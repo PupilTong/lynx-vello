@@ -29,6 +29,7 @@ mod container;
 pub mod error;
 pub mod model;
 pub(crate) mod reader;
+pub(crate) mod sections;
 pub mod value;
 pub mod version;
 
