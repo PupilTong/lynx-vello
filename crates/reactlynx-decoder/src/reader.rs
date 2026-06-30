@@ -50,11 +50,6 @@ impl<'a> Reader<'a> {
         self.pos >= self.buf.len()
     }
 
-    /// The whole underlying buffer (ignores the cursor).
-    pub(crate) const fn buffer(&self) -> &'a [u8] {
-        self.buf
-    }
-
     fn need(&self, n: usize) -> Result<()> {
         if self.remaining() < n {
             Err(DecodeError::UnexpectedEof {
@@ -73,13 +68,6 @@ impl<'a> Reader<'a> {
         let out = &self.buf[self.pos..self.pos + n];
         self.pos += n;
         Ok(out)
-    }
-
-    /// Advance by `n` bytes without returning them.
-    pub(crate) fn skip(&mut self, n: usize) -> Result<()> {
-        self.need(n)?;
-        self.pos += n;
-        Ok(())
     }
 
     /// Move the cursor to an absolute position (must be within the buffer).
@@ -143,11 +131,6 @@ impl<'a> Reader<'a> {
         ]))
     }
 
-    /// Fixed 8-byte little-endian `i64`.
-    pub(crate) fn i64(&mut self) -> Result<i64> {
-        Ok(self.u64()?.cast_signed())
-    }
-
     /// Fixed 8-byte IEEE-754 little-endian `f64`.
     pub(crate) fn f64(&mut self) -> Result<f64> {
         Ok(f64::from_bits(self.u64()?))
@@ -180,12 +163,6 @@ impl<'a> Reader<'a> {
         let at = self.pos;
         let bytes = self.take(len)?;
         core::str::from_utf8(bytes).map_err(|_| DecodeError::Utf8(at))
-    }
-
-    /// A length-prefixed raw byte payload: `compact_u32 len` then `len` bytes.
-    pub(crate) fn lbytes(&mut self) -> Result<&'a [u8]> {
-        let len = self.compact_u32()? as usize;
-        self.take(len)
     }
 }
 

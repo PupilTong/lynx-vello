@@ -7,13 +7,6 @@
 //! paths (radon / virtual-node tree, the old `ELEMENT_TEMPLATE` section, TTML
 //! page parsing, Air mode). See `docs/lynx/` for the format reference.
 //!
-//! ## Status
-//!
-//! The reader/value primitives below are consumed by the section decoders,
-//! which are still being filled in — hence the crate-level `dead_code`
-//! allowance. It is removed once the container + section decoders wire
-//! everything together (the final review gate).
-//!
 //! # Example
 //!
 //! ```no_run
@@ -23,7 +16,6 @@
 //!     Err(e) => eprintln!("decode failed: {e}"),
 //! }
 //! ```
-#![allow(dead_code)] // scaffolding; see "Status" above. Removed at final review.
 
 mod container;
 pub mod error;
