@@ -3,6 +3,16 @@
 //! All borrowed data is tied to the input buffer lifetime so section payloads
 //! can stay zero-copy until deeper decoders are implemented.
 
+pub mod element;
+pub mod style;
+
+pub use element::{
+    AttributeBinding, AttributeBindingType, ElementBuiltInAttribute, ElementBuiltInTag,
+    ElementNode, ElementSection, ElementTag, ElementTemplates, EventBinding, EventType,
+    ParsedStyleEntry, PiperEventBinding,
+};
+pub use style::{CssDescriptor, ParsedStyles, StyleObjects};
+
 use crate::{value::Value, version::Version};
 
 /// A fully decoded native template bundle.
@@ -32,8 +42,8 @@ pub struct TemplateBundle<'a> {
     pub root_lepus: Option<LepusContext<'a>>,
     /// Named LepusNG chunk bytecode payloads.
     pub lepus_chunks: Vec<LepusChunk<'a>>,
-    /// Run 2: decode `NEW_ELEMENT_TEMPLATE`; for now this is the raw section body.
-    pub raw_new_element_template: Option<&'a [u8]>,
+    /// Decoded fiber element templates from `NEW_ELEMENT_TEMPLATE`.
+    pub element_templates: ElementTemplates<'a>,
     /// Run 2: decode `CSS`; for now this is the raw section body.
     pub raw_css: Option<&'a [u8]>,
     /// Run 2: decode `STYLE_OBJECT`; for now this is the raw section body.
@@ -66,7 +76,7 @@ impl<'a> TemplateBundle<'a> {
             custom_sections: Vec::new(),
             root_lepus: None,
             lepus_chunks: Vec::new(),
-            raw_new_element_template: None,
+            element_templates: ElementTemplates::default(),
             raw_css: None,
             raw_style_object: None,
             raw_parsed_styles: None,
@@ -117,6 +127,8 @@ pub struct CompileOptions<'a> {
     pub enable_trial_options: bool,
     /// Whether rule-based CSS is enabled. This is derived from page config later.
     pub enable_css_rule: bool,
+    /// Architecture option from header-ext key 28 (`FIBER_ARCH` is 1).
+    pub arch_option: u8,
     /// Raw decoded header-ext fields for options this run does not model yet.
     pub raw_fields: Vec<CompileOptionField<'a>>,
 }
@@ -136,6 +148,7 @@ impl<'a> CompileOptions<'a> {
             enable_simple_styling: false,
             enable_trial_options: false,
             enable_css_rule: false,
+            arch_option: 0,
             raw_fields: Vec::new(),
         }
     }

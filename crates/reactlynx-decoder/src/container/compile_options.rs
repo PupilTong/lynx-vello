@@ -24,7 +24,7 @@ pub(super) fn apply_field<'a>(
         20 => options.enable_trial_options = read_bool(field.payload)?,
         25 => options.enable_fiber_arch = read_bool(field.payload)?,
         27 => options.enable_flexible_template = read_bool(field.payload)?,
-        28 => options.enable_fiber_arch = read_u8(field.payload)? == 1,
+        28 => options.arch_option = read_u8(field.payload)?,
         29 => options.enable_css_selector = read_bool(field.payload)?,
         33 => options.enable_simple_styling = read_bool(field.payload)?,
         _ => {}

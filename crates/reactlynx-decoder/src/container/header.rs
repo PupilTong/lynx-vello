@@ -11,7 +11,7 @@ use crate::{
 
 const QUICK_BINARY_MAGIC: u32 = 0x0024_1922;
 const LEPUS_BINARY_MAGIC: u32 = 0xdd73_7199;
-const MIN_SUPPORTED_VERSION: &str = "0.1.0.0";
+const MIN_SUPPORTED_VERSION: Version = Version::new(0, 1, 0, 0);
 
 pub(super) struct DecodedHeader<'a> {
     pub(super) header: Header<'a>,
@@ -40,8 +40,9 @@ pub(super) fn decode<'a>(reader: &mut Reader<'a>) -> Result<DecodedHeader<'a>> {
     }
 
     let lepus_version = reader.lstr()?;
+    let parsed_lepus_version = Version::parse(lepus_version);
     let (cli_version, ios_version, android_version, target_sdk_str) =
-        if lepus_version > MIN_SUPPORTED_VERSION {
+        if parsed_lepus_version > MIN_SUPPORTED_VERSION {
             let cli = reader.lstr()?;
             let ios = reader.lstr()?;
             let android = reader.lstr()?;
