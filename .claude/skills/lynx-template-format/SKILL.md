@@ -50,8 +50,8 @@ All under `docs/lynx/`:
 
 ## Source of truth
 
-- C++ codec: `/Users/akiwah/repos/lynx/core/template_bundle/template_codec`
+- C++ codec: `lynx/core/template_bundle/template_codec`
   (`binary_decoder/` readers, `binary_encoder/` writers).
-- ReactLynx SWC transforms: `/Users/akiwah/repos/lynx-stack/packages/react/transform/crates`
+- ReactLynx SWC transforms: `lynx-stack/packages/react/transform/crates`
   (`swc_plugin_snapshot`, `swc_plugin_element_template`).
-- Rust idiom reference: `/Users/akiwah/repos/lynx-stack/packages/web-platform/web-core/src`.
+- Rust idiom reference: `lynx-stack/packages/web-platform/web-core/src`.

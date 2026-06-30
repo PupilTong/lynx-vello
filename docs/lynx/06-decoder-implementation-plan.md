@@ -13,8 +13,8 @@ This plan is the synthesis of the five analysis docs in this directory:
 - `04-feature-switches.md` — compile-options / version gates that select old vs new.
 - `05-pipeline-and-rust-idioms.md` — encode pipeline, Rust idioms to mirror, two-format distinction.
 
-All C++ `path:line` cites are into `/Users/akiwah/repos/lynx` (engine) unless noted
-`stack:` → `/Users/akiwah/repos/lynx-stack`.
+All C++ `path:line` cites are into `lynx` (engine) unless noted
+`stack:` → `lynx-stack`.
 
 > **One load-bearing caveat repeated from every analyst:** in this source tree the
 > `Compact*` integer helpers are **fixed-width little-endian, NOT LEB128**
@@ -499,7 +499,7 @@ The only ground-truth encoder is the C++ `TemplateBinaryWriter` reached via
      `SDRAWROF` one.
 
 2. **Reuse existing encoder snapshots / test artifacts.** The engine repo
-   (`/Users/akiwah/repos/lynx`) ships codec unit tests; the SWC element-template
+   (`lynx`) ships codec unit tests; the SWC element-template
    crate ships `tests/__combined_snapshots__/*.snap` (`02 §5.3`) which give the
    **input JSON** shape (useful to predict the decoded model, not the bytes).
    Search both repos for committed `*.lynx`/`*.tasm`/binary template test

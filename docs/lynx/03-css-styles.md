@@ -4,9 +4,9 @@ Authoritative byte-layout spec for the CSS-related sections of the LynxJS
 template binary, for a Rust decoder. Citations are `path:line` against the two
 reference repos:
 
-- **engine** = `/Users/akiwah/repos/lynx` (C++ codec; ground truth for the
+- **engine** = `lynx` (C++ codec; ground truth for the
   on-disk template binary).
-- **stack** = `/Users/akiwah/repos/lynx-stack` (ReactLynx transforms + web-core
+- **stack** = `lynx-stack` (ReactLynx transforms + web-core
   Rust).
 
 > **Critical orientation.** There are **two completely different CSS

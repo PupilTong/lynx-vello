@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.87"
 license = "Apache-2.0"
-repository = "https://github.com/akiwah/lynx-vello"
+repository = "https://github.com/PupilTong/lynx-vello"
 authors = ["lynx-vello contributors"]
 
 # Shared third-party dependencies. Crates opt in via `dep = { workspace = true }`.

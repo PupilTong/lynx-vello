@@ -2,7 +2,7 @@
 
 Authoritative byte-level reference for the LynxJS **template/encode** binary container
 as implemented in the C++ engine codec at
-`/Users/akiwah/repos/lynx/core/template_bundle/template_codec`.
+`lynx/core/template_bundle/template_codec`.
 All path:line citations are into that `lynx` repo unless noted.
 
 > Scope: this documents the **container envelope** — magic, header, version gates,

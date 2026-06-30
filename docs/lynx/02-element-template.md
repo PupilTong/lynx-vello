@@ -2,8 +2,8 @@
 
 Authoritative reference for decoding the **element template** (compiled snapshot) sections of a
 LynxJS template bundle. Distilled from the C++ engine codec
-(`/Users/akiwah/repos/lynx/core/template_bundle/template_codec`) and the ReactLynx SWC transforms
-(`/Users/akiwah/repos/lynx-stack/packages/react/transform/crates`).
+(`lynx/core/template_bundle/template_codec`) and the ReactLynx SWC transforms
+(`lynx-stack/packages/react/transform/crates`).
 
 Citations are `path:line` relative to the two repo roots above.
 

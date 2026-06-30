@@ -3,7 +3,7 @@
 Authoritative map of the compile options / feature switches that select **old vs new**
 encoding behavior in the LynxJS template binary, so a Rust ReactLynx decoder can target the
 **latest feature subset** and skip legacy paths. All citations are `path:line` into the
-`lynx` C++ engine repo (`/Users/akiwah/repos/lynx`) unless noted.
+`lynx` C++ engine repo (`lynx`) unless noted.
 
 > Scope note: `lynx-stack` web-core Rust (`packages/web-platform/web-core/src/template/`)
 > uses its **own `rkyv` IR**, not the raw C++ template binary. The C++ codec under
