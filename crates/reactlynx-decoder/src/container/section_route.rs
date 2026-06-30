@@ -74,10 +74,7 @@ const FIBER_ORDER: &[BinarySection] = &[
     BinarySection::Css,
     BinarySection::StyleObject,
     BinarySection::Js,
-    BinarySection::JsBytecode,
     BinarySection::Config,
-    BinarySection::RootLepus,
-    BinarySection::LepusChunk,
     BinarySection::CustomSections,
     BinarySection::NewElementTemplate,
 ];
@@ -160,14 +157,18 @@ fn dispatch_route<'a>(
         | BinarySection::DynamicComponent
         | BinarySection::Themed
         | BinarySection::UsingDynamicComponentInfo
-        | BinarySection::SectionRoute => Ok(()),
+        // Bytecode sections are intentionally not decoded (source-only scope):
+        // JS_BYTECODE (compiled JS), ROOT_LEPUS and LEPUS_CHUNK (compiled
+        // LepusNG). They are recognized so the route still parses, then skipped
+        // by range. Only JS source (section 5) is decoded.
+        | BinarySection::SectionRoute
+        | BinarySection::JsBytecode
+        | BinarySection::RootLepus
+        | BinarySection::LepusChunk => Ok(()),
         BinarySection::Css => sections::css::decode(&mut section, bundle),
         BinarySection::StyleObject => sections::style_object::decode(&mut section, bundle),
         BinarySection::Js => sections::js::decode_source(&mut section, bundle),
-        BinarySection::JsBytecode => sections::js_bytecode::decode(&mut section, bundle),
         BinarySection::Config => sections::config::decode(&mut section, bundle),
-        BinarySection::RootLepus => sections::root_lepus::decode(&mut section, bundle),
-        BinarySection::LepusChunk => sections::lepus_chunk::decode(&mut section, bundle),
         BinarySection::CustomSections => sections::custom::decode(&mut section, bundle),
         BinarySection::NewElementTemplate => {
             sections::element_template::decode(&mut section, bundle)

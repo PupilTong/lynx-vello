@@ -11,11 +11,17 @@ The decoder targets the **latest feature subset** of the format. Where the
 encoder selects behavior with a switch, we decode the new variant and skip the
 legacy one:
 
-| Area            | Implemented (latest)             | Skipped (legacy)                    |
-| --------------- | -------------------------------- | ----------------------------------- |
+| Area            | Implemented (latest)             | Skipped                              |
+| --------------- | -------------------------------- | ------------------------------------ |
 | Element trees   | `NEW_ELEMENT_TEMPLATE` section   | `ELEMENT_TEMPLATE`, radon/vnode tree |
 | Styles          | `STYLE_OBJECT` / parsed styles   | inline TTSS string re-parse          |
-| Page descriptor | binary `CONFIG` / page config    | —                                   |
+| Page descriptor | binary `CONFIG` / page config    | —                                    |
+| Scripts         | `JS` **source** (path, content)  | `JS_BYTECODE`, `ROOT_LEPUS`, `LEPUS_CHUNK` (all compiled bytecode) |
+| VM              | LepusNG / QuickJS (`0x00241922`) | legacy Lepus VM (`0xdd737199`)       |
+
+The decoder is **source-only**: compiled-bytecode sections are recognized in the
+section route but skipped by range (decoding still succeeds — they're just not
+exposed), never executed.
 
 See [`docs/lynx/`](docs/lynx) for the reverse-engineered format reference that
 drives the implementation.

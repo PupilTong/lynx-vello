@@ -44,6 +44,13 @@ All under `docs/lynx/`:
 - **Latest = fiber.** Decode `NEW_ELEMENT_TEMPLATE` (BinarySection 17),
   `STYLE_OBJECT` (18), `PARSED_STYLES` (13). Skip legacy `ELEMENT_TEMPLATE`
   (12), radon/virtual-node tree, TTML, Air mode.
+- **Source-only, no bytecode.** Keep `JS` (5) — JS *source* `(path, content)`.
+  Drop the compiled-bytecode sections `JS_BYTECODE` (14, gated by
+  `encode_quickjs_bytecode_`), `ROOT_LEPUS` (11) and `LEPUS_CHUNK` (15) — these
+  are always compiled LepusNG/QuickJS bytecode with no source variant. They are
+  recognized in the route but skipped by range (decode succeeds), never decoded
+  or executed. Only LepusNG (`0x00241922`) is accepted; the Lepus VM
+  (`0xdd737199`) → `UnsupportedVm`.
 - **Section enums** live in `lynx/core/template_bundle/template_codec/template_binary.h`.
   `BinarySection` and `BinaryOffsetType` are **not** aligned (e.g.
   `NEW_ELEMENT_TEMPLATE` is `BinarySection 17` but `BinaryOffsetType 21`).

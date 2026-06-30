@@ -34,14 +34,8 @@ pub struct TemplateBundle<'a> {
     pub page_config: Option<PageConfig<'a>>,
     /// JavaScript source assets.
     pub js_sources: Vec<JsSource<'a>>,
-    /// QuickJS bytecode assets.
-    pub js_bytecode: Vec<JsBytecode<'a>>,
     /// Custom section payloads.
     pub custom_sections: Vec<CustomSection<'a>>,
-    /// Root LepusNG context bytecode.
-    pub root_lepus: Option<LepusContext<'a>>,
-    /// Named LepusNG chunk bytecode payloads.
-    pub lepus_chunks: Vec<LepusChunk<'a>>,
     /// Decoded fiber element templates from `NEW_ELEMENT_TEMPLATE`.
     pub element_templates: ElementTemplates<'a>,
     /// Run 2: decode `CSS`; for now this is the raw section body.
@@ -72,10 +66,7 @@ impl<'a> TemplateBundle<'a> {
             snapshot,
             page_config: None,
             js_sources: Vec::new(),
-            js_bytecode: Vec::new(),
             custom_sections: Vec::new(),
-            root_lepus: None,
-            lepus_chunks: Vec::new(),
             element_templates: ElementTemplates::default(),
             raw_css: None,
             raw_style_object: None,
@@ -190,31 +181,6 @@ pub struct JsSource<'a> {
     pub path: &'a str,
     /// JavaScript source text.
     pub content: &'a str,
-}
-
-/// QuickJS bytecode entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JsBytecode<'a> {
-    /// Source path.
-    pub path: &'a str,
-    /// Bytecode bytes.
-    pub data: &'a [u8],
-}
-
-/// Root LepusNG context.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LepusContext<'a> {
-    /// Raw LepusNG bytecode payload.
-    pub code: &'a [u8],
-}
-
-/// Named LepusNG chunk.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LepusChunk<'a> {
-    /// Chunk path.
-    pub path: &'a str,
-    /// Raw LepusNG bytecode payload.
-    pub code: &'a [u8],
 }
 
 /// Decoded custom section.
