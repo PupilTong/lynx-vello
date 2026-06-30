@@ -1,0 +1,44 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+license = "Apache-2.0"
+repository = "https://github.com/akiwah/lynx-vello"
+authors = ["lynx-vello contributors"]
+
+# Shared third-party dependencies. Crates opt in via `dep = { workspace = true }`.
+[workspace.dependencies]
+thiserror = "2"
+bitflags = "2.6"
+
+# Internal crates referenced by path so the workspace stays self-contained.
+reactlynx-decoder = { path = "crates/reactlynx-decoder" }
+
+# Lints are defined once and inherited by every member via `[lints] workspace = true`.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Pragmatic opt-outs for a binary-format decoder.
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+cast_possible_truncation = "allow"
+doc_markdown = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+# Faster local decode of large fixtures while debugging.
+[profile.dev.package."*"]
+opt-level = 2

@@ -1,0 +1,6 @@
+# Pinned nightly for reproducible builds across local + CI (aarch64 macOS).
+# Bump the date deliberately; `components` keep clippy/rustfmt in lockstep.
+[toolchain]
+channel = "nightly-2026-04-20"
+components = ["rustfmt", "clippy", "rust-src"]
+profile = "minimal"

@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+*.pdb
+Cargo.lock.bak
+
+# Local fixtures / scratch
+/fixtures/local/
+.DS_Store

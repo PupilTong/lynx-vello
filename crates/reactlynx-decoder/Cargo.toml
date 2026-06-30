@@ -1,0 +1,16 @@
+[package]
+name = "reactlynx-decoder"
+description = "Decoder for the ReactLynx native binary template format (the latest feature subset)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+bitflags = { workspace = true }
+
+[lints]
+workspace = true

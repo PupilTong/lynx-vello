@@ -1,0 +1,7 @@
+# Nightly rustfmt (the pinned toolchain) unlocks import hygiene options.
+edition = "2024"
+style_edition = "2024"
+group_imports = "StdExternalCrate"
+imports_granularity = "Crate"
+reorder_impl_items = true
+use_field_init_shorthand = true
