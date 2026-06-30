@@ -5,6 +5,7 @@ const HEADER_EXT_MAGIC: u32 = 0x494e_464f;
 const SECTION_ROUTE: u8 = 10;
 const SECTION_CONFIG: u8 = 6;
 const SECTION_CSS: u8 = 1;
+const SECTION_PARSED_STYLES: u8 = 13;
 const SECTION_NEW_ELEMENT_TEMPLATE: u8 = 17;
 
 pub(crate) fn minimal_config_bundle(json: &str) -> Vec<u8> {
@@ -25,8 +26,103 @@ pub(crate) fn minimal_css_bundle() -> Vec<u8> {
     bundle_with_sections(vec![section])
 }
 
+pub(crate) fn css_bundle_with_one_property(property_id: u32, value: &str) -> Vec<u8> {
+    let mut fragment = Vec::new();
+    fragment.extend_from_slice(&7u32.to_le_bytes()); // fragment id
+    fragment.extend_from_slice(&0u32.to_le_bytes()); // dependent count
+    fragment.extend_from_slice(&0u32.to_le_bytes()); // selector tuple count
+    fragment.extend_from_slice(&1u32.to_le_bytes()); // css_size=1, keyframes=0
+    push_lstr(&mut fragment, ".box");
+    push_css_parse_token(&mut fragment, property_id, value);
+
+    let mut section = vec![SECTION_CSS];
+    section.extend_from_slice(&1u32.to_le_bytes()); // fragment count
+    section.extend_from_slice(&7i32.to_le_bytes()); // route id
+    section.extend_from_slice(&0u32.to_le_bytes()); // start
+    section.extend_from_slice(&(fragment.len() as u32).to_le_bytes()); // end
+    section.extend_from_slice(&fragment);
+
+    bundle_with_sections(vec![section])
+}
+
+pub(crate) fn parsed_styles_bundle_without_css_pattern_byte(
+    property_id: u32,
+    value: &str,
+) -> Vec<u8> {
+    let mut block = Vec::new();
+    block.extend_from_slice(&1u32.to_le_bytes());
+    block.extend_from_slice(&property_id.to_le_bytes());
+    push_value_str(&mut block, value);
+    block.extend_from_slice(&0u32.to_le_bytes());
+
+    let mut section = vec![SECTION_PARSED_STYLES];
+    section.extend_from_slice(&1u32.to_le_bytes());
+    push_lstr(&mut section, "inline");
+    section.extend_from_slice(&0u32.to_le_bytes());
+    section.extend_from_slice(&block);
+
+    bundle_with_sections_for("1.9.0", true, true, vec![section])
+}
+
+pub(crate) fn css_bundle_with_legacy_font_face() -> Vec<u8> {
+    let mut fragment = Vec::new();
+    fragment.extend_from_slice(&7u32.to_le_bytes());
+    fragment.extend_from_slice(&0u32.to_le_bytes());
+    fragment.extend_from_slice(&0u32.to_le_bytes());
+    fragment.extend_from_slice(&0u32.to_le_bytes());
+    fragment.push(SECTION_CSS);
+    fragment.extend_from_slice(&1u32.to_le_bytes());
+    fragment.extend_from_slice(&1u32.to_le_bytes());
+    push_lstr(&mut fragment, "font-family");
+    push_lstr(&mut fragment, "LegacyFace");
+
+    let mut section = vec![SECTION_CSS];
+    section.extend_from_slice(&1u32.to_le_bytes());
+    section.extend_from_slice(&7i32.to_le_bytes());
+    section.extend_from_slice(&0u32.to_le_bytes());
+    section.extend_from_slice(&(fragment.len() as u32).to_le_bytes());
+    section.extend_from_slice(&fragment);
+
+    bundle_with_sections_for("2.6.0", true, true, vec![section])
+}
+
+pub(crate) fn css_rule_bundle_with_config_after_css() -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&42u32.to_le_bytes());
+    payload.extend_from_slice(&0u32.to_le_bytes());
+    push_css_parse_token(&mut payload, 27, "12px");
+
+    let mut fragment = Vec::new();
+    fragment.extend_from_slice(&7u32.to_le_bytes());
+    fragment.extend_from_slice(&0u32.to_le_bytes());
+    fragment.extend_from_slice(&1u32.to_le_bytes());
+    fragment.push(2);
+    fragment.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    fragment.extend_from_slice(&payload);
+
+    let mut css = vec![SECTION_CSS];
+    css.extend_from_slice(&1u32.to_le_bytes());
+    css.extend_from_slice(&7i32.to_le_bytes());
+    css.extend_from_slice(&0u32.to_le_bytes());
+    css.extend_from_slice(&(fragment.len() as u32).to_le_bytes());
+    css.extend_from_slice(&fragment);
+
+    let mut config = vec![SECTION_CONFIG];
+    push_lstr(&mut config, r#"{"enableCSSRule":true}"#);
+
+    bundle_with_sections(vec![css, config])
+}
+
 fn bundle_with_sections(sections: Vec<Vec<u8>>) -> Vec<u8> {
-    let target_sdk = "3.9.0";
+    bundle_with_sections_for("3.9.0", true, true, sections)
+}
+
+fn bundle_with_sections_for(
+    target_sdk: &str,
+    enable_css_parser: bool,
+    enable_css_variable: bool,
+    sections: Vec<Vec<u8>>,
+) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&0u32.to_le_bytes());
     out.extend_from_slice(&QUICK_MAGIC.to_le_bytes());
@@ -34,8 +130,10 @@ fn bundle_with_sections(sections: Vec<Vec<u8>>) -> Vec<u8> {
     push_lstr(&mut out, "");
     push_lstr(&mut out, target_sdk);
     push_lstr(&mut out, target_sdk);
-    push_header_ext(&mut out, target_sdk);
-    out.push(0); // template_info = Nil
+    push_header_ext(&mut out, target_sdk, enable_css_parser, enable_css_variable);
+    if has_template_info(target_sdk) {
+        out.push(0); // template_info = Nil
+    }
     push_lstr(&mut out, "card");
     out.push(0); // snapshot
 
@@ -55,6 +153,13 @@ fn bundle_with_sections(sections: Vec<Vec<u8>>) -> Vec<u8> {
     let total_size = out.len() as u32;
     out[0..4].copy_from_slice(&total_size.to_le_bytes());
     out
+}
+
+fn has_template_info(target_sdk: &str) -> bool {
+    let mut parts = target_sdk.split('.');
+    let major = parts.next().and_then(|part| part.parse::<u16>().ok());
+    let minor = parts.next().and_then(|part| part.parse::<u16>().ok());
+    matches!((major, minor), (Some(major), Some(minor)) if major > 2 || (major == 2 && minor >= 7))
 }
 
 fn push_element_template_section_body(out: &mut Vec<u8>) {
@@ -126,11 +231,32 @@ fn push_value_str(out: &mut Vec<u8>, value: &str) {
     push_lstr(out, value);
 }
 
-fn push_header_ext(out: &mut Vec<u8>, target_sdk: &str) {
+fn push_css_parse_token(out: &mut Vec<u8>, property_id: u32, value: &str) {
+    push_css_attributes(out, property_id, value);
+    out.extend_from_slice(&0u32.to_le_bytes()); // important attributes
+    out.extend_from_slice(&0u32.to_le_bytes()); // style variables
+}
+
+fn push_css_attributes(out: &mut Vec<u8>, property_id: u32, value: &str) {
+    out.extend_from_slice(&1u32.to_le_bytes());
+    out.extend_from_slice(&property_id.to_le_bytes());
+    out.extend_from_slice(&1u32.to_le_bytes()); // CssValuePattern::String
+    push_value_str(out, value);
+    out.extend_from_slice(&0u32.to_le_bytes()); // CssValueType::Default
+    push_lstr(out, "");
+    out.push(0); // default_value_map = Nil
+}
+
+fn push_header_ext(
+    out: &mut Vec<u8>,
+    target_sdk: &str,
+    enable_css_parser: bool,
+    enable_css_variable: bool,
+) {
     let mut fields = Vec::new();
     push_field(&mut fields, 0, 0, target_sdk.as_bytes());
-    push_field(&mut fields, 1, 1, &[1]); // enable_css_parser
-    push_field(&mut fields, 1, 6, &[1]); // enable_css_variable
+    push_field(&mut fields, 1, 1, &[u8::from(enable_css_parser)]);
+    push_field(&mut fields, 1, 6, &[u8::from(enable_css_variable)]);
     push_field(&mut fields, 1, 25, &[1]); // enable_fiber_arch
     push_field(&mut fields, 1, 27, &[1]); // enable_flexible_template
     push_field(&mut fields, 1, 28, &[1]); // arch_option = FIBER_ARCH

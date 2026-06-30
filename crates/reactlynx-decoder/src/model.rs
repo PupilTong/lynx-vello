@@ -11,9 +11,17 @@ pub use element::{
     ElementNode, ElementSection, ElementTag, ElementTemplates, EventBinding, EventType,
     ParsedStyleEntry, PiperEventBinding,
 };
-pub use style::{CssDescriptor, ParsedStyles, StyleObjects};
+pub use style::{
+    CssAttributes, CssDescriptor, CssFragment, CssFragmentBody, CssFragmentTokens, CssKeyframe,
+    CssKeyframeCustomProperties, CssKeyframeKey, CssKeyframesToken, CssParseToken, CssRule,
+    CssRuleType, CssSelectorTuple, CssSheet, CssValue, CssValuePattern, CssValueType,
+    FontFaceEntry, FontFaceToken, ParsedStyleBlock, ParsedStyles, StyleObjects,
+};
 
-use crate::{value::Value, version::Version};
+use crate::{
+    value::Value,
+    version::{V_2_0, V_2_7, Version},
+};
 
 /// A fully decoded native template bundle.
 #[derive(Debug, Clone)]
@@ -38,12 +46,12 @@ pub struct TemplateBundle<'a> {
     pub custom_sections: Vec<CustomSection<'a>>,
     /// Decoded fiber element templates from `NEW_ELEMENT_TEMPLATE`.
     pub element_templates: ElementTemplates<'a>,
-    /// Run 2: decode `CSS`; for now this is the raw section body.
-    pub raw_css: Option<&'a [u8]>,
-    /// Run 2: decode `STYLE_OBJECT`; for now this is the raw section body.
-    pub raw_style_object: Option<&'a [u8]>,
-    /// Run 2: decode `PARSED_STYLES`; for now this is the raw section body.
-    pub raw_parsed_styles: Option<&'a [u8]>,
+    /// Decoded stylesheet descriptor from the `CSS` section.
+    pub css: CssDescriptor<'a>,
+    /// Decoded simple-styling objects from `STYLE_OBJECT`.
+    pub style_objects: Option<StyleObjects<'a>>,
+    /// Decoded keyed parsed inline-style blocks from `PARSED_STYLES`.
+    pub parsed_styles: Option<ParsedStyles<'a>>,
 }
 
 impl<'a> TemplateBundle<'a> {
@@ -68,9 +76,9 @@ impl<'a> TemplateBundle<'a> {
             js_sources: Vec::new(),
             custom_sections: Vec::new(),
             element_templates: ElementTemplates::default(),
-            raw_css: None,
-            raw_style_object: None,
-            raw_parsed_styles: None,
+            css: CssDescriptor::default(),
+            style_objects: None,
+            parsed_styles: None,
         }
     }
 }
@@ -142,6 +150,30 @@ impl<'a> CompileOptions<'a> {
             arch_option: 0,
             raw_fields: Vec::new(),
         }
+    }
+
+    /// C++ EnableCssParser: raw flag AND target_sdk >= V_2_0.
+    ///
+    /// Reference: `core/template_bundle/template_codec/compile_options.h:163`.
+    #[must_use]
+    pub fn css_parser_enabled(&self) -> bool {
+        self.enable_css_parser && self.target_sdk.is_at_least(V_2_0)
+    }
+
+    /// C++ EnableCssVariable: raw flag AND target_sdk >= V_2_0.
+    ///
+    /// Reference: `core/template_bundle/template_codec/compile_options.h:167`.
+    #[must_use]
+    pub fn css_variable_enabled(&self) -> bool {
+        self.enable_css_variable && self.target_sdk.is_at_least(V_2_0)
+    }
+
+    /// FEATURE_CSS_FONT_FACE_EXTENSION (target_sdk >= V_2_7); list form has a count prefix.
+    ///
+    /// Reference: `core/template_bundle/template_codec/binary_decoder/lynx_binary_base_css_reader.cc:749`.
+    #[must_use]
+    pub fn css_font_face_extension_enabled(&self) -> bool {
+        self.target_sdk.is_at_least(V_2_7)
     }
 }
 

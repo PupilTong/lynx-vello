@@ -69,12 +69,12 @@ struct RouteEntry {
 
 const FIBER_ORDER: &[BinarySection] = &[
     BinarySection::String,
+    BinarySection::Config,
     BinarySection::ParsedStyles,
     BinarySection::ElementTemplate,
     BinarySection::Css,
     BinarySection::StyleObject,
     BinarySection::Js,
-    BinarySection::Config,
     BinarySection::CustomSections,
     BinarySection::NewElementTemplate,
 ];

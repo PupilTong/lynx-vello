@@ -2,30 +2,214 @@
 
 use crate::{
     error::{DecodeError, Result},
+    model::CompileOptions,
     reader::Reader,
     value::{Value, decode_value},
-    version::{V_2_14, Version},
+    version::{V_2_14, V_3_9, Version},
 };
 
-/// Raw-captured CSS descriptor for this narrowed run.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Decoded CSS descriptor.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct CssDescriptor<'a> {
-    /// Raw CSS section body, when present.
-    pub raw: Option<&'a [u8]>,
+    /// CSS fragments keyed by their fragment id on wire.
+    pub fragments: Vec<CssFragment<'a>>,
 }
 
-/// Raw-captured style-object descriptor for this narrowed run.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// A decoded CSS fragment.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CssFragment<'a> {
+    /// Fragment id.
+    pub id: u32,
+    /// Dependent CSS fragment ids.
+    pub dependent_ids: Vec<i32>,
+    /// Fragment body selected by compile options.
+    pub body: CssFragmentBody<'a>,
+}
+
+/// Body variants for a CSS fragment.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CssFragmentBody<'a> {
+    /// Rule-list form used when `enable_css_rule` is set.
+    Rules(Vec<CssRule<'a>>),
+    /// Legacy selector/token form.
+    Tokens(CssFragmentTokens<'a>),
+}
+
+/// Legacy selector/token CSS fragment body.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CssFragmentTokens<'a> {
+    /// Selector tuples present when `enable_css_selector` is set.
+    pub selectors: Vec<CssSelectorTuple<'a>>,
+    /// Named parse tokens.
+    pub tokens: Vec<(&'a str, CssParseToken<'a>)>,
+    /// Keyframe tokens.
+    pub keyframes: Vec<(&'a str, CssKeyframesToken<'a>)>,
+    /// Legacy font-face blocks.
+    pub font_faces: Vec<FontFaceEntry<'a>>,
+}
+
+/// One flattened selector tuple plus its declarations.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CssSelectorTuple<'a> {
+    /// Opaque selector nodes encoded as lepus values.
+    pub selectors: Vec<Value<'a>>,
+    /// Declarations for this selector tuple.
+    pub token: CssParseToken<'a>,
+}
+
+/// A decoded rule-list CSS rule.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CssRule<'a> {
+    /// A style rule.
+    Style {
+        /// Parser document-order position.
+        position: u32,
+        /// Opaque selector nodes encoded as lepus values.
+        selectors: Vec<Value<'a>>,
+        /// Rule declarations.
+        token: CssParseToken<'a>,
+    },
+    /// A media rule.
+    Media {
+        /// Opaque media condition encoded as a lepus value.
+        condition: Value<'a>,
+        /// Nested rules.
+        children: Vec<CssRule<'a>>,
+    },
+    /// A supports rule.
+    Supports {
+        /// Opaque supports condition encoded as a lepus value.
+        condition: Value<'a>,
+        /// Nested rules.
+        children: Vec<CssRule<'a>>,
+    },
+    /// A keyframes rule.
+    Keyframes {
+        /// Animation name.
+        name: &'a str,
+        /// Keyframes body.
+        token: CssKeyframesToken<'a>,
+    },
+    /// A font-face rule in the rule-list format.
+    FontFace(Value<'a>),
+    /// A layer statement or block.
+    Layer {
+        /// Dot-separated layer-name segments.
+        segments: Vec<&'a str>,
+        /// Parser document-order position.
+        position: u32,
+        /// Nested rules, empty for statement form.
+        children: Vec<CssRule<'a>>,
+        /// Whether this was a block rule instead of a statement.
+        is_block: bool,
+    },
+    /// A known or unknown rule type intentionally skipped by payload size.
+    Skipped {
+        /// Raw rule type byte.
+        rule_type: u8,
+    },
+}
+
+/// CSS parse token: declarations and optional selector metadata.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CssParseToken<'a> {
+    /// Normal declarations.
+    pub attributes: CssAttributes<'a>,
+    /// Important declarations (`target_sdk >= 3.9`).
+    pub important_attributes: CssAttributes<'a>,
+    /// CSS style variables.
+    pub style_variables: Vec<(&'a str, &'a str)>,
+    /// Legacy sheets when selectors are disabled.
+    pub sheets: Vec<CssSheet<'a>>,
+}
+
+/// CSS declaration map.
+pub type CssAttributes<'a> = Vec<(u32, CssValue<'a>)>;
+
+/// Legacy CSS sheet record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CssSheet<'a> {
+    /// Encoded type, ignored by the C++ reader and recomputed at runtime.
+    pub type_id: u32,
+    /// Sheet name.
+    pub name: &'a str,
+    /// Selector text.
+    pub selector: &'a str,
+}
+
+/// Keyframes token.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CssKeyframesToken<'a> {
+    /// Keyframe declaration frames.
+    pub frames: Vec<CssKeyframe<'a>>,
+    /// Custom property declarations gated by target SDK and compile options.
+    pub custom_properties: Vec<CssKeyframeCustomProperties<'a>>,
+}
+
+/// A single keyframe selector and its declarations.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CssKeyframe<'a> {
+    /// Parsed numeric key when CSS parser is enabled.
+    pub key: CssKeyframeKey<'a>,
+    /// Frame declarations.
+    pub attributes: CssAttributes<'a>,
+}
+
+/// Keyframe selector representation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CssKeyframeKey<'a> {
+    /// Parsed floating-point key.
+    Parsed(f64),
+    /// Raw textual key.
+    Text(&'a str),
+}
+
+/// Keyframe custom property content for a selector.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CssKeyframeCustomProperties<'a> {
+    /// Keyframe selector.
+    pub key: CssKeyframeKey<'a>,
+    /// Custom properties.
+    pub properties: Vec<(&'a str, CssValue<'a>)>,
+}
+
+/// One font-face token.
+pub type FontFaceToken<'a> = Vec<(&'a str, &'a str)>;
+
+/// A decoded font-face entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FontFaceEntry<'a> {
+    /// Family map key derived by the engine from the first token.
+    pub family: &'a str,
+    /// Token list.
+    pub tokens: Vec<FontFaceToken<'a>>,
+}
+
+/// Decoded style-object descriptor.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct StyleObjects<'a> {
-    /// Raw `STYLE_OBJECT` section body.
-    pub raw: &'a [u8],
+    /// Simple style objects.
+    pub objects: Vec<CssAttributes<'a>>,
+    /// Style-object keyframes.
+    pub keyframes: Vec<(&'a str, CssKeyframesToken<'a>)>,
+    /// Style-object font faces.
+    pub font_faces: Vec<FontFaceEntry<'a>>,
 }
 
-/// Raw-captured parsed-styles descriptor for this narrowed run.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Decoded parsed-styles descriptor.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ParsedStyles<'a> {
-    /// Raw `PARSED_STYLES` section body.
-    pub raw: &'a [u8],
+    /// Keyed parsed style blocks.
+    pub entries: Vec<(&'a str, ParsedStyleBlock<'a>)>,
+}
+
+/// A parsed inline-style block.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ParsedStyleBlock<'a> {
+    /// Parsed style declarations.
+    pub attributes: CssAttributes<'a>,
+    /// CSS variables.
+    pub variables: Vec<(&'a str, &'a str)>,
 }
 
 /// A decoded CSS value.
@@ -269,5 +453,182 @@ pub(crate) fn decode_css_value<'a>(
         value_type,
         default_value,
         default_value_map,
+    })
+}
+
+/// Decode a `CSSAttributes` declaration map.
+///
+/// Reference: `core/template_bundle/template_codec/binary_decoder/lynx_binary_base_css_reader.cc:588`.
+pub(crate) fn decode_css_attributes<'a>(
+    reader: &mut Reader<'a>,
+    enable_css_parser: bool,
+    enable_css_variable: bool,
+    target_sdk: Version,
+) -> Result<CssAttributes<'a>> {
+    let size = reader.compact_u32()? as usize;
+    let mut attributes = Vec::new();
+    attributes
+        .try_reserve(size)
+        .map_err(|_| DecodeError::Malformed("CSS attributes too large"))?;
+    for _ in 0..size {
+        let property_id = reader.compact_u32()?;
+        let value = decode_css_value(reader, enable_css_parser, enable_css_variable, target_sdk)?;
+        attributes.push((property_id, value));
+    }
+    Ok(attributes)
+}
+
+/// Decode a `CSSParseToken`.
+///
+/// Reference: `core/template_bundle/template_codec/binary_decoder/lynx_binary_base_css_reader.cc:505`.
+pub(crate) fn decode_css_parse_token<'a>(
+    reader: &mut Reader<'a>,
+    options: &CompileOptions<'_>,
+) -> Result<CssParseToken<'a>> {
+    let attributes = decode_css_attributes(
+        reader,
+        options.css_parser_enabled(),
+        options.css_variable_enabled(),
+        options.target_sdk,
+    )?;
+    let important_attributes = if options.target_sdk.is_at_least(V_3_9) {
+        decode_css_attributes(
+            reader,
+            options.css_parser_enabled(),
+            options.css_variable_enabled(),
+            options.target_sdk,
+        )?
+    } else {
+        Vec::new()
+    };
+    let style_variables = if options.css_variable_enabled() {
+        decode_css_style_variables(reader)?
+    } else {
+        Vec::new()
+    };
+    let sheets = if options.enable_css_selector {
+        Vec::new()
+    } else {
+        decode_css_sheets(reader)?
+    };
+
+    Ok(CssParseToken {
+        attributes,
+        important_attributes,
+        style_variables,
+        sheets,
+    })
+}
+
+/// Decode CSS style variables.
+///
+/// Reference: `core/template_bundle/template_codec/binary_decoder/lynx_binary_base_css_reader.cc:637`.
+pub(crate) fn decode_css_style_variables<'a>(
+    reader: &mut Reader<'a>,
+) -> Result<Vec<(&'a str, &'a str)>> {
+    let size = reader.compact_u32()? as usize;
+    let mut variables = Vec::new();
+    variables
+        .try_reserve(size)
+        .map_err(|_| DecodeError::Malformed("CSS variables too large"))?;
+    for _ in 0..size {
+        let key = reader.lstr()?;
+        let value = reader.lstr()?;
+        variables.push((key, value));
+    }
+    Ok(variables)
+}
+
+fn decode_css_sheets<'a>(reader: &mut Reader<'a>) -> Result<Vec<CssSheet<'a>>> {
+    let size = reader.compact_u32()? as usize;
+    let mut sheets = Vec::new();
+    sheets
+        .try_reserve(size)
+        .map_err(|_| DecodeError::Malformed("CSS sheets too large"))?;
+    for _ in 0..size {
+        sheets.push(CssSheet {
+            type_id: reader.compact_u32()?,
+            name: reader.lstr()?,
+            selector: reader.lstr()?,
+        });
+    }
+    Ok(sheets)
+}
+
+/// Decode a keyframes token.
+///
+/// Reference: `core/template_bundle/template_codec/binary_decoder/lynx_binary_base_css_reader.cc:549`.
+pub(crate) fn decode_css_keyframes_token<'a>(
+    reader: &mut Reader<'a>,
+    options: &CompileOptions<'_>,
+) -> Result<CssKeyframesToken<'a>> {
+    let frames = decode_css_keyframes(reader, options)?;
+    let custom_properties = Vec::new();
+    Ok(CssKeyframesToken {
+        frames,
+        custom_properties,
+    })
+}
+
+fn decode_css_keyframes<'a>(
+    reader: &mut Reader<'a>,
+    options: &CompileOptions<'_>,
+) -> Result<Vec<CssKeyframe<'a>>> {
+    let size = reader.compact_u32()? as usize;
+    let mut frames = Vec::new();
+    frames
+        .try_reserve(size)
+        .map_err(|_| DecodeError::Malformed("CSS keyframes too large"))?;
+    for _ in 0..size {
+        let key = if options.css_parser_enabled() {
+            CssKeyframeKey::Parsed(reader.compact_f64()?)
+        } else {
+            CssKeyframeKey::Text(reader.lstr()?)
+        };
+        let attributes = decode_css_attributes(
+            reader,
+            options.css_parser_enabled(),
+            options.css_variable_enabled(),
+            options.target_sdk,
+        )?;
+        frames.push(CssKeyframe { key, attributes });
+    }
+    Ok(frames)
+}
+
+/// Decode one legacy font-face token.
+///
+/// Reference: `core/template_bundle/template_codec/binary_decoder/lynx_binary_base_css_reader.cc:539`.
+pub(crate) fn decode_font_face_token<'a>(reader: &mut Reader<'a>) -> Result<FontFaceToken<'a>> {
+    let size = reader.compact_u32()? as usize;
+    let mut token = Vec::new();
+    token
+        .try_reserve(size)
+        .map_err(|_| DecodeError::Malformed("font-face token too large"))?;
+    for _ in 0..size {
+        token.push((reader.lstr()?, reader.lstr()?));
+    }
+    Ok(token)
+}
+
+/// Decode a parsed style block.
+///
+/// Reference: `core/template_bundle/template_codec/binary_decoder/element_binary_reader.cc:842`.
+pub(crate) fn decode_parsed_style_block<'a>(
+    reader: &mut Reader<'a>,
+    options: &CompileOptions<'_>,
+) -> Result<ParsedStyleBlock<'a>> {
+    // C++ element_binary_reader.cc:849 calls the one-arg DecodeCSSValue overload,
+    // which uses member-gated parser/variable flags rather than forcing true.
+    let attributes = decode_css_attributes(
+        reader,
+        options.css_parser_enabled(),
+        options.css_variable_enabled(),
+        options.target_sdk,
+    )?;
+    let variables = decode_css_style_variables(reader)?;
+    Ok(ParsedStyleBlock {
+        attributes,
+        variables,
     })
 }

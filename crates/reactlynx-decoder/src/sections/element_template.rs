@@ -271,8 +271,8 @@ fn decode_parsed_style_entry<'a>(
         let property_id = reader.compact_u32()?;
         let value = decode_css_value(
             reader,
-            options.enable_css_parser,
-            options.enable_css_variable,
+            options.css_parser_enabled(),
+            options.css_variable_enabled(),
             options.target_sdk,
         )?;
         attributes.push((property_id, value));
