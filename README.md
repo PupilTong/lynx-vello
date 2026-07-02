@@ -18,7 +18,17 @@ cargo check          # uses the pinned nightly automatically
 cargo test
 cargo fmt
 cargo clippy
+cargo bench          # divan benchmarks (CodSpeed-compatible)
 ```
+
+## CI
+
+A single `macos-latest` (aarch64) job runs rustfmt, clippy (`-D warnings`),
+tests with coverage ([Codecov](https://codecov.io)), and benchmarks tracked by
+[CodSpeed](https://codspeed.io) in **walltime** mode — CodSpeed's
+valgrind-based simulation instrument is Linux-only, but walltime is fully
+supported on macOS aarch64 (runner ships darwin-arm64 binaries and uses the
+samply profiler there).
 
 ## Reference knowledge
 

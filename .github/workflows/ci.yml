@@ -10,7 +10,7 @@ env:
 
 jobs:
   ci:
-    name: fmt + clippy + test (macOS)
+    name: fmt + clippy + test + coverage + bench (macOS)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,5 +27,40 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Test
-        run: cargo test
+      - name: Install cargo-llvm-cov and cargo-codspeed
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-codspeed
+
+      # Runs the test suite under coverage instrumentation (replaces a plain
+      # `cargo test` run for lib/integration tests).
+      - name: Tests + coverage
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+
+      - name: Doctests
+        run: cargo test --doc
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          fail_ci_if_error: true
+
+      # CodSpeed on macOS aarch64: the valgrind-based simulation instrument is
+      # Linux-only (the runner bails with "Unsupported system" on anything but
+      # Ubuntu/Debian), but walltime mode is FullySupported on macOS since
+      # runner v4.15 (darwin-aarch64 binaries, samply profiler). Expect more
+      # run-to-run noise than CodSpeed's dedicated macro runners.
+      - name: Build benchmarks
+        run: cargo codspeed build -m walltime
+
+      - name: Run benchmarks (CodSpeed, walltime)
+        uses: CodSpeedHQ/action@v4
+        with:
+          mode: walltime
+          run: cargo codspeed run -m walltime
+          # Tokenless upload works for public repos; set CODSPEED_TOKEN in the
+          # repo secrets once the project is registered on codspeed.io to make
+          # uploads authenticated.
+          token: ${{ secrets.CODSPEED_TOKEN }}
