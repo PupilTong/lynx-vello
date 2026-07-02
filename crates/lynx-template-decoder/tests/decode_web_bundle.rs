@@ -10,18 +10,18 @@ fn fixture(name: &str) -> Vec<u8> {
 }
 
 #[test]
-fn decodes_lazy_component_with_css() {
-    let template = decode(&fixture("config-lazy-component-css.web.bundle")).unwrap();
+fn decodes_card_with_css() {
+    let template = decode(&fixture("basic-class-selector.web.bundle")).unwrap();
 
     assert_eq!(template.version, 1);
     assert_eq!(template.config_str("cardType"), Some("react"));
-    assert!(template.config_flag("isLazy"));
+    assert!(!template.config_flag("isLazy"));
     assert!(template.config_flag("enableFiberArch"));
 
     // Main-thread code is plain JavaScript, keyed by chunk name. The length
     // matches the reference decoder's `lepusCode.root.byteLength`.
     let root = &template.lepus_code["root"];
-    assert_eq!(root.len(), 3068);
+    assert_eq!(root.len(), 26998);
     assert!(root.contains("use strict"), "lepus root should be JS text");
 
     // Background-thread chunks.
@@ -41,7 +41,7 @@ fn decodes_lazy_component_with_css() {
     // Real CSS. Expected values cross-validated against the reference
     // decoder (`@lynx-js/web-core` `decodeTemplate` + wasm), which flattens
     // this bundle to:
-    //   .container[l-e-name=""]{background-color:orange;height:100px;width:100px;}
+    //   .basic:not([l-e-name]){background-color:pink;height:100px;width:100px;}
     let style_info = template.style_info.as_ref().unwrap();
     assert_eq!(style_info.css_id_to_style_sheet.len(), 1);
     let sheet = &style_info.css_id_to_style_sheet[&0];
@@ -56,7 +56,7 @@ fn decodes_lazy_component_with_css() {
         .iter()
         .map(Selector::to_css_string)
         .collect();
-    assert_eq!(selectors, [".container"]);
+    assert_eq!(selectors, [".basic"]);
     let declarations: Vec<String> = rule
         .declaration_block
         .declarations
@@ -65,7 +65,7 @@ fn decodes_lazy_component_with_css() {
         .collect();
     assert_eq!(
         declarations,
-        ["background-color:orange", "height:100px", "width:100px"]
+        ["background-color:pink", "height:100px", "width:100px"]
     );
     assert!(
         rule.declaration_block
@@ -134,7 +134,7 @@ fn rejects_future_version() {
 
 #[test]
 fn rejects_truncated_section() {
-    let bundle = fixture("config-lazy-component-css.web.bundle");
+    let bundle = fixture("basic-class-selector.web.bundle");
     let err = decode(&bundle[..bundle.len() - 100]).unwrap_err();
     assert!(matches!(err, DecodeError::UnexpectedEof { .. }), "{err}");
 }
