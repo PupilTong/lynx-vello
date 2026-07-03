@@ -17,11 +17,13 @@ sits on top of `lynx-js-runtime-bridge`'s runtime emulation.
 
 ## Reference repos
 
-- `/Users/akiwah/repos/lynx-stack` — `packages/react/runtime` and
+Absolute paths are defined once in `AGENTS.md` (shorthand: `lynx/`, `lynx-stack/`, `Paws/`).
+
+- `lynx-stack/` — `packages/react/runtime` and
   `packages/react/transform` are the ground truth for the JSX
   runtime/snapshot-patch model and what the compiler emits; `packages/react/components`
   is the built-in component library; read `AGENTS.md` there if present.
-- `/Users/akiwah/repos/lynx` isn't the primary reference here (ReactLynx is a
+- `lynx/` isn't the primary reference here (ReactLynx is a
   `lynx-stack` framework, not part of the C++ engine) but is useful for
   cross-checking underlying element/event behavior your compat layer relies on.
 
@@ -35,6 +37,8 @@ sits on top of `lynx-js-runtime-bridge`'s runtime emulation.
   timing — if something seems wrong at the ReactLynx level, check whether the
   underlying runtime-bridge behavior contract is actually correct first.
 - If `docs/tracking/reactlynx.md` or `components.md` are still stubs,
-  research them (or delegate to `lynx-behavior-researcher`) before
-  implementing — ReactLynx's dual-thread reconciliation model has subtle
-  ordering guarantees that are easy to get wrong from memory.
+  research them yourself against the reference repos before implementing —
+  ReactLynx's dual-thread reconciliation model has subtle ordering guarantees
+  that are easy to get wrong from memory. You can't spawn other subagents
+  yourself; if you're being invoked from the main session, it can run
+  `lynx-behavior-researcher` first instead.

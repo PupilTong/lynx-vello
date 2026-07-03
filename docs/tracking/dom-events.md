@@ -14,7 +14,6 @@ including arbitration between simultaneous gestures).
 Scope note: this is the spec for `.claude/agents/lynx-js-runtime-bridge.md`.
 
 Implementation-pattern reference (not a behavior spec):
-`/Users/akiwah/repos/paws-libs/Paws`'s `engine/src/events/` (`dispatch.rs`,
-`event.rs`, `listener.rs`) and `engine/src/hit_test/` show standard DOM-style
-event dispatch and hit-testing over a custom Rust DOM with no browser
-underneath.
+`Paws/engine/src/events/` (`dispatch.rs`, `event.rs`, `listener.rs`) and
+`Paws/engine/src/hit_test/` show standard DOM-style event dispatch and
+hit-testing over a custom Rust DOM with no browser underneath.

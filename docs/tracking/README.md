@@ -8,12 +8,12 @@ so implementation work on any subsystem starts from a real spec instead of
 re-deriving Lynx behavior from scratch each time — **read the relevant file
 below before implementing a new subsystem.**
 
-A third local checkout, `/Users/akiwah/repos/paws-libs/Paws`, is *not* a Lynx
-behavior spec — it's a sibling native Rust UI engine (stylo + Taffy + parley)
-used purely as an **implementation-pattern** reference for DOM system and CSS
-system design (wiring stylo onto a custom DOM, stacking context, event
-dispatch/hit-testing). It's cited in the files below where relevant; see
-`AGENTS.md` for its full scope.
+A third local checkout, `Paws/` (absolute path defined once in `AGENTS.md`),
+is *not* a Lynx behavior spec — it's a sibling native Rust UI engine (stylo +
+Taffy + parley) used purely as an **implementation-pattern** reference for
+DOM system and CSS system design (wiring stylo onto a custom DOM, stacking
+context, event dispatch/hit-testing). It's cited in the files below where
+relevant; see `AGENTS.md` for its full scope.
 
 Nothing in this repo implements any of this yet; every file here is pure
 research/spec, not a status tracker of finished work. Once implementation
@@ -30,7 +30,7 @@ Most files use a table with these columns:
 | Tier | `Core` (must-have for basic ReactLynx apps to render/work), `Extended` (common but not universal), `Rare` (long-tail, defer) |
 | W3C-compliant? | `Yes` / `No` / `Partial` — whether Lynx's behavior matches the relevant web standard |
 | Deviation & what to do instead | Only filled when not compliant — the actual W3C-correct behavior to implement instead (see the [standards policy](../../AGENTS.md#standards-policy-w3c-first-lynx-behavior-second)) |
-| Source refs | File paths into the local `lynx`/`lynx-stack` checkouts, prefixed `lynx/` or `lynx-stack/`, that back the row |
+| Source refs | File paths into the local `lynx`/`lynx-stack`/`Paws` checkouts, prefixed `lynx/`, `lynx-stack/`, or `Paws/` (the last only on implementation-pattern rows, never as a behavior-spec source) |
 
 ## Index
 

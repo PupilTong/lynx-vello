@@ -32,14 +32,16 @@ spell out the exact mapping once filled in.
 
 ## Reference repos
 
-- `/Users/akiwah/repos/lynx` — `core/runtime` (global API/native
+Absolute paths are defined once in `AGENTS.md` (shorthand: `lynx/`, `lynx-stack/`, `Paws/`).
+
+- `lynx/` — `core/runtime` (global API/native
   modules/lifecycle) and `core/renderer/dom` / event-handling directories
   (verify exact paths) are ground truth for JS-facing behavior.
-- `/Users/akiwah/repos/lynx-stack` — `packages/web-platform/web-core` is the
+- `lynx-stack/` — `packages/web-platform/web-core` is the
   closest existing implementation of this entire layer (dual-thread split,
   message protocol, global polyfills) for the web target; read its AGENTS.md
   if present.
-- `/Users/akiwah/repos/paws-libs/Paws` — **implementation-pattern reference**
+- `Paws/` — **implementation-pattern reference**
   for the DOM/event half only (not Lynx behavior, and not the threading
   model): `engine/src/events/` (`dispatch.rs`, `event.rs`, `listener.rs`) and
   `engine/src/hit_test/` show standard DOM-style event dispatch and
@@ -52,6 +54,8 @@ spell out the exact mapping once filled in.
 - This is the layer `lynx-reactlynx-compat` builds on — keep its behavior
   contract (what fires when, in what order, on which "thread") precise, since
   ReactLynx compatibility depends on it.
-- If a tracking doc here is still a stub, research it (or delegate to
-  `lynx-behavior-researcher`) before implementing — the dual-thread timing
-  model in particular is easy to get subtly wrong from memory.
+- If a tracking doc here is still a stub, research it yourself against the
+  reference repos before implementing — the dual-thread timing model in
+  particular is easy to get subtly wrong from memory. You can't spawn other
+  subagents yourself; if you're being invoked from the main session, it can
+  run `lynx-behavior-researcher` first instead.

@@ -8,13 +8,14 @@ in `.claude/agents/`) or Codex (paste into `codex` CLI, or forward through
 All of these assume the reader starts from `AGENTS.md` — they don't repeat the
 project mission/standards policy, just the task-specific framing.
 
-Three reference repos, three different roles (see `AGENTS.md` for details):
+Three reference repos, three different roles (absolute paths defined once in
+`AGENTS.md`; shorthand used below):
 
-- `/Users/akiwah/repos/lynx` — Lynx behavior spec (C++ engine)
-- `/Users/akiwah/repos/lynx-stack` — Lynx/ReactLynx behavior spec (TS/Rust, web target)
-- `/Users/akiwah/repos/paws-libs/Paws` — **not** Lynx behavior; an
-  implementation-pattern reference for DOM/CSS system design (stylo wiring,
-  stacking context, event dispatch/hit-testing) only
+- `lynx/` — Lynx behavior spec (C++ engine)
+- `lynx-stack/` — Lynx/ReactLynx behavior spec (TS/Rust, web target)
+- `Paws/` — **not** Lynx behavior; an implementation-pattern reference for
+  DOM/CSS system design (stylo wiring, stacking context, event
+  dispatch/hit-testing) only
 
 ## Research a tracking-doc gap
 
@@ -23,9 +24,9 @@ specific behavior isn't already covered before extending it.
 
 ```
 Read AGENTS.md and docs/tracking/README.md for context. Research {TOPIC} by
-reading the actual source in /Users/akiwah/repos/lynx and/or
-/Users/akiwah/repos/lynx-stack (don't rely on general knowledge of LynxJS —
-confirm by reading real files, and cite the paths you read). Follow the
+reading the actual source in lynx/ and/or lynx-stack/ (see AGENTS.md for
+their absolute paths; don't rely on general knowledge of LynxJS — confirm by
+reading real files, and cite the paths you read). Follow the
 column conventions in docs/tracking/README.md. Flag anything that deviates
 from the relevant W3C/CSS/DOM standard, per the standards policy in
 AGENTS.md. Update {TRACKING_FILE} with your findings — replace the "pending
@@ -36,8 +37,10 @@ initial research pass" stub content, don't just append.
 
 ```
 Read AGENTS.md, then docs/tracking/{css-layout,css-visual,css-text,css-animation}.md
-for {PROPERTY_NAME}'s spec (research it first via the lynx-behavior-researcher
-subagent if that file is still a stub for this property). Implement
+for {PROPERTY_NAME}'s spec — if that file is still a stub for this property,
+research it directly against lynx/ and lynx-stack/ yourself, or (only if
+you're the main session, since subagents can't spawn other subagents) run
+the lynx-behavior-researcher subagent first. Implement
 {PROPERTY_NAME} in the style engine (stylo integration), matching Lynx's
 behavior unless docs/tracking/deviations.md (or your own research) says it
 diverges from the W3C spec, in which case implement the W3C-correct behavior.
@@ -88,6 +91,7 @@ this by hand — but if composing the forwarded task text yourself, include:
 Context: lynx-vello, a Rust reimplementation of LynxJS's web-bundle runtime
 on stylo/vello/parley (see AGENTS.md for the full mission and standards
 policy — Codex reads AGENTS.md automatically). Task: {TASK}. Relevant spec:
-docs/tracking/{FILE}.md. Relevant reference source:
-/Users/akiwah/repos/lynx{,-stack}/{PATH}.
+docs/tracking/{FILE}.md. Relevant reference source: lynx/{PATH} or
+lynx-stack/{PATH} (see AGENTS.md for their absolute paths; use Paws/{PATH}
+instead for a DOM/CSS implementation-pattern question, not Lynx behavior).
 ```

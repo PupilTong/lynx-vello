@@ -23,21 +23,22 @@ policy. Then read the relevant tracking spec before implementing anything:
 
 ## Reference repos
 
-- `/Users/akiwah/repos/lynx` — `core/renderer/css`, `core/style` (or wherever
+Absolute paths are defined once in `AGENTS.md` (shorthand: `lynx/`, `lynx-stack/`, `Paws/`).
+
+- `lynx/` — `core/renderer/css`, `core/style` (or wherever
   `CSSPropertyID`/property enums actually live — grep, don't assume) is the
   ground truth for which properties/values Lynx supports and what its default
   values/inheritance rules are.
-- `/Users/akiwah/repos/lynx-stack` — `packages/web-platform/web-core`'s
+- `lynx-stack/` — `packages/web-platform/web-core`'s
   StyleInfo-to-DOM application code is the closest existing reference for how
   pre-parsed rules get turned into applied style.
-- `/Users/akiwah/repos/paws-libs/Paws` — **implementation-pattern reference**
-  (not a Lynx behavior spec): `engine/src/style.rs`,
-  `engine/src/style/css_style_sheet.rs`, and `engine/src/style/sheet_cache.rs`
-  show a real, working `stylo` integration (cascade + `RuleTree`) over a
-  custom Rust DOM — the closest existing example of the exact wiring this
-  crate needs to do. `paws-style-ir/` is a second rkyv-based style-IR design
-  worth comparing against `RawStyleInfo` (it targets rkyv `0.8.9`; we stay
-  pinned at `0.7`, see `AGENTS.md`).
+- `Paws/` — **implementation-pattern reference** (not a Lynx behavior spec):
+  `engine/src/style.rs`, `engine/src/style/css_style_sheet.rs`, and
+  `engine/src/style/sheet_cache.rs` show a real, working `stylo` integration
+  (cascade + `RuleTree`) over a custom Rust DOM — the closest existing
+  example of the exact wiring this crate needs to do. `paws-style-ir/` is a
+  second rkyv-based style-IR design worth comparing against `RawStyleInfo`
+  (it targets rkyv `0.8.x`; we stay pinned at `0.7`, see `AGENTS.md`).
 
 ## Ground rules
 

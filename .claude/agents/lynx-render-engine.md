@@ -26,11 +26,13 @@ half of the `z-index` W3C-first policy owned jointly with
 
 ## Reference repos
 
-- `/Users/akiwah/repos/lynx` — the C++ renderer (`gfx/` and/or
+Absolute paths are defined once in `AGENTS.md` (shorthand: `lynx/`, `lynx-stack/`, `Paws/`).
+
+- `lynx/` — the C++ renderer (`gfx/` and/or
   `core/renderer` painting code — verify the actual path) is ground truth for
   paint semantics (border-radius clipping, shadow spread/blur, filter
   effects, transform composition order).
-- `/Users/akiwah/repos/lynx-stack` — `packages/web-platform/web-elements`
+- `lynx-stack/` — `packages/web-platform/web-elements`
   shows the expected visual result for each built-in component today, useful
   as a rendering cross-check.
 
@@ -39,5 +41,7 @@ half of the `z-index` W3C-first policy owned jointly with
 - Behavioral/visual compatibility, not pixel-perfect fidelity (see
   `AGENTS.md`).
 - If `docs/tracking/css-visual.md` or `css-animation.md` are still stubs,
-  research them (or delegate to `lynx-behavior-researcher`) before
-  implementing paint logic for a property you're unsure about.
+  research them yourself against the reference repos before implementing
+  paint logic for a property you're unsure about. You can't spawn other
+  subagents yourself; if you're being invoked from the main session, it can
+  run `lynx-behavior-researcher` first instead.

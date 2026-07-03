@@ -26,7 +26,9 @@ the quirky behavior from the C++ engine for this one property.
 
 ## Reference repos
 
-- `/Users/akiwah/repos/lynx` — `core/renderer/starlight` is the ground truth
+Absolute paths are defined once in `AGENTS.md` (shorthand: `lynx/`, `lynx-stack/`, `Paws/`).
+
+- `lynx/` — `core/renderer/starlight` is the ground truth
   for box-model/flex/linear/relative layout *semantics* (verify the exact
   path; it may have moved). Lynx's `display: linear` (with `linear-weight`,
   `linear-gravity`, `linear-direction`) and `relative-*` positioning
@@ -34,24 +36,26 @@ the quirky behavior from the C++ engine for this one property.
   relative`) are Lynx-specific layout primitives with no direct CSS
   equivalent; replicate their actual behavior faithfully since they aren't a
   standards violation, just a Lynx extension.
-- `/Users/akiwah/repos/lynx-stack` — `packages/web-platform/web-core` shows
+- `lynx-stack/` — `packages/web-platform/web-core` shows
   how these get expressed as real CSS/flexbox on the web target today, which
   is a useful cross-check for expected visual results.
-- `/Users/akiwah/repos/paws-libs/Paws` — **implementation-pattern reference**
-  (not a Lynx behavior spec): `engine/src/layout/stacking.rs` is a real,
-  spec-conformance-tested (Paws tracks W3C WPT alignment, see its
-  `wpt-alignment.md`) Rust implementation of CSS stacking-context painting
-  order, built on the same `stylo` computed-style output this engine will
-  have — the concrete reference for getting the z-index/stacking-context
-  deviation right. `engine/src/layout/block.rs` and `text.rs` show computed
-  style flowing into box layout more broadly (Paws uses Taffy for the actual
-  box algorithm, which lynx-vello's from-scratch engine won't, but the
-  stylo-to-layout wiring pattern still transfers).
+- `Paws/` — **implementation-pattern reference** (not a Lynx behavior spec):
+  `engine/src/layout/stacking.rs` is a real, spec-conformance-tested (Paws
+  tracks W3C WPT alignment, see its `wpt-alignment.md`) Rust implementation
+  of CSS stacking-context painting order, built on the same `stylo`
+  computed-style output this engine will have — the concrete reference for
+  getting the z-index/stacking-context deviation right. `engine/src/layout/block.rs`
+  and `text.rs` show computed style flowing into box layout more broadly
+  (Paws uses Taffy for the actual box algorithm, which lynx-vello's
+  from-scratch engine won't, but the stylo-to-layout wiring pattern still
+  transfers).
 
 ## Ground rules
 
 - Everything here is behavioral compatibility, not pixel-perfect layout
   matching (see `AGENTS.md`).
-- If `docs/tracking/css-layout.md` is still a stub, do the spec research
-  yourself (or delegate to `lynx-behavior-researcher`) before implementing —
-  don't guess at flex/linear/relative semantics from memory.
+- If `docs/tracking/css-layout.md` is still a stub, research it yourself
+  against the reference repos before implementing — don't guess at
+  flex/linear/relative semantics from memory. You can't spawn other
+  subagents yourself; if you're being invoked from the main session, it can
+  run `lynx-behavior-researcher` first instead.

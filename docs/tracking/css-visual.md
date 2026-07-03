@@ -13,6 +13,5 @@ resolve and what the `vello`-backed renderer must paint — see
 `.claude/agents/lynx-css-engine.md` and `.claude/agents/lynx-render-engine.md`.
 
 Implementation-pattern reference (not a behavior spec):
-`/Users/akiwah/repos/paws-libs/Paws`'s `engine/src/style.rs` and
-`engine/src/style/css_style_sheet.rs` show a working `stylo` cascade
-integration over a custom Rust DOM.
+`Paws/engine/src/style.rs` and `Paws/engine/src/style/css_style_sheet.rs`
+show a working `stylo` cascade integration over a custom Rust DOM.

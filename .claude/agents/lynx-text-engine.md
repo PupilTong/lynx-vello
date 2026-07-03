@@ -16,11 +16,13 @@ and `docs/tracking/deviations.md`.
 
 ## Reference repos
 
-- `/Users/akiwah/repos/lynx` — Lynx's text-layout code (search for the text
+Absolute paths are defined once in `AGENTS.md` (shorthand: `lynx/`, `lynx-stack/`, `Paws/`).
+
+- `lynx/` — Lynx's text-layout code (search for the text
   measurement/line-breaking implementation under `core/renderer`) is ground
   truth for exact truncation/line-clamp/line-breaking behavior, including any
   Lynx-specific text properties (look for `-x-` prefixed properties).
-- `/Users/akiwah/repos/lynx-stack` — `packages/web-platform/web-elements`'s
+- `lynx-stack/` — `packages/web-platform/web-elements`'s
   `x-text` implementation shows how these map onto real browser text layout
   today, useful as a behavioral cross-check.
 
@@ -32,5 +34,7 @@ and `docs/tracking/deviations.md`.
 - If Lynx's line-breaking/truncation behavior turns out to diverge from what
   the relevant Unicode/CSS text spec says, apply the W3C-first policy and
   record the divergence in `docs/tracking/deviations.md`.
-- If `docs/tracking/css-text.md` is still a stub, research it yourself (or
-  delegate to `lynx-behavior-researcher`) before implementing.
+- If `docs/tracking/css-text.md` is still a stub, research it yourself
+  against the reference repos before implementing. You can't spawn other
+  subagents yourself; if you're being invoked from the main session, it can
+  run `lynx-behavior-researcher` first instead.

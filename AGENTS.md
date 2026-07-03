@@ -79,15 +79,21 @@ useful signal for currently-compatible versions of those libraries.
   above), and DOM-style event dispatch/hit-testing with no browser
   underneath (`engine/src/events/`, `engine/src/hit_test/`). Its
   `paws-style-ir/` crate is a second, independent rkyv-based style-IR design
-  worth comparing against our own `RawStyleInfo` (it targets rkyv `0.8.9`;
-  ours stays pinned at `0.7`, see Dependency policy below).
+  worth comparing against our own `RawStyleInfo` (it targets rkyv `0.8.x`;
+  ours stays pinned at `0.7`, see Dependency policy above).
+
+Elsewhere in this repo (subagent personas, tracking docs, prompts), these
+three are referred to by shorthand as `lynx/`, `lynx-stack/`, and `Paws/` —
+this section is the only place the absolute paths are spelled out.
 
 ## Reference knowledge
 
-- `docs/web-binary-template.md` — the web-target bundle format this repo
-  decodes today: container layout, section encodings, and the rkyv 0.7
-  `RawStyleInfo` CSS data model (mirrored 1:1 in the decoder crate — field/variant
-  order there is wire format, do not reorder).
+- `docs/web-binary-template.md` — **read this before touching
+  `crates/lynx-template-decoder` or any StyleInfo/wire-format code.** The
+  web-target bundle format this repo decodes today: container layout,
+  section encodings, and the rkyv 0.7 `RawStyleInfo` CSS data model (mirrored
+  1:1 in the decoder crate — field/variant order there is wire format, do not
+  reorder).
 - `docs/lynx-binary-template.md` — the *native* `.lynx.bundle` format ("lynx"
   target), reference only, not implemented here.
 - `docs/tracking/` — the behavior/feature inventory (CSS properties, layout
