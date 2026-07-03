@@ -36,18 +36,31 @@ Most files use a table with these columns:
 
 | File | Domain |
 | --- | --- |
-| [css-layout.md](css-layout.md) | Box model, positioning, flex, Lynx's `linear`/`relative` layout, z-index/stacking |
+| [css-layout.md](css-layout.md) | Box model, positioning, flex/grid, Lynx's `linear`/`relative` layout, z-index/stacking |
 | [css-visual.md](css-visual.md) | Color, background, border, shadow, filter, transform, opacity |
 | [css-text.md](css-text.md) | Font/text properties relevant to `parley` shaping/layout |
 | [css-animation.md](css-animation.md) | Transitions, `@keyframes`, timing functions, JS `animate()` API |
-| [dom-events.md](dom-events.md) | Element/NodesRef model, event types, bind/catch/capture-bind/capture-catch model, gesture recognizers |
-| [js-runtime.md](js-runtime.md) | Global `lynx` object, native modules, Element PAPI, app/page lifecycle, main/background threading |
+| [css-selectors-cascade.md](css-selectors-cascade.md) | Selector matching, pseudo-classes/elements, specificity/cascade, custom properties (`var()`) |
+| [css-at-rules.md](css-at-rules.md) | `@media`, `@font-face`, `@supports` |
+| [dom-events.md](dom-events.md) | Element/NodesRef model, event types, bind/catch/capture-bind/capture-catch model, gesture recognizers, nested-scroll coordination, pointer-events |
+| [js-runtime.md](js-runtime.md) | Global `lynx` object, native modules, Element PAPI, app/page lifecycle, main/background threading, per-component UIMethod catalog |
 | [web-core-runtime.md](web-core-runtime.md) | `web-core`'s dual-thread architecture end to end — the reference model lynx-vello replicates natively |
-| [components.md](components.md) | Built-in components (`web-elements` custom elements ↔ Lynx JSX tags) |
+| [components.md](components.md) | Built-in components (`web-elements` custom elements ↔ Lynx JSX tags), form/IME contract, lazy component loading, `<frame>` |
 | [reactlynx.md](reactlynx.md) | ReactLynx runtime/compiler model, hooks compatibility matrix, public API & component library |
-| [deviations.md](deviations.md) | Rollup of every known Lynx-vs-W3C behavior divergence pulled from the files above, with the W3C-correct behavior to implement |
+| [media-resources.md](media-resources.md) | Image loading pipeline, clipboard, video/audio playback |
+| [accessibility.md](accessibility.md) | Accessibility node tree, screen-reader semantics, JS a11y API |
+| [deviations.md](deviations.md) | Curated rollup of the highest-impact Lynx-vs-W3C behavior divergences, with the W3C-correct behavior to implement (the exhaustive per-property list lives in each file above) |
 
 ## Status
 
-Initial research pass in progress (multi-agent sweep over both reference
-repos). Files will be filled in as that completes.
+Initial research pass complete: a 30-agent sweep (10 initial topics + 2
+rounds of completeness-critique gap-filling) read `lynx/` and `lynx-stack/`
+and produced 28 sections, assembled into the files above. One malformed
+section (a critique-round artifact literally titled "test", 4 characters of
+content) was discarded rather than force-fit into a file. `css-selectors-cascade.md`,
+`css-at-rules.md`, `media-resources.md`, and `accessibility.md` didn't exist
+as original stubs — they're new files the critique pass identified as gaps
+in the original ten topics. None of this has been independently
+double-checked against the source repos yet (only the agents that produced
+it verified their own citations) — treat file/line references as a strong
+starting point, not ground truth, especially for anything load-bearing.

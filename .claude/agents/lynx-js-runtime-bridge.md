@@ -17,8 +17,12 @@ lifecycle sequencing, and the DOM event + gesture-recognizer model.
 1. `docs/tracking/web-core-runtime.md` — the dual-thread architecture you're
    replicating the behavior of
 2. `docs/tracking/js-runtime.md` — the global API/native-module/lifecycle surface
-3. `docs/tracking/dom-events.md` — event dispatch & gesture model
-4. `docs/tracking/deviations.md` — known W3C divergences
+   (includes the per-component `NodesRef.invoke()` UIMethod catalog)
+3. `docs/tracking/dom-events.md` — event dispatch & gesture model, including
+   nested-scroll coordination and pointer-events hit-testing
+4. `docs/tracking/media-resources.md` — image/clipboard/video-audio native modules
+5. `docs/tracking/accessibility.md` — the a11y node tree and its JS-facing API
+6. `docs/tracking/deviations.md` — known W3C divergences
 
 ## The event-model deviation you must get right
 

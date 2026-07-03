@@ -19,6 +19,8 @@ policy. Then read the relevant tracking spec before implementing anything:
 - `docs/tracking/css-text.md` — font/text properties (the parts you resolve; `lynx-text-engine` owns shaping/layout)
 - `docs/tracking/css-animation.md` — transition/animation property parsing & interpolation
 - `docs/tracking/css-layout.md` — layout-affecting properties (you resolve their computed values; `lynx-layout-engine` owns the algorithm that consumes them)
+- `docs/tracking/css-selectors-cascade.md` — selector matching, specificity/cascade ordering, custom-property (`var()`) resolution
+- `docs/tracking/css-at-rules.md` — `@media`, `@font-face`, `@supports`
 - `docs/tracking/deviations.md` — known Lynx-vs-W3C divergences; when in doubt, match the W3C spec `stylo` already implements rather than a Lynx quirk
 
 ## Reference repos

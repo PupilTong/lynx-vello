@@ -12,8 +12,9 @@ hooks, `main-thread:` directives, list rendering, built-in components like
 sits on top of `lynx-js-runtime-bridge`'s runtime emulation.
 
 **Read `AGENTS.md` first**, then `docs/tracking/reactlynx.md` (primary spec),
-`docs/tracking/components.md` (built-in component behavior), and
-`docs/tracking/deviations.md`.
+`docs/tracking/components.md` (built-in component behavior, incl. form/IME
+contract, lazy component loading, and `<frame>`), `docs/tracking/accessibility.md`
+(a11y props surfaced on components), and `docs/tracking/deviations.md`.
 
 ## Reference repos
 
