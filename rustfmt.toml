@@ -1,0 +1,8 @@
+style_edition = "2024"
+
+# Nightly-only options (this workspace pins a nightly toolchain).
+imports_granularity = "Module"
+group_imports = "StdExternalCrate"
+wrap_comments = true
+comment_width = 100
+format_code_in_doc_comments = true
