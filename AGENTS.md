@@ -28,15 +28,64 @@ This project does not touch the native `.lynx.bundle` format or platform
 bridges (`docs/lynx-binary-template.md` is kept for reference only, not a
 target).
 
-## Standards policy: W3C first, Lynx behavior second
+## Standards policy
 
-Match Lynx's *observable* behavior only where it doesn't conflict with
-W3C/CSS/DOM standards. Where the actual LynxJS engine's behavior diverges from
-the relevant web standard, implement the **W3C-standard behavior instead** of
-replicating the Lynx quirk. Known example: Lynx's `z-index`/stacking
-implementation does not follow the CSS stacking-context algorithm — implement
-the real CSS algorithm instead. See `docs/tracking/deviations.md` for the
-running list of known divergences found so far.
+Every CSS/DOM/JS feature Lynx supports falls into exactly one of two buckets
+— classify a feature before implementing it, by what Lynx's implementation
+*is*, not by what its name resembles:
+
+1. **Lynx supports a real W3C/CSS/DOM feature.** The feature exists in the
+   relevant spec, even if Lynx's own implementation of it is buggy,
+   incomplete, or non-conformant. Implement the **W3C-correct behavior**
+   for it, not Lynx's quirk. Confirmed examples:
+   - `z-index`/stacking context — Lynx reparents same-`z-index` elements
+     once to the nearest "stacking context node" and sorts by raw integer
+     value, instead of running the real recursive, per-stacking-context
+     CSS algorithm. Implement the real CSS algorithm instead.
+   - `position: fixed` — in every mode Lynx supports (the legacy path and
+     both newer `enable-fixed-new`/`enable-unify-fixed-behavior` paths), a
+     fixed element's containing block is always the single page-root
+     element (`ElementManager::root()`, sized to the viewport), reached
+     either by literally reparenting the element under the root in the
+     render tree (legacy: `FiberElement::InsertFixedElement`,
+     `fiber_element.cc:5037-5096`) or via a dedicated root pointer plus a
+     root-only measurement pass (`LayoutObject::GetRoot()`,
+     `LayoutAlgorithm::InitializeFixedNode`, `layout_algorithm.cc:102-130`).
+     Scroll offset from *every* scrollable ancestor is excluded not by
+     per-ancestor coordinate math but structurally: the fixed element's
+     native view is simply never mounted inside any scrollable ancestor's
+     view hierarchy (`ElementContainer::InsertElementContainerAccordingToElement`,
+     `element_container.cc:321-327`). There is **no exception anywhere for
+     ancestors with `transform`/`filter`/`perspective`/`will-change`/`contain`**
+     (confirmed absent — no `transform` reference exists anywhere in
+     `core/renderer/starlight/layout/`, and Lynx has no `contain` property
+     at all) — properties that, per the real CSS spec, establish a *new*
+     containing block for fixed descendants instead of the viewport. Nor is
+     there any component-boundary-scoped containing block: fixed is always
+     page-root-relative regardless of `<component>` nesting depth.
+     **Implement the real W3C algorithm**: viewport-equivalent containing
+     block by default, re-anchored to the nearest ancestor with a
+     qualifying transform/filter/perspective/will-change/contain when one
+     exists — not Lynx's unconditional escape-to-root behavior.
+2. **Lynx supports a Lynx-only extension with no W3C equivalent** (e.g.
+   `display: linear`, `relative-*` positioning, the `rpx`/`ppx` units).
+   Implement **Lynx's actual behavior**, faithfully — there's no spec to
+   defer to, so match what Lynx does, not what would be more "standard."
+   **Do not extend these features**: don't add capability, generalize the
+   value grammar, or otherwise "improve" a Lynx-only feature beyond what
+   Lynx itself actually does.
+
+**Watch for false friends.** A Lynx feature can share a name with a W3C
+feature (`position: fixed`, `filter`, ...) while quietly implementing
+different semantics underneath — that belongs in bucket 1, but only once
+you've actually confirmed, by reading `lynx/` source, that Lynx claims to
+implement that spec feature and that the deviation is real, not assumed. If
+you find a case like this and Lynx's behavior is ambiguous, the bucket-1-vs-2
+classification itself is unclear, or the decision is consequential — **don't
+decide silently. Ask the user** before choosing which behavior to implement.
+
+See `docs/tracking/deviations.md` for the running list of confirmed
+divergences found so far.
 
 ## Dependency policy
 

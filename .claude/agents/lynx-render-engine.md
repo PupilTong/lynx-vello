@@ -24,6 +24,26 @@ half of the `z-index` W3C-first policy owned jointly with
 `docs/tracking/deviations.md`). Do not replicate Lynx's non-standard
 `z-index` behavior.
 
+`position: fixed` is a second confirmed false friend, also owned jointly with
+`lynx-layout-engine`. In every mode Lynx supports, a fixed element's
+containing block is unconditionally the single page-root element (reached
+either by reparenting under root in the render tree, or via a dedicated root
+pointer + root-only measurement pass), with **no exception for ancestors
+that have `transform`/`filter`/`perspective`/`will-change`/`contain`** —
+properties that, per the real CSS spec, establish a *new* containing block
+for fixed descendants instead of the viewport. We follow the **W3C-correct**
+algorithm here too: viewport-equivalent containing block by default,
+re-anchored to the nearest qualifying ancestor when one exists — not Lynx's
+always-escape-to-root behavior. See `docs/tracking/css-layout.md` and
+`docs/tracking/deviations.md` for the full source citations.
+
+If you run into another Lynx property/API that *looks* like a W3C feature by
+name but you're not certain its actual behavior matches (another "false
+friend" like `z-index` and `position: fixed`), don't guess either way —
+verify against `lynx/` source first, and if it's still ambiguous or the
+decision is consequential, ask the user before deciding whether to follow
+Lynx's behavior or the W3C spec for it (see `AGENTS.md`'s standards policy).
+
 ## Reference repos
 
 Absolute paths are defined once in `AGENTS.md` (shorthand: `lynx/`, `lynx-stack/`, `Paws/`).

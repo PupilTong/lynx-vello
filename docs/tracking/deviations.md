@@ -47,6 +47,22 @@ consequential choice about whether to follow the spec or the quirk.
   `LinearLayout`/`RelativeLayout`-derived) with no CSS equivalent at all;
   not a spec violation, just extensions to implement faithfully as their
   own algorithms (not flex polyfills, unlike how `web-core` does it).
+- **`position: fixed` containing block** — in every mode Lynx supports, a
+  fixed element's containing block is unconditionally the single page-root
+  element (reached via render-tree reparenting in the legacy path, or a
+  dedicated root pointer + root-only measurement pass in the newer
+  `enable-fixed-new`/`enable-unify-fixed-behavior` paths), with **no
+  exception for ancestors with `transform`/`filter`/`perspective`/
+  `will-change`/`contain`** (confirmed absent — no `transform` reference
+  exists anywhere in `core/renderer/starlight/layout/`, and Lynx has no
+  `contain` property at all) and no component-boundary-scoped containing
+  block either. **Decision: implement the real CSS algorithm** — viewport
+  by default, re-anchored to the nearest qualifying ancestor when one
+  exists — not Lynx's unconditional escape-to-root. (Scroll-offset
+  exclusion, on the other hand, is achieved structurally — the fixed
+  element's native view is simply never mounted inside any scrollable
+  ancestor — and that part already matches the *observable* CSS behavior of
+  staying put while scrolling, so no decision is needed there.)
 
 ## CSS visual/paint & animation (see [css-visual.md](css-visual.md), [css-animation.md](css-animation.md))
 

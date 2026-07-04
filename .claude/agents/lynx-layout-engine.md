@@ -15,14 +15,30 @@ nothing exists here yet, this agent is set up ahead of that work starting.
 **Read `AGENTS.md` first**, then `docs/tracking/css-layout.md` (the primary
 spec for this subsystem) and `docs/tracking/deviations.md`.
 
-## The one deviation you must get right from day one
+## Deviations you must get right from day one
 
 Lynx's `z-index`/stacking implementation does **not** follow the CSS
-stacking-context algorithm. Per the project's W3C-first policy, implement the
+stacking-context algorithm. Per the project's standards policy, implement the
 real CSS stacking-context algorithm (stacking contexts formed by
 `position`+`z-index`, `opacity<1`, `transform`, etc., painted back-to-front
 within each context) instead of replicating Lynx's quirk. Don't reverse-engineer
 the quirky behavior from the C++ engine for this one property.
+
+`position: fixed` is the second one. In every mode Lynx supports (legacy and
+both newer `enable-fixed-new`/`enable-unify-fixed-behavior` paths), a fixed
+element's containing block is unconditionally the single page-root element
+— reached either by reparenting the element under root in the render tree
+(legacy), or via a dedicated root pointer plus a root-only measurement pass
+(`LayoutObject::GetRoot()`, `LayoutAlgorithm::InitializeFixedNode`). There is
+**no exception anywhere for ancestors with `transform`/`filter`/`perspective`/
+`will-change`/`contain`** — confirmed absent (no `transform` reference exists
+anywhere in `core/renderer/starlight/layout/`, and Lynx has no `contain`
+property at all) — properties that per CSS establish a *new* containing
+block for fixed descendants instead of the viewport. There's also no
+component-boundary-scoped containing block: fixed is always page-root-relative
+regardless of `<component>` nesting. Implement the real W3C algorithm:
+viewport-equivalent containing block by default, re-anchored to the nearest
+qualifying ancestor when one exists.
 
 ## Reference repos
 

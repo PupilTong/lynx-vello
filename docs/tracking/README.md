@@ -29,7 +29,7 @@ Most files use a table with these columns:
 | Description | What it does, in Lynx today |
 | Tier | `Core` (must-have for basic ReactLynx apps to render/work), `Extended` (common but not universal), `Rare` (long-tail, defer) |
 | W3C-compliant? | `Yes` / `No` / `Partial` — whether Lynx's behavior matches the relevant web standard |
-| Deviation & what to do instead | Only filled when not compliant — the actual W3C-correct behavior to implement instead (see the [standards policy](../../AGENTS.md#standards-policy-w3c-first-lynx-behavior-second)) |
+| Deviation & what to do instead | Only filled when not compliant — the actual W3C-correct behavior to implement instead (see the [standards policy](../../AGENTS.md#standards-policy)) |
 | Source refs | File paths into the local `lynx`/`lynx-stack`/`Paws` checkouts, prefixed `lynx/`, `lynx-stack/`, or `Paws/` (the last only on implementation-pattern rows, never as a behavior-spec source) |
 
 ## Index
