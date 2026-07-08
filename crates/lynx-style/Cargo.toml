@@ -1,0 +1,22 @@
+[package]
+name = "lynx-style"
+description = "CSS style engine for the Lynx web-bundle runtime: drives the vendored stylo fork's cascade over lynx-dom to produce per-element computed styles (rpx/ppx/sp units and display:linear included)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lynx-dom = { workspace = true }
+
+stylo = { workspace = true }
+stylo_traits = { workspace = true }
+selectors = { workspace = true }
+app_units = { workspace = true }
+cssparser = "0.37"
+euclid = { workspace = true }
+url = { workspace = true }
+
+[lints]
+workspace = true

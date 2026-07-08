@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# `vendor/stylo` is the Lynx-patched stylo fork, itself a Cargo workspace. Our
+# crates consume it via path dependencies, but it must stay its *own* workspace
+# so its members' `workspace = true` deps (e.g. `to_shmem`) inherit from
+# `vendor/stylo/Cargo.toml`, not from here.
+exclude = ["vendor/stylo"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,15 +16,39 @@ rust-version = "1.95"
 
 [workspace.dependencies]
 # Intra-workspace crates
+lynx-dom = { path = "crates/lynx-dom" }
+lynx-style = { path = "crates/lynx-style" }
 lynx-template-decoder = { path = "crates/lynx-template-decoder" }
 
+# The Lynx-patched stylo fork (git submodule; see AGENTS.md dependency
+# policy). The `lynx` branch carries the Lynx patch series (rpx/ppx/sp
+# units, display:linear|relative, linear-*/relative-*/-x-* longhands) and
+# is rebased onto upstream stylo releases.
+stylo = { path = "vendor/stylo/style", package = "stylo" }
+stylo_atoms = { path = "vendor/stylo/stylo_atoms" }
+stylo_dom = { path = "vendor/stylo/stylo_dom" }
+stylo_traits = { path = "vendor/stylo/style_traits", package = "stylo_traits" }
+selectors = { path = "vendor/stylo/selectors" }
+servo_arc = { path = "vendor/stylo/servo_arc" }
+
 # Third-party
+#
+# `app_units`, `atomic_refcell`, `euclid`, and `url` are pinned to the same
+# major/minor the vendored stylo fork depends on (`vendor/stylo/style/Cargo.toml`)
+# so Cargo unifies them to a single version and the stylo trait signatures line
+# up type-for-type (no duplicate `euclid`/`app_units` in the graph).
+app_units = "0.7"
+atomic_refcell = "0.1"
 bytecheck = "0.6"
 divan = { package = "codspeed-divan-compat", version = "5" }
+euclid = "0.22"
 rkyv = { version = "0.7", features = ["validation"] }
+rustc-hash = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+smallvec = "1"
 thiserror = "2"
+url = "2"
 
 [workspace.lints.rust]
 unsafe_code = "warn"
