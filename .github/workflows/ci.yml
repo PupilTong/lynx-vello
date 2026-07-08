@@ -14,6 +14,9 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # vendor/stylo (the Lynx-patched stylo fork) is a submodule.
+          submodules: recursive
 
       # Installs the nightly toolchain + components pinned in rust-toolchain.toml.
       - name: Install pinned toolchain
