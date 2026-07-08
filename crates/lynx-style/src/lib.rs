@@ -87,8 +87,14 @@ impl std::fmt::Debug for StyleEngine {
         // `Stylist` isn't `Debug`; surface the parts that are.
         f.debug_struct("StyleEngine")
             .field("viewport", &self.stylist.device().viewport_size())
-            .field("screen_width", &self.stylist.device().screen_width())
-            .field("font_scale", &self.stylist.device().font_scale())
+            .field(
+                "screen_width",
+                &stylo::values::specified::lynx_units::lynx_screen_width_px(),
+            )
+            .field(
+                "font_scale",
+                &stylo::values::specified::lynx_units::lynx_font_scale(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -285,7 +291,13 @@ impl StyleEngine {
     }
 
     /// Update the Lynx metric bases (`ppx` DPR, `rpx` screen width, `sp` font
-    /// scale) on the [`Device`].
+    /// scale).
+    ///
+    /// The Device keeps its own DPR (for standard CSS resolution behavior);
+    /// the Lynx units read the process-global metrics in stylo's
+    /// `values::specified::lynx_units` — they are plain length units, so the
+    /// servo [`Device`] does not know about them. Both are updated here, then
+    /// the stylist is refreshed so the next resolve sees the new bases.
     ///
     /// [`Device`]: stylo::device::Device
     pub fn set_screen_metrics(
@@ -294,10 +306,14 @@ impl StyleEngine {
         screen_width: f32,
         font_scale: f32,
     ) {
-        let device = self.stylist.device_mut();
-        device.set_device_pixel_ratio(euclid::Scale::new(device_pixel_ratio));
-        device.set_screen_width(screen_width);
-        device.set_font_scale(font_scale);
+        self.stylist
+            .device_mut()
+            .set_device_pixel_ratio(euclid::Scale::new(device_pixel_ratio));
+        stylo::values::specified::lynx_units::set_lynx_unit_metrics(
+            screen_width,
+            device_pixel_ratio,
+            font_scale,
+        );
         self.refresh_device();
     }
 

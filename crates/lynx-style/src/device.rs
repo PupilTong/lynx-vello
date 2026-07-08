@@ -66,7 +66,16 @@ pub(crate) fn build_device(metrics: EngineMetrics) -> Device {
     );
     let device_pixel_ratio = Scale::<f32, CSSPixel, DevicePixel>::new(metrics.device_pixel_ratio);
 
-    let mut device = Device::new(
+    // rpx/ppx/sp resolve against these process-global metrics, not the Device
+    // (see `vendor/stylo` `values/specified/lynx_units.rs`): they are plain
+    // length units, set at engine init and on metric change (+ restyle).
+    stylo::values::specified::lynx_units::set_lynx_unit_metrics(
+        metrics.screen_width,
+        metrics.device_pixel_ratio,
+        metrics.font_scale,
+    );
+
+    Device::new(
         MediaType::screen(),
         QuirksMode::NoQuirks,
         viewport,
@@ -77,11 +86,7 @@ pub(crate) fn build_device(metrics: EngineMetrics) -> Device {
         PrefersColorScheme::Light,
         PointerCapabilities::default(),
         PointerCapabilities::default(),
-    );
-    // Lynx units resolve against these (see `vendor/stylo` `device/servo.rs`).
-    device.set_screen_width(metrics.screen_width);
-    device.set_font_scale(metrics.font_scale);
-    device
+    )
 }
 
 /// A minimal [`FontMetricsProvider`]: enough to compute font-relative units and
