@@ -789,18 +789,11 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 name = "lynx-dom"
 version = "0.1.0"
 dependencies = [
- "app_units",
- "atomic_refcell",
- "euclid",
  "rustc-hash",
- "selectors",
- "smallvec",
  "stylo",
+ "stylo-dom",
  "stylo_atoms",
- "stylo_dom",
- "stylo_traits",
  "thiserror",
- "url",
 ]
 
 [[package]]
@@ -1474,6 +1467,23 @@ dependencies = [
  "void",
  "walkdir",
  "web_atoms",
+]
+
+[[package]]
+name = "stylo-dom"
+version = "0.1.0"
+dependencies = [
+ "app_units",
+ "atomic_refcell",
+ "euclid",
+ "rustc-hash",
+ "selectors",
+ "smallvec",
+ "stylo",
+ "stylo_atoms",
+ "stylo_dom",
+ "stylo_traits",
+ "url",
 ]
 
 [[package]]

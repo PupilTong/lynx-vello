@@ -1,9 +1,10 @@
-//! The unified [`Node`] element struct and its event-registration types.
+//! The unified [`Widget`] element struct and its event-registration types.
 
 use std::cell::UnsafeCell;
 use std::fmt;
 
 use atomic_refcell::AtomicRefCell;
+use dom::ElementState;
 use rustc_hash::FxHashMap;
 use selectors::matching::ElementSelectorFlags;
 use smallvec::SmallVec;
@@ -13,10 +14,9 @@ use stylo::properties::{ComputedValues, PropertyDeclarationBlock};
 use stylo::servo_arc::Arc;
 use stylo::shared_lock::Locked;
 use stylo_atoms::Atom;
-use stylo_dom::ElementState;
 
-use crate::arena::ElementId;
-use crate::tag::NodeKind;
+use crate::arena::WidgetId;
+use crate::kind::WidgetKind;
 
 /// Which bind/catch channel an event handler was authored on.
 ///
@@ -50,29 +50,30 @@ pub struct EventReg {
     pub handler: Box<str>,
 }
 
-/// A single element in the document tree.
+/// A single element in the widget tree.
 ///
-/// One struct covers every [`NodeKind`]; `kind` discriminates. Text content is
-/// carried in [`Node::text`] for `raw-text` leaves.
+/// One struct covers every [`WidgetKind`]; `kind` discriminates. Text content is
+/// carried in [`Widget::text`] for `raw-text` leaves.
 ///
 /// # Thread-safety
 ///
-/// A `Node` owns stylo's per-element interior-mutable state — [`stylo_data`]
+/// A `Widget` owns stylo's per-element interior-mutable state — [`stylo_data`]
 /// (an [`UnsafeCell`]) and [`selector_flags`] (an [`AtomicRefCell`]) — so it is
 /// deliberately **not** `Sync` (the `UnsafeCell` makes it so automatically) and
 /// the whole crate assumes a **single-threaded flush**: style resolution and
 /// tree mutation never run concurrently on the same [`Arena`](crate::Arena).
-/// The `stylo_dom` trait impls document this invariant at each `unsafe` site.
+/// The [`traits`](crate::traits) impls document this invariant at each `unsafe`
+/// site.
 ///
-/// [`stylo_data`]: Node::stylo_data
-/// [`selector_flags`]: Node::selector_flags
-pub struct Node {
+/// [`stylo_data`]: Widget::stylo_data
+/// [`selector_flags`]: Widget::selector_flags
+pub struct Widget {
     /// The parent element, or `None` for the root / a detached element.
-    pub parent: Option<ElementId>,
+    pub parent: Option<WidgetId>,
     /// Child elements, in document order.
-    pub children: Vec<ElementId>,
+    pub children: Vec<WidgetId>,
     /// The element kind.
-    pub kind: NodeKind,
+    pub kind: WidgetKind,
     /// The Lynx tag name, interned as a stylo [`LocalName`] atom so
     /// `selectors::Element::has_local_name` is a cheap atom comparison.
     pub tag: LocalName,
@@ -93,8 +94,8 @@ pub struct Node {
     /// `data-*` dataset entries (keys stored without the `data-` prefix).
     pub dataset: FxHashMap<Box<str>, String>,
     /// Active dynamic pseudo-classes (`:hover` / `:active` / `:focus`) as stylo
-    /// state bits. Written through the public
-    /// [`set_pseudo_state`](crate::Document::set_pseudo_state) API.
+    /// state bits. Written through the `WidgetTree::set_pseudo_state` PAPI in
+    /// the `lynx-dom` crate.
     pub element_state: ElementState,
 
     /// The element's parsed inline style block (Lynx's `style` attribute /
@@ -108,7 +109,7 @@ pub struct Node {
     pub computed: Option<Arc<ComputedValues>>,
 
     /// stylo's per-element style data (`ElementData`), created lazily via
-    /// `TElement::ensure_data`. Only touched through the `stylo_dom` trait
+    /// `TElement::ensure_data`. Only touched through the [`traits`](crate::traits)
     /// impls under the single-threaded-flush invariant.
     pub stylo_data: UnsafeCell<Option<ElementDataWrapper>>,
 
@@ -128,13 +129,13 @@ pub struct Node {
     pub events: SmallVec<[EventReg; 2]>,
 }
 
-impl Node {
-    /// Create a detached node of the given kind and tag.
+impl Widget {
+    /// Create a detached widget of the given kind and tag.
     ///
     /// `unique_id` is left `0` until the [`Arena`](crate::Arena) assigns it on
     /// insertion.
     #[must_use]
-    pub fn new(kind: NodeKind, tag: &str) -> Self {
+    pub fn new(kind: WidgetKind, tag: &str) -> Self {
         Self {
             parent: None,
             children: Vec::new(),
@@ -171,12 +172,12 @@ impl Node {
     }
 }
 
-impl fmt::Debug for Node {
+impl fmt::Debug for Widget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // `stylo_data` (an `UnsafeCell`) is deliberately omitted: it is not
         // `Debug`, and reading it would need the single-threaded-flush
         // invariant we cannot assert from here.
-        f.debug_struct("Node")
+        f.debug_struct("Widget")
             .field("kind", &self.kind)
             .field("tag", &self.tag_str())
             .field("unique_id", &self.unique_id)

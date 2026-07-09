@@ -1,11 +1,11 @@
-//! [`NodeInfo`] + [`TNode`] for [`ElemRef`].
+//! [`NodeInfo`] + [`TNode`] for [`WidgetRef`].
 
 use stylo::dom::{NodeInfo, OpaqueNode, TNode};
 
-use crate::arena::ElemRef;
-use crate::node::Node;
+use crate::arena::WidgetRef;
+use crate::widget::Widget;
 
-impl NodeInfo for ElemRef<'_> {
+impl NodeInfo for WidgetRef<'_> {
     fn is_element(&self) -> bool {
         // Every Lynx node — including `<raw-text>` — is an element with a tag.
         true
@@ -16,29 +16,29 @@ impl NodeInfo for ElemRef<'_> {
     }
 }
 
-impl<'a> TNode for ElemRef<'a> {
-    type ConcreteElement = ElemRef<'a>;
-    type ConcreteDocument = ElemRef<'a>;
-    type ConcreteShadowRoot = ElemRef<'a>;
+impl<'a> TNode for WidgetRef<'a> {
+    type ConcreteElement = WidgetRef<'a>;
+    type ConcreteDocument = WidgetRef<'a>;
+    type ConcreteShadowRoot = WidgetRef<'a>;
 
     fn parent_node(&self) -> Option<Self> {
         self.parent()
     }
 
     fn first_child(&self) -> Option<Self> {
-        ElemRef::first_child(*self)
+        WidgetRef::first_child(*self)
     }
 
     fn last_child(&self) -> Option<Self> {
-        ElemRef::last_child(*self)
+        WidgetRef::last_child(*self)
     }
 
     fn prev_sibling(&self) -> Option<Self> {
-        ElemRef::prev_sibling(*self)
+        WidgetRef::prev_sibling(*self)
     }
 
     fn next_sibling(&self) -> Option<Self> {
-        ElemRef::next_sibling(*self)
+        WidgetRef::next_sibling(*self)
     }
 
     fn owner_doc(&self) -> Self::ConcreteDocument {
@@ -71,7 +71,7 @@ impl<'a> TNode for ElemRef<'a> {
     }
 
     fn opaque(&self) -> OpaqueNode {
-        OpaqueNode(std::ptr::from_ref::<Node>(self.node()) as usize)
+        OpaqueNode(std::ptr::from_ref::<Widget>(self.widget()) as usize)
     }
 
     fn debug_id(self) -> usize {

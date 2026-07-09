@@ -4,9 +4,9 @@
 ///
 /// `NoneElement` is Lynx's `<none>` element — spelled that way (rather than
 /// `None`) to avoid clashing with `Option::None` at call sites that store a
-/// `NodeKind` inside an `Option`.
+/// `WidgetKind` inside an `Option`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum NodeKind {
+pub enum WidgetKind {
     /// `<page>` — the root element.
     Page,
     /// `<view>` — the generic box container.
@@ -33,8 +33,8 @@ pub enum NodeKind {
     Unknown,
 }
 
-impl NodeKind {
-    /// Classify a Lynx tag name. Unrecognised tags map to [`NodeKind::Unknown`].
+impl WidgetKind {
+    /// Classify a Lynx tag name. Unrecognised tags map to [`WidgetKind::Unknown`].
     #[must_use]
     pub fn from_tag(tag: &str) -> Self {
         match tag {
@@ -55,8 +55,8 @@ impl NodeKind {
 
     /// The canonical Lynx tag name for this kind.
     ///
-    /// [`NodeKind::Unknown`] has no canonical tag (the real tag string lives in
-    /// [`Node::tag`](crate::Node::tag)); it reports `"unknown"`.
+    /// [`WidgetKind::Unknown`] has no canonical tag (the real tag string lives in
+    /// [`Widget::tag`](crate::Widget::tag)); it reports `"unknown"`.
     #[must_use]
     pub const fn tag_name(self) -> &'static str {
         match self {

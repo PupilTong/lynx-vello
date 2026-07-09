@@ -19,14 +19,20 @@ rust-version = "1.95"
 lynx-dom = { path = "crates/lynx-dom" }
 lynx-style = { path = "crates/lynx-style" }
 lynx-template-decoder = { path = "crates/lynx-template-decoder" }
+stylo-dom = { path = "crates/stylo-dom" }
 
 # The Lynx-patched stylo fork (git submodule; see AGENTS.md dependency
 # policy). The `lynx` branch carries the Lynx patch series (rpx/ppx/sp
 # units, display:linear|relative, linear-*/relative-*/-x-* longhands) and
 # is rebased onto upstream stylo releases.
+#
+# The vendored servo package is itself named `stylo_dom`; that name is taken
+# here by our `crates/stylo-dom` (which re-exports `ElementState`), so the
+# vendored crate is aliased `dom` — the same rename `vendor/stylo/style`'s own
+# Cargo.toml uses. Only `crates/stylo-dom` depends on it directly.
 stylo = { path = "vendor/stylo/style", package = "stylo" }
 stylo_atoms = { path = "vendor/stylo/stylo_atoms" }
-stylo_dom = { path = "vendor/stylo/stylo_dom" }
+dom = { path = "vendor/stylo/stylo_dom", package = "stylo_dom" }
 stylo_traits = { path = "vendor/stylo/style_traits", package = "stylo_traits" }
 selectors = { path = "vendor/stylo/selectors" }
 servo_arc = { path = "vendor/stylo/servo_arc" }

@@ -1,6 +1,6 @@
 [package]
 name = "lynx-dom"
-description = "Native Rust element/DOM layer for the Lynx web-bundle runtime: a generational-arena document tree plus the snake_case Element PAPI surface that the lynx-style crate drives stylo over"
+description = "Widget Element-PAPI layer for the Lynx web-bundle runtime: the snake_case Element PAPI surface (WidgetTree) that validates opcode semantics and drives the stylo-dom crate's tree + inline-style primitives"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,23 +8,18 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# The stylo-integration DOM machinery (Widget arena, tree/inline primitives,
+# stylo element-trait impls). Its vocabulary is re-exported from this crate.
+stylo-dom = { workspace = true }
+
 rustc-hash = { workspace = true }
-smallvec = { workspace = true }
 thiserror = { workspace = true }
 
-# stylo integration: the node struct owns stylo's interior-mutable per-element
-# state (ElementData/selector flags) and the `stylo_dom` module implements
-# stylo's element traits (`TNode`/`TElement`/`TDocument`/`selectors::Element`)
-# on `ElemRef`.
+# The PAPI layer still names a few stylo types directly: computed-style
+# write-back (`Arc<ComputedValues>`), the shared lock / base URL it forwards to
+# the arena, and interned class/id atoms.
 stylo = { workspace = true }
 stylo_atoms = { workspace = true }
-stylo_dom = { workspace = true }
-stylo_traits = { workspace = true }
-selectors = { workspace = true }
-app_units = { workspace = true }
-atomic_refcell = { workspace = true }
-euclid = { workspace = true }
-url = { workspace = true }
 
 [lints]
 workspace = true

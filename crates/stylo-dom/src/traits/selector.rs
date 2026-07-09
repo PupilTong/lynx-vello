@@ -1,9 +1,9 @@
-//! [`selectors::Element`] for [`ElemRef`].
+//! [`selectors::Element`] for [`WidgetRef`].
 //!
 //! id/class matching is **case-sensitive** (Lynx authors selectors that way);
 //! `:hover`/`:active`/`:focus` are matched from the element's
-//! [`ElementState`](stylo_dom::ElementState); attribute matching covers the
-//! node's real attributes plus the synthetic `l-css-id` (see
+//! [`ElementState`](crate::ElementState); attribute matching covers the
+//! element's real attributes plus the synthetic `l-css-id` (see
 //! [`TElement::get_attr`](stylo::dom::TElement::get_attr)).
 
 use selectors::attr::{AttrSelectorOperation, CaseSensitivity, NamespaceConstraint};
@@ -15,14 +15,14 @@ use stylo::selector_parser::{NonTSPseudoClass, PseudoElement, SelectorImpl};
 use stylo::values::{AtomIdent, AtomString};
 use stylo::{CaseSensitivityExt, LocalName, Namespace};
 
-use crate::arena::ElemRef;
-use crate::tag::NodeKind;
+use crate::arena::WidgetRef;
+use crate::kind::WidgetKind;
 
-impl Element for ElemRef<'_> {
+impl Element for WidgetRef<'_> {
     type Impl = SelectorImpl;
 
     fn opaque(&self) -> OpaqueElement {
-        OpaqueElement::new(self.node())
+        OpaqueElement::new(self.widget())
     }
 
     fn parent_element(&self) -> Option<Self> {
@@ -62,7 +62,7 @@ impl Element for ElemRef<'_> {
         &self,
         local_name: &<Self::Impl as selectors::SelectorImpl>::BorrowedLocalName,
     ) -> bool {
-        self.node().tag.0 == *local_name
+        self.widget().tag.0 == *local_name
     }
 
     fn has_namespace(
@@ -74,7 +74,7 @@ impl Element for ElemRef<'_> {
     }
 
     fn is_same_type(&self, other: &Self) -> bool {
-        self.node().tag == other.node().tag
+        self.widget().tag == other.widget().tag
     }
 
     fn attr_matches(
@@ -85,9 +85,9 @@ impl Element for ElemRef<'_> {
     ) -> bool {
         let name: &str = local_name.0.as_ref();
         if name == "l-css-id" {
-            return operation.eval_str(&self.node().css_id.to_string());
+            return operation.eval_str(&self.widget().css_id.to_string());
         }
-        if let Some(value) = self.node().attrs.get(name) {
+        if let Some(value) = self.widget().attrs.get(name) {
             return operation.eval_str(value);
         }
         // web-core reflects dataset entries as `data-*` attributes (DOM
@@ -97,7 +97,7 @@ impl Element for ElemRef<'_> {
         // turns out to emit camelCase dataset keys.
         if let Some(key) = name.strip_prefix("data-") {
             return self
-                .node()
+                .widget()
                 .dataset
                 .get(key)
                 .is_some_and(|value| operation.eval_str(value));
@@ -114,7 +114,7 @@ impl Element for ElemRef<'_> {
         // Every other non-tree-structural pseudo-class is unsupported → false.
         match pc {
             NonTSPseudoClass::Hover | NonTSPseudoClass::Active | NonTSPseudoClass::Focus => {
-                self.node().element_state.contains(pc.state_flag())
+                self.widget().element_state.contains(pc.state_flag())
             }
             _ => false,
         }
@@ -134,14 +134,14 @@ impl Element for ElemRef<'_> {
         // its parent.
         let self_flags = flags.for_self();
         if !self_flags.is_empty() {
-            self.node().selector_flags.borrow_mut().insert(self_flags);
+            self.widget().selector_flags.borrow_mut().insert(self_flags);
         }
         let parent_flags = flags.for_parent();
         if !parent_flags.is_empty()
             && let Some(parent) = self.parent()
         {
             parent
-                .node()
+                .widget()
                 .selector_flags
                 .borrow_mut()
                 .insert(parent_flags);
@@ -157,14 +157,14 @@ impl Element for ElemRef<'_> {
     }
 
     fn has_id(&self, id: &AtomIdent, case_sensitivity: CaseSensitivity) -> bool {
-        self.node()
+        self.widget()
             .id_attr
             .as_ref()
             .is_some_and(|my_id| case_sensitivity.eq_atom(my_id, id))
     }
 
     fn has_class(&self, name: &AtomIdent, case_sensitivity: CaseSensitivity) -> bool {
-        self.node()
+        self.widget()
             .classes
             .iter()
             .any(|class| case_sensitivity.eq_atom(class, name))
@@ -185,14 +185,14 @@ impl Element for ElemRef<'_> {
     fn is_empty(&self) -> bool {
         // Non-empty if it has any child element, or a `<raw-text>` child with
         // non-empty text content.
-        self.children().next().is_none() && self.node().text.as_ref().is_none_or(String::is_empty)
+        self.children().next().is_none() && self.widget().text.as_ref().is_none_or(String::is_empty)
     }
 
     fn is_root(&self) -> bool {
         // `:root` is exactly the `<page>` element (web-core rewrites `:root`
         // to the page part). Checking the kind — not parentlessness — keeps a
         // detached subtree's root from matching `:root` during resolve.
-        self.node().kind == NodeKind::Page && self.parent().is_none()
+        self.widget().kind == WidgetKind::Page && self.parent().is_none()
     }
 
     fn add_element_unique_hashes(&self, filter: &mut BloomFilter) -> bool {

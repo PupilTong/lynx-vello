@@ -1,4 +1,4 @@
-//! [`TElement`] for [`ElemRef`].
+//! [`TElement`] for [`WidgetRef`].
 //!
 //! # Safety
 //!
@@ -7,14 +7,15 @@
 //! state stylo mandates ([`ensure_data`](TElement::ensure_data),
 //! [`clear_data`](TElement::clear_data), `borrow_data`, `mutate_data`). Each
 //! `unsafe` access relies on the crate-wide **single-threaded-flush**
-//! invariant: an element's [`stylo_data`](crate::Node::stylo_data) is only ever
-//! touched while the caller holds exclusive access to the tree, so no aliasing
-//! or data race is possible.
+//! invariant: an element's [`stylo_data`](crate::Widget::stylo_data) is only
+//! ever touched while the caller holds exclusive access to the tree, so no
+//! aliasing or data race is possible.
 #![allow(unsafe_code)]
 
 use std::sync::OnceLock;
 
 use app_units::Au;
+use dom::ElementState;
 use euclid::default::Size2D;
 use selectors::matching::{ElementSelectorFlags, VisitedHandlingMode};
 use selectors::sink::Push;
@@ -30,27 +31,26 @@ use stylo::values::AtomIdent;
 use stylo::values::computed::Display;
 use stylo::{LocalName, Namespace};
 use stylo_atoms::Atom;
-use stylo_dom::ElementState;
 
-use crate::arena::{Arena, ElemRef, ElementId};
+use crate::arena::{Arena, WidgetId, WidgetRef};
 
 /// The children iterator stylo's restyle traversal walks. Skips over any child
 /// whose handle no longer resolves (defensive; live trees never hit that).
 #[derive(Debug)]
 pub struct ChildrenIter<'a> {
     arena: &'a Arena,
-    children: &'a [ElementId],
+    children: &'a [WidgetId],
     index: usize,
 }
 
 impl<'a> Iterator for ChildrenIter<'a> {
-    type Item = ElemRef<'a>;
+    type Item = WidgetRef<'a>;
 
-    fn next(&mut self) -> Option<ElemRef<'a>> {
+    fn next(&mut self) -> Option<WidgetRef<'a>> {
         while self.index < self.children.len() {
             let id = self.children[self.index];
             self.index += 1;
-            if let Some(elem) = self.arena.elem_ref(id) {
+            if let Some(elem) = self.arena.widget_ref(id) {
                 return Some(elem);
             }
         }
@@ -65,8 +65,8 @@ fn empty_namespace() -> &'static <SelectorImpl as selectors::SelectorImpl>::Borr
     &EMPTY.get_or_init(Namespace::default).0
 }
 
-impl<'a> TElement for ElemRef<'a> {
-    type ConcreteNode = ElemRef<'a>;
+impl<'a> TElement for WidgetRef<'a> {
+    type ConcreteNode = WidgetRef<'a>;
     type TraversalChildrenIterator = ChildrenIter<'a>;
 
     fn as_node(&self) -> Self::ConcreteNode {
@@ -76,7 +76,7 @@ impl<'a> TElement for ElemRef<'a> {
     fn traversal_children(&self) -> LayoutIterator<Self::TraversalChildrenIterator> {
         LayoutIterator(ChildrenIter {
             arena: self.arena,
-            children: &self.node().children,
+            children: &self.widget().children,
             index: 0,
         })
     }
@@ -94,7 +94,7 @@ impl<'a> TElement for ElemRef<'a> {
     }
 
     fn style_attribute(&self) -> Option<ArcBorrow<'_, Locked<PropertyDeclarationBlock>>> {
-        self.node().inline_block.as_ref().map(Arc::borrow_arc)
+        self.widget().inline_block.as_ref().map(Arc::borrow_arc)
     }
 
     fn animation_rule(
@@ -112,7 +112,7 @@ impl<'a> TElement for ElemRef<'a> {
     }
 
     fn state(&self) -> ElementState {
-        self.node().element_state
+        self.widget().element_state
     }
 
     fn has_part_attr(&self) -> bool {
@@ -125,14 +125,14 @@ impl<'a> TElement for ElemRef<'a> {
 
     fn id(&self) -> Option<&Atom> {
         // In the servo build stylo's `WeakAtom` is `stylo_atoms::Atom`.
-        self.node().id_attr.as_ref()
+        self.widget().id_attr.as_ref()
     }
 
     fn each_class<F>(&self, mut callback: F)
     where
         F: FnMut(&AtomIdent),
     {
-        for class in &self.node().classes {
+        for class in &self.widget().classes {
             callback(AtomIdent::cast(class));
         }
     }
@@ -147,12 +147,12 @@ impl<'a> TElement for ElemRef<'a> {
     where
         F: FnMut(&LocalName),
     {
-        for name in self.node().attrs.keys() {
+        for name in self.widget().attrs.keys() {
             callback(&LocalName::from(name.as_ref()));
         }
         // Dataset entries are reflected as `data-*` attributes (web-core
         // parity; see `attr_matches`).
-        for key in self.node().dataset.keys() {
+        for key in self.widget().dataset.keys() {
             callback(&LocalName::from(format!("data-{key}").as_str()));
         }
         // Expose the synthetic `l-css-id` attribute (see `attr_matches`) so the
@@ -161,7 +161,7 @@ impl<'a> TElement for ElemRef<'a> {
     }
 
     fn has_dirty_descendants(&self) -> bool {
-        self.node().dirty_descendants
+        self.widget().dirty_descendants
     }
 
     fn has_snapshot(&self) -> bool {
@@ -177,8 +177,8 @@ impl<'a> TElement for ElemRef<'a> {
 
     unsafe fn set_dirty_descendants(&self) {
         // No-op: the flush driver tracks descendant dirtiness itself
-        // (`Node::dirty_descendants`); stylo's own traversal bits are unused in
-        // this milestone.
+        // (`Widget::dirty_descendants`); stylo's own traversal bits are unused
+        // in this milestone.
     }
 
     unsafe fn unset_dirty_descendants(&self) {}
@@ -192,7 +192,7 @@ impl<'a> TElement for ElemRef<'a> {
     unsafe fn ensure_data(&self) -> ElementDataMut<'_> {
         // SAFETY: single-threaded flush — the caller holds exclusive access to
         // this element, so creating/borrowing its `ElementData` cannot race.
-        let slot = unsafe { &mut *self.node().stylo_data.get() };
+        let slot = unsafe { &mut *self.widget().stylo_data.get() };
         slot.get_or_insert_with(ElementDataWrapper::default)
             .borrow_mut()
     }
@@ -201,22 +201,22 @@ impl<'a> TElement for ElemRef<'a> {
         // SAFETY: single-threaded flush — exclusive access, no concurrent
         // borrow of this element's stylo state.
         unsafe {
-            *self.node().stylo_data.get() = None;
+            *self.widget().stylo_data.get() = None;
         }
-        *self.node().selector_flags.borrow_mut() = ElementSelectorFlags::empty();
+        *self.widget().selector_flags.borrow_mut() = ElementSelectorFlags::empty();
     }
 
     fn has_data(&self) -> bool {
         // SAFETY: reads only the `Option` discriminant; no concurrent mutation
         // under the single-threaded-flush invariant.
-        unsafe { (*self.node().stylo_data.get()).is_some() }
+        unsafe { (*self.widget().stylo_data.get()).is_some() }
     }
 
     fn borrow_data(&self) -> Option<ElementDataRef<'_>> {
         // SAFETY: `ElementDataWrapper` tracks borrows internally; single-threaded
         // flush rules out a concurrent mutable borrow.
         unsafe {
-            (*self.node().stylo_data.get())
+            (*self.widget().stylo_data.get())
                 .as_ref()
                 .map(ElementDataWrapper::borrow)
         }
@@ -226,7 +226,7 @@ impl<'a> TElement for ElemRef<'a> {
         // SAFETY: as `borrow_data`, plus exclusive access under single-threaded
         // flush.
         unsafe {
-            (*self.node().stylo_data.get())
+            (*self.widget().stylo_data.get())
                 .as_ref()
                 .map(ElementDataWrapper::borrow_mut)
         }
@@ -252,11 +252,11 @@ impl<'a> TElement for ElemRef<'a> {
         false
     }
 
-    fn shadow_root(&self) -> Option<ElemRef<'a>> {
+    fn shadow_root(&self) -> Option<WidgetRef<'a>> {
         None
     }
 
-    fn containing_shadow(&self) -> Option<ElemRef<'a>> {
+    fn containing_shadow(&self) -> Option<WidgetRef<'a>> {
         None
     }
 
@@ -282,7 +282,7 @@ impl<'a> TElement for ElemRef<'a> {
     }
 
     fn local_name(&self) -> &<SelectorImpl as selectors::SelectorImpl>::BorrowedLocalName {
-        &self.node().tag.0
+        &self.widget().tag.0
     }
 
     fn namespace(&self) -> &<SelectorImpl as selectors::SelectorImpl>::BorrowedNamespaceUrl {
@@ -294,7 +294,7 @@ impl<'a> TElement for ElemRef<'a> {
     }
 
     fn has_selector_flags(&self, flags: ElementSelectorFlags) -> bool {
-        self.node().selector_flags.borrow().contains(flags)
+        self.widget().selector_flags.borrow().contains(flags)
     }
 
     fn relative_selector_search_direction(&self) -> ElementSelectorFlags {
@@ -304,13 +304,13 @@ impl<'a> TElement for ElemRef<'a> {
     fn get_attr(&self, attr: &LocalName, _namespace: &Namespace) -> Option<String> {
         let name: &str = attr.0.as_ref();
         if name == "l-css-id" {
-            return Some(self.node().css_id.to_string());
+            return Some(self.widget().css_id.to_string());
         }
-        if let Some(value) = self.node().attrs.get(name) {
+        if let Some(value) = self.widget().attrs.get(name) {
             return Some(value.clone());
         }
         // Dataset reflection as `data-*`, matching `attr_matches`.
         name.strip_prefix("data-")
-            .and_then(|key| self.node().dataset.get(key).cloned())
+            .and_then(|key| self.widget().dataset.get(key).cloned())
     }
 }

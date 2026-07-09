@@ -21,7 +21,7 @@ mod device;
 use cssparser::{Parser, ParserInput};
 pub use device::EngineMetrics;
 use device::build_device;
-use lynx_dom::{Document, ElemRef};
+use lynx_dom::{WidgetRef, WidgetTree};
 use selectors::matching::{
     MatchingContext, MatchingForInvalidation, MatchingMode, NeedsSelectorFlags, SelectorCaches,
 };
@@ -116,9 +116,9 @@ impl StyleEngine {
         }
     }
 
-    /// The engine's [`SharedRwLock`]. A [`Document`] must share this lock (via
-    /// [`StyleEngine::new_document`] or [`Document::with_lock`]) for its inline
-    /// style blocks to be readable by the cascade.
+    /// The engine's [`SharedRwLock`]. A [`WidgetTree`] must share this lock (via
+    /// [`StyleEngine::new_widget_tree`] or [`WidgetTree::with_lock`]) for its
+    /// inline style blocks to be readable by the cascade.
     #[must_use]
     pub fn shared_lock(&self) -> &SharedRwLock {
         &self.lock
@@ -130,11 +130,11 @@ impl StyleEngine {
         &self.url_data
     }
 
-    /// Create an empty [`Document`] that shares this engine's lock, so its
+    /// Create an empty [`WidgetTree`] that shares this engine's lock, so its
     /// inline styles parse and cascade against the same [`SharedRwLock`].
     #[must_use]
-    pub fn new_document(&self) -> Document {
-        Document::with_lock(self.lock.clone(), self.url_data.clone())
+    pub fn new_widget_tree(&self) -> WidgetTree {
+        WidgetTree::with_lock(self.lock.clone(), self.url_data.clone())
     }
 
     /// Parse `css` as an author (or UA/user) stylesheet and add it to the
@@ -204,7 +204,7 @@ impl StyleEngine {
         Arc::new(self.lock.wrap(media))
     }
 
-    /// Resolve one element's computed style.
+    /// Resolve one widget's computed style.
     ///
     /// `parent_style` is the parent element's [`ComputedValues`], used for
     /// inheritance; pass `None` at the root (stylo's initial values stand in).
@@ -212,9 +212,9 @@ impl StyleEngine {
     /// [`cascade`] signature. The ancestor bloom filter is deliberately `None`
     /// (see the plan); it is added only if a large-CSS benchmark demands it.
     #[must_use]
-    pub fn resolve_element(
+    pub fn resolve_widget(
         &self,
-        element: ElemRef<'_>,
+        element: WidgetRef<'_>,
         parent_style: Option<&ComputedValues>,
     ) -> Arc<ComputedValues> {
         let guard = self.lock.read();
@@ -263,7 +263,7 @@ impl StyleEngine {
 
         let mut rule_cache_conditions = RuleCacheConditions::default();
         let mut tree_counting_caches = stylo::context::TreeCountingCaches::default();
-        cascade::<ElemRef<'_>>(
+        cascade::<WidgetRef<'_>>(
             &self.stylist,
             None,
             &rule_node,

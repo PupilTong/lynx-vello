@@ -1,8 +1,8 @@
-//! stylo element-trait implementations for [`ElemRef`](crate::ElemRef).
+//! stylo element-trait implementations for [`WidgetRef`](crate::WidgetRef).
 //!
 //! stylo drives selector matching and the cascade over any type implementing
 //! its element traits. This module wires our arena-backed DOM to that model by
-//! implementing, on the `Copy` handle [`ElemRef`](crate::ElemRef):
+//! implementing, on the `Copy` handle [`WidgetRef`](crate::WidgetRef):
 //!
 //! - [`NodeInfo`](stylo::dom::NodeInfo) + [`TNode`](stylo::dom::TNode) ([`node`])
 //! - [`TElement`](stylo::dom::TElement) ([`element`])
@@ -17,8 +17,8 @@
 //! - **Every node is an element.** There is no separate document node: the `<page>` root *is* the
 //!   document root, which is what makes `:root` match it and what
 //!   [`TNode::owner_doc`](stylo::dom::TNode::owner_doc) returns.
-//! - **`:hover`/`:active`/`:focus`** are matched from the node's
-//!   [`ElementState`](stylo_dom::ElementState) (unlike Paws, which stubs them to `false`).
+//! - **`:hover`/`:active`/`:focus`** are matched from the element's
+//!   [`ElementState`](crate::ElementState) (unlike Paws, which stubs them to `false`).
 //! - **`l-css-id`** is exposed as a synthetic attribute (the element's `css_id`) for the future
 //!   scoped-CSS mode.
 //! - **Shadow DOM / pseudo-elements / animations** are stubbed (`None`/`false`) — none exist in the

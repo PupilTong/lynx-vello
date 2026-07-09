@@ -1,0 +1,31 @@
+[package]
+name = "stylo-dom"
+description = "stylo-integration DOM machinery for lynx-vello: the generational Widget arena, tree-mutation + coarse style-invalidation primitives, inline-style parsing, and the stylo element-trait impls the lynx-style cascade runs over"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rustc-hash = { workspace = true }
+smallvec = { workspace = true }
+
+# stylo integration: the Widget struct owns stylo's interior-mutable per-element
+# state (ElementData/selector flags) and the `traits` module implements stylo's
+# element traits (`TNode`/`TElement`/`TDocument`/`selectors::Element`) on
+# `WidgetRef`. The vendored servo package is itself named `stylo_dom`; we depend
+# on it under the `dom` rename (as vendor/stylo/style's own Cargo.toml does) so
+# this crate can take the `stylo_dom` lib name and re-export `ElementState`.
+stylo = { workspace = true }
+stylo_atoms = { workspace = true }
+dom = { workspace = true }
+stylo_traits = { workspace = true }
+selectors = { workspace = true }
+app_units = { workspace = true }
+atomic_refcell = { workspace = true }
+euclid = { workspace = true }
+url = { workspace = true }
+
+[lints]
+workspace = true

@@ -5,15 +5,15 @@
 //! `:focus`.
 //!
 //! [`PseudoState`] is the crate's public API type (it keeps `set_pseudo_state`
-//! free of any stylo type in its signature); internally each [`Node`] stores
-//! the equivalent stylo [`ElementState`](stylo_dom::ElementState) so
+//! free of any stylo type in its signature); internally each [`Widget`] stores
+//! the equivalent stylo [`ElementState`](crate::ElementState) so
 //! `selectors::Element::match_non_ts_pseudo_class` can test it directly against
 //! `NonTSPseudoClass::state_flag()`. [`PseudoState::to_element_state`] is the
 //! single bridge between the two.
 //!
-//! [`Node`]: crate::Node
+//! [`Widget`]: crate::Widget
 
-use stylo_dom::ElementState;
+use dom::ElementState;
 
 /// The set of active dynamic pseudo-classes on an element.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -76,11 +76,12 @@ impl PseudoState {
         }
     }
 
-    /// Map this set to the equivalent stylo [`ElementState`].
+    /// Map this set to the equivalent stylo [`ElementState`](crate::ElementState).
     ///
     /// This is the only place `PseudoState` and stylo's state bits are bridged;
     /// `selectors::Element::match_non_ts_pseudo_class` matches the resulting
-    /// [`ElementState`] against `NonTSPseudoClass::state_flag()`.
+    /// [`ElementState`](crate::ElementState) against
+    /// `NonTSPseudoClass::state_flag()`.
     #[must_use]
     pub fn to_element_state(self) -> ElementState {
         let mut state = ElementState::empty();
@@ -90,7 +91,8 @@ impl PseudoState {
         state
     }
 
-    /// Recover a [`PseudoState`] from a stylo [`ElementState`] (the inverse of
+    /// Recover a [`PseudoState`] from a stylo
+    /// [`ElementState`](crate::ElementState) (the inverse of
     /// [`to_element_state`](Self::to_element_state), keeping only the three bits
     /// Lynx tracks).
     #[must_use]
