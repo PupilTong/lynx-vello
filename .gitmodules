@@ -1,0 +1,4 @@
+[submodule "vendor/stylo"]
+	path = vendor/stylo
+	url = https://github.com/PupilTong/stylo
+	branch = lynx

@@ -127,6 +127,30 @@ consequential choice about whether to follow the spec or the quirk.
 
 ## CSS selectors, cascade & at-rules (see [css-selectors-cascade.md](css-selectors-cascade.md), [css-at-rules.md](css-at-rules.md))
 
+- **Deprecated CSS properties/values are dropped, not implemented** — the
+  lynxjs.org API index is the authority (user decision, 2026-07): the style
+  engine implements only non-deprecated properties and values. Concretely:
+  `linear-orientation`, `linear-gravity`, `linear-layout-gravity`,
+  `linear-cross-gravity` (modern API = standard
+  `justify-content`/`align-items`/`align-self`), `grid-column-span`/
+  `grid-row-span`, and `linear-direction`'s legacy
+  `vertical`/`horizontal(-reverse)` value spellings do not parse. Note that
+  web-core today still *accepts* these from old bundles — bundles authored
+  against deprecated APIs will lose those declarations here. Intentional.
+- **CSS inheritance** — native Lynx gates *all* property inheritance behind
+  `enableCSSInheritance` (default **off**, allowlist when on;
+  [css-text.md](css-text.md) recommends replicating that gate). But the
+  compat target `web-core` **ignores that flag entirely** (zero references
+  in `lynx-stack/packages/web-platform/`): it runs on the browser's
+  always-on W3C inheritance and reproduces the visible Lynx behavior with
+  targeted UA-sheet resets (`x-text { color: initial }` +
+  `x-text > x-text { color: inherit }` in `web-elements`).
+  **Decision (user-confirmed, 2026-07): web-core parity** — lynx-vello uses
+  stylo's standard always-on inheritance plus the replicated UA resets. The
+  native-Lynx gate is documented as a config-gated fallback design
+  (doctored parent `ComputedValues`, allowlist mask) but not implemented.
+  Custom properties inherit unconditionally in both worlds.
+
 - **`:is()`, `:where()`, `:has()`, `:nth-child()` family, `:first-child`/`:last-child`/`:only-child`/`:empty`**
   — all are *parsed* by Lynx's selector grammar but have **no matcher case at
   runtime** (always false). This is a bigger gap than a values mismatch: the

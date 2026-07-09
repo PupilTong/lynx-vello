@@ -1,0 +1,28 @@
+[package]
+name = "lynx-widget"
+description = "Widget Element-PAPI layer for the Lynx web-bundle runtime: the snake_case Element PAPI surface (WidgetTree) over stylo-dom's generic Element<T> core, instantiated with the Lynx-specific WidgetState payload"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The generic, HTML-DOM-subset core (Element<T> arena, tree/inline/dirty
+# primitives, stylo element-trait impls). This crate instantiates it with
+# `WidgetState` and re-exports the result Widget-first.
+stylo-dom = { workspace = true }
+
+rustc-hash = { workspace = true }
+smallvec = { workspace = true }
+thiserror = { workspace = true }
+
+# The PAPI layer still names a few stylo types directly: computed-style
+# write-back (`Arc<ComputedValues>`), the shared lock / base URL it forwards to
+# the arena, interned class/id atoms, and `LocalName` for the ExternalState
+# attribute-name hook.
+stylo = { workspace = true }
+stylo_atoms = { workspace = true }
+
+[lints]
+workspace = true

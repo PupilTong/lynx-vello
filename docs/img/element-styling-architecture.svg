@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 748" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#57606a"/>
+    </marker>
+  </defs>
+  <style>
+    .h1 { font-size: 20px; font-weight: 700; fill: #24292f; }
+    .h2 { font-size: 12px; fill: #57606a; }
+    .bh { font-size: 13px; font-weight: 700; fill: #24292f; }
+    .bs { font-size: 11px; fill: #57606a; }
+    .ln { font-size: 11.5px; fill: #24292f; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .lb { font-size: 11px; fill: #57606a; }
+    .ar { stroke: #57606a; stroke-width: 1.4; fill: none; }
+  </style>
+
+  <rect x="0" y="0" width="1000" height="748" fill="#ffffff"/>
+
+  <text x="40" y="38" class="h1">lynx-vello — element + styling layer</text>
+  <text x="40" y="58" class="h2">architecture v3 · a generic HTML-DOM-subset core (stylo-dom) extended by the Lynx Widget layer (lynx-widget)</text>
+
+  <!-- Row 0: inputs -->
+  <rect x="40" y="84" width="400" height="54" rx="6" fill="#fff8f0" stroke="#d18b47"/>
+  <text x="52" y="104" class="bh">Lynx JS runtime — future crate</text>
+  <text x="52" y="124" class="ln">__CreatePage · __CreateView · __SetClasses · …</text>
+
+  <rect x="560" y="84" width="400" height="54" rx="6" fill="#eceff1" stroke="#78909c"/>
+  <text x="572" y="104" class="bh">ReactLynx .web.bundle → lynx-template-decoder</text>
+  <text x="572" y="124" class="ln">SDRA WROF → StyleInfo · page config (exists)</text>
+
+  <path class="ar" d="M240,138 V172" marker-end="url(#arr)"/>
+  <text x="248" y="160" class="lb">Element PAPI calls</text>
+  <path class="ar" d="M760,138 V172" marker-end="url(#arr)" stroke-dasharray="5 4"/>
+  <text x="768" y="160" class="lb">StyleInfo — M3 (planned)</text>
+
+  <!-- Row 1 left: lynx-widget -->
+  <rect x="40" y="178" width="400" height="184" rx="6" fill="#fff3e0" stroke="#d18b47" stroke-width="1.5"/>
+  <text x="52" y="198" class="bh">crates/lynx-widget</text>
+  <text x="205" y="198" class="bs">— the Widget layer (Lynx vocabulary only)</text>
+  <text x="52" y="222" class="ln">WidgetTree — the Element PAPI surface:</text>
+  <text x="52" y="238" class="ln">  append_element ↔ __AppendElement · insert_before</text>
+  <text x="52" y="254" class="ln">  remove = detach · destroy_element · replace</text>
+  <text x="52" y="270" class="ln">  set_classes/attribute/dataset/events/css_id</text>
+  <text x="52" y="290" class="ln">WidgetState { kind, unique_id, css_id,</text>
+  <text x="52" y="306" class="ln">  dataset, events } : ExternalState</text>
+  <text x="52" y="326" class="ln">Widget = Element&lt;WidgetState&gt; · WidgetRef · WidgetId</text>
+  <text x="52" y="346" class="ln">WidgetError · unique-id minting + index</text>
+
+  <!-- Row 1 right: lynx-style -->
+  <rect x="560" y="178" width="400" height="184" rx="6" fill="#e8f5e9" stroke="#4c8c52" stroke-width="1.5"/>
+  <text x="572" y="198" class="bh">crates/lynx-style</text>
+  <text x="700" y="198" class="bs">— the style engine</text>
+  <text x="572" y="222" class="ln">StyleEngine { Stylist · Device · SharedRwLock }</text>
+  <text x="572" y="238" class="ln">EngineMetrics: viewport · DPR · screen_width(rpx)</text>
+  <text x="572" y="254" class="ln">  · font_scale(sp) — live metric updates</text>
+  <text x="572" y="274" class="ln">resolve_widget: match → rule tree → cascade</text>
+  <text x="572" y="290" class="ln">add_stylesheet — media-capable (@media seam)</text>
+  <text x="572" y="310" class="ln">planned: M3 StyleInfo ingestion · M4 UA sheet</text>
+  <text x="572" y="326" class="ln">  · M6 flush/restyle driver</text>
+  <text x="572" y="346" class="ln">web-core-parity inheritance (always-on W3C)</text>
+
+  <!-- gap arrows row1 -->
+  <path class="ar" d="M446,250 H554" marker-end="url(#arr)" marker-start="url(#arr)"/>
+  <text x="500" y="240" class="lb" text-anchor="middle">shares</text>
+  <text x="500" y="266" class="lb" text-anchor="middle">SharedRwLock</text>
+
+  <!-- Row1 -> Row2 arrows -->
+  <path class="ar" d="M140,362 V406" marker-end="url(#arr)"/>
+  <path class="ar" d="M340,406 V362" marker-end="url(#arr)"/>
+  <text x="158" y="382" class="lb">delegates · T = WidgetState</text>
+  <text x="158" y="400" class="lb">ExternalState hooks ↑</text>
+  <path class="ar" d="M760,362 V406" marker-end="url(#arr)"/>
+  <text x="768" y="388" class="lb">Stylist · cascade · property parsing</text>
+
+  <!-- Row 2 left: stylo-dom -->
+  <rect x="40" y="412" width="400" height="196" rx="6" fill="#e3f2fd" stroke="#4a7ab5" stroke-width="1.5"/>
+  <text x="52" y="432" class="bh">crates/stylo-dom</text>
+  <text x="182" y="432" class="bs">— strict HTML-DOM subset (generic, no Lynx)</text>
+  <text x="52" y="456" class="ln">Element&lt;T&gt; · ElementId · ElementRef&lt;'a,T&gt; · Arena&lt;T&gt;</text>
+  <text x="52" y="476" class="ln">trait ExternalState — embedder hooks into matching:</text>
+  <text x="52" y="492" class="ln">  is_root · extra_attr_value · each_extra_attr_name</text>
+  <text x="52" y="512" class="ln">tree + dirty primitives (coarse invalidation,</text>
+  <text x="52" y="528" class="ln">  :empty + +/~ safe) · inline-style parsing</text>
+  <text x="52" y="548" class="ln">impl TElement · TNode · TDocument</text>
+  <text x="52" y="564" class="ln">  · selectors::Element for ElementRef&lt;'a,T&gt;</text>
+  <text x="52" y="584" class="ln">computed: Arc&lt;ComputedValues&gt; per element</text>
+
+  <!-- Row 2 right: vendor/stylo -->
+  <rect x="560" y="412" width="400" height="196" rx="6" fill="#f3e5f5" stroke="#8e6aa8" stroke-width="1.5"/>
+  <text x="572" y="432" class="bh">vendor/stylo</text>
+  <text x="668" y="432" class="bs">— git submodule (PupilTong/stylo · branch lynx)</text>
+  <text x="572" y="456" class="ln">stylo 0.19 (servo flavor) + 3-commit lynx series:</text>
+  <text x="572" y="476" class="ln">  rpx/ppx/sp units — lynx_units global metrics</text>
+  <text x="572" y="492" class="ln">  display: linear | relative</text>
+  <text x="572" y="508" class="ln">  linear-* / relative-* longhands (non-deprecated)</text>
+  <text x="572" y="532" class="ln">crates: stylo(style) · selectors · stylo_atoms</text>
+  <text x="572" y="548" class="ln">  · stylo_dom (aliased dom) · stylo_traits</text>
+  <text x="572" y="572" class="ln">rebased onto upstream releases; fork tests in CI</text>
+  <text x="572" y="588" class="ln">(19 lynx_* tests)</text>
+
+  <!-- cross elbow: lynx-style <-> stylo-dom -->
+  <path class="ar" d="M446,470 H500 V300 H554" marker-end="url(#arr)" marker-start="url(#arr)"/>
+  <text x="506" y="384" class="lb">TElement</text>
+  <text x="506" y="400" class="lb">match +</text>
+  <text x="506" y="416" class="lb">cascade,</text>
+  <text x="506" y="436" class="lb">writes</text>
+  <text x="506" y="452" class="lb">Computed-</text>
+  <text x="506" y="468" class="lb">Values</text>
+
+  <!-- Row 2 -> Row 3 -->
+  <path class="ar" d="M240,608 V644" marker-end="url(#arr)"/>
+  <path class="ar" d="M760,608 V644" marker-end="url(#arr)"/>
+
+  <!-- Row 3: future consumers -->
+  <rect x="40" y="650" width="920" height="58" rx="6" fill="#fafafa" stroke="#999999" stroke-dasharray="6 4"/>
+  <text x="52" y="672" class="bh">future crates</text>
+  <text x="150" y="672" class="bs">— consume the widget tree + per-element Arc&lt;ComputedValues&gt;</text>
+  <text x="52" y="694" class="ln">lynx-layout (starlight successor) · lynx-text (parley) · lynx-render (vello) · lynx runtime (PAPI JS bindings)</text>
+
+  <text x="960" y="736" class="lb" text-anchor="end">lynx-vello PR #4 · architecture v3 · 2026-07-09</text>
+</svg>

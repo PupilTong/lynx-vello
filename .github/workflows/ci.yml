@@ -14,6 +14,9 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # vendor/stylo (the Lynx-patched stylo fork) is a submodule.
+          submodules: recursive
 
       # Installs the nightly toolchain + components pinned in rust-toolchain.toml.
       - name: Install pinned toolchain
@@ -36,6 +39,15 @@ jobs:
       # `cargo test` run for lib/integration tests).
       - name: Tests + coverage
         run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+
+      # The Lynx patch series in the vendored stylo fork carries its own test
+      # suites; vendor/stylo is excluded from the workspace, so run them
+      # explicitly or rebases regress silently.
+      - name: Stylo fork Lynx tests
+        run: >-
+          cargo test --manifest-path vendor/stylo/Cargo.toml -p stylo
+          --test lynx_lengths --test lynx_display
+          --test lynx_linear_properties --test lynx_relative_properties
 
       - name: Doctests
         run: cargo test --doc
