@@ -1,7 +1,7 @@
 //! `lynx-style` — the CSS style engine of **lynx-vello**.
 //!
 //! This crate drives the vendored, Lynx-patched **stylo** fork's cascade over
-//! the [`lynx-dom`](lynx_dom) element tree to produce per-element
+//! the [`lynx-widget`](lynx_widget) widget tree to produce per-widget
 //! [`ComputedValues`]. It owns the servo [`Device`](stylo::device::Device) (the
 //! Lynx view size + `rpx`/`ppx`/`sp` metric bases), the [`Stylist`], and the
 //! [`SharedRwLock`] that guards every parsed rule and inline block.
@@ -21,7 +21,7 @@ mod device;
 use cssparser::{Parser, ParserInput};
 pub use device::EngineMetrics;
 use device::build_device;
-use lynx_dom::{WidgetRef, WidgetTree};
+use lynx_widget::{WidgetRef, WidgetTree};
 use selectors::matching::{
     MatchingContext, MatchingForInvalidation, MatchingMode, NeedsSelectorFlags, SelectorCaches,
 };

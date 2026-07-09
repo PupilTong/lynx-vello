@@ -1,6 +1,6 @@
 //! Integration tests for the minimal [`StyleEngine`] wiring (M2).
 //!
-//! These build a tiny tree through the `lynx-dom` PAPI, add an author
+//! These build a tiny tree through the `lynx-widget` PAPI, add an author
 //! stylesheet, and assert the resolved [`ComputedValues`] — colours, `rpx`
 //! lengths, inline-vs-class precedence, `display: linear`, the fork's
 //! `linear-weight` longhand, and inheritance.

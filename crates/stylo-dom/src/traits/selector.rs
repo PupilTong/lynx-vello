@@ -1,9 +1,10 @@
-//! [`selectors::Element`] for [`WidgetRef`].
+//! [`selectors::Element`] for [`ElementRef`].
 //!
-//! id/class matching is **case-sensitive** (Lynx authors selectors that way);
-//! `:hover`/`:active`/`:focus` are matched from the element's
-//! [`ElementState`](crate::ElementState); attribute matching covers the
-//! element's real attributes plus the synthetic `l-css-id` (see
+//! id/class matching is **case-sensitive**; `:hover`/`:active`/`:focus` are
+//! matched from the element's [`ElementState`](crate::ElementState); attribute
+//! matching covers the element's real attributes plus whatever synthetic /
+//! reflected attributes the embedder's
+//! [`ExternalState`](crate::ExternalState) hooks serve (see
 //! [`TElement::get_attr`](stylo::dom::TElement::get_attr)).
 
 use selectors::attr::{AttrSelectorOperation, CaseSensitivity, NamespaceConstraint};
@@ -15,14 +16,14 @@ use stylo::selector_parser::{NonTSPseudoClass, PseudoElement, SelectorImpl};
 use stylo::values::{AtomIdent, AtomString};
 use stylo::{CaseSensitivityExt, LocalName, Namespace};
 
-use crate::arena::WidgetRef;
-use crate::kind::WidgetKind;
+use crate::arena::ElementRef;
+use crate::ext::ExternalState;
 
-impl Element for WidgetRef<'_> {
+impl<T: ExternalState> Element for ElementRef<'_, T> {
     type Impl = SelectorImpl;
 
     fn opaque(&self) -> OpaqueElement {
-        OpaqueElement::new(self.widget())
+        OpaqueElement::new(self.element())
     }
 
     fn parent_element(&self) -> Option<Self> {
@@ -62,19 +63,19 @@ impl Element for WidgetRef<'_> {
         &self,
         local_name: &<Self::Impl as selectors::SelectorImpl>::BorrowedLocalName,
     ) -> bool {
-        self.widget().tag.0 == *local_name
+        self.element().tag.0 == *local_name
     }
 
     fn has_namespace(
         &self,
         ns: &<Self::Impl as selectors::SelectorImpl>::BorrowedNamespaceUrl,
     ) -> bool {
-        // Lynx elements are never namespaced: only the empty namespace matches.
+        // Elements are never namespaced here: only the empty namespace matches.
         ns.is_empty()
     }
 
     fn is_same_type(&self, other: &Self) -> bool {
-        self.widget().tag == other.widget().tag
+        self.element().tag == other.element().tag
     }
 
     fn attr_matches(
@@ -84,25 +85,15 @@ impl Element for WidgetRef<'_> {
         operation: &AttrSelectorOperation<&AtomString>,
     ) -> bool {
         let name: &str = local_name.0.as_ref();
-        if name == "l-css-id" {
-            return operation.eval_str(&self.widget().css_id.to_string());
-        }
-        if let Some(value) = self.widget().attrs.get(name) {
+        if let Some(value) = self.element().attrs.get(name) {
             return operation.eval_str(value);
         }
-        // web-core reflects dataset entries as `data-*` attributes (DOM
-        // dataset reflection), so `[data-x]` selectors must see them too.
-        // Keys are matched verbatim after the `data-` prefix; camelCase↔kebab
-        // reflection is revisited with StyleInfo ingestion (M3) if ReactLynx
-        // turns out to emit camelCase dataset keys.
-        if let Some(key) = name.strip_prefix("data-") {
-            return self
-                .widget()
-                .dataset
-                .get(key)
-                .is_some_and(|value| operation.eval_str(value));
-        }
-        false
+        // Synthetic / reflected attributes are the embedder's: consulted only
+        // after the real attrs map misses (see `ExternalState::extra_attr_value`).
+        self.element()
+            .ext
+            .extra_attr_value(name)
+            .is_some_and(|value| operation.eval_str(&value))
     }
 
     fn match_non_ts_pseudo_class(
@@ -110,11 +101,11 @@ impl Element for WidgetRef<'_> {
         pc: &NonTSPseudoClass,
         _context: &mut MatchingContext<Self::Impl>,
     ) -> bool {
-        // Match the dynamic Lynx pseudo-classes against the element's state.
-        // Every other non-tree-structural pseudo-class is unsupported → false.
+        // Match the dynamic pseudo-classes against the element's state. Every
+        // other non-tree-structural pseudo-class is unsupported → false.
         match pc {
             NonTSPseudoClass::Hover | NonTSPseudoClass::Active | NonTSPseudoClass::Focus => {
-                self.widget().element_state.contains(pc.state_flag())
+                self.element().element_state.contains(pc.state_flag())
             }
             _ => false,
         }
@@ -134,14 +125,17 @@ impl Element for WidgetRef<'_> {
         // its parent.
         let self_flags = flags.for_self();
         if !self_flags.is_empty() {
-            self.widget().selector_flags.borrow_mut().insert(self_flags);
+            self.element()
+                .selector_flags
+                .borrow_mut()
+                .insert(self_flags);
         }
         let parent_flags = flags.for_parent();
         if !parent_flags.is_empty()
             && let Some(parent) = self.parent()
         {
             parent
-                .widget()
+                .element()
                 .selector_flags
                 .borrow_mut()
                 .insert(parent_flags);
@@ -157,14 +151,14 @@ impl Element for WidgetRef<'_> {
     }
 
     fn has_id(&self, id: &AtomIdent, case_sensitivity: CaseSensitivity) -> bool {
-        self.widget()
+        self.element()
             .id_attr
             .as_ref()
             .is_some_and(|my_id| case_sensitivity.eq_atom(my_id, id))
     }
 
     fn has_class(&self, name: &AtomIdent, case_sensitivity: CaseSensitivity) -> bool {
-        self.widget()
+        self.element()
             .classes
             .iter()
             .any(|class| case_sensitivity.eq_atom(class, name))
@@ -183,16 +177,19 @@ impl Element for WidgetRef<'_> {
     }
 
     fn is_empty(&self) -> bool {
-        // Non-empty if it has any child element, or a `<raw-text>` child with
-        // non-empty text content.
-        self.children().next().is_none() && self.widget().text.as_ref().is_none_or(String::is_empty)
+        // Non-empty if the element has any child, or carries non-empty
+        // character data.
+        self.children().next().is_none()
+            && self.element().text.as_ref().is_none_or(String::is_empty)
     }
 
     fn is_root(&self) -> bool {
-        // `:root` is exactly the `<page>` element (web-core rewrites `:root`
-        // to the page part). Checking the kind — not parentlessness — keeps a
-        // detached subtree's root from matching `:root` during resolve.
-        self.widget().kind == WidgetKind::Page && self.parent().is_none()
+        // `:root` is a parentless element whose external state also deems it a
+        // root. An embedder with a distinguished root element narrows
+        // `ExternalState::is_root` so a detached subtree's parentless top does
+        // not match `:root` during resolve; the default keeps parentless ⇒
+        // root.
+        self.parent().is_none() && self.element().ext.is_root()
     }
 
     fn add_element_unique_hashes(&self, filter: &mut BloomFilter) -> bool {

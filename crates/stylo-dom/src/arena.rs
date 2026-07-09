@@ -1,13 +1,13 @@
-//! The generational arena backing the widget tree.
+//! The generational arena backing the element tree.
 //!
 //! Elements live in a hand-rolled `Vec<Slot>` arena with a free list — no
-//! `slotmap` dependency, deliberately minimal. Each element is addressed by a
-//! [`WidgetId`] carrying the slot index plus the slot's generation; once a slot
-//! is freed its generation is bumped, so any [`WidgetId`] referring to the
-//! previous occupant becomes stale and resolves to `None`.
+//! `slotmap` dependency, deliberately minimal. Each element is addressed by an
+//! [`ElementId`] carrying the slot index plus the slot's generation; once a
+//! slot is freed its generation is bumped, so any [`ElementId`] referring to
+//! the previous occupant becomes stale and resolves to `None`.
 //!
-//! [`WidgetRef`] is a lightweight `Copy` handle pairing a borrow of the arena
-//! with a [`WidgetId`]; it exposes read-only tree navigation and is the type
+//! [`ElementRef`] is a lightweight `Copy` handle pairing a borrow of the arena
+//! with an [`ElementId`]; it exposes read-only tree navigation and is the type
 //! stylo's element traits are implemented on (see [`crate::traits`]).
 
 use std::num::NonZeroU32;
@@ -15,8 +15,7 @@ use std::num::NonZeroU32;
 use stylo::shared_lock::SharedRwLock;
 use stylo::stylesheets::UrlExtraData;
 
-use crate::kind::WidgetKind;
-use crate::widget::Widget;
+use crate::element::Element;
 
 /// The placeholder base URL for parsing a standalone arena's inline styles.
 ///
@@ -32,12 +31,12 @@ fn about_blank_url_data() -> UrlExtraData {
 /// (arena lookups return `None`), even if the slot is later reused by a
 /// different element.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct WidgetId {
+pub struct ElementId {
     index: u32,
     generation: NonZeroU32,
 }
 
-impl WidgetId {
+impl ElementId {
     /// The slot index this handle refers to.
     #[must_use]
     pub const fn index(self) -> u32 {
@@ -51,47 +50,40 @@ impl WidgetId {
     }
 }
 
-/// One arena slot: the current generation plus an optional live [`Widget`].
+/// One arena slot: the current generation plus an optional live [`Element`].
 #[derive(Debug)]
-struct Slot {
+struct Slot<T> {
     generation: NonZeroU32,
-    widget: Option<Widget>,
+    element: Option<Element<T>>,
 }
 
-/// A generational arena of [`Widget`]s.
+/// A generational arena of [`Element`]s.
 ///
-/// Besides storage, the arena hands out the monotonically increasing Lynx
-/// `unique_id` (`i32`) assigned to each created element (see
-/// [`Widget::unique_id`]).
-///
-/// The arena also owns the [`SharedRwLock`] and [`UrlExtraData`] used to parse
-/// and guard every element's inline style block. The `lynx-style`
-/// [`StyleEngine`] must resolve elements from an arena whose lock it *shares*
-/// (see [`Arena::with_lock`]); otherwise stylo's `Locked::read_with` guard
-/// check fails when the cascade reaches an inline block.
-///
-/// [`StyleEngine`]: https://docs.rs/lynx-style
+/// The arena owns the [`SharedRwLock`] and [`UrlExtraData`] used to parse and
+/// guard every element's inline style block. The style engine driving the
+/// cascade must resolve elements from an arena whose lock it *shares* (see
+/// [`Arena::with_lock`]); otherwise stylo's `Locked::read_with` guard check
+/// fails when the cascade reaches an inline block.
 #[derive(Debug)]
-pub struct Arena {
-    slots: Vec<Slot>,
+pub struct Arena<T> {
+    slots: Vec<Slot<T>>,
     free_list: Vec<u32>,
-    next_unique_id: i32,
     lock: SharedRwLock,
     url_data: UrlExtraData,
 }
 
-impl Default for Arena {
+impl<T> Default for Arena<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Arena {
+impl<T> Arena<T> {
     /// Create an empty arena with a freshly minted [`SharedRwLock`] and a
     /// placeholder `about:blank` [`UrlExtraData`].
     ///
     /// A standalone arena (DOM-only, never styled) can use this. To style the
-    /// tree, build it from an arena whose lock the `StyleEngine` shares — see
+    /// tree, build it from an arena whose lock the style engine shares — see
     /// [`Arena::with_lock`].
     #[must_use]
     pub fn new() -> Self {
@@ -99,15 +91,13 @@ impl Arena {
     }
 
     /// Create an empty arena backed by an explicit [`SharedRwLock`] and
-    /// [`UrlExtraData`], typically cloned from the `StyleEngine` that will
+    /// [`UrlExtraData`], typically cloned from the style engine that will
     /// style this tree so their guards match.
     #[must_use]
     pub fn with_lock(lock: SharedRwLock, url_data: UrlExtraData) -> Self {
         Self {
             slots: Vec::new(),
             free_list: Vec::new(),
-            // Lynx `unique_id`s are 1-based; 0 stays reserved as "unset".
-            next_unique_id: 1,
             lock,
             url_data,
         }
@@ -125,21 +115,17 @@ impl Arena {
         &self.url_data
     }
 
-    /// Insert a widget, assigning it the next Lynx `unique_id`, and return its
-    /// handle.
+    /// Insert an element and return its handle.
     ///
     /// # Panics
     ///
     /// Panics if the arena would need to grow past `u32::MAX` slots.
-    pub fn insert(&mut self, mut widget: Widget) -> WidgetId {
-        widget.unique_id = self.next_unique_id;
-        self.next_unique_id = self.next_unique_id.wrapping_add(1);
-
+    pub fn insert(&mut self, element: Element<T>) -> ElementId {
         if let Some(index) = self.free_list.pop() {
             let slot = &mut self.slots[index as usize];
-            debug_assert!(slot.widget.is_none(), "free-list slot must be vacant");
-            slot.widget = Some(widget);
-            WidgetId {
+            debug_assert!(slot.element.is_none(), "free-list slot must be vacant");
+            slot.element = Some(element);
+            ElementId {
                 index,
                 generation: slot.generation,
             }
@@ -148,26 +134,26 @@ impl Arena {
                 u32::try_from(self.slots.len()).expect("arena capacity exceeds u32::MAX slots");
             self.slots.push(Slot {
                 generation: NonZeroU32::MIN,
-                widget: Some(widget),
+                element: Some(element),
             });
-            WidgetId {
+            ElementId {
                 index,
                 generation: NonZeroU32::MIN,
             }
         }
     }
 
-    /// Remove an element, returning its widget if the handle is live.
+    /// Remove an element, returning it if the handle is live.
     ///
     /// The slot's generation is advanced so the passed handle (and any other
     /// handle sharing the slot) becomes stale. If a slot's generation is
     /// exhausted it is retired rather than reused, preserving uniqueness.
-    pub fn remove(&mut self, id: WidgetId) -> Option<Widget> {
+    pub fn remove(&mut self, id: ElementId) -> Option<Element<T>> {
         let slot = self.slots.get_mut(id.index as usize)?;
         if slot.generation != id.generation {
             return None;
         }
-        let widget = slot.widget.take()?;
+        let element = slot.element.take()?;
         if let Some(next) = slot.generation.checked_add(1) {
             slot.generation = next;
             self.free_list.push(id.index);
@@ -175,25 +161,25 @@ impl Arena {
             // Generation space exhausted for this slot: retire it (never
             // reuse) so no future handle can collide with a past one.
         }
-        Some(widget)
+        Some(element)
     }
 
     /// Borrow an element if the handle is live.
     #[must_use]
-    pub fn get(&self, id: WidgetId) -> Option<&Widget> {
+    pub fn get(&self, id: ElementId) -> Option<&Element<T>> {
         let slot = self.slots.get(id.index as usize)?;
         if slot.generation == id.generation {
-            slot.widget.as_ref()
+            slot.element.as_ref()
         } else {
             None
         }
     }
 
     /// Mutably borrow an element if the handle is live.
-    pub fn get_mut(&mut self, id: WidgetId) -> Option<&mut Widget> {
+    pub fn get_mut(&mut self, id: ElementId) -> Option<&mut Element<T>> {
         let slot = self.slots.get_mut(id.index as usize)?;
         if slot.generation == id.generation {
-            slot.widget.as_mut()
+            slot.element.as_mut()
         } else {
             None
         }
@@ -201,15 +187,15 @@ impl Arena {
 
     /// Whether the handle currently resolves to a live element.
     #[must_use]
-    pub fn contains(&self, id: WidgetId) -> bool {
+    pub fn contains(&self, id: ElementId) -> bool {
         self.get(id).is_some()
     }
 
     /// A read-only navigation handle for the element, if live.
     #[must_use]
-    pub fn widget_ref(&self, id: WidgetId) -> Option<WidgetRef<'_>> {
+    pub fn element_ref(&self, id: ElementId) -> Option<ElementRef<'_, T>> {
         if self.contains(id) {
-            Some(WidgetRef { arena: self, id })
+            Some(ElementRef { arena: self, id })
         } else {
             None
         }
@@ -217,13 +203,13 @@ impl Arena {
 
     /// Clear every element's dirty bits.
     ///
-    /// The `lynx-style` crate calls this after a style-resolution pass; tests
+    /// The style-flush driver calls this after a style-resolution pass; tests
     /// use it to establish a clean baseline before exercising invalidation.
     pub fn clear_dirty(&mut self) {
         for slot in &mut self.slots {
-            if let Some(widget) = &mut slot.widget {
-                widget.style_dirty = false;
-                widget.dirty_descendants = false;
+            if let Some(element) = &mut slot.element {
+                element.style_dirty = false;
+                element.dirty_descendants = false;
             }
         }
     }
@@ -233,22 +219,30 @@ impl Arena {
 /// navigation.
 ///
 /// This is the type stylo's element/traversal traits are implemented on (see
-/// [`crate::traits`]); keeping it a thin `(&Arena, WidgetId)` pair leaves that
-/// seam clean. Only constructible via [`Arena::widget_ref`], so the referenced
+/// [`crate::traits`]); keeping it a thin `(&Arena, ElementId)` pair leaves that
+/// seam clean. Only constructible via [`Arena::element_ref`], so the referenced
 /// element is guaranteed live for the handle's (immutable) borrow of the arena.
-#[derive(Clone, Copy)]
-pub struct WidgetRef<'a> {
-    pub(crate) arena: &'a Arena,
-    pub(crate) id: WidgetId,
+pub struct ElementRef<'a, T> {
+    pub(crate) arena: &'a Arena<T>,
+    pub(crate) id: ElementId,
 }
 
-impl std::fmt::Debug for WidgetRef<'_> {
+// Hand-written (rather than derived) so `T` needs no `Clone`/`Copy` bound: the
+// handle only holds a shared reference plus an id.
+impl<T> Clone for ElementRef<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for ElementRef<'_, T> {}
+
+impl<T> std::fmt::Debug for ElementRef<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let widget = self.widget();
-        f.debug_struct("WidgetRef")
+        let element = self.element();
+        f.debug_struct("ElementRef")
             .field("id", &self.id)
-            .field("kind", &widget.kind)
-            .field("tag", &widget.tag_str())
+            .field("tag", &element.tag_str())
             .finish()
     }
 }
@@ -256,110 +250,106 @@ impl std::fmt::Debug for WidgetRef<'_> {
 /// Two handles are equal when they point at the same element of the same arena.
 ///
 /// stylo's `TElement`/`TNode` require `Eq`/`Hash`; identity is the arena pointer
-/// paired with the [`WidgetId`]. Comparing the arena by pointer (rather than by
+/// paired with the [`ElementId`]. Comparing the arena by pointer (rather than by
 /// value) keeps this cheap and matches stylo's expectation that element identity
 /// is stable.
-impl PartialEq for WidgetRef<'_> {
+impl<T> PartialEq for ElementRef<'_, T> {
     fn eq(&self, other: &Self) -> bool {
         std::ptr::eq(self.arena, other.arena) && self.id == other.id
     }
 }
 
-impl Eq for WidgetRef<'_> {}
+impl<T> Eq for ElementRef<'_, T> {}
 
-impl std::hash::Hash for WidgetRef<'_> {
+impl<T> std::hash::Hash for ElementRef<'_, T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         (std::ptr::from_ref(self.arena) as usize).hash(state);
         self.id.hash(state);
     }
 }
 
-impl<'a> WidgetRef<'a> {
-    /// Borrow the underlying widget.
+impl<'a, T> ElementRef<'a, T> {
+    /// Borrow the underlying element.
     ///
-    /// `pub(crate)` so the [`traits`](crate::traits) impls can reach widget
-    /// state; the panic path is unreachable given the construction invariant (a
-    /// `WidgetRef` only exists for a live element).
-    pub(crate) fn widget(self) -> &'a Widget {
+    /// `pub(crate)` so the [`traits`](crate::traits) impls can reach element
+    /// state; the panic path is unreachable given the construction invariant
+    /// (an `ElementRef` only exists for a live element).
+    pub(crate) fn element(self) -> &'a Element<T> {
         self.arena
             .get(self.id)
-            .expect("WidgetRef always references a live element")
+            .expect("ElementRef always references a live element")
     }
 
     /// The handle for this element.
     #[must_use]
-    pub const fn id(self) -> WidgetId {
+    pub const fn id(self) -> ElementId {
         self.id
     }
 
-    /// The element's [`WidgetKind`].
-    #[must_use]
-    pub fn kind(self) -> WidgetKind {
-        self.widget().kind
-    }
-
-    /// The element's Lynx tag name.
+    /// The element's tag name.
     #[must_use]
     pub fn tag(self) -> &'a str {
-        self.widget().tag_str()
+        self.element().tag_str()
     }
 
-    /// The element's Lynx `unique_id`.
+    /// The element's external-state payload.
     #[must_use]
-    pub fn unique_id(self) -> i32 {
-        self.widget().unique_id
+    pub fn ext(self) -> &'a T {
+        &self.element().ext
     }
 
     /// The parent element, if any.
     #[must_use]
-    pub fn parent(self) -> Option<WidgetRef<'a>> {
-        self.widget().parent.and_then(|p| self.arena.widget_ref(p))
+    pub fn parent(self) -> Option<ElementRef<'a, T>> {
+        self.element()
+            .parent
+            .and_then(|p| self.arena.element_ref(p))
     }
 
     /// The first child element, if any.
     #[must_use]
-    pub fn first_child(self) -> Option<WidgetRef<'a>> {
-        self.widget()
+    pub fn first_child(self) -> Option<ElementRef<'a, T>> {
+        self.element()
             .children
             .first()
-            .and_then(|&c| self.arena.widget_ref(c))
+            .and_then(|&c| self.arena.element_ref(c))
     }
 
     /// The last child element, if any.
     #[must_use]
-    pub fn last_child(self) -> Option<WidgetRef<'a>> {
-        self.widget()
+    pub fn last_child(self) -> Option<ElementRef<'a, T>> {
+        self.element()
             .children
             .last()
-            .and_then(|&c| self.arena.widget_ref(c))
+            .and_then(|&c| self.arena.element_ref(c))
     }
 
     /// The next sibling element, if any.
     #[must_use]
-    pub fn next_sibling(self) -> Option<WidgetRef<'a>> {
-        let parent = self.widget().parent?;
+    pub fn next_sibling(self) -> Option<ElementRef<'a, T>> {
+        let parent = self.element().parent?;
         let siblings = &self.arena.get(parent)?.children;
         let pos = siblings.iter().position(|&c| c == self.id)?;
         let next = *siblings.get(pos + 1)?;
-        self.arena.widget_ref(next)
+        self.arena.element_ref(next)
     }
 
     /// The previous sibling element, if any.
     #[must_use]
-    pub fn prev_sibling(self) -> Option<WidgetRef<'a>> {
-        let parent = self.widget().parent?;
+    pub fn prev_sibling(self) -> Option<ElementRef<'a, T>> {
+        let parent = self.element().parent?;
         let siblings = &self.arena.get(parent)?.children;
         let pos = siblings.iter().position(|&c| c == self.id)?;
         let prev = *siblings.get(pos.checked_sub(1)?)?;
-        self.arena.widget_ref(prev)
+        self.arena.element_ref(prev)
     }
 
     /// Iterate over the element's children in document order.
-    pub fn children(self) -> impl Iterator<Item = WidgetRef<'a>> + 'a {
+    pub fn children(self) -> impl Iterator<Item = ElementRef<'a, T>> + 'a {
         let arena = self.arena;
-        self.widget()
+        self.element()
             .children
             .iter()
-            .filter_map(move |&id| arena.widget_ref(id))
+            .filter_map(move |&id| arena.element_ref(id))
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "stylo-dom"
-description = "stylo-integration DOM machinery for lynx-vello: the generational Widget arena, tree-mutation + coarse style-invalidation primitives, inline-style parsing, and the stylo element-trait impls the lynx-style cascade runs over"
+description = "Generic stylo-integrated DOM core for lynx-vello: a generational arena of Element<T> nodes (a strict HTML-DOM subset), tree-mutation + coarse style-invalidation + inline-style primitives, and stylo element-trait impls, parameterized over an embedder-supplied external state"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,12 +11,13 @@ rust-version.workspace = true
 rustc-hash = { workspace = true }
 smallvec = { workspace = true }
 
-# stylo integration: the Widget struct owns stylo's interior-mutable per-element
-# state (ElementData/selector flags) and the `traits` module implements stylo's
-# element traits (`TNode`/`TElement`/`TDocument`/`selectors::Element`) on
-# `WidgetRef`. The vendored servo package is itself named `stylo_dom`; we depend
-# on it under the `dom` rename (as vendor/stylo/style's own Cargo.toml does) so
-# this crate can take the `stylo_dom` lib name and re-export `ElementState`.
+# stylo integration: the Element struct owns stylo's interior-mutable
+# per-element state (ElementData/selector flags) and the `traits` module
+# implements stylo's element traits (`TNode`/`TElement`/`TDocument`/
+# `selectors::Element`) on `ElementRef`. The vendored servo package is itself
+# named `stylo_dom`; we depend on it under the `dom` rename (as
+# vendor/stylo/style's own Cargo.toml does) so this crate can take the
+# `stylo_dom` lib name and re-export `ElementState`.
 stylo = { workspace = true }
 stylo_atoms = { workspace = true }
 dom = { workspace = true }

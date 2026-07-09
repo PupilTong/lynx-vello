@@ -1,4 +1,4 @@
-//! [`TElement`] for [`WidgetRef`].
+//! [`TElement`] for [`ElementRef`].
 //!
 //! # Safety
 //!
@@ -7,7 +7,7 @@
 //! state stylo mandates ([`ensure_data`](TElement::ensure_data),
 //! [`clear_data`](TElement::clear_data), `borrow_data`, `mutate_data`). Each
 //! `unsafe` access relies on the crate-wide **single-threaded-flush**
-//! invariant: an element's [`stylo_data`](crate::Widget::stylo_data) is only
+//! invariant: an element's [`stylo_data`](crate::Element::stylo_data) is only
 //! ever touched while the caller holds exclusive access to the tree, so no
 //! aliasing or data race is possible.
 #![allow(unsafe_code)]
@@ -32,25 +32,26 @@ use stylo::values::computed::Display;
 use stylo::{LocalName, Namespace};
 use stylo_atoms::Atom;
 
-use crate::arena::{Arena, WidgetId, WidgetRef};
+use crate::arena::{Arena, ElementId, ElementRef};
+use crate::ext::ExternalState;
 
 /// The children iterator stylo's restyle traversal walks. Skips over any child
 /// whose handle no longer resolves (defensive; live trees never hit that).
 #[derive(Debug)]
-pub struct ChildrenIter<'a> {
-    arena: &'a Arena,
-    children: &'a [WidgetId],
+pub struct ChildrenIter<'a, T> {
+    arena: &'a Arena<T>,
+    children: &'a [ElementId],
     index: usize,
 }
 
-impl<'a> Iterator for ChildrenIter<'a> {
-    type Item = WidgetRef<'a>;
+impl<'a, T> Iterator for ChildrenIter<'a, T> {
+    type Item = ElementRef<'a, T>;
 
-    fn next(&mut self) -> Option<WidgetRef<'a>> {
+    fn next(&mut self) -> Option<ElementRef<'a, T>> {
         while self.index < self.children.len() {
             let id = self.children[self.index];
             self.index += 1;
-            if let Some(elem) = self.arena.widget_ref(id) {
+            if let Some(elem) = self.arena.element_ref(id) {
                 return Some(elem);
             }
         }
@@ -58,16 +59,16 @@ impl<'a> Iterator for ChildrenIter<'a> {
     }
 }
 
-/// The single shared empty namespace, returned by [`TElement::namespace`] (Lynx
-/// tags are never namespaced).
+/// The single shared empty namespace, returned by [`TElement::namespace`]
+/// (tags are never namespaced here).
 fn empty_namespace() -> &'static <SelectorImpl as selectors::SelectorImpl>::BorrowedNamespaceUrl {
     static EMPTY: OnceLock<Namespace> = OnceLock::new();
     &EMPTY.get_or_init(Namespace::default).0
 }
 
-impl<'a> TElement for WidgetRef<'a> {
-    type ConcreteNode = WidgetRef<'a>;
-    type TraversalChildrenIterator = ChildrenIter<'a>;
+impl<'a, T: ExternalState> TElement for ElementRef<'a, T> {
+    type ConcreteNode = ElementRef<'a, T>;
+    type TraversalChildrenIterator = ChildrenIter<'a, T>;
 
     fn as_node(&self) -> Self::ConcreteNode {
         *self
@@ -76,7 +77,7 @@ impl<'a> TElement for WidgetRef<'a> {
     fn traversal_children(&self) -> LayoutIterator<Self::TraversalChildrenIterator> {
         LayoutIterator(ChildrenIter {
             arena: self.arena,
-            children: &self.widget().children,
+            children: &self.element().children,
             index: 0,
         })
     }
@@ -94,7 +95,7 @@ impl<'a> TElement for WidgetRef<'a> {
     }
 
     fn style_attribute(&self) -> Option<ArcBorrow<'_, Locked<PropertyDeclarationBlock>>> {
-        self.widget().inline_block.as_ref().map(Arc::borrow_arc)
+        self.element().inline_block.as_ref().map(Arc::borrow_arc)
     }
 
     fn animation_rule(
@@ -112,7 +113,7 @@ impl<'a> TElement for WidgetRef<'a> {
     }
 
     fn state(&self) -> ElementState {
-        self.widget().element_state
+        self.element().element_state
     }
 
     fn has_part_attr(&self) -> bool {
@@ -125,14 +126,14 @@ impl<'a> TElement for WidgetRef<'a> {
 
     fn id(&self) -> Option<&Atom> {
         // In the servo build stylo's `WeakAtom` is `stylo_atoms::Atom`.
-        self.widget().id_attr.as_ref()
+        self.element().id_attr.as_ref()
     }
 
     fn each_class<F>(&self, mut callback: F)
     where
         F: FnMut(&AtomIdent),
     {
-        for class in &self.widget().classes {
+        for class in &self.element().classes {
             callback(AtomIdent::cast(class));
         }
     }
@@ -147,21 +148,17 @@ impl<'a> TElement for WidgetRef<'a> {
     where
         F: FnMut(&LocalName),
     {
-        for name in self.widget().attrs.keys() {
+        for name in self.element().attrs.keys() {
             callback(&LocalName::from(name.as_ref()));
         }
-        // Dataset entries are reflected as `data-*` attributes (web-core
-        // parity; see `attr_matches`).
-        for key in self.widget().dataset.keys() {
-            callback(&LocalName::from(format!("data-{key}").as_str()));
-        }
-        // Expose the synthetic `l-css-id` attribute (see `attr_matches`) so the
-        // bloom filter accounts for it in the future scoped-CSS mode.
-        callback(&LocalName::from("l-css-id"));
+        // Synthetic / reflected attribute names come from the embedder, so the
+        // bloom filter accounts for them too (see
+        // `ExternalState::each_extra_attr_name`).
+        self.element().ext.each_extra_attr_name(&mut callback);
     }
 
     fn has_dirty_descendants(&self) -> bool {
-        self.widget().dirty_descendants
+        self.element().dirty_descendants
     }
 
     fn has_snapshot(&self) -> bool {
@@ -177,8 +174,8 @@ impl<'a> TElement for WidgetRef<'a> {
 
     unsafe fn set_dirty_descendants(&self) {
         // No-op: the flush driver tracks descendant dirtiness itself
-        // (`Widget::dirty_descendants`); stylo's own traversal bits are unused
-        // in this milestone.
+        // (`Element::dirty_descendants`); stylo's own traversal bits are
+        // unused in this milestone.
     }
 
     unsafe fn unset_dirty_descendants(&self) {}
@@ -192,7 +189,7 @@ impl<'a> TElement for WidgetRef<'a> {
     unsafe fn ensure_data(&self) -> ElementDataMut<'_> {
         // SAFETY: single-threaded flush — the caller holds exclusive access to
         // this element, so creating/borrowing its `ElementData` cannot race.
-        let slot = unsafe { &mut *self.widget().stylo_data.get() };
+        let slot = unsafe { &mut *self.element().stylo_data.get() };
         slot.get_or_insert_with(ElementDataWrapper::default)
             .borrow_mut()
     }
@@ -201,22 +198,22 @@ impl<'a> TElement for WidgetRef<'a> {
         // SAFETY: single-threaded flush — exclusive access, no concurrent
         // borrow of this element's stylo state.
         unsafe {
-            *self.widget().stylo_data.get() = None;
+            *self.element().stylo_data.get() = None;
         }
-        *self.widget().selector_flags.borrow_mut() = ElementSelectorFlags::empty();
+        *self.element().selector_flags.borrow_mut() = ElementSelectorFlags::empty();
     }
 
     fn has_data(&self) -> bool {
         // SAFETY: reads only the `Option` discriminant; no concurrent mutation
         // under the single-threaded-flush invariant.
-        unsafe { (*self.widget().stylo_data.get()).is_some() }
+        unsafe { (*self.element().stylo_data.get()).is_some() }
     }
 
     fn borrow_data(&self) -> Option<ElementDataRef<'_>> {
         // SAFETY: `ElementDataWrapper` tracks borrows internally; single-threaded
         // flush rules out a concurrent mutable borrow.
         unsafe {
-            (*self.widget().stylo_data.get())
+            (*self.element().stylo_data.get())
                 .as_ref()
                 .map(ElementDataWrapper::borrow)
         }
@@ -226,7 +223,7 @@ impl<'a> TElement for WidgetRef<'a> {
         // SAFETY: as `borrow_data`, plus exclusive access under single-threaded
         // flush.
         unsafe {
-            (*self.widget().stylo_data.get())
+            (*self.element().stylo_data.get())
                 .as_ref()
                 .map(ElementDataWrapper::borrow_mut)
         }
@@ -252,11 +249,11 @@ impl<'a> TElement for WidgetRef<'a> {
         false
     }
 
-    fn shadow_root(&self) -> Option<WidgetRef<'a>> {
+    fn shadow_root(&self) -> Option<ElementRef<'a, T>> {
         None
     }
 
-    fn containing_shadow(&self) -> Option<WidgetRef<'a>> {
+    fn containing_shadow(&self) -> Option<ElementRef<'a, T>> {
         None
     }
 
@@ -282,7 +279,7 @@ impl<'a> TElement for WidgetRef<'a> {
     }
 
     fn local_name(&self) -> &<SelectorImpl as selectors::SelectorImpl>::BorrowedLocalName {
-        &self.widget().tag.0
+        &self.element().tag.0
     }
 
     fn namespace(&self) -> &<SelectorImpl as selectors::SelectorImpl>::BorrowedNamespaceUrl {
@@ -294,7 +291,7 @@ impl<'a> TElement for WidgetRef<'a> {
     }
 
     fn has_selector_flags(&self, flags: ElementSelectorFlags) -> bool {
-        self.widget().selector_flags.borrow().contains(flags)
+        self.element().selector_flags.borrow().contains(flags)
     }
 
     fn relative_selector_search_direction(&self) -> ElementSelectorFlags {
@@ -303,14 +300,11 @@ impl<'a> TElement for WidgetRef<'a> {
 
     fn get_attr(&self, attr: &LocalName, _namespace: &Namespace) -> Option<String> {
         let name: &str = attr.0.as_ref();
-        if name == "l-css-id" {
-            return Some(self.widget().css_id.to_string());
-        }
-        if let Some(value) = self.widget().attrs.get(name) {
+        if let Some(value) = self.element().attrs.get(name) {
             return Some(value.clone());
         }
-        // Dataset reflection as `data-*`, matching `attr_matches`.
-        name.strip_prefix("data-")
-            .and_then(|key| self.widget().dataset.get(key).cloned())
+        // Synthetic / reflected attributes are the embedder's: consulted only
+        // after the real attrs map misses, matching `attr_matches`.
+        self.element().ext.extra_attr_value(name)
     }
 }

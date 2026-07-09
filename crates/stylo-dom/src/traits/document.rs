@@ -1,19 +1,19 @@
-//! [`TDocument`] + [`TShadowRoot`] for [`WidgetRef`].
+//! [`TDocument`] + [`TShadowRoot`] for [`ElementRef`].
 //!
-//! There is no distinct document node in the Lynx model — the `<page>` root
-//! doubles as the document — and no shadow DOM, so [`TShadowRoot`] is a stub
-//! that is never actually reached (`TNode::as_shadow_root` always returns
-//! `None`).
+//! There is no distinct document node in this model — the tree root doubles as
+//! the document — and no shadow DOM, so [`TShadowRoot`] is a stub that is never
+//! actually reached (`TNode::as_shadow_root` always returns `None`).
 
 use stylo::context::QuirksMode;
 use stylo::dom::{TDocument, TNode, TShadowRoot};
 use stylo::shared_lock::SharedRwLock;
 use stylo::stylist::CascadeData;
 
-use crate::arena::WidgetRef;
+use crate::arena::ElementRef;
+use crate::ext::ExternalState;
 
-impl<'a> TDocument for WidgetRef<'a> {
-    type ConcreteNode = WidgetRef<'a>;
+impl<'a, T: ExternalState> TDocument for ElementRef<'a, T> {
+    type ConcreteNode = ElementRef<'a, T>;
 
     fn as_node(&self) -> Self::ConcreteNode {
         *self
@@ -32,8 +32,8 @@ impl<'a> TDocument for WidgetRef<'a> {
     }
 }
 
-impl<'a> TShadowRoot for WidgetRef<'a> {
-    type ConcreteNode = WidgetRef<'a>;
+impl<'a, T: ExternalState> TShadowRoot for ElementRef<'a, T> {
+    type ConcreteNode = ElementRef<'a, T>;
 
     fn as_node(&self) -> Self::ConcreteNode {
         *self

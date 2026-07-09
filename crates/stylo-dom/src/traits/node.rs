@@ -1,13 +1,15 @@
-//! [`NodeInfo`] + [`TNode`] for [`WidgetRef`].
+//! [`NodeInfo`] + [`TNode`] for [`ElementRef`].
 
 use stylo::dom::{NodeInfo, OpaqueNode, TNode};
 
-use crate::arena::WidgetRef;
-use crate::widget::Widget;
+use crate::arena::ElementRef;
+use crate::element::Element;
+use crate::ext::ExternalState;
 
-impl NodeInfo for WidgetRef<'_> {
+impl<T: ExternalState> NodeInfo for ElementRef<'_, T> {
     fn is_element(&self) -> bool {
-        // Every Lynx node — including `<raw-text>` — is an element with a tag.
+        // Every node is an element with a tag; character data rides on the
+        // element itself (`Element::text`).
         true
     }
 
@@ -16,34 +18,34 @@ impl NodeInfo for WidgetRef<'_> {
     }
 }
 
-impl<'a> TNode for WidgetRef<'a> {
-    type ConcreteElement = WidgetRef<'a>;
-    type ConcreteDocument = WidgetRef<'a>;
-    type ConcreteShadowRoot = WidgetRef<'a>;
+impl<'a, T: ExternalState> TNode for ElementRef<'a, T> {
+    type ConcreteElement = ElementRef<'a, T>;
+    type ConcreteDocument = ElementRef<'a, T>;
+    type ConcreteShadowRoot = ElementRef<'a, T>;
 
     fn parent_node(&self) -> Option<Self> {
         self.parent()
     }
 
     fn first_child(&self) -> Option<Self> {
-        WidgetRef::first_child(*self)
+        ElementRef::first_child(*self)
     }
 
     fn last_child(&self) -> Option<Self> {
-        WidgetRef::last_child(*self)
+        ElementRef::last_child(*self)
     }
 
     fn prev_sibling(&self) -> Option<Self> {
-        WidgetRef::prev_sibling(*self)
+        ElementRef::prev_sibling(*self)
     }
 
     fn next_sibling(&self) -> Option<Self> {
-        WidgetRef::next_sibling(*self)
+        ElementRef::next_sibling(*self)
     }
 
     fn owner_doc(&self) -> Self::ConcreteDocument {
-        // No separate document node: the topmost ancestor (the `<page>` root)
-        // acts as the document.
+        // No separate document node: the topmost ancestor acts as the
+        // document.
         let mut cur = *self;
         while let Some(parent) = cur.parent() {
             cur = parent;
@@ -62,7 +64,7 @@ impl<'a> TNode for WidgetRef<'a> {
     }
 
     fn as_document(&self) -> Option<Self::ConcreteDocument> {
-        // Our root is the `<page>` element, not a distinct document node.
+        // Our root is an ordinary element, not a distinct document node.
         None
     }
 
@@ -71,11 +73,12 @@ impl<'a> TNode for WidgetRef<'a> {
     }
 
     fn opaque(&self) -> OpaqueNode {
-        OpaqueNode(std::ptr::from_ref::<Widget>(self.widget()) as usize)
+        OpaqueNode(std::ptr::from_ref::<Element<T>>(self.element()) as usize)
     }
 
     fn debug_id(self) -> usize {
-        usize::try_from(self.unique_id()).unwrap_or(0)
+        // Diagnostic only: the arena slot index stands in for a node id.
+        usize::try_from(self.id().index()).unwrap_or(0)
     }
 
     fn traversal_parent(&self) -> Option<Self::ConcreteElement> {

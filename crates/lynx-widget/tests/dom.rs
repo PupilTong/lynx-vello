@@ -1,6 +1,6 @@
-//! Integration tests for the `lynx-dom` Element-PAPI surface.
+//! Integration tests for the `lynx-widget` Element-PAPI surface.
 
-use lynx_dom::{EventKind, PseudoState, WidgetError, WidgetKind, WidgetTree};
+use lynx_widget::{EventKind, PseudoState, WidgetError, WidgetKind, WidgetTree};
 
 /// Build `page > container > [a, b, c]` and return the handles.
 fn three_children() -> (WidgetTree, TestTree) {
@@ -27,11 +27,11 @@ fn three_children() -> (WidgetTree, TestTree) {
 }
 
 struct TestTree {
-    page: lynx_dom::WidgetId,
-    container: lynx_dom::WidgetId,
-    a: lynx_dom::WidgetId,
-    b: lynx_dom::WidgetId,
-    c: lynx_dom::WidgetId,
+    page: lynx_widget::WidgetId,
+    container: lynx_widget::WidgetId,
+    a: lynx_widget::WidgetId,
+    b: lynx_widget::WidgetId,
+    c: lynx_widget::WidgetId,
 }
 
 #[test]
@@ -39,18 +39,21 @@ fn tree_building_and_navigation() {
     let (doc, t) = three_children();
 
     // Kinds / tags round-trip.
-    assert_eq!(doc.widget_ref(t.page).unwrap().kind(), WidgetKind::Page);
+    assert_eq!(doc.widget(t.page).unwrap().ext.kind, WidgetKind::Page);
     assert_eq!(doc.get_tag(t.container), Some("view"));
 
     // Parent / child structure via WidgetRef.
     let page = doc.widget_ref(t.page).unwrap();
     assert!(page.parent().is_none());
-    let children: Vec<_> = page.children().map(lynx_dom::WidgetRef::id).collect();
+    let children: Vec<_> = page.children().map(lynx_widget::WidgetRef::id).collect();
     assert_eq!(children, vec![t.container]);
 
     let container = doc.widget_ref(t.container).unwrap();
     assert_eq!(container.parent().unwrap().id(), t.page);
-    let kids: Vec<_> = container.children().map(lynx_dom::WidgetRef::id).collect();
+    let kids: Vec<_> = container
+        .children()
+        .map(lynx_widget::WidgetRef::id)
+        .collect();
     assert_eq!(kids, vec![t.a, t.b, t.c]);
     assert_eq!(container.first_child().unwrap().id(), t.a);
     assert_eq!(container.last_child().unwrap().id(), t.c);
@@ -86,9 +89,9 @@ fn text_and_raw_text() {
     let raw = doc.create_raw_text("hello");
     doc.append_element(raw, text).unwrap();
 
-    assert_eq!(doc.widget_ref(text).unwrap().kind(), WidgetKind::Text);
+    assert_eq!(doc.widget(text).unwrap().ext.kind, WidgetKind::Text);
     let raw_node = doc.widget(raw).unwrap();
-    assert_eq!(raw_node.kind, WidgetKind::RawText);
+    assert_eq!(raw_node.ext.kind, WidgetKind::RawText);
     assert_eq!(raw_node.text.as_deref(), Some("hello"));
 }
 
@@ -97,8 +100,8 @@ fn create_element_classifies_tag() {
     let mut doc = WidgetTree::new();
     let li = doc.create_element("list-item");
     let unknown = doc.create_element("marquee");
-    assert_eq!(doc.widget(li).unwrap().kind, WidgetKind::ListItem);
-    assert_eq!(doc.widget(unknown).unwrap().kind, WidgetKind::Unknown);
+    assert_eq!(doc.widget(li).unwrap().ext.kind, WidgetKind::ListItem);
+    assert_eq!(doc.widget(unknown).unwrap().ext.kind, WidgetKind::Unknown);
     assert_eq!(doc.get_tag(unknown), Some("marquee"));
 }
 
@@ -122,7 +125,7 @@ fn insert_element_before_semantics() {
         .widget_ref(page)
         .unwrap()
         .children()
-        .map(lynx_dom::WidgetRef::id)
+        .map(lynx_widget::WidgetRef::id)
         .collect();
     assert_eq!(order, vec![a, b, c, d]);
 
@@ -132,7 +135,7 @@ fn insert_element_before_semantics() {
         .widget_ref(page)
         .unwrap()
         .children()
-        .map(lynx_dom::WidgetRef::id)
+        .map(lynx_widget::WidgetRef::id)
         .collect();
     assert_eq!(order, vec![b, a, c, d]);
 
@@ -149,7 +152,7 @@ fn insert_element_before_semantics() {
         .widget_ref(page)
         .unwrap()
         .children()
-        .map(lynx_dom::WidgetRef::id)
+        .map(lynx_widget::WidgetRef::id)
         .collect();
     assert_eq!(order, vec![b, a, c, d]);
     // ... and errors when n is not a child of the target parent.
@@ -220,7 +223,7 @@ fn remove_detaches_and_destroy_frees() {
         .widget_ref(container)
         .unwrap()
         .children()
-        .map(lynx_dom::WidgetRef::id)
+        .map(lynx_widget::WidgetRef::id)
         .collect();
     assert_eq!(kids, vec![sibling]);
 
@@ -257,7 +260,7 @@ fn replace_element_keeps_position() {
         .widget_ref(t.container)
         .unwrap()
         .children()
-        .map(lynx_dom::WidgetRef::id)
+        .map(lynx_widget::WidgetRef::id)
         .collect();
     assert_eq!(order, vec![t.a, new, t.c]);
     // Like DOM replaceChild, the old node survives, detached.
@@ -371,11 +374,11 @@ fn cycle_prevention() {
 fn set_css_id_batch() {
     let (mut doc, t) = three_children();
     doc.set_css_id(&[t.a, t.b, t.c], 42).unwrap();
-    assert_eq!(doc.widget(t.a).unwrap().css_id, 42);
-    assert_eq!(doc.widget(t.b).unwrap().css_id, 42);
-    assert_eq!(doc.widget(t.c).unwrap().css_id, 42);
+    assert_eq!(doc.widget(t.a).unwrap().ext.css_id, 42);
+    assert_eq!(doc.widget(t.b).unwrap().ext.css_id, 42);
+    assert_eq!(doc.widget(t.c).unwrap().ext.css_id, 42);
     // The page keeps its default (unset) css_id.
-    assert_eq!(doc.widget(t.page).unwrap().css_id, 0);
+    assert_eq!(doc.widget(t.page).unwrap().ext.css_id, 0);
 
     // A stale handle anywhere in the batch fails the whole call.
     doc.destroy_element(t.a).unwrap();
@@ -420,7 +423,7 @@ fn classes_and_inline_styles() {
 }
 
 /// The number of declarations in an element's parsed inline style block.
-fn inline_declaration_count(doc: &WidgetTree, id: lynx_dom::WidgetId) -> usize {
+fn inline_declaration_count(doc: &WidgetTree, id: lynx_widget::WidgetId) -> usize {
     let guard = doc.shared_lock().read();
     let node = doc.widget(id).unwrap();
     let block = node
@@ -457,7 +460,7 @@ fn attributes_id_and_dataset_and_events() {
     doc.set_dataset(view, [("role", "hero"), ("index", "3")])
         .unwrap();
     doc.add_dataset(view, "extra", "yes").unwrap();
-    let dataset = &doc.widget(view).unwrap().dataset;
+    let dataset = &doc.widget(view).unwrap().ext.dataset;
     assert_eq!(dataset.get("role").map(String::as_str), Some("hero"));
     assert_eq!(dataset.get("extra").map(String::as_str), Some("yes"));
     assert_eq!(dataset.len(), 3);
@@ -467,7 +470,7 @@ fn attributes_id_and_dataset_and_events() {
         .unwrap();
     doc.add_event(view, EventKind::CaptureCatch, "touchstart", "handler#2")
         .unwrap();
-    let events = &doc.widget(view).unwrap().events;
+    let events = &doc.widget(view).unwrap().ext.events;
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].kind, EventKind::Bind);
     assert_eq!(&*events[0].name, "tap");
@@ -512,4 +515,24 @@ fn stale_handle_operations_error() {
         Err(WidgetError::StaleElement(view))
     );
     assert!(doc.get_tag(view).is_none());
+}
+
+#[test]
+fn unique_ids_are_monotonic_and_one_based() {
+    let mut doc = WidgetTree::new();
+    let page = doc.create_page();
+    let view = doc.create_view();
+    assert_eq!(doc.get_element_unique_id(page), Some(1));
+    assert_eq!(doc.get_element_unique_id(view), Some(2));
+    assert_eq!(doc.widget(view).unwrap().ext.unique_id, 2);
+}
+
+#[test]
+fn widget_kind_tag_mapping() {
+    assert_eq!(WidgetKind::from_tag("list-item"), WidgetKind::ListItem);
+    assert_eq!(WidgetKind::from_tag("none"), WidgetKind::NoneElement);
+    assert_eq!(WidgetKind::from_tag("marquee"), WidgetKind::Unknown);
+    assert_eq!(WidgetKind::Page.tag_name(), "page");
+    assert_eq!(WidgetKind::ScrollView.tag_name(), "scroll-view");
+    assert_eq!(WidgetKind::Unknown.tag_name(), "unknown");
 }

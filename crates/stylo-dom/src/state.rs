@@ -1,17 +1,17 @@
 //! Element pseudo-class state.
 //!
 //! A tiny hand-rolled bit set (no `bitflags` dependency) tracking the dynamic
-//! pseudo-class flags Lynx supports on an element: `:hover`, `:active`, and
-//! `:focus`.
+//! pseudo-class flags on an element: `:hover`, `:active`, and `:focus`.
 //!
-//! [`PseudoState`] is the crate's public API type (it keeps `set_pseudo_state`
-//! free of any stylo type in its signature); internally each [`Widget`] stores
-//! the equivalent stylo [`ElementState`](crate::ElementState) so
+//! [`PseudoState`] is the crate's public API type (it keeps embedder
+//! state-toggling APIs free of any stylo type in their signatures); internally
+//! each [`Element`] stores the equivalent stylo
+//! [`ElementState`](crate::ElementState) so
 //! `selectors::Element::match_non_ts_pseudo_class` can test it directly against
 //! `NonTSPseudoClass::state_flag()`. [`PseudoState::to_element_state`] is the
 //! single bridge between the two.
 //!
-//! [`Widget`]: crate::Widget
+//! [`Element`]: crate::Element
 
 use dom::ElementState;
 
@@ -93,8 +93,8 @@ impl PseudoState {
 
     /// Recover a [`PseudoState`] from a stylo
     /// [`ElementState`](crate::ElementState) (the inverse of
-    /// [`to_element_state`](Self::to_element_state), keeping only the three bits
-    /// Lynx tracks).
+    /// [`to_element_state`](Self::to_element_state), keeping only the three
+    /// bits tracked here).
     #[must_use]
     pub fn from_element_state(state: ElementState) -> Self {
         let mut out = Self::empty();

@@ -1,6 +1,6 @@
-//! Lynx element kinds and the tag-name mapping.
+//! Lynx widget kinds and the tag-name mapping.
 
-/// The kind of a Lynx element.
+/// The kind of a Lynx widget.
 ///
 /// `NoneElement` is Lynx's `<none>` element — spelled that way (rather than
 /// `None`) to avoid clashing with `Option::None` at call sites that store a
@@ -52,8 +52,8 @@ impl WidgetKind {
 
     /// The canonical Lynx tag name for this kind.
     ///
-    /// [`WidgetKind::Unknown`] has no canonical tag (the real tag string lives in
-    /// [`Widget::tag`](crate::Widget::tag)); it reports `"unknown"`.
+    /// [`WidgetKind::Unknown`] has no canonical tag (the real tag string lives
+    /// in the widget's `tag` field); it reports `"unknown"`.
     #[must_use]
     pub const fn tag_name(self) -> &'static str {
         match self {

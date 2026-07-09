@@ -13,10 +13,11 @@
 //! [`WidgetTree::has_dirty`] / [`WidgetTree::clear_dirty`]).
 //!
 //! This layer validates PAPI semantics — stale handles, cycles, insertion
-//! reference resolution, error mapping, the `unique_id` index, the `css_id`
-//! batch — and **delegates** the actual tree mutation and inline-style parsing
-//! to the [`stylo_dom`] crate's [`Arena`] primitives, because their invalidation
-//! is style-system logic.
+//! reference resolution, error mapping, the `unique_id` minting + index, the
+//! `css_id` batch — and **delegates** the actual tree mutation and inline-style
+//! parsing to the [`stylo_dom`] crate's [`Arena`] primitives, because their
+//! invalidation is style-system logic. The Lynx-specific per-widget data lives
+//! in the element's [`WidgetState`] payload.
 //!
 //! [`append_element`]: WidgetTree::append_element
 //! [`insert_element_before`]: WidgetTree::insert_element_before
@@ -31,8 +32,12 @@ use stylo::servo_arc::Arc;
 use stylo::shared_lock::SharedRwLock;
 use stylo::stylesheets::UrlExtraData;
 use stylo_atoms::Atom;
-use stylo_dom::{Arena, EventKind, EventReg, PseudoState, Widget, WidgetId, WidgetKind, WidgetRef};
+use stylo_dom::{Arena, Element, PseudoState};
 use thiserror::Error;
+
+use crate::kind::WidgetKind;
+use crate::state::{EventKind, EventReg, WidgetState};
+use crate::{Widget, WidgetId, WidgetRef};
 
 /// An error from a tree-mutating [`WidgetTree`] operation.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Error)]
@@ -61,12 +66,16 @@ pub enum WidgetError {
     BadInsertReference(WidgetId),
 }
 
-/// The widget tree: a generational [`Arena`] plus the current page root and a
-/// `unique_id` → [`WidgetId`] index.
+/// The widget tree: a generational [`Arena`] of [`Widget`]s plus the current
+/// page root, the Lynx `unique_id` counter, and a `unique_id` → [`WidgetId`]
+/// index.
 #[derive(Debug)]
 pub struct WidgetTree {
-    arena: Arena,
+    arena: Arena<WidgetState>,
     page: Option<WidgetId>,
+    /// The next Lynx `unique_id` to mint (1-based; 0 stays reserved as
+    /// "unset").
+    next_unique_id: i32,
     by_unique_id: FxHashMap<i32, WidgetId>,
 }
 
@@ -95,17 +104,19 @@ impl WidgetTree {
         Self::from_arena(Arena::with_lock(lock, url_data))
     }
 
-    fn from_arena(arena: Arena) -> Self {
+    fn from_arena(arena: Arena<WidgetState>) -> Self {
         Self {
             arena,
             page: None,
+            // Lynx `unique_id`s are 1-based; 0 stays reserved as "unset".
+            next_unique_id: 1,
             by_unique_id: FxHashMap::default(),
         }
     }
 
     /// Borrow the underlying arena.
     #[must_use]
-    pub const fn arena(&self) -> &Arena {
+    pub const fn arena(&self) -> &Arena<WidgetState> {
         &self.arena
     }
 
@@ -113,7 +124,7 @@ impl WidgetTree {
     ///
     /// The `lynx-style` crate uses this to write resolved computed styles and
     /// clear dirty bits after a resolution pass.
-    pub const fn arena_mut(&mut self) -> &mut Arena {
+    pub const fn arena_mut(&mut self) -> &mut Arena<WidgetState> {
         &mut self.arena
     }
 
@@ -132,13 +143,12 @@ impl WidgetTree {
     // --- element creation -------------------------------------------------
 
     fn create(&mut self, kind: WidgetKind, tag: &str) -> WidgetId {
-        let id = self.arena.insert(Widget::new(kind, tag));
-        let uid = self
+        let unique_id = self.next_unique_id;
+        self.next_unique_id = self.next_unique_id.wrapping_add(1);
+        let id = self
             .arena
-            .get(id)
-            .expect("freshly inserted widget is live")
-            .unique_id;
-        self.by_unique_id.insert(uid, id);
+            .insert(Element::new(tag, WidgetState::new(kind, unique_id)));
+        self.by_unique_id.insert(unique_id, id);
         id
     }
 
@@ -291,8 +301,10 @@ impl WidgetTree {
             return Err(WidgetError::StaleElement(id));
         }
         self.arena.detach(id);
-        for unique_id in self.arena.drop_subtree(id) {
-            self.by_unique_id.remove(&unique_id);
+        // The arena returns the freed widgets' state; harvest the unique_ids
+        // out of it to keep the index consistent.
+        for state in self.arena.drop_subtree(id) {
+            self.by_unique_id.remove(&state.unique_id);
         }
         Ok(())
     }
@@ -442,7 +454,7 @@ impl WidgetTree {
         }
         for &id in ids {
             if let Some(widget) = self.arena.get_mut(id) {
-                widget.css_id = css_id;
+                widget.ext.css_id = css_id;
             }
         }
         for &id in ids {
@@ -460,7 +472,7 @@ impl WidgetTree {
     {
         match self.arena.get_mut(id) {
             Some(widget) => {
-                widget.dataset = entries
+                widget.ext.dataset = entries
                     .into_iter()
                     .map(|(k, v)| (k.into(), v.into()))
                     .collect();
@@ -475,7 +487,7 @@ impl WidgetTree {
     pub fn add_dataset(&mut self, id: WidgetId, key: &str, value: &str) -> Result<(), WidgetError> {
         match self.arena.get_mut(id) {
             Some(widget) => {
-                widget.dataset.insert(key.into(), value.to_owned());
+                widget.ext.dataset.insert(key.into(), value.to_owned());
             }
             None => return Err(WidgetError::StaleElement(id)),
         }
@@ -493,7 +505,7 @@ impl WidgetTree {
         handler: &str,
     ) -> Result<(), WidgetError> {
         match self.arena.get_mut(id) {
-            Some(widget) => widget.events.push(EventReg {
+            Some(widget) => widget.ext.events.push(EventReg {
                 name: name.into(),
                 kind,
                 handler: handler.into(),
@@ -535,7 +547,7 @@ impl WidgetTree {
     /// An element's Lynx `unique_id`.
     #[must_use]
     pub fn get_element_unique_id(&self, id: WidgetId) -> Option<i32> {
-        self.arena.get(id).map(|widget| widget.unique_id)
+        self.arena.get(id).map(|widget| widget.ext.unique_id)
     }
 
     /// An element's active dynamic pseudo-classes, as a [`PseudoState`].
@@ -567,7 +579,7 @@ impl WidgetTree {
     /// A read-only navigation handle for an element, if live.
     #[must_use]
     pub fn widget_ref(&self, id: WidgetId) -> Option<WidgetRef<'_>> {
-        self.arena.widget_ref(id)
+        self.arena.element_ref(id)
     }
 
     /// An element's resolved computed style, if it has been styled.

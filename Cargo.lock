@@ -786,24 +786,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
-name = "lynx-dom"
-version = "0.1.0"
-dependencies = [
- "rustc-hash",
- "stylo",
- "stylo-dom",
- "stylo_atoms",
- "thiserror",
-]
-
-[[package]]
 name = "lynx-style"
 version = "0.1.0"
 dependencies = [
  "app_units",
  "cssparser",
  "euclid",
- "lynx-dom",
+ "lynx-widget",
  "selectors",
  "stylo",
  "stylo_traits",
@@ -818,6 +807,18 @@ dependencies = [
  "codspeed-divan-compat",
  "rkyv",
  "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "lynx-widget"
+version = "0.1.0"
+dependencies = [
+ "rustc-hash",
+ "smallvec",
+ "stylo",
+ "stylo-dom",
+ "stylo_atoms",
  "thiserror",
 ]
 
