@@ -40,6 +40,15 @@ jobs:
       - name: Tests + coverage
         run: cargo llvm-cov --workspace --lcov --output-path lcov.info
 
+      # The Lynx patch series in the vendored stylo fork carries its own test
+      # suites; vendor/stylo is excluded from the workspace, so run them
+      # explicitly or rebases regress silently.
+      - name: Stylo fork Lynx tests
+        run: >-
+          cargo test --manifest-path vendor/stylo/Cargo.toml -p stylo
+          --test lynx_lengths --test lynx_display
+          --test lynx_linear_properties --test lynx_relative_properties
+
       - name: Doctests
         run: cargo test --doc
 

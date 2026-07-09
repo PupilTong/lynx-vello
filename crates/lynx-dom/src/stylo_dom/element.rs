@@ -150,6 +150,11 @@ impl<'a> TElement for ElemRef<'a> {
         for name in self.node().attrs.keys() {
             callback(&LocalName::from(name.as_ref()));
         }
+        // Dataset entries are reflected as `data-*` attributes (web-core
+        // parity; see `attr_matches`).
+        for key in self.node().dataset.keys() {
+            callback(&LocalName::from(format!("data-{key}").as_str()));
+        }
         // Expose the synthetic `l-css-id` attribute (see `attr_matches`) so the
         // bloom filter accounts for it in the future scoped-CSS mode.
         callback(&LocalName::from("l-css-id"));
@@ -301,6 +306,11 @@ impl<'a> TElement for ElemRef<'a> {
         if name == "l-css-id" {
             return Some(self.node().css_id.to_string());
         }
-        self.node().attrs.get(name).cloned()
+        if let Some(value) = self.node().attrs.get(name) {
+            return Some(value.clone());
+        }
+        // Dataset reflection as `data-*`, matching `attr_matches`.
+        name.strip_prefix("data-")
+            .and_then(|key| self.node().dataset.get(key).cloned())
     }
 }

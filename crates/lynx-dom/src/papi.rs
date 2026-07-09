@@ -223,9 +223,17 @@ impl Document {
             });
         }
         if let Some(reference) = before {
-            // A same-parent move (`before == child`) is resolved after detach;
-            // any other reference must currently be a child of `parent`.
-            if reference != child && !self.is_child_of(reference, parent) {
+            if reference == child {
+                // DOM pre-insert: the reference resolves to `child`'s next
+                // sibling, so `insertBefore(n, n)` keeps `n` exactly where it
+                // is — a structural no-op (web-core parity).
+                return if self.is_child_of(child, parent) {
+                    Ok(())
+                } else {
+                    Err(DomError::BadInsertReference(reference))
+                };
+            }
+            if !self.is_child_of(reference, parent) {
                 return Err(DomError::BadInsertReference(reference));
             }
         }
@@ -245,13 +253,22 @@ impl Document {
         if let Some(child_node) = self.arena.get_mut(child) {
             child_node.parent = Some(parent);
         }
-        // Coarse: a structural change re-dirties the parent's whole subtree.
-        self.arena.mark_subtree_dirty(parent);
+        // Coarse: a structural change re-dirties the parent's whole subtree,
+        // and — like an attribute change — the parent's following-sibling
+        // subtrees, because the mutation can flip the parent's own matching
+        // (`:empty`, `:nth-child(..) of` the parent) observed through `+`/`~`.
+        self.arena.mark_attribute_changed(parent);
         Ok(())
     }
 
-    /// Remove `child` from `parent`, dropping `child`'s entire subtree from the
-    /// arena and the `unique_id` index.
+    /// Remove `child` from `parent`, **detaching** it — the subtree stays
+    /// alive in the arena (and in the `unique_id` index) and can be
+    /// re-inserted later.
+    ///
+    /// This matches the Element PAPI contract: web-core's `__RemoveElement` is
+    /// DOM `removeChild` (the element remains usable), and Lynx list recycling
+    /// re-attaches previously removed subtrees. Use
+    /// [`destroy_element`](Self::destroy_element) to actually free a subtree.
     pub fn remove_element(&mut self, parent: ElementId, child: ElementId) -> Result<(), DomError> {
         let Some(child_node) = self.arena.get(child) else {
             return Err(DomError::StaleElement(child));
@@ -260,16 +277,33 @@ impl Document {
             return Err(DomError::NotAChild { parent, child });
         }
 
-        if let Some(parent_node) = self.arena.get_mut(parent) {
-            parent_node.children.retain(|&c| c != child);
-        }
-        self.drop_subtree(child);
-        self.arena.mark_subtree_dirty(parent);
+        // `detach` unlinks and applies the structural invalidation (parent
+        // subtree + parent's following siblings, for `:empty` + `+`/`~`).
+        self.detach(child);
         Ok(())
     }
 
-    /// Replace `old` with `new` in the tree, keeping `old`'s position. `new` is
-    /// detached from any current parent first; `old`'s subtree is then dropped.
+    /// Detach `id` (if attached) and free its entire subtree from the arena
+    /// and the `unique_id` index. All handles into the subtree become stale.
+    ///
+    /// This is the explicit destruction step [`remove_element`](Self::remove_element)
+    /// deliberately does not perform; the runtime layer decides when a
+    /// detached subtree is truly dead (web-core relies on GC for this).
+    pub fn destroy_element(&mut self, id: ElementId) -> Result<(), DomError> {
+        if !self.arena.contains(id) {
+            return Err(DomError::StaleElement(id));
+        }
+        self.detach(id);
+        self.drop_subtree(id);
+        Ok(())
+    }
+
+    /// Replace `old` with `new` in the tree, keeping `old`'s position. `new`
+    /// is detached from any current parent first; `old` ends up detached but
+    /// alive (like DOM `replaceChild`, which returns the old node).
+    ///
+    /// Replacing a detached `old` is a no-op, matching DOM `replaceWith` on a
+    /// parentless node.
     pub fn replace_element(&mut self, new: ElementId, old: ElementId) -> Result<(), DomError> {
         if new == old {
             return Ok(());
@@ -278,10 +312,7 @@ impl Document {
             return Err(DomError::StaleElement(old));
         };
         let Some(parent) = old_node.parent else {
-            return Err(DomError::NotAChild {
-                parent: old,
-                child: old,
-            });
+            return Ok(());
         };
         self.insert_element_before(new, parent, Some(old))?;
         self.remove_element(parent, old)
@@ -667,8 +698,10 @@ impl Document {
         self.child_position(parent, child).is_some()
     }
 
-    /// Detach `child` from its current parent, if any, marking the old parent's
-    /// subtree dirty.
+    /// Detach `child` from its current parent, if any, applying the structural
+    /// invalidation at the old location: the parent's subtree plus the
+    /// parent's following-sibling subtrees (a removal can flip the parent's
+    /// `:empty`/`:nth-*` matching, observable through `+`/`~`).
     fn detach(&mut self, child: ElementId) {
         let old_parent = match self.arena.get(child) {
             Some(node) => node.parent,
@@ -678,7 +711,7 @@ impl Document {
             if let Some(parent_node) = self.arena.get_mut(parent) {
                 parent_node.children.retain(|&c| c != child);
             }
-            self.arena.mark_subtree_dirty(parent);
+            self.arena.mark_attribute_changed(parent);
         }
         if let Some(child_node) = self.arena.get_mut(child) {
             child_node.parent = None;

@@ -16,6 +16,7 @@ use stylo::values::{AtomIdent, AtomString};
 use stylo::{CaseSensitivityExt, LocalName, Namespace};
 
 use crate::arena::ElemRef;
+use crate::tag::NodeKind;
 
 impl Element for ElemRef<'_> {
     type Impl = SelectorImpl;
@@ -86,10 +87,22 @@ impl Element for ElemRef<'_> {
         if name == "l-css-id" {
             return operation.eval_str(&self.node().css_id.to_string());
         }
-        self.node()
-            .attrs
-            .get(name)
-            .is_some_and(|value| operation.eval_str(value))
+        if let Some(value) = self.node().attrs.get(name) {
+            return operation.eval_str(value);
+        }
+        // web-core reflects dataset entries as `data-*` attributes (DOM
+        // dataset reflection), so `[data-x]` selectors must see them too.
+        // Keys are matched verbatim after the `data-` prefix; camelCase↔kebab
+        // reflection is revisited with StyleInfo ingestion (M3) if ReactLynx
+        // turns out to emit camelCase dataset keys.
+        if let Some(key) = name.strip_prefix("data-") {
+            return self
+                .node()
+                .dataset
+                .get(key)
+                .is_some_and(|value| operation.eval_str(value));
+        }
+        false
     }
 
     fn match_non_ts_pseudo_class(
@@ -116,7 +129,23 @@ impl Element for ElemRef<'_> {
     }
 
     fn apply_selector_flags(&self, flags: ElementSelectorFlags) {
-        self.node().selector_flags.borrow_mut().insert(flags);
+        // stylo's contract splits the flags: `for_self()` bits land on this
+        // element, `for_parent()` bits (slow-selector / edge-child markers) on
+        // its parent.
+        let self_flags = flags.for_self();
+        if !self_flags.is_empty() {
+            self.node().selector_flags.borrow_mut().insert(self_flags);
+        }
+        let parent_flags = flags.for_parent();
+        if !parent_flags.is_empty()
+            && let Some(parent) = self.parent()
+        {
+            parent
+                .node()
+                .selector_flags
+                .borrow_mut()
+                .insert(parent_flags);
+        }
     }
 
     fn is_link(&self) -> bool {
@@ -160,8 +189,10 @@ impl Element for ElemRef<'_> {
     }
 
     fn is_root(&self) -> bool {
-        // The `<page>` root has no parent; this is what makes `:root` match it.
-        self.parent().is_none()
+        // `:root` is exactly the `<page>` element (web-core rewrites `:root`
+        // to the page part). Checking the kind — not parentlessness — keeps a
+        // detached subtree's root from matching `:root` during resolve.
+        self.node().kind == NodeKind::Page && self.parent().is_none()
     }
 
     fn add_element_unique_hashes(&self, filter: &mut BloomFilter) -> bool {

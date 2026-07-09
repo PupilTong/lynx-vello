@@ -135,10 +135,59 @@ fn insert_element_before_semantics() {
     let orphan = doc.create_view();
     let err = doc.insert_element_before(stray, page, Some(orphan));
     assert_eq!(err, Err(DomError::BadInsertReference(orphan)));
+
+    // `insertBefore(n, n)` keeps `n` exactly where it is (DOM pre-insert
+    // resolves the reference to n's next sibling) — not a move-to-end.
+    doc.insert_element_before(b, page, Some(b)).unwrap();
+    let order: Vec<_> = doc
+        .elem(page)
+        .unwrap()
+        .children()
+        .map(lynx_dom::ElemRef::id)
+        .collect();
+    assert_eq!(order, vec![b, a, c, d]);
+    // ... and errors when n is not a child of the target parent.
+    let outsider = doc.create_view();
+    assert_eq!(
+        doc.insert_element_before(outsider, page, Some(outsider)),
+        Err(DomError::BadInsertReference(outsider))
+    );
 }
 
 #[test]
-fn remove_element_drops_subtree() {
+fn tree_mutations_dirty_parents_following_siblings() {
+    // `.list:empty + .hint`-style selectors: an insert/remove flips the
+    // parent's own matching, observed through `+`/`~` — so tree mutations
+    // must dirty the mutated parent's FOLLOWING siblings, like attribute
+    // changes do.
+    let mut doc = Document::new();
+    let page = doc.create_page();
+    let before_sib = doc.create_view();
+    let list = doc.create_view();
+    let hint = doc.create_view();
+    doc.append_element(before_sib, page).unwrap();
+    doc.append_element(list, page).unwrap();
+    doc.append_element(hint, page).unwrap();
+    let child = doc.create_view();
+    doc.append_element(child, list).unwrap();
+    doc.clear_dirty();
+
+    // Removing `list`'s only child can flip `.list:empty` → `hint` restyles.
+    doc.remove_element(list, child).unwrap();
+    assert!(doc.node(hint).unwrap().style_dirty);
+    assert!(
+        !doc.node(before_sib).unwrap().style_dirty,
+        "earlier siblings are unaffected by later-sibling mutations"
+    );
+
+    doc.clear_dirty();
+    // The reverse transition (insert) invalidates the same way.
+    doc.append_element(child, list).unwrap();
+    assert!(doc.node(hint).unwrap().style_dirty);
+}
+
+#[test]
+fn remove_detaches_and_destroy_frees() {
     let mut doc = Document::new();
     let page = doc.create_page();
     let container = doc.create_view();
@@ -153,16 +202,14 @@ fn remove_element_drops_subtree() {
     let child_uid = doc.get_element_unique_id(child).unwrap();
     let grandchild_uid = doc.get_element_unique_id(grandchild).unwrap();
 
+    // PAPI remove = detach: the subtree stays alive and re-insertable
+    // (web-core's __RemoveElement is DOM removeChild; list recycling
+    // re-attaches removed subtrees).
     doc.remove_element(container, child).unwrap();
-
-    // The subtree is gone from the arena.
-    assert!(doc.node(child).is_none());
-    assert!(doc.node(grandchild).is_none());
-    assert!(doc.elem(child).is_none());
-    // The unique_id index is cleaned.
-    assert_eq!(doc.element_by_unique_id(child_uid), None);
-    assert_eq!(doc.element_by_unique_id(grandchild_uid), None);
-    // The surviving sibling remains.
+    assert!(doc.node(child).is_some());
+    assert_eq!(doc.get_parent(child), None);
+    assert_eq!(doc.get_parent(grandchild), Some(child));
+    assert_eq!(doc.element_by_unique_id(child_uid), Some(child));
     let kids: Vec<_> = doc
         .elem(container)
         .unwrap()
@@ -170,6 +217,18 @@ fn remove_element_drops_subtree() {
         .map(lynx_dom::ElemRef::id)
         .collect();
     assert_eq!(kids, vec![sibling]);
+
+    // Re-inserting the detached subtree works.
+    doc.append_element(child, container).unwrap();
+    assert_eq!(doc.get_parent(child), Some(container));
+    doc.remove_element(container, child).unwrap();
+
+    // Explicit destruction frees the subtree and the unique_id index.
+    doc.destroy_element(child).unwrap();
+    assert!(doc.node(child).is_none());
+    assert!(doc.node(grandchild).is_none());
+    assert_eq!(doc.element_by_unique_id(child_uid), None);
+    assert_eq!(doc.element_by_unique_id(grandchild_uid), None);
 
     // Removing a non-child errors.
     let other = doc.create_view();
@@ -195,8 +254,16 @@ fn replace_element_keeps_position() {
         .map(lynx_dom::ElemRef::id)
         .collect();
     assert_eq!(order, vec![t.a, new, t.c]);
-    assert!(doc.node(t.b).is_none());
+    // Like DOM replaceChild, the old node survives, detached.
+    assert!(doc.node(t.b).is_some());
+    assert_eq!(doc.get_parent(t.b), None);
     assert_eq!(doc.get_parent(new), Some(t.container));
+
+    // Replacing a detached element is a no-op (DOM replaceWith on a
+    // parentless node).
+    let another = doc.create_view();
+    doc.replace_element(another, t.b).unwrap();
+    assert_eq!(doc.get_parent(another), None);
 }
 
 #[test]
@@ -206,7 +273,7 @@ fn generation_safety_after_reuse() {
     let a = doc.create_view();
     doc.append_element(a, page).unwrap();
 
-    doc.remove_element(page, a).unwrap();
+    doc.destroy_element(a).unwrap();
     // The next created element reuses the freed slot with a bumped generation.
     let b = doc.create_view();
     assert_eq!(a.index(), b.index(), "slot should have been reused");
@@ -305,7 +372,7 @@ fn set_css_id_batch() {
     assert_eq!(doc.node(t.page).unwrap().css_id, 0);
 
     // A stale handle anywhere in the batch fails the whole call.
-    doc.remove_element(t.container, t.a).unwrap();
+    doc.destroy_element(t.a).unwrap();
     assert_eq!(
         doc.set_css_id(&[t.b, t.a], 7),
         Err(DomError::StaleElement(t.a))
@@ -428,7 +495,7 @@ fn stale_handle_operations_error() {
     let page = doc.create_page();
     let view = doc.create_view();
     doc.append_element(view, page).unwrap();
-    doc.remove_element(page, view).unwrap();
+    doc.destroy_element(view).unwrap();
 
     assert_eq!(
         doc.set_classes(view, "x"),

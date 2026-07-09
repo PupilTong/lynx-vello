@@ -75,6 +75,11 @@ pub fn property_is_supported(name: &str) -> bool {
 /// stylo owns the rule tree internally (unlike the 0.13 line, where it was a
 /// separate `RuleTree`), reached via [`Stylist::rule_tree`].
 ///
+/// **One engine per process**: the Lynx unit bases (`rpx`/`ppx`/`sp`) are
+/// process-global in the stylo fork — see [`EngineMetrics`] for the full
+/// contract. Constructing a second engine with different metrics silently
+/// changes Lynx-unit resolution for the first.
+///
 /// [`Device`]: stylo::device::Device
 pub struct StyleEngine {
     stylist: Stylist,
@@ -284,9 +289,11 @@ impl StyleEngine {
     ///
     /// [`Device`]: stylo::device::Device
     pub fn set_viewport(&mut self, width: f32, height: f32) {
-        self.stylist
-            .device_mut()
-            .set_viewport_size(euclid::Size2D::new(width, height));
+        let device = self.stylist.device_mut();
+        let dpr = device.device_pixel_ratio().get();
+        device.set_viewport_size(euclid::Size2D::new(width, height));
+        // Keep the build_device invariant `device_size = viewport * dpr`.
+        device.set_device_size(euclid::Size2D::new(width * dpr, height * dpr));
         self.refresh_device();
     }
 
@@ -306,9 +313,14 @@ impl StyleEngine {
         screen_width: f32,
         font_scale: f32,
     ) {
-        self.stylist
-            .device_mut()
-            .set_device_pixel_ratio(euclid::Scale::new(device_pixel_ratio));
+        let device = self.stylist.device_mut();
+        device.set_device_pixel_ratio(euclid::Scale::new(device_pixel_ratio));
+        // Keep the build_device invariant `device_size = viewport * dpr`.
+        let viewport = device.viewport_size();
+        device.set_device_size(euclid::Size2D::new(
+            viewport.width * device_pixel_ratio,
+            viewport.height * device_pixel_ratio,
+        ));
         stylo::values::specified::lynx_units::set_lynx_unit_metrics(
             screen_width,
             device_pixel_ratio,

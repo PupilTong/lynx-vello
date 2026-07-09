@@ -25,6 +25,20 @@ use stylo_traits::{CSSPixel, DevicePixel};
 /// The environment metrics the style engine builds its [`Device`] from.
 ///
 /// Lengths are in CSS pixels except `device_pixel_ratio` (a scale).
+///
+/// # Process-global Lynx unit bases
+///
+/// `screen_width`, `device_pixel_ratio`, and `font_scale` feed the stylo
+/// fork's **process-global** Lynx unit metrics
+/// (`stylo::values::specified::lynx_units`): `rpx`/`ppx`/`sp` in *every*
+/// engine in the process resolve against whichever engine set them last.
+/// Run one `StyleEngine` per process (the Lynx model — all views share one
+/// physical screen), or ensure multiple engines share identical metrics.
+///
+/// `font_scale` currently scales **only** the `sp` unit. Native Lynx can
+/// additionally scale other font-relevant lengths by `font_scale` (unless
+/// its `font-scale-sp-only` mode is set); that behavior belongs to the text
+/// engine and is intentionally not modeled here yet.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EngineMetrics {
     /// The Lynx view width, in CSS pixels (the basis for `vw`, `%`).
@@ -84,8 +98,12 @@ pub(crate) fn build_device(metrics: EngineMetrics) -> Device {
         Box::new(LynxFontMetricsProvider),
         default_values,
         PrefersColorScheme::Light,
-        PointerCapabilities::default(),
-        PointerCapabilities::default(),
+        // Lynx surfaces are touch-first: a coarse, non-hovering primary
+        // pointer. `PointerCapabilities::default()` would reflect the *build
+        // host* instead. (Lynx's own `hover`/`pointer` media features are
+        // dead even natively; this only matters once @media is wired.)
+        PointerCapabilities::COARSE,
+        PointerCapabilities::COARSE,
     )
 }
 
