@@ -25,8 +25,6 @@ pub enum WidgetKind {
     ListItem,
     /// `<wrapper>` — a transparent grouping element.
     Wrapper,
-    /// `<component>` — a component boundary.
-    Component,
     /// `<none>` — Lynx's explicit "no element" element.
     NoneElement,
     /// Any tag not recognised as a built-in Lynx element.
@@ -47,7 +45,6 @@ impl WidgetKind {
             "list" => Self::List,
             "list-item" => Self::ListItem,
             "wrapper" => Self::Wrapper,
-            "component" => Self::Component,
             "none" => Self::NoneElement,
             _ => Self::Unknown,
         }
@@ -69,7 +66,6 @@ impl WidgetKind {
             Self::List => "list",
             Self::ListItem => "list-item",
             Self::Wrapper => "wrapper",
-            Self::Component => "component",
             Self::NoneElement => "none",
             Self::Unknown => "unknown",
         }

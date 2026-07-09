@@ -81,8 +81,9 @@ pub struct Widget {
     /// insertion (1-based, monotonically increasing).
     pub unique_id: i32,
     /// The `css_id` scoping this element's styles: `0` means unset / global.
-    /// A later milestone gives this enclosing-component semantics. It is also
-    /// exposed to selector matching as the synthetic `l-css-id` attribute.
+    /// Stamped directly by Lynx's `__SetCSSId` (there is no `<component>`
+    /// element in this engine to inherit it from). It is also exposed to
+    /// selector matching as the synthetic `l-css-id` attribute.
     pub css_id: i32,
     /// The element's classes, interned as atoms.
     pub classes: SmallVec<[Atom; 4]>,

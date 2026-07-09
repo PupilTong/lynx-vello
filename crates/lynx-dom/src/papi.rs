@@ -185,11 +185,6 @@ impl WidgetTree {
         self.create(WidgetKind::List, "list")
     }
 
-    /// Create a `<component>` boundary element.
-    pub fn create_component(&mut self) -> WidgetId {
-        self.create(WidgetKind::Component, "component")
-    }
-
     /// Create a `<wrapper>` element.
     pub fn create_wrapper(&mut self) -> WidgetId {
         self.create(WidgetKind::Wrapper, "wrapper")
