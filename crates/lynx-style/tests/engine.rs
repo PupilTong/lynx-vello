@@ -21,15 +21,6 @@ fn metrics() -> EngineMetrics {
     EngineMetrics::new(750.0, 1334.0, 2.0)
 }
 
-/// The Lynx unit bases (`rpx`/`ppx`/`sp`) are process-global in the stylo
-/// fork, and every [`StyleEngine::new`] writes them — so tests that resolve
-/// styles must not run concurrently. Each test takes this lock first.
-fn metrics_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 /// Resolve the computed width of a fixed-length `width` value, in CSS px.
 fn width_px(size: Size) -> f32 {
     match size {
@@ -40,7 +31,6 @@ fn width_px(size: Size) -> f32 {
 
 #[test]
 fn class_rule_sets_color() {
-    let _metrics = metrics_lock();
     let mut engine = StyleEngine::new(metrics());
     engine.add_stylesheet_str(".c { color: red; }", Origin::Author);
 
@@ -58,13 +48,9 @@ fn class_rule_sets_color() {
 }
 
 #[test]
-fn rpx_resolves_against_screen_width() {
-    let _metrics = metrics_lock();
-    // screen_width 750 → 1rpx = 1px → 100rpx = 100px.
-    let mut engine = StyleEngine::new(EngineMetrics {
-        screen_width: 750.0,
-        ..metrics()
-    });
+fn rpx_resolves_against_viewport_width() {
+    // viewport_width 750 → 1rpx = 1px → 100rpx = 100px.
+    let mut engine = StyleEngine::new(metrics());
     engine.add_stylesheet_str(".box { width: 100rpx; }", Origin::Author);
 
     let mut doc = engine.new_widget_tree();
@@ -78,11 +64,10 @@ fn rpx_resolves_against_screen_width() {
 }
 
 #[test]
-fn rpx_follows_screen_width_change() {
-    let _metrics = metrics_lock();
-    // Same CSS, wider screen: screen_width 1500 → 1rpx = 2px → 100rpx = 200px.
+fn rpx_follows_viewport_change() {
+    // Same CSS, wider view: viewport_width 1500 → 1rpx = 2px → 100rpx = 200px.
     let mut engine = StyleEngine::new(EngineMetrics {
-        screen_width: 1500.0,
+        viewport_width: 1500.0,
         ..metrics()
     });
     engine.add_stylesheet_str(".box { width: 100rpx; }", Origin::Author);
@@ -96,15 +81,14 @@ fn rpx_follows_screen_width_change() {
     let computed = engine.resolve_widget(doc.widget_ref(view).unwrap(), None);
     assert_eq!(width_px(computed.clone_width()), 200.0);
 
-    // Narrowing the screen live (no re-ingestion) makes rpx follow.
-    engine.set_screen_metrics(2.0, 750.0, 1.0);
+    // Narrowing the view live (no re-ingestion) makes rpx follow.
+    engine.set_viewport(750.0, 1334.0);
     let computed = engine.resolve_widget(doc.widget_ref(view).unwrap(), None);
     assert_eq!(width_px(computed.clone_width()), 100.0);
 }
 
 #[test]
 fn inline_style_beats_class_rule() {
-    let _metrics = metrics_lock();
     let mut engine = StyleEngine::new(metrics());
     engine.add_stylesheet_str(".c { color: red; }", Origin::Author);
 
@@ -125,7 +109,6 @@ fn inline_style_beats_class_rule() {
 
 #[test]
 fn display_linear_computes_to_lynx_linear() {
-    let _metrics = metrics_lock();
     let mut engine = StyleEngine::new(metrics());
     engine.add_stylesheet_str(".row { display: linear; }", Origin::Author);
 
@@ -141,7 +124,6 @@ fn display_linear_computes_to_lynx_linear() {
 
 #[test]
 fn linear_weight_longhand_computes() {
-    let _metrics = metrics_lock();
     let mut engine = StyleEngine::new(metrics());
     engine.add_stylesheet_str(".item { linear-weight: 2; }", Origin::Author);
 
@@ -157,7 +139,6 @@ fn linear_weight_longhand_computes() {
 
 #[test]
 fn color_inherits_into_child() {
-    let _metrics = metrics_lock();
     let mut engine = StyleEngine::new(metrics());
     // `color` is inherited; the child has no own `color`.
     engine.add_stylesheet_str(".parent { color: green; }", Origin::Author);
@@ -184,7 +165,6 @@ fn color_inherits_into_child() {
 
 #[test]
 fn writeback_stores_computed_and_clears_dirty() {
-    let _metrics = metrics_lock();
     let mut engine = StyleEngine::new(metrics());
     engine.add_stylesheet_str(".c { color: red; }", Origin::Author);
 
@@ -201,17 +181,20 @@ fn writeback_stores_computed_and_clears_dirty() {
     assert!(!doc.widget(view).unwrap().style_dirty);
 }
 
-/// A standalone helper module documenting the (verified) `-webkit-text-stroke`
-/// bucket answer — see the crate-level report. This test just asserts what the
-/// servo build of the vendored stylo actually exposes.
+/// `text-stroke*` — the unprefixed Lynx spelling of stylo's `-webkit-text-stroke*`
+/// — is supported. The fork ports the (formerly `engine = "gecko"`) -webkit-
+/// properties into the servo build behind `layout.unimplemented` and registers
+/// the unprefixed Lynx aliases; the `lynx` feature force-enables them.
 #[test]
-fn webkit_text_stroke_is_absent_in_servo_build() {
+fn text_stroke_is_supported() {
     use lynx_style::property_is_supported;
-    // `-webkit-text-stroke*` is gated `engine = "gecko"` in the vendored stylo,
-    // so it is NOT compiled into the servo build lynx-vello uses. This documents
-    // that `text-stroke*` must be a fork-added (bucket B) property later.
-    assert!(!property_is_supported("-webkit-text-stroke-width"));
-    assert!(!property_is_supported("-webkit-text-stroke-color"));
+    // Lynx's unprefixed spellings (aliases of the -webkit-text-stroke* family).
+    assert!(property_is_supported("text-stroke"));
+    assert!(property_is_supported("text-stroke-color"));
+    assert!(property_is_supported("text-stroke-width"));
+    // The canonical -webkit- names (the alias targets) are exposed too.
+    assert!(property_is_supported("-webkit-text-stroke-width"));
+    assert!(property_is_supported("-webkit-text-stroke-color"));
     // A plain servo-supported property, as a positive control.
     assert!(property_is_supported("color"));
 }
