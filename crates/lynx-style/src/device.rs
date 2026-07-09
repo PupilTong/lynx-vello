@@ -2,9 +2,9 @@
 //! against, plus the [`EngineMetrics`] describing the Lynx view it models.
 //!
 //! The device carries the viewport (the Lynx view, *not* the host window), the
-//! device-pixel ratio, and the Lynx-specific `screen_width` (`rpx` basis) and
-//! `font_scale` (`sp` basis). All of these stay live: mutating them and
-//! re-resolving is enough for `rpx`/`ppx`/`sp`/`vw`/`vh` to follow, with no
+//! device-pixel ratio. The viewport doubles as the `rpx` basis
+//! (`1rpx = viewport_width / 750`, resolved like `vw`). All of it stays
+//! live: mutating and re-resolving is enough for `rpx`/`vw`/`vh` to follow, with no
 //! re-ingestion (exercised more fully from M6).
 
 use euclid::{Scale, Size2D};
@@ -24,47 +24,31 @@ use stylo_traits::{CSSPixel, DevicePixel};
 
 /// The environment metrics the style engine builds its [`Device`] from.
 ///
-/// Lengths are in CSS pixels except `device_pixel_ratio` (a scale).
-///
-/// # Process-global Lynx unit bases
-///
-/// `screen_width`, `device_pixel_ratio`, and `font_scale` feed the stylo
-/// fork's **process-global** Lynx unit metrics
-/// (`stylo::values::specified::lynx_units`): `rpx`/`ppx`/`sp` in *every*
-/// engine in the process resolve against whichever engine set them last.
-/// Run one `StyleEngine` per process (the Lynx model — all views share one
-/// physical screen), or ensure multiple engines share identical metrics.
-///
-/// `font_scale` currently scales **only** the `sp` unit. Native Lynx can
-/// additionally scale other font-relevant lengths by `font_scale` (unless
-/// its `font-scale-sp-only` mode is set); that behavior belongs to the text
-/// engine and is intentionally not modeled here yet.
+/// Lengths are in CSS pixels except `device_pixel_ratio` (a scale). The
+/// Lynx `rpx` unit is viewport-relative (`1rpx = viewport_width / 750`,
+/// exactly like `vw` with a denominator of 750), so it needs no metrics
+/// beyond the viewport itself and stays live through
+/// [`StyleEngine::set_viewport`](crate::StyleEngine::set_viewport).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EngineMetrics {
-    /// The Lynx view width, in CSS pixels (the basis for `vw`, `%`).
+    /// The Lynx view width, in CSS pixels (the basis for `vw`, `%`, and
+    /// `rpx` = width/750).
     pub viewport_width: f32,
     /// The Lynx view height, in CSS pixels (the basis for `vh`).
     pub viewport_height: f32,
-    /// CSS-pixel → device-pixel ratio (the basis for `ppx` = `1/dpr`).
+    /// CSS-pixel → device-pixel ratio.
     pub device_pixel_ratio: f32,
-    /// The screen width, in CSS pixels, that `1rpx = screen_width / 750`
-    /// resolves against.
-    pub screen_width: f32,
-    /// The font scale that `1sp = font_scale px` resolves against.
-    pub font_scale: f32,
 }
 
 impl EngineMetrics {
-    /// Metrics for a `width`×`height` Lynx view at the given device-pixel ratio,
-    /// with `rpx` resolving against `width` and no font scaling.
+    /// Metrics for a `width`×`height` Lynx view at the given device-pixel
+    /// ratio.
     #[must_use]
     pub fn new(width: f32, height: f32, device_pixel_ratio: f32) -> Self {
         Self {
             viewport_width: width,
             viewport_height: height,
             device_pixel_ratio,
-            screen_width: width,
-            font_scale: 1.0,
         }
     }
 }
@@ -79,15 +63,6 @@ pub(crate) fn build_device(metrics: EngineMetrics) -> Device {
         metrics.viewport_height * metrics.device_pixel_ratio,
     );
     let device_pixel_ratio = Scale::<f32, CSSPixel, DevicePixel>::new(metrics.device_pixel_ratio);
-
-    // rpx/ppx/sp resolve against these process-global metrics, not the Device
-    // (see `vendor/stylo` `values/specified/lynx_units.rs`): they are plain
-    // length units, set at engine init and on metric change (+ restyle).
-    stylo::values::specified::lynx_units::set_lynx_unit_metrics(
-        metrics.screen_width,
-        metrics.device_pixel_ratio,
-        metrics.font_scale,
-    );
 
     Device::new(
         MediaType::screen(),

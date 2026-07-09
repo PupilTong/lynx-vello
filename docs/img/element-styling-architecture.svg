@@ -51,8 +51,8 @@
   <text x="572" y="198" class="bh">crates/lynx-style</text>
   <text x="700" y="198" class="bs">— the style engine</text>
   <text x="572" y="222" class="ln">StyleEngine { Stylist · Device · SharedRwLock }</text>
-  <text x="572" y="238" class="ln">EngineMetrics: viewport · DPR · screen_width(rpx)</text>
-  <text x="572" y="254" class="ln">  · font_scale(sp) — live metric updates</text>
+  <text x="572" y="238" class="ln">EngineMetrics: viewport (also the rpx basis) · DPR</text>
+  <text x="572" y="254" class="ln">  set_viewport keeps rpx/vw/vh live</text>
   <text x="572" y="274" class="ln">resolve_widget: match → rule tree → cascade</text>
   <text x="572" y="290" class="ln">add_stylesheet — media-capable (@media seam)</text>
   <text x="572" y="310" class="ln">planned: M3 StyleInfo ingestion · M4 UA sheet</text>
@@ -90,13 +90,13 @@
   <text x="572" y="432" class="bh">vendor/stylo</text>
   <text x="668" y="432" class="bs">— git submodule (PupilTong/stylo · branch lynx)</text>
   <text x="572" y="456" class="ln">stylo 0.19 (servo flavor) + 3-commit lynx series:</text>
-  <text x="572" y="476" class="ln">  rpx/ppx/sp units — lynx_units global metrics</text>
+  <text x="572" y="476" class="ln">  rpx unit — viewport-relative, resolved like vw</text>
   <text x="572" y="492" class="ln">  display: linear | relative</text>
   <text x="572" y="508" class="ln">  linear-* / relative-* longhands (non-deprecated)</text>
   <text x="572" y="532" class="ln">crates: stylo(style) · selectors · stylo_atoms</text>
   <text x="572" y="548" class="ln">  · stylo_dom (aliased dom) · stylo_traits</text>
   <text x="572" y="572" class="ln">rebased onto upstream releases; fork tests in CI</text>
-  <text x="572" y="588" class="ln">(19 lynx_* tests)</text>
+  <text x="572" y="588" class="ln">(20 lynx_* tests)</text>
 
   <!-- cross elbow: lynx-style <-> stylo-dom -->
   <path class="ar" d="M446,470 H500 V300 H554" marker-end="url(#arr)" marker-start="url(#arr)"/>
