@@ -60,10 +60,9 @@ struct Slot<T> {
 /// A generational arena of [`Element`]s.
 ///
 /// The arena owns the [`SharedRwLock`] and [`UrlExtraData`] used to parse and
-/// guard every element's inline style block. The style engine driving the
-/// cascade must resolve elements from an arena whose lock it *shares* (see
-/// [`Arena::with_lock`]); otherwise stylo's `Locked::read_with` guard check
-/// fails when the cascade reaches an inline block.
+/// guard every element's inline style block. [`StyleEngine`](crate::StyleEngine)
+/// creates styled arenas with the matching private context; embedders do not
+/// pass locks across crate boundaries.
 #[derive(Debug)]
 pub struct Arena<T> {
     slots: Vec<Slot<T>>,
@@ -82,19 +81,15 @@ impl<T> Arena<T> {
     /// Create an empty arena with a freshly minted [`SharedRwLock`] and a
     /// placeholder `about:blank` [`UrlExtraData`].
     ///
-    /// A standalone arena (DOM-only, never styled) can use this. To style the
-    /// tree, build it from an arena whose lock the style engine shares — see
-    /// [`Arena::with_lock`].
+    /// A standalone arena (DOM-only, never styled) can use this. Styled trees
+    /// should be created by [`StyleEngine::new_arena`](crate::StyleEngine::new_arena).
     #[must_use]
     pub fn new() -> Self {
-        Self::with_lock(SharedRwLock::new(), about_blank_url_data())
+        Self::with_style_context(SharedRwLock::new(), about_blank_url_data())
     }
 
-    /// Create an empty arena backed by an explicit [`SharedRwLock`] and
-    /// [`UrlExtraData`], typically cloned from the style engine that will
-    /// style this tree so their guards match.
-    #[must_use]
-    pub fn with_lock(lock: SharedRwLock, url_data: UrlExtraData) -> Self {
+    /// Create an arena with the style context owned by this crate.
+    pub(crate) fn with_style_context(lock: SharedRwLock, url_data: UrlExtraData) -> Self {
         Self {
             slots: Vec::new(),
             free_list: Vec::new(),
@@ -105,13 +100,13 @@ impl<T> Arena<T> {
 
     /// The shared lock guarding this arena's inline style blocks.
     #[must_use]
-    pub fn shared_lock(&self) -> &SharedRwLock {
+    pub(crate) fn shared_lock(&self) -> &SharedRwLock {
         &self.lock
     }
 
     /// The base URL data used when parsing this arena's inline styles.
     #[must_use]
-    pub fn url_data(&self) -> &UrlExtraData {
+    pub(crate) fn url_data(&self) -> &UrlExtraData {
         &self.url_data
     }
 

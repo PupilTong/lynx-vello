@@ -5,10 +5,10 @@
 //! implementing, on the `Copy` handle [`ElementRef`](crate::ElementRef) (for
 //! any payload `T: `[`ExternalState`](crate::ExternalState)):
 //!
-//! - [`NodeInfo`](stylo::dom::NodeInfo) + [`TNode`](stylo::dom::TNode) ([`node`])
-//! - [`TElement`](stylo::dom::TElement) ([`element`])
-//! - [`TDocument`](stylo::dom::TDocument) + [`TShadowRoot`](stylo::dom::TShadowRoot) ([`document`])
-//! - [`selectors::Element`] ([`selector`])
+//! - [`NodeInfo`](stylo::dom::NodeInfo) + [`TNode`](stylo::dom::TNode) (`node`)
+//! - [`TElement`](stylo::dom::TElement) (`element`)
+//! - [`TDocument`](stylo::dom::TDocument) + [`TShadowRoot`](stylo::dom::TShadowRoot) (`document`)
+//! - [`selectors::Element`] (`selector`)
 //!
 //! Modelled on Paws' `engine/src/style/dom/*` (stylo 0.13), adapted to the
 //! vendored stylo 0.19 trait surface.
@@ -26,13 +26,13 @@
 //!   [`ExternalState`](crate::ExternalState) attribute hooks.
 //! - **Shadow DOM / pseudo-elements / animations** are stubbed (`None`/`false`) — none exist in
 //!   this model yet.
-//! - **Snapshots** are unused: invalidation is coarse (see [`crate::dirty`]), so `has_snapshot()`
-//!   is `false` and `handled_snapshot()` a no-op.
+//! - **Snapshots** are unused: invalidation is coarse, so `has_snapshot()` is `false` and
+//!   `handled_snapshot()` a no-op.
 //!
 //! # Safety
 //!
 //! The `unsafe` needed for stylo's interior-mutable per-element state is
-//! confined to [`element`]; see that module's `SAFETY` notes. The invariant is
+//! confined to the `element` implementation; see that module's `SAFETY` notes. The invariant is
 //! the crate-wide one: **single-threaded flush** — no element's stylo data is
 //! touched concurrently.
 

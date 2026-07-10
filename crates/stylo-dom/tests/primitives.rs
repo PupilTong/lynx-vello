@@ -23,14 +23,7 @@ fn insert(arena: &mut Arena<()>, tag: &str) -> ElementId {
 
 /// The number of declarations in an element's parsed inline style block.
 fn inline_declaration_count(arena: &Arena<()>, id: ElementId) -> usize {
-    let guard = arena.shared_lock().read();
-    let block = arena
-        .get(id)
-        .unwrap()
-        .inline_block
-        .as_ref()
-        .expect("element has an inline block");
-    block.read_with(&guard).declarations().len()
+    arena.inline_style_declaration_count(id).unwrap()
 }
 
 #[test]

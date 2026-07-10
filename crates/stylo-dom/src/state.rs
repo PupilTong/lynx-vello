@@ -6,7 +6,7 @@
 //! [`PseudoState`] is the crate's public API type (it keeps embedder
 //! state-toggling APIs free of any stylo type in their signatures); internally
 //! each [`Element`] stores the equivalent stylo
-//! [`ElementState`](crate::ElementState) so
+//! [`ElementState`] so
 //! `selectors::Element::match_non_ts_pseudo_class` can test it directly against
 //! `NonTSPseudoClass::state_flag()`. [`PseudoState::to_element_state`] is the
 //! single bridge between the two.
@@ -76,11 +76,11 @@ impl PseudoState {
         }
     }
 
-    /// Map this set to the equivalent stylo [`ElementState`](crate::ElementState).
+    /// Map this set to the equivalent stylo [`ElementState`].
     ///
     /// This is the only place `PseudoState` and stylo's state bits are bridged;
     /// `selectors::Element::match_non_ts_pseudo_class` matches the resulting
-    /// [`ElementState`](crate::ElementState) against
+    /// [`ElementState`] against
     /// `NonTSPseudoClass::state_flag()`.
     #[must_use]
     pub fn to_element_state(self) -> ElementState {
@@ -92,7 +92,7 @@ impl PseudoState {
     }
 
     /// Recover a [`PseudoState`] from a stylo
-    /// [`ElementState`](crate::ElementState) (the inverse of
+    /// [`ElementState`] (the inverse of
     /// [`to_element_state`](Self::to_element_state), keeping only the three
     /// bits tracked here).
     #[must_use]

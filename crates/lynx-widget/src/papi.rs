@@ -8,8 +8,8 @@
 //! [`replace_element`] ↔ `__ReplaceElement`, [`create_element`] ↔
 //! `__CreateElement`) even though the values they carry are [`Widget`]s. JS
 //! bindings live in a later runtime crate; this is the pure native validation
-//! layer. There is deliberately **no** flush/resolution driver: the `lynx-style`
-//! crate drives restyling and reads the dirty state maintained here (see
+//! layer. [`crate::StyleEngine`] adapts `stylo-dom`'s generic cascade to the
+//! Widget tree and reads the dirty state maintained here (see
 //! [`WidgetTree::has_dirty`] / [`WidgetTree::clear_dirty`]).
 //!
 //! This layer validates PAPI semantics — stale handles, cycles, insertion
@@ -29,8 +29,6 @@
 use rustc_hash::FxHashMap;
 use stylo::properties::ComputedValues;
 use stylo::servo_arc::Arc;
-use stylo::shared_lock::SharedRwLock;
-use stylo::stylesheets::UrlExtraData;
 use stylo_atoms::Atom;
 use stylo_dom::{Arena, Element, PseudoState};
 use thiserror::Error;
@@ -86,25 +84,17 @@ impl Default for WidgetTree {
 }
 
 impl WidgetTree {
-    /// Create an empty widget tree with a freshly minted [`SharedRwLock`].
+    /// Create a standalone Widget tree for DOM-only use.
     ///
-    /// Suitable for DOM-only use; to style the tree, build it with
-    /// [`WidgetTree::with_lock`] using the `StyleEngine`'s shared lock so the
-    /// cascade's guards match this tree's inline style blocks.
+    /// A tree that will be styled should be created with
+    /// [`StyleEngine::new_widget_tree`](crate::StyleEngine::new_widget_tree),
+    /// which binds it to the generic style engine's private context.
     #[must_use]
     pub fn new() -> Self {
         Self::from_arena(Arena::new())
     }
 
-    /// Create an empty widget tree backed by an explicit [`SharedRwLock`] and
-    /// [`UrlExtraData`] (typically the `StyleEngine`'s, so inline styles parse
-    /// against the same lock the cascade guards).
-    #[must_use]
-    pub fn with_lock(lock: SharedRwLock, url_data: UrlExtraData) -> Self {
-        Self::from_arena(Arena::with_lock(lock, url_data))
-    }
-
-    fn from_arena(arena: Arena<WidgetState>) -> Self {
+    pub(crate) fn from_arena(arena: Arena<WidgetState>) -> Self {
         Self {
             arena,
             page: None,
@@ -122,22 +112,10 @@ impl WidgetTree {
 
     /// Mutably borrow the underlying arena.
     ///
-    /// The `lynx-style` crate uses this to write resolved computed styles and
-    /// clear dirty bits after a resolution pass.
+    /// The Widget style adapter uses this to write resolved computed styles
+    /// and clear dirty bits after a resolution pass.
     pub const fn arena_mut(&mut self) -> &mut Arena<WidgetState> {
         &mut self.arena
-    }
-
-    /// The tree's [`SharedRwLock`] (guarding inline style blocks).
-    #[must_use]
-    pub fn shared_lock(&self) -> &SharedRwLock {
-        self.arena.shared_lock()
-    }
-
-    /// The tree's base [`UrlExtraData`] (used to parse inline styles).
-    #[must_use]
-    pub fn url_data(&self) -> &UrlExtraData {
-        self.arena.url_data()
     }
 
     // --- element creation -------------------------------------------------
@@ -589,20 +567,17 @@ impl WidgetTree {
     }
 
     /// Store an element's resolved computed style and clear its `style_dirty`
-    /// bit. Called by the `lynx-style` crate after resolving an element.
+    /// bit. Called after the Widget style adapter resolves an element.
     pub fn set_computed(
         &mut self,
         id: WidgetId,
         style: Arc<ComputedValues>,
     ) -> Result<(), WidgetError> {
-        match self.arena.get_mut(id) {
-            Some(widget) => {
-                widget.computed = Some(style);
-                widget.style_dirty = false;
-            }
-            None => return Err(WidgetError::StaleElement(id)),
+        if self.arena.store_computed_style(id, style) {
+            Ok(())
+        } else {
+            Err(WidgetError::StaleElement(id))
         }
-        Ok(())
     }
 
     // --- dirty state ------------------------------------------------------

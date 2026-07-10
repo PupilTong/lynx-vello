@@ -102,10 +102,22 @@ useful signal for currently-compatible versions of those libraries.
 - `crates/lynx-template-decoder` — decodes `.web.bundle` (magic `SDRA WROF`):
   manifest, rkyv `StyleInfo`, Lepus/JS code, custom sections. Scope: binary
   template parsing only, no JS runtime, no CSS engine (yet).
-- *(planned, not yet scaffolded)* style / layout / text / render / runtime
-  crates — see `docs/tracking/` for the behavior surface each will need to
-  cover before scaffolding begins, and `.claude/agents/` for the
-  subsystem-scoped agent personas already set up for this work.
+- `crates/stylo-dom` — generic HTML-DOM subset and standards-oriented CSS
+  computation core. Owns `Element<T>` / `Arena<T>`, stylo DOM trait impls,
+  tree invalidation, inline-style parsing, the `Stylist` / cascade pipeline,
+  and the private `SharedRwLock` shared by an engine and its arenas. It must
+  not contain Lynx widget vocabulary or Lynx device/unit policy.
+- `crates/lynx-widget` — Lynx Element-PAPI and style adapter over `stylo-dom`.
+  Owns `WidgetState` / `WidgetTree`, Lynx view metrics, touch-first
+  device policy, and the viewport-relative `rpx` integration. Standard CSS
+  parsing, matching, cascade, and lock ownership remain in `stylo-dom`.
+- *(planned, not yet scaffolded)* layout / text / render / runtime crates —
+  see `docs/tracking/` for the behavior surface each will need to cover before
+  scaffolding begins, and `.claude/agents/` for the subsystem-scoped agent
+  personas already set up for this work.
+
+See `docs/style-architecture.md` for the current style-layer dependency and
+ownership rules.
 
 ## Reference repos (local checkouts, read-only — do not edit)
 

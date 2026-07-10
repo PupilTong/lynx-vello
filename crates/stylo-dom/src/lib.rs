@@ -4,15 +4,15 @@
 //! needs to run its cascade over it: a generational [`Arena`] of [`Element`]s
 //! addressed by an [`ElementId`], the [`ElementRef`] navigation handle, the
 //! low-level tree-mutation + coarse-invalidation primitives, inline-style
-//! parsing, and the stylo element-trait impls.
+//! parsing, the stylo element-trait impls, and a standards-oriented CSS
+//! computation engine.
 //!
 //! It knows nothing about any particular embedder: [`Element`] is generic over
 //! an external-state payload `T` (its [`ext`](Element::ext) field), and the
 //! [`ExternalState`] trait is the only channel through which that payload can
 //! influence matching (`:root` participation, synthetic / reflected
 //! attributes). In lynx-vello the Lynx embedding layer supplies its own
-//! payload type; `()` works as a payload wherever no external state is
-//! needed.
+//! payload type; `()` works as a payload wherever no external state is needed.
 //!
 //! # stylo integration
 //!
@@ -21,15 +21,16 @@
 //! stylo's interior-mutable per-element state; the [`traits`] module implements
 //! stylo's element traits ([`TNode`](stylo::dom::TNode) /
 //! [`TElement`](stylo::dom::TElement) / [`TDocument`](stylo::dom::TDocument) /
-//! [`selectors::Element`]) on [`ElementRef`]. Style *resolution* itself is
-//! driven by the embedding style engine over these impls; this crate only
-//! builds/mutates the tree and tracks dirty state.
+//! [`selectors::Element`]) on [`ElementRef`]. [`StyleEngine`] owns stylesheet
+//! parsing, matching, rule-tree insertion, cascade, and the shared style lock.
+//! Embedders supply a [`stylo::device::Device`] and keep platform-specific
+//! metrics outside this crate.
 //!
-//! Inline styles are parsed at mutation time (see [`inline`]) into a stylo
+//! Inline styles are parsed at mutation time into a stylo
 //! [`PropertyDeclarationBlock`](stylo::properties::PropertyDeclarationBlock)
-//! guarded by the arena's [`SharedRwLock`](stylo::shared_lock::SharedRwLock); to
-//! style a tree, build the [`Arena`] with the style engine's lock
-//! ([`Arena::with_lock`]) so the cascade's guards match.
+//! guarded by a crate-owned [`SharedRwLock`](stylo::shared_lock::SharedRwLock).
+//! Create styled trees through [`StyleEngine::new_arena`]; the lock never needs
+//! to cross the public embedder boundary.
 //!
 //! # Thread-safety
 //!
@@ -46,15 +47,17 @@
 //!   payload).
 //! - [`ext`] — the [`ExternalState`] trait the payload implements.
 //! - [`state`] — the [`PseudoState`] flag set (`:hover` / `:active` / `:focus`).
+//! - [`style`] — the generic [`StyleEngine`] and stylesheet/cascade pipeline.
 //! - [`traits`] — stylo's element-trait impls on [`ElementRef`].
 //!
-//! The tree-mutation ([`tree`]), inline-style ([`inline`]), and
-//! coarse-invalidation ([`dirty`]) primitives are added as methods on [`Arena`].
+//! Tree-mutation, inline-style, and coarse-invalidation primitives are added
+//! as methods on [`Arena`].
 
 pub mod arena;
 pub mod element;
 pub mod ext;
 pub mod state;
+pub mod style;
 pub mod traits;
 
 mod dirty;
@@ -62,9 +65,10 @@ mod inline;
 mod tree;
 
 pub use arena::{Arena, ElementId, ElementRef};
-/// stylo's [`ElementState`](dom::ElementState), re-exported so downstream crates
+/// stylo's [`ElementState`], re-exported so downstream crates
 /// never name the vendored `stylo_dom` package directly.
 pub use dom::ElementState;
 pub use element::Element;
 pub use ext::ExternalState;
 pub use state::PseudoState;
+pub use style::{ComputedStyle, StyleEngine, StylesheetOrigin, property_is_supported};

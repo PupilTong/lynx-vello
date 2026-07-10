@@ -7,6 +7,9 @@
 //! `unique_id` minting + index, the `css_id` batch) and delegates the actual
 //! tree mutation, coarse invalidation, and inline-style parsing to the
 //! [`stylo_dom`] crate — the generic, HTML-DOM-subset core this crate embeds.
+//! It also owns the Lynx-specific style adapter: view metrics,
+//! viewport-relative `rpx`, and touch-first device policy wrapped around
+//! [`stylo_dom::StyleEngine`]'s standards-oriented cascade.
 //!
 //! # Vocabulary
 //!
@@ -29,15 +32,18 @@
 //! - [`papi`] — the [`WidgetTree`] type and its Element-PAPI-shaped methods, plus [`WidgetError`].
 //! - [`kind`] — the Lynx tag-name ↔ [`WidgetKind`] mapping.
 //! - [`state`] — [`WidgetState`] (the `ExternalState` payload) and the event-registration types.
+//! - [`style`] — the Lynx metrics/device adapter around the generic style engine.
 
 pub mod kind;
 pub mod papi;
 pub mod state;
+pub mod style;
 
 pub use kind::WidgetKind;
 pub use papi::{WidgetError, WidgetTree};
 pub use state::{EventKind, EventReg, WidgetState};
-pub use stylo_dom::PseudoState;
+pub use style::{EngineMetrics, StyleEngine};
+pub use stylo_dom::{ComputedStyle, PseudoState, StylesheetOrigin, property_is_supported};
 
 /// A Lynx widget: the generic HTML-DOM-subset element carrying the
 /// Lynx-specific [`WidgetState`] payload in its `ext` field.

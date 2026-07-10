@@ -20,6 +20,21 @@ use stylo_traits::ParsingMode;
 use crate::arena::{Arena, ElementId};
 
 impl<T> Arena<T> {
+    /// Count parsed declarations in an element's inline style.
+    ///
+    /// Returns `None` for a stale handle and `Some(0)` when the element has no
+    /// inline block. This keeps the style lock encapsulated while still
+    /// allowing diagnostics and tests to inspect parsed state.
+    #[must_use]
+    pub fn inline_style_declaration_count(&self, id: ElementId) -> Option<usize> {
+        let element = self.get(id)?;
+        let Some(block) = element.inline_block.as_ref() else {
+            return Some(0);
+        };
+        let guard = self.shared_lock().read();
+        Some(block.read_with(&guard).declarations().len())
+    }
+
     /// Replace an element's inline style, parsing the whole declaration block
     /// through stylo (the `style` attribute). An empty string clears it.
     ///
