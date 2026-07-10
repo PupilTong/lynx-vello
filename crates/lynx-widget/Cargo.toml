@@ -1,6 +1,6 @@
 [package]
 name = "lynx-widget"
-description = "Widget Element-PAPI layer for the Lynx web-bundle runtime: the snake_case Element PAPI surface (WidgetTree) over stylo-dom's generic Element<T> core, instantiated with the Lynx-specific WidgetState payload"
+description = "Lynx Widget/PAPI and Lynx-specific style-device integration over stylo-dom"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,13 +16,17 @@ stylo-dom = { workspace = true }
 rustc-hash = { workspace = true }
 smallvec = { workspace = true }
 thiserror = { workspace = true }
+euclid = { workspace = true }
 
-# The PAPI layer still names a few stylo types directly: computed-style
-# write-back (`Arc<ComputedValues>`), the shared lock / base URL it forwards to
-# the arena, interned class/id atoms, and `LocalName` for the ExternalState
-# attribute-name hook.
+# The Lynx adapter names computed values, Device metrics, atoms, and
+# `ExternalState` attribute names directly. Lock ownership and the cascade
+# remain encapsulated by `stylo-dom`.
 stylo = { workspace = true }
 stylo_atoms = { workspace = true }
+stylo_traits = { workspace = true }
+
+[dev-dependencies]
+app_units = { workspace = true }
 
 [lints]
 workspace = true

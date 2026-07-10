@@ -407,8 +407,8 @@ fn classes_and_inline_styles() {
     doc.add_class(view, "qux").unwrap();
     assert_eq!(doc.widget(view).unwrap().classes.len(), 4);
 
-    // Inline styles are now parsed into a stylo `PropertyDeclarationBlock`
-    // guarded by the document's shared lock.
+    // Inline styles are parsed into a stylo `PropertyDeclarationBlock`; lock
+    // ownership stays encapsulated in `stylo-dom`.
     doc.add_inline_style(view, "color", "red").unwrap();
     doc.add_inline_style(view, "width", "10px").unwrap();
     assert_eq!(inline_declaration_count(&doc, view), 2);
@@ -424,13 +424,7 @@ fn classes_and_inline_styles() {
 
 /// The number of declarations in an element's parsed inline style block.
 fn inline_declaration_count(doc: &WidgetTree, id: lynx_widget::WidgetId) -> usize {
-    let guard = doc.shared_lock().read();
-    let node = doc.widget(id).unwrap();
-    let block = node
-        .inline_block
-        .as_ref()
-        .expect("element has an inline block");
-    block.read_with(&guard).declarations().len()
+    doc.arena().inline_style_declaration_count(id).unwrap()
 }
 
 #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "stylo-dom"
-description = "Generic stylo-integrated DOM core for lynx-vello: a generational arena of Element<T> nodes (a strict HTML-DOM subset), tree-mutation + coarse style-invalidation + inline-style primitives, and stylo element-trait impls, parameterized over an embedder-supplied external state"
+description = "Generic DOM and standards-oriented CSS computation core over stylo, parameterized by embedder state"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -25,6 +25,7 @@ stylo_traits = { workspace = true }
 selectors = { workspace = true }
 app_units = { workspace = true }
 atomic_refcell = { workspace = true }
+cssparser = { workspace = true }
 euclid = { workspace = true }
 url = { workspace = true }
 

@@ -1,27 +1,18 @@
-//! Integration tests for the minimal [`StyleEngine`] wiring (M2).
-//!
-//! These build a tiny tree through the `lynx-widget` PAPI, add an author
-//! stylesheet, and assert the resolved [`ComputedValues`] — colours, `rpx`
-//! lengths, inline-vs-class precedence, `display: linear`, the fork's
-//! `linear-weight` longhand, and inheritance.
-//!
-//! The computed `rpx`/`linear-weight` values are exact integers by
-//! construction, so exact float equality is intentional here.
+//! Integration coverage for the Lynx adapter over `stylo-dom`'s cascade.
 #![allow(clippy::float_cmp)]
 
 use app_units::Au;
-use lynx_style::{EngineMetrics, StyleEngine};
+use lynx_widget::{EngineMetrics, StyleEngine};
 use stylo::color::AbsoluteColor;
 use stylo::stylesheets::Origin;
 use stylo::values::computed::Size;
 use stylo::values::specified::box_::DisplayInside;
 
-/// A 750×1334 CSS-px view (so `1rpx = 1px` by default) at DPR 2.
+/// A 750×1334 CSS-px view (so `1rpx = 1px`) at DPR 2.
 fn metrics() -> EngineMetrics {
     EngineMetrics::new(750.0, 1334.0, 2.0)
 }
 
-/// Resolve the computed width of a fixed-length `width` value, in CSS px.
 fn width_px(size: Size) -> f32 {
     match size {
         Size::LengthPercentage(lp) => lp.0.to_pixel_length(Au::new(0)).px(),
@@ -49,7 +40,6 @@ fn class_rule_sets_color() {
 
 #[test]
 fn rpx_resolves_against_viewport_width() {
-    // viewport_width 750 → 1rpx = 1px → 100rpx = 100px.
     let mut engine = StyleEngine::new(metrics());
     engine.add_stylesheet_str(".box { width: 100rpx; }", Origin::Author);
 
@@ -65,7 +55,6 @@ fn rpx_resolves_against_viewport_width() {
 
 #[test]
 fn rpx_follows_viewport_change() {
-    // Same CSS, wider view: viewport_width 1500 → 1rpx = 2px → 100rpx = 200px.
     let mut engine = StyleEngine::new(EngineMetrics {
         viewport_width: 1500.0,
         ..metrics()
@@ -81,7 +70,6 @@ fn rpx_follows_viewport_change() {
     let computed = engine.resolve_widget(doc.widget_ref(view).unwrap(), None);
     assert_eq!(width_px(computed.clone_width()), 200.0);
 
-    // Narrowing the view live (no re-ingestion) makes rpx follow.
     engine.set_viewport(750.0, 1334.0);
     let computed = engine.resolve_widget(doc.widget_ref(view).unwrap(), None);
     assert_eq!(width_px(computed.clone_width()), 100.0);
@@ -140,7 +128,6 @@ fn linear_weight_longhand_computes() {
 #[test]
 fn color_inherits_into_child() {
     let mut engine = StyleEngine::new(metrics());
-    // `color` is inherited; the child has no own `color`.
     engine.add_stylesheet_str(".parent { color: green; }", Origin::Author);
 
     let mut doc = engine.new_widget_tree();
@@ -156,11 +143,7 @@ fn color_inherits_into_child() {
     assert_eq!(parent_style.clone_color(), green);
 
     let child_style = engine.resolve_widget(doc.widget_ref(child).unwrap(), Some(&parent_style));
-    assert_eq!(
-        child_style.clone_color(),
-        green,
-        "child with no own color inherits the parent's"
-    );
+    assert_eq!(child_style.clone_color(), green);
 }
 
 #[test]
@@ -181,20 +164,14 @@ fn writeback_stores_computed_and_clears_dirty() {
     assert!(!doc.widget(view).unwrap().style_dirty);
 }
 
-/// `text-stroke*` — the unprefixed Lynx spelling of stylo's `-webkit-text-stroke*`
-/// — is supported. The fork ports the (formerly `engine = "gecko"`) -webkit-
-/// properties into the servo build behind `layout.unimplemented` and registers
-/// the unprefixed Lynx aliases; the `lynx` feature force-enables them.
 #[test]
 fn text_stroke_is_supported() {
-    use lynx_style::property_is_supported;
-    // Lynx's unprefixed spellings (aliases of the -webkit-text-stroke* family).
+    use lynx_widget::property_is_supported;
+
     assert!(property_is_supported("text-stroke"));
     assert!(property_is_supported("text-stroke-color"));
     assert!(property_is_supported("text-stroke-width"));
-    // The canonical -webkit- names (the alias targets) are exposed too.
     assert!(property_is_supported("-webkit-text-stroke-width"));
     assert!(property_is_supported("-webkit-text-stroke-color"));
-    // A plain servo-supported property, as a positive control.
     assert!(property_is_supported("color"));
 }

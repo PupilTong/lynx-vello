@@ -16,14 +16,13 @@ rust-version = "1.95"
 
 [workspace.dependencies]
 # Intra-workspace crates
-lynx-style = { path = "crates/lynx-style" }
 lynx-template-decoder = { path = "crates/lynx-template-decoder" }
 lynx-widget = { path = "crates/lynx-widget" }
 stylo-dom = { path = "crates/stylo-dom" }
 
 # The Lynx-patched stylo fork (git submodule; see AGENTS.md dependency
-# policy). The `lynx` branch carries the Lynx patch series (rpx/ppx/sp
-# units, display:linear|relative, linear-*/relative-*/-x-* longhands) and
+# policy). The `lynx` branch carries the Lynx patch series (viewport-relative
+# rpx, display:linear|relative, linear-*/relative-*/-x-* longhands) and
 # is rebased onto upstream stylo releases.
 #
 # We enable the fork's `lynx` cargo feature workspace-wide: it turns stylo into
@@ -51,6 +50,7 @@ servo_arc = { path = "vendor/stylo/servo_arc" }
 app_units = "0.7"
 atomic_refcell = "0.1"
 bytecheck = "0.6"
+cssparser = "0.37"
 divan = { package = "codspeed-divan-compat", version = "5" }
 euclid = "0.22"
 rkyv = { version = "0.7", features = ["validation"] }
