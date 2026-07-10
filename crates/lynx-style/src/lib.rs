@@ -3,7 +3,8 @@
 //! This crate drives the vendored, Lynx-patched **stylo** fork's cascade over
 //! the [`lynx-widget`](lynx_widget) widget tree to produce per-widget
 //! [`ComputedValues`]. It owns the servo [`Device`](stylo::device::Device) (the
-//! Lynx view size + `rpx`/`ppx`/`sp` metric bases), the [`Stylist`], and the
+//! Lynx view size, off which the viewport-relative `rpx` unit resolves), the
+//! [`Stylist`], and the
 //! [`SharedRwLock`] that guards every parsed rule and inline block.
 //!
 //! # Milestone scope (M2)
@@ -57,10 +58,10 @@ fn about_blank_url_data() -> UrlExtraData {
 /// Whether `name` is a real (non-custom) CSS property in the vendored stylo
 /// build lynx-vello compiles.
 ///
-/// Useful for classifying properties against the tracking buckets: e.g.
-/// `-webkit-text-stroke*` is present in stylo's source but gated
-/// `engine = "gecko"`, so this returns `false` for it in the servo build —
-/// which is why Lynx's `text-stroke*` must be fork-added (bucket B).
+/// Useful for classifying properties against the tracking buckets. Under the
+/// `lynx` feature this includes the fork's additions — e.g. Lynx's unprefixed
+/// `text-stroke*`, aliased onto the (now servo-visible) `-webkit-text-stroke*`
+/// family, returns `true`.
 #[must_use]
 pub fn property_is_supported(name: &str) -> bool {
     matches!(
@@ -75,10 +76,9 @@ pub fn property_is_supported(name: &str) -> bool {
 /// stylo owns the rule tree internally (unlike the 0.13 line, where it was a
 /// separate `RuleTree`), reached via [`Stylist::rule_tree`].
 ///
-/// **One engine per process**: the Lynx unit bases (`rpx`/`ppx`/`sp`) are
-/// process-global in the stylo fork — see [`EngineMetrics`] for the full
-/// contract. Constructing a second engine with different metrics silently
-/// changes Lynx-unit resolution for the first.
+/// Engines are independent: every unit basis lives on the [`Device`] (the Lynx
+/// `rpx` unit is viewport-relative — see [`EngineMetrics`]), so multiple engines
+/// with different metrics can coexist in one process.
 ///
 /// [`Device`]: stylo::device::Device
 pub struct StyleEngine {
@@ -93,12 +93,8 @@ impl std::fmt::Debug for StyleEngine {
         f.debug_struct("StyleEngine")
             .field("viewport", &self.stylist.device().viewport_size())
             .field(
-                "screen_width",
-                &stylo::values::specified::lynx_units::lynx_screen_width_px(),
-            )
-            .field(
-                "font_scale",
-                &stylo::values::specified::lynx_units::lynx_font_scale(),
+                "device_pixel_ratio",
+                &self.stylist.device().device_pixel_ratio().get(),
             )
             .finish_non_exhaustive()
     }
@@ -297,22 +293,17 @@ impl StyleEngine {
         self.refresh_device();
     }
 
-    /// Update the Lynx metric bases (`ppx` DPR, `rpx` screen width, `sp` font
-    /// scale).
+    /// Update the device-pixel ratio (e.g. the view moved to a display of a
+    /// different density).
     ///
-    /// The Device keeps its own DPR (for standard CSS resolution behavior);
-    /// the Lynx units read the process-global metrics in stylo's
-    /// `values::specified::lynx_units` — they are plain length units, so the
-    /// servo [`Device`] does not know about them. Both are updated here, then
-    /// the stylist is refreshed so the next resolve sees the new bases.
+    /// `rpx`/`vw`/`vh` follow the viewport rather than the DPR, so this only
+    /// affects standard CSS resolution behavior; [`set_viewport`] is what drives
+    /// the Lynx `rpx` unit. The `device_size = viewport * dpr` invariant is
+    /// preserved and the stylist is refreshed so the next resolve sees the new
+    /// ratio.
     ///
-    /// [`Device`]: stylo::device::Device
-    pub fn set_screen_metrics(
-        &mut self,
-        device_pixel_ratio: f32,
-        screen_width: f32,
-        font_scale: f32,
-    ) {
+    /// [`set_viewport`]: Self::set_viewport
+    pub fn set_device_pixel_ratio(&mut self, device_pixel_ratio: f32) {
         let device = self.stylist.device_mut();
         device.set_device_pixel_ratio(euclid::Scale::new(device_pixel_ratio));
         // Keep the build_device invariant `device_size = viewport * dpr`.
@@ -321,11 +312,6 @@ impl StyleEngine {
             viewport.width * device_pixel_ratio,
             viewport.height * device_pixel_ratio,
         ));
-        stylo::values::specified::lynx_units::set_lynx_unit_metrics(
-            screen_width,
-            device_pixel_ratio,
-            font_scale,
-        );
         self.refresh_device();
     }
 

@@ -42,12 +42,19 @@ jobs:
 
       # The Lynx patch series in the vendored stylo fork carries its own test
       # suites; vendor/stylo is excluded from the workspace, so run them
-      # explicitly or rebases regress silently.
+      # explicitly or rebases regress silently. They live behind the fork's
+      # `lynx` feature (the Lynx-only additions + property/value gating), so
+      # they only compile and run with `--features lynx`.
       - name: Stylo fork Lynx tests
         run: >-
-          cargo test --manifest-path vendor/stylo/Cargo.toml -p stylo
-          --test lynx_lengths --test lynx_display
-          --test lynx_linear_properties --test lynx_relative_properties
+          cargo test --manifest-path vendor/stylo/Cargo.toml -p stylo --features lynx
+          --test lynx_lengths
+          --test lynx_display
+          --test lynx_linear_properties
+          --test lynx_relative_properties
+          --test lynx_supported_properties
+          --test lynx_disabled_properties
+          --test lynx_value_gating
 
       - name: Doctests
         run: cargo test --doc

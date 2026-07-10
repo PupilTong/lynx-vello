@@ -26,11 +26,16 @@ stylo-dom = { path = "crates/stylo-dom" }
 # units, display:linear|relative, linear-*/relative-*/-x-* longhands) and
 # is rebased onto upstream stylo releases.
 #
+# We enable the fork's `lynx` cargo feature workspace-wide: it turns stylo into
+# Lynx's CSS engine — enabling those Lynx-only additions AND disabling the CSS
+# properties and keyword values Lynx does not support (so, e.g., `float`,
+# `writing-mode` or `overflow: clip` stop parsing). `lynx` implies `servo`.
+#
 # The vendored servo package is itself named `stylo_dom`; that name is taken
 # here by our `crates/stylo-dom` (which re-exports `ElementState`), so the
 # vendored crate is aliased `dom` — the same rename `vendor/stylo/style`'s own
 # Cargo.toml uses. Only `crates/stylo-dom` depends on it directly.
-stylo = { path = "vendor/stylo/style", package = "stylo" }
+stylo = { path = "vendor/stylo/style", package = "stylo", features = ["lynx"] }
 stylo_atoms = { path = "vendor/stylo/stylo_atoms" }
 dom = { path = "vendor/stylo/stylo_dom", package = "stylo_dom" }
 stylo_traits = { path = "vendor/stylo/style_traits", package = "stylo_traits" }
