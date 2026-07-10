@@ -16,7 +16,7 @@
 //!  ┌───────────────────────────┐   traits    ┌───────────────────────────┐
 //!  │ node storage (any layout) │◀───────────▶│ compute_root_layout       │
 //!  │ computed styles (any repr)│  NodeId +   │ compute_leaf_layout       │
-//!  │ per-node Cache + Layouts  │  POD values │ cache/hidden/round        │
+//!  │ per-node Cache + Layouts  │  POD values │ cache/hidden/abs-pos/round│
 //!  │ dispatch: display → algo  │◀───────────▶│ flex algo (L1), grid (L2) │
 //!  └───────────────────────────┘  recursion  └───────────────────────────┘
 //! ```
@@ -28,8 +28,8 @@
 //! - [`style`] — the style protocol: engine-owned value types plus the `CoreStyle`/container/item
 //!   traits hosts implement as cheap views over their computed styles.
 //! - [`compute`] — the machinery entry points hosts call from their dispatch (root, cache wrapper,
-//!   hidden, leaf, rounding), including the canonical dispatch skeleton. The flexbox and grid
-//!   algorithm entry points land here in L1/L2.
+//!   hidden, leaf, the positioned pass, rounding), including the canonical dispatch skeleton. The
+//!   flexbox and grid algorithm entry points land here in L1/L2.
 //! - [`cache`] — the embeddable per-node measurement cache and its matching contract.
 //! - [`geometry`] — `Copy`/`#[repr(C)]` geometry primitives.
 //!
@@ -128,6 +128,12 @@
 //!
 //!     fn set_unrounded_layout(&mut self, node: NodeId, layout: &Layout) {
 //!         self.nodes[usize::from(node)].layout = *layout;
+//!     }
+//!
+//!     fn set_static_position(&mut self, child: NodeId, static_position: Point<f32>) {
+//!         // This toy has no hoisted out-of-flow nodes; real hosts store
+//!         // this for the positioned pass (compute_absolute_layout).
+//!         let _ = (child, static_position);
 //!     }
 //!
 //!     fn compute_child_layout(&mut self, child: NodeId, input: LayoutInput) -> LayoutOutput {

@@ -12,23 +12,36 @@
 //! [`Cache`] is the reference container hosts are expected to embed
 //! per-node (delegating `CacheTree`'s methods to it), keeping the slot
 //! policy uniform across hosts. It is a fixed-size, allocation-free array of
-//! slots: one slot for the final [`RunMode::PerformLayout`] result, the rest
-//! for [`RunMode::ComputeSize`] measurements keyed by constraint shape.
+//! slots: one slot for the final [`PerformLayout`](crate::tree::RunMode)
+//! result, the rest for [`ComputeSize`](crate::tree::RunMode) measurements
+//! keyed by constraint shape.
 //!
 //! # Keying semantics (the contract `get`/`store` will implement in L1)
 //!
-//! A stored entry matches a lookup when it is *usable*: the entry's
-//! `known_dimensions` and `available_space` are compatible with the
-//! request's (equal known dimensions; equal-or-equivalent available space,
-//! where a definite available space equal to a known dimension is
-//! equivalent), and a `PerformLayout` entry may answer a `ComputeSize`
-//! lookup but never the reverse. Slot assignment groups entries by
-//! constraint shape (which of the four known/available inputs are definite)
-//! so repeated probes of the same shape overwrite instead of evicting other
-//! shapes. `PerformHiddenLayout` results are never cached.
+//! The key is the **complete [`LayoutInput`]** — every field can change the
+//! result, so none may be dropped from matching. In particular:
+//!
+//! - `sizing_mode`: an [`InherentSize`](crate::tree::SizingMode) run applies the node's own
+//!   `size`/`min`/`max`/`aspect-ratio`; a [`ContentSize`](crate::tree::SizingMode) probe ignores
+//!   them. Entries from one must never answer the other.
+//! - `parent_size`: the percentage basis. Identical constraints under a different parent size
+//!   resolve percentage styles differently.
+//! - `requested_axis`: scopes which axes of a `ComputeSize` answer were actually computed; a
+//!   single-axis entry must not answer a request for the other axis.
+//!
+//! On top of the exact key, a stored entry may satisfy a request under
+//! *provable equivalences only*: a
+//! [`PerformLayout`](crate::tree::RunMode) entry may answer a
+//! [`ComputeSize`](crate::tree::RunMode) lookup whose remaining key fields
+//! match (never the reverse); a `RequestedAxis::Both` entry may answer a
+//! single-axis probe; and a definite `available_space` component equal to
+//! the same axis's `known_dimensions` component is equivalent to that known
+//! dimension. Slot assignment groups entries by constraint shape (which
+//! inputs are definite) so repeated probes of the same shape overwrite
+//! instead of evicting other shapes.
+//! [`PerformHiddenLayout`](crate::tree::RunMode) results are never cached.
 
-use crate::geometry::Size;
-use crate::tree::{AvailableSpace, LayoutOutput, RunMode};
+use crate::tree::{LayoutInput, LayoutOutput};
 
 /// Number of measurement slots in a [`Cache`] (excluding the dedicated
 /// final-layout slot).
@@ -40,11 +53,10 @@ use crate::tree::{AvailableSpace, LayoutOutput, RunMode};
 /// constant is public so hosts can size columnar storage.
 pub const MEASURE_CACHE_SLOTS: usize = 8;
 
-/// One cached constraint→output pair.
+/// One cached input→output pair (the full [`LayoutInput`] is the key).
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct CacheSlot {
-    known_dimensions: Size<Option<f32>>,
-    available_space: Size<AvailableSpace>,
+    input: LayoutInput,
     output: LayoutOutput,
 }
 
@@ -91,39 +103,28 @@ impl Cache {
         self.perform_layout.is_none() && self.measurements.iter().all(Option::is_none)
     }
 
-    /// Looks up a usable entry for these constraints (see the module docs
-    /// for the matching contract).
+    /// Looks up an entry usable for the complete `input` key (see the
+    /// module docs for the matching contract and its allowed equivalences).
     ///
     /// # Panics
     ///
     /// Protocol stub — the matching policy is implemented in milestone L1;
     /// calling this currently panics with `todo!`.
     #[must_use]
-    pub fn get(
-        &self,
-        known_dimensions: Size<Option<f32>>,
-        available_space: Size<AvailableSpace>,
-        run_mode: RunMode,
-    ) -> Option<LayoutOutput> {
-        let _ = (known_dimensions, available_space, run_mode);
+    pub fn get(&self, input: LayoutInput) -> Option<LayoutOutput> {
+        let _ = input;
         todo!("L1: cache slot matching (see module docs for the contract)")
     }
 
-    /// Stores `output` under these constraints (see the module docs for the
-    /// slot-assignment contract).
+    /// Stores `output` under the complete `input` key (see the module docs
+    /// for the slot-assignment contract).
     ///
     /// # Panics
     ///
     /// Protocol stub — the slot policy is implemented in milestone L1;
     /// calling this currently panics with `todo!`.
-    pub fn store(
-        &mut self,
-        known_dimensions: Size<Option<f32>>,
-        available_space: Size<AvailableSpace>,
-        run_mode: RunMode,
-        output: LayoutOutput,
-    ) {
-        let _ = (known_dimensions, available_space, run_mode, output);
+    pub fn store(&mut self, input: LayoutInput, output: LayoutOutput) {
+        let _ = (input, output);
         todo!("L1: cache slot assignment (see module docs for the contract)")
     }
 

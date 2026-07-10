@@ -8,11 +8,12 @@
 //! never exist in the host's binary.
 //!
 //! This module currently contains only the **generic machinery** (root
-//! entry, cache wrapper, hidden zeroing, leaf boxing, rounding). The
-//! algorithm entry points — `compute_flexbox_layout<Tree: FlexTree>` (L1)
-//! and `compute_grid_layout<Tree: GridTree>` (L2) — are specified in
-//! `docs/layout-architecture.md` and land as sibling functions here with
-//! the same shape: `fn(&mut Tree, NodeId, LayoutInput) -> LayoutOutput`.
+//! entry, cache wrapper, hidden zeroing, leaf boxing, the positioned pass,
+//! rounding). The algorithm entry points — `compute_flexbox_layout<Tree:
+//! FlexTree>` (L1) and `compute_grid_layout<Tree: GridTree>` (L2) — are
+//! specified in `docs/layout-architecture.md` and land as sibling functions
+//! here with the same shape: `fn(&mut Tree, NodeId, LayoutInput) ->
+//! LayoutOutput`.
 //!
 //! # The canonical dispatch skeleton
 //!
@@ -56,13 +57,17 @@
 //!
 //! # Pass structure
 //!
-//! A full layout run is two host-initiated passes:
+//! A full layout run is host-initiated passes in this order:
 //!
-//! 1. [`compute_root_layout`] — sizes and positions the whole (dirty part of the) tree in unrounded
-//!    CSS pixels.
-//! 2. [`round_layout`] — derives the pixel-snapped layouts. Optional but recommended for crisp
-//!    rendering; kept separate so relayout always starts from unrounded values (re-rounding rounded
-//!    values drifts).
+//! 1. [`compute_root_layout`] — in-flow layout of the whole (dirty part of the) tree in unrounded
+//!    CSS pixels. Out-of-flow nodes whose containing block is not their formatting parent
+//!    ([`Position::AbsoluteHoisted`](crate::style::Position)) only get their static positions
+//!    recorded here.
+//! 2. [`compute_absolute_layout`] — the positioned pass: once per hoisted node, against its real
+//!    containing block.
+//! 3. [`round_layout`] — derives the device-pixel-snapped layouts. Optional but recommended for
+//!    crisp rendering; kept separate so relayout always starts from unrounded values (re-rounding
+//!    rounded values drifts).
 //!
 //! # Status
 //!
@@ -74,9 +79,9 @@ mod leaf;
 
 pub use leaf::compute_leaf_layout;
 
-use crate::geometry::Size;
+use crate::geometry::{Point, Size};
 use crate::tree::{
-    AvailableSpace, CacheTree, LayoutInput, LayoutOutput, LayoutTree, NodeId, RoundTree,
+    AvailableSpace, CacheTree, Layout, LayoutInput, LayoutOutput, LayoutTree, NodeId, RoundTree,
 };
 
 /// Lays out the tree under `root` into `available_space`.
@@ -86,7 +91,7 @@ use crate::tree::{
 /// the definite parts of `available_space`), routes it through
 /// [`compute_child_layout`](LayoutTree::compute_child_layout) — so the root
 /// dispatches like any other node — resolves the root's own margins, and
-/// stores the root's [`Layout`](crate::tree::Layout) (at location `(0, 0)`
+/// stores the root's [`Layout`] (at location `(0, 0)`
 /// plus resolved margins) via
 /// [`set_unrounded_layout`](LayoutTree::set_unrounded_layout).
 ///
@@ -110,11 +115,15 @@ pub fn compute_root_layout<Tree: LayoutTree>(
 /// Wraps one node's layout computation in the shared caching policy.
 ///
 /// The host calls this at the top of its dispatch (see the module docs);
-/// `compute_uncached` is the actual routing closure. On a usable cached
-/// entry (matching per the [`cache`](crate::cache) module's contract) the
-/// closure is skipped entirely; otherwise its result is stored before being
-/// returned. [`RunMode::PerformHiddenLayout`](crate::tree::RunMode) requests
-/// bypass the cache in both directions.
+/// `compute_uncached` is the actual routing closure. The **complete
+/// `input` is the cache key** — it is passed through to
+/// [`CacheTree`] unmodified, so no result-affecting
+/// field (`sizing_mode`, `parent_size`, `requested_axis`, …) can alias. On
+/// a usable cached entry (matching per the [`cache`](crate::cache) module's
+/// contract) the closure is skipped entirely; otherwise its result is
+/// stored before being returned.
+/// [`RunMode::PerformHiddenLayout`](crate::tree::RunMode) requests bypass
+/// the cache in both directions.
 ///
 /// # Panics
 ///
@@ -136,7 +145,7 @@ where
 
 /// Zeroes the layout of a `display: none` node and its whole subtree.
 ///
-/// Stores an all-zero [`Layout`](crate::tree::Layout) for `node`'s children
+/// Stores an all-zero [`Layout`] for `node`'s children
 /// and recurses through
 /// [`compute_child_layout`](LayoutTree::compute_child_layout) with
 /// [`RunMode::PerformHiddenLayout`](crate::tree::RunMode), so previously
@@ -152,26 +161,77 @@ pub fn compute_hidden_layout<Tree: LayoutTree>(tree: &mut Tree, node: NodeId) ->
     todo!("L1: hidden-subtree zeroing (see rustdoc for the contract)")
 }
 
-/// Derives pixel-snapped final layouts from the unrounded layouts under
-/// `root`.
+/// Sizes and positions one out-of-flow node against its containing block —
+/// the host-driven **positioned pass** for
+/// [`Position::AbsoluteHoisted`](crate::style::Position) nodes.
 ///
-/// Walks the tree via [`RoundTree`], reading each
-/// [`unrounded_layout`](RoundTree::unrounded_layout) and writing a rounded
-/// copy through [`set_final_layout`](RoundTree::set_final_layout).
+/// Runs after in-flow layout. The node's formatting parent computed and
+/// recorded the node's static position
+/// ([`set_static_position`](LayoutTree::set_static_position)) but did not
+/// size or place it. The host resolves which node is the containing block
+/// (for Lynx `fixed`: the viewport root, or the nearest
+/// transformed/filtered ancestor per the W3C rule), converts the recorded
+/// static position into that block's space — it holds every unrounded
+/// layout by now — and calls this once per hoisted node with:
 ///
-/// Rounding contract (cumulative-error-free): positions are rounded in
-/// *accumulated* (root-relative) space and sizes derived as
-/// `round(pos + size) - round(pos)`, so adjacent edges land on the same
-/// physical pixel and a box's rounded size never drifts more than one pixel
-/// from its unrounded size — at the cost that equal unrounded sizes may
-/// round to sizes differing by one pixel (the standard trade-off, also made
-/// by browsers). Idempotent given unchanged unrounded inputs.
+/// - `containing_block`: the containing block's **padding-box size**, the basis for the node's
+///   inset and percentage resolution;
+/// - `static_position`: the converted static position (padding-box space), the anchor for any axis
+///   whose insets are both `auto` (CSS Position / Flexbox §4.1 / Grid §10.1 semantics).
+///
+/// The node's subtree is laid out normally through
+/// [`compute_child_layout`](LayoutTree::compute_child_layout) (descendants
+/// store parent-relative layouts as usual, with normal caching). The node's
+/// **own** layout is *returned, not stored*: its `location` is relative to
+/// the containing block's **padding box**, which is generally not the
+/// node's tree parent — the host converts it into formatting-parent space
+/// and stores it via
+/// [`set_unrounded_layout`](LayoutTree::set_unrounded_layout), keeping
+/// [`Layout::location`]'s parent-relative contract intact for rounding and
+/// painting.
 ///
 /// # Panics
 ///
 /// Protocol stub — implemented in milestone L1; calling this currently
 /// panics with `todo!`.
-pub fn round_layout<Tree: RoundTree>(tree: &mut Tree, root: NodeId) {
-    let _ = (tree, root);
-    todo!("L1: pixel-snapping pass (see rustdoc for the contract)")
+#[must_use = "the returned layout is in containing-block space; the host must convert and store it"]
+pub fn compute_absolute_layout<Tree: LayoutTree>(
+    tree: &mut Tree,
+    node: NodeId,
+    containing_block: Size<f32>,
+    static_position: Point<f32>,
+) -> Layout {
+    let _ = (tree, node, containing_block, static_position);
+    todo!("L1: absolutely-positioned sizing and placement (see rustdoc for the contract)")
+}
+
+/// Derives device-pixel-snapped final layouts from the unrounded layouts
+/// under `root`.
+///
+/// Walks the tree via [`RoundTree`], reading each
+/// [`unrounded_layout`](RoundTree::unrounded_layout) and writing a rounded
+/// copy through [`set_final_layout`](RoundTree::set_final_layout).
+///
+/// `scale` is the device-pixel ratio — physical pixels per CSS pixel (e.g.
+/// `2.0`/`3.0` on high-DPI displays; `1.0` snaps to whole CSS pixels). It
+/// must be finite and `> 0` (debug-asserted). Snapping happens on the
+/// **device-pixel grid**, since layout coordinates are CSS pixels but crisp
+/// edges are physical: `snap(v) = round(v × scale) / scale`.
+///
+/// Rounding contract (cumulative-error-free): positions are snapped in
+/// *accumulated* (root-relative) space and sizes derived as
+/// `snap(pos + size) - snap(pos)`, so adjacent edges land on the same
+/// physical pixel and a box's snapped size never drifts more than one
+/// device pixel from its unrounded size — at the cost that equal unrounded
+/// sizes may snap to sizes differing by one device pixel (the standard
+/// trade-off, also made by browsers). Idempotent given unchanged unrounded
+/// inputs and scale.
+///
+/// # Panics
+///
+/// Protocol stub — implemented in milestone L1; calling this currently
+/// panics with `todo!`.
+pub fn round_layout<Tree: RoundTree>(tree: &mut Tree, root: NodeId, scale: f32) {
+    let _ = (tree, root, scale);
+    todo!("L1: device-pixel-snapping pass (see rustdoc for the contract)")
 }

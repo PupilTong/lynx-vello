@@ -68,9 +68,13 @@ demands only what it uses:
 Entry points (`neutron_star::compute`) are free generic functions — there is
 no engine object, so unused entry points never monomorphize into the host.
 Landed as machinery stubs: `compute_root_layout`, `compute_leaf_layout`
-(host measure closure), `compute_hidden_layout`, `compute_cached_layout`,
-`round_layout`. The algorithm entry points arrive with their
-implementations, as siblings with the fixed shape
+(host measure closure), `compute_hidden_layout`, `compute_cached_layout`
+(keyed on the **complete `LayoutInput`** — see the caching section),
+`compute_absolute_layout` (the positioned pass for out-of-flow nodes whose
+containing block is not their formatting parent), and
+`round_layout(tree, root, scale)` (device-pixel snapping). The algorithm
+entry points arrive with their implementations, as siblings with the fixed
+shape
 
 ```rust
 pub fn compute_flexbox_layout<Tree: FlexTree>(  // L1
@@ -151,17 +155,38 @@ opaque `CalcHandle(u64)`; algorithms resolve through
 `LayoutTree::resolve_calc(handle, basis)`. Zero parser dependency, full
 `calc()` support.
 
-**Absolute positioning resolves against the layout parent.** The engine
-sizes/places `Position::Absolute` children against the container being laid
-out (its padding box), per CSS. Finding the *containing block* is the host's
-job (arrange the layout tree so the abs-pos node's parent is its CB). For
-Lynx this is degenerate-and-correct: every Lynx element is positioned
-(default `position: relative`), so the CSS "nearest positioned ancestor" is
-always the parent. `position: fixed` is lowered by the host per the real
-W3C rule the tracking doc mandates (viewport root by default, re-anchored
-under a transformed/filtered/`will-change` ancestor when present) — the
-engine only ever sees `Absolute`. `position: sticky` is a host post-pass
-(scroll-time offset clamping), as in production engines.
+**Out-of-flow: the layout tree is the formatting structure; the containing
+block is data, not topology.** Out-of-flow nodes are **never reparented** —
+they stay children of their formatting parent, because CSS derives their
+*static position* from that parent's formatting context (Flexbox §4.1: as
+if the sole flex item under the container's alignment; Grid §10.1: the
+content-edge area), and reparenting would destroy exactly that context.
+What varies is where the containing block is, encoded per node by the host:
+
+- `Position::Absolute` — CB **is** the layout parent. The parent's
+  algorithm sizes/places the node fully (insets/percentages against its
+  padding box; auto insets fall back to the static position it just
+  computed). This is the only case Lynx `position: absolute` produces:
+  every Lynx element is positioned, so the nearest positioned ancestor is
+  always the parent.
+- `Position::AbsoluteHoisted` — CB is **not** the parent (CSS `fixed`; or
+  `absolute` escaping non-positioned ancestors in non-Lynx hosts). The
+  parent's algorithm computes the node's flex/grid-aware static position
+  and records it via `LayoutTree::set_static_position`, but does not size
+  or place it. After in-flow layout the host runs the **positioned pass**:
+  it resolves the CB node (for Lynx `fixed`: the viewport root, or the
+  nearest transformed/filtered/`will-change` ancestor per the W3C rule the
+  tracking doc mandates), converts the recorded static position into CB
+  padding-box space (all unrounded layouts exist by then), and calls
+  `compute_absolute_layout(tree, node, cb_padding_box_size,
+  static_position)`. That entry sizes the node per the CSS abs-pos rules,
+  lays out its subtree normally, and *returns* the node's own layout in CB
+  space; the host converts it into formatting-parent space and stores it,
+  keeping `Layout::location`'s parent-relative contract intact for rounding
+  and painting.
+
+`position: sticky` remains a host post-pass (scroll-time offset clamping),
+as in production engines.
 
 **Physical axes + `Direction`, no writing modes.** The vendored stylo fork's
 `lynx` feature disables `writing-mode` entirely, so the engine is
@@ -171,12 +196,17 @@ main/inline axis — the same simplification Starlight and Yoga make.
 Logical properties (`inset-inline-*`, `margin-inline-*`) are resolved to
 physical edges by the style system before layout.
 
-**Two layout copies, one rounding pass.** Algorithms produce **unrounded**
-`f32` layouts (`set_unrounded_layout`); `round_layout` derives pixel-snapped
-finals through `RoundTree` with the cumulative-error-free contract (round
-accumulated positions, derive sizes as `round(pos+size) − round(pos)` so
-adjacent edges share a physical pixel). Relayout always restarts from
-unrounded values — re-rounding rounded values is how engines drift.
+**Two layout copies, one rounding pass — on the device-pixel grid.**
+Algorithms produce **unrounded** `f32` layouts (`set_unrounded_layout`);
+`round_layout(tree, root, scale)` derives snapped finals through
+`RoundTree`. `scale` is the device-pixel ratio (physical px per CSS px):
+coordinates are CSS pixels but crisp edges are physical, so snapping is
+`snap(v) = round(v × scale) / scale` — on a DPR-2 screen `0.5` CSS px is
+already an exact physical edge and must survive. The cumulative-error-free
+contract still holds (snap accumulated positions, derive sizes as
+`snap(pos+size) − snap(pos)` so adjacent edges share a physical pixel).
+Relayout always restarts from unrounded values — re-rounding rounded values
+is how engines drift.
 
 **`order` is protocol; `z-index` is not.** Flex/grid items expose `order`
 (Lynx supports it) and `Layout.order` records the resulting sibling
@@ -202,10 +232,15 @@ the painting — layout's job is to never be the frame's bottleneck.
   probes children under multiple constraints; uncached, nested containers go
   super-linear (the classic exponential blowup). The protocol bakes the
   fix in: `compute_cached_layout` around every dispatch, per-node slots
-  keyed by constraint shape (`cache::Cache`, embeddable, fixed-size,
-  allocation-free — `MEASURE_CACHE_SLOTS = 8` measurement slots + 1 layout
-  slot, policy documented in the module and validated against probe traces
-  in L1).
+  (`cache::Cache`, embeddable, fixed-size, allocation-free —
+  `MEASURE_CACHE_SLOTS = 8` measurement slots + 1 layout slot, slot policy
+  validated against probe traces in L1). The key is the **complete
+  `LayoutInput`** — `sizing_mode` (content-size probes ignore the node's own
+  size/min/max/aspect-ratio), `parent_size` (the percentage basis), and
+  `requested_axis` (which axes an answer actually computed) all change
+  results, so dropping any of them from the key would alias distinct
+  layouts; matching may coalesce entries only under provable equivalences
+  (documented in the `cache` module).
 - **Incremental relayout is a host workflow the protocol supports, not a
   hidden engine mode.** On style/content/children change the host clears
   that node's cache and its ancestors' (dirty-path invalidation), then
@@ -272,8 +307,12 @@ the engine we're succeeding.
    with `gap`.
 7. **Cross-axis alignment** (§9.6) — auto margins, `align-self` (baseline
    alignment via child `first_baselines`), `align-content`.
-8. **Absolutely-positioned children** (§4.1) — sized/placed against the
-   container's padding box from insets; static position per §9.8.
+8. **Out-of-flow children** (§4.1) — compute each one's static position per
+   §9.8 (sole-item alignment). `Position::Absolute` children are then
+   sized/placed against the container's padding box from their insets (auto
+   insets anchor to the static position); `Position::AbsoluteHoisted`
+   children only get the static position recorded via
+   `set_static_position` — the host's positioned pass finishes them.
 9. **Finalize** — per-child `set_unrounded_layout` (skipped under
    `ComputeSize`), container border-box size, `content_size` accumulation,
    container baseline.
@@ -333,7 +372,8 @@ Lynx `<list>`-component concern, not a grid mode).
   flex/grid.
 - **L1 — flexbox**: add `compute_flexbox_layout` and implement it per the
   plan above, plus the shared machinery it exercises: leaf boxing, hidden
-  layout, cache matching policy, root entry, rounding. Benches + Chrome
+  layout, cache matching policy, root entry, the positioned pass
+  (`compute_absolute_layout`), device-pixel rounding. Benches + Chrome
   goldens.
 - **L2 — grid**: add `compute_grid_layout` per the plan above,
   `auto-fill`/`auto-fit`, dense packing; baseline alignment and

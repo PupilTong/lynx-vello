@@ -68,11 +68,15 @@ pub enum BoxGenerationMode {
 /// The positioning scheme of a node (the engine-relevant projection of CSS
 /// `position`).
 ///
+/// The layout tree is always the **formatting** structure — out-of-flow
+/// nodes stay children of their formatting parent, never reparented, so the
+/// parent's algorithm can compute their CSS-correct *static position*
+/// (Flexbox §4.1: as if the sole flex item; Grid §10.1: the content-edge
+/// area). What varies is *where the containing block is*, which the host
+/// resolves from computed style and encodes per node:
+///
 /// Marked `#[non_exhaustive]`: `sticky` (a host post-pass today, see the
-/// architecture doc) may become first-class later. `fixed` is *not* planned
-/// as a variant — per the CSS containing-block rules the host lowers a fixed
-/// node to `Absolute` under the layout-tree node that is its containing
-/// block (the viewport root, or the nearest transformed/filtered ancestor).
+/// architecture doc) may become first-class later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum Position {
@@ -82,12 +86,26 @@ pub enum Position {
     /// default `position: relative` means).
     #[default]
     Relative,
-    /// Out-of-flow. The node is sized/placed against its layout parent's
-    /// padding box using its insets; it does not affect sibling layout. The
-    /// host must arrange the layout tree so an absolute node's parent *is*
-    /// its CSS containing block (for Lynx this is automatic: every element
-    /// is positioned, so the containing block is always the parent).
+    /// Out-of-flow, containing block **is** the layout parent — the common
+    /// case, and the only one Lynx `position: absolute` produces (every Lynx
+    /// element is positioned, so the nearest positioned ancestor is always
+    /// the parent). The parent's algorithm sizes/places the node fully:
+    /// insets and percentages resolve against the parent's padding box, and
+    /// auto insets fall back to the static position the parent just
+    /// computed. The node does not affect sibling layout.
     Absolute,
+    /// Out-of-flow, containing block is **not** the layout parent (CSS
+    /// `position: fixed`, or `absolute` escaping non-positioned ancestors in
+    /// non-Lynx hosts). The parent's algorithm computes and records the
+    /// node's static position via
+    /// [`LayoutTree::set_static_position`](crate::tree::LayoutTree::set_static_position)
+    /// but does **not** size or place it; the host completes it after
+    /// in-flow layout in a positioned pass via
+    /// [`compute_absolute_layout`](crate::compute::compute_absolute_layout)
+    /// against the real containing block (for Lynx `fixed`: the viewport
+    /// root, or the nearest transformed/filtered/`will-change` ancestor per
+    /// the W3C rule the tracking doc mandates).
+    AbsoluteHoisted,
 }
 
 /// The `overflow` value of one axis, as layout cares about it.

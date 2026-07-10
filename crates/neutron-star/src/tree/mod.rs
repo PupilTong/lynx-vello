@@ -59,6 +59,7 @@ pub use io::{
     AvailableSpace, Layout, LayoutInput, LayoutOutput, RequestedAxis, RunMode, SizingMode,
 };
 
+use crate::geometry::Point;
 use crate::style::value::CalcHandle;
 use crate::style::{
     CoreStyle, FlexContainerStyle, FlexItemStyle, GridContainerStyle, GridItemStyle,
@@ -174,6 +175,24 @@ pub trait LayoutTree: TraverseTree {
     /// pixel-snapped copy through [`RoundTree`].
     fn set_unrounded_layout(&mut self, node: NodeId, layout: &Layout);
 
+    /// Records the CSS **static position** of an out-of-flow child whose
+    /// containing block is elsewhere
+    /// ([`Position::AbsoluteHoisted`](crate::style::Position)).
+    ///
+    /// Called by the parent's algorithm during a `PerformLayout` run for
+    /// each such child: `static_position` is the origin of the child's
+    /// hypothetical margin box per the parent's formatting context (Flexbox
+    /// §4.1 sole-item alignment; Grid §10.1 content-edge area), relative to
+    /// the parent's border box — the same space as [`Layout::location`].
+    /// The parent does *not* size or place the child.
+    ///
+    /// The host stores the value, converts it into containing-block space
+    /// once in-flow layout is done (all unrounded layouts are available by
+    /// then), and passes it to
+    /// [`compute_absolute_layout`](crate::compute::compute_absolute_layout)
+    /// in the positioned pass.
+    fn set_static_position(&mut self, child: NodeId, static_position: Point<f32>);
+
     /// Lays out (or measures) `child`, returning its output — **the host
     /// dispatch point** (see the module docs for the contract and the
     /// `compute` module docs for the canonical skeleton).
@@ -236,6 +255,17 @@ pub trait GridTree: LayoutTree {
 /// delegate these methods to it; the trait exists so storage stays
 /// host-chosen (structure-of-arrays hosts can pack cache slots columnar).
 ///
+/// # The key is the complete [`LayoutInput`]
+///
+/// Every field of the input can change the output, so none may be dropped
+/// from matching: `sizing_mode` toggles whether the node's own
+/// `size`/`min`/`max`/`aspect-ratio` apply, `parent_size` is the percentage
+/// basis, and `requested_axis` scopes which axes of a `ComputeSize` answer
+/// were actually computed. A matching policy may treat a stored entry as
+/// usable for a request only under *provable* equivalences (see
+/// [`cache`](crate::cache) for the contract) — never across differing
+/// `sizing_mode` or percentage bases.
+///
 /// # Invalidation is the host's job
 ///
 /// The engine only ever *reads* and *fills* slots. When a node's style,
@@ -245,24 +275,11 @@ pub trait GridTree: LayoutTree {
 ///
 /// [`cache_clear`]: CacheTree::cache_clear
 pub trait CacheTree {
-    /// Looks up a previously-stored output for these constraints.
-    fn cache_get(
-        &self,
-        node: NodeId,
-        known_dimensions: crate::geometry::Size<Option<f32>>,
-        available_space: crate::geometry::Size<AvailableSpace>,
-        run_mode: RunMode,
-    ) -> Option<LayoutOutput>;
+    /// Looks up a previously-stored output usable for `input`.
+    fn cache_get(&self, node: NodeId, input: LayoutInput) -> Option<LayoutOutput>;
 
-    /// Stores an output under these constraints.
-    fn cache_store(
-        &mut self,
-        node: NodeId,
-        known_dimensions: crate::geometry::Size<Option<f32>>,
-        available_space: crate::geometry::Size<AvailableSpace>,
-        run_mode: RunMode,
-        layout_output: LayoutOutput,
-    );
+    /// Stores an output computed for `input`.
+    fn cache_store(&mut self, node: NodeId, input: LayoutInput, layout_output: LayoutOutput);
 
     /// Drops every cached entry of `node`.
     fn cache_clear(&mut self, node: NodeId);

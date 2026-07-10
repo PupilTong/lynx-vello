@@ -12,8 +12,8 @@
 
 use neutron_star::cache::Cache;
 use neutron_star::compute::{
-    compute_cached_layout, compute_hidden_layout, compute_leaf_layout, compute_root_layout,
-    round_layout,
+    compute_absolute_layout, compute_cached_layout, compute_hidden_layout, compute_leaf_layout,
+    compute_root_layout, round_layout,
 };
 use neutron_star::prelude::*;
 use neutron_star::style::{
@@ -137,6 +137,8 @@ struct MockNode {
     children: Vec<NodeId>,
     unrounded: Layout,
     finalized: Layout,
+    /// Static position recorded for `Position::AbsoluteHoisted` children.
+    static_position: Point<f32>,
 }
 
 #[derive(Debug, Default)]
@@ -194,6 +196,10 @@ impl LayoutTree for MockTree {
         self.node_mut(node).unrounded = *layout;
     }
 
+    fn set_static_position(&mut self, child: NodeId, static_position: Point<f32>) {
+        self.node_mut(child).static_position = static_position;
+    }
+
     // The canonical dispatch shape (compute_cached_layout is omitted only
     // because it is still a stub; real hosts wrap the match in it). The
     // flexbox/grid arms join in L1/L2.
@@ -235,26 +241,13 @@ impl GridTree for MockTree {
 
 /// A trivially-conformant always-miss cache (the embeddable
 /// [`Cache`]'s matching policy is an L1 stub, so the mock supplies its own).
+/// Keyed on the complete `LayoutInput` per the `CacheTree` contract.
 impl CacheTree for MockTree {
-    fn cache_get(
-        &self,
-        _node: NodeId,
-        _known_dimensions: Size<Option<f32>>,
-        _available_space: Size<AvailableSpace>,
-        _run_mode: RunMode,
-    ) -> Option<LayoutOutput> {
+    fn cache_get(&self, _node: NodeId, _input: LayoutInput) -> Option<LayoutOutput> {
         None
     }
 
-    fn cache_store(
-        &mut self,
-        _node: NodeId,
-        _known_dimensions: Size<Option<f32>>,
-        _available_space: Size<AvailableSpace>,
-        _run_mode: RunMode,
-        _layout_output: LayoutOutput,
-    ) {
-    }
+    fn cache_store(&mut self, _node: NodeId, _input: LayoutInput, _layout_output: LayoutOutput) {}
 
     fn cache_clear(&mut self, _node: NodeId) {}
 }
@@ -360,6 +353,17 @@ fn leaf_dispatch_round_trips_layout_io() {
 }
 
 #[test]
+fn static_position_round_trips_through_the_tree() {
+    // For `Position::AbsoluteHoisted` children the formatting parent records
+    // a static position instead of a layout; the host stores it for the
+    // positioned pass.
+    let (mut tree, root) = leaf_tree();
+    let child = tree.child_id(root, 1);
+    tree.set_static_position(child, Point::new(12.5, 7.0));
+    assert_eq!(tree.node(child).static_position, Point::new(12.5, 7.0));
+}
+
+#[test]
 fn embeddable_cache_lifecycle() {
     let mut cache = Cache::new();
     assert!(cache.is_empty());
@@ -419,14 +423,30 @@ fn stub_compute_cached_layout() {
 
 #[test]
 #[should_panic(expected = "not yet implemented")]
+fn stub_compute_absolute_layout() {
+    let (mut tree, root) = leaf_tree();
+    let hoisted = tree.child_id(root, 0);
+    // Positioned pass: containing-block padding-box size + static position
+    // converted into that space by the host.
+    let _ = compute_absolute_layout(
+        &mut tree,
+        hoisted,
+        Size::new(800.0, 600.0),
+        Point::new(12.5, 7.0),
+    );
+}
+
+#[test]
+#[should_panic(expected = "not yet implemented")]
 fn stub_round_layout() {
     let (mut tree, root) = leaf_tree();
-    round_layout(&mut tree, root);
+    // Snap on the device-pixel grid of a 2× display.
+    round_layout(&mut tree, root, 2.0);
 }
 
 #[test]
 #[should_panic(expected = "not yet implemented")]
 fn stub_cache_get() {
     let cache = Cache::new();
-    let _ = cache.get(Size::NONE, Size::MAX_CONTENT, RunMode::ComputeSize);
+    let _ = cache.get(LayoutInput::default());
 }
