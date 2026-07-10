@@ -16,9 +16,10 @@ cross-platform engine built on:
 - **[vello](https://github.com/linebender/vello)** — GPU vector rendering
 - **[parley](https://github.com/linebender/parley)** — text layout & shaping
 
-A from-scratch layout engine (successor to the C++ engine's `starlight`) is
-planned but not yet started; see `docs/tracking/css-layout.md` for the behavior
-it will need to cover.
+The from-scratch layout engine (successor to the C++ engine's `starlight`) is
+`crates/neutron-star` — currently protocol/interfaces only, algorithms
+pending. See `docs/layout-architecture.md` for its design and
+`docs/tracking/css-layout.md` for the behavior it must cover.
 
 **Compatibility target**: ReactLynx apps compiled to `.web.bundle` must render
 and behave the same as they do under `web-core` today. "Behave the same" means
@@ -111,13 +112,25 @@ useful signal for currently-compatible versions of those libraries.
   Owns `WidgetState` / `WidgetTree`, Lynx view metrics, touch-first
   device policy, and the viewport-relative `rpx` integration. Standard CSS
   parsing, matching, cascade, and lock ownership remain in `stylo-dom`.
-- *(planned, not yet scaffolded)* layout / text / render / runtime crates —
+- `crates/neutron-star` — the standalone-publishable box-layout engine
+  (CSS flexbox + grid): trait-based host⇄engine protocol with static
+  dispatch only (no `dyn`), host-owned storage, and host-side display
+  dispatch so Lynx's `linear`/`relative` modes plug in as peer algorithms.
+  **Contracts + skeleton only so far (L0)** — the flex/grid style/tree
+  traits exist but their algorithm entry points and implementations do not
+  yet (L1/L2; plans live in the architecture doc), and the generic
+  machinery entry points are documented `todo!()` stubs. Read
+  `docs/layout-architecture.md` before touching it. Must not contain Lynx
+  vocabulary or depend on other workspace crates.
+- *(planned, not yet scaffolded)* text / render / runtime crates, plus the
+  `lynx-layout` adapter wiring `neutron-star` to the widget/style stack —
   see `docs/tracking/` for the behavior surface each will need to cover before
   scaffolding begins, and `.claude/agents/` for the subsystem-scoped agent
   personas already set up for this work.
 
 See `docs/style-architecture.md` for the current style-layer dependency and
-ownership rules.
+ownership rules, and `docs/layout-architecture.md` for the layout-layer
+equivalent.
 
 ## Reference repos (local checkouts, read-only — do not edit)
 

@@ -18,6 +18,7 @@ rust-version = "1.95"
 # Intra-workspace crates
 lynx-template-decoder = { path = "crates/lynx-template-decoder" }
 lynx-widget = { path = "crates/lynx-widget" }
+neutron-star = { path = "crates/neutron-star" }
 stylo-dom = { path = "crates/stylo-dom" }
 
 # The Lynx-patched stylo fork (git submodule; see AGENTS.md dependency

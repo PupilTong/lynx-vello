@@ -1,0 +1,287 @@
+//! The layout **wire format**: the value types that flow between host and
+//! engine on every `compute_child_layout` call.
+//!
+//! One node-layout exchange is `LayoutInput → LayoutOutput`; the durable
+//! per-node result the host stores is [`Layout`]. All three are `Copy` PODs.
+//! [`LayoutInput`] and [`LayoutOutput`] are `#[non_exhaustive]` because the
+//! protocol is expected to grow (e.g. block-layout margin collapsing adds
+//! fields); construct them with the provided constructors, or via
+//! `..Default::default()`-style field assignment on a `default()` value.
+
+use crate::geometry::{Edges, Point, Size};
+
+/// What the caller wants from a layout pass over one node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RunMode {
+    /// Produce final sizes *and positions* for the node's children, and
+    /// store them via
+    /// [`LayoutTree::set_unrounded_layout`](crate::tree::LayoutTree::set_unrounded_layout).
+    #[default]
+    PerformLayout,
+    /// Only compute the node's size (a measurement probe during a parent's
+    /// sizing passes). Child layouts must not be stored.
+    ComputeSize,
+    /// The node is `display: none`: zero everything, recursively, so stale
+    /// geometry never leaks from a previously-visible subtree.
+    PerformHiddenLayout,
+}
+
+/// Whether a measurement respects the node's own sizing styles.
+///
+/// This distinction is CSS's "content-based size" vs "used size": when a
+/// flex/grid algorithm needs an item's *content contribution* it asks with
+/// [`SizingMode::ContentSize`] (styles applied by the caller instead), while
+/// ordinary child layout uses [`SizingMode::InherentSize`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum SizingMode {
+    /// Apply the node's own `size`/`min-size`/`max-size`/`aspect-ratio`.
+    #[default]
+    InherentSize,
+    /// Ignore the node's own sizing styles; measure pure content.
+    ContentSize,
+}
+
+/// Which axes a [`RunMode::ComputeSize`] probe actually needs.
+///
+/// A hint, not a contract: algorithms may compute both axes anyway (they
+/// often fall out together), but a host/leaf can use this to skip expensive
+/// work — e.g. text needs no line-breaking to answer a width-only probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RequestedAxis {
+    /// Only the horizontal size is needed.
+    Horizontal,
+    /// Only the vertical size is needed.
+    Vertical,
+    /// Both sizes are needed (the value used by [`RunMode::PerformLayout`]).
+    #[default]
+    Both,
+}
+
+/// The space a layout pass may size a node into, per axis (CSS Sizing's
+/// *available space*).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AvailableSpace {
+    /// A definite number of CSS pixels is available.
+    Definite(f32),
+    /// Size under a min-content constraint (as small as possible without
+    /// overflowing content).
+    MinContent,
+    /// Size under a max-content constraint (ideal unconstrained size).
+    MaxContent,
+}
+
+impl AvailableSpace {
+    /// Is this a definite pixel amount?
+    #[must_use]
+    pub const fn is_definite(self) -> bool {
+        matches!(self, Self::Definite(_))
+    }
+
+    /// The definite pixel amount, if any.
+    #[must_use]
+    pub const fn into_option(self) -> Option<f32> {
+        match self {
+            Self::Definite(value) => Some(value),
+            _ => None,
+        }
+    }
+}
+
+impl Default for AvailableSpace {
+    /// `MaxContent` — the unconstrained default.
+    fn default() -> Self {
+        Self::MaxContent
+    }
+}
+
+impl From<f32> for AvailableSpace {
+    fn from(value: f32) -> Self {
+        Self::Definite(value)
+    }
+}
+
+impl From<Option<f32>> for AvailableSpace {
+    /// `None` becomes [`AvailableSpace::MaxContent`].
+    fn from(value: Option<f32>) -> Self {
+        value.map_or(Self::MaxContent, Self::Definite)
+    }
+}
+
+impl Size<AvailableSpace> {
+    /// Max-content constraint on both axes.
+    pub const MAX_CONTENT: Self = Self {
+        width: AvailableSpace::MaxContent,
+        height: AvailableSpace::MaxContent,
+    };
+
+    /// Min-content constraint on both axes.
+    pub const MIN_CONTENT: Self = Self {
+        width: AvailableSpace::MinContent,
+        height: AvailableSpace::MinContent,
+    };
+
+    /// Drops the intrinsic-constraint variants, keeping definite pixels.
+    #[must_use]
+    pub fn into_options(self) -> Size<Option<f32>> {
+        Size {
+            width: self.width.into_option(),
+            height: self.height.into_option(),
+        }
+    }
+}
+
+/// Everything an algorithm may know about a node before laying it out.
+///
+/// Semantics of the sizing fields (all in CSS pixels, all border-box):
+///
+/// - `known_dimensions` — sizes already **decided** by the caller (e.g. a stretched flex item's
+///   cross size). An algorithm must return exactly these where present.
+/// - `parent_size` — the parent's content-box size where definite; the basis for resolving this
+///   node's percentage styles.
+/// - `available_space` — the constraint to size into. `Definite` here does **not** force a size
+///   (that's `known_dimensions`); it's the space to wrap/shrink against.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[non_exhaustive]
+pub struct LayoutInput {
+    /// What the caller wants (layout, measurement, or hidden zeroing).
+    pub run_mode: RunMode,
+    /// Whether this node's own sizing styles apply.
+    pub sizing_mode: SizingMode,
+    /// Which axes a `ComputeSize` probe needs.
+    pub requested_axis: RequestedAxis,
+    /// Border-box sizes already decided by the caller.
+    pub known_dimensions: Size<Option<f32>>,
+    /// The parent's definite content-box size (percentage basis).
+    pub parent_size: Size<Option<f32>>,
+    /// The space to size into.
+    pub available_space: Size<AvailableSpace>,
+}
+
+impl LayoutInput {
+    /// A full-layout request. `sizing_mode` defaults to
+    /// [`SizingMode::InherentSize`] and `requested_axis` to
+    /// [`RequestedAxis::Both`]; assign fields to deviate.
+    #[must_use]
+    pub fn perform_layout(
+        known_dimensions: Size<Option<f32>>,
+        parent_size: Size<Option<f32>>,
+        available_space: Size<AvailableSpace>,
+    ) -> Self {
+        Self {
+            run_mode: RunMode::PerformLayout,
+            sizing_mode: SizingMode::InherentSize,
+            requested_axis: RequestedAxis::Both,
+            known_dimensions,
+            parent_size,
+            available_space,
+        }
+    }
+
+    /// A measurement probe (no child layouts are stored).
+    #[must_use]
+    pub fn compute_size(
+        known_dimensions: Size<Option<f32>>,
+        parent_size: Size<Option<f32>>,
+        available_space: Size<AvailableSpace>,
+        requested_axis: RequestedAxis,
+    ) -> Self {
+        Self {
+            run_mode: RunMode::ComputeSize,
+            sizing_mode: SizingMode::InherentSize,
+            requested_axis,
+            known_dimensions,
+            parent_size,
+            available_space,
+        }
+    }
+}
+
+/// What one layout pass reports back to its caller.
+///
+/// This is the *transient* answer the parent algorithm consumes; the durable
+/// per-node record is [`Layout`], stored separately via
+/// [`LayoutTree::set_unrounded_layout`](crate::tree::LayoutTree::set_unrounded_layout).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[non_exhaustive]
+pub struct LayoutOutput {
+    /// The node's border-box size.
+    pub size: Size<f32>,
+    /// The node's scrollable-overflow size: the extent of content measured
+    /// from the border-box origin, ≥ `size` minus borders/scrollbars. Feeds
+    /// ancestors' own `content_size` and the host's scroll ranges.
+    pub content_size: Size<f32>,
+    /// First-baseline offsets from the border-box origin, per axis, if the
+    /// node has baselines (`y` is the horizontal-text baseline used by
+    /// flexbox `align-items: baseline`).
+    pub first_baselines: Point<Option<f32>>,
+}
+
+impl LayoutOutput {
+    /// The all-zero output of hidden layout.
+    pub const HIDDEN: Self = Self {
+        size: Size::ZERO,
+        content_size: Size::ZERO,
+        first_baselines: Point::NONE,
+    };
+
+    /// An output with no baselines.
+    #[must_use]
+    pub fn new(size: Size<f32>, content_size: Size<f32>) -> Self {
+        Self {
+            size,
+            content_size,
+            first_baselines: Point::NONE,
+        }
+    }
+
+    /// Adds first-baseline information.
+    #[must_use]
+    pub fn with_first_baselines(mut self, first_baselines: Point<Option<f32>>) -> Self {
+        self.first_baselines = first_baselines;
+        self
+    }
+}
+
+/// The durable, host-stored layout of one node.
+///
+/// Coordinate contract: `location` is the offset of this node's **border-box
+/// origin from its parent's border-box origin**, before any transform, with
+/// ancestor scroll offsets *not* applied (scrolling is presentation, applied
+/// by the host/renderer). Relative-position insets are already applied.
+/// Values are unrounded CSS pixels until
+/// [`round_layout`](crate::compute::round_layout) writes the rounded copy
+/// via [`RoundTree`](crate::tree::RoundTree).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[non_exhaustive]
+pub struct Layout {
+    /// Paint/traversal order among siblings: the node's index after sorting
+    /// by style `order` (stable within equal values). Not related to
+    /// `z-index`, which the host's paint layer owns.
+    pub order: u32,
+    /// Border-box origin relative to the parent's border-box origin.
+    pub location: Point<f32>,
+    /// Border-box size.
+    pub size: Size<f32>,
+    /// Scrollable-overflow size (see [`LayoutOutput::content_size`]).
+    pub content_size: Size<f32>,
+    /// Scrollbar space reserved on each axis (`x` is width reserved by a
+    /// vertical scrollbar, `y` height by a horizontal one).
+    pub scrollbar_size: Size<f32>,
+    /// Used border widths.
+    pub border: Edges<f32>,
+    /// Used padding.
+    pub padding: Edges<f32>,
+    /// Used margins (`auto` margins resolved).
+    pub margin: Edges<f32>,
+}
+
+impl Layout {
+    /// A zeroed layout with the given sibling order.
+    #[must_use]
+    pub fn with_order(order: u32) -> Self {
+        Self {
+            order,
+            ..Self::default()
+        }
+    }
+}
