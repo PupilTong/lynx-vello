@@ -15,6 +15,14 @@
 //! `docs/tracking/deviations.md`: `box-sizing: border-box`,
 //! `overflow: hidden`, `display: linear` (when `defaultDisplayLinear`, the
 //! default), `position: relative`, and zero-width solid borders.
+//!
+//! **No `!important` in this sheet** (`docs/style-assumptions.md` §D.15): in
+//! the browser web-elements' defaults are *author*-origin, so their
+//! `!important` loses to app `!important`; here they are UA origin, where an
+//! important declaration would *outrank* author `!important` and invert web
+//! parity. Behaviors web-elements enforces via `!important` (e.g.
+//! `scroll-view { display: flex !important }`) belong to the native layout
+//! engine's element policy instead.
 
 use std::fmt::Write;
 

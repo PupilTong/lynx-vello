@@ -14,8 +14,8 @@
 //!   dropped, exactly like web-core's `FlattenedStyleInfo`.
 //! - **cssId scoping**: every emitted selector variant gets a `:where([l-css-id="N"])` guard
 //!   appended to its subject compound (zero specificity, so the author cascade is unperturbed)
-//!   unless the importing css id is `0` (global / `removeCSSScope`). String-parity with web-core's
-//!   decoder output — same insertion anchor, same formatting.
+//!   unless the importing css id is `0` (global; pageConfig `enableRemoveCSSScope` compiles to css
+//!   id 0). String-parity with web-core's decoder output — same insertion anchor, same formatting.
 //! - **No web-DOM rewrites**: web-core's `:root` → `[part="page"]`, `::placeholder` →
 //!   `::part(input)::placeholder`, and `view` → `x-view` tag renames exist to map onto a real
 //!   browser DOM; the native engine matches Lynx tags and `:root` (the `<page>` element) directly.

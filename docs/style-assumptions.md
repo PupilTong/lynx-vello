@@ -53,7 +53,17 @@ the semantics are stylo's.** Everything below refines that sentence.
    fidelity wins over web-target parity here — an intentional, recorded
    divergence from web-core (where browser passthrough renders them).
    Selectors parse; no pseudo-element boxes are generated and `content` is
-   inert. Revisit when real fixtures/apps demand it.
+   inert.
+
+   *Policy reconciliation*: this does not trip [AGENTS.md](../AGENTS.md)'s
+   bucket-1 rule ("implement W3C-correct behavior for spec features Lynx
+   supports") because **native Lynx does not support this feature at all** —
+   no `content` property exists anywhere in its property table; only the web
+   target renders it, as a side effect of browser passthrough. The omission
+   is a scoped exception to the *web-core compat target*, recorded as a
+   decision in [deviations.md](tracking/deviations.md). **Milestone to
+   revisit**: when the render engine grows generated-content box support, or
+   the first real fixture/app depends on it — whichever comes first.
 
 ## B. Performance architecture
 
@@ -74,6 +84,16 @@ the semantics are stylo's.** Everything below refines that sentence.
    affected. No coarse mark-subtree-dirty MVP phase; the invalidation
    machinery is the headline performance feature, and native Lynx has the
    same concept (`RuleInvalidationSet`).
+
+   *§6/§7 required a DOM redesign, and it shipped together with the styling
+   system* (not as a retrofit onto the earlier single-threaded-flush
+   `stylo-dom`): flushes now drive stylo's own `driver::traverse_dom`;
+   every piece of element state stylo mutates through `&self` became
+   atomic; the one non-atomic slot (`ElementData`) is single-owner under
+   stylo's one-worker-per-element traversal discipline; and mutations
+   record pre-mutation snapshots that feed stylo's invalidation sets. See
+   [style-architecture.md](style-architecture.md) for the resulting
+   lifecycle and thread-safety invariants.
 
 8. **Style→layout handoff: direct `Arc<ComputedValues>` reads + change
    flags.** neutron-star / render consume stylo's computed values in place;
@@ -101,6 +121,18 @@ the semantics are stylo's.** Everything below refines that sentence.
     layout-affecting properties animate style-side through stylo's
     Animations/Transitions cascade levels (per-frame computed-value
     interpolation, correct cascade interactions). Two clocks by design.
+
+    *Structural side effects are not render-private.* A transform/filter
+    also creates a containing block for positioned descendants and a
+    stacking context — and those must be visible to layout even while the
+    interpolated value lives render-side. Resolution (matching browser
+    behavior and `will-change` semantics): an element with a **running**
+    animation or transition of `transform`/`filter`/`opacity` establishes
+    its containing block / stacking context **for the entire duration**,
+    even across `none` keyframes. That makes the structural bits a
+    per-animation constant flipped at start/end through the normal
+    style-side path — layout never needs per-frame animation state, only
+    the render side interpolates.
 
 12. **Animation staleness seam: query-time sync.** The render side owns the
     in-flight value for render-driven properties; when something needs the
@@ -130,14 +162,25 @@ the semantics are stylo's.** Everything below refines that sentence.
     free — author styles override naturally. No hardcoded per-widget style
     seeding.
 
+    *Importance constraint*: in the browser, web-elements' defaults are
+    **author**-origin CSS, and several carry `!important`. Ours are UA
+    origin, where an important declaration would **outrank author
+    `!important`** (cascade origin order inverts for important
+    declarations) — so the generated UA sheet must stay `!important`-free.
+    Component behaviors web-elements enforces via `!important` (e.g.
+    `scroll-view { display: flex !important }`) are instead owned by the
+    native layout engine's element policy, not fought out in the cascade.
+
 16. **cssId scoping is a widget-layer concern.** The feature exists for
-    `removeCSSScope = false`; `stylo-dom` stays scope-unaware. Mechanism:
-    the widget layer synthesizes `:where([l-css-id="N"])` guards onto
+    pageConfig `enableRemoveCSSScope = false` (that is the exact
+    `.web.bundle` key; this doc previously shortened it to
+    "removeCSSScope"); `stylo-dom` stays scope-unaware. Mechanism: the
+    widget layer synthesizes `:where([l-css-id="N"])` guards onto
     selectors at ingest — string-parity with web-core's decoder output,
     trivially differential-testable, zero specificity perturbation. (With
-    `removeCSSScope = true`, guard synthesis is skipped and styles are
-    global.) Partitioned per-cssId rule sets remain a possible *measured*
-    optimization, not the design.
+    `enableRemoveCSSScope = true` the compiler emits css id `0`, guard
+    synthesis is skipped, and styles are global.) Partitioned per-cssId
+    rule sets remain a possible *measured* optimization, not the design.
 
 17. **Legacy `css_og` (`enableCSSSelector=false`) bundles: out of scope for
     v1.** Reconfirms the earlier deferral. The decoder may still parse the
