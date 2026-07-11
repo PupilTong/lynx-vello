@@ -1,10 +1,11 @@
 # neutron-star
 
-A trait-first, statically-dispatched box-layout engine for host-owned trees,
-supporting CSS **flexbox** and **grid**. Built as the from-scratch successor to
-the Lynx C++ engine's `starlight` layout engine, but deliberately
-Lynx-agnostic: the crate has zero required dependencies and is designed to be
-published and used standalone.
+A trait-first, statically-dispatched box-layout engine for host-owned trees.
+CSS **flexbox** is implemented; the CSS **Grid** host protocol is reserved for
+the next algorithm milestone. Built as the from-scratch successor to the Lynx
+C++ engine's `starlight` layout engine, but deliberately Lynx-agnostic: the
+crate has zero required dependencies and is designed to be published and used
+standalone.
 
 > **Status: flexbox implemented (milestone L1).** The protocol, shared layout
 > machinery, leaf/absolute sizing, cache, rounding, and CSS Flexbox Level 1
@@ -44,16 +45,16 @@ knowing about them).
 ## Dependencies and feature flags
 
 None, deliberately. The flex and grid protocols are core, unconditional API,
-and the crate compiles with zero dependencies. (An optional `serde` feature
-for golden-fixture testing is planned alongside those tests in L1.)
+and the crate compiles with zero dependencies.
 
 ## Prior art
 
 The tree/style trait split is informed by [Taffy]'s `LayoutPartialTree`
 design (proven to keep a layout engine storage-agnostic without trait
-objects), the algorithms-to-come by the CSS specs directly (Flexbox Level 1,
-Grid Level 2, Sizing Level 3), and the performance posture by `starlight` and
-[Yoga]. neutron-star shares no code with any of them.
+objects), the implemented flex algorithm and planned grid algorithm by the
+CSS specs directly (Flexbox Level 1, Grid Level 2, Sizing Level 3), and the
+performance posture by `starlight` and [Yoga]. neutron-star shares no code
+with any of them.
 
 [Taffy]: https://github.com/DioxusLabs/taffy
 [Yoga]: https://github.com/facebook/yoga

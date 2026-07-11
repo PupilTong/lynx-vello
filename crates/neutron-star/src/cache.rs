@@ -46,9 +46,9 @@ use crate::tree::{AvailableSpace, LayoutInput, LayoutOutput, RunMode};
 /// Number of measurement slots in a [`Cache`] (excluding the dedicated
 /// final-layout slot).
 ///
-/// Sized to the distinct constraint *shapes* flex/grid sizing passes emit
-/// for one node (known/unknown width × height crossed with
-/// definite/min-/max-content available space patterns actually produced).
+/// Sized to cover the distinct constraint *shapes* used by layout sizing
+/// passes for one node (known/unknown width × height crossed with
+/// definite/min-/max-content available-space patterns).
 /// The constant is public so hosts can size columnar storage consistently
 /// with the reference cache.
 pub const MEASURE_CACHE_SLOTS: usize = 8;

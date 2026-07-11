@@ -113,8 +113,8 @@ useful signal for currently-compatible versions of those libraries.
   Owns `WidgetState` / `WidgetTree`, Lynx view metrics, touch-first
   device policy, and the viewport-relative `rpx` integration. Standard CSS
   parsing, matching, cascade, and lock ownership remain in `stylo-dom`.
-- `crates/neutron-star` — the standalone-publishable box-layout engine
-  (CSS flexbox + grid): trait-based host⇄engine protocol with static
+- `crates/neutron-star` — the standalone-publishable CSS flexbox engine with
+  a reserved Grid protocol: trait-based host⇄engine integration with static
   dispatch only (no `dyn`), host-owned storage, and host-side display
   dispatch so Lynx's `linear`/`relative` modes plug in as peer algorithms.
   **Flexbox milestone implemented (L1)** — the shared root/leaf/cache/

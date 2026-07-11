@@ -2,11 +2,11 @@
 
 `crates/neutron-star` is lynx-vello's box-layout engine: the from-scratch
 successor to the Lynx C++ engine's `starlight`
-(`lynx/core/renderer/starlight/`), supporting CSS **flexbox** and **grid**.
-It is deliberately Lynx-agnostic and standalone-publishable — zero required
-dependencies, no assumption about DOM, style engine, or storage — and every
-host boundary is **static dispatch**: `dyn` is impossible by construction,
-not by convention.
+(`lynx/core/renderer/starlight/`). It implements CSS **flexbox** and carries
+the host protocol for the planned CSS **Grid** algorithm. It is deliberately
+Lynx-agnostic and standalone-publishable — zero required dependencies, no
+assumption about DOM, style engine, or storage — and every host boundary is
+**static dispatch**: `dyn` is impossible by construction, not by convention.
 
 Status: **L1 (flexbox)** — the protocol, generic machinery, cache, leaf and
 positioned sizing, rounding, and CSS Flexbox Level 1 algorithm are
@@ -18,9 +18,9 @@ performance architecture, and the remaining plan.
 Behavior spec: [`docs/tracking/css-layout.md`](tracking/css-layout.md)
 (what Starlight does, which parts are real W3C features vs Lynx extensions,
 and the confirmed deviations). Per the standards policy in
-[`AGENTS.md`](../AGENTS.md), flex/grid are implemented from the **W3C specs**
-(Flexbox Level 1, Grid Level 2, Sizing Level 3, Box Alignment Level 3), not
-by porting Starlight's C++.
+[`AGENTS.md`](../AGENTS.md), flex is implemented—and grid is planned—from the
+**W3C specs** (Flexbox Level 1, Grid Level 2, Sizing Level 3, Box Alignment
+Level 3), not by porting Starlight's C++.
 
 ## Ownership
 
@@ -30,7 +30,7 @@ by porting Starlight's C++.
 │ lynx-widget  │──▶│ lynx-layout (planned)    │──▶│ neutron-star             │
 │ + stylo-dom  │   │ host adapter:            │   │ tree/style protocol      │
 │ styles, tree │   │ · impls the tree traits  │   │ flexbox algorithm        │
-└──────────────┘   │ · stylo → style views    │   │ grid algorithm           │
+└──────────────┘   │ · stylo → style views    │   │ grid protocol + L2 plan  │
      ▲             │ · display dispatch       │   │ leaf/hidden/cache/round  │
 ┌──────────────┐   │ · linear/relative algos  │   │ machinery                │
 │ lynx-text    │◀──│ · text measure closures  │   │ (no Lynx vocabulary,    │
@@ -41,7 +41,7 @@ by porting Starlight's C++.
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| `neutron-star` | Layout algorithms (flex, grid, leaf boxing, hidden, rounding), the protocol vocabulary (geometry, style values, layout IO), cache semantics | Node storage, style storage, display dispatch, Lynx vocabulary (`linear-*`, `rpx`, …), text shaping, stacking/paint order |
+| `neutron-star` | Implemented flex algorithm; planned grid algorithm; leaf boxing, hidden layout, rounding; protocol vocabulary (geometry, style values, layout IO); cache semantics | Node storage, style storage, display dispatch, Lynx vocabulary (`linear-*`, `rpx`, …), text shaping, stacking/paint order |
 | `lynx-layout` *(planned host adapter)* | Trait impls over the widget tree, stylo `ComputedValues` → style views, display-mode dispatch, `linear`/`relative`/`staggered` algorithms, dirty tracking + cache invalidation, fixed/sticky lowering | A second flex/grid implementation, engine-side copies of styles |
 | `lynx-text` *(planned)* | Text measurement closures handed to `compute_leaf_layout` | Box layout |
 
@@ -71,16 +71,18 @@ Implemented machinery: `compute_root_layout`, `compute_leaf_layout`
 `compute_absolute_layout` (the positioned pass for out-of-flow nodes whose
 containing block is not their formatting parent), and
 `round_layout(tree, root, scale)` (device-pixel snapping), plus the L1
-`compute_flexbox_layout`. Algorithm entry points use the fixed shape
+`compute_flexbox_layout`. The live flex entry point uses the fixed shape that
+the Grid entry point will retain in L2:
 
 ```rust
-pub fn compute_flexbox_layout<Tree: FlexTree>(  // implemented in L1
+pub fn compute_flexbox_layout<Tree: FlexTree>(  // implemented
     tree: &mut Tree, node: NodeId, input: LayoutInput) -> LayoutOutput;
-pub fn compute_grid_layout<Tree: GridTree>(     // L2
+pub fn compute_grid_layout<Tree: GridTree>(     // planned L2 API
     tree: &mut Tree, node: NodeId, input: LayoutInput) -> LayoutOutput;
 ```
 
-so hosts can already shape their dispatch around them.
+The flex signature is public now; the Grid signature documents the planned
+L2 API so hosts can reserve the corresponding dispatch arm.
 
 Layout IO is three `Copy` PODs: `LayoutInput` (run mode, sizing mode,
 known dimensions / parent size / available space) → `LayoutOutput` (size,
@@ -104,8 +106,8 @@ This single decision buys three properties at once:
    staggered-grid. The engine has **no `Display` enum** — dispatch identity
    belongs to the host.
 2. **Uniform caching.** Every path through dispatch shares one cache policy,
-   so mixed trees (flex containing linear containing grid) memoize
-   correctly.
+   so mixed trees of engine and host-private layout modes memoize correctly;
+   Grid will use the same path when its L2 algorithm lands.
 3. **Partial relayout.** Any node can be a layout root; the engine never
    assumes global tree access.
 
@@ -225,13 +227,15 @@ the painting — layout's job is to never be the frame's bottleneck.
   native, halves cache traffic vs `f64`; Starlight/Yoga/Taffy all agree).
   No `NaN` sentinel games — unknowns are `Option<f32>`/enum variants, and
   boundary values must be finite (debug-asserted).
-- **The measurement cache is the asymptotic mechanism.** Flex/grid sizing
-  probes children under multiple constraints; uncached, nested containers go
-  super-linear (the classic exponential blowup). The protocol bakes the
-  fix in: `compute_cached_layout` around every dispatch, per-node slots
+- **The measurement cache is the asymptotic mechanism.** Flex sizing—and
+  Grid once L2 lands—probes children under multiple constraints; uncached,
+  nested containers go super-linear (the classic exponential blowup). The
+  protocol bakes the fix in: `compute_cached_layout` around every dispatch,
+  per-node slots
   (`cache::Cache`, embeddable, fixed-size, allocation-free —
-  `MEASURE_CACHE_SLOTS = 8` measurement slots + 1 layout slot, slot policy
-  validated against probe traces in L1). The key is the **complete
+  `MEASURE_CACHE_SLOTS = 8` measurement slots + 1 layout slot). Shape-aware
+  replacement is implemented; probe-trace validation and tuning remain L4
+  work. The key is the **complete
   `LayoutInput`** — `sizing_mode` (content-size probes ignore the node's own
   size/min/max/aspect-ratio), `parent_size` (the percentage basis), and
   `requested_axis` (which axes an answer actually computed) all change
@@ -246,19 +250,16 @@ the painting — layout's job is to never be the frame's bottleneck.
   choose a nearer relayout root when the dirty node's size can't escape
   (fixed-size subtree) — the engine is agnostic because any node can be a
   root.
-- **Allocation strategy (L1 rule, benchmark-gated evolution).** Per-node
-  transient state (flex line arrays, grid placement/track vectors) uses
-  stack-first small-vector storage sized for the common fan-out, spilling to
-  heap only on large child counts; nothing engine-side persists between
-  calls. If benches justify it, the upgrade path is a bump-arena scratch
-  threaded through the *internal* recursion — deliberately **not** in the
-  public protocol (the host round-trip would infect every trait signature
-  with scratch lifetimes), so it can be adopted without a protocol break.
-- **Data-oriented inner loops.** Inside algorithms, per-item working sets
-  are laid out as structure-of-arrays scratch so the resolve-flexible-
-  lengths loop and grid track sizing iterate contiguous `f32` runs —
-  auto-vectorizable now, explicit SIMD later if profiles demand. This is
-  engine-internal and invisible to the protocol.
+- **Allocation strategy (current).** Algorithms use transient `Vec` scratch;
+  nothing engine-side persists between calls. Benchmark-gated upgrades
+  include stack-first storage or a bump arena threaded through *internal*
+  recursion — deliberately **not** through the public protocol, where scratch
+  lifetimes would infect every host trait signature. Either can be adopted
+  without a protocol break.
+- **Data-oriented inner loops (planned).** The current flex implementation
+  uses array-of-structs scratch. Profiles may justify structure-of-arrays
+  storage and explicit SIMD for its flexible-length loops later; these are
+  engine-internal changes, invisible to the protocol.
 - **Parallelism: designed, deferred, additive.** `compute_child_layout`'s
   `&mut self` recursion is inherently sequential — correct for v0 (layout is
   rarely the bottleneck vs paint/style, and Yoga/Taffy/Starlight are all
@@ -271,11 +272,11 @@ the painting — layout's job is to never be the frame's bottleneck.
   pool (host storage, host threading policy — the engine stays
   thread-unaware). Adding a defaulted method is semver-minor, so this ships
   when profiles earn it, without a protocol break.
-- **Benchmarks planned for L1 hardening.** `divan` (CodSpeed-compatible, per repo toolchain)
-  micro/macro benches: deep flex nesting, wide children, wrap-heavy,
-  grid auto-placement, incremental single-node dirty. Baselines: Taffy and
-  Yoga on equivalent trees — not to copy their design, but to keep
-  "high-performance" falsifiable.
+- **Benchmarks planned for performance/parity hardening.** `divan`
+  (CodSpeed-compatible, per repo toolchain) micro/macro benches: deep flex
+  nesting, wide children, wrap-heavy, grid auto-placement, incremental
+  single-node dirty. Baselines: Taffy and Yoga on equivalent trees — not to
+  copy their design, but to keep "high-performance" falsifiable.
 
 ## Algorithms (L1 implemented, L2 planned)
 
@@ -353,9 +354,9 @@ Lynx `<list>`-component concern, not a grid mode).
   host and spec-derived fixtures for axes, flexing, wrapping, intrinsic
   contributions, alignment, baselines, box sizing, percentages, auto
   minimums, out-of-flow static positions, and compute-only runs.
-- **L1 hardening (planned):** golden layout trees compared against
-  browser-computed geometry for the same CSS, differential fuzzing against
-  Taffy on the shared feature subset, and the flex benchmarks above.
+- **Parity/performance hardening (planned):** golden layout trees compared
+  against browser-computed geometry for the same CSS, differential fuzzing
+  against Taffy on the shared feature subset, and the flex benchmarks above.
 - **Lynx modes (host-side):** `linear`/`relative` conformance fixtures come
   from Starlight behavior per `docs/tracking/css-layout.md`, tested in the
   adapter crate, not here.
@@ -381,14 +382,14 @@ Lynx `<list>`-component concern, not a grid mode).
 - **L5 — parity hardening**: WPT-derived flex/grid suites, web-core
   side-by-side fixtures, fuzzing.
 
-## Open questions (tracked, non-blocking)
+## Open follow-ups (tracked, non-blocking)
 
 - Percentage-height resolution quirks: does Starlight resolve `%` heights
   against indefinite parents anywhere CSS wouldn't? Needs a
-  `lynx-behavior-researcher` pass before L1 finalizes `parent_size`
-  edge-case semantics.
-- `aspect-ratio` interaction matrix (with `min/max`, stretch, and intrinsic
-  keywords) — spec-complete in L1 or staged?
+  `lynx-behavior-researcher` pass before parity hardening closes this
+  edge-case surface.
+- Expand `aspect-ratio` parity coverage across `min/max`, stretch, and
+  intrinsic keywords.
 - Whether Lynx's legacy `grid-*-span` properties need adapter-side lowering
   beyond `span N` placement (tracking doc says they're superseded aliases).
 - Crate name availability on crates.io (`neutron-star`) — check before the

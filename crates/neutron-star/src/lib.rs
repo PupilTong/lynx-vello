@@ -1,5 +1,6 @@
-//! **neutron-star** — a trait-first, statically-dispatched box-layout engine
-//! for host-owned trees, supporting CSS **flexbox** and **grid**.
+//! **neutron-star** — a trait-first, statically-dispatched CSS **flexbox**
+//! engine for host-owned trees, with CSS **Grid** host contracts reserved for
+//! its next algorithm milestone.
 //!
 //! Built as lynx-vello's from-scratch successor to the Lynx C++ engine's
 //! `starlight`, but deliberately Lynx-agnostic and standalone-publishable:
@@ -17,7 +18,7 @@
 //!  │ node storage (any layout) │◀───────────▶│ compute_root_layout       │
 //!  │ computed styles (any repr)│  NodeId +   │ compute_leaf_layout       │
 //!  │ per-node Cache + Layouts  │  POD values │ cache/hidden/abs-pos/round│
-//!  │ dispatch: display → algo  │◀───────────▶│ flex algo (L1), grid (L2) │
+//!  │ dispatch: display → algo  │◀───────────▶│ flex algo; grid contracts │
 //!  └───────────────────────────┘  recursion  └───────────────────────────┘
 //! ```
 //!
@@ -132,8 +133,8 @@
 //!
 //!     fn compute_child_layout(&mut self, child: NodeId, input: LayoutInput) -> LayoutOutput {
 //!         // Real hosts: compute_cached_layout + display dispatch here
-//!         // (see the `compute` module docs). This toy treats everything
-//!         // as an empty leaf:
+//!         // (see the `compute` module docs). This toy treats every node
+//!         // as hidden:
 //!         let _ = (child, input);
 //!         LayoutOutput::HIDDEN
 //!     }

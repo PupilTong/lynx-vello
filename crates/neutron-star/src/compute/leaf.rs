@@ -20,8 +20,9 @@ use crate::tree::{AvailableSpace, LayoutInput, LayoutOutput, RequestedAxis, RunM
 /// Sizes a content leaf, delegating content measurement to `measure`.
 ///
 /// `measure(known_dimensions, available_space)` returns the content's size
-/// and optional first baselines for the given constraints: `known_dimensions` are extents
-/// already fixed by styles (measure the other axis against them — e.g. text
+/// and optional first baselines for the given constraints. `known_dimensions`
+/// are resolved or caller-decided border-box dimensions converted to
+/// content-box extents (measure the other axis against them — e.g. text
 /// height for a known width); `available_space` constrains the free axes.
 /// The closure is called at most once. A single-axis size probe whose box is
 /// already fully known can skip it; full layout and both-axis probes still
@@ -34,9 +35,10 @@ use crate::tree::{AvailableSpace, LayoutInput, LayoutOutput, RequestedAxis, RunM
 ///
 /// The returned size applies, in order: known dimensions verbatim; style
 /// size/aspect-ratio (per [`SizingMode`](crate::tree::SizingMode)); measured
-/// content size; min/max clamps; padding+border floor (a box is never
-/// smaller than its own surrounds). `content_size` is the border-origin
-/// scrollable extent, including measured overflow.
+/// content size; min/max clamps; and a padding+border floor on axes the
+/// engine resolves itself. Caller-supplied known dimensions remain verbatim.
+/// `content_size` is the border-origin scrollable extent, including measured
+/// overflow.
 #[allow(clippy::too_many_lines)]
 pub fn compute_leaf_layout<Style, MeasureFn, CalcResolver, Measurement>(
     input: LayoutInput,
@@ -167,9 +169,10 @@ where
 
 /// Host measurement returned to [`compute_leaf_layout`].
 ///
-/// `size` and `first_baselines` are relative to the content-box origin.
-/// Returning a plain [`Size<f32>`] remains supported through [`From`], for
-/// leaves without baseline information.
+/// `size` is the measured content-box extent. `first_baselines` contains
+/// offsets from the content-box origin. Returning a plain [`Size<f32>`]
+/// remains supported through [`From`], for leaves without baseline
+/// information.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct LeafMeasurement {
     /// Measured content-box size.

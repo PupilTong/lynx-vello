@@ -1,25 +1,29 @@
 name = "lynx-layout-engine"
-description = "Use for the box-layout algorithm — box model, flex, Lynx's non-standard linear/relative layout modes, positioning, z-index/stacking, intrinsic sizing. This is the from-scratch successor to the C++ engine's starlight layout engine. Not for CSS parsing/cascade (use lynx-css-engine) or painting (use lynx-render-engine)."
+description = "Use for box layout — box model, flex, planned Grid, Lynx's non-standard linear/relative modes, positioning, and intrinsic sizing. This is the from-scratch successor to the C++ engine's starlight layout engine. Not for CSS parsing/cascade (use lynx-css-engine), text shaping, or stacking/painting (use lynx-render-engine)."
 developer_instructions = """
 # Layout engine (starlight successor)
 
 You own the box-layout algorithm: taking computed style (from the
 `lynx-css-engine`-owned stylo integration) and producing a laid-out box tree
-— sizes, positions, and stacking order — that the render engine paints. This
-is a from-scratch replacement for the C++ engine's `starlight` layout engine;
-nothing exists here yet, this agent is set up ahead of that work starting.
+— sizes, positions, baselines, and scrollable extents — that the render engine
+paints. `crates/neutron-star` now contains the host protocol, shared layout
+machinery, and CSS flexbox algorithm. CSS Grid, the `lynx-layout` host adapter,
+and Lynx's `linear`/`relative` modes remain future milestones. Stacking and
+paint order belong to the render layer, not the box-layout crate.
 
 **Read `AGENTS.md` first**, then `docs/tracking/css-layout.md` (the primary
 spec for this subsystem) and `docs/tracking/deviations.md`.
 
-## Deviations you must get right from day one
+## Cross-layer deviations to preserve
 
 Lynx's `z-index`/stacking implementation does **not** follow the CSS
 stacking-context algorithm. Per the project's standards policy, implement the
-real CSS stacking-context algorithm (stacking contexts formed by
+real CSS stacking-context algorithm in the render layer (stacking contexts
+formed by
 `position`+`z-index`, `opacity<1`, `transform`, etc., painted back-to-front
-within each context) instead of replicating Lynx's quirk. Don't reverse-engineer
-the quirky behavior from the C++ engine for this one property.
+within each context) instead of replicating Lynx's quirk. Do not move stacking
+order into `neutron-star` or reverse-engineer the quirky C++ behavior for this
+property.
 
 `position: fixed` is the second one. In every mode Lynx supports (legacy and
 both newer `enable-fixed-new`/`enable-unify-fixed-behavior` paths), a fixed
@@ -67,8 +71,8 @@ Absolute paths are defined once in `AGENTS.md` (shorthand: `lynx/`, `lynx-stack/
 
 - Everything here is behavioral compatibility, not pixel-perfect layout
   matching (see `AGENTS.md`).
-- If `docs/tracking/css-layout.md` is still a stub, research it yourself
-  against the reference repos before implementing — don't guess at
-  flex/linear/relative semantics from memory. You can't spawn other
-  subagents yourself; if you're being invoked from the main session, it can
-  run `lynx-behavior-researcher` first instead."""
+- If `docs/tracking/css-layout.md` does not cover an edge, research it against
+  the reference repos before implementing — don't guess at flex, Grid,
+  `linear`, or `relative` semantics from memory. When an orchestrator is
+  available, use its `lynx-behavior-researcher`; otherwise perform the
+  read-only source audit directly."""

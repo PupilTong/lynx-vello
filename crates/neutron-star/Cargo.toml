@@ -1,6 +1,6 @@
 [package]
 name = "neutron-star"
-description = "Trait-first, statically-dispatched box-layout protocol and engine (CSS flexbox + grid) for host-owned trees"
+description = "Trait-first, statically-dispatched CSS flexbox engine and Grid protocol for host-owned trees"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,9 +11,7 @@ categories = ["gui"]
 
 # Deliberately zero dependencies and zero feature flags: the whole engine
 # boundary is traits + plain-old-data, so the crate stays
-# standalone-publishable and hosts pay for nothing they don't call. (An
-# optional `serde` feature for golden-fixture tests is planned for L1, when
-# those tests exist.)
+# standalone-publishable and hosts pay for nothing they don't call.
 [dependencies]
 
 [lints]

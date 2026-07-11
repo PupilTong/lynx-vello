@@ -220,7 +220,10 @@ where
 /// [`compute_child_layout`](LayoutTree::compute_child_layout) with
 /// [`RunMode::PerformHiddenLayout`](crate::tree::RunMode), so previously
 /// laid-out geometry can't leak out of a subtree that just became hidden.
-/// Returns [`LayoutOutput::HIDDEN`].
+/// Every visited node is also passed to
+/// [`LayoutTree::invalidate_layout_cache`], preventing a later cache hit from
+/// restoring only a revealed subtree's root while its descendants stay
+/// zeroed. Returns [`LayoutOutput::HIDDEN`].
 pub fn compute_hidden_layout<Tree: LayoutTree>(tree: &mut Tree, node: NodeId) -> LayoutOutput {
     tree.invalidate_layout_cache(node);
     let hidden_layout = Layout::with_order(0);
@@ -250,8 +253,9 @@ pub fn compute_hidden_layout<Tree: LayoutTree>(tree: &mut Tree, node: NodeId) ->
 /// size or place it. The host resolves which node is the containing block
 /// (for Lynx `fixed`: the viewport root, or the nearest
 /// transformed/filtered ancestor per the W3C rule), converts the recorded
-/// static position into that block's space — it holds every unrounded
-/// layout by now — and calls this once per hoisted node with:
+/// static position into that block's space once all required in-flow and
+/// ancestor layouts are available, and calls this once per hoisted node
+/// with:
 ///
 /// - `containing_block`: the containing block's **padding-box size**, the basis for the node's
 ///   inset and percentage resolution;
@@ -384,8 +388,9 @@ fn absolute_known_dimensions(
 ) -> Size<Option<f32>> {
     // `auto` stretches only when both opposing insets are definite. These
     // are caller-decided border-box dimensions, clamped before they become
-    // known dimensions. With an aspect ratio and two auto sizes the block
-    // axis remains ratio-dependent instead of stretching independently.
+    // known dimensions. When horizontal stretch first establishes the width
+    // of a two-auto-axis ratio box, height remains ratio-derived; otherwise
+    // definite vertical insets may stretch height independently.
     let horizontal_stretch =
         style.auto_size.width && style.insets.left.is_some() && style.insets.right.is_some();
     let ratio_dependent_height = style.aspect_ratio.is_some()

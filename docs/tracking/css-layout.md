@@ -124,6 +124,12 @@ The project's own `default_layout_style.h` already encodes a "Lynx default vs W3
 
 ## Also see
 
-Scope note: this is the behavior spec for the *layout algorithm*, which the from-scratch layout engine (successor to the C++ engine's `starlight`) implements — see `.claude/agents/lynx-layout-engine.md`. The engine crate is [`crates/neutron-star`](../../crates/neutron-star) (protocol landed, algorithms pending); its design, ownership boundaries, and milestones are in [`docs/layout-architecture.md`](../layout-architecture.md).
+Scope note: this is the behavior spec for the *layout algorithm*, which the
+from-scratch layout engine (successor to the C++ engine's `starlight`)
+implements — see `.claude/agents/lynx-layout-engine.md`. The engine crate is
+[`crates/neutron-star`](../../crates/neutron-star): its protocol, shared
+machinery, and flexbox algorithm are implemented; Grid remains the next
+algorithm milestone. Its design, ownership boundaries, and milestones are in
+[`docs/layout-architecture.md`](../layout-architecture.md).
 
 Implementation-pattern reference (not a behavior spec): `Paws/engine/src/layout/stacking.rs` for a real, WPT-conformance-tested CSS stacking-context implementation over `stylo` computed style — the concrete reference for the z-index deviation.

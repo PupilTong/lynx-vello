@@ -130,10 +130,11 @@ impl From<LengthPercentage> for LengthPercentageAuto {
 ///
 /// Beyond [`LengthPercentageAuto`]'s values this includes the CSS Sizing
 /// Level 3 intrinsic-sizing keywords, which Lynx's `starlight` also models
-/// (`NLength::kNLengthMaxContent`/`kNLengthFitContent`). Algorithm support
-/// for the intrinsic keywords may lag (they are reserved from L0 so that
-/// adding them is not a protocol break); until implemented they resolve as
-/// `Auto`.
+/// (`NLength::kNLengthMaxContent`/`kNLengthFitContent`). Intrinsic keywords
+/// remain symbolic so each layout algorithm can resolve them from its
+/// min-/max-content probes. Flexbox resolves them for main-axis preferred,
+/// minimum, maximum, and flex-basis sizes; unsupported contexts leave them
+/// unresolved for that context's fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Dimension {
     /// An absolute length in CSS pixels.
