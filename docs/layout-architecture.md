@@ -8,14 +8,12 @@ dependencies, no assumption about DOM, style engine, or storage — and every
 host boundary is **static dispatch**: `dyn` is impossible by construction,
 not by convention.
 
-Status: **L0 (contracts + skeleton)** — every interface and value type is
-final-shaped, documented, and conformance-tested against a mock host. The
-crate contains **no layout algorithm**: the flex/grid *contracts* (style
-traits, `FlexTree`/`GridTree`) exist, their algorithm entry points and
-implementations land in L1/L2 (plans below), and the generic machinery
-entry points are `todo!()` stubs whose rustdoc is their specification. The
-crate rustdoc is the protocol reference; this document is the rationale, the
-performance architecture, and the plan.
+Status: **L1 (flexbox)** — the protocol, generic machinery, cache, leaf and
+positioned sizing, rounding, and CSS Flexbox Level 1 algorithm are
+implemented and conformance-tested against a plain-storage mock host. The
+Grid contracts exist, but its L2 algorithm is still pending. The crate
+rustdoc is the protocol reference; this document is the rationale, the
+performance architecture, and the remaining plan.
 
 Behavior spec: [`docs/tracking/css-layout.md`](tracking/css-layout.md)
 (what Starlight does, which parts are real W3C features vs Lynx extensions,
@@ -59,7 +57,7 @@ demands only what it uses:
 | Trait | Adds | Consumed by |
 | --- | --- | --- |
 | `TraverseTree` | child iteration (GAT iterator) | everything |
-| `LayoutTree: TraverseTree` | `CoreStyle` views, `resolve_calc`, `set_unrounded_layout`, **`compute_child_layout` (the host dispatch point)** | all algorithms |
+| `LayoutTree: TraverseTree` | `CoreStyle` views, `resolve_calc`, layout/static-position storage, hidden-cache invalidation hook, **`compute_child_layout` (the host dispatch point)** | all algorithms |
 | `FlexTree: LayoutTree` | flex container/item style views | the L1 flexbox algorithm |
 | `GridTree: LayoutTree` | grid container/item style views (GAT track-list iterators) | the L2 grid algorithm |
 | `CacheTree` | per-node measurement-cache slots | `compute_cached_layout` |
@@ -67,17 +65,16 @@ demands only what it uses:
 
 Entry points (`neutron_star::compute`) are free generic functions — there is
 no engine object, so unused entry points never monomorphize into the host.
-Landed as machinery stubs: `compute_root_layout`, `compute_leaf_layout`
+Implemented machinery: `compute_root_layout`, `compute_leaf_layout`
 (host measure closure), `compute_hidden_layout`, `compute_cached_layout`
 (keyed on the **complete `LayoutInput`** — see the caching section),
 `compute_absolute_layout` (the positioned pass for out-of-flow nodes whose
 containing block is not their formatting parent), and
-`round_layout(tree, root, scale)` (device-pixel snapping). The algorithm
-entry points arrive with their implementations, as siblings with the fixed
-shape
+`round_layout(tree, root, scale)` (device-pixel snapping), plus the L1
+`compute_flexbox_layout`. Algorithm entry points use the fixed shape
 
 ```rust
-pub fn compute_flexbox_layout<Tree: FlexTree>(  // L1
+pub fn compute_flexbox_layout<Tree: FlexTree>(  // implemented in L1
     tree: &mut Tree, node: NodeId, input: LayoutInput) -> LayoutOutput;
 pub fn compute_grid_layout<Tree: GridTree>(     // L2
     tree: &mut Tree, node: NodeId, input: LayoutInput) -> LayoutOutput;
@@ -274,16 +271,16 @@ the painting — layout's job is to never be the frame's bottleneck.
   pool (host storage, host threading policy — the engine stays
   thread-unaware). Adding a defaulted method is semver-minor, so this ships
   when profiles earn it, without a protocol break.
-- **Benchmarks from L1.** `divan` (CodSpeed-compatible, per repo toolchain)
+- **Benchmarks planned for L1 hardening.** `divan` (CodSpeed-compatible, per repo toolchain)
   micro/macro benches: deep flex nesting, wide children, wrap-heavy,
   grid auto-placement, incremental single-node dirty. Baselines: Taffy and
   Yoga on equivalent trees — not to copy their design, but to keep
   "high-performance" falsifiable.
 
-## Algorithm plans (L1/L2)
+## Algorithms (L1 implemented, L2 planned)
 
-Kept here — not in the crate — so the code stays contracts-and-skeleton
-until the implementations land. Starlight's C++ mirrors the same spec steps
+This pass structure documents the implemented L1 flex algorithm and the
+planned L2 grid algorithm. Starlight's C++ mirrors the same spec steps
 (`flex_layout_algorithm.h` literally cites "Algorithm-3"…"Algorithm-15";
 `grid_layout_algorithm.h` uses the spec's track-sizing terms verbatim), so
 following the spec text directly also keeps us structurally comparable to
@@ -348,33 +345,30 @@ Lynx `<list>`-component concern, not a grid mode).
 
 ## Testing strategy
 
-- **L0 (landed):** `tests/protocol.rs` — a complete mock host implementing
+- **L0/L1 (landed):** `tests/protocol.rs` — a complete mock host implementing
   every trait over plain `Vec` storage; proves the protocol is implementable
   without `dyn` (plus the `compile_fail` doctest making non-object-safety a
-  tested guarantee), exercises the GAT track-list machinery, and pins every
-  entry point as callable (`#[should_panic]` on the `todo!` stubs).
-- **L1+:** spec-derived unit fixtures per algorithm pass; golden layout
-  trees compared against Chrome-computed geometry for the same CSS
-  (web-core parity is the project bar — an optional `serde` feature for
-  serializing fixtures/results is introduced together with these tests, by
-  the user's call it stays out of L0); differential fuzzing against Taffy
-  on the shared feature subset (cheap oracle, since the protocols are
-  shaped alike); the benches above.
+  tested guarantee), exercises the GAT track-list machinery and all shared
+  machinery entry points. `tests/flexbox.rs` supplies a styling-engine-free
+  host and spec-derived fixtures for axes, flexing, wrapping, intrinsic
+  contributions, alignment, baselines, box sizing, percentages, auto
+  minimums, out-of-flow static positions, and compute-only runs.
+- **L1 hardening (planned):** golden layout trees compared against
+  browser-computed geometry for the same CSS, differential fuzzing against
+  Taffy on the shared feature subset, and the flex benchmarks above.
 - **Lynx modes (host-side):** `linear`/`relative` conformance fixtures come
   from Starlight behavior per `docs/tracking/css-layout.md`, tested in the
   adapter crate, not here.
 
 ## Milestones
 
-- **L0 — contracts + skeleton** *(this change)*: traits, value types, IO,
-  cache semantics, machinery entry-point contracts, conformance mock, this
-  document. Deliberately **no algorithm code** — not even stubs — for
-  flex/grid.
-- **L1 — flexbox**: add `compute_flexbox_layout` and implement it per the
-  plan above, plus the shared machinery it exercises: leaf boxing, hidden
+- **L0 — contracts + skeleton** *(complete)*: traits, value types, IO,
+  cache semantics, machinery entry-point contracts, and conformance mock.
+- **L1 — flexbox** *(complete)*: `compute_flexbox_layout` per the plan above,
+  plus the shared machinery it exercises: leaf boxing, hidden
   layout, cache matching policy, root entry, the positioned pass
-  (`compute_absolute_layout`), device-pixel rounding. Benches + Chrome
-  goldens.
+  (`compute_absolute_layout`), and device-pixel rounding. Browser goldens,
+  differential fuzzing, and benchmarks remain parity/performance hardening.
 - **L2 — grid**: add `compute_grid_layout` per the plan above,
   `auto-fill`/`auto-fit`, dense packing; baseline alignment and
   grid-area-relative abs-pos as trailing refinements.

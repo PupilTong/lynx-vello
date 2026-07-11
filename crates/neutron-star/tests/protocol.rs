@@ -3,12 +3,10 @@
 //! storage with zero `dyn`, zero allocation at the boundary, and zero
 //! engine-side state.
 //!
-//! Runtime tests only exercise implemented surface (traversal, style views,
-//! value plumbing); the machinery entry points are asserted to be *callable*
-//! and currently-stubbed via `#[should_panic]`. The flex/grid algorithm
-//! entry points don't exist yet (L1/L2) — only their contracts
-//! (`FlexTree`/`GridTree` and the style traits) do, and this host implements
-//! all of them.
+//! Runtime tests exercise traversal, style/value plumbing, and the shared L1
+//! machinery. Flexbox behavior has its own `tests/flexbox.rs` suite; Grid's
+//! algorithm remains pending while this host proves its protocol is
+//! implementable.
 
 use neutron_star::cache::Cache;
 use neutron_star::compute::{
@@ -17,13 +15,12 @@ use neutron_star::compute::{
 };
 use neutron_star::prelude::*;
 use neutron_star::style::{
-    CalcHandle, Dimension, GridPlacement, GridTemplateComponent, LengthPercentage, Position,
-    RepetitionCount, TrackSizingFunction,
+    BoxGenerationMode, CalcHandle, Dimension, GridPlacement, GridTemplateComponent,
+    LengthPercentage, LengthPercentageAuto, Position, RepetitionCount, TrackSizingFunction,
 };
 
 /// The host's own display vocabulary — deliberately *not* an engine type
-/// (dispatch belongs to the host; see the `compute` module docs). Flex/grid
-/// arms join in L1/L2 when their algorithm entry points exist.
+/// (dispatch belongs to the host; see the `compute` module docs).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 enum MockDisplay {
     #[default]
@@ -61,6 +58,8 @@ impl neutron_star::style::GridTemplateRepetition for MockRepetition {
 #[derive(Debug, Clone, Default)]
 struct MockStyle {
     display: MockDisplay,
+    hidden: bool,
+    auto_horizontal_margin: bool,
     size: Size<Dimension>,
     flex_grow: f32,
     grid_column: Line<GridPlacement>,
@@ -68,8 +67,29 @@ struct MockStyle {
 }
 
 impl CoreStyle for MockStyle {
+    fn box_generation_mode(&self) -> BoxGenerationMode {
+        if self.hidden {
+            BoxGenerationMode::None
+        } else {
+            BoxGenerationMode::Normal
+        }
+    }
+
     fn size(&self) -> Size<Dimension> {
         self.size
+    }
+
+    fn margin(&self) -> Edges<LengthPercentageAuto> {
+        if self.auto_horizontal_margin {
+            Edges {
+                left: LengthPercentageAuto::Auto,
+                right: LengthPercentageAuto::Auto,
+                top: LengthPercentageAuto::ZERO,
+                bottom: LengthPercentageAuto::ZERO,
+            }
+        } else {
+            Edges::uniform(LengthPercentageAuto::ZERO)
+        }
     }
 }
 
@@ -144,6 +164,7 @@ struct MockNode {
 #[derive(Debug, Default)]
 struct MockTree {
     nodes: Vec<MockNode>,
+    invalidated: Vec<NodeId>,
 }
 
 impl MockTree {
@@ -200,10 +221,16 @@ impl LayoutTree for MockTree {
         self.node_mut(child).static_position = static_position;
     }
 
-    // The canonical dispatch shape (compute_cached_layout is omitted only
-    // because it is still a stub; real hosts wrap the match in it). The
-    // flexbox/grid arms join in L1/L2.
+    fn invalidate_layout_cache(&mut self, node: NodeId) {
+        self.invalidated.push(node);
+    }
+
+    // A reduced dispatch shape for this protocol-only mock. Real hosts wrap
+    // the match in compute_cached_layout and add flex/grid/custom modes.
     fn compute_child_layout(&mut self, child: NodeId, input: LayoutInput) -> LayoutOutput {
+        if input.run_mode == RunMode::PerformHiddenLayout {
+            return compute_hidden_layout(self, child);
+        }
         match self.node(child).style.display {
             MockDisplay::Hidden => compute_hidden_layout(self, child),
             MockDisplay::Leaf => {
@@ -239,8 +266,8 @@ impl GridTree for MockTree {
     }
 }
 
-/// A trivially-conformant always-miss cache (the embeddable
-/// [`Cache`]'s matching policy is an L1 stub, so the mock supplies its own).
+/// A trivially-conformant always-miss cache (the protocol mock intentionally
+/// keeps cache behavior observable through the standalone [`Cache`] tests).
 /// Keyed on the complete `LayoutInput` per the `CacheTree` contract.
 impl CacheTree for MockTree {
     fn cache_get(&self, _node: NodeId, _input: LayoutInput) -> Option<LayoutOutput> {
@@ -372,81 +399,169 @@ fn embeddable_cache_lifecycle() {
     assert_eq!(cache, Cache::default());
 }
 
-// ---------------------------------------------------------------------------
-// Stub-callability: every algorithm entry point monomorphizes against the
-// mock host and is reachable; bodies are L1/L2 work.
-// ---------------------------------------------------------------------------
-
 #[test]
-#[should_panic(expected = "not yet implemented")]
-fn stub_compute_root_layout() {
+fn compute_root_layout_stores_the_root_box() {
     let (mut tree, root) = leaf_tree();
-    compute_root_layout(&mut tree, root, Size::MAX_CONTENT);
+    compute_root_layout(
+        &mut tree,
+        root,
+        Size::new(
+            AvailableSpace::Definite(100.0),
+            AvailableSpace::Definite(80.0),
+        ),
+    );
+    assert_eq!(tree.unrounded_layout(root).location, Point::ZERO);
+    assert_eq!(tree.unrounded_layout(root).size, Size::ZERO);
 }
 
 #[test]
-#[should_panic(expected = "not yet implemented")]
-fn stub_compute_hidden_layout() {
-    let (mut tree, _) = leaf_tree();
+#[allow(clippy::float_cmp)] // Exact halves of an integer available size.
+fn compute_root_layout_resolves_horizontal_auto_margins() {
+    let mut tree = MockTree::default();
+    let root = tree.push(
+        MockStyle {
+            auto_horizontal_margin: true,
+            ..MockStyle::default()
+        },
+        vec![],
+    );
+    compute_root_layout(
+        &mut tree,
+        root,
+        Size::new(
+            AvailableSpace::Definite(100.0),
+            AvailableSpace::Definite(20.0),
+        ),
+    );
+    assert_eq!(tree.unrounded_layout(root).margin.left, 50.0);
+    assert_eq!(tree.unrounded_layout(root).margin.right, 50.0);
+    assert_eq!(tree.unrounded_layout(root).location.x, 50.0);
+}
+
+#[test]
+fn compute_root_layout_preserves_a_hidden_zero_box() {
+    let mut tree = MockTree::default();
+    let root = tree.push(
+        MockStyle {
+            display: MockDisplay::Hidden,
+            hidden: true,
+            auto_horizontal_margin: true,
+            ..MockStyle::default()
+        },
+        vec![],
+    );
+    compute_root_layout(
+        &mut tree,
+        root,
+        Size::new(
+            AvailableSpace::Definite(100.0),
+            AvailableSpace::Definite(20.0),
+        ),
+    );
+    assert_eq!(tree.unrounded_layout(root), Layout::default());
+}
+
+#[test]
+fn compute_hidden_layout_clears_stale_geometry() {
+    let (mut tree, root) = leaf_tree();
     let hidden = tree.push(
         MockStyle {
             display: MockDisplay::Hidden,
             ..MockStyle::default()
         },
-        vec![],
+        vec![root],
     );
-    compute_hidden_layout(&mut tree, hidden);
+    tree.node_mut(hidden).unrounded.size = Size::new(50.0, 20.0);
+    tree.node_mut(root).unrounded.size = Size::new(40.0, 10.0);
+    assert_eq!(
+        compute_hidden_layout(&mut tree, hidden),
+        LayoutOutput::HIDDEN
+    );
+    assert_eq!(tree.unrounded_layout(hidden), Layout::default());
+    assert_eq!(tree.unrounded_layout(root), Layout::default());
+    assert!(tree.invalidated.contains(&hidden));
+    assert!(tree.invalidated.contains(&root));
 }
 
 #[test]
-#[should_panic(expected = "not yet implemented")]
-fn stub_compute_leaf_layout() {
-    compute_leaf_layout(
+fn compute_leaf_layout_uses_the_host_measurement() {
+    let output = compute_leaf_layout(
         LayoutInput::default(),
         &MockStyle::default(),
         |_, _| unreachable!("mock styles never carry calc()"),
-        |_known, _available| Size::ZERO,
+        |_known, _available| Size::new(31.0, 17.0),
     );
+    assert_eq!(output.size, Size::new(31.0, 17.0));
+    assert_eq!(output.content_size, Size::new(31.0, 17.0));
 }
 
 #[test]
-#[should_panic(expected = "not yet implemented")]
-fn stub_compute_cached_layout() {
+fn compute_cached_layout_runs_an_uncached_dispatch() {
+    use std::cell::Cell;
+
     let (mut tree, root) = leaf_tree();
-    compute_cached_layout(
+    let calls = Cell::new(0);
+    let output = compute_cached_layout(
         &mut tree,
         root,
         LayoutInput::default(),
-        LayoutTree::compute_child_layout,
+        |tree, node, input| {
+            calls.set(calls.get() + 1);
+            tree.compute_child_layout(node, input)
+        },
     );
+    assert_eq!(calls.get(), 1);
+    assert_eq!(output, LayoutOutput::HIDDEN);
 }
 
 #[test]
-#[should_panic(expected = "not yet implemented")]
-fn stub_compute_absolute_layout() {
+fn compute_absolute_layout_uses_the_static_position() {
     let (mut tree, root) = leaf_tree();
     let hoisted = tree.child_id(root, 0);
-    // Positioned pass: containing-block padding-box size + static position
-    // converted into that space by the host.
-    let _ = compute_absolute_layout(
+    let layout = compute_absolute_layout(
         &mut tree,
         hoisted,
         Size::new(800.0, 600.0),
         Point::new(12.5, 7.0),
     );
+    assert_eq!(layout.location, Point::new(12.5, 7.0));
+    assert_eq!(layout.size, Size::ZERO);
 }
 
 #[test]
-#[should_panic(expected = "not yet implemented")]
-fn stub_round_layout() {
+fn round_layout_snaps_on_the_device_pixel_grid() {
     let (mut tree, root) = leaf_tree();
-    // Snap on the device-pixel grid of a 2× display.
+    let child = tree.child_id(root, 0);
+    let mut root_layout = Layout::default();
+    root_layout.location = Point::new(0.24, 0.24);
+    root_layout.size = Size::new(10.26, 10.26);
+    tree.node_mut(root).unrounded = root_layout;
+    let mut child_layout = Layout::default();
+    child_layout.location = Point::new(0.26, 0.26);
+    child_layout.size = Size::new(4.74, 4.74);
+    tree.node_mut(child).unrounded = child_layout;
+
     round_layout(&mut tree, root, 2.0);
+    assert_eq!(tree.node(root).finalized.location, Point::ZERO);
+    assert_eq!(tree.node(root).finalized.size, Size::new(10.5, 10.5));
+    assert_eq!(tree.node(child).finalized.location, Point::new(0.5, 0.5));
+    assert_eq!(tree.node(child).finalized.size, Size::new(4.5, 4.5));
 }
 
 #[test]
-#[should_panic(expected = "not yet implemented")]
-fn stub_cache_get() {
-    let cache = Cache::new();
-    let _ = cache.get(LayoutInput::default());
+fn embeddable_cache_round_trips_a_complete_key() {
+    let mut cache = Cache::new();
+    let input = LayoutInput::compute_size(
+        Size::new(Some(20.0), None),
+        Size::new(Some(100.0), Some(80.0)),
+        Size::new(AvailableSpace::Definite(20.0), AvailableSpace::MaxContent),
+        RequestedAxis::Horizontal,
+    );
+    let output = LayoutOutput::new(Size::new(20.0, 12.0), Size::new(20.0, 12.0));
+    cache.store(input, output);
+    assert_eq!(cache.get(input), Some(output));
+
+    let mut different_axis = input;
+    different_axis.requested_axis = RequestedAxis::Both;
+    assert_eq!(cache.get(different_axis), None);
 }

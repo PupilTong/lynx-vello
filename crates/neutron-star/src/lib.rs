@@ -28,8 +28,8 @@
 //! - [`style`] — the style protocol: engine-owned value types plus the `CoreStyle`/container/item
 //!   traits hosts implement as cheap views over their computed styles.
 //! - [`compute`] — the machinery entry points hosts call from their dispatch (root, cache wrapper,
-//!   hidden, leaf, the positioned pass, rounding), including the canonical dispatch skeleton. The
-//!   flexbox and grid algorithm entry points land here in L1/L2.
+//!   hidden, leaf, the positioned pass, rounding), including the canonical dispatch skeleton and
+//!   the implemented flexbox entry point. Grid layout remains the L2 milestone.
 //! - [`cache`] — the embeddable per-node measurement cache and its matching contract.
 //! - [`geometry`] — `Copy`/`#[repr(C)]` geometry primitives.
 //!
@@ -52,23 +52,17 @@
 //! fn erased(tree: &dyn neutron_star::tree::TraverseTree) {}
 //! ```
 //!
-//! # Status: contracts and skeleton only (milestone L0)
+//! # Status: flexbox implemented (milestone L1)
 //!
-//! Every interface and value type is final-shaped and documented. The crate
-//! deliberately contains **no layout algorithm**: the flex/grid *contracts*
-//! (style traits, `FlexTree`/`GridTree`) are defined here, their algorithm
-//! entry points and implementations arrive in L1/L2, and the generic
-//! machinery in [`compute`] is `todo!()`-stubbed with its rustdoc as the
-//! specification. See `docs/layout-architecture.md` in the lynx-vello
-//! repository for the full design rationale, performance architecture,
-//! algorithm plans, and milestones.
+//! The generic protocol and machinery are implemented together with the CSS
+//! Flexbox Level 1 algorithm. The Grid style/tree contracts are final-shaped,
+//! but their algorithm remains L2. See `docs/layout-architecture.md` in the
+//! lynx-vello repository for the design rationale and remaining milestones.
 //!
 //! # Dependencies and feature flags
 //!
 //! None, deliberately: the flex and grid protocols are core, unconditional
-//! API, and the crate compiles with zero dependencies. (An optional `serde`
-//! feature for golden-fixture testing is planned alongside those tests in
-//! L1.)
+//! API, and the crate compiles with zero dependencies.
 //!
 //! # Minimal host sketch
 //!

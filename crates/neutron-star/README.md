@@ -6,11 +6,10 @@ the Lynx C++ engine's `starlight` layout engine, but deliberately
 Lynx-agnostic: the crate has zero required dependencies and is designed to be
 published and used standalone.
 
-> **Status: contracts and skeleton only (milestone L0).** Every interface and
-> value type is defined and documented; the crate contains **no layout
-> algorithm** — the flex/grid contracts (style traits, `FlexTree`/`GridTree`)
-> are here, their algorithm entry points and implementations land in L1/L2,
-> and the generic machinery entry points are documented `todo!()` stubs. See
+> **Status: flexbox implemented (milestone L1).** The protocol, shared layout
+> machinery, leaf/absolute sizing, cache, rounding, and CSS Flexbox Level 1
+> algorithm are implemented. The Grid protocol is present; its layout
+> algorithm remains milestone L2. See
 > `docs/layout-architecture.md` in the repository root for the full design,
 > algorithm plans, milestones, and rationale.
 
@@ -21,8 +20,8 @@ styles, and all storage**. Hosts implement a small family of traits
 (`TraverseTree`, `LayoutTree`, `FlexTree`, `GridTree`, `CacheTree`,
 `RoundTree`) and per-node style views (`CoreStyle`, `FlexContainerStyle`, …),
 then call free generic entry points (`compute_root_layout`,
-`compute_leaf_layout`, …; the flex/grid algorithm functions join them in
-L1/L2). Recursion flows *through the host*: the engine calls
+`compute_leaf_layout`, `compute_flexbox_layout`, …; grid joins in L2).
+Recursion flows *through the host*: the engine calls
 `LayoutTree::compute_child_layout`, and the host dispatches each child to
 the right algorithm — one of neutron-star's, or its own (this is how Lynx's
 non-CSS `linear`/`relative` modes plug in as peer algorithms without the engine

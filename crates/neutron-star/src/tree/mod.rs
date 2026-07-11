@@ -30,9 +30,9 @@
 //!
 //! [`LayoutTree::compute_child_layout`] is the **dispatch point**: the host
 //! inspects the child's `display` (which the engine deliberately has no enum
-//! for) and routes to an engine algorithm entry point (the flexbox and grid
-//! functions land in L1/L2 as `fn(&mut Tree, NodeId, LayoutInput) ->
-//! LayoutOutput` peers in [`compute`](crate::compute)),
+//! for) and routes to an engine algorithm entry point (flexbox is implemented
+//! as a `fn(&mut Tree, NodeId, LayoutInput) -> LayoutOutput` in
+//! [`compute`](crate::compute); grid follows in L2),
 //! [`compute_leaf_layout`](crate::compute::compute_leaf_layout) (text/images
 //! via its own measure closure), or *its own algorithm* — this is exactly how
 //! lynx-vello's non-CSS `display: linear`/`display: relative` modes plug in
@@ -193,6 +193,17 @@ pub trait LayoutTree: TraverseTree {
     /// in the positioned pass.
     fn set_static_position(&mut self, child: NodeId, static_position: Point<f32>);
 
+    /// Invalidates any cached layout answers for `node` before hidden
+    /// layout overwrites durable geometry.
+    ///
+    /// Hosts without caching may keep the default no-op. Hosts implementing
+    /// [`CacheTree`] must delegate this hook to [`CacheTree::cache_clear`]: a
+    /// later cache hit may otherwise restore only a subtree root's output
+    /// while its descendants remain zeroed from `display:none`.
+    fn invalidate_layout_cache(&mut self, node: NodeId) {
+        let _ = node;
+    }
+
     /// Lays out (or measures) `child`, returning its output — **the host
     /// dispatch point** (see the module docs for the contract and the
     /// `compute` module docs for the canonical skeleton).
@@ -208,9 +219,8 @@ pub trait LayoutTree: TraverseTree {
     fn compute_child_layout(&mut self, child: NodeId, input: LayoutInput) -> LayoutOutput;
 }
 
-/// Adds flexbox style views — the tree bound of the flexbox algorithm entry
-/// point (`compute_flexbox_layout`, specified in the architecture doc and
-/// landing in L1).
+/// Adds flexbox style views — the tree bound of
+/// [`compute_flexbox_layout`](crate::compute::compute_flexbox_layout).
 pub trait FlexTree: LayoutTree {
     /// Borrowed flex-container style view.
     type ContainerStyle<'a>: FlexContainerStyle
@@ -271,7 +281,10 @@ pub trait GridTree: LayoutTree {
 /// The engine only ever *reads* and *fills* slots. When a node's style,
 /// content, or children change, the host must [`cache_clear`] it **and every
 /// ancestor up to its relayout root** before the next layout — cached
-/// entries encode children's contributions.
+/// entries encode children's contributions. A caching host must also
+/// implement [`LayoutTree::invalidate_layout_cache`] by delegating to
+/// [`cache_clear`]; hidden layout invokes that hook for every descendant so
+/// later cache hits cannot leave zeroed geometry behind.
 ///
 /// [`cache_clear`]: CacheTree::cache_clear
 pub trait CacheTree {
