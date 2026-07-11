@@ -5,8 +5,8 @@
 //! size stored alongside each node.
 
 use neutron_star::compute::{
-    LeafMeasurement, compute_absolute_layout, compute_flexbox_layout, compute_hidden_layout,
-    compute_leaf_layout,
+    LeafMeasurement, compute_absolute_layout, compute_flexbox_layout, compute_leaf_layout,
+    hide_subtree,
 };
 use neutron_star::prelude::*;
 use neutron_star::style::{
@@ -204,6 +204,7 @@ struct TestNode {
 struct TestTree {
     nodes: Vec<TestNode>,
     layout_writes: usize,
+    leaf_measure_calls: usize,
 }
 
 impl TestTree {
@@ -312,10 +313,9 @@ impl LayoutTree for TestTree {
         let intrinsic_size = node.intrinsic_size;
         let first_baseline = node.first_baseline;
 
-        if input.run_mode == RunMode::PerformHiddenLayout
-            || style.box_generation_mode == BoxGenerationMode::None
-        {
-            return compute_hidden_layout(self, child);
+        if style.box_generation_mode == BoxGenerationMode::None {
+            hide_subtree(self, child);
+            return LayoutOutput::HIDDEN;
         }
 
         match display {
@@ -325,6 +325,7 @@ impl LayoutTree for TestTree {
                 &style,
                 |_calc, _basis| unreachable!("test styles do not contain calc() values"),
                 |known_dimensions, available_space| {
+                    self.leaf_measure_calls += 1;
                     let measured = Size::new(
                         if available_space.width == AvailableSpace::MinContent {
                             min_content_size.width
@@ -822,7 +823,7 @@ fn hidden_and_out_of_flow_children_do_not_participate_in_flexing() {
 }
 
 #[test]
-fn compute_size_does_not_write_durable_layouts() {
+fn measure_goal_does_not_write_durable_layouts() {
     let mut tree = TestTree::default();
     let first = fixed_leaf(&mut tree, 40.0, 10.0);
     let second = fixed_leaf(&mut tree, 40.0, 20.0);
@@ -849,6 +850,34 @@ fn compute_size_does_not_write_durable_layouts() {
     assert_eq!(tree.layout(first), sentinel);
     assert_eq!(tree.layout(second), sentinel);
     assert_eq!(tree.layout(root), sentinel);
+}
+
+#[test]
+fn leaf_measure_goal_preserves_the_single_axis_fast_path() {
+    let mut tree = TestTree::default();
+    let leaf = fixed_leaf(&mut tree, 40.0, 20.0);
+    let known = Size::new(Some(40.0), Some(20.0));
+    let parent = Size::new(Some(100.0), Some(100.0));
+    let available = Size::new(
+        AvailableSpace::Definite(100.0),
+        AvailableSpace::Definite(100.0),
+    );
+
+    let measured = tree.compute_child_layout(
+        leaf,
+        LayoutInput::compute_size(known, parent, available, RequestedAxis::Horizontal),
+    );
+    assert_size(measured.size, Size::new(40.0, 20.0));
+    assert_eq!(tree.leaf_measure_calls, 0);
+
+    let _ = tree.compute_child_layout(
+        leaf,
+        LayoutInput::compute_size(known, parent, available, RequestedAxis::Both),
+    );
+    assert_eq!(tree.leaf_measure_calls, 1);
+
+    let _ = tree.compute_child_layout(leaf, LayoutInput::perform_layout(known, parent, available));
+    assert_eq!(tree.leaf_measure_calls, 2);
 }
 
 #[test]

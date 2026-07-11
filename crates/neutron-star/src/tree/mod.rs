@@ -36,10 +36,11 @@
 //! [`compute_leaf_layout`](crate::compute::compute_leaf_layout) (text/images
 //! via its own measure closure), or *its own algorithm* — this is exactly how
 //! lynx-vello's non-CSS `display: linear`/`display: relative` modes plug in
-//! as peer algorithms. The host wraps the routing in
-//! [`compute_cached_layout`](crate::compute::compute_cached_layout) so every
-//! path shares one cache policy. See the `compute` module docs for the
-//! canonical dispatch skeleton.
+//! as peer algorithms. The host handles `display: none` first with
+//! [`hide_subtree`](crate::compute::hide_subtree), then wraps visible-node
+//! routing in [`compute_cached_layout`](crate::compute::compute_cached_layout)
+//! so every sizing path shares one cache policy. See the `compute` module docs
+//! for the canonical dispatch skeleton.
 //!
 //! Because recursion passes `&mut self` back and forth, the protocol is
 //! single-threaded per tree by construction; the planned intra-layout
@@ -56,7 +57,7 @@
 mod io;
 
 pub use io::{
-    AvailableSpace, Layout, LayoutInput, LayoutOutput, RequestedAxis, RunMode, SizingMode,
+    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, RequestedAxis, SizingMode,
 };
 
 use crate::geometry::Point;
@@ -179,7 +180,7 @@ pub trait LayoutTree: TraverseTree {
     /// containing block is elsewhere
     /// ([`Position::AbsoluteHoisted`](crate::style::Position)).
     ///
-    /// Called by the parent's algorithm during a `PerformLayout` run for
+    /// Called by the parent's algorithm during a [`LayoutGoal::Commit`] run for
     /// each such child: `static_position` is the origin of the child's
     /// hypothetical margin box per the parent's formatting context (Flexbox
     /// §4.1 sole-item alignment; Grid §10.1 content-edge area), relative to
@@ -193,8 +194,8 @@ pub trait LayoutTree: TraverseTree {
     /// in the positioned pass.
     fn set_static_position(&mut self, child: NodeId, static_position: Point<f32>);
 
-    /// Invalidates any cached layout answers for `node` before hidden
-    /// layout overwrites durable geometry.
+    /// Invalidates any cached layout answers for `node` before
+    /// hidden-subtree cleanup overwrites durable geometry.
     ///
     /// Hosts without caching may keep the default no-op. Hosts implementing
     /// [`CacheTree`] must delegate this hook to [`CacheTree::cache_clear`]: a
@@ -209,12 +210,13 @@ pub trait LayoutTree: TraverseTree {
     /// `compute` module docs for the canonical skeleton).
     ///
     /// Implementations must:
-    /// - handle [`BoxGenerationMode::None`](crate::style::BoxGenerationMode) and
-    ///   [`RunMode::PerformHiddenLayout`] via
-    ///   [`compute_hidden_layout`](crate::compute::compute_hidden_layout),
-    /// - route other nodes by their display mode to an engine algorithm, a host algorithm, or leaf
-    ///   measurement,
-    /// - wrap the routing in [`compute_cached_layout`](crate::compute::compute_cached_layout),
+    /// - handle [`BoxGenerationMode::None`](crate::style::BoxGenerationMode) by calling
+    ///   [`hide_subtree`](crate::compute::hide_subtree) and returning [`LayoutOutput::HIDDEN`]
+    ///   **before** consulting the cache,
+    /// - route visible nodes by their display mode to an engine algorithm, a host algorithm, or
+    ///   leaf measurement,
+    /// - wrap that visible-node routing in
+    ///   [`compute_cached_layout`](crate::compute::compute_cached_layout),
     /// - be deterministic for identical inputs between cache clears.
     fn compute_child_layout(&mut self, child: NodeId, input: LayoutInput) -> LayoutOutput;
 }
@@ -268,13 +270,15 @@ pub trait GridTree: LayoutTree {
 /// # The key is the complete [`LayoutInput`]
 ///
 /// Every field of the input can change the output, so none may be dropped
-/// from matching: `sizing_mode` toggles whether the node's own
+/// from matching: `goal` distinguishes committing layout from measurement
+/// (and carries a measurement's requested axes), `sizing_mode` toggles whether the node's own
 /// `size`/`min`/`max`/`aspect-ratio` apply, `parent_size` is the percentage
-/// basis, and `requested_axis` scopes which axes of a `ComputeSize` answer
-/// were actually computed. A matching policy may treat a stored entry as
-/// usable for a request only under *provable* equivalences (see
-/// [`cache`](crate::cache) for the contract) — never across differing
-/// `sizing_mode` or percentage bases.
+/// basis, and the remaining fields define the sizing constraints. A matching
+/// policy may treat a stored entry as usable for a request only under
+/// *provable* equivalences (see [`cache`](crate::cache) for the contract) —
+/// never across differing `sizing_mode` or percentage bases. A committed
+/// result may satisfy a compatible both-axis measurement, but a measurement
+/// can never satisfy a commit.
 ///
 /// # Invalidation is the host's job
 ///
@@ -283,8 +287,9 @@ pub trait GridTree: LayoutTree {
 /// ancestor up to its relayout root** before the next layout — cached
 /// entries encode children's contributions. A caching host must also
 /// implement [`LayoutTree::invalidate_layout_cache`] by delegating to
-/// [`cache_clear`]; hidden layout invokes that hook for every descendant so
-/// later cache hits cannot leave zeroed geometry behind.
+/// [`cache_clear`]; [`hide_subtree`](crate::compute::hide_subtree) invokes that
+/// hook for every descendant so later cache hits cannot leave zeroed geometry
+/// behind.
 ///
 /// [`cache_clear`]: CacheTree::cache_clear
 pub trait CacheTree {

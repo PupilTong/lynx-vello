@@ -8,7 +8,7 @@
 //! never exist in the host's binary.
 //!
 //! This module contains the generic machinery (root entry, cache wrapper,
-//! hidden zeroing, leaf boxing, the positioned pass, rounding) and the
+//! hidden-subtree zeroing, leaf boxing, the positioned pass, rounding) and the
 //! implemented [`compute_flexbox_layout`] entry point. Grid layout remains
 //! the L2 algorithm milestone.
 //!
@@ -19,9 +19,7 @@
 //! `display: linear`/`relative` — adds arms that call its own algorithms):
 //!
 //! ```
-//! use neutron_star::compute::{
-//!     compute_cached_layout, compute_flexbox_layout, compute_hidden_layout,
-//! };
+//! use neutron_star::compute::{compute_cached_layout, compute_flexbox_layout, hide_subtree};
 //! use neutron_star::tree::{CacheTree, FlexTree, GridTree, LayoutInput, LayoutOutput, NodeId};
 //!
 //! # #[derive(Clone, Copy)]
@@ -35,9 +33,17 @@
 //! where
 //!     Tree: FlexTree + GridTree + CacheTree,
 //! {
+//!     let display = host_display_of(tree, node);
+//!     if let Display::Hidden = display {
+//!         // Hidden mutation must precede the cache wrapper: caching HIDDEN as
+//!         // a committed result would suppress geometry when the node reappears.
+//!         hide_subtree(tree, node);
+//!         return LayoutOutput::HIDDEN;
+//!     }
+//!
 //!     compute_cached_layout(tree, node, input, |tree, node, input| {
-//!         match host_display_of(tree, node) {
-//!             Display::Hidden => compute_hidden_layout(tree, node),
+//!         match display {
+//!             Display::Hidden => unreachable!(),
 //!             Display::Flex => compute_flexbox_layout(tree, node, input),
 //!             Display::Grid => unimplemented!("grid layout lands in L2"),
 //!             // host: Display::Linear => host_linear_layout(tree, node, input),
@@ -81,13 +87,13 @@ use crate::geometry::{Edges, Point, Size};
 use crate::style::{BoxGenerationMode, CoreStyle, Direction};
 use crate::tree::{
     AvailableSpace, CacheTree, Layout, LayoutInput, LayoutOutput, LayoutTree, NodeId, RoundTree,
-    RunMode,
 };
 
 /// Lays out the tree under `root` into `available_space`.
 ///
 /// The host's entry point for a layout flush. Builds the root
-/// [`LayoutInput`] (`PerformLayout`, no known dimensions, `parent_size` from
+/// [`LayoutInput`] ([`LayoutGoal::Commit`](crate::tree::LayoutGoal::Commit),
+/// no known dimensions, `parent_size` from
 /// the definite parts of `available_space`), routes it through
 /// [`compute_child_layout`](LayoutTree::compute_child_layout) — so the root
 /// dispatches like any other node — resolves the root's own margins, and
@@ -180,16 +186,19 @@ fn resolve_root_margins(
 
 /// Wraps one node's layout computation in the shared caching policy.
 ///
-/// The host calls this at the top of its dispatch (see the module docs);
+/// After handling `display: none` with [`hide_subtree`], the host calls this
+/// at the top of its visible-node dispatch (see the module docs);
 /// `compute_uncached` is the actual routing closure. The **complete
 /// `input` is the cache key** — it is passed through to
 /// [`CacheTree`] unmodified, so no result-affecting
-/// field (`sizing_mode`, `parent_size`, `requested_axis`, …) can alias. On
+/// field (`goal`, `sizing_mode`, `parent_size`, …) can alias. On
 /// a usable cached entry (matching per the [`cache`](crate::cache) module's
 /// contract) the closure is skipped entirely; otherwise its result is
 /// stored before being returned.
-/// [`RunMode::PerformHiddenLayout`](crate::tree::RunMode) requests bypass
-/// the cache in both directions.
+///
+/// Hidden nodes must never enter this wrapper: [`hide_subtree`] invalidates
+/// their cache before zeroing geometry, whereas storing
+/// [`LayoutOutput::HIDDEN`] as a committed answer would undo that invariant.
 pub fn compute_cached_layout<Tree, ComputeFn>(
     tree: &mut Tree,
     node: NodeId,
@@ -200,10 +209,6 @@ where
     Tree: CacheTree,
     ComputeFn: FnOnce(&mut Tree, NodeId, LayoutInput) -> LayoutOutput,
 {
-    if input.run_mode == RunMode::PerformHiddenLayout {
-        return compute_uncached(tree, node, input);
-    }
-
     if let Some(output) = tree.cache_get(node, input) {
         return output;
     }
@@ -215,32 +220,25 @@ where
 
 /// Zeroes the layout of a `display: none` node and its whole subtree.
 ///
-/// Stores an all-zero [`Layout`] for `node`'s children
-/// and recurses through
-/// [`compute_child_layout`](LayoutTree::compute_child_layout) with
-/// [`RunMode::PerformHiddenLayout`](crate::tree::RunMode), so previously
-/// laid-out geometry can't leak out of a subtree that just became hidden.
-/// Every visited node is also passed to
+/// Recurses directly through tree children, storing an all-zero [`Layout`] for
+/// every visited node so previously-laid-out geometry cannot leak from a
+/// subtree that just became hidden. Every node is first passed to
 /// [`LayoutTree::invalidate_layout_cache`], preventing a later cache hit from
 /// restoring only a revealed subtree's root while its descendants stay
-/// zeroed. Returns [`LayoutOutput::HIDDEN`].
-pub fn compute_hidden_layout<Tree: LayoutTree>(tree: &mut Tree, node: NodeId) -> LayoutOutput {
+/// zeroed.
+///
+/// Host dispatch must call this command **before** [`compute_cached_layout`]
+/// and then return [`LayoutOutput::HIDDEN`] itself.
+pub fn hide_subtree<Tree: LayoutTree>(tree: &mut Tree, node: NodeId) {
     tree.invalidate_layout_cache(node);
     let hidden_layout = Layout::with_order(0);
     tree.set_unrounded_layout(node, &hidden_layout);
 
-    let hidden_input = LayoutInput {
-        run_mode: RunMode::PerformHiddenLayout,
-        ..LayoutInput::default()
-    };
     let child_count = tree.child_count(node);
     for index in 0..child_count {
         let child = tree.child_id(node, index);
-        tree.set_unrounded_layout(child, &hidden_layout);
-        let _ = tree.compute_child_layout(child, hidden_input);
+        hide_subtree(tree, child);
     }
-
-    LayoutOutput::HIDDEN
 }
 
 /// Sizes and positions one out-of-flow node against its containing block —
@@ -366,6 +364,8 @@ pub fn compute_absolute_layout<Tree: LayoutTree>(
     layout
 }
 
+/// Resolved box-model and positioning inputs retained across the recursive
+/// child-layout call for one absolutely positioned node.
 #[derive(Clone, Copy)]
 struct AbsoluteStyle {
     insets: Edges<Option<f32>>,
@@ -566,6 +566,8 @@ fn absolute_axis_location(axis: AbsoluteAxis) -> f32 {
     }
 }
 
+/// One physical-axis instance of the absolute-position equation used to turn
+/// insets, used margins, and the static fallback into a border-box offset.
 #[derive(Clone, Copy)]
 struct AbsoluteAxis {
     containing_size: f32,

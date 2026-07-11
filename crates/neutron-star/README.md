@@ -26,7 +26,9 @@ Recursion flows *through the host*: the engine calls
 `LayoutTree::compute_child_layout`, and the host dispatches each child to
 the right algorithm — one of neutron-star's, or its own (this is how Lynx's
 non-CSS `linear`/`relative` modes plug in as peer algorithms without the engine
-knowing about them).
+knowing about them). `display:none` cleanup is an explicit host precheck:
+call `hide_subtree` and return `LayoutOutput::HIDDEN` before entering the
+generated-box cache/dispatch path.
 
 ## Hard rules
 

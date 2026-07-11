@@ -17,7 +17,7 @@
 //!  ┌───────────────────────────┐   traits    ┌───────────────────────────┐
 //!  │ node storage (any layout) │◀───────────▶│ compute_root_layout       │
 //!  │ computed styles (any repr)│  NodeId +   │ compute_leaf_layout       │
-//!  │ per-node Cache + Layouts  │  POD values │ cache/hidden/abs-pos/round│
+//!  │ per-node Cache + Layouts  │  POD values │ cache/hide/abs-pos/round  │
 //!  │ dispatch: display → algo  │◀───────────▶│ flex algo; grid contracts │
 //!  └───────────────────────────┘  recursion  └───────────────────────────┘
 //! ```
@@ -29,8 +29,8 @@
 //! - [`style`] — the style protocol: engine-owned value types plus the `CoreStyle`/container/item
 //!   traits hosts implement as cheap views over their computed styles.
 //! - [`compute`] — the machinery entry points hosts call from their dispatch (root, cache wrapper,
-//!   hidden, leaf, the positioned pass, rounding), including the canonical dispatch skeleton and
-//!   the implemented flexbox entry point. Grid layout remains the L2 milestone.
+//!   subtree hiding, leaf, the positioned pass, rounding), including the canonical dispatch
+//!   skeleton and the implemented flexbox entry point. Grid layout remains the L2 milestone.
 //! - [`cache`] — the embeddable per-node measurement cache and its matching contract.
 //! - [`geometry`] — `Copy`/`#[repr(C)]` geometry primitives.
 //!
@@ -132,11 +132,11 @@
 //!     }
 //!
 //!     fn compute_child_layout(&mut self, child: NodeId, input: LayoutInput) -> LayoutOutput {
-//!         // Real hosts: compute_cached_layout + display dispatch here
-//!         // (see the `compute` module docs). This toy treats every node
-//!         // as hidden:
-//!         let _ = (child, input);
-//!         LayoutOutput::HIDDEN
+//!         // Real hosts handle display:none before compute_cached_layout,
+//!         // then dispatch visible nodes (see the `compute` module docs).
+//!         // This toy treats every node as an empty visible leaf:
+//!         let _ = child;
+//!         LayoutOutput::new(input.known_dimensions.unwrap_or(Size::ZERO), Size::ZERO)
 //!     }
 //! }
 //!
@@ -171,7 +171,7 @@ pub mod prelude {
         GridTemplateRepetition,
     };
     pub use crate::tree::{
-        AvailableSpace, CacheTree, FlexTree, GridTree, Layout, LayoutInput, LayoutOutput,
-        LayoutTree, NodeId, RequestedAxis, RoundTree, RunMode, SizingMode, TraverseTree,
+        AvailableSpace, CacheTree, FlexTree, GridTree, Layout, LayoutGoal, LayoutInput,
+        LayoutOutput, LayoutTree, NodeId, RequestedAxis, RoundTree, SizingMode, TraverseTree,
     };
 }

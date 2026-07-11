@@ -15,7 +15,9 @@ use super::util::{
 use crate::geometry::{Edges, Point, Size};
 use crate::style::value::CalcHandle;
 use crate::style::{BoxSizing, CoreStyle};
-use crate::tree::{AvailableSpace, LayoutInput, LayoutOutput, RequestedAxis, RunMode, SizingMode};
+use crate::tree::{
+    AvailableSpace, LayoutGoal, LayoutInput, LayoutOutput, RequestedAxis, SizingMode,
+};
 
 /// Sizes a content leaf, delegating content measurement to `measure`.
 ///
@@ -52,9 +54,10 @@ where
     Measurement: Into<LeafMeasurement>,
     CalcResolver: Fn(CalcHandle, f32) -> f32,
 {
-    if input.run_mode == RunMode::PerformHiddenLayout {
-        return LayoutOutput::HIDDEN;
-    }
+    let measurement_axis = match input.goal {
+        LayoutGoal::Measure(axis) => Some(axis),
+        LayoutGoal::Commit => None,
+    };
 
     let LeafSizing {
         margin,
@@ -78,8 +81,7 @@ where
 
     // A single-axis probe needs no content or baseline information once the
     // box is fully fixed. Both-axis probes are used by baseline alignment.
-    if input.run_mode == RunMode::ComputeSize
-        && input.requested_axis != RequestedAxis::Both
+    if measurement_axis.is_some_and(|axis| axis != RequestedAxis::Both)
         && node_size.width.is_some()
         && node_size.height.is_some()
     {
@@ -139,7 +141,7 @@ where
     node_size = apply_measured_aspect_ratio(
         node_size,
         originally_indefinite,
-        input.requested_axis,
+        measurement_axis,
         aspect_ratio,
         box_sizing,
         padding_border_size,
@@ -168,6 +170,9 @@ where
 }
 
 /// Host measurement returned to [`compute_leaf_layout`].
+///
+/// This contains content-box data only; leaf layout adds box-model surrounds,
+/// applies constraints, and converts baselines to border-box coordinates.
 ///
 /// `size` is the measured content-box extent. `first_baselines` contains
 /// offsets from the content-box origin. Returning a plain [`Size<f32>`]
@@ -208,7 +213,7 @@ impl From<Size<f32>> for LeafMeasurement {
 fn apply_measured_aspect_ratio(
     mut size: Size<Option<f32>>,
     originally_indefinite: Size<bool>,
-    requested_axis: RequestedAxis,
+    measurement_axis: Option<RequestedAxis>,
     aspect_ratio: Option<f32>,
     box_sizing: BoxSizing,
     padding_border_size: Size<f32>,
@@ -226,8 +231,8 @@ fn apply_measured_aspect_ratio(
 
     // With both preferred axes automatic, the inline axis is normally the
     // ratio-determining axis. A vertical-only probe can invert that choice.
-    match requested_axis {
-        RequestedAxis::Vertical => {
+    match measurement_axis {
+        Some(RequestedAxis::Vertical) => {
             let sizing_height = sizing_box_axis(
                 size.height.unwrap_or(0.0),
                 padding_border_size.height,
@@ -239,7 +244,7 @@ fn apply_measured_aspect_ratio(
                 box_sizing,
             ));
         }
-        RequestedAxis::Horizontal | RequestedAxis::Both => {
+        None | Some(RequestedAxis::Horizontal | RequestedAxis::Both) => {
             let sizing_width = sizing_box_axis(
                 size.width.unwrap_or(0.0),
                 padding_border_size.width,
@@ -255,6 +260,8 @@ fn apply_measured_aspect_ratio(
     size
 }
 
+/// Resolved box-model and sizing inputs reused throughout one leaf-layout
+/// call; all optional dimensions are border-box sizes.
 struct LeafSizing {
     margin: Edges<f32>,
     padding_border_size: Size<f32>,

@@ -33,7 +33,7 @@ use crate::style::{
     FlexItemStyle, FlexWrap, Overflow, Position,
 };
 use crate::tree::{
-    AvailableSpace, FlexTree, Layout, LayoutInput, LayoutOutput, NodeId, RequestedAxis, RunMode,
+    AvailableSpace, FlexTree, Layout, LayoutGoal, LayoutInput, LayoutOutput, NodeId, RequestedAxis,
     SizingMode,
 };
 
@@ -85,6 +85,10 @@ impl Axis {
     }
 }
 
+/// Physical main/cross-axis mapping used by every flex pass.
+///
+/// Scratch positions stay flow-relative; the reversal flags convert them to
+/// physical coordinates only when final child locations are produced.
 #[derive(Debug, Clone, Copy)]
 #[allow(clippy::struct_excessive_bools)]
 struct Axes {
@@ -128,6 +132,8 @@ impl Axes {
     }
 }
 
+/// Owned snapshot of the container style needed across mutable child-layout
+/// callbacks, which cannot retain a borrowed host style view.
 #[derive(Debug, Clone, Copy)]
 struct ContainerStyleData {
     direction: FlexDirection,
@@ -149,6 +155,8 @@ struct ContainerStyleData {
     box_sizing: BoxSizing,
 }
 
+/// Owned snapshot of one child's item and core style, captured before the
+/// flex passes begin mutating the host through recursive layout calls.
 #[derive(Debug, Clone, Copy)]
 struct ItemStyleData {
     node: NodeId,
@@ -174,6 +182,8 @@ struct ItemStyleData {
     align_self: AlignItems,
 }
 
+/// Transient per-item state accumulated across the Flexbox §9 sizing,
+/// flexing, cross-size, and alignment passes.
 #[derive(Debug, Clone)]
 struct FlexItem {
     style: ItemStyleData,
@@ -203,6 +213,8 @@ struct FlexItem {
     cross_position: f32,
 }
 
+/// One consecutive range in the order-modified item array plus its resolved
+/// cross-axis size and position.
 #[derive(Debug, Clone, Copy)]
 struct FlexLine {
     start: usize,
@@ -1700,17 +1712,13 @@ fn perform_absolute_children<Tree: FlexTree>(
 ///
 /// The function consumes only [`FlexTree`] style views and host callbacks;
 /// it has no dependency on a DOM or styling engine. Child layouts are stored
-/// only for [`RunMode::PerformLayout`].
+/// only for [`LayoutGoal::Commit`].
 #[allow(clippy::too_many_lines)]
 pub fn compute_flexbox_layout<Tree: FlexTree>(
     tree: &mut Tree,
     node: NodeId,
     input: LayoutInput,
 ) -> LayoutOutput {
-    if input.run_mode == RunMode::PerformHiddenLayout {
-        return super::compute_hidden_layout(tree, node);
-    }
-
     let style = container_style(tree, node);
     let axes = Axes::new(style.direction, style.wrap, style.inline_direction);
     let resolve_calc = |handle, basis| tree.resolve_calc(handle, basis);
@@ -2045,7 +2053,7 @@ pub fn compute_flexbox_layout<Tree: FlexTree>(
     let content_origin = Point::new(border.left + padding.left, border.top + padding.top);
     let provisional_baseline =
         first_container_baseline(&items, &lines, axes, inner_size, content_origin);
-    if input.run_mode == RunMode::ComputeSize {
+    if matches!(input.goal, LayoutGoal::Measure(_)) {
         return LayoutOutput::new(outer_size, outer_size)
             .with_first_baselines(Point::new(None, provisional_baseline));
     }
@@ -2060,11 +2068,7 @@ pub fn compute_flexbox_layout<Tree: FlexTree>(
         outer_size,
     );
     for (document_index, child) in hidden {
-        let hidden_input = LayoutInput {
-            run_mode: RunMode::PerformHiddenLayout,
-            ..LayoutInput::default()
-        };
-        let _ = tree.compute_child_layout(child, hidden_input);
+        super::hide_subtree(tree, child);
         tree.set_unrounded_layout(
             child,
             &Layout::with_order(u32::try_from(document_index).unwrap_or(u32::MAX)),

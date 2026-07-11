@@ -53,7 +53,7 @@ use crate::geometry::{Edges, Point, Size};
 /// `display: none`).
 ///
 /// The dispatch protocol handles `None` before any algorithm runs (see
-/// [`compute_hidden_layout`](crate::compute::compute_hidden_layout)); which
+/// [`hide_subtree`](crate::compute::hide_subtree)); which
 /// *algorithm* a generated box uses is the host's dispatch decision, so the
 /// engine deliberately has no `Display` enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -167,7 +167,7 @@ pub enum Direction {
 /// Style every box has, regardless of which algorithm lays it out.
 ///
 /// This is the supertrait of all container/item style traits and the only
-/// style the generic machinery (dispatch, hidden layout, leaf layout,
+/// style the generic machinery (dispatch, hidden-subtree cleanup, leaf layout,
 /// rounding) reads. Defaults are the CSS initial values.
 ///
 /// Percentage bases (all per CSS Sizing/Box):

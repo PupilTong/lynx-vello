@@ -10,8 +10,8 @@
 
 use neutron_star::cache::Cache;
 use neutron_star::compute::{
-    compute_absolute_layout, compute_cached_layout, compute_hidden_layout, compute_leaf_layout,
-    compute_root_layout, round_layout,
+    compute_absolute_layout, compute_cached_layout, compute_leaf_layout, compute_root_layout,
+    hide_subtree, round_layout,
 };
 use neutron_star::prelude::*;
 use neutron_star::style::{
@@ -58,7 +58,6 @@ impl neutron_star::style::GridTemplateRepetition for MockRepetition {
 #[derive(Debug, Clone, Default)]
 struct MockStyle {
     display: MockDisplay,
-    hidden: bool,
     auto_horizontal_margin: bool,
     size: Size<Dimension>,
     flex_grow: f32,
@@ -68,7 +67,7 @@ struct MockStyle {
 
 impl CoreStyle for MockStyle {
     fn box_generation_mode(&self) -> BoxGenerationMode {
-        if self.hidden {
+        if self.display == MockDisplay::Hidden {
             BoxGenerationMode::None
         } else {
             BoxGenerationMode::Normal
@@ -226,13 +225,15 @@ impl LayoutTree for MockTree {
     }
 
     // A reduced dispatch shape for this protocol-only mock. Real hosts wrap
-    // the match in compute_cached_layout and add flex/grid/custom modes.
+    // generated boxes in compute_cached_layout and add flex/grid/custom
+    // modes; hidden cleanup must happen before that cache boundary.
     fn compute_child_layout(&mut self, child: NodeId, input: LayoutInput) -> LayoutOutput {
-        if input.run_mode == RunMode::PerformHiddenLayout {
-            return compute_hidden_layout(self, child);
+        if self.node(child).style.box_generation_mode() == BoxGenerationMode::None {
+            hide_subtree(self, child);
+            return LayoutOutput::HIDDEN;
         }
         match self.node(child).style.display {
-            MockDisplay::Hidden => compute_hidden_layout(self, child),
+            MockDisplay::Hidden => unreachable!("handled before the cache boundary"),
             MockDisplay::Leaf => {
                 LayoutOutput::new(input.known_dimensions.unwrap_or(Size::ZERO), Size::ZERO)
             }
@@ -444,7 +445,6 @@ fn compute_root_layout_preserves_a_hidden_zero_box() {
     let root = tree.push(
         MockStyle {
             display: MockDisplay::Hidden,
-            hidden: true,
             auto_horizontal_margin: true,
             ..MockStyle::default()
         },
@@ -462,7 +462,7 @@ fn compute_root_layout_preserves_a_hidden_zero_box() {
 }
 
 #[test]
-fn compute_hidden_layout_clears_stale_geometry() {
+fn explicit_hidden_cleanup_clears_stale_geometry() {
     let (mut tree, root) = leaf_tree();
     let hidden = tree.push(
         MockStyle {
@@ -473,10 +473,7 @@ fn compute_hidden_layout_clears_stale_geometry() {
     );
     tree.node_mut(hidden).unrounded.size = Size::new(50.0, 20.0);
     tree.node_mut(root).unrounded.size = Size::new(40.0, 10.0);
-    assert_eq!(
-        compute_hidden_layout(&mut tree, hidden),
-        LayoutOutput::HIDDEN
-    );
+    hide_subtree(&mut tree, hidden);
     assert_eq!(tree.unrounded_layout(hidden), Layout::default());
     assert_eq!(tree.unrounded_layout(root), Layout::default());
     assert!(tree.invalidated.contains(&hidden));
@@ -562,6 +559,6 @@ fn embeddable_cache_round_trips_a_complete_key() {
     assert_eq!(cache.get(input), Some(output));
 
     let mut different_axis = input;
-    different_axis.requested_axis = RequestedAxis::Both;
+    different_axis.goal = LayoutGoal::Measure(RequestedAxis::Both);
     assert_eq!(cache.get(different_axis), None);
 }

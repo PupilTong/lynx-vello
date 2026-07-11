@@ -41,7 +41,7 @@ Level 3), not by porting Starlight's C++.
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| `neutron-star` | Implemented flex algorithm; planned grid algorithm; leaf boxing, hidden layout, rounding; protocol vocabulary (geometry, style values, layout IO); cache semantics | Node storage, style storage, display dispatch, Lynx vocabulary (`linear-*`, `rpx`, …), text shaping, stacking/paint order |
+| `neutron-star` | Implemented flex algorithm; planned grid algorithm; leaf boxing, hidden-subtree cleanup, rounding; protocol vocabulary (geometry, style values, layout IO); cache semantics | Node storage, style storage, display dispatch, Lynx vocabulary (`linear-*`, `rpx`, …), text shaping, stacking/paint order |
 | `lynx-layout` *(planned host adapter)* | Trait impls over the widget tree, stylo `ComputedValues` → style views, display-mode dispatch, `linear`/`relative`/`staggered` algorithms, dirty tracking + cache invalidation, fixed/sticky lowering | A second flex/grid implementation, engine-side copies of styles |
 | `lynx-text` *(planned)* | Text measurement closures handed to `compute_leaf_layout` | Box layout |
 
@@ -66,7 +66,8 @@ demands only what it uses:
 Entry points (`neutron_star::compute`) are free generic functions — there is
 no engine object, so unused entry points never monomorphize into the host.
 Implemented machinery: `compute_root_layout`, `compute_leaf_layout`
-(host measure closure), `compute_hidden_layout`, `compute_cached_layout`
+(host measure closure), explicit hidden-subtree cleanup via
+`hide_subtree`, `compute_cached_layout`
 (keyed on the **complete `LayoutInput`** — see the caching section),
 `compute_absolute_layout` (the positioned pass for out-of-flow nodes whose
 containing block is not their formatting parent), and
@@ -84,19 +85,24 @@ pub fn compute_grid_layout<Tree: GridTree>(     // planned L2 API
 The flex signature is public now; the Grid signature documents the planned
 L2 API so hosts can reserve the corresponding dispatch arm.
 
-Layout IO is three `Copy` PODs: `LayoutInput` (run mode, sizing mode,
+Layout IO is three `Copy` PODs: `LayoutInput` (layout goal, sizing mode,
 known dimensions / parent size / available space) → `LayoutOutput` (size,
 content size, baselines) per call, and `Layout` (order, location, size,
 content size, scrollbar size, border/padding/margin) as the durable
-per-node result. `LayoutInput`/`LayoutOutput`/`Layout` are
+per-node result. `LayoutGoal::Measure(RequestedAxis)` makes measurement and
+its requested axes one value; `LayoutGoal::Commit` requests durable child
+geometry. Hidden-subtree cleanup is deliberately outside this sizing API.
+`LayoutInput`/`LayoutOutput`/`Layout` are
 `#[non_exhaustive]` so the protocol can grow additively (block-layout margin
 collapsing is the known future widener).
 
 **Recursion round-trips through the host.** An algorithm never walks the
-tree itself; it calls `tree.compute_child_layout(child, input)` and the host
-routes the child — to a neutron-star algorithm, to leaf measurement, or to a
-host-private algorithm — wrapping the routing in `compute_cached_layout`.
-This single decision buys three properties at once:
+tree itself; it calls `tree.compute_child_layout(child, input)`. The host
+first handles `BoxGenerationMode::None` by calling `hide_subtree` and
+returning `LayoutOutput::HIDDEN`; this explicit cleanup precedes and bypasses
+the cache. For a generated box, the host routes to a neutron-star algorithm,
+leaf measurement, or a host-private algorithm, wrapping that routing in
+`compute_cached_layout`. This decision buys three properties at once:
 
 1. **Open algorithm set.** Lynx's non-CSS `display: linear` (Android
    `LinearLayout` semantics: `linear-weight`/`linear-gravity`/…) and
@@ -105,9 +111,10 @@ This single decision buys three properties at once:
    the engine none the wiser. Same for the `<list>` component's
    staggered-grid. The engine has **no `Display` enum** — dispatch identity
    belongs to the host.
-2. **Uniform caching.** Every path through dispatch shares one cache policy,
-   so mixed trees of engine and host-private layout modes memoize correctly;
-   Grid will use the same path when its L2 algorithm lands.
+2. **Uniform caching.** Every generated-box path through dispatch shares one
+   cache policy, so mixed trees of engine and host-private layout modes
+   memoize correctly; Grid will use the same path when its L2 algorithm
+   lands. Hidden cleanup deliberately stays outside that cache boundary.
 3. **Partial relayout.** Any node can be a layout root; the engine never
    assumes global tree access.
 
@@ -230,16 +237,17 @@ the painting — layout's job is to never be the frame's bottleneck.
 - **The measurement cache is the asymptotic mechanism.** Flex sizing—and
   Grid once L2 lands—probes children under multiple constraints; uncached,
   nested containers go super-linear (the classic exponential blowup). The
-  protocol bakes the fix in: `compute_cached_layout` around every dispatch,
-  per-node slots
+  protocol bakes the fix in: `compute_cached_layout` around every
+  generated-box dispatch, per-node slots
   (`cache::Cache`, embeddable, fixed-size, allocation-free —
   `MEASURE_CACHE_SLOTS = 8` measurement slots + 1 layout slot). Shape-aware
   replacement is implemented; probe-trace validation and tuning remain L4
   work. The key is the **complete
-  `LayoutInput`** — `sizing_mode` (content-size probes ignore the node's own
-  size/min/max/aspect-ratio), `parent_size` (the percentage basis), and
-  `requested_axis` (which axes an answer actually computed) all change
-  results, so dropping any of them from the key would alias distinct
+  `LayoutInput`** — `goal` distinguishes side-effect-free measurements
+  (including their requested axes) from geometry commits, `sizing_mode`
+  controls whether content-size probes ignore the node's own
+  size/min/max/aspect-ratio, and `parent_size` is the percentage basis. All
+  change results, so dropping any of them from the key would alias distinct
   layouts; matching may coalesce entries only under provable equivalences
   (documented in the `cache` module).
 - **Incremental relayout is a host workflow the protocol supports, not a
@@ -311,9 +319,9 @@ the engine we're succeeding.
    insets anchor to the static position); `Position::AbsoluteHoisted`
    children only get the static position recorded via
    `set_static_position` — the host's positioned pass finishes them.
-9. **Finalize** — per-child `set_unrounded_layout` (skipped under
-   `ComputeSize`), container border-box size, `content_size` accumulation,
-   container baseline.
+9. **Finalize** — per-child `set_unrounded_layout` (only for
+   `LayoutGoal::Commit`), container border-box size, `content_size`
+   accumulation, container baseline.
 
 The automatic minimum size (§4.5, `min-size: auto`) resolves inside steps
 2/4, honoring `Overflow::is_scroll_container`.
@@ -353,7 +361,7 @@ Lynx `<list>`-component concern, not a grid mode).
   machinery entry points. `tests/flexbox.rs` supplies a styling-engine-free
   host and spec-derived fixtures for axes, flexing, wrapping, intrinsic
   contributions, alignment, baselines, box sizing, percentages, auto
-  minimums, out-of-flow static positions, and compute-only runs.
+  minimums, out-of-flow static positions, and measurement-only runs.
 - **Parity/performance hardening (planned):** golden layout trees compared
   against browser-computed geometry for the same CSS, differential fuzzing
   against Taffy on the shared feature subset, and the flex benchmarks above.
@@ -366,8 +374,8 @@ Lynx `<list>`-component concern, not a grid mode).
 - **L0 — contracts + skeleton** *(complete)*: traits, value types, IO,
   cache semantics, machinery entry-point contracts, and conformance mock.
 - **L1 — flexbox** *(complete)*: `compute_flexbox_layout` per the plan above,
-  plus the shared machinery it exercises: leaf boxing, hidden
-  layout, cache matching policy, root entry, the positioned pass
+  plus the shared machinery it exercises: leaf boxing, hidden-subtree
+  cleanup, cache matching policy, root entry, the positioned pass
   (`compute_absolute_layout`), and device-pixel rounding. Browser goldens,
   differential fuzzing, and benchmarks remain parity/performance hardening.
 - **L2 — grid**: add `compute_grid_layout` per the plan above,
