@@ -6,7 +6,9 @@
 //! provide a stylo [`Device`] and an [`ExternalState`]
 //! payload; no Lynx-specific metrics, units, or widget vocabulary live here.
 
-use cssparser::{Parser, ParserInput};
+use std::sync::atomic::AtomicBool;
+
+use cssparser::{Parser, ParserInput, SourceLocation};
 use selectors::matching::{
     MatchingContext, MatchingForInvalidation, MatchingMode, NeedsSelectorFlags, SelectorCaches,
 };
@@ -15,27 +17,42 @@ use stylo::context::QuirksMode;
 use stylo::custom_properties::AttrTaint;
 use stylo::device::Device;
 use stylo::dom::TElement;
+use stylo::font_face::parse_font_face_block;
 use stylo::media_queries::MediaList;
 use stylo::parser::ParserContext;
 /// The computed style produced by [`StyleEngine::resolve`].
 pub use stylo::properties::ComputedValues as ComputedStyle;
 use stylo::properties::cascade::{FirstLineReparenting, cascade};
+use stylo::properties::declaration_block::parse_one_declaration_into;
 use stylo::properties::style_structs::Font;
-use stylo::properties::{AnimationDeclarations, ComputedValues};
+use stylo::properties::{
+    AnimationDeclarations, ComputedValues, Importance, PropertyDeclarationBlock, PropertyId,
+    SourcePropertyDeclaration,
+};
 use stylo::rule_cache::RuleCacheConditions;
 use stylo::rule_tree::RuleCascadeFlags;
+use stylo::selector_parser::SelectorParser;
 use stylo::servo_arc::Arc;
 use stylo::shared_lock::{SharedRwLock, StylesheetGuards};
+/// A single CSS rule, as built by the [`StyleEngine`] rule builders.
+pub use stylo::stylesheets::CssRule;
 /// A stylesheet's cascade origin.
 pub use stylo::stylesheets::Origin as StylesheetOrigin;
+use stylo::stylesheets::keyframes_rule::{KeyframesRule, parse_keyframe_list};
 use stylo::stylesheets::{
-    AllowImportRules, CssRuleType, DocumentStyleSheet, Origin, Stylesheet, UrlExtraData,
+    AllowImportRules, CssRuleType, CssRules, DocumentStyleSheet, Origin, StyleRule, Stylesheet,
+    StylesheetContents, UrlExtraData,
 };
 use stylo::stylist::{RuleInclusion, Stylist};
+use stylo::values::KeyframesName;
 use stylo::values::specified::position::PositionTryFallbacksTryTactic;
 use stylo_traits::ParsingMode;
 
 use crate::{Arena, ElementId, ElementRef, ExternalState};
+
+/// One declaration for direct rule construction: property name, value text,
+/// and whether it carries `!important`.
+pub type RawDeclaration<'a> = (&'a str, &'a str, bool);
 
 /// The placeholder base URL used by [`StyleEngine::new`].
 fn about_blank_url_data() -> UrlExtraData {
@@ -95,6 +112,16 @@ impl StyleEngine {
     #[must_use]
     pub fn new_arena<T>(&self) -> Arena<T> {
         Arena::with_style_context(self.lock.clone(), self.url_data.clone())
+    }
+
+    /// The engine's stylist (crate-internal: the flush traversal needs it).
+    pub(crate) fn stylist(&self) -> &Stylist {
+        &self.stylist
+    }
+
+    /// The engine's shared style lock (crate-internal).
+    pub(crate) fn shared_lock(&self) -> &SharedRwLock {
+        &self.lock
     }
 
     /// Inspect the device used for viewport units and media evaluation.
@@ -158,6 +185,176 @@ impl StyleEngine {
         self.stylist.append_stylesheet(document_sheet, &guard);
         let guards = StylesheetGuards::same(&guard);
         self.stylist.flush(&guards);
+    }
+
+    /// Append pre-built rules as one stylesheet of the given origin, without
+    /// any CSS-text round trip, and flush the stylist.
+    ///
+    /// This is the mounting half of **direct construction** (see
+    /// `docs/style-assumptions.md` §B.5): pair it with
+    /// [`build_style_rule`](Self::build_style_rule) /
+    /// [`build_keyframes_rule`](Self::build_keyframes_rule) /
+    /// [`build_font_face_rule`](Self::build_font_face_rule).
+    pub fn append_rules(&mut self, rules: Vec<CssRule>, origin: Origin) {
+        let rules = CssRules::new(rules, &self.lock);
+        let contents = StylesheetContents::from_rules(
+            rules,
+            origin,
+            self.url_data.clone(),
+            QuirksMode::NoQuirks,
+        );
+        let sheet = Stylesheet {
+            contents: self.lock.wrap(contents),
+            shared_lock: self.lock.clone(),
+            media: Arc::new(self.lock.wrap(MediaList::empty())),
+            disabled: AtomicBool::new(false),
+        };
+        let document_sheet = DocumentStyleSheet(Arc::new(sheet));
+
+        let guard = self.lock.read();
+        self.stylist.append_stylesheet(document_sheet, &guard);
+        let guards = StylesheetGuards::same(&guard);
+        self.stylist.flush(&guards);
+    }
+
+    /// Build a style rule from selector text plus individual declarations.
+    ///
+    /// One selector-list parse for the rule; one per-property value parse per
+    /// declaration (shorthands expand normally, unknown/disabled properties
+    /// and invalid values are dropped exactly like a text parse would).
+    /// Returns `None` when the selector list fails to parse — the whole rule
+    /// is invalid per CSS error handling.
+    #[must_use]
+    pub fn build_style_rule<'d>(
+        &self,
+        selectors: &str,
+        declarations: impl IntoIterator<Item = RawDeclaration<'d>>,
+    ) -> Option<CssRule> {
+        let selectors =
+            SelectorParser::parse_author_origin_no_namespace(selectors, &self.url_data).ok()?;
+        let block = self.parse_declaration_block(declarations, CssRuleType::Style);
+        Some(CssRule::Style(Arc::new(self.lock.wrap(StyleRule {
+            selectors,
+            block: Arc::new(self.lock.wrap(block)),
+            rules: None,
+            source_location: SourceLocation { line: 0, column: 0 },
+        }))))
+    }
+
+    /// Build an `@keyframes` rule from its name and the keyframe-list body
+    /// text (`"0% { … } 100% { … }"`).
+    ///
+    /// Keyframe stops are rare and tiny compared to style rules, so parsing
+    /// the reassembled body through stylo's keyframe-list parser keeps this
+    /// exact without a bespoke stop builder.
+    #[must_use]
+    pub fn build_keyframes_rule(&self, name: &str, body: &str) -> Option<CssRule> {
+        if name.is_empty() {
+            return None;
+        }
+        let mut context = self.parser_context(CssRuleType::Keyframes);
+        let mut input = ParserInput::new(body);
+        let mut parser = Parser::new(&mut input);
+        let keyframes = parse_keyframe_list(&mut context, &mut parser, &self.lock);
+        Some(CssRule::Keyframes(Arc::new(self.lock.wrap(
+            KeyframesRule {
+                name: KeyframesName::from_ident(name),
+                keyframes,
+                vendor_prefix: None,
+                source_location: SourceLocation { line: 0, column: 0 },
+            },
+        ))))
+    }
+
+    /// Build an `@font-face` rule from its descriptor-block text
+    /// (`"font-family: X; src: url(…);"`).
+    #[must_use]
+    pub fn build_font_face_rule(&self, body: &str) -> Option<CssRule> {
+        let context = self.parser_context(CssRuleType::FontFace);
+        let mut input = ParserInput::new(body);
+        let mut parser = Parser::new(&mut input);
+        let rule =
+            parse_font_face_block(&context, &mut parser, SourceLocation { line: 0, column: 0 });
+        Some(CssRule::FontFace(Arc::new(self.lock.wrap(rule))))
+    }
+
+    /// Parse individual declarations into one declaration block.
+    fn parse_declaration_block<'d>(
+        &self,
+        declarations: impl IntoIterator<Item = RawDeclaration<'d>>,
+        rule_type: CssRuleType,
+    ) -> PropertyDeclarationBlock {
+        let context = self.parser_context(rule_type);
+        let mut block = PropertyDeclarationBlock::new();
+        let mut source = SourcePropertyDeclaration::default();
+        for (name, value, important) in declarations {
+            // The gated parse (not `parse_unchecked`) so properties the lynx
+            // stylo build disables stop here, exactly as in a text parse.
+            let Ok(id) = PropertyId::parse(name, &context) else {
+                continue;
+            };
+            // Drop any leftovers from a previous failed parse.
+            drop(source.drain());
+            if parse_one_declaration_into(
+                &mut source,
+                id,
+                value,
+                Origin::Author,
+                &self.url_data,
+                None,
+                ParsingMode::DEFAULT,
+                QuirksMode::NoQuirks,
+                rule_type,
+            )
+            .is_ok()
+            {
+                let importance = if important {
+                    Importance::Important
+                } else {
+                    Importance::Normal
+                };
+                block.extend(source.drain(), importance);
+            }
+        }
+        block
+    }
+
+    /// A parser context for this engine's URL data, author origin.
+    fn parser_context(&self, rule_type: CssRuleType) -> ParserContext<'_> {
+        ParserContext::new(
+            Origin::Author,
+            &self.url_data,
+            Some(rule_type),
+            ParsingMode::DEFAULT,
+            QuirksMode::NoQuirks,
+            std::borrow::Cow::default(),
+            None,
+            None,
+            AttrTaint::default(),
+        )
+    }
+
+    /// Whether an `@keyframes` animation with this name has been registered
+    /// (via any appended stylesheet). The element picks the cascade data the
+    /// lookup runs against; pass the tree root for document-level rules.
+    #[must_use]
+    pub fn has_keyframes_animation<T: ExternalState>(
+        &self,
+        name: &str,
+        element: ElementRef<'_, T>,
+    ) -> bool {
+        self.stylist
+            .lookup_keyframes(&stylo_atoms::Atom::from(name), element)
+            .is_some()
+    }
+
+    /// The number of registered `@font-face` rules across all origins.
+    #[must_use]
+    pub fn font_face_count(&self) -> usize {
+        self.stylist
+            .iter_extra_data_origins()
+            .map(|(data, _)| data.font_faces.len())
+            .sum()
     }
 
     /// Parse a media-query string using this engine's URL and lock context.
@@ -275,14 +472,15 @@ impl StyleEngine {
 impl<T> Arena<T> {
     /// Store a resolved style and mark the element's own style work complete.
     ///
-    /// Returns `false` when `id` is stale. Descendant dirtiness is left intact
-    /// for the future tree flush driver to process.
+    /// Returns `false` when `id` is stale. Descendant dirtiness is left
+    /// intact. Used with the standalone [`StyleEngine::resolve`] path; the
+    /// flush traversal ([`StyleEngine::flush_tree`]) stores styles itself.
     pub fn store_computed_style(&mut self, id: ElementId, style: Arc<ComputedValues>) -> bool {
         let Some(element) = self.get_mut(id) else {
             return false;
         };
-        element.computed = Some(style);
-        element.style_dirty = false;
+        element.set_computed_style(style);
+        element.set_style_dirty(false);
         true
     }
 }

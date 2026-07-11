@@ -161,7 +161,7 @@ fn writeback_stores_computed_and_clears_dirty() {
     doc.set_computed(view, computed).unwrap();
 
     assert!(doc.computed(view).is_some());
-    assert!(!doc.widget(view).unwrap().style_dirty);
+    assert!(!doc.widget(view).unwrap().is_style_dirty());
 }
 
 #[test]

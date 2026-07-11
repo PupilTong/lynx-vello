@@ -18,6 +18,10 @@ smallvec = { workspace = true }
 thiserror = { workspace = true }
 euclid = { workspace = true }
 
+# The .web.bundle wire format: `StyleInfo` ingestion lowers its decoded
+# rules straight into stylo objects (see `src/ingest.rs`).
+lynx-template-decoder = { workspace = true }
+
 # The Lynx adapter names computed values, Device metrics, atoms, and
 # `ExternalState` attribute names directly. Lock ownership and the cascade
 # remain encapsulated by `stylo-dom`.
@@ -27,6 +31,11 @@ stylo_traits = { workspace = true }
 
 [dev-dependencies]
 app_units = { workspace = true }
+divan = { workspace = true }
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "style"
+harness = false

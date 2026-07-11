@@ -332,28 +332,33 @@ impl WidgetTree {
 
     /// Replace an element's classes from a whitespace-separated list.
     pub fn set_classes(&mut self, id: WidgetId, classes: &str) -> Result<(), WidgetError> {
-        match self.arena.get_mut(id) {
-            Some(widget) => {
-                widget.classes = classes.split_whitespace().map(Atom::from).collect();
-            }
-            None => return Err(WidgetError::StaleElement(id)),
+        if !self.arena.contains(id) {
+            return Err(WidgetError::StaleElement(id));
         }
-        self.arena.mark_attribute_changed(id);
+        // Snapshot the old class list before mutating so the flush can run
+        // invalidation-set matching against old vs. new.
+        self.arena.note_class_change(id);
+        if let Some(widget) = self.arena.get_mut(id) {
+            widget.classes = classes.split_whitespace().map(Atom::from).collect();
+        }
         Ok(())
     }
 
     /// Add a single class (no-op if already present).
     pub fn add_class(&mut self, id: WidgetId, class: &str) -> Result<(), WidgetError> {
-        match self.arena.get_mut(id) {
+        let class = Atom::from(class);
+        match self.arena.get(id) {
             Some(widget) => {
-                let class = Atom::from(class);
-                if !widget.classes.contains(&class) {
-                    widget.classes.push(class);
+                if widget.classes.contains(&class) {
+                    return Ok(());
                 }
             }
             None => return Err(WidgetError::StaleElement(id)),
         }
-        self.arena.mark_attribute_changed(id);
+        self.arena.note_class_change(id);
+        if let Some(widget) = self.arena.get_mut(id) {
+            widget.classes.push(class);
+        }
         Ok(())
     }
 
@@ -398,30 +403,30 @@ impl WidgetTree {
         name: &str,
         value: &str,
     ) -> Result<(), WidgetError> {
-        match self.arena.get_mut(id) {
-            Some(widget) => {
-                widget.attrs.insert(name.into(), value.to_owned());
-            }
-            None => return Err(WidgetError::StaleElement(id)),
+        if !self.arena.contains(id) {
+            return Err(WidgetError::StaleElement(id));
         }
-        self.arena.mark_attribute_changed(id);
+        self.arena.note_attribute_change(id, name);
+        if let Some(widget) = self.arena.get_mut(id) {
+            widget.attrs.insert(name.into(), value.to_owned());
+        }
         Ok(())
     }
 
     /// Set an element's id selector value (Lynx's `__SetID`). An empty string
     /// clears it.
     pub fn set_id(&mut self, id: WidgetId, id_selector: &str) -> Result<(), WidgetError> {
-        match self.arena.get_mut(id) {
-            Some(widget) => {
-                widget.id_attr = if id_selector.is_empty() {
-                    None
-                } else {
-                    Some(Atom::from(id_selector))
-                };
-            }
-            None => return Err(WidgetError::StaleElement(id)),
+        if !self.arena.contains(id) {
+            return Err(WidgetError::StaleElement(id));
         }
-        self.arena.mark_attribute_changed(id);
+        self.arena.note_id_change(id);
+        if let Some(widget) = self.arena.get_mut(id) {
+            widget.id_attr = if id_selector.is_empty() {
+                None
+            } else {
+                Some(Atom::from(id_selector))
+            };
+        }
         Ok(())
     }
 
@@ -431,12 +436,12 @@ impl WidgetTree {
             return Err(WidgetError::StaleElement(bad));
         }
         for &id in ids {
+            // The css_id is reflected as the synthetic `l-css-id` attribute,
+            // so snapshot it as an attribute change.
+            self.arena.note_attribute_change(id, "l-css-id");
             if let Some(widget) = self.arena.get_mut(id) {
                 widget.ext.css_id = css_id;
             }
-        }
-        for &id in ids {
-            self.arena.mark_attribute_changed(id);
         }
         Ok(())
     }
@@ -448,28 +453,66 @@ impl WidgetTree {
         K: Into<Box<str>>,
         V: Into<String>,
     {
-        match self.arena.get_mut(id) {
-            Some(widget) => {
-                widget.ext.dataset = entries
-                    .into_iter()
-                    .map(|(k, v)| (k.into(), v.into()))
-                    .collect();
-            }
-            None => return Err(WidgetError::StaleElement(id)),
+        if !self.arena.contains(id) {
+            return Err(WidgetError::StaleElement(id));
         }
-        self.arena.mark_attribute_changed(id);
+        // Snapshot the old values first, and name every old reflected
+        // attribute while they still exist.
+        self.arena.note_other_attributes_change(id);
+        let old_keys: Vec<String> = self
+            .arena
+            .get(id)
+            .map(|widget| {
+                widget
+                    .ext
+                    .dataset
+                    .keys()
+                    .map(|key| format!("data-{key}"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for key in &old_keys {
+            self.arena.note_attribute_change(id, key);
+        }
+
+        if let Some(widget) = self.arena.get_mut(id) {
+            widget.ext.dataset = entries
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect();
+        }
+
+        // Names that only exist in the new dataset still need to be flagged
+        // as changed; the snapshot keeps the pre-mutation values.
+        let new_keys: Vec<String> = self
+            .arena
+            .get(id)
+            .map(|widget| {
+                widget
+                    .ext
+                    .dataset
+                    .keys()
+                    .map(|key| format!("data-{key}"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for key in &new_keys {
+            if !old_keys.contains(key) {
+                self.arena.note_attribute_change(id, key);
+            }
+        }
         Ok(())
     }
 
     /// Add or overwrite a single `data-*` dataset entry.
     pub fn add_dataset(&mut self, id: WidgetId, key: &str, value: &str) -> Result<(), WidgetError> {
-        match self.arena.get_mut(id) {
-            Some(widget) => {
-                widget.ext.dataset.insert(key.into(), value.to_owned());
-            }
-            None => return Err(WidgetError::StaleElement(id)),
+        if !self.arena.contains(id) {
+            return Err(WidgetError::StaleElement(id));
         }
-        self.arena.mark_attribute_changed(id);
+        self.arena.note_attribute_change(id, &format!("data-{key}"));
+        if let Some(widget) = self.arena.get_mut(id) {
+            widget.ext.dataset.insert(key.into(), value.to_owned());
+        }
         Ok(())
     }
 
@@ -500,11 +543,13 @@ impl WidgetTree {
         state: PseudoState,
         on: bool,
     ) -> Result<(), WidgetError> {
-        match self.arena.get_mut(id) {
-            Some(widget) => widget.element_state.set(state.to_element_state(), on),
-            None => return Err(WidgetError::StaleElement(id)),
+        if !self.arena.contains(id) {
+            return Err(WidgetError::StaleElement(id));
         }
-        self.arena.mark_attribute_changed(id);
+        self.arena.note_state_change(id);
+        if let Some(widget) = self.arena.get_mut(id) {
+            widget.element_state.set(state.to_element_state(), on);
+        }
         Ok(())
     }
 
@@ -561,13 +606,18 @@ impl WidgetTree {
     }
 
     /// An element's resolved computed style, if it has been styled.
+    ///
+    /// The style lives in stylo's per-element data; the `Arc` clone is cheap.
     #[must_use]
-    pub fn computed(&self, id: WidgetId) -> Option<&Arc<ComputedValues>> {
-        self.arena.get(id).and_then(Widget::computed)
+    pub fn computed(&self, id: WidgetId) -> Option<Arc<ComputedValues>> {
+        self.arena.get(id).and_then(Widget::computed_style)
     }
 
     /// Store an element's resolved computed style and clear its `style_dirty`
-    /// bit. Called after the Widget style adapter resolves an element.
+    /// bit. Used with the standalone
+    /// [`StyleEngine::resolve_widget`](crate::StyleEngine::resolve_widget)
+    /// path; [`StyleEngine::flush_widget_tree`](crate::StyleEngine::flush_widget_tree)
+    /// stores styles itself.
     pub fn set_computed(
         &mut self,
         id: WidgetId,
@@ -589,7 +639,7 @@ impl WidgetTree {
             Some(page) => self
                 .arena
                 .get(page)
-                .is_some_and(|widget| widget.style_dirty || widget.dirty_descendants),
+                .is_some_and(|widget| widget.is_style_dirty() || widget.has_dirty_descendants()),
             None => false,
         }
     }

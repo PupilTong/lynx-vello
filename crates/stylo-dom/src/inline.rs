@@ -56,7 +56,7 @@ impl<T> Arena<T> {
         if let Some(element) = self.get_mut(id) {
             element.inline_block = block;
         }
-        self.mark_attribute_changed(id);
+        self.note_inline_style_change(id);
     }
 
     /// Parse a single `name: value` declaration through stylo and merge it into
@@ -107,6 +107,6 @@ impl<T> Arena<T> {
         if let Some(element) = self.get_mut(id) {
             element.inline_block = Some(wrapped);
         }
-        self.mark_attribute_changed(id);
+        self.note_inline_style_change(id);
     }
 }

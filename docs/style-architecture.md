@@ -23,19 +23,38 @@ Lynx-only device and unit behavior moved up into `lynx-widget`.
 
 ## Style lifecycle
 
-1. `lynx_widget::StyleEngine::new(EngineMetrics)` constructs the touch-first
-   stylo `Device`; its viewport is the `rpx` basis.
+1. `lynx_widget::StyleEngine::new(EngineMetrics)` (or `with_page_config`)
+   constructs the touch-first stylo `Device` — its viewport is the `rpx`
+   basis — and installs the **UA-origin default sheet** generated from the
+   `PageConfig` (`defaultDisplayLinear`, `defaultOverflowVisible`; see
+   `crates/lynx-widget/src/ua.rs`). Page config is never an engine branch.
 2. The adapter constructs `stylo_dom::StyleEngine`, which owns one `Stylist`,
    one base URL, and one private `SharedRwLock`.
-3. `StyleEngine::new_widget_tree()` asks the core for an arena bound to that
+3. `StyleEngine::load_style_info(&StyleInfo)` ingests a decoded bundle by
+   **direct construction** (`crates/lynx-widget/src/ingest.rs`): one selector
+   parse per rule + per-property value parses into stylo rule objects — no
+   CSS-text re-serialization. Lynx policy applied at ingest: `@import`
+   flattening (Kahn, web-core parity) and cssId scoping via
+   `:where([l-css-id="N"])` guards on the subject compound. The rules mount
+   through the fork's `StylesheetContents::from_rules` +
+   `stylo_dom::StyleEngine::append_rules`.
+4. `StyleEngine::new_widget_tree()` asks the core for an arena bound to that
    private style context. Neither `lynx-widget` nor callers receive the lock.
-4. DOM mutations and inline-style parsing happen in `Arena<T>` and mark the
-   affected nodes dirty.
-5. Stylesheets, selector matching, rule-tree insertion, inheritance, and
-   cascade run in `stylo_dom::StyleEngine::resolve`.
-6. The Widget adapter exposes `resolve_widget` and applies Lynx viewport/device changes;
-   future flush orchestration can walk dirty Widgets without duplicating the
-   CSS algorithm.
+5. DOM mutations schedule style work in `Arena<T>` (`crates/stylo-dom/src/dirty.rs`):
+   attribute / class / id / pseudo-state changes record **pre-mutation
+   snapshots** for stylo's invalidation sets; structural changes post
+   **restyle hints** scoped by the selector flags stylo recorded during
+   matching; inline-style updates post the style-attribute replacement hint.
+6. `StyleEngine::flush_widget_tree(&mut tree)` drives **stylo's own restyle
+   traversal** (`crates/stylo-dom/src/flush.rs`): snapshot-driven
+   invalidation, the style sharing cache, bloom filter, and rayon
+   parallelism over wide DOM levels (stylo's global style pool). Computed
+   styles land in each element's stylo `ElementData`; read them with
+   `WidgetTree::computed` (an `Arc<ComputedValues>` clone — direct Arc reads
+   per `docs/style-assumptions.md` §B.8).
+7. `stylo_dom::StyleEngine::resolve` remains as the standalone per-element
+   match+cascade (no traversal state); the Widget adapter exposes it as
+   `resolve_widget`.
 
 ## Invariants
 
@@ -47,4 +66,28 @@ Lynx-only device and unit behavior moved up into `lynx-widget`.
   environment policy belong in `lynx-widget` (or the maintained stylo fork
   when they are first-class CSS grammar/value extensions).
 - Device mutations go through `stylo_dom::StyleEngine::update_device` or
-  `set_viewport`, ensuring media-dependent cascade data is refreshed.
+  `set_viewport`, ensuring media-dependent cascade data is refreshed. After a
+  device change the embedder calls
+  `lynx_widget::StyleEngine::restyle_after_device_change` on each styled tree
+  so `rpx`/`vw`/`vh` lengths re-resolve and media-dependent rules re-match on
+  the next flush.
+- **Snapshot before mutating**: every matching-relevant mutation API calls
+  its `note_*_change` counterpart *before* applying the change, so the
+  snapshot holds the old state.
+- Element state stylo touches through `&self` during a traversal is atomic;
+  the `ElementData` slot is single-owner under stylo's traversal discipline
+  (`SAFETY` notes in `stylo-dom`'s `traits`/`flush`). Concurrent parallel
+  flushes are serialized process-wide (stylo's global pool keeps
+  per-traversal state in worker TLS).
+
+## Performance posture (see `docs/style-assumptions.md`)
+
+- Ingestion: direct construction, §B.5. Parallel traversal from day 1, §B.6.
+- Incremental restyles ride stylo invalidation sets, §B.7 — a class flip on
+  one element restyles only affected elements (~3µs on a 1.1k-widget tree in
+  the divan benches, vs ~1.1ms for the initial full flush).
+- Benchmarks: `cargo bench -p lynx-widget` (`benches/style.rs`,
+  CodSpeed-tracked) — ingestion, initial flush (sequential + parallel),
+  incremental class flip / inline style, no-op flush floor, standalone
+  resolve baseline. No native-C++-Lynx comparison harness yet (§E.18 is the
+  bar; harness is follow-up work).

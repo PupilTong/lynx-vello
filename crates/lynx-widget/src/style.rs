@@ -6,6 +6,7 @@
 //! and Widget-oriented convenience methods.
 
 use euclid::{Scale, Size2D};
+use lynx_template_decoder::StyleInfo;
 use stylo::device::Device;
 use stylo::device::servo::FontMetricsProvider;
 use stylo::font_metrics::FontMetrics;
@@ -18,10 +19,11 @@ use stylo::servo_arc::Arc;
 use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
-use stylo_dom::{StyleEngine as DomStyleEngine, StylesheetOrigin};
+use stylo_dom::{Parallelism, StyleEngine as DomStyleEngine, StylesheetOrigin};
 use stylo_traits::{CSSPixel, DevicePixel};
 
-use crate::{WidgetRef, WidgetTree};
+use crate::ua::{PageConfig, ua_stylesheet};
+use crate::{WidgetRef, WidgetTree, ingest};
 
 /// The environment metrics for a Lynx widget style engine.
 ///
@@ -58,15 +60,62 @@ impl EngineMetrics {
 #[derive(Debug)]
 pub struct StyleEngine {
     core: DomStyleEngine,
+    page_config: PageConfig,
 }
 
 impl StyleEngine {
-    /// Build a Widget style engine for the supplied Lynx metrics.
+    /// Build a Widget style engine for the supplied Lynx metrics, with the
+    /// default page configuration.
     #[must_use]
     pub fn new(metrics: EngineMetrics) -> Self {
-        Self {
-            core: DomStyleEngine::new(build_device(metrics)),
-        }
+        Self::with_page_config(metrics, PageConfig::default())
+    }
+
+    /// Build a Widget style engine with an explicit page configuration.
+    ///
+    /// The configuration is honored **as generated UA styles** — a UA-origin
+    /// stylesheet installed here (see [`crate::ua`]), never as branches in
+    /// the styling engine.
+    #[must_use]
+    pub fn with_page_config(metrics: EngineMetrics, page_config: PageConfig) -> Self {
+        let mut core = DomStyleEngine::new(build_device(metrics));
+        core.add_stylesheet_str(&ua_stylesheet(page_config), StylesheetOrigin::UserAgent);
+        Self { core, page_config }
+    }
+
+    /// The page configuration this engine's UA styles were generated for.
+    #[must_use]
+    pub const fn page_config(&self) -> PageConfig {
+        self.page_config
+    }
+
+    /// Load a decoded `StyleInfo` section: lower every fragment into stylo
+    /// rules by direct construction (import flattening + cssId `:where`
+    /// scoping included; see [`crate::ingest`]) and mount them as one author
+    /// stylesheet.
+    pub fn load_style_info(&mut self, info: &StyleInfo) {
+        let rules = ingest::build_rules(&self.core, info);
+        self.core.append_rules(rules, StylesheetOrigin::Author);
+    }
+
+    /// Restyle everything scheduled since the last flush (stylo's traversal:
+    /// parallel when the tree is wide enough, invalidation-set-driven,
+    /// style-sharing enabled). Styles land on the widgets; read them with
+    /// [`WidgetTree::computed`].
+    ///
+    /// A no-op without a page root.
+    pub fn flush_widget_tree(&self, tree: &mut WidgetTree) {
+        self.flush_widget_tree_with(tree, Parallelism::Auto);
+    }
+
+    /// [`flush_widget_tree`](Self::flush_widget_tree) with explicit traversal
+    /// scheduling (benchmarks pin [`Parallelism::Sequential`]).
+    pub fn flush_widget_tree_with(&self, tree: &mut WidgetTree, parallelism: Parallelism) {
+        let Some(page) = tree.get_page_element() else {
+            return;
+        };
+        self.core
+            .flush_tree_with(tree.arena_mut(), page, parallelism);
     }
 
     /// Access the generic CSS engine.
@@ -113,13 +162,34 @@ impl StyleEngine {
     }
 
     /// Update the Lynx view viewport.
+    ///
+    /// Already-styled trees keep computed values resolved against the old
+    /// viewport (`rpx`/`vw`/`vh` lengths, media-dependent rules) until the
+    /// embedder calls [`restyle_after_device_change`] on each of them.
+    ///
+    /// [`restyle_after_device_change`]: Self::restyle_after_device_change
     pub fn set_viewport(&mut self, width: f32, height: f32) {
         self.core.set_viewport(width, height);
     }
 
     /// Update the device-pixel ratio while preserving the CSS viewport.
+    ///
+    /// As with [`set_viewport`](Self::set_viewport), follow up with
+    /// [`restyle_after_device_change`](Self::restyle_after_device_change) on
+    /// every styled tree.
     pub fn set_device_pixel_ratio(&mut self, device_pixel_ratio: f32) {
         self.core.set_device_pixel_ratio(device_pixel_ratio);
+    }
+
+    /// Schedule a full restyle of `tree` after a device change
+    /// ([`set_viewport`](Self::set_viewport) /
+    /// [`set_device_pixel_ratio`](Self::set_device_pixel_ratio)): viewport
+    /// units (`rpx`/`vw`/`vh`) re-resolve and media-dependent rules re-match
+    /// on the tree's next flush. A no-op without a page root.
+    pub fn restyle_after_device_change(&self, tree: &mut WidgetTree) {
+        if let Some(page) = tree.get_page_element() {
+            tree.arena_mut().mark_subtree_dirty(page);
+        }
     }
 }
 

@@ -3,7 +3,6 @@
 use stylo::dom::{NodeInfo, OpaqueNode, TNode};
 
 use crate::arena::ElementRef;
-use crate::element::Element;
 use crate::ext::ExternalState;
 
 impl<T: ExternalState> NodeInfo for ElementRef<'_, T> {
@@ -73,7 +72,10 @@ impl<'a, T: ExternalState> TNode for ElementRef<'a, T> {
     }
 
     fn opaque(&self) -> OpaqueNode {
-        OpaqueNode(std::ptr::from_ref::<Element<T>>(self.element()) as usize)
+        // Derived from the (index, generation) id — NOT the element's address:
+        // stylo keys snapshot maps by `OpaqueNode` across arbitrary tree
+        // mutations, and arena growth can reallocate and move every element.
+        self.id().opaque()
     }
 
     fn debug_id(self) -> usize {

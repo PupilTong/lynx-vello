@@ -9,9 +9,18 @@
 //! [`ElementRef`] is a lightweight `Copy` handle pairing a borrow of the arena
 //! with an [`ElementId`]; it exposes read-only tree navigation and is the type
 //! stylo's element traits are implemented on (see [`crate::traits`]).
+//!
+//! The arena also owns the **pending snapshot set** for stylo's
+//! invalidation-set restyle: before a matching-relevant mutation, the embedder
+//! layer records the element's old state/attributes here (see
+//! [`crate::dirty`]), and the next
+//! [`StyleEngine::flush_tree`](crate::StyleEngine::flush_tree) consumes them.
 
+use std::fmt;
 use std::num::NonZeroU32;
 
+use stylo::dom::OpaqueNode;
+use stylo::selector_parser::SnapshotMap;
 use stylo::shared_lock::SharedRwLock;
 use stylo::stylesheets::UrlExtraData;
 
@@ -48,6 +57,25 @@ impl ElementId {
     pub const fn generation(self) -> NonZeroU32 {
         self.generation
     }
+
+    /// The stable stylo [`OpaqueNode`] identity for this handle.
+    ///
+    /// stylo keys its [`SnapshotMap`] and traversal roots by `OpaqueNode`.
+    /// Deriving it from the id (rather than the element's address) keeps it
+    /// stable across arena growth, which can reallocate and move every
+    /// element.
+    #[must_use]
+    pub(crate) const fn opaque(self) -> OpaqueNode {
+        // Packs (generation, index) into the usize. 64-bit targets only —
+        // on 32-bit this would truncate the generation.
+        const {
+            assert!(
+                size_of::<usize>() >= 8,
+                "ElementId::opaque requires a 64-bit target"
+            );
+        }
+        OpaqueNode(((self.generation.get() as usize) << 32) | self.index as usize)
+    }
 }
 
 /// One arena slot: the current generation plus an optional live [`Element`].
@@ -63,12 +91,28 @@ struct Slot<T> {
 /// guard every element's inline style block. [`StyleEngine`](crate::StyleEngine)
 /// creates styled arenas with the matching private context; embedders do not
 /// pass locks across crate boundaries.
-#[derive(Debug)]
 pub struct Arena<T> {
     slots: Vec<Slot<T>>,
     free_list: Vec<u32>,
     lock: SharedRwLock,
     url_data: UrlExtraData,
+    /// Pre-mutation element snapshots pending the next flush, keyed by the
+    /// element's stable [`OpaqueNode`] (see [`ElementId::opaque`]).
+    snapshots: SnapshotMap,
+    /// The ids behind [`Arena::snapshots`], so `complete_flush` can clear the
+    /// per-element snapshot bits without a way to map `OpaqueNode` back.
+    snapshotted: Vec<ElementId>,
+}
+
+impl<T: fmt::Debug> fmt::Debug for Arena<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `SnapshotMap` is not `Debug`; report its size instead.
+        f.debug_struct("Arena")
+            .field("slots", &self.slots)
+            .field("free_list", &self.free_list)
+            .field("pending_snapshots", &self.snapshotted.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl<T> Default for Arena<T> {
@@ -95,6 +139,8 @@ impl<T> Arena<T> {
             free_list: Vec::new(),
             lock,
             url_data,
+            snapshots: SnapshotMap::new(),
+            snapshotted: Vec::new(),
         }
     }
 
@@ -108,6 +154,16 @@ impl<T> Arena<T> {
     #[must_use]
     pub(crate) fn url_data(&self) -> &UrlExtraData {
         &self.url_data
+    }
+
+    /// The pending pre-mutation snapshots, consumed by the flush traversal.
+    #[must_use]
+    pub(crate) fn snapshot_map(&self) -> &SnapshotMap {
+        &self.snapshots
+    }
+
+    pub(crate) fn snapshot_map_mut(&mut self) -> (&mut SnapshotMap, &mut Vec<ElementId>) {
+        (&mut self.snapshots, &mut self.snapshotted)
     }
 
     /// Insert an element and return its handle.
@@ -156,6 +212,12 @@ impl<T> Arena<T> {
             // Generation space exhausted for this slot: retire it (never
             // reuse) so no future handle can collide with a past one.
         }
+        // A dead element's pending snapshot must not survive it; the map entry
+        // is keyed by the (now stale) opaque id and is dropped with the map on
+        // the next `complete_flush`. Removing it eagerly keeps the map small.
+        if element.snapshot_present() {
+            self.snapshots.remove(&id.opaque());
+        }
         Some(element)
     }
 
@@ -198,13 +260,45 @@ impl<T> Arena<T> {
 
     /// Clear every element's dirty bits.
     ///
-    /// The style-flush driver calls this after a style-resolution pass; tests
-    /// use it to establish a clean baseline before exercising invalidation.
+    /// Establishes a clean baseline (tests, or an embedder resetting a tree).
+    /// The flush path uses the cheaper targeted
+    /// [`complete_flush`](Self::complete_flush) instead.
     pub fn clear_dirty(&mut self) {
         for slot in &mut self.slots {
             if let Some(element) = &mut slot.element {
-                element.style_dirty = false;
-                element.dirty_descendants = false;
+                element.set_style_dirty(false);
+                element.set_dirty_descendants_bit(false);
+            }
+        }
+    }
+
+    /// Clear the flush-scheduling state after a style traversal: drops the
+    /// consumed snapshots and walks only the dirty spine under `root` clearing
+    /// the dirty bits.
+    ///
+    /// The spine walk cannot see below an element whose `dirty_descendants`
+    /// stylo already cleared (it does so when a subtree computes to
+    /// `display: none`), so `style_dirty` breadcrumbs inside such a subtree
+    /// may survive — see [`Element::is_style_dirty`](crate::Element::is_style_dirty).
+    pub(crate) fn complete_flush(&mut self, root: ElementId) {
+        for id in std::mem::take(&mut self.snapshotted) {
+            if let Some(element) = self.get(id) {
+                element.clear_snapshot_flags();
+            }
+        }
+        self.snapshots.clear();
+
+        // Walk the dirty spine: clear `style_dirty` on every child of a
+        // dirty-descendants node, but only descend where the bit is set.
+        let mut stack = vec![root];
+        while let Some(current) = stack.pop() {
+            let Some(element) = self.get(current) else {
+                continue;
+            };
+            element.set_style_dirty(false);
+            if element.has_dirty_descendants() {
+                element.set_dirty_descendants_bit(false);
+                stack.extend_from_slice(&element.children);
             }
         }
     }
