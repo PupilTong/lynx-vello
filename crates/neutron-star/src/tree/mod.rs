@@ -10,7 +10,8 @@
 //!  TraverseTree                       child access
 //!      └── LayoutSource               + core style views / calc resolution
 //!           ├── FlexSource            + flex style views
-//!           └── GridSource            + grid style views
+//!           ├── GridSource            + grid style views
+//!           └── RelativeSource        + relative style views
 //!  LayoutState                        unrounded layout / static-position writes
 //!  CacheState                         measurement and commit cache slots
 //!      └── LayoutSession<Source>       + host display dispatch
@@ -33,13 +34,13 @@
 //!
 //! [`LayoutSession::compute_child_layout`] is the **dispatch point**: the host
 //! inspects the child's `display` (which the engine deliberately has no enum
-//! for) and routes to an engine algorithm entry point (flexbox and Grid are
-//! implemented in [`compute`](crate::compute)),
+//! for) and routes to an engine algorithm entry point (Flexbox, Grid, and
+//! Starlight Relative are implemented in [`compute`](crate::compute)),
 //! [`compute_leaf_layout`](crate::compute::compute_leaf_layout) (text/images
 //! via a generic [`LeafMeasurer`](crate::compute::LeafMeasurer)), or *its own
-//! algorithm* — this is exactly how
-//! lynx-vello's non-CSS `display: linear`/`display: relative` modes plug in
-//! as peer algorithms. The host handles `display: none` first with
+//! algorithm* — this is how lynx-vello's non-CSS `display: linear` mode can
+//! plug in as a peer, while `display: relative` routes to the generic engine
+//! entry point. The host handles `display: none` first with
 //! [`hide_subtree`](crate::compute::hide_subtree), then wraps visible-node
 //! routing in [`compute_cached_layout`](crate::compute::compute_cached_layout)
 //! so every sizing path shares one cache policy. See the `compute` module docs
@@ -71,6 +72,7 @@ use crate::geometry::Point;
 use crate::style::value::CalcHandle;
 use crate::style::{
     CoreStyle, FlexContainerStyle, FlexItemStyle, GridContainerStyle, GridItemStyle,
+    RelativeContainerStyle, RelativeItemStyle,
 };
 
 /// An opaque node handle, chosen by the host.
@@ -212,6 +214,26 @@ pub trait GridSource: LayoutSource {
     fn grid_item_style(&self, item: NodeId) -> Self::ItemStyle<'_>;
 }
 
+/// Adds Starlight relative-layout style views to an immutable
+/// [`LayoutSource`].
+pub trait RelativeSource: LayoutSource {
+    /// Borrowed relative-container style view.
+    type ContainerStyle<'a>: RelativeContainerStyle
+    where
+        Self: 'a;
+    /// Borrowed relative-item style view.
+    type ItemStyle<'a>: RelativeItemStyle
+    where
+        Self: 'a;
+
+    /// The relative-container style view of `container`.
+    fn relative_container_style(&self, container: NodeId) -> Self::ContainerStyle<'_>;
+
+    /// The relative-item style view of `item` (a direct child of a relative
+    /// container).
+    fn relative_item_style(&self, item: NodeId) -> Self::ItemStyle<'_>;
+}
+
 /// Host-owned mutable layout output for the current layout epoch.
 ///
 /// This state is a separate object from its [`LayoutSource`], so writing
@@ -284,7 +306,8 @@ pub trait CacheState: Sized {
 ///
 /// `Source` and `Self` must be independent objects. Implementations inspect
 /// the immutable source to handle `display: none` before caching, then route a
-/// generated box to flex, Grid, leaf measurement, or a host-private algorithm.
+/// generated box to Flex, Grid, Relative, leaf measurement, or a host-private
+/// algorithm.
 /// The concrete source/session pair is statically dispatched; neutron-star
 /// does not erase either side behind `dyn`.
 pub trait LayoutSession<Source: LayoutSource>: LayoutState + CacheState {

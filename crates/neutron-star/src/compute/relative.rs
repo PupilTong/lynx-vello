@@ -1,0 +1,1654 @@
+//! Starlight id-constrained relative layout.
+//!
+//! This is the standalone implementation of `display: relative`, not CSS
+//! `position: relative`. Its direct in-flow children form a dependency graph
+//! over integer ids and position physical margin edges relative to the parent
+//! or sibling edges.
+
+#![allow(clippy::cast_precision_loss)]
+
+use super::compute_absolute_layout;
+use super::util::{
+    ItemKey, OrderedItem, ResolvedContainerBox, ResolvedItemBox, box_inset_size, clamp_axis,
+    preferred_size_definiteness, resolve_container_box, resolve_item_box_with_bases,
+    resolve_length_percentage, subtract_available_space,
+};
+use crate::geometry::{Edges, Line, Point, Size};
+use crate::style::value::Dimension;
+use crate::style::{
+    BoxGenerationMode, BoxSizing, CoreStyle, Direction, Position, RelativeCenter,
+    RelativeContainerStyle, RelativeItemStyle, RelativeReference,
+};
+use crate::tree::{
+    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutSession, NodeId,
+    RelativeSource, RequestedAxis, SizingMode,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Axis {
+    Horizontal,
+    Vertical,
+}
+
+impl Axis {
+    const ALL: [Self; 2] = [Self::Horizontal, Self::Vertical];
+
+    #[inline]
+    fn size<T: Copy>(self, size: Size<T>) -> T {
+        match self {
+            Self::Horizontal => size.width,
+            Self::Vertical => size.height,
+        }
+    }
+
+    #[inline]
+    fn set_size<T>(self, size: &mut Size<T>, value: T) {
+        match self {
+            Self::Horizontal => size.width = value,
+            Self::Vertical => size.height = value,
+        }
+    }
+
+    #[inline]
+    fn position(self, positions: Size<Line<f32>>) -> Line<f32> {
+        self.size(positions)
+    }
+
+    #[inline]
+    fn set_position(self, positions: &mut Size<Line<f32>>, value: Line<f32>) {
+        self.set_size(positions, value);
+    }
+
+    #[inline]
+    fn margin_sum(self, margin: Edges<f32>) -> f32 {
+        match self {
+            Self::Horizontal => margin.horizontal_sum(),
+            Self::Vertical => margin.vertical_sum(),
+        }
+    }
+
+    #[inline]
+    fn start_reference(self, edges: Edges<ResolvedReference>) -> ResolvedReference {
+        match self {
+            Self::Horizontal => edges.left,
+            Self::Vertical => edges.top,
+        }
+    }
+
+    #[inline]
+    fn end_reference(self, edges: Edges<ResolvedReference>) -> ResolvedReference {
+        match self {
+            Self::Horizontal => edges.right,
+            Self::Vertical => edges.bottom,
+        }
+    }
+
+    #[inline]
+    fn centers(self, center: RelativeCenter) -> bool {
+        match self {
+            Self::Horizontal => center.is_horizontal(),
+            Self::Vertical => center.is_vertical(),
+        }
+    }
+
+    #[inline]
+    const fn requested(self) -> RequestedAxis {
+        match self {
+            Self::Horizontal => RequestedAxis::Horizontal,
+            Self::Vertical => RequestedAxis::Vertical,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Bounds {
+    min: f32,
+    max: f32,
+    definite: bool,
+}
+
+impl Bounds {
+    #[inline]
+    fn new(parent_extent: Option<f32>) -> Self {
+        Self {
+            min: 0.0,
+            max: parent_extent.unwrap_or(0.0),
+            definite: parent_extent.is_some(),
+        }
+    }
+
+    #[inline]
+    fn include(&mut self, position: Line<f32>) {
+        if !self.definite {
+            self.min = self.min.min(position.start);
+            self.max = self.max.max(position.end);
+        }
+    }
+
+    #[inline]
+    fn extent(self) -> f32 {
+        (self.max - self.min).max(0.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResolvedReference(u32);
+
+impl ResolvedReference {
+    const NONE: Self = Self(u32::MAX);
+    const PARENT: Self = Self(u32::MAX - 1);
+
+    #[inline]
+    fn resolve(reference: RelativeReference, lookup: &IdLookup) -> Self {
+        if reference.is_none() {
+            Self::NONE
+        } else if reference.is_parent() {
+            Self::PARENT
+        } else {
+            lookup.get(reference).map_or(Self::NONE, |index| {
+                Self(u32::try_from(index).expect("relative item count exceeds u32"))
+            })
+        }
+    }
+
+    #[inline]
+    const fn is_parent(self) -> bool {
+        self.0 == Self::PARENT.0
+    }
+
+    #[inline]
+    const fn item_index_u32(self) -> Option<u32> {
+        if self.0 < Self::PARENT.0 {
+            Some(self.0)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn item_index(self) -> Option<usize> {
+        self.item_index_u32()
+            .map(|index| usize::try_from(index).expect("relative item index does not fit usize"))
+    }
+}
+
+#[derive(Debug)]
+struct RelativeItem {
+    key: ItemKey,
+    align: Edges<ResolvedReference>,
+    adjacent: Edges<ResolvedReference>,
+    center: RelativeCenter,
+    raw_size: Size<Dimension>,
+    raw_min_size: Size<Dimension>,
+    raw_max_size: Size<Dimension>,
+    preferred_size: Size<Option<f32>>,
+    intrinsic_preferred_size: Size<Option<f32>>,
+    intrinsic_sizes_ready: bool,
+    preferred_size_is_definite: Size<bool>,
+    min_size: Size<Option<f32>>,
+    max_size: Size<Option<f32>>,
+    box_sizing: BoxSizing,
+    margin: Edges<f32>,
+    padding: Edges<f32>,
+    border: Edges<f32>,
+    scrollbar: Size<f32>,
+    inset: Edges<Option<f32>>,
+    direction: Direction,
+    positions: Size<Line<f32>>,
+    output: LayoutOutput,
+    last_measure: Option<LayoutInput>,
+    size_is_definite: Size<bool>,
+    reuse_fixed_measurement: bool,
+}
+
+impl RelativeItem {
+    #[inline]
+    fn outer_size(&self, axis: Axis) -> f32 {
+        axis.size(self.output.size) + axis.margin_sum(self.margin)
+    }
+
+    #[inline]
+    fn box_floor(&self) -> Size<f32> {
+        box_inset_size(self.padding, self.border, self.scrollbar)
+    }
+
+    #[inline]
+    fn fixed_measurement_matches(&self, refreshed: &Self) -> bool {
+        self.preferred_size.width.is_some()
+            && self.preferred_size.height.is_some()
+            && self.preferred_size_is_definite.width
+            && self.preferred_size_is_definite.height
+            && self.raw_size == refreshed.raw_size
+            && self.raw_min_size == refreshed.raw_min_size
+            && self.raw_max_size == refreshed.raw_max_size
+            && self.preferred_size == refreshed.preferred_size
+            && self.preferred_size_is_definite == refreshed.preferred_size_is_definite
+            && self.min_size == refreshed.min_size
+            && self.max_size == refreshed.max_size
+            && self.box_sizing == refreshed.box_sizing
+            && self.margin == refreshed.margin
+            && self.padding == refreshed.padding
+            && self.border == refreshed.border
+            && self.scrollbar == refreshed.scrollbar
+    }
+}
+
+fn resolve_item<Source: RelativeSource>(
+    source: &Source,
+    key: ItemKey,
+    size_percentage_basis: Size<Option<f32>>,
+    edge_inline_basis: Option<f32>,
+    lookup: &IdLookup,
+) -> RelativeItem {
+    let style = source.relative_item_style(key.node);
+    let ResolvedItemBox {
+        raw_size,
+        raw_min_size,
+        raw_max_size,
+        preferred_size,
+        aspect_ratio,
+        box_sizing,
+        min_size,
+        max_size,
+        margin,
+        padding,
+        border,
+        scrollbar,
+        inset,
+        ..
+    } = resolve_item_box_with_bases(source, &style, size_percentage_basis, edge_inline_basis);
+
+    RelativeItem {
+        key,
+        align: style
+            .relative_align()
+            .map(|reference| ResolvedReference::resolve(reference, lookup)),
+        adjacent: style
+            .relative_adjacent()
+            .map(|reference| ResolvedReference::resolve(reference, lookup)),
+        center: style.relative_center(),
+        raw_size,
+        raw_min_size,
+        raw_max_size,
+        preferred_size,
+        intrinsic_preferred_size: Size::NONE,
+        intrinsic_sizes_ready: false,
+        preferred_size_is_definite: preferred_size_definiteness(
+            raw_size,
+            size_percentage_basis,
+            aspect_ratio,
+        ),
+        min_size,
+        max_size,
+        box_sizing,
+        margin,
+        padding,
+        border,
+        scrollbar,
+        inset,
+        direction: style.direction(),
+        positions: Size::new(Line::new(0.0, 0.0), Line::new(0.0, 0.0)),
+        output: LayoutOutput::HIDDEN,
+        last_measure: None,
+        size_is_definite: Size::new(false, false),
+        reuse_fixed_measurement: false,
+    }
+}
+
+/// Compact, sorted id lookup. Sorting by `(id, ordered_index)` and retaining
+/// the final pair implements duplicate-id last-wins semantics without a
+/// randomized hash table in the hot path.
+#[derive(Debug)]
+struct IdLookup {
+    entries: Vec<(i32, usize)>,
+}
+
+impl IdLookup {
+    fn new<Source: RelativeSource>(source: &Source, items: &[OrderedItem]) -> Self {
+        let mut entries = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            let relative_id = source.relative_item_style(item.node).relative_id();
+            if relative_id.is_item() {
+                entries.push((relative_id.get(), index));
+            }
+        }
+        entries.sort_unstable();
+
+        let mut write = 0;
+        for read in 0..entries.len() {
+            let entry = entries[read];
+            if write > 0 && entries[write - 1].0 == entry.0 {
+                entries[write - 1] = entry;
+            } else {
+                entries[write] = entry;
+                write += 1;
+            }
+        }
+        entries.truncate(write);
+        Self { entries }
+    }
+
+    #[inline]
+    fn get(&self, id: RelativeReference) -> Option<usize> {
+        if !id.is_item() {
+            return None;
+        }
+        self.entries
+            .binary_search_by_key(&id.get(), |entry| entry.0)
+            .ok()
+            .map(|index| self.entries[index].1)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DependencyScope {
+    Horizontal,
+    Vertical,
+    Combined,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Dependencies {
+    values: [u32; 8],
+    len: u8,
+}
+
+impl Dependencies {
+    const EMPTY: Self = Self {
+        values: [0; 8],
+        len: 0,
+    };
+
+    #[inline]
+    fn add(&mut self, value: u32) {
+        let len = usize::from(self.len);
+        if self.values[..len].contains(&value) {
+            return;
+        }
+        self.values[len] = value;
+        self.len += 1;
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[u32] {
+        &self.values[..usize::from(self.len)]
+    }
+}
+
+#[inline]
+fn has_axis_dependencies(item: &RelativeItem, axis: Axis) -> bool {
+    let references = [
+        axis.start_reference(item.align),
+        axis.end_reference(item.align),
+        axis.end_reference(item.adjacent),
+        axis.start_reference(item.adjacent),
+    ];
+    references
+        .into_iter()
+        .any(|reference| reference.item_index_u32().is_some())
+}
+
+fn add_axis_dependencies(item: &RelativeItem, axis: Axis, dependencies: &mut Dependencies) {
+    let align_start = axis.start_reference(item.align);
+    let align_end = axis.end_reference(item.align);
+    // Adjacency is opposite-sided: right/bottom-of constrain start;
+    // left/top-of constrain end.
+    let after = axis.end_reference(item.adjacent);
+    let before = axis.start_reference(item.adjacent);
+    for reference in [align_start, align_end, after, before] {
+        if let Some(index) = reference.item_index_u32() {
+            dependencies.add(index);
+        }
+    }
+}
+
+/// Topological order with CSR reverse edges and a monotonic cycle cursor.
+/// Every item has at most eight distinct dependencies, so graph construction
+/// and sorting are `O(n + e)` after id lookup resolution.
+fn dependency_order(items: &[RelativeItem], scope: DependencyScope) -> Vec<usize> {
+    let count = items.len();
+    let has_dependencies = items.iter().any(|item| match scope {
+        DependencyScope::Horizontal => has_axis_dependencies(item, Axis::Horizontal),
+        DependencyScope::Vertical => has_axis_dependencies(item, Axis::Vertical),
+        DependencyScope::Combined => {
+            has_axis_dependencies(item, Axis::Horizontal)
+                || has_axis_dependencies(item, Axis::Vertical)
+        }
+    });
+    if !has_dependencies {
+        return (0..count).collect();
+    }
+
+    let mut dependencies = vec![Dependencies::EMPTY; count];
+    for (index, item) in items.iter().enumerate() {
+        match scope {
+            DependencyScope::Horizontal => {
+                add_axis_dependencies(item, Axis::Horizontal, &mut dependencies[index]);
+            }
+            DependencyScope::Vertical => {
+                add_axis_dependencies(item, Axis::Vertical, &mut dependencies[index]);
+            }
+            DependencyScope::Combined => {
+                add_axis_dependencies(item, Axis::Horizontal, &mut dependencies[index]);
+                add_axis_dependencies(item, Axis::Vertical, &mut dependencies[index]);
+            }
+        }
+    }
+
+    let mut outgoing_counts = vec![0_usize; count];
+    let mut indegree = Vec::with_capacity(count);
+    let mut edge_count = 0;
+    for item_dependencies in &dependencies {
+        let len = item_dependencies.as_slice().len();
+        indegree.push(u8::try_from(len).expect("relative item has at most eight dependencies"));
+        edge_count += len;
+        for &dependency in item_dependencies.as_slice() {
+            let dependency =
+                usize::try_from(dependency).expect("relative dependency index does not fit usize");
+            outgoing_counts[dependency] += 1;
+        }
+    }
+
+    let mut offsets = Vec::with_capacity(count + 1);
+    offsets.push(0);
+    for &outgoing in &outgoing_counts {
+        offsets.push(offsets.last().copied().unwrap_or(0) + outgoing);
+    }
+    outgoing_counts.fill(0);
+    let mut dependents = vec![0_usize; edge_count];
+    for (dependent, item_dependencies) in dependencies.iter().enumerate() {
+        for &dependency in item_dependencies.as_slice() {
+            let dependency =
+                usize::try_from(dependency).expect("relative dependency index does not fit usize");
+            let cursor = offsets[dependency] + outgoing_counts[dependency];
+            dependents[cursor] = dependent;
+            outgoing_counts[dependency] += 1;
+        }
+    }
+    drop(dependencies);
+
+    outgoing_counts.clear();
+    let mut ready = outgoing_counts;
+    for (index, &degree) in indegree.iter().enumerate() {
+        if degree == 0 {
+            ready.push(index);
+        }
+    }
+    let mut ready_head = 0;
+    let mut lowest_remaining = 0;
+    let mut order = Vec::with_capacity(count);
+
+    while order.len() < count {
+        let current = if ready_head < ready.len() {
+            let current = ready[ready_head];
+            ready_head += 1;
+            current
+        } else {
+            while indegree[lowest_remaining] == u8::MAX {
+                lowest_remaining += 1;
+            }
+            let current = lowest_remaining;
+            lowest_remaining += 1;
+            current
+        };
+        if indegree[current] == u8::MAX {
+            continue;
+        }
+        indegree[current] = u8::MAX;
+        order.push(current);
+
+        for &dependent in &dependents[offsets[current]..offsets[current + 1]] {
+            if indegree[dependent] == u8::MAX {
+                continue;
+            }
+            indegree[dependent] -= 1;
+            if indegree[dependent] == 0 {
+                ready.push(dependent);
+            }
+        }
+    }
+
+    order
+}
+
+#[inline]
+fn reference_position(
+    reference: ResolvedReference,
+    target_end: bool,
+    axis: Axis,
+    parent_size: Size<Option<f32>>,
+    _lookup: &IdLookup,
+    items: &[RelativeItem],
+    allow_item_references: bool,
+) -> Option<f32> {
+    if reference.is_parent() {
+        return axis
+            .size(parent_size)
+            .map(|extent| if target_end { extent } else { 0.0 });
+    }
+    if !allow_item_references {
+        return None;
+    }
+    reference.item_index().map(|index| {
+        let position = axis.position(items[index].positions);
+        if target_end {
+            position.end
+        } else {
+            position.start
+        }
+    })
+}
+
+fn axis_constraints(
+    item: &RelativeItem,
+    axis: Axis,
+    parent_size: Size<Option<f32>>,
+    lookup: &IdLookup,
+    items: &[RelativeItem],
+    allow_item_references: bool,
+) -> Line<Option<f32>> {
+    let align_start = axis.start_reference(item.align);
+    let align_end = axis.end_reference(item.align);
+    let after = axis.end_reference(item.adjacent);
+    let before = axis.start_reference(item.adjacent);
+
+    let start = reference_position(
+        align_start,
+        false,
+        axis,
+        parent_size,
+        lookup,
+        items,
+        allow_item_references,
+    )
+    .or_else(|| {
+        reference_position(
+            after,
+            true,
+            axis,
+            parent_size,
+            lookup,
+            items,
+            allow_item_references,
+        )
+    });
+    let end = reference_position(
+        align_end,
+        true,
+        axis,
+        parent_size,
+        lookup,
+        items,
+        allow_item_references,
+    )
+    .or_else(|| {
+        reference_position(
+            before,
+            false,
+            axis,
+            parent_size,
+            lookup,
+            items,
+            allow_item_references,
+        )
+    });
+    Line::new(start, end)
+}
+
+fn all_constraints(
+    item: &RelativeItem,
+    parent_size: Size<Option<f32>>,
+    lookup: &IdLookup,
+    items: &[RelativeItem],
+    allow_item_references: bool,
+) -> Size<Line<Option<f32>>> {
+    Size::new(
+        axis_constraints(
+            item,
+            Axis::Horizontal,
+            parent_size,
+            lookup,
+            items,
+            allow_item_references,
+        ),
+        axis_constraints(
+            item,
+            Axis::Vertical,
+            parent_size,
+            lookup,
+            items,
+            allow_item_references,
+        ),
+    )
+}
+
+#[inline]
+fn constrained_border_size(constraints: Line<Option<f32>>, margin_sum: f32) -> Option<f32> {
+    match (constraints.start, constraints.end) {
+        (Some(start), Some(end)) => Some(((end.max(start) - start) - margin_sum).max(0.0)),
+        _ => None,
+    }
+}
+
+fn fit_content_available<Source: RelativeSource>(
+    source: &Source,
+    value: Dimension,
+    axis: Axis,
+    parent_size: Size<Option<f32>>,
+    available: AvailableSpace,
+    box_sizing: BoxSizing,
+    box_floor: f32,
+) -> AvailableSpace {
+    match value {
+        Dimension::MinContent => AvailableSpace::MinContent,
+        Dimension::MaxContent => AvailableSpace::MaxContent,
+        Dimension::FitContent(limit) => {
+            let owner = axis.size(parent_size).or_else(|| available.into_option());
+            let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
+            let limit = resolve_length_percentage(limit, owner, &resolve_calc).map(|limit| {
+                if box_sizing == BoxSizing::ContentBox {
+                    limit + box_floor
+                } else {
+                    limit
+                }
+            });
+            match (available, limit) {
+                (AvailableSpace::Definite(available), Some(limit)) => {
+                    AvailableSpace::Definite(available.min(limit).max(0.0))
+                }
+                (_, Some(limit)) => AvailableSpace::Definite(limit.max(0.0)),
+                (available, None) => available,
+            }
+        }
+        Dimension::Length(_) | Dimension::Percent(_) | Dimension::Calc(_) | Dimension::Auto => {
+            available
+        }
+    }
+}
+
+#[inline]
+fn needs_min_content(value: Dimension) -> bool {
+    matches!(value, Dimension::MinContent | Dimension::FitContent(_))
+}
+
+#[inline]
+fn needs_max_content(value: Dimension) -> bool {
+    matches!(value, Dimension::MaxContent | Dimension::FitContent(_))
+}
+
+fn intrinsic_probe<Source, Session>(
+    source: &Source,
+    session: &mut Session,
+    item: &RelativeItem,
+    axis: Axis,
+    intrinsic_space: AvailableSpace,
+    parent_size: Size<Option<f32>>,
+    available_content: Size<AvailableSpace>,
+) -> f32
+where
+    Source: RelativeSource,
+    Session: LayoutSession<Source>,
+{
+    let mut available = Size::new(
+        subtract_available_space(available_content.width, item.margin.horizontal_sum()),
+        subtract_available_space(available_content.height, item.margin.vertical_sum()),
+    );
+    axis.set_size(&mut available, intrinsic_space);
+    let mut input = LayoutInput::compute_size(Size::NONE, parent_size, available, axis.requested());
+    input.sizing_mode = SizingMode::ContentSize;
+    axis.size(
+        session
+            .compute_child_layout(source, item.key.node, input)
+            .size,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_intrinsic_dimension<Source: RelativeSource>(
+    source: &Source,
+    value: Dimension,
+    axis: Axis,
+    min_content: Option<f32>,
+    max_content: Option<f32>,
+    parent_size: Size<Option<f32>>,
+    available_content: Size<AvailableSpace>,
+    box_sizing: BoxSizing,
+    box_floor: f32,
+) -> Option<f32> {
+    match value {
+        Dimension::MinContent => min_content,
+        Dimension::MaxContent => max_content,
+        Dimension::FitContent(limit) => {
+            let min_content = min_content.unwrap_or(0.0);
+            let max_content = max_content.unwrap_or(min_content);
+            let owner = axis
+                .size(parent_size)
+                .or_else(|| axis.size(available_content).into_option());
+            let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
+            let limit = resolve_length_percentage(limit, owner, &resolve_calc).map_or(
+                max_content,
+                |limit| {
+                    if box_sizing == BoxSizing::ContentBox {
+                        limit + box_floor
+                    } else {
+                        limit
+                    }
+                },
+            );
+            Some(max_content.min(limit.max(min_content)))
+        }
+        Dimension::Length(_) | Dimension::Percent(_) | Dimension::Calc(_) | Dimension::Auto => None,
+    }
+}
+
+fn prepare_intrinsic_sizes<Source, Session>(
+    source: &Source,
+    session: &mut Session,
+    item: &mut RelativeItem,
+    parent_size: Size<Option<f32>>,
+    available_content: Size<AvailableSpace>,
+) where
+    Source: RelativeSource,
+    Session: LayoutSession<Source>,
+{
+    if item.intrinsic_sizes_ready {
+        return;
+    }
+
+    for axis in Axis::ALL {
+        let raw_size = axis.size(item.raw_size);
+        let raw_min = axis.size(item.raw_min_size);
+        let raw_max = axis.size(item.raw_max_size);
+        let needs_min = [raw_size, raw_min, raw_max]
+            .into_iter()
+            .any(needs_min_content);
+        let needs_max = [raw_size, raw_min, raw_max]
+            .into_iter()
+            .any(needs_max_content);
+        if !needs_min && !needs_max {
+            continue;
+        }
+
+        let min_content = needs_min.then(|| {
+            intrinsic_probe(
+                source,
+                session,
+                item,
+                axis,
+                AvailableSpace::MinContent,
+                parent_size,
+                available_content,
+            )
+        });
+        let max_content = needs_max.then(|| {
+            intrinsic_probe(
+                source,
+                session,
+                item,
+                axis,
+                AvailableSpace::MaxContent,
+                parent_size,
+                available_content,
+            )
+        });
+        let floor = axis.size(item.box_floor());
+        let preferred = resolve_intrinsic_dimension(
+            source,
+            raw_size,
+            axis,
+            min_content,
+            max_content,
+            parent_size,
+            available_content,
+            item.box_sizing,
+            floor,
+        );
+        axis.set_size(&mut item.intrinsic_preferred_size, preferred);
+        if let Some(min) = resolve_intrinsic_dimension(
+            source,
+            raw_min,
+            axis,
+            min_content,
+            max_content,
+            parent_size,
+            available_content,
+            item.box_sizing,
+            floor,
+        ) {
+            axis.set_size(&mut item.min_size, Some(min));
+        }
+        if let Some(max) = resolve_intrinsic_dimension(
+            source,
+            raw_max,
+            axis,
+            min_content,
+            max_content,
+            parent_size,
+            available_content,
+            item.box_sizing,
+            floor,
+        ) {
+            axis.set_size(&mut item.max_size, Some(max));
+        }
+    }
+    let floor = item.box_floor();
+    for axis in Axis::ALL {
+        if let Some(preferred) = axis.size(item.intrinsic_preferred_size) {
+            axis.set_size(
+                &mut item.intrinsic_preferred_size,
+                Some(clamp_axis(
+                    preferred,
+                    axis.size(item.min_size),
+                    axis.size(item.max_size),
+                    axis.size(floor),
+                )),
+            );
+        }
+    }
+    item.intrinsic_sizes_ready = true;
+}
+
+fn measurement_input<Source: RelativeSource>(
+    source: &Source,
+    item: &RelativeItem,
+    constraints: Size<Line<Option<f32>>>,
+    parent_size: Size<Option<f32>>,
+    available_content: Size<AvailableSpace>,
+) -> LayoutInput {
+    let mut known_dimensions = Size::NONE;
+    let mut constraint_definite = Size::new(false, false);
+    let mut available_space = Size::new(
+        subtract_available_space(available_content.width, item.margin.horizontal_sum()),
+        subtract_available_space(available_content.height, item.margin.vertical_sum()),
+    );
+    let floor = item.box_floor();
+
+    for axis in Axis::ALL {
+        let constrained =
+            constrained_border_size(axis.size(constraints), axis.margin_sum(item.margin)).map(
+                |size| {
+                    clamp_axis(
+                        size,
+                        axis.size(item.min_size),
+                        axis.size(item.max_size),
+                        axis.size(floor),
+                    )
+                },
+            );
+        let known_is_definite = constrained.is_some()
+            || (constrained.is_none() && axis.size(item.preferred_size_is_definite));
+        axis.set_size(&mut constraint_definite, known_is_definite);
+        let known = constrained
+            .or(axis.size(item.preferred_size))
+            .or(axis.size(item.intrinsic_preferred_size));
+        axis.set_size(&mut known_dimensions, known);
+        if let Some(known) = known {
+            axis.set_size(&mut available_space, AvailableSpace::Definite(known));
+        } else {
+            let available = fit_content_available(
+                source,
+                axis.size(item.raw_size),
+                axis,
+                parent_size,
+                axis.size(available_space),
+                item.box_sizing,
+                axis.size(floor),
+            );
+            axis.set_size(&mut available_space, available);
+        }
+    }
+
+    let mut input = LayoutInput::compute_size(
+        known_dimensions,
+        parent_size,
+        available_space,
+        RequestedAxis::Both,
+    );
+    // A dependency equation decides geometry, but an intrinsic keyword does
+    // not become a definite percentage basis merely because its used size is
+    // passed as a known dimension for this measurement.
+    input.definite_dimensions = constraint_definite;
+    input.sizing_mode = SizingMode::InherentSize;
+    input
+}
+
+fn measure_item<Source, Session>(
+    source: &Source,
+    session: &mut Session,
+    item: &mut RelativeItem,
+    input: LayoutInput,
+) where
+    Source: RelativeSource,
+    Session: LayoutSession<Source>,
+{
+    if let Some(previous) = item.last_measure {
+        if previous == input {
+            return;
+        }
+        if item.reuse_fixed_measurement
+            && previous.goal == input.goal
+            && previous.sizing_mode == input.sizing_mode
+            && previous.known_dimensions == input.known_dimensions
+            && previous.definite_dimensions == input.definite_dimensions
+            && previous.available_space == input.available_space
+        {
+            item.last_measure = Some(input);
+            return;
+        }
+    }
+    item.reuse_fixed_measurement = false;
+    let mut output = session.compute_child_layout(source, item.key.node, input);
+    let floor = item.box_floor();
+    if input.known_dimensions.width.is_none() {
+        let clamped_width = clamp_axis(
+            output.size.width,
+            item.min_size.width,
+            item.max_size.width,
+            floor.width,
+        );
+        if clamped_width.total_cmp(&output.size.width).is_eq() {
+            output.size.width = clamped_width;
+        } else {
+            // Intrinsic min/max values are resolved by Relative rather than
+            // by the recursively-dispatched child. A horizontal clamp can
+            // change wrapping and therefore height, so remeasure with that
+            // width fixed while keeping any dependency-decided height.
+            let mut refined = input;
+            refined.known_dimensions.width = Some(clamped_width);
+            refined.available_space.width = AvailableSpace::Definite(clamped_width);
+            if !input.definite_dimensions.height {
+                refined.known_dimensions.height = None;
+                refined.available_space.height = input.available_space.height;
+            }
+            output = session.compute_child_layout(source, item.key.node, refined);
+            output.size.width = clamped_width;
+        }
+    }
+    if input.known_dimensions.height.is_none() {
+        output.size.height = clamp_axis(
+            output.size.height,
+            item.min_size.height,
+            item.max_size.height,
+            floor.height,
+        );
+    }
+    output.content_size.width = output.content_size.width.max(output.size.width);
+    output.content_size.height = output.content_size.height.max(output.size.height);
+    item.output = output;
+    item.last_measure = Some(input);
+    item.size_is_definite = Size::new(
+        item.preferred_size_is_definite.width || input.definite_dimensions.width,
+        item.preferred_size_is_definite.height || input.definite_dimensions.height,
+    );
+}
+
+fn position_from_constraints(
+    item: &RelativeItem,
+    axis: Axis,
+    constraints: Line<Option<f32>>,
+    bounds: Bounds,
+) -> Line<f32> {
+    let outer_size = item.outer_size(axis);
+    match (constraints.start, constraints.end) {
+        (Some(start), Some(end)) => Line::new(start, end.max(start)),
+        (Some(start), None) => Line::new(start, start + outer_size),
+        (None, Some(end)) => Line::new(end - outer_size, end),
+        (None, None) => {
+            let align_start = axis.start_reference(item.align);
+            let align_end = axis.end_reference(item.align);
+            if align_end.is_parent() {
+                Line::new(bounds.max - outer_size, bounds.max)
+            } else if align_start.is_parent() || !axis.centers(item.center) {
+                Line::new(bounds.min, bounds.min + outer_size)
+            } else {
+                let start = bounds.min + (bounds.max - bounds.min - outer_size) / 2.0;
+                Line::new(start, start + outer_size)
+            }
+        }
+    }
+}
+
+fn position_axis(
+    items: &mut [RelativeItem],
+    order: &[usize],
+    axis: Axis,
+    parent_size: Size<Option<f32>>,
+    lookup: &IdLookup,
+) -> Bounds {
+    let mut bounds = Bounds::new(axis.size(parent_size));
+    for &index in order {
+        let constraints = axis_constraints(&items[index], axis, parent_size, lookup, items, true);
+        let position = position_from_constraints(&items[index], axis, constraints, bounds);
+        axis.set_position(&mut items[index].positions, position);
+        bounds.include(position);
+    }
+    bounds
+}
+
+fn measure_all<Source, Session>(
+    source: &Source,
+    session: &mut Session,
+    items: &mut [RelativeItem],
+    parent_size: Size<Option<f32>>,
+    available_content: Size<AvailableSpace>,
+    lookup: &IdLookup,
+    allow_item_references: bool,
+) where
+    Source: RelativeSource,
+    Session: LayoutSession<Source>,
+{
+    for index in 0..items.len() {
+        prepare_intrinsic_sizes(
+            source,
+            session,
+            &mut items[index],
+            parent_size,
+            available_content,
+        );
+        let constraints = all_constraints(
+            &items[index],
+            parent_size,
+            lookup,
+            items,
+            allow_item_references,
+        );
+        let input = measurement_input(
+            source,
+            &items[index],
+            constraints,
+            parent_size,
+            available_content,
+        );
+        measure_item(source, session, &mut items[index], input);
+    }
+}
+
+fn one_pass_layout<Source, Session>(
+    source: &Source,
+    session: &mut Session,
+    items: &mut [RelativeItem],
+    order: &[usize],
+    parent_size: Size<Option<f32>>,
+    available_content: Size<AvailableSpace>,
+    lookup: &IdLookup,
+) -> Size<Bounds>
+where
+    Source: RelativeSource,
+    Session: LayoutSession<Source>,
+{
+    let mut bounds = Size::new(
+        Bounds::new(parent_size.width),
+        Bounds::new(parent_size.height),
+    );
+    for &index in order {
+        prepare_intrinsic_sizes(
+            source,
+            session,
+            &mut items[index],
+            parent_size,
+            available_content,
+        );
+        let constraints = all_constraints(&items[index], parent_size, lookup, items, true);
+        let input = measurement_input(
+            source,
+            &items[index],
+            constraints,
+            parent_size,
+            available_content,
+        );
+        measure_item(source, session, &mut items[index], input);
+
+        for axis in Axis::ALL {
+            let axis_constraints = axis.size(constraints);
+            let axis_bounds = axis.size(bounds);
+            let position =
+                position_from_constraints(&items[index], axis, axis_constraints, axis_bounds);
+            axis.set_position(&mut items[index].positions, position);
+            let mut updated = axis_bounds;
+            updated.include(position);
+            axis.set_size(&mut bounds, updated);
+        }
+    }
+    bounds
+}
+
+fn refresh_item_bases<Source: RelativeSource>(
+    source: &Source,
+    items: &mut [RelativeItem],
+    size_percentage_basis: Size<Option<f32>>,
+    edge_inline_basis: Option<f32>,
+    lookup: &IdLookup,
+) {
+    for item in items {
+        let positions = item.positions;
+        let output = item.output;
+        let last_measure = item.last_measure;
+        let intrinsic_preferred_size = item.intrinsic_preferred_size;
+        let intrinsic_sizes_ready = item.intrinsic_sizes_ready;
+        let size_is_definite = item.size_is_definite;
+        let mut refreshed = resolve_item(
+            source,
+            item.key,
+            size_percentage_basis,
+            edge_inline_basis,
+            lookup,
+        );
+        let reuse_fixed_measurement = item.fixed_measurement_matches(&refreshed);
+        refreshed.positions = positions;
+        refreshed.output = output;
+        if reuse_fixed_measurement {
+            refreshed.intrinsic_preferred_size = intrinsic_preferred_size;
+            refreshed.intrinsic_sizes_ready = intrinsic_sizes_ready;
+            refreshed.last_measure = last_measure;
+            refreshed.size_is_definite = size_is_definite;
+            refreshed.reuse_fixed_measurement = true;
+        }
+        *item = refreshed;
+    }
+}
+
+#[inline]
+fn final_outer_axis(
+    initial_outer: Option<f32>,
+    caller_known: Option<f32>,
+    content_extent: f32,
+    inset: f32,
+    min: Option<f32>,
+    max: Option<f32>,
+) -> f32 {
+    if let Some(known) = caller_known {
+        return known.max(0.0);
+    }
+    let candidate = initial_outer.unwrap_or(content_extent + inset);
+    clamp_axis(candidate, min, max, inset).max(0.0)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn two_pass_layout<Source, Session>(
+    source: &Source,
+    session: &mut Session,
+    items: &mut [RelativeItem],
+    horizontal_order: &[usize],
+    vertical_order: &[usize],
+    initial_parent_size: Size<Option<f32>>,
+    mut available_content: Size<AvailableSpace>,
+    lookup: &IdLookup,
+    initial_outer: Size<Option<f32>>,
+    caller_known: Size<Option<f32>>,
+    box_inset: Size<f32>,
+    min_size: Size<Option<f32>>,
+    max_size: Size<Option<f32>>,
+) -> Size<f32>
+where
+    Source: RelativeSource,
+    Session: LayoutSession<Source>,
+{
+    // Initial measurement only has parent-edge constraints. Sibling edges
+    // become available as the separate axis orders are positioned.
+    measure_all(
+        source,
+        session,
+        items,
+        initial_parent_size,
+        available_content,
+        lookup,
+        false,
+    );
+    let _ = position_axis(
+        items,
+        horizontal_order,
+        Axis::Horizontal,
+        initial_parent_size,
+        lookup,
+    );
+    let _ = position_axis(
+        items,
+        vertical_order,
+        Axis::Vertical,
+        initial_parent_size,
+        lookup,
+    );
+
+    // Refine both-sided sibling constraints and selectively remeasure.
+    measure_all(
+        source,
+        session,
+        items,
+        initial_parent_size,
+        available_content,
+        lookup,
+        true,
+    );
+    let horizontal_bounds = position_axis(
+        items,
+        horizontal_order,
+        Axis::Horizontal,
+        initial_parent_size,
+        lookup,
+    );
+    let mut vertical_bounds = position_axis(
+        items,
+        vertical_order,
+        Axis::Vertical,
+        initial_parent_size,
+        lookup,
+    );
+
+    let outer_width = final_outer_axis(
+        initial_outer.width,
+        caller_known.width,
+        horizontal_bounds.extent(),
+        box_inset.width,
+        min_size.width,
+        max_size.width,
+    );
+    let content_width = (outer_width - box_inset.width).max(0.0);
+    let mut resolved_parent_size = initial_parent_size;
+
+    if initial_parent_size.width.is_none() {
+        resolved_parent_size.width = Some(content_width);
+        available_content.width = AvailableSpace::Definite(content_width);
+
+        // Percentages whose owner width was cyclic now resolve against the
+        // content-sized width. Relative references and ids cannot change
+        // during the immutable source epoch, so the existing lookup remains
+        // valid.
+        refresh_item_bases(
+            source,
+            items,
+            resolved_parent_size,
+            Some(content_width),
+            lookup,
+        );
+        let _ = position_axis(
+            items,
+            horizontal_order,
+            Axis::Horizontal,
+            resolved_parent_size,
+            lookup,
+        );
+        measure_all(
+            source,
+            session,
+            items,
+            resolved_parent_size,
+            available_content,
+            lookup,
+            true,
+        );
+        let _ = position_axis(
+            items,
+            horizontal_order,
+            Axis::Horizontal,
+            resolved_parent_size,
+            lookup,
+        );
+        vertical_bounds = position_axis(
+            items,
+            vertical_order,
+            Axis::Vertical,
+            resolved_parent_size,
+            lookup,
+        );
+    }
+
+    let outer_height = final_outer_axis(
+        initial_outer.height,
+        caller_known.height,
+        vertical_bounds.extent(),
+        box_inset.height,
+        min_size.height,
+        max_size.height,
+    );
+    let content_height = (outer_height - box_inset.height).max(0.0);
+    resolved_parent_size.height = Some(content_height);
+
+    // Final positions see both final content extents. This intentionally does
+    // not add another measurement round: relative-layout Level 1 only
+    // repositions after final height determination.
+    let _ = position_axis(
+        items,
+        horizontal_order,
+        Axis::Horizontal,
+        resolved_parent_size,
+        lookup,
+    );
+    let _ = position_axis(
+        items,
+        vertical_order,
+        Axis::Vertical,
+        resolved_parent_size,
+        lookup,
+    );
+
+    Size::new(outer_width, outer_height)
+}
+
+#[inline]
+fn relative_offset(inset: Edges<Option<f32>>, direction: Direction) -> Point<f32> {
+    let x = match (inset.left, inset.right) {
+        (Some(left), Some(right)) => {
+            if direction == Direction::Rtl {
+                -right
+            } else {
+                left
+            }
+        }
+        (Some(left), None) => left,
+        (None, Some(right)) => -right,
+        (None, None) => 0.0,
+    };
+    Point::new(x, inset.top.unwrap_or_else(|| -inset.bottom.unwrap_or(0.0)))
+}
+
+fn commit_in_flow<Source, Session>(
+    source: &Source,
+    session: &mut Session,
+    items: &mut [RelativeItem],
+    content_size: Size<f32>,
+    content_origin: Point<f32>,
+    container_size: Size<f32>,
+) -> Size<f32>
+where
+    Source: RelativeSource,
+    Session: LayoutSession<Source>,
+{
+    let parent_size = content_size.map(Some);
+    let available = content_size.map(AvailableSpace::Definite);
+    let mut scrollable_size = container_size;
+
+    for item in items {
+        let mut input =
+            LayoutInput::perform_layout(item.output.size.map(Some), parent_size, available);
+        input.definite_dimensions = item.size_is_definite;
+        input.sizing_mode = SizingMode::ContentSize;
+        let output = session.compute_child_layout(source, item.key.node, input);
+        item.output = output;
+
+        let offset = relative_offset(item.inset, item.direction);
+        let horizontal = item.positions.width;
+        let vertical = item.positions.height;
+        let location = Point::new(
+            content_origin.x + horizontal.start + item.margin.left + offset.x,
+            content_origin.y + vertical.start + item.margin.top + offset.y,
+        );
+        let mut layout = Layout::with_order(item.key.layout_order);
+        layout.location = location;
+        layout.size = output.size;
+        layout.content_size = output.content_size;
+        layout.scrollbar_size = item.scrollbar;
+        layout.border = item.border;
+        layout.padding = item.padding;
+        layout.margin = item.margin;
+        session.set_unrounded_layout(item.key.node, &layout);
+
+        scrollable_size.width = scrollable_size
+            .width
+            .max(location.x + output.size.width.max(output.content_size.width));
+        scrollable_size.height = scrollable_size
+            .height
+            .max(location.y + output.size.height.max(output.content_size.height));
+    }
+    scrollable_size
+}
+
+fn commit_out_of_flow<Source, Session>(
+    source: &Source,
+    session: &mut Session,
+    items: &[OrderedItem],
+    container_size: Size<f32>,
+    border: Edges<f32>,
+) -> Size<f32>
+where
+    Source: RelativeSource,
+    Session: LayoutSession<Source>,
+{
+    let padding_box_size = Size::new(
+        (container_size.width - border.horizontal_sum()).max(0.0),
+        (container_size.height - border.vertical_sum()).max(0.0),
+    );
+    let mut scrollable_size = container_size;
+    for pending in items {
+        let style = source.relative_item_style(pending.node);
+        match style.position() {
+            Position::Absolute => {
+                let mut layout = compute_absolute_layout(
+                    source,
+                    session,
+                    pending.node,
+                    padding_box_size,
+                    Point::ZERO,
+                );
+                layout.order = pending.layout_order;
+                layout.location.x += border.left;
+                layout.location.y += border.top;
+                scrollable_size.width = scrollable_size
+                    .width
+                    .max(layout.location.x + layout.size.width.max(layout.content_size.width));
+                scrollable_size.height = scrollable_size
+                    .height
+                    .max(layout.location.y + layout.size.height.max(layout.content_size.height));
+                session.set_unrounded_layout(pending.node, &layout);
+            }
+            Position::AbsoluteHoisted => {
+                session.set_static_position(pending.node, Point::new(border.left, border.top));
+            }
+            _ => {}
+        }
+    }
+    scrollable_size
+}
+
+/// Computes a Starlight relative-layout container.
+///
+/// Relative ids and physical-edge properties are supplied by a generic
+/// [`RelativeSource`]; recursive measurement and durable geometry writes flow
+/// through the host's [`LayoutSession`]. The implementation uses compact
+/// sorted id lookup, fixed-width dependency deduplication, CSR reverse edges,
+/// and a linear Kahn/cycle-fallback traversal. Child layouts are stored only
+/// for [`LayoutGoal::Commit`], and the container exports no baseline.
+#[allow(clippy::too_many_lines)]
+pub fn compute_relative_layout<Source, Session>(
+    source: &Source,
+    session: &mut Session,
+    node: NodeId,
+    input: LayoutInput,
+) -> LayoutOutput
+where
+    Source: RelativeSource,
+    Session: LayoutSession<Source>,
+{
+    let style = source.relative_container_style(node);
+    let layout_once = style.relative_layout_once();
+    let style_definite = if input.sizing_mode == SizingMode::ContentSize {
+        Size::new(false, false)
+    } else {
+        preferred_size_definiteness(style.size(), input.parent_size, style.aspect_ratio())
+    };
+    let outer_definite = Size::new(
+        input.definite_dimensions.width || style_definite.width,
+        input.definite_dimensions.height || style_definite.height,
+    );
+    let ResolvedContainerBox {
+        padding,
+        border,
+        scrollbar,
+        box_inset,
+        min: min_size,
+        max: max_size,
+        outer: initial_outer,
+        inner: initial_inner,
+        available_inner,
+    } = resolve_container_box(source, &style, input);
+
+    let initial_parent_size = Size::new(
+        outer_definite
+            .width
+            .then_some(initial_inner.width)
+            .flatten(),
+        outer_definite
+            .height
+            .then_some(initial_inner.height)
+            .flatten(),
+    );
+    let available_content = Size::new(
+        initial_inner
+            .width
+            .map_or(available_inner.width, AvailableSpace::Definite),
+        initial_inner
+            .height
+            .map_or(available_inner.height, AvailableSpace::Definite),
+    );
+    let edge_inline_basis = available_content.width.into_option();
+
+    let child_count = source.child_count(node);
+    let mut generated = Vec::with_capacity(child_count);
+    let mut absolute_items = Vec::new();
+    let mut hidden = Vec::new();
+    for document_index in 0..child_count {
+        let child = source.child_id(node, document_index);
+        let child_style = source.relative_item_style(child);
+        if child_style.box_generation_mode() == BoxGenerationMode::None {
+            hidden.push((document_index, child));
+            continue;
+        }
+        let pending = OrderedItem {
+            node: child,
+            document_index,
+            css_order: child_style.order(),
+            layout_order: u32::try_from(document_index).unwrap_or(u32::MAX),
+        };
+        if matches!(
+            child_style.position(),
+            Position::Absolute | Position::AbsoluteHoisted
+        ) {
+            absolute_items.push(pending);
+        } else {
+            generated.push(pending);
+        }
+    }
+
+    if generated.iter().any(|item| item.css_order != 0) {
+        generated.sort_unstable_by_key(|item| (item.css_order, item.document_index));
+    }
+    for (layout_order, item) in generated.iter_mut().enumerate() {
+        item.layout_order = u32::try_from(layout_order).unwrap_or(u32::MAX);
+    }
+
+    let lookup = IdLookup::new(source, &generated);
+    let mut items = generated
+        .into_iter()
+        .map(|item| {
+            resolve_item(
+                source,
+                item.key(),
+                initial_parent_size,
+                edge_inline_basis,
+                &lookup,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let outer_size = if layout_once {
+        let order = dependency_order(&items, DependencyScope::Combined);
+        let bounds = one_pass_layout(
+            source,
+            session,
+            &mut items,
+            &order,
+            initial_parent_size,
+            available_content,
+            &lookup,
+        );
+        Size::new(
+            final_outer_axis(
+                initial_outer.width,
+                input.known_dimensions.width,
+                bounds.width.extent(),
+                box_inset.width,
+                min_size.width,
+                max_size.width,
+            ),
+            final_outer_axis(
+                initial_outer.height,
+                input.known_dimensions.height,
+                bounds.height.extent(),
+                box_inset.height,
+                min_size.height,
+                max_size.height,
+            ),
+        )
+    } else {
+        let horizontal_order = dependency_order(&items, DependencyScope::Horizontal);
+        let vertical_order = dependency_order(&items, DependencyScope::Vertical);
+        two_pass_layout(
+            source,
+            session,
+            &mut items,
+            &horizontal_order,
+            &vertical_order,
+            initial_parent_size,
+            available_content,
+            &lookup,
+            initial_outer,
+            input.known_dimensions,
+            box_inset,
+            min_size,
+            max_size,
+        )
+    };
+    let content_size = Size::new(
+        (outer_size.width - box_inset.width).max(0.0),
+        (outer_size.height - box_inset.height).max(0.0),
+    );
+    if matches!(input.goal, LayoutGoal::Measure(_)) {
+        return LayoutOutput::new(outer_size, outer_size);
+    }
+
+    let content_origin = Point::new(border.left + padding.left, border.top + padding.top);
+    let mut scrollable_size = commit_in_flow(
+        source,
+        session,
+        &mut items,
+        content_size,
+        content_origin,
+        outer_size,
+    );
+    for (document_index, child) in hidden {
+        super::hide_subtree(source, session, child);
+        session.set_unrounded_layout(
+            child,
+            &Layout::with_order(u32::try_from(document_index).unwrap_or(u32::MAX)),
+        );
+    }
+    scrollable_size = scrollable_size.zip_map(
+        commit_out_of_flow(source, session, &absolute_items, outer_size, border),
+        f32::max,
+    );
+
+    let _ = scrollbar;
+    LayoutOutput::new(outer_size, scrollable_size)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixed_dependencies_deduplicate_without_heap_sets() {
+        let mut dependencies = Dependencies::EMPTY;
+        dependencies.add(4);
+        dependencies.add(4);
+        dependencies.add(2);
+        assert_eq!(dependencies.as_slice(), &[4, 2]);
+    }
+
+    #[test]
+    fn contradictory_constraints_collapse_at_the_start_edge() {
+        assert_eq!(
+            constrained_border_size(Line::new(Some(20.0), Some(10.0)), 3.0),
+            Some(0.0)
+        );
+    }
+}

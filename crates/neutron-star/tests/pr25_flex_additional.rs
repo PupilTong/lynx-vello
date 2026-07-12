@@ -9,7 +9,7 @@ mod support;
 
 use neutron_star::compute::{
     FnLeafMeasurer, LeafMetrics, compute_flexbox_layout, compute_grid_layout, compute_leaf_layout,
-    hide_subtree,
+    compute_relative_layout, hide_subtree,
 };
 use neutron_star::prelude::*;
 use neutron_star::style::{
@@ -551,6 +551,7 @@ impl LayoutSession<TestSource> for WriteOnlySession {
         match node.display {
             TestDisplay::Flex => compute_flexbox_layout(source, self, child, input),
             TestDisplay::Grid => compute_grid_layout(source, self, child, input),
+            TestDisplay::Relative => compute_relative_layout(source, self, child, input),
             TestDisplay::Leaf => {
                 let mut measurer = FnLeafMeasurer::new(|_| LeafMetrics::new(Size::<f32>::ZERO));
                 compute_leaf_layout(
