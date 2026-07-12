@@ -9,10 +9,18 @@ rust-version.workspace = true
 keywords = ["layout", "flexbox", "grid", "css", "ui"]
 categories = ["gui"]
 
-# Deliberately zero dependencies and zero feature flags: the whole engine
-# boundary is traits + plain-old-data, so the crate stays
-# standalone-publishable and hosts pay for nothing they don't call.
+# Deliberately zero runtime dependencies and zero feature flags: the whole
+# engine boundary is traits + plain-old-data, so the crate stays
+# standalone-publishable and hosts pay for nothing they don't call. Benchmark
+# tooling remains a dev-only dependency.
 [dependencies]
+
+[dev-dependencies]
+divan = { workspace = true }
+
+[[bench]]
+name = "flexbox"
+harness = false
 
 [lints]
 workspace = true

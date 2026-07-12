@@ -250,8 +250,9 @@ pub trait LayoutState: Sized {
 /// Every field of the input can change the output, so none may be dropped
 /// from matching: `goal` distinguishes committing layout from measurement
 /// (and carries a measurement's requested axes), `sizing_mode` toggles whether the node's own
-/// `size`/`min`/`max`/`aspect-ratio` apply, `parent_size` is the percentage
-/// basis, and the remaining fields define the sizing constraints. A matching
+/// `size`/`min`/`max`/`aspect-ratio` apply, `definite_dimensions` distinguishes
+/// decided geometry from a definite percentage basis, `parent_size` is the
+/// parent percentage basis, and the remaining fields define the sizing constraints. A matching
 /// policy may treat a stored entry as usable for a request only under
 /// *provable* equivalences (see [`cache`](crate::cache) for the contract) —
 /// never across differing `sizing_mode` or percentage bases. A committed

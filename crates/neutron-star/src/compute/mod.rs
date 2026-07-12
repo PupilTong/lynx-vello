@@ -504,7 +504,9 @@ fn resolve_absolute_style<Source: LayoutSource>(
 /// `2.0`/`3.0` on high-DPI displays; `1.0` snaps to whole CSS pixels). It
 /// must be finite and `> 0` (debug-asserted). Snapping happens on the
 /// **device-pixel grid**, since layout coordinates are CSS pixels but crisp
-/// edges are physical: `snap(v) = round(v × scale) / scale`.
+/// edges are physical: `snap(v) = css_round(v × scale) / scale`. CSS nearest-
+/// integer rounding chooses the value toward positive infinity at an exact
+/// half-way tie (`1.5 → 2`, `-1.5 → -1`).
 ///
 /// Rounding contract (cumulative-error-free): positions are snapped in
 /// *accumulated* (root-relative) space and sizes derived as
@@ -524,6 +526,20 @@ where
         "scale must be positive and finite"
     );
     round_layout_inner(source, state, root, scale, Point::ZERO);
+}
+
+/// CSS Values' nearest-integer rule: choose the upper integer on an exact
+/// half-way tie. This intentionally differs from Rust's `f32::round` for
+/// negative halves, where `-1.5` rounds away from zero to `-2`.
+#[inline]
+fn css_round_to_integer(value: f32) -> f32 {
+    debug_assert!(value.is_finite(), "CSS pixel coordinates must be finite");
+    let lower = value.floor();
+    if value - lower < 0.5 {
+        lower
+    } else {
+        lower + 1.0
+    }
 }
 
 fn resolve_absolute_margins(
@@ -623,7 +639,7 @@ fn round_layout_inner<Source, State>(
         parent_position.x + unrounded.location.x,
         parent_position.y + unrounded.location.y,
     );
-    let snap = |value: f32| (value * scale).round() / scale;
+    let snap = |value: f32| css_round_to_integer(value * scale) / scale;
 
     let mut rounded = unrounded;
     rounded.location = Point::new(

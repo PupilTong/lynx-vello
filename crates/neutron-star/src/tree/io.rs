@@ -138,6 +138,9 @@ impl Size<AvailableSpace> {
 ///
 /// - `known_dimensions` — sizes already **decided** by the caller (e.g. a stretched flex item's
 ///   cross size). An algorithm must return exactly these where present.
+/// - `definite_dimensions` — whether each decided size is also *definite* for percentage
+///   propagation. Flex sizing can decide a used size that remains indefinite under Flexbox §9.8;
+///   geometry and percentage definiteness therefore cannot share one sentinel.
 /// - `parent_size` — the parent's content-box size where definite; the basis for resolving this
 ///   node's percentage styles.
 /// - `available_space` — the constraint to size into. `Definite` here does **not** force a size
@@ -151,6 +154,9 @@ pub struct LayoutInput {
     pub sizing_mode: SizingMode,
     /// Border-box sizes already decided by the caller.
     pub known_dimensions: Size<Option<f32>>,
+    /// Whether each known dimension establishes a definite percentage basis
+    /// for this node's descendants.
+    pub definite_dimensions: Size<bool>,
     /// The parent's definite content-box size (percentage basis).
     pub parent_size: Size<Option<f32>>,
     /// The space to size into.
@@ -170,6 +176,7 @@ impl LayoutInput {
             goal: LayoutGoal::Commit,
             sizing_mode: SizingMode::InherentSize,
             known_dimensions,
+            definite_dimensions: known_dimensions.map(|value| value.is_some()),
             parent_size,
             available_space,
         }
@@ -187,6 +194,7 @@ impl LayoutInput {
             goal: LayoutGoal::Measure(requested_axis),
             sizing_mode: SizingMode::InherentSize,
             known_dimensions,
+            definite_dimensions: known_dimensions.map(|value| value.is_some()),
             parent_size,
             available_space,
         }
