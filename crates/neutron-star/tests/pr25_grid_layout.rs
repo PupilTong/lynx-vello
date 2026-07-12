@@ -6160,7 +6160,12 @@ fn grid_rows_re_resolve_after_column_re_resolution_changes_block_min_content_con
 
     assert_close(size.width, 80.0);
     assert_close(size.height, 40.0);
-    assert_close(tree.nodes[trailing_marker].layout.offset.x, 80.0);
+    // The source fixture stops after the intrinsic container-sizing pass.
+    // Grid §12 requires a final sizing pass using the resulting 80×40
+    // container. Its auto row stretches to 40px, so the bounded column
+    // correction observes width = 40 × 8 = 320px and overflows the
+    // intrinsically-sized 80px container.
+    assert_close(tree.nodes[trailing_marker].layout.offset.x, 320.0);
     assert!(
         tree.nodes[intrinsic]
             .min_content_constraints
@@ -6172,6 +6177,56 @@ fn grid_rows_re_resolve_after_column_re_resolution_changes_block_min_content_con
                 && constraints.height.mode == MeasureMode::Indefinite),
         "block min-content contribution should be requeried after the column re-resolution"
     );
+}
+
+#[test]
+fn grid_final_percentage_track_resolution_survives_cross_axis_feedback() {
+    let mut tree = MeasuringTree::default();
+    let root = tree.push(MeasuringNode::new(Style {
+        display: Display::Grid,
+        grid_template_columns: vec![Length::MinContent, Length::percent(50.0)],
+        grid_template_rows: vec![Length::Auto],
+        justify_items: JustifyItems::Start,
+        align_items: AlignItems::Stretch,
+        ..Style::default()
+    }));
+    let intrinsic = tree.push(MeasuringNode::measured_with_cross_axis_intrinsic(
+        Style {
+            grid_column_start: Some(1),
+            grid_row_start: Some(1),
+            justify_self: JustifyItems::Start,
+            ..Style::default()
+        },
+        Size::new(20.0, 10.0),
+        20.0,
+        8.0,
+        10.0,
+        0.5,
+    ));
+    let second_track_start = tree.push(MeasuringNode::new(grid_start_item(Style {
+        grid_column_start: Some(2),
+        grid_row_start: Some(1),
+        ..Style::default()
+    })));
+    let grid_end = tree.push(MeasuringNode::new(grid_start_item(Style {
+        grid_column_start: Some(3),
+        grid_row_start: Some(1),
+        ..Style::default()
+    })));
+    tree.append_child(root, intrinsic);
+    tree.append_child(root, second_track_start);
+    tree.append_child(root, grid_end);
+
+    let size = run_rust_layout(&mut tree, root, Constraints::indefinite());
+
+    // During intrinsic container sizing the cyclic 50% track is auto, so
+    // the container settles at 80×40. The mandatory final Grid sizing pass
+    // resolves that track to 40px and independently performs the one-time
+    // row→column correction, which expands the first track to 320px.
+    assert_close(size.width, 80.0);
+    assert_close(size.height, 40.0);
+    assert_close(tree.nodes[second_track_start].layout.offset.x, 320.0);
+    assert_close(tree.nodes[grid_end].layout.offset.x, 360.0);
 }
 
 #[test]

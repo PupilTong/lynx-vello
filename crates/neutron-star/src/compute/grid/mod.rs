@@ -19,10 +19,11 @@ mod sizing;
 mod tracks;
 mod types;
 
-use alignment::{align_tracks, item_alignment_offset};
+use alignment::{align_tracks, alignment_spacing_from_free_space, item_alignment_offset};
 use placement::{AxisPlacement, GridArea, PlacementInput, place_items, resolve_axis_placement};
 use sizing::{
-    initialize_tracks, probe_raw_min_content, resolve_item_intrinsic_dimensions, size_tracks,
+    CrossAxisTracks, initialize_tracks, probe_raw_min_content, resolve_item_intrinsic_dimensions,
+    size_tracks,
 };
 use tracks::{ExpandedTemplate, MAX_MATERIALIZED_TRACKS, build_axis_tracks, expand_template};
 use types::{Axis, GridItem, TrackSet};
@@ -201,7 +202,7 @@ fn run_track_sizing<Source, Session>(
     gap: Size<f32>,
     justify_content: AlignContent,
     align_content: AlignContent,
-) -> (TrackSet, TrackSet, bool)
+) -> (TrackSet, TrackSet)
 where
     Source: GridSource,
     Session: LayoutSession<Source>,
@@ -211,13 +212,41 @@ where
         item.clear_contribution_cache(Axis::Horizontal);
         item.clear_contribution_cache(Axis::Vertical);
     }
+    // Grid §12.1 sizes columns before rows. During that first column pass,
+    // an item sees each row with a definite max track sizing function at
+    // that maximum and every other row as infinite. Only when the container
+    // and every row are definite does content alignment affect this estimate.
+    let mut rows = initialize_tracks(source, row_specs, inner_basis.height, gap.height);
+    let all_rows_definite = rows
+        .tracks
+        .iter()
+        .all(|track| track.growth_limit.is_finite());
+    let distributed_gap = if all_rows_definite {
+        inner_basis.height.map_or(0.0, |height| {
+            let visible = rows.tracks.iter().filter(|track| !track.collapsed).count();
+            let used = rows
+                .tracks
+                .iter()
+                .filter(|track| !track.collapsed)
+                .map(|track| track.growth_limit)
+                .sum::<f32>()
+                + rows.total_gap();
+            alignment_spacing_from_free_space(height - used, visible, align_content).1
+        })
+    } else {
+        0.0
+    };
+    let initial_column_cross_tracks = CrossAxisTracks::DefiniteMaximums {
+        tracks: &rows,
+        distributed_gap,
+    };
     let mut columns = initialize_tracks(source, column_specs, inner_basis.width, gap.width);
     size_tracks(
         source,
         session,
         Axis::Horizontal,
         &mut columns,
-        None,
+        Some(initial_column_cross_tracks),
         items,
         inner_basis,
         inner_basis
@@ -254,7 +283,7 @@ where
                             session,
                             item,
                             Axis::Horizontal,
-                            None,
+                            Some(initial_column_cross_tracks),
                             inner_basis,
                         )
                     },
@@ -272,13 +301,12 @@ where
     }
     let mut row_basis = inner_basis;
     row_basis.width = row_basis.width.or(Some(columns.used_size()));
-    let mut rows = initialize_tracks(source, row_specs, inner_basis.height, gap.height);
     size_tracks(
         source,
         session,
         Axis::Vertical,
         &mut rows,
-        Some(&columns),
+        Some(CrossAxisTracks::resolved(&columns)),
         items,
         row_basis,
         inner_basis
@@ -302,7 +330,7 @@ where
                 session,
                 item,
                 Axis::Horizontal,
-                Some(&rows),
+                Some(CrossAxisTracks::resolved(&rows)),
                 inner_basis,
             );
             let tolerance = f32::EPSILON * before.abs().max(after.abs()).max(1.0);
@@ -329,7 +357,7 @@ where
             session,
             Axis::Horizontal,
             &mut rerun_columns,
-            Some(&rows),
+            Some(CrossAxisTracks::resolved(&rows)),
             items,
             inner_basis,
             inner_basis
@@ -355,7 +383,7 @@ where
             session,
             Axis::Vertical,
             &mut rerun_rows,
-            Some(&columns),
+            Some(CrossAxisTracks::resolved(&columns)),
             items,
             final_row_basis,
             inner_basis
@@ -368,7 +396,7 @@ where
         }
         rows = rerun_rows;
     }
-    (columns, rows, column_feedback_changed)
+    (columns, rows)
 }
 
 fn final_outer_size(metrics: &ResolvedContainerBox, tracks: Size<f32>) -> Size<f32> {
@@ -499,7 +527,7 @@ where
             session,
             item,
             Axis::Horizontal,
-            Some(rows),
+            Some(CrossAxisTracks::resolved(rows)),
             Size::new(Some(area_size.width), Some(area_size.height)),
         );
         resolve_item_intrinsic_dimensions(
@@ -507,7 +535,7 @@ where
             session,
             item,
             Axis::Vertical,
-            Some(columns),
+            Some(CrossAxisTracks::resolved(columns)),
             Size::new(Some(area_size.width), Some(area_size.height)),
         );
         let raw_size = source.grid_item_style(item.key.node).size();
@@ -1320,7 +1348,7 @@ where
         .map(|(item, area)| resolve_grid_item(source, item.key(), area, Size::NONE, item_defaults))
         .collect::<Vec<_>>();
 
-    let (mut columns, mut rows, cross_axis_feedback_resolved) = run_track_sizing(
+    let (mut columns, mut rows) = run_track_sizing(
         source,
         session,
         &column_specs,
@@ -1347,11 +1375,11 @@ where
         gap_value,
         Size::new(Some(final_inner.width), Some(final_inner.height)),
     );
-    let needs_definite_rerun = (!cross_axis_feedback_resolved
-        && (initial_percentage_basis.width.is_none() || initial_percentage_basis.height.is_none()))
+    let needs_definite_rerun = initial_percentage_basis.width.is_none()
+        || initial_percentage_basis.height.is_none()
         || final_gap != initial_gap;
     if needs_definite_rerun {
-        (columns, rows, _) = run_track_sizing(
+        (columns, rows) = run_track_sizing(
             source,
             session,
             &column_specs,

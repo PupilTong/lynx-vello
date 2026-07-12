@@ -6,7 +6,8 @@ the PR's styling engine, native linker, or Lynx C++ comparison runner.
 
 ## Inventory
 
-- 230 direct Grid layout tests: `tests/pr25_grid_layout.rs`.
+- 230 direct Grid layout tests plus one W3C boundary regression:
+  `tests/pr25_grid_layout.rs`.
 - 179 Grid-named native head-to-head cases: 136 exact stripped-name mappings
   to the direct suite plus 43 Rust-only deterministic scenario tests in
   `tests/pr25_native_grid.rs`.
@@ -65,6 +66,13 @@ outside the numeric protocol milestone and are recorded in
   They lower to direct absolute positioning in the compatibility target;
   production fixed-position containing-block selection remains the host-owned
   hoisted positioned pass.
+- One source cross-axis fixture stops at the intrinsic container-sizing
+  result. CSS Grid §12 requires a separate final Grid sizing pass: cyclic
+  percentages resolve against the resulting container, `auto` rows stretch,
+  and the bounded row→column/column→row corrections still run independently.
+  The migrated assertion records that W3C overflow geometry and a companion
+  percentage-track regression prevents either phase from suppressing the
+  other.
 
 ## Grid benchmark scenarios
 

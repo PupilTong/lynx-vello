@@ -413,7 +413,13 @@ The automatic minimum size (§4.5, `min-size: auto`) resolves inside steps
    baseline shims, distribute item contributions in span order (including
    infinitely-growable and non-affected-track phases), maximize tracks,
    expand `fr` (§12.7), and stretch `auto` tracks. A bounded cross-axis
-   feedback pass detects contribution changes after row sizing.
+   feedback pass detects contribution changes after row sizing. While
+   columns are initially sized, only rows with definite max track sizing
+   functions provide finite block-axis space; other rows are infinite per
+   §12.1. This per-run columns→rows correction is independent of the outer
+   Grid layout phases: cyclic percentages are `auto` while finding an
+   intrinsic container size, then resolve against that resulting size in a
+   final Grid sizing run.
 4. **Alignment** (CSS Align) — `align/justify-content` position tracks with
    `gap`; `align/justify-self` place items in their areas; `Rtl` flips the
    inline axis.
