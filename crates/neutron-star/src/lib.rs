@@ -1,6 +1,7 @@
-//! **neutron-star** — a trait-first, statically-dispatched CSS **flexbox**
-//! engine for host-owned trees, with CSS **Grid** host contracts reserved for
-//! its next algorithm milestone.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
+//! **neutron-star** — a trait-first, statically-dispatched CSS **flexbox** and
+//! **Grid** engine for host-owned trees.
 //!
 //! Built as lynx-vello's from-scratch successor to the Lynx C++ engine's
 //! `starlight`, but deliberately Lynx-agnostic and standalone-publishable:
@@ -18,7 +19,7 @@
 //!  │ immutable source:         │◀───────────▶│ compute_root_layout       │
 //!  │ · topology + styles       │  NodeId +   │ compute_leaf_layout       │
 //!  │ mutable session:          │  POD values │ cache/hide/abs-pos/round  │
-//!  │ · layouts/cache/dispatch  │◀───────────▶│ flex algo; grid contracts │
+//!  │ · layouts/cache/dispatch  │◀───────────▶│ flex + grid algorithms    │
 //!  └───────────────────────────┘  recursion  └───────────────────────────┘
 //! ```
 //!
@@ -30,7 +31,7 @@
 //!   traits hosts implement as cheap views over their computed styles.
 //! - [`compute`] — the machinery entry points hosts call from their dispatch (root, cache wrapper,
 //!   subtree hiding, leaf, the positioned pass, rounding), including the canonical dispatch
-//!   skeleton and the implemented flexbox entry point. Grid layout remains the L2 milestone.
+//!   skeleton and the implemented flexbox and Grid entry points.
 //! - [`cache`] — the embeddable per-node measurement cache and its matching contract.
 //! - [`geometry`] — `Copy`/`#[repr(C)]` geometry primitives.
 //!
@@ -57,12 +58,13 @@
 //! fn erased_state(state: &mut dyn neutron_star::tree::LayoutState) {}
 //! ```
 //!
-//! # Status: flexbox implemented (milestone L1)
+//! # Status: flexbox and Grid implemented (milestone L2)
 //!
-//! The generic protocol and machinery are implemented together with the CSS
-//! Flexbox Level 1 algorithm. The Grid style/tree contracts are final-shaped,
-//! but their algorithm remains L2. See `docs/layout-architecture.md` in the
-//! lynx-vello repository for the design rationale and remaining milestones.
+//! The generic protocol and machinery are implemented together with CSS
+//! Flexbox Level 1 and numeric CSS Grid Level 2 (excluding subgrid and named
+//! areas). See `docs/layout-architecture.md` in the lynx-vello repository for
+//! the design rationale, represented conformance surface, and remaining
+//! parity milestones.
 //!
 //! # Dependencies and feature flags
 //!

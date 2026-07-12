@@ -65,6 +65,10 @@ url = "2"
 [workspace.lints.rust]
 unsafe_code = "warn"
 missing_debug_implementations = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(coverage)",
+    "cfg(coverage_nightly)",
+] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

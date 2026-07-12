@@ -214,3 +214,38 @@ impl<T> Line<T> {
         Self { start, end }
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    #![allow(clippy::float_cmp)]
+
+    use super::*;
+
+    #[test]
+    fn point_map_transforms_each_component_once() {
+        let mut calls = 0;
+        let mapped = Point::new(2_i32, 5_i32).map(|value| {
+            calls += 1;
+            value * value
+        });
+
+        assert_eq!(mapped, Point::new(4, 25));
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn geometry_helpers_preserve_axis_order() {
+        let size = Size::new(2, 3).map(|value| value * 10);
+        assert_eq!(size, Size::new(20, 30));
+        assert_eq!(
+            size.zip_map(Size::new(1, 2), |left, right| left + right),
+            Size::new(21, 32)
+        );
+
+        let edges = Edges::uniform(2.0);
+        assert_eq!(edges.horizontal_sum(), 4.0);
+        assert_eq!(edges.vertical_sum(), 4.0);
+        assert_eq!(Line::new("start", "end").start, "start");
+    }
+}

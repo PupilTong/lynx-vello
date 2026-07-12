@@ -89,7 +89,7 @@ pub enum Visibility {
 /// The layout tree is always the **formatting** structure — out-of-flow
 /// nodes stay children of their formatting parent, never reparented, so the
 /// parent's algorithm can compute their CSS-correct *static position*
-/// (Flexbox §4.1: as if the sole flex item; Grid §10.1: the content-edge
+/// (Flexbox §4.1: as if the sole flex item; Grid §10.2: the content-edge
 /// area). What varies is *where the containing block is*, which the host
 /// resolves from computed style and encodes per node:
 ///
@@ -333,5 +333,55 @@ impl<S: CoreStyle> CoreStyle for &S {
 
     fn direction(&self) -> Direction {
         (**self).direction()
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    #![allow(clippy::float_cmp)]
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct Defaults;
+
+    impl CoreStyle for Defaults {}
+
+    #[test]
+    fn core_style_defaults_are_css_initial_values() {
+        let style = Defaults;
+
+        assert_eq!(style.box_generation_mode(), BoxGenerationMode::Normal);
+        assert_eq!(style.position(), Position::Relative);
+        assert_eq!(style.inset(), Edges::uniform(LengthPercentageAuto::Auto));
+        assert_eq!(style.size(), Size::new(Dimension::Auto, Dimension::Auto));
+        assert_eq!(
+            style.min_size(),
+            Size::new(Dimension::Auto, Dimension::Auto)
+        );
+        assert_eq!(
+            style.max_size(),
+            Size::new(Dimension::Auto, Dimension::Auto)
+        );
+        assert_eq!(style.aspect_ratio(), None);
+        assert_eq!(style.margin(), Edges::uniform(LengthPercentageAuto::ZERO));
+        assert_eq!(style.padding(), Edges::uniform(LengthPercentage::ZERO));
+        assert_eq!(style.border(), Edges::uniform(LengthPercentage::ZERO));
+        assert_eq!(
+            style.overflow(),
+            Point::new(Overflow::Visible, Overflow::Visible)
+        );
+        assert_eq!(style.scrollbar_width(), 0.0);
+        assert_eq!(style.box_sizing(), BoxSizing::ContentBox);
+        assert_eq!(style.direction(), Direction::Ltr);
+    }
+
+    #[test]
+    fn overflow_only_treats_scrollable_values_as_scroll_containers() {
+        assert!(!Overflow::Visible.is_scroll_container());
+        assert!(!Overflow::Clip.is_scroll_container());
+        assert!(Overflow::Hidden.is_scroll_container());
+        assert!(Overflow::Scroll.is_scroll_container());
     }
 }

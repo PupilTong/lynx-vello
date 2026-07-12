@@ -631,6 +631,8 @@ fn finalize_size(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
     use crate::cache::Cache;
@@ -862,5 +864,150 @@ mod tests {
 
         assert_eq!(output.size, Size::new(23.0, 9.0));
         assert_eq!(output.first_baselines, Point::NONE);
+    }
+
+    #[test]
+    fn measurement_conversion_and_reference_forwarding_preserve_metrics() {
+        let metrics = LeafMetrics::from(Size::new(19.0, 7.0))
+            .with_first_baselines(Point::new(Some(3.0), Some(5.0)));
+        let reference = &metrics;
+
+        assert_eq!(
+            <&LeafMetrics as LeafMeasurement>::size(&reference),
+            Size::new(19.0, 7.0)
+        );
+        assert_eq!(
+            <&LeafMetrics as LeafMeasurement>::first_baselines(&reference),
+            Point::new(Some(3.0), Some(5.0))
+        );
+    }
+
+    #[test]
+    fn measured_aspect_ratio_respects_requested_axis_and_sizing_box() {
+        let both_indefinite = Size::new(true, true);
+        let padding_border = Size::new(10.0, 10.0);
+
+        let vertical = apply_measured_aspect_ratio(
+            Size::new(Some(40.0), Some(50.0)),
+            both_indefinite,
+            Some(RequestedAxis::Vertical),
+            Some(2.0),
+            BoxSizing::ContentBox,
+            padding_border,
+        );
+        assert_eq!(vertical, Size::new(Some(90.0), Some(50.0)));
+
+        let horizontal = apply_measured_aspect_ratio(
+            Size::new(Some(100.0), Some(20.0)),
+            both_indefinite,
+            Some(RequestedAxis::Both),
+            Some(2.0),
+            BoxSizing::ContentBox,
+            padding_border,
+        );
+        assert_eq!(horizontal, Size::new(Some(100.0), Some(55.0)));
+
+        let border_box = apply_measured_aspect_ratio(
+            Size::new(Some(100.0), Some(20.0)),
+            both_indefinite,
+            None,
+            Some(2.0),
+            BoxSizing::BorderBox,
+            padding_border,
+        );
+        assert_eq!(border_box, Size::new(Some(100.0), Some(50.0)));
+
+        let unchanged = Size::new(Some(30.0), Some(40.0));
+        assert_eq!(
+            apply_measured_aspect_ratio(
+                unchanged,
+                Size::new(false, true),
+                None,
+                Some(2.0),
+                BoxSizing::ContentBox,
+                padding_border,
+            ),
+            unchanged
+        );
+        assert_eq!(
+            apply_measured_aspect_ratio(
+                unchanged,
+                both_indefinite,
+                None,
+                Some(0.0),
+                BoxSizing::ContentBox,
+                padding_border,
+            ),
+            unchanged
+        );
+    }
+
+    struct ConflictingMinMaxStyle;
+
+    impl CoreStyle for ConflictingMinMaxStyle {
+        fn min_size(&self) -> Size<crate::style::Dimension> {
+            Size::new(
+                crate::style::Dimension::Length(80.0),
+                crate::style::Dimension::Length(70.0),
+            )
+        }
+
+        fn max_size(&self) -> Size<crate::style::Dimension> {
+            Size::new(
+                crate::style::Dimension::Length(40.0),
+                crate::style::Dimension::Length(90.0),
+            )
+        }
+    }
+
+    #[test]
+    fn sizing_helpers_honor_min_precedence_known_dimensions_and_box_sizing() {
+        let sizing =
+            resolve_leaf_sizing(LayoutInput::default(), &ConflictingMinMaxStyle, &|_, _| {
+                unreachable!("test style has no calc() values")
+            });
+        assert_eq!(sizing.node_size, Size::new(Some(80.0), None));
+
+        assert_eq!(
+            border_box_to_sizing_box(
+                Size::new(Some(30.0), Some(20.0)),
+                BoxSizing::ContentBox,
+                Size::new(8.0, 6.0),
+            ),
+            Size::new(Some(22.0), Some(14.0))
+        );
+        assert_eq!(sizing_box_axis(30.0, 8.0, BoxSizing::BorderBox), 30.0);
+        assert_eq!(border_box_axis(22.0, 8.0, BoxSizing::ContentBox), 30.0);
+        assert_eq!(border_box_axis(22.0, 8.0, BoxSizing::BorderBox), 22.0);
+
+        assert_eq!(
+            clamp_resolved_size(
+                Size::new(Some(5.0), Some(50.0)),
+                Size::new(Some(5.0), None),
+                Size::new(Some(20.0), Some(10.0)),
+                Size::new(Some(30.0), Some(40.0)),
+                Size::new(10.0, 12.0),
+            ),
+            Size::new(Some(5.0), Some(40.0))
+        );
+    }
+
+    #[test]
+    fn cache_clear_capability_invalidates_box_and_retained_artifacts_together() {
+        let mut state = LeafHostState::default();
+        state.artifacts.committed = Some(RetainedArtifact {
+            metrics: LeafMetrics::new(Size::new(1.0, 1.0)),
+            paint_data: vec![b'C'],
+        });
+        state.artifacts.probe = Some(RetainedArtifact {
+            metrics: LeafMetrics::new(Size::new(1.0, 1.0)),
+            paint_data: vec![b'P'],
+        });
+
+        CacheState::cache_clear(&mut state, NodeId::new(0));
+
+        assert!(state.box_cache.is_empty());
+        assert!(state.artifacts.committed.is_none());
+        assert!(state.artifacts.probe.is_none());
     }
 }

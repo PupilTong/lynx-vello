@@ -1,16 +1,15 @@
 # neutron-star
 
-A trait-first, statically-dispatched box-layout engine for host-owned trees.
-CSS **flexbox** is implemented; the CSS **Grid** host protocol is reserved for
-the next algorithm milestone. Built as the from-scratch successor to the Lynx
+A trait-first, statically-dispatched CSS **flexbox** and **Grid** layout engine
+for host-owned trees. Built as the from-scratch successor to the Lynx
 C++ engine's `starlight` layout engine, but deliberately Lynx-agnostic: the
 crate has zero required dependencies and is designed to be published and used
 standalone.
 
-> **Status: flexbox implemented (milestone L1).** The protocol, shared layout
-> machinery, leaf/absolute sizing, cache, rounding, and CSS Flexbox Level 1
-> algorithm are implemented. The Grid protocol is present; its layout
-> algorithm remains milestone L2. See
+> **Status: flexbox and Grid implemented (milestone L2).** The protocol,
+> shared layout machinery, leaf/absolute sizing, cache, rounding, CSS Flexbox
+> Level 1, and numeric CSS Grid Level 2 algorithms are implemented. Grid
+> deliberately excludes subgrid and host-lowered named lines/areas. See
 > `docs/layout-architecture.md` in the repository root for the full design,
 > algorithm plans, milestones, and rationale.
 
@@ -61,7 +60,7 @@ and the crate compiles with zero dependencies.
 
 The source/session/style protocol split is informed by [Taffy]'s `LayoutPartialTree`
 design (proven to keep a layout engine storage-agnostic without trait
-objects), the implemented flex algorithm and planned grid algorithm by the
+objects), the implemented flex and Grid algorithms by the
 CSS specs directly (Flexbox Level 1, Grid Level 2, Sizing Level 3), and the
 performance posture by `starlight` and [Yoga]. neutron-star shares no code
 with any of them.

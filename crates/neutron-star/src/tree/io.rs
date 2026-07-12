@@ -290,3 +290,53 @@ impl Layout {
         }
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn available_space_conversions_preserve_definite_and_intrinsic_constraints() {
+        assert!(AvailableSpace::Definite(12.0).is_definite());
+        assert!(!AvailableSpace::MinContent.is_definite());
+        assert!(!AvailableSpace::MaxContent.is_definite());
+
+        assert_eq!(AvailableSpace::Definite(12.0).into_option(), Some(12.0));
+        assert_eq!(AvailableSpace::MinContent.into_option(), None);
+        assert_eq!(AvailableSpace::MaxContent.into_option(), None);
+        assert_eq!(AvailableSpace::default(), AvailableSpace::MaxContent);
+        assert_eq!(AvailableSpace::from(18.0), AvailableSpace::Definite(18.0));
+        assert_eq!(
+            AvailableSpace::from(Some(20.0)),
+            AvailableSpace::Definite(20.0)
+        );
+        assert_eq!(AvailableSpace::from(None), AvailableSpace::MaxContent);
+
+        let options =
+            Size::new(AvailableSpace::Definite(30.0), AvailableSpace::MinContent).into_options();
+        assert_eq!(options, Size::new(Some(30.0), None));
+    }
+
+    #[test]
+    fn layout_wire_constructors_set_only_their_documented_fields() {
+        let known = Size::new(Some(100.0), None);
+        let parent = Size::new(Some(200.0), Some(150.0));
+        let available = Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent);
+
+        let commit = LayoutInput::perform_layout(known, parent, available);
+        assert_eq!(commit.goal, LayoutGoal::Commit);
+        assert_eq!(commit.sizing_mode, SizingMode::InherentSize);
+        assert_eq!(commit.known_dimensions, known);
+
+        let measure =
+            LayoutInput::compute_size(known, parent, available, RequestedAxis::Horizontal);
+        assert_eq!(measure.goal, LayoutGoal::Measure(RequestedAxis::Horizontal));
+
+        let baselines = Point::new(None, Some(14.0));
+        let output = LayoutOutput::new(Size::new(100.0, 20.0), Size::new(120.0, 30.0))
+            .with_first_baselines(baselines);
+        assert_eq!(output.first_baselines, baselines);
+        assert_eq!(Layout::with_order(7).order, 7);
+    }
+}

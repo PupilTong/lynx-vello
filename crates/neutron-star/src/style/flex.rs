@@ -186,3 +186,52 @@ impl<S: FlexItemStyle> FlexItemStyle for &S {
         (**self).order()
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    #![allow(clippy::float_cmp)]
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct Defaults;
+
+    impl CoreStyle for Defaults {}
+    impl FlexContainerStyle for Defaults {}
+    impl FlexItemStyle for Defaults {}
+
+    #[test]
+    fn flex_container_defaults_are_css_initial_values() {
+        let style = Defaults;
+
+        assert_eq!(style.flex_direction(), FlexDirection::Row);
+        assert_eq!(style.flex_wrap(), FlexWrap::NoWrap);
+        assert_eq!(
+            FlexContainerStyle::gap(&style),
+            Size::new(LengthPercentage::ZERO, LengthPercentage::ZERO)
+        );
+        assert_eq!(FlexContainerStyle::align_content(&style), None);
+        assert_eq!(FlexContainerStyle::align_items(&style), None);
+        assert_eq!(FlexContainerStyle::justify_content(&style), None);
+    }
+
+    #[test]
+    fn flex_item_defaults_and_direction_helpers_cover_all_axes() {
+        let style = Defaults;
+
+        assert_eq!(style.flex_basis(), Dimension::Auto);
+        assert_eq!(style.flex_grow(), 0.0);
+        assert_eq!(style.flex_shrink(), 1.0);
+        assert_eq!(FlexItemStyle::align_self(&style), None);
+        assert_eq!(style.order(), 0);
+
+        assert!(FlexDirection::Row.is_row());
+        assert!(FlexDirection::RowReverse.is_row());
+        assert!(FlexDirection::Column.is_column());
+        assert!(FlexDirection::ColumnReverse.is_column());
+        assert!(!FlexDirection::Row.is_reverse());
+        assert!(FlexDirection::RowReverse.is_reverse());
+        assert!(FlexDirection::ColumnReverse.is_reverse());
+    }
+}
