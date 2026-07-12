@@ -6,20 +6,46 @@
 
 use neutron_star::compute::{
     FnLeafMeasurer, LeafMeasureInput, LeafMetrics, compute_cached_layout, compute_flexbox_layout,
-    compute_leaf_layout, hide_subtree,
+    compute_grid_layout, compute_leaf_layout, hide_subtree,
 };
 use neutron_star::prelude::*;
 use neutron_star::style::{
     AlignContent, AlignItems, AlignSelf, BoxGenerationMode, BoxSizing, CalcHandle, Dimension,
-    Direction, FlexDirection, FlexWrap, JustifyContent, LengthPercentage, LengthPercentageAuto,
-    Overflow, Position, Visibility,
+    Direction, FlexDirection, FlexWrap, GridAutoFlow, GridPlacement, GridTemplateComponent,
+    JustifyContent, JustifyItems, JustifySelf, LengthPercentage, LengthPercentageAuto, Overflow,
+    Position, RepetitionCount, TrackSizingFunction, Visibility,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TestDisplay {
     Flex,
+    Grid,
     Leaf,
 }
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct NoRepetition;
+
+impl GridTemplateRepetition for NoRepetition {
+    type Tracks<'a> = std::iter::Empty<TrackSizingFunction>;
+
+    fn count(&self) -> RepetitionCount {
+        RepetitionCount::Count(1)
+    }
+
+    fn tracks(&self) -> Self::Tracks<'_> {
+        std::iter::empty()
+    }
+}
+
+fn single_track(track: TrackSizingFunction) -> GridTemplateComponent<NoRepetition> {
+    GridTemplateComponent::Single(track)
+}
+
+type TemplateTracks<'a> = std::iter::Map<
+    std::iter::Copied<std::slice::Iter<'a, TrackSizingFunction>>,
+    fn(TrackSizingFunction) -> GridTemplateComponent<NoRepetition>,
+>;
 
 #[derive(Debug, Clone)]
 pub(super) struct TestStyle {
@@ -49,6 +75,15 @@ pub(super) struct TestStyle {
     pub(super) flex_shrink: f32,
     pub(super) align_self: Option<AlignSelf>,
     pub(super) order: i32,
+    pub(super) template_rows: Vec<TrackSizingFunction>,
+    pub(super) template_columns: Vec<TrackSizingFunction>,
+    pub(super) auto_rows: Vec<TrackSizingFunction>,
+    pub(super) auto_columns: Vec<TrackSizingFunction>,
+    pub(super) auto_flow: GridAutoFlow,
+    pub(super) justify_items: Option<JustifyItems>,
+    pub(super) grid_row: Line<GridPlacement>,
+    pub(super) grid_column: Line<GridPlacement>,
+    pub(super) justify_self: Option<JustifySelf>,
 }
 
 impl Default for TestStyle {
@@ -80,6 +115,15 @@ impl Default for TestStyle {
             flex_shrink: 1.0,
             align_self: None,
             order: 0,
+            template_rows: Vec::new(),
+            template_columns: Vec::new(),
+            auto_rows: Vec::new(),
+            auto_columns: Vec::new(),
+            auto_flow: GridAutoFlow::Row,
+            justify_items: None,
+            grid_row: Line::new(GridPlacement::Auto, GridPlacement::Auto),
+            grid_column: Line::new(GridPlacement::Auto, GridPlacement::Auto),
+            justify_self: None,
         }
     }
 }
@@ -194,6 +238,74 @@ impl FlexItemStyle for TestStyle {
     }
 }
 
+impl GridContainerStyle for TestStyle {
+    type Repetition<'a> = NoRepetition;
+    type TemplateTracks<'a> = TemplateTracks<'a>;
+    type AutoTracks<'a> = std::iter::Copied<std::slice::Iter<'a, TrackSizingFunction>>;
+
+    fn grid_template_rows(&self) -> Self::TemplateTracks<'_> {
+        self.template_rows.iter().copied().map(single_track as _)
+    }
+
+    fn grid_template_columns(&self) -> Self::TemplateTracks<'_> {
+        self.template_columns.iter().copied().map(single_track as _)
+    }
+
+    fn grid_auto_rows(&self) -> Self::AutoTracks<'_> {
+        self.auto_rows.iter().copied()
+    }
+
+    fn grid_auto_columns(&self) -> Self::AutoTracks<'_> {
+        self.auto_columns.iter().copied()
+    }
+
+    fn grid_auto_flow(&self) -> GridAutoFlow {
+        self.auto_flow
+    }
+
+    fn gap(&self) -> Size<LengthPercentage> {
+        self.gap
+    }
+
+    fn align_content(&self) -> Option<AlignContent> {
+        self.align_content
+    }
+
+    fn justify_content(&self) -> Option<JustifyContent> {
+        self.justify_content
+    }
+
+    fn align_items(&self) -> Option<AlignItems> {
+        self.align_items
+    }
+
+    fn justify_items(&self) -> Option<JustifyItems> {
+        self.justify_items
+    }
+}
+
+impl GridItemStyle for TestStyle {
+    fn grid_row(&self) -> Line<GridPlacement> {
+        self.grid_row
+    }
+
+    fn grid_column(&self) -> Line<GridPlacement> {
+        self.grid_column
+    }
+
+    fn align_self(&self) -> Option<AlignSelf> {
+        self.align_self
+    }
+
+    fn justify_self(&self) -> Option<JustifySelf> {
+        self.justify_self
+    }
+
+    fn order(&self) -> i32 {
+        self.order
+    }
+}
+
 /// A static test-leaf measurement strategy.
 ///
 /// `Function` accepts a function pointer rather than a trait object, keeping the shared host
@@ -210,6 +322,7 @@ pub(super) enum TestMeasure {
         measure: fn(TestConstraints) -> Size<f32>,
         baseline: Option<fn(Size<f32>) -> f32>,
     },
+    Profile(TestMeasureProfile),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -247,6 +360,25 @@ impl TestSideConstraint {
             mode: TestMeasureMode::AtMost,
         }
     }
+
+    pub(super) fn bounded_size(self) -> Option<f32> {
+        match self.mode {
+            TestMeasureMode::Indefinite => None,
+            TestMeasureMode::Definite | TestMeasureMode::AtMost => Some(self.size),
+        }
+    }
+
+    pub(super) fn near(self, other: Self) -> bool {
+        (self.mode == TestMeasureMode::Indefinite && other.mode == TestMeasureMode::Indefinite)
+            || (self.mode == other.mode && (self.size - other.size).abs() < 0.00001)
+    }
+
+    pub(super) fn clamp(self, value: f32) -> f32 {
+        match self.mode {
+            TestMeasureMode::AtMost => value.min(self.size),
+            TestMeasureMode::Definite | TestMeasureMode::Indefinite => value,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -275,6 +407,53 @@ impl TestConstraints {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) enum TestRegularMeasure {
+    Fixed(Size<f32>),
+    HeightFromWidth {
+        intrinsic_width: f32,
+        fallback_height: f32,
+        height_ratio: f32,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum TestIntrinsicMeasure {
+    Fixed(Size<f32>),
+    WidthFromHeight {
+        fallback_width: f32,
+        width_ratio: f32,
+        height: f32,
+    },
+    CrossAxis {
+        fallback_width: f32,
+        width_from_height_ratio: f32,
+        fallback_height: f32,
+        height_from_width_ratio: f32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct TestMeasureProfile {
+    pub(super) regular: Option<TestRegularMeasure>,
+    pub(super) min_content: Option<TestIntrinsicMeasure>,
+    pub(super) max_content: Option<TestIntrinsicMeasure>,
+    pub(super) first_baseline: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TestMeasureCallKind {
+    Regular,
+    MinContent,
+    MaxContent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct TestMeasureCall {
+    pub(super) kind: TestMeasureCallKind,
+    pub(super) constraints: TestConstraints,
+}
+
 fn test_side_constraint(known: Option<f32>, available: AvailableSpace) -> TestSideConstraint {
     if let Some(value) = known {
         return TestSideConstraint::definite(value);
@@ -286,7 +465,7 @@ fn test_side_constraint(known: Option<f32>, available: AvailableSpace) -> TestSi
 }
 
 impl TestMeasure {
-    fn measure(self, input: LeafMeasureInput) -> LeafMetrics {
+    fn measure(self, input: LeafMeasureInput) -> (LeafMetrics, Option<TestMeasureCall>) {
         let measured = match self {
             Self::Intrinsic {
                 min_content_size,
@@ -320,16 +499,124 @@ impl TestMeasure {
                 LeafMetrics::new(size)
                     .with_first_baselines(Point::new(None, baseline.map(|baseline| baseline(size))))
             }
+            Self::Profile(profile) => {
+                let constraints = TestConstraints::new(
+                    test_side_constraint(input.known_dimensions.width, input.available_space.width),
+                    test_side_constraint(
+                        input.known_dimensions.height,
+                        input.available_space.height,
+                    ),
+                );
+                let kind = if matches!(input.goal, LayoutGoal::Measure(_))
+                    && (input.available_space.width == AvailableSpace::MinContent
+                        || input.available_space.height == AvailableSpace::MinContent)
+                {
+                    TestMeasureCallKind::MinContent
+                } else if matches!(input.goal, LayoutGoal::Measure(_))
+                    && (input.available_space.width == AvailableSpace::MaxContent
+                        || input.available_space.height == AvailableSpace::MaxContent)
+                {
+                    TestMeasureCallKind::MaxContent
+                } else {
+                    TestMeasureCallKind::Regular
+                };
+                let regular = profile
+                    .regular
+                    .map_or(Size::ZERO, |measure| measure.measure(constraints));
+                let size = match kind {
+                    TestMeasureCallKind::Regular => regular,
+                    TestMeasureCallKind::MinContent => profile
+                        .min_content
+                        .map_or(regular, |measure| measure.measure(constraints)),
+                    TestMeasureCallKind::MaxContent => profile
+                        .max_content
+                        .map_or(regular, |measure| measure.measure(constraints)),
+                };
+                let size = if size.width.is_finite() && size.height.is_finite() {
+                    size
+                } else {
+                    regular
+                };
+                return (
+                    LeafMetrics::new(size)
+                        .with_first_baselines(Point::new(None, profile.first_baseline)),
+                    Some(TestMeasureCall { kind, constraints }),
+                );
+            }
         };
 
-        LeafMetrics::new(Size::new(
-            input.known_dimensions.width.unwrap_or(measured.size.width),
-            input
-                .known_dimensions
-                .height
-                .unwrap_or(measured.size.height),
-        ))
-        .with_first_baselines(measured.first_baselines)
+        (
+            LeafMetrics::new(Size::new(
+                input.known_dimensions.width.unwrap_or(measured.size.width),
+                input
+                    .known_dimensions
+                    .height
+                    .unwrap_or(measured.size.height),
+            ))
+            .with_first_baselines(measured.first_baselines),
+            None,
+        )
+    }
+}
+
+impl TestRegularMeasure {
+    fn measure(self, constraints: TestConstraints) -> Size<f32> {
+        match self {
+            Self::Fixed(size) => Size::new(
+                constraints.width.clamp(size.width),
+                constraints.height.clamp(size.height),
+            ),
+            Self::HeightFromWidth {
+                intrinsic_width,
+                fallback_height,
+                height_ratio,
+            } => {
+                let width = constraints.width.bounded_size().unwrap_or(intrinsic_width);
+                let height = if constraints.width.bounded_size().is_some() {
+                    width * height_ratio
+                } else {
+                    fallback_height
+                };
+                Size::new(
+                    constraints.width.clamp(width),
+                    constraints.height.clamp(height),
+                )
+            }
+        }
+    }
+}
+
+impl TestIntrinsicMeasure {
+    fn measure(self, constraints: TestConstraints) -> Size<f32> {
+        match self {
+            Self::Fixed(size) => size,
+            Self::WidthFromHeight {
+                fallback_width,
+                width_ratio,
+                height,
+            } => Size::new(
+                constraints
+                    .height
+                    .bounded_size()
+                    .map_or(fallback_width, |value| value * width_ratio),
+                height,
+            ),
+            Self::CrossAxis {
+                fallback_width,
+                width_from_height_ratio,
+                fallback_height,
+                height_from_width_ratio,
+            } => Size::new(
+                constraints
+                    .height
+                    .bounded_size()
+                    .map_or(fallback_width, |value| value * width_from_height_ratio),
+                constraints
+                    .width
+                    .bounded_size()
+                    .map_or(fallback_height, |value| value * height_from_width_ratio),
+            ),
+        }
     }
 }
 
@@ -342,11 +629,12 @@ pub(super) struct TestSourceNode {
     pub(super) first_baseline_override: Option<f32>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub(super) struct TestSessionNode {
     pub(super) layout: Layout,
     pub(super) static_position: Option<Point<f32>>,
     pub(super) output: LayoutOutput,
+    pub(super) measure_calls: Vec<TestMeasureCall>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -448,6 +736,20 @@ impl TestTree {
         })
     }
 
+    pub(super) fn push_grid(&mut self, style: TestStyle, children: Vec<NodeId>) -> NodeId {
+        self.push(TestSourceNode {
+            display: TestDisplay::Grid,
+            style,
+            children,
+            measure: TestMeasure::Intrinsic {
+                min_content_size: Size::ZERO,
+                max_content_size: Size::ZERO,
+                first_baseline: None,
+            },
+            first_baseline_override: None,
+        })
+    }
+
     pub(super) fn push(&mut self, node: TestSourceNode) -> NodeId {
         debug_assert_eq!(self.source.nodes.len(), self.session.nodes.len());
         let id = NodeId::from(self.source.nodes.len());
@@ -531,6 +833,19 @@ impl FlexSource for TestSource {
     }
 }
 
+impl GridSource for TestSource {
+    type ContainerStyle<'a> = &'a TestStyle;
+    type ItemStyle<'a> = &'a TestStyle;
+
+    fn grid_container_style(&self, container: NodeId) -> Self::ContainerStyle<'_> {
+        &self.nodes[usize::from(container)].style
+    }
+
+    fn grid_item_style(&self, item: NodeId) -> Self::ItemStyle<'_> {
+        &self.nodes[usize::from(item)].style
+    }
+}
+
 impl LayoutState for TestSession {
     fn set_unrounded_layout(&mut self, node: NodeId, layout: &Layout) {
         self.layout_writes += 1;
@@ -570,13 +885,17 @@ impl LayoutSession<TestSource> for TestSession {
         let output =
             compute_cached_layout(self, child, input, |session, child, input| match display {
                 TestDisplay::Flex => compute_flexbox_layout(source, session, child, input),
+                TestDisplay::Grid => compute_grid_layout(source, session, child, input),
                 TestDisplay::Leaf => {
                     let style = &node.style;
                     let measure = node.measure;
                     let leaf_measure_calls = &mut session.leaf_measure_calls;
+                    let measure_calls = &mut session.nodes[usize::from(child)].measure_calls;
                     let mut measurer = FnLeafMeasurer::new(|measure_input| {
                         *leaf_measure_calls += 1;
-                        measure.measure(measure_input)
+                        let (metrics, call) = measure.measure(measure_input);
+                        measure_calls.extend(call);
+                        metrics
                     });
                     compute_leaf_layout(
                         input,

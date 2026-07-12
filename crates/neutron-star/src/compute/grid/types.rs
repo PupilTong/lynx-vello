@@ -253,6 +253,35 @@ impl TrackSet {
         (self.end_line_position(end) - self.line_position(start)).max(0.0)
     }
 
+    /// Grid §12.1's cross-axis estimate used while columns are sized before
+    /// rows. A row with a definite max track sizing function contributes
+    /// that maximum; if any row in the span has an indefinite maximum, the
+    /// item's available block space is infinite and therefore has no finite
+    /// area estimate.
+    pub(super) fn definite_max_area_size(
+        &self,
+        start: i32,
+        end: i32,
+        distributed_gap: f32,
+    ) -> Option<f32> {
+        let range = self.span_indices(start, end);
+        let visible = self.tracks[range.clone()]
+            .iter()
+            .filter(|track| !track.collapsed)
+            .count();
+        let mut size = (self.gap + distributed_gap) * visible.saturating_sub(1) as f32;
+        for track in &self.tracks[range] {
+            if track.collapsed {
+                continue;
+            }
+            if !track.growth_limit.is_finite() {
+                return None;
+            }
+            size += track.growth_limit;
+        }
+        Some(size)
+    }
+
     /// Logical position of a grid line from the start of the content box.
     pub(super) fn line_position(&self, coordinate: i32) -> f32 {
         if coordinate <= self.first_coordinate {

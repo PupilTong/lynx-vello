@@ -5,21 +5,26 @@
 use super::types::TrackSet;
 use crate::style::AlignContent;
 
-/// Positions tracks in logical start-to-end order. Inline RTL conversion is
-/// deliberately deferred until child locations are materialized, keeping
-/// placement and sizing coordinate systems identical.
-pub(super) fn align_tracks(tracks: &mut TrackSet, container_size: f32, alignment: AlignContent) {
-    // Positional alignment is unsafe unless the style protocol explicitly
-    // represents a `safe` qualifier (it currently does not), so center/end
-    // retain negative free space and may overflow both edges. Distributed
-    // values use their safe fallback when space is negative.
+pub(super) fn track_alignment_spacing(
+    tracks: &TrackSet,
+    container_size: f32,
+    alignment: AlignContent,
+) -> (f32, f32) {
     let free = container_size - tracks.used_size();
     let visible = tracks
         .tracks
         .iter()
         .filter(|track| !track.collapsed)
         .count();
-    let (offset, distributed_gap) = match alignment {
+    alignment_spacing_from_free_space(free, visible, alignment)
+}
+
+pub(super) fn alignment_spacing_from_free_space(
+    free: f32,
+    visible: usize,
+    alignment: AlignContent,
+) -> (f32, f32) {
+    match alignment {
         AlignContent::End | AlignContent::FlexEnd => (free, 0.0),
         AlignContent::Center => (free / 2.0, 0.0),
         AlignContent::SpaceBetween if visible > 1 && free > 0.0 => {
@@ -39,7 +44,18 @@ pub(super) fn align_tracks(tracks: &mut TrackSet, container_size: f32, alignment
         | AlignContent::SpaceBetween
         | AlignContent::SpaceAround
         | AlignContent::SpaceEvenly => (0.0, 0.0),
-    };
+    }
+}
+
+/// Positions tracks in logical start-to-end order. Inline RTL conversion is
+/// deliberately deferred until child locations are materialized, keeping
+/// placement and sizing coordinate systems identical.
+pub(super) fn align_tracks(tracks: &mut TrackSet, container_size: f32, alignment: AlignContent) {
+    // Positional alignment is unsafe unless the style protocol explicitly
+    // represents a `safe` qualifier (it currently does not), so center/end
+    // retain negative free space and may overflow both edges. Distributed
+    // values use their safe fallback when space is negative.
+    let (offset, distributed_gap) = track_alignment_spacing(tracks, container_size, alignment);
 
     tracks.rebuild_aligned_positions(offset, distributed_gap);
 }

@@ -138,11 +138,42 @@ fn margin_sum(item: &GridItem, axis: Axis) -> f32 {
     axis.sum(item.margin)
 }
 
-fn cross_area_size(item: &GridItem, axis: Axis, cross_tracks: Option<&TrackSet>) -> Option<f32> {
+/// Cross-axis track state available to an intrinsic contribution probe.
+///
+/// Before rows have been sized, Grid §12.1 uses definite maximum row sizes
+/// and treats every other row as infinite. Once an axis has been sized, its
+/// actual aligned grid-area geometry is used instead.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum CrossAxisTracks<'a> {
+    DefiniteMaximums {
+        tracks: &'a TrackSet,
+        distributed_gap: f32,
+    },
+    Resolved(&'a TrackSet),
+}
+
+impl<'a> CrossAxisTracks<'a> {
+    #[inline]
+    pub(super) const fn resolved(tracks: &'a TrackSet) -> Self {
+        Self::Resolved(tracks)
+    }
+}
+
+fn cross_area_size(
+    item: &GridItem,
+    axis: Axis,
+    cross_tracks: Option<CrossAxisTracks<'_>>,
+) -> Option<f32> {
     let cross = axis.other();
-    let tracks = cross_tracks?;
     let span = span_for(item, cross);
-    Some((tracks.area_size(span.start, span.end) - margin_sum(item, cross)).max(0.0))
+    let size = match cross_tracks? {
+        CrossAxisTracks::DefiniteMaximums {
+            tracks,
+            distributed_gap,
+        } => tracks.definite_max_area_size(span.start, span.end, distributed_gap)?,
+        CrossAxisTracks::Resolved(tracks) => tracks.area_size(span.start, span.end),
+    };
+    Some((size - margin_sum(item, cross)).max(0.0))
 }
 
 fn raw_content_size<Source, Session>(
@@ -151,8 +182,8 @@ fn raw_content_size<Source, Session>(
     item: &mut GridItem,
     axis: Axis,
     kind: ContributionKind,
-    cross_tracks: Option<&TrackSet>,
-    inner_size: crate::geometry::Size<Option<f32>>,
+    cross_tracks: Option<CrossAxisTracks<'_>>,
+    _inner_size: crate::geometry::Size<Option<f32>>,
 ) -> f32
 where
     Source: GridSource,
@@ -183,9 +214,7 @@ where
     cross.set_size(&mut known, resolved_cross);
 
     let target_available = available_for(kind);
-    let cross_available = cross_area
-        .or_else(|| cross.size(inner_size))
-        .map_or(AvailableSpace::MaxContent, AvailableSpace::Definite);
+    let cross_available = cross_area.map_or(AvailableSpace::MaxContent, AvailableSpace::Definite);
     let available = match axis {
         Axis::Horizontal => crate::geometry::Size::new(target_available, cross_available),
         Axis::Vertical => crate::geometry::Size::new(cross_available, target_available),
@@ -243,7 +272,7 @@ pub(super) fn probe_raw_min_content<Source, Session>(
     session: &mut Session,
     item: &mut GridItem,
     axis: Axis,
-    cross_tracks: Option<&TrackSet>,
+    cross_tracks: Option<CrossAxisTracks<'_>>,
     inner_size: crate::geometry::Size<Option<f32>>,
 ) -> f32
 where
@@ -266,7 +295,7 @@ pub(super) fn resolve_item_intrinsic_dimensions<Source, Session>(
     session: &mut Session,
     item: &mut GridItem,
     axis: Axis,
-    cross_tracks: Option<&TrackSet>,
+    cross_tracks: Option<CrossAxisTracks<'_>>,
     inner_size: crate::geometry::Size<Option<f32>>,
 ) where
     Source: GridSource,
@@ -351,7 +380,7 @@ fn measure_contribution<Source, Session>(
     axis: Axis,
     kind: ContributionKind,
     tracks: &TrackSet,
-    cross_tracks: Option<&TrackSet>,
+    cross_tracks: Option<CrossAxisTracks<'_>>,
     inner_size: crate::geometry::Size<Option<f32>>,
 ) -> f32
 where
@@ -380,14 +409,7 @@ where
     let preferred_behaves_auto_or_depends = axis.size(item.preferred_behaves_auto_or_depends);
     let mut contribution = match kind {
         ContributionKind::Minimum => {
-            if !preferred_behaves_auto_or_depends {
-                // A definite preferred size defines the box's intrinsic
-                // contribution; overflowing descendants do not enlarge it.
-                preferred.unwrap_or_else(|| {
-                    raw_content_size(source, session, item, axis, kind, cross_tracks, inner_size)
-                        + margin_sum(item, axis)
-                })
-            } else if let Some(minimum) = explicit_min {
+            if let Some(minimum) = explicit_min {
                 minimum
             } else {
                 // Grid §6.6: an automatic minimum is content-based when
@@ -419,6 +441,21 @@ where
                     let suggestion = preferred.map_or(raw_outer, |size| raw_outer.min(size));
                     fixed_max_span_limit(source, axis, tracks, indexes, inner_size)
                         .map_or(suggestion, |limit| suggestion.min(limit))
+                } else if !preferred_behaves_auto_or_depends {
+                    // A definite preferred size defines the box's minimum
+                    // contribution only when Grid's content-based automatic
+                    // minimum does not apply.
+                    preferred.unwrap_or_else(|| {
+                        raw_content_size(
+                            source,
+                            session,
+                            item,
+                            axis,
+                            kind,
+                            cross_tracks,
+                            inner_size,
+                        ) + margin_sum(item, axis)
+                    })
                 } else {
                     axis.sum(item.padding)
                         + axis.sum(item.border)
@@ -516,7 +553,7 @@ fn measure_limited_contribution<Source, Session>(
     axis: Axis,
     kind: ContributionKind,
     tracks: &TrackSet,
-    cross_tracks: Option<&TrackSet>,
+    cross_tracks: Option<CrossAxisTracks<'_>>,
     inner_size: crate::geometry::Size<Option<f32>>,
 ) -> f32
 where
@@ -569,7 +606,7 @@ fn prepare_baseline_shims<Source, Session>(
     session: &mut Session,
     axis: Axis,
     tracks: &TrackSet,
-    cross_tracks: Option<&TrackSet>,
+    cross_tracks: Option<CrossAxisTracks<'_>>,
     items: &mut [GridItem],
     inner_size: crate::geometry::Size<Option<f32>>,
 ) where
@@ -854,7 +891,7 @@ fn run_spanning_base_phase<Source, Session, P>(
     session: &mut Session,
     axis: Axis,
     tracks: &mut TrackSet,
-    cross_tracks: Option<&TrackSet>,
+    cross_tracks: Option<CrossAxisTracks<'_>>,
     items: &mut [GridItem],
     item_indices: &[usize],
     inner_size: crate::geometry::Size<Option<f32>>,
@@ -927,7 +964,7 @@ fn run_spanning_growth_phase<Source, Session, P>(
     session: &mut Session,
     axis: Axis,
     tracks: &mut TrackSet,
-    cross_tracks: Option<&TrackSet>,
+    cross_tracks: Option<CrossAxisTracks<'_>>,
     items: &mut [GridItem],
     item_indices: &[usize],
     inner_size: crate::geometry::Size<Option<f32>>,
@@ -986,7 +1023,7 @@ fn resolve_intrinsic_sizes<Source, Session>(
     session: &mut Session,
     axis: Axis,
     tracks: &mut TrackSet,
-    cross_tracks: Option<&TrackSet>,
+    cross_tracks: Option<CrossAxisTracks<'_>>,
     items: &mut [GridItem],
     inner_size: crate::geometry::Size<Option<f32>>,
     available: AvailableSpace,
@@ -1026,18 +1063,40 @@ fn resolve_intrinsic_sizes<Source, Session>(
                 cross_tracks,
                 inner_size,
             ),
-            MinTrackSizingFunction::Auto
-                if matches!(
-                    available,
-                    AvailableSpace::MinContent | AvailableSpace::MaxContent
-                ) =>
-            {
+            MinTrackSizingFunction::Auto if available == AvailableSpace::MinContent => {
                 measure_limited_contribution(
                     source,
                     session,
                     item,
                     axis,
                     ContributionKind::MinContent,
+                    tracks,
+                    cross_tracks,
+                    inner_size,
+                )
+            }
+            MinTrackSizingFunction::Auto if available == AvailableSpace::MaxContent => {
+                // The max-content constrained branch still performs the
+                // limited min-content probe first. Besides providing the
+                // automatic-minimum floor required by §12.5, this preserves
+                // cross-axis feedback when the two intrinsic contributions
+                // respond differently to the resolved opposite track.
+                let _ = measure_limited_contribution(
+                    source,
+                    session,
+                    item,
+                    axis,
+                    ContributionKind::MinContent,
+                    tracks,
+                    cross_tracks,
+                    inner_size,
+                );
+                measure_limited_contribution(
+                    source,
+                    session,
+                    item,
+                    axis,
+                    ContributionKind::MaxContent,
                     tracks,
                     cross_tracks,
                     inner_size,
@@ -1286,6 +1345,27 @@ fn resolve_intrinsic_sizes<Source, Session>(
     // Step 4 considers every item crossing a flexible track together. The
     // flex-factor weighting includes the specified <1 remainder rule.
     if !crosses_flexible.is_empty() {
+        // Under a max-content constraint, flexible tracks' intrinsic base
+        // growth is driven by the item's max-content contribution. Using the
+        // automatic minimum here loses all contribution for ordinary
+        // measured items and makes sub-unit/zero `fr` tracks collapse before
+        // §12.7 can find a flex fraction.
+        let spanned_flex_sum = crosses_flexible
+            .iter()
+            .flat_map(|&index| {
+                let span = span_for(&items[index], axis);
+                tracks.tracks[tracks.span_indices(span.start, span.end).clone()]
+                    .iter()
+                    .filter(|track| track.is_flexible())
+                    .map(|track| track.flex_factor)
+            })
+            .sum::<f32>();
+        let flexible_base_kind =
+            if available != AvailableSpace::MinContent && spanned_flex_sum < 1.0 {
+                ContributionKind::MaxContent
+            } else {
+                spanning_minimum_kind
+            };
         run_spanning_base_phase(
             source,
             session,
@@ -1295,7 +1375,7 @@ fn resolve_intrinsic_sizes<Source, Session>(
             items,
             &crosses_flexible,
             inner_size,
-            spanning_minimum_kind,
+            flexible_base_kind,
             use_limited_min_content,
             true,
             |track| track.is_flexible(),
@@ -1433,7 +1513,7 @@ fn expand_flexible_tracks<Source, Session>(
     session: &mut Session,
     axis: Axis,
     tracks: &mut TrackSet,
-    cross_tracks: Option<&TrackSet>,
+    cross_tracks: Option<CrossAxisTracks<'_>>,
     items: &mut [GridItem],
     inner_size: crate::geometry::Size<Option<f32>>,
     available: AvailableSpace,
@@ -1533,7 +1613,7 @@ pub(super) fn size_tracks<Source, Session>(
     session: &mut Session,
     axis: Axis,
     tracks: &mut TrackSet,
-    cross_tracks: Option<&TrackSet>,
+    cross_tracks: Option<CrossAxisTracks<'_>>,
     items: &mut [GridItem],
     inner_size: crate::geometry::Size<Option<f32>>,
     available: AvailableSpace,
@@ -1865,6 +1945,45 @@ mod tests {
             first_coordinate: 0,
             collapsed_line_positions: None,
         }
+    }
+
+    #[test]
+    fn initial_column_cross_area_uses_only_definite_row_maximums() {
+        let mut item = test_item(0, 1);
+        item.area.row = TrackSpan { start: 0, end: 2 };
+        item.margin.top = 2.0;
+        item.margin.bottom = 3.0;
+        let mut rows = track_set(vec![test_track(4.0, 10.0), test_track(6.0, 20.0)]);
+        rows.gap = 5.0;
+
+        let estimated = CrossAxisTracks::DefiniteMaximums {
+            tracks: &rows,
+            distributed_gap: 3.0,
+        };
+        assert_eq!(
+            cross_area_size(&item, Axis::Horizontal, Some(estimated)),
+            Some(33.0)
+        );
+
+        rows.tracks[1].growth_limit = f32::INFINITY;
+        let estimated = CrossAxisTracks::DefiniteMaximums {
+            tracks: &rows,
+            distributed_gap: 0.0,
+        };
+        assert_eq!(
+            cross_area_size(&item, Axis::Horizontal, Some(estimated)),
+            None
+        );
+
+        rows.rebuild_positions();
+        assert_eq!(
+            cross_area_size(
+                &item,
+                Axis::Horizontal,
+                Some(CrossAxisTracks::resolved(&rows)),
+            ),
+            Some(10.0)
+        );
     }
 
     #[test]

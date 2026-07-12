@@ -15,16 +15,21 @@ pub(crate) use neutron_star::style::{
     AlignContent, AlignItems, BoxSizing, Direction, FlexDirection, FlexWrap, JustifyContent,
 };
 use neutron_star::style::{
-    BoxGenerationMode, CalcHandle, Dimension, LengthPercentage, LengthPercentageAuto, Position,
+    BoxGenerationMode, CalcHandle, Dimension, GridAutoFlow as NeutronGridAutoFlow, GridLine,
+    GridPlacement, LengthPercentage, LengthPercentageAuto, MaxTrackSizingFunction,
+    MinTrackSizingFunction, Position, TrackSizingFunction,
 };
 
 use crate::support::{
     TestConstraints, TestDisplay, TestMeasure, TestMeasureMode, TestSideConstraint, TestSourceNode,
     TestStyle, TestTree,
 };
+#[allow(unused_imports)] // Individual PR migration targets use different trace subsets.
 pub(crate) use crate::support::{
-    TestConstraints as Constraints, TestMeasureMode as MeasureMode,
-    TestSideConstraint as SideConstraint,
+    TestConstraints as Constraints, TestIntrinsicMeasure as IntrinsicMeasureSpec,
+    TestMeasureCall as MeasureCall, TestMeasureCallKind as MeasureCallKind,
+    TestMeasureMode as MeasureMode, TestMeasureProfile as MeasurementProfile,
+    TestRegularMeasure as RegularMeasure, TestSideConstraint as SideConstraint,
 };
 pub(crate) type Point = neutron_star::geometry::Point<f32>;
 pub(crate) type Size = neutron_star::geometry::Size<f32>;
@@ -66,6 +71,26 @@ pub(crate) enum Visibility {
     Visible,
     Hidden,
     Collapse,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum JustifyItems {
+    Auto,
+    #[default]
+    Stretch,
+    Start,
+    Center,
+    End,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum GridAutoFlow {
+    #[default]
+    Row,
+    Column,
+    Dense,
+    RowDense,
+    ColumnDense,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -148,6 +173,18 @@ impl Length {
         Self::Calc { fixed, percent }
     }
 
+    pub(crate) const fn fr(value: f32) -> Self {
+        Self::Fr(value)
+    }
+
+    pub(crate) const fn min_content() -> Self {
+        Self::MinContent
+    }
+
+    pub(crate) const fn max_content() -> Self {
+        Self::MaxContent
+    }
+
     pub(crate) const fn fit_content(base: Option<BaseLength>) -> Self {
         Self::FitContent(base)
     }
@@ -216,6 +253,8 @@ pub(crate) struct Style {
     pub(crate) align_items: AlignItems,
     pub(crate) align_self: Option<AlignItems>,
     pub(crate) align_content: AlignContent,
+    pub(crate) justify_items: JustifyItems,
+    pub(crate) justify_self: JustifyItems,
     pub(crate) flex_grow: f32,
     pub(crate) flex_shrink: f32,
     pub(crate) flex_basis: Length,
@@ -225,6 +264,19 @@ pub(crate) struct Style {
     pub(crate) linear_orientation: LinearOrientation,
     pub(crate) grid_template_columns: Vec<Length>,
     pub(crate) grid_template_rows: Vec<Length>,
+    pub(crate) grid_template_columns_max: Vec<Length>,
+    pub(crate) grid_template_rows_max: Vec<Length>,
+    pub(crate) grid_auto_columns: Vec<Length>,
+    pub(crate) grid_auto_rows: Vec<Length>,
+    pub(crate) grid_auto_columns_max: Vec<Length>,
+    pub(crate) grid_auto_rows_max: Vec<Length>,
+    pub(crate) grid_auto_flow: GridAutoFlow,
+    pub(crate) grid_column_start: Option<i32>,
+    pub(crate) grid_column_end: Option<i32>,
+    pub(crate) grid_row_start: Option<i32>,
+    pub(crate) grid_row_end: Option<i32>,
+    pub(crate) grid_column_span: usize,
+    pub(crate) grid_row_span: usize,
 }
 
 impl Default for Style {
@@ -255,6 +307,8 @@ impl Default for Style {
             align_items: AlignItems::Stretch,
             align_self: None,
             align_content: AlignContent::Stretch,
+            justify_items: JustifyItems::Stretch,
+            justify_self: JustifyItems::Auto,
             flex_grow: 0.0,
             flex_shrink: 1.0,
             flex_basis: Length::Auto,
@@ -264,6 +318,19 @@ impl Default for Style {
             linear_orientation: LinearOrientation::Vertical,
             grid_template_columns: Vec::new(),
             grid_template_rows: Vec::new(),
+            grid_template_columns_max: Vec::new(),
+            grid_template_rows_max: Vec::new(),
+            grid_auto_columns: Vec::new(),
+            grid_auto_rows: Vec::new(),
+            grid_auto_columns_max: Vec::new(),
+            grid_auto_rows_max: Vec::new(),
+            grid_auto_flow: GridAutoFlow::Row,
+            grid_column_start: None,
+            grid_column_end: None,
+            grid_row_start: None,
+            grid_row_end: None,
+            grid_column_span: 1,
+            grid_row_span: 1,
         }
     }
 }
@@ -288,6 +355,8 @@ pub(crate) struct SimpleNode {
     measured_size: Option<Size>,
     measure_func: Option<SimpleMeasureFunc>,
     baseline: Option<f32>,
+    measurement_profile: Option<MeasurementProfile>,
+    measure_trace: Vec<MeasureCall>,
 }
 
 impl SimpleNode {
@@ -299,6 +368,8 @@ impl SimpleNode {
             measured_size: None,
             measure_func: None,
             baseline: None,
+            measurement_profile: None,
+            measure_trace: Vec::new(),
         }
     }
 
@@ -355,10 +426,28 @@ pub(crate) trait LayoutTree {
     fn children(&self, node: Self::NodeId) -> Self::Children<'_>;
     fn style(&self, node: Self::NodeId) -> &Style;
     fn set_layout(&mut self, node: Self::NodeId, layout: LayoutResult);
-    fn layout(&self, node: Self::NodeId) -> Option<LayoutResult>;
+    fn layout(&self, _node: Self::NodeId) -> Option<LayoutResult> {
+        None
+    }
 
     fn measure(&mut self, _node: Self::NodeId, _constraints: Constraints) -> Option<Size> {
         None
+    }
+
+    fn measure_min_content(
+        &mut self,
+        node: Self::NodeId,
+        constraints: Constraints,
+    ) -> Option<Size> {
+        self.measure(node, constraints)
+    }
+
+    fn measure_max_content(
+        &mut self,
+        node: Self::NodeId,
+        constraints: Constraints,
+    ) -> Option<Size> {
+        self.measure(node, constraints)
     }
 
     fn has_measure(&self, _node: Self::NodeId) -> bool {
@@ -372,6 +461,12 @@ pub(crate) trait LayoutTree {
     fn baseline(&self, _node: Self::NodeId, _content_size: Size) -> Option<f32> {
         None
     }
+
+    fn measurement_profile(&self, _node: Self::NodeId) -> Option<MeasurementProfile> {
+        None
+    }
+
+    fn set_measure_trace(&mut self, _node: Self::NodeId, _trace: &[MeasureCall]) {}
 }
 
 impl LayoutTree for SimpleTree {
@@ -411,6 +506,15 @@ impl LayoutTree for SimpleTree {
     fn baseline(&self, node: Self::NodeId, _content_size: Size) -> Option<f32> {
         self.nodes[node].baseline
     }
+
+    fn measurement_profile(&self, node: Self::NodeId) -> Option<MeasurementProfile> {
+        self.nodes[node].measurement_profile
+    }
+
+    fn set_measure_trace(&mut self, node: Self::NodeId, trace: &[MeasureCall]) {
+        self.nodes[node].measure_trace.clear();
+        self.nodes[node].measure_trace.extend_from_slice(trace);
+    }
 }
 
 fn dimension(tree: &mut TestTree, value: Length) -> Dimension {
@@ -442,6 +546,20 @@ fn minimum_dimension(tree: &mut TestTree, value: Length) -> Dimension {
 fn maximum_dimension(tree: &mut TestTree, value: Length) -> Dimension {
     if value == Length::FitContent(None) {
         Dimension::Auto
+    } else {
+        dimension(tree, value)
+    }
+}
+
+fn preferred_dimension(tree: &mut TestTree, value: Length, position: PositionType) -> Dimension {
+    if matches!(position, PositionType::Absolute | PositionType::Fixed)
+        && matches!(value, Length::FitContent(_))
+    {
+        // PR #25's positioned Grid path treats `fit-content(...)` as the
+        // legacy uncapped intrinsic keyword. Keep that source-fixture quirk
+        // in the compatibility adapter; neutron-star's production protocol
+        // retains standards-oriented `Dimension::FitContent` semantics.
+        Dimension::MaxContent
     } else {
         dimension(tree, value)
     }
@@ -484,14 +602,149 @@ fn length_percentage_auto(tree: &mut TestTree, value: Length) -> LengthPercentag
     }
 }
 
+fn min_track_sizing(tree: &mut TestTree, value: Length) -> MinTrackSizingFunction {
+    match value {
+        Length::Points(_) | Length::Percent(_) | Length::Calc { .. } => {
+            MinTrackSizingFunction::Fixed(length_percentage(tree, value))
+        }
+        Length::MinContent => MinTrackSizingFunction::MinContent,
+        Length::MaxContent => MinTrackSizingFunction::MaxContent,
+        // `<flex>` and `fit-content()` are invalid minimums in `minmax()`;
+        // source fixtures only use them in the single/max position, whose
+        // expansion is handled by `track_sizing` below.
+        Length::Auto | Length::Fr(_) | Length::FitContent(_) => MinTrackSizingFunction::Auto,
+    }
+}
+
+fn max_track_sizing(tree: &mut TestTree, value: Length) -> MaxTrackSizingFunction {
+    match value {
+        Length::Points(_) | Length::Percent(_) | Length::Calc { .. } => {
+            MaxTrackSizingFunction::Fixed(length_percentage(tree, value))
+        }
+        Length::Auto | Length::FitContent(None) => MaxTrackSizingFunction::Auto,
+        Length::MinContent => MaxTrackSizingFunction::MinContent,
+        Length::MaxContent => MaxTrackSizingFunction::MaxContent,
+        Length::Fr(factor) => MaxTrackSizingFunction::Fr(factor),
+        Length::FitContent(Some(base)) => {
+            MaxTrackSizingFunction::FitContent(length_percentage_from_base(tree, base))
+        }
+    }
+}
+
+fn track_sizing(
+    tree: &mut TestTree,
+    minimum: Length,
+    maximum: Option<Length>,
+) -> TrackSizingFunction {
+    if let Some(maximum) = maximum {
+        return TrackSizingFunction::minmax(
+            min_track_sizing(tree, minimum),
+            max_track_sizing(tree, maximum),
+        );
+    }
+    match minimum {
+        Length::Points(_) | Length::Percent(_) | Length::Calc { .. } => {
+            TrackSizingFunction::fixed(length_percentage(tree, minimum))
+        }
+        Length::Auto | Length::FitContent(None) => TrackSizingFunction::AUTO,
+        Length::MinContent => TrackSizingFunction::minmax(
+            MinTrackSizingFunction::MinContent,
+            MaxTrackSizingFunction::MinContent,
+        ),
+        Length::MaxContent => TrackSizingFunction::minmax(
+            MinTrackSizingFunction::MaxContent,
+            MaxTrackSizingFunction::MaxContent,
+        ),
+        Length::Fr(factor) => TrackSizingFunction::fr(factor),
+        Length::FitContent(Some(base)) => {
+            TrackSizingFunction::fit_content(length_percentage_from_base(tree, base))
+        }
+    }
+}
+
+fn track_list(
+    tree: &mut TestTree,
+    minimums: &[Length],
+    maximums: &[Length],
+) -> Vec<TrackSizingFunction> {
+    minimums
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, minimum)| track_sizing(tree, minimum, maximums.get(index).copied()))
+        .collect()
+}
+
+fn grid_flow(flow: GridAutoFlow) -> NeutronGridAutoFlow {
+    match flow {
+        GridAutoFlow::Row => NeutronGridAutoFlow::Row,
+        GridAutoFlow::Column => NeutronGridAutoFlow::Column,
+        GridAutoFlow::Dense | GridAutoFlow::RowDense => NeutronGridAutoFlow::RowDense,
+        GridAutoFlow::ColumnDense => NeutronGridAutoFlow::ColumnDense,
+    }
+}
+
+fn grid_line(value: i32) -> GridPlacement {
+    let value = i16::try_from(value).expect("PR #25 numeric grid line fits i16");
+    GridPlacement::Line(GridLine::new(value))
+}
+
+fn grid_span(value: usize) -> GridPlacement {
+    GridPlacement::Span(u16::try_from(value).expect("PR #25 numeric grid span fits u16"))
+}
+
+fn grid_placement(
+    start: Option<i32>,
+    end: Option<i32>,
+    span: usize,
+    position: PositionType,
+) -> Line<GridPlacement> {
+    let positioned = matches!(position, PositionType::Absolute | PositionType::Fixed);
+    let start_placement = start.map_or_else(
+        || {
+            if end.is_some() && span > 1 {
+                grid_span(span)
+            } else {
+                GridPlacement::Auto
+            }
+        },
+        grid_line,
+    );
+    let end_placement = end.map_or_else(
+        || {
+            if span > 1 || (start.is_some() && !positioned) {
+                grid_span(span)
+            } else {
+                GridPlacement::Auto
+            }
+        },
+        grid_line,
+    );
+    Line::new(start_placement, end_placement)
+}
+
+fn justify_item(value: JustifyItems) -> Option<AlignItems> {
+    match value {
+        JustifyItems::Auto => None,
+        JustifyItems::Stretch => Some(AlignItems::Stretch),
+        JustifyItems::Start => Some(AlignItems::Start),
+        JustifyItems::Center => Some(AlignItems::Center),
+        JustifyItems::End => Some(AlignItems::End),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
 fn convert_style(tree: &mut TestTree, style: &Style, has_children: bool) -> TestStyle {
     let display_mode = match style.display {
         Display::None => BoxGenerationMode::None,
         _ => BoxGenerationMode::Normal,
     };
     let position = match style.position {
-        PositionType::Absolute => Position::Absolute,
-        PositionType::Fixed => Position::AbsoluteHoisted,
+        // PR #25's Rust Grid suite exercises fixed children through Grid's
+        // direct out-of-flow area path. Lower that source fixture to
+        // `Absolute`; neutron-star's real `fixed` integration remains the
+        // host-owned hoisted positioned pass and is tested separately.
+        PositionType::Absolute | PositionType::Fixed => Position::Absolute,
         PositionType::Static | PositionType::Relative | PositionType::Sticky => Position::Relative,
     };
     let flex_direction = match style.display {
@@ -499,6 +752,18 @@ fn convert_style(tree: &mut TestTree, style: &Style, has_children: bool) -> Test
         Display::Block | Display::Relative | Display::Grid if has_children => FlexDirection::Column,
         _ => style.flex_direction,
     };
+    let template_columns = track_list(
+        tree,
+        &style.grid_template_columns,
+        &style.grid_template_columns_max,
+    );
+    let template_rows = track_list(
+        tree,
+        &style.grid_template_rows,
+        &style.grid_template_rows_max,
+    );
+    let auto_columns = track_list(tree, &style.grid_auto_columns, &style.grid_auto_columns_max);
+    let auto_rows = track_list(tree, &style.grid_auto_rows, &style.grid_auto_rows_max);
     TestStyle {
         box_generation_mode: display_mode,
         visibility: match style.visibility {
@@ -513,7 +778,10 @@ fn convert_style(tree: &mut TestTree, style: &Style, has_children: bool) -> Test
             top: length_percentage_auto(tree, style.top),
             bottom: length_percentage_auto(tree, style.bottom),
         },
-        size: NSize::new(dimension(tree, style.width), dimension(tree, style.height)),
+        size: NSize::new(
+            preferred_dimension(tree, style.width, style.position),
+            preferred_dimension(tree, style.height, style.position),
+        ),
         min_size: NSize::new(
             minimum_dimension(tree, style.min_width),
             minimum_dimension(tree, style.min_height),
@@ -565,31 +833,90 @@ fn convert_style(tree: &mut TestTree, style: &Style, has_children: bool) -> Test
         flex_shrink: style.flex_shrink,
         align_self: style.align_self,
         order: style.order,
+        template_columns,
+        template_rows,
+        auto_columns,
+        auto_rows,
+        auto_flow: grid_flow(style.grid_auto_flow),
+        justify_items: justify_item(style.justify_items),
+        justify_self: justify_item(style.justify_self),
+        grid_column: grid_placement(
+            style.grid_column_start,
+            style.grid_column_end,
+            style.grid_column_span,
+            style.position,
+        ),
+        grid_row: grid_placement(
+            style.grid_row_start,
+            style.grid_row_end,
+            style.grid_row_span,
+            style.position,
+        ),
         ..TestStyle::default()
     }
 }
 
 fn lower_tree(tree: &SimpleTree) -> TestTree {
     let mut lowered = TestTree::default();
+    let mut grid_child = vec![false; tree.nodes.len()];
     for node in &tree.nodes {
+        if node.style.display == Display::Grid {
+            for &child in &node.children {
+                grid_child[child] = true;
+            }
+        }
+    }
+    for (node_index, node) in tree.nodes.iter().enumerate() {
         let style = convert_style(&mut lowered, &node.style, !node.children.is_empty());
-        let display = if node.style.display == Display::Flex
-            || (node.style.display != Display::None && !node.children.is_empty())
-        {
-            TestDisplay::Flex
-        } else {
-            TestDisplay::Leaf
+        let display = match node.style.display {
+            Display::Grid => TestDisplay::Grid,
+            Display::Flex => TestDisplay::Flex,
+            Display::Block | Display::Linear | Display::Relative if !node.children.is_empty() => {
+                TestDisplay::Flex
+            }
+            Display::None | Display::Block | Display::Linear | Display::Relative => {
+                TestDisplay::Leaf
+            }
         };
-        let measure = if let Some(measure) = node.measure_func {
+        let measure = if let Some(profile) = node.measurement_profile {
+            TestMeasure::Profile(profile)
+        } else if let Some(measure) = node.measure_func {
             TestMeasure::ConstraintFunction {
                 measure,
                 baseline: None,
             }
-        } else {
-            let intrinsic = node.measured_size.unwrap_or(Size::ZERO);
+        } else if let Some(intrinsic) = node.measured_size
+            && grid_child[node_index]
+        {
+            let minimum = Size::new(
+                match node.style.min_width {
+                    Length::Points(value) => value,
+                    _ => 0.0,
+                },
+                match node.style.min_height {
+                    Length::Points(value) => value,
+                    _ => 0.0,
+                },
+            );
+            TestMeasure::Profile(MeasurementProfile {
+                regular: Some(RegularMeasure::Fixed(intrinsic)),
+                min_content: Some(IntrinsicMeasureSpec::Fixed(minimum)),
+                max_content: Some(IntrinsicMeasureSpec::Fixed(intrinsic)),
+                first_baseline: node.baseline,
+            })
+        } else if let Some(intrinsic) = node.measured_size {
+            // Preserve the pre-Grid PR adapter contract for Flex and foreign
+            // layout children: a fixed measurement is also their min- and
+            // max-content contribution.
             TestMeasure::Intrinsic {
                 min_content_size: intrinsic,
                 max_content_size: intrinsic,
+                first_baseline: node.baseline,
+            }
+        } else {
+            TestMeasure::Intrinsic {
+                min_content_size: Size::ZERO,
+                max_content_size: Size::ZERO,
                 first_baseline: node.baseline,
             }
         };
@@ -614,6 +941,18 @@ fn lower_tree(tree: &SimpleTree) -> TestTree {
     for (index, node) in tree.nodes.iter().enumerate() {
         lowered.source.nodes[index].children =
             node.children.iter().copied().map(NodeId::from).collect();
+        if node.style.display == Display::Grid {
+            for &child in &node.children {
+                // PR #25's Grid fixture surface has no overflow property.
+                // Use CSS's visible initial value so the automatic-minimum
+                // rules remain Grid-correct; Flex fixtures retain the Lynx
+                // computed hidden default supplied above.
+                lowered.source.nodes[child].style.overflow = neutron_star::geometry::Point::new(
+                    neutron_star::style::Overflow::Visible,
+                    neutron_star::style::Overflow::Visible,
+                );
+            }
+        }
     }
     lowered
 }
@@ -625,13 +964,21 @@ fn constraint_space(side: SideConstraint) -> AvailableSpace {
     }
 }
 
-fn known_dimensions(constraints: Constraints, owner_constraints: bool) -> NSize<Option<f32>> {
+fn known_dimensions(
+    constraints: Constraints,
+    owner_constraints: bool,
+    style: &Style,
+) -> NSize<Option<f32>> {
     if owner_constraints {
         return NSize::NONE;
     }
     NSize::new(
-        (constraints.width.mode == MeasureMode::Definite).then_some(constraints.width.size),
-        (constraints.height.mode == MeasureMode::Definite).then_some(constraints.height.size),
+        (constraints.width.mode == MeasureMode::Definite
+            && (style.display != Display::Grid || style.width == Length::Auto))
+            .then_some(constraints.width.size),
+        (constraints.height.mode == MeasureMode::Definite
+            && (style.display != Display::Grid || style.height == Length::Auto))
+            .then_some(constraints.height.size),
     )
 }
 
@@ -647,14 +994,12 @@ fn run_simple_layout(
         constraint_space(constraints.height),
     );
     let root_id = NodeId::from(root);
+    let known_dimensions =
+        known_dimensions(constraints, owner_constraints, &tree.nodes[root].style);
     let output = lowered.session.compute_child_layout(
         &lowered.source,
         root_id,
-        LayoutInput::perform_layout(
-            known_dimensions(constraints, owner_constraints),
-            available.into_options(),
-            available,
-        ),
+        LayoutInput::perform_layout(known_dimensions, available.into_options(), available),
     );
 
     for (index, node) in tree.nodes.iter_mut().enumerate() {
@@ -686,6 +1031,9 @@ fn run_simple_layout(
                 session.layout.margin.bottom,
             ),
         };
+        node.measure_trace.clear();
+        node.measure_trace
+            .extend_from_slice(&lowered.session.nodes[index].measure_calls);
     }
     tree.nodes[root].layout.size = output.size;
     tree.nodes[root].layout.baseline = output.first_baselines.y;
@@ -739,11 +1087,13 @@ fn run_layout_tree<T: LayoutTree>(
         let children = tree.children(node).collect::<Vec<_>>();
         let has_measure = tree.has_measure(node);
         let measure_func = tree.measure_func(node);
-        let measured_size = if has_measure && measure_func.is_none() {
-            tree.measure(node, Constraints::indefinite())
-        } else {
-            None
-        };
+        let measurement_profile = tree.measurement_profile(node);
+        let measured_size =
+            if has_measure && measure_func.is_none() && measurement_profile.is_none() {
+                tree.measure(node, Constraints::indefinite())
+            } else {
+                None
+            };
         let baseline = measured_size.and_then(|size| tree.baseline(node, size));
         let mapped = snapshot.push(SimpleNode {
             style,
@@ -752,6 +1102,8 @@ fn run_layout_tree<T: LayoutTree>(
             measured_size,
             measure_func,
             baseline,
+            measurement_profile,
+            measure_trace: Vec::new(),
         });
         node_map.insert(node, mapped);
 
@@ -768,6 +1120,7 @@ fn run_layout_tree<T: LayoutTree>(
     let size = run_simple_layout(&mut snapshot, mapped_root, constraints, owner_constraints);
     for (node, mapped) in node_map {
         tree.set_layout(node, snapshot.nodes[mapped].layout);
+        tree.set_measure_trace(node, &snapshot.nodes[mapped].measure_trace);
     }
     size
 }

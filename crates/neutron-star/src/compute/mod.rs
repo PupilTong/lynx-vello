@@ -98,10 +98,10 @@ pub use leaf::{
 
 use self::util::{
     apply_box_sizing, auto_edges_to_zero, clamp, resolve_edges, resolve_insets,
-    resolve_optional_edges, resolve_size, scrollbar_size,
+    resolve_length_percentage, resolve_optional_edges, resolve_size, scrollbar_size,
 };
 use crate::geometry::{Edges, Point, Size};
-use crate::style::{BoxGenerationMode, CoreStyle, Direction};
+use crate::style::{BoxGenerationMode, CoreStyle, Dimension, Direction};
 use crate::tree::{
     AvailableSpace, CacheState, Layout, LayoutInput, LayoutOutput, LayoutSession, LayoutSource,
     LayoutState, NodeId, RoundState, TraverseTree,
@@ -326,6 +326,7 @@ where
         padding,
         border,
         scrollbar_size,
+        preferred_available,
         direction,
         ..
     } = resolved_style;
@@ -347,8 +348,12 @@ where
             known_dimensions,
             parent_size,
             Size::new(
-                AvailableSpace::Definite(inset_modified_size.width),
-                AvailableSpace::Definite(inset_modified_size.height),
+                preferred_available
+                    .width
+                    .unwrap_or(AvailableSpace::Definite(inset_modified_size.width)),
+                preferred_available
+                    .height
+                    .unwrap_or(AvailableSpace::Definite(inset_modified_size.height)),
             ),
         ),
     );
@@ -403,6 +408,12 @@ struct ResolvedAbsoluteStyle {
     padding: Edges<f32>,
     border: Edges<f32>,
     scrollbar_size: Size<f32>,
+    /// Intrinsic preferred sizes must be measured in their own sizing mode;
+    /// the inset-modified containing block is only the fallback available
+    /// space for `auto`. A definite fit-content limit is retained here even
+    /// though `resolve_size` deliberately leaves intrinsic dimensions
+    /// unresolved.
+    preferred_available: Size<Option<AvailableSpace>>,
     auto_size: Size<bool>,
     min_size: Size<Option<f32>>,
     max_size: Size<Option<f32>>,
@@ -465,6 +476,13 @@ fn resolve_absolute_style<Source: LayoutSource>(
         padding.vertical_sum() + border.vertical_sum(),
     );
     let style_size = style.size();
+    let preferred_available = style_size.zip_map(parent_size, |dimension, basis| match dimension {
+        Dimension::MinContent => Some(AvailableSpace::MinContent),
+        Dimension::MaxContent => Some(AvailableSpace::MaxContent),
+        Dimension::FitContent(limit) => resolve_length_percentage(limit, basis, &resolve_calc)
+            .map(|limit| AvailableSpace::Definite(limit.max(0.0))),
+        Dimension::Length(_) | Dimension::Percent(_) | Dimension::Calc(_) | Dimension::Auto => None,
+    });
     let resolved_style_size = apply_box_sizing(
         resolve_size(style_size, parent_size, &resolve_calc),
         style.box_sizing(),
@@ -487,6 +505,7 @@ fn resolve_absolute_style<Source: LayoutSource>(
         padding,
         border,
         scrollbar_size: scrollbar_size(&style),
+        preferred_available,
         auto_size: Size::new(
             style_size.width.is_auto() && resolved_style_size.width.is_none(),
             style_size.height.is_auto() && resolved_style_size.height.is_none(),
@@ -778,6 +797,7 @@ mod tests {
             padding: Edges::ZERO,
             border: Edges::ZERO,
             scrollbar_size: Size::ZERO,
+            preferred_available: Size::new(None, None),
             auto_size: Size::new(true, true),
             min_size: Size::new(Some(20.0), Some(10.0)),
             max_size: Size::new(Some(90.0), Some(60.0)),
