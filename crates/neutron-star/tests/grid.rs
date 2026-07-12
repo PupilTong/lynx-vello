@@ -1011,7 +1011,7 @@ fn auto_fill_keeps_empty_tracks_while_auto_fit_collapses_them() {
 }
 
 #[test]
-fn auto_fit_collapses_gutters_on_both_sides_of_an_empty_track() {
+fn auto_fit_collapsed_track_gutters_coincide() {
     let mut tree = TestTree::default();
     let mut first_style = fixed_leaf_style(10.0, 10.0);
     first_style.grid_column = placement(line(1), line(2));
@@ -1031,8 +1031,67 @@ fn auto_fit_collapses_gutters_on_both_sides_of_an_empty_track() {
     definite_layout(&mut tree, root, 190.0, 20.0);
 
     assert_close(tree.layout(first).location.x, 0.0);
-    // Track 2 is empty and collapsed, including both adjoining gutters.
-    assert_close(tree.layout(third).location.x, 40.0);
+    // Track 2 is empty and collapsed. Its two adjoining gutters coincide,
+    // leaving exactly one 10px gutter between the surviving tracks.
+    assert_close(tree.layout(third).location.x, 50.0);
+}
+
+#[test]
+fn auto_fit_spanning_area_crosses_one_coincident_gutter() {
+    let mut tree = TestTree::default();
+    let mut first_style = fixed_leaf_style(10.0, 10.0);
+    first_style.grid_column = placement(line(1), line(2));
+    first_style.grid_row = placement(line(1), line(2));
+    let first = tree.push_leaf(first_style, Size::new(10.0, 10.0), Size::new(10.0, 10.0));
+    let mut third_style = fixed_leaf_style(10.0, 10.0);
+    third_style.grid_column = placement(line(3), line(4));
+    third_style.grid_row = placement(line(1), line(2));
+    let third = tree.push_leaf(third_style, Size::new(10.0, 10.0), Size::new(10.0, 10.0));
+    let spanning_style = TestStyle {
+        position: Position::Absolute,
+        inset: Edges::uniform(LengthPercentageAuto::ZERO),
+        grid_column: placement(line(1), line(4)),
+        grid_row: placement(line(1), line(2)),
+        ..TestStyle::default()
+    };
+    let spanning = tree.push_leaf(spanning_style, Size::ZERO, Size::ZERO);
+    let mut style = grid_style(&[], &[px(20.0)]);
+    style.template_columns = vec![repeat(RepetitionCount::AutoFit, vec![px(40.0)])];
+    style.gap.width = LengthPercentage::length(10.0);
+    style.justify_items = Some(JustifyItems::Start);
+    style.align_items = Some(AlignItems::Start);
+    let root = tree.push_grid(style, vec![first, third, spanning]);
+
+    definite_layout(&mut tree, root, 190.0, 20.0);
+
+    assert_close(tree.layout(third).location.x, 50.0);
+    assert_point(tree.layout(spanning).location, Point::ZERO);
+    assert_size(tree.layout(spanning).size, Size::new(90.0, 20.0));
+}
+
+#[test]
+fn auto_fit_collapsed_gutters_overlap_distributed_alignment_space() {
+    let mut tree = TestTree::default();
+    let mut first_style = fixed_leaf_style(10.0, 10.0);
+    first_style.grid_column = placement(line(1), line(2));
+    let first = tree.push_leaf(first_style, Size::new(10.0, 10.0), Size::new(10.0, 10.0));
+    let mut third_style = fixed_leaf_style(10.0, 10.0);
+    third_style.grid_column = placement(line(3), line(4));
+    let third = tree.push_leaf(third_style, Size::new(10.0, 10.0), Size::new(10.0, 10.0));
+    let mut style = grid_style(&[], &[px(20.0)]);
+    style.template_columns = vec![repeat(RepetitionCount::AutoFit, vec![px(40.0)])];
+    style.gap.width = LengthPercentage::length(10.0);
+    style.justify_content = Some(JustifyContent::SpaceBetween);
+    style.justify_items = Some(JustifyItems::Start);
+    style.align_items = Some(AlignItems::Start);
+    let root = tree.push_grid(style, vec![first, third]);
+
+    definite_layout(&mut tree, root, 190.0, 20.0);
+
+    // The ordinary 10px gutter and all 100px distributed alignment space
+    // overlap across the collapsed track instead of disappearing.
+    assert_close(tree.layout(first).location.x, 0.0);
+    assert_close(tree.layout(third).location.x, 150.0);
 }
 
 #[test]
@@ -1293,6 +1352,43 @@ fn rtl_flips_the_inline_track_axis_and_auto_placement_start() {
 }
 
 #[test]
+fn rtl_container_uses_container_start_for_stretch_and_item_start_for_baseline() {
+    let mut tree = TestTree::default();
+    // The default justify-self is stretch, but a definite width prevents
+    // stretching, so it falls back to the RTL container's right start edge.
+    let default_stretch = fixed_leaf(&mut tree, 20.0, 10.0);
+    let mut ltr_baseline_style = fixed_leaf_style(20.0, 10.0);
+    ltr_baseline_style.grid_row = placement(line(2), line(3));
+    ltr_baseline_style.justify_self = Some(JustifySelf::Baseline);
+    let ltr_baseline = tree.push_leaf(
+        ltr_baseline_style,
+        Size::new(20.0, 10.0),
+        Size::new(20.0, 10.0),
+    );
+    let mut rtl_baseline_style = fixed_leaf_style(20.0, 10.0);
+    rtl_baseline_style.direction = Direction::Rtl;
+    rtl_baseline_style.grid_row = placement(line(3), line(4));
+    rtl_baseline_style.justify_self = Some(JustifySelf::Baseline);
+    let rtl_baseline = tree.push_leaf(
+        rtl_baseline_style,
+        Size::new(20.0, 10.0),
+        Size::new(20.0, 10.0),
+    );
+    let mut style = grid_style(&[px(100.0)], &[px(20.0), px(20.0), px(20.0)]);
+    style.direction = Direction::Rtl;
+    style.align_items = Some(AlignItems::Start);
+    let root = tree.push_grid(style, vec![default_stretch, ltr_baseline, rtl_baseline]);
+
+    definite_layout(&mut tree, root, 100.0, 60.0);
+
+    assert_point(tree.layout(default_stretch).location, Point::new(80.0, 0.0));
+    // First-baseline falls back to safe self-start. The LTR item's start is
+    // left even though its alignment container is RTL; the RTL item's is right.
+    assert_point(tree.layout(ltr_baseline).location, Point::new(0.0, 20.0));
+    assert_point(tree.layout(rtl_baseline).location, Point::new(80.0, 40.0));
+}
+
+#[test]
 fn order_sort_is_stable_and_recorded_in_layouts() {
     let mut tree = TestTree::default();
     let mut first_style = fixed_leaf_style(10.0, 10.0);
@@ -1488,6 +1584,46 @@ fn absolute_static_fallback_uses_content_box_not_selected_grid_area() {
 }
 
 #[test]
+fn baseline_static_fallback_uses_self_start_and_safe_container_start() {
+    let mut tree = TestTree::default();
+    let mut ltr_style = fixed_leaf_style(120.0, 10.0);
+    ltr_style.position = Position::AbsoluteHoisted;
+    ltr_style.justify_self = Some(JustifySelf::Baseline);
+    let ltr = tree.push_leaf(ltr_style, Size::new(120.0, 10.0), Size::new(120.0, 10.0));
+    let mut rtl_style = fixed_leaf_style(20.0, 10.0);
+    rtl_style.position = Position::AbsoluteHoisted;
+    rtl_style.justify_self = Some(JustifySelf::Baseline);
+    rtl_style.direction = Direction::Rtl;
+    let rtl = tree.push_leaf(rtl_style, Size::new(20.0, 10.0), Size::new(20.0, 10.0));
+    let mut style = grid_style(&[], &[]);
+    style.direction = Direction::Rtl;
+    let root = tree.push_grid(style, vec![ltr, rtl]);
+
+    definite_layout(&mut tree, root, 100.0, 50.0);
+
+    // Positive free space uses the RTL item's own inline start. The wider
+    // LTR item overflows, so `safe self-start` instead falls back to the RTL
+    // container's start edge and keeps the item's right edge at 100px.
+    assert_eq!(
+        tree.session_node(ltr).static_position,
+        Some(Point::new(-20.0, 0.0))
+    );
+    assert_eq!(
+        tree.session_node(rtl).static_position,
+        Some(Point::new(80.0, 0.0))
+    );
+    let static_position = tree.session_node(rtl).static_position.unwrap();
+    let positioned = compute_absolute_layout(
+        &tree.source,
+        &mut tree.session,
+        rtl,
+        Size::new(100.0, 50.0),
+        static_position,
+    );
+    assert_point(positioned.location, Point::new(80.0, 0.0));
+}
+
+#[test]
 fn hoisted_absolute_records_grid_aware_static_position_for_positioned_pass() {
     let mut tree = TestTree::default();
     let mut child_style = fixed_leaf_style(20.0, 10.0);
@@ -1653,6 +1789,92 @@ fn min_content_layout(tree: &mut TestTree, root: NodeId) -> LayoutOutput {
         root,
         LayoutInput::perform_layout(Size::NONE, Size::NONE, Size::MIN_CONTENT),
     )
+}
+
+#[test]
+fn min_content_constraint_uses_zero_flex_fraction() {
+    let mut tree = TestTree::default();
+    let item = intrinsic_leaf(&mut tree, Size::new(20.0, 10.0), Size::new(80.0, 10.0));
+    let root = tree.push_grid(grid_style(&[fr(1.0)], &[px(10.0)]), vec![item]);
+
+    let output = min_content_layout(&mut tree, root);
+
+    // Grid §12.7 fixes the flex fraction at zero under a min-content
+    // constraint. The track keeps its 20px intrinsic base instead of taking
+    // the indefinite/max-content branch and growing to 80px.
+    assert_size(output.size, Size::new(20.0, 10.0));
+    assert_size(tree.layout(item).size, Size::new(20.0, 10.0));
+}
+
+#[test]
+fn automatic_minimum_is_clamped_by_a_fixed_max_track() {
+    let mut tree = TestTree::default();
+    let item = intrinsic_leaf(&mut tree, Size::new(200.0, 10.0), Size::new(200.0, 10.0));
+    let bounded = TrackSizingFunction::minmax(
+        MinTrackSizingFunction::Auto,
+        MaxTrackSizingFunction::Fixed(LengthPercentage::length(50.0)),
+    );
+    let root = tree.push_grid(grid_style(&[bounded], &[px(10.0)]), vec![item]);
+
+    let output = min_content_layout(&mut tree, root);
+
+    // Grid §6.6 clamps the content-based automatic minimum to the grid
+    // area's fixed maximum even though the item's min-content width is 200px.
+    assert_size(output.size, Size::new(50.0, 10.0));
+    assert_size(tree.layout(item).size, Size::new(50.0, 10.0));
+}
+
+#[test]
+fn spanning_fixed_maximum_limit_includes_the_interior_gap() {
+    let mut tree = TestTree::default();
+    let item_style = TestStyle {
+        grid_column: placement(line(1), line(3)),
+        grid_row: placement(line(1), line(2)),
+        ..TestStyle::default()
+    };
+    let item = tree.push_leaf(item_style, Size::new(200.0, 10.0), Size::new(200.0, 10.0));
+    let bounded = TrackSizingFunction::minmax(
+        MinTrackSizingFunction::Auto,
+        MaxTrackSizingFunction::Fixed(LengthPercentage::length(50.0)),
+    );
+    let mut style = grid_style(&[bounded, bounded], &[px(10.0)]);
+    style.gap.width = LengthPercentage::length(10.0);
+    let root = tree.push_grid(style, vec![item]);
+
+    let output = min_content_layout(&mut tree, root);
+
+    // Both §6.6's automatic minimum and §12.5's limited min-content
+    // contribution use 50px + 10px gutter + 50px as the maximum area.
+    assert_size(output.size, Size::new(110.0, 10.0));
+    assert_size(tree.layout(item).size, Size::new(110.0, 10.0));
+}
+
+#[test]
+fn max_content_spanning_contribution_is_limited_by_fixed_max_tracks() {
+    let mut tree = TestTree::default();
+    let item_style = TestStyle {
+        grid_column: placement(line(1), line(3)),
+        grid_row: placement(line(1), line(2)),
+        // Disable the automatic minimum so this isolates §12.5's limited
+        // max-content contribution rather than §6.6's automatic-min clamp.
+        min_size: Size::new(Dimension::ZERO, Dimension::ZERO),
+        ..TestStyle::default()
+    };
+    let item = tree.push_leaf(item_style, Size::new(200.0, 10.0), Size::new(300.0, 10.0));
+    let bounded = TrackSizingFunction::minmax(
+        MinTrackSizingFunction::Auto,
+        MaxTrackSizingFunction::Fixed(LengthPercentage::length(50.0)),
+    );
+    let mut style = grid_style(&[bounded, bounded], &[px(10.0)]);
+    style.gap.width = LengthPercentage::length(10.0);
+    let root = tree.push_grid(style, vec![item]);
+
+    let output = intrinsic_layout(&mut tree, root);
+
+    // `intrinsic_layout` supplies a max-content constraint. The 300px
+    // contribution is capped at 50px + 10px gutter + 50px.
+    assert_size(output.size, Size::new(110.0, 10.0));
+    assert_size(tree.layout(item).size, Size::new(110.0, 10.0));
 }
 
 #[test]
@@ -1948,6 +2170,43 @@ fn spanning_growth_only_expands_tracks_marked_infinitely_growable() {
     // track whose infinite limit became finite grows to 90px.
     assert_close(output.size.width, 100.0);
     assert_close(tree.layout(marker).location.x, 10.0);
+}
+
+#[test]
+fn single_track_intrinsic_base_floors_its_growth_limit_before_spanning_growth() {
+    let mut tree = TestTree::default();
+    let first_style = TestStyle {
+        grid_column: placement(line(1), line(2)),
+        grid_row: placement(line(1), line(2)),
+        ..TestStyle::default()
+    };
+    let first = tree.push_leaf(first_style, Size::new(100.0, 10.0), Size::new(100.0, 10.0));
+    let spanning_style = TestStyle {
+        grid_column: placement(line(1), line(3)),
+        grid_row: placement(line(1), line(2)),
+        min_size: Size::new(Dimension::ZERO, Dimension::ZERO),
+        ..TestStyle::default()
+    };
+    let spanning = tree.push_leaf(spanning_style, Size::new(0.0, 10.0), Size::new(150.0, 10.0));
+    let first_track = TrackSizingFunction::minmax(
+        MinTrackSizingFunction::MinContent,
+        MaxTrackSizingFunction::Fixed(LengthPercentage::length(50.0)),
+    );
+    let second_track = TrackSizingFunction::minmax(
+        MinTrackSizingFunction::Fixed(LengthPercentage::ZERO),
+        MaxTrackSizingFunction::MaxContent,
+    );
+    let root = tree.push_grid(
+        grid_style(&[first_track, second_track], &[px(10.0)]),
+        vec![first, spanning],
+    );
+
+    let output = intrinsic_layout(&mut tree, root);
+
+    // Track one has a 100px intrinsic base despite its fixed 50px maximum.
+    // Its growth limit must be floored to that base before the spanning
+    // item's 150px max-content contribution gives the second track 50px.
+    assert_size(output.size, Size::new(150.0, 10.0));
 }
 
 #[test]

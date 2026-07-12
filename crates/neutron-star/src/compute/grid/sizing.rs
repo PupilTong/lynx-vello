@@ -121,6 +121,7 @@ pub(super) fn initialize_tracks<Source: GridSource>(
         tracks,
         gap,
         first_coordinate: specs.first().map_or(0, |spec| spec.coordinate),
+        collapsed_line_positions: None,
     }
 }
 
@@ -400,7 +401,7 @@ where
                         .iter()
                         .any(|track| matches!(track.sizing.min, MinTrackSizingFunction::Auto))
                     && (item.span(axis) == 1
-                        || !tracks.tracks[indexes]
+                        || !tracks.tracks[indexes.clone()]
                             .iter()
                             .any(|track| track.is_flexible()));
                 if automatic_min_applies {
@@ -415,7 +416,9 @@ where
                     ) + margin_sum(item, axis);
                     // The specified-size suggestion caps the content-size
                     // suggestion when a percentage became definite.
-                    preferred.map_or(raw_outer, |size| raw_outer.min(size))
+                    let suggestion = preferred.map_or(raw_outer, |size| raw_outer.min(size));
+                    fixed_max_span_limit(source, axis, tracks, indexes, inner_size)
+                        .map_or(suggestion, |limit| suggestion.min(limit))
                 } else {
                     axis.sum(item.padding)
                         + axis.sum(item.border)
@@ -461,6 +464,101 @@ fn span_gap(tracks: &TrackSet, range: core::ops::Range<usize>) -> f32 {
         .filter(|track| !track.collapsed)
         .count();
     tracks.gap * visible.saturating_sub(1) as f32
+}
+
+/// Returns the maximum grid-area size when every visible track in the span
+/// has a fixed max track sizing function. Grid §6.6 includes intervening
+/// gutters in this stretch-fit clamp; collapsed tracks contribute zero, and
+/// `span_gap` preserves only the gutters between surviving visible tracks.
+fn fixed_max_span_limit<Source: GridSource>(
+    source: &Source,
+    axis: Axis,
+    tracks: &TrackSet,
+    range: core::ops::Range<usize>,
+    inner_size: crate::geometry::Size<Option<f32>>,
+) -> Option<f32> {
+    let mut limit = span_gap(tracks, range.clone());
+    let percentage_basis = axis.size(inner_size);
+    let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
+    for track in &tracks.tracks[range] {
+        if track.collapsed {
+            continue;
+        }
+        let MaxTrackSizingFunction::Fixed(maximum) = track.sizing.max else {
+            return None;
+        };
+        let maximum = resolve_length_percentage(maximum, percentage_basis, &resolve_calc)?;
+        let minimum = match track.sizing.min {
+            MinTrackSizingFunction::Fixed(minimum) => {
+                resolve_length_percentage(minimum, percentage_basis, &resolve_calc)?
+            }
+            MinTrackSizingFunction::Auto
+            | MinTrackSizingFunction::MinContent
+            | MinTrackSizingFunction::MaxContent => 0.0,
+        };
+        // `minmax()` gives its minimum precedence when a declared fixed max
+        // is smaller. Resolve from immutable sizing functions rather than a
+        // growth limit that earlier item distribution may have raised.
+        limit += maximum.max(minimum).max(0.0);
+    }
+    Some(limit)
+}
+
+/// Computes Grid §12.5's limited min-/max-content contribution. A spanning
+/// item is capped only when every track has a fixed max sizing function; for
+/// one track, a resolved `fit-content()` argument is also an allowed limit.
+/// The result is always floored by the item's minimum contribution.
+#[allow(clippy::too_many_arguments)]
+fn measure_limited_contribution<Source, Session>(
+    source: &Source,
+    session: &mut Session,
+    item: &mut GridItem,
+    axis: Axis,
+    kind: ContributionKind,
+    tracks: &TrackSet,
+    cross_tracks: Option<&TrackSet>,
+    inner_size: crate::geometry::Size<Option<f32>>,
+) -> f32
+where
+    Source: GridSource,
+    Session: LayoutSession<Source>,
+{
+    debug_assert!(matches!(
+        kind,
+        ContributionKind::MinContent | ContributionKind::MaxContent
+    ));
+    let contribution = measure_contribution(
+        source,
+        session,
+        item,
+        axis,
+        kind,
+        tracks,
+        cross_tracks,
+        inner_size,
+    );
+    let span = span_for(item, axis);
+    let range = tracks.span_indices(span.start, span.end);
+    let fixed_limit = fixed_max_span_limit(source, axis, tracks, range.clone(), inner_size)
+        .or_else(|| {
+            (range.len() == 1)
+                .then(|| tracks.tracks[range.start].fit_content_limit)
+                .filter(|limit| limit.is_finite())
+        });
+    let Some(limit) = fixed_limit else {
+        return contribution;
+    };
+    let minimum = measure_contribution(
+        source,
+        session,
+        item,
+        axis,
+        ContributionKind::Minimum,
+        tracks,
+        cross_tracks,
+        inner_size,
+    );
+    contribution.min(limit).max(minimum)
 }
 
 /// Computes first-baseline start shims before row contributions are used.
@@ -742,8 +840,8 @@ fn apply_planned_growth(tracks: &mut TrackSet, planned: &mut [f32], touched: &mu
             track.base
         };
         track.growth_limit = (starting + increase)
-            .max(track.base)
-            .min(track.fit_content_limit);
+            .min(track.fit_content_limit)
+            .max(track.base);
         if was_infinite && track.growth_limit.is_finite() {
             track.infinitely_growable = true;
         }
@@ -761,6 +859,7 @@ fn run_spanning_base_phase<Source, Session, P>(
     item_indices: &[usize],
     inner_size: crate::geometry::Size<Option<f32>>,
     kind: ContributionKind,
+    limited: bool,
     weighted_flex: bool,
     eligible: P,
     planned: &mut [f32],
@@ -781,16 +880,29 @@ fn run_spanning_base_phase<Source, Session, P>(
         {
             continue;
         }
-        let contribution = measure_contribution(
-            source,
-            session,
-            &mut items[item_index],
-            axis,
-            kind,
-            tracks,
-            cross_tracks,
-            inner_size,
-        );
+        let contribution = if limited {
+            measure_limited_contribution(
+                source,
+                session,
+                &mut items[item_index],
+                axis,
+                kind,
+                tracks,
+                cross_tracks,
+                inner_size,
+            )
+        } else {
+            measure_contribution(
+                source,
+                session,
+                &mut items[item_index],
+                axis,
+                kind,
+                tracks,
+                cross_tracks,
+                inner_size,
+            )
+        };
         let extra = contribution - span_affected_size(tracks, range.clone(), PlannedSize::Base);
         distribute_extra(
             tracks,
@@ -920,17 +1032,7 @@ fn resolve_intrinsic_sizes<Source, Session>(
                     AvailableSpace::MinContent | AvailableSpace::MaxContent
                 ) =>
             {
-                let minimum = measure_contribution(
-                    source,
-                    session,
-                    item,
-                    axis,
-                    ContributionKind::Minimum,
-                    tracks,
-                    cross_tracks,
-                    inner_size,
-                );
-                let min_content = measure_contribution(
+                measure_limited_contribution(
                     source,
                     session,
                     item,
@@ -939,13 +1041,7 @@ fn resolve_intrinsic_sizes<Source, Session>(
                     tracks,
                     cross_tracks,
                     inner_size,
-                );
-                let fixed_limit = track.growth_limit.min(track.fit_content_limit);
-                if fixed_limit.is_finite() {
-                    min_content.min(fixed_limit).max(minimum)
-                } else {
-                    min_content
-                }
+                )
             }
             MinTrackSizingFunction::Auto => measure_contribution(
                 source,
@@ -990,10 +1086,17 @@ fn resolve_intrinsic_sizes<Source, Session>(
         for (index, contribution) in single_growth_limits.into_iter().enumerate() {
             if let Some(contribution) = contribution {
                 tracks.tracks[index].growth_limit = contribution
-                    .max(tracks.tracks[index].base)
-                    .min(tracks.tracks[index].fit_content_limit);
+                    .min(tracks.tracks[index].fit_content_limit)
+                    .max(tracks.tracks[index].base);
             }
         }
+    }
+    // Grid §12.5 step 2 requires every growth limit to be at least its base
+    // size before spanning-item distribution. This also covers fixed maxima
+    // and fit-content clamps whose declared limit is smaller than an
+    // intrinsic minimum established by a single-track item.
+    for track in &mut tracks.tracks {
+        track.growth_limit = track.growth_limit.max(track.base);
     }
 
     // Sort once by span, then process contiguous equal-span buckets. Each
@@ -1021,7 +1124,11 @@ fn resolve_intrinsic_sizes<Source, Session>(
     if non_flexible.is_empty() && crosses_flexible.is_empty() {
         for track in &mut tracks.tracks {
             if !track.growth_limit.is_finite() {
-                track.growth_limit = track.base.max(0.0).min(track.fit_content_limit);
+                track.growth_limit = track
+                    .base
+                    .max(0.0)
+                    .min(track.fit_content_limit)
+                    .max(track.base);
             }
         }
         return;
@@ -1031,10 +1138,11 @@ fn resolve_intrinsic_sizes<Source, Session>(
     let mut affected_scratch = Vec::<DistributionEntry>::new();
     let mut non_affected_scratch = Vec::<DistributionEntry>::new();
     let mut start = 0;
-    let spanning_minimum_kind = if matches!(
+    let use_limited_min_content = matches!(
         available,
         AvailableSpace::MinContent | AvailableSpace::MaxContent
-    ) {
+    );
+    let spanning_minimum_kind = if use_limited_min_content {
         ContributionKind::MinContent
     } else {
         ContributionKind::Minimum
@@ -1056,6 +1164,7 @@ fn resolve_intrinsic_sizes<Source, Session>(
             group,
             inner_size,
             spanning_minimum_kind,
+            use_limited_min_content,
             false,
             |track| track.intrinsic_min,
             &mut planned,
@@ -1073,6 +1182,7 @@ fn resolve_intrinsic_sizes<Source, Session>(
             group,
             inner_size,
             ContributionKind::MinContent,
+            false,
             false,
             |track| {
                 matches!(
@@ -1096,6 +1206,7 @@ fn resolve_intrinsic_sizes<Source, Session>(
                 group,
                 inner_size,
                 ContributionKind::MaxContent,
+                true,
                 false,
                 |track| {
                     matches!(
@@ -1119,6 +1230,7 @@ fn resolve_intrinsic_sizes<Source, Session>(
             group,
             inner_size,
             ContributionKind::MaxContent,
+            false,
             false,
             |track| matches!(track.sizing.min, MinTrackSizingFunction::MaxContent),
             &mut planned,
@@ -1184,6 +1296,7 @@ fn resolve_intrinsic_sizes<Source, Session>(
             &crosses_flexible,
             inner_size,
             spanning_minimum_kind,
+            use_limited_min_content,
             true,
             |track| track.is_flexible(),
             &mut planned,
@@ -1201,6 +1314,7 @@ fn resolve_intrinsic_sizes<Source, Session>(
             &crosses_flexible,
             inner_size,
             ContributionKind::MinContent,
+            false,
             true,
             |track| {
                 track.is_flexible()
@@ -1219,7 +1333,11 @@ fn resolve_intrinsic_sizes<Source, Session>(
     // Step 5 resolves every remaining infinity, including flexible tracks.
     for track in &mut tracks.tracks {
         if !track.growth_limit.is_finite() {
-            track.growth_limit = track.base.max(0.0).min(track.fit_content_limit);
+            track.growth_limit = track
+                .base
+                .max(0.0)
+                .min(track.fit_content_limit)
+                .max(track.base);
         }
     }
 }
@@ -1324,6 +1442,13 @@ fn expand_flexible_tracks<Source, Session>(
     Session: LayoutSession<Source>,
 {
     if !tracks.tracks.iter().any(|track| track.is_flexible()) {
+        return;
+    }
+
+    // Grid §12.7: a min-content constraint forces the used flex fraction to
+    // zero. Intrinsic sizing has already established each flexible track's
+    // base, so no max-content item probes are needed in this branch.
+    if available == AvailableSpace::MinContent {
         return;
     }
 
@@ -1691,6 +1816,7 @@ mod tests {
             },
             align_self: crate::style::AlignItems::Start,
             justify_self: crate::style::AlignItems::Start,
+            direction: crate::style::Direction::Ltr,
             aspect_ratio: None,
             box_sizing: BoxSizing::ContentBox,
             overflow: Point::new(Overflow::Visible, Overflow::Visible),
@@ -1737,6 +1863,7 @@ mod tests {
             tracks,
             gap: 0.0,
             first_coordinate: 0,
+            collapsed_line_positions: None,
         }
     }
 

@@ -8,7 +8,7 @@ use super::placement::GridArea;
 use crate::compute::util::ItemKey;
 use crate::geometry::{Edges, Point, Size};
 use crate::style::alignment::AlignItems;
-use crate::style::{BoxSizing, Overflow, TrackSizingFunction};
+use crate::style::{BoxSizing, Direction, Overflow, TrackSizingFunction};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Axis {
@@ -74,6 +74,9 @@ pub(super) struct GridItem {
     pub(super) area: GridArea,
     pub(super) align_self: AlignItems,
     pub(super) justify_self: AlignItems,
+    /// The item's own inline base direction. Baseline fallback uses
+    /// self-start, which can differ from the Grid container's inline start.
+    pub(super) direction: Direction,
     pub(super) aspect_ratio: Option<f32>,
     pub(super) box_sizing: BoxSizing,
     pub(super) overflow: Point<Overflow>,
@@ -157,6 +160,9 @@ pub(super) struct TrackSet {
     pub(super) tracks: Vec<Track>,
     pub(super) gap: f32,
     pub(super) first_coordinate: i32,
+    /// Far-edge positions for start lines inside collapsed track runs.
+    /// Allocated only when `auto-fit` actually collapses a track.
+    pub(super) collapsed_line_positions: Option<Vec<f32>>,
 }
 
 impl TrackSet {
@@ -176,40 +182,72 @@ impl TrackSet {
     }
 
     pub(super) fn total_gap(&self) -> f32 {
-        let count = self
-            .tracks
-            .windows(2)
-            .filter(|pair| !pair[0].collapsed && !pair[1].collapsed)
-            .count();
+        let visible = self.tracks.iter().filter(|track| !track.collapsed).count();
         #[allow(clippy::cast_precision_loss)]
         {
-            self.gap * count as f32
+            self.gap * visible.saturating_sub(1) as f32
         }
     }
 
     /// Rebuilds logical line positions from the current base sizes using
-    /// the ordinary (pre-alignment) gutter. Track sizing calls this once per
-    /// axis, making the many later area queries constant-time.
+    /// the ordinary (pre-alignment) gutter. Gutters adjoining an interior
+    /// collapsed track coincide, so consecutive surviving tracks still have
+    /// exactly one gutter between them. Track sizing calls this once per axis,
+    /// making the many later area queries constant-time.
     pub(super) fn rebuild_positions(&mut self) {
-        let mut cursor = 0.0;
+        self.rebuild_positions_with_spacing(0.0, 0.0);
+    }
+
+    /// Rebuilds positions after content alignment has introduced an initial
+    /// offset and optional distributed space between visible tracks.
+    pub(super) fn rebuild_aligned_positions(&mut self, offset: f32, distributed_gap: f32) {
+        self.rebuild_positions_with_spacing(offset, distributed_gap);
+    }
+
+    fn rebuild_positions_with_spacing(&mut self, offset: f32, distributed_gap: f32) {
+        let mut cursor = offset;
         let mut previous_visible = false;
+        let mut saw_collapsed = false;
         for track in &mut self.tracks {
             if track.collapsed {
+                saw_collapsed = true;
+                // Retain the preceding track's end edge. `line_position`
+                // selects the following visible track's start edge when this
+                // collapsed line is used as an area's start boundary, which
+                // models the two adjoining gutters as exactly overlapping.
                 track.position = cursor;
-                previous_visible = false;
                 continue;
             }
             if previous_visible {
-                cursor += self.gap;
+                cursor += self.gap + distributed_gap;
             }
             track.position = cursor;
             cursor += track.base;
             previous_visible = true;
         }
+
+        if saw_collapsed {
+            let positions = self.collapsed_line_positions.get_or_insert_with(Vec::new);
+            positions.resize(self.tracks.len(), 0.0);
+            let mut next_visible_position = None;
+            for (index, track) in self.tracks.iter().enumerate().rev() {
+                if track.collapsed {
+                    positions[index] = next_visible_position.unwrap_or(track.position);
+                } else {
+                    positions[index] = track.position;
+                    next_visible_position = Some(track.position);
+                }
+            }
+        } else {
+            // Keep the common path allocation-free, including when a TrackSet
+            // instance is reused after a prior collapsed layout.
+            self.collapsed_line_positions = None;
+        }
     }
 
-    /// Size of an item area, including only gutters whose two neighboring
-    /// tracks survive `auto-fit` collapse.
+    /// Size of an item area, including one coincident gutter between each
+    /// pair of surviving tracks. Collapsed runs at either span boundary add
+    /// no gutter to the area.
     #[inline]
     pub(super) fn area_size(&self, start: i32, end: i32) -> f32 {
         (self.end_line_position(end) - self.line_position(start)).max(0.0)
@@ -227,9 +265,22 @@ impl TrackSet {
                 .iter()
                 .rev()
                 .find(|track| !track.collapsed)
+                .or_else(|| self.tracks.last())
                 .map_or(0.0, |track| track.position + track.base);
         }
-        self.tracks[self.index_of(coordinate)].position
+        let index = self.index_of(coordinate);
+        let track = &self.tracks[index];
+        if !track.collapsed {
+            return track.position;
+        }
+        // A collapsed track has zero breadth and its adjoining gutters
+        // overlap. For a start boundary, use the cached far edge of that
+        // coincident gutter: the next surviving track's start. The optional
+        // cache keeps every line lookup O(1) while avoiding an allocation for
+        // TrackSets without collapsed tracks.
+        self.collapsed_line_positions
+            .as_ref()
+            .map_or(track.position, |positions| positions[index])
     }
 
     /// End edge of the track immediately before a grid line. Gutters are

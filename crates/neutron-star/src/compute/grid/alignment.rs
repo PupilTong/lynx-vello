@@ -41,21 +41,7 @@ pub(super) fn align_tracks(tracks: &mut TrackSet, container_size: f32, alignment
         | AlignContent::SpaceEvenly => (0.0, 0.0),
     };
 
-    let mut cursor = offset;
-    let mut previous_visible = false;
-    for track in &mut tracks.tracks {
-        if track.collapsed {
-            track.position = cursor;
-            previous_visible = false;
-            continue;
-        }
-        if previous_visible {
-            cursor += tracks.gap + distributed_gap;
-        }
-        track.position = cursor;
-        cursor += track.base;
-        previous_visible = true;
-    }
+    tracks.rebuild_aligned_positions(offset, distributed_gap);
 }
 
 /// Offset of an item inside the free space of one grid-area axis.
@@ -63,25 +49,39 @@ pub(super) fn align_tracks(tracks: &mut TrackSet, container_size: f32, alignment
 pub(super) fn item_alignment_offset(
     free_space: f32,
     alignment: crate::style::AlignItems,
-    axis_reversed: bool,
+    container_axis_reversed: bool,
+    self_axis_reversed: bool,
 ) -> f32 {
     match alignment {
-        crate::style::AlignItems::Start | crate::style::AlignItems::FlexStart => {
-            if axis_reversed {
+        crate::style::AlignItems::Start
+        | crate::style::AlignItems::FlexStart
+        | crate::style::AlignItems::Stretch => {
+            // Stretch falls back to the alignment container's start edge.
+            if container_axis_reversed {
                 free_space
             } else {
                 0.0
             }
         }
         crate::style::AlignItems::End | crate::style::AlignItems::FlexEnd => {
-            if axis_reversed {
+            if container_axis_reversed {
                 0.0
             } else {
                 free_space
             }
         }
         crate::style::AlignItems::Center => free_space / 2.0,
-        crate::style::AlignItems::Baseline | crate::style::AlignItems::Stretch => 0.0,
+        // First-baseline's fallback is safe self-start, so the alignment
+        // subject's own writing direction controls the physical edge unless
+        // overflow triggers `safe`'s fallback to the container's start edge.
+        crate::style::AlignItems::Baseline => {
+            let reversed = if free_space < 0.0 {
+                container_axis_reversed
+            } else {
+                self_axis_reversed
+            };
+            if reversed { free_space } else { 0.0 }
+        }
     }
 }
 
@@ -114,6 +114,7 @@ mod tests {
             tracks: vec![track(10.0, false), track(10.0, false), track(10.0, false)],
             gap: 0.0,
             first_coordinate: 0,
+            collapsed_line_positions: None,
         }
     }
 
@@ -156,16 +157,68 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_track_breaks_the_gutter_and_reversed_end_stays_at_zero() {
+    fn collapsed_track_gutters_overlap_and_reversed_fallbacks_use_start() {
         let mut tracks = TrackSet {
-            tracks: vec![track(10.0, false), track(0.0, true), track(10.0, false)],
+            tracks: vec![
+                track(10.0, false),
+                track(0.0, true),
+                track(0.0, true),
+                track(10.0, false),
+            ],
             gap: 7.0,
             first_coordinate: 0,
+            collapsed_line_positions: None,
         };
-        align_tracks(&mut tracks, 20.0, AlignContent::Start);
+        assert_eq!(tracks.used_size(), 27.0);
+        tracks.rebuild_positions();
         assert_eq!(tracks.tracks[0].position, 0.0);
         assert_eq!(tracks.tracks[1].position, 10.0);
         assert_eq!(tracks.tracks[2].position, 10.0);
-        assert_eq!(item_alignment_offset(13.0, AlignItems::FlexEnd, true), 0.0);
+        assert_eq!(tracks.tracks[3].position, 17.0);
+        assert_eq!(tracks.line_position(1), 17.0);
+        assert_eq!(tracks.line_position(2), 17.0);
+
+        align_tracks(&mut tracks, 27.0, AlignContent::Start);
+        assert_eq!(tracks.tracks[0].position, 0.0);
+        assert_eq!(tracks.tracks[1].position, 10.0);
+        assert_eq!(tracks.tracks[2].position, 10.0);
+        assert_eq!(tracks.tracks[3].position, 17.0);
+        assert_eq!(tracks.area_size(0, 4), 27.0);
+        assert_eq!(tracks.area_size(0, 3), 10.0);
+        assert_eq!(tracks.area_size(1, 4), 10.0);
+        assert_eq!(tracks.area_size(1, 2), 0.0);
+
+        align_tracks(&mut tracks, 50.0, AlignContent::SpaceBetween);
+        assert_eq!(tracks.tracks[0].position, 0.0);
+        assert_eq!(tracks.tracks[1].position, 10.0);
+        assert_eq!(tracks.tracks[2].position, 10.0);
+        assert_eq!(tracks.tracks[3].position, 40.0);
+        assert_eq!(tracks.area_size(0, 4), 50.0);
+        assert_eq!(tracks.area_size(1, 4), 10.0);
+
+        assert_eq!(
+            item_alignment_offset(13.0, AlignItems::FlexEnd, true, false),
+            0.0
+        );
+        assert_eq!(
+            item_alignment_offset(13.0, AlignItems::Stretch, true, false),
+            13.0
+        );
+        assert_eq!(
+            item_alignment_offset(13.0, AlignItems::Baseline, true, false),
+            0.0
+        );
+        assert_eq!(
+            item_alignment_offset(13.0, AlignItems::Baseline, false, true),
+            13.0
+        );
+        assert_eq!(
+            item_alignment_offset(-13.0, AlignItems::Baseline, false, true),
+            0.0
+        );
+        assert_eq!(
+            item_alignment_offset(-13.0, AlignItems::Baseline, true, false),
+            -13.0
+        );
     }
 }

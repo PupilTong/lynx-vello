@@ -138,6 +138,7 @@ fn resolve_grid_item<Source: GridSource>(
             }
         }),
         justify_self: style.justify_self().unwrap_or(defaults.justify_items),
+        direction: style.direction(),
         aspect_ratio,
         box_sizing,
         overflow,
@@ -576,8 +577,9 @@ where
         // Positive free space has already been consumed by auto margins, so
         // these offsets are zero in that case. On overflow auto margins are
         // zero and self-alignment still applies (Grid §11.2).
-        let offset_x = item_alignment_offset(free_x, item.justify_self, rtl);
-        let offset_y = item_alignment_offset(free_y, item.align_self, false);
+        let item_rtl = item.direction == Direction::Rtl;
+        let offset_x = item_alignment_offset(free_x, item.justify_self, rtl, item_rtl);
+        let offset_y = item_alignment_offset(free_y, item.align_self, false, false);
         let relative_x = item
             .inset
             .left
@@ -854,10 +856,12 @@ where
             containing_size.width - margin_box.width,
             item.justify_self,
             rtl,
+            item.direction == Direction::Rtl,
         ),
         item_alignment_offset(
             containing_size.height - margin_box.height,
             item.align_self,
+            false,
             false,
         ),
     )
