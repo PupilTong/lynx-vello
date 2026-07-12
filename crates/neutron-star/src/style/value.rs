@@ -186,3 +186,64 @@ impl From<LengthPercentageAuto> for Dimension {
         }
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calc_handles_round_trip_host_identifiers() {
+        let handle = CalcHandle::from_raw(u64::MAX - 7);
+        assert_eq!(handle.raw(), u64::MAX - 7);
+    }
+
+    #[test]
+    fn length_percentage_conversions_preserve_every_variant() {
+        let handle = CalcHandle::from_raw(9);
+        let cases = [
+            (
+                LengthPercentage::Length(12.0),
+                LengthPercentageAuto::Length(12.0),
+                Dimension::Length(12.0),
+            ),
+            (
+                LengthPercentage::Percent(0.25),
+                LengthPercentageAuto::Percent(0.25),
+                Dimension::Percent(0.25),
+            ),
+            (
+                LengthPercentage::Calc(handle),
+                LengthPercentageAuto::Calc(handle),
+                Dimension::Calc(handle),
+            ),
+        ];
+
+        for (source, expected_auto, expected_dimension) in cases {
+            assert_eq!(LengthPercentageAuto::from(source), expected_auto);
+            assert_eq!(Dimension::from(source), expected_dimension);
+        }
+    }
+
+    #[test]
+    fn auto_length_percentage_converts_to_all_dimension_variants() {
+        let handle = CalcHandle::from_raw(11);
+        let cases = [
+            (LengthPercentageAuto::Length(4.0), Dimension::Length(4.0)),
+            (
+                LengthPercentageAuto::Percent(0.75),
+                Dimension::Percent(0.75),
+            ),
+            (LengthPercentageAuto::Calc(handle), Dimension::Calc(handle)),
+            (LengthPercentageAuto::Auto, Dimension::Auto),
+        ];
+
+        for (source, expected) in cases {
+            assert_eq!(Dimension::from(source), expected);
+        }
+        assert!(LengthPercentageAuto::Auto.is_auto());
+        assert!(!LengthPercentageAuto::ZERO.is_auto());
+        assert!(Dimension::Auto.is_auto());
+        assert!(!Dimension::ZERO.is_auto());
+    }
+}

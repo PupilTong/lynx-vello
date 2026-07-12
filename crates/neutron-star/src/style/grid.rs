@@ -13,9 +13,11 @@
 //!
 //! Placements are numeric lines and spans. Named lines, named areas
 //! (`grid-template-areas`), and `subgrid` are **not protocol**: name→number
-//! resolution is a style-system concern and must be done host-side. (Lynx
-//! never implemented named lines/areas, so the lynx-vello host needs no such
-//! resolution; a browser-grade host would do it in its style adapter.)
+//! resolution is a host concern. Lynx never implemented named lines/areas, so
+//! the lynx-vello adapter needs no such resolution. A browser-grade host can
+//! lower ordinary names in its style adapter, but names inside `auto-repeat`
+//! depend on the used repetition count and would require a future protocol
+//! extension.
 
 use crate::geometry::{Line, Size};
 use crate::style::CoreStyle;
@@ -412,5 +414,99 @@ impl<S: GridItemStyle> GridItemStyle for &S {
 
     fn order(&self) -> i32 {
         (**self).order()
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Clone, Copy)]
+    struct EmptyRepetition;
+
+    impl GridTemplateRepetition for EmptyRepetition {
+        type Tracks<'a> = core::iter::Empty<TrackSizingFunction>;
+
+        fn count(&self) -> RepetitionCount {
+            RepetitionCount::Count(1)
+        }
+
+        fn tracks(&self) -> Self::Tracks<'_> {
+            core::iter::empty()
+        }
+    }
+
+    #[derive(Debug)]
+    struct Defaults;
+
+    impl CoreStyle for Defaults {}
+
+    impl GridContainerStyle for Defaults {
+        type Repetition<'a> = EmptyRepetition;
+        type TemplateTracks<'a> = core::iter::Empty<GridTemplateComponent<EmptyRepetition>>;
+        type AutoTracks<'a> = core::iter::Empty<TrackSizingFunction>;
+
+        fn grid_template_rows(&self) -> Self::TemplateTracks<'_> {
+            core::iter::empty()
+        }
+
+        fn grid_template_columns(&self) -> Self::TemplateTracks<'_> {
+            core::iter::empty()
+        }
+
+        fn grid_auto_rows(&self) -> Self::AutoTracks<'_> {
+            core::iter::empty()
+        }
+
+        fn grid_auto_columns(&self) -> Self::AutoTracks<'_> {
+            core::iter::empty()
+        }
+    }
+
+    impl GridItemStyle for Defaults {}
+
+    #[test]
+    fn grid_container_defaults_are_css_initial_values() {
+        let style = Defaults;
+
+        assert_eq!(style.grid_template_rows().count(), 0);
+        assert_eq!(style.grid_template_columns().count(), 0);
+        assert_eq!(style.grid_auto_rows().count(), 0);
+        assert_eq!(style.grid_auto_columns().count(), 0);
+        assert_eq!(style.grid_auto_flow(), GridAutoFlow::Row);
+        assert_eq!(
+            GridContainerStyle::gap(&style),
+            Size::new(LengthPercentage::ZERO, LengthPercentage::ZERO)
+        );
+        assert_eq!(GridContainerStyle::align_content(&style), None);
+        assert_eq!(GridContainerStyle::justify_content(&style), None);
+        assert_eq!(GridContainerStyle::align_items(&style), None);
+        assert_eq!(GridContainerStyle::justify_items(&style), None);
+    }
+
+    #[test]
+    fn grid_item_defaults_and_value_helpers_cover_all_flow_modes() {
+        let style = Defaults;
+        let automatic = Line::new(GridPlacement::Auto, GridPlacement::Auto);
+
+        assert_eq!(style.grid_row(), automatic);
+        assert_eq!(style.grid_column(), automatic);
+        assert_eq!(GridItemStyle::align_self(&style), None);
+        assert_eq!(GridItemStyle::justify_self(&style), None);
+        assert_eq!(style.order(), 0);
+
+        assert!(!GridAutoFlow::Row.is_dense());
+        assert!(GridAutoFlow::Row.is_row_flow());
+        assert!(!GridAutoFlow::Column.is_dense());
+        assert!(!GridAutoFlow::Column.is_row_flow());
+        assert!(GridAutoFlow::RowDense.is_dense());
+        assert!(GridAutoFlow::RowDense.is_row_flow());
+        assert!(GridAutoFlow::ColumnDense.is_dense());
+        assert!(!GridAutoFlow::ColumnDense.is_row_flow());
+
+        let line = GridLine::new(-3);
+        assert_eq!(line.as_i16(), -3);
+        assert_eq!(TrackSizingFunction::default(), TrackSizingFunction::AUTO);
     }
 }

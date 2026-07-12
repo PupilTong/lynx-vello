@@ -33,8 +33,8 @@
 //!
 //! [`LayoutSession::compute_child_layout`] is the **dispatch point**: the host
 //! inspects the child's `display` (which the engine deliberately has no enum
-//! for) and routes to an engine algorithm entry point (flexbox is implemented
-//! in [`compute`](crate::compute); grid follows in L2),
+//! for) and routes to an engine algorithm entry point (flexbox and Grid are
+//! implemented in [`compute`](crate::compute)),
 //! [`compute_leaf_layout`](crate::compute::compute_leaf_layout) (text/images
 //! via a generic [`LeafMeasurer`](crate::compute::LeafMeasurer)), or *its own
 //! algorithm* — this is exactly how
@@ -315,4 +315,22 @@ pub trait RoundState: Sized {
 
     /// Stores the final, pixel-snapped layout of `node`.
     fn set_final_layout(&mut self, node: NodeId, layout: &Layout);
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_ids_round_trip_each_supported_host_integer() {
+        let direct = NodeId::new(0xfedc_ba98_7654_3210);
+        assert_eq!(direct.get(), 0xfedc_ba98_7654_3210);
+
+        let from_u64 = NodeId::from(42_u64);
+        assert_eq!(u64::from(from_u64), 42);
+
+        let from_index = NodeId::from(17_usize);
+        assert_eq!(usize::from(from_index), 17);
+    }
 }

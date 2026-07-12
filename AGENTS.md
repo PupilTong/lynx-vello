@@ -18,7 +18,7 @@ cross-platform engine built on:
 
 The from-scratch layout engine (successor to the C++ engine's `starlight`) is
 `crates/neutron-star` — its host protocol, shared layout machinery, and CSS
-flexbox algorithm are implemented; CSS Grid remains pending. See
+flexbox and Grid algorithms are implemented. See
 `docs/layout-architecture.md` for its design and
 `docs/tracking/css-layout.md` for the behavior it must cover.
 
@@ -121,17 +121,15 @@ useful signal for currently-compatible versions of those libraries.
   Owns `WidgetState` / `WidgetTree`, Lynx view metrics, touch-first
   device policy, and the viewport-relative `rpx` integration. Standard CSS
   parsing, matching, cascade, and lock ownership remain in `stylo-dom`.
-- `crates/neutron-star` — the standalone-publishable CSS flexbox engine with
-  a reserved Grid protocol: trait-based host⇄engine integration with static
-  dispatch only (no `dyn`), an immutable topology/style source physically
-  separated from mutable layout/cache/measurement sessions, and host-side
-  display dispatch so Lynx's `linear`/`relative` modes plug in as peer
-  algorithms. Leaf content engines integrate through the generic lending
-  `LeafMeasurer` protocol (the planned text adapter retains Parley layouts in
-  host storage rather than cloning engine artifacts).
-  **Flexbox milestone implemented (L1)** — the shared root/leaf/cache/
-  positioned/rounding machinery and CSS Flexbox Level 1 algorithm are live;
-  the Grid style/tree contract exists but its L2 algorithm is still pending.
+- `crates/neutron-star` — the standalone-publishable CSS flexbox and Grid
+  engine: trait-based host⇄engine integration with static dispatch only (no
+  `dyn`), an immutable topology/style source physically separated from
+  mutable layout/cache/measurement sessions, and host-side display dispatch
+  so Lynx's `linear`/`relative` modes plug in as peer algorithms. Leaf content
+  engines integrate through the generic lending `LeafMeasurer` protocol.
+  **Grid milestone implemented (L2)** — the shared root/leaf/cache/
+  positioned/rounding machinery, CSS Flexbox Level 1, and numeric CSS Grid
+  Level 2 (excluding subgrid/named areas) algorithms are live.
   Read
   `docs/layout-architecture.md` before touching it. Must not contain Lynx
   vocabulary or depend on other workspace crates.

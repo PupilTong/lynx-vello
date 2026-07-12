@@ -18,20 +18,18 @@
 // necessarily operates in the engine's f32 coordinate space.
 #![allow(clippy::cast_precision_loss)]
 
-use core::cmp::Ordering;
-
 use super::compute_absolute_layout;
 use super::util::{
-    apply_aspect_ratio, apply_box_sizing, auto_edges_to_zero, clamp, resolve_dimension,
-    resolve_edges, resolve_insets, resolve_length_percentage, resolve_optional_edges, resolve_size,
-    subtract_available_space,
+    ItemKey, OrderedItem, ResolvedContainerBox, ResolvedItemBox, box_inset_size, clamp_axis,
+    preferred_size_definiteness, resolve_container_box, resolve_dimension, resolve_gap,
+    resolve_item_box, resolve_length_percentage,
 };
 use crate::geometry::{Edges, Point, Size};
 use crate::style::alignment::{AlignContent, AlignItems};
-use crate::style::value::{CalcHandle, Dimension, LengthPercentageAuto};
+use crate::style::value::Dimension;
 use crate::style::{
     BoxGenerationMode, BoxSizing, CoreStyle, Direction, FlexContainerStyle, FlexDirection,
-    FlexItemStyle, FlexWrap, Overflow, Position, Visibility,
+    FlexItemStyle, FlexWrap, Position, Visibility,
 };
 use crate::tree::{
     AvailableSpace, FlexSource, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutSession,
@@ -131,33 +129,6 @@ impl Axes {
             cross_base_reverse,
         }
     }
-}
-
-/// Compact order/classification record retained before an item is resolved.
-/// Raw style stays in the immutable source and is reborrowed by each pass.
-#[derive(Debug, Clone, Copy)]
-struct PendingItem {
-    node: NodeId,
-    document_index: usize,
-    css_order: i32,
-    layout_order: u32,
-}
-
-impl PendingItem {
-    fn key(self) -> ItemKey {
-        ItemKey {
-            node: self.node,
-            layout_order: self.layout_order,
-        }
-    }
-}
-
-/// Stable identity and paint order retained when resolved item scratch is
-/// rebuilt after a cyclic percentage basis becomes definite.
-#[derive(Debug, Clone, Copy)]
-struct ItemKey {
-    node: NodeId,
-    layout_order: u32,
 }
 
 /// Transient per-item state accumulated across the Flexbox §9 sizing,
@@ -305,66 +276,6 @@ fn set_flow_end(edges: &mut Edges<f32>, axis: Axis, reverse: bool, value: f32) {
     }
 }
 
-#[inline]
-fn padding_border_size(padding: Edges<f32>, border: Edges<f32>, scrollbar: Size<f32>) -> Size<f32> {
-    Size::new(
-        padding.horizontal_sum() + border.horizontal_sum() + scrollbar.width,
-        padding.vertical_sum() + border.vertical_sum() + scrollbar.height,
-    )
-}
-
-#[inline]
-fn resolve_quantitative_sizes(
-    size: Size<Dimension>,
-    basis: Size<Option<f32>>,
-    aspect_ratio: Option<f32>,
-    box_sizing: BoxSizing,
-    inset_size: Size<f32>,
-    resolve_calc: &impl Fn(CalcHandle, f32) -> f32,
-) -> Size<Option<f32>> {
-    apply_box_sizing(
-        apply_aspect_ratio(resolve_size(size, basis, resolve_calc), aspect_ratio),
-        box_sizing,
-        inset_size,
-    )
-}
-
-#[inline]
-fn dimension_is_definite(value: Dimension, parent_basis: Option<f32>) -> bool {
-    match value {
-        Dimension::Length(_) => true,
-        Dimension::Percent(_) | Dimension::Calc(_) => parent_basis.is_some(),
-        Dimension::Auto
-        | Dimension::MinContent
-        | Dimension::MaxContent
-        | Dimension::FitContent(_) => false,
-    }
-}
-
-fn preferred_size_definiteness(
-    size: Size<Dimension>,
-    parent_size: Size<Option<f32>>,
-    aspect_ratio: Option<f32>,
-) -> Size<bool> {
-    let mut definite = Size::new(
-        dimension_is_definite(size.width, parent_size.width),
-        dimension_is_definite(size.height, parent_size.height),
-    );
-    if aspect_ratio.is_some() {
-        if definite.width {
-            definite.height = true;
-        } else if definite.height {
-            definite.width = true;
-        }
-    }
-    definite
-}
-
-#[inline]
-fn clamp_axis(value: f32, min: Option<f32>, max: Option<f32>, floor: f32) -> f32 {
-    clamp(value, min, max).max(floor)
-}
-
 fn alignment_distribution(
     value: AlignContent,
     free_space: f32,
@@ -434,23 +345,6 @@ fn relative_offset(inset: Edges<Option<f32>>, direction: Direction) -> Point<f32
     Point::new(x, y)
 }
 
-#[inline]
-fn copied_scrollbar_size(overflow: Point<Overflow>, width: f32) -> Size<f32> {
-    debug_assert!(width.is_finite() && width >= 0.0);
-    Size::new(
-        if overflow.y == Overflow::Scroll {
-            width
-        } else {
-            0.0
-        },
-        if overflow.x == Overflow::Scroll {
-            width
-        } else {
-            0.0
-        },
-    )
-}
-
 fn resolve_item<Source: FlexSource>(
     source: &Source,
     key: ItemKey,
@@ -468,50 +362,28 @@ fn resolve_item<Source: FlexSource>(
         flex_shrink.is_finite() && flex_shrink >= 0.0,
         "flex-shrink must be finite and non-negative"
     );
-    let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
-    let inline_basis = container_inner_size.width;
-    let size_value = style.size();
-    let padding = resolve_edges(style.padding(), inline_basis, &resolve_calc);
-    let border = resolve_edges(style.border(), inline_basis, &resolve_calc);
-    let scrollbar = copied_scrollbar_size(style.overflow(), style.scrollbar_width());
-    let inset_size = padding_border_size(padding, border, scrollbar);
-    let preferred_size = resolve_quantitative_sizes(
-        size_value,
-        container_inner_size,
-        style.aspect_ratio(),
-        style.box_sizing(),
-        inset_size,
-        &resolve_calc,
-    );
+    let ResolvedItemBox {
+        raw_size,
+        aspect_ratio,
+        preferred_size,
+        min_size,
+        max_size,
+        margin,
+        margin_auto,
+        padding,
+        border,
+        scrollbar,
+        inset,
+        ..
+    } = resolve_item_box(source, &style, container_inner_size);
     let preferred_size_is_definite =
-        preferred_size_definiteness(size_value, container_inner_size, style.aspect_ratio());
-    let min_size = resolve_quantitative_sizes(
-        style.min_size(),
-        container_inner_size,
-        style.aspect_ratio(),
-        style.box_sizing(),
-        inset_size,
-        &resolve_calc,
-    );
-    let max_size = resolve_quantitative_sizes(
-        style.max_size(),
-        container_inner_size,
-        style.aspect_ratio(),
-        style.box_sizing(),
-        inset_size,
-        &resolve_calc,
-    );
-    let margin_value = style.margin();
-    let optional_margin = resolve_optional_edges(margin_value, inline_basis, &resolve_calc);
-    let margin_auto = margin_value.map(LengthPercentageAuto::is_auto);
-    let margin = auto_edges_to_zero(optional_margin);
-    let inset = resolve_insets(style.inset(), container_inner_size, &resolve_calc);
+        preferred_size_definiteness(raw_size, container_inner_size, aspect_ratio);
 
     FlexItem {
         key,
         direction: style.direction(),
         align_self: style.align_self().unwrap_or(default_alignment),
-        size_is_auto: size_value.map(Dimension::is_auto),
+        size_is_auto: raw_size.map(Dimension::is_auto),
         flex_grow,
         flex_shrink,
         preferred_size,
@@ -593,7 +465,7 @@ fn determine_flex_base_sizes<Source, Session>(
         // Source and session are deliberately separate: this borrowed style
         // view remains valid across both recursive measurements below.
         let style = source.flex_item_style(item.key.node);
-        let inset_size = padding_border_size(item.padding, item.border, item.scrollbar);
+        let inset_size = box_inset_size(item.padding, item.border, item.scrollbar);
         let main_floor = axes.main.size(inset_size);
         let cross_preferred = axes.cross.size(item.preferred_size);
         let mut known = Size::NONE;
@@ -1137,11 +1009,9 @@ fn resolve_flexible_lengths(
             .iter_mut()
             .filter(|item| !item.frozen && !item.is_suppressed())
         {
-            let floor = axes.main.size(padding_border_size(
-                item.padding,
-                item.border,
-                item.scrollbar,
-            ));
+            let floor = axes
+                .main
+                .size(box_inset_size(item.padding, item.border, item.scrollbar));
             let unclamped = item.target_main;
             item.target_main = clamp_axis(
                 unclamped,
@@ -1227,7 +1097,7 @@ fn determine_hypothetical_cross_sizes<Source, Session>(
                 SizingMode::InherentSize,
                 RequestedAxis::Both,
             );
-            let inset_size = padding_border_size(item.padding, item.border, item.scrollbar);
+            let inset_size = box_inset_size(item.padding, item.border, item.scrollbar);
             let cross_floor = axes.cross.size(inset_size);
             item.hypothetical_cross = clamp_axis(
                 axes.cross.size(output.size),
@@ -1356,7 +1226,7 @@ fn determine_used_cross_sizes(items: &mut [FlexItem], lines: &[FlexLine], axes: 
                 item.target_cross = 0.0;
                 continue;
             }
-            let inset_size = padding_border_size(item.padding, item.border, item.scrollbar);
+            let inset_size = box_inset_size(item.padding, item.border, item.scrollbar);
             let cross_floor = axes.cross.size(inset_size);
             let should_stretch = item.align_self == AlignItems::Stretch
                 && axes.cross.size(item.size_is_auto)
@@ -1799,7 +1669,7 @@ fn static_position_for_absolute(
 fn perform_absolute_children<Source, Session>(
     source: &Source,
     session: &mut Session,
-    absolute_items: &[PendingItem],
+    absolute_items: &[OrderedItem],
     axes: Axes,
     inner_size: Size<f32>,
     container_size: Size<f32>,
@@ -1821,16 +1691,17 @@ where
     );
 
     for pending in absolute_items {
+        let key = pending.key();
         // The borrowed view is safe across recursive session calls; only
         // layout/cache state mutates while the source epoch stays immutable.
-        let style = source.flex_item_style(pending.node);
-        let mut item = resolve_item(source, pending.key(), parent_size, default_alignment);
+        let style = source.flex_item_style(key.node);
+        let mut item = resolve_item(source, key, parent_size, default_alignment);
         let mut known = item.preferred_size;
         let available = inner_size.map(AvailableSpace::Definite);
         let output = child_measurement(
             source,
             session,
-            pending.node,
+            key.node,
             known,
             item.preferred_size_is_definite,
             parent_size,
@@ -1838,7 +1709,7 @@ where
             SizingMode::InherentSize,
             RequestedAxis::Both,
         );
-        let inset_size = padding_border_size(item.padding, item.border, item.scrollbar);
+        let inset_size = box_inset_size(item.padding, item.border, item.scrollbar);
         known.width = Some(clamp_axis(
             output.size.width,
             item.min_size.width,
@@ -1865,11 +1736,11 @@ where
                 let mut layout = compute_absolute_layout(
                     source,
                     session,
-                    pending.node,
+                    key.node,
                     padding_box_size,
                     static_in_padding_space,
                 );
-                layout.order = pending.layout_order;
+                layout.order = key.layout_order;
                 layout.location.x += border.left;
                 layout.location.y += border.top;
                 content_size.width = content_size
@@ -1878,10 +1749,10 @@ where
                 content_size.height = content_size
                     .height
                     .max(layout.location.y + layout.size.height.max(layout.content_size.height));
-                session.set_unrounded_layout(pending.node, &layout);
+                session.set_unrounded_layout(key.node, &layout);
             }
             Position::AbsoluteHoisted => {
-                session.set_static_position(pending.node, static_position);
+                session.set_static_position(key.node, static_position);
             }
             _ => {}
         }
@@ -1929,66 +1800,6 @@ where
     let align_items = style.align_items().unwrap_or(AlignItems::Stretch);
     let justify_content = style.justify_content().unwrap_or(AlignContent::FlexStart);
     let axes = Axes::new(style.flex_direction(), flex_wrap, style.direction());
-    let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
-    let padding = resolve_edges(style.padding(), input.parent_size.width, &resolve_calc);
-    let border = resolve_edges(style.border(), input.parent_size.width, &resolve_calc);
-    let scrollbar = copied_scrollbar_size(style.overflow(), style.scrollbar_width());
-    let container_inset_size = padding_border_size(padding, border, scrollbar);
-    let margin = auto_edges_to_zero(resolve_optional_edges(
-        style.margin(),
-        input.parent_size.width,
-        &resolve_calc,
-    ));
-
-    let (preferred_size, min_size, max_size) = if input.sizing_mode == SizingMode::ContentSize {
-        (Size::NONE, Size::NONE, Size::NONE)
-    } else {
-        (
-            resolve_quantitative_sizes(
-                style.size(),
-                input.parent_size,
-                style.aspect_ratio(),
-                style.box_sizing(),
-                container_inset_size,
-                &resolve_calc,
-            ),
-            resolve_quantitative_sizes(
-                style.min_size(),
-                input.parent_size,
-                style.aspect_ratio(),
-                style.box_sizing(),
-                container_inset_size,
-                &resolve_calc,
-            ),
-            resolve_quantitative_sizes(
-                style.max_size(),
-                input.parent_size,
-                style.aspect_ratio(),
-                style.box_sizing(),
-                container_inset_size,
-                &resolve_calc,
-            ),
-        )
-    };
-
-    let clamped_preferred = Size::new(
-        preferred_size.width.map(|value| {
-            clamp_axis(
-                value,
-                min_size.width,
-                max_size.width,
-                container_inset_size.width,
-            )
-        }),
-        preferred_size.height.map(|value| {
-            clamp_axis(
-                value,
-                min_size.height,
-                max_size.height,
-                container_inset_size.height,
-            )
-        }),
-    );
     let style_definite = if input.sizing_mode == SizingMode::ContentSize {
         Size::new(false, false)
     } else {
@@ -1998,46 +1809,21 @@ where
         input.definite_dimensions.width || style_definite.width,
         input.definite_dimensions.height || style_definite.height,
     );
-    let mut outer_size = input.known_dimensions.or(clamped_preferred);
-    let mut inner_size = Size::new(
-        outer_size
-            .width
-            .map(|value| (value - container_inset_size.width).max(0.0)),
-        outer_size
-            .height
-            .map(|value| (value - container_inset_size.height).max(0.0)),
-    );
+    let ResolvedContainerBox {
+        padding,
+        border,
+        box_inset: container_inset_size,
+        min: min_size,
+        max: max_size,
+        outer: mut outer_size,
+        inner: mut inner_size,
+        available_inner: inner_available_space,
+        ..
+    } = resolve_container_box(source, &style, input);
     let item_inline_basis_was_indefinite = !outer_definite.width;
     let main_percentage_basis_was_indefinite = !axes.main.size(outer_definite);
-    let inner_available_space = Size::new(
-        inner_size.width.map_or_else(
-            || {
-                subtract_available_space(
-                    input.available_space.width,
-                    margin.horizontal_sum() + container_inset_size.width,
-                )
-            },
-            AvailableSpace::Definite,
-        ),
-        inner_size.height.map_or_else(
-            || {
-                subtract_available_space(
-                    input.available_space.height,
-                    margin.vertical_sum() + container_inset_size.height,
-                )
-            },
-            AvailableSpace::Definite,
-        ),
-    );
     let gap_value = style.gap();
-    let mut gap = Size::new(
-        resolve_length_percentage(gap_value.width, inner_size.width, &resolve_calc)
-            .unwrap_or(0.0)
-            .max(0.0),
-        resolve_length_percentage(gap_value.height, inner_size.height, &resolve_calc)
-            .unwrap_or(0.0)
-            .max(0.0),
-    );
+    let mut gap = resolve_gap(source, gap_value, inner_size);
     let mut generated = Vec::new();
     let mut absolute_items = Vec::new();
     let mut hidden = Vec::new();
@@ -2049,7 +1835,7 @@ where
             hidden.push((document_index, child));
             continue;
         }
-        let pending = PendingItem {
+        let pending = OrderedItem {
             node: child,
             document_index,
             css_order: child_style.order(),
@@ -2064,29 +1850,46 @@ where
             generated.push(pending);
         }
     }
-    generated.sort_by(|left, right| match left.css_order.cmp(&right.css_order) {
-        Ordering::Equal => left.document_index.cmp(&right.document_index),
-        ordering => ordering,
-    });
-    let mut paint_order = generated
-        .iter()
-        .map(|item| (item.css_order, item.document_index, item.node))
-        .chain(
+    let has_modified_order = generated.iter().any(|item| item.css_order != 0);
+    if has_modified_order {
+        generated.sort_unstable_by_key(|item| (item.css_order, item.document_index));
+        let mut paint_keys = Vec::with_capacity(generated.len() + absolute_items.len());
+        paint_keys.extend(
+            generated
+                .iter()
+                .enumerate()
+                .map(|(index, item)| (item.css_order, item.document_index, false, index)),
+        );
+        paint_keys.extend(
             absolute_items
                 .iter()
-                .map(|item| (0, item.document_index, item.node)),
-        )
-        .collect::<Vec<_>>();
-    paint_order.sort_by_key(|&(order, document_index, _)| (order, document_index));
-    for (layout_order, &(_, _, ordered_node)) in paint_order.iter().enumerate() {
-        let layout_order = u32::try_from(layout_order).unwrap_or(u32::MAX);
-        if let Some(item) = generated.iter_mut().find(|item| item.node == ordered_node) {
-            item.layout_order = layout_order;
-        } else if let Some(item) = absolute_items
-            .iter_mut()
-            .find(|item| item.node == ordered_node)
-        {
-            item.layout_order = layout_order;
+                .enumerate()
+                .map(|(index, item)| (0, item.document_index, true, index)),
+        );
+        paint_keys.sort_unstable_by_key(|&(order, document, _, _)| (order, document));
+        for (layout_order, &(_, _, is_absolute, index)) in paint_keys.iter().enumerate() {
+            let layout_order = u32::try_from(layout_order).unwrap_or(u32::MAX);
+            if is_absolute {
+                absolute_items[index].layout_order = layout_order;
+            } else {
+                generated[index].layout_order = layout_order;
+            }
+        }
+    } else {
+        let (mut generated_index, mut absolute_index, mut layout_order) = (0, 0, 0_u32);
+        while generated_index < generated.len() || absolute_index < absolute_items.len() {
+            let take_generated = absolute_index == absolute_items.len()
+                || (generated_index < generated.len()
+                    && generated[generated_index].document_index
+                        < absolute_items[absolute_index].document_index);
+            if take_generated {
+                generated[generated_index].layout_order = layout_order;
+                generated_index += 1;
+            } else {
+                absolute_items[absolute_index].layout_order = layout_order;
+                absolute_index += 1;
+            }
+            layout_order = layout_order.saturating_add(1);
         }
     }
 
@@ -2207,15 +2010,7 @@ where
         // used values resolve against the resulting content-box width. Run
         // the item/line phases once more with that now-definite basis while
         // keeping the intrinsic container size fixed.
-        let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
-        gap = Size::new(
-            resolve_length_percentage(gap_value.width, inner_size.width, &resolve_calc)
-                .unwrap_or(0.0)
-                .max(0.0),
-            resolve_length_percentage(gap_value.height, inner_size.height, &resolve_calc)
-                .unwrap_or(0.0)
-                .max(0.0),
-        );
+        gap = resolve_gap(source, gap_value, inner_size);
         main_gap = axes.main.size(gap);
         // Re-resolve compact scratch in place. Raw style is fetched by NodeId;
         // no second full-style snapshot or parallel style Vec is needed.
@@ -2355,4 +2150,386 @@ where
 
     LayoutOutput::new(outer_size, content_size)
         .with_first_baselines(Point::new(None, first_baseline.or(provisional_baseline)))
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[allow(clippy::float_cmp)]
+mod tests {
+    use super::*;
+
+    fn item(main: f32, cross: f32) -> FlexItem {
+        FlexItem {
+            key: ItemKey {
+                node: NodeId::new(0),
+                layout_order: 0,
+            },
+            direction: Direction::Ltr,
+            align_self: AlignItems::Stretch,
+            size_is_auto: Size::new(true, true),
+            flex_grow: 0.0,
+            flex_shrink: 1.0,
+            preferred_size: Size::NONE,
+            preferred_size_is_definite: Size::new(false, false),
+            min_size: Size::NONE,
+            max_size: Size::NONE,
+            margin: Edges::ZERO,
+            margin_auto: Edges::uniform(false),
+            padding: Edges::ZERO,
+            border: Edges::ZERO,
+            scrollbar: Size::ZERO,
+            inset: Edges::uniform(None),
+            flex_basis: main,
+            inner_flex_basis: main,
+            min_content_contribution: main,
+            max_content_contribution: main,
+            resolved_min_main: 0.0,
+            hypothetical_main: main,
+            target_main: main,
+            hypothetical_cross: cross,
+            target_cross: cross,
+            baseline: cross,
+            measured_baselines: Point::NONE,
+            frozen: false,
+            violation: 0.0,
+            main_position: 0.0,
+            cross_position: 0.0,
+            main_size_is_definite: false,
+            collapsed: false,
+            collapse_strut_cross: None,
+        }
+    }
+
+    #[test]
+    fn physical_edge_and_alignment_helpers_cover_reverse_and_overflow_rules() {
+        let mut edges = Edges::ZERO;
+        set_flow_start(&mut edges, Axis::Horizontal, true, 1.0);
+        set_flow_start(&mut edges, Axis::Vertical, true, 2.0);
+        set_flow_end(&mut edges, Axis::Horizontal, true, 3.0);
+        set_flow_end(&mut edges, Axis::Vertical, true, 4.0);
+        assert_eq!(
+            edges,
+            Edges {
+                left: 3.0,
+                right: 1.0,
+                top: 4.0,
+                bottom: 2.0
+            }
+        );
+
+        assert_eq!(
+            alignment_distribution(AlignContent::Start, 12.0, 2, false, false),
+            (0.0, 0.0)
+        );
+        assert_eq!(
+            alignment_distribution(AlignContent::Start, 12.0, 2, true, false),
+            (12.0, 0.0)
+        );
+        assert_eq!(
+            alignment_distribution(AlignContent::End, 12.0, 2, false, false),
+            (12.0, 0.0)
+        );
+        assert_eq!(
+            alignment_distribution(AlignContent::End, 12.0, 2, true, false),
+            (0.0, 0.0)
+        );
+        assert_eq!(
+            alignment_distribution(AlignContent::FlexEnd, 12.0, 2, false, false),
+            (12.0, 0.0)
+        );
+        assert_eq!(
+            alignment_distribution(AlignContent::Center, 12.0, 2, false, false),
+            (6.0, 0.0)
+        );
+        assert_eq!(
+            alignment_distribution(AlignContent::SpaceBetween, 12.0, 3, false, false),
+            (0.0, 6.0)
+        );
+        assert_eq!(
+            alignment_distribution(AlignContent::SpaceAround, 12.0, 3, false, false),
+            (2.0, 4.0)
+        );
+        assert_eq!(
+            alignment_distribution(AlignContent::SpaceEvenly, 12.0, 3, false, false),
+            (3.0, 3.0)
+        );
+        assert_eq!(
+            alignment_distribution(AlignContent::SpaceAround, -12.0, 3, false, false),
+            (-6.0, 0.0)
+        );
+        assert_eq!(
+            alignment_distribution(AlignContent::SpaceBetween, -12.0, 3, false, false),
+            (0.0, 0.0)
+        );
+        assert_eq!(
+            alignment_distribution(AlignContent::Center, 12.0, 0, false, false),
+            (0.0, 0.0)
+        );
+
+        let opposing = Edges {
+            left: Some(7.0),
+            right: Some(11.0),
+            top: None,
+            bottom: Some(5.0),
+        };
+        assert_eq!(
+            relative_offset(opposing, Direction::Ltr),
+            Point::new(7.0, -5.0)
+        );
+        assert_eq!(
+            relative_offset(opposing, Direction::Rtl),
+            Point::new(-11.0, -5.0)
+        );
+    }
+
+    #[test]
+    fn intrinsic_line_helpers_cover_empty_min_max_and_definite_constraints() {
+        let axes = Axes::new(FlexDirection::Row, FlexWrap::Wrap, Direction::Ltr);
+        assert!(
+            collect_flex_lines(
+                &[],
+                FlexWrap::Wrap,
+                AvailableSpace::Definite(10.0),
+                0.0,
+                axes
+            )
+            .is_empty()
+        );
+
+        let mut items = vec![item(10.0, 5.0), item(20.0, 7.0)];
+        items[0].min_content_contribution = 8.0;
+        items[1].min_content_contribution = 15.0;
+        items[0].max_content_contribution = 12.0;
+        items[1].max_content_contribution = 24.0;
+        let lines = collect_flex_lines(
+            &items,
+            FlexWrap::Wrap,
+            AvailableSpace::MinContent,
+            2.0,
+            axes,
+        );
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            line_intrinsic_main(
+                &items,
+                FlexLine {
+                    start: 0,
+                    end: 2,
+                    cross_size: 0.0,
+                    cross_position: 0.0
+                },
+                2.0,
+                axes
+            ),
+            32.0
+        );
+        assert_eq!(
+            determine_auto_main_size(
+                &items,
+                &lines,
+                2.0,
+                axes,
+                AvailableSpace::MinContent,
+                1.0,
+                None,
+                None
+            ),
+            16.0
+        );
+        assert_eq!(
+            determine_auto_main_size(
+                &items,
+                &lines,
+                2.0,
+                axes,
+                AvailableSpace::MaxContent,
+                1.0,
+                None,
+                None
+            ),
+            25.0
+        );
+        assert_eq!(
+            determine_auto_main_size(
+                &items,
+                &lines,
+                2.0,
+                axes,
+                AvailableSpace::Definite(100.0),
+                1.0,
+                None,
+                None
+            ),
+            21.0
+        );
+    }
+
+    #[test]
+    fn baseline_and_cross_alignment_cover_auto_margin_overflow_and_reversal() {
+        let normal = Axes::new(FlexDirection::Row, FlexWrap::Wrap, Direction::Ltr);
+        let reversed = Axes::new(FlexDirection::Row, FlexWrap::WrapReverse, Direction::Ltr);
+        let mut baseline_items = vec![item(10.0, 20.0), item(10.0, 15.0)];
+        baseline_items[0].align_self = AlignItems::Baseline;
+        baseline_items[0].baseline = 12.0;
+        baseline_items[0].margin = Edges {
+            left: 0.0,
+            right: 0.0,
+            top: 2.0,
+            bottom: 1.0,
+        };
+        baseline_items[1].align_self = AlignItems::Baseline;
+        baseline_items[1].baseline = 5.0;
+        baseline_items[1].margin = Edges {
+            left: 0.0,
+            right: 0.0,
+            top: 1.0,
+            bottom: 3.0,
+        };
+        let mut lines = [FlexLine {
+            start: 0,
+            end: 2,
+            cross_size: 0.0,
+            cross_position: 0.0,
+        }];
+        calculate_line_cross_sizes(&baseline_items, &mut lines, normal, FlexWrap::Wrap, None);
+        assert_eq!(lines[0].cross_size, 27.0);
+
+        let mut positive_auto = item(10.0, 10.0);
+        positive_auto.margin_auto.bottom = true;
+        let mut positive = [positive_auto];
+        align_items_cross_axis(
+            &mut positive,
+            &[FlexLine {
+                start: 0,
+                end: 1,
+                cross_size: 20.0,
+                cross_position: 0.0,
+            }],
+            normal,
+        );
+        assert_eq!(positive[0].margin.bottom, 10.0);
+
+        let mut overflowing_auto = item(10.0, 30.0);
+        overflowing_auto.margin_auto.bottom = true;
+        let mut overflowing = [overflowing_auto];
+        align_items_cross_axis(
+            &mut overflowing,
+            &[FlexLine {
+                start: 0,
+                end: 1,
+                cross_size: 20.0,
+                cross_position: 0.0,
+            }],
+            reversed,
+        );
+        assert_eq!(overflowing[0].margin.bottom, -10.0);
+
+        let mut baseline = item(10.0, 20.0);
+        baseline.align_self = AlignItems::Baseline;
+        baseline.baseline = 8.0;
+        let mut baseline = [baseline];
+        align_items_cross_axis(
+            &mut baseline,
+            &[FlexLine {
+                start: 0,
+                end: 1,
+                cross_size: 40.0,
+                cross_position: 0.0,
+            }],
+            reversed,
+        );
+        assert_eq!(baseline[0].cross_position, 20.0);
+
+        let mut end = item(10.0, 20.0);
+        end.align_self = AlignItems::End;
+        let mut normal_end = [end];
+        align_items_cross_axis(
+            &mut normal_end,
+            &[FlexLine {
+                start: 0,
+                end: 1,
+                cross_size: 40.0,
+                cross_position: 0.0,
+            }],
+            normal,
+        );
+        assert_eq!(normal_end[0].cross_position, 20.0);
+        let mut end = item(10.0, 20.0);
+        end.align_self = AlignItems::End;
+        let mut reversed_end = [end];
+        align_items_cross_axis(
+            &mut reversed_end,
+            &[FlexLine {
+                start: 0,
+                end: 1,
+                cross_size: 40.0,
+                cross_position: 0.0,
+            }],
+            reversed,
+        );
+        assert_eq!(reversed_end[0].cross_position, 0.0);
+    }
+
+    #[test]
+    fn absolute_static_cross_alignment_uses_logical_start_and_end() {
+        let normal = Axes::new(FlexDirection::Row, FlexWrap::Wrap, Direction::Ltr);
+        let reversed = Axes::new(FlexDirection::Row, FlexWrap::WrapReverse, Direction::Ltr);
+        let inner = Size::new(100.0, 50.0);
+        let origin = Point::new(5.0, 7.0);
+        let mut candidate = item(20.0, 10.0);
+
+        candidate.align_self = AlignItems::Start;
+        assert_eq!(
+            static_position_for_absolute(
+                &candidate,
+                normal,
+                inner,
+                origin,
+                AlignContent::FlexStart
+            ),
+            origin
+        );
+        assert_eq!(
+            static_position_for_absolute(
+                &candidate,
+                reversed,
+                inner,
+                origin,
+                AlignContent::FlexStart
+            ),
+            origin
+        );
+        candidate.align_self = AlignItems::End;
+        assert_eq!(
+            static_position_for_absolute(
+                &candidate,
+                normal,
+                inner,
+                origin,
+                AlignContent::FlexStart
+            ),
+            Point::new(5.0, 47.0)
+        );
+        assert_eq!(
+            static_position_for_absolute(
+                &candidate,
+                reversed,
+                inner,
+                origin,
+                AlignContent::FlexStart
+            ),
+            Point::new(5.0, 47.0)
+        );
+        candidate.align_self = AlignItems::FlexEnd;
+        assert_eq!(
+            static_position_for_absolute(
+                &candidate,
+                normal,
+                inner,
+                origin,
+                AlignContent::FlexStart
+            ),
+            Point::new(5.0, 47.0)
+        );
+    }
 }

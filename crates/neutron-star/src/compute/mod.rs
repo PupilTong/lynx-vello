@@ -11,8 +11,8 @@
 //!
 //! This module contains the generic machinery (root entry, cache wrapper,
 //! hidden-subtree zeroing, leaf boxing, the positioned pass, rounding) and the
-//! implemented [`compute_flexbox_layout`] entry point. Grid layout remains
-//! the L2 algorithm milestone.
+//! implemented [`compute_flexbox_layout`] and [`compute_grid_layout`] entry
+//! points.
 //!
 //! # The canonical dispatch skeleton
 //!
@@ -21,7 +21,9 @@
 //! `display: linear`/`relative` — adds arms that call its own algorithms):
 //!
 //! ```
-//! use neutron_star::compute::{compute_cached_layout, compute_flexbox_layout, hide_subtree};
+//! use neutron_star::compute::{
+//!     compute_cached_layout, compute_flexbox_layout, compute_grid_layout, hide_subtree,
+//! };
 //! use neutron_star::tree::{
 //!     FlexSource, GridSource, LayoutInput, LayoutOutput, LayoutSession, LayoutSource, NodeId,
 //! };
@@ -55,7 +57,7 @@
 //!         match display {
 //!             Display::Hidden => unreachable!(),
 //!             Display::Flex => compute_flexbox_layout(source, session, node, input),
-//!             Display::Grid => unimplemented!("grid layout lands in L2"),
+//!             Display::Grid => compute_grid_layout(source, session, node, input),
 //!             // host: Display::Linear => host_linear_layout(source, session, node, input),
 //!             // host: Display::Leaf => compute_leaf_layout(input, &style, resolve, &mut measurer),
 //!         }
@@ -83,10 +85,12 @@
 //!    crisp rendering; kept separate so relayout always starts from unrounded values (re-rounding
 //!    rounded values drifts).
 mod flexbox;
+mod grid;
 mod leaf;
 mod util;
 
 pub use flexbox::compute_flexbox_layout;
+pub use grid::compute_grid_layout;
 pub use leaf::{
     FnLeafMeasurer, LeafMeasureInput, LeafMeasurement, LeafMeasurer, LeafMetrics,
     compute_leaf_layout,
@@ -276,7 +280,7 @@ where
 /// - `containing_block`: the containing block's **padding-box size**, the basis for the node's
 ///   inset and percentage resolution;
 /// - `static_position`: the converted static position (padding-box space), the anchor for any axis
-///   whose insets are both `auto` (CSS Position / Flexbox §4.1 / Grid §10.1 semantics).
+///   whose insets are both `auto` (CSS Position / Flexbox §4.1 / Grid §10.2 semantics).
 ///
 /// The node's subtree is laid out normally through
 /// [`compute_child_layout`](LayoutSession::compute_child_layout) (descendants
@@ -287,7 +291,9 @@ where
 /// and stores it via
 /// [`set_unrounded_layout`](LayoutState::set_unrounded_layout), keeping
 /// [`Layout::location`]'s parent-relative contract intact for rounding and
-/// painting.
+/// painting. The returned [`Layout::order`] is zero; the host's positioned
+/// pass assigns the formatting parent's order-modified paint index when it
+/// stores a hoisted node.
 #[must_use = "the returned layout is in containing-block space; the host must convert and store it"]
 pub fn compute_absolute_layout<Source, Session>(
     source: &Source,
@@ -691,5 +697,211 @@ fn round_layout_inner<Source, State>(
     for index in 0..child_count {
         let child = source.child_id(node, index);
         round_layout_inner(source, state, child, scale, position);
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[allow(clippy::float_cmp)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn root_auto_margins_cover_indefinite_fixed_single_and_double_auto_cases() {
+        let fixed = Edges {
+            left: Some(3.0),
+            right: Some(7.0),
+            top: Some(2.0),
+            bottom: Some(4.0),
+        };
+        assert_eq!(
+            resolve_root_margins(
+                fixed,
+                Edges::uniform(false),
+                AvailableSpace::MaxContent,
+                40.0,
+            ),
+            Edges {
+                left: 3.0,
+                right: 7.0,
+                top: 2.0,
+                bottom: 4.0,
+            }
+        );
+        assert_eq!(
+            resolve_root_margins(
+                fixed,
+                Edges::uniform(false),
+                AvailableSpace::Definite(100.0),
+                40.0,
+            )
+            .left,
+            3.0
+        );
+
+        let both = resolve_root_margins(
+            Edges::uniform(None),
+            Edges {
+                left: true,
+                right: true,
+                top: false,
+                bottom: false,
+            },
+            AvailableSpace::Definite(100.0),
+            40.0,
+        );
+        assert_eq!((both.left, both.right), (30.0, 30.0));
+
+        let one = resolve_root_margins(
+            Edges {
+                left: Some(5.0),
+                right: None,
+                top: None,
+                bottom: None,
+            },
+            Edges {
+                left: false,
+                right: true,
+                top: false,
+                bottom: false,
+            },
+            AvailableSpace::Definite(100.0),
+            40.0,
+        );
+        assert_eq!((one.left, one.right), (5.0, 55.0));
+    }
+
+    fn absolute_style() -> ResolvedAbsoluteStyle {
+        ResolvedAbsoluteStyle {
+            insets: Edges::uniform(Some(0.0)),
+            optional_margin: Edges::uniform(None),
+            padding: Edges::ZERO,
+            border: Edges::ZERO,
+            scrollbar_size: Size::ZERO,
+            auto_size: Size::new(true, true),
+            min_size: Size::new(Some(20.0), Some(10.0)),
+            max_size: Size::new(Some(90.0), Some(60.0)),
+            aspect_ratio: None,
+            direction: Direction::Ltr,
+            padding_border_size: Size::new(8.0, 6.0),
+        }
+    }
+
+    #[test]
+    fn absolute_known_dimensions_clamp_stretch_and_defer_ratio_height() {
+        let style = absolute_style();
+        assert_eq!(
+            absolute_known_dimensions(&style, Size::new(100.0, 80.0), Edges::uniform(5.0),),
+            Size::new(Some(90.0), Some(60.0))
+        );
+
+        let mut ratio = style;
+        ratio.aspect_ratio = Some(2.0);
+        assert_eq!(
+            absolute_known_dimensions(&ratio, Size::new(100.0, 80.0), Edges::uniform(5.0),),
+            Size::new(Some(90.0), None)
+        );
+
+        let mut vertical_only = style;
+        vertical_only.auto_size.width = false;
+        assert_eq!(
+            absolute_known_dimensions(&vertical_only, Size::new(100.0, 30.0), Edges::uniform(20.0),),
+            Size::new(None, Some(10.0))
+        );
+    }
+
+    #[test]
+    fn absolute_auto_margins_cover_positive_negative_and_one_sided_equations() {
+        let insets = Edges::uniform(Some(0.0));
+        let centered = resolve_absolute_margins(
+            Edges::uniform(None),
+            insets,
+            Size::new(100.0, 80.0),
+            Size::new(60.0, 40.0),
+            Direction::Ltr,
+        );
+        assert_eq!(centered, Edges::uniform(20.0));
+
+        let ltr_overflow = resolve_absolute_margins(
+            Edges::uniform(None),
+            insets,
+            Size::new(40.0, 80.0),
+            Size::new(60.0, 40.0),
+            Direction::Ltr,
+        );
+        assert_eq!((ltr_overflow.left, ltr_overflow.right), (0.0, -20.0));
+        let rtl_overflow = resolve_absolute_margins(
+            Edges::uniform(None),
+            insets,
+            Size::new(40.0, 80.0),
+            Size::new(60.0, 40.0),
+            Direction::Rtl,
+        );
+        assert_eq!((rtl_overflow.left, rtl_overflow.right), (-20.0, 0.0));
+
+        let start_auto = resolve_absolute_margins(
+            Edges {
+                left: None,
+                right: Some(3.0),
+                top: None,
+                bottom: Some(4.0),
+            },
+            insets,
+            Size::new(100.0, 80.0),
+            Size::new(60.0, 40.0),
+            Direction::Ltr,
+        );
+        assert_eq!((start_auto.left, start_auto.top), (37.0, 36.0));
+        let end_auto = resolve_absolute_margins(
+            Edges {
+                left: Some(2.0),
+                right: None,
+                top: Some(5.0),
+                bottom: None,
+            },
+            insets,
+            Size::new(100.0, 80.0),
+            Size::new(60.0, 40.0),
+            Direction::Ltr,
+        );
+        assert_eq!((end_auto.right, end_auto.bottom), (38.0, 35.0));
+    }
+
+    #[test]
+    fn absolute_axis_location_covers_static_start_end_and_rtl_preference() {
+        let base = AbsoluteAxis {
+            containing_size: 100.0,
+            box_size: 20.0,
+            start_inset: None,
+            end_inset: None,
+            start_margin: 3.0,
+            end_margin: 4.0,
+            static_position: 11.0,
+            prefer_end: false,
+        };
+        assert_eq!(absolute_axis_location(base), 14.0);
+        assert_eq!(
+            absolute_axis_location(AbsoluteAxis {
+                start_inset: Some(7.0),
+                ..base
+            }),
+            10.0
+        );
+        assert_eq!(
+            absolute_axis_location(AbsoluteAxis {
+                end_inset: Some(9.0),
+                ..base
+            }),
+            67.0
+        );
+        assert_eq!(
+            absolute_axis_location(AbsoluteAxis {
+                start_inset: Some(7.0),
+                end_inset: Some(9.0),
+                prefer_end: true,
+                ..base
+            }),
+            67.0
+        );
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "neutron-star"
-description = "Trait-first, statically-dispatched CSS flexbox engine and Grid protocol for host-owned trees"
+description = "Trait-first, statically-dispatched CSS flexbox and Grid engine for host-owned trees"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -24,3 +24,7 @@ harness = false
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "grid"
+harness = false

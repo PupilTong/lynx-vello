@@ -1002,3 +1002,67 @@ fn overflowing_auto_margins_follow_main_and_cross_axis_rules() {
     assert_close(layout.margin.top, 0.0);
     assert_close(layout.margin.bottom, -30.0);
 }
+
+#[test]
+fn intrinsic_item_keywords_resolve_preferred_min_max_and_fit_content_basis() {
+    let mut tree = TestTree::default();
+    let constrained = tree.push_intrinsic_leaf(
+        TestStyle {
+            size: Size::new(Dimension::MaxContent, Dimension::Length(10.0)),
+            min_size: Size::new(
+                Dimension::FitContent(LengthPercentage::length(30.0)),
+                Dimension::Auto,
+            ),
+            max_size: Size::new(Dimension::MinContent, Dimension::Auto),
+            ..TestStyle::default()
+        },
+        Size::new(20.0, 10.0),
+        Size::new(80.0, 10.0),
+    );
+    let fit_basis = tree.push_intrinsic_leaf(
+        TestStyle {
+            min_size: Size::new(Dimension::ZERO, Dimension::Auto),
+            flex_basis: Dimension::FitContent(LengthPercentage::length(50.0)),
+            ..TestStyle::default()
+        },
+        Size::new(20.0, 10.0),
+        Size::new(80.0, 10.0),
+    );
+    let root = flex_container(&mut tree, TestStyle::default(), &[constrained, fit_basis]);
+
+    definite_layout(&mut tree, root, 200.0, 20.0);
+
+    // CSS minimums take precedence over a smaller maximum.
+    assert_close(tree.layout(constrained).size.width, 30.0);
+    assert_close(tree.layout(fit_basis).size.width, 50.0);
+}
+
+#[test]
+fn container_preferred_axes_clamp_with_minimum_precedence_and_content_mode_ignores_them() {
+    let mut tree = TestTree::default();
+    let root = flex_container(
+        &mut tree,
+        TestStyle {
+            size: Size::new(Dimension::Length(300.0), Dimension::Length(100.0)),
+            min_size: Size::new(Dimension::Length(400.0), Dimension::Length(120.0)),
+            max_size: Size::new(Dimension::Length(200.0), Dimension::Length(80.0)),
+            ..TestStyle::default()
+        },
+        &[],
+    );
+
+    let inherent = perform_layout(
+        &mut tree,
+        root,
+        Size::NONE,
+        Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
+    );
+    assert_size(inherent.size, Size::new(400.0, 120.0));
+
+    let mut content_input = LayoutInput::perform_layout(Size::NONE, Size::NONE, Size::MAX_CONTENT);
+    content_input.sizing_mode = SizingMode::ContentSize;
+    let content = tree
+        .session
+        .compute_child_layout(&tree.source, root, content_input);
+    assert_size(content.size, Size::ZERO);
+}
