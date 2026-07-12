@@ -1,27 +1,26 @@
-//! Styling-engine-free host shared by lynx-layout integration tests and benchmarks.
+//! Styling-engine-free host shared by neutron-star Linear tests and benchmarks.
 
 // Every integration-test or benchmark target includes this module separately and intentionally
 // uses only part of the fixture surface.
 #![allow(dead_code)]
 
-use lynx_layout::{
-    LinearContainerStyle, LinearCrossGravity, LinearGravity, LinearItemStyle, LinearLayoutGravity,
-    LinearOrientation, LinearSource, compute_linear_layout,
-};
+use neutron_star::cache::Cache;
 use neutron_star::compute::{
-    FnLeafMeasurer, LeafMeasureInput, LeafMetrics, compute_cached_layout, compute_grid_layout,
-    compute_leaf_layout, hide_subtree,
+    FnLeafMeasurer, LeafMeasureInput, LeafMetrics, compute_cached_layout, compute_flexbox_layout,
+    compute_grid_layout, compute_leaf_layout, compute_linear_layout, hide_subtree,
 };
 use neutron_star::prelude::*;
 use neutron_star::style::{
     AlignItems, AlignSelf, BoxGenerationMode, BoxSizing, CalcHandle, CoreStyle, Dimension,
     Direction, GridTemplateComponent, JustifyContent, LengthPercentage, LengthPercentageAuto,
-    Overflow, Position, RepetitionCount, TrackSizingFunction, Visibility,
+    LinearContainerStyle, LinearCrossGravity, LinearGravity, LinearItemStyle, LinearLayoutGravity,
+    LinearOrientation, Overflow, Position, RepetitionCount, TrackSizingFunction, Visibility,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TestDisplay {
     Linear,
+    Flex,
     Grid,
     Leaf,
 }
@@ -193,6 +192,17 @@ impl LinearItemStyle for TestStyle {
     }
 }
 
+impl FlexContainerStyle for TestStyle {}
+impl FlexItemStyle for TestStyle {
+    fn align_self(&self) -> Option<AlignSelf> {
+        self.align_self
+    }
+
+    fn order(&self) -> i32 {
+        self.order
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) struct EmptyGridRepetition;
 
@@ -329,6 +339,7 @@ pub(super) struct TestSession {
     pub(super) layout_writes: usize,
     pub(super) static_position_writes: usize,
     pub(super) record_measure_inputs: bool,
+    caches: Option<Vec<Cache>>,
 }
 
 impl Default for TestSession {
@@ -338,7 +349,14 @@ impl Default for TestSession {
             layout_writes: 0,
             static_position_writes: 0,
             record_measure_inputs: true,
+            caches: None,
         }
+    }
+}
+
+impl TestSession {
+    pub(super) fn enable_cache(&mut self) {
+        self.caches = Some(vec![Cache::new(); self.nodes.len()]);
     }
 }
 
@@ -426,11 +444,27 @@ impl TestTree {
         })
     }
 
+    pub(super) fn push_flex(&mut self, style: TestStyle, children: Vec<NodeId>) -> NodeId {
+        self.push(TestSourceNode {
+            display: TestDisplay::Flex,
+            style,
+            children,
+            measure: TestMeasure::Intrinsic {
+                min_content_size: Size::ZERO,
+                max_content_size: Size::ZERO,
+                first_baseline: None,
+            },
+        })
+    }
+
     pub(super) fn push(&mut self, node: TestSourceNode) -> NodeId {
         debug_assert_eq!(self.source.nodes.len(), self.session.nodes.len());
         let id = NodeId::from(self.source.nodes.len());
         self.source.nodes.push(node);
         self.session.nodes.push(TestSessionNode::default());
+        if let Some(caches) = &mut self.session.caches {
+            caches.push(Cache::new());
+        }
         id
     }
 
@@ -499,14 +533,14 @@ impl LayoutSource for TestSource {
 }
 
 impl LinearSource for TestSource {
-    type LinearContainerStyle<'a> = &'a TestStyle;
-    type LinearItemStyle<'a> = &'a TestStyle;
+    type ContainerStyle<'a> = &'a TestStyle;
+    type ItemStyle<'a> = &'a TestStyle;
 
-    fn linear_container_style(&self, container: NodeId) -> Self::LinearContainerStyle<'_> {
+    fn linear_container_style(&self, container: NodeId) -> Self::ContainerStyle<'_> {
         &self.nodes[usize::from(container)].style
     }
 
-    fn linear_item_style(&self, item: NodeId) -> Self::LinearItemStyle<'_> {
+    fn linear_item_style(&self, item: NodeId) -> Self::ItemStyle<'_> {
         &self.nodes[usize::from(item)].style
     }
 }
@@ -524,6 +558,19 @@ impl GridSource for TestSource {
     }
 }
 
+impl FlexSource for TestSource {
+    type ContainerStyle<'a> = &'a TestStyle;
+    type ItemStyle<'a> = &'a TestStyle;
+
+    fn flex_container_style(&self, container: NodeId) -> Self::ContainerStyle<'_> {
+        &self.nodes[usize::from(container)].style
+    }
+
+    fn flex_item_style(&self, item: NodeId) -> Self::ItemStyle<'_> {
+        &self.nodes[usize::from(item)].style
+    }
+}
+
 impl LayoutState for TestSession {
     fn set_unrounded_layout(&mut self, node: NodeId, layout: &Layout) {
         self.layout_writes += 1;
@@ -537,13 +584,21 @@ impl LayoutState for TestSession {
 }
 
 impl CacheState for TestSession {
-    fn cache_get(&self, _node: NodeId, _input: LayoutInput) -> Option<LayoutOutput> {
-        None
+    fn cache_get(&self, node: NodeId, input: LayoutInput) -> Option<LayoutOutput> {
+        self.caches.as_ref()?[usize::from(node)].get(input)
     }
 
-    fn cache_store(&mut self, _node: NodeId, _input: LayoutInput, _output: LayoutOutput) {}
+    fn cache_store(&mut self, node: NodeId, input: LayoutInput, output: LayoutOutput) {
+        if let Some(caches) = &mut self.caches {
+            caches[usize::from(node)].store(input, output);
+        }
+    }
 
-    fn cache_clear(&mut self, _node: NodeId) {}
+    fn cache_clear(&mut self, node: NodeId) {
+        if let Some(caches) = &mut self.caches {
+            caches[usize::from(node)].clear();
+        }
+    }
 }
 
 impl LayoutSession<TestSource> for TestSession {
@@ -563,6 +618,7 @@ impl LayoutSession<TestSource> for TestSession {
         let output =
             compute_cached_layout(self, child, input, |session, child, input| match display {
                 TestDisplay::Linear => compute_linear_layout(source, session, child, input),
+                TestDisplay::Flex => compute_flexbox_layout(source, session, child, input),
                 TestDisplay::Grid => compute_grid_layout(source, session, child, input),
                 TestDisplay::Leaf => {
                     let style = &source.nodes[index].style;

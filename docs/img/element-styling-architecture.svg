@@ -111,11 +111,11 @@
   <path class="ar" d="M240,608 V644" marker-end="url(#arr)"/>
   <path class="ar" d="M760,608 V644" marker-end="url(#arr)"/>
 
-  <!-- Row 3: future consumers -->
+  <!-- Row 3: existing layout engine and future integration/consumers -->
   <rect x="40" y="650" width="920" height="58" rx="6" fill="#fafafa" stroke="#999999" stroke-dasharray="6 4"/>
-  <text x="52" y="672" class="bh">future crates</text>
-  <text x="150" y="672" class="bs">— consume the widget tree + per-element Arc&lt;ComputedValues&gt;</text>
-  <text x="52" y="694" class="ln">lynx-layout (starlight successor) · lynx-text (parley) · lynx-render (vello) · lynx runtime (PAPI JS bindings)</text>
+  <text x="52" y="672" class="bh">layout engine + future pipeline</text>
+  <text x="270" y="672" class="bs">— host integration and downstream text/render crates remain planned</text>
+  <text x="52" y="694" class="ln">neutron-star (Flex/Grid/Linear/Relative) · future runtime adapter · lynx-text (parley) · lynx-render (vello)</text>
 
   <text x="960" y="736" class="lb" text-anchor="end">lynx-vello PR #4 · architecture v3 · 2026-07-09</text>
 </svg>

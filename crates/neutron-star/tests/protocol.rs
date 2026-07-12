@@ -3,16 +3,16 @@
 //! storage with zero `dyn`, zero allocation at the boundary, and zero
 //! engine-side state.
 //!
-//! Runtime tests exercise traversal, style/value plumbing, and the shared L1
-//! machinery. Flexbox behavior has its own `tests/flexbox.rs` suite; Grid's
-//! algorithm remains pending while this host proves its protocol is
-//! implementable.
+//! Runtime tests exercise traversal, style/value plumbing, and shared
+//! machinery. Algorithm behavior lives in `tests/flexbox.rs`, `tests/grid.rs`,
+//! `tests/linear.rs`, and `tests/relative.rs`; this host proves their complete
+//! protocol surface is implementable.
 
 use neutron_star::cache::Cache;
 use neutron_star::compute::{
     FnLeafMeasurer, LeafMeasureInput, LeafMeasurement, LeafMeasurer, LeafMetrics,
     compute_absolute_layout, compute_cached_layout, compute_leaf_layout, compute_root_layout,
-    hide_subtree, measure_absolute_layout, round_layout,
+    hide_subtree, round_layout,
 };
 use neutron_star::prelude::*;
 use neutron_star::style::{
@@ -62,7 +62,6 @@ struct MockStyle {
     display: MockDisplay,
     auto_horizontal_margin: bool,
     size: Size<Dimension>,
-    inset: Edges<LengthPercentageAuto>,
     padding: Edges<LengthPercentage>,
     flex_grow: f32,
     grid_column: Line<GridPlacement>,
@@ -80,10 +79,6 @@ impl CoreStyle for MockStyle {
 
     fn size(&self) -> Size<Dimension> {
         self.size
-    }
-
-    fn inset(&self) -> Edges<LengthPercentageAuto> {
-        self.inset
     }
 
     fn padding(&self) -> Edges<LengthPercentage> {
@@ -114,6 +109,8 @@ impl FlexItemStyle for MockStyle {
 
 impl RelativeContainerStyle for MockStyle {}
 impl RelativeItemStyle for MockStyle {}
+impl LinearContainerStyle for MockStyle {}
+impl LinearItemStyle for MockStyle {}
 
 fn to_component(component: &MockTemplateComponent) -> GridTemplateComponent<&MockRepetition> {
     match component {
@@ -297,6 +294,19 @@ impl RelativeSource for MockSource {
     }
 
     fn relative_item_style(&self, item: NodeId) -> Self::ItemStyle<'_> {
+        &self.node(item).style
+    }
+}
+
+impl LinearSource for MockSource {
+    type ContainerStyle<'a> = &'a MockStyle;
+    type ItemStyle<'a> = &'a MockStyle;
+
+    fn linear_container_style(&self, container: NodeId) -> Self::ContainerStyle<'_> {
+        &self.node(container).style
+    }
+
+    fn linear_item_style(&self, item: NodeId) -> Self::ItemStyle<'_> {
         &self.node(item).style
     }
 }
@@ -772,33 +782,6 @@ fn compute_absolute_layout_uses_the_static_position() {
     );
     assert_eq!(layout.location, Point::new(12.5, 7.0));
     assert_eq!(layout.size, Size::ZERO);
-}
-
-#[test]
-fn measure_absolute_layout_uses_positioned_sizing_without_writes() {
-    let (mut host, root) = leaf_tree();
-    let hoisted = host.source.child_id(root, 0);
-    host.source.nodes[usize::from(hoisted)].style.inset = Edges {
-        left: LengthPercentageAuto::Length(10.0),
-        right: LengthPercentageAuto::Length(20.0),
-        top: LengthPercentageAuto::Length(5.0),
-        bottom: LengthPercentageAuto::Length(15.0),
-    };
-    host.session.node_mut(hoisted).unrounded.size = Size::new(17.0, 9.0);
-
-    let measurement = measure_absolute_layout(
-        &host.source,
-        &mut host.session,
-        hoisted,
-        Size::new(100.0, 80.0),
-    );
-
-    assert_eq!(measurement.location, Point::new(10.0, 5.0));
-    assert_eq!(measurement.size, Size::new(70.0, 60.0));
-    assert_eq!(
-        host.session.unrounded_layout(hoisted).size,
-        Size::new(17.0, 9.0)
-    );
 }
 
 #[test]

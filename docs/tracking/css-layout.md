@@ -4,7 +4,42 @@
 
 ### Layout Engine: Box Model, Positioning, Flex/Grid, and Lynx-Specific Layout Primitives
 
-Source of truth: Lynx's native layout engine is **Starlight** (`lynx/core/renderer/starlight/{layout,style,types}`), a from-scratch C++ layout engine (not a fork of Yoga/Taffy). Its property surface is generated from `lynx/tools/css_generator/property_index.json` + one `css_defines/<id>-<name>.json` file per property (236 properties total as of `count: 236`); layout-affecting ones are tagged `"consumption_status": "layout-only"` and land in `LayoutComputedStyle`. Algorithms live one-per-mode: `flex_layout_algorithm.cc`, `linear_layout_algorithm.cc`, `relative_layout_algorithm.cc`, `grid_layout_algorithm.cc`, `staggered_grid_layout_algorithm.cc`, `position_layout_utils.cc`. `display` in Lynx is *only* an internal/child-layout-mode switch (flex/linear/grid/relative/none) — it does **not** carry CSS's external inline/block dichotomy (confirmed in `lynx/tools/css_generator/css_defines/24-display.json`: "does not determine the external display type"). Flexbox and Grid implementations closely mirror the W3C algorithms step-by-step (comments in `flex_layout_algorithm.h` literally cite "Algorithm-3" .. "Algorithm-15" matching the CSS Flexbox spec's resolution steps; `grid_layout_algorithm.h` mirrors CSS Grid's track-sizing algorithm terms verbatim: "intrinsic track sizes", "infinitely growable", "flexible tracks"). The two non-standard layout modes unique to Lynx are **linear** (Android-`LinearLayout`-derived: `display:linear` + `linear-*` properties) and **relative** (Android-`RelativeLayout`-derived: `display:relative` + `relative-*` properties, id-based sibling anchoring — unrelated to CSS `position:relative`). `lynx-stack/packages/web-platform/web-core` (the closest prior art to lynx-vello) does not reimplement Starlight; it polyfills `linear`/`relative` on top of real browser CSS Flexbox via custom elements and CSS custom properties (see `lynx-stack/packages/web-platform/web-core/src/style_transformer/rules.rs`, which rewrites `display:linear` → `--lynx-display:linear; display:flex` plus `--lynx-linear-orientation` custom props consumed by `lynx-stack/packages/web-platform/web-elements/**/LinearContainer*`). lynx-vello now implements `linear` as a first-class host-side algorithm rather than a flex polyfill; `relative` remains future work and should follow the same first-class approach.
+Source of truth: Lynx's native layout engine is **Starlight**
+(`lynx/core/renderer/starlight/{layout,style,types}`), a from-scratch C++ layout
+engine (not a fork of Yoga/Taffy). Its property surface is generated from
+`lynx/tools/css_generator/property_index.json` plus one
+`css_defines/<id>-<name>.json` file per property (236 properties total as of
+`count: 236`); layout-affecting ones are tagged
+`"consumption_status": "layout-only"` and land in `LayoutComputedStyle`.
+Algorithms live one-per-mode: `flex_layout_algorithm.cc`,
+`linear_layout_algorithm.cc`, `relative_layout_algorithm.cc`,
+`grid_layout_algorithm.cc`, `staggered_grid_layout_algorithm.cc`, and
+`position_layout_utils.cc`. `display` in Lynx is *only* an
+internal/child-layout-mode switch (flex/linear/grid/relative/none) — it does
+**not** carry CSS's external inline/block dichotomy (confirmed in
+`lynx/tools/css_generator/css_defines/24-display.json`: "does not determine the
+external display type"). Flexbox and Grid closely mirror the W3C algorithms
+step-by-step: `flex_layout_algorithm.h` cites "Algorithm-3" through
+"Algorithm-15" matching the CSS Flexbox resolution steps, and
+`grid_layout_algorithm.h` uses the Grid track-sizing terms "intrinsic track
+sizes", "infinitely growable", and "flexible tracks" verbatim.
+
+The two non-standard layout modes unique to Lynx are **linear**
+(Android-`LinearLayout`-derived: `display:linear` plus `linear-*` properties)
+and **relative** (Android-`RelativeLayout`-derived: `display:relative` plus
+`relative-*` properties and id-based sibling anchoring — unrelated to CSS
+`position:relative`). `lynx-stack/packages/web-platform/web-core` does not
+reimplement Starlight; it polyfills Linear on top of browser CSS Flexbox via
+custom elements and CSS custom properties, while Relative has no web-core
+implementation. For example,
+`lynx-stack/packages/web-platform/web-core/src/style_transformer/rules.rs`
+rewrites `display:linear` to `--lynx-display:linear; display:flex` plus
+`--lynx-linear-orientation` custom properties consumed by
+`lynx-stack/packages/web-platform/web-elements/**/LinearContainer*`.
+lynx-vello implements both Linear and Relative as first-class algorithms in
+`neutron-star`, alongside Flex and Grid. Linear is not a Flex polyfill, and
+Relative follows its standalone Starlight contract rather than nonexistent
+web-core prior art.
 
 **Z-index / stacking context — confirmed W3C deviation.** Lynx does **not** implement the CSS stacking-context algorithm (a per-stacking-context, recursively-scoped paint order with 7 layers: negative z-index → block-level in-flow → floats → inline in-flow → positioned/z-index:0 descendants recursively → positive z-index, each subtree re-entering the same algorithm). Instead (`lynx/core/renderer/dom/element_container.cc`, `ElementContainer::ZIndexChanged`/`UpdateZIndexList`, and `Element::IsStackingContextNode` in `lynx/core/renderer/dom/element.cc:1903`):
 - A node is a "stacking context node" only if it is the root, or `has_z_props()` (non-zero `z-index` while positioned), or `is_fixed_`, or has a transform, or has opacity — a much smaller trigger set than CSS (CSS also creates stacking contexts for `will-change`, CSS filters, `isolation:isolate`, `mix-blend-mode`, flex/grid items with z-index≠auto, masks, clip-path, contain:layout/paint, etc. — several of which Lynx's list omits, e.g. filter/mask/clip-path are CSS properties Lynx supports but does **not** list as stacking-context triggers in `IsStackingContextNode()`).
@@ -67,18 +102,34 @@ The project's own `default_layout_style.h` already encodes a "Lynx default vs W3
 
 `display:linear` ports Android's `LinearLayout` model. Main axis is chosen by `linear-orientation`/`linear-direction` (two overlapping properties — `linear-orientation` is the legacy/deprecated one per its own compat data `"deprecated": true`; `linear-direction` id 189 is the current one, both accepting `vertical|horizontal|vertical-reverse|horizontal-reverse` and the newer CSS-flex-like aliases `row|row-reverse|column|column-reverse`). Children are laid out sequentially along that axis; cross-axis placement per-child uses `linear-layout-gravity` (child-side, ~`align-self`); container-side distribution along main axis uses `linear-gravity` (~`justify-content` + more absolute anchor keywords `top/bottom/left/right`); container-side cross-axis alignment for all children uses `linear-cross-gravity` (~`align-items`, but with only `start/end/center/stretch/none`, no space-distribution values). Extra space distribution along the main axis, beyond gravity, uses an Android-style weight system: `linear-weight` (per-child, like `flex-grow` but simpler — no shrink/basis split) divided over `linear-weight-sum` (explicit container-declared total, unlike flex's implicit sum-of-flex-grow).
 
-**Implementation status:** `crates/lynx-layout` implements this formatting
+**Implementation status:** `crates/neutron-star` implements this formatting
 context as the generic `compute_linear_layout` peer algorithm plus
-`LinearSource`, `LinearContainerStyle`, and `LinearItemStyle` protocols. It
-uses neutron-star's shared layout IO, cache/session recursion, box-model
-support, leaf dispatch, absolute-position helper, and hidden-subtree cleanup;
-it does not translate linear into flex. The algorithm is standalone today:
-the concrete Widget/stylo adapter, dirty/cache invalidation wiring, root
-fixed-position pass, and Parley/text integration remain future L3 work.
+`LinearSource`, `LinearContainerStyle`, and `LinearItemStyle` protocols,
+alongside its Flex, Grid, and Relative protocols and algorithms. Linear uses
+the same layout IO, cache/session recursion, private box-model machinery, leaf
+dispatch, absolute-position helper, and hidden-subtree cleanup; it does not
+translate linear into Flex. The concrete Widget/stylo adapter, dirty/cache
+invalidation wiring, root fixed-position pass, Relative and Linear
+computed-style translation, and Parley/text integration remain future L3
+work. No separate integration crate has been established.
+
+Two Starlight-specific sizing rules are deliberately pinned rather than
+inherited from Flexbox/web-core. First, Linear weights and default cross-axis
+stretch use the incoming constraint's decided geometry even when a Flex parent
+marks that target indefinite for descendant percentages under Flexbox §9.8;
+`definite_dimensions` remains percentage-basis metadata only. Second, after an
+intrinsic Linear container obtains its inline size, percentage margin,
+padding, and min/max box data are re-resolved without remeasuring the child or
+recomputing the already-established main total. The percentage basis is the
+provisional intrinsic content size before the container's own min/max clamp.
+This follows
+`LinearLayoutAlgorithm::DetermineContainerSize`/`UpdateContainerSize` and
+`BoxInfo::UpdateBoxData`; it intentionally differs from web-core's browser
+Flex polyfill, which can reflow a percentage-sized child.
 
 | Item | Description | Tier | W3C-compliant? | Deviation & what we should do instead | Source refs |
 |---|---|---|---|---|---|
-| `display: linear` | Enables linear (Android LinearLayout-style) child layout | Core | No (non-CSS) | Implemented in `crates/lynx-layout` as its own sequential-layout algorithm over neutron-star's generic protocol, not as a flex translation | `css_defines/24-display.json`, `lynx/core/renderer/starlight/layout/linear_layout_algorithm.{h,cc}` |
+| `display: linear` | Enables linear (Android LinearLayout-style) child layout | Core | No (non-CSS) | Implemented in `crates/neutron-star` as a first-class sequential-layout algorithm alongside Flex and Grid, not as a Flex translation | `css_defines/24-display.json`, `lynx/core/renderer/starlight/layout/linear_layout_algorithm.{h,cc}` |
 | `linear-orientation` (legacy, deprecated) | Main axis + direction: `horizontal\|vertical\|horizontal-reverse\|vertical-reverse\|row\|column\|row-reverse\|column-reverse`; default `vertical` | Core | No (non-CSS) | No CSS equivalent property name; conceptually ≈ `flex-direction` restricted to a linear container. Deprecated in favor of `linear-direction` | `css_defines/78-linear-orientation.json` |
 | `linear-direction` | Same value space as above, current/non-deprecated property; default `column` | Core | No (non-CSS) | Same as above | `css_defines/189-linear-direction.json` |
 | `linear-gravity` | Container: main-axis space distribution: `none\|start\|end\|center\|space-between\|top\|bottom\|left\|right\|center-vertical\|center-horizontal`; default `none` | Core | No (non-CSS) | ≈ `justify-content` but with extra directional/absolute keywords (`top/bottom/left/right` independent of orientation) with no direct CSS analog | `css_defines/81-linear-gravity.json` |
@@ -154,12 +205,10 @@ Scope note: this is the behavior spec for the *layout algorithm*, which the
 from-scratch layout engine (successor to the C++ engine's `starlight`)
 implements — see `.claude/agents/lynx-layout-engine.md`. The engine crate is
 [`crates/neutron-star`](../../crates/neutron-star): its protocol, shared
-machinery, and Flexbox, Grid, and Starlight Relative algorithms are
-implemented. The host-side
-[`crates/lynx-layout`](../../crates/lynx-layout) crate implements the generic
-linear protocol and algorithm over that machinery; its concrete L3 runtime
-adapter remains pending. Their design, ownership boundaries, and milestones
-are in
+machinery, and Flexbox, Grid, Starlight Relative, and Linear algorithms are
+implemented. Its concrete L3 Widget/stylo runtime adapter and text integration
+remain pending; no separate integration crate has been established. The
+design, ownership boundaries, and milestones are in
 [`docs/layout-architecture.md`](../layout-architecture.md).
 
 Implementation-pattern reference (not a behavior spec): `Paws/engine/src/layout/stacking.rs` for a real, WPT-conformance-tested CSS stacking-context implementation over `stylo` computed style — the concrete reference for the z-index deviation.

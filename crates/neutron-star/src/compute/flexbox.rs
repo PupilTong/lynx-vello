@@ -19,11 +19,10 @@
 #![allow(clippy::cast_precision_loss)]
 
 use super::compute_absolute_layout;
-use super::support::relative_offset;
 use super::util::{
     ItemKey, OrderedItem, ResolvedContainerBox, ResolvedItemBox, box_inset_size, clamp_axis,
-    preferred_size_definiteness, resolve_container_box, resolve_dimension, resolve_gap,
-    resolve_item_box, resolve_length_percentage, sort_and_assign_layout_order,
+    preferred_size_definiteness, relative_offset, resolve_container_box, resolve_dimension,
+    resolve_gap, resolve_item_box, resolve_length_percentage, sort_and_assign_layout_order,
 };
 use crate::geometry::{Edges, Point, Size};
 use crate::style::alignment::{AlignContent, AlignItems};
@@ -358,7 +357,7 @@ fn resolve_item<Source: FlexSource>(
         scrollbar,
         inset,
         ..
-    } = resolve_item_box(source, &style, container_inner_size);
+    } = resolve_item_box(source, &style, container_inner_size, false);
     let preferred_size_is_definite =
         preferred_size_definiteness(raw_size, container_inner_size, aspect_ratio);
 

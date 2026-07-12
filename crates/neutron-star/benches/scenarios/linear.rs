@@ -3,12 +3,12 @@
 #![allow(dead_code)]
 #![allow(clippy::cast_precision_loss)]
 
-use lynx_layout::{LinearCrossGravity, LinearGravity, LinearLayoutGravity, LinearOrientation};
 use neutron_star::compute::{LeafMeasureInput, LeafMetrics};
 use neutron_star::prelude::*;
 use neutron_star::style::{
     AlignContent, AlignItems, BoxGenerationMode, Dimension, Direction, LengthPercentage,
-    LengthPercentageAuto, Position,
+    LengthPercentageAuto, LinearCrossGravity, LinearGravity, LinearLayoutGravity,
+    LinearOrientation, Position,
 };
 
 use crate::support::{TestStyle, TestTree, perform_layout};
@@ -325,7 +325,7 @@ fn build_mixed_hidden_absolute(nodes: usize) -> BenchCase {
     let mut tree = TestTree::default();
     let mut children = Vec::with_capacity(count);
     for index in 0..count {
-        match index % 4 {
+        match index % 6 {
             0 => children.push(fixed_leaf(
                 &mut tree,
                 TestStyle {
@@ -355,6 +355,26 @@ fn build_mixed_hidden_absolute(nodes: usize) -> BenchCase {
                         top: LengthPercentageAuto::Length((index % 11) as f32),
                         bottom: LengthPercentageAuto::Auto,
                     },
+                    ..TestStyle::default()
+                },
+                8.0,
+                10.0,
+            )),
+            3 => children.push(fixed_leaf(
+                &mut tree,
+                TestStyle {
+                    position: Position::Absolute,
+                    linear_layout_gravity: LinearLayoutGravity::Center,
+                    ..TestStyle::default()
+                },
+                8.0,
+                10.0,
+            )),
+            4 => children.push(fixed_leaf(
+                &mut tree,
+                TestStyle {
+                    position: Position::AbsoluteHoisted,
+                    linear_layout_gravity: LinearLayoutGravity::End,
                     ..TestStyle::default()
                 },
                 8.0,

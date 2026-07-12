@@ -2,6 +2,7 @@
 
 #[path = "../benches/scenarios/linear.rs"]
 mod scenarios;
+#[path = "linear_support/mod.rs"]
 mod support;
 
 use std::collections::{BTreeSet, HashSet};
@@ -63,7 +64,7 @@ fn scaling_scenarios_retain_exact_node_counts() {
         ("weighted_distribution", 1 + INPUT),
         ("weighted_freeze", 1 + INPUT),
         ("measured_stretch", 1 + INPUT),
-        // Every fourth input beginning at index one adds a hidden descendant.
+        // Every sixth input beginning at index one adds a hidden descendant.
         ("mixed_hidden_absolute", 1 + INPUT + 2),
         ("linear_gravity_matrix", 1 + 4 * INPUT),
         ("linear_layout_gravity_matrix", 1 + 4 * INPUT),

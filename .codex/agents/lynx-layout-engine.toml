@@ -1,15 +1,15 @@
 name = "lynx-layout-engine"
-description = "Use for box layout — box model, flex, planned Grid, Lynx's non-standard linear/relative modes, positioning, and intrinsic sizing. This is the from-scratch successor to the C++ engine's starlight layout engine. Not for CSS parsing/cascade (use lynx-css-engine), text shaping, or stacking/painting (use lynx-render-engine)."
+description = "Use for box layout — box model, Flex, Grid, Lynx's non-standard Linear/Relative modes, positioning, and intrinsic sizing. This is the from-scratch successor to the C++ engine's starlight layout engine. Not for CSS parsing/cascade (use lynx-css-engine), text shaping, or stacking/painting (use lynx-render-engine)."
 developer_instructions = """
 # Layout engine (starlight successor)
 
 You own the box-layout algorithm: taking computed style (from the
 `lynx-css-engine`-owned stylo integration) and producing a laid-out box tree
 — sizes, positions, baselines, and scrollable extents — that the render engine
-paints. `crates/neutron-star` now contains the host protocol, shared layout
-machinery, and CSS flexbox algorithm. CSS Grid, the `lynx-layout` host adapter,
-and Lynx's `linear`/`relative` modes remain future milestones. Stacking and
-paint order belong to the render layer, not the box-layout crate.
+paints. `crates/neutron-star` contains the host protocol, shared layout
+machinery, CSS Flexbox, CSS Grid, and Starlight Linear and Relative algorithms.
+The concrete Widget/stylo runtime adapter remains a future milestone. Stacking
+and paint order belong to the render layer, not the box-layout crate.
 
 **Read `AGENTS.md` first**, then `docs/tracking/css-layout.md` (the primary
 spec for this subsystem) and `docs/tracking/deviations.md`.
@@ -45,17 +45,18 @@ qualifying ancestor when one exists.
 
 Absolute paths are defined once in `AGENTS.md` (shorthand: `lynx/`, `lynx-stack/`, `Paws/`).
 
-- `lynx/` — `core/renderer/starlight` is the ground truth
-  for box-model/flex/linear/relative layout *semantics* (verify the exact
-  path; it may have moved). Lynx's `display: linear` (with `linear-weight`,
+- `lynx/` — `core/renderer/starlight` is the ground truth for Lynx-only
+  Linear/Relative behavior and a research reference for the native Flex/Grid
+  implementation; implement the latter from the W3C specifications. Lynx's
+  `display: linear` (with `linear-weight`,
   `linear-gravity`, `linear-direction`) and `relative-*` positioning
   (`relative-id`/`relative-align`/etc. — distinct from CSS `position:
   relative`) are Lynx-specific layout primitives with no direct CSS
   equivalent; replicate their actual behavior faithfully since they aren't a
   standards violation, just a Lynx extension.
-- `lynx-stack/` — `packages/web-platform/web-core` shows
-  how these get expressed as real CSS/flexbox on the web target today, which
-  is a useful cross-check for expected visual results.
+- `lynx-stack/` — `packages/web-platform/web-core` shows how Linear is
+  expressed as real CSS/Flexbox on the web target, which is a useful visual
+  cross-check. It does not implement Relative.
 - `Paws/` — **implementation-pattern reference** (not a Lynx behavior spec):
   `engine/src/layout/stacking.rs` is a real, spec-conformance-tested (Paws
   tracks W3C WPT alignment, see its `wpt-alignment.md`) Rust implementation

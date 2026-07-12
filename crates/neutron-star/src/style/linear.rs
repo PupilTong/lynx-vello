@@ -1,4 +1,4 @@
-//! Computed-style vocabulary for Lynx's `display: linear` algorithm.
+//! Style protocol for Starlight's `display: linear` layout algorithm.
 //!
 //! These values are the layout-facing result of style resolution, not raw CSS
 //! parser tokens. A concrete Lynx/stylo bridge owns compatibility precedence
@@ -6,7 +6,7 @@
 //! exposes the resulting effective orientation through
 //! [`LinearContainerStyle::linear_orientation`].
 
-use neutron_star::style::{AlignItems, AlignSelf, CoreStyle, JustifyContent};
+use super::{AlignItems, AlignSelf, CoreStyle, JustifyContent};
 
 /// Main-axis orientation of a linear container.
 ///
@@ -150,7 +150,7 @@ pub enum LinearLayoutGravity {
 
 /// Computed style of a node as a linear container.
 ///
-/// Defaults are the standalone linear protocol's initial values. A concrete
+/// Defaults are the Linear protocol's initial values. A concrete
 /// Lynx bridge may materialize compatibility defaults before returning this
 /// view.
 pub trait LinearContainerStyle: CoreStyle {
@@ -253,5 +253,65 @@ impl<S: LinearItemStyle> LinearItemStyle for &S {
 
     fn order(&self) -> i32 {
         (**self).order()
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    #![allow(clippy::float_cmp)]
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct Defaults;
+
+    impl CoreStyle for Defaults {}
+    impl LinearContainerStyle for Defaults {}
+    impl LinearItemStyle for Defaults {}
+
+    #[test]
+    fn linear_defaults_match_the_documented_style_surface() {
+        let style = Defaults;
+        assert_eq!(style.linear_orientation(), LinearOrientation::Vertical);
+        assert_eq!(style.linear_gravity(), LinearGravity::None);
+        assert_eq!(style.linear_cross_gravity(), LinearCrossGravity::None);
+        assert_eq!(style.linear_weight_sum(), 0.0);
+        assert_eq!(LinearContainerStyle::justify_content(&style), None);
+        assert_eq!(LinearContainerStyle::align_items(&style), None);
+        assert_eq!(style.linear_layout_gravity(), LinearLayoutGravity::None);
+        assert_eq!(style.linear_weight(), 0.0);
+        assert_eq!(LinearItemStyle::align_self(&style), None);
+        assert_eq!(style.order(), 0);
+    }
+
+    #[test]
+    fn orientation_helpers_cover_primary_and_compatibility_values() {
+        for orientation in [
+            LinearOrientation::Row,
+            LinearOrientation::RowReverse,
+            LinearOrientation::Horizontal,
+            LinearOrientation::HorizontalReverse,
+        ] {
+            assert!(orientation.is_horizontal());
+            assert!(!orientation.is_vertical());
+        }
+        for orientation in [
+            LinearOrientation::Column,
+            LinearOrientation::ColumnReverse,
+            LinearOrientation::Vertical,
+            LinearOrientation::VerticalReverse,
+        ] {
+            assert!(orientation.is_vertical());
+            assert!(!orientation.is_horizontal());
+        }
+        for orientation in [
+            LinearOrientation::RowReverse,
+            LinearOrientation::ColumnReverse,
+            LinearOrientation::HorizontalReverse,
+            LinearOrientation::VerticalReverse,
+        ] {
+            assert!(orientation.is_reverse());
+        }
     }
 }

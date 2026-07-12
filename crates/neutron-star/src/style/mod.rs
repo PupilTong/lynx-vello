@@ -4,22 +4,25 @@
 //! immutable `LayoutSource` traits hand out short-lived **style views** —
 //! cheap borrowed values implementing [`CoreStyle`] plus the per-algorithm traits
 //! ([`FlexContainerStyle`]/[`FlexItemStyle`], [`GridContainerStyle`]/
-//! [`GridItemStyle`], [`RelativeContainerStyle`]/[`RelativeItemStyle`]) — and
-//! every accessor returns a small `Copy` value from [`value`]/[`alignment`]
-//! or [`relative`]. A host backed by stylo implements the accessors
+//! [`GridItemStyle`], [`LinearContainerStyle`]/[`LinearItemStyle`], and
+//! [`RelativeContainerStyle`]/[`RelativeItemStyle`]) — and
+//! every accessor returns a small `Copy` value from the style value modules
+//! ([`value`], [`alignment`], [`linear`], [`relative`], and the algorithm
+//! modules). A host backed by stylo implements the accessors
 //! as direct translations of `ComputedValues` fields; a test host returns
 //! struct fields. Blanket impls are provided for `&S`, so implementing a
 //! trait on your style struct makes plain references usable as views.
 //!
-//! # Defaults are protocol initial values
+//! # Defaults match the owning layout specification
 //!
-//! Defaulted CSS trait methods return their **CSS initial value**. The
-//! non-CSS Relative traits return the standalone Relative Level 1 initial
-//! values. Host-specific *defaults* — like Lynx defaulting `box-sizing` to
-//! `border-box`, `overflow` to `hidden`, and `relative-layout-once` to
-//! `true` — are computed-style policy and belong in the host's style system,
-//! which already resolves them before layout runs. The engine only defines
-//! what the values *mean*.
+//! [`CoreStyle`], Flex, and Grid methods default to their **CSS initial
+//! values**. Linear and Relative methods default to the initial values
+//! documented by their Starlight specifications. Host-specific computed
+//! defaults — like Lynx defaulting `box-sizing` to `border-box`, `overflow`
+//! to `hidden`, `position` to a `relative` that means CSS `static`, or
+//! `relative-layout-once` to `true` — belong in the host's style system,
+//! which resolves them before layout runs. The engine defines what the values
+//! mean, not which compatibility profile materializes them.
 //!
 //! # Units contract
 //!
@@ -36,6 +39,7 @@
 pub mod alignment;
 pub mod flex;
 pub mod grid;
+pub mod linear;
 pub mod relative;
 pub mod value;
 
@@ -47,6 +51,10 @@ pub use grid::{
     GridAutoFlow, GridContainerStyle, GridItemStyle, GridLine, GridPlacement,
     GridTemplateComponent, GridTemplateRepetition, MaxTrackSizingFunction, MinTrackSizingFunction,
     RepetitionCount, TrackSizingFunction,
+};
+pub use linear::{
+    LinearContainerStyle, LinearCrossGravity, LinearDirection, LinearGravity, LinearItemStyle,
+    LinearLayoutGravity, LinearOrientation,
 };
 pub use relative::{RelativeCenter, RelativeContainerStyle, RelativeItemStyle, RelativeReference};
 pub use value::{CalcHandle, Dimension, LengthPercentage, LengthPercentageAuto};

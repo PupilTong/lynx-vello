@@ -1,67 +1,68 @@
-# Layout architecture — `neutron-star` + `lynx-layout`
+# Layout architecture — `neutron-star`
 
 `crates/neutron-star` is lynx-vello's box-layout engine: the from-scratch
 successor to the Lynx C++ engine's `starlight`
-(`lynx/core/renderer/starlight/`). It implements CSS **flexbox** and **Grid**
-plus the standalone Starlight **relative-layout** extension. It is
-host/storage-agnostic and standalone-publishable — zero required dependencies,
-no assumption about DOM, style engine, or storage — and every host boundary
-is **static dispatch**: `dyn` is impossible by construction, not by
-convention.
+(`lynx/core/renderer/starlight/`). It implements CSS **flexbox**, CSS **Grid**,
+and Lynx's Starlight **Relative** and **Linear** layouts as first-class peer
+algorithms. It is host/storage-agnostic and standalone-publishable — zero
+required dependencies, no assumption about DOM, style engine, or storage —
+and every host boundary is **static dispatch**: `dyn` is impossible by
+construction, not by convention.
 
-Status: **L2R (Relative) + standalone linear milestone** — `neutron-star`'s
-protocol, generic machinery, cache, leaf and positioned sizing, rounding,
-CSS Flexbox Level 1, numeric CSS Grid Level 2, and Starlight Relative Layout
-Level 1 algorithms are implemented and conformance-tested against
-plain-storage mock hosts. Grid excludes subgrid and named lines/areas, which
-are outside the current protocol.
-`crates/lynx-layout` implements the Lynx-only linear computed-style/source
-protocol and generic `compute_linear_layout` peer algorithm over that
-machinery; the concrete Widget/stylo adapter is not implemented yet. Crate
+Status: **Flexbox, Grid, Relative, and Linear implemented** —
+`neutron-star`'s protocol, generic machinery, cache, leaf and positioned
+sizing, rounding, CSS Flexbox Level 1, numeric CSS Grid Level 2, Starlight
+Relative Layout Level 1, and Starlight Linear algorithms are implemented and
+conformance-tested against plain-storage mock hosts. Grid excludes subgrid and
+named lines/areas, which are outside the current protocol. The concrete
+Widget/stylo adapter is not implemented yet. Crate
 rustdoc is the API reference; this document is the rationale, performance
 architecture, and remaining plan.
 
-Behavior spec: [`docs/tracking/css-layout.md`](tracking/css-layout.md)
+Behavior inventory: [`docs/tracking/css-layout.md`](tracking/css-layout.md)
 (what Starlight does, which parts are real W3C features vs Lynx extensions,
-and the confirmed deviations). Per the standards policy in
+and the confirmed deviations). The standalone Linear algorithm is specified in
+[`docs/starlight-linear-layout.md`](starlight-linear-layout.md). Per the
+standards policy in
 [`AGENTS.md`](../AGENTS.md), flex and Grid are implemented from the
 **W3C specs** (Flexbox Level 1, Grid Level 2, Sizing Level 3, Box Alignment
-Level 3), not by porting Starlight's C++. Relative is a Lynx-only extension
-and follows the normative
+Level 3), not by porting Starlight's C++. Relative and Linear are Lynx-only
+extensions. Relative follows the normative
 [`Starlight Relative Layout Module Level 1`](starlight-relative-layout.md),
-with explicitly documented Rust-surface defaults.
+with explicitly documented Rust-surface defaults; Linear follows the
+standalone specification linked above and Starlight's behavior.
 
 ## Ownership
 
 ```text
-              lynx-vello host stack                        standalone
-┌──────────────┐   ┌──────────────────────────┐   ┌──────────────────────────┐
-│ lynx-widget  │   │ lynx-layout              │──▶│ neutron-star             │
-│ + stylo-dom  │   │ implemented:             │   │ tree/style protocol      │
-│ styles, tree │   │ · linear style/source    │   │ flexbox algorithm        │
-└──────┬───────┘   │ · linear algorithm       │   │ grid + relative algos    │
-       │ future    │ future adapter:          │   │ leaf/hidden/cache/round  │
-       └──────────▶│ · source/session/dispatch│   │ support machinery        │
-┌──────────────┐   │ · fixed/dirty/staggered  │   │ (one Lynx extension;     │
-│ lynx-text    │──▶│ · generic leaf measurers │   │  no storage, no dyn)     │
-│ (planned,    │   │ · text artifact storage  │   └──────────────────────────┘
-│  parley)     │   └──────────────────────────┘
-└──────────────┘
+        lynx-vello host stack                           standalone
+┌──────────────────────────────────┐     ┌─────────────────────────────────┐
+│ lynx-widget + stylo-dom          │     │ neutron-star                    │
+│ styles and tree                  │     │ tree/style protocol             │
+│                                  │     │ flex / grid / relative / linear │
+│ future runtime integration:      │────▶│ leaf/hidden/cache/position/round│
+│ source/session/display dispatch  │     │ no storage, DOM, stylo, or dyn  │
+│ fixed/dirty/staggered integration│     └─────────────────────────────────┘
+└────────────────┬─────────────────┘                      ▲
+                 │                                        │ LeafMeasurer
+┌────────────────┴─────────────────┐                      │
+│ planned Parley text integration │──────────────────────┘
+└──────────────────────────────────┘
 ```
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| `neutron-star` | Flex, Grid, and standalone Starlight Relative algorithms; public support arithmetic; leaf boxing, hidden-subtree cleanup, rounding; protocol vocabulary (geometry, style values, layout IO); cache semantics | Node storage, style storage, display dispatch, other Lynx vocabulary (`linear-*`, `rpx`, …), text shaping, stacking/paint order |
-| `lynx-layout` | Implemented Lynx-linear value/style/source protocol and generic linear algorithm; future immutable views over the widget/style tree, mutable layout/cache session, display dispatch, `staggered` algorithm, relative computed-style translation, dirty tracking + cache invalidation, and fixed/sticky lowering | A second flex/grid/relative implementation, engine-side copies of styles |
+| `neutron-star` | Implemented Flex, Grid, Relative, and Linear algorithms; their generic value/style/source protocols (including `relative-*` and `linear-*`); leaf boxing, hidden-subtree cleanup, positioned layout, rounding; shared private arithmetic; geometry and layout IO; cache semantics | Node/style storage, display dispatch, DOM/widget/stylo types, resolved device-unit policy (`rpx`, etc.), text shaping, stacking/paint order |
+| Future runtime integration *(location not yet established)* | Immutable views over the widget/style tree, mutable layout/cache session, display dispatch, Relative/Linear computed-style translation, `staggered` integration, dirty tracking + cache invalidation, and fixed/sticky lowering | A second Flex/Grid/Relative/Linear implementation, engine-side copies of styles |
 | `lynx-text` *(planned)* | A generic `LeafMeasurer` adapter over Parley contexts and a host-owned retained text-layout cache | Box layout |
 
-The engine/host seam is exactly the seam that makes the crate publishable:
-the relative-layout protocol is the deliberate built-in Starlight extension,
-while other Lynx-specific vocabulary lives in `lynx-layout`. Its linear
-algorithm is a first-class peer rather than a flex translation. The
-still-future concrete adapter is otherwise mechanical: computed-style
-accessor translation, separate source/session storage, and one display-mode
-dispatch.
+The engine/host seam is exactly the seam that makes the crate publishable.
+The Lynx-specific values and algorithms for Relative and Linear live in
+`neutron-star`, but the crate still owns no host storage or style-engine
+representation. Both are first-class peers rather than translations into
+Flex or Grid. The still-future concrete adapter is otherwise mechanical:
+computed-style accessor translation, separate source/session storage, and one
+display-mode dispatch.
 
 ## The protocol in one page
 
@@ -75,7 +76,7 @@ demands only what it uses:
 | `FlexSource: LayoutSource` | immutable flex container/item style views | the L1 flexbox algorithm |
 | `GridSource: LayoutSource` | immutable grid container/item views, including GAT track-list iterators | the L2 grid algorithm |
 | `RelativeSource: LayoutSource` | immutable relative container/item style views | the Starlight Relative L1 algorithm |
-| `lynx_layout::LinearSource: LayoutSource` | immutable Lynx-linear container/item style views | the host-side linear algorithm |
+| `LinearSource: LayoutSource` | immutable Starlight Linear container/item style views | the Linear algorithm |
 | `LayoutState` | mutable unrounded-layout and static-position storage | committing algorithms and hidden cleanup |
 | `CacheState` | mutable per-node measurement-cache slots | `compute_cached_layout` and hidden cleanup |
 | `LayoutSession<Source>: LayoutState + CacheState` | **`compute_child_layout(source, …)`**, the host display/algorithm dispatch point | recursive algorithms |
@@ -90,13 +91,10 @@ Implemented machinery: `compute_root_layout`, `compute_leaf_layout`
 `compute_absolute_layout` (the positioned pass for out-of-flow nodes whose
 containing block is not their formatting parent), and
 `round_layout(source, state, root, scale)` (device-pixel snapping), plus
-`compute_flexbox_layout`, `compute_grid_layout`, and
-`compute_relative_layout`. In addition,
-`neutron_star::compute::support` publicly exposes
-the same allocation-free length, edge, box-sizing, aspect-ratio, clamp, and
-relative-offset arithmetic to host-side peer algorithms. The live flex and
-Grid entry points and the host-side linear entry point all use the same fixed
-shape:
+`compute_flexbox_layout`, `compute_grid_layout`, `compute_relative_layout`,
+and `compute_linear_layout`. All four algorithms share private allocation-free
+length, edge, box-sizing, aspect-ratio, clamp, and relative-offset machinery.
+Their public entry points use the same fixed shape:
 
 ```rust
 pub fn compute_flexbox_layout<Source, Session>(
@@ -114,7 +112,7 @@ pub fn compute_relative_layout<Source, Session>(
     -> LayoutOutput
 where Source: RelativeSource, Session: LayoutSession<Source>;
 
-pub fn compute_linear_layout<Source, Session>( // implemented in lynx-layout
+pub fn compute_linear_layout<Source, Session>(
     source: &Source, session: &mut Session, node: NodeId, input: LayoutInput)
     -> LayoutOutput
 where Source: LinearSource, Session: LayoutSession<Source>;
@@ -144,20 +142,22 @@ styles from `source`, then calls
 first handles `BoxGenerationMode::None` by calling `hide_subtree` and
 returning `LayoutOutput::HIDDEN`; this explicit cleanup precedes and bypasses
 the cache. For a generated box, the host routes to a neutron-star algorithm,
-leaf measurement, or a host-private algorithm, wrapping that routing in
-`compute_cached_layout`. This decision buys three properties at once:
+leaf measurement, or a future additional host algorithm, wrapping that
+routing in `compute_cached_layout`. This decision buys three properties at
+once:
 
-1. **Open algorithm set.** Starlight `display: relative` is a built-in peer
-   selected through `RelativeSource`; Lynx's non-CSS `display: linear`
-   (Android `LinearLayout` semantics: `linear-weight`/`linear-gravity`/…) is an
-   implemented peer algorithm in `lynx-layout`, against the same source and
-   session protocol with the engine none the wiser. The `<list>` component's
-   staggered-grid remains a future host peer. The engine has **no `Display`
+1. **Open dispatch with four first-class algorithms.** Flex, Grid, and Lynx's
+   non-CSS `display: relative` (id-anchored sibling constraint solving) and
+   `display: linear` (Android `LinearLayout` semantics:
+   `linear-weight`/`linear-gravity`/…) are implemented peers in
+   `neutron-star`, against the same source and session protocol. The `<list>`
+   component's staggered-grid remains a future host peer. The engine has **no
+   `Display`
    enum** — dispatch identity belongs to the future concrete host adapter.
 2. **Uniform caching.** Every generated-box path through dispatch shares one
-   cache policy, so mixed trees of engine and host-private layout modes
-   memoize correctly. Hidden cleanup deliberately stays outside that cache
-   boundary.
+   cache policy, so mixed-algorithm trees memoize correctly. Future
+   host-provided modes can use the same wrapper. Hidden cleanup deliberately
+   stays outside that cache boundary.
 3. **Partial relayout.** Any node can be a layout root; the engine never
    assumes global tree access.
 
@@ -200,9 +200,10 @@ per accessor call — lazy translation from stylo's `ComputedValues`, no
 materialized engine-side style structs. Grid track *lists* stay borrowed GAT
 iterators with `repeat()` as a nested `GridTemplateRepetition` value, so
 even the sequence-valued styles cross the boundary without allocation.
-CSS trait-method defaults are **CSS initial values**; Relative methods use
-the standalone Relative Level 1 initial values. Lynx's divergent defaults
-are computed-value policy and stay in the host's style system:
+Core/Flex/Grid trait methods default to **CSS initial values**; Linear trait
+methods use Starlight Linear's documented initial values, and Relative methods
+use the standalone Relative Level 1 initial values. Other Lynx compatibility
+defaults are computed-value policy and stay in the host's style system:
 
 | Property | Standalone engine default | Lynx computed default (host supplies) |
 | --- | --- | --- |
@@ -314,8 +315,10 @@ the painting — layout's job is to never be the frame's bottleneck.
   native, halves cache traffic vs `f64`; Starlight/Yoga/Taffy all agree).
   No `NaN` sentinel games — unknowns are `Option<f32>`/enum variants, and
   boundary values must be finite (debug-asserted).
-- **Shared setup, flat hot scratch.** Flex, Grid, and Relative reuse the same
-  inline, statically-dispatched ordering and box-resolution helpers. Their temporary
+- **Shared setup, flat hot scratch.** Flex, Grid, Relative, and Linear reuse
+  the same
+  inline, statically-dispatched ordering and box-resolution helpers. Their
+  temporary
   `ResolvedItemBox`/`ResolvedContainerBox` PODs eliminate duplicate sizing
   rules at the algorithm boundary, then each algorithm destructures item
   values into its own flat scratch record. Inner loops therefore retain
@@ -325,8 +328,9 @@ the painting — layout's job is to never be the frame's bottleneck.
   The item resolver is force-inlined because release-IR inspection
   showed that ordinary inlining materialized a 216-byte return temporary;
   forced inlining lets scalar replacement remove that copy chain.
-- **The measurement cache is the asymptotic mechanism.** Flex, Grid, and
-  two-pass Relative sizing probe children under multiple constraints; uncached,
+- **The measurement cache is the asymptotic mechanism.** Flex, Grid, two-pass
+  Relative, and Linear sizing probe children under multiple constraints;
+  uncached,
   nested containers go super-linear (the classic exponential blowup). The
   protocol bakes the fix in: `compute_cached_layout` around every
   generated-box dispatch, per-node slots
@@ -386,8 +390,9 @@ the painting — layout's job is to never be the frame's bottleneck.
   pool (host storage, host threading policy — the engine stays
   thread-unaware). Adding a defaulted method is semver-minor, so this ships
   when profiles earn it, without a protocol break.
-- **Flex, Grid, and Relative benchmarks are landed; broader performance
-  hardening remains.** The `divan` (CodSpeed-compatible) suite ports the 18 Flex-tagged
+- **Flex, Grid, Relative, and Linear benchmarks are landed; broader
+  performance hardening remains.** The `divan` (CodSpeed-compatible) suite
+  ports the 18 Flex-tagged
   workloads from `PupilTong/lynx#25` and measures neutron-star's Rust path
   only. Direct Flex workloads retain their complete trees; mixed-display
   workloads explicitly benchmark the Flex-owned slice rather than invoking
@@ -403,14 +408,17 @@ the painting — layout's job is to never be the frame's bottleneck.
   PR #25 Relative target ports all nine source workloads that contain a real
   `display: relative` branch; mixed-display workloads keep only their Relative
   slice, and every timed invocation uses a fresh Rust-only tree.
-  Equivalent-tree Taffy/Yoga and other
-  cross-engine differential baselines remain future additions — not to copy
-  those engines' designs, but to keep "high-performance" falsifiable.
+  The Linear suite covers fixed stacks,
+  weighted distribution and freeze paths, ordering, gravity matrices,
+  measurement/stretch, and mixed hidden/absolute children. Equivalent-tree
+  Taffy/Yoga and other cross-engine differential baselines remain future
+  additions — not to copy those engines' designs, but to keep
+  "high-performance" falsifiable.
 
-## Algorithms (Flex, Grid, Relative, and standalone Linear implemented)
+## Algorithms (Flex, Grid, Relative, and Linear implemented)
 
 This pass structure documents the implemented L1 Flex and L2 Grid algorithms
-plus the implemented Relative L1 and host-side Linear algorithms.
+plus the implemented Relative L1 and first-class Linear algorithms.
 Starlight's C++ mirrors the same spec steps
 (`flex_layout_algorithm.h` literally cites "Algorithm-3"…"Algorithm-15";
 `grid_layout_algorithm.h` uses the spec's track-sizing terms verbatim), so
@@ -448,21 +456,29 @@ the engine we're succeeding.
 The automatic minimum size (§4.5, `min-size: auto`) resolves inside steps
 2/4, honoring `Overflow::is_scroll_container`.
 
-**Linear (standalone host-side milestone implemented)** — Starlight linear
-layout, as a single-axis pipeline in `crates/lynx-layout`:
+**Linear** — Starlight linear layout, as a first-class single-axis pipeline in
+`crates/neutron-star`:
 
 1. **Setup** — resolve the container box and axes, classify hidden,
    out-of-flow, and in-flow children, and stably apply non-zero `order`.
 2. **Item sizing** — resolve each item's box model, preferred/min/max sizes,
    aspect ratio, intrinsic constraints, effective cross gravity, and auto
-   margins through neutron-star's shared support arithmetic.
-3. **Weight distribution** — when the main content size is definite,
-   distribute remaining space among positive `linear-weight` items using the
-   explicit positive `linear-weight-sum` denominator when present, with
-   iterative min/max freezing and final child relayout.
+   margins through neutron-star's shared private box arithmetic.
+3. **Weight distribution** — when the incoming main-axis constraint has a
+   decided size, distribute remaining space among positive `linear-weight`
+   items using the explicit positive `linear-weight-sum` denominator when
+   present, with iterative min/max freezing and final child relayout. This is
+   Starlight constraint-mode definiteness, intentionally distinct from
+   `LayoutInput::definite_dimensions`: a Flex target may activate Linear
+   weights/stretch while remaining indefinite as a descendant percentage
+   basis under Flexbox §9.8.
 4. **Container sizing** — use the definite content size or the final sum/max
    of item outer sizes, then apply padding, border, aspect ratio, and min/max
-   clamps; cyclic inline percentages receive a targeted second pass.
+   clamps. Once an intrinsic inline size is known, a targeted pass re-resolves
+   percentage-dependent box used values against the provisional content size
+   before the container's own min/max clamp, but does not remeasure children
+   or feed the new values back into the container/main total; this preserves
+   Starlight's measured-once `UpdateContainerSize` behavior and call order.
 5. **Alignment** — map `linear-gravity`/`justify-content` on the main axis and
    item/container linear gravity plus standard alignment on the cross axis,
    including RTL/reverse axes and cross-axis auto margins.
@@ -475,9 +491,9 @@ layout, as a single-axis pipeline in `crates/lynx-layout`:
 8. **Measure-only path** — return sizes and baselines without durable child
    writes, retaining the same `LayoutInput`/cache semantics as flexbox.
 
-This is a generic algorithm over `LinearSource` and
-`LayoutSession<Source>`; it is not yet wired to `WidgetTree` or stylo
-computed values.
+Like Flex and Grid, this is a generic neutron-star algorithm over
+`LinearSource` and `LayoutSession<Source>`; it is not yet wired to
+`WidgetTree` or stylo computed values.
 
 **Grid (L2)** — CSS Grid Level 2 (minus subgrid), as a pipeline:
 
@@ -568,13 +584,14 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
   [`pr25-relative-migration.md`](pr25-relative-migration.md).
   Browser geometry goldens and differential fuzzing
   against Taffy on the shared feature subset remain planned.
-- **Standalone Lynx linear (landed):** `crates/lynx-layout` carries the
-  styling-engine-free mock-host seam for linear conformance and performance
-  scenarios. Its source of behavior is Starlight plus
-  `docs/tracking/css-layout.md`; neutron-star remains unaware of Lynx values.
-- **Remaining Lynx integration:** Widget/stylo translation, relative
-  computed-style translation, component-specific staggered layout, and
-  mixed-runtime parity belong in `lynx-layout`.
+- **Starlight Linear (landed):** `crates/neutron-star/tests/linear.rs` and the
+  Linear benchmark suite carry the styling-engine-free mock-host seam for
+  conformance and performance scenarios. Their source of behavior is
+  Starlight plus `docs/tracking/css-layout.md`.
+- **Remaining Lynx integration:** Widget/stylo translation for Relative and
+  Linear, component-specific staggered layout, and mixed-runtime parity remain
+  future work; the integration layer's final module or crate placement has not
+  been established.
 
 ## Milestones
 
@@ -594,14 +611,15 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
   remeasurement, deterministic cycles, out-of-flow handling, conformance
   fixtures, the full Rust-only PR #25 test/benchmark migration, and CodSpeed
   benchmarks.
-- **L3 — lynx-layout host layer** *(partial)*: the crate, Lynx-linear
-  value/style/source protocol, and standalone generic
-  `compute_linear_layout` algorithm are complete. Remaining L3 work is the
-  concrete `lynx-widget`/stylo adapter (including `CalcHandle` translation),
-  mutable session and display dispatch, dirty→cache invalidation wiring, the
-  relative computed-style translation, root fixed-position pass and sticky
-  lowering, and a generic Parley `LeafMeasurer` with retained text-layout
-  storage.
+- **L3 — Starlight modes + runtime integration** *(partial)*: the Lynx-linear
+  value/style/source protocol and generic `compute_linear_layout` algorithm
+  are complete in `neutron-star`. Remaining L3 work is the concrete
+  `lynx-widget`/stylo adapter (including `CalcHandle` translation), mutable
+  session and display dispatch, dirty→cache invalidation wiring, the root
+  fixed-position pass and sticky lowering, Relative and Linear computed-style
+  translation, and a generic Parley `LeafMeasurer` with retained text-layout
+  storage. The integration layer's final module or crate placement remains
+  undecided.
 - **L4 — performance**: probe-trace-tuned cache slots, SoA scratch, arena
   exploration, the batched-children parallel hook if profiles justify it.
 - **L5 — parity hardening**: WPT-derived flex/grid suites, web-core
