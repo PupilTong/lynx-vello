@@ -1,11 +1,13 @@
-//! Protocol machinery entry points — free generic functions over the tree
-//! traits.
+//! Protocol machinery entry points — free generic functions over an immutable
+//! layout source and separate mutable session/state traits.
 //!
 //! There is deliberately no engine object: everything callable is a function
 //! so that hosts compose them freely inside their
-//! [`compute_child_layout`](crate::tree::LayoutTree::compute_child_layout)
+//! [`compute_child_layout`](crate::tree::LayoutSession::compute_child_layout)
 //! dispatch, and so that unused entry points (and their monomorphizations)
-//! never exist in the host's binary.
+//! never exist in the host's binary. Keeping the arguments separate is
+//! intentional: style and topology views borrowed from the source remain
+//! valid while recursive layout mutates only the session.
 //!
 //! This module contains the generic machinery (root entry, cache wrapper,
 //! hidden-subtree zeroing, leaf boxing, the positioned pass, rounding) and the
@@ -20,7 +22,9 @@
 //!
 //! ```
 //! use neutron_star::compute::{compute_cached_layout, compute_flexbox_layout, hide_subtree};
-//! use neutron_star::tree::{CacheTree, FlexTree, GridTree, LayoutInput, LayoutOutput, NodeId};
+//! use neutron_star::tree::{
+//!     FlexSource, GridSource, LayoutInput, LayoutOutput, LayoutSession, LayoutSource, NodeId,
+//! };
 //!
 //! # #[derive(Clone, Copy)]
 //! enum Display {
@@ -29,35 +33,41 @@
 //!     Hidden,
 //! }
 //!
-//! fn dispatch<Tree>(tree: &mut Tree, node: NodeId, input: LayoutInput) -> LayoutOutput
+//! fn dispatch<Source, Session>(
+//!     source: &Source,
+//!     session: &mut Session,
+//!     node: NodeId,
+//!     input: LayoutInput,
+//! ) -> LayoutOutput
 //! where
-//!     Tree: FlexTree + GridTree + CacheTree,
+//!     Source: FlexSource + GridSource,
+//!     Session: LayoutSession<Source>,
 //! {
-//!     let display = host_display_of(tree, node);
+//!     let display = host_display_of(source, node);
 //!     if let Display::Hidden = display {
 //!         // Hidden mutation must precede the cache wrapper: caching HIDDEN as
 //!         // a committed result would suppress geometry when the node reappears.
-//!         hide_subtree(tree, node);
+//!         hide_subtree(source, session, node);
 //!         return LayoutOutput::HIDDEN;
 //!     }
 //!
-//!     compute_cached_layout(tree, node, input, |tree, node, input| {
+//!     compute_cached_layout(session, node, input, |session, node, input| {
 //!         match display {
 //!             Display::Hidden => unreachable!(),
-//!             Display::Flex => compute_flexbox_layout(tree, node, input),
+//!             Display::Flex => compute_flexbox_layout(source, session, node, input),
 //!             Display::Grid => unimplemented!("grid layout lands in L2"),
-//!             // host: Display::Linear => host_linear_layout(tree, node, input),
-//!             // host: Display::Leaf => compute_leaf_layout(input, &style, resolve, measure),
+//!             // host: Display::Linear => host_linear_layout(source, session, node, input),
+//!             // host: Display::Leaf => compute_leaf_layout(input, &style, resolve, &mut measurer),
 //!         }
 //!     })
 //! }
 //! # fn host_display_of<T>(_: &T, _: NodeId) -> Display { Display::Flex }
 //! ```
 //!
-//! The host's `LayoutTree::compute_child_layout` implementation simply calls
-//! its `dispatch`. Algorithms call back into `compute_child_layout` for each
-//! child, so the same routing (and the same cache) applies at every level of
-//! the tree.
+//! The host's `LayoutSession::compute_child_layout` implementation simply
+//! calls its `dispatch`. Algorithms call back into `compute_child_layout` for
+//! each child, so the same routing (and the same cache) applies at every level
+//! of the tree.
 //!
 //! # Pass structure
 //!
@@ -77,7 +87,10 @@ mod leaf;
 mod util;
 
 pub use flexbox::compute_flexbox_layout;
-pub use leaf::{LeafMeasurement, compute_leaf_layout};
+pub use leaf::{
+    FnLeafMeasurer, LeafMeasureInput, LeafMeasurement, LeafMeasurer, LeafMetrics,
+    compute_leaf_layout,
+};
 
 use self::util::{
     apply_box_sizing, auto_edges_to_zero, clamp, resolve_edges, resolve_insets,
@@ -86,7 +99,8 @@ use self::util::{
 use crate::geometry::{Edges, Point, Size};
 use crate::style::{BoxGenerationMode, CoreStyle, Direction};
 use crate::tree::{
-    AvailableSpace, CacheTree, Layout, LayoutInput, LayoutOutput, LayoutTree, NodeId, RoundTree,
+    AvailableSpace, CacheState, Layout, LayoutInput, LayoutOutput, LayoutSession, LayoutSource,
+    LayoutState, NodeId, RoundState, TraverseTree,
 };
 
 /// Lays out the tree under `root` into `available_space`.
@@ -95,48 +109,48 @@ use crate::tree::{
 /// [`LayoutInput`] ([`LayoutGoal::Commit`](crate::tree::LayoutGoal::Commit),
 /// no known dimensions, `parent_size` from
 /// the definite parts of `available_space`), routes it through
-/// [`compute_child_layout`](LayoutTree::compute_child_layout) — so the root
+/// [`compute_child_layout`](LayoutSession::compute_child_layout) — so the root
 /// dispatches like any other node — resolves the root's own margins, and
 /// stores the root's [`Layout`] (at location `(0, 0)`
 /// plus resolved margins) via
-/// [`set_unrounded_layout`](LayoutTree::set_unrounded_layout).
+/// [`set_unrounded_layout`](LayoutState::set_unrounded_layout).
 ///
 /// Incrementality: this walks — and pays for — only what caches miss. For a
-/// clean subtree the recursion is answered from [`CacheTree`] storage at its
+/// clean subtree the recursion is answered from [`CacheState`] storage at its
 /// root.
-pub fn compute_root_layout<Tree: LayoutTree>(
-    tree: &mut Tree,
+pub fn compute_root_layout<Source, Session>(
+    source: &Source,
+    session: &mut Session,
     root: NodeId,
     available_space: Size<AvailableSpace>,
-) {
+) where
+    Source: LayoutSource,
+    Session: LayoutSession<Source>,
+{
     let parent_size = available_space.into_options();
-    let output = tree.compute_child_layout(
+    let output = session.compute_child_layout(
+        source,
         root,
         LayoutInput::perform_layout(Size::NONE, parent_size, available_space),
     );
 
-    let (hidden, margin, padding, border, scrollbar_size) = {
-        let style = tree.core_style(root);
-        let resolve_calc = |handle, basis| tree.resolve_calc(handle, basis);
-        let margin_value = style.margin();
-        let optional_margin =
-            resolve_optional_edges(margin_value, parent_size.width, &resolve_calc);
-        (
-            style.box_generation_mode() == BoxGenerationMode::None,
-            resolve_root_margins(
-                optional_margin,
-                margin_value.map(crate::style::LengthPercentageAuto::is_auto),
-                available_space.width,
-                output.size.width,
-            ),
-            resolve_edges(style.padding(), parent_size.width, &resolve_calc),
-            resolve_edges(style.border(), parent_size.width, &resolve_calc),
-            scrollbar_size(&style),
-        )
-    };
+    let style = source.core_style(root);
+    let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
+    let margin_value = style.margin();
+    let optional_margin = resolve_optional_edges(margin_value, parent_size.width, &resolve_calc);
+    let hidden = style.box_generation_mode() == BoxGenerationMode::None;
+    let margin = resolve_root_margins(
+        optional_margin,
+        margin_value.map(crate::style::LengthPercentageAuto::is_auto),
+        available_space.width,
+        output.size.width,
+    );
+    let padding = resolve_edges(style.padding(), parent_size.width, &resolve_calc);
+    let border = resolve_edges(style.border(), parent_size.width, &resolve_calc);
+    let scrollbar_size = scrollbar_size(&style);
 
     if hidden {
-        tree.set_unrounded_layout(root, &Layout::default());
+        session.set_unrounded_layout(root, &Layout::default());
         return;
     }
 
@@ -148,7 +162,7 @@ pub fn compute_root_layout<Tree: LayoutTree>(
     layout.border = border;
     layout.padding = padding;
     layout.margin = margin;
-    tree.set_unrounded_layout(root, &layout);
+    session.set_unrounded_layout(root, &layout);
 }
 
 fn resolve_root_margins(
@@ -190,7 +204,7 @@ fn resolve_root_margins(
 /// at the top of its visible-node dispatch (see the module docs);
 /// `compute_uncached` is the actual routing closure. The **complete
 /// `input` is the cache key** — it is passed through to
-/// [`CacheTree`] unmodified, so no result-affecting
+/// [`CacheState`] unmodified, so no result-affecting
 /// field (`goal`, `sizing_mode`, `parent_size`, …) can alias. On
 /// a usable cached entry (matching per the [`cache`](crate::cache) module's
 /// contract) the closure is skipped entirely; otherwise its result is
@@ -199,22 +213,22 @@ fn resolve_root_margins(
 /// Hidden nodes must never enter this wrapper: [`hide_subtree`] invalidates
 /// their cache before zeroing geometry, whereas storing
 /// [`LayoutOutput::HIDDEN`] as a committed answer would undo that invariant.
-pub fn compute_cached_layout<Tree, ComputeFn>(
-    tree: &mut Tree,
+pub fn compute_cached_layout<State, ComputeFn>(
+    state: &mut State,
     node: NodeId,
     input: LayoutInput,
     compute_uncached: ComputeFn,
 ) -> LayoutOutput
 where
-    Tree: CacheTree,
-    ComputeFn: FnOnce(&mut Tree, NodeId, LayoutInput) -> LayoutOutput,
+    State: CacheState,
+    ComputeFn: FnOnce(&mut State, NodeId, LayoutInput) -> LayoutOutput,
 {
-    if let Some(output) = tree.cache_get(node, input) {
+    if let Some(output) = state.cache_get(node, input) {
         return output;
     }
 
-    let output = compute_uncached(tree, node, input);
-    tree.cache_store(node, input, output);
+    let output = compute_uncached(state, node, input);
+    state.cache_store(node, input, output);
     output
 }
 
@@ -223,21 +237,25 @@ where
 /// Recurses directly through tree children, storing an all-zero [`Layout`] for
 /// every visited node so previously-laid-out geometry cannot leak from a
 /// subtree that just became hidden. Every node is first passed to
-/// [`LayoutTree::invalidate_layout_cache`], preventing a later cache hit from
+/// [`CacheState::cache_clear`], preventing a later cache hit from
 /// restoring only a revealed subtree's root while its descendants stay
 /// zeroed.
 ///
 /// Host dispatch must call this command **before** [`compute_cached_layout`]
 /// and then return [`LayoutOutput::HIDDEN`] itself.
-pub fn hide_subtree<Tree: LayoutTree>(tree: &mut Tree, node: NodeId) {
-    tree.invalidate_layout_cache(node);
+pub fn hide_subtree<Source, State>(source: &Source, state: &mut State, node: NodeId)
+where
+    Source: TraverseTree,
+    State: LayoutState + CacheState,
+{
+    state.cache_clear(node);
     let hidden_layout = Layout::with_order(0);
-    tree.set_unrounded_layout(node, &hidden_layout);
+    state.set_unrounded_layout(node, &hidden_layout);
 
-    let child_count = tree.child_count(node);
+    let child_count = source.child_count(node);
     for index in 0..child_count {
-        let child = tree.child_id(node, index);
-        hide_subtree(tree, child);
+        let child = source.child_id(node, index);
+        hide_subtree(source, state, child);
     }
 }
 
@@ -247,7 +265,7 @@ pub fn hide_subtree<Tree: LayoutTree>(tree: &mut Tree, node: NodeId) {
 ///
 /// Runs after in-flow layout. The node's formatting parent computed and
 /// recorded the node's static position
-/// ([`set_static_position`](LayoutTree::set_static_position)) but did not
+/// ([`set_static_position`](LayoutState::set_static_position)) but did not
 /// size or place it. The host resolves which node is the containing block
 /// (for Lynx `fixed`: the viewport root, or the nearest
 /// transformed/filtered ancestor per the W3C rule), converts the recorded
@@ -261,22 +279,27 @@ pub fn hide_subtree<Tree: LayoutTree>(tree: &mut Tree, node: NodeId) {
 ///   whose insets are both `auto` (CSS Position / Flexbox §4.1 / Grid §10.1 semantics).
 ///
 /// The node's subtree is laid out normally through
-/// [`compute_child_layout`](LayoutTree::compute_child_layout) (descendants
+/// [`compute_child_layout`](LayoutSession::compute_child_layout) (descendants
 /// store parent-relative layouts as usual, with normal caching). The node's
 /// **own** layout is *returned, not stored*: its `location` is relative to
 /// the containing block's **padding box**, which is generally not the
 /// node's tree parent — the host converts it into formatting-parent space
 /// and stores it via
-/// [`set_unrounded_layout`](LayoutTree::set_unrounded_layout), keeping
+/// [`set_unrounded_layout`](LayoutState::set_unrounded_layout), keeping
 /// [`Layout::location`]'s parent-relative contract intact for rounding and
 /// painting.
 #[must_use = "the returned layout is in containing-block space; the host must convert and store it"]
-pub fn compute_absolute_layout<Tree: LayoutTree>(
-    tree: &mut Tree,
+pub fn compute_absolute_layout<Source, Session>(
+    source: &Source,
+    session: &mut Session,
     node: NodeId,
     containing_block: Size<f32>,
     static_position: Point<f32>,
-) -> Layout {
+) -> Layout
+where
+    Source: LayoutSource,
+    Session: LayoutSession<Source>,
+{
     debug_assert!(
         containing_block.width.is_finite()
             && containing_block.height.is_finite()
@@ -290,8 +313,8 @@ pub fn compute_absolute_layout<Tree: LayoutTree>(
     );
 
     let parent_size = Size::new(Some(containing_block.width), Some(containing_block.height));
-    let resolved_style = resolve_absolute_style(tree, node, parent_size);
-    let AbsoluteStyle {
+    let resolved_style = resolve_absolute_style(source, node, parent_size);
+    let ResolvedAbsoluteStyle {
         insets,
         optional_margin,
         padding,
@@ -311,7 +334,8 @@ pub fn compute_absolute_layout<Tree: LayoutTree>(
 
     let known_dimensions =
         absolute_known_dimensions(&resolved_style, inset_modified_size, fixed_margin);
-    let output = tree.compute_child_layout(
+    let output = session.compute_child_layout(
+        source,
         node,
         LayoutInput::perform_layout(
             known_dimensions,
@@ -367,7 +391,7 @@ pub fn compute_absolute_layout<Tree: LayoutTree>(
 /// Resolved box-model and positioning inputs retained across the recursive
 /// child-layout call for one absolutely positioned node.
 #[derive(Clone, Copy)]
-struct AbsoluteStyle {
+struct ResolvedAbsoluteStyle {
     insets: Edges<Option<f32>>,
     optional_margin: Edges<Option<f32>>,
     padding: Edges<f32>,
@@ -382,7 +406,7 @@ struct AbsoluteStyle {
 }
 
 fn absolute_known_dimensions(
-    style: &AbsoluteStyle,
+    style: &ResolvedAbsoluteStyle,
     inset_modified_size: Size<f32>,
     fixed_margin: Edges<f32>,
 ) -> Size<Option<f32>> {
@@ -421,13 +445,13 @@ fn absolute_known_dimensions(
     )
 }
 
-fn resolve_absolute_style<Tree: LayoutTree>(
-    tree: &Tree,
+fn resolve_absolute_style<Source: LayoutSource>(
+    source: &Source,
     node: NodeId,
     parent_size: Size<Option<f32>>,
-) -> AbsoluteStyle {
-    let style = tree.core_style(node);
-    let resolve_calc = |handle, basis| tree.resolve_calc(handle, basis);
+) -> ResolvedAbsoluteStyle {
+    let style = source.core_style(node);
+    let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
     let padding = resolve_edges(style.padding(), parent_size.width, &resolve_calc);
     let border = resolve_edges(style.border(), parent_size.width, &resolve_calc);
     let padding_border_size = Size::new(
@@ -451,7 +475,7 @@ fn resolve_absolute_style<Tree: LayoutTree>(
         padding_border_size,
     );
 
-    AbsoluteStyle {
+    ResolvedAbsoluteStyle {
         insets: resolve_insets(style.inset(), parent_size, &resolve_calc),
         optional_margin: resolve_optional_edges(style.margin(), parent_size.width, &resolve_calc),
         padding,
@@ -472,9 +496,9 @@ fn resolve_absolute_style<Tree: LayoutTree>(
 /// Derives device-pixel-snapped final layouts from the unrounded layouts
 /// under `root`.
 ///
-/// Walks the tree via [`RoundTree`], reading each
-/// [`unrounded_layout`](RoundTree::unrounded_layout) and writing a rounded
-/// copy through [`set_final_layout`](RoundTree::set_final_layout).
+/// Walks topology via [`TraverseTree`], reading each
+/// [`unrounded_layout`](RoundState::unrounded_layout) and writing a rounded
+/// copy through [`set_final_layout`](RoundState::set_final_layout).
 ///
 /// `scale` is the device-pixel ratio — physical pixels per CSS pixel (e.g.
 /// `2.0`/`3.0` on high-DPI displays; `1.0` snaps to whole CSS pixels). It
@@ -490,12 +514,16 @@ fn resolve_absolute_style<Tree: LayoutTree>(
 /// sizes may snap to sizes differing by one device pixel (the standard
 /// trade-off, also made by browsers). Idempotent given unchanged unrounded
 /// inputs and scale.
-pub fn round_layout<Tree: RoundTree>(tree: &mut Tree, root: NodeId, scale: f32) {
+pub fn round_layout<Source, State>(source: &Source, state: &mut State, root: NodeId, scale: f32)
+where
+    Source: TraverseTree,
+    State: RoundState,
+{
     debug_assert!(
         scale.is_finite() && scale > 0.0,
         "scale must be positive and finite"
     );
-    round_layout_inner(tree, root, scale, Point::ZERO);
+    round_layout_inner(source, state, root, scale, Point::ZERO);
 }
 
 fn resolve_absolute_margins(
@@ -580,13 +608,17 @@ struct AbsoluteAxis {
     prefer_end: bool,
 }
 
-fn round_layout_inner<Tree: RoundTree>(
-    tree: &mut Tree,
+fn round_layout_inner<Source, State>(
+    source: &Source,
+    state: &mut State,
     node: NodeId,
     scale: f32,
     parent_position: Point<f32>,
-) {
-    let unrounded = tree.unrounded_layout(node);
+) where
+    Source: TraverseTree,
+    State: RoundState,
+{
+    let unrounded = state.unrounded_layout(node);
     let position = Point::new(
         parent_position.x + unrounded.location.x,
         parent_position.y + unrounded.location.y,
@@ -637,11 +669,11 @@ fn round_layout_inner<Tree: RoundTree>(
     rounded.margin.bottom = snap(position.y + unrounded.size.height + unrounded.margin.bottom)
         - snap(position.y + unrounded.size.height);
 
-    tree.set_final_layout(node, &rounded);
+    state.set_final_layout(node, &rounded);
 
-    let child_count = tree.child_count(node);
+    let child_count = source.child_count(node);
     for index in 0..child_count {
-        let child = tree.child_id(node, index);
-        round_layout_inner(tree, child, scale, position);
+        let child = source.child_id(node, index);
+        round_layout_inner(source, state, child, scale, position);
     }
 }

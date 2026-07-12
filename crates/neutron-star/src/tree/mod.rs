@@ -1,40 +1,43 @@
 //! The tree protocol: how the engine sees the host's node tree.
 //!
-//! neutron-star owns **no tree**. The host keeps nodes in whatever storage it
-//! likes (a slab, an arena, an ECS, a retained DOM) and exposes them through
-//! the traits here, addressed by opaque [`NodeId`]s. The traits form a
-//! deliberate hierarchy of *capability*, so each engine function demands only
-//! what it uses:
+//! neutron-star owns **no tree or layout store**. The host exposes immutable
+//! topology/style through a source object and mutable layout/cache storage
+//! through a separate session object, both addressed by opaque [`NodeId`]s.
+//! The traits form a deliberate hierarchy of capability, so each engine
+//! function demands only what it uses:
 //!
 //! ```text
-//!  TraverseTree            child access               (rounding, debug)
-//!      └── LayoutTree      + style views, layout IO   (all algorithms)
-//!           ├── FlexTree   + flex style views         (flex algorithm, L1)
-//!           └── GridTree   + grid style views         (grid algorithm, L2)
-//!  CacheTree               measurement cache slots    (compute_cached_layout)
-//!  RoundTree: TraverseTree unrounded → final layouts  (round_layout)
+//!  TraverseTree                       child access
+//!      └── LayoutSource               + core style views / calc resolution
+//!           ├── FlexSource            + flex style views
+//!           └── GridSource            + grid style views
+//!  LayoutState                        unrounded layout / static-position writes
+//!  CacheState                         measurement and commit cache slots
+//!      └── LayoutSession<Source>       + host display dispatch
+//!  RoundState                         unrounded reads → final-layout writes
 //! ```
 //!
 //! # The recursion contract
 //!
-//! Layout recursion deliberately round-trips through the host:
+//! Layout recursion deliberately round-trips through the host session while
+//! the source remains immutably borrowed:
 //!
 //! ```text
-//!  compute_root_layout(tree, root, …)
-//!      └─▶ tree.compute_child_layout(root, input)           [host dispatch]
-//!            └─▶ <algorithm>(tree, root, input)             [engine algo]
-//!                  ├─▶ tree.compute_child_layout(child, …)  [host dispatch]
+//!  compute_root_layout(source, session, root, …)
+//!      └─▶ session.compute_child_layout(source, root, input)          [host dispatch]
+//!            └─▶ <algorithm>(source, session, root, input)            [engine algo]
+//!                  ├─▶ session.compute_child_layout(source, child, …) [host dispatch]
 //!                  │     └─▶ … per that child's display …
-//!                  └─▶ tree.set_unrounded_layout(child, …)
+//!                  └─▶ session.set_unrounded_layout(child, …)
 //! ```
 //!
-//! [`LayoutTree::compute_child_layout`] is the **dispatch point**: the host
+//! [`LayoutSession::compute_child_layout`] is the **dispatch point**: the host
 //! inspects the child's `display` (which the engine deliberately has no enum
 //! for) and routes to an engine algorithm entry point (flexbox is implemented
-//! as a `fn(&mut Tree, NodeId, LayoutInput) -> LayoutOutput` in
-//! [`compute`](crate::compute); grid follows in L2),
+//! in [`compute`](crate::compute); grid follows in L2),
 //! [`compute_leaf_layout`](crate::compute::compute_leaf_layout) (text/images
-//! via its own measure closure), or *its own algorithm* — this is exactly how
+//! via a generic [`LeafMeasurer`](crate::compute::LeafMeasurer)), or *its own
+//! algorithm* — this is exactly how
 //! lynx-vello's non-CSS `display: linear`/`display: relative` modes plug in
 //! as peer algorithms. The host handles `display: none` first with
 //! [`hide_subtree`](crate::compute::hide_subtree), then wraps visible-node
@@ -42,17 +45,21 @@
 //! so every sizing path shares one cache policy. See the `compute` module docs
 //! for the canonical dispatch skeleton.
 //!
-//! Because recursion passes `&mut self` back and forth, the protocol is
-//! single-threaded per tree by construction; the planned intra-layout
-//! parallelism protocol (batched child requests, see the architecture doc)
-//! will be additive.
+//! A layout flush is an **immutable source epoch**: topology, computed style,
+//! display dispatch inputs, and calc data must not change until the flush
+//! finishes. Measurement may mutate session-owned text caches and layout
+//! state, but not the source. The source and session must be two independent
+//! Rust objects (normally backed by disjoint host fields); this lets a borrowed
+//! GAT style view remain live while recursive layout mutably borrows only the
+//! session.
 //!
-//! # Object safety — deliberately absent
+//! # Static dispatch — no `dyn`
 //!
-//! Every trait here uses generic-associated-type iterators or style views,
-//! which makes them structurally **not object-safe**: `dyn LayoutTree` is a
-//! compile error, not a style-guide rule. The entire host⇄engine boundary
-//! monomorphizes and can inline.
+//! Engine entry points are generic over concrete source and session types and
+//! provide no erased fallback. The source traits carry GAT iterators/style
+//! views and are structurally not object-safe; host⇄engine calls therefore
+//! monomorphize and can inline. Mutable storage/session traits explicitly
+//! require `Sized`, so they cannot be substituted with `dyn` either.
 
 mod io;
 
@@ -125,7 +132,7 @@ impl From<NodeId> for usize {
 /// The children of a node are an ordered list in **document order** (the
 /// order style `order` reordering starts from). All methods must be cheap
 /// and repeatable: algorithms iterate children several times per pass.
-pub trait TraverseTree {
+pub trait TraverseTree: Sized {
     /// Borrowed iterator over a node's children, in document order.
     type ChildIter<'a>: Iterator<Item = NodeId>
     where
@@ -143,14 +150,16 @@ pub trait TraverseTree {
     fn child_id(&self, parent: NodeId, index: usize) -> NodeId;
 }
 
-/// The core layout capability: style views, calc resolution, layout storage,
-/// and the child-layout dispatch callback.
-pub trait LayoutTree: TraverseTree {
+/// Immutable topology and core-style access for one layout epoch.
+///
+/// A source must not change while a layout call is in progress. Its borrowed
+/// style views may remain live across recursive calls because all layout,
+/// cache, and measurement mutation goes through a separate [`LayoutSession`].
+pub trait LayoutSource: TraverseTree {
     /// The borrowed style view handed to the generic machinery.
     ///
     /// Typically `&'a HostStyle` (blanket impls make any `&S` a view when
-    /// `S: CoreStyle`) or a small wrapper struct translating host storage on
-    /// each accessor.
+    /// `S: CoreStyle`) or a small wrapper translating host storage lazily.
     type CoreStyle<'a>: CoreStyle
     where
         Self: 'a;
@@ -165,65 +174,10 @@ pub trait LayoutTree: TraverseTree {
     /// [`CalcHandle`]. Hosts whose styles never produce `Calc` values may
     /// implement this as `unreachable!()`.
     fn resolve_calc(&self, calc: CalcHandle, basis: f32) -> f32;
-
-    /// Stores the durable layout of `node`.
-    ///
-    /// Called by algorithms for each child they position (and by
-    /// [`compute_root_layout`](crate::compute::compute_root_layout) for the
-    /// root). The values are **unrounded**; the host must keep them as-is
-    /// for incremental relayout and let
-    /// [`round_layout`](crate::compute::round_layout) derive the
-    /// pixel-snapped copy through [`RoundTree`].
-    fn set_unrounded_layout(&mut self, node: NodeId, layout: &Layout);
-
-    /// Records the CSS **static position** of an out-of-flow child whose
-    /// containing block is elsewhere
-    /// ([`Position::AbsoluteHoisted`](crate::style::Position)).
-    ///
-    /// Called by the parent's algorithm during a [`LayoutGoal::Commit`] run for
-    /// each such child: `static_position` is the origin of the child's
-    /// hypothetical margin box per the parent's formatting context (Flexbox
-    /// §4.1 sole-item alignment; Grid §10.1 content-edge area), relative to
-    /// the parent's border box — the same space as [`Layout::location`].
-    /// The parent does *not* size or place the child.
-    ///
-    /// The host stores the value, converts it into containing-block space
-    /// once in-flow layout is done (all unrounded layouts are available by
-    /// then), and passes it to
-    /// [`compute_absolute_layout`](crate::compute::compute_absolute_layout)
-    /// in the positioned pass.
-    fn set_static_position(&mut self, child: NodeId, static_position: Point<f32>);
-
-    /// Invalidates any cached layout answers for `node` before
-    /// hidden-subtree cleanup overwrites durable geometry.
-    ///
-    /// Hosts without caching may keep the default no-op. Hosts implementing
-    /// [`CacheTree`] must delegate this hook to [`CacheTree::cache_clear`]: a
-    /// later cache hit may otherwise restore only a subtree root's output
-    /// while its descendants remain zeroed from `display:none`.
-    fn invalidate_layout_cache(&mut self, node: NodeId) {
-        let _ = node;
-    }
-
-    /// Lays out (or measures) `child`, returning its output — **the host
-    /// dispatch point** (see the module docs for the contract and the
-    /// `compute` module docs for the canonical skeleton).
-    ///
-    /// Implementations must:
-    /// - handle [`BoxGenerationMode::None`](crate::style::BoxGenerationMode) by calling
-    ///   [`hide_subtree`](crate::compute::hide_subtree) and returning [`LayoutOutput::HIDDEN`]
-    ///   **before** consulting the cache,
-    /// - route visible nodes by their display mode to an engine algorithm, a host algorithm, or
-    ///   leaf measurement,
-    /// - wrap that visible-node routing in
-    ///   [`compute_cached_layout`](crate::compute::compute_cached_layout),
-    /// - be deterministic for identical inputs between cache clears.
-    fn compute_child_layout(&mut self, child: NodeId, input: LayoutInput) -> LayoutOutput;
 }
 
-/// Adds flexbox style views — the tree bound of
-/// [`compute_flexbox_layout`](crate::compute::compute_flexbox_layout).
-pub trait FlexTree: LayoutTree {
+/// Adds flexbox style views to an immutable [`LayoutSource`].
+pub trait FlexSource: LayoutSource {
     /// Borrowed flex-container style view.
     type ContainerStyle<'a>: FlexContainerStyle
     where
@@ -240,10 +194,8 @@ pub trait FlexTree: LayoutTree {
     fn flex_item_style(&self, item: NodeId) -> Self::ItemStyle<'_>;
 }
 
-/// Adds grid style views — the tree bound of the grid algorithm entry point
-/// (`compute_grid_layout`, specified in the architecture doc and landing in
-/// L2).
-pub trait GridTree: LayoutTree {
+/// Adds Grid style views to an immutable [`LayoutSource`].
+pub trait GridSource: LayoutSource {
     /// Borrowed grid-container style view.
     type ContainerStyle<'a>: GridContainerStyle
     where
@@ -260,12 +212,38 @@ pub trait GridTree: LayoutTree {
     fn grid_item_style(&self, item: NodeId) -> Self::ItemStyle<'_>;
 }
 
+/// Host-owned mutable layout output for the current layout epoch.
+///
+/// This state is a separate object from its [`LayoutSource`], so writing
+/// geometry never invalidates a borrowed source style view.
+pub trait LayoutState: Sized {
+    /// Stores the durable, unrounded layout of `node`.
+    ///
+    /// Called by algorithms for each child they position and by the root
+    /// entry point. Hosts retain this copy for incremental relayout and let
+    /// [`round_layout`](crate::compute::round_layout) derive pixel-snapped
+    /// output separately.
+    fn set_unrounded_layout(&mut self, node: NodeId, layout: &Layout);
+
+    /// Records the CSS static position of an out-of-flow child whose
+    /// containing block is elsewhere
+    /// ([`Position::AbsoluteHoisted`](crate::style::Position)).
+    ///
+    /// During a [`LayoutGoal::Commit`] run this is the origin of the child's
+    /// hypothetical margin box in its formatting parent's border-box space.
+    /// The host later converts it into the real containing block's padding-box
+    /// space for the positioned pass.
+    fn set_static_position(&mut self, child: NodeId, static_position: Point<f32>);
+}
+
 /// Host-owned measurement/layout caching, consulted by
 /// [`compute_cached_layout`](crate::compute::compute_cached_layout).
 ///
 /// Hosts typically embed one [`Cache`](crate::cache::Cache) per node and
 /// delegate these methods to it; the trait exists so storage stays
 /// host-chosen (structure-of-arrays hosts can pack cache slots columnar).
+/// A host that deliberately disables caching returns `None` from
+/// [`cache_get`](Self::cache_get) and makes the write/clear methods no-ops.
 ///
 /// # The key is the complete [`LayoutInput`]
 ///
@@ -282,17 +260,15 @@ pub trait GridTree: LayoutTree {
 ///
 /// # Invalidation is the host's job
 ///
-/// The engine only ever *reads* and *fills* slots. When a node's style,
+/// The engine only ever reads, fills, and explicitly clears slots. When a node's style,
 /// content, or children change, the host must [`cache_clear`] it **and every
 /// ancestor up to its relayout root** before the next layout — cached
-/// entries encode children's contributions. A caching host must also
-/// implement [`LayoutTree::invalidate_layout_cache`] by delegating to
-/// [`cache_clear`]; [`hide_subtree`](crate::compute::hide_subtree) invokes that
-/// hook for every descendant so later cache hits cannot leave zeroed geometry
-/// behind.
+/// entries encode children's contributions. [`hide_subtree`](crate::compute::hide_subtree)
+/// clears every descendant directly so later cache hits cannot leave zeroed
+/// geometry behind.
 ///
-/// [`cache_clear`]: CacheTree::cache_clear
-pub trait CacheTree {
+/// [`cache_clear`]: CacheState::cache_clear
+pub trait CacheState: Sized {
     /// Looks up a previously-stored output usable for `input`.
     fn cache_get(&self, node: NodeId, input: LayoutInput) -> Option<LayoutOutput>;
 
@@ -303,15 +279,37 @@ pub trait CacheTree {
     fn cache_clear(&mut self, node: NodeId);
 }
 
-/// Read/write access for the pixel-snapping pass
-/// ([`round_layout`](crate::compute::round_layout)).
+/// Mutable layout/cache state plus the host's open display dispatch.
 ///
-/// Kept separate from [`LayoutTree`] so the rounded copy can live in a
-/// different store (e.g. the render tree) than the unrounded layout the
-/// engine needs for stable incremental relayout.
-pub trait RoundTree: TraverseTree {
+/// `Source` and `Self` must be independent objects. Implementations inspect
+/// the immutable source to handle `display: none` before caching, then route a
+/// generated box to flex, Grid, leaf measurement, or a host-private algorithm.
+/// The concrete source/session pair is statically dispatched; neutron-star
+/// does not erase either side behind `dyn`.
+pub trait LayoutSession<Source: LayoutSource>: LayoutState + CacheState {
+    /// Lays out or measures `child`, returning the result to its parent.
+    ///
+    /// Implementations must call [`hide_subtree`](crate::compute::hide_subtree)
+    /// and return [`LayoutOutput::HIDDEN`] for a non-generated box **before**
+    /// consulting the cache. Visible-node routing is wrapped in
+    /// [`compute_cached_layout`](crate::compute::compute_cached_layout) and
+    /// must be deterministic between cache clears.
+    fn compute_child_layout(
+        &mut self,
+        source: &Source,
+        child: NodeId,
+        input: LayoutInput,
+    ) -> LayoutOutput;
+}
+
+/// Read/write access for the pixel-snapping pass.
+///
+/// Topology is supplied independently by a [`TraverseTree`]; this state only
+/// reads the unrounded copy and writes the final copy, which may live in a
+/// different host store.
+pub trait RoundState: Sized {
     /// The unrounded layout previously stored via
-    /// [`LayoutTree::set_unrounded_layout`].
+    /// [`LayoutState::set_unrounded_layout`].
     fn unrounded_layout(&self, node: NodeId) -> Layout;
 
     /// Stores the final, pixel-snapped layout of `node`.

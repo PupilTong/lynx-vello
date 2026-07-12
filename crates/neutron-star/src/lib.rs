@@ -15,10 +15,10 @@
 //! ```text
 //!            host owns                          engine owns
 //!  ┌───────────────────────────┐   traits    ┌───────────────────────────┐
-//!  │ node storage (any layout) │◀───────────▶│ compute_root_layout       │
-//!  │ computed styles (any repr)│  NodeId +   │ compute_leaf_layout       │
-//!  │ per-node Cache + Layouts  │  POD values │ cache/hide/abs-pos/round  │
-//!  │ dispatch: display → algo  │◀───────────▶│ flex algo; grid contracts │
+//!  │ immutable source:         │◀───────────▶│ compute_root_layout       │
+//!  │ · topology + styles       │  NodeId +   │ compute_leaf_layout       │
+//!  │ mutable session:          │  POD values │ cache/hide/abs-pos/round  │
+//!  │ · layouts/cache/dispatch  │◀───────────▶│ flex algo; grid contracts │
 //!  └───────────────────────────┘  recursion  └───────────────────────────┘
 //! ```
 //!
@@ -35,22 +35,26 @@
 //! - [`geometry`] — `Copy`/`#[repr(C)]` geometry primitives.
 //!
 //! Layout recursion round-trips through the host's
-//! [`compute_child_layout`](tree::LayoutTree::compute_child_layout) on every
-//! node, which is what makes the engine *open*: the host routes each node to
-//! a neutron-star algorithm or to its own (Lynx's non-CSS `linear` and
-//! `relative` modes are ordinary peer algorithms in the host, invisible to
-//! this crate).
+//! [`compute_child_layout`](tree::LayoutSession::compute_child_layout) on
+//! every node. The immutable [`LayoutSource`](tree::LayoutSource) is passed
+//! separately from the mutable session, so borrowed computed-style views can
+//! remain live across recursion. The host routes each node to a neutron-star
+//! algorithm or to its own (Lynx's non-CSS `linear` and `relative` modes are
+//! ordinary peer algorithms in the host, invisible to this crate).
 //!
 //! # No `dyn`, by construction
 //!
-//! Every host boundary is generics + associated types (GATs — borrowed
-//! iterators and style views), so the traits are structurally not
-//! object-safe and every engine⇄host call monomorphizes and can inline.
+//! Every host boundary is generic. Source/measurement protocols use GATs
+//! (borrowed iterators, style views, and measurement views), while mutable
+//! capability traits explicitly require `Sized`; none can be erased to a
+//! trait object, and every engine⇄host call monomorphizes and can inline.
 //! There is no erased fallback and none is planned:
 //!
 //! ```compile_fail
 //! // GAT-based protocols cannot be made into trait objects:
 //! fn erased(tree: &dyn neutron_star::tree::TraverseTree) {}
+//! // Mutable protocol capabilities are also explicitly Sized:
+//! fn erased_state(state: &mut dyn neutron_star::tree::LayoutState) {}
 //! ```
 //!
 //! # Status: flexbox implemented (milestone L1)
@@ -78,23 +82,22 @@
 //! struct Style; // your computed-style type
 //! impl CoreStyle for Style {} // CSS initial values from the defaults
 //!
-//! struct Node {
+//! struct SourceNode {
 //!     style: Style,
 //!     children: Vec<NodeId>,
-//!     layout: Layout,
 //! }
 //!
-//! struct Tree {
-//!     nodes: Vec<Node>,
+//! struct Source {
+//!     nodes: Vec<SourceNode>,
 //! }
 //!
-//! impl Tree {
-//!     fn node(&self, id: NodeId) -> &Node {
+//! impl Source {
+//!     fn node(&self, id: NodeId) -> &SourceNode {
 //!         &self.nodes[usize::from(id)]
 //!     }
 //! }
 //!
-//! impl TraverseTree for Tree {
+//! impl TraverseTree for Source {
 //!     type ChildIter<'a> = std::iter::Copied<std::slice::Iter<'a, NodeId>>;
 //!
 //!     fn child_ids(&self, parent: NodeId) -> Self::ChildIter<'_> {
@@ -110,7 +113,7 @@
 //!     }
 //! }
 //!
-//! impl LayoutTree for Tree {
+//! impl LayoutSource for Source {
 //!     type CoreStyle<'a> = &'a Style;
 //!
 //!     fn core_style(&self, node: NodeId) -> Self::CoreStyle<'_> {
@@ -120,9 +123,15 @@
 //!     fn resolve_calc(&self, _calc: CalcHandle, _basis: f32) -> f32 {
 //!         unreachable!("this host's styles never carry calc()")
 //!     }
+//! }
 //!
+//! struct Session {
+//!     layouts: Vec<Layout>,
+//! }
+//!
+//! impl LayoutState for Session {
 //!     fn set_unrounded_layout(&mut self, node: NodeId, layout: &Layout) {
-//!         self.nodes[usize::from(node)].layout = *layout;
+//!         self.layouts[usize::from(node)] = *layout;
 //!     }
 //!
 //!     fn set_static_position(&mut self, child: NodeId, static_position: Point<f32>) {
@@ -130,25 +139,42 @@
 //!         // this for the positioned pass (compute_absolute_layout).
 //!         let _ = (child, static_position);
 //!     }
+//! }
 //!
-//!     fn compute_child_layout(&mut self, child: NodeId, input: LayoutInput) -> LayoutOutput {
+//! impl CacheState for Session {
+//!     fn cache_get(&self, _: NodeId, _: LayoutInput) -> Option<LayoutOutput> {
+//!         None
+//!     }
+//!     fn cache_store(&mut self, _: NodeId, _: LayoutInput, _: LayoutOutput) {}
+//!     fn cache_clear(&mut self, _: NodeId) {}
+//! }
+//!
+//! impl LayoutSession<Source> for Session {
+//!     fn compute_child_layout(
+//!         &mut self,
+//!         source: &Source,
+//!         child: NodeId,
+//!         input: LayoutInput,
+//!     ) -> LayoutOutput {
 //!         // Real hosts handle display:none before compute_cached_layout,
 //!         // then dispatch visible nodes (see the `compute` module docs).
 //!         // This toy treats every node as an empty visible leaf:
-//!         let _ = child;
+//!         let _ = source.core_style(child);
 //!         LayoutOutput::new(input.known_dimensions.unwrap_or(Size::ZERO), Size::ZERO)
 //!     }
 //! }
 //!
-//! let mut tree = Tree {
-//!     nodes: vec![Node {
+//! let source = Source {
+//!     nodes: vec![SourceNode {
 //!         style: Style,
 //!         children: vec![],
-//!         layout: Layout::default(),
 //!     }],
 //! };
+//! let mut session = Session {
+//!     layouts: vec![Layout::default()],
+//! };
 //! let root = NodeId::from(0_usize);
-//! let output = tree.compute_child_layout(root, LayoutInput::default());
+//! let output = session.compute_child_layout(&source, root, LayoutInput::default());
 //! assert_eq!(output.size, Size::ZERO);
 //! ```
 
@@ -165,13 +191,17 @@ pub mod tree;
 /// (`Dimension`, alignment enums, grid track types, …) is not re-exported
 /// here — pull it from [`style`] as needed.
 pub mod prelude {
+    pub use crate::compute::{
+        FnLeafMeasurer, LeafMeasureInput, LeafMeasurement, LeafMeasurer, LeafMetrics,
+    };
     pub use crate::geometry::{Edges, Line, Point, Size};
     pub use crate::style::{
         CoreStyle, FlexContainerStyle, FlexItemStyle, GridContainerStyle, GridItemStyle,
         GridTemplateRepetition,
     };
     pub use crate::tree::{
-        AvailableSpace, CacheTree, FlexTree, GridTree, Layout, LayoutGoal, LayoutInput,
-        LayoutOutput, LayoutTree, NodeId, RequestedAxis, RoundTree, SizingMode, TraverseTree,
+        AvailableSpace, CacheState, FlexSource, GridSource, Layout, LayoutGoal, LayoutInput,
+        LayoutOutput, LayoutSession, LayoutSource, LayoutState, NodeId, RequestedAxis, RoundState,
+        SizingMode, TraverseTree,
     };
 }

@@ -5,8 +5,8 @@
 //! size stored alongside each node.
 
 use neutron_star::compute::{
-    LeafMeasurement, compute_absolute_layout, compute_flexbox_layout, compute_leaf_layout,
-    hide_subtree,
+    FnLeafMeasurer, LeafMetrics, compute_absolute_layout, compute_cached_layout,
+    compute_flexbox_layout, compute_leaf_layout, hide_subtree,
 };
 use neutron_star::prelude::*;
 use neutron_star::style::{
@@ -189,22 +189,38 @@ impl FlexItemStyle for TestStyle {
 }
 
 #[derive(Debug, Clone)]
-struct TestNode {
+struct TestSourceNode {
     display: TestDisplay,
     style: TestStyle,
     children: Vec<NodeId>,
     min_content_size: Size<f32>,
     intrinsic_size: Size<f32>,
     first_baseline: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct TestSessionNode {
     layout: Layout,
     static_position: Option<Point<f32>>,
 }
 
 #[derive(Debug, Default)]
-struct TestTree {
-    nodes: Vec<TestNode>,
+struct TestSource {
+    nodes: Vec<TestSourceNode>,
+}
+
+#[derive(Debug, Default)]
+struct TestSession {
+    nodes: Vec<TestSessionNode>,
     layout_writes: usize,
     leaf_measure_calls: usize,
+}
+
+/// Builder and assertion facade; layout receives its fields separately.
+#[derive(Debug, Default)]
+struct TestTree {
+    source: TestSource,
+    session: TestSession,
 }
 
 impl TestTree {
@@ -214,15 +230,13 @@ impl TestTree {
         intrinsic_size: Size<f32>,
         first_baseline: Option<f32>,
     ) -> NodeId {
-        self.push(TestNode {
+        self.push(TestSourceNode {
             display: TestDisplay::Leaf,
             style,
             children: Vec::new(),
             min_content_size: intrinsic_size,
             intrinsic_size,
             first_baseline,
-            layout: Layout::default(),
-            static_position: None,
         })
     }
 
@@ -233,133 +247,169 @@ impl TestTree {
         max_content_size: Size<f32>,
     ) -> NodeId {
         let node = self.push_leaf(style, max_content_size, None);
-        self.node_mut(node).min_content_size = min_content_size;
+        self.source_node_mut(node).min_content_size = min_content_size;
         node
     }
 
     fn push_flex(&mut self, style: TestStyle, children: Vec<NodeId>) -> NodeId {
-        self.push(TestNode {
+        self.push(TestSourceNode {
             display: TestDisplay::Flex,
             style,
             children,
             min_content_size: Size::ZERO,
             intrinsic_size: Size::ZERO,
             first_baseline: None,
-            layout: Layout::default(),
-            static_position: None,
         })
     }
 
-    fn push(&mut self, node: TestNode) -> NodeId {
-        let id = NodeId::from(self.nodes.len());
-        self.nodes.push(node);
+    fn push(&mut self, node: TestSourceNode) -> NodeId {
+        debug_assert_eq!(self.source.nodes.len(), self.session.nodes.len());
+        let id = NodeId::from(self.source.nodes.len());
+        self.source.nodes.push(node);
+        self.session.nodes.push(TestSessionNode::default());
         id
     }
 
-    fn node(&self, id: NodeId) -> &TestNode {
-        &self.nodes[usize::from(id)]
+    fn source_node_mut(&mut self, id: NodeId) -> &mut TestSourceNode {
+        &mut self.source.nodes[usize::from(id)]
     }
 
-    fn node_mut(&mut self, id: NodeId) -> &mut TestNode {
-        &mut self.nodes[usize::from(id)]
+    fn session_node(&self, id: NodeId) -> &TestSessionNode {
+        &self.session.nodes[usize::from(id)]
+    }
+
+    fn session_node_mut(&mut self, id: NodeId) -> &mut TestSessionNode {
+        &mut self.session.nodes[usize::from(id)]
     }
 
     fn layout(&self, id: NodeId) -> Layout {
-        self.node(id).layout
+        self.session_node(id).layout
+    }
+
+    fn static_position(&self, id: NodeId) -> Option<Point<f32>> {
+        self.session_node(id).static_position
     }
 }
 
-impl TraverseTree for TestTree {
+impl TraverseTree for TestSource {
     type ChildIter<'a> = std::iter::Copied<std::slice::Iter<'a, NodeId>>;
 
     fn child_ids(&self, parent: NodeId) -> Self::ChildIter<'_> {
-        self.node(parent).children.iter().copied()
+        self.nodes[usize::from(parent)].children.iter().copied()
     }
 
     fn child_count(&self, parent: NodeId) -> usize {
-        self.node(parent).children.len()
+        self.nodes[usize::from(parent)].children.len()
     }
 
     fn child_id(&self, parent: NodeId, index: usize) -> NodeId {
-        self.node(parent).children[index]
+        self.nodes[usize::from(parent)].children[index]
     }
 }
 
-impl LayoutTree for TestTree {
+impl LayoutSource for TestSource {
     type CoreStyle<'a> = &'a TestStyle;
 
     fn core_style(&self, node: NodeId) -> Self::CoreStyle<'_> {
-        &self.node(node).style
+        &self.nodes[usize::from(node)].style
     }
 
     fn resolve_calc(&self, _calc: CalcHandle, _basis: f32) -> f32 {
         unreachable!("test styles do not contain calc() values")
     }
+}
 
+impl FlexSource for TestSource {
+    type ContainerStyle<'a> = &'a TestStyle;
+    type ItemStyle<'a> = &'a TestStyle;
+
+    fn flex_container_style(&self, container: NodeId) -> Self::ContainerStyle<'_> {
+        &self.nodes[usize::from(container)].style
+    }
+
+    fn flex_item_style(&self, item: NodeId) -> Self::ItemStyle<'_> {
+        &self.nodes[usize::from(item)].style
+    }
+}
+
+impl LayoutState for TestSession {
     fn set_unrounded_layout(&mut self, node: NodeId, layout: &Layout) {
         self.layout_writes += 1;
-        self.node_mut(node).layout = *layout;
+        self.nodes[usize::from(node)].layout = *layout;
     }
 
     fn set_static_position(&mut self, child: NodeId, static_position: Point<f32>) {
-        self.node_mut(child).static_position = Some(static_position);
+        self.nodes[usize::from(child)].static_position = Some(static_position);
+    }
+}
+
+impl CacheState for TestSession {
+    fn cache_get(&self, _node: NodeId, _input: LayoutInput) -> Option<LayoutOutput> {
+        None
     }
 
-    fn compute_child_layout(&mut self, child: NodeId, input: LayoutInput) -> LayoutOutput {
-        let node = self.node(child);
-        let display = node.display;
-        let style = node.style.clone();
-        let min_content_size = node.min_content_size;
-        let intrinsic_size = node.intrinsic_size;
-        let first_baseline = node.first_baseline;
+    fn cache_store(&mut self, _node: NodeId, _input: LayoutInput, _output: LayoutOutput) {}
 
-        if style.box_generation_mode == BoxGenerationMode::None {
-            hide_subtree(self, child);
+    fn cache_clear(&mut self, _node: NodeId) {}
+}
+
+impl LayoutSession<TestSource> for TestSession {
+    fn compute_child_layout(
+        &mut self,
+        source: &TestSource,
+        child: NodeId,
+        input: LayoutInput,
+    ) -> LayoutOutput {
+        let node = &source.nodes[usize::from(child)];
+        let display = node.display;
+
+        if node.style.box_generation_mode == BoxGenerationMode::None {
+            hide_subtree(source, self, child);
             return LayoutOutput::HIDDEN;
         }
 
-        match display {
-            TestDisplay::Flex => compute_flexbox_layout(self, child, input),
-            TestDisplay::Leaf => compute_leaf_layout(
-                input,
-                &style,
-                |_calc, _basis| unreachable!("test styles do not contain calc() values"),
-                |known_dimensions, available_space| {
-                    self.leaf_measure_calls += 1;
+        compute_cached_layout(self, child, input, |session, child, input| match display {
+            TestDisplay::Flex => compute_flexbox_layout(source, session, child, input),
+            TestDisplay::Leaf => {
+                let style = &node.style;
+                let min_content_size = node.min_content_size;
+                let intrinsic_size = node.intrinsic_size;
+                let first_baseline = node.first_baseline;
+                let leaf_measure_calls = &mut session.leaf_measure_calls;
+                let mut measurer = FnLeafMeasurer::new(|measure_input| {
+                    *leaf_measure_calls += 1;
                     let measured = Size::new(
-                        if available_space.width == AvailableSpace::MinContent {
+                        if measure_input.available_space.width == AvailableSpace::MinContent {
                             min_content_size.width
                         } else {
                             intrinsic_size.width
                         },
-                        if available_space.height == AvailableSpace::MinContent {
+                        if measure_input.available_space.height == AvailableSpace::MinContent {
                             min_content_size.height
                         } else {
                             intrinsic_size.height
                         },
                     );
                     let size = Size::new(
-                        known_dimensions.width.unwrap_or(measured.width),
-                        known_dimensions.height.unwrap_or(measured.height),
+                        measure_input
+                            .known_dimensions
+                            .width
+                            .unwrap_or(measured.width),
+                        measure_input
+                            .known_dimensions
+                            .height
+                            .unwrap_or(measured.height),
                     );
-                    LeafMeasurement::new(size)
-                        .with_first_baselines(Point::new(None, first_baseline))
-                },
-            ),
-        }
-    }
-}
-
-impl FlexTree for TestTree {
-    type ContainerStyle<'a> = &'a TestStyle;
-    type ItemStyle<'a> = &'a TestStyle;
-
-    fn flex_container_style(&self, container: NodeId) -> Self::ContainerStyle<'_> {
-        &self.node(container).style
-    }
-
-    fn flex_item_style(&self, item: NodeId) -> Self::ItemStyle<'_> {
-        &self.node(item).style
+                    LeafMetrics::new(size).with_first_baselines(Point::new(None, first_baseline))
+                });
+                compute_leaf_layout(
+                    input,
+                    style,
+                    |_calc, _basis| unreachable!("test styles do not contain calc() values"),
+                    &mut measurer,
+                )
+            }
+        })
     }
 }
 
@@ -389,7 +439,8 @@ fn perform_layout(
     known_dimensions: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
 ) -> LayoutOutput {
-    tree.compute_child_layout(
+    tree.session.compute_child_layout(
+        &tree.source,
         root,
         LayoutInput::perform_layout(
             known_dimensions,
@@ -819,7 +870,7 @@ fn hidden_and_out_of_flow_children_do_not_participate_in_flexing() {
 
     assert_close(tree.layout(first).location.x, 0.0);
     assert_close(tree.layout(second).location.x, 80.0);
-    assert!(tree.node(hoisted).static_position.is_some());
+    assert!(tree.static_position(hoisted).is_some());
 }
 
 #[test]
@@ -831,11 +882,12 @@ fn measure_goal_does_not_write_durable_layouts() {
     let mut sentinel = Layout::default();
     sentinel.location = Point::new(123.0, 456.0);
     sentinel.size = Size::new(7.0, 8.0);
-    tree.node_mut(first).layout = sentinel;
-    tree.node_mut(second).layout = sentinel;
-    tree.node_mut(root).layout = sentinel;
+    tree.session_node_mut(first).layout = sentinel;
+    tree.session_node_mut(second).layout = sentinel;
+    tree.session_node_mut(root).layout = sentinel;
 
-    let output = tree.compute_child_layout(
+    let output = tree.session.compute_child_layout(
+        &tree.source,
         root,
         LayoutInput::compute_size(
             Size::new(Some(100.0), None),
@@ -846,7 +898,7 @@ fn measure_goal_does_not_write_durable_layouts() {
     );
 
     assert_size(output.size, Size::new(100.0, 20.0));
-    assert_eq!(tree.layout_writes, 0);
+    assert_eq!(tree.session.layout_writes, 0);
     assert_eq!(tree.layout(first), sentinel);
     assert_eq!(tree.layout(second), sentinel);
     assert_eq!(tree.layout(root), sentinel);
@@ -863,21 +915,27 @@ fn leaf_measure_goal_preserves_the_single_axis_fast_path() {
         AvailableSpace::Definite(100.0),
     );
 
-    let measured = tree.compute_child_layout(
+    let measured = tree.session.compute_child_layout(
+        &tree.source,
         leaf,
         LayoutInput::compute_size(known, parent, available, RequestedAxis::Horizontal),
     );
     assert_size(measured.size, Size::new(40.0, 20.0));
-    assert_eq!(tree.leaf_measure_calls, 0);
+    assert_eq!(tree.session.leaf_measure_calls, 0);
 
-    let _ = tree.compute_child_layout(
+    let _ = tree.session.compute_child_layout(
+        &tree.source,
         leaf,
         LayoutInput::compute_size(known, parent, available, RequestedAxis::Both),
     );
-    assert_eq!(tree.leaf_measure_calls, 1);
+    assert_eq!(tree.session.leaf_measure_calls, 1);
 
-    let _ = tree.compute_child_layout(leaf, LayoutInput::perform_layout(known, parent, available));
-    assert_eq!(tree.leaf_measure_calls, 2);
+    let _ = tree.session.compute_child_layout(
+        &tree.source,
+        leaf,
+        LayoutInput::perform_layout(known, parent, available),
+    );
+    assert_eq!(tree.session.leaf_measure_calls, 2);
 }
 
 #[test]
@@ -1094,10 +1152,7 @@ fn hoisted_static_position_is_the_aligned_margin_box_origin() {
     );
 
     definite_layout(&mut tree, root, 100.0, 50.0);
-    assert_eq!(
-        tree.node(child).static_position,
-        Some(Point::new(37.5, 18.5))
-    );
+    assert_eq!(tree.static_position(child), Some(Point::new(37.5, 18.5)));
 }
 
 #[test]
@@ -1277,14 +1332,14 @@ fn absolute_children_use_order_zero_for_paint_order() {
 #[test]
 fn leaf_measurement_reports_baselines_for_a_fully_sized_box() {
     let style = fixed_leaf_style(100.0, 20.0);
+    let mut measurer = FnLeafMeasurer::new(|_input| {
+        LeafMetrics::new(Size::new(100.0, 20.0)).with_first_baselines(Point::new(None, Some(15.0)))
+    });
     let output = compute_leaf_layout(
         LayoutInput::perform_layout(Size::NONE, Size::NONE, Size::MAX_CONTENT),
         &style,
         |_calc, _basis| unreachable!(),
-        |_known, _available| {
-            LeafMeasurement::new(Size::new(100.0, 20.0))
-                .with_first_baselines(Point::new(None, Some(15.0)))
-        },
+        &mut measurer,
     );
     assert_size(output.size, Size::new(100.0, 20.0));
     assert_size(output.content_size, Size::new(100.0, 20.0));
@@ -1298,6 +1353,10 @@ fn leaf_max_width_constrains_measurement_and_preserves_overflow_extent() {
         padding: Edges::uniform(LengthPercentage::length(10.0)),
         ..TestStyle::default()
     };
+    let mut measurer = FnLeafMeasurer::new(|input| {
+        assert_eq!(input.available_space.width, AvailableSpace::Definite(100.0));
+        LeafMetrics::new(Size::new(200.0, 30.0)).with_first_baselines(Point::new(None, Some(15.0)))
+    });
     let output = compute_leaf_layout(
         LayoutInput::perform_layout(
             Size::NONE,
@@ -1309,11 +1368,7 @@ fn leaf_max_width_constrains_measurement_and_preserves_overflow_extent() {
         ),
         &style,
         |_calc, _basis| unreachable!(),
-        |_known, available| {
-            assert_eq!(available.width, AvailableSpace::Definite(100.0));
-            LeafMeasurement::new(Size::new(200.0, 30.0))
-                .with_first_baselines(Point::new(None, Some(15.0)))
-        },
+        &mut measurer,
     );
     // max-width is content-box: 100 content + 20 padding.
     assert_size(output.size, Size::new(120.0, 50.0));
@@ -1340,7 +1395,13 @@ fn absolute_aspect_ratio_uses_vertical_inset_stretch_when_horizontal_is_auto() {
         None,
     );
 
-    let layout = compute_absolute_layout(&mut tree, child, Size::new(100.0, 100.0), Point::ZERO);
+    let layout = compute_absolute_layout(
+        &tree.source,
+        &mut tree.session,
+        child,
+        Size::new(100.0, 100.0),
+        Point::ZERO,
+    );
     assert_size(layout.size, Size::new(160.0, 80.0));
     assert_point(layout.location, Point::new(0.0, 10.0));
 }

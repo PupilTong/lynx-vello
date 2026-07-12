@@ -17,29 +17,37 @@ standalone.
 ## Design in one paragraph
 
 The engine owns **algorithms and vocabulary**; the host owns **the tree, the
-styles, and all storage**. Hosts implement a small family of traits
-(`TraverseTree`, `LayoutTree`, `FlexTree`, `GridTree`, `CacheTree`,
-`RoundTree`) and per-node style views (`CoreStyle`, `FlexContainerStyle`, …),
-then call free generic entry points (`compute_root_layout`,
-`compute_leaf_layout`, `compute_flexbox_layout`, …; grid joins in L2).
+styles, and all storage**. The protocol deliberately exposes those through
+two separate objects: an immutable `LayoutSource` (`TraverseTree`,
+`FlexSource`, `GridSource`) containing topology and computed-style views, and
+a mutable object implementing `LayoutSession` (`LayoutState` + `CacheState`)
+and, when pixel snapping is used, the independent `RoundState` capability.
+That mutable side contains results, caches, measurement resources, and
+display dispatch.
 Recursion flows *through the host*: the engine calls
-`LayoutTree::compute_child_layout`, and the host dispatches each child to
-the right algorithm — one of neutron-star's, or its own (this is how Lynx's
-non-CSS `linear`/`relative` modes plug in as peer algorithms without the engine
-knowing about them). `display:none` cleanup is an explicit host precheck:
-call `hide_subtree` and return `LayoutOutput::HIDDEN` before entering the
-generated-box cache/dispatch path.
+`LayoutSession::compute_child_layout(source, …)`, and the host dispatches each
+child to the right algorithm — one of neutron-star's, or its own (this is how
+Lynx's non-CSS `linear`/`relative` modes plug in as peer algorithms without
+the engine knowing about them). The split lets Flex and Grid retain borrowed
+style/track views while recursive layout mutates only the session.
+`display:none` cleanup is an explicit host precheck: call `hide_subtree` and
+return `LayoutOutput::HIDDEN` before entering the generated-box cache/dispatch
+path.
 
 ## Hard rules
 
-- **No `dyn`.** Every host boundary is generics + associated types (GATs);
-  the traits are structurally not object-safe, so trait objects are impossible
-  by construction, and every call across the engine/host boundary can inline.
+- **No `dyn`.** Every host boundary is generic. Source/measurement traits use
+  GATs and mutable capability traits explicitly require `Sized`, so trait
+  objects are impossible by construction and every call can inline.
 - **No storage.** The engine allocates only transient algorithm scratch; node
-  data, styles, caches, and results all live in host-chosen storage addressed
-  by opaque `NodeId`s.
-- **Plain-old-data protocol.** Everything crossing the boundary is small,
-  `Copy`, `#[repr(C)]` where layout matters, and `f32`-based.
+  data, styles, caches, retained text layouts, and results all live in
+  host-chosen storage addressed by opaque `NodeId`s. Semantic source data is
+  immutable for a layout epoch; mutable results and caches live separately.
+- **POD box protocol, lending measurement seam.** Layout inputs, outputs, and
+  geometry are small `Copy`, `#[repr(C)]` where layout matters, and
+  `f32`-based. `LeafMeasurer` may additionally lend an engine-specific rich
+  artifact view; leaf boxing immediately copies its size/baselines into
+  `LeafMetrics`, while the host retains the artifact for painting.
 - **CSS-initial defaults.** Trait-method defaults are the CSS initial values;
   host-specific defaults (e.g. Lynx's `box-sizing: border-box` or
   `overflow: hidden`) are the host's job.
@@ -51,7 +59,7 @@ and the crate compiles with zero dependencies.
 
 ## Prior art
 
-The tree/style trait split is informed by [Taffy]'s `LayoutPartialTree`
+The source/session/style protocol split is informed by [Taffy]'s `LayoutPartialTree`
 design (proven to keep a layout engine storage-agnostic without trait
 objects), the implemented flex algorithm and planned grid algorithm by the
 CSS specs directly (Flexbox Level 1, Grid Level 2, Sizing Level 3), and the

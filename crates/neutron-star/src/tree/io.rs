@@ -46,7 +46,7 @@ pub enum RequestedAxis {
 /// Measurement is side-effect free: child layouts must not be stored. A
 /// commit produces final sizes and positions for the node's children and
 /// stores them through
-/// [`LayoutTree::set_unrounded_layout`](crate::tree::LayoutTree::set_unrounded_layout).
+/// [`LayoutState::set_unrounded_layout`](crate::tree::LayoutState::set_unrounded_layout).
 /// Hidden-subtree zeroing is a separate operation provided by
 /// [`hide_subtree`](crate::compute::hide_subtree), not a
 /// sizing goal.
@@ -197,7 +197,7 @@ impl LayoutInput {
 ///
 /// This is the *transient* answer the parent algorithm consumes; the durable
 /// per-node record is [`Layout`], stored separately via
-/// [`LayoutTree::set_unrounded_layout`](crate::tree::LayoutTree::set_unrounded_layout).
+/// [`LayoutState::set_unrounded_layout`](crate::tree::LayoutState::set_unrounded_layout).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct LayoutOutput {
@@ -247,7 +247,7 @@ impl LayoutOutput {
 /// by the host/renderer). Relative-position insets are already applied.
 /// Values are unrounded CSS pixels until
 /// [`round_layout`](crate::compute::round_layout) writes the rounded copy
-/// via [`RoundTree`](crate::tree::RoundTree).
+/// via [`RoundState`](crate::tree::RoundState).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct Layout {

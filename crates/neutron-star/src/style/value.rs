@@ -15,21 +15,21 @@
 //! until layout knows the percentage basis, and their parsed representation
 //! lives in the host's style engine. The protocol therefore carries an opaque
 //! [`CalcHandle`] token; whenever an algorithm needs the value it calls back
-//! through [`LayoutTree::resolve_calc`] with the basis. This keeps
+//! through [`LayoutSource::resolve_calc`] with the basis. This keeps
 //! neutron-star free of any CSS-parser dependency while supporting full
 //! `calc()`.
 //!
-//! [`LayoutTree::resolve_calc`]: crate::tree::LayoutTree::resolve_calc
+//! [`LayoutSource::resolve_calc`]: crate::tree::LayoutSource::resolve_calc
 
 /// An opaque reference to a host-owned `calc()` expression.
 ///
 /// The engine never inspects the value — it only passes it back to
-/// [`LayoutTree::resolve_calc`](crate::tree::LayoutTree::resolve_calc)
+/// [`LayoutSource::resolve_calc`](crate::tree::LayoutSource::resolve_calc)
 /// together with a percentage basis. Hosts typically encode an index or a
 /// (suitably guaranteed-live) pointer into their computed-style storage.
 ///
-/// A handle is only meaningful to the tree it came from, and only for the
-/// duration of the layout run in which the style accessor produced it.
+/// A handle is only meaningful to the [`LayoutSource`](crate::tree::LayoutSource)
+/// that produced it, and only for that immutable source epoch's layout run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CalcHandle(u64);
 
@@ -59,7 +59,7 @@ pub enum LengthPercentage {
     /// style accessor that produced this value.
     Percent(f32),
     /// A host-owned `calc()` expression; resolve via
-    /// [`LayoutTree::resolve_calc`](crate::tree::LayoutTree::resolve_calc).
+    /// [`LayoutSource::resolve_calc`](crate::tree::LayoutSource::resolve_calc).
     Calc(CalcHandle),
 }
 

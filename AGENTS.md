@@ -115,8 +115,12 @@ useful signal for currently-compatible versions of those libraries.
   parsing, matching, cascade, and lock ownership remain in `stylo-dom`.
 - `crates/neutron-star` — the standalone-publishable CSS flexbox engine with
   a reserved Grid protocol: trait-based host⇄engine integration with static
-  dispatch only (no `dyn`), host-owned storage, and host-side display
-  dispatch so Lynx's `linear`/`relative` modes plug in as peer algorithms.
+  dispatch only (no `dyn`), an immutable topology/style source physically
+  separated from mutable layout/cache/measurement sessions, and host-side
+  display dispatch so Lynx's `linear`/`relative` modes plug in as peer
+  algorithms. Leaf content engines integrate through the generic lending
+  `LeafMeasurer` protocol (the planned text adapter retains Parley layouts in
+  host storage rather than cloning engine artifacts).
   **Flexbox milestone implemented (L1)** — the shared root/leaf/cache/
   positioned/rounding machinery and CSS Flexbox Level 1 algorithm are live;
   the Grid style/tree contract exists but its L2 algorithm is still pending.

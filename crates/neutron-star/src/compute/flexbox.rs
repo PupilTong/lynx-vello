@@ -1,9 +1,10 @@
 //! CSS Flexible Box Layout Module Level 1 layout algorithm.
 //!
-//! The implementation follows the pass ordering in Flexbox §9.  Styles and
-//! storage stay host-owned: all style values are copied out through
-//! [`FlexTree`] views before a mutable child measurement, and every recursive
-//! layout call round-trips through [`LayoutTree::compute_child_layout`].
+//! The implementation follows the pass ordering in Flexbox §9. Style and
+//! topology stay in an immutable [`FlexSource`], while recursive measurement
+//! and durable writes go through a separate [`LayoutSession`]. This separation
+//! lets borrowed GAT style views remain live across child layout without raw
+//! style snapshots or self-referential scratch structures.
 //!
 //! The current protocol deliberately leaves formatting-tree preprocessing
 //! (anonymous item generation) to the host and has no representation for
@@ -27,14 +28,14 @@ use super::util::{
 };
 use crate::geometry::{Edges, Point, Size};
 use crate::style::alignment::{AlignContent, AlignItems};
-use crate::style::value::{CalcHandle, Dimension, LengthPercentage, LengthPercentageAuto};
+use crate::style::value::{CalcHandle, Dimension, LengthPercentageAuto};
 use crate::style::{
     BoxGenerationMode, BoxSizing, CoreStyle, Direction, FlexContainerStyle, FlexDirection,
     FlexItemStyle, FlexWrap, Overflow, Position,
 };
 use crate::tree::{
-    AvailableSpace, FlexTree, Layout, LayoutGoal, LayoutInput, LayoutOutput, NodeId, RequestedAxis,
-    SizingMode,
+    AvailableSpace, FlexSource, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutSession,
+    NodeId, RequestedAxis, SizingMode,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,61 +133,44 @@ impl Axes {
     }
 }
 
-/// Owned snapshot of the container style needed across mutable child-layout
-/// callbacks, which cannot retain a borrowed host style view.
+/// Compact order/classification record retained before an item is resolved.
+/// Raw style stays in the immutable source and is reborrowed by each pass.
 #[derive(Debug, Clone, Copy)]
-struct ContainerStyleData {
-    direction: FlexDirection,
-    wrap: FlexWrap,
-    inline_direction: Direction,
-    gap: Size<LengthPercentage>,
-    align_content: AlignContent,
-    align_items: AlignItems,
-    justify_content: AlignContent,
-    size: Size<Dimension>,
-    min_size: Size<Dimension>,
-    max_size: Size<Dimension>,
-    aspect_ratio: Option<f32>,
-    margin: Edges<LengthPercentageAuto>,
-    padding: Edges<crate::style::LengthPercentage>,
-    border: Edges<crate::style::LengthPercentage>,
-    overflow: Point<Overflow>,
-    scrollbar_width: f32,
-    box_sizing: BoxSizing,
-}
-
-/// Owned snapshot of one child's item and core style, captured before the
-/// flex passes begin mutating the host through recursive layout calls.
-#[derive(Debug, Clone, Copy)]
-struct ItemStyleData {
+struct PendingItem {
     node: NodeId,
     document_index: usize,
     css_order: i32,
     layout_order: u32,
-    position: Position,
-    size_value: Size<Dimension>,
-    min_size_value: Size<Dimension>,
-    max_size_value: Size<Dimension>,
-    flex_basis_value: Dimension,
-    aspect_ratio: Option<f32>,
-    box_sizing: BoxSizing,
-    direction: Direction,
-    overflow: Point<Overflow>,
-    scrollbar_width: f32,
-    inset: Edges<LengthPercentageAuto>,
-    margin_value: Edges<LengthPercentageAuto>,
-    padding_value: Edges<LengthPercentage>,
-    border_value: Edges<LengthPercentage>,
-    flex_grow: f32,
-    flex_shrink: f32,
-    align_self: AlignItems,
+}
+
+impl PendingItem {
+    fn key(self) -> ItemKey {
+        ItemKey {
+            node: self.node,
+            layout_order: self.layout_order,
+        }
+    }
+}
+
+/// Stable identity and paint order retained when resolved item scratch is
+/// rebuilt after a cyclic percentage basis becomes definite.
+#[derive(Debug, Clone, Copy)]
+struct ItemKey {
+    node: NodeId,
+    layout_order: u32,
 }
 
 /// Transient per-item state accumulated across the Flexbox §9 sizing,
-/// flexing, cross-size, and alignment passes.
-#[derive(Debug, Clone)]
+/// flexing, cross-size, and alignment passes. It stores only resolved values
+/// and compact hot style fields; raw CSS values are reborrowed from `node`.
+#[derive(Debug)]
 struct FlexItem {
-    style: ItemStyleData,
+    key: ItemKey,
+    direction: Direction,
+    align_self: AlignItems,
+    size_is_auto: Size<bool>,
+    flex_grow: f32,
+    flex_shrink: f32,
     preferred_size: Size<Option<f32>>,
     min_size: Size<Option<f32>>,
     max_size: Size<Option<f32>>,
@@ -415,65 +399,6 @@ fn relative_offset(inset: Edges<Option<f32>>, direction: Direction) -> Point<f32
     Point::new(x, y)
 }
 
-fn container_style<Tree: FlexTree>(tree: &Tree, node: NodeId) -> ContainerStyleData {
-    let style = tree.flex_container_style(node);
-    ContainerStyleData {
-        direction: style.flex_direction(),
-        wrap: style.flex_wrap(),
-        inline_direction: style.direction(),
-        gap: style.gap(),
-        align_content: style.align_content().unwrap_or(AlignContent::Stretch),
-        align_items: style.align_items().unwrap_or(AlignItems::Stretch),
-        justify_content: style.justify_content().unwrap_or(AlignContent::FlexStart),
-        size: style.size(),
-        min_size: style.min_size(),
-        max_size: style.max_size(),
-        aspect_ratio: style.aspect_ratio(),
-        margin: style.margin(),
-        padding: style.padding(),
-        border: style.border(),
-        overflow: style.overflow(),
-        scrollbar_width: style.scrollbar_width(),
-        box_sizing: style.box_sizing(),
-    }
-}
-
-fn item_style<Tree: FlexTree>(
-    tree: &Tree,
-    node: NodeId,
-    document_index: usize,
-    default_alignment: AlignItems,
-) -> Option<ItemStyleData> {
-    let style = tree.flex_item_style(node);
-    if style.box_generation_mode() == BoxGenerationMode::None {
-        return None;
-    }
-
-    Some(ItemStyleData {
-        node,
-        document_index,
-        css_order: style.order(),
-        layout_order: u32::try_from(document_index).unwrap_or(u32::MAX),
-        position: style.position(),
-        size_value: style.size(),
-        min_size_value: style.min_size(),
-        max_size_value: style.max_size(),
-        flex_basis_value: style.flex_basis(),
-        aspect_ratio: style.aspect_ratio(),
-        box_sizing: style.box_sizing(),
-        direction: style.direction(),
-        overflow: style.overflow(),
-        scrollbar_width: style.scrollbar_width(),
-        inset: style.inset(),
-        margin_value: style.margin(),
-        padding_value: style.padding(),
-        border_value: style.border(),
-        flex_grow: style.flex_grow(),
-        flex_shrink: style.flex_shrink(),
-        align_self: style.align_self().unwrap_or(default_alignment),
-    })
-}
-
 #[inline]
 fn copied_scrollbar_size(overflow: Point<Overflow>, width: f32) -> Size<f32> {
     debug_assert!(width.is_finite() && width >= 0.0);
@@ -491,56 +416,67 @@ fn copied_scrollbar_size(overflow: Point<Overflow>, width: f32) -> Size<f32> {
     )
 }
 
-fn resolve_item<Tree: FlexTree>(
-    tree: &Tree,
-    style: &ItemStyleData,
+fn resolve_item<Source: FlexSource>(
+    source: &Source,
+    key: ItemKey,
     container_inner_size: Size<Option<f32>>,
+    default_alignment: AlignItems,
 ) -> FlexItem {
+    let style = source.flex_item_style(key.node);
+    let flex_grow = style.flex_grow();
+    let flex_shrink = style.flex_shrink();
     debug_assert!(
-        style.flex_grow.is_finite() && style.flex_grow >= 0.0,
+        flex_grow.is_finite() && flex_grow >= 0.0,
         "flex-grow must be finite and non-negative"
     );
     debug_assert!(
-        style.flex_shrink.is_finite() && style.flex_shrink >= 0.0,
+        flex_shrink.is_finite() && flex_shrink >= 0.0,
         "flex-shrink must be finite and non-negative"
     );
-    let resolve_calc = |handle, basis| tree.resolve_calc(handle, basis);
+    let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
     let inline_basis = container_inner_size.width;
-    let padding = resolve_edges(style.padding_value, inline_basis, &resolve_calc);
-    let border = resolve_edges(style.border_value, inline_basis, &resolve_calc);
-    let scrollbar = copied_scrollbar_size(style.overflow, style.scrollbar_width);
+    let size_value = style.size();
+    let padding = resolve_edges(style.padding(), inline_basis, &resolve_calc);
+    let border = resolve_edges(style.border(), inline_basis, &resolve_calc);
+    let scrollbar = copied_scrollbar_size(style.overflow(), style.scrollbar_width());
     let inset_size = padding_border_size(padding, border, scrollbar);
     let preferred_size = resolve_quantitative_sizes(
-        style.size_value,
+        size_value,
         container_inner_size,
-        style.aspect_ratio,
-        style.box_sizing,
+        style.aspect_ratio(),
+        style.box_sizing(),
         inset_size,
         &resolve_calc,
     );
     let min_size = resolve_quantitative_sizes(
-        style.min_size_value,
+        style.min_size(),
         container_inner_size,
-        style.aspect_ratio,
-        style.box_sizing,
+        style.aspect_ratio(),
+        style.box_sizing(),
         inset_size,
         &resolve_calc,
     );
     let max_size = resolve_quantitative_sizes(
-        style.max_size_value,
+        style.max_size(),
         container_inner_size,
-        style.aspect_ratio,
-        style.box_sizing,
+        style.aspect_ratio(),
+        style.box_sizing(),
         inset_size,
         &resolve_calc,
     );
-    let optional_margin = resolve_optional_edges(style.margin_value, inline_basis, &resolve_calc);
-    let margin_auto = style.margin_value.map(LengthPercentageAuto::is_auto);
+    let margin_value = style.margin();
+    let optional_margin = resolve_optional_edges(margin_value, inline_basis, &resolve_calc);
+    let margin_auto = margin_value.map(LengthPercentageAuto::is_auto);
     let margin = auto_edges_to_zero(optional_margin);
-    let inset = resolve_insets(style.inset, container_inner_size, &resolve_calc);
+    let inset = resolve_insets(style.inset(), container_inner_size, &resolve_calc);
 
     FlexItem {
-        style: *style,
+        key,
+        direction: style.direction(),
+        align_self: style.align_self().unwrap_or(default_alignment),
+        size_is_auto: size_value.map(Dimension::is_auto),
+        flex_grow,
+        flex_shrink,
         preferred_size,
         min_size,
         max_size,
@@ -568,15 +504,21 @@ fn resolve_item<Tree: FlexTree>(
     }
 }
 
-fn child_measurement<Tree: FlexTree>(
-    tree: &mut Tree,
+#[allow(clippy::too_many_arguments)]
+fn child_measurement<Source, Session>(
+    source: &Source,
+    session: &mut Session,
     node: NodeId,
     known_dimensions: Size<Option<f32>>,
     parent_size: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
     sizing_mode: SizingMode,
     requested_axis: RequestedAxis,
-) -> LayoutOutput {
+) -> LayoutOutput
+where
+    Source: FlexSource,
+    Session: LayoutSession<Source>,
+{
     let mut input = LayoutInput::compute_size(
         known_dimensions,
         parent_size,
@@ -584,22 +526,29 @@ fn child_measurement<Tree: FlexTree>(
         requested_axis,
     );
     input.sizing_mode = sizing_mode;
-    tree.compute_child_layout(node, input)
+    session.compute_child_layout(source, node, input)
 }
 
 #[allow(clippy::too_many_lines)]
-fn determine_flex_base_sizes<Tree: FlexTree>(
-    tree: &mut Tree,
+fn determine_flex_base_sizes<Source, Session>(
+    source: &Source,
+    session: &mut Session,
     items: &mut [FlexItem],
     axes: Axes,
     container_inner_size: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
     flex_basis_percentage_basis: Option<f32>,
-) {
+) where
+    Source: FlexSource,
+    Session: LayoutSession<Source>,
+{
     let container_main = axes.main.size(container_inner_size);
     let available_main = axes.main.size(available_space);
 
     for item in items {
+        // Source and session are deliberately separate: this borrowed style
+        // view remains valid across both recursive measurements below.
+        let style = source.flex_item_style(item.key.node);
         let inset_size = padding_border_size(item.padding, item.border, item.scrollbar);
         let main_floor = axes.main.size(inset_size);
         let cross_preferred = axes.cross.size(item.preferred_size);
@@ -620,8 +569,9 @@ fn determine_flex_base_sizes<Tree: FlexTree>(
             size_from_axes(axes, None, axes.cross.size(container_inner_size));
         let min_content = axes.main.size(
             child_measurement(
-                tree,
-                item.style.node,
+                source,
+                session,
+                item.key.node,
                 known,
                 contribution_parent_size,
                 min_available,
@@ -632,8 +582,9 @@ fn determine_flex_base_sizes<Tree: FlexTree>(
         );
         let max_content = axes.main.size(
             child_measurement(
-                tree,
-                item.style.node,
+                source,
+                session,
+                item.key.node,
                 known,
                 contribution_parent_size,
                 max_available,
@@ -648,7 +599,7 @@ fn determine_flex_base_sizes<Tree: FlexTree>(
                 Dimension::MinContent => Some(min_content),
                 Dimension::MaxContent => Some(max_content),
                 Dimension::FitContent(limit) => {
-                    let resolve_calc = |handle, basis| tree.resolve_calc(handle, basis);
+                    let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
                     let limit = resolve_length_percentage(limit, container_main, &resolve_calc)
                         .unwrap_or(max_content);
                     Some(max_content.min(limit.max(min_content)))
@@ -660,32 +611,30 @@ fn determine_flex_base_sizes<Tree: FlexTree>(
             }
         };
         if axes.main.size(item.preferred_size).is_none()
-            && let Some(value) = resolve_intrinsic_dimension(axes.main.size(item.style.size_value))
+            && let Some(value) = resolve_intrinsic_dimension(axes.main.size(style.size()))
         {
             axes.main.set_size(&mut item.preferred_size, Some(value));
         }
         if axes.main.size(item.min_size).is_none()
-            && let Some(value) =
-                resolve_intrinsic_dimension(axes.main.size(item.style.min_size_value))
+            && let Some(value) = resolve_intrinsic_dimension(axes.main.size(style.min_size()))
         {
             axes.main.set_size(&mut item.min_size, Some(value));
         }
         if axes.main.size(item.max_size).is_none()
-            && let Some(value) =
-                resolve_intrinsic_dimension(axes.main.size(item.style.max_size_value))
+            && let Some(value) = resolve_intrinsic_dimension(axes.main.size(style.max_size()))
         {
             axes.main.set_size(&mut item.max_size, Some(value));
         }
 
         let resolved_basis = {
-            let resolve_calc = |handle, basis| tree.resolve_calc(handle, basis);
+            let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
             resolve_dimension(
-                item.style.flex_basis_value,
+                style.flex_basis(),
                 flex_basis_percentage_basis,
                 &resolve_calc,
             )
             .map(|basis| {
-                if item.style.box_sizing == BoxSizing::ContentBox {
+                if style.box_sizing() == BoxSizing::ContentBox {
                     basis + main_floor
                 } else {
                     basis
@@ -694,7 +643,7 @@ fn determine_flex_base_sizes<Tree: FlexTree>(
         };
 
         let preferred_main = axes.main.size(item.preferred_size);
-        let preferred_flex_basis = if item.style.flex_basis_value.is_auto() {
+        let preferred_flex_basis = if style.flex_basis().is_auto() {
             preferred_main
         } else {
             None
@@ -702,16 +651,16 @@ fn determine_flex_base_sizes<Tree: FlexTree>(
         item.flex_basis = if let Some(basis) = resolved_basis.or(preferred_flex_basis) {
             basis
         } else {
-            let content_basis = if item.style.flex_basis_value.is_auto() {
-                axes.main.size(item.style.size_value)
+            let content_basis = if style.flex_basis().is_auto() {
+                axes.main.size(style.size())
             } else {
-                item.style.flex_basis_value
+                style.flex_basis()
             };
             match content_basis {
                 Dimension::MinContent => min_content,
                 Dimension::MaxContent | Dimension::Length(_) | Dimension::Calc(_) => max_content,
                 Dimension::FitContent(limit) => {
-                    let resolve_calc = |handle, basis| tree.resolve_calc(handle, basis);
+                    let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
                     let limit = super::util::resolve_length_percentage(
                         limit,
                         flex_basis_percentage_basis,
@@ -736,17 +685,17 @@ fn determine_flex_base_sizes<Tree: FlexTree>(
         let explicit_min = axes.main.size(item.min_size);
         item.resolved_min_main = if let Some(minimum) = explicit_min {
             minimum.max(main_floor)
-        } else if item.style.overflow.x.is_scroll_container()
-            || item.style.overflow.y.is_scroll_container()
+        } else if style.overflow().x.is_scroll_container()
+            || style.overflow().y.is_scroll_container()
         {
             main_floor
         } else {
-            let raw_main_size = axes.main.size(item.style.size_value);
-            let raw_cross_size = axes.cross.size(item.style.size_value);
+            let raw_main_size = axes.main.size(style.size());
+            let raw_cross_size = axes.cross.size(style.size());
             let specified_suggestion = (!raw_main_size.is_auto())
                 .then_some(preferred_main)
                 .flatten();
-            let transferred_suggestion = (item.style.aspect_ratio.is_some()
+            let transferred_suggestion = (style.aspect_ratio().is_some()
                 && !raw_cross_size.is_auto())
             .then_some(preferred_main)
             .flatten();
@@ -775,10 +724,10 @@ fn determine_flex_base_sizes<Tree: FlexTree>(
         let preferred_contribution = preferred_main.unwrap_or(0.0);
         let contribution = |content: f32| {
             let mut value = content.max(preferred_contribution);
-            if item.style.flex_grow == 0.0 {
+            if item.flex_grow == 0.0 {
                 value = value.min(item.flex_basis);
             }
-            if item.style.flex_shrink == 0.0 {
+            if item.flex_shrink == 0.0 {
                 value = value.max(item.flex_basis);
             }
             clamp_axis(
@@ -950,9 +899,9 @@ fn resolve_flexible_lengths(
         item.violation = 0.0;
         item.target_main = item.flex_basis;
         let factor_is_zero = if growing {
-            item.style.flex_grow == 0.0
+            item.flex_grow == 0.0
         } else {
-            item.style.flex_shrink == 0.0
+            item.flex_shrink == 0.0
         };
         let clamp_requires_freeze = if growing {
             item.flex_basis > item.hypothetical_main
@@ -1002,9 +951,9 @@ fn resolve_flexible_lengths(
             .filter(|item| !item.frozen)
             .map(|item| {
                 if growing {
-                    item.style.flex_grow
+                    item.flex_grow
                 } else {
-                    item.style.flex_shrink
+                    item.flex_shrink
                 }
             })
             .sum::<f32>();
@@ -1018,19 +967,18 @@ fn resolve_flexible_lengths(
         if growing {
             if factor_sum > 0.0 {
                 for item in line_items.iter_mut().filter(|item| !item.frozen) {
-                    item.target_main =
-                        item.flex_basis + remaining * item.style.flex_grow / factor_sum;
+                    item.target_main = item.flex_basis + remaining * item.flex_grow / factor_sum;
                 }
             }
         } else {
             let scaled_sum = line_items
                 .iter()
                 .filter(|item| !item.frozen)
-                .map(|item| item.style.flex_shrink * item.inner_flex_basis)
+                .map(|item| item.flex_shrink * item.inner_flex_basis)
                 .sum::<f32>();
             if scaled_sum > 0.0 {
                 for item in line_items.iter_mut().filter(|item| !item.frozen) {
-                    let scaled = item.style.flex_shrink * item.inner_flex_basis;
+                    let scaled = item.flex_shrink * item.inner_flex_basis;
                     item.target_main = item.flex_basis + remaining * scaled / scaled_sum;
                 }
             }
@@ -1081,14 +1029,18 @@ fn resolve_flexible_lengths(
     debug_assert!(false, "flex freeze loop exceeded the item-count bound");
 }
 
-fn determine_hypothetical_cross_sizes<Tree: FlexTree>(
-    tree: &mut Tree,
+fn determine_hypothetical_cross_sizes<Source, Session>(
+    source: &Source,
+    session: &mut Session,
     items: &mut [FlexItem],
     lines: &[FlexLine],
     axes: Axes,
     container_inner_size: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
-) {
+) where
+    Source: FlexSource,
+    Session: LayoutSession<Source>,
+{
     for line in lines {
         for item in &mut items[line.start..line.end] {
             let mut known = Size::NONE;
@@ -1101,8 +1053,9 @@ fn determine_hypothetical_cross_sizes<Tree: FlexTree>(
                 axes.cross.size(available_space),
             );
             let output = child_measurement(
-                tree,
-                item.style.node,
+                source,
+                session,
+                item.key.node,
                 known,
                 container_inner_size,
                 child_available,
@@ -1150,7 +1103,7 @@ fn calculate_line_cross_sizes(
         for item in &items[line.start..line.end] {
             let outer_cross = item.hypothetical_cross + axis_sum(item.margin, axes.cross);
             if axes.main == Axis::Horizontal
-                && item.style.align_self == AlignItems::Baseline
+                && item.align_self == AlignItems::Baseline
                 && !flow_start_bool(item.margin_auto, axes.cross, axes.cross_reverse)
                 && !flow_end_bool(item.margin_auto, axes.cross, axes.cross_reverse)
             {
@@ -1222,8 +1175,8 @@ fn determine_used_cross_sizes(items: &mut [FlexItem], lines: &[FlexLine], axes: 
         for item in &mut items[line.start..line.end] {
             let inset_size = padding_border_size(item.padding, item.border, item.scrollbar);
             let cross_floor = axes.cross.size(inset_size);
-            let should_stretch = item.style.align_self == AlignItems::Stretch
-                && axes.cross.size(item.style.size_value).is_auto()
+            let should_stretch = item.align_self == AlignItems::Stretch
+                && axes.cross.size(item.size_is_auto)
                 && !flow_start_bool(item.margin_auto, axes.cross, axes.cross_reverse)
                 && !flow_end_bool(item.margin_auto, axes.cross, axes.cross_reverse);
             item.target_cross = if should_stretch {
@@ -1354,7 +1307,7 @@ fn align_items_cross_axis(items: &mut [FlexItem], lines: &[FlexLine], axes: Axes
             items[line.start..line.end]
                 .iter()
                 .filter(|item| {
-                    item.style.align_self == AlignItems::Baseline
+                    item.align_self == AlignItems::Baseline
                         && !flow_start_bool(item.margin_auto, axes.cross, axes.cross_reverse)
                         && !flow_end_bool(item.margin_auto, axes.cross, axes.cross_reverse)
                 })
@@ -1409,7 +1362,7 @@ fn align_items_cross_axis(items: &mut [FlexItem], lines: &[FlexLine], axes: Axes
                 continue;
             }
 
-            if item.style.align_self == AlignItems::Baseline && axes.main == Axis::Horizontal {
+            if item.align_self == AlignItems::Baseline && axes.main == Axis::Horizontal {
                 let physical_top = max_physical_baseline - item.baseline;
                 item.cross_position = if axes.cross_reverse {
                     line.cross_size - physical_top - item.target_cross
@@ -1419,7 +1372,7 @@ fn align_items_cross_axis(items: &mut [FlexItem], lines: &[FlexLine], axes: Axes
                 continue;
             }
 
-            let alignment_offset = match item.style.align_self {
+            let alignment_offset = match item.align_self {
                 AlignItems::Start => {
                     if axes.cross_reverse == axes.cross_base_reverse {
                         0.0
@@ -1489,7 +1442,7 @@ fn first_container_baseline(
     let line = *lines.first()?;
     let first = items[line.start..line.end]
         .iter()
-        .find(|item| axes.main == Axis::Vertical || item.style.align_self == AlignItems::Baseline)
+        .find(|item| axes.main == Axis::Vertical || item.align_self == AlignItems::Baseline)
         .or_else(|| items[line.start..line.end].first())?;
     let location = item_border_box_location(first, line, axes, inner_size, content_origin);
     Some(
@@ -1500,15 +1453,21 @@ fn first_container_baseline(
     )
 }
 
-fn perform_in_flow_layout<Tree: FlexTree>(
-    tree: &mut Tree,
+#[allow(clippy::too_many_arguments)]
+fn perform_in_flow_layout<Source, Session>(
+    source: &Source,
+    session: &mut Session,
     items: &mut [FlexItem],
     lines: &[FlexLine],
     axes: Axes,
     inner_size: Size<f32>,
     content_origin: Point<f32>,
     container_size: Size<f32>,
-) -> (Size<f32>, Option<f32>) {
+) -> (Size<f32>, Option<f32>)
+where
+    Source: FlexSource,
+    Session: LayoutSession<Source>,
+{
     let parent_size = inner_size.map(Some);
     let mut content_size = container_size;
     let mut first_baseline = None;
@@ -1524,14 +1483,14 @@ fn perform_in_flow_layout<Tree: FlexTree>(
             // The parent has already applied the flex item's own sizing,
             // min/max and aspect-ratio rules to both target axes.
             input.sizing_mode = SizingMode::ContentSize;
-            let output = tree.compute_child_layout(item.style.node, input);
-            let offset = relative_offset(item.inset, item.style.direction);
+            let output = session.compute_child_layout(source, item.key.node, input);
+            let offset = relative_offset(item.inset, item.direction);
             let mut location =
                 item_border_box_location(item, *line, axes, inner_size, content_origin);
             location.x += offset.x;
             location.y += offset.y;
 
-            let mut layout = Layout::with_order(item.style.layout_order);
+            let mut layout = Layout::with_order(item.key.layout_order);
             layout.location = location;
             layout.size = output.size;
             layout.content_size = output.content_size;
@@ -1539,7 +1498,7 @@ fn perform_in_flow_layout<Tree: FlexTree>(
             layout.border = item.border;
             layout.padding = item.padding;
             layout.margin = item.margin;
-            tree.set_unrounded_layout(item.style.node, &layout);
+            session.set_unrounded_layout(item.key.node, &layout);
 
             let overflow_width = output.size.width.max(output.content_size.width);
             let overflow_height = output.size.height.max(output.content_size.height);
@@ -1547,7 +1506,7 @@ fn perform_in_flow_layout<Tree: FlexTree>(
             content_size.height = content_size.height.max(location.y + overflow_height);
 
             if first_baseline.is_none()
-                && (axes.main == Axis::Vertical || item.style.align_self == AlignItems::Baseline)
+                && (axes.main == Axis::Vertical || item.align_self == AlignItems::Baseline)
             {
                 first_baseline =
                     Some(location.y + output.first_baselines.y.unwrap_or(output.size.height));
@@ -1581,7 +1540,7 @@ fn static_position_for_absolute(
 
     let free_cross =
         axes.cross.size(inner_size) - item.target_cross - axis_sum(item.margin, axes.cross);
-    let cross_alignment = match item.style.align_self {
+    let cross_alignment = match item.align_self {
         AlignItems::Start => {
             if axes.cross_reverse == axes.cross_base_reverse {
                 0.0
@@ -1627,16 +1586,22 @@ fn static_position_for_absolute(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn perform_absolute_children<Tree: FlexTree>(
-    tree: &mut Tree,
-    absolute_styles: &[ItemStyleData],
+fn perform_absolute_children<Source, Session>(
+    source: &Source,
+    session: &mut Session,
+    absolute_items: &[PendingItem],
     axes: Axes,
     inner_size: Size<f32>,
     container_size: Size<f32>,
     padding: Edges<f32>,
     border: Edges<f32>,
     justify_content: AlignContent,
-) -> Size<f32> {
+    default_alignment: AlignItems,
+) -> Size<f32>
+where
+    Source: FlexSource,
+    Session: LayoutSession<Source>,
+{
     let content_origin = Point::new(border.left + padding.left, border.top + padding.top);
     let parent_size = inner_size.map(Some);
     let mut content_size = container_size;
@@ -1645,13 +1610,17 @@ fn perform_absolute_children<Tree: FlexTree>(
         (container_size.height - border.vertical_sum()).max(0.0),
     );
 
-    for style in absolute_styles {
-        let mut item = resolve_item(tree, style, parent_size);
+    for pending in absolute_items {
+        // The borrowed view is safe across recursive session calls; only
+        // layout/cache state mutates while the source epoch stays immutable.
+        let style = source.flex_item_style(pending.node);
+        let mut item = resolve_item(source, pending.key(), parent_size, default_alignment);
         let mut known = item.preferred_size;
         let available = inner_size.map(AvailableSpace::Definite);
         let output = child_measurement(
-            tree,
-            style.node,
+            source,
+            session,
+            pending.node,
             known,
             parent_size,
             available,
@@ -1676,19 +1645,20 @@ fn perform_absolute_children<Tree: FlexTree>(
         let static_position =
             static_position_for_absolute(&item, axes, inner_size, content_origin, justify_content);
 
-        match style.position {
+        match style.position() {
             Position::Absolute => {
                 let static_in_padding_space = Point::new(
                     static_position.x - border.left,
                     static_position.y - border.top,
                 );
                 let mut layout = compute_absolute_layout(
-                    tree,
-                    style.node,
+                    source,
+                    session,
+                    pending.node,
                     padding_box_size,
                     static_in_padding_space,
                 );
-                layout.order = style.layout_order;
+                layout.order = pending.layout_order;
                 layout.location.x += border.left;
                 layout.location.y += border.top;
                 content_size.width = content_size
@@ -1697,10 +1667,10 @@ fn perform_absolute_children<Tree: FlexTree>(
                 content_size.height = content_size
                     .height
                     .max(layout.location.y + layout.size.height.max(layout.content_size.height));
-                tree.set_unrounded_layout(style.node, &layout);
+                session.set_unrounded_layout(pending.node, &layout);
             }
             Position::AbsoluteHoisted => {
-                tree.set_static_position(style.node, static_position);
+                session.set_static_position(pending.node, static_position);
             }
             _ => {}
         }
@@ -1710,24 +1680,36 @@ fn perform_absolute_children<Tree: FlexTree>(
 
 /// Computes one flex container according to CSS Flexible Box Layout §9.
 ///
-/// The function consumes only [`FlexTree`] style views and host callbacks;
-/// it has no dependency on a DOM or styling engine. Child layouts are stored
-/// only for [`LayoutGoal::Commit`].
+/// Style, calc resolution, and child topology are read only from `source`;
+/// recursive layout and durable geometry writes use `session`. The function
+/// has no dependency on a DOM or styling engine. Child layouts are stored only
+/// for [`LayoutGoal::Commit`].
 #[allow(clippy::too_many_lines)]
-pub fn compute_flexbox_layout<Tree: FlexTree>(
-    tree: &mut Tree,
+pub fn compute_flexbox_layout<Source, Session>(
+    source: &Source,
+    session: &mut Session,
     node: NodeId,
     input: LayoutInput,
-) -> LayoutOutput {
-    let style = container_style(tree, node);
-    let axes = Axes::new(style.direction, style.wrap, style.inline_direction);
-    let resolve_calc = |handle, basis| tree.resolve_calc(handle, basis);
-    let padding = resolve_edges(style.padding, input.parent_size.width, &resolve_calc);
-    let border = resolve_edges(style.border, input.parent_size.width, &resolve_calc);
-    let scrollbar = copied_scrollbar_size(style.overflow, style.scrollbar_width);
+) -> LayoutOutput
+where
+    Source: FlexSource,
+    Session: LayoutSession<Source>,
+{
+    // Unlike the former owned snapshot, this GAT view remains borrowed for
+    // the whole algorithm while recursive calls mutate only `session`.
+    let style = source.flex_container_style(node);
+    let flex_wrap = style.flex_wrap();
+    let align_content = style.align_content().unwrap_or(AlignContent::Stretch);
+    let align_items = style.align_items().unwrap_or(AlignItems::Stretch);
+    let justify_content = style.justify_content().unwrap_or(AlignContent::FlexStart);
+    let axes = Axes::new(style.flex_direction(), flex_wrap, style.direction());
+    let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
+    let padding = resolve_edges(style.padding(), input.parent_size.width, &resolve_calc);
+    let border = resolve_edges(style.border(), input.parent_size.width, &resolve_calc);
+    let scrollbar = copied_scrollbar_size(style.overflow(), style.scrollbar_width());
     let container_inset_size = padding_border_size(padding, border, scrollbar);
     let margin = auto_edges_to_zero(resolve_optional_edges(
-        style.margin,
+        style.margin(),
         input.parent_size.width,
         &resolve_calc,
     ));
@@ -1737,26 +1719,26 @@ pub fn compute_flexbox_layout<Tree: FlexTree>(
     } else {
         (
             resolve_quantitative_sizes(
-                style.size,
+                style.size(),
                 input.parent_size,
-                style.aspect_ratio,
-                style.box_sizing,
+                style.aspect_ratio(),
+                style.box_sizing(),
                 container_inset_size,
                 &resolve_calc,
             ),
             resolve_quantitative_sizes(
-                style.min_size,
+                style.min_size(),
                 input.parent_size,
-                style.aspect_ratio,
-                style.box_sizing,
+                style.aspect_ratio(),
+                style.box_sizing(),
                 container_inset_size,
                 &resolve_calc,
             ),
             resolve_quantitative_sizes(
-                style.max_size,
+                style.max_size(),
                 input.parent_size,
-                style.aspect_ratio,
-                style.box_sizing,
+                style.aspect_ratio(),
+                style.box_sizing(),
                 container_inset_size,
                 &resolve_calc,
             ),
@@ -1812,31 +1794,39 @@ pub fn compute_flexbox_layout<Tree: FlexTree>(
             AvailableSpace::Definite,
         ),
     );
+    let gap_value = style.gap();
     let mut gap = Size::new(
-        resolve_length_percentage(style.gap.width, inner_size.width, &resolve_calc)
+        resolve_length_percentage(gap_value.width, inner_size.width, &resolve_calc)
             .unwrap_or(0.0)
             .max(0.0),
-        resolve_length_percentage(style.gap.height, inner_size.height, &resolve_calc)
+        resolve_length_percentage(gap_value.height, inner_size.height, &resolve_calc)
             .unwrap_or(0.0)
             .max(0.0),
     );
     let mut generated = Vec::new();
-    let mut absolute_styles = Vec::new();
+    let mut absolute_items = Vec::new();
     let mut hidden = Vec::new();
-    let child_count = tree.child_count(node);
+    let child_count = source.child_count(node);
     for document_index in 0..child_count {
-        let child = tree.child_id(node, document_index);
-        let Some(child_style) = item_style(tree, child, document_index, style.align_items) else {
+        let child = source.child_id(node, document_index);
+        let child_style = source.flex_item_style(child);
+        if child_style.box_generation_mode() == BoxGenerationMode::None {
             hidden.push((document_index, child));
             continue;
+        }
+        let pending = PendingItem {
+            node: child,
+            document_index,
+            css_order: child_style.order(),
+            layout_order: u32::try_from(document_index).unwrap_or(u32::MAX),
         };
         if matches!(
-            child_style.position,
+            child_style.position(),
             Position::Absolute | Position::AbsoluteHoisted
         ) {
-            absolute_styles.push(child_style);
+            absolute_items.push(pending);
         } else {
-            generated.push(child_style);
+            generated.push(pending);
         }
     }
     generated.sort_by(|left, right| match left.css_order.cmp(&right.css_order) {
@@ -1847,7 +1837,7 @@ pub fn compute_flexbox_layout<Tree: FlexTree>(
         .iter()
         .map(|item| (item.css_order, item.document_index, item.node))
         .chain(
-            absolute_styles
+            absolute_items
                 .iter()
                 .map(|item| (0, item.document_index, item.node)),
         )
@@ -1857,7 +1847,7 @@ pub fn compute_flexbox_layout<Tree: FlexTree>(
         let layout_order = u32::try_from(layout_order).unwrap_or(u32::MAX);
         if let Some(item) = generated.iter_mut().find(|item| item.node == ordered_node) {
             item.layout_order = layout_order;
-        } else if let Some(item) = absolute_styles
+        } else if let Some(item) = absolute_items
             .iter_mut()
             .find(|item| item.node == ordered_node)
         {
@@ -1867,10 +1857,11 @@ pub fn compute_flexbox_layout<Tree: FlexTree>(
 
     let mut items = generated
         .into_iter()
-        .map(|item| resolve_item(tree, &item, inner_size))
+        .map(|item| resolve_item(source, item.key(), inner_size, align_items))
         .collect::<Vec<_>>();
     determine_flex_base_sizes(
-        tree,
+        source,
+        session,
         &mut items,
         axes,
         inner_size,
@@ -1883,7 +1874,7 @@ pub fn compute_flexbox_layout<Tree: FlexTree>(
         || axes.main.size(inner_available_space),
         AvailableSpace::Definite,
     );
-    let mut lines = collect_flex_lines(&items, style.wrap, line_available_main, main_gap, axes);
+    let mut lines = collect_flex_lines(&items, flex_wrap, line_available_main, main_gap, axes);
 
     let inset_main = axes.main.size(container_inset_size);
     if axes.main.size(outer_size).is_none() {
@@ -1900,9 +1891,9 @@ pub fn compute_flexbox_layout<Tree: FlexTree>(
         axes.main.set_size(&mut outer_size, Some(outer_main));
         axes.main
             .set_size(&mut inner_size, Some((outer_main - inset_main).max(0.0)));
-        let resolve_calc = |handle, basis| tree.resolve_calc(handle, basis);
+        let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
         let resolved_main_gap = resolve_length_percentage(
-            axes.main.size(style.gap),
+            axes.main.size(gap_value),
             axes.main.size(inner_size),
             &resolve_calc,
         )
@@ -1917,7 +1908,8 @@ pub fn compute_flexbox_layout<Tree: FlexTree>(
     }
 
     determine_hypothetical_cross_sizes(
-        tree,
+        source,
+        session,
         &mut items,
         &lines,
         axes,
@@ -1928,7 +1920,7 @@ pub fn compute_flexbox_layout<Tree: FlexTree>(
         &items,
         &mut lines,
         axes,
-        style.wrap,
+        flex_wrap,
         axes.cross.size(inner_size),
     );
 
@@ -1949,9 +1941,9 @@ pub fn compute_flexbox_layout<Tree: FlexTree>(
             .set_size(&mut inner_size, Some((outer_cross - inset_cross).max(0.0)));
     }
     if cross_was_definite {
-        let resolve_calc = |handle, basis| tree.resolve_calc(handle, basis);
+        let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
         let resolved_cross_gap = resolve_length_percentage(
-            axes.cross.size(style.gap),
+            axes.cross.size(gap_value),
             axes.cross.size(inner_size),
             &resolve_calc,
         )
@@ -1965,27 +1957,29 @@ pub fn compute_flexbox_layout<Tree: FlexTree>(
         // used values resolve against the resulting content-box width. Run
         // the item/line phases once more with that now-definite basis while
         // keeping the intrinsic container size fixed.
-        let resolve_calc = |handle, basis| tree.resolve_calc(handle, basis);
+        let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
         gap = Size::new(
-            resolve_length_percentage(style.gap.width, inner_size.width, &resolve_calc)
+            resolve_length_percentage(gap_value.width, inner_size.width, &resolve_calc)
                 .unwrap_or(0.0)
                 .max(0.0),
-            resolve_length_percentage(style.gap.height, inner_size.height, &resolve_calc)
+            resolve_length_percentage(gap_value.height, inner_size.height, &resolve_calc)
                 .unwrap_or(0.0)
                 .max(0.0),
         );
         main_gap = axes.main.size(gap);
-        let item_styles = items.iter().map(|item| item.style).collect::<Vec<_>>();
-        items = item_styles
-            .iter()
-            .map(|item| resolve_item(tree, item, inner_size))
-            .collect();
+        // Re-resolve compact scratch in place. Raw style is fetched by NodeId;
+        // no second full-style snapshot or parallel style Vec is needed.
+        for item in &mut items {
+            let key = item.key;
+            *item = resolve_item(source, key, inner_size, align_items);
+        }
         let final_available_space = Size::new(
             AvailableSpace::Definite(inner_size.width.unwrap_or(0.0)),
             AvailableSpace::Definite(inner_size.height.unwrap_or(0.0)),
         );
         determine_flex_base_sizes(
-            tree,
+            source,
+            session,
             &mut items,
             axes,
             inner_size,
@@ -1998,7 +1992,7 @@ pub fn compute_flexbox_layout<Tree: FlexTree>(
         );
         lines = collect_flex_lines(
             &items,
-            style.wrap,
+            flex_wrap,
             AvailableSpace::Definite(inner_main),
             main_gap,
             axes,
@@ -2007,28 +2001,23 @@ pub fn compute_flexbox_layout<Tree: FlexTree>(
             resolve_flexible_lengths(&mut items, line, inner_main, main_gap, axes);
         }
         determine_hypothetical_cross_sizes(
-            tree,
+            source,
+            session,
             &mut items,
             &lines,
             axes,
             inner_size,
             final_available_space,
         );
-        calculate_line_cross_sizes(&items, &mut lines, axes, style.wrap, Some(inner_cross));
+        calculate_line_cross_sizes(&items, &mut lines, axes, flex_wrap, Some(inner_cross));
     }
     let cross_gap = axes.cross.size(gap);
-    if style.wrap == FlexWrap::NoWrap
+    if flex_wrap == FlexWrap::NoWrap
         && let Some(line) = lines.first_mut()
     {
         line.cross_size = inner_cross;
     }
-    stretch_lines(
-        &mut lines,
-        style.wrap,
-        style.align_content,
-        inner_cross,
-        cross_gap,
-    );
+    stretch_lines(&mut lines, flex_wrap, align_content, inner_cross, cross_gap);
     determine_used_cross_sizes(&mut items, &lines, axes);
     distribute_main_axis(
         &mut items,
@@ -2036,13 +2025,13 @@ pub fn compute_flexbox_layout<Tree: FlexTree>(
         axes,
         inner_main,
         main_gap,
-        style.justify_content,
+        justify_content,
     );
     align_lines(
         &mut lines,
         axes,
-        style.wrap,
-        style.align_content,
+        flex_wrap,
+        align_content,
         inner_cross,
         cross_gap,
     );
@@ -2059,7 +2048,8 @@ pub fn compute_flexbox_layout<Tree: FlexTree>(
     }
 
     let (mut content_size, first_baseline) = perform_in_flow_layout(
-        tree,
+        source,
+        session,
         &mut items,
         &lines,
         axes,
@@ -2068,21 +2058,23 @@ pub fn compute_flexbox_layout<Tree: FlexTree>(
         outer_size,
     );
     for (document_index, child) in hidden {
-        super::hide_subtree(tree, child);
-        tree.set_unrounded_layout(
+        super::hide_subtree(source, session, child);
+        session.set_unrounded_layout(
             child,
             &Layout::with_order(u32::try_from(document_index).unwrap_or(u32::MAX)),
         );
     }
     let absolute_content_size = perform_absolute_children(
-        tree,
-        &absolute_styles,
+        source,
+        session,
+        &absolute_items,
         axes,
         inner_size,
         outer_size,
         padding,
         border,
-        style.justify_content,
+        justify_content,
+        align_items,
     );
     content_size = content_size.zip_map(absolute_content_size, f32::max);
 
