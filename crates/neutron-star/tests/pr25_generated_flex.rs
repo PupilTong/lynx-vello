@@ -7,6 +7,8 @@
 mod pr25_support;
 mod support;
 
+use std::collections::BTreeSet;
+
 use neutron_star::compute::{LeafMeasureInput, LeafMetrics, compute_absolute_layout};
 use neutron_star::prelude::*;
 use neutron_star::style::{
@@ -1517,6 +1519,546 @@ fn generated_sticky_sizing_matrix_has_10_flex_geometry_cases() {
         }
     }
     assert_eq!(case_count, 10);
+}
+
+const DETERMINISTIC_SUPPORTED_TREE_SEED: u64 = 0x5A17_1A64;
+const DEFAULT_DETERMINISTIC_SUPPORTED_TREE_CASES: usize = 32_768;
+const DEFAULT_DETERMINISTIC_FLEX_CONTAINING_CASES: usize = 27_637;
+const HIGH_CASE_FLEX_CONTAINING_CASES: usize = 315;
+
+// This is the source regression list after the source helper's sort/dedup.
+// The test below advances through every listed case and runs every tree that
+// contains a Flex node, including Block/Linear roots with nested Flex.
+#[allow(clippy::unreadable_literal)] // Keep upstream case IDs directly searchable.
+const DETERMINISTIC_HIGH_CASES: [usize; 330] = [
+    25, 26, 95, 172, 175, 215, 481, 992, 1012, 1234, 2167, 2299, 2425, 2523, 2704, 2740, 2791,
+    3109, 3814, 4187, 5572, 6723, 6754, 7009, 7662, 7834, 8359, 8638, 9259, 9591, 9907, 10035,
+    10733, 12823, 13868, 14304, 14505, 15500, 16328, 18982, 19719, 19993, 22474, 23012, 23362,
+    25535, 27453, 27673, 27731, 29021, 29221, 29902, 31230, 34113, 41175, 42293, 42544, 44450,
+    45883, 47159, 51367, 54850, 55744, 56293, 64120, 64135, 68032, 68538, 68701, 69145, 71254,
+    76766, 79192, 83434, 85507, 86849, 86992, 87239, 88209, 89938, 91679, 96812, 99274, 105004,
+    105770, 106204, 109786, 110407, 114658, 117329, 117836, 121948, 127981, 134513, 139357, 139979,
+    146179, 149574, 160141, 161737, 161817, 164190, 164482, 165472, 166953, 176185, 176542, 176761,
+    178066, 178583, 179252, 184937, 186434, 190825, 191781, 197620, 197653, 202380, 203219, 207391,
+    210793, 218134, 226104, 226687, 237668, 242282, 243040, 244918, 251182, 259483, 269542, 278605,
+    282829, 283687, 283842, 285802, 289600, 291152, 292360, 299934, 299965, 302041, 302185, 307159,
+    308572, 309457, 310564, 316984, 318982, 319761, 320341, 320509, 324307, 328591, 331564, 331954,
+    333262, 337984, 339274, 340393, 349150, 351670, 352168, 352507, 353716, 355459, 356476, 357577,
+    358597, 359128, 370004, 372628, 379001, 379945, 380056, 383395, 385732, 389959, 390103, 392284,
+    394393, 396763, 406621, 407422, 411883, 411918, 413818, 422704, 428455, 429025, 433231, 434269,
+    435562, 437389, 441040, 441260, 441274, 443098, 453535, 455530, 456847, 458437, 466714, 467131,
+    467404, 467710, 468928, 470710, 476011, 479230, 480139, 482731, 483016, 483940, 486302, 486361,
+    488938, 495574, 496681, 497539, 500887, 501562, 504658, 516046, 517072, 520441, 523900, 524797,
+    532018, 536077, 536206, 537223, 539452, 540076, 540469, 540769, 541387, 545509, 549595, 549826,
+    559621, 559681, 562162, 562909, 563128, 566536, 566881, 569228, 570262, 573658, 573712, 575104,
+    577384, 579595, 583909, 588640, 590308, 591160, 595567, 597256, 598741, 602614, 603613, 610390,
+    611671, 612157, 621826, 622414, 622600, 627868, 630196, 631288, 631777, 633370, 634267, 637210,
+    637504, 642361, 646950, 652294, 653143, 655681, 655924, 656965, 659557, 661243, 663121, 663199,
+    667462, 668800, 673411, 674587, 675739, 679180, 679381, 680551, 687208, 690619, 691855, 692140,
+    692560, 693904, 694987, 698668, 700933, 711010, 712609, 712636, 715732, 721072, 724985, 726547,
+    726901, 734488, 738802, 739687, 742114, 742318, 746173, 747619, 748012, 751531, 761683, 762991,
+    763882, 763942, 764425, 764680, 772306, 776896,
+];
+
+#[derive(Clone, Debug)]
+struct DeterministicRng {
+    state: u64,
+}
+
+impl DeterministicRng {
+    const fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        self.state = self
+            .state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (self.state >> 32) as u32
+    }
+
+    fn range(&mut self, upper: usize) -> usize {
+        debug_assert!(upper > 0);
+        self.next_u32() as usize % upper
+    }
+
+    fn bool(&mut self) -> bool {
+        self.range(2) == 0
+    }
+
+    fn points(&mut self, min: f32, step: f32, count: usize) -> f32 {
+        let point_index =
+            u8::try_from(self.range(count)).expect("deterministic point-table indices fit in u8");
+        min + step * f32::from(point_index)
+    }
+
+    fn bit_as_f32(&mut self) -> f32 {
+        f32::from(u8::try_from(self.range(2)).expect("a deterministic bit fits in u8"))
+    }
+}
+
+/// Advances the same single RNG stream as the source generated suite.
+///
+/// `build` is false for unselected high cases. Their complete styles are still
+/// generated so a later selected case observes exactly the source RNG state,
+/// but no tree storage is allocated for them. A built tree is returned only
+/// when its root or one of its descendants has `display: flex`.
+fn deterministic_supported_flex_tree(
+    rng: &mut DeterministicRng,
+    case_index: usize,
+    build: bool,
+) -> Option<(p::SimpleTree, usize, p::Constraints)> {
+    let mut tree = p::SimpleTree::default();
+    let root_display = match case_index % 3 {
+        0 => p::Display::Block,
+        1 => p::Display::Flex,
+        _ => p::Display::Linear,
+    };
+    let root_style = deterministic_container_style(rng, root_display);
+    let root = build.then(|| tree.push(p::SimpleNode::new(root_style)));
+    let mut contains_flex = root_display == p::Display::Flex;
+
+    let child_count = 3 + rng.range(3);
+    for child_index in 0..child_count {
+        let child_display = deterministic_child_display(rng, child_index);
+        contains_flex |= child_display == p::Display::Flex;
+        let child_style = deterministic_child_style(rng, child_display, child_index);
+        let child = root.map(|root| {
+            let child = tree.push(p::SimpleNode::new(child_style));
+            tree.append_child(root, child);
+            child
+        });
+
+        if matches!(
+            child_display,
+            p::Display::Block | p::Display::Flex | p::Display::Linear
+        ) && rng.range(4) == 0
+        {
+            append_deterministic_grandchildren(rng, &mut tree, child, child_index);
+        }
+    }
+
+    let constraints = match case_index % 3 {
+        0 => p::Constraints::definite(160.0, 120.0),
+        1 => p::Constraints::new(
+            p::SideConstraint::at_most(180.0),
+            p::SideConstraint::at_most(140.0),
+        ),
+        _ => p::Constraints::indefinite(),
+    };
+    (build && contains_flex)
+        .then_some(root)
+        .flatten()
+        .map(|root| (tree, root, constraints))
+}
+
+fn append_deterministic_grandchildren(
+    rng: &mut DeterministicRng,
+    tree: &mut p::SimpleTree,
+    parent: Option<usize>,
+    child_index: usize,
+) {
+    for grandchild_index in 0..=rng.range(2) {
+        let mut style = deterministic_child_style(rng, p::Display::Block, grandchild_index);
+        style.position = p::PositionType::Static;
+        style.order = i32::try_from(grandchild_index)
+            .expect("the generated suite creates at most two grandchildren");
+        if child_index.is_multiple_of(2) {
+            style.width = p::Length::points(rng.points(8.0, 3.0, 5));
+        }
+        if let Some(parent) = parent {
+            let node = tree.push(p::SimpleNode::new(style));
+            tree.append_child(parent, node);
+        }
+    }
+}
+
+fn deterministic_container_style(rng: &mut DeterministicRng, display: p::Display) -> p::Style {
+    let mut style = deterministic_base_style(rng, display);
+    style.width = deterministic_axis_length(rng);
+    style.height = deterministic_axis_length(rng);
+    style.min_width = p::Length::points(20.0);
+    style.min_height = p::Length::points(16.0);
+    style.padding = deterministic_edge_lengths(rng);
+    style.border = p::Rect::new(
+        rng.bit_as_f32(),
+        rng.bit_as_f32(),
+        rng.bit_as_f32(),
+        rng.bit_as_f32(),
+    );
+
+    match display {
+        p::Display::Flex => {
+            style.flex_direction = [
+                FlexDirection::Row,
+                FlexDirection::Column,
+                FlexDirection::RowReverse,
+                FlexDirection::ColumnReverse,
+            ][rng.range(4)];
+            style.flex_wrap =
+                [FlexWrap::NoWrap, FlexWrap::Wrap, FlexWrap::WrapReverse][rng.range(3)];
+            style.align_items = deterministic_align_items(rng);
+            style.align_content = deterministic_align_content(rng);
+            style.justify_content = deterministic_justify_content(rng);
+        }
+        p::Display::Linear => {
+            style.linear_orientation = [
+                p::LinearOrientation::Horizontal,
+                p::LinearOrientation::Vertical,
+                p::LinearOrientation::HorizontalReverse,
+                p::LinearOrientation::VerticalReverse,
+            ][rng.range(4)];
+            // Preserve the source RNG stream for linear-gravity and
+            // linear-layout-gravity, which are host-dispatch-only fields in
+            // this Flex fixture facade.
+            let _ = rng.range(5);
+            let _ = rng.range(5);
+        }
+        p::Display::None | p::Display::Block | p::Display::Relative | p::Display::Grid => {}
+    }
+    style
+}
+
+fn deterministic_child_style(
+    rng: &mut DeterministicRng,
+    display: p::Display,
+    child_index: usize,
+) -> p::Style {
+    let mut style = deterministic_base_style(rng, display);
+    style.width = deterministic_axis_length(rng);
+    style.height = deterministic_axis_length(rng);
+    (style.min_width, style.max_width) = deterministic_coherent_minmax_lengths(rng);
+    (style.min_height, style.max_height) = deterministic_coherent_minmax_lengths(rng);
+    style.margin = deterministic_edge_lengths(rng);
+    style.padding = deterministic_edge_lengths(rng);
+    style.border = p::Rect::all(rng.bit_as_f32());
+    style.order =
+        i32::try_from(child_index).expect("the generated suite creates at most five children") - 1;
+    style.flex_basis = deterministic_axis_length(rng);
+    style.flex_grow = if rng.bool() { 1.0 } else { 0.0 };
+    style.flex_shrink = if rng.bool() { 1.0 } else { 0.0 };
+    style.align_self = (rng.range(3) == 0).then(|| deterministic_align_items(rng));
+    // Preserve the source JustifyItems draw. Grid self-alignment is outside
+    // the immutable Flex style contract, so the generated value is discarded.
+    let _ = rng.range(5);
+    style
+}
+
+fn deterministic_base_style(rng: &mut DeterministicRng, display: p::Display) -> p::Style {
+    p::Style {
+        display,
+        box_sizing: if rng.bool() {
+            BoxSizing::ContentBox
+        } else {
+            BoxSizing::BorderBox
+        },
+        direction: DIRECTIONS[rng.range(DIRECTIONS.len())],
+        row_gap: deterministic_gap_length(rng),
+        column_gap: deterministic_gap_length(rng),
+        ..p::Style::default()
+    }
+}
+
+fn deterministic_child_display(rng: &mut DeterministicRng, child_index: usize) -> p::Display {
+    if child_index == 1 && rng.range(5) == 0 {
+        return p::Display::None;
+    }
+    [p::Display::Block, p::Display::Flex, p::Display::Linear][rng.range(3)]
+}
+
+fn deterministic_axis_length(rng: &mut DeterministicRng) -> p::Length {
+    match rng.range(4) {
+        0 => p::Length::Auto,
+        1 => p::Length::points(rng.points(18.0, 6.0, 10)),
+        2 => p::Length::percent(rng.points(20.0, 10.0, 6)),
+        3 => p::Length::Fr(rng.points(1.0, 1.0, 4)),
+        _ => unreachable!("deterministic axis-length variant is out of range"),
+    }
+}
+
+fn deterministic_coherent_minmax_lengths(rng: &mut DeterministicRng) -> (p::Length, p::Length) {
+    match rng.range(6) {
+        0 => (p::Length::Auto, p::Length::Auto),
+        1 => (p::Length::points(rng.points(8.0, 4.0, 4)), p::Length::Auto),
+        2 => {
+            let min = rng.points(8.0, 4.0, 4);
+            (
+                p::Length::points(min),
+                p::Length::points(min + rng.points(16.0, 4.0, 4)),
+            )
+        }
+        3 => (p::Length::Auto, p::Length::points(rng.points(32.0, 8.0, 4))),
+        4 => (p::Length::Fr(rng.points(4.0, 2.0, 4)), p::Length::Auto),
+        5 => {
+            let min = rng.points(4.0, 2.0, 4);
+            (
+                p::Length::Fr(min),
+                p::Length::Fr(min + rng.points(12.0, 2.0, 4)),
+            )
+        }
+        _ => unreachable!("deterministic min/max variant is out of range"),
+    }
+}
+
+fn deterministic_edge_lengths(rng: &mut DeterministicRng) -> p::Rect<p::Length> {
+    fn edge(rng: &mut DeterministicRng) -> p::Length {
+        match rng.range(2) {
+            0 => p::Length::ZERO,
+            _ => p::Length::points(rng.points(1.0, 2.0, 4)),
+        }
+    }
+    p::Rect::new(edge(rng), edge(rng), edge(rng), edge(rng))
+}
+
+fn deterministic_gap_length(rng: &mut DeterministicRng) -> p::Length {
+    match rng.range(2) {
+        0 => p::Length::ZERO,
+        _ => p::Length::points(rng.points(1.0, 2.0, 4)),
+    }
+}
+
+fn deterministic_justify_content(rng: &mut DeterministicRng) -> JustifyContent {
+    [
+        JustifyContent::FlexStart,
+        JustifyContent::Center,
+        JustifyContent::FlexEnd,
+        JustifyContent::SpaceBetween,
+        JustifyContent::SpaceAround,
+        JustifyContent::SpaceEvenly,
+        JustifyContent::Start,
+        JustifyContent::End,
+    ][rng.range(8)]
+}
+
+fn deterministic_align_items(rng: &mut DeterministicRng) -> AlignItems {
+    [
+        AlignItems::Stretch,
+        AlignItems::FlexStart,
+        AlignItems::Center,
+        AlignItems::FlexEnd,
+        AlignItems::Start,
+        AlignItems::End,
+    ][rng.range(6)]
+}
+
+fn deterministic_align_content(rng: &mut DeterministicRng) -> AlignContent {
+    [
+        AlignContent::FlexStart,
+        AlignContent::Center,
+        AlignContent::FlexEnd,
+        AlignContent::SpaceBetween,
+        AlignContent::SpaceAround,
+        AlignContent::Stretch,
+    ][rng.range(6)]
+}
+
+#[derive(Debug, Default)]
+struct DeterministicFlexCoverage {
+    case_count: usize,
+    root_display_counts: [usize; 3],
+    node_count: usize,
+    flex_node_count: usize,
+    flex_direction_counts: [usize; 4],
+    flex_wrap_counts: [usize; 3],
+    positive_size_node_count: usize,
+    nonzero_offset_node_count: usize,
+    fractional_geometry_value_count: usize,
+    distinct_root_sizes: BTreeSet<(u32, u32)>,
+}
+
+impl DeterministicFlexCoverage {
+    fn record_source(&mut self, tree: &p::SimpleTree, root: usize) {
+        self.case_count += 1;
+        self.root_display_counts[match tree.nodes[root].style.display {
+            p::Display::Block => 0,
+            p::Display::Flex => 1,
+            p::Display::Linear => 2,
+            display => panic!("the deterministic generator cannot produce a {display:?} root"),
+        }] += 1;
+        self.node_count += tree.nodes.len();
+
+        for node in &tree.nodes {
+            if node.style.display != p::Display::Flex {
+                continue;
+            }
+            self.flex_node_count += 1;
+            self.flex_direction_counts[match node.style.flex_direction {
+                FlexDirection::Row => 0,
+                FlexDirection::RowReverse => 1,
+                FlexDirection::Column => 2,
+                FlexDirection::ColumnReverse => 3,
+            }] += 1;
+            self.flex_wrap_counts[match node.style.flex_wrap {
+                FlexWrap::NoWrap => 0,
+                FlexWrap::Wrap => 1,
+                FlexWrap::WrapReverse => 2,
+            }] += 1;
+        }
+    }
+
+    fn record_layout(&mut self, tree: &p::SimpleTree, root: usize) {
+        let root_size = tree.nodes[root].layout.size;
+        self.distinct_root_sizes
+            .insert((root_size.width.to_bits(), root_size.height.to_bits()));
+
+        for node in &tree.nodes {
+            let layout = node.layout;
+            if layout.size.width > 0.0 && layout.size.height > 0.0 {
+                self.positive_size_node_count += 1;
+            }
+            if layout.offset.x.abs() > f32::EPSILON || layout.offset.y.abs() > f32::EPSILON {
+                self.nonzero_offset_node_count += 1;
+            }
+            self.fractional_geometry_value_count += [
+                layout.offset.x,
+                layout.offset.y,
+                layout.size.width,
+                layout.size.height,
+            ]
+            .into_iter()
+            .filter(|value| value.fract().abs() > 1.0e-4)
+            .count();
+        }
+    }
+
+    fn assert_diversity(&self, expected_cases: usize, expected_root_displays: [usize; 3]) {
+        assert_eq!(self.case_count, expected_cases);
+        assert_eq!(self.root_display_counts, expected_root_displays);
+        assert!(self.node_count >= self.case_count * 4);
+        assert!(self.flex_node_count > self.case_count);
+        assert!(
+            self.flex_direction_counts
+                .into_iter()
+                .all(|count| count > 0)
+        );
+        assert!(self.flex_wrap_counts.into_iter().all(|count| count > 0));
+        assert!(self.positive_size_node_count > self.case_count);
+        assert!(self.nonzero_offset_node_count > 0);
+        assert!(self.fractional_geometry_value_count > 0);
+        assert!(self.distinct_root_sizes.len() > 16);
+    }
+}
+
+fn assert_deterministic_rust_flex_case(
+    case_index: usize,
+    tree: p::SimpleTree,
+    root: usize,
+    constraints: p::Constraints,
+    coverage: &mut DeterministicFlexCoverage,
+) {
+    assert!(
+        tree.nodes
+            .iter()
+            .any(|node| node.style.display == p::Display::Flex),
+        "generated case {case_index} does not contain a Flex node"
+    );
+    coverage.record_source(&tree, root);
+    let mut first = tree.clone();
+    let mut second = tree;
+    let first_size =
+        p::LayoutEngine::new().layout_with_owner_constraints(&mut first, root, constraints);
+    let second_size =
+        p::LayoutEngine::new().layout_with_owner_constraints(&mut second, root, constraints);
+
+    assert_eq!(
+        first_size, second_size,
+        "generated Flex case {case_index} returned non-deterministic root geometry"
+    );
+    assert_eq!(first.nodes.len(), second.nodes.len());
+    for (node_index, (first_node, second_node)) in first.nodes.iter().zip(&second.nodes).enumerate()
+    {
+        assert_eq!(
+            first_node.layout, second_node.layout,
+            "generated Flex case {case_index}, node {node_index} returned non-deterministic geometry"
+        );
+        let layout = first_node.layout;
+        for value in [
+            layout.offset.x,
+            layout.offset.y,
+            layout.size.width,
+            layout.size.height,
+            layout.padding.left,
+            layout.padding.right,
+            layout.padding.top,
+            layout.padding.bottom,
+            layout.border.left,
+            layout.border.right,
+            layout.border.top,
+            layout.border.bottom,
+            layout.margin.left,
+            layout.margin.right,
+            layout.margin.top,
+            layout.margin.bottom,
+        ] {
+            assert!(
+                value.is_finite(),
+                "generated Flex case {case_index}, node {node_index} returned non-finite geometry {value}"
+            );
+        }
+        if let Some(baseline) = layout.baseline {
+            assert!(
+                baseline.is_finite(),
+                "generated Flex case {case_index}, node {node_index} returned non-finite baseline"
+            );
+        }
+        assert!(
+            layout.size.width >= 0.0 && layout.size.height >= 0.0,
+            "generated Flex case {case_index}, node {node_index} returned negative size {:?}",
+            layout.size
+        );
+    }
+    assert_eq!(first.nodes[root].layout.size, first_size);
+    coverage.record_layout(&first, root);
+}
+
+#[test]
+fn generated_deterministic_supported_tree_fuzz_runs_27637_flex_containing_trees_in_rust() {
+    let mut rng = DeterministicRng::new(DETERMINISTIC_SUPPORTED_TREE_SEED);
+    let mut coverage = DeterministicFlexCoverage::default();
+    for case_index in 0..DEFAULT_DETERMINISTIC_SUPPORTED_TREE_CASES {
+        if let Some((tree, root, constraints)) =
+            deterministic_supported_flex_tree(&mut rng, case_index, true)
+        {
+            assert_deterministic_rust_flex_case(case_index, tree, root, constraints, &mut coverage);
+        }
+    }
+    // Block/Linear roots are host-lowered protocol smoke cases. The 10,923
+    // Flex-root cases remain separately visible in the middle slot.
+    coverage.assert_diversity(
+        DEFAULT_DETERMINISTIC_FLEX_CONTAINING_CASES,
+        [8_380, 10_923, 8_334],
+    );
+}
+
+#[test]
+fn generated_deterministic_high_case_regressions_run_all_315_flex_containing_trees_in_rust() {
+    assert!(
+        DETERMINISTIC_HIGH_CASES
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+    );
+
+    let mut rng = DeterministicRng::new(DETERMINISTIC_SUPPORTED_TREE_SEED);
+    let mut next_source_case = 0;
+    let mut coverage = DeterministicFlexCoverage::default();
+    let max_case = *DETERMINISTIC_HIGH_CASES
+        .last()
+        .expect("the source high-case list is non-empty");
+    for case_index in 0..=max_case {
+        let selected = DETERMINISTIC_HIGH_CASES.get(next_source_case).copied() == Some(case_index);
+        let case = deterministic_supported_flex_tree(&mut rng, case_index, selected);
+        if selected {
+            next_source_case += 1;
+        }
+        if let Some((tree, root, constraints)) = case {
+            assert_deterministic_rust_flex_case(case_index, tree, root, constraints, &mut coverage);
+        }
+    }
+    assert_eq!(next_source_case, DETERMINISTIC_HIGH_CASES.len());
+    // Of all 330 source high cases, 315 contain Flex. The 51 Block/Linear
+    // roots are host-lowered protocol smoke cases; 264 are true Flex roots.
+    coverage.assert_diversity(HIGH_CASE_FLEX_CONTAINING_CASES, [19, 264, 32]);
 }
 
 fn run_flex_basis_regression(case_id: usize) {

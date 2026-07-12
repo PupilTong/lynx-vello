@@ -6,6 +6,49 @@ mod support;
 
 use pr25_support::*;
 
+const ENGINE_FLEX_MAPPINGS: [(&str, &str); 10] = [
+    (
+        "flex_node_context_carries_percent_propagation",
+        "engine_flex_dispatch_matrix_covers_nine_source_invariants",
+    ),
+    (
+        "flex_row_distributes_grow_space",
+        "engine_flex_dispatch_matrix_covers_nine_source_invariants",
+    ),
+    (
+        "measured_flex_leaf_uses_measure_delegate_before_display_algorithm",
+        "engine_flex_dispatch_matrix_covers_nine_source_invariants",
+    ),
+    (
+        "flex_stretch_reuse_reexports_cached_subtree_through_layout_tree_readback",
+        "engine_flex_dispatch_matrix_covers_nine_source_invariants",
+    ),
+    (
+        "flex_justify_center_offsets_items",
+        "engine_flex_dispatch_matrix_covers_nine_source_invariants",
+    ),
+    (
+        "edge_lengths_use_starlight_numeric_length_resolution",
+        "non_css_raw_flex_lengths_stop_at_typed_protocol_boundary",
+    ),
+    (
+        "flex_basis_uses_starlight_numeric_fr_resolution",
+        "non_css_raw_flex_lengths_stop_at_typed_protocol_boundary",
+    ),
+    (
+        "flex_column_gap_uses_starlight_numeric_length_resolution",
+        "non_css_raw_flex_lengths_stop_at_typed_protocol_boundary",
+    ),
+    (
+        "flex_row_gap_uses_starlight_numeric_length_resolution",
+        "non_css_raw_flex_lengths_stop_at_typed_protocol_boundary",
+    ),
+    (
+        "percentage_padding_resolves_against_definite_parent_width",
+        "flex_percentage_padding_resolves_against_definite_containing_block_width",
+    ),
+];
+
 const SOLVER_MAPPINGS: [(&str, &str); 24] = [
     (
         "used_flex_factor_is_grow_only_when_hypothetical_sum_is_less_than_container",
@@ -118,6 +161,51 @@ fn fixed_leaf(tree: &mut SimpleTree, width: f32, height: f32) -> usize {
         height: Length::points(height),
         ..Style::default()
     }))
+}
+
+#[test]
+fn non_css_raw_flex_lengths_stop_at_typed_protocol_boundary() {
+    // PR #25's Starlight raw-value model accepts Grid `fr` and intrinsic
+    // sizing keywords in Flex edge/gap slots. Those values are not in the
+    // CSS grammars for inset, margin, padding, or gap. The compatibility
+    // fixture must stop them here instead of extending neutron-star's typed
+    // `LengthPercentage(Auto)` protocol.
+    for raw_edge_or_gap in [
+        Length::MaxContent,
+        Length::FitContent(Some(BaseLength::fixed(4.0))),
+        Length::Fr(1.0),
+    ] {
+        let mut tree = SimpleTree::default();
+        let root = tree.push(SimpleNode::new(Style {
+            display: Display::Flex,
+            width: Length::points(80.0),
+            height: Length::points(20.0),
+            column_gap: raw_edge_or_gap,
+            align_items: AlignItems::FlexStart,
+            ..Style::default()
+        }));
+        let first = tree.push(SimpleNode::new(Style {
+            position: PositionType::Relative,
+            left: raw_edge_or_gap,
+            width: Length::points(12.0),
+            height: Length::points(6.0),
+            flex_basis: Length::Fr(30.0),
+            margin: Rect::new(raw_edge_or_gap, Length::ZERO, Length::ZERO, Length::ZERO),
+            padding: Rect::new(raw_edge_or_gap, Length::ZERO, Length::ZERO, Length::ZERO),
+            ..Style::default()
+        }));
+        let second = fixed_leaf(&mut tree, 10.0, 6.0);
+        tree.append_child(root, first);
+        tree.append_child(root, second);
+
+        run_rust_layout(&mut tree, root, Constraints::definite(80.0, 20.0));
+
+        assert_close(tree.nodes[first].layout.size.width, 12.0);
+        assert_close(tree.nodes[first].layout.padding.left, 0.0);
+        assert_close(tree.nodes[first].layout.margin.left, 0.0);
+        assert_close(tree.nodes[first].layout.offset.x, 0.0);
+        assert_close(tree.nodes[second].layout.offset.x, 12.0);
+    }
 }
 
 #[test]
@@ -356,6 +444,21 @@ fn flex_solver_inventory_maps_all_24_non_linear_source_tests() {
                 || canonical.contains(&needle)
                 || additional.contains(&needle),
             "solver source test {source} must map to existing canonical target {target}"
+        );
+    }
+}
+
+#[test]
+fn engine_flex_inventory_maps_source_tests_and_typed_protocol_exclusions() {
+    let internal = include_str!("pr25_flex_internal.rs");
+    let additional = include_str!("pr25_flex_additional.rs");
+
+    assert_eq!(ENGINE_FLEX_MAPPINGS.len(), 10);
+    for (source, target) in ENGINE_FLEX_MAPPINGS {
+        let needle = format!("fn {target}(");
+        assert!(
+            internal.contains(&needle) || additional.contains(&needle),
+            "engine source test {source} must map to existing Rust target {target}"
         );
     }
 }

@@ -68,6 +68,21 @@ fn assert_close(actual: f32, expected: f32) {
     );
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ExpectedNode {
+    offset: Point,
+    size: Size,
+    baseline: f32,
+}
+
+const fn expected_node(x: f32, y: f32, width: f32, height: f32, baseline: f32) -> ExpectedNode {
+    ExpectedNode {
+        offset: Point::new(x, y),
+        size: Size::new(width, height),
+        baseline,
+    }
+}
+
 fn assert_valid_snapshot(tree: &SimpleTree, root: usize, expected_root: Size) {
     assert_eq!(tree.nodes[root].layout.size, expected_root);
     for node in &tree.nodes {
@@ -81,6 +96,57 @@ fn assert_valid_snapshot(tree: &SimpleTree, root: usize, expected_root: Size) {
         }
         assert!(node.layout.size.width >= 0.0);
         assert!(node.layout.size.height >= 0.0);
+    }
+}
+
+fn assert_snapshot(tree: &SimpleTree, expected: &[ExpectedNode]) {
+    assert_eq!(
+        tree.nodes.len(),
+        expected.len(),
+        "snapshot node cardinality changed"
+    );
+    assert_valid_snapshot(tree, 0, expected[0].size);
+
+    for (index, (node, expected)) in tree.nodes.iter().zip(expected).enumerate() {
+        for (actual, expected, field) in [
+            (node.layout.offset.x, expected.offset.x, "offset.x"),
+            (node.layout.offset.y, expected.offset.y, "offset.y"),
+            (node.layout.size.width, expected.size.width, "size.width"),
+            (node.layout.size.height, expected.size.height, "size.height"),
+        ] {
+            let error = (actual - expected).abs();
+            assert!(
+                error <= 0.01,
+                "node {index} {field}: expected {expected}, got {actual} (absolute error {error})"
+            );
+        }
+        let actual_baseline = node
+            .layout
+            .baseline
+            .expect("public snapshot has a baseline");
+        let baseline_error = (actual_baseline - expected.baseline).abs();
+        assert!(
+            baseline_error <= 0.01,
+            "node {index} baseline: expected {}, got {actual_baseline} (absolute error {baseline_error})",
+            expected.baseline,
+        );
+
+        for edge in [
+            node.layout.margin.left,
+            node.layout.margin.right,
+            node.layout.margin.top,
+            node.layout.margin.bottom,
+            node.layout.padding.left,
+            node.layout.padding.right,
+            node.layout.padding.top,
+            node.layout.padding.bottom,
+            node.layout.border.left,
+            node.layout.border.right,
+            node.layout.border.top,
+            node.layout.border.bottom,
+        ] {
+            assert_close(edge, 0.0);
+        }
     }
 }
 
@@ -124,6 +190,8 @@ fn run_alignment_order_snapshot() {
         display: Display::Flex,
         width: Length::points(180.0),
         height: Length::points(60.0),
+        flex_direction: FlexDirection::Row,
+        flex_wrap: FlexWrap::NoWrap,
         justify_content: JustifyContent::SpaceBetween,
         align_items: AlignItems::Center,
         ..Style::default()
@@ -153,9 +221,17 @@ fn run_alignment_order_snapshot() {
     }
     run_rust_layout(&mut tree, root, Constraints::definite(180.0, 60.0));
 
-    assert_valid_snapshot(&tree, root, Size::new(180.0, 60.0));
-    assert!(tree.nodes[second].layout.offset.x < tree.nodes[third].layout.offset.x);
-    assert!(tree.nodes[third].layout.offset.x < tree.nodes[first].layout.offset.x);
+    // Visual order is second, third, first. The 67px of free main-axis space is split into
+    // two 33.5px gaps; no integer layout-unit rounding is applied.
+    assert_snapshot(
+        &tree,
+        &[
+            expected_node(0.0, 0.0, 180.0, 60.0, 40.0),
+            expected_node(150.0, 50.0, 30.0, 10.0, 10.0),
+            expected_node(0.0, 20.0, 45.0, 20.0, 20.0),
+            expected_node(78.5, 15.0, 38.0, 30.0, 30.0),
+        ],
+    );
 }
 
 fn run_grow_snapshot() {
@@ -164,6 +240,8 @@ fn run_grow_snapshot() {
         display: Display::Flex,
         width: Length::points(180.0),
         height: Length::points(50.0),
+        flex_direction: FlexDirection::Row,
+        flex_wrap: FlexWrap::NoWrap,
         align_items: AlignItems::FlexStart,
         ..Style::default()
     }));
@@ -189,9 +267,17 @@ fn run_grow_snapshot() {
     }
     run_rust_layout(&mut tree, root, Constraints::definite(180.0, 50.0));
 
-    assert_valid_snapshot(&tree, root, Size::new(180.0, 50.0));
-    assert_close(tree.nodes[fixed].layout.size.width, 30.0);
-    assert!(tree.nodes[faster].layout.size.width > tree.nodes[grow].layout.size.width);
+    // The 130px free space is distributed 1:2. Keeping the thirds here is deliberate: Flex
+    // sizing remains in fractional CSS pixels until an optional device-pixel snapping pass.
+    assert_snapshot(
+        &tree,
+        &[
+            expected_node(0.0, 0.0, 180.0, 50.0, 10.0),
+            expected_node(0.0, 0.0, 30.0, 10.0, 10.0),
+            expected_node(30.0, 0.0, 190.0 / 3.0, 20.0, 20.0),
+            expected_node(280.0 / 3.0, 0.0, 260.0 / 3.0, 30.0, 30.0),
+        ],
+    );
 }
 
 fn run_shrink_snapshot() {
@@ -200,6 +286,8 @@ fn run_shrink_snapshot() {
         display: Display::Flex,
         width: Length::points(90.0),
         height: Length::points(50.0),
+        flex_direction: FlexDirection::Row,
+        flex_wrap: FlexWrap::NoWrap,
         align_items: AlignItems::FlexStart,
         ..Style::default()
     }));
@@ -226,9 +314,17 @@ fn run_shrink_snapshot() {
     }
     run_rust_layout(&mut tree, root, Constraints::definite(90.0, 50.0));
 
-    assert_valid_snapshot(&tree, root, Size::new(90.0, 50.0));
-    assert_close(tree.nodes[inflexible].layout.size.width, 27.0);
-    assert!(tree.nodes[second].layout.size.width < tree.nodes[first].layout.size.width);
+    // Scaled shrink factors are 60 and 116. They absorb 18.75px and 36.25px respectively;
+    // the zero-shrink 30% item remains 27px wide.
+    assert_snapshot(
+        &tree,
+        &[
+            expected_node(0.0, 0.0, 90.0, 50.0, 10.0),
+            expected_node(0.0, 0.0, 41.25, 10.0, 10.0),
+            expected_node(41.25, 0.0, 21.75, 20.0, 20.0),
+            expected_node(63.0, 0.0, 27.0, 30.0, 30.0),
+        ],
+    );
 }
 
 fn run_wrap_snapshot(flex_wrap: FlexWrap) {
@@ -237,6 +333,7 @@ fn run_wrap_snapshot(flex_wrap: FlexWrap) {
             display: Display::Flex,
             width: Length::points(55.0),
             height: Length::points(80.0),
+            flex_direction: FlexDirection::Row,
             flex_wrap,
             justify_content: JustifyContent::FlexStart,
             align_content: AlignContent::FlexStart,
@@ -246,28 +343,39 @@ fn run_wrap_snapshot(flex_wrap: FlexWrap) {
         },
         [(30.0, 10.0), (30.0, 20.0), (30.0, 15.0)],
     );
-    match flex_wrap {
+    let expected = match flex_wrap {
         FlexWrap::NoWrap => {
-            assert_close(tree.nodes[1].layout.offset.y, tree.nodes[2].layout.offset.y);
-            assert_close(tree.nodes[2].layout.offset.y, tree.nodes[3].layout.offset.y);
+            let item_width = 55.0 / 3.0;
+            [
+                expected_node(0.0, 0.0, 55.0, 80.0, 10.0),
+                expected_node(0.0, 0.0, item_width, 10.0, 10.0),
+                expected_node(item_width, 0.0, item_width, 20.0, 20.0),
+                expected_node(item_width * 2.0, 0.0, item_width, 15.0, 15.0),
+            ]
         }
-        FlexWrap::Wrap => {
-            assert!(tree.nodes[1].layout.offset.y < tree.nodes[2].layout.offset.y);
-            assert!(tree.nodes[2].layout.offset.y < tree.nodes[3].layout.offset.y);
-        }
-        FlexWrap::WrapReverse => {
-            assert!(tree.nodes[1].layout.offset.y > tree.nodes[2].layout.offset.y);
-            assert!(tree.nodes[2].layout.offset.y > tree.nodes[3].layout.offset.y);
-        }
-    }
+        FlexWrap::Wrap => [
+            expected_node(0.0, 0.0, 55.0, 80.0, 10.0),
+            expected_node(0.0, 0.0, 30.0, 10.0, 10.0),
+            expected_node(0.0, 15.0, 30.0, 20.0, 20.0),
+            expected_node(0.0, 40.0, 30.0, 15.0, 15.0),
+        ],
+        FlexWrap::WrapReverse => [
+            expected_node(0.0, 0.0, 55.0, 80.0, 80.0),
+            expected_node(0.0, 70.0, 30.0, 10.0, 10.0),
+            expected_node(0.0, 45.0, 30.0, 20.0, 20.0),
+            expected_node(0.0, 25.0, 30.0, 15.0, 15.0),
+        ],
+    };
+    assert_snapshot(&tree, &expected);
 }
 
-fn run_align_content_snapshot(align_content: AlignContent) {
-    let tree = run_three_item_case(
+fn build_align_content_snapshot(align_content: AlignContent, height: f32) -> SimpleTree {
+    run_three_item_case(
         Style {
             display: Display::Flex,
             width: Length::points(55.0),
-            height: Length::points(105.0),
+            height: Length::points(height),
+            flex_direction: FlexDirection::Row,
             flex_wrap: FlexWrap::Wrap,
             justify_content: JustifyContent::FlexStart,
             align_content,
@@ -275,9 +383,44 @@ fn run_align_content_snapshot(align_content: AlignContent) {
             ..Style::default()
         },
         [(30.0, 10.0), (30.0, 20.0), (30.0, 15.0)],
+    )
+}
+
+fn run_dedicated_align_content_snapshot() {
+    // This is the PR's dedicated 55x95 space-between builder, distinct from the 55x105
+    // align-content variant matrix below. Its 50px free cross space becomes two 25px gaps.
+    let tree = build_align_content_snapshot(AlignContent::SpaceBetween, 95.0);
+    assert_snapshot(
+        &tree,
+        &[
+            expected_node(0.0, 0.0, 55.0, 95.0, 10.0),
+            expected_node(0.0, 0.0, 30.0, 10.0, 10.0),
+            expected_node(0.0, 35.0, 30.0, 20.0, 20.0),
+            expected_node(0.0, 80.0, 30.0, 15.0, 15.0),
+        ],
     );
-    assert!(tree.nodes[1].layout.offset.y <= tree.nodes[2].layout.offset.y);
-    assert!(tree.nodes[2].layout.offset.y <= tree.nodes[3].layout.offset.y);
+}
+
+fn run_align_content_snapshot(align_content: AlignContent) {
+    let tree = build_align_content_snapshot(align_content, 105.0);
+    let line_offsets = match align_content {
+        AlignContent::FlexStart | AlignContent::Start => [0.0, 10.0, 30.0],
+        AlignContent::FlexEnd | AlignContent::End => [60.0, 70.0, 90.0],
+        AlignContent::Center => [30.0, 40.0, 60.0],
+        AlignContent::Stretch => [0.0, 30.0, 70.0],
+        AlignContent::SpaceBetween => [0.0, 40.0, 90.0],
+        AlignContent::SpaceAround => [10.0, 40.0, 80.0],
+        AlignContent::SpaceEvenly => [15.0, 40.0, 75.0],
+    };
+    assert_snapshot(
+        &tree,
+        &[
+            expected_node(0.0, 0.0, 55.0, 105.0, line_offsets[0] + 10.0),
+            expected_node(0.0, line_offsets[0], 30.0, 10.0, 10.0),
+            expected_node(0.0, line_offsets[1], 30.0, 20.0, 20.0),
+            expected_node(0.0, line_offsets[2], 30.0, 15.0, 15.0),
+        ],
+    );
 }
 
 fn run_direction_snapshot(flex_direction: FlexDirection) {
@@ -287,18 +430,44 @@ fn run_direction_snapshot(flex_direction: FlexDirection) {
             width: Length::points(100.0),
             height: Length::points(90.0),
             flex_direction,
+            flex_wrap: FlexWrap::NoWrap,
+            justify_content: JustifyContent::FlexStart,
             align_items: AlignItems::FlexStart,
             ..Style::default()
         },
         [(10.0, 15.0), (20.0, 25.0), (15.0, 10.0)],
     );
-    if flex_direction.is_row() {
-        let ordered = tree.nodes[1].layout.offset.x < tree.nodes[2].layout.offset.x;
-        assert_eq!(ordered, flex_direction == FlexDirection::Row);
-    } else {
-        let ordered = tree.nodes[1].layout.offset.y < tree.nodes[2].layout.offset.y;
-        assert_eq!(ordered, flex_direction == FlexDirection::Column);
-    }
+    let item_offsets = match flex_direction {
+        FlexDirection::Row => [
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            Point::new(30.0, 0.0),
+        ],
+        FlexDirection::RowReverse => [
+            Point::new(90.0, 0.0),
+            Point::new(70.0, 0.0),
+            Point::new(55.0, 0.0),
+        ],
+        FlexDirection::Column => [
+            Point::new(0.0, 0.0),
+            Point::new(0.0, 15.0),
+            Point::new(0.0, 40.0),
+        ],
+        FlexDirection::ColumnReverse => [
+            Point::new(0.0, 75.0),
+            Point::new(0.0, 50.0),
+            Point::new(0.0, 40.0),
+        ],
+    };
+    assert_snapshot(
+        &tree,
+        &[
+            expected_node(0.0, 0.0, 100.0, 90.0, item_offsets[0].y + 15.0),
+            expected_node(item_offsets[0].x, item_offsets[0].y, 10.0, 15.0, 15.0),
+            expected_node(item_offsets[1].x, item_offsets[1].y, 20.0, 25.0, 25.0),
+            expected_node(item_offsets[2].x, item_offsets[2].y, 15.0, 10.0, 10.0),
+        ],
+    );
 }
 
 fn run_justify_snapshot(justify_content: JustifyContent) {
@@ -307,14 +476,33 @@ fn run_justify_snapshot(justify_content: JustifyContent) {
             display: Display::Flex,
             width: Length::points(105.0),
             height: Length::points(30.0),
+            flex_direction: FlexDirection::Row,
+            flex_wrap: FlexWrap::NoWrap,
             justify_content,
             align_items: AlignItems::FlexStart,
             ..Style::default()
         },
         [(10.0, 10.0), (20.0, 10.0), (15.0, 10.0)],
     );
-    assert!(tree.nodes[1].layout.offset.x < tree.nodes[2].layout.offset.x);
-    assert!(tree.nodes[2].layout.offset.x < tree.nodes[3].layout.offset.x);
+    let item_offsets = match justify_content {
+        JustifyContent::FlexStart | JustifyContent::Stretch | JustifyContent::Start => {
+            [0.0, 10.0, 30.0]
+        }
+        JustifyContent::Center => [30.0, 40.0, 60.0],
+        JustifyContent::FlexEnd | JustifyContent::End => [60.0, 70.0, 90.0],
+        JustifyContent::SpaceBetween => [0.0, 40.0, 90.0],
+        JustifyContent::SpaceAround => [10.0, 40.0, 80.0],
+        JustifyContent::SpaceEvenly => [15.0, 40.0, 75.0],
+    };
+    assert_snapshot(
+        &tree,
+        &[
+            expected_node(0.0, 0.0, 105.0, 30.0, 10.0),
+            expected_node(item_offsets[0], 0.0, 10.0, 10.0, 10.0),
+            expected_node(item_offsets[1], 0.0, 20.0, 10.0, 10.0),
+            expected_node(item_offsets[2], 0.0, 15.0, 10.0, 10.0),
+        ],
+    );
 }
 
 fn run_align_items_snapshot(align_items: AlignItems) {
@@ -329,6 +517,9 @@ fn run_align_items_snapshot(align_items: AlignItems) {
         display: Display::Flex,
         width: Length::points(100.0),
         height: Length::points(60.0),
+        flex_direction: FlexDirection::Row,
+        flex_wrap: FlexWrap::NoWrap,
+        justify_content: JustifyContent::FlexStart,
         align_items,
         ..Style::default()
     }));
@@ -345,10 +536,44 @@ fn run_align_items_snapshot(align_items: AlignItems) {
         tree.append_child(root, child);
     }
     run_rust_layout(&mut tree, root, Constraints::definite(100.0, 60.0));
-    assert_valid_snapshot(&tree, root, Size::new(100.0, 60.0));
-    if auto_cross_size {
-        for child in 1..=3 {
-            assert_close(tree.nodes[child].layout.size.height, 60.0);
+    let (item_offsets, item_heights) = match align_items {
+        AlignItems::Stretch => ([0.0, 0.0, 0.0], [60.0, 60.0, 60.0]),
+        AlignItems::FlexStart | AlignItems::Start => ([0.0, 0.0, 0.0], [10.0, 20.0, 15.0]),
+        AlignItems::FlexEnd | AlignItems::End => ([50.0, 40.0, 45.0], [10.0, 20.0, 15.0]),
+        AlignItems::Center => ([25.0, 20.0, 22.5], [10.0, 20.0, 15.0]),
+        AlignItems::Baseline => ([10.0, 0.0, 5.0], [10.0, 20.0, 15.0]),
+    };
+    assert_snapshot(
+        &tree,
+        &[
+            expected_node(0.0, 0.0, 100.0, 60.0, item_offsets[0] + item_heights[0]),
+            expected_node(0.0, item_offsets[0], 10.0, item_heights[0], item_heights[0]),
+            expected_node(
+                10.0,
+                item_offsets[1],
+                20.0,
+                item_heights[1],
+                item_heights[1],
+            ),
+            expected_node(
+                30.0,
+                item_offsets[2],
+                15.0,
+                item_heights[2],
+                item_heights[2],
+            ),
+        ],
+    );
+
+    if align_items == AlignItems::Baseline {
+        let physical_baseline =
+            tree.nodes[1].layout.offset.y + tree.nodes[1].layout.baseline.expect("first baseline");
+        for child in 2..=3 {
+            assert_close(
+                tree.nodes[child].layout.offset.y
+                    + tree.nodes[child].layout.baseline.expect("peer baseline"),
+                physical_baseline,
+            );
         }
     }
 }
@@ -359,6 +584,9 @@ fn run_align_self_base_snapshot() {
         display: Display::Flex,
         width: Length::points(120.0),
         height: Length::points(60.0),
+        flex_direction: FlexDirection::Row,
+        flex_wrap: FlexWrap::NoWrap,
+        justify_content: JustifyContent::FlexStart,
         align_items: AlignItems::Center,
         ..Style::default()
     }));
@@ -378,8 +606,16 @@ fn run_align_self_base_snapshot() {
         tree.append_child(root, child);
     }
     run_rust_layout(&mut tree, root, Constraints::definite(120.0, 60.0));
-    assert_valid_snapshot(&tree, root, Size::new(120.0, 60.0));
-    assert_close(tree.nodes[4].layout.size.height, 60.0);
+    assert_snapshot(
+        &tree,
+        &[
+            expected_node(0.0, 0.0, 120.0, 60.0, 35.0),
+            expected_node(0.0, 25.0, 10.0, 10.0, 10.0),
+            expected_node(10.0, 0.0, 10.0, 20.0, 20.0),
+            expected_node(20.0, 45.0, 10.0, 15.0, 15.0),
+            expected_node(30.0, 0.0, 10.0, 60.0, 60.0),
+        ],
+    );
 }
 
 fn run_align_self_variant_snapshot(align_self: Option<AlignItems>) {
@@ -389,6 +625,9 @@ fn run_align_self_variant_snapshot(align_self: Option<AlignItems>) {
         display: Display::Flex,
         width: Length::points(100.0),
         height: Length::points(50.0),
+        flex_direction: FlexDirection::Row,
+        flex_wrap: FlexWrap::NoWrap,
+        justify_content: JustifyContent::FlexStart,
         align_items: AlignItems::FlexEnd,
         ..Style::default()
     }));
@@ -406,10 +645,20 @@ fn run_align_self_variant_snapshot(align_self: Option<AlignItems>) {
     tree.append_child(root, first);
     tree.append_child(root, inherited);
     run_rust_layout(&mut tree, root, Constraints::definite(100.0, 50.0));
-    assert_valid_snapshot(&tree, root, Size::new(100.0, 50.0));
-    if align_self == Some(AlignItems::Stretch) {
-        assert_close(tree.nodes[first].layout.size.height, 50.0);
-    }
+    let (first_y, first_height) = match align_self {
+        None | Some(AlignItems::FlexEnd | AlignItems::End) => (42.0, 8.0),
+        Some(AlignItems::Stretch) => (0.0, 50.0),
+        Some(AlignItems::FlexStart | AlignItems::Baseline | AlignItems::Start) => (0.0, 8.0),
+        Some(AlignItems::Center) => (21.0, 8.0),
+    };
+    assert_snapshot(
+        &tree,
+        &[
+            expected_node(0.0, 0.0, 100.0, 50.0, first_y + first_height),
+            expected_node(0.0, first_y, 12.0, first_height, first_height),
+            expected_node(12.0, 40.0, 14.0, 10.0, 10.0),
+        ],
+    );
 }
 
 fn run_baseline_snapshot(use_align_self: bool) {
@@ -418,6 +667,9 @@ fn run_baseline_snapshot(use_align_self: bool) {
         display: Display::Flex,
         width: Length::points(120.0),
         height: Length::points(60.0),
+        flex_direction: FlexDirection::Row,
+        flex_wrap: FlexWrap::NoWrap,
+        justify_content: JustifyContent::FlexStart,
         align_items: if use_align_self {
             AlignItems::FlexStart
         } else {
@@ -450,11 +702,40 @@ fn run_baseline_snapshot(use_align_self: bool) {
         tree.append_child(root, child);
     }
     run_rust_layout(&mut tree, root, Constraints::definite(120.0, 60.0));
-    assert_valid_snapshot(&tree, root, Size::new(120.0, 60.0));
-    assert_close(
-        tree.nodes[first].layout.offset.y + 15.0,
-        tree.nodes[second].layout.offset.y + 4.0,
+    let third_y = if use_align_self { 0.0 } else { 7.0 };
+    assert_snapshot(
+        &tree,
+        &[
+            expected_node(0.0, 0.0, 120.0, 60.0, 15.0),
+            expected_node(0.0, 0.0, 30.0, 20.0, 15.0),
+            expected_node(30.0, 11.0, 20.0, 10.0, 4.0),
+            expected_node(50.0, third_y, 25.0, 16.0, 8.0),
+        ],
     );
+
+    let shared_baseline = tree.nodes[first].layout.offset.y
+        + tree.nodes[first]
+            .layout
+            .baseline
+            .expect("first measured baseline");
+    assert_close(
+        tree.nodes[second].layout.offset.y
+            + tree.nodes[second]
+                .layout
+                .baseline
+                .expect("second measured baseline"),
+        shared_baseline,
+    );
+    if !use_align_self {
+        assert_close(
+            tree.nodes[third].layout.offset.y
+                + tree.nodes[third]
+                    .layout
+                    .baseline
+                    .expect("third measured baseline"),
+            shared_baseline,
+        );
+    }
 }
 
 #[test]
@@ -464,7 +745,7 @@ fn standalone_public_flex_layout_matrix_runs_all_47_rust_snapshots() {
     run_alignment_order_snapshot();
     run_grow_snapshot();
     run_shrink_snapshot();
-    run_align_content_snapshot(AlignContent::SpaceBetween);
+    run_dedicated_align_content_snapshot();
     snapshots += 4;
 
     for value in FLEX_WRAP_VALUES {

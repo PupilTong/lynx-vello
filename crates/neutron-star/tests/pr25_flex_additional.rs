@@ -12,8 +12,8 @@ use neutron_star::compute::{
 };
 use neutron_star::prelude::*;
 use neutron_star::style::{
-    AlignItems, BoxGenerationMode, Dimension, Direction, FlexDirection, FlexWrap, JustifyContent,
-    LengthPercentage, LengthPercentageAuto, Position, Visibility,
+    AlignItems, BoxGenerationMode, BoxSizing, Dimension, Direction, FlexDirection, FlexWrap,
+    JustifyContent, LengthPercentage, LengthPercentageAuto, Position, Visibility,
 };
 use support::*;
 
@@ -48,6 +48,78 @@ fn flex_item_derives_cross_size_from_main_size_and_aspect_ratio() {
 
     assert_size(output.size, Size::new(100.0, 20.0));
     assert_size(tree.layout(child).size, Size::new(40.0, 20.0));
+}
+
+#[test]
+fn flex_percentage_padding_resolves_against_definite_containing_block_width() {
+    let mut tree = TestTree::default();
+    let child = fixed_leaf(&mut tree, 10.0, 10.0);
+    let inner = flex_container(
+        &mut tree,
+        TestStyle {
+            box_sizing: BoxSizing::BorderBox,
+            size: Size::new(Dimension::Length(100.0), Dimension::Auto),
+            padding: Edges::uniform(LengthPercentage::percent(0.1)),
+            align_items: Some(AlignItems::FlexStart),
+            ..TestStyle::default()
+        },
+        &[child],
+    );
+    let root = flex_container(
+        &mut tree,
+        TestStyle {
+            align_items: Some(AlignItems::FlexStart),
+            ..TestStyle::default()
+        },
+        &[inner],
+    );
+
+    let output = perform_layout(
+        &mut tree,
+        root,
+        Size::new(Some(100.0), None),
+        Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
+    );
+
+    assert_close(tree.layout(inner).padding.left, 10.0);
+    assert_close(tree.layout(inner).padding.top, 10.0);
+    assert_size(tree.layout(inner).size, Size::new(100.0, 30.0));
+    assert_point(tree.layout(child).location, Point::new(10.0, 10.0));
+    assert_size(output.size, Size::new(100.0, 30.0));
+}
+
+#[test]
+fn vertical_percentage_padding_and_margin_use_width_percent_base() {
+    let mut tree = TestTree::default();
+    let mut child_style = fixed_leaf_style(10.0, 5.0);
+    child_style.margin.top = LengthPercentageAuto::Percent(0.05);
+    child_style.margin.bottom = LengthPercentageAuto::Percent(0.02);
+    let child = tree.push_leaf(child_style, Size::new(10.0, 5.0), None);
+    let root = flex_container(
+        &mut tree,
+        TestStyle {
+            size: Size::new(Dimension::Length(120.0), Dimension::Auto),
+            padding: Edges::uniform(LengthPercentage::percent(0.1)),
+            align_items: Some(AlignItems::FlexStart),
+            ..TestStyle::default()
+        },
+        &[child],
+    );
+
+    let output = perform_layout(
+        &mut tree,
+        root,
+        Size::NONE,
+        Size::new(AvailableSpace::Definite(120.0), AvailableSpace::MaxContent),
+    );
+
+    assert_close(tree.layout(child).margin.top, 6.0);
+    assert_close(tree.layout(child).margin.bottom, 2.4);
+    assert_size(tree.layout(child).size, Size::new(10.0, 5.0));
+    assert_point(tree.layout(child).location, Point::new(12.0, 18.0));
+    // Keep fractional CSS-pixel geometry. PR #25's source assertion rounded
+    // this to an integer layout unit, which is not part of CSS Flexbox.
+    assert_size(output.size, Size::new(144.0, 37.4));
 }
 
 #[test]
@@ -402,6 +474,38 @@ fn immutable_source_style_view_survives_mutable_session_recursion() {
     assert_eq!(root_style.flex_direction, FlexDirection::Row);
     assert_size(output.size, Size::new(60.0, 20.0));
     assert_size(tree.layout(child).size, Size::new(11.0, 7.0));
+    assert!(tree.session.layout_writes > 0);
+}
+
+#[test]
+fn external_host_measurement_baseline_and_writeback_survive_split_storage() {
+    let mut tree = TestTree::default();
+    let child = tree.push_leaf(TestStyle::default(), Size::new(10.2, 5.2), Some(4.0));
+    let root = flex_container(
+        &mut tree,
+        TestStyle {
+            size: Size::new(Dimension::Length(80.0), Dimension::Length(40.0)),
+            padding: Edges::uniform(LengthPercentage::length(2.0)),
+            align_items: Some(AlignItems::FlexStart),
+            ..TestStyle::default()
+        },
+        &[child],
+    );
+
+    let output = perform_layout(
+        &mut tree,
+        root,
+        Size::NONE,
+        Size::new(
+            AvailableSpace::Definite(100.0),
+            AvailableSpace::Definite(80.0),
+        ),
+    );
+
+    assert_size(output.size, Size::new(84.0, 44.0));
+    assert_point(tree.layout(child).location, Point::new(2.0, 2.0));
+    assert_size(tree.layout(child).size, Size::new(10.2, 5.2));
+    assert_eq!(tree.session_node(child).output.first_baselines.y, Some(4.0));
     assert!(tree.session.layout_writes > 0);
 }
 
