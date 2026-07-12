@@ -10,22 +10,6 @@
 
 use crate::geometry::{Edges, Point, Size};
 
-/// What the caller wants from a layout pass over one node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum RunMode {
-    /// Produce final sizes *and positions* for the node's children, and
-    /// store them via
-    /// [`LayoutTree::set_unrounded_layout`](crate::tree::LayoutTree::set_unrounded_layout).
-    #[default]
-    PerformLayout,
-    /// Only compute the node's size (a measurement probe during a parent's
-    /// sizing passes). Child layouts must not be stored.
-    ComputeSize,
-    /// The node is `display: none`: zero everything, recursively, so stale
-    /// geometry never leaks from a previously-visible subtree.
-    PerformHiddenLayout,
-}
-
 /// Whether a measurement respects the node's own sizing styles.
 ///
 /// This distinction is CSS's "content-based size" vs "used size": when a
@@ -41,7 +25,7 @@ pub enum SizingMode {
     ContentSize,
 }
 
-/// Which axes a [`RunMode::ComputeSize`] probe actually needs.
+/// Which axes a [`LayoutGoal::Measure`] probe actually needs.
 ///
 /// A hint, not a contract: algorithms may compute both axes anyway (they
 /// often fall out together), but a host/leaf can use this to skip expensive
@@ -52,9 +36,27 @@ pub enum RequestedAxis {
     Horizontal,
     /// Only the vertical size is needed.
     Vertical,
-    /// Both sizes are needed (the value used by [`RunMode::PerformLayout`]).
+    /// Both sizes are needed.
     #[default]
     Both,
+}
+
+/// What the caller wants from a layout pass over one node.
+///
+/// Measurement is side-effect free: child layouts must not be stored. A
+/// commit produces final sizes and positions for the node's children and
+/// stores them through
+/// [`LayoutState::set_unrounded_layout`](crate::tree::LayoutState::set_unrounded_layout).
+/// Hidden-subtree zeroing is a separate operation provided by
+/// [`hide_subtree`](crate::compute::hide_subtree), not a
+/// sizing goal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum LayoutGoal {
+    /// Only compute the node's size along the requested axes.
+    Measure(RequestedAxis),
+    /// Produce and store final child geometry.
+    #[default]
+    Commit,
 }
 
 /// The space a layout pass may size a node into, per axis (CSS Sizing's
@@ -143,12 +145,10 @@ impl Size<AvailableSpace> {
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct LayoutInput {
-    /// What the caller wants (layout, measurement, or hidden zeroing).
-    pub run_mode: RunMode,
+    /// Whether this call measures the node or commits child geometry.
+    pub goal: LayoutGoal,
     /// Whether this node's own sizing styles apply.
     pub sizing_mode: SizingMode,
-    /// Which axes a `ComputeSize` probe needs.
-    pub requested_axis: RequestedAxis,
     /// Border-box sizes already decided by the caller.
     pub known_dimensions: Size<Option<f32>>,
     /// The parent's definite content-box size (percentage basis).
@@ -159,8 +159,7 @@ pub struct LayoutInput {
 
 impl LayoutInput {
     /// A full-layout request. `sizing_mode` defaults to
-    /// [`SizingMode::InherentSize`] and `requested_axis` to
-    /// [`RequestedAxis::Both`]; assign fields to deviate.
+    /// [`SizingMode::InherentSize`]; assign fields to deviate.
     #[must_use]
     pub fn perform_layout(
         known_dimensions: Size<Option<f32>>,
@@ -168,9 +167,8 @@ impl LayoutInput {
         available_space: Size<AvailableSpace>,
     ) -> Self {
         Self {
-            run_mode: RunMode::PerformLayout,
+            goal: LayoutGoal::Commit,
             sizing_mode: SizingMode::InherentSize,
-            requested_axis: RequestedAxis::Both,
             known_dimensions,
             parent_size,
             available_space,
@@ -186,9 +184,8 @@ impl LayoutInput {
         requested_axis: RequestedAxis,
     ) -> Self {
         Self {
-            run_mode: RunMode::ComputeSize,
+            goal: LayoutGoal::Measure(requested_axis),
             sizing_mode: SizingMode::InherentSize,
-            requested_axis,
             known_dimensions,
             parent_size,
             available_space,
@@ -200,7 +197,7 @@ impl LayoutInput {
 ///
 /// This is the *transient* answer the parent algorithm consumes; the durable
 /// per-node record is [`Layout`], stored separately via
-/// [`LayoutTree::set_unrounded_layout`](crate::tree::LayoutTree::set_unrounded_layout).
+/// [`LayoutState::set_unrounded_layout`](crate::tree::LayoutState::set_unrounded_layout).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct LayoutOutput {
@@ -217,7 +214,7 @@ pub struct LayoutOutput {
 }
 
 impl LayoutOutput {
-    /// The all-zero output of hidden layout.
+    /// The all-zero output a host returns after [`hide_subtree`](crate::compute::hide_subtree).
     pub const HIDDEN: Self = Self {
         size: Size::ZERO,
         content_size: Size::ZERO,
@@ -250,7 +247,7 @@ impl LayoutOutput {
 /// by the host/renderer). Relative-position insets are already applied.
 /// Values are unrounded CSS pixels until
 /// [`round_layout`](crate::compute::round_layout) writes the rounded copy
-/// via [`RoundTree`](crate::tree::RoundTree).
+/// via [`RoundState`](crate::tree::RoundState).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct Layout {

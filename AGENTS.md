@@ -17,8 +17,9 @@ cross-platform engine built on:
 - **[parley](https://github.com/linebender/parley)** — text layout & shaping
 
 The from-scratch layout engine (successor to the C++ engine's `starlight`) is
-`crates/neutron-star` — currently protocol/interfaces only, algorithms
-pending. See `docs/layout-architecture.md` for its design and
+`crates/neutron-star` — its host protocol, shared layout machinery, and CSS
+flexbox algorithm are implemented; CSS Grid remains pending. See
+`docs/layout-architecture.md` for its design and
 `docs/tracking/css-layout.md` for the behavior it must cover.
 
 **Compatibility target**: ReactLynx apps compiled to `.web.bundle` must render
@@ -112,14 +113,18 @@ useful signal for currently-compatible versions of those libraries.
   Owns `WidgetState` / `WidgetTree`, Lynx view metrics, touch-first
   device policy, and the viewport-relative `rpx` integration. Standard CSS
   parsing, matching, cascade, and lock ownership remain in `stylo-dom`.
-- `crates/neutron-star` — the standalone-publishable box-layout engine
-  (CSS flexbox + grid): trait-based host⇄engine protocol with static
-  dispatch only (no `dyn`), host-owned storage, and host-side display
-  dispatch so Lynx's `linear`/`relative` modes plug in as peer algorithms.
-  **Contracts + skeleton only so far (L0)** — the flex/grid style/tree
-  traits exist but their algorithm entry points and implementations do not
-  yet (L1/L2; plans live in the architecture doc), and the generic
-  machinery entry points are documented `todo!()` stubs. Read
+- `crates/neutron-star` — the standalone-publishable CSS flexbox engine with
+  a reserved Grid protocol: trait-based host⇄engine integration with static
+  dispatch only (no `dyn`), an immutable topology/style source physically
+  separated from mutable layout/cache/measurement sessions, and host-side
+  display dispatch so Lynx's `linear`/`relative` modes plug in as peer
+  algorithms. Leaf content engines integrate through the generic lending
+  `LeafMeasurer` protocol (the planned text adapter retains Parley layouts in
+  host storage rather than cloning engine artifacts).
+  **Flexbox milestone implemented (L1)** — the shared root/leaf/cache/
+  positioned/rounding machinery and CSS Flexbox Level 1 algorithm are live;
+  the Grid style/tree contract exists but its L2 algorithm is still pending.
+  Read
   `docs/layout-architecture.md` before touching it. Must not contain Lynx
   vocabulary or depend on other workspace crates.
 - *(planned, not yet scaffolded)* text / render / runtime crates, plus the

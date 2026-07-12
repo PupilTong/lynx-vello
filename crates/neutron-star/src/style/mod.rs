@@ -1,8 +1,8 @@
 //! The style protocol: how the engine reads computed style.
 //!
-//! The engine never sees the host's style representation. Instead, the tree
-//! traits hand out short-lived **style views** — cheap borrowed values
-//! implementing [`CoreStyle`] plus the per-algorithm traits
+//! The engine never sees the host's style representation. Instead, the
+//! immutable `LayoutSource` traits hand out short-lived **style views** —
+//! cheap borrowed values implementing [`CoreStyle`] plus the per-algorithm traits
 //! ([`FlexContainerStyle`]/[`FlexItemStyle`], [`GridContainerStyle`]/
 //! [`GridItemStyle`]) — and every accessor returns a small `Copy` value from
 //! [`value`]/[`alignment`]. A host backed by stylo implements the accessors
@@ -27,7 +27,7 @@
 //! symbolic ([`value::LengthPercentage::Percent`]) because their basis is
 //! only known during layout; `calc()` stays symbolic as a
 //! [`value::CalcHandle`] resolved through
-//! [`LayoutTree::resolve_calc`](crate::tree::LayoutTree::resolve_calc). All
+//! [`LayoutSource::resolve_calc`](crate::tree::LayoutSource::resolve_calc). All
 //! values must be finite — `NaN`/`±∞` at the boundary is a host bug
 //! (debug-asserted by the algorithms, not defended against in release).
 
@@ -53,7 +53,7 @@ use crate::geometry::{Edges, Point, Size};
 /// `display: none`).
 ///
 /// The dispatch protocol handles `None` before any algorithm runs (see
-/// [`compute_hidden_layout`](crate::compute::compute_hidden_layout)); which
+/// [`hide_subtree`](crate::compute::hide_subtree)); which
 /// *algorithm* a generated box uses is the host's dispatch decision, so the
 /// engine deliberately has no `Display` enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -98,7 +98,7 @@ pub enum Position {
     /// `position: fixed`, or `absolute` escaping non-positioned ancestors in
     /// non-Lynx hosts). The parent's algorithm computes and records the
     /// node's static position via
-    /// [`LayoutTree::set_static_position`](crate::tree::LayoutTree::set_static_position)
+    /// [`LayoutState::set_static_position`](crate::tree::LayoutState::set_static_position)
     /// but does **not** size or place it; the host completes it after
     /// in-flow layout in a positioned pass via
     /// [`compute_absolute_layout`](crate::compute::compute_absolute_layout)
@@ -167,14 +167,14 @@ pub enum Direction {
 /// Style every box has, regardless of which algorithm lays it out.
 ///
 /// This is the supertrait of all container/item style traits and the only
-/// style the generic machinery (dispatch, hidden layout, leaf layout,
+/// style the generic machinery (dispatch, hidden-subtree cleanup, leaf layout,
 /// rounding) reads. Defaults are the CSS initial values.
 ///
 /// Percentage bases (all per CSS Sizing/Box):
 /// - `size.width`, `min/max width`, `margin` (all four edges!), `padding` (all four edges),
 ///   `inset.left/right` — the containing block's **width**.
 /// - `size.height`, `min/max height`, `inset.top/bottom` — the containing block's **height**.
-pub trait CoreStyle {
+pub trait CoreStyle: Sized {
     /// Whether this node generates a box (`display: none` ⇒
     /// [`BoxGenerationMode::None`]).
     fn box_generation_mode(&self) -> BoxGenerationMode {

@@ -4,11 +4,11 @@
 //! **container** decides axes, wrapping, and distribution
 //! ([`FlexContainerStyle`]); each **item** decides its own flexibility and
 //! self-alignment ([`FlexItemStyle`]). The L1 flexbox algorithm reads
-//! containers through [`FlexTree::flex_container_style`] and items through
-//! [`FlexTree::flex_item_style`].
+//! containers through [`FlexSource::flex_container_style`] and items through
+//! [`FlexSource::flex_item_style`].
 //!
-//! [`FlexTree::flex_container_style`]: crate::tree::FlexTree::flex_container_style
-//! [`FlexTree::flex_item_style`]: crate::tree::FlexTree::flex_item_style
+//! [`FlexSource::flex_container_style`]: crate::tree::FlexSource::flex_container_style
+//! [`FlexSource::flex_item_style`]: crate::tree::FlexSource::flex_item_style
 
 use crate::geometry::Size;
 use crate::style::CoreStyle;

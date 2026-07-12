@@ -193,7 +193,7 @@ impl TrackSizingFunction {
 /// The track iterator must be `Clone` (the algorithm iterates a repetition
 /// once per expansion) and `ExactSizeIterator` (auto-fill/auto-fit need the
 /// per-repetition track count up front to solve the repetition count).
-pub trait GridTemplateRepetition {
+pub trait GridTemplateRepetition: Sized {
     /// Borrowed iterator over the tracks inside this repetition.
     type Tracks<'a>: Iterator<Item = TrackSizingFunction> + ExactSizeIterator + Clone
     where

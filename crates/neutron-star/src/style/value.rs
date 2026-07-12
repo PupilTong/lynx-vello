@@ -15,21 +15,21 @@
 //! until layout knows the percentage basis, and their parsed representation
 //! lives in the host's style engine. The protocol therefore carries an opaque
 //! [`CalcHandle`] token; whenever an algorithm needs the value it calls back
-//! through [`LayoutTree::resolve_calc`] with the basis. This keeps
+//! through [`LayoutSource::resolve_calc`] with the basis. This keeps
 //! neutron-star free of any CSS-parser dependency while supporting full
 //! `calc()`.
 //!
-//! [`LayoutTree::resolve_calc`]: crate::tree::LayoutTree::resolve_calc
+//! [`LayoutSource::resolve_calc`]: crate::tree::LayoutSource::resolve_calc
 
 /// An opaque reference to a host-owned `calc()` expression.
 ///
 /// The engine never inspects the value — it only passes it back to
-/// [`LayoutTree::resolve_calc`](crate::tree::LayoutTree::resolve_calc)
+/// [`LayoutSource::resolve_calc`](crate::tree::LayoutSource::resolve_calc)
 /// together with a percentage basis. Hosts typically encode an index or a
 /// (suitably guaranteed-live) pointer into their computed-style storage.
 ///
-/// A handle is only meaningful to the tree it came from, and only for the
-/// duration of the layout run in which the style accessor produced it.
+/// A handle is only meaningful to the [`LayoutSource`](crate::tree::LayoutSource)
+/// that produced it, and only for that immutable source epoch's layout run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CalcHandle(u64);
 
@@ -59,7 +59,7 @@ pub enum LengthPercentage {
     /// style accessor that produced this value.
     Percent(f32),
     /// A host-owned `calc()` expression; resolve via
-    /// [`LayoutTree::resolve_calc`](crate::tree::LayoutTree::resolve_calc).
+    /// [`LayoutSource::resolve_calc`](crate::tree::LayoutSource::resolve_calc).
     Calc(CalcHandle),
 }
 
@@ -130,10 +130,11 @@ impl From<LengthPercentage> for LengthPercentageAuto {
 ///
 /// Beyond [`LengthPercentageAuto`]'s values this includes the CSS Sizing
 /// Level 3 intrinsic-sizing keywords, which Lynx's `starlight` also models
-/// (`NLength::kNLengthMaxContent`/`kNLengthFitContent`). Algorithm support
-/// for the intrinsic keywords may lag (they are reserved from L0 so that
-/// adding them is not a protocol break); until implemented they resolve as
-/// `Auto`.
+/// (`NLength::kNLengthMaxContent`/`kNLengthFitContent`). Intrinsic keywords
+/// remain symbolic so each layout algorithm can resolve them from its
+/// min-/max-content probes. Flexbox resolves them for main-axis preferred,
+/// minimum, maximum, and flex-basis sizes; unsupported contexts leave them
+/// unresolved for that context's fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Dimension {
     /// An absolute length in CSS pixels.
