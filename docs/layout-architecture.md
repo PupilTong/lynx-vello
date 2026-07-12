@@ -23,8 +23,9 @@ and the confirmed deviations). Per the standards policy in
 [`AGENTS.md`](../AGENTS.md), flex and Grid are implemented from the
 **W3C specs** (Flexbox Level 1, Grid Level 2, Sizing Level 3, Box Alignment
 Level 3), not by porting Starlight's C++. Relative is a Lynx-only extension
-and follows its standalone implementation specification, with explicitly
-documented Rust-surface defaults.
+and follows the normative
+[`Starlight Relative Layout Module Level 1`](starlight-relative-layout.md),
+with explicitly documented Rust-surface defaults.
 
 ## Ownership
 
