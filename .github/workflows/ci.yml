@@ -49,12 +49,15 @@ jobs:
 
       # Keep neutron-star's production source above the agreed line-coverage
       # floor. Integration tests are executed, but test/benchmark source is
-      # excluded from the metric.
+      # excluded from the metric. Clear the preceding workspace run's profiles
+      # first so dependency and vendor coverage cannot leak into this package-
+      # scoped report.
       - name: Neutron-star 95% coverage gate
-        run: >-
-          cargo llvm-cov -p neutron-star --locked --summary-only
-          --ignore-filename-regex '(^|/)(tests|benches)(/|$)'
-          --fail-under-lines 95
+        run: |
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov -p neutron-star --locked --summary-only \
+            --ignore-filename-regex '(^|/)(tests|benches)(/|$)' \
+            --fail-under-lines 95
 
       # The Lynx patch series in the vendored stylo fork carries its own test
       # suites; vendor/stylo is excluded from the workspace, so run them
