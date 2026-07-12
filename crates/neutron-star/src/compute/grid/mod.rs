@@ -29,7 +29,8 @@ use types::{Axis, GridItem, TrackSet};
 
 use super::util::{
     ItemKey, OrderedItem, ResolvedContainerBox, ResolvedItemBox, apply_aspect_ratio,
-    box_inset_size, clamp, clamp_axis, resolve_container_box, resolve_gap, resolve_item_box,
+    box_inset_size, clamp, clamp_axis, preferred_size_definiteness, resolve_container_box,
+    resolve_gap, resolve_item_box,
 };
 use super::{compute_absolute_layout, hide_subtree};
 use crate::geometry::{Edges, Line, Point, Size};
@@ -40,7 +41,7 @@ use crate::style::{
 };
 use crate::tree::{
     AvailableSpace, GridSource, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutSession,
-    NodeId, RequestedAxis,
+    NodeId, RequestedAxis, SizingMode,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -77,14 +78,19 @@ fn classify_item<Source: GridSource>(
     if style.box_generation_mode() == BoxGenerationMode::None {
         return None;
     }
+    let position = style.position();
     Some(PendingItem {
         ordered: OrderedItem {
             node,
             document_index,
-            css_order: GridItemStyle::order(&style),
+            css_order: if position == Position::Relative {
+                GridItemStyle::order(&style)
+            } else {
+                0
+            },
             layout_order: 0,
         },
-        position: style.position(),
+        position,
         row: style.grid_row(),
         column: style.grid_column(),
     })
@@ -1003,17 +1009,46 @@ where
         justify_items: style.justify_items().unwrap_or(AlignItems::Stretch),
     };
     let direction = style.direction();
+    let style_definite = if input.sizing_mode == SizingMode::ContentSize {
+        Size::new(false, false)
+    } else {
+        preferred_size_definiteness(style.size(), input.parent_size, style.aspect_ratio())
+    };
+    let outer_definite = Size::new(
+        input.definite_dimensions.width || style_definite.width,
+        input.definite_dimensions.height || style_definite.height,
+    );
     let metrics = resolve_container_box(source, &style, input);
-    let initial_gap = resolve_gap(source, gap_value, metrics.inner);
+    let initial_percentage_basis = Size::new(
+        outer_definite
+            .width
+            .then_some(metrics.inner.width)
+            .flatten(),
+        outer_definite
+            .height
+            .then_some(metrics.inner.height)
+            .flatten(),
+    );
+    let definite_outer = Size::new(
+        outer_definite
+            .width
+            .then_some(metrics.outer.width)
+            .flatten(),
+        outer_definite
+            .height
+            .then_some(metrics.outer.height)
+            .flatten(),
+    );
+    let initial_gap = resolve_gap(source, gap_value, initial_percentage_basis);
     // Auto-repeat's preferred/max constraint must be clamped by min/max
     // first; CSS gives the minimum precedence when max < min. Track counts
     // use the resulting content-box constraint, not the raw border-box
     // property value.
     let repeat_max_basis = Size::new(
-        metrics.outer.width.or(metrics.max.width).map(|value| {
+        definite_outer.width.or(metrics.max.width).map(|value| {
             (clamp(value, metrics.min.width, metrics.max.width) - metrics.box_inset.width).max(0.0)
         }),
-        metrics.outer.height.or(metrics.max.height).map(|value| {
+        definite_outer.height.or(metrics.max.height).map(|value| {
             (clamp(value, metrics.min.height, metrics.max.height) - metrics.box_inset.height)
                 .max(0.0)
         }),
@@ -1063,10 +1098,7 @@ where
             in_flow.push(child_style);
         }
     }
-    let has_modified_order = in_flow
-        .iter()
-        .chain(absolute.iter())
-        .any(|item| item.ordered.css_order != 0);
+    let has_modified_order = in_flow.iter().any(|item| item.ordered.css_order != 0);
     if in_flow.iter().any(|item| item.ordered.css_order != 0) {
         in_flow.sort_unstable_by_key(|item| (item.ordered.css_order, item.ordered.document_index));
     }
@@ -1083,14 +1115,12 @@ where
                 index,
             )
         }));
-        paint_keys.extend(absolute.iter().enumerate().map(|(index, item)| {
-            (
-                item.ordered.css_order,
-                item.ordered.document_index,
-                true,
-                index,
-            )
-        }));
+        paint_keys.extend(
+            absolute
+                .iter()
+                .enumerate()
+                .map(|(index, item)| (0, item.ordered.document_index, true, index)),
+        );
         paint_keys.sort_unstable_by_key(|&(order, document, _, _)| (order, document));
         for (layout_order, &(_, _, is_absolute, index)) in paint_keys.iter().enumerate() {
             let layout_order = u32::try_from(layout_order).unwrap_or(u32::MAX);
@@ -1185,7 +1215,7 @@ where
         &column_specs,
         &row_specs,
         &mut items,
-        metrics.inner,
+        initial_percentage_basis,
         metrics.available_inner,
         initial_gap,
         justify_content,
@@ -1206,8 +1236,9 @@ where
         gap_value,
         Size::new(Some(final_inner.width), Some(final_inner.height)),
     );
-    let needs_definite_rerun =
-        metrics.inner.width.is_none() || metrics.inner.height.is_none() || final_gap != initial_gap;
+    let needs_definite_rerun = initial_percentage_basis.width.is_none()
+        || initial_percentage_basis.height.is_none()
+        || final_gap != initial_gap;
     if needs_definite_rerun {
         (columns, rows) = run_track_sizing(
             source,

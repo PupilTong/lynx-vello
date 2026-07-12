@@ -21,8 +21,8 @@
 use super::compute_absolute_layout;
 use super::util::{
     ItemKey, OrderedItem, ResolvedContainerBox, ResolvedItemBox, box_inset_size, clamp_axis,
-    resolve_container_box, resolve_dimension, resolve_gap, resolve_item_box,
-    resolve_length_percentage,
+    preferred_size_definiteness, resolve_container_box, resolve_dimension, resolve_gap,
+    resolve_item_box, resolve_length_percentage,
 };
 use crate::geometry::{Edges, Point, Size};
 use crate::style::alignment::{AlignContent, AlignItems};
@@ -274,37 +274,6 @@ fn set_flow_end(edges: &mut Edges<f32>, axis: Axis, reverse: bool, value: f32) {
         (Axis::Vertical, false) => edges.bottom = value,
         (Axis::Vertical, true) => edges.top = value,
     }
-}
-
-#[inline]
-fn dimension_is_definite(value: Dimension, parent_basis: Option<f32>) -> bool {
-    match value {
-        Dimension::Length(_) => true,
-        Dimension::Percent(_) | Dimension::Calc(_) => parent_basis.is_some(),
-        Dimension::Auto
-        | Dimension::MinContent
-        | Dimension::MaxContent
-        | Dimension::FitContent(_) => false,
-    }
-}
-
-fn preferred_size_definiteness(
-    size: Size<Dimension>,
-    parent_size: Size<Option<f32>>,
-    aspect_ratio: Option<f32>,
-) -> Size<bool> {
-    let mut definite = Size::new(
-        dimension_is_definite(size.width, parent_size.width),
-        dimension_is_definite(size.height, parent_size.height),
-    );
-    if aspect_ratio.is_some() {
-        if definite.width {
-            definite.height = true;
-        } else if definite.height {
-            definite.width = true;
-        }
-    }
-    definite
 }
 
 fn alignment_distribution(

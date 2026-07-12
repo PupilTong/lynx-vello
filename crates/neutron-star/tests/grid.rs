@@ -88,6 +88,9 @@ struct TestStyle {
     grid_column: Line<GridPlacement>,
     align_self: Option<AlignSelf>,
     justify_self: Option<JustifySelf>,
+    flex_basis: Dimension,
+    flex_grow: f32,
+    flex_shrink: f32,
     order: i32,
 }
 
@@ -122,6 +125,9 @@ impl Default for TestStyle {
             grid_column: Line::new(GridPlacement::Auto, GridPlacement::Auto),
             align_self: None,
             justify_self: None,
+            flex_basis: Dimension::Auto,
+            flex_grow: 0.0,
+            flex_shrink: 1.0,
             order: 0,
         }
     }
@@ -284,6 +290,18 @@ impl FlexContainerStyle for TestStyle {
 }
 
 impl FlexItemStyle for TestStyle {
+    fn flex_basis(&self) -> Dimension {
+        self.flex_basis
+    }
+
+    fn flex_grow(&self) -> f32 {
+        self.flex_grow
+    }
+
+    fn flex_shrink(&self) -> f32 {
+        self.flex_shrink
+    }
+
     fn align_self(&self) -> Option<AlignSelf> {
         self.align_self
     }
@@ -306,6 +324,7 @@ struct TestSourceNode {
 #[derive(Debug, Clone, Copy, Default)]
 struct TestSessionNode {
     layout: Layout,
+    last_input: Option<LayoutInput>,
     static_position: Option<Point<f32>>,
     layout_writes: usize,
     static_position_writes: usize,
@@ -465,6 +484,7 @@ impl LayoutSession<TestSource> for TestSession {
         child: NodeId,
         input: LayoutInput,
     ) -> LayoutOutput {
+        self.nodes[usize::from(child)].last_input = Some(input);
         let node = &source.nodes[usize::from(child)];
         let display = node.display;
 
@@ -1300,6 +1320,28 @@ fn order_sort_is_stable_and_recorded_in_layouts() {
 }
 
 #[test]
+fn absolute_grid_children_use_order_zero_for_paint_order() {
+    let mut tree = TestTree::default();
+    let mut absolute_style = fixed_leaf_style(10.0, 10.0);
+    absolute_style.position = Position::Absolute;
+    absolute_style.order = 10;
+    let absolute = tree.push_leaf(absolute_style, Size::ZERO, Size::new(10.0, 10.0));
+    let in_flow = fixed_leaf(&mut tree, 10.0, 10.0);
+    let root = tree.push_grid(
+        grid_style(&[px(20.0)], &[px(10.0)]),
+        vec![absolute, in_flow],
+    );
+
+    definite_layout(&mut tree, root, 20.0, 10.0);
+
+    // An absolutely-positioned child is not a grid item, so its own
+    // `order` value is ignored and it contributes the initial value zero to
+    // the formatting parent's order-modified paint sequence.
+    assert_eq!(tree.layout(absolute).order, 0);
+    assert_eq!(tree.layout(in_flow).order, 1);
+}
+
+#[test]
 fn measure_goal_probes_intrinsics_without_durable_writes() {
     let mut tree = TestTree::default();
     let child = intrinsic_leaf(&mut tree, Size::new(30.0, 10.0), Size::new(60.0, 20.0));
@@ -1539,6 +1581,45 @@ fn grid_dispatch_composes_with_nested_flex_without_erasure() {
     assert_size(tree.layout(inner).size, Size::new(120.0, 40.0));
     assert_point(tree.layout(first).location, Point::ZERO);
     assert_point(tree.layout(second).location, Point::new(100.0, 0.0));
+}
+
+#[test]
+fn flex_known_but_indefinite_grid_size_does_not_seed_initial_auto_repeat() {
+    let mut tree = TestTree::default();
+    let first = fixed_leaf(&mut tree, 20.0, 10.0);
+    let second = fixed_leaf(&mut tree, 20.0, 10.0);
+
+    let mut grid = grid_style(&[], &[px(10.0)]);
+    grid.template_columns = vec![repeat(RepetitionCount::AutoFill, vec![percent(0.5)])];
+    grid.size.height = Dimension::Length(20.0);
+    grid.flex_basis = Dimension::Percent(0.5);
+    grid.flex_shrink = 0.0;
+    grid.align_items = Some(AlignItems::Start);
+    grid.justify_items = Some(JustifyItems::Start);
+    let inner = tree.push_grid(grid, vec![first, second]);
+
+    let root = tree.push_flex(
+        TestStyle {
+            size: Size::new(Dimension::Auto, Dimension::Length(20.0)),
+            align_items: Some(AlignItems::Start),
+            ..TestStyle::default()
+        },
+        vec![inner],
+    );
+
+    let output = intrinsic_layout(&mut tree, root);
+
+    let grid_input = tree.session_node(inner).last_input.unwrap();
+    assert_close(grid_input.known_dimensions.width.unwrap(), 20.0);
+    assert!(!grid_input.definite_dimensions.width);
+    assert_close(output.size.width, 20.0);
+    assert_size(tree.layout(inner).size, Size::new(20.0, 20.0));
+    // The unresolved percentage flex basis gives Grid numeric used geometry,
+    // but not an initial percentage basis. auto-fill therefore materializes
+    // once; its 50% track resolves during the bounded final sizing rerun and
+    // the second item auto-places into an implicit row rather than column 2.
+    assert_point(tree.layout(first).location, Point::ZERO);
+    assert_point(tree.layout(second).location, Point::new(0.0, 10.0));
 }
 
 #[test]

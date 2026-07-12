@@ -255,6 +255,41 @@ pub(super) fn apply_aspect_ratio(
 }
 
 #[inline]
+fn dimension_is_definite(value: Dimension, parent_basis: Option<f32>) -> bool {
+    match value {
+        Dimension::Length(_) => true,
+        Dimension::Percent(_) | Dimension::Calc(_) => parent_basis.is_some(),
+        Dimension::Auto
+        | Dimension::MinContent
+        | Dimension::MaxContent
+        | Dimension::FitContent(_) => false,
+    }
+}
+
+/// Returns which preferred-size axes establish a definite percentage basis.
+/// A preferred aspect ratio transfers definiteness across axes just as it
+/// transfers the resolved preferred size.
+#[inline]
+pub(super) fn preferred_size_definiteness(
+    size: Size<Dimension>,
+    parent_size: Size<Option<f32>>,
+    aspect_ratio: Option<f32>,
+) -> Size<bool> {
+    let mut definite = Size::new(
+        dimension_is_definite(size.width, parent_size.width),
+        dimension_is_definite(size.height, parent_size.height),
+    );
+    if aspect_ratio.is_some() {
+        if definite.width {
+            definite.height = true;
+        } else if definite.height {
+            definite.width = true;
+        }
+    }
+    definite
+}
+
+#[inline]
 pub(super) fn clamp(value: f32, min: Option<f32>, max: Option<f32>) -> f32 {
     // CSS gives the minimum precedence when max < min.
     value
