@@ -28,3 +28,7 @@ workspace = true
 [[bench]]
 name = "grid"
 harness = false
+
+[[bench]]
+name = "grid_pr25"
+harness = false

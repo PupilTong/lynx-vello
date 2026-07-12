@@ -380,14 +380,7 @@ where
     let preferred_behaves_auto_or_depends = axis.size(item.preferred_behaves_auto_or_depends);
     let mut contribution = match kind {
         ContributionKind::Minimum => {
-            if !preferred_behaves_auto_or_depends {
-                // A definite preferred size defines the box's intrinsic
-                // contribution; overflowing descendants do not enlarge it.
-                preferred.unwrap_or_else(|| {
-                    raw_content_size(source, session, item, axis, kind, cross_tracks, inner_size)
-                        + margin_sum(item, axis)
-                })
-            } else if let Some(minimum) = explicit_min {
+            if let Some(minimum) = explicit_min {
                 minimum
             } else {
                 // Grid §6.6: an automatic minimum is content-based when
@@ -419,6 +412,21 @@ where
                     let suggestion = preferred.map_or(raw_outer, |size| raw_outer.min(size));
                     fixed_max_span_limit(source, axis, tracks, indexes, inner_size)
                         .map_or(suggestion, |limit| suggestion.min(limit))
+                } else if !preferred_behaves_auto_or_depends {
+                    // A definite preferred size defines the box's minimum
+                    // contribution only when Grid's content-based automatic
+                    // minimum does not apply.
+                    preferred.unwrap_or_else(|| {
+                        raw_content_size(
+                            source,
+                            session,
+                            item,
+                            axis,
+                            kind,
+                            cross_tracks,
+                            inner_size,
+                        ) + margin_sum(item, axis)
+                    })
                 } else {
                     axis.sum(item.padding)
                         + axis.sum(item.border)
@@ -1026,18 +1034,40 @@ fn resolve_intrinsic_sizes<Source, Session>(
                 cross_tracks,
                 inner_size,
             ),
-            MinTrackSizingFunction::Auto
-                if matches!(
-                    available,
-                    AvailableSpace::MinContent | AvailableSpace::MaxContent
-                ) =>
-            {
+            MinTrackSizingFunction::Auto if available == AvailableSpace::MinContent => {
                 measure_limited_contribution(
                     source,
                     session,
                     item,
                     axis,
                     ContributionKind::MinContent,
+                    tracks,
+                    cross_tracks,
+                    inner_size,
+                )
+            }
+            MinTrackSizingFunction::Auto if available == AvailableSpace::MaxContent => {
+                // The max-content constrained branch still performs the
+                // limited min-content probe first. Besides providing the
+                // automatic-minimum floor required by §12.5, this preserves
+                // cross-axis feedback when the two intrinsic contributions
+                // respond differently to the resolved opposite track.
+                let _ = measure_limited_contribution(
+                    source,
+                    session,
+                    item,
+                    axis,
+                    ContributionKind::MinContent,
+                    tracks,
+                    cross_tracks,
+                    inner_size,
+                );
+                measure_limited_contribution(
+                    source,
+                    session,
+                    item,
+                    axis,
+                    ContributionKind::MaxContent,
                     tracks,
                     cross_tracks,
                     inner_size,
@@ -1286,6 +1316,27 @@ fn resolve_intrinsic_sizes<Source, Session>(
     // Step 4 considers every item crossing a flexible track together. The
     // flex-factor weighting includes the specified <1 remainder rule.
     if !crosses_flexible.is_empty() {
+        // Under a max-content constraint, flexible tracks' intrinsic base
+        // growth is driven by the item's max-content contribution. Using the
+        // automatic minimum here loses all contribution for ordinary
+        // measured items and makes sub-unit/zero `fr` tracks collapse before
+        // §12.7 can find a flex fraction.
+        let spanned_flex_sum = crosses_flexible
+            .iter()
+            .flat_map(|&index| {
+                let span = span_for(&items[index], axis);
+                tracks.tracks[tracks.span_indices(span.start, span.end).clone()]
+                    .iter()
+                    .filter(|track| track.is_flexible())
+                    .map(|track| track.flex_factor)
+            })
+            .sum::<f32>();
+        let flexible_base_kind =
+            if available != AvailableSpace::MinContent && spanned_flex_sum < 1.0 {
+                ContributionKind::MaxContent
+            } else {
+                spanning_minimum_kind
+            };
         run_spanning_base_phase(
             source,
             session,
@@ -1295,7 +1346,7 @@ fn resolve_intrinsic_sizes<Source, Session>(
             items,
             &crosses_flexible,
             inner_size,
-            spanning_minimum_kind,
+            flexible_base_kind,
             use_limited_min_content,
             true,
             |track| track.is_flexible(),

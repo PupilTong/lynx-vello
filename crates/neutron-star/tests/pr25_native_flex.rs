@@ -782,6 +782,7 @@ fn native_flex_inventory_partitions_into_canonical_and_unique_cases() {
     }
 }
 
+#[allow(dead_code)]
 trait NativeLengthExt {
     fn fr(value: f32) -> Self;
     fn max_content() -> Self;

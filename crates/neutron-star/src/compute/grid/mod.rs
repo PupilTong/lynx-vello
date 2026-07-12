@@ -201,7 +201,7 @@ fn run_track_sizing<Source, Session>(
     gap: Size<f32>,
     justify_content: AlignContent,
     align_content: AlignContent,
-) -> (TrackSet, TrackSet)
+) -> (TrackSet, TrackSet, bool)
 where
     Source: GridSource,
     Session: LayoutSession<Source>,
@@ -368,7 +368,7 @@ where
         }
         rows = rerun_rows;
     }
-    (columns, rows)
+    (columns, rows, column_feedback_changed)
 }
 
 fn final_outer_size(metrics: &ResolvedContainerBox, tracks: Size<f32>) -> Size<f32> {
@@ -510,13 +510,31 @@ where
             Some(columns),
             Size::new(Some(area_size.width), Some(area_size.height)),
         );
+        let raw_size = source.grid_item_style(item.key.node).size();
         let mut known = item.preferred_size;
+        let resolved_preferred = item.preferred_size;
+        let intrinsic_width = matches!(
+            raw_size.width,
+            Dimension::MinContent | Dimension::MaxContent | Dimension::FitContent(_)
+        );
+        let intrinsic_height = matches!(
+            raw_size.height,
+            Dimension::MinContent | Dimension::MaxContent | Dimension::FitContent(_)
+        );
+        if intrinsic_width {
+            known.width = None;
+        }
+        if intrinsic_height {
+            known.height = None;
+        }
         let horizontal_stretch = item.justify_self == AlignItems::Stretch
             && known.width.is_none()
+            && !intrinsic_width
             && !item.margin_auto.left
             && !item.margin_auto.right;
         let vertical_stretch = item.align_self == AlignItems::Stretch
             && known.height.is_none()
+            && !intrinsic_height
             && !item.margin_auto.top
             && !item.margin_auto.bottom;
         if horizontal_stretch {
@@ -534,8 +552,28 @@ where
             .map(|value| clamp(value, item.min_size.height, item.max_size.height));
 
         let available = Size::new(
-            AvailableSpace::Definite((area_size.width - item.margin.horizontal_sum()).max(0.0)),
-            AvailableSpace::Definite((area_size.height - item.margin.vertical_sum()).max(0.0)),
+            if matches!(raw_size.width, Dimension::FitContent(_)) {
+                resolved_preferred
+                    .width
+                    .map_or(AvailableSpace::MaxContent, AvailableSpace::Definite)
+            } else {
+                known.width.map_or(AvailableSpace::MaxContent, |_| {
+                    AvailableSpace::Definite(
+                        (area_size.width - item.margin.horizontal_sum()).max(0.0),
+                    )
+                })
+            },
+            if matches!(raw_size.height, Dimension::FitContent(_)) {
+                resolved_preferred
+                    .height
+                    .map_or(AvailableSpace::MaxContent, AvailableSpace::Definite)
+            } else {
+                known.height.map_or(AvailableSpace::MaxContent, |_| {
+                    AvailableSpace::Definite(
+                        (area_size.height - item.margin.vertical_sum()).max(0.0),
+                    )
+                })
+            },
         );
         let parent_size = Size::new(Some(area_size.width), Some(area_size.height));
         let input = match goal {
@@ -744,6 +782,30 @@ fn absolute_axis_lines(
     placement: Line<GridPlacement>,
     explicit_tracks: usize,
 ) -> (Option<i32>, Option<i32>) {
+    // Unlike in-flow placement, two definite lines on an absolutely
+    // positioned item are not reordered when the end precedes the start.
+    // Grid §10.1 makes that a zero-sized containing block at the start line.
+    // Resolve the two line coordinates independently so the subsequent area
+    // calculation can retain that start edge.
+    if matches!(placement.start, GridPlacement::Line(_))
+        && matches!(placement.end, GridPlacement::Line(_))
+    {
+        let start = match resolve_axis_placement(
+            Line::new(placement.start, GridPlacement::Span(1)),
+            explicit_tracks,
+        ) {
+            AxisPlacement::Definite(span) => Some(span.start),
+            AxisPlacement::Indefinite { .. } => None,
+        };
+        let end = match resolve_axis_placement(
+            Line::new(GridPlacement::Span(1), placement.end),
+            explicit_tracks,
+        ) {
+            AxisPlacement::Definite(span) => Some(span.end),
+            AxisPlacement::Indefinite { .. } => None,
+        };
+        return (start, end);
+    }
     if !matches!(placement.start, GridPlacement::Auto)
         && !matches!(placement.end, GridPlacement::Auto)
     {
@@ -822,13 +884,24 @@ where
     Session: LayoutSession<Source>,
 {
     let basis = Size::new(Some(containing_size.width), Some(containing_size.height));
+    let raw_size = source.grid_item_style(item.key.node).size();
+    let intrinsic_available =
+        raw_size.zip_map(containing_size, |dimension, available| match dimension {
+            Dimension::MinContent => AvailableSpace::MinContent,
+            Dimension::MaxContent => AvailableSpace::MaxContent,
+            Dimension::Length(_)
+            | Dimension::Percent(_)
+            | Dimension::Calc(_)
+            | Dimension::Auto
+            | Dimension::FitContent(_) => AvailableSpace::Definite(available),
+        });
     let output = session.compute_child_layout(
         source,
         item.key.node,
         LayoutInput::compute_size(
             item.preferred_size,
             basis,
-            containing_size.map(AvailableSpace::Definite),
+            intrinsic_available,
             RequestedAxis::Both,
         ),
     );
@@ -851,19 +924,35 @@ where
         used_size.width + item.margin.horizontal_sum(),
         used_size.height + item.margin.vertical_sum(),
     );
+    let auto_margin_offset = |axis: Axis| {
+        let available = axis.size(containing_size) - axis.size(used_size);
+        let start_auto = axis.start(item.margin_auto);
+        let end_auto = axis.end(item.margin_auto);
+        let fixed_start = axis.start(item.margin);
+        let fixed_end = axis.end(item.margin);
+        let count = usize::from(start_auto) + usize::from(end_auto);
+        (count > 0).then(|| {
+            let share = ((available - fixed_start - fixed_end).max(0.0)) / count as f32;
+            if start_auto { share } else { 0.0 }
+        })
+    };
     Point::new(
-        item_alignment_offset(
-            containing_size.width - margin_box.width,
-            item.justify_self,
-            rtl,
-            item.direction == Direction::Rtl,
-        ),
-        item_alignment_offset(
-            containing_size.height - margin_box.height,
-            item.align_self,
-            false,
-            false,
-        ),
+        auto_margin_offset(Axis::Horizontal).unwrap_or_else(|| {
+            item_alignment_offset(
+                containing_size.width - margin_box.width,
+                item.justify_self,
+                rtl,
+                item.direction == Direction::Rtl,
+            )
+        }),
+        auto_margin_offset(Axis::Vertical).unwrap_or_else(|| {
+            item_alignment_offset(
+                containing_size.height - margin_box.height,
+                item.align_self,
+                false,
+                false,
+            )
+        }),
     )
 }
 
@@ -905,11 +994,12 @@ where
     );
     for pending in items {
         let key = pending.key();
-        let needs_static_measurement = {
+        let inset_auto = {
             let style = source.grid_item_style(key.node);
-            let inset_auto = style.inset().map(LengthPercentageAuto::is_auto);
-            (inset_auto.left && inset_auto.right) || (inset_auto.top && inset_auto.bottom)
+            style.inset().map(LengthPercentageAuto::is_auto)
         };
+        let needs_static_measurement =
+            (inset_auto.left && inset_auto.right) || (inset_auto.top && inset_auto.bottom);
         let content_static_offset = if needs_static_measurement {
             let item = resolve_grid_item(
                 source,
@@ -1022,7 +1112,24 @@ where
         input.definite_dimensions.width || style_definite.width,
         input.definite_dimensions.height || style_definite.height,
     );
-    let metrics = resolve_container_box(source, &style, input);
+    let mut metrics = resolve_container_box(source, &style, input);
+    if input.sizing_mode != SizingMode::ContentSize {
+        let preferred = style.size();
+        if metrics.inner.width.is_none() {
+            metrics.available_inner.width = match preferred.width {
+                Dimension::MinContent => AvailableSpace::MinContent,
+                Dimension::MaxContent => AvailableSpace::MaxContent,
+                _ => metrics.available_inner.width,
+            };
+        }
+        if metrics.inner.height.is_none() {
+            metrics.available_inner.height = match preferred.height {
+                Dimension::MinContent => AvailableSpace::MinContent,
+                Dimension::MaxContent => AvailableSpace::MaxContent,
+                _ => metrics.available_inner.height,
+            };
+        }
+    }
     let initial_percentage_basis = Size::new(
         outer_definite
             .width
@@ -1213,7 +1320,7 @@ where
         .map(|(item, area)| resolve_grid_item(source, item.key(), area, Size::NONE, item_defaults))
         .collect::<Vec<_>>();
 
-    let (mut columns, mut rows) = run_track_sizing(
+    let (mut columns, mut rows, cross_axis_feedback_resolved) = run_track_sizing(
         source,
         session,
         &column_specs,
@@ -1240,11 +1347,11 @@ where
         gap_value,
         Size::new(Some(final_inner.width), Some(final_inner.height)),
     );
-    let needs_definite_rerun = initial_percentage_basis.width.is_none()
-        || initial_percentage_basis.height.is_none()
+    let needs_definite_rerun = (!cross_axis_feedback_resolved
+        && (initial_percentage_basis.width.is_none() || initial_percentage_basis.height.is_none()))
         || final_gap != initial_gap;
     if needs_definite_rerun {
-        (columns, rows) = run_track_sizing(
+        (columns, rows, _) = run_track_sizing(
             source,
             session,
             &column_specs,
