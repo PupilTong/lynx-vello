@@ -84,6 +84,13 @@ impl<T: ExternalState> Element for ElementRef<'_, T> {
         local_name: &LocalName,
         operation: &AttrSelectorOperation<&AtomString>,
     ) -> bool {
+        // Known gap: `class`/`id` live in their own fields (`classes`,
+        // `id_attr`), not in `attrs`, and are not reflected here — so
+        // attribute-form selectors like `[class~=x]`/`[id=y]` never match
+        // them (use `.x`/`#y`). Reflecting them costs a string build on this
+        // hot path for a selector form ReactLynx CSS does not use;
+        // invalidation (`note_class_change`/`note_id_change`) is consistent
+        // with this choice.
         let name: &str = local_name.0.as_ref();
         if let Some(value) = self.element().attrs.get(name) {
             return operation.eval_str(value);
@@ -122,13 +129,14 @@ impl<T: ExternalState> Element for ElementRef<'_, T> {
     fn apply_selector_flags(&self, flags: ElementSelectorFlags) {
         // stylo's contract splits the flags: `for_self()` bits land on this
         // element, `for_parent()` bits (slow-selector / edge-child markers) on
-        // its parent.
+        // its parent. Atomic ORs: parallel workers matching sibling elements
+        // may both push parent flags onto the shared parent.
+        use std::sync::atomic::Ordering;
         let self_flags = flags.for_self();
         if !self_flags.is_empty() {
             self.element()
                 .selector_flags
-                .borrow_mut()
-                .insert(self_flags);
+                .fetch_or(self_flags.bits(), Ordering::Relaxed);
         }
         let parent_flags = flags.for_parent();
         if !parent_flags.is_empty()
@@ -137,8 +145,7 @@ impl<T: ExternalState> Element for ElementRef<'_, T> {
             parent
                 .element()
                 .selector_flags
-                .borrow_mut()
-                .insert(parent_flags);
+                .fetch_or(parent_flags.bits(), Ordering::Relaxed);
         }
     }
 

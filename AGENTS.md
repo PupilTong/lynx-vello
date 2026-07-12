@@ -89,6 +89,14 @@ decide silently. Ask the user** before choosing which behavior to implement.
 See `docs/tracking/deviations.md` for the running list of confirmed
 divergences found so far.
 
+**Scope exceptions.** A feature can be deliberately deferred or narrowed
+relative to the compat target by an explicit, user-confirmed decision — the
+styling-system set lives in `docs/style-assumptions.md` (e.g.
+`::before`/`::after` omitted in v1: native Lynx has no such feature; only the
+web target renders it via browser passthrough). Those decisions override the
+default "match web-core" expectation until their recorded revisit milestone;
+follow them rather than re-deriving the classification.
+
 ## Dependency policy
 
 All crates should track the **latest available versions** — **except `rkyv`,

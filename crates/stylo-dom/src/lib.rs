@@ -34,10 +34,14 @@
 //!
 //! # Thread-safety
 //!
-//! Because an [`Element`] owns an `UnsafeCell` of stylo's `ElementData`, the
-//! tree is **not** `Sync`, and the whole crate assumes a **single-threaded
-//! flush**: resolution and mutation never run concurrently on the same arena.
-//! The `unsafe` this requires is confined to [`traits`].
+//! Style flushes ([`StyleEngine::flush_tree`]) run **stylo's own restyle
+//! traversal**, which may fan out over rayon workers sharing `&Arena`. Every
+//! piece of element state stylo touches through `&self` during a traversal is
+//! atomic; the one non-atomic slot (the `UnsafeCell` of stylo's
+//! `ElementData`) is owned by exactly one worker at a time under stylo's
+//! traversal discipline — see [`Element`] and the `SAFETY` notes in
+//! [`traits`] and [`flush`]. Outside a flush, mutation goes through
+//! `&mut Arena`, so nothing races.
 //!
 //! # Layout
 //!
@@ -56,6 +60,7 @@
 pub mod arena;
 pub mod element;
 pub mod ext;
+pub mod flush;
 pub mod state;
 pub mod style;
 pub mod traits;
@@ -70,5 +75,8 @@ pub use arena::{Arena, ElementId, ElementRef};
 pub use dom::ElementState;
 pub use element::Element;
 pub use ext::ExternalState;
+pub use flush::Parallelism;
 pub use state::PseudoState;
-pub use style::{ComputedStyle, StyleEngine, StylesheetOrigin, property_is_supported};
+pub use style::{
+    ComputedStyle, CssRule, RawDeclaration, StyleEngine, StylesheetOrigin, property_is_supported,
+};

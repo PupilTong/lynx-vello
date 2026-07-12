@@ -164,11 +164,12 @@ fn insert_element_before_semantics() {
 }
 
 #[test]
-fn tree_mutations_dirty_parents_following_siblings() {
-    // `.list:empty + .hint`-style selectors: an insert/remove flips the
-    // parent's own matching, observed through `+`/`~` — so tree mutations
-    // must dirty the mutated parent's FOLLOWING siblings, like attribute
-    // changes do.
+fn tree_mutations_mark_reachability() {
+    // Structural mutations must make the mutation site reachable from the
+    // page root (the flush walks `dirty_descendants` down); which siblings
+    // actually restyle is decided at flush time from stylo's selector flags
+    // (`.list:empty + .hint`-style rules set HAS_EMPTY_SELECTOR on `list`
+    // during matching).
     let mut doc = WidgetTree::new();
     let page = doc.create_page();
     let before_sib = doc.create_view();
@@ -180,19 +181,19 @@ fn tree_mutations_dirty_parents_following_siblings() {
     let child = doc.create_view();
     doc.append_element(child, list).unwrap();
     doc.clear_dirty();
+    assert!(!doc.has_dirty());
 
-    // Removing `list`'s only child can flip `.list:empty` → `hint` restyles.
     doc.remove_element(list, child).unwrap();
-    assert!(doc.widget(hint).unwrap().style_dirty);
+    assert!(doc.has_dirty(), "removal must schedule flush work");
     assert!(
-        !doc.widget(before_sib).unwrap().style_dirty,
-        "earlier siblings are unaffected by later-sibling mutations"
+        !doc.widget(before_sib).unwrap().is_style_dirty(),
+        "siblings are not blanket-dirtied at mutation time"
     );
 
     doc.clear_dirty();
-    // The reverse transition (insert) invalidates the same way.
     doc.append_element(child, list).unwrap();
-    assert!(doc.widget(hint).unwrap().style_dirty);
+    assert!(doc.has_dirty(), "insertion must schedule flush work");
+    assert!(doc.widget(list).unwrap().has_dirty_descendants());
 }
 
 #[test]
@@ -316,19 +317,19 @@ fn dirty_propagation_from_set_classes() {
 
     doc.set_classes(b, "highlighted").unwrap();
 
-    // The mutated node and its subtree are dirty.
-    assert!(doc.widget(b).unwrap().style_dirty);
-    assert!(doc.widget(b1).unwrap().style_dirty);
-    // Ancestors gain dirty_descendants but not style_dirty.
-    assert!(doc.widget(container).unwrap().dirty_descendants);
-    assert!(!doc.widget(container).unwrap().style_dirty);
-    assert!(doc.widget(page).unwrap().dirty_descendants);
-    // Following sibling's subtree is dirtied (covers + / ~ combinators).
-    assert!(doc.widget(c).unwrap().style_dirty);
-    assert!(doc.widget(c1).unwrap().style_dirty);
-    // Earlier sibling is untouched.
-    assert!(!doc.widget(a).unwrap().style_dirty);
-    assert!(!doc.widget(a).unwrap().dirty_descendants);
+    // The mutated node itself is dirty; ancestors gain reachability bits.
+    assert!(doc.widget(b).unwrap().is_style_dirty());
+    assert!(doc.widget(container).unwrap().has_dirty_descendants());
+    assert!(!doc.widget(container).unwrap().is_style_dirty());
+    assert!(doc.widget(page).unwrap().has_dirty_descendants());
+    // Nothing else is blanket-dirtied at mutation time: precision comes from
+    // the pre-mutation snapshot matched against the stylist's invalidation
+    // maps during the flush.
+    assert!(!doc.widget(b1).unwrap().is_style_dirty());
+    assert!(!doc.widget(c).unwrap().is_style_dirty());
+    assert!(!doc.widget(c1).unwrap().is_style_dirty());
+    assert!(!doc.widget(a).unwrap().is_style_dirty());
+    assert!(!doc.widget(a).unwrap().has_dirty_descendants());
 
     assert!(doc.has_dirty());
 }

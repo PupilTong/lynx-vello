@@ -157,11 +157,18 @@ consequential choice about whether to follow the spec or the quirk.
   grammar exists, the semantics don't. `:where()` in particular is load-bearing
   — it's the exact mechanism `web-core` uses for CSS-module scoping — so
   lynx-vello needs it working natively regardless of ReactLynx author usage.
+  **Decision (user-confirmed, 2026-07-11): full stylo matching** — everything
+  that parses, matches per spec; the native matcher's gaps are not
+  replicated. See [docs/style-assumptions.md](../style-assumptions.md) §A.3.
 - **`::before`/`::after` + `content`** — entirely unimplemented in the native
   engine (no box generation, no `content` property at all); only works on the
   web target via passthrough to the real browser. lynx-vello must explicitly
   decide whether to add real support (W3C-correct) since there's no native
   Lynx behavior to fall back to.
+  **Decision (user-confirmed, 2026-07-11): omit in v1** — native-Lynx
+  fidelity; selectors parse but generate no boxes and `content` stays inert.
+  This is an intentional divergence from the web target; revisit on fixture
+  demand. See [docs/style-assumptions.md](../style-assumptions.md) §A.4.
 - **`@media` queries** — the C++ engine has a complete, recently-added,
   spec-modeled evaluator, but it is **wired only into the native `.lynx.bundle`
   pipeline**. The `.web.bundle` wire format lynx-vello actually decodes has
@@ -172,6 +179,10 @@ consequential choice about whether to follow the spec or the quirk.
   whether to (a) match today's web-bundle behavior (media queries never
   apply) or (b) extend the format, using the C++ engine's evaluator model as
   the behavioral reference either way.
+  **Decision (user-confirmed, 2026-07-11): (b) — wire stylo's `@media`
+  evaluation now**, ahead of the wire format, with the C++ NG evaluator as
+  the behavioral reference; the format extension itself stays future work.
+  See [docs/style-assumptions.md](../style-assumptions.md) §C.10.
 - **`@supports`** — parser and evaluator exist in the C++ engine but have
   **zero production call sites** (confirmed by grep); `selector()`,
   `font-tech()`, `font-format()`, and `at-rule()` all unconditionally return

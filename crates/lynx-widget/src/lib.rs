@@ -38,12 +38,18 @@ pub mod kind;
 pub mod papi;
 pub mod state;
 pub mod style;
+pub mod ua;
+
+mod ingest;
 
 pub use kind::WidgetKind;
 pub use papi::{WidgetError, WidgetTree};
 pub use state::{EventKind, EventReg, WidgetState};
 pub use style::{EngineMetrics, StyleEngine};
-pub use stylo_dom::{ComputedStyle, PseudoState, StylesheetOrigin, property_is_supported};
+pub use stylo_dom::{
+    ComputedStyle, Parallelism, PseudoState, StylesheetOrigin, property_is_supported,
+};
+pub use ua::PageConfig;
 
 /// A Lynx widget: the generic HTML-DOM-subset element carrying the
 /// Lynx-specific [`WidgetState`] payload in its `ext` field.

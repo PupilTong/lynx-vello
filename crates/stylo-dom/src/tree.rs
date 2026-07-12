@@ -11,15 +11,20 @@
 //!
 //! # Invalidation contract
 //!
-//! - [`Arena::detach`] applies [`mark_attribute_changed`](Arena::mark_attribute_changed) to the
-//!   *old* parent (a removal can flip the parent's `:empty` / `:nth-*` matching, observable through
-//!   `+` / `~`).
-//! - [`Arena::attach_at`] applies it to the *new* parent, for the same reason.
+//! - [`Arena::detach`] applies the child-list invalidation
+//!   ([`note_child_list_change`](Arena::note_child_list_change)) to the *old* parent — scoped by
+//!   the parent's stylo selector flags, so a removal only restyles what `:empty` / `:nth-*` /
+//!   edge-child rules can actually observe.
+//! - [`Arena::attach_at`] applies it to the *new* parent, and additionally schedules a subtree
+//!   restyle on a previously-styled `child` (its matching context — ancestors, siblings — changed
+//!   with the move).
 //!
 //! Cycle detection is deliberately **not** here: it is the embedding layer's
 //! job because it produces that layer's errors. The read helpers
 //! ([`Arena::is_ancestor`] etc.) the embedder needs to detect cycles / resolve
 //! references live here so both layers share one implementation.
+
+use stylo::invalidation::element::restyle_hints::RestyleHint;
 
 use crate::arena::{Arena, ElementId};
 
@@ -55,10 +60,9 @@ impl<T> Arena<T> {
         false
     }
 
-    /// Detach `child` from its current parent, if any, applying the structural
-    /// invalidation at the old location: the parent's subtree plus the
-    /// parent's following-sibling subtrees (a removal can flip the parent's
-    /// `:empty`/`:nth-*` matching, observable through `+`/`~`).
+    /// Detach `child` from its current parent, if any, applying the
+    /// selector-flag-scoped child-list invalidation at the old location (a
+    /// removal can flip `:empty` / `:nth-*` / edge-child matching).
     ///
     /// A no-op on an already-parentless (or stale) `child`.
     pub fn detach(&mut self, child: ElementId) {
@@ -67,27 +71,31 @@ impl<T> Arena<T> {
             None => return,
         };
         if let Some(parent) = old_parent {
-            if let Some(parent_element) = self.get_mut(parent) {
-                parent_element.children.retain(|&c| c != child);
+            let mut removed_index = 0;
+            if let Some(parent_element) = self.get_mut(parent)
+                && let Some(pos) = parent_element.children.iter().position(|&c| c == child)
+            {
+                removed_index = pos;
+                parent_element.children.remove(pos);
             }
-            self.mark_attribute_changed(parent);
+            self.note_child_list_change(parent, removed_index);
         }
         if let Some(child_element) = self.get_mut(child) {
             child_element.parent = None;
         }
     }
 
-    /// Link `child` into `parent` at `index`, applying the structural
-    /// invalidation at the new location.
+    /// Link `child` into `parent` at `index`, applying the
+    /// selector-flag-scoped child-list invalidation at the new location.
     ///
     /// Assumes `child` is already detached and that the caller has validated
     /// the link (no cycle, live handles); the index is clamped by
     /// [`Vec::insert`]'s contract, so callers pass a position in `0..=len`.
     ///
-    /// Coarse invalidation: like an attribute change, this re-dirties the new
-    /// parent's whole subtree and its following-sibling subtrees, because the
-    /// mutation can flip the parent's own matching (`:empty`,
-    /// `:nth-child(..) of` the parent) observed through `+`/`~`.
+    /// A `child` that has been styled before is scheduled for a subtree
+    /// restyle: its matching context (ancestors, siblings) changed with the
+    /// move. A fresh child needs nothing — elements without style data are
+    /// styled unconditionally when the traversal reaches them.
     pub fn attach_at(&mut self, parent: ElementId, child: ElementId, index: usize) {
         if let Some(parent_element) = self.get_mut(parent) {
             parent_element.children.insert(index, child);
@@ -95,7 +103,8 @@ impl<T> Arena<T> {
         if let Some(child_element) = self.get_mut(child) {
             child_element.parent = Some(parent);
         }
-        self.mark_attribute_changed(parent);
+        self.add_restyle_hint(child, RestyleHint::restyle_subtree());
+        self.note_child_list_change(parent, index);
     }
 
     /// Remove `root` and all its descendants from the arena, returning the

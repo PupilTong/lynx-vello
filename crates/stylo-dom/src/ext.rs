@@ -24,7 +24,10 @@ use stylo::LocalName;
 /// Implementations hold whatever per-element data the embedder needs alongside
 /// the HTML-DOM-subset fields, and override the hooks below where that data
 /// should participate in selector matching. All hooks default to "no effect".
-pub trait ExternalState {
+///
+/// `Sync` is required because the restyle traversal may run in parallel:
+/// rayon workers call the hooks concurrently through shared references.
+pub trait ExternalState: Sync {
     /// Whether this element may match `:root`.
     ///
     /// [`selectors::Element::is_root`] matches an element that is parentless

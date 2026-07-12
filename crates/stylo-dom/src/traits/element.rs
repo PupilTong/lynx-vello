@@ -2,17 +2,21 @@
 //!
 //! # Safety
 //!
-//! This is the only module carrying `unsafe`, hence the module-wide
-//! `#![allow(unsafe_code)]`. All of it is the interior-mutable per-element
+//! This module carries the `unsafe` for the interior-mutable per-element
 //! state stylo mandates ([`ensure_data`](TElement::ensure_data),
 //! [`clear_data`](TElement::clear_data), `borrow_data`, `mutate_data`). Each
-//! `unsafe` access relies on the crate-wide **single-threaded-flush**
-//! invariant: an element's [`stylo_data`](crate::Element::stylo_data) is only
-//! ever touched while the caller holds exclusive access to the tree, so no
-//! aliasing or data race is possible.
+//! `unsafe` access relies on **stylo's traversal discipline**: during a
+//! (possibly parallel) restyle traversal, each element's
+//! [`stylo_data`](crate::Element::stylo_data) is touched by exactly one
+//! worker at a time (a parent reads/writes a child's data only in
+//! `note_children`, strictly before any worker takes ownership of that
+//! child), and outside a traversal the embedder holds `&mut Arena`. All other
+//! per-element state stylo mutates through `&self` is atomic (see
+//! [`Element`](crate::Element)).
 #![allow(unsafe_code)]
 
 use std::sync::OnceLock;
+use std::sync::atomic::Ordering;
 
 use app_units::Au;
 use dom::ElementState;
@@ -158,36 +162,46 @@ impl<'a, T: ExternalState> TElement for ElementRef<'a, T> {
     }
 
     fn has_dirty_descendants(&self) -> bool {
-        self.element().dirty_descendants
+        self.element().has_dirty_descendants()
     }
 
     fn has_snapshot(&self) -> bool {
-        // Coarse invalidation (see `crate::dirty`): we never snapshot.
-        false
+        // Set by the arena's `note_*_change` snapshot recorders (see
+        // `crate::dirty`); consumed by stylo's invalidation pass.
+        self.element().snapshot_present()
     }
 
     fn handled_snapshot(&self) -> bool {
-        true
+        self.element().snapshot_handled()
     }
 
-    unsafe fn set_handled_snapshot(&self) {}
+    unsafe fn set_handled_snapshot(&self) {
+        self.element().set_snapshot_handled();
+    }
 
     unsafe fn set_dirty_descendants(&self) {
-        // No-op: the flush driver tracks descendant dirtiness itself
-        // (`Element::dirty_descendants`); stylo's own traversal bits are
-        // unused in this milestone.
+        self.element().set_dirty_descendants_bit(true);
     }
 
-    unsafe fn unset_dirty_descendants(&self) {}
+    unsafe fn unset_dirty_descendants(&self) {
+        self.element().set_dirty_descendants_bit(false);
+    }
 
-    fn store_children_to_process(&self, _n: isize) {}
+    fn store_children_to_process(&self, n: isize) {
+        self.element()
+            .children_to_process
+            .store(n, Ordering::SeqCst);
+    }
 
     fn did_process_child(&self) -> isize {
-        0
+        self.element()
+            .children_to_process
+            .fetch_sub(1, Ordering::SeqCst)
+            - 1
     }
 
     unsafe fn ensure_data(&self) -> ElementDataMut<'_> {
-        // SAFETY: single-threaded flush — the caller holds exclusive access to
+        // SAFETY: traversal discipline — the caller holds exclusive access to
         // this element, so creating/borrowing its `ElementData` cannot race.
         let slot = unsafe { &mut *self.element().stylo_data.get() };
         slot.get_or_insert_with(ElementDataWrapper::default)
@@ -195,23 +209,25 @@ impl<'a, T: ExternalState> TElement for ElementRef<'a, T> {
     }
 
     unsafe fn clear_data(&self) {
-        // SAFETY: single-threaded flush — exclusive access, no concurrent
-        // borrow of this element's stylo state.
+        // SAFETY: traversal discipline — exclusive access to this element, no
+        // concurrent borrow of its stylo state.
         unsafe {
             *self.element().stylo_data.get() = None;
         }
-        *self.element().selector_flags.borrow_mut() = ElementSelectorFlags::empty();
+        self.element().selector_flags.store(0, Ordering::Relaxed);
     }
 
     fn has_data(&self) -> bool {
-        // SAFETY: reads only the `Option` discriminant; no concurrent mutation
-        // under the single-threaded-flush invariant.
+        // SAFETY: reads only the `Option` discriminant; the slot is only
+        // created/removed by this element's owning worker (or under `&mut
+        // Arena`), never concurrently with this read.
         unsafe { (*self.element().stylo_data.get()).is_some() }
     }
 
     fn borrow_data(&self) -> Option<ElementDataRef<'_>> {
-        // SAFETY: `ElementDataWrapper` tracks borrows internally; single-threaded
-        // flush rules out a concurrent mutable borrow.
+        // SAFETY: `ElementDataWrapper` tracks borrows internally (debug
+        // builds); the traversal discipline rules out a concurrent mutable
+        // borrow.
         unsafe {
             (*self.element().stylo_data.get())
                 .as_ref()
@@ -220,8 +236,8 @@ impl<'a, T: ExternalState> TElement for ElementRef<'a, T> {
     }
 
     fn mutate_data(&self) -> Option<ElementDataMut<'_>> {
-        // SAFETY: as `borrow_data`, plus exclusive access under single-threaded
-        // flush.
+        // SAFETY: as `borrow_data`, plus exclusive access under the traversal
+        // discipline.
         unsafe {
             (*self.element().stylo_data.get())
                 .as_ref()
@@ -291,7 +307,7 @@ impl<'a, T: ExternalState> TElement for ElementRef<'a, T> {
     }
 
     fn has_selector_flags(&self, flags: ElementSelectorFlags) -> bool {
-        self.element().selector_flags.borrow().contains(flags)
+        self.element().selector_flags().contains(flags)
     }
 
     fn relative_selector_search_direction(&self) -> ElementSelectorFlags {

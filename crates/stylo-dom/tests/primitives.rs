@@ -1,8 +1,13 @@
 //! Integration tests for the `stylo-dom` primitives an embedder's API layer
 //! delegates to: the generational [`Arena`], [`ElementRef`] navigation, the
 //! tree-mutation primitives (`attach_at`/`detach`/`drop_subtree`) with their
-//! coarse invalidation, the read helpers, inline-style parsing, and the
+//! invalidation scheduling, the read helpers, inline-style parsing, and the
 //! [`ExternalState`] hook defaults.
+//!
+//! Invalidation *scheduling* (dirty bits making mutations reachable from the
+//! root) is asserted here; invalidation *precision* (which elements a flush
+//! actually restyles, via snapshots and selector flags) is behavioral and
+//! covered by the style/flush integration tests.
 //!
 //! Everything runs against `Element<()>` (the no-op payload) except the
 //! `drop_subtree` harvest test, which uses a payload type to observe what the
@@ -80,10 +85,11 @@ fn element_ref_navigation() {
 }
 
 #[test]
-fn attach_detach_invalidates_parent_following_siblings() {
-    // `root > [before_sib, list, hint]`, `list > child`. A structural change to
-    // `list` dirties its subtree and its FOLLOWING siblings (`hint`) — like an
-    // attribute change — covering `.list:empty + .hint`-style selectors.
+fn attach_detach_marks_reachability() {
+    // `root > [before_sib, list, hint]`, `list > child`. Structural changes
+    // must make the mutation site reachable from the root (the flush walks
+    // `dirty_descendants` bits down); precision (which siblings actually
+    // restyle) is the flush's job, driven by stylo selector flags.
     let mut arena = Arena::new();
     let root = insert(&mut arena, "html");
     let before_sib = insert(&mut arena, "div");
@@ -96,23 +102,29 @@ fn attach_detach_invalidates_parent_following_siblings() {
     append(&mut arena, list, child);
     arena.clear_dirty();
 
-    // Detaching `list`'s only child can flip `.list:empty` → `hint` restyles.
     arena.detach(child);
-    assert!(arena.get(hint).unwrap().style_dirty);
     assert!(
-        !arena.get(before_sib).unwrap().style_dirty,
-        "earlier siblings are unaffected by later-sibling mutations"
+        arena.get(root).unwrap().has_dirty_descendants(),
+        "detaching under `list` must be reachable from the root"
     );
+    assert!(
+        !arena.get(before_sib).unwrap().is_style_dirty(),
+        "siblings are not blanket-dirtied at mutation time"
+    );
+    assert!(!arena.get(hint).unwrap().is_style_dirty());
 
     arena.clear_dirty();
-    // Re-attaching invalidates the same way.
     append(&mut arena, list, child);
-    assert!(arena.get(hint).unwrap().style_dirty);
+    assert!(arena.get(list).unwrap().has_dirty_descendants());
+    assert!(arena.get(root).unwrap().has_dirty_descendants());
 }
 
 #[test]
-fn mark_attribute_changed_dirties_subtree_and_following() {
-    // `root > container > [a, b, c]`, `b > b1`, `c > c1`.
+fn note_attribute_change_marks_element_and_ancestors() {
+    // `root > container > [a, b, c]`, `b > b1`. An attribute change marks the
+    // element itself dirty and its ancestor chain reachable — nothing else at
+    // mutation time (invalidation-set matching happens at flush, driven by
+    // the pre-mutation snapshot).
     let mut arena = Arena::new();
     let root = insert(&mut arena, "html");
     let container = insert(&mut arena, "div");
@@ -125,25 +137,18 @@ fn mark_attribute_changed_dirties_subtree_and_following() {
     append(&mut arena, container, c);
     let b1 = insert(&mut arena, "div");
     append(&mut arena, b, b1);
-    let c1 = insert(&mut arena, "div");
-    append(&mut arena, c, c1);
     arena.clear_dirty();
 
-    arena.mark_attribute_changed(b);
+    arena.note_attribute_change(b, "title");
 
-    // The mutated node and its subtree are dirty.
-    assert!(arena.get(b).unwrap().style_dirty);
-    assert!(arena.get(b1).unwrap().style_dirty);
-    // Ancestors gain dirty_descendants but not style_dirty.
-    assert!(arena.get(container).unwrap().dirty_descendants);
-    assert!(!arena.get(container).unwrap().style_dirty);
-    assert!(arena.get(root).unwrap().dirty_descendants);
-    // Following sibling's subtree is dirtied (covers + / ~ combinators).
-    assert!(arena.get(c).unwrap().style_dirty);
-    assert!(arena.get(c1).unwrap().style_dirty);
-    // Earlier sibling is untouched.
-    assert!(!arena.get(a).unwrap().style_dirty);
-    assert!(!arena.get(a).unwrap().dirty_descendants);
+    assert!(arena.get(b).unwrap().is_style_dirty());
+    assert!(arena.get(container).unwrap().has_dirty_descendants());
+    assert!(!arena.get(container).unwrap().is_style_dirty());
+    assert!(arena.get(root).unwrap().has_dirty_descendants());
+    // Siblings and descendants are not blanket-dirtied.
+    assert!(!arena.get(a).unwrap().is_style_dirty());
+    assert!(!arena.get(c).unwrap().is_style_dirty());
+    assert!(!arena.get(b1).unwrap().is_style_dirty());
 }
 
 #[test]
