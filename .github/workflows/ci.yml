@@ -29,6 +29,7 @@ jobs:
         # also descends into the separately-versioned vendor/stylo workspace.
         run: >-
           cargo fmt --check
+          -p lynx-layout
           -p lynx-template-decoder
           -p lynx-widget
           -p stylo-dom

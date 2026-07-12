@@ -1,0 +1,21 @@
+[package]
+name = "lynx-layout"
+description = "Lynx-specific layout adapter and peer algorithms over neutron-star"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+neutron-star = { workspace = true }
+
+[dev-dependencies]
+divan = { workspace = true }
+
+[[bench]]
+name = "linear"
+harness = false
+
+[lints]
+workspace = true

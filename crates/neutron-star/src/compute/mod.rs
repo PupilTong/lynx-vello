@@ -12,7 +12,8 @@
 //! This module contains the generic machinery (root entry, cache wrapper,
 //! hidden-subtree zeroing, leaf boxing, the positioned pass, rounding) and the
 //! implemented [`compute_flexbox_layout`], [`compute_grid_layout`], and
-//! [`compute_relative_layout`] entry points.
+//! [`compute_relative_layout`] entry points. Its public [`support`] module
+//! exposes shared box-model arithmetic for host-private peer algorithms.
 //!
 //! # The canonical dispatch skeleton
 //!
@@ -92,6 +93,7 @@ mod flexbox;
 mod grid;
 mod leaf;
 mod relative;
+pub mod support;
 mod util;
 
 pub use flexbox::compute_flexbox_layout;
@@ -109,14 +111,14 @@ use self::util::{
 use crate::geometry::{Edges, Point, Size};
 use crate::style::{BoxGenerationMode, CoreStyle, Dimension, Direction};
 use crate::tree::{
-    AvailableSpace, CacheState, Layout, LayoutInput, LayoutOutput, LayoutSession, LayoutSource,
-    LayoutState, NodeId, RoundState, TraverseTree,
+    AvailableSpace, CacheState, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutSession,
+    LayoutSource, LayoutState, NodeId, RequestedAxis, RoundState, TraverseTree,
 };
 
 /// Lays out the tree under `root` into `available_space`.
 ///
 /// The host's entry point for a layout flush. Builds the root
-/// [`LayoutInput`] ([`LayoutGoal::Commit`](crate::tree::LayoutGoal::Commit),
+/// [`LayoutInput`] ([`LayoutGoal::Commit`],
 /// no known dimensions, `parent_size` from
 /// the definite parts of `available_space`), routes it through
 /// [`compute_child_layout`](LayoutSession::compute_child_layout) — so the root
@@ -312,6 +314,59 @@ where
     Source: LayoutSource,
     Session: LayoutSession<Source>,
 {
+    absolute_layout(
+        source,
+        session,
+        node,
+        containing_block,
+        static_position,
+        LayoutGoal::Commit,
+    )
+}
+
+/// Measures an out-of-flow node with the same inset, automatic-size,
+/// aspect-ratio, min/max, and margin rules as [`compute_absolute_layout`].
+///
+/// Formatting algorithms use this side-effect-free probe when their static
+/// position depends on the out-of-flow node's final margin-box size. The
+/// returned layout is relative to the containing block's padding box with a
+/// zero static-position fallback; callers normally consume only its `size`
+/// and `margin`, calculate the formatting-context-specific static position,
+/// then call [`compute_absolute_layout`] for the committing pass. No durable
+/// child geometry is written by this measurement.
+#[must_use]
+pub fn measure_absolute_layout<Source, Session>(
+    source: &Source,
+    session: &mut Session,
+    node: NodeId,
+    containing_block: Size<f32>,
+) -> Layout
+where
+    Source: LayoutSource,
+    Session: LayoutSession<Source>,
+{
+    absolute_layout(
+        source,
+        session,
+        node,
+        containing_block,
+        Point::ZERO,
+        LayoutGoal::Measure(RequestedAxis::Both),
+    )
+}
+
+fn absolute_layout<Source, Session>(
+    source: &Source,
+    session: &mut Session,
+    node: NodeId,
+    containing_block: Size<f32>,
+    static_position: Point<f32>,
+    goal: LayoutGoal,
+) -> Layout
+where
+    Source: LayoutSource,
+    Session: LayoutSession<Source>,
+{
     debug_assert!(
         containing_block.width.is_finite()
             && containing_block.height.is_finite()
@@ -347,22 +402,26 @@ where
 
     let known_dimensions =
         absolute_known_dimensions(&resolved_style, inset_modified_size, fixed_margin);
-    let output = session.compute_child_layout(
-        source,
-        node,
-        LayoutInput::perform_layout(
+    let available_space = Size::new(
+        preferred_available
+            .width
+            .unwrap_or(AvailableSpace::Definite(inset_modified_size.width)),
+        preferred_available
+            .height
+            .unwrap_or(AvailableSpace::Definite(inset_modified_size.height)),
+    );
+    let child_input = match goal {
+        LayoutGoal::Commit => {
+            LayoutInput::perform_layout(known_dimensions, parent_size, available_space)
+        }
+        LayoutGoal::Measure(requested_axis) => LayoutInput::compute_size(
             known_dimensions,
             parent_size,
-            Size::new(
-                preferred_available
-                    .width
-                    .unwrap_or(AvailableSpace::Definite(inset_modified_size.width)),
-                preferred_available
-                    .height
-                    .unwrap_or(AvailableSpace::Definite(inset_modified_size.height)),
-            ),
+            available_space,
+            requested_axis,
         ),
-    );
+    };
+    let output = session.compute_child_layout(source, node, child_input);
 
     let margin = resolve_absolute_margins(
         optional_margin,

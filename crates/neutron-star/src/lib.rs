@@ -30,8 +30,9 @@
 //! - [`style`] — the style protocol: engine-owned value types plus the `CoreStyle`/container/item
 //!   traits hosts implement as cheap views over their computed styles.
 //! - [`compute`] — the machinery entry points hosts call from their dispatch (root, cache wrapper,
-//!   subtree hiding, leaf, the positioned pass, rounding), including the canonical dispatch
-//!   skeleton and the implemented Flexbox, Grid, and Relative entry points.
+//!   subtree hiding, leaf, the positioned pass, rounding), the shared [`compute::support`] building
+//!   blocks for host-private algorithms, the canonical dispatch skeleton, and the implemented
+//!   Flexbox, Grid, and Relative entry points.
 //! - [`cache`] — the embeddable per-node measurement cache and its matching contract.
 //! - [`geometry`] — `Copy`/`#[repr(C)]` geometry primitives.
 //!

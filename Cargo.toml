@@ -16,6 +16,7 @@ rust-version = "1.95"
 
 [workspace.dependencies]
 # Intra-workspace crates
+lynx-layout = { path = "crates/lynx-layout" }
 lynx-template-decoder = { path = "crates/lynx-template-decoder" }
 lynx-widget = { path = "crates/lynx-widget" }
 neutron-star = { path = "crates/neutron-star" }

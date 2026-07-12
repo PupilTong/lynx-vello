@@ -12,7 +12,7 @@ use neutron_star::cache::Cache;
 use neutron_star::compute::{
     FnLeafMeasurer, LeafMeasureInput, LeafMeasurement, LeafMeasurer, LeafMetrics,
     compute_absolute_layout, compute_cached_layout, compute_leaf_layout, compute_root_layout,
-    hide_subtree, round_layout,
+    hide_subtree, measure_absolute_layout, round_layout,
 };
 use neutron_star::prelude::*;
 use neutron_star::style::{
@@ -62,6 +62,7 @@ struct MockStyle {
     display: MockDisplay,
     auto_horizontal_margin: bool,
     size: Size<Dimension>,
+    inset: Edges<LengthPercentageAuto>,
     padding: Edges<LengthPercentage>,
     flex_grow: f32,
     grid_column: Line<GridPlacement>,
@@ -79,6 +80,10 @@ impl CoreStyle for MockStyle {
 
     fn size(&self) -> Size<Dimension> {
         self.size
+    }
+
+    fn inset(&self) -> Edges<LengthPercentageAuto> {
+        self.inset
     }
 
     fn padding(&self) -> Edges<LengthPercentage> {
@@ -767,6 +772,33 @@ fn compute_absolute_layout_uses_the_static_position() {
     );
     assert_eq!(layout.location, Point::new(12.5, 7.0));
     assert_eq!(layout.size, Size::ZERO);
+}
+
+#[test]
+fn measure_absolute_layout_uses_positioned_sizing_without_writes() {
+    let (mut host, root) = leaf_tree();
+    let hoisted = host.source.child_id(root, 0);
+    host.source.nodes[usize::from(hoisted)].style.inset = Edges {
+        left: LengthPercentageAuto::Length(10.0),
+        right: LengthPercentageAuto::Length(20.0),
+        top: LengthPercentageAuto::Length(5.0),
+        bottom: LengthPercentageAuto::Length(15.0),
+    };
+    host.session.node_mut(hoisted).unrounded.size = Size::new(17.0, 9.0);
+
+    let measurement = measure_absolute_layout(
+        &host.source,
+        &mut host.session,
+        hoisted,
+        Size::new(100.0, 80.0),
+    );
+
+    assert_eq!(measurement.location, Point::new(10.0, 5.0));
+    assert_eq!(measurement.size, Size::new(70.0, 60.0));
+    assert_eq!(
+        host.session.unrounded_layout(hoisted).size,
+        Size::new(17.0, 9.0)
+    );
 }
 
 #[test]

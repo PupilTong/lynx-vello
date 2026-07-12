@@ -19,6 +19,7 @@
 #![allow(clippy::cast_precision_loss)]
 
 use super::compute_absolute_layout;
+use super::support::relative_offset;
 use super::util::{
     ItemKey, OrderedItem, ResolvedContainerBox, ResolvedItemBox, box_inset_size, clamp_axis,
     preferred_size_definiteness, resolve_container_box, resolve_dimension, resolve_gap,
@@ -325,24 +326,6 @@ fn alignment_distribution(
             (between, between)
         }
     }
-}
-
-#[inline]
-fn relative_offset(inset: Edges<Option<f32>>, direction: Direction) -> Point<f32> {
-    let x = match (inset.left, inset.right) {
-        (Some(left), Some(right)) => {
-            if direction == Direction::Rtl {
-                -right
-            } else {
-                left
-            }
-        }
-        (Some(left), None) => left,
-        (None, Some(right)) => -right,
-        (None, None) => 0.0,
-    };
-    let y = inset.top.unwrap_or_else(|| -inset.bottom.unwrap_or(0.0));
-    Point::new(x, y)
 }
 
 fn resolve_item<Source: FlexSource>(

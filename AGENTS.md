@@ -16,10 +16,13 @@ cross-platform engine built on:
 - **[vello](https://github.com/linebender/vello)** — GPU vector rendering
 - **[parley](https://github.com/linebender/parley)** — text layout & shaping
 
-The from-scratch layout engine (successor to the C++ engine's `starlight`) is
-`crates/neutron-star` — its host protocol, shared layout machinery, CSS
-flexbox and Grid algorithms, and standalone Starlight relative-layout
-algorithm are implemented. See
+The from-scratch layout stack (successor to the C++ engine's `starlight`) is
+centered on `crates/neutron-star`, whose host protocol, shared layout
+machinery, CSS flexbox and Grid algorithms, and standalone Starlight
+relative-layout algorithm are implemented. `crates/lynx-layout` builds
+Lynx-only peer algorithms over that protocol; its standalone generic
+`display: linear` algorithm and style/source surface are implemented, while
+the concrete runtime adapter remains pending. See
 `docs/layout-architecture.md` for its design and
 `docs/tracking/css-layout.md` for the behavior it must cover.
 
@@ -130,16 +133,23 @@ useful signal for currently-compatible versions of those libraries.
   generic lending `LeafMeasurer` protocol. The shared root/leaf/cache/
   positioned/rounding machinery, CSS Flexbox Level 1, numeric CSS Grid Level
   2 (excluding subgrid/named areas), and id-constrained Starlight Relative
-  Layout Level 1 algorithms are live. `display: linear` remains a future
-  host/adapter peer algorithm.
+  Layout Level 1 algorithms are live. `display: linear` is implemented as a
+  host/adapter peer algorithm in `crates/lynx-layout`.
   Read
   `docs/layout-architecture.md` before touching it. Apart from the explicitly
   standalone relative-layout protocol, it must not contain Lynx widget,
   component, or device/unit vocabulary and must not depend on other workspace
   crates.
-- *(planned, not yet scaffolded)* text / render / runtime crates, plus the
-  `lynx-layout` adapter wiring `neutron-star` to the widget/style stack —
-  see `docs/tracking/` for the behavior surface each will need to cover before
+- `crates/lynx-layout` — the host-side home for Lynx-only layout vocabulary
+  and peer algorithms over `neutron-star`. Its standalone generic
+  `display: linear` style/source protocol and `compute_linear_layout`
+  algorithm are implemented without depending on `lynx-widget` or stylo.
+  The concrete Widget/stylo source/session adapter, display dispatch and
+  dirty→cache invalidation wiring, root fixed-position pass, and Parley/text
+  integration remain future L3 work.
+  Do not move `linear-*` vocabulary into `neutron-star`.
+- *(planned, not yet scaffolded)* text / render / runtime crates — see
+  `docs/tracking/` for the behavior surface each will need to cover before
   scaffolding begins, and `.claude/agents/` for the subsystem-scoped agent
   personas already set up for this work.
 
