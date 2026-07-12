@@ -1471,6 +1471,7 @@ version = "0.1.0"
 dependencies = [
  "app_units",
  "atomic_refcell",
+ "codspeed-divan-compat",
  "cssparser",
  "euclid",
  "rustc-hash",

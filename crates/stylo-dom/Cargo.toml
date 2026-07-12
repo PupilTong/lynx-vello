@@ -29,5 +29,12 @@ cssparser = { workspace = true }
 euclid = { workspace = true }
 url = { workspace = true }
 
+[dev-dependencies]
+divan = { workspace = true }
+
+[[bench]]
+name = "css"
+harness = false
+
 [lints]
 workspace = true
