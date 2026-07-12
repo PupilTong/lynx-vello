@@ -93,12 +93,17 @@ The flex signature is public now; the Grid signature documents the planned
 L2 API so hosts can reserve the corresponding dispatch arm.
 
 Layout IO is three `Copy` PODs: `LayoutInput` (layout goal, sizing mode,
-known dimensions / parent size / available space) → `LayoutOutput` (size,
-content size, baselines) per call, and `Layout` (order, location, size,
-content size, scrollbar size, border/padding/margin) as the durable
-per-node result. `LayoutGoal::Measure(RequestedAxis)` makes measurement and
-its requested axes one value; `LayoutGoal::Commit` requests durable child
-geometry. Hidden-subtree cleanup is deliberately outside this sizing API.
+known dimensions, whether those dimensions establish definite percentage
+bases, parent size, and available space) → `LayoutOutput` (size, content size,
+baselines) per call, and `Layout` (order, location, size, content size,
+scrollbar size, border/padding/margin) as the durable per-node result. The
+separate `definite_dimensions` field is necessary because Flexbox can decide
+an item's used geometry while §9.8 still classifies that size as indefinite
+for percentages in descendants; Grid has the same distinction. A geometric
+`Some(size)` therefore cannot double as a definiteness flag.
+`LayoutGoal::Measure(RequestedAxis)` makes measurement and its requested axes
+one value; `LayoutGoal::Commit` requests durable child geometry.
+Hidden-subtree cleanup is deliberately outside this sizing API.
 `LayoutInput`/`LayoutOutput`/`Layout` are
 `#[non_exhaustive]` so the protocol can grow additively (block-layout margin
 collapsing is the known future widener).
@@ -245,10 +250,15 @@ Algorithms produce **unrounded** `f32` layouts (`set_unrounded_layout`);
 `round_layout(source, state, root, scale)` derives snapped finals through
 `TraverseTree` + `RoundState`. `scale` is the device-pixel ratio (physical px per CSS px):
 coordinates are CSS pixels but crisp edges are physical, so snapping is
-`snap(v) = round(v × scale) / scale` — on a DPR-2 screen `0.5` CSS px is
+`snap(v) = css_round(v × scale) / scale` — on a DPR-2 screen `0.5` CSS px is
 already an exact physical edge and must survive. The cumulative-error-free
 contract still holds (snap accumulated positions, derive sizes as
 `snap(pos+size) − snap(pos)` so adjacent edges share a physical pixel).
+`css_round` follows [CSS Values' nearest-integer tie rule](https://drafts.csswg.org/css-values-4/#integers)
+toward positive infinity (`1.5 → 2`, `-1.5 → -1`), rather than Rust's
+away-from-zero rule for negative halves. Flex sizing itself remains
+fractional; this optional final pass does not introduce Lynx integer
+layout-unit semantics.
 Relayout always restarts from unrounded values — re-rounding rounded values
 is how engines drift.
 
@@ -284,10 +294,11 @@ the painting — layout's job is to never be the frame's bottleneck.
   `LayoutInput`** — `goal` distinguishes side-effect-free measurements
   (including their requested axes) from geometry commits, `sizing_mode`
   controls whether content-size probes ignore the node's own
-  size/min/max/aspect-ratio, and `parent_size` is the percentage basis. All
-  change results, so dropping any of them from the key would alias distinct
-  layouts; matching may coalesce entries only under provable equivalences
-  (documented in the `cache` module).
+  size/min/max/aspect-ratio, `definite_dimensions` preserves percentage
+  definiteness independently from decided geometry, and `parent_size` is the
+  percentage basis. All change results, so dropping any of them from the key
+  would alias distinct layouts; matching may coalesce entries only under
+  provable equivalences (documented in the `cache` module).
 - **Incremental relayout is a host workflow the protocol supports, not a
   hidden engine mode.** On style/content/children change the host clears
   that node's cache and its ancestors' (dirty-path invalidation), then
@@ -319,11 +330,14 @@ the painting — layout's job is to never be the frame's bottleneck.
   pool (host storage, host threading policy — the engine stays
   thread-unaware). Adding a defaulted method is semver-minor, so this ships
   when profiles earn it, without a protocol break.
-- **Benchmarks planned for performance/parity hardening.** `divan`
-  (CodSpeed-compatible, per repo toolchain) micro/macro benches: deep flex
-  nesting, wide children, wrap-heavy, grid auto-placement, incremental
-  single-node dirty. Baselines: Taffy and Yoga on equivalent trees — not to
-  copy their design, but to keep "high-performance" falsifiable.
+- **Flex benchmarks are landed; broader performance hardening remains.** The
+  `divan` (CodSpeed-compatible) suite ports the 18 Flex-tagged workloads from
+  `PupilTong/lynx#25` and measures neutron-star's Rust path only. Direct Flex
+  workloads retain their complete trees; mixed-display workloads explicitly
+  benchmark the Flex-owned slice rather than invoking foreign algorithms or
+  the Lynx C++ runner. Grid auto-placement, incremental single-node dirties,
+  and equivalent-tree Taffy/Yoga baselines remain future additions — not to
+  copy those engines' designs, but to keep "high-performance" falsifiable.
 
 ## Algorithms (L1 implemented, L2 planned)
 
@@ -405,9 +419,10 @@ Lynx `<list>`-component concern, not a grid mode).
   unit tests additionally cover non-`Clone` borrowed GAT results, separate
   probe/commit artifacts, committed box-cache hits, and coordinated
   invalidation.
-- **Parity/performance hardening (planned):** golden layout trees compared
-  against browser-computed geometry for the same CSS, differential fuzzing
-  against Taffy on the shared feature subset, and the flex benchmarks above.
+- **Parity/performance hardening:** the Rust-only Flex benchmark suite above
+  and the migrated `PupilTong/lynx#25` Flex fixtures are landed. Browser
+  geometry goldens and differential fuzzing against Taffy on the shared
+  feature subset remain planned.
 - **Lynx modes (host-side):** `linear`/`relative` conformance fixtures come
   from Starlight behavior per `docs/tracking/css-layout.md`, tested in the
   adapter crate, not here.
@@ -419,8 +434,9 @@ Lynx `<list>`-component concern, not a grid mode).
 - **L1 — flexbox** *(complete)*: `compute_flexbox_layout` per the plan above,
   plus the shared machinery it exercises: leaf boxing, hidden-subtree
   cleanup, cache matching policy, root entry, the positioned pass
-  (`compute_absolute_layout`), and device-pixel rounding. Browser goldens,
-  differential fuzzing, and benchmarks remain parity/performance hardening.
+  (`compute_absolute_layout`), and device-pixel rounding. The Rust-only Flex
+  fixture and benchmark migration is landed; browser goldens and differential
+  fuzzing remain parity/performance hardening.
 - **L2 — grid**: add `compute_grid_layout` per the plan above,
   `auto-fill`/`auto-fit`, dense packing; baseline alignment and
   grid-area-relative abs-pos as trailing refinements.

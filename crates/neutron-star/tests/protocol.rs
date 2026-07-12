@@ -18,6 +18,7 @@ use neutron_star::prelude::*;
 use neutron_star::style::{
     BoxGenerationMode, CalcHandle, Dimension, GridPlacement, GridTemplateComponent,
     LengthPercentage, LengthPercentageAuto, Position, RepetitionCount, TrackSizingFunction,
+    Visibility,
 };
 
 /// The host's own display vocabulary — deliberately *not* an engine type
@@ -366,6 +367,7 @@ fn style_views_serve_css_initial_defaults() {
     // Through the blanket `&S` view, as the engine will consume it.
     let view: <MockSource as LayoutSource>::CoreStyle<'_> = &style;
     assert_eq!(view.position(), Position::Relative);
+    assert_eq!(view.visibility(), Visibility::Visible);
     assert!(view.size().width.is_auto());
     assert_eq!(FlexItemStyle::order(&view), 0);
     assert_eq!(
@@ -769,6 +771,23 @@ fn round_layout_snaps_on_the_device_pixel_grid() {
 }
 
 #[test]
+fn round_layout_uses_css_positive_infinity_tie_breaking() {
+    let (mut host, root) = leaf_tree();
+    let mut root_layout = Layout::default();
+    // At DPR 2 these become -1.5 and +1.5 device pixels. CSS nearest-
+    // integer rounding chooses the upper integer in both cases: -1 and +2.
+    root_layout.location = Point::new(-0.75, 0.75);
+    host.session.node_mut(root).unrounded = root_layout;
+
+    round_layout(&host.source, &mut host.session, root, 2.0);
+
+    assert_eq!(
+        host.session.node(root).finalized.location,
+        Point::new(-0.5, 1.0)
+    );
+}
+
+#[test]
 fn embeddable_cache_round_trips_a_complete_key() {
     let mut cache = Cache::new();
     let input = LayoutInput::compute_size(
@@ -784,4 +803,9 @@ fn embeddable_cache_round_trips_a_complete_key() {
     let mut different_axis = input;
     different_axis.goal = LayoutGoal::Measure(RequestedAxis::Both);
     assert_eq!(cache.get(different_axis), None);
+
+    assert_eq!(input.definite_dimensions, Size::new(true, false));
+    let mut same_geometry_but_indefinite = input;
+    same_geometry_but_indefinite.definite_dimensions.width = false;
+    assert_eq!(cache.get(same_geometry_but_indefinite), None);
 }
