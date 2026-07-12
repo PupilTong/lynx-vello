@@ -26,6 +26,8 @@
 //!   them. Entries from one must never answer the other.
 //! - `parent_size`: the percentage basis. Identical constraints under a different parent size
 //!   resolve percentage styles differently.
+//! - `definite_dimensions`: equal used geometry can differ in whether it establishes a percentage
+//!   basis for descendants (notably after Flexbox's post-flexing step).
 //! - `goal`: distinguishes a geometry-committing run from a measurement and, for measurements,
 //!   scopes which axes the answer actually computed. A single-axis entry must not answer a request
 //!   for the other axis.
@@ -194,6 +196,7 @@ fn inputs_match(stored: LayoutInput, requested: LayoutInput) -> bool {
     if !goal_matches
         || stored.sizing_mode != requested.sizing_mode
         || stored.known_dimensions != requested.known_dimensions
+        || stored.definite_dimensions != requested.definite_dimensions
         || stored.parent_size != requested.parent_size
     {
         return false;
@@ -225,8 +228,9 @@ fn axis_constraint_shape(known_dimension: Option<f32>, available_space: Availabl
 
 #[inline]
 fn same_constraint_shape(left: LayoutInput, right: LayoutInput) -> bool {
-    axis_constraint_shape(left.known_dimensions.width, left.available_space.width)
-        == axis_constraint_shape(right.known_dimensions.width, right.available_space.width)
+    left.definite_dimensions == right.definite_dimensions
+        && axis_constraint_shape(left.known_dimensions.width, left.available_space.width)
+            == axis_constraint_shape(right.known_dimensions.width, right.available_space.width)
         && axis_constraint_shape(left.known_dimensions.height, left.available_space.height)
             == axis_constraint_shape(right.known_dimensions.height, right.available_space.height)
 }

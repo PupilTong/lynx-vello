@@ -65,6 +65,24 @@ pub enum BoxGenerationMode {
     None,
 }
 
+/// The layout-relevant projection of CSS `visibility`.
+///
+/// `hidden` generates and lays out a box exactly like `visible`; painting is
+/// the host renderer's concern. `collapse` only changes geometry for flex
+/// items: the item is removed from main-axis layout while leaving behind the
+/// cross-size strut required by Flexbox §4.4. In every other formatting
+/// context it currently behaves like `hidden`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Visibility {
+    /// Generate, lay out, and paint the box normally.
+    #[default]
+    Visible,
+    /// Generate and lay out the box, but do not paint it.
+    Hidden,
+    /// Collapse a flex item to a cross-axis strut.
+    Collapse,
+}
+
 /// The positioning scheme of a node (the engine-relevant projection of CSS
 /// `position`).
 ///
@@ -181,6 +199,12 @@ pub trait CoreStyle: Sized {
         BoxGenerationMode::Normal
     }
 
+    /// `visibility`. Only [`Visibility::Collapse`] affects box geometry, and
+    /// only when this node is a flex item.
+    fn visibility(&self) -> Visibility {
+        Visibility::Visible
+    }
+
     /// The positioning scheme (see [`Position`]).
     fn position(&self) -> Position {
         Position::Relative
@@ -253,6 +277,10 @@ pub trait CoreStyle: Sized {
 impl<S: CoreStyle> CoreStyle for &S {
     fn box_generation_mode(&self) -> BoxGenerationMode {
         (**self).box_generation_mode()
+    }
+
+    fn visibility(&self) -> Visibility {
+        (**self).visibility()
     }
 
     fn position(&self) -> Position {

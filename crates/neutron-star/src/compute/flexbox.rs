@@ -8,10 +8,10 @@
 //!
 //! The current protocol deliberately leaves formatting-tree preprocessing
 //! (anonymous item generation) to the host and has no representation for
-//! `visibility: collapse`, `flex-basis: content`, replaced-vs-non-replaced
-//! automatic minimums, or non-horizontal writing modes. The algorithm is
-//! spec-oriented over the representable surface; ordinary items use the
-//! non-replaced §4.5 automatic-minimum rule.
+//! `flex-basis: content`, replaced-vs-non-replaced automatic minimums, or
+//! non-horizontal writing modes. The algorithm is spec-oriented over the
+//! representable surface; ordinary items use the non-replaced §4.5
+//! automatic-minimum rule.
 
 // Item and line counts are transient Vec lengths. A flex container cannot
 // practically approach f32's exact-integer limit, while alignment division
@@ -31,7 +31,7 @@ use crate::style::alignment::{AlignContent, AlignItems};
 use crate::style::value::{CalcHandle, Dimension, LengthPercentageAuto};
 use crate::style::{
     BoxGenerationMode, BoxSizing, CoreStyle, Direction, FlexContainerStyle, FlexDirection,
-    FlexItemStyle, FlexWrap, Overflow, Position,
+    FlexItemStyle, FlexWrap, Overflow, Position, Visibility,
 };
 use crate::tree::{
     AvailableSpace, FlexSource, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutSession,
@@ -172,6 +172,7 @@ struct FlexItem {
     flex_grow: f32,
     flex_shrink: f32,
     preferred_size: Size<Option<f32>>,
+    preferred_size_is_definite: Size<bool>,
     min_size: Size<Option<f32>>,
     max_size: Size<Option<f32>>,
     margin: Edges<f32>,
@@ -195,6 +196,16 @@ struct FlexItem {
     violation: f32,
     main_position: f32,
     cross_position: f32,
+    main_size_is_definite: bool,
+    collapsed: bool,
+    collapse_strut_cross: Option<f32>,
+}
+
+impl FlexItem {
+    #[inline]
+    fn is_suppressed(&self) -> bool {
+        self.collapsed && self.collapse_strut_cross.is_some()
+    }
 }
 
 /// One consecutive range in the order-modified item array plus its resolved
@@ -205,13 +216,6 @@ struct FlexLine {
     end: usize,
     cross_size: f32,
     cross_position: f32,
-}
-
-impl FlexLine {
-    #[inline]
-    fn len(self) -> usize {
-        self.end - self.start
-    }
 }
 
 #[inline]
@@ -323,6 +327,37 @@ fn resolve_quantitative_sizes(
         box_sizing,
         inset_size,
     )
+}
+
+#[inline]
+fn dimension_is_definite(value: Dimension, parent_basis: Option<f32>) -> bool {
+    match value {
+        Dimension::Length(_) => true,
+        Dimension::Percent(_) | Dimension::Calc(_) => parent_basis.is_some(),
+        Dimension::Auto
+        | Dimension::MinContent
+        | Dimension::MaxContent
+        | Dimension::FitContent(_) => false,
+    }
+}
+
+fn preferred_size_definiteness(
+    size: Size<Dimension>,
+    parent_size: Size<Option<f32>>,
+    aspect_ratio: Option<f32>,
+) -> Size<bool> {
+    let mut definite = Size::new(
+        dimension_is_definite(size.width, parent_size.width),
+        dimension_is_definite(size.height, parent_size.height),
+    );
+    if aspect_ratio.is_some() {
+        if definite.width {
+            definite.height = true;
+        } else if definite.height {
+            definite.width = true;
+        }
+    }
+    definite
 }
 
 #[inline]
@@ -448,6 +483,8 @@ fn resolve_item<Source: FlexSource>(
         inset_size,
         &resolve_calc,
     );
+    let preferred_size_is_definite =
+        preferred_size_definiteness(size_value, container_inner_size, style.aspect_ratio());
     let min_size = resolve_quantitative_sizes(
         style.min_size(),
         container_inner_size,
@@ -478,6 +515,7 @@ fn resolve_item<Source: FlexSource>(
         flex_grow,
         flex_shrink,
         preferred_size,
+        preferred_size_is_definite,
         min_size,
         max_size,
         margin,
@@ -501,6 +539,9 @@ fn resolve_item<Source: FlexSource>(
         violation: 0.0,
         main_position: 0.0,
         cross_position: 0.0,
+        main_size_is_definite: false,
+        collapsed: style.visibility() == Visibility::Collapse,
+        collapse_strut_cross: None,
     }
 }
 
@@ -510,6 +551,7 @@ fn child_measurement<Source, Session>(
     session: &mut Session,
     node: NodeId,
     known_dimensions: Size<Option<f32>>,
+    definite_dimensions: Size<bool>,
     parent_size: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
     sizing_mode: SizingMode,
@@ -525,11 +567,12 @@ where
         available_space,
         requested_axis,
     );
+    input.definite_dimensions = definite_dimensions;
     input.sizing_mode = sizing_mode;
     session.compute_child_layout(source, node, input)
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn determine_flex_base_sizes<Source, Session>(
     source: &Source,
     session: &mut Session,
@@ -538,6 +581,7 @@ fn determine_flex_base_sizes<Source, Session>(
     container_inner_size: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
     flex_basis_percentage_basis: Option<f32>,
+    container_main_is_definite: bool,
 ) where
     Source: FlexSource,
     Session: LayoutSession<Source>,
@@ -554,6 +598,11 @@ fn determine_flex_base_sizes<Source, Session>(
         let cross_preferred = axes.cross.size(item.preferred_size);
         let mut known = Size::NONE;
         axes.cross.set_size(&mut known, cross_preferred);
+        let mut known_is_definite = Size::new(false, false);
+        axes.cross.set_size(
+            &mut known_is_definite,
+            axes.cross.size(item.preferred_size_is_definite),
+        );
 
         let min_available = size_from_axes(
             axes,
@@ -573,6 +622,7 @@ fn determine_flex_base_sizes<Source, Session>(
                 session,
                 item.key.node,
                 known,
+                known_is_definite,
                 contribution_parent_size,
                 min_available,
                 SizingMode::ContentSize,
@@ -586,6 +636,7 @@ fn determine_flex_base_sizes<Source, Session>(
                 session,
                 item.key.node,
                 known,
+                known_is_definite,
                 contribution_parent_size,
                 max_available,
                 SizingMode::ContentSize,
@@ -593,6 +644,24 @@ fn determine_flex_base_sizes<Source, Session>(
             )
             .size,
         );
+        let available_content = if matches!(available_main, AvailableSpace::Definite(_)) {
+            axes.main.size(
+                child_measurement(
+                    source,
+                    session,
+                    item.key.node,
+                    known,
+                    known_is_definite,
+                    contribution_parent_size,
+                    available_space,
+                    SizingMode::ContentSize,
+                    axes.main.requested(),
+                )
+                .size,
+            )
+        } else {
+            max_content
+        };
 
         let resolve_intrinsic_dimension = |value: Dimension| -> Option<f32> {
             match value {
@@ -648,7 +717,9 @@ fn determine_flex_base_sizes<Source, Session>(
         } else {
             None
         };
-        item.flex_basis = if let Some(basis) = resolved_basis.or(preferred_flex_basis) {
+        let definite_basis = resolved_basis.or(preferred_flex_basis);
+        item.main_size_is_definite = container_main_is_definite || definite_basis.is_some();
+        item.flex_basis = if let Some(basis) = definite_basis {
             basis
         } else {
             let content_basis = if style.flex_basis().is_auto() {
@@ -673,7 +744,7 @@ fn determine_flex_base_sizes<Source, Session>(
                     if available_main == AvailableSpace::MinContent {
                         min_content
                     } else {
-                        max_content
+                        available_content
                     }
                 }
             }
@@ -723,7 +794,10 @@ fn determine_flex_base_sizes<Source, Session>(
         let margin_main = axis_sum(item.margin, axes.main);
         let preferred_contribution = preferred_main.unwrap_or(0.0);
         let contribution = |content: f32| {
-            let mut value = content.max(preferred_contribution);
+            let definite_basis = (!style.flex_basis().is_auto()).then_some(item.flex_basis);
+            let mut value = content
+                .max(preferred_contribution)
+                .max(definite_basis.unwrap_or(0.0));
             if item.flex_grow == 0.0 {
                 value = value.min(item.flex_basis);
             }
@@ -745,12 +819,41 @@ fn determine_flex_base_sizes<Source, Session>(
 
 #[inline]
 fn item_outer_hypothetical_main(item: &FlexItem, axes: Axes) -> f32 {
-    item.hypothetical_main + axis_sum(item.margin, axes.main)
+    if item.is_suppressed() {
+        0.0
+    } else {
+        item.hypothetical_main + axis_sum(item.margin, axes.main)
+    }
 }
 
 #[inline]
 fn item_outer_target_main(item: &FlexItem, axes: Axes) -> f32 {
-    item.target_main + axis_sum(item.margin, axes.main)
+    if item.is_suppressed() {
+        0.0
+    } else {
+        item.target_main + axis_sum(item.margin, axes.main)
+    }
+}
+
+#[inline]
+fn participating_count(items: &[FlexItem]) -> usize {
+    items.iter().filter(|item| !item.is_suppressed()).count()
+}
+
+fn apply_collapse_struts(items: &mut [FlexItem], struts: &[Option<f32>]) {
+    debug_assert_eq!(items.len(), struts.len());
+    for (item, strut) in items.iter_mut().zip(struts.iter().copied()) {
+        item.collapse_strut_cross = strut;
+        if item.is_suppressed() {
+            item.flex_basis = 0.0;
+            item.inner_flex_basis = 0.0;
+            item.resolved_min_main = 0.0;
+            item.hypothetical_main = 0.0;
+            item.target_main = 0.0;
+            item.min_content_contribution = 0.0;
+            item.max_content_contribution = 0.0;
+        }
+    }
 }
 
 fn collect_flex_lines(
@@ -772,14 +875,31 @@ fn collect_flex_lines(
         return Vec::new();
     }
     if available_main == AvailableSpace::MinContent {
-        return (0..items.len())
-            .map(|index| FlexLine {
-                start: index,
-                end: index + 1,
-                cross_size: 0.0,
-                cross_position: 0.0,
-            })
-            .collect();
+        let mut lines = Vec::new();
+        let mut start = 0;
+        let mut has_participant = false;
+        for (index, item) in items.iter().enumerate() {
+            if item.is_suppressed() {
+                continue;
+            }
+            if has_participant {
+                lines.push(FlexLine {
+                    start,
+                    end: index,
+                    cross_size: 0.0,
+                    cross_position: 0.0,
+                });
+                start = index;
+            }
+            has_participant = true;
+        }
+        lines.push(FlexLine {
+            start,
+            end: items.len(),
+            cross_size: 0.0,
+            cross_position: 0.0,
+        });
+        return lines;
     }
 
     let AvailableSpace::Definite(limit) = available_main else {
@@ -790,16 +910,27 @@ fn collect_flex_lines(
     while start < items.len() {
         let mut end = start;
         let mut occupied = 0.0;
+        let mut prior_participants = 0;
         while end < items.len() {
             let item_size = item_outer_hypothetical_main(&items[end], axes);
-            let candidate_gap = if end == start { 0.0 } else { gap };
+            let candidate_gap = if items[end].is_suppressed() || prior_participants == 0 {
+                0.0
+            } else {
+                gap
+            };
             let candidate = occupied + candidate_gap + item_size;
             // The first item always establishes a line. A zero-sized item at
             // an exact boundary remains on the preceding line (§9.3 note).
-            if end > start && candidate > limit && !(item_size == 0.0 && candidate_gap == 0.0) {
+            if prior_participants > 0
+                && candidate > limit
+                && !(item_size == 0.0 && candidate_gap == 0.0)
+            {
                 break;
             }
             occupied = candidate;
+            if !items[end].is_suppressed() {
+                prior_participants += 1;
+            }
             end += 1;
         }
         lines.push(FlexLine {
@@ -814,16 +945,20 @@ fn collect_flex_lines(
 }
 
 fn line_intrinsic_main(items: &[FlexItem], line: FlexLine, gap: f32, axes: Axes) -> f32 {
-    let item_sum = items[line.start..line.end]
+    let line_items = &items[line.start..line.end];
+    let item_sum = line_items
         .iter()
+        .filter(|item| !item.is_suppressed())
         .map(|item| item.flex_basis.max(item.resolved_min_main) + axis_sum(item.margin, axes.main))
         .sum::<f32>();
-    item_sum + gap * line.len().saturating_sub(1) as f32
+    item_sum + gap * participating_count(line_items).saturating_sub(1) as f32
 }
 
 fn line_content_contribution(items: &[FlexItem], line: FlexLine, gap: f32, maximum: bool) -> f32 {
-    let item_sum = items[line.start..line.end]
+    let line_items = &items[line.start..line.end];
+    let item_sum = line_items
         .iter()
+        .filter(|item| !item.is_suppressed())
         .map(|item| {
             if maximum {
                 item.max_content_contribution
@@ -832,7 +967,7 @@ fn line_content_contribution(items: &[FlexItem], line: FlexLine, gap: f32, maxim
             }
         })
         .sum::<f32>();
-    item_sum + gap * line.len().saturating_sub(1) as f32
+    item_sum + gap * participating_count(line_items).saturating_sub(1) as f32
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -866,10 +1001,6 @@ fn determine_auto_main_size(
             .max_by(f32::total_cmp)
             .unwrap_or(0.0),
     };
-    let content = match available_main {
-        AvailableSpace::Definite(available) if lines.len() > 1 => content.max(available),
-        _ => content,
-    };
     clamp_axis(content + inset_main, min_outer, max_outer, inset_main)
 }
 
@@ -882,10 +1013,14 @@ fn resolve_flexible_lengths(
     axes: Axes,
 ) {
     let line_items = &mut items[line.start..line.end];
-    if line_items.is_empty() {
+    if participating_count(line_items) == 0 {
+        for item in line_items {
+            item.target_main = 0.0;
+            item.frozen = true;
+        }
         return;
     }
-    let total_gap = gap * line_items.len().saturating_sub(1) as f32;
+    let total_gap = gap * participating_count(line_items).saturating_sub(1) as f32;
     let hypothetical_sum = total_gap
         + line_items
             .iter()
@@ -898,6 +1033,11 @@ fn resolve_flexible_lengths(
         item.frozen = false;
         item.violation = 0.0;
         item.target_main = item.flex_basis;
+        if item.is_suppressed() {
+            item.target_main = 0.0;
+            item.frozen = true;
+            continue;
+        }
         let factor_is_zero = if growing {
             item.flex_grow == 0.0
         } else {
@@ -917,6 +1057,7 @@ fn resolve_flexible_lengths(
     let initial_used = total_gap
         + line_items
             .iter()
+            .filter(|item| !item.is_suppressed())
             .map(|item| {
                 let main = if item.frozen {
                     item.target_main
@@ -928,7 +1069,7 @@ fn resolve_flexible_lengths(
             .sum::<f32>();
     let initial_free_space = inner_main_size - initial_used;
 
-    for _ in 0..=line_items.len() {
+    for _ in 0..=participating_count(line_items) {
         if line_items.iter().all(|item| item.frozen) {
             return;
         }
@@ -936,6 +1077,7 @@ fn resolve_flexible_lengths(
         let used = total_gap
             + line_items
                 .iter()
+                .filter(|item| !item.is_suppressed())
                 .map(|item| {
                     let main = if item.frozen {
                         item.target_main
@@ -948,7 +1090,7 @@ fn resolve_flexible_lengths(
         let mut remaining = inner_main_size - used;
         let factor_sum = line_items
             .iter()
-            .filter(|item| !item.frozen)
+            .filter(|item| !item.frozen && !item.is_suppressed())
             .map(|item| {
                 if growing {
                     item.flex_grow
@@ -966,18 +1108,24 @@ fn resolve_flexible_lengths(
 
         if growing {
             if factor_sum > 0.0 {
-                for item in line_items.iter_mut().filter(|item| !item.frozen) {
+                for item in line_items
+                    .iter_mut()
+                    .filter(|item| !item.frozen && !item.is_suppressed())
+                {
                     item.target_main = item.flex_basis + remaining * item.flex_grow / factor_sum;
                 }
             }
         } else {
             let scaled_sum = line_items
                 .iter()
-                .filter(|item| !item.frozen)
+                .filter(|item| !item.frozen && !item.is_suppressed())
                 .map(|item| item.flex_shrink * item.inner_flex_basis)
                 .sum::<f32>();
             if scaled_sum > 0.0 {
-                for item in line_items.iter_mut().filter(|item| !item.frozen) {
+                for item in line_items
+                    .iter_mut()
+                    .filter(|item| !item.frozen && !item.is_suppressed())
+                {
                     let scaled = item.flex_shrink * item.inner_flex_basis;
                     item.target_main = item.flex_basis + remaining * scaled / scaled_sum;
                 }
@@ -985,7 +1133,10 @@ fn resolve_flexible_lengths(
         }
 
         let mut total_violation = 0.0;
-        for item in line_items.iter_mut().filter(|item| !item.frozen) {
+        for item in line_items
+            .iter_mut()
+            .filter(|item| !item.frozen && !item.is_suppressed())
+        {
             let floor = axes.main.size(padding_border_size(
                 item.padding,
                 item.border,
@@ -1003,7 +1154,10 @@ fn resolve_flexible_lengths(
         }
 
         let mut froze_any = false;
-        for item in line_items.iter_mut().filter(|item| !item.frozen) {
+        for item in line_items
+            .iter_mut()
+            .filter(|item| !item.frozen && !item.is_suppressed())
+        {
             let freeze = if total_violation > f32::EPSILON {
                 item.violation > 0.0
             } else if total_violation < -f32::EPSILON {
@@ -1043,10 +1197,20 @@ fn determine_hypothetical_cross_sizes<Source, Session>(
 {
     for line in lines {
         for item in &mut items[line.start..line.end] {
+            if item.is_suppressed() {
+                item.hypothetical_cross = 0.0;
+                item.target_cross = 0.0;
+                item.measured_baselines = Point::NONE;
+                item.baseline = 0.0;
+                continue;
+            }
             let mut known = Size::NONE;
             axes.main.set_size(&mut known, Some(item.target_main));
             axes.cross
                 .set_size(&mut known, axes.cross.size(item.preferred_size));
+            let mut known_is_definite = item.preferred_size_is_definite;
+            axes.main
+                .set_size(&mut known_is_definite, item.main_size_is_definite);
             let child_available = size_from_axes(
                 axes,
                 AvailableSpace::Definite(item.target_main),
@@ -1057,6 +1221,7 @@ fn determine_hypothetical_cross_sizes<Source, Session>(
                 session,
                 item.key.node,
                 known,
+                known_is_definite,
                 container_inner_size,
                 child_available,
                 SizingMode::InherentSize,
@@ -1091,7 +1256,11 @@ fn calculate_line_cross_sizes(
     if wrap == FlexWrap::NoWrap
         && let (Some(line), Some(cross_size)) = (lines.first_mut(), known_inner_cross)
     {
-        line.cross_size = cross_size.max(0.0);
+        let collapse_strut = items
+            .iter()
+            .filter_map(|item| item.collapse_strut_cross)
+            .fold(0.0_f32, f32::max);
+        line.cross_size = cross_size.max(collapse_strut).max(0.0);
         return;
     }
 
@@ -1101,6 +1270,9 @@ fn calculate_line_cross_sizes(
         let mut largest_after_baseline = 0.0_f32;
         let mut has_baseline_item = false;
         for item in &items[line.start..line.end] {
+            if item.is_suppressed() {
+                continue;
+            }
             let outer_cross = item.hypothetical_cross + axis_sum(item.margin, axes.cross);
             if axes.main == Axis::Horizontal
                 && item.align_self == AlignItems::Baseline
@@ -1123,7 +1295,14 @@ fn calculate_line_cross_sizes(
         } else {
             0.0
         };
-        line.cross_size = largest_outer.max(baseline_outer).max(0.0);
+        let collapse_strut = items[line.start..line.end]
+            .iter()
+            .filter_map(|item| item.collapse_strut_cross)
+            .fold(0.0_f32, f32::max);
+        line.cross_size = largest_outer
+            .max(baseline_outer)
+            .max(collapse_strut)
+            .max(0.0);
     }
 }
 
@@ -1173,6 +1352,10 @@ fn stretch_lines(
 fn determine_used_cross_sizes(items: &mut [FlexItem], lines: &[FlexLine], axes: Axes) {
     for line in lines {
         for item in &mut items[line.start..line.end] {
+            if item.is_suppressed() {
+                item.target_cross = 0.0;
+                continue;
+            }
             let inset_size = padding_border_size(item.padding, item.border, item.scrollbar);
             let cross_floor = axes.cross.size(inset_size);
             let should_stretch = item.align_self == AlignItems::Stretch
@@ -1203,7 +1386,8 @@ fn distribute_main_axis(
 ) {
     for line in lines {
         let line_items = &mut items[line.start..line.end];
-        let fixed_gap = main_gap * line_items.len().saturating_sub(1) as f32;
+        let participant_count = participating_count(line_items);
+        let fixed_gap = main_gap * participant_count.saturating_sub(1) as f32;
         let used = fixed_gap
             + line_items
                 .iter()
@@ -1212,6 +1396,7 @@ fn distribute_main_axis(
         let free_space = inner_main - used;
         let auto_count = line_items
             .iter()
+            .filter(|item| !item.is_suppressed())
             .map(|item| {
                 usize::from(flow_start_bool(
                     item.margin_auto,
@@ -1227,7 +1412,7 @@ fn distribute_main_axis(
 
         let (leading, distributed_gap) = if free_space > 0.0 && auto_count > 0 {
             let share = free_space / auto_count as f32;
-            for item in line_items.iter_mut() {
+            for item in line_items.iter_mut().filter(|item| !item.is_suppressed()) {
                 if flow_start_bool(item.margin_auto, axes.main, axes.main_reverse) {
                     set_flow_start(&mut item.margin, axes.main, axes.main_reverse, share);
                 }
@@ -1237,7 +1422,7 @@ fn distribute_main_axis(
             }
             (0.0, 0.0)
         } else {
-            for item in line_items.iter_mut() {
+            for item in line_items.iter_mut().filter(|item| !item.is_suppressed()) {
                 if flow_start_bool(item.margin_auto, axes.main, axes.main_reverse) {
                     set_flow_start(&mut item.margin, axes.main, axes.main_reverse, 0.0);
                 }
@@ -1248,19 +1433,24 @@ fn distribute_main_axis(
             alignment_distribution(
                 justify_content,
                 free_space,
-                line_items.len(),
+                participant_count,
                 axes.main_reverse,
                 axes.main_base_reverse,
             )
         };
 
         let mut cursor = leading;
-        let line_item_count = line_items.len();
-        for (index, item) in line_items.iter_mut().enumerate() {
+        let mut participant_index = 0;
+        for item in line_items.iter_mut() {
+            if item.is_suppressed() {
+                item.main_position = cursor;
+                continue;
+            }
             cursor += flow_start(item.margin, axes.main, axes.main_reverse);
             item.main_position = cursor;
             cursor += item.target_main + flow_end(item.margin, axes.main, axes.main_reverse);
-            if index + 1 < line_item_count {
+            participant_index += 1;
+            if participant_index < participant_count {
                 cursor += main_gap + distributed_gap;
             }
         }
@@ -1307,7 +1497,8 @@ fn align_items_cross_axis(items: &mut [FlexItem], lines: &[FlexLine], axes: Axes
             items[line.start..line.end]
                 .iter()
                 .filter(|item| {
-                    item.align_self == AlignItems::Baseline
+                    !item.is_suppressed()
+                        && item.align_self == AlignItems::Baseline
                         && !flow_start_bool(item.margin_auto, axes.cross, axes.cross_reverse)
                         && !flow_end_bool(item.margin_auto, axes.cross, axes.cross_reverse)
                 })
@@ -1318,6 +1509,10 @@ fn align_items_cross_axis(items: &mut [FlexItem], lines: &[FlexLine], axes: Axes
         };
 
         for item in &mut items[line.start..line.end] {
+            if item.is_suppressed() {
+                item.cross_position = 0.0;
+                continue;
+            }
             let start_auto = flow_start_bool(item.margin_auto, axes.cross, axes.cross_reverse);
             let end_auto = flow_end_bool(item.margin_auto, axes.cross, axes.cross_reverse);
             let free = line.cross_size - item.target_cross - axis_sum(item.margin, axes.cross);
@@ -1442,8 +1637,13 @@ fn first_container_baseline(
     let line = *lines.first()?;
     let first = items[line.start..line.end]
         .iter()
+        .filter(|item| !item.is_suppressed())
         .find(|item| axes.main == Axis::Vertical || item.align_self == AlignItems::Baseline)
-        .or_else(|| items[line.start..line.end].first())?;
+        .or_else(|| {
+            items[line.start..line.end]
+                .iter()
+                .find(|item| !item.is_suppressed())
+        })?;
     let location = item_border_box_location(first, line, axes, inner_size, content_origin);
     Some(
         location.y
@@ -1474,12 +1674,22 @@ where
 
     for line in lines {
         for item in &mut items[line.start..line.end] {
+            if item.is_suppressed() {
+                super::hide_subtree(source, session, item.key.node);
+                session.set_unrounded_layout(
+                    item.key.node,
+                    &Layout::with_order(item.key.layout_order),
+                );
+                continue;
+            }
             let target_size = size_from_axes(axes, item.target_main, item.target_cross);
             let mut input = LayoutInput::perform_layout(
                 target_size.map(Some),
                 parent_size,
                 target_size.map(AvailableSpace::Definite),
             );
+            axes.main
+                .set_size(&mut input.definite_dimensions, item.main_size_is_definite);
             // The parent has already applied the flex item's own sizing,
             // min/max and aspect-ratio rules to both target axes.
             input.sizing_mode = SizingMode::ContentSize;
@@ -1622,6 +1832,7 @@ where
             session,
             pending.node,
             known,
+            item.preferred_size_is_definite,
             parent_size,
             available,
             SizingMode::InherentSize,
@@ -1695,6 +1906,21 @@ where
     Source: FlexSource,
     Session: LayoutSession<Source>,
 {
+    compute_flexbox_layout_with_collapse_struts(source, session, node, input, None)
+}
+
+#[allow(clippy::too_many_lines)]
+fn compute_flexbox_layout_with_collapse_struts<Source, Session>(
+    source: &Source,
+    session: &mut Session,
+    node: NodeId,
+    input: LayoutInput,
+    collapse_struts: Option<&[Option<f32>]>,
+) -> LayoutOutput
+where
+    Source: FlexSource,
+    Session: LayoutSession<Source>,
+{
     // Unlike the former owned snapshot, this GAT view remains borrowed for
     // the whole algorithm while recursive calls mutate only `session`.
     let style = source.flex_container_style(node);
@@ -1763,6 +1989,15 @@ where
             )
         }),
     );
+    let style_definite = if input.sizing_mode == SizingMode::ContentSize {
+        Size::new(false, false)
+    } else {
+        preferred_size_definiteness(style.size(), input.parent_size, style.aspect_ratio())
+    };
+    let outer_definite = Size::new(
+        input.definite_dimensions.width || style_definite.width,
+        input.definite_dimensions.height || style_definite.height,
+    );
     let mut outer_size = input.known_dimensions.or(clamped_preferred);
     let mut inner_size = Size::new(
         outer_size
@@ -1772,8 +2007,8 @@ where
             .height
             .map(|value| (value - container_inset_size.height).max(0.0)),
     );
-    let item_inline_basis_was_indefinite = inner_size.width.is_none();
-    let main_percentage_basis_was_indefinite = axes.main.size(inner_size).is_none();
+    let item_inline_basis_was_indefinite = !outer_definite.width;
+    let main_percentage_basis_was_indefinite = !axes.main.size(outer_definite);
     let inner_available_space = Size::new(
         inner_size.width.map_or_else(
             || {
@@ -1857,7 +2092,16 @@ where
 
     let mut items = generated
         .into_iter()
-        .map(|item| resolve_item(source, item.key(), inner_size, align_items))
+        .map(|item| {
+            let mut percentage_basis = inner_size;
+            if !outer_definite.width {
+                percentage_basis.width = None;
+            }
+            if !outer_definite.height {
+                percentage_basis.height = None;
+            }
+            resolve_item(source, item.key(), percentage_basis, align_items)
+        })
         .collect::<Vec<_>>();
     determine_flex_base_sizes(
         source,
@@ -1866,8 +2110,14 @@ where
         axes,
         inner_size,
         inner_available_space,
-        axes.main.size(inner_size),
+        (!main_percentage_basis_was_indefinite)
+            .then(|| axes.main.size(inner_size))
+            .flatten(),
+        !main_percentage_basis_was_indefinite,
     );
+    if let Some(struts) = collapse_struts {
+        apply_collapse_struts(&mut items, struts);
+    }
 
     let main_gap = axes.main.size(gap);
     let line_available_main = axes.main.size(inner_size).map_or_else(
@@ -1989,7 +2239,11 @@ where
             } else {
                 axes.main.size(inner_size)
             },
+            !main_percentage_basis_was_indefinite,
         );
+        if let Some(struts) = collapse_struts {
+            apply_collapse_struts(&mut items, struts);
+        }
         lines = collect_flex_lines(
             &items,
             flex_wrap,
@@ -2018,6 +2272,27 @@ where
         line.cross_size = inner_cross;
     }
     stretch_lines(&mut lines, flex_wrap, align_content, inner_cross, cross_gap);
+    if collapse_struts.is_none() && items.iter().any(|item| item.collapsed) {
+        // Flexbox §9.4 stores the first-round cross size of the *line* that
+        // contains each collapsed item, after align-content:stretch. Using
+        // the item's own hypothetical cross size would lose baseline- or
+        // line-distribution space when the second round ignores that item.
+        let mut struts = vec![None; items.len()];
+        for line in &lines {
+            for (offset, item) in items[line.start..line.end].iter().enumerate() {
+                if item.collapsed {
+                    struts[line.start + offset] = Some(line.cross_size);
+                }
+            }
+        }
+        return compute_flexbox_layout_with_collapse_struts(
+            source,
+            session,
+            node,
+            input,
+            Some(&struts),
+        );
+    }
     determine_used_cross_sizes(&mut items, &lines, axes);
     distribute_main_axis(
         &mut items,
