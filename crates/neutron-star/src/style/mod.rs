@@ -4,20 +4,22 @@
 //! immutable `LayoutSource` traits hand out short-lived **style views** —
 //! cheap borrowed values implementing [`CoreStyle`] plus the per-algorithm traits
 //! ([`FlexContainerStyle`]/[`FlexItemStyle`], [`GridContainerStyle`]/
-//! [`GridItemStyle`]) — and every accessor returns a small `Copy` value from
-//! [`value`]/[`alignment`]. A host backed by stylo implements the accessors
+//! [`GridItemStyle`], [`RelativeContainerStyle`]/[`RelativeItemStyle`]) — and
+//! every accessor returns a small `Copy` value from [`value`]/[`alignment`]
+//! or [`relative`]. A host backed by stylo implements the accessors
 //! as direct translations of `ComputedValues` fields; a test host returns
 //! struct fields. Blanket impls are provided for `&S`, so implementing a
 //! trait on your style struct makes plain references usable as views.
 //!
-//! # Defaults are CSS initial values
+//! # Defaults are protocol initial values
 //!
-//! Every defaulted trait method returns the **CSS initial value** for its
-//! property. Host-specific *defaults* — like Lynx defaulting `box-sizing` to
-//! `border-box`, `overflow` to `hidden`, and `position` to a `relative` that
-//! means CSS `static` — are computed-style policy and belong in the host's
-//! style system, which already resolves them before layout runs. The engine
-//! only defines what the values *mean*.
+//! Defaulted CSS trait methods return their **CSS initial value**. The
+//! non-CSS Relative traits return the standalone Relative Level 1 initial
+//! values. Host-specific *defaults* — like Lynx defaulting `box-sizing` to
+//! `border-box`, `overflow` to `hidden`, and `relative-layout-once` to
+//! `true` — are computed-style policy and belong in the host's style system,
+//! which already resolves them before layout runs. The engine only defines
+//! what the values *mean*.
 //!
 //! # Units contract
 //!
@@ -34,6 +36,7 @@
 pub mod alignment;
 pub mod flex;
 pub mod grid;
+pub mod relative;
 pub mod value;
 
 pub use alignment::{
@@ -45,6 +48,7 @@ pub use grid::{
     GridTemplateComponent, GridTemplateRepetition, MaxTrackSizingFunction, MinTrackSizingFunction,
     RepetitionCount, TrackSizingFunction,
 };
+pub use relative::{RelativeCenter, RelativeContainerStyle, RelativeItemStyle, RelativeReference};
 pub use value::{CalcHandle, Dimension, LengthPercentage, LengthPercentageAuto};
 
 use crate::geometry::{Edges, Point, Size};

@@ -6,20 +6,22 @@
 
 use neutron_star::compute::{
     FnLeafMeasurer, LeafMeasureInput, LeafMetrics, compute_cached_layout, compute_flexbox_layout,
-    compute_grid_layout, compute_leaf_layout, hide_subtree,
+    compute_grid_layout, compute_leaf_layout, compute_relative_layout, hide_subtree,
 };
 use neutron_star::prelude::*;
 use neutron_star::style::{
     AlignContent, AlignItems, AlignSelf, BoxGenerationMode, BoxSizing, CalcHandle, Dimension,
     Direction, FlexDirection, FlexWrap, GridAutoFlow, GridPlacement, GridTemplateComponent,
     JustifyContent, JustifyItems, JustifySelf, LengthPercentage, LengthPercentageAuto, Overflow,
-    Position, RepetitionCount, TrackSizingFunction, Visibility,
+    Position, RelativeCenter, RelativeContainerStyle, RelativeItemStyle, RelativeReference,
+    RepetitionCount, TrackSizingFunction, Visibility,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TestDisplay {
     Flex,
     Grid,
+    Relative,
     Leaf,
 }
 
@@ -84,6 +86,11 @@ pub(super) struct TestStyle {
     pub(super) grid_row: Line<GridPlacement>,
     pub(super) grid_column: Line<GridPlacement>,
     pub(super) justify_self: Option<JustifySelf>,
+    pub(super) relative_layout_once: bool,
+    pub(super) relative_id: RelativeReference,
+    pub(super) relative_align: Edges<RelativeReference>,
+    pub(super) relative_adjacent: Edges<RelativeReference>,
+    pub(super) relative_center: RelativeCenter,
 }
 
 impl Default for TestStyle {
@@ -124,6 +131,11 @@ impl Default for TestStyle {
             grid_row: Line::new(GridPlacement::Auto, GridPlacement::Auto),
             grid_column: Line::new(GridPlacement::Auto, GridPlacement::Auto),
             justify_self: None,
+            relative_layout_once: false,
+            relative_id: RelativeReference::NONE,
+            relative_align: Edges::uniform(RelativeReference::NONE),
+            relative_adjacent: Edges::uniform(RelativeReference::NONE),
+            relative_center: RelativeCenter::None,
         }
     }
 }
@@ -299,6 +311,34 @@ impl GridItemStyle for TestStyle {
 
     fn justify_self(&self) -> Option<JustifySelf> {
         self.justify_self
+    }
+
+    fn order(&self) -> i32 {
+        self.order
+    }
+}
+
+impl RelativeContainerStyle for TestStyle {
+    fn relative_layout_once(&self) -> bool {
+        self.relative_layout_once
+    }
+}
+
+impl RelativeItemStyle for TestStyle {
+    fn relative_id(&self) -> RelativeReference {
+        self.relative_id
+    }
+
+    fn relative_align(&self) -> Edges<RelativeReference> {
+        self.relative_align
+    }
+
+    fn relative_adjacent(&self) -> Edges<RelativeReference> {
+        self.relative_adjacent
+    }
+
+    fn relative_center(&self) -> RelativeCenter {
+        self.relative_center
     }
 
     fn order(&self) -> i32 {
@@ -652,6 +692,7 @@ pub(super) struct TestSource {
 #[derive(Debug, Default)]
 pub(super) struct TestSession {
     pub(super) nodes: Vec<TestSessionNode>,
+    pub(super) child_layout_calls: usize,
     pub(super) layout_writes: usize,
     pub(super) leaf_measure_calls: usize,
 }
@@ -739,6 +780,20 @@ impl TestTree {
     pub(super) fn push_grid(&mut self, style: TestStyle, children: Vec<NodeId>) -> NodeId {
         self.push(TestSourceNode {
             display: TestDisplay::Grid,
+            style,
+            children,
+            measure: TestMeasure::Intrinsic {
+                min_content_size: Size::ZERO,
+                max_content_size: Size::ZERO,
+                first_baseline: None,
+            },
+            first_baseline_override: None,
+        })
+    }
+
+    pub(super) fn push_relative(&mut self, style: TestStyle, children: Vec<NodeId>) -> NodeId {
+        self.push(TestSourceNode {
+            display: TestDisplay::Relative,
             style,
             children,
             measure: TestMeasure::Intrinsic {
@@ -846,6 +901,19 @@ impl GridSource for TestSource {
     }
 }
 
+impl RelativeSource for TestSource {
+    type ContainerStyle<'a> = &'a TestStyle;
+    type ItemStyle<'a> = &'a TestStyle;
+
+    fn relative_container_style(&self, container: NodeId) -> Self::ContainerStyle<'_> {
+        &self.nodes[usize::from(container)].style
+    }
+
+    fn relative_item_style(&self, item: NodeId) -> Self::ItemStyle<'_> {
+        &self.nodes[usize::from(item)].style
+    }
+}
+
 impl LayoutState for TestSession {
     fn set_unrounded_layout(&mut self, node: NodeId, layout: &Layout) {
         self.layout_writes += 1;
@@ -874,6 +942,7 @@ impl LayoutSession<TestSource> for TestSession {
         child: NodeId,
         input: LayoutInput,
     ) -> LayoutOutput {
+        self.child_layout_calls += 1;
         let node = &source.nodes[usize::from(child)];
         let display = node.display;
 
@@ -886,6 +955,7 @@ impl LayoutSession<TestSource> for TestSession {
             compute_cached_layout(self, child, input, |session, child, input| match display {
                 TestDisplay::Flex => compute_flexbox_layout(source, session, child, input),
                 TestDisplay::Grid => compute_grid_layout(source, session, child, input),
+                TestDisplay::Relative => compute_relative_layout(source, session, child, input),
                 TestDisplay::Leaf => {
                     let style = &node.style;
                     let measure = node.measure;
@@ -931,6 +1001,14 @@ pub(super) fn fixed_leaf(tree: &mut TestTree, width: f32, height: f32) -> NodeId
 
 pub(super) fn flex_container(tree: &mut TestTree, style: TestStyle, children: &[NodeId]) -> NodeId {
     tree.push_flex(style, children.to_vec())
+}
+
+pub(super) fn relative_container(
+    tree: &mut TestTree,
+    style: TestStyle,
+    children: &[NodeId],
+) -> NodeId {
+    tree.push_relative(style, children.to_vec())
 }
 
 pub(super) fn perform_layout(

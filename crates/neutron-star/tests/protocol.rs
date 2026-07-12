@@ -17,8 +17,8 @@ use neutron_star::compute::{
 use neutron_star::prelude::*;
 use neutron_star::style::{
     BoxGenerationMode, CalcHandle, Dimension, GridPlacement, GridTemplateComponent,
-    LengthPercentage, LengthPercentageAuto, Position, RepetitionCount, TrackSizingFunction,
-    Visibility,
+    LengthPercentage, LengthPercentageAuto, Position, RelativeCenter, RelativeContainerStyle,
+    RelativeItemStyle, RelativeReference, RepetitionCount, TrackSizingFunction, Visibility,
 };
 
 /// The host's own display vocabulary — deliberately *not* an engine type
@@ -106,6 +106,9 @@ impl FlexItemStyle for MockStyle {
         self.flex_grow
     }
 }
+
+impl RelativeContainerStyle for MockStyle {}
+impl RelativeItemStyle for MockStyle {}
 
 fn to_component(component: &MockTemplateComponent) -> GridTemplateComponent<&MockRepetition> {
     match component {
@@ -280,6 +283,19 @@ impl GridSource for MockSource {
     }
 }
 
+impl RelativeSource for MockSource {
+    type ContainerStyle<'a> = &'a MockStyle;
+    type ItemStyle<'a> = &'a MockStyle;
+
+    fn relative_container_style(&self, container: NodeId) -> Self::ContainerStyle<'_> {
+        &self.node(container).style
+    }
+
+    fn relative_item_style(&self, item: NodeId) -> Self::ItemStyle<'_> {
+        &self.node(item).style
+    }
+}
+
 impl LayoutState for MockSession {
     fn set_unrounded_layout(&mut self, node: NodeId, layout: &Layout) {
         self.node_mut(node).unrounded = *layout;
@@ -370,6 +386,15 @@ fn style_views_serve_css_initial_defaults() {
     assert_eq!(view.visibility(), Visibility::Visible);
     assert!(view.size().width.is_auto());
     assert_eq!(FlexItemStyle::order(&view), 0);
+    assert!(!RelativeContainerStyle::relative_layout_once(&view));
+    assert_eq!(
+        RelativeItemStyle::relative_id(&view),
+        RelativeReference::NONE
+    );
+    assert_eq!(
+        RelativeItemStyle::relative_center(&view),
+        RelativeCenter::None
+    );
     assert_eq!(
         GridItemStyle::grid_column(&view),
         Line::new(GridPlacement::Auto, GridPlacement::Auto)

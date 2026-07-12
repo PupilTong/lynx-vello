@@ -11,27 +11,30 @@
 //!
 //! This module contains the generic machinery (root entry, cache wrapper,
 //! hidden-subtree zeroing, leaf boxing, the positioned pass, rounding) and the
-//! implemented [`compute_flexbox_layout`] and [`compute_grid_layout`] entry
-//! points.
+//! implemented [`compute_flexbox_layout`], [`compute_grid_layout`], and
+//! [`compute_relative_layout`] entry points.
 //!
 //! # The canonical dispatch skeleton
 //!
 //! Every host implements the same shape once; this is the whole integration
-//! surface of the engine (a host with custom layout modes — e.g. lynx-vello's
-//! `display: linear`/`relative` — adds arms that call its own algorithms):
+//! surface of the engine (a host with custom layout modes such as
+//! lynx-vello's `display: linear` adds arms that call its own algorithms):
 //!
 //! ```
 //! use neutron_star::compute::{
-//!     compute_cached_layout, compute_flexbox_layout, compute_grid_layout, hide_subtree,
+//!     compute_cached_layout, compute_flexbox_layout, compute_grid_layout,
+//!     compute_relative_layout, hide_subtree,
 //! };
 //! use neutron_star::tree::{
 //!     FlexSource, GridSource, LayoutInput, LayoutOutput, LayoutSession, LayoutSource, NodeId,
+//!     RelativeSource,
 //! };
 //!
 //! # #[derive(Clone, Copy)]
 //! enum Display {
 //!     Flex,
 //!     Grid,
+//!     Relative,
 //!     Hidden,
 //! }
 //!
@@ -42,7 +45,7 @@
 //!     input: LayoutInput,
 //! ) -> LayoutOutput
 //! where
-//!     Source: FlexSource + GridSource,
+//!     Source: FlexSource + GridSource + RelativeSource,
 //!     Session: LayoutSession<Source>,
 //! {
 //!     let display = host_display_of(source, node);
@@ -58,6 +61,7 @@
 //!             Display::Hidden => unreachable!(),
 //!             Display::Flex => compute_flexbox_layout(source, session, node, input),
 //!             Display::Grid => compute_grid_layout(source, session, node, input),
+//!             Display::Relative => compute_relative_layout(source, session, node, input),
 //!             // host: Display::Linear => host_linear_layout(source, session, node, input),
 //!             // host: Display::Leaf => compute_leaf_layout(input, &style, resolve, &mut measurer),
 //!         }
@@ -87,6 +91,7 @@
 mod flexbox;
 mod grid;
 mod leaf;
+mod relative;
 mod util;
 
 pub use flexbox::compute_flexbox_layout;
@@ -95,6 +100,7 @@ pub use leaf::{
     FnLeafMeasurer, LeafMeasureInput, LeafMeasurement, LeafMeasurer, LeafMetrics,
     compute_leaf_layout,
 };
+pub use relative::compute_relative_layout;
 
 use self::util::{
     apply_box_sizing, auto_edges_to_zero, clamp, resolve_edges, resolve_insets,

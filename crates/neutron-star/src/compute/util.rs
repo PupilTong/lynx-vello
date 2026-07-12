@@ -47,6 +47,7 @@ impl OrderedItem {
 pub(super) struct ResolvedItemBox {
     pub(super) raw_size: Size<Dimension>,
     pub(super) raw_min_size: Size<Dimension>,
+    pub(super) raw_max_size: Size<Dimension>,
     pub(super) aspect_ratio: Option<f32>,
     pub(super) box_sizing: BoxSizing,
     pub(super) overflow: Point<Overflow>,
@@ -382,6 +383,26 @@ pub(super) fn resolve_item_box<Source: LayoutSource>(
     style: &impl CoreStyle,
     percentage_basis: Size<Option<f32>>,
 ) -> ResolvedItemBox {
+    resolve_item_box_with_bases(source, style, percentage_basis, percentage_basis.width)
+}
+
+/// Resolves an item's box when sizing percentages and physical edge
+/// percentages have different bases.
+///
+/// Relative layout uses the definite parent content size for child sizing,
+/// while margins/padding/borders resolve against the available parent width.
+/// Flex and Grid use [`resolve_item_box`], where both bases are identical.
+#[inline(always)]
+#[allow(
+    clippy::inline_always,
+    reason = "avoids a 216-byte resolver result and copy chain in release LLVM IR"
+)]
+pub(super) fn resolve_item_box_with_bases<Source: LayoutSource>(
+    source: &Source,
+    style: &impl CoreStyle,
+    size_percentage_basis: Size<Option<f32>>,
+    edge_inline_basis: Option<f32>,
+) -> ResolvedItemBox {
     let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
     let raw_size = style.size();
     let raw_min_size = style.min_size();
@@ -389,13 +410,13 @@ pub(super) fn resolve_item_box<Source: LayoutSource>(
     let aspect_ratio = style.aspect_ratio();
     let box_sizing = style.box_sizing();
     let overflow = style.overflow();
-    let padding = resolve_edges(style.padding(), percentage_basis.width, &resolve_calc);
-    let border = resolve_edges(style.border(), percentage_basis.width, &resolve_calc);
+    let padding = resolve_edges(style.padding(), edge_inline_basis, &resolve_calc);
+    let border = resolve_edges(style.border(), edge_inline_basis, &resolve_calc);
     let scrollbar = scrollbar_size_from(overflow, style.scrollbar_width());
     let box_inset = box_inset_size(padding, border, scrollbar);
     let preferred_size = resolve_quantitative_sizes(
         raw_size,
-        percentage_basis,
+        size_percentage_basis,
         aspect_ratio,
         box_sizing,
         box_inset,
@@ -403,7 +424,7 @@ pub(super) fn resolve_item_box<Source: LayoutSource>(
     );
     let min_size = resolve_quantitative_sizes(
         raw_min_size,
-        percentage_basis,
+        size_percentage_basis,
         aspect_ratio,
         box_sizing,
         box_inset,
@@ -411,19 +432,19 @@ pub(super) fn resolve_item_box<Source: LayoutSource>(
     );
     let max_size = resolve_quantitative_sizes(
         raw_max_size,
-        percentage_basis,
+        size_percentage_basis,
         aspect_ratio,
         box_sizing,
         box_inset,
         &resolve_calc,
     );
     let margin_value = style.margin();
-    let optional_margin =
-        resolve_optional_edges(margin_value, percentage_basis.width, &resolve_calc);
+    let optional_margin = resolve_optional_edges(margin_value, edge_inline_basis, &resolve_calc);
 
     ResolvedItemBox {
         raw_size,
         raw_min_size,
+        raw_max_size,
         aspect_ratio,
         box_sizing,
         overflow,
@@ -435,7 +456,7 @@ pub(super) fn resolve_item_box<Source: LayoutSource>(
         padding,
         border,
         scrollbar,
-        inset: resolve_insets(style.inset(), percentage_basis, &resolve_calc),
+        inset: resolve_insets(style.inset(), size_percentage_basis, &resolve_calc),
     }
 }
 

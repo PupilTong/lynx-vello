@@ -81,19 +81,29 @@ The project's own `default_layout_style.h` already encodes a "Lynx default vs W3
 
 #### Lynx-specific non-CSS layout primitives: `relative-*` (display:relative)
 
-`display:relative` ports Android's `RelativeLayout`. Each child is optionally tagged with a small integer `relative-id` (scope: unique among siblings) so other siblings can anchor to it by id; `relative-{top,right,bottom,left}-of` / `relative-inline-{start,end}-of` reference another sibling's `relative-id` (or the special parent id) to position this child's respective edge adjacent to that sibling; `relative-align-{top,right,bottom,left}` / `relative-align-inline-{start,end}` align this child's edge flush with another element's *same-side* edge (rather than adjacent-placement); `relative-center` centers the child within the parent on one or both axes; `relative-layout-once` is a perf/correctness toggle (when true, forces one-directional/upward-only dependency resolution instead of iterative constraint solving — matches `RelativeLayoutAlgorithm`'s dependency-graph + topological-sort structure seen in `relative_layout_algorithm.h`, which builds `id_map_`, per-item `dependencies`/`reverse_dependencies` sets, and does a `Sort()` pass before positioning). This is fundamentally a same-generation dependency-graph solver, not a CSS box-flow model — nothing in standard CSS does sibling-referential anchoring by id within a single containing block (closest analogs are grid named lines/areas, which are still index/name-based grid slots, not free-form anchor points), and CSS Anchor Positioning (`anchor()`/`position-anchor`) is document-wide/absolute-positioning-only, not a same-parent relative-layout mode.
+Normative algorithm: [Starlight Relative Layout Module Level 1](../starlight-relative-layout.md).
+
+`display:relative` ports Android's `RelativeLayout`. Each child is optionally tagged with a small integer `relative-id` (scope: unique among siblings) so other siblings can anchor to it by id; `relative-{top,right,bottom,left}-of` / `relative-inline-{start,end}-of` reference another sibling's `relative-id` (or the special parent id) to position this child's respective edge adjacent to that sibling; `relative-align-{top,right,bottom,left}` / `relative-align-inline-{start,end}` align this child's edge flush with another element's *same-side* edge (rather than adjacent-placement); `relative-center` centers the child within the parent on one or both axes; `relative-layout-once` is a perf/correctness toggle (when true, it uses one combined dependency order and measures each item as encountered; false uses separate horizontal/vertical orders plus selective remeasurement). Native Lynx computes the property default as `true`; neutron-star's standalone trait surface deliberately defaults it to `false`, and the future Lynx adapter must materialize native's `true`. This is fundamentally a same-generation dependency-graph solver, not a CSS box-flow model — nothing in standard CSS does sibling-referential anchoring by id within a single containing block (closest analogs are grid named lines/areas, which are still index/name-based grid slots not per-element anchors), and CSS Anchor Positioning (`anchor()`/`position-anchor`) is document-wide/absolute-positioning-only, not a same-parent relative-layout mode.
 
 | Item | Description | Tier | W3C-compliant? | Deviation & what we should do instead | Source refs |
 |---|---|---|---|---|---|
-| `display: relative` | Enables relative (Android RelativeLayout-style) sibling-anchored child layout | Extended | No (non-CSS) | Implement as its own dependency-graph-based algorithm; **not** the same as CSS `position:relative` (name collision only) | `css_defines/24-display.json`, `lynx/core/renderer/starlight/layout/relative_layout_algorithm.{h,cc}` |
+| `display: relative` | Enables relative (Android RelativeLayout-style) sibling-anchored child layout | Extended | No (non-CSS) | Implemented as `neutron_star::compute::compute_relative_layout`; **not** the same as CSS `position:relative` (name collision only) | `css_defines/24-display.json`, `lynx/core/renderer/starlight/layout/relative_layout_algorithm.{h,cc}` |
 | `relative-id` | Assigns an integer id to a child so siblings can reference it; default `-1` (none) | Extended | No (non-CSS) | No CSS equivalent (closest: grid-line names, but those are container-scoped slots not per-element anchors) | `css_defines/131-relative-id.json`, `default_layout_style.h` (`SL_DEFAULT_RELATIVE_ID=-1`) |
 | `relative-top-of`/`relative-right-of`/`relative-bottom-of`/`relative-left-of` | Place this element's given edge adjacent-outside the referenced sibling's opposite edge (id-based) | Extended | No (non-CSS) | No CSS equivalent | `css_defines/136-139` |
 | `relative-inline-start-of`/`relative-inline-end-of` | Logical-direction variants of the above | Extended | No (non-CSS) | — | `css_defines/166,167` |
 | `relative-align-top`/`-right`/`-bottom`/`-left` | Align this element's edge flush with referenced sibling's same-side edge (id-based) | Extended | No (non-CSS) | No CSS equivalent | `css_defines/132-135` |
 | `relative-align-inline-start`/`-end` | Logical variants | Extended | No (non-CSS) | — | `css_defines/164,165` |
 | `relative-center` | Center child within parent: `none\|vertical\|horizontal\|both`; default `none` | Extended | No (non-CSS) | ≈ combination of `align-self:center`+`justify-self:center`, but scoped to `relative` mode only | `css_defines/141-relative-center.json` |
-| `relative-layout-once` | Perf/solver toggle limiting dependency resolution to upward-only references; default `true` | Rare | No (non-CSS) | Implementation-detail flag of the constraint solver; lynx-vello needs an equivalent solver-mode flag only if reusing a similar dependency-graph approach | `css_defines/140-relative-layout-once.json`, `relative_layout_algorithm.h` (`InlineDependencies`, `Sort()`) |
+| `relative-layout-once` | Selects one combined dependency/measurement pass (`true`) or separate-axis two-pass solving (`false`); native computed default `true` | Rare | No (non-CSS) | Implemented in neutron-star; its reusable trait default is intentionally `false`, so the Lynx adapter must pass native's computed `true` explicitly | `css_defines/140-relative-layout-once.json`, `relative_layout_algorithm.h` (`InlineDependencies`, `Sort()`) |
 | Web-lynx (web-core) support | All `relative-*` properties show `"web_lynx": {"version_added": false}` in compat data | — | — | Confirms `web-core` (the prior reference implementation) never implemented `display:relative` at all — lynx-vello has no working prior-art reference for this mode and must implement solely from Starlight's C++ source | `css_defines/131,140,141-relative-*.json` (each `"web_lynx":{"version_added": false}`) |
+
+The standalone Relative Level 1 contract also makes three explicit repairs
+relative to current native C++: id `0` never identifies an item (native can
+accidentally add a graph dependency before later treating it as parent),
+contradictory double anchors clamp the end to the start, and two-pass solving
+performs the specified selective remeasurement/final-size feedback rounds.
+These are user-confirmed module semantics, not accidental attempts to extend
+the raw value grammar.
 
 #### Units and value types (layout-relevant)
 
@@ -128,7 +138,7 @@ Scope note: this is the behavior spec for the *layout algorithm*, which the
 from-scratch layout engine (successor to the C++ engine's `starlight`)
 implements — see `.claude/agents/lynx-layout-engine.md`. The engine crate is
 [`crates/neutron-star`](../../crates/neutron-star): its protocol, shared
-machinery, and flexbox and Grid algorithms are implemented. Its design,
+machinery, and Flexbox, Grid, and Starlight Relative algorithms are implemented. Its design,
 ownership boundaries, and milestones are in
 [`docs/layout-architecture.md`](../layout-architecture.md).
 

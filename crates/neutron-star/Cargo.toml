@@ -1,6 +1,6 @@
 [package]
 name = "neutron-star"
-description = "Trait-first, statically-dispatched CSS flexbox and Grid engine for host-owned trees"
+description = "Statically-dispatched CSS Flex/Grid and Starlight relative layout for host-owned trees"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -31,4 +31,8 @@ harness = false
 
 [[bench]]
 name = "grid_pr25"
+harness = false
+
+[[bench]]
+name = "relative"
 harness = false
