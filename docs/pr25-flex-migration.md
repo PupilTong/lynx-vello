@@ -287,7 +287,7 @@ Linear cross-axis cache guard. The remaining 24 Flex tests are tracked by
 | **Total** | **24** | |
 
 The excluded `linear_cross_axis_cache_guard_covers_ignored_stretch_and_auto_children`
-belongs to Lynx's host-side Linear algorithm, not CSS Flexbox.
+belongs to neutron-star's Starlight Linear algorithm, not CSS Flexbox.
 
 ## Flex algorithm coverage inventory tests
 

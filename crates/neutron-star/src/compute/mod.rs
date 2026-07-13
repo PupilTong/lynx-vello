@@ -11,29 +11,30 @@
 //!
 //! This module contains the generic machinery (root entry, cache wrapper,
 //! hidden-subtree zeroing, leaf boxing, the positioned pass, rounding) and the
-//! implemented [`compute_flexbox_layout`], [`compute_grid_layout`], and
-//! [`compute_relative_layout`] entry points.
+//! implemented [`compute_flexbox_layout`], [`compute_grid_layout`],
+//! [`compute_linear_layout`], and [`compute_relative_layout`] entry points.
 //!
 //! # The canonical dispatch skeleton
 //!
 //! Every host implements the same shape once; this is the whole integration
-//! surface of the engine (a host with custom layout modes such as
-//! lynx-vello's `display: linear` adds arms that call its own algorithms):
+//! surface of the engine (a host with additional layout modes adds arms that
+//! call its own algorithms):
 //!
 //! ```
 //! use neutron_star::compute::{
 //!     compute_cached_layout, compute_flexbox_layout, compute_grid_layout,
-//!     compute_relative_layout, hide_subtree,
+//!     compute_linear_layout, compute_relative_layout, hide_subtree,
 //! };
 //! use neutron_star::tree::{
-//!     FlexSource, GridSource, LayoutInput, LayoutOutput, LayoutSession, LayoutSource, NodeId,
-//!     RelativeSource,
+//!     FlexSource, GridSource, LayoutInput, LayoutOutput, LayoutSession, LayoutSource,
+//!     LinearSource, NodeId, RelativeSource,
 //! };
 //!
 //! # #[derive(Clone, Copy)]
 //! enum Display {
 //!     Flex,
 //!     Grid,
+//!     Linear,
 //!     Relative,
 //!     Hidden,
 //! }
@@ -45,7 +46,7 @@
 //!     input: LayoutInput,
 //! ) -> LayoutOutput
 //! where
-//!     Source: FlexSource + GridSource + RelativeSource,
+//!     Source: FlexSource + GridSource + LinearSource + RelativeSource,
 //!     Session: LayoutSession<Source>,
 //! {
 //!     let display = host_display_of(source, node);
@@ -61,8 +62,8 @@
 //!             Display::Hidden => unreachable!(),
 //!             Display::Flex => compute_flexbox_layout(source, session, node, input),
 //!             Display::Grid => compute_grid_layout(source, session, node, input),
+//!             Display::Linear => compute_linear_layout(source, session, node, input),
 //!             Display::Relative => compute_relative_layout(source, session, node, input),
-//!             // host: Display::Linear => host_linear_layout(source, session, node, input),
 //!             // host: Display::Leaf => compute_leaf_layout(input, &style, resolve, &mut measurer),
 //!         }
 //!     })
@@ -91,6 +92,7 @@
 mod flexbox;
 mod grid;
 mod leaf;
+mod linear;
 mod relative;
 mod util;
 
@@ -100,6 +102,7 @@ pub use leaf::{
     FnLeafMeasurer, LeafMeasureInput, LeafMeasurement, LeafMeasurer, LeafMetrics,
     compute_leaf_layout,
 };
+pub use linear::compute_linear_layout;
 pub use relative::compute_relative_layout;
 
 use self::util::{
@@ -109,14 +112,14 @@ use self::util::{
 use crate::geometry::{Edges, Point, Size};
 use crate::style::{BoxGenerationMode, CoreStyle, Dimension, Direction};
 use crate::tree::{
-    AvailableSpace, CacheState, Layout, LayoutInput, LayoutOutput, LayoutSession, LayoutSource,
-    LayoutState, NodeId, RoundState, TraverseTree,
+    AvailableSpace, CacheState, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutSession,
+    LayoutSource, LayoutState, NodeId, RequestedAxis, RoundState, TraverseTree,
 };
 
 /// Lays out the tree under `root` into `available_space`.
 ///
 /// The host's entry point for a layout flush. Builds the root
-/// [`LayoutInput`] ([`LayoutGoal::Commit`](crate::tree::LayoutGoal::Commit),
+/// [`LayoutInput`] ([`LayoutGoal::Commit`],
 /// no known dimensions, `parent_size` from
 /// the definite parts of `available_space`), routes it through
 /// [`compute_child_layout`](LayoutSession::compute_child_layout) — so the root
@@ -312,6 +315,85 @@ where
     Source: LayoutSource,
     Session: LayoutSession<Source>,
 {
+    absolute_layout(
+        source,
+        session,
+        node,
+        containing_block,
+        move |_, _| static_position,
+        LayoutGoal::Commit,
+    )
+}
+
+/// Commits one out-of-flow child while deriving its static position from the
+/// resolved border-box size and used margins.
+pub(super) fn compute_absolute_layout_with_static_position<Source, Session, StaticPosition>(
+    source: &Source,
+    session: &mut Session,
+    node: NodeId,
+    containing_block: Size<f32>,
+    static_position: StaticPosition,
+) -> Layout
+where
+    Source: LayoutSource,
+    Session: LayoutSession<Source>,
+    StaticPosition: FnOnce(Size<f32>, Edges<f32>) -> Point<f32>,
+{
+    absolute_layout(
+        source,
+        session,
+        node,
+        containing_block,
+        static_position,
+        LayoutGoal::Commit,
+    )
+}
+
+/// Measures an out-of-flow node with the same inset, automatic-size,
+/// aspect-ratio, min/max, and margin rules as [`compute_absolute_layout`].
+///
+/// Formatting algorithms use this side-effect-free probe when a hoisted
+/// out-of-flow node's static position depends on its margin-box size. The
+/// requested axis can be narrowed to the inset pair that actually needs a
+/// static fallback. The returned layout uses a zero static position; callers
+/// consume its `size` and `margin` to record the formatting-context-specific
+/// static position for the later positioned pass. No durable child geometry
+/// is written by this measurement.
+#[must_use]
+pub(super) fn measure_absolute_layout<Source, Session>(
+    source: &Source,
+    session: &mut Session,
+    node: NodeId,
+    containing_block: Size<f32>,
+    requested_axis: RequestedAxis,
+) -> Layout
+where
+    Source: LayoutSource,
+    Session: LayoutSession<Source>,
+{
+    absolute_layout(
+        source,
+        session,
+        node,
+        containing_block,
+        |_, _| Point::ZERO,
+        LayoutGoal::Measure(requested_axis),
+    )
+}
+
+fn absolute_layout<Source, Session, StaticPosition>(
+    source: &Source,
+    session: &mut Session,
+    node: NodeId,
+    containing_block: Size<f32>,
+    static_position: StaticPosition,
+    goal: LayoutGoal,
+) -> Layout
+where
+    Source: LayoutSource,
+    Session: LayoutSession<Source>,
+    StaticPosition: FnOnce(Size<f32>, Edges<f32>) -> Point<f32>,
+{
     debug_assert!(
         containing_block.width.is_finite()
             && containing_block.height.is_finite()
@@ -319,11 +401,6 @@ where
             && containing_block.height >= 0.0,
         "containing-block sizes must be finite and non-negative"
     );
-    debug_assert!(
-        static_position.x.is_finite() && static_position.y.is_finite(),
-        "static positions must be finite"
-    );
-
     let parent_size = Size::new(Some(containing_block.width), Some(containing_block.height));
     let resolved_style = resolve_absolute_style(source, node, parent_size);
     let ResolvedAbsoluteStyle {
@@ -347,22 +424,26 @@ where
 
     let known_dimensions =
         absolute_known_dimensions(&resolved_style, inset_modified_size, fixed_margin);
-    let output = session.compute_child_layout(
-        source,
-        node,
-        LayoutInput::perform_layout(
+    let available_space = Size::new(
+        preferred_available
+            .width
+            .unwrap_or(AvailableSpace::Definite(inset_modified_size.width)),
+        preferred_available
+            .height
+            .unwrap_or(AvailableSpace::Definite(inset_modified_size.height)),
+    );
+    let child_input = match goal {
+        LayoutGoal::Commit => {
+            LayoutInput::perform_layout(known_dimensions, parent_size, available_space)
+        }
+        LayoutGoal::Measure(requested_axis) => LayoutInput::compute_size(
             known_dimensions,
             parent_size,
-            Size::new(
-                preferred_available
-                    .width
-                    .unwrap_or(AvailableSpace::Definite(inset_modified_size.width)),
-                preferred_available
-                    .height
-                    .unwrap_or(AvailableSpace::Definite(inset_modified_size.height)),
-            ),
+            available_space,
+            requested_axis,
         ),
-    );
+    };
+    let output = session.compute_child_layout(source, node, child_input);
 
     let margin = resolve_absolute_margins(
         optional_margin,
@@ -370,6 +451,11 @@ where
         inset_modified_size,
         output.size,
         direction,
+    );
+    let static_position = static_position(output.size, margin);
+    debug_assert!(
+        static_position.x.is_finite() && static_position.y.is_finite(),
+        "static positions must be finite"
     );
     let location = Point::new(
         absolute_axis_location(AbsoluteAxis {

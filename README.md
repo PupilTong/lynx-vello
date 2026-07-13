@@ -7,6 +7,16 @@ Rust monorepo exploring a native [Lynx](https://lynxjs.org) rendering stack.
 | Crate | Purpose |
 | --- | --- |
 | [`crates/lynx-template-decoder`](crates/lynx-template-decoder) | Native Rust decoder for the Lynx **web** binary template (`.web.bundle`), a port of `@lynx-js/web-core`'s `decodeTemplate` incl. the rkyv `StyleInfo` model. |
+| [`crates/stylo-dom`](crates/stylo-dom) | Generic arena-backed DOM subset and standards-oriented stylo cascade/invalidation core. |
+| [`crates/lynx-widget`](crates/lynx-widget) | Lynx Widget/PAPI tree and Lynx-specific style/device adapter over `stylo-dom`. |
+| [`crates/neutron-star`](crates/neutron-star) | Standalone, statically-dispatched box-layout engine: CSS Flexbox, numeric CSS Grid Level 2, Starlight `display: linear` and `display: relative`, and shared leaf/cache/positioned/rounding machinery are implemented. |
+
+`neutron-star` exposes Flex, Grid, Linear, and Relative as peer generic
+algorithms over host-owned topology, styles, layout state, and caches. The live
+bridge from `lynx-widget` computed styles to retained layout state remains
+future work; that integration still needs display dispatch, dirty/cache wiring,
+the root fixed-position pass, and text measurement. Its final module or crate
+placement has not been established.
 
 ## Toolchain
 

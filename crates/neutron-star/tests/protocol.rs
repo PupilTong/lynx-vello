@@ -3,10 +3,10 @@
 //! storage with zero `dyn`, zero allocation at the boundary, and zero
 //! engine-side state.
 //!
-//! Runtime tests exercise traversal, style/value plumbing, and the shared L1
-//! machinery. Flexbox behavior has its own `tests/flexbox.rs` suite; Grid's
-//! algorithm remains pending while this host proves its protocol is
-//! implementable.
+//! Runtime tests exercise traversal, style/value plumbing, and shared
+//! machinery. Algorithm behavior lives in `tests/flexbox.rs`, `tests/grid.rs`,
+//! `tests/linear.rs`, and `tests/relative.rs`; this host proves their complete
+//! protocol surface is implementable.
 
 use neutron_star::cache::Cache;
 use neutron_star::compute::{
@@ -109,6 +109,8 @@ impl FlexItemStyle for MockStyle {
 
 impl RelativeContainerStyle for MockStyle {}
 impl RelativeItemStyle for MockStyle {}
+impl LinearContainerStyle for MockStyle {}
+impl LinearItemStyle for MockStyle {}
 
 fn to_component(component: &MockTemplateComponent) -> GridTemplateComponent<&MockRepetition> {
     match component {
@@ -292,6 +294,19 @@ impl RelativeSource for MockSource {
     }
 
     fn relative_item_style(&self, item: NodeId) -> Self::ItemStyle<'_> {
+        &self.node(item).style
+    }
+}
+
+impl LinearSource for MockSource {
+    type ContainerStyle<'a> = &'a MockStyle;
+    type ItemStyle<'a> = &'a MockStyle;
+
+    fn linear_container_style(&self, container: NodeId) -> Self::ContainerStyle<'_> {
+        &self.node(container).style
+    }
+
+    fn linear_item_style(&self, item: NodeId) -> Self::ItemStyle<'_> {
         &self.node(item).style
     }
 }

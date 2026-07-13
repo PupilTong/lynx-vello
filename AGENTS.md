@@ -17,9 +17,10 @@ cross-platform engine built on:
 - **[parley](https://github.com/linebender/parley)** — text layout & shaping
 
 The from-scratch layout engine (successor to the C++ engine's `starlight`) is
-`crates/neutron-star` — its host protocol, shared layout machinery, CSS
-flexbox and Grid algorithms, and standalone Starlight relative-layout
-algorithm are implemented. See
+`crates/neutron-star` — its host protocol, shared layout machinery, and CSS
+flexbox, Grid, and Starlight `display: relative` and `display: linear`
+algorithms are implemented as first-class peers. The concrete Widget/stylo
+runtime adapter remains pending. See
 `docs/layout-architecture.md` for its design and
 `docs/tracking/css-layout.md` for the behavior it must cover.
 
@@ -122,24 +123,29 @@ useful signal for currently-compatible versions of those libraries.
   Owns `WidgetState` / `WidgetTree`, Lynx view metrics, touch-first
   device policy, and the viewport-relative `rpx` integration. Standard CSS
   parsing, matching, cascade, and lock ownership remain in `stylo-dom`.
-- `crates/neutron-star` — the standalone-publishable CSS flexbox/Grid and
-  Starlight relative-layout engine: trait-based host⇄engine integration with
-  static dispatch only (no `dyn`), an immutable topology/style source
+- `crates/neutron-star` — the standalone-publishable Flexbox, Grid, and
+  Starlight Relative and Linear engine: trait-based host⇄engine integration
+  with static dispatch only (no `dyn`), an immutable topology/style source
   physically separated from mutable layout/cache/measurement sessions, and
-  host-side display dispatch. Leaf content engines integrate through the
-  generic lending `LeafMeasurer` protocol. The shared root/leaf/cache/
-  positioned/rounding machinery, CSS Flexbox Level 1, numeric CSS Grid Level
-  2 (excluding subgrid/named areas), and id-constrained Starlight Relative
-  Layout Level 1 algorithms are live. `display: linear` remains a future
-  host/adapter peer algorithm.
+  host-side
+  display dispatch. Leaf content engines integrate through the generic
+  lending `LeafMeasurer` protocol. **Flexbox, Grid, Relative, and Linear
+  implemented** —
+  the shared root/leaf/cache/positioned/rounding machinery, CSS Flexbox Level
+  1, numeric CSS Grid Level 2 (excluding subgrid/named areas), id-constrained
+  Starlight Relative Layout Level 1, and Lynx's `display: linear` algorithm
+  and `linear-*` style/source protocol are live.
   Read
-  `docs/layout-architecture.md` before touching it. Apart from the explicitly
-  standalone relative-layout protocol, it must not contain Lynx widget,
-  component, or device/unit vocabulary and must not depend on other workspace
-  crates.
-- *(planned, not yet scaffolded)* text / render / runtime crates, plus the
-  `lynx-layout` adapter wiring `neutron-star` to the widget/style stack —
-  see `docs/tracking/` for the behavior surface each will need to cover before
+  `docs/layout-architecture.md` before touching it. It must not depend on
+  other workspace crates or own host tree/style storage, DOM/widget types,
+  resolved device-unit policy, text shaping, or paint order.
+- Future runtime-layout integration — the concrete Widget/stylo
+  source/session adapter, display dispatch and dirty→cache invalidation
+  wiring, root fixed-position pass, component-specific staggered layout, and
+  Parley/text integration remain L3 work. No separate crate for this layer
+  has been established yet.
+- *(planned, not yet scaffolded)* text / render / runtime crates — see
+  `docs/tracking/` for the behavior surface each will need to cover before
   scaffolding begins, and `.claude/agents/` for the subsystem-scoped agent
   personas already set up for this work.
 
