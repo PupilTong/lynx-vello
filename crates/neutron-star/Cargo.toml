@@ -44,3 +44,7 @@ harness = false
 [[bench]]
 name = "linear"
 harness = false
+
+[[bench]]
+name = "linear_pr25"
+harness = false

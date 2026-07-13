@@ -78,18 +78,29 @@ fn sticky_grid(start: bool) -> (SimpleTree, usize, usize) {
 fn grid_sticky_child_percent_insets_resolve_against_container_constraints() {
     let (mut tree, root, child) = sticky_grid(true);
     run_rust_layout(&mut tree, root, Constraints::definite(100.0, 40.0));
-    // neutron-star exports in-flow relative geometry; the host's sticky
-    // clamp/post-pass consumes the same resolved offsets.
-    assert_close(tree.nodes[child].layout.offset.x, 10.0);
-    assert_close(tree.nodes[child].layout.offset.y, 10.0);
+    // Sticky stays in normal Grid flow. The test-only host exports the
+    // authored insets separately for its later clamp/post-pass.
+    assert_close(tree.nodes[child].layout.offset.x, 0.0);
+    assert_close(tree.nodes[child].layout.offset.y, 0.0);
+    assert_close(tree.nodes[child].layout.sticky_pos.left, 10.0);
+    assert_close(tree.nodes[child].layout.sticky_pos.right, STICKY_AUTO_INSET);
+    assert_close(tree.nodes[child].layout.sticky_pos.top, 10.0);
+    assert_close(
+        tree.nodes[child].layout.sticky_pos.bottom,
+        STICKY_AUTO_INSET,
+    );
 }
 
 #[test]
 fn grid_sticky_child_end_percent_insets_resolve_against_container_constraints() {
     let (mut tree, root, child) = sticky_grid(false);
     run_rust_layout(&mut tree, root, Constraints::definite(100.0, 40.0));
-    assert_close(tree.nodes[child].layout.offset.x, -20.0);
-    assert_close(tree.nodes[child].layout.offset.y, -20.0);
+    assert_close(tree.nodes[child].layout.offset.x, 0.0);
+    assert_close(tree.nodes[child].layout.offset.y, 0.0);
+    assert_close(tree.nodes[child].layout.sticky_pos.left, STICKY_AUTO_INSET);
+    assert_close(tree.nodes[child].layout.sticky_pos.right, 20.0);
+    assert_close(tree.nodes[child].layout.sticky_pos.top, STICKY_AUTO_INSET);
+    assert_close(tree.nodes[child].layout.sticky_pos.bottom, 20.0);
 }
 
 #[test]

@@ -20,10 +20,11 @@ standard CSS behavior is asserted against neutron-star directly.
   separate immutable source and mutable session through
   `tests/pr25_support/mod.rs`.
 - `display: block`, `linear`, `relative`, and `grid` subtrees appearing inside
-  otherwise Flex-focused source cases are host-dispatch boundaries. Until
-  their peer algorithms exist, the compatibility fixture lowers container
-  structure through a Flex adapter and documents the substitution. It does
-  not claim parity for the foreign algorithm.
+  otherwise Flex-focused source cases are host-dispatch boundaries. Block
+  follows Starlight's caller-owned Block-as-Linear mapping; Linear, Relative,
+  and Grid use their real peer algorithms. A Flex-focused target still does
+  not claim parity for foreign-algorithm fields that its fixture explicitly
+  omits.
 - `fr` outside Grid is not valid CSS Flex syntax. Source-only raw `fr` values
   lower to `auto`; canonical CSS length/percentage/calc cases remain covered.
 - Sticky positioning is a host post-pass. Flex tests cover its in-flow box and
@@ -143,11 +144,12 @@ the same root order). Every unselected case still consumes its complete RNG
 draw sequence so later case IDs remain reproducible. Each selected tree is
 laid out twice by neutron-star and asserts identical complete node geometry,
 finite non-negative sizes, and aggregate input/output diversity and non-zero
-geometry. The 16,714 default and 51 high-case Block/Linear-root cases are
-host-lowered deterministic protocol smoke tests: their foreign parent uses
-the documented Flex column/orientation adapter, so they do not claim
-source-equivalent Block/Linear geometry. No case imports Lynx's integer
-rounding results.
+geometry. The 16,714 default and 51 high-case Block/Linear-root cases dispatch
+through real Linear layout (Block uses the source engine's Block-as-Linear
+mapping). They remain Flex-focused protocol smoke tests because this older
+builder intentionally discards foreign-only Linear gravity draws; the exact
+Linear generator is migrated separately in `pr25_generated_linear.rs`. No
+case imports Lynx's integer rounding results.
 
 `pr25_native_flex.rs` contains `NATIVE_FLEX_INVENTORY` and the canonical-overlap
 inventory so the 191/91 cardinalities cannot drift silently.
@@ -287,7 +289,9 @@ Linear cross-axis cache guard. The remaining 24 Flex tests are tracked by
 | **Total** | **24** | |
 
 The excluded `linear_cross_axis_cache_guard_covers_ignored_stretch_and_auto_children`
-belongs to neutron-star's Starlight Linear algorithm, not CSS Flexbox.
+belongs to neutron-star's Starlight Linear algorithm, not CSS Flexbox. It is
+executed through the public cache/layout contracts in
+`tests/pr25_linear_external_callback.rs`.
 
 ## Flex algorithm coverage inventory tests
 
