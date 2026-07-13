@@ -6,17 +6,17 @@ use crate::style::value::{CalcHandle, Dimension, LengthPercentage, LengthPercent
 use crate::style::{BoxSizing, CoreStyle, Overflow};
 use crate::tree::{AvailableSpace, LayoutInput, LayoutSource, NodeId, SizingMode};
 
-/// Stable host identity and order-modified paint index shared by Flex and
-/// Grid scratch.
+/// Stable host identity and order-modified paint index shared by Flex, Grid,
+/// and Relative scratch.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ItemKey {
     pub(super) node: NodeId,
     pub(super) layout_order: u32,
 }
 
-/// Algorithm-neutral ordering data collected before Flex/Grid item
+/// Algorithm-neutral ordering data collected before Flex/Grid/Relative item
 /// classification. The field order intentionally packs this to 24 bytes on
-/// 64-bit targets; both algorithms keep one record per generated child.
+/// 64-bit targets; each algorithm keeps one record per generated child.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct OrderedItem {
     pub(super) node: NodeId,
@@ -37,7 +37,82 @@ impl OrderedItem {
     }
 }
 
-/// Box classification inputs and resolved values common to Flex/Grid items.
+/// Access to the common ordering record retained by pre-layout item scratch.
+pub(super) trait PendingLayoutItem {
+    fn ordered(&self) -> &OrderedItem;
+    fn ordered_mut(&mut self) -> &mut OrderedItem;
+}
+
+impl PendingLayoutItem for OrderedItem {
+    #[inline]
+    fn ordered(&self) -> &OrderedItem {
+        self
+    }
+
+    #[inline]
+    fn ordered_mut(&mut self) -> &mut OrderedItem {
+        self
+    }
+}
+
+/// Sorts in-flow items by `order` when needed and assigns one contiguous
+/// order-modified paint sequence across in-flow and out-of-flow siblings.
+///
+/// Out-of-flow children contribute the initial `order` value (`0`) because
+/// they are not formatting-context items. Both input slices must be in source
+/// order on entry; only `in_flow` is reordered.
+pub(super) fn sort_and_assign_layout_order<Item: PendingLayoutItem>(
+    in_flow: &mut [Item],
+    absolute: &mut [Item],
+) {
+    let has_modified_order = in_flow.iter().any(|item| item.ordered().css_order != 0);
+    if has_modified_order {
+        in_flow.sort_unstable_by_key(|item| {
+            let ordered = item.ordered();
+            (ordered.css_order, ordered.document_index)
+        });
+        let mut paint_keys = Vec::with_capacity(in_flow.len() + absolute.len());
+        paint_keys.extend(in_flow.iter().enumerate().map(|(index, item)| {
+            let ordered = item.ordered();
+            (ordered.css_order, ordered.document_index, false, index)
+        }));
+        paint_keys.extend(
+            absolute
+                .iter()
+                .enumerate()
+                .map(|(index, item)| (0, item.ordered().document_index, true, index)),
+        );
+        paint_keys.sort_unstable_by_key(|&(order, document, _, _)| (order, document));
+        for (layout_order, &(_, _, is_absolute, index)) in paint_keys.iter().enumerate() {
+            let layout_order = u32::try_from(layout_order).unwrap_or(u32::MAX);
+            if is_absolute {
+                absolute[index].ordered_mut().layout_order = layout_order;
+            } else {
+                in_flow[index].ordered_mut().layout_order = layout_order;
+            }
+        }
+        return;
+    }
+
+    let (mut in_flow_index, mut absolute_index, mut layout_order) = (0, 0, 0_u32);
+    while in_flow_index < in_flow.len() || absolute_index < absolute.len() {
+        let take_in_flow = absolute_index == absolute.len()
+            || (in_flow_index < in_flow.len()
+                && in_flow[in_flow_index].ordered().document_index
+                    < absolute[absolute_index].ordered().document_index);
+        if take_in_flow {
+            in_flow[in_flow_index].ordered_mut().layout_order = layout_order;
+            in_flow_index += 1;
+        } else {
+            absolute[absolute_index].ordered_mut().layout_order = layout_order;
+            absolute_index += 1;
+        }
+        layout_order = layout_order.saturating_add(1);
+    }
+}
+
+/// Box classification inputs and resolved values common to Flex/Grid/Relative
+/// items.
 ///
 /// This is a short-lived resolver result. Each algorithm destructures it into
 /// its own flat hot scratch so shared code does not constrain data layout.

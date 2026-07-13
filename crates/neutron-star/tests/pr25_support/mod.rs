@@ -1,4 +1,4 @@
-//! Compatibility facade for the Rust Flex fixtures migrated from PupilTong/lynx#25.
+//! Compatibility facade for Rust layout fixtures migrated from PupilTong/lynx#25.
 //!
 //! The source PR used a monolithic `SimpleTree` API. This facade preserves its
 //! fixture vocabulary while lowering every run into neutron-star's immutable
@@ -9,15 +9,17 @@
 
 use std::collections::BTreeMap;
 
+use neutron_star::compute::compute_absolute_layout;
 use neutron_star::geometry::Size as NSize;
 use neutron_star::prelude::*;
 pub(crate) use neutron_star::style::{
     AlignContent, AlignItems, BoxSizing, Direction, FlexDirection, FlexWrap, JustifyContent,
+    RelativeCenter,
 };
 use neutron_star::style::{
     BoxGenerationMode, CalcHandle, Dimension, GridAutoFlow as NeutronGridAutoFlow, GridLine,
     GridPlacement, LengthPercentage, LengthPercentageAuto, MaxTrackSizingFunction,
-    MinTrackSizingFunction, Position, TrackSizingFunction,
+    MinTrackSizingFunction, Position, RelativeReference, TrackSizingFunction,
 };
 
 use crate::support::{
@@ -33,6 +35,8 @@ pub(crate) use crate::support::{
 };
 pub(crate) type Point = neutron_star::geometry::Point<f32>;
 pub(crate) type Size = neutron_star::geometry::Size<f32>;
+pub(crate) const RELATIVE_ALIGN_NONE: i32 = -1;
+pub(crate) const RELATIVE_ALIGN_PARENT: i32 = 0;
 
 pub(crate) trait DirectionExt {
     fn is_rtl(&self) -> bool;
@@ -277,6 +281,17 @@ pub(crate) struct Style {
     pub(crate) grid_row_end: Option<i32>,
     pub(crate) grid_column_span: usize,
     pub(crate) grid_row_span: usize,
+    pub(crate) relative_id: i32,
+    pub(crate) relative_align_top: i32,
+    pub(crate) relative_align_right: i32,
+    pub(crate) relative_align_bottom: i32,
+    pub(crate) relative_align_left: i32,
+    pub(crate) relative_top_of: i32,
+    pub(crate) relative_right_of: i32,
+    pub(crate) relative_bottom_of: i32,
+    pub(crate) relative_left_of: i32,
+    pub(crate) relative_layout_once: bool,
+    pub(crate) relative_center: RelativeCenter,
 }
 
 impl Default for Style {
@@ -331,6 +346,17 @@ impl Default for Style {
             grid_row_end: None,
             grid_column_span: 1,
             grid_row_span: 1,
+            relative_id: RELATIVE_ALIGN_NONE,
+            relative_align_top: RELATIVE_ALIGN_NONE,
+            relative_align_right: RELATIVE_ALIGN_NONE,
+            relative_align_bottom: RELATIVE_ALIGN_NONE,
+            relative_align_left: RELATIVE_ALIGN_NONE,
+            relative_top_of: RELATIVE_ALIGN_NONE,
+            relative_right_of: RELATIVE_ALIGN_NONE,
+            relative_bottom_of: RELATIVE_ALIGN_NONE,
+            relative_left_of: RELATIVE_ALIGN_NONE,
+            relative_layout_once: false,
+            relative_center: RelativeCenter::None,
         }
     }
 }
@@ -734,7 +760,12 @@ fn justify_item(value: JustifyItems) -> Option<AlignItems> {
 }
 
 #[allow(clippy::too_many_lines)]
-fn convert_style(tree: &mut TestTree, style: &Style, has_children: bool) -> TestStyle {
+fn convert_style(
+    tree: &mut TestTree,
+    style: &Style,
+    has_children: bool,
+    hoist_fixed: bool,
+) -> TestStyle {
     let display_mode = match style.display {
         Display::None => BoxGenerationMode::None,
         _ => BoxGenerationMode::Normal,
@@ -744,6 +775,7 @@ fn convert_style(tree: &mut TestTree, style: &Style, has_children: bool) -> Test
         // direct out-of-flow area path. Lower that source fixture to
         // `Absolute`; neutron-star's real `fixed` integration remains the
         // host-owned hoisted positioned pass and is tested separately.
+        PositionType::Fixed if hoist_fixed => Position::AbsoluteHoisted,
         PositionType::Absolute | PositionType::Fixed => Position::Absolute,
         PositionType::Static | PositionType::Relative | PositionType::Sticky => Position::Relative,
     };
@@ -852,12 +884,28 @@ fn convert_style(tree: &mut TestTree, style: &Style, has_children: bool) -> Test
             style.grid_row_span,
             style.position,
         ),
+        relative_layout_once: style.relative_layout_once,
+        relative_id: RelativeReference::new(style.relative_id),
+        relative_align: neutron_star::geometry::Edges {
+            left: RelativeReference::new(style.relative_align_left),
+            right: RelativeReference::new(style.relative_align_right),
+            top: RelativeReference::new(style.relative_align_top),
+            bottom: RelativeReference::new(style.relative_align_bottom),
+        },
+        relative_adjacent: neutron_star::geometry::Edges {
+            left: RelativeReference::new(style.relative_left_of),
+            right: RelativeReference::new(style.relative_right_of),
+            top: RelativeReference::new(style.relative_top_of),
+            bottom: RelativeReference::new(style.relative_bottom_of),
+        },
+        relative_center: style.relative_center,
         ..TestStyle::default()
     }
 }
 
 fn lower_tree(tree: &SimpleTree) -> TestTree {
     let mut lowered = TestTree::default();
+    let hoisted_fixed = relative_fixed_mask(tree);
     let mut grid_child = vec![false; tree.nodes.len()];
     for node in &tree.nodes {
         if node.style.display == Display::Grid {
@@ -867,16 +915,18 @@ fn lower_tree(tree: &SimpleTree) -> TestTree {
         }
     }
     for (node_index, node) in tree.nodes.iter().enumerate() {
-        let style = convert_style(&mut lowered, &node.style, !node.children.is_empty());
+        let style = convert_style(
+            &mut lowered,
+            &node.style,
+            !node.children.is_empty(),
+            hoisted_fixed[node_index],
+        );
         let display = match node.style.display {
             Display::Grid => TestDisplay::Grid,
             Display::Flex => TestDisplay::Flex,
-            Display::Block | Display::Linear | Display::Relative if !node.children.is_empty() => {
-                TestDisplay::Flex
-            }
-            Display::None | Display::Block | Display::Linear | Display::Relative => {
-                TestDisplay::Leaf
-            }
+            Display::Relative => TestDisplay::Relative,
+            Display::Block | Display::Linear if !node.children.is_empty() => TestDisplay::Flex,
+            Display::None | Display::Block | Display::Linear => TestDisplay::Leaf,
         };
         let measure = if let Some(profile) = node.measurement_profile {
             TestMeasure::Profile(profile)
@@ -957,6 +1007,113 @@ fn lower_tree(tree: &SimpleTree) -> TestTree {
     lowered
 }
 
+fn relative_fixed_mask(tree: &SimpleTree) -> Vec<bool> {
+    fn visit(tree: &SimpleTree, node: usize, inside_relative: bool, mask: &mut [bool]) {
+        let inside_relative =
+            inside_relative || tree.nodes[node].style.display == Display::Relative;
+        for &child in &tree.nodes[node].children {
+            mask[child] =
+                inside_relative && tree.nodes[child].style.position == PositionType::Fixed;
+            visit(tree, child, inside_relative, mask);
+        }
+    }
+
+    let mut is_child = vec![false; tree.nodes.len()];
+    for node in &tree.nodes {
+        for &child in &node.children {
+            is_child[child] = true;
+        }
+    }
+    let mut mask = vec![false; tree.nodes.len()];
+    for (root, is_child) in is_child.iter().copied().enumerate() {
+        if !is_child {
+            visit(tree, root, false, &mut mask);
+        }
+    }
+    mask
+}
+
+fn finish_relative_fixed_pass(
+    tree: &SimpleTree,
+    lowered: &mut TestTree,
+    root: usize,
+    root_size: Size,
+) -> Vec<Option<Layout>> {
+    fn collect(
+        tree: &SimpleTree,
+        lowered: &TestTree,
+        node: usize,
+        global: Point,
+        parents: &mut [Option<usize>],
+        globals: &mut [Point],
+    ) {
+        globals[node] = global;
+        for &child in &tree.nodes[node].children {
+            parents[child] = Some(node);
+            let location = lowered.session.nodes[child].layout.location;
+            collect(
+                tree,
+                lowered,
+                child,
+                Point::new(global.x + location.x, global.y + location.y),
+                parents,
+                globals,
+            );
+        }
+    }
+
+    let mut parents = vec![None; tree.nodes.len()];
+    let mut globals = vec![Point::ZERO; tree.nodes.len()];
+    collect(tree, lowered, root, Point::ZERO, &mut parents, &mut globals);
+
+    let root_border = tree.nodes[root].style.border;
+    let containing_size = Size::new(
+        (root_size.width - root_border.left - root_border.right).max(0.0),
+        (root_size.height - root_border.top - root_border.bottom).max(0.0),
+    );
+    let root_padding_origin = Point::new(root_border.left, root_border.top);
+    let mut exposed = vec![None; tree.nodes.len()];
+
+    for index in 0..tree.nodes.len() {
+        if tree.nodes[index].style.position != PositionType::Fixed
+            || lowered.source.nodes[index].style.position != Position::AbsoluteHoisted
+            || lowered.source.nodes[index].style.box_generation_mode == BoxGenerationMode::None
+        {
+            continue;
+        }
+        let Some(static_position) = lowered.session.nodes[index].static_position else {
+            continue;
+        };
+        let parent_global = parents[index].map_or(Point::ZERO, |parent| globals[parent]);
+        let static_in_root_padding = Point::new(
+            parent_global.x + static_position.x - root_padding_origin.x,
+            parent_global.y + static_position.y - root_padding_origin.y,
+        );
+        let layout = compute_absolute_layout(
+            &lowered.source,
+            &mut lowered.session,
+            NodeId::from(index),
+            containing_size,
+            static_in_root_padding,
+        );
+        exposed[index] = Some(layout);
+
+        let mut stored = layout;
+        stored.location = Point::new(
+            root_padding_origin.x + layout.location.x - parent_global.x,
+            root_padding_origin.y + layout.location.y - parent_global.y,
+        );
+        lowered
+            .session
+            .set_unrounded_layout(NodeId::from(index), &stored);
+        globals[index] = Point::new(
+            parent_global.x + stored.location.x,
+            parent_global.y + stored.location.y,
+        );
+    }
+    exposed
+}
+
 fn constraint_space(side: SideConstraint) -> AvailableSpace {
     match side.mode {
         MeasureMode::Indefinite => AvailableSpace::MaxContent,
@@ -1001,17 +1158,26 @@ fn run_simple_layout(
         root_id,
         LayoutInput::perform_layout(known_dimensions, available.into_options(), available),
     );
+    let exposed_fixed = finish_relative_fixed_pass(tree, &mut lowered, root, output.size);
+    let mut relative_item = vec![false; tree.nodes.len()];
+    for parent in &tree.nodes {
+        if parent.style.display == Display::Relative {
+            for &child in &parent.children {
+                relative_item[child] = true;
+            }
+        }
+    }
 
     for (index, node) in tree.nodes.iter_mut().enumerate() {
         let session = &lowered.session.nodes[index];
         node.layout = LayoutResult {
-            offset: session.layout.location,
+            offset: exposed_fixed[index].map_or(session.layout.location, |layout| layout.location),
             size: session.layout.size,
             baseline: session
                 .output
                 .first_baselines
                 .y
-                .or(Some(session.layout.size.height)),
+                .or_else(|| (!relative_item[index]).then_some(session.layout.size.height)),
             padding: Rect::new(
                 session.layout.padding.left,
                 session.layout.padding.right,

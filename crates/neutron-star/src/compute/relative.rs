@@ -5,13 +5,11 @@
 //! over integer ids and position physical margin edges relative to the parent
 //! or sibling edges.
 
-#![allow(clippy::cast_precision_loss)]
-
 use super::compute_absolute_layout;
 use super::util::{
     ItemKey, OrderedItem, ResolvedContainerBox, ResolvedItemBox, box_inset_size, clamp_axis,
     preferred_size_definiteness, resolve_container_box, resolve_item_box_with_bases,
-    resolve_length_percentage, subtract_available_space,
+    resolve_length_percentage, sort_and_assign_layout_order, subtract_available_space,
 };
 use crate::geometry::{Edges, Line, Point, Size};
 use crate::style::value::Dimension;
@@ -875,8 +873,7 @@ fn measurement_input<Source: RelativeSource>(
                     )
                 },
             );
-        let known_is_definite = constrained.is_some()
-            || (constrained.is_none() && axis.size(item.preferred_size_is_definite));
+        let known_is_definite = constrained.is_some() || axis.size(item.preferred_size_is_definite);
         axis.set_size(&mut constraint_definite, known_is_definite);
         let known = constrained
             .or(axis.size(item.preferred_size))
@@ -1472,7 +1469,7 @@ where
     let ResolvedContainerBox {
         padding,
         border,
-        scrollbar,
+        scrollbar: _,
         box_inset,
         min: min_size,
         max: max_size,
@@ -1528,12 +1525,7 @@ where
         }
     }
 
-    if generated.iter().any(|item| item.css_order != 0) {
-        generated.sort_unstable_by_key(|item| (item.css_order, item.document_index));
-    }
-    for (layout_order, item) in generated.iter_mut().enumerate() {
-        item.layout_order = u32::try_from(layout_order).unwrap_or(u32::MAX);
-    }
+    sort_and_assign_layout_order(&mut generated, &mut absolute_items);
 
     let lookup = IdLookup::new(source, &generated);
     let mut items = generated
@@ -1626,7 +1618,6 @@ where
         f32::max,
     );
 
-    let _ = scrollbar;
     LayoutOutput::new(outer_size, scrollable_size)
 }
 

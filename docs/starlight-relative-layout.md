@@ -108,6 +108,12 @@ two-pass relative layout
 The following value names describe computed style data, not raw CSS parser
 tokens.
 
+The standalone layout trait surface is physical. Before layout, a host bridge
+lowers `relative-inline-start-of`, `relative-inline-end-of`,
+`relative-align-inline-start`, and `relative-align-inline-end` to the
+corresponding left or right property using the computed writing direction.
+The algorithm consumes only the resulting physical side references.
+
 Initial values in this section document the current Rust standalone style
 surface. If another Starlight bridge materializes different compatibility
 defaults before layout, the bridge owns that defaulting decision; this
@@ -435,3 +441,7 @@ all style-resolved trees using the non-deprecated surface above, it produces
 the same border-box sizes, offsets, hidden-subtree behavior, dependency-order
 fallbacks, duplicate-id resolution, and out-of-flow static positions as this
 algorithm.
+
+The repository's exhaustive Rust-only migration of the Relative tests and
+benchmarks added by `PupilTong/lynx#25` is inventoried in
+[`pr25-relative-migration.md`](pr25-relative-migration.md).

@@ -90,9 +90,9 @@ Normative algorithm: [Starlight Relative Layout Module Level 1](../starlight-rel
 | `display: relative` | Enables relative (Android RelativeLayout-style) sibling-anchored child layout | Extended | No (non-CSS) | Implemented as `neutron_star::compute::compute_relative_layout`; **not** the same as CSS `position:relative` (name collision only) | `css_defines/24-display.json`, `lynx/core/renderer/starlight/layout/relative_layout_algorithm.{h,cc}` |
 | `relative-id` | Assigns an integer id to a child so siblings can reference it; default `-1` (none) | Extended | No (non-CSS) | No CSS equivalent (closest: grid-line names, but those are container-scoped slots not per-element anchors) | `css_defines/131-relative-id.json`, `default_layout_style.h` (`SL_DEFAULT_RELATIVE_ID=-1`) |
 | `relative-top-of`/`relative-right-of`/`relative-bottom-of`/`relative-left-of` | Place this element's given edge adjacent-outside the referenced sibling's opposite edge (id-based) | Extended | No (non-CSS) | No CSS equivalent | `css_defines/136-139` |
-| `relative-inline-start-of`/`relative-inline-end-of` | Logical-direction variants of the above | Extended | No (non-CSS) | — | `css_defines/166,167` |
+| `relative-inline-start-of`/`relative-inline-end-of` | Logical-direction variants of the above | Extended | No (non-CSS) | Host adapter lowers to physical left/right references using computed writing direction before layout | `css_defines/166,167` |
 | `relative-align-top`/`-right`/`-bottom`/`-left` | Align this element's edge flush with referenced sibling's same-side edge (id-based) | Extended | No (non-CSS) | No CSS equivalent | `css_defines/132-135` |
-| `relative-align-inline-start`/`-end` | Logical variants | Extended | No (non-CSS) | — | `css_defines/164,165` |
+| `relative-align-inline-start`/`-end` | Logical variants | Extended | No (non-CSS) | Host adapter lowers to physical left/right references using computed writing direction before layout | `css_defines/164,165` |
 | `relative-center` | Center child within parent: `none\|vertical\|horizontal\|both`; default `none` | Extended | No (non-CSS) | ≈ combination of `align-self:center`+`justify-self:center`, but scoped to `relative` mode only | `css_defines/141-relative-center.json` |
 | `relative-layout-once` | Selects one combined dependency/measurement pass (`true`) or separate-axis two-pass solving (`false`); native computed default `true` | Rare | No (non-CSS) | Implemented in neutron-star; its reusable trait default is intentionally `false`, so the Lynx adapter must pass native's computed `true` explicitly | `css_defines/140-relative-layout-once.json`, `relative_layout_algorithm.h` (`InlineDependencies`, `Sort()`) |
 | Web-lynx (web-core) support | All `relative-*` properties show `"web_lynx": {"version_added": false}` in compat data | — | — | Confirms `web-core` (the prior reference implementation) never implemented `display:relative` at all — lynx-vello has no working prior-art reference for this mode and must implement solely from Starlight's C++ source | `css_defines/131,140,141-relative-*.json` (each `"web_lynx":{"version_added": false}`) |
@@ -104,6 +104,13 @@ contradictory double anchors clamp the end to the start, and two-pass solving
 performs the specified selective remeasurement/final-size feedback rounds.
 These are user-confirmed module semantics, not accidental attempts to extend
 the raw value grammar.
+
+The complete Rust-only test and benchmark migration from
+[`PupilTong/lynx#25`](https://github.com/PupilTong/lynx/pull/25), including
+the exact retained and excluded head-to-head inventories, is recorded in
+[`pr25-relative-migration.md`](../pr25-relative-migration.md). The migrated
+head-to-head targets execute neutron-star only and do not import Lynx C++ or
+its FFI runner.
 
 #### Units and value types (layout-relevant)
 
