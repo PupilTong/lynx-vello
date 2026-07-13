@@ -309,7 +309,7 @@ fn flexbox_migration_boundaries_prevent_false_cpp_parity_status() {
     for boundary in [
         "No C++ engine",
         "No styling engine",
-        "not claim parity for the foreign algorithm",
+        "not claim parity for foreign-algorithm fields",
         "not a compatibility promise with the C++ Starlight engine",
     ] {
         assert!(

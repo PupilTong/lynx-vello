@@ -1709,9 +1709,9 @@ fn deterministic_container_style(rng: &mut DeterministicRng, display: p::Display
                 p::LinearOrientation::HorizontalReverse,
                 p::LinearOrientation::VerticalReverse,
             ][rng.range(4)];
-            // Preserve the source RNG stream for linear-gravity and
-            // linear-layout-gravity, which are host-dispatch-only fields in
-            // this Flex fixture facade.
+            // Preserve the source RNG stream for Linear-only gravity fields.
+            // This older Flex-focused generator intentionally discards them;
+            // `pr25_generated_linear` retains and exercises their exact values.
             let _ = rng.range(5);
             let _ = rng.range(5);
         }
@@ -2023,8 +2023,9 @@ fn generated_deterministic_supported_tree_fuzz_runs_27637_flex_containing_trees_
             assert_deterministic_rust_flex_case(case_index, tree, root, constraints, &mut coverage);
         }
     }
-    // Block/Linear roots are host-lowered protocol smoke cases. The 10,923
-    // Flex-root cases remain separately visible in the middle slot.
+    // Block/Linear roots use real Linear dispatch but remain Flex-focused
+    // protocol smoke cases. The 10,923 Flex-root cases remain separately
+    // visible in the middle slot.
     coverage.assert_diversity(
         DEFAULT_DETERMINISTIC_FLEX_CONTAINING_CASES,
         [8_380, 10_923, 8_334],
@@ -2057,7 +2058,8 @@ fn generated_deterministic_high_case_regressions_run_all_315_flex_containing_tre
     }
     assert_eq!(next_source_case, DETERMINISTIC_HIGH_CASES.len());
     // Of all 330 source high cases, 315 contain Flex. The 51 Block/Linear
-    // roots are host-lowered protocol smoke cases; 264 are true Flex roots.
+    // roots use real Linear dispatch as protocol smoke cases; 264 are true
+    // Flex roots.
     coverage.assert_diversity(HIGH_CASE_FLEX_CONTAINING_CASES, [19, 264, 32]);
 }
 

@@ -12,8 +12,8 @@
 //!
 //! Host lowerings are intentional and visible:
 //! - Flex-only `fr` values have no W3C meaning and become `auto`;
-//! - foreign Block/Linear/Grid containers are host-dispatched as column Flex adapters because
-//!   neutron-star does not own those algorithms yet;
+//! - Block containers use Starlight's host-owned Block-as-Linear mapping, while Linear and Grid
+//!   containers use neutron-star's real peer algorithms;
 //! - cache-parity scenarios rebuild through the stateless test session and therefore assert
 //!   geometry, not C++ cache-hit behavior;
 //! - sticky positioning remains in-flow here; sticky inset export belongs to the host positioning
@@ -697,22 +697,22 @@ const UNIQUE_NATIVE_FLEX_SCENARIOS: &[&str] = &[
     "head_to_head_wrapped_root_at_most_shrink_wraps_largest_flex_line",
 ];
 
-const EXPLICIT_HOST_LOWERINGS: &[(&str, &str)] = &[
+const EXPLICIT_HOST_BOUNDARIES: &[(&str, &str)] = &[
     (
         "head_to_head_flex_basis_fr_length_is_imported_as_full_value",
         "Flex-only fr is normalized to auto",
     ),
     (
         "head_to_head_flex_column_stretch_with_fr_sibling_preserves_percent_basis",
-        "fr is normalized to auto and foreign display containers use host Flex adapters",
+        "fr is normalized to auto; Block and Linear use real Linear dispatch",
     ),
     (
         "head_to_head_flex_row_baseline_uses_nested_linear_container_baseline",
-        "the canonical target uses the host's foreign-container baseline override",
+        "the nested container dispatches through the real Linear algorithm",
     ),
     (
         "head_to_head_flex_row_baseline_uses_nested_grid_container_baseline",
-        "the canonical target lowers the foreign Grid subtree through a column-Flex adapter",
+        "the nested container dispatches through the real Grid algorithm",
     ),
     (
         "head_to_head_flex_stretch_reexports_cached_block_subtree",
@@ -732,7 +732,7 @@ const EXPLICIT_HOST_LOWERINGS: &[(&str, &str)] = &[
     ),
     (
         "head_to_head_wrapped_flex_fit_content_measured_callback_container_width",
-        "the Block root is host-lowered to a column Flex adapter",
+        "the Block root uses Starlight's host-owned Block-as-Linear mapping",
     ),
     (
         "head_to_head_flex_sticky_child_percent_insets_resolve_against_container_constraints",
@@ -773,10 +773,10 @@ fn native_flex_inventory_partitions_into_canonical_and_unique_cases() {
         inventory
     );
 
-    for (scenario, reason) in EXPLICIT_HOST_LOWERINGS {
+    for (scenario, reason) in EXPLICIT_HOST_BOUNDARIES {
         assert!(
             inventory.contains(scenario),
-            "lowered scenario missing: {scenario}"
+            "host-boundary scenario missing: {scenario}"
         );
         assert!(!reason.is_empty());
     }
@@ -2309,8 +2309,8 @@ fn head_to_head_flex_growing_explicit_stretch_handles_inflexible_percent_basis_s
 }
 
 #[test]
-// Host lowering: Flex-only `fr` is normalized to `auto`, and the foreign
-// descendants are dispatched through the column-Flex compatibility adapter.
+// Host boundary: Flex-only `fr` is normalized to `auto`; Block and Linear
+// descendants dispatch through the real Linear algorithm.
 #[allow(clippy::too_many_lines)]
 fn head_to_head_flex_column_stretch_with_fr_sibling_preserves_percent_basis() {
     let mut tree = SimpleTree::default();

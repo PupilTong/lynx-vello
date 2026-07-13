@@ -14,7 +14,7 @@ use neutron_star::geometry::Size as NSize;
 use neutron_star::prelude::*;
 pub(crate) use neutron_star::style::{
     AlignContent, AlignItems, BoxSizing, Direction, FlexDirection, FlexWrap, JustifyContent,
-    RelativeCenter,
+    LinearCrossGravity, LinearGravity, LinearLayoutGravity, RelativeCenter,
 };
 use neutron_star::style::{
     BoxGenerationMode, CalcHandle, Dimension, GridAutoFlow as NeutronGridAutoFlow, GridLine,
@@ -37,6 +37,8 @@ pub(crate) type Point = neutron_star::geometry::Point<f32>;
 pub(crate) type Size = neutron_star::geometry::Size<f32>;
 pub(crate) const RELATIVE_ALIGN_NONE: i32 = -1;
 pub(crate) const RELATIVE_ALIGN_PARENT: i32 = 0;
+/// Starlight's exported value for an authored `auto` sticky inset.
+pub(crate) const STICKY_AUTO_INSET: f32 = -1e10;
 
 pub(crate) trait DirectionExt {
     fn is_rtl(&self) -> bool;
@@ -111,12 +113,33 @@ pub(crate) enum LinearOrientation {
 }
 
 impl LinearOrientation {
-    fn flex_direction(self) -> FlexDirection {
+    pub(crate) fn is_row(self) -> bool {
+        matches!(
+            self,
+            Self::Horizontal | Self::HorizontalReverse | Self::Row | Self::RowReverse
+        )
+    }
+
+    pub(crate) fn is_reverse(self) -> bool {
+        matches!(
+            self,
+            Self::HorizontalReverse
+                | Self::VerticalReverse
+                | Self::RowReverse
+                | Self::ColumnReverse
+        )
+    }
+
+    fn neutron(self) -> neutron_star::style::LinearOrientation {
         match self {
-            Self::Horizontal | Self::Row => FlexDirection::Row,
-            Self::HorizontalReverse | Self::RowReverse => FlexDirection::RowReverse,
-            Self::Vertical | Self::Column => FlexDirection::Column,
-            Self::VerticalReverse | Self::ColumnReverse => FlexDirection::ColumnReverse,
+            Self::Horizontal => neutron_star::style::LinearOrientation::Horizontal,
+            Self::HorizontalReverse => neutron_star::style::LinearOrientation::HorizontalReverse,
+            Self::Vertical => neutron_star::style::LinearOrientation::Vertical,
+            Self::VerticalReverse => neutron_star::style::LinearOrientation::VerticalReverse,
+            Self::Row => neutron_star::style::LinearOrientation::Row,
+            Self::RowReverse => neutron_star::style::LinearOrientation::RowReverse,
+            Self::Column => neutron_star::style::LinearOrientation::Column,
+            Self::ColumnReverse => neutron_star::style::LinearOrientation::ColumnReverse,
         }
     }
 }
@@ -266,6 +289,11 @@ pub(crate) struct Style {
     pub(crate) row_gap: Length,
     pub(crate) column_gap: Length,
     pub(crate) linear_orientation: LinearOrientation,
+    pub(crate) linear_gravity: LinearGravity,
+    pub(crate) linear_layout_gravity: LinearLayoutGravity,
+    pub(crate) linear_cross_gravity: LinearCrossGravity,
+    pub(crate) linear_weight: f32,
+    pub(crate) linear_weight_sum: f32,
     pub(crate) grid_template_columns: Vec<Length>,
     pub(crate) grid_template_rows: Vec<Length>,
     pub(crate) grid_template_columns_max: Vec<Length>,
@@ -331,6 +359,11 @@ impl Default for Style {
             row_gap: Length::ZERO,
             column_gap: Length::ZERO,
             linear_orientation: LinearOrientation::Vertical,
+            linear_gravity: LinearGravity::None,
+            linear_layout_gravity: LinearLayoutGravity::None,
+            linear_cross_gravity: LinearCrossGravity::None,
+            linear_weight: 0.0,
+            linear_weight_sum: 0.0,
             grid_template_columns: Vec::new(),
             grid_template_rows: Vec::new(),
             grid_template_columns_max: Vec::new(),
@@ -369,6 +402,13 @@ pub(crate) struct LayoutResult {
     pub(crate) padding: Edges,
     pub(crate) border: Edges,
     pub(crate) margin: Edges,
+    /// Resolved sticky insets retained by this test-only host facade.
+    ///
+    /// Sticky positioning remains a host post-pass in neutron-star. The core
+    /// layout therefore receives an in-flow node with auto visual insets,
+    /// while this field preserves the source PR's exported metadata for the
+    /// later scroll-time pass.
+    pub(crate) sticky_pos: Edges,
 }
 
 pub(crate) type SimpleMeasureFunc = fn(Constraints) -> Size;
@@ -378,6 +418,7 @@ pub(crate) struct SimpleNode {
     pub(crate) style: Style,
     pub(crate) layout: LayoutResult,
     pub(crate) children: Vec<usize>,
+    has_measure: bool,
     measured_size: Option<Size>,
     measure_func: Option<SimpleMeasureFunc>,
     baseline: Option<f32>,
@@ -391,6 +432,7 @@ impl SimpleNode {
             style,
             layout: LayoutResult::default(),
             children: Vec::new(),
+            has_measure: false,
             measured_size: None,
             measure_func: None,
             baseline: None,
@@ -401,6 +443,7 @@ impl SimpleNode {
 
     pub(crate) fn with_measured_size(style: Style, measured_size: Size) -> Self {
         Self {
+            has_measure: true,
             measured_size: Some(measured_size),
             ..Self::new(style)
         }
@@ -408,7 +451,19 @@ impl SimpleNode {
 
     pub(crate) fn with_measure_func(style: Style, measure_func: SimpleMeasureFunc) -> Self {
         Self {
+            has_measure: true,
             measure_func: Some(measure_func),
+            ..Self::new(style)
+        }
+    }
+
+    /// A measured node whose host callback declines to provide a size.
+    ///
+    /// PR #25 still routes such a node through measured layout and uses its
+    /// zero-size fallback; it must not fall through to display dispatch.
+    pub(crate) fn with_null_measure(style: Style) -> Self {
+        Self {
+            has_measure: true,
             ..Self::new(style)
         }
     }
@@ -419,6 +474,7 @@ impl SimpleNode {
         baseline: f32,
     ) -> Self {
         Self {
+            has_measure: true,
             measured_size: Some(measured_size),
             baseline: Some(baseline),
             ..Self::new(style)
@@ -522,7 +578,7 @@ impl LayoutTree for SimpleTree {
     }
 
     fn has_measure(&self, node: Self::NodeId) -> bool {
-        self.nodes[node].measured_size.is_some() || self.nodes[node].measure_func.is_some()
+        self.nodes[node].has_measure
     }
 
     fn measure_func(&self, node: Self::NodeId) -> Option<SimpleMeasureFunc> {
@@ -779,8 +835,27 @@ fn convert_style(
         PositionType::Absolute | PositionType::Fixed => Position::Absolute,
         PositionType::Static | PositionType::Relative | PositionType::Sticky => Position::Relative,
     };
+    // Sticky participates in normal flow and its authored insets belong to a
+    // host scroll-time post-pass. Passing them to neutron-star here would
+    // reinterpret Sticky as `position: relative` and visually shift the box.
+    // Keep the source values on `Style`; `run_simple_layout` resolves and
+    // exports them through the test facade's `LayoutResult::sticky_pos`.
+    let inset = if style.position == PositionType::Sticky {
+        neutron_star::geometry::Edges {
+            left: LengthPercentageAuto::Auto,
+            right: LengthPercentageAuto::Auto,
+            top: LengthPercentageAuto::Auto,
+            bottom: LengthPercentageAuto::Auto,
+        }
+    } else {
+        neutron_star::geometry::Edges {
+            left: length_percentage_auto(tree, style.left),
+            right: length_percentage_auto(tree, style.right),
+            top: length_percentage_auto(tree, style.top),
+            bottom: length_percentage_auto(tree, style.bottom),
+        }
+    };
     let flex_direction = match style.display {
-        Display::Linear => style.linear_orientation.flex_direction(),
         Display::Block | Display::Relative | Display::Grid if has_children => FlexDirection::Column,
         _ => style.flex_direction,
     };
@@ -804,12 +879,7 @@ fn convert_style(
             Visibility::Collapse => neutron_star::style::Visibility::Collapse,
         },
         position,
-        inset: neutron_star::geometry::Edges {
-            left: length_percentage_auto(tree, style.left),
-            right: length_percentage_auto(tree, style.right),
-            top: length_percentage_auto(tree, style.top),
-            bottom: length_percentage_auto(tree, style.bottom),
-        },
+        inset,
         size: NSize::new(
             preferred_dimension(tree, style.width, style.position),
             preferred_dimension(tree, style.height, style.position),
@@ -843,6 +913,12 @@ fn convert_style(
         },
         box_sizing: style.box_sizing,
         direction: style.direction,
+        linear_orientation: style.linear_orientation.neutron(),
+        linear_gravity: style.linear_gravity,
+        linear_layout_gravity: style.linear_layout_gravity,
+        linear_cross_gravity: style.linear_cross_gravity,
+        linear_weight: style.linear_weight,
+        linear_weight_sum: style.linear_weight_sum,
         flex_direction,
         flex_wrap: style.flex_wrap,
         gap: NSize::new(
@@ -905,7 +981,7 @@ fn convert_style(
 
 fn lower_tree(tree: &SimpleTree) -> TestTree {
     let mut lowered = TestTree::default();
-    let hoisted_fixed = relative_fixed_mask(tree);
+    let hoisted_fixed = hoisted_fixed_mask(tree);
     let mut grid_child = vec![false; tree.nodes.len()];
     for node in &tree.nodes {
         if node.style.display == Display::Grid {
@@ -921,12 +997,22 @@ fn lower_tree(tree: &SimpleTree) -> TestTree {
             !node.children.is_empty(),
             hoisted_fixed[node_index],
         );
-        let display = match node.style.display {
-            Display::Grid => TestDisplay::Grid,
-            Display::Flex => TestDisplay::Flex,
-            Display::Relative => TestDisplay::Relative,
-            Display::Block | Display::Linear if !node.children.is_empty() => TestDisplay::Flex,
-            Display::None | Display::Block | Display::Linear => TestDisplay::Leaf,
+        // PR #25 selects the measured path before display dispatch. Otherwise
+        // its effective-style step maps every Block box, including an empty
+        // one, to Linear. Mirror that ordering instead of inferring leafness
+        // from child count or the authored display value.
+        let has_measure =
+            node.has_measure || node.measure_func.is_some() || node.measurement_profile.is_some();
+        let display = if has_measure {
+            TestDisplay::Leaf
+        } else {
+            match node.style.display {
+                Display::Grid => TestDisplay::Grid,
+                Display::Flex => TestDisplay::Flex,
+                Display::Linear | Display::Block => TestDisplay::Linear,
+                Display::Relative => TestDisplay::Relative,
+                Display::None => TestDisplay::Leaf,
+            }
         };
         let measure = if let Some(profile) = node.measurement_profile {
             TestMeasure::Profile(profile)
@@ -975,17 +1061,6 @@ fn lower_tree(tree: &SimpleTree) -> TestTree {
             style,
             children: Vec::new(),
             measure,
-            // Starlight's horizontal linear container exports the last
-            // participating child's baseline. This is host-dispatch output,
-            // not Flex behavior; preserve it as a foreign-algorithm result.
-            first_baseline_override: (node.style.display == Display::Linear)
-                .then(|| {
-                    node.children
-                        .iter()
-                        .filter_map(|&child| tree.nodes[child].baseline)
-                        .next_back()
-                })
-                .flatten(),
         });
     }
     for (index, node) in tree.nodes.iter().enumerate() {
@@ -1007,14 +1082,17 @@ fn lower_tree(tree: &SimpleTree) -> TestTree {
     lowered
 }
 
-fn relative_fixed_mask(tree: &SimpleTree) -> Vec<bool> {
-    fn visit(tree: &SimpleTree, node: usize, inside_relative: bool, mask: &mut [bool]) {
-        let inside_relative =
-            inside_relative || tree.nodes[node].style.display == Display::Relative;
+fn hoisted_fixed_mask(tree: &SimpleTree) -> Vec<bool> {
+    fn visit(tree: &SimpleTree, node: usize, inside_host_pass: bool, mask: &mut [bool]) {
+        let inside_host_pass = inside_host_pass
+            || matches!(
+                tree.nodes[node].style.display,
+                Display::Block | Display::Linear | Display::Relative
+            );
         for &child in &tree.nodes[node].children {
             mask[child] =
-                inside_relative && tree.nodes[child].style.position == PositionType::Fixed;
-            visit(tree, child, inside_relative, mask);
+                inside_host_pass && tree.nodes[child].style.position == PositionType::Fixed;
+            visit(tree, child, inside_host_pass, mask);
         }
     }
 
@@ -1139,6 +1217,184 @@ fn known_dimensions(
     )
 }
 
+fn resolve_authored_length(length: Length, percent_base: Option<f32>) -> Option<f32> {
+    match length {
+        Length::Auto | Length::MinContent | Length::MaxContent | Length::FitContent(None) => None,
+        Length::Points(value) | Length::Fr(value) => Some(value),
+        Length::Percent(value) => percent_base.map(|base| base * (value / 100.0)),
+        Length::Calc { fixed, percent } => percent_base
+            .map(|base| fixed + base * (percent / 100.0))
+            .or_else(|| (percent == 0.0).then_some(fixed)),
+        Length::FitContent(Some(base)) => {
+            if base.has_percentage {
+                percent_base.map(|value| base.fixed + value * (base.percentage / 100.0))
+            } else {
+                Some(base.fixed)
+            }
+        }
+    }
+}
+
+fn resolve_sticky_inset(length: Length, percent_base: Option<f32>) -> f32 {
+    resolve_authored_length(length, percent_base).unwrap_or(STICKY_AUTO_INSET)
+}
+
+fn resolved_sticky_pos(style: &Style, percent_base: NSize<Option<f32>>) -> Edges {
+    if style.position != PositionType::Sticky {
+        return Edges::default();
+    }
+    Edges {
+        left: resolve_sticky_inset(style.left, percent_base.width),
+        right: resolve_sticky_inset(style.right, percent_base.width),
+        top: resolve_sticky_inset(style.top, percent_base.height),
+        bottom: resolve_sticky_inset(style.bottom, percent_base.height),
+    }
+}
+
+fn content_percent_base(layout: &Layout) -> NSize<Option<f32>> {
+    NSize::new(
+        Some(
+            (layout.size.width
+                - layout.padding.left
+                - layout.padding.right
+                - layout.border.left
+                - layout.border.right)
+                .max(0.0),
+        ),
+        Some(
+            (layout.size.height
+                - layout.padding.top
+                - layout.padding.bottom
+                - layout.border.top
+                - layout.border.bottom)
+                .max(0.0),
+        ),
+    )
+}
+
+fn root_sticky_percent_base(constraints: Constraints) -> NSize<Option<f32>> {
+    NSize::new(
+        constraints
+            .width
+            .is_definite()
+            .then_some(constraints.width.size),
+        constraints
+            .height
+            .is_definite()
+            .then_some(constraints.height.size),
+    )
+}
+
+fn root_content_percent_base(
+    style: &Style,
+    border_box_size: Size,
+    constraints: Constraints,
+) -> NSize<Option<f32>> {
+    let inline_basis = constraints
+        .width
+        .is_definite()
+        .then_some(constraints.width.size);
+    let padding_left = resolve_authored_length(style.padding.left, inline_basis).unwrap_or(0.0);
+    let padding_right = resolve_authored_length(style.padding.right, inline_basis).unwrap_or(0.0);
+    let padding_top = resolve_authored_length(style.padding.top, inline_basis).unwrap_or(0.0);
+    let padding_bottom = resolve_authored_length(style.padding.bottom, inline_basis).unwrap_or(0.0);
+    NSize::new(
+        Some(
+            (border_box_size.width
+                - padding_left
+                - padding_right
+                - style.border.left
+                - style.border.right)
+                .max(0.0),
+        ),
+        Some(
+            (border_box_size.height
+                - padding_top
+                - padding_bottom
+                - style.border.top
+                - style.border.bottom)
+                .max(0.0),
+        ),
+    )
+}
+
+fn resolve_lowered_length_percentage(
+    tree: &TestTree,
+    value: LengthPercentage,
+    inline_basis: Option<f32>,
+) -> f32 {
+    match value {
+        LengthPercentage::Length(value) => value,
+        LengthPercentage::Percent(fraction) => inline_basis.map_or(0.0, |basis| basis * fraction),
+        LengthPercentage::Calc(handle) => {
+            inline_basis.map_or(0.0, |basis| tree.source.resolve_calc(handle, basis))
+        }
+    }
+}
+
+fn resolve_lowered_length_percentage_auto(
+    tree: &TestTree,
+    value: LengthPercentageAuto,
+    inline_basis: Option<f32>,
+) -> f32 {
+    match value {
+        LengthPercentageAuto::Length(value) => value,
+        LengthPercentageAuto::Percent(fraction) => {
+            inline_basis.map_or(0.0, |basis| basis * fraction)
+        }
+        LengthPercentageAuto::Calc(handle) => {
+            inline_basis.map_or(0.0, |basis| tree.source.resolve_calc(handle, basis))
+        }
+        LengthPercentageAuto::Auto => 0.0,
+    }
+}
+
+fn commit_root_box(
+    tree: &mut TestTree,
+    root: usize,
+    output: LayoutOutput,
+    inline_basis: Option<f32>,
+) {
+    if tree.source.nodes[root].style.box_generation_mode == BoxGenerationMode::None {
+        return;
+    }
+
+    let style = &tree.source.nodes[root].style;
+    let margin = style
+        .margin
+        .map(|value| resolve_lowered_length_percentage_auto(tree, value, inline_basis));
+    let padding = style
+        .padding
+        .map(|value| resolve_lowered_length_percentage(tree, value, inline_basis).max(0.0));
+    let border = style
+        .border
+        .map(|value| resolve_lowered_length_percentage(tree, value, inline_basis).max(0.0));
+
+    let mut layout = Layout::default();
+    layout.size = output.size;
+    layout.content_size = output.content_size;
+    layout.margin = margin;
+    layout.padding = padding;
+    layout.border = border;
+    tree.session.nodes[root].layout = layout;
+}
+
+fn hidden_subtree_mask(tree: &SimpleTree, root: usize) -> Vec<bool> {
+    fn visit(tree: &SimpleTree, node: usize, ancestor_hidden: bool, hidden: &mut [bool]) {
+        let node_hidden = ancestor_hidden || tree.nodes[node].style.display == Display::None;
+        hidden[node] = node_hidden;
+        for &child in &tree.nodes[node].children {
+            visit(tree, child, node_hidden, hidden);
+        }
+    }
+
+    // Nodes outside the requested root's subtree were not laid out either;
+    // suppress host metadata for them just as for an explicitly hidden box.
+    let mut hidden = vec![true; tree.nodes.len()];
+    visit(tree, root, false, &mut hidden);
+    hidden
+}
+
 fn run_simple_layout(
     tree: &mut SimpleTree,
     root: usize,
@@ -1153,31 +1409,49 @@ fn run_simple_layout(
     let root_id = NodeId::from(root);
     let known_dimensions =
         known_dimensions(constraints, owner_constraints, &tree.nodes[root].style);
+    let parent_size = available.into_options();
     let output = lowered.session.compute_child_layout(
         &lowered.source,
         root_id,
-        LayoutInput::perform_layout(known_dimensions, available.into_options(), available),
+        LayoutInput::perform_layout(known_dimensions, parent_size, available),
     );
+    commit_root_box(&mut lowered, root, output, parent_size.width);
     let exposed_fixed = finish_relative_fixed_pass(tree, &mut lowered, root, output.size);
+    let root_child_sticky_percent_base =
+        root_content_percent_base(&tree.nodes[root].style, output.size, constraints);
     let mut relative_item = vec![false; tree.nodes.len()];
-    for parent in &tree.nodes {
+    let mut parents = vec![None; tree.nodes.len()];
+    let hidden_subtree = hidden_subtree_mask(tree, root);
+    for (parent_index, parent) in tree.nodes.iter().enumerate() {
         if parent.style.display == Display::Relative {
             for &child in &parent.children {
                 relative_item[child] = true;
             }
         }
+        for &child in &parent.children {
+            parents[child] = Some(parent_index);
+        }
     }
 
     for (index, node) in tree.nodes.iter_mut().enumerate() {
         let session = &lowered.session.nodes[index];
+        let sticky_percent_base = match parents[index] {
+            None => root_sticky_percent_base(constraints),
+            Some(parent) if parent == root => root_child_sticky_percent_base,
+            Some(parent) => content_percent_base(&lowered.session.nodes[parent].layout),
+        };
         node.layout = LayoutResult {
             offset: exposed_fixed[index].map_or(session.layout.location, |layout| layout.location),
             size: session.layout.size,
-            baseline: session
-                .output
-                .first_baselines
-                .y
-                .or_else(|| (!relative_item[index]).then_some(session.layout.size.height)),
+            baseline: if hidden_subtree[index] {
+                None
+            } else {
+                session
+                    .output
+                    .first_baselines
+                    .y
+                    .or_else(|| (!relative_item[index]).then_some(session.layout.size.height))
+            },
             padding: Rect::new(
                 session.layout.padding.left,
                 session.layout.padding.right,
@@ -1196,6 +1470,11 @@ fn run_simple_layout(
                 session.layout.margin.top,
                 session.layout.margin.bottom,
             ),
+            sticky_pos: if hidden_subtree[index] {
+                Edges::default()
+            } else {
+                resolved_sticky_pos(&node.style, sticky_percent_base)
+            },
         };
         node.measure_trace.clear();
         node.measure_trace
@@ -1265,6 +1544,7 @@ fn run_layout_tree<T: LayoutTree>(
             style,
             layout: LayoutResult::default(),
             children: Vec::new(),
+            has_measure,
             measured_size,
             measure_func,
             baseline,

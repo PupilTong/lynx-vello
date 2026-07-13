@@ -6,21 +6,24 @@
 
 use neutron_star::compute::{
     FnLeafMeasurer, LeafMeasureInput, LeafMetrics, compute_cached_layout, compute_flexbox_layout,
-    compute_grid_layout, compute_leaf_layout, compute_relative_layout, hide_subtree,
+    compute_grid_layout, compute_leaf_layout, compute_linear_layout, compute_relative_layout,
+    hide_subtree,
 };
 use neutron_star::prelude::*;
 use neutron_star::style::{
     AlignContent, AlignItems, AlignSelf, BoxGenerationMode, BoxSizing, CalcHandle, Dimension,
     Direction, FlexDirection, FlexWrap, GridAutoFlow, GridPlacement, GridTemplateComponent,
-    JustifyContent, JustifyItems, JustifySelf, LengthPercentage, LengthPercentageAuto, Overflow,
-    Position, RelativeCenter, RelativeContainerStyle, RelativeItemStyle, RelativeReference,
-    RepetitionCount, TrackSizingFunction, Visibility,
+    JustifyContent, JustifyItems, JustifySelf, LengthPercentage, LengthPercentageAuto,
+    LinearContainerStyle, LinearCrossGravity, LinearGravity, LinearItemStyle, LinearLayoutGravity,
+    LinearOrientation, Overflow, Position, RelativeCenter, RelativeContainerStyle,
+    RelativeItemStyle, RelativeReference, RepetitionCount, TrackSizingFunction, Visibility,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TestDisplay {
     Flex,
     Grid,
+    Linear,
     Relative,
     Leaf,
 }
@@ -66,6 +69,10 @@ pub(super) struct TestStyle {
     pub(super) scrollbar_width: f32,
     pub(super) box_sizing: BoxSizing,
     pub(super) direction: Direction,
+    pub(super) linear_orientation: LinearOrientation,
+    pub(super) linear_gravity: LinearGravity,
+    pub(super) linear_cross_gravity: LinearCrossGravity,
+    pub(super) linear_weight_sum: f32,
     pub(super) flex_direction: FlexDirection,
     pub(super) flex_wrap: FlexWrap,
     pub(super) gap: Size<LengthPercentage>,
@@ -75,6 +82,8 @@ pub(super) struct TestStyle {
     pub(super) flex_basis: Dimension,
     pub(super) flex_grow: f32,
     pub(super) flex_shrink: f32,
+    pub(super) linear_layout_gravity: LinearLayoutGravity,
+    pub(super) linear_weight: f32,
     pub(super) align_self: Option<AlignSelf>,
     pub(super) order: i32,
     pub(super) template_rows: Vec<TrackSizingFunction>,
@@ -111,6 +120,10 @@ impl Default for TestStyle {
             scrollbar_width: 0.0,
             box_sizing: BoxSizing::ContentBox,
             direction: Direction::Ltr,
+            linear_orientation: LinearOrientation::Vertical,
+            linear_gravity: LinearGravity::None,
+            linear_cross_gravity: LinearCrossGravity::None,
+            linear_weight_sum: 0.0,
             flex_direction: FlexDirection::Row,
             flex_wrap: FlexWrap::NoWrap,
             gap: Size::new(LengthPercentage::ZERO, LengthPercentage::ZERO),
@@ -120,6 +133,8 @@ impl Default for TestStyle {
             flex_basis: Dimension::Auto,
             flex_grow: 0.0,
             flex_shrink: 1.0,
+            linear_layout_gravity: LinearLayoutGravity::None,
+            linear_weight: 0.0,
             align_self: None,
             order: 0,
             template_rows: Vec::new(),
@@ -199,6 +214,50 @@ impl CoreStyle for TestStyle {
 
     fn direction(&self) -> Direction {
         self.direction
+    }
+}
+
+impl LinearContainerStyle for TestStyle {
+    fn linear_orientation(&self) -> LinearOrientation {
+        self.linear_orientation
+    }
+
+    fn linear_gravity(&self) -> LinearGravity {
+        self.linear_gravity
+    }
+
+    fn linear_cross_gravity(&self) -> LinearCrossGravity {
+        self.linear_cross_gravity
+    }
+
+    fn linear_weight_sum(&self) -> f32 {
+        self.linear_weight_sum
+    }
+
+    fn justify_content(&self) -> Option<JustifyContent> {
+        self.justify_content
+    }
+
+    fn align_items(&self) -> Option<AlignItems> {
+        self.align_items
+    }
+}
+
+impl LinearItemStyle for TestStyle {
+    fn linear_layout_gravity(&self) -> LinearLayoutGravity {
+        self.linear_layout_gravity
+    }
+
+    fn linear_weight(&self) -> f32 {
+        self.linear_weight
+    }
+
+    fn align_self(&self) -> Option<AlignSelf> {
+        self.align_self
+    }
+
+    fn order(&self) -> i32 {
+        self.order
     }
 }
 
@@ -695,7 +754,6 @@ pub(super) struct TestSourceNode {
     pub(super) style: TestStyle,
     pub(super) children: Vec<NodeId>,
     pub(super) measure: TestMeasure,
-    pub(super) first_baseline_override: Option<f32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -750,7 +808,6 @@ impl TestTree {
                 max_content_size: intrinsic_size,
                 first_baseline,
             },
-            first_baseline_override: None,
         })
     }
 
@@ -769,7 +826,6 @@ impl TestTree {
                 max_content_size,
                 first_baseline: None,
             },
-            first_baseline_override: None,
         })
     }
 
@@ -783,7 +839,6 @@ impl TestTree {
             style,
             children: Vec::new(),
             measure: TestMeasure::Function(measure),
-            first_baseline_override: None,
         })
     }
 
@@ -803,7 +858,6 @@ impl TestTree {
                 max_content_size: Size::ZERO,
                 first_baseline: None,
             },
-            first_baseline_override: None,
         })
     }
 
@@ -817,7 +871,19 @@ impl TestTree {
                 max_content_size: Size::ZERO,
                 first_baseline: None,
             },
-            first_baseline_override: None,
+        })
+    }
+
+    pub(super) fn push_linear(&mut self, style: TestStyle, children: Vec<NodeId>) -> NodeId {
+        self.push(TestSourceNode {
+            display: TestDisplay::Linear,
+            style,
+            children,
+            measure: TestMeasure::Intrinsic {
+                min_content_size: Size::ZERO,
+                max_content_size: Size::ZERO,
+                first_baseline: None,
+            },
         })
     }
 
@@ -831,7 +897,6 @@ impl TestTree {
                 max_content_size: Size::ZERO,
                 first_baseline: None,
             },
-            first_baseline_override: None,
         })
     }
 
@@ -935,6 +1000,19 @@ impl GridSource for TestSource {
     }
 }
 
+impl LinearSource for TestSource {
+    type ContainerStyle<'a> = &'a TestStyle;
+    type ItemStyle<'a> = &'a TestStyle;
+
+    fn linear_container_style(&self, container: NodeId) -> Self::ContainerStyle<'_> {
+        &self.nodes[usize::from(container)].style
+    }
+
+    fn linear_item_style(&self, item: NodeId) -> Self::ItemStyle<'_> {
+        &self.nodes[usize::from(item)].style
+    }
+}
+
 impl RelativeSource for TestSource {
     type ContainerStyle<'a> = &'a TestStyle;
     type ItemStyle<'a> = &'a TestStyle;
@@ -999,6 +1077,7 @@ impl LayoutSession<TestSource> for TestSession {
             compute_cached_layout(self, child, input, |session, child, input| match display {
                 TestDisplay::Flex => compute_flexbox_layout(source, session, child, input),
                 TestDisplay::Grid => compute_grid_layout(source, session, child, input),
+                TestDisplay::Linear => compute_linear_layout(source, session, child, input),
                 TestDisplay::Relative => compute_relative_layout(source, session, child, input),
                 TestDisplay::Leaf => {
                     let style = &node.style;
@@ -1019,9 +1098,6 @@ impl LayoutSession<TestSource> for TestSession {
                     )
                 }
             });
-        let output = node.first_baseline_override.map_or(output, |baseline| {
-            output.with_first_baselines(Point::new(None, Some(baseline)))
-        });
         self.nodes[usize::from(child)].output = output;
         output
     }
@@ -1053,6 +1129,14 @@ pub(super) fn relative_container(
     children: &[NodeId],
 ) -> NodeId {
     tree.push_relative(style, children.to_vec())
+}
+
+pub(super) fn linear_container(
+    tree: &mut TestTree,
+    style: TestStyle,
+    children: &[NodeId],
+) -> NodeId {
+    tree.push_linear(style, children.to_vec())
 }
 
 pub(super) fn perform_layout(
