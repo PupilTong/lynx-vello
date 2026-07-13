@@ -24,7 +24,8 @@ use thiserror::Error;
 ///
 /// The future is intentionally not required to be `Send`: JavaScript realm
 /// handles are commonly owner-thread-bound. Tokio applications can drive such
-/// operations on a [`tokio::task::LocalSet`].
+/// operations on a
+/// [`tokio::task::LocalSet`](https://docs.rs/tokio/latest/tokio/task/struct.LocalSet.html).
 pub type ScriptFuture<'a, C, S> =
     Pin<Box<dyn Future<Output = Result<ScriptValue<C, S>, ScriptError>> + 'a>>;
 
@@ -37,6 +38,11 @@ pub type ScriptFuture<'a, C, S> =
 /// Implementations must validate host-constructed values before entering the
 /// realm, including the canonical representation of [`ScriptValue::BigInt`],
 /// and reject malformed input with [`ScriptErrorKind::InvalidBoundaryValue`].
+///
+/// `Clone` is intentionally conditional: a value is cloneable only when both
+/// engine handle types are cloneable. Engines that provide cloneable handles
+/// must define each clone as another root that keeps the same target alive
+/// until that handle is released.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum ScriptValue<C, S> {
@@ -77,14 +83,16 @@ pub trait ScriptEngine {
     /// A handle is scoped to exactly one engine instance. The implementation
     /// is responsible for keeping its target alive until the handle is
     /// released, or for returning a stable [`ScriptErrorKind::StaleHandle`]
-    /// error after invalidation.
+    /// error after invalidation. If the handle implements `Clone`, each clone
+    /// is another root with the same lifetime guarantee.
     type Callable: fmt::Debug;
 
     /// Opaque rooted handle for engine-owned Symbols.
     ///
     /// As with [`Self::Callable`], a Symbol handle is scoped to exactly one
     /// engine instance and must remain valid or fail with a stable stale-handle
-    /// error.
+    /// error. A `Clone` implementation has the same semantics as adding
+    /// another root.
     type Symbol: fmt::Debug;
 
     /// Synchronously evaluate `source_text` as a top-level Script.

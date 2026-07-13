@@ -120,7 +120,9 @@ impl<R: ResourceFetcher + ?Sized, E: ScriptEngine> LynxView<R, E> {
     /// Create a view using a resource fetcher shared with other views.
     ///
     /// Only `R` is shared. The script engine is consumed and the widget API is
-    /// freshly allocated for this view.
+    /// freshly allocated for this view. Callers sharing a fetcher must assign
+    /// each view a distinct [`crate::resource::RequestId::namespace`]; the
+    /// view does not allocate or coordinate request IDs.
     #[must_use]
     pub fn with_shared_resource_fetcher(
         resource_fetcher: Arc<R>,
@@ -131,6 +133,9 @@ impl<R: ResourceFetcher + ?Sized, E: ScriptEngine> LynxView<R, E> {
     }
 
     /// Create a view using a shared fetcher and explicit page defaults.
+    ///
+    /// As with [`Self::with_shared_resource_fetcher`], callers own request-ID
+    /// namespace allocation across all views sharing this fetcher.
     #[must_use]
     pub fn with_shared_resource_fetcher_and_page_config(
         resource_fetcher: Arc<R>,

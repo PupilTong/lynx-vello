@@ -121,7 +121,9 @@ pub trait ResourceFetcher: Send + Sync + 'static {
 ///
 /// A fetcher may be shared by several views or runtimes. Each owner therefore
 /// supplies a stable namespace and a monotonically increasing sequence; the
-/// pair must not be reused while the fetcher remains alive.
+/// pair must not be reused while the fetcher remains alive. Namespace
+/// allocation belongs to the owners sharing the fetcher; neither
+/// [`ResourceFetcher`] nor [`crate::view::LynxView`] coordinates it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RequestId {
     /// View/runtime namespace chosen by the caller.
@@ -281,6 +283,10 @@ pub struct ResolveRequest {
 }
 
 /// A host-resolved resource locator.
+///
+/// Its fields remain public so embedders can construct and adapt requests, so
+/// receiving one is not proof that [`ResourceFetcher::resolve`] produced it.
+/// Fetchers must validate host-constructed values as untrusted input.
 #[derive(Clone, Debug)]
 pub struct ResolvedLocator {
     /// Original unresolved descriptor.
@@ -396,6 +402,11 @@ pub struct ResourcePath {
 }
 
 /// Input to the HTTP transport behind `lynx.fetch` and `EventSource`.
+///
+/// HTTP requests deliberately use a [`ResolvedLocator`], making host URL
+/// interception and rewriting an explicit resolve step before every
+/// transaction. Implementations may optimize that step internally, but must
+/// preserve its observable policy and tracing behavior.
 pub struct HttpRequest {
     /// Per-request identity, cancellation and priority.
     pub context: RequestContext,
