@@ -114,6 +114,15 @@ useful signal for currently-compatible versions of those libraries.
 - `crates/lynx-template-decoder` — decodes `.web.bundle` (magic `SDRA WROF`):
   manifest, rkyv `StyleInfo`, Lepus/JS code, custom sections. Scope: binary
   template parsing only, no JS runtime, no CSS engine (yet).
+- `crates/bobcat-engine` — native runtime integration crate. Its independent
+  `resource` module owns the protocol-only, host-injected, object-safe Tokio
+  `ResourceFetcher` contract; `script` owns the ShadowRealm-inspired isolated
+  `ScriptEngine` protocol; and `view` owns `LynxView<R, E>`, coupling one
+  engine instance with one private `lynx-widget` StyleEngine/WidgetTree pair.
+  The resource module must not decode images/fonts/templates, upload render
+  resources, or own cache/retry policy; its protocol remains independent of
+  decoder/widget/style/layout/render layers even though the enclosing engine
+  crate composes `lynx-widget` at the view layer.
 - `crates/stylo-dom` — generic HTML-DOM subset and standards-oriented CSS
   computation core. Owns `Element<T>` / `Arena<T>`, stylo DOM trait impls,
   tree invalidation, inline-style parsing, the `Stylist` / cascade pipeline,

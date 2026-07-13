@@ -1,0 +1,21 @@
+[package]
+name = "bobcat-engine"
+description = "Native Lynx runtime engine for lynx-vello"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lynx-widget = { workspace = true }
+
+bytes = { workspace = true }
+http = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+url = { workspace = true }
+
+[lints]
+workspace = true
