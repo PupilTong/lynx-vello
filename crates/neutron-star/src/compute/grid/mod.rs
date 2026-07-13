@@ -29,9 +29,9 @@ use tracks::{ExpandedTemplate, MAX_MATERIALIZED_TRACKS, build_axis_tracks, expan
 use types::{Axis, GridItem, TrackSet};
 
 use super::util::{
-    ItemKey, OrderedItem, ResolvedContainerBox, ResolvedItemBox, apply_aspect_ratio,
-    box_inset_size, clamp, clamp_axis, preferred_size_definiteness, resolve_container_box,
-    resolve_gap, resolve_item_box,
+    ItemKey, OrderedItem, PendingLayoutItem, ResolvedContainerBox, ResolvedItemBox,
+    apply_aspect_ratio, box_inset_size, clamp, clamp_axis, preferred_size_definiteness,
+    resolve_container_box, resolve_gap, resolve_item_box, sort_and_assign_layout_order,
 };
 use super::{compute_absolute_layout, hide_subtree};
 use crate::geometry::{Edges, Line, Point, Size};
@@ -67,6 +67,18 @@ impl PendingItem {
     #[inline]
     fn key(self) -> ItemKey {
         self.ordered.key()
+    }
+}
+
+impl PendingLayoutItem for PendingItem {
+    #[inline]
+    fn ordered(&self) -> &OrderedItem {
+        &self.ordered
+    }
+
+    #[inline]
+    fn ordered_mut(&mut self) -> &mut OrderedItem {
+        &mut self.ordered
     }
 }
 
@@ -1237,55 +1249,9 @@ where
             in_flow.push(child_style);
         }
     }
-    let has_modified_order = in_flow.iter().any(|item| item.ordered.css_order != 0);
-    if in_flow.iter().any(|item| item.ordered.css_order != 0) {
-        in_flow.sort_unstable_by_key(|item| (item.ordered.css_order, item.ordered.document_index));
-    }
-
     // Assign paint order without the quadratic node lookup used by many
     // straightforward implementations.
-    if has_modified_order {
-        let mut paint_keys = Vec::with_capacity(in_flow.len() + absolute.len());
-        paint_keys.extend(in_flow.iter().enumerate().map(|(index, item)| {
-            (
-                item.ordered.css_order,
-                item.ordered.document_index,
-                false,
-                index,
-            )
-        }));
-        paint_keys.extend(
-            absolute
-                .iter()
-                .enumerate()
-                .map(|(index, item)| (0, item.ordered.document_index, true, index)),
-        );
-        paint_keys.sort_unstable_by_key(|&(order, document, _, _)| (order, document));
-        for (layout_order, &(_, _, is_absolute, index)) in paint_keys.iter().enumerate() {
-            let layout_order = u32::try_from(layout_order).unwrap_or(u32::MAX);
-            if is_absolute {
-                absolute[index].ordered.layout_order = layout_order;
-            } else {
-                in_flow[index].ordered.layout_order = layout_order;
-            }
-        }
-    } else {
-        let (mut in_flow_index, mut absolute_index, mut layout_order) = (0, 0, 0_u32);
-        while in_flow_index < in_flow.len() || absolute_index < absolute.len() {
-            let take_in_flow = absolute_index == absolute.len()
-                || (in_flow_index < in_flow.len()
-                    && in_flow[in_flow_index].ordered.document_index
-                        < absolute[absolute_index].ordered.document_index);
-            if take_in_flow {
-                in_flow[in_flow_index].ordered.layout_order = layout_order;
-                in_flow_index += 1;
-            } else {
-                absolute[absolute_index].ordered.layout_order = layout_order;
-                absolute_index += 1;
-            }
-            layout_order = layout_order.saturating_add(1);
-        }
-    }
+    sort_and_assign_layout_order(&mut in_flow, &mut absolute);
 
     let placement_inputs = in_flow
         .iter()

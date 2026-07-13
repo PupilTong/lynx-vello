@@ -520,6 +520,32 @@ fn absolute_children_use_padding_box_and_do_not_affect_wrap_content() {
 }
 
 #[test]
+fn absolute_and_in_flow_children_share_contiguous_paint_order() {
+    let mut tree = TestTree::default();
+    let mut absolute_style = fixed_leaf_style(10.0, 10.0);
+    absolute_style.position = Position::Absolute;
+    absolute_style.order = 10;
+    let absolute = tree.push_leaf(absolute_style, Size::new(10.0, 10.0), None);
+    let in_flow = fixed_leaf(&mut tree, 10.0, 10.0);
+    let root = relative_container(
+        &mut tree,
+        TestStyle {
+            size: Size::new(Dimension::Length(20.0), Dimension::Length(10.0)),
+            ..TestStyle::default()
+        },
+        &[absolute, in_flow],
+    );
+
+    definite_layout(&mut tree, root, 20.0, 10.0);
+
+    // An absolute child is not a relative item, so its own `order` value is
+    // ignored. It still occupies one unique slot in the formatting parent's
+    // joint order-modified paint sequence.
+    assert_eq!(tree.layout(absolute).order, 0);
+    assert_eq!(tree.layout(in_flow).order, 1);
+}
+
+#[test]
 fn hoisted_children_record_padding_box_static_position_only() {
     let mut tree = TestTree::default();
     let mut fixed_style = relative_leaf_style(10.0, 10.0, 1);

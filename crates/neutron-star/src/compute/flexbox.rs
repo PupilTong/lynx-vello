@@ -22,7 +22,7 @@ use super::compute_absolute_layout;
 use super::util::{
     ItemKey, OrderedItem, ResolvedContainerBox, ResolvedItemBox, box_inset_size, clamp_axis,
     preferred_size_definiteness, resolve_container_box, resolve_dimension, resolve_gap,
-    resolve_item_box, resolve_length_percentage,
+    resolve_item_box, resolve_length_percentage, sort_and_assign_layout_order,
 };
 use crate::geometry::{Edges, Point, Size};
 use crate::style::alignment::{AlignContent, AlignItems};
@@ -1850,48 +1850,7 @@ where
             generated.push(pending);
         }
     }
-    let has_modified_order = generated.iter().any(|item| item.css_order != 0);
-    if has_modified_order {
-        generated.sort_unstable_by_key(|item| (item.css_order, item.document_index));
-        let mut paint_keys = Vec::with_capacity(generated.len() + absolute_items.len());
-        paint_keys.extend(
-            generated
-                .iter()
-                .enumerate()
-                .map(|(index, item)| (item.css_order, item.document_index, false, index)),
-        );
-        paint_keys.extend(
-            absolute_items
-                .iter()
-                .enumerate()
-                .map(|(index, item)| (0, item.document_index, true, index)),
-        );
-        paint_keys.sort_unstable_by_key(|&(order, document, _, _)| (order, document));
-        for (layout_order, &(_, _, is_absolute, index)) in paint_keys.iter().enumerate() {
-            let layout_order = u32::try_from(layout_order).unwrap_or(u32::MAX);
-            if is_absolute {
-                absolute_items[index].layout_order = layout_order;
-            } else {
-                generated[index].layout_order = layout_order;
-            }
-        }
-    } else {
-        let (mut generated_index, mut absolute_index, mut layout_order) = (0, 0, 0_u32);
-        while generated_index < generated.len() || absolute_index < absolute_items.len() {
-            let take_generated = absolute_index == absolute_items.len()
-                || (generated_index < generated.len()
-                    && generated[generated_index].document_index
-                        < absolute_items[absolute_index].document_index);
-            if take_generated {
-                generated[generated_index].layout_order = layout_order;
-                generated_index += 1;
-            } else {
-                absolute_items[absolute_index].layout_order = layout_order;
-                absolute_index += 1;
-            }
-            layout_order = layout_order.saturating_add(1);
-        }
-    }
+    sort_and_assign_layout_order(&mut generated, &mut absolute_items);
 
     let mut items = generated
         .into_iter()

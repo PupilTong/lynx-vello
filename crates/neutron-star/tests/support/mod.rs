@@ -401,6 +401,10 @@ impl TestSideConstraint {
         }
     }
 
+    pub(super) const fn is_definite(self) -> bool {
+        matches!(self.mode, TestMeasureMode::Definite)
+    }
+
     pub(super) fn bounded_size(self) -> Option<f32> {
         match self.mode {
             TestMeasureMode::Indefinite => None,
@@ -450,6 +454,11 @@ impl TestConstraints {
 #[derive(Debug, Clone, Copy)]
 pub(super) enum TestRegularMeasure {
     Fixed(Size<f32>),
+    WidthByHeightDefiniteness {
+        at_most_width: f32,
+        definite_width: f32,
+        height: f32,
+    },
     HeightFromWidth {
         intrinsic_width: f32,
         fallback_height: f32,
@@ -492,6 +501,7 @@ pub(super) enum TestMeasureCallKind {
 pub(super) struct TestMeasureCall {
     pub(super) kind: TestMeasureCallKind,
     pub(super) constraints: TestConstraints,
+    pub(super) goal: LayoutGoal,
 }
 
 fn test_side_constraint(known: Option<f32>, available: AvailableSpace) -> TestSideConstraint {
@@ -580,7 +590,11 @@ impl TestMeasure {
                 return (
                     LeafMetrics::new(size)
                         .with_first_baselines(Point::new(None, profile.first_baseline)),
-                    Some(TestMeasureCall { kind, constraints }),
+                    Some(TestMeasureCall {
+                        kind,
+                        constraints,
+                        goal: input.goal,
+                    }),
                 );
             }
         };
@@ -606,6 +620,21 @@ impl TestRegularMeasure {
                 constraints.width.clamp(size.width),
                 constraints.height.clamp(size.height),
             ),
+            Self::WidthByHeightDefiniteness {
+                at_most_width,
+                definite_width,
+                height,
+            } => {
+                let width = if constraints.height.is_definite() {
+                    definite_width
+                } else {
+                    at_most_width
+                };
+                Size::new(
+                    constraints.width.clamp(width),
+                    constraints.height.clamp(height),
+                )
+            }
             Self::HeightFromWidth {
                 intrinsic_width,
                 fallback_height,
@@ -672,6 +701,7 @@ pub(super) struct TestSourceNode {
 #[derive(Debug, Clone, Default)]
 pub(super) struct TestSessionNode {
     pub(super) layout: Layout,
+    pub(super) final_layout: Layout,
     pub(super) static_position: Option<Point<f32>>,
     pub(super) output: LayoutOutput,
     pub(super) measure_calls: Vec<TestMeasureCall>,
@@ -838,6 +868,10 @@ impl TestTree {
         self.session_node(id).layout
     }
 
+    pub(super) fn final_layout(&self, id: NodeId) -> Layout {
+        self.session_node(id).final_layout
+    }
+
     pub(super) fn static_position(&self, id: NodeId) -> Option<Point<f32>> {
         self.session_node(id).static_position
     }
@@ -933,6 +967,16 @@ impl CacheState for TestSession {
     fn cache_store(&mut self, _node: NodeId, _input: LayoutInput, _output: LayoutOutput) {}
 
     fn cache_clear(&mut self, _node: NodeId) {}
+}
+
+impl RoundState for TestSession {
+    fn unrounded_layout(&self, node: NodeId) -> Layout {
+        self.nodes[usize::from(node)].layout
+    }
+
+    fn set_final_layout(&mut self, node: NodeId, layout: &Layout) {
+        self.nodes[usize::from(node)].final_layout = *layout;
+    }
 }
 
 impl LayoutSession<TestSource> for TestSession {

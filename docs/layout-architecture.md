@@ -380,7 +380,10 @@ the painting — layout's job is to never be the frame's bottleneck.
   cycles, one-pass versus two-pass solving, nested cold layout, warm
   descendants, root cache hits, and auto-width refinement. The refinement
   path preserves measurements for unchanged, definite fixed items while
-  percentage-dependent or newly double-anchored items remeasure.
+  percentage-dependent or newly double-anchored items remeasure. The separate
+  PR #25 Relative target ports all nine source workloads that contain a real
+  `display: relative` branch; mixed-display workloads keep only their Relative
+  slice, and every timed invocation uses a fresh Rust-only tree.
   Equivalent-tree Taffy/Yoga and other
   cross-engine differential baselines remain future additions — not to copy
   those engines' designs, but to keep "high-performance" falsifiable.
@@ -504,7 +507,14 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
   metric.
 - **Parity/performance hardening:** the Rust-only Flex benchmark suite and
   migrated `PupilTong/lynx#25` Flex fixtures are landed alongside the Grid
-  benchmark suite above and the graph/cache-focused Relative CodSpeed suite.
+  benchmark suite above, the graph/cache-focused Relative CodSpeed suite, and
+  the complete Rust-only PR #25 Relative migration. The latter retains 72
+  direct tests, 72 native head-to-head Rust cases, 15 generated matrices (429
+  cases), 401 standalone cases, two dedicated standalone-public snapshots plus
+  the mixed display matrix's Relative branch, two sticky-boundary cases, four
+  algorithm inventory guards, and nine benchmark workloads; its detailed
+  source map is recorded in
+  [`pr25-relative-migration.md`](pr25-relative-migration.md).
   Browser geometry goldens and differential fuzzing
   against Taffy on the shared feature subset remain planned.
 - **Remaining host-side Lynx modes:** `linear` and component-specific
@@ -526,7 +536,8 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
 - **L2R — Starlight relative** *(complete)*: `RelativeSource`, the one-pass
   combined and two-pass per-axis dependency solvers, intrinsic/percentage
   remeasurement, deterministic cycles, out-of-flow handling, conformance
-  fixtures, and CodSpeed benchmarks.
+  fixtures, the full Rust-only PR #25 test/benchmark migration, and CodSpeed
+  benchmarks.
 - **L3 — lynx-layout adapter**: trait impls over `lynx-widget`/`stylo-dom`,
   stylo→view translation (incl. `CalcHandle` into stylo's calc nodes),
   dispatch, dirty→cache invalidation wiring, relative style translation, the
