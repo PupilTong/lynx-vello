@@ -10,16 +10,16 @@
 use core::cmp::Ordering;
 
 use super::util::{
-    ResolvedContainerBox, ResolvedItemBox, apply_aspect_ratio, box_inset_size, clamp_axis,
-    preferred_size_definiteness, relative_offset, resolve_container_box, resolve_insets,
-    resolve_item_box, resolve_length_percentage,
+    ResolvedContainerBox, ResolvedItemBox, apply_aspect_ratio, auto_edges_to_zero, box_inset_size,
+    clamp_axis, preferred_size_definiteness, relative_offset, resolve_container_box, resolve_edges,
+    resolve_insets, resolve_item_box, resolve_length_percentage, resolve_optional_edges,
 };
 use super::{compute_absolute_layout_with_static_position, hide_subtree, measure_absolute_layout};
 use crate::geometry::{Edges, Point, Size};
 use crate::style::{
     AlignItems, BoxGenerationMode, BoxSizing, CoreStyle, Dimension, Direction, JustifyContent,
-    LengthPercentageAuto, LinearContainerStyle, LinearCrossGravity, LinearGravity, LinearItemStyle,
-    LinearLayoutGravity, LinearOrientation, Position,
+    LengthPercentage, LengthPercentageAuto, LinearContainerStyle, LinearCrossGravity,
+    LinearGravity, LinearItemStyle, LinearLayoutGravity, LinearOrientation, Position,
 };
 use crate::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutSession, LinearSource,
@@ -137,6 +137,58 @@ enum NonFlowItem {
     },
 }
 
+#[derive(Debug, Clone, Copy)]
+#[repr(transparent)]
+struct LinearItemFlags(u8);
+
+impl LinearItemFlags {
+    const MARGIN_REFRESH: u8 = 1 << 0;
+    const PADDING_BORDER_REFRESH: u8 = 1 << 1;
+    const RELATIVE_OFFSET: u8 = 1 << 2;
+    const FROZEN: u8 = 1 << 3;
+    const BOX_REFRESH: u8 = Self::MARGIN_REFRESH | Self::PADDING_BORDER_REFRESH;
+
+    #[inline]
+    const fn needs_box_refresh(self) -> bool {
+        self.0 & Self::BOX_REFRESH != 0
+    }
+
+    #[inline]
+    const fn needs_relative_offset_refresh(self) -> bool {
+        self.0 & Self::RELATIVE_OFFSET != 0
+    }
+
+    #[inline]
+    const fn needs_margin_refresh(self) -> bool {
+        self.0 & Self::MARGIN_REFRESH != 0
+    }
+
+    #[inline]
+    const fn needs_padding_border_refresh(self) -> bool {
+        self.0 & Self::PADDING_BORDER_REFRESH != 0
+    }
+
+    #[inline]
+    const fn is_frozen(self) -> bool {
+        self.0 & Self::FROZEN != 0
+    }
+
+    #[inline]
+    fn set_frozen(&mut self, frozen: bool) {
+        if frozen {
+            self.0 |= Self::FROZEN;
+        } else {
+            self.0 &= !Self::FROZEN;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LinearItemSeed {
+    key: ItemKey,
+    flags: LinearItemFlags,
+}
+
 /// One allocation-friendly scratch record per in-flow item. Raw style remains
 /// in the immutable source and is reborrowed only for intrinsic probes or a
 /// cyclic percentage re-resolution.
@@ -168,10 +220,8 @@ struct LinearItem {
     baseline: Option<f32>,
     main_size_is_definite: bool,
     cross_size_is_definite: bool,
-    frozen: bool,
     violation: f32,
-    depends_on_inline_basis: bool,
-    relative_offset_depends_on_basis: bool,
+    flags: LinearItemFlags,
 }
 
 #[inline]
@@ -382,10 +432,71 @@ fn computed_main_gravity(
     }
 }
 
+#[inline]
+fn length_depends_on_basis(value: LengthPercentage) -> bool {
+    matches!(
+        value,
+        LengthPercentage::Percent(_) | LengthPercentage::Calc(_)
+    )
+}
+
+#[inline]
+fn auto_length_depends_on_basis(value: LengthPercentageAuto) -> bool {
+    matches!(
+        value,
+        LengthPercentageAuto::Percent(_) | LengthPercentageAuto::Calc(_)
+    )
+}
+
+#[inline]
+fn initial_item_flags(style: &impl LinearItemStyle, inline_basis: Option<f32>) -> LinearItemFlags {
+    let inset = style.inset();
+    let relative_offset = auto_length_depends_on_basis(inset.left)
+        || auto_length_depends_on_basis(inset.right)
+        || auto_length_depends_on_basis(inset.top)
+        || auto_length_depends_on_basis(inset.bottom);
+    let (margin_refresh, padding_border_refresh) = if inline_basis.is_none() {
+        // Only used edges can affect the remaining layout phases. Starlight's
+        // internal min/max rewrite has no downstream consumer after sizing,
+        // while relative insets resolve independently against the final
+        // clamped containing block.
+        let margin = style.margin();
+        let padding = style.padding();
+        let border = style.border();
+        (
+            auto_length_depends_on_basis(margin.left)
+                || auto_length_depends_on_basis(margin.right)
+                || auto_length_depends_on_basis(margin.top)
+                || auto_length_depends_on_basis(margin.bottom),
+            length_depends_on_basis(padding.left)
+                || length_depends_on_basis(padding.right)
+                || length_depends_on_basis(padding.top)
+                || length_depends_on_basis(padding.bottom)
+                || length_depends_on_basis(border.left)
+                || length_depends_on_basis(border.right)
+                || length_depends_on_basis(border.top)
+                || length_depends_on_basis(border.bottom),
+        )
+    } else {
+        (false, false)
+    };
+    let mut flags = 0;
+    if margin_refresh {
+        flags |= LinearItemFlags::MARGIN_REFRESH;
+    }
+    if padding_border_refresh {
+        flags |= LinearItemFlags::PADDING_BORDER_REFRESH;
+    }
+    if relative_offset {
+        flags |= LinearItemFlags::RELATIVE_OFFSET;
+    }
+    LinearItemFlags(flags)
+}
+
 fn resolve_item<Source: LinearSource>(
     source: &Source,
     style: impl LinearItemStyle,
-    key: ItemKey,
+    seed: LinearItemSeed,
     percentage_basis: Size<Option<f32>>,
     container_cross: LinearCrossGravity,
     align_items: Option<AlignItems>,
@@ -404,20 +515,6 @@ fn resolve_item<Source: LinearSource>(
         align_items,
         axes,
     );
-    let inset_value = style.inset();
-    let relative_offset_depends_on_basis = [
-        inset_value.left,
-        inset_value.right,
-        inset_value.top,
-        inset_value.bottom,
-    ]
-    .into_iter()
-    .any(|value| {
-        matches!(
-            value,
-            LengthPercentageAuto::Percent(_) | LengthPercentageAuto::Calc(_)
-        )
-    });
     let ResolvedItemBox {
         raw_size,
         raw_min_size,
@@ -433,18 +530,12 @@ fn resolve_item<Source: LinearSource>(
         border,
         scrollbar,
         inset,
-        depends_on_inline_basis,
         ..
-    } = resolve_item_box(
-        source,
-        &style,
-        percentage_basis,
-        percentage_basis.width.is_none(),
-    );
+    } = resolve_item_box(source, &style, percentage_basis);
     let relative_offset = relative_offset(inset, direction);
 
     LinearItem {
-        key,
+        key: seed.key,
         gravity,
         weight,
         size_is_auto: raw_size.map(Dimension::is_auto),
@@ -481,10 +572,29 @@ fn resolve_item<Source: LinearSource>(
         baseline: None,
         main_size_is_definite: false,
         cross_size_is_definite: false,
-        frozen: false,
         violation: 0.0,
-        depends_on_inline_basis,
-        relative_offset_depends_on_basis,
+        flags: seed.flags,
+    }
+}
+
+#[inline]
+fn refresh_item_edges<Source: LinearSource>(
+    source: &Source,
+    style: impl LinearItemStyle,
+    item: &mut LinearItem,
+    percentage_basis: Size<Option<f32>>,
+) {
+    let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
+    if item.flags.needs_padding_border_refresh() {
+        item.padding = resolve_edges(style.padding(), percentage_basis.width, &resolve_calc);
+        item.border = resolve_edges(style.border(), percentage_basis.width, &resolve_calc);
+    }
+    if item.flags.needs_margin_refresh() {
+        let margin_value = style.margin();
+        let optional_margin =
+            resolve_optional_edges(margin_value, percentage_basis.width, &resolve_calc);
+        item.margin = auto_edges_to_zero(optional_margin);
+        item.margin_auto = margin_value.map(LengthPercentageAuto::is_auto);
     }
 }
 
@@ -989,7 +1099,7 @@ fn distribute_weighted_items(
             weighted_margins += axis_sum(item.margin, axes.main);
             weighted_count = weighted_count.saturating_add(1);
             item.main_size = 0.0;
-            item.frozen = false;
+            item.flags.set_frozen(false);
             item.violation = 0.0;
         } else {
             fixed_outer += outer_main(item, axes);
@@ -1023,7 +1133,7 @@ fn distribute_weighted_items(
         let mut total_violation = 0.0;
         for item in items
             .iter_mut()
-            .filter(|item| item.weight > 0.0 && !item.frozen)
+            .filter(|item| item.weight > 0.0 && !item.flags.is_frozen())
         {
             let tentative = if free_space > 0.0 {
                 free_space * item.weight / active_weight
@@ -1053,7 +1163,7 @@ fn distribute_weighted_items(
         let mut froze_any = false;
         for item in items
             .iter_mut()
-            .filter(|item| item.weight > 0.0 && !item.frozen)
+            .filter(|item| item.weight > 0.0 && !item.flags.is_frozen())
         {
             let violating = if freeze_min {
                 item.violation > 0.0
@@ -1061,7 +1171,7 @@ fn distribute_weighted_items(
                 item.violation < 0.0
             };
             if violating {
-                item.frozen = true;
+                item.flags.set_frozen(true);
                 active_weight -= item.weight;
                 frozen_size += item.main_size;
                 froze_any = true;
@@ -1645,7 +1755,7 @@ where
     let mut items = Vec::with_capacity(child_count);
     let mut non_flow_items = Vec::new();
     let mut has_nonzero_order = false;
-    let mut has_inline_dependency = false;
+    let mut has_box_basis_dependency = false;
     let mut has_relative_basis_dependency = false;
     let mut absolute_count = 0usize;
     for document_index in 0..child_count {
@@ -1692,29 +1802,33 @@ where
         }
         let css_order = child_style.order();
         has_nonzero_order |= css_order != 0;
+        let flags = initial_item_flags(&child_style, percentage_basis.width);
         let item = resolve_item(
             source,
             child_style,
-            ItemKey {
-                node: child,
-                document_index,
-                css_order,
-                // Temporarily retain the number of preceding effective-order
-                // zero absolute siblings. After sorting this is exactly the
-                // merge offset for a zero-order in-flow item.
-                layout_order: if commits_layout {
-                    u32::try_from(absolute_count).unwrap_or(u32::MAX)
-                } else {
-                    0
+            LinearItemSeed {
+                key: ItemKey {
+                    node: child,
+                    document_index,
+                    css_order,
+                    // Temporarily retain the number of preceding effective-order
+                    // zero absolute siblings. After sorting this is exactly the
+                    // merge offset for a zero-order in-flow item.
+                    layout_order: if commits_layout {
+                        u32::try_from(absolute_count).unwrap_or(u32::MAX)
+                    } else {
+                        0
+                    },
                 },
+                flags,
             },
             percentage_basis,
             container_cross,
             align_items,
             axes,
         );
-        has_inline_dependency |= item.depends_on_inline_basis;
-        has_relative_basis_dependency |= item.relative_offset_depends_on_basis;
+        has_box_basis_dependency |= item.flags.needs_box_refresh();
+        has_relative_basis_dependency |= item.flags.needs_relative_offset_refresh();
         items.push(item);
     }
     if has_nonzero_order {
@@ -1776,7 +1890,7 @@ where
     // Cyclic percentages contribute zero while an inline size is intrinsic,
     // then resolve against the resulting used width. Avoid the second pass for
     // the overwhelmingly common all-absolute-length case.
-    if !outer_definite.width && has_inline_dependency {
+    if !outer_definite.width && has_box_basis_dependency {
         // Starlight refreshes BoxInfo before the container's provisional
         // border-box size is clamped by min/max. A previously constrained axis
         // keeps that constraint; an intrinsic axis uses its natural content
@@ -1788,28 +1902,17 @@ where
         )
         .map(Some);
         for item in &mut items {
-            let key = item.key;
-            let item_style = source.linear_item_style(key.node);
-            let resolved = resolve_item(
-                source,
-                item_style,
-                key,
-                percentage_basis,
-                container_cross,
-                align_items,
-                axes,
-            );
+            if !item.flags.needs_box_refresh() {
+                continue;
+            }
             // Starlight's UpdateContainerSize refreshes percentage-dependent
-            // box data after an intrinsic container becomes definite, but it
-            // deliberately does not measure the child again. Preserve the
-            // already-used size/baseline/definiteness and weight-freeze state;
-            // only values whose percentage basis has now materialized change.
-            item.min_size = resolved.min_size;
-            item.max_size = resolved.max_size;
-            item.margin = resolved.margin;
-            item.margin_auto = resolved.margin_auto;
-            item.padding = resolved.padding;
-            item.border = resolved.border;
+            // used edges after an intrinsic container becomes definite, but
+            // it deliberately does not measure the child again. Preserve the
+            // already-used size/baseline/definiteness and weight-freeze state.
+            // Min/max has no consumer after sizing, so re-resolving it here
+            // would only create dead stores.
+            let item_style = source.linear_item_style(item.key.node);
+            refresh_item_edges(source, item_style, item, percentage_basis);
         }
         // The intrinsic container size remains fixed. Percentage-dependent
         // used values may overflow it, but neither item measurement nor the
@@ -1834,7 +1937,7 @@ where
         let final_percentage_basis = final_inner_size.map(Some);
         let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
         for item in &mut items {
-            if !item.relative_offset_depends_on_basis {
+            if !item.flags.needs_relative_offset_refresh() {
                 continue;
             }
             let item_style = source.linear_item_style(item.key.node);
@@ -1875,9 +1978,166 @@ where
 mod tests {
     use super::*;
 
+    #[derive(Debug, Clone, Copy)]
+    struct DependencyStyle {
+        size: Size<Dimension>,
+        min_size: Size<Dimension>,
+        max_size: Size<Dimension>,
+        margin: Edges<LengthPercentageAuto>,
+        padding: Edges<LengthPercentage>,
+        border: Edges<LengthPercentage>,
+        inset: Edges<LengthPercentageAuto>,
+    }
+
+    impl Default for DependencyStyle {
+        fn default() -> Self {
+            Self {
+                size: Size::new(Dimension::Auto, Dimension::Auto),
+                min_size: Size::new(Dimension::Auto, Dimension::Auto),
+                max_size: Size::new(Dimension::Auto, Dimension::Auto),
+                margin: Edges::uniform(LengthPercentageAuto::ZERO),
+                padding: Edges::uniform(LengthPercentage::ZERO),
+                border: Edges::uniform(LengthPercentage::ZERO),
+                inset: Edges::uniform(LengthPercentageAuto::Auto),
+            }
+        }
+    }
+
+    impl CoreStyle for DependencyStyle {
+        fn inset(&self) -> Edges<LengthPercentageAuto> {
+            self.inset
+        }
+
+        fn size(&self) -> Size<Dimension> {
+            self.size
+        }
+
+        fn min_size(&self) -> Size<Dimension> {
+            self.min_size
+        }
+
+        fn max_size(&self) -> Size<Dimension> {
+            self.max_size
+        }
+
+        fn margin(&self) -> Edges<LengthPercentageAuto> {
+            self.margin
+        }
+
+        fn padding(&self) -> Edges<LengthPercentage> {
+            self.padding
+        }
+
+        fn border(&self) -> Edges<LengthPercentage> {
+            self.border
+        }
+    }
+
+    impl LinearItemStyle for DependencyStyle {}
+
     #[test]
     fn linear_item_scratch_stays_cache_conscious() {
         let size = core::mem::size_of::<LinearItem>();
-        assert!(size <= 200, "LinearItem grew to {size} bytes");
+        assert!(size <= 192, "LinearItem grew to {size} bytes");
+    }
+
+    #[test]
+    fn edge_dependency_values_cover_percent_and_calc() {
+        let calc = crate::style::CalcHandle::from_raw(1);
+        assert!(!length_depends_on_basis(LengthPercentage::Length(1.0)));
+        assert!(length_depends_on_basis(LengthPercentage::Percent(0.5)));
+        assert!(length_depends_on_basis(LengthPercentage::Calc(calc)));
+        assert!(!auto_length_depends_on_basis(LengthPercentageAuto::Length(
+            1.0
+        )));
+        assert!(!auto_length_depends_on_basis(LengthPercentageAuto::Auto));
+        assert!(auto_length_depends_on_basis(LengthPercentageAuto::Percent(
+            0.5
+        )));
+        assert!(auto_length_depends_on_basis(LengthPercentageAuto::Calc(
+            calc
+        )));
+    }
+
+    #[test]
+    fn linear_dependency_policy_matches_the_two_refresh_phases() {
+        let width_only = DependencyStyle {
+            size: Size::new(Dimension::Percent(0.5), Dimension::Auto),
+            ..DependencyStyle::default()
+        };
+        let width_dependencies = initial_item_flags(&width_only, None);
+        assert!(!width_dependencies.needs_box_refresh());
+        assert!(!width_dependencies.needs_relative_offset_refresh());
+
+        for style in [
+            DependencyStyle {
+                min_size: Size::new(Dimension::Percent(0.5), Dimension::Auto),
+                ..DependencyStyle::default()
+            },
+            DependencyStyle {
+                max_size: Size::new(Dimension::Percent(0.5), Dimension::Auto),
+                ..DependencyStyle::default()
+            },
+        ] {
+            assert!(!initial_item_flags(&style, None).needs_box_refresh());
+        }
+
+        for (style, expected_refresh) in [
+            (
+                DependencyStyle {
+                    margin: Edges {
+                        left: LengthPercentageAuto::Percent(0.5),
+                        ..Edges::uniform(LengthPercentageAuto::ZERO)
+                    },
+                    ..DependencyStyle::default()
+                },
+                LinearItemFlags::MARGIN_REFRESH,
+            ),
+            (
+                DependencyStyle {
+                    padding: Edges {
+                        left: LengthPercentage::Percent(0.5),
+                        ..Edges::uniform(LengthPercentage::ZERO)
+                    },
+                    ..DependencyStyle::default()
+                },
+                LinearItemFlags::PADDING_BORDER_REFRESH,
+            ),
+            (
+                DependencyStyle {
+                    border: Edges {
+                        left: LengthPercentage::Percent(0.5),
+                        ..Edges::uniform(LengthPercentage::ZERO)
+                    },
+                    ..DependencyStyle::default()
+                },
+                LinearItemFlags::PADDING_BORDER_REFRESH,
+            ),
+        ] {
+            let flags = initial_item_flags(&style, None);
+            assert_eq!(flags.0 & LinearItemFlags::BOX_REFRESH, expected_refresh);
+            assert!(!initial_item_flags(&style, Some(100.0)).needs_box_refresh());
+        }
+
+        for inset in [
+            Edges {
+                left: LengthPercentageAuto::Percent(0.5),
+                ..Edges::uniform(LengthPercentageAuto::Auto)
+            },
+            Edges {
+                top: LengthPercentageAuto::Percent(0.5),
+                ..Edges::uniform(LengthPercentageAuto::Auto)
+            },
+        ] {
+            let dependencies = initial_item_flags(
+                &DependencyStyle {
+                    inset,
+                    ..DependencyStyle::default()
+                },
+                None,
+            );
+            assert!(!dependencies.needs_box_refresh());
+            assert!(dependencies.needs_relative_offset_refresh());
+        }
     }
 }

@@ -134,7 +134,6 @@ pub(super) struct ResolvedItemBox {
     pub(super) border: Edges<f32>,
     pub(super) scrollbar: Size<f32>,
     pub(super) inset: Edges<Option<f32>>,
-    pub(super) depends_on_inline_basis: bool,
 }
 
 /// Algorithm-neutral resolved container box and sizing constraints.
@@ -460,77 +459,18 @@ fn scrollbar_size_from(overflow: Point<Overflow>, width: f32) -> Size<f32> {
     )
 }
 
-#[inline]
-fn length_depends_on_basis(value: LengthPercentage) -> bool {
-    matches!(
-        value,
-        LengthPercentage::Percent(_) | LengthPercentage::Calc(_)
-    )
-}
-
-#[inline]
-fn auto_length_depends_on_basis(value: LengthPercentageAuto) -> bool {
-    matches!(
-        value,
-        LengthPercentageAuto::Percent(_) | LengthPercentageAuto::Calc(_)
-    )
-}
-
-#[inline]
-fn width_dimension_depends_on_basis(value: Dimension) -> bool {
-    matches!(value, Dimension::Percent(_) | Dimension::Calc(_))
-        || matches!(value, Dimension::FitContent(limit) if length_depends_on_basis(limit))
-}
-
-#[inline]
-#[allow(clippy::too_many_arguments)]
-fn style_depends_on_inline_basis(
-    size: Size<Dimension>,
-    min_size: Size<Dimension>,
-    max_size: Size<Dimension>,
-    margin: Edges<LengthPercentageAuto>,
-    padding: Edges<LengthPercentage>,
-    border: Edges<LengthPercentage>,
-    inset: Edges<LengthPercentageAuto>,
-) -> bool {
-    width_dimension_depends_on_basis(size.width)
-        || width_dimension_depends_on_basis(min_size.width)
-        || width_dimension_depends_on_basis(max_size.width)
-        || auto_length_depends_on_basis(margin.left)
-        || auto_length_depends_on_basis(margin.right)
-        || auto_length_depends_on_basis(margin.top)
-        || auto_length_depends_on_basis(margin.bottom)
-        || length_depends_on_basis(padding.left)
-        || length_depends_on_basis(padding.right)
-        || length_depends_on_basis(padding.top)
-        || length_depends_on_basis(padding.bottom)
-        || length_depends_on_basis(border.left)
-        || length_depends_on_basis(border.right)
-        || length_depends_on_basis(border.top)
-        || length_depends_on_basis(border.bottom)
-        || auto_length_depends_on_basis(inset.left)
-        || auto_length_depends_on_basis(inset.right)
-}
-
 /// Resolves the algorithm-neutral box values of one layout item.
 #[inline(always)]
 #[allow(
     clippy::inline_always,
-    reason = "avoids a 216-byte resolver result and copy chain in release LLVM IR"
+    reason = "avoids a large resolver result and copy chain in release LLVM IR"
 )]
 pub(super) fn resolve_item_box<Source: LayoutSource>(
     source: &Source,
     style: &impl CoreStyle,
     percentage_basis: Size<Option<f32>>,
-    track_inline_dependency: bool,
 ) -> ResolvedItemBox {
-    resolve_item_box_with_bases_and_dependency(
-        source,
-        style,
-        percentage_basis,
-        percentage_basis.width,
-        track_inline_dependency,
-    )
+    resolve_item_box_with_bases(source, style, percentage_basis, percentage_basis.width)
 }
 
 /// Resolves an item's box when sizing percentages and physical edge
@@ -542,34 +482,13 @@ pub(super) fn resolve_item_box<Source: LayoutSource>(
 #[inline(always)]
 #[allow(
     clippy::inline_always,
-    reason = "avoids a 216-byte resolver result and copy chain in release LLVM IR"
+    reason = "avoids a large resolver result and copy chain in release LLVM IR"
 )]
 pub(super) fn resolve_item_box_with_bases<Source: LayoutSource>(
     source: &Source,
     style: &impl CoreStyle,
     size_percentage_basis: Size<Option<f32>>,
     edge_inline_basis: Option<f32>,
-) -> ResolvedItemBox {
-    resolve_item_box_with_bases_and_dependency(
-        source,
-        style,
-        size_percentage_basis,
-        edge_inline_basis,
-        false,
-    )
-}
-
-#[inline(always)]
-#[allow(
-    clippy::inline_always,
-    reason = "keeps the tracking branch compile-time-constant at every public-internal call site"
-)]
-fn resolve_item_box_with_bases_and_dependency<Source: LayoutSource>(
-    source: &Source,
-    style: &impl CoreStyle,
-    size_percentage_basis: Size<Option<f32>>,
-    edge_inline_basis: Option<f32>,
-    track_inline_dependency: bool,
 ) -> ResolvedItemBox {
     let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
     let raw_size = style.size();
@@ -628,16 +547,6 @@ fn resolve_item_box_with_bases_and_dependency<Source: LayoutSource>(
         border,
         scrollbar,
         inset: resolve_insets(inset_value, size_percentage_basis, &resolve_calc),
-        depends_on_inline_basis: track_inline_dependency
-            && style_depends_on_inline_basis(
-                raw_size,
-                raw_min_size,
-                raw_max_size,
-                margin_value,
-                padding_value,
-                border_value,
-                inset_value,
-            ),
     }
 }
 

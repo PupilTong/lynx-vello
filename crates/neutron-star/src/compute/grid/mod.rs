@@ -133,7 +133,7 @@ fn resolve_grid_item<Source: GridSource>(
         scrollbar,
         inset,
         ..
-    } = resolve_item_box(source, &style, percentage_basis, false);
+    } = resolve_item_box(source, &style, percentage_basis);
     let behaves_auto_or_depends = |value: Dimension| {
         matches!(
             value,
@@ -460,7 +460,7 @@ fn refresh_item_basis<Source: GridSource>(
         scrollbar,
         inset,
         ..
-    } = resolve_item_box(source, &style, percentage_basis, false);
+    } = resolve_item_box(source, &style, percentage_basis);
     item.preferred_size = preferred_size;
     item.min_size = min_size;
     item.max_size = max_size;

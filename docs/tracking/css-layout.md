@@ -119,10 +119,12 @@ stretch use the incoming constraint's decided geometry even when a Flex parent
 marks that target indefinite for descendant percentages under Flexbox §9.8;
 `definite_dimensions` remains percentage-basis metadata only. Second, after an
 intrinsic Linear container obtains its inline size, percentage margin,
-padding, and min/max box data are re-resolved without remeasuring the child or
-recomputing the already-established main total. The percentage basis is the
-provisional intrinsic content size before the container's own min/max clamp.
-This follows
+padding, and border used edges are re-resolved without remeasuring the child
+or recomputing the already-established main total. Starlight also rewrites its
+internal min/max BoxInfo at this point, but item sizing is already complete and
+no later phase reads those values, so neutron-star eliminates that dead update.
+The percentage basis is the provisional intrinsic content size before the
+container's own min/max clamp. This follows
 `LinearLayoutAlgorithm::DetermineContainerSize`/`UpdateContainerSize` and
 `BoxInfo::UpdateBoxData`; it intentionally differs from web-core's browser
 Flex polyfill, which can reflow a percentage-sized child.

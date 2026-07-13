@@ -67,31 +67,51 @@ impl BenchCase {
 }
 
 macro_rules! scenario {
-    ($name:literal, $build:ident) => {
+    ($function:ident, $build:ident) => {
         Scenario {
-            name: $name,
+            name: stringify!($function),
             build: $build,
         }
     };
 }
 
-pub(super) const SCENARIOS: &[Scenario] = &[
-    scenario!("fixed_stack", build_fixed_stack),
-    scenario!("ordered_stack", build_ordered_stack),
-    scenario!("weighted_distribution", build_weighted_distribution),
-    scenario!("weighted_freeze", build_weighted_freeze),
-    scenario!("measured_stretch", build_measured_stretch),
-    scenario!("mixed_hidden_absolute", build_mixed_hidden_absolute),
-    scenario!("linear_gravity_matrix", build_linear_gravity_matrix),
-    scenario!(
-        "linear_layout_gravity_matrix",
-        build_linear_layout_gravity_matrix
-    ),
-    scenario!(
-        "linear_cross_gravity_matrix",
-        build_linear_cross_gravity_matrix
-    ),
-];
+macro_rules! for_each_linear_scenario {
+    ($callback:ident) => {
+        $callback! {
+            fixed_stack, build_fixed_stack;
+            ordered_stack, build_ordered_stack;
+            weighted_distribution, build_weighted_distribution;
+            weighted_freeze, build_weighted_freeze;
+            measured_stretch, build_measured_stretch;
+            mixed_hidden_absolute, build_mixed_hidden_absolute;
+            intrinsic_pure_length, build_intrinsic_pure_length;
+            intrinsic_sparse_percentage, build_intrinsic_sparse_percentage;
+            intrinsic_dense_percentage, build_intrinsic_dense_percentage;
+            intrinsic_dense_padding_percentage, build_intrinsic_dense_padding_percentage;
+            intrinsic_percentage_size_only, build_intrinsic_percentage_size_only;
+            intrinsic_percentage_min_max_only, build_intrinsic_percentage_min_max_only;
+            intrinsic_relative_inset_only, build_intrinsic_relative_inset_only;
+            linear_gravity_matrix, build_linear_gravity_matrix;
+            linear_layout_gravity_matrix, build_linear_layout_gravity_matrix;
+            linear_cross_gravity_matrix, build_linear_cross_gravity_matrix;
+        }
+    };
+}
+#[allow(
+    unused_imports,
+    reason = "only the benchmark target expands this list twice"
+)]
+pub(super) use for_each_linear_scenario;
+
+macro_rules! declare_scenarios {
+    ($( $function:ident, $build:ident; )*) => {
+        pub(super) const SCENARIOS: &[Scenario] = &[
+            $(scenario!($function, $build),)*
+        ];
+    };
+}
+
+for_each_linear_scenario!(declare_scenarios);
 
 pub(super) const ORIENTATIONS: [LinearOrientation; 8] = [
     LinearOrientation::Horizontal,
@@ -174,6 +194,15 @@ fn fixed_case(tree: TestTree, root: NodeId, width: f32, height: f32) -> BenchCas
             AvailableSpace::Definite(width),
             AvailableSpace::Definite(height),
         ),
+    )
+}
+
+fn intrinsic_case(tree: TestTree, root: NodeId) -> BenchCase {
+    BenchCase::new(
+        tree,
+        root,
+        Size::new(None, Some(16.0)),
+        Size::new(AvailableSpace::MaxContent, AvailableSpace::Definite(16.0)),
     )
 }
 
@@ -392,6 +421,163 @@ fn build_mixed_hidden_absolute(nodes: usize) -> BenchCase {
         children,
     );
     fixed_case(tree, root, count as f32 * 8.0, 64.0)
+}
+
+fn build_intrinsic_percentage_stack(nodes: usize, percentage_items: usize) -> BenchCase {
+    let count = nodes.max(1);
+    let percentage = 1.0 / (count as f32 * 8.0);
+    let mut tree = TestTree::default();
+    let mut children = Vec::with_capacity(count);
+    for index in 0..count {
+        let margin = if index >= count.saturating_sub(percentage_items) {
+            LengthPercentageAuto::Percent(percentage)
+        } else {
+            LengthPercentageAuto::ZERO
+        };
+        children.push(fixed_leaf(
+            &mut tree,
+            TestStyle {
+                margin: Edges {
+                    left: margin,
+                    right: LengthPercentageAuto::ZERO,
+                    top: LengthPercentageAuto::ZERO,
+                    bottom: LengthPercentageAuto::ZERO,
+                },
+                ..TestStyle::default()
+            },
+            8.0,
+            10.0,
+        ));
+    }
+    let root = tree.push_linear(
+        TestStyle {
+            linear_orientation: LinearOrientation::Horizontal,
+            ..TestStyle::default()
+        },
+        children,
+    );
+    intrinsic_case(tree, root)
+}
+
+fn build_intrinsic_pure_length(nodes: usize) -> BenchCase {
+    build_intrinsic_percentage_stack(nodes, 0)
+}
+
+fn build_intrinsic_sparse_percentage(nodes: usize) -> BenchCase {
+    build_intrinsic_percentage_stack(nodes, 1)
+}
+
+fn build_intrinsic_dense_percentage(nodes: usize) -> BenchCase {
+    build_intrinsic_percentage_stack(nodes, nodes.max(1))
+}
+
+fn build_intrinsic_dense_padding_percentage(nodes: usize) -> BenchCase {
+    let count = nodes.max(1);
+    let percentage = 1.0 / (count as f32 * 8.0);
+    let mut tree = TestTree::default();
+    let mut children = Vec::with_capacity(count);
+    for _ in 0..count {
+        children.push(fixed_leaf(
+            &mut tree,
+            TestStyle {
+                padding: Edges {
+                    left: LengthPercentage::Percent(percentage),
+                    ..Edges::uniform(LengthPercentage::ZERO)
+                },
+                ..TestStyle::default()
+            },
+            8.0,
+            10.0,
+        ));
+    }
+    let root = tree.push_linear(
+        TestStyle {
+            linear_orientation: LinearOrientation::Horizontal,
+            ..TestStyle::default()
+        },
+        children,
+    );
+    intrinsic_case(tree, root)
+}
+
+fn build_intrinsic_percentage_size_only(nodes: usize) -> BenchCase {
+    let count = nodes.max(1);
+    let mut tree = TestTree::default();
+    let mut children = Vec::with_capacity(count);
+    for _ in 0..count {
+        children.push(tree.push_leaf(
+            TestStyle {
+                size: Size::new(Dimension::Percent(0.5), px(10.0)),
+                ..TestStyle::default()
+            },
+            Size::new(8.0, 10.0),
+            None,
+        ));
+    }
+    let root = tree.push_linear(
+        TestStyle {
+            linear_orientation: LinearOrientation::Horizontal,
+            ..TestStyle::default()
+        },
+        children,
+    );
+    intrinsic_case(tree, root)
+}
+
+fn build_intrinsic_percentage_min_max_only(nodes: usize) -> BenchCase {
+    let count = nodes.max(1);
+    let mut tree = TestTree::default();
+    let mut children = Vec::with_capacity(count);
+    for _ in 0..count {
+        children.push(fixed_leaf(
+            &mut tree,
+            TestStyle {
+                min_size: Size::new(Dimension::Percent(0.5), Dimension::Auto),
+                ..TestStyle::default()
+            },
+            8.0,
+            10.0,
+        ));
+    }
+    let root = tree.push_linear(
+        TestStyle {
+            linear_orientation: LinearOrientation::Horizontal,
+            ..TestStyle::default()
+        },
+        children,
+    );
+    intrinsic_case(tree, root)
+}
+
+fn build_intrinsic_relative_inset_only(nodes: usize) -> BenchCase {
+    let count = nodes.max(1);
+    let percentage = 1.0 / (count as f32 * 8.0);
+    let mut tree = TestTree::default();
+    let mut children = Vec::with_capacity(count);
+    for _ in 0..count {
+        children.push(fixed_leaf(
+            &mut tree,
+            TestStyle {
+                inset: Edges {
+                    left: LengthPercentageAuto::Percent(percentage),
+                    right: LengthPercentageAuto::Auto,
+                    top: LengthPercentageAuto::Auto,
+                    bottom: LengthPercentageAuto::Auto,
+                },
+                ..TestStyle::default()
+            },
+            8.0,
+            10.0,
+        ));
+    }
+    let root = tree.push_linear(
+        TestStyle {
+            linear_orientation: LinearOrientation::Horizontal,
+            ..TestStyle::default()
+        },
+        children,
+    );
+    intrinsic_case(tree, root)
 }
 
 fn direction(index: usize) -> Direction {

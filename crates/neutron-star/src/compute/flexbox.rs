@@ -357,7 +357,7 @@ fn resolve_item<Source: FlexSource>(
         scrollbar,
         inset,
         ..
-    } = resolve_item_box(source, &style, container_inner_size, false);
+    } = resolve_item_box(source, &style, container_inner_size);
     let preferred_size_is_definite =
         preferred_size_definiteness(raw_size, container_inner_size, aspect_ratio);
 

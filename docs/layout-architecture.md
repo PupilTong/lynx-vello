@@ -479,6 +479,11 @@ The automatic minimum size (§4.5, `min-size: auto`) resolves inside steps
    before the container's own min/max clamp, but does not remeasure children
    or feed the new values back into the container/main total; this preserves
    Starlight's measured-once `UpdateContainerSize` behavior and call order.
+   Dependency flags are Linear-owned: the shared box resolver returns only
+   resolved values, and compact item-local bits selectively refresh margin or
+   padding/border fields that depend on the newly available inline basis.
+   Preferred and min/max sizes remain measured-once; after item sizing they
+   have no downstream consumer, so re-resolving them would be a dead update.
 5. **Alignment** — map `linear-gravity`/`justify-content` on the main axis and
    item/container linear gravity plus standard alignment on the cross axis,
    including RTL/reverse axes and cross-axis auto margins.
