@@ -13,7 +13,7 @@ use neutron_star::prelude::*;
 use neutron_star::style::{
     AlignContent, AlignItems, AlignSelf, BoxGenerationMode, BoxSizing, Dimension, Direction,
     FlexDirection, FlexWrap, JustifyContent, LengthPercentage, LengthPercentageAuto, Overflow,
-    Position,
+    Position, Visibility,
 };
 use support::*;
 
@@ -268,100 +268,142 @@ fn justify_content_and_main_axis_auto_margin_distribute_space() {
     assert_close(margin_tree.layout(trailing).location.x, 80.0);
 }
 
-#[test]
-fn cross_axis_alignment_auto_margins_and_stretch_are_applied() {
-    let mut align_tree = TestTree::default();
-    let centered = fixed_leaf(&mut align_tree, 20.0, 20.0);
-    let mut end_style = fixed_leaf_style(20.0, 20.0);
-    end_style.align_self = Some(AlignSelf::FlexEnd);
-    let ended = align_tree.push_leaf(end_style, Size::new(20.0, 20.0), None);
-    let root = flex_container(
-        &mut align_tree,
-        TestStyle {
-            align_items: Some(AlignItems::Center),
-            ..TestStyle::default()
-        },
-        &[centered, ended],
-    );
+mod alignment {
+    use super::*;
 
-    definite_layout(&mut align_tree, root, 100.0, 60.0);
-    assert_close(align_tree.layout(centered).location.y, 20.0);
-    assert_close(align_tree.layout(ended).location.y, 40.0);
+    #[test]
+    fn align_items_center_and_align_self_end_position_items_on_the_cross_axis() {
+        let mut align_tree = TestTree::default();
+        let centered = fixed_leaf(&mut align_tree, 20.0, 20.0);
+        let mut end_style = fixed_leaf_style(20.0, 20.0);
+        end_style.align_self = Some(AlignSelf::FlexEnd);
+        let ended = align_tree.push_leaf(end_style, Size::new(20.0, 20.0), None);
+        let root = flex_container(
+            &mut align_tree,
+            TestStyle {
+                align_items: Some(AlignItems::Center),
+                ..TestStyle::default()
+            },
+            &[centered, ended],
+        );
 
-    let mut stretch_tree = TestTree::default();
-    let stretched = stretch_tree.push_leaf(TestStyle::default(), Size::new(20.0, 10.0), None);
-    let root = flex_container(&mut stretch_tree, TestStyle::default(), &[stretched]);
-    definite_layout(&mut stretch_tree, root, 100.0, 60.0);
-    assert_close(stretch_tree.layout(stretched).size.height, 60.0);
+        definite_layout(&mut align_tree, root, 100.0, 60.0);
+        assert_close(align_tree.layout(centered).location.y, 20.0);
+        assert_close(align_tree.layout(ended).location.y, 40.0);
+    }
 
-    let mut margin_tree = TestTree::default();
-    let mut auto_margin_style = fixed_leaf_style(20.0, 20.0);
-    auto_margin_style.margin.top = LengthPercentageAuto::Auto;
-    let auto_margin = margin_tree.push_leaf(auto_margin_style, Size::new(20.0, 20.0), None);
-    let root = flex_container(
-        &mut margin_tree,
-        TestStyle {
-            align_items: Some(AlignItems::Center),
-            ..TestStyle::default()
-        },
-        &[auto_margin],
-    );
+    #[test]
+    fn an_auto_cross_size_stretches_to_the_flex_line() {
+        let mut stretch_tree = TestTree::default();
+        let stretched = stretch_tree.push_leaf(TestStyle::default(), Size::new(20.0, 10.0), None);
+        let root = flex_container(&mut stretch_tree, TestStyle::default(), &[stretched]);
+        definite_layout(&mut stretch_tree, root, 100.0, 60.0);
+        assert_close(stretch_tree.layout(stretched).size.height, 60.0);
+    }
 
-    definite_layout(&mut margin_tree, root, 100.0, 60.0);
-    assert_close(margin_tree.layout(auto_margin).margin.top, 40.0);
-    assert_close(margin_tree.layout(auto_margin).location.y, 40.0);
-}
+    #[test]
+    fn a_cross_start_auto_margin_absorbs_free_space_before_alignment() {
+        let mut margin_tree = TestTree::default();
+        let mut auto_margin_style = fixed_leaf_style(20.0, 20.0);
+        auto_margin_style.margin.top = LengthPercentageAuto::Auto;
+        let auto_margin = margin_tree.push_leaf(auto_margin_style, Size::new(20.0, 20.0), None);
+        let root = flex_container(
+            &mut margin_tree,
+            TestStyle {
+                align_items: Some(AlignItems::Center),
+                ..TestStyle::default()
+            },
+            &[auto_margin],
+        );
 
-#[test]
-fn align_content_positions_multiple_lines_in_the_cross_axis() {
-    let mut tree = TestTree::default();
-    let first = fixed_leaf(&mut tree, 60.0, 10.0);
-    let second = fixed_leaf(&mut tree, 60.0, 10.0);
-    let root = flex_container(
-        &mut tree,
-        TestStyle {
-            flex_wrap: FlexWrap::Wrap,
-            gap: Size::new(LengthPercentage::ZERO, LengthPercentage::length(10.0)),
-            align_content: Some(AlignContent::Center),
-            align_items: Some(AlignItems::FlexStart),
-            ..TestStyle::default()
-        },
-        &[first, second],
-    );
+        definite_layout(&mut margin_tree, root, 100.0, 60.0);
+        assert_close(margin_tree.layout(auto_margin).margin.top, 40.0);
+        assert_close(margin_tree.layout(auto_margin).location.y, 40.0);
+    }
 
-    definite_layout(&mut tree, root, 100.0, 60.0);
+    #[test]
+    fn a_collapsed_item_preserves_its_first_round_baseline_strut() {
+        let mut tree = TestTree::default();
+        let mut collapsed_style = fixed_leaf_style(10.0, 40.0);
+        collapsed_style.visibility = Visibility::Collapse;
+        let collapsed = tree.push_leaf(collapsed_style, Size::new(10.0, 40.0), Some(5.0));
+        let visible = tree.push_leaf(
+            fixed_leaf_style(10.0, 40.0),
+            Size::new(10.0, 40.0),
+            Some(35.0),
+        );
+        let root = flex_container(
+            &mut tree,
+            TestStyle {
+                align_items: Some(AlignItems::Baseline),
+                ..TestStyle::default()
+            },
+            &[collapsed, visible],
+        );
 
-    assert_close(tree.layout(first).location.y, 15.0);
-    assert_close(tree.layout(second).location.y, 35.0);
-}
+        let output = perform_layout(
+            &mut tree,
+            root,
+            Size::new(Some(100.0), None),
+            Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
+        );
 
-#[test]
-fn baseline_alignment_uses_child_first_baselines() {
-    let mut tree = TestTree::default();
-    let first = tree.push_leaf(
-        fixed_leaf_style(20.0, 20.0),
-        Size::new(20.0, 20.0),
-        Some(15.0),
-    );
-    let second = tree.push_leaf(
-        fixed_leaf_style(20.0, 30.0),
-        Size::new(20.0, 30.0),
-        Some(10.0),
-    );
-    let root = flex_container(
-        &mut tree,
-        TestStyle {
-            align_items: Some(AlignItems::Baseline),
-            ..TestStyle::default()
-        },
-        &[first, second],
-    );
+        assert_size(output.size, Size::new(100.0, 70.0));
+        assert_size(tree.layout(collapsed).size, Size::ZERO);
+        assert_size(tree.layout(visible).size, Size::new(10.0, 40.0));
+    }
 
-    let output = definite_layout(&mut tree, root, 100.0, 40.0);
+    #[test]
+    fn align_content_positions_multiple_lines_in_the_cross_axis() {
+        let mut tree = TestTree::default();
+        let first = fixed_leaf(&mut tree, 60.0, 10.0);
+        let second = fixed_leaf(&mut tree, 60.0, 10.0);
+        let root = flex_container(
+            &mut tree,
+            TestStyle {
+                flex_wrap: FlexWrap::Wrap,
+                gap: Size::new(LengthPercentage::ZERO, LengthPercentage::length(10.0)),
+                align_content: Some(AlignContent::Center),
+                align_items: Some(AlignItems::FlexStart),
+                ..TestStyle::default()
+            },
+            &[first, second],
+        );
 
-    assert_close(tree.layout(first).location.y + 15.0, 15.0);
-    assert_close(tree.layout(second).location.y + 10.0, 15.0);
-    assert_eq!(output.first_baselines.y, Some(15.0));
+        definite_layout(&mut tree, root, 100.0, 60.0);
+
+        assert_close(tree.layout(first).location.y, 15.0);
+        assert_close(tree.layout(second).location.y, 35.0);
+    }
+
+    #[test]
+    fn baseline_alignment_uses_child_first_baselines() {
+        let mut tree = TestTree::default();
+        let first = tree.push_leaf(
+            fixed_leaf_style(20.0, 20.0),
+            Size::new(20.0, 20.0),
+            Some(15.0),
+        );
+        let second = tree.push_leaf(
+            fixed_leaf_style(20.0, 30.0),
+            Size::new(20.0, 30.0),
+            Some(10.0),
+        );
+        let root = flex_container(
+            &mut tree,
+            TestStyle {
+                align_items: Some(AlignItems::Baseline),
+                ..TestStyle::default()
+            },
+            &[first, second],
+        );
+
+        let output = definite_layout(&mut tree, root, 100.0, 40.0);
+
+        assert_close(tree.layout(first).location.y + 15.0, 15.0);
+        assert_close(tree.layout(second).location.y + 10.0, 15.0);
+        assert_eq!(output.first_baselines.y, Some(15.0));
+    }
 }
 
 #[test]

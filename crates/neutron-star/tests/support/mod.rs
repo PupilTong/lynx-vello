@@ -4,6 +4,7 @@
 // intentionally uses only a subset of the helpers.
 #![allow(dead_code)]
 
+use neutron_star::cache::Cache;
 use neutron_star::compute::{
     FnLeafMeasurer, LeafMeasureInput, LeafMetrics, compute_cached_layout, compute_flexbox_layout,
     compute_grid_layout, compute_leaf_layout, compute_linear_layout, compute_relative_layout,
@@ -762,6 +763,7 @@ pub(super) struct TestSessionNode {
     pub(super) final_layout: Layout,
     pub(super) static_position: Option<Point<f32>>,
     pub(super) output: LayoutOutput,
+    pub(super) measure_inputs: Vec<LeafMeasureInput>,
     pub(super) measure_calls: Vec<TestMeasureCall>,
 }
 
@@ -777,12 +779,35 @@ pub(super) struct TestSource {
     calcs: Vec<TestCalc>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct TestSession {
     pub(super) nodes: Vec<TestSessionNode>,
     pub(super) child_layout_calls: usize,
     pub(super) layout_writes: usize,
+    pub(super) static_position_writes: usize,
     pub(super) leaf_measure_calls: usize,
+    pub(super) record_measure_inputs: bool,
+    caches: Option<Vec<Cache>>,
+}
+
+impl Default for TestSession {
+    fn default() -> Self {
+        Self {
+            nodes: Vec::new(),
+            child_layout_calls: 0,
+            layout_writes: 0,
+            static_position_writes: 0,
+            leaf_measure_calls: 0,
+            record_measure_inputs: true,
+            caches: None,
+        }
+    }
+}
+
+impl TestSession {
+    pub(super) fn enable_cache(&mut self) {
+        self.caches = Some(vec![Cache::new(); self.nodes.len()]);
+    }
 }
 
 /// Builder and assertion facade; layout receives its fields separately.
@@ -905,6 +930,9 @@ impl TestTree {
         let id = NodeId::from(self.source.nodes.len());
         self.source.nodes.push(node);
         self.session.nodes.push(TestSessionNode::default());
+        if let Some(caches) = &mut self.session.caches {
+            caches.push(Cache::new());
+        }
         id
     }
 
@@ -939,6 +967,10 @@ impl TestTree {
 
     pub(super) fn static_position(&self, id: NodeId) -> Option<Point<f32>> {
         self.session_node(id).static_position
+    }
+
+    pub(super) fn measure_inputs(&self, id: NodeId) -> &[LeafMeasureInput] {
+        &self.session_node(id).measure_inputs
     }
 }
 
@@ -1033,18 +1065,27 @@ impl LayoutState for TestSession {
     }
 
     fn set_static_position(&mut self, child: NodeId, static_position: Point<f32>) {
+        self.static_position_writes += 1;
         self.nodes[usize::from(child)].static_position = Some(static_position);
     }
 }
 
 impl CacheState for TestSession {
-    fn cache_get(&self, _node: NodeId, _input: LayoutInput) -> Option<LayoutOutput> {
-        None
+    fn cache_get(&self, node: NodeId, input: LayoutInput) -> Option<LayoutOutput> {
+        self.caches.as_ref()?[usize::from(node)].get(input)
     }
 
-    fn cache_store(&mut self, _node: NodeId, _input: LayoutInput, _output: LayoutOutput) {}
+    fn cache_store(&mut self, node: NodeId, input: LayoutInput, output: LayoutOutput) {
+        if let Some(caches) = &mut self.caches {
+            caches[usize::from(node)].store(input, output);
+        }
+    }
 
-    fn cache_clear(&mut self, _node: NodeId) {}
+    fn cache_clear(&mut self, node: NodeId) {
+        if let Some(caches) = &mut self.caches {
+            caches[usize::from(node)].clear();
+        }
+    }
 }
 
 impl RoundState for TestSession {
@@ -1082,10 +1123,16 @@ impl LayoutSession<TestSource> for TestSession {
                 TestDisplay::Leaf => {
                     let style = &node.style;
                     let measure = node.measure;
+                    let record_measure_inputs = session.record_measure_inputs;
                     let leaf_measure_calls = &mut session.leaf_measure_calls;
-                    let measure_calls = &mut session.nodes[usize::from(child)].measure_calls;
+                    let session_node = &mut session.nodes[usize::from(child)];
+                    let measure_inputs = &mut session_node.measure_inputs;
+                    let measure_calls = &mut session_node.measure_calls;
                     let mut measurer = FnLeafMeasurer::new(|measure_input| {
                         *leaf_measure_calls += 1;
+                        if record_measure_inputs {
+                            measure_inputs.push(measure_input);
+                        }
                         let (metrics, call) = measure.measure(measure_input);
                         measure_calls.extend(call);
                         metrics
@@ -1169,6 +1216,24 @@ pub(super) fn definite_layout(
         Size::new(
             AvailableSpace::Definite(width),
             AvailableSpace::Definite(height),
+        ),
+    )
+}
+
+pub(super) fn measure_layout(
+    tree: &mut TestTree,
+    root: NodeId,
+    known_dimensions: Size<Option<f32>>,
+    available_space: Size<AvailableSpace>,
+) -> LayoutOutput {
+    tree.session.compute_child_layout(
+        &tree.source,
+        root,
+        LayoutInput::compute_size(
+            known_dimensions,
+            available_space.into_options(),
+            available_space,
+            RequestedAxis::Both,
         ),
     )
 }

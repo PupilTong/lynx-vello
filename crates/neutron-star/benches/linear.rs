@@ -2,7 +2,7 @@
 
 #[path = "scenarios/linear.rs"]
 mod scenarios;
-#[path = "../tests/linear_support/mod.rs"]
+#[path = "../tests/support/mod.rs"]
 mod support;
 
 use divan::counter::ItemsCount;

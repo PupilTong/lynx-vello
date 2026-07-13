@@ -29,6 +29,25 @@ fn relative_leaf(tree: &mut TestTree, width: f32, height: f32, relative_id: i32)
     )
 }
 
+fn dependency_cycle_fixture(layout_once: bool) -> (TestTree, NodeId, NodeId, NodeId) {
+    let mut tree = TestTree::default();
+    let mut a_style = relative_leaf_style(10.0, 10.0, 1);
+    a_style.relative_adjacent.right = id(2);
+    let a = tree.push_leaf(a_style, Size::new(10.0, 10.0), None);
+    let mut b_style = relative_leaf_style(10.0, 10.0, 2);
+    b_style.relative_adjacent.bottom = id(1);
+    let b = tree.push_leaf(b_style, Size::new(10.0, 10.0), None);
+    let root = relative_container(
+        &mut tree,
+        TestStyle {
+            relative_layout_once: layout_once,
+            ..TestStyle::default()
+        },
+        &[a, b],
+    );
+    (tree, root, a, b)
+}
+
 #[test]
 fn parent_alignment_and_sibling_adjacency_use_physical_margin_edges() {
     let mut tree = TestTree::default();
@@ -229,36 +248,24 @@ fn unconstrained_centering_is_axis_selective() {
     assert_point(tree.layout(both).location, Point::new(45.0, 30.0));
 }
 
-#[test]
-fn combined_and_separate_dependency_orders_have_defined_cycle_behavior() {
-    fn fixture(layout_once: bool) -> (TestTree, NodeId, NodeId, NodeId) {
-        let mut tree = TestTree::default();
-        let mut a_style = relative_leaf_style(10.0, 10.0, 1);
-        a_style.relative_adjacent.right = id(2);
-        let a = tree.push_leaf(a_style, Size::new(10.0, 10.0), None);
-        let mut b_style = relative_leaf_style(10.0, 10.0, 2);
-        b_style.relative_adjacent.bottom = id(1);
-        let b = tree.push_leaf(b_style, Size::new(10.0, 10.0), None);
-        let root = relative_container(
-            &mut tree,
-            TestStyle {
-                relative_layout_once: layout_once,
-                ..TestStyle::default()
-            },
-            &[a, b],
-        );
-        (tree, root, a, b)
+mod dependency_order {
+    use super::*;
+
+    #[test]
+    fn one_pass_cycle_fallback_uses_combined_dependency_order() {
+        let (mut once, root, a, b) = dependency_cycle_fixture(true);
+        definite_layout(&mut once, root, 100.0, 100.0);
+        assert_point(once.layout(a).location, Point::new(0.0, 0.0));
+        assert_point(once.layout(b).location, Point::new(0.0, 10.0));
     }
 
-    let (mut once, root, a, b) = fixture(true);
-    definite_layout(&mut once, root, 100.0, 100.0);
-    assert_point(once.layout(a).location, Point::new(0.0, 0.0));
-    assert_point(once.layout(b).location, Point::new(0.0, 10.0));
-
-    let (mut twice, root, a, b) = fixture(false);
-    definite_layout(&mut twice, root, 100.0, 100.0);
-    assert_point(twice.layout(a).location, Point::new(10.0, 0.0));
-    assert_point(twice.layout(b).location, Point::new(0.0, 10.0));
+    #[test]
+    fn two_pass_cycle_fallback_orders_each_axis_independently() {
+        let (mut twice, root, a, b) = dependency_cycle_fixture(false);
+        definite_layout(&mut twice, root, 100.0, 100.0);
+        assert_point(twice.layout(a).location, Point::new(10.0, 0.0));
+        assert_point(twice.layout(b).location, Point::new(0.0, 10.0));
+    }
 }
 
 #[test]
@@ -588,7 +595,7 @@ fn measure_goal_has_no_durable_geometry_side_effects_or_baseline() {
 }
 
 #[test]
-fn nested_relative_containers_dispatch_through_the_host() {
+fn nested_relative_containers_propagate_intrinsic_child_size() {
     let mut tree = TestTree::default();
     let leaf = relative_leaf(&mut tree, 12.0, 8.0, 1);
     let inner = relative_container(&mut tree, TestStyle::default(), &[leaf]);

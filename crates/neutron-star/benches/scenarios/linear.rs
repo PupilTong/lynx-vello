@@ -1,4 +1,4 @@
-//! Deterministic `display: linear` workloads shared by Divan and inventory tests.
+//! Deterministic engine-native `display: linear` workloads for Divan.
 
 #![allow(dead_code)]
 #![allow(clippy::cast_precision_loss)]
@@ -99,7 +99,7 @@ macro_rules! for_each_linear_scenario {
 }
 #[allow(
     unused_imports,
-    reason = "only the benchmark target expands this list twice"
+    reason = "the benchmark registry expands the declaration list twice"
 )]
 pub(super) use for_each_linear_scenario;
 

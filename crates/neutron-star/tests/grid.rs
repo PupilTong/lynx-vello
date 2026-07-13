@@ -5,6 +5,8 @@
 //! GATs, and display dispatch is static all the way into the generic Grid and
 //! leaf entry points.
 
+mod support;
+
 use neutron_star::compute::{
     FnLeafMeasurer, LeafMetrics, compute_absolute_layout, compute_cached_layout,
     compute_flexbox_layout, compute_grid_layout, compute_leaf_layout, hide_subtree,
@@ -1680,7 +1682,7 @@ fn hoisted_static_position_ignores_placement_and_measures_auto_content() {
 }
 
 #[test]
-fn nested_grid_dispatch_composes_without_erasure() {
+fn nested_grid_uses_its_outer_area_for_fractional_tracks() {
     let mut tree = TestTree::default();
     let first = intrinsic_leaf(&mut tree, Size::ZERO, Size::ZERO);
     let second = intrinsic_leaf(&mut tree, Size::ZERO, Size::ZERO);
@@ -1698,7 +1700,7 @@ fn nested_grid_dispatch_composes_without_erasure() {
 }
 
 #[test]
-fn grid_dispatch_composes_with_nested_flex_without_erasure() {
+fn a_flex_item_uses_its_grid_area_for_space_distribution() {
     let mut tree = TestTree::default();
     let first = fixed_leaf(&mut tree, 20.0, 10.0);
     let second = fixed_leaf(&mut tree, 20.0, 10.0);
@@ -2325,4 +2327,81 @@ fn cross_axis_rerun_uses_effective_content_alignment_gaps() {
     // Grid §12.3 requires that aligned area size in the column feedback pass.
     assert_size(output.size, Size::new(100.0, 100.0));
     assert_size(tree.layout(child).size, Size::new(100.0, 100.0));
+}
+
+mod sizing {
+    use super::*;
+
+    #[test]
+    fn an_auto_row_uses_a_child_preferred_aspect_ratio() {
+        let mut tree = support::TestTree::default();
+        let child = tree.push_leaf(
+            support::TestStyle {
+                size: Size::new(Dimension::Length(80.0), Dimension::Auto),
+                aspect_ratio: Some(2.0),
+                ..support::TestStyle::default()
+            },
+            Size::ZERO,
+            None,
+        );
+        let root = tree.push_grid(
+            support::TestStyle {
+                size: Size::new(Dimension::Length(80.0), Dimension::Auto),
+                template_columns: vec![TrackSizingFunction::fixed(LengthPercentage::length(80.0))],
+                ..support::TestStyle::default()
+            },
+            vec![child],
+        );
+
+        let output = support::perform_layout(
+            &mut tree,
+            root,
+            Size::NONE,
+            Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
+        );
+
+        support::assert_size(output.size, Size::new(80.0, 40.0));
+        support::assert_size(tree.layout(child).size, Size::new(80.0, 40.0));
+        support::assert_point(tree.layout(child).location, Point::ZERO);
+    }
+}
+
+mod visibility {
+    use super::*;
+
+    #[test]
+    fn hidden_and_collapsed_grid_items_keep_their_auto_placement_cells() {
+        let mut tree = support::TestTree::default();
+        let mut hidden_style = support::fixed_leaf_style(50.0, 20.0);
+        hidden_style.visibility = neutron_star::style::Visibility::Hidden;
+        let hidden = tree.push_leaf(hidden_style, Size::new(50.0, 20.0), None);
+        let mut collapsed_style = support::fixed_leaf_style(50.0, 20.0);
+        collapsed_style.visibility = neutron_star::style::Visibility::Collapse;
+        let collapsed = tree.push_leaf(collapsed_style, Size::new(50.0, 20.0), None);
+        let visible = support::fixed_leaf(&mut tree, 50.0, 20.0);
+        let root = tree.push_grid(
+            support::TestStyle {
+                template_columns: vec![
+                    TrackSizingFunction::fixed(LengthPercentage::length(50.0)),
+                    TrackSizingFunction::fixed(LengthPercentage::length(50.0)),
+                    TrackSizingFunction::fixed(LengthPercentage::length(50.0)),
+                ],
+                template_rows: vec![TrackSizingFunction::fixed(LengthPercentage::length(20.0))],
+                ..support::TestStyle::default()
+            },
+            vec![hidden, collapsed, visible],
+        );
+
+        support::definite_layout(&mut tree, root, 150.0, 20.0);
+
+        for (name, node, expected_x) in [
+            ("hidden", hidden, 0.0),
+            ("collapsed", collapsed, 50.0),
+            ("visible", visible, 100.0),
+        ] {
+            let layout = tree.layout(node);
+            assert_eq!(layout.size, Size::new(50.0, 20.0), "{name} item size");
+            assert_eq!(layout.location, Point::new(expected_x, 0.0), "{name} cell");
+        }
+    }
 }

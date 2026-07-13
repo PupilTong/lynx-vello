@@ -442,6 +442,7 @@ the same border-box sizes, offsets, hidden-subtree behavior, dependency-order
 fallbacks, duplicate-id resolution, and out-of-flow static positions as this
 algorithm.
 
-The repository's exhaustive Rust-only migration of the Relative tests and
-benchmarks added by `PupilTong/lynx#25` is inventoried in
-[`pr25-relative-migration.md`](pr25-relative-migration.md).
+The executable conformance suite is `crates/neutron-star/tests/relative.rs`.
+Its test names describe observable Relative behavior and its assertions cover
+exact geometry, dependency ordering, measurement, visibility, static
+positions, and cache results through the public host protocol.

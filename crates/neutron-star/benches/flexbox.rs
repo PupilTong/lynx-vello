@@ -1,4 +1,4 @@
-//! Rust-only Flex benchmark scenarios migrated from `PupilTong/lynx#25`.
+//! Engine-native Flex benchmark scenarios.
 
 #[path = "scenarios/flexbox.rs"]
 mod scenarios;
@@ -35,10 +35,7 @@ flex_bench!(flex_grow_row, "flex_grow_row");
 flex_bench!(flex_wrap_gaps, "flex_wrap_gaps");
 flex_bench!(flex_at_most_root, "flex_at_most_root");
 flex_bench!(at_most_owner_matrix, "at_most_owner_matrix");
-flex_bench!(
-    standalone_owner_direction_inheritance,
-    "standalone_owner_direction_inheritance"
-);
+flex_bench!(owner_direction_inheritance, "owner_direction_inheritance");
 flex_bench!(flex_axis_alignment_matrix, "flex_axis_alignment_matrix");
 flex_bench!(flex_distribution_matrix, "flex_distribution_matrix");
 flex_bench!(flex_wrap_alignment_matrix, "flex_wrap_alignment_matrix");
