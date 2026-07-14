@@ -11,6 +11,7 @@ Rust monorepo exploring a native [Lynx](https://lynxjs.org) rendering stack.
 | [`crates/stylo-dom`](crates/stylo-dom) | Generic arena-backed DOM subset and standards-oriented stylo cascade/invalidation core. |
 | [`crates/lynx-widget`](crates/lynx-widget) | Lynx Widget/PAPI tree and Lynx-specific style/device adapter over `stylo-dom`. |
 | [`crates/neutron-star`](crates/neutron-star) | Standalone, statically-dispatched box-layout engine: CSS Flexbox, numeric CSS Grid Level 2, Starlight `display: linear` and `display: relative`, and shared leaf/cache/positioned/rounding machinery are implemented. |
+| [`crates/quickjs-rust-bridge`](crates/quickjs-rust-bridge) | Owner-thread-bound Rust wrapper around the pinned QuickJS C submodule, including exact values, sanitized exceptions, pending jobs, the Bobcat `ScriptEngine` adapter, and QuickJS-backed `LynxView` factories. |
 
 `neutron-star` exposes Flex, Grid, Linear, and Relative as peer generic
 algorithms over host-owned topology, styles, layout state, and caches. The live
@@ -23,8 +24,10 @@ placement has not been established.
 
 The workspace pins the latest **nightly** toolchain via [`rust-toolchain.toml`](rust-toolchain.toml)
 (edition 2024, resolver 3, workspace lints, nightly `rustfmt` options).
+Initialize the pinned Stylo and QuickJS sources before the first build:
 
 ```sh
+git submodule update --init --recursive
 cargo check          # uses the pinned nightly automatically
 cargo test
 cargo fmt

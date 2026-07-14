@@ -123,6 +123,13 @@ useful signal for currently-compatible versions of those libraries.
   resources, or own cache/retry policy; its protocol remains independent of
   decoder/widget/style/layout/render layers even though the enclosing engine
   crate composes `lynx-widget` at the view layer.
+- `crates/quickjs-rust-bridge` — owner-thread-bound safe Rust wrapper around
+  the pinned `vendor/quickjs` submodule. It owns the QuickJS C build and the
+  narrow unsafe FFI shim, realm/value lifetime and affinity checks, exact
+  ECMAScript string conversion, exception sanitization, and pending-job pump,
+  plus the `bobcat-engine::ScriptEngine` adapter and default QuickJS-backed
+  `LynxView` construction path. Lynx host globals and the future preloaded
+  module graph belong here rather than in the engine-neutral protocol.
 - `crates/stylo-dom` — generic HTML-DOM subset and standards-oriented CSS
   computation core. Owns `Element<T>` / `Arena<T>`, stylo DOM trait impls,
   tree invalidation, inline-style parsing, the `Stylist` / cascade pipeline,
