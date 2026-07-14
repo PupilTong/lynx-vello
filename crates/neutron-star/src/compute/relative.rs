@@ -9,7 +9,7 @@ use super::compute_absolute_layout;
 use super::util::{
     ItemKey, OrderedItem, ResolvedContainerBox, ResolvedItemBox, box_inset_size, clamp_axis,
     preferred_size_definiteness, resolve_container_box, resolve_item_box_with_bases,
-    resolve_length_percentage, sort_and_assign_layout_order,
+    resolve_length_percentage, sort_and_assign_layout_order, subtract_available_space,
 };
 use crate::geometry::{Edges, Line, Point, Size};
 use crate::style::value::Dimension;
@@ -860,49 +860,91 @@ fn measurement_input<Source: RelativeSource>(
     let floor = item.box_floor();
 
     for axis in Axis::ALL {
-        let constrained =
-            constrained_border_size(axis.size(constraints), axis.margin_sum(item.margin)).map(
-                |size| {
-                    clamp_axis(
-                        size,
-                        axis.size(item.min_size),
-                        axis.size(item.max_size),
-                        axis.size(floor),
-                    )
-                },
-            );
+        let line = axis.size(constraints);
+        let has_one_sided_constraint =
+            matches!((line.start, line.end), (Some(_), None) | (None, Some(_)));
+        let raw_size = axis.size(item.raw_size);
+        let fit_content_needs_one_sided_measurement =
+            matches!(raw_size, Dimension::FitContent(_)) && has_one_sided_constraint;
+        let constrained = constrained_border_size(line, axis.margin_sum(item.margin)).map(|size| {
+            clamp_axis(
+                size,
+                axis.size(item.min_size),
+                axis.size(item.max_size),
+                axis.size(floor),
+            )
+        });
         let known_is_definite = constrained.is_some() || axis.size(item.preferred_size_is_definite);
         axis.set_size(&mut constraint_definite, known_is_definite);
-        let known = constrained
-            .or(axis.size(item.preferred_size))
-            .or(axis.size(item.intrinsic_preferred_size));
+        let known = constrained.or(axis.size(item.preferred_size)).or_else(|| {
+            (!fit_content_needs_one_sided_measurement)
+                .then(|| axis.size(item.intrinsic_preferred_size))
+                .flatten()
+        });
         axis.set_size(&mut known_dimensions, known);
         if let Some(known) = known {
             axis.set_size(&mut available_space, AvailableSpace::Definite(known));
         } else {
-            let line = axis.size(constraints);
-            let one_sided_available = match (line.start, line.end, axis.size(available_space)) {
-                (Some(start), None, AvailableSpace::Definite(available)) => {
-                    AvailableSpace::Definite((available - start).max(0.0))
+            let margin_sum = axis.margin_sum(item.margin);
+            let available = if fit_content_needs_one_sided_measurement {
+                // Starlight resolves fit-content on the default
+                // margin-stripped AtMost constraint before a one-sided
+                // relative constraint changes it. Start subtracts from that
+                // fitted limit, while end replaces it with the end
+                // coordinate. Lift the result back to containing space so
+                // the child can remove its own margins exactly once.
+                let child_available =
+                    subtract_available_space(axis.size(available_space), margin_sum);
+                let fitted_child_available = fit_content_available(
+                    source,
+                    raw_size,
+                    axis,
+                    parent_size,
+                    child_available,
+                    item.box_sizing,
+                    axis.size(floor),
+                );
+                let constrained_child_available =
+                    match (line.start, line.end, fitted_child_available) {
+                        (Some(start), None, AvailableSpace::Definite(available)) => {
+                            AvailableSpace::Definite((available - start).max(0.0))
+                        }
+                        (None, Some(end), AvailableSpace::Definite(_)) => {
+                            AvailableSpace::Definite(end.max(0.0))
+                        }
+                        (_, _, available) => available,
+                    };
+                match constrained_child_available {
+                    AvailableSpace::Definite(available) => {
+                        AvailableSpace::Definite(available + margin_sum)
+                    }
+                    intrinsic => intrinsic,
                 }
-                (None, Some(end), AvailableSpace::Definite(_)) => {
-                    // Starlight replaces the default margin-stripped AtMost
-                    // constraint with the physical end coordinate. Add the
-                    // margins here because the child entry point will remove
-                    // them while lowering LayoutInput.
-                    AvailableSpace::Definite((end + axis.margin_sum(item.margin)).max(0.0))
-                }
-                (_, _, available) => available,
+            } else {
+                let one_sided_available = match (line.start, line.end, axis.size(available_space)) {
+                    (Some(start), None, AvailableSpace::Definite(available)) => {
+                        AvailableSpace::Definite((available - start).max(0.0))
+                    }
+                    (None, Some(end), AvailableSpace::Definite(_)) => {
+                        // Starlight replaces the default margin-stripped
+                        // AtMost constraint with the physical end
+                        // coordinate. Add the margins here because the
+                        // child entry point will remove them while
+                        // lowering LayoutInput.
+                        AvailableSpace::Definite((end + margin_sum).max(0.0))
+                    }
+                    (_, _, available) => available,
+                };
+                fit_content_available(
+                    source,
+                    raw_size,
+                    axis,
+                    parent_size,
+                    one_sided_available,
+                    item.box_sizing,
+                    axis.size(floor),
+                )
             };
-            let available = fit_content_available(
-                source,
-                axis.size(item.raw_size),
-                axis,
-                parent_size,
-                one_sided_available,
-                item.box_sizing,
-                axis.size(floor),
-            );
             axis.set_size(&mut available_space, available);
         }
     }

@@ -9,6 +9,27 @@ use neutron_star::style::{
 };
 use support::*;
 
+fn width_bounded_by_available(
+    input: neutron_star::compute::LeafMeasureInput,
+) -> neutron_star::compute::LeafMetrics {
+    let width = match input.available_space.width {
+        AvailableSpace::Definite(width) => width.min(200.0),
+        AvailableSpace::MinContent | AvailableSpace::MaxContent => 200.0,
+    };
+    neutron_star::compute::LeafMetrics::new(Size::new(width, 10.0))
+}
+
+fn intrinsic_width_bounded_by_available(
+    input: neutron_star::compute::LeafMeasureInput,
+) -> neutron_star::compute::LeafMetrics {
+    let width = match input.available_space.width {
+        AvailableSpace::Definite(width) => width.min(200.0),
+        AvailableSpace::MinContent => 20.0,
+        AvailableSpace::MaxContent => 200.0,
+    };
+    neutron_star::compute::LeafMetrics::new(Size::new(width, 10.0))
+}
+
 fn id(value: i32) -> RelativeReference {
     RelativeReference::new(value)
 }
@@ -771,16 +792,6 @@ fn sibling_edges_stretch_an_auto_sized_item_after_subtracting_margins() {
 
 #[test]
 fn a_single_start_constraint_reduces_leaf_available_space() {
-    fn width_bounded_by_available(
-        input: neutron_star::compute::LeafMeasureInput,
-    ) -> neutron_star::compute::LeafMetrics {
-        let width = match input.available_space.width {
-            AvailableSpace::Definite(width) => width.min(200.0),
-            AvailableSpace::MinContent | AvailableSpace::MaxContent => 200.0,
-        };
-        neutron_star::compute::LeafMetrics::new(Size::new(width, 10.0))
-    }
-
     let mut tree = TestTree::default();
     let anchor = relative_leaf(&mut tree, 20.0, 10.0, 10);
     let mut follower_style = TestStyle::default();
@@ -801,24 +812,14 @@ fn a_single_start_constraint_reduces_leaf_available_space() {
 
 #[test]
 fn a_single_end_constraint_preserves_margins_in_leaf_available_space() {
-    fn width_bounded_by_available(
-        input: neutron_star::compute::LeafMeasureInput,
-    ) -> neutron_star::compute::LeafMetrics {
-        let width = match input.available_space.width {
-            AvailableSpace::Definite(width) => width.min(200.0),
-            AvailableSpace::MinContent | AvailableSpace::MaxContent => 200.0,
-        };
-        neutron_star::compute::LeafMetrics::new(Size::new(width, 10.0))
-    }
-
     let mut tree = TestTree::default();
     let mut anchor_style = relative_leaf_style(20.0, 10.0, 20);
     anchor_style.relative_align.right = RelativeReference::PARENT;
     let anchor = tree.push_leaf(anchor_style, Size::new(20.0, 10.0), None);
     let mut follower_style = TestStyle {
         margin: Edges {
-            left: LengthPercentageAuto::Length(5.0),
-            right: LengthPercentageAuto::Length(5.0),
+            left: LengthPercentageAuto::Length(3.0),
+            right: LengthPercentageAuto::Length(3.0),
             top: LengthPercentageAuto::ZERO,
             bottom: LengthPercentageAuto::ZERO,
         },
@@ -831,7 +832,92 @@ fn a_single_end_constraint_preserves_margins_in_leaf_available_space() {
     definite_layout(&mut tree, root, 100.0, 20.0);
 
     assert_point(tree.layout(anchor).location, Point::new(80.0, 0.0));
-    assert_point(tree.layout(follower).location, Point::new(-5.0, 0.0));
+    assert_point(tree.layout(follower).location, Point::new(-3.0, 0.0));
+    assert_size(tree.layout(follower).size, Size::new(80.0, 10.0));
+    assert_close(tree.layout(follower).margin.left, 3.0);
+    assert_close(tree.layout(follower).margin.right, 3.0);
+    assert!(tree.measure_inputs(follower).iter().any(|input| {
+        input.known_dimensions.width.is_none()
+            && input.available_space.width == AvailableSpace::Definite(80.0)
+    }));
+}
+
+#[test]
+fn an_unanchored_child_removes_its_margins_from_available_space_once() {
+    let mut tree = TestTree::default();
+    let child = tree.push_measured_leaf(
+        TestStyle {
+            margin: Edges {
+                left: LengthPercentageAuto::Length(7.0),
+                right: LengthPercentageAuto::Length(3.0),
+                top: LengthPercentageAuto::ZERO,
+                bottom: LengthPercentageAuto::ZERO,
+            },
+            ..TestStyle::default()
+        },
+        width_bounded_by_available,
+    );
+    let root = relative_container(&mut tree, TestStyle::default(), &[child]);
+
+    definite_layout(&mut tree, root, 100.0, 20.0);
+
+    assert_point(tree.layout(child).location, Point::new(7.0, 0.0));
+    assert_size(tree.layout(child).size, Size::new(90.0, 10.0));
+    assert_close(tree.layout(child).margin.left, 7.0);
+    assert_close(tree.layout(child).margin.right, 3.0);
+    assert!(tree.measure_inputs(child).iter().any(|input| {
+        input.known_dimensions.width.is_none()
+            && input.available_space.width == AvailableSpace::Definite(90.0)
+    }));
+}
+
+#[test]
+fn a_start_constraint_reduces_the_fit_content_limit_before_measurement() {
+    let mut tree = TestTree::default();
+    let anchor = relative_leaf(&mut tree, 20.0, 10.0, 30);
+    let mut follower_style = TestStyle {
+        size: Size::new(
+            Dimension::FitContent(LengthPercentage::Length(50.0)),
+            Dimension::Length(10.0),
+        ),
+        ..TestStyle::default()
+    };
+    follower_style.relative_adjacent.right = id(30);
+    let follower = tree.push_measured_leaf(follower_style, intrinsic_width_bounded_by_available);
+    let root = relative_container(&mut tree, TestStyle::default(), &[follower, anchor]);
+
+    definite_layout(&mut tree, root, 100.0, 20.0);
+
+    assert_point(tree.layout(anchor).location, Point::new(0.0, 0.0));
+    assert_point(tree.layout(follower).location, Point::new(20.0, 0.0));
+    assert_size(tree.layout(follower).size, Size::new(30.0, 10.0));
+    assert!(tree.measure_inputs(follower).iter().any(|input| {
+        input.known_dimensions.width.is_none()
+            && input.available_space.width == AvailableSpace::Definite(30.0)
+    }));
+}
+
+#[test]
+fn an_end_constraint_overrides_the_fit_content_limit_before_measurement() {
+    let mut tree = TestTree::default();
+    let mut anchor_style = relative_leaf_style(20.0, 10.0, 40);
+    anchor_style.relative_align.right = RelativeReference::PARENT;
+    let anchor = tree.push_leaf(anchor_style, Size::new(20.0, 10.0), None);
+    let mut follower_style = TestStyle {
+        size: Size::new(
+            Dimension::FitContent(LengthPercentage::Length(50.0)),
+            Dimension::Length(10.0),
+        ),
+        ..TestStyle::default()
+    };
+    follower_style.relative_adjacent.left = id(40);
+    let follower = tree.push_measured_leaf(follower_style, intrinsic_width_bounded_by_available);
+    let root = relative_container(&mut tree, TestStyle::default(), &[follower, anchor]);
+
+    definite_layout(&mut tree, root, 100.0, 20.0);
+
+    assert_point(tree.layout(anchor).location, Point::new(80.0, 0.0));
+    assert_point(tree.layout(follower).location, Point::new(0.0, 0.0));
     assert_size(tree.layout(follower).size, Size::new(80.0, 10.0));
     assert!(tree.measure_inputs(follower).iter().any(|input| {
         input.known_dimensions.width.is_none()
