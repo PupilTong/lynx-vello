@@ -103,6 +103,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bobcat-quickjs"
+version = "0.1.0"
+dependencies = [
+ "bobcat-engine",
+ "quickjs-rust-bridge",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1082,7 +1090,6 @@ dependencies = [
 name = "quickjs-rust-bridge"
 version = "0.1.0"
 dependencies = [
- "bobcat-engine",
  "cc",
 ]
 

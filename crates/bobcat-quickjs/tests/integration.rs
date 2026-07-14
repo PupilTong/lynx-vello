@@ -14,10 +14,11 @@ use bobcat_engine::resource::{
 };
 use bobcat_engine::script::{ScriptEngine, ScriptErrorKind, ScriptErrorPhase, ScriptValue};
 use bobcat_engine::view::EngineMetrics;
-use quickjs_rust_bridge::{
-    DEFAULT_EXECUTION_TIMEOUT, EvalSource, QuickJsCallable, QuickJsConfig, QuickJsScriptEngine,
-    QuickJsSymbol, new_quickjs_view,
+use bobcat_quickjs::{
+    DEFAULT_EXECUTION_TIMEOUT, QuickJsCallable, QuickJsConfig, QuickJsScriptEngine, QuickJsSymbol,
+    new_quickjs_view,
 };
+use quickjs_rust_bridge::EvalSource;
 
 type Value = ScriptValue<QuickJsCallable, QuickJsSymbol>;
 

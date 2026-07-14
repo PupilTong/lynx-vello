@@ -2,9 +2,9 @@
 //!
 //! [`QuickJsScriptEngine`] adapts the engine-independent
 //! [`bobcat_engine::script::ScriptEngine`] boundary to one private `QuickJS`
-//! realm. This module owns runtime policy such as automatic, bounded
-//! microtask checkpoints; the lower-level [`crate::Realm`] API remains usable
-//! independently.
+//! realm. This crate owns runtime policy such as automatic, bounded microtask
+//! checkpoints; the lower-level [`quickjs_rust_bridge::Realm`] API remains
+//! usable independently.
 
 use std::fmt;
 use std::num::NonZeroUsize;
@@ -17,8 +17,7 @@ use bobcat_engine::script::{
     ScriptSourceLocation, ScriptValue,
 };
 use bobcat_engine::view::{EngineMetrics, LynxView};
-
-use crate as quickjs;
+use quickjs_rust_bridge as quickjs;
 
 /// Default maximum number of promise jobs run by one checkpoint.
 pub const DEFAULT_MAX_JOBS_PER_CHECKPOINT: NonZeroUsize =
@@ -399,6 +398,11 @@ fn quickjs_to_script_value(
             ScriptErrorKind::NonTransferableValue,
             phase,
             "ordinary QuickJS objects cannot cross the script boundary",
+        )),
+        _ => Err(script_error(
+            ScriptErrorKind::NonTransferableValue,
+            phase,
+            "this QuickJS value kind cannot cross the script boundary",
         )),
     }
 }

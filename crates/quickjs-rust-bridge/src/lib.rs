@@ -8,12 +8,7 @@
 //! The vendored engine builds on Unix targets and Windows GNU/MinGW. Windows
 //! MSVC is rejected explicitly because the upstream C sources do not support
 //! that ABI/toolchain.
-//!
-//! The crate also provides [`QuickJsScriptEngine`], a direct implementation of
-//! [`bobcat_engine::script::ScriptEngine`], plus convenience constructors for
-//! QuickJS-backed [`bobcat_engine::view::LynxView`] instances.
 
-mod bobcat;
 mod ffi;
 
 #[allow(
@@ -1769,11 +1764,6 @@ mod implementation {
     }
 }
 
-pub use bobcat::{
-    DEFAULT_EXECUTION_TIMEOUT, DEFAULT_MAX_JOBS_PER_CHECKPOINT, QuickJsCallable, QuickJsConfig,
-    QuickJsInitializationError, QuickJsLynxView, QuickJsScriptEngine, QuickJsScriptEngineConfig,
-    QuickJsSymbol, new_quickjs_view, new_quickjs_view_with_config,
-};
 pub use implementation::{
     Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, InterruptHandle, JobDrain, Realm,
     RealmOptions, SourceLocation, Value, ValueKind,

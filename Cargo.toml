@@ -17,6 +17,7 @@ rust-version = "1.95"
 [workspace.dependencies]
 # Intra-workspace crates
 bobcat-engine = { path = "crates/bobcat-engine" }
+bobcat-quickjs = { path = "crates/bobcat-quickjs" }
 lynx-template-decoder = { path = "crates/lynx-template-decoder" }
 lynx-widget = { path = "crates/lynx-widget" }
 neutron-star = { path = "crates/neutron-star" }
@@ -45,8 +46,9 @@ selectors = { path = "vendor/stylo/selectors" }
 servo_arc = { path = "vendor/stylo/servo_arc" }
 
 # The embedded JavaScript engine is pinned as a git submodule rather than a
-# Cargo package. `quickjs-rust-bridge` compiles the C core directly, keeps all
-# ABI-sensitive `JSValue` handling behind a C shim, and owns the Bobcat adapter.
+# Cargo package. `quickjs-rust-bridge` compiles the C core directly and keeps
+# all ABI-sensitive `JSValue` handling behind a C shim. `bobcat-quickjs` owns
+# the higher-level Bobcat adapter and runtime composition policy.
 
 # Third-party
 #

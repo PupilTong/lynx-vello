@@ -29,8 +29,11 @@ jobs:
         # also descends into the separately-versioned vendor/stylo workspace.
         run: >-
           cargo fmt --check
+          -p bobcat-engine
+          -p bobcat-quickjs
           -p lynx-template-decoder
           -p lynx-widget
+          -p quickjs-rust-bridge
           -p stylo-dom
           -p neutron-star
 
