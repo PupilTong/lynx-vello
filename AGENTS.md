@@ -143,17 +143,20 @@ useful signal for currently-compatible versions of those libraries.
   the shared root/leaf/cache/positioned/rounding machinery, CSS Flexbox Level
   1, numeric CSS Grid Level 2 (excluding subgrid/named areas), id-constrained
   Starlight Relative Layout Level 1, and Lynx's `display: linear` algorithm
-  and `linear-*` style/source protocol are live.
+  and `linear-*` style/source protocol are live. Text shaping, line breaking,
+  intrinsic/height-for-width measurement, baselines, and retained Parley
+  layouts live behind the default-on `text` feature; the protocol and
+  box-layout core stay dependency-free with `default-features = false`.
   Read
   `docs/layout-architecture.md` before touching it. It must not depend on
   other workspace crates or own host tree/style storage, DOM/widget types,
-  resolved device-unit policy, text shaping, or paint order.
+  resolved device-unit policy, or paint order.
 - Future runtime-layout integration — the concrete Widget/stylo
   source/session adapter, display dispatch and dirty→cache invalidation
   wiring, root fixed-position pass, component-specific staggered layout, and
-  Parley/text integration remain L3 work. No separate crate for this layer
-  has been established yet.
-- *(planned, not yet scaffolded)* text / render / runtime crates — see
+  text-style translation and text-session wiring remain L3 work. No separate
+  crate for this layer has been established yet.
+- *(planned, not yet scaffolded)* render / runtime crates — see
   `docs/tracking/` for the behavior surface each will need to cover before
   scaffolding begins, and `.claude/agents/` for the subsystem-scoped agent
   personas already set up for this work.

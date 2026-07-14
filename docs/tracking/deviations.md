@@ -88,6 +88,21 @@ consequential choice about whether to follow the spec or the quirk.
   idents/`all` per spec. Implement standard open-ended property-name
   matching.
 
+## Text layout (see [css-text.md](css-text.md))
+
+- **Parley 0.11 paragraph base direction** — the public Parley builders and
+  `Layout` expose no base-direction override. Internally, text analysis always
+  invokes bidi resolution with an automatic/first-strong base level, even
+  though the lower-level `parlance` crate defines a `BaseDirection` value.
+  Consequently, the `neutron-star` text adapter can resolve physical
+  `text-align: start`/`end` from `CoreStyle::direction()`, but cannot yet force
+  UAX #9 paragraph ordering for neutral or opposite-strong text inside an
+  explicitly LTR/RTL container. Injecting bidi controls would corrupt source
+  byte ranges, so the current implementation retains Parley's automatic bidi
+  shaping and records this as an integration limitation. Revisit when Parley
+  exposes its base-level input (or if a narrowly-scoped upstream patch is
+  adopted).
+
 ## Event model & gestures (see [dom-events.md](dom-events.md))
 
 - **`bind`/`catch`/`capture-bind`/`capture-catch`/`global-bindEvent`** — phase

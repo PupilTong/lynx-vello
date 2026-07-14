@@ -4,19 +4,20 @@
 //! immutable `LayoutSource` traits hand out short-lived **style views** —
 //! cheap borrowed values implementing [`CoreStyle`] plus the per-algorithm traits
 //! ([`FlexContainerStyle`]/[`FlexItemStyle`], [`GridContainerStyle`]/
-//! [`GridItemStyle`], [`LinearContainerStyle`]/[`LinearItemStyle`], and
-//! [`RelativeContainerStyle`]/[`RelativeItemStyle`]) — and
+//! [`GridItemStyle`], [`LinearContainerStyle`]/[`LinearItemStyle`],
+//! [`RelativeContainerStyle`]/[`RelativeItemStyle`], and
+//! [`TextContainerStyle`]/[`TextRunStyle`]) — and
 //! every accessor returns a small `Copy` value from the style value modules
-//! ([`value`], [`alignment`], [`linear`], [`relative`], and the algorithm
-//! modules). A host backed by stylo implements the accessors
+//! ([`value`], [`alignment`], [`linear`], [`relative`], [`text`], and the
+//! algorithm modules). A host backed by stylo implements the accessors
 //! as direct translations of `ComputedValues` fields; a test host returns
 //! struct fields. Blanket impls are provided for `&S`, so implementing a
 //! trait on your style struct makes plain references usable as views.
 //!
 //! # Defaults match the owning layout specification
 //!
-//! [`CoreStyle`], Flex, and Grid methods default to their **CSS initial
-//! values**. Linear and Relative methods default to the initial values
+//! [`CoreStyle`], Flex, Grid, and scalar Text methods default to their **CSS
+//! initial values**. Linear and Relative methods default to the initial values
 //! documented by their Starlight specifications. Host-specific computed
 //! defaults — like Lynx defaulting `box-sizing` to `border-box`, `overflow`
 //! to `hidden`, `position` to a `relative` that means CSS `static`, or
@@ -41,6 +42,7 @@ pub mod flex;
 pub mod grid;
 pub mod linear;
 pub mod relative;
+pub mod text;
 pub mod value;
 
 pub use alignment::{
@@ -57,6 +59,11 @@ pub use linear::{
     LinearLayoutGravity, LinearOrientation,
 };
 pub use relative::{RelativeCenter, RelativeContainerStyle, RelativeItemStyle, RelativeReference};
+pub use text::{
+    FontFamily, FontFeatureSetting, FontStyle, FontVariationSetting, FontWeight, GenericFontFamily,
+    LineHeight, OpenTypeTag, TextAlign, TextBrush, TextContainerStyle, TextRun, TextRunStyle,
+    WhiteSpace, WordBreak,
+};
 pub use value::{CalcHandle, Dimension, LengthPercentage, LengthPercentageAuto};
 
 use crate::geometry::{Edges, Point, Size};
