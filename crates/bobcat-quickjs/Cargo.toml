@@ -1,0 +1,16 @@
+[package]
+name = "bobcat-quickjs"
+description = "QuickJS ScriptEngine adapter and runtime composition for Bobcat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+bobcat-engine = { workspace = true }
+quickjs-rust-bridge = { workspace = true }
+
+[lints]
+workspace = true

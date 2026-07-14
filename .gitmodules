@@ -2,3 +2,6 @@
 	path = vendor/stylo
 	url = https://github.com/PupilTong/stylo
 	branch = lynx
+[submodule "vendor/quickjs"]
+	path = vendor/quickjs
+	url = https://github.com/PupilTong/quickjs

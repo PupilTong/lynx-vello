@@ -17,9 +17,11 @@ rust-version = "1.95"
 [workspace.dependencies]
 # Intra-workspace crates
 bobcat-engine = { path = "crates/bobcat-engine" }
+bobcat-quickjs = { path = "crates/bobcat-quickjs" }
 lynx-template-decoder = { path = "crates/lynx-template-decoder" }
 lynx-widget = { path = "crates/lynx-widget" }
 neutron-star = { path = "crates/neutron-star" }
+quickjs-rust-bridge = { path = "crates/quickjs-rust-bridge" }
 stylo-dom = { path = "crates/stylo-dom" }
 
 # The Lynx-patched stylo fork (git submodule; see AGENTS.md dependency
@@ -43,6 +45,11 @@ stylo_traits = { path = "vendor/stylo/style_traits", package = "stylo_traits" }
 selectors = { path = "vendor/stylo/selectors" }
 servo_arc = { path = "vendor/stylo/servo_arc" }
 
+# The embedded JavaScript engine is pinned as a git submodule rather than a
+# Cargo package. `quickjs-rust-bridge` compiles the C core directly and keeps
+# all ABI-sensitive `JSValue` handling behind a C shim. `bobcat-quickjs` owns
+# the higher-level Bobcat adapter and runtime composition policy.
+
 # Third-party
 #
 # `app_units`, `atomic_refcell`, `euclid`, and `url` are pinned to the same
@@ -53,6 +60,7 @@ app_units = "0.7"
 atomic_refcell = "0.1"
 bytecheck = "0.6"
 bytes = "1"
+cc = "1"
 cssparser = "0.37"
 divan = { package = "codspeed-divan-compat", version = "5" }
 euclid = "0.22"
