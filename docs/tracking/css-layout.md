@@ -168,12 +168,11 @@ performs the specified selective remeasurement/final-size feedback rounds.
 These are user-confirmed module semantics, not accidental attempts to extend
 the raw value grammar.
 
-The complete Rust-only test and benchmark migration from
-[`PupilTong/lynx#25`](https://github.com/PupilTong/lynx/pull/25), including
-the exact retained and excluded head-to-head inventories, is recorded in
-[`pr25-relative-migration.md`](../pr25-relative-migration.md). The migrated
-head-to-head targets execute neutron-star only and do not import Lynx C++ or
-its FFI runner.
+Executable coverage lives in neutron-star's engine-native Relative behavior
+suite and benchmark target. Tests assert geometry, dependency-order fallback,
+measurement traces, visibility, static positions, and cache behavior through
+the public host protocol; source inventories and external-runner terminology
+are not part of the contract.
 
 #### Units and value types (layout-relevant)
 

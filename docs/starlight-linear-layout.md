@@ -371,9 +371,10 @@ distance from each item's cross-start margin edge to that item's baseline,
 after applying cross-axis alignment.
 
 If the container's main axis is vertical, its baseline is based on the first
-linear item's baseline plus the main-axis alignment start offset. If there are
-no in-flow items or the first item has no baseline, the container has no
-exported baseline.
+linear item's baseline plus the main-axis alignment start offset. If the first
+item has no baseline, synthesize one at its bottom border edge, matching
+Starlight's `LayoutObject::GetOffsetFromTopMarginEdgeToBaseline`. If there are
+no in-flow items, the container has no exported baseline.
 
 ### 8. Out-of-Flow Children
 

@@ -1,11 +1,9 @@
-// Portions copyright 2026 The Lynx Authors. All rights reserved.
-// Upstream fixtures are licensed under the Apache License, Version 2.0; see
-// https://github.com/PupilTong/lynx/blob/dfeedeabfefca7ec5d77ea511071745361/LICENSE.
+// Portions copyright 2026 The Lynx Authors. Licensed under Apache-2.0.
 //
-// Focused Rust-only adaptations of the Linear fixtures added by PupilTong/lynx#25,
-// plus protocol-level checks for neutron-star's split source/session host.
+// Engine-native Linear behavior tests plus protocol-level checks for
+// neutron-star's split source/session host.
 
-#[path = "linear_support/mod.rs"]
+#[path = "support/mod.rs"]
 mod support;
 
 use neutron_star::compute::{LeafMeasureInput, LeafMetrics};
@@ -40,64 +38,75 @@ fn fixed_style(width: f32, height: f32) -> TestStyle {
     }
 }
 
-fn axis_positions(
-    orientation: LinearOrientation,
-    direction: Direction,
-) -> (Point<f32>, Point<f32>) {
-    let mut tree = TestTree::default();
-    let first = fixed_leaf(&mut tree, 10.0, 10.0);
-    let second = fixed_leaf(&mut tree, 20.0, 10.0);
-    let root = tree.push_linear(
-        TestStyle {
-            linear_orientation: orientation,
-            direction,
-            ..TestStyle::default()
-        },
-        vec![first, second],
-    );
-    definite_layout(&mut tree, root, 100.0, 100.0);
-    (tree.layout(first).location, tree.layout(second).location)
-}
+mod direction {
+    use super::*;
 
-#[test]
-fn orientation_aliases_reverse_and_rtl_map_to_physical_axes() {
-    assert_eq!(
-        axis_positions(LinearOrientation::Row, Direction::Ltr),
-        axis_positions(LinearOrientation::Horizontal, Direction::Ltr)
-    );
-    assert_eq!(
-        axis_positions(LinearOrientation::Column, Direction::Ltr),
-        axis_positions(LinearOrientation::Vertical, Direction::Ltr)
-    );
-    assert_eq!(
-        axis_positions(LinearOrientation::RowReverse, Direction::Ltr),
-        axis_positions(LinearOrientation::HorizontalReverse, Direction::Ltr)
-    );
-    assert_eq!(
-        axis_positions(LinearOrientation::ColumnReverse, Direction::Ltr),
-        axis_positions(LinearOrientation::VerticalReverse, Direction::Ltr)
-    );
+    fn axis_positions(
+        orientation: LinearOrientation,
+        direction: Direction,
+    ) -> (Point<f32>, Point<f32>) {
+        let mut tree = TestTree::default();
+        let first = fixed_leaf(&mut tree, 10.0, 10.0);
+        let second = fixed_leaf(&mut tree, 20.0, 10.0);
+        let root = tree.push_linear(
+            TestStyle {
+                linear_orientation: orientation,
+                direction,
+                ..TestStyle::default()
+            },
+            vec![first, second],
+        );
+        definite_layout(&mut tree, root, 100.0, 100.0);
+        (tree.layout(first).location, tree.layout(second).location)
+    }
 
-    assert_eq!(
-        axis_positions(LinearOrientation::Horizontal, Direction::Ltr),
-        (Point::new(0.0, 0.0), Point::new(10.0, 0.0))
-    );
-    assert_eq!(
-        axis_positions(LinearOrientation::HorizontalReverse, Direction::Ltr),
-        (Point::new(90.0, 0.0), Point::new(70.0, 0.0))
-    );
-    assert_eq!(
-        axis_positions(LinearOrientation::Horizontal, Direction::Rtl),
-        (Point::new(90.0, 0.0), Point::new(70.0, 0.0))
-    );
-    assert_eq!(
-        axis_positions(LinearOrientation::HorizontalReverse, Direction::Rtl),
-        (Point::new(0.0, 0.0), Point::new(10.0, 0.0))
-    );
-    assert_eq!(
-        axis_positions(LinearOrientation::VerticalReverse, Direction::Rtl),
-        (Point::new(90.0, 90.0), Point::new(80.0, 80.0))
-    );
+    #[test]
+    fn orientation_aliases_match_their_row_and_column_forms() {
+        assert_eq!(
+            axis_positions(LinearOrientation::Row, Direction::Ltr),
+            axis_positions(LinearOrientation::Horizontal, Direction::Ltr)
+        );
+        assert_eq!(
+            axis_positions(LinearOrientation::Column, Direction::Ltr),
+            axis_positions(LinearOrientation::Vertical, Direction::Ltr)
+        );
+        assert_eq!(
+            axis_positions(LinearOrientation::RowReverse, Direction::Ltr),
+            axis_positions(LinearOrientation::HorizontalReverse, Direction::Ltr)
+        );
+        assert_eq!(
+            axis_positions(LinearOrientation::ColumnReverse, Direction::Ltr),
+            axis_positions(LinearOrientation::VerticalReverse, Direction::Ltr)
+        );
+    }
+
+    #[test]
+    fn horizontal_reverse_and_rtl_each_flip_the_main_axis() {
+        assert_eq!(
+            axis_positions(LinearOrientation::Horizontal, Direction::Ltr),
+            (Point::new(0.0, 0.0), Point::new(10.0, 0.0))
+        );
+        assert_eq!(
+            axis_positions(LinearOrientation::HorizontalReverse, Direction::Ltr),
+            (Point::new(90.0, 0.0), Point::new(70.0, 0.0))
+        );
+        assert_eq!(
+            axis_positions(LinearOrientation::Horizontal, Direction::Rtl),
+            (Point::new(90.0, 0.0), Point::new(70.0, 0.0))
+        );
+        assert_eq!(
+            axis_positions(LinearOrientation::HorizontalReverse, Direction::Rtl),
+            (Point::new(0.0, 0.0), Point::new(10.0, 0.0))
+        );
+    }
+
+    #[test]
+    fn vertical_reverse_uses_bottom_main_start_and_rtl_cross_start() {
+        assert_eq!(
+            axis_positions(LinearOrientation::VerticalReverse, Direction::Rtl),
+            (Point::new(90.0, 90.0), Point::new(80.0, 80.0))
+        );
+    }
 }
 
 #[test]
@@ -365,8 +374,8 @@ fn cross_case(container: TestStyle, child: TestStyle) -> Layout {
 }
 
 #[test]
-fn cross_gravity_precedence_and_stretch_follow_linear_rules() {
-    let item_override = cross_case(
+fn item_layout_gravity_overrides_align_self_and_container_cross_gravity() {
+    let layout = cross_case(
         TestStyle {
             linear_cross_gravity: LinearCrossGravity::Center,
             align_items: Some(AlignItems::Start),
@@ -378,9 +387,12 @@ fn cross_gravity_precedence_and_stretch_follow_linear_rules() {
             ..fixed_style(20.0, 10.0)
         },
     );
-    assert_close(item_override.location.x, 80.0);
+    assert_close(layout.location.x, 80.0);
+}
 
-    let align_self = cross_case(
+#[test]
+fn align_self_overrides_container_cross_gravity() {
+    let layout = cross_case(
         TestStyle {
             linear_cross_gravity: LinearCrossGravity::End,
             align_items: Some(AlignItems::End),
@@ -391,9 +403,12 @@ fn cross_gravity_precedence_and_stretch_follow_linear_rules() {
             ..fixed_style(20.0, 10.0)
         },
     );
-    assert_close(align_self.location.x, 40.0);
+    assert_close(layout.location.x, 40.0);
+}
 
-    let container_linear = cross_case(
+#[test]
+fn container_cross_gravity_overrides_align_items() {
+    let layout = cross_case(
         TestStyle {
             linear_cross_gravity: LinearCrossGravity::Center,
             align_items: Some(AlignItems::End),
@@ -401,27 +416,33 @@ fn cross_gravity_precedence_and_stretch_follow_linear_rules() {
         },
         fixed_style(20.0, 10.0),
     );
-    assert_close(container_linear.location.x, 40.0);
+    assert_close(layout.location.x, 40.0);
+}
 
-    let align_items_stretch_is_not_mapped = cross_case(
+#[test]
+fn align_items_stretch_is_not_a_linear_layout_gravity_fallback() {
+    let layout = cross_case(
         TestStyle {
             align_items: Some(AlignItems::Stretch),
             ..TestStyle::default()
         },
         fixed_style(20.0, 10.0),
     );
-    assert_close(align_items_stretch_is_not_mapped.location.x, 0.0);
-    assert_close(align_items_stretch_is_not_mapped.size.width, 20.0);
+    assert_close(layout.location.x, 0.0);
+    assert_close(layout.size.width, 20.0);
+}
 
-    let explicit_stretch = cross_case(
+#[test]
+fn layout_gravity_stretch_overrides_an_explicit_cross_size() {
+    let layout = cross_case(
         TestStyle::default(),
         TestStyle {
             linear_layout_gravity: LinearLayoutGravity::Stretch,
             ..fixed_style(20.0, 10.0)
         },
     );
-    assert_close(explicit_stretch.location.x, 0.0);
-    assert_close(explicit_stretch.size.width, 100.0);
+    assert_close(layout.location.x, 0.0);
+    assert_close(layout.size.width, 100.0);
 }
 
 #[test]
@@ -575,20 +596,27 @@ fn weighted_pair(
 }
 
 #[test]
-fn weights_split_space_and_explicit_sum_can_reserve_space() {
+fn weights_split_main_space_in_proportion_to_their_values() {
     let (first, second) = weighted_pair(90.0, 0.0, 1.0, 2.0, Dimension::Auto, Dimension::Auto);
     assert_close(first.size.width, 30.0);
     assert_close(second.size.width, 60.0);
     assert_close(second.location.x, 30.0);
+}
 
+#[test]
+fn an_explicit_weight_sum_can_reserve_unallocated_main_space() {
     let (first, second) = weighted_pair(100.0, 4.0, 1.0, 1.0, Dimension::Auto, Dimension::Auto);
     assert_close(first.size.width, 25.0);
     assert_close(second.size.width, 25.0);
     assert_close(second.location.x, 25.0);
+}
 
+#[test]
+fn a_total_weight_below_one_leaves_part_of_the_main_space_unallocated() {
     let (first, second) = weighted_pair(100.0, 0.0, 0.25, 0.25, Dimension::Auto, Dimension::Auto);
     assert_close(first.size.width, 25.0);
     assert_close(second.size.width, 25.0);
+    assert_close(second.location.x, 25.0);
 }
 
 #[test]
@@ -611,6 +639,28 @@ fn weighted_min_and_max_violations_freeze_and_redistribute() {
     );
     assert_close(first.size.width, 70.0);
     assert_close(second.size.width, 30.0);
+}
+
+#[test]
+fn an_exhausted_main_axis_assigns_zero_size_to_a_weighted_item() {
+    let mut tree = TestTree::default();
+    let fixed = fixed_leaf(&mut tree, 20.0, 30.0);
+    let weighted = tree.push_leaf(
+        TestStyle {
+            size: Size::new(px(20.0), Dimension::Auto),
+            linear_weight: 1.0,
+            ..TestStyle::default()
+        },
+        Size::new(20.0, 10.0),
+        None,
+    );
+    let root = tree.push_linear(TestStyle::default(), vec![fixed, weighted]);
+
+    definite_layout(&mut tree, root, 100.0, 20.0);
+
+    assert_size(tree.layout(fixed).size, Size::new(20.0, 30.0));
+    assert_point(tree.layout(weighted).location, Point::new(0.0, 30.0));
+    assert_size(tree.layout(weighted).size, Size::new(20.0, 0.0));
 }
 
 #[test]
@@ -873,52 +923,64 @@ fn max_content_keyword_does_not_issue_a_min_content_probe() {
     );
 }
 
-#[test]
-fn horizontal_and_vertical_baselines_follow_linear_item_rules() {
-    let mut row_tree = TestTree::default();
-    let early = row_tree.push_leaf(fixed_style(10.0, 30.0), Size::new(10.0, 30.0), Some(5.0));
-    let late = row_tree.push_leaf(fixed_style(10.0, 20.0), Size::new(10.0, 20.0), Some(15.0));
-    let row = row_tree.push_linear(
-        TestStyle {
-            linear_orientation: LinearOrientation::Horizontal,
-            ..TestStyle::default()
-        },
-        vec![early, late],
-    );
-    let output = definite_layout(&mut row_tree, row, 100.0, 40.0);
-    assert_close(output.first_baselines.y.unwrap(), 15.0);
+mod baseline {
+    use super::*;
 
-    let mut column_tree = TestTree::default();
-    let first = column_tree.push_leaf(fixed_style(10.0, 20.0), Size::new(10.0, 20.0), Some(5.0));
-    let second = fixed_leaf(&mut column_tree, 10.0, 10.0);
-    let column = column_tree.push_linear(
-        TestStyle {
-            linear_gravity: LinearGravity::Center,
-            ..TestStyle::default()
-        },
-        vec![first, second],
-    );
-    let output = definite_layout(&mut column_tree, column, 20.0, 100.0);
-    assert_close(output.first_baselines.y.unwrap(), 40.0);
+    #[test]
+    fn horizontal_linear_baseline_uses_the_largest_child_baseline() {
+        let mut row_tree = TestTree::default();
+        let early = row_tree.push_leaf(fixed_style(10.0, 30.0), Size::new(10.0, 30.0), Some(5.0));
+        let late = row_tree.push_leaf(fixed_style(10.0, 20.0), Size::new(10.0, 20.0), Some(15.0));
+        let row = row_tree.push_linear(
+            TestStyle {
+                linear_orientation: LinearOrientation::Horizontal,
+                ..TestStyle::default()
+            },
+            vec![early, late],
+        );
+        let output = definite_layout(&mut row_tree, row, 100.0, 40.0);
+        assert_close(output.first_baselines.y.unwrap(), 15.0);
+    }
 
-    let empty = column_tree.push_linear(TestStyle::default(), Vec::new());
-    let output = definite_layout(&mut column_tree, empty, 20.0, 20.0);
-    assert_eq!(output.first_baselines.y, None);
+    #[test]
+    fn vertical_linear_baseline_includes_main_axis_gravity_offset() {
+        let mut column_tree = TestTree::default();
+        let first =
+            column_tree.push_leaf(fixed_style(10.0, 20.0), Size::new(10.0, 20.0), Some(5.0));
+        let second = fixed_leaf(&mut column_tree, 10.0, 10.0);
+        let column = column_tree.push_linear(
+            TestStyle {
+                linear_gravity: LinearGravity::Center,
+                ..TestStyle::default()
+            },
+            vec![first, second],
+        );
+        let output = definite_layout(&mut column_tree, column, 20.0, 100.0);
+        assert_close(output.first_baselines.y.unwrap(), 40.0);
+    }
+
+    #[test]
+    fn empty_linear_container_has_no_first_baseline() {
+        let mut tree = TestTree::default();
+        let empty = tree.push_linear(TestStyle::default(), Vec::new());
+        let output = definite_layout(&mut tree, empty, 20.0, 20.0);
+        assert_eq!(output.first_baselines.y, None);
+    }
+
+    #[test]
+    fn a_missing_child_baseline_uses_its_bottom_edge_without_leaking_probe_data() {
+        let mut tree = TestTree::default();
+        let child = tree.push_measured_leaf(TestStyle::default(), probe_only_baseline);
+        let root = tree.push_linear(TestStyle::default(), vec![child]);
+
+        let output = definite_layout(&mut tree, root, 20.0, 20.0);
+
+        assert_eq!(output.first_baselines.y, Some(10.0));
+    }
 }
 
 #[test]
-fn committed_child_without_a_baseline_does_not_export_its_probe_baseline() {
-    let mut tree = TestTree::default();
-    let child = tree.push_measured_leaf(TestStyle::default(), probe_only_baseline);
-    let root = tree.push_linear(TestStyle::default(), vec![child]);
-
-    let output = definite_layout(&mut tree, root, 20.0, 20.0);
-
-    assert_eq!(output.first_baselines.y, None);
-}
-
-#[test]
-fn nested_linear_containers_round_trip_through_static_host_dispatch() {
+fn nested_linear_container_applies_its_inner_gravity() {
     let mut tree = TestTree::default();
     let first = fixed_leaf(&mut tree, 10.0, 10.0);
     let second = fixed_leaf(&mut tree, 20.0, 10.0);
@@ -939,7 +1001,7 @@ fn nested_linear_containers_round_trip_through_static_host_dispatch() {
 }
 
 #[test]
-fn grid_and_linear_share_static_host_dispatch_in_both_directions() {
+fn a_linear_item_can_be_a_grid_container() {
     let mut linear_root_tree = TestTree::default();
     let grid_leaf = fixed_leaf(&mut linear_root_tree, 12.0, 8.0);
     let grid = linear_root_tree.push_grid(fixed_style(30.0, 20.0), vec![grid_leaf]);
@@ -956,7 +1018,10 @@ fn grid_and_linear_share_static_host_dispatch_in_both_directions() {
         linear_root_tree.layout(grid_leaf).size,
         Size::new(12.0, 8.0),
     );
+}
 
+#[test]
+fn a_grid_item_can_be_a_linear_container() {
     let mut grid_root_tree = TestTree::default();
     let linear_leaf = fixed_leaf(&mut grid_root_tree, 10.0, 6.0);
     let linear = grid_root_tree.push_linear(
@@ -978,7 +1043,7 @@ fn grid_and_linear_share_static_host_dispatch_in_both_directions() {
 }
 
 #[test]
-fn flex_and_linear_share_static_host_dispatch_in_both_directions() {
+fn a_linear_item_can_be_a_flex_container() {
     let mut linear_root_tree = TestTree::default();
     let flex_leaf = fixed_leaf(&mut linear_root_tree, 12.0, 8.0);
     let flex = linear_root_tree.push_flex(fixed_style(30.0, 20.0), vec![flex_leaf]);
@@ -995,7 +1060,10 @@ fn flex_and_linear_share_static_host_dispatch_in_both_directions() {
         linear_root_tree.layout(flex_leaf).size,
         Size::new(12.0, 8.0),
     );
+}
 
+#[test]
+fn a_flex_item_can_be_a_linear_container() {
     let mut flex_root_tree = TestTree::default();
     let linear_leaf = fixed_leaf(&mut flex_root_tree, 10.0, 6.0);
     let linear = flex_root_tree.push_linear(

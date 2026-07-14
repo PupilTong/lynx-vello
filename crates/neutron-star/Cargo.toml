@@ -38,23 +38,11 @@ name = "grid"
 harness = false
 
 [[bench]]
-name = "grid_pr25"
-harness = false
-
-[[bench]]
 name = "relative"
 harness = false
 
 [[bench]]
-name = "relative_pr25"
-harness = false
-
-[[bench]]
 name = "linear"
-harness = false
-
-[[bench]]
-name = "linear_pr25"
 harness = false
 
 [[bench]]

@@ -345,6 +345,19 @@ Given start, end, and the item's outer size:
 When the parent extent is content-sized, the current relative bounds start at
 `0..0` and grow to include each item as it is positioned.
 
+When resolved positions are converted back into measurement constraints:
+
+1. If both sides are definite, measure the item with their distance minus
+   margins as a definite size.
+2. If only the start side is definite and the current constraint is at-most,
+   subtract that start position from the available size.
+3. If only the end side is definite and the current constraint is at-most,
+   use the end position as the available size.
+
+These one-sided reductions match
+`RelativeLayoutAlgorithm::ComputeConstraints`; they prevent measured content
+from overflowing the remaining part of a definite relative container.
+
 ### 4. One-Pass Relative Layout
 
 If `relative-layout-once` is true:
@@ -354,7 +367,7 @@ If `relative-layout-once` is true:
    extents if present, or `0..0` otherwise.
 3. For each item in combined order:
    1. refine its width and height constraints from resolved side positions
-      when both sides in an axis are definite;
+      using the definite and one-sided rules above;
    2. lay out the item with the refined constraints;
    3. compute horizontal position and update horizontal bounds if the parent
       width is content-sized;
@@ -370,7 +383,7 @@ If `relative-layout-once` is false:
 2. Position items in the horizontal axis using the horizontal order.
 3. Position items in the vertical axis using the vertical order.
 4. Remeasure any item whose constraints become definite or tighter because
-   both sides in an axis are resolved.
+   one or both sides in an axis are resolved.
 5. Reposition both axes.
 6. Determine content width:
    - fixed or definite container width uses that content width;
@@ -442,6 +455,7 @@ the same border-box sizes, offsets, hidden-subtree behavior, dependency-order
 fallbacks, duplicate-id resolution, and out-of-flow static positions as this
 algorithm.
 
-The repository's exhaustive Rust-only migration of the Relative tests and
-benchmarks added by `PupilTong/lynx#25` is inventoried in
-[`pr25-relative-migration.md`](pr25-relative-migration.md).
+The executable conformance suite is `crates/neutron-star/tests/relative.rs`.
+Its test names describe observable Relative behavior and its assertions cover
+exact geometry, dependency ordering, measurement, visibility, static
+positions, and cache results through the public host protocol.

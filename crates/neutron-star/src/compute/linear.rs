@@ -1421,7 +1421,10 @@ fn container_baseline(
             .reduce(f32::max)
     } else {
         let first = items.first()?;
-        let baseline = first.baseline?;
+        // Starlight's LayoutObject synthesizes a missing child baseline at
+        // the child's bottom border edge. For a vertical Linear container
+        // that edge lies in the main axis, so the fallback is its main size.
+        let baseline = first.baseline.unwrap_or(first.main_size);
         Some(item_location(first, axes, inner_size, content_origin).y + baseline)
     }
 }

@@ -25,7 +25,9 @@ architecture, and remaining plan.
 
 Behavior inventory: [`docs/tracking/css-layout.md`](tracking/css-layout.md)
 (what Starlight does, which parts are real W3C features vs Lynx extensions,
-and the confirmed deviations). The standalone Linear algorithm is specified in
+and the confirmed deviations). The executable standards/source baseline and
+scope are recorded in
+[`docs/layout-conformance.md`](layout-conformance.md). The standalone Linear algorithm is specified in
 [`docs/starlight-linear-layout.md`](starlight-linear-layout.md). Per the
 standards policy in
 [`AGENTS.md`](../AGENTS.md), flex and Grid are implemented from the
@@ -399,11 +401,10 @@ the painting — layout's job is to never be the frame's bottleneck.
   when profiles earn it, without a protocol break.
 - **Flex, Grid, Relative, and Linear benchmarks are landed; broader
   performance hardening remains.** The `divan` (CodSpeed-compatible) suite
-  ports the 18 Flex-tagged
-  workloads from `PupilTong/lynx#25` and measures neutron-star's Rust path
-  only. Direct Flex workloads retain their complete trees; mixed-display
-  workloads explicitly benchmark the Flex-owned slice rather than invoking
-  foreign algorithms or the Lynx C++ runner. The Grid suite covers scaled
+  measures engine-native workloads through neutron-star's public host
+  protocol. The Flex suite covers deep and wide trees, wrapping, weighted
+  distribution, measurement, nested containers, and positioned children.
+  The Grid suite covers scaled
   sparse/dense auto-placement, fixed/`fr` tracks, unique intrinsic span
   buckets, flex freeze thresholds, cold/warm nested grids, a root cache hit,
   and dirty-leaf ancestor invalidation. The Relative suite covers independent
@@ -411,11 +412,8 @@ the painting — layout's job is to never be the frame's bottleneck.
   cycles, one-pass versus two-pass solving, nested cold layout, warm
   descendants, root cache hits, and auto-width refinement. The refinement
   path preserves measurements for unchanged, definite fixed items while
-  percentage-dependent or newly double-anchored items remeasure. The separate
-  PR #25 Relative target ports all nine source workloads that contain a real
-  `display: relative` branch; mixed-display workloads keep only their Relative
-  slice, and every timed invocation uses a fresh Rust-only tree.
-  The Linear suite covers fixed stacks,
+  percentage-dependent or newly double-anchored items remeasure. The Linear
+  suite covers fixed stacks,
   weighted distribution and freeze paths, ordering, gravity matrices,
   measurement/stretch, and mixed hidden/absolute children. Equivalent-tree
   Taffy/Yoga and other cross-engine differential baselines remain future
@@ -553,7 +551,7 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
    currently resolved horizontal/vertical sides, position both margin-edge
    pairs, and grow wrap-content bounds.
 4. **Two-pass mode** — measure initial parent constraints, position separate
-   horizontal/vertical orders, selectively remeasure tightened double-sided
+   horizontal/vertical orders, selectively remeasure tightened one- or double-sided
    constraints, resolve wrap width and cyclic percentages, then resolve height
    and recompute final positions against both final content extents.
 5. **Finalize** — commit border-box locations from the content origin plus
@@ -567,39 +565,42 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
   `Vec` storage; proves the protocol is implementable
   without `dyn` (plus `compile_fail` doctests pinning both the GAT and explicit
   `Sized` barriers), exercises the GAT track-list machinery and all shared
-  machinery entry points. `tests/flexbox.rs` supplies a styling-engine-free
-  host and spec-derived fixtures for axes, flexing, wrapping, intrinsic
-  contributions, alignment, baselines, box sizing, percentages, auto
-  minimums, out-of-flow static positions, and measurement-only runs. Leaf
+  machinery entry points. `tests/support` is the shared real-protocol host for
+  Flex, Linear, Relative, and cross-algorithm Grid coverage; Grid additionally
+  keeps a local borrowed-repetition host for its track-list GAT cases.
+  `tests/flexbox.rs` covers grow/shrink/freeze, basis and percentages, wrapping
+  and gaps, axes and alignment, auto margins, collapse struts, measurement,
+  baselines, and absolute/hoisted positioning. Leaf
   unit tests additionally cover non-`Clone` borrowed GAT results, separate
   probe/commit artifacts, committed box-cache hits, and coordinated
   invalidation. `tests/grid.rs` covers numeric placement, sparse/dense and
   row/column auto-flow, implicit/automatic tracks, intrinsic spanning
-  contributions, alignment, RTL, nested dispatch, and out-of-flow behavior.
+  contributions, fixed/intrinsic/`fr`/fit-content/minmax tracks, spans,
+  alignment, RTL, baselines, measurement, nested layout, visibility, and
+  absolute/hoisted behavior.
   Private unit tests pin placement bit ranges, clamping, repeat expansion, and
   track cycling. `tests/relative.rs` covers every physical reference family,
   duplicate/reserved ids, both solver modes, cycles, intrinsic and percentage
   sizing, parent min/max feedback, selective wrap-width remeasurement,
-  hidden/out-of-flow behavior, nested dispatch, and measurement-only runs.
+  measurement, visibility, nested layout, and absolute/hoisted behavior.
+  `tests/linear.rs` covers orientation and gravity, weight/sum/freeze, order
+  and visibility, intrinsic/minmax sizing, measurement, baselines, auto
+  margins, absolute/hoisted behavior, and Flex/Grid composition.
   CI enforces at least 95% line coverage for `neutron-star`
   production source while excluding test and benchmark source from the
   metric.
-- **Parity/performance hardening:** the Rust-only Flex benchmark suite and
-  migrated `PupilTong/lynx#25` Flex fixtures are landed alongside the Grid
-  benchmark suite above, the graph/cache-focused Relative CodSpeed suite, and
-  the complete Rust-only PR #25 Relative migration. The latter retains 72
-  direct tests, 72 native head-to-head Rust cases, 15 generated matrices (429
-  cases), 401 standalone cases, two dedicated standalone-public snapshots plus
-  the mixed display matrix's Relative branch, two sticky-boundary cases, four
-  algorithm inventory guards, and nine benchmark workloads; its detailed
-  source map is recorded in
-  [`pr25-relative-migration.md`](pr25-relative-migration.md).
-  Browser geometry goldens and differential fuzzing
-  against Taffy on the shared feature subset remain planned.
-- **Starlight Linear (landed):** `crates/neutron-star/tests/linear.rs` and the
-  Linear benchmark suite carry the styling-engine-free mock-host seam for
-  conformance and performance scenarios. Their source of behavior is
-  Starlight plus `docs/tracking/css-layout.md`.
+- **Behavior/performance hardening:** each algorithm has an engine-native
+  behavior suite and a CodSpeed-compatible benchmark target. Tests use exact
+  geometry, used-edge, baseline, measurement-trace, static-position, layout
+  order, or cache-result oracles; repository-text inventories and
+  source-migration cardinality guards are intentionally excluded. Browser
+  geometry goldens and differential fuzzing against Taffy on the shared
+  feature subset remain planned.
+- **Positioning boundary:** engine tests cover `Position::AbsoluteHoisted`
+  static-position export and the common `compute_absolute_layout` completion
+  pass. CSS Fixed root lowering, Sticky/list/component metadata, and anonymous
+  text-item generation remain host/integration responsibilities and are not
+  neutron-star behavior contracts.
 - **Remaining Lynx integration:** Widget/stylo translation for Relative and
   Linear, component-specific staggered layout, and mixed-runtime parity remain
   future work; the integration layer's final module or crate placement has not
@@ -612,17 +613,16 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
 - **L1 — flexbox** *(complete)*: `compute_flexbox_layout` per the plan above,
   plus the shared machinery it exercises: leaf boxing, hidden-subtree
   cleanup, cache matching policy, root entry, the positioned pass
-  (`compute_absolute_layout`), and device-pixel rounding. The Rust-only Flex
-  fixture and benchmark migration is landed; browser goldens and differential
+  (`compute_absolute_layout`), and device-pixel rounding. Engine-native Flex
+  fixtures and benchmarks are landed; browser goldens and differential
   fuzzing remain parity/performance hardening.
 - **L2 — grid** *(complete)*: `compute_grid_layout`, `auto-fill`/`auto-fit`,
   dense packing, first-baseline alignment, and direct-child
   grid-area-relative absolute positioning.
 - **L2R — Starlight relative** *(complete)*: `RelativeSource`, the one-pass
   combined and two-pass per-axis dependency solvers, intrinsic/percentage
-  remeasurement, deterministic cycles, out-of-flow handling, conformance
-  fixtures, the full Rust-only PR #25 test/benchmark migration, and CodSpeed
-  benchmarks.
+  remeasurement, deterministic cycles, out-of-flow handling, engine-native
+  conformance fixtures, and CodSpeed benchmarks.
 - **L3 — Starlight modes + runtime integration** *(partial)*: the Lynx-linear
   value/style/source protocol, generic `compute_linear_layout` algorithm, and
   feature-gated Parley text measurement core are complete in `neutron-star`.
