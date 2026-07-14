@@ -567,9 +567,14 @@ fn quickjs_engine_composes_into_a_lynx_view() {
     let mut view = new_quickjs_view(NullResourceFetcher, EngineMetrics::new(390.0, 844.0, 3.0))
         .expect("view should initialize");
 
-    assert_eq!(view.config(), QuickJsConfig::default());
+    assert_eq!(
+        view.inner.script_engine().config(),
+        QuickJsConfig::default()
+    );
     assert!(format!("{:?}", view.widget_api()).contains("LynxWidgetApi"));
-    assert!(!format!("{view:?}").contains("ScriptEngine"));
+    let view_debug = format!("{view:?}");
+    assert!(!view_debug.contains("ScriptEngine"));
+    assert!(!view_debug.contains("QuickJsConfig"));
     assert!(matches!(
         view.inner.script_engine_mut().evaluate("6 * 7"),
         Ok(Value::Number(42.0))

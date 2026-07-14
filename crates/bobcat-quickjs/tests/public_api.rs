@@ -3,22 +3,12 @@ use std::sync::Arc;
 
 use bobcat_engine::resource::ResourceFetcher;
 use bobcat_engine::view::{EngineMetrics, LynxWidgetApi};
-use bobcat_quickjs::{
-    DEFAULT_EXECUTION_TIMEOUT, QuickJsConfig, QuickJsInitializationError, QuickJsLynxView,
-    new_quickjs_view, new_quickjs_view_with_config,
-};
+use bobcat_quickjs::{QuickJsInitializationError, QuickJsLynxView, new_quickjs_view};
 
 #[allow(dead_code)]
 fn public_view_contract<R: ResourceFetcher>(view: &mut QuickJsLynxView<R>) {
     let _: fn(R, EngineMetrics) -> Result<QuickJsLynxView<R>, QuickJsInitializationError> =
         new_quickjs_view::<R>;
-    let _: fn(
-        R,
-        EngineMetrics,
-        QuickJsConfig,
-    ) -> Result<QuickJsLynxView<R>, QuickJsInitializationError> = new_quickjs_view_with_config::<R>;
-
-    let _: QuickJsConfig = view.config();
     let _: &R = view.resource_fetcher();
     let _: &Arc<R> = view.shared_resource_fetcher();
     let _: &LynxWidgetApi = view.widget_api();
@@ -26,11 +16,8 @@ fn public_view_contract<R: ResourceFetcher>(view: &mut QuickJsLynxView<R>) {
 }
 
 #[test]
-fn expected_public_configuration_and_error_contracts_are_available() {
+fn expected_public_error_contract_is_available() {
     fn assert_error<T: Error + Send + Sync + 'static>() {}
 
     assert_error::<QuickJsInitializationError>();
-    let config = QuickJsConfig::default();
-    assert_eq!(config.execution_timeout(), Some(DEFAULT_EXECUTION_TIMEOUT));
-    assert!(!format!("{config:?}").contains("RealmOptions"));
 }

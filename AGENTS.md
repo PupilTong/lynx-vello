@@ -132,12 +132,14 @@ useful signal for currently-compatible versions of those libraries.
   policy.
 - `crates/bobcat-quickjs` — narrow integration layer depending on both
   `bobcat-engine` and the otherwise Bobcat-independent `quickjs-rust-bridge`.
-  Its public API is an opaque QuickJS-backed `LynxView`, configuration, and
-  construction factories. The `bobcat-engine::script` adapter types and all
-  realm/value handles, interrupt controls, and source-evaluation entry points
-  remain crate-private implementation details. Lynx host globals and the
-  future preloaded module graph belong here rather than in the generic QuickJS
-  bridge or engine-neutral protocol.
+  Its public API is limited to an opaque QuickJS-backed `LynxView`, its default
+  construction factory, an opaque initialization error, and resource/widget
+  host access through that view. Runtime configuration, default constants,
+  explicit-config construction, the `bobcat-engine::script` adapter types,
+  and all realm/value handles, interrupt controls, and source-evaluation entry
+  points remain crate-private implementation details. Lynx host globals and
+  the future preloaded module graph belong here rather than in the generic
+  QuickJS bridge or engine-neutral protocol.
 - `crates/stylo-dom` — generic HTML-DOM subset and standards-oriented CSS
   computation core. Owns `Element<T>` / `Arena<T>`, stylo DOM trait impls,
   tree invalidation, inline-style parsing, the `Stylist` / cascade pipeline,

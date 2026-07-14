@@ -1,9 +1,10 @@
 //! QuickJS-backed runtime composition for [`bobcat_engine`].
 //!
-//! The public API exposes an opaque [`QuickJsLynxView`], its [`QuickJsConfig`]
-//! and construction helpers. The concrete script adapter, realm values and
-//! direct source-evaluation controls remain implementation details. The
-//! lower-level [`quickjs_rust_bridge`] crate remains independently usable.
+//! The public API exposes an opaque [`QuickJsLynxView`] and its default
+//! construction helper. Runtime configuration, the concrete script adapter,
+//! realm values and direct source-evaluation controls remain implementation
+//! details. The lower-level [`quickjs_rust_bridge`] crate remains independently
+//! usable.
 
 use std::fmt;
 use std::num::NonZeroUsize;
@@ -18,82 +19,60 @@ use bobcat_engine::script::{
 use bobcat_engine::view::{EngineMetrics, LynxView, LynxWidgetApi};
 use quickjs_rust_bridge as quickjs;
 
-/// Default maximum number of promise jobs run by one checkpoint.
-pub const DEFAULT_MAX_JOBS_PER_CHECKPOINT: NonZeroUsize =
+const DEFAULT_MAX_JOBS_PER_CHECKPOINT: NonZeroUsize =
     NonZeroUsize::new(1_024).expect("the default job limit is non-zero");
 
-/// Default wall-time limit for one JavaScript entry or promise-job checkpoint.
-pub const DEFAULT_EXECUTION_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_EXECUTION_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Runtime policy for a [`QuickJsLynxView`].
-///
-/// The job limit is non-zero by construction, and the default execution
-/// timeout is finite. Together they prevent one script entry or checkpoint
-/// from monopolizing the owner thread indefinitely. The timeout can be
-/// disabled explicitly for embedders that provide another interruption
-/// policy.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct QuickJsConfig {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct QuickJsConfig {
     realm_options: quickjs::RealmOptions,
     max_jobs_per_checkpoint: NonZeroUsize,
 }
 
+#[cfg(test)]
 impl QuickJsConfig {
-    /// Set the `QuickJS` heap limit in bytes, or `None` for no explicit limit.
     #[must_use]
-    pub const fn with_memory_limit(mut self, memory_limit: Option<usize>) -> Self {
+    const fn with_memory_limit(mut self, memory_limit: Option<usize>) -> Self {
         self.realm_options.memory_limit = memory_limit;
         self
     }
 
-    /// Set the `QuickJS` native-stack limit, or `None` for its default.
     #[must_use]
-    pub const fn with_max_stack_size(mut self, max_stack_size: Option<usize>) -> Self {
+    const fn with_max_stack_size(mut self, max_stack_size: Option<usize>) -> Self {
         self.realm_options.max_stack_size = max_stack_size;
         self
     }
 
-    /// Set the wall-time limit for one JavaScript entry or job checkpoint.
-    ///
-    /// `None` disables deadline-based interruption. The limit remains
-    /// cooperative and cannot preempt a blocking native host callback.
     #[must_use]
-    pub const fn with_execution_timeout(mut self, execution_timeout: Option<Duration>) -> Self {
+    const fn with_execution_timeout(mut self, execution_timeout: Option<Duration>) -> Self {
         self.realm_options.execution_timeout = execution_timeout;
         self
     }
 
-    /// Replace the maximum number of jobs run by one checkpoint.
     #[must_use]
-    pub const fn with_max_jobs_per_checkpoint(
-        mut self,
-        max_jobs_per_checkpoint: NonZeroUsize,
-    ) -> Self {
+    const fn with_max_jobs_per_checkpoint(mut self, max_jobs_per_checkpoint: NonZeroUsize) -> Self {
         self.max_jobs_per_checkpoint = max_jobs_per_checkpoint;
         self
     }
 
-    /// Return the maximum number of jobs run by one checkpoint.
     #[must_use]
-    pub const fn max_jobs_per_checkpoint(self) -> NonZeroUsize {
+    const fn max_jobs_per_checkpoint(self) -> NonZeroUsize {
         self.max_jobs_per_checkpoint
     }
 
-    /// Return the configured `QuickJS` heap limit in bytes.
     #[must_use]
-    pub const fn memory_limit(self) -> Option<usize> {
+    const fn memory_limit(self) -> Option<usize> {
         self.realm_options.memory_limit
     }
 
-    /// Return the configured `QuickJS` native-stack limit in bytes.
     #[must_use]
-    pub const fn max_stack_size(self) -> Option<usize> {
+    const fn max_stack_size(self) -> Option<usize> {
         self.realm_options.max_stack_size
     }
 
-    /// Return the wall-time limit for one JavaScript entry or job checkpoint.
     #[must_use]
-    pub const fn execution_timeout(self) -> Option<Duration> {
+    const fn execution_timeout(self) -> Option<Duration> {
         self.realm_options.execution_timeout
     }
 }
@@ -108,18 +87,6 @@ impl Default for QuickJsConfig {
             },
             max_jobs_per_checkpoint: DEFAULT_MAX_JOBS_PER_CHECKPOINT,
         }
-    }
-}
-
-impl fmt::Debug for QuickJsConfig {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("QuickJsConfig")
-            .field("memory_limit", &self.memory_limit())
-            .field("max_stack_size", &self.max_stack_size())
-            .field("execution_timeout", &self.execution_timeout())
-            .field("max_jobs_per_checkpoint", &self.max_jobs_per_checkpoint())
-            .finish()
     }
 }
 
@@ -202,6 +169,7 @@ impl QuickJsScriptEngine {
         })
     }
 
+    #[cfg(test)]
     #[must_use]
     const fn config(&self) -> QuickJsConfig {
         self.config
@@ -476,12 +444,6 @@ pub struct QuickJsLynxView<R: ResourceFetcher + ?Sized> {
 }
 
 impl<R: ResourceFetcher + ?Sized> QuickJsLynxView<R> {
-    /// Return this view's `QuickJS` runtime policy.
-    #[must_use]
-    pub const fn config(&self) -> QuickJsConfig {
-        self.inner.script_engine().config()
-    }
-
     /// Borrow the host resource fetcher.
     #[must_use]
     pub fn resource_fetcher(&self) -> &R {
@@ -510,30 +472,17 @@ impl<R: ResourceFetcher + ?Sized> fmt::Debug for QuickJsLynxView<R> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("QuickJsLynxView")
-            .field("config", &self.config())
             .field("widget_api", &self.widget_api())
             .finish_non_exhaustive()
     }
 }
 
-/// Create a QuickJS-backed view with default runtime policy.
+/// Create a QuickJS-backed view with the crate-owned runtime policy.
 pub fn new_quickjs_view<R: ResourceFetcher>(
     resource_fetcher: R,
     metrics: EngineMetrics,
 ) -> Result<QuickJsLynxView<R>, QuickJsInitializationError> {
     let script_engine = QuickJsScriptEngine::new()?;
-    Ok(QuickJsLynxView {
-        inner: LynxView::new(resource_fetcher, script_engine, metrics),
-    })
-}
-
-/// Create a QuickJS-backed view with explicit runtime policy.
-pub fn new_quickjs_view_with_config<R: ResourceFetcher>(
-    resource_fetcher: R,
-    metrics: EngineMetrics,
-    config: QuickJsConfig,
-) -> Result<QuickJsLynxView<R>, QuickJsInitializationError> {
-    let script_engine = QuickJsScriptEngine::with_config(config)?;
     Ok(QuickJsLynxView {
         inner: LynxView::new(resource_fetcher, script_engine, metrics),
     })

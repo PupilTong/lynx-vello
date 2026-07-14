@@ -7,7 +7,7 @@ Rust monorepo exploring a native [Lynx](https://lynxjs.org) rendering stack.
 | Crate | Purpose |
 | --- | --- |
 | [`crates/bobcat-engine`](crates/bobcat-engine) | Engine-neutral runtime protocol and composition crate. Independent `resource`, ShadowRealm-inspired `script`, and per-instance `view` modules define host injection and isolated `LynxView<R, E>` ownership without depending on a concrete JavaScript engine. |
-| [`crates/bobcat-quickjs`](crates/bobcat-quickjs) | Opaque QuickJS-backed `LynxView` integration over `bobcat-engine` and the Bobcat-independent `quickjs-rust-bridge`. Its public surface is limited to view/configuration types and construction factories; script adapters, realm/value handles, interrupts, and source evaluation stay internal. |
+| [`crates/bobcat-quickjs`](crates/bobcat-quickjs) | Opaque QuickJS-backed `LynxView` integration over `bobcat-engine` and the Bobcat-independent `quickjs-rust-bridge`. Its public surface is limited to the opaque view, its default constructor and initialization error, plus resource/widget host access; runtime configuration, default constants, explicit-config construction, script adapters, realm/value handles, interrupts, and source evaluation stay internal. |
 | [`crates/lynx-template-decoder`](crates/lynx-template-decoder) | Native Rust decoder for the Lynx **web** binary template (`.web.bundle`), a port of `@lynx-js/web-core`'s `decodeTemplate` incl. the rkyv `StyleInfo` model. |
 | [`crates/stylo-dom`](crates/stylo-dom) | Generic arena-backed DOM subset and standards-oriented stylo cascade/invalidation core. |
 | [`crates/lynx-widget`](crates/lynx-widget) | Lynx Widget/PAPI tree and Lynx-specific style/device adapter over `stylo-dom`. |
