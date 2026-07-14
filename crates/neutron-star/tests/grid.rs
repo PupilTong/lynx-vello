@@ -936,6 +936,30 @@ fn column_auto_flow_fills_rows_before_advancing_columns() {
 }
 
 #[test]
+fn column_dense_flow_backfills_a_hole_before_the_current_cursor() {
+    let mut tree = TestTree::default();
+    let mut tall = fixed_leaf_style(10.0, 10.0);
+    tall.grid_row.end = GridPlacement::Span(2);
+    let first = tree.push_leaf(tall.clone(), Size::ZERO, Size::new(10.0, 10.0));
+    let second = tree.push_leaf(tall, Size::ZERO, Size::new(10.0, 10.0));
+    let third = fixed_leaf(&mut tree, 10.0, 10.0);
+    let mut style = grid_style(
+        &[px(10.0), px(10.0), px(10.0)],
+        &[px(10.0), px(10.0), px(10.0)],
+    );
+    style.auto_flow = GridAutoFlow::ColumnDense;
+    style.justify_items = Some(JustifyItems::Start);
+    style.align_items = Some(AlignItems::Start);
+    let root = tree.push_grid(style, vec![first, second, third]);
+
+    definite_layout(&mut tree, root, 30.0, 30.0);
+
+    assert_point(tree.layout(first).location, Point::new(0.0, 0.0));
+    assert_point(tree.layout(second).location, Point::new(10.0, 0.0));
+    assert_point(tree.layout(third).location, Point::new(0.0, 20.0));
+}
+
+#[test]
 fn implicit_auto_tracks_cycle_after_the_explicit_grid() {
     let mut tree = TestTree::default();
     let mut children = Vec::new();
@@ -1289,6 +1313,41 @@ fn container_baseline_comes_from_first_nonempty_row_with_synthesis() {
 }
 
 #[test]
+fn container_baseline_uses_grid_order_within_the_first_nonempty_row() {
+    let mut tree = TestTree::default();
+    let mut second_column_style = fixed_leaf_style(8.0, 10.0);
+    second_column_style.grid_column = placement(line(2), line(3));
+    second_column_style.grid_row = placement(line(1), line(2));
+    let second_column = tree.push_leaf(
+        second_column_style,
+        Size::new(8.0, 10.0),
+        Size::new(8.0, 10.0),
+    );
+    tree.source_node_mut(second_column).first_baseline = Some(12.0);
+
+    let mut first_column_style = fixed_leaf_style(8.0, 10.0);
+    first_column_style.grid_column = placement(line(1), line(2));
+    first_column_style.grid_row = placement(line(1), line(2));
+    let first_column = tree.push_leaf(
+        first_column_style,
+        Size::new(8.0, 10.0),
+        Size::new(8.0, 10.0),
+    );
+    tree.source_node_mut(first_column).first_baseline = Some(5.0);
+
+    let mut style = grid_style(&[px(20.0), px(20.0)], &[px(20.0)]);
+    style.align_items = Some(AlignItems::Start);
+    style.justify_items = Some(JustifyItems::Start);
+    let root = tree.push_grid(style, vec![second_column, first_column]);
+
+    let output = definite_layout(&mut tree, root, 40.0, 20.0);
+
+    assert_eq!(output.first_baselines.y, Some(5.0));
+    assert_point(tree.layout(first_column).location, Point::new(0.0, 0.0));
+    assert_point(tree.layout(second_column).location, Point::new(20.0, 0.0));
+}
+
+#[test]
 fn auto_sized_items_stretch_and_auto_margins_win_over_self_alignment() {
     let mut tree = TestTree::default();
     let stretch = intrinsic_leaf(&mut tree, Size::new(20.0, 10.0), Size::new(20.0, 10.0));
@@ -1311,6 +1370,22 @@ fn auto_sized_items_stretch_and_auto_margins_win_over_self_alignment() {
     assert_close(tree.layout(centered).margin.right, 40.0);
     assert_close(tree.layout(centered).margin.top, 15.0);
     assert_close(tree.layout(centered).margin.bottom, 15.0);
+}
+
+#[test]
+fn a_single_inline_start_auto_margin_pushes_the_item_to_area_end() {
+    let mut tree = TestTree::default();
+    let mut child_style = fixed_leaf_style(20.0, 10.0);
+    child_style.margin.left = LengthPercentageAuto::Auto;
+    child_style.justify_self = Some(JustifySelf::Start);
+    let child = tree.push_leaf(child_style, Size::new(20.0, 10.0), Size::new(20.0, 10.0));
+    let root = tree.push_grid(grid_style(&[px(100.0)], &[px(20.0)]), vec![child]);
+
+    definite_layout(&mut tree, root, 100.0, 20.0);
+
+    assert_point(tree.layout(child).location, Point::new(80.0, 0.0));
+    assert_close(tree.layout(child).margin.left, 80.0);
+    assert_close(tree.layout(child).margin.right, 0.0);
 }
 
 #[test]
@@ -1537,6 +1612,28 @@ fn direct_absolute_child_uses_its_definite_grid_area_as_containing_block() {
     // stretch the auto-sized absolute box within that area, not the grid root.
     assert_point(tree.layout(child).location, Point::new(65.0, 37.0));
     assert_size(tree.layout(child).size, Size::new(55.0, 35.0));
+}
+
+#[test]
+fn rtl_grid_areas_keep_absolute_left_insets_physical() {
+    let mut tree = TestTree::default();
+    let mut child_style = fixed_leaf_style(5.0, 10.0);
+    child_style.position = Position::Absolute;
+    child_style.grid_column = placement(line(1), line(2));
+    child_style.grid_row = placement(line(1), line(2));
+    child_style.inset.left = LengthPercentageAuto::Length(2.0);
+    let child = tree.push_leaf(child_style, Size::new(5.0, 10.0), Size::new(5.0, 10.0));
+    let mut style = grid_style(&[px(20.0), px(30.0)], &[px(10.0)]);
+    style.direction = Direction::Rtl;
+    style.gap.width = LengthPercentage::length(10.0);
+    let root = tree.push_grid(style, vec![child]);
+
+    definite_layout(&mut tree, root, 100.0, 10.0);
+
+    // The first logical column occupies physical x=80..100. `left` remains
+    // a physical inset into that area even though track order is RTL.
+    assert_point(tree.layout(child).location, Point::new(82.0, 0.0));
+    assert_size(tree.layout(child).size, Size::new(5.0, 10.0));
 }
 
 #[test]

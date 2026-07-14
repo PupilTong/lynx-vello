@@ -9,7 +9,7 @@ use super::compute_absolute_layout;
 use super::util::{
     ItemKey, OrderedItem, ResolvedContainerBox, ResolvedItemBox, box_inset_size, clamp_axis,
     preferred_size_definiteness, resolve_container_box, resolve_item_box_with_bases,
-    resolve_length_percentage, sort_and_assign_layout_order, subtract_available_space,
+    resolve_length_percentage, sort_and_assign_layout_order,
 };
 use crate::geometry::{Edges, Line, Point, Size};
 use crate::style::value::Dimension;
@@ -687,10 +687,9 @@ where
     Source: RelativeSource,
     Session: LayoutSession<Source>,
 {
-    let mut available = Size::new(
-        subtract_available_space(available_content.width, item.margin.horizontal_sum()),
-        subtract_available_space(available_content.height, item.margin.vertical_sum()),
-    );
+    // LayoutInput carries the containing space. The recursively dispatched
+    // child owns its box model and removes its margins exactly once.
+    let mut available = available_content;
     axis.set_size(&mut available, intrinsic_space);
     let mut input = LayoutInput::compute_size(Size::NONE, parent_size, available, axis.requested());
     input.sizing_mode = SizingMode::ContentSize;
@@ -855,10 +854,9 @@ fn measurement_input<Source: RelativeSource>(
 ) -> LayoutInput {
     let mut known_dimensions = Size::NONE;
     let mut constraint_definite = Size::new(false, false);
-    let mut available_space = Size::new(
-        subtract_available_space(available_content.width, item.margin.horizontal_sum()),
-        subtract_available_space(available_content.height, item.margin.vertical_sum()),
-    );
+    // Keep this as containing space. Leaf and container entry points remove
+    // their own margins when translating LayoutInput into content constraints.
+    let mut available_space = available_content;
     let floor = item.box_floor();
 
     for axis in Axis::ALL {
@@ -882,12 +880,26 @@ fn measurement_input<Source: RelativeSource>(
         if let Some(known) = known {
             axis.set_size(&mut available_space, AvailableSpace::Definite(known));
         } else {
+            let line = axis.size(constraints);
+            let one_sided_available = match (line.start, line.end, axis.size(available_space)) {
+                (Some(start), None, AvailableSpace::Definite(available)) => {
+                    AvailableSpace::Definite((available - start).max(0.0))
+                }
+                (None, Some(end), AvailableSpace::Definite(_)) => {
+                    // Starlight replaces the default margin-stripped AtMost
+                    // constraint with the physical end coordinate. Add the
+                    // margins here because the child entry point will remove
+                    // them while lowering LayoutInput.
+                    AvailableSpace::Definite((end + axis.margin_sum(item.margin)).max(0.0))
+                }
+                (_, _, available) => available,
+            };
             let available = fit_content_available(
                 source,
                 axis.size(item.raw_size),
                 axis,
                 parent_size,
-                axis.size(available_space),
+                one_sided_available,
                 item.box_sizing,
                 axis.size(floor),
             );

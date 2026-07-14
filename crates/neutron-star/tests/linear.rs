@@ -374,8 +374,8 @@ fn cross_case(container: TestStyle, child: TestStyle) -> Layout {
 }
 
 #[test]
-fn cross_gravity_precedence_and_stretch_follow_linear_rules() {
-    let item_override = cross_case(
+fn item_layout_gravity_overrides_align_self_and_container_cross_gravity() {
+    let layout = cross_case(
         TestStyle {
             linear_cross_gravity: LinearCrossGravity::Center,
             align_items: Some(AlignItems::Start),
@@ -387,9 +387,12 @@ fn cross_gravity_precedence_and_stretch_follow_linear_rules() {
             ..fixed_style(20.0, 10.0)
         },
     );
-    assert_close(item_override.location.x, 80.0);
+    assert_close(layout.location.x, 80.0);
+}
 
-    let align_self = cross_case(
+#[test]
+fn align_self_overrides_container_cross_gravity() {
+    let layout = cross_case(
         TestStyle {
             linear_cross_gravity: LinearCrossGravity::End,
             align_items: Some(AlignItems::End),
@@ -400,9 +403,12 @@ fn cross_gravity_precedence_and_stretch_follow_linear_rules() {
             ..fixed_style(20.0, 10.0)
         },
     );
-    assert_close(align_self.location.x, 40.0);
+    assert_close(layout.location.x, 40.0);
+}
 
-    let container_linear = cross_case(
+#[test]
+fn container_cross_gravity_overrides_align_items() {
+    let layout = cross_case(
         TestStyle {
             linear_cross_gravity: LinearCrossGravity::Center,
             align_items: Some(AlignItems::End),
@@ -410,27 +416,33 @@ fn cross_gravity_precedence_and_stretch_follow_linear_rules() {
         },
         fixed_style(20.0, 10.0),
     );
-    assert_close(container_linear.location.x, 40.0);
+    assert_close(layout.location.x, 40.0);
+}
 
-    let align_items_stretch_is_not_mapped = cross_case(
+#[test]
+fn align_items_stretch_is_not_a_linear_layout_gravity_fallback() {
+    let layout = cross_case(
         TestStyle {
             align_items: Some(AlignItems::Stretch),
             ..TestStyle::default()
         },
         fixed_style(20.0, 10.0),
     );
-    assert_close(align_items_stretch_is_not_mapped.location.x, 0.0);
-    assert_close(align_items_stretch_is_not_mapped.size.width, 20.0);
+    assert_close(layout.location.x, 0.0);
+    assert_close(layout.size.width, 20.0);
+}
 
-    let explicit_stretch = cross_case(
+#[test]
+fn layout_gravity_stretch_overrides_an_explicit_cross_size() {
+    let layout = cross_case(
         TestStyle::default(),
         TestStyle {
             linear_layout_gravity: LinearLayoutGravity::Stretch,
             ..fixed_style(20.0, 10.0)
         },
     );
-    assert_close(explicit_stretch.location.x, 0.0);
-    assert_close(explicit_stretch.size.width, 100.0);
+    assert_close(layout.location.x, 0.0);
+    assert_close(layout.size.width, 100.0);
 }
 
 #[test]
@@ -584,20 +596,27 @@ fn weighted_pair(
 }
 
 #[test]
-fn weights_split_space_and_explicit_sum_can_reserve_space() {
+fn weights_split_main_space_in_proportion_to_their_values() {
     let (first, second) = weighted_pair(90.0, 0.0, 1.0, 2.0, Dimension::Auto, Dimension::Auto);
     assert_close(first.size.width, 30.0);
     assert_close(second.size.width, 60.0);
     assert_close(second.location.x, 30.0);
+}
 
+#[test]
+fn an_explicit_weight_sum_can_reserve_unallocated_main_space() {
     let (first, second) = weighted_pair(100.0, 4.0, 1.0, 1.0, Dimension::Auto, Dimension::Auto);
     assert_close(first.size.width, 25.0);
     assert_close(second.size.width, 25.0);
     assert_close(second.location.x, 25.0);
+}
 
+#[test]
+fn a_total_weight_below_one_leaves_part_of_the_main_space_unallocated() {
     let (first, second) = weighted_pair(100.0, 0.0, 0.25, 0.25, Dimension::Auto, Dimension::Auto);
     assert_close(first.size.width, 25.0);
     assert_close(second.size.width, 25.0);
+    assert_close(second.location.x, 25.0);
 }
 
 #[test]
@@ -620,6 +639,28 @@ fn weighted_min_and_max_violations_freeze_and_redistribute() {
     );
     assert_close(first.size.width, 70.0);
     assert_close(second.size.width, 30.0);
+}
+
+#[test]
+fn an_exhausted_main_axis_assigns_zero_size_to_a_weighted_item() {
+    let mut tree = TestTree::default();
+    let fixed = fixed_leaf(&mut tree, 20.0, 30.0);
+    let weighted = tree.push_leaf(
+        TestStyle {
+            size: Size::new(px(20.0), Dimension::Auto),
+            linear_weight: 1.0,
+            ..TestStyle::default()
+        },
+        Size::new(20.0, 10.0),
+        None,
+    );
+    let root = tree.push_linear(TestStyle::default(), vec![fixed, weighted]);
+
+    definite_layout(&mut tree, root, 100.0, 20.0);
+
+    assert_size(tree.layout(fixed).size, Size::new(20.0, 30.0));
+    assert_point(tree.layout(weighted).location, Point::new(0.0, 30.0));
+    assert_size(tree.layout(weighted).size, Size::new(20.0, 0.0));
 }
 
 #[test]
@@ -927,14 +968,14 @@ mod baseline {
     }
 
     #[test]
-    fn committed_child_without_a_baseline_does_not_export_its_probe_baseline() {
+    fn a_missing_child_baseline_uses_its_bottom_edge_without_leaking_probe_data() {
         let mut tree = TestTree::default();
         let child = tree.push_measured_leaf(TestStyle::default(), probe_only_baseline);
         let root = tree.push_linear(TestStyle::default(), vec![child]);
 
         let output = definite_layout(&mut tree, root, 20.0, 20.0);
 
-        assert_eq!(output.first_baselines.y, None);
+        assert_eq!(output.first_baselines.y, Some(10.0));
     }
 }
 

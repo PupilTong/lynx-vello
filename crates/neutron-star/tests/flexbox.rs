@@ -134,6 +134,118 @@ fn wrapping_accounts_for_column_and_row_gaps() {
     assert_point(tree.layout(third).location, Point::new(0.0, 25.0));
 }
 
+mod line_collection {
+    use super::*;
+
+    #[test]
+    fn a_zero_sized_item_after_an_exact_fit_remains_on_the_current_line() {
+        let mut tree = TestTree::default();
+        let exact_fit = fixed_leaf(&mut tree, 50.0, 10.0);
+        let zero_sized = fixed_leaf(&mut tree, 0.0, 6.0);
+        let next_line = fixed_leaf(&mut tree, 10.0, 10.0);
+        let root = flex_container(
+            &mut tree,
+            TestStyle {
+                flex_wrap: FlexWrap::Wrap,
+                align_items: Some(AlignItems::FlexStart),
+                ..TestStyle::default()
+            },
+            &[exact_fit, zero_sized, next_line],
+        );
+
+        let output = perform_layout(
+            &mut tree,
+            root,
+            Size::new(Some(50.0), None),
+            Size::new(AvailableSpace::Definite(50.0), AvailableSpace::MaxContent),
+        );
+
+        assert_size(output.size, Size::new(50.0, 20.0));
+        assert_point(tree.layout(exact_fit).location, Point::new(0.0, 0.0));
+        assert_size(tree.layout(zero_sized).size, Size::new(0.0, 6.0));
+        assert_point(tree.layout(zero_sized).location, Point::new(50.0, 0.0));
+        assert_point(tree.layout(next_line).location, Point::new(0.0, 10.0));
+    }
+
+    #[test]
+    fn an_oversized_first_item_forms_its_own_line() {
+        let mut tree = TestTree::default();
+        let oversized = tree.push_leaf(
+            TestStyle {
+                flex_shrink: 0.0,
+                ..fixed_leaf_style(50.0, 10.0)
+            },
+            Size::new(50.0, 10.0),
+            None,
+        );
+        let next = fixed_leaf(&mut tree, 10.0, 10.0);
+        let root = flex_container(
+            &mut tree,
+            TestStyle {
+                flex_wrap: FlexWrap::Wrap,
+                align_items: Some(AlignItems::FlexStart),
+                ..TestStyle::default()
+            },
+            &[oversized, next],
+        );
+
+        let output = perform_layout(
+            &mut tree,
+            root,
+            Size::new(Some(30.0), None),
+            Size::new(AvailableSpace::Definite(30.0), AvailableSpace::MaxContent),
+        );
+
+        assert_size(output.size, Size::new(30.0, 20.0));
+        assert_size(tree.layout(oversized).size, Size::new(50.0, 10.0));
+        assert_point(tree.layout(oversized).location, Point::new(0.0, 0.0));
+        assert_point(tree.layout(next).location, Point::new(0.0, 10.0));
+    }
+
+    #[test]
+    fn flexible_lengths_are_resolved_independently_for_each_line() {
+        let mut tree = TestTree::default();
+        let mut growing = |basis| {
+            tree.push_leaf(
+                TestStyle {
+                    flex_grow: 1.0,
+                    ..fixed_leaf_style(basis, 10.0)
+                },
+                Size::new(basis, 10.0),
+                None,
+            )
+        };
+        let first = growing(40.0);
+        let second = growing(40.0);
+        let third = growing(40.0);
+        let fourth = growing(20.0);
+        let root = flex_container(
+            &mut tree,
+            TestStyle {
+                flex_wrap: FlexWrap::Wrap,
+                align_items: Some(AlignItems::FlexStart),
+                ..TestStyle::default()
+            },
+            &[first, second, third, fourth],
+        );
+
+        let output = perform_layout(
+            &mut tree,
+            root,
+            Size::new(Some(100.0), None),
+            Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
+        );
+
+        assert_size(output.size, Size::new(100.0, 20.0));
+        assert_size(tree.layout(first).size, Size::new(50.0, 10.0));
+        assert_size(tree.layout(second).size, Size::new(50.0, 10.0));
+        assert_size(tree.layout(third).size, Size::new(60.0, 10.0));
+        assert_size(tree.layout(fourth).size, Size::new(40.0, 10.0));
+        assert_point(tree.layout(third).location, Point::new(0.0, 10.0));
+        assert_point(tree.layout(fourth).location, Point::new(60.0, 10.0));
+    }
+}
+
 fn direction_fixture(
     flex_direction: FlexDirection,
     direction: Direction,
@@ -231,12 +343,12 @@ fn order_is_stable_and_layout_order_is_the_sorted_index() {
 }
 
 #[test]
-fn justify_content_and_main_axis_auto_margin_distribute_space() {
-    let mut justify_tree = TestTree::default();
-    let first = fixed_leaf(&mut justify_tree, 20.0, 10.0);
-    let second = fixed_leaf(&mut justify_tree, 20.0, 10.0);
+fn space_between_places_two_items_at_opposite_main_edges() {
+    let mut tree = TestTree::default();
+    let first = fixed_leaf(&mut tree, 20.0, 10.0);
+    let second = fixed_leaf(&mut tree, 20.0, 10.0);
     let root = flex_container(
-        &mut justify_tree,
+        &mut tree,
         TestStyle {
             justify_content: Some(JustifyContent::SpaceBetween),
             ..TestStyle::default()
@@ -244,17 +356,37 @@ fn justify_content_and_main_axis_auto_margin_distribute_space() {
         &[first, second],
     );
 
-    definite_layout(&mut justify_tree, root, 100.0, 20.0);
-    assert_close(justify_tree.layout(first).location.x, 0.0);
-    assert_close(justify_tree.layout(second).location.x, 80.0);
+    definite_layout(&mut tree, root, 100.0, 20.0);
+    assert_close(tree.layout(first).location.x, 0.0);
+    assert_close(tree.layout(second).location.x, 80.0);
+}
 
-    let mut margin_tree = TestTree::default();
+#[test]
+fn a_single_space_between_item_falls_back_to_main_start() {
+    let mut tree = TestTree::default();
+    let child = fixed_leaf(&mut tree, 20.0, 10.0);
+    let root = flex_container(
+        &mut tree,
+        TestStyle {
+            justify_content: Some(JustifyContent::SpaceBetween),
+            ..TestStyle::default()
+        },
+        &[child],
+    );
+
+    definite_layout(&mut tree, root, 100.0, 20.0);
+    assert_point(tree.layout(child).location, Point::new(0.0, 0.0));
+}
+
+#[test]
+fn a_main_start_auto_margin_consumes_space_before_justify_content() {
+    let mut tree = TestTree::default();
     let mut auto_margin_style = fixed_leaf_style(20.0, 10.0);
     auto_margin_style.margin.left = LengthPercentageAuto::Auto;
-    let auto_margin = margin_tree.push_leaf(auto_margin_style, Size::new(20.0, 10.0), None);
-    let trailing = fixed_leaf(&mut margin_tree, 20.0, 10.0);
+    let auto_margin = tree.push_leaf(auto_margin_style, Size::new(20.0, 10.0), None);
+    let trailing = fixed_leaf(&mut tree, 20.0, 10.0);
     let root = flex_container(
-        &mut margin_tree,
+        &mut tree,
         TestStyle {
             justify_content: Some(JustifyContent::Center),
             ..TestStyle::default()
@@ -262,10 +394,10 @@ fn justify_content_and_main_axis_auto_margin_distribute_space() {
         &[auto_margin, trailing],
     );
 
-    definite_layout(&mut margin_tree, root, 100.0, 20.0);
-    assert_close(margin_tree.layout(auto_margin).margin.left, 60.0);
-    assert_close(margin_tree.layout(auto_margin).location.x, 60.0);
-    assert_close(margin_tree.layout(trailing).location.x, 80.0);
+    definite_layout(&mut tree, root, 100.0, 20.0);
+    assert_close(tree.layout(auto_margin).margin.left, 60.0);
+    assert_close(tree.layout(auto_margin).location.x, 60.0);
+    assert_close(tree.layout(trailing).location.x, 80.0);
 }
 
 mod alignment {
@@ -351,6 +483,35 @@ mod alignment {
         assert_size(output.size, Size::new(100.0, 70.0));
         assert_size(tree.layout(collapsed).size, Size::ZERO);
         assert_size(tree.layout(visible).size, Size::new(10.0, 40.0));
+    }
+
+    #[test]
+    fn a_collapsed_item_removes_main_space_but_preserves_its_cross_strut() {
+        let mut tree = TestTree::default();
+        let mut collapsed_style = fixed_leaf_style(100.0, 80.0);
+        collapsed_style.visibility = Visibility::Collapse;
+        let collapsed = tree.push_leaf(collapsed_style, Size::new(100.0, 80.0), None);
+        let visible = fixed_leaf(&mut tree, 40.0, 20.0);
+        let root = flex_container(
+            &mut tree,
+            TestStyle {
+                align_items: Some(AlignItems::FlexStart),
+                ..TestStyle::default()
+            },
+            &[collapsed, visible],
+        );
+
+        let output = perform_layout(
+            &mut tree,
+            root,
+            Size::new(Some(200.0), None),
+            Size::new(AvailableSpace::Definite(200.0), AvailableSpace::MaxContent),
+        );
+
+        assert_size(output.size, Size::new(200.0, 80.0));
+        assert_size(tree.layout(collapsed).size, Size::ZERO);
+        assert_point(tree.layout(visible).location, Point::ZERO);
+        assert_size(tree.layout(visible).size, Size::new(40.0, 20.0));
     }
 
     #[test]

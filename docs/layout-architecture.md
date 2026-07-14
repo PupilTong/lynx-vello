@@ -25,7 +25,9 @@ architecture, and remaining plan.
 
 Behavior inventory: [`docs/tracking/css-layout.md`](tracking/css-layout.md)
 (what Starlight does, which parts are real W3C features vs Lynx extensions,
-and the confirmed deviations). The standalone Linear algorithm is specified in
+and the confirmed deviations). The executable standards/source baseline and
+scope are recorded in
+[`docs/layout-conformance.md`](layout-conformance.md). The standalone Linear algorithm is specified in
 [`docs/starlight-linear-layout.md`](starlight-linear-layout.md). Per the
 standards policy in
 [`AGENTS.md`](../AGENTS.md), flex and Grid are implemented from the
@@ -549,7 +551,7 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
    currently resolved horizontal/vertical sides, position both margin-edge
    pairs, and grow wrap-content bounds.
 4. **Two-pass mode** — measure initial parent constraints, position separate
-   horizontal/vertical orders, selectively remeasure tightened double-sided
+   horizontal/vertical orders, selectively remeasure tightened one- or double-sided
    constraints, resolve wrap width and cyclic percentages, then resolve height
    and recompute final positions against both final content extents.
 5. **Finalize** — commit border-box locations from the content origin plus
@@ -587,7 +589,7 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
   CI enforces at least 95% line coverage for `neutron-star`
   production source while excluding test and benchmark source from the
   metric.
-- **Parity/performance hardening:** each algorithm has an engine-native
+- **Behavior/performance hardening:** each algorithm has an engine-native
   behavior suite and a CodSpeed-compatible benchmark target. Tests use exact
   geometry, used-edge, baseline, measurement-trace, static-position, layout
   order, or cache-result oracles; repository-text inventories and

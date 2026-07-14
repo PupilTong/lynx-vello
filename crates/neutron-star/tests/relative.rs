@@ -266,6 +266,44 @@ mod dependency_order {
         assert_point(twice.layout(a).location, Point::new(10.0, 0.0));
         assert_point(twice.layout(b).location, Point::new(0.0, 10.0));
     }
+
+    #[test]
+    fn one_pass_processes_all_initial_roots_before_newly_ready_dependents() {
+        let mut tree = TestTree::default();
+        let mut dependent_style = relative_leaf_style(10.0, 10.0, 1);
+        dependent_style.relative_adjacent.right = id(2);
+        let dependent = tree.push_leaf(dependent_style, Size::new(10.0, 10.0), None);
+        let centered_root = tree.push_leaf(
+            TestStyle {
+                size: Size::new(Dimension::Length(10.0), Dimension::Length(10.0)),
+                relative_center: RelativeCenter::Horizontal,
+                ..TestStyle::default()
+            },
+            Size::new(10.0, 10.0),
+            None,
+        );
+        let anchor = relative_leaf(&mut tree, 20.0, 10.0, 2);
+        let root = relative_container(
+            &mut tree,
+            TestStyle {
+                relative_layout_once: true,
+                ..TestStyle::default()
+            },
+            &[dependent, centered_root, anchor],
+        );
+
+        let output = perform_layout(
+            &mut tree,
+            root,
+            Size::NONE,
+            Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
+        );
+
+        assert_size(output.size, Size::new(30.0, 10.0));
+        assert_point(tree.layout(centered_root).location, Point::new(-5.0, 0.0));
+        assert_point(tree.layout(anchor).location, Point::new(-5.0, 0.0));
+        assert_point(tree.layout(dependent).location, Point::new(15.0, 0.0));
+    }
 }
 
 #[test]
@@ -310,6 +348,66 @@ fn wrap_content_uses_dependency_extent_and_container_surrounds() {
     assert_size(output.size, Size::new(39.0, 26.0));
     assert_point(tree.layout(anchor).location, Point::new(7.0, 7.0));
     assert_point(tree.layout(follower).location, Point::new(17.0, 7.0));
+}
+
+#[test]
+fn padding_and_border_translate_every_relative_position_from_the_content_origin() {
+    let mut tree = TestTree::default();
+    let anchor = relative_leaf(&mut tree, 20.0, 10.0, 10);
+
+    let mut parent_end_style = relative_leaf_style(10.0, 8.0, 11);
+    parent_end_style.relative_align.right = RelativeReference::PARENT;
+    parent_end_style.relative_align.bottom = RelativeReference::PARENT;
+    let parent_end = tree.push_leaf(parent_end_style, Size::new(10.0, 8.0), None);
+
+    let centered = tree.push_leaf(
+        TestStyle {
+            size: Size::new(Dimension::Length(20.0), Dimension::Length(10.0)),
+            relative_center: RelativeCenter::Both,
+            ..TestStyle::default()
+        },
+        Size::new(20.0, 10.0),
+        None,
+    );
+
+    let mut sibling_after_style = relative_leaf_style(6.0, 4.0, 12);
+    sibling_after_style.relative_adjacent.right = id(10);
+    sibling_after_style.relative_adjacent.bottom = id(10);
+    let sibling_after = tree.push_leaf(sibling_after_style, Size::new(6.0, 4.0), None);
+
+    let root = relative_container(
+        &mut tree,
+        TestStyle {
+            size: Size::new(Dimension::Length(100.0), Dimension::Length(80.0)),
+            padding: Edges {
+                left: LengthPercentage::Length(3.0),
+                right: LengthPercentage::Length(7.0),
+                top: LengthPercentage::Length(5.0),
+                bottom: LengthPercentage::Length(11.0),
+            },
+            border: Edges {
+                left: LengthPercentage::Length(2.0),
+                right: LengthPercentage::Length(1.0),
+                top: LengthPercentage::Length(4.0),
+                bottom: LengthPercentage::Length(6.0),
+            },
+            ..TestStyle::default()
+        },
+        &[anchor, parent_end, centered, sibling_after],
+    );
+
+    let output = perform_layout(
+        &mut tree,
+        root,
+        Size::NONE,
+        Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
+    );
+
+    assert_size(output.size, Size::new(113.0, 106.0));
+    assert_point(tree.layout(anchor).location, Point::new(5.0, 9.0));
+    assert_point(tree.layout(parent_end).location, Point::new(95.0, 81.0));
+    assert_point(tree.layout(centered).location, Point::new(45.0, 44.0));
+    assert_point(tree.layout(sibling_after).location, Point::new(25.0, 19.0));
 }
 
 #[test]
@@ -614,7 +712,7 @@ fn nested_relative_containers_propagate_intrinsic_child_size() {
 }
 
 #[test]
-fn sibling_same_side_alignment_and_before_adjacency_cover_remaining_properties() {
+fn sibling_same_side_alignment_and_before_adjacency_use_the_referenced_edges() {
     let mut tree = TestTree::default();
     let mut anchor_style = relative_leaf_style(10.0, 10.0, 1);
     anchor_style.relative_align.right = RelativeReference::PARENT;
@@ -636,6 +734,109 @@ fn sibling_same_side_alignment_and_before_adjacency_cover_remaining_properties()
 
     assert_point(tree.layout(aligned).location, Point::new(90.0, 90.0));
     assert_point(tree.layout(before).location, Point::new(80.0, 80.0));
+}
+
+#[test]
+fn sibling_edges_stretch_an_auto_sized_item_after_subtracting_margins() {
+    let mut tree = TestTree::default();
+    let mut left_style = relative_leaf_style(20.0, 10.0, 40);
+    left_style.relative_align.left = RelativeReference::PARENT;
+    let left = tree.push_leaf(left_style, Size::new(20.0, 10.0), None);
+    let mut right_style = relative_leaf_style(20.0, 10.0, 41);
+    right_style.relative_align.right = RelativeReference::PARENT;
+    let right = tree.push_leaf(right_style, Size::new(20.0, 10.0), None);
+    let mut middle_style = TestStyle {
+        margin: Edges {
+            left: LengthPercentageAuto::Length(5.0),
+            right: LengthPercentageAuto::Length(5.0),
+            top: LengthPercentageAuto::ZERO,
+            bottom: LengthPercentageAuto::ZERO,
+        },
+        ..TestStyle::default()
+    };
+    middle_style.relative_adjacent.right = id(40);
+    middle_style.relative_adjacent.left = id(41);
+    let middle = tree.push_leaf(middle_style, Size::new(200.0, 10.0), None);
+    let root = relative_container(&mut tree, TestStyle::default(), &[middle, right, left]);
+
+    definite_layout(&mut tree, root, 100.0, 40.0);
+
+    assert_point(tree.layout(left).location, Point::new(0.0, 0.0));
+    assert_point(tree.layout(right).location, Point::new(80.0, 0.0));
+    assert_point(tree.layout(middle).location, Point::new(25.0, 0.0));
+    assert_size(tree.layout(middle).size, Size::new(50.0, 10.0));
+    assert_close(tree.layout(middle).margin.left, 5.0);
+    assert_close(tree.layout(middle).margin.right, 5.0);
+}
+
+#[test]
+fn a_single_start_constraint_reduces_leaf_available_space() {
+    fn width_bounded_by_available(
+        input: neutron_star::compute::LeafMeasureInput,
+    ) -> neutron_star::compute::LeafMetrics {
+        let width = match input.available_space.width {
+            AvailableSpace::Definite(width) => width.min(200.0),
+            AvailableSpace::MinContent | AvailableSpace::MaxContent => 200.0,
+        };
+        neutron_star::compute::LeafMetrics::new(Size::new(width, 10.0))
+    }
+
+    let mut tree = TestTree::default();
+    let anchor = relative_leaf(&mut tree, 20.0, 10.0, 10);
+    let mut follower_style = TestStyle::default();
+    follower_style.relative_adjacent.right = id(10);
+    let follower = tree.push_measured_leaf(follower_style, width_bounded_by_available);
+    let root = relative_container(&mut tree, TestStyle::default(), &[follower, anchor]);
+
+    definite_layout(&mut tree, root, 100.0, 20.0);
+
+    assert_point(tree.layout(anchor).location, Point::new(0.0, 0.0));
+    assert_point(tree.layout(follower).location, Point::new(20.0, 0.0));
+    assert_size(tree.layout(follower).size, Size::new(80.0, 10.0));
+    assert!(tree.measure_inputs(follower).iter().any(|input| {
+        input.known_dimensions.width.is_none()
+            && input.available_space.width == AvailableSpace::Definite(80.0)
+    }));
+}
+
+#[test]
+fn a_single_end_constraint_preserves_margins_in_leaf_available_space() {
+    fn width_bounded_by_available(
+        input: neutron_star::compute::LeafMeasureInput,
+    ) -> neutron_star::compute::LeafMetrics {
+        let width = match input.available_space.width {
+            AvailableSpace::Definite(width) => width.min(200.0),
+            AvailableSpace::MinContent | AvailableSpace::MaxContent => 200.0,
+        };
+        neutron_star::compute::LeafMetrics::new(Size::new(width, 10.0))
+    }
+
+    let mut tree = TestTree::default();
+    let mut anchor_style = relative_leaf_style(20.0, 10.0, 20);
+    anchor_style.relative_align.right = RelativeReference::PARENT;
+    let anchor = tree.push_leaf(anchor_style, Size::new(20.0, 10.0), None);
+    let mut follower_style = TestStyle {
+        margin: Edges {
+            left: LengthPercentageAuto::Length(5.0),
+            right: LengthPercentageAuto::Length(5.0),
+            top: LengthPercentageAuto::ZERO,
+            bottom: LengthPercentageAuto::ZERO,
+        },
+        ..TestStyle::default()
+    };
+    follower_style.relative_adjacent.left = id(20);
+    let follower = tree.push_measured_leaf(follower_style, width_bounded_by_available);
+    let root = relative_container(&mut tree, TestStyle::default(), &[follower, anchor]);
+
+    definite_layout(&mut tree, root, 100.0, 20.0);
+
+    assert_point(tree.layout(anchor).location, Point::new(80.0, 0.0));
+    assert_point(tree.layout(follower).location, Point::new(-5.0, 0.0));
+    assert_size(tree.layout(follower).size, Size::new(80.0, 10.0));
+    assert!(tree.measure_inputs(follower).iter().any(|input| {
+        input.known_dimensions.width.is_none()
+            && input.available_space.width == AvailableSpace::Definite(80.0)
+    }));
 }
 
 #[test]
