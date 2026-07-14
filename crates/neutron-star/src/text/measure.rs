@@ -73,6 +73,8 @@ where
         #[cfg(test)]
         self.context.record_shape();
         let (font_context, layout_context) = self.context.parts();
+        // Keep layout in fractional CSS pixels. Device-pixel quantization belongs
+        // to the engine's later DPR-aware rounding and rendering passes.
         let mut builder =
             layout_context.style_run_builder(font_context, content.text.as_str(), 1.0, false);
         let word_break = self.container_style.word_break();
@@ -108,7 +110,7 @@ where
 
         let reusable = match goal {
             LayoutGoal::Measure(_) => self.artifacts.committed.clone(),
-            LayoutGoal::Commit => self.artifacts.probe.clone(),
+            LayoutGoal::Commit => self.artifacts.probe.take(),
         };
         let artifact = reusable.unwrap_or_else(|| self.shape());
         match goal {
@@ -148,7 +150,6 @@ where
 
     fn measure(&mut self, input: LeafMeasureInput) -> Self::Measurement<'_> {
         let inline_basis = definite_inline_size(input).unwrap_or(0.0).max(0.0);
-        let max_advance = line_break_width(input);
         let indent = resolve_length_percentage(
             self.container_style.text_indent(),
             inline_basis,
@@ -172,8 +173,18 @@ where
                 .as_mut()
                 .expect("a committed artifact was installed"),
         };
+        let max_advance = line_break_width(input, artifact);
         artifact.rebreak(max_advance, indent);
         if matches!(input.goal, LayoutGoal::Commit) {
+            let measured_width = artifact.size().width;
+            if input.known_dimensions.width.is_none()
+                && max_advance.is_some_and(|limit| limit > measured_width)
+            {
+                // An available-space limit constrains wrapping, but it does not
+                // make an auto-sized text box fill that limit. Rebreak at the
+                // measured width so alignment positions glyphs inside the box.
+                artifact.rebreak(Some(measured_width), indent);
+            }
             artifact.align(alignment);
         }
         TextLayoutView::new(artifact)
@@ -190,11 +201,11 @@ fn definite_inline_size(input: LeafMeasureInput) -> Option<f32> {
         })
 }
 
-fn line_break_width(input: LeafMeasureInput) -> Option<f32> {
+fn line_break_width(input: LeafMeasureInput, artifact: &TextLayout) -> Option<f32> {
     input.known_dimensions.width.map_or_else(
         || match input.available_space.width {
             AvailableSpace::Definite(width) => Some(width.max(0.0)),
-            AvailableSpace::MinContent => Some(0.0),
+            AvailableSpace::MinContent => Some(artifact.min_content_width().max(0.0)),
             AvailableSpace::MaxContent => None,
         },
         |width| Some(width.max(0.0)),
@@ -400,6 +411,11 @@ mod tests {
         );
         assert_eq!(measurer.measure(commit).artifact().line_count(), 2);
         assert_eq!(measurer.context.shape_count(), 1);
+        assert!(measurer.artifacts.probe().is_none());
+        assert!(measurer.artifacts.committed().is_some());
+
+        assert_eq!(measurer.measure(narrower).size(), Size::new(48.0, 64.0));
+        assert_eq!(measurer.context.shape_count(), 1);
         assert!(measurer.artifacts.probe().is_some());
         assert!(measurer.artifacts.committed().is_some());
     }
@@ -411,7 +427,8 @@ mod tests {
             Size::new(AvailableSpace::MinContent, AvailableSpace::MaxContent),
             LayoutGoal::Commit,
         );
-        assert_eq!(line_break_width(input), Some(0.0));
+        let empty = TextLayout::shaped(parley::Layout::default(), false);
+        assert_eq!(line_break_width(input, &empty), Some(0.0));
         assert_eq!(
             alignment(TextAlign::Start, Direction::Rtl),
             Alignment::Right

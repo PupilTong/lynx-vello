@@ -17,16 +17,19 @@ pub struct TextLayout {
     metrics: LeafMetrics,
     line_count: usize,
     max_advance: Option<f32>,
+    min_content_width: f32,
     has_text: bool,
 }
 
 impl TextLayout {
     pub(super) fn shaped(parley_layout: Layout<TextBrush>, has_text: bool) -> Self {
+        let min_content_width = parley_layout.calculate_content_widths().min;
         Self {
             parley_layout,
             metrics: LeafMetrics::default(),
             line_count: 0,
             max_advance: None,
+            min_content_width,
             has_text,
         }
     }
@@ -39,18 +42,14 @@ impl TextLayout {
         self.refresh_metrics();
     }
 
+    pub(super) const fn min_content_width(&self) -> f32 {
+        self.min_content_width
+    }
+
     pub(super) fn align(&mut self, alignment: Alignment) {
         self.parley_layout
             .align(alignment, AlignmentOptions::default());
         self.refresh_metrics();
-        if alignment != Alignment::Left {
-            let aligned_width = self
-                .parley_layout
-                .lines()
-                .map(|line| line.metrics().inline_max_coord)
-                .fold(0.0_f32, f32::max);
-            self.metrics.size.width = self.metrics.size.width.max(aligned_width);
-        }
     }
 
     fn refresh_metrics(&mut self) {
@@ -77,8 +76,7 @@ impl TextLayout {
         &self.parley_layout
     }
 
-    /// Measured content-box size, including inline overflow and any committed
-    /// non-left alignment line box needed to contain positioned glyphs.
+    /// Measured content-box size, including inline overflow.
     #[must_use]
     pub const fn size(&self) -> Size<f32> {
         self.metrics.size

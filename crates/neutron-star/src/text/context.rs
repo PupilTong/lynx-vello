@@ -17,6 +17,7 @@ use crate::style::TextBrush;
 pub struct TextContext {
     font: FontContext,
     layout: LayoutContext<TextBrush>,
+    // Unit-test instrumentation proving retained layouts rebreak without reshaping.
     #[cfg(test)]
     shape_count: usize,
 }

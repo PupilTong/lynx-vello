@@ -223,9 +223,9 @@ fn exact_ahem_geometry_covers_empty_whitespace_single_word_and_wrapping() {
         &whitespace,
         request(AvailableSpace::MaxContent, LayoutGoal::Commit),
     );
-    assert_close(measured.size.width, 0.0);
-    assert_close(measured.size.height, 16.0);
-    assert_eq!(measured.line_count, 1);
+    assert_size(measured.size, Size::ZERO);
+    assert_eq!(measured.line_count, 0);
+    assert_eq!(measured.baseline, None);
 
     artifacts.invalidate();
     let word = [TextRun {
@@ -306,14 +306,47 @@ fn intrinsic_width_and_nowrap_rebreak_retained_shape() {
             LayoutGoal::Measure(RequestedAxis::Horizontal),
         ),
     );
-    assert_close(minimum.size.width, 16.0);
-    assert!(minimum.line_count >= 8);
-    assert_eq!(artifacts.probe().expect("probe").max_advance(), Some(0.0));
+    assert_size(minimum.size, Size::new(80.0, 32.0));
+    assert_eq!(minimum.line_count, 2);
+    assert_eq!(artifacts.probe().expect("probe").max_advance(), Some(80.0));
     let committed = artifacts.committed().expect("committed survives probe");
     assert_eq!(committed.max_advance(), None);
     assert_eq!(committed.line_count(), 1);
 
+    container.word_break = WordBreak::BreakAll;
+    artifacts.invalidate();
+    let break_all = observe(
+        &mut context,
+        &mut artifacts,
+        &container,
+        &run,
+        request(
+            AvailableSpace::MinContent,
+            LayoutGoal::Measure(RequestedAxis::Horizontal),
+        ),
+    );
+    assert_size(break_all.size, Size::new(16.0, 128.0));
+    assert_eq!(break_all.line_count, 8);
+    assert_eq!(
+        artifacts.probe().expect("break-all probe").max_advance(),
+        Some(16.0)
+    );
+
     container.white_space = WhiteSpace::NoWrap;
+    artifacts.invalidate();
+    let nowrap_intrinsic = observe(
+        &mut context,
+        &mut artifacts,
+        &container,
+        &run,
+        request(
+            AvailableSpace::MinContent,
+            LayoutGoal::Measure(RequestedAxis::Horizontal),
+        ),
+    );
+    assert_size(nowrap_intrinsic.size, Size::new(144.0, 16.0));
+    assert_eq!(nowrap_intrinsic.line_count, 1);
+
     artifacts.invalidate();
     let nowrap = observe(
         &mut context,
@@ -327,9 +360,9 @@ fn intrinsic_width_and_nowrap_rebreak_retained_shape() {
 }
 
 #[test]
-fn nowrap_still_aligns_against_a_definite_inline_constraint() {
+fn auto_sized_alignment_uses_the_measured_text_width() {
     let style = RunStyle::ahem(16.0);
-    let container = ContainerStyle {
+    let mut container = ContainerStyle {
         align: TextAlign::Right,
         white_space: WhiteSpace::NoWrap,
         ..ContainerStyle::default()
@@ -350,15 +383,88 @@ fn nowrap_still_aligns_against_a_definite_inline_constraint() {
         request(AvailableSpace::Definite(80.0), LayoutGoal::Commit),
     );
 
-    assert_size(measured.size, Size::new(80.0, 16.0));
+    assert_size(measured.size, Size::new(32.0, 16.0));
     assert_eq!(measured.line_count, 1);
-    let committed = artifacts.committed().expect("nowrap commit");
-    assert_eq!(committed.max_advance(), Some(80.0));
+    let committed = artifacts.committed().expect("auto-sized nowrap commit");
+    assert_eq!(committed.max_advance(), Some(32.0));
     assert_close(
         committed
             .parley_layout()
             .get(0)
             .expect("nowrap line")
+            .metrics()
+            .offset,
+        0.0,
+    );
+
+    container.white_space = WhiteSpace::Normal;
+    artifacts.invalidate();
+    let wrapped_run = [TextRun {
+        text: "abc de",
+        style: &style,
+        preserve_newlines: false,
+    }];
+    let wrapped = observe(
+        &mut context,
+        &mut artifacts,
+        &container,
+        &wrapped_run,
+        request(AvailableSpace::Definite(80.0), LayoutGoal::Commit),
+    );
+    assert_size(wrapped.size, Size::new(48.0, 32.0));
+    assert_eq!(wrapped.line_count, 2);
+    let wrapped = artifacts.committed().expect("auto-sized wrapped commit");
+    assert_close(
+        wrapped
+            .parley_layout()
+            .get(0)
+            .expect("first line")
+            .metrics()
+            .offset,
+        0.0,
+    );
+    assert_close(
+        wrapped
+            .parley_layout()
+            .get(1)
+            .expect("second line")
+            .metrics()
+            .offset,
+        16.0,
+    );
+}
+
+#[test]
+fn known_inline_size_aligns_without_changing_content_metrics() {
+    let style = RunStyle::ahem(16.0);
+    let container = ContainerStyle {
+        align: TextAlign::Right,
+        white_space: WhiteSpace::NoWrap,
+        ..ContainerStyle::default()
+    };
+    let run = [TextRun {
+        text: "ab",
+        style: &style,
+        preserve_newlines: false,
+    }];
+    let mut context = text_context();
+    let mut artifacts = ArtifactSlots::default();
+    let input = LeafMeasureInput::new(
+        Size::new(Some(80.0), None),
+        Size::new(AvailableSpace::Definite(80.0), AvailableSpace::MaxContent),
+        LayoutGoal::Commit,
+    );
+
+    let measured = observe(&mut context, &mut artifacts, &container, &run, input);
+
+    assert_size(measured.size, Size::new(32.0, 16.0));
+    let committed = artifacts.committed().expect("known-width commit");
+    assert_eq!(committed.max_advance(), Some(80.0));
+    assert_close(
+        committed
+            .parley_layout()
+            .get(0)
+            .expect("known-width line")
             .metrics()
             .offset,
         48.0,
@@ -446,6 +552,21 @@ fn word_break_modes_change_regular_break_opportunities() {
             .break_reason();
         assert_eq!(first_break, expected_break);
     }
+
+    container.word_break = WordBreak::KeepAll;
+    artifacts.invalidate();
+    let keep_all_intrinsic = observe(
+        &mut context,
+        &mut artifacts,
+        &container,
+        &cjk,
+        request(
+            AvailableSpace::MinContent,
+            LayoutGoal::Measure(RequestedAxis::Horizontal),
+        ),
+    );
+    assert_size(keep_all_intrinsic.size, Size::new(64.0, 16.0));
+    assert_eq!(keep_all_intrinsic.line_count, 1);
 }
 
 #[test]
@@ -620,7 +741,7 @@ fn indent_newline_preservation_alignment_and_rtl_are_exported() {
         &rtl,
         request(AvailableSpace::Definite(80.0), LayoutGoal::Commit),
     );
-    assert_size(rtl.size, Size::new(80.0, 16.0));
+    assert_size(rtl.size, Size::new(64.0, 16.0));
     assert_eq!(rtl.line_count, 1);
     let line = artifacts
         .committed()
@@ -628,7 +749,7 @@ fn indent_newline_preservation_alignment_and_rtl_are_exported() {
         .parley_layout()
         .get(0)
         .expect("rtl line");
-    assert_close(line.metrics().offset, 16.0);
+    assert_close(line.metrics().offset, 0.0);
 }
 
 #[test]
@@ -899,8 +1020,8 @@ fn flex_baseline_integration_reuses_artifacts_and_jointly_invalidates_caches() {
             .first_baseline()
             .expect("large baseline");
     assert_close(small_baseline, large_baseline);
-    assert!(small_state.artifacts.probe().is_some());
-    assert!(large_state.artifacts.probe().is_some());
+    assert!(small_state.artifacts.probe().is_none());
+    assert!(large_state.artifacts.probe().is_none());
 
     let calls_after_first_layout = session.leaf_measure_calls;
     assert!(calls_after_first_layout >= 4);

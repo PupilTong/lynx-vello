@@ -8,7 +8,6 @@ use crate::style::{TextRun, TextRunStyle};
 pub(super) struct ShapingContent<'a, R: TextRunStyle> {
     pub(super) text: String,
     pub(super) ranges: Vec<StyledRange<'a, R>>,
-    pub(super) fallback_style: Option<&'a R>,
 }
 
 /// One contiguous range in normalized UTF-8 text carrying a host run style.
@@ -34,13 +33,11 @@ where
     let mut content = ShapingContent {
         text: String::new(),
         ranges: Vec::new(),
-        fallback_style: None,
     };
     let mut pending_whitespace = None;
     let mut after_preserved_break = false;
 
     for run in runs {
-        content.fallback_style.get_or_insert(run.style);
         for character in run.text.chars() {
             match character {
                 '\n' => queue_segment_break(
@@ -64,7 +61,9 @@ where
         }
     }
 
-    if let Some(whitespace) = pending_whitespace {
+    if !content.text.is_empty()
+        && let Some(whitespace) = pending_whitespace
+    {
         content.push(' ', whitespace.style());
     }
 
@@ -312,20 +311,29 @@ mod tests {
     }
 
     #[test]
-    fn empty_inputs_retain_an_optional_fallback_style() {
-        let style = RunStyle;
-        let empty_run = normalize_runs(
-            [TextRun {
-                text: "",
-                style: &style,
-                preserve_newlines: false,
-            }]
+    fn fully_collapsible_and_empty_inputs_produce_no_shaping_ranges() {
+        let first = RunStyle;
+        let second = RunStyle;
+        let whitespace = normalize_runs(
+            [
+                TextRun {
+                    text: " \t\r",
+                    style: &first,
+                    preserve_newlines: false,
+                },
+                TextRun {
+                    text: "\n ",
+                    style: &second,
+                    preserve_newlines: false,
+                },
+            ]
             .into_iter(),
         );
         let no_runs = normalize_runs(core::iter::empty::<TextRun<'_, RunStyle>>());
 
-        assert!(empty_run.text.is_empty());
-        assert!(empty_run.fallback_style.is_some());
-        assert!(no_runs.fallback_style.is_none());
+        assert!(whitespace.text.is_empty());
+        assert!(whitespace.ranges.is_empty());
+        assert!(no_runs.text.is_empty());
+        assert!(no_runs.ranges.is_empty());
     }
 }
