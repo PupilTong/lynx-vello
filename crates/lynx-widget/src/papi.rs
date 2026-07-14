@@ -153,7 +153,7 @@ impl WidgetTree {
     pub fn create_raw_text(&mut self, text: impl Into<String>) -> WidgetId {
         let id = self.create(WidgetKind::RawText, "raw-text");
         if let Some(widget) = self.arena.get_mut(id) {
-            widget.text = Some(text.into());
+            widget.ext.raw_text = Some(text.into());
         }
         id
     }
@@ -205,10 +205,10 @@ impl WidgetTree {
         parent: WidgetId,
         before: Option<WidgetId>,
     ) -> Result<(), WidgetError> {
-        if !self.arena.contains(child) {
+        if self.arena.get(child).is_none() {
             return Err(WidgetError::StaleElement(child));
         }
-        if !self.arena.contains(parent) {
+        if self.arena.get(parent).is_none() {
             return Err(WidgetError::StaleElement(parent));
         }
         if child == parent || self.arena.is_ancestor(child, parent) {
@@ -228,7 +228,7 @@ impl WidgetTree {
                     Err(WidgetError::BadInsertReference(reference))
                 };
             }
-            if !self.arena.is_child_of(reference, parent) {
+            if self.arena.get(reference).is_none() || !self.arena.is_child_of(reference, parent) {
                 return Err(WidgetError::BadInsertReference(reference));
             }
         }
@@ -275,7 +275,7 @@ impl WidgetTree {
     /// deliberately does not perform; the runtime layer decides when a
     /// detached subtree is truly dead (web-core relies on GC for this).
     pub fn destroy_element(&mut self, id: WidgetId) -> Result<(), WidgetError> {
-        if !self.arena.contains(id) {
+        if self.arena.get(id).is_none() {
             return Err(WidgetError::StaleElement(id));
         }
         self.arena.detach(id);
@@ -310,16 +310,19 @@ impl WidgetTree {
     /// The first child of `parent`, if any.
     #[must_use]
     pub fn first_element(&self, parent: WidgetId) -> Option<WidgetId> {
-        self.arena.get(parent)?.children.first().copied()
+        self.arena
+            .element_ref(parent)?
+            .first_child()
+            .map(stylo_dom::ElementRef::id)
     }
 
     /// The next sibling of `widget`, if any.
     #[must_use]
     pub fn next_element(&self, widget: WidgetId) -> Option<WidgetId> {
-        let parent = self.arena.get(widget)?.parent?;
-        let siblings = &self.arena.get(parent)?.children;
-        let pos = siblings.iter().position(|&c| c == widget)?;
-        siblings.get(pos + 1).copied()
+        self.arena
+            .element_ref(widget)?
+            .next_sibling()
+            .map(stylo_dom::ElementRef::id)
     }
 
     /// The parent of `widget`, if any.
@@ -332,7 +335,7 @@ impl WidgetTree {
 
     /// Replace an element's classes from a whitespace-separated list.
     pub fn set_classes(&mut self, id: WidgetId, classes: &str) -> Result<(), WidgetError> {
-        if !self.arena.contains(id) {
+        if self.arena.get(id).is_none() {
             return Err(WidgetError::StaleElement(id));
         }
         // Snapshot the old class list before mutating so the flush can run
@@ -367,7 +370,7 @@ impl WidgetTree {
     ///
     /// The parse is delegated to the [`Arena`] inline-style primitive.
     pub fn set_inline_styles(&mut self, id: WidgetId, text: &str) -> Result<(), WidgetError> {
-        if !self.arena.contains(id) {
+        if self.arena.get(id).is_none() {
             return Err(WidgetError::StaleElement(id));
         }
         self.arena.set_inline_styles(id, text);
@@ -385,7 +388,7 @@ impl WidgetTree {
         name: &str,
         value: &str,
     ) -> Result<(), WidgetError> {
-        if !self.arena.contains(id) {
+        if self.arena.get(id).is_none() {
             return Err(WidgetError::StaleElement(id));
         }
         self.arena.add_inline_style(id, name, value);
@@ -403,7 +406,7 @@ impl WidgetTree {
         name: &str,
         value: &str,
     ) -> Result<(), WidgetError> {
-        if !self.arena.contains(id) {
+        if self.arena.get(id).is_none() {
             return Err(WidgetError::StaleElement(id));
         }
         self.arena.note_attribute_change(id, name);
@@ -416,7 +419,7 @@ impl WidgetTree {
     /// Set an element's id selector value (Lynx's `__SetID`). An empty string
     /// clears it.
     pub fn set_id(&mut self, id: WidgetId, id_selector: &str) -> Result<(), WidgetError> {
-        if !self.arena.contains(id) {
+        if self.arena.get(id).is_none() {
             return Err(WidgetError::StaleElement(id));
         }
         self.arena.note_id_change(id);
@@ -432,7 +435,7 @@ impl WidgetTree {
 
     /// Set the `css_id` (style scope) on a batch of elements.
     pub fn set_css_id(&mut self, ids: &[WidgetId], css_id: i32) -> Result<(), WidgetError> {
-        if let Some(&bad) = ids.iter().find(|&&id| !self.arena.contains(id)) {
+        if let Some(&bad) = ids.iter().find(|&&id| self.arena.get(id).is_none()) {
             return Err(WidgetError::StaleElement(bad));
         }
         for &id in ids {
@@ -453,7 +456,7 @@ impl WidgetTree {
         K: Into<Box<str>>,
         V: Into<String>,
     {
-        if !self.arena.contains(id) {
+        if self.arena.get(id).is_none() {
             return Err(WidgetError::StaleElement(id));
         }
         // Snapshot the old values first, and name every old reflected
@@ -506,7 +509,7 @@ impl WidgetTree {
 
     /// Add or overwrite a single `data-*` dataset entry.
     pub fn add_dataset(&mut self, id: WidgetId, key: &str, value: &str) -> Result<(), WidgetError> {
-        if !self.arena.contains(id) {
+        if self.arena.get(id).is_none() {
             return Err(WidgetError::StaleElement(id));
         }
         self.arena.note_attribute_change(id, &format!("data-{key}"));
@@ -543,7 +546,7 @@ impl WidgetTree {
         state: PseudoState,
         on: bool,
     ) -> Result<(), WidgetError> {
-        if !self.arena.contains(id) {
+        if self.arena.get(id).is_none() {
             return Err(WidgetError::StaleElement(id));
         }
         self.arena.note_state_change(id);

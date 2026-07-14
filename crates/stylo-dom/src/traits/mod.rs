@@ -1,8 +1,9 @@
-//! stylo element-trait implementations for [`ElementRef`](crate::ElementRef).
+//! Stylo node/element-trait implementations for the arena DOM handles.
 //!
 //! stylo drives selector matching and the cascade over any type implementing
 //! its element traits. This module wires our arena-backed DOM to that model by
-//! implementing, on the `Copy` handle [`ElementRef`](crate::ElementRef) (for
+//! implementing on [`NodeRef`](crate::NodeRef) and
+//! [`ElementRef`](crate::ElementRef) (for
 //! any payload `T: `[`ExternalState`](crate::ExternalState)):
 //!
 //! - [`NodeInfo`](stylo::dom::NodeInfo) + [`TNode`](stylo::dom::TNode) (`node`)
@@ -15,9 +16,8 @@
 //!
 //! # Model
 //!
-//! - **Every node is an element.** There is no separate document or text node: the topmost ancestor
-//!   acts as the document root (see [`TNode::owner_doc`](stylo::dom::TNode::owner_doc)), and
-//!   character data rides on the element ([`Element::text`](crate::Element::text)).
+//! - **Element and Text are distinct nodes.** `NodeRef::as_element` returns `None` for Text, which
+//!   has no computed style or embedder payload. The topmost Element acts as the document root.
 //! - **`:hover`/`:active`/`:focus`** are matched from the element's
 //!   [`ElementState`](crate::ElementState) (unlike Paws, which stubs them to `false`).
 //! - **`:root`** matches a parentless element whose

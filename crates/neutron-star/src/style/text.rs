@@ -277,6 +277,25 @@ pub trait TextRunStyle: Sized {
         LineHeight::Normal
     }
 
+    /// Run-level `white-space` wrapping mode, when supplied by the host.
+    ///
+    /// Returning `None` preserves the previous protocol behavior: the run
+    /// inherits the value exposed by its [`TextContainerStyle`]. DOM-backed
+    /// hosts should return the run's computed inherited value so descendants
+    /// that override `white-space` can affect only their own inline content.
+    fn white_space(&self) -> Option<WhiteSpace> {
+        None
+    }
+
+    /// Run-level `word-break`, when supplied by the host.
+    ///
+    /// Returning `None` inherits the paragraph container's value. This
+    /// backwards-compatible default lets non-DOM hosts keep their existing
+    /// paragraph-wide behavior while DOM computed styles can vary per run.
+    fn word_break(&self) -> Option<WordBreak> {
+        None
+    }
+
     /// Computed `font-feature-settings` entries.
     fn font_feature_settings(&self) -> Self::FontFeatureSettings<'_>;
 
@@ -370,6 +389,14 @@ impl<S: TextRunStyle> TextRunStyle for &S {
         (**self).line_height()
     }
 
+    fn white_space(&self) -> Option<WhiteSpace> {
+        TextRunStyle::white_space(&**self)
+    }
+
+    fn word_break(&self) -> Option<WordBreak> {
+        TextRunStyle::word_break(&**self)
+    }
+
     fn font_feature_settings(&self) -> Self::FontFeatureSettings<'_> {
         S::font_feature_settings(&**self)
     }
@@ -415,8 +442,8 @@ mod tests {
         let style = Defaults;
 
         assert_eq!(style.text_align(), TextAlign::Start);
-        assert_eq!(style.white_space(), WhiteSpace::Normal);
-        assert_eq!(style.word_break(), WordBreak::Normal);
+        assert_eq!(TextContainerStyle::white_space(&style), WhiteSpace::Normal);
+        assert_eq!(TextContainerStyle::word_break(&style), WordBreak::Normal);
         assert_eq!(style.text_indent(), LengthPercentage::ZERO);
         assert_eq!(style.font_families().count(), 0);
         assert_eq!(style.font_size(), 16.0);
@@ -424,6 +451,8 @@ mod tests {
         assert_eq!(style.font_style(), FontStyle::Normal);
         assert_eq!(style.letter_spacing(), 0.0);
         assert_eq!(style.line_height(), LineHeight::Normal);
+        assert_eq!(TextRunStyle::white_space(&style), None);
+        assert_eq!(TextRunStyle::word_break(&style), None);
         assert_eq!(style.font_feature_settings().count(), 0);
         assert_eq!(style.font_variation_settings().count(), 0);
         assert_eq!(

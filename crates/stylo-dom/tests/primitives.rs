@@ -13,10 +13,10 @@
 //! `drop_subtree` harvest test, which uses a payload type to observe what the
 //! arena returns.
 
-use stylo_dom::{Arena, Element, ElementId, ElementState, ExternalState, PseudoState};
+use stylo_dom::{Arena, Element, ElementId, ElementState, ExternalState, NodeId, PseudoState};
 
 /// Append `child` as the last child of `parent`, via the `attach_at` primitive.
-fn append<T>(arena: &mut Arena<T>, parent: ElementId, child: ElementId) {
+fn append<T>(arena: &mut Arena<T>, parent: ElementId, child: NodeId) {
     let index = arena.children_len(parent);
     arena.attach_at(parent, child, index);
 }
@@ -82,6 +82,186 @@ fn element_ref_navigation() {
         a
     );
     assert!(arena.element_ref(c).unwrap().next_sibling().is_none());
+}
+
+#[test]
+fn text_is_a_real_dom_node_without_element_state() {
+    use stylo::dom::{NodeInfo, TNode};
+
+    let mut arena = Arena::new();
+    let root = insert(&mut arena, "html");
+    let before = insert(&mut arena, "span");
+    let text = arena.insert_text("hello");
+    let after = insert(&mut arena, "span");
+    append(&mut arena, root, before);
+    append(&mut arena, root, text);
+    append(&mut arena, root, after);
+
+    let text_ref = arena.node_ref(text).unwrap();
+    assert!(!NodeInfo::is_element(&text_ref));
+    assert!(NodeInfo::is_text_node(&text_ref));
+    assert!(TNode::as_element(&text_ref).is_none());
+    assert_eq!(text_ref.text(), Some("hello"));
+    assert_eq!(text_ref.parent().unwrap().id(), root);
+    assert_eq!(text_ref.prev_sibling().unwrap().id(), before);
+    assert_eq!(text_ref.next_sibling().unwrap().id(), after);
+    assert_eq!(TNode::owner_doc(&text_ref).id(), root);
+    assert!(TNode::is_in_document(&text_ref));
+
+    // Text cannot be reached through Element-only accessors and owns neither
+    // an embedder payload nor computed style.
+    assert!(arena.get(text).is_none());
+    assert!(arena.element_ref(text).is_none());
+
+    let root_ref = arena.element_ref(root).unwrap();
+    let all_children = root_ref
+        .child_nodes()
+        .map(stylo_dom::NodeRef::id)
+        .collect::<Vec<_>>();
+    assert_eq!(all_children, vec![before, text, after]);
+
+    arena.detach(text);
+    let detached = arena.node_ref(text).unwrap();
+    assert!(!TNode::is_in_document(&detached));
+    assert_eq!(TNode::owner_doc(&detached).id(), root);
+}
+
+#[test]
+fn attach_rejects_text_parents_and_stale_children_atomically() {
+    let mut arena = Arena::new();
+    let root = insert(&mut arena, "html");
+    let text_parent = arena.insert_text("not an Element");
+    let child = insert(&mut arena, "span");
+
+    let before_text_parent = arena.layout_revision();
+    arena.attach_at(text_parent, child, 0);
+    assert_eq!(arena.layout_revision(), before_text_parent);
+    assert!(arena.node_ref(child).unwrap().parent().is_none());
+
+    let stale = insert(&mut arena, "stale");
+    arena.remove(stale);
+    let before_stale_child = arena.layout_revision();
+    arena.attach_at(root, stale, 0);
+    assert_eq!(arena.layout_revision(), before_stale_child);
+    assert_eq!(arena.children_len(root), 0);
+}
+
+#[test]
+fn element_navigation_and_structural_siblings_skip_text() {
+    let mut arena = Arena::new();
+    let root = insert(&mut arena, "html");
+    let leading_text = arena.insert_text("before");
+    let first = insert(&mut arena, "div");
+    let middle_text = arena.insert_text("between");
+    let second = insert(&mut arena, "div");
+    append(&mut arena, root, leading_text);
+    append(&mut arena, root, first);
+    append(&mut arena, root, middle_text);
+    append(&mut arena, root, second);
+
+    let root_ref = arena.element_ref(root).unwrap();
+    assert_eq!(root_ref.first_child().unwrap().id(), first);
+    assert_eq!(root_ref.last_child().unwrap().id(), second);
+    assert_eq!(
+        root_ref
+            .children()
+            .map(stylo_dom::ElementRef::id)
+            .collect::<Vec<_>>(),
+        vec![first, second]
+    );
+    assert!(arena.element_ref(first).unwrap().prev_sibling().is_none());
+    assert_eq!(
+        arena
+            .element_ref(first)
+            .unwrap()
+            .next_sibling()
+            .unwrap()
+            .id(),
+        second
+    );
+    assert_eq!(
+        arena
+            .element_ref(second)
+            .unwrap()
+            .prev_sibling()
+            .unwrap()
+            .id(),
+        first
+    );
+}
+
+#[test]
+fn empty_selector_observes_nonempty_text_and_element_children() {
+    use selectors::Element as _;
+
+    let mut arena = Arena::new();
+    let root = insert(&mut arena, "div");
+    let empty_text = arena.insert_text("");
+    append(&mut arena, root, empty_text);
+
+    assert!(arena.element_ref(root).unwrap().is_empty());
+    assert!(arena.set_text(empty_text, "content"));
+    assert!(!arena.element_ref(root).unwrap().is_empty());
+    assert!(arena.set_text(empty_text, ""));
+    assert!(arena.element_ref(root).unwrap().is_empty());
+
+    // Selectors defines whitespace as character data too; only a zero-length
+    // Text node is ignored by :empty.
+    assert!(arena.set_text(empty_text, " "));
+    assert!(!arena.element_ref(root).unwrap().is_empty());
+    assert!(arena.set_text(empty_text, ""));
+
+    let child = insert(&mut arena, "span");
+    append(&mut arena, root, child);
+    assert!(!arena.element_ref(root).unwrap().is_empty());
+    arena.detach(child);
+    assert!(arena.element_ref(root).unwrap().is_empty());
+}
+
+#[test]
+fn text_tree_mutations_advance_layout_revision() {
+    let mut arena = Arena::new();
+    assert_eq!(arena.layout_revision(), 0);
+
+    let root = insert(&mut arena, "div");
+    let after_root = arena.layout_revision();
+    assert!(after_root > 0);
+    let text = arena.insert_text("a");
+    let after_text = arena.layout_revision();
+    assert!(after_text > after_root);
+    append(&mut arena, root, text);
+    let after_attach = arena.layout_revision();
+    assert!(after_attach > after_text);
+
+    assert!(arena.set_text(text, "a"));
+    assert_eq!(
+        arena.layout_revision(),
+        after_attach,
+        "an equal write is a no-op"
+    );
+    assert!(arena.set_text(text, "b"));
+    let after_data = arena.layout_revision();
+    assert!(after_data > after_attach);
+
+    arena.detach(text);
+    let after_detach = arena.layout_revision();
+    assert!(after_detach > after_data);
+    assert!(arena.remove_node(text).is_some());
+    assert!(arena.layout_revision() > after_detach);
+}
+
+#[test]
+fn public_mutable_borrows_advance_layout_revision() {
+    let mut arena = Arena::new();
+    let root = insert(&mut arena, "div");
+    let before_element = arena.layout_revision();
+    arena.get_mut(root).unwrap().tag = "changed".into();
+    assert!(arena.layout_revision() > before_element);
+
+    let text = arena.insert_text("a");
+    let before_text = arena.layout_revision();
+    arena.text_mut(text).unwrap().parent = Some(root);
+    assert!(arena.layout_revision() > before_text);
 }
 
 #[test]
@@ -164,6 +344,8 @@ fn drop_subtree_frees_and_returns_payloads() {
     append(&mut arena, container, child);
     let grandchild = arena.insert(Element::new("div", Payload(12)));
     append(&mut arena, child, grandchild);
+    let text = arena.insert_text("payload-free text");
+    append(&mut arena, grandchild, text);
 
     let mut removed = arena.drop_subtree(child);
     removed.sort_unstable();
@@ -175,6 +357,7 @@ fn drop_subtree_frees_and_returns_payloads() {
 
     assert!(arena.get(child).is_none());
     assert!(arena.get(grandchild).is_none());
+    assert!(arena.node_ref(text).is_none());
     // `container` is untouched (drop_subtree does not unlink from a parent).
     assert!(arena.get(container).is_some());
 }

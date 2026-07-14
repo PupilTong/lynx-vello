@@ -667,6 +667,7 @@ fn compute_leaf_layout_uses_the_host_measurement() {
         seen,
         Some(LeafMeasureInput::new(
             Size::new(Some(50.0), None),
+            Size::new(Some(100.0), Some(100.0)),
             Size::new(
                 AvailableSpace::Definite(50.0),
                 AvailableSpace::Definite(90.0),
@@ -742,6 +743,7 @@ fn compute_leaf_layout_accepts_a_non_clone_borrowed_measurement() {
     assert_eq!(
         measurer.last_input,
         Some(LeafMeasureInput::new(
+            Size::NONE,
             Size::NONE,
             Size::MAX_CONTENT,
             LayoutGoal::Measure(RequestedAxis::Both),

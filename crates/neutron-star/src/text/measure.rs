@@ -29,7 +29,7 @@ use crate::tree::{AvailableSpace, LayoutGoal};
 /// [`ArtifactSlots`] borrow separately from its layout session. `resolve_calc`
 /// is the same host callback used by box layout and is needed only when
 /// `text-indent` contains a `calc()` value.
-pub struct TextMeasurer<'session, 'source, Container, RunStyle, Runs, ResolveCalc>
+pub struct TextMeasurer<'session, 'container, 'source, Container, RunStyle, Runs, ResolveCalc>
 where
     Container: TextContainerStyle,
     RunStyle: TextRunStyle + 'source,
@@ -38,13 +38,13 @@ where
 {
     context: &'session mut TextContext,
     artifacts: &'session mut ArtifactSlots,
-    container_style: &'source Container,
+    container_style: &'container Container,
     runs: Runs,
     resolve_calc: ResolveCalc,
 }
 
-impl<'session, 'source, Container, RunStyle, Runs, ResolveCalc>
-    TextMeasurer<'session, 'source, Container, RunStyle, Runs, ResolveCalc>
+impl<'session, 'container, 'source, Container, RunStyle, Runs, ResolveCalc>
+    TextMeasurer<'session, 'container, 'source, Container, RunStyle, Runs, ResolveCalc>
 where
     Container: TextContainerStyle,
     RunStyle: TextRunStyle + 'source,
@@ -55,7 +55,7 @@ where
     pub fn new(
         context: &'session mut TextContext,
         artifacts: &'session mut ArtifactSlots,
-        container_style: &'source Container,
+        container_style: &'container Container,
         runs: Runs,
         resolve_calc: ResolveCalc,
     ) -> Self {
@@ -77,19 +77,26 @@ where
         // to the engine's later DPR-aware rounding and rendering passes.
         let mut builder =
             layout_context.style_run_builder(font_context, content.text.as_str(), 1.0, false);
-        let word_break = self.container_style.word_break();
+        let container_word_break = self.container_style.word_break();
+        let container_white_space = self.container_style.white_space();
         // Chromium's ordinary ASCII pair table deliberately suppresses
         // breaks between AL-class characters. Applying it to `break-all`
         // would erase opportunities created by that CSS value, so let ICU's
-        // selected BreakAll mode own those boundaries.
-        if word_break != WordBreak::BreakAll {
+        // selected BreakAll mode own those boundaries. Parley's override hook
+        // is paragraph-global, so one BreakAll run requires disabling the
+        // table for the whole paragraph; the per-run ICU modes still retain
+        // the authored boundaries without splitting the anonymous text item.
+        let has_break_all_run = content.ranges.iter().any(|range| {
+            effective_word_break(range.style, container_word_break) == WordBreak::BreakAll
+        });
+        if !has_break_all_run {
             builder.set_line_break_override(Some(CHROMIUM_LINE_BREAK_OVERRIDE));
         }
         builder.reserve(content.ranges.len(), content.ranges.len());
 
         for range in &content.ranges {
             let style =
-                translate_run_style(range.style, word_break, self.container_style.white_space());
+                translate_run_style(range.style, container_word_break, container_white_space);
             let style_index = builder.push_style(style);
             builder.push_style_run(style_index, range.bytes.clone());
         }
@@ -121,7 +128,7 @@ where
 }
 
 impl<'source, Container, RunStyle, Runs, ResolveCalc> fmt::Debug
-    for TextMeasurer<'_, 'source, Container, RunStyle, Runs, ResolveCalc>
+    for TextMeasurer<'_, '_, 'source, Container, RunStyle, Runs, ResolveCalc>
 where
     Container: TextContainerStyle,
     RunStyle: TextRunStyle + 'source,
@@ -136,7 +143,7 @@ where
 }
 
 impl<'source, Container, RunStyle, Runs, ResolveCalc> LeafMeasurer
-    for TextMeasurer<'_, 'source, Container, RunStyle, Runs, ResolveCalc>
+    for TextMeasurer<'_, '_, 'source, Container, RunStyle, Runs, ResolveCalc>
 where
     Container: TextContainerStyle,
     RunStyle: TextRunStyle + 'source,
@@ -149,7 +156,10 @@ where
         Self: 'a;
 
     fn measure(&mut self, input: LeafMeasureInput) -> Self::Measurement<'_> {
-        let inline_basis = definite_inline_size(input).unwrap_or(0.0).max(0.0);
+        // CSS Text specifies percentages in `text-indent` relative to the
+        // containing block's inline size. A known leaf width or the space
+        // available after its own margins/padding is not that basis.
+        let inline_basis = input.parent_size.width.unwrap_or(0.0).max(0.0);
         let indent = resolve_length_percentage(
             self.container_style.text_indent(),
             inline_basis,
@@ -191,16 +201,6 @@ where
     }
 }
 
-fn definite_inline_size(input: LeafMeasureInput) -> Option<f32> {
-    input
-        .known_dimensions
-        .width
-        .or(match input.available_space.width {
-            AvailableSpace::Definite(width) => Some(width),
-            AvailableSpace::MinContent | AvailableSpace::MaxContent => None,
-        })
-}
-
 fn line_break_width(input: LeafMeasureInput, artifact: &TextLayout) -> Option<f32> {
     input.known_dimensions.width.map_or_else(
         || match input.available_space.width {
@@ -239,9 +239,11 @@ fn alignment(value: TextAlign, direction: Direction) -> Alignment {
 
 fn translate_run_style(
     style: &impl TextRunStyle,
-    word_break: WordBreak,
-    white_space: WhiteSpace,
+    container_word_break: WordBreak,
+    container_white_space: WhiteSpace,
 ) -> ParleyTextStyle<'static, 'static, TextBrush> {
+    let word_break = effective_word_break(style, container_word_break);
+    let white_space = effective_white_space(style, container_white_space);
     let mut families: Vec<_> = style.font_families().map(translate_font_family).collect();
     if families.is_empty() {
         families.push(ParleyFontFamilyName::Generic(
@@ -286,6 +288,14 @@ fn translate_run_style(
         },
         ..ParleyTextStyle::default()
     }
+}
+
+fn effective_word_break(style: &impl TextRunStyle, container: WordBreak) -> WordBreak {
+    style.word_break().unwrap_or(container)
+}
+
+fn effective_white_space(style: &impl TextRunStyle, container: WhiteSpace) -> WhiteSpace {
+    style.white_space().unwrap_or(container)
 }
 
 fn translate_font_family(value: FontFamily<'_>) -> ParleyFontFamilyName<'static> {
@@ -390,6 +400,7 @@ mod tests {
         );
         let probe = LeafMeasureInput::new(
             Size::NONE,
+            Size::new(Some(80.0), None),
             Size::new(AvailableSpace::Definite(80.0), AvailableSpace::MaxContent),
             LayoutGoal::Measure(RequestedAxis::Both),
         );
@@ -398,6 +409,7 @@ mod tests {
         assert_eq!(measurer.context.shape_count(), 1);
         let narrower = LeafMeasureInput::new(
             Size::NONE,
+            Size::new(Some(48.0), None),
             Size::new(AvailableSpace::Definite(48.0), AvailableSpace::MaxContent),
             LayoutGoal::Measure(RequestedAxis::Both),
         );
@@ -406,6 +418,7 @@ mod tests {
 
         let commit = LeafMeasureInput::new(
             Size::NONE,
+            Size::new(Some(80.0), None),
             Size::new(AvailableSpace::Definite(80.0), AvailableSpace::MaxContent),
             LayoutGoal::Commit,
         );
@@ -423,6 +436,7 @@ mod tests {
     #[test]
     fn constraint_alignment_and_length_mappings_cover_protocol_values() {
         let input = LeafMeasureInput::new(
+            Size::NONE,
             Size::NONE,
             Size::new(AvailableSpace::MinContent, AvailableSpace::MaxContent),
             LayoutGoal::Commit,

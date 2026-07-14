@@ -41,6 +41,25 @@ lynx-vello implements both Linear and Relative as first-class algorithms in
 Relative follows its standalone Starlight contract rather than nonexistent
 web-core prior art.
 
+**DOM Text integration — standards rule plus explicit project extension.**
+The layout object is `stylo-dom`'s real `Node<T> = Element | Text` arena. Text
+nodes have character data and tree linkage
+but no tag, attributes, embedder payload, or computed style. After style flush,
+`stylo_dom::layout::DomLayoutSource` borrows the arena, projects dense
+formatting metadata, and groups consecutive Text children into anonymous
+items; wholly collapsible whitespace generates no item. Anonymous text items
+inside Flexbox and Grid, including their initial item values and inherited text
+styling, follow the W3C Flex/Grid rules. By explicit user direction, the same
+Parley-measured leaf is also accepted by Linear and Relative so Text can
+participate in all four algorithms. That Linear/Relative behavior is a
+lynx-vello engineering extension: neither mode has a W3C text-item rule, and
+native Lynx's virtual raw-text is ignored outside its text-element path, so it
+must not be described as native compatibility parity.
+`stylo_dom::layout::DomLayoutSession` performs all four dispatches, retains
+the Parley and box state separately from the source, and exposes rounded box
+and committed paragraph output by real DOM node id. Connecting Lynx PAPI nodes
+to this generic DOM API is deferred.
+
 **Z-index / stacking context — confirmed W3C deviation.** Lynx does **not** implement the CSS stacking-context algorithm (a per-stacking-context, recursively-scoped paint order with 7 layers: negative z-index → block-level in-flow → floats → inline in-flow → positioned/z-index:0 descendants recursively → positive z-index, each subtree re-entering the same algorithm). Instead (`lynx/core/renderer/dom/element_container.cc`, `ElementContainer::ZIndexChanged`/`UpdateZIndexList`, and `Element::IsStackingContextNode` in `lynx/core/renderer/dom/element.cc:1903`):
 - A node is a "stacking context node" only if it is the root, or `has_z_props()` (non-zero `z-index` while positioned), or `is_fixed_`, or has a transform, or has opacity — a much smaller trigger set than CSS (CSS also creates stacking contexts for `will-change`, CSS filters, `isolation:isolate`, `mix-blend-mode`, flex/grid items with z-index≠auto, masks, clip-path, contain:layout/paint, etc. — several of which Lynx's list omits, e.g. filter/mask/clip-path are CSS properties Lynx supports but does **not** list as stacking-context triggers in `IsStackingContextNode()`).
 - Any child element whose resolved `z-index != 0` (not just any non-`auto` value — Lynx has no `auto` keyword state distinct from `0`) is **pulled out of the normal container tree and re-parented once** to the *nearest enclosing stacking-context node's* `ElementContainer` (`EnclosingStackingContextNode()` + `MoveZChildrenRecursively`), flattening every intervening non-stacking-context ancestor. This is a single global reparenting per stacking-context "island", not a recursive per-ancestor composition.
@@ -69,8 +88,8 @@ The project's own `default_layout_style.h` already encodes a "Lynx default vs W3
 
 | Item | Description | Tier | W3C-compliant? | Deviation & what we should do instead | Source refs |
 |---|---|---|---|---|---|
-| `display` | Selects child layout algorithm: `none/flex/grid/linear/relative/block/auto` (`auto`≈flex in Lynx, block in W3C-aligned mode) | Core | Partial | Does not carry CSS's external inline/block box type, only internal layout mode; `block` alias only active under a W3C-alignment flag. lynx-vello should treat `display` as choosing layout algorithm only, and separately track box "outer" type per CSS if targeting full compat | `lynx/tools/css_generator/css_defines/24-display.json`, `lynx/core/renderer/starlight/style/default_layout_style.h` |
-| `position` | `absolute\|relative\|fixed\|sticky`, default `relative` | Core | Partial | No `static` keyword; Lynx's `relative` is closer to CSS `static` (plain in-flow) since there's no inline/block box notion; `sticky` behaves like CSS position:sticky (scroll-container relative); `fixed` always resolves against the page root with no transform/filter/perspective/contain escape hatch — see the dedicated `position: fixed` paragraph above and `deviations.md` | `lynx/tools/css_generator/css_defines/5-position.json`, `lynx/core/renderer/starlight/layout/layout_object.h:78-92`, `lynx/core/renderer/dom/fiber/fiber_element.cc:5037-5096` |
+| `display` | Selects child layout algorithm: `none/flex/grid/linear/relative/block/auto` (`auto`≈flex in Lynx, block in W3C-aligned mode) | Core | Partial | Does not carry CSS's external inline/block box type, only internal layout mode; `block` alias only active under a W3C-alignment flag. The Lynx-enabled Stylo grammar rejects author-facing `display:contents`, but `DomLayoutSource` implements contents flattening at the computed-value boundary and exposes an embedder-neutral `Contents` role; PAPI mapping is deferred. Flex/Grid anonymous Text items are implemented as W3C behavior; their Linear/Relative use is the explicit project extension described above. Ordinary computed block/inline values are classified as `Flow`, but CSS Block/Inline formatting is not implemented; `DomLayoutSession`'s current Linear fallback is not W3C conformance. | `lynx/tools/css_generator/css_defines/24-display.json`, `lynx/core/renderer/starlight/style/default_layout_style.h` |
+| `position` | `absolute\|relative\|fixed\|sticky`, default `relative` | Core | Partial | No `static` keyword; Lynx's `relative` is closer to CSS `static` (plain in-flow) since there's no inline/block box notion; `sticky` behaves like CSS position:sticky (scroll-container relative); `fixed` always resolves against the page root with no transform/filter/perspective/contain escape hatch — see the dedicated `position: fixed` paragraph above and `deviations.md`. The current generic DOM adapter is narrower than the intended W3C behavior: it maps `absolute` to neutron-star's parent-contained variant and does not yet discover/hoist across static ancestors to the actual CSS containing block. Do not claim full Positioned Layout conformance until that pass exists. | `lynx/tools/css_generator/css_defines/5-position.json`, `lynx/core/renderer/starlight/layout/layout_object.h:78-92`, `lynx/core/renderer/dom/fiber/fiber_element.cc:5037-5096` |
 | `top`/`right`/`bottom`/`left` | Offsets for absolute/fixed/relative(=static-ish)/sticky | Core | Yes | — | `lynx/tools/css_generator/css_defines/1-top.json` (+2,3,4), `lynx/core/renderer/starlight/layout/position_layout_utils.h` |
 | `inset-inline-start`/`inset-inline-end` | Logical offsets | Extended | Yes | — | `css_defines/168-inset-inline-start.json`, `169-inset-inline-end.json` |
 | `box-sizing` | `border-box\|content-box\|auto`(→border-box) | Core | Partial | `auto` default resolves to `border-box`; CSS default is `content-box`. Match Lynx default for compat | `css_defines/6-box-sizing.json` |
@@ -108,11 +127,15 @@ context as the generic `compute_linear_layout` peer algorithm plus
 alongside its Flex, Grid, and Relative protocols and algorithms. Linear uses
 the same layout IO, cache/session recursion, private box-model machinery, leaf
 dispatch, absolute-position helper, and hidden-subtree cleanup; it does not
-translate linear into Flex. The concrete Widget/stylo adapter, dirty/cache
-invalidation wiring, root fixed-position pass, Relative and Linear
-computed-style translation, and text-style translation/session wiring remain
-future L3 work. The feature-gated Parley measurement core itself now lives in
-`neutron-star`; no separate integration crate has been established.
+translate linear into Flex. The concrete DOM source, computed-style
+translation, and mutable `DomLayoutSession` live in `stylo_dom::layout`.
+Generated text items use the same recursive leaf seam in Linear as in Flex,
+Grid, and Relative, subject to the extension caveat above. Current invalidation
+is correct but conservative at whole-Arena-`layout_revision` granularity. Lynx
+PAPI projection, fine-grained dirty/cache wiring, the root fixed-position pass,
+and component-specific layout remain future L3 work. The feature-gated Parley
+measurement core itself stays in `neutron-star`; no separate integration crate
+was needed.
 
 Two Starlight-specific sizing rules are deliberately pinned rather than
 inherited from Flexbox/web-core. First, Linear weights and default cross-axis
@@ -146,18 +169,18 @@ Flex polyfill, which can reflow a percentage-sized child.
 
 Normative algorithm: [Starlight Relative Layout Module Level 1](../starlight-relative-layout.md).
 
-`display:relative` ports Android's `RelativeLayout`. Each child is optionally tagged with a small integer `relative-id` (scope: unique among siblings) so other siblings can anchor to it by id; `relative-{top,right,bottom,left}-of` / `relative-inline-{start,end}-of` reference another sibling's `relative-id` (or the special parent id) to position this child's respective edge adjacent to that sibling; `relative-align-{top,right,bottom,left}` / `relative-align-inline-{start,end}` align this child's edge flush with another element's *same-side* edge (rather than adjacent-placement); `relative-center` centers the child within the parent on one or both axes; `relative-layout-once` is a perf/correctness toggle (when true, it uses one combined dependency order and measures each item as encountered; false uses separate horizontal/vertical orders plus selective remeasurement). Native Lynx computes the property default as `true`; neutron-star's standalone trait surface deliberately defaults it to `false`, and the future Lynx adapter must materialize native's `true`. This is fundamentally a same-generation dependency-graph solver, not a CSS box-flow model — nothing in standard CSS does sibling-referential anchoring by id within a single containing block (closest analogs are grid named lines/areas, which are still index/name-based grid slots not per-element anchors), and CSS Anchor Positioning (`anchor()`/`position-anchor`) is document-wide/absolute-positioning-only, not a same-parent relative-layout mode.
+`display:relative` ports Android's `RelativeLayout`. Each child is optionally tagged with a small integer `relative-id` (scope: unique among siblings) so other siblings can anchor to it by id; `relative-{top,right,bottom,left}-of` / `relative-inline-{start,end}-of` reference another sibling's `relative-id` (or the special parent id) to position this child's respective edge adjacent to that sibling; `relative-align-{top,right,bottom,left}` / `relative-align-inline-{start,end}` align this child's edge flush with another element's *same-side* edge (rather than adjacent-placement); `relative-center` centers the child within the parent on one or both axes; `relative-layout-once` is a perf/correctness toggle (when true, it uses one combined dependency order and measures each item as encountered; false uses separate horizontal/vertical orders plus selective remeasurement). Native Lynx computes the property default as `true`; neutron-star's standalone trait surface deliberately defaults it to `false`, and `stylo-dom`'s computed-style view materializes the parsed value for the concrete runtime. This is fundamentally a same-generation dependency-graph solver, not a CSS box-flow model — nothing in standard CSS does sibling-referential anchoring by id within a single containing block (closest analogs are grid named lines/areas, which are still index/name-based grid slots not per-element anchors), and CSS Anchor Positioning (`anchor()`/`position-anchor`) is document-wide/absolute-positioning-only, not a same-parent relative-layout mode.
 
 | Item | Description | Tier | W3C-compliant? | Deviation & what we should do instead | Source refs |
 |---|---|---|---|---|---|
 | `display: relative` | Enables relative (Android RelativeLayout-style) sibling-anchored child layout | Extended | No (non-CSS) | Implemented as `neutron_star::compute::compute_relative_layout`; **not** the same as CSS `position:relative` (name collision only) | `css_defines/24-display.json`, `lynx/core/renderer/starlight/layout/relative_layout_algorithm.{h,cc}` |
 | `relative-id` | Assigns an integer id to a child so siblings can reference it; default `-1` (none) | Extended | No (non-CSS) | No CSS equivalent (closest: grid-line names, but those are container-scoped slots not per-element anchors) | `css_defines/131-relative-id.json`, `default_layout_style.h` (`SL_DEFAULT_RELATIVE_ID=-1`) |
 | `relative-top-of`/`relative-right-of`/`relative-bottom-of`/`relative-left-of` | Place this element's given edge adjacent-outside the referenced sibling's opposite edge (id-based) | Extended | No (non-CSS) | No CSS equivalent | `css_defines/136-139` |
-| `relative-inline-start-of`/`relative-inline-end-of` | Logical-direction variants of the above | Extended | No (non-CSS) | Host adapter lowers to physical left/right references using computed writing direction before layout | `css_defines/166,167` |
+| `relative-inline-start-of`/`relative-inline-end-of` | Logical-direction variants of the above | Extended | No (non-CSS) | The `stylo-dom` computed-style adapter lowers to physical left/right references using computed writing direction before layout | `css_defines/166,167` |
 | `relative-align-top`/`-right`/`-bottom`/`-left` | Align this element's edge flush with referenced sibling's same-side edge (id-based) | Extended | No (non-CSS) | No CSS equivalent | `css_defines/132-135` |
-| `relative-align-inline-start`/`-end` | Logical variants | Extended | No (non-CSS) | Host adapter lowers to physical left/right references using computed writing direction before layout | `css_defines/164,165` |
+| `relative-align-inline-start`/`-end` | Logical variants | Extended | No (non-CSS) | The `stylo-dom` computed-style adapter lowers to physical left/right references using computed writing direction before layout | `css_defines/164,165` |
 | `relative-center` | Center child within parent: `none\|vertical\|horizontal\|both`; default `none` | Extended | No (non-CSS) | ≈ combination of `align-self:center`+`justify-self:center`, but scoped to `relative` mode only | `css_defines/141-relative-center.json` |
-| `relative-layout-once` | Selects one combined dependency/measurement pass (`true`) or separate-axis two-pass solving (`false`); native computed default `true` | Rare | No (non-CSS) | Implemented in neutron-star; its reusable trait default is intentionally `false`, so the Lynx adapter must pass native's computed `true` explicitly | `css_defines/140-relative-layout-once.json`, `relative_layout_algorithm.h` (`InlineDependencies`, `Sort()`) |
+| `relative-layout-once` | Selects one combined dependency/measurement pass (`true`) or separate-axis two-pass solving (`false`); native computed default `true` | Rare | No (non-CSS) | Implemented in neutron-star; its reusable trait default is intentionally `false`, while `stylo-dom::layout::ComputedLayoutStyle` passes the concrete computed value explicitly | `css_defines/140-relative-layout-once.json`, `relative_layout_algorithm.h` (`InlineDependencies`, `Sort()`) |
 | Web-lynx (web-core) support | All `relative-*` properties show `"web_lynx": {"version_added": false}` in compat data | — | — | Confirms `web-core` (the prior reference implementation) never implemented `display:relative` at all — lynx-vello has no working prior-art reference for this mode and must implement solely from Starlight's C++ source | `css_defines/131,140,141-relative-*.json` (each `"web_lynx":{"version_added": false}`) |
 
 The standalone Relative Level 1 contract also makes three explicit repairs
@@ -209,9 +232,12 @@ implements — see `.claude/agents/lynx-layout-engine.md`. The engine crate is
 [`crates/neutron-star`](../../crates/neutron-star): its protocol, shared
 machinery, and Flexbox, Grid, Starlight Relative, and Linear algorithms are
 implemented alongside its feature-gated Parley measurement core. Its concrete
-L3 Widget/stylo runtime adapter, including text-style translation and
-text-session wiring, remains pending; no separate integration crate has been
-established. The design, ownership boundaries, and milestones are in
+L3 DOM source, text-style translation, mutable session, and output queries
+live in `stylo-dom`. Real Text nodes now participate through anonymous items
+in all four algorithms, with the Linear/Relative extension qualification
+above. Lynx PAPI projection, fine-grained invalidation, and
+fixed/sticky/component-specific passes remain pending. The design, ownership
+boundaries, and milestones are in
 [`docs/layout-architecture.md`](../layout-architecture.md).
 
 Implementation-pattern reference (not a behavior spec): `Paws/engine/src/layout/stacking.rs` for a real, WPT-conformance-tested CSS stacking-context implementation over `stylo` computed style — the concrete reference for the z-index deviation.

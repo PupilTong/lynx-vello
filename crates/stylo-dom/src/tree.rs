@@ -26,12 +26,13 @@
 
 use stylo::invalidation::element::restyle_hints::RestyleHint;
 
-use crate::arena::{Arena, ElementId};
+use crate::arena::{Arena, ElementId, NodeId};
+use crate::node::Node;
 
 impl<T> Arena<T> {
     /// The position of `child` within `parent`'s child list, if it is a child.
     #[must_use]
-    pub fn child_position(&self, parent: ElementId, child: ElementId) -> Option<usize> {
+    pub fn child_position(&self, parent: ElementId, child: NodeId) -> Option<usize> {
         self.get(parent)?.children.iter().position(|&c| c == child)
     }
 
@@ -43,19 +44,19 @@ impl<T> Arena<T> {
 
     /// Whether `child` is a direct child of `parent`.
     #[must_use]
-    pub fn is_child_of(&self, child: ElementId, parent: ElementId) -> bool {
+    pub fn is_child_of(&self, child: NodeId, parent: ElementId) -> bool {
         self.child_position(parent, child).is_some()
     }
 
     /// Whether `ancestor` is a strict ancestor of `descendant`.
     #[must_use]
-    pub fn is_ancestor(&self, ancestor: ElementId, descendant: ElementId) -> bool {
-        let mut next = self.get(descendant).and_then(|element| element.parent);
+    pub fn is_ancestor(&self, ancestor: NodeId, descendant: NodeId) -> bool {
+        let mut next = self.get_node(descendant).and_then(Node::parent);
         while let Some(current) = next {
             if current == ancestor {
                 return true;
             }
-            next = self.get(current).and_then(|element| element.parent);
+            next = self.get_node(current).and_then(Node::parent);
         }
         false
     }
@@ -65,9 +66,9 @@ impl<T> Arena<T> {
     /// removal can flip `:empty` / `:nth-*` / edge-child matching).
     ///
     /// A no-op on an already-parentless (or stale) `child`.
-    pub fn detach(&mut self, child: ElementId) {
-        let old_parent = match self.get(child) {
-            Some(element) => element.parent,
+    pub fn detach(&mut self, child: NodeId) {
+        let old_parent = match self.get_node(child) {
+            Some(node) => node.parent(),
             None => return,
         };
         if let Some(parent) = old_parent {
@@ -80,8 +81,8 @@ impl<T> Arena<T> {
             }
             self.note_child_list_change(parent, removed_index);
         }
-        if let Some(child_element) = self.get_mut(child) {
-            child_element.parent = None;
+        if let Some(child_node) = self.get_node_mut(child) {
+            child_node.set_parent(None);
         }
     }
 
@@ -96,12 +97,20 @@ impl<T> Arena<T> {
     /// restyle: its matching context (ancestors, siblings) changed with the
     /// move. A fresh child needs nothing — elements without style data are
     /// styled unconditionally when the traversal reaches them.
-    pub fn attach_at(&mut self, parent: ElementId, child: ElementId, index: usize) {
-        if let Some(parent_element) = self.get_mut(parent) {
-            parent_element.children.insert(index, child);
+    pub fn attach_at(&mut self, parent: ElementId, child: NodeId, index: usize) {
+        // `ElementId` is a compatibility alias for `NodeId`, so validate the
+        // semantic node kinds before mutating either half of the tree link.
+        // This also makes stale-handle calls a true no-op instead of inserting
+        // a stale child id or assigning a Text node as a parent.
+        if self.get(parent).is_none() || self.get_node(child).is_none() {
+            return;
         }
-        if let Some(child_element) = self.get_mut(child) {
-            child_element.parent = Some(parent);
+        let Some(parent_element) = self.get_mut(parent) else {
+            return;
+        };
+        parent_element.children.insert(index, child);
+        if let Some(child_node) = self.get_node_mut(child) {
+            child_node.set_parent(Some(parent));
         }
         self.add_restyle_hint(child, RestyleHint::restyle_subtree());
         self.note_child_list_change(parent, index);
@@ -118,9 +127,14 @@ impl<T> Arena<T> {
         let mut removed = Vec::new();
         let mut stack = vec![root];
         while let Some(current) = stack.pop() {
-            if let Some(element) = self.remove(current) {
-                stack.extend_from_slice(&element.children);
-                removed.push(element.ext);
+            if let Some(node) = self.remove_node(current) {
+                match node {
+                    Node::Element(element) => {
+                        stack.extend_from_slice(&element.children);
+                        removed.push(element.ext);
+                    }
+                    Node::Text(_) => {}
+                }
             }
         }
         removed

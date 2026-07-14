@@ -129,6 +129,7 @@ where
     let measurement = {
         let measurement = measurer.measure(LeafMeasureInput::new(
             measure_known_dimensions,
+            input.parent_size,
             available_space,
             input.goal,
         ));
@@ -187,14 +188,19 @@ where
 ///
 /// The dimensions have already been translated through the leaf's box model:
 /// known dimensions are content-box extents, and available space excludes its
-/// margins, padding, borders, and reserved scrollbar space. [`Self::goal`]
-/// lets a host distinguish a transient probe from the committed layout whose
-/// rich artifact may need to remain available for painting.
+/// margins, padding, borders, and reserved scrollbar space. `parent_size`
+/// remains the containing block's content-box size, rather than the leaf's
+/// own box or its reduced available space, so content engines can resolve
+/// percentage values such as CSS `text-indent` against the correct basis.
+/// [`Self::goal`] lets a host distinguish a transient probe from the committed
+/// layout whose rich artifact may need to remain available for painting.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct LeafMeasureInput {
     /// Content-box dimensions already decided by the caller.
     pub known_dimensions: Size<Option<f32>>,
+    /// The containing block's definite content-box size (percentage basis).
+    pub parent_size: Size<Option<f32>>,
     /// Space available to unconstrained content-box axes.
     pub available_space: Size<AvailableSpace>,
     /// Whether this is a sizing probe or a geometry commit.
@@ -206,11 +212,13 @@ impl LeafMeasureInput {
     #[must_use]
     pub const fn new(
         known_dimensions: Size<Option<f32>>,
+        parent_size: Size<Option<f32>>,
         available_space: Size<AvailableSpace>,
         goal: LayoutGoal,
     ) -> Self {
         Self {
             known_dimensions,
+            parent_size,
             available_space,
             goal,
         }
@@ -702,6 +710,7 @@ mod tests {
         assert_eq!(
             measurer.last_input,
             Some(LeafMeasureInput::new(
+                Size::NONE,
                 Size::NONE,
                 Size::MAX_CONTENT,
                 LayoutGoal::Commit,

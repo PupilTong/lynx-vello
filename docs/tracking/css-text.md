@@ -8,8 +8,38 @@ Scope: every text/font CSS property and Lynx-specific (`-x-`) text property regi
 
 Two engine-wide behavioral facts that affect every row below:
 1. **CSS inheritance is off by default.** `lynx/core/renderer/css/dynamic_css_configs.h:33` hardcodes `enable_css_inheritance_ = false`; ReactLynx's build plugin defaults `enableCSSInheritance: false` (`lynx-stack/packages/rspeedy/plugin-react/src/pluginReactLynx.ts:170,370`). When off, **no property inherits at all** — not even `color`/`font-family`/`font-size`. When turned on, only the fixed list in `GetDefaultInheritableProps()` (`lynx/core/renderer/css/dynamic_css_styles_manager.cc:30-38`) inherits: `font-size, font-family, text-align, line-spacing, letter-spacing, line-height, font-style, font-weight, color, text-decoration, text-shadow, direction, cursor` (extensible via `customCSSInheritanceList`). The web target fights the browser's native (always-on) inheritance by forcing `color: initial` on `x-text` (`lynx-stack/packages/web-platform/web-elements/src/elements/XText/x-text.css:12`).
-   - **W3C divergence.** Per CSS2.1/CSS Text, `color`, `font-*`, `line-height`, `text-align`, `white-space`, `word-break`, `letter-spacing`, `direction`, `visibility`, `cursor` etc. are inherited by default; `text-decoration` and `text-shadow` are explicitly **not** inherited (decoration instead paints through descendants via the "propagate" rule). Lynx inherits `text-decoration`/`text-shadow` when inheritance is on, and inherits nothing by default. **lynx-vello must implement inheritance as an opt-in gate keyed off the bundle's page config (`enableCSSInheritance` + `customCSSInheritanceList`), not stylo's default always-on cascade**, and when emulating "on", restrict propagation to exactly this property list rather than full standard inheritance.
+   - **W3C divergence and project decision.** Per CSS2.1/CSS Text, `color`, `font-*`, `line-height`, `text-align`, `white-space`, `word-break`, `letter-spacing`, `direction`, `visibility`, `cursor` etc. are inherited by default; `text-decoration` and `text-shadow` are explicitly **not** inherited (decoration instead paints through descendants via the "propagate" rule). Lynx inherits `text-decoration`/`text-shadow` when inheritance is on, and inherits nothing by default. Per [`docs/style-assumptions.md` §C.9](../style-assumptions.md), lynx-vello intentionally keeps Stylo's full W3C inheritance always on and does not emulate the native `enableCSSInheritance` gate. `stylo_dom::layout::DomLayoutSource` consumes those inherited computed styles directly.
 2. **`direction: lynx-rtl` physically mirrors, standard `rtl` does not.** See row below — flag this prominently since it changes `left`/`right`/margin/padding/border/radius resolution, not just text flow.
+
+Implementation status (CSS Text subset, not a complete conformance claim):
+`neutron-star::text` implements whitespace processing,
+Parley's Unicode bidi shaping, per-run computed `white-space` and `word-break`
+overrides promoted through transparent/`display: contents` elements, line
+breaking, intrinsic and height-for-width measurement, baselines, and retained
+Parley layouts. The current Parley API still chooses an automatic/first-strong
+paragraph base level: computed CSS `direction` can resolve physical
+`text-align: start`/`end`, but cannot force UAX #9 paragraph ordering. This
+limitation is recorded in [`deviations.md`](deviations.md); the implementation
+does not inject bidi control characters because that would corrupt source byte
+ranges.
+
+`stylo-dom` now stores true Text nodes distinct from Elements: Text has no
+external payload, tag, attributes, or computed style, and its `NodeRef`/Stylo
+`TNode` behavior reflects that distinction.
+`stylo_dom::layout::DomLayoutSource` borrows the Arena, retains only dense
+formatting metadata plus computed-style Arcs, and exposes contiguous Text as
+an anonymous Parley-measured leaf. `DomLayoutSession` owns the disjoint mutable
+text context, artifacts, layouts, and caches; after a commit it exposes rounded
+box output and the retained paragraph by real Text node id. Flexbox and Grid
+grouping/whitespace omission are W3C rules.
+
+Using that same generated text leaf in Lynx-only Linear and Relative is an
+explicit project extension requested so Text participates in all four
+algorithms; it is neither W3C behavior nor native-Lynx parity, because native
+virtual raw-text is ignored outside the native text-element path.
+Lynx PAPI projection, truncation/ellipsis, a general inline formatting context,
+inline replaced boxes, decoration painting, and resource fetching remain
+separate work.
 
 #### Font properties
 
@@ -48,7 +78,7 @@ Two engine-wide behavioral facts that affect every row below:
 | `hyphens` | Enum: `none, manual, auto`, default `manual` | Extended | Yes | Default differs from CSS spec default (`manual` here vs. CSS's `manual` — actually matches); verify native hyphenation dictionary availability, likely a native-platform passthrough not implemented at all in the textra path shown here | `lynx/tools/css_generator/css_defines/209-hyphens.json`; `lynx/core/renderer/css/text_attributes.h:114` |
 | `direction` | Enum: `normal (default), lynx-rtl, rtl, ltr` | Core | **No** | **W3C divergence (flagged per project instructions).** `direction: lynx-rtl` is a Lynx-only value that *physically* mirrors `left↔right`, `margin-left↔margin-right`, `padding-left↔padding-right`, `border-{left,right}-*`, `border-{top,bottom}-{left,right}-radius`, and `relative-{align,left-of,right-of}` properties (`GetRTLDirectionMapping()`), in addition to affecting text flow. Standard CSS `direction: rtl` only affects logical-property resolution, text/inline flow, and `text-align: start/end`/`justify-content` etc. — it never swaps literal physical `left`/`right` declarations. lynx-vello (stylo) must implement **both**: standard `rtl` (logical-only, matches stylo/W3C default) AND a Lynx-compat mode for `lynx-rtl` that performs the extra physical-property swap Lynx does, gated to only fire when a bundle actually declares `lynx-rtl` (should not touch behavior of standard `rtl`/`ltr`). `text-align: start`/`left`/`right` also resolve differently under `lynx-rtl` vs `rtl` (`ResolveTextAlign`, `lynx/core/renderer/css/dynamic_direction_styles_manager.cc:130-165`) | `lynx/tools/css_generator/css_defines/130-direction.json`; `lynx/core/renderer/css/dynamic_direction_styles_manager.h:24-34`; `lynx/core/renderer/css/dynamic_direction_styles_manager.cc:19-165` (full RTL/logical mapping tables); `lynx/core/renderer/starlight/style/layout_computed_style.h:42-43` |
 | writing-mode | — | — | N/A | **No `writing-mode` CSS property exists in Lynx** (no entry in property table, no handler, no enum). Vertical text / vertical writing modes are **not supported** at all in the native engine as far as this checkout shows. Confirm with lynx-stack web team before assuming any web-only vertical-text shim exists; none found | Absence confirmed via grep across `lynx/tools/css_generator/css_defines/` and `lynx/core/renderer/css/` |
-| RTL/bidi text shaping | Only the `direction` property (block/inline flow direction) is modeled; no evidence of Unicode BiDi algorithm control (`unicode-bidi` property) or per-run bidi reordering logic in the C++ CSS layer | — | No (unimplemented) | No `unicode-bidi` property found. Actual bidi glyph reordering (if any) is delegated entirely to the native "textra"/platform text shaping engine (opaque in this checkout) — parley + vello will need to implement full Unicode BiDi (UAX #9) independently since Lynx's CSS layer provides no configuration surface for it beyond the coarse `direction` flag | Absence confirmed via grep; `lynx/core/renderer/ui_wrapper/layout/textra/text_layout_textra.cc` (opaque paragraph builder is the only bidi-relevant sink) |
+| RTL/bidi text shaping | Only the `direction` property (block/inline flow direction) is modeled; no evidence of a `unicode-bidi` property in the C++ CSS layer | — | Partial | Parley applies Unicode BiDi (UAX #9), but its current public builder always uses automatic/first-strong paragraph base direction. lynx-vello therefore cannot yet force paragraph ordering from computed CSS `direction`; it only resolves direction-sensitive physical alignment. Unicode formatting characters in content still participate normally. See `deviations.md` for the integration limitation. | Absence confirmed via grep; `lynx/core/renderer/ui_wrapper/layout/textra/text_layout_textra.cc` (opaque paragraph builder is the native bidi sink) |
 
 #### Text decoration & effects
 

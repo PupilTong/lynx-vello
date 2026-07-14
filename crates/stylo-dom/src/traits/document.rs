@@ -9,14 +9,14 @@ use stylo::dom::{TDocument, TNode, TShadowRoot};
 use stylo::shared_lock::SharedRwLock;
 use stylo::stylist::CascadeData;
 
-use crate::arena::ElementRef;
+use crate::arena::{ElementRef, NodeRef};
 use crate::ext::ExternalState;
 
 impl<'a, T: ExternalState> TDocument for ElementRef<'a, T> {
-    type ConcreteNode = ElementRef<'a, T>;
+    type ConcreteNode = NodeRef<'a, T>;
 
     fn as_node(&self) -> Self::ConcreteNode {
-        *self
+        ElementRef::as_node(*self)
     }
 
     fn is_html_document(&self) -> bool {
@@ -33,10 +33,10 @@ impl<'a, T: ExternalState> TDocument for ElementRef<'a, T> {
 }
 
 impl<'a, T: ExternalState> TShadowRoot for ElementRef<'a, T> {
-    type ConcreteNode = ElementRef<'a, T>;
+    type ConcreteNode = NodeRef<'a, T>;
 
     fn as_node(&self) -> Self::ConcreteNode {
-        *self
+        ElementRef::as_node(*self)
     }
 
     fn host(&self) -> <Self::ConcreteNode as TNode>::ConcreteElement {

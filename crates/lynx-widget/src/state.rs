@@ -69,6 +69,12 @@ pub struct WidgetState {
     pub dataset: FxHashMap<Box<str>, String>,
     /// Event bindings on this widget.
     pub events: SmallVec<[EventReg; 2]>,
+    /// Literal payload of a PAPI `raw-text` wrapper.
+    ///
+    /// This legacy PAPI storage remains element-local for now. The generic
+    /// HTML-DOM layout path consumes real [`stylo_dom::TextNode`] values and
+    /// does not consult this field.
+    pub raw_text: Option<String>,
 }
 
 impl WidgetState {
@@ -82,6 +88,7 @@ impl WidgetState {
             css_id: 0,
             dataset: FxHashMap::default(),
             events: SmallVec::new(),
+            raw_text: None,
         }
     }
 }

@@ -19,8 +19,10 @@ cross-platform engine built on:
 The from-scratch layout engine (successor to the C++ engine's `starlight`) is
 `crates/neutron-star` — its host protocol, shared layout machinery, and CSS
 flexbox, Grid, and Starlight `display: relative` and `display: linear`
-algorithms are implemented as first-class peers. The concrete Widget/stylo
-runtime adapter remains pending. See
+algorithms are implemented as first-class peers. The concrete `stylo-dom`
+formatting source and layout/text session connect all four algorithms to real
+DOM Text nodes through generated anonymous text items and expose their layout
+results. See
 `docs/layout-architecture.md` for its design and
 `docs/tracking/css-layout.md` for the behavior it must cover.
 
@@ -99,6 +101,13 @@ web target renders it via browser passthrough). Those decisions override the
 default "match web-core" expectation until their recorded revisit milestone;
 follow them rather than re-deriving the classification.
 
+One explicit layout exception is already approved: Flexbox and Grid generate
+anonymous items for contiguous DOM Text according to their W3C rules, and the
+same measured text leaf is also admitted as a child of Lynx-only Linear and
+Relative containers. The latter is a deliberate lynx-vello engineering
+extension, not a W3C rule and not native-Lynx parity (native virtual
+`<raw-text>` is ignored outside its text-element path).
+
 ## Dependency policy
 
 All crates should track the **latest available versions** — **except `rkyv`,
@@ -141,14 +150,23 @@ useful signal for currently-compatible versions of those libraries.
   the future preloaded module graph belong here rather than in the generic
   QuickJS bridge or engine-neutral protocol.
 - `crates/stylo-dom` — generic HTML-DOM subset and standards-oriented CSS
-  computation core. Owns `Element<T>` / `Arena<T>`, stylo DOM trait impls,
-  tree invalidation, inline-style parsing, the `Stylist` / cascade pipeline,
-  and the private `SharedRwLock` shared by an engine and its arenas. It must
-  not contain Lynx widget vocabulary or Lynx device/unit policy.
+  computation core. Owns the real `Node<T> = Element | Text` tree in
+  `Arena<T>`, stylo DOM trait impls, tree invalidation, inline-style parsing,
+  the `Stylist` / cascade pipeline, and the private `SharedRwLock` shared by an
+  engine and its arenas. Its `layout` module owns both halves of DOM layout:
+  the immutable `DomLayoutSource` formatting projection and lazy
+  Stylo-computed-value views, plus the mutable `DomLayoutSession` containing
+  box caches, rounded layouts, Parley context/artifacts, font registration,
+  algorithm dispatch, and Element/Text result queries. Text nodes carry no
+  embedder payload, tag, attributes, or computed style. `stylo-dom` must not
+  contain Lynx widget vocabulary or Lynx device/unit policy.
 - `crates/lynx-widget` — Lynx Element-PAPI and style adapter over `stylo-dom`.
   Owns `WidgetState` / `WidgetTree`, Lynx view metrics, touch-first
   device policy, and the viewport-relative `rpx` integration. Standard CSS
-  parsing, matching, cascade, and lock ownership remain in `stylo-dom`.
+  parsing, matching, cascade, lock ownership, and the DOM layout source/session
+  remain in `stylo-dom`. Connecting Lynx PAPI elements to that generic DOM
+  layout API is deliberately deferred and is not part of the current text
+  integration.
 - `crates/neutron-star` — the standalone-publishable Flexbox, Grid, and
   Starlight Relative and Linear engine: trait-based host⇄engine integration
   with static dispatch only (no `dyn`), an immutable topology/style source
@@ -168,11 +186,14 @@ useful signal for currently-compatible versions of those libraries.
   `docs/layout-architecture.md` before touching it. It must not depend on
   other workspace crates or own host tree/style storage, DOM/widget types,
   resolved device-unit policy, or paint order.
-- Future runtime-layout integration — the concrete Widget/stylo
-  source/session adapter, display dispatch and dirty→cache invalidation
-  wiring, root fixed-position pass, component-specific staggered layout, and
-  text-style translation and text-session wiring remain L3 work. No separate
-  crate for this layer has been established yet.
+- Remaining runtime-layout integration — fine-grained dirty→ancestor cache
+  invalidation (the DOM session conservatively invalidates a changed whole
+  epoch), the root fixed-position and sticky passes, replaced/inline content
+  measurement, W3C absolute-position containing-block discovery/hoisting,
+  standards-compliant CSS Block/Inline Flow, and
+  component-specific staggered layout remain L3 work. `DomLayoutSession`
+  currently routes `DomLayoutDisplay::Flow` through a legacy Linear fallback;
+  that is not CSS Flow conformance. Lynx PAPI integration is also deferred.
 - *(planned, not yet scaffolded)* render / runtime crates — see
   `docs/tracking/` for the behavior surface each will need to cover before
   scaffolding begins, and `.claude/agents/` for the subsystem-scoped agent

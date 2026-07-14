@@ -43,7 +43,6 @@ impl<T: ExternalState> Element for ElementRef<'_, T> {
     }
 
     fn prev_sibling_element(&self) -> Option<Self> {
-        // Every node is an element, so the immediate previous sibling is it.
         self.prev_sibling()
     }
 
@@ -184,10 +183,10 @@ impl<T: ExternalState> Element for ElementRef<'_, T> {
     }
 
     fn is_empty(&self) -> bool {
-        // Non-empty if the element has any child, or carries non-empty
-        // character data.
-        self.children().next().is_none()
-            && self.element().text.as_ref().is_none_or(String::is_empty)
+        // Selectors :empty ignores zero-length Text nodes, but any Element
+        // child or Text node with non-empty character data makes this false.
+        self.child_nodes()
+            .all(|node| node.text().is_some_and(str::is_empty))
     }
 
     fn is_root(&self) -> bool {

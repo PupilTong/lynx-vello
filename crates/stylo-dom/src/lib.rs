@@ -1,8 +1,9 @@
 //! `stylo-dom` — a generic, stylo-integrated DOM core.
 //!
 //! This crate models a **strict subset of the HTML DOM** and everything stylo
-//! needs to run its cascade over it: a generational [`Arena`] of [`Element`]s
-//! addressed by an [`ElementId`], the [`ElementRef`] navigation handle, the
+//! needs to run its cascade over it: a generational [`Arena`] of real
+//! [`Element`] and [`TextNode`] nodes addressed by a [`NodeId`], the
+//! [`NodeRef`] / [`ElementRef`] navigation handles, the
 //! low-level tree-mutation + coarse-invalidation primitives, inline-style
 //! parsing, the stylo element-trait impls, and a standards-oriented CSS
 //! computation engine.
@@ -21,7 +22,7 @@
 //! stylo's interior-mutable per-element state; the [`traits`] module implements
 //! stylo's element traits ([`TNode`](stylo::dom::TNode) /
 //! [`TElement`](stylo::dom::TElement) / [`TDocument`](stylo::dom::TDocument) /
-//! [`selectors::Element`]) on [`ElementRef`]. [`StyleEngine`] owns stylesheet
+//! [`selectors::Element`]) on [`NodeRef`] and [`ElementRef`]. [`StyleEngine`] owns stylesheet
 //! parsing, matching, rule-tree insertion, cascade, and the shared style lock.
 //! Embedders supply a [`stylo::device::Device`] and keep platform-specific
 //! metrics outside this crate.
@@ -45,10 +46,9 @@
 //!
 //! # Layout
 //!
-//! - [`arena`] — the generational arena, [`ElementId`], and the [`ElementRef`] navigation handle
-//!   (the type stylo traits are implemented on).
-//! - [`element`] — the unified [`Element`] struct (the HTML-DOM-subset fields plus the `ext`
-//!   payload).
+//! - [`arena`] — the generational arena, [`NodeId`], and read-only node/element handles.
+//! - [`node`] / [`element`] — distinct Text and Element node variants; only elements carry the
+//!   embedder's `ext` payload and Stylo style data.
 //! - [`ext`] — the [`ExternalState`] trait the payload implements.
 //! - [`state`] — the [`PseudoState`] flag set (`:hover` / `:active` / `:focus`).
 //! - [`style`] — the generic [`StyleEngine`] and stylesheet/cascade pipeline.
@@ -61,6 +61,8 @@ pub mod arena;
 pub mod element;
 pub mod ext;
 pub mod flush;
+pub mod layout;
+pub mod node;
 pub mod state;
 pub mod style;
 pub mod traits;
@@ -69,13 +71,14 @@ mod dirty;
 mod inline;
 mod tree;
 
-pub use arena::{Arena, ElementId, ElementRef};
+pub use arena::{Arena, ElementId, ElementRef, NodeId, NodeRef};
 /// stylo's [`ElementState`], re-exported so downstream crates
 /// never name the vendored `stylo_dom` package directly.
 pub use dom::ElementState;
 pub use element::Element;
 pub use ext::ExternalState;
 pub use flush::Parallelism;
+pub use node::{Node, TextNode};
 pub use state::PseudoState;
 pub use style::{
     ComputedStyle, CssRule, RawDeclaration, StyleEngine, StylesheetOrigin, property_is_supported,

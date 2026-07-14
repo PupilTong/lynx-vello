@@ -11,15 +11,29 @@ dependencies for the protocol and box-layout core when built with
 construction, not by convention. Default builds enable the optional `text`
 feature and its Parley-backed measurement core.
 
-Status: **Flexbox, Grid, Relative, Linear, and text measurement implemented** —
+Status: **Flexbox, Grid, Relative, Linear, text measurement, and DOM layout
+integration implemented** —
 `neutron-star`'s protocol, generic machinery, cache, leaf and positioned
 sizing, rounding, CSS Flexbox Level 1, numeric CSS Grid Level 2, Starlight
 Relative Layout Level 1, Starlight Linear algorithms, and the default-on
 Parley text measurement core are implemented and conformance-tested against
-plain-storage mock hosts. Grid excludes subgrid and named lines/areas, which
-are outside the current protocol. Text truncation, inline boxes, and the
-concrete Widget/stylo adapter (including text-style translation and session
-wiring) are not implemented yet. Crate
+plain-storage mock hosts. `stylo_dom::layout::DomLayoutSource` borrows the
+styled DOM `Arena` directly and supplies the immutable formatting projection
+and computed-style views; `stylo_dom::layout::DomLayoutSession` owns the
+separate mutable box caches, layouts, Parley context/artifacts, font
+registration, display dispatch, and result queries. Real DOM Text nodes form
+measured anonymous items rather than fake Elements. Flexbox and Grid use the W3C
+anonymous-item rules. Admitting the same generated text leaf to Linear and
+Relative is an explicit lynx-vello extension requested for this integration,
+not a W3C rule or a native-Lynx parity claim. Grid excludes subgrid and named
+lines/areas, which are outside the current protocol. Text truncation, a general
+inline formatting context, standards-compliant CSS Block Flow, fine-grained
+dirty-subtree invalidation, Lynx PAPI projection, and the root fixed/sticky
+pass are not implemented yet. The DOM adapter also does not yet discover and
+hoist `position:absolute` boxes across static ancestors to their W3C
+containing block. `DomLayoutSession` currently routes
+`DomLayoutDisplay::Flow` to a legacy Linear fallback; this is not CSS Flow
+conformance. Crate
 rustdoc is the API reference; this document is the rationale, performance
 architecture, and remaining plan.
 
@@ -45,12 +59,11 @@ Text behavior is inventoried in
 ```text
         lynx-vello host stack                           standalone
 ┌──────────────────────────────────┐     ┌─────────────────────────────────┐
-│ lynx-widget + stylo-dom          │     │ neutron-star                    │
-│ styles and tree                  │     │ tree/style/text protocols       │
-│                                  │     │ flex / grid / relative / linear │
-│ future runtime integration:      │────▶│ text feature: Parley measure    │
-│ source/session/display dispatch  │     │ leaf/hidden/cache/position/round│
-│ fixed/dirty/staggered integration│     │ no host storage, DOM, or stylo  │
+│ stylo-dom: Node/Arena + styles   │     │ neutron-star                    │
+│ DomLayoutSource formatting view │     │ tree/style/text protocols       │
+│ DomLayoutSession + output query  │────▶│ flex / grid / relative / linear │
+│ future PAPI/fixed/dirty work     │     │ text feature: Parley measure    │
+│                                  │     │ no host storage, DOM, or stylo  │
 └──────────────────────────────────┘     └─────────────────────────────────┘
 ```
 
@@ -58,15 +71,83 @@ Text behavior is inventoried in
 | --- | --- | --- |
 | `neutron-star` | Implemented Flex, Grid, Relative, and Linear algorithms; their generic value/style/source protocols (including `relative-*` and `linear-*`); the parley-free text style/run protocol; leaf boxing, hidden-subtree cleanup, positioned layout, rounding; shared private arithmetic; geometry and layout IO; cache semantics | Node/style/content storage, display dispatch, DOM/widget/stylo types, resolved device-unit policy (`rpx`, etc.), stacking/paint order |
 | `neutron-star::text` (`text` feature, default-on) | Parley context/font registration, whitespace processing, shaping, line breaking, intrinsic and height-for-width measurement, baselines, and retained `TextLayout` artifact types | Text truncation and ellipsis, inline boxes, paint styling, stylo/widget translation, resource fetching, or host cache/session storage |
-| Future runtime integration *(location not yet established)* | Immutable views over the widget/style tree; mutable layout/cache session; display dispatch; Relative/Linear/text computed-style and attribute translation; text-context/artifact-slot storage; `staggered` integration; dirty tracking + cache invalidation; fixed/sticky lowering | A second Flex/Grid/Relative/Linear/text-measurement implementation, engine-side copies of styles |
+| `stylo-dom` | Real `Node<T> = Element | Text` storage; the immutable `DomLayoutSource` that borrows an `Arena`, owns dense formatting metadata and computed-style Arcs, generates anonymous text items, maps DOM ids to source-local layout ids, and translates Stylo values (including `calc()`) into Core/Flex/Grid/Relative/Linear/text protocol views; the mutable `DomLayoutSession` with box caches, rounded layouts, Parley artifacts/font registration, display dispatch, epoch reconciliation, and Element/Text output queries | Lynx tag/PAPI/device policy, algorithm implementations |
+| `lynx-widget` | Lynx PAPI/UA/device policy | The currently deferred PAPI-to-layout projection, a second layout implementation, or ownership of DOM layout state |
+| Remaining runtime integration | Lynx PAPI projection, fine-grained dirty→ancestor cache invalidation, root fixed-position and sticky passes, replaced-content measurement, component-specific `staggered` integration | A second Flex/Grid/Relative/Linear/text-measurement implementation, engine-side copies of styles |
 
 The engine/host seam is exactly the seam that makes the crate publishable.
 The Lynx-specific values and algorithms for Relative and Linear live in
 `neutron-star`, but the crate still owns no host storage or style-engine
 representation. Both are first-class peers rather than translations into
-Flex or Grid. The still-future concrete adapter is otherwise mechanical:
-computed-style accessor translation, separate source/session storage, and one
-display-mode dispatch.
+Flex or Grid. The concrete source and runtime preserve the same source/session
+split:
+`DomLayoutSource` directly borrows immutable DOM topology and Text data for one
+epoch while owning only lightweight formatting metadata and strong
+computed-style references; `DomLayoutSession` owns every mutable cache, layout,
+and retained text artifact. Both halves live in `stylo-dom`, while
+`neutron-star` remains generic and storage-agnostic.
+
+### DOM nodes and formatting nodes
+
+`stylo-dom` is the layout object's source of truth. `Arena<T>` stores a real
+`Node<T>` enum: Element nodes own the embedder payload, tag, attributes, and
+Stylo `ElementData`; Text nodes own only character data and tree linkage.
+`NodeRef` and Stylo's `TNode` therefore report standard Element/Text semantics,
+and Text has no tag, attributes, external payload, or independently computed
+style.
+
+`DomLayoutSource<'arena, T>` borrows that arena after style flush. It builds
+source-local dense formatting metadata for actual Element boxes and generated
+anonymous text items, retaining the
+computed-style Arcs needed by lazy neutron-star protocol views. DOM ids and
+dense layout `NodeId`s are mapped explicitly because anonymous nodes share the
+layout id space but have no backing Element.
+
+For Flexbox and Grid, consecutive Text children (including Text promoted
+through `display: contents` or a neutral transparent host role) become one
+anonymous item; a wholly collapsible whitespace sequence generates no item.
+The anonymous item receives CSS-initial box/item values, so parent flex/grid
+item properties do not leak into it, while its paragraph and shaping runs use
+the applicable inherited styles from surrounding Elements. This is the W3C
+anonymous-item model. The same Parley-measured leaf is accepted by Linear and
+Relative containers only because the user explicitly requested Text
+participation in all four algorithms. Linear and Relative have no W3C rule for
+this, and native Lynx ignores virtual raw-text on those non-text paths, so this
+choice is documented as a project extension rather than compatibility parity.
+
+The generic `LayoutNodePolicy` extension point can classify embedder Elements
+as transparent `Contents`/`TextCarrier` nodes or `Replaced` leaves without
+teaching `stylo-dom` any host vocabulary. The current work exercises the HTML
+DOM subset itself; `lynx-widget` does not yet map PAPI tags into those roles.
+
+The projection classifies ordinary block/inline values as
+`DomLayoutDisplay::Flow` without pretending to implement their formatting
+algorithm. Until a CSS Block/Inline engine lands, `DomLayoutSession` routes
+that category through a legacy Linear fallback. This preserves a usable host
+fallback but is not W3C Flow conformance.
+
+Each Arena receives a process-unique monotonic layout identity, and each source
+also records its conservative `layout_revision`. `DomLayoutSession` clears
+retained node state when the arena identity, root, or revision changes; an
+unchanged epoch can reuse caches and artifacts without aliasing a later Arena
+that happens to reuse the same allocation address. After a commit,
+`final_layout` returns rounded box output for a real Element or Text node, and
+`committed_text_layout` returns the retained paragraph for a Text node.
+Consecutive contributors resolve to their shared anonymous item. This keeps
+the immutable borrowed source physically separate from all mutable layout and
+measurement state.
+
+The public session surface is deliberately small:
+
+| API | Result |
+| --- | --- |
+| `DomLayoutSession::<T>::new()` / `without_system_fonts()` | Create retained state with the system font collection or an empty deterministic collection. |
+| `register_fonts(bytes)` | Register every readable face and, on success, invalidate cached measurements, retained artifacts, and result queries until the next commit. |
+| `commit(source, available_space, device_pixel_ratio)` | Reconcile the source epoch, run root layout, device-pixel-round it, and return the root `Layout`. |
+| `final_layout(source, node_id)` | Return the final rounded `Layout` for a real Element or contributing Text node in the last committed epoch. |
+| `committed_text_layout(source, node_id)` | Return the retained Parley `TextLayout` for a contributing Text node; non-text and omitted-whitespace nodes return `None`. |
+| `formatting_layout(source, layout_node_id)` | Return rounded output for an actual or generated formatting node, including anonymous text items. |
+| `formatting_text_layout(source, layout_node_id)` | Return the retained paragraph artifact for an anonymous text formatting node. |
 
 ## The protocol in one page
 
@@ -81,8 +162,8 @@ so each entry point demands only what it uses:
 | `GridSource: LayoutSource` | immutable grid container/item views, including GAT track-list iterators | the L2 grid algorithm |
 | `RelativeSource: LayoutSource` | immutable relative container/item style views | the Starlight Relative L1 algorithm |
 | `LinearSource: LayoutSource` | immutable Starlight Linear container/item style views | the Linear algorithm |
-| `TextContainerStyle: CoreStyle` | paragraph-level alignment, whitespace, word-break, and indent values | the Parley `TextMeasurer` |
-| `TextRunStyle` | run-level font, spacing, line-height, family, feature, and variation views | the Parley `TextMeasurer` |
+| `TextContainerStyle: CoreStyle` | paragraph-level alignment, inherited fallback whitespace/word-break, and indent values | the Parley `TextMeasurer` |
+| `TextRunStyle` | run-level font, spacing, line-height, family, feature, variation, and optional computed whitespace/word-break overrides | the Parley `TextMeasurer` |
 | `LayoutState` | mutable unrounded-layout and static-position storage | committing algorithms and hidden cleanup |
 | `CacheState` | mutable per-node measurement-cache slots | `compute_cached_layout` and hidden cleanup |
 | `LayoutSession<Source>: LayoutState + CacheState` | **`compute_child_layout(source, …)`**, the host display/algorithm dispatch point | recursive algorithms |
@@ -159,7 +240,8 @@ once:
    `neutron-star`, against the same source and session protocol. The `<list>`
    component's staggered-grid remains a future host peer. The engine has **no
    `Display`
-   enum** — dispatch identity belongs to the future concrete host adapter.
+   enum** — dispatch identity belongs to the concrete host adapter
+   (`DomLayoutSession` for the current DOM integration).
 2. **Uniform caching.** Every generated-box path through dispatch shares one
    cache policy, so mixed-algorithm trees memoize correctly. Future
    host-provided modes can use the same wrapper. Hidden cleanup deliberately
@@ -502,8 +584,9 @@ The automatic minimum size (§4.5, `min-size: auto`) resolves inside steps
    writes, retaining the same `LayoutInput`/cache semantics as flexbox.
 
 Like Flex and Grid, this is a generic neutron-star algorithm over
-`LinearSource` and `LayoutSession<Source>`; it is not yet wired to
-`WidgetTree` or stylo computed values.
+`LinearSource` and `LayoutSession<Source>`. The `stylo-dom` computed-style
+views and `DomLayoutSession` dispatch wire it to the DOM without giving
+neutron-star a DOM dependency.
 
 **Grid (L2)** — CSS Grid Level 2 (minus subgrid), as a pipeline:
 
@@ -601,10 +684,11 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
   pass. CSS Fixed root lowering, Sticky/list/component metadata, and anonymous
   text-item generation remain host/integration responsibilities and are not
   neutron-star behavior contracts.
-- **Remaining Lynx integration:** Widget/stylo translation for Relative and
-  Linear, component-specific staggered layout, and mixed-runtime parity remain
-  future work; the integration layer's final module or crate placement has not
-  been established.
+- **DOM integration:** `stylo-dom` tests cover real Text nodes, anonymous-item
+  grouping and initial item values, inherited per-run text styles, all four
+  dispatch paths, retained text output, and stale-epoch rejection. Lynx PAPI
+  projection, component-specific staggered layout, and mixed-runtime parity
+  remain future work.
 
 ## Milestones
 
@@ -626,13 +710,16 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
 - **L3 — Starlight modes + runtime integration** *(partial)*: the Lynx-linear
   value/style/source protocol, generic `compute_linear_layout` algorithm, and
   feature-gated Parley text measurement core are complete in `neutron-star`.
-  Remaining L3 work is the concrete
-  `lynx-widget`/stylo adapter (including `CalcHandle` translation), mutable
-  session and display dispatch, dirty→cache invalidation wiring, the root
-  fixed-position pass and sticky lowering, Relative and Linear computed-style
-  translation, text computed-style/attribute translation, and text-context and
-  artifact-slot session wiring. The integration layer's final module or crate
-  placement remains undecided; no separate text crate is planned.
+  The concrete `stylo-dom` formatting source and computed-style adapter
+  (including `CalcHandle` translation), true DOM Text nodes, anonymous text
+  items, mutable `DomLayoutSession`/display dispatch, conservative
+  whole-revision cache invalidation, Element/Text output queries, and
+  text-context/artifact-slot wiring are also complete. Remaining L3 work is
+  Lynx PAPI projection, fine-grained dirty→ancestor cache invalidation, the root
+  fixed-position pass and sticky lowering, standards-compliant CSS
+  Block/Inline Flow, W3C absolute-position containing-block discovery/hoisting,
+  replaced/inline content, and component-specific staggered layout; no
+  separate text crate is planned.
 - **L4 — performance**: probe-trace-tuned cache slots, SoA scratch, arena
   exploration, the batched-children parallel hook if profiles justify it.
 - **L5 — parity hardening**: WPT-derived flex/grid suites, web-core
@@ -648,5 +735,16 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
   intrinsic keywords.
 - Whether Lynx's legacy `grid-*-span` properties need adapter-side lowering
   beyond `span N` placement (tracking doc says they're superseded aliases).
+- Vendored Stylo currently has no computed longhands for `linear-gravity`,
+  `linear-cross-gravity`, or `linear-layout-gravity`; the adapter correctly
+  falls back to standard alignment properties until that parser/computed-style
+  surface is added.
+- The Lynx-enabled Stylo grammar intentionally rejects author-facing
+  `display: contents`. `DomLayoutSource` nevertheless implements contents
+  flattening at the computed-value boundary, while the generic `Contents` role
+  can request the same formatting projection without teaching `stylo-dom` a
+  host tag name. Mapping Lynx `<wrapper>` or other PAPI nodes to that role is
+  deferred. Anonymous text-item construction is implemented; exposing the
+  `display: contents` keyword to authors remains a parser-surface decision.
 - Crate name availability on crates.io (`neutron-star`) — check before the
   first publish; the protocol doesn't depend on the name.

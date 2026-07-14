@@ -116,6 +116,7 @@ impl TextCase {
         measurer
             .measure(LeafMeasureInput::new(
                 Size::NONE,
+                Size::new(Some(width), None),
                 Size::new(AvailableSpace::Definite(width), AvailableSpace::MaxContent),
                 goal,
             ))

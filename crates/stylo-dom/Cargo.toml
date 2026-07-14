@@ -11,6 +11,10 @@ rust-version.workspace = true
 rustc-hash = { workspace = true }
 smallvec = { workspace = true }
 
+# Layout integration implements neutron-star's style/source protocols and
+# owns the mutable Parley-backed session that commits DOM text geometry.
+neutron-star = { workspace = true, features = ["text"] }
+
 # stylo integration: the Element struct owns stylo's interior-mutable
 # per-element state (ElementData/selector flags) and the `traits` module
 # implements stylo's element traits (`TNode`/`TElement`/`TDocument`/

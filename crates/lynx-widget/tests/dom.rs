@@ -92,7 +92,7 @@ fn text_and_raw_text() {
     assert_eq!(doc.widget(text).unwrap().ext.kind, WidgetKind::Text);
     let raw_node = doc.widget(raw).unwrap();
     assert_eq!(raw_node.ext.kind, WidgetKind::RawText);
-    assert_eq!(raw_node.text.as_deref(), Some("hello"));
+    assert_eq!(raw_node.ext.raw_text.as_deref(), Some("hello"));
 }
 
 #[test]

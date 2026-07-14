@@ -19,12 +19,13 @@ pub(super) struct StyledRange<'a, R: TextRunStyle> {
 /// Applies the collapsing shared by Lynx's `white-space: normal` and
 /// `white-space: nowrap` before Parley shapes the paragraph.
 ///
-/// CSS document whitespace (space, tab, CR-as-space, and LF segment breaks)
-/// is collapsed to one ASCII space. Runs marked `preserve_newlines` retain LF
-/// hard breaks while still collapsing other whitespace; spaces immediately
-/// adjacent to those breaks are removed. Other controls, non-breaking spaces,
-/// and other Unicode spaces are deliberately passed through for Parley to
-/// render or otherwise process.
+/// CSS document whitespace (space, tab, and CR/LF/form-feed segment breaks)
+/// is collapsed to one ASCII space. Runs marked `preserve_newlines` implement
+/// the narrower Lynx raw-text extension: they retain LF hard breaks while
+/// still collapsing CR as space and passing form feed through; spaces
+/// immediately adjacent to retained LF breaks are removed. Other controls,
+/// non-breaking spaces, and other Unicode spaces are deliberately passed
+/// through for Parley to render or otherwise process.
 pub(super) fn normalize_runs<'a, R, Runs>(runs: Runs) -> ShapingContent<'a, R>
 where
     R: TextRunStyle + 'a,
@@ -47,6 +48,13 @@ where
                     run.style,
                     run.preserve_newlines,
                 ),
+                '\r' | '\u{000C}' if !run.preserve_newlines => queue_segment_break(
+                    &mut content,
+                    &mut pending_whitespace,
+                    &mut after_preserved_break,
+                    run.style,
+                    false,
+                ),
                 ' ' | '\t' | '\r' => {
                     if !after_preserved_break && pending_whitespace.is_none() {
                         pending_whitespace = Some(PendingWhitespace::Space(run.style));
@@ -59,12 +67,6 @@ where
                 }
             }
         }
-    }
-
-    if !content.text.is_empty()
-        && let Some(whitespace) = pending_whitespace
-    {
-        content.push(' ', whitespace.style());
     }
 
     content
@@ -111,6 +113,12 @@ fn flush_pending_whitespace<'a, R: TextRunStyle>(
     let Some(whitespace) = pending_whitespace.take() else {
         return;
     };
+    // CSS Text phase II removes collapsible spaces at the start of a line.
+    // At paragraph start that decision is independent of line breaking, so
+    // discard it before shaping instead of giving Parley a visible cluster.
+    if content.text.is_empty() {
+        return;
+    }
     let remove = matches!(whitespace, PendingWhitespace::SegmentBreak(_))
         && should_remove_segment_break(content.text.chars().next_back(), next);
     if !remove {
@@ -279,6 +287,16 @@ mod tests {
         );
         assert_eq!(controls.text, "a b\x0Cc");
 
+        let css_segment_breaks = normalize_runs(
+            [TextRun {
+                text: "a\rb\x0Cc",
+                style: &first,
+                preserve_newlines: false,
+            }]
+            .into_iter(),
+        );
+        assert_eq!(css_segment_breaks.text, "a b c");
+
         let chinese = normalize_runs(
             [TextRun {
                 text: "你\n好",
@@ -288,6 +306,16 @@ mod tests {
             .into_iter(),
         );
         assert_eq!(chinese.text, "你好");
+
+        let chinese_cr = normalize_runs(
+            [TextRun {
+                text: "你\r好",
+                style: &first,
+                preserve_newlines: false,
+            }]
+            .into_iter(),
+        );
+        assert_eq!(chinese_cr.text, "你好");
 
         let korean = normalize_runs(
             [TextRun {
@@ -335,5 +363,22 @@ mod tests {
         assert!(whitespace.ranges.is_empty());
         assert!(no_runs.text.is_empty());
         assert!(no_runs.ranges.is_empty());
+    }
+
+    #[test]
+    fn removes_collapsible_spaces_at_paragraph_edges() {
+        let style = RunStyle;
+        let content = normalize_runs(
+            [TextRun {
+                text: " \t a \r\n ",
+                style: &style,
+                preserve_newlines: false,
+            }]
+            .into_iter(),
+        );
+
+        assert_eq!(content.text, "a");
+        assert_eq!(content.ranges.len(), 1);
+        assert_eq!(content.ranges[0].bytes, 0..1);
     }
 }

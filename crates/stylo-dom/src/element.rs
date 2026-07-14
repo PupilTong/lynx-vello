@@ -1,4 +1,4 @@
-//! The unified [`Element`] struct — the HTML-DOM-subset node.
+//! The [`Element`] node variant in the HTML-DOM subset.
 
 use std::cell::UnsafeCell;
 use std::fmt;
@@ -15,7 +15,7 @@ use stylo::servo_arc::Arc;
 use stylo::shared_lock::Locked;
 use stylo_atoms::Atom;
 
-use crate::arena::ElementId;
+use crate::arena::NodeId;
 
 /// Bit set in [`Element::snapshot_flags`] when a pre-mutation snapshot has
 /// been recorded for this element in the arena's
@@ -28,7 +28,8 @@ pub(crate) const SNAPSHOT_HANDLED: u8 = 1 << 1;
 ///
 /// The fields model a strict subset of the HTML DOM: tree links, tag, id,
 /// classes, attributes, dynamic pseudo-class state, an inline style block,
-/// character data, and the per-element style bookkeeping stylo needs. Anything
+/// and the per-element style bookkeeping stylo needs. Character data lives in
+/// distinct [`TextNode`](crate::TextNode)s. Anything
 /// beyond that subset belongs to the embedder and lives in the [`ext`] payload
 /// (see [`ExternalState`](crate::ExternalState)).
 ///
@@ -43,7 +44,7 @@ pub(crate) const SNAPSHOT_HANDLED: u8 = 1 << 1;
 /// - owned by exactly one worker at a time under stylo's traversal discipline ([`stylo_data`], an
 ///   [`UnsafeCell`]; see [`crate::traits`] for the per-access safety arguments).
 ///
-/// Everything else (tag/classes/attrs/text/`ext`) is **immutable during a
+/// Everything else (tag/classes/attrs/`ext`) is **immutable during a
 /// flush**: mutation requires `&mut Arena`, which
 /// [`StyleEngine::flush_tree`](crate::StyleEngine::flush_tree) holds
 /// exclusively for the whole traversal.
@@ -57,9 +58,9 @@ pub(crate) const SNAPSHOT_HANDLED: u8 = 1 << 1;
 /// [`children_to_process`]: Element::children_to_process
 pub struct Element<T> {
     /// The parent element, or `None` for the root / a detached element.
-    pub parent: Option<ElementId>,
-    /// Child elements, in document order.
-    pub children: Vec<ElementId>,
+    pub parent: Option<NodeId>,
+    /// Child nodes, in document order.
+    pub children: Vec<NodeId>,
     /// The tag name, interned as a stylo [`LocalName`] atom so
     /// `selectors::Element::has_local_name` is a cheap atom comparison.
     pub tag: LocalName,
@@ -113,9 +114,6 @@ pub struct Element<T> {
     /// when one appears.
     pub(crate) children_to_process: AtomicIsize,
 
-    /// Literal character-data content, for text leaves.
-    pub text: Option<String>,
-
     /// The embedder's external-state payload (see
     /// [`ExternalState`](crate::ExternalState)).
     pub ext: T,
@@ -140,7 +138,6 @@ impl<T> Element<T> {
             dirty_descendants: AtomicBool::new(false),
             snapshot_flags: AtomicU8::new(0),
             children_to_process: AtomicIsize::new(0),
-            text: None,
             ext,
         }
     }

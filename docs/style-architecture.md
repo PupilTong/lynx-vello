@@ -17,8 +17,8 @@ Lynx-only device and unit behavior moved up into `lynx-widget`.
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| `stylo-dom` | `Element<T>`, `Arena<T>`, stylo DOM traits, invalidation, inline parsing, `Stylist`, rule matching, cascade, media evaluation, computed values, the private `SharedRwLock` | Lynx tags/PAPI, `WidgetState`, Lynx unit metrics, touch-device policy |
-| `lynx-widget` | `WidgetState`, `WidgetTree`, PAPI validation, `EngineMetrics`, touch-first `Device` construction, viewport-relative `rpx` integration | A second stylist, cascade implementation, stylesheet lock sharing |
+| `stylo-dom` | `Node<T> = Element | Text`, `Arena<T>`, stylo DOM traits, invalidation, inline parsing, `Stylist`, rule matching, cascade, media evaluation, computed values, the private `SharedRwLock`, and the `DomLayoutSource`/`DomLayoutSession` pair plus lazy computed-style views and queryable layout output | Lynx tags/PAPI, `WidgetState`, Lynx unit metrics, touch-device policy |
+| `lynx-widget` | `WidgetState`, `WidgetTree`, PAPI validation, `EngineMetrics`, touch-first `Device` construction, and viewport-relative `rpx` integration | A second stylist, cascade implementation, stylesheet lock sharing; its PAPI-to-layout adapter is deferred |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, the maintained Lynx CSS extension patch set | Runtime Widget/PAPI policy |
 
 ## Style lifecycle
@@ -55,6 +55,20 @@ Lynx-only device and unit behavior moved up into `lynx-widget`.
 7. `stylo_dom::StyleEngine::resolve` remains as the standalone per-element
    match+cascade (no traversal state); the Widget adapter exposes it as
    `resolve_widget`.
+8. After a flush, `stylo_dom::layout::DomLayoutSource` borrows the `Arena`
+   directly and builds only dense formatting metadata plus strong references
+   to the relevant computed-style Arcs. Its accessors translate lazily into
+   neutron-star values. Real Text nodes carry no computed style of their own;
+   contiguous text becomes an anonymous item whose paragraph/run values come
+   from the surrounding styled elements. The source records the Arena's
+   process-unique identity and conservative `layout_revision`.
+9. `stylo_dom::layout::DomLayoutSession` consumes that immutable epoch and
+   retains the disjoint mutable box caches, rounded layouts, Parley context and
+   text artifacts. After `commit`, `final_layout` and
+   `committed_text_layout` expose output by real Element/Text `NodeId`; a Text
+   contributor resolves to its shared anonymous item's box and paragraph.
+   Successful font registration invalidates both retained measurement state
+   and result queries until the next commit.
 
 ## Invariants
 
@@ -65,6 +79,10 @@ Lynx-only device and unit behavior moved up into `lynx-widget`.
 - Standard CSS behavior belongs in `stylo-dom`. Lynx-only extensions and
   environment policy belong in `lynx-widget` (or the maintained stylo fork
   when they are first-class CSS grammar/value extensions).
+- DOM Text is not represented by a fake element: it has no external payload,
+  tag, attributes, or `ElementData`, and `NodeRef`/Stylo `TNode` reports the
+  standard Element-vs-Text semantics. `lynx-widget` PAPI projection into this
+  DOM/layout model is intentionally deferred.
 - Device mutations go through `stylo_dom::StyleEngine::update_device` or
   `set_viewport`, ensuring media-dependent cascade data is refreshed. After a
   device change the embedder calls

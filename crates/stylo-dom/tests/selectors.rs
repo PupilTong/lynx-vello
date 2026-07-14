@@ -12,7 +12,7 @@
 
 mod common;
 
-use common::{Doc, url_data};
+use common::{Doc, rgb, url_data};
 use cssparser::ToCss;
 use stylo::selector_parser::SelectorParser;
 use stylo_dom::ElementState;
@@ -172,6 +172,45 @@ fn structural_pseudo_classes_match_per_spec() {
     let solo_parent = doc.el(doc.root, "view.solo-parent");
     let solo = doc.el(solo_parent, "view");
     assert!(doc.matches(solo, ":only-child"));
+}
+
+#[test]
+fn text_nodes_do_not_count_as_element_siblings() {
+    let mut doc = Doc::new();
+    let first = doc.el(doc.root, "view.first");
+    let second = doc.el(doc.root, "view.second");
+    let leading = doc.arena.insert_text("leading");
+    doc.arena.attach_at(doc.root, leading, 0);
+    let middle = doc.arena.insert_text("middle");
+    doc.arena.attach_at(doc.root, middle, 2);
+
+    assert!(doc.matches(first, ":first-child"));
+    assert!(doc.matches(first, ":nth-child(1)"));
+    assert!(doc.matches(second, ":last-child"));
+    assert!(doc.matches(second, ":nth-child(2)"));
+    assert!(doc.matches(second, ".first + .second"));
+}
+
+#[test]
+fn empty_selector_restyles_when_text_data_changes() {
+    let mut doc = Doc::with_css(
+        ".target { color: blue; }\n\
+         .target:empty { color: red; }",
+    );
+    let target = doc.el(doc.root, "view.target");
+    let text = doc.arena.insert_text("");
+    doc.arena.attach_at(target, text, 0);
+
+    doc.flush();
+    assert_eq!(doc.color(target), rgb(255, 0, 0));
+
+    assert!(doc.arena.set_text(text, "content"));
+    doc.flush();
+    assert_eq!(doc.color(target), rgb(0, 0, 255));
+
+    assert!(doc.arena.set_text(text, ""));
+    doc.flush();
+    assert_eq!(doc.color(target), rgb(255, 0, 0));
 }
 
 // C++: selector_matcher_test.cc::CSSMatcherTest.CheckPseudoElement — Lynx

@@ -1,23 +1,21 @@
-//! [`NodeInfo`] + [`TNode`] for [`ElementRef`].
+//! [`NodeInfo`] + [`TNode`] for [`NodeRef`].
 
 use stylo::dom::{NodeInfo, OpaqueNode, TNode};
 
-use crate::arena::ElementRef;
+use crate::arena::{ElementRef, NodeRef};
 use crate::ext::ExternalState;
 
-impl<T: ExternalState> NodeInfo for ElementRef<'_, T> {
+impl<T: ExternalState> NodeInfo for NodeRef<'_, T> {
     fn is_element(&self) -> bool {
-        // Every node is an element with a tag; character data rides on the
-        // element itself (`Element::text`).
-        true
+        NodeRef::is_element(*self)
     }
 
     fn is_text_node(&self) -> bool {
-        false
+        self.is_text()
     }
 }
 
-impl<'a, T: ExternalState> TNode for ElementRef<'a, T> {
+impl<'a, T: ExternalState> TNode for NodeRef<'a, T> {
     type ConcreteElement = ElementRef<'a, T>;
     type ConcreteDocument = ElementRef<'a, T>;
     type ConcreteShadowRoot = ElementRef<'a, T>;
@@ -27,43 +25,50 @@ impl<'a, T: ExternalState> TNode for ElementRef<'a, T> {
     }
 
     fn first_child(&self) -> Option<Self> {
-        ElementRef::first_child(*self)
+        NodeRef::first_child(*self)
     }
 
     fn last_child(&self) -> Option<Self> {
-        ElementRef::last_child(*self)
+        NodeRef::last_child(*self)
     }
 
     fn prev_sibling(&self) -> Option<Self> {
-        ElementRef::prev_sibling(*self)
+        NodeRef::prev_sibling(*self)
     }
 
     fn next_sibling(&self) -> Option<Self> {
-        ElementRef::next_sibling(*self)
+        NodeRef::next_sibling(*self)
     }
 
     fn owner_doc(&self) -> Self::ConcreteDocument {
-        // No separate document node: the topmost ancestor acts as the
-        // document.
-        let mut cur = *self;
-        while let Some(parent) = cur.parent() {
-            cur = parent;
+        // No separate Document node: the distinguished root Element acts as
+        // it. An attached node reaches that root through its ancestors; a
+        // detached Text node falls back to the root owned by the same arena.
+        let mut current = *self;
+        while let Some(parent) = current.parent() {
+            current = parent;
         }
-        cur
+        current
+            .as_element()
+            .or_else(|| self.arena.document_element_ref())
+            .expect("a DOM arena must contain a root Element")
     }
 
     fn is_in_document(&self) -> bool {
-        // Style resolution only ever visits attached nodes; coarse but true for
-        // everything the flush driver reaches.
-        true
+        let mut current = *self;
+        while let Some(parent) = current.parent() {
+            current = parent;
+        }
+        current
+            .as_element()
+            .is_some_and(|root| root.ext().is_root())
     }
 
     fn as_element(&self) -> Option<Self::ConcreteElement> {
-        Some(*self)
+        NodeRef::as_element(*self)
     }
 
     fn as_document(&self) -> Option<Self::ConcreteDocument> {
-        // Our root is an ordinary element, not a distinct document node.
         None
     }
 
@@ -72,18 +77,14 @@ impl<'a, T: ExternalState> TNode for ElementRef<'a, T> {
     }
 
     fn opaque(&self) -> OpaqueNode {
-        // Derived from the (index, generation) id — NOT the element's address:
-        // stylo keys snapshot maps by `OpaqueNode` across arbitrary tree
-        // mutations, and arena growth can reallocate and move every element.
         self.id().opaque()
     }
 
     fn debug_id(self) -> usize {
-        // Diagnostic only: the arena slot index stands in for a node id.
         usize::try_from(self.id().index()).unwrap_or(0)
     }
 
     fn traversal_parent(&self) -> Option<Self::ConcreteElement> {
-        self.parent()
+        self.parent()?.as_element()
     }
 }

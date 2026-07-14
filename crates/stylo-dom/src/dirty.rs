@@ -128,13 +128,21 @@ impl<T> Arena<T> {
     /// insertion/removal position). Scope comes from the selector flags stylo
     /// recorded on the parent during matching, so this is near-free unless
     /// some matched rule actually depends on child structure.
-    pub(crate) fn note_child_list_change(&mut self, parent: ElementId, index: usize) {
+    pub(crate) fn note_child_list_change(&mut self, parent: ElementId, _index: usize) {
         let Some(parent_element) = self.get(parent) else {
             return;
         };
         let flags = parent_element.selector_flags();
         if flags.intersects(STRUCTURE_SENSITIVE) {
-            let children = parent_element.children.clone();
+            // Structural selectors count Element children only. Text nodes
+            // still affect `:empty`, but never `:nth-child`, edge-child, or
+            // sibling-element relationships.
+            let children = parent_element
+                .children
+                .iter()
+                .copied()
+                .filter(|&id| self.get(id).is_some())
+                .collect::<Vec<_>>();
             if flags.intersects(ElementSelectorFlags::HAS_EMPTY_SELECTOR) {
                 // The `:empty` flip can affect the container's own subtree
                 // and — through `+`/`~` (`.list:empty + .hint`) — its later
@@ -148,7 +156,13 @@ impl<T> Arena<T> {
                     .and_then(|element| {
                         let grandparent = self.get(element.parent?)?;
                         let pos = grandparent.children.iter().position(|&c| c == parent)?;
-                        Some(grandparent.children[pos + 1..].to_vec())
+                        Some(
+                            grandparent.children[pos + 1..]
+                                .iter()
+                                .copied()
+                                .filter(|&id| self.get(id).is_some())
+                                .collect(),
+                        )
                     })
                     .unwrap_or_default();
                 for sibling in later_siblings {
@@ -160,7 +174,10 @@ impl<T> Arena<T> {
                     self.add_restyle_hint(child, RestyleHint::restyle_subtree());
                 }
             } else if flags.intersects(ElementSelectorFlags::HAS_SLOW_SELECTOR_LATER_SIBLINGS) {
-                for &child in children.get(index..).unwrap_or_default() {
+                // `index` is a raw-node position and Text nodes do not count
+                // for structural selectors. Conservatively invalidate every
+                // Element child; selector matching remains exact.
+                for &child in &children {
                     self.add_restyle_hint(child, RestyleHint::restyle_subtree());
                 }
             } else if flags.intersects(ElementSelectorFlags::MAY_HAVE_TREE_COUNTING_FUNCTION) {

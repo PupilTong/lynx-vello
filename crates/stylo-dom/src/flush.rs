@@ -39,7 +39,7 @@ use stylo::traversal::{DomTraversal, PerLevelTraversalData, recalc_style_at};
 use stylo::traversal_flags::TraversalFlags;
 use stylo_atoms::Atom;
 
-use crate::arena::{Arena, ElementId, ElementRef};
+use crate::arena::{Arena, ElementId, ElementRef, NodeRef};
 use crate::ext::ExternalState;
 use crate::style::StyleEngine;
 
@@ -109,19 +109,28 @@ impl<'a, T: ExternalState> DomTraversal<ElementRef<'a, T>> for RecalcStyle<'a> {
         &self,
         traversal_data: &PerLevelTraversalData,
         context: &mut StyleContext<ElementRef<'a, T>>,
-        node: ElementRef<'a, T>,
+        node: NodeRef<'a, T>,
         note_child: F,
     ) where
-        F: FnMut(ElementRef<'a, T>),
+        F: FnMut(NodeRef<'a, T>),
     {
-        // Every node is an element in this model.
+        let element = node
+            .as_element()
+            .expect("Stylo only schedules Element nodes for restyle");
         // SAFETY: stylo's traversal contract — exactly one worker processes
         // this element, so creating/borrowing its data cannot race.
-        let mut data = unsafe { node.ensure_data() };
-        recalc_style_at(self, traversal_data, context, node, &mut data, note_child);
+        let mut data = unsafe { element.ensure_data() };
+        recalc_style_at(
+            self,
+            traversal_data,
+            context,
+            element,
+            &mut data,
+            note_child,
+        );
     }
 
-    fn process_postorder(&self, _: &mut StyleContext<ElementRef<'a, T>>, _: ElementRef<'a, T>) {
+    fn process_postorder(&self, _: &mut StyleContext<ElementRef<'a, T>>, _: NodeRef<'a, T>) {
         debug_assert!(false, "needs_postorder_traversal() is false");
     }
 
@@ -155,6 +164,7 @@ impl StyleEngine {
         root: ElementId,
         parallelism: Parallelism,
     ) {
+        let mut traversed = false;
         {
             let Some(root_ref) = arena.element_ref(root) else {
                 return;
@@ -182,6 +192,7 @@ impl StyleEngine {
                 &traversal.shared,
             );
             if token.should_traverse() {
+                traversed = true;
                 // stylo's sequential-task teardown asserts it runs on a
                 // LAYOUT thread (its pool workers are initialized as such);
                 // mark the embedder's calling thread for the traversal.
@@ -201,5 +212,12 @@ impl StyleEngine {
             }
         }
         arena.complete_flush(root);
+        if traversed {
+            // A real restyle may replace one or more `Arc<ComputedValues>`.
+            // Conservatively advance the DOM-owned layout epoch once for the
+            // whole traversal; layout sessions can then discard stale box and
+            // text artifacts without copying or fingerprinting the host tree.
+            arena.bump_layout_revision();
+        }
     }
 }

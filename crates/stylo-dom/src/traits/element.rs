@@ -36,7 +36,7 @@ use stylo::values::computed::Display;
 use stylo::{LocalName, Namespace};
 use stylo_atoms::Atom;
 
-use crate::arena::{Arena, ElementId, ElementRef};
+use crate::arena::{Arena, ElementId, ElementRef, NodeRef};
 use crate::ext::ExternalState;
 
 /// The children iterator stylo's restyle traversal walks. Skips over any child
@@ -49,14 +49,14 @@ pub struct ChildrenIter<'a, T> {
 }
 
 impl<'a, T> Iterator for ChildrenIter<'a, T> {
-    type Item = ElementRef<'a, T>;
+    type Item = NodeRef<'a, T>;
 
-    fn next(&mut self) -> Option<ElementRef<'a, T>> {
+    fn next(&mut self) -> Option<NodeRef<'a, T>> {
         while self.index < self.children.len() {
             let id = self.children[self.index];
             self.index += 1;
-            if let Some(elem) = self.arena.element_ref(id) {
-                return Some(elem);
+            if let Some(node) = self.arena.node_ref(id) {
+                return Some(node);
             }
         }
         None
@@ -71,11 +71,11 @@ fn empty_namespace() -> &'static <SelectorImpl as selectors::SelectorImpl>::Borr
 }
 
 impl<'a, T: ExternalState> TElement for ElementRef<'a, T> {
-    type ConcreteNode = ElementRef<'a, T>;
+    type ConcreteNode = NodeRef<'a, T>;
     type TraversalChildrenIterator = ChildrenIter<'a, T>;
 
     fn as_node(&self) -> Self::ConcreteNode {
-        *self
+        ElementRef::as_node(*self)
     }
 
     fn traversal_children(&self) -> LayoutIterator<Self::TraversalChildrenIterator> {

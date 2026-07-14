@@ -49,6 +49,8 @@ struct RunStyle {
     line_height: LineHeight,
     features: Vec<FontFeatureSetting>,
     variations: Vec<FontVariationSetting>,
+    white_space: Option<WhiteSpace>,
+    word_break: Option<WordBreak>,
 }
 
 impl RunStyle {
@@ -62,6 +64,8 @@ impl RunStyle {
             line_height: LineHeight::Normal,
             features: Vec::new(),
             variations: Vec::new(),
+            white_space: None,
+            word_break: None,
         }
     }
 }
@@ -101,6 +105,14 @@ impl TextRunStyle for RunStyle {
 
     fn line_height(&self) -> LineHeight {
         self.line_height
+    }
+
+    fn white_space(&self) -> Option<WhiteSpace> {
+        self.white_space
+    }
+
+    fn word_break(&self) -> Option<WordBreak> {
+        self.word_break
     }
 
     fn font_feature_settings(&self) -> Self::FontFeatureSettings<'_> {
@@ -160,6 +172,7 @@ struct Observation {
 fn request(width: AvailableSpace, goal: LayoutGoal) -> LeafMeasureInput {
     LeafMeasureInput::new(
         Size::NONE,
+        Size::new(width.into_option(), None),
         Size::new(width, AvailableSpace::MaxContent),
         goal,
     )
@@ -226,6 +239,21 @@ fn exact_ahem_geometry_covers_empty_whitespace_single_word_and_wrapping() {
     assert_size(measured.size, Size::ZERO);
     assert_eq!(measured.line_count, 0);
     assert_eq!(measured.baseline, None);
+
+    artifacts.invalidate();
+    let edge_spaces = [TextRun {
+        text: " \t a \r\n ",
+        style: &style,
+        preserve_newlines: false,
+    }];
+    let measured = observe(
+        &mut context,
+        &mut artifacts,
+        &container,
+        &edge_spaces,
+        request(AvailableSpace::MaxContent, LayoutGoal::Commit),
+    );
+    assert_size(measured.size, Size::new(16.0, 16.0));
 
     artifacts.invalidate();
     let word = [TextRun {
@@ -451,6 +479,7 @@ fn known_inline_size_aligns_without_changing_content_metrics() {
     let mut artifacts = ArtifactSlots::default();
     let input = LeafMeasureInput::new(
         Size::new(Some(80.0), None),
+        Size::new(Some(80.0), None),
         Size::new(AvailableSpace::Definite(80.0), AvailableSpace::MaxContent),
         LayoutGoal::Commit,
     );
@@ -567,6 +596,65 @@ fn word_break_modes_change_regular_break_opportunities() {
     );
     assert_size(keep_all_intrinsic.size, Size::new(64.0, 16.0));
     assert_eq!(keep_all_intrinsic.line_count, 1);
+}
+
+#[test]
+fn run_break_styles_override_the_container_without_splitting_the_paragraph() {
+    let normal = RunStyle::ahem(16.0);
+    let mut break_all = RunStyle::ahem(16.0);
+    break_all.word_break = Some(WordBreak::BreakAll);
+    let mut nowrap = RunStyle::ahem(16.0);
+    nowrap.white_space = Some(WhiteSpace::NoWrap);
+    let container = ContainerStyle::default();
+    let mut context = text_context();
+    let mut artifacts = ArtifactSlots::default();
+
+    let mixed = [
+        TextRun {
+            text: "a ",
+            style: &normal,
+            preserve_newlines: false,
+        },
+        TextRun {
+            text: "abcdefgh",
+            style: &break_all,
+            preserve_newlines: false,
+        },
+    ];
+    let measured = observe(
+        &mut context,
+        &mut artifacts,
+        &container,
+        &mixed,
+        request(AvailableSpace::Definite(32.0), LayoutGoal::Commit),
+    );
+    assert!(measured.line_count > 2);
+    assert!(
+        artifacts
+            .committed()
+            .expect("mixed run layout")
+            .parley_layout()
+            .lines()
+            .skip(1)
+            .any(|line| line.break_reason() == BreakReason::Regular),
+        "the break-all run must retain regular per-character opportunities"
+    );
+
+    artifacts.invalidate();
+    let no_wrap_run = [TextRun {
+        text: "abc defgh",
+        style: &nowrap,
+        preserve_newlines: false,
+    }];
+    let measured = observe(
+        &mut context,
+        &mut artifacts,
+        &container,
+        &no_wrap_run,
+        request(AvailableSpace::Definite(32.0), LayoutGoal::Commit),
+    );
+    assert_eq!(measured.line_count, 1);
+    assert_size(measured.size, Size::new(144.0, 16.0));
 }
 
 #[test]
@@ -750,6 +838,79 @@ fn indent_newline_preservation_alignment_and_rtl_are_exported() {
         .get(0)
         .expect("rtl line");
     assert_close(line.metrics().offset, 0.0);
+}
+
+#[test]
+fn css_direction_does_not_masquerade_as_a_forced_parley_base_level() {
+    let style = RunStyle::ahem(16.0);
+    let container = ContainerStyle {
+        direction: Direction::Rtl,
+        ..ContainerStyle::default()
+    };
+    let neutral = [TextRun {
+        text: "1234",
+        style: &style,
+        preserve_newlines: false,
+    }];
+    let mut context = text_context();
+    let mut artifacts = ArtifactSlots::default();
+
+    let _ = observe(
+        &mut context,
+        &mut artifacts,
+        &container,
+        &neutral,
+        request(AvailableSpace::MaxContent, LayoutGoal::Commit),
+    );
+
+    // Parley 0.11 exposes no public forced-base-direction builder option, so
+    // numeric/neutral text remains automatic (LTR) even when CSS says RTL.
+    // Keep this executable until the documented integration gap is closed.
+    assert!(
+        !artifacts
+            .committed()
+            .expect("neutral paragraph commits")
+            .parley_layout()
+            .is_rtl()
+    );
+}
+
+#[test]
+fn percentage_text_indent_uses_the_containing_block_inline_size() {
+    let style = RunStyle::ahem(16.0);
+    let container = ContainerStyle {
+        indent: LengthPercentage::Percent(0.1),
+        ..ContainerStyle::default()
+    };
+    let runs = [TextRun {
+        text: "ab",
+        style: &style,
+        preserve_newlines: false,
+    }];
+    let mut context = text_context();
+    let mut artifacts = ArtifactSlots::default();
+
+    let measured = observe(
+        &mut context,
+        &mut artifacts,
+        &container,
+        &runs,
+        LeafMeasureInput::new(
+            Size::new(Some(80.0), None),
+            Size::new(Some(200.0), None),
+            Size::new(AvailableSpace::Definite(80.0), AvailableSpace::MaxContent),
+            LayoutGoal::Commit,
+        ),
+    );
+
+    assert_size(measured.size, Size::new(52.0, 16.0));
+    let line = artifacts
+        .committed()
+        .expect("percentage-indent commit")
+        .parley_layout()
+        .get(0)
+        .expect("text line");
+    assert_close(line.metrics().offset, 20.0);
 }
 
 #[test]
