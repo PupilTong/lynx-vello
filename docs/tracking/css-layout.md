@@ -110,8 +110,9 @@ the same layout IO, cache/session recursion, private box-model machinery, leaf
 dispatch, absolute-position helper, and hidden-subtree cleanup; it does not
 translate linear into Flex. The concrete Widget/stylo adapter, dirty/cache
 invalidation wiring, root fixed-position pass, Relative and Linear
-computed-style translation, and Parley/text integration remain future L3
-work. No separate integration crate has been established.
+computed-style translation, and text-style translation/session wiring remain
+future L3 work. The feature-gated Parley measurement core itself now lives in
+`neutron-star`; no separate integration crate has been established.
 
 Two Starlight-specific sizing rules are deliberately pinned rather than
 inherited from Flexbox/web-core. First, Linear weights and default cross-axis
@@ -208,9 +209,10 @@ from-scratch layout engine (successor to the C++ engine's `starlight`)
 implements — see `.claude/agents/lynx-layout-engine.md`. The engine crate is
 [`crates/neutron-star`](../../crates/neutron-star): its protocol, shared
 machinery, and Flexbox, Grid, Starlight Relative, and Linear algorithms are
-implemented. Its concrete L3 Widget/stylo runtime adapter and text integration
-remain pending; no separate integration crate has been established. The
-design, ownership boundaries, and milestones are in
+implemented alongside its feature-gated Parley measurement core. Its concrete
+L3 Widget/stylo runtime adapter, including text-style translation and
+text-session wiring, remains pending; no separate integration crate has been
+established. The design, ownership boundaries, and milestones are in
 [`docs/layout-architecture.md`](../layout-architecture.md).
 
 Implementation-pattern reference (not a behavior spec): `Paws/engine/src/layout/stacking.rs` for a real, WPT-conformance-tested CSS stacking-context implementation over `stylo` computed style — the concrete reference for the z-index deviation.

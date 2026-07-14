@@ -59,19 +59,21 @@
 //! fn erased_state(state: &mut dyn neutron_star::tree::LayoutState) {}
 //! ```
 //!
-//! # Status: Flexbox, Grid, Linear, and Relative Level 1 implemented
+//! # Status: Flexbox, Grid, Linear, Relative, and text measurement implemented
 //!
 //! The generic protocol and machinery are implemented together with CSS
 //! Flexbox Level 1, numeric CSS Grid Level 2 (excluding subgrid and named
-//! areas), Starlight Linear layout, and Starlight Relative Layout Level 1.
+//! areas), Starlight Linear layout, Starlight Relative Layout Level 1, and an
+//! optional Parley shaping/line-breaking measurement core.
 //! See `docs/layout-architecture.md` in the lynx-vello repository for the
 //! design rationale, represented conformance surface, and remaining parity
 //! milestones.
 //!
 //! # Dependencies and feature flags
 //!
-//! None, deliberately: the layout protocols are core, unconditional API, and
-//! the crate compiles with zero dependencies.
+//! The style/tree/box-layout protocol is unconditional and compiles with zero
+//! dependencies under `default-features = false`. Default builds enable the
+//! `text` feature and its optional Parley dependency.
 //!
 //! # Minimal host sketch
 //!
@@ -186,6 +188,8 @@ pub mod cache;
 pub mod compute;
 pub mod geometry;
 pub mod style;
+#[cfg(feature = "text")]
+pub mod text;
 pub mod tree;
 
 /// One-stop imports for implementing a host: every protocol trait plus the
@@ -202,7 +206,7 @@ pub mod prelude {
     pub use crate::style::{
         CoreStyle, FlexContainerStyle, FlexItemStyle, GridContainerStyle, GridItemStyle,
         GridTemplateRepetition, LinearContainerStyle, LinearItemStyle, RelativeContainerStyle,
-        RelativeItemStyle,
+        RelativeItemStyle, TextContainerStyle, TextRunStyle,
     };
     pub use crate::tree::{
         AvailableSpace, CacheState, FlexSource, GridSource, Layout, LayoutGoal, LayoutInput,

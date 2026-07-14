@@ -4,13 +4,15 @@ A trait-first, statically-dispatched CSS **flexbox**, CSS **Grid**, and
 Starlight **Linear**/**relative-layout** engine for host-owned trees. Built as
 the from-scratch successor to the Lynx C++ engine's `starlight` layout engine.
 It is host- and storage-agnostic despite exposing Lynx-specific algorithms:
-the crate has zero required dependencies and is designed to be published and
-used standalone.
+its protocol and box-layout core have zero dependencies when default features
+are disabled, and the crate is designed to be published and used standalone.
 
-> **Status: Flexbox, Grid, Linear, and Relative Level 1 implemented.** The
+> **Status: Flexbox, Grid, Linear, Relative Level 1, and text measurement
+> implemented.** The
 > protocol, shared layout machinery, leaf/absolute sizing, cache, rounding,
 > CSS Flexbox Level 1, numeric CSS Grid Level 2, Starlight `display: linear`,
-> and Starlight Relative Layout Level 1 algorithms are implemented. Grid
+> Starlight Relative Layout Level 1, and the feature-gated Parley shaping and
+> line-breaking core are implemented. Grid
 > deliberately excludes subgrid and
 > host-lowered named lines/areas. See
 > `docs/layout-architecture.md` in the repository root for the full design,
@@ -34,6 +36,9 @@ Relative modes are all first-class neutron-star entry points; a host can still
 add other modes through the same dispatch seam. The split lets every algorithm
 retain borrowed style/track views while recursive layout mutates only the
 session.
+The optional text adapter uses the same seam: host-owned run/style views are
+immutable, while the host stores a reusable `TextContext` and per-node
+`ArtifactSlots` in its mutable session.
 `display:none` cleanup is an explicit host precheck: call `hide_subtree` and
 return `LayoutOutput::HIDDEN` before entering the generated-box cache/dispatch
 path.
@@ -60,8 +65,10 @@ path.
 
 ## Dependencies and feature flags
 
-None, deliberately. The Flex, Grid, Linear, and Relative protocols are core,
-unconditional API, and the crate compiles with zero dependencies.
+The Flex, Grid, Linear, Relative, and text-style protocols are unconditional,
+and `default-features = false` keeps that protocol and box-layout core at zero
+dependencies. Default builds enable the `text` feature and its optional
+Parley dependency for shaping, line breaking, and retained text measurement.
 
 ## Prior art
 
