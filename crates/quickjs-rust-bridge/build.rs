@@ -27,25 +27,39 @@ fn main() {
         "cutils.c",
     ];
 
-    let mut build = cc::Build::new();
-    build
-        .include(&quickjs_dir)
+    let configure_build = || {
+        let mut build = cc::Build::new();
+        build
+            .define("CONFIG_VERSION", Some(version_define.as_str()))
+            .flag_if_supported("-std=gnu11")
+            .flag_if_supported("-fwrapv");
+        if target_os == "windows" {
+            build.define("__USE_MINGW_ANSI_STDIO", None);
+        } else {
+            build.define("_GNU_SOURCE", None);
+        }
+        build
+    };
+
+    // Emit the shim archive before its QuickJS dependency so static linkers see
+    // the bridge's unresolved JS_* symbols before scanning the engine archive.
+    let mut shim_build = configure_build();
+    shim_build
+        .flag("-isystem")
+        .flag(&quickjs_dir)
         .file(manifest_dir.join("src/shim.c"))
-        .define("CONFIG_VERSION", Some(version_define.as_str()))
-        .flag_if_supported("-std=gnu11")
-        .flag_if_supported("-fwrapv")
-        .warnings(false);
+        .warnings(true)
+        .warnings_into_errors(true)
+        .compile("quickjs_bridge_shim");
 
-    if target_os == "windows" {
-        build.define("__USE_MINGW_ANSI_STDIO", None);
-    } else {
-        build.define("_GNU_SOURCE", None);
-    }
-
+    // Keep diagnostics from the pinned third-party sources out of the
+    // project-owned shim's strict warning policy.
+    let mut quickjs_build = configure_build();
+    quickjs_build.include(&quickjs_dir).warnings(false);
     for source in sources {
-        build.file(quickjs_dir.join(source));
+        quickjs_build.file(quickjs_dir.join(source));
     }
-    build.compile("quickjs_bridge");
+    quickjs_build.compile("quickjs_bridge_core");
 
     if env::var("CARGO_CFG_TARGET_FAMILY").as_deref() == Ok("unix") {
         println!("cargo:rustc-link-lib=m");

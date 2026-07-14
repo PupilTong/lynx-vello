@@ -1,8 +1,20 @@
 #include "quickjs.h"
 
+#include <assert.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
+
+_Static_assert(JS_EVAL_TYPE_GLOBAL == 0,
+               "Rust JS_EVAL_TYPE_GLOBAL must match quickjs.h");
+_Static_assert(JS_EVAL_TYPE_MODULE == 1,
+               "Rust JS_EVAL_TYPE_MODULE must match quickjs.h");
+_Static_assert(JS_EVAL_FLAG_STRICT == (1 << 3),
+               "Rust JS_EVAL_FLAG_STRICT must match quickjs.h");
+_Static_assert(JS_EVAL_FLAG_BACKTRACE_BARRIER == (1 << 6),
+               "Rust JS_EVAL_FLAG_BACKTRACE_BARRIER must match quickjs.h");
+_Static_assert(JS_EVAL_FLAG_ASYNC == (1 << 7),
+               "Rust JS_EVAL_FLAG_ASYNC must match quickjs.h");
 
 typedef struct QjsValue {
     JSValue value;
@@ -14,12 +26,16 @@ typedef struct QjsUnhandledRejection {
     struct QjsUnhandledRejection *next;
 } QjsUnhandledRejection;
 
+typedef int QjsInterruptCallback(void *opaque);
+
 typedef struct QjsRuntime {
     JSRuntime *raw;
     JSContext *context;
     QjsUnhandledRejection *rejection_head;
     QjsUnhandledRejection *rejection_tail;
     int rejection_tracker_oom;
+    QjsInterruptCallback *interrupt_callback;
+    void *interrupt_opaque;
 } QjsRuntime;
 
 enum QjsValueKind {
@@ -40,6 +56,9 @@ enum QjsEvalFailureStage {
     QJS_EVAL_FAILURE_COMPILE = 1,
     QJS_EVAL_FAILURE_EXECUTE = 2,
 };
+
+_Static_assert(QJS_EVAL_FAILURE_COMPILE == 1,
+               "Rust QJS_EVAL_FAILURE_COMPILE must match shim.c");
 
 static QjsValue *qjs_box(JSContext *ctx, JSValue value) {
     QjsValue *boxed;
@@ -104,6 +123,16 @@ static void qjs_promise_rejection_tracker(JSContext *context,
     runtime->rejection_tail = current;
 }
 
+static int qjs_interrupt_trampoline(JSRuntime *raw, void *opaque) {
+    QjsRuntime *runtime = opaque;
+
+    (void)raw;
+    if (runtime->interrupt_callback == NULL) {
+        return 0;
+    }
+    return runtime->interrupt_callback(runtime->interrupt_opaque);
+}
+
 QjsRuntime *qjs_runtime_new(void) {
     QjsRuntime *runtime = calloc(1, sizeof(*runtime));
     if (runtime == NULL) {
@@ -126,6 +155,9 @@ QjsRuntime *qjs_runtime_new(void) {
 void qjs_runtime_free(QjsRuntime *runtime) {
     QjsUnhandledRejection *current = runtime->rejection_head;
 
+    JS_SetInterruptHandler(runtime->raw, NULL, NULL);
+    runtime->interrupt_callback = NULL;
+    runtime->interrupt_opaque = NULL;
     JS_SetHostPromiseRejectionTracker(runtime->raw, NULL, NULL);
     while (current != NULL) {
         QjsUnhandledRejection *next = current->next;
@@ -139,6 +171,8 @@ void qjs_runtime_free(QjsRuntime *runtime) {
 }
 
 JSContext *qjs_context_new(QjsRuntime *runtime) {
+    /* The rejection sidecar uses this sole context to own captured reasons. */
+    assert(runtime->context == NULL);
     runtime->context = JS_NewContext(runtime->raw);
     return runtime->context;
 }
@@ -153,6 +187,16 @@ void qjs_runtime_set_memory_limit(QjsRuntime *runtime, size_t limit) {
 
 void qjs_runtime_set_max_stack_size(QjsRuntime *runtime, size_t size) {
     JS_SetMaxStackSize(runtime->raw, size);
+}
+
+void qjs_runtime_set_interrupt_handler(QjsRuntime *runtime,
+                                       QjsInterruptCallback *callback,
+                                       void *opaque) {
+    runtime->interrupt_callback = callback;
+    runtime->interrupt_opaque = opaque;
+    JS_SetInterruptHandler(runtime->raw,
+                           callback == NULL ? NULL : qjs_interrupt_trampoline,
+                           callback == NULL ? NULL : runtime);
 }
 
 QjsValue *qjs_new_undefined(JSContext *context) {

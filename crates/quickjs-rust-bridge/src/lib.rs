@@ -21,11 +21,16 @@ mod ffi;
     reason = "this private implementation module contains the audited QuickJS FFI call sites"
 )]
 mod implementation {
-    use std::ffi::CString;
+    use std::cell::Cell;
+    use std::ffi::{CString, c_void};
     use std::fmt;
     use std::num::TryFromIntError;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::ptr::{self, NonNull};
     use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
 
     use super::ffi;
 
@@ -43,6 +48,12 @@ mod implementation {
         pub memory_limit: Option<usize>,
         /// Native stack limit in bytes. `None` uses `QuickJS`'s default.
         pub max_stack_size: Option<usize>,
+        /// Maximum wall time for one JavaScript entry or pending-job drain.
+        ///
+        /// The limit is cooperative: `QuickJS` checks it at engine interrupt
+        /// polling points. It cannot preempt a blocking native host callback.
+        /// `None` disables deadline-based interruption.
+        pub execution_timeout: Option<Duration>,
     }
 
     /// Borrowed JavaScript source plus diagnostic metadata.
@@ -125,6 +136,8 @@ mod implementation {
         NotCallable,
         TypeMismatch,
         TooManyArguments,
+        Interrupted,
+        ExecutionTimeout,
         Engine,
     }
 
@@ -181,9 +194,215 @@ mod implementation {
         pub jobs_remaining: bool,
     }
 
+    const INTERRUPT_REQUESTED: u64 = 1;
+    const MAX_INTERRUPT_GENERATION: u64 = u64::MAX >> 1;
+
+    #[derive(Debug)]
+    struct InterruptShared {
+        /// Zero while idle. Otherwise the high 63 bits identify the active
+        /// execution and bit zero records a host interruption request.
+        active: AtomicU64,
+    }
+
+    /// A thread-safe handle that can interrupt the JavaScript execution which
+    /// is active when the request is made.
+    ///
+    /// The request is best-effort because the owner thread may finish between
+    /// observing the active execution and `QuickJS` reaching its next polling
+    /// point. An idle request is ignored and cannot affect a later execution.
+    #[derive(Clone, Debug)]
+    pub struct InterruptHandle {
+        shared: Arc<InterruptShared>,
+    }
+
+    impl InterruptHandle {
+        /// Request interruption of the currently active JavaScript execution.
+        ///
+        /// Returns `false` if no JavaScript execution was active when the
+        /// request was observed. Returning `true` means the request was
+        /// recorded, not that the owner thread has already stopped.
+        #[must_use]
+        pub fn request_interrupt(&self) -> bool {
+            let active = self.shared.active.load(Ordering::Acquire);
+            if active == 0 {
+                return false;
+            }
+            if active & INTERRUPT_REQUESTED != 0 {
+                return true;
+            }
+
+            // Never retarget a late request to a newer generation. A strong
+            // compare-exchange can fail only because the active operation
+            // changed or another requester marked this exact generation.
+            match self.shared.active.compare_exchange(
+                active,
+                active | INTERRUPT_REQUESTED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => true,
+                Err(observed) => observed == active | INTERRUPT_REQUESTED,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum InterruptReason {
+        HostRequest,
+        Deadline,
+        HandlerFailure,
+    }
+
+    struct InterruptState {
+        shared: Arc<InterruptShared>,
+        timeout: Option<Duration>,
+        next_generation: Cell<u64>,
+        active_token: Cell<u64>,
+        deadline: Cell<Option<Instant>>,
+        reason: Cell<Option<InterruptReason>>,
+    }
+
+    impl InterruptState {
+        fn new(timeout: Option<Duration>) -> Self {
+            Self {
+                shared: Arc::new(InterruptShared {
+                    active: AtomicU64::new(0),
+                }),
+                timeout,
+                next_generation: Cell::new(0),
+                active_token: Cell::new(0),
+                deadline: Cell::new(None),
+                reason: Cell::new(None),
+            }
+        }
+
+        fn begin(self: &Rc<Self>) -> ExecutionGuard {
+            debug_assert_eq!(
+                self.shared.active.load(Ordering::Acquire),
+                0,
+                "QuickJS execution guards must not be nested"
+            );
+            let mut generation = self.next_generation.get() + 1;
+            if generation > MAX_INTERRUPT_GENERATION {
+                generation = 1;
+            }
+            self.next_generation.set(generation);
+            let token = generation << 1;
+            let now = Instant::now();
+            let deadline = self
+                .timeout
+                .map(|timeout| now.checked_add(timeout).unwrap_or(now));
+
+            self.reason.set(None);
+            self.deadline.set(deadline);
+            self.active_token.set(token);
+            self.shared.active.store(token, Ordering::Release);
+            ExecutionGuard {
+                state: Rc::clone(self),
+                token,
+                armed: true,
+            }
+        }
+
+        fn poll(&self) -> bool {
+            let token = self.active_token.get();
+            if token == 0 {
+                return false;
+            }
+            if self.reason.get().is_some() {
+                return true;
+            }
+            let active = self.shared.active.load(Ordering::Acquire);
+            if active == token | INTERRUPT_REQUESTED {
+                self.reason.set(Some(InterruptReason::HostRequest));
+                return true;
+            }
+            if active != token {
+                return false;
+            }
+            if self
+                .deadline
+                .get()
+                .is_some_and(|deadline| Instant::now() >= deadline)
+            {
+                self.reason.set(Some(InterruptReason::Deadline));
+                return true;
+            }
+            false
+        }
+    }
+
+    struct ExecutionGuard {
+        state: Rc<InterruptState>,
+        token: u64,
+        armed: bool,
+    }
+
+    impl ExecutionGuard {
+        fn finish<T>(mut self, result: Result<T, Error>, phase: ErrorPhase) -> Result<T, Error> {
+            let reason = self.state.reason.get();
+            self.disarm();
+            reason.map_or(result, |reason| Err(interrupt_error(reason, phase)))
+        }
+
+        fn disarm(&mut self) {
+            if !self.armed {
+                return;
+            }
+            let active = self.state.shared.active.swap(0, Ordering::AcqRel);
+            debug_assert!(
+                active == self.token || active == self.token | INTERRUPT_REQUESTED,
+                "interrupt generation changed during one synchronous execution"
+            );
+            self.state.active_token.set(0);
+            self.state.deadline.set(None);
+            self.state.reason.set(None);
+            self.armed = false;
+        }
+    }
+
+    impl Drop for ExecutionGuard {
+        fn drop(&mut self) {
+            self.disarm();
+        }
+    }
+
+    unsafe extern "C" fn interrupt_callback(opaque: *mut c_void) -> i32 {
+        // SAFETY: RealmInner unregisters the callback before dropping this
+        // stable Rc allocation. QuickJS invokes it only on the owner thread.
+        let state = unsafe { &*opaque.cast::<InterruptState>() };
+        if let Ok(interrupted) = catch_unwind(AssertUnwindSafe(|| state.poll())) {
+            i32::from(interrupted)
+        } else {
+            // No Rust panic may cross the C ABI. Fail closed if a platform
+            // clock implementation ever panics while polling the deadline.
+            state.reason.set(Some(InterruptReason::HandlerFailure));
+            1
+        }
+    }
+
+    fn interrupt_error(reason: InterruptReason, phase: ErrorPhase) -> Error {
+        match reason {
+            InterruptReason::HostRequest => Error::bridge(
+                ErrorKind::Interrupted,
+                phase,
+                "QuickJS execution was interrupted by the host",
+            ),
+            InterruptReason::Deadline => Error::bridge(
+                ErrorKind::ExecutionTimeout,
+                phase,
+                "QuickJS execution exceeded its configured timeout",
+            ),
+            InterruptReason::HandlerFailure => {
+                Error::bridge(ErrorKind::Engine, phase, "QuickJS interrupt handler failed")
+            }
+        }
+    }
+
     struct RealmInner {
         runtime: NonNull<ffi::QjsRuntime>,
         context: NonNull<ffi::JSContext>,
+        interrupt: Rc<InterruptState>,
     }
 
     impl Drop for RealmInner {
@@ -191,7 +410,15 @@ mod implementation {
             // SAFETY: this is the last `Rc<RealmInner>`, hence all ValueInner
             // instances have already freed their values. The context belongs to
             // this runtime and both pointers came from their matching constructors.
+            // Unregistering first makes the callback opaque invalid only after
+            // QuickJS can no longer dereference it.
             unsafe {
+                ffi::qjs_runtime_set_interrupt_handler(
+                    self.runtime.as_ptr(),
+                    None,
+                    ptr::null_mut(),
+                );
+                self.interrupt.shared.active.store(0, Ordering::Release);
                 ffi::qjs_context_free(self.context.as_ptr());
                 ffi::qjs_runtime_free(self.runtime.as_ptr());
             }
@@ -199,6 +426,16 @@ mod implementation {
     }
 
     /// One owner-thread-bound `QuickJS` runtime and global realm.
+    ///
+    /// ```compile_fail,E0277
+    /// fn require_send<T: Send>() {}
+    /// require_send::<quickjs_rust_bridge::Realm>();
+    /// ```
+    ///
+    /// ```compile_fail,E0277
+    /// fn require_sync<T: Sync>() {}
+    /// require_sync::<quickjs_rust_bridge::Realm>();
+    /// ```
     pub struct Realm {
         inner: Rc<RealmInner>,
     }
@@ -221,8 +458,19 @@ mod implementation {
             Self::with_options(RealmOptions::default())
         }
 
-        /// Creates a realm with optional heap and native-stack limits.
+        /// Creates a realm with optional heap, native-stack, and execution limits.
         pub fn with_options(options: RealmOptions) -> Result<Self, Error> {
+            if options
+                .execution_timeout
+                .is_some_and(|timeout| Instant::now().checked_add(timeout).is_none())
+            {
+                return Err(Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::CreateRealm,
+                    "execution timeout exceeds this platform's monotonic-clock range",
+                ));
+            }
+
             // SAFETY: the returned pointers are checked before use and immediately
             // placed under `RealmInner`'s matching destruction path.
             unsafe {
@@ -247,9 +495,30 @@ mod implementation {
                         "QuickJS could not allocate a context",
                     ));
                 };
+                let interrupt = Rc::new(InterruptState::new(options.execution_timeout));
+                ffi::qjs_runtime_set_interrupt_handler(
+                    runtime.as_ptr(),
+                    Some(interrupt_callback),
+                    Rc::as_ptr(&interrupt).cast_mut().cast(),
+                );
                 Ok(Self {
-                    inner: Rc::new(RealmInner { runtime, context }),
+                    inner: Rc::new(RealmInner {
+                        runtime,
+                        context,
+                        interrupt,
+                    }),
                 })
+            }
+        }
+
+        /// Returns a thread-safe handle for interrupting the active JavaScript entry.
+        ///
+        /// Requests are generation-scoped: an idle or late request cannot poison
+        /// the realm's next evaluation, call, or pending-job drain.
+        #[must_use]
+        pub fn interrupt_handle(&self) -> InterruptHandle {
+            InterruptHandle {
+                shared: Arc::clone(&self.inner.interrupt.shared),
             }
         }
 
@@ -419,6 +688,7 @@ mod implementation {
             }
 
             let mut failure_stage = 0;
+            let guard = self.inner.interrupt.begin();
             // SAFETY: source is explicitly NUL-terminated, its length excludes the
             // terminator, source_name and failure_stage are live, and context is
             // live. The shim initializes failure_stage before returning.
@@ -432,7 +702,7 @@ mod implementation {
                     &raw mut failure_stage,
                 )
             };
-            NonNull::new(raw)
+            let result = NonNull::new(raw)
                 .map(|raw| Value::from_raw(Rc::clone(&self.inner), raw))
                 .ok_or_else(|| {
                     self.capture_exception_with_syntax(
@@ -440,7 +710,8 @@ mod implementation {
                         ErrorPhase::Evaluate,
                         failure_stage == QJS_EVAL_FAILURE_COMPILE,
                     )
-                })
+                });
+            guard.finish(result, ErrorPhase::Evaluate)
         }
 
         /// Calls a function value after validating every handle's realm affinity.
@@ -475,6 +746,7 @@ mod implementation {
                 .iter()
                 .map(|value| value.inner.raw.as_ptr().cast_const())
                 .collect();
+            let guard = self.inner.interrupt.begin();
             // SAFETY: affinity validation proves all handles use this live context;
             // the pointer array remains live for the call and count fits `int`.
             let raw = unsafe {
@@ -486,13 +758,21 @@ mod implementation {
                     raw_arguments.as_ptr(),
                 )
             };
-            self.value_or_exception(raw, self.inner.context.as_ptr(), ErrorPhase::Call)
+            let result =
+                self.value_or_exception(raw, self.inner.context.as_ptr(), ErrorPhase::Call);
+            guard.finish(result, ErrorPhase::Call)
         }
 
         /// Executes at most one pending Promise/microtask job.
         ///
         /// Returns `true` when a job ran and `false` when the queue was empty.
         pub fn execute_pending_job(&mut self) -> Result<bool, Error> {
+            let guard = self.inner.interrupt.begin();
+            let result = self.execute_pending_job_inner();
+            guard.finish(result, ErrorPhase::PendingJob)
+        }
+
+        fn execute_pending_job_inner(&mut self) -> Result<bool, Error> {
             let mut job_context = ptr::null_mut();
             // SAFETY: runtime is live; QuickJS initializes job_context whenever it
             // reports a failing job.
@@ -519,27 +799,35 @@ mod implementation {
 
         /// Runs pending jobs until `QuickJS` reports an empty queue.
         pub fn drain_pending_jobs(&mut self) -> Result<usize, Error> {
-            let mut executed = 0usize;
-            while self.execute_pending_job()? {
-                executed = executed.saturating_add(1);
-            }
-            Ok(executed)
+            let guard = self.inner.interrupt.begin();
+            let result = (|| {
+                let mut executed = 0usize;
+                while self.execute_pending_job_inner()? {
+                    executed = executed.saturating_add(1);
+                }
+                Ok(executed)
+            })();
+            guard.finish(result, ErrorPhase::PendingJob)
         }
 
         /// Runs pending jobs until the queue is empty or `budget` jobs ran.
         pub fn drain_pending_jobs_bounded(&mut self, budget: usize) -> Result<JobDrain, Error> {
-            let mut executed = 0usize;
-            while executed < budget && self.execute_pending_job()? {
-                executed += 1;
-            }
-            let jobs_remaining = self.has_pending_job();
-            if !jobs_remaining && let Some(error) = self.take_unhandled_rejection() {
-                return Err(error);
-            }
-            Ok(JobDrain {
-                executed,
-                jobs_remaining,
-            })
+            let guard = self.inner.interrupt.begin();
+            let result = (|| {
+                let mut executed = 0usize;
+                while executed < budget && self.execute_pending_job_inner()? {
+                    executed += 1;
+                }
+                let jobs_remaining = self.has_pending_job();
+                if !jobs_remaining && let Some(error) = self.take_unhandled_rejection() {
+                    return Err(error);
+                }
+                Ok(JobDrain {
+                    executed,
+                    jobs_remaining,
+                })
+            })();
+            guard.finish(result, ErrorPhase::PendingJob)
         }
 
         fn construct(
@@ -630,6 +918,16 @@ mod implementation {
     }
 
     /// A rooted `QuickJS` value that keeps its owning realm alive.
+    ///
+    /// ```compile_fail,E0277
+    /// fn require_send<T: Send>() {}
+    /// require_send::<quickjs_rust_bridge::Value>();
+    /// ```
+    ///
+    /// ```compile_fail,E0277
+    /// fn require_sync<T: Sync>() {}
+    /// require_sync::<quickjs_rust_bridge::Value>();
+    /// ```
     #[derive(Clone)]
     pub struct Value {
         inner: Rc<ValueInner>,
@@ -947,7 +1245,7 @@ mod implementation {
 
     fn int_conversion_error(_: TryFromIntError) -> Error {
         Error::bridge(
-            ErrorKind::OutOfMemory,
+            ErrorKind::InvalidInput,
             ErrorPhase::Evaluate,
             "line offset does not fit this platform",
         )
@@ -955,7 +1253,79 @@ mod implementation {
 
     #[cfg(test)]
     mod tests {
+        use std::sync::mpsc;
+        use std::time::Instant;
+        use std::{panic, thread};
+
         use super::*;
+
+        const TEST_EXECUTION_TIMEOUT: Duration = Duration::from_millis(20);
+        const TEST_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(3);
+
+        fn timed_realm() -> Realm {
+            Realm::with_options(RealmOptions {
+                execution_timeout: Some(TEST_EXECUTION_TIMEOUT),
+                ..RealmOptions::default()
+            })
+            .expect("timed realm should initialize")
+        }
+
+        fn run_with_watchdog<T: Send + 'static>(
+            operation: impl FnOnce() -> T + Send + 'static,
+        ) -> T {
+            let (sender, receiver) = mpsc::sync_channel(1);
+            let worker = thread::spawn(move || {
+                let outcome = panic::catch_unwind(panic::AssertUnwindSafe(operation));
+                let _ = sender.send(outcome);
+            });
+            let outcome = receiver
+                .recv_timeout(TEST_WATCHDOG_TIMEOUT)
+                .unwrap_or_else(|error| panic!("QuickJS interrupt watchdog expired: {error}"));
+            worker
+                .join()
+                .expect("watchdog worker should capture its own panic");
+            match outcome {
+                Ok(value) => value,
+                Err(payload) => panic::resume_unwind(payload),
+            }
+        }
+
+        fn run_with_external_interrupt(
+            operation: impl FnOnce(&mut Realm, mpsc::SyncSender<InterruptHandle>) -> Error
+            + Send
+            + 'static,
+        ) -> (ErrorKind, ErrorPhase, Option<f64>) {
+            let (handle_sender, handle_receiver) = mpsc::sync_channel(1);
+            let (result_sender, result_receiver) = mpsc::sync_channel(1);
+            let worker = thread::spawn(move || {
+                let mut realm = Realm::new().expect("realm should initialize");
+                let error = operation(&mut realm, handle_sender);
+                let reused = realm
+                    .eval(EvalSource::new("14 * 3"), EvalOptions::default())
+                    .expect("realm should remain reusable")
+                    .as_number();
+                result_sender
+                    .send((error.kind, error.phase, reused))
+                    .expect("test should receive worker result");
+            });
+            let handle = handle_receiver
+                .recv_timeout(TEST_WATCHDOG_TIMEOUT)
+                .expect("worker should publish interrupt handle");
+            let request_deadline = Instant::now() + TEST_WATCHDOG_TIMEOUT;
+            while !handle.request_interrupt() {
+                assert!(
+                    Instant::now() < request_deadline,
+                    "JavaScript operation never became interruptible"
+                );
+                thread::yield_now();
+            }
+            let result = result_receiver
+                .recv_timeout(TEST_WATCHDOG_TIMEOUT)
+                .expect("external interruption watchdog expired");
+            worker.join().expect("worker should finish cleanly");
+            assert!(!handle.request_interrupt());
+            result
+        }
 
         #[test]
         fn evaluates_and_calls_functions() {
@@ -972,6 +1342,219 @@ mod implementation {
 
             assert_eq!(function.kind(), ValueKind::Function);
             assert_eq!(result.as_number(), Some(42.0));
+        }
+
+        #[test]
+        fn times_out_infinite_evaluation_and_reuses_realm() {
+            let (kind, phase, reused) = run_with_watchdog(|| {
+                let mut realm = timed_realm();
+                let error = realm
+                    .eval(EvalSource::new("for (;;) {}"), EvalOptions::default())
+                    .expect_err("infinite evaluation must time out");
+                let reused = realm
+                    .eval(EvalSource::new("21 * 2"), EvalOptions::default())
+                    .expect("realm should remain reusable")
+                    .as_number();
+                (error.kind, error.phase, reused)
+            });
+
+            assert_eq!(kind, ErrorKind::ExecutionTimeout);
+            assert_eq!(phase, ErrorPhase::Evaluate);
+            assert_eq!(reused, Some(42.0));
+        }
+
+        #[test]
+        fn times_out_infinite_call_and_reuses_realm() {
+            let (kind, phase, reused) = run_with_watchdog(|| {
+                let mut realm = timed_realm();
+                let callable = realm
+                    .eval(
+                        EvalSource::new("() => { while (true) {} }"),
+                        EvalOptions::default(),
+                    )
+                    .expect("callable should evaluate");
+                let error = realm
+                    .call(&callable, None, &[])
+                    .expect_err("infinite call must time out");
+                let reused = realm
+                    .eval(EvalSource::new("6 * 7"), EvalOptions::default())
+                    .expect("realm should remain reusable")
+                    .as_number();
+                (error.kind, error.phase, reused)
+            });
+
+            assert_eq!(kind, ErrorKind::ExecutionTimeout);
+            assert_eq!(phase, ErrorPhase::Call);
+            assert_eq!(reused, Some(42.0));
+        }
+
+        #[test]
+        fn timeout_remains_active_while_sanitizing_exceptions() {
+            let (kind, phase, reused) = run_with_watchdog(|| {
+                let mut realm = timed_realm();
+                let error = realm
+                    .eval(
+                        EvalSource::new("throw new Proxy({}, { get() { while (true) {} } })"),
+                        EvalOptions::default(),
+                    )
+                    .expect_err("malicious exception accessors must time out");
+                let reused = realm
+                    .eval(EvalSource::new("40 + 2"), EvalOptions::default())
+                    .expect("realm should remain reusable")
+                    .as_number();
+                (error.kind, error.phase, reused)
+            });
+
+            assert_eq!(kind, ErrorKind::ExecutionTimeout);
+            assert_eq!(phase, ErrorPhase::Evaluate);
+            assert_eq!(reused, Some(42.0));
+        }
+
+        #[test]
+        fn times_out_an_infinite_pending_job() {
+            let (kind, phase, reused) = run_with_watchdog(|| {
+                let mut realm = timed_realm();
+                realm
+                    .eval(
+                        EvalSource::new(
+                            "Promise.resolve().then(() => { while (true) {} }); undefined",
+                        ),
+                        EvalOptions::default(),
+                    )
+                    .expect("job should be scheduled");
+                let error = realm
+                    .execute_pending_job()
+                    .expect_err("infinite pending job must time out");
+                let reused = realm
+                    .eval(EvalSource::new("7 * 6"), EvalOptions::default())
+                    .expect("realm should remain reusable")
+                    .as_number();
+                (error.kind, error.phase, reused)
+            });
+
+            assert_eq!(kind, ErrorKind::ExecutionTimeout);
+            assert_eq!(phase, ErrorPhase::PendingJob);
+            assert_eq!(reused, Some(42.0));
+        }
+
+        #[test]
+        fn one_timeout_covers_an_entire_pending_job_drain() {
+            let (kind, phase, reused) = run_with_watchdog(|| {
+                let mut realm = timed_realm();
+                realm
+                    .eval(
+                        EvalSource::new(
+                            "globalThis.reschedule = () => { \
+                             Promise.resolve().then(reschedule); \
+                             }; reschedule()",
+                        ),
+                        EvalOptions::default(),
+                    )
+                    .expect("self-replenishing job chain should start");
+                let error = realm
+                    .drain_pending_jobs_bounded(usize::MAX)
+                    .expect_err("the whole drain must share one deadline");
+                let reused = realm
+                    .eval(EvalSource::new("84 / 2"), EvalOptions::default())
+                    .expect("realm should remain reusable")
+                    .as_number();
+                (error.kind, error.phase, reused)
+            });
+
+            assert_eq!(kind, ErrorKind::ExecutionTimeout);
+            assert_eq!(phase, ErrorPhase::PendingJob);
+            assert_eq!(reused, Some(42.0));
+        }
+
+        #[test]
+        fn external_interrupt_is_scoped_to_the_active_generation() {
+            let (kind, phase, reused) = run_with_external_interrupt(|realm, handle_sender| {
+                handle_sender
+                    .send(realm.interrupt_handle())
+                    .expect("test should receive interrupt handle");
+                realm
+                    .eval(EvalSource::new("for (;;) {}"), EvalOptions::default())
+                    .expect_err("host request must interrupt evaluation")
+            });
+
+            assert_eq!(kind, ErrorKind::Interrupted);
+            assert_eq!(phase, ErrorPhase::Evaluate);
+            assert_eq!(reused, Some(42.0));
+        }
+
+        #[test]
+        fn external_interrupt_covers_calls_and_preserves_realm() {
+            let (kind, phase, reused) = run_with_external_interrupt(|realm, handle_sender| {
+                let callable = realm
+                    .eval(
+                        EvalSource::new("() => { while (true) {} }"),
+                        EvalOptions::default(),
+                    )
+                    .expect("callable should evaluate");
+                handle_sender
+                    .send(realm.interrupt_handle())
+                    .expect("test should receive interrupt handle");
+                realm
+                    .call(&callable, None, &[])
+                    .expect_err("host request must interrupt call")
+            });
+
+            assert_eq!(kind, ErrorKind::Interrupted);
+            assert_eq!(phase, ErrorPhase::Call);
+            assert_eq!(reused, Some(42.0));
+        }
+
+        #[test]
+        fn external_interrupt_covers_pending_jobs_and_preserves_realm() {
+            let (kind, phase, reused) = run_with_external_interrupt(|realm, handle_sender| {
+                realm
+                    .eval(
+                        EvalSource::new(
+                            "Promise.resolve().then(() => { while (true) {} }); undefined",
+                        ),
+                        EvalOptions::default(),
+                    )
+                    .expect("job should be scheduled");
+                handle_sender
+                    .send(realm.interrupt_handle())
+                    .expect("test should receive interrupt handle");
+                realm
+                    .execute_pending_job()
+                    .expect_err("host request must interrupt pending job")
+            });
+
+            assert_eq!(kind, ErrorKind::Interrupted);
+            assert_eq!(phase, ErrorPhase::PendingJob);
+            assert_eq!(reused, Some(42.0));
+        }
+
+        #[test]
+        fn idle_interrupt_requests_do_not_poison_later_execution() {
+            fn assert_send_sync<T: Send + Sync>() {}
+
+            assert_send_sync::<InterruptHandle>();
+            let mut realm = Realm::new().expect("realm should initialize");
+            let handle = realm.interrupt_handle();
+            assert!(!handle.request_interrupt());
+            let result = realm
+                .eval(EvalSource::new("20 + 22"), EvalOptions::default())
+                .expect("idle request must not affect evaluation");
+            assert_eq!(result.as_number(), Some(42.0));
+            drop(result);
+            drop(realm);
+            assert!(!handle.request_interrupt());
+        }
+
+        #[test]
+        fn rejects_unrepresentable_execution_timeout() {
+            let error = Realm::with_options(RealmOptions {
+                execution_timeout: Some(Duration::MAX),
+                ..RealmOptions::default()
+            })
+            .expect_err("an unrepresentable deadline must fail realm creation");
+
+            assert_eq!(error.kind, ErrorKind::InvalidInput);
+            assert_eq!(error.phase, ErrorPhase::CreateRealm);
         }
 
         #[test]
@@ -1187,11 +1770,11 @@ mod implementation {
 }
 
 pub use bobcat::{
-    DEFAULT_MAX_JOBS_PER_CHECKPOINT, QuickJsCallable, QuickJsConfig, QuickJsInitializationError,
-    QuickJsLynxView, QuickJsScriptEngine, QuickJsScriptEngineConfig, QuickJsSymbol,
-    new_quickjs_view, new_quickjs_view_with_config,
+    DEFAULT_EXECUTION_TIMEOUT, DEFAULT_MAX_JOBS_PER_CHECKPOINT, QuickJsCallable, QuickJsConfig,
+    QuickJsInitializationError, QuickJsLynxView, QuickJsScriptEngine, QuickJsScriptEngineConfig,
+    QuickJsSymbol, new_quickjs_view, new_quickjs_view_with_config,
 };
 pub use implementation::{
-    Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, JobDrain, Realm, RealmOptions,
-    SourceLocation, Value, ValueKind,
+    Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, InterruptHandle, JobDrain, Realm,
+    RealmOptions, SourceLocation, Value, ValueKind,
 };

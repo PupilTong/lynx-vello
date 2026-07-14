@@ -1,8 +1,10 @@
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::task::{Context, Poll, Waker};
+use std::time::Duration;
+use std::{panic, thread};
 
 use bobcat_engine::resource::{
     BufferedResourceRequest, HttpRequest, HttpResponse, PrefetchReceipt, PrefetchRequest,
@@ -13,8 +15,8 @@ use bobcat_engine::resource::{
 use bobcat_engine::script::{ScriptEngine, ScriptErrorKind, ScriptErrorPhase, ScriptValue};
 use bobcat_engine::view::EngineMetrics;
 use quickjs_rust_bridge::{
-    EvalSource, QuickJsCallable, QuickJsConfig, QuickJsScriptEngine, QuickJsSymbol,
-    new_quickjs_view,
+    DEFAULT_EXECUTION_TIMEOUT, EvalSource, QuickJsCallable, QuickJsConfig, QuickJsScriptEngine,
+    QuickJsSymbol, new_quickjs_view,
 };
 
 type Value = ScriptValue<QuickJsCallable, QuickJsSymbol>;
@@ -25,6 +27,54 @@ fn engine() -> QuickJsScriptEngine {
 
 fn evaluate(engine: &mut QuickJsScriptEngine, source: &str) -> Value {
     engine.evaluate(source).expect("script should evaluate")
+}
+
+fn run_with_watchdog<T: Send + 'static>(operation: impl FnOnce() -> T + Send + 'static) -> T {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let worker = thread::spawn(move || {
+        let outcome = panic::catch_unwind(panic::AssertUnwindSafe(operation));
+        let _ = sender.send(outcome);
+    });
+    let outcome = receiver
+        .recv_timeout(Duration::from_secs(3))
+        .unwrap_or_else(|error| panic!("QuickJS interrupt watchdog expired: {error}"));
+    worker
+        .join()
+        .expect("watchdog worker should capture its own panic");
+    match outcome {
+        Ok(value) => value,
+        Err(payload) => panic::resume_unwind(payload),
+    }
+}
+
+#[test]
+fn execution_timeout_policy_is_configurable() {
+    let default = QuickJsConfig::default();
+    assert_eq!(default.execution_timeout(), Some(DEFAULT_EXECUTION_TIMEOUT));
+    assert_eq!(
+        default.with_execution_timeout(None).execution_timeout(),
+        None
+    );
+}
+
+#[test]
+fn execution_timeout_maps_to_reusable_bobcat_error() {
+    let (kind, phase, message, reused) = run_with_watchdog(|| {
+        let config =
+            QuickJsConfig::default().with_execution_timeout(Some(Duration::from_millis(20)));
+        let mut engine =
+            QuickJsScriptEngine::with_config(config).expect("QuickJS realm should initialize");
+        let error = engine
+            .evaluate("for (;;) {}")
+            .expect_err("infinite evaluation must time out");
+        let reused = matches!(engine.evaluate("6 * 7"), Ok(Value::Number(42.0)));
+        (error.kind, error.phase, error.message, reused)
+    });
+
+    assert_eq!(kind, ScriptErrorKind::Other);
+    assert_eq!(phase, ScriptErrorPhase::Evaluate);
+    assert!(message.contains("configured timeout"));
+    assert!(reused);
 }
 
 #[test]
@@ -256,13 +306,13 @@ fn checkpoint_errors_after_primary_exceptions_precede_javascript_reentry() {
         )
         .expect_err("the primary exception should win");
     assert_eq!(primary.kind, ScriptErrorKind::Exception);
-    assert_eq!(primary.message.as_ref(), "primary failure");
+    assert_eq!(primary.message.as_ref(), "Error: primary failure");
 
     let deferred = engine
         .evaluate("globalThis.enteredBeforeDeferredRejection = true")
         .expect_err("the deferred checkpoint error should be reported first");
     assert_eq!(deferred.kind, ScriptErrorKind::Exception);
-    assert_eq!(deferred.message.as_ref(), "deferred rejection");
+    assert_eq!(deferred.message.as_ref(), "Error: deferred rejection");
     assert!(matches!(
         evaluate(&mut engine, "typeof enteredBeforeDeferredRejection"),
         Value::String(value) if value.as_ref() == "undefined"
@@ -310,6 +360,13 @@ fn source_metadata_and_error_categories_are_preserved() {
         .expect_err("throw must fail");
     assert_eq!(exception.kind, ScriptErrorKind::Exception);
     assert_eq!(exception.phase, ScriptErrorPhase::Evaluate);
+    assert_eq!(exception.message.as_ref(), "Error: private realm error");
+
+    let type_error = engine
+        .evaluate("throw new TypeError('invalid receiver')")
+        .expect_err("a TypeError must fail");
+    assert_eq!(type_error.kind, ScriptErrorKind::Exception);
+    assert_eq!(type_error.message.as_ref(), "TypeError: invalid receiver");
 
     let thrown_syntax = engine
         .evaluate("throw new SyntaxError('runtime syntax object')")
@@ -360,7 +417,7 @@ fn rejected_microtasks_are_sanitized_as_checkpoint_exceptions() {
 
     assert_eq!(error.kind, ScriptErrorKind::Exception);
     assert_eq!(error.phase, ScriptErrorPhase::Evaluate);
-    assert_eq!(error.message.as_ref(), "microtask rejection");
+    assert_eq!(error.message.as_ref(), "Error: microtask rejection");
 }
 
 #[test]
@@ -372,14 +429,14 @@ fn multiple_rejections_are_reported_before_javascript_reentry() {
         )
         .expect_err("the first unhandled rejection must fail the checkpoint");
     assert_eq!(first.kind, ScriptErrorKind::Exception);
-    assert_eq!(first.message.as_ref(), "first");
+    assert_eq!(first.message.as_ref(), "Error: first");
 
     let second = engine
         .evaluate("globalThis.enteredBeforeRejectionsDrained = true")
         .expect_err("the second rejection must precede new JavaScript");
     assert_eq!(second.kind, ScriptErrorKind::Exception);
     assert_eq!(second.phase, ScriptErrorPhase::Evaluate);
-    assert_eq!(second.message.as_ref(), "second");
+    assert_eq!(second.message.as_ref(), "Error: second");
 
     assert!(matches!(
         evaluate(&mut engine, "typeof enteredBeforeRejectionsDrained"),

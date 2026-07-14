@@ -2,7 +2,9 @@
 
 #![allow(unsafe_code)]
 
-use std::ffi::{c_char, c_double, c_int};
+use std::ffi::{c_char, c_double, c_int, c_void};
+
+pub(crate) type InterruptCallback = unsafe extern "C" fn(opaque: *mut c_void) -> c_int;
 
 #[repr(C)]
 pub(crate) struct QjsRuntime {
@@ -26,6 +28,11 @@ unsafe extern "C" {
     pub(crate) fn qjs_context_free(context: *mut JSContext);
     pub(crate) fn qjs_runtime_set_memory_limit(runtime: *mut QjsRuntime, limit: usize);
     pub(crate) fn qjs_runtime_set_max_stack_size(runtime: *mut QjsRuntime, size: usize);
+    pub(crate) fn qjs_runtime_set_interrupt_handler(
+        runtime: *mut QjsRuntime,
+        callback: Option<InterruptCallback>,
+        opaque: *mut c_void,
+    );
 
     pub(crate) fn qjs_new_undefined(context: *mut JSContext) -> *mut QjsValue;
     pub(crate) fn qjs_new_null(context: *mut JSContext) -> *mut QjsValue;

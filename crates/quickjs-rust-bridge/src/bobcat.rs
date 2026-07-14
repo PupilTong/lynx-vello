@@ -9,6 +9,7 @@
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bobcat_engine::resource::ResourceFetcher;
 use bobcat_engine::script::{
@@ -23,10 +24,15 @@ use crate as quickjs;
 pub const DEFAULT_MAX_JOBS_PER_CHECKPOINT: NonZeroUsize =
     NonZeroUsize::new(1_024).expect("the default job limit is non-zero");
 
+/// Default wall-time limit for one JavaScript entry or promise-job checkpoint.
+pub const DEFAULT_EXECUTION_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Runtime policy for a [`QuickJsScriptEngine`].
 ///
-/// The job limit is non-zero by construction, preventing one public engine
-/// operation from draining an endlessly replenished promise queue forever.
+/// The job limit is non-zero by construction, and the default execution
+/// timeout is finite. Together they prevent one public engine operation from
+/// monopolizing the owner thread indefinitely. The timeout can be disabled
+/// explicitly for embedders that provide another interruption policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QuickJsConfig {
     realm_options: quickjs::RealmOptions,
@@ -45,6 +51,16 @@ impl QuickJsConfig {
     #[must_use]
     pub const fn with_max_stack_size(mut self, max_stack_size: Option<usize>) -> Self {
         self.realm_options.max_stack_size = max_stack_size;
+        self
+    }
+
+    /// Set the wall-time limit for one JavaScript entry or job checkpoint.
+    ///
+    /// `None` disables deadline-based interruption. The limit remains
+    /// cooperative and cannot preempt a blocking native host callback.
+    #[must_use]
+    pub const fn with_execution_timeout(mut self, execution_timeout: Option<Duration>) -> Self {
+        self.realm_options.execution_timeout = execution_timeout;
         self
     }
 
@@ -75,6 +91,12 @@ impl QuickJsConfig {
     pub const fn max_stack_size(self) -> Option<usize> {
         self.realm_options.max_stack_size
     }
+
+    /// Return the wall-time limit for one JavaScript entry or job checkpoint.
+    #[must_use]
+    pub const fn execution_timeout(self) -> Option<Duration> {
+        self.realm_options.execution_timeout
+    }
 }
 
 impl Default for QuickJsConfig {
@@ -83,6 +105,7 @@ impl Default for QuickJsConfig {
             realm_options: quickjs::RealmOptions {
                 memory_limit: None,
                 max_stack_size: None,
+                execution_timeout: Some(DEFAULT_EXECUTION_TIMEOUT),
             },
             max_jobs_per_checkpoint: DEFAULT_MAX_JOBS_PER_CHECKPOINT,
         }
@@ -131,6 +154,11 @@ impl fmt::Debug for QuickJsSymbol {
 /// outstanding checkpoint work remains ordered ahead of later JavaScript: the
 /// next evaluation or call first resumes the checkpoint and proceeds only
 /// after it drains.
+///
+/// A checkpoint runs before a successful evaluation or call is returned. An
+/// unhandled rejection therefore returns an error and discards that operation's
+/// otherwise successful result. This is an intentional synchronous embedding
+/// policy; browser-style rejection events require a separate reporting channel.
 pub struct QuickJsScriptEngine {
     realm: quickjs::Realm,
     config: QuickJsConfig,
@@ -158,6 +186,12 @@ impl QuickJsScriptEngine {
     #[must_use]
     pub const fn config(&self) -> QuickJsConfig {
         self.config
+    }
+
+    /// Return a thread-safe handle for interrupting the active JavaScript entry.
+    #[must_use]
+    pub fn interrupt_handle(&self) -> quickjs::InterruptHandle {
+        self.realm.interrupt_handle()
     }
 
     /// Evaluate a Script with bridge-owned diagnostic metadata.
@@ -256,7 +290,8 @@ impl QuickJsScriptEngine {
                 // runs after a later host-to-JavaScript entry. Preserve the
                 // primary exception and defer any checkpoint failure.
                 if let Err(checkpoint_error) = self.checkpoint(phase) {
-                    self.deferred_checkpoint_error = Some(checkpoint_error);
+                    self.deferred_checkpoint_error
+                        .get_or_insert(checkpoint_error);
                 }
                 Err(primary_error)
             }
@@ -380,6 +415,10 @@ fn map_quickjs_error(error: quickjs::Error, phase: ScriptErrorPhase) -> ScriptEr
             ScriptErrorKind::InvalidBoundaryValue
         }
         quickjs::ErrorKind::WrongRealm => ScriptErrorKind::WrongEngine,
+        quickjs::ErrorKind::Interrupted | quickjs::ErrorKind::ExecutionTimeout => {
+            // Interruption ends only the current entry; the realm remains reusable.
+            ScriptErrorKind::Other
+        }
         _ => ScriptErrorKind::Other,
     };
     let location = error.location.map(|location| ScriptSourceLocation {
@@ -387,10 +426,16 @@ fn map_quickjs_error(error: quickjs::Error, phase: ScriptErrorPhase) -> ScriptEr
         line: location.line,
         column: location.column,
     });
+    let message = match (error.name, error.message) {
+        (Some(name), message) if name.is_empty() => message,
+        (Some(name), message) if message.is_empty() => name,
+        (Some(name), message) => format!("{name}: {message}"),
+        (None, message) => message,
+    };
     ScriptError {
         kind,
         phase,
-        message: Arc::from(error.message),
+        message: Arc::from(message),
         location,
     }
 }
