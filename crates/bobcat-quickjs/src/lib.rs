@@ -1,10 +1,9 @@
-//! Direct QuickJS-backed runtime composition for [`bobcat_engine`].
+//! QuickJS-backed runtime composition for [`bobcat_engine`].
 //!
-//! [`QuickJsScriptEngine`] adapts the engine-independent
-//! [`bobcat_engine::script::ScriptEngine`] boundary to one private `QuickJS`
-//! realm. This crate owns runtime policy such as automatic, bounded microtask
-//! checkpoints; the lower-level [`quickjs_rust_bridge::Realm`] API remains
-//! usable independently.
+//! The public API exposes an opaque [`QuickJsLynxView`], its [`QuickJsConfig`]
+//! and construction helpers. The concrete script adapter, realm values and
+//! direct source-evaluation controls remain implementation details. The
+//! lower-level [`quickjs_rust_bridge`] crate remains independently usable.
 
 use std::fmt;
 use std::num::NonZeroUsize;
@@ -16,7 +15,7 @@ use bobcat_engine::script::{
     ScriptEngine, ScriptError, ScriptErrorKind, ScriptErrorPhase, ScriptFuture,
     ScriptSourceLocation, ScriptValue,
 };
-use bobcat_engine::view::{EngineMetrics, LynxView};
+use bobcat_engine::view::{EngineMetrics, LynxView, LynxWidgetApi};
 use quickjs_rust_bridge as quickjs;
 
 /// Default maximum number of promise jobs run by one checkpoint.
@@ -26,13 +25,14 @@ pub const DEFAULT_MAX_JOBS_PER_CHECKPOINT: NonZeroUsize =
 /// Default wall-time limit for one JavaScript entry or promise-job checkpoint.
 pub const DEFAULT_EXECUTION_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Runtime policy for a [`QuickJsScriptEngine`].
+/// Runtime policy for a [`QuickJsLynxView`].
 ///
 /// The job limit is non-zero by construction, and the default execution
-/// timeout is finite. Together they prevent one public engine operation from
-/// monopolizing the owner thread indefinitely. The timeout can be disabled
-/// explicitly for embedders that provide another interruption policy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// timeout is finite. Together they prevent one script entry or checkpoint
+/// from monopolizing the owner thread indefinitely. The timeout can be
+/// disabled explicitly for embedders that provide another interruption
+/// policy.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct QuickJsConfig {
     realm_options: quickjs::RealmOptions,
     max_jobs_per_checkpoint: NonZeroUsize,
@@ -111,19 +111,55 @@ impl Default for QuickJsConfig {
     }
 }
 
-/// Descriptive alias for [`QuickJsConfig`].
-pub type QuickJsScriptEngineConfig = QuickJsConfig;
+impl fmt::Debug for QuickJsConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("QuickJsConfig")
+            .field("memory_limit", &self.memory_limit())
+            .field("max_stack_size", &self.max_stack_size())
+            .field("execution_timeout", &self.execution_timeout())
+            .field("max_jobs_per_checkpoint", &self.max_jobs_per_checkpoint())
+            .finish()
+    }
+}
 
 /// Failure to allocate or initialize a `QuickJS` realm.
-pub type QuickJsInitializationError = quickjs::Error;
+#[derive(Clone, PartialEq, Eq)]
+pub struct QuickJsInitializationError {
+    message: Arc<str>,
+}
 
-/// Opaque, cloneable root for a callable owned by one `QuickJS` realm.
-///
-/// Cloning this handle adds another root. Passing it to a different
-/// [`QuickJsScriptEngine`] is rejected with
-/// [`bobcat_engine::script::ScriptErrorKind::WrongEngine`].
+impl QuickJsInitializationError {
+    fn from_quickjs(error: quickjs::Error) -> Self {
+        Self {
+            message: Arc::from(error.message),
+        }
+    }
+}
+
+impl fmt::Debug for QuickJsInitializationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("QuickJsInitializationError")
+            .field("message", &self.message)
+            .finish()
+    }
+}
+
+impl fmt::Display for QuickJsInitializationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "could not initialize the QuickJS runtime: {}",
+            self.message
+        )
+    }
+}
+
+impl std::error::Error for QuickJsInitializationError {}
+
 #[derive(Clone)]
-pub struct QuickJsCallable(quickjs::Value);
+struct QuickJsCallable(quickjs::Value);
 
 impl fmt::Debug for QuickJsCallable {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -133,11 +169,8 @@ impl fmt::Debug for QuickJsCallable {
     }
 }
 
-/// Opaque, cloneable root for a Symbol owned by one `QuickJS` realm.
-///
-/// The symbol's identity and description remain engine-private.
 #[derive(Clone)]
-pub struct QuickJsSymbol(quickjs::Value);
+struct QuickJsSymbol(quickjs::Value);
 
 impl fmt::Debug for QuickJsSymbol {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -147,18 +180,7 @@ impl fmt::Debug for QuickJsSymbol {
     }
 }
 
-/// One owner-thread-bound `QuickJS` realm implementing Bobcat's script boundary.
-///
-/// If a checkpoint reaches its configured job limit or reports a rejection,
-/// outstanding checkpoint work remains ordered ahead of later JavaScript: the
-/// next evaluation or call first resumes the checkpoint and proceeds only
-/// after it drains.
-///
-/// A checkpoint runs before a successful evaluation or call is returned. An
-/// unhandled rejection therefore returns an error and discards that operation's
-/// otherwise successful result. This is an intentional synchronous embedding
-/// policy; browser-style rejection events require a separate reporting channel.
-pub struct QuickJsScriptEngine {
+struct QuickJsScriptEngine {
     realm: quickjs::Realm,
     config: QuickJsConfig,
     checkpoint_incomplete: bool,
@@ -166,39 +188,26 @@ pub struct QuickJsScriptEngine {
 }
 
 impl QuickJsScriptEngine {
-    /// Allocate a realm with [`QuickJsConfig::default`].
-    pub fn new() -> Result<Self, QuickJsInitializationError> {
+    fn new() -> Result<Self, QuickJsInitializationError> {
         Self::with_config(QuickJsConfig::default())
     }
 
-    /// Allocate a realm with explicit runtime policy.
-    pub fn with_config(config: QuickJsConfig) -> Result<Self, QuickJsInitializationError> {
+    fn with_config(config: QuickJsConfig) -> Result<Self, QuickJsInitializationError> {
         Ok(Self {
-            realm: quickjs::Realm::with_options(config.realm_options)?,
+            realm: quickjs::Realm::with_options(config.realm_options)
+                .map_err(QuickJsInitializationError::from_quickjs)?,
             config,
             checkpoint_incomplete: false,
             deferred_checkpoint_error: None,
         })
     }
 
-    /// Return this engine's runtime policy.
     #[must_use]
-    pub const fn config(&self) -> QuickJsConfig {
+    const fn config(&self) -> QuickJsConfig {
         self.config
     }
 
-    /// Return a thread-safe handle for interrupting the active JavaScript entry.
-    #[must_use]
-    pub fn interrupt_handle(&self) -> quickjs::InterruptHandle {
-        self.realm.interrupt_handle()
-    }
-
-    /// Evaluate a Script with bridge-owned diagnostic metadata.
-    ///
-    /// Bobcat's engine-neutral [`ScriptEngine::evaluate`] accepts only source
-    /// text. This inherent method keeps source names and line offsets local to
-    /// the concrete `QuickJS` integration.
-    pub fn evaluate_source(
+    fn evaluate_source(
         &mut self,
         source: quickjs::EvalSource<'_>,
     ) -> Result<ScriptValue<QuickJsCallable, QuickJsSymbol>, ScriptError> {
@@ -457,8 +466,55 @@ fn script_error(
     }
 }
 
-/// A Bobcat view using the default `QuickJS` script adapter.
-pub type QuickJsLynxView<R> = LynxView<R, QuickJsScriptEngine>;
+/// A QuickJS-backed Bobcat view whose script runtime is kept private.
+///
+/// Host code can access resources and widgets through this facade. Script
+/// execution is driven by the runtime integration rather than by exposing the
+/// concrete [`bobcat_engine::script::ScriptEngine`] implementation.
+pub struct QuickJsLynxView<R: ResourceFetcher + ?Sized> {
+    inner: LynxView<R, QuickJsScriptEngine>,
+}
+
+impl<R: ResourceFetcher + ?Sized> QuickJsLynxView<R> {
+    /// Return this view's `QuickJS` runtime policy.
+    #[must_use]
+    pub const fn config(&self) -> QuickJsConfig {
+        self.inner.script_engine().config()
+    }
+
+    /// Borrow the host resource fetcher.
+    #[must_use]
+    pub fn resource_fetcher(&self) -> &R {
+        self.inner.resource_fetcher()
+    }
+
+    /// Borrow the shared ownership handle for the host resource fetcher.
+    #[must_use]
+    pub const fn shared_resource_fetcher(&self) -> &Arc<R> {
+        self.inner.shared_resource_fetcher()
+    }
+
+    /// Borrow this view's widget API.
+    #[must_use]
+    pub const fn widget_api(&self) -> &LynxWidgetApi {
+        self.inner.widget_api()
+    }
+
+    /// Mutably borrow this view's widget API.
+    pub const fn widget_api_mut(&mut self) -> &mut LynxWidgetApi {
+        self.inner.widget_api_mut()
+    }
+}
+
+impl<R: ResourceFetcher + ?Sized> fmt::Debug for QuickJsLynxView<R> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("QuickJsLynxView")
+            .field("config", &self.config())
+            .field("widget_api", &self.widget_api())
+            .finish_non_exhaustive()
+    }
+}
 
 /// Create a QuickJS-backed view with default runtime policy.
 pub fn new_quickjs_view<R: ResourceFetcher>(
@@ -466,7 +522,9 @@ pub fn new_quickjs_view<R: ResourceFetcher>(
     metrics: EngineMetrics,
 ) -> Result<QuickJsLynxView<R>, QuickJsInitializationError> {
     let script_engine = QuickJsScriptEngine::new()?;
-    Ok(LynxView::new(resource_fetcher, script_engine, metrics))
+    Ok(QuickJsLynxView {
+        inner: LynxView::new(resource_fetcher, script_engine, metrics),
+    })
 }
 
 /// Create a QuickJS-backed view with explicit runtime policy.
@@ -476,5 +534,10 @@ pub fn new_quickjs_view_with_config<R: ResourceFetcher>(
     config: QuickJsConfig,
 ) -> Result<QuickJsLynxView<R>, QuickJsInitializationError> {
     let script_engine = QuickJsScriptEngine::with_config(config)?;
-    Ok(LynxView::new(resource_fetcher, script_engine, metrics))
+    Ok(QuickJsLynxView {
+        inner: LynxView::new(resource_fetcher, script_engine, metrics),
+    })
 }
+
+#[cfg(test)]
+mod tests;

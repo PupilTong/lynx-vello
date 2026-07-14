@@ -14,11 +14,12 @@ use bobcat_engine::resource::{
 };
 use bobcat_engine::script::{ScriptEngine, ScriptErrorKind, ScriptErrorPhase, ScriptValue};
 use bobcat_engine::view::EngineMetrics;
-use bobcat_quickjs::{
+use quickjs_rust_bridge::EvalSource;
+
+use super::{
     DEFAULT_EXECUTION_TIMEOUT, QuickJsCallable, QuickJsConfig, QuickJsScriptEngine, QuickJsSymbol,
     new_quickjs_view,
 };
-use quickjs_rust_bridge::EvalSource;
 
 type Value = ScriptValue<QuickJsCallable, QuickJsSymbol>;
 
@@ -566,8 +567,11 @@ fn quickjs_engine_composes_into_a_lynx_view() {
     let mut view = new_quickjs_view(NullResourceFetcher, EngineMetrics::new(390.0, 844.0, 3.0))
         .expect("view should initialize");
 
+    assert_eq!(view.config(), QuickJsConfig::default());
+    assert!(format!("{:?}", view.widget_api()).contains("LynxWidgetApi"));
+    assert!(!format!("{view:?}").contains("ScriptEngine"));
     assert!(matches!(
-        view.script_engine_mut().evaluate("6 * 7"),
+        view.inner.script_engine_mut().evaluate("6 * 7"),
         Ok(Value::Number(42.0))
     ));
     assert!(!view.resource_fetcher().supports(ResourceCapability::Http));
