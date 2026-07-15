@@ -1,10 +1,10 @@
-//! The generational storage backing a [`Document`].
+//! The slot storage backing a [`Document`].
 //!
-//! Elements live in a hand-rolled `Vec<Slot>` arena with a free list — no
-//! `slotmap` dependency, deliberately minimal. Each element is addressed by an
-//! [`ElementId`] carrying the slot index plus the slot's generation; once a
-//! slot is freed its generation is bumped, so any [`ElementId`] referring to
-//! the previous occupant becomes stale and resolves to `None`.
+//! Elements live in a [`Slab`] and are addressed by an [`ElementId`] carrying
+//! a private slot index. Production correctness relies on the embedder not
+//! reclaiming a slot while a strong external handle or a delayed raw id
+//! exists. Debug/test builds additionally carry a document-wide allocation
+//! epoch so violations fail immediately instead of silently becoming ABA.
 //!
 //! Every live node carries an address-stable back-pointer to its document;
 //! stylo's DOM traits are therefore implemented directly on `&Node<T>`.
@@ -17,11 +17,13 @@
 
 use std::cell::Cell;
 use std::fmt;
+#[cfg(debug_assertions)]
 use std::num::NonZeroU32;
 use std::ptr::NonNull;
 
 use dom::ElementState;
 use rustc_hash::FxHashMap;
+use slab::Slab;
 use smallvec::SmallVec;
 use stylo::dom::OpaqueNode;
 use stylo::selector_parser::SnapshotMap;
@@ -32,16 +34,16 @@ use stylo_atoms::Atom;
 
 use crate::node::Node;
 
-/// A stable, generation-checked handle to an element in a [`Document`].
+/// A private-to-the-embedder slot identity for an element in a [`Document`].
 ///
-/// Cheap to copy and hash. A handle stays valid until its element is removed;
-/// afterwards the slot's generation advances and the handle becomes stale
-/// (arena lookups return `None`), even if the slot is later reused by a
-/// different element.
+/// VM/application layers must wrap this in their own strong handle rather than
+/// exposing or storing it directly. Debug/test builds attach an allocation
+/// epoch that detects stale internal ids after slot reuse.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ElementId {
     index: u32,
-    generation: NonZeroU32,
+    #[cfg(debug_assertions)]
+    allocation_epoch: NonZeroU32,
 }
 
 impl ElementId {
@@ -49,12 +51,6 @@ impl ElementId {
     #[must_use]
     pub const fn index(self) -> u32 {
         self.index
-    }
-
-    /// The generation this handle was minted with.
-    #[must_use]
-    pub const fn generation(self) -> NonZeroU32 {
-        self.generation
     }
 
     /// The stable stylo [`OpaqueNode`] identity for this handle.
@@ -65,30 +61,31 @@ impl ElementId {
     /// element.
     #[must_use]
     pub(crate) const fn opaque(self) -> OpaqueNode {
-        // Packs (generation, index) into the usize. 64-bit targets only —
-        // on 32-bit this would truncate the generation.
-        const {
-            assert!(
-                size_of::<usize>() >= 8,
-                "ElementId::opaque requires a 64-bit target"
-            );
+        #[cfg(debug_assertions)]
+        {
+            // Debug identities include the allocation epoch so a stale
+            // snapshot cannot collide with a replacement node.
+            const {
+                assert!(
+                    size_of::<usize>() >= 8,
+                    "ElementId::opaque requires a 64-bit target in debug builds"
+                );
+            }
+            OpaqueNode(((self.allocation_epoch.get() as usize) << 32) | self.index as usize)
         }
-        OpaqueNode(((self.generation.get() as usize) << 32) | self.index as usize)
+        #[cfg(not(debug_assertions))]
+        {
+            OpaqueNode(self.index as usize)
+        }
     }
-}
-
-/// One arena slot: the current generation plus an optional live [`Node`].
-#[derive(Debug)]
-struct Slot<T> {
-    generation: NonZeroU32,
-    element: Option<Node<T>>,
 }
 
 /// The address-stable document allocation that live nodes point back to.
 pub(crate) struct DocumentInner<T> {
     pub(crate) stylist: Stylist,
-    slots: Vec<Slot<T>>,
-    free_list: Vec<u32>,
+    nodes: Slab<Node<T>>,
+    #[cfg(debug_assertions)]
+    next_allocation_epoch: NonZeroU32,
     pub(crate) lock: SharedRwLock,
     pub(crate) url_data: UrlExtraData,
     snapshots: SnapshotMap,
@@ -121,20 +118,30 @@ impl Drop for TraversalGuard<'_> {
 
 impl<T> DocumentInner<T> {
     pub(crate) fn node(&self, id: ElementId) -> Option<&Node<T>> {
-        let slot = self.slots.get(id.index as usize)?;
-        if slot.generation == id.generation {
-            slot.element.as_ref()
+        let node = self.nodes.get(id.index as usize)?;
+        #[cfg(debug_assertions)]
+        if node.node_id() == id {
+            Some(node)
         } else {
             None
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            Some(node)
         }
     }
 
     pub(crate) fn node_mut(&mut self, id: ElementId) -> Option<&mut Node<T>> {
-        let slot = self.slots.get_mut(id.index as usize)?;
-        if slot.generation == id.generation {
-            slot.element.as_mut()
+        let node = self.nodes.get_mut(id.index as usize)?;
+        #[cfg(debug_assertions)]
+        if node.node_id() == id {
+            Some(node)
         } else {
             None
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            Some(node)
         }
     }
 
@@ -193,8 +200,7 @@ impl<T: fmt::Debug> fmt::Debug for Document<T> {
         // `SnapshotMap` is not `Debug`; report its size instead.
         f.debug_struct("Document")
             .field("viewport", &self.inner.stylist.device().viewport_size())
-            .field("slots", &self.inner.slots)
-            .field("free_list", &self.inner.free_list)
+            .field("nodes", &self.inner.nodes)
             .field("pending_snapshots", &self.inner.snapshotted.len())
             .finish_non_exhaustive()
     }
@@ -205,8 +211,9 @@ impl<T> Document<T> {
         Self {
             inner: Box::new(DocumentInner {
                 stylist,
-                slots: Vec::new(),
-                free_list: Vec::new(),
+                nodes: Slab::new(),
+                #[cfg(debug_assertions)]
+                next_allocation_epoch: NonZeroU32::MIN,
                 lock,
                 url_data,
                 snapshots: SnapshotMap::new(),
@@ -247,65 +254,69 @@ impl<T> Document<T> {
     ///
     /// # Panics
     ///
-    /// Panics if the arena would need to grow past `u32::MAX` slots.
+    /// Panics if the slab would need an index beyond `u32::MAX`. Debug/test
+    /// builds also panic after exhausting the diagnostic allocation epoch.
     pub fn create_element(&mut self, tag: &str, ext: T) -> ElementId {
         self.inner.note_mutation();
         let document = NonNull::from(self.inner.as_mut());
-        if let Some(index) = self.inner.free_list.pop() {
-            let slot = &mut self.inner.slots[index as usize];
-            debug_assert!(slot.element.is_none(), "free-list slot must be vacant");
-            let id = ElementId {
-                index,
-                generation: slot.generation,
-            };
-            slot.element = Some(Node::new(document, id, tag, ext));
-            id
-        } else {
-            let index = u32::try_from(self.inner.slots.len())
-                .expect("arena capacity exceeds u32::MAX slots");
-            let id = ElementId {
-                index,
-                generation: NonZeroU32::MIN,
-            };
-            self.inner.slots.push(Slot {
-                generation: NonZeroU32::MIN,
-                element: Some(Node::new(document, id, tag, ext)),
-            });
-            id
-        }
-    }
-
-    /// Destroy an element, returning its external-state payload if the handle
-    /// is live.
-    ///
-    /// The slot's generation is advanced so the passed handle (and any other
-    /// handle sharing the slot) becomes stale. If a slot's generation is
-    /// exhausted it is retired rather than reused, preserving uniqueness.
-    pub fn remove(&mut self, id: ElementId) -> Option<T> {
-        self.remove_node(id).map(|node| node.ext)
+        let index = u32::try_from(self.inner.nodes.vacant_key())
+            .expect("arena capacity exceeds u32::MAX slots");
+        #[cfg(debug_assertions)]
+        let allocation_epoch = {
+            let current = self.inner.next_allocation_epoch;
+            self.inner.next_allocation_epoch = current
+                .checked_add(1)
+                .expect("document allocation epoch exhausted");
+            current
+        };
+        let id = ElementId {
+            index,
+            #[cfg(debug_assertions)]
+            allocation_epoch,
+        };
+        let entry = self.inner.nodes.vacant_entry();
+        debug_assert_eq!(entry.key(), index as usize);
+        entry.insert(Node::new(document, id, tag, ext));
+        id
     }
 
     pub(crate) fn remove_node(&mut self, id: ElementId) -> Option<Node<T>> {
         self.inner.note_mutation();
-        let slot = self.inner.slots.get_mut(id.index as usize)?;
-        if slot.generation != id.generation {
-            return None;
-        }
-        let element = slot.element.take()?;
-        if let Some(next) = slot.generation.checked_add(1) {
-            slot.generation = next;
-            self.inner.free_list.push(id.index);
-        } else {
-            // Generation space exhausted for this slot: retire it (never
-            // reuse) so no future handle can collide with a past one.
-        }
+        self.inner.node(id)?;
+        let element = self.inner.nodes.try_remove(id.index as usize)?;
         // A dead element's pending snapshot must not survive it; the map entry
         // is keyed by the (now stale) opaque id and is dropped with the map on
         // the next `complete_flush`. Removing it eagerly keeps the map small.
         if element.snapshot_present() {
             self.inner.snapshots.remove(&id.opaque());
         }
+        // No internal raw id may survive physical reclamation. In particular,
+        // later slot reuse must not let flush cleanup mistake a new node for
+        // this removed snapshot owner.
+        self.inner
+            .snapshotted
+            .retain(|&snapshotted| snapshotted != id);
         Some(element)
+    }
+
+    pub(crate) fn live_ids(&self) -> Vec<ElementId> {
+        self.inner
+            .nodes
+            .iter()
+            .map(|(_, node)| node.node_id())
+            .collect()
+    }
+
+    /// Number of live nodes retained by this document.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.inner.nodes.len()
+    }
+
+    /// Whether this document retains no nodes.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Borrow an element if the handle is live.
@@ -378,11 +389,9 @@ impl<T> Document<T> {
     /// [`complete_flush`](Self::complete_flush) instead.
     pub fn clear_dirty(&mut self) {
         self.inner.note_mutation();
-        for slot in &mut self.inner.slots {
-            if let Some(element) = &mut slot.element {
-                element.set_style_dirty(false);
-                element.set_dirty_descendants_bit(false);
-            }
+        for (_, element) in &mut self.inner.nodes {
+            element.set_style_dirty(false);
+            element.set_dirty_descendants_bit(false);
         }
     }
 

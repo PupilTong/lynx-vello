@@ -1,8 +1,8 @@
 //! `stylo-dom` — a generic, stylo-integrated DOM core.
 //!
 //! This crate models a **strict subset of the HTML DOM** and everything stylo
-//! needs to run its cascade over it: a generational [`Document`] of [`Node`]s
-//! addressed by an [`ElementId`], address-stable node back-pointers, the
+//! needs to run its cascade over it: a slot-backed [`Document`] of [`Node`]s
+//! addressed internally by an [`ElementId`], address-stable node back-pointers, the
 //! low-level tree-mutation + coarse-invalidation primitives, inline-style
 //! parsing, the stylo element-trait impls, and a standards-oriented CSS
 //! computation engine.
@@ -46,7 +46,7 @@
 //!
 //! # Layout
 //!
-//! - [`arena`] — [`Document`]'s generational storage, [`ElementId`], and stable ownership.
+//! - [`arena`] — [`Document`]'s Slab storage, internal [`ElementId`], and stable ownership.
 //! - [`node`] — the unified [`Node`] struct (the HTML-DOM-subset fields plus the `ext` payload).
 //! - [`ext`] — the [`ExternalState`] trait the payload implements.
 //! - [`state`] — the [`PseudoState`] flag set (`:hover` / `:active` / `:focus`).

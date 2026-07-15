@@ -6,8 +6,11 @@
 //! affected parent's subtree and its following-sibling subtrees, exactly like
 //! an attribute change (see [`crate::dirty`]). The embedder's API layer
 //! validates its own semantics (stale ids, cycles, reference resolution) and
-//! produces its own errors, then delegates the actual unlink/link/free to
-//! these primitives.
+//! produces its own errors, then delegates the actual unlink/link to these
+//! primitives. Physical reclamation is available only through
+//! [`Document::collect_detached`], which cannot remove connected nodes and
+//! requires the embedder to prove that every node in a detached subtree is
+//! externally unretained.
 //!
 //! # Invalidation contract
 //!
@@ -24,6 +27,7 @@
 //! ([`Document::is_ancestor`](crate::Document::is_ancestor) etc.) the embedder needs to detect
 //! cycles / resolve references live here so both layers share one implementation.
 
+use rustc_hash::FxHashSet;
 use stylo::invalidation::element::restyle_hints::RestyleHint;
 
 use crate::arena::{Document, ElementId};
@@ -48,10 +52,22 @@ impl<T> Document<T> {
     }
 
     /// Whether `ancestor` is a strict ancestor of `descendant`.
+    ///
+    /// # Panics
+    ///
+    /// In debug/test builds, panics if the existing topology contains a
+    /// parent cycle. Validated embedding APIs must prevent such cycles.
     #[must_use]
     pub fn is_ancestor(&self, ancestor: ElementId, descendant: ElementId) -> bool {
         let mut next = self.get(descendant).and_then(|element| element.parent);
+        #[cfg(debug_assertions)]
+        let mut visited = FxHashSet::default();
         while let Some(current) = next {
+            #[cfg(debug_assertions)]
+            assert!(
+                visited.insert(current),
+                "tree topology contains a parent cycle"
+            );
             if current == ancestor {
                 return true;
             }
@@ -107,22 +123,127 @@ impl<T> Document<T> {
         self.note_child_list_change(parent, index);
     }
 
-    /// Remove `root` and all its descendants from the arena, returning the
-    /// external-state payload of every element freed (in no particular order).
+    /// Reclaim detached subtrees whose nodes have no external strong handles.
     ///
-    /// The caller (the embedder's API layer) harvests whatever it indexed from
-    /// the returned payloads. All handles into the subtree become stale. This
-    /// does **not** unlink `root` from a parent first — callers that need that
-    /// call [`Document::detach`](crate::Document::detach) beforehand.
-    pub fn drop_subtree(&mut self, root: ElementId) -> Vec<T> {
+    /// `retained_roots` are parentless nodes that still belong to the live DOM
+    /// tree (normally the document/page root). Every other parentless node is
+    /// a detached-subtree candidate. A candidate is reclaimed only when
+    /// `is_externally_retained` returns `false` for every node in that subtree.
+    ///
+    /// This is the only public physical-reclamation path. It cannot destroy a
+    /// connected node, and it never partially destroys a retained subtree.
+    /// Embedders should derive `is_externally_retained` from their strong
+    /// handle registry rather than from VM-specific guesses.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the document's supposedly live topology contains an
+    /// unresolved id or changes between validation and reclamation. Under the
+    /// owner-thread mutation model, either condition is an invariant failure.
+    pub fn collect_detached(
+        &mut self,
+        retained_roots: &[ElementId],
+        mut is_externally_retained: impl FnMut(ElementId) -> bool,
+    ) -> Vec<(ElementId, T)> {
+        let roots: Vec<_> = self
+            .live_ids()
+            .into_iter()
+            .filter(|&id| {
+                self.get(id).is_some_and(|node| node.parent.is_none())
+                    && !retained_roots.contains(&id)
+            })
+            .collect();
         let mut removed = Vec::new();
-        let mut stack = vec![root];
-        while let Some(current) = stack.pop() {
-            if let Some(element) = self.remove_node(current) {
-                stack.extend_from_slice(&element.children);
-                removed.push(element.ext);
+
+        for root in roots {
+            if !self.contains(root) {
+                continue;
+            }
+
+            let mut subtree = Vec::new();
+            let mut stack = vec![root];
+            let mut retained = false;
+            while let Some(current) = stack.pop() {
+                let Some(node) = self.get(current) else {
+                    debug_assert!(false, "live topology contained a stale ElementId");
+                    retained = true;
+                    break;
+                };
+                if is_externally_retained(current) {
+                    retained = true;
+                    break;
+                }
+                subtree.push(current);
+                stack.extend_from_slice(&node.children);
+            }
+
+            if retained {
+                continue;
+            }
+            for id in subtree {
+                let node = self
+                    .remove_node(id)
+                    .expect("collector validated every node before reclamation");
+                removed.push((id, node.ext));
             }
         }
+
         removed
+    }
+
+    /// Assert the bidirectional parent/child topology invariants.
+    ///
+    /// This is cheap enough for tests and debug mutation checks, but is not
+    /// called by the generic document automatically in release builds.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a stale parent/child id, a missing back-pointer, a duplicate
+    /// child entry, a parent cycle, or any other mismatch in the bidirectional
+    /// topology.
+    pub fn assert_tree_integrity(&self) {
+        let live_ids = self.live_ids();
+        for &id in &live_ids {
+            let node = self.get(id).expect("live id must resolve");
+            if let Some(parent) = node.parent {
+                let parent_node = self
+                    .get(parent)
+                    .expect("a live node's parent id must resolve");
+                assert_eq!(
+                    parent_node
+                        .children
+                        .iter()
+                        .filter(|&&child| child == id)
+                        .count(),
+                    1,
+                    "a live node must occur exactly once in its parent's child list"
+                );
+            }
+            for &child in &node.children {
+                let child_node = self
+                    .get(child)
+                    .expect("a live node's child id must resolve");
+                assert_eq!(
+                    child_node.parent,
+                    Some(id),
+                    "child back-pointer must name the containing parent"
+                );
+            }
+        }
+
+        for id in live_ids {
+            let mut visited = FxHashSet::default();
+            let mut current = Some(id);
+            while let Some(ancestor) = current {
+                assert!(
+                    visited.insert(ancestor),
+                    "tree topology contains a parent cycle"
+                );
+                current = self
+                    .get(ancestor)
+                    .expect("a live ancestor id must resolve")
+                    .parent;
+            }
+        }
     }
 }

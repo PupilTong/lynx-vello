@@ -72,9 +72,10 @@ impl<'a, T: ExternalState> TNode for &'a Node<T> {
     }
 
     fn opaque(&self) -> OpaqueNode {
-        // Derived from the (index, generation) id — NOT the element's address:
+        // Derived from the internal slot identity — NOT the element's address:
         // stylo keys snapshot maps by `OpaqueNode` across arbitrary tree
         // mutations, and arena growth can reallocate and move every element.
+        // Debug builds include the diagnostic allocation epoch.
         self.node_id().opaque()
     }
 

@@ -23,7 +23,7 @@ use stylo_dom::{Document as DomDocument, Parallelism, StylesheetOrigin};
 use stylo_traits::{CSSPixel, DevicePixel};
 
 use crate::ua::{PageConfig, ua_stylesheet};
-use crate::{Widget, WidgetTree, ingest};
+use crate::{WidgetHandle, WidgetTree, ingest};
 
 /// The environment metrics for a Lynx widget document.
 ///
@@ -102,7 +102,8 @@ impl WidgetTree {
     /// [`flush_styles`](Self::flush_styles) with explicit traversal
     /// scheduling (benchmarks pin [`Parallelism::Sequential`]).
     pub fn flush_styles_with(&mut self, parallelism: Parallelism) {
-        let Some(page) = self.get_page_element() else {
+        self.collect_garbage();
+        let Some(page) = self.page else {
             return;
         };
         self.document_mut().flush_with(page, parallelism);
@@ -128,10 +129,14 @@ impl WidgetTree {
     #[must_use]
     pub fn resolve_widget(
         &self,
-        widget: &Widget,
+        handle: &WidgetHandle,
         parent_style: Option<&ComputedValues>,
-    ) -> Arc<ComputedValues> {
-        self.document().resolve(widget, parent_style)
+    ) -> Option<Arc<ComputedValues>> {
+        let id = self.id_for(handle).ok()?;
+        Some(
+            self.document()
+                .resolve(self.document().get(id)?, parent_style),
+        )
     }
 
     /// Update the Lynx view viewport.
@@ -159,9 +164,26 @@ impl WidgetTree {
     /// units (`rpx`/`vw`/`vh`) re-resolve and media-dependent rules re-match
     /// on the tree's next flush. A no-op without a page root.
     fn restyle_after_device_change(&mut self) {
-        if let Some(page) = self.get_page_element() {
+        if let Some(page) = self.page {
             self.document_mut().mark_subtree_dirty(page);
         }
+    }
+
+    /// Number of `@font-face` rules currently registered in this tree.
+    #[must_use]
+    pub fn font_face_count(&self) -> usize {
+        self.document().font_face_count()
+    }
+
+    /// Whether the named keyframes animation is available to `handle`.
+    #[must_use]
+    pub fn has_keyframes_animation(&self, name: &str, handle: &WidgetHandle) -> bool {
+        let Ok(id) = self.id_for(handle) else {
+            return false;
+        };
+        self.document()
+            .get(id)
+            .is_some_and(|widget| self.document().has_keyframes_animation(name, widget))
     }
 }
 

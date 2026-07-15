@@ -66,7 +66,7 @@ pub(crate) const SNAPSHOT_HANDLED: u8 = 1 << 1;
 pub struct Node<T> {
     /// Stable back-pointer to the document allocation that owns this node.
     document: NonNull<DocumentInner<T>>,
-    /// This node's generation-checked identity in `document`.
+    /// This node's internal slot identity in `document`.
     id: ElementId,
     /// The parent element, or `None` for the root / a detached element.
     pub parent: Option<ElementId>,
@@ -155,7 +155,7 @@ impl<T> Node<T> {
         }
     }
 
-    /// This node's stable, generation-checked identity.
+    /// This node's internal identity within its owning document.
     #[must_use]
     pub const fn node_id(&self) -> ElementId {
         self.id

@@ -226,9 +226,9 @@ mod tests {
         let second_page = second.tree_mut().create_page();
         let first_child = first.tree_mut().create_view();
 
-        assert_eq!(first.tree().get_element_unique_id(first_page), Some(1));
-        assert_eq!(second.tree().get_element_unique_id(second_page), Some(1));
-        assert_eq!(first.tree().get_element_unique_id(first_child), Some(2));
+        assert_eq!(first.tree().get_element_unique_id(&first_page), Some(1));
+        assert_eq!(second.tree().get_element_unique_id(&second_page), Some(1));
+        assert_eq!(first.tree().get_element_unique_id(&first_child), Some(2));
         assert_eq!(second.tree().element_by_unique_id(2), None);
     }
 }

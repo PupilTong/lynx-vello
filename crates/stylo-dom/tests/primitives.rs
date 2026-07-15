@@ -1,6 +1,6 @@
 //! Integration tests for the `stylo-dom` primitives an embedder's API layer
-//! delegates to: the generational [`Document`], `&Node` back-pointer navigation, the
-//! tree-mutation primitives (`attach_at`/`detach`/`drop_subtree`) with their
+//! delegates to: the slot-backed [`Document`], `&Node` back-pointer navigation, the
+//! tree-mutation primitives (`attach_at`/`detach`/`collect_detached`) with their
 //! invalidation scheduling, the read helpers, inline-style parsing, and the
 //! [`ExternalState`] hook defaults.
 //!
@@ -10,7 +10,7 @@
 //! covered by the style/flush integration tests.
 //!
 //! Everything runs against `Node<()>` (the no-op payload) except the
-//! `drop_subtree` harvest test, which uses a payload type to observe what the
+//! detached-subtree collection test, which uses a payload type to observe what the
 //! arena returns.
 
 mod common;
@@ -34,20 +34,22 @@ fn inline_declaration_count(arena: &Document<()>, id: ElementId) -> usize {
 }
 
 #[test]
-fn arena_generational_reuse() {
+#[cfg(debug_assertions)]
+fn debug_epoch_detects_raw_id_reuse() {
     let mut arena = Document::new(common::device(800.0, 600.0));
     let a = insert(&mut arena, "div");
     assert!(arena.get(a).is_some());
 
-    arena.remove(a);
+    let removed = arena.collect_detached(&[], |_| false);
+    assert_eq!(removed.len(), 1);
     assert!(arena.get(a).is_none());
 
-    // The next insert reuses the freed slot with a bumped generation.
+    // The next insert reuses the freed slot with a bumped debug epoch.
     let b = insert(&mut arena, "div");
     assert_eq!(a.index(), b.index(), "slot should have been reused");
     assert!(
         arena.get(a).is_none(),
-        "the stale handle no longer resolves"
+        "the debug epoch rejects the old raw id"
     );
     assert!(arena.get(b).is_some());
     assert_ne!(a, b);
@@ -152,7 +154,7 @@ fn note_attribute_change_marks_element_and_ancestors() {
 }
 
 #[test]
-fn drop_subtree_frees_and_returns_payloads() {
+fn collect_detached_frees_and_returns_payloads() {
     /// A payload carrying an embedder-side id, to observe the harvest.
     #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
     struct Payload(i32);
@@ -165,7 +167,12 @@ fn drop_subtree_frees_and_returns_payloads() {
     let grandchild = arena.create_element("div", Payload(12));
     append(&mut arena, child, grandchild);
 
-    let mut removed = arena.drop_subtree(child);
+    arena.detach(child);
+    let mut removed: Vec<_> = arena
+        .collect_detached(&[container], |_| false)
+        .into_iter()
+        .map(|(_, payload)| payload)
+        .collect();
     removed.sort_unstable();
     assert_eq!(
         removed,
@@ -175,7 +182,7 @@ fn drop_subtree_frees_and_returns_payloads() {
 
     assert!(arena.get(child).is_none());
     assert!(arena.get(grandchild).is_none());
-    // `container` is untouched (drop_subtree does not unlink from a parent).
+    // `container` is an explicitly retained root and remains untouched.
     assert!(arena.get(container).is_some());
 }
 

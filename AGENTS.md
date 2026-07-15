@@ -128,13 +128,51 @@ implementation limitations:
    or its Document. The only concurrency inside this interval is stylo's own
    scoped parallel traversal; its workers receive an immutable tree/topology,
    join before `flush` returns, and cannot publish DOM mutations.
+4. **`ElementId` is an embedding-layer implementation detail.** It may cross
+   the `stylo-dom → lynx-widget` crate boundary, but must never be exposed to a
+   VM, application/user code, callback payload, or delayed task. The public
+   Widget/runtime identity is `Rc<NodeHandle>`; its internal arena id and
+   per-tree identity are private.
+5. **Strong external node ownership is explicit.** VM wrappers, application
+   references, and delayed work that must keep a node alive hold
+   `Rc<NodeHandle>`. Delayed work that intentionally must not retain a node
+   holds `Weak<NodeHandle>` and handles upgrade failure as normal control flow.
+   A bare integer/id is never an acceptable delayed node reference.
+6. **DOM removal is detachment, not destruction.** A detached node remains in
+   its original `Document` and is reattachable. There is no arbitrary public
+   `destroy`/`drop_subtree` API at the Widget/VM boundary. Physical slot
+   reclamation is owned by the Widget handle collector.
+7. **A slot may be reclaimed only when both reachability roots are gone:** the
+   node is not connected to the Document's live page tree, and no node in its
+   detached subtree has an external strong handle. Reclamation is subtree-
+   atomic: a strong handle to any descendant retains its detached ancestors
+   and siblings in that subtree. Destroying/reclaiming a parent must never
+   physically destroy a descendant that is still externally held.
+8. **Each live Widget node has one canonical registry `Rc<NodeHandle>`.** A
+   strong count above that registry owner means external retention. Removing
+   the registry owner is part of physical slot reclamation and causes all weak
+   handles to expire before that slot can represent another node. Handles are
+   also scoped by an allocation identity for their owning `WidgetTree`, so a
+   handle from one view is rejected by another even when their slot indices
+   coincide.
+9. **Lifecycle violations must be loud in test/debug builds.** Validate the
+   one-handle-per-live-node registry, bidirectional parent/child topology,
+   same-tree handle identity, and `strong_count == 1` immediately before
+   reclaiming each node. `stylo-dom` stores nodes in a `Slab` and carries a
+   debug-only, document-wide allocation epoch in its internal ids so a leaked
+   raw id or uncleared delayed id fails instead of silently aliasing a reused
+   slot; release builds rely on the ownership invariants above and do not pay
+   for that epoch.
 
 Design APIs around direct ownership and ordinary `&` / `&mut` borrows under
-these constraints. Do not introduce `Rc`/`Arc`, `RefCell`/`AtomicRefCell`, or
-`Mutex`/`RwLock` merely to support hypothetical cross-thread VM, Widget, or
-Document access. This does not remove synchronization required *inside*
-stylo's parallel traversal, stylo's shared CSS data model, genuinely
-concurrent resource services, or explicit cross-thread interruption handles.
+these constraints. The owner-thread `Rc<NodeHandle>` registry above is the
+deliberate external-node-lifetime mechanism; it does not wrap the `Document`
+or make it concurrently accessible. Do not introduce additional `Rc`/`Arc`,
+`RefCell`/`AtomicRefCell`, or `Mutex`/`RwLock` merely to support hypothetical
+cross-thread VM, Widget, or Document access. This does not remove
+synchronization required *inside* stylo's parallel traversal, stylo's shared
+CSS data model, genuinely concurrent resource services, or explicit
+cross-thread interruption handles.
 If a feature would require weakening one of these constraints, stop and ask
 the user rather than silently broadening the ownership model.
 

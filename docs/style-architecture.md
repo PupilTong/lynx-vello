@@ -18,7 +18,7 @@ Lynx-only device and unit behavior moved up into `lynx-widget`.
 | Layer | Owns | Must not own |
 | --- | --- | --- |
 | `stylo-dom` | `Document<T>` and `Node<T>`, address-stable node back-pointers, stylo DOM traits on `&Node<T>`, invalidation, inline parsing, per-document `Stylist`/`Device`, rule matching, cascade, media evaluation, computed values, and the private `SharedRwLock` | Lynx tags/PAPI, `WidgetState`, Lynx unit metrics, touch-device policy |
-| `lynx-widget` | `WidgetState`, `WidgetTree`, PAPI validation, `EngineMetrics`, touch-first `Device` construction, viewport-relative `rpx` integration | A second stylist, cascade implementation, stylesheet lock sharing |
+| `lynx-widget` | `WidgetState`, `WidgetTree`, opaque `Rc<NodeHandle>` identities and their canonical registry/GC, PAPI validation, `EngineMetrics`, touch-first `Device` construction, viewport-relative `rpx` integration | A second stylist, cascade implementation, stylesheet lock sharing; exposing raw `ElementId` to VM/user code |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, the maintained Lynx CSS extension patch set | Runtime Widget/PAPI policy |
 
 ## Style lifecycle
@@ -60,9 +60,15 @@ Lynx-only device and unit behavior moved up into `lynx-widget`.
 
 - Each view's VM, `WidgetTree`, and `Document<WidgetState>` have one common
   owner thread. They are directly owned rather than made concurrently
-  accessible through an outer `Rc`/`Arc`, `RefCell`, or lock. Stable external
-  element handles identify nodes by `ElementId`; they do not independently own
-  nodes or the document.
+  accessible through an outer `Rc`/`Arc`, `RefCell`, or lock. The sole
+  owner-thread sharing mechanism is node identity: VM/user code sees only
+  `Rc<NodeHandle>`, never `ElementId`, and no handle grants direct access to
+  the `Document`.
+- `WidgetTree` owns exactly one canonical `Rc<NodeHandle>` per live node.
+  Additional strong counts are external owners; delayed work either clones
+  that strong handle or explicitly stores `Weak<NodeHandle>` and accepts
+  upgrade failure. A per-tree `Rc` allocation identity rejects handles from
+  another view before their internal slot ids are considered.
 - Mutation and flush are separate synchronous phases on that owner thread. A
   flush is non-reentrant and cannot run JavaScript, deliver events, apply
   resource completions, call layout/render code, or otherwise expose a tree
@@ -75,8 +81,19 @@ Lynx-only device and unit behavior moved up into `lynx-widget`.
   context. Create as many independent documents as needed; no document state is
   global or shared implicitly.
 - Nodes are created through `Document::create_element`; there is no public
-  unbound `Node` constructor. Detach keeps the node in its document, while
-  physical removal exposes only the embedder payload.
+  unbound `Node` constructor. Detach keeps the node in its document and makes
+  no handle stale. There is no arbitrary public Widget/VM `destroy` or
+  `drop_subtree`: `WidgetTree::collect_garbage` may physically reclaim only a
+  detached subtree for which every canonical handle has strong count one.
+  Reclamation is subtree-atomic, so a strong descendant handle retains the
+  entire detached subtree and a parent can never cascade-delete a held child.
+- Internal `ElementId` is a `Slab` index only in release builds. Debug/test
+  builds add a document-wide allocation epoch solely as an invariant detector:
+  stale internal queues or accidental raw-id escape fail on slot reuse rather
+  than becoming ABA.
+  The collector also asserts registry/document cardinality, canonical-handle
+  identity, bidirectional topology, and the final strong count immediately
+  before reclamation.
 - `Document` does not expose `&mut Node`: moving or swapping a whole node could
   invalidate its document back-pointer. Mutation APIs project only ordinary
   fields (`classes_mut`, `attrs_mut`, `ext_mut`, and so on), while topology is

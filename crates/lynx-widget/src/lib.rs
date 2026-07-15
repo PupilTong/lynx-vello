@@ -3,7 +3,7 @@
 //! lynx-vello is a from-scratch native Rust reimplementation of the `LynxJS`
 //! web-bundle runtime (see `AGENTS.md` for the full mission). This crate is the
 //! thin PAPI surface Lynx's JS Element API is shaped after: [`WidgetTree`]
-//! validates opcode semantics (stale handles, cycles, insertion references, the
+//! validates opcode semantics (foreign handles, cycles, insertion references, the
 //! `unique_id` minting + index, the `css_id` batch) and delegates the actual
 //! tree mutation, coarse invalidation, and inline-style parsing to the
 //! [`stylo_dom`] crate — the generic, HTML-DOM-subset core this crate embeds.
@@ -19,8 +19,8 @@
 //! Lynx-specific payload carrying the [`WidgetKind`], `unique_id`, `css_id`,
 //! `data-*` dataset, and event bindings — and names the result Widget-first:
 //!
-//! - [`Widget`] = `stylo_dom::Node<WidgetState>`
-//! - [`WidgetId`] = `stylo_dom::ElementId`
+//! - the retained node is an internal `stylo_dom::Node<WidgetState>`
+//! - VM/application code sees only [`Rc<NodeHandle>`](NodeHandle), never the document's arena id
 //!
 //! The retained tree is a [`WidgetTree`], errors are [`WidgetError`]. Method
 //! names keep the `element` wording of the `__*Element` PAPI opcodes they
@@ -39,8 +39,10 @@ pub mod state;
 pub mod style;
 pub mod ua;
 
+mod handle;
 mod ingest;
 
+pub use handle::{NodeHandle, WeakNodeHandle, WidgetHandle};
 pub use kind::WidgetKind;
 pub use papi::{WidgetError, WidgetTree};
 pub use state::{EventKind, EventReg, WidgetState};
@@ -50,9 +52,6 @@ pub use stylo_dom::{
 };
 pub use ua::PageConfig;
 
-/// A Lynx widget: the generic HTML-DOM-subset element carrying the
-/// Lynx-specific [`WidgetState`] payload in its `ext` field.
-pub type Widget = stylo_dom::Node<WidgetState>;
-
-/// A stable, generation-checked handle to a [`Widget`] in a [`WidgetTree`].
-pub type WidgetId = stylo_dom::ElementId;
+/// The retained Widget node type. It stays crate-private so its internal
+/// `ElementId` topology cannot cross the VM/application boundary.
+pub(crate) type Widget = stylo_dom::Node<WidgetState>;
