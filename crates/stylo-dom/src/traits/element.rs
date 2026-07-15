@@ -10,7 +10,7 @@
 //! [`stylo_data`](crate::Node::stylo_data) is touched by exactly one
 //! worker at a time (a parent reads/writes a child's data only in
 //! `note_children`, strictly before any worker takes ownership of that
-//! child), and outside a traversal the embedder holds `&mut Arena`. All other
+//! child), and outside a traversal the embedder holds `&mut Document`. All other
 //! per-element state stylo mutates through `&self` is atomic (see
 //! [`Node`](crate::Node)).
 #![allow(unsafe_code)]
@@ -36,14 +36,14 @@ use stylo::values::computed::Display;
 use stylo::{LocalName, Namespace};
 use stylo_atoms::Atom;
 
-use crate::arena::{Document, ElementId};
+use crate::arena::{DocumentInner, ElementId};
 use crate::ext::ExternalState;
 use crate::node::Node;
 
 /// The children iterator stylo's restyle traversal walks. Skips over any child
 /// whose handle no longer resolves (defensive; live trees never hit that).
 pub struct ChildrenIter<'a, T> {
-    document: &'a Document<T>,
+    document: &'a DocumentInner<T>,
     children: &'a [ElementId],
     index: usize,
 }
@@ -229,7 +229,7 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
     fn has_data(&self) -> bool {
         // SAFETY: reads only the `Option` discriminant; the slot is only
         // created/removed by this element's owning worker (or under `&mut
-        // Arena`), never concurrently with this read.
+        // Document`), never concurrently with this read.
         unsafe { (*self.element().stylo_data.get()).is_some() }
     }
 

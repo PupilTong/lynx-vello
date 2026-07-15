@@ -1,5 +1,5 @@
 //! Integration tests for the `stylo-dom` primitives an embedder's API layer
-//! delegates to: the generational [`Arena`], `&Node` back-pointer navigation, the
+//! delegates to: the generational [`Document`], `&Node` back-pointer navigation, the
 //! tree-mutation primitives (`attach_at`/`detach`/`drop_subtree`) with their
 //! invalidation scheduling, the read helpers, inline-style parsing, and the
 //! [`ExternalState`] hook defaults.
@@ -13,27 +13,29 @@
 //! `drop_subtree` harvest test, which uses a payload type to observe what the
 //! arena returns.
 
-use stylo_dom::{Arena, ElementId, ElementState, ExternalState, PseudoState};
+mod common;
+
+use stylo_dom::{Document, ElementId, ElementState, ExternalState, PseudoState};
 
 /// Append `child` as the last child of `parent`, via the `attach_at` primitive.
-fn append<T>(arena: &mut Arena<T>, parent: ElementId, child: ElementId) {
+fn append<T>(arena: &mut Document<T>, parent: ElementId, child: ElementId) {
     let index = arena.children_len(parent);
     arena.attach_at(parent, child, index);
 }
 
 /// Create an element with the given tag (no-op payload) and return its handle.
-fn insert(arena: &mut Arena<()>, tag: &str) -> ElementId {
+fn insert(arena: &mut Document<()>, tag: &str) -> ElementId {
     arena.create_element(tag, ())
 }
 
 /// The number of declarations in an element's parsed inline style block.
-fn inline_declaration_count(arena: &Arena<()>, id: ElementId) -> usize {
+fn inline_declaration_count(arena: &Document<()>, id: ElementId) -> usize {
     arena.inline_style_declaration_count(id).unwrap()
 }
 
 #[test]
 fn arena_generational_reuse() {
-    let mut arena = Arena::new();
+    let mut arena = Document::new(common::device(800.0, 600.0));
     let a = insert(&mut arena, "div");
     assert!(arena.get(a).is_some());
 
@@ -53,7 +55,7 @@ fn arena_generational_reuse() {
 
 #[test]
 fn node_back_pointer_navigation_survives_arena_move() {
-    let mut arena = Arena::new();
+    let mut arena = Document::new(common::device(800.0, 600.0));
     let root = insert(&mut arena, "html");
     let container = insert(&mut arena, "div");
     append(&mut arena, root, container);
@@ -88,7 +90,7 @@ fn attach_detach_marks_reachability() {
     // must make the mutation site reachable from the root (the flush walks
     // `dirty_descendants` bits down); precision (which siblings actually
     // restyle) is the flush's job, driven by stylo selector flags.
-    let mut arena = Arena::new();
+    let mut arena = Document::new(common::device(800.0, 600.0));
     let root = insert(&mut arena, "html");
     let before_sib = insert(&mut arena, "div");
     let list = insert(&mut arena, "div");
@@ -123,7 +125,7 @@ fn note_attribute_change_marks_element_and_ancestors() {
     // element itself dirty and its ancestor chain reachable — nothing else at
     // mutation time (invalidation-set matching happens at flush, driven by
     // the pre-mutation snapshot).
-    let mut arena = Arena::new();
+    let mut arena = Document::new(common::device(800.0, 600.0));
     let root = insert(&mut arena, "html");
     let container = insert(&mut arena, "div");
     append(&mut arena, root, container);
@@ -156,7 +158,7 @@ fn drop_subtree_frees_and_returns_payloads() {
     struct Payload(i32);
     impl ExternalState for Payload {}
 
-    let mut arena: Arena<Payload> = Arena::new();
+    let mut arena: Document<Payload> = Document::new(common::device(800.0, 600.0));
     let container = arena.create_element("div", Payload(10));
     let child = arena.create_element("div", Payload(11));
     append(&mut arena, container, child);
@@ -179,7 +181,7 @@ fn drop_subtree_frees_and_returns_payloads() {
 
 #[test]
 fn ancestor_and_child_queries() {
-    let mut arena = Arena::new();
+    let mut arena = Document::new(common::device(800.0, 600.0));
     let root = insert(&mut arena, "html");
     let container = insert(&mut arena, "div");
     append(&mut arena, root, container);
@@ -198,7 +200,7 @@ fn ancestor_and_child_queries() {
 
 #[test]
 fn inline_style_helpers_parse_merge_and_clear() {
-    let mut arena = Arena::new();
+    let mut arena = Document::new(common::device(800.0, 600.0));
     let view = insert(&mut arena, "div");
 
     // `add_inline_style` parses and folds one declaration at a time.
@@ -224,7 +226,7 @@ fn external_state_default_root_matching() {
     use selectors::Element as _;
 
     // The `()` payload keeps the HTML-ish default: parentless ⇒ `:root`.
-    let mut arena = Arena::new();
+    let mut arena = Document::new(common::device(800.0, 600.0));
     let root = insert(&mut arena, "html");
     let child = insert(&mut arena, "div");
     append(&mut arena, root, child);
@@ -239,7 +241,7 @@ fn external_state_default_attr_hooks() {
 
     // The `()` payload serves no synthetic attributes: only the real attrs
     // map answers `get_attr`.
-    let mut arena = Arena::new();
+    let mut arena = Document::new(common::device(800.0, 600.0));
     let el = insert(&mut arena, "div");
     arena
         .attrs_mut(el)

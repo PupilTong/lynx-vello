@@ -425,7 +425,7 @@ fn classes_and_inline_styles() {
 
 /// The number of declarations in an element's parsed inline style block.
 fn inline_declaration_count(doc: &WidgetTree, id: lynx_widget::WidgetId) -> usize {
-    doc.arena().inline_style_declaration_count(id).unwrap()
+    doc.document().inline_style_declaration_count(id).unwrap()
 }
 
 #[test]

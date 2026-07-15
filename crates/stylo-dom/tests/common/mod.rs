@@ -45,10 +45,10 @@ use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_atoms::Atom;
-use stylo_dom::{Arena, ElementId, ElementState, StyleEngine, StylesheetOrigin};
+use stylo_dom::{Document, ElementId, ElementState, StylesheetOrigin};
 use stylo_traits::{CSSPixel, DevicePixel};
 
-/// The base URL every harness parse uses (mirrors `StyleEngine::new`).
+/// The base URL every harness parse uses (mirrors `Document::new`).
 #[must_use]
 pub fn url_data() -> UrlExtraData {
     UrlExtraData::from(url::Url::parse("about:blank").expect("about:blank is a valid URL"))
@@ -104,12 +104,11 @@ impl FontMetricsProvider for TestFontMetricsProvider {
     }
 }
 
-/// An engine + arena + root, with element construction and mutation helpers
+/// A document + root, with element construction and mutation helpers
 /// whose snapshot ordering is always correct.
 #[derive(Debug)]
 pub struct Doc {
-    pub engine: StyleEngine,
-    pub arena: Arena<()>,
+    pub document: Document<()>,
     pub root: ElementId,
 }
 
@@ -131,25 +130,20 @@ impl Doc {
     /// A document over an explicit device.
     #[must_use]
     pub fn with_device(device: Device) -> Self {
-        let engine = StyleEngine::new(device);
-        let mut arena = engine.new_arena();
-        let root = arena.create_element("page", ());
-        Self {
-            engine,
-            arena,
-            root,
-        }
+        let mut document = Document::new(device);
+        let root = document.create_element("page", ());
+        Self { document, root }
     }
 
     /// Append an author-origin stylesheet.
     pub fn add_css(&mut self, css: &str) {
-        self.engine
+        self.document
             .add_stylesheet_str(css, StylesheetOrigin::Author);
     }
 
     /// Append a user-agent-origin stylesheet.
     pub fn add_ua_css(&mut self, css: &str) {
-        self.engine
+        self.document
             .add_stylesheet_str(css, StylesheetOrigin::UserAgent);
     }
 
@@ -162,25 +156,28 @@ impl Doc {
     /// values may be single- or double-quoted.
     pub fn el(&mut self, parent: ElementId, spec: &str) -> ElementId {
         let parsed = ElementSpec::parse(spec);
-        let id = self.arena.create_element(&parsed.tag, ());
+        let id = self.document.create_element(&parsed.tag, ());
         if let Some(selector_id) = parsed.id {
-            *self.arena.id_attr_mut(id).expect("fresh element") =
+            *self.document.id_attr_mut(id).expect("fresh element") =
                 Some(Atom::from(selector_id.as_str()));
         }
-        self.arena.classes_mut(id).expect("fresh element").extend(
-            parsed
-                .classes
-                .iter()
-                .map(|class| Atom::from(class.as_str())),
-        );
-        self.arena.attrs_mut(id).expect("fresh element").extend(
+        self.document
+            .classes_mut(id)
+            .expect("fresh element")
+            .extend(
+                parsed
+                    .classes
+                    .iter()
+                    .map(|class| Atom::from(class.as_str())),
+            );
+        self.document.attrs_mut(id).expect("fresh element").extend(
             parsed
                 .attrs
                 .into_iter()
                 .map(|(name, value)| (name.into_boxed_str(), value)),
         );
-        let index = self.arena.children_len(parent);
-        self.arena.attach_at(parent, id, index);
+        let index = self.document.children_len(parent);
+        self.document.attach_at(parent, id, index);
         id
     }
 
@@ -191,14 +188,14 @@ impl Doc {
 
     /// Run a style flush (stylo's restyle traversal) over the whole tree.
     pub fn flush(&mut self) {
-        self.engine.flush_tree(&mut self.arena, self.root);
+        self.document.flush(self.root);
     }
 
     /// The flushed computed style of `id`. Panics when `id` is stale or the
     /// tree has not been flushed since the element was styled.
     #[must_use]
     pub fn style(&self, id: ElementId) -> Arc<ComputedValues> {
-        self.arena
+        self.document
             .get(id)
             .expect("element id is live")
             .computed_style()
@@ -229,7 +226,7 @@ impl Doc {
     pub fn matches(&self, id: ElementId, selector: &str) -> bool {
         let list = SelectorParser::parse_author_origin_no_namespace(selector, &url_data())
             .unwrap_or_else(|_| panic!("selector `{selector}` must parse"));
-        let element = self.arena.element_ref(id).expect("element id is live");
+        let element = self.document.element_ref(id).expect("element id is live");
         let mut caches = SelectorCaches::default();
         let mut context = MatchingContext::new(
             MatchingMode::Normal,
@@ -252,8 +249,8 @@ impl Doc {
 
     /// Add a class.
     pub fn add_class(&mut self, id: ElementId, class: &str) {
-        self.arena.note_class_change(id);
-        self.arena
+        self.document.note_class_change(id);
+        self.document
             .classes_mut(id)
             .expect("element id is live")
             .push(Atom::from(class));
@@ -261,9 +258,9 @@ impl Doc {
 
     /// Remove a class (no-op when absent).
     pub fn remove_class(&mut self, id: ElementId, class: &str) {
-        self.arena.note_class_change(id);
+        self.document.note_class_change(id);
         let atom = Atom::from(class);
-        self.arena
+        self.document
             .classes_mut(id)
             .expect("element id is live")
             .retain(|existing| *existing != atom);
@@ -271,14 +268,14 @@ impl Doc {
 
     /// Set or clear the id attribute.
     pub fn set_id(&mut self, id: ElementId, value: Option<&str>) {
-        self.arena.note_id_change(id);
-        *self.arena.id_attr_mut(id).expect("element id is live") = value.map(Atom::from);
+        self.document.note_id_change(id);
+        *self.document.id_attr_mut(id).expect("element id is live") = value.map(Atom::from);
     }
 
     /// Set an attribute value.
     pub fn set_attr(&mut self, id: ElementId, name: &str, value: &str) {
-        self.arena.note_attribute_change(id, name);
-        self.arena
+        self.document.note_attribute_change(id, name);
+        self.document
             .attrs_mut(id)
             .expect("element id is live")
             .insert(name.into(), value.into());
@@ -286,8 +283,8 @@ impl Doc {
 
     /// Remove an attribute.
     pub fn remove_attr(&mut self, id: ElementId, name: &str) {
-        self.arena.note_attribute_change(id, name);
-        self.arena
+        self.document.note_attribute_change(id, name);
+        self.document
             .attrs_mut(id)
             .expect("element id is live")
             .remove(name);
@@ -295,9 +292,9 @@ impl Doc {
 
     /// Set or clear dynamic pseudo-class state bits (`:hover`/`:active`/…).
     pub fn set_state(&mut self, id: ElementId, state: ElementState, on: bool) {
-        self.arena.note_state_change(id);
+        self.document.note_state_change(id);
         let element_state = self
-            .arena
+            .document
             .element_state_mut(id)
             .expect("element id is live");
         if on {
@@ -309,7 +306,7 @@ impl Doc {
 
     /// Replace the element's inline `style` declarations.
     pub fn set_inline(&mut self, id: ElementId, css: &str) {
-        self.arena.set_inline_styles(id, css);
+        self.document.set_inline_styles(id, css);
     }
 }
 
@@ -428,15 +425,14 @@ pub fn media_matches_on(
     scheme: PrefersColorScheme,
 ) -> bool {
     const PROBE: &str = ".probe { color: rgb(1, 2, 3) }";
-    let mut engine = StyleEngine::new(device_with(width, height, dpr, scheme));
-    engine.add_stylesheet_with_media(PROBE, StylesheetOrigin::Author, query);
-    let mut arena = engine.new_arena();
-    let probe = arena.create_element("view", ());
-    arena
+    let mut document = Document::new(device_with(width, height, dpr, scheme));
+    document.add_stylesheet_with_media(PROBE, StylesheetOrigin::Author, query);
+    let probe = document.create_element("view", ());
+    document
         .classes_mut(probe)
         .expect("fresh element")
         .push(Atom::from("probe"));
-    let style = engine.resolve(arena.element_ref(probe).expect("fresh element"), None);
+    let style = document.resolve(document.element_ref(probe).expect("fresh element"), None);
     style.clone_color() == rgb(1, 2, 3)
 }
 

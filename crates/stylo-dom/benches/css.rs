@@ -28,7 +28,7 @@ use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_atoms::Atom;
-use stylo_dom::{Arena, ElementId, ElementState, Parallelism, StyleEngine, StylesheetOrigin};
+use stylo_dom::{Document, ElementId, ElementState, Parallelism, StylesheetOrigin};
 use stylo_traits::{CSSPixel, DevicePixel};
 
 fn main() {
@@ -113,15 +113,15 @@ fn author_sheet() -> String {
     css
 }
 
-fn engine_with_author_sheet() -> StyleEngine {
-    let mut engine = StyleEngine::new(device(800.0, 600.0));
-    engine.add_stylesheet_str(&author_sheet(), StylesheetOrigin::Author);
-    engine
+fn document_with_author_sheet() -> Document<()> {
+    let mut document = Document::new(device(800.0, 600.0));
+    document.add_stylesheet_str(&author_sheet(), StylesheetOrigin::Author);
+    document
 }
 
-fn create_element(arena: &mut Arena<()>, tag: &str, classes: &[String]) -> ElementId {
-    let id = arena.create_element(tag, ());
-    arena
+fn create_element(document: &mut Document<()>, tag: &str, classes: &[String]) -> ElementId {
+    let id = document.create_element(tag, ());
+    document
         .classes_mut(id)
         .expect("fresh element")
         .extend(classes.iter().map(|class| Atom::from(class.as_str())));
@@ -130,53 +130,53 @@ fn create_element(arena: &mut Arena<()>, tag: &str, classes: &[String]) -> Eleme
 
 /// `page > 32 × section > 32 × view`, classes cycling through the rule set,
 /// every section carrying a `data-row` attribute. ~1.1k elements.
-fn build_tree(engine: &StyleEngine) -> (Arena<()>, ElementId, ElementId) {
-    let mut arena = engine.new_arena();
-    let root = arena.create_element("page", ());
+fn populate_tree(document: &mut Document<()>) -> (ElementId, ElementId) {
+    let root = document.create_element("page", ());
     let mut probe = root;
     let mut class = 0usize;
     for row in 0..32 {
         class += 1;
-        let section = create_element(
-            &mut arena,
-            "section",
-            &[format!("c{}", class % CLASS_RULES)],
-        );
-        arena
+        let section = create_element(document, "section", &[format!("c{}", class % CLASS_RULES)]);
+        document
             .attrs_mut(section)
             .expect("fresh section")
             .insert("data-row".into(), row.to_string());
-        arena.attach_at(root, section, row);
+        document.attach_at(root, section, row);
         for leaf_index in 0..32 {
             class += 1;
-            let leaf = create_element(&mut arena, "view", &[format!("c{}", class % CLASS_RULES)]);
-            arena.attach_at(section, leaf, leaf_index);
+            let leaf = create_element(document, "view", &[format!("c{}", class % CLASS_RULES)]);
+            document.attach_at(section, leaf, leaf_index);
             probe = leaf;
         }
     }
-    (arena, root, probe)
+    (root, probe)
+}
+
+fn build_document() -> (Document<()>, ElementId, ElementId) {
+    let mut document = document_with_author_sheet();
+    let (root, probe) = populate_tree(&mut document);
+    (document, root, probe)
 }
 
 /// A flushed document plus a probe leaf, ready for incremental cases.
-fn flushed() -> (StyleEngine, Arena<()>, ElementId, ElementId) {
-    let engine = engine_with_author_sheet();
-    let (mut arena, root, probe) = build_tree(&engine);
-    engine.flush_tree(&mut arena, root);
-    (engine, arena, root, probe)
+fn flushed() -> (Document<()>, ElementId, ElementId) {
+    let (mut document, root, probe) = build_document();
+    document.flush(root);
+    (document, root, probe)
 }
 
 // --- stylesheet parsing ------------------------------------------------------
 
 /// Parse + register the generated author sheet from CSS text (one stylist
-/// flush included), on a fresh engine per iteration.
+/// flush included), on a fresh document per iteration.
 #[divan::bench]
 fn parse_author_sheet_text(bencher: divan::Bencher) {
     let css = author_sheet();
     bencher
-        .with_inputs(|| StyleEngine::new(device(800.0, 600.0)))
-        .bench_local_values(|mut engine| {
-            engine.add_stylesheet_str(black_box(&css), StylesheetOrigin::Author);
-            engine
+        .with_inputs(|| Document::<()>::new(device(800.0, 600.0)))
+        .bench_local_values(|mut document| {
+            document.add_stylesheet_str(black_box(&css), StylesheetOrigin::Author);
+            document
         });
 }
 
@@ -184,23 +184,21 @@ fn parse_author_sheet_text(bencher: divan::Bencher) {
 
 #[divan::bench]
 fn initial_flush_sequential(bencher: divan::Bencher) {
-    let engine = engine_with_author_sheet();
     bencher
-        .with_inputs(|| build_tree(&engine))
-        .bench_local_values(|(mut arena, root, _)| {
-            engine.flush_tree_with(&mut arena, root, Parallelism::Sequential);
-            arena
+        .with_inputs(build_document)
+        .bench_local_values(|(mut document, root, _)| {
+            document.flush_with(root, Parallelism::Sequential);
+            document
         });
 }
 
 #[divan::bench]
 fn initial_flush_parallel(bencher: divan::Bencher) {
-    let engine = engine_with_author_sheet();
     bencher
-        .with_inputs(|| build_tree(&engine))
-        .bench_local_values(|(mut arena, root, _)| {
-            engine.flush_tree_with(&mut arena, root, Parallelism::Auto);
-            arena
+        .with_inputs(build_document)
+        .bench_local_values(|(mut document, root, _)| {
+            document.flush_with(root, Parallelism::Auto);
+            document
         });
 }
 
@@ -213,16 +211,16 @@ fn incremental_class_flip(bencher: divan::Bencher) {
     let state = RefCell::new(flushed());
     let mut on = false;
     bencher.bench_local(|| {
-        let (engine, arena, root, probe) = &mut *state.borrow_mut();
+        let (document, root, probe) = &mut *state.borrow_mut();
         on = !on;
-        arena.note_class_change(*probe);
-        let classes = arena.classes_mut(*probe).expect("probe is live");
+        document.note_class_change(*probe);
+        let classes = document.classes_mut(*probe).expect("probe is live");
         if on {
             classes.push(Atom::from("c1"));
         } else {
             classes.pop();
         }
-        engine.flush_tree(arena, *root);
+        document.flush(*root);
     });
 }
 
@@ -232,41 +230,41 @@ fn incremental_inline_style(bencher: divan::Bencher) {
     let state = RefCell::new(flushed());
     let mut on = false;
     bencher.bench_local(|| {
-        let (engine, arena, root, probe) = &mut *state.borrow_mut();
+        let (document, root, probe) = &mut *state.borrow_mut();
         on = !on;
         let css = if on {
             "color: rgb(9, 9, 9); width: 10px"
         } else {
             "color: rgb(3, 3, 3); width: 20px"
         };
-        arena.set_inline_styles(*probe, black_box(css));
-        engine.flush_tree(arena, *root);
+        document.set_inline_styles(*probe, black_box(css));
+        document.flush(*root);
     });
 }
 
 /// `:hover` state flip on one deep leaf (state-keyed invalidation).
 #[divan::bench]
 fn incremental_state_flip(bencher: divan::Bencher) {
-    let mut engine = engine_with_author_sheet();
-    engine.add_stylesheet_str(
+    let mut document = document_with_author_sheet();
+    document.add_stylesheet_str(
         "view:hover { color: rgb(250, 250, 250); }",
         StylesheetOrigin::Author,
     );
-    let (mut arena, root, probe) = build_tree(&engine);
-    engine.flush_tree(&mut arena, root);
-    let state = RefCell::new((engine, arena));
+    let (root, probe) = populate_tree(&mut document);
+    document.flush(root);
+    let state = RefCell::new(document);
     let mut on = false;
     bencher.bench_local(|| {
-        let (engine, arena) = &mut *state.borrow_mut();
+        let document = &mut *state.borrow_mut();
         on = !on;
-        arena.note_state_change(probe);
-        let element_state = arena.element_state_mut(probe).expect("probe is live");
+        document.note_state_change(probe);
+        let element_state = document.element_state_mut(probe).expect("probe is live");
         if on {
             element_state.insert(ElementState::HOVER);
         } else {
             element_state.remove(ElementState::HOVER);
         }
-        engine.flush_tree(arena, root);
+        document.flush(root);
     });
 }
 
@@ -275,8 +273,8 @@ fn incremental_state_flip(bencher: divan::Bencher) {
 fn noop_flush(bencher: divan::Bencher) {
     let state = RefCell::new(flushed());
     bencher.bench_local(|| {
-        let (engine, arena, root, _) = &mut *state.borrow_mut();
-        engine.flush_tree(arena, *root);
+        let (document, root, _) = &mut *state.borrow_mut();
+        document.flush(*root);
     });
 }
 
@@ -286,26 +284,25 @@ fn noop_flush(bencher: divan::Bencher) {
 /// root, inherited by every descendant).
 #[divan::bench]
 fn inheritance_deep_chain(bencher: divan::Bencher) {
-    let mut engine = StyleEngine::new(device(800.0, 600.0));
-    engine.add_stylesheet_str(
-        "page { color: rgb(120, 30, 40); font-size: 18px; }",
-        StylesheetOrigin::Author,
-    );
     bencher
         .with_inputs(|| {
-            let mut arena = engine.new_arena();
-            let root = arena.create_element("page", ());
+            let mut document = Document::new(device(800.0, 600.0));
+            document.add_stylesheet_str(
+                "page { color: rgb(120, 30, 40); font-size: 18px; }",
+                StylesheetOrigin::Author,
+            );
+            let root = document.create_element("page", ());
             let mut parent = root;
             for _ in 0..256 {
-                let child = arena.create_element("view", ());
-                arena.attach_at(parent, child, 0);
+                let child = document.create_element("view", ());
+                document.attach_at(parent, child, 0);
                 parent = child;
             }
-            (arena, root)
+            (document, root)
         })
-        .bench_local_values(|(mut arena, root)| {
-            engine.flush_tree(&mut arena, root);
-            arena
+        .bench_local_values(|(mut document, root)| {
+            document.flush(root);
+            document
         });
 }
 
@@ -318,13 +315,16 @@ fn var_chain_cascade(bencher: divan::Bencher) {
         let _ = write!(css, "--v{i}: var(--v{});", i - 1);
     }
     css.push_str("} view { color: var(--v31); }");
-    let mut engine = StyleEngine::new(device(800.0, 600.0));
-    engine.add_stylesheet_str(&css, StylesheetOrigin::Author);
     bencher
-        .with_inputs(|| build_tree(&engine))
-        .bench_local_values(|(mut arena, root, _)| {
-            engine.flush_tree(&mut arena, root);
-            arena
+        .with_inputs(|| {
+            let mut document = Document::new(device(800.0, 600.0));
+            document.add_stylesheet_str(&css, StylesheetOrigin::Author);
+            let (root, probe) = populate_tree(&mut document);
+            (document, root, probe)
+        })
+        .bench_local_values(|(mut document, root, _)| {
+            document.flush(root);
+            document
         });
 }
 
@@ -334,22 +334,22 @@ fn var_chain_cascade(bencher: divan::Bencher) {
 /// device-change restyle.
 #[divan::bench]
 fn media_viewport_flip(bencher: divan::Bencher) {
-    let mut engine = engine_with_author_sheet();
-    engine.add_stylesheet_with_media(
+    let mut document = document_with_author_sheet();
+    document.add_stylesheet_with_media(
         ".c1 { color: rgb(200, 100, 50); } view { padding-top: 3px; }",
         StylesheetOrigin::Author,
         "(min-width: 700px)",
     );
-    let (mut arena, root, _) = build_tree(&engine);
-    engine.flush_tree(&mut arena, root);
-    let state = RefCell::new((engine, arena));
+    let (root, _) = populate_tree(&mut document);
+    document.flush(root);
+    let state = RefCell::new(document);
     let mut wide = true;
     bencher.bench_local(move || {
-        let (engine, arena) = &mut *state.borrow_mut();
+        let document = &mut *state.borrow_mut();
         wide = !wide;
-        engine.set_viewport(if wide { 800.0 } else { 400.0 }, 600.0);
-        arena.mark_subtree_dirty(black_box(root));
-        engine.flush_tree(arena, root);
+        document.set_viewport(if wide { 800.0 } else { 400.0 }, 600.0);
+        document.mark_subtree_dirty(black_box(root));
+        document.flush(root);
     });
 }
 
@@ -359,10 +359,12 @@ fn media_viewport_flip(bencher: divan::Bencher) {
 /// media/value helpers use).
 #[divan::bench]
 fn resolve_single_element(bencher: divan::Bencher) {
-    let engine = engine_with_author_sheet();
-    let (arena, _, probe) = build_tree(&engine);
+    let mut document = document_with_author_sheet();
+    let (_, probe) = populate_tree(&mut document);
     bencher.bench_local(|| {
-        let element = arena.element_ref(black_box(probe)).expect("probe is live");
-        black_box(engine.resolve(element, None));
+        let element = document
+            .element_ref(black_box(probe))
+            .expect("probe is live");
+        black_box(document.resolve(element, None));
     });
 }

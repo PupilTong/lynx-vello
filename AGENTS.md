@@ -118,7 +118,8 @@ useful signal for currently-compatible versions of those libraries.
   `resource` module owns the protocol-only, host-injected, object-safe Tokio
   `ResourceFetcher` contract; `script` owns the ShadowRealm-inspired isolated
   `ScriptEngine` protocol; and `view` owns `LynxView<R, E>`, coupling one
-  engine instance with one private `lynx-widget` StyleEngine/WidgetTree pair.
+  engine instance with one private `lynx-widget` `WidgetTree`, whose generic
+  document owns both its nodes and style context.
   The resource module must not decode images/fonts/templates, upload render
   resources, or own cache/retry policy; its protocol remains independent of
   decoder/widget/style/layout/render layers even though the enclosing engine
@@ -141,10 +142,10 @@ useful signal for currently-compatible versions of those libraries.
   the future preloaded module graph belong here rather than in the generic
   QuickJS bridge or engine-neutral protocol.
 - `crates/stylo-dom` — generic HTML-DOM subset and standards-oriented CSS
-  computation core. Owns `Node<T>` / `Arena<T>`, address-stable document
-  back-pointers, stylo DOM trait impls directly on `&Node<T>`,
-  tree invalidation, inline-style parsing, the `Stylist` / cascade pipeline,
-  and the private `SharedRwLock` shared by an engine and its arenas. It must
+  computation core. Owns `Node<T>` / `Document<T>`, address-stable document
+  back-pointers, stylo DOM trait impls directly on `&Node<T>`, tree
+  invalidation, inline-style parsing, and each document's private `Stylist`,
+  `Device`, cascade pipeline, and `SharedRwLock`. It must
   not contain Lynx widget vocabulary or Lynx device/unit policy.
 - `crates/lynx-widget` — Lynx Element-PAPI and style adapter over `stylo-dom`.
   Owns `WidgetState` / `WidgetTree`, Lynx view metrics, touch-first

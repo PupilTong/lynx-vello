@@ -12,7 +12,7 @@ use std::cell::RefCell;
 
 use divan::black_box;
 use lynx_template_decoder::StyleInfo;
-use lynx_widget::{EngineMetrics, Parallelism, StyleEngine, WidgetId, WidgetTree};
+use lynx_widget::{EngineMetrics, Parallelism, WidgetId, WidgetTree};
 
 fn main() {
     divan::main();
@@ -36,17 +36,16 @@ fn large_style_info() -> StyleInfo {
         .expect("fixture carries StyleInfo")
 }
 
-/// An engine with the large fixture stylesheet loaded.
-fn engine_with_large_css() -> StyleEngine {
-    let mut engine = StyleEngine::new(metrics());
-    engine.load_style_info(&large_style_info());
-    engine
+/// A document with the large fixture stylesheet loaded.
+fn document_with_large_css() -> WidgetTree {
+    let mut document = WidgetTree::with_metrics(metrics());
+    document.load_style_info(&large_style_info());
+    document
 }
 
 /// `page > 32 × view > 32 × view`, classes cycling through the fixture's
 /// `.classN` rules. Returns the tree and one deep leaf.
-fn build_tree(engine: &StyleEngine) -> (WidgetTree, WidgetId) {
-    let mut tree = engine.new_widget_tree();
+fn populate_tree(tree: &mut WidgetTree) -> WidgetId {
     let page = tree.create_page();
     let mut class_index = 0usize;
     let mut probe = None;
@@ -65,7 +64,13 @@ fn build_tree(engine: &StyleEngine) -> (WidgetTree, WidgetId) {
             probe = Some(leaf);
         }
     }
-    (tree, probe.expect("tree has leaves"))
+    probe.expect("tree has leaves")
+}
+
+fn build_tree() -> (WidgetTree, WidgetId) {
+    let mut tree = document_with_large_css();
+    let probe = populate_tree(&mut tree);
+    (tree, probe)
 }
 
 /// `StyleInfo` → stylo rule objects + stylist flush, by direct construction
@@ -75,21 +80,20 @@ fn build_tree(engine: &StyleEngine) -> (WidgetTree, WidgetId) {
 fn ingest_large_style_info(bencher: divan::Bencher<'_, '_>) {
     let info = large_style_info();
     bencher
-        .with_inputs(|| StyleEngine::new(metrics()))
-        .bench_local_values(|mut engine| {
-            engine.load_style_info(black_box(&info));
-            engine
+        .with_inputs(|| WidgetTree::with_metrics(metrics()))
+        .bench_local_values(|mut document| {
+            document.load_style_info(black_box(&info));
+            document
         });
 }
 
 /// First full style pass over ~1.1k widgets, single-threaded.
 #[divan::bench]
 fn initial_flush_1k_sequential(bencher: divan::Bencher<'_, '_>) {
-    let engine = engine_with_large_css();
     bencher
-        .with_inputs(|| build_tree(&engine).0)
+        .with_inputs(|| build_tree().0)
         .bench_local_values(|mut tree| {
-            engine.flush_widget_tree_with(&mut tree, Parallelism::Sequential);
+            tree.flush_styles_with(Parallelism::Sequential);
             tree
         });
 }
@@ -99,11 +103,10 @@ fn initial_flush_1k_sequential(bencher: divan::Bencher<'_, '_>) {
 /// levels on its own).
 #[divan::bench]
 fn initial_flush_1k_parallel(bencher: divan::Bencher<'_, '_>) {
-    let engine = engine_with_large_css();
     bencher
-        .with_inputs(|| build_tree(&engine).0)
+        .with_inputs(|| build_tree().0)
         .bench_local_values(|mut tree| {
-            engine.flush_widget_tree_with(&mut tree, Parallelism::Auto);
+            tree.flush_styles_with(Parallelism::Auto);
             tree
         });
 }
@@ -112,16 +115,15 @@ fn initial_flush_1k_parallel(bencher: divan::Bencher<'_, '_>) {
 /// diffing restyles only the elements whose rules could be affected).
 #[divan::bench]
 fn incremental_class_flip(bencher: divan::Bencher<'_, '_>) {
-    let engine = engine_with_large_css();
-    let (mut tree, probe) = build_tree(&engine);
-    engine.flush_widget_tree(&mut tree);
+    let (mut tree, probe) = build_tree();
+    tree.flush_styles();
     let state = RefCell::new((tree, false));
     bencher.bench_local(|| {
         let (tree, toggle) = &mut *state.borrow_mut();
         *toggle = !*toggle;
         let class = if *toggle { "class7" } else { "class9" };
         tree.set_classes(probe, black_box(class)).unwrap();
-        engine.flush_widget_tree(tree);
+        tree.flush_styles();
     });
 }
 
@@ -129,9 +131,8 @@ fn incremental_class_flip(bencher: divan::Bencher<'_, '_>) {
 /// replacement hint (swaps one cascade level, no selector re-matching).
 #[divan::bench]
 fn incremental_inline_style(bencher: divan::Bencher<'_, '_>) {
-    let engine = engine_with_large_css();
-    let (mut tree, probe) = build_tree(&engine);
-    engine.flush_widget_tree(&mut tree);
+    let (mut tree, probe) = build_tree();
+    tree.flush_styles();
     let state = RefCell::new((tree, false));
     bencher.bench_local(|| {
         let (tree, toggle) = &mut *state.borrow_mut();
@@ -139,19 +140,18 @@ fn incremental_inline_style(bencher: divan::Bencher<'_, '_>) {
         let width = if *toggle { "10px" } else { "20px" };
         tree.add_inline_style(probe, "width", black_box(width))
             .unwrap();
-        engine.flush_widget_tree(tree);
+        tree.flush_styles();
     });
 }
 
 /// A flush with nothing scheduled: the per-frame overhead floor.
 #[divan::bench]
 fn no_op_flush(bencher: divan::Bencher<'_, '_>) {
-    let engine = engine_with_large_css();
-    let (mut tree, _) = build_tree(&engine);
-    engine.flush_widget_tree(&mut tree);
+    let (mut tree, _) = build_tree();
+    tree.flush_styles();
     let state = RefCell::new(tree);
     bencher.bench_local(|| {
-        engine.flush_widget_tree(&mut state.borrow_mut());
+        state.borrow_mut().flush_styles();
     });
 }
 
@@ -159,15 +159,14 @@ fn no_op_flush(bencher: divan::Bencher<'_, '_>) {
 /// style sharing) — the cache-less baseline the flush path improves on.
 #[divan::bench]
 fn resolve_single_widget(bencher: divan::Bencher<'_, '_>) {
-    let engine = engine_with_large_css();
-    let (tree, probe) = build_tree(&engine);
+    let (tree, probe) = build_tree();
     let parent = tree.get_parent(probe).unwrap();
     let parent_style = {
         let parent_ref = tree.widget_ref(parent).unwrap();
-        engine.resolve_widget(parent_ref, None)
+        tree.resolve_widget(parent_ref, None)
     };
     bencher.bench_local(|| {
         let widget_ref = tree.widget_ref(black_box(probe)).unwrap();
-        engine.resolve_widget(widget_ref, Some(&parent_style))
+        tree.resolve_widget(widget_ref, Some(&parent_style))
     });
 }

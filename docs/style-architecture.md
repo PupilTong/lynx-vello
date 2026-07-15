@@ -17,53 +17,54 @@ Lynx-only device and unit behavior moved up into `lynx-widget`.
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| `stylo-dom` | `Node<T>`, address-stable `Document` storage behind `Arena<T>`, stylo DOM traits on `&Node<T>`, invalidation, inline parsing, `Stylist`, rule matching, cascade, media evaluation, computed values, the private `SharedRwLock` | Lynx tags/PAPI, `WidgetState`, Lynx unit metrics, touch-device policy |
+| `stylo-dom` | `Document<T>` and `Node<T>`, address-stable node back-pointers, stylo DOM traits on `&Node<T>`, invalidation, inline parsing, per-document `Stylist`/`Device`, rule matching, cascade, media evaluation, computed values, and the private `SharedRwLock` | Lynx tags/PAPI, `WidgetState`, Lynx unit metrics, touch-device policy |
 | `lynx-widget` | `WidgetState`, `WidgetTree`, PAPI validation, `EngineMetrics`, touch-first `Device` construction, viewport-relative `rpx` integration | A second stylist, cascade implementation, stylesheet lock sharing |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, the maintained Lynx CSS extension patch set | Runtime Widget/PAPI policy |
 
 ## Style lifecycle
 
-1. `lynx_widget::StyleEngine::new(EngineMetrics)` (or `with_page_config`)
+1. `lynx_widget::WidgetTree::with_metrics(EngineMetrics)` (or `with_page_config`)
    constructs the touch-first stylo `Device` — its viewport is the `rpx`
    basis — and installs the **UA-origin default sheet** generated from the
    `PageConfig` (`defaultDisplayLinear`, `defaultOverflowVisible`; see
    `crates/lynx-widget/src/ua.rs`). Page config is never an engine branch.
-2. The adapter constructs `stylo_dom::StyleEngine`, which owns one `Stylist`,
-   one base URL, and one private `SharedRwLock`.
-3. `StyleEngine::load_style_info(&StyleInfo)` ingests a decoded bundle by
+2. The adapter constructs one independent `stylo_dom::Document<WidgetState>`,
+   which owns its node storage together with one `Stylist`, `Device`, base URL,
+   and private `SharedRwLock`. Multiple documents are independent instances;
+   this is not a singleton model.
+3. `WidgetTree::load_style_info(&StyleInfo)` ingests a decoded bundle by
    **direct construction** (`crates/lynx-widget/src/ingest.rs`): one selector
    parse per rule + per-property value parses into stylo rule objects — no
    CSS-text re-serialization. Lynx policy applied at ingest: `@import`
    flattening (Kahn, web-core parity) and cssId scoping via
    `:where([l-css-id="N"])` guards on the subject compound. The rules mount
    through the fork's `StylesheetContents::from_rules` +
-   `stylo_dom::StyleEngine::append_rules`.
-4. `StyleEngine::new_widget_tree()` asks the core for an arena bound to that
-   private style context. Neither `lynx-widget` nor callers receive the lock.
-5. DOM mutations schedule style work in `Arena<T>` (`crates/stylo-dom/src/dirty.rs`):
+   `stylo_dom::Document::append_rules`.
+4. DOM mutations schedule style work in `Document<T>` (`crates/stylo-dom/src/dirty.rs`):
    attribute / class / id / pseudo-state changes record **pre-mutation
    snapshots** for stylo's invalidation sets; structural changes post
    **restyle hints** scoped by the selector flags stylo recorded during
    matching; inline-style updates post the style-attribute replacement hint.
-6. `StyleEngine::flush_widget_tree(&mut tree)` drives **stylo's own restyle
+5. `WidgetTree::flush_styles()` delegates to `Document::flush` and drives **stylo's own restyle
    traversal** (`crates/stylo-dom/src/flush.rs`): snapshot-driven
    invalidation, the style sharing cache, bloom filter, and rayon
    parallelism over wide DOM levels (stylo's global style pool). Computed
    styles land in each element's stylo `ElementData`; read them with
    `WidgetTree::computed` (an `Arc<ComputedValues>` clone — direct Arc reads
    per `docs/style-assumptions.md` §B.8).
-7. `stylo_dom::StyleEngine::resolve` remains as the standalone per-element
+6. `stylo_dom::Document::resolve` remains as the standalone per-element
    match+cascade (no traversal state); the Widget adapter exposes it as
    `resolve_widget`.
 
 ## Invariants
 
-- Build styled arenas through the engine that will resolve them. `Arena::new`
-  and `WidgetTree::new` are for standalone DOM-only use.
-- Nodes are created through `Arena::create_element`; there is no public
+- Every `Document<T>` owns exactly one node tree and exactly one matching style
+  context. Create as many independent documents as needed; no document state is
+  global or shared implicitly.
+- Nodes are created through `Document::create_element`; there is no public
   unbound `Node` constructor. Detach keeps the node in its document, while
   physical removal exposes only the embedder payload.
-- `Arena` does not expose `&mut Node`: moving or swapping a whole node could
+- `Document` does not expose `&mut Node`: moving or swapping a whole node could
   invalidate its document back-pointer. Mutation APIs project only ordinary
   fields (`classes_mut`, `attrs_mut`, `ext_mut`, and so on), while topology is
   changed through the tree primitives.
@@ -72,12 +73,11 @@ Lynx-only device and unit behavior moved up into `lynx-widget`.
 - Standard CSS behavior belongs in `stylo-dom`. Lynx-only extensions and
   environment policy belong in `lynx-widget` (or the maintained stylo fork
   when they are first-class CSS grammar/value extensions).
-- Device mutations go through `stylo_dom::StyleEngine::update_device` or
-  `set_viewport`, ensuring media-dependent cascade data is refreshed. After a
-  device change the embedder calls
-  `lynx_widget::StyleEngine::restyle_after_device_change` on each styled tree
-  so `rpx`/`vw`/`vh` lengths re-resolve and media-dependent rules re-match on
-  the next flush.
+- Device mutations go through `stylo_dom::Document::update_device` or
+  `set_viewport`, ensuring media-dependent cascade data is refreshed.
+  `WidgetTree::set_viewport` and `set_device_pixel_ratio` also schedule their
+  own page subtree, so `rpx`/`vw`/`vh` lengths re-resolve and media-dependent
+  rules re-match on the next flush.
 - **Snapshot before mutating**: every matching-relevant mutation API calls
   its `note_*_change` counterpart *before* applying the change, so the
   snapshot holds the old state.

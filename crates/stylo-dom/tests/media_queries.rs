@@ -5,7 +5,7 @@
 //!
 //! Scope: `enableCSSSelector = true` / `enableRemoveCSSScope = true`. The
 //! `.web.bundle` wire format cannot carry `@media` yet; per
-//! `docs/style-assumptions.md` §C.10 the engine supports it ahead of the
+//! `docs/style-assumptions.md` §C.10 the document supports it ahead of the
 //! format, with the C++ NG evaluator as the behavioral reference. Ports
 //! assert end-to-end evaluation (a probe rule guarded by the query applies
 //! or not) and serialization idempotence — never Lynx's internal node/Lepus
@@ -28,25 +28,24 @@ use stylo::servo::media_features::PointerCapabilities;
 use stylo::stylesheets::{CssRuleType, Origin};
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo_atoms::Atom;
-use stylo_dom::{StyleEngine, StylesheetOrigin};
+use stylo_dom::{Document, StylesheetOrigin};
 use stylo_traits::{CSSPixel, DevicePixel, ParsingMode, ToCss};
 
 /// End-to-end evaluation of `query` against an explicit device: does a
 /// probe rule guarded by it apply?
 fn matches_dev(device: Device, query: &str) -> bool {
-    let mut engine = StyleEngine::new(device);
-    engine.add_stylesheet_with_media(
+    let mut document = Document::new(device);
+    document.add_stylesheet_with_media(
         ".probe { color: rgb(1, 2, 3) }",
         StylesheetOrigin::Author,
         query,
     );
-    let mut arena = engine.new_arena();
-    let probe = arena.create_element("view", ());
-    arena
+    let probe = document.create_element("view", ());
+    document
         .classes_mut(probe)
         .expect("fresh element")
         .push(Atom::from("probe"));
-    let style = engine.resolve(arena.element_ref(probe).expect("fresh element"), None);
+    let style = document.resolve(document.element_ref(probe).expect("fresh element"), None);
     style.clone_color() == rgb(1, 2, 3)
 }
 
@@ -203,7 +202,7 @@ fn orientation_follows_viewport() {
 
 // C++: MediaQueryEvaluatorTest resolution + device-pixel-ratio tables
 // (DPR 3 device; 3dppx = 288dpi). Lynx's bare `device-pixel-ratio` spelling
-// is a Lynx-only extension; the engine follows compat-standard naming
+// is a Lynx-only extension; the document follows compat-standard naming
 // (`-webkit-`/`-moz-` prefixed, per WHATWG compat spec) plus the real MQ4
 // `resolution` feature. The bare spelling never matches — an intentional,
 // recorded divergence (no `.web.bundle` can carry `@media` yet, so nothing
@@ -467,6 +466,6 @@ fn serialization_is_canonical_and_idempotent() {
 // override with no stylo analog (orientation derives from the viewport).
 // Skipped (skip-out-of-scope): null_guards — C++ nullptr-safety of Eval().
 // Skipped (folded): parse_media_condition_entrypoint — stylo's internal
-// MediaCondition entry is not reachable through the engine; the observable
+// MediaCondition entry is not reachable through the document; the observable
 // grammar (bare types rejected as conditions) is covered by
 // `compound_conditions_and_list_semantics`.

@@ -34,6 +34,8 @@ use lynx_template_decoder::style_info::{Rule, RuleType, Selector, SimpleSelector
 use rustc_hash::{FxHashMap, FxHashSet};
 use stylo_dom::CssRule;
 
+use crate::WidgetState;
+
 /// One rule's declarations, lowered to `(name, value, important)` text parts.
 fn lower_declarations(rule: &Rule) -> Vec<(&str, String, bool)> {
     rule.declaration_block
@@ -237,11 +239,14 @@ fn write_declaration_block(buf: &mut String, rule: &Rule) {
     }
 }
 
-/// Lower every fragment of `info` into stylo rules via the engine's builders.
+/// Lower every fragment of `info` into stylo rules via the document's builders.
 ///
 /// Returns the built rules; the caller mounts them
-/// ([`StyleEngine::load_style_info`](crate::StyleEngine::load_style_info)).
-pub(crate) fn build_rules(core: &stylo_dom::StyleEngine, info: &StyleInfo) -> Vec<CssRule> {
+/// ([`WidgetTree::load_style_info`](crate::WidgetTree::load_style_info)).
+pub(crate) fn build_rules(
+    document: &stylo_dom::Document<WidgetState>,
+    info: &StyleInfo,
+) -> Vec<CssRule> {
     let imported_by = imported_by_map(info);
 
     // Deterministic emission order: ascending css id. (The wire format's
@@ -265,7 +270,7 @@ pub(crate) fn build_rules(core: &stylo_dom::StyleEngine, info: &StyleInfo) -> Ve
                         continue;
                     }
                     let declarations = lower_declarations(rule);
-                    core.build_style_rule(
+                    document.build_style_rule(
                         &selectors,
                         declarations
                             .iter()
@@ -279,12 +284,12 @@ pub(crate) fn build_rules(core: &stylo_dom::StyleEngine, info: &StyleInfo) -> Ve
                         .first()
                         .map(Selector::to_css_string)
                         .unwrap_or_default();
-                    core.build_keyframes_rule(name.trim(), &keyframes_body(rule))
+                    document.build_keyframes_rule(name.trim(), &keyframes_body(rule))
                 }
                 RuleType::FontFace => {
                     let mut body = String::new();
                     write_declaration_block(&mut body, rule);
-                    core.build_font_face_rule(&body)
+                    document.build_font_face_rule(&body)
                 }
             };
             rules.extend(built);

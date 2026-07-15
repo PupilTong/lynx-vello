@@ -1,6 +1,6 @@
 //! The stylo-traversal-driven style flush.
 //!
-//! [`StyleEngine::flush_tree`] restyles everything scheduled since the last
+//! [`Document::flush`](crate::Document::flush) restyles everything scheduled since the last
 //! flush by driving **stylo's own restyle traversal**
 //! ([`driver::traverse_dom`]) over the arena, which buys, in one move:
 //!
@@ -15,7 +15,7 @@
 //!
 //! Computed styles land in each element's stylo `ElementData`
 //! ([`Node::computed_style`](crate::Node::computed_style) reads them);
-//! [`Arena::complete_flush`](crate::Arena) then drops the consumed snapshots
+//! [`Document::complete_flush`](crate::Document) then drops the consumed snapshots
 //! and clears the dirty spine.
 //!
 //! # Safety
@@ -39,12 +39,11 @@ use stylo::traversal::{DomTraversal, PerLevelTraversalData, recalc_style_at};
 use stylo::traversal_flags::TraversalFlags;
 use stylo_atoms::Atom;
 
-use crate::arena::{Arena, ElementId};
+use crate::arena::{Document, ElementId};
 use crate::ext::ExternalState;
 use crate::node::Node;
-use crate::style::StyleEngine;
 
-/// How [`StyleEngine::flush_tree_with`] schedules the traversal.
+/// How [`Document::flush_with`] schedules the traversal.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Parallelism {
     /// Use stylo's global style thread pool when it exists; stylo still
@@ -135,7 +134,7 @@ impl<'a, T: ExternalState + Sync> DomTraversal<&'a Node<T>> for RecalcStyle<'a> 
     }
 }
 
-impl StyleEngine {
+impl<T: ExternalState + Sync> Document<T> {
     /// Restyle everything scheduled since the last flush under `root`,
     /// using the style thread pool when the tree is wide enough
     /// ([`Parallelism::Auto`]).
@@ -145,22 +144,17 @@ impl StyleEngine {
     /// If the traversal panics, the arena's scheduling state (dirty bits,
     /// pending snapshots) is left unspecified; an embedder that catches the
     /// unwind should discard or rebuild the tree rather than keep flushing it.
-    pub fn flush_tree<T: ExternalState + Sync>(&self, arena: &mut Arena<T>, root: ElementId) {
-        self.flush_tree_with(arena, root, Parallelism::Auto);
+    pub fn flush(&mut self, root: ElementId) {
+        self.flush_with(root, Parallelism::Auto);
     }
 
-    /// [`flush_tree`](Self::flush_tree) with explicit traversal scheduling.
-    pub fn flush_tree_with<T: ExternalState + Sync>(
-        &self,
-        arena: &mut Arena<T>,
-        root: ElementId,
-        parallelism: Parallelism,
-    ) {
+    /// [`flush`](Self::flush) with explicit traversal scheduling.
+    pub fn flush_with(&mut self, root: ElementId, parallelism: Parallelism) {
         {
-            let Some(root_ref) = arena.element_ref(root) else {
+            let Some(root_ref) = self.element_ref(root) else {
                 return;
             };
-            let _traversal_guard = arena.begin_traversal();
+            let _traversal_guard = self.begin_traversal();
             let guard = self.shared_lock().read();
             let shared = SharedStyleContext {
                 stylist: self.stylist(),
@@ -174,7 +168,7 @@ impl StyleEngine {
                 // the real clock and a persistent `DocumentAnimationSet`.
                 current_time_for_animations: 0.0,
                 traversal_flags: TraversalFlags::empty(),
-                snapshot_map: arena.snapshot_map(),
+                snapshot_map: self.snapshot_map(),
                 animations: DocumentAnimationSet::default(),
                 registered_speculative_painters: &NO_PAINTERS,
             };
@@ -202,6 +196,6 @@ impl StyleEngine {
                 }
             }
         }
-        arena.complete_flush(root);
+        self.complete_flush(root);
     }
 }

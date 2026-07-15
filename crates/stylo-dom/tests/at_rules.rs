@@ -7,7 +7,7 @@
 //! Descriptor-level assertions parse a stylesheet under a test-owned
 //! `SharedRwLock` (the same public stylo API `stylo-dom` builds on) and read
 //! the rule objects back; registration-level assertions go through
-//! `StyleEngine`'s rule builders.
+//! `Document`'s rule builders.
 
 mod common;
 
@@ -17,7 +17,7 @@ use stylo::media_queries::MediaList;
 use stylo::properties::font_face::DescriptorId;
 use stylo::shared_lock::SharedRwLock;
 use stylo::stylesheets::{AllowImportRules, CssRule, Origin, Stylesheet};
-use stylo_dom::{StyleEngine, StylesheetOrigin};
+use stylo_dom::{Document, StylesheetOrigin};
 use stylo_traits::ToCss;
 
 /// Parse one stylesheet under a private lock and return `(lock, rules)`.
@@ -99,26 +99,25 @@ fn keyframe_selectors_normalize_and_reject() {
     );
 }
 
-// Registration behavior through the engine's direct-construction builders.
+// Registration behavior through the document's direct-construction builders.
 #[test]
 fn keyframes_rules_register_and_resolve_by_name() {
-    let mut engine = StyleEngine::new(device(800.0, 600.0));
-    let rule = engine
+    let mut document = Document::new(device(800.0, 600.0));
+    let rule = document
         .build_keyframes_rule("slide", "from { opacity: 0 } to { opacity: 1 }")
         .expect("named rule builds");
-    engine.append_rules(vec![rule], StylesheetOrigin::Author);
+    document.append_rules(vec![rule], StylesheetOrigin::Author);
     assert!(
-        engine
+        document
             .build_keyframes_rule("", "from { opacity: 0 }")
             .is_none(),
         "an empty animation name is invalid"
     );
 
-    let mut arena = engine.new_arena();
-    let root = arena.create_element("page", ());
-    let root_ref = arena.element_ref(root).expect("root is live");
-    assert!(engine.has_keyframes_animation("slide", root_ref));
-    assert!(!engine.has_keyframes_animation("missing", root_ref));
+    let root = document.create_element("page", ());
+    let root_ref = document.element_ref(root).expect("root is live");
+    assert!(document.has_keyframes_animation("slide", root_ref));
+    assert!(!document.has_keyframes_animation("missing", root_ref));
 }
 
 // C++: font_face_parser_test.cc::ParseRequiredDescriptorsAndRanges.
@@ -168,7 +167,7 @@ fn font_face_full_descriptor_set() {
 }
 
 // C++: font_face_parser_test.cc::ParseDefaults — unset optional descriptors
-// stay unset (the engine applies weight 400/stretch 100%/style normal /
+// stay unset (the document applies weight 400/stretch 100%/style normal /
 // full unicode-range at font-matching time).
 #[test]
 fn font_face_defaults_stay_unset() {
@@ -327,14 +326,14 @@ fn font_face_src_list_is_forgiving_per_entry() {
     }
 }
 
-// Registration count through the engine (direct-construction path).
+// Registration count through the document (direct-construction path).
 #[test]
 fn font_face_rules_register_in_the_stylist() {
     let mut doc = Doc::new();
-    assert_eq!(doc.engine.font_face_count(), 0);
+    assert_eq!(doc.document.font_face_count(), 0);
     doc.add_css("@font-face { font-family: A; src: url(a.woff2); }");
     doc.add_css("@font-face { font-family: B; src: url(b.woff2); }");
-    assert_eq!(doc.engine.font_face_count(), 2);
+    assert_eq!(doc.document.font_face_count(), 2);
 }
 
 // Skipped (skip-internal): css_font_face_token_unittest.cc dictionary

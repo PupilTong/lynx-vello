@@ -14,20 +14,14 @@ use std::any::type_name;
 use std::fmt;
 use std::sync::Arc;
 
-use lynx_widget::StyleEngine;
 pub use lynx_widget::{EngineMetrics, PageConfig, WidgetTree};
 
 use crate::resource::ResourceFetcher;
 use crate::script::ScriptEngine;
 
-/// One view-local instance of the `lynx-widget` Element PAPI and style engine.
-///
-/// The tree is always created by this exact [`StyleEngine`], binding its arena
-/// to the style engine's private Stylo lock/context. The engine stays private,
-/// and operations that use it are paired with this tree internally.
+/// One view-local `lynx-widget` document and Element PAPI instance.
 #[derive(Debug)]
 pub struct LynxWidgetApi {
-    style_engine: StyleEngine,
     tree: WidgetTree,
 }
 
@@ -41,9 +35,9 @@ impl LynxWidgetApi {
     /// Create an empty view-local widget API with explicit page defaults.
     #[must_use]
     pub fn with_page_config(metrics: EngineMetrics, page_config: PageConfig) -> Self {
-        let style_engine = StyleEngine::with_page_config(metrics, page_config);
-        let tree = style_engine.new_widget_tree();
-        Self { style_engine, tree }
+        Self {
+            tree: WidgetTree::with_page_config(metrics, page_config),
+        }
     }
 
     /// Borrow this view's Element-PAPI tree.
@@ -59,22 +53,18 @@ impl LynxWidgetApi {
 
     /// Flush pending style work in this view's own tree.
     pub fn flush_styles(&mut self) {
-        self.style_engine.flush_widget_tree(&mut self.tree);
+        self.tree.flush_styles();
     }
 
     /// Update this view's viewport and schedule its tree for restyling.
     pub fn set_viewport(&mut self, width: f32, height: f32) {
-        self.style_engine.set_viewport(width, height);
-        self.style_engine
-            .restyle_after_device_change(&mut self.tree);
+        self.tree.set_viewport(width, height);
     }
 
     /// Update this view's device-pixel ratio and schedule its tree for
     /// restyling.
     pub fn set_device_pixel_ratio(&mut self, device_pixel_ratio: f32) {
-        self.style_engine.set_device_pixel_ratio(device_pixel_ratio);
-        self.style_engine
-            .restyle_after_device_change(&mut self.tree);
+        self.tree.set_device_pixel_ratio(device_pixel_ratio);
     }
 }
 

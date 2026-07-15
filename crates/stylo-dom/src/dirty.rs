@@ -1,7 +1,7 @@
-//! Style-invalidation scheduling on the [`Arena`].
+//! Style-invalidation scheduling on the [`Document`](crate::Document).
 //!
 //! Two cooperating mechanisms decide what the next
-//! [`StyleEngine::flush_tree`](crate::StyleEngine::flush_tree) recomputes:
+//! [`Document::flush`](crate::Document::flush) recomputes:
 //!
 //! 1. **Snapshots** (fine-grained, for attribute / class / id / state changes): before mutating,
 //!    the embedder calls the matching `note_*_change` method, which records the element's *old*
@@ -28,7 +28,7 @@ use stylo::attr::{AttrIdentifier, AttrValue};
 use stylo::invalidation::element::restyle_hints::RestyleHint;
 use stylo::selector_parser::Snapshot;
 
-use crate::arena::{Arena, ElementId};
+use crate::arena::{Document, ElementId};
 use crate::ext::ExternalState;
 
 /// Selector-flag bits on a parent that make child-list mutations observable
@@ -40,7 +40,7 @@ const STRUCTURE_SENSITIVE: ElementSelectorFlags = ElementSelectorFlags::HAS_SLOW
     .union(ElementSelectorFlags::HAS_EMPTY_SELECTOR)
     .union(ElementSelectorFlags::MAY_HAVE_TREE_COUNTING_FUNCTION);
 
-impl<T> Arena<T> {
+impl<T> Document<T> {
     /// Mark `id` as needing its own style recomputed, and flag its ancestors as
     /// having a dirty descendant.
     ///
@@ -196,7 +196,7 @@ impl<T> Arena<T> {
     }
 }
 
-impl<T: ExternalState> Arena<T> {
+impl<T: ExternalState> Document<T> {
     /// Record a pre-mutation snapshot for `id` and note that its `class` list
     /// is changing. Call **before** applying the mutation.
     pub fn note_class_change(&mut self, id: ElementId) {

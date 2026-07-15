@@ -1,4 +1,4 @@
-//! Low-level tree-mutation primitives on the [`Arena`], with their style
+//! Low-level tree-mutation primitives on the [`Document`](crate::Document), with their style
 //! invalidation baked in.
 //!
 //! These live here (rather than in the embedder's API layer) because their
@@ -11,24 +11,24 @@
 //!
 //! # Invalidation contract
 //!
-//! - [`Arena::detach`] applies the child-list invalidation
-//!   ([`note_child_list_change`](Arena::note_child_list_change)) to the *old* parent — scoped by
-//!   the parent's stylo selector flags, so a removal only restyles what `:empty` / `:nth-*` /
-//!   edge-child rules can actually observe.
-//! - [`Arena::attach_at`] applies it to the *new* parent, and additionally schedules a subtree
-//!   restyle on a previously-styled `child` (its matching context — ancestors, siblings — changed
-//!   with the move).
+//! - [`Document::detach`](crate::Document::detach) applies the child-list invalidation
+//!   ([`note_child_list_change`](crate::Document::note_child_list_change)) to the *old* parent —
+//!   scoped by the parent's stylo selector flags, so a removal only restyles what `:empty` /
+//!   `:nth-*` / edge-child rules can actually observe.
+//! - [`Document::attach_at`](crate::Document::attach_at) applies it to the *new* parent, and
+//!   additionally schedules a subtree restyle on a previously-styled `child` (its matching context
+//!   — ancestors, siblings — changed with the move).
 //!
 //! Cycle detection is deliberately **not** here: it is the embedding layer's
 //! job because it produces that layer's errors. The read helpers
-//! ([`Arena::is_ancestor`] etc.) the embedder needs to detect cycles / resolve
-//! references live here so both layers share one implementation.
+//! ([`Document::is_ancestor`](crate::Document::is_ancestor) etc.) the embedder needs to detect
+//! cycles / resolve references live here so both layers share one implementation.
 
 use stylo::invalidation::element::restyle_hints::RestyleHint;
 
-use crate::arena::{Arena, ElementId};
+use crate::arena::{Document, ElementId};
 
-impl<T> Arena<T> {
+impl<T> Document<T> {
     /// The position of `child` within `parent`'s child list, if it is a child.
     #[must_use]
     pub fn child_position(&self, parent: ElementId, child: ElementId) -> Option<usize> {
@@ -113,7 +113,7 @@ impl<T> Arena<T> {
     /// The caller (the embedder's API layer) harvests whatever it indexed from
     /// the returned payloads. All handles into the subtree become stale. This
     /// does **not** unlink `root` from a parent first — callers that need that
-    /// call [`Arena::detach`] beforehand.
+    /// call [`Document::detach`](crate::Document::detach) beforehand.
     pub fn drop_subtree(&mut self, root: ElementId) -> Vec<T> {
         let mut removed = Vec::new();
         let mut stack = vec![root];

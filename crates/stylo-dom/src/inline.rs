@@ -1,4 +1,4 @@
-//! Inline-style parsing on the [`Arena`].
+//! Inline-style parsing on the [`Document`](crate::Document).
 //!
 //! These helpers parse `style`-attribute CSS text into a stylo
 //! [`PropertyDeclarationBlock`] guarded by the arena's
@@ -17,9 +17,9 @@ use stylo::servo_arc::Arc;
 use stylo::stylesheets::{CssRuleType, Origin};
 use stylo_traits::ParsingMode;
 
-use crate::arena::{Arena, ElementId};
+use crate::arena::{Document, ElementId};
 
-impl<T> Arena<T> {
+impl<T> Document<T> {
     /// Count parsed declarations in an element's inline style.
     ///
     /// Returns `None` for a stale handle and `Some(0)` when the element has no

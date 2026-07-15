@@ -8,8 +8,8 @@
 //! tree mutation, coarse invalidation, and inline-style parsing to the
 //! [`stylo_dom`] crate — the generic, HTML-DOM-subset core this crate embeds.
 //! It also owns the Lynx-specific style adapter: view metrics,
-//! viewport-relative `rpx`, and touch-first device policy wrapped around
-//! [`stylo_dom::StyleEngine`]'s standards-oriented cascade.
+//! viewport-relative `rpx`, and touch-first device policy installed into each
+//! [`stylo_dom::Document`]'s standards-oriented cascade.
 //!
 //! # Vocabulary
 //!
@@ -44,7 +44,7 @@ mod ingest;
 pub use kind::WidgetKind;
 pub use papi::{WidgetError, WidgetTree};
 pub use state::{EventKind, EventReg, WidgetState};
-pub use style::{EngineMetrics, StyleEngine};
+pub use style::EngineMetrics;
 pub use stylo_dom::{
     ComputedStyle, Parallelism, PseudoState, StylesheetOrigin, property_is_supported,
 };

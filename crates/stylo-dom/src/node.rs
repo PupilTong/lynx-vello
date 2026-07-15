@@ -17,7 +17,7 @@ use stylo::servo_arc::Arc;
 use stylo::shared_lock::Locked;
 use stylo_atoms::Atom;
 
-use crate::arena::{Document, ElementId};
+use crate::arena::{DocumentInner, ElementId};
 
 /// Bit set in [`Node::snapshot_flags`] when a pre-mutation snapshot has
 /// been recorded for this element in the arena's
@@ -34,7 +34,7 @@ pub(crate) const SNAPSHOT_HANDLED: u8 = 1 << 1;
 /// beyond that subset belongs to the embedder and lives in the [`ext`] payload
 /// (see [`ExternalState`](crate::ExternalState)).
 ///
-/// Nodes are created only by [`Arena::create_element`](crate::Arena::create_element),
+/// Nodes are created only by [`Document::create_element`](crate::Document::create_element),
 /// which installs their document back-pointer and stable id before publishing
 /// them. Detaching changes tree links but keeps the node in that document;
 /// physical removal consumes the node and returns only its external payload.
@@ -42,7 +42,7 @@ pub(crate) const SNAPSHOT_HANDLED: u8 = 1 << 1;
 /// # Thread-safety
 ///
 /// stylo's restyle traversal may run **in parallel** (rayon workers sharing
-/// `&Arena`), so every piece of element state that stylo touches during a
+/// `&Document`), so every piece of element state that stylo touches during a
 /// traversal is either
 ///
 /// - atomic ([`selector_flags`], [`style_dirty`], [`dirty_descendants`], [`snapshot_flags`],
@@ -51,8 +51,8 @@ pub(crate) const SNAPSHOT_HANDLED: u8 = 1 << 1;
 ///   [`UnsafeCell`]; see [`crate::traits`] for the per-access safety arguments).
 ///
 /// Everything else (tag/classes/attrs/text/`ext`) is **immutable during a
-/// flush**: mutation requires `&mut Arena`, which
-/// [`StyleEngine::flush_tree`](crate::StyleEngine::flush_tree) holds
+/// flush**: mutation requires `&mut Document`, which
+/// [`Document::flush`](crate::Document::flush) holds
 /// exclusively for the whole traversal. The flush API additionally requires
 /// `T: Sync`, because selector matching may read the external payload from
 /// multiple workers.
@@ -66,7 +66,7 @@ pub(crate) const SNAPSHOT_HANDLED: u8 = 1 << 1;
 /// [`children_to_process`]: Node::children_to_process
 pub struct Node<T> {
     /// Stable back-pointer to the document allocation that owns this node.
-    document: NonNull<Document<T>>,
+    document: NonNull<DocumentInner<T>>,
     /// This node's generation-checked identity in `document`.
     id: ElementId,
     /// The parent element, or `None` for the root / a detached element.
@@ -135,7 +135,12 @@ pub struct Node<T> {
 }
 
 impl<T> Node<T> {
-    pub(crate) fn new(document: NonNull<Document<T>>, id: ElementId, tag: &str, ext: T) -> Self {
+    pub(crate) fn new(
+        document: NonNull<DocumentInner<T>>,
+        id: ElementId,
+        tag: &str,
+        ext: T,
+    ) -> Self {
         Self {
             document,
             id,
@@ -183,9 +188,9 @@ impl<T> Node<T> {
     }
 
     /// The stable document allocation that owns this live node.
-    pub(crate) fn document(&self) -> &Document<T> {
-        // SAFETY: `Arena` owns `Document` through a private `Box`, so moving
-        // the outer arena never moves this allocation. Only the document can
+    pub(crate) fn document(&self) -> &DocumentInner<T> {
+        // SAFETY: `Document` owns `DocumentInner` through a private `Box`, so
+        // moving the public owner never moves this allocation. Only the document can
         // construct nodes, and physical removal consumes the node without
         // exposing it, so every reachable node carries this live pointer.
         #[expect(
@@ -256,11 +261,11 @@ impl<T> Node<T> {
     /// element has been through a style pass).
     ///
     /// Must not be called while a style flush is running on the element's
-    /// arena (impossible through the public API: a flush holds `&mut Arena`).
+    /// arena (impossible through the public API: a flush holds `&mut Document`).
     #[must_use]
     pub fn has_style_data(&self) -> bool {
         // SAFETY: reads only the `Option` discriminant; no flush is running
-        // (flushes require `&mut Arena`, we hold `&self` from that arena).
+        // (flushes require `&mut Document`, we hold `&self` from that arena).
         #[expect(unsafe_code, reason = "UnsafeCell discriminant read outside any flush")]
         unsafe {
             (*self.stylo_data.get()).is_some()
@@ -272,10 +277,10 @@ impl<T> Node<T> {
     /// The style lives in stylo's per-element `ElementData`; this clones the
     /// `Arc` out of it. Must not be called while a style flush is running on
     /// the element's arena (impossible through the public API: a flush holds
-    /// `&mut Arena`).
+    /// `&mut Document`).
     #[must_use]
     pub fn computed_style(&self) -> Option<Arc<ComputedValues>> {
-        // SAFETY: no flush is running (flushes require `&mut Arena`, and we
+        // SAFETY: no flush is running (flushes require `&mut Document`, and we
         // hold `&self` borrowed from that arena), so reading the slot and
         // taking a shared borrow of the wrapper cannot race.
         #[expect(unsafe_code, reason = "UnsafeCell read outside any flush")]
@@ -285,7 +290,7 @@ impl<T> Node<T> {
 
     /// Store a resolved computed style, creating the stylo `ElementData` slot
     /// if needed. Used by the standalone
-    /// [`StyleEngine::resolve`](crate::StyleEngine::resolve) path; the flush
+    /// [`Document::resolve`](crate::Document::resolve) path; the flush
     /// traversal writes styles through stylo itself.
     pub(crate) fn set_computed_style(&mut self, style: Arc<ComputedValues>) {
         let slot = self.stylo_data.get_mut();

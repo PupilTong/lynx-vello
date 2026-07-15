@@ -1,4 +1,4 @@
-//! The generational arena backing the element tree.
+//! The generational storage backing a [`Document`].
 //!
 //! Elements live in a hand-rolled `Vec<Slot>` arena with a free list — no
 //! `slotmap` dependency, deliberately minimal. Each element is addressed by an
@@ -9,11 +9,11 @@
 //! Every live node carries an address-stable back-pointer to its document;
 //! stylo's DOM traits are therefore implemented directly on `&Node<T>`.
 //!
-//! The arena also owns the **pending snapshot set** for stylo's
+//! The document also owns the **pending snapshot set** for stylo's
 //! invalidation-set restyle: before a matching-relevant mutation, the embedder
 //! layer records the element's old state/attributes here (see
 //! [`crate::dirty`]), and the next
-//! [`StyleEngine::flush_tree`](crate::StyleEngine::flush_tree) consumes them.
+//! [`Document::flush`](crate::Document::flush) consumes them.
 
 use std::fmt;
 use std::num::NonZeroU32;
@@ -27,18 +27,12 @@ use stylo::dom::OpaqueNode;
 use stylo::selector_parser::SnapshotMap;
 use stylo::shared_lock::SharedRwLock;
 use stylo::stylesheets::UrlExtraData;
+use stylo::stylist::Stylist;
 use stylo_atoms::Atom;
 
 use crate::node::Node;
 
-/// The placeholder base URL for parsing a standalone arena's inline styles.
-///
-/// `about:blank` is a constant, valid URL, so this never fails.
-fn about_blank_url_data() -> UrlExtraData {
-    UrlExtraData::from(::url::Url::parse("about:blank").expect("about:blank is a valid URL"))
-}
-
-/// A stable, generation-checked handle to an element in an [`Arena`].
+/// A stable, generation-checked handle to an element in a [`Document`].
 ///
 /// Cheap to copy and hash. A handle stays valid until its element is removed;
 /// afterwards the slot's generation advances and the handle becomes stale
@@ -91,11 +85,12 @@ struct Slot<T> {
 }
 
 /// The address-stable document allocation that live nodes point back to.
-pub(crate) struct Document<T> {
+pub(crate) struct DocumentInner<T> {
+    pub(crate) stylist: Stylist,
     slots: Vec<Slot<T>>,
     free_list: Vec<u32>,
-    lock: SharedRwLock,
-    url_data: UrlExtraData,
+    pub(crate) lock: SharedRwLock,
+    pub(crate) url_data: UrlExtraData,
     snapshots: SnapshotMap,
     snapshotted: Vec<ElementId>,
     phase: AtomicU8,
@@ -136,7 +131,7 @@ impl Drop for TraversalGuard<'_> {
     }
 }
 
-impl<T> Document<T> {
+impl<T> DocumentInner<T> {
     pub(crate) fn node(&self, id: ElementId) -> Option<&Node<T>> {
         let slot = self.slots.get(id.index as usize)?;
         if slot.generation == id.generation {
@@ -151,12 +146,7 @@ impl<T> Document<T> {
     }
 
     fn assert_idle(&self) {
-        match self.phase.load(Ordering::Acquire) {
-            PHASE_IDLE => {}
-            PHASE_TRAVERSING => panic!("document mutation attempted during style traversal"),
-            PHASE_POISONED => panic!("document was poisoned by a panicking style traversal"),
-            _ => unreachable!("invalid document phase"),
-        }
+        assert_idle(&self.phase);
     }
 
     fn note_mutation(&self) {
@@ -165,69 +155,66 @@ impl<T> Document<T> {
     }
 
     fn begin_traversal(&self) -> TraversalGuard<'_> {
-        self.phase
-            .compare_exchange(
-                PHASE_IDLE,
-                PHASE_TRAVERSING,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .unwrap_or_else(|phase| match phase {
-                PHASE_TRAVERSING => panic!("nested style traversal on one document"),
-                PHASE_POISONED => panic!("document was poisoned by a panicking style traversal"),
-                _ => unreachable!("invalid document phase"),
-            });
-        let entered_epoch = self.mutation_epoch.load(Ordering::Acquire);
-        TraversalGuard {
-            phase: &self.phase,
-            mutation_epoch: &self.mutation_epoch,
-            entered_epoch,
-        }
+        begin_traversal(&self.phase, &self.mutation_epoch)
     }
 }
 
-/// A generational arena of [`Node`]s.
-///
-/// The arena owns the [`SharedRwLock`] and [`UrlExtraData`] used to parse and
-/// guard every element's inline style block. [`StyleEngine`](crate::StyleEngine)
-/// creates styled arenas with the matching private context; embedders do not
-/// pass locks across crate boundaries.
-pub struct Arena<T> {
-    document: Box<Document<T>>,
+fn assert_idle(phase: &AtomicU8) {
+    match phase.load(Ordering::Acquire) {
+        PHASE_IDLE => {}
+        PHASE_TRAVERSING => panic!("document mutation attempted during style traversal"),
+        PHASE_POISONED => panic!("document was poisoned by a panicking style traversal"),
+        _ => unreachable!("invalid document phase"),
+    }
 }
 
-impl<T: fmt::Debug> fmt::Debug for Arena<T> {
+fn begin_traversal<'a>(phase: &'a AtomicU8, mutation_epoch: &'a AtomicU64) -> TraversalGuard<'a> {
+    phase
+        .compare_exchange(
+            PHASE_IDLE,
+            PHASE_TRAVERSING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .unwrap_or_else(|phase| match phase {
+            PHASE_TRAVERSING => panic!("nested style traversal on one document"),
+            PHASE_POISONED => panic!("document was poisoned by a panicking style traversal"),
+            _ => unreachable!("invalid document phase"),
+        });
+    TraversalGuard {
+        phase,
+        mutation_epoch,
+        entered_epoch: mutation_epoch.load(Ordering::Acquire),
+    }
+}
+
+/// One independent DOM tree and its complete stylo style context.
+///
+/// Every document owns its own [`Stylist`], [`SharedRwLock`], device, node
+/// storage, invalidation snapshots, and traversal phase. The private boxed
+/// allocation keeps the address followed by every [`Node`] back-pointer stable
+/// even when this public owner is moved.
+pub struct Document<T> {
+    pub(crate) inner: Box<DocumentInner<T>>,
+}
+
+impl<T: fmt::Debug> fmt::Debug for Document<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // `SnapshotMap` is not `Debug`; report its size instead.
-        f.debug_struct("Arena")
-            .field("slots", &self.document.slots)
-            .field("free_list", &self.document.free_list)
-            .field("pending_snapshots", &self.document.snapshotted.len())
+        f.debug_struct("Document")
+            .field("viewport", &self.inner.stylist.device().viewport_size())
+            .field("slots", &self.inner.slots)
+            .field("free_list", &self.inner.free_list)
+            .field("pending_snapshots", &self.inner.snapshotted.len())
             .finish_non_exhaustive()
     }
 }
 
-impl<T> Default for Arena<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<T> Arena<T> {
-    /// Create an empty arena with a freshly minted [`SharedRwLock`] and a
-    /// placeholder `about:blank` [`UrlExtraData`].
-    ///
-    /// A standalone arena (DOM-only, never styled) can use this. Styled trees
-    /// should be created by [`StyleEngine::new_arena`](crate::StyleEngine::new_arena).
-    #[must_use]
-    pub fn new() -> Self {
-        Self::with_style_context(SharedRwLock::new(), about_blank_url_data())
-    }
-
-    /// Create an arena with the style context owned by this crate.
-    pub(crate) fn with_style_context(lock: SharedRwLock, url_data: UrlExtraData) -> Self {
+impl<T> Document<T> {
+    pub(crate) fn from_parts(stylist: Stylist, lock: SharedRwLock, url_data: UrlExtraData) -> Self {
         Self {
-            document: Box::new(Document {
+            inner: Box::new(DocumentInner {
+                stylist,
                 slots: Vec::new(),
                 free_list: Vec::new(),
                 lock,
@@ -243,28 +230,28 @@ impl<T> Arena<T> {
     /// The shared lock guarding this arena's inline style blocks.
     #[must_use]
     pub(crate) fn shared_lock(&self) -> &SharedRwLock {
-        &self.document.lock
+        &self.inner.lock
     }
 
     /// The base URL data used when parsing this arena's inline styles.
     #[must_use]
     pub(crate) fn url_data(&self) -> &UrlExtraData {
-        &self.document.url_data
+        &self.inner.url_data
     }
 
     /// The pending pre-mutation snapshots, consumed by the flush traversal.
     #[must_use]
     pub(crate) fn snapshot_map(&self) -> &SnapshotMap {
-        &self.document.snapshots
+        &self.inner.snapshots
     }
 
     pub(crate) fn snapshot_map_mut(&mut self) -> (&mut SnapshotMap, &mut Vec<ElementId>) {
-        self.document.note_mutation();
-        (&mut self.document.snapshots, &mut self.document.snapshotted)
+        self.inner.note_mutation();
+        (&mut self.inner.snapshots, &mut self.inner.snapshotted)
     }
 
     pub(crate) fn note_mutation(&self) {
-        self.document.note_mutation();
+        self.inner.note_mutation();
     }
 
     /// Create an element in this document and return its handle.
@@ -273,10 +260,10 @@ impl<T> Arena<T> {
     ///
     /// Panics if the arena would need to grow past `u32::MAX` slots.
     pub fn create_element(&mut self, tag: &str, ext: T) -> ElementId {
-        self.document.note_mutation();
-        let document = NonNull::from(self.document.as_mut());
-        if let Some(index) = self.document.free_list.pop() {
-            let slot = &mut self.document.slots[index as usize];
+        self.inner.note_mutation();
+        let document = NonNull::from(self.inner.as_mut());
+        if let Some(index) = self.inner.free_list.pop() {
+            let slot = &mut self.inner.slots[index as usize];
             debug_assert!(slot.element.is_none(), "free-list slot must be vacant");
             let id = ElementId {
                 index,
@@ -285,13 +272,13 @@ impl<T> Arena<T> {
             slot.element = Some(Node::new(document, id, tag, ext));
             id
         } else {
-            let index = u32::try_from(self.document.slots.len())
+            let index = u32::try_from(self.inner.slots.len())
                 .expect("arena capacity exceeds u32::MAX slots");
             let id = ElementId {
                 index,
                 generation: NonZeroU32::MIN,
             };
-            self.document.slots.push(Slot {
+            self.inner.slots.push(Slot {
                 generation: NonZeroU32::MIN,
                 element: Some(Node::new(document, id, tag, ext)),
             });
@@ -310,15 +297,15 @@ impl<T> Arena<T> {
     }
 
     pub(crate) fn remove_node(&mut self, id: ElementId) -> Option<Node<T>> {
-        self.document.note_mutation();
-        let slot = self.document.slots.get_mut(id.index as usize)?;
+        self.inner.note_mutation();
+        let slot = self.inner.slots.get_mut(id.index as usize)?;
         if slot.generation != id.generation {
             return None;
         }
         let element = slot.element.take()?;
         if let Some(next) = slot.generation.checked_add(1) {
             slot.generation = next;
-            self.document.free_list.push(id.index);
+            self.inner.free_list.push(id.index);
         } else {
             // Generation space exhausted for this slot: retire it (never
             // reuse) so no future handle can collide with a past one.
@@ -327,7 +314,7 @@ impl<T> Arena<T> {
         // is keyed by the (now stale) opaque id and is dropped with the map on
         // the next `complete_flush`. Removing it eagerly keeps the map small.
         if element.snapshot_present() {
-            self.document.snapshots.remove(&id.opaque());
+            self.inner.snapshots.remove(&id.opaque());
         }
         Some(element)
     }
@@ -335,7 +322,7 @@ impl<T> Arena<T> {
     /// Borrow an element if the handle is live.
     #[must_use]
     pub fn get(&self, id: ElementId) -> Option<&Node<T>> {
-        self.document.node(id)
+        self.inner.node(id)
     }
 
     /// Mutably borrow a whole node inside this crate.
@@ -343,8 +330,8 @@ impl<T> Arena<T> {
     /// This must not be public: moving/swapping the returned `Node` could move
     /// it into a different document while leaving its back-pointer unchanged.
     pub(crate) fn node_mut(&mut self, id: ElementId) -> Option<&mut Node<T>> {
-        self.document.note_mutation();
-        let slot = self.document.slots.get_mut(id.index as usize)?;
+        self.inner.note_mutation();
+        let slot = self.inner.slots.get_mut(id.index as usize)?;
         if slot.generation == id.generation {
             slot.element.as_mut()
         } else {
@@ -406,8 +393,8 @@ impl<T> Arena<T> {
     /// The flush path uses the cheaper targeted
     /// [`complete_flush`](Self::complete_flush) instead.
     pub fn clear_dirty(&mut self) {
-        self.document.note_mutation();
-        for slot in &mut self.document.slots {
+        self.inner.note_mutation();
+        for slot in &mut self.inner.slots {
             if let Some(element) = &mut slot.element {
                 element.set_style_dirty(false);
                 element.set_dirty_descendants_bit(false);
@@ -424,13 +411,13 @@ impl<T> Arena<T> {
     /// `display: none`), so `style_dirty` breadcrumbs inside such a subtree
     /// may survive — see [`Node::is_style_dirty`](crate::Node::is_style_dirty).
     pub(crate) fn complete_flush(&mut self, root: ElementId) {
-        self.document.assert_idle();
-        for id in std::mem::take(&mut self.document.snapshotted) {
+        self.inner.assert_idle();
+        for id in std::mem::take(&mut self.inner.snapshotted) {
             if let Some(element) = self.get(id) {
                 element.clear_snapshot_flags();
             }
         }
-        self.document.snapshots.clear();
+        self.inner.snapshots.clear();
 
         // Walk the dirty spine: clear `style_dirty` on every child of a
         // dirty-descendants node, but only descend where the bit is set.
@@ -448,34 +435,37 @@ impl<T> Arena<T> {
     }
 
     pub(crate) fn begin_traversal(&self) -> TraversalGuard<'_> {
-        self.document.begin_traversal()
+        self.inner.begin_traversal()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::atomic::{AtomicU8, AtomicU64};
 
-    use super::Arena;
+    use super::{PHASE_IDLE, assert_idle, begin_traversal};
 
     #[test]
     fn traversal_phase_rejects_mutation() {
-        let arena = Arena::<()>::new();
-        let _guard = arena.begin_traversal();
-        let mutation = catch_unwind(AssertUnwindSafe(|| arena.note_mutation()));
+        let phase = AtomicU8::new(PHASE_IDLE);
+        let mutation_epoch = AtomicU64::new(0);
+        let _guard = begin_traversal(&phase, &mutation_epoch);
+        let mutation = catch_unwind(AssertUnwindSafe(|| assert_idle(&phase)));
         assert!(mutation.is_err());
     }
 
     #[test]
     fn panicking_traversal_poisons_document() {
-        let arena = Arena::<()>::new();
+        let phase = AtomicU8::new(PHASE_IDLE);
+        let mutation_epoch = AtomicU64::new(0);
         let traversal = catch_unwind(AssertUnwindSafe(|| {
-            let _guard = arena.begin_traversal();
+            let _guard = begin_traversal(&phase, &mutation_epoch);
             panic!("synthetic traversal failure");
         }));
         assert!(traversal.is_err());
 
-        let mutation = catch_unwind(AssertUnwindSafe(|| arena.note_mutation()));
+        let mutation = catch_unwind(AssertUnwindSafe(|| assert_idle(&phase)));
         assert!(mutation.is_err());
     }
 }
