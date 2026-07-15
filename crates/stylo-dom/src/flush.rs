@@ -115,6 +115,8 @@ impl<'a, T: ExternalState + Sync> DomTraversal<&'a Node<T>> for RecalcStyle<'a> 
         F: FnMut(&'a Node<T>),
     {
         // Every node is an element in this model.
+        #[cfg(debug_assertions)]
+        let _element_owner = node.debug_claim_style_data_for_traversal();
         // SAFETY: stylo's traversal contract — exactly one worker processes
         // this element, so creating/borrowing its data cannot race.
         let mut data = unsafe { node.ensure_data() };
@@ -173,6 +175,11 @@ impl<T: ExternalState + Sync> Document<T> {
                 registered_speculative_painters: &NO_PAINTERS,
             };
             let traversal = RecalcStyle { shared };
+            // Cover `pre_traverse` as well as `traverse_dom`: root
+            // invalidation reads and mutates ElementData before the driver is
+            // entered, and debug phase checks require every such access to be
+            // made by a registered layout/traversal thread.
+            let _thread_state = LayoutThreadStateGuard::enter();
             let token = <RecalcStyle<'_> as DomTraversal<&Node<T>>>::pre_traverse(
                 root_ref,
                 &traversal.shared,
@@ -180,8 +187,7 @@ impl<T: ExternalState + Sync> Document<T> {
             if token.should_traverse() {
                 // stylo's sequential-task teardown asserts it runs on a
                 // LAYOUT thread (its pool workers are initialized as such);
-                // mark the embedder's calling thread for the traversal.
-                let _thread_state = LayoutThreadStateGuard::enter();
+                // the embedder's calling thread was marked before pre-traverse.
                 match parallelism {
                     Parallelism::Sequential => {
                         driver::traverse_dom(&traversal, token, None);

@@ -206,6 +206,8 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
     }
 
     unsafe fn ensure_data(&self) -> ElementDataMut<'_> {
+        #[cfg(debug_assertions)]
+        let _owner = self.element().debug_claim_style_data_write();
         // SAFETY: traversal discipline — the caller holds exclusive access to
         // this element, so creating/borrowing its `ElementData` cannot race.
         let slot = unsafe { &mut *self.element().style_element_data.get() };
@@ -214,21 +216,33 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
     }
 
     unsafe fn clear_data(&self) {
+        #[cfg(debug_assertions)]
+        let _owner = self.element().debug_claim_style_data_write();
         // SAFETY: traversal discipline — exclusive access to this element, no
         // concurrent borrow of its stylo state.
         unsafe {
+            #[cfg(debug_assertions)]
+            if let Some(wrapper) = (*self.element().style_element_data.get()).as_ref() {
+                // `clear_data` moves and drops the wrapper. Force stylo's
+                // debug AtomicRefCell to prove no ElementData guard survives.
+                drop(wrapper.borrow_mut());
+            }
             *self.element().style_element_data.get() = None;
         }
         self.element().selector_flags.store(0, Ordering::Relaxed);
     }
 
     fn has_data(&self) -> bool {
+        #[cfg(debug_assertions)]
+        let _reader = self.element().debug_claim_style_data_read();
         // SAFETY: the slot is inspected by its owning worker, or outside a
         // flush; creation and removal cannot race this access.
         unsafe { (*self.element().style_element_data.get()).is_some() }
     }
 
     fn borrow_data(&self) -> Option<ElementDataRef<'_>> {
+        #[cfg(debug_assertions)]
+        let _reader = self.element().debug_claim_style_data_read();
         // SAFETY: the document phase and traversal ownership exclude a
         // concurrent mutable access to this element.
         unsafe {
@@ -239,6 +253,8 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
     }
 
     fn mutate_data(&self) -> Option<ElementDataMut<'_>> {
+        #[cfg(debug_assertions)]
+        let _owner = self.element().debug_claim_style_data_write();
         // SAFETY: stylo invokes this for the worker that owns the element.
         unsafe {
             (*self.element().style_element_data.get())

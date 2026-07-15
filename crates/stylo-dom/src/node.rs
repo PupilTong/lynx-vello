@@ -19,6 +19,125 @@ use stylo_atoms::Atom;
 
 use crate::arena::{DocumentInner, ElementId};
 
+#[cfg(debug_assertions)]
+static NEXT_DEBUG_STYLE_OWNER: AtomicUsize = AtomicUsize::new(1);
+
+#[cfg(debug_assertions)]
+thread_local! {
+    /// A compact, process-unique token used in per-element diagnostic atomics.
+    static DEBUG_STYLE_OWNER: usize = {
+        let owner = NEXT_DEBUG_STYLE_OWNER.fetch_add(1, Ordering::Relaxed);
+        assert_ne!(owner, 0, "debug style owner token space exhausted");
+        owner
+    };
+}
+
+#[cfg(debug_assertions)]
+fn debug_style_owner() -> usize {
+    DEBUG_STYLE_OWNER.with(|owner| *owner)
+}
+
+/// Debug-only lease proving that this thread is the current accessor of an
+/// element's outer `Option<ElementDataWrapper>` slot.
+#[cfg(debug_assertions)]
+pub(crate) struct DebugStyleDataOwnerGuard<'a> {
+    owner: &'a AtomicUsize,
+    acquired: bool,
+}
+
+/// Debug-only shared lease protecting an outer style-data-slot read. The
+/// returned stylo `ElementDataRef` carries its own `AtomicRefCell` borrow after
+/// this short-lived outer-slot lease is released.
+#[cfg(debug_assertions)]
+pub(crate) struct DebugStyleDataReadGuard<'a> {
+    readers: &'a AtomicUsize,
+    acquired: bool,
+}
+
+#[cfg(debug_assertions)]
+impl<'a> DebugStyleDataOwnerGuard<'a> {
+    fn claim(
+        owner: &'a AtomicUsize,
+        readers: &AtomicUsize,
+        element_index: u32,
+        reentrant: bool,
+    ) -> Self {
+        let current = debug_style_owner();
+        match owner.compare_exchange(0, current, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => {
+                let reader_count = readers.load(Ordering::Acquire);
+                if reader_count != 0 {
+                    owner.store(0, Ordering::Release);
+                    panic!(
+                        "mutable ElementData ownership for element slot {element_index} overlaps {reader_count} outer-slot reader(s)"
+                    );
+                }
+                Self {
+                    owner,
+                    acquired: true,
+                }
+            }
+            Err(existing) if reentrant && existing == current => Self {
+                owner,
+                acquired: false,
+            },
+            Err(existing) => panic!(
+                "concurrent ElementData ownership for element slot {element_index}: owner={existing}, contender={current}"
+            ),
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+impl<'a> DebugStyleDataReadGuard<'a> {
+    fn claim(owner: &AtomicUsize, readers: &'a AtomicUsize, element_index: u32) -> Self {
+        let current = debug_style_owner();
+        let existing = owner.load(Ordering::Acquire);
+        if existing == current {
+            return Self {
+                readers,
+                acquired: false,
+            };
+        }
+        assert_eq!(
+            existing, 0,
+            "ElementData read for element slot {element_index} overlaps mutable owner {existing}"
+        );
+
+        let previous = readers.fetch_add(1, Ordering::AcqRel);
+        assert_ne!(previous, usize::MAX, "debug style reader count overflow");
+        let existing = owner.load(Ordering::Acquire);
+        if existing != 0 {
+            readers.fetch_sub(1, Ordering::AcqRel);
+            panic!(
+                "ElementData read for element slot {element_index} raced mutable owner {existing}"
+            );
+        }
+        Self {
+            readers,
+            acquired: true,
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Drop for DebugStyleDataOwnerGuard<'_> {
+    fn drop(&mut self) {
+        if self.acquired {
+            self.owner.store(0, Ordering::Release);
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Drop for DebugStyleDataReadGuard<'_> {
+    fn drop(&mut self) {
+        if self.acquired {
+            self.readers.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
 /// Bit set in [`Node::snapshot_flags`] when a pre-mutation snapshot has
 /// been recorded for this element in the arena's
 /// [`SnapshotMap`](stylo::selector_parser::SnapshotMap).
@@ -99,6 +218,14 @@ pub struct Node<T> {
     /// [`computed_style`](Node::computed_style)). Only touched through the
     /// [`traits`](crate::traits) impls under stylo's traversal discipline.
     pub(crate) style_element_data: UnsafeCell<Option<ElementDataWrapper>>,
+    /// Worker currently processing or inspecting `style_element_data`.
+    /// Strict preorder claims reject duplicate processing; nested accesses by
+    /// that worker are allowed. Completely absent from release builds.
+    #[cfg(debug_assertions)]
+    debug_style_data_owner: AtomicUsize,
+    /// Number of workers currently inspecting the outer style-data slot.
+    #[cfg(debug_assertions)]
+    debug_style_data_readers: AtomicUsize,
 
     /// Selector flags accumulated by stylo during matching (e.g. "has a
     /// child-position-dependent rule"), stored as the raw
@@ -146,6 +273,10 @@ impl<T> Node<T> {
             element_state: ElementState::empty(),
             inline_block: None,
             style_element_data: UnsafeCell::new(None),
+            #[cfg(debug_assertions)]
+            debug_style_data_owner: AtomicUsize::new(0),
+            #[cfg(debug_assertions)]
+            debug_style_data_readers: AtomicUsize::new(0),
             selector_flags: AtomicUsize::new(0),
             style_dirty: false,
             dirty_descendants: AtomicBool::new(false),
@@ -243,6 +374,43 @@ impl<T> Node<T> {
         self
     }
 
+    /// Claim this element for one complete `process_preorder` call.
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_claim_style_data_for_traversal(&self) -> DebugStyleDataOwnerGuard<'_> {
+        self.document().debug_assert_traversing();
+        DebugStyleDataOwnerGuard::claim(
+            &self.debug_style_data_owner,
+            &self.debug_style_data_readers,
+            self.id.index(),
+            false,
+        )
+    }
+
+    /// Claim mutable access to the outer style-data slot for one trait method.
+    /// Accesses nested under this thread's preorder claim are reentrant.
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_claim_style_data_write(&self) -> DebugStyleDataOwnerGuard<'_> {
+        self.document().debug_assert_style_data_access();
+        DebugStyleDataOwnerGuard::claim(
+            &self.debug_style_data_owner,
+            &self.debug_style_data_readers,
+            self.id.index(),
+            true,
+        )
+    }
+
+    /// Claim a shared read of the outer style-data slot. Multiple traversal
+    /// workers may legitimately read a common parent at the same time.
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_claim_style_data_read(&self) -> DebugStyleDataReadGuard<'_> {
+        self.document().debug_assert_style_data_access();
+        DebugStyleDataReadGuard::claim(
+            &self.debug_style_data_owner,
+            &self.debug_style_data_readers,
+            self.id.index(),
+        )
+    }
+
     /// The element's tag name as a string slice.
     #[must_use]
     pub fn tag_str(&self) -> &str {
@@ -256,6 +424,8 @@ impl<T> Node<T> {
     /// arena (impossible through the public API: a flush holds `&mut Document`).
     #[must_use]
     pub fn has_style_data(&self) -> bool {
+        #[cfg(debug_assertions)]
+        let _reader = self.debug_claim_style_data_read();
         // SAFETY: reads only the `Option` discriminant; no flush is running
         // (flushes require `&mut Document`, and this reference came from that
         // document).
@@ -273,6 +443,8 @@ impl<T> Node<T> {
     /// `&mut Document`).
     #[must_use]
     pub fn computed_style(&self) -> Option<Arc<ComputedValues>> {
+        #[cfg(debug_assertions)]
+        let _reader = self.debug_claim_style_data_read();
         // SAFETY: no flush is running, so reading the slot and borrowing an
         // initialized wrapper cannot race with mutation.
         #[expect(unsafe_code, reason = "borrow the stylo data slot outside a flush")]
@@ -386,5 +558,84 @@ impl<T> fmt::Debug for Node<T> {
             .field("dirty_descendants", &Node::has_dirty_descendants(self))
             .field("children", &self.children)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(test, debug_assertions))]
+mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::{DebugStyleDataOwnerGuard, DebugStyleDataReadGuard};
+
+    #[test]
+    fn style_data_owner_rejects_duplicate_preorder_claim() {
+        let owner = AtomicUsize::new(0);
+        let readers = AtomicUsize::new(0);
+        let _first = DebugStyleDataOwnerGuard::claim(&owner, &readers, 7, false);
+
+        let duplicate = catch_unwind(AssertUnwindSafe(|| {
+            let _duplicate = DebugStyleDataOwnerGuard::claim(&owner, &readers, 7, false);
+        }));
+
+        assert!(duplicate.is_err());
+    }
+
+    #[test]
+    fn style_data_owner_allows_same_worker_nested_access() {
+        let owner = AtomicUsize::new(0);
+        let readers = AtomicUsize::new(0);
+        let first = DebugStyleDataOwnerGuard::claim(&owner, &readers, 7, false);
+        let claimed = owner.load(Ordering::Acquire);
+        {
+            let _nested = DebugStyleDataOwnerGuard::claim(&owner, &readers, 7, true);
+            assert_eq!(owner.load(Ordering::Acquire), claimed);
+        }
+        assert_eq!(owner.load(Ordering::Acquire), claimed);
+        drop(first);
+        assert_eq!(owner.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn style_data_owner_rejects_another_thread() {
+        let owner = AtomicUsize::new(0);
+        let readers = AtomicUsize::new(0);
+        let _first = DebugStyleDataOwnerGuard::claim(&owner, &readers, 7, false);
+
+        std::thread::scope(|scope| {
+            let contender = scope
+                .spawn(|| {
+                    catch_unwind(AssertUnwindSafe(|| {
+                        let _contender = DebugStyleDataOwnerGuard::claim(&owner, &readers, 7, true);
+                    }))
+                })
+                .join()
+                .expect("contender thread must return normally");
+            assert!(contender.is_err());
+        });
+    }
+
+    #[test]
+    fn style_data_readers_can_overlap_but_exclude_a_writer() {
+        let owner = AtomicUsize::new(0);
+        let readers = AtomicUsize::new(0);
+        let first = DebugStyleDataReadGuard::claim(&owner, &readers, 7);
+
+        std::thread::scope(|scope| {
+            let second = scope.spawn(|| {
+                let second = DebugStyleDataReadGuard::claim(&owner, &readers, 7);
+                assert_eq!(readers.load(Ordering::Acquire), 2);
+                second
+            });
+            let second = second.join().expect("second reader must be accepted");
+            drop(second);
+        });
+
+        let writer = catch_unwind(AssertUnwindSafe(|| {
+            let _writer = DebugStyleDataOwnerGuard::claim(&owner, &readers, 7, true);
+        }));
+        assert!(writer.is_err());
+        drop(first);
+        assert_eq!(readers.load(Ordering::Acquire), 0);
     }
 }

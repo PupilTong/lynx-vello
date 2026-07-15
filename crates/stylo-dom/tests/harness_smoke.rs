@@ -34,6 +34,33 @@ fn mutation_helpers_restyle_incrementally() {
     assert_eq!(doc.color(el), rgb(255, 0, 0));
 }
 
+#[cfg(debug_assertions)]
+#[test]
+fn debug_owner_checks_accept_wide_parallel_traversal() {
+    let mut doc = Doc::with_css(".even { color: rgb(10, 20, 30) }");
+    let mut probe = None;
+    for index in 0..512 {
+        let element = doc.el(
+            doc.root,
+            if index % 2 == 0 {
+                "view.even"
+            } else {
+                "view.odd"
+            },
+        );
+        if index == 510 {
+            probe = Some(element);
+        }
+    }
+
+    doc.flush();
+
+    assert_eq!(
+        doc.color(probe.expect("probe must be created")),
+        rgb(10, 20, 30)
+    );
+}
+
 #[test]
 fn state_bits_participate_in_matching() {
     let mut doc = Doc::with_css("view:hover { color: rgb(0, 255, 0) }");

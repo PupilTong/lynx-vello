@@ -115,13 +115,19 @@ Lynx-only device and unit behavior moved up into `lynx-widget`.
   the `ElementData` slot is single-owner under stylo's traversal discipline
   (`SAFETY` notes in `stylo-dom`'s `traits`/`flush`). Concurrent parallel
   flushes are serialized process-wide (stylo's global pool keeps
-  per-traversal state in worker TLS).
+  per-traversal state in worker TLS). Debug builds mirror the traversal phase
+  in an atomic visible to workers and attach a mutable-owner token plus reader
+  count to every element. Concurrent parent reads remain legal; duplicate
+  `process_preorder` ownership, read/write overlap, access from a
+  non-traversal thread, and clearing a still-borrowed `ElementDataWrapper`
+  panic at the violation site. These diagnostic fields and operations are
+  absent from release builds.
 - Every live `Node<T>` has a back-pointer to its boxed, address-stable document
   allocation. A style flush changes that document from `IDLE` to `TRAVERSING`,
-  using owner-thread `Cell` state rather than cross-thread atomics, and poisons
-  it if traversal unwinds. This makes the immutable-tree phase required by
-  Stylo's parallel workers an explicit runtime invariant without pretending
-  that host mutation can race the flush.
+  using owner-thread `Cell` state in release builds, and poisons it if
+  traversal unwinds. This makes the immutable-tree phase required by Stylo's
+  parallel workers an explicit runtime invariant without pretending that host
+  mutation can race the flush.
 
 ## Performance posture (see `docs/style-assumptions.md`)
 

@@ -20,6 +20,8 @@ use std::fmt;
 #[cfg(debug_assertions)]
 use std::num::NonZeroU32;
 use std::ptr::NonNull;
+#[cfg(debug_assertions)]
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use dom::ElementState;
 use rustc_hash::FxHashMap;
@@ -30,6 +32,8 @@ use stylo::selector_parser::SnapshotMap;
 use stylo::shared_lock::SharedRwLock;
 use stylo::stylesheets::UrlExtraData;
 use stylo::stylist::Stylist;
+#[cfg(debug_assertions)]
+use stylo::thread_state;
 use stylo_atoms::Atom;
 
 use crate::node::Node;
@@ -91,6 +95,11 @@ pub(crate) struct DocumentInner<T> {
     snapshots: SnapshotMap,
     snapshotted: Vec<ElementId>,
     phase: Cell<DocumentPhase>,
+    /// Cross-worker mirror of `phase`, used only to diagnose violations of
+    /// stylo's traversal access contract. Release builds retain only the
+    /// owner-thread `Cell` state above.
+    #[cfg(debug_assertions)]
+    debug_traversal_phase: AtomicU8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,19 +109,38 @@ enum DocumentPhase {
     Poisoned,
 }
 
+#[cfg(debug_assertions)]
+const DEBUG_PHASE_IDLE: u8 = 0;
+#[cfg(debug_assertions)]
+const DEBUG_PHASE_TRAVERSING: u8 = 1;
+#[cfg(debug_assertions)]
+const DEBUG_PHASE_POISONED: u8 = 2;
+
 /// RAII exclusion guard for stylo's possibly parallel traversal.
 pub(crate) struct TraversalGuard<'a> {
     phase: &'a Cell<DocumentPhase>,
+    #[cfg(debug_assertions)]
+    debug_phase: &'a AtomicU8,
 }
 
 impl Drop for TraversalGuard<'_> {
     fn drop(&mut self) {
         let panicking = std::thread::panicking();
-        self.phase.set(if panicking {
+        let next_phase = if panicking {
             DocumentPhase::Poisoned
         } else {
             DocumentPhase::Idle
-        });
+        };
+        #[cfg(debug_assertions)]
+        self.debug_phase.store(
+            if panicking {
+                DEBUG_PHASE_POISONED
+            } else {
+                DEBUG_PHASE_IDLE
+            },
+            Ordering::Release,
+        );
+        self.phase.set(next_phase);
     }
 }
 
@@ -158,7 +186,42 @@ impl<T> DocumentInner<T> {
     }
 
     fn begin_traversal(&self) -> TraversalGuard<'_> {
-        begin_traversal(&self.phase)
+        begin_traversal(
+            &self.phase,
+            #[cfg(debug_assertions)]
+            &self.debug_traversal_phase,
+        )
+    }
+
+    /// Verify an `ElementData` access is coming from a traversal participant,
+    /// or from the single owner thread while the document is idle.
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_assert_style_data_access(&self) {
+        match self.debug_traversal_phase.load(Ordering::Acquire) {
+            DEBUG_PHASE_IDLE => {}
+            DEBUG_PHASE_TRAVERSING => assert!(
+                thread_state::get().is_layout(),
+                "ElementData accessed by a non-traversal thread during style traversal"
+            ),
+            DEBUG_PHASE_POISONED => {
+                panic!("ElementData accessed after a panicking style traversal")
+            }
+            phase => panic!("invalid debug traversal phase {phase}"),
+        }
+    }
+
+    /// Verify entry into the one-worker-per-element portion of traversal.
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_assert_traversing(&self) {
+        assert_eq!(
+            self.debug_traversal_phase.load(Ordering::Acquire),
+            DEBUG_PHASE_TRAVERSING,
+            "element traversal ownership claimed outside style traversal"
+        );
+        assert!(
+            thread_state::get().is_layout(),
+            "element traversal ownership claimed by a non-traversal thread"
+        );
     }
 }
 
@@ -174,15 +237,32 @@ fn assert_idle(phase: &Cell<DocumentPhase>) {
     }
 }
 
-fn begin_traversal(phase: &Cell<DocumentPhase>) -> TraversalGuard<'_> {
+fn begin_traversal<'a>(
+    phase: &'a Cell<DocumentPhase>,
+    #[cfg(debug_assertions)] debug_phase: &'a AtomicU8,
+) -> TraversalGuard<'a> {
     match phase.get() {
-        DocumentPhase::Idle => phase.set(DocumentPhase::Traversing),
+        DocumentPhase::Idle => {}
         DocumentPhase::Traversing => panic!("nested style traversal on one document"),
         DocumentPhase::Poisoned => {
             panic!("document was poisoned by a panicking style traversal")
         }
     }
-    TraversalGuard { phase }
+    #[cfg(debug_assertions)]
+    debug_phase
+        .compare_exchange(
+            DEBUG_PHASE_IDLE,
+            DEBUG_PHASE_TRAVERSING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .expect("debug traversal phase disagrees with document phase");
+    phase.set(DocumentPhase::Traversing);
+    TraversalGuard {
+        phase,
+        #[cfg(debug_assertions)]
+        debug_phase,
+    }
 }
 
 /// One independent DOM tree and its complete stylo style context.
@@ -219,6 +299,8 @@ impl<T> Document<T> {
                 snapshots: SnapshotMap::new(),
                 snapshotted: Vec::new(),
                 phase: Cell::new(DocumentPhase::Idle),
+                #[cfg(debug_assertions)]
+                debug_traversal_phase: AtomicU8::new(DEBUG_PHASE_IDLE),
             }),
         }
     }
@@ -436,13 +518,25 @@ impl<T> Document<T> {
 mod tests {
     use std::cell::Cell;
     use std::panic::{AssertUnwindSafe, catch_unwind};
+    #[cfg(debug_assertions)]
+    use std::sync::atomic::{AtomicU8, Ordering};
 
+    #[cfg(debug_assertions)]
+    use super::{DEBUG_PHASE_IDLE, DEBUG_PHASE_POISONED, DEBUG_PHASE_TRAVERSING};
     use super::{DocumentPhase, assert_idle, begin_traversal};
 
     #[test]
     fn traversal_phase_rejects_mutation() {
         let phase = Cell::new(DocumentPhase::Idle);
-        let _guard = begin_traversal(&phase);
+        #[cfg(debug_assertions)]
+        let debug_phase = AtomicU8::new(DEBUG_PHASE_IDLE);
+        let _guard = begin_traversal(
+            &phase,
+            #[cfg(debug_assertions)]
+            &debug_phase,
+        );
+        #[cfg(debug_assertions)]
+        assert_eq!(debug_phase.load(Ordering::Acquire), DEBUG_PHASE_TRAVERSING);
         let mutation = catch_unwind(AssertUnwindSafe(|| assert_idle(&phase)));
         assert!(mutation.is_err());
     }
@@ -450,11 +544,19 @@ mod tests {
     #[test]
     fn panicking_traversal_poisons_document() {
         let phase = Cell::new(DocumentPhase::Idle);
+        #[cfg(debug_assertions)]
+        let debug_phase = AtomicU8::new(DEBUG_PHASE_IDLE);
         let traversal = catch_unwind(AssertUnwindSafe(|| {
-            let _guard = begin_traversal(&phase);
+            let _guard = begin_traversal(
+                &phase,
+                #[cfg(debug_assertions)]
+                &debug_phase,
+            );
             panic!("synthetic traversal failure");
         }));
         assert!(traversal.is_err());
+        #[cfg(debug_assertions)]
+        assert_eq!(debug_phase.load(Ordering::Acquire), DEBUG_PHASE_POISONED);
 
         let mutation = catch_unwind(AssertUnwindSafe(|| assert_idle(&phase)));
         assert!(mutation.is_err());
