@@ -78,7 +78,7 @@ impl<T> Document<T> {
         let Some(element) = self.node_mut(id) else {
             return;
         };
-        if let Some(wrapper) = element.stylo_data_mut() {
+        if let Some(wrapper) = element.style_element_data_mut() {
             wrapper.borrow_mut().hint.insert(hint);
         }
     }

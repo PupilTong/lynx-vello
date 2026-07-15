@@ -38,11 +38,11 @@
 //! Style flushes ([`Document::flush`]) run **stylo's own restyle
 //! traversal**, which may fan out over rayon workers sharing the document. Every
 //! piece of element state stylo touches through `&self` during a traversal is
-//! atomic; the one non-atomic `ElementDataSlot` confines stylo's required
-//! `UnsafeCell` and is owned by exactly one worker at a time under stylo's
-//! traversal discipline — see [`Node`] and the `SAFETY` notes in [`traits`]
-//! and [`flush`]. Outside a flush, mutation goes through `&mut Document`, so
-//! nothing races.
+//! atomic; each node's non-atomic
+//! `UnsafeCell<Option<ElementDataWrapper>>` is owned by exactly one worker at
+//! a time under stylo's traversal discipline — see [`Node`] and the `SAFETY`
+//! notes in [`traits`] and [`flush`]. Outside a flush, mutation goes through
+//! `&mut Document`, so nothing races.
 //!
 //! # Layout
 //!
@@ -64,7 +64,6 @@ pub mod state;
 pub mod style;
 pub mod traits;
 
-mod data;
 mod dirty;
 mod inline;
 mod tree;

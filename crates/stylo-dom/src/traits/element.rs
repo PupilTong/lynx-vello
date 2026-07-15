@@ -7,7 +7,7 @@
 //! [`clear_data`](TElement::clear_data), `borrow_data`, `mutate_data`). Each
 //! `unsafe` access relies on **stylo's traversal discipline**: during a
 //! (possibly parallel) restyle traversal, each element's
-//! [`stylo_data`](crate::Node::stylo_data) is touched by exactly one
+//! [`style_element_data`](crate::Node::style_element_data) is touched by exactly one
 //! worker at a time (a parent reads/writes a child's data only in
 //! `note_children`, strictly before any worker takes ownership of that
 //! child), and outside a traversal the embedder holds `&mut Document`. All other
@@ -25,7 +25,7 @@ use selectors::matching::{ElementSelectorFlags, VisitedHandlingMode};
 use selectors::sink::Push;
 use stylo::applicable_declarations::ApplicableDeclarationBlock;
 use stylo::context::SharedStyleContext;
-use stylo::data::{ElementDataMut, ElementDataRef};
+use stylo::data::{ElementDataMut, ElementDataRef, ElementDataWrapper};
 use stylo::dom::{LayoutIterator, TElement};
 use stylo::properties::PropertyDeclarationBlock;
 use stylo::selector_parser::{AttrValue, Lang, PseudoElement, SelectorImpl};
@@ -208,26 +208,43 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
     unsafe fn ensure_data(&self) -> ElementDataMut<'_> {
         // SAFETY: traversal discipline — the caller holds exclusive access to
         // this element, so creating/borrowing its `ElementData` cannot race.
-        unsafe { self.element().stylo_data.ensure() }
+        let slot = unsafe { &mut *self.element().style_element_data.get() };
+        slot.get_or_insert_with(ElementDataWrapper::default)
+            .borrow_mut()
     }
 
     unsafe fn clear_data(&self) {
         // SAFETY: traversal discipline — exclusive access to this element, no
         // concurrent borrow of its stylo state.
-        unsafe { self.element().stylo_data.clear() };
+        unsafe {
+            *self.element().style_element_data.get() = None;
+        }
         self.element().selector_flags.store(0, Ordering::Relaxed);
     }
 
     fn has_data(&self) -> bool {
-        self.element().stylo_data.is_initialized()
+        // SAFETY: the slot is inspected by its owning worker, or outside a
+        // flush; creation and removal cannot race this access.
+        unsafe { (*self.element().style_element_data.get()).is_some() }
     }
 
     fn borrow_data(&self) -> Option<ElementDataRef<'_>> {
-        self.element().stylo_data.borrow()
+        // SAFETY: the document phase and traversal ownership exclude a
+        // concurrent mutable access to this element.
+        unsafe {
+            (*self.element().style_element_data.get())
+                .as_ref()
+                .map(ElementDataWrapper::borrow)
+        }
     }
 
     fn mutate_data(&self) -> Option<ElementDataMut<'_>> {
-        self.element().stylo_data.borrow_mut()
+        // SAFETY: stylo invokes this for the worker that owns the element.
+        unsafe {
+            (*self.element().style_element_data.get())
+                .as_ref()
+                .map(ElementDataWrapper::borrow_mut)
+        }
     }
 
     fn skip_item_display_fixup(&self) -> bool {
