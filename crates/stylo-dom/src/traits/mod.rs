@@ -31,13 +31,14 @@
 //!
 //! # Safety
 //!
-//! The `unsafe` needed for stylo's interior-mutable per-element state is
-//! confined to the `element` implementation; see that module's `SAFETY`
-//! notes. A flush freezes document topology and ordinary node data, then stylo
-//! may distribute `&Node<T>` references across workers. Its traversal
-//! discipline gives one worker ownership of each node's `ElementData`, while
-//! cross-worker state is atomic. [`TraversalGuard`](crate::arena::TraversalGuard)
-//! enforces the frozen phase and validates its mutation epoch.
+//! The raw `UnsafeCell` access needed for stylo's interior-mutable per-element
+//! state is confined to `crate::data::ElementDataSlot`; the `element` module
+//! supplies the matching trait-level safety boundary. A flush freezes document
+//! topology and ordinary node data, then stylo may distribute `&Node<T>`
+//! references across workers. Its traversal discipline gives one worker
+//! ownership of each node's `ElementData`, while cross-worker state is atomic.
+//! [`TraversalGuard`](crate::arena::TraversalGuard) enforces the owner-thread
+//! phase and poisons a document when traversal unwinds.
 
 mod document;
 mod element;

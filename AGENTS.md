@@ -109,6 +109,35 @@ decode those without a forward-compat break. `/Users/akiwah/repos/paws-libs/Paws
 `Cargo.toml` (an actively maintained sibling project on `stylo`/`parley`) is a
 useful signal for currently-compatible versions of those libraries.
 
+## Runtime ownership and style-flush model
+
+The following are settled architecture constraints, not temporary
+implementation limitations:
+
+1. **A VM and its Widget runtime always execute on the same owner thread.**
+   JavaScript host calls do not access that view's Widget state from another
+   thread.
+2. **A Widget runtime and its `stylo_dom::Document` always execute on that
+   same owner thread.** Ownership may move between threads only while the
+   entire view is stopped and no handles or callbacks can observe it; there is
+   never concurrent host access to one Widget/Document pair.
+3. **A stylo flush is synchronous, non-reentrant, and uninterruptible from the
+   host's point of view.** From entry through traversal teardown and dirty-state
+   cleanup, no JavaScript callback, event delivery, resource completion,
+   layout/render callback, or other source may read or mutate the Widget tree
+   or its Document. The only concurrency inside this interval is stylo's own
+   scoped parallel traversal; its workers receive an immutable tree/topology,
+   join before `flush` returns, and cannot publish DOM mutations.
+
+Design APIs around direct ownership and ordinary `&` / `&mut` borrows under
+these constraints. Do not introduce `Rc`/`Arc`, `RefCell`/`AtomicRefCell`, or
+`Mutex`/`RwLock` merely to support hypothetical cross-thread VM, Widget, or
+Document access. This does not remove synchronization required *inside*
+stylo's parallel traversal, stylo's shared CSS data model, genuinely
+concurrent resource services, or explicit cross-thread interruption handles.
+If a feature would require weakening one of these constraints, stop and ask
+the user rather than silently broadening the ownership model.
+
 ## Crates
 
 - `crates/lynx-template-decoder` — decodes `.web.bundle` (magic `SDRA WROF`):

@@ -58,6 +58,19 @@ Lynx-only device and unit behavior moved up into `lynx-widget`.
 
 ## Invariants
 
+- Each view's VM, `WidgetTree`, and `Document<WidgetState>` have one common
+  owner thread. They are directly owned rather than made concurrently
+  accessible through an outer `Rc`/`Arc`, `RefCell`, or lock. Stable external
+  element handles identify nodes by `ElementId`; they do not independently own
+  nodes or the document.
+- Mutation and flush are separate synchronous phases on that owner thread. A
+  flush is non-reentrant and cannot run JavaScript, deliver events, apply
+  resource completions, call layout/render code, or otherwise expose a tree
+  mutation until its traversal workers have joined and `complete_flush` has
+  returned. Stylo's scoped worker traversal is the sole exception to the
+  owner-thread rule: it sees frozen topology and ordinary element fields and
+  mutates only the per-element/atomic state permitted by Stylo's traversal
+  contract.
 - Every `Document<T>` owns exactly one node tree and exactly one matching style
   context. Create as many independent documents as needed; no document state is
   global or shared implicitly.
@@ -88,9 +101,10 @@ Lynx-only device and unit behavior moved up into `lynx-widget`.
   per-traversal state in worker TLS).
 - Every live `Node<T>` has a back-pointer to its boxed, address-stable document
   allocation. A style flush changes that document from `IDLE` to `TRAVERSING`,
-  checks that its mutation epoch did not change, and poisons it if traversal
-  unwinds. This makes the immutable-tree phase required by Stylo's parallel
-  workers an explicit runtime invariant.
+  using owner-thread `Cell` state rather than cross-thread atomics, and poisons
+  it if traversal unwinds. This makes the immutable-tree phase required by
+  Stylo's parallel workers an explicit runtime invariant without pretending
+  that host mutation can race the flush.
 
 ## Performance posture (see `docs/style-assumptions.md`)
 

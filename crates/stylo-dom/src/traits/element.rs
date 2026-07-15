@@ -25,7 +25,7 @@ use selectors::matching::{ElementSelectorFlags, VisitedHandlingMode};
 use selectors::sink::Push;
 use stylo::applicable_declarations::ApplicableDeclarationBlock;
 use stylo::context::SharedStyleContext;
-use stylo::data::{ElementDataMut, ElementDataRef, ElementDataWrapper};
+use stylo::data::{ElementDataMut, ElementDataRef};
 use stylo::dom::{LayoutIterator, TElement};
 use stylo::properties::PropertyDeclarationBlock;
 use stylo::selector_parser::{AttrValue, Lang, PseudoElement, SelectorImpl};
@@ -196,62 +196,38 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
         self.element().set_dirty_descendants_bit(false);
     }
 
-    fn store_children_to_process(&self, n: isize) {
-        self.element()
-            .children_to_process
-            .store(n, Ordering::SeqCst);
+    fn store_children_to_process(&self, _: isize) {
+        // RecalcStyle has no postorder phase, so DomTraversal returns before
+        // invoking this bookkeeping hook.
     }
 
     fn did_process_child(&self) -> isize {
-        self.element()
-            .children_to_process
-            .fetch_sub(1, Ordering::SeqCst)
-            - 1
+        unreachable!("stylo-dom's style traversal has no postorder phase")
     }
 
     unsafe fn ensure_data(&self) -> ElementDataMut<'_> {
         // SAFETY: traversal discipline — the caller holds exclusive access to
         // this element, so creating/borrowing its `ElementData` cannot race.
-        let slot = unsafe { &mut *self.element().stylo_data.get() };
-        slot.get_or_insert_with(ElementDataWrapper::default)
-            .borrow_mut()
+        unsafe { self.element().stylo_data.ensure() }
     }
 
     unsafe fn clear_data(&self) {
         // SAFETY: traversal discipline — exclusive access to this element, no
         // concurrent borrow of its stylo state.
-        unsafe {
-            *self.element().stylo_data.get() = None;
-        }
+        unsafe { self.element().stylo_data.clear() };
         self.element().selector_flags.store(0, Ordering::Relaxed);
     }
 
     fn has_data(&self) -> bool {
-        // SAFETY: reads only the `Option` discriminant; the slot is only
-        // created/removed by this element's owning worker (or under `&mut
-        // Document`), never concurrently with this read.
-        unsafe { (*self.element().stylo_data.get()).is_some() }
+        self.element().stylo_data.is_initialized()
     }
 
     fn borrow_data(&self) -> Option<ElementDataRef<'_>> {
-        // SAFETY: `ElementDataWrapper` tracks borrows internally (debug
-        // builds); the traversal discipline rules out a concurrent mutable
-        // borrow.
-        unsafe {
-            (*self.element().stylo_data.get())
-                .as_ref()
-                .map(ElementDataWrapper::borrow)
-        }
+        self.element().stylo_data.borrow()
     }
 
     fn mutate_data(&self) -> Option<ElementDataMut<'_>> {
-        // SAFETY: as `borrow_data`, plus exclusive access under the traversal
-        // discipline.
-        unsafe {
-            (*self.element().stylo_data.get())
-                .as_ref()
-                .map(ElementDataWrapper::borrow_mut)
-        }
+        self.element().stylo_data.borrow_mut()
     }
 
     fn skip_item_display_fixup(&self) -> bool {

@@ -47,7 +47,7 @@ impl<T> Document<T> {
     /// The ancestor walk stops early once it reaches an ancestor already marked
     /// `dirty_descendants`.
     pub fn mark_style_dirty(&mut self, id: ElementId) {
-        match self.get(id) {
+        match self.node_mut(id) {
             Some(element) => element.set_style_dirty(true),
             None => return,
         }
@@ -58,7 +58,7 @@ impl<T> Document<T> {
     /// Mark the entire subtree rooted at `id` as needing style recomputed, and
     /// flag `id`'s ancestors as having a dirty descendant.
     pub fn mark_subtree_dirty(&mut self, id: ElementId) {
-        match self.get(id) {
+        match self.node_mut(id) {
             Some(element) => {
                 element.set_style_dirty(true);
                 if !element.children.is_empty() {
@@ -87,7 +87,7 @@ impl<T> Document<T> {
     /// just changed). Uses stylo's dedicated style-attribute replacement hint,
     /// which swaps one cascade level instead of re-matching selectors.
     pub(crate) fn note_inline_style_change(&mut self, id: ElementId) {
-        if let Some(element) = self.get(id) {
+        if let Some(element) = self.node_mut(id) {
             element.set_style_dirty(true);
         } else {
             return;
@@ -117,7 +117,7 @@ impl<T> Document<T> {
     /// Set the element's own dirty bit and make it reachable from the root.
     fn mark_mutated(&mut self, id: ElementId) {
         self.note_mutation();
-        if let Some(element) = self.get(id) {
+        if let Some(element) = self.node_mut(id) {
             element.set_style_dirty(true);
         } else {
             return;
@@ -141,7 +141,7 @@ impl<T> Document<T> {
                 // and — through `+`/`~` (`.list:empty + .hint`) — its later
                 // siblings' subtrees (Gecko's `RestyleForEmptyChange`).
                 self.add_restyle_hint(parent, RestyleHint::restyle_subtree());
-                if let Some(element) = self.get(parent) {
+                if let Some(element) = self.node_mut(parent) {
                     element.set_style_dirty(true);
                 }
                 let later_siblings: Vec<ElementId> = self

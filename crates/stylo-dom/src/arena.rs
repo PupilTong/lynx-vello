@@ -15,10 +15,10 @@
 //! [`crate::dirty`]), and the next
 //! [`Document::flush`](crate::Document::flush) consumes them.
 
+use std::cell::Cell;
 use std::fmt;
 use std::num::NonZeroU32;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use dom::ElementState;
 use rustc_hash::FxHashMap;
@@ -93,41 +93,29 @@ pub(crate) struct DocumentInner<T> {
     pub(crate) url_data: UrlExtraData,
     snapshots: SnapshotMap,
     snapshotted: Vec<ElementId>,
-    phase: AtomicU8,
-    mutation_epoch: AtomicU64,
+    phase: Cell<DocumentPhase>,
 }
 
-const PHASE_IDLE: u8 = 0;
-const PHASE_TRAVERSING: u8 = 1;
-const PHASE_POISONED: u8 = 2;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DocumentPhase {
+    Idle,
+    Traversing,
+    Poisoned,
+}
 
 /// RAII exclusion guard for stylo's possibly parallel traversal.
 pub(crate) struct TraversalGuard<'a> {
-    phase: &'a AtomicU8,
-    mutation_epoch: &'a AtomicU64,
-    entered_epoch: u64,
+    phase: &'a Cell<DocumentPhase>,
 }
 
 impl Drop for TraversalGuard<'_> {
     fn drop(&mut self) {
         let panicking = std::thread::panicking();
-        self.phase.store(
-            if panicking {
-                PHASE_POISONED
-            } else {
-                PHASE_IDLE
-            },
-            Ordering::Release,
-        );
-        // Do not risk a second panic while unwinding. A traversal panic already
-        // poisons the document, so every later mutation/flush will fail fast.
-        if !panicking {
-            debug_assert_eq!(
-                self.mutation_epoch.load(Ordering::Acquire),
-                self.entered_epoch,
-                "document mutation epoch changed during style traversal"
-            );
-        }
+        self.phase.set(if panicking {
+            DocumentPhase::Poisoned
+        } else {
+            DocumentPhase::Idle
+        });
     }
 }
 
@@ -136,6 +124,15 @@ impl<T> DocumentInner<T> {
         let slot = self.slots.get(id.index as usize)?;
         if slot.generation == id.generation {
             slot.element.as_ref()
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn node_mut(&mut self, id: ElementId) -> Option<&mut Node<T>> {
+        let slot = self.slots.get_mut(id.index as usize)?;
+        if slot.generation == id.generation {
+            slot.element.as_mut()
         } else {
             None
         }
@@ -151,41 +148,34 @@ impl<T> DocumentInner<T> {
 
     fn note_mutation(&self) {
         self.assert_idle();
-        self.mutation_epoch.fetch_add(1, Ordering::Relaxed);
     }
 
     fn begin_traversal(&self) -> TraversalGuard<'_> {
-        begin_traversal(&self.phase, &self.mutation_epoch)
+        begin_traversal(&self.phase)
     }
 }
 
-fn assert_idle(phase: &AtomicU8) {
-    match phase.load(Ordering::Acquire) {
-        PHASE_IDLE => {}
-        PHASE_TRAVERSING => panic!("document mutation attempted during style traversal"),
-        PHASE_POISONED => panic!("document was poisoned by a panicking style traversal"),
-        _ => unreachable!("invalid document phase"),
+fn assert_idle(phase: &Cell<DocumentPhase>) {
+    match phase.get() {
+        DocumentPhase::Idle => {}
+        DocumentPhase::Traversing => {
+            panic!("document mutation attempted during style traversal")
+        }
+        DocumentPhase::Poisoned => {
+            panic!("document was poisoned by a panicking style traversal")
+        }
     }
 }
 
-fn begin_traversal<'a>(phase: &'a AtomicU8, mutation_epoch: &'a AtomicU64) -> TraversalGuard<'a> {
-    phase
-        .compare_exchange(
-            PHASE_IDLE,
-            PHASE_TRAVERSING,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        )
-        .unwrap_or_else(|phase| match phase {
-            PHASE_TRAVERSING => panic!("nested style traversal on one document"),
-            PHASE_POISONED => panic!("document was poisoned by a panicking style traversal"),
-            _ => unreachable!("invalid document phase"),
-        });
-    TraversalGuard {
-        phase,
-        mutation_epoch,
-        entered_epoch: mutation_epoch.load(Ordering::Acquire),
+fn begin_traversal(phase: &Cell<DocumentPhase>) -> TraversalGuard<'_> {
+    match phase.get() {
+        DocumentPhase::Idle => phase.set(DocumentPhase::Traversing),
+        DocumentPhase::Traversing => panic!("nested style traversal on one document"),
+        DocumentPhase::Poisoned => {
+            panic!("document was poisoned by a panicking style traversal")
+        }
     }
+    TraversalGuard { phase }
 }
 
 /// One independent DOM tree and its complete stylo style context.
@@ -221,8 +211,7 @@ impl<T> Document<T> {
                 url_data,
                 snapshots: SnapshotMap::new(),
                 snapshotted: Vec::new(),
-                phase: AtomicU8::new(PHASE_IDLE),
-                mutation_epoch: AtomicU64::new(0),
+                phase: Cell::new(DocumentPhase::Idle),
             }),
         }
     }
@@ -331,12 +320,7 @@ impl<T> Document<T> {
     /// it into a different document while leaving its back-pointer unchanged.
     pub(crate) fn node_mut(&mut self, id: ElementId) -> Option<&mut Node<T>> {
         self.inner.note_mutation();
-        let slot = self.inner.slots.get_mut(id.index as usize)?;
-        if slot.generation == id.generation {
-            slot.element.as_mut()
-        } else {
-            None
-        }
+        self.inner.node_mut(id)
     }
 
     /// Mutably borrow an element's class list if the handle is live.
@@ -423,7 +407,7 @@ impl<T> Document<T> {
         // dirty-descendants node, but only descend where the bit is set.
         let mut stack = vec![root];
         while let Some(current) = stack.pop() {
-            let Some(element) = self.get(current) else {
+            let Some(element) = self.inner.node_mut(current) else {
                 continue;
             };
             element.set_style_dirty(false);
@@ -441,26 +425,24 @@ impl<T> Document<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::panic::{AssertUnwindSafe, catch_unwind};
-    use std::sync::atomic::{AtomicU8, AtomicU64};
 
-    use super::{PHASE_IDLE, assert_idle, begin_traversal};
+    use super::{DocumentPhase, assert_idle, begin_traversal};
 
     #[test]
     fn traversal_phase_rejects_mutation() {
-        let phase = AtomicU8::new(PHASE_IDLE);
-        let mutation_epoch = AtomicU64::new(0);
-        let _guard = begin_traversal(&phase, &mutation_epoch);
+        let phase = Cell::new(DocumentPhase::Idle);
+        let _guard = begin_traversal(&phase);
         let mutation = catch_unwind(AssertUnwindSafe(|| assert_idle(&phase)));
         assert!(mutation.is_err());
     }
 
     #[test]
     fn panicking_traversal_poisons_document() {
-        let phase = AtomicU8::new(PHASE_IDLE);
-        let mutation_epoch = AtomicU64::new(0);
+        let phase = Cell::new(DocumentPhase::Idle);
         let traversal = catch_unwind(AssertUnwindSafe(|| {
-            let _guard = begin_traversal(&phase, &mutation_epoch);
+            let _guard = begin_traversal(&phase);
             panic!("synthetic traversal failure");
         }));
         assert!(traversal.is_err());

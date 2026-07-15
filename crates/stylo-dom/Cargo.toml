@@ -24,7 +24,6 @@ dom = { workspace = true }
 stylo_traits = { workspace = true }
 selectors = { workspace = true }
 app_units = { workspace = true }
-atomic_refcell = { workspace = true }
 cssparser = { workspace = true }
 euclid = { workspace = true }
 url = { workspace = true }

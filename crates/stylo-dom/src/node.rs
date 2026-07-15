@@ -1,10 +1,9 @@
 //! The unified [`Node`] struct — the HTML-DOM-subset node.
 
-use std::cell::UnsafeCell;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 use dom::ElementState;
 use rustc_hash::FxHashMap;
@@ -18,6 +17,7 @@ use stylo::shared_lock::Locked;
 use stylo_atoms::Atom;
 
 use crate::arena::{DocumentInner, ElementId};
+use crate::data::ElementDataSlot;
 
 /// Bit set in [`Node::snapshot_flags`] when a pre-mutation snapshot has
 /// been recorded for this element in the arena's
@@ -45,10 +45,9 @@ pub(crate) const SNAPSHOT_HANDLED: u8 = 1 << 1;
 /// `&Document`), so every piece of element state that stylo touches during a
 /// traversal is either
 ///
-/// - atomic ([`selector_flags`], [`style_dirty`], [`dirty_descendants`], [`snapshot_flags`],
-///   [`children_to_process`]), or
+/// - atomic ([`selector_flags`], [`dirty_descendants`], [`snapshot_flags`]), or
 /// - owned by exactly one worker at a time under stylo's traversal discipline ([`stylo_data`], an
-///   [`UnsafeCell`]; see [`crate::traits`] for the per-access safety arguments).
+///   [`ElementDataSlot`]; see [`crate::traits`] for the per-access safety arguments).
 ///
 /// Everything else (tag/classes/attrs/text/`ext`) is **immutable during a
 /// flush**: mutation requires `&mut Document`, which
@@ -63,7 +62,6 @@ pub(crate) const SNAPSHOT_HANDLED: u8 = 1 << 1;
 /// [`style_dirty`]: Node::style_dirty
 /// [`dirty_descendants`]: Node::dirty_descendants
 /// [`snapshot_flags`]: Node::snapshot_flags
-/// [`children_to_process`]: Node::children_to_process
 pub struct Node<T> {
     /// Stable back-pointer to the document allocation that owns this node.
     document: NonNull<DocumentInner<T>>,
@@ -99,7 +97,7 @@ pub struct Node<T> {
     /// `TElement::ensure_data`. The resolved computed style lives here (see
     /// [`computed_style`](Node::computed_style)). Only touched through the
     /// [`traits`](crate::traits) impls under stylo's traversal discipline.
-    pub(crate) stylo_data: UnsafeCell<Option<ElementDataWrapper>>,
+    pub(crate) stylo_data: ElementDataSlot,
 
     /// Selector flags accumulated by stylo during matching (e.g. "has a
     /// child-position-dependent rule"), stored as the raw
@@ -110,7 +108,7 @@ pub struct Node<T> {
 
     /// Whether this element itself has pending style work (embedder-visible
     /// dirty signal; stylo's own scheduling uses `ElementData::hint`).
-    pub(crate) style_dirty: AtomicBool,
+    pub(crate) style_dirty: bool,
     /// Whether some descendant of this element has pending style work. This is
     /// the bit stylo's traversal walks down
     /// ([`TElement::has_dirty_descendants`](stylo::dom::TElement::has_dirty_descendants)).
@@ -119,12 +117,6 @@ pub struct Node<T> {
     /// Snapshot lifecycle bits ([`SNAPSHOT_PRESENT`] / [`SNAPSHOT_HANDLED`]),
     /// mirroring `TElement::{has_snapshot, handled_snapshot}`.
     pub(crate) snapshot_flags: AtomicU8,
-
-    /// Bottom-up traversal bookkeeping
-    /// (`TElement::{store_children_to_process, did_process_child}`). Unused
-    /// while the style traversal has no postorder pass, but kept sound for
-    /// when one appears.
-    pub(crate) children_to_process: AtomicIsize,
 
     /// Literal character-data content, for text leaves.
     pub text: Option<String>,
@@ -152,12 +144,11 @@ impl<T> Node<T> {
             attrs: FxHashMap::default(),
             element_state: ElementState::empty(),
             inline_block: None,
-            stylo_data: UnsafeCell::new(None),
+            stylo_data: ElementDataSlot::empty(),
             selector_flags: AtomicUsize::new(0),
-            style_dirty: AtomicBool::new(false),
+            style_dirty: false,
             dirty_descendants: AtomicBool::new(false),
             snapshot_flags: AtomicU8::new(0),
-            children_to_process: AtomicIsize::new(0),
             text: None,
             ext,
         }
@@ -264,12 +255,7 @@ impl<T> Node<T> {
     /// arena (impossible through the public API: a flush holds `&mut Document`).
     #[must_use]
     pub fn has_style_data(&self) -> bool {
-        // SAFETY: reads only the `Option` discriminant; no flush is running
-        // (flushes require `&mut Document`, we hold `&self` from that arena).
-        #[expect(unsafe_code, reason = "UnsafeCell discriminant read outside any flush")]
-        unsafe {
-            (*self.stylo_data.get()).is_some()
-        }
+        self.stylo_data.is_initialized()
     }
 
     /// The resolved computed style, if this element has been styled.
@@ -280,12 +266,9 @@ impl<T> Node<T> {
     /// `&mut Document`).
     #[must_use]
     pub fn computed_style(&self) -> Option<Arc<ComputedValues>> {
-        // SAFETY: no flush is running (flushes require `&mut Document`, and we
-        // hold `&self` borrowed from that arena), so reading the slot and
-        // taking a shared borrow of the wrapper cannot race.
-        #[expect(unsafe_code, reason = "UnsafeCell read outside any flush")]
-        let slot = unsafe { (*self.stylo_data.get()).as_ref() };
-        slot.and_then(|wrapper| wrapper.borrow().styles.primary.clone())
+        self.stylo_data
+            .borrow()
+            .and_then(|data| data.styles.primary.clone())
     }
 
     /// Store a resolved computed style, creating the stylo `ElementData` slot
@@ -293,8 +276,7 @@ impl<T> Node<T> {
     /// [`Document::resolve`](crate::Document::resolve) path; the flush
     /// traversal writes styles through stylo itself.
     pub(crate) fn set_computed_style(&mut self, style: Arc<ComputedValues>) {
-        let slot = self.stylo_data.get_mut();
-        let wrapper = slot.get_or_insert_with(ElementDataWrapper::default);
+        let wrapper = self.stylo_data.get_or_insert_mut();
         wrapper.borrow_mut().styles.primary = Some(style);
     }
 
@@ -314,7 +296,7 @@ impl<T> Node<T> {
     /// the next time the element is scheduled while reachable).
     #[must_use]
     pub fn is_style_dirty(&self) -> bool {
-        self.style_dirty.load(Ordering::Relaxed)
+        self.style_dirty
     }
 
     /// Whether a descendant has pending style work.
@@ -323,8 +305,8 @@ impl<T> Node<T> {
         self.dirty_descendants.load(Ordering::Relaxed)
     }
 
-    pub(crate) fn set_style_dirty(&self, dirty: bool) {
-        self.style_dirty.store(dirty, Ordering::Relaxed);
+    pub(crate) const fn set_style_dirty(&mut self, dirty: bool) {
+        self.style_dirty = dirty;
     }
 
     pub(crate) fn set_dirty_descendants_bit(&self, dirty: bool) {
@@ -356,9 +338,9 @@ impl<T> Node<T> {
     /// Mutable access to the stylo `ElementData` wrapper, if it exists.
     ///
     /// Safe because it goes through `&mut self`: exclusive access to the
-    /// element means no traversal is concurrently touching the `UnsafeCell`.
+    /// element means no traversal is concurrently touching the slot.
     pub(crate) fn stylo_data_mut(&mut self) -> Option<&mut ElementDataWrapper> {
-        self.stylo_data.get_mut().as_mut()
+        self.stylo_data.get_mut()
     }
 }
 
@@ -379,9 +361,8 @@ impl<T> Hash for Node<T> {
 
 impl<T> fmt::Debug for Node<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // `stylo_data` (an `UnsafeCell`) is deliberately omitted: it is not
-        // `Debug`, and reading it here would need the no-concurrent-flush
-        // invariant we cannot assert from a generic Debug impl.
+        // `stylo_data` is deliberately omitted: a generic Debug call cannot
+        // establish the no-concurrent-flush invariant required to read it.
         f.debug_struct("Node")
             .field("node_id", &self.id)
             .field("tag", &self.tag_str())

@@ -6,7 +6,9 @@ in `.claude/agents/`) or Codex (paste into `codex` CLI, or forward through
 `/codex:rescue`). Fill in the `{PLACEHOLDERS}`.
 
 All of these assume the reader starts from `AGENTS.md` — they don't repeat the
-project mission/standards policy, just the task-specific framing.
+project mission/standards policy or its owner-thread/non-reentrant-flush
+constraints, just the task-specific framing. Do not add synchronization for a
+hypothetical cross-thread VM/Widget/Document model when using these prompts.
 
 Three reference repos, three different roles (absolute paths defined once in
 `AGENTS.md`; shorthand used below):
