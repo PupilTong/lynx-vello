@@ -11,10 +11,10 @@ rust-version.workspace = true
 rustc-hash = { workspace = true }
 smallvec = { workspace = true }
 
-# stylo integration: the Element struct owns stylo's interior-mutable
-# per-element state (ElementData/selector flags) and the `traits` module
+# stylo integration: the Node struct owns stylo's interior-mutable per-element
+# state (ElementData/selector flags) and the `traits` module
 # implements stylo's element traits (`TNode`/`TElement`/`TDocument`/
-# `selectors::Element`) on `ElementRef`. The vendored servo package is itself
+# `selectors::Element`) directly on `&Node<T>`. The vendored servo package is itself
 # named `stylo_dom`; we depend on it under the `dom` rename (as
 # vendor/stylo/style's own Cargo.toml does) so this crate can take the
 # `stylo_dom` lib name and re-export `ElementState`.

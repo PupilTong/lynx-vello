@@ -17,8 +17,8 @@
 //!    nothing depends on costs nothing.
 //!
 //! Both paths also maintain the embedder-visible dirty bits
-//! ([`Element::is_style_dirty`](crate::Element::is_style_dirty) /
-//! [`Element::has_dirty_descendants`](crate::Element::has_dirty_descendants)):
+//! ([`Node::is_style_dirty`](crate::Node::is_style_dirty) /
+//! [`Node::has_dirty_descendants`](crate::Node::has_dirty_descendants)):
 //! `dirty_descendants` on the ancestor chain is what lets the traversal reach
 //! the invalidated element.
 
@@ -75,7 +75,7 @@ impl<T> Arena<T> {
     /// been styled before. An element without style data needs no hint: the
     /// traversal styles data-less elements unconditionally.
     pub(crate) fn add_restyle_hint(&mut self, id: ElementId, hint: RestyleHint) {
-        let Some(element) = self.get_mut(id) else {
+        let Some(element) = self.node_mut(id) else {
             return;
         };
         if let Some(wrapper) = element.stylo_data_mut() {
@@ -116,6 +116,7 @@ impl<T> Arena<T> {
 
     /// Set the element's own dirty bit and make it reachable from the root.
     fn mark_mutated(&mut self, id: ElementId) {
+        self.note_mutation();
         if let Some(element) = self.get(id) {
             element.set_style_dirty(true);
         } else {
@@ -279,7 +280,7 @@ impl<T: ExternalState> Arena<T> {
 /// state: dynamic pseudo-class bits plus every matching-relevant attribute —
 /// the id selector value, classes, real attributes, and the embedder's
 /// synthetic / reflected attributes.
-fn build_snapshot<T: ExternalState>(element: &crate::element::Element<T>) -> Snapshot {
+fn build_snapshot<T: ExternalState>(element: &crate::Node<T>) -> Snapshot {
     let mut attrs: Vec<(AttrIdentifier, AttrValue)> = Vec::new();
 
     // "id" and "class" go FIRST, and with the exact `AttrValue` variants the

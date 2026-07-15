@@ -8,7 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-# The generic, HTML-DOM-subset core (Element<T> arena, tree/inline/dirty
+# The generic, HTML-DOM-subset core (Node<T> arena, tree/inline/dirty
 # primitives, stylo element-trait impls). This crate instantiates it with
 # `WidgetState` and re-exports the result Widget-first.
 stylo-dom = { workspace = true }

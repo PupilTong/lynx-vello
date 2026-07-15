@@ -141,7 +141,8 @@ useful signal for currently-compatible versions of those libraries.
   the future preloaded module graph belong here rather than in the generic
   QuickJS bridge or engine-neutral protocol.
 - `crates/stylo-dom` — generic HTML-DOM subset and standards-oriented CSS
-  computation core. Owns `Element<T>` / `Arena<T>`, stylo DOM trait impls,
+  computation core. Owns `Node<T>` / `Arena<T>`, address-stable document
+  back-pointers, stylo DOM trait impls directly on `&Node<T>`,
   tree invalidation, inline-style parsing, the `Stylist` / cascade pipeline,
   and the private `SharedRwLock` shared by an engine and its arenas. It must
   not contain Lynx widget vocabulary or Lynx device/unit policy.

@@ -1,4 +1,4 @@
-//! [`TDocument`] + [`TShadowRoot`] for [`ElementRef`].
+//! [`TDocument`] + [`TShadowRoot`] for [`&Node`](crate::Node).
 //!
 //! There is no distinct document node in this model — the tree root doubles as
 //! the document — and no shadow DOM, so [`TShadowRoot`] is a stub that is never
@@ -9,11 +9,11 @@ use stylo::dom::{TDocument, TNode, TShadowRoot};
 use stylo::shared_lock::SharedRwLock;
 use stylo::stylist::CascadeData;
 
-use crate::arena::ElementRef;
 use crate::ext::ExternalState;
+use crate::node::Node;
 
-impl<'a, T: ExternalState> TDocument for ElementRef<'a, T> {
-    type ConcreteNode = ElementRef<'a, T>;
+impl<'a, T: ExternalState> TDocument for &'a Node<T> {
+    type ConcreteNode = &'a Node<T>;
 
     fn as_node(&self) -> Self::ConcreteNode {
         *self
@@ -28,12 +28,12 @@ impl<'a, T: ExternalState> TDocument for ElementRef<'a, T> {
     }
 
     fn shared_lock(&self) -> &SharedRwLock {
-        self.arena.shared_lock()
+        self.document().shared_lock()
     }
 }
 
-impl<'a, T: ExternalState> TShadowRoot for ElementRef<'a, T> {
-    type ConcreteNode = ElementRef<'a, T>;
+impl<'a, T: ExternalState> TShadowRoot for &'a Node<T> {
+    type ConcreteNode = &'a Node<T>;
 
     fn as_node(&self) -> Self::ConcreteNode {
         *self

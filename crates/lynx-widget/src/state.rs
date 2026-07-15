@@ -1,7 +1,7 @@
 //! The Lynx external state carried by every widget ([`WidgetState`]), plus the
 //! event-registration types.
 //!
-//! `stylo-dom`'s [`Element`](stylo_dom::Element) covers only the HTML-DOM
+//! `stylo-dom`'s [`Node`](stylo_dom::Node) covers only the HTML-DOM
 //! subset; everything Lynx-specific about a widget — its [`WidgetKind`], the
 //! `unique_id`, the `css_id` style scope, the `data-*` dataset, and event
 //! bindings — lives here, in the element's `ext` payload. The
@@ -49,7 +49,7 @@ pub struct EventReg {
 }
 
 /// The Lynx-specific per-widget state, carried as the `ext` payload of
-/// [`Widget`](crate::Widget) (= `stylo_dom::Element<WidgetState>`).
+/// [`Widget`](crate::Widget) (= `stylo_dom::Node<WidgetState>`).
 #[derive(Debug)]
 pub struct WidgetState {
     /// The widget kind (the Lynx tag classification).

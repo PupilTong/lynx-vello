@@ -1,4 +1,4 @@
-//! [`TElement`] for [`ElementRef`].
+//! [`TElement`] for [`&Node`](crate::Node).
 //!
 //! # Safety
 //!
@@ -7,12 +7,12 @@
 //! [`clear_data`](TElement::clear_data), `borrow_data`, `mutate_data`). Each
 //! `unsafe` access relies on **stylo's traversal discipline**: during a
 //! (possibly parallel) restyle traversal, each element's
-//! [`stylo_data`](crate::Element::stylo_data) is touched by exactly one
+//! [`stylo_data`](crate::Node::stylo_data) is touched by exactly one
 //! worker at a time (a parent reads/writes a child's data only in
 //! `note_children`, strictly before any worker takes ownership of that
 //! child), and outside a traversal the embedder holds `&mut Arena`. All other
 //! per-element state stylo mutates through `&self` is atomic (see
-//! [`Element`](crate::Element)).
+//! [`Node`](crate::Node)).
 #![allow(unsafe_code)]
 
 use std::sync::OnceLock;
@@ -36,26 +36,35 @@ use stylo::values::computed::Display;
 use stylo::{LocalName, Namespace};
 use stylo_atoms::Atom;
 
-use crate::arena::{Arena, ElementId, ElementRef};
+use crate::arena::{Document, ElementId};
 use crate::ext::ExternalState;
+use crate::node::Node;
 
 /// The children iterator stylo's restyle traversal walks. Skips over any child
 /// whose handle no longer resolves (defensive; live trees never hit that).
-#[derive(Debug)]
 pub struct ChildrenIter<'a, T> {
-    arena: &'a Arena<T>,
+    document: &'a Document<T>,
     children: &'a [ElementId],
     index: usize,
 }
 
-impl<'a, T> Iterator for ChildrenIter<'a, T> {
-    type Item = ElementRef<'a, T>;
+impl<T> std::fmt::Debug for ChildrenIter<'_, T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChildrenIter")
+            .field("remaining", &self.children.len().saturating_sub(self.index))
+            .finish()
+    }
+}
 
-    fn next(&mut self) -> Option<ElementRef<'a, T>> {
+impl<'a, T> Iterator for ChildrenIter<'a, T> {
+    type Item = &'a Node<T>;
+
+    fn next(&mut self) -> Option<&'a Node<T>> {
         while self.index < self.children.len() {
             let id = self.children[self.index];
             self.index += 1;
-            if let Some(elem) = self.arena.element_ref(id) {
+            if let Some(elem) = self.document.node(id) {
                 return Some(elem);
             }
         }
@@ -70,8 +79,8 @@ fn empty_namespace() -> &'static <SelectorImpl as selectors::SelectorImpl>::Borr
     &EMPTY.get_or_init(Namespace::default).0
 }
 
-impl<'a, T: ExternalState> TElement for ElementRef<'a, T> {
-    type ConcreteNode = ElementRef<'a, T>;
+impl<'a, T: ExternalState> TElement for &'a Node<T> {
+    type ConcreteNode = &'a Node<T>;
     type TraversalChildrenIterator = ChildrenIter<'a, T>;
 
     fn as_node(&self) -> Self::ConcreteNode {
@@ -80,7 +89,7 @@ impl<'a, T: ExternalState> TElement for ElementRef<'a, T> {
 
     fn traversal_children(&self) -> LayoutIterator<Self::TraversalChildrenIterator> {
         LayoutIterator(ChildrenIter {
-            arena: self.arena,
+            document: self.document(),
             children: &self.element().children,
             index: 0,
         })
@@ -265,11 +274,11 @@ impl<'a, T: ExternalState> TElement for ElementRef<'a, T> {
         false
     }
 
-    fn shadow_root(&self) -> Option<ElementRef<'a, T>> {
+    fn shadow_root(&self) -> Option<&'a Node<T>> {
         None
     }
 
-    fn containing_shadow(&self) -> Option<ElementRef<'a, T>> {
+    fn containing_shadow(&self) -> Option<&'a Node<T>> {
         None
     }
 

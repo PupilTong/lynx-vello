@@ -30,12 +30,12 @@ use rustc_hash::FxHashMap;
 use stylo::properties::ComputedValues;
 use stylo::servo_arc::Arc;
 use stylo_atoms::Atom;
-use stylo_dom::{Arena, Element, PseudoState};
+use stylo_dom::{Arena, PseudoState};
 use thiserror::Error;
 
 use crate::kind::WidgetKind;
 use crate::state::{EventKind, EventReg, WidgetState};
-use crate::{Widget, WidgetId, WidgetRef};
+use crate::{Widget, WidgetId};
 
 /// An error from a tree-mutating [`WidgetTree`] operation.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Error)]
@@ -125,7 +125,7 @@ impl WidgetTree {
         self.next_unique_id = self.next_unique_id.wrapping_add(1);
         let id = self
             .arena
-            .insert(Element::new(tag, WidgetState::new(kind, unique_id)));
+            .create_element(tag, WidgetState::new(kind, unique_id));
         self.by_unique_id.insert(unique_id, id);
         id
     }
@@ -152,8 +152,8 @@ impl WidgetTree {
     /// Create a `<raw-text>` leaf carrying literal text content.
     pub fn create_raw_text(&mut self, text: impl Into<String>) -> WidgetId {
         let id = self.create(WidgetKind::RawText, "raw-text");
-        if let Some(widget) = self.arena.get_mut(id) {
-            widget.text = Some(text.into());
+        if let Some(widget_text) = self.arena.text_mut(id) {
+            *widget_text = Some(text.into());
         }
         id
     }
@@ -338,8 +338,8 @@ impl WidgetTree {
         // Snapshot the old class list before mutating so the flush can run
         // invalidation-set matching against old vs. new.
         self.arena.note_class_change(id);
-        if let Some(widget) = self.arena.get_mut(id) {
-            widget.classes = classes.split_whitespace().map(Atom::from).collect();
+        if let Some(widget_classes) = self.arena.classes_mut(id) {
+            *widget_classes = classes.split_whitespace().map(Atom::from).collect();
         }
         Ok(())
     }
@@ -356,8 +356,8 @@ impl WidgetTree {
             None => return Err(WidgetError::StaleElement(id)),
         }
         self.arena.note_class_change(id);
-        if let Some(widget) = self.arena.get_mut(id) {
-            widget.classes.push(class);
+        if let Some(widget_classes) = self.arena.classes_mut(id) {
+            widget_classes.push(class);
         }
         Ok(())
     }
@@ -407,8 +407,8 @@ impl WidgetTree {
             return Err(WidgetError::StaleElement(id));
         }
         self.arena.note_attribute_change(id, name);
-        if let Some(widget) = self.arena.get_mut(id) {
-            widget.attrs.insert(name.into(), value.to_owned());
+        if let Some(widget_attrs) = self.arena.attrs_mut(id) {
+            widget_attrs.insert(name.into(), value.to_owned());
         }
         Ok(())
     }
@@ -420,8 +420,8 @@ impl WidgetTree {
             return Err(WidgetError::StaleElement(id));
         }
         self.arena.note_id_change(id);
-        if let Some(widget) = self.arena.get_mut(id) {
-            widget.id_attr = if id_selector.is_empty() {
+        if let Some(widget_id) = self.arena.id_attr_mut(id) {
+            *widget_id = if id_selector.is_empty() {
                 None
             } else {
                 Some(Atom::from(id_selector))
@@ -439,8 +439,8 @@ impl WidgetTree {
             // The css_id is reflected as the synthetic `l-css-id` attribute,
             // so snapshot it as an attribute change.
             self.arena.note_attribute_change(id, "l-css-id");
-            if let Some(widget) = self.arena.get_mut(id) {
-                widget.ext.css_id = css_id;
+            if let Some(widget_state) = self.arena.ext_mut(id) {
+                widget_state.css_id = css_id;
             }
         }
         Ok(())
@@ -475,8 +475,8 @@ impl WidgetTree {
             self.arena.note_attribute_change(id, key);
         }
 
-        if let Some(widget) = self.arena.get_mut(id) {
-            widget.ext.dataset = entries
+        if let Some(widget_state) = self.arena.ext_mut(id) {
+            widget_state.dataset = entries
                 .into_iter()
                 .map(|(k, v)| (k.into(), v.into()))
                 .collect();
@@ -510,8 +510,8 @@ impl WidgetTree {
             return Err(WidgetError::StaleElement(id));
         }
         self.arena.note_attribute_change(id, &format!("data-{key}"));
-        if let Some(widget) = self.arena.get_mut(id) {
-            widget.ext.dataset.insert(key.into(), value.to_owned());
+        if let Some(widget_state) = self.arena.ext_mut(id) {
+            widget_state.dataset.insert(key.into(), value.to_owned());
         }
         Ok(())
     }
@@ -525,8 +525,8 @@ impl WidgetTree {
         name: &str,
         handler: &str,
     ) -> Result<(), WidgetError> {
-        match self.arena.get_mut(id) {
-            Some(widget) => widget.ext.events.push(EventReg {
+        match self.arena.ext_mut(id) {
+            Some(widget_state) => widget_state.events.push(EventReg {
                 name: name.into(),
                 kind,
                 handler: handler.into(),
@@ -547,8 +547,8 @@ impl WidgetTree {
             return Err(WidgetError::StaleElement(id));
         }
         self.arena.note_state_change(id);
-        if let Some(widget) = self.arena.get_mut(id) {
-            widget.element_state.set(state.to_element_state(), on);
+        if let Some(element_state) = self.arena.element_state_mut(id) {
+            element_state.set(state.to_element_state(), on);
         }
         Ok(())
     }
@@ -599,10 +599,10 @@ impl WidgetTree {
         self.arena.get(id)
     }
 
-    /// A read-only navigation handle for an element, if live.
+    /// Borrow an element for read-only tree navigation, if live.
     #[must_use]
-    pub fn widget_ref(&self, id: WidgetId) -> Option<WidgetRef<'_>> {
-        self.arena.element_ref(id)
+    pub fn widget_ref(&self, id: WidgetId) -> Option<&Widget> {
+        self.arena.node(id)
     }
 
     /// An element's resolved computed style, if it has been styled.

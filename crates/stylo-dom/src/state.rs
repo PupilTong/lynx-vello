@@ -5,13 +5,13 @@
 //!
 //! [`PseudoState`] is the crate's public API type (it keeps embedder
 //! state-toggling APIs free of any stylo type in their signatures); internally
-//! each [`Element`] stores the equivalent stylo
+//! each [`Node`] stores the equivalent stylo
 //! [`ElementState`] so
 //! `selectors::Element::match_non_ts_pseudo_class` can test it directly against
 //! `NonTSPseudoClass::state_flag()`. [`PseudoState::to_element_state`] is the
 //! single bridge between the two.
 //!
-//! [`Element`]: crate::Element
+//! [`Node`]: crate::Node
 
 use dom::ElementState;
 

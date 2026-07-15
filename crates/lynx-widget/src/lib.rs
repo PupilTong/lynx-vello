@@ -14,14 +14,13 @@
 //! # Vocabulary
 //!
 //! A Lynx-Element-PAPI-created instance is a [`Widget`] in this repo. The
-//! `stylo-dom` core speaks HTML DOM (`Element<T>`, generic over an external
+//! `stylo-dom` core speaks HTML DOM (`Node<T>`, generic over an external
 //! state); the Lynx layer instantiates it with [`WidgetState`] — the
 //! Lynx-specific payload carrying the [`WidgetKind`], `unique_id`, `css_id`,
 //! `data-*` dataset, and event bindings — and names the result Widget-first:
 //!
-//! - [`Widget`] = `stylo_dom::Element<WidgetState>`
+//! - [`Widget`] = `stylo_dom::Node<WidgetState>`
 //! - [`WidgetId`] = `stylo_dom::ElementId`
-//! - [`WidgetRef`] = `stylo_dom::ElementRef<'_, WidgetState>`
 //!
 //! The retained tree is a [`WidgetTree`], errors are [`WidgetError`]. Method
 //! names keep the `element` wording of the `__*Element` PAPI opcodes they
@@ -53,11 +52,7 @@ pub use ua::PageConfig;
 
 /// A Lynx widget: the generic HTML-DOM-subset element carrying the
 /// Lynx-specific [`WidgetState`] payload in its `ext` field.
-pub type Widget = stylo_dom::Element<WidgetState>;
+pub type Widget = stylo_dom::Node<WidgetState>;
 
 /// A stable, generation-checked handle to a [`Widget`] in a [`WidgetTree`].
 pub type WidgetId = stylo_dom::ElementId;
-
-/// A `Copy` read-only navigation handle over a [`Widget`] and its arena (the
-/// type the stylo element traits are implemented on).
-pub type WidgetRef<'a> = stylo_dom::ElementRef<'a, WidgetState>;

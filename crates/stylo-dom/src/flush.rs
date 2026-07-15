@@ -14,7 +14,7 @@
 //!   `ThreadLocalStyleContext`.
 //!
 //! Computed styles land in each element's stylo `ElementData`
-//! ([`Element::computed_style`](crate::Element::computed_style) reads them);
+//! ([`Node::computed_style`](crate::Node::computed_style) reads them);
 //! [`Arena::complete_flush`](crate::Arena) then drops the consumed snapshots
 //! and clears the dirty spine.
 //!
@@ -39,8 +39,9 @@ use stylo::traversal::{DomTraversal, PerLevelTraversalData, recalc_style_at};
 use stylo::traversal_flags::TraversalFlags;
 use stylo_atoms::Atom;
 
-use crate::arena::{Arena, ElementId, ElementRef};
+use crate::arena::{Arena, ElementId};
 use crate::ext::ExternalState;
+use crate::node::Node;
 use crate::style::StyleEngine;
 
 /// How [`StyleEngine::flush_tree_with`] schedules the traversal.
@@ -104,15 +105,15 @@ struct RecalcStyle<'a> {
     shared: SharedStyleContext<'a>,
 }
 
-impl<'a, T: ExternalState> DomTraversal<ElementRef<'a, T>> for RecalcStyle<'a> {
+impl<'a, T: ExternalState + Sync> DomTraversal<&'a Node<T>> for RecalcStyle<'a> {
     fn process_preorder<F>(
         &self,
         traversal_data: &PerLevelTraversalData,
-        context: &mut StyleContext<ElementRef<'a, T>>,
-        node: ElementRef<'a, T>,
+        context: &mut StyleContext<&'a Node<T>>,
+        node: &'a Node<T>,
         note_child: F,
     ) where
-        F: FnMut(ElementRef<'a, T>),
+        F: FnMut(&'a Node<T>),
     {
         // Every node is an element in this model.
         // SAFETY: stylo's traversal contract — exactly one worker processes
@@ -121,7 +122,7 @@ impl<'a, T: ExternalState> DomTraversal<ElementRef<'a, T>> for RecalcStyle<'a> {
         recalc_style_at(self, traversal_data, context, node, &mut data, note_child);
     }
 
-    fn process_postorder(&self, _: &mut StyleContext<ElementRef<'a, T>>, _: ElementRef<'a, T>) {
+    fn process_postorder(&self, _: &mut StyleContext<&'a Node<T>>, _: &'a Node<T>) {
         debug_assert!(false, "needs_postorder_traversal() is false");
     }
 
@@ -144,12 +145,12 @@ impl StyleEngine {
     /// If the traversal panics, the arena's scheduling state (dirty bits,
     /// pending snapshots) is left unspecified; an embedder that catches the
     /// unwind should discard or rebuild the tree rather than keep flushing it.
-    pub fn flush_tree<T: ExternalState>(&self, arena: &mut Arena<T>, root: ElementId) {
+    pub fn flush_tree<T: ExternalState + Sync>(&self, arena: &mut Arena<T>, root: ElementId) {
         self.flush_tree_with(arena, root, Parallelism::Auto);
     }
 
     /// [`flush_tree`](Self::flush_tree) with explicit traversal scheduling.
-    pub fn flush_tree_with<T: ExternalState>(
+    pub fn flush_tree_with<T: ExternalState + Sync>(
         &self,
         arena: &mut Arena<T>,
         root: ElementId,
@@ -159,6 +160,7 @@ impl StyleEngine {
             let Some(root_ref) = arena.element_ref(root) else {
                 return;
             };
+            let _traversal_guard = arena.begin_traversal();
             let guard = self.shared_lock().read();
             let shared = SharedStyleContext {
                 stylist: self.stylist(),
@@ -177,7 +179,7 @@ impl StyleEngine {
                 registered_speculative_painters: &NO_PAINTERS,
             };
             let traversal = RecalcStyle { shared };
-            let token = <RecalcStyle<'_> as DomTraversal<ElementRef<'_, T>>>::pre_traverse(
+            let token = <RecalcStyle<'_> as DomTraversal<&Node<T>>>::pre_traverse(
                 root_ref,
                 &traversal.shared,
             );

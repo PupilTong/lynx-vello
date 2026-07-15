@@ -72,7 +72,7 @@ impl<T> Arena<T> {
         };
         if let Some(parent) = old_parent {
             let mut removed_index = 0;
-            if let Some(parent_element) = self.get_mut(parent)
+            if let Some(parent_element) = self.node_mut(parent)
                 && let Some(pos) = parent_element.children.iter().position(|&c| c == child)
             {
                 removed_index = pos;
@@ -80,7 +80,7 @@ impl<T> Arena<T> {
             }
             self.note_child_list_change(parent, removed_index);
         }
-        if let Some(child_element) = self.get_mut(child) {
+        if let Some(child_element) = self.node_mut(child) {
             child_element.parent = None;
         }
     }
@@ -97,10 +97,10 @@ impl<T> Arena<T> {
     /// move. A fresh child needs nothing — elements without style data are
     /// styled unconditionally when the traversal reaches them.
     pub fn attach_at(&mut self, parent: ElementId, child: ElementId, index: usize) {
-        if let Some(parent_element) = self.get_mut(parent) {
+        if let Some(parent_element) = self.node_mut(parent) {
             parent_element.children.insert(index, child);
         }
-        if let Some(child_element) = self.get_mut(child) {
+        if let Some(child_element) = self.node_mut(child) {
             child_element.parent = Some(parent);
         }
         self.add_restyle_hint(child, RestyleHint::restyle_subtree());
@@ -118,7 +118,7 @@ impl<T> Arena<T> {
         let mut removed = Vec::new();
         let mut stack = vec![root];
         while let Some(current) = stack.pop() {
-            if let Some(element) = self.remove(current) {
+            if let Some(element) = self.remove_node(current) {
                 stack.extend_from_slice(&element.children);
                 removed.push(element.ext);
             }

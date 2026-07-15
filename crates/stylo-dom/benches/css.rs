@@ -28,9 +28,7 @@ use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_atoms::Atom;
-use stylo_dom::{
-    Arena, Element, ElementId, ElementState, Parallelism, StyleEngine, StylesheetOrigin,
-};
+use stylo_dom::{Arena, ElementId, ElementState, Parallelism, StyleEngine, StylesheetOrigin};
 use stylo_traits::{CSSPixel, DevicePixel};
 
 fn main() {
@@ -121,30 +119,37 @@ fn engine_with_author_sheet() -> StyleEngine {
     engine
 }
 
-fn element(tag: &str, classes: &[String]) -> Element<()> {
-    let mut el = Element::new(tag, ());
-    for class in classes {
-        el.classes.push(Atom::from(class.as_str()));
-    }
-    el
+fn create_element(arena: &mut Arena<()>, tag: &str, classes: &[String]) -> ElementId {
+    let id = arena.create_element(tag, ());
+    arena
+        .classes_mut(id)
+        .expect("fresh element")
+        .extend(classes.iter().map(|class| Atom::from(class.as_str())));
+    id
 }
 
 /// `page > 32 × section > 32 × view`, classes cycling through the rule set,
 /// every section carrying a `data-row` attribute. ~1.1k elements.
 fn build_tree(engine: &StyleEngine) -> (Arena<()>, ElementId, ElementId) {
     let mut arena = engine.new_arena();
-    let root = arena.insert(Element::new("page", ()));
+    let root = arena.create_element("page", ());
     let mut probe = root;
     let mut class = 0usize;
     for row in 0..32 {
         class += 1;
-        let mut section = element("section", &[format!("c{}", class % CLASS_RULES)]);
-        section.attrs.insert("data-row".into(), row.to_string());
-        let section = arena.insert(section);
+        let section = create_element(
+            &mut arena,
+            "section",
+            &[format!("c{}", class % CLASS_RULES)],
+        );
+        arena
+            .attrs_mut(section)
+            .expect("fresh section")
+            .insert("data-row".into(), row.to_string());
         arena.attach_at(root, section, row);
         for leaf_index in 0..32 {
             class += 1;
-            let leaf = arena.insert(element("view", &[format!("c{}", class % CLASS_RULES)]));
+            let leaf = create_element(&mut arena, "view", &[format!("c{}", class % CLASS_RULES)]);
             arena.attach_at(section, leaf, leaf_index);
             probe = leaf;
         }
@@ -211,11 +216,11 @@ fn incremental_class_flip(bencher: divan::Bencher) {
         let (engine, arena, root, probe) = &mut *state.borrow_mut();
         on = !on;
         arena.note_class_change(*probe);
-        let element = arena.get_mut(*probe).expect("probe is live");
+        let classes = arena.classes_mut(*probe).expect("probe is live");
         if on {
-            element.classes.push(Atom::from("c1"));
+            classes.push(Atom::from("c1"));
         } else {
-            element.classes.pop();
+            classes.pop();
         }
         engine.flush_tree(arena, *root);
     });
@@ -255,11 +260,11 @@ fn incremental_state_flip(bencher: divan::Bencher) {
         let (engine, arena) = &mut *state.borrow_mut();
         on = !on;
         arena.note_state_change(probe);
-        let element = arena.get_mut(probe).expect("probe is live");
+        let element_state = arena.element_state_mut(probe).expect("probe is live");
         if on {
-            element.element_state.insert(ElementState::HOVER);
+            element_state.insert(ElementState::HOVER);
         } else {
-            element.element_state.remove(ElementState::HOVER);
+            element_state.remove(ElementState::HOVER);
         }
         engine.flush_tree(arena, root);
     });
@@ -289,10 +294,10 @@ fn inheritance_deep_chain(bencher: divan::Bencher) {
     bencher
         .with_inputs(|| {
             let mut arena = engine.new_arena();
-            let root = arena.insert(Element::new("page", ()));
+            let root = arena.create_element("page", ());
             let mut parent = root;
             for _ in 0..256 {
-                let child = arena.insert(Element::new("view", ()));
+                let child = arena.create_element("view", ());
                 arena.attach_at(parent, child, 0);
                 parent = child;
             }

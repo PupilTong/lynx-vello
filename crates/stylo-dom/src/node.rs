@@ -1,7 +1,9 @@
-//! The unified [`Element`] struct — the HTML-DOM-subset node.
+//! The unified [`Node`] struct — the HTML-DOM-subset node.
 
 use std::cell::UnsafeCell;
 use std::fmt;
+use std::hash::{Hash, Hasher};
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicUsize, Ordering};
 
 use dom::ElementState;
@@ -15,9 +17,9 @@ use stylo::servo_arc::Arc;
 use stylo::shared_lock::Locked;
 use stylo_atoms::Atom;
 
-use crate::arena::ElementId;
+use crate::arena::{Document, ElementId};
 
-/// Bit set in [`Element::snapshot_flags`] when a pre-mutation snapshot has
+/// Bit set in [`Node::snapshot_flags`] when a pre-mutation snapshot has
 /// been recorded for this element in the arena's
 /// [`SnapshotMap`](stylo::selector_parser::SnapshotMap).
 pub(crate) const SNAPSHOT_PRESENT: u8 = 1 << 0;
@@ -31,6 +33,11 @@ pub(crate) const SNAPSHOT_HANDLED: u8 = 1 << 1;
 /// character data, and the per-element style bookkeeping stylo needs. Anything
 /// beyond that subset belongs to the embedder and lives in the [`ext`] payload
 /// (see [`ExternalState`](crate::ExternalState)).
+///
+/// Nodes are created only by [`Arena::create_element`](crate::Arena::create_element),
+/// which installs their document back-pointer and stable id before publishing
+/// them. Detaching changes tree links but keeps the node in that document;
+/// physical removal consumes the node and returns only its external payload.
 ///
 /// # Thread-safety
 ///
@@ -46,16 +53,22 @@ pub(crate) const SNAPSHOT_HANDLED: u8 = 1 << 1;
 /// Everything else (tag/classes/attrs/text/`ext`) is **immutable during a
 /// flush**: mutation requires `&mut Arena`, which
 /// [`StyleEngine::flush_tree`](crate::StyleEngine::flush_tree) holds
-/// exclusively for the whole traversal.
+/// exclusively for the whole traversal. The flush API additionally requires
+/// `T: Sync`, because selector matching may read the external payload from
+/// multiple workers.
 ///
-/// [`ext`]: Element::ext
-/// [`stylo_data`]: Element::stylo_data
-/// [`selector_flags`]: Element::selector_flags
-/// [`style_dirty`]: Element::style_dirty
-/// [`dirty_descendants`]: Element::dirty_descendants
-/// [`snapshot_flags`]: Element::snapshot_flags
-/// [`children_to_process`]: Element::children_to_process
-pub struct Element<T> {
+/// [`ext`]: Node::ext
+/// [`stylo_data`]: Node::stylo_data
+/// [`selector_flags`]: Node::selector_flags
+/// [`style_dirty`]: Node::style_dirty
+/// [`dirty_descendants`]: Node::dirty_descendants
+/// [`snapshot_flags`]: Node::snapshot_flags
+/// [`children_to_process`]: Node::children_to_process
+pub struct Node<T> {
+    /// Stable back-pointer to the document allocation that owns this node.
+    document: NonNull<Document<T>>,
+    /// This node's generation-checked identity in `document`.
+    id: ElementId,
     /// The parent element, or `None` for the root / a detached element.
     pub parent: Option<ElementId>,
     /// Child elements, in document order.
@@ -69,7 +82,7 @@ pub struct Element<T> {
     /// (the embedder decides whether/how the two are linked).
     pub id_attr: Option<Atom>,
     /// Plain attributes. Synthetic / reflected attributes beyond this map are
-    /// served by the [`ext`](Element::ext) payload's
+    /// served by the [`ext`](Node::ext) payload's
     /// [`extra_attr_value`](crate::ExternalState::extra_attr_value) hook.
     pub attrs: FxHashMap<Box<str>, String>,
     /// Active dynamic pseudo-classes (`:hover` / `:active` / `:focus`) as stylo
@@ -84,24 +97,24 @@ pub struct Element<T> {
 
     /// stylo's per-element style data (`ElementData`), created lazily via
     /// `TElement::ensure_data`. The resolved computed style lives here (see
-    /// [`computed_style`](Element::computed_style)). Only touched through the
+    /// [`computed_style`](Node::computed_style)). Only touched through the
     /// [`traits`](crate::traits) impls under stylo's traversal discipline.
-    pub stylo_data: UnsafeCell<Option<ElementDataWrapper>>,
+    pub(crate) stylo_data: UnsafeCell<Option<ElementDataWrapper>>,
 
     /// Selector flags accumulated by stylo during matching (e.g. "has a
     /// child-position-dependent rule"), stored as the raw
     /// [`ElementSelectorFlags`] bits. Atomic because parallel workers matching
     /// sibling elements may both push `for_parent()` flags onto the shared
     /// parent.
-    pub selector_flags: AtomicUsize,
+    pub(crate) selector_flags: AtomicUsize,
 
     /// Whether this element itself has pending style work (embedder-visible
     /// dirty signal; stylo's own scheduling uses `ElementData::hint`).
-    pub style_dirty: AtomicBool,
+    pub(crate) style_dirty: AtomicBool,
     /// Whether some descendant of this element has pending style work. This is
     /// the bit stylo's traversal walks down
     /// ([`TElement::has_dirty_descendants`](stylo::dom::TElement::has_dirty_descendants)).
-    pub dirty_descendants: AtomicBool,
+    pub(crate) dirty_descendants: AtomicBool,
 
     /// Snapshot lifecycle bits ([`SNAPSHOT_PRESENT`] / [`SNAPSHOT_HANDLED`]),
     /// mirroring `TElement::{has_snapshot, handled_snapshot}`.
@@ -121,11 +134,11 @@ pub struct Element<T> {
     pub ext: T,
 }
 
-impl<T> Element<T> {
-    /// Create a detached element with the given tag and external state.
-    #[must_use]
-    pub fn new(tag: &str, ext: T) -> Self {
+impl<T> Node<T> {
+    pub(crate) fn new(document: NonNull<Document<T>>, id: ElementId, tag: &str, ext: T) -> Self {
         Self {
+            document,
+            id,
             parent: None,
             children: Vec::new(),
             tag: LocalName::from(tag),
@@ -143,6 +156,94 @@ impl<T> Element<T> {
             text: None,
             ext,
         }
+    }
+
+    /// This node's stable, generation-checked identity.
+    #[must_use]
+    pub const fn node_id(&self) -> ElementId {
+        self.id
+    }
+
+    /// Compatibility spelling for [`Node::node_id`].
+    #[must_use]
+    pub fn id(&self) -> ElementId {
+        self.node_id()
+    }
+
+    /// The element tag as a string slice.
+    #[must_use]
+    pub fn tag(&self) -> &str {
+        self.tag_str()
+    }
+
+    /// The embedder's external-state payload.
+    #[must_use]
+    pub const fn ext(&self) -> &T {
+        &self.ext
+    }
+
+    /// The stable document allocation that owns this live node.
+    pub(crate) fn document(&self) -> &Document<T> {
+        // SAFETY: `Arena` owns `Document` through a private `Box`, so moving
+        // the outer arena never moves this allocation. Only the document can
+        // construct nodes, and physical removal consumes the node without
+        // exposing it, so every reachable node carries this live pointer.
+        #[expect(
+            unsafe_code,
+            reason = "node navigation follows its stable document back-pointer"
+        )]
+        unsafe {
+            self.document.as_ref()
+        }
+    }
+
+    /// The parent node, if attached.
+    #[must_use]
+    pub fn parent(&self) -> Option<&Node<T>> {
+        self.document().node(self.parent?)
+    }
+
+    /// The first child node, if any.
+    #[must_use]
+    pub fn first_child(&self) -> Option<&Node<T>> {
+        self.document().node(*self.children.first()?)
+    }
+
+    /// The last child node, if any.
+    #[must_use]
+    pub fn last_child(&self) -> Option<&Node<T>> {
+        self.document().node(*self.children.last()?)
+    }
+
+    /// The next sibling node, if any.
+    #[must_use]
+    pub fn next_sibling(&self) -> Option<&Node<T>> {
+        let document = self.document();
+        let siblings = &document.node(self.parent?)?.children;
+        let position = siblings.iter().position(|&id| id == self.node_id())?;
+        document.node(*siblings.get(position + 1)?)
+    }
+
+    /// The previous sibling node, if any.
+    #[must_use]
+    pub fn prev_sibling(&self) -> Option<&Node<T>> {
+        let document = self.document();
+        let siblings = &document.node(self.parent?)?.children;
+        let position = siblings.iter().position(|&id| id == self.node_id())?;
+        document.node(*siblings.get(position.checked_sub(1)?)?)
+    }
+
+    /// Child nodes in document order.
+    pub fn children(&self) -> impl Iterator<Item = &Node<T>> {
+        let document = self.document();
+        self.children
+            .iter()
+            .filter_map(move |&id| document.node(id))
+    }
+
+    /// The element record used by stylo's trait implementations.
+    pub(crate) const fn element(&self) -> &Self {
+        self
     }
 
     /// The element's tag name as a string slice.
@@ -186,7 +287,7 @@ impl<T> Element<T> {
     /// if needed. Used by the standalone
     /// [`StyleEngine::resolve`](crate::StyleEngine::resolve) path; the flush
     /// traversal writes styles through stylo itself.
-    pub fn set_computed_style(&mut self, style: Arc<ComputedValues>) {
+    pub(crate) fn set_computed_style(&mut self, style: Arc<ComputedValues>) {
         let slot = self.stylo_data.get_mut();
         let wrapper = slot.get_or_insert_with(ElementDataWrapper::default);
         wrapper.borrow_mut().styles.primary = Some(style);
@@ -256,21 +357,36 @@ impl<T> Element<T> {
     }
 }
 
-impl<T: fmt::Debug> fmt::Debug for Element<T> {
+impl<T> PartialEq for Node<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.document == other.document && self.id == other.id
+    }
+}
+
+impl<T> Eq for Node<T> {}
+
+impl<T> Hash for Node<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.document.hash(state);
+        self.id.hash(state);
+    }
+}
+
+impl<T> fmt::Debug for Node<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // `stylo_data` (an `UnsafeCell`) is deliberately omitted: it is not
         // `Debug`, and reading it here would need the no-concurrent-flush
         // invariant we cannot assert from a generic Debug impl.
-        f.debug_struct("Element")
+        f.debug_struct("Node")
+            .field("node_id", &self.id)
             .field("tag", &self.tag_str())
             .field("classes", &self.classes)
             .field("id_attr", &self.id_attr)
             .field("element_state", &self.element_state)
             .field("has_inline_block", &self.inline_block.is_some())
             .field("style_dirty", &self.is_style_dirty())
-            .field("dirty_descendants", &Element::has_dirty_descendants(self))
+            .field("dirty_descendants", &Node::has_dirty_descendants(self))
             .field("children", &self.children)
-            .field("ext", &self.ext)
             .finish_non_exhaustive()
     }
 }

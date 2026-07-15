@@ -75,7 +75,7 @@
   <rect x="657" y="355" width="471" height="202" rx="10" fill="#eff6ff" stroke="#60a5fa" stroke-width="2"/>
   <text x="677" y="385" class="crate">stylo-dom</text>
   <text x="677" y="408" class="role">generic DOM + standards-oriented CSS computation</text>
-  <text x="677" y="435" class="item">Element&lt;T&gt; · Arena&lt;T&gt; · stylo traits</text>
+  <text x="677" y="435" class="item">Node&lt;T&gt; · stable Document back-pointer · traits on &amp;Node</text>
   <text x="677" y="459" class="item">stylesheets · selector matching · rule tree</text>
   <text x="677" y="483" class="item">inheritance · cascade · media refresh</text>
   <text x="677" y="507" class="item">StyleEngine { Stylist · SharedRwLock }</text>

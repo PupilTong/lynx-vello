@@ -42,17 +42,17 @@ fn tree_building_and_navigation() {
     assert_eq!(doc.widget(t.page).unwrap().ext.kind, WidgetKind::Page);
     assert_eq!(doc.get_tag(t.container), Some("view"));
 
-    // Parent / child structure via WidgetRef.
+    // Parent / child structure directly through &Widget back-pointers.
     let page = doc.widget_ref(t.page).unwrap();
     assert!(page.parent().is_none());
-    let children: Vec<_> = page.children().map(lynx_widget::WidgetRef::id).collect();
+    let children: Vec<_> = page.children().map(lynx_widget::Widget::node_id).collect();
     assert_eq!(children, vec![t.container]);
 
     let container = doc.widget_ref(t.container).unwrap();
     assert_eq!(container.parent().unwrap().id(), t.page);
     let kids: Vec<_> = container
         .children()
-        .map(lynx_widget::WidgetRef::id)
+        .map(lynx_widget::Widget::node_id)
         .collect();
     assert_eq!(kids, vec![t.a, t.b, t.c]);
     assert_eq!(container.first_child().unwrap().id(), t.a);
@@ -125,7 +125,7 @@ fn insert_element_before_semantics() {
         .widget_ref(page)
         .unwrap()
         .children()
-        .map(lynx_widget::WidgetRef::id)
+        .map(lynx_widget::Widget::node_id)
         .collect();
     assert_eq!(order, vec![a, b, c, d]);
 
@@ -135,7 +135,7 @@ fn insert_element_before_semantics() {
         .widget_ref(page)
         .unwrap()
         .children()
-        .map(lynx_widget::WidgetRef::id)
+        .map(lynx_widget::Widget::node_id)
         .collect();
     assert_eq!(order, vec![b, a, c, d]);
 
@@ -152,7 +152,7 @@ fn insert_element_before_semantics() {
         .widget_ref(page)
         .unwrap()
         .children()
-        .map(lynx_widget::WidgetRef::id)
+        .map(lynx_widget::Widget::node_id)
         .collect();
     assert_eq!(order, vec![b, a, c, d]);
     // ... and errors when n is not a child of the target parent.
@@ -224,7 +224,7 @@ fn remove_detaches_and_destroy_frees() {
         .widget_ref(container)
         .unwrap()
         .children()
-        .map(lynx_widget::WidgetRef::id)
+        .map(lynx_widget::Widget::node_id)
         .collect();
     assert_eq!(kids, vec![sibling]);
 
@@ -261,7 +261,7 @@ fn replace_element_keeps_position() {
         .widget_ref(t.container)
         .unwrap()
         .children()
-        .map(lynx_widget::WidgetRef::id)
+        .map(lynx_widget::Widget::node_id)
         .collect();
     assert_eq!(order, vec![t.a, new, t.c]);
     // Like DOM replaceChild, the old node survives, detached.

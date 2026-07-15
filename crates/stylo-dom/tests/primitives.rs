@@ -1,5 +1,5 @@
 //! Integration tests for the `stylo-dom` primitives an embedder's API layer
-//! delegates to: the generational [`Arena`], [`ElementRef`] navigation, the
+//! delegates to: the generational [`Arena`], `&Node` back-pointer navigation, the
 //! tree-mutation primitives (`attach_at`/`detach`/`drop_subtree`) with their
 //! invalidation scheduling, the read helpers, inline-style parsing, and the
 //! [`ExternalState`] hook defaults.
@@ -9,11 +9,11 @@
 //! actually restyles, via snapshots and selector flags) is behavioral and
 //! covered by the style/flush integration tests.
 //!
-//! Everything runs against `Element<()>` (the no-op payload) except the
+//! Everything runs against `Node<()>` (the no-op payload) except the
 //! `drop_subtree` harvest test, which uses a payload type to observe what the
 //! arena returns.
 
-use stylo_dom::{Arena, Element, ElementId, ElementState, ExternalState, PseudoState};
+use stylo_dom::{Arena, ElementId, ElementState, ExternalState, PseudoState};
 
 /// Append `child` as the last child of `parent`, via the `attach_at` primitive.
 fn append<T>(arena: &mut Arena<T>, parent: ElementId, child: ElementId) {
@@ -21,9 +21,9 @@ fn append<T>(arena: &mut Arena<T>, parent: ElementId, child: ElementId) {
     arena.attach_at(parent, child, index);
 }
 
-/// Insert an element with the given tag (no-op payload) and return its handle.
+/// Create an element with the given tag (no-op payload) and return its handle.
 fn insert(arena: &mut Arena<()>, tag: &str) -> ElementId {
-    arena.insert(Element::new(tag, ()))
+    arena.create_element(tag, ())
 }
 
 /// The number of declarations in an element's parsed inline style block.
@@ -52,7 +52,7 @@ fn arena_generational_reuse() {
 }
 
 #[test]
-fn element_ref_navigation() {
+fn node_back_pointer_navigation_survives_arena_move() {
     let mut arena = Arena::new();
     let root = insert(&mut arena, "html");
     let container = insert(&mut arena, "div");
@@ -64,24 +64,22 @@ fn element_ref_navigation() {
     append(&mut arena, container, b);
     append(&mut arena, container, c);
 
-    let cref = arena.element_ref(container).unwrap();
+    // Moving the public owner moves only its Box; the document allocation all
+    // nodes point to stays at the same address.
+    let arena = std::hint::black_box(arena);
+
+    let cref = arena.node(container).unwrap();
     assert_eq!(cref.tag(), "div");
     assert_eq!(cref.parent().unwrap().id(), root);
-    let kids: Vec<_> = cref.children().map(stylo_dom::ElementRef::id).collect();
+    let kids: Vec<_> = cref.children().map(stylo_dom::Node::node_id).collect();
     assert_eq!(kids, vec![a, b, c]);
     assert_eq!(cref.first_child().unwrap().id(), a);
     assert_eq!(cref.last_child().unwrap().id(), c);
 
-    assert!(arena.element_ref(a).unwrap().prev_sibling().is_none());
-    assert_eq!(
-        arena.element_ref(a).unwrap().next_sibling().unwrap().id(),
-        b
-    );
-    assert_eq!(
-        arena.element_ref(b).unwrap().prev_sibling().unwrap().id(),
-        a
-    );
-    assert!(arena.element_ref(c).unwrap().next_sibling().is_none());
+    assert!(arena.node(a).unwrap().prev_sibling().is_none());
+    assert_eq!(arena.node(a).unwrap().next_sibling().unwrap().id(), b);
+    assert_eq!(arena.node(b).unwrap().prev_sibling().unwrap().id(), a);
+    assert!(arena.node(c).unwrap().next_sibling().is_none());
 }
 
 #[test]
@@ -159,10 +157,10 @@ fn drop_subtree_frees_and_returns_payloads() {
     impl ExternalState for Payload {}
 
     let mut arena: Arena<Payload> = Arena::new();
-    let container = arena.insert(Element::new("div", Payload(10)));
-    let child = arena.insert(Element::new("div", Payload(11)));
+    let container = arena.create_element("div", Payload(10));
+    let child = arena.create_element("div", Payload(11));
     append(&mut arena, container, child);
-    let grandchild = arena.insert(Element::new("div", Payload(12)));
+    let grandchild = arena.create_element("div", Payload(12));
     append(&mut arena, child, grandchild);
 
     let mut removed = arena.drop_subtree(child);
@@ -244,9 +242,8 @@ fn external_state_default_attr_hooks() {
     let mut arena = Arena::new();
     let el = insert(&mut arena, "div");
     arena
-        .get_mut(el)
+        .attrs_mut(el)
         .unwrap()
-        .attrs
         .insert("title".into(), "hi".into());
 
     let elem = arena.element_ref(el).unwrap();

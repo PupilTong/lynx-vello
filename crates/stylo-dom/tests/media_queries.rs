@@ -28,7 +28,7 @@ use stylo::servo::media_features::PointerCapabilities;
 use stylo::stylesheets::{CssRuleType, Origin};
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo_atoms::Atom;
-use stylo_dom::{Element, StyleEngine, StylesheetOrigin};
+use stylo_dom::{StyleEngine, StylesheetOrigin};
 use stylo_traits::{CSSPixel, DevicePixel, ParsingMode, ToCss};
 
 /// End-to-end evaluation of `query` against an explicit device: does a
@@ -41,11 +41,10 @@ fn matches_dev(device: Device, query: &str) -> bool {
         query,
     );
     let mut arena = engine.new_arena();
-    let probe = arena.insert(Element::new("view", ()));
+    let probe = arena.create_element("view", ());
     arena
-        .get_mut(probe)
+        .classes_mut(probe)
         .expect("fresh element")
-        .classes
         .push(Atom::from("probe"));
     let style = engine.resolve(arena.element_ref(probe).expect("fresh element"), None);
     style.clone_color() == rgb(1, 2, 3)

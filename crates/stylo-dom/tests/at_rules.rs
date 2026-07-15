@@ -115,7 +115,7 @@ fn keyframes_rules_register_and_resolve_by_name() {
     );
 
     let mut arena = engine.new_arena();
-    let root = arena.insert(stylo_dom::Element::new("page", ()));
+    let root = arena.create_element("page", ());
     let root_ref = arena.element_ref(root).expect("root is live");
     assert!(engine.has_keyframes_animation("slide", root_ref));
     assert!(!engine.has_keyframes_animation("missing", root_ref));

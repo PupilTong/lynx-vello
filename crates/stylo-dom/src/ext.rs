@@ -1,8 +1,8 @@
 //! The [`ExternalState`] payload trait — the embedder's hooks into the generic
 //! DOM.
 //!
-//! [`Element`](crate::Element) is generic over an external-state payload `T`,
-//! carried in its [`ext`](crate::Element::ext) field. The payload is opaque to
+//! [`Node`](crate::Node) is generic over an external-state payload `T`,
+//! carried in its [`ext`](crate::Node::ext) field. The payload is opaque to
 //! this crate except through the hooks defined here, which the generic stylo
 //! trait impls ([`crate::traits`]) consult wherever embedder-specific data can
 //! influence selector matching:
@@ -11,7 +11,7 @@
 //!   parentlessness).
 //! - [`extra_attr_value`](ExternalState::extra_attr_value) /
 //!   [`each_extra_attr_name`](ExternalState::each_extra_attr_name) — synthetic or reflected
-//!   attributes beyond the element's real [`attrs`](crate::Element::attrs) map.
+//!   attributes beyond the element's real [`attrs`](crate::Node::attrs) map.
 //!
 //! Every hook has a neutral default, so `()` (implemented below) is a valid
 //! payload for embedders — and tests — that need none of them.
@@ -19,7 +19,7 @@
 use stylo::LocalName;
 
 /// The embedder-supplied external state carried by every
-/// [`Element`](crate::Element).
+/// [`Node`](crate::Node).
 ///
 /// Implementations hold whatever per-element data the embedder needs alongside
 /// the HTML-DOM-subset fields, and override the hooks below where that data
@@ -43,7 +43,7 @@ pub trait ExternalState: Sync {
     ///
     /// Consulted by attribute matching ([`selectors::Element::attr_matches`]
     /// and [`TElement::get_attr`](stylo::dom::TElement::get_attr)) only
-    /// **after** the element's real [`attrs`](crate::Element::attrs) map misses
+    /// **after** the element's real [`attrs`](crate::Node::attrs) map misses
     /// `name`. The default exposes nothing.
     fn extra_attr_value(&self, _name: &str) -> Option<String> {
         None

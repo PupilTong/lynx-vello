@@ -1,4 +1,4 @@
-//! [`selectors::Element`] for [`ElementRef`].
+//! [`selectors::Element`] for [`&Node`](crate::Node).
 //!
 //! id/class matching is **case-sensitive**; `:hover`/`:active`/`:focus` are
 //! matched from the element's [`ElementState`](crate::ElementState); attribute
@@ -16,10 +16,10 @@ use stylo::selector_parser::{NonTSPseudoClass, PseudoElement, SelectorImpl};
 use stylo::values::{AtomIdent, AtomString};
 use stylo::{CaseSensitivityExt, LocalName, Namespace};
 
-use crate::arena::ElementRef;
 use crate::ext::ExternalState;
+use crate::node::Node;
 
-impl<T: ExternalState> Element for ElementRef<'_, T> {
+impl<T: ExternalState> Element for &Node<T> {
     type Impl = SelectorImpl;
 
     fn opaque(&self) -> OpaqueElement {

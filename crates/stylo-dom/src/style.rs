@@ -48,7 +48,7 @@ use stylo::values::KeyframesName;
 use stylo::values::specified::position::PositionTryFallbacksTryTactic;
 use stylo_traits::ParsingMode;
 
-use crate::{Arena, ElementId, ElementRef, ExternalState};
+use crate::{Arena, ElementId, ExternalState, Node};
 
 /// One declaration for direct rule construction: property name, value text,
 /// and whether it carries `!important`.
@@ -338,11 +338,7 @@ impl StyleEngine {
     /// (via any appended stylesheet). The element picks the cascade data the
     /// lookup runs against; pass the tree root for document-level rules.
     #[must_use]
-    pub fn has_keyframes_animation<T: ExternalState>(
-        &self,
-        name: &str,
-        element: ElementRef<'_, T>,
-    ) -> bool {
+    pub fn has_keyframes_animation<T: ExternalState>(&self, name: &str, element: &Node<T>) -> bool {
         self.stylist
             .lookup_keyframes(&stylo_atoms::Atom::from(name), element)
             .is_some()
@@ -387,7 +383,7 @@ impl StyleEngine {
     #[must_use]
     pub fn resolve<T: ExternalState>(
         &self,
-        element: ElementRef<'_, T>,
+        element: &Node<T>,
         parent_style: Option<&ComputedValues>,
     ) -> Arc<ComputedValues> {
         let guard = self.lock.read();
@@ -436,7 +432,7 @@ impl StyleEngine {
 
         let mut rule_cache_conditions = RuleCacheConditions::default();
         let mut tree_counting_caches = stylo::context::TreeCountingCaches::default();
-        cascade::<ElementRef<'_, T>>(
+        cascade::<&Node<T>>(
             &self.stylist,
             None,
             &rule_node,
@@ -476,7 +472,7 @@ impl<T> Arena<T> {
     /// intact. Used with the standalone [`StyleEngine::resolve`] path; the
     /// flush traversal ([`StyleEngine::flush_tree`]) stores styles itself.
     pub fn store_computed_style(&mut self, id: ElementId, style: Arc<ComputedValues>) -> bool {
-        let Some(element) = self.get_mut(id) else {
+        let Some(element) = self.node_mut(id) else {
             return false;
         };
         element.set_computed_style(style);

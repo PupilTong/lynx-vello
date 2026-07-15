@@ -23,7 +23,7 @@ use stylo_dom::{Parallelism, StyleEngine as DomStyleEngine, StylesheetOrigin};
 use stylo_traits::{CSSPixel, DevicePixel};
 
 use crate::ua::{PageConfig, ua_stylesheet};
-use crate::{WidgetRef, WidgetTree, ingest};
+use crate::{Widget, WidgetTree, ingest};
 
 /// The environment metrics for a Lynx widget style engine.
 ///
@@ -155,7 +155,7 @@ impl StyleEngine {
     #[must_use]
     pub fn resolve_widget(
         &self,
-        widget: WidgetRef<'_>,
+        widget: &Widget,
         parent_style: Option<&ComputedValues>,
     ) -> Arc<ComputedValues> {
         self.core.resolve(widget, parent_style)

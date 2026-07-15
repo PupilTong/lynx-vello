@@ -6,9 +6,8 @@
 //! slot is freed its generation is bumped, so any [`ElementId`] referring to
 //! the previous occupant becomes stale and resolves to `None`.
 //!
-//! [`ElementRef`] is a lightweight `Copy` handle pairing a borrow of the arena
-//! with an [`ElementId`]; it exposes read-only tree navigation and is the type
-//! stylo's element traits are implemented on (see [`crate::traits`]).
+//! Every live node carries an address-stable back-pointer to its document;
+//! stylo's DOM traits are therefore implemented directly on `&Node<T>`.
 //!
 //! The arena also owns the **pending snapshot set** for stylo's
 //! invalidation-set restyle: before a matching-relevant mutation, the embedder
@@ -18,13 +17,19 @@
 
 use std::fmt;
 use std::num::NonZeroU32;
+use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
+use dom::ElementState;
+use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 use stylo::dom::OpaqueNode;
 use stylo::selector_parser::SnapshotMap;
 use stylo::shared_lock::SharedRwLock;
 use stylo::stylesheets::UrlExtraData;
+use stylo_atoms::Atom;
 
-use crate::element::Element;
+use crate::node::Node;
 
 /// The placeholder base URL for parsing a standalone arena's inline styles.
 ///
@@ -78,39 +83,126 @@ impl ElementId {
     }
 }
 
-/// One arena slot: the current generation plus an optional live [`Element`].
+/// One arena slot: the current generation plus an optional live [`Node`].
 #[derive(Debug)]
 struct Slot<T> {
     generation: NonZeroU32,
-    element: Option<Element<T>>,
+    element: Option<Node<T>>,
 }
 
-/// A generational arena of [`Element`]s.
+/// The address-stable document allocation that live nodes point back to.
+pub(crate) struct Document<T> {
+    slots: Vec<Slot<T>>,
+    free_list: Vec<u32>,
+    lock: SharedRwLock,
+    url_data: UrlExtraData,
+    snapshots: SnapshotMap,
+    snapshotted: Vec<ElementId>,
+    phase: AtomicU8,
+    mutation_epoch: AtomicU64,
+}
+
+const PHASE_IDLE: u8 = 0;
+const PHASE_TRAVERSING: u8 = 1;
+const PHASE_POISONED: u8 = 2;
+
+/// RAII exclusion guard for stylo's possibly parallel traversal.
+pub(crate) struct TraversalGuard<'a> {
+    phase: &'a AtomicU8,
+    mutation_epoch: &'a AtomicU64,
+    entered_epoch: u64,
+}
+
+impl Drop for TraversalGuard<'_> {
+    fn drop(&mut self) {
+        let panicking = std::thread::panicking();
+        self.phase.store(
+            if panicking {
+                PHASE_POISONED
+            } else {
+                PHASE_IDLE
+            },
+            Ordering::Release,
+        );
+        // Do not risk a second panic while unwinding. A traversal panic already
+        // poisons the document, so every later mutation/flush will fail fast.
+        if !panicking {
+            debug_assert_eq!(
+                self.mutation_epoch.load(Ordering::Acquire),
+                self.entered_epoch,
+                "document mutation epoch changed during style traversal"
+            );
+        }
+    }
+}
+
+impl<T> Document<T> {
+    pub(crate) fn node(&self, id: ElementId) -> Option<&Node<T>> {
+        let slot = self.slots.get(id.index as usize)?;
+        if slot.generation == id.generation {
+            slot.element.as_ref()
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn shared_lock(&self) -> &SharedRwLock {
+        &self.lock
+    }
+
+    fn assert_idle(&self) {
+        match self.phase.load(Ordering::Acquire) {
+            PHASE_IDLE => {}
+            PHASE_TRAVERSING => panic!("document mutation attempted during style traversal"),
+            PHASE_POISONED => panic!("document was poisoned by a panicking style traversal"),
+            _ => unreachable!("invalid document phase"),
+        }
+    }
+
+    fn note_mutation(&self) {
+        self.assert_idle();
+        self.mutation_epoch.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn begin_traversal(&self) -> TraversalGuard<'_> {
+        self.phase
+            .compare_exchange(
+                PHASE_IDLE,
+                PHASE_TRAVERSING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .unwrap_or_else(|phase| match phase {
+                PHASE_TRAVERSING => panic!("nested style traversal on one document"),
+                PHASE_POISONED => panic!("document was poisoned by a panicking style traversal"),
+                _ => unreachable!("invalid document phase"),
+            });
+        let entered_epoch = self.mutation_epoch.load(Ordering::Acquire);
+        TraversalGuard {
+            phase: &self.phase,
+            mutation_epoch: &self.mutation_epoch,
+            entered_epoch,
+        }
+    }
+}
+
+/// A generational arena of [`Node`]s.
 ///
 /// The arena owns the [`SharedRwLock`] and [`UrlExtraData`] used to parse and
 /// guard every element's inline style block. [`StyleEngine`](crate::StyleEngine)
 /// creates styled arenas with the matching private context; embedders do not
 /// pass locks across crate boundaries.
 pub struct Arena<T> {
-    slots: Vec<Slot<T>>,
-    free_list: Vec<u32>,
-    lock: SharedRwLock,
-    url_data: UrlExtraData,
-    /// Pre-mutation element snapshots pending the next flush, keyed by the
-    /// element's stable [`OpaqueNode`] (see [`ElementId::opaque`]).
-    snapshots: SnapshotMap,
-    /// The ids behind [`Arena::snapshots`], so `complete_flush` can clear the
-    /// per-element snapshot bits without a way to map `OpaqueNode` back.
-    snapshotted: Vec<ElementId>,
+    document: Box<Document<T>>,
 }
 
 impl<T: fmt::Debug> fmt::Debug for Arena<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // `SnapshotMap` is not `Debug`; report its size instead.
         f.debug_struct("Arena")
-            .field("slots", &self.slots)
-            .field("free_list", &self.free_list)
-            .field("pending_snapshots", &self.snapshotted.len())
+            .field("slots", &self.document.slots)
+            .field("free_list", &self.document.free_list)
+            .field("pending_snapshots", &self.document.snapshotted.len())
             .finish_non_exhaustive()
     }
 }
@@ -135,79 +227,98 @@ impl<T> Arena<T> {
     /// Create an arena with the style context owned by this crate.
     pub(crate) fn with_style_context(lock: SharedRwLock, url_data: UrlExtraData) -> Self {
         Self {
-            slots: Vec::new(),
-            free_list: Vec::new(),
-            lock,
-            url_data,
-            snapshots: SnapshotMap::new(),
-            snapshotted: Vec::new(),
+            document: Box::new(Document {
+                slots: Vec::new(),
+                free_list: Vec::new(),
+                lock,
+                url_data,
+                snapshots: SnapshotMap::new(),
+                snapshotted: Vec::new(),
+                phase: AtomicU8::new(PHASE_IDLE),
+                mutation_epoch: AtomicU64::new(0),
+            }),
         }
     }
 
     /// The shared lock guarding this arena's inline style blocks.
     #[must_use]
     pub(crate) fn shared_lock(&self) -> &SharedRwLock {
-        &self.lock
+        &self.document.lock
     }
 
     /// The base URL data used when parsing this arena's inline styles.
     #[must_use]
     pub(crate) fn url_data(&self) -> &UrlExtraData {
-        &self.url_data
+        &self.document.url_data
     }
 
     /// The pending pre-mutation snapshots, consumed by the flush traversal.
     #[must_use]
     pub(crate) fn snapshot_map(&self) -> &SnapshotMap {
-        &self.snapshots
+        &self.document.snapshots
     }
 
     pub(crate) fn snapshot_map_mut(&mut self) -> (&mut SnapshotMap, &mut Vec<ElementId>) {
-        (&mut self.snapshots, &mut self.snapshotted)
+        self.document.note_mutation();
+        (&mut self.document.snapshots, &mut self.document.snapshotted)
     }
 
-    /// Insert an element and return its handle.
+    pub(crate) fn note_mutation(&self) {
+        self.document.note_mutation();
+    }
+
+    /// Create an element in this document and return its handle.
     ///
     /// # Panics
     ///
     /// Panics if the arena would need to grow past `u32::MAX` slots.
-    pub fn insert(&mut self, element: Element<T>) -> ElementId {
-        if let Some(index) = self.free_list.pop() {
-            let slot = &mut self.slots[index as usize];
+    pub fn create_element(&mut self, tag: &str, ext: T) -> ElementId {
+        self.document.note_mutation();
+        let document = NonNull::from(self.document.as_mut());
+        if let Some(index) = self.document.free_list.pop() {
+            let slot = &mut self.document.slots[index as usize];
             debug_assert!(slot.element.is_none(), "free-list slot must be vacant");
-            slot.element = Some(element);
-            ElementId {
+            let id = ElementId {
                 index,
                 generation: slot.generation,
-            }
+            };
+            slot.element = Some(Node::new(document, id, tag, ext));
+            id
         } else {
-            let index =
-                u32::try_from(self.slots.len()).expect("arena capacity exceeds u32::MAX slots");
-            self.slots.push(Slot {
-                generation: NonZeroU32::MIN,
-                element: Some(element),
-            });
-            ElementId {
+            let index = u32::try_from(self.document.slots.len())
+                .expect("arena capacity exceeds u32::MAX slots");
+            let id = ElementId {
                 index,
                 generation: NonZeroU32::MIN,
-            }
+            };
+            self.document.slots.push(Slot {
+                generation: NonZeroU32::MIN,
+                element: Some(Node::new(document, id, tag, ext)),
+            });
+            id
         }
     }
 
-    /// Remove an element, returning it if the handle is live.
+    /// Destroy an element, returning its external-state payload if the handle
+    /// is live.
     ///
     /// The slot's generation is advanced so the passed handle (and any other
     /// handle sharing the slot) becomes stale. If a slot's generation is
     /// exhausted it is retired rather than reused, preserving uniqueness.
-    pub fn remove(&mut self, id: ElementId) -> Option<Element<T>> {
-        let slot = self.slots.get_mut(id.index as usize)?;
+    pub fn remove(&mut self, id: ElementId) -> Option<T> {
+        self.remove_node(id).map(|node| node.ext)
+    }
+
+    pub(crate) fn remove_node(&mut self, id: ElementId) -> Option<Node<T>> {
+        self.document.note_mutation();
+        let slot = self.document.slots.get_mut(id.index as usize)?;
         if slot.generation != id.generation {
             return None;
         }
         let element = slot.element.take()?;
         if let Some(next) = slot.generation.checked_add(1) {
             slot.generation = next;
-            self.free_list.push(id.index);
+            self.document.free_list.push(id.index);
         } else {
             // Generation space exhausted for this slot: retire it (never
             // reuse) so no future handle can collide with a past one.
@@ -216,30 +327,59 @@ impl<T> Arena<T> {
         // is keyed by the (now stale) opaque id and is dropped with the map on
         // the next `complete_flush`. Removing it eagerly keeps the map small.
         if element.snapshot_present() {
-            self.snapshots.remove(&id.opaque());
+            self.document.snapshots.remove(&id.opaque());
         }
         Some(element)
     }
 
     /// Borrow an element if the handle is live.
     #[must_use]
-    pub fn get(&self, id: ElementId) -> Option<&Element<T>> {
-        let slot = self.slots.get(id.index as usize)?;
-        if slot.generation == id.generation {
-            slot.element.as_ref()
-        } else {
-            None
-        }
+    pub fn get(&self, id: ElementId) -> Option<&Node<T>> {
+        self.document.node(id)
     }
 
-    /// Mutably borrow an element if the handle is live.
-    pub fn get_mut(&mut self, id: ElementId) -> Option<&mut Element<T>> {
-        let slot = self.slots.get_mut(id.index as usize)?;
+    /// Mutably borrow a whole node inside this crate.
+    ///
+    /// This must not be public: moving/swapping the returned `Node` could move
+    /// it into a different document while leaving its back-pointer unchanged.
+    pub(crate) fn node_mut(&mut self, id: ElementId) -> Option<&mut Node<T>> {
+        self.document.note_mutation();
+        let slot = self.document.slots.get_mut(id.index as usize)?;
         if slot.generation == id.generation {
             slot.element.as_mut()
         } else {
             None
         }
+    }
+
+    /// Mutably borrow an element's class list if the handle is live.
+    pub fn classes_mut(&mut self, id: ElementId) -> Option<&mut SmallVec<[Atom; 4]>> {
+        self.node_mut(id).map(|node| &mut node.classes)
+    }
+
+    /// Mutably borrow an element's id-selector value if the handle is live.
+    pub fn id_attr_mut(&mut self, id: ElementId) -> Option<&mut Option<Atom>> {
+        self.node_mut(id).map(|node| &mut node.id_attr)
+    }
+
+    /// Mutably borrow an element's ordinary attribute map if the handle is live.
+    pub fn attrs_mut(&mut self, id: ElementId) -> Option<&mut FxHashMap<Box<str>, String>> {
+        self.node_mut(id).map(|node| &mut node.attrs)
+    }
+
+    /// Mutably borrow an element's dynamic pseudo-class state if the handle is live.
+    pub fn element_state_mut(&mut self, id: ElementId) -> Option<&mut ElementState> {
+        self.node_mut(id).map(|node| &mut node.element_state)
+    }
+
+    /// Mutably borrow an element's character data if the handle is live.
+    pub fn text_mut(&mut self, id: ElementId) -> Option<&mut Option<String>> {
+        self.node_mut(id).map(|node| &mut node.text)
+    }
+
+    /// Mutably borrow an element's embedder payload if the handle is live.
+    pub fn ext_mut(&mut self, id: ElementId) -> Option<&mut T> {
+        self.node_mut(id).map(|node| &mut node.ext)
     }
 
     /// Whether the handle currently resolves to a live element.
@@ -250,12 +390,14 @@ impl<T> Arena<T> {
 
     /// A read-only navigation handle for the element, if live.
     #[must_use]
-    pub fn element_ref(&self, id: ElementId) -> Option<ElementRef<'_, T>> {
-        if self.contains(id) {
-            Some(ElementRef { arena: self, id })
-        } else {
-            None
-        }
+    pub fn element_ref(&self, id: ElementId) -> Option<&Node<T>> {
+        self.get(id)
+    }
+
+    /// Borrow a live node by id.
+    #[must_use]
+    pub fn node(&self, id: ElementId) -> Option<&Node<T>> {
+        self.get(id)
     }
 
     /// Clear every element's dirty bits.
@@ -264,7 +406,8 @@ impl<T> Arena<T> {
     /// The flush path uses the cheaper targeted
     /// [`complete_flush`](Self::complete_flush) instead.
     pub fn clear_dirty(&mut self) {
-        for slot in &mut self.slots {
+        self.document.note_mutation();
+        for slot in &mut self.document.slots {
             if let Some(element) = &mut slot.element {
                 element.set_style_dirty(false);
                 element.set_dirty_descendants_bit(false);
@@ -279,14 +422,15 @@ impl<T> Arena<T> {
     /// The spine walk cannot see below an element whose `dirty_descendants`
     /// stylo already cleared (it does so when a subtree computes to
     /// `display: none`), so `style_dirty` breadcrumbs inside such a subtree
-    /// may survive — see [`Element::is_style_dirty`](crate::Element::is_style_dirty).
+    /// may survive — see [`Node::is_style_dirty`](crate::Node::is_style_dirty).
     pub(crate) fn complete_flush(&mut self, root: ElementId) {
-        for id in std::mem::take(&mut self.snapshotted) {
+        self.document.assert_idle();
+        for id in std::mem::take(&mut self.document.snapshotted) {
             if let Some(element) = self.get(id) {
                 element.clear_snapshot_flags();
             }
         }
-        self.snapshots.clear();
+        self.document.snapshots.clear();
 
         // Walk the dirty spine: clear `style_dirty` on every child of a
         // dirty-descendants node, but only descend where the bit is set.
@@ -302,143 +446,36 @@ impl<T> Arena<T> {
             }
         }
     }
-}
 
-/// A `Copy` read-only handle over an element and its arena, exposing tree
-/// navigation.
-///
-/// This is the type stylo's element/traversal traits are implemented on (see
-/// [`crate::traits`]); keeping it a thin `(&Arena, ElementId)` pair leaves that
-/// seam clean. Only constructible via [`Arena::element_ref`], so the referenced
-/// element is guaranteed live for the handle's (immutable) borrow of the arena.
-pub struct ElementRef<'a, T> {
-    pub(crate) arena: &'a Arena<T>,
-    pub(crate) id: ElementId,
-}
-
-// Hand-written (rather than derived) so `T` needs no `Clone`/`Copy` bound: the
-// handle only holds a shared reference plus an id.
-impl<T> Clone for ElementRef<'_, T> {
-    fn clone(&self) -> Self {
-        *self
+    pub(crate) fn begin_traversal(&self) -> TraversalGuard<'_> {
+        self.document.begin_traversal()
     }
 }
 
-impl<T> Copy for ElementRef<'_, T> {}
+#[cfg(test)]
+mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
-impl<T> std::fmt::Debug for ElementRef<'_, T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let element = self.element();
-        f.debug_struct("ElementRef")
-            .field("id", &self.id)
-            .field("tag", &element.tag_str())
-            .finish()
-    }
-}
+    use super::Arena;
 
-/// Two handles are equal when they point at the same element of the same arena.
-///
-/// stylo's `TElement`/`TNode` require `Eq`/`Hash`; identity is the arena pointer
-/// paired with the [`ElementId`]. Comparing the arena by pointer (rather than by
-/// value) keeps this cheap and matches stylo's expectation that element identity
-/// is stable.
-impl<T> PartialEq for ElementRef<'_, T> {
-    fn eq(&self, other: &Self) -> bool {
-        std::ptr::eq(self.arena, other.arena) && self.id == other.id
-    }
-}
-
-impl<T> Eq for ElementRef<'_, T> {}
-
-impl<T> std::hash::Hash for ElementRef<'_, T> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        (std::ptr::from_ref(self.arena) as usize).hash(state);
-        self.id.hash(state);
-    }
-}
-
-impl<'a, T> ElementRef<'a, T> {
-    /// Borrow the underlying element.
-    ///
-    /// `pub(crate)` so the [`traits`](crate::traits) impls can reach element
-    /// state; the panic path is unreachable given the construction invariant
-    /// (an `ElementRef` only exists for a live element).
-    pub(crate) fn element(self) -> &'a Element<T> {
-        self.arena
-            .get(self.id)
-            .expect("ElementRef always references a live element")
+    #[test]
+    fn traversal_phase_rejects_mutation() {
+        let arena = Arena::<()>::new();
+        let _guard = arena.begin_traversal();
+        let mutation = catch_unwind(AssertUnwindSafe(|| arena.note_mutation()));
+        assert!(mutation.is_err());
     }
 
-    /// The handle for this element.
-    #[must_use]
-    pub const fn id(self) -> ElementId {
-        self.id
-    }
+    #[test]
+    fn panicking_traversal_poisons_document() {
+        let arena = Arena::<()>::new();
+        let traversal = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = arena.begin_traversal();
+            panic!("synthetic traversal failure");
+        }));
+        assert!(traversal.is_err());
 
-    /// The element's tag name.
-    #[must_use]
-    pub fn tag(self) -> &'a str {
-        self.element().tag_str()
-    }
-
-    /// The element's external-state payload.
-    #[must_use]
-    pub fn ext(self) -> &'a T {
-        &self.element().ext
-    }
-
-    /// The parent element, if any.
-    #[must_use]
-    pub fn parent(self) -> Option<ElementRef<'a, T>> {
-        self.element()
-            .parent
-            .and_then(|p| self.arena.element_ref(p))
-    }
-
-    /// The first child element, if any.
-    #[must_use]
-    pub fn first_child(self) -> Option<ElementRef<'a, T>> {
-        self.element()
-            .children
-            .first()
-            .and_then(|&c| self.arena.element_ref(c))
-    }
-
-    /// The last child element, if any.
-    #[must_use]
-    pub fn last_child(self) -> Option<ElementRef<'a, T>> {
-        self.element()
-            .children
-            .last()
-            .and_then(|&c| self.arena.element_ref(c))
-    }
-
-    /// The next sibling element, if any.
-    #[must_use]
-    pub fn next_sibling(self) -> Option<ElementRef<'a, T>> {
-        let parent = self.element().parent?;
-        let siblings = &self.arena.get(parent)?.children;
-        let pos = siblings.iter().position(|&c| c == self.id)?;
-        let next = *siblings.get(pos + 1)?;
-        self.arena.element_ref(next)
-    }
-
-    /// The previous sibling element, if any.
-    #[must_use]
-    pub fn prev_sibling(self) -> Option<ElementRef<'a, T>> {
-        let parent = self.element().parent?;
-        let siblings = &self.arena.get(parent)?.children;
-        let pos = siblings.iter().position(|&c| c == self.id)?;
-        let prev = *siblings.get(pos.checked_sub(1)?)?;
-        self.arena.element_ref(prev)
-    }
-
-    /// Iterate over the element's children in document order.
-    pub fn children(self) -> impl Iterator<Item = ElementRef<'a, T>> + 'a {
-        let arena = self.arena;
-        self.element()
-            .children
-            .iter()
-            .filter_map(move |&id| arena.element_ref(id))
+        let mutation = catch_unwind(AssertUnwindSafe(|| arena.note_mutation()));
+        assert!(mutation.is_err());
     }
 }

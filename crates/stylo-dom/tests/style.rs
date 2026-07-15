@@ -14,7 +14,7 @@ use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_atoms::Atom;
-use stylo_dom::{Element, StyleEngine, StylesheetOrigin};
+use stylo_dom::{StyleEngine, StylesheetOrigin};
 use stylo_traits::{CSSPixel, DevicePixel};
 
 fn device(width: f32, height: f32) -> Device {
@@ -63,18 +63,13 @@ fn standard_cascade_is_embedder_neutral() {
     );
 
     let mut arena = engine.new_arena();
-    let parent = arena.insert(Element::new("section", ()));
-    let child = arena.insert(Element::new("span", ()));
+    let parent = arena.create_element("section", ());
+    let child = arena.create_element("span", ());
     arena
-        .get_mut(parent)
+        .classes_mut(parent)
         .unwrap()
-        .classes
         .push(Atom::from("parent"));
-    arena
-        .get_mut(child)
-        .unwrap()
-        .classes
-        .push(Atom::from("child"));
+    arena.classes_mut(child).unwrap().push(Atom::from("child"));
     arena.attach_at(parent, child, 0);
 
     let parent_style = engine.resolve(arena.element_ref(parent).unwrap(), None);
@@ -105,12 +100,8 @@ fn media_queries_follow_standard_viewport_updates() {
     );
 
     let mut arena = engine.new_arena();
-    let element = arena.insert(Element::new("div", ()));
-    arena
-        .get_mut(element)
-        .unwrap()
-        .classes
-        .push(Atom::from("box"));
+    let element = arena.create_element("div", ());
+    arena.classes_mut(element).unwrap().push(Atom::from("box"));
 
     let wide = engine.resolve(arena.element_ref(element).unwrap(), None);
     assert_eq!(

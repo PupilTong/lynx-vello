@@ -43,7 +43,7 @@
   <text x="52" y="270" class="ln">  set_classes/attribute/dataset/events/css_id</text>
   <text x="52" y="290" class="ln">WidgetState { kind, unique_id, css_id,</text>
   <text x="52" y="306" class="ln">  dataset, events } : ExternalState</text>
-  <text x="52" y="326" class="ln">Widget = Element&lt;WidgetState&gt; · WidgetRef · WidgetId</text>
+  <text x="52" y="326" class="ln">Widget = Node&lt;WidgetState&gt; · WidgetId</text>
   <text x="52" y="346" class="ln">WidgetError · unique-id minting + index</text>
 
   <!-- Row 1 right: lynx-style -->
@@ -76,13 +76,13 @@
   <rect x="40" y="412" width="400" height="196" rx="6" fill="#e3f2fd" stroke="#4a7ab5" stroke-width="1.5"/>
   <text x="52" y="432" class="bh">crates/stylo-dom</text>
   <text x="182" y="432" class="bs">— strict HTML-DOM subset (generic, no Lynx)</text>
-  <text x="52" y="456" class="ln">Element&lt;T&gt; · ElementId · ElementRef&lt;'a,T&gt; · Arena&lt;T&gt;</text>
+  <text x="52" y="456" class="ln">Node&lt;T&gt; · ElementId · Arena&lt;T&gt; { boxed Document }</text>
   <text x="52" y="476" class="ln">trait ExternalState — embedder hooks into matching:</text>
   <text x="52" y="492" class="ln">  is_root · extra_attr_value · each_extra_attr_name</text>
   <text x="52" y="512" class="ln">tree + dirty primitives (coarse invalidation,</text>
   <text x="52" y="528" class="ln">  :empty + +/~ safe) · inline-style parsing</text>
   <text x="52" y="548" class="ln">impl TElement · TNode · TDocument</text>
-  <text x="52" y="564" class="ln">  · selectors::Element for ElementRef&lt;'a,T&gt;</text>
+  <text x="52" y="564" class="ln">  · selectors::Element for &amp;Node&lt;T&gt;</text>
   <text x="52" y="584" class="ln">computed: Arc&lt;ComputedValues&gt; per element</text>
 
   <!-- Row 2 right: vendor/stylo -->

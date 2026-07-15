@@ -17,7 +17,7 @@ Lynx-only device and unit behavior moved up into `lynx-widget`.
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| `stylo-dom` | `Element<T>`, `Arena<T>`, stylo DOM traits, invalidation, inline parsing, `Stylist`, rule matching, cascade, media evaluation, computed values, the private `SharedRwLock` | Lynx tags/PAPI, `WidgetState`, Lynx unit metrics, touch-device policy |
+| `stylo-dom` | `Node<T>`, address-stable `Document` storage behind `Arena<T>`, stylo DOM traits on `&Node<T>`, invalidation, inline parsing, `Stylist`, rule matching, cascade, media evaluation, computed values, the private `SharedRwLock` | Lynx tags/PAPI, `WidgetState`, Lynx unit metrics, touch-device policy |
 | `lynx-widget` | `WidgetState`, `WidgetTree`, PAPI validation, `EngineMetrics`, touch-first `Device` construction, viewport-relative `rpx` integration | A second stylist, cascade implementation, stylesheet lock sharing |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, the maintained Lynx CSS extension patch set | Runtime Widget/PAPI policy |
 
@@ -60,6 +60,13 @@ Lynx-only device and unit behavior moved up into `lynx-widget`.
 
 - Build styled arenas through the engine that will resolve them. `Arena::new`
   and `WidgetTree::new` are for standalone DOM-only use.
+- Nodes are created through `Arena::create_element`; there is no public
+  unbound `Node` constructor. Detach keeps the node in its document, while
+  physical removal exposes only the embedder payload.
+- `Arena` does not expose `&mut Node`: moving or swapping a whole node could
+  invalidate its document back-pointer. Mutation APIs project only ordinary
+  fields (`classes_mut`, `attrs_mut`, `ext_mut`, and so on), while topology is
+  changed through the tree primitives.
 - `SharedRwLock` is an implementation detail of `stylo-dom`; embedders do not
   construct, pass, or read it.
 - Standard CSS behavior belongs in `stylo-dom`. Lynx-only extensions and
@@ -79,6 +86,11 @@ Lynx-only device and unit behavior moved up into `lynx-widget`.
   (`SAFETY` notes in `stylo-dom`'s `traits`/`flush`). Concurrent parallel
   flushes are serialized process-wide (stylo's global pool keeps
   per-traversal state in worker TLS).
+- Every live `Node<T>` has a back-pointer to its boxed, address-stable document
+  allocation. A style flush changes that document from `IDLE` to `TRAVERSING`,
+  checks that its mutation epoch did not change, and poisons it if traversal
+  unwinds. This makes the immutable-tree phase required by Stylo's parallel
+  workers an explicit runtime invariant.
 
 ## Performance posture (see `docs/style-assumptions.md`)
 

@@ -1,14 +1,14 @@
-//! [`NodeInfo`] + [`TNode`] for [`ElementRef`].
+//! [`NodeInfo`] + [`TNode`] for [`&Node`](crate::Node).
 
 use stylo::dom::{NodeInfo, OpaqueNode, TNode};
 
-use crate::arena::ElementRef;
 use crate::ext::ExternalState;
+use crate::node::Node;
 
-impl<T: ExternalState> NodeInfo for ElementRef<'_, T> {
+impl<T: ExternalState> NodeInfo for &Node<T> {
     fn is_element(&self) -> bool {
         // Every node is an element with a tag; character data rides on the
-        // element itself (`Element::text`).
+        // element itself (`Node::text`).
         true
     }
 
@@ -17,29 +17,29 @@ impl<T: ExternalState> NodeInfo for ElementRef<'_, T> {
     }
 }
 
-impl<'a, T: ExternalState> TNode for ElementRef<'a, T> {
-    type ConcreteElement = ElementRef<'a, T>;
-    type ConcreteDocument = ElementRef<'a, T>;
-    type ConcreteShadowRoot = ElementRef<'a, T>;
+impl<'a, T: ExternalState> TNode for &'a Node<T> {
+    type ConcreteElement = &'a Node<T>;
+    type ConcreteDocument = &'a Node<T>;
+    type ConcreteShadowRoot = &'a Node<T>;
 
     fn parent_node(&self) -> Option<Self> {
         self.parent()
     }
 
     fn first_child(&self) -> Option<Self> {
-        ElementRef::first_child(*self)
+        Node::first_child(*self)
     }
 
     fn last_child(&self) -> Option<Self> {
-        ElementRef::last_child(*self)
+        Node::last_child(*self)
     }
 
     fn prev_sibling(&self) -> Option<Self> {
-        ElementRef::prev_sibling(*self)
+        Node::prev_sibling(*self)
     }
 
     fn next_sibling(&self) -> Option<Self> {
-        ElementRef::next_sibling(*self)
+        Node::next_sibling(*self)
     }
 
     fn owner_doc(&self) -> Self::ConcreteDocument {
@@ -75,12 +75,12 @@ impl<'a, T: ExternalState> TNode for ElementRef<'a, T> {
         // Derived from the (index, generation) id — NOT the element's address:
         // stylo keys snapshot maps by `OpaqueNode` across arbitrary tree
         // mutations, and arena growth can reallocate and move every element.
-        self.id().opaque()
+        self.node_id().opaque()
     }
 
     fn debug_id(self) -> usize {
         // Diagnostic only: the arena slot index stands in for a node id.
-        usize::try_from(self.id().index()).unwrap_or(0)
+        usize::try_from(self.node_id().index()).unwrap_or(0)
     }
 
     fn traversal_parent(&self) -> Option<Self::ConcreteElement> {

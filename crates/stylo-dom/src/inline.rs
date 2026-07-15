@@ -53,7 +53,7 @@ impl<T> Arena<T> {
             );
             Some(Arc::new(self.shared_lock().wrap(parsed)))
         };
-        if let Some(element) = self.get_mut(id) {
+        if let Some(element) = self.node_mut(id) {
             element.inline_block = block;
         }
         self.note_inline_style_change(id);
@@ -104,7 +104,7 @@ impl<T> Arena<T> {
         block.extend(source.drain(), Importance::Normal);
         let wrapped = Arc::new(lock.wrap(block));
 
-        if let Some(element) = self.get_mut(id) {
+        if let Some(element) = self.node_mut(id) {
             element.inline_block = Some(wrapped);
         }
         self.note_inline_style_change(id);
