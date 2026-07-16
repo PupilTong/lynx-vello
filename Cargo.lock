@@ -941,10 +941,10 @@ dependencies = [
  "rustc-hash",
  "smallvec",
  "stylo",
- "stylo-dom",
  "stylo_atoms",
  "stylo_traits",
  "thiserror",
+ "w3c-dom",
 ]
 
 [[package]]
@@ -1733,25 +1733,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "stylo-dom"
-version = "0.1.0"
-dependencies = [
- "app_units",
- "atomic_refcell",
- "codspeed-divan-compat",
- "cssparser",
- "euclid",
- "rustc-hash",
- "selectors",
- "smallvec",
- "stylo",
- "stylo_atoms",
- "stylo_dom",
- "stylo_traits",
- "url",
-]
-
-[[package]]
 name = "stylo_atoms"
 version = "0.19.0"
 dependencies = [
@@ -2073,6 +2054,25 @@ name = "void"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
+
+[[package]]
+name = "w3c-dom"
+version = "0.1.0"
+dependencies = [
+ "app_units",
+ "atomic_refcell",
+ "codspeed-divan-compat",
+ "cssparser",
+ "euclid",
+ "rustc-hash",
+ "selectors",
+ "smallvec",
+ "stylo",
+ "stylo_atoms",
+ "stylo_dom",
+ "stylo_traits",
+ "url",
+]
 
 [[package]]
 name = "walkdir"

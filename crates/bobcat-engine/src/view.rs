@@ -236,9 +236,18 @@ mod tests {
         let second_page = second.tree_mut().create_page();
         let first_child = first.tree_mut().create_view();
 
-        assert_eq!(first.tree().get_element_unique_id(first_page), Some(1));
-        assert_eq!(second.tree().get_element_unique_id(second_page), Some(1));
-        assert_eq!(first.tree().get_element_unique_id(first_child), Some(2));
-        assert_eq!(second.tree().element_by_unique_id(2), None);
+        assert_eq!(first.tree().get_element_unique_id(&first_page).unwrap(), 1);
+        assert_eq!(
+            second.tree().get_element_unique_id(&second_page).unwrap(),
+            1
+        );
+        assert_eq!(first.tree().get_element_unique_id(&first_child).unwrap(), 2);
+        // Independent trees mint independent handles: a foreign handle is a
+        // typed error, and unique_id namespaces do not cross views.
+        assert!(second.tree().get_element_unique_id(&first_child).is_err());
+        assert_ne!(
+            second.tree().element_by_unique_id(2),
+            Some(first_child.clone())
+        );
     }
 }

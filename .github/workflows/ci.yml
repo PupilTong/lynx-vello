@@ -34,7 +34,7 @@ jobs:
           -p lynx-template-decoder
           -p lynx-widget
           -p quickjs-rust-bridge
-          -p stylo-dom
+          -p w3c-dom
           -p neutron-star
 
       - name: Clippy
@@ -63,20 +63,23 @@ jobs:
             --fail-under-lines 95
 
       # The Lynx patch series in the vendored stylo fork carries its own test
-      # suites; vendor/stylo is excluded from the workspace, so run them
-      # explicitly or rebases regress silently. They live behind the fork's
-      # `lynx` feature (the Lynx-only additions + property/value gating), so
-      # they only compile and run with `--features lynx`.
+      # suites; vendor/stylo is excluded from the workspace, so run them here
+      # or rebases regress silently. The target list is discovered from the
+      # fork checkout (a hardcoded list rots silently when the rebased branch
+      # adds suites). All of them live behind the fork's `lynx` feature except
+      # `lynx_feature_off_parity`, which guards the feature-OFF build and
+      # belongs to the fork repo's own CI — running it here would cost a full
+      # second stylo compile for a fork-side concern.
       - name: Stylo fork Lynx tests
-        run: >-
-          cargo test --manifest-path vendor/stylo/Cargo.toml -p stylo --features lynx
-          --test lynx_lengths
-          --test lynx_display
-          --test lynx_linear_properties
-          --test lynx_relative_properties
-          --test lynx_supported_properties
-          --test lynx_disabled_properties
-          --test lynx_value_gating
+        run: |
+          targets=""
+          for file in vendor/stylo/style/tests/lynx_*.rs; do
+            name="$(basename "$file" .rs)"
+            [ "$name" = "lynx_feature_off_parity" ] && continue
+            targets="$targets --test $name"
+          done
+          echo "discovered:$targets"
+          cargo test --manifest-path vendor/stylo/Cargo.toml -p stylo --features lynx $targets
 
       - name: Doctests
         run: cargo test --doc

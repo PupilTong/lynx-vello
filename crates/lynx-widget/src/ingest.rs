@@ -7,7 +7,7 @@
 //! re-serialization of stylesheets** (web-core's approach for the browser).
 //! See `docs/style-assumptions.md` §B.5.
 //!
-//! Lynx policy applied here (and deliberately NOT in `stylo-dom`):
+//! Lynx policy applied here (and deliberately NOT in `w3c-dom`):
 //!
 //! - **Import flattening** (web-core parity): each fragment's rules are emitted once per css id
 //!   that transitively `@import`s it, in Kahn topological order; fragments on an import cycle are
@@ -32,7 +32,7 @@
 
 use lynx_template_decoder::style_info::{Rule, RuleType, Selector, SimpleSelectorType, StyleInfo};
 use rustc_hash::{FxHashMap, FxHashSet};
-use stylo_dom::CssRule;
+use w3c_dom::CssRule;
 
 /// One rule's declarations, lowered to `(name, value, important)` text parts.
 fn lower_declarations(rule: &Rule) -> Vec<(&str, String, bool)> {
@@ -241,7 +241,7 @@ fn write_declaration_block(buf: &mut String, rule: &Rule) {
 ///
 /// Returns the built rules; the caller mounts them
 /// ([`StyleEngine::load_style_info`](crate::StyleEngine::load_style_info)).
-pub(crate) fn build_rules(core: &stylo_dom::StyleEngine, info: &StyleInfo) -> Vec<CssRule> {
+pub(crate) fn build_rules(core: &w3c_dom::StyleEngine, info: &StyleInfo) -> Vec<CssRule> {
     let imported_by = imported_by_map(info);
 
     // Deterministic emission order: ascending css id. (The wire format's

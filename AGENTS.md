@@ -140,15 +140,27 @@ useful signal for currently-compatible versions of those libraries.
   points remain crate-private implementation details. Lynx host globals and
   the future preloaded module graph belong here rather than in the generic
   QuickJS bridge or engine-neutral protocol.
-- `crates/stylo-dom` — generic HTML-DOM subset and standards-oriented CSS
-  computation core. Owns `Element<T>` / `Arena<T>`, stylo DOM trait impls,
-  tree invalidation, inline-style parsing, the `Stylist` / cascade pipeline,
-  and the private `SharedRwLock` shared by an engine and its arenas. It must
-  not contain Lynx widget vocabulary or Lynx device/unit policy.
-- `crates/lynx-widget` — Lynx Element-PAPI and style adapter over `stylo-dom`.
-  Owns `WidgetState` / `WidgetTree`, Lynx view metrics, touch-first
-  device policy, and the viewport-relative `rpx` integration. Standard CSS
-  parsing, matching, cascade, and lock ownership remain in `stylo-dom`.
+- `crates/w3c-dom` — generic W3C-DOM-subset document tree and
+  standards-oriented CSS computation core. Owns the single `Document<T>`
+  tree of `Node<T>`s (ONE TREE policy: nodes are created and mutated only
+  through `Document` methods, which carry their own snapshot/invalidation),
+  the stylo trait impls on the plain one-word `&Node` handle (per-node
+  backpointer; styling runs in place, no mirror tree), inline-style
+  parsing, the `Stylist` /
+  cascade pipeline, and the private `SharedRwLock` shared by an engine and
+  its documents. Mutation APIs follow a let-it-crash contract
+  (`debug_assert` + panic on stale handles rather than silent no-ops). It
+  must not contain Lynx widget vocabulary or Lynx device/unit policy.
+- `crates/lynx-widget` — Lynx Element-PAPI and style adapter over `w3c-dom`.
+  Owns `WidgetState` / `WidgetTree` (a validation layer over the document:
+  untrusted PAPI input becomes `WidgetError`s before it reaches the
+  crash-on-misuse DOM core) and the `WidgetHandle` ownership layer — the
+  PAPI traffics exclusively in canonical, tree-identified handles; a live
+  handle retains its node, and detached subtrees are reclaimed automatically
+  once their last handle drops (the native stand-in for the browser GC; no
+  public disposal API). Also owns Lynx view metrics, touch-first device
+  policy, and the viewport-relative `rpx` integration. Standard CSS parsing,
+  matching, cascade, and lock ownership remain in `w3c-dom`.
 - `crates/neutron-star` — the standalone-publishable Flexbox, Grid, and
   Starlight Relative and Linear engine: trait-based host⇄engine integration
   with static dispatch only (no `dyn`), an immutable topology/style source

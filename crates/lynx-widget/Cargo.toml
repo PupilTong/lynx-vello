@@ -1,6 +1,6 @@
 [package]
 name = "lynx-widget"
-description = "Lynx Widget/PAPI and Lynx-specific style-device integration over stylo-dom"
+description = "Lynx Widget/PAPI and Lynx-specific style-device integration over w3c-dom"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,10 +8,10 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-# The generic, HTML-DOM-subset core (Element<T> arena, tree/inline/dirty
-# primitives, stylo element-trait impls). This crate instantiates it with
-# `WidgetState` and re-exports the result Widget-first.
-stylo-dom = { workspace = true }
+# The generic, W3C-DOM-subset core (the one `Document<T>` tree of `Node<T>`s,
+# invalidation-carrying mutation, stylo element-trait impls). This crate
+# instantiates it with `WidgetState` and re-exports the result Widget-first.
+w3c-dom = { workspace = true }
 
 rustc-hash = { workspace = true }
 smallvec = { workspace = true }
@@ -24,7 +24,7 @@ lynx-template-decoder = { workspace = true }
 
 # The Lynx adapter names computed values, Device metrics, atoms, and
 # `ExternalState` attribute names directly. Lock ownership and the cascade
-# remain encapsulated by `stylo-dom`.
+# remain encapsulated by `w3c-dom`.
 stylo = { workspace = true }
 stylo_atoms = { workspace = true }
 stylo_traits = { workspace = true }

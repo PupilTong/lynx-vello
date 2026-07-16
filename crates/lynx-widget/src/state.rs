@@ -1,10 +1,10 @@
 //! The Lynx external state carried by every widget ([`WidgetState`]), plus the
 //! event-registration types.
 //!
-//! `stylo-dom`'s [`Element`](stylo_dom::Element) covers only the HTML-DOM
+//! `w3c-dom`'s [`Node`](w3c_dom::Node) covers only the W3C-DOM
 //! subset; everything Lynx-specific about a widget — its [`WidgetKind`], the
 //! `unique_id`, the `css_id` style scope, the `data-*` dataset, and event
-//! bindings — lives here, in the element's `ext` payload. The
+//! bindings — lives here, in the node's `ext` payload. The
 //! [`ExternalState`] impl is what feeds the Lynx-specific bits back into
 //! selector matching (`:root` = the `<page>` kind, the synthetic `l-css-id`
 //! attribute, `data-*` dataset reflection).
@@ -12,7 +12,7 @@
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use stylo::LocalName;
-use stylo_dom::ExternalState;
+use w3c_dom::ExternalState;
 
 use crate::kind::WidgetKind;
 
@@ -49,7 +49,7 @@ pub struct EventReg {
 }
 
 /// The Lynx-specific per-widget state, carried as the `ext` payload of
-/// [`Widget`](crate::Widget) (= `stylo_dom::Element<WidgetState>`).
+/// [`Widget`](crate::Widget) (= `w3c_dom::Node<WidgetState>`).
 #[derive(Debug)]
 pub struct WidgetState {
     /// The widget kind (the Lynx tag classification).
