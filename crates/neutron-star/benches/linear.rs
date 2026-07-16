@@ -14,12 +14,33 @@ fn main() {
     divan::main();
 }
 
+fn scenario_batch_size(name: &str) -> usize {
+    match name {
+        "linear_cross_gravity_matrix"
+        | "linear_gravity_matrix"
+        | "linear_layout_gravity_matrix" => 3,
+        _ => 24,
+    }
+}
+
 fn bench_scenario(bencher: divan::Bencher<'_, '_>, name: &'static str) {
     let scenario = scenario_named(name);
+    let batch_size = scenario_batch_size(name);
     bencher
-        .with_inputs(move || (scenario.build)(NODES))
-        .input_counter(|case: &BenchCase| ItemsCount::new(case.node_count()))
-        .bench_local_values(|mut case| divan::black_box(case.run()));
+        .with_inputs(move || {
+            (0..batch_size)
+                .map(|_| (scenario.build)(NODES))
+                .collect::<Vec<_>>()
+        })
+        .input_counter(|cases: &Vec<BenchCase>| {
+            ItemsCount::new(cases.iter().map(BenchCase::node_count).sum::<usize>())
+        })
+        .bench_local_values(|mut cases| {
+            for case in &mut cases {
+                divan::black_box(case.run());
+            }
+            cases
+        });
 }
 
 macro_rules! linear_bench {

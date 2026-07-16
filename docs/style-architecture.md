@@ -129,8 +129,11 @@ Document/Node design (this document describes the current shape).
 
 - Ingestion: direct construction, §B.5. Parallel traversal from day 1, §B.6.
 - Incremental restyles ride stylo invalidation sets, §B.7 — a class flip on
-  one element restyles only affected elements (~3µs on a 1.1k-widget tree in
-  the divan benches, vs ~1.1ms for the initial full flush).
+  one element restyles only affected elements (~3µs per logical operation on
+  a 1.1k-widget tree, vs ~1.1ms for the initial full flush). The Divan benches
+  batch short operations into millisecond-scale samples and expose the batch
+  size through an item counter, so this per-operation figure is derived from
+  throughput rather than a flaky microsecond sample.
 - Benchmarks: `cargo bench -p lynx-widget` (`benches/style.rs`,
   CodSpeed-tracked) — ingestion, initial flush (sequential + parallel),
   incremental class flip / inline style, no-op flush floor, standalone
