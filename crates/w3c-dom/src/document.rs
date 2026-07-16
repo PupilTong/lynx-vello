@@ -83,7 +83,7 @@ pub(crate) fn mint_identity() -> NonZeroU64 {
 /// # Why the generation exists
 ///
 /// The document recycles slots through a free list, so a bare index is
-/// ambiguous: after `remove_subtree`, the next `create_node` may place a
+/// ambiguous: after `remove_subtree`, the next node factory call may place a
 /// **new, unrelated node in the same slot** (the ABA problem). This is not a
 /// rare race but the steady state: embedders retain ids by design (Lynx's
 /// scripting runtime holds element handles over frames while the tree
@@ -395,22 +395,52 @@ impl<T> Document<T> {
 
     // --- node factory ------------------------------------------------------
 
-    /// Create a detached node and return its handle.
+    /// Create a detached element and return its handle.
     ///
-    /// This is the **only** way nodes come to exist: they are born inside
-    /// this document, carrying the backpointer to it, and never move to
-    /// another one.
+    /// Elements are born inside this document, carrying the backpointer to
+    /// it, and never move to another one.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the document would need to grow past `u32::MAX` slots.
+    pub fn create_element(&mut self, tag: &str, ext: T) -> NodeId {
+        self.allocate_node(|core, id| Node::new_element(core, id, tag, ext))
+    }
+
+    /// Backwards-compatible name for [`create_element`](Self::create_element).
+    ///
+    /// New code should prefer the kind-specific factory so element creation is
+    /// visibly distinct from [`create_text_node`](Self::create_text_node).
     ///
     /// # Panics
     ///
     /// Panics if the document would need to grow past `u32::MAX` slots.
     pub fn create_node(&mut self, tag: &str, ext: T) -> NodeId {
+        self.create_element(tag, ext)
+    }
+
+    /// Create a detached text node containing `text` and return its handle.
+    ///
+    /// Text nodes share the document's storage, tree links, identity, and
+    /// embedder payload type, but they have no tag or CSS element state and
+    /// are not selector subjects.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the document would need to grow past `u32::MAX` slots.
+    pub fn create_text_node(&mut self, text: impl Into<String>, ext: T) -> NodeId {
+        let text = text.into();
+        self.allocate_node(|core, id| Node::new_text(core, id, text, ext))
+    }
+
+    /// Allocate one generational slot and construct its occupant.
+    fn allocate_node(&mut self, make: impl FnOnce(CorePtr<T>, NodeId) -> Node<T>) -> NodeId {
         let core_ptr = self.core;
         let core = self.core_mut();
         if let Some(id) = core.free_list.pop() {
             let slot = &mut core.slots[id.index as usize];
             debug_assert!(slot.is_none(), "free-list slot must be vacant");
-            *slot = Some(Node::new(core_ptr, id, tag, ext));
+            *slot = Some(make(core_ptr, id));
             id
         } else {
             let index =
@@ -420,7 +450,7 @@ impl<T> Document<T> {
                 index,
                 generation: NonZeroU32::MIN,
             };
-            core.slots.push(Some(Node::new(core_ptr, id, tag, ext)));
+            core.slots.push(Some(make(core_ptr, id)));
             id
         }
     }
@@ -433,11 +463,17 @@ impl<T> Document<T> {
     /// The root is where [`StyleEngine::flush_document`](crate::StyleEngine::flush_document)
     /// starts and what [`needs_flush`](Self::needs_flush) inspects.
     ///
-    /// Contract: `id` is live and parentless (`debug_assert`ed).
+    /// Contract: `id` identifies a live, parentless element.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `id` is stale, belongs to another document, has a parent,
+    /// or identifies a text node.
     pub fn set_root(&mut self, id: NodeId) {
-        debug_assert!(
-            self.get(id).is_some_and(|node| node.parent_id().is_none()),
-            "document root must be a live, parentless node"
+        assert!(
+            self.get(id)
+                .is_some_and(|node| node.is_element() && node.parent_id().is_none()),
+            "document root must be a live, parentless element"
         );
         self.core_mut().root = Some(id);
         self.mark_subtree_dirty(id);
@@ -532,11 +568,11 @@ impl<T> Document<T> {
     ///
     /// # Panics
     ///
-    /// Panics when `parent`, `child`, or `before` is stale, when `child` is
-    /// the document root, when `before` is not a child of `parent`, or — in
-    /// debug builds — when the link would create a cycle or
-    /// `before == child` (the let-it-crash mutation contract; see the crate
-    /// docs).
+    /// Panics when `parent`, `child`, or `before` is stale, when `parent` is a
+    /// text node, when `child` is the document root, when `before` is not a
+    /// child of `parent`, or — in debug builds — when the link would create a
+    /// cycle or `before == child` (the let-it-crash mutation contract; see the
+    /// crate docs).
     pub fn insert_before(&mut self, parent: NodeId, child: NodeId, before: Option<NodeId>) {
         // Always-on (not just debug): a reparented root would let a later
         // `remove_subtree` of its ancestor free the root while the document
@@ -549,6 +585,10 @@ impl<T> Document<T> {
         );
         debug_assert!(self.contains(parent), "insert_before: stale parent");
         debug_assert!(self.contains(child), "insert_before: stale child");
+        assert!(
+            self.get(parent).is_some_and(Node::is_element),
+            "insert_before: parent must be a live element"
+        );
         debug_assert!(child != parent, "insert_before: child == parent");
         debug_assert!(
             !self.is_ancestor(child, parent),

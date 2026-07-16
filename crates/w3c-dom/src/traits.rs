@@ -25,9 +25,10 @@
 //!
 //! # Model
 //!
-//! - **Every node is an element.** There is no separate document or text node: the topmost ancestor
-//!   acts as the document root (see [`TNode::owner_doc`]), and character data rides on the node
-//!   ([`Node::text`](crate::Node::text)).
+//! - **Elements and text nodes share one tree.** [`NodeInfo`] and [`TNode::as_element`] distinguish
+//!   the two; stylo traverses text nodes as DOM/layout children but only elements enter selector
+//!   matching and the cascade. There is no separate document node: the topmost ancestor acts as the
+//!   document root (see [`TNode::owner_doc`]).
 //! - **`:hover`/`:active`/`:focus`** are matched from the node's
 //!   [`ElementState`](crate::ElementState).
 //! - **`:root`** matches a parentless node whose [`ExternalState::is_root`] hook agrees.
@@ -38,11 +39,11 @@
 //!
 //! # Safety
 //!
-//! This module carries the `unsafe` for the interior-mutable per-node state
+//! This module carries the `unsafe` for the interior-mutable per-element state
 //! stylo mandates ([`ensure_data`](TElement::ensure_data),
 //! [`clear_data`](TElement::clear_data), `borrow_data`, `mutate_data`). Each
 //! `unsafe` access relies on **stylo's traversal discipline**: during a
-//! (possibly parallel) restyle traversal, each node's
+//! (possibly parallel) restyle traversal, each element's
 //! [`stylo_data`](crate::Node) is touched by exactly one worker at a time (a
 //! parent reads/writes a child's data only in `note_children`, strictly
 //! before any worker takes ownership of that child), and outside a traversal
@@ -89,13 +90,11 @@ fn empty_namespace() -> &'static <SelectorImpl as selectors::SelectorImpl>::Borr
 
 impl<T: ExternalState> NodeInfo for &Node<T> {
     fn is_element(&self) -> bool {
-        // Every node is an element with a tag; character data rides on the
-        // node itself (`Node::text`).
-        true
+        Node::is_element(self)
     }
 
     fn is_text_node(&self) -> bool {
-        false
+        Node::is_text_node(self)
     }
 }
 
@@ -141,7 +140,7 @@ impl<'a, T: ExternalState> TNode for &'a Node<T> {
     }
 
     fn as_element(&self) -> Option<Self::ConcreteElement> {
-        Some(*self)
+        Node::is_element(self).then_some(*self)
     }
 
     fn as_document(&self) -> Option<Self::ConcreteDocument> {
@@ -166,7 +165,7 @@ impl<'a, T: ExternalState> TNode for &'a Node<T> {
     }
 
     fn traversal_parent(&self) -> Option<Self::ConcreteElement> {
-        Node::parent(*self)
+        Node::parent(*self).filter(|parent| Node::is_element(*parent))
     }
 }
 
@@ -230,7 +229,7 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
     }
 
     fn is_html_element(&self) -> bool {
-        true
+        Node::is_element(self)
     }
 
     fn is_mathml_element(&self) -> bool {
@@ -459,7 +458,11 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
     }
 
     fn local_name(&self) -> &<SelectorImpl as selectors::SelectorImpl>::BorrowedLocalName {
-        &self.tag.0
+        &self
+            .tag
+            .as_ref()
+            .expect("TElement::local_name called for a text node")
+            .0
     }
 
     fn namespace(&self) -> &<SelectorImpl as selectors::SelectorImpl>::BorrowedNamespaceUrl {
@@ -503,7 +506,7 @@ impl<T: ExternalState> Element for &Node<T> {
     }
 
     fn parent_element(&self) -> Option<Self> {
-        Node::parent(*self)
+        Node::parent(*self).filter(|parent| Node::is_element(*parent))
     }
 
     fn parent_node_is_shadow_root(&self) -> bool {
@@ -519,39 +522,60 @@ impl<T: ExternalState> Element for &Node<T> {
     }
 
     fn prev_sibling_element(&self) -> Option<Self> {
-        // Every node is an element, so the immediate previous sibling is it.
-        Node::prev_sibling(*self)
+        let mut sibling = Node::prev_sibling(*self);
+        while let Some(node) = sibling {
+            if node.is_element() {
+                return Some(node);
+            }
+            sibling = Node::prev_sibling(node);
+        }
+        None
     }
 
     fn next_sibling_element(&self) -> Option<Self> {
-        Node::next_sibling(*self)
+        let mut sibling = Node::next_sibling(*self);
+        while let Some(node) = sibling {
+            if node.is_element() {
+                return Some(node);
+            }
+            sibling = Node::next_sibling(node);
+        }
+        None
     }
 
     fn first_element_child(&self) -> Option<Self> {
-        Node::first_child(*self)
+        let mut child = Node::first_child(*self);
+        while let Some(node) = child {
+            if node.is_element() {
+                return Some(node);
+            }
+            child = Node::next_sibling(node);
+        }
+        None
     }
 
     fn is_html_element_in_html_document(&self) -> bool {
-        true
+        Node::is_element(self)
     }
 
     fn has_local_name(
         &self,
         local_name: &<Self::Impl as selectors::SelectorImpl>::BorrowedLocalName,
     ) -> bool {
-        self.tag.0 == *local_name
+        self.tag.as_ref().is_some_and(|tag| tag.0 == *local_name)
     }
 
     fn has_namespace(
         &self,
         ns: &<Self::Impl as selectors::SelectorImpl>::BorrowedNamespaceUrl,
     ) -> bool {
-        // Nodes are never namespaced here: only the empty namespace matches.
-        ns.is_empty()
+        // Elements are never namespaced here: only the empty namespace
+        // matches. Text nodes have no namespace at all.
+        self.is_element() && ns.is_empty()
     }
 
     fn is_same_type(&self, other: &Self) -> bool {
-        self.tag == other.tag
+        self.is_element() && other.is_element() && self.tag == other.tag
     }
 
     fn attr_matches(
@@ -654,9 +678,7 @@ impl<T: ExternalState> Element for &Node<T> {
     }
 
     fn is_empty(&self) -> bool {
-        // Non-empty if the node has any child, or carries non-empty
-        // character data.
-        self.children.is_empty() && self.text.as_ref().is_none_or(String::is_empty)
+        self.is_element() && self.is_empty_element()
     }
 
     fn is_root(&self) -> bool {
@@ -665,10 +687,13 @@ impl<T: ExternalState> Element for &Node<T> {
         // `ExternalState::is_root` so a detached subtree's parentless top
         // does not match `:root` during resolve; the default keeps
         // parentless ⇒ root.
-        self.parent.is_none() && self.ext.is_root()
+        self.is_element() && self.parent.is_none() && self.ext.is_root()
     }
 
     fn add_element_unique_hashes(&self, filter: &mut BloomFilter) -> bool {
+        if !self.is_element() {
+            return false;
+        }
         stylo::bloom::each_relevant_element_hash(*self, |hash| {
             filter.insert_hash(hash & BLOOM_HASH_MASK);
         });

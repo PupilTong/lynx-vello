@@ -13,9 +13,9 @@
 //! `remove_subtree` harvest test, which uses a payload type to observe what
 //! the document returns.
 
-use w3c_dom::{Document, ExternalState, Node, NodeId};
+use w3c_dom::{Document, ExternalState, Node, NodeId, NodeType};
 
-/// Create a node with the given tag (no-op payload) and return its handle.
+/// Create an element with the given tag (no-op payload) and return its handle.
 fn node(doc: &mut Document<()>, tag: &str) -> NodeId {
     doc.create_node(tag, ())
 }
@@ -51,7 +51,7 @@ fn node_ref_navigation() {
     doc.append(container, c);
 
     let cref = doc.get(container).unwrap();
-    assert_eq!(cref.tag(), "div");
+    assert_eq!(cref.tag(), Some("div"));
     assert_eq!(cref.parent().unwrap().id(), root);
     let kids: Vec<_> = cref.children().map(Node::id).collect();
     assert_eq!(kids, vec![a, b, c]);
@@ -62,6 +62,82 @@ fn node_ref_navigation() {
     assert_eq!(doc.get(a).unwrap().next_sibling().unwrap().id(), b);
     assert_eq!(doc.get(b).unwrap().prev_sibling().unwrap().id(), a);
     assert!(doc.get(c).unwrap().next_sibling().is_none());
+}
+
+#[test]
+fn element_and_text_nodes_share_the_document_tree() {
+    let mut doc = Document::new();
+    let parent = doc.create_element("p", ());
+    let text = doc.create_text_node("hello", ());
+    doc.append(parent, text);
+
+    let element = doc.get(parent).unwrap();
+    assert_eq!(element.node_type(), NodeType::Element);
+    assert!(element.is_element());
+    assert!(!element.is_text_node());
+    assert_eq!(element.tag(), Some("p"));
+    assert_eq!(element.text(), None);
+
+    let text_node = doc.get(text).unwrap();
+    assert_eq!(text_node.node_type(), NodeType::Text);
+    assert!(!text_node.is_element());
+    assert!(text_node.is_text_node());
+    assert_eq!(text_node.tag(), None);
+    assert_eq!(text_node.text(), Some("hello"));
+    assert_eq!(text_node.parent_id(), Some(parent));
+    assert_eq!(element.first_child().unwrap().id(), text);
+
+    doc.set_text_data(text, "updated");
+    assert_eq!(doc.get(text).unwrap().text(), Some("updated"));
+}
+
+#[test]
+fn element_navigation_and_empty_matching_handle_text_children() {
+    use selectors::Element as _;
+
+    let mut doc = Document::new();
+    let parent = node(&mut doc, "div");
+    let leading_text = doc.create_text_node("", ());
+    let first = node(&mut doc, "span");
+    let middle_text = doc.create_text_node("between", ());
+    let second = node(&mut doc, "span");
+    doc.append(parent, leading_text);
+    doc.append(parent, first);
+    doc.append(parent, middle_text);
+    doc.append(parent, second);
+
+    let parent_ref = doc.get(parent).unwrap();
+    assert_eq!(parent_ref.first_child().unwrap().id(), leading_text);
+    assert_eq!(parent_ref.first_element_child().unwrap().id(), first);
+    assert_eq!(
+        doc.get(first).unwrap().next_sibling_element().unwrap().id(),
+        second
+    );
+    assert_eq!(
+        doc.get(second)
+            .unwrap()
+            .prev_sibling_element()
+            .unwrap()
+            .id(),
+        first
+    );
+    assert!(
+        !parent_ref.is_empty(),
+        "a non-empty text child makes the element non-empty"
+    );
+
+    let empty_parent = node(&mut doc, "div");
+    let empty_text = doc.create_text_node("", ());
+    doc.append(empty_parent, empty_text);
+    assert!(
+        doc.get(empty_parent).unwrap().is_empty(),
+        "an empty text child does not affect :empty"
+    );
+    doc.set_text_data(empty_text, " ");
+    assert!(
+        !doc.get(empty_parent).unwrap().is_empty(),
+        "whitespace character data is non-empty"
+    );
 }
 
 #[test]
@@ -159,7 +235,7 @@ fn remove_subtree_frees_detaches_and_returns_payloads() {
     let container = doc.create_node("div", Payload(10));
     let child = doc.create_node("div", Payload(11));
     doc.append(container, child);
-    let grandchild = doc.create_node("div", Payload(12));
+    let grandchild = doc.create_text_node("payload", Payload(12));
     doc.append(child, grandchild);
 
     let mut removed = doc.remove_subtree(child);
@@ -313,6 +389,31 @@ fn reparenting_the_root_crashes() {
     // Linking the root under another node would let a later subtree removal
     // free the root out from under the document.
     doc.append(other, root);
+}
+
+#[test]
+#[should_panic(expected = "parent must be a live element")]
+fn text_nodes_cannot_have_children() {
+    let mut doc = Document::new();
+    let text = doc.create_text_node("parent", ());
+    let child = node(&mut doc, "span");
+    doc.append(text, child);
+}
+
+#[test]
+#[should_panic(expected = "parentless element")]
+fn text_nodes_cannot_be_the_document_root() {
+    let mut doc = Document::new();
+    let text = doc.create_text_node("root", ());
+    doc.set_root(text);
+}
+
+#[test]
+#[should_panic(expected = "element-only Document mutation")]
+fn text_nodes_reject_element_attributes() {
+    let mut doc = Document::new();
+    let text = doc.create_text_node("hello", ());
+    doc.set_attribute(text, "title", "not an element");
 }
 
 // --- the let-it-crash mutation contract -------------------------------------
