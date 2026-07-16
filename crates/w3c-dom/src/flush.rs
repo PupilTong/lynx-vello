@@ -3,8 +3,8 @@
 //! [`StyleEngine::flush_document`] restyles everything scheduled since the
 //! last flush by driving **stylo's own restyle traversal**
 //! ([`driver::traverse_dom`]) over the document — in place, on the one tree
-//! (the one-word [`NodeRef`](crate::NodeRef) handle is the traversal's
-//! element type; no mirror tree is built). That buys, in one move:
+//! (the one-word `&Node` reference is the traversal's element type; no
+//! mirror tree is built). That buys, in one move:
 //!
 //! - **Parallelism**: Firefox-style rayon work-stealing over wide DOM levels (via stylo's global
 //!   [`STYLE_THREAD_POOL`]), with a sequential fallback for small trees driven by stylo's own
@@ -43,7 +43,7 @@ use stylo_atoms::Atom;
 use crate::document::Document;
 use crate::engine::StyleEngine;
 use crate::ext::ExternalState;
-use crate::node::NodeRef;
+use crate::node::Node;
 
 /// How [`StyleEngine::flush_document_with`] schedules the traversal.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -106,15 +106,15 @@ struct RecalcStyle<'a> {
     shared: SharedStyleContext<'a>,
 }
 
-impl<'a, T: ExternalState> DomTraversal<NodeRef<'a, T>> for RecalcStyle<'a> {
+impl<'a, T: ExternalState> DomTraversal<&'a Node<T>> for RecalcStyle<'a> {
     fn process_preorder<F>(
         &self,
         traversal_data: &PerLevelTraversalData,
-        context: &mut StyleContext<NodeRef<'a, T>>,
-        node: NodeRef<'a, T>,
+        context: &mut StyleContext<&'a Node<T>>,
+        node: &'a Node<T>,
         note_child: F,
     ) where
-        F: FnMut(NodeRef<'a, T>),
+        F: FnMut(&'a Node<T>),
     {
         // Every node is an element in this model.
         // SAFETY: stylo's traversal contract — exactly one worker processes
@@ -123,7 +123,7 @@ impl<'a, T: ExternalState> DomTraversal<NodeRef<'a, T>> for RecalcStyle<'a> {
         recalc_style_at(self, traversal_data, context, node, &mut data, note_child);
     }
 
-    fn process_postorder(&self, _: &mut StyleContext<NodeRef<'a, T>>, _: NodeRef<'a, T>) {
+    fn process_postorder(&self, _: &mut StyleContext<&'a Node<T>>, _: &'a Node<T>) {
         debug_assert!(false, "needs_postorder_traversal() is false");
     }
 
@@ -170,7 +170,7 @@ impl StyleEngine {
         };
         {
             let root_ref = document
-                .node_ref(root)
+                .get(root)
                 .expect("the document root is kept live or unset");
             let guard = self.shared_lock().read();
             let shared = SharedStyleContext {
@@ -190,7 +190,7 @@ impl StyleEngine {
                 registered_speculative_painters: &NO_PAINTERS,
             };
             let traversal = RecalcStyle { shared };
-            let token = <RecalcStyle<'_> as DomTraversal<NodeRef<'_, T>>>::pre_traverse(
+            let token = <RecalcStyle<'_> as DomTraversal<&Node<T>>>::pre_traverse(
                 root_ref,
                 &traversal.shared,
             );

@@ -544,10 +544,12 @@ impl WidgetTree {
         self.doc.get(id)
     }
 
-    /// A read-only navigation handle for an element, if live.
+    /// A read-only navigation handle for an element, if live (the same
+    /// `&Widget` as [`widget`](Self::widget); kept as the name PAPI-side
+    /// callers navigate through).
     #[must_use]
     pub fn widget_ref(&self, id: WidgetId) -> Option<WidgetRef<'_>> {
-        self.doc.node_ref(id)
+        self.doc.get(id)
     }
 
     /// An element's resolved computed style, if it has been styled.

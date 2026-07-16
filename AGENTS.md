@@ -144,8 +144,9 @@ useful signal for currently-compatible versions of those libraries.
   standards-oriented CSS computation core. Owns the single `Document<T>`
   tree of `Node<T>`s (ONE TREE policy: nodes are created and mutated only
   through `Document` methods, which carry their own snapshot/invalidation),
-  the one-word `NodeRef` stylo-trait handle (per-node backpointer; styling
-  runs in place, no mirror tree), inline-style parsing, the `Stylist` /
+  the stylo trait impls on the plain one-word `&Node` handle (per-node
+  backpointer; styling runs in place, no mirror tree), inline-style
+  parsing, the `Stylist` /
   cascade pipeline, and the private `SharedRwLock` shared by an engine and
   its documents. Mutation APIs follow a let-it-crash contract
   (`debug_assert` + panic on stale handles rather than silent no-ops). It

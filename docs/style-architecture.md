@@ -35,17 +35,18 @@ Document/Node design (this document describes the current shape).
   (`WidgetTree` maps violations to `WidgetError`).
 - **Backpointers, one-word handles, no mirror tree.** The document core is heap-pinned and every
   node carries a pointer back to it, so tree navigation needs nothing but `&Node`. stylo's
-  element traits (`TNode`/`TElement`/`TDocument`/`selectors::Element`) are implemented on the
-  one-word `NodeRef(&Node)` handle, and the restyle traversal runs **in place on the document**
-  — no second tree is materialized to enter the styling engine. The word-sized handle is
-  load-bearing: stylo's style-sharing cache sizes its TLS for a one-word `TElement` handle
-  (`FakeCandidate` in `style/sharing/mod.rs`).
+  element traits (`TNode`/`TElement`/`TDocument`/`selectors::Element`) are implemented
+  **directly on `&'a Node<T>`** — there is no wrapper handle type — and the restyle traversal
+  runs **in place on the document**; no second tree is materialized to enter the styling engine.
+  The word-sized handle is load-bearing: stylo's style-sharing cache sizes its TLS for a
+  one-word `TElement` handle (`FakeCandidate` in `style/sharing/mod.rs`), and a shared
+  reference is exactly that (and `Copy` by nature).
 
 ## Ownership boundaries
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| `w3c-dom` | `Document<T>` (the one tree: storage, root, snapshots, lock), `Node<T>`, `NodeId`/`NodeRef`, stylo DOM traits, invalidation-carrying mutation, inline parsing, `Stylist`, rule matching, cascade, media evaluation, computed values | Lynx tags/PAPI, `WidgetState`, Lynx unit metrics, touch-device policy |
+| `w3c-dom` | `Document<T>` (the one tree: storage, root, snapshots, lock), `Node<T>`, `NodeId`, the stylo DOM traits on `&Node`, invalidation-carrying mutation, inline parsing, `Stylist`, rule matching, cascade, media evaluation, computed values | Lynx tags/PAPI, `WidgetState`, Lynx unit metrics, touch-device policy |
 | `lynx-widget` | `WidgetState`, `WidgetTree` (PAPI validation over the document), `EngineMetrics`, touch-first `Device` construction, viewport-relative `rpx` integration | A second stylist, cascade implementation, stylesheet lock sharing, direct node construction |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, the maintained Lynx CSS extension patch set **and the Lynx supported-property/value grammar definition** (`style/properties/lynx_properties.txt`, `lynx` feature gates) | Runtime Widget/PAPI policy |
 

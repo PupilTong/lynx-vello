@@ -56,7 +56,7 @@ use stylo::values::specified::position::PositionTryFallbacksTryTactic;
 use stylo_traits::ParsingMode;
 
 use crate::document::about_blank_url_data;
-use crate::{Document, ExternalState, NodeId, NodeRef};
+use crate::{Document, ExternalState, Node, NodeId};
 
 /// One declaration for direct rule construction: property name, value text,
 /// and whether it carries `!important`.
@@ -341,11 +341,7 @@ impl StyleEngine {
     /// (via any appended stylesheet). The node picks the cascade data the
     /// lookup runs against; pass the tree root for document-level rules.
     #[must_use]
-    pub fn has_keyframes_animation<T: ExternalState>(
-        &self,
-        name: &str,
-        node: NodeRef<'_, T>,
-    ) -> bool {
+    pub fn has_keyframes_animation<T: ExternalState>(&self, name: &str, node: &Node<T>) -> bool {
         self.stylist
             .lookup_keyframes(&stylo_atoms::Atom::from(name), node)
             .is_some()
@@ -390,7 +386,7 @@ impl StyleEngine {
     #[must_use]
     pub fn resolve<T: ExternalState>(
         &self,
-        node: NodeRef<'_, T>,
+        node: &Node<T>,
         parent_style: Option<&ComputedValues>,
     ) -> Arc<ComputedValues> {
         let guard = self.lock.read();
@@ -439,7 +435,7 @@ impl StyleEngine {
 
         let mut rule_cache_conditions = RuleCacheConditions::default();
         let mut tree_counting_caches = stylo::context::TreeCountingCaches::default();
-        cascade::<NodeRef<'_, T>>(
+        cascade::<&Node<T>>(
             &self.stylist,
             None,
             &rule_node,

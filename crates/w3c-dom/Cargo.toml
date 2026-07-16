@@ -14,8 +14,8 @@ smallvec = { workspace = true }
 # stylo integration: `Node` owns stylo's interior-mutable per-node state
 # (ElementData/selector flags) and the `traits` module implements stylo's
 # element traits (`TNode`/`TElement`/`TDocument`/`selectors::Element`) on the
-# one-word `NodeRef` handle. The vendored servo package named `stylo_dom` is
-# consumed under the `dom` rename, matching vendor/stylo/style's own
+# plain one-word `&Node` handle. The vendored servo package named `stylo_dom`
+# is consumed under the `dom` rename, matching vendor/stylo/style's own
 # Cargo.toml; this crate re-exports its `ElementState`.
 stylo = { workspace = true }
 stylo_atoms = { workspace = true }

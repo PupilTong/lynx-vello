@@ -116,7 +116,7 @@ fn keyframes_rules_register_and_resolve_by_name() {
 
     let mut doc: w3c_dom::Document<()> = engine.new_document();
     let root = doc.create_node("page", ());
-    let root_ref = doc.node_ref(root).expect("root is live");
+    let root_ref = doc.get(root).expect("root is live");
     assert!(engine.has_keyframes_animation("slide", root_ref));
     assert!(!engine.has_keyframes_animation("missing", root_ref));
 }

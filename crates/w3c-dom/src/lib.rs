@@ -11,8 +11,8 @@
 //! - [`Node<T>`] — the compositional unit: the W3C-DOM-subset fields (tree links, tag, id, classes,
 //!   attributes, dynamic pseudo-class state, inline style, character data) plus stylo's per-node
 //!   style bookkeeping. Read-only from outside the crate.
-//! - [`NodeId`] — a generational handle; [`NodeRef`] — the one-word `Copy` navigation handle the
-//!   stylo element traits are implemented on.
+//! - [`NodeId`] — a generational, staleness-detecting handle. The *read* handle is a plain
+//!   `&Node<T>`; the stylo element traits are implemented directly on it (no wrapper type).
 //! - [`StyleEngine`] — stylesheet parsing/building, matching, rule-tree insertion, cascade, and the
 //!   style flush ([`StyleEngine::flush_document`]).
 //! - [`ExternalState`] — the embedder-payload trait; the only channel through which the payload `T`
@@ -35,13 +35,13 @@
 //! implements stylo's
 //! element traits ([`TNode`](stylo::dom::TNode) /
 //! [`TElement`](stylo::dom::TElement) / [`TDocument`](stylo::dom::TDocument)
-//! / [`selectors::Element`]) directly on [`NodeRef`]. Styling therefore runs
+//! / [`selectors::Element`]) directly on `&'a Node<T>`. Styling therefore runs
 //! **on the document itself** — no mirror tree is built to enter the styling
 //! engine. Two design points make that work:
 //!
 //! - every node carries a **backpointer** to its (heap-pinned) document core, so tree navigation
-//!   needs nothing but `&Node` — which keeps [`NodeRef`] one word, the size stylo's style-sharing
-//!   cache requires of a `TElement` handle;
+//!   needs nothing but `&Node` — a shared reference is exactly the one-word `Copy` value stylo's
+//!   style-sharing cache requires of a `TElement` handle;
 //! - node identity for snapshots/traversal roots ([`OpaqueNode`](stylo::dom::OpaqueNode)) derives
 //!   from the generational [`NodeId`], so it survives slot-storage growth moving nodes.
 //!
@@ -94,4 +94,4 @@ pub use crate::engine::{
 };
 pub use crate::ext::ExternalState;
 pub use crate::flush::Parallelism;
-pub use crate::node::{ChildrenIter, Node, NodeRef};
+pub use crate::node::{ChildrenIter, Node};

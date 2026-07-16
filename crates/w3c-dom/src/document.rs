@@ -12,7 +12,7 @@
 //!
 //! # Contract: let it crash
 //!
-//! Queries ([`get`](Document::get), [`node_ref`](Document::node_ref), …)
+//! Queries ([`get`](Document::get), [`child_position`](Document::child_position), …)
 //! return `Option` — asking about a stale [`NodeId`] is a legitimate
 //! question. **Mutations are different**: passing a stale id, linking a node
 //! under its own descendant, or naming an insertion reference that is not a
@@ -54,6 +54,32 @@ pub(crate) fn about_blank_url_data() -> UrlExtraData {
 /// afterwards the slot's generation advances and the handle becomes stale
 /// (document lookups return `None`), even if the slot is later reused by a
 /// different node.
+///
+/// # Why the generation exists
+///
+/// The document recycles slots through a free list, so a bare index is
+/// ambiguous: after `remove_subtree`, the next `create_node` may place a
+/// **new, unrelated node in the same slot** (the ABA problem). Embedders
+/// retain ids across those events by design — Lynx's scripting runtime holds
+/// element references over frames, and list recycling detaches, re-attaches,
+/// and destroys subtrees constantly — so a dangling id *will* eventually
+/// point at a reused slot. The generation is what turns that from silent
+/// aliasing (reading or mutating a stranger node — the worst kind of logic
+/// corruption) into a detectable staleness: `remove` bumps the slot's
+/// generation, old handles stop resolving, and each layer reacts per its
+/// contract (queries return `None`, PAPI maps to `WidgetError::StaleElement`,
+/// DOM-core mutations crash per the let-it-crash contract — which is only
+/// *possible* because staleness is detectable at all).
+///
+/// The generation also anchors stylo integration: the [`OpaqueNode`]
+/// identity is derived from **(generation, index)**, so a freed-and-reused
+/// slot yields a different `OpaqueNode` and a dead node's pending snapshot
+/// or restyle bookkeeping can never be attributed to its slot's successor
+/// (an address-derived identity would additionally break whenever slot
+/// storage growth moves nodes). A slot whose 32-bit generation space is
+/// exhausted is retired rather than reused, preserving uniqueness; and
+/// because the generation is `NonZeroU32`, `Option<NodeId>` costs no extra
+/// space.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct NodeId {
     index: u32,
@@ -271,7 +297,7 @@ impl<T> Document<T> {
     pub(crate) fn core_mut(&mut self) -> &mut Core<T> {
         // SAFETY: as `core`, plus `&mut self` excludes every other borrow of
         // the document, and node backpointers are only dereferenced from
-        // shared-borrow contexts (`NodeRef` navigation, stylo traits).
+        // shared-borrow contexts (`&Node` navigation, stylo traits).
         #[expect(unsafe_code, reason = "deref the owned, heap-pinned core")]
         unsafe {
             self.core.0.as_mut()
@@ -352,12 +378,6 @@ impl<T> Document<T> {
     #[must_use]
     pub fn contains(&self, id: NodeId) -> bool {
         self.get(id).is_some()
-    }
-
-    /// A `Copy` navigation handle for the node, if live.
-    #[must_use]
-    pub fn node_ref(&self, id: NodeId) -> Option<crate::NodeRef<'_, T>> {
-        self.get(id).map(crate::NodeRef)
     }
 
     /// The position of `child` within `parent`'s child list, if it is a child.

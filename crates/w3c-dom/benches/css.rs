@@ -342,7 +342,7 @@ fn resolve_single_element(bencher: divan::Bencher) {
     let engine = engine_with_author_sheet();
     let (doc, probe) = build_tree(&engine);
     bencher.bench_local(|| {
-        let node = doc.node_ref(black_box(probe)).expect("probe is live");
+        let node = doc.get(black_box(probe)).expect("probe is live");
         black_box(engine.resolve(node, None));
     });
 }

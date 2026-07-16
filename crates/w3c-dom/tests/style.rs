@@ -68,14 +68,14 @@ fn standard_cascade_is_embedder_neutral() {
     doc.add_class(child, "child");
     doc.append(parent, child);
 
-    let parent_style = engine.resolve(doc.node_ref(parent).unwrap(), None);
+    let parent_style = engine.resolve(doc.get(parent).unwrap(), None);
     assert_eq!(
         parent_style.clone_color(),
         AbsoluteColor::srgb_legacy(0, 128, 0, 1.0)
     );
 
     doc.set_inline_style(child, "color: blue");
-    let child_style = engine.resolve(doc.node_ref(child).unwrap(), Some(parent_style.as_ref()));
+    let child_style = engine.resolve(doc.get(child).unwrap(), Some(parent_style.as_ref()));
     assert_eq!(
         child_style.clone_color(),
         AbsoluteColor::srgb_legacy(0, 0, 255, 1.0),
@@ -96,13 +96,13 @@ fn media_queries_follow_standard_viewport_updates() {
     let element = doc.create_node("div", ());
     doc.add_class(element, "box");
 
-    let wide = engine.resolve(doc.node_ref(element).unwrap(), None);
+    let wide = engine.resolve(doc.get(element).unwrap(), None);
     assert_eq!(
         wide.clone_color(),
         AbsoluteColor::srgb_legacy(255, 0, 0, 1.0)
     );
 
     engine.set_viewport(400.0, 600.0);
-    let narrow = engine.resolve(doc.node_ref(element).unwrap(), None);
+    let narrow = engine.resolve(doc.get(element).unwrap(), None);
     assert_ne!(narrow.clone_color(), wide.clone_color());
 }

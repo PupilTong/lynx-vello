@@ -24,7 +24,8 @@
 //!
 //! - [`Widget`] = `w3c_dom::Node<WidgetState>`
 //! - [`WidgetId`] = `w3c_dom::NodeId`
-//! - [`WidgetRef`] = `w3c_dom::NodeRef<'_, WidgetState>`
+//! - [`WidgetRef`] = `&w3c_dom::Node<WidgetState>` (a plain reference — the stylo traits live on
+//!   it)
 //!
 //! The retained tree is a [`WidgetTree`], errors are [`WidgetError`]. Method
 //! names keep the `element` wording of the `__*Element` PAPI opcodes they
@@ -61,6 +62,6 @@ pub type Widget = w3c_dom::Node<WidgetState>;
 /// A stable, generation-checked handle to a [`Widget`] in a [`WidgetTree`].
 pub type WidgetId = w3c_dom::NodeId;
 
-/// A `Copy` read-only navigation handle over a [`Widget`] (the type the stylo
-/// element traits are implemented on).
-pub type WidgetRef<'a> = w3c_dom::NodeRef<'a, WidgetState>;
+/// A read-only navigation handle over a [`Widget`]: a plain shared
+/// reference (the type stylo's element traits are implemented on).
+pub type WidgetRef<'a> = &'a Widget;

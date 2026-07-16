@@ -42,7 +42,7 @@ fn matches_dev(device: Device, query: &str) -> bool {
     let mut doc: Document<()> = engine.new_document();
     let probe = doc.create_node("view", ());
     doc.add_class(probe, "probe");
-    let style = engine.resolve(doc.node_ref(probe).expect("fresh node"), None);
+    let style = engine.resolve(doc.get(probe).expect("fresh node"), None);
     style.clone_color() == rgb(1, 2, 3)
 }
 

@@ -1,19 +1,27 @@
-//! stylo element-trait implementations for [`NodeRef`].
+//! stylo element-trait implementations, directly on `&Node`.
 //!
 //! stylo drives selector matching and the cascade over any type implementing
 //! its element traits. This module wires the document tree to that model by
-//! implementing, on the one-word `Copy` handle [`NodeRef`] (for any payload
-//! `T: `[`ExternalState`]):
+//! implementing, on the plain shared reference `&'a Node<T>` (for any
+//! payload `T: `[`ExternalState`]):
 //!
 //! - [`NodeInfo`] + [`TNode`]
 //! - [`TElement`]
 //! - [`TDocument`] + [`TShadowRoot`]
 //! - [`selectors::Element`]
 //!
-//! Because the traits live on `&Node` directly (navigation runs through the
-//! node's document backpointer), stylo styles the document **in place** — no
-//! second tree is materialized to enter the styling engine, and the handle
-//! fits stylo's word-sized style-sharing-cache slot.
+//! There is no handle type: a reference is already the one-word `Copy` value
+//! stylo requires (its style-sharing cache sizes TLS for a word-sized
+//! `TElement` handle), and navigation runs through the node's document
+//! backpointer — so stylo styles the document **in place**, no second tree
+//! is materialized to enter the styling engine.
+//!
+//! Implementation note: inside these impls, inherent `Node` methods that
+//! share a name with a trait method (`parent`, `first_child`,
+//! `next_sibling`, `id`, `has_dirty_descendants`, …) are called **fully
+//! qualified** (`Node::parent(*self)`), never with method syntax — on a
+//! `&Node` receiver with the trait in scope, method-call syntax resolves to
+//! the trait impl first, which here would recurse.
 //!
 //! # Model
 //!
@@ -68,7 +76,7 @@ use stylo::{CaseSensitivityExt, LocalName, Namespace};
 use stylo_atoms::Atom;
 
 use crate::ext::ExternalState;
-use crate::node::{ChildrenIter, NodeRef};
+use crate::node::{ChildrenIter, Node};
 
 /// The single shared empty namespace, returned by [`TElement::namespace`]
 /// (tags are never namespaced here).
@@ -79,7 +87,7 @@ fn empty_namespace() -> &'static <SelectorImpl as selectors::SelectorImpl>::Borr
 
 // --- NodeInfo + TNode -------------------------------------------------------
 
-impl<T: ExternalState> NodeInfo for NodeRef<'_, T> {
+impl<T: ExternalState> NodeInfo for &Node<T> {
     fn is_element(&self) -> bool {
         // Every node is an element with a tag; character data rides on the
         // node itself (`Node::text`).
@@ -91,36 +99,36 @@ impl<T: ExternalState> NodeInfo for NodeRef<'_, T> {
     }
 }
 
-impl<'a, T: ExternalState> TNode for NodeRef<'a, T> {
-    type ConcreteElement = NodeRef<'a, T>;
-    type ConcreteDocument = NodeRef<'a, T>;
-    type ConcreteShadowRoot = NodeRef<'a, T>;
+impl<'a, T: ExternalState> TNode for &'a Node<T> {
+    type ConcreteElement = &'a Node<T>;
+    type ConcreteDocument = &'a Node<T>;
+    type ConcreteShadowRoot = &'a Node<T>;
 
     fn parent_node(&self) -> Option<Self> {
-        self.parent()
+        Node::parent(*self)
     }
 
     fn first_child(&self) -> Option<Self> {
-        NodeRef::first_child(*self)
+        Node::first_child(*self)
     }
 
     fn last_child(&self) -> Option<Self> {
-        NodeRef::last_child(*self)
+        Node::last_child(*self)
     }
 
     fn prev_sibling(&self) -> Option<Self> {
-        NodeRef::prev_sibling(*self)
+        Node::prev_sibling(*self)
     }
 
     fn next_sibling(&self) -> Option<Self> {
-        NodeRef::next_sibling(*self)
+        Node::next_sibling(*self)
     }
 
     fn owner_doc(&self) -> Self::ConcreteDocument {
         // No separate document node: the topmost ancestor acts as the
         // document.
         let mut cur = *self;
-        while let Some(parent) = cur.parent() {
+        while let Some(parent) = Node::parent(cur) {
             cur = parent;
         }
         cur
@@ -149,24 +157,23 @@ impl<'a, T: ExternalState> TNode for NodeRef<'a, T> {
         // Derived from the (index, generation) id — NOT the node's address:
         // stylo keys snapshot maps by `OpaqueNode` across arbitrary tree
         // mutations, and slot-storage growth can move every node.
-        // (Fully qualified: `TElement::id` shadows the inherent `id` here.)
-        NodeRef::id(*self).opaque()
+        Node::id(*self).opaque()
     }
 
     fn debug_id(self) -> usize {
         // Diagnostic only: the slot index stands in for a node id.
-        usize::try_from(NodeRef::id(self).index()).unwrap_or(0)
+        usize::try_from(Node::id(self).index()).unwrap_or(0)
     }
 
     fn traversal_parent(&self) -> Option<Self::ConcreteElement> {
-        self.parent()
+        Node::parent(*self)
     }
 }
 
 // --- TDocument + TShadowRoot --------------------------------------------------
 
-impl<'a, T: ExternalState> TDocument for NodeRef<'a, T> {
-    type ConcreteNode = NodeRef<'a, T>;
+impl<'a, T: ExternalState> TDocument for &'a Node<T> {
+    type ConcreteNode = &'a Node<T>;
 
     fn as_node(&self) -> Self::ConcreteNode {
         *self
@@ -183,12 +190,12 @@ impl<'a, T: ExternalState> TDocument for NodeRef<'a, T> {
     fn shared_lock(&self) -> &SharedRwLock {
         // The document backpointer serves stylo's lock lookup without any
         // per-node lock clone.
-        &self.node().tree().lock
+        &self.tree().lock
     }
 }
 
-impl<'a, T: ExternalState> TShadowRoot for NodeRef<'a, T> {
-    type ConcreteNode = NodeRef<'a, T>;
+impl<'a, T: ExternalState> TShadowRoot for &'a Node<T> {
+    type ConcreteNode = &'a Node<T>;
 
     fn as_node(&self) -> Self::ConcreteNode {
         *self
@@ -210,8 +217,8 @@ impl<'a, T: ExternalState> TShadowRoot for NodeRef<'a, T> {
 
 // --- TElement -----------------------------------------------------------------
 
-impl<'a, T: ExternalState> TElement for NodeRef<'a, T> {
-    type ConcreteNode = NodeRef<'a, T>;
+impl<'a, T: ExternalState> TElement for &'a Node<T> {
+    type ConcreteNode = &'a Node<T>;
     type TraversalChildrenIterator = ChildrenIter<'a, T>;
 
     fn as_node(&self) -> Self::ConcreteNode {
@@ -219,7 +226,7 @@ impl<'a, T: ExternalState> TElement for NodeRef<'a, T> {
     }
 
     fn traversal_children(&self) -> LayoutIterator<Self::TraversalChildrenIterator> {
-        LayoutIterator(self.children())
+        LayoutIterator(Node::children(*self))
     }
 
     fn is_html_element(&self) -> bool {
@@ -235,7 +242,7 @@ impl<'a, T: ExternalState> TElement for NodeRef<'a, T> {
     }
 
     fn style_attribute(&self) -> Option<ArcBorrow<'_, Locked<PropertyDeclarationBlock>>> {
-        self.node().inline_block.as_ref().map(Arc::borrow_arc)
+        self.inline_block.as_ref().map(Arc::borrow_arc)
     }
 
     fn animation_rule(
@@ -253,7 +260,7 @@ impl<'a, T: ExternalState> TElement for NodeRef<'a, T> {
     }
 
     fn state(&self) -> ElementState {
-        self.node().element_state()
+        self.element_state
     }
 
     fn has_part_attr(&self) -> bool {
@@ -266,14 +273,14 @@ impl<'a, T: ExternalState> TElement for NodeRef<'a, T> {
 
     fn id(&self) -> Option<&Atom> {
         // In the servo build stylo's `WeakAtom` is `stylo_atoms::Atom`.
-        self.node().id_attr.as_ref()
+        self.id_attr.as_ref()
     }
 
     fn each_class<F>(&self, mut callback: F)
     where
         F: FnMut(&AtomIdent),
     {
-        for class in &self.node().classes {
+        for class in &self.classes {
             callback(AtomIdent::cast(class));
         }
     }
@@ -288,56 +295,53 @@ impl<'a, T: ExternalState> TElement for NodeRef<'a, T> {
     where
         F: FnMut(&LocalName),
     {
-        for name in self.node().attrs.keys() {
+        for name in self.attrs.keys() {
             callback(&LocalName::from(name.as_ref()));
         }
         // Synthetic / reflected attribute names come from the embedder, so
         // the bloom filter accounts for them too (see
         // `ExternalState::each_extra_attr_name`).
-        self.node().ext().each_extra_attr_name(&mut callback);
+        self.ext.each_extra_attr_name(&mut callback);
     }
 
     fn has_dirty_descendants(&self) -> bool {
-        self.node().has_dirty_descendants()
+        Node::has_dirty_descendants(self)
     }
 
     fn has_snapshot(&self) -> bool {
         // Set by the document's snapshot recorders (see
         // `crate::invalidation`); consumed by stylo's invalidation pass.
-        self.node().snapshot_present()
+        self.snapshot_present()
     }
 
     fn handled_snapshot(&self) -> bool {
-        self.node().snapshot_handled()
+        self.snapshot_handled()
     }
 
     unsafe fn set_handled_snapshot(&self) {
-        self.node().set_snapshot_handled();
+        self.set_snapshot_handled();
     }
 
     unsafe fn set_dirty_descendants(&self) {
-        self.node().set_dirty_descendants_bit(true);
+        self.set_dirty_descendants_bit(true);
     }
 
     unsafe fn unset_dirty_descendants(&self) {
-        self.node().set_dirty_descendants_bit(false);
+        self.set_dirty_descendants_bit(false);
     }
 
     fn store_children_to_process(&self, n: isize) {
-        self.node().children_to_process.store(n, Ordering::SeqCst);
+        self.children_to_process.store(n, Ordering::SeqCst);
     }
 
     fn did_process_child(&self) -> isize {
-        self.node()
-            .children_to_process
-            .fetch_sub(1, Ordering::SeqCst)
-            - 1
+        self.children_to_process.fetch_sub(1, Ordering::SeqCst) - 1
     }
 
     unsafe fn ensure_data(&self) -> ElementDataMut<'_> {
         // SAFETY: traversal discipline — the caller holds exclusive access to
         // this node, so creating/borrowing its `ElementData` cannot race.
-        let slot = unsafe { &mut *self.node().stylo_data.get() };
+        let slot = unsafe { &mut *self.stylo_data.get() };
         slot.get_or_insert_with(ElementDataWrapper::default)
             .borrow_mut()
     }
@@ -346,16 +350,16 @@ impl<'a, T: ExternalState> TElement for NodeRef<'a, T> {
         // SAFETY: traversal discipline — exclusive access to this node, no
         // concurrent borrow of its stylo state.
         unsafe {
-            *self.node().stylo_data.get() = None;
+            *self.stylo_data.get() = None;
         }
-        self.node().selector_flags.store(0, Ordering::Relaxed);
+        self.selector_flags.store(0, Ordering::Relaxed);
     }
 
     fn has_data(&self) -> bool {
         // SAFETY: reads only the `Option` discriminant; the slot is only
         // created/removed by this node's owning worker (or under
         // `&mut Document`), never concurrently with this read.
-        unsafe { (*self.node().stylo_data.get()).is_some() }
+        unsafe { (*self.stylo_data.get()).is_some() }
     }
 
     fn borrow_data(&self) -> Option<ElementDataRef<'_>> {
@@ -363,7 +367,7 @@ impl<'a, T: ExternalState> TElement for NodeRef<'a, T> {
         // builds); the traversal discipline rules out a concurrent mutable
         // borrow.
         unsafe {
-            (*self.node().stylo_data.get())
+            (*self.stylo_data.get())
                 .as_ref()
                 .map(ElementDataWrapper::borrow)
         }
@@ -373,7 +377,7 @@ impl<'a, T: ExternalState> TElement for NodeRef<'a, T> {
         // SAFETY: as `borrow_data`, plus exclusive access under the traversal
         // discipline.
         unsafe {
-            (*self.node().stylo_data.get())
+            (*self.stylo_data.get())
                 .as_ref()
                 .map(ElementDataWrapper::borrow_mut)
         }
@@ -399,11 +403,11 @@ impl<'a, T: ExternalState> TElement for NodeRef<'a, T> {
         false
     }
 
-    fn shadow_root(&self) -> Option<NodeRef<'a, T>> {
+    fn shadow_root(&self) -> Option<&'a Node<T>> {
         None
     }
 
-    fn containing_shadow(&self) -> Option<NodeRef<'a, T>> {
+    fn containing_shadow(&self) -> Option<&'a Node<T>> {
         None
     }
 
@@ -429,7 +433,7 @@ impl<'a, T: ExternalState> TElement for NodeRef<'a, T> {
     }
 
     fn local_name(&self) -> &<SelectorImpl as selectors::SelectorImpl>::BorrowedLocalName {
-        &self.node().tag.0
+        &self.tag.0
     }
 
     fn namespace(&self) -> &<SelectorImpl as selectors::SelectorImpl>::BorrowedNamespaceUrl {
@@ -441,7 +445,7 @@ impl<'a, T: ExternalState> TElement for NodeRef<'a, T> {
     }
 
     fn has_selector_flags(&self, flags: ElementSelectorFlags) -> bool {
-        self.node().selector_flags().contains(flags)
+        self.selector_flags().contains(flags)
     }
 
     fn relative_selector_search_direction(&self) -> ElementSelectorFlags {
@@ -450,30 +454,30 @@ impl<'a, T: ExternalState> TElement for NodeRef<'a, T> {
 
     fn get_attr(&self, attr: &LocalName, _namespace: &Namespace) -> Option<String> {
         let name: &str = attr.0.as_ref();
-        if let Some(value) = self.node().attrs.get(name) {
+        if let Some(value) = self.attrs.get(name) {
             return Some(value.clone());
         }
         // Synthetic / reflected attributes are the embedder's: consulted only
         // after the real attribute map misses, matching `attr_matches`.
-        self.node().ext().extra_attr_value(name)
+        self.ext.extra_attr_value(name)
     }
 }
 
 // --- selectors::Element ---------------------------------------------------------
 
 /// id/class matching is **case-sensitive**; `:hover`/`:active`/`:focus` are
-/// matched from the node's [`ElementState`](crate::ElementState); attribute
+/// matched from the node's [`ElementState`]; attribute
 /// matching covers the node's real attributes plus whatever synthetic /
 /// reflected attributes the embedder's [`ExternalState`] hooks serve.
-impl<T: ExternalState> Element for NodeRef<'_, T> {
+impl<T: ExternalState> Element for &Node<T> {
     type Impl = SelectorImpl;
 
     fn opaque(&self) -> OpaqueElement {
-        OpaqueElement::new(self.node())
+        OpaqueElement::new(*self)
     }
 
     fn parent_element(&self) -> Option<Self> {
-        self.parent()
+        Node::parent(*self)
     }
 
     fn parent_node_is_shadow_root(&self) -> bool {
@@ -490,15 +494,15 @@ impl<T: ExternalState> Element for NodeRef<'_, T> {
 
     fn prev_sibling_element(&self) -> Option<Self> {
         // Every node is an element, so the immediate previous sibling is it.
-        self.prev_sibling()
+        Node::prev_sibling(*self)
     }
 
     fn next_sibling_element(&self) -> Option<Self> {
-        self.next_sibling()
+        Node::next_sibling(*self)
     }
 
     fn first_element_child(&self) -> Option<Self> {
-        self.first_child()
+        Node::first_child(*self)
     }
 
     fn is_html_element_in_html_document(&self) -> bool {
@@ -509,7 +513,7 @@ impl<T: ExternalState> Element for NodeRef<'_, T> {
         &self,
         local_name: &<Self::Impl as selectors::SelectorImpl>::BorrowedLocalName,
     ) -> bool {
-        self.node().tag.0 == *local_name
+        self.tag.0 == *local_name
     }
 
     fn has_namespace(
@@ -521,7 +525,7 @@ impl<T: ExternalState> Element for NodeRef<'_, T> {
     }
 
     fn is_same_type(&self, other: &Self) -> bool {
-        self.node().tag == other.node().tag
+        self.tag == other.tag
     }
 
     fn attr_matches(
@@ -538,13 +542,12 @@ impl<T: ExternalState> Element for NodeRef<'_, T> {
         // invalidation (the class/id snapshot recorders) is consistent with
         // this choice.
         let name: &str = local_name.0.as_ref();
-        if let Some(value) = self.node().attrs.get(name) {
+        if let Some(value) = self.attrs.get(name) {
             return operation.eval_str(value);
         }
         // Synthetic / reflected attributes are the embedder's: consulted only
         // after the real attribute map misses (see `ExternalState::extra_attr_value`).
-        self.node()
-            .ext()
+        self.ext
             .extra_attr_value(name)
             .is_some_and(|value| operation.eval_str(&value))
     }
@@ -558,7 +561,7 @@ impl<T: ExternalState> Element for NodeRef<'_, T> {
         // other non-tree-structural pseudo-class is unsupported → false.
         match pc {
             NonTSPseudoClass::Hover | NonTSPseudoClass::Active | NonTSPseudoClass::Focus => {
-                self.node().element_state().contains(pc.state_flag())
+                self.element_state.contains(pc.state_flag())
             }
             _ => false,
         }
@@ -579,16 +582,14 @@ impl<T: ExternalState> Element for NodeRef<'_, T> {
         // both push parent flags onto the shared parent.
         let self_flags = flags.for_self();
         if !self_flags.is_empty() {
-            self.node()
-                .selector_flags
+            self.selector_flags
                 .fetch_or(self_flags.bits(), Ordering::Relaxed);
         }
         let parent_flags = flags.for_parent();
         if !parent_flags.is_empty()
-            && let Some(parent) = self.parent()
+            && let Some(parent) = Node::parent(*self)
         {
             parent
-                .node()
                 .selector_flags
                 .fetch_or(parent_flags.bits(), Ordering::Relaxed);
         }
@@ -603,15 +604,13 @@ impl<T: ExternalState> Element for NodeRef<'_, T> {
     }
 
     fn has_id(&self, id: &AtomIdent, case_sensitivity: CaseSensitivity) -> bool {
-        self.node()
-            .id_attr
+        self.id_attr
             .as_ref()
             .is_some_and(|my_id| case_sensitivity.eq_atom(my_id, id))
     }
 
     fn has_class(&self, name: &AtomIdent, case_sensitivity: CaseSensitivity) -> bool {
-        self.node()
-            .classes
+        self.classes
             .iter()
             .any(|class| case_sensitivity.eq_atom(class, name))
     }
@@ -631,7 +630,7 @@ impl<T: ExternalState> Element for NodeRef<'_, T> {
     fn is_empty(&self) -> bool {
         // Non-empty if the node has any child, or carries non-empty
         // character data.
-        self.node().children.is_empty() && self.node().text.as_ref().is_none_or(String::is_empty)
+        self.children.is_empty() && self.text.as_ref().is_none_or(String::is_empty)
     }
 
     fn is_root(&self) -> bool {
@@ -640,7 +639,7 @@ impl<T: ExternalState> Element for NodeRef<'_, T> {
         // `ExternalState::is_root` so a detached subtree's parentless top
         // does not match `:root` during resolve; the default keeps
         // parentless ⇒ root.
-        self.node().parent.is_none() && self.node().ext().is_root()
+        self.parent.is_none() && self.ext.is_root()
     }
 
     fn add_element_unique_hashes(&self, filter: &mut BloomFilter) -> bool {

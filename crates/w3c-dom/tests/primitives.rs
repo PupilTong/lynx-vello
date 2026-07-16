@@ -1,6 +1,6 @@
 //! Integration tests for the `w3c-dom` primitives an embedder's API layer
 //! delegates to: the ONE-TREE [`Document`] (generational storage, structure
-//! ops, queries), [`NodeRef`] navigation, invalidation scheduling carried by
+//! ops, queries), `&Node` navigation, invalidation scheduling carried by
 //! the setters, inline-style parsing, the [`ExternalState`] hook defaults,
 //! and the let-it-crash mutation contract.
 //!
@@ -13,7 +13,7 @@
 //! `remove_subtree` harvest test, which uses a payload type to observe what
 //! the document returns.
 
-use w3c_dom::{Document, ExternalState, NodeId, NodeRef};
+use w3c_dom::{Document, ExternalState, Node, NodeId};
 
 /// Create a node with the given tag (no-op payload) and return its handle.
 fn node(doc: &mut Document<()>, tag: &str) -> NodeId {
@@ -50,18 +50,18 @@ fn node_ref_navigation() {
     doc.append(container, b);
     doc.append(container, c);
 
-    let cref = doc.node_ref(container).unwrap();
+    let cref = doc.get(container).unwrap();
     assert_eq!(cref.tag(), "div");
     assert_eq!(cref.parent().unwrap().id(), root);
-    let kids: Vec<_> = cref.children().map(NodeRef::id).collect();
+    let kids: Vec<_> = cref.children().map(Node::id).collect();
     assert_eq!(kids, vec![a, b, c]);
     assert_eq!(cref.first_child().unwrap().id(), a);
     assert_eq!(cref.last_child().unwrap().id(), c);
 
-    assert!(doc.node_ref(a).unwrap().prev_sibling().is_none());
-    assert_eq!(doc.node_ref(a).unwrap().next_sibling().unwrap().id(), b);
-    assert_eq!(doc.node_ref(b).unwrap().prev_sibling().unwrap().id(), a);
-    assert!(doc.node_ref(c).unwrap().next_sibling().is_none());
+    assert!(doc.get(a).unwrap().prev_sibling().is_none());
+    assert_eq!(doc.get(a).unwrap().next_sibling().unwrap().id(), b);
+    assert_eq!(doc.get(b).unwrap().prev_sibling().unwrap().id(), a);
+    assert!(doc.get(c).unwrap().next_sibling().is_none());
 }
 
 #[test]
@@ -242,8 +242,8 @@ fn external_state_default_root_matching() {
     let child = node(&mut doc, "div");
     doc.append(root, child);
 
-    assert!(doc.node_ref(root).unwrap().is_root());
-    assert!(!doc.node_ref(child).unwrap().is_root());
+    assert!(doc.get(root).unwrap().is_root());
+    assert!(!doc.get(child).unwrap().is_root());
 }
 
 #[test]
@@ -256,10 +256,10 @@ fn external_state_default_attr_hooks() {
     let el = node(&mut doc, "div");
     doc.set_attribute(el, "title", "hi");
 
-    let elem = doc.node_ref(el).unwrap();
+    let elem = doc.get(el).unwrap();
     let ns = stylo::Namespace::default();
     assert_eq!(
-        elem.node().attr("title"),
+        elem.attr("title"),
         Some("hi"),
         "the accessor sees the plain attribute"
     );

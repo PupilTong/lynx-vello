@@ -218,7 +218,8 @@ impl Doc {
     pub fn matches(&self, id: NodeId, selector: &str) -> bool {
         let list = SelectorParser::parse_author_origin_no_namespace(selector, &url_data())
             .unwrap_or_else(|_| panic!("selector `{selector}` must parse"));
-        let node = self.dom.node_ref(id).expect("node id is live");
+        let node = self.dom.get(id).expect("node id is live");
+        let node_handle = &node;
         let mut caches = SelectorCaches::default();
         let mut context = MatchingContext::new(
             MatchingMode::Normal,
@@ -228,7 +229,7 @@ impl Doc {
             NeedsSelectorFlags::No,
             MatchingForInvalidation::No,
         );
-        matches_selector_list(&list, &node, &mut context)
+        matches_selector_list(&list, node_handle, &mut context)
     }
 
     /// Whether `selector` parses at all in this build.
@@ -395,7 +396,7 @@ pub fn media_matches_on(
     let mut doc: Document<()> = engine.new_document();
     let probe = doc.create_node("view", ());
     doc.add_class(probe, "probe");
-    let style = engine.resolve(doc.node_ref(probe).expect("fresh node"), None);
+    let style = engine.resolve(doc.get(probe).expect("fresh node"), None);
     style.clone_color() == rgb(1, 2, 3)
 }
 

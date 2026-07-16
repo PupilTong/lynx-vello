@@ -1,4 +1,4 @@
-//! [`Node`] — the unit the tree is composed of — and the [`NodeRef`]
+//! [`Node`] — the unit the tree is composed of — and its `&Node` read/
 //! navigation handle.
 //!
 //! A node models a strict subset of the W3C DOM: tree links, tag, id,
@@ -12,15 +12,16 @@
 //! so pre-mutation snapshots and restyle hints can never be skipped. Shared
 //! accessors on `Node` are the read surface.
 //!
-//! # The backpointer, and why `NodeRef` is one word
+//! # The backpointer, and why `&Node` is the handle
 //!
 //! Each node carries a pointer back to the [`Document`](crate::Document) core
-//! that owns it. Tree navigation therefore needs nothing but the node itself:
-//! [`NodeRef`] wraps a plain `&Node`, and stylo's element traits are
-//! implemented on that **one-word handle** (see [`crate::traits`]). This is
-//! load-bearing beyond convenience — stylo's style-sharing cache sizes its
+//! that owns it. Tree navigation therefore needs nothing but the node itself,
+//! and stylo's element traits are implemented **directly on `&'a Node<T>`**
+//! (see the crate-private `traits` module) — no wrapper handle exists. This
+//! is load-bearing beyond convenience — stylo's style-sharing cache sizes its
 //! thread-local storage for a word-sized `TElement` handle (see
-//! `style/sharing/mod.rs`, `FakeCandidate`) — and it is what lets the restyle
+//! `style/sharing/mod.rs`, `FakeCandidate`), and a shared reference is
+//! exactly one word and `Copy` by nature — and it is what lets the restyle
 //! traversal run over the one tree in place, with no mirror tree built for
 //! styling.
 //!
@@ -171,7 +172,7 @@ impl<T> Node<T> {
     ///
     /// # Safety discipline (crate-internal)
     ///
-    /// Callable only from shared-borrow contexts ([`NodeRef`] navigation and
+    /// Callable only from shared-borrow contexts (`&Node` navigation and
     /// the stylo trait impls), where the `&self` was itself derived from a
     /// `&Document` / `&Core`: the core is then alive (it owns this node) and
     /// no `&mut Core` can exist (`Document` mutation holds `&mut self`).
@@ -383,11 +384,79 @@ impl<T> Node<T> {
     }
 }
 
-impl<T: fmt::Debug> fmt::Debug for Node<T> {
+// --- tree navigation ----------------------------------------------------------
+//
+// Navigation lives directly on `Node` (resolving ids through the document
+// backpointer), so a plain `&'a Node<T>` is the crate's only read handle —
+// the same one-word value stylo's element traits are implemented on (see
+// the crate-private `traits` module; stylo's style-sharing cache sizes its
+// TLS for a word-sized `TElement` handle). References being `Copy` is what
+// the traversal relies on; no wrapper type is needed.
+//
+// The trait impls on `&Node` reuse these method names (`first_child`,
+// `next_sibling`, …) and delegate to them **fully qualified**
+// (`Node::first_child(node)`): with a stylo trait in scope, method-call
+// syntax on a `&Node` receiver would resolve to the trait impl first.
+impl<T> Node<T> {
+    /// The parent node, if any.
+    #[must_use]
+    pub fn parent(&self) -> Option<&Node<T>> {
+        self.parent.map(|id| self.tree().link(id))
+    }
+
+    /// The first child node, if any.
+    #[must_use]
+    pub fn first_child(&self) -> Option<&Node<T>> {
+        self.children.first().map(|&id| self.tree().link(id))
+    }
+
+    /// The last child node, if any.
+    #[must_use]
+    pub fn last_child(&self) -> Option<&Node<T>> {
+        self.children.last().map(|&id| self.tree().link(id))
+    }
+
+    /// The next sibling node, if any.
+    #[must_use]
+    pub fn next_sibling(&self) -> Option<&Node<T>> {
+        self.sibling_at(1)
+    }
+
+    /// The previous sibling node, if any.
+    #[must_use]
+    pub fn prev_sibling(&self) -> Option<&Node<T>> {
+        self.sibling_at(-1)
+    }
+
+    fn sibling_at(&self, offset: isize) -> Option<&Node<T>> {
+        let tree = self.tree();
+        let siblings = &tree.link(self.parent?).children;
+        let pos = siblings
+            .iter()
+            .position(|&c| c == self.id)
+            .expect("node must appear in its parent's child list");
+        let sibling = *siblings.get(pos.checked_add_signed(offset)?)?;
+        Some(tree.link(sibling))
+    }
+
+    /// Iterate over the node's children in document order.
+    #[must_use]
+    pub fn children(&self) -> ChildrenIter<'_, T> {
+        ChildrenIter {
+            tree: self.tree(),
+            children: &self.children,
+            index: 0,
+        }
+    }
+}
+
+// `stylo_data` (an `UnsafeCell`) and the `ext` payload are deliberately
+// omitted: the former is not `Debug` (and reading it would need the
+// no-concurrent-flush invariant), and printing the latter would demand a
+// `T: Debug` bound this impl cannot carry — stylo's `TNode`/`TElement`
+// require `&Node<T>: Debug` for every payload type.
+impl<T> fmt::Debug for Node<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // `stylo_data` (an `UnsafeCell`) is deliberately omitted: it is not
-        // `Debug`, and reading it here would need the no-concurrent-flush
-        // invariant we cannot assert from a generic Debug impl.
         f.debug_struct("Node")
             .field("id", &self.id)
             .field("tag", &self.tag())
@@ -398,146 +467,32 @@ impl<T: fmt::Debug> fmt::Debug for Node<T> {
             .field("style_dirty", &self.is_style_dirty())
             .field("dirty_descendants", &self.has_dirty_descendants())
             .field("children", &self.children)
-            .field("ext", &self.ext)
             .finish_non_exhaustive()
     }
 }
 
-/// A `Copy` read-only navigation handle over a node.
+/// Node equality is **identity**: two nodes are equal exactly when they are
+/// the same node (compared by address, which is stable for the lifetime of
+/// any borrow — mutation, and thus node motion, needs `&mut Document`).
 ///
-/// One word — a wrapped `&Node` — thanks to the node backpointer; this is
-/// the type stylo's element/traversal traits are implemented on (see the
-/// crate-private `traits` module), and stylo's style-sharing cache depends
-/// on the handle being word-sized. Only constructible via
-/// [`Document::node_ref`](crate::Document::node_ref) (or navigation from
-/// another handle), so the referenced node is guaranteed live for the
-/// handle's borrow of its document.
-pub struct NodeRef<'a, T>(pub(crate) &'a Node<T>);
-
-/// The style-sharing cache sizes its TLS for a word-sized handle
-/// (`FakeCandidate` in stylo's `style/sharing/mod.rs`); a fatter `NodeRef`
-/// would fail stylo's runtime layout assertion on the first flush.
-const _: () = assert!(size_of::<NodeRef<'_, ()>>() == size_of::<usize>());
-
-// Hand-written (rather than derived) so `T` needs no `Clone`/`Copy` bound:
-// the handle only holds a shared reference.
-impl<T> Clone for NodeRef<'_, T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<T> Copy for NodeRef<'_, T> {}
-
-impl<T> fmt::Debug for NodeRef<'_, T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("NodeRef")
-            .field("id", &self.0.id())
-            .field("tag", &self.0.tag())
-            .finish()
-    }
-}
-
-/// Two handles are equal when they point at the same node.
-///
-/// stylo's `TElement`/`TNode` require `Eq`/`Hash`; identity is the node's
-/// address, which is stable for the lifetime of the borrow (mutation — and
-/// thus any node motion — needs `&mut Document`).
-impl<T> PartialEq for NodeRef<'_, T> {
+/// A DOM node is an entity, not a value; this is also what stylo's
+/// `TElement`/`TNode` bounds (`Eq`/`Hash` on the `&Node` handle) require of
+/// element identity. `Hash` matches: it hashes the address.
+impl<T> PartialEq for Node<T> {
     fn eq(&self, other: &Self) -> bool {
-        std::ptr::eq(self.0, other.0)
+        std::ptr::eq(self, other)
     }
 }
 
-impl<T> Eq for NodeRef<'_, T> {}
+impl<T> Eq for Node<T> {}
 
-impl<T> std::hash::Hash for NodeRef<'_, T> {
+impl<T> std::hash::Hash for Node<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::ptr::from_ref(self.0).hash(state);
+        std::ptr::from_ref(self).hash(state);
     }
 }
 
-impl<'a, T> NodeRef<'a, T> {
-    /// Borrow the underlying node.
-    #[must_use]
-    pub fn node(self) -> &'a Node<T> {
-        self.0
-    }
-
-    /// The handle for this node.
-    #[must_use]
-    pub fn id(self) -> NodeId {
-        self.0.id()
-    }
-
-    /// The node's tag name.
-    #[must_use]
-    pub fn tag(self) -> &'a str {
-        self.0.tag.0.as_ref()
-    }
-
-    /// The node's external-state payload.
-    #[must_use]
-    pub fn ext(self) -> &'a T {
-        &self.0.ext
-    }
-
-    /// The parent node, if any.
-    #[must_use]
-    pub fn parent(self) -> Option<NodeRef<'a, T>> {
-        let tree = self.0.tree();
-        self.0.parent.map(|id| NodeRef(tree.link(id)))
-    }
-
-    /// The first child node, if any.
-    #[must_use]
-    pub fn first_child(self) -> Option<NodeRef<'a, T>> {
-        let tree = self.0.tree();
-        self.0.children.first().map(|&id| NodeRef(tree.link(id)))
-    }
-
-    /// The last child node, if any.
-    #[must_use]
-    pub fn last_child(self) -> Option<NodeRef<'a, T>> {
-        let tree = self.0.tree();
-        self.0.children.last().map(|&id| NodeRef(tree.link(id)))
-    }
-
-    /// The next sibling node, if any.
-    #[must_use]
-    pub fn next_sibling(self) -> Option<NodeRef<'a, T>> {
-        self.sibling_at(1)
-    }
-
-    /// The previous sibling node, if any.
-    #[must_use]
-    pub fn prev_sibling(self) -> Option<NodeRef<'a, T>> {
-        self.sibling_at(-1)
-    }
-
-    fn sibling_at(self, offset: isize) -> Option<NodeRef<'a, T>> {
-        let tree = self.0.tree();
-        let siblings = &tree.link(self.0.parent?).children;
-        let pos = siblings
-            .iter()
-            .position(|&c| c == self.0.id())
-            .expect("node must appear in its parent's child list");
-        let sibling = *siblings.get(pos.checked_add_signed(offset)?)?;
-        Some(NodeRef(tree.link(sibling)))
-    }
-
-    /// Iterate over the node's children in document order.
-    #[must_use]
-    pub fn children(self) -> ChildrenIter<'a, T> {
-        ChildrenIter {
-            tree: self.0.tree(),
-            children: &self.0.children,
-            index: 0,
-        }
-    }
-}
-
-/// The children iterator ([`NodeRef::children`]); also what stylo's restyle
+/// The children iterator ([`Node::children`]); also what stylo's restyle
 /// traversal walks.
 pub struct ChildrenIter<'a, T> {
     tree: &'a Core<T>,
@@ -555,11 +510,11 @@ impl<T> fmt::Debug for ChildrenIter<'_, T> {
 }
 
 impl<'a, T> Iterator for ChildrenIter<'a, T> {
-    type Item = NodeRef<'a, T>;
+    type Item = &'a Node<T>;
 
-    fn next(&mut self) -> Option<NodeRef<'a, T>> {
+    fn next(&mut self) -> Option<&'a Node<T>> {
         let id = *self.children.get(self.index)?;
         self.index += 1;
-        Some(NodeRef(self.tree.link(id)))
+        Some(self.tree.link(id))
     }
 }
