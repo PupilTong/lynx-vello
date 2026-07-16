@@ -84,17 +84,27 @@ fn transform_origin_grammar() {
     );
 }
 
-// `offset-distance` is not in the fork's supported Lynx grammar
-// (`vendor/stylo/style/properties/lynx_properties.txt` lists `offset-path`
-// and `offset-rotate` but no `offset-distance`) even though the C++ engine
-// has an offset_distance handler — flagged for fork review. The guard pins
-// the absence so a fork addition is noticed and the C++ rows get re-ported.
+// C++: offset_distance_handler_unittest.cc — W3C-corrected: unitless
+// non-zero rejects; percentages stay percentages.
 #[test]
-fn offset_distance_is_absent() {
-    assert!(
-        !w3c_dom::property_is_supported("offset-distance"),
-        "offset-distance grew grammar support — port the C++ rows"
+fn offset_distance_grammar() {
+    assert!(parses("offset-distance", "0"), "unitless zero length");
+    assert_eq!(specified("offset-distance", "0%").as_deref(), Some("0%"));
+    assert_eq!(specified("offset-distance", "50%").as_deref(), Some("50%"));
+    assert_eq!(
+        specified("offset-distance", "100%").as_deref(),
+        Some("100%")
     );
+    assert_eq!(
+        specified("offset-distance", "10px").as_deref(),
+        Some("10px")
+    );
+    for invalid in ["1", "100% foo", "auto"] {
+        assert!(
+            !parses("offset-distance", invalid),
+            "`{invalid}` must be rejected"
+        );
+    }
 }
 
 // C++: css_string_parser_unittest.cc offset_rotate_value. Fork decision
