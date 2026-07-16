@@ -161,6 +161,11 @@ fn writeback_stores_computed_and_clears_dirty() {
     doc.set_computed(&view, computed).unwrap();
 
     assert!(doc.computed(&view).unwrap().is_some());
+    // Before the writeback the view is `is_style_dirty` only because it had
+    // no style data (`set_classes` on a never-styled widget records no
+    // snapshot and no hint — `ensure_snapshot` skips unstyled nodes). Storing
+    // the computed style gives it data with no pending snapshot or hint, so
+    // under the derived semantics it now reports clean.
     assert!(!doc.widget(&view).unwrap().is_style_dirty());
 }
 

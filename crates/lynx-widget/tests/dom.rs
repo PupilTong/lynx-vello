@@ -532,23 +532,42 @@ fn structural_and_attribute_changes_schedule_flush_work() {
     let child = doc.create_view();
     doc.append_element(&child, &list).unwrap();
     doc.clear_dirty();
-    assert!(!doc.has_dirty());
+    // These widgets are never styled, so under the derived dirty semantics
+    // they stay `is_style_dirty` and the tree-level `has_dirty` (dominated by
+    // the never-styled page) is not a meaningful baseline. `clear_dirty`
+    // still resets the reachability spine — assert on that, mirroring
+    // w3c-dom's own `attach_detach_marks_reachability`.
+    assert!(!doc.widget(&page).unwrap().has_dirty_descendants());
 
     doc.remove_element(&list, &child).unwrap();
-    assert!(doc.has_dirty(), "removal must schedule flush work");
     assert!(
-        !doc.widget(&hint).unwrap().is_style_dirty(),
+        doc.widget(&page).unwrap().has_dirty_descendants(),
+        "removal under `list` must be reachable from the page root"
+    );
+    // `dirty_descendants` is the mutation-time reachability signal; a
+    // bystanding sibling gains none of it.
+    assert!(
+        !doc.widget(&hint).unwrap().has_dirty_descendants(),
         "siblings are not blanket-dirtied at mutation time"
     );
 
     doc.clear_dirty();
     doc.append_element(&child, &list).unwrap();
-    assert!(doc.has_dirty(), "insertion must schedule flush work");
-    assert!(doc.widget(&list).unwrap().has_dirty_descendants());
+    assert!(
+        doc.widget(&list).unwrap().has_dirty_descendants(),
+        "insertion under `list` marks its spine reachable"
+    );
+    assert!(doc.widget(&page).unwrap().has_dirty_descendants());
 
     doc.clear_dirty();
     doc.set_classes(&child, "hot").unwrap();
+    // `child`'s ancestor spine gains reachability bits; `child` itself is the
+    // mutated widget, not a spine node, and the bystander gains nothing.
+    assert!(doc.widget(&list).unwrap().has_dirty_descendants());
+    assert!(doc.widget(&page).unwrap().has_dirty_descendants());
+    assert!(!doc.widget(&child).unwrap().has_dirty_descendants());
+    assert!(!doc.widget(&hint).unwrap().has_dirty_descendants());
+    // The tree still needs a flush: every widget here is never-styled, so the
+    // page reports derived `is_style_dirty` and the tree-level query is true.
     assert!(doc.has_dirty(), "class change must schedule flush work");
-    assert!(doc.widget(&child).unwrap().is_style_dirty());
-    assert!(!doc.widget(&hint).unwrap().is_style_dirty());
 }
