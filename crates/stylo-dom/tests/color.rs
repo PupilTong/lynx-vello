@@ -25,6 +25,7 @@ mod common;
 
 use common::{Doc, parses};
 use stylo::color::AbsoluteColor;
+use stylo::values::animated::{Animate, Procedure};
 use stylo::values::computed::ColorPropertyValue;
 use stylo_dom::ElementId;
 
@@ -68,10 +69,24 @@ fn text_gradient_survives_document_cascade() {
     doc.set_inline(element, "color: linear-gradient(red, blue)");
     doc.flush();
 
-    assert!(matches!(
-        doc.style(element).clone_color_value(),
-        ColorPropertyValue::Gradient(_)
-    ));
+    let style = doc.style(element);
+    let gradient = style.clone_color_value();
+    assert!(matches!(&gradient, ColorPropertyValue::Gradient(_)));
+
+    // Native Lynx stores opaque black as the parallel solid text color when
+    // `color` is a gradient, and its default border color is independently
+    // black. `currentcolor` consumers therefore must not become transparent.
+    assert_rgba(style.clone_color(), 0, 0, 0, 1.0, "gradient fallback");
+    assert_eq!(doc.value(element, "border-top-color"), "rgb(0, 0, 0)");
+
+    // Solid colors interpolate; gradients are not numeric color values and
+    // take Web Animations' discrete fallback.
+    let solid = ColorPropertyValue::Color(AbsoluteColor::BLACK);
+    assert!(
+        gradient
+            .animate(&solid, Procedure::Interpolate { progress: 0.5 })
+            .is_err()
+    );
 }
 
 /// The full Lynx `<named-color>` table (148 entries incl. `transparent`) with
