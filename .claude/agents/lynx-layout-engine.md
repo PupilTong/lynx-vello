@@ -11,8 +11,10 @@ You own the box-layout algorithm: taking computed style (from the
 — sizes, positions, baselines, and scrollable extents — that the render engine
 paints. `crates/neutron-star` contains the host protocol, shared layout
 machinery, CSS Flexbox, CSS Grid, and Starlight Linear and Relative algorithms.
-The concrete Widget/stylo runtime adapter remains a future milestone. Stacking
-and paint order belong to the render layer, not the box-layout crate.
+The concrete adapter from `stylo-dom` topology/computed styles into
+neutron-star remains a future milestone. `lynx-widget` is only a PAPI facade
+and must not own that adapter. Stacking and paint order belong to the render
+layer, not the box-layout crate.
 
 **Read `AGENTS.md` first**, then `docs/tracking/css-layout.md` (the primary
 spec for this subsystem) and `docs/tracking/deviations.md`.

@@ -53,6 +53,17 @@ fn flex_shorthand_grammar() {
     assert!(!parses("flex", "2 3 5"));
     assert!(!parses("flex", "10 2 3"));
     assert!(!parses("flex", "hello"));
+
+    // `flex.rs` uses Stylo's upstream FlexBasis parser unchanged.
+    for basis in [
+        "content",
+        "min-content",
+        "max-content",
+        "fit-content",
+        "fit-content(20px)",
+    ] {
+        assert!(parses("flex-basis", basis), "flex-basis: {basis}");
+    }
 }
 
 // C++: flex_flow_handler_unittest.cc (all four tests). The shorthand resets
@@ -185,6 +196,14 @@ fn grid_placement_shorthands() {
             "`grid-column: {invalid}` must be rejected"
         );
     }
+
+    // Grid value types are the upstream Stylo types, including named lines.
+    for value in ["header", "2 header", "span header", "span 2 header"] {
+        assert!(
+            parses("grid-column-start", value),
+            "grid-column-start: {value}"
+        );
+    }
 }
 
 // C++: grid_template_handler_unittest.cc — track lists asserted through
@@ -208,7 +227,8 @@ fn grid_template_tracks() {
         "1fr 0.2fr auto 2fr"
     );
 
-    // Integer repeat() forms parse; the computed value PRESERVES the
+    // Positive-integer repeat() forms parse, including documented multi-track
+    // fragments; the computed value PRESERVES the
     // repeat() structure (expansion to concrete tracks is the layout
     // engine's track-resolution step, not a computed-value operation —
     // Lynx materialized the expansion at parse time instead).
@@ -265,13 +285,17 @@ fn grid_template_tracks() {
         "repeat(1, minmax(fit-content(100px), 2fr))"
     ));
 
-    // W3C-corrected: the empty string is not a declaration; `none` is the
-    // keyword form of the initial value.
+    // The reverted upstream grid grammar includes `none`, intrinsic tracks,
+    // line names, and automatic repeats.
     assert!(!parses("grid-template-rows", ""));
-    assert_eq!(
-        computed("grid-template-rows: none", "grid-template-rows"),
-        "none"
-    );
+    for valid in [
+        "none",
+        "min-content",
+        "[header] 20px [body] 1fr",
+        "repeat(auto-fit, 20px)",
+    ] {
+        assert!(parses("grid-template-rows", valid), "`{valid}` must parse");
+    }
 }
 
 // C++: aspect_ratio_handler_unittest.cc — W3C-corrected: ratios are kept

@@ -405,14 +405,29 @@ fn timing_function_functions() {
 }
 
 // C++: timing_function_handler_unittest.cc square-bezier — Lynx-only easing
-// with no stylo grammar today; the guard pins its absence so a fork addition
-// is noticed and the C++ rows get ported.
+// with one numeric control point. Stylo retains the two coefficients in the
+// computed value and evaluates the equivalent cubic curve.
 #[test]
-fn square_bezier_is_absent() {
-    assert!(
-        !parses("transition-timing-function", "square-bezier(1, 0.5)"),
-        "square-bezier grew grammar support — port the Lynx-faithful rows"
+fn square_bezier_grammar() {
+    assert_eq!(
+        specified("transition-timing-function", "square-bezier(1, 0.5)").as_deref(),
+        Some("square-bezier(1, 0.5)")
     );
+    assert!(parses(
+        "animation-timing-function",
+        "square-bezier(0.25, 0.75)"
+    ));
+    for invalid in [
+        "square-bezier()",
+        "square-bezier(1)",
+        "square-bezier(1, 0.5, 0.25)",
+        "square-bezier(left, top)",
+    ] {
+        assert!(
+            !parses("transition-timing-function", invalid),
+            "`{invalid}` must be rejected"
+        );
+    }
 }
 
 // C++: time_handler_unittest.cc — units required (no unitless-compat

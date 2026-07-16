@@ -25,6 +25,7 @@ mod common;
 
 use common::{Doc, parses};
 use stylo::color::AbsoluteColor;
+use stylo::values::computed::ColorPropertyValue;
 use stylo_dom::ElementId;
 
 /// Assert a computed `AbsoluteColor` resolves to the given legacy-sRGB channels.
@@ -55,6 +56,22 @@ fn background_color(doc: &Doc, id: ElementId) -> AbsoluteColor {
     let style = doc.style(id);
     let current = style.clone_color();
     style.clone_background_color().resolve_to_absolute(&current)
+}
+
+/// Lynx text gradients must survive parsing and cascade as a computed value;
+/// the future layout/paint adapter reads this from `stylo-dom`, not from the
+/// Widget/PAPI facade.
+#[test]
+fn text_gradient_survives_document_cascade() {
+    let mut doc = Doc::new();
+    let element = doc.el(doc.root, "text");
+    doc.set_inline(element, "color: linear-gradient(red, blue)");
+    doc.flush();
+
+    assert!(matches!(
+        doc.style(element).clone_color_value(),
+        ColorPropertyValue::Gradient(_)
+    ));
 }
 
 /// The full Lynx `<named-color>` table (148 entries incl. `transparent`) with

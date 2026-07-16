@@ -9,8 +9,8 @@
 //! - Real W3C features assert **W3C-correct** behavior — what stylo does — even where the C++
 //!   engine deviates (e.g. selectors Lynx parses but never matches must match here; `var()` cycles
 //!   use the spec's fallback rules).
-//! - Lynx-only extensions (`display: linear`, `linear-*`/`relative-*` longhands, `rpx`/`ppx` units)
-//!   assert Lynx's actual behavior.
+//! - Lynx-only extensions (`display: linear`, `linear-*`/`relative-*` longhands, and `rpx`) assert
+//!   Lynx's actual behavior.
 //!
 //! Tests build small trees through [`Doc`], flush through stylo's restyle
 //! traversal, and assert computed values by serialized longhand

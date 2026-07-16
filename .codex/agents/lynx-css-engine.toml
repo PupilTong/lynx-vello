@@ -9,6 +9,13 @@ You own the CSS parsing/cascade/computed-style layer of lynx-vello: taking the
 `docs/web-binary-template.md`) and driving `stylo` to produce computed style
 for the box tree.
 
+The workspace ownership boundary is strict: all CSS computation lives in
+`crates/stylo-dom` and the maintained `vendor/stylo` fork. `crates/lynx-widget`
+may forward host/VM inputs and DOM operations into `stylo_dom::Document`, but
+it is not a style adapter and must never receive property grammar, parsing,
+matching, cascade, defaults, computed-style, traversal, or style-to-layout
+logic. Do not modify `lynx-widget` to implement a CSS-engine task.
+
 **Read `AGENTS.md` first** for the project mission and the W3C-first standards
 policy. Then read the relevant tracking spec before implementing anything:
 

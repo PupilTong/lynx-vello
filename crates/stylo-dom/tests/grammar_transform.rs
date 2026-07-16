@@ -84,22 +84,20 @@ fn transform_origin_grammar() {
     );
 }
 
-// C++: offset_distance_handler_unittest.cc — W3C-corrected: unitless
-// non-zero rejects; percentages stay percentages.
+// C++: offset_distance_handler_unittest.cc — Lynx treats both literal
+// numbers and percentages as a normalized path fraction. Lengths are absent.
 #[test]
 fn offset_distance_grammar() {
-    assert!(parses("offset-distance", "0"), "unitless zero length");
+    assert_eq!(specified("offset-distance", "0").as_deref(), Some("0%"));
+    assert_eq!(specified("offset-distance", "0.5").as_deref(), Some("50%"));
+    assert_eq!(specified("offset-distance", "1").as_deref(), Some("100%"));
     assert_eq!(specified("offset-distance", "0%").as_deref(), Some("0%"));
     assert_eq!(specified("offset-distance", "50%").as_deref(), Some("50%"));
     assert_eq!(
         specified("offset-distance", "100%").as_deref(),
         Some("100%")
     );
-    assert_eq!(
-        specified("offset-distance", "10px").as_deref(),
-        Some("10px")
-    );
-    for invalid in ["1", "100% foo", "auto"] {
+    for invalid in ["-0.1", "1.1", "101%", "10px", "calc(50%)", "auto"] {
         assert!(
             !parses("offset-distance", invalid),
             "`{invalid}` must be rejected"
@@ -107,20 +105,15 @@ fn offset_distance_grammar() {
     }
 }
 
-// C++: css_string_parser_unittest.cc offset_rotate_value — W3C grammar
-// `[ auto | reverse ] || <angle>`; angles stay literal (no mod-360, no
-// sentinel packing).
+// C++: css_string_parser_unittest.cc offset_rotate_value — Lynx's documented
+// subset is `auto` or one angle in the inclusive 0deg..=360deg range.
 #[test]
 fn offset_rotate_grammar() {
     for (input, expected) in [
         ("auto", "auto"),
-        ("reverse", "reverse"),
         ("45deg", "45deg"),
         ("0.25turn", "0.25turn"),
-        ("-90deg", "-90deg"),
-        ("450deg", "450deg"),
-        ("auto 45deg", "auto 45deg"),
-        ("reverse 45deg", "reverse 45deg"),
+        ("360deg", "360deg"),
     ] {
         assert_eq!(
             specified("offset-rotate", input).as_deref(),
@@ -128,12 +121,16 @@ fn offset_rotate_grammar() {
             "`{input}`"
         );
     }
-    // `45deg auto` reorders to canonical keyword-first form.
-    assert_eq!(
-        specified("offset-rotate", "45deg auto").as_deref(),
-        Some("auto 45deg")
-    );
-    for invalid in ["100%", "auto reverse", "wrongvalue"] {
+    for invalid in [
+        "reverse",
+        "-90deg",
+        "361deg",
+        "450deg",
+        "auto 45deg",
+        "45deg auto",
+        "100%",
+        "wrongvalue",
+    ] {
         assert!(
             !parses("offset-rotate", invalid),
             "`{invalid}` must be rejected"
@@ -141,24 +138,20 @@ fn offset_rotate_grammar() {
     }
 }
 
-// C++: css_string_parser_unittest.cc parse_cursor — url images carry an
-// optional two-number hotspot; a lone hotspot number is invalid per W3C
-// (Lynx defaulted it to 0,0).
+// C++: css_string_parser_unittest.cc parse_cursor — the Lynx subset exposes
+// keyword cursors only; URL cursor lists are deliberately absent.
 #[test]
 fn cursor_grammar() {
-    assert_eq!(specified("cursor", "help").as_deref(), Some("help"));
-    assert_eq!(
-        specified("cursor", "url(hand.cur), pointer").as_deref(),
-        Some("url(\"hand.cur\"), pointer")
-    );
-    assert_eq!(
-        specified("cursor", "url(hand.cur) 10 20, pointer").as_deref(),
-        Some("url(\"hand.cur\") 10 20, pointer")
-    );
-    assert!(
-        !parses("cursor", "url(hand.cur) 10, pointer"),
-        "a lone hotspot coordinate is invalid (W3C-corrected)"
-    );
+    for keyword in ["auto", "help", "pointer", "grab", "zoom-in"] {
+        assert_eq!(specified("cursor", keyword).as_deref(), Some(keyword));
+    }
+    for invalid in [
+        "url(hand.cur), pointer",
+        "url(hand.cur) 10 20, pointer",
+        "url(hand.cur) 10, pointer",
+    ] {
+        assert!(!parses("cursor", invalid), "`{invalid}` must be rejected");
+    }
 }
 
 // Skipped (skip-internal): the lepus null/type-guard rows and Lynx's

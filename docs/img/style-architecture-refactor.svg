@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
   <title id="title">lynx-vello style architecture refactor</title>
-  <desc id="desc">Before and after diagram showing lynx-style removed, standards-oriented CSS computation and SharedRwLock moved into stylo-dom, and Lynx-specific device policy moved into lynx-widget.</desc>
+  <desc id="desc">Before and after diagram showing lynx-style removed and all CSS computation, device interpretation, and SharedRwLock ownership consolidated in stylo-dom; lynx-widget remains only a PAPI and host-input facade.</desc>
   <defs>
     <linearGradient id="page" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#f8fafc"/>
@@ -27,7 +27,7 @@
 
   <rect width="1200" height="760" fill="url(#page)"/>
   <text x="52" y="50" class="title">Style architecture refactor</text>
-  <text x="52" y="76" class="subtitle">One standards-oriented core, one Lynx adapter, one lock owner</text>
+  <text x="52" y="76" class="subtitle">One CSS-computation owner; the Widget layer only forwards operations and inputs</text>
 
   <rect x="40" y="104" width="535" height="548" rx="18" fill="#fff" stroke="#cbd5e1" filter="url(#shadow)"/>
   <rect x="625" y="104" width="535" height="548" rx="18" fill="#fff" stroke="#86efac" stroke-width="2" filter="url(#shadow)"/>
@@ -63,10 +63,10 @@
   <!-- After -->
   <rect x="657" y="168" width="471" height="145" rx="10" fill="#fff7ed" stroke="#fdba74"/>
   <text x="677" y="198" class="crate">lynx-widget</text>
-  <text x="677" y="221" class="role">Lynx vocabulary and platform policy</text>
+  <text x="677" y="221" class="role">Lynx PAPI and host facade only — no CSS calculation</text>
   <text x="677" y="248" class="item">WidgetTree · WidgetState · Element PAPI</text>
-  <text x="677" y="272" class="item">EngineMetrics · touch Device · viewport rpx</text>
-  <text x="677" y="296" class="item">thin StyleEngine adapter</text>
+  <text x="677" y="272" class="item">external handles · PAPI validation</text>
+  <text x="677" y="296" class="item">forwards DOM operations and host input data</text>
 
   <path d="M892 313V348" class="arrow"/>
   <rect x="924" y="319" width="184" height="28" rx="14" fill="#dcfce7"/>
@@ -78,8 +78,8 @@
   <text x="677" y="435" class="item">Node&lt;T&gt; · stable Document back-pointer · traits on &amp;Node</text>
   <text x="677" y="459" class="item">stylesheets · selector matching · rule tree</text>
   <text x="677" y="483" class="item">inheritance · cascade · media refresh</text>
-  <text x="677" y="507" class="item">StyleEngine { Stylist · SharedRwLock }</text>
-  <text x="677" y="531" class="item">engine-created arenas share private context</text>
+  <text x="677" y="507" class="item">Document { node storage · Stylist · Device · SharedRwLock }</text>
+  <text x="677" y="531" class="item">unit/media/default semantics · computed style · traversal</text>
 
   <path d="M892 557V584" class="arrow"/>
   <rect x="657" y="591" width="471" height="44" rx="10" fill="#faf5ff" stroke="#c4b5fd"/>
@@ -92,5 +92,5 @@
   </g>
 
   <rect x="40" y="680" width="1120" height="48" rx="12" fill="#0f172a"/>
-  <text x="600" y="710" text-anchor="middle" class="callout" fill="#f8fafc">Dependency direction: lynx-widget → stylo-dom → vendor/stylo · standards go down, Lynx policy stays up</text>
+  <text x="600" y="710" text-anchor="middle" class="callout" fill="#f8fafc">lynx-widget calls Document APIs · CSS is computed only by stylo-dom + vendor/stylo</text>
 </svg>

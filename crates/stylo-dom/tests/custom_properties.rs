@@ -132,6 +132,21 @@ fn variable_with_fallback() {
     assert_eq!(doc.color(el), rgb(0, 0, 255));
 }
 
+#[test]
+fn variable_fallback_can_resolve_to_css_wide_keyword() {
+    let mut doc = Doc::new();
+    doc.set_inline(doc.root, "color: rgb(1, 2, 3)");
+    let child = doc.el(doc.root, "view");
+    doc.set_inline(child, "color: var(--missing, inherit)");
+    doc.flush();
+
+    assert_eq!(
+        doc.color(child),
+        rgb(1, 2, 3),
+        "a substituted CSS-wide keyword must re-enter the standard cascade path"
+    );
+}
+
 // C++: css_value_unittest.cc::CSSValueSubstitutionTest.NonCycleFallbackBehavior
 #[test]
 fn non_cycle_fallback_behavior() {

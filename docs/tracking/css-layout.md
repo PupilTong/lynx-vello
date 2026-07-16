@@ -93,7 +93,7 @@ The project's own `default_layout_style.h` already encodes a "Lynx default vs W3
 | `order` | Flex/grid item paint/layout order override | Core | Yes | — | `css_defines/75-order.json` |
 | `gap`/`row-gap`/`column-gap` (+legacy `grid-row-gap`/`grid-column-gap`) | Standard gutter | Core | Yes | — | `css_defines/205-207,181,182` |
 | `grid-template-columns`/`-rows`, `grid-auto-columns`/`-rows`, `grid-auto-flow` | Standard CSS Grid track definition + auto-placement axis/dense mode | Core | Yes | — | `css_defines/171-174,185`, `lynx/core/renderer/starlight/layout/grid_layout_algorithm.h` (mirrors spec: "intrinsic track sizes", dense/sparse placement cursor) |
-| `grid-column-start/end`, `grid-row-start/end`, `grid-column`/`grid-row` (shorthands), `grid-column-span`/`grid-row-span` (legacy Lynx spanning props) | Item placement in grid | Core (start/end) / Rare (span aliases) | Partial | `grid-column-span`/`grid-row-span` are pre-CSS-Grid Lynx-only span properties, superseded by standard `span N` syntax in `grid-column-end` etc.; keep both for back-compat but treat span-props as Lynx legacy | `css_defines/175,176,177-180,227,228` |
+| `grid-column-start/end`, `grid-row-start/end`, `grid-column`/`grid-row` (shorthands); Lynx-only `grid-column-span`/`grid-row-span` | Item placement in grid | Core (standard properties) / Lynx extension | Partial | The standalone span properties are Lynx-only extensions with no W3C property equivalent and are deliberately unsupported; use standard `span N` grid-line syntax instead. | `css_defines/175,176,177-180,227,228` |
 | `justify-items`, `justify-self` | Grid alignment; default `justify-items:stretch`, `justify-self:auto` | Core | Yes | — | `css_defines/183,184`, `default_layout_style.h` |
 | `staggered-grid` behaviors (via `staggered_grid_layout_algorithm.cc`) | Pinterest-style masonry layout for `<list>` component | Rare | No (non-CSS) | Not a standard CSS layout mode at all (no `display: masonry` equivalent shipped cross-browser); implement as a component-level custom layout, not general CSS | `lynx/core/renderer/starlight/layout/staggered_grid_layout_algorithm.h` |
 | `list-main-axis-gap`, `list-cross-axis-gap` | Gap sizing specific to the `<list>` component (not general flow), `consumption_status: skip` | Rare | No (non-CSS) | Component-specific, not part of generic box layout | `css_defines/187,188` |
@@ -108,10 +108,10 @@ context as the generic `compute_linear_layout` peer algorithm plus
 alongside its Flex, Grid, and Relative protocols and algorithms. Linear uses
 the same layout IO, cache/session recursion, private box-model machinery, leaf
 dispatch, absolute-position helper, and hidden-subtree cleanup; it does not
-translate linear into Flex. The concrete Widget/stylo adapter, dirty/cache
-invalidation wiring, root fixed-position pass, Relative and Linear
-computed-style translation, and text-style translation/session wiring remain
-future L3 work. The feature-gated Parley measurement core itself now lives in
+translate linear into Flex. The concrete adapter from `stylo-dom`
+topology/computed styles into neutron-star, dirty/cache invalidation wiring,
+root fixed-position pass, Relative and Linear computed-style translation, and
+text-style translation/session wiring remain future L3 work. The feature-gated Parley measurement core itself now lives in
 `neutron-star`; no separate integration crate has been established.
 
 Two Starlight-specific sizing rules are deliberately pinned rather than
@@ -209,8 +209,8 @@ implements — see `.claude/agents/lynx-layout-engine.md`. The engine crate is
 [`crates/neutron-star`](../../crates/neutron-star): its protocol, shared
 machinery, and Flexbox, Grid, Starlight Relative, and Linear algorithms are
 implemented alongside its feature-gated Parley measurement core. Its concrete
-L3 Widget/stylo runtime adapter, including text-style translation and
-text-session wiring, remains pending; no separate integration crate has been
+L3 `stylo-dom` computed-style/topology to neutron-star runtime adapter,
+including text-style translation and text-session wiring, remains pending; no separate integration crate has been
 established. The design, ownership boundaries, and milestones are in
 [`docs/layout-architecture.md`](../layout-architecture.md).
 

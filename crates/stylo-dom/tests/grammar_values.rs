@@ -14,6 +14,7 @@
 mod common;
 
 use common::{Doc, parses, rgb, rgba, specified};
+use stylo::values::specified::WillChangeBits;
 use stylo_dom::property_is_supported;
 
 // C++: length_handler_unittest.cc width table + css_string_parser
@@ -64,6 +65,17 @@ fn opacity_numbers() {
     for invalid in ["test", "true"] {
         assert!(!parses("opacity", invalid), "`{invalid}` must be rejected");
     }
+}
+
+#[test]
+fn will_change_survives_cascade() {
+    let mut doc = Doc::with_css("view { will-change: transform, opacity; }");
+    let element = doc.el(doc.root, "view");
+    doc.flush();
+    assert_eq!(doc.value(element, "will-change"), "transform, opacity");
+    let bits = doc.style(element).clone_will_change().bits;
+    assert!(bits.contains(WillChangeBits::TRANSFORM));
+    assert!(bits.contains(WillChangeBits::OPACITY));
 }
 
 // C++: enum_handler_unittest.cc align-content keywords (the enum handlers
@@ -120,6 +132,7 @@ fn line_height_grammar() {
         ("10", "10"),
         ("20px", "20px"),
         ("30rpx", "30rpx"),
+        ("120%", "120%"),
         ("normal", "normal"),
     ] {
         assert_eq!(
@@ -129,6 +142,19 @@ fn line_height_grammar() {
         );
     }
     assert!(!parses("line-height", "40px 123456"));
+}
+
+#[test]
+fn font_property_grammars_stay_upstream() {
+    for value in ["medium", "smaller", "larger"] {
+        assert!(parses("font-size", value), "font-size: {value}");
+    }
+    assert!(parses("font-style", "oblique 10deg"));
+    for value in ["bolder", "lighter", "1", "100.5", "1000"] {
+        assert!(parses("font-weight", value), "font-weight: {value}");
+    }
+    assert!(!parses("font-weight", "0"));
+    assert!(!parses("font-weight", "1001"));
 }
 
 // C++: auto_font_size*_handler_unittest.cc — the `-x-auto-font-size` family

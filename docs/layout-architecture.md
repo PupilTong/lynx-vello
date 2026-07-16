@@ -18,8 +18,9 @@ Relative Layout Level 1, Starlight Linear algorithms, and the default-on
 Parley text measurement core are implemented and conformance-tested against
 plain-storage mock hosts. Grid excludes subgrid and named lines/areas, which
 are outside the current protocol. Text truncation, inline boxes, and the
-concrete Widget/stylo adapter (including text-style translation and session
-wiring) are not implemented yet. Crate
+concrete adapter from `stylo-dom` topology/computed styles into neutron-star
+sources and sessions (including text-style translation) are not implemented
+yet. Crate
 rustdoc is the API reference; this document is the rationale, performance
 architecture, and remaining plan.
 
@@ -45,8 +46,8 @@ Text behavior is inventoried in
 ```text
         lynx-vello host stack                           standalone
 ┌──────────────────────────────────┐     ┌─────────────────────────────────┐
-│ lynx-widget + stylo-dom          │     │ neutron-star                    │
-│ styles and tree                  │     │ tree/style/text protocols       │
+│ stylo-dom Document               │     │ neutron-star                    │
+│ topology + computed styles       │     │ tree/style/text protocols       │
 │                                  │     │ flex / grid / relative / linear │
 │ future runtime integration:      │────▶│ text feature: Parley measure    │
 │ source/session/display dispatch  │     │ leaf/hidden/cache/position/round│
@@ -57,8 +58,8 @@ Text behavior is inventoried in
 | Layer | Owns | Must not own |
 | --- | --- | --- |
 | `neutron-star` | Implemented Flex, Grid, Relative, and Linear algorithms; their generic value/style/source protocols (including `relative-*` and `linear-*`); the parley-free text style/run protocol; leaf boxing, hidden-subtree cleanup, positioned layout, rounding; shared private arithmetic; geometry and layout IO; cache semantics | Node/style/content storage, display dispatch, DOM/widget/stylo types, resolved device-unit policy (`rpx`, etc.), stacking/paint order |
-| `neutron-star::text` (`text` feature, default-on) | Parley context/font registration, whitespace processing, shaping, line breaking, intrinsic and height-for-width measurement, baselines, and retained `TextLayout` artifact types | Text truncation and ellipsis, inline boxes, paint styling, stylo/widget translation, resource fetching, or host cache/session storage |
-| Future runtime integration *(location not yet established)* | Immutable views over the widget/style tree; mutable layout/cache session; display dispatch; Relative/Linear/text computed-style and attribute translation; text-context/artifact-slot storage; `staggered` integration; dirty tracking + cache invalidation; fixed/sticky lowering | A second Flex/Grid/Relative/Linear/text-measurement implementation, engine-side copies of styles |
+| `neutron-star::text` (`text` feature, default-on) | Parley context/font registration, whitespace processing, shaping, line breaking, intrinsic and height-for-width measurement, baselines, and retained `TextLayout` artifact types | Text truncation and ellipsis, inline boxes, paint styling, stylo-dom translation, resource fetching, or host cache/session storage |
+| Future runtime integration *(location not yet established)* | Immutable views over `stylo-dom` topology/computed styles plus explicitly supplied content metadata; mutable layout/cache session; display dispatch; Relative/Linear/text computed-style and attribute translation; text-context/artifact-slot storage; `staggered` integration; dirty tracking + cache invalidation; fixed/sticky lowering | A second Flex/Grid/Relative/Linear/text-measurement implementation, engine-side copies of styles, or CSS computation in `lynx-widget` |
 
 The engine/host seam is exactly the seam that makes the crate publishable.
 The Lynx-specific values and algorithms for Relative and Linear live in
@@ -503,7 +504,7 @@ The automatic minimum size (§4.5, `min-size: auto`) resolves inside steps
 
 Like Flex and Grid, this is a generic neutron-star algorithm over
 `LinearSource` and `LayoutSession<Source>`; it is not yet wired to
-`WidgetTree` or stylo computed values.
+`stylo-dom` topology or computed values.
 
 **Grid (L2)** — CSS Grid Level 2 (minus subgrid), as a pipeline:
 
@@ -601,10 +602,10 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
   pass. CSS Fixed root lowering, Sticky/list/component metadata, and anonymous
   text-item generation remain host/integration responsibilities and are not
   neutron-star behavior contracts.
-- **Remaining Lynx integration:** Widget/stylo translation for Relative and
-  Linear, component-specific staggered layout, and mixed-runtime parity remain
-  future work; the integration layer's final module or crate placement has not
-  been established.
+- **Remaining Lynx integration:** `stylo-dom` computed-style translation for
+  Relative and Linear, component-specific staggered layout, and mixed-runtime
+  parity remain future work; the integration layer's final module or crate
+  placement has not been established.
 
 ## Milestones
 
@@ -626,8 +627,8 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
 - **L3 — Starlight modes + runtime integration** *(partial)*: the Lynx-linear
   value/style/source protocol, generic `compute_linear_layout` algorithm, and
   feature-gated Parley text measurement core are complete in `neutron-star`.
-  Remaining L3 work is the concrete
-  `lynx-widget`/stylo adapter (including `CalcHandle` translation), mutable
+  Remaining L3 work is the concrete `stylo-dom` computed-style/topology
+  adapter (including `CalcHandle` translation), mutable
   session and display dispatch, dirty→cache invalidation wiring, the root
   fixed-position pass and sticky lowering, Relative and Linear computed-style
   translation, text computed-style/attribute translation, and text-context and

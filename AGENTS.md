@@ -19,8 +19,8 @@ cross-platform engine built on:
 The from-scratch layout engine (successor to the C++ engine's `starlight`) is
 `crates/neutron-star` — its host protocol, shared layout machinery, and CSS
 flexbox, Grid, and Starlight `display: relative` and `display: linear`
-algorithms are implemented as first-class peers. The concrete Widget/stylo
-runtime adapter remains pending. See
+algorithms are implemented as first-class peers. The concrete adapter from
+`stylo-dom` topology/computed styles into neutron-star remains pending. See
 `docs/layout-architecture.md` for its design and
 `docs/tracking/css-layout.md` for the behavior it must cover.
 
@@ -185,8 +185,11 @@ the user rather than silently broadening the ownership model.
   `resource` module owns the protocol-only, host-injected, object-safe Tokio
   `ResourceFetcher` contract; `script` owns the ShadowRealm-inspired isolated
   `ScriptEngine` protocol; and `view` owns `LynxView<R, E>`, coupling one
-  engine instance with one private `lynx-widget` `WidgetTree`, whose generic
-  document owns both its nodes and style context.
+  engine instance with one private `lynx-widget` `WidgetTree`. The widget
+  facade may forward DOM mutations and host inputs to its private
+  `stylo_dom::Document`, but CSS computation is owned exclusively by that
+  document; composition inside `LynxView` does not make `lynx-widget` a style
+  engine.
   The resource module must not decode images/fonts/templates, upload render
   resources, or own cache/retry policy; its protocol remains independent of
   decoder/widget/style/layout/render layers even though the enclosing engine
@@ -209,15 +212,25 @@ the user rather than silently broadening the ownership model.
   the future preloaded module graph belong here rather than in the generic
   QuickJS bridge or engine-neutral protocol.
 - `crates/stylo-dom` — generic HTML-DOM subset and standards-oriented CSS
-  computation core. Owns `Node<T>` / `Document<T>`, address-stable document
+  computation core, and the **only workspace layer that owns CSS
+  computation**. Owns `Node<T>` / `Document<T>`, address-stable document
   back-pointers, stylo DOM trait impls directly on `&Node<T>`, tree
   invalidation, inline-style parsing, and each document's private `Stylist`,
-  `Device`, cascade pipeline, and `SharedRwLock`. It must
-  not contain Lynx widget vocabulary or Lynx device/unit policy.
-- `crates/lynx-widget` — Lynx Element-PAPI and style adapter over `stylo-dom`.
-  Owns `WidgetState` / `WidgetTree`, Lynx view metrics, touch-first
-  device policy, and the viewport-relative `rpx` integration. Standard CSS
-  parsing, matching, cascade, and lock ownership remain in `stylo-dom`.
+  `Device`, stylesheet origins/default sheets, matching, cascade, computed
+  values, traversal, and `SharedRwLock`. It must not contain Lynx widget/PAPI
+  vocabulary. Lynx CSS grammar belongs in the maintained Stylo fork; host
+  metrics may be passed into `Document`, but their CSS interpretation remains
+  here.
+- `crates/lynx-widget` — Lynx Element-PAPI facade over the generic DOM.
+  Owns `WidgetState` / `WidgetTree`, opaque external node handles, PAPI
+  validation, and host-provided view/configuration data. It may translate
+  bundle/runtime inputs and call `stylo_dom::Document` APIs, but it does not
+  own or implement CSS parsing semantics, selector matching, cascade,
+  invalidation/traversal, computed-style calculation, UA/default-style
+  semantics, or style-to-layout adaptation. Do not change this crate to
+  implement a CSS-engine task, and do not describe it as a "style adapter":
+  forwarding inputs or exposing facade methods does not place it in the CSS
+  computation pipeline.
 - `crates/neutron-star` — the standalone-publishable Flexbox, Grid, and
   Starlight Relative and Linear engine: trait-based host⇄engine integration
   with static dispatch only (no `dyn`), an immutable topology/style source
@@ -237,8 +250,9 @@ the user rather than silently broadening the ownership model.
   `docs/layout-architecture.md` before touching it. It must not depend on
   other workspace crates or own host tree/style storage, DOM/widget types,
   resolved device-unit policy, or paint order.
-- Future runtime-layout integration — the concrete Widget/stylo
-  source/session adapter, display dispatch and dirty→cache invalidation
+- Future runtime-layout integration — the concrete `stylo-dom`
+  computed-style/topology source and neutron-star session adapter, display
+  dispatch and dirty→cache invalidation
   wiring, root fixed-position pass, component-specific staggered layout, and
   text-style translation and text-session wiring remain L3 work. No separate
   crate for this layer has been established yet.

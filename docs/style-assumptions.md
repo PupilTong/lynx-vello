@@ -1,6 +1,6 @@
 # Styling-system design assumptions
 
-> User-confirmed in an interactive Q&A session, 2026-07-11. This doc records
+> User-confirmed in interactive Q&A sessions, 2026-07-11 through 2026-07-16. This doc records
 > the **decisions** that bound the high-performance styling-system
 > implementation; it decides *what and why*, not *how*. Architecture/ownership
 > rules live in [style-architecture.md](style-architecture.md); the behavior
@@ -9,37 +9,50 @@
 > [AGENTS.md](../AGENTS.md).
 
 The one-line framing: **the styling system is a subset of the W3C standard —
-the subset is defined by what the `.web.bundle` wire format can carry, and
-the semantics are stylo's.** Everything below refines that sentence.
+the author surface is seeded by Lynx's official property index and closed over
+complete shorthand/longhand families, while the semantics are Stylo's.**
+Everything below refines that sentence.
 
 ## Settled before this session (not re-decided)
 
-- stylo is the cascade engine, layered `lynx-widget → stylo-dom → vendor/stylo`
-  (fork with the `lynx` feature; Lynx-only properties and `rpx`/`ppx`/`sp`
-  units are first-class grammar in the fork, no side-channel tricks).
+- `stylo-dom::Document` is the sole workspace owner of CSS computation and
+  uses `vendor/stylo` as its engine (fork with the `lynx` feature; the selected
+  Lynx-only properties and `rpx` unit are first-class grammar in the fork,
+  with no side-channel tricks). `lynx-widget` may call the document but is not
+  part of the CSS-computation layer.
 - Compat target is **web-core / `.web.bundle`** behavior, not native
   `.lynx.bundle`.
 - W3C-correct semantics for real spec features; faithful cloning for
   Lynx-only extensions ([AGENTS.md](../AGENTS.md) standards policy).
 - Custom properties (`--x`/`var()`) ride stylo's native spec-compliant
-  support; deprecated Lynx properties are dropped, not implemented
-  ([deviations.md](tracking/deviations.md)).
+  support. Lynx `-x-*` properties, `ppx`/`sp`, and the three deferred gravity
+  properties are not implemented ([deviations.md](tracking/deviations.md)).
 
 ## A. Scope — what "the subset" means
 
-1. **Wire-format-driven surface.** The supported CSS surface is whatever a
-   `.web.bundle` can encode: `RuleType::{Declaration, FontFace, KeyFrames}`
-   rules, inline styles, and the web-core property table — modulo the
-   existing deprecated-property exclusion. No hand-curated property
-   allowlist is maintained. Web-core parity by construction: on the web
-   target the effective surface is "encoder output × full browser CSS", and
-   stylo *is* a browser engine.
+1. **The official Lynx property index is the author-surface seed.** The
+   source-of-truth list is
+   `vendor/stylo/style/properties/lynx_properties.txt`, synchronized from the
+   official Lynx property index. From that seed, code generation computes the
+   complete shorthand/longhand closure: if either a shorthand or one of its
+   longhands is supported, the shorthand and *all* of its component longhands
+   are authorable. Supported shorthands use their complete Stylo/W3C grammar;
+   there are no Lynx-specific partial-shorthand parsers.
 
-2. **The subset is a scope boundary, not a runtime gate.** Full stylo runs;
-   standard CSS that "sneaks through" the wire format (e.g. `writing-mode`
-   as a raw declaration string) behaves however stylo behaves. No
-   validation/strip layer, no pruning of the stylo fork's property set. This
-   matches web-core, where the browser also accepted everything.
+2. **The subset is compiled, not filtered at runtime.** With
+   `feature = "lynx"`, unsupported names are absent from the generated
+   property-name table and unsupported enum/type/parser arms are absent from
+   the generated Rust. There is no runtime feature flag and no post-parse
+   filter-out layer. Without the feature, upstream Servo behavior is retained
+   and tested for parity. The deliberate exclusions are all Lynx `-x-*`
+   properties, the `ppx` and `sp` units, and `linear-cross-gravity`,
+   `linear-gravity`, and `linear-layout-gravity`. See
+   [stylo-lynx-css-subset.md](stylo-lynx-css-subset.md) for the complete
+   property/value behavior table.
+
+   `direction` follows W3C exactly: only `ltr | rtl` exists. Lynx's internal
+   `normal` state and its `lynx-rtl` compatibility value are not part of this
+   engine.
 
 3. **Selector matching = full stylo matching.** Everything stylo parses,
    matches per spec — including `:is()`, `:where()`, `:has()`, the
@@ -150,17 +163,18 @@ the semantics are stylo's.** Everything below refines that sentence.
 
 ## D. Integration & configuration
 
-14. **pageConfig becomes generated UA styles, not engine logic.** Flags like
-    `defaultDisplayLinear` / `defaultOverflowVisible` are honored the way
-    web-core honors them: they parameterize generated UA-sheet content at
-    the widget/adapter level. The styling core contains no pageConfig
-    branches.
+14. **pageConfig becomes Document-owned UA styles, not widget engine logic.**
+    A host can pass `defaultDisplayLinear` / `defaultOverflowVisible` inputs
+    through the PAPI layer, but `stylo-dom::Document` is the sole CSS
+    computation owner and owns the UA-origin stylesheet semantics. Forwarding
+    configuration through `lynx-widget` does not make it a style adapter and
+    must not lead to CSS behavior being implemented there.
 
-15. **Built-in component defaults = a UA-origin stylesheet.** One
-    user-agent-origin sheet in the stylist (mirroring web-elements' host
-    styles), parameterized per §14. Correct cascade-origin semantics for
-    free — author styles override naturally. No hardcoded per-widget style
-    seeding.
+15. **Built-in component defaults = a Document-owned UA-origin stylesheet.**
+    One user-agent-origin sheet in the `Document`'s stylist (mirroring
+    web-elements' host styles), parameterized per §14. Correct cascade-origin
+    semantics for free — author styles override naturally. No hardcoded
+    per-widget style seeding and no CSS calculation in `lynx-widget`.
 
     *Importance constraint*: in the browser, web-elements' defaults are
     **author**-origin CSS, and several carry `!important`. Ours are UA
@@ -171,16 +185,24 @@ the semantics are stylo's.** Everything below refines that sentence.
     `scroll-view { display: flex !important }`) are instead owned by the
     native layout engine's element policy, not fought out in the cascade.
 
-16. **cssId scoping is a widget-layer concern.** The feature exists for
+    Stylo's initial values remain the upstream W3C values. Lynx defaults such
+    as the inherited 14px root font, `justify-items: stretch`, zero gaps,
+    `position: relative`, `overflow: hidden`, and the configurable default
+    display are ordinary declarations in this UA sheet; the Stylo fork must
+    not carry `lynx_initial` overrides.
+
+16. **cssId scoping is a stylesheet-ingestion concern owned by
+    `stylo-dom`.** The feature exists for
     pageConfig `enableRemoveCSSScope = false` (that is the exact
-    `.web.bundle` key; this doc previously shortened it to
-    "removeCSSScope"); `stylo-dom` stays scope-unaware. Mechanism: the
-    widget layer synthesizes `:where([l-css-id="N"])` guards onto
-    selectors at ingest — string-parity with web-core's decoder output,
-    trivially differential-testable, zero specificity perturbation. (With
-    `enableRemoveCSSScope = true` the compiler emits css id `0`, guard
-    synthesis is skipped, and styles are global.) Partitioned per-cssId
-    rule sets remain a possible *measured* optimization, not the design.
+    `.web.bundle` key; this doc previously shortened it to "removeCSSScope").
+    The host/PAPI layer passes the css id and flag as input; it does not rewrite
+    selector semantics. The `Document` ingestion path synthesizes
+    `:where([l-css-id="N"])` guards onto selectors — string-parity with
+    web-core's decoder output, trivially differential-testable, zero
+    specificity perturbation. (With `enableRemoveCSSScope = true` the compiler
+    emits css id `0`, guard synthesis is skipped, and styles are global.)
+    Partitioned per-cssId rule sets remain a possible *measured* optimization,
+    not the design.
 
 17. **Legacy `css_og` (`enableCSSSelector=false`) bundles: out of scope for
     v1.** Reconfirms the earlier deferral. The decoder may still parse the

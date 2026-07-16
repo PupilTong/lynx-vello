@@ -1,15 +1,15 @@
-//! Border, outline, shadow, text-stroke/decoration, and filter grammar —
+//! Border, shadow, text-stroke/decoration, and filter grammar —
 //! ported from `lynx/core/renderer/css/parser/border_handler_unittest.cc`,
 //! `border_radius_handler_unittest.cc`, `shadow_handler_unittest.cc`,
 //! `text_stroke_handler_unittest.cc`, `text_decoration_handler_unittest.cc`,
 //! and `filter_handler_unittest.cc`.
 //!
 //! Scope: `enableCSSSelector = true` / `enableRemoveCSSScope = true`. W3C
-//! corrections: shorthands reset omitted longhands to initial values
-//! (border/outline color → currentColor, not "absent"); corner-radius
+//! corrections: shorthands reset omitted longhands to initial values (border
+//! color → currentColor, not "absent"); corner-radius
 //! longhands reject Lynx's compat slash form; unitless non-zero lengths
-//! reject (no `enable_length_unit_check` leniency); single-value
-//! -webkit-text-stroke is valid per the `||` grammar (Lynx rejected it).
+//! reject (no `enable_length_unit_check` leniency); single-value unprefixed
+//! `text-stroke` is valid per the `||` grammar (Lynx rejected it).
 
 mod common;
 
@@ -66,10 +66,11 @@ fn border_shorthand_expansion() {
     assert!(!parses("border", "double double"));
 }
 
-// C++: border_handler_unittest.cc::border_side_and_outline_shorthands +
-// outline_shorthand_named_widths_and_colors.
+// C++: border_handler_unittest.cc::border_side_and_outline_shorthands.
+// Border sides are in the supported set; the undocumented outline family is
+// intentionally absent from the Lynx author surface.
 #[test]
-fn per_side_border_and_outline_shorthands() {
+fn per_side_border_shorthands_and_outline_exclusion() {
     let mut doc = Doc::new();
     let el = doc.el(doc.root, "view");
     for side in ["border-right", "border-left", "border-top", "border-bottom"] {
@@ -80,37 +81,15 @@ fn per_side_border_and_outline_shorthands() {
         assert_eq!(doc.value(el, &format!("{side}-color")), "rgb(0, 0, 0)");
     }
 
-    let rows: &[(&str, &str, &str, Option<&str>)] = &[
-        ("10px double red", "10px", "double", Some("rgb(255, 0, 0)")),
-        ("10px double", "10px", "double", None),
-        ("thick double red", "5px", "double", Some("rgb(255, 0, 0)")),
-        (
-            "medium dashed #0000ff",
-            "3px",
-            "dashed",
-            Some("rgb(0, 0, 255)"),
-        ),
-        ("thin outset hsla(89, 43%, 51%, 0.3)", "1px", "outset", None),
-    ];
-    for &(input, width, style, color) in rows {
-        doc.set_inline(el, &format!("outline: {input}"));
-        doc.flush();
-        assert_eq!(doc.value(el, "outline-width"), width, "`{input}`");
-        assert_eq!(doc.value(el, "outline-style"), style, "`{input}`");
-        if let Some(color) = color {
-            assert_eq!(doc.value(el, "outline-color"), color, "`{input}`");
-        }
+    for (name, value) in [
+        ("outline", "1px solid red"),
+        ("outline-color", "red"),
+        ("outline-style", "solid"),
+        ("outline-width", "1px"),
+        ("outline-offset", "1px"),
+    ] {
+        assert!(!parses(name, value), "`{name}` must be absent");
     }
-    // The hsla row resolves to rgba(132, 184, 76, 0.3)-ish; assert the
-    // channel prefix to stay clear of float-formatting details.
-    doc.set_inline(el, "outline: thin outset hsla(89, 43%, 51%, 0.3)");
-    doc.flush();
-    assert!(
-        doc.value(el, "outline-color")
-            .starts_with("rgba(132, 184, 76, 0.3"),
-        "hsla resolves: {}",
-        doc.value(el, "outline-color")
-    );
 }
 
 // C++: border_handler_unittest.cc keyword tables.
@@ -244,16 +223,12 @@ fn box_shadow_grammar() {
     for fragment in ["1px", "2px", "3px", "4px", "rgb(255, 0, 0)"] {
         assert!(full.contains(fragment), "`{fragment}` in: {full}");
     }
-    let inset = computed("box-shadow: 1px 2px 3px inset rgb(255, 0, 0)", "box-shadow");
-    assert!(inset.contains("inset"), "inset kept: {inset}");
-    let leading = computed("box-shadow: inset 1px 2px 3px red", "box-shadow");
-    assert!(leading.contains("inset"), "leading inset kept: {leading}");
     assert_eq!(
         computed(
-            "box-shadow: 1px 2px 3px inset rgb(255, 0, 0), 1px 2px 3px inset red",
+            "box-shadow: 1px 2px 3px rgb(255, 0, 0), 4px 5px 6px blue",
             "box-shadow",
         )
-        .matches("inset")
+        .matches("rgb(")
         .count(),
         2,
         "two layers in order"
@@ -262,6 +237,12 @@ fn box_shadow_grammar() {
         assert_eq!(
             computed(&format!("box-shadow: {none}"), "box-shadow"),
             "none"
+        );
+    }
+    for inset in ["1px 2px 3px inset red", "inset 1px 2px 3px red"] {
+        assert!(
+            computed(&format!("box-shadow: {inset}"), "box-shadow").contains("inset"),
+            "`{inset}` must retain the standard inset keyword"
         );
     }
     for invalid in [
@@ -305,45 +286,44 @@ fn text_stroke_grammar() {
     let mut doc = Doc::with_css("view { color: rgb(9, 9, 9) }");
     let el = doc.el(doc.root, "view");
 
-    doc.set_inline(el, "-webkit-text-stroke: 1px yellow");
+    doc.set_inline(el, "text-stroke: 1px yellow");
     doc.flush();
-    assert_eq!(doc.value(el, "-webkit-text-stroke-width"), "1px");
-    assert_eq!(
-        doc.value(el, "-webkit-text-stroke-color"),
-        "rgb(255, 255, 0)"
-    );
+    assert_eq!(doc.value(el, "text-stroke-width"), "1px");
+    assert_eq!(doc.value(el, "text-stroke-color"), "rgb(255, 255, 0)");
 
     // Order-irrelevant + whitespace-tolerant.
     doc.set_inline(el, "         yellow         1px       ");
-    doc.set_inline(el, "-webkit-text-stroke:         yellow         1px       ");
+    doc.set_inline(el, "text-stroke:         yellow         1px       ");
     doc.flush();
-    assert_eq!(doc.value(el, "-webkit-text-stroke-width"), "1px");
-    assert_eq!(
-        doc.value(el, "-webkit-text-stroke-color"),
-        "rgb(255, 255, 0)"
-    );
+    assert_eq!(doc.value(el, "text-stroke-width"), "1px");
+    assert_eq!(doc.value(el, "text-stroke-color"), "rgb(255, 255, 0)");
 
     // Single-value forms are valid; the other longhand resets to initial
     // (width 0, color currentColor).
-    doc.set_inline(el, "-webkit-text-stroke: 1px");
+    doc.set_inline(el, "text-stroke: 1px");
     doc.flush();
-    assert_eq!(doc.value(el, "-webkit-text-stroke-width"), "1px");
+    assert_eq!(doc.value(el, "text-stroke-width"), "1px");
     assert_eq!(
-        doc.value(el, "-webkit-text-stroke-color"),
+        doc.value(el, "text-stroke-color"),
         "rgb(9, 9, 9)",
         "omitted stroke color is currentColor"
     );
-    doc.set_inline(el, "-webkit-text-stroke: yellow");
+    doc.set_inline(el, "text-stroke: yellow");
     doc.flush();
-    assert_eq!(doc.value(el, "-webkit-text-stroke-width"), "0px");
-    assert_eq!(
-        doc.value(el, "-webkit-text-stroke-color"),
-        "rgb(255, 255, 0)"
-    );
+    assert_eq!(doc.value(el, "text-stroke-width"), "0px");
+    assert_eq!(doc.value(el, "text-stroke-color"), "rgb(255, 255, 0)");
+
+    // Keep Stylo's upstream <line-width> grammar. There is no Lynx-only
+    // text-stroke-width parser: the standard width keywords remain valid.
+    for (keyword, computed_width) in [("thin", "1px"), ("medium", "3px"), ("thick", "5px")] {
+        doc.set_inline(el, &format!("text-stroke-width: {keyword}"));
+        doc.flush();
+        assert_eq!(doc.value(el, "text-stroke-width"), computed_width);
+    }
 
     assert!(
-        !parses("-webkit-text-stroke", "none"),
-        "no `none` value in the -webkit-text-stroke grammar"
+        !parses("text-stroke", "none"),
+        "no `none` value in the text-stroke grammar"
     );
 }
 
@@ -358,12 +338,13 @@ fn text_decoration_grammar() {
     doc.flush();
     assert_eq!(doc.value(el, "text-decoration-line"), "none");
 
-    doc.set_inline(el, "text-decoration: underline line-through");
-    doc.flush();
-    assert_eq!(
-        doc.value(el, "text-decoration-line"),
-        "underline line-through"
+    assert!(
+        !parses("text-decoration", "underline line-through"),
+        "Lynx accepts exactly one line keyword"
     );
+    doc.set_inline(el, "text-decoration: line-through");
+    doc.flush();
+    assert_eq!(doc.value(el, "text-decoration-line"), "line-through");
 
     doc.set_inline(el, "text-decoration: yellow dashed underline");
     doc.flush();

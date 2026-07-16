@@ -5,9 +5,10 @@
 //! Scope: `enableCSSSelector = true` / `enableRemoveCSSScope = true`. W3C
 //! corrections per the inventory: no parse-time gradient color mixing
 //! (Lynx's `LerpColor` stop "correction" is not replicated — stops stay
-//! literal), bare-number gradient stop positions are invalid, and the
-//! `background` shorthand resets omitted longhands to their W3C initial
-//! values (`background-clip: border-box`, not Lynx's padding-box).
+//! literal). Lynx's documented bare-number gradient stop fractions remain a
+//! first-class extension, and the `background` shorthand resets omitted
+//! longhands to their W3C initial values (`background-clip: border-box`, not
+//! Lynx's padding-box).
 
 mod common;
 
@@ -121,23 +122,19 @@ fn background_image_urls() {
 }
 
 // C++: background_image_handler_unittest.cc linear-gradient cases —
-// W3C-corrected: literal stops (no LerpColor pre-mixing, no materialized
-// auto midpoints), and bare-number stop positions are invalid.
+// Literal stops (no LerpColor pre-mixing, no materialized auto midpoints).
+// Lynx additionally accepts a bare number as a 0..1-style stop fraction.
 #[test]
 fn background_image_linear_gradients() {
-    assert!(
-        !parses(
-            "background-image",
-            "linear-gradient(to left, red, blue 30%, green 0.9)"
-        ),
-        "bare-number stop positions are invalid"
-    );
-    let corrected = computed(
-        "background-image: linear-gradient(to left, red, blue 30%, green 90%)",
+    let numbered = computed(
+        "background-image: linear-gradient(to left, red, blue 30%, green 0.9)",
         "background-image",
     );
-    assert!(corrected.contains("to left"), "direction kept: {corrected}");
-    assert!(corrected.contains("30%") && corrected.contains("90%"));
+    assert!(numbered.contains("to left"), "direction kept: {numbered}");
+    assert!(
+        numbered.contains("30%") && numbered.contains("90%"),
+        "bare 0.9 is retained as a 90% stop: {numbered}"
+    );
 
     // Default direction (no angle) is `to bottom`.
     let defaulted = computed(
@@ -172,7 +169,6 @@ fn background_image_linear_gradients() {
 fn background_image_gradient_angle_units() {
     let rows: &[(&str, &str)] = &[
         ("linear-gradient(90DeG, green, green)", "90deg"),
-        ("linear-gradient(100gRaD, green, green)", "90deg"),
         ("linear-gradient(0.25tUrN, green, green)", "90deg"),
         ("linear-gradient(1.57rAd, green, green)", "89.95"),
     ];
@@ -184,6 +180,7 @@ fn background_image_gradient_angle_units() {
         );
     }
     for invalid in [
+        "linear-gradient(100grad, red, red)",
         "linear-gradient(90degree, red, red)",
         "linear-gradient(100gradian, red, red)",
         "linear-gradient(1.57radian, red, red)",

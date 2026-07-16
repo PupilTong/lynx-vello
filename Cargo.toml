@@ -26,13 +26,14 @@ stylo-dom = { path = "crates/stylo-dom" }
 
 # The Lynx-patched stylo fork (git submodule; see AGENTS.md dependency
 # policy). The `lynx` branch carries the Lynx patch series (viewport-relative
-# rpx, display:linear|relative, linear-*/relative-*/-x-* longhands) and
+# rpx, display:linear|relative, and linear-*/relative-* longhands) and
 # is rebased onto upstream stylo releases.
 #
 # We enable the fork's `lynx` cargo feature workspace-wide: it turns stylo into
-# Lynx's CSS engine — enabling those Lynx-only additions AND disabling the CSS
-# properties and keyword values Lynx does not support (so, e.g., `float`,
-# `writing-mode` or `overflow: clip` stop parsing). `lynx` implies `servo`.
+# Lynx's CSS engine — enabling those Lynx-only additions and compiling the
+# documented property seed plus its complete shorthand/longhand closure (so,
+# e.g., `float`, `writing-mode`, and `overflow: clip` do not parse). `-x-*`,
+# `ppx`, and `sp` are intentionally absent. `lynx` implies `servo`.
 #
 # The vendored servo package is itself named `stylo_dom`; that name is taken
 # here by our `crates/stylo-dom` (which re-exports `ElementState`), so the
