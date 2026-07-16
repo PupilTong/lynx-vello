@@ -420,14 +420,18 @@ impl StyleEngine {
     /// `None` to inherit from stylo's initial values.
     /// # Panics
     ///
-    /// Panics when `node` belongs to a document not created by this engine
-    /// (the same boundary check as `flush_document`).
+    /// Panics when `node` is a text node or belongs to a document not created
+    /// by this engine (the same boundary check as `flush_document`).
     #[must_use]
     pub fn resolve<T: ExternalState>(
         &self,
         node: &Node<T>,
         parent_style: Option<&ComputedValues>,
     ) -> Arc<ComputedValues> {
+        assert!(
+            node.is_element(),
+            "StyleEngine::resolve called with a text node"
+        );
         assert_eq!(
             node.tree().engine_token,
             Some(self.token),
@@ -522,12 +526,16 @@ impl<T> Document<T> {
     /// # Panics
     ///
     /// Panics when `id` is stale (the let-it-crash mutation contract; see
-    /// the crate docs).
+    /// the crate docs), or when it names a text node.
     pub fn store_computed_style(&mut self, id: NodeId, style: Arc<ComputedValues>) {
         let node = self
             .core_mut()
             .node_mut(id)
             .expect("stale NodeId passed to Document::store_computed_style");
+        assert!(
+            node.is_element(),
+            "Document::store_computed_style called with a text node"
+        );
         node.set_computed_style(style);
         node.set_style_dirty(false);
     }

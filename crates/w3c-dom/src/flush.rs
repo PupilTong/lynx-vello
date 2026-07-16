@@ -15,7 +15,7 @@
 //! - **The style sharing cache and bloom filter**, managed per worker by stylo's
 //!   `ThreadLocalStyleContext`.
 //!
-//! Computed styles land in each node's stylo `ElementData`
+//! Computed styles land in each element node's stylo `ElementData`
 //! ([`Node::computed_style`](crate::Node::computed_style) reads them); the
 //! document then drops the consumed snapshots and clears the dirty spine.
 //!
@@ -116,7 +116,10 @@ impl<'a, T: ExternalState> DomTraversal<&'a Node<T>> for RecalcStyle<'a> {
     ) where
         F: FnMut(&'a Node<T>),
     {
-        // Every node is an element in this model.
+        // The traversal visits text nodes as layout children, but stylo's
+        // `note_children` schedules preorder work only for `as_element()`
+        // nodes. The designated root is also required to be an element.
+        debug_assert!(node.is_element(), "style preorder received a text node");
         // SAFETY: stylo's traversal contract — exactly one worker processes
         // this node, so creating/borrowing its data cannot race.
         let mut data = unsafe { node.ensure_data() };
