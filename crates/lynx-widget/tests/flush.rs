@@ -284,7 +284,9 @@ fn empty_flip_restyles_later_sibling() {
     engine.flush_widget_tree(&mut tree);
     assert_eq!(color_of(&tree, hint), red());
 
-    tree.append_element(child, list).unwrap();
+    // PAPI remove frees the subtree, so un-emptying takes a fresh child.
+    let refill = tree.create_view();
+    tree.append_element(refill, list).unwrap();
     engine.flush_widget_tree(&mut tree);
     assert_ne!(color_of(&tree, hint), red());
 }

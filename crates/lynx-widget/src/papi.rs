@@ -4,9 +4,9 @@
 //! Rust). Each mirrors a `__*` PAPI opcode, so the method names keep the
 //! `element` wording of the opcode they map to (e.g. [`append_element`] ↔
 //! `__AppendElement`, [`insert_element_before`] ↔ `__InsertElementBefore`,
-//! [`remove_element`] ↔ `__RemoveElement`, [`destroy_element`],
-//! [`replace_element`] ↔ `__ReplaceElement`, [`create_element`] ↔
-//! `__CreateElement`) even though the values they carry are [`Widget`]s. JS
+//! [`remove_element`] ↔ `__RemoveElement`, [`replace_element`] ↔
+//! `__ReplaceElement`, [`create_element`] ↔ `__CreateElement`) even though
+//! the values they carry are [`Widget`]s. JS
 //! bindings live in a later runtime crate; this is the pure native validation
 //! layer. [`crate::StyleEngine`] adapts `w3c-dom`'s generic cascade to the
 //! Widget tree and reads the dirty state maintained here (see
@@ -24,7 +24,6 @@
 //! [`append_element`]: WidgetTree::append_element
 //! [`insert_element_before`]: WidgetTree::insert_element_before
 //! [`remove_element`]: WidgetTree::remove_element
-//! [`destroy_element`]: WidgetTree::destroy_element
 //! [`replace_element`]: WidgetTree::replace_element
 //! [`create_element`]: WidgetTree::create_element
 
@@ -233,14 +232,18 @@ impl WidgetTree {
         Ok(())
     }
 
-    /// Remove `child` from `parent`, **detaching** it — the subtree stays
-    /// alive in the document (and in the `unique_id` index) and can be
-    /// re-inserted later.
+    /// Remove `child` from `parent` and **free its entire subtree** (arena
+    /// slots and `unique_id` index entries). All handles into the subtree
+    /// become stale; removing the page also clears the document root.
     ///
-    /// This matches the Element PAPI contract: web-core's `__RemoveElement` is
-    /// DOM `removeChild` (the element remains usable), and Lynx list recycling
-    /// re-attaches previously removed subtrees. Use
-    /// [`destroy_element`](Self::destroy_element) to actually free a subtree.
+    /// Deviation from web-core, by design: browser `__RemoveElement` is DOM
+    /// `removeChild` — the element stays alive for whatever still references
+    /// it, and the garbage collector reclaims it eventually. This engine has
+    /// no GC and implements no list recycling (there is no consumer for
+    /// detached-but-alive subtrees), so freeing immediately is the leak-free
+    /// equivalent. Content that should stop rendering *without* being
+    /// destroyed keeps its place in the tree — that is `content-visibility`'s
+    /// job, not a detach-and-hold pool's.
     pub fn remove_element(&mut self, parent: WidgetId, child: WidgetId) -> Result<(), WidgetError> {
         let Some(child_widget) = self.doc.get(child) else {
             return Err(WidgetError::StaleElement(child));
@@ -249,37 +252,23 @@ impl WidgetTree {
             return Err(WidgetError::NotAChild { parent, child });
         }
 
-        // `detach` unlinks and applies the structural invalidation (parent
-        // subtree + parent's following siblings, for `:empty` + `+`/`~`).
-        self.doc.detach(child);
-        Ok(())
-    }
-
-    /// Detach `id` (if attached) and free its entire subtree from the
-    /// document and the `unique_id` index. All handles into the subtree
-    /// become stale; destroying the page also clears the document root.
-    ///
-    /// This is the explicit destruction step [`remove_element`](Self::remove_element)
-    /// deliberately does not perform; the runtime layer decides when a
-    /// detached subtree is truly dead (web-core relies on GC for this).
-    pub fn destroy_element(&mut self, id: WidgetId) -> Result<(), WidgetError> {
-        if !self.doc.contains(id) {
-            return Err(WidgetError::StaleElement(id));
-        }
-        // The document returns the freed widgets' state; harvest the
-        // unique_ids out of it to keep the index consistent.
-        for state in self.doc.remove_subtree(id) {
+        // `remove_subtree` detaches (with the structural invalidation at the
+        // old location) and frees; harvest the returned widget states to keep
+        // the `unique_id` index consistent.
+        for state in self.doc.remove_subtree(child) {
             self.by_unique_id.remove(&state.unique_id);
         }
         Ok(())
     }
 
     /// Replace `old` with `new` in the tree, keeping `old`'s position. `new`
-    /// is detached from any current parent first; `old` ends up detached but
-    /// alive (like DOM `replaceChild`, which returns the old node).
+    /// is detached from any current parent first; `old` and its subtree are
+    /// **freed** (see [`remove_element`](Self::remove_element) — no GC, no
+    /// recycling, so nothing may linger detached-but-alive).
     ///
     /// Replacing a detached `old` is a no-op, matching DOM `replaceWith` on a
-    /// parentless node.
+    /// parentless node — reachable only for a freshly created, never-attached
+    /// `old`.
     pub fn replace_element(&mut self, new: WidgetId, old: WidgetId) -> Result<(), WidgetError> {
         if new == old {
             return Ok(());

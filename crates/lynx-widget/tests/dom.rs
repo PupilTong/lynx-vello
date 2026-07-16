@@ -188,13 +188,14 @@ fn tree_mutations_mark_reachability() {
     );
 
     doc.clear_dirty();
-    doc.append_element(child, list).unwrap();
+    let fresh = doc.create_view();
+    doc.append_element(fresh, list).unwrap();
     assert!(doc.has_dirty(), "insertion must schedule flush work");
     assert!(doc.widget(list).unwrap().has_dirty_descendants());
 }
 
 #[test]
-fn remove_detaches_and_destroy_frees() {
+fn remove_frees_the_subtree_and_index() {
     let mut doc = WidgetTree::new();
     let page = doc.create_page();
     let container = doc.create_view();
@@ -209,33 +210,21 @@ fn remove_detaches_and_destroy_frees() {
     let child_uid = doc.get_element_unique_id(child).unwrap();
     let grandchild_uid = doc.get_element_unique_id(grandchild).unwrap();
 
-    // PAPI remove = detach: the subtree stays alive and re-insertable
-    // (web-core's __RemoveElement is DOM removeChild; list recycling
-    // re-attaches removed subtrees).
+    // PAPI remove frees the whole subtree immediately: no GC and no list
+    // recycling means nothing may linger detached-but-alive (hiding without
+    // destroying is content-visibility's job, on attached nodes).
     doc.remove_element(container, child).unwrap();
-    assert!(doc.widget(child).is_some());
-    assert_eq!(doc.get_parent(child), None);
-    assert_eq!(doc.get_parent(grandchild), Some(child));
-    assert_eq!(doc.element_by_unique_id(child_uid), Some(child));
+    assert!(doc.widget(child).is_none());
+    assert!(doc.widget(grandchild).is_none());
+    assert_eq!(doc.element_by_unique_id(child_uid), None);
+    assert_eq!(doc.element_by_unique_id(grandchild_uid), None);
     let kids: Vec<_> = doc
         .widget_ref(container)
         .unwrap()
         .children()
         .map(lynx_widget::Widget::id)
         .collect();
-    assert_eq!(kids, vec![sibling]);
-
-    // Re-inserting the detached subtree works.
-    doc.append_element(child, container).unwrap();
-    assert_eq!(doc.get_parent(child), Some(container));
-    doc.remove_element(container, child).unwrap();
-
-    // Explicit destruction frees the subtree and the unique_id index.
-    doc.destroy_element(child).unwrap();
-    assert!(doc.widget(child).is_none());
-    assert!(doc.widget(grandchild).is_none());
-    assert_eq!(doc.element_by_unique_id(child_uid), None);
-    assert_eq!(doc.element_by_unique_id(grandchild_uid), None);
+    assert_eq!(kids, vec![sibling], "the sibling subtree is untouched");
 
     // Removing a non-child errors.
     let other = doc.create_view();
@@ -261,15 +250,21 @@ fn replace_element_keeps_position() {
         .map(lynx_widget::Widget::id)
         .collect();
     assert_eq!(order, vec![t.a, new, t.c]);
-    // Like DOM replaceChild, the old node survives, detached.
-    assert!(doc.widget(t.b).is_some());
-    assert_eq!(doc.get_parent(t.b), None);
+    // The old node is freed with its subtree (no GC, no recycling).
+    assert!(doc.widget(t.b).is_none());
     assert_eq!(doc.get_parent(new), Some(t.container));
 
-    // Replacing a detached element is a no-op (DOM replaceWith on a
-    // parentless node).
+    // Replacing through the now-stale handle errors.
     let another = doc.create_view();
-    doc.replace_element(another, t.b).unwrap();
+    assert_eq!(
+        doc.replace_element(another, t.b),
+        Err(WidgetError::StaleElement(t.b))
+    );
+
+    // Replacing a freshly created, never-attached old is the DOM
+    // replaceWith-on-parentless no-op.
+    let detached = doc.create_view();
+    doc.replace_element(another, detached).unwrap();
     assert_eq!(doc.get_parent(another), None);
 }
 
@@ -280,7 +275,7 @@ fn generation_safety_after_reuse() {
     let a = doc.create_view();
     doc.append_element(a, page).unwrap();
 
-    doc.destroy_element(a).unwrap();
+    doc.remove_element(page, a).unwrap();
     // The next created element reuses the freed slot with a bumped generation.
     let b = doc.create_view();
     assert_eq!(a.index(), b.index(), "slot should have been reused");
@@ -379,7 +374,7 @@ fn set_css_id_batch() {
     assert_eq!(doc.widget(t.page).unwrap().ext().css_id, 0);
 
     // A stale handle anywhere in the batch fails the whole call.
-    doc.destroy_element(t.a).unwrap();
+    doc.remove_element(t.container, t.a).unwrap();
     assert_eq!(
         doc.set_css_id(&[t.b, t.a], 7),
         Err(WidgetError::StaleElement(t.a))
@@ -490,7 +485,7 @@ fn stale_handle_operations_error() {
     let page = doc.create_page();
     let view = doc.create_view();
     doc.append_element(view, page).unwrap();
-    doc.destroy_element(view).unwrap();
+    doc.remove_element(page, view).unwrap();
 
     assert_eq!(
         doc.set_classes(view, "x"),

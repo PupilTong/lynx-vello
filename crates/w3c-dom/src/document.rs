@@ -28,6 +28,23 @@
 //! created, even when the `Document` value moves), and every [`Node`] carries
 //! a pointer back to the core that owns it. That backpointer is what lets the
 //! stylo handle be a plain `&Node` — see [`crate::node`] and [`crate::traits`].
+//!
+//! # Storage: hand-rolled generational slots (not `slab`/`slotmap`)
+//!
+//! Node storage is a plain `Vec<Option<Node<T>>>` plus a free list of
+//! **pre-minted next ids**. `slab` would only replace the free list — it
+//! reuses bare indices, which is exactly the ABA aliasing [`NodeId`]'s
+//! generation exists to prevent, so a generation layer would have to be
+//! bolted on top of it anyway. Generational-arena crates (`slotmap` and
+//! friends) do provide versioned keys, but would put a third-party key type
+//! at the center of the public API and the `OpaqueNode` packing, for what is
+//! ~forty lines of storage this crate wants tight control over: the
+//! retire-on-exhaustion policy, the `NonZeroU32` niche in [`NodeId`], the
+//! (generation, index) → [`OpaqueNode`](stylo::dom::OpaqueNode) derivation,
+//! and the let-it-crash error surface. There is deliberately no per-slot
+//! header struct either: a **live node already knows its own id**, so the
+//! occupant's generation is stored exactly once (in the node), and a vacant
+//! slot's *next* generation lives in the free-list entry that will mint it.
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -61,9 +78,10 @@ pub(crate) fn about_blank_url_data() -> UrlExtraData {
 /// ambiguous: after `remove_subtree`, the next `create_node` may place a
 /// **new, unrelated node in the same slot** (the ABA problem). Embedders
 /// retain ids across those events by design — Lynx's scripting runtime holds
-/// element references over frames, and list recycling detaches, re-attaches,
-/// and destroys subtrees constantly — so a dangling id *will* eventually
-/// point at a reused slot. The generation is what turns that from silent
+/// element handles over frames while the tree mutates underneath them, and
+/// removal frees whole subtrees at once — so a dangling id held by script
+/// *will* eventually point at a reused slot. The generation is what turns
+/// that from silent
 /// aliasing (reading or mutating a stranger node — the worst kind of logic
 /// corruption) into a detectable staleness: `remove` bumps the slot's
 /// generation, old handles stop resolving, and each layer reacts per its
@@ -118,13 +136,6 @@ impl NodeId {
     }
 }
 
-/// One storage slot: the current generation plus an optional live [`Node`].
-#[derive(Debug)]
-struct Slot<T> {
-    generation: NonZeroU32,
-    node: Option<Node<T>>,
-}
-
 /// The owned pointer to a document's heap-pinned [`Core`].
 ///
 /// A dedicated newtype so the `unsafe` `Send`/`Sync` assertions cover exactly
@@ -158,8 +169,14 @@ unsafe impl<T> Sync for CorePtr<T> {}
 /// (stylo's `TDocument::shared_lock`). The snapshot machinery and root ride
 /// along so the whole document state is one allocation.
 pub(crate) struct Core<T> {
-    slots: Vec<Slot<T>>,
-    free_list: Vec<u32>,
+    /// Node storage: `slots[i]` holds the live node whose id carries index
+    /// `i`. A vacant entry is either on the free list or retired (its
+    /// generation space is exhausted — never reused).
+    slots: Vec<Option<Node<T>>>,
+    /// Pre-minted ids for vacant, reusable slots: popping one yields the
+    /// exact (index, bumped-generation) identity the slot's next occupant
+    /// will carry.
+    free_list: Vec<NodeId>,
     /// The document root, if designated (see [`Document::set_root`]).
     root: Option<NodeId>,
     /// The shared lock guarding this document's inline style blocks.
@@ -175,24 +192,17 @@ pub(crate) struct Core<T> {
 }
 
 impl<T> Core<T> {
-    /// Borrow a node if the handle is live.
+    /// Borrow a node if the handle is live (the occupant's own id carries
+    /// the generation to check against).
     pub(crate) fn node(&self, id: NodeId) -> Option<&Node<T>> {
-        let slot = self.slots.get(id.index as usize)?;
-        if slot.generation == id.generation {
-            slot.node.as_ref()
-        } else {
-            None
-        }
+        let node = self.slots.get(id.index as usize)?.as_ref()?;
+        (node.id() == id).then_some(node)
     }
 
     /// Mutably borrow a node if the handle is live.
     pub(crate) fn node_mut(&mut self, id: NodeId) -> Option<&mut Node<T>> {
-        let slot = self.slots.get_mut(id.index as usize)?;
-        if slot.generation == id.generation {
-            slot.node.as_mut()
-        } else {
-            None
-        }
+        let node = self.slots.get_mut(id.index as usize)?.as_mut()?;
+        (node.id() == id).then_some(node)
     }
 
     /// Resolve an internal tree link (a parent/child id stored inside a
@@ -318,14 +328,10 @@ impl<T> Document<T> {
     pub fn create_node(&mut self, tag: &str, ext: T) -> NodeId {
         let core_ptr = self.core;
         let core = self.core_mut();
-        if let Some(index) = core.free_list.pop() {
-            let slot = &mut core.slots[index as usize];
-            debug_assert!(slot.node.is_none(), "free-list slot must be vacant");
-            let id = NodeId {
-                index,
-                generation: slot.generation,
-            };
-            slot.node = Some(Node::new(core_ptr, id, tag, ext));
+        if let Some(id) = core.free_list.pop() {
+            let slot = &mut core.slots[id.index as usize];
+            debug_assert!(slot.is_none(), "free-list slot must be vacant");
+            *slot = Some(Node::new(core_ptr, id, tag, ext));
             id
         } else {
             let index =
@@ -334,10 +340,7 @@ impl<T> Document<T> {
                 index,
                 generation: NonZeroU32::MIN,
             };
-            core.slots.push(Slot {
-                generation: NonZeroU32::MIN,
-                node: Some(Node::new(core_ptr, id, tag, ext)),
-            });
+            core.slots.push(Some(Node::new(core_ptr, id, tag, ext)));
             id
         }
     }
@@ -551,19 +554,22 @@ impl<T> Document<T> {
         removed
     }
 
-    /// Free one slot, returning its node. The slot's generation is advanced
-    /// so every handle to it becomes stale; a slot whose generation space is
-    /// exhausted is retired rather than reused, preserving uniqueness.
+    /// Free one slot, returning its node. The slot's next identity (bumped
+    /// generation) is pre-minted onto the free list, so every handle to the
+    /// old occupant becomes stale; a slot whose generation space is exhausted
+    /// is retired rather than reused, preserving uniqueness.
     fn remove_node(&mut self, id: NodeId) -> Option<Node<T>> {
         let core = self.core_mut();
         let slot = core.slots.get_mut(id.index as usize)?;
-        if slot.generation != id.generation {
+        if slot.as_ref()?.id() != id {
             return None;
         }
-        let node = slot.node.take()?;
-        if let Some(next) = slot.generation.checked_add(1) {
-            slot.generation = next;
-            core.free_list.push(id.index);
+        let node = slot.take()?;
+        if let Some(next) = id.generation.checked_add(1) {
+            core.free_list.push(NodeId {
+                index: id.index,
+                generation: next,
+            });
         }
         // A dead node's pending snapshot must not survive it; the map entry
         // is keyed by the (now stale) opaque id and would be dropped with the
@@ -593,11 +599,9 @@ impl<T> Document<T> {
     /// Establishes a clean baseline (tests, or an embedder resetting a tree).
     /// The flush path uses the cheaper targeted `complete_flush` instead.
     pub fn clear_dirty(&mut self) {
-        for slot in &mut self.core_mut().slots {
-            if let Some(node) = &mut slot.node {
-                node.set_style_dirty(false);
-                node.set_dirty_descendants_bit(false);
-            }
+        for node in self.core_mut().slots.iter_mut().flatten() {
+            node.set_style_dirty(false);
+            node.set_dirty_descendants_bit(false);
         }
     }
 
