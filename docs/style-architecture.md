@@ -18,11 +18,12 @@ Document/Node design (this document describes the current shape).
 ## The w3c-dom core: one tree, Document-mediated mutation
 
 - **ONE TREE policy.** `Document<T>` is the single owner of everything tree-shaped: node storage
-  (a slab with versioned handles), the real DOM document node and its optional `documentElement`,
-  and the private style context (`SharedRwLock` + base URL). Each pending pre-mutation snapshot
-  lives directly on its element. There is no separate arena/tree object, and no public way to
-  construct or mutate a `Node<T>` outside its document — `Document::create_node` is the only
-  element factory, and every DOM operation is a `Document` method.
+  (a `Slab` of mixed element/text nodes with versioned handles), the real DOM document node and
+  its optional `documentElement`, and the private style context (`SharedRwLock` + base URL). Each
+  pending pre-mutation snapshot lives directly on its node. There is no separate arena/tree
+  object, and no public way to construct or mutate a `Node<T>` outside its document —
+  `Document::create_element` and `Document::create_text_node` are the kind-specific factories,
+  and every DOM operation is a `Document` method.
 - **Invalidation is carried by the operations.** Each matching-relevant setter
   (`set_classes`, `set_attribute`, `set_state`, `set_inline_style`, structural
   `insert_before`/`detach`/`remove_subtree`, …) records its own pre-mutation snapshot or scoped
@@ -35,30 +36,32 @@ Document/Node design (this document describes the current shape).
   caller bugs — `debug_assert!`ed and panicking rather than silently ignored. Layers holding
   untrusted handles validate first (`WidgetTree` maps violations to `WidgetError`, including its
   Lynx-specific `<page>` root protection).
-- **Identity, twice.** Every `NodeId` embeds its document's process-unique token, so an id from
+- **Identity at each boundary.** Every `NodeId` embeds its document's process-unique token, so an
+  id from
   tree A never resolves in tree B (two trees mint identical `(index, generation)` sequences —
-  without the token that is silent same-slot aliasing). Every document also records the identity
-  of the `StyleEngine` that created it; `flush_document`/`resolve` assert the pairing at the
-  boundary instead of dying deep inside stylo on a mismatched `SharedRwLock` (or worse, silently
-  cascading against the wrong stylist).
+  without the token that is silent same-slot aliasing). Engine/document pairing does not maintain
+  another integer token: both share the same `Arc<SharedRwLock>`, and `flush_document`/`resolve`
+  compare that actual style-context identity at the boundary instead of dying deep inside stylo on
+  a mismatched lock (or worse, silently cascading against the wrong stylist).
 - **Debug contract instrumentation.** The `stylo_data` `UnsafeCell` slot carries a debug-only
   guard (reader/writer state, owning thread, unwind poisoning) and the document a debug
   traversal-phase flag; violations of stylo's one-worker-per-element discipline crash debug
   builds instead of being UB. Release builds compile it all away.
 - **Backpointers, one-word handles, no mirror tree.** The document core is heap-pinned and every
-  element carries a pointer back to it, so owner-document lookup and element navigation need
-  nothing but `&Node`. stylo's `TElement`/`selectors::Element` traits remain implemented directly
-  on **`&'a Node<T>`**; a small `DomNode` value supplies `TNode`'s broader document-or-element
-  view, and `DomDocument` supplies `TDocument`. The restyle traversal still runs **in place on the
-  document**; no second tree is materialized. The word-sized `TElement` handle is load-bearing:
-  stylo's style-sharing cache sizes its TLS for a one-word handle (`FakeCandidate` in
-  `style/sharing/mod.rs`), and a shared reference is exactly that (and `Copy` by nature).
+  node carries a pointer back to it, so tree navigation needs nothing but `&Node`. stylo's DOM
+  element traits remain implemented directly on **`&'a Node<T>`**; a small `DomNode` value gives
+  `TNode` the broader document/element/text view, and `DomDocument` supplies `TDocument`. The
+  restyle traversal runs **in place on the document**; no second tree is materialized. Text nodes
+  remain in DOM/layout child iteration but are skipped by selector matching and cascade. The
+  word-sized `TElement` handle is load-bearing: stylo's style-sharing cache sizes its TLS for a
+  one-word handle (`FakeCandidate` in `style/sharing/mod.rs`), and a shared reference is exactly
+  that (and `Copy` by nature).
 
 ## Ownership boundaries
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| `w3c-dom` | `Document<T>` (the real document node, element storage, document-element link, lock), `Node<T>` (elements, including their pending snapshots), `NodeId`, the stylo DOM traits, invalidation-carrying mutation, inline parsing, `Stylist`, rule matching, cascade, media evaluation, computed values | Lynx tags/PAPI, `<page>` root policy, `WidgetState`, Lynx unit metrics, touch-device policy |
+| `w3c-dom` | `Document<T>` (the real document node, mixed-node storage, document-element link, lock), `Node<T>` (elements/text, including node-owned pending snapshots), `NodeId`, the stylo DOM traits, invalidation-carrying mutation, inline parsing, `Stylist`, rule matching, cascade, media evaluation, computed values | Lynx tags/PAPI, `<page>` root policy, `WidgetState`, Lynx unit metrics, touch-device policy |
 | `lynx-widget` | `WidgetState`, `WidgetTree` (PAPI validation plus its own `<page>` root over the generic document), `WidgetHandle` (canonical registry: tree identity, node retention, drop-driven reclamation of detached subtrees), `EngineMetrics`, touch-first `Device` construction, viewport-relative `rpx` integration | A second stylist, cascade implementation, stylesheet lock sharing, direct node construction, raw-id public APIs |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, the maintained Lynx CSS extension patch set **and the Lynx supported-property/value grammar definition** (`style/properties/lynx_properties.txt`, `lynx` feature gates) | Runtime Widget/PAPI policy |
 
@@ -96,10 +99,10 @@ Document/Node design (this document describes the current shape).
    temporary map required by stylo's traversal API, followed by
    snapshot-driven invalidation, the style sharing cache, bloom filter, and
    rayon parallelism over wide DOM levels (stylo's global style pool).
-   Computed styles land in each node's stylo `ElementData`; read them with
+   Computed styles land in each element node's stylo `ElementData`; read them with
    `WidgetTree::computed` (an `Arc<ComputedValues>` clone — direct Arc reads
    per `docs/style-assumptions.md` §B.8).
-7. `w3c_dom::StyleEngine::resolve` remains as the standalone per-node
+7. `w3c_dom::StyleEngine::resolve` remains as the standalone per-element
    match+cascade (no traversal state); the Widget adapter exposes it as
    `resolve_widget`.
 
@@ -135,8 +138,11 @@ Document/Node design (this document describes the current shape).
 
 - Ingestion: direct construction, §B.5. Parallel traversal from day 1, §B.6.
 - Incremental restyles ride stylo invalidation sets, §B.7 — a class flip on
-  one element restyles only affected elements (~3µs on a 1.1k-widget tree in
-  the divan benches, vs ~1.1ms for the initial full flush).
+  one element restyles only affected elements (~3µs per logical operation on
+  a 1.1k-widget tree, vs ~1.1ms for the initial full flush). The Divan benches
+  batch short operations into millisecond-scale samples and expose the batch
+  size through an item counter, so this per-operation figure is derived from
+  throughput rather than a flaky microsecond sample.
 - Benchmarks: `cargo bench -p lynx-widget` (`benches/style.rs`,
   CodSpeed-tracked) — ingestion, initial flush (sequential + parallel),
   incremental class flip / inline style, no-op flush floor, standalone

@@ -14,6 +14,7 @@ use std::cell::RefCell;
 use std::fmt::Write as _;
 
 use divan::black_box;
+use divan::counter::ItemsCount;
 use euclid::{Scale, Size2D};
 use stylo::context::QuirksMode;
 use stylo::device::Device;
@@ -74,6 +75,19 @@ fn device(width: f32, height: f32) -> Device {
 }
 
 const CLASS_RULES: usize = 200;
+
+// CodSpeed's instrumented Divan adapter invokes each measured closure once.
+// Batch independent cold inputs or repeated state transitions so even the
+// fastest paths have millisecond-scale samples while counters retain the
+// logical operation count.
+const PARSE_BATCH: usize = 8;
+const INITIAL_FLUSH_BATCH: usize = 2;
+const INCREMENTAL_BATCH: usize = 1_024;
+const NO_OP_BATCH: usize = 65_536;
+const INHERITANCE_BATCH: usize = 32;
+const VAR_CHAIN_BATCH: usize = 8;
+const MEDIA_BATCH: usize = 2;
+const RESOLVE_BATCH: usize = 1_024;
 
 /// `CLASS_RULES` simple class rules plus a band of combinator/pseudo-heavy
 /// rules — the same selector families the ported behavior tests exercise.
@@ -159,10 +173,17 @@ fn flushed() -> (StyleEngine, Document<()>, NodeId) {
 fn parse_author_sheet_text(bencher: divan::Bencher) {
     let css = author_sheet();
     bencher
-        .with_inputs(|| StyleEngine::new(device(800.0, 600.0)))
-        .bench_local_values(|mut engine| {
-            engine.add_stylesheet_str(black_box(&css), StylesheetOrigin::Author);
-            engine
+        .counter(ItemsCount::new(PARSE_BATCH))
+        .with_inputs(|| {
+            (0..PARSE_BATCH)
+                .map(|_| StyleEngine::new(device(800.0, 600.0)))
+                .collect::<Vec<_>>()
+        })
+        .bench_local_values(|mut engines| {
+            for engine in &mut engines {
+                engine.add_stylesheet_str(black_box(&css), StylesheetOrigin::Author);
+            }
+            engines
         });
 }
 
@@ -172,10 +193,17 @@ fn parse_author_sheet_text(bencher: divan::Bencher) {
 fn initial_flush_sequential(bencher: divan::Bencher) {
     let engine = engine_with_author_sheet();
     bencher
-        .with_inputs(|| build_tree(&engine))
-        .bench_local_values(|(mut doc, _)| {
-            engine.flush_document_with(&mut doc, Parallelism::Sequential);
-            doc
+        .counter(ItemsCount::new(INITIAL_FLUSH_BATCH))
+        .with_inputs(|| {
+            (0..INITIAL_FLUSH_BATCH)
+                .map(|_| build_tree(&engine).0)
+                .collect::<Vec<_>>()
+        })
+        .bench_local_values(|mut docs| {
+            for doc in &mut docs {
+                engine.flush_document_with(doc, Parallelism::Sequential);
+            }
+            docs
         });
 }
 
@@ -183,10 +211,17 @@ fn initial_flush_sequential(bencher: divan::Bencher) {
 fn initial_flush_parallel(bencher: divan::Bencher) {
     let engine = engine_with_author_sheet();
     bencher
-        .with_inputs(|| build_tree(&engine))
-        .bench_local_values(|(mut doc, _)| {
-            engine.flush_document_with(&mut doc, Parallelism::Auto);
-            doc
+        .counter(ItemsCount::new(INITIAL_FLUSH_BATCH))
+        .with_inputs(|| {
+            (0..INITIAL_FLUSH_BATCH)
+                .map(|_| build_tree(&engine).0)
+                .collect::<Vec<_>>()
+        })
+        .bench_local_values(|mut docs| {
+            for doc in &mut docs {
+                engine.flush_document_with(doc, Parallelism::Auto);
+            }
+            docs
         });
 }
 
@@ -198,16 +233,20 @@ fn initial_flush_parallel(bencher: divan::Bencher) {
 fn incremental_class_flip(bencher: divan::Bencher) {
     let state = RefCell::new(flushed());
     let mut on = false;
-    bencher.bench_local(|| {
-        let (engine, doc, probe) = &mut *state.borrow_mut();
-        on = !on;
-        if on {
-            doc.add_class(*probe, "c1");
-        } else {
-            doc.remove_class(*probe, "c1");
-        }
-        engine.flush_document(doc);
-    });
+    bencher
+        .counter(ItemsCount::new(INCREMENTAL_BATCH))
+        .bench_local(|| {
+            for _ in 0..INCREMENTAL_BATCH {
+                let (engine, doc, probe) = &mut *state.borrow_mut();
+                on = !on;
+                if on {
+                    doc.add_class(*probe, "c1");
+                } else {
+                    doc.remove_class(*probe, "c1");
+                }
+                engine.flush_document(doc);
+            }
+        });
 }
 
 /// Inline `style` update on one deep leaf.
@@ -215,17 +254,21 @@ fn incremental_class_flip(bencher: divan::Bencher) {
 fn incremental_inline_style(bencher: divan::Bencher) {
     let state = RefCell::new(flushed());
     let mut on = false;
-    bencher.bench_local(|| {
-        let (engine, doc, probe) = &mut *state.borrow_mut();
-        on = !on;
-        let css = if on {
-            "color: rgb(9, 9, 9); width: 10px"
-        } else {
-            "color: rgb(3, 3, 3); width: 20px"
-        };
-        doc.set_inline_style(*probe, black_box(css));
-        engine.flush_document(doc);
-    });
+    bencher
+        .counter(ItemsCount::new(INCREMENTAL_BATCH))
+        .bench_local(|| {
+            for _ in 0..INCREMENTAL_BATCH {
+                let (engine, doc, probe) = &mut *state.borrow_mut();
+                on = !on;
+                let css = if on {
+                    "color: rgb(9, 9, 9); width: 10px"
+                } else {
+                    "color: rgb(3, 3, 3); width: 20px"
+                };
+                doc.set_inline_style(*probe, black_box(css));
+                engine.flush_document(doc);
+            }
+        });
 }
 
 /// `:hover` state flip on one deep leaf (state-keyed invalidation).
@@ -240,22 +283,30 @@ fn incremental_state_flip(bencher: divan::Bencher) {
     engine.flush_document(&mut doc);
     let state = RefCell::new((engine, doc));
     let mut on = false;
-    bencher.bench_local(|| {
-        let (engine, doc) = &mut *state.borrow_mut();
-        on = !on;
-        doc.set_state(probe, ElementState::HOVER, on);
-        engine.flush_document(doc);
-    });
+    bencher
+        .counter(ItemsCount::new(INCREMENTAL_BATCH))
+        .bench_local(|| {
+            for _ in 0..INCREMENTAL_BATCH {
+                let (engine, doc) = &mut *state.borrow_mut();
+                on = !on;
+                doc.set_state(probe, ElementState::HOVER, on);
+                engine.flush_document(doc);
+            }
+        });
 }
 
 /// A flush with nothing scheduled — the per-frame floor.
 #[divan::bench]
 fn noop_flush(bencher: divan::Bencher) {
     let state = RefCell::new(flushed());
-    bencher.bench_local(|| {
-        let (engine, doc, _) = &mut *state.borrow_mut();
-        engine.flush_document(doc);
-    });
+    bencher
+        .counter(ItemsCount::new(NO_OP_BATCH))
+        .bench_local(|| {
+            for _ in 0..NO_OP_BATCH {
+                let (engine, doc, _) = &mut *state.borrow_mut();
+                engine.flush_document(doc);
+            }
+        });
 }
 
 // --- inheritance & custom properties -----------------------------------------
@@ -270,21 +321,28 @@ fn inheritance_deep_chain(bencher: divan::Bencher) {
         StylesheetOrigin::Author,
     );
     bencher
+        .counter(ItemsCount::new(INHERITANCE_BATCH))
         .with_inputs(|| {
-            let mut doc: Document<()> = engine.new_document();
-            let root = doc.create_node("page", ());
-            doc.append_child(root);
-            let mut parent = root;
-            for _ in 0..256 {
-                let child = doc.create_node("view", ());
-                doc.append(parent, child);
-                parent = child;
-            }
-            doc
+            (0..INHERITANCE_BATCH)
+                .map(|_| {
+                    let mut doc: Document<()> = engine.new_document();
+                    let root = doc.create_node("page", ());
+                    doc.append_child(root);
+                    let mut parent = root;
+                    for _ in 0..256 {
+                        let child = doc.create_node("view", ());
+                        doc.append(parent, child);
+                        parent = child;
+                    }
+                    doc
+                })
+                .collect::<Vec<_>>()
         })
-        .bench_local_values(|mut doc| {
-            engine.flush_document(&mut doc);
-            doc
+        .bench_local_values(|mut docs| {
+            for doc in &mut docs {
+                engine.flush_document(doc);
+            }
+            docs
         });
 }
 
@@ -300,10 +358,17 @@ fn var_chain_cascade(bencher: divan::Bencher) {
     let mut engine = StyleEngine::new(device(800.0, 600.0));
     engine.add_stylesheet_str(&css, StylesheetOrigin::Author);
     bencher
-        .with_inputs(|| build_tree(&engine))
-        .bench_local_values(|(mut doc, _)| {
-            engine.flush_document(&mut doc);
-            doc
+        .counter(ItemsCount::new(VAR_CHAIN_BATCH))
+        .with_inputs(|| {
+            (0..VAR_CHAIN_BATCH)
+                .map(|_| build_tree(&engine).0)
+                .collect::<Vec<_>>()
+        })
+        .bench_local_values(|mut docs| {
+            for doc in &mut docs {
+                engine.flush_document(doc);
+            }
+            docs
         });
 }
 
@@ -326,13 +391,17 @@ fn media_viewport_flip(bencher: divan::Bencher) {
         .expect("document has an element child");
     let state = RefCell::new((engine, doc));
     let mut wide = true;
-    bencher.bench_local(move || {
-        let (engine, doc) = &mut *state.borrow_mut();
-        wide = !wide;
-        engine.set_viewport(if wide { 800.0 } else { 400.0 }, 600.0);
-        doc.mark_subtree_dirty(black_box(root));
-        engine.flush_document(doc);
-    });
+    bencher
+        .counter(ItemsCount::new(MEDIA_BATCH))
+        .bench_local(move || {
+            for _ in 0..MEDIA_BATCH {
+                let (engine, doc) = &mut *state.borrow_mut();
+                wide = !wide;
+                engine.set_viewport(if wide { 800.0 } else { 400.0 }, 600.0);
+                doc.mark_subtree_dirty(black_box(root));
+                engine.flush_document(doc);
+            }
+        });
 }
 
 // --- standalone resolve baseline ----------------------------------------------
@@ -343,8 +412,14 @@ fn media_viewport_flip(bencher: divan::Bencher) {
 fn resolve_single_element(bencher: divan::Bencher) {
     let engine = engine_with_author_sheet();
     let (doc, probe) = build_tree(&engine);
-    bencher.bench_local(|| {
-        let node = doc.get(black_box(probe)).expect("probe is live");
-        black_box(engine.resolve(node, None));
-    });
+    bencher
+        .counter(ItemsCount::new(RESOLVE_BATCH))
+        .with_inputs(|| Vec::with_capacity(RESOLVE_BATCH))
+        .bench_local_values(|mut styles| {
+            for _ in 0..RESOLVE_BATCH {
+                let node = doc.get(black_box(probe)).expect("probe is live");
+                styles.push(engine.resolve(node, None));
+            }
+            styles
+        });
 }

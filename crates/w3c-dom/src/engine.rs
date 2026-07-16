@@ -13,7 +13,7 @@
 //! drives stylo's restyle traversal directly over the document's nodes — no
 //! separate style tree is ever built.
 
-use std::num::NonZeroU64;
+use std::sync::Arc as StdArc;
 use std::sync::atomic::AtomicBool;
 
 use cssparser::{Parser, ParserInput, SourceLocation};
@@ -56,7 +56,7 @@ use stylo::values::KeyframesName;
 use stylo::values::specified::position::PositionTryFallbacksTryTactic;
 use stylo_traits::ParsingMode;
 
-use crate::document::{about_blank_url_data, mint_identity};
+use crate::document::about_blank_url_data;
 use crate::{Document, ExternalState, Node, NodeId};
 
 /// One declaration for direct rule construction: property name, value text,
@@ -79,13 +79,10 @@ pub fn property_is_supported(name: &str) -> bool {
 /// need to construct, share, or synchronize a `SharedRwLock` themselves.
 pub struct StyleEngine {
     stylist: Stylist,
-    lock: SharedRwLock,
+    /// Shared style-context identity and the lock protecting every stylesheet
+    /// and inline declaration created by this engine.
+    lock: StdArc<SharedRwLock>,
     url_data: UrlExtraData,
-    /// Process-unique engine identity, stamped into every document created
-    /// by [`new_document`](Self::new_document) and validated wherever this
-    /// engine's stylist/lock meet a document (see
-    /// [`assert_owns`](Self::assert_owns)).
-    token: NonZeroU64,
 }
 
 impl std::fmt::Debug for StyleEngine {
@@ -112,9 +109,8 @@ impl StyleEngine {
     pub fn with_url_data(device: Device, url_data: UrlExtraData) -> Self {
         Self {
             stylist: Stylist::new(device, QuirksMode::NoQuirks),
-            lock: SharedRwLock::new(),
+            lock: StdArc::new(SharedRwLock::new()),
             url_data,
-            token: mint_identity(),
         }
     }
 
@@ -125,7 +121,7 @@ impl StyleEngine {
     /// crate-private `assert_owns` boundary check).
     #[must_use]
     pub fn new_document<T>(&self) -> Document<T> {
-        Document::with_style_context(self.lock.clone(), self.url_data.clone(), Some(self.token))
+        Document::with_style_context(StdArc::clone(&self.lock), self.url_data.clone())
     }
 
     /// Assert that `document` was created by **this** engine.
@@ -145,10 +141,9 @@ impl StyleEngine {
     /// Panics when `document` was created by a different engine or standalone
     /// (`Document::new`).
     pub(crate) fn assert_owns<T>(&self, document: &Document<T>) {
-        assert_eq!(
-            document.core().engine_token,
-            Some(self.token),
-            "document is not paired with this StyleEngine (created by a              different engine or standalone)"
+        assert!(
+            StdArc::ptr_eq(&document.core().lock, &self.lock),
+            "document is not paired with this StyleEngine (created by a different engine or standalone)"
         );
     }
 
@@ -211,7 +206,7 @@ impl StyleEngine {
             self.url_data.clone(),
             origin,
             media,
-            self.lock.clone(),
+            self.lock.as_ref().clone(),
             None,
             None,
             QuirksMode::NoQuirks,
@@ -243,7 +238,7 @@ impl StyleEngine {
         );
         let sheet = Stylesheet {
             contents: self.lock.wrap(contents),
-            shared_lock: self.lock.clone(),
+            shared_lock: self.lock.as_ref().clone(),
             media: Arc::new(self.lock.wrap(MediaList::empty())),
             disabled: AtomicBool::new(false),
         };
@@ -420,17 +415,20 @@ impl StyleEngine {
     /// pass `None` to inherit from stylo's initial values.
     /// # Panics
     ///
-    /// Panics when `node` belongs to a document not created by this engine
-    /// (the same boundary check as `flush_document`).
+    /// Panics when `node` is a text node or belongs to a document not created
+    /// by this engine (the same boundary check as `flush_document`).
     #[must_use]
     pub fn resolve<T: ExternalState>(
         &self,
         node: &Node<T>,
         parent_style: Option<&ComputedValues>,
     ) -> Arc<ComputedValues> {
-        assert_eq!(
-            node.tree().engine_token,
-            Some(self.token),
+        assert!(
+            node.is_element(),
+            "StyleEngine::resolve called with a text node"
+        );
+        assert!(
+            StdArc::ptr_eq(&node.tree().lock, &self.lock),
             "node's document is not paired with this StyleEngine"
         );
         let guard = self.lock.read();
@@ -522,12 +520,16 @@ impl<T> Document<T> {
     /// # Panics
     ///
     /// Panics when `id` is stale (the let-it-crash mutation contract; see
-    /// the crate docs).
+    /// the crate docs), or when it names a text node.
     pub fn store_computed_style(&mut self, id: NodeId, style: Arc<ComputedValues>) {
         let node = self
             .core_mut()
             .node_mut(id)
             .expect("stale NodeId passed to Document::store_computed_style");
+        assert!(
+            node.is_element(),
+            "Document::store_computed_style called with a text node"
+        );
         node.set_computed_style(style);
         node.set_style_dirty(false);
     }

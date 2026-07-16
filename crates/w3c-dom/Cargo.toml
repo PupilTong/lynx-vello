@@ -12,7 +12,7 @@ rustc-hash = { workspace = true }
 slab = { workspace = true }
 smallvec = { workspace = true }
 
-# stylo integration: `Node` owns stylo's interior-mutable per-node state
+# stylo integration: element `Node`s own stylo's interior-mutable per-element state
 # (ElementData/selector flags) and the `traits` module implements stylo's
 # element traits (`TNode`/`TElement`/`TDocument`/`selectors::Element`) on the
 # plain one-word `&Node` handle. The vendored servo package named `stylo_dom`

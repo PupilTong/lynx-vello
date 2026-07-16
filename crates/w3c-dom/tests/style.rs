@@ -84,6 +84,186 @@ fn standard_cascade_is_embedder_neutral() {
 }
 
 #[test]
+fn style_traversal_skips_text_nodes_and_reaches_element_siblings() {
+    let mut engine = StyleEngine::new(device(800.0, 600.0));
+    engine.add_stylesheet_str("span { color: red; }", StylesheetOrigin::Author);
+
+    let mut doc: Document<()> = engine.new_document();
+    let root = doc.create_element("page", ());
+    let text = doc.create_text_node("hello", ());
+    let span = doc.create_element("span", ());
+    doc.append(root, text);
+    doc.append(root, span);
+    doc.append_child(root);
+
+    engine.flush_document(&mut doc);
+
+    assert!(doc.get(root).unwrap().has_style_data());
+    assert!(
+        !doc.get(text).unwrap().has_style_data(),
+        "text nodes are DOM/layout children, not styled elements"
+    );
+    assert_eq!(
+        doc.get(span)
+            .unwrap()
+            .computed_style()
+            .unwrap()
+            .clone_color(),
+        AbsoluteColor::srgb_legacy(255, 0, 0, 1.0)
+    );
+}
+
+#[test]
+fn text_data_changes_invalidate_the_parent_empty_selector() {
+    let mut engine = StyleEngine::new(device(800.0, 600.0));
+    engine.add_stylesheet_str(
+        ".box { color: blue; } .box:empty { color: red; }",
+        StylesheetOrigin::Author,
+    );
+
+    let mut doc: Document<()> = engine.new_document();
+    let root = doc.create_element("page", ());
+    let box_element = doc.create_element("view", ());
+    let text = doc.create_text_node("", ());
+    doc.add_class(box_element, "box");
+    doc.append(box_element, text);
+    doc.append(root, box_element);
+    doc.append_child(root);
+
+    engine.flush_document(&mut doc);
+    assert_eq!(
+        doc.get(box_element)
+            .unwrap()
+            .computed_style()
+            .unwrap()
+            .clone_color(),
+        AbsoluteColor::srgb_legacy(255, 0, 0, 1.0),
+        "an empty text node preserves :empty"
+    );
+
+    doc.set_text_data(text, "hello");
+    assert!(doc.needs_flush());
+    engine.flush_document(&mut doc);
+    assert_eq!(
+        doc.get(box_element)
+            .unwrap()
+            .computed_style()
+            .unwrap()
+            .clone_color(),
+        AbsoluteColor::srgb_legacy(0, 0, 255, 1.0),
+        "non-empty text makes the parent fail :empty"
+    );
+
+    doc.set_text_data(text, "");
+    engine.flush_document(&mut doc);
+    assert_eq!(
+        doc.get(box_element)
+            .unwrap()
+            .computed_style()
+            .unwrap()
+            .clone_color(),
+        AbsoluteColor::srgb_legacy(255, 0, 0, 1.0),
+        "clearing text restores :empty"
+    );
+
+    doc.detach(text);
+    engine.flush_document(&mut doc);
+    doc.set_text_data(text, "reattached");
+    assert!(
+        !doc.needs_flush(),
+        "mutating detached text cannot affect a styled element"
+    );
+    doc.append(box_element, text);
+    engine.flush_document(&mut doc);
+    assert_eq!(
+        doc.get(box_element)
+            .unwrap()
+            .computed_style()
+            .unwrap()
+            .clone_color(),
+        AbsoluteColor::srgb_legacy(0, 0, 255, 1.0),
+        "inserting non-empty text clears :empty"
+    );
+
+    doc.detach(text);
+    engine.flush_document(&mut doc);
+    assert_eq!(
+        doc.get(box_element)
+            .unwrap()
+            .computed_style()
+            .unwrap()
+            .clone_color(),
+        AbsoluteColor::srgb_legacy(255, 0, 0, 1.0),
+        "removing the only non-empty text restores :empty"
+    );
+}
+
+#[test]
+fn edge_child_selectors_ignore_interleaved_text_nodes_during_restyle() {
+    let mut engine = StyleEngine::new(device(800.0, 600.0));
+    engine.add_stylesheet_str(
+        ".item { color: blue; } .item:first-child { color: red; } \
+         .item:last-child { color: green; }",
+        StylesheetOrigin::Author,
+    );
+
+    let mut doc: Document<()> = engine.new_document();
+    let root = doc.create_element("page", ());
+    let leading_a = doc.create_text_node("a", ());
+    let leading_b = doc.create_text_node("b", ());
+    let first = doc.create_element("view", ());
+    let last = doc.create_element("view", ());
+    let trailing_a = doc.create_text_node("c", ());
+    let trailing_b = doc.create_text_node("d", ());
+    doc.add_class(first, "item");
+    doc.add_class(last, "item");
+    for child in [leading_a, leading_b, first, last, trailing_a, trailing_b] {
+        doc.append(root, child);
+    }
+    doc.append_child(root);
+    engine.flush_document(&mut doc);
+
+    let color =
+        |doc: &Document<()>, id| doc.get(id).unwrap().computed_style().unwrap().clone_color();
+    assert_eq!(
+        color(&doc, first),
+        AbsoluteColor::srgb_legacy(255, 0, 0, 1.0)
+    );
+    assert_eq!(
+        color(&doc, last),
+        AbsoluteColor::srgb_legacy(0, 128, 0, 1.0)
+    );
+
+    let new_first = doc.create_element("view", ());
+    doc.add_class(new_first, "item");
+    doc.insert_before(root, new_first, Some(first));
+    engine.flush_document(&mut doc);
+    assert_eq!(
+        color(&doc, new_first),
+        AbsoluteColor::srgb_legacy(255, 0, 0, 1.0)
+    );
+    assert_eq!(
+        color(&doc, first),
+        AbsoluteColor::srgb_legacy(0, 0, 255, 1.0),
+        "the displaced first element must lose :first-child"
+    );
+
+    let new_last = doc.create_element("view", ());
+    doc.add_class(new_last, "item");
+    doc.append(root, new_last);
+    engine.flush_document(&mut doc);
+    assert_eq!(
+        color(&doc, new_last),
+        AbsoluteColor::srgb_legacy(0, 128, 0, 1.0)
+    );
+    assert_eq!(
+        color(&doc, last),
+        AbsoluteColor::srgb_legacy(0, 0, 255, 1.0),
+        "the displaced last element must lose :last-child"
+    );
+}
+
+#[test]
 fn media_queries_follow_standard_viewport_updates() {
     let mut engine = StyleEngine::new(device(800.0, 600.0));
     engine.add_stylesheet_with_media(

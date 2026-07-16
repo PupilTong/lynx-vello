@@ -2,6 +2,7 @@
 //! `CodSpeed` (walltime mode on the macOS CI runner).
 
 use divan::black_box;
+use divan::counter::ItemsCount;
 
 fn main() {
     divan::main();
@@ -16,19 +17,38 @@ const EMPTY_STYLE: &[u8] = include_bytes!("../tests/fixtures/basic-bindtap.web.b
 /// rkyv decode.
 const LARGE_CSS: &[u8] = include_bytes!("../tests/fixtures/basic-performance-large-css.web.bundle");
 
-#[divan::bench]
-fn decode_small_card() -> lynx_template_decoder::WebTemplate {
-    lynx_template_decoder::decode(black_box(SMALL)).unwrap()
+// CodSpeed's instrumented Divan adapter measures the benchmark closure once.
+// Batch enough independent decodes into that closure to keep every sample in
+// the millisecond range; the counter preserves per-template throughput.
+const BATCH_SIZE: usize = 256;
+
+fn bench_decode(bencher: divan::Bencher<'_, '_>, bytes: &'static [u8]) {
+    bencher
+        .counter(ItemsCount::new(BATCH_SIZE))
+        .with_inputs(|| Vec::with_capacity(BATCH_SIZE))
+        .bench_local_values(|mut templates| {
+            for _ in 0..BATCH_SIZE {
+                templates.push(lynx_template_decoder::decode(black_box(bytes)).unwrap());
+            }
+            // Keep decoded templates alive until after the timed region so
+            // deallocation does not become part of the decode measurement.
+            templates
+        });
 }
 
 #[divan::bench]
-fn decode_empty_style_info() -> lynx_template_decoder::WebTemplate {
-    lynx_template_decoder::decode(black_box(EMPTY_STYLE)).unwrap()
+fn decode_small_card(bencher: divan::Bencher<'_, '_>) {
+    bench_decode(bencher, SMALL);
 }
 
 #[divan::bench]
-fn decode_large_style_info() -> lynx_template_decoder::WebTemplate {
-    lynx_template_decoder::decode(black_box(LARGE_CSS)).unwrap()
+fn decode_empty_style_info(bencher: divan::Bencher<'_, '_>) {
+    bench_decode(bencher, EMPTY_STYLE);
+}
+
+#[divan::bench]
+fn decode_large_style_info(bencher: divan::Bencher<'_, '_>) {
+    bench_decode(bencher, LARGE_CSS);
 }
 
 /// Selector reassembly over every rule of the large stylesheet — the hot
@@ -37,12 +57,14 @@ fn decode_large_style_info() -> lynx_template_decoder::WebTemplate {
 fn selectors_to_css(bencher: divan::Bencher<'_, '_>) {
     let template = lynx_template_decoder::decode(LARGE_CSS).unwrap();
     let style_info = template.style_info.unwrap();
-    bencher.bench(|| {
+    bencher.counter(ItemsCount::new(BATCH_SIZE)).bench(|| {
         let mut total = 0usize;
-        for sheet in black_box(&style_info).css_id_to_style_sheet.values() {
-            for rule in &sheet.rules {
-                for selector in &rule.prelude.selector_list {
-                    total += selector.to_css_string().len();
+        for _ in 0..BATCH_SIZE {
+            for sheet in black_box(&style_info).css_id_to_style_sheet.values() {
+                for rule in &sheet.rules {
+                    for selector in &rule.prelude.selector_list {
+                        total += selector.to_css_string().len();
+                    }
                 }
             }
         }

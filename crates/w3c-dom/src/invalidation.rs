@@ -72,9 +72,10 @@ impl<T> Document<T> {
     ///
     /// # Panics
     ///
-    /// Panics when `id` is stale (the let-it-crash mutation contract; see
-    /// the crate docs).
+    /// Panics when `id` is stale or identifies a text node (the let-it-crash
+    /// mutation contract; see the crate docs).
     pub fn mark_style_dirty(&mut self, id: NodeId) {
+        self.live_element(id);
         self.live(id).set_style_dirty(true);
         self.add_restyle_hint(id, RestyleHint::RESTYLE_SELF);
         self.mark_ancestors_dirty_descendants(id);
@@ -85,10 +86,10 @@ impl<T> Document<T> {
     ///
     /// # Panics
     ///
-    /// Panics when `id` is stale (the let-it-crash mutation contract; see
-    /// the crate docs).
+    /// Panics when `id` is stale or identifies a text node (the let-it-crash
+    /// mutation contract; see the crate docs).
     pub fn mark_subtree_dirty(&mut self, id: NodeId) {
-        let node = self.live(id);
+        let node = self.live_element(id);
         node.set_style_dirty(true);
         if !node.child_ids().is_empty() {
             node.set_dirty_descendants_bit(true);
@@ -102,6 +103,16 @@ impl<T> Document<T> {
     fn live(&self, id: NodeId) -> &Node<T> {
         self.get(id)
             .expect("stale or foreign NodeId passed to a Document mutation method")
+    }
+
+    /// Resolve a live element for an element-only mutation path.
+    fn live_element(&self, id: NodeId) -> &Node<T> {
+        let node = self.live(id);
+        assert!(
+            node.is_element(),
+            "element-only Document mutation called with a text node"
+        );
+        node
     }
 
     /// Insert restyle-hint bits into `id`'s stylo `ElementData`, if it has
@@ -147,35 +158,43 @@ impl<T> Document<T> {
     /// recorded on the parent during matching, so this is near-free unless
     /// some matched rule actually depends on child structure.
     pub(crate) fn note_child_list_change(&mut self, parent: NodeId, index: usize) {
-        let parent_node = self.live(parent);
+        let parent_node = self.live_element(parent);
         let flags = parent_node.selector_flags();
         if flags.intersects(STRUCTURE_SENSITIVE) {
             let children = parent_node.child_ids().to_vec();
+            let element_children: Vec<NodeId> = children
+                .iter()
+                .copied()
+                .filter(|&child| self.live(child).is_element())
+                .collect();
             if flags.intersects(ElementSelectorFlags::HAS_EMPTY_SELECTOR) {
                 self.note_emptiness_change(parent);
             }
             if flags.intersects(ElementSelectorFlags::HAS_SLOW_SELECTOR) {
-                for &child in &children {
+                for &child in &element_children {
                     self.add_restyle_hint(child, RestyleHint::restyle_subtree());
                 }
             } else if flags.intersects(ElementSelectorFlags::HAS_SLOW_SELECTOR_LATER_SIBLINGS) {
                 for &child in children.get(index..).unwrap_or_default() {
-                    self.add_restyle_hint(child, RestyleHint::restyle_subtree());
+                    if self.live(child).is_element() {
+                        self.add_restyle_hint(child, RestyleHint::restyle_subtree());
+                    }
                 }
             } else if flags.intersects(ElementSelectorFlags::MAY_HAVE_TREE_COUNTING_FUNCTION) {
-                for &child in &children {
+                for &child in &element_children {
                     self.add_restyle_hint(child, RestyleHint::RECASCADE_SELF);
                 }
             }
             if flags.intersects(ElementSelectorFlags::HAS_EDGE_CHILD_SELECTOR) {
                 // Both edges AND their inward neighbors: an edge insertion
                 // displaces the old edge child one slot inward (a prepend
-                // makes the old `:first-child` `children[1]`), and it needs
-                // its edge styling dropped. Duplicate hints are idempotent.
-                let edges: Vec<NodeId> = children
+                // makes the old `:first-child` `element_children[1]`), and it
+                // needs its edge styling dropped. Duplicate hints are
+                // idempotent.
+                let edges: Vec<NodeId> = element_children
                     .iter()
                     .take(2)
-                    .chain(children.iter().rev().take(2))
+                    .chain(element_children.iter().rev().take(2))
                     .copied()
                     .collect();
                 for child in edges {
@@ -225,8 +244,9 @@ impl<T: ExternalState> Document<T> {
     /// # Panics
     ///
     /// Panics when `id` is stale (the let-it-crash mutation contract; see
-    /// the crate docs).
+    /// the crate docs), or when it names a text node.
     pub fn set_classes(&mut self, id: NodeId, classes: &str) {
+        self.live_element(id);
         self.note_class_change(id);
         self.core_mut()
             .node_mut(id)
@@ -239,10 +259,10 @@ impl<T: ExternalState> Document<T> {
     /// # Panics
     ///
     /// Panics when `id` is stale (the let-it-crash mutation contract; see
-    /// the crate docs).
+    /// the crate docs), or when it names a text node.
     pub fn add_class(&mut self, id: NodeId, class: &str) {
         let class = Atom::from(class);
-        if self.live(id).classes.contains(&class) {
+        if self.live_element(id).classes.contains(&class) {
             return;
         }
         self.note_class_change(id);
@@ -258,10 +278,10 @@ impl<T: ExternalState> Document<T> {
     /// # Panics
     ///
     /// Panics when `id` is stale (the let-it-crash mutation contract; see
-    /// the crate docs).
+    /// the crate docs), or when it names a text node.
     pub fn remove_class(&mut self, id: NodeId, class: &str) {
         let class = Atom::from(class);
-        if !self.live(id).classes.contains(&class) {
+        if !self.live_element(id).classes.contains(&class) {
             return;
         }
         self.note_class_change(id);
@@ -277,8 +297,9 @@ impl<T: ExternalState> Document<T> {
     /// # Panics
     ///
     /// Panics when `id` is stale (the let-it-crash mutation contract; see
-    /// the crate docs).
+    /// the crate docs), or when it names a text node.
     pub fn set_id_attr(&mut self, id: NodeId, value: Option<&str>) {
+        self.live_element(id);
         self.note_id_change(id);
         self.core_mut()
             .node_mut(id)
@@ -291,8 +312,9 @@ impl<T: ExternalState> Document<T> {
     /// # Panics
     ///
     /// Panics when `id` is stale (the let-it-crash mutation contract; see
-    /// the crate docs).
+    /// the crate docs), or when it names a text node.
     pub fn set_attribute(&mut self, id: NodeId, name: &str, value: &str) {
+        self.live_element(id);
         self.note_attribute_change(id, name);
         self.core_mut()
             .node_mut(id)
@@ -306,8 +328,9 @@ impl<T: ExternalState> Document<T> {
     /// # Panics
     ///
     /// Panics when `id` is stale (the let-it-crash mutation contract; see
-    /// the crate docs).
+    /// the crate docs), or when it names a text node.
     pub fn remove_attribute(&mut self, id: NodeId, name: &str) {
+        self.live_element(id);
         self.note_attribute_change(id, name);
         self.core_mut()
             .node_mut(id)
@@ -322,8 +345,9 @@ impl<T: ExternalState> Document<T> {
     /// # Panics
     ///
     /// Panics when `id` is stale (the let-it-crash mutation contract; see
-    /// the crate docs).
+    /// the crate docs), or when it names a text node.
     pub fn set_state(&mut self, id: NodeId, flags: dom::ElementState, on: bool) {
+        self.live_element(id);
         // `ensure_snapshot` captures the old state on first call; state
         // invalidation keys off `snapshot.state`, so nothing further to flag.
         self.ensure_snapshot(id);
@@ -335,11 +359,13 @@ impl<T: ExternalState> Document<T> {
             .set(flags, on);
     }
 
-    /// Set or clear the node's literal character data.
+    /// Set or clear a node's literal character data.
     ///
-    /// Text participates in matching only through `:empty`; the invalidation
-    /// is scoped accordingly (near-free unless a matched rule depends on the
-    /// node's emptiness).
+    /// On a text node, `None` is normalized to the empty string so the node
+    /// remains a text node with valid character data. Element-backed text
+    /// carriers may use `None` to clear their data. Character data
+    /// participates in matching only through the containing element's
+    /// `:empty` state; invalidation is scoped accordingly.
     ///
     /// # Panics
     ///
@@ -347,20 +373,54 @@ impl<T: ExternalState> Document<T> {
     /// the crate docs).
     pub fn set_text(&mut self, id: NodeId, text: Option<String>) {
         let node = self.live(id);
-        let was_empty = node.text().is_none_or(str::is_empty);
-        let empty_flip = was_empty != text.as_deref().is_none_or(str::is_empty)
-            && node.child_ids().is_empty()
-            && node
-                .selector_flags()
-                .intersects(ElementSelectorFlags::HAS_EMPTY_SELECTOR);
+        let is_text_node = node.is_text_node();
+        let affected_element = if is_text_node {
+            node.parent_id()
+        } else {
+            Some(id)
+        };
+        let (was_empty, watches_empty) = affected_element.map_or((false, false), |element| {
+            let element = self.live_element(element);
+            (
+                element.is_empty_element(),
+                element
+                    .selector_flags()
+                    .intersects(ElementSelectorFlags::HAS_EMPTY_SELECTOR),
+            )
+        });
+        let text = if is_text_node {
+            Some(text.unwrap_or_default())
+        } else {
+            text
+        };
         self.core_mut()
             .node_mut(id)
             .expect("stale or foreign NodeId passed to Document::set_text")
             .text = text;
-        if empty_flip {
-            self.note_emptiness_change(id);
-            self.mark_ancestors_dirty_descendants(id);
+        if let Some(element) = affected_element
+            && watches_empty
+            && was_empty != self.live_element(element).is_empty_element()
+        {
+            self.note_emptiness_change(element);
+            self.mark_ancestors_dirty_descendants(element);
         }
+    }
+
+    /// Replace a text node's character data.
+    ///
+    /// This is the kind-checked convenience form of [`set_text`](Self::set_text)
+    /// for W3C text nodes. Element-backed text carriers continue to use
+    /// `set_text` directly.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `id` is stale or names an element node.
+    pub fn set_text_data(&mut self, id: NodeId, text: impl Into<String>) {
+        assert!(
+            self.live(id).is_text_node(),
+            "Document::set_text_data called with an element node"
+        );
+        self.set_text(id, Some(text.into()));
     }
 
     // --- inline style ----------------------------------------------------------
@@ -374,8 +434,9 @@ impl<T: ExternalState> Document<T> {
     /// # Panics
     ///
     /// Panics when `id` is stale (the let-it-crash mutation contract; see
-    /// the crate docs).
+    /// the crate docs), or when it names a text node.
     pub fn set_inline_style(&mut self, id: NodeId, css: &str) {
+        self.live_element(id);
         let block = if css.is_empty() {
             None
         } else {
@@ -408,12 +469,9 @@ impl<T: ExternalState> Document<T> {
     /// # Panics
     ///
     /// Panics when `id` is stale (the let-it-crash mutation contract; see
-    /// the crate docs).
+    /// the crate docs), or when it names a text node.
     pub fn add_inline_style(&mut self, id: NodeId, name: &str, value: &str) {
-        debug_assert!(
-            self.contains(id),
-            "stale or foreign NodeId passed to add_inline_style"
-        );
+        self.live_element(id);
         let Ok(property_id) = PropertyId::parse_unchecked(name, None) else {
             return;
         };
@@ -459,10 +517,11 @@ impl<T: ExternalState> Document<T> {
     ///
     /// # Panics
     ///
-    /// Panics when `id` is stale (the let-it-crash mutation contract; see
-    /// the crate docs).
+    /// Panics when `id` is stale or identifies a text node (the let-it-crash
+    /// mutation contract; see the crate docs).
     #[must_use]
     pub fn inline_style_declaration_count(&self, id: NodeId) -> usize {
+        self.live_element(id);
         let core = self.core();
         let Some(block) = &self.live(id).inline_block else {
             return 0;
@@ -489,9 +548,10 @@ impl<T: ExternalState> Document<T> {
     ///
     /// # Panics
     ///
-    /// Panics when `id` is stale (the let-it-crash mutation contract; see
-    /// the crate docs).
+    /// Panics when `id` is stale or identifies a text node (the let-it-crash
+    /// mutation contract; see the crate docs).
     pub fn note_external_attribute_change(&mut self, id: NodeId, name: &str) {
+        self.live_element(id);
         self.note_attribute_change(id, name);
     }
 
@@ -502,9 +562,10 @@ impl<T: ExternalState> Document<T> {
     ///
     /// # Panics
     ///
-    /// Panics when `id` is stale (the let-it-crash mutation contract; see
-    /// the crate docs).
+    /// Panics when `id` is stale or identifies a text node (the let-it-crash
+    /// mutation contract; see the crate docs).
     pub fn note_external_attributes_change(&mut self, id: NodeId) {
+        self.live_element(id);
         if let Some(snapshot) = self.ensure_snapshot(id) {
             snapshot.other_attributes_changed = true;
         }

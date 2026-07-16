@@ -288,7 +288,9 @@ impl WidgetTree {
         self.sweep_dropped();
         let unique_id = self.next_unique_id;
         self.next_unique_id = self.next_unique_id.wrapping_add(1);
-        let id = self.doc.create_node(tag, WidgetState::new(kind, unique_id));
+        let id = self
+            .doc
+            .create_element(tag, WidgetState::new(kind, unique_id));
         self.by_unique_id.insert(unique_id, id);
         self.handle_for(id)
     }
@@ -720,10 +722,12 @@ impl WidgetTree {
     /// An element's Lynx tag name.
     pub fn get_tag(&self, handle: &WidgetHandle) -> Result<&str, WidgetError> {
         let id = self.resolve(handle)?;
-        self.doc
-            .get(id)
-            .map(Widget::tag)
-            .ok_or(WidgetError::StaleElement(id))
+        let widget = self.doc.get(id).ok_or(WidgetError::StaleElement(id))?;
+        debug_assert!(
+            widget.is_element(),
+            "WidgetTree handles always identify element nodes"
+        );
+        widget.tag().ok_or(WidgetError::StaleElement(id))
     }
 
     /// An element's plain attribute map.

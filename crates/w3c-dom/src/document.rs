@@ -39,6 +39,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::ptr::NonNull;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use slab::Slab;
@@ -56,8 +57,8 @@ pub(crate) fn about_blank_url_data() -> UrlExtraData {
     UrlExtraData::from(::url::Url::parse("about:blank").expect("about:blank is a valid URL"))
 }
 
-/// Mint a process-unique identity token (documents and style engines share
-/// the counter; `0` is never minted, so tokens fit `NonZeroU64`).
+/// Mint a process-unique document identity token. `0` is never minted, so
+/// tokens fit `NonZeroU64`.
 pub(crate) fn mint_identity() -> NonZeroU64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NonZeroU64::new(NEXT.fetch_add(1, Ordering::Relaxed)).expect("identity counter starts at 1")
@@ -72,7 +73,7 @@ pub(crate) fn mint_identity() -> NonZeroU64 {
 /// # Why the generation exists
 ///
 /// The slab recycles indices, so a bare index is ambiguous: after
-/// `remove_subtree`, the next `create_node` may place a new node at the same
+/// `remove_subtree`, the next node factory call may place a new node at the same
 /// index. A document-local allocation generation turns that ABA-shaped reuse
 /// into detectable staleness: queries return `None`, while mutation methods
 /// panic according to the crate's let-it-crash contract.
@@ -182,13 +183,6 @@ pub(crate) struct Core<T> {
     /// This document's process-unique identity, stamped into every [`NodeId`]
     /// it mints.
     token: NonZeroU64,
-    /// The identity of the [`StyleEngine`](crate::StyleEngine) whose private
-    /// style context this document shares, or `None` for a standalone
-    /// document. Validated by the engine at every flush/resolve entry point:
-    /// running one engine's stylist and lock against another engine's
-    /// document is either a deep stylo panic (`Locked::read_with` guard
-    /// mismatch) or, worse, a silently wrong cascade.
-    pub(crate) engine_token: Option<NonZeroU64>,
     /// Node storage. `nodes[id.index]` holds the live node for that slab key;
     /// `Slab` owns vacant-slot tracking and reuse.
     nodes: Slab<Node<T>>,
@@ -198,11 +192,11 @@ pub(crate) struct Core<T> {
     /// the public 32-bit generation.
     next_generation: u64,
     /// The document's element child, if one has been appended. `Document` is
-    /// the actual DOM root; this link is its (at most one, in our
-    /// element-only subset) child, not a separately designated tree root.
+    /// the actual DOM root; this link is its at-most-one element child, not a
+    /// separately designated tree root. Text nodes live below elements.
     document_element: Option<NodeId>,
     /// The shared lock guarding this document's inline style blocks.
-    pub(crate) lock: SharedRwLock,
+    pub(crate) lock: Arc<SharedRwLock>,
     /// The base URL data used when parsing this document's inline styles.
     pub(crate) url_data: UrlExtraData,
     /// Debug-only: set for the duration of a style flush, so per-node style
@@ -260,7 +254,7 @@ impl<T> Core<T> {
     }
 }
 
-/// The one tree: a document node, a slab of element [`Node`]s (including
+/// The one tree: a document node, a slab of element/text [`Node`]s (including
 /// their pending snapshots), and the private style context.
 ///
 /// See the crate docs for the ONE TREE policy and the mutation
@@ -311,18 +305,13 @@ impl<T> Document<T> {
     /// [`StyleEngine::new_document`](crate::StyleEngine::new_document).
     #[must_use]
     pub fn new() -> Self {
-        Self::with_style_context(SharedRwLock::new(), about_blank_url_data(), None)
+        Self::with_style_context(Arc::new(SharedRwLock::new()), about_blank_url_data())
     }
 
     /// Create a document with the style context owned by this crate.
-    pub(crate) fn with_style_context(
-        lock: SharedRwLock,
-        url_data: UrlExtraData,
-        engine_token: Option<NonZeroU64>,
-    ) -> Self {
+    pub(crate) fn with_style_context(lock: Arc<SharedRwLock>, url_data: UrlExtraData) -> Self {
         let core = Box::new(Core {
             token: mint_identity(),
-            engine_token,
             nodes: Slab::new(),
             next_generation: 1,
             document_element: None,
@@ -378,17 +367,47 @@ impl<T> Document<T> {
 
     // --- node factory ------------------------------------------------------
 
-    /// Create a detached node and return its handle.
+    /// Create a detached element and return its handle.
     ///
-    /// This is the **only** way nodes come to exist: they are born inside
-    /// this document, carrying the backpointer to it, and never move to
-    /// another one.
+    /// Elements are born inside this document, carrying the backpointer to
+    /// it, and never move to another one.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the document would need to grow past `u32::MAX` slots.
+    pub fn create_element(&mut self, tag: &str, ext: T) -> NodeId {
+        self.allocate_node(|core, id| Node::new_element(core, id, tag, ext))
+    }
+
+    /// Backwards-compatible name for [`create_element`](Self::create_element).
+    ///
+    /// New code should prefer the kind-specific factory so element creation is
+    /// visibly distinct from [`create_text_node`](Self::create_text_node).
     ///
     /// # Panics
     ///
     /// Panics if the slab key or allocation generation no longer fits in the
     /// corresponding 32-bit [`NodeId`] field.
     pub fn create_node(&mut self, tag: &str, ext: T) -> NodeId {
+        self.create_element(tag, ext)
+    }
+
+    /// Create a detached text node containing `text` and return its handle.
+    ///
+    /// Text nodes share the document's storage, tree links, identity, and
+    /// embedder payload type, but they have no tag or CSS element state and
+    /// are not selector subjects.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the document would need to grow past `u32::MAX` slots.
+    pub fn create_text_node(&mut self, text: impl Into<String>, ext: T) -> NodeId {
+        let text = text.into();
+        self.allocate_node(|core, id| Node::new_text(core, id, text, ext))
+    }
+
+    /// Allocate one generational slot and construct its occupant.
+    fn allocate_node(&mut self, make: impl FnOnce(CorePtr<T>, NodeId) -> Node<T>) -> NodeId {
         let core_ptr = self.core;
         let core = self.core_mut();
         let index =
@@ -405,7 +424,7 @@ impl<T> Document<T> {
             index,
             generation,
         };
-        let inserted = core.nodes.insert(Node::new(core_ptr, id, tag, ext));
+        let inserted = core.nodes.insert(make(core_ptr, id));
         debug_assert_eq!(inserted, index as usize, "vacant slab key changed");
         id
     }
@@ -414,19 +433,20 @@ impl<T> Document<T> {
 
     /// Append `child` to the document node.
     ///
-    /// This DOM subset stores only elements, so a document may have at most
-    /// one child: its `documentElement`. The child may be detached or linked
-    /// under another element; DOM pre-insertion detaches it first. Attaching
-    /// it schedules an initial style pass for the whole subtree.
+    /// This DOM subset permits one child on the document node: its element
+    /// `documentElement`. Text nodes live below elements. The child may be
+    /// detached or linked under another element; DOM pre-insertion detaches
+    /// it first. Attaching it schedules an initial style pass for the whole
+    /// subtree.
     ///
     /// # Panics
     ///
-    /// Panics when `child` is stale or the document already has a different
-    /// element child.
+    /// Panics when `child` is stale, is a text node, or the document already
+    /// has a different element child.
     pub fn append_child(&mut self, child: NodeId) {
         assert!(
-            self.contains(child),
-            "stale or foreign NodeId passed to Document::append_child"
+            self.get(child).is_some_and(Node::is_element),
+            "Document::append_child requires a live element"
         );
         if self.core().document_element == Some(child) {
             return;
@@ -535,14 +555,17 @@ impl<T> Document<T> {
     ///
     /// # Panics
     ///
-    /// Panics when `parent`, `child`, or `before` is stale, when `before` is
-    /// not a child of `parent`, or — in debug builds — when the link would
-    /// create a cycle or
-    /// `before == child` (the let-it-crash mutation contract; see the crate
-    /// docs).
+    /// Panics when `parent`, `child`, or `before` is stale, when `parent` is a
+    /// text node, when `before` is not a child of `parent`, or — in debug
+    /// builds — when the link would create a cycle or `before == child` (the
+    /// let-it-crash mutation contract; see the crate docs).
     pub fn insert_before(&mut self, parent: NodeId, child: NodeId, before: Option<NodeId>) {
         debug_assert!(self.contains(parent), "insert_before: stale parent");
         debug_assert!(self.contains(child), "insert_before: stale child");
+        assert!(
+            self.get(parent).is_some_and(Node::is_element),
+            "insert_before: parent must be a live element"
+        );
         debug_assert!(child != parent, "insert_before: child == parent");
         debug_assert!(
             !self.is_ancestor(child, parent),

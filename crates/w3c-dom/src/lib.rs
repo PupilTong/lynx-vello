@@ -4,14 +4,15 @@
 //! everything stylo needs to run its cascade over it in place. The public
 //! surface is deliberately small:
 //!
-//! - [`Document<T>`] — **the one tree and its actual DOM document node.** It owns every element,
-//!   its optional `documentElement`, and the private style context. Elements are created by
-//!   [`Document::create_node`] and mutated exclusively through `Document` methods; there is no way
-//!   to construct, mutate, or re-home one outside its document (ONE TREE policy).
-//! - [`Node<T>`] — the compositional unit: the W3C-DOM-subset fields (tree links, tag, id, classes,
-//!   attributes, dynamic pseudo-class state, inline style, character data), its pending
-//!   invalidation snapshot, and stylo's per-node style bookkeeping. Read-only from outside the
-//!   crate.
+//! - [`Document<T>`] — **the one tree and its actual DOM document node.** It owns every stored
+//!   node, its optional `documentElement`, and the private style context. Element and text nodes
+//!   are created by [`Document::create_element`] / [`Document::create_text_node`] and mutated
+//!   exclusively through `Document` methods; there is no way to construct, mutate, or re-home a
+//!   node outside its document (ONE TREE policy).
+//! - [`Node<T>`] — the compositional unit. [`NodeType::Element`] nodes carry the W3C-DOM-subset
+//!   element fields and stylo bookkeeping; [`NodeType::Text`] nodes carry character data. Both
+//!   kinds share tree links, the embedder payload, and a node-owned pending invalidation snapshot
+//!   slot. Read-only from outside the crate.
 //! - [`NodeId`] — a generational, staleness-detecting handle. The *read* handle is a plain
 //!   `&Node<T>`; the stylo element traits are implemented directly on it (no wrapper type).
 //! - [`StyleEngine`] — stylesheet parsing/building, matching, rule-tree insertion, cascade, and the
@@ -31,8 +32,8 @@
 //!
 //! # stylo integration — one tree, one-word handles
 //!
-//! Tags/classes/ids are interned as stylo atoms and each [`Node`] owns
-//! stylo's interior-mutable per-node state; the crate-private `traits` module
+//! Element tags/classes/ids are interned as stylo atoms and each element node
+//! owns stylo's interior-mutable style state; the crate-private `traits` module
 //! implements stylo's
 //! element traits with `&'a Node<T>` as the hot [`TElement`](stylo::dom::TElement)
 //! handle and a small internal node view for
@@ -96,6 +97,6 @@ pub use crate::engine::{
 };
 pub use crate::ext::ExternalState;
 pub use crate::flush::Parallelism;
-pub use crate::node::{ChildrenIter, Node};
+pub use crate::node::{ChildrenIter, Node, NodeType};
 #[doc(hidden)]
 pub use crate::traits::{DomChildrenIter, DomDocument, DomNode};

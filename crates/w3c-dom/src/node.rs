@@ -1,15 +1,17 @@
 //! [`Node`] — the unit the tree is composed of — and its `&Node` read/
 //! navigation handle.
 //!
-//! A node models a strict subset of the W3C DOM: tree links, tag, id,
-//! classes, attributes, dynamic pseudo-class state, an inline style block,
-//! character data, and the per-node style bookkeeping stylo needs. Anything
-//! beyond that subset belongs to the embedder and lives in the node's
+//! A node models a strict subset of the W3C DOM. Element nodes carry a tag,
+//! id, classes, attributes, dynamic pseudo-class state, an inline style block,
+//! and the per-element style bookkeeping stylo needs; text nodes carry
+//! character data. Both kinds share tree links and an embedder-owned
 //! [`ext`](Node::ext) payload (see [`ExternalState`](crate::ExternalState)).
 //!
-//! Nodes are created by [`Document::create_node`](crate::Document::create_node)
-//! — never directly — and every DOM mutation goes through `Document` methods,
-//! so pre-mutation snapshots and restyle hints can never be skipped. Shared
+//! Nodes are created by
+//! [`Document::create_element`](crate::Document::create_element) or
+//! [`Document::create_text_node`](crate::Document::create_text_node) — never
+//! directly — and every DOM mutation goes through `Document` methods, so
+//! pre-mutation snapshots and restyle hints can never be skipped. Shared
 //! accessors on `Node` are the read surface.
 //!
 //! # The backpointer, and why `&Node` is the handle
@@ -246,6 +248,19 @@ pub(crate) const SNAPSHOT_PRESENT: u8 = 1 << 0;
 /// Bit set once stylo's invalidation pass has consumed the snapshot.
 pub(crate) const SNAPSHOT_HANDLED: u8 = 1 << 1;
 
+/// The kind of a DOM [`Node`].
+///
+/// `w3c-dom` currently models the two node kinds needed by the runtime and
+/// stylo traversal. The owning [`Document`](crate::Document) is represented
+/// separately as the DOM document node at the stylo boundary.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NodeType {
+    /// An element node with a local tag name and CSS style state.
+    Element,
+    /// A text node containing character data and no element identity.
+    Text,
+}
+
 /// A single node in a [`Document`](crate::Document) tree.
 ///
 /// See the crate docs for the model, the backpointer, and the
@@ -258,6 +273,8 @@ pub struct Node<T> {
     /// This node's own handle (also the source of its stable stylo
     /// `OpaqueNode` identity).
     id: NodeId,
+    /// Whether this is an element or text node.
+    kind: NodeType,
 
     /// The parent element, or `None` for the document element / a detached
     /// element. Stylo's broader DOM-node view supplies the real `Document`
@@ -265,9 +282,10 @@ pub struct Node<T> {
     pub(crate) parent: Option<NodeId>,
     /// Child nodes, in document order.
     pub(crate) children: Vec<NodeId>,
-    /// The tag name, interned as a stylo [`LocalName`] atom so
+    /// The element's tag name, interned as a stylo [`LocalName`] atom so
     /// `selectors::Element::has_local_name` is a cheap atom comparison.
-    pub(crate) tag: LocalName,
+    /// `None` for text nodes.
+    pub(crate) tag: Option<LocalName>,
     /// The node's classes, interned as atoms.
     pub(crate) classes: SmallVec<[Atom; 4]>,
     /// The node's `id` selector value, distinct from a plain `id` attribute
@@ -291,10 +309,11 @@ pub struct Node<T> {
     /// the start of a flush.
     pub(crate) snapshot: Option<Snapshot>,
 
-    /// stylo's per-node style data (`ElementData`), created lazily via
+    /// stylo's per-element style data (`ElementData`), created lazily via
     /// `TElement::ensure_data`. The resolved computed style lives here (see
-    /// [`computed_style`](Node::computed_style)). Only touched through the
-    /// [`traits`](crate::traits) impls under stylo's traversal discipline.
+    /// [`computed_style`](Node::computed_style)). It remains empty for text
+    /// nodes and is only touched through the [`traits`](crate::traits) impls
+    /// under stylo's traversal discipline.
     pub(crate) stylo_data: UnsafeCell<Option<ElementDataWrapper>>,
 
     /// Selector flags accumulated by stylo during matching (e.g. "has a
@@ -327,7 +346,9 @@ pub struct Node<T> {
     #[cfg(debug_assertions)]
     pub(crate) slot_guard: slot_guard::SlotGuard,
 
-    /// Literal character-data content, for text leaves.
+    /// Literal character data. Always `Some` for a text node. Element nodes
+    /// may also carry data for embedder-defined element-backed text carriers
+    /// (Lynx's `<raw-text>` is one); ordinary W3C text uses a child text node.
     pub(crate) text: Option<String>,
 
     /// The embedder's external-state payload (see
@@ -336,15 +357,42 @@ pub struct Node<T> {
 }
 
 impl<T> Node<T> {
-    /// Create a detached node bound to its owning document core. Crate-only:
-    /// embedders go through [`Document::create_node`](crate::Document::create_node).
-    pub(crate) fn new(core: CorePtr<T>, id: NodeId, tag: &str, ext: T) -> Self {
+    /// Create a detached element bound to its owning document core.
+    /// Crate-only: embedders go through
+    /// [`Document::create_element`](crate::Document::create_element).
+    pub(crate) fn new_element(core: CorePtr<T>, id: NodeId, tag: &str, ext: T) -> Self {
+        Self::new(
+            core,
+            id,
+            NodeType::Element,
+            Some(LocalName::from(tag)),
+            None,
+            ext,
+        )
+    }
+
+    /// Create a detached text node bound to its owning document core.
+    /// Crate-only: embedders go through
+    /// [`Document::create_text_node`](crate::Document::create_text_node).
+    pub(crate) fn new_text(core: CorePtr<T>, id: NodeId, text: String, ext: T) -> Self {
+        Self::new(core, id, NodeType::Text, None, Some(text), ext)
+    }
+
+    fn new(
+        core: CorePtr<T>,
+        id: NodeId,
+        kind: NodeType,
+        tag: Option<LocalName>,
+        text: Option<String>,
+        ext: T,
+    ) -> Self {
         Self {
             core,
             id,
+            kind,
             parent: None,
             children: Vec::new(),
-            tag: LocalName::from(tag),
+            tag,
             classes: SmallVec::new(),
             id_attr: None,
             attrs: FxHashMap::default(),
@@ -359,7 +407,7 @@ impl<T> Node<T> {
             children_to_process: AtomicIsize::new(0),
             #[cfg(debug_assertions)]
             slot_guard: slot_guard::SlotGuard::new(),
-            text: None,
+            text,
             ext,
         }
     }
@@ -390,8 +438,26 @@ impl<T> Node<T> {
         self.id
     }
 
+    /// This node's DOM kind.
+    #[must_use]
+    pub const fn node_type(&self) -> NodeType {
+        self.kind
+    }
+
+    /// Whether this is an element node.
+    #[must_use]
+    pub const fn is_element(&self) -> bool {
+        matches!(self.kind, NodeType::Element)
+    }
+
+    /// Whether this is a text node.
+    #[must_use]
+    pub const fn is_text_node(&self) -> bool {
+        matches!(self.kind, NodeType::Text)
+    }
+
     /// The parent element's handle, or `None` for the document element / a
-    /// detached element.
+    /// detached node.
     #[must_use]
     pub fn parent_id(&self) -> Option<NodeId> {
         self.parent
@@ -403,10 +469,10 @@ impl<T> Node<T> {
         &self.children
     }
 
-    /// The node's tag name.
+    /// The element's tag name, or `None` for a text node.
     #[must_use]
-    pub fn tag(&self) -> &str {
-        self.tag.0.as_ref()
+    pub fn tag(&self) -> Option<&str> {
+        self.tag.as_ref().map(|tag| tag.0.as_ref())
     }
 
     /// The node's `id` selector value.
@@ -446,7 +512,8 @@ impl<T> Node<T> {
         self.element_state
     }
 
-    /// The literal character data, for text leaves.
+    /// The literal character data, if this is a text node or an
+    /// embedder-defined element-backed text carrier.
     #[must_use]
     pub fn text(&self) -> Option<&str> {
         self.text.as_deref()
@@ -467,8 +534,9 @@ impl<T> Node<T> {
 
     // --- style reads ----------------------------------------------------------
 
-    /// Whether stylo has ever created per-node style data here (i.e. the node
-    /// has been through a style pass).
+    /// Whether stylo has ever created element style data here.
+    ///
+    /// Always `false` for text nodes, which do not enter the cascade.
     ///
     /// Must not be called while a style flush is running on the node's
     /// document (impossible through the public API: a flush holds
@@ -483,12 +551,12 @@ impl<T> Node<T> {
         }
     }
 
-    /// The resolved computed style, if this node has been styled.
+    /// The resolved computed style, if this element has been styled.
     ///
-    /// The style lives in stylo's per-node `ElementData`; this clones the
-    /// `Arc` out of it. Must not be called while a style flush is running on
-    /// the node's document (impossible through the public API: a flush holds
-    /// `&mut Document`).
+    /// Text nodes return `None`. The style lives in stylo's per-element
+    /// `ElementData`; this clones the `Arc` out of it. Must not be called while
+    /// a style flush is running on the node's document (impossible through the
+    /// public API: a flush holds `&mut Document`).
     #[must_use]
     pub fn computed_style(&self) -> Option<Arc<ComputedValues>> {
         // SAFETY: no flush is running (flushes require `&mut Document`, and
@@ -579,6 +647,22 @@ impl<T> Node<T> {
     pub(crate) fn into_ext(self) -> T {
         self.ext
     }
+
+    /// Whether this element has no element children, non-empty text-node
+    /// children, or element-backed character data.
+    ///
+    /// Empty text nodes do not affect `:empty`; non-empty text nodes (including
+    /// whitespace-only data) do. Text nodes themselves are never selector
+    /// subjects, so callers only use this for elements.
+    pub(crate) fn is_empty_element(&self) -> bool {
+        debug_assert!(self.is_element(), "`:empty` is only defined for elements");
+        self.text.as_ref().is_none_or(String::is_empty)
+            && self.children.iter().all(|&id| {
+                let child = self.tree().link(id);
+                !child.is_element()
+                    && (!child.is_text_node() || child.text.as_ref().is_none_or(String::is_empty))
+            })
+    }
 }
 
 // --- tree navigation ----------------------------------------------------------
@@ -656,7 +740,9 @@ impl<T> fmt::Debug for Node<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Node")
             .field("id", &self.id)
+            .field("node_type", &self.kind)
             .field("tag", &self.tag())
+            .field("text", &self.text)
             .field("classes", &self.classes)
             .field("id_attr", &self.id_attr)
             .field("element_state", &self.element_state)
