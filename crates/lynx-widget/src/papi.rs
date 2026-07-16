@@ -92,11 +92,15 @@ pub enum WidgetError {
 }
 
 /// The widget tree: one [`Document`] of [`Widget`]s plus the Lynx `unique_id`
-/// counter/index and the canonical [`WidgetHandle`] registry. The `<page>`
-/// root is the document root.
+/// counter/index, its own `<page>` root, and the canonical [`WidgetHandle`]
+/// registry. `w3c-dom::Document` remains the DOM document node; this layer
+/// decides which of its elements is Lynx's root.
 #[derive(Debug)]
 pub struct WidgetTree {
     doc: Document<WidgetState>,
+    /// The Lynx `<page>` root. This is widget-layer state: `w3c-dom` only
+    /// sees an ordinary element attached beneath its document node.
+    page: Option<NodeId>,
     /// The next Lynx `unique_id` to mint (1-based; 0 stays reserved as
     /// "unset").
     next_unique_id: i32,
@@ -130,6 +134,7 @@ impl WidgetTree {
     pub(crate) fn from_document(doc: Document<WidgetState>) -> Self {
         Self {
             doc,
+            page: None,
             // Lynx `unique_id`s are 1-based; 0 stays reserved as "unset".
             next_unique_id: 1,
             by_unique_id: FxHashMap::default(),
@@ -149,8 +154,13 @@ impl WidgetTree {
     /// The Widget style adapter uses this to flush and to schedule
     /// device-change restyles; everything it exposes carries its own
     /// invalidation.
-    pub const fn document_mut(&mut self) -> &mut Document<WidgetState> {
+    pub(crate) const fn document_mut(&mut self) -> &mut Document<WidgetState> {
         &mut self.doc
+    }
+
+    /// The Lynx page root id, if one has been created.
+    pub(crate) const fn page_id(&self) -> Option<NodeId> {
+        self.page
     }
 
     // --- handles ------------------------------------------------------------
@@ -187,7 +197,7 @@ impl WidgetTree {
         if let Some(existing) = registry.get(&id).and_then(Weak::upgrade) {
             return WidgetHandle { inner: existing };
         }
-        let inner = StdArc::new(HandleInner::new(self.doc.token(), id, &self.reaper));
+        let inner = StdArc::new(HandleInner::new(id, &self.reaper));
         registry.insert(id, StdArc::downgrade(&inner));
         WidgetHandle { inner }
     }
@@ -225,7 +235,7 @@ impl WidgetTree {
             while let Some(parent) = self.doc.get(top).and_then(Node::parent_id) {
                 top = parent;
             }
-            if self.doc.root() == Some(top) {
+            if self.page == Some(top) {
                 continue; // attached content: retained by the tree itself
             }
             let (retained, subtree) = self.subtree_retention(top);
@@ -283,11 +293,17 @@ impl WidgetTree {
         self.handle_for(id)
     }
 
-    /// Create the `<page>` root element and record it as the document root
-    /// (which also schedules its initial style pass).
+    /// Create the Lynx `<page>` root and attach it beneath the generic DOM
+    /// document node (which also schedules its initial style pass).
+    ///
+    /// # Panics
+    ///
+    /// Panics if this tree already has a `<page>` root.
     pub fn create_page(&mut self) -> WidgetHandle {
+        assert!(self.page.is_none(), "WidgetTree already has a <page> root");
         let handle = self.create(WidgetKind::Page, "page");
-        self.doc.set_root(handle.id());
+        self.doc.append_child(handle.id());
+        self.page = Some(handle.id());
         handle
     }
 
@@ -364,10 +380,10 @@ impl WidgetTree {
         self.sweep_dropped();
         let child_id = self.resolve(child)?;
         let parent_id = self.resolve(parent)?;
-        if self.doc.root() == Some(child_id) {
-            // A reparented root would let removing its new ancestor free the
-            // root out from under the document (the DOM core enforces the
-            // same invariant by panicking; PAPI input gets a typed error).
+        if self.page == Some(child_id) {
+            // Generic DOM permits moving its document element; Lynx PAPI is
+            // stricter because `<page>` remains this WidgetTree's root for
+            // its entire lifetime.
             return Err(WidgetError::CannotReparentRoot(child_id));
         }
         if child_id == parent_id || self.doc.is_ancestor(child_id, parent_id) {
@@ -448,7 +464,7 @@ impl WidgetTree {
         let Some(parent_id) = self.doc.get(old_id).and_then(Node::parent_id) else {
             return Ok(());
         };
-        if self.doc.root() == Some(new_id) {
+        if self.page == Some(new_id) {
             return Err(WidgetError::CannotReparentRoot(new_id));
         }
         if new_id == parent_id || self.doc.is_ancestor(new_id, parent_id) {
@@ -749,10 +765,10 @@ impl WidgetTree {
         self.doc.contains(id).then(|| self.handle_for(id))
     }
 
-    /// The tree's `<page>` root (the document root), if one has been created.
+    /// The tree's Lynx `<page>` root, if one has been created.
     #[must_use]
     pub fn get_page_element(&self) -> Option<WidgetHandle> {
-        self.doc.root().map(|id| self.handle_for(id))
+        self.page.map(|id| self.handle_for(id))
     }
 
     /// Borrow an element's [`Widget`].

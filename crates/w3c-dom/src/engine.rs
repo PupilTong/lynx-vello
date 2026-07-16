@@ -416,8 +416,8 @@ impl StyleEngine {
 
     /// Match and cascade one node into standard CSS computed values.
     ///
-    /// `parent_style` supplies inherited values. At a document root, pass
-    /// `None` to inherit from stylo's initial values.
+    /// `parent_style` supplies inherited values. At the document element,
+    /// pass `None` to inherit from stylo's initial values.
     /// # Panics
     ///
     /// Panics when `node` belongs to a document not created by this engine

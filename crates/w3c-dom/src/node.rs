@@ -259,7 +259,9 @@ pub struct Node<T> {
     /// `OpaqueNode` identity).
     id: NodeId,
 
-    /// The parent node, or `None` for the root / a detached node.
+    /// The parent element, or `None` for the document element / a detached
+    /// element. Stylo's broader DOM-node view supplies the real `Document`
+    /// parent for the document element.
     pub(crate) parent: Option<NodeId>,
     /// Child nodes, in document order.
     pub(crate) children: Vec<NodeId>,
@@ -388,7 +390,8 @@ impl<T> Node<T> {
         self.id
     }
 
-    /// The parent's handle, or `None` for the root / a detached node.
+    /// The parent element's handle, or `None` for the document element / a
+    /// detached element.
     #[must_use]
     pub fn parent_id(&self) -> Option<NodeId> {
         self.parent
@@ -515,7 +518,7 @@ impl<T> Node<T> {
     /// Whether this node itself has pending style work.
     ///
     /// A scheduling breadcrumb, not ground truth: the authoritative "does the
-    /// tree need a flush" signal is the root's bits
+    /// tree need a flush" signal is the document element's bits
     /// ([`Document::needs_flush`](crate::Document::needs_flush)). In one
     /// corner the breadcrumb can go stale — a descendant of a subtree that
     /// became `display: none` in the same flush keeps its bit set (stylo

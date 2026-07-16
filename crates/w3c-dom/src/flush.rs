@@ -30,7 +30,7 @@ use stylo::context::{
     RegisteredSpeculativePainter, RegisteredSpeculativePainters, SharedStyleContext, StyleContext,
     StyleSystemOptions,
 };
-use stylo::dom::TElement;
+use stylo::dom::{TElement, TNode};
 use stylo::driver;
 use stylo::global_style_data::STYLE_THREAD_POOL;
 use stylo::servo::animation::DocumentAnimationSet;
@@ -44,6 +44,7 @@ use crate::document::Document;
 use crate::engine::StyleEngine;
 use crate::ext::ExternalState;
 use crate::node::Node;
+use crate::traits::DomNode;
 
 /// How [`StyleEngine::flush_document_with`] schedules the traversal.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -111,19 +112,28 @@ impl<'a, T: ExternalState> DomTraversal<&'a Node<T>> for RecalcStyle<'a> {
         &self,
         traversal_data: &PerLevelTraversalData,
         context: &mut StyleContext<&'a Node<T>>,
-        node: &'a Node<T>,
+        node: DomNode<'a, T>,
         note_child: F,
     ) where
-        F: FnMut(&'a Node<T>),
+        F: FnMut(DomNode<'a, T>),
     {
-        // Every node is an element in this model.
+        let element = node
+            .as_element()
+            .expect("style traversal only schedules element nodes");
         // SAFETY: stylo's traversal contract — exactly one worker processes
         // this node, so creating/borrowing its data cannot race.
-        let mut data = unsafe { node.ensure_data() };
-        recalc_style_at(self, traversal_data, context, node, &mut data, note_child);
+        let mut data = unsafe { element.ensure_data() };
+        recalc_style_at(
+            self,
+            traversal_data,
+            context,
+            element,
+            &mut data,
+            note_child,
+        );
     }
 
-    fn process_postorder(&self, _: &mut StyleContext<&'a Node<T>>, _: &'a Node<T>) {
+    fn process_postorder(&self, _: &mut StyleContext<&'a Node<T>>, _: DomNode<'a, T>) {
         debug_assert!(false, "needs_postorder_traversal() is false");
     }
 
@@ -138,10 +148,11 @@ impl<'a, T: ExternalState> DomTraversal<&'a Node<T>> for RecalcStyle<'a> {
 
 impl StyleEngine {
     /// Restyle everything scheduled since the last flush under the document
-    /// root, using the style thread pool when the tree is wide enough
+    /// element, using the style thread pool when the tree is wide enough
     /// ([`Parallelism::Auto`]).
     ///
-    /// A no-op when the document has no root or nothing is scheduled.
+    /// A no-op when the document has no element child or nothing is
+    /// scheduled.
     ///
     /// If the traversal panics, the document's scheduling state (dirty bits,
     /// pending snapshots) is left unspecified; an embedder that catches the
@@ -159,17 +170,15 @@ impl StyleEngine {
     /// Panics when `document` was not created by this engine
     /// (`StyleEngine::new_document` pairs them; flushing across the pair
     /// boundary would run the wrong stylist and take the wrong lock), or
-    /// when the document's designated root has been removed without clearing
-    /// the root — impossible through the public API
-    /// ([`Document::remove_subtree`](crate::Document::remove_subtree) clears
-    /// it).
+    /// if an internal document-element link is dangling — impossible through
+    /// the public mutation API.
     pub fn flush_document_with<T: ExternalState>(
         &self,
         document: &mut Document<T>,
         parallelism: Parallelism,
     ) {
         self.assert_owns(document);
-        let Some(root) = document.root() else {
+        let Some(root) = document.document_element() else {
             return;
         };
         // Nodes own snapshots between mutations and flushes. Stylo's API
@@ -186,7 +195,7 @@ impl StyleEngine {
         {
             let root_ref = document
                 .get(root)
-                .expect("the document root is kept live or unset");
+                .expect("the document element is kept live or unset");
             let guard = self.shared_lock().read();
             let shared = SharedStyleContext {
                 stylist: self.stylist(),

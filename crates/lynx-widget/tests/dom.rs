@@ -90,6 +90,25 @@ fn create_elements_kinds_and_structure() {
 }
 
 #[test]
+fn page_tag_alone_does_not_become_the_widget_root() {
+    let mut tree = WidgetTree::new();
+    let detached_page = tree.create_element("page");
+    assert_eq!(tree.get_page_element(), None);
+    assert!(
+        !tree
+            .document()
+            .is_connected(tree.widget(&detached_page).unwrap().id())
+    );
+
+    let page = tree.create_page();
+    assert_eq!(tree.get_page_element(), Some(page.clone()));
+    assert!(
+        tree.document()
+            .is_connected(tree.widget(&page).unwrap().id())
+    );
+}
+
+#[test]
 fn unique_ids_are_monotonic_and_one_based() {
     let mut doc = WidgetTree::new();
     let page = doc.create_page();
@@ -234,7 +253,8 @@ fn the_page_root_cannot_be_reparented() {
         doc.insert_element_before(&t.page, &t.container, Some(&t.a)),
         Err(WidgetError::CannotReparentRoot(_))
     ));
-    // Structure is untouched; the page is still the root and parentless.
+    // Structure is untouched; the page is still the WidgetTree root and has
+    // no parent widget (its DOM parent is the distinct Document node).
     assert_eq!(doc.get_parent(&t.page).unwrap(), None);
     assert_eq!(doc.get_page_element(), Some(t.page.clone()));
 }

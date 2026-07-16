@@ -178,15 +178,18 @@ fn remove_subtree_frees_detaches_and_returns_payloads() {
 }
 
 #[test]
-fn remove_subtree_clears_the_root() {
+fn remove_subtree_clears_the_document_element() {
     let mut doc = Document::new();
     let root = node(&mut doc, "page");
-    doc.set_root(root);
-    assert_eq!(doc.root(), Some(root));
-    assert!(doc.needs_flush(), "a fresh root needs its initial pass");
+    doc.append_child(root);
+    assert_eq!(doc.document_element(), Some(root));
+    assert!(
+        doc.needs_flush(),
+        "a fresh document element needs its initial pass"
+    );
 
     doc.remove_subtree(root);
-    assert_eq!(doc.root(), None);
+    assert_eq!(doc.document_element(), None);
     assert!(!doc.needs_flush());
 }
 
@@ -233,17 +236,47 @@ fn inline_style_helpers_parse_merge_and_clear() {
 }
 
 #[test]
-fn external_state_default_root_matching() {
+fn root_matching_uses_document_structure() {
     use selectors::Element as _;
 
-    // The `()` payload keeps the HTML-ish default: parentless ⇒ `:root`.
     let mut doc = Document::new();
     let root = node(&mut doc, "html");
     let child = node(&mut doc, "div");
+    let detached = node(&mut doc, "section");
     doc.append(root, child);
+    doc.append_child(root);
 
     assert!(doc.get(root).unwrap().is_root());
     assert!(!doc.get(child).unwrap().is_root());
+    assert!(
+        !doc.get(detached).unwrap().is_root(),
+        "a detached parentless element is not the document element"
+    );
+    assert!(doc.is_connected(root));
+    assert!(doc.is_connected(child));
+    assert!(!doc.is_connected(detached));
+}
+
+#[test]
+fn stylo_sees_a_distinct_document_node_and_real_owner_document() {
+    use stylo::dom::{TDocument as _, TElement as _, TNode as _};
+
+    let mut doc = Document::new();
+    let root = node(&mut doc, "html");
+    let detached = node(&mut doc, "section");
+    doc.append_child(root);
+
+    let root_node = doc.get(root).unwrap().as_node();
+    let document_node = root_node.owner_doc().as_node();
+    assert!(document_node.as_document().is_some());
+    assert_eq!(root_node.parent_node(), Some(document_node));
+    assert_eq!(document_node.first_child(), Some(root_node));
+    assert!(root_node.is_in_document());
+
+    let detached_node = doc.get(detached).unwrap().as_node();
+    assert_eq!(detached_node.owner_doc().as_node(), document_node);
+    assert_eq!(detached_node.parent_node(), None);
+    assert!(!detached_node.is_in_document());
 }
 
 #[test]
@@ -304,15 +337,16 @@ fn mutating_with_a_foreign_id_crashes() {
 }
 
 #[test]
-#[should_panic(expected = "document root cannot be linked under a parent")]
-fn reparenting_the_root_crashes() {
+fn reparenting_the_document_element_detaches_it_from_the_document() {
     let mut doc = Document::new();
     let root = node(&mut doc, "page");
-    doc.set_root(root);
+    doc.append_child(root);
     let other = node(&mut doc, "view");
-    // Linking the root under another node would let a later subtree removal
-    // free the root out from under the document.
     doc.append(other, root);
+
+    assert_eq!(doc.document_element(), None);
+    assert_eq!(doc.get(root).unwrap().parent_id(), Some(other));
+    assert!(!doc.is_connected(root));
 }
 
 // --- the let-it-crash mutation contract -------------------------------------

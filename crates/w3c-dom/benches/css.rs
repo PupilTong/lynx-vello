@@ -123,7 +123,7 @@ fn engine_with_author_sheet() -> StyleEngine {
 fn build_tree(engine: &StyleEngine) -> (Document<()>, NodeId) {
     let mut doc: Document<()> = engine.new_document();
     let root = doc.create_node("page", ());
-    doc.set_root(root);
+    doc.append_child(root);
     let mut probe = root;
     let mut class = 0usize;
     for row in 0..32 {
@@ -273,7 +273,7 @@ fn inheritance_deep_chain(bencher: divan::Bencher) {
         .with_inputs(|| {
             let mut doc: Document<()> = engine.new_document();
             let root = doc.create_node("page", ());
-            doc.set_root(root);
+            doc.append_child(root);
             let mut parent = root;
             for _ in 0..256 {
                 let child = doc.create_node("view", ());
@@ -321,7 +321,9 @@ fn media_viewport_flip(bencher: divan::Bencher) {
     );
     let (mut doc, _) = build_tree(&engine);
     engine.flush_document(&mut doc);
-    let root = doc.root().expect("tree has a root");
+    let root = doc
+        .document_element()
+        .expect("document has an element child");
     let state = RefCell::new((engine, doc));
     let mut wide = true;
     bencher.bench_local(move || {

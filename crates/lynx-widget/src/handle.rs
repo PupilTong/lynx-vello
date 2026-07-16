@@ -46,7 +46,7 @@ impl WidgetHandle {
     /// The identity token of the tree this handle belongs to.
     #[must_use]
     pub fn tree_token(&self) -> NonZeroU64 {
-        self.inner.tree_token
+        self.inner.id.document_token()
     }
 
     pub(crate) fn id(&self) -> NodeId {
@@ -79,7 +79,6 @@ impl std::fmt::Debug for WidgetHandle {
 
 /// The canonical per-node allocation behind every [`WidgetHandle`] clone.
 pub(crate) struct HandleInner {
-    pub(crate) tree_token: NonZeroU64,
     pub(crate) id: NodeId,
     /// Where to report this node when the last clone drops. `Weak`: handles
     /// must not keep their tree's plumbing alive.
@@ -87,9 +86,8 @@ pub(crate) struct HandleInner {
 }
 
 impl HandleInner {
-    pub(crate) fn new(tree_token: NonZeroU64, id: NodeId, reaper: &Arc<Reaper>) -> Self {
+    pub(crate) fn new(id: NodeId, reaper: &Arc<Reaper>) -> Self {
         Self {
-            tree_token,
             id,
             reaper: Arc::downgrade(reaper),
         }

@@ -3,7 +3,7 @@
 //! # ONE TREE policy
 //!
 //! A [`Document`] is the **single** owner of every node it contains: node
-//! storage (a slab with versioned handles), the optional document root, the
+//! storage (a slab with versioned handles), the optional document element, the
 //! per-node pre-mutation snapshots for stylo's invalidation-set restyle,
 //! and the private style context ([`SharedRwLock`] + base URL) guarding every
 //! node's inline declarations. There is no separate arena/tree/document split
@@ -175,8 +175,9 @@ unsafe impl<T> Sync for CorePtr<T> {}
 ///
 /// Everything a node's backpointer must reach lives here: the slab storage
 /// (id → node resolution for tree navigation) and the shared style lock
-/// (stylo's `TDocument::shared_lock`). The root rides along so the whole
-/// document state is one allocation; each pending snapshot lives on its node.
+/// (stylo's `TDocument::shared_lock`). The document-element link rides along
+/// so the whole document state is one allocation; each pending snapshot lives
+/// on its node.
 pub(crate) struct Core<T> {
     /// This document's process-unique identity, stamped into every [`NodeId`]
     /// it mints.
@@ -196,8 +197,10 @@ pub(crate) struct Core<T> {
     /// [`NodeId`]. The wider counter lets creation fail instead of wrapping
     /// the public 32-bit generation.
     next_generation: u64,
-    /// The document root, if designated (see [`Document::set_root`]).
-    root: Option<NodeId>,
+    /// The document's element child, if one has been appended. `Document` is
+    /// the actual DOM root; this link is its (at most one, in our
+    /// element-only subset) child, not a separately designated tree root.
+    document_element: Option<NodeId>,
     /// The shared lock guarding this document's inline style blocks.
     pub(crate) lock: SharedRwLock,
     /// The base URL data used when parsing this document's inline styles.
@@ -223,6 +226,25 @@ impl<T> Core<T> {
         (node.id() == id).then_some(node)
     }
 
+    /// The element child of the document node, if present.
+    pub(crate) fn document_element(&self) -> Option<NodeId> {
+        self.document_element
+    }
+
+    /// Whether `id` is connected beneath the document node.
+    pub(crate) fn is_connected(&self, id: NodeId) -> bool {
+        let mut current = id;
+        loop {
+            let Some(node) = self.node(current) else {
+                return false;
+            };
+            let Some(parent) = node.parent_id() else {
+                return self.document_element == Some(current);
+            };
+            current = parent;
+        }
+    }
+
     /// Debug-only: whether a style flush is currently traversing this tree.
     #[cfg(debug_assertions)]
     pub(crate) fn in_flush(&self) -> bool {
@@ -238,8 +260,8 @@ impl<T> Core<T> {
     }
 }
 
-/// The one tree: a slab of [`Node`]s (including their pending snapshots) plus
-/// the document root and private style context.
+/// The one tree: a document node, a slab of element [`Node`]s (including
+/// their pending snapshots), and the private style context.
 ///
 /// See the crate docs for the ONE TREE policy and the mutation
 /// contract. Create styled documents through
@@ -268,7 +290,7 @@ impl<T: fmt::Debug> fmt::Debug for Document<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let core = self.core();
         f.debug_struct("Document")
-            .field("root", &core.root)
+            .field("document_element", &core.document_element)
             .field("nodes", &core.nodes)
             .finish_non_exhaustive()
     }
@@ -303,7 +325,7 @@ impl<T> Document<T> {
             engine_token,
             nodes: Slab::new(),
             next_generation: 1,
-            root: None,
+            document_element: None,
             lock,
             url_data,
             #[cfg(debug_assertions)]
@@ -388,28 +410,40 @@ impl<T> Document<T> {
         id
     }
 
-    // --- root --------------------------------------------------------------
+    // --- document node -----------------------------------------------------
 
-    /// Designate `id` as the document root and schedule its initial style
-    /// pass.
+    /// Append `child` to the document node.
     ///
-    /// The root is where [`StyleEngine::flush_document`](crate::StyleEngine::flush_document)
-    /// starts and what [`needs_flush`](Self::needs_flush) inspects.
+    /// This DOM subset stores only elements, so a document may have at most
+    /// one child: its `documentElement`. The child may be detached or linked
+    /// under another element; DOM pre-insertion detaches it first. Attaching
+    /// it schedules an initial style pass for the whole subtree.
     ///
-    /// Contract: `id` is live and parentless (`debug_assert`ed).
-    pub fn set_root(&mut self, id: NodeId) {
-        debug_assert!(
-            self.get(id).is_some_and(|node| node.parent_id().is_none()),
-            "document root must be a live, parentless node"
+    /// # Panics
+    ///
+    /// Panics when `child` is stale or the document already has a different
+    /// element child.
+    pub fn append_child(&mut self, child: NodeId) {
+        assert!(
+            self.contains(child),
+            "stale or foreign NodeId passed to Document::append_child"
         );
-        self.core_mut().root = Some(id);
-        self.mark_subtree_dirty(id);
+        if self.core().document_element == Some(child) {
+            return;
+        }
+        assert!(
+            self.core().document_element.is_none(),
+            "Document::append_child: a document may have only one element child"
+        );
+        self.detach(child);
+        self.core_mut().document_element = Some(child);
+        self.mark_subtree_dirty(child);
     }
 
-    /// The document root, if one has been designated.
+    /// The document's element child, if one has been appended.
     #[must_use]
-    pub fn root(&self) -> Option<NodeId> {
-        self.core().root
+    pub fn document_element(&self) -> Option<NodeId> {
+        self.core().document_element
     }
 
     /// This document's process-unique identity token.
@@ -434,6 +468,12 @@ impl<T> Document<T> {
     #[must_use]
     pub fn contains(&self, id: NodeId) -> bool {
         self.get(id).is_some()
+    }
+
+    /// Whether `id` is connected beneath this document node.
+    #[must_use]
+    pub fn is_connected(&self, id: NodeId) -> bool {
+        self.core().is_connected(id)
     }
 
     /// The position of `child` within `parent`'s child list, if it is a child.
@@ -495,21 +535,12 @@ impl<T> Document<T> {
     ///
     /// # Panics
     ///
-    /// Panics when `parent`, `child`, or `before` is stale, when `child` is
-    /// the document root, when `before` is not a child of `parent`, or — in
-    /// debug builds — when the link would create a cycle or
+    /// Panics when `parent`, `child`, or `before` is stale, when `before` is
+    /// not a child of `parent`, or — in debug builds — when the link would
+    /// create a cycle or
     /// `before == child` (the let-it-crash mutation contract; see the crate
     /// docs).
     pub fn insert_before(&mut self, parent: NodeId, child: NodeId, before: Option<NodeId>) {
-        // Always-on (not just debug): a reparented root would let a later
-        // `remove_subtree` of its ancestor free the root while the document
-        // still points at it — the next flush would then panic far from the
-        // cause. Root is designated once and stays parentless; embedder
-        // layers reject this with a typed error before it can reach here.
-        assert!(
-            self.root() != Some(child),
-            "insert_before: the document root cannot be linked under a parent"
-        );
         debug_assert!(self.contains(parent), "insert_before: stale parent");
         debug_assert!(self.contains(child), "insert_before: stale child");
         debug_assert!(child != parent, "insert_before: child == parent");
@@ -559,7 +590,8 @@ impl<T> Document<T> {
     /// selector-flag-scoped child-list invalidation at the old location (a
     /// removal can flip `:empty` / `:nth-*` / edge-child matching).
     ///
-    /// A no-op on an already-parentless `child` (that includes the root).
+    /// A no-op on an already-detached `child`. If `child` is the document
+    /// element, this removes it from the document node.
     ///
     /// # Panics
     ///
@@ -570,6 +602,9 @@ impl<T> Document<T> {
             .expect("stale or foreign NodeId passed to Document::detach")
             .parent_id();
         let Some(parent) = old_parent else {
+            if self.core().document_element == Some(child) {
+                self.core_mut().document_element = None;
+            }
             return;
         };
         let core = self.core_mut();
@@ -593,8 +628,8 @@ impl<T> Document<T> {
     /// of every node freed (in no particular order).
     ///
     /// The caller harvests whatever it indexed from the returned payloads.
-    /// All handles into the subtree become stale; if the document root was in
-    /// the subtree, the document no longer has a root.
+    /// All handles into the subtree become stale. Removing the document
+    /// element leaves the document node without an element child.
     ///
     /// # Panics
     ///
@@ -602,9 +637,6 @@ impl<T> Document<T> {
     /// the crate docs).
     pub fn remove_subtree(&mut self, id: NodeId) -> Vec<T> {
         self.detach(id);
-        if self.core().root.is_some_and(|root| root == id) {
-            self.core_mut().root = None;
-        }
         let mut removed = Vec::new();
         let mut stack = vec![id];
         while let Some(current) = stack.pop() {
@@ -663,12 +695,12 @@ impl<T> Document<T> {
         snapshots
     }
 
-    /// Whether the tree has pending style work, judged at the document root.
+    /// Whether the connected document element has pending style work.
     ///
-    /// `false` when no root has been designated.
+    /// `false` when the document has no element child.
     #[must_use]
     pub fn needs_flush(&self) -> bool {
-        self.root().is_some_and(|root| {
+        self.document_element().is_some_and(|root| {
             self.get(root)
                 .is_some_and(|node| node.is_style_dirty() || node.has_dirty_descendants())
         })

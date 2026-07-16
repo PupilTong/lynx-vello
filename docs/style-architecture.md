@@ -18,11 +18,11 @@ Document/Node design (this document describes the current shape).
 ## The w3c-dom core: one tree, Document-mediated mutation
 
 - **ONE TREE policy.** `Document<T>` is the single owner of everything tree-shaped: node storage
-  (a slab with versioned handles), the optional document root, and the private style context
-  (`SharedRwLock` + base URL). Each pending pre-mutation snapshot lives directly on its node. There
-  is no separate arena/tree object, and no public way to construct or mutate a `Node<T>` outside
-  its document — `Document::create_node` is the only factory, and every DOM operation is a
-  `Document` method.
+  (a slab with versioned handles), the real DOM document node and its optional `documentElement`,
+  and the private style context (`SharedRwLock` + base URL). Each pending pre-mutation snapshot
+  lives directly on its element. There is no separate arena/tree object, and no public way to
+  construct or mutate a `Node<T>` outside its document — `Document::create_node` is the only
+  element factory, and every DOM operation is a `Document` method.
 - **Invalidation is carried by the operations.** Each matching-relevant setter
   (`set_classes`, `set_attribute`, `set_state`, `set_inline_style`, structural
   `insert_before`/`detach`/`remove_subtree`, …) records its own pre-mutation snapshot or scoped
@@ -31,9 +31,10 @@ Document/Node design (this document describes the current shape).
   `Document::note_external_attribute_change` when a payload change affects a synthetic /
   reflected attribute (e.g. Lynx's `l-css-id`, `data-*`).
 - **Let it crash.** Query methods return `Option`; mutation methods treat stale/foreign
-  `NodeId`s, cycle-creating links, root reparenting, and foreign insertion references as caller
-  bugs — `debug_assert!`ed and panicking rather than silently ignored. Layers holding untrusted
-  handles validate first (`WidgetTree` maps violations to `WidgetError`).
+  `NodeId`s, cycle-creating links, a second document element, and foreign insertion references as
+  caller bugs — `debug_assert!`ed and panicking rather than silently ignored. Layers holding
+  untrusted handles validate first (`WidgetTree` maps violations to `WidgetError`, including its
+  Lynx-specific `<page>` root protection).
 - **Identity, twice.** Every `NodeId` embeds its document's process-unique token, so an id from
   tree A never resolves in tree B (two trees mint identical `(index, generation)` sequences —
   without the token that is silent same-slot aliasing). Every document also records the identity
@@ -45,20 +46,20 @@ Document/Node design (this document describes the current shape).
   traversal-phase flag; violations of stylo's one-worker-per-element discipline crash debug
   builds instead of being UB. Release builds compile it all away.
 - **Backpointers, one-word handles, no mirror tree.** The document core is heap-pinned and every
-  node carries a pointer back to it, so tree navigation needs nothing but `&Node`. stylo's
-  element traits (`TNode`/`TElement`/`TDocument`/`selectors::Element`) are implemented
-  **directly on `&'a Node<T>`** — there is no wrapper handle type — and the restyle traversal
-  runs **in place on the document**; no second tree is materialized to enter the styling engine.
-  The word-sized handle is load-bearing: stylo's style-sharing cache sizes its TLS for a
-  one-word `TElement` handle (`FakeCandidate` in `style/sharing/mod.rs`), and a shared
-  reference is exactly that (and `Copy` by nature).
+  element carries a pointer back to it, so owner-document lookup and element navigation need
+  nothing but `&Node`. stylo's `TElement`/`selectors::Element` traits remain implemented directly
+  on **`&'a Node<T>`**; a small `DomNode` value supplies `TNode`'s broader document-or-element
+  view, and `DomDocument` supplies `TDocument`. The restyle traversal still runs **in place on the
+  document**; no second tree is materialized. The word-sized `TElement` handle is load-bearing:
+  stylo's style-sharing cache sizes its TLS for a one-word handle (`FakeCandidate` in
+  `style/sharing/mod.rs`), and a shared reference is exactly that (and `Copy` by nature).
 
 ## Ownership boundaries
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| `w3c-dom` | `Document<T>` (the one tree: storage, root, lock), `Node<T>` (including its pending snapshot), `NodeId`, the stylo DOM traits on `&Node`, invalidation-carrying mutation, inline parsing, `Stylist`, rule matching, cascade, media evaluation, computed values | Lynx tags/PAPI, `WidgetState`, Lynx unit metrics, touch-device policy |
-| `lynx-widget` | `WidgetState`, `WidgetTree` (PAPI validation over the document), `WidgetHandle` (canonical registry: tree identity, node retention, drop-driven reclamation of detached subtrees), `EngineMetrics`, touch-first `Device` construction, viewport-relative `rpx` integration | A second stylist, cascade implementation, stylesheet lock sharing, direct node construction, raw-id public APIs |
+| `w3c-dom` | `Document<T>` (the real document node, element storage, document-element link, lock), `Node<T>` (elements, including their pending snapshots), `NodeId`, the stylo DOM traits, invalidation-carrying mutation, inline parsing, `Stylist`, rule matching, cascade, media evaluation, computed values | Lynx tags/PAPI, `<page>` root policy, `WidgetState`, Lynx unit metrics, touch-device policy |
+| `lynx-widget` | `WidgetState`, `WidgetTree` (PAPI validation plus its own `<page>` root over the generic document), `WidgetHandle` (canonical registry: tree identity, node retention, drop-driven reclamation of detached subtrees), `EngineMetrics`, touch-first `Device` construction, viewport-relative `rpx` integration | A second stylist, cascade implementation, stylesheet lock sharing, direct node construction, raw-id public APIs |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, the maintained Lynx CSS extension patch set **and the Lynx supported-property/value grammar definition** (`style/properties/lynx_properties.txt`, `lynx` feature gates) | Runtime Widget/PAPI policy |
 
 ## Style lifecycle
@@ -80,7 +81,9 @@ Document/Node design (this document describes the current shape).
    `w3c_dom::StyleEngine::append_rules`.
 4. `StyleEngine::new_widget_tree()` asks the core for a document bound to
    that private style context (`w3c_dom::StyleEngine::new_document`). Neither
-   `lynx-widget` nor callers receive the lock.
+   `lynx-widget` nor callers receive the lock. `WidgetTree::create_page`
+   records `<page>` as the Lynx-layer root and attaches that ordinary element
+   beneath the generic DOM document node.
 5. DOM mutations schedule style work as part of the `Document` methods that
    perform them (`crates/w3c-dom/src/invalidation.rs`): attribute / class /
    id / pseudo-state changes record a **pre-mutation snapshot on the affected
@@ -88,7 +91,7 @@ Document/Node design (this document describes the current shape).
    hints** scoped by the selector flags stylo recorded during matching;
    inline-style updates post the style-attribute replacement hint.
 6. `StyleEngine::flush_widget_tree(&mut tree)` drives **stylo's own restyle
-   traversal** (`crates/w3c-dom/src/flush.rs`) from the document root:
+   traversal** (`crates/w3c-dom/src/flush.rs`) from the DOM document element:
    reachable pending node snapshots are moved along the dirty spine into the
    temporary map required by stylo's traversal API, followed by
    snapshot-driven invalidation, the style sharing cache, bloom filter, and

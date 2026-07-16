@@ -1,20 +1,22 @@
-//! stylo element-trait implementations, directly on `&Node`.
+//! stylo DOM-trait implementations over the document and its elements.
 //!
 //! stylo drives selector matching and the cascade over any type implementing
 //! its element traits. This module wires the document tree to that model by
-//! implementing, on the plain shared reference `&'a Node<T>` (for any
-//! payload `T: `[`ExternalState`]):
+//! implementing [`TElement`] directly on the plain shared reference
+//! `&'a Node<T>` (for any payload `T: `[`ExternalState`]), while a small
+//! [`DomNode`] value represents either the real document node or an element
+//! for [`TNode`]:
 //!
-//! - [`NodeInfo`] + [`TNode`]
+//! - [`NodeInfo`] + [`TNode`] on [`DomNode`]
 //! - [`TElement`]
-//! - [`TDocument`] + [`TShadowRoot`]
+//! - [`TDocument`] on [`DomDocument`]
 //! - [`selectors::Element`]
 //!
-//! There is no handle type: a reference is already the one-word `Copy` value
-//! stylo requires (its style-sharing cache sizes TLS for a word-sized
-//! `TElement` handle), and navigation runs through the node's document
-//! backpointer — so stylo styles the document **in place**, no second tree
-//! is materialized to enter the styling engine.
+//! The hot [`TElement`] handle remains the one-word `&Node` value stylo's
+//! style-sharing cache requires. [`DomNode`] is used only where stylo needs
+//! the broader DOM-node type that can also represent `Document`; both views
+//! navigate the same in-place tree through each element's document
+//! backpointer, with no mirror tree.
 //!
 //! Implementation note: inside these impls, inherent `Node` methods that
 //! share a name with a trait method (`parent`, `first_child`,
@@ -25,12 +27,12 @@
 //!
 //! # Model
 //!
-//! - **Every node is an element.** There is no separate document or text node: the topmost ancestor
-//!   acts as the document root (see [`TNode::owner_doc`]), and character data rides on the node
+//! - **Document is a distinct node.** [`DomNode`] represents the document or an element;
+//!   [`Node<T>`] itself remains element-only. Character data rides on an element
 //!   ([`Node::text`](crate::Node::text)).
 //! - **`:hover`/`:active`/`:focus`** are matched from the node's
 //!   [`ElementState`](crate::ElementState).
-//! - **`:root`** matches a parentless node whose [`ExternalState::is_root`] hook agrees.
+//! - **`:root`** matches the document element, never a detached parentless element.
 //! - **Synthetic / reflected attributes** beyond the node's real attribute map are served by the
 //!   [`ExternalState`] attribute hooks.
 //! - **Shadow DOM / pseudo-elements / animations** are stubbed (`None`/`false`) — none exist in
@@ -50,6 +52,7 @@
 //! through `&self` is atomic (see [`Node`](crate::Node)).
 #![allow(unsafe_code)]
 
+use std::fmt;
 use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 
@@ -75,6 +78,7 @@ use stylo::values::{AtomIdent, AtomString};
 use stylo::{CaseSensitivityExt, LocalName, Namespace};
 use stylo_atoms::Atom;
 
+use crate::document::Core;
 use crate::ext::ExternalState;
 use crate::node::{ChildrenIter, Node};
 
@@ -85,13 +89,137 @@ fn empty_namespace() -> &'static <SelectorImpl as selectors::SelectorImpl>::Borr
     &EMPTY.get_or_init(Namespace::default).0
 }
 
+// --- DOM node/document views ------------------------------------------------
+
+/// Stylo's copyable view of this crate's real document node.
+///
+/// Public only because it appears as a public trait's associated type; the
+/// constructor and representation stay private to this crate.
+#[doc(hidden)]
+pub struct DomDocument<'a, T> {
+    core: &'a Core<T>,
+}
+
+impl<T> Clone for DomDocument<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for DomDocument<'_, T> {}
+
+impl<T> fmt::Debug for DomDocument<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("#document")
+    }
+}
+
+enum DomNodeKind<'a, T> {
+    Document(&'a Core<T>),
+    Element(&'a Node<T>),
+}
+
+impl<T> Clone for DomNodeKind<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for DomNodeKind<'_, T> {}
+
+/// Stylo's copyable node view, capable of representing either the distinct
+/// document node or one of its elements.
+///
+/// Public only because it appears as a public trait's associated type; the
+/// constructor and representation stay private to this crate.
+#[doc(hidden)]
+pub struct DomNode<'a, T> {
+    kind: DomNodeKind<'a, T>,
+}
+
+impl<T> Clone for DomNode<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for DomNode<'_, T> {}
+
+impl<T> PartialEq for DomNode<'_, T> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self.kind, other.kind) {
+            (DomNodeKind::Document(a), DomNodeKind::Document(b)) => std::ptr::eq(a, b),
+            (DomNodeKind::Element(a), DomNodeKind::Element(b)) => std::ptr::eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+impl<T> fmt::Debug for DomNode<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.kind {
+            DomNodeKind::Document(_) => f.write_str("#document"),
+            DomNodeKind::Element(node) => f
+                .debug_struct("Element")
+                .field("id", &node.id())
+                .field("tag", &node.tag())
+                .finish(),
+        }
+    }
+}
+
+impl<'a, T> DomNode<'a, T> {
+    fn document(core: &'a Core<T>) -> Self {
+        DomNode {
+            kind: DomNodeKind::Document(core),
+        }
+    }
+
+    fn element(node: &'a Node<T>) -> Self {
+        DomNode {
+            kind: DomNodeKind::Element(node),
+        }
+    }
+
+    fn owner_document(self) -> DomDocument<'a, T> {
+        let core = match self.kind {
+            DomNodeKind::Document(core) => core,
+            DomNodeKind::Element(node) => node.tree(),
+        };
+        DomDocument { core }
+    }
+}
+
+/// Adapter from the element-only storage iterator to Stylo's broader DOM
+/// node iterator.
+#[doc(hidden)]
+pub struct DomChildrenIter<'a, T>(ChildrenIter<'a, T>);
+
+impl<T> fmt::Debug for DomChildrenIter<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("DomChildrenIter").field(&self.0).finish()
+    }
+}
+
+impl<'a, T> Iterator for DomChildrenIter<'a, T> {
+    type Item = DomNode<'a, T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(DomNode::element)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+}
+
+impl<T> ExactSizeIterator for DomChildrenIter<'_, T> {}
+
 // --- NodeInfo + TNode -------------------------------------------------------
 
-impl<T: ExternalState> NodeInfo for &Node<T> {
+impl<T: ExternalState> NodeInfo for DomNode<'_, T> {
     fn is_element(&self) -> bool {
-        // Every node is an element with a tag; character data rides on the
-        // node itself (`Node::text`).
-        true
+        matches!(self.kind, DomNodeKind::Element(_))
     }
 
     fn is_text_node(&self) -> bool {
@@ -99,54 +227,78 @@ impl<T: ExternalState> NodeInfo for &Node<T> {
     }
 }
 
-impl<'a, T: ExternalState> TNode for &'a Node<T> {
+impl<'a, T: ExternalState> TNode for DomNode<'a, T> {
     type ConcreteElement = &'a Node<T>;
-    type ConcreteDocument = &'a Node<T>;
-    type ConcreteShadowRoot = &'a Node<T>;
+    type ConcreteDocument = DomDocument<'a, T>;
+    type ConcreteShadowRoot = DomNode<'a, T>;
 
     fn parent_node(&self) -> Option<Self> {
-        Node::parent(*self)
+        match self.kind {
+            DomNodeKind::Document(_) => None,
+            DomNodeKind::Element(node) => Node::parent(node).map(DomNode::element).or_else(|| {
+                (node.tree().document_element() == Some(node.id()))
+                    .then(|| DomNode::document(node.tree()))
+            }),
+        }
     }
 
     fn first_child(&self) -> Option<Self> {
-        Node::first_child(*self)
+        match self.kind {
+            DomNodeKind::Document(core) => core
+                .document_element()
+                .and_then(|id| core.node(id))
+                .map(DomNode::element),
+            DomNodeKind::Element(node) => Node::first_child(node).map(DomNode::element),
+        }
     }
 
     fn last_child(&self) -> Option<Self> {
-        Node::last_child(*self)
+        match self.kind {
+            DomNodeKind::Document(core) => core
+                .document_element()
+                .and_then(|id| core.node(id))
+                .map(DomNode::element),
+            DomNodeKind::Element(node) => Node::last_child(node).map(DomNode::element),
+        }
     }
 
     fn prev_sibling(&self) -> Option<Self> {
-        Node::prev_sibling(*self)
+        match self.kind {
+            DomNodeKind::Document(_) => None,
+            DomNodeKind::Element(node) => Node::prev_sibling(node).map(DomNode::element),
+        }
     }
 
     fn next_sibling(&self) -> Option<Self> {
-        Node::next_sibling(*self)
+        match self.kind {
+            DomNodeKind::Document(_) => None,
+            DomNodeKind::Element(node) => Node::next_sibling(node).map(DomNode::element),
+        }
     }
 
     fn owner_doc(&self) -> Self::ConcreteDocument {
-        // No separate document node: the topmost ancestor acts as the
-        // document.
-        let mut cur = *self;
-        while let Some(parent) = Node::parent(cur) {
-            cur = parent;
-        }
-        cur
+        self.owner_document()
     }
 
     fn is_in_document(&self) -> bool {
-        // Style resolution only ever visits attached nodes; coarse but true
-        // for everything the flush driver reaches.
-        true
+        match self.kind {
+            DomNodeKind::Document(_) => true,
+            DomNodeKind::Element(node) => node.tree().is_connected(node.id()),
+        }
     }
 
     fn as_element(&self) -> Option<Self::ConcreteElement> {
-        Some(*self)
+        match self.kind {
+            DomNodeKind::Document(_) => None,
+            DomNodeKind::Element(node) => Some(node),
+        }
     }
 
     fn as_document(&self) -> Option<Self::ConcreteDocument> {
-        // Our root is an ordinary node, not a distinct document node.
-        None
+        match self.kind {
+            DomNodeKind::Document(core) => Some(DomDocument { core }),
+            DomNodeKind::Element(_) => None,
+        }
     }
 
     fn as_shadow_root(&self) -> Option<Self::ConcreteShadowRoot> {
@@ -154,29 +306,40 @@ impl<'a, T: ExternalState> TNode for &'a Node<T> {
     }
 
     fn opaque(&self) -> OpaqueNode {
-        // Derived from the (index, generation) id — NOT the node's address:
-        // stylo keys snapshot maps by `OpaqueNode` across arbitrary tree
-        // mutations, and slab-storage growth can move every node.
-        Node::id(*self).opaque()
+        match self.kind {
+            // Element generations are non-zero, so zero is reserved for the
+            // one document node in each per-document stylo operation.
+            DomNodeKind::Document(_) => OpaqueNode(0),
+            // Derived from the (index, generation) id — NOT the node's
+            // address: slab growth can move every element.
+            DomNodeKind::Element(node) => node.id().opaque(),
+        }
     }
 
     fn debug_id(self) -> usize {
-        // Diagnostic only: the slot index stands in for a node id.
-        usize::try_from(Node::id(self).index()).unwrap_or(0)
+        match self.kind {
+            DomNodeKind::Document(_) => 0,
+            DomNodeKind::Element(node) => usize::try_from(node.id().index())
+                .unwrap_or(0)
+                .saturating_add(1),
+        }
     }
 
     fn traversal_parent(&self) -> Option<Self::ConcreteElement> {
-        Node::parent(*self)
+        match self.kind {
+            DomNodeKind::Document(_) => None,
+            DomNodeKind::Element(node) => Node::parent(node),
+        }
     }
 }
 
 // --- TDocument + TShadowRoot --------------------------------------------------
 
-impl<'a, T: ExternalState> TDocument for &'a Node<T> {
-    type ConcreteNode = &'a Node<T>;
+impl<'a, T: ExternalState> TDocument for DomDocument<'a, T> {
+    type ConcreteNode = DomNode<'a, T>;
 
     fn as_node(&self) -> Self::ConcreteNode {
-        *self
+        DomNode::document(self.core)
     }
 
     fn is_html_document(&self) -> bool {
@@ -188,23 +351,23 @@ impl<'a, T: ExternalState> TDocument for &'a Node<T> {
     }
 
     fn shared_lock(&self) -> &SharedRwLock {
-        // The document backpointer serves stylo's lock lookup without any
-        // per-node lock clone.
-        &self.tree().lock
+        &self.core.lock
     }
 }
 
-impl<'a, T: ExternalState> TShadowRoot for &'a Node<T> {
-    type ConcreteNode = &'a Node<T>;
+impl<'a, T: ExternalState> TShadowRoot for DomNode<'a, T> {
+    type ConcreteNode = DomNode<'a, T>;
 
     fn as_node(&self) -> Self::ConcreteNode {
         *self
     }
 
     fn host(&self) -> <Self::ConcreteNode as TNode>::ConcreteElement {
-        // Unreachable: we never expose shadow roots (`as_shadow_root` is
-        // always `None`), so stylo never calls `host()`.
-        *self
+        // Unreachable: `TNode::as_shadow_root` always returns `None`.
+        match self.kind {
+            DomNodeKind::Element(node) => node,
+            DomNodeKind::Document(_) => unreachable!("document is not a shadow root"),
+        }
     }
 
     fn style_data<'b>(&self) -> Option<&'b CascadeData>
@@ -218,15 +381,15 @@ impl<'a, T: ExternalState> TShadowRoot for &'a Node<T> {
 // --- TElement -----------------------------------------------------------------
 
 impl<'a, T: ExternalState> TElement for &'a Node<T> {
-    type ConcreteNode = &'a Node<T>;
-    type TraversalChildrenIterator = ChildrenIter<'a, T>;
+    type ConcreteNode = DomNode<'a, T>;
+    type TraversalChildrenIterator = DomChildrenIter<'a, T>;
 
     fn as_node(&self) -> Self::ConcreteNode {
-        *self
+        DomNode::element(*self)
     }
 
     fn traversal_children(&self) -> LayoutIterator<Self::TraversalChildrenIterator> {
-        LayoutIterator(Node::children(*self))
+        LayoutIterator(DomChildrenIter(Node::children(*self)))
     }
 
     fn is_html_element(&self) -> bool {
@@ -429,11 +592,11 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
         false
     }
 
-    fn shadow_root(&self) -> Option<&'a Node<T>> {
+    fn shadow_root(&self) -> Option<DomNode<'a, T>> {
         None
     }
 
-    fn containing_shadow(&self) -> Option<&'a Node<T>> {
+    fn containing_shadow(&self) -> Option<DomNode<'a, T>> {
         None
     }
 
@@ -660,12 +823,10 @@ impl<T: ExternalState> Element for &Node<T> {
     }
 
     fn is_root(&self) -> bool {
-        // `:root` is a parentless node whose external state also deems it a
-        // root. An embedder with a distinguished root node narrows
-        // `ExternalState::is_root` so a detached subtree's parentless top
-        // does not match `:root` during resolve; the default keeps
-        // parentless ⇒ root.
-        self.parent.is_none() && self.ext.is_root()
+        // Selectors Level 4: `:root` matches the document element. A
+        // detached parentless element has an owner document but is not its
+        // element child, so it must not match.
+        self.tree().document_element() == Some(Node::id(self))
     }
 
     fn add_element_unique_hashes(&self, filter: &mut BloomFilter) -> bool {

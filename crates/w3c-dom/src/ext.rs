@@ -7,8 +7,6 @@
 //! trait impls ([`crate::traits`]) consult wherever embedder-specific data can
 //! influence matching:
 //!
-//! - [`is_root`](ExternalState::is_root) — whether the node may match `:root` (combined with
-//!   parentlessness).
 //! - [`extra_attr_value`](ExternalState::extra_attr_value) /
 //!   [`each_extra_attr_name`](ExternalState::each_extra_attr_name) — synthetic or reflected
 //!   attributes beyond the node's real attribute map.
@@ -34,17 +32,6 @@ use stylo::LocalName;
 /// `Sync` is required because the restyle traversal may run in parallel:
 /// rayon workers call the hooks concurrently through shared references.
 pub trait ExternalState: Sync {
-    /// Whether this node may match `:root`.
-    ///
-    /// [`selectors::Element::is_root`] matches a node that is parentless
-    /// **and** passes this hook. The default (`true`) keeps the HTML-ish rule
-    /// "parentless ⇒ root"; an embedder whose root is a distinguished node
-    /// narrows this so a detached subtree's parentless top does not match
-    /// `:root` during resolve.
-    fn is_root(&self) -> bool {
-        true
-    }
-
     /// The value of a synthetic or reflected attribute named `name`, if any.
     ///
     /// Consulted by attribute matching ([`selectors::Element::attr_matches`]
