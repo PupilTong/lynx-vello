@@ -13,6 +13,12 @@
 //! `StyleAdjuster::adjust_for_contain` (`vendor/stylo/style/style_adjuster.rs`).
 //! `container-type` is intentionally excluded: container queries (contain-3)
 //! are out of scope and `container-type`/`container-name` stay disabled.
+//!
+//! The layout engine keeps its **own** copy of this fold for its box-layout
+//! consumers — `neutron_star::style::effective_containment` (over decomposed
+//! stylo values, since it has no `ComputedValues` adapter yet) — mirroring the
+//! same rationale. The two copies are deliberately independent: there is no
+//! crate dependency between `w3c-dom` and `neutron-star`.
 
 use stylo::properties::ComputedValues;
 pub use stylo::values::computed::{Contain, ContentVisibility};

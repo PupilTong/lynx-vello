@@ -64,7 +64,7 @@ Document/Node design (this document describes the current shape).
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| `w3c-dom` | `Document<T>` (fixed-address node slab), slot-zero document `Node<T>` (style context + ordinary child list), element/text nodes (including node-owned pending snapshots), raw-index `NodeId`, direct `&Node` Stylo DOM traits, invalidation-carrying mutation, inline parsing, `Stylist`, rule matching, cascade, media evaluation, computed values | Lynx tags/PAPI, `<page>` root policy, `WidgetState`, Lynx unit metrics, touch-device policy |
+| `w3c-dom` | `Document<T>` (fixed-address node slab), slot-zero document `Node<T>` (style context + ordinary child list), element/text nodes (including node-owned pending snapshots), raw-index `NodeId`, direct `&Node` Stylo DOM traits, invalidation-carrying mutation, inline parsing, `Stylist`, rule matching, cascade, media evaluation, computed values, the **damage vocabulary** (`StyleDamage`/`FlushSummary`) + `effective_containment` derivation | Lynx tags/PAPI, `<page>` root policy, `WidgetState`, Lynx unit metrics, touch-device policy |
 | `lynx-widget` | `WidgetState`, `WidgetTree` (PAPI validation plus its own `<page>` root over the generic document), `WidgetHandle` (canonical registry, context ownership, node retention, drop-driven reclamation of detached subtrees), `EngineMetrics`, touch-first `Device` construction, viewport-relative `rpx` integration | A second stylist, cascade implementation, stylesheet lock sharing, direct node construction, raw-id public APIs |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, the maintained Lynx CSS extension patch set **and the Lynx supported-property/value grammar definition** (`style/properties/lynx_properties.txt`, `lynx` feature gates) | Runtime Widget/PAPI policy |
 
@@ -95,7 +95,14 @@ Document/Node design (this document describes the current shape).
    id / pseudo-state changes record a **pre-mutation snapshot on the affected
    node** for stylo's invalidation sets; structural changes post **restyle
    hints** scoped by the selector flags stylo recorded during matching;
-   inline-style updates post the style-attribute replacement hint.
+   inline-style updates post the style-attribute replacement hint. There is no
+   separate embedder dirty flag: `Node::is_style_dirty` is **derived** from
+   stylo's own scheduling state — a never-styled element (no `ElementData`) is
+   always dirty; a styled one is dirty iff it carries a pending snapshot or a
+   queued restyle hint. The slot-zero document node and text nodes never enter
+   the cascade, so they are never dirty. `Document::needs_flush` (and
+   `WidgetTree::has_dirty` above it) reads the **document element's** derived
+   dirtiness OR its `dirty_descendants` bit.
 6. `StyleEngine::flush_widget_tree(&mut tree)` drives **stylo's own restyle
    traversal** (`crates/w3c-dom/src/flush.rs`) from `Document::root_element()`, the first element
    child of the slot-zero document node:
@@ -105,10 +112,41 @@ Document/Node design (this document describes the current shape).
    rayon parallelism over wide DOM levels (stylo's global style pool).
    Computed styles land in each element node's stylo `ElementData`; read them with
    `WidgetTree::computed` (an `Arc<ComputedValues>` clone — direct Arc reads
-   per `docs/style-assumptions.md` §B.8).
-7. `w3c_dom::StyleEngine::resolve` remains as the standalone per-element
+   per `docs/style-assumptions.md` §B.8). The underlying
+   `w3c_dom::StyleEngine::flush_document` returns a **`FlushSummary`** — the
+   per-node `StyleDamage` the change produced (a diff-based restyle damage
+   class: repaint / stacking-context rebuild / overflow recalc / relayout,
+   cumulative) plus a `traversed` flag, keyed by `NodeId`. Initial styling of
+   a subtree reports **no** damage by design (no old values to diff); a later
+   geometry/`display` change reports the matching damage on the affected
+   nodes, which the engine-level layout pass consumes to invalidate
+   incrementally. The summary is *not* `#[must_use]`, and
+   `flush_document_with_sink` streams the same damage without allocating the
+   `Vec`. **Damage stays inside the engine layer**: `lynx-widget` is the
+   web-core analogue over `w3c-dom`'s browser-DOM analogue, so
+   `flush_widget_tree` neither forwards nor re-exports the damage vocabulary
+   — style→layout damage flow is `w3c-dom`'s internal seam, not PAPI surface.
+7. **Harvest is the tail of the flush** (the crate-private
+   `Document::harvest_flush`): after the traversal returns it walks the dirty
+   spine from the traversal's *actual* root (`driver::traverse_dom`'s return
+   value — stylo can raise a flush root to its parent when the root's
+   snapshot invalidated siblings; for the document element the raise is
+   structurally impossible — it has no element siblings, and stylo resolves
+   the substitute via `parent_element_or_host()`, `None` for the document
+   element — so the harvest follows the driver's returned root purely by
+   contract, as insurance for a future subtree-flush entry point), reads each
+   visited node's
+   `ElementData::damage` into the summary, then **clears** stylo's per-node
+   restyle state (hint + damage + flags) and the `dirty_descendants` /
+   snapshot bits. Clearing damage is not optional — see the invariant below.
+   `Document::clear_dirty` is the same reset applied to the whole document at
+   once (a full scheduling reset, computed styles preserved); the per-flush
+   path uses the cheaper spine-targeted harvest.
+8. `w3c_dom::StyleEngine::resolve` remains as the standalone per-node
    match+cascade (no traversal state); the Widget adapter exposes it as
-   `resolve_widget`.
+   `resolve_widget`. It does **not** participate in stylo's hint scheduling,
+   so a node styled only through `resolve` + `store_computed_style` keeps any
+   pending snapshot/hint until a flush or `clear_dirty` drains it.
 
 ## Invariants
 
@@ -137,6 +175,14 @@ Document/Node design (this document describes the current shape).
   per-traversal state in worker TLS). This discipline is what upcoming
   parallel style resolving relies on — do not add non-atomic `&self`
   mutability to `Node`.
+- **Clear damage on harvest.** stylo never clears restyle damage for a normal
+  restyle, and in servo builds `element_needs_traversal`
+  (`vendor/stylo/style/traversal.rs:226-228`) returns `true` for any element
+  whose `ElementData` still carries non-empty damage. Without the harvest's
+  clear pass, every previously-restyled node would be re-traversed on every
+  later flush forever. The regression guard: an incremental flush reports
+  non-empty damage; an immediate second flush reports an empty summary with
+  `traversed == false`.
 
 ## Performance posture (see `docs/style-assumptions.md`)
 
@@ -147,9 +193,16 @@ Document/Node design (this document describes the current shape).
   batch short operations into millisecond-scale samples and expose the batch
   size through an item counter, so this per-operation figure is derived from
   throughput rather than a flaky microsecond sample.
+- Damage harvest is a spine walk over already-dirty nodes, so it costs
+  nothing on clean subtrees. Clearing damage on harvest also makes a repeat
+  flush a **true no-op** (the scheduling token short-circuits, no traversal
+  runs) — `noop_flush` measures exactly that floor.
 - Benchmarks: `cargo bench -p lynx-widget` (`benches/style.rs`,
   CodSpeed-tracked) — ingestion, initial flush (sequential + parallel),
-  incremental class flip / inline style, no-op flush floor, standalone
-  resolve baseline — plus `cargo bench -p w3c-dom` (`benches/css.rs`) at the
-  engine level. No native-C++-Lynx comparison harness yet (§E.18 is the bar;
-  harness is follow-up work).
+  incremental class flip (relayout) / **class flip repaint-only** (two
+  color-only fixture rules, the layout-skippable fast path) / inline style,
+  no-op flush floor, standalone resolve baseline; each incremental scenario
+  `black_box`es its `FlushSummary` so the harvest cost is measured — plus
+  `cargo bench -p w3c-dom` (`benches/css.rs`) at the engine level. No
+  native-C++-Lynx comparison harness yet (§E.18 is the bar; harness is
+  follow-up work).

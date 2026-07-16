@@ -199,6 +199,53 @@ the semantics are stylo's.** Everything below refines that sentence.
     C++ engine) are implementation follow-ups, but the yardstick itself is
     fixed.
 
+## F. Deliberate extensions beyond the subset
+
+19. **CSS containment (`contain` / `content-visibility`): enabled as a
+    user-directed extension beyond Lynx parity.** *(Recorded 2026-07-14, after
+    the 2026-07-11 session.)* Native Lynx has **no** containment property —
+    there is no `CssPropertyId` variant, so the `.web.bundle` wire format
+    cannot carry it and no real bundle emits it. It therefore does not fit the
+    wire-format subset framing of §A; it is a deliberate, user-directed W3C
+    extension, arriving only via **inline styles** (`add_inline_style`) and
+    any future ingest path. In the vendored stylo fork, `contain` itself was
+    already seeded in the lynx grammar (`lynx_properties.txt`); the
+    `lynx-contain` submodule branch completes the css-contain-2 family by
+    enabling `content-visibility` and `contain-intrinsic-size` (+ physical
+    longhands) under the `lynx` feature, with fork-side parse/compute/damage
+    coverage. Ingestion applies no property allowlist, so the fork build is
+    the only gate. On top of that grammar, this repo adds the consuming
+    machinery: `w3c-dom`'s `effective_containment` fold and
+    `StyleDamage`/`FlushSummary` damage harvest, and `neutron-star`'s
+    size/layout containment, skipped contents, and relayout-boundary
+    invalidation. Motivation: `<list>` virtualization (see
+    [tracking/components.md](tracking/components.md)) — off-screen / recycled
+    rows are the archetypal `content-visibility` + intrinsic-size case.
+
+    **v1 scope (css-contain-2 only):**
+    - **No container queries (contain-3).** `container-type` / `container-name` stay disabled.
+      Single-axis `inline-size` containment parses if the grammar allows but is **ignored by
+      layout** — never treated as size containment, never a relayout boundary. Size containment
+      always covers both physical axes.
+    - **`content-visibility: auto` relevance is deferred.** v1 computes `auto`'s always-on
+      `layout | paint | style` containment, but the relevance/skipping bit is a **host-pushed
+      signal defaulting to "always relevant"** (`CoreStyle::skips_contents`, the same
+      `ElementState`-style deferral as `:hover`, §C.13). `contentvisibilityautostatechange` is
+      **not** fired — there is no event layer, and half-wiring it would break future `<list>`
+      parity. `content-visibility: hidden` is fully implemented (skip contents + intrinsic size +
+      strict-like containment).
+    - **Paint containment is layout-side only.** `contain: paint`'s IFC / containing-block effects
+      are computed and exposed; its clipping + stacking context are a **render-layer** concern
+      (compute the flags, do not claim paint conformance).
+    - **Style containment is N/A.** `contain: style` parses and feeds the `content` / `strict`
+      composite math, but the engine has no counters, quotes, or `content` property, so it has no
+      semantic effect.
+
+    The layout-side semantics (size-substitution, layout-containment baseline
+    suppression + host CB contract, skipped contents, the relayout-boundary
+    theorem) live in [layout-architecture.md](layout-architecture.md); the
+    tracking rows are in [tracking/css-layout.md](tracking/css-layout.md).
+
 ## Deliberately still open (known non-decisions)
 
 - The v1 media-feature set `Device` exposes (viewport geometry, orientation,
