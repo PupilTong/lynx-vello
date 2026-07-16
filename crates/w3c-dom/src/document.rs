@@ -76,18 +76,24 @@ pub(crate) fn about_blank_url_data() -> UrlExtraData {
 ///
 /// The document recycles slots through a free list, so a bare index is
 /// ambiguous: after `remove_subtree`, the next `create_node` may place a
-/// **new, unrelated node in the same slot** (the ABA problem). Embedders
-/// retain ids across those events by design — Lynx's scripting runtime holds
-/// element handles over frames while the tree mutates underneath them, and
-/// removal frees whole subtrees at once — so a dangling id held by script
-/// *will* eventually point at a reused slot. The generation is what turns
-/// that from silent
-/// aliasing (reading or mutating a stranger node — the worst kind of logic
-/// corruption) into a detectable staleness: `remove` bumps the slot's
-/// generation, old handles stop resolving, and each layer reacts per its
-/// contract (queries return `None`, PAPI maps to `WidgetError::StaleElement`,
-/// DOM-core mutations crash per the let-it-crash contract — which is only
-/// *possible* because staleness is detectable at all).
+/// **new, unrelated node in the same slot** (the ABA problem). This is not a
+/// rare race but the steady state: embedders retain ids by design (Lynx's
+/// scripting runtime holds element handles over frames while the tree
+/// mutates underneath them), removal frees whole subtrees immediately (no
+/// GC, no recycling pools), and the free list is LIFO — a
+/// remove-then-create sequence, the standard shape of a framework list
+/// diff, reuses the *just-freed* slot at once. A vacant slot is detectable
+/// without generations; a slot **occupied by a stranger** is not — only the
+/// generation turns that from silent aliasing (reading or mutating the
+/// wrong node — the worst kind of logic corruption) into detectable
+/// staleness: freeing pre-mints a bumped-generation id for the slot, old
+/// handles stop resolving, and each layer reacts per its contract (queries
+/// return `None`, PAPI maps to `WidgetError::StaleElement`, DOM-core
+/// mutations crash per the let-it-crash contract — both contracts are only
+/// *implementable* because staleness is decidable at all). The same
+/// miss-on-stale property covers every side table that holds ids across
+/// mutations — the pending-snapshot bookkeeping today; layout caches,
+/// damage lists, and hit-test/event targets tomorrow.
 ///
 /// The generation also anchors stylo integration: the [`OpaqueNode`]
 /// identity is derived from **(generation, index)**, so a freed-and-reused
