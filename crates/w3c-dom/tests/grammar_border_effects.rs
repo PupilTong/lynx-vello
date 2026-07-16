@@ -340,17 +340,31 @@ fn text_decoration_grammar() {
     doc.flush();
     assert_eq!(doc.value(el, "text-decoration-line"), "none");
 
-    // Fork decision (vendor/stylo, lynx feature): `text-decoration-line` is
-    // narrowed to SINGLE keywords (`none | underline | line-through`), so the
-    // combined form is rejected. NOTE this diverges from both W3C and the
-    // C++ handler (text_decoration_handler_unittest.cc accepts
-    // "underline line-through" and stores both flags) — if the fork restores
-    // the `mixed` grammar, this assertion fires and the combined rows get
-    // re-ported.
-    assert!(
-        !parses("text-decoration", "underline line-through"),
-        "combined line keywords grew grammar support — port the C++ rows"
+    // C++ row: "underline line-through" stores both flags — the line
+    // keywords are a combinable set (starlight's TextDecorationType is a
+    // bitmask; W3C `mixed` grammar). Serialization is canonical-order, so
+    // the swapped spelling computes to the same value.
+    doc.set_inline(el, "text-decoration: underline line-through");
+    doc.flush();
+    assert_eq!(
+        doc.value(el, "text-decoration-line"),
+        "underline line-through"
     );
+    assert_eq!(
+        computed(
+            "text-decoration: line-through underline",
+            "text-decoration-line"
+        ),
+        "underline line-through"
+    );
+    assert!(parses("text-decoration-line", "underline line-through"));
+
+    // The keyword set stays trimmed to the C++ production (no overline or
+    // blink); `none` stays exclusive and repeats reject per W3C, where the
+    // C++ parser is merely tolerant of duplicates.
+    assert!(!parses("text-decoration-line", "underline overline"));
+    assert!(!parses("text-decoration-line", "underline underline"));
+    assert!(!parses("text-decoration-line", "none underline"));
 
     doc.set_inline(el, "text-decoration: yellow dashed underline");
     doc.flush();
