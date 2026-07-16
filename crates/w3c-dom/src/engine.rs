@@ -13,6 +13,7 @@
 //! drives stylo's restyle traversal directly over the document's nodes — no
 //! separate style tree is ever built.
 
+use std::num::NonZeroU64;
 use std::sync::atomic::AtomicBool;
 
 use cssparser::{Parser, ParserInput, SourceLocation};
@@ -55,7 +56,7 @@ use stylo::values::KeyframesName;
 use stylo::values::specified::position::PositionTryFallbacksTryTactic;
 use stylo_traits::ParsingMode;
 
-use crate::document::about_blank_url_data;
+use crate::document::{about_blank_url_data, mint_identity};
 use crate::{Document, ExternalState, Node, NodeId};
 
 /// One declaration for direct rule construction: property name, value text,
@@ -80,6 +81,11 @@ pub struct StyleEngine {
     stylist: Stylist,
     lock: SharedRwLock,
     url_data: UrlExtraData,
+    /// Process-unique engine identity, stamped into every document created
+    /// by [`new_document`](Self::new_document) and validated wherever this
+    /// engine's stylist/lock meet a document (see
+    /// [`assert_owns`](Self::assert_owns)).
+    token: NonZeroU64,
 }
 
 impl std::fmt::Debug for StyleEngine {
@@ -108,13 +114,42 @@ impl StyleEngine {
             stylist: Stylist::new(device, QuirksMode::NoQuirks),
             lock: SharedRwLock::new(),
             url_data,
+            token: mint_identity(),
         }
     }
 
     /// Create an empty document sharing this engine's private style context.
+    ///
+    /// The document is permanently paired with this engine: flushing or
+    /// resolving it through any other engine panics at the entry point (the
+    /// crate-private `assert_owns` boundary check).
     #[must_use]
     pub fn new_document<T>(&self) -> Document<T> {
-        Document::with_style_context(self.lock.clone(), self.url_data.clone())
+        Document::with_style_context(self.lock.clone(), self.url_data.clone(), Some(self.token))
+    }
+
+    /// Assert that `document` was created by **this** engine.
+    ///
+    /// Every entry point that runs this engine's stylist or takes this
+    /// engine's lock against a document's nodes calls this first. Skipping it
+    /// would not make a mismatched pair work — inline styles are locked under
+    /// the creating engine's `SharedRwLock`, so stylo panics deep inside
+    /// (`Locked::read_with called with a guard from an unrelated
+    /// SharedRwLock`), and a document *without* inline styles would silently
+    /// cascade against the wrong stylist — it only makes the failure late,
+    /// obscure, or invisible. Failing here is the let-it-crash contract with
+    /// a nameable cause.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `document` was created by a different engine or standalone
+    /// (`Document::new`).
+    pub(crate) fn assert_owns<T>(&self, document: &Document<T>) {
+        assert_eq!(
+            document.core().engine_token,
+            Some(self.token),
+            "document is not paired with this StyleEngine (created by a              different engine or standalone)"
+        );
     }
 
     /// The engine's stylist (crate-internal: the flush traversal needs it).
@@ -383,12 +418,21 @@ impl StyleEngine {
     ///
     /// `parent_style` supplies inherited values. At a document root, pass
     /// `None` to inherit from stylo's initial values.
+    /// # Panics
+    ///
+    /// Panics when `node` belongs to a document not created by this engine
+    /// (the same boundary check as `flush_document`).
     #[must_use]
     pub fn resolve<T: ExternalState>(
         &self,
         node: &Node<T>,
         parent_style: Option<&ComputedValues>,
     ) -> Arc<ComputedValues> {
+        assert_eq!(
+            node.tree().engine_token,
+            Some(self.token),
+            "node's document is not paired with this StyleEngine"
+        );
         let guard = self.lock.read();
         let guards = StylesheetGuards::same(&guard);
 

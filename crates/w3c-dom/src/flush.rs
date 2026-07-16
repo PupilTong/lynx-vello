@@ -156,8 +156,11 @@ impl StyleEngine {
     ///
     /// # Panics
     ///
-    /// Panics when the document's designated root has been removed without
-    /// clearing the root — impossible through the public API
+    /// Panics when `document` was not created by this engine
+    /// (`StyleEngine::new_document` pairs them; flushing across the pair
+    /// boundary would run the wrong stylist and take the wrong lock), or
+    /// when the document's designated root has been removed without clearing
+    /// the root — impossible through the public API
     /// ([`Document::remove_subtree`](crate::Document::remove_subtree) clears
     /// it).
     pub fn flush_document_with<T: ExternalState>(
@@ -165,9 +168,16 @@ impl StyleEngine {
         document: &mut Document<T>,
         parallelism: Parallelism,
     ) {
+        self.assert_owns(document);
         let Some(root) = document.root() else {
             return;
         };
+        // Debug traversal-phase marker: per-node style readers assert they
+        // never run concurrently with the traversal, and the trait accessors
+        // assert they only run inside one. Cleared on unwind too (individual
+        // slot poisoning covers mid-panic node state).
+        #[cfg(debug_assertions)]
+        let _phase = document.begin_flush_phase();
         {
             let root_ref = document
                 .get(root)

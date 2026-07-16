@@ -12,7 +12,7 @@ use std::cell::RefCell;
 
 use divan::black_box;
 use lynx_template_decoder::StyleInfo;
-use lynx_widget::{EngineMetrics, Parallelism, StyleEngine, WidgetId, WidgetTree};
+use lynx_widget::{EngineMetrics, Parallelism, StyleEngine, WidgetHandle, WidgetTree};
 
 fn main() {
     divan::main();
@@ -45,22 +45,22 @@ fn engine_with_large_css() -> StyleEngine {
 
 /// `page > 32 × view > 32 × view`, classes cycling through the fixture's
 /// `.classN` rules. Returns the tree and one deep leaf.
-fn build_tree(engine: &StyleEngine) -> (WidgetTree, WidgetId) {
+fn build_tree(engine: &StyleEngine) -> (WidgetTree, WidgetHandle) {
     let mut tree = engine.new_widget_tree();
     let page = tree.create_page();
     let mut class_index = 0usize;
     let mut probe = None;
     for _ in 0..32 {
         let container = tree.create_view();
-        tree.append_element(container, page).unwrap();
+        tree.append_element(&container, &page).unwrap();
         class_index += 1;
-        tree.set_classes(container, &format!("class{}", class_index % 186 + 1))
+        tree.set_classes(&container, &format!("class{}", class_index % 186 + 1))
             .unwrap();
         for _ in 0..32 {
             let leaf = tree.create_view();
-            tree.append_element(leaf, container).unwrap();
+            tree.append_element(&leaf, &container).unwrap();
             class_index += 1;
-            tree.set_classes(leaf, &format!("class{}", class_index % 186 + 1))
+            tree.set_classes(&leaf, &format!("class{}", class_index % 186 + 1))
                 .unwrap();
             probe = Some(leaf);
         }
@@ -120,7 +120,7 @@ fn incremental_class_flip(bencher: divan::Bencher<'_, '_>) {
         let (tree, toggle) = &mut *state.borrow_mut();
         *toggle = !*toggle;
         let class = if *toggle { "class7" } else { "class9" };
-        tree.set_classes(probe, black_box(class)).unwrap();
+        tree.set_classes(&probe, black_box(class)).unwrap();
         engine.flush_widget_tree(tree);
     });
 }
@@ -137,7 +137,7 @@ fn incremental_inline_style(bencher: divan::Bencher<'_, '_>) {
         let (tree, toggle) = &mut *state.borrow_mut();
         *toggle = !*toggle;
         let width = if *toggle { "10px" } else { "20px" };
-        tree.add_inline_style(probe, "width", black_box(width))
+        tree.add_inline_style(&probe, "width", black_box(width))
             .unwrap();
         engine.flush_widget_tree(tree);
     });
@@ -161,13 +161,16 @@ fn no_op_flush(bencher: divan::Bencher<'_, '_>) {
 fn resolve_single_widget(bencher: divan::Bencher<'_, '_>) {
     let engine = engine_with_large_css();
     let (tree, probe) = build_tree(&engine);
-    let parent = tree.get_parent(probe).unwrap();
+    let parent = tree
+        .get_parent(&probe)
+        .unwrap()
+        .expect("probe has a parent");
     let parent_style = {
-        let parent_ref = tree.widget_ref(parent).unwrap();
+        let parent_ref = tree.widget_ref(&parent).unwrap();
         engine.resolve_widget(parent_ref, None)
     };
     bencher.bench_local(|| {
-        let widget_ref = tree.widget_ref(black_box(probe)).unwrap();
+        let widget_ref = tree.widget_ref(black_box(&probe)).unwrap();
         engine.resolve_widget(widget_ref, Some(&parent_style))
     });
 }

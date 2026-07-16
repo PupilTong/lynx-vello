@@ -48,8 +48,9 @@
 
 use std::fmt;
 use std::marker::PhantomData;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use stylo::dom::OpaqueNode;
 use stylo::selector_parser::SnapshotMap;
@@ -63,6 +64,13 @@ use crate::node::Node;
 /// `about:blank` is a constant, valid URL, so this never fails.
 pub(crate) fn about_blank_url_data() -> UrlExtraData {
     UrlExtraData::from(::url::Url::parse("about:blank").expect("about:blank is a valid URL"))
+}
+
+/// Mint a process-unique identity token (documents and style engines share
+/// the counter; `0` is never minted, so tokens fit `NonZeroU64`).
+pub(crate) fn mint_identity() -> NonZeroU64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NonZeroU64::new(NEXT.fetch_add(1, Ordering::Relaxed)).expect("identity counter starts at 1")
 }
 
 /// A stable, generation-checked handle to a node in a [`Document`].
@@ -104,13 +112,33 @@ pub(crate) fn about_blank_url_data() -> UrlExtraData {
 /// exhausted is retired rather than reused, preserving uniqueness; and
 /// because the generation is `NonZeroU32`, `Option<NodeId>` costs no extra
 /// space.
+///
+/// # Document identity
+///
+/// An id also carries the **token of the document that minted it**
+/// ([`document_token`](Self::document_token)): two documents mint identical
+/// `(index, generation)` sequences, so without the token an id from tree A
+/// would pass tree B's liveness check and silently alias whatever occupies
+/// the same slot there — cross-tree data corruption, not a detectable error.
+/// With the token in the id (and in every node's own id), a foreign id
+/// simply never compares equal: queries return `None`, mutations crash per
+/// the let-it-crash contract, and embedder layers can reject it with a
+/// typed error before that.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct NodeId {
+    doc: NonZeroU64,
     index: u32,
     generation: NonZeroU32,
 }
 
 impl NodeId {
+    /// The identity token of the document this id was minted by (see
+    /// [`Document::token`]).
+    #[must_use]
+    pub const fn document_token(self) -> NonZeroU64 {
+        self.doc
+    }
+
     /// The slot index this handle refers to.
     #[must_use]
     pub const fn index(self) -> u32 {
@@ -131,7 +159,10 @@ impl NodeId {
     #[must_use]
     pub(crate) const fn opaque(self) -> OpaqueNode {
         // Packs (generation, index) into the usize. 64-bit targets only —
-        // on 32-bit this would truncate the generation.
+        // on 32-bit this would truncate the generation. The document token
+        // is deliberately excluded: stylo's snapshot map and traversal roots
+        // are per-document, so (generation, index) is unique within the one
+        // map an OpaqueNode is ever used in.
         const {
             assert!(
                 size_of::<usize>() >= 8,
@@ -175,6 +206,16 @@ unsafe impl<T> Sync for CorePtr<T> {}
 /// (stylo's `TDocument::shared_lock`). The snapshot machinery and root ride
 /// along so the whole document state is one allocation.
 pub(crate) struct Core<T> {
+    /// This document's process-unique identity, stamped into every [`NodeId`]
+    /// it mints.
+    token: NonZeroU64,
+    /// The identity of the [`StyleEngine`](crate::StyleEngine) whose private
+    /// style context this document shares, or `None` for a standalone
+    /// document. Validated by the engine at every flush/resolve entry point:
+    /// running one engine's stylist and lock against another engine's
+    /// document is either a deep stylo panic (`Locked::read_with` guard
+    /// mismatch) or, worse, a silently wrong cascade.
+    pub(crate) engine_token: Option<NonZeroU64>,
     /// Node storage: `slots[i]` holds the live node whose id carries index
     /// `i`. A vacant entry is either on the free list or retired (its
     /// generation space is exhausted — never reused).
@@ -195,6 +236,11 @@ pub(crate) struct Core<T> {
     /// The ids behind [`Core::snapshots`], so `complete_flush` can clear the
     /// per-node snapshot bits without a way to map `OpaqueNode` back.
     pub(crate) snapshotted: Vec<NodeId>,
+    /// Debug-only: set for the duration of a style flush, so per-node style
+    /// readers can assert traversal-phase discipline (see
+    /// [`crate::node::slot_guard`]).
+    #[cfg(debug_assertions)]
+    pub(crate) in_flush: std::sync::atomic::AtomicBool,
 }
 
 impl<T> Core<T> {
@@ -209,6 +255,12 @@ impl<T> Core<T> {
     pub(crate) fn node_mut(&mut self, id: NodeId) -> Option<&mut Node<T>> {
         let node = self.slots.get_mut(id.index as usize)?.as_mut()?;
         (node.id() == id).then_some(node)
+    }
+
+    /// Debug-only: whether a style flush is currently traversing this tree.
+    #[cfg(debug_assertions)]
+    pub(crate) fn in_flush(&self) -> bool {
+        self.in_flush.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Resolve an internal tree link (a parent/child id stored inside a
@@ -274,12 +326,18 @@ impl<T> Document<T> {
     /// [`StyleEngine::new_document`](crate::StyleEngine::new_document).
     #[must_use]
     pub fn new() -> Self {
-        Self::with_style_context(SharedRwLock::new(), about_blank_url_data())
+        Self::with_style_context(SharedRwLock::new(), about_blank_url_data(), None)
     }
 
     /// Create a document with the style context owned by this crate.
-    pub(crate) fn with_style_context(lock: SharedRwLock, url_data: UrlExtraData) -> Self {
+    pub(crate) fn with_style_context(
+        lock: SharedRwLock,
+        url_data: UrlExtraData,
+        engine_token: Option<NonZeroU64>,
+    ) -> Self {
         let core = Box::new(Core {
+            token: mint_identity(),
+            engine_token,
             slots: Vec::new(),
             free_list: Vec::new(),
             root: None,
@@ -287,6 +345,8 @@ impl<T> Document<T> {
             url_data,
             snapshots: SnapshotMap::new(),
             snapshotted: Vec::new(),
+            #[cfg(debug_assertions)]
+            in_flush: std::sync::atomic::AtomicBool::new(false),
         });
         Document {
             core: CorePtr(NonNull::from(Box::leak(core))),
@@ -320,6 +380,19 @@ impl<T> Document<T> {
         }
     }
 
+    /// Debug-only: mark the document as inside a style flush for the
+    /// returned token's lifetime (RAII, cleared on unwind). The token holds
+    /// the heap-pinned core's address rather than a borrow, so the flush can
+    /// still take `&mut Document` for `complete_flush` while the phase is
+    /// marked.
+    #[cfg(debug_assertions)]
+    pub(crate) fn begin_flush_phase(&self) -> FlushPhaseToken<T> {
+        use std::sync::atomic::Ordering;
+        let was = self.core().in_flush.swap(true, Ordering::AcqRel);
+        assert!(!was, "flush re-entered on a document already being flushed");
+        FlushPhaseToken { core: self.core }
+    }
+
     // --- node factory ------------------------------------------------------
 
     /// Create a detached node and return its handle.
@@ -343,6 +416,7 @@ impl<T> Document<T> {
             let index =
                 u32::try_from(core.slots.len()).expect("document capacity exceeds u32::MAX slots");
             let id = NodeId {
+                doc: core.token,
                 index,
                 generation: NonZeroU32::MIN,
             };
@@ -373,6 +447,16 @@ impl<T> Document<T> {
     #[must_use]
     pub fn root(&self) -> Option<NodeId> {
         self.core().root
+    }
+
+    /// This document's process-unique identity token.
+    ///
+    /// Every [`NodeId`] this document mints carries it
+    /// ([`NodeId::document_token`]); embedder layers use it to give their own
+    /// handles an unforgeable tree identity.
+    #[must_use]
+    pub fn token(&self) -> NonZeroU64 {
+        self.core().token
     }
 
     // --- queries -----------------------------------------------------------
@@ -431,7 +515,7 @@ impl<T> Document<T> {
     pub fn ext_mut(&mut self, id: NodeId) -> &mut T {
         self.core_mut()
             .node_mut(id)
-            .expect("stale NodeId passed to Document::ext_mut")
+            .expect("stale or foreign NodeId passed to Document::ext_mut")
             .ext_mut()
     }
 
@@ -448,11 +532,21 @@ impl<T> Document<T> {
     ///
     /// # Panics
     ///
-    /// Panics when `parent`, `child`, or `before` is stale, when `before` is
-    /// not a child of `parent`, or — in debug builds — when the link would
-    /// create a cycle or `before == child` (the let-it-crash mutation
-    /// contract; see the crate docs).
+    /// Panics when `parent`, `child`, or `before` is stale, when `child` is
+    /// the document root, when `before` is not a child of `parent`, or — in
+    /// debug builds — when the link would create a cycle or
+    /// `before == child` (the let-it-crash mutation contract; see the crate
+    /// docs).
     pub fn insert_before(&mut self, parent: NodeId, child: NodeId, before: Option<NodeId>) {
+        // Always-on (not just debug): a reparented root would let a later
+        // `remove_subtree` of its ancestor free the root while the document
+        // still points at it — the next flush would then panic far from the
+        // cause. Root is designated once and stays parentless; embedder
+        // layers reject this with a typed error before it can reach here.
+        assert!(
+            self.root() != Some(child),
+            "insert_before: the document root cannot be linked under a parent"
+        );
         debug_assert!(self.contains(parent), "insert_before: stale parent");
         debug_assert!(self.contains(child), "insert_before: stale child");
         debug_assert!(child != parent, "insert_before: child == parent");
@@ -471,7 +565,7 @@ impl<T> Document<T> {
         let index = match before {
             None => self
                 .get(parent)
-                .expect("stale NodeId passed to Document::insert_before")
+                .expect("stale or foreign NodeId passed to Document::insert_before")
                 .child_ids()
                 .len(),
             Some(reference) => self
@@ -481,11 +575,11 @@ impl<T> Document<T> {
 
         let core = self.core_mut();
         core.node_mut(parent)
-            .expect("stale NodeId passed to Document::insert_before")
+            .expect("stale or foreign NodeId passed to Document::insert_before")
             .children
             .insert(index, child);
         core.node_mut(child)
-            .expect("stale NodeId passed to Document::insert_before")
+            .expect("stale or foreign NodeId passed to Document::insert_before")
             .parent = Some(parent);
 
         self.note_moved_subtree(child);
@@ -510,7 +604,7 @@ impl<T> Document<T> {
     pub fn detach(&mut self, child: NodeId) {
         let old_parent = self
             .get(child)
-            .expect("stale NodeId passed to Document::detach")
+            .expect("stale or foreign NodeId passed to Document::detach")
             .parent_id();
         let Some(parent) = old_parent else {
             return;
@@ -526,7 +620,7 @@ impl<T> Document<T> {
             .expect("child must appear in its parent's child list");
         parent_node.children.remove(removed_index);
         core.node_mut(child)
-            .expect("stale NodeId passed to Document::detach")
+            .expect("stale or foreign NodeId passed to Document::detach")
             .parent = None;
         self.note_child_list_change(parent, removed_index);
     }
@@ -573,6 +667,7 @@ impl<T> Document<T> {
         let node = slot.take()?;
         if let Some(next) = id.generation.checked_add(1) {
             core.free_list.push(NodeId {
+                doc: id.doc,
                 index: id.index,
                 generation: next,
             });
@@ -641,5 +736,27 @@ impl<T> Document<T> {
                 stack.extend_from_slice(&node.children);
             }
         }
+    }
+}
+
+/// Debug-only RAII marker for the style-flush phase (see
+/// [`Document::begin_flush_phase`]).
+#[cfg(debug_assertions)]
+pub(crate) struct FlushPhaseToken<T> {
+    core: CorePtr<T>,
+}
+
+#[cfg(debug_assertions)]
+impl<T> Drop for FlushPhaseToken<T> {
+    fn drop(&mut self) {
+        // SAFETY: the token is created from a live document and dropped
+        // inside the flush call that created it; the heap-pinned core
+        // outlives both. Storing the address (not a borrow) is what lets the
+        // flush take `&mut Document` while the phase is marked — the flag is
+        // atomic, so this store cannot race with anything the `&mut` guards.
+        #[expect(unsafe_code, reason = "atomic store through the heap-pinned core")]
+        let core = unsafe { self.core.0.as_ref() };
+        core.in_flush
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 }

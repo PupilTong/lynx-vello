@@ -29,10 +29,20 @@ Document/Node design (this document describes the current shape).
   not asked of embedders. The one embedder obligation left: pair `Document::ext_mut` with
   `Document::note_external_attribute_change` when a payload change affects a synthetic /
   reflected attribute (e.g. Lynx's `l-css-id`, `data-*`).
-- **Let it crash.** Query methods return `Option`; mutation methods treat stale `NodeId`s,
-  cycle-creating links, and foreign insertion references as caller bugs — `debug_assert!`ed and
-  panicking rather than silently ignored. Layers holding untrusted handles validate first
-  (`WidgetTree` maps violations to `WidgetError`).
+- **Let it crash.** Query methods return `Option`; mutation methods treat stale/foreign
+  `NodeId`s, cycle-creating links, root reparenting, and foreign insertion references as caller
+  bugs — `debug_assert!`ed and panicking rather than silently ignored. Layers holding untrusted
+  handles validate first (`WidgetTree` maps violations to `WidgetError`).
+- **Identity, twice.** Every `NodeId` embeds its document's process-unique token, so an id from
+  tree A never resolves in tree B (two trees mint identical `(index, generation)` sequences —
+  without the token that is silent same-slot aliasing). Every document also records the identity
+  of the `StyleEngine` that created it; `flush_document`/`resolve` assert the pairing at the
+  boundary instead of dying deep inside stylo on a mismatched `SharedRwLock` (or worse, silently
+  cascading against the wrong stylist).
+- **Debug contract instrumentation.** The `stylo_data` `UnsafeCell` slot carries a debug-only
+  guard (reader/writer state, owning thread, unwind poisoning) and the document a debug
+  traversal-phase flag; violations of stylo's one-worker-per-element discipline crash debug
+  builds instead of being UB. Release builds compile it all away.
 - **Backpointers, one-word handles, no mirror tree.** The document core is heap-pinned and every
   node carries a pointer back to it, so tree navigation needs nothing but `&Node`. stylo's
   element traits (`TNode`/`TElement`/`TDocument`/`selectors::Element`) are implemented
@@ -47,7 +57,7 @@ Document/Node design (this document describes the current shape).
 | Layer | Owns | Must not own |
 | --- | --- | --- |
 | `w3c-dom` | `Document<T>` (the one tree: storage, root, snapshots, lock), `Node<T>`, `NodeId`, the stylo DOM traits on `&Node`, invalidation-carrying mutation, inline parsing, `Stylist`, rule matching, cascade, media evaluation, computed values | Lynx tags/PAPI, `WidgetState`, Lynx unit metrics, touch-device policy |
-| `lynx-widget` | `WidgetState`, `WidgetTree` (PAPI validation over the document), `EngineMetrics`, touch-first `Device` construction, viewport-relative `rpx` integration | A second stylist, cascade implementation, stylesheet lock sharing, direct node construction |
+| `lynx-widget` | `WidgetState`, `WidgetTree` (PAPI validation over the document), `WidgetHandle` (canonical registry: tree identity, node retention, drop-driven reclamation of detached subtrees), `EngineMetrics`, touch-first `Device` construction, viewport-relative `rpx` integration | A second stylist, cascade implementation, stylesheet lock sharing, direct node construction, raw-id public APIs |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, the maintained Lynx CSS extension patch set **and the Lynx supported-property/value grammar definition** (`style/properties/lynx_properties.txt`, `lynx` feature gates) | Runtime Widget/PAPI policy |
 
 ## Style lifecycle

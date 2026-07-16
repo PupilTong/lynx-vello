@@ -6,36 +6,37 @@
 //! `__AppendElement`, [`insert_element_before`] ↔ `__InsertElementBefore`,
 //! [`remove_element`] ↔ `__RemoveElement`, [`replace_element`] ↔
 //! `__ReplaceElement`, [`create_element`] ↔ `__CreateElement`) even though
-//! the values they carry are [`Widget`]s. JS
-//! bindings live in a later runtime crate; this is the pure native validation
-//! layer. [`crate::StyleEngine`] adapts `w3c-dom`'s generic cascade to the
-//! Widget tree and reads the dirty state maintained here (see
-//! [`WidgetTree::has_dirty`] / [`WidgetTree::clear_dirty`]).
+//! the values they carry are [`Widget`]s. JS bindings live in a later runtime
+//! crate; this is the pure native validation layer. [`crate::StyleEngine`]
+//! adapts `w3c-dom`'s generic cascade to the Widget tree and reads the dirty
+//! state maintained here (see [`WidgetTree::has_dirty`] /
+//! [`WidgetTree::clear_dirty`]).
 //!
-//! This layer validates PAPI semantics — stale handles, cycles, insertion
-//! reference resolution, error mapping, the `unique_id` minting + index, the
-//! `css_id` batch — and **delegates** every DOM operation to
-//! [`w3c_dom::Document`] methods, which carry their own style invalidation.
-//! PAPI opcodes arrive from the scripting runtime with untrusted handles, so
-//! the validation here is what turns would-be contract violations (which the
-//! DOM core treats as crashes) into [`WidgetError`]s. The Lynx-specific
+//! This layer validates PAPI semantics — foreign/stale handles, cycles,
+//! insertion reference resolution, root protection, error mapping, the
+//! `unique_id` minting + index, the `css_id` batch — and **delegates** every
+//! DOM operation to [`w3c_dom::Document`] methods, which carry their own
+//! style invalidation. PAPI opcodes arrive from the scripting runtime, so the
+//! validation here is what turns would-be contract violations (which the DOM
+//! core treats as crashes) into [`WidgetError`]s. The Lynx-specific
 //! per-widget data lives in each node's [`WidgetState`] payload.
 //!
 //! # Ownership and lifetime
 //!
 //! Widgets are **owned by the scripting engine**: `ReactLynx` runs inside the
-//! JS engine, and each JS element wrapper holds its widget's [`WidgetId`].
-//! The tree is storage plus structure — never lifetime policy:
+//! JS engine, and each JS element wrapper holds a [`WidgetHandle`] clone. The
+//! tree is storage plus structure — never lifetime policy:
 //!
+//! - The PAPI traffics **exclusively in handles**. A handle carries its tree's identity (using it
+//!   on another tree is [`WidgetError::ForeignWidget`], not silent same-slot aliasing), and a live
+//!   handle **retains** its node — nothing a wrapper can still reach is ever freed.
 //! - Structural opcodes ([`remove_element`], [`replace_element`], …) attach and detach; they never
 //!   free. Detached subtrees are first-class DOM citizens (browser `removeChild` semantics): alive,
 //!   mutable, re-insertable.
-//! - Freeing is the owner's call. In web-core the browser GC collects a detached node once no JS
-//!   reference remains; here the runtime layer makes that decision through its wrapper finalizers
-//!   and executes it via [`dispose_detached`](WidgetTree::dispose_detached) — the one
-//!   lifetime-affecting entry point, deliberately outside the `__*Element` opcode set.
-//!
-//! [`dispose_detached`]: WidgetTree::dispose_detached
+//! - Freeing is a **consequence of ownership**, not an opcode: when the last handle into a detached
+//!   subtree drops (wrapper finalizers, in the runtime), the subtree is reclaimed atomically at the
+//!   next operation boundary — the native equivalent of the browser GC collecting unreferenced
+//!   detached nodes. There is no public disposal API. See [`crate::handle`].
 //!
 //! [`append_element`]: WidgetTree::append_element
 //! [`insert_element_before`]: WidgetTree::insert_element_before
@@ -43,56 +44,70 @@
 //! [`replace_element`]: WidgetTree::replace_element
 //! [`create_element`]: WidgetTree::create_element
 
+use std::num::NonZeroU64;
+use std::sync::{Arc as StdArc, Mutex, Weak};
+
 use rustc_hash::FxHashMap;
 use stylo::properties::ComputedValues;
 use stylo::servo_arc::Arc;
 use thiserror::Error;
-use w3c_dom::{Document, ElementState};
+use w3c_dom::{Document, ElementState, Node, NodeId};
 
+use crate::handle::{HandleInner, Reaper, WidgetHandle};
 use crate::kind::WidgetKind;
 use crate::state::{EventKind, EventReg, WidgetState};
-use crate::{Widget, WidgetId, WidgetRef};
+use crate::{Widget, WidgetRef};
 
-/// An error from a tree-mutating [`WidgetTree`] operation.
+/// An error from a [`WidgetTree`] operation on untrusted PAPI input.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Error)]
 pub enum WidgetError {
+    /// A handle from a different [`WidgetTree`] was used on this one.
+    #[error("widget {0:?} belongs to a different tree")]
+    ForeignWidget(NodeId),
     /// A handle did not resolve to a live element.
     #[error("widget {0:?} is stale or does not exist")]
-    StaleElement(WidgetId),
+    StaleElement(NodeId),
     /// A `remove`/`replace` target was not a child of the given parent.
     #[error("widget {child:?} is not a child of {parent:?}")]
     NotAChild {
         /// The claimed parent.
-        parent: WidgetId,
+        parent: NodeId,
         /// The element that was not actually its child.
-        child: WidgetId,
+        child: NodeId,
     },
     /// Performing the insertion would make an element its own ancestor.
     #[error("linking {ancestor:?} under {descendant:?} would create a cycle")]
     WouldCycle {
         /// The element being inserted (would become an ancestor of itself).
-        ancestor: WidgetId,
+        ancestor: NodeId,
         /// The intended parent (a descendant of `ancestor`).
-        descendant: WidgetId,
+        descendant: NodeId,
     },
     /// An `insert_element_before` reference node was not a child of the parent.
     #[error("insertion reference {0:?} is not a child of the parent")]
-    BadInsertReference(WidgetId),
-    /// A disposal target was still attached to a parent.
-    #[error("widget {0:?} is still attached; detach it before disposal")]
-    NotDetached(WidgetId),
+    BadInsertReference(NodeId),
+    /// The `<page>` root cannot be linked under a parent.
+    #[error("the page root {0:?} cannot be reparented")]
+    CannotReparentRoot(NodeId),
 }
 
 /// The widget tree: one [`Document`] of [`Widget`]s plus the Lynx `unique_id`
-/// counter and a `unique_id` → [`WidgetId`] index. The `<page>` root is the
-/// document root.
+/// counter/index and the canonical [`WidgetHandle`] registry. The `<page>`
+/// root is the document root.
 #[derive(Debug)]
 pub struct WidgetTree {
     doc: Document<WidgetState>,
     /// The next Lynx `unique_id` to mint (1-based; 0 stays reserved as
     /// "unset").
     next_unique_id: i32,
-    by_unique_id: FxHashMap<i32, WidgetId>,
+    by_unique_id: FxHashMap<i32, NodeId>,
+    /// Canonical handle registry: at most one live [`HandleInner`] per node,
+    /// so `Arc` strong counts are exactly the outstanding external
+    /// references. Interior-mutable so `&self` navigation can mint handles.
+    handles: Mutex<FxHashMap<NodeId, Weak<HandleInner>>>,
+    /// Drop-notification queue shared with every handle (see
+    /// [`crate::handle`]).
+    reaper: StdArc<Reaper>,
 }
 
 impl Default for WidgetTree {
@@ -118,6 +133,8 @@ impl WidgetTree {
             // Lynx `unique_id`s are 1-based; 0 stays reserved as "unset".
             next_unique_id: 1,
             by_unique_id: FxHashMap::default(),
+            handles: Mutex::new(FxHashMap::default()),
+            reaper: Reaper::new(),
         }
     }
 
@@ -136,64 +153,184 @@ impl WidgetTree {
         &mut self.doc
     }
 
+    // --- handles ------------------------------------------------------------
+
+    /// Resolve a handle for use on **this** tree, mapping the two ways
+    /// untrusted input can be wrong to typed errors.
+    ///
+    /// `StaleElement` is defensive: a live handle retains its node, so a
+    /// same-tree handle whose node is gone indicates a bug in this layer —
+    /// debug builds assert.
+    fn resolve(&self, handle: &WidgetHandle) -> Result<NodeId, WidgetError> {
+        let id = handle.id();
+        if handle.tree_token() != self.doc.token() {
+            return Err(WidgetError::ForeignWidget(id));
+        }
+        if !self.doc.contains(id) {
+            debug_assert!(
+                false,
+                "a live same-tree WidgetHandle must retain its node (registry bug)"
+            );
+            return Err(WidgetError::StaleElement(id));
+        }
+        Ok(id)
+    }
+
+    /// The canonical handle for a live node: clones the existing one when any
+    /// external clone is alive, mints (and registers) a fresh one otherwise.
+    fn handle_for(&self, id: NodeId) -> WidgetHandle {
+        debug_assert!(self.doc.contains(id), "handle_for on a freed node");
+        let mut registry = self
+            .handles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(existing) = registry.get(&id).and_then(Weak::upgrade) {
+            return WidgetHandle { inner: existing };
+        }
+        let inner = StdArc::new(HandleInner::new(self.doc.token(), id, &self.reaper));
+        registry.insert(id, StdArc::downgrade(&inner));
+        WidgetHandle { inner }
+    }
+
+    /// Drain the handle-drop queue and reclaim every **detached** subtree
+    /// that no longer contains any externally retained node.
+    ///
+    /// Called at every mutating operation boundary and before each flush; a
+    /// single relaxed load when nothing was dropped. Attached nodes are never
+    /// collected — the tree retains document content, like the browser DOM.
+    pub(crate) fn sweep_dropped(&mut self) {
+        let Some(dropped) = self.reaper.take_dropped() else {
+            return;
+        };
+        for id in dropped {
+            // Lazily drop the dead registry entry (a re-lookup may already
+            // have re-minted one; only remove if truly dead).
+            {
+                let mut registry = self
+                    .handles
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if registry
+                    .get(&id)
+                    .is_some_and(|weak| weak.strong_count() == 0)
+                {
+                    registry.remove(&id);
+                }
+            }
+            if !self.doc.contains(id) {
+                continue; // already reclaimed by an earlier entry in this batch
+            }
+            // Find the top of the tree `id` sits in.
+            let mut top = id;
+            while let Some(parent) = self.doc.get(top).and_then(Node::parent_id) {
+                top = parent;
+            }
+            if self.doc.root() == Some(top) {
+                continue; // attached content: retained by the tree itself
+            }
+            let (retained, subtree) = self.subtree_retention(top);
+            if retained {
+                continue;
+            }
+            // No external handle anywhere in the detached subtree: reclaim it
+            // atomically — slots, unique_id index, registry entries.
+            for state in self.doc.remove_subtree(top) {
+                self.by_unique_id.remove(&state.unique_id);
+            }
+            let mut registry = self
+                .handles
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for freed in subtree {
+                registry.remove(&freed);
+            }
+        }
+    }
+
+    /// Whether any node in the subtree rooted at `root` has a live external
+    /// handle, plus the subtree's ids (reused by the reclamation path).
+    fn subtree_retention(&self, root: NodeId) -> (bool, Vec<NodeId>) {
+        let registry = self
+            .handles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut retained = false;
+        let mut ids = Vec::new();
+        let mut stack = vec![root];
+        while let Some(current) = stack.pop() {
+            ids.push(current);
+            if registry
+                .get(&current)
+                .is_some_and(|weak| weak.strong_count() > 0)
+            {
+                retained = true;
+            }
+            if let Some(node) = self.doc.get(current) {
+                stack.extend_from_slice(node.child_ids());
+            }
+        }
+        (retained, ids)
+    }
+
     // --- element creation -------------------------------------------------
 
-    fn create(&mut self, kind: WidgetKind, tag: &str) -> WidgetId {
+    fn create(&mut self, kind: WidgetKind, tag: &str) -> WidgetHandle {
+        self.sweep_dropped();
         let unique_id = self.next_unique_id;
         self.next_unique_id = self.next_unique_id.wrapping_add(1);
         let id = self.doc.create_node(tag, WidgetState::new(kind, unique_id));
         self.by_unique_id.insert(unique_id, id);
-        id
+        self.handle_for(id)
     }
 
     /// Create the `<page>` root element and record it as the document root
     /// (which also schedules its initial style pass).
-    pub fn create_page(&mut self) -> WidgetId {
-        let id = self.create(WidgetKind::Page, "page");
-        self.doc.set_root(id);
-        id
+    pub fn create_page(&mut self) -> WidgetHandle {
+        let handle = self.create(WidgetKind::Page, "page");
+        self.doc.set_root(handle.id());
+        handle
     }
 
     /// Create a `<view>` element.
-    pub fn create_view(&mut self) -> WidgetId {
+    pub fn create_view(&mut self) -> WidgetHandle {
         self.create(WidgetKind::View, "view")
     }
 
     /// Create a `<text>` element.
-    pub fn create_text(&mut self) -> WidgetId {
+    pub fn create_text(&mut self) -> WidgetHandle {
         self.create(WidgetKind::Text, "text")
     }
 
     /// Create a `<raw-text>` leaf carrying literal text content.
-    pub fn create_raw_text(&mut self, text: impl Into<String>) -> WidgetId {
-        let id = self.create(WidgetKind::RawText, "raw-text");
-        self.doc.set_text(id, Some(text.into()));
-        id
+    pub fn create_raw_text(&mut self, text: impl Into<String>) -> WidgetHandle {
+        let handle = self.create(WidgetKind::RawText, "raw-text");
+        self.doc.set_text(handle.id(), Some(text.into()));
+        handle
     }
 
     /// Create an `<image>` element.
-    pub fn create_image(&mut self) -> WidgetId {
+    pub fn create_image(&mut self) -> WidgetHandle {
         self.create(WidgetKind::Image, "image")
     }
 
     /// Create a `<scroll-view>` element.
-    pub fn create_scroll_view(&mut self) -> WidgetId {
+    pub fn create_scroll_view(&mut self) -> WidgetHandle {
         self.create(WidgetKind::ScrollView, "scroll-view")
     }
 
     /// Create a `<list>` element.
-    pub fn create_list(&mut self) -> WidgetId {
+    pub fn create_list(&mut self) -> WidgetHandle {
         self.create(WidgetKind::List, "list")
     }
 
     /// Create a `<wrapper>` element.
-    pub fn create_wrapper(&mut self) -> WidgetId {
+    pub fn create_wrapper(&mut self) -> WidgetHandle {
         self.create(WidgetKind::Wrapper, "wrapper")
     }
 
     /// Create an element from an arbitrary Lynx tag name. The tag is classified
     /// via [`WidgetKind::from_tag`].
-    pub fn create_element(&mut self, tag: &str) -> WidgetId {
+    pub fn create_element(&mut self, tag: &str) -> WidgetHandle {
         let kind = WidgetKind::from_tag(tag);
         self.create(kind, tag)
     }
@@ -201,7 +338,11 @@ impl WidgetTree {
     // --- tree mutation ----------------------------------------------------
 
     /// Append `child` as the last child of `parent`.
-    pub fn append_element(&mut self, child: WidgetId, parent: WidgetId) -> Result<(), WidgetError> {
+    pub fn append_element(
+        &mut self,
+        child: &WidgetHandle,
+        parent: &WidgetHandle,
+    ) -> Result<(), WidgetError> {
         self.insert_element_before(child, parent, None)
     }
 
@@ -209,45 +350,50 @@ impl WidgetTree {
     /// when `before` is `None`.
     ///
     /// `child` is first detached from any current parent. Re-inserting within
-    /// the same parent reorders it. Validation (stale handles, cycles, the
-    /// insertion reference) happens here — PAPI handles are untrusted — and
-    /// the link itself is delegated to [`Document::insert_before`], which
-    /// carries the structural invalidation.
+    /// the same parent reorders it. Validation (foreign handles, cycles, root
+    /// protection, the insertion reference) happens here — PAPI input is
+    /// untrusted — and the link itself is delegated to
+    /// [`Document::insert_before`], which carries the structural
+    /// invalidation.
     pub fn insert_element_before(
         &mut self,
-        child: WidgetId,
-        parent: WidgetId,
-        before: Option<WidgetId>,
+        child: &WidgetHandle,
+        parent: &WidgetHandle,
+        before: Option<&WidgetHandle>,
     ) -> Result<(), WidgetError> {
-        if !self.doc.contains(child) {
-            return Err(WidgetError::StaleElement(child));
+        self.sweep_dropped();
+        let child_id = self.resolve(child)?;
+        let parent_id = self.resolve(parent)?;
+        if self.doc.root() == Some(child_id) {
+            // A reparented root would let removing its new ancestor free the
+            // root out from under the document (the DOM core enforces the
+            // same invariant by panicking; PAPI input gets a typed error).
+            return Err(WidgetError::CannotReparentRoot(child_id));
         }
-        if !self.doc.contains(parent) {
-            return Err(WidgetError::StaleElement(parent));
-        }
-        if child == parent || self.doc.is_ancestor(child, parent) {
+        if child_id == parent_id || self.doc.is_ancestor(child_id, parent_id) {
             return Err(WidgetError::WouldCycle {
-                ancestor: child,
-                descendant: parent,
+                ancestor: child_id,
+                descendant: parent_id,
             });
         }
-        if let Some(reference) = before {
-            if reference == child {
+        let before_id = before.map(|handle| self.resolve(handle)).transpose()?;
+        if let Some(reference) = before_id {
+            if reference == child_id {
                 // DOM pre-insert: the reference resolves to `child`'s next
                 // sibling, so `insertBefore(n, n)` keeps `n` exactly where it
                 // is — a structural no-op (web-core parity).
-                return if self.doc.child_position(parent, child).is_some() {
+                return if self.doc.child_position(parent_id, child_id).is_some() {
                     Ok(())
                 } else {
                     Err(WidgetError::BadInsertReference(reference))
                 };
             }
-            if self.doc.child_position(parent, reference).is_none() {
+            if self.doc.child_position(parent_id, reference).is_none() {
                 return Err(WidgetError::BadInsertReference(reference));
             }
         }
 
-        self.doc.insert_before(parent, child, before);
+        self.doc.insert_before(parent_id, child_id, before_id);
         Ok(())
     }
 
@@ -256,52 +402,28 @@ impl WidgetTree {
     /// mutable, and re-insertable: detached nodes are ordinary browser
     /// behavior and first-class here.
     ///
-    /// Removal deliberately says nothing about lifetime — structural opcodes
-    /// never free. The widgets' **owner** is the scripting engine (a JS
-    /// element wrapper holds its `WidgetId`); a detached subtree lives until
-    /// the owner proves it unreachable and disposes of it via
-    /// [`dispose_detached`](Self::dispose_detached) — the native stand-in
-    /// for what the browser GC does for web-core.
-    pub fn remove_element(&mut self, parent: WidgetId, child: WidgetId) -> Result<(), WidgetError> {
-        let Some(child_widget) = self.doc.get(child) else {
-            return Err(WidgetError::StaleElement(child));
-        };
-        if child_widget.parent_id() != Some(parent) {
-            return Err(WidgetError::NotAChild { parent, child });
+    /// Removal says nothing about lifetime — structural opcodes never free.
+    /// The detached subtree lives for as long as any [`WidgetHandle`] into it
+    /// does, and is reclaimed automatically once the last one drops (see
+    /// [`crate::handle`]).
+    pub fn remove_element(
+        &mut self,
+        parent: &WidgetHandle,
+        child: &WidgetHandle,
+    ) -> Result<(), WidgetError> {
+        self.sweep_dropped();
+        let parent_id = self.resolve(parent)?;
+        let child_id = self.resolve(child)?;
+        if self.doc.get(child_id).and_then(Node::parent_id) != Some(parent_id) {
+            return Err(WidgetError::NotAChild {
+                parent: parent_id,
+                child: child_id,
+            });
         }
 
         // `detach` unlinks and applies the structural invalidation (parent
         // subtree + parent's following siblings, for `:empty` + `+`/`~`).
-        self.doc.detach(child);
-        Ok(())
-    }
-
-    /// Free a **detached** subtree: arena slots and `unique_id` index
-    /// entries. All handles into the subtree become stale.
-    ///
-    /// This is the ownership seam, not an Element-PAPI opcode: the scripting
-    /// engine owns widgets through its element wrappers, and its GC decides
-    /// *when* a detached subtree is dead (web-core inherits exactly this
-    /// from the browser GC). The runtime layer calls this from its
-    /// finalization path once no wrapper into the subtree remains reachable.
-    /// The tree supplies the mechanism; the owner supplies the policy.
-    ///
-    /// Disposing an attached element is refused (`NotDetached`): visible
-    /// content is never collected out from under the tree — detach first
-    /// (and content that should merely stop rendering stays attached under
-    /// `content-visibility`).
-    pub fn dispose_detached(&mut self, id: WidgetId) -> Result<(), WidgetError> {
-        let Some(widget) = self.doc.get(id) else {
-            return Err(WidgetError::StaleElement(id));
-        };
-        if widget.parent_id().is_some() {
-            return Err(WidgetError::NotDetached(id));
-        }
-        // The document returns the freed widgets' states; harvest the
-        // unique_ids out of them to keep the index consistent.
-        for state in self.doc.remove_subtree(id) {
-            self.by_unique_id.remove(&state.unique_id);
-        }
+        self.doc.detach(child_id);
         Ok(())
     }
 
@@ -312,71 +434,94 @@ impl WidgetTree {
     ///
     /// Replacing a detached `old` is a no-op, matching DOM `replaceWith` on a
     /// parentless node.
-    pub fn replace_element(&mut self, new: WidgetId, old: WidgetId) -> Result<(), WidgetError> {
-        if new == old {
+    pub fn replace_element(
+        &mut self,
+        new: &WidgetHandle,
+        old: &WidgetHandle,
+    ) -> Result<(), WidgetError> {
+        self.sweep_dropped();
+        let new_id = self.resolve(new)?;
+        let old_id = self.resolve(old)?;
+        if new_id == old_id {
             return Ok(());
         }
-        let Some(old_widget) = self.doc.get(old) else {
-            return Err(WidgetError::StaleElement(old));
-        };
-        let Some(parent) = old_widget.parent_id() else {
+        let Some(parent_id) = self.doc.get(old_id).and_then(Node::parent_id) else {
             return Ok(());
         };
-        self.insert_element_before(new, parent, Some(old))?;
-        self.remove_element(parent, old)
+        if self.doc.root() == Some(new_id) {
+            return Err(WidgetError::CannotReparentRoot(new_id));
+        }
+        if new_id == parent_id || self.doc.is_ancestor(new_id, parent_id) {
+            return Err(WidgetError::WouldCycle {
+                ancestor: new_id,
+                descendant: parent_id,
+            });
+        }
+        self.doc.insert_before(parent_id, new_id, Some(old_id));
+        self.doc.detach(old_id);
+        Ok(())
     }
 
     /// The first child of `parent`, if any.
-    #[must_use]
-    pub fn first_element(&self, parent: WidgetId) -> Option<WidgetId> {
-        self.doc.get(parent)?.child_ids().first().copied()
+    pub fn first_element(
+        &self,
+        parent: &WidgetHandle,
+    ) -> Result<Option<WidgetHandle>, WidgetError> {
+        let parent_id = self.resolve(parent)?;
+        Ok(self
+            .doc
+            .get(parent_id)
+            .and_then(|node| node.child_ids().first().copied())
+            .map(|id| self.handle_for(id)))
     }
 
     /// The next sibling of `widget`, if any.
-    #[must_use]
-    pub fn next_element(&self, widget: WidgetId) -> Option<WidgetId> {
-        let parent = self.doc.get(widget)?.parent_id()?;
-        let siblings = self.doc.get(parent)?.child_ids();
-        let pos = siblings.iter().position(|&c| c == widget)?;
-        siblings.get(pos + 1).copied()
+    pub fn next_element(&self, widget: &WidgetHandle) -> Result<Option<WidgetHandle>, WidgetError> {
+        let id = self.resolve(widget)?;
+        Ok(self
+            .doc
+            .get(id)
+            .and_then(Node::next_sibling)
+            .map(|node| self.handle_for(node.id())))
     }
 
     /// The parent of `widget`, if any.
-    #[must_use]
-    pub fn get_parent(&self, widget: WidgetId) -> Option<WidgetId> {
-        self.doc.get(widget)?.parent_id()
+    pub fn get_parent(&self, widget: &WidgetHandle) -> Result<Option<WidgetHandle>, WidgetError> {
+        let id = self.resolve(widget)?;
+        Ok(self
+            .doc
+            .get(id)
+            .and_then(Node::parent_id)
+            .map(|parent| self.handle_for(parent)))
     }
 
     // --- styling / attributes ---------------------------------------------
 
-    /// Resolve a live widget for a mutation opcode, mapping staleness to the
-    /// PAPI error.
-    fn check_live(&self, id: WidgetId) -> Result<(), WidgetError> {
-        if self.doc.contains(id) {
-            Ok(())
-        } else {
-            Err(WidgetError::StaleElement(id))
-        }
-    }
-
     /// Replace an element's classes from a whitespace-separated list.
-    pub fn set_classes(&mut self, id: WidgetId, classes: &str) -> Result<(), WidgetError> {
-        self.check_live(id)?;
+    pub fn set_classes(&mut self, handle: &WidgetHandle, classes: &str) -> Result<(), WidgetError> {
+        self.sweep_dropped();
+        let id = self.resolve(handle)?;
         self.doc.set_classes(id, classes);
         Ok(())
     }
 
     /// Add a single class (no-op if already present).
-    pub fn add_class(&mut self, id: WidgetId, class: &str) -> Result<(), WidgetError> {
-        self.check_live(id)?;
+    pub fn add_class(&mut self, handle: &WidgetHandle, class: &str) -> Result<(), WidgetError> {
+        self.sweep_dropped();
+        let id = self.resolve(handle)?;
         self.doc.add_class(id, class);
         Ok(())
     }
 
     /// Replace an element's inline style, parsing the whole declaration block
     /// through stylo (Lynx's `__SetInlineStyles`). An empty string clears it.
-    pub fn set_inline_styles(&mut self, id: WidgetId, text: &str) -> Result<(), WidgetError> {
-        self.check_live(id)?;
+    pub fn set_inline_styles(
+        &mut self,
+        handle: &WidgetHandle,
+        text: &str,
+    ) -> Result<(), WidgetError> {
+        self.sweep_dropped();
+        let id = self.resolve(handle)?;
         self.doc.set_inline_style(id, text);
         Ok(())
     }
@@ -387,11 +532,12 @@ impl WidgetTree {
     /// An unparseable property/value is dropped (CSS error handling).
     pub fn add_inline_style(
         &mut self,
-        id: WidgetId,
+        handle: &WidgetHandle,
         name: &str,
         value: &str,
     ) -> Result<(), WidgetError> {
-        self.check_live(id)?;
+        self.sweep_dropped();
+        let id = self.resolve(handle)?;
         self.doc.add_inline_style(id, name, value);
         Ok(())
     }
@@ -403,30 +549,38 @@ impl WidgetTree {
     /// [`WidgetTree::set_id`] (its `__SetID`).
     pub fn set_attribute(
         &mut self,
-        id: WidgetId,
+        handle: &WidgetHandle,
         name: &str,
         value: &str,
     ) -> Result<(), WidgetError> {
-        self.check_live(id)?;
+        self.sweep_dropped();
+        let id = self.resolve(handle)?;
         self.doc.set_attribute(id, name, value);
         Ok(())
     }
 
     /// Set an element's id selector value (Lynx's `__SetID`). An empty string
     /// clears it.
-    pub fn set_id(&mut self, id: WidgetId, id_selector: &str) -> Result<(), WidgetError> {
-        self.check_live(id)?;
+    pub fn set_id(&mut self, handle: &WidgetHandle, id_selector: &str) -> Result<(), WidgetError> {
+        self.sweep_dropped();
+        let id = self.resolve(handle)?;
         self.doc
             .set_id_attr(id, (!id_selector.is_empty()).then_some(id_selector));
         Ok(())
     }
 
     /// Set the `css_id` (style scope) on a batch of elements.
-    pub fn set_css_id(&mut self, ids: &[WidgetId], css_id: i32) -> Result<(), WidgetError> {
-        if let Some(&bad) = ids.iter().find(|&&id| !self.doc.contains(id)) {
-            return Err(WidgetError::StaleElement(bad));
-        }
-        for &id in ids {
+    pub fn set_css_id(
+        &mut self,
+        handles: &[&WidgetHandle],
+        css_id: i32,
+    ) -> Result<(), WidgetError> {
+        self.sweep_dropped();
+        let ids = handles
+            .iter()
+            .map(|handle| self.resolve(handle))
+            .collect::<Result<Vec<_>, _>>()?;
+        for id in ids {
             // The css_id is reflected as the synthetic `l-css-id` attribute;
             // snapshot it before the payload mutation.
             self.doc.note_external_attribute_change(id, "l-css-id");
@@ -436,13 +590,18 @@ impl WidgetTree {
     }
 
     /// Replace an element's `data-*` dataset.
-    pub fn set_dataset<I, K, V>(&mut self, id: WidgetId, entries: I) -> Result<(), WidgetError>
+    pub fn set_dataset<I, K, V>(
+        &mut self,
+        handle: &WidgetHandle,
+        entries: I,
+    ) -> Result<(), WidgetError>
     where
         I: IntoIterator<Item = (K, V)>,
         K: Into<Box<str>>,
         V: Into<String>,
     {
-        self.check_live(id)?;
+        self.sweep_dropped();
+        let id = self.resolve(handle)?;
         // Snapshot the old values first, and name every old reflected
         // attribute while they still exist.
         self.doc.note_external_attributes_change(id);
@@ -490,8 +649,14 @@ impl WidgetTree {
     }
 
     /// Add or overwrite a single `data-*` dataset entry.
-    pub fn add_dataset(&mut self, id: WidgetId, key: &str, value: &str) -> Result<(), WidgetError> {
-        self.check_live(id)?;
+    pub fn add_dataset(
+        &mut self,
+        handle: &WidgetHandle,
+        key: &str,
+        value: &str,
+    ) -> Result<(), WidgetError> {
+        self.sweep_dropped();
+        let id = self.resolve(handle)?;
         self.doc
             .note_external_attribute_change(id, &format!("data-{key}"));
         self.doc
@@ -505,16 +670,17 @@ impl WidgetTree {
     /// invalidation.)
     pub fn add_event(
         &mut self,
-        id: WidgetId,
+        handle: &WidgetHandle,
         kind: EventKind,
         name: &str,
-        handler: &str,
+        event_handler: &str,
     ) -> Result<(), WidgetError> {
-        self.check_live(id)?;
+        self.sweep_dropped();
+        let id = self.resolve(handle)?;
         self.doc.ext_mut(id).events.push(EventReg {
             name: name.into(),
             kind,
-            handler: handler.into(),
+            handler: event_handler.into(),
         });
         Ok(())
     }
@@ -523,11 +689,12 @@ impl WidgetTree {
     /// `:focus`, as [`ElementState`] bits) on an element.
     pub fn set_pseudo_state(
         &mut self,
-        id: WidgetId,
+        handle: &WidgetHandle,
         state: ElementState,
         on: bool,
     ) -> Result<(), WidgetError> {
-        self.check_live(id)?;
+        self.sweep_dropped();
+        let id = self.resolve(handle)?;
         self.doc.set_state(id, state, on);
         Ok(())
     }
@@ -535,61 +702,81 @@ impl WidgetTree {
     // --- getters ----------------------------------------------------------
 
     /// An element's Lynx tag name.
-    #[must_use]
-    pub fn get_tag(&self, id: WidgetId) -> Option<&str> {
-        self.doc.get(id).map(Widget::tag)
+    pub fn get_tag(&self, handle: &WidgetHandle) -> Result<&str, WidgetError> {
+        let id = self.resolve(handle)?;
+        self.doc
+            .get(id)
+            .map(Widget::tag)
+            .ok_or(WidgetError::StaleElement(id))
     }
 
     /// An element's plain attribute map.
-    #[must_use]
-    pub fn get_attributes(&self, id: WidgetId) -> Option<&FxHashMap<Box<str>, String>> {
-        self.doc.get(id).map(Widget::attrs)
+    pub fn get_attributes(
+        &self,
+        handle: &WidgetHandle,
+    ) -> Result<&FxHashMap<Box<str>, String>, WidgetError> {
+        let id = self.resolve(handle)?;
+        self.doc
+            .get(id)
+            .map(Widget::attrs)
+            .ok_or(WidgetError::StaleElement(id))
     }
 
     /// An element's Lynx `unique_id`.
-    #[must_use]
-    pub fn get_element_unique_id(&self, id: WidgetId) -> Option<i32> {
-        self.doc.get(id).map(|widget| widget.ext().unique_id)
+    pub fn get_element_unique_id(&self, handle: &WidgetHandle) -> Result<i32, WidgetError> {
+        let id = self.resolve(handle)?;
+        self.doc
+            .get(id)
+            .map(|widget| widget.ext().unique_id)
+            .ok_or(WidgetError::StaleElement(id))
     }
 
     /// An element's active dynamic pseudo-classes, as [`ElementState`] bits.
-    #[must_use]
-    pub fn pseudo_state(&self, id: WidgetId) -> Option<ElementState> {
-        self.doc.get(id).map(Widget::element_state)
+    pub fn pseudo_state(&self, handle: &WidgetHandle) -> Result<ElementState, WidgetError> {
+        let id = self.resolve(handle)?;
+        self.doc
+            .get(id)
+            .map(Widget::element_state)
+            .ok_or(WidgetError::StaleElement(id))
     }
 
-    /// Resolve a Lynx `unique_id` back to its [`WidgetId`].
+    /// Resolve a Lynx `unique_id` back to its element, as the canonical
+    /// handle. `None` for never-assigned ids and for elements already
+    /// reclaimed (all handles dropped while detached).
     #[must_use]
-    pub fn element_by_unique_id(&self, unique_id: i32) -> Option<WidgetId> {
-        self.by_unique_id.get(&unique_id).copied()
+    pub fn element_by_unique_id(&self, unique_id: i32) -> Option<WidgetHandle> {
+        let id = *self.by_unique_id.get(&unique_id)?;
+        self.doc.contains(id).then(|| self.handle_for(id))
     }
 
     /// The tree's `<page>` root (the document root), if one has been created.
     #[must_use]
-    pub fn get_page_element(&self) -> Option<WidgetId> {
-        self.doc.root()
+    pub fn get_page_element(&self) -> Option<WidgetHandle> {
+        self.doc.root().map(|id| self.handle_for(id))
     }
 
-    /// Borrow an element's [`Widget`], if live.
-    #[must_use]
-    pub fn widget(&self, id: WidgetId) -> Option<&Widget> {
-        self.doc.get(id)
+    /// Borrow an element's [`Widget`].
+    pub fn widget(&self, handle: &WidgetHandle) -> Result<&Widget, WidgetError> {
+        let id = self.resolve(handle)?;
+        self.doc.get(id).ok_or(WidgetError::StaleElement(id))
     }
 
-    /// A read-only navigation handle for an element, if live (the same
-    /// `&Widget` as [`widget`](Self::widget); kept as the name PAPI-side
-    /// callers navigate through).
-    #[must_use]
-    pub fn widget_ref(&self, id: WidgetId) -> Option<WidgetRef<'_>> {
-        self.doc.get(id)
+    /// A read-only navigation reference for an element (the same `&Widget` as
+    /// [`widget`](Self::widget); kept as the name PAPI-side callers navigate
+    /// through).
+    pub fn widget_ref(&self, handle: &WidgetHandle) -> Result<WidgetRef<'_>, WidgetError> {
+        self.widget(handle)
     }
 
     /// An element's resolved computed style, if it has been styled.
     ///
     /// The style lives in stylo's per-element data; the `Arc` clone is cheap.
-    #[must_use]
-    pub fn computed(&self, id: WidgetId) -> Option<Arc<ComputedValues>> {
-        self.doc.get(id).and_then(Widget::computed_style)
+    pub fn computed(
+        &self,
+        handle: &WidgetHandle,
+    ) -> Result<Option<Arc<ComputedValues>>, WidgetError> {
+        let id = self.resolve(handle)?;
+        Ok(self.doc.get(id).and_then(Widget::computed_style))
     }
 
     /// Store an element's resolved computed style and clear its `style_dirty`
@@ -599,10 +786,11 @@ impl WidgetTree {
     /// stores styles itself.
     pub fn set_computed(
         &mut self,
-        id: WidgetId,
+        handle: &WidgetHandle,
         style: Arc<ComputedValues>,
     ) -> Result<(), WidgetError> {
-        self.check_live(id)?;
+        self.sweep_dropped();
+        let id = self.resolve(handle)?;
         self.doc.store_computed_style(id, style);
         Ok(())
     }
@@ -618,5 +806,23 @@ impl WidgetTree {
     /// Clear every element's dirty bits (called after a restyle pass).
     pub fn clear_dirty(&mut self) {
         self.doc.clear_dirty();
+    }
+
+    /// This tree's identity token (every handle it mints carries it).
+    #[must_use]
+    pub fn token(&self) -> NonZeroU64 {
+        self.doc.token()
+    }
+
+    /// Reclaim now instead of at the next operation boundary: drain the
+    /// handle-drop notifications and free every detached subtree with no
+    /// externally retained node.
+    ///
+    /// Purely a scheduling hook (the same sweep runs automatically before
+    /// every mutating opcode and every flush) — it cannot free anything a
+    /// live [`WidgetHandle`] still reaches. The runtime layer calls this at
+    /// its frame boundary after wrapper finalizers ran.
+    pub fn collect(&mut self) {
+        self.sweep_dropped();
     }
 }

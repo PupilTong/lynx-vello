@@ -10,7 +10,7 @@ use lynx_template_decoder::style_info::{
     Selector, SimpleSelector, SimpleSelectorType, StyleInfo, StyleSheet, ValueToken, token_types,
 };
 use lynx_widget::{
-    ElementState, EngineMetrics, PageConfig, Parallelism, StyleEngine, WidgetId, WidgetTree,
+    ElementState, EngineMetrics, PageConfig, Parallelism, StyleEngine, WidgetHandle, WidgetTree,
 };
 use stylo::color::AbsoluteColor;
 use stylo::values::computed::Size;
@@ -32,8 +32,11 @@ fn red() -> AbsoluteColor {
     AbsoluteColor::srgb_legacy(255, 0, 0, 1.0)
 }
 
-fn color_of(tree: &WidgetTree, id: WidgetId) -> AbsoluteColor {
-    tree.computed(id).expect("styled").clone_color()
+fn color_of(tree: &WidgetTree, handle: &WidgetHandle) -> AbsoluteColor {
+    tree.computed(handle)
+        .expect("same-tree handle")
+        .expect("styled")
+        .clone_color()
 }
 
 // --- StyleInfo construction helpers -------------------------------------
@@ -94,15 +97,15 @@ fn flush_styles_the_tree_and_inherits() {
     let page = tree.create_page();
     let view = tree.create_view();
     let inner = tree.create_view();
-    tree.append_element(view, page).unwrap();
-    tree.append_element(inner, view).unwrap();
-    tree.set_classes(view, "c").unwrap();
+    tree.append_element(&view, &page).unwrap();
+    tree.append_element(&inner, &view).unwrap();
+    tree.set_classes(&view, "c").unwrap();
 
     engine.flush_widget_tree(&mut tree);
 
-    assert_eq!(color_of(&tree, view), red());
+    assert_eq!(color_of(&tree, &view), red());
     assert_eq!(
-        color_of(&tree, inner),
+        color_of(&tree, &inner),
         red(),
         "color inherits into the child"
     );
@@ -117,11 +120,11 @@ fn ua_defaults_apply_and_follow_page_config() {
     let page = tree.create_page();
     let view = tree.create_view();
     let text = tree.create_text();
-    tree.append_element(view, page).unwrap();
-    tree.append_element(text, page).unwrap();
+    tree.append_element(&view, &page).unwrap();
+    tree.append_element(&text, &page).unwrap();
     engine.flush_widget_tree(&mut tree);
 
-    let view_style = tree.computed(view).unwrap();
+    let view_style = tree.computed(&view).unwrap().unwrap();
     assert_eq!(
         view_style.clone_display().inside(),
         DisplayInside::LynxLinear
@@ -131,7 +134,7 @@ fn ua_defaults_apply_and_follow_page_config() {
         view_style.clone_box_sizing(),
         stylo::properties::longhands::box_sizing::computed_value::T::BorderBox
     );
-    let text_style = tree.computed(text).unwrap();
+    let text_style = tree.computed(&text).unwrap().unwrap();
     assert_eq!(text_style.clone_display().inside(), DisplayInside::Flex);
 
     // defaultDisplayLinear=false + defaultOverflowVisible=true, as UA styles.
@@ -145,10 +148,10 @@ fn ua_defaults_apply_and_follow_page_config() {
     let mut tree = engine.new_widget_tree();
     let page = tree.create_page();
     let view = tree.create_view();
-    tree.append_element(view, page).unwrap();
+    tree.append_element(&view, &page).unwrap();
     engine.flush_widget_tree(&mut tree);
 
-    let view_style = tree.computed(view).unwrap();
+    let view_style = tree.computed(&view).unwrap().unwrap();
     assert_eq!(view_style.clone_display().inside(), DisplayInside::Flex);
     assert_eq!(view_style.clone_overflow_x(), Overflow::Visible);
 }
@@ -163,11 +166,11 @@ fn author_styles_override_ua_defaults() {
     let mut tree = engine.new_widget_tree();
     let page = tree.create_page();
     let view = tree.create_view();
-    tree.append_element(view, page).unwrap();
-    tree.set_classes(view, "v").unwrap();
+    tree.append_element(&view, &page).unwrap();
+    tree.set_classes(&view, "v").unwrap();
     engine.flush_widget_tree(&mut tree);
 
-    let style = tree.computed(view).unwrap();
+    let style = tree.computed(&view).unwrap().unwrap();
     assert_eq!(style.clone_overflow_x(), Overflow::Visible);
     assert_eq!(style.clone_display().inside(), DisplayInside::Flex);
 }
@@ -186,20 +189,20 @@ fn class_flip_restyles_precisely() {
     let page = tree.create_page();
     let target = tree.create_view();
     let bystander = tree.create_view();
-    tree.append_element(target, page).unwrap();
-    tree.append_element(bystander, page).unwrap();
+    tree.append_element(&target, &page).unwrap();
+    tree.append_element(&bystander, &page).unwrap();
     engine.flush_widget_tree(&mut tree);
 
-    let before_target = tree.computed(target).unwrap();
-    let before_bystander = tree.computed(bystander).unwrap();
+    let before_target = tree.computed(&target).unwrap().unwrap();
+    let before_bystander = tree.computed(&bystander).unwrap().unwrap();
     assert_ne!(before_target.clone_color(), red());
 
-    tree.set_classes(target, "hot").unwrap();
+    tree.set_classes(&target, "hot").unwrap();
     assert!(tree.has_dirty());
     engine.flush_widget_tree(&mut tree);
 
-    assert_eq!(color_of(&tree, target), red());
-    let after_bystander = tree.computed(bystander).unwrap();
+    assert_eq!(color_of(&tree, &target), red());
+    let after_bystander = tree.computed(&bystander).unwrap().unwrap();
     assert!(
         stylo::servo_arc::Arc::ptr_eq(&before_bystander, &after_bystander),
         "an unrelated sibling must keep its computed style identity"
@@ -215,15 +218,15 @@ fn inline_style_update_applies_on_flush() {
     let mut tree = engine.new_widget_tree();
     let page = tree.create_page();
     let view = tree.create_view();
-    tree.append_element(view, page).unwrap();
-    tree.set_classes(view, "c").unwrap();
+    tree.append_element(&view, &page).unwrap();
+    tree.set_classes(&view, "c").unwrap();
     engine.flush_widget_tree(&mut tree);
-    assert_eq!(color_of(&tree, view), red());
+    assert_eq!(color_of(&tree, &view), red());
 
-    tree.add_inline_style(view, "color", "blue").unwrap();
+    tree.add_inline_style(&view, "color", "blue").unwrap();
     engine.flush_widget_tree(&mut tree);
     assert_eq!(
-        color_of(&tree, view),
+        color_of(&tree, &view),
         AbsoluteColor::srgb_legacy(0, 0, 255, 1.0),
         "inline declaration replaces the class rule's color"
     );
@@ -240,20 +243,20 @@ fn pseudo_state_change_restyles_via_snapshot() {
     let mut tree = engine.new_widget_tree();
     let page = tree.create_page();
     let btn = tree.create_view();
-    tree.append_element(btn, page).unwrap();
-    tree.set_classes(btn, "btn").unwrap();
+    tree.append_element(&btn, &page).unwrap();
+    tree.set_classes(&btn, "btn").unwrap();
     engine.flush_widget_tree(&mut tree);
-    assert_ne!(color_of(&tree, btn), red());
+    assert_ne!(color_of(&tree, &btn), red());
 
-    tree.set_pseudo_state(btn, ElementState::ACTIVE, true)
+    tree.set_pseudo_state(&btn, ElementState::ACTIVE, true)
         .unwrap();
     engine.flush_widget_tree(&mut tree);
-    assert_eq!(color_of(&tree, btn), red());
+    assert_eq!(color_of(&tree, &btn), red());
 
-    tree.set_pseudo_state(btn, ElementState::ACTIVE, false)
+    tree.set_pseudo_state(&btn, ElementState::ACTIVE, false)
         .unwrap();
     engine.flush_widget_tree(&mut tree);
-    assert_ne!(color_of(&tree, btn), red());
+    assert_ne!(color_of(&tree, &btn), red());
 }
 
 #[test]
@@ -272,23 +275,23 @@ fn empty_flip_restyles_later_sibling() {
     let list = tree.create_view();
     let hint = tree.create_view();
     let child = tree.create_view();
-    tree.append_element(list, page).unwrap();
-    tree.append_element(hint, page).unwrap();
-    tree.set_classes(list, "list").unwrap();
-    tree.set_classes(hint, "hint").unwrap();
-    tree.append_element(child, list).unwrap();
+    tree.append_element(&list, &page).unwrap();
+    tree.append_element(&hint, &page).unwrap();
+    tree.set_classes(&list, "list").unwrap();
+    tree.set_classes(&hint, "hint").unwrap();
+    tree.append_element(&child, &list).unwrap();
     engine.flush_widget_tree(&mut tree);
-    assert_ne!(color_of(&tree, hint), red());
+    assert_ne!(color_of(&tree, &hint), red());
 
-    tree.remove_element(list, child).unwrap();
+    tree.remove_element(&list, &child).unwrap();
     engine.flush_widget_tree(&mut tree);
-    assert_eq!(color_of(&tree, hint), red());
+    assert_eq!(color_of(&tree, &hint), red());
 
     // The removed child stayed alive (DOM removeChild); re-inserting the
     // detached node un-empties the list and drops the rule again.
-    tree.append_element(child, list).unwrap();
+    tree.append_element(&child, &list).unwrap();
     engine.flush_widget_tree(&mut tree);
-    assert_ne!(color_of(&tree, hint), red());
+    assert_ne!(color_of(&tree, &hint), red());
 }
 
 // --- StyleInfo ingestion ---------------------------------------------------
@@ -313,20 +316,20 @@ fn scoped_rules_match_only_their_css_id() {
     let page = tree.create_page();
     let scoped = tree.create_view();
     let unscoped = tree.create_view();
-    tree.append_element(scoped, page).unwrap();
-    tree.append_element(unscoped, page).unwrap();
-    tree.set_classes(scoped, "card").unwrap();
-    tree.set_classes(unscoped, "card").unwrap();
-    tree.set_css_id(&[scoped], 2).unwrap();
+    tree.append_element(&scoped, &page).unwrap();
+    tree.append_element(&unscoped, &page).unwrap();
+    tree.set_classes(&scoped, "card").unwrap();
+    tree.set_classes(&unscoped, "card").unwrap();
+    tree.set_css_id(&[&scoped], 2).unwrap();
     engine.flush_widget_tree(&mut tree);
 
     assert_eq!(
-        color_of(&tree, scoped),
+        color_of(&tree, &scoped),
         red(),
         ":where([l-css-id=\"2\"])-guarded rule matches the scoped widget"
     );
     assert_ne!(
-        color_of(&tree, unscoped),
+        color_of(&tree, &unscoped),
         red(),
         "widgets outside the css-id scope must not match"
     );
@@ -352,15 +355,15 @@ fn css_id_zero_rules_are_global() {
     let page = tree.create_page();
     let plain = tree.create_view();
     let with_scope = tree.create_view();
-    tree.append_element(plain, page).unwrap();
-    tree.append_element(with_scope, page).unwrap();
-    tree.set_classes(plain, "any").unwrap();
-    tree.set_classes(with_scope, "any").unwrap();
-    tree.set_css_id(&[with_scope], 7).unwrap();
+    tree.append_element(&plain, &page).unwrap();
+    tree.append_element(&with_scope, &page).unwrap();
+    tree.set_classes(&plain, "any").unwrap();
+    tree.set_classes(&with_scope, "any").unwrap();
+    tree.set_css_id(&[&with_scope], 7).unwrap();
     engine.flush_widget_tree(&mut tree);
 
-    assert_eq!(color_of(&tree, plain), red());
-    assert_eq!(color_of(&tree, with_scope), red());
+    assert_eq!(color_of(&tree, &plain), red());
+    assert_eq!(color_of(&tree, &with_scope), red());
 }
 
 #[test]
@@ -395,18 +398,22 @@ fn imports_flatten_to_every_importer_scope() {
     let importer = tree.create_view();
     let owner = tree.create_view();
     let outsider = tree.create_view();
-    for id in [importer, owner, outsider] {
-        tree.append_element(id, page).unwrap();
+    for id in [&importer, &owner, &outsider] {
+        tree.append_element(id, &page).unwrap();
         tree.set_classes(id, "imported").unwrap();
     }
-    tree.set_css_id(&[importer], 1).unwrap();
-    tree.set_css_id(&[owner], 2).unwrap();
-    tree.set_css_id(&[outsider], 3).unwrap();
+    tree.set_css_id(&[&importer], 1).unwrap();
+    tree.set_css_id(&[&owner], 2).unwrap();
+    tree.set_css_id(&[&outsider], 3).unwrap();
     engine.flush_widget_tree(&mut tree);
 
-    assert_eq!(color_of(&tree, importer), red(), "importer scope applies");
-    assert_eq!(color_of(&tree, owner), red(), "owning scope applies");
-    assert_ne!(color_of(&tree, outsider), red(), "unrelated scope must not");
+    assert_eq!(color_of(&tree, &importer), red(), "importer scope applies");
+    assert_eq!(color_of(&tree, &owner), red(), "owning scope applies");
+    assert_ne!(
+        color_of(&tree, &outsider),
+        red(),
+        "unrelated scope must not"
+    );
 }
 
 #[test]
@@ -469,7 +476,7 @@ fn keyframes_and_font_face_are_registered() {
     assert!(
         engine
             .core()
-            .has_keyframes_animation("spin", tree.widget_ref(page).unwrap()),
+            .has_keyframes_animation("spin", tree.widget_ref(&page).unwrap()),
         "@keyframes spin must be registered with the stylist"
     );
 }
@@ -489,12 +496,12 @@ fn fixture_bundle_styles_end_to_end() {
     let mut tree = engine.new_widget_tree();
     let page = tree.create_page();
     let card = tree.create_view();
-    tree.append_element(card, page).unwrap();
-    tree.set_classes(card, "basic").unwrap();
+    tree.append_element(&card, &page).unwrap();
+    tree.set_classes(&card, "basic").unwrap();
     engine.flush_widget_tree(&mut tree);
 
     // `.basic { background-color: pink; height: 100px; width: 100px }`
-    let style = tree.computed(card).unwrap();
+    let style = tree.computed(&card).unwrap().unwrap();
     assert_eq!(width_px(style.clone_width()), 100.0);
     assert_eq!(width_px(style.clone_height()), 100.0);
 }
@@ -509,13 +516,13 @@ fn parallel_flush_matches_sequential() {
         let mut leaves = Vec::new();
         for section in 0..16 {
             let container = tree.create_view();
-            tree.append_element(container, page).unwrap();
-            tree.set_classes(container, "outer").unwrap();
+            tree.append_element(&container, &page).unwrap();
+            tree.set_classes(&container, "outer").unwrap();
             for item in 0..16 {
                 let leaf = tree.create_view();
-                tree.append_element(leaf, container).unwrap();
+                tree.append_element(&leaf, &container).unwrap();
                 tree.set_classes(
-                    leaf,
+                    &leaf,
                     if (section + item) % 2 == 0 {
                         "even"
                     } else {
@@ -531,7 +538,7 @@ fn parallel_flush_matches_sequential() {
         leaves
             .into_iter()
             .map(|leaf| {
-                let style = tree.computed(leaf).unwrap();
+                let style = tree.computed(&leaf).unwrap().unwrap();
                 (width_px(style.clone_width()), style.clone_color())
             })
             .collect()
@@ -565,45 +572,48 @@ fn edge_child_restyle_on_append_and_prepend() {
     let page = tree.create_page();
     let a = tree.create_view();
     let b = tree.create_view();
-    for id in [a, b] {
-        tree.append_element(id, page).unwrap();
+    for id in [&a, &b] {
+        tree.append_element(id, &page).unwrap();
         tree.set_classes(id, "item").unwrap();
     }
     engine.flush_widget_tree(&mut tree);
-    assert_eq!(color_of(&tree, b), red(), "b is :last-child");
+    assert_eq!(color_of(&tree, &b), red(), "b is :last-child");
     assert_eq!(
-        width_px(tree.computed(a).unwrap().clone_width()),
+        width_px(tree.computed(&a).unwrap().unwrap().clone_width()),
         42.0,
         "a is :first-child"
     );
 
     // Append: b stops being :last-child.
     let c = tree.create_view();
-    tree.append_element(c, page).unwrap();
-    tree.set_classes(c, "item").unwrap();
+    tree.append_element(&c, &page).unwrap();
+    tree.set_classes(&c, "item").unwrap();
     engine.flush_widget_tree(&mut tree);
     assert_ne!(
-        color_of(&tree, b),
+        color_of(&tree, &b),
         red(),
         "displaced old :last-child must be restyled on append"
     );
     assert_eq!(
-        color_of(&tree, c),
+        color_of(&tree, &c),
         red(),
         "new last child gains the styling"
     );
 
     // Prepend: a stops being :first-child.
     let front = tree.create_view();
-    tree.insert_element_before(front, page, Some(a)).unwrap();
-    tree.set_classes(front, "item").unwrap();
+    tree.insert_element_before(&front, &page, Some(&a)).unwrap();
+    tree.set_classes(&front, "item").unwrap();
     engine.flush_widget_tree(&mut tree);
     assert!(
-        matches!(tree.computed(a).unwrap().clone_width(), Size::Auto),
+        matches!(
+            tree.computed(&a).unwrap().unwrap().clone_width(),
+            Size::Auto
+        ),
         "displaced old :first-child must be restyled back to width:auto on prepend"
     );
     assert_eq!(
-        width_px(tree.computed(front).unwrap().clone_width()),
+        width_px(tree.computed(&front).unwrap().unwrap().clone_width()),
         42.0,
         "new first child gains the styling"
     );
@@ -620,17 +630,20 @@ fn viewport_change_restyles_flushed_tree() {
     let mut tree = engine.new_widget_tree();
     let page = tree.create_page();
     let view = tree.create_view();
-    tree.append_element(view, page).unwrap();
-    tree.set_classes(view, "box").unwrap();
+    tree.append_element(&view, &page).unwrap();
+    tree.set_classes(&view, "box").unwrap();
     engine.flush_widget_tree(&mut tree);
-    assert_eq!(width_px(tree.computed(view).unwrap().clone_width()), 100.0);
+    assert_eq!(
+        width_px(tree.computed(&view).unwrap().unwrap().clone_width()),
+        100.0
+    );
 
     // 1rpx = viewport_width / 750: doubling the width doubles rpx lengths.
     engine.set_viewport(1500.0, 1334.0);
     engine.restyle_after_device_change(&mut tree);
     engine.flush_widget_tree(&mut tree);
     assert_eq!(
-        width_px(tree.computed(view).unwrap().clone_width()),
+        width_px(tree.computed(&view).unwrap().unwrap().clone_width()),
         200.0,
         "rpx lengths must re-resolve against the new viewport"
     );
@@ -670,21 +683,21 @@ fn self_importing_fragment_is_dropped() {
     let page = tree.create_page();
     let cyclic = tree.create_view();
     let leaf = tree.create_view();
-    tree.append_element(cyclic, page).unwrap();
-    tree.append_element(leaf, page).unwrap();
-    tree.set_classes(cyclic, "cyclic").unwrap();
-    tree.set_classes(leaf, "leaf").unwrap();
-    tree.set_css_id(&[cyclic], 5).unwrap();
-    tree.set_css_id(&[leaf], 6).unwrap();
+    tree.append_element(&cyclic, &page).unwrap();
+    tree.append_element(&leaf, &page).unwrap();
+    tree.set_classes(&cyclic, "cyclic").unwrap();
+    tree.set_classes(&leaf, "leaf").unwrap();
+    tree.set_css_id(&[&cyclic], 5).unwrap();
+    tree.set_css_id(&[&leaf], 6).unwrap();
     engine.flush_widget_tree(&mut tree);
 
     assert_ne!(
-        color_of(&tree, cyclic),
+        color_of(&tree, &cyclic),
         red(),
         "self-importing fragment's rules must be dropped"
     );
     assert_ne!(
-        color_of(&tree, leaf),
+        color_of(&tree, &leaf),
         red(),
         "fragment 6 is only reachable through the cycle and drops with it"
     );

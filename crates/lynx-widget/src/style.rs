@@ -112,6 +112,9 @@ impl StyleEngine {
     /// [`flush_widget_tree`](Self::flush_widget_tree) with explicit traversal
     /// scheduling (benchmarks pin [`Parallelism::Sequential`]).
     pub fn flush_widget_tree_with(&self, tree: &mut WidgetTree, parallelism: Parallelism) {
+        // Reclaim handle-dropped detached subtrees before styling: the flush
+        // is the reliable once-per-frame boundary.
+        tree.sweep_dropped();
         self.core
             .flush_document_with(tree.document_mut(), parallelism);
     }
@@ -185,7 +188,7 @@ impl StyleEngine {
     /// units (`rpx`/`vw`/`vh`) re-resolve and media-dependent rules re-match
     /// on the tree's next flush. A no-op without a page root.
     pub fn restyle_after_device_change(&self, tree: &mut WidgetTree) {
-        if let Some(page) = tree.get_page_element() {
+        if let Some(page) = tree.document().root() {
             tree.document_mut().mark_subtree_dirty(page);
         }
     }

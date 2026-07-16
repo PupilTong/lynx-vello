@@ -106,3 +106,38 @@ fn media_queries_follow_standard_viewport_updates() {
     let narrow = engine.resolve(doc.get(element).unwrap(), None);
     assert_ne!(narrow.clone_color(), wide.clone_color());
 }
+
+#[test]
+#[should_panic(expected = "not paired with this StyleEngine")]
+fn flushing_a_foreign_document_crashes_at_the_boundary() {
+    let engine_a = StyleEngine::new(device(800.0, 600.0));
+    let engine_b = StyleEngine::new(device(800.0, 600.0));
+    let mut doc: Document<()> = engine_a.new_document();
+    let root = doc.create_node("page", ());
+    doc.set_root(root);
+    // Without the boundary check this dies deep inside stylo
+    // ("Locked::read_with called with a guard from an unrelated
+    // SharedRwLock") — or silently cascades against the wrong stylist when
+    // no inline styles exist.
+    engine_b.flush_document(&mut doc);
+}
+
+#[test]
+#[should_panic(expected = "not paired with this StyleEngine")]
+fn resolving_through_a_foreign_engine_crashes() {
+    let engine_a = StyleEngine::new(device(800.0, 600.0));
+    let engine_b = StyleEngine::new(device(800.0, 600.0));
+    let mut doc: Document<()> = engine_a.new_document();
+    let el = doc.create_node("view", ());
+    let _ = engine_b.resolve(doc.get(el).unwrap(), None);
+}
+
+#[test]
+#[should_panic(expected = "not paired with this StyleEngine")]
+fn standalone_documents_cannot_be_flushed() {
+    let engine = StyleEngine::new(device(800.0, 600.0));
+    let mut doc: Document<()> = Document::new();
+    let root = doc.create_node("page", ());
+    doc.set_root(root);
+    engine.flush_document(&mut doc);
+}

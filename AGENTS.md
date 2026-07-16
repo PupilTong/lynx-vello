@@ -153,9 +153,13 @@ useful signal for currently-compatible versions of those libraries.
   must not contain Lynx widget vocabulary or Lynx device/unit policy.
 - `crates/lynx-widget` — Lynx Element-PAPI and style adapter over `w3c-dom`.
   Owns `WidgetState` / `WidgetTree` (a validation layer over the document:
-  untrusted PAPI handles become `WidgetError`s before they reach the
-  crash-on-misuse DOM core), Lynx view metrics, touch-first device policy,
-  and the viewport-relative `rpx` integration. Standard CSS parsing,
+  untrusted PAPI input becomes `WidgetError`s before it reaches the
+  crash-on-misuse DOM core) and the `WidgetHandle` ownership layer — the
+  PAPI traffics exclusively in canonical, tree-identified handles; a live
+  handle retains its node, and detached subtrees are reclaimed automatically
+  once their last handle drops (the native stand-in for the browser GC; no
+  public disposal API). Also owns Lynx view metrics, touch-first device
+  policy, and the viewport-relative `rpx` integration. Standard CSS parsing,
   matching, cascade, and lock ownership remain in `w3c-dom`.
 - `crates/neutron-star` — the standalone-publishable Flexbox, Grid, and
   Starlight Relative and Linear engine: trait-based host⇄engine integration

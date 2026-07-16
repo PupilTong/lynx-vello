@@ -58,6 +58,186 @@ use stylo_atoms::Atom;
 
 use crate::document::{Core, CorePtr, NodeId};
 
+/// Debug-only instrumentation for the `stylo_data` slot (finding: a bare
+/// `UnsafeCell` makes contract violations undefined behavior instead of a
+/// loud failure). The inner `ElementData` borrows are already checked by
+/// stylo's `ElementDataWrapper` (debug borrow tracking); this guard covers
+/// the layer that wrapper cannot see — the **`Option` slot itself**
+/// (`ensure_data`/`clear_data` writing the slot while another worker reads
+/// its discriminant), plus traversal-phase discipline and unwind poisoning.
+/// Release builds compile all of it away.
+#[cfg(debug_assertions)]
+pub(crate) mod slot_guard {
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+
+    /// A process-unique token for the current thread
+    /// (`ThreadId::as_u64` is unstable; this is its moral equivalent).
+    fn current_thread_token() -> u64 {
+        use std::cell::Cell;
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        thread_local! {
+            static TOKEN: Cell<u64> = const { Cell::new(0) };
+        }
+        TOKEN.with(|token| {
+            if token.get() == 0 {
+                token.set(NEXT.fetch_add(1, Ordering::Relaxed));
+            }
+            token.get()
+        })
+    }
+
+    const FREE: u32 = 0;
+    const WRITER: u32 = u32::MAX;
+
+    /// Per-node access guard for the `stylo_data` slot: `FREE`, a reader
+    /// count, or `WRITER`; the owning thread of a writer; and a poison flag
+    /// set when a panic unwinds through an active access.
+    pub(crate) struct SlotGuard {
+        state: AtomicU32,
+        owner: AtomicU64,
+        poisoned: AtomicBool,
+    }
+
+    impl SlotGuard {
+        pub(crate) const fn new() -> Self {
+            Self {
+                state: AtomicU32::new(FREE),
+                owner: AtomicU64::new(0),
+                poisoned: AtomicBool::new(false),
+            }
+        }
+
+        fn check_poison(&self) {
+            assert!(
+                !self.poisoned.load(Ordering::Acquire),
+                "stylo_data slot poisoned: a panic unwound through an earlier access; the tree's style state is unspecified — discard or rebuild it (see the flush docs)"
+            );
+        }
+
+        /// Begin an exclusive (slot-mutating) access.
+        pub(crate) fn begin_write(&self) -> WriteToken<'_> {
+            self.check_poison();
+            let prev = self.state.swap(WRITER, Ordering::AcqRel);
+            if prev != FREE {
+                self.poisoned.store(true, Ordering::Release);
+                panic!(
+                    "stylo_data slot written while {} — stylo's traversal ownership contract (one worker per element) was violated (writer thread {})",
+                    if prev == WRITER {
+                        "another worker holds it for writing".to_owned()
+                    } else {
+                        format!("{prev} reader(s) hold it")
+                    },
+                    self.owner.load(Ordering::Relaxed),
+                );
+            }
+            self.owner.store(current_thread_token(), Ordering::Relaxed);
+            WriteToken { guard: self }
+        }
+
+        /// Begin a shared (discriminant/`as_ref`) access.
+        pub(crate) fn begin_read(&self) -> ReadToken<'_> {
+            self.check_poison();
+            let prev = self.state.fetch_add(1, Ordering::AcqRel);
+            if prev >= WRITER - 1 {
+                self.poisoned.store(true, Ordering::Release);
+                panic!(
+                    "stylo_data slot read while a writer (thread {}) holds it — stylo's traversal ownership contract was violated",
+                    self.owner.load(Ordering::Relaxed),
+                );
+            }
+            ReadToken { guard: self }
+        }
+    }
+
+    pub(crate) struct WriteToken<'a> {
+        guard: &'a SlotGuard,
+    }
+
+    impl Drop for WriteToken<'_> {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                self.guard.poisoned.store(true, Ordering::Release);
+            }
+            self.guard.owner.store(0, Ordering::Relaxed);
+            self.guard.state.store(FREE, Ordering::Release);
+        }
+    }
+
+    pub(crate) struct ReadToken<'a> {
+        guard: &'a SlotGuard,
+    }
+
+    impl Drop for ReadToken<'_> {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                self.guard.poisoned.store(true, Ordering::Release);
+            }
+            self.guard.state.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn concurrent_writers_panic_and_poison() {
+            let guard = SlotGuard::new();
+            let _held = guard.begin_write();
+            let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _t = guard.begin_write();
+            }));
+            assert!(second.is_err(), "second writer must panic");
+            // The violation poisons the guard for every later access.
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _t = guard.begin_read();
+                }))
+                .is_err(),
+                "post-violation access must report poisoning"
+            );
+        }
+
+        #[test]
+        fn reader_during_writer_panics() {
+            let guard = SlotGuard::new();
+            let _held = guard.begin_write();
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _t = guard.begin_read();
+                }))
+                .is_err()
+            );
+        }
+
+        #[test]
+        fn readers_share_and_release() {
+            let guard = SlotGuard::new();
+            {
+                let _a = guard.begin_read();
+                let _b = guard.begin_read();
+            }
+            let _w = guard.begin_write();
+        }
+
+        #[test]
+        fn unwind_through_access_poisons() {
+            let guard = SlotGuard::new();
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _t = guard.begin_read();
+                panic!("mid-access unwind");
+            }));
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _t = guard.begin_read();
+                }))
+                .is_err(),
+                "an unwound access must poison the slot"
+            );
+        }
+    }
+}
+
 /// Bit set in [`Node::snapshot_flags`] when a pre-mutation snapshot has been
 /// recorded for this node in the document's
 /// [`SnapshotMap`](stylo::selector_parser::SnapshotMap).
@@ -134,6 +314,11 @@ pub struct Node<T> {
     /// when one appears.
     pub(crate) children_to_process: AtomicIsize,
 
+    /// Debug-only access guard for the `stylo_data` slot (see
+    /// [`slot_guard`]).
+    #[cfg(debug_assertions)]
+    pub(crate) slot_guard: slot_guard::SlotGuard,
+
     /// Literal character-data content, for text leaves.
     pub(crate) text: Option<String>,
 
@@ -163,6 +348,8 @@ impl<T> Node<T> {
             dirty_descendants: AtomicBool::new(false),
             snapshot_flags: AtomicU8::new(0),
             children_to_process: AtomicIsize::new(0),
+            #[cfg(debug_assertions)]
+            slot_guard: slot_guard::SlotGuard::new(),
             text: None,
             ext,
         }

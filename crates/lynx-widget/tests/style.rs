@@ -28,10 +28,10 @@ fn class_rule_sets_color() {
     let mut doc = engine.new_widget_tree();
     let page = doc.create_page();
     let view = doc.create_view();
-    doc.append_element(view, page).unwrap();
-    doc.set_classes(view, "c").unwrap();
+    doc.append_element(&view, &page).unwrap();
+    doc.set_classes(&view, "c").unwrap();
 
-    let computed = engine.resolve_widget(doc.widget_ref(view).unwrap(), None);
+    let computed = engine.resolve_widget(doc.widget_ref(&view).unwrap(), None);
     assert_eq!(
         computed.clone_color(),
         AbsoluteColor::srgb_legacy(255, 0, 0, 1.0)
@@ -46,10 +46,10 @@ fn rpx_resolves_against_viewport_width() {
     let mut doc = engine.new_widget_tree();
     let page = doc.create_page();
     let view = doc.create_view();
-    doc.append_element(view, page).unwrap();
-    doc.set_classes(view, "box").unwrap();
+    doc.append_element(&view, &page).unwrap();
+    doc.set_classes(&view, "box").unwrap();
 
-    let computed = engine.resolve_widget(doc.widget_ref(view).unwrap(), None);
+    let computed = engine.resolve_widget(doc.widget_ref(&view).unwrap(), None);
     assert_eq!(width_px(computed.clone_width()), 100.0);
 }
 
@@ -64,14 +64,14 @@ fn rpx_follows_viewport_change() {
     let mut doc = engine.new_widget_tree();
     let page = doc.create_page();
     let view = doc.create_view();
-    doc.append_element(view, page).unwrap();
-    doc.set_classes(view, "box").unwrap();
+    doc.append_element(&view, &page).unwrap();
+    doc.set_classes(&view, "box").unwrap();
 
-    let computed = engine.resolve_widget(doc.widget_ref(view).unwrap(), None);
+    let computed = engine.resolve_widget(doc.widget_ref(&view).unwrap(), None);
     assert_eq!(width_px(computed.clone_width()), 200.0);
 
     engine.set_viewport(750.0, 1334.0);
-    let computed = engine.resolve_widget(doc.widget_ref(view).unwrap(), None);
+    let computed = engine.resolve_widget(doc.widget_ref(&view).unwrap(), None);
     assert_eq!(width_px(computed.clone_width()), 100.0);
 }
 
@@ -83,11 +83,11 @@ fn inline_style_beats_class_rule() {
     let mut doc = engine.new_widget_tree();
     let page = doc.create_page();
     let view = doc.create_view();
-    doc.append_element(view, page).unwrap();
-    doc.set_classes(view, "c").unwrap();
-    doc.set_inline_styles(view, "color: blue").unwrap();
+    doc.append_element(&view, &page).unwrap();
+    doc.set_classes(&view, "c").unwrap();
+    doc.set_inline_styles(&view, "color: blue").unwrap();
 
-    let computed = engine.resolve_widget(doc.widget_ref(view).unwrap(), None);
+    let computed = engine.resolve_widget(doc.widget_ref(&view).unwrap(), None);
     assert_eq!(
         computed.clone_color(),
         AbsoluteColor::srgb_legacy(0, 0, 255, 1.0),
@@ -103,10 +103,10 @@ fn display_linear_computes_to_lynx_linear() {
     let mut doc = engine.new_widget_tree();
     let page = doc.create_page();
     let view = doc.create_view();
-    doc.append_element(view, page).unwrap();
-    doc.set_classes(view, "row").unwrap();
+    doc.append_element(&view, &page).unwrap();
+    doc.set_classes(&view, "row").unwrap();
 
-    let computed = engine.resolve_widget(doc.widget_ref(view).unwrap(), None);
+    let computed = engine.resolve_widget(doc.widget_ref(&view).unwrap(), None);
     assert_eq!(computed.clone_display().inside(), DisplayInside::LynxLinear);
 }
 
@@ -118,10 +118,10 @@ fn linear_weight_longhand_computes() {
     let mut doc = engine.new_widget_tree();
     let page = doc.create_page();
     let view = doc.create_view();
-    doc.append_element(view, page).unwrap();
-    doc.set_classes(view, "item").unwrap();
+    doc.append_element(&view, &page).unwrap();
+    doc.set_classes(&view, "item").unwrap();
 
-    let computed = engine.resolve_widget(doc.widget_ref(view).unwrap(), None);
+    let computed = engine.resolve_widget(doc.widget_ref(&view).unwrap(), None);
     assert_eq!(computed.clone_linear_weight().0, 2.0);
 }
 
@@ -133,16 +133,16 @@ fn color_inherits_into_child() {
     let mut doc = engine.new_widget_tree();
     let page = doc.create_page();
     let parent = doc.create_view();
-    doc.append_element(parent, page).unwrap();
-    doc.set_classes(parent, "parent").unwrap();
+    doc.append_element(&parent, &page).unwrap();
+    doc.set_classes(&parent, "parent").unwrap();
     let child = doc.create_text();
-    doc.append_element(child, parent).unwrap();
+    doc.append_element(&child, &parent).unwrap();
 
-    let parent_style = engine.resolve_widget(doc.widget_ref(parent).unwrap(), None);
+    let parent_style = engine.resolve_widget(doc.widget_ref(&parent).unwrap(), None);
     let green = AbsoluteColor::srgb_legacy(0, 128, 0, 1.0);
     assert_eq!(parent_style.clone_color(), green);
 
-    let child_style = engine.resolve_widget(doc.widget_ref(child).unwrap(), Some(&parent_style));
+    let child_style = engine.resolve_widget(doc.widget_ref(&child).unwrap(), Some(&parent_style));
     assert_eq!(child_style.clone_color(), green);
 }
 
@@ -154,14 +154,14 @@ fn writeback_stores_computed_and_clears_dirty() {
     let mut doc = engine.new_widget_tree();
     let page = doc.create_page();
     let view = doc.create_view();
-    doc.append_element(view, page).unwrap();
-    doc.set_classes(view, "c").unwrap();
+    doc.append_element(&view, &page).unwrap();
+    doc.set_classes(&view, "c").unwrap();
 
-    let computed = engine.resolve_widget(doc.widget_ref(view).unwrap(), None);
-    doc.set_computed(view, computed).unwrap();
+    let computed = engine.resolve_widget(doc.widget_ref(&view).unwrap(), None);
+    doc.set_computed(&view, computed).unwrap();
 
-    assert!(doc.computed(view).is_some());
-    assert!(!doc.widget(view).unwrap().is_style_dirty());
+    assert!(doc.computed(&view).unwrap().is_some());
+    assert!(!doc.widget(&view).unwrap().is_style_dirty());
 }
 
 #[test]

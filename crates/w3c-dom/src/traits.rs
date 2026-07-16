@@ -339,6 +339,16 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
     }
 
     unsafe fn ensure_data(&self) -> ElementDataMut<'_> {
+        // Debug contract check: slot-exclusive access, traversal phase only.
+        // (The returned borrow is separately tracked by `ElementDataWrapper`.)
+        #[cfg(debug_assertions)]
+        let _access = {
+            debug_assert!(
+                self.tree().in_flush(),
+                "TElement::ensure_data called outside a style traversal"
+            );
+            self.slot_guard.begin_write()
+        };
         // SAFETY: traversal discipline — the caller holds exclusive access to
         // this node, so creating/borrowing its `ElementData` cannot race.
         let slot = unsafe { &mut *self.stylo_data.get() };
@@ -347,6 +357,14 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
     }
 
     unsafe fn clear_data(&self) {
+        #[cfg(debug_assertions)]
+        let _access = {
+            debug_assert!(
+                self.tree().in_flush(),
+                "TElement::clear_data called outside a style traversal"
+            );
+            self.slot_guard.begin_write()
+        };
         // SAFETY: traversal discipline — exclusive access to this node, no
         // concurrent borrow of its stylo state.
         unsafe {
@@ -356,6 +374,8 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
     }
 
     fn has_data(&self) -> bool {
+        #[cfg(debug_assertions)]
+        let _access = self.slot_guard.begin_read();
         // SAFETY: reads only the `Option` discriminant; the slot is only
         // created/removed by this node's owning worker (or under
         // `&mut Document`), never concurrently with this read.
@@ -363,6 +383,8 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
     }
 
     fn borrow_data(&self) -> Option<ElementDataRef<'_>> {
+        #[cfg(debug_assertions)]
+        let _access = self.slot_guard.begin_read();
         // SAFETY: `ElementDataWrapper` tracks borrows internally (debug
         // builds); the traversal discipline rules out a concurrent mutable
         // borrow.
@@ -374,6 +396,10 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
     }
 
     fn mutate_data(&self) -> Option<ElementDataMut<'_>> {
+        // Slot-wise this is a *read* (`as_ref`); the mutable borrow of the
+        // inner data is tracked by `ElementDataWrapper` itself.
+        #[cfg(debug_assertions)]
+        let _access = self.slot_guard.begin_read();
         // SAFETY: as `borrow_data`, plus exclusive access under the traversal
         // discipline.
         unsafe {

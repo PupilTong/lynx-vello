@@ -23,7 +23,6 @@
 //! dataset, and event bindings — and names the result Widget-first:
 //!
 //! - [`Widget`] = `w3c_dom::Node<WidgetState>`
-//! - [`WidgetId`] = `w3c_dom::NodeId`
 //! - [`WidgetRef`] = `&w3c_dom::Node<WidgetState>` (a plain reference — the stylo traits live on
 //!   it)
 //!
@@ -34,10 +33,12 @@
 //! # Layout
 //!
 //! - [`papi`] — the [`WidgetTree`] type and its Element-PAPI-shaped methods, plus [`WidgetError`].
+//! - [`handle`] — [`WidgetHandle`], the canonical handle registry types.
 //! - [`kind`] — the Lynx tag-name ↔ [`WidgetKind`] mapping.
 //! - [`state`] — [`WidgetState`] (the `ExternalState` payload) and the event-registration types.
 //! - [`style`] — the Lynx metrics/device adapter around the generic style engine.
 
+pub mod handle;
 pub mod kind;
 pub mod papi;
 pub mod state;
@@ -46,6 +47,7 @@ pub mod ua;
 
 mod ingest;
 
+pub use handle::WidgetHandle;
 pub use kind::WidgetKind;
 pub use papi::{WidgetError, WidgetTree};
 pub use state::{EventKind, EventReg, WidgetState};
@@ -58,9 +60,6 @@ pub use w3c_dom::{
 /// A Lynx widget: the generic W3C-DOM-subset node carrying the Lynx-specific
 /// [`WidgetState`] payload in its `ext` field.
 pub type Widget = w3c_dom::Node<WidgetState>;
-
-/// A stable, generation-checked handle to a [`Widget`] in a [`WidgetTree`].
-pub type WidgetId = w3c_dom::NodeId;
 
 /// A read-only navigation handle over a [`Widget`]: a plain shared
 /// reference (the type stylo's element traits are implemented on).
