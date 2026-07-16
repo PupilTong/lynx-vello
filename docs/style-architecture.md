@@ -31,18 +31,17 @@ Document/Node design (this document describes the current shape).
   not asked of embedders. The one embedder obligation left: pair `Document::ext_mut` with
   `Document::note_external_attribute_change` when a payload change affects a synthetic /
   reflected attribute (e.g. Lynx's `l-css-id`, `data-*`).
-- **Let it crash.** Query methods return `Option`; mutation methods treat stale/foreign
-  `NodeId`s, cycle-creating links, a second document element, and foreign insertion references as
+- **Let it crash.** Query methods return `Option`; mutation methods treat stale `NodeId`s,
+  cycle-creating links, a second document element, and invalid insertion references as
   caller bugs — `debug_assert!`ed and panicking rather than silently ignored. Layers holding
   untrusted handles validate first (`WidgetTree` maps violations to `WidgetError`, including its
   Lynx-specific `<page>` root protection).
-- **Identity at each boundary.** Every `NodeId` embeds its document's process-unique token, so an
-  id from
-  tree A never resolves in tree B (two trees mint identical `(index, generation)` sequences —
-  without the token that is silent same-slot aliasing). Engine/document pairing does not maintain
-  another integer token: both share the same `Arc<SharedRwLock>`, and `flush_document`/`resolve`
-  compare that actual style-context identity at the boundary instead of dying deep inside stylo on
-  a mismatched lock (or worse, silently cascading against the wrong stylist).
+- **Identity is context-scoped.** `NodeId` is only `(index, generation)` and is meaningful inside
+  the `Document` that minted it. Separate JS contexts do not exchange handles; generation exists
+  solely to detect same-Slab index reuse. A native `WidgetHandle` already carries its context's
+  `Reaper` owner, so a host-side routing bug can still be rejected without adding identity to the
+  DOM. Engine/document pairing similarly uses their shared `Arc<SharedRwLock>` identity rather
+  than an integer token.
 - **Debug contract instrumentation.** The `stylo_data` `UnsafeCell` slot carries a debug-only
   guard (reader/writer state, owning thread, unwind poisoning) and the document a debug
   traversal-phase flag; violations of stylo's one-worker-per-element discipline crash debug
@@ -62,7 +61,7 @@ Document/Node design (this document describes the current shape).
 | Layer | Owns | Must not own |
 | --- | --- | --- |
 | `w3c-dom` | `Document<T>` (the real document node, mixed-node storage, document-element link, lock), `Node<T>` (elements/text, including node-owned pending snapshots), `NodeId`, the stylo DOM traits, invalidation-carrying mutation, inline parsing, `Stylist`, rule matching, cascade, media evaluation, computed values | Lynx tags/PAPI, `<page>` root policy, `WidgetState`, Lynx unit metrics, touch-device policy |
-| `lynx-widget` | `WidgetState`, `WidgetTree` (PAPI validation plus its own `<page>` root over the generic document), `WidgetHandle` (canonical registry: tree identity, node retention, drop-driven reclamation of detached subtrees), `EngineMetrics`, touch-first `Device` construction, viewport-relative `rpx` integration | A second stylist, cascade implementation, stylesheet lock sharing, direct node construction, raw-id public APIs |
+| `lynx-widget` | `WidgetState`, `WidgetTree` (PAPI validation plus its own `<page>` root over the generic document), `WidgetHandle` (canonical registry, context ownership, node retention, drop-driven reclamation of detached subtrees), `EngineMetrics`, touch-first `Device` construction, viewport-relative `rpx` integration | A second stylist, cascade implementation, stylesheet lock sharing, direct node construction, raw-id public APIs |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, the maintained Lynx CSS extension patch set **and the Lynx supported-property/value grammar definition** (`style/properties/lynx_properties.txt`, `lynx` feature gates) | Runtime Widget/PAPI policy |
 
 ## Style lifecycle

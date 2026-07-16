@@ -12,7 +12,7 @@
 //! state maintained here (see [`WidgetTree::has_dirty`] /
 //! [`WidgetTree::clear_dirty`]).
 //!
-//! This layer validates PAPI semantics — foreign/stale handles, cycles,
+//! This layer validates PAPI semantics — misrouted/stale handles, cycles,
 //! insertion reference resolution, root protection, error mapping, the
 //! `unique_id` minting + index, the `css_id` batch — and **delegates** every
 //! DOM operation to [`w3c_dom::Document`] methods, which carry their own
@@ -27,9 +27,9 @@
 //! JS engine, and each JS element wrapper holds a [`WidgetHandle`] clone. The
 //! tree is storage plus structure — never lifetime policy:
 //!
-//! - The PAPI traffics **exclusively in handles**. A handle carries its tree's identity (using it
-//!   on another tree is [`WidgetError::ForeignWidget`], not silent same-slot aliasing), and a live
-//!   handle **retains** its node — nothing a wrapper can still reach is ever freed.
+//! - The PAPI traffics **exclusively in handles**. JS contexts do not exchange them; the native
+//!   boundary still rejects a misrouted handle through its existing context owner. A live handle
+//!   **retains** its node — nothing a wrapper can still reach is ever freed.
 //! - Structural opcodes ([`remove_element`], [`replace_element`], …) attach and detach; they never
 //!   free. Detached subtrees are first-class DOM citizens (browser `removeChild` semantics): alive,
 //!   mutable, re-insertable.
@@ -44,7 +44,6 @@
 //! [`replace_element`]: WidgetTree::replace_element
 //! [`create_element`]: WidgetTree::create_element
 
-use std::num::NonZeroU64;
 use std::sync::{Arc as StdArc, Mutex, Weak};
 
 use rustc_hash::FxHashMap;
@@ -61,8 +60,8 @@ use crate::{Widget, WidgetRef};
 /// An error from a [`WidgetTree`] operation on untrusted PAPI input.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Error)]
 pub enum WidgetError {
-    /// A handle from a different [`WidgetTree`] was used on this one.
-    #[error("widget {0:?} belongs to a different tree")]
+    /// A handle from a different runtime context was routed to this tree.
+    #[error("widget {0:?} belongs to a different context")]
     ForeignWidget(NodeId),
     /// A handle did not resolve to a live element.
     #[error("widget {0:?} is stale or does not exist")]
@@ -173,7 +172,7 @@ impl WidgetTree {
     /// debug builds assert.
     fn resolve(&self, handle: &WidgetHandle) -> Result<NodeId, WidgetError> {
         let id = handle.id();
-        if handle.tree_token() != self.doc.token() {
+        if !handle.belongs_to(&self.reaper) {
             return Err(WidgetError::ForeignWidget(id));
         }
         if !self.doc.contains(id) {
@@ -368,7 +367,7 @@ impl WidgetTree {
     /// when `before` is `None`.
     ///
     /// `child` is first detached from any current parent. Re-inserting within
-    /// the same parent reorders it. Validation (foreign handles, cycles, root
+    /// the same parent reorders it. Validation (misrouted handles, cycles, root
     /// protection, the insertion reference) happens here — PAPI input is
     /// untrusted — and the link itself is delegated to
     /// [`Document::insert_before`], which carries the structural
@@ -826,12 +825,6 @@ impl WidgetTree {
     /// Clear every element's dirty bits (called after a restyle pass).
     pub fn clear_dirty(&mut self) {
         self.doc.clear_dirty();
-    }
-
-    /// This tree's identity token (every handle it mints carries it).
-    #[must_use]
-    pub fn token(&self) -> NonZeroU64 {
-        self.doc.token()
     }
 
     /// Reclaim now instead of at the next operation boundary: drain the

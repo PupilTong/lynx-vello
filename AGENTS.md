@@ -156,7 +156,7 @@ useful signal for currently-compatible versions of those libraries.
   Owns `WidgetState` / `WidgetTree` (a validation layer over the document:
   untrusted PAPI input becomes `WidgetError`s before it reaches the
   crash-on-misuse DOM core) and the `WidgetHandle` ownership layer — the
-  PAPI traffics exclusively in canonical, tree-identified handles; a live
+  PAPI traffics exclusively in canonical, context-owned handles; a live
   handle retains its node, and detached subtrees are reclaimed automatically
   once their last handle drops (the native stand-in for the browser GC; no
   public disposal API). Also owns Lynx view metrics, touch-first device

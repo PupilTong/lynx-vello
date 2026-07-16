@@ -23,7 +23,7 @@
 //! # Contract: let it crash
 //!
 //! Mutation methods treat invalid input — stale [`NodeId`]s, cycle-creating
-//! links, foreign insertion references — as **caller bugs**, not conditions
+//! links, unrelated insertion references — as **caller bugs**, not conditions
 //! to absorb: preconditions are `debug_assert!`ed and the internal lookups
 //! panic rather than silently no-op. Query methods (`get`, `node_ref`,
 //! `child_position`, …) return `Option` instead; asking is always legal.

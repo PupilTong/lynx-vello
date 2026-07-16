@@ -6,10 +6,9 @@
 //! what raw ids cannot express, and why the PAPI surface traffics
 //! exclusively in handles:
 //!
-//! - **Tree identity.** A handle records the [`Document`](w3c_dom::Document) token of the tree that
-//!   minted it; using it against another [`WidgetTree`](crate::WidgetTree) is a typed
-//!   [`WidgetError::ForeignWidget`](crate::WidgetError::ForeignWidget), never silent cross-tree
-//!   aliasing.
+//! - **Context ownership.** Runtime JS contexts do not exchange handles. The native PAPI boundary
+//!   can still reject a misrouted handle from its existing `Reaper` owner, without adding identity
+//!   state to the DOM or `NodeId`.
 //! - **Canonicality.** For each node there is at most one live `HandleInner`; every lookup for that
 //!   node clones the same `Arc`, so `Arc` strong counts are exactly the number of outstanding
 //!   external references — the retention signal reclamation is built on.
@@ -23,7 +22,6 @@
 //! There is deliberately **no public disposal API**: freeing is a consequence
 //! of ownership (drop your handles), not an opcode.
 
-use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -43,21 +41,19 @@ pub struct WidgetHandle {
 }
 
 impl WidgetHandle {
-    /// The identity token of the tree this handle belongs to.
-    #[must_use]
-    pub fn tree_token(&self) -> NonZeroU64 {
-        self.inner.id.document_token()
-    }
-
     pub(crate) fn id(&self) -> NodeId {
         self.inner.id
+    }
+
+    /// Whether this handle was minted by the context using `reaper`.
+    pub(crate) fn belongs_to(&self, reaper: &Arc<Reaper>) -> bool {
+        std::ptr::eq(self.inner.reaper.as_ptr(), Arc::as_ptr(reaper))
     }
 }
 
 impl PartialEq for WidgetHandle {
     fn eq(&self, other: &Self) -> bool {
-        // NodeId embeds the document token, so id equality is identity.
-        self.inner.id == other.inner.id
+        Arc::ptr_eq(&self.inner, &other.inner)
     }
 }
 
@@ -65,7 +61,7 @@ impl Eq for WidgetHandle {}
 
 impl std::hash::Hash for WidgetHandle {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.inner.id.hash(state);
+        std::ptr::hash(Arc::as_ptr(&self.inner), state);
     }
 }
 

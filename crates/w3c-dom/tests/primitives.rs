@@ -32,6 +32,7 @@ fn document_generational_reuse() {
     // The next create reuses the freed slot with a bumped generation.
     let b = node(&mut doc, "div");
     assert_eq!(a.index(), b.index(), "slot should have been reused");
+    assert_ne!(a.generation(), b.generation());
     assert!(doc.get(a).is_none(), "the stale handle no longer resolves");
     assert!(doc.get(b).is_some());
     assert_ne!(a, b);
@@ -379,39 +380,6 @@ fn external_state_default_attr_hooks() {
     assert_eq!(elem.get_attr(&stylo::LocalName::from("data-x"), &ns), None);
 }
 
-// --- document identity ---------------------------------------------------------
-
-#[test]
-fn cross_document_ids_fail_closed() {
-    // Two documents mint identical (index, generation) sequences; the
-    // document token in NodeId keeps them from ever aliasing.
-    let mut doc_a = Document::new();
-    let mut doc_b = Document::new();
-    let a0 = node(&mut doc_a, "div");
-    let b0 = node(&mut doc_b, "div");
-    assert_eq!(a0.index(), b0.index());
-    assert_eq!(a0.generation(), b0.generation());
-    assert_ne!(a0, b0, "ids differ by document token");
-    assert_ne!(a0.document_token(), b0.document_token());
-    assert_eq!(doc_a.token(), a0.document_token());
-
-    // Queries with a foreign id answer None instead of aliasing the
-    // same-slot occupant.
-    assert!(doc_b.get(a0).is_none());
-    assert!(!doc_b.contains(a0));
-}
-
-#[test]
-#[should_panic(expected = "stale or foreign NodeId")]
-fn mutating_with_a_foreign_id_crashes() {
-    let mut doc_a = Document::new();
-    let mut doc_b = Document::new();
-    let a0 = node(&mut doc_a, "div");
-    let _b0 = node(&mut doc_b, "div");
-    // Same slot shape, wrong tree: must crash, not mutate doc_b's node.
-    doc_b.set_attribute(a0, "title", "boom");
-}
-
 #[test]
 fn reparenting_the_document_element_detaches_it_from_the_document() {
     let mut doc = Document::new();
@@ -453,7 +421,7 @@ fn text_nodes_reject_element_attributes() {
 // --- the let-it-crash mutation contract -------------------------------------
 
 #[test]
-#[should_panic(expected = "stale or foreign NodeId")]
+#[should_panic(expected = "stale NodeId")]
 fn mutating_through_a_stale_handle_crashes() {
     let mut doc = Document::new();
     let a = node(&mut doc, "div");
@@ -464,7 +432,7 @@ fn mutating_through_a_stale_handle_crashes() {
 }
 
 #[test]
-#[should_panic(expected = "stale or foreign NodeId")]
+#[should_panic(expected = "stale NodeId")]
 fn ext_mut_through_a_stale_handle_crashes() {
     let mut doc = Document::new();
     let a = node(&mut doc, "div");

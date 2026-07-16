@@ -37,10 +37,9 @@
 
 use std::fmt;
 use std::marker::PhantomData;
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::NonZeroU32;
 use std::ptr::NonNull;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use slab::Slab;
 use stylo::dom::OpaqueNode;
@@ -55,13 +54,6 @@ use crate::node::Node;
 /// `about:blank` is a constant, valid URL, so this never fails.
 pub(crate) fn about_blank_url_data() -> UrlExtraData {
     UrlExtraData::from(::url::Url::parse("about:blank").expect("about:blank is a valid URL"))
-}
-
-/// Mint a process-unique document identity token. `0` is never minted, so
-/// tokens fit `NonZeroU64`.
-pub(crate) fn mint_identity() -> NonZeroU64 {
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    NonZeroU64::new(NEXT.fetch_add(1, Ordering::Relaxed)).expect("identity counter starts at 1")
 }
 
 /// A stable, generation-checked handle to a node in a [`Document`].
@@ -86,32 +78,16 @@ pub(crate) fn mint_identity() -> NonZeroU64 {
 /// storage growth moves nodes). Because the generation is `NonZeroU32`,
 /// `Option<NodeId>` costs no extra space.
 ///
-/// # Document identity
-///
-/// An id also carries the **token of the document that minted it**
-/// ([`document_token`](Self::document_token)): two documents mint identical
-/// `(index, generation)` sequences, so without the token an id from tree A
-/// would pass tree B's liveness check and silently alias whatever occupies
-/// the same slot there — cross-tree data corruption, not a detectable error.
-/// With the token in the id (and in every node's own id), a foreign id
-/// simply never compares equal: queries return `None`, mutations crash per
-/// the let-it-crash contract, and embedder layers can reject it with a
-/// typed error before that.
+/// A `NodeId` is scoped to the [`Document`] that minted it. Documents belong
+/// to isolated runtime contexts and do not exchange raw ids, so the handle
+/// deliberately carries no cross-document identity.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct NodeId {
-    doc: NonZeroU64,
     index: u32,
     generation: NonZeroU32,
 }
 
 impl NodeId {
-    /// The identity token of the document this id was minted by (see
-    /// [`Document::token`]).
-    #[must_use]
-    pub const fn document_token(self) -> NonZeroU64 {
-        self.doc
-    }
-
     /// The slot index this handle refers to.
     #[must_use]
     pub const fn index(self) -> u32 {
@@ -132,10 +108,7 @@ impl NodeId {
     #[must_use]
     pub(crate) const fn opaque(self) -> OpaqueNode {
         // Packs (generation, index) into the usize. 64-bit targets only —
-        // on 32-bit this would truncate the generation. The document token
-        // is deliberately excluded: stylo's snapshot map and traversal roots
-        // are per-document, so (generation, index) is unique within the one
-        // map an OpaqueNode is ever used in.
+        // on 32-bit this would truncate the generation.
         const {
             assert!(
                 size_of::<usize>() >= 8,
@@ -180,9 +153,6 @@ unsafe impl<T> Sync for CorePtr<T> {}
 /// so the whole document state is one allocation; each pending snapshot lives
 /// on its node.
 pub(crate) struct Core<T> {
-    /// This document's process-unique identity, stamped into every [`NodeId`]
-    /// it mints.
-    token: NonZeroU64,
     /// Node storage. `nodes[id.index]` holds the live node for that slab key;
     /// `Slab` owns vacant-slot tracking and reuse.
     nodes: Slab<Node<T>>,
@@ -311,7 +281,6 @@ impl<T> Document<T> {
     /// Create a document with the style context owned by this crate.
     pub(crate) fn with_style_context(lock: Arc<SharedRwLock>, url_data: UrlExtraData) -> Self {
         let core = Box::new(Core {
-            token: mint_identity(),
             nodes: Slab::new(),
             next_generation: 1,
             document_element: None,
@@ -419,11 +388,7 @@ impl<T> Document<T> {
         .expect("node generations start at one");
         core.next_generation += 1;
 
-        let id = NodeId {
-            doc: core.token,
-            index,
-            generation,
-        };
+        let id = NodeId { index, generation };
         let inserted = core.nodes.insert(make(core_ptr, id));
         debug_assert_eq!(inserted, index as usize, "vacant slab key changed");
         id
@@ -464,16 +429,6 @@ impl<T> Document<T> {
     #[must_use]
     pub fn document_element(&self) -> Option<NodeId> {
         self.core().document_element
-    }
-
-    /// This document's process-unique identity token.
-    ///
-    /// Every [`NodeId`] this document mints carries it
-    /// ([`NodeId::document_token`]); embedder layers use it to give their own
-    /// handles an unforgeable tree identity.
-    #[must_use]
-    pub fn token(&self) -> NonZeroU64 {
-        self.core().token
     }
 
     // --- queries -----------------------------------------------------------
@@ -538,7 +493,7 @@ impl<T> Document<T> {
     pub fn ext_mut(&mut self, id: NodeId) -> &mut T {
         self.core_mut()
             .node_mut(id)
-            .expect("stale or foreign NodeId passed to Document::ext_mut")
+            .expect("stale NodeId passed to Document::ext_mut")
             .ext_mut()
     }
 
@@ -582,7 +537,7 @@ impl<T> Document<T> {
         let index = match before {
             None => self
                 .get(parent)
-                .expect("stale or foreign NodeId passed to Document::insert_before")
+                .expect("stale NodeId passed to Document::insert_before")
                 .child_ids()
                 .len(),
             Some(reference) => self
@@ -592,11 +547,11 @@ impl<T> Document<T> {
 
         let core = self.core_mut();
         core.node_mut(parent)
-            .expect("stale or foreign NodeId passed to Document::insert_before")
+            .expect("stale NodeId passed to Document::insert_before")
             .children
             .insert(index, child);
         core.node_mut(child)
-            .expect("stale or foreign NodeId passed to Document::insert_before")
+            .expect("stale NodeId passed to Document::insert_before")
             .parent = Some(parent);
 
         self.note_moved_subtree(child);
@@ -622,7 +577,7 @@ impl<T> Document<T> {
     pub fn detach(&mut self, child: NodeId) {
         let old_parent = self
             .get(child)
-            .expect("stale or foreign NodeId passed to Document::detach")
+            .expect("stale NodeId passed to Document::detach")
             .parent_id();
         let Some(parent) = old_parent else {
             if self.core().document_element == Some(child) {
@@ -641,7 +596,7 @@ impl<T> Document<T> {
             .expect("child must appear in its parent's child list");
         parent_node.children.remove(removed_index);
         core.node_mut(child)
-            .expect("stale or foreign NodeId passed to Document::detach")
+            .expect("stale NodeId passed to Document::detach")
             .parent = None;
         self.note_child_list_change(parent, removed_index);
     }

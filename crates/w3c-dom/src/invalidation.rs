@@ -102,7 +102,7 @@ impl<T> Document<T> {
     /// contract applied.
     fn live(&self, id: NodeId) -> &Node<T> {
         self.get(id)
-            .expect("stale or foreign NodeId passed to a Document mutation method")
+            .expect("stale NodeId passed to a Document mutation method")
     }
 
     /// Resolve a live element for an element-only mutation path.
@@ -250,7 +250,7 @@ impl<T: ExternalState> Document<T> {
         self.note_class_change(id);
         self.core_mut()
             .node_mut(id)
-            .expect("stale or foreign NodeId passed to Document::set_classes")
+            .expect("stale NodeId passed to Document::set_classes")
             .classes = classes.split_whitespace().map(Atom::from).collect();
     }
 
@@ -268,7 +268,7 @@ impl<T: ExternalState> Document<T> {
         self.note_class_change(id);
         self.core_mut()
             .node_mut(id)
-            .expect("stale or foreign NodeId passed to Document::add_class")
+            .expect("stale NodeId passed to Document::add_class")
             .classes
             .push(class);
     }
@@ -287,7 +287,7 @@ impl<T: ExternalState> Document<T> {
         self.note_class_change(id);
         self.core_mut()
             .node_mut(id)
-            .expect("stale or foreign NodeId passed to Document::remove_class")
+            .expect("stale NodeId passed to Document::remove_class")
             .classes
             .retain(|existing| *existing != class);
     }
@@ -303,7 +303,7 @@ impl<T: ExternalState> Document<T> {
         self.note_id_change(id);
         self.core_mut()
             .node_mut(id)
-            .expect("stale or foreign NodeId passed to Document::set_id_attr")
+            .expect("stale NodeId passed to Document::set_id_attr")
             .id_attr = value.map(Atom::from);
     }
 
@@ -318,7 +318,7 @@ impl<T: ExternalState> Document<T> {
         self.note_attribute_change(id, name);
         self.core_mut()
             .node_mut(id)
-            .expect("stale or foreign NodeId passed to Document::set_attribute")
+            .expect("stale NodeId passed to Document::set_attribute")
             .attrs
             .insert(name.into(), value.to_owned());
     }
@@ -334,7 +334,7 @@ impl<T: ExternalState> Document<T> {
         self.note_attribute_change(id, name);
         self.core_mut()
             .node_mut(id)
-            .expect("stale or foreign NodeId passed to Document::remove_attribute")
+            .expect("stale NodeId passed to Document::remove_attribute")
             .attrs
             .remove(name);
     }
@@ -354,7 +354,7 @@ impl<T: ExternalState> Document<T> {
         self.mark_mutated(id);
         self.core_mut()
             .node_mut(id)
-            .expect("stale or foreign NodeId passed to Document::set_state")
+            .expect("stale NodeId passed to Document::set_state")
             .element_state
             .set(flags, on);
     }
@@ -395,7 +395,7 @@ impl<T: ExternalState> Document<T> {
         };
         self.core_mut()
             .node_mut(id)
-            .expect("stale or foreign NodeId passed to Document::set_text")
+            .expect("stale NodeId passed to Document::set_text")
             .text = text;
         if let Some(element) = affected_element
             && watches_empty
@@ -452,7 +452,7 @@ impl<T: ExternalState> Document<T> {
         };
         self.core_mut()
             .node_mut(id)
-            .expect("stale or foreign NodeId passed to Document::set_inline_style")
+            .expect("stale NodeId passed to Document::set_inline_style")
             .inline_block = block;
         self.note_inline_style_change(id);
     }
@@ -506,7 +506,7 @@ impl<T: ExternalState> Document<T> {
 
         self.core_mut()
             .node_mut(id)
-            .expect("stale or foreign NodeId passed to Document::add_inline_style")
+            .expect("stale NodeId passed to Document::add_inline_style")
             .inline_block = Some(wrapped);
         self.note_inline_style_change(id);
     }
