@@ -21,6 +21,22 @@
 //! DOM core treats as crashes) into [`WidgetError`]s. The Lynx-specific
 //! per-widget data lives in each node's [`WidgetState`] payload.
 //!
+//! # Ownership and lifetime
+//!
+//! Widgets are **owned by the scripting engine**: `ReactLynx` runs inside the
+//! JS engine, and each JS element wrapper holds its widget's [`WidgetId`].
+//! The tree is storage plus structure — never lifetime policy:
+//!
+//! - Structural opcodes ([`remove_element`], [`replace_element`], …) attach and detach; they never
+//!   free. Detached subtrees are first-class DOM citizens (browser `removeChild` semantics): alive,
+//!   mutable, re-insertable.
+//! - Freeing is the owner's call. In web-core the browser GC collects a detached node once no JS
+//!   reference remains; here the runtime layer makes that decision through its wrapper finalizers
+//!   and executes it via [`dispose_detached`](WidgetTree::dispose_detached) — the one
+//!   lifetime-affecting entry point, deliberately outside the `__*Element` opcode set.
+//!
+//! [`dispose_detached`]: WidgetTree::dispose_detached
+//!
 //! [`append_element`]: WidgetTree::append_element
 //! [`insert_element_before`]: WidgetTree::insert_element_before
 //! [`remove_element`]: WidgetTree::remove_element
@@ -62,6 +78,9 @@ pub enum WidgetError {
     /// An `insert_element_before` reference node was not a child of the parent.
     #[error("insertion reference {0:?} is not a child of the parent")]
     BadInsertReference(WidgetId),
+    /// A disposal target was still attached to a parent.
+    #[error("widget {0:?} is still attached; detach it before disposal")]
+    NotDetached(WidgetId),
 }
 
 /// The widget tree: one [`Document`] of [`Widget`]s plus the Lynx `unique_id`
@@ -232,18 +251,17 @@ impl WidgetTree {
         Ok(())
     }
 
-    /// Remove `child` from `parent` and **free its entire subtree** (arena
-    /// slots and `unique_id` index entries). All handles into the subtree
-    /// become stale; removing the page also clears the document root.
+    /// Remove `child` from `parent`, **detaching** it — DOM `removeChild`
+    /// (web-core's `__RemoveElement`). The subtree stays alive, fully
+    /// mutable, and re-insertable: detached nodes are ordinary browser
+    /// behavior and first-class here.
     ///
-    /// Deviation from web-core, by design: browser `__RemoveElement` is DOM
-    /// `removeChild` — the element stays alive for whatever still references
-    /// it, and the garbage collector reclaims it eventually. This engine has
-    /// no GC and implements no list recycling (there is no consumer for
-    /// detached-but-alive subtrees), so freeing immediately is the leak-free
-    /// equivalent. Content that should stop rendering *without* being
-    /// destroyed keeps its place in the tree — that is `content-visibility`'s
-    /// job, not a detach-and-hold pool's.
+    /// Removal deliberately says nothing about lifetime — structural opcodes
+    /// never free. The widgets' **owner** is the scripting engine (a JS
+    /// element wrapper holds its `WidgetId`); a detached subtree lives until
+    /// the owner proves it unreachable and disposes of it via
+    /// [`dispose_detached`](Self::dispose_detached) — the native stand-in
+    /// for what the browser GC does for web-core.
     pub fn remove_element(&mut self, parent: WidgetId, child: WidgetId) -> Result<(), WidgetError> {
         let Some(child_widget) = self.doc.get(child) else {
             return Err(WidgetError::StaleElement(child));
@@ -252,23 +270,48 @@ impl WidgetTree {
             return Err(WidgetError::NotAChild { parent, child });
         }
 
-        // `remove_subtree` detaches (with the structural invalidation at the
-        // old location) and frees; harvest the returned widget states to keep
-        // the `unique_id` index consistent.
-        for state in self.doc.remove_subtree(child) {
+        // `detach` unlinks and applies the structural invalidation (parent
+        // subtree + parent's following siblings, for `:empty` + `+`/`~`).
+        self.doc.detach(child);
+        Ok(())
+    }
+
+    /// Free a **detached** subtree: arena slots and `unique_id` index
+    /// entries. All handles into the subtree become stale.
+    ///
+    /// This is the ownership seam, not an Element-PAPI opcode: the scripting
+    /// engine owns widgets through its element wrappers, and its GC decides
+    /// *when* a detached subtree is dead (web-core inherits exactly this
+    /// from the browser GC). The runtime layer calls this from its
+    /// finalization path once no wrapper into the subtree remains reachable.
+    /// The tree supplies the mechanism; the owner supplies the policy.
+    ///
+    /// Disposing an attached element is refused (`NotDetached`): visible
+    /// content is never collected out from under the tree — detach first
+    /// (and content that should merely stop rendering stays attached under
+    /// `content-visibility`).
+    pub fn dispose_detached(&mut self, id: WidgetId) -> Result<(), WidgetError> {
+        let Some(widget) = self.doc.get(id) else {
+            return Err(WidgetError::StaleElement(id));
+        };
+        if widget.parent_id().is_some() {
+            return Err(WidgetError::NotDetached(id));
+        }
+        // The document returns the freed widgets' states; harvest the
+        // unique_ids out of them to keep the index consistent.
+        for state in self.doc.remove_subtree(id) {
             self.by_unique_id.remove(&state.unique_id);
         }
         Ok(())
     }
 
     /// Replace `old` with `new` in the tree, keeping `old`'s position. `new`
-    /// is detached from any current parent first; `old` and its subtree are
-    /// **freed** (see [`remove_element`](Self::remove_element) — no GC, no
-    /// recycling, so nothing may linger detached-but-alive).
+    /// is detached from any current parent first; `old` ends up detached but
+    /// alive (like DOM `replaceChild`, which returns the old node to its
+    /// owner).
     ///
     /// Replacing a detached `old` is a no-op, matching DOM `replaceWith` on a
-    /// parentless node — reachable only for a freshly created, never-attached
-    /// `old`.
+    /// parentless node.
     pub fn replace_element(&mut self, new: WidgetId, old: WidgetId) -> Result<(), WidgetError> {
         if new == old {
             return Ok(());
