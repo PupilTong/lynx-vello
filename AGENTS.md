@@ -182,7 +182,7 @@ useful signal for currently-compatible versions of those libraries.
   Lynx computed defaults (border-box, `overflow: hidden`, `display: linear`
   on every element, …) stay embedder cascade policy (UA sheet). Relies on
   the vendored stylo fork (`vendor/stylo`, submodule
-  branch `lynx-contain`, tip `2943690a9`): `contain` was already seeded in
+  branch `lynx-contain`, tip `5d79805ab`): `contain` was already seeded in
   the fork's lynx grammar; the branch adds `content-visibility` /
   `contain-intrinsic-size` under the `lynx` feature — pushing that fork
   branch is a pending **user action**.
