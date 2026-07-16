@@ -1,5 +1,6 @@
 //! Parley shape, rebreak, and cache benchmarks tracked by CodSpeed/Divan.
 
+use divan::counter::ItemsCount;
 use neutron_star::cache::Cache;
 use neutron_star::compute::{
     LeafMeasureInput, LeafMeasurement, LeafMeasurer, compute_cached_layout,
@@ -70,7 +71,6 @@ impl TextRunStyle for RunStyle {
 
 #[derive(Debug)]
 struct TextCase {
-    context: TextContext,
     artifacts: ArtifactSlots,
     container: ContainerStyle,
     run_styles: Vec<RunStyle>,
@@ -79,10 +79,7 @@ struct TextCase {
 
 impl TextCase {
     fn new(spec: &'static [(&'static str, f32)]) -> Self {
-        let mut context = TextContext::without_system_fonts();
-        assert_eq!(context.register_fonts(AHEM), 1);
         Self {
-            context,
             artifacts: ArtifactSlots::default(),
             container: ContainerStyle,
             run_styles: spec
@@ -95,7 +92,7 @@ impl TextCase {
         }
     }
 
-    fn measure(&mut self, width: f32, goal: LayoutGoal) -> Size<f32> {
+    fn measure(&mut self, context: &mut TextContext, width: f32, goal: LayoutGoal) -> Size<f32> {
         let runs = self
             .spec
             .iter()
@@ -107,7 +104,7 @@ impl TextCase {
             })
             .collect::<Vec<_>>();
         let mut measurer = TextMeasurer::new(
-            &mut self.context,
+            context,
             &mut self.artifacts,
             &self.container,
             runs.into_iter(),
@@ -123,57 +120,97 @@ impl TextCase {
     }
 }
 
-fn cold(bencher: divan::Bencher<'_, '_>, spec: &'static [(&'static str, f32)]) {
+/// Independent per-node artifacts sharing the session-level text context used
+/// by the production protocol. Keeping the batch in one input avoids creating
+/// thousands of duplicate font collections for the sub-microsecond cases.
+#[derive(Debug)]
+struct TextBatch {
+    context: TextContext,
+    cases: Vec<TextCase>,
+}
+
+impl TextBatch {
+    fn new(spec: &'static [(&'static str, f32)], batch_size: usize) -> Self {
+        let mut context = TextContext::without_system_fonts();
+        assert_eq!(context.register_fonts(AHEM), 1);
+        Self {
+            context,
+            cases: (0..batch_size).map(|_| TextCase::new(spec)).collect(),
+        }
+    }
+
+    fn measure_all(&mut self, width: f32, goal: LayoutGoal) -> Size<f32> {
+        let mut last = Size::new(0.0, 0.0);
+        for case in &mut self.cases {
+            last = divan::black_box(case.measure(&mut self.context, width, goal));
+        }
+        last
+    }
+}
+
+fn cold(bencher: divan::Bencher<'_, '_>, spec: &'static [(&'static str, f32)], batch_size: usize) {
     bencher
-        .with_inputs(|| TextCase::new(spec))
-        .bench_local_values(|mut case| {
-            divan::black_box(case.measure(320.0, LayoutGoal::Commit));
+        .counter(ItemsCount::new(batch_size))
+        .with_inputs(|| TextBatch::new(spec, batch_size))
+        .bench_local_refs(|batch| {
+            divan::black_box(batch.measure_all(320.0, LayoutGoal::Commit));
         });
 }
 
-fn warm_rebreak(bencher: divan::Bencher<'_, '_>, spec: &'static [(&'static str, f32)]) {
+fn warm_rebreak(
+    bencher: divan::Bencher<'_, '_>,
+    spec: &'static [(&'static str, f32)],
+    batch_size: usize,
+) {
     bencher
+        .counter(ItemsCount::new(batch_size))
         .with_inputs(|| {
-            let mut case = TextCase::new(spec);
-            divan::black_box(case.measure(320.0, LayoutGoal::Commit));
-            case
+            let mut batch = TextBatch::new(spec, batch_size);
+            divan::black_box(batch.measure_all(320.0, LayoutGoal::Commit));
+            batch
         })
-        .bench_local_values(|mut case| {
-            divan::black_box(case.measure(180.0, LayoutGoal::Commit));
+        .bench_local_refs(|batch| {
+            divan::black_box(batch.measure_all(180.0, LayoutGoal::Commit));
         });
 }
 
 macro_rules! text_benchmarks {
-    ($cold:ident, $warm:ident, $spec:ident) => {
+    ($cold:ident, $warm:ident, $spec:ident, $cold_batch:expr, $warm_batch:expr) => {
         #[divan::bench]
         fn $cold(bencher: divan::Bencher<'_, '_>) {
-            cold(bencher, $spec);
+            cold(bencher, $spec, $cold_batch);
         }
 
         #[divan::bench]
         fn $warm(bencher: divan::Bencher<'_, '_>) {
-            warm_rebreak(bencher, $spec);
+            warm_rebreak(bencher, $spec, $warm_batch);
         }
     };
 }
 
-text_benchmarks!(cold_label, warm_rebreak_label, LABEL);
-text_benchmarks!(cold_sentence, warm_rebreak_sentence, SENTENCE);
-text_benchmarks!(cold_paragraph, warm_rebreak_paragraph, PARAGRAPH);
-text_benchmarks!(cold_cjk, warm_rebreak_cjk, CJK_PARAGRAPH);
-text_benchmarks!(cold_multi_run, warm_rebreak_multi_run, MULTI_RUN);
+text_benchmarks!(cold_label, warm_rebreak_label, LABEL, 1_024, 8_192);
+text_benchmarks!(cold_sentence, warm_rebreak_sentence, SENTENCE, 512, 2_048);
+text_benchmarks!(cold_paragraph, warm_rebreak_paragraph, PARAGRAPH, 128, 512);
+text_benchmarks!(cold_cjk, warm_rebreak_cjk, CJK_PARAGRAPH, 256, 2_048);
+text_benchmarks!(
+    cold_multi_run,
+    warm_rebreak_multi_run,
+    MULTI_RUN,
+    256,
+    1_024
+);
 
 #[derive(Debug)]
 struct CachedCase {
     cache: Cache,
     input: LayoutInput,
-    text: TextCase,
+    text: TextBatch,
 }
 
 impl CachedCase {
     fn new() -> Self {
-        let mut text = TextCase::new(PARAGRAPH);
-        let size = text.measure(320.0, LayoutGoal::Commit);
+        let mut text = TextBatch::new(PARAGRAPH, 1);
+        let size = text.measure_all(320.0, LayoutGoal::Commit);
         let input = LayoutInput::perform_layout(
             Size::NONE,
             Size::NONE,
@@ -187,7 +224,7 @@ impl CachedCase {
     fn hit(&mut self) -> LayoutOutput {
         let input = self.input;
         compute_cached_layout(self, NodeId::new(0), input, |case, _, _| {
-            let size = case.text.measure(320.0, LayoutGoal::Commit);
+            let size = case.text.measure_all(320.0, LayoutGoal::Commit);
             LayoutOutput::new(size, size)
         })
     }
@@ -207,9 +244,17 @@ impl CacheState for CachedCase {
     }
 }
 
+const CACHE_HIT_BATCH: usize = 524_288;
+
 #[divan::bench]
 fn committed_box_cache_hit(bencher: divan::Bencher<'_, '_>) {
     bencher
+        .counter(ItemsCount::new(CACHE_HIT_BATCH))
         .with_inputs(CachedCase::new)
-        .bench_local_values(|mut case| divan::black_box(case.hit()));
+        .bench_local_values(|mut case| {
+            for _ in 0..CACHE_HIT_BATCH {
+                divan::black_box(divan::black_box(&mut case).hit());
+            }
+            case
+        });
 }

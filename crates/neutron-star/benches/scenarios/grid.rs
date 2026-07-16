@@ -4,6 +4,7 @@
 //! region. The measured closure therefore covers layout and the host-owned
 //! cache protocol, but not DOM/style construction or fixture allocation.
 
+use divan::counter::ItemsCount;
 use neutron_star::cache::Cache;
 use neutron_star::compute::{
     FnLeafMeasurer, LeafMetrics, compute_cached_layout, compute_grid_layout, compute_leaf_layout,
@@ -881,53 +882,92 @@ impl DirtyNestedFixture {
     }
 }
 
+const FIXED_TRACKS_BATCH: usize = 16;
+const INTRINSIC_SPANS_BATCH: usize = 16;
+const WARM_DESCENDANTS_BATCH: usize = 512;
+const ROOT_CACHE_HIT_BATCH: usize = 131_072;
+const DIRTY_PATH_BATCH: usize = 32;
+
+const fn sparse_batch_size(item_count: usize) -> usize {
+    if item_count <= 256 { 64 } else { 4 }
+}
+
+const fn dense_batch_size(item_count: usize) -> usize {
+    if item_count <= 256 { 8 } else { 1 }
+}
+
+const fn unique_span_batch_size(track_count: usize) -> usize {
+    match track_count {
+        32 => 256,
+        128 => 32,
+        _ => 2,
+    }
+}
+
+const fn flex_freeze_batch_size(track_count: usize) -> usize {
+    match track_count {
+        32 => 256,
+        256 => 32,
+        _ => 8,
+    }
+}
+
+fn bench_cold<Make>(bencher: divan::Bencher<'_, '_>, batch_size: usize, make_fixture: Make)
+where
+    Make: Fn() -> Fixture + Copy,
+{
+    bencher
+        .counter(ItemsCount::new(batch_size))
+        .with_inputs(move || (0..batch_size).map(|_| make_fixture()).collect::<Vec<_>>())
+        .bench_local_values(|mut fixtures| {
+            for fixture in &mut fixtures {
+                divan::black_box(fixture.run());
+            }
+            fixtures
+        });
+}
+
 #[divan::bench(args = [256, 4_096])]
 fn sparse_auto_placement_cold(bencher: divan::Bencher<'_, '_>, item_count: usize) {
-    bencher
-        .with_inputs(|| sparse_auto_fixture(item_count))
-        .bench_local_refs(Fixture::run);
+    bench_cold(bencher, sparse_batch_size(item_count), || {
+        sparse_auto_fixture(item_count)
+    });
 }
 
 #[divan::bench(args = [256, 1_024])]
 fn dense_hole_backfill_cold(bencher: divan::Bencher<'_, '_>, item_count: usize) {
-    bencher
-        .with_inputs(|| dense_holes_fixture(item_count))
-        .bench_local_refs(Fixture::run);
+    bench_cold(bencher, dense_batch_size(item_count), || {
+        dense_holes_fixture(item_count)
+    });
 }
 
 #[divan::bench]
 fn fixed_and_fractional_tracks_cold(bencher: divan::Bencher<'_, '_>) {
-    bencher
-        .with_inputs(fixed_fr_fixture)
-        .bench_local_refs(Fixture::run);
+    bench_cold(bencher, FIXED_TRACKS_BATCH, fixed_fr_fixture);
 }
 
 #[divan::bench]
 fn intrinsic_spanning_items_cold(bencher: divan::Bencher<'_, '_>) {
-    bencher
-        .with_inputs(intrinsic_spans_fixture)
-        .bench_local_refs(Fixture::run);
+    bench_cold(bencher, INTRINSIC_SPANS_BATCH, intrinsic_spans_fixture);
 }
 
 #[divan::bench(args = [32, 128, 512])]
 fn unique_intrinsic_span_buckets_cold(bencher: divan::Bencher<'_, '_>, track_count: usize) {
-    bencher
-        .with_inputs(|| unique_intrinsic_spans_fixture(track_count))
-        .bench_local_refs(Fixture::run);
+    bench_cold(bencher, unique_span_batch_size(track_count), || {
+        unique_intrinsic_spans_fixture(track_count)
+    });
 }
 
 #[divan::bench(args = [32, 256, 1_024])]
 fn flexible_track_freeze_thresholds_cold(bencher: divan::Bencher<'_, '_>, track_count: usize) {
-    bencher
-        .with_inputs(|| flex_freeze_threshold_fixture(track_count))
-        .bench_local_refs(Fixture::run);
+    bench_cold(bencher, flex_freeze_batch_size(track_count), || {
+        flex_freeze_threshold_fixture(track_count)
+    });
 }
 
 #[divan::bench]
 fn nested_grid_cold(bencher: divan::Bencher<'_, '_>) {
-    bencher
-        .with_inputs(nested_fixture)
-        .bench_local_refs(Fixture::run);
+    bench_cold(bencher, 1, nested_fixture);
 }
 
 #[divan::bench]
@@ -941,7 +981,13 @@ fn nested_grid_warm_descendants(bencher: divan::Bencher<'_, '_>) {
             fixture.clear_root_cache();
             fixture
         })
-        .bench_local_refs(Fixture::run);
+        .counter(ItemsCount::new(WARM_DESCENDANTS_BATCH))
+        .bench_local_refs(|fixture| {
+            for _ in 0..WARM_DESCENDANTS_BATCH {
+                divan::black_box(fixture.run());
+                fixture.clear_root_cache();
+            }
+        });
 }
 
 #[divan::bench]
@@ -952,12 +998,22 @@ fn nested_grid_warm_root_cache_hit(bencher: divan::Bencher<'_, '_>) {
             let _ = fixture.run();
             fixture
         })
-        .bench_local_refs(Fixture::run);
+        .counter(ItemsCount::new(ROOT_CACHE_HIT_BATCH))
+        .bench_local_refs(|fixture| {
+            for _ in 0..ROOT_CACHE_HIT_BATCH {
+                divan::black_box(divan::black_box(&mut *fixture).run());
+            }
+        });
 }
 
 #[divan::bench]
 fn nested_grid_dirty_leaf_and_ancestors(bencher: divan::Bencher<'_, '_>) {
     bencher
+        .counter(ItemsCount::new(DIRTY_PATH_BATCH))
         .with_inputs(DirtyNestedFixture::new)
-        .bench_local_refs(DirtyNestedFixture::run);
+        .bench_local_refs(|fixture| {
+            for _ in 0..DIRTY_PATH_BATCH {
+                divan::black_box(fixture.run());
+            }
+        });
 }

@@ -442,16 +442,47 @@ fn nested_fixture() -> Fixture {
     }
 }
 
+const SMALL_GRAPH_BATCH: usize = 64;
+const LARGE_GRAPH_BATCH: usize = 4;
+const NESTED_COLD_BATCH: usize = 8;
+const WARM_DESCENDANTS_BATCH: usize = 1_024;
+const ROOT_CACHE_HIT_BATCH: usize = 131_072;
+
+const fn graph_batch_size(item_count: usize) -> usize {
+    if item_count <= 256 {
+        SMALL_GRAPH_BATCH
+    } else {
+        LARGE_GRAPH_BATCH
+    }
+}
+
 fn bench_graph(
     bencher: divan::Bencher<'_, '_>,
     item_count: usize,
     layout_once: bool,
     kind: GraphKind,
 ) {
+    let batch_size = graph_batch_size(item_count);
     bencher
-        .with_inputs(|| graph_fixture(item_count, layout_once, kind))
-        .input_counter(|fixture| ItemsCount::new(fixture.item_count))
-        .bench_local_refs(|fixture| divan::black_box(fixture.run()));
+        .with_inputs(|| {
+            (0..batch_size)
+                .map(|_| graph_fixture(item_count, layout_once, kind))
+                .collect::<Vec<_>>()
+        })
+        .input_counter(|fixtures: &Vec<Fixture>| {
+            ItemsCount::new(
+                fixtures
+                    .iter()
+                    .map(|fixture| fixture.item_count)
+                    .sum::<usize>(),
+            )
+        })
+        .bench_local_values(|mut fixtures| {
+            for fixture in &mut fixtures {
+                divan::black_box(fixture.run());
+            }
+            fixtures
+        });
 }
 
 #[divan::bench(args = [256, 4_096])]
@@ -461,10 +492,27 @@ fn independent_two_pass_cold(bencher: divan::Bencher<'_, '_>, item_count: usize)
 
 #[divan::bench(args = [256, 4_096])]
 fn independent_two_pass_wrap_width_cold(bencher: divan::Bencher<'_, '_>, item_count: usize) {
+    let batch_size = graph_batch_size(item_count);
     bencher
-        .with_inputs(|| graph_fixture(item_count, false, GraphKind::Independent))
-        .input_counter(|fixture| ItemsCount::new(fixture.item_count))
-        .bench_local_refs(|fixture| divan::black_box(fixture.run_auto_width()));
+        .with_inputs(|| {
+            (0..batch_size)
+                .map(|_| graph_fixture(item_count, false, GraphKind::Independent))
+                .collect::<Vec<_>>()
+        })
+        .input_counter(|fixtures: &Vec<Fixture>| {
+            ItemsCount::new(
+                fixtures
+                    .iter()
+                    .map(|fixture| fixture.item_count)
+                    .sum::<usize>(),
+            )
+        })
+        .bench_local_values(|mut fixtures| {
+            for fixture in &mut fixtures {
+                divan::black_box(fixture.run_auto_width());
+            }
+            fixtures
+        });
 }
 
 #[divan::bench(args = [256, 4_096])]
@@ -490,9 +538,25 @@ fn duplicate_ids_cold(bencher: divan::Bencher<'_, '_>, item_count: usize) {
 #[divan::bench]
 fn nested_relative_cold(bencher: divan::Bencher<'_, '_>) {
     bencher
-        .with_inputs(nested_fixture)
-        .input_counter(|fixture| ItemsCount::new(fixture.item_count))
-        .bench_local_refs(Fixture::run);
+        .with_inputs(|| {
+            (0..NESTED_COLD_BATCH)
+                .map(|_| nested_fixture())
+                .collect::<Vec<_>>()
+        })
+        .input_counter(|fixtures: &Vec<Fixture>| {
+            ItemsCount::new(
+                fixtures
+                    .iter()
+                    .map(|fixture| fixture.item_count)
+                    .sum::<usize>(),
+            )
+        })
+        .bench_local_values(|mut fixtures| {
+            for fixture in &mut fixtures {
+                divan::black_box(fixture.run());
+            }
+            fixtures
+        });
 }
 
 #[divan::bench]
@@ -504,8 +568,15 @@ fn nested_relative_warm_descendants(bencher: divan::Bencher<'_, '_>) {
             fixture.clear_root_cache();
             fixture
         })
-        .input_counter(|fixture| ItemsCount::new(fixture.item_count))
-        .bench_local_refs(Fixture::run);
+        .input_counter(|fixture| ItemsCount::new(fixture.item_count * WARM_DESCENDANTS_BATCH))
+        .bench_local_refs(|fixture| {
+            for _ in 0..WARM_DESCENDANTS_BATCH {
+                divan::black_box(fixture.run());
+                // Re-establish the intended warm-descendants/root-dirty state
+                // for the next logical operation in this sample.
+                fixture.clear_root_cache();
+            }
+        });
 }
 
 #[divan::bench]
@@ -516,6 +587,13 @@ fn nested_relative_root_cache_hit(bencher: divan::Bencher<'_, '_>) {
             let _ = fixture.run();
             fixture
         })
-        .input_counter(|fixture| ItemsCount::new(fixture.item_count))
-        .bench_local_refs(Fixture::run);
+        .input_counter(|fixture| ItemsCount::new(fixture.item_count * ROOT_CACHE_HIT_BATCH))
+        .bench_local_refs(|fixture| {
+            for _ in 0..ROOT_CACHE_HIT_BATCH {
+                // Cache hits do not mutate the fixture. Obscure the input on
+                // every lookup so the optimizer cannot hoist the query out of
+                // this batching loop.
+                divan::black_box(divan::black_box(&mut *fixture).run());
+            }
+        });
 }
