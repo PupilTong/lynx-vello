@@ -298,10 +298,20 @@ fn grid_template_tracks() {
     }
 }
 
-// C++: aspect_ratio_handler_unittest.cc — W3C-corrected: ratios are kept
-// as number pairs (not pre-divided floats) and negatives reject.
+// C++: aspect_ratio_handler_unittest.cc — W3C-corrected: the full
+// `auto || <ratio>` grammar is available, ratios stay as number pairs (not
+// pre-divided floats), and negatives reject.
 #[test]
 fn aspect_ratio_grammar() {
+    assert_eq!(specified("aspect-ratio", "auto").as_deref(), Some("auto"));
+    assert_eq!(
+        specified("aspect-ratio", "auto 16/9").as_deref(),
+        Some("auto 16 / 9")
+    );
+    assert_eq!(
+        specified("aspect-ratio", "16/9 auto").as_deref(),
+        Some("auto 16 / 9")
+    );
     assert_eq!(
         specified("aspect-ratio", "10/100").as_deref(),
         Some("10 / 100")
@@ -320,6 +330,13 @@ fn aspect_ratio_grammar() {
         "negative ratios are invalid (Lynx accepted them)"
     );
     assert!(!parses("aspect-ratio", ""));
+}
+
+#[test]
+fn display_contents_survives_cascade() {
+    assert_eq!(computed("display: contents", "display"), "contents");
+    assert!(parses("display", "contents"));
+    assert!(!parses("display", "block"));
 }
 
 // C++: list_gap_handler_unittest.cc — `list-main-axis-gap` is a Lynx-only

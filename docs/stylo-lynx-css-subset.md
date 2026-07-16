@@ -9,8 +9,8 @@
 > value table keep their upstream parser.
 
 The revision-pinned, author-spelling-complete comparison against upstream
-Servo—including all 23 Lynx-only names, all 229 upstream-only names, and the
-160/51 changed/unchanged partition of common names—is tracked in
+Servo—including all 22 Lynx-only names, all 228 upstream-only names, and the
+160/52 changed/unchanged partition of common names—is tracked in
 [`tracking/stylo-lynx-vs-upstream-properties.md`](tracking/stylo-lynx-vs-upstream-properties.md).
 
 ## Generation rules
@@ -48,6 +48,8 @@ source: every `-x-*` property; `linear-cross-gravity`, `linear-gravity`, and
 Stylo `-webkit-text-stroke*` implementation names stay private; only Lynx's
 unprefixed `text-stroke*` aliases are authorable. Custom properties (`--*`)
 remain supported through Stylo's separate custom-property path.
+`offset-distance` also remains absent because upstream Servo declares it
+Gecko-only; the Lynx build follows Servo's support level for that property.
 
 ## Property/value behavior
 
@@ -59,12 +61,12 @@ does not enter the cascade, like an unsupported browser CSS value.
 | Every non-custom property | Its property-specific grammar, `var()` substitutions, and standard CSS-wide values `inherit`, `initial`, `unset`, `revert`, and `revert-layer` | No Lynx-specific cascade-keyword path. |
 | Any length-bearing supported property | `0`; `px`, `rpx`, `em`, `rem`, `vw`, `vh`; percentages and typed `calc()` where that property's grammar permits them | No `ppx`, `sp`, absolute units, `ex`/`ch` families, `lh` families, `vmin`/`vmax`, dynamic/small/large viewport units, logical viewport units, or container-query units. `rpx` is unavailable in context-free descriptors such as `@font-face`. |
 | Any angle-bearing supported property | `deg`, `rad`, `turn`, and typed `calc()` where permitted | `grad` is absent. |
-| `display` | `none`, `flex`, `grid`, `linear`, `relative` | No `block`, `inline`, compound display syntax, table/list values, `contents`, or `flow-root`. In particular, `display:block` is ignored as invalid. |
+| `display` | `none`, `contents`, `flex`, `grid`, `linear`, `relative` | No `block`, `inline`, compound display syntax, table/list values, or `flow-root`. `contents` keeps Stylo's original box-suppression, item-container propagation, and root/top-layer blockification behavior. In particular, authored `display:block` is still ignored as invalid. |
 | `direction` | `ltr`, `rtl` | `normal` and `lynx-rtl` do not exist. This uses Stylo's W3C direction type and semantics. |
 | `overflow`, `overflow-x`, `overflow-y` | `visible`, `hidden` | No `scroll`, `auto`, `clip`, or `overlay`; scrolling is widget policy rather than a CSS overflow value. |
 | `position` | `relative`, `absolute`, `fixed`, `sticky` | No `static`. |
 | `visibility` | `visible`, `hidden` | No `collapse`. |
-| `aspect-ratio` | `<non-negative-ratio>`, e.g. `1` or `16 / 9` | The `auto` arm is internal-only. |
+| `aspect-ratio` | Stylo's upstream W3C grammar: `auto`, a non-negative ratio, or both in either order | No Lynx-specific parser or representation. |
 | `width`, `height` | Stylo's upstream W3C sizing grammar, including `auto`, intrinsic sizing keywords, and enabled sizing functions | No Lynx-specific value parser; the global Lynx unit subset still applies. |
 | `flex-basis` | Stylo's upstream `content | <'width'>` grammar, including intrinsic sizing keywords | No Lynx-specific value parser or additional restriction. |
 | `min-width`, `min-height` | Stylo's upstream W3C sizing grammar, including `auto` and intrinsic sizing keywords | No Lynx-specific value parser; negative sizes remain invalid per CSS. |
@@ -72,7 +74,8 @@ does not enter the cascade, like an unsupported browser CSS value.
 | `gap`, `row-gap`, `column-gap` and grid aliases | Stylo's upstream W3C grammar: `normal` or a non-negative `<length-percentage>` | The UA sheet may still supply Lynx's zero-gap default. |
 | `z-index` | Stylo's upstream W3C grammar: `auto` or `<integer>` | No Lynx-specific value parser. |
 | `perspective` | Stylo's upstream W3C grammar: `none` or a non-negative `<length>` | No Lynx-only `auto` spelling. |
-| `will-change` | Stylo's upstream W3C grammar, including `auto`, `scroll-position`, `contents`, and `<custom-ident>` property names | Stylo parses, cascades, and computes the hint. Consumption by the future style-to-layout/paint adapter is still pending. |
+| `contain` | Stylo's upstream W3C grammar and original `Contain` bit layout, including `none`, `strict`, `content`, and combinations of `size`, `inline-size`, `layout`, `style`, and `paint` | The upstream Servo property is pref-gated; the Lynx property source force-enables it without changing its value or computed representation. |
+| `will-change` | Stylo's upstream W3C grammar, including `auto`, `scroll-position`, `contents`, `contain`, and other `<custom-ident>` property names | `will-change: contain` sets Stylo's original `CONTAIN` structural bit. Consumption by the future style-to-layout/paint adapter is still pending. |
 | `font-size` | Stylo's upstream W3C grammar, including length/percentage and absolute/relative size keywords | No Lynx-specific value parser. The 14px Lynx default comes from the UA sheet. |
 | `font-style` property | Stylo's upstream W3C grammar, including `oblique <angle>` | No Lynx-specific value parser. |
 | `font-weight` property | Stylo's upstream W3C grammar: `normal`, `bold`, `bolder`, `lighter`, or a number in `[1, 1000]` | Fractional values in range remain valid; no Lynx-specific min/max or integer-only constants are introduced. |
@@ -98,7 +101,6 @@ does not enter the cascade, like an unsupported browser CSS value.
 | `text-shadow` | Exactly one `offset-x offset-y blur color` shadow, in that order | No color-first form, omitted blur, or comma-separated list. |
 | `clip-path` | `none` or one of `inset()`, `circle()`, `ellipse()`, `path()` | No `polygon`, URL, geometry-box-only, `rect`, `xywh`, or `shape`. |
 | `offset-path` | One of `inset()`, `circle()`, `ellipse()`, `path()` | No author `none`, `ray`, URL, polygon, coordinate box, or path position. |
-| `offset-distance` | Literal number `0..=1` or percentage `0%..=100%` | No length, out-of-range value, or `calc()`. Numbers compute as the corresponding path percentage. |
 | `offset-rotate` | `auto` or one angle resolving in `0deg..=360deg` | No `reverse`, combined `auto <angle>`, negative/out-of-range angle, or unresolved `calc()`. |
 | `transform` | `none`; `matrix`/`matrix3d`; translate 2D/3D; scale/scaleX/scaleY with number factors; rotate/rotateX/Y/Z; skew/skewX/Y | No percentage scale factors, `scaleZ`, `scale3d`, `rotate3d`, or `perspective()` function. |
 | `transform-origin` | One- or two-dimensional origin | The third depth component rejects. |

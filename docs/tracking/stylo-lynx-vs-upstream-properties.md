@@ -1,7 +1,7 @@
 # Stylo `lynx` vs upstream Servo property inventory
 
 > Snapshot: 2026-07-16. This file compares `vendor/stylo` with
-> `feature = "lynx"` at `e2c54e1ca5d272cf7cc0f12f485922914fef4770`
+> `feature = "lynx"` at `ac7e1c68e88c1b932b4eded5a4048d157a99eacf`
 > against `upstream/main` at
 > `219f722e8be7feceacd7a870e93b39f6c6d22b7c`.
 
@@ -39,16 +39,16 @@ currently upstream-only.
 |---|---:|
 | Lynx author spellings | 234 |
 | Upstream Servo author spellings | 440 |
-| Spellings common to both | 211 |
-| Lynx-only spellings | 23 |
-| Upstream-only spellings | 229 |
+| Spellings common to both | 212 |
+| Lynx-only spellings | 22 |
+| Upstream-only spellings | 228 |
 | Common spellings with a known behavior difference | 160 |
-| Common spellings audited as behaviorally unchanged | 51 |
+| Common spellings audited as behaviorally unchanged | 52 |
 
-The accounting is closed: `23 + 229 + 211 = 463` spellings in the union, and
-the 211 common spellings split into `160 + 51`.
+The accounting is closed: `22 + 228 + 212 = 462` spellings in the union, and
+the 212 common spellings split into `160 + 52`.
 
-## Lynx-only spellings (23)
+## Lynx-only spellings (22)
 
 These names are absent from the pinned upstream Servo author table.
 
@@ -61,18 +61,18 @@ These names are absent from the pinned upstream Servo author table.
 | `relative-top-of`, `relative-right-of`, `relative-bottom-of`, `relative-left-of`, `relative-inline-start-of`, `relative-inline-end-of` | `none | <positive-integer>`; `none` computes to `-1`. |
 | `relative-center` | `none | vertical | horizontal | both`; initial `none`. |
 | `relative-layout-once` | `true | false`; current generated initial is `true`. |
-| `offset-distance` | Literal number in `[0, 1]` or literal percentage in `[0%, 100%]`; no length or `calc()`. |
 | `offset-rotate` | `auto` or one angle that can resolve at parse time into `[0deg, 360deg]`; no `reverse`, combined form, context-dependent `calc()`, or `grad`. |
 | `text-stroke-color` | Lynx's restricted `<color>` grammar. The canonical `-webkit-text-stroke-color` implementation name is hidden. |
 | `text-stroke-width` | `thin | medium | thick | <non-negative-length>` using the Lynx length-unit set; initial `0px`. The canonical prefixed name is hidden. |
 | `text-stroke` | Unprefixed alias for the width/color shorthand; either component may appear in either order and omitted components use their initial values. The canonical prefixed name is hidden. |
 
 Of these, the 18 `linear-*`/`relative-*` names are Lynx-only extensions.
-`offset-distance` and `offset-rotate` are standard motion-path properties that
-upstream Servo does not expose, while `text-stroke*` uses Lynx's unprefixed
-spelling over Stylo's Gecko-only compatibility implementation.
+`offset-rotate` is a standard motion-path property that upstream Servo does
+not expose, while `text-stroke*` uses Lynx's unprefixed spelling over Stylo's
+Gecko-only compatibility implementation. `offset-distance` follows upstream
+Servo and is therefore absent from both author tables.
 
-## Upstream-only spellings (229)
+## Upstream-only spellings (228)
 
 Every spelling below exists in the pinned upstream Servo generated author
 table and is absent from the `lynx` generated table. Under `lynx`, declaration
@@ -202,7 +202,6 @@ column-count
 column-span
 column-width
 columns
-contain
 container-name
 container-type
 content
@@ -328,7 +327,6 @@ animation-range-end
 animation-range-start
 animation-timeline
 animation-timing-function
-aspect-ratio
 background
 background-clip
 background-color
@@ -380,6 +378,7 @@ box-shadow
 clip-path
 color
 column-gap
+contain
 cursor
 display
 filter
@@ -481,7 +480,7 @@ width
 will-change
 ```
 
-### Default availability differences (33)
+### Default availability differences (34)
 
 All three upstream Servo static prefs below default to `false`. Upstream keeps
 the names in its generated table but `parse_enabled_for_all_content` rejects
@@ -491,7 +490,7 @@ properties at compile time.
 | Upstream pref | Common property spellings forced on by `lynx` |
 |---|---|
 | `layout.grid.enabled` | `grid`, `grid-area`, `grid-auto-columns`, `grid-auto-flow`, `grid-auto-rows`, `grid-column`, `grid-column-end`, `grid-column-start`, `grid-row`, `grid-row-end`, `grid-row-start`, `grid-template`, `grid-template-areas`, `grid-template-columns`, `grid-template-rows` |
-| `layout.unimplemented` | `animation-range-end`, `animation-range-start`, `animation-timeline`, `mask`, `mask-clip`, `mask-composite`, `mask-image`, `mask-mode`, `mask-origin`, `mask-position`, `mask-position-x`, `mask-position-y`, `mask-repeat`, `mask-size`, `offset-path`, `text-overflow` |
+| `layout.unimplemented` | `animation-range-end`, `animation-range-start`, `animation-timeline`, `contain`, `mask`, `mask-clip`, `mask-composite`, `mask-image`, `mask-mode`, `mask-origin`, `mask-position`, `mask-position-x`, `mask-position-y`, `mask-repeat`, `mask-size`, `offset-path`, `text-overflow` |
 | `layout.variable_fonts.enabled` | `font-optical-sizing`, `font-variation-settings` |
 
 `display: grid` is also accepted unconditionally by `lynx`; upstream Servo
@@ -608,12 +607,12 @@ table.
 | `place-content`, `place-self`, `place-items` | Component grammars above apply. For a one-value shorthand, Lynx explicitly rejects a value that cannot also be copied to the inline-axis component; two-value forms remain supported. |
 | `animation-duration`, `animation` | Lynx accepts a non-negative `<time>` only. Upstream can additionally accept `auto` when its scroll-driven-animation pref is enabled. |
 | `animation-timing-function`, `transition-timing-function`, `animation`, `transition` | Lynx adds `square-bezier(x, y)` and removes CSS `linear()`. Standard keywords, `steps()`, and `cubic-bezier()` remain. `square-bezier` is converted to an equivalent cubic Bézier for evaluation. |
-| `aspect-ratio` | Lynx accepts a ratio only; upstream's `auto` and `auto <ratio>` authored arms are rejected. The internal initial value can still carry `auto`. |
 | `background-clip` | `border-area` is unconditionally accepted under Lynx; upstream Servo gates that value with `layout.css.background-clip.border-area.enabled`. Other common box values are unchanged. |
 | `clip-path` | Lynx accepts `none`, `inset()`, `circle()`, `ellipse()`, or `path()`. It rejects upstream URL, polygon/shape/rect/xywh, and geometry-box forms. |
 | `color` | Unlike upstream Servo's solid-only property, Lynx also accepts and preserves one of its restricted gradients for text painting. A gradient uses transparent as the solid fallback for internal current-color consumers. `color` animation is discrete instead of interpolated, and the document-colors-disabled cascade special case is not applied to the Lynx enum. |
 | `cursor` | Lynx accepts only a cursor keyword. It rejects upstream URL/hotspot image lists and the `-moz-grab`, `-moz-grabbing`, `-moz-zoom-in`, and `-moz-zoom-out` value aliases. |
-| `display` | Lynx accepts exactly `none`, `flex`, `grid`, `linear`, `relative`. It rejects `block`, `inline`, `contents`, flow/table/list values, inline-flex/grid, and compound syntax. The upstream initial inline-flow encoding remains internal; therefore `display: block` is an invalid declaration, not the initial/default. |
+| `contain` | Lynx force-enables the property while upstream Servo's default `layout.unimplemented` pref rejects it. Its W3C parser, computed `Contain` bit layout, and structural meaning are otherwise unchanged. |
+| `display` | Lynx accepts exactly `none`, `contents`, `flex`, `grid`, `linear`, `relative`. It rejects `block`, `inline`, flow/table/list values, inline-flex/grid, and compound syntax. `contents` retains Stylo's original `is_contents` behavior, `DISPLAY_CONTENTS_IN_ITEM_CONTAINER` propagation, and root/top-layer blockification. The upstream initial inline-flow encoding remains internal; therefore authored `display: block` is still invalid. |
 | `filter` | Lynx accepts `none` or chains of `blur()`, `brightness()`, `contrast()`, `grayscale()`, and `saturate()`. It rejects upstream Servo's `hue-rotate()`, `invert()`, `opacity()`, `sepia()`, and `drop-shadow()`. URL filters are Gecko-only and therefore are not a Lynx-vs-Servo difference. |
 | `image-rendering` | The standard Servo values remain, but Lynx removes the `-moz-crisp-edges` value alias. |
 | `letter-spacing` | Lynx accepts `<length>` only. Upstream also accepts `normal` and percentages through its shared spacing type. |
@@ -629,9 +628,9 @@ table.
 | `transform-origin` | Lynx accepts only a one- or two-dimensional origin; the third depth length is rejected. |
 | `visibility` | Lynx accepts `visible | hidden`; `collapse` is compiled out. |
 | `transition-property`, `transition` | Property names missing from the Lynx lookup table compute as `Unsupported` identifiers instead of upstream `NonCustom` ids. This includes explicit `transition-property: all`: because the `all` property spelling is hidden, the authored token does not become Stylo's special all-properties id, even though omitted transition-property still uses the internal initial `all`. Lynx-only property names have the inverse difference and resolve to real ids. |
-| `will-change` | The authored W3C grammar is retained, but property-name-derived change bits only exist for names in the Lynx lookup table and for compiled match arms. Hints such as `contain`, `backdrop-filter`, `view-transition-name`, individual `translate`/`rotate`/`scale`, and other omitted properties therefore retain their identifier text but do not set the upstream structural bits. Supported names such as `transform`, `filter`, `opacity`, `perspective`, `position`, `z-index`, `mask-image`, and `clip-path` still set their corresponding bits. |
+| `will-change` | The authored W3C grammar is retained. `contain` is now a real Lynx property id and `will-change: contain` sets Stylo's original `CONTAIN` structural bit. Property-name-derived bits still require a name in the Lynx lookup table and a compiled match arm, so omitted hints such as `backdrop-filter`, `view-transition-name`, and individual `translate`/`rotate`/`scale` retain their identifier text without setting those upstream bits. Supported names such as `transform`, `filter`, `opacity`, `perspective`, `position`, `z-index`, `mask-image`, and `clip-path` retain their original bits. |
 
-## Common spellings audited as unchanged (51)
+## Common spellings audited as unchanged (52)
 
 These names are present on both sides and have no known Lynx-specific parser,
 primitive-value, computed-value, animation, default-availability, or
@@ -647,6 +646,7 @@ animation-fill-mode
 animation-iteration-count
 animation-name
 animation-play-state
+aspect-ratio
 background-attachment
 background-origin
 background-repeat
@@ -694,7 +694,8 @@ z-index
 ```
 
 Notably, this parity set includes the properties explicitly restored to
-upstream structure during the subset work: `z-index`, border styles,
+upstream structure during the subset work: `aspect-ratio`, `z-index`, border
+styles,
 `border-image-slice`/`border-image-repeat`, flex direction/flow/grow/shrink,
 and the white-space components. `column-gap`, `row-gap`, sizing properties,
 `perspective`, and `box-shadow` are not in the parity set because, although
@@ -708,7 +709,7 @@ color grammar still differs.
   not only `css-properties.json`, so hidden-canonical aliases remain visible.
 - Re-audit every added/removed `cfg(feature = "lynx")`, `lynx_*` generator
   override, and Lynx-only value type. Update both the canonical 160-name set
-  and the mechanism tables; the 160/51 partition must still cover all common
+  and the mechanism tables; the 160/52 partition must still cover all common
   spellings.
 - Keep custom properties out of the non-custom counts, but retain an explicit
   test that `--*` lookup and `var()` substitution work with the feature on.

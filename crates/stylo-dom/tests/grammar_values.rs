@@ -68,12 +68,18 @@ fn opacity_numbers() {
 }
 
 #[test]
-fn will_change_survives_cascade() {
-    let mut doc = Doc::with_css("view { will-change: transform, opacity; }");
+fn containment_hints_survive_cascade() {
+    let mut doc =
+        Doc::with_css("view { contain: layout paint; will-change: contain, transform, opacity; }");
     let element = doc.el(doc.root, "view");
     doc.flush();
-    assert_eq!(doc.value(element, "will-change"), "transform, opacity");
+    assert_eq!(doc.value(element, "contain"), "layout paint");
+    assert_eq!(
+        doc.value(element, "will-change"),
+        "contain, transform, opacity"
+    );
     let bits = doc.style(element).clone_will_change().bits;
+    assert!(bits.contains(WillChangeBits::CONTAIN));
     assert!(bits.contains(WillChangeBits::TRANSFORM));
     assert!(bits.contains(WillChangeBits::OPACITY));
 }

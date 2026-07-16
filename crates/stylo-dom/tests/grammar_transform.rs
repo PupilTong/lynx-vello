@@ -2,7 +2,8 @@
 //! `lynx/core/renderer/css/parser/transform_handler_unittest.cc`,
 //! `transform_origin_handler_unittest.cc`,
 //! `offset_distance_handler_unittest.cc`, and the offset-rotate rows of
-//! `css_string_parser_unittest.cc`.
+//! `css_string_parser_unittest.cc`. `offset-distance` itself deliberately
+//! follows upstream Servo's support level and is therefore not exposed.
 //!
 //! Scope: `enableCSSSelector = true` / `enableRemoveCSSScope = true`. W3C
 //! corrections: the legacy lenient forms (`rotate(20)` without a unit,
@@ -84,23 +85,14 @@ fn transform_origin_grammar() {
     );
 }
 
-// C++: offset_distance_handler_unittest.cc — Lynx treats both literal
-// numbers and percentages as a normalized path fraction. Lengths are absent.
+// Upstream Servo declares `offset-distance` Gecko-only. Even though native
+// Lynx has a normalized-fraction grammar, stylo-dom follows the Servo surface.
 #[test]
-fn offset_distance_grammar() {
-    assert_eq!(specified("offset-distance", "0").as_deref(), Some("0%"));
-    assert_eq!(specified("offset-distance", "0.5").as_deref(), Some("50%"));
-    assert_eq!(specified("offset-distance", "1").as_deref(), Some("100%"));
-    assert_eq!(specified("offset-distance", "0%").as_deref(), Some("0%"));
-    assert_eq!(specified("offset-distance", "50%").as_deref(), Some("50%"));
-    assert_eq!(
-        specified("offset-distance", "100%").as_deref(),
-        Some("100%")
-    );
-    for invalid in ["-0.1", "1.1", "101%", "10px", "calc(50%)", "auto"] {
+fn offset_distance_follows_servo_support_level() {
+    for value in ["0", "0.5", "1", "0%", "50%", "100%", "10px", "auto"] {
         assert!(
-            !parses("offset-distance", invalid),
-            "`{invalid}` must be rejected"
+            !parses("offset-distance", value),
+            "`offset-distance: {value}` must be unavailable in the Servo build"
         );
     }
 }
