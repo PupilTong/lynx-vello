@@ -201,7 +201,7 @@ fn initial_flush_sequential(bencher: divan::Bencher) {
         })
         .bench_local_values(|mut docs| {
             for doc in &mut docs {
-                engine.flush_document_with(doc, Parallelism::Sequential);
+                black_box(engine.flush_document_with(doc, Parallelism::Sequential));
             }
             docs
         });
@@ -219,7 +219,7 @@ fn initial_flush_parallel(bencher: divan::Bencher) {
         })
         .bench_local_values(|mut docs| {
             for doc in &mut docs {
-                engine.flush_document_with(doc, Parallelism::Auto);
+                black_box(engine.flush_document_with(doc, Parallelism::Auto));
             }
             docs
         });
@@ -244,7 +244,7 @@ fn incremental_class_flip(bencher: divan::Bencher) {
                 } else {
                     doc.remove_class(*probe, "c1");
                 }
-                engine.flush_document(doc);
+                black_box(engine.flush_document(doc));
             }
         });
 }
@@ -266,7 +266,7 @@ fn incremental_inline_style(bencher: divan::Bencher) {
                     "color: rgb(3, 3, 3); width: 20px"
                 };
                 doc.set_inline_style(*probe, black_box(css));
-                engine.flush_document(doc);
+                black_box(engine.flush_document(doc));
             }
         });
 }
@@ -290,7 +290,39 @@ fn incremental_state_flip(bencher: divan::Bencher) {
                 let (engine, doc) = &mut *state.borrow_mut();
                 on = !on;
                 doc.set_state(probe, ElementState::HOVER, on);
-                engine.flush_document(doc);
+                black_box(engine.flush_document(doc));
+            }
+        });
+}
+
+/// Class flip whose rules differ only in `color`: the harvested damage is
+/// REPAINT-only (no relayout class), the layout-skippable fast path.
+#[divan::bench]
+fn incremental_class_flip_repaint_only(bencher: divan::Bencher) {
+    let mut engine = engine_with_author_sheet();
+    engine.add_stylesheet_str(
+        "view.rp-a { color: rgb(17, 17, 17); } view.rp-b { color: rgb(68, 68, 68); }",
+        StylesheetOrigin::Author,
+    );
+    let (mut doc, probe) = build_tree(&engine);
+    doc.add_class(probe, "rp-a");
+    engine.flush_document(&mut doc);
+    let state = RefCell::new((engine, doc));
+    let mut on = false;
+    bencher
+        .counter(ItemsCount::new(INCREMENTAL_BATCH))
+        .bench_local(|| {
+            for _ in 0..INCREMENTAL_BATCH {
+                let (engine, doc) = &mut *state.borrow_mut();
+                on = !on;
+                if on {
+                    doc.remove_class(probe, "rp-a");
+                    doc.add_class(probe, "rp-b");
+                } else {
+                    doc.remove_class(probe, "rp-b");
+                    doc.add_class(probe, "rp-a");
+                }
+                black_box(engine.flush_document(doc));
             }
         });
 }
@@ -304,7 +336,7 @@ fn noop_flush(bencher: divan::Bencher) {
         .bench_local(|| {
             for _ in 0..NO_OP_BATCH {
                 let (engine, doc, _) = &mut *state.borrow_mut();
-                engine.flush_document(doc);
+                black_box(engine.flush_document(doc));
             }
         });
 }

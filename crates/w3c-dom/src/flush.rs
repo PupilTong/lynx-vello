@@ -17,7 +17,12 @@
 //!
 //! Computed styles land in each element node's stylo `ElementData`
 //! ([`Node::computed_style`](crate::Node::computed_style) reads them); the
-//! document then clears the consumed snapshot flags and the dirty spine.
+//! document's harvest then collects the per-node restyle damage into a
+//! [`FlushSummary`], drops the consumed snapshots, and clears stylo's restyle
+//! state so the next flush does not re-traverse. The harvest is rooted at the
+//! traversal's **actual** root, which stylo may raise to the passed root's
+//! parent when a subtree flush invalidated the root's siblings (see
+//! [`StyleEngine::flush_document_with_sink`]).
 //!
 //! # Safety
 //!
@@ -40,7 +45,8 @@ use stylo::traversal::{DomTraversal, PerLevelTraversalData, recalc_style_at};
 use stylo::traversal_flags::TraversalFlags;
 use stylo_atoms::Atom;
 
-use crate::document::Document;
+use crate::damage::{FlushSummary, StyleDamage};
+use crate::document::{Document, NodeId};
 use crate::engine::StyleEngine;
 use crate::ext::ExternalState;
 use crate::node::Node;
@@ -153,19 +159,31 @@ impl StyleEngine {
     /// element, using the style thread pool when the tree is wide enough
     /// ([`Parallelism::Auto`]).
     ///
-    /// A no-op when the document has no element child or nothing is
-    /// scheduled.
+    /// Returns a [`FlushSummary`] of the per-node restyle damage the flush
+    /// produced (see [`StyleDamage`]). Initial styling of a subtree produces
+    /// **no** damage by design — there are no old computed values to diff, so
+    /// embedders lay out a freshly styled subtree from their own structural
+    /// knowledge. A `display: none → visible` flip does produce `RELAYOUT`
+    /// damage on the flipped node, which covers its whole subtree.
+    ///
+    /// A no-op (empty summary, `traversed == false`) when the document has no
+    /// element child or nothing is scheduled.
     ///
     /// If the traversal panics, the document's scheduling state (dirty bits,
     /// pending snapshots) is left unspecified; an embedder that catches the
     /// unwind should discard or rebuild the document rather than keep
     /// flushing it.
-    pub fn flush_document<T: ExternalState>(&self, document: &mut Document<T>) {
-        self.flush_document_with(document, Parallelism::Auto);
+    pub fn flush_document<T: ExternalState>(&self, document: &mut Document<T>) -> FlushSummary {
+        self.flush_document_with(document, Parallelism::Auto)
     }
 
     /// [`flush_document`](Self::flush_document) with explicit traversal
     /// scheduling.
+    ///
+    /// Collects the harvested damage into the returned [`FlushSummary`]'s
+    /// `Vec`. Embedders that want to avoid that allocation stream the damage
+    /// directly with
+    /// [`flush_document_with_sink`](Self::flush_document_with_sink).
     ///
     /// # Panics
     ///
@@ -178,10 +196,59 @@ impl StyleEngine {
         &self,
         document: &mut Document<T>,
         parallelism: Parallelism,
-    ) {
+    ) -> FlushSummary {
+        let mut damage = Vec::new();
+        let traversed = self.flush_document_with_sink(document, parallelism, &mut |id, d| {
+            damage.push((id, d));
+        });
+        FlushSummary { damage, traversed }
+    }
+
+    /// The zero-alloc flush primitive: restyle under the document element, then
+    /// stream each node's non-empty restyle damage to `sink` as it is
+    /// harvested, instead of collecting it into a `Vec`. Returns whether the
+    /// traversal ran (stylo's `pre_traverse` scheduling token said there was
+    /// work) — the `traversed` flag
+    /// [`flush_document_with`](Self::flush_document_with) records.
+    ///
+    /// `sink` is a `&mut dyn FnMut` rather than a generic `impl FnMut` so the
+    /// harvest walk (already monomorphized per external-state payload `T`) is
+    /// not additionally monomorphized per closure; the per-node dynamic call
+    /// is negligible next to the cascade work that produced the damage.
+    ///
+    /// The harvest walks from the traversal's **actual** root, which stylo's
+    /// `pre_traverse` (`vendor/stylo/style/traversal.rs`) may substitute: when
+    /// a flush root's snapshot invalidated its *siblings*, the traversal is
+    /// raised to the root's **parent** (the restyled siblings live under it,
+    /// and `propagate_dirty_bit_up_to` sets its `dirty_descendants`).
+    /// `driver::traverse_dom` returns that actual root; harvesting from it —
+    /// rather than the passed root — is what reaches (and clears) the siblings'
+    /// damage and the parent's dirty bit. Flushes here root at the document
+    /// **element** (`root_element`), for which the substitution is
+    /// structurally impossible: it has no element siblings for a snapshot to
+    /// invalidate (a document owns one element child), and stylo's raise path
+    /// resolves the substitute via `parent_element_or_host()`, which is `None`
+    /// for the document element (its parent is the slot-zero document *node*).
+    /// The harvest still follows the driver's returned root by contract — and
+    /// tolerates a non-element root defensively (no `ElementData`, so it
+    /// yields no damage and only clears its own bits) — purely as insurance
+    /// for a future subtree-flush entry point, where real element parents and
+    /// siblings exist. Without a traversal the passed root is harvested
+    /// directly (it is always inspected, even with no dirty bits).
+    ///
+    /// # Panics
+    ///
+    /// As [`flush_document_with`](Self::flush_document_with).
+    pub fn flush_document_with_sink<T: ExternalState>(
+        &self,
+        document: &mut Document<T>,
+        parallelism: Parallelism,
+        sink: &mut dyn FnMut(NodeId, StyleDamage),
+    ) -> bool {
         self.assert_owns(document);
         let Some(root) = document.root_element().map(Node::id) else {
-            return;
+            // No document element: no traversal, and nothing to harvest.
+            return false;
         };
         // Nodes own snapshots between mutations and flushes. Stylo's API
         // expects a map for the traversal, so drain the reachable snapshots
@@ -194,7 +261,7 @@ impl StyleEngine {
         // slot poisoning covers mid-panic node state).
         #[cfg(debug_assertions)]
         let _phase = document.begin_flush_phase();
-        {
+        let (harvest_root, traversed) = {
             let root_ref = document
                 .get(root)
                 .expect("the root element child is kept live or absent");
@@ -220,25 +287,41 @@ impl StyleEngine {
                 root_ref,
                 &traversal.shared,
             );
-            if token.should_traverse() {
+            // Read the scheduling decision before the token is moved into
+            // `traverse_dom`.
+            let should_traverse = token.should_traverse();
+            // `driver::traverse_dom` returns the traversal's actual root (the
+            // passed root, or its parent when a sibling invalidation raised
+            // it). `NodeId` is `Copy`, so capture the harvest root inside this
+            // shared-borrow scope before `root_ref` (and the shared context
+            // borrowing it) go out of scope.
+            let harvest_root = if should_traverse {
                 // stylo's sequential-task teardown asserts it runs on a
                 // LAYOUT thread (its pool workers are initialized as such);
                 // mark the embedder's calling thread for the traversal.
                 let _thread_state = LayoutThreadStateGuard::enter();
                 match parallelism {
                     Parallelism::Sequential => {
-                        driver::traverse_dom(&traversal, token, None);
+                        Node::id(driver::traverse_dom(&traversal, token, None))
                     }
                     Parallelism::Auto => {
                         let _pool_guard = STYLE_POOL_GUARD
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
                         let pool = STYLE_THREAD_POOL.pool();
-                        driver::traverse_dom(&traversal, token, pool.as_ref());
+                        Node::id(driver::traverse_dom(&traversal, token, pool.as_ref()))
                     }
                 }
-            }
-        }
-        document.complete_flush(root, &snapshots);
+            } else {
+                // No traversal ran, so the actual root is the passed root.
+                root
+            };
+            (harvest_root, should_traverse)
+        };
+        // Harvest runs under `&mut Document` now that the traversal (which
+        // borrowed the document through `root_ref`/the shared context) has
+        // finished.
+        document.harvest_flush(harvest_root, &snapshots, sink);
+        traversed
     }
 }

@@ -191,11 +191,16 @@ fn attach_detach_marks_reachability() {
         doc.get(root).unwrap().has_dirty_descendants(),
         "detaching under `list` must be reachable from the root"
     );
+    // Siblings gain no `dirty_descendants` at mutation time — only the
+    // mutated parent's ancestor spine does. (These never-styled nodes are
+    // always `is_style_dirty` under the derived semantics, so
+    // `dirty_descendants` is the mutation-time reachability signal to assert
+    // on here.)
     assert!(
-        !doc.get(before_sib).unwrap().is_style_dirty(),
+        !doc.get(before_sib).unwrap().has_dirty_descendants(),
         "siblings are not blanket-dirtied at mutation time"
     );
-    assert!(!doc.get(hint).unwrap().is_style_dirty());
+    assert!(!doc.get(hint).unwrap().has_dirty_descendants());
 
     doc.clear_dirty();
     doc.append(list, child);
@@ -205,10 +210,13 @@ fn attach_detach_marks_reachability() {
 
 #[test]
 fn attribute_change_marks_node_and_ancestors() {
-    // `root > container > [a, b, c]`, `b > b1`. An attribute change marks the
-    // node itself dirty and its ancestor chain reachable — nothing else at
-    // mutation time (invalidation-set matching happens at flush, driven by
-    // the pre-mutation snapshot the setter records).
+    // `root > container > [a, b, c]`, `b > b1`. An attribute change makes
+    // `b`'s ancestor chain reachable from the root — nothing else at mutation
+    // time (invalidation-set matching happens at flush, driven by the
+    // pre-mutation snapshot the setter records). These nodes are never
+    // styled, so under the derived semantics they are all `is_style_dirty`;
+    // the discriminating mutation-time signal is `dirty_descendants`, which
+    // is set on the ancestor spine only.
     let mut doc = Document::new();
     let root = node(&mut doc, "html");
     let container = node(&mut doc, "div");
@@ -225,14 +233,16 @@ fn attribute_change_marks_node_and_ancestors() {
 
     doc.set_attribute(b, "title", "hi");
 
-    assert!(doc.get(b).unwrap().is_style_dirty());
+    // `container` (b's parent) and `root` are on the reachability spine.
     assert!(doc.get(container).unwrap().has_dirty_descendants());
-    assert!(!doc.get(container).unwrap().is_style_dirty());
     assert!(doc.get(root).unwrap().has_dirty_descendants());
-    // Siblings and descendants are not blanket-dirtied.
-    assert!(!doc.get(a).unwrap().is_style_dirty());
-    assert!(!doc.get(c).unwrap().is_style_dirty());
-    assert!(!doc.get(b1).unwrap().is_style_dirty());
+    // `b` itself is the mutated node, not a spine node: only its ancestors
+    // gain `dirty_descendants`.
+    assert!(!doc.get(b).unwrap().has_dirty_descendants());
+    // Siblings and descendants gain no scheduling bits.
+    assert!(!doc.get(a).unwrap().has_dirty_descendants());
+    assert!(!doc.get(c).unwrap().has_dirty_descendants());
+    assert!(!doc.get(b1).unwrap().has_dirty_descendants());
 }
 
 #[test]
