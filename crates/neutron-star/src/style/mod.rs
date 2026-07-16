@@ -61,12 +61,14 @@
 //! `NaN`/`±∞` at the boundary is a host bug (debug-asserted by the
 //! algorithms, not defended against in release).
 
+pub mod containment;
 pub mod flex;
 pub mod grid;
 pub mod linear;
 pub mod relative;
 pub mod text;
 
+pub use containment::effective_containment;
 pub use flex::{FlexContainerStyle, FlexItemStyle};
 pub use grid::{GridContainerStyle, GridItemStyle};
 pub use linear::{LinearContainerStyle, LinearItemStyle};
@@ -82,12 +84,12 @@ pub use stylo::computed_values::{
 pub use stylo::values::computed::length::NonNegativeLengthPercentageOrNormal;
 pub use stylo::values::computed::lynx_layout::{RelativeAlign, RelativeReference};
 pub use stylo::values::computed::{
-    AspectRatio, Au, BorderSideWidth, ContentDistribution, Display, FlexBasis, FontFamily,
-    FontFeatureSettings, FontStyle, FontVariationSettings, FontWeight, GridAutoFlow, GridLine,
-    GridTemplateComponent, ImplicitGridTracks, Inset, ItemPlacement, JustifyItems,
-    LengthPercentage, LetterSpacing, LineHeight, Margin, MaxSize, NonNegativeLengthPercentage,
-    NonNegativeNumber, Overflow, PositionProperty, SelfAlignment, Size as StyleSize, TextAlign,
-    TextIndent, WordBreak,
+    AspectRatio, Au, BorderSideWidth, Contain, ContainIntrinsicSize, ContentDistribution,
+    ContentVisibility, Display, FlexBasis, FontFamily, FontFeatureSettings, FontStyle,
+    FontVariationSettings, FontWeight, GridAutoFlow, GridLine, GridTemplateComponent,
+    ImplicitGridTracks, Inset, ItemPlacement, JustifyItems, LengthPercentage, LetterSpacing,
+    LineHeight, Margin, MaxSize, NonNegativeLengthPercentage, NonNegativeNumber, Overflow,
+    PositionProperty, SelfAlignment, Size as StyleSize, TextAlign, TextIndent, WordBreak,
 };
 pub use stylo::values::specified::align::AlignFlags;
 pub use text::{TextBrush, TextContainerStyle, TextRun, TextRunStyle};
@@ -223,6 +225,44 @@ pub trait CoreStyle: Sized {
     fn direction(&self) -> direction::T {
         direction::T::Ltr
     }
+
+    /// The box's **effective** CSS containment ([`Contain`]).
+    ///
+    /// The host folds `content-visibility` into the raw `contain` value exactly
+    /// as stylo's gecko-mode adjuster does — see [`effective_containment`].
+    /// `content-visibility: hidden` (and `auto` while skipped) therefore
+    /// contributes `SIZE | LAYOUT | PAINT | STYLE`. When
+    /// [`skips_contents`](Self::skips_contents) is `true`, this **must** report
+    /// at least `SIZE | LAYOUT | PAINT | STYLE`. Consumers query the effect bits
+    /// ([`Contain::contains`]), never the `CONTENT`/`STRICT` marker composites
+    /// (see the [`containment`] module).
+    fn containment(&self) -> Contain {
+        Contain::empty()
+    }
+
+    /// `contain-intrinsic-width`: the substitute content-box width a
+    /// size-contained box reports instead of measuring its contents.
+    fn contain_intrinsic_width(&self) -> ContainIntrinsicSize {
+        ContainIntrinsicSize::None
+    }
+
+    /// `contain-intrinsic-height`: the substitute content-box height a
+    /// size-contained box reports instead of measuring its contents.
+    fn contain_intrinsic_height(&self) -> ContainIntrinsicSize {
+        ContainIntrinsicSize::None
+    }
+
+    /// Whether the box skips laying out its contents (`content-visibility:
+    /// hidden`, or `auto` while off-screen — the host supplies the relevance
+    /// signal).
+    ///
+    /// When `true`, host dispatch routes the node to
+    /// [`compute_skipped_contents_layout`](crate::compute::compute_skipped_contents_layout)
+    /// instead of an algorithm, and [`containment`](Self::containment) must
+    /// report at least `SIZE | LAYOUT | PAINT | STYLE`.
+    fn skips_contents(&self) -> bool {
+        false
+    }
 }
 
 impl<S: CoreStyle> CoreStyle for &S {
@@ -281,6 +321,22 @@ impl<S: CoreStyle> CoreStyle for &S {
     fn direction(&self) -> direction::T {
         (**self).direction()
     }
+
+    fn containment(&self) -> Contain {
+        (**self).containment()
+    }
+
+    fn contain_intrinsic_width(&self) -> ContainIntrinsicSize {
+        (**self).contain_intrinsic_width()
+    }
+
+    fn contain_intrinsic_height(&self) -> ContainIntrinsicSize {
+        (**self).contain_intrinsic_height()
+    }
+
+    fn skips_contents(&self) -> bool {
+        (**self).skips_contents()
+    }
 }
 
 #[cfg(test)]
@@ -332,6 +388,17 @@ mod tests {
         );
         assert_eq!(style.box_sizing(), box_sizing::T::ContentBox);
         assert_eq!(style.direction(), direction::T::Ltr);
+        assert_eq!(style.containment(), Contain::empty());
+        assert_eq!(style.contain_intrinsic_width(), ContainIntrinsicSize::None);
+        assert_eq!(style.contain_intrinsic_height(), ContainIntrinsicSize::None);
+        assert!(!style.skips_contents());
+
+        // The blanket `&S` view forwards the new accessors too.
+        let view = &style;
+        assert_eq!(view.containment(), Contain::empty());
+        assert_eq!(view.contain_intrinsic_width(), ContainIntrinsicSize::None);
+        assert_eq!(view.contain_intrinsic_height(), ContainIntrinsicSize::None);
+        assert!(!view.skips_contents());
     }
 
     #[test]

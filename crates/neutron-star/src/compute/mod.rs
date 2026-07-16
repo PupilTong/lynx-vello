@@ -25,11 +25,11 @@
 //! ```
 //! use neutron_star::compute::{
 //!     compute_cached_layout, compute_flexbox_layout, compute_grid_layout, compute_linear_layout,
-//!     compute_relative_layout, hide_subtree,
+//!     compute_relative_layout, compute_skipped_contents_layout, hide_subtree,
 //! };
 //! use neutron_star::style::{
-//!     FlexContainerStyle, FlexItemStyle, GridContainerStyle, GridItemStyle, LinearContainerStyle,
-//!     LinearItemStyle, RelativeContainerStyle, RelativeItemStyle,
+//!     CoreStyle, FlexContainerStyle, FlexItemStyle, GridContainerStyle, GridItemStyle,
+//!     LinearContainerStyle, LinearItemStyle, RelativeContainerStyle, RelativeItemStyle,
 //! };
 //! use neutron_star::tree::{LayoutInput, LayoutNode, LayoutOutput};
 //!
@@ -62,6 +62,12 @@
 //!         return LayoutOutput::HIDDEN;
 //!     }
 //!
+//!     // content-visibility skipping routes here next, still outside the cache:
+//!     // it sizes the box from contain-intrinsic-size and hides its contents.
+//!     if node.style().skips_contents() {
+//!         return compute_skipped_contents_layout(node, input);
+//!     }
+//!
 //!     compute_cached_layout(node, input, |node, input| {
 //!         match display {
 //!             Display::Hidden => unreachable!(),
@@ -75,6 +81,26 @@
 //! }
 //! # fn host_display_of<N>(_: N) -> Display { Display::Flex }
 //! ```
+//!
+//! # Independent formatting contexts and layout containment
+//!
+//! Each display mode here is already its own formatting context (there is no
+//! block flow and thus no margin collapsing yet), so `contain: layout`'s
+//! "independent formatting context / no margin-collapse across the boundary"
+//! requirement is satisfied structurally. When block layout and its margin
+//! collapsing land, a `LAYOUT`-contained box must additionally suppress
+//! collapsing through its boundary. Layout containment has two *active* v1
+//! effects, both at each algorithm's output construction: it suppresses the
+//! container baseline exported to the parent, and — per
+//! [css-contain-2 §3.3](https://drafts.csswg.org/css-contain-2/#containment-layout)
+//! — it collapses the box's own scrollable overflow to its border box when
+//! `overflow: visible` (descendant overflow becomes ink overflow), via the
+//! `own_scrollable_overflow` helper. Orthogonally, scrollable overflow is
+//! *trapped* at every scroll container ([css-overflow-3
+//! §3.3](https://drafts.csswg.org/css-overflow-3/#scrollable)): a
+//! scroll-container child contributes only its border box to its container's
+//! `content_size` (the `accumulate_scrollable_overflow` helper), regardless of
+//! containment.
 //!
 //! The host's `LayoutNode::compute_child_layout` implementation simply calls
 //! its `dispatch`. Algorithms call back into `compute_child_layout` for each
@@ -113,12 +139,14 @@ use stylo::computed_values::direction;
 use stylo::values::computed::{Margin, Size as StyleSize};
 
 use self::util::{
-    apply_box_sizing, auto_edges_to_zero, clamp, resolve_border, resolve_insets,
-    resolve_length_percentage, resolve_margins, resolve_max_sizes, resolve_padding, resolve_size,
-    used_aspect_ratio,
+    apply_box_sizing, auto_edges_to_zero, clamp, clamp_axis, resolve_border, resolve_container_box,
+    resolve_insets, resolve_length_percentage, resolve_margins, resolve_max_sizes, resolve_padding,
+    resolve_size, used_aspect_ratio,
 };
 use crate::geometry::{Edges, Point, Size};
+use crate::invalidate::is_relayout_boundary;
 use crate::style::CoreStyle;
+use crate::style::containment::contain_intrinsic_length;
 use crate::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
 };
@@ -207,6 +235,47 @@ fn resolve_root_margins(
     margin
 }
 
+/// Re-runs a **relayout boundary** in place after an internal mutation, reusing
+/// the exact [`LayoutInput`] it was last committed with.
+///
+/// A [`is_relayout_boundary`] node
+/// (`contain: strict`, or a skipped `content-visibility` box) is safely
+/// re-rootable: an internal descendant change can neither escape the box's
+/// formatting context nor alter its own outer size. But a boundary's used size
+/// is frequently **parent-imposed** — a stretched cross size
+/// (`align-items: stretch`), a flex-grown main size, a resolved percentage.
+/// [`compute_root_layout`] would discard that, synthesizing a fresh input from
+/// `available_space` only, so the boundary would re-derive its *self-determined*
+/// size and desync from its un-invalidated ancestors.
+///
+/// This entry instead re-runs `node` with the **verbatim** `input` — obtain it
+/// from [`Cache::committed_input`](crate::cache::Cache::committed_input) *before*
+/// [`invalidate_for_relayout`](crate::invalidate::invalidate_for_relayout)
+/// clears the cache. Because identical input plus unchanged style
+/// deterministically yields an identical outer size (size containment
+/// guarantees interior changes cannot affect it), **only the interior
+/// re-arranges** and every ancestor stays valid. `input`'s
+/// [`goal`](LayoutGoal) is normalized to
+/// [`Commit`](LayoutGoal::Commit): a committed slot always carries `Commit`
+/// already, but a stray `Measure` input must not be replayed as a
+/// geometry-storing pass.
+///
+/// Unlike [`compute_root_layout`], this does **not** store `node`'s own
+/// [`Layout`]: at a boundary that record belongs to the still-valid parent and
+/// is unchanged. The recursive commit refreshes the interior and re-populates
+/// `node`'s cache; the returned [`LayoutOutput`] (its `size` equal to the
+/// boundary's unchanged outer size) is handed back for the host to consume.
+pub fn compute_boundary_relayout<N: LayoutNode>(node: N, input: LayoutInput) -> LayoutOutput {
+    debug_assert!(
+        is_relayout_boundary(&node.style()),
+        "compute_boundary_relayout requires a relayout boundary \
+         (contain: strict, or a skipped content-visibility box)"
+    );
+    let mut input = input;
+    input.goal = LayoutGoal::Commit;
+    node.compute_child_layout(input)
+}
+
 /// Wraps one node's layout computation in the shared caching policy.
 ///
 /// After handling `display: none` with [`hide_subtree`], the host calls this
@@ -259,6 +328,79 @@ pub fn hide_subtree<N: LayoutNode>(node: N) {
     for child in node.children() {
         hide_subtree(child);
     }
+}
+
+/// Lays out a box whose **contents are skipped** — `content-visibility:
+/// hidden` (and `auto` while off-screen), reported by
+/// [`CoreStyle::skips_contents`].
+///
+/// The node still generates its own principal box: it is sized purely from its
+/// styles with `contain-intrinsic-{width,height}` substituted for the
+/// content-derived size (both axes, since a skipped box is size-contained by
+/// contract — see [`CoreStyle::skips_contents`]), and **none of its children
+/// are laid out**. On a [`LayoutGoal::Commit`] each child subtree is passed to
+/// [`hide_subtree`], mirroring the `display: none` discipline so stale
+/// descendant geometry and caches from a previous non-skipped pass are cleaned.
+/// A [`LayoutGoal::Measure`] probe stays side-effect free (no hiding).
+///
+/// Because the returned box has no laid-out contents, its `content_size`
+/// equals its border box and it exports no baseline (matching layout
+/// containment).
+///
+/// # Dispatch placement (host contract)
+///
+/// Route here **before** [`compute_cached_layout`], right after the
+/// `display: none` check:
+///
+/// ```text
+/// if style.display().is_none() { hide_subtree(node); return HIDDEN; }
+/// if style.skips_contents()    { return compute_skipped_contents_layout(node, input); }
+/// compute_cached_layout(node, input, <algorithm dispatch>)
+/// ```
+///
+/// Like [`hide_subtree`], the child-hiding here deliberately **precedes and
+/// bypasses the cache boundary**: caching a skipped result and later serving it
+/// on a hit would leave a re-populated child subtree un-hidden. Sizing a
+/// contentless box is cheap and `hide_subtree` is far cheaper than laying the
+/// subtree out, so recomputing it per pass is acceptable; a normal→skipped
+/// transition (the host [`cache_clear`](LayoutNode::cache_clear)s on the style
+/// change) therefore always re-hides the freshly-orphaned descendants, and a
+/// skipped→normal transition re-dispatches to the algorithm.
+pub fn compute_skipped_contents_layout<N: LayoutNode>(node: N, input: LayoutInput) -> LayoutOutput {
+    let style = node.style();
+    let metrics = resolve_container_box(&style, input);
+    let intrinsic = Size::new(
+        contain_intrinsic_length(&style.contain_intrinsic_width()),
+        contain_intrinsic_length(&style.contain_intrinsic_height()),
+    );
+    let outer_size = Size::new(
+        metrics.outer.width.unwrap_or_else(|| {
+            clamp_axis(
+                intrinsic.width.unwrap_or(0.0) + metrics.box_inset.width,
+                metrics.min.width,
+                metrics.max.width,
+                metrics.box_inset.width,
+            )
+        }),
+        metrics.outer.height.unwrap_or_else(|| {
+            clamp_axis(
+                intrinsic.height.unwrap_or(0.0) + metrics.box_inset.height,
+                metrics.min.height,
+                metrics.max.height,
+                metrics.box_inset.height,
+            )
+        }),
+    );
+
+    if input.goal == LayoutGoal::Commit {
+        // Clean any descendant geometry/caches left by a prior non-skipped
+        // pass. This precedes and bypasses the cache, mirroring hide_subtree.
+        for child in node.children() {
+            hide_subtree(child);
+        }
+    }
+
+    LayoutOutput::new(outer_size, outer_size)
 }
 
 /// Sizes and positions one out-of-flow node against its containing block —

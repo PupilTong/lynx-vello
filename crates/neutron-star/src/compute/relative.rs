@@ -11,12 +11,13 @@ use stylo::values::computed::{LengthPercentage, MaxSize, PositionProperty, Size 
 
 use super::compute_absolute_layout;
 use super::util::{
-    ItemKey, OrderedItem, ResolvedContainerBox, ResolvedItemBox, box_inset_size, clamp_axis,
-    preferred_size_definiteness, resolve_container_box, resolve_item_box_with_bases,
-    resolve_length_percentage, sort_and_assign_layout_order, subtract_available_space,
-    used_aspect_ratio,
+    ItemKey, OrderedItem, ResolvedContainerBox, ResolvedItemBox, accumulate_scrollable_overflow,
+    box_inset_size, clamp_axis, own_scrollable_overflow, preferred_size_definiteness,
+    resolve_container_box, resolve_item_box_with_bases, resolve_length_percentage,
+    sort_and_assign_layout_order, subtract_available_space, used_aspect_ratio,
 };
 use crate::geometry::{Edges, Line, Point, Size};
+use crate::style::containment::size_containment;
 use crate::style::relative::{RELATIVE_REFERENCE_NONE, RELATIVE_REFERENCE_PARENT};
 use crate::style::{CoreStyle, RelativeContainerStyle, RelativeItemStyle};
 use crate::tree::{
@@ -1276,6 +1277,14 @@ fn refresh_item_bases<N>(
     }
 }
 
+/// The substitute wrap-content extent for a size-contained axis, or `None`
+/// when the container is not size-contained (callers fall back to the real
+/// wrap-content bounds).
+#[inline]
+fn contained_extent(size_containment: Option<Size<Option<f32>>>, axis: Axis) -> Option<f32> {
+    size_containment.map(|intrinsic| axis.size(intrinsic).unwrap_or(0.0))
+}
+
 #[inline]
 fn final_outer_axis(
     initial_outer: Option<f32>,
@@ -1305,6 +1314,7 @@ fn two_pass_layout<N>(
     box_inset: Size<f32>,
     min_size: Size<Option<f32>>,
     max_size: Size<Option<f32>>,
+    size_containment: Option<Size<Option<f32>>>,
 ) -> Size<f32>
 where
     N: LayoutNode,
@@ -1335,7 +1345,8 @@ where
     let outer_width = final_outer_axis(
         initial_outer.width,
         caller_known.width,
-        horizontal_bounds.extent(),
+        contained_extent(size_containment, Axis::Horizontal)
+            .unwrap_or_else(|| horizontal_bounds.extent()),
         box_inset.width,
         min_size.width,
         max_size.width,
@@ -1372,7 +1383,8 @@ where
     let outer_height = final_outer_axis(
         initial_outer.height,
         caller_known.height,
-        vertical_bounds.extent(),
+        contained_extent(size_containment, Axis::Vertical)
+            .unwrap_or_else(|| vertical_bounds.extent()),
         box_inset.height,
         min_size.height,
         max_size.height,
@@ -1455,12 +1467,15 @@ where
         layout.margin = item.margin;
         item.key.node.set_unrounded_layout(&layout);
 
-        scrollable_size.width = scrollable_size
-            .width
-            .max(location.x + output.size.width.max(output.content_size.width));
-        scrollable_size.height = scrollable_size
-            .height
-            .max(location.y + output.size.height.max(output.content_size.height));
+        // A scroll-container child traps its interior scrollable overflow;
+        // any other child propagates border box ∪ content_size (§3.3).
+        accumulate_scrollable_overflow(
+            &mut scrollable_size,
+            location,
+            output.size,
+            output.content_size,
+            item.key.node.style().overflow(),
+        );
     }
     scrollable_size
 }
@@ -1488,12 +1503,13 @@ where
                 layout.order = pending.layout_order;
                 layout.location.x += border.left;
                 layout.location.y += border.top;
-                scrollable_size.width = scrollable_size
-                    .width
-                    .max(layout.location.x + layout.size.width.max(layout.content_size.width));
-                scrollable_size.height = scrollable_size
-                    .height
-                    .max(layout.location.y + layout.size.height.max(layout.content_size.height));
+                accumulate_scrollable_overflow(
+                    &mut scrollable_size,
+                    layout.location,
+                    layout.size,
+                    layout.content_size,
+                    style.overflow(),
+                );
                 pending.node.set_unrounded_layout(&layout);
             }
             // The containing block is not the layout parent (CSS `fixed`):
@@ -1526,6 +1542,11 @@ where
     N::Style: RelativeContainerStyle + RelativeItemStyle,
 {
     let style = node.style();
+    // Size containment substitutes contain-intrinsic-size for the container's
+    // wrap-content bounds. Items are still measured, positioned, and committed
+    // (they may overflow the contained box). Relative containers export no
+    // baseline, so layout containment needs no extra suppression here.
+    let size_containment = size_containment(&style);
     let layout_once = style.relative_layout_once() == relative_layout_once::T::True;
     let style_definite = if input.sizing_mode == SizingMode::ContentSize {
         Size::new(false, false)
@@ -1612,7 +1633,8 @@ where
             final_outer_axis(
                 initial_outer.width,
                 input.known_dimensions.width,
-                bounds.width.extent(),
+                contained_extent(size_containment, Axis::Horizontal)
+                    .unwrap_or_else(|| bounds.width.extent()),
                 box_inset.width,
                 min_size.width,
                 max_size.width,
@@ -1620,7 +1642,8 @@ where
             final_outer_axis(
                 initial_outer.height,
                 input.known_dimensions.height,
-                bounds.height.extent(),
+                contained_extent(size_containment, Axis::Vertical)
+                    .unwrap_or_else(|| bounds.height.extent()),
                 box_inset.height,
                 min_size.height,
                 max_size.height,
@@ -1641,6 +1664,7 @@ where
             box_inset,
             min_size,
             max_size,
+            size_containment,
         )
     };
     let content_size = Size::new(
@@ -1664,6 +1688,10 @@ where
         f32::max,
     );
 
+    // css-contain-2 §3.3: a layout-contained container with `overflow: visible`
+    // reports its border box as its scrollable overflow (descendant overflow is
+    // ink-only); a scroll container keeps the interior union.
+    let scrollable_size = own_scrollable_overflow(&style, outer_size, scrollable_size);
     LayoutOutput::new(outer_size, scrollable_size)
 }
 

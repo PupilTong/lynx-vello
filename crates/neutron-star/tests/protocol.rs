@@ -17,18 +17,20 @@ use std::fmt;
 
 use neutron_star::cache::Cache;
 use neutron_star::compute::{
-    compute_absolute_layout, compute_cached_layout, compute_leaf_layout, compute_root_layout,
-    hide_subtree, round_layout,
+    compute_absolute_layout, compute_boundary_relayout, compute_cached_layout,
+    compute_flexbox_layout, compute_leaf_layout, compute_root_layout,
+    compute_skipped_contents_layout, hide_subtree, round_layout,
 };
+use neutron_star::invalidate::{invalidate_for_relayout, is_relayout_boundary};
 use neutron_star::prelude::*;
 use style_traits::values::specified::AllowedNumericType;
 use stylo::Zero;
 use stylo::computed_values::{relative_center, relative_layout_once, visibility};
 use stylo::values::computed::length_percentage::{CalcNode, ComputedLeaf};
 use stylo::values::computed::{
-    Display, GridLine, GridTemplateComponent, ImplicitGridTracks, Length, LengthPercentage, Margin,
-    NonNegativeLengthPercentage, NonNegativeNumber, Percentage, PositionProperty,
-    Size as StyleSize,
+    Contain, ContainIntrinsicSize, Display, GridLine, GridTemplateComponent, ImplicitGridTracks,
+    Length, LengthPercentage, Margin, NonNegativeLengthPercentage, NonNegativeNumber, Percentage,
+    PositionProperty, Size as StyleSize,
 };
 use stylo::values::generics::NonNegative;
 use stylo::values::generics::grid::{
@@ -92,6 +94,7 @@ fn track_list(tracks: Vec<TrackSize<LengthPercentage>>) -> GridTemplateComponent
 enum MockDisplay {
     #[default]
     Leaf,
+    Flex,
     Hidden,
 }
 
@@ -107,6 +110,10 @@ struct MockStyle {
     grid_column: Line<GridLine>,
     template_columns: GridTemplateComponent,
     implicit_tracks: ImplicitGridTracks,
+    containment: Contain,
+    contain_intrinsic_width: ContainIntrinsicSize,
+    contain_intrinsic_height: ContainIntrinsicSize,
+    skips_contents: bool,
 }
 
 fn auto_horizontal_margin() -> Edges<Margin> {
@@ -129,6 +136,10 @@ impl Default for MockStyle {
             grid_column: Line::new(GridLine::auto(), GridLine::auto()),
             template_columns: GridTemplateComponent::None,
             implicit_tracks: GenericImplicitGridTracks(stylo::OwnedSlice::default()),
+            containment: Contain::empty(),
+            contain_intrinsic_width: ContainIntrinsicSize::None,
+            contain_intrinsic_height: ContainIntrinsicSize::None,
+            skips_contents: false,
         }
     }
 }
@@ -152,6 +163,22 @@ impl CoreStyle for MockStyle {
 
     fn margin(&self) -> Edges<&Margin> {
         self.margin.as_ref()
+    }
+
+    fn containment(&self) -> Contain {
+        self.containment
+    }
+
+    fn contain_intrinsic_width(&self) -> ContainIntrinsicSize {
+        self.contain_intrinsic_width.clone()
+    }
+
+    fn contain_intrinsic_height(&self) -> ContainIntrinsicSize {
+        self.contain_intrinsic_height.clone()
+    }
+
+    fn skips_contents(&self) -> bool {
+        self.skips_contents
     }
 }
 
@@ -329,8 +356,15 @@ impl<'t> LayoutNode for MockRef<'t> {
             return LayoutOutput::HIDDEN;
         }
 
+        // content-visibility skipping routes here, outside the cache boundary,
+        // exactly like display:none (see the compute module docs).
+        if style.skips_contents() {
+            return compute_skipped_contents_layout(self, input);
+        }
+
         compute_cached_layout(self, input, |handle, input| match handle.style().display {
             MockDisplay::Hidden => unreachable!("handled before the cache boundary"),
+            MockDisplay::Flex => compute_flexbox_layout(handle, input),
             MockDisplay::Leaf => {
                 LayoutOutput::new(input.known_dimensions.unwrap_or(Size::ZERO), Size::ZERO)
             }
@@ -950,4 +984,261 @@ fn default_child_count_counts_the_children_iterator() {
         .child_count(),
         0
     );
+}
+
+// ---------------------------------------------------------------------------
+// Containment-bounded, damage-driven cache invalidation.
+// ---------------------------------------------------------------------------
+
+fn size_px(value: f32) -> StyleSize {
+    StyleSize::LengthPercentage(npx(value))
+}
+
+fn contain_len(value: f32) -> ContainIntrinsicSize {
+    ContainIntrinsicSize::Length(NonNegative(Length::new(value)))
+}
+
+fn contain_auto_len(value: f32) -> ContainIntrinsicSize {
+    ContainIntrinsicSize::AutoLength(NonNegative(Length::new(value)))
+}
+
+fn contained_style(containment: Contain) -> MockStyle {
+    MockStyle {
+        containment,
+        ..MockStyle::default()
+    }
+}
+
+#[test]
+fn relayout_boundary_requires_both_layout_and_size() {
+    // Only layout AND size together (strict, or a skipped content-visibility
+    // box) close the upward path.
+    assert!(is_relayout_boundary(&contained_style(Contain::STRICT)));
+    assert!(is_relayout_boundary(&contained_style(
+        Contain::SIZE | Contain::LAYOUT
+    )));
+    // Layout alone is famously NOT a boundary; nor is size alone or content.
+    assert!(!is_relayout_boundary(&contained_style(Contain::LAYOUT)));
+    assert!(!is_relayout_boundary(&contained_style(Contain::SIZE)));
+    assert!(!is_relayout_boundary(&contained_style(Contain::CONTENT)));
+    assert!(!is_relayout_boundary(&contained_style(Contain::empty())));
+    // Single-axis inline-size never reaches the full SIZE bit test.
+    assert!(!is_relayout_boundary(&contained_style(
+        Contain::INLINE_SIZE | Contain::LAYOUT
+    )));
+}
+
+#[test]
+fn invalidate_for_relayout_stops_at_the_nearest_boundary() {
+    let mut tree = MockTree::default();
+    let leaf = tree.push(MockStyle::default(), vec![]);
+    let boundary = tree.push(contained_style(Contain::STRICT), vec![leaf]);
+    let root = tree.push(MockStyle::default(), vec![boundary]);
+
+    // Seed every cache so we can observe which ones get cleared.
+    for node in [leaf, boundary, root] {
+        tree.session_node(node).cache.borrow_mut().store(
+            LayoutInput::default(),
+            LayoutOutput::new(Size::new(1.0, 1.0), Size::ZERO),
+        );
+    }
+
+    let re_root = invalidate_for_relayout(
+        tree.node(leaf),
+        [tree.node(boundary), tree.node(root)].into_iter(),
+    );
+
+    // Stops at (and returns) the boundary; the root above it is untouched.
+    assert_eq!(re_root.index, boundary);
+    assert_eq!(*tree.invalidated.borrow(), vec![leaf, boundary]);
+    assert!(tree.session_node(leaf).cache.borrow().is_empty());
+    assert!(tree.session_node(boundary).cache.borrow().is_empty());
+    assert!(!tree.session_node(root).cache.borrow().is_empty());
+}
+
+#[test]
+fn invalidate_for_relayout_walks_to_root_without_a_boundary() {
+    let mut tree = MockTree::default();
+    let leaf = tree.push(MockStyle::default(), vec![]);
+    // `content` is layout+paint+style but no size — not a boundary.
+    let mid = tree.push(contained_style(Contain::CONTENT), vec![leaf]);
+    let root = tree.push(MockStyle::default(), vec![mid]);
+
+    let re_root = invalidate_for_relayout(
+        tree.node(leaf),
+        [tree.node(mid), tree.node(root)].into_iter(),
+    );
+
+    // No ancestor is a boundary, so the last yielded node (the root) is
+    // returned and every cache on the path is cleared.
+    assert_eq!(re_root.index, root);
+    assert_eq!(*tree.invalidated.borrow(), vec![leaf, mid, root]);
+}
+
+#[test]
+fn invalidate_for_relayout_returns_the_node_when_it_is_the_root() {
+    let mut tree = MockTree::default();
+    let lone = tree.push(MockStyle::default(), vec![]);
+
+    let re_root = invalidate_for_relayout(tree.node(lone), std::iter::empty());
+
+    assert_eq!(re_root.index, lone);
+    assert_eq!(*tree.invalidated.borrow(), vec![lone]);
+}
+
+/// A `contain: strict` flex container stretched on its cross axis by a flex
+/// parent, holding one interior leaf. Returns `(tree, parent, boundary,
+/// interior)` after an initial full layout.
+fn stretched_boundary_tree() -> (MockTree, usize, usize, usize) {
+    let mut tree = MockTree::default();
+    // Interior leaf: 40px main size, auto cross (stretched by the boundary).
+    let interior = tree.push(
+        MockStyle {
+            size: Size::new(size_px(40.0), StyleSize::auto()),
+            ..MockStyle::default()
+        },
+        vec![],
+    );
+    // The boundary: a strict-contained flex row. Its 50px main size is
+    // self-determined, but its cross (height) is auto — so the parent stretches
+    // it to 200, well above its own contain-intrinsic-height of 30.
+    let boundary = tree.push(
+        MockStyle {
+            display: MockDisplay::Flex,
+            size: Size::new(size_px(50.0), StyleSize::auto()),
+            containment: Contain::STRICT,
+            contain_intrinsic_width: contain_len(50.0),
+            contain_intrinsic_height: contain_len(30.0),
+            ..MockStyle::default()
+        },
+        vec![interior],
+    );
+    // The parent: a definite 300x200 flex row; `align-items` defaults to
+    // stretch, so it imposes height 200 on the boundary.
+    let parent = tree.push(
+        MockStyle {
+            display: MockDisplay::Flex,
+            size: Size::new(size_px(300.0), size_px(200.0)),
+            ..MockStyle::default()
+        },
+        vec![boundary],
+    );
+
+    tree.compute_child_layout(
+        parent,
+        LayoutInput::perform_layout(Size::NONE, Size::NONE, Size::MAX_CONTENT),
+    );
+    (tree, parent, boundary, interior)
+}
+
+#[test]
+fn compute_boundary_relayout_preserves_the_parent_imposed_size_and_updates_the_interior() {
+    let (mut tree, parent, boundary, interior) = stretched_boundary_tree();
+
+    // The parent stretched the boundary's cross axis to 200 (its self-determined
+    // contain-intrinsic-height is only 30); its main size is the 50px style.
+    let boundary_layout = tree.unrounded_layout(boundary);
+    assert_eq!(boundary_layout.size, Size::new(50.0, 200.0));
+    assert_eq!(tree.unrounded_layout(interior).size, Size::new(40.0, 200.0));
+
+    // Capture the exact input the boundary was committed with — carrying the
+    // stretched cross size — BEFORE invalidation clears the cache.
+    let committed = tree
+        .session_node(boundary)
+        .cache
+        .borrow()
+        .committed_input()
+        .expect("the boundary has a committed layout");
+
+    // Mutate the interior; size containment means this cannot change the
+    // boundary's outer size.
+    tree.nodes[interior].style.size.width = size_px(20.0);
+
+    // Invalidate up from the damaged interior; the walk stops at the boundary.
+    let re_root = invalidate_for_relayout(
+        tree.node(interior),
+        [tree.node(boundary), tree.node(parent)].into_iter(),
+    );
+    assert_eq!(re_root.index, boundary);
+
+    // Re-root at the boundary with its preserved committed input.
+    let output = compute_boundary_relayout(tree.node(boundary), committed);
+
+    // Deterministically identical outer size (size containment).
+    assert_eq!(output.size, Size::new(50.0, 200.0));
+    // The boundary's own stored frame (owned by the un-invalidated parent) is
+    // untouched: same location, same size.
+    let after = tree.unrounded_layout(boundary);
+    assert_eq!(after.location, boundary_layout.location);
+    assert_eq!(after.size, boundary_layout.size);
+    // The interior re-arranged to the mutated size.
+    assert_eq!(tree.unrounded_layout(interior).size, Size::new(20.0, 200.0));
+}
+
+#[test]
+fn compute_root_layout_would_resize_a_stretched_boundary_regression_contrast() {
+    // Documents WHY compute_boundary_relayout preserves the committed input:
+    // re-rooting the SAME stretched boundary via compute_root_layout (which
+    // synthesizes a fresh input from available space) re-derives its
+    // self-determined size and desyncs from the parent's imposed 200.
+    let (tree, _parent, boundary, _interior) = stretched_boundary_tree();
+    let stretched = tree.unrounded_layout(boundary).size;
+    assert_eq!(stretched, Size::new(50.0, 200.0));
+
+    compute_root_layout(
+        tree.node(boundary),
+        Size::new(
+            AvailableSpace::Definite(300.0),
+            AvailableSpace::Definite(200.0),
+        ),
+    );
+
+    // Without the imposed cross size, the boundary falls back to its
+    // contain-intrinsic-height (30) — a different outer size than the
+    // parent-stretched one, which is exactly the desync the committed-input
+    // re-root avoids.
+    let self_determined = tree.unrounded_layout(boundary).size;
+    assert_eq!(self_determined, Size::new(50.0, 30.0));
+    assert_ne!(self_determined, stretched);
+}
+
+#[test]
+fn skipped_contents_dispatch_sizes_from_intrinsic_and_hides_descendants() {
+    let mut tree = MockTree::default();
+    let child = tree.push(MockStyle::default(), vec![]);
+    let skipped = tree.push(
+        MockStyle {
+            skips_contents: true,
+            containment: Contain::STRICT,
+            contain_intrinsic_width: contain_len(40.0),
+            contain_intrinsic_height: contain_auto_len(24.0),
+            ..MockStyle::default()
+        },
+        vec![child],
+    );
+    // Give the child stale geometry from a hypothetical earlier non-skipped
+    // pass; the skipped commit must clean it.
+    let mut stale = tree.session_node(child).unrounded.get();
+    stale.size = Size::new(99.0, 99.0);
+    tree.session_node(child).unrounded.set(stale);
+
+    let output = tree.compute_child_layout(
+        skipped,
+        LayoutInput::perform_layout(
+            Size::NONE,
+            Size::new(Some(200.0), Some(200.0)),
+            Size::new(
+                AvailableSpace::Definite(200.0),
+                AvailableSpace::Definite(200.0),
+            ),
+        ),
+    );
+
+    // Sized purely from contain-intrinsic-size (auto <len> behaves as <len>).
+    assert_eq!(output.size, Size::new(40.0, 24.0));
+    // Skipped boxes are layout-contained: no baseline escapes.
+    assert_eq!(output.first_baselines, Point::NONE);
+    // The child subtree was hidden (zeroed) on commit.
+    assert_eq!(tree.unrounded_layout(child), Layout::default());
+    assert!(tree.invalidated.borrow().contains(&child));
 }

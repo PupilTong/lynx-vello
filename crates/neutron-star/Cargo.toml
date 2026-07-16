@@ -53,6 +53,10 @@ name = "linear"
 harness = false
 
 [[bench]]
+name = "containment"
+harness = false
+
+[[bench]]
 name = "text"
 harness = false
 required-features = ["text"]
