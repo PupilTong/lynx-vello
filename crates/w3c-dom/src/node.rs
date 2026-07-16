@@ -305,9 +305,10 @@ pub struct Node<T> {
     pub(crate) inline_block: Option<Arc<Locked<PropertyDeclarationBlock>>>,
 
     /// This node's matching-relevant state before its first mutation since
-    /// the last style flush. Drained into stylo's temporary `SnapshotMap` at
+    /// the last style flush. Boxed so the common no-snapshot case costs one
+    /// word in every node; drained into stylo's temporary `SnapshotMap` at
     /// the start of a flush.
-    pub(crate) snapshot: Option<Snapshot>,
+    pub(crate) snapshot: Option<Box<Snapshot>>,
 
     /// stylo's per-element style data (`ElementData`), created lazily via
     /// `TElement::ensure_data`. The resolved computed style lives here (see

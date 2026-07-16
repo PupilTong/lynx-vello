@@ -617,14 +617,14 @@ impl<T: ExternalState> Document<T> {
                 .core_mut()
                 .node_mut(id)
                 .expect("live node disappeared while recording its snapshot");
-            node.snapshot = Some(snapshot);
+            node.snapshot = Some(Box::new(snapshot));
             node.set_snapshot_present();
         }
         self.core_mut()
             .node_mut(id)
             .expect("live node disappeared while refining its snapshot")
             .snapshot
-            .as_mut()
+            .as_deref_mut()
     }
 }
 

@@ -150,8 +150,8 @@ unsafe impl<T> Sync for CorePtr<T> {}
 /// Everything a node's backpointer must reach lives here: the slab storage
 /// (id → node resolution for tree navigation) and the shared style lock
 /// (stylo's `TDocument::shared_lock`). The document-element link rides along
-/// so the whole document state is one allocation; each pending snapshot lives
-/// on its node.
+/// in the same pinned allocation. Each pending snapshot remains owned by its
+/// node but is boxed lazily so clean nodes pay only one word for the slot.
 pub(crate) struct Core<T> {
     /// Node storage. `nodes[id.index]` holds the live node for that slab key;
     /// `Slab` owns vacant-slot tracking and reuse.
@@ -664,7 +664,7 @@ impl<T> Document<T> {
                 "snapshot slot and lifecycle flag diverged before flush"
             );
             if let Some(snapshot) = node.snapshot.take() {
-                snapshots.insert(node.id().opaque(), snapshot);
+                snapshots.insert(node.id().opaque(), *snapshot);
             }
             if node.has_dirty_descendants() {
                 stack.extend_from_slice(&node.children);

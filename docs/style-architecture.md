@@ -20,8 +20,9 @@ Document/Node design (this document describes the current shape).
 - **ONE TREE policy.** `Document<T>` is the single owner of everything tree-shaped: node storage
   (a `Slab` of mixed element/text nodes with versioned handles), the real DOM document node and
   its optional `documentElement`, and the private style context (`SharedRwLock` + base URL). Each
-  pending pre-mutation snapshot lives directly on its node. There is no separate arena/tree
-  object, and no public way to construct or mutate a `Node<T>` outside its document —
+  pending pre-mutation snapshot is owned by its node in a pointer-sized optional box, allocated
+  only when a previously styled element is first mutated between flushes. There is no separate
+  arena/tree object, and no public way to construct or mutate a `Node<T>` outside its document —
   `Document::create_element` and `Document::create_text_node` are the kind-specific factories,
   and every DOM operation is a `Document` method.
 - **Invalidation is carried by the operations.** Each matching-relevant setter
