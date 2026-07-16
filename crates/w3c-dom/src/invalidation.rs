@@ -9,10 +9,11 @@
 //! recomputes:
 //!
 //! 1. **Snapshots** (fine-grained, for attribute / class / id / state changes): before mutating,
-//!    the setter records the node's *old* matching-relevant state into the document's
-//!    [`SnapshotMap`](stylo::selector_parser::SnapshotMap). During the flush, stylo's
-//!    invalidation-set machinery compares old vs. new against the stylist's dependency maps and
-//!    restyles only the nodes whose rules could actually be affected.
+//!    the setter records the node's *old* matching-relevant state in that node. At flush time the
+//!    pending per-node snapshots are moved into stylo's temporary
+//!    [`SnapshotMap`](stylo::selector_parser::SnapshotMap); its invalidation-set machinery compares
+//!    old vs. new against the stylist's dependency maps and restyles only the nodes whose rules
+//!    could actually be affected.
 //!
 //! 2. **Restyle hints** (for changes with no snapshot representation): structural mutations, text
 //!    changes, and inline-style updates insert [`RestyleHint`] bits directly into the affected
@@ -547,16 +548,22 @@ impl<T: ExternalState> Document<T> {
         if !node.has_style_data() {
             return None;
         }
-        if !node.snapshot_present() {
+        if node.snapshot.is_none() {
             // First snapshot for this node since the last flush: capture the
             // old state.
             let snapshot = build_snapshot(node);
+            let node = self
+                .core_mut()
+                .node_mut(id)
+                .expect("live node disappeared while recording its snapshot");
+            node.snapshot = Some(snapshot);
             node.set_snapshot_present();
-            let core = self.core_mut();
-            core.snapshots.insert(id.opaque(), snapshot);
-            core.snapshotted.push(id);
         }
-        self.core_mut().snapshots.get_mut(&id.opaque())
+        self.core_mut()
+            .node_mut(id)
+            .expect("live node disappeared while refining its snapshot")
+            .snapshot
+            .as_mut()
     }
 }
 

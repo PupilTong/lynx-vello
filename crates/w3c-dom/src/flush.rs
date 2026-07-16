@@ -17,7 +17,7 @@
 //!
 //! Computed styles land in each node's stylo `ElementData`
 //! ([`Node::computed_style`](crate::Node::computed_style) reads them); the
-//! document then drops the consumed snapshots and clears the dirty spine.
+//! document then clears the consumed snapshot flags and the dirty spine.
 //!
 //! # Safety
 //!
@@ -172,6 +172,11 @@ impl StyleEngine {
         let Some(root) = document.root() else {
             return;
         };
+        // Nodes own snapshots between mutations and flushes. Stylo's API
+        // expects a map for the traversal, so drain the reachable snapshots
+        // along the dirty spine into this temporary adapter; it is dropped
+        // when this flush returns.
+        let snapshots = document.take_snapshot_map(root);
         // Debug traversal-phase marker: per-node style readers assert they
         // never run concurrently with the traversal, and the trait accessors
         // assert they only run inside one. Cleared on unwind too (individual
@@ -195,7 +200,7 @@ impl StyleEngine {
                 // the real clock and a persistent `DocumentAnimationSet`.
                 current_time_for_animations: 0.0,
                 traversal_flags: TraversalFlags::empty(),
-                snapshot_map: &document.core().snapshots,
+                snapshot_map: &snapshots,
                 animations: DocumentAnimationSet::default(),
                 registered_speculative_painters: &NO_PAINTERS,
             };
@@ -223,6 +228,6 @@ impl StyleEngine {
                 }
             }
         }
-        document.complete_flush(root);
+        document.complete_flush(root, &snapshots);
     }
 }

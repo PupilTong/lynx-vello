@@ -156,7 +156,7 @@ impl<'a, T: ExternalState> TNode for &'a Node<T> {
     fn opaque(&self) -> OpaqueNode {
         // Derived from the (index, generation) id — NOT the node's address:
         // stylo keys snapshot maps by `OpaqueNode` across arbitrary tree
-        // mutations, and slot-storage growth can move every node.
+        // mutations, and slab-storage growth can move every node.
         Node::id(*self).opaque()
     }
 
@@ -309,7 +309,7 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
     }
 
     fn has_snapshot(&self) -> bool {
-        // Set by the document's snapshot recorders (see
+        // Set when a document mutation records this node's snapshot (see
         // `crate::invalidation`); consumed by stylo's invalidation pass.
         self.snapshot_present()
     }

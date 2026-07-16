@@ -52,6 +52,7 @@ use smallvec::SmallVec;
 use stylo::LocalName;
 use stylo::data::ElementDataWrapper;
 use stylo::properties::{ComputedValues, PropertyDeclarationBlock};
+use stylo::selector_parser::Snapshot;
 use stylo::servo_arc::Arc;
 use stylo::shared_lock::Locked;
 use stylo_atoms::Atom;
@@ -238,9 +239,9 @@ pub(crate) mod slot_guard {
     }
 }
 
-/// Bit set in [`Node::snapshot_flags`] when a pre-mutation snapshot has been
-/// recorded for this node in the document's
-/// [`SnapshotMap`](stylo::selector_parser::SnapshotMap).
+/// Bit set in [`Node::snapshot_flags`] when this node has a pre-mutation
+/// snapshot pending in its [`Node::snapshot`] slot or being consumed by a
+/// style flush.
 pub(crate) const SNAPSHOT_PRESENT: u8 = 1 << 0;
 /// Bit set once stylo's invalidation pass has consumed the snapshot.
 pub(crate) const SNAPSHOT_HANDLED: u8 = 1 << 1;
@@ -282,6 +283,11 @@ pub struct Node<T> {
     /// under the document's [`SharedRwLock`](stylo::shared_lock::SharedRwLock).
     /// `None` when no inline style is set.
     pub(crate) inline_block: Option<Arc<Locked<PropertyDeclarationBlock>>>,
+
+    /// This node's matching-relevant state before its first mutation since
+    /// the last style flush. Drained into stylo's temporary `SnapshotMap` at
+    /// the start of a flush.
+    pub(crate) snapshot: Option<Snapshot>,
 
     /// stylo's per-node style data (`ElementData`), created lazily via
     /// `TElement::ensure_data`. The resolved computed style lives here (see
@@ -342,6 +348,7 @@ impl<T> Node<T> {
             attrs: FxHashMap::default(),
             element_state: ElementState::empty(),
             inline_block: None,
+            snapshot: None,
             stylo_data: UnsafeCell::new(None),
             selector_flags: AtomicUsize::new(0),
             style_dirty: AtomicBool::new(false),

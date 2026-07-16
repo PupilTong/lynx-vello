@@ -18,10 +18,11 @@ Document/Node design (this document describes the current shape).
 ## The w3c-dom core: one tree, Document-mediated mutation
 
 - **ONE TREE policy.** `Document<T>` is the single owner of everything tree-shaped: node storage
-  (a generational slot arena), the optional document root, the pending pre-mutation snapshot set,
-  and the private style context (`SharedRwLock` + base URL). There is no separate arena/tree
-  object, and no public way to construct or mutate a `Node<T>` outside its document —
-  `Document::create_node` is the only factory, and every DOM operation is a `Document` method.
+  (a slab with versioned handles), the optional document root, and the private style context
+  (`SharedRwLock` + base URL). Each pending pre-mutation snapshot lives directly on its node. There
+  is no separate arena/tree object, and no public way to construct or mutate a `Node<T>` outside
+  its document — `Document::create_node` is the only factory, and every DOM operation is a
+  `Document` method.
 - **Invalidation is carried by the operations.** Each matching-relevant setter
   (`set_classes`, `set_attribute`, `set_state`, `set_inline_style`, structural
   `insert_before`/`detach`/`remove_subtree`, …) records its own pre-mutation snapshot or scoped
@@ -56,7 +57,7 @@ Document/Node design (this document describes the current shape).
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| `w3c-dom` | `Document<T>` (the one tree: storage, root, snapshots, lock), `Node<T>`, `NodeId`, the stylo DOM traits on `&Node`, invalidation-carrying mutation, inline parsing, `Stylist`, rule matching, cascade, media evaluation, computed values | Lynx tags/PAPI, `WidgetState`, Lynx unit metrics, touch-device policy |
+| `w3c-dom` | `Document<T>` (the one tree: storage, root, lock), `Node<T>` (including its pending snapshot), `NodeId`, the stylo DOM traits on `&Node`, invalidation-carrying mutation, inline parsing, `Stylist`, rule matching, cascade, media evaluation, computed values | Lynx tags/PAPI, `WidgetState`, Lynx unit metrics, touch-device policy |
 | `lynx-widget` | `WidgetState`, `WidgetTree` (PAPI validation over the document), `WidgetHandle` (canonical registry: tree identity, node retention, drop-driven reclamation of detached subtrees), `EngineMetrics`, touch-first `Device` construction, viewport-relative `rpx` integration | A second stylist, cascade implementation, stylesheet lock sharing, direct node construction, raw-id public APIs |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, the maintained Lynx CSS extension patch set **and the Lynx supported-property/value grammar definition** (`style/properties/lynx_properties.txt`, `lynx` feature gates) | Runtime Widget/PAPI policy |
 
@@ -82,12 +83,14 @@ Document/Node design (this document describes the current shape).
    `lynx-widget` nor callers receive the lock.
 5. DOM mutations schedule style work as part of the `Document` methods that
    perform them (`crates/w3c-dom/src/invalidation.rs`): attribute / class /
-   id / pseudo-state changes record **pre-mutation snapshots** for stylo's
-   invalidation sets; structural changes post **restyle hints** scoped by the
-   selector flags stylo recorded during matching; inline-style updates post
-   the style-attribute replacement hint.
+   id / pseudo-state changes record a **pre-mutation snapshot on the affected
+   node** for stylo's invalidation sets; structural changes post **restyle
+   hints** scoped by the selector flags stylo recorded during matching;
+   inline-style updates post the style-attribute replacement hint.
 6. `StyleEngine::flush_widget_tree(&mut tree)` drives **stylo's own restyle
    traversal** (`crates/w3c-dom/src/flush.rs`) from the document root:
+   reachable pending node snapshots are moved along the dirty spine into the
+   temporary map required by stylo's traversal API, followed by
    snapshot-driven invalidation, the style sharing cache, bloom filter, and
    rayon parallelism over wide DOM levels (stylo's global style pool).
    Computed styles land in each node's stylo `ElementData`; read them with

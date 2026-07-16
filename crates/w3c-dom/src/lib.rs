@@ -4,13 +4,14 @@
 //! everything stylo needs to run its cascade over it in place. The public
 //! surface is deliberately small:
 //!
-//! - [`Document<T>`] — **the one tree.** It owns every node, the optional document root, the
-//!   pending invalidation snapshots, and the private style context. Nodes are created by
-//!   [`Document::create_node`] and mutated exclusively through `Document` methods; there is no way
-//!   to construct, mutate, or re-home a node outside its document (ONE TREE policy).
+//! - [`Document<T>`] — **the one tree.** It owns every node, the optional document root, and the
+//!   private style context. Nodes are created by [`Document::create_node`] and mutated exclusively
+//!   through `Document` methods; there is no way to construct, mutate, or re-home a node outside
+//!   its document (ONE TREE policy).
 //! - [`Node<T>`] — the compositional unit: the W3C-DOM-subset fields (tree links, tag, id, classes,
-//!   attributes, dynamic pseudo-class state, inline style, character data) plus stylo's per-node
-//!   style bookkeeping. Read-only from outside the crate.
+//!   attributes, dynamic pseudo-class state, inline style, character data), its pending
+//!   invalidation snapshot, and stylo's per-node style bookkeeping. Read-only from outside the
+//!   crate.
 //! - [`NodeId`] — a generational, staleness-detecting handle. The *read* handle is a plain
 //!   `&Node<T>`; the stylo element traits are implemented directly on it (no wrapper type).
 //! - [`StyleEngine`] — stylesheet parsing/building, matching, rule-tree insertion, cascade, and the
@@ -43,7 +44,7 @@
 //!   needs nothing but `&Node` — a shared reference is exactly the one-word `Copy` value stylo's
 //!   style-sharing cache requires of a `TElement` handle;
 //! - node identity for snapshots/traversal roots ([`OpaqueNode`](stylo::dom::OpaqueNode)) derives
-//!   from the generational [`NodeId`], so it survives slot-storage growth moving nodes.
+//!   from the generational [`NodeId`], so it survives slab-storage growth moving nodes.
 //!
 //! Inline styles are parsed at mutation time into a stylo
 //! [`PropertyDeclarationBlock`](stylo::properties::PropertyDeclarationBlock)

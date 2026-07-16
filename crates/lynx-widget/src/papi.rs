@@ -233,7 +233,7 @@ impl WidgetTree {
                 continue;
             }
             // No external handle anywhere in the detached subtree: reclaim it
-            // atomically — slots, unique_id index, registry entries.
+            // atomically — slab entries, unique_id index, registry entries.
             for state in self.doc.remove_subtree(top) {
                 self.by_unique_id.remove(&state.unique_id);
             }

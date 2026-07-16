@@ -15,7 +15,7 @@
 //!   external references — the retention signal reclamation is built on.
 //! - **Drop-driven reclamation.** Dropping the last clone for a node pushes its id onto the tree's
 //!   crate-private `Reaper` queue. At the next operation boundary the tree sweeps: a **detached**
-//!   subtree in which *no* node has a live handle is freed atomically (arena slots + `unique_id`
+//!   subtree in which *no* node has a live handle is freed atomically (slab entries + `unique_id`
 //!   index). Attached nodes are never collected — the tree itself keeps document content alive,
 //!   exactly like the browser, where the DOM tree retains its nodes and GC only ever collects
 //!   *detached* ones nobody references.

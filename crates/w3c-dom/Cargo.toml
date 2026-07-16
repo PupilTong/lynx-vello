@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 rustc-hash = { workspace = true }
+slab = { workspace = true }
 smallvec = { workspace = true }
 
 # stylo integration: `Node` owns stylo's interior-mutable per-node state
