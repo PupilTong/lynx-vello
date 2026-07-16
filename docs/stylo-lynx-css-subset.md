@@ -8,6 +8,11 @@
 > intentionally differs from upstream Stylo; properties not listed in the
 > value table keep their upstream parser.
 
+The revision-pinned, author-spelling-complete comparison against upstream
+Servo—including all 23 Lynx-only names, all 229 upstream-only names, and the
+160/51 changed/unchanged partition of common names—is tracked in
+[`tracking/stylo-lynx-vs-upstream-properties.md`](tracking/stylo-lynx-vs-upstream-properties.md).
+
 ## Generation rules
 
 | Input/design rule | Generated behavior |

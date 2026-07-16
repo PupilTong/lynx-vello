@@ -40,6 +40,7 @@ Most files use a table with these columns:
 | [css-visual.md](css-visual.md) | Color, background, border, shadow, filter, transform, opacity |
 | [css-text.md](css-text.md) | Font/text properties relevant to `parley` shaping/layout |
 | [css-animation.md](css-animation.md) | Transitions, `@keyframes`, timing functions, JS `animate()` API |
+| [stylo-lynx-vs-upstream-properties.md](stylo-lynx-vs-upstream-properties.md) | Exhaustive generated property-name and value-behavior diff between the Stylo `lynx` build and pinned upstream Servo |
 | [css-selectors-cascade.md](css-selectors-cascade.md) | Selector matching, pseudo-classes/elements, specificity/cascade, custom properties (`var()`) |
 | [css-at-rules.md](css-at-rules.md) | `@media`, `@font-face`, `@supports` |
 | [dom-events.md](dom-events.md) | Element/NodesRef model, event types, bind/catch/capture-bind/capture-catch model, gesture recognizers, nested-scroll coordination, pointer-events |
