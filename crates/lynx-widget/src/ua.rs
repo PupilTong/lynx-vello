@@ -29,7 +29,7 @@ use std::fmt::Write;
 /// The style-relevant page configuration, decoded from a bundle's `pageConfig`.
 ///
 /// Only knobs the **style layer** consumes live here; they become generated
-/// UA styles (see [`ua_stylesheet`]).
+/// UA styles (see the crate-private `ua_stylesheet` generator).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PageConfig {
     /// `defaultDisplayLinear`: unstyled containers default to

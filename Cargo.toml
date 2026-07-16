@@ -22,7 +22,7 @@ lynx-template-decoder = { path = "crates/lynx-template-decoder" }
 lynx-widget = { path = "crates/lynx-widget" }
 neutron-star = { path = "crates/neutron-star" }
 quickjs-rust-bridge = { path = "crates/quickjs-rust-bridge" }
-stylo-dom = { path = "crates/stylo-dom" }
+w3c-dom = { path = "crates/w3c-dom" }
 
 # The Lynx-patched stylo fork (git submodule; see AGENTS.md dependency
 # policy). The `lynx` branch carries the Lynx patch series (viewport-relative
@@ -34,10 +34,9 @@ stylo-dom = { path = "crates/stylo-dom" }
 # properties and keyword values Lynx does not support (so, e.g., `float`,
 # `writing-mode` or `overflow: clip` stop parsing). `lynx` implies `servo`.
 #
-# The vendored servo package is itself named `stylo_dom`; that name is taken
-# here by our `crates/stylo-dom` (which re-exports `ElementState`), so the
-# vendored crate is aliased `dom` — the same rename `vendor/stylo/style`'s own
-# Cargo.toml uses. Only `crates/stylo-dom` depends on it directly.
+# The vendored servo package named `stylo_dom` is aliased `dom` — the same
+# rename `vendor/stylo/style`'s own Cargo.toml uses. Only `crates/w3c-dom`
+# (which re-exports its `ElementState`) depends on it directly.
 stylo = { path = "vendor/stylo/style", package = "stylo", features = ["lynx"] }
 stylo_atoms = { path = "vendor/stylo/stylo_atoms" }
 dom = { path = "vendor/stylo/stylo_dom", package = "stylo_dom" }

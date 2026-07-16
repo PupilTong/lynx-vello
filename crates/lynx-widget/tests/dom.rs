@@ -1,6 +1,6 @@
 //! Integration tests for the `lynx-widget` Element-PAPI surface.
 
-use lynx_widget::{EventKind, PseudoState, WidgetError, WidgetKind, WidgetTree};
+use lynx_widget::{ElementState, EventKind, WidgetError, WidgetKind, WidgetTree};
 
 /// Build `page > container > [a, b, c]` and return the handles.
 fn three_children() -> (WidgetTree, TestTree) {
@@ -39,7 +39,7 @@ fn tree_building_and_navigation() {
     let (doc, t) = three_children();
 
     // Kinds / tags round-trip.
-    assert_eq!(doc.widget(t.page).unwrap().ext.kind, WidgetKind::Page);
+    assert_eq!(doc.widget(t.page).unwrap().ext().kind, WidgetKind::Page);
     assert_eq!(doc.get_tag(t.container), Some("view"));
 
     // Parent / child structure via WidgetRef.
@@ -89,10 +89,10 @@ fn text_and_raw_text() {
     let raw = doc.create_raw_text("hello");
     doc.append_element(raw, text).unwrap();
 
-    assert_eq!(doc.widget(text).unwrap().ext.kind, WidgetKind::Text);
+    assert_eq!(doc.widget(text).unwrap().ext().kind, WidgetKind::Text);
     let raw_node = doc.widget(raw).unwrap();
-    assert_eq!(raw_node.ext.kind, WidgetKind::RawText);
-    assert_eq!(raw_node.text.as_deref(), Some("hello"));
+    assert_eq!(raw_node.ext().kind, WidgetKind::RawText);
+    assert_eq!(raw_node.text(), Some("hello"));
 }
 
 #[test]
@@ -100,8 +100,8 @@ fn create_element_classifies_tag() {
     let mut doc = WidgetTree::new();
     let li = doc.create_element("list-item");
     let unknown = doc.create_element("marquee");
-    assert_eq!(doc.widget(li).unwrap().ext.kind, WidgetKind::ListItem);
-    assert_eq!(doc.widget(unknown).unwrap().ext.kind, WidgetKind::Unknown);
+    assert_eq!(doc.widget(li).unwrap().ext().kind, WidgetKind::ListItem);
+    assert_eq!(doc.widget(unknown).unwrap().ext().kind, WidgetKind::Unknown);
     assert_eq!(doc.get_tag(unknown), Some("marquee"));
 }
 
@@ -375,11 +375,11 @@ fn cycle_prevention() {
 fn set_css_id_batch() {
     let (mut doc, t) = three_children();
     doc.set_css_id(&[t.a, t.b, t.c], 42).unwrap();
-    assert_eq!(doc.widget(t.a).unwrap().ext.css_id, 42);
-    assert_eq!(doc.widget(t.b).unwrap().ext.css_id, 42);
-    assert_eq!(doc.widget(t.c).unwrap().ext.css_id, 42);
+    assert_eq!(doc.widget(t.a).unwrap().ext().css_id, 42);
+    assert_eq!(doc.widget(t.b).unwrap().ext().css_id, 42);
+    assert_eq!(doc.widget(t.c).unwrap().ext().css_id, 42);
     // The page keeps its default (unset) css_id.
-    assert_eq!(doc.widget(t.page).unwrap().ext.css_id, 0);
+    assert_eq!(doc.widget(t.page).unwrap().ext().css_id, 0);
 
     // A stale handle anywhere in the batch fails the whole call.
     doc.destroy_element(t.a).unwrap();
@@ -394,22 +394,16 @@ fn classes_and_inline_styles() {
     let mut doc = WidgetTree::new();
     let view = doc.create_view();
     doc.set_classes(view, "  foo   bar baz ").unwrap();
-    let classes: Vec<&str> = doc
-        .widget(view)
-        .unwrap()
-        .classes
-        .iter()
-        .map(|c| &**c)
-        .collect();
+    let classes: Vec<&str> = doc.widget(view).unwrap().classes().collect();
     assert_eq!(classes, vec!["foo", "bar", "baz"]);
 
     // add_class dedups.
     doc.add_class(view, "bar").unwrap();
     doc.add_class(view, "qux").unwrap();
-    assert_eq!(doc.widget(view).unwrap().classes.len(), 4);
+    assert_eq!(doc.widget(view).unwrap().classes().len(), 4);
 
     // Inline styles are parsed into a stylo `PropertyDeclarationBlock`; lock
-    // ownership stays encapsulated in `stylo-dom`.
+    // ownership stays encapsulated in `w3c-dom`.
     doc.add_inline_style(view, "color", "red").unwrap();
     doc.add_inline_style(view, "width", "10px").unwrap();
     assert_eq!(inline_declaration_count(&doc, view), 2);
@@ -420,12 +414,12 @@ fn classes_and_inline_styles() {
 
     // An empty string clears the inline block.
     doc.set_inline_styles(view, "").unwrap();
-    assert!(doc.widget(view).unwrap().inline_block.is_none());
+    assert_eq!(inline_declaration_count(&doc, view), 0);
 }
 
 /// The number of declarations in an element's parsed inline style block.
 fn inline_declaration_count(doc: &WidgetTree, id: lynx_widget::WidgetId) -> usize {
-    doc.arena().inline_style_declaration_count(id).unwrap()
+    doc.document().inline_style_declaration_count(id)
 }
 
 #[test]
@@ -443,19 +437,19 @@ fn attributes_id_and_dataset_and_events() {
             .map(String::as_str),
         Some("not-a-selector")
     );
-    assert!(doc.widget(view).unwrap().id_attr.is_none());
+    assert!(doc.widget(view).unwrap().id_attr().is_none());
 
     // set_id populates the id selector separately.
     doc.set_id(view, "my-id").unwrap();
-    assert_eq!(doc.widget(view).unwrap().id_attr.as_deref(), Some("my-id"));
+    assert_eq!(doc.widget(view).unwrap().id_attr(), Some("my-id"));
     doc.set_id(view, "").unwrap();
-    assert!(doc.widget(view).unwrap().id_attr.is_none());
+    assert!(doc.widget(view).unwrap().id_attr().is_none());
 
     // Dataset.
     doc.set_dataset(view, [("role", "hero"), ("index", "3")])
         .unwrap();
     doc.add_dataset(view, "extra", "yes").unwrap();
-    let dataset = &doc.widget(view).unwrap().ext.dataset;
+    let dataset = &doc.widget(view).unwrap().ext().dataset;
     assert_eq!(dataset.get("role").map(String::as_str), Some("hero"));
     assert_eq!(dataset.get("extra").map(String::as_str), Some("yes"));
     assert_eq!(dataset.len(), 3);
@@ -465,7 +459,7 @@ fn attributes_id_and_dataset_and_events() {
         .unwrap();
     doc.add_event(view, EventKind::CaptureCatch, "touchstart", "handler#2")
         .unwrap();
-    let events = &doc.widget(view).unwrap().ext.events;
+    let events = &doc.widget(view).unwrap().ext().events;
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].kind, EventKind::Bind);
     assert_eq!(&*events[0].name, "tap");
@@ -477,20 +471,20 @@ fn attributes_id_and_dataset_and_events() {
 fn pseudo_state_toggling() {
     let mut doc = WidgetTree::new();
     let view = doc.create_view();
-    doc.set_pseudo_state(view, PseudoState::HOVER, true)
+    doc.set_pseudo_state(view, ElementState::HOVER, true)
         .unwrap();
-    doc.set_pseudo_state(view, PseudoState::FOCUS, true)
+    doc.set_pseudo_state(view, ElementState::FOCUS, true)
         .unwrap();
     let state = doc.pseudo_state(view).unwrap();
-    assert!(state.contains(PseudoState::HOVER));
-    assert!(state.contains(PseudoState::FOCUS));
-    assert!(!state.contains(PseudoState::ACTIVE));
+    assert!(state.contains(ElementState::HOVER));
+    assert!(state.contains(ElementState::FOCUS));
+    assert!(!state.contains(ElementState::ACTIVE));
 
-    doc.set_pseudo_state(view, PseudoState::HOVER, false)
+    doc.set_pseudo_state(view, ElementState::HOVER, false)
         .unwrap();
     let state = doc.pseudo_state(view).unwrap();
-    assert!(!state.contains(PseudoState::HOVER));
-    assert!(state.contains(PseudoState::FOCUS));
+    assert!(!state.contains(ElementState::HOVER));
+    assert!(state.contains(ElementState::FOCUS));
 }
 
 #[test]
@@ -519,7 +513,7 @@ fn unique_ids_are_monotonic_and_one_based() {
     let view = doc.create_view();
     assert_eq!(doc.get_element_unique_id(page), Some(1));
     assert_eq!(doc.get_element_unique_id(view), Some(2));
-    assert_eq!(doc.widget(view).unwrap().ext.unique_id, 2);
+    assert_eq!(doc.widget(view).unwrap().ext().unique_id, 2);
 }
 
 #[test]

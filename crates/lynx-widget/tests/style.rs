@@ -1,4 +1,4 @@
-//! Integration coverage for the Lynx adapter over `stylo-dom`'s cascade.
+//! Integration coverage for the Lynx adapter over `w3c-dom`'s cascade.
 #![allow(clippy::float_cmp)]
 
 use app_units::Au;
@@ -171,7 +171,9 @@ fn text_stroke_is_supported() {
     assert!(property_is_supported("text-stroke"));
     assert!(property_is_supported("text-stroke-color"));
     assert!(property_is_supported("text-stroke-width"));
-    assert!(property_is_supported("-webkit-text-stroke-width"));
-    assert!(property_is_supported("-webkit-text-stroke-color"));
+    // The `-webkit-` spellings are the hidden canonical properties; only the
+    // Lynx `text-stroke*` aliases are author-facing in the fork's grammar.
+    assert!(!property_is_supported("-webkit-text-stroke-width"));
+    assert!(!property_is_supported("-webkit-text-stroke-color"));
     assert!(property_is_supported("color"));
 }

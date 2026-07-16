@@ -10,7 +10,7 @@ use lynx_template_decoder::style_info::{
     Selector, SimpleSelector, SimpleSelectorType, StyleInfo, StyleSheet, ValueToken, token_types,
 };
 use lynx_widget::{
-    EngineMetrics, PageConfig, Parallelism, PseudoState, StyleEngine, WidgetId, WidgetTree,
+    ElementState, EngineMetrics, PageConfig, Parallelism, StyleEngine, WidgetId, WidgetTree,
 };
 use stylo::color::AbsoluteColor;
 use stylo::values::computed::Size;
@@ -245,12 +245,12 @@ fn pseudo_state_change_restyles_via_snapshot() {
     engine.flush_widget_tree(&mut tree);
     assert_ne!(color_of(&tree, btn), red());
 
-    tree.set_pseudo_state(btn, PseudoState::ACTIVE, true)
+    tree.set_pseudo_state(btn, ElementState::ACTIVE, true)
         .unwrap();
     engine.flush_widget_tree(&mut tree);
     assert_eq!(color_of(&tree, btn), red());
 
-    tree.set_pseudo_state(btn, PseudoState::ACTIVE, false)
+    tree.set_pseudo_state(btn, ElementState::ACTIVE, false)
         .unwrap();
     engine.flush_widget_tree(&mut tree);
     assert_ne!(color_of(&tree, btn), red());

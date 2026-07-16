@@ -14,7 +14,7 @@ the semantics are stylo's.** Everything below refines that sentence.
 
 ## Settled before this session (not re-decided)
 
-- stylo is the cascade engine, layered `lynx-widget → stylo-dom → vendor/stylo`
+- stylo is the cascade engine, layered `lynx-widget → w3c-dom → vendor/stylo`
   (fork with the `lynx` feature; Lynx-only properties and `rpx`/`ppx`/`sp`
   units are first-class grammar in the fork, no side-channel tricks).
 - Compat target is **web-core / `.web.bundle`** behavior, not native
@@ -87,7 +87,7 @@ the semantics are stylo's.** Everything below refines that sentence.
 
    *§6/§7 required a DOM redesign, and it shipped together with the styling
    system* (not as a retrofit onto the earlier single-threaded-flush
-   `stylo-dom`): flushes now drive stylo's own `driver::traverse_dom`;
+   `w3c-dom`): flushes now drive stylo's own `driver::traverse_dom`;
    every piece of element state stylo mutates through `&self` became
    atomic; the one non-atomic slot (`ElementData`) is single-owner under
    stylo's one-worker-per-element traversal discipline; and mutations
@@ -174,7 +174,7 @@ the semantics are stylo's.** Everything below refines that sentence.
 16. **cssId scoping is a widget-layer concern.** The feature exists for
     pageConfig `enableRemoveCSSScope = false` (that is the exact
     `.web.bundle` key; this doc previously shortened it to
-    "removeCSSScope"); `stylo-dom` stays scope-unaware. Mechanism: the
+    "removeCSSScope"); `w3c-dom` stays scope-unaware. Mechanism: the
     widget layer synthesizes `:where([l-css-id="N"])` guards onto
     selectors at ingest — string-parity with web-core's decoder output,
     trivially differential-testable, zero specificity perturbation. (With

@@ -1,0 +1,39 @@
+[package]
+name = "w3c-dom"
+description = "Generic W3C-DOM-subset document tree and standards-oriented CSS computation core over stylo, parameterized by embedder state"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rustc-hash = { workspace = true }
+smallvec = { workspace = true }
+
+# stylo integration: `Node` owns stylo's interior-mutable per-node state
+# (ElementData/selector flags) and the `traits` module implements stylo's
+# element traits (`TNode`/`TElement`/`TDocument`/`selectors::Element`) on the
+# one-word `NodeRef` handle. The vendored servo package named `stylo_dom` is
+# consumed under the `dom` rename, matching vendor/stylo/style's own
+# Cargo.toml; this crate re-exports its `ElementState`.
+stylo = { workspace = true }
+stylo_atoms = { workspace = true }
+dom = { workspace = true }
+stylo_traits = { workspace = true }
+selectors = { workspace = true }
+app_units = { workspace = true }
+atomic_refcell = { workspace = true }
+cssparser = { workspace = true }
+euclid = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+divan = { workspace = true }
+
+[[bench]]
+name = "css"
+harness = false
+
+[lints]
+workspace = true

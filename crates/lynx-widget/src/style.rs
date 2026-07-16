@@ -1,4 +1,4 @@
-//! Lynx-specific adaptation of [`stylo_dom::StyleEngine`].
+//! Lynx-specific adaptation of [`w3c_dom::StyleEngine`].
 //!
 //! The generic crate owns CSS parsing, matching, cascade, and locking. This
 //! module supplies only the platform policy that is actually Lynx-specific:
@@ -19,8 +19,8 @@ use stylo::servo_arc::Arc;
 use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
-use stylo_dom::{Parallelism, StyleEngine as DomStyleEngine, StylesheetOrigin};
 use stylo_traits::{CSSPixel, DevicePixel};
+use w3c_dom::{Parallelism, StyleEngine as DomStyleEngine, StylesheetOrigin};
 
 use crate::ua::{PageConfig, ua_stylesheet};
 use crate::{WidgetRef, WidgetTree, ingest};
@@ -56,7 +56,7 @@ impl EngineMetrics {
 /// The Widget-facing style adapter.
 ///
 /// All standard CSS work and `SharedRwLock` ownership stay in the inner
-/// [`stylo_dom::StyleEngine`]. This wrapper owns no second stylist or lock.
+/// [`w3c_dom::StyleEngine`]. This wrapper owns no second stylist or lock.
 #[derive(Debug)]
 pub struct StyleEngine {
     core: DomStyleEngine,
@@ -91,7 +91,8 @@ impl StyleEngine {
 
     /// Load a decoded `StyleInfo` section: lower every fragment into stylo
     /// rules by direct construction (import flattening + cssId `:where`
-    /// scoping included; see [`crate::ingest`]) and mount them as one author
+    /// scoping included; see the crate-private `ingest` module) and mount them
+    /// as one author
     /// stylesheet.
     pub fn load_style_info(&mut self, info: &StyleInfo) {
         let rules = ingest::build_rules(&self.core, info);
@@ -111,11 +112,8 @@ impl StyleEngine {
     /// [`flush_widget_tree`](Self::flush_widget_tree) with explicit traversal
     /// scheduling (benchmarks pin [`Parallelism::Sequential`]).
     pub fn flush_widget_tree_with(&self, tree: &mut WidgetTree, parallelism: Parallelism) {
-        let Some(page) = tree.get_page_element() else {
-            return;
-        };
         self.core
-            .flush_tree_with(tree.arena_mut(), page, parallelism);
+            .flush_document_with(tree.document_mut(), parallelism);
     }
 
     /// Access the generic CSS engine.
@@ -132,7 +130,7 @@ impl StyleEngine {
     /// Create a Widget tree bound to this engine's private style context.
     #[must_use]
     pub fn new_widget_tree(&self) -> WidgetTree {
-        WidgetTree::from_arena(self.core.new_arena())
+        WidgetTree::from_document(self.core.new_document())
     }
 
     /// Parse and append a stylesheet that applies to all media.
@@ -188,7 +186,7 @@ impl StyleEngine {
     /// on the tree's next flush. A no-op without a page root.
     pub fn restyle_after_device_change(&self, tree: &mut WidgetTree) {
         if let Some(page) = tree.get_page_element() {
-            tree.arena_mut().mark_subtree_dirty(page);
+            tree.document_mut().mark_subtree_dirty(page);
         }
     }
 }

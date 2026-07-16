@@ -45,7 +45,7 @@ Text behavior is inventoried in
 ```text
         lynx-vello host stack                           standalone
 ┌──────────────────────────────────┐     ┌─────────────────────────────────┐
-│ lynx-widget + stylo-dom          │     │ neutron-star                    │
+│ lynx-widget + w3c-dom          │     │ neutron-star                    │
 │ styles and tree                  │     │ tree/style/text protocols       │
 │                                  │     │ flex / grid / relative / linear │
 │ future runtime integration:      │────▶│ text feature: Parley measure    │

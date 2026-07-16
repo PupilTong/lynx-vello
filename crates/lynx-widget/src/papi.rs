@@ -1,4 +1,4 @@
-//! The [`WidgetTree`] — owner of the arena and the Element-PAPI surface.
+//! The [`WidgetTree`] — owner of the document and the Element-PAPI surface.
 //!
 //! Methods here are shaped after Lynx's JS Element PAPI (renamed to `snake_case`
 //! Rust). Each mirrors a `__*` PAPI opcode, so the method names keep the
@@ -8,16 +8,18 @@
 //! [`replace_element`] ↔ `__ReplaceElement`, [`create_element`] ↔
 //! `__CreateElement`) even though the values they carry are [`Widget`]s. JS
 //! bindings live in a later runtime crate; this is the pure native validation
-//! layer. [`crate::StyleEngine`] adapts `stylo-dom`'s generic cascade to the
+//! layer. [`crate::StyleEngine`] adapts `w3c-dom`'s generic cascade to the
 //! Widget tree and reads the dirty state maintained here (see
 //! [`WidgetTree::has_dirty`] / [`WidgetTree::clear_dirty`]).
 //!
 //! This layer validates PAPI semantics — stale handles, cycles, insertion
 //! reference resolution, error mapping, the `unique_id` minting + index, the
-//! `css_id` batch — and **delegates** the actual tree mutation and inline-style
-//! parsing to the [`stylo_dom`] crate's [`Arena`] primitives, because their
-//! invalidation is style-system logic. The Lynx-specific per-widget data lives
-//! in the element's [`WidgetState`] payload.
+//! `css_id` batch — and **delegates** every DOM operation to
+//! [`w3c_dom::Document`] methods, which carry their own style invalidation.
+//! PAPI opcodes arrive from the scripting runtime with untrusted handles, so
+//! the validation here is what turns would-be contract violations (which the
+//! DOM core treats as crashes) into [`WidgetError`]s. The Lynx-specific
+//! per-widget data lives in each node's [`WidgetState`] payload.
 //!
 //! [`append_element`]: WidgetTree::append_element
 //! [`insert_element_before`]: WidgetTree::insert_element_before
@@ -29,9 +31,8 @@
 use rustc_hash::FxHashMap;
 use stylo::properties::ComputedValues;
 use stylo::servo_arc::Arc;
-use stylo_atoms::Atom;
-use stylo_dom::{Arena, Element, PseudoState};
 use thiserror::Error;
+use w3c_dom::{Document, ElementState};
 
 use crate::kind::WidgetKind;
 use crate::state::{EventKind, EventReg, WidgetState};
@@ -64,13 +65,12 @@ pub enum WidgetError {
     BadInsertReference(WidgetId),
 }
 
-/// The widget tree: a generational [`Arena`] of [`Widget`]s plus the current
-/// page root, the Lynx `unique_id` counter, and a `unique_id` → [`WidgetId`]
-/// index.
+/// The widget tree: one [`Document`] of [`Widget`]s plus the Lynx `unique_id`
+/// counter and a `unique_id` → [`WidgetId`] index. The `<page>` root is the
+/// document root.
 #[derive(Debug)]
 pub struct WidgetTree {
-    arena: Arena<WidgetState>,
-    page: Option<WidgetId>,
+    doc: Document<WidgetState>,
     /// The next Lynx `unique_id` to mint (1-based; 0 stays reserved as
     /// "unset").
     next_unique_id: i32,
@@ -91,31 +91,31 @@ impl WidgetTree {
     /// which binds it to the generic style engine's private context.
     #[must_use]
     pub fn new() -> Self {
-        Self::from_arena(Arena::new())
+        Self::from_document(Document::new())
     }
 
-    pub(crate) fn from_arena(arena: Arena<WidgetState>) -> Self {
+    pub(crate) fn from_document(doc: Document<WidgetState>) -> Self {
         Self {
-            arena,
-            page: None,
+            doc,
             // Lynx `unique_id`s are 1-based; 0 stays reserved as "unset".
             next_unique_id: 1,
             by_unique_id: FxHashMap::default(),
         }
     }
 
-    /// Borrow the underlying arena.
+    /// Borrow the underlying document.
     #[must_use]
-    pub const fn arena(&self) -> &Arena<WidgetState> {
-        &self.arena
+    pub const fn document(&self) -> &Document<WidgetState> {
+        &self.doc
     }
 
-    /// Mutably borrow the underlying arena.
+    /// Mutably borrow the underlying document.
     ///
-    /// The Widget style adapter uses this to write resolved computed styles
-    /// and clear dirty bits after a resolution pass.
-    pub const fn arena_mut(&mut self) -> &mut Arena<WidgetState> {
-        &mut self.arena
+    /// The Widget style adapter uses this to flush and to schedule
+    /// device-change restyles; everything it exposes carries its own
+    /// invalidation.
+    pub const fn document_mut(&mut self) -> &mut Document<WidgetState> {
+        &mut self.doc
     }
 
     // --- element creation -------------------------------------------------
@@ -123,19 +123,16 @@ impl WidgetTree {
     fn create(&mut self, kind: WidgetKind, tag: &str) -> WidgetId {
         let unique_id = self.next_unique_id;
         self.next_unique_id = self.next_unique_id.wrapping_add(1);
-        let id = self
-            .arena
-            .insert(Element::new(tag, WidgetState::new(kind, unique_id)));
+        let id = self.doc.create_node(tag, WidgetState::new(kind, unique_id));
         self.by_unique_id.insert(unique_id, id);
         id
     }
 
-    /// Create the `<page>` root element and record it as the tree's page.
+    /// Create the `<page>` root element and record it as the document root
+    /// (which also schedules its initial style pass).
     pub fn create_page(&mut self) -> WidgetId {
         let id = self.create(WidgetKind::Page, "page");
-        self.page = Some(id);
-        // The root always needs an initial style pass.
-        self.arena.mark_style_dirty(id);
+        self.doc.set_root(id);
         id
     }
 
@@ -152,9 +149,7 @@ impl WidgetTree {
     /// Create a `<raw-text>` leaf carrying literal text content.
     pub fn create_raw_text(&mut self, text: impl Into<String>) -> WidgetId {
         let id = self.create(WidgetKind::RawText, "raw-text");
-        if let Some(widget) = self.arena.get_mut(id) {
-            widget.text = Some(text.into());
-        }
+        self.doc.set_text(id, Some(text.into()));
         id
     }
 
@@ -197,21 +192,22 @@ impl WidgetTree {
     ///
     /// `child` is first detached from any current parent. Re-inserting within
     /// the same parent reorders it. Validation (stale handles, cycles, the
-    /// insertion reference) happens here; the unlink/link is delegated to the
-    /// [`Arena`] tree primitives, which carry the structural invalidation.
+    /// insertion reference) happens here — PAPI handles are untrusted — and
+    /// the link itself is delegated to [`Document::insert_before`], which
+    /// carries the structural invalidation.
     pub fn insert_element_before(
         &mut self,
         child: WidgetId,
         parent: WidgetId,
         before: Option<WidgetId>,
     ) -> Result<(), WidgetError> {
-        if !self.arena.contains(child) {
+        if !self.doc.contains(child) {
             return Err(WidgetError::StaleElement(child));
         }
-        if !self.arena.contains(parent) {
+        if !self.doc.contains(parent) {
             return Err(WidgetError::StaleElement(parent));
         }
-        if child == parent || self.arena.is_ancestor(child, parent) {
+        if child == parent || self.doc.is_ancestor(child, parent) {
             return Err(WidgetError::WouldCycle {
                 ancestor: child,
                 descendant: parent,
@@ -222,32 +218,23 @@ impl WidgetTree {
                 // DOM pre-insert: the reference resolves to `child`'s next
                 // sibling, so `insertBefore(n, n)` keeps `n` exactly where it
                 // is — a structural no-op (web-core parity).
-                return if self.arena.is_child_of(child, parent) {
+                return if self.doc.child_position(parent, child).is_some() {
                     Ok(())
                 } else {
                     Err(WidgetError::BadInsertReference(reference))
                 };
             }
-            if !self.arena.is_child_of(reference, parent) {
+            if self.doc.child_position(parent, reference).is_none() {
                 return Err(WidgetError::BadInsertReference(reference));
             }
         }
 
-        self.arena.detach(child);
-
-        let index = match before {
-            None => self.arena.children_len(parent),
-            Some(reference) => self
-                .arena
-                .child_position(parent, reference)
-                .unwrap_or_else(|| self.arena.children_len(parent)),
-        };
-        self.arena.attach_at(parent, child, index);
+        self.doc.insert_before(parent, child, before);
         Ok(())
     }
 
     /// Remove `child` from `parent`, **detaching** it — the subtree stays
-    /// alive in the arena (and in the `unique_id` index) and can be
+    /// alive in the document (and in the `unique_id` index) and can be
     /// re-inserted later.
     ///
     /// This matches the Element PAPI contract: web-core's `__RemoveElement` is
@@ -255,33 +242,33 @@ impl WidgetTree {
     /// re-attaches previously removed subtrees. Use
     /// [`destroy_element`](Self::destroy_element) to actually free a subtree.
     pub fn remove_element(&mut self, parent: WidgetId, child: WidgetId) -> Result<(), WidgetError> {
-        let Some(child_widget) = self.arena.get(child) else {
+        let Some(child_widget) = self.doc.get(child) else {
             return Err(WidgetError::StaleElement(child));
         };
-        if child_widget.parent != Some(parent) {
+        if child_widget.parent_id() != Some(parent) {
             return Err(WidgetError::NotAChild { parent, child });
         }
 
         // `detach` unlinks and applies the structural invalidation (parent
         // subtree + parent's following siblings, for `:empty` + `+`/`~`).
-        self.arena.detach(child);
+        self.doc.detach(child);
         Ok(())
     }
 
-    /// Detach `id` (if attached) and free its entire subtree from the arena
-    /// and the `unique_id` index. All handles into the subtree become stale.
+    /// Detach `id` (if attached) and free its entire subtree from the
+    /// document and the `unique_id` index. All handles into the subtree
+    /// become stale; destroying the page also clears the document root.
     ///
     /// This is the explicit destruction step [`remove_element`](Self::remove_element)
     /// deliberately does not perform; the runtime layer decides when a
     /// detached subtree is truly dead (web-core relies on GC for this).
     pub fn destroy_element(&mut self, id: WidgetId) -> Result<(), WidgetError> {
-        if !self.arena.contains(id) {
+        if !self.doc.contains(id) {
             return Err(WidgetError::StaleElement(id));
         }
-        self.arena.detach(id);
-        // The arena returns the freed widgets' state; harvest the unique_ids
-        // out of it to keep the index consistent.
-        for state in self.arena.drop_subtree(id) {
+        // The document returns the freed widgets' state; harvest the
+        // unique_ids out of it to keep the index consistent.
+        for state in self.doc.remove_subtree(id) {
             self.by_unique_id.remove(&state.unique_id);
         }
         Ok(())
@@ -297,10 +284,10 @@ impl WidgetTree {
         if new == old {
             return Ok(());
         }
-        let Some(old_widget) = self.arena.get(old) else {
+        let Some(old_widget) = self.doc.get(old) else {
             return Err(WidgetError::StaleElement(old));
         };
-        let Some(parent) = old_widget.parent else {
+        let Some(parent) = old_widget.parent_id() else {
             return Ok(());
         };
         self.insert_element_before(new, parent, Some(old))?;
@@ -310,14 +297,14 @@ impl WidgetTree {
     /// The first child of `parent`, if any.
     #[must_use]
     pub fn first_element(&self, parent: WidgetId) -> Option<WidgetId> {
-        self.arena.get(parent)?.children.first().copied()
+        self.doc.get(parent)?.child_ids().first().copied()
     }
 
     /// The next sibling of `widget`, if any.
     #[must_use]
     pub fn next_element(&self, widget: WidgetId) -> Option<WidgetId> {
-        let parent = self.arena.get(widget)?.parent?;
-        let siblings = &self.arena.get(parent)?.children;
+        let parent = self.doc.get(widget)?.parent_id()?;
+        let siblings = self.doc.get(parent)?.child_ids();
         let pos = siblings.iter().position(|&c| c == widget)?;
         siblings.get(pos + 1).copied()
     }
@@ -325,70 +312,55 @@ impl WidgetTree {
     /// The parent of `widget`, if any.
     #[must_use]
     pub fn get_parent(&self, widget: WidgetId) -> Option<WidgetId> {
-        self.arena.get(widget)?.parent
+        self.doc.get(widget)?.parent_id()
     }
 
     // --- styling / attributes ---------------------------------------------
 
+    /// Resolve a live widget for a mutation opcode, mapping staleness to the
+    /// PAPI error.
+    fn check_live(&self, id: WidgetId) -> Result<(), WidgetError> {
+        if self.doc.contains(id) {
+            Ok(())
+        } else {
+            Err(WidgetError::StaleElement(id))
+        }
+    }
+
     /// Replace an element's classes from a whitespace-separated list.
     pub fn set_classes(&mut self, id: WidgetId, classes: &str) -> Result<(), WidgetError> {
-        if !self.arena.contains(id) {
-            return Err(WidgetError::StaleElement(id));
-        }
-        // Snapshot the old class list before mutating so the flush can run
-        // invalidation-set matching against old vs. new.
-        self.arena.note_class_change(id);
-        if let Some(widget) = self.arena.get_mut(id) {
-            widget.classes = classes.split_whitespace().map(Atom::from).collect();
-        }
+        self.check_live(id)?;
+        self.doc.set_classes(id, classes);
         Ok(())
     }
 
     /// Add a single class (no-op if already present).
     pub fn add_class(&mut self, id: WidgetId, class: &str) -> Result<(), WidgetError> {
-        let class = Atom::from(class);
-        match self.arena.get(id) {
-            Some(widget) => {
-                if widget.classes.contains(&class) {
-                    return Ok(());
-                }
-            }
-            None => return Err(WidgetError::StaleElement(id)),
-        }
-        self.arena.note_class_change(id);
-        if let Some(widget) = self.arena.get_mut(id) {
-            widget.classes.push(class);
-        }
+        self.check_live(id)?;
+        self.doc.add_class(id, class);
         Ok(())
     }
 
     /// Replace an element's inline style, parsing the whole declaration block
     /// through stylo (Lynx's `__SetInlineStyles`). An empty string clears it.
-    ///
-    /// The parse is delegated to the [`Arena`] inline-style primitive.
     pub fn set_inline_styles(&mut self, id: WidgetId, text: &str) -> Result<(), WidgetError> {
-        if !self.arena.contains(id) {
-            return Err(WidgetError::StaleElement(id));
-        }
-        self.arena.set_inline_styles(id, text);
+        self.check_live(id)?;
+        self.doc.set_inline_style(id, text);
         Ok(())
     }
 
     /// Parse a single `name: value` declaration through stylo and merge it into
     /// the element's inline style block (Lynx's `__AddInlineStyle`).
     ///
-    /// The parse/merge is delegated to the [`Arena`] inline-style primitive; an
-    /// unparseable property/value is dropped.
+    /// An unparseable property/value is dropped (CSS error handling).
     pub fn add_inline_style(
         &mut self,
         id: WidgetId,
         name: &str,
         value: &str,
     ) -> Result<(), WidgetError> {
-        if !self.arena.contains(id) {
-            return Err(WidgetError::StaleElement(id));
-        }
-        self.arena.add_inline_style(id, name, value);
+        self.check_live(id)?;
+        self.doc.add_inline_style(id, name, value);
         Ok(())
     }
 
@@ -403,45 +375,30 @@ impl WidgetTree {
         name: &str,
         value: &str,
     ) -> Result<(), WidgetError> {
-        if !self.arena.contains(id) {
-            return Err(WidgetError::StaleElement(id));
-        }
-        self.arena.note_attribute_change(id, name);
-        if let Some(widget) = self.arena.get_mut(id) {
-            widget.attrs.insert(name.into(), value.to_owned());
-        }
+        self.check_live(id)?;
+        self.doc.set_attribute(id, name, value);
         Ok(())
     }
 
     /// Set an element's id selector value (Lynx's `__SetID`). An empty string
     /// clears it.
     pub fn set_id(&mut self, id: WidgetId, id_selector: &str) -> Result<(), WidgetError> {
-        if !self.arena.contains(id) {
-            return Err(WidgetError::StaleElement(id));
-        }
-        self.arena.note_id_change(id);
-        if let Some(widget) = self.arena.get_mut(id) {
-            widget.id_attr = if id_selector.is_empty() {
-                None
-            } else {
-                Some(Atom::from(id_selector))
-            };
-        }
+        self.check_live(id)?;
+        self.doc
+            .set_id_attr(id, (!id_selector.is_empty()).then_some(id_selector));
         Ok(())
     }
 
     /// Set the `css_id` (style scope) on a batch of elements.
     pub fn set_css_id(&mut self, ids: &[WidgetId], css_id: i32) -> Result<(), WidgetError> {
-        if let Some(&bad) = ids.iter().find(|&&id| !self.arena.contains(id)) {
+        if let Some(&bad) = ids.iter().find(|&&id| !self.doc.contains(id)) {
             return Err(WidgetError::StaleElement(bad));
         }
         for &id in ids {
-            // The css_id is reflected as the synthetic `l-css-id` attribute,
-            // so snapshot it as an attribute change.
-            self.arena.note_attribute_change(id, "l-css-id");
-            if let Some(widget) = self.arena.get_mut(id) {
-                widget.ext.css_id = css_id;
-            }
+            // The css_id is reflected as the synthetic `l-css-id` attribute;
+            // snapshot it before the payload mutation.
+            self.doc.note_external_attribute_change(id, "l-css-id");
+            self.doc.ext_mut(id).css_id = css_id;
         }
         Ok(())
     }
@@ -453,18 +410,16 @@ impl WidgetTree {
         K: Into<Box<str>>,
         V: Into<String>,
     {
-        if !self.arena.contains(id) {
-            return Err(WidgetError::StaleElement(id));
-        }
+        self.check_live(id)?;
         // Snapshot the old values first, and name every old reflected
         // attribute while they still exist.
-        self.arena.note_other_attributes_change(id);
+        self.doc.note_external_attributes_change(id);
         let old_keys: Vec<String> = self
-            .arena
+            .doc
             .get(id)
             .map(|widget| {
                 widget
-                    .ext
+                    .ext()
                     .dataset
                     .keys()
                     .map(|key| format!("data-{key}"))
@@ -472,24 +427,22 @@ impl WidgetTree {
             })
             .unwrap_or_default();
         for key in &old_keys {
-            self.arena.note_attribute_change(id, key);
+            self.doc.note_external_attribute_change(id, key);
         }
 
-        if let Some(widget) = self.arena.get_mut(id) {
-            widget.ext.dataset = entries
-                .into_iter()
-                .map(|(k, v)| (k.into(), v.into()))
-                .collect();
-        }
+        self.doc.ext_mut(id).dataset = entries
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect();
 
         // Names that only exist in the new dataset still need to be flagged
         // as changed; the snapshot keeps the pre-mutation values.
         let new_keys: Vec<String> = self
-            .arena
+            .doc
             .get(id)
             .map(|widget| {
                 widget
-                    .ext
+                    .ext()
                     .dataset
                     .keys()
                     .map(|key| format!("data-{key}"))
@@ -498,7 +451,7 @@ impl WidgetTree {
             .unwrap_or_default();
         for key in &new_keys {
             if !old_keys.contains(key) {
-                self.arena.note_attribute_change(id, key);
+                self.doc.note_external_attribute_change(id, key);
             }
         }
         Ok(())
@@ -506,13 +459,13 @@ impl WidgetTree {
 
     /// Add or overwrite a single `data-*` dataset entry.
     pub fn add_dataset(&mut self, id: WidgetId, key: &str, value: &str) -> Result<(), WidgetError> {
-        if !self.arena.contains(id) {
-            return Err(WidgetError::StaleElement(id));
-        }
-        self.arena.note_attribute_change(id, &format!("data-{key}"));
-        if let Some(widget) = self.arena.get_mut(id) {
-            widget.ext.dataset.insert(key.into(), value.to_owned());
-        }
+        self.check_live(id)?;
+        self.doc
+            .note_external_attribute_change(id, &format!("data-{key}"));
+        self.doc
+            .ext_mut(id)
+            .dataset
+            .insert(key.into(), value.to_owned());
         Ok(())
     }
 
@@ -525,31 +478,25 @@ impl WidgetTree {
         name: &str,
         handler: &str,
     ) -> Result<(), WidgetError> {
-        match self.arena.get_mut(id) {
-            Some(widget) => widget.ext.events.push(EventReg {
-                name: name.into(),
-                kind,
-                handler: handler.into(),
-            }),
-            None => return Err(WidgetError::StaleElement(id)),
-        }
+        self.check_live(id)?;
+        self.doc.ext_mut(id).events.push(EventReg {
+            name: name.into(),
+            kind,
+            handler: handler.into(),
+        });
         Ok(())
     }
 
-    /// Toggle one or more pseudo-class flags on an element.
+    /// Toggle one or more dynamic pseudo-class flags (`:hover` / `:active` /
+    /// `:focus`, as [`ElementState`] bits) on an element.
     pub fn set_pseudo_state(
         &mut self,
         id: WidgetId,
-        state: PseudoState,
+        state: ElementState,
         on: bool,
     ) -> Result<(), WidgetError> {
-        if !self.arena.contains(id) {
-            return Err(WidgetError::StaleElement(id));
-        }
-        self.arena.note_state_change(id);
-        if let Some(widget) = self.arena.get_mut(id) {
-            widget.element_state.set(state.to_element_state(), on);
-        }
+        self.check_live(id)?;
+        self.doc.set_state(id, state, on);
         Ok(())
     }
 
@@ -558,27 +505,25 @@ impl WidgetTree {
     /// An element's Lynx tag name.
     #[must_use]
     pub fn get_tag(&self, id: WidgetId) -> Option<&str> {
-        self.arena.get(id).map(Widget::tag_str)
+        self.doc.get(id).map(Widget::tag)
     }
 
     /// An element's plain attribute map.
     #[must_use]
     pub fn get_attributes(&self, id: WidgetId) -> Option<&FxHashMap<Box<str>, String>> {
-        self.arena.get(id).map(|widget| &widget.attrs)
+        self.doc.get(id).map(Widget::attrs)
     }
 
     /// An element's Lynx `unique_id`.
     #[must_use]
     pub fn get_element_unique_id(&self, id: WidgetId) -> Option<i32> {
-        self.arena.get(id).map(|widget| widget.ext.unique_id)
+        self.doc.get(id).map(|widget| widget.ext().unique_id)
     }
 
-    /// An element's active dynamic pseudo-classes, as a [`PseudoState`].
+    /// An element's active dynamic pseudo-classes, as [`ElementState`] bits.
     #[must_use]
-    pub fn pseudo_state(&self, id: WidgetId) -> Option<PseudoState> {
-        self.arena
-            .get(id)
-            .map(|widget| PseudoState::from_element_state(widget.element_state))
+    pub fn pseudo_state(&self, id: WidgetId) -> Option<ElementState> {
+        self.doc.get(id).map(Widget::element_state)
     }
 
     /// Resolve a Lynx `unique_id` back to its [`WidgetId`].
@@ -587,22 +532,22 @@ impl WidgetTree {
         self.by_unique_id.get(&unique_id).copied()
     }
 
-    /// The tree's `<page>` root, if one has been created.
+    /// The tree's `<page>` root (the document root), if one has been created.
     #[must_use]
-    pub const fn get_page_element(&self) -> Option<WidgetId> {
-        self.page
+    pub fn get_page_element(&self) -> Option<WidgetId> {
+        self.doc.root()
     }
 
     /// Borrow an element's [`Widget`], if live.
     #[must_use]
     pub fn widget(&self, id: WidgetId) -> Option<&Widget> {
-        self.arena.get(id)
+        self.doc.get(id)
     }
 
     /// A read-only navigation handle for an element, if live.
     #[must_use]
     pub fn widget_ref(&self, id: WidgetId) -> Option<WidgetRef<'_>> {
-        self.arena.element_ref(id)
+        self.doc.node_ref(id)
     }
 
     /// An element's resolved computed style, if it has been styled.
@@ -610,7 +555,7 @@ impl WidgetTree {
     /// The style lives in stylo's per-element data; the `Arc` clone is cheap.
     #[must_use]
     pub fn computed(&self, id: WidgetId) -> Option<Arc<ComputedValues>> {
-        self.arena.get(id).and_then(Widget::computed_style)
+        self.doc.get(id).and_then(Widget::computed_style)
     }
 
     /// Store an element's resolved computed style and clear its `style_dirty`
@@ -623,11 +568,9 @@ impl WidgetTree {
         id: WidgetId,
         style: Arc<ComputedValues>,
     ) -> Result<(), WidgetError> {
-        if self.arena.store_computed_style(id, style) {
-            Ok(())
-        } else {
-            Err(WidgetError::StaleElement(id))
-        }
+        self.check_live(id)?;
+        self.doc.store_computed_style(id, style);
+        Ok(())
     }
 
     // --- dirty state ------------------------------------------------------
@@ -635,17 +578,11 @@ impl WidgetTree {
     /// Whether the tree has any pending style work, checked at the page root.
     #[must_use]
     pub fn has_dirty(&self) -> bool {
-        match self.page {
-            Some(page) => self
-                .arena
-                .get(page)
-                .is_some_and(|widget| widget.is_style_dirty() || widget.has_dirty_descendants()),
-            None => false,
-        }
+        self.doc.needs_flush()
     }
 
     /// Clear every element's dirty bits (called after a restyle pass).
     pub fn clear_dirty(&mut self) {
-        self.arena.clear_dirty();
+        self.doc.clear_dirty();
     }
 }
