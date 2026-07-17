@@ -1,11 +1,12 @@
 //! [`Node`] — the unit the tree is composed of — and its `&Node` read/
 //! navigation handle.
 //!
-//! A node models a strict subset of the W3C DOM. Element nodes carry a tag,
-//! id, classes, attributes, dynamic pseudo-class state, an inline style block,
-//! and the per-element style bookkeeping stylo needs; text nodes carry
-//! character data. Both kinds share tree links and an embedder-owned
-//! [`ext`](Node::ext) payload (see [`ExternalState`](crate::ExternalState)).
+//! A node models a strict subset of the W3C DOM. Slot zero is the document
+//! node and owns the shared style context. Element nodes carry a tag, id,
+//! classes, attributes, dynamic pseudo-class state, an inline style block,
+//! and the per-element style bookkeeping Stylo needs; text nodes carry
+//! character data. Element/text variants share tree links and an
+//! embedder-owned [`ext`](Node::ext) payload.
 //!
 //! Nodes are created by
 //! [`Document::create_element`](crate::Document::create_element) or
@@ -16,8 +17,9 @@
 //!
 //! # The backpointer, and why `&Node` is the handle
 //!
-//! Each node carries a pointer back to the [`Document`](crate::Document) core
-//! that owns it. Tree navigation therefore needs nothing but the node itself,
+//! Each node carries a pointer back to the fixed-address [`Slab`](slab::Slab)
+//! owned by its [`Document`](crate::Document). Tree navigation therefore
+//! needs nothing but the node itself,
 //! and stylo's element traits are implemented **directly on `&'a Node<T>`**
 //! (see the crate-private `traits` module) — no wrapper handle exists. This
 //! is load-bearing beyond convenience — stylo's style-sharing cache sizes its
@@ -45,21 +47,24 @@
 
 use std::cell::UnsafeCell;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicUsize, Ordering};
+use std::sync::Arc as StdArc;
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 
 use dom::ElementState;
 use rustc_hash::FxHashMap;
 use selectors::matching::ElementSelectorFlags;
+use slab::Slab;
 use smallvec::SmallVec;
 use stylo::LocalName;
 use stylo::data::ElementDataWrapper;
 use stylo::properties::{ComputedValues, PropertyDeclarationBlock};
 use stylo::selector_parser::Snapshot;
 use stylo::servo_arc::Arc;
-use stylo::shared_lock::Locked;
+use stylo::shared_lock::{Locked, SharedRwLock};
+use stylo::stylesheets::UrlExtraData;
 use stylo_atoms::Atom;
 
-use crate::document::{Core, CorePtr, NodeId};
+use crate::document::{DOCUMENT_NODE_ID, NodeId};
 
 /// Debug-only instrumentation for the `stylo_data` slot (finding: a bare
 /// `UnsafeCell` makes contract violations undefined behavior instead of a
@@ -249,16 +254,31 @@ pub(crate) const SNAPSHOT_PRESENT: u8 = 1 << 0;
 pub(crate) const SNAPSHOT_HANDLED: u8 = 1 << 1;
 
 /// The kind of a DOM [`Node`].
-///
-/// `w3c-dom` currently models the two node kinds needed by the runtime and
-/// stylo traversal. The owning [`Document`](crate::Document) is represented
-/// separately as the DOM document node at the stylo boundary.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum NodeType {
+    /// The real DOM document node, permanently stored at slab slot zero.
+    Document,
     /// An element node with a local tag name and CSS style state.
     Element,
     /// A text node containing character data and no element identity.
     Text,
+}
+
+/// Kind-specific node data.
+///
+/// The document variant owns the context that every node can reach through
+/// its slab backpointer. Element/text variants own the embedder payload; the
+/// document node deliberately has no `T`, so creating `Document<T>` never
+/// requires `T: Default` or a sentinel payload.
+pub(crate) enum NodeData<T> {
+    Document {
+        lock: StdArc<SharedRwLock>,
+        url_data: UrlExtraData,
+        #[cfg(debug_assertions)]
+        in_flush: AtomicBool,
+    },
+    Element(T),
+    Text(T),
 }
 
 /// A single node in a [`Document`](crate::Document) tree.
@@ -267,18 +287,14 @@ pub enum NodeType {
 /// thread-safety story. All fields are crate-private: reads go through the
 /// accessors below, writes through `Document` methods.
 pub struct Node<T> {
-    /// Backpointer to the owning document core (ONE TREE: a node belongs to
-    /// exactly one document, for life).
-    core: CorePtr<T>,
-    /// This node's own handle (also the source of its stable stylo
-    /// `OpaqueNode` identity).
+    /// Backpointer to the owning fixed-address slab.
+    tree: AtomicPtr<Slab<Node<T>>>,
+    /// This node's raw slab index and stable Stylo `OpaqueNode` identity.
     id: NodeId,
-    /// Whether this is an element or text node.
-    kind: NodeType,
+    /// Whether this is the document, an element, or text, plus its payload.
+    data: NodeData<T>,
 
-    /// The parent element, or `None` for the document element / a detached
-    /// element. Stylo's broader DOM-node view supplies the real `Document`
-    /// parent for the document element.
+    /// The parent node. The connected root element points to slot zero.
     pub(crate) parent: Option<NodeId>,
     /// Child nodes, in document order.
     pub(crate) children: Vec<NodeId>,
@@ -351,46 +367,60 @@ pub struct Node<T> {
     /// may also carry data for embedder-defined element-backed text carriers
     /// (Lynx's `<raw-text>` is one); ordinary W3C text uses a child text node.
     pub(crate) text: Option<String>,
-
-    /// The embedder's external-state payload (see
-    /// [`ExternalState`](crate::ExternalState)).
-    pub(crate) ext: T,
 }
 
 impl<T> Node<T> {
-    /// Create a detached element bound to its owning document core.
-    /// Crate-only: embedders go through
-    /// [`Document::create_element`](crate::Document::create_element).
-    pub(crate) fn new_element(core: CorePtr<T>, id: NodeId, tag: &str, ext: T) -> Self {
+    /// Create the slot-zero document node.
+    pub(crate) fn new_document(
+        tree: *mut Slab<Node<T>>,
+        lock: StdArc<SharedRwLock>,
+        url_data: UrlExtraData,
+    ) -> Self {
         Self::new(
-            core,
-            id,
-            NodeType::Element,
-            Some(LocalName::from(tag)),
+            tree,
+            DOCUMENT_NODE_ID,
+            NodeData::Document {
+                lock,
+                url_data,
+                #[cfg(debug_assertions)]
+                in_flush: AtomicBool::new(false),
+            },
             None,
-            ext,
+            None,
         )
     }
 
-    /// Create a detached text node bound to its owning document core.
+    /// Create a detached element bound to its owning document slab.
+    /// Crate-only: embedders go through
+    /// [`Document::create_element`](crate::Document::create_element).
+    pub(crate) fn new_element(tree: *mut Slab<Node<T>>, id: NodeId, tag: &str, ext: T) -> Self {
+        Self::new(
+            tree,
+            id,
+            NodeData::Element(ext),
+            Some(LocalName::from(tag)),
+            None,
+        )
+    }
+
+    /// Create a detached text node bound to its owning document slab.
     /// Crate-only: embedders go through
     /// [`Document::create_text_node`](crate::Document::create_text_node).
-    pub(crate) fn new_text(core: CorePtr<T>, id: NodeId, text: String, ext: T) -> Self {
-        Self::new(core, id, NodeType::Text, None, Some(text), ext)
+    pub(crate) fn new_text(tree: *mut Slab<Node<T>>, id: NodeId, text: String, ext: T) -> Self {
+        Self::new(tree, id, NodeData::Text(ext), None, Some(text))
     }
 
     fn new(
-        core: CorePtr<T>,
+        tree: *mut Slab<Node<T>>,
         id: NodeId,
-        kind: NodeType,
+        data: NodeData<T>,
         tag: Option<LocalName>,
         text: Option<String>,
-        ext: T,
     ) -> Self {
         Self {
-            core,
+            tree: AtomicPtr::new(tree),
             id,
-            kind,
+            data,
             parent: None,
             children: Vec::new(),
             tag,
@@ -409,26 +439,62 @@ impl<T> Node<T> {
             #[cfg(debug_assertions)]
             slot_guard: slot_guard::SlotGuard::new(),
             text,
-            ext,
         }
     }
 
-    /// Borrow the owning document core through the backpointer.
+    /// Borrow the owning document's fixed-address slab through the backpointer.
     ///
     /// # Safety discipline (crate-internal)
     ///
     /// Callable only from shared-borrow contexts (`&Node` navigation and
-    /// the stylo trait impls), where the `&self` was itself derived from a
-    /// `&Document` / `&Core`: the core is then alive (it owns this node) and
-    /// no `&mut Core` can exist (`Document` mutation holds `&mut self`).
-    /// `Document`'s `&mut` methods never call this.
-    pub(crate) fn tree(&self) -> &Core<T> {
-        // SAFETY: see above — backpointer target is the live, heap-pinned
-        // core that owns this node; only shared borrows are active.
-        #[expect(unsafe_code, reason = "deref the owning core from a shared context")]
+    /// the stylo trait impls), where the `&self` was itself derived from the
+    /// slab. The boxed slab outlives every node and mutation requires
+    /// `&mut Document`, so no mutable slab borrow can coexist.
+    pub(crate) fn tree(&self) -> &Slab<Node<T>> {
+        // SAFETY: the private `Document` field keeps the boxed slab at this
+        // address until after every node is dropped; see the method contract.
+        #[expect(unsafe_code, reason = "deref the owning slab backpointer")]
         unsafe {
-            self.core.0.as_ref()
+            &*self.tree.load(Ordering::Relaxed)
         }
+    }
+
+    /// The owner document node at the slab's fixed slot zero.
+    pub(crate) fn owner_document(&self) -> &Node<T> {
+        self.tree()
+            .get(DOCUMENT_NODE_ID)
+            .expect("the document node is never removed")
+    }
+
+    /// The owner document's style lock.
+    pub(crate) fn document_lock(&self) -> &StdArc<SharedRwLock> {
+        match &self.owner_document().data {
+            NodeData::Document { lock, .. } => lock,
+            _ => unreachable!("slot zero must contain the document node"),
+        }
+    }
+
+    /// The owner document's base URL data.
+    pub(crate) fn document_url_data(&self) -> &UrlExtraData {
+        match &self.owner_document().data {
+            NodeData::Document { url_data, .. } => url_data,
+            _ => unreachable!("slot zero must contain the document node"),
+        }
+    }
+
+    /// The owner document's traversal-phase flag.
+    #[cfg(debug_assertions)]
+    pub(crate) fn flush_flag(&self) -> &AtomicBool {
+        match &self.owner_document().data {
+            NodeData::Document { in_flush, .. } => in_flush,
+            _ => unreachable!("slot zero must contain the document node"),
+        }
+    }
+
+    /// Whether the owner document is inside a style traversal.
+    #[cfg(debug_assertions)]
+    pub(crate) fn in_flush(&self) -> bool {
+        self.flush_flag().load(Ordering::Relaxed)
     }
 
     // --- identity & DOM reads ------------------------------------------------
@@ -441,24 +507,33 @@ impl<T> Node<T> {
 
     /// This node's DOM kind.
     #[must_use]
-    pub const fn node_type(&self) -> NodeType {
-        self.kind
+    pub fn node_type(&self) -> NodeType {
+        match &self.data {
+            NodeData::Document { .. } => NodeType::Document,
+            NodeData::Element(_) => NodeType::Element,
+            NodeData::Text(_) => NodeType::Text,
+        }
+    }
+
+    /// Whether this is the document node.
+    #[must_use]
+    pub fn is_document(&self) -> bool {
+        matches!(&self.data, NodeData::Document { .. })
     }
 
     /// Whether this is an element node.
     #[must_use]
-    pub const fn is_element(&self) -> bool {
-        matches!(self.kind, NodeType::Element)
+    pub fn is_element(&self) -> bool {
+        matches!(&self.data, NodeData::Element(_))
     }
 
     /// Whether this is a text node.
     #[must_use]
-    pub const fn is_text_node(&self) -> bool {
-        matches!(self.kind, NodeType::Text)
+    pub fn is_text_node(&self) -> bool {
+        matches!(&self.data, NodeData::Text(_))
     }
 
-    /// The parent element's handle, or `None` for the document element / a
-    /// detached node.
+    /// The parent node's handle, or `None` for the document/detached nodes.
     #[must_use]
     pub fn parent_id(&self) -> Option<NodeId> {
         self.parent
@@ -521,16 +596,27 @@ impl<T> Node<T> {
     }
 
     /// The embedder's external-state payload.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called on the document node, which deliberately has no
+    /// embedder payload.
     #[must_use]
     pub fn ext(&self) -> &T {
-        &self.ext
+        match &self.data {
+            NodeData::Element(ext) | NodeData::Text(ext) => ext,
+            NodeData::Document { .. } => panic!("the document node has no external payload"),
+        }
     }
 
     /// Payload mutation is `Document`-mediated
     /// ([`Document::ext_mut`](crate::Document::ext_mut)) so synthetic-attribute
     /// snapshots can be demanded contractually alongside it.
     pub(crate) fn ext_mut(&mut self) -> &mut T {
-        &mut self.ext
+        match &mut self.data {
+            NodeData::Element(ext) | NodeData::Text(ext) => ext,
+            NodeData::Document { .. } => panic!("the document node has no external payload"),
+        }
     }
 
     // --- style reads ----------------------------------------------------------
@@ -646,7 +732,10 @@ impl<T> Node<T> {
 
     /// Take ownership of the payload when the node is freed.
     pub(crate) fn into_ext(self) -> T {
-        self.ext
+        match self.data {
+            NodeData::Element(ext) | NodeData::Text(ext) => ext,
+            NodeData::Document { .. } => unreachable!("the document node is never removed"),
+        }
     }
 
     /// Whether this element has no element children, non-empty text-node
@@ -659,7 +748,10 @@ impl<T> Node<T> {
         debug_assert!(self.is_element(), "`:empty` is only defined for elements");
         self.text.as_ref().is_none_or(String::is_empty)
             && self.children.iter().all(|&id| {
-                let child = self.tree().link(id);
+                let child = self
+                    .tree()
+                    .get(id)
+                    .expect("internal tree links always resolve");
                 !child.is_element()
                     && (!child.is_text_node() || child.text.as_ref().is_none_or(String::is_empty))
             })
@@ -681,21 +773,45 @@ impl<T> Node<T> {
 // syntax on a `&Node` receiver would resolve to the trait impl first.
 impl<T> Node<T> {
     /// The parent node, if any.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal parent link is dangling.
     #[must_use]
     pub fn parent(&self) -> Option<&Node<T>> {
-        self.parent.map(|id| self.tree().link(id))
+        self.parent.map(|id| {
+            self.tree()
+                .get(id)
+                .expect("internal tree links always resolve")
+        })
     }
 
     /// The first child node, if any.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal child link is dangling.
     #[must_use]
     pub fn first_child(&self) -> Option<&Node<T>> {
-        self.children.first().map(|&id| self.tree().link(id))
+        self.children.first().map(|&id| {
+            self.tree()
+                .get(id)
+                .expect("internal tree links always resolve")
+        })
     }
 
     /// The last child node, if any.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal child link is dangling.
     #[must_use]
     pub fn last_child(&self) -> Option<&Node<T>> {
-        self.children.last().map(|&id| self.tree().link(id))
+        self.children.last().map(|&id| {
+            self.tree()
+                .get(id)
+                .expect("internal tree links always resolve")
+        })
     }
 
     /// The next sibling node, if any.
@@ -712,13 +828,19 @@ impl<T> Node<T> {
 
     fn sibling_at(&self, offset: isize) -> Option<&Node<T>> {
         let tree = self.tree();
-        let siblings = &tree.link(self.parent?).children;
+        let siblings = &tree
+            .get(self.parent?)
+            .expect("internal tree links always resolve")
+            .children;
         let pos = siblings
             .iter()
             .position(|&c| c == self.id)
             .expect("node must appear in its parent's child list");
         let sibling = *siblings.get(pos.checked_add_signed(offset)?)?;
-        Some(tree.link(sibling))
+        Some(
+            tree.get(sibling)
+                .expect("internal tree links always resolve"),
+        )
     }
 
     /// Iterate over the node's children in document order.
@@ -741,7 +863,7 @@ impl<T> fmt::Debug for Node<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Node")
             .field("id", &self.id)
-            .field("node_type", &self.kind)
+            .field("node_type", &self.node_type())
             .field("tag", &self.tag())
             .field("text", &self.text)
             .field("classes", &self.classes)
@@ -779,7 +901,7 @@ impl<T> std::hash::Hash for Node<T> {
 /// The children iterator ([`Node::children`]); also what stylo's restyle
 /// traversal walks.
 pub struct ChildrenIter<'a, T> {
-    tree: &'a Core<T>,
+    tree: &'a Slab<Node<T>>,
     children: &'a [NodeId],
     index: usize,
 }
@@ -799,6 +921,10 @@ impl<'a, T> Iterator for ChildrenIter<'a, T> {
     fn next(&mut self) -> Option<&'a Node<T>> {
         let id = *self.children.get(self.index)?;
         self.index += 1;
-        Some(self.tree.link(id))
+        Some(
+            self.tree
+                .get(id)
+                .expect("internal tree links always resolve"),
+        )
     }
 }

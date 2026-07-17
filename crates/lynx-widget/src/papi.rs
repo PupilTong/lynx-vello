@@ -188,7 +188,10 @@ impl WidgetTree {
     /// The canonical handle for a live node: clones the existing one when any
     /// external clone is alive, mints (and registers) a fresh one otherwise.
     fn handle_for(&self, id: NodeId) -> WidgetHandle {
-        debug_assert!(self.doc.contains(id), "handle_for on a freed node");
+        debug_assert!(
+            self.doc.get(id).is_some_and(Node::is_element),
+            "WidgetHandle can only identify a live element"
+        );
         let mut registry = self
             .handles
             .lock()
@@ -229,13 +232,13 @@ impl WidgetTree {
             if !self.doc.contains(id) {
                 continue; // already reclaimed by an earlier entry in this batch
             }
+            if self.doc.is_connected(id) {
+                continue; // attached content is retained by the DOM tree
+            }
             // Find the top of the tree `id` sits in.
             let mut top = id;
             while let Some(parent) = self.doc.get(top).and_then(Node::parent_id) {
                 top = parent;
-            }
-            if self.page == Some(top) {
-                continue; // attached content: retained by the tree itself
             }
             let (retained, subtree) = self.subtree_retention(top);
             if retained {
@@ -509,6 +512,7 @@ impl WidgetTree {
             .doc
             .get(id)
             .and_then(Node::parent_id)
+            .filter(|&parent| self.doc.get(parent).is_some_and(Node::is_element))
             .map(|parent| self.handle_for(parent)))
     }
 

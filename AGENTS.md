@@ -142,11 +142,13 @@ useful signal for currently-compatible versions of those libraries.
   QuickJS bridge or engine-neutral protocol.
 - `crates/w3c-dom` — generic W3C-DOM-subset document tree and
   standards-oriented CSS computation core. Owns the single, distinct
-  `Document<T>` node and its slab of element/text `Node<T>`s (ONE TREE policy:
-  nodes are created and mutated only through `Document` methods, with pending
-  snapshots stored on the affected nodes), the stylo `TElement` impl on the
-  plain one-word `&Node` handle plus the broader document/element/text `TNode`
-  view (per-node backpointer; styling runs in place, no mirror tree),
+  fixed-address `Box<Slab<Node<T>>>`: slot zero is the real DOM Document node
+  and owns the document style context; later slots are element/text nodes,
+  addressed by raw `usize` indices (ONE TREE policy: nodes are created and
+  mutated only through `Document` methods, with pending snapshots stored on
+  the affected nodes). Every node points directly back to the slab, and the
+  same plain one-word `&Node` implements Stylo's document/node/element traits
+  according to its `NodeData` (styling runs in place, no mirror tree),
   inline-style parsing, the `Stylist` /
   cascade pipeline, and the private `SharedRwLock` shared by an engine and
   its documents. Mutation APIs follow a let-it-crash contract

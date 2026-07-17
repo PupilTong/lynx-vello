@@ -387,8 +387,9 @@ fn media_viewport_flip(bencher: divan::Bencher) {
     let (mut doc, _) = build_tree(&engine);
     engine.flush_document(&mut doc);
     let root = doc
-        .document_element()
-        .expect("document has an element child");
+        .root_element()
+        .expect("document has an element child")
+        .id();
     let state = RefCell::new((engine, doc));
     let mut wide = true;
     bencher
