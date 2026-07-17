@@ -188,7 +188,7 @@ impl StyleEngine {
     /// units (`rpx`/`vw`/`vh`) re-resolve and media-dependent rules re-match
     /// on the tree's next flush. A no-op without a page root.
     pub fn restyle_after_device_change(&self, tree: &mut WidgetTree) {
-        if let Some(page) = tree.document().root() {
+        if let Some(page) = tree.page_id() {
             tree.document_mut().mark_subtree_dirty(page);
         }
     }

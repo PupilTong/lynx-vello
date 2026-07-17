@@ -4,25 +4,26 @@
 //! everything stylo needs to run its cascade over it in place. The public
 //! surface is deliberately small:
 //!
-//! - [`Document<T>`] — **the one tree.** It owns every node, the optional document root, the
-//!   pending invalidation snapshots, and the private style context. Element and text nodes are
-//!   created by [`Document::create_element`] / [`Document::create_text_node`] and mutated
+//! - [`Document<T>`] — **the one tree and its actual DOM document node.** It owns every stored
+//!   node, its optional `documentElement`, and the private style context. Element and text nodes
+//!   are created by [`Document::create_element`] / [`Document::create_text_node`] and mutated
 //!   exclusively through `Document` methods; there is no way to construct, mutate, or re-home a
 //!   node outside its document (ONE TREE policy).
 //! - [`Node<T>`] — the compositional unit. [`NodeType::Element`] nodes carry the W3C-DOM-subset
 //!   element fields and stylo bookkeeping; [`NodeType::Text`] nodes carry character data. Both
-//!   kinds share tree links and the embedder payload. Read-only from outside the crate.
+//!   kinds share tree links, the embedder payload, and a node-owned pending invalidation snapshot
+//!   slot. Read-only from outside the crate.
 //! - [`NodeId`] — a generational, staleness-detecting handle. The *read* handle is a plain
 //!   `&Node<T>`; the stylo element traits are implemented directly on it (no wrapper type).
 //! - [`StyleEngine`] — stylesheet parsing/building, matching, rule-tree insertion, cascade, and the
 //!   style flush ([`StyleEngine::flush_document`]).
 //! - [`ExternalState`] — the embedder-payload trait; the only channel through which the payload `T`
-//!   influences matching (`:root` participation, synthetic / reflected attributes).
+//!   influences matching (synthetic / reflected attributes).
 //!
 //! # Contract: let it crash
 //!
 //! Mutation methods treat invalid input — stale [`NodeId`]s, cycle-creating
-//! links, foreign insertion references — as **caller bugs**, not conditions
+//! links, unrelated insertion references — as **caller bugs**, not conditions
 //! to absorb: preconditions are `debug_assert!`ed and the internal lookups
 //! panic rather than silently no-op. Query methods (`get`, `node_ref`,
 //! `child_position`, …) return `Option` instead; asking is always legal.
@@ -34,17 +35,18 @@
 //! Element tags/classes/ids are interned as stylo atoms and each element node
 //! owns stylo's interior-mutable style state; the crate-private `traits` module
 //! implements stylo's
-//! element traits ([`TNode`](stylo::dom::TNode) /
-//! [`TElement`](stylo::dom::TElement) / [`TDocument`](stylo::dom::TDocument)
-//! / [`selectors::Element`]) directly on `&'a Node<T>`. Styling therefore runs
-//! **on the document itself** — no mirror tree is built to enter the styling
-//! engine. Two design points make that work:
+//! element traits with `&'a Node<T>` as the hot [`TElement`](stylo::dom::TElement)
+//! handle and a small internal node view for
+//! [`TNode`](stylo::dom::TNode)/[`TDocument`](stylo::dom::TDocument), so the
+//! distinct document node is represented without turning it into an Element.
+//! Styling therefore runs **on the document itself** — no mirror tree is
+//! built to enter the styling engine. Two design points make that work:
 //!
 //! - every node carries a **backpointer** to its (heap-pinned) document core, so tree navigation
 //!   needs nothing but `&Node` — a shared reference is exactly the one-word `Copy` value stylo's
 //!   style-sharing cache requires of a `TElement` handle;
 //! - node identity for snapshots/traversal roots ([`OpaqueNode`](stylo::dom::OpaqueNode)) derives
-//!   from the generational [`NodeId`], so it survives slot-storage growth moving nodes.
+//!   from the generational [`NodeId`], so it survives slab-storage growth moving nodes.
 //!
 //! Inline styles are parsed at mutation time into a stylo
 //! [`PropertyDeclarationBlock`](stylo::properties::PropertyDeclarationBlock)
@@ -96,3 +98,5 @@ pub use crate::engine::{
 pub use crate::ext::ExternalState;
 pub use crate::flush::Parallelism;
 pub use crate::node::{ChildrenIter, Node, NodeType};
+#[doc(hidden)]
+pub use crate::traits::{DomChildrenIter, DomDocument, DomNode};

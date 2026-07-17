@@ -94,7 +94,7 @@ fn style_traversal_skips_text_nodes_and_reaches_element_siblings() {
     let span = doc.create_element("span", ());
     doc.append(root, text);
     doc.append(root, span);
-    doc.set_root(root);
+    doc.append_child(root);
 
     engine.flush_document(&mut doc);
 
@@ -128,7 +128,7 @@ fn text_data_changes_invalidate_the_parent_empty_selector() {
     doc.add_class(box_element, "box");
     doc.append(box_element, text);
     doc.append(root, box_element);
-    doc.set_root(root);
+    doc.append_child(root);
 
     engine.flush_document(&mut doc);
     assert_eq!(
@@ -220,7 +220,7 @@ fn edge_child_selectors_ignore_interleaved_text_nodes_during_restyle() {
     for child in [leading_a, leading_b, first, last, trailing_a, trailing_b] {
         doc.append(root, child);
     }
-    doc.set_root(root);
+    doc.append_child(root);
     engine.flush_document(&mut doc);
 
     let color =
@@ -294,7 +294,7 @@ fn flushing_a_foreign_document_crashes_at_the_boundary() {
     let engine_b = StyleEngine::new(device(800.0, 600.0));
     let mut doc: Document<()> = engine_a.new_document();
     let root = doc.create_node("page", ());
-    doc.set_root(root);
+    doc.append_child(root);
     // Without the boundary check this dies deep inside stylo
     // ("Locked::read_with called with a guard from an unrelated
     // SharedRwLock") — or silently cascades against the wrong stylist when
@@ -318,6 +318,6 @@ fn standalone_documents_cannot_be_flushed() {
     let engine = StyleEngine::new(device(800.0, 600.0));
     let mut doc: Document<()> = Document::new();
     let root = doc.create_node("page", ());
-    doc.set_root(root);
+    doc.append_child(root);
     engine.flush_document(&mut doc);
 }

@@ -2066,6 +2066,7 @@ dependencies = [
  "euclid",
  "rustc-hash",
  "selectors",
+ "slab",
  "smallvec",
  "stylo",
  "stylo_atoms",

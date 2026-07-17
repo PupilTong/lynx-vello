@@ -6,8 +6,9 @@
 //! `unique_id`, the `css_id` style scope, the `data-*` dataset, and event
 //! bindings — lives here, in the node's `ext` payload. The
 //! [`ExternalState`] impl is what feeds the Lynx-specific bits back into
-//! selector matching (`:root` = the `<page>` kind, the synthetic `l-css-id`
-//! attribute, `data-*` dataset reflection).
+//! selector matching (the synthetic `l-css-id` attribute and `data-*`
+//! dataset reflection). Structural selectors such as `:root` stay entirely
+//! in `w3c-dom`.
 
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -87,14 +88,6 @@ impl WidgetState {
 }
 
 impl ExternalState for WidgetState {
-    fn is_root(&self) -> bool {
-        // `:root` is exactly the `<page>` element (web-core rewrites `:root`
-        // to the page part). Checking the kind — not just parentlessness —
-        // keeps a detached subtree's root from matching `:root` during
-        // resolve.
-        self.kind == WidgetKind::Page
-    }
-
     fn extra_attr_value(&self, name: &str) -> Option<String> {
         if name == "l-css-id" {
             // The synthetic `l-css-id` attribute exposes the widget's style

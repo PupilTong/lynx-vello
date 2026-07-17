@@ -17,8 +17,10 @@
 //!   unless the importing css id is `0` (global; pageConfig `enableRemoveCSSScope` compiles to css
 //!   id 0). String-parity with web-core's decoder output — same insertion anchor, same formatting.
 //! - **No web-DOM rewrites**: web-core's `:root` → `[part="page"]`, `::placeholder` →
-//!   `::part(input)::placeholder`, and `view` → `x-view` tag renames exist to map onto a real
-//!   browser DOM; the native engine matches Lynx tags and `:root` (the `<page>` element) directly.
+//!   `::part(input)::placeholder`, and `view` → `x-view` tag renames exist to map onto its browser
+//!   host DOM. The native adapter records `<page>` as its own root and attaches it as an ordinary
+//!   element beneath `w3c-dom`'s real document node; standard `:root` matching therefore remains a
+//!   structural DOM concern rather than a `WidgetState` hook.
 //! - **No entry-name guards** (`:not([l-e-name])`): lazy bundles are unsupported so far, so the
 //!   guard could never exclude anything — it would be pure per-match overhead.
 //! - The legacy `enableCSSSelector=false` (`css_og`) mode is **out of scope**

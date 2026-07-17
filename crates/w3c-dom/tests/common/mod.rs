@@ -134,7 +134,7 @@ impl Doc {
         let engine = StyleEngine::new(device);
         let mut dom = engine.new_document();
         let root = dom.create_node("page", ());
-        dom.set_root(root);
+        dom.append_child(root);
         Self { engine, dom, root }
     }
 

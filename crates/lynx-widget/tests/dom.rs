@@ -1,7 +1,8 @@
 //! Element-PAPI behavior: creation, structure opcodes, attribute/style
-//! setters, the `unique_id` index, and the ownership model — handles carry
-//! tree identity, retain their nodes, and drive reclamation of detached
-//! subtrees.
+//! setters, the `unique_id` index, and the ownership model — handles retain
+//! their nodes and drive reclamation of detached subtrees.
+
+use std::collections::HashSet;
 
 use lynx_widget::{ElementState, EventKind, WidgetError, WidgetHandle, WidgetKind, WidgetTree};
 
@@ -90,6 +91,25 @@ fn create_elements_kinds_and_structure() {
 }
 
 #[test]
+fn page_tag_alone_does_not_become_the_widget_root() {
+    let mut tree = WidgetTree::new();
+    let detached_page = tree.create_element("page");
+    assert_eq!(tree.get_page_element(), None);
+    assert!(
+        !tree
+            .document()
+            .is_connected(tree.widget(&detached_page).unwrap().id())
+    );
+
+    let page = tree.create_page();
+    assert_eq!(tree.get_page_element(), Some(page.clone()));
+    assert!(
+        tree.document()
+            .is_connected(tree.widget(&page).unwrap().id())
+    );
+}
+
+#[test]
 fn unique_ids_are_monotonic_and_one_based() {
     let mut doc = WidgetTree::new();
     let page = doc.create_page();
@@ -110,7 +130,7 @@ fn widget_kind_tag_mapping() {
     assert_eq!(WidgetKind::Unknown.tag_name(), "unknown");
 }
 
-// --- handles: identity, canonicality, foreignness ----------------------------
+// --- handles: canonicality and context ownership -----------------------------
 
 #[test]
 fn handles_are_canonical() {
@@ -124,13 +144,19 @@ fn handles_are_canonical() {
 }
 
 #[test]
-fn cross_tree_handles_are_foreign_errors() {
-    // Two fresh trees mint identical (index, generation) sequences; without
-    // tree identity, tree A's handle would silently alias tree B's same-slot
-    // node. With it, every entry point answers ForeignWidget.
+fn misrouted_handles_are_rejected_at_the_native_boundary() {
+    // Runtime JS contexts never exchange handles. If native code violates
+    // that boundary, the handle's existing Reaper owner rejects the routing;
+    // NodeId itself remains scoped to one Document.
     let (mut doc_a, t_a) = three_children();
     let (mut doc_b, t_b) = three_children();
-    assert_ne!(doc_a.token(), doc_b.token());
+
+    assert_ne!(t_a.a, t_b.a);
+    let mut identities = HashSet::new();
+    assert!(identities.insert(t_a.a.clone()));
+    assert!(!identities.insert(t_a.a.clone()));
+    assert!(identities.insert(t_b.a.clone()));
+    assert_eq!(identities.len(), 2);
 
     assert!(matches!(
         doc_b.set_classes(&t_a.a, "x"),
@@ -148,10 +174,10 @@ fn cross_tree_handles_are_foreign_errors() {
         doc_b.computed(&t_a.a),
         Err(WidgetError::ForeignWidget(_))
     ));
-    // And the same-slot node in tree B is untouched.
+    // The corresponding node in context B is untouched.
     doc_a.set_classes(&t_a.a, "only-in-a").unwrap();
     let b_classes: Vec<&str> = doc_b.widget(&t_b.a).unwrap().classes().collect();
-    assert!(b_classes.is_empty(), "no cross-tree mutation leaked");
+    assert!(b_classes.is_empty(), "misrouted mutation reached context B");
 }
 
 // --- structure opcodes --------------------------------------------------------
@@ -234,7 +260,8 @@ fn the_page_root_cannot_be_reparented() {
         doc.insert_element_before(&t.page, &t.container, Some(&t.a)),
         Err(WidgetError::CannotReparentRoot(_))
     ));
-    // Structure is untouched; the page is still the root and parentless.
+    // Structure is untouched; the page is still the WidgetTree root and has
+    // no parent widget (its DOM parent is the distinct Document node).
     assert_eq!(doc.get_parent(&t.page).unwrap(), None);
     assert_eq!(doc.get_page_element(), Some(t.page.clone()));
 }
@@ -460,7 +487,7 @@ fn set_css_id_batch() {
     // The page keeps its default (unset) css_id.
     assert_eq!(doc.widget(&t.page).unwrap().ext().css_id, 0);
 
-    // A foreign handle anywhere in the batch fails the whole call.
+    // A misrouted handle anywhere in the batch fails the whole call.
     let (_other, other_t) = three_children();
     assert!(matches!(
         doc.set_css_id(&[&t.b, &other_t.a], 7),

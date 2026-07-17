@@ -54,6 +54,7 @@ use smallvec::SmallVec;
 use stylo::LocalName;
 use stylo::data::ElementDataWrapper;
 use stylo::properties::{ComputedValues, PropertyDeclarationBlock};
+use stylo::selector_parser::Snapshot;
 use stylo::servo_arc::Arc;
 use stylo::shared_lock::Locked;
 use stylo_atoms::Atom;
@@ -240,9 +241,9 @@ pub(crate) mod slot_guard {
     }
 }
 
-/// Bit set in [`Node::snapshot_flags`] when a pre-mutation snapshot has been
-/// recorded for this node in the document's
-/// [`SnapshotMap`](stylo::selector_parser::SnapshotMap).
+/// Bit set in [`Node::snapshot_flags`] when this node has a pre-mutation
+/// snapshot pending in its [`Node::snapshot`] slot or being consumed by a
+/// style flush.
 pub(crate) const SNAPSHOT_PRESENT: u8 = 1 << 0;
 /// Bit set once stylo's invalidation pass has consumed the snapshot.
 pub(crate) const SNAPSHOT_HANDLED: u8 = 1 << 1;
@@ -250,8 +251,8 @@ pub(crate) const SNAPSHOT_HANDLED: u8 = 1 << 1;
 /// The kind of a DOM [`Node`].
 ///
 /// `w3c-dom` currently models the two node kinds needed by the runtime and
-/// stylo traversal. A separate document node is intentionally not represented:
-/// the designated root element stands in for it at the stylo boundary.
+/// stylo traversal. The owning [`Document`](crate::Document) is represented
+/// separately as the DOM document node at the stylo boundary.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum NodeType {
     /// An element node with a local tag name and CSS style state.
@@ -275,7 +276,9 @@ pub struct Node<T> {
     /// Whether this is an element or text node.
     kind: NodeType,
 
-    /// The parent node, or `None` for the root / a detached node.
+    /// The parent element, or `None` for the document element / a detached
+    /// element. Stylo's broader DOM-node view supplies the real `Document`
+    /// parent for the document element.
     pub(crate) parent: Option<NodeId>,
     /// Child nodes, in document order.
     pub(crate) children: Vec<NodeId>,
@@ -300,6 +303,12 @@ pub struct Node<T> {
     /// under the document's [`SharedRwLock`](stylo::shared_lock::SharedRwLock).
     /// `None` when no inline style is set.
     pub(crate) inline_block: Option<Arc<Locked<PropertyDeclarationBlock>>>,
+
+    /// This node's matching-relevant state before its first mutation since
+    /// the last style flush. Boxed so the common no-snapshot case costs one
+    /// word in every node; drained into stylo's temporary `SnapshotMap` at
+    /// the start of a flush.
+    pub(crate) snapshot: Option<Box<Snapshot>>,
 
     /// stylo's per-element style data (`ElementData`), created lazily via
     /// `TElement::ensure_data`. The resolved computed style lives here (see
@@ -390,6 +399,7 @@ impl<T> Node<T> {
             attrs: FxHashMap::default(),
             element_state: ElementState::empty(),
             inline_block: None,
+            snapshot: None,
             stylo_data: UnsafeCell::new(None),
             selector_flags: AtomicUsize::new(0),
             style_dirty: AtomicBool::new(false),
@@ -447,7 +457,8 @@ impl<T> Node<T> {
         matches!(self.kind, NodeType::Text)
     }
 
-    /// The parent's handle, or `None` for the root / a detached node.
+    /// The parent element's handle, or `None` for the document element / a
+    /// detached node.
     #[must_use]
     pub fn parent_id(&self) -> Option<NodeId> {
         self.parent
@@ -576,7 +587,7 @@ impl<T> Node<T> {
     /// Whether this node itself has pending style work.
     ///
     /// A scheduling breadcrumb, not ground truth: the authoritative "does the
-    /// tree need a flush" signal is the root's bits
+    /// tree need a flush" signal is the document element's bits
     /// ([`Document::needs_flush`](crate::Document::needs_flush)). In one
     /// corner the breadcrumb can go stale — a descendant of a subtree that
     /// became `display: none` in the same flush keeps its bit set (stylo

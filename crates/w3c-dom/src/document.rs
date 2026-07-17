@@ -3,8 +3,8 @@
 //! # ONE TREE policy
 //!
 //! A [`Document`] is the **single** owner of every node it contains: node
-//! storage (a generational slot arena), the optional document root, the
-//! pending pre-mutation snapshot set for stylo's invalidation-set restyle,
+//! storage (a slab with versioned handles), the optional document element, the
+//! per-node pre-mutation snapshots for stylo's invalidation-set restyle,
 //! and the private style context ([`SharedRwLock`] + base URL) guarding every
 //! node's inline declarations. There is no separate arena/tree/document split
 //! — every DOM operation is a method on `Document`, and nodes cannot be
@@ -29,29 +29,19 @@
 //! a pointer back to the core that owns it. That backpointer is what lets the
 //! stylo handle be a plain `&Node` — see [`crate::node`] and [`crate::traits`].
 //!
-//! # Storage: hand-rolled generational slots (not `slab`/`slotmap`)
+//! # Storage
 //!
-//! Node storage is a plain `Vec<Option<Node<T>>>` plus a free list of
-//! **pre-minted next ids**. `slab` would only replace the free list — it
-//! reuses bare indices, which is exactly the ABA aliasing [`NodeId`]'s
-//! generation exists to prevent, so a generation layer would have to be
-//! bolted on top of it anyway. Generational-arena crates (`slotmap` and
-//! friends) do provide versioned keys, but would put a third-party key type
-//! at the center of the public API and the `OpaqueNode` packing, for what is
-//! ~forty lines of storage this crate wants tight control over: the
-//! retire-on-exhaustion policy, the `NonZeroU32` niche in [`NodeId`], the
-//! (generation, index) → [`OpaqueNode`](stylo::dom::OpaqueNode) derivation,
-//! and the let-it-crash error surface. There is deliberately no per-slot
-//! header struct either: a **live node already knows its own id**, so the
-//! occupant's generation is stored exactly once (in the node), and a vacant
-//! slot's *next* generation lives in the free-list entry that will mint it.
+//! Nodes live in a [`slab::Slab`], which owns vacant-slot tracking and index
+//! reuse. [`NodeId`] adds a document-local allocation generation so a stale
+//! id cannot resolve to a later node that reuses the same slab index.
 
 use std::fmt;
 use std::marker::PhantomData;
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::NonZeroU32;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
+use slab::Slab;
 use stylo::dom::OpaqueNode;
 use stylo::selector_parser::SnapshotMap;
 use stylo::shared_lock::SharedRwLock;
@@ -66,79 +56,38 @@ pub(crate) fn about_blank_url_data() -> UrlExtraData {
     UrlExtraData::from(::url::Url::parse("about:blank").expect("about:blank is a valid URL"))
 }
 
-/// Mint a process-unique identity token (documents and style engines share
-/// the counter; `0` is never minted, so tokens fit `NonZeroU64`).
-pub(crate) fn mint_identity() -> NonZeroU64 {
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    NonZeroU64::new(NEXT.fetch_add(1, Ordering::Relaxed)).expect("identity counter starts at 1")
-}
-
 /// A stable, generation-checked handle to a node in a [`Document`].
 ///
 /// Cheap to copy and hash. A handle stays valid until its node is removed;
-/// afterwards the slot's generation advances and the handle becomes stale
-/// (document lookups return `None`), even if the slot is later reused by a
-/// different node.
+/// afterwards it becomes stale (document lookups return `None`), even if the
+/// slab index is later reused by a different node.
 ///
 /// # Why the generation exists
 ///
-/// The document recycles slots through a free list, so a bare index is
-/// ambiguous: after `remove_subtree`, the next node factory call may place a
-/// **new, unrelated node in the same slot** (the ABA problem). This is not a
-/// rare race but the steady state: embedders retain ids by design (Lynx's
-/// scripting runtime holds element handles over frames while the tree
-/// mutates underneath them), removal frees whole subtrees immediately (no
-/// GC, no recycling pools), and the free list is LIFO — a
-/// remove-then-create sequence, the standard shape of a framework list
-/// diff, reuses the *just-freed* slot at once. A vacant slot is detectable
-/// without generations; a slot **occupied by a stranger** is not — only the
-/// generation turns that from silent aliasing (reading or mutating the
-/// wrong node — the worst kind of logic corruption) into detectable
-/// staleness: freeing pre-mints a bumped-generation id for the slot, old
-/// handles stop resolving, and each layer reacts per its contract (queries
-/// return `None`, PAPI maps to `WidgetError::StaleElement`, DOM-core
-/// mutations crash per the let-it-crash contract — both contracts are only
-/// *implementable* because staleness is decidable at all). The same
-/// miss-on-stale property covers every side table that holds ids across
-/// mutations — the pending-snapshot bookkeeping today; layout caches,
-/// damage lists, and hit-test/event targets tomorrow.
+/// The slab recycles indices, so a bare index is ambiguous: after
+/// `remove_subtree`, the next node factory call may place a new node at the same
+/// index. A document-local allocation generation turns that ABA-shaped reuse
+/// into detectable staleness: queries return `None`, while mutation methods
+/// panic according to the crate's let-it-crash contract.
 ///
 /// The generation also anchors stylo integration: the [`OpaqueNode`]
 /// identity is derived from **(generation, index)**, so a freed-and-reused
 /// slot yields a different `OpaqueNode` and a dead node's pending snapshot
 /// or restyle bookkeeping can never be attributed to its slot's successor
-/// (an address-derived identity would additionally break whenever slot
-/// storage growth moves nodes). A slot whose 32-bit generation space is
-/// exhausted is retired rather than reused, preserving uniqueness; and
-/// because the generation is `NonZeroU32`, `Option<NodeId>` costs no extra
-/// space.
+/// (an address-derived identity would additionally break whenever slab
+/// storage growth moves nodes). Because the generation is `NonZeroU32`,
+/// `Option<NodeId>` costs no extra space.
 ///
-/// # Document identity
-///
-/// An id also carries the **token of the document that minted it**
-/// ([`document_token`](Self::document_token)): two documents mint identical
-/// `(index, generation)` sequences, so without the token an id from tree A
-/// would pass tree B's liveness check and silently alias whatever occupies
-/// the same slot there — cross-tree data corruption, not a detectable error.
-/// With the token in the id (and in every node's own id), a foreign id
-/// simply never compares equal: queries return `None`, mutations crash per
-/// the let-it-crash contract, and embedder layers can reject it with a
-/// typed error before that.
+/// A `NodeId` is scoped to the [`Document`] that minted it. Documents belong
+/// to isolated runtime contexts and do not exchange raw ids, so the handle
+/// deliberately carries no cross-document identity.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct NodeId {
-    doc: NonZeroU64,
     index: u32,
     generation: NonZeroU32,
 }
 
 impl NodeId {
-    /// The identity token of the document this id was minted by (see
-    /// [`Document::token`]).
-    #[must_use]
-    pub const fn document_token(self) -> NonZeroU64 {
-        self.doc
-    }
-
     /// The slot index this handle refers to.
     #[must_use]
     pub const fn index(self) -> u32 {
@@ -155,14 +104,11 @@ impl NodeId {
     ///
     /// stylo keys its [`SnapshotMap`] and traversal roots by `OpaqueNode`.
     /// Deriving it from the id (rather than the node's address) keeps it
-    /// stable across slot-storage growth, which can move every node.
+    /// stable across slab-storage growth, which can move every node.
     #[must_use]
     pub(crate) const fn opaque(self) -> OpaqueNode {
         // Packs (generation, index) into the usize. 64-bit targets only —
-        // on 32-bit this would truncate the generation. The document token
-        // is deliberately excluded: stylo's snapshot map and traversal roots
-        // are per-document, so (generation, index) is unique within the one
-        // map an OpaqueNode is ever used in.
+        // on 32-bit this would truncate the generation.
         const {
             assert!(
                 size_of::<usize>() >= 8,
@@ -201,41 +147,28 @@ unsafe impl<T> Sync for CorePtr<T> {}
 
 /// The heap-pinned single tree behind a [`Document`].
 ///
-/// Everything a node's backpointer must reach lives here: the slot storage
+/// Everything a node's backpointer must reach lives here: the slab storage
 /// (id → node resolution for tree navigation) and the shared style lock
-/// (stylo's `TDocument::shared_lock`). The snapshot machinery and root ride
-/// along so the whole document state is one allocation.
+/// (stylo's `TDocument::shared_lock`). The document-element link rides along
+/// in the same pinned allocation. Each pending snapshot remains owned by its
+/// node but is boxed lazily so clean nodes pay only one word for the slot.
 pub(crate) struct Core<T> {
-    /// This document's process-unique identity, stamped into every [`NodeId`]
-    /// it mints.
-    token: NonZeroU64,
-    /// The identity of the [`StyleEngine`](crate::StyleEngine) whose private
-    /// style context this document shares, or `None` for a standalone
-    /// document. Validated by the engine at every flush/resolve entry point:
-    /// running one engine's stylist and lock against another engine's
-    /// document is either a deep stylo panic (`Locked::read_with` guard
-    /// mismatch) or, worse, a silently wrong cascade.
-    pub(crate) engine_token: Option<NonZeroU64>,
-    /// Node storage: `slots[i]` holds the live node whose id carries index
-    /// `i`. A vacant entry is either on the free list or retired (its
-    /// generation space is exhausted — never reused).
-    slots: Vec<Option<Node<T>>>,
-    /// Pre-minted ids for vacant, reusable slots: popping one yields the
-    /// exact (index, bumped-generation) identity the slot's next occupant
-    /// will carry.
-    free_list: Vec<NodeId>,
-    /// The document root, if designated (see [`Document::set_root`]).
-    root: Option<NodeId>,
+    /// Node storage. `nodes[id.index]` holds the live node for that slab key;
+    /// `Slab` owns vacant-slot tracking and reuse.
+    nodes: Slab<Node<T>>,
+    /// Generation assigned to the next allocation. This is independent of
+    /// slab vacancy management and prevents a reused key from reviving an old
+    /// [`NodeId`]. The wider counter lets creation fail instead of wrapping
+    /// the public 32-bit generation.
+    next_generation: u64,
+    /// The document's element child, if one has been appended. `Document` is
+    /// the actual DOM root; this link is its at-most-one element child, not a
+    /// separately designated tree root. Text nodes live below elements.
+    document_element: Option<NodeId>,
     /// The shared lock guarding this document's inline style blocks.
-    pub(crate) lock: SharedRwLock,
+    pub(crate) lock: Arc<SharedRwLock>,
     /// The base URL data used when parsing this document's inline styles.
     pub(crate) url_data: UrlExtraData,
-    /// Pre-mutation node snapshots pending the next flush, keyed by the
-    /// node's stable [`OpaqueNode`] (see [`NodeId::opaque`]).
-    pub(crate) snapshots: SnapshotMap,
-    /// The ids behind [`Core::snapshots`], so `complete_flush` can clear the
-    /// per-node snapshot bits without a way to map `OpaqueNode` back.
-    pub(crate) snapshotted: Vec<NodeId>,
     /// Debug-only: set for the duration of a style flush, so per-node style
     /// readers can assert traversal-phase discipline (see
     /// [`crate::node::slot_guard`]).
@@ -247,14 +180,33 @@ impl<T> Core<T> {
     /// Borrow a node if the handle is live (the occupant's own id carries
     /// the generation to check against).
     pub(crate) fn node(&self, id: NodeId) -> Option<&Node<T>> {
-        let node = self.slots.get(id.index as usize)?.as_ref()?;
+        let node = self.nodes.get(id.index as usize)?;
         (node.id() == id).then_some(node)
     }
 
     /// Mutably borrow a node if the handle is live.
     pub(crate) fn node_mut(&mut self, id: NodeId) -> Option<&mut Node<T>> {
-        let node = self.slots.get_mut(id.index as usize)?.as_mut()?;
+        let node = self.nodes.get_mut(id.index as usize)?;
         (node.id() == id).then_some(node)
+    }
+
+    /// The element child of the document node, if present.
+    pub(crate) fn document_element(&self) -> Option<NodeId> {
+        self.document_element
+    }
+
+    /// Whether `id` is connected beneath the document node.
+    pub(crate) fn is_connected(&self, id: NodeId) -> bool {
+        let mut current = id;
+        loop {
+            let Some(node) = self.node(current) else {
+                return false;
+            };
+            let Some(parent) = node.parent_id() else {
+                return self.document_element == Some(current);
+            };
+            current = parent;
+        }
     }
 
     /// Debug-only: whether a style flush is currently traversing this tree.
@@ -272,8 +224,8 @@ impl<T> Core<T> {
     }
 }
 
-/// The one tree: a generational arena of [`Node`]s plus the document root,
-/// the pending snapshot set, and the private style context.
+/// The one tree: a document node, a slab of element/text [`Node`]s (including
+/// their pending snapshots), and the private style context.
 ///
 /// See the crate docs for the ONE TREE policy and the mutation
 /// contract. Create styled documents through
@@ -301,12 +253,9 @@ impl<T> Drop for Document<T> {
 impl<T: fmt::Debug> fmt::Debug for Document<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let core = self.core();
-        // `SnapshotMap` is not `Debug`; report its size instead.
         f.debug_struct("Document")
-            .field("root", &core.root)
-            .field("slots", &core.slots)
-            .field("free_list", &core.free_list)
-            .field("pending_snapshots", &core.snapshotted.len())
+            .field("document_element", &core.document_element)
+            .field("nodes", &core.nodes)
             .finish_non_exhaustive()
     }
 }
@@ -326,25 +275,17 @@ impl<T> Document<T> {
     /// [`StyleEngine::new_document`](crate::StyleEngine::new_document).
     #[must_use]
     pub fn new() -> Self {
-        Self::with_style_context(SharedRwLock::new(), about_blank_url_data(), None)
+        Self::with_style_context(Arc::new(SharedRwLock::new()), about_blank_url_data())
     }
 
     /// Create a document with the style context owned by this crate.
-    pub(crate) fn with_style_context(
-        lock: SharedRwLock,
-        url_data: UrlExtraData,
-        engine_token: Option<NonZeroU64>,
-    ) -> Self {
+    pub(crate) fn with_style_context(lock: Arc<SharedRwLock>, url_data: UrlExtraData) -> Self {
         let core = Box::new(Core {
-            token: mint_identity(),
-            engine_token,
-            slots: Vec::new(),
-            free_list: Vec::new(),
-            root: None,
+            nodes: Slab::new(),
+            next_generation: 1,
+            document_element: None,
             lock,
             url_data,
-            snapshots: SnapshotMap::new(),
-            snapshotted: Vec::new(),
             #[cfg(debug_assertions)]
             in_flush: std::sync::atomic::AtomicBool::new(false),
         });
@@ -414,7 +355,8 @@ impl<T> Document<T> {
     ///
     /// # Panics
     ///
-    /// Panics if the document would need to grow past `u32::MAX` slots.
+    /// Panics if the slab key or allocation generation no longer fits in the
+    /// corresponding 32-bit [`NodeId`] field.
     pub fn create_node(&mut self, tag: &str, ext: T) -> NodeId {
         self.create_element(tag, ext)
     }
@@ -437,62 +379,56 @@ impl<T> Document<T> {
     fn allocate_node(&mut self, make: impl FnOnce(CorePtr<T>, NodeId) -> Node<T>) -> NodeId {
         let core_ptr = self.core;
         let core = self.core_mut();
-        if let Some(id) = core.free_list.pop() {
-            let slot = &mut core.slots[id.index as usize];
-            debug_assert!(slot.is_none(), "free-list slot must be vacant");
-            *slot = Some(make(core_ptr, id));
-            id
-        } else {
-            let index =
-                u32::try_from(core.slots.len()).expect("document capacity exceeds u32::MAX slots");
-            let id = NodeId {
-                doc: core.token,
-                index,
-                generation: NonZeroU32::MIN,
-            };
-            core.slots.push(Some(make(core_ptr, id)));
-            id
-        }
+        let index =
+            u32::try_from(core.nodes.vacant_key()).expect("document slab key exceeds u32::MAX");
+        let generation = NonZeroU32::new(
+            u32::try_from(core.next_generation)
+                .expect("document exhausted its 32-bit node generations"),
+        )
+        .expect("node generations start at one");
+        core.next_generation += 1;
+
+        let id = NodeId { index, generation };
+        let inserted = core.nodes.insert(make(core_ptr, id));
+        debug_assert_eq!(inserted, index as usize, "vacant slab key changed");
+        id
     }
 
-    // --- root --------------------------------------------------------------
+    // --- document node -----------------------------------------------------
 
-    /// Designate `id` as the document root and schedule its initial style
-    /// pass.
+    /// Append `child` to the document node.
     ///
-    /// The root is where [`StyleEngine::flush_document`](crate::StyleEngine::flush_document)
-    /// starts and what [`needs_flush`](Self::needs_flush) inspects.
-    ///
-    /// Contract: `id` identifies a live, parentless element.
+    /// This DOM subset permits one child on the document node: its element
+    /// `documentElement`. Text nodes live below elements. The child may be
+    /// detached or linked under another element; DOM pre-insertion detaches
+    /// it first. Attaching it schedules an initial style pass for the whole
+    /// subtree.
     ///
     /// # Panics
     ///
-    /// Panics when `id` is stale, belongs to another document, has a parent,
-    /// or identifies a text node.
-    pub fn set_root(&mut self, id: NodeId) {
+    /// Panics when `child` is stale, is a text node, or the document already
+    /// has a different element child.
+    pub fn append_child(&mut self, child: NodeId) {
         assert!(
-            self.get(id)
-                .is_some_and(|node| node.is_element() && node.parent_id().is_none()),
-            "document root must be a live, parentless element"
+            self.get(child).is_some_and(Node::is_element),
+            "Document::append_child requires a live element"
         );
-        self.core_mut().root = Some(id);
-        self.mark_subtree_dirty(id);
+        if self.core().document_element == Some(child) {
+            return;
+        }
+        assert!(
+            self.core().document_element.is_none(),
+            "Document::append_child: a document may have only one element child"
+        );
+        self.detach(child);
+        self.core_mut().document_element = Some(child);
+        self.mark_subtree_dirty(child);
     }
 
-    /// The document root, if one has been designated.
+    /// The document's element child, if one has been appended.
     #[must_use]
-    pub fn root(&self) -> Option<NodeId> {
-        self.core().root
-    }
-
-    /// This document's process-unique identity token.
-    ///
-    /// Every [`NodeId`] this document mints carries it
-    /// ([`NodeId::document_token`]); embedder layers use it to give their own
-    /// handles an unforgeable tree identity.
-    #[must_use]
-    pub fn token(&self) -> NonZeroU64 {
-        self.core().token
+    pub fn document_element(&self) -> Option<NodeId> {
+        self.core().document_element
     }
 
     // --- queries -----------------------------------------------------------
@@ -507,6 +443,12 @@ impl<T> Document<T> {
     #[must_use]
     pub fn contains(&self, id: NodeId) -> bool {
         self.get(id).is_some()
+    }
+
+    /// Whether `id` is connected beneath this document node.
+    #[must_use]
+    pub fn is_connected(&self, id: NodeId) -> bool {
+        self.core().is_connected(id)
     }
 
     /// The position of `child` within `parent`'s child list, if it is a child.
@@ -551,7 +493,7 @@ impl<T> Document<T> {
     pub fn ext_mut(&mut self, id: NodeId) -> &mut T {
         self.core_mut()
             .node_mut(id)
-            .expect("stale or foreign NodeId passed to Document::ext_mut")
+            .expect("stale NodeId passed to Document::ext_mut")
             .ext_mut()
     }
 
@@ -569,20 +511,10 @@ impl<T> Document<T> {
     /// # Panics
     ///
     /// Panics when `parent`, `child`, or `before` is stale, when `parent` is a
-    /// text node, when `child` is the document root, when `before` is not a
-    /// child of `parent`, or — in debug builds — when the link would create a
-    /// cycle or `before == child` (the let-it-crash mutation contract; see the
-    /// crate docs).
+    /// text node, when `before` is not a child of `parent`, or — in debug
+    /// builds — when the link would create a cycle or `before == child` (the
+    /// let-it-crash mutation contract; see the crate docs).
     pub fn insert_before(&mut self, parent: NodeId, child: NodeId, before: Option<NodeId>) {
-        // Always-on (not just debug): a reparented root would let a later
-        // `remove_subtree` of its ancestor free the root while the document
-        // still points at it — the next flush would then panic far from the
-        // cause. Root is designated once and stays parentless; embedder
-        // layers reject this with a typed error before it can reach here.
-        assert!(
-            self.root() != Some(child),
-            "insert_before: the document root cannot be linked under a parent"
-        );
         debug_assert!(self.contains(parent), "insert_before: stale parent");
         debug_assert!(self.contains(child), "insert_before: stale child");
         assert!(
@@ -605,7 +537,7 @@ impl<T> Document<T> {
         let index = match before {
             None => self
                 .get(parent)
-                .expect("stale or foreign NodeId passed to Document::insert_before")
+                .expect("stale NodeId passed to Document::insert_before")
                 .child_ids()
                 .len(),
             Some(reference) => self
@@ -615,11 +547,11 @@ impl<T> Document<T> {
 
         let core = self.core_mut();
         core.node_mut(parent)
-            .expect("stale or foreign NodeId passed to Document::insert_before")
+            .expect("stale NodeId passed to Document::insert_before")
             .children
             .insert(index, child);
         core.node_mut(child)
-            .expect("stale or foreign NodeId passed to Document::insert_before")
+            .expect("stale NodeId passed to Document::insert_before")
             .parent = Some(parent);
 
         self.note_moved_subtree(child);
@@ -636,7 +568,8 @@ impl<T> Document<T> {
     /// selector-flag-scoped child-list invalidation at the old location (a
     /// removal can flip `:empty` / `:nth-*` / edge-child matching).
     ///
-    /// A no-op on an already-parentless `child` (that includes the root).
+    /// A no-op on an already-detached `child`. If `child` is the document
+    /// element, this removes it from the document node.
     ///
     /// # Panics
     ///
@@ -644,9 +577,12 @@ impl<T> Document<T> {
     pub fn detach(&mut self, child: NodeId) {
         let old_parent = self
             .get(child)
-            .expect("stale or foreign NodeId passed to Document::detach")
+            .expect("stale NodeId passed to Document::detach")
             .parent_id();
         let Some(parent) = old_parent else {
+            if self.core().document_element == Some(child) {
+                self.core_mut().document_element = None;
+            }
             return;
         };
         let core = self.core_mut();
@@ -660,7 +596,7 @@ impl<T> Document<T> {
             .expect("child must appear in its parent's child list");
         parent_node.children.remove(removed_index);
         core.node_mut(child)
-            .expect("stale or foreign NodeId passed to Document::detach")
+            .expect("stale NodeId passed to Document::detach")
             .parent = None;
         self.note_child_list_change(parent, removed_index);
     }
@@ -670,8 +606,8 @@ impl<T> Document<T> {
     /// of every node freed (in no particular order).
     ///
     /// The caller harvests whatever it indexed from the returned payloads.
-    /// All handles into the subtree become stale; if the document root was in
-    /// the subtree, the document no longer has a root.
+    /// All handles into the subtree become stale. Removing the document
+    /// element leaves the document node without an element child.
     ///
     /// # Panics
     ///
@@ -679,9 +615,6 @@ impl<T> Document<T> {
     /// the crate docs).
     pub fn remove_subtree(&mut self, id: NodeId) -> Vec<T> {
         self.detach(id);
-        if self.core().root.is_some_and(|root| root == id) {
-            self.core_mut().root = None;
-        }
         let mut removed = Vec::new();
         let mut stack = vec![id];
         while let Some(current) = stack.pop() {
@@ -694,74 +627,97 @@ impl<T> Document<T> {
         removed
     }
 
-    /// Free one slot, returning its node. The slot's next identity (bumped
-    /// generation) is pre-minted onto the free list, so every handle to the
-    /// old occupant becomes stale; a slot whose generation space is exhausted
-    /// is retired rather than reused, preserving uniqueness.
+    /// Remove one node from the slab and return it. A future occupant of the
+    /// same slab key receives a fresh allocation generation, so handles to
+    /// this node remain stale.
     fn remove_node(&mut self, id: NodeId) -> Option<Node<T>> {
         let core = self.core_mut();
-        let slot = core.slots.get_mut(id.index as usize)?;
-        if slot.as_ref()?.id() != id {
+        let index = id.index as usize;
+        if core.nodes.get(index)?.id() != id {
             return None;
         }
-        let node = slot.take()?;
-        if let Some(next) = id.generation.checked_add(1) {
-            core.free_list.push(NodeId {
-                doc: id.doc,
-                index: id.index,
-                generation: next,
-            });
-        }
-        // A dead node's pending snapshot must not survive it; the map entry
-        // is keyed by the (now stale) opaque id and would be dropped with the
-        // map on the next `complete_flush`. Removing it eagerly keeps the map
-        // small.
-        if node.snapshot_present() {
-            core.snapshots.remove(&id.opaque());
-        }
+        let node = core
+            .nodes
+            .try_remove(index)
+            .expect("validated slab entry must still be occupied");
         Some(node)
     }
 
     // --- flush bookkeeping ---------------------------------------------------
 
-    /// Whether the tree has pending style work, judged at the document root.
+    /// Move the pending snapshots reachable along `root`'s dirty spine into
+    /// the map expected by stylo's traversal API. Snapshots on detached trees
+    /// stay on their nodes until those trees are attached and flushed (or
+    /// dropped). Presence/handled flags remain set until
+    /// [`complete_flush`](Self::complete_flush).
+    pub(crate) fn take_snapshot_map(&mut self, root: NodeId) -> SnapshotMap {
+        let mut snapshots = SnapshotMap::new();
+        let core = self.core_mut();
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            let Some(node) = core.node_mut(id) else {
+                continue;
+            };
+            debug_assert_eq!(
+                node.snapshot.is_some(),
+                node.snapshot_present(),
+                "snapshot slot and lifecycle flag diverged before flush"
+            );
+            if let Some(snapshot) = node.snapshot.take() {
+                snapshots.insert(node.id().opaque(), *snapshot);
+            }
+            if node.has_dirty_descendants() {
+                stack.extend_from_slice(&node.children);
+            }
+        }
+        snapshots
+    }
+
+    /// Whether the connected document element has pending style work.
     ///
-    /// `false` when no root has been designated.
+    /// `false` when the document has no element child.
     #[must_use]
     pub fn needs_flush(&self) -> bool {
-        self.root().is_some_and(|root| {
+        self.document_element().is_some_and(|root| {
             self.get(root)
                 .is_some_and(|node| node.is_style_dirty() || node.has_dirty_descendants())
         })
     }
 
-    /// Clear every node's dirty bits.
+    /// Clear every node's dirty bits and pending snapshot.
     ///
     /// Establishes a clean baseline (tests, or an embedder resetting a tree).
     /// The flush path uses the cheaper targeted `complete_flush` instead.
     pub fn clear_dirty(&mut self) {
-        for node in self.core_mut().slots.iter_mut().flatten() {
+        for (_, node) in &mut self.core_mut().nodes {
             node.set_style_dirty(false);
             node.set_dirty_descendants_bit(false);
+            node.snapshot = None;
+            node.clear_snapshot_flags();
         }
     }
 
-    /// Clear the flush-scheduling state after a style traversal: drops the
-    /// consumed snapshots and walks only the dirty spine under `root`
-    /// clearing the dirty bits.
+    /// Clear the flush-scheduling state after a style traversal: clears the
+    /// consumed snapshot flags and walks only the dirty spine under `root`
+    /// clearing the dirty bits. `snapshots` itself is local to the flush and
+    /// is dropped by its caller.
     ///
     /// The spine walk cannot see below a node whose `dirty_descendants`
     /// stylo already cleared (it does so when a subtree computes to
     /// `display: none`), so `style_dirty` breadcrumbs inside such a subtree
     /// may survive — see [`Node::is_style_dirty`].
-    pub(crate) fn complete_flush(&mut self, root: NodeId) {
+    pub(crate) fn complete_flush(&mut self, root: NodeId, snapshots: &SnapshotMap) {
         let core = self.core_mut();
-        for id in std::mem::take(&mut core.snapshotted) {
-            if let Some(node) = core.node(id) {
+        for opaque in snapshots.keys() {
+            // `NodeId::opaque` packs the slab key into the low 32 bits. Check
+            // the full opaque identity as well in case the key was reused.
+            let index = opaque.0 & 0xffff_ffff;
+            if let Some(node) = core.nodes.get(index)
+                && node.id().opaque() == *opaque
+            {
                 node.clear_snapshot_flags();
             }
         }
-        core.snapshots.clear();
 
         // Walk the dirty spine: clear `style_dirty` on every child of a
         // dirty-descendants node, but only descend where the bit is set.

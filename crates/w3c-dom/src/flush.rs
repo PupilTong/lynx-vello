@@ -17,7 +17,7 @@
 //!
 //! Computed styles land in each element node's stylo `ElementData`
 //! ([`Node::computed_style`](crate::Node::computed_style) reads them); the
-//! document then drops the consumed snapshots and clears the dirty spine.
+//! document then clears the consumed snapshot flags and the dirty spine.
 //!
 //! # Safety
 //!
@@ -30,7 +30,7 @@ use stylo::context::{
     RegisteredSpeculativePainter, RegisteredSpeculativePainters, SharedStyleContext, StyleContext,
     StyleSystemOptions,
 };
-use stylo::dom::TElement;
+use stylo::dom::{TElement, TNode};
 use stylo::driver;
 use stylo::global_style_data::STYLE_THREAD_POOL;
 use stylo::servo::animation::DocumentAnimationSet;
@@ -44,6 +44,7 @@ use crate::document::Document;
 use crate::engine::StyleEngine;
 use crate::ext::ExternalState;
 use crate::node::Node;
+use crate::traits::DomNode;
 
 /// How [`StyleEngine::flush_document_with`] schedules the traversal.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -111,22 +112,31 @@ impl<'a, T: ExternalState> DomTraversal<&'a Node<T>> for RecalcStyle<'a> {
         &self,
         traversal_data: &PerLevelTraversalData,
         context: &mut StyleContext<&'a Node<T>>,
-        node: &'a Node<T>,
+        node: DomNode<'a, T>,
         note_child: F,
     ) where
-        F: FnMut(&'a Node<T>),
+        F: FnMut(DomNode<'a, T>),
     {
-        // The traversal visits text nodes as layout children, but stylo's
-        // `note_children` schedules preorder work only for `as_element()`
-        // nodes. The designated root is also required to be an element.
-        debug_assert!(node.is_element(), "style preorder received a text node");
+        // Text nodes remain in DOM/layout child iteration, but stylo only
+        // schedules preorder style work for nodes whose `as_element()`
+        // succeeds.
+        let element = node
+            .as_element()
+            .expect("style traversal only schedules element nodes");
         // SAFETY: stylo's traversal contract — exactly one worker processes
         // this node, so creating/borrowing its data cannot race.
-        let mut data = unsafe { node.ensure_data() };
-        recalc_style_at(self, traversal_data, context, node, &mut data, note_child);
+        let mut data = unsafe { element.ensure_data() };
+        recalc_style_at(
+            self,
+            traversal_data,
+            context,
+            element,
+            &mut data,
+            note_child,
+        );
     }
 
-    fn process_postorder(&self, _: &mut StyleContext<&'a Node<T>>, _: &'a Node<T>) {
+    fn process_postorder(&self, _: &mut StyleContext<&'a Node<T>>, _: DomNode<'a, T>) {
         debug_assert!(false, "needs_postorder_traversal() is false");
     }
 
@@ -141,10 +151,11 @@ impl<'a, T: ExternalState> DomTraversal<&'a Node<T>> for RecalcStyle<'a> {
 
 impl StyleEngine {
     /// Restyle everything scheduled since the last flush under the document
-    /// root, using the style thread pool when the tree is wide enough
+    /// element, using the style thread pool when the tree is wide enough
     /// ([`Parallelism::Auto`]).
     ///
-    /// A no-op when the document has no root or nothing is scheduled.
+    /// A no-op when the document has no element child or nothing is
+    /// scheduled.
     ///
     /// If the traversal panics, the document's scheduling state (dirty bits,
     /// pending snapshots) is left unspecified; an embedder that catches the
@@ -162,19 +173,22 @@ impl StyleEngine {
     /// Panics when `document` was not created by this engine
     /// (`StyleEngine::new_document` pairs them; flushing across the pair
     /// boundary would run the wrong stylist and take the wrong lock), or
-    /// when the document's designated root has been removed without clearing
-    /// the root — impossible through the public API
-    /// ([`Document::remove_subtree`](crate::Document::remove_subtree) clears
-    /// it).
+    /// if an internal document-element link is dangling — impossible through
+    /// the public mutation API.
     pub fn flush_document_with<T: ExternalState>(
         &self,
         document: &mut Document<T>,
         parallelism: Parallelism,
     ) {
         self.assert_owns(document);
-        let Some(root) = document.root() else {
+        let Some(root) = document.document_element() else {
             return;
         };
+        // Nodes own snapshots between mutations and flushes. Stylo's API
+        // expects a map for the traversal, so drain the reachable snapshots
+        // along the dirty spine into this temporary adapter; it is dropped
+        // when this flush returns.
+        let snapshots = document.take_snapshot_map(root);
         // Debug traversal-phase marker: per-node style readers assert they
         // never run concurrently with the traversal, and the trait accessors
         // assert they only run inside one. Cleared on unwind too (individual
@@ -184,7 +198,7 @@ impl StyleEngine {
         {
             let root_ref = document
                 .get(root)
-                .expect("the document root is kept live or unset");
+                .expect("the document element is kept live or unset");
             let guard = self.shared_lock().read();
             let shared = SharedStyleContext {
                 stylist: self.stylist(),
@@ -198,7 +212,7 @@ impl StyleEngine {
                 // the real clock and a persistent `DocumentAnimationSet`.
                 current_time_for_animations: 0.0,
                 traversal_flags: TraversalFlags::empty(),
-                snapshot_map: &document.core().snapshots,
+                snapshot_map: &snapshots,
                 animations: DocumentAnimationSet::default(),
                 registered_speculative_painters: &NO_PAINTERS,
             };
@@ -226,6 +240,6 @@ impl StyleEngine {
                 }
             }
         }
-        document.complete_flush(root);
+        document.complete_flush(root, &snapshots);
     }
 }

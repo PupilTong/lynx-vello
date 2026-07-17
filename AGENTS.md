@@ -141,12 +141,13 @@ useful signal for currently-compatible versions of those libraries.
   the future preloaded module graph belong here rather than in the generic
   QuickJS bridge or engine-neutral protocol.
 - `crates/w3c-dom` — generic W3C-DOM-subset document tree and
-  standards-oriented CSS computation core. Owns the single `Document<T>`
-  tree of `Node<T>`s (ONE TREE policy: nodes are created and mutated only
-  through `Document` methods, which carry their own snapshot/invalidation),
-  the stylo trait impls on the plain one-word `&Node` handle (per-node
-  backpointer; styling runs in place, no mirror tree), inline-style
-  parsing, the `Stylist` /
+  standards-oriented CSS computation core. Owns the single, distinct
+  `Document<T>` node and its slab of element/text `Node<T>`s (ONE TREE policy:
+  nodes are created and mutated only through `Document` methods, with pending
+  snapshots stored on the affected nodes), the stylo `TElement` impl on the
+  plain one-word `&Node` handle plus the broader document/element/text `TNode`
+  view (per-node backpointer; styling runs in place, no mirror tree),
+  inline-style parsing, the `Stylist` /
   cascade pipeline, and the private `SharedRwLock` shared by an engine and
   its documents. Mutation APIs follow a let-it-crash contract
   (`debug_assert` + panic on stale handles rather than silent no-ops). It
@@ -155,7 +156,7 @@ useful signal for currently-compatible versions of those libraries.
   Owns `WidgetState` / `WidgetTree` (a validation layer over the document:
   untrusted PAPI input becomes `WidgetError`s before it reaches the
   crash-on-misuse DOM core) and the `WidgetHandle` ownership layer — the
-  PAPI traffics exclusively in canonical, tree-identified handles; a live
+  PAPI traffics exclusively in canonical, context-owned handles; a live
   handle retains its node, and detached subtrees are reclaimed automatically
   once their last handle drops (the native stand-in for the browser GC; no
   public disposal API). Also owns Lynx view metrics, touch-first device
