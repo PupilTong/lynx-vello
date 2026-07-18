@@ -142,7 +142,7 @@ impl StyleEngine {
     /// (`Document::new`).
     pub(crate) fn assert_owns<T>(&self, document: &Document<T>) {
         assert!(
-            StdArc::ptr_eq(&document.core().lock, &self.lock),
+            StdArc::ptr_eq(document.style_lock(), &self.lock),
             "document is not paired with this StyleEngine (created by a different engine or standalone)"
         );
     }
@@ -428,7 +428,7 @@ impl StyleEngine {
             "StyleEngine::resolve called with a text node"
         );
         assert!(
-            StdArc::ptr_eq(&node.tree().lock, &self.lock),
+            StdArc::ptr_eq(node.document_lock(), &self.lock),
             "node's document is not paired with this StyleEngine"
         );
         let guard = self.lock.read();
@@ -523,8 +523,8 @@ impl<T> Document<T> {
     /// the crate docs), or when it names a text node.
     pub fn store_computed_style(&mut self, id: NodeId, style: Arc<ComputedValues>) {
         let node = self
-            .core_mut()
-            .node_mut(id)
+            .tree_mut()
+            .get_mut(id)
             .expect("stale NodeId passed to Document::store_computed_style");
         assert!(
             node.is_element(),

@@ -44,7 +44,6 @@ use crate::document::Document;
 use crate::engine::StyleEngine;
 use crate::ext::ExternalState;
 use crate::node::Node;
-use crate::traits::DomNode;
 
 /// How [`StyleEngine::flush_document_with`] schedules the traversal.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -112,10 +111,10 @@ impl<'a, T: ExternalState> DomTraversal<&'a Node<T>> for RecalcStyle<'a> {
         &self,
         traversal_data: &PerLevelTraversalData,
         context: &mut StyleContext<&'a Node<T>>,
-        node: DomNode<'a, T>,
+        node: &'a Node<T>,
         note_child: F,
     ) where
-        F: FnMut(DomNode<'a, T>),
+        F: FnMut(&'a Node<T>),
     {
         // Text nodes remain in DOM/layout child iteration, but stylo only
         // schedules preorder style work for nodes whose `as_element()`
@@ -136,7 +135,7 @@ impl<'a, T: ExternalState> DomTraversal<&'a Node<T>> for RecalcStyle<'a> {
         );
     }
 
-    fn process_postorder(&self, _: &mut StyleContext<&'a Node<T>>, _: DomNode<'a, T>) {
+    fn process_postorder(&self, _: &mut StyleContext<&'a Node<T>>, _: &'a Node<T>) {
         debug_assert!(false, "needs_postorder_traversal() is false");
     }
 
@@ -173,15 +172,15 @@ impl StyleEngine {
     /// Panics when `document` was not created by this engine
     /// (`StyleEngine::new_document` pairs them; flushing across the pair
     /// boundary would run the wrong stylist and take the wrong lock), or
-    /// if an internal document-element link is dangling — impossible through
-    /// the public mutation API.
+    /// if an internal child link from the document node is dangling —
+    /// impossible through the public mutation API.
     pub fn flush_document_with<T: ExternalState>(
         &self,
         document: &mut Document<T>,
         parallelism: Parallelism,
     ) {
         self.assert_owns(document);
-        let Some(root) = document.document_element() else {
+        let Some(root) = document.root_element().map(Node::id) else {
             return;
         };
         // Nodes own snapshots between mutations and flushes. Stylo's API
@@ -198,7 +197,7 @@ impl StyleEngine {
         {
             let root_ref = document
                 .get(root)
-                .expect("the document element is kept live or unset");
+                .expect("the root element child is kept live or absent");
             let guard = self.shared_lock().read();
             let shared = SharedStyleContext {
                 stylist: self.stylist(),

@@ -1,22 +1,10 @@
-//! stylo DOM-trait implementations over the document and its stored nodes.
+//! Stylo DOM traits implemented directly on the one-word `&Node` handle.
 //!
-//! stylo drives selector matching and the cascade over any type implementing
-//! its element traits. This module wires the document tree to that model by
-//! implementing [`TElement`] directly on the plain shared reference
-//! `&'a Node<T>` (for any payload `T: `[`ExternalState`]), while a small
-//! [`DomNode`] value represents either the real document node or a stored
-//! element/text node for [`TNode`]:
-//!
-//! - [`NodeInfo`] + [`TNode`] on [`DomNode`]
-//! - [`TElement`]
-//! - [`TDocument`] on [`DomDocument`]
-//! - [`selectors::Element`]
-//!
-//! The hot [`TElement`] handle remains the one-word `&Node` value stylo's
-//! style-sharing cache requires. [`DomNode`] is used only where stylo needs
-//! the broader DOM-node type that can also represent `Document` and text;
-//! both views navigate the same in-place tree through each node's document
-//! backpointer, with no mirror tree.
+//! The slot-zero document, elements, and text nodes are all real [`Node`]
+//! values distinguished by their `NodeData`. Consequently the same `&Node`
+//! type implements [`TNode`], [`TElement`], [`TDocument`], and the unused
+//! [`TShadowRoot`] associated-type stub. No document/node wrapper or iterator
+//! adapter is needed, and Stylo traverses the one slab-backed tree in place.
 //!
 //! Implementation note: inside these impls, inherent `Node` methods that
 //! share a name with a trait method (`parent`, `first_child`,
@@ -27,9 +15,8 @@
 //!
 //! # Model
 //!
-//! - **Document is a distinct node.** [`DomNode`] represents either the document or one of its
-//!   stored element/text nodes. [`NodeInfo`] and [`TNode::as_element`] distinguish the stored node
-//!   kinds; text nodes remain DOM/layout children but do not enter selector matching or cascade.
+//! - **Document is a distinct node.** Slot zero is `NodeData::Document`; [`NodeInfo`] and
+//!   [`TNode::as_element`] distinguish it from elements and text.
 //! - **`:hover`/`:active`/`:focus`** are matched from the node's
 //!   [`ElementState`](crate::ElementState).
 //! - **`:root`** matches the document element, never a detached parentless element.
@@ -52,7 +39,6 @@
 //! through `&self` is atomic (see [`Node`](crate::Node)).
 #![allow(unsafe_code)]
 
-use std::fmt;
 use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 
@@ -78,7 +64,6 @@ use stylo::values::{AtomIdent, AtomString};
 use stylo::{CaseSensitivityExt, LocalName, Namespace};
 use stylo_atoms::Atom;
 
-use crate::document::Core;
 use crate::ext::ExternalState;
 use crate::node::{ChildrenIter, Node};
 
@@ -89,222 +74,66 @@ fn empty_namespace() -> &'static <SelectorImpl as selectors::SelectorImpl>::Borr
     &EMPTY.get_or_init(Namespace::default).0
 }
 
-// --- DOM node/document views ------------------------------------------------
-
-/// Stylo's copyable view of this crate's real document node.
-///
-/// Public only because it appears as a public trait's associated type; the
-/// constructor and representation stay private to this crate.
-#[doc(hidden)]
-pub struct DomDocument<'a, T> {
-    core: &'a Core<T>,
-}
-
-impl<T> Clone for DomDocument<'_, T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<T> Copy for DomDocument<'_, T> {}
-
-impl<T> fmt::Debug for DomDocument<'_, T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("#document")
-    }
-}
-
-enum DomNodeKind<'a, T> {
-    Document(&'a Core<T>),
-    Node(&'a Node<T>),
-}
-
-impl<T> Clone for DomNodeKind<'_, T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<T> Copy for DomNodeKind<'_, T> {}
-
-/// Stylo's copyable node view, capable of representing either the distinct
-/// document node or one of its stored element/text nodes.
-///
-/// Public only because it appears as a public trait's associated type; the
-/// constructor and representation stay private to this crate.
-#[doc(hidden)]
-pub struct DomNode<'a, T> {
-    kind: DomNodeKind<'a, T>,
-}
-
-impl<T> Clone for DomNode<'_, T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<T> Copy for DomNode<'_, T> {}
-
-impl<T> PartialEq for DomNode<'_, T> {
-    fn eq(&self, other: &Self) -> bool {
-        match (self.kind, other.kind) {
-            (DomNodeKind::Document(a), DomNodeKind::Document(b)) => std::ptr::eq(a, b),
-            (DomNodeKind::Node(a), DomNodeKind::Node(b)) => std::ptr::eq(a, b),
-            _ => false,
-        }
-    }
-}
-
-impl<T> fmt::Debug for DomNode<'_, T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.kind {
-            DomNodeKind::Document(_) => f.write_str("#document"),
-            DomNodeKind::Node(node) => f
-                .debug_struct("Node")
-                .field("id", &node.id())
-                .field("type", &node.node_type())
-                .field("tag", &node.tag())
-                .finish(),
-        }
-    }
-}
-
-impl<'a, T> DomNode<'a, T> {
-    fn document(core: &'a Core<T>) -> Self {
-        DomNode {
-            kind: DomNodeKind::Document(core),
-        }
-    }
-
-    fn node(node: &'a Node<T>) -> Self {
-        DomNode {
-            kind: DomNodeKind::Node(node),
-        }
-    }
-
-    fn owner_document(self) -> DomDocument<'a, T> {
-        let core = match self.kind {
-            DomNodeKind::Document(core) => core,
-            DomNodeKind::Node(node) => node.tree(),
-        };
-        DomDocument { core }
-    }
-}
-
-/// Adapter from the mixed-node storage iterator to Stylo's DOM-node view.
-#[doc(hidden)]
-pub struct DomChildrenIter<'a, T>(ChildrenIter<'a, T>);
-
-impl<T> fmt::Debug for DomChildrenIter<'_, T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("DomChildrenIter").field(&self.0).finish()
-    }
-}
-
-impl<'a, T> Iterator for DomChildrenIter<'a, T> {
-    type Item = DomNode<'a, T>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.0.next().map(DomNode::node)
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.0.size_hint()
-    }
-}
-
-impl<T> ExactSizeIterator for DomChildrenIter<'_, T> {}
-
 // --- NodeInfo + TNode -------------------------------------------------------
 
-impl<T: ExternalState> NodeInfo for DomNode<'_, T> {
+impl<T: ExternalState> NodeInfo for &Node<T> {
     fn is_element(&self) -> bool {
-        match self.kind {
-            DomNodeKind::Document(_) => false,
-            DomNodeKind::Node(node) => node.is_element(),
-        }
+        Node::is_element(self)
     }
 
     fn is_text_node(&self) -> bool {
-        match self.kind {
-            DomNodeKind::Document(_) => false,
-            DomNodeKind::Node(node) => node.is_text_node(),
-        }
+        Node::is_text_node(self)
     }
 }
 
-impl<'a, T: ExternalState> TNode for DomNode<'a, T> {
+impl<'a, T: ExternalState> TNode for &'a Node<T> {
     type ConcreteElement = &'a Node<T>;
-    type ConcreteDocument = DomDocument<'a, T>;
-    type ConcreteShadowRoot = DomNode<'a, T>;
+    type ConcreteDocument = &'a Node<T>;
+    type ConcreteShadowRoot = &'a Node<T>;
 
     fn parent_node(&self) -> Option<Self> {
-        match self.kind {
-            DomNodeKind::Document(_) => None,
-            DomNodeKind::Node(node) => Node::parent(node).map(DomNode::node).or_else(|| {
-                (node.tree().document_element() == Some(node.id()))
-                    .then(|| DomNode::document(node.tree()))
-            }),
-        }
+        Node::parent(*self)
     }
 
     fn first_child(&self) -> Option<Self> {
-        match self.kind {
-            DomNodeKind::Document(core) => core
-                .document_element()
-                .and_then(|id| core.node(id))
-                .map(DomNode::node),
-            DomNodeKind::Node(node) => Node::first_child(node).map(DomNode::node),
-        }
+        Node::first_child(*self)
     }
 
     fn last_child(&self) -> Option<Self> {
-        match self.kind {
-            DomNodeKind::Document(core) => core
-                .document_element()
-                .and_then(|id| core.node(id))
-                .map(DomNode::node),
-            DomNodeKind::Node(node) => Node::last_child(node).map(DomNode::node),
-        }
+        Node::last_child(*self)
     }
 
     fn prev_sibling(&self) -> Option<Self> {
-        match self.kind {
-            DomNodeKind::Document(_) => None,
-            DomNodeKind::Node(node) => Node::prev_sibling(node).map(DomNode::node),
-        }
+        Node::prev_sibling(*self)
     }
 
     fn next_sibling(&self) -> Option<Self> {
-        match self.kind {
-            DomNodeKind::Document(_) => None,
-            DomNodeKind::Node(node) => Node::next_sibling(node).map(DomNode::node),
-        }
+        Node::next_sibling(*self)
     }
 
     fn owner_doc(&self) -> Self::ConcreteDocument {
-        self.owner_document()
+        Node::owner_document(*self)
     }
 
     fn is_in_document(&self) -> bool {
-        match self.kind {
-            DomNodeKind::Document(_) => true,
-            DomNodeKind::Node(node) => node.tree().is_connected(node.id()),
+        let mut current = *self;
+        loop {
+            if current.is_document() {
+                return true;
+            }
+            let Some(parent) = Node::parent(current) else {
+                return false;
+            };
+            current = parent;
         }
     }
 
     fn as_element(&self) -> Option<Self::ConcreteElement> {
-        match self.kind {
-            DomNodeKind::Document(_) => None,
-            DomNodeKind::Node(node) => node.is_element().then_some(node),
-        }
+        Node::is_element(self).then_some(*self)
     }
 
     fn as_document(&self) -> Option<Self::ConcreteDocument> {
-        match self.kind {
-            DomNodeKind::Document(core) => Some(DomDocument { core }),
-            DomNodeKind::Node(_) => None,
-        }
+        Node::is_document(self).then_some(*self)
     }
 
     fn as_shadow_root(&self) -> Option<Self::ConcreteShadowRoot> {
@@ -312,40 +141,27 @@ impl<'a, T: ExternalState> TNode for DomNode<'a, T> {
     }
 
     fn opaque(&self) -> OpaqueNode {
-        match self.kind {
-            // Stored-node generations are non-zero, so zero is reserved for the
-            // one document node in each per-document stylo operation.
-            DomNodeKind::Document(_) => OpaqueNode(0),
-            // Derived from the (index, generation) id — NOT the node's
-            // address: slab growth can move every stored node.
-            DomNodeKind::Node(node) => node.id().opaque(),
-        }
+        OpaqueNode(Node::id(self))
     }
 
     fn debug_id(self) -> usize {
-        match self.kind {
-            DomNodeKind::Document(_) => 0,
-            DomNodeKind::Node(node) => usize::try_from(node.id().index())
-                .unwrap_or(0)
-                .saturating_add(1),
-        }
+        Node::id(self)
     }
 
     fn traversal_parent(&self) -> Option<Self::ConcreteElement> {
-        match self.kind {
-            DomNodeKind::Document(_) => None,
-            DomNodeKind::Node(node) => Node::parent(node).filter(|parent| parent.is_element()),
-        }
+        let parent = Node::parent(*self)?;
+        parent.is_element().then_some(parent)
     }
 }
 
 // --- TDocument + TShadowRoot --------------------------------------------------
 
-impl<'a, T: ExternalState> TDocument for DomDocument<'a, T> {
-    type ConcreteNode = DomNode<'a, T>;
+impl<'a, T: ExternalState> TDocument for &'a Node<T> {
+    type ConcreteNode = &'a Node<T>;
 
     fn as_node(&self) -> Self::ConcreteNode {
-        DomNode::document(self.core)
+        debug_assert!(Node::is_document(self));
+        *self
     }
 
     fn is_html_document(&self) -> bool {
@@ -357,24 +173,20 @@ impl<'a, T: ExternalState> TDocument for DomDocument<'a, T> {
     }
 
     fn shared_lock(&self) -> &SharedRwLock {
-        &self.core.lock
+        debug_assert!(Node::is_document(self));
+        self.document_lock()
     }
 }
 
-impl<'a, T: ExternalState> TShadowRoot for DomNode<'a, T> {
-    type ConcreteNode = DomNode<'a, T>;
+impl<'a, T: ExternalState> TShadowRoot for &'a Node<T> {
+    type ConcreteNode = &'a Node<T>;
 
     fn as_node(&self) -> Self::ConcreteNode {
         *self
     }
 
     fn host(&self) -> <Self::ConcreteNode as TNode>::ConcreteElement {
-        // Unreachable: `TNode::as_shadow_root` always returns `None`.
-        match self.kind {
-            DomNodeKind::Node(node) if node.is_element() => node,
-            DomNodeKind::Node(_) => unreachable!("text node is not a shadow root"),
-            DomNodeKind::Document(_) => unreachable!("document is not a shadow root"),
-        }
+        unreachable!("w3c-dom does not model shadow roots")
     }
 
     fn style_data<'b>(&self) -> Option<&'b CascadeData>
@@ -388,15 +200,15 @@ impl<'a, T: ExternalState> TShadowRoot for DomNode<'a, T> {
 // --- TElement -----------------------------------------------------------------
 
 impl<'a, T: ExternalState> TElement for &'a Node<T> {
-    type ConcreteNode = DomNode<'a, T>;
-    type TraversalChildrenIterator = DomChildrenIter<'a, T>;
+    type ConcreteNode = &'a Node<T>;
+    type TraversalChildrenIterator = ChildrenIter<'a, T>;
 
     fn as_node(&self) -> Self::ConcreteNode {
-        DomNode::node(*self)
+        *self
     }
 
     fn traversal_children(&self) -> LayoutIterator<Self::TraversalChildrenIterator> {
-        LayoutIterator(DomChildrenIter(Node::children(*self)))
+        LayoutIterator(Node::children(*self))
     }
 
     fn is_html_element(&self) -> bool {
@@ -471,7 +283,7 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
         // Synthetic / reflected attribute names come from the embedder, so
         // the bloom filter accounts for them too (see
         // `ExternalState::each_extra_attr_name`).
-        self.ext.each_extra_attr_name(&mut callback);
+        Node::ext(self).each_extra_attr_name(&mut callback);
     }
 
     fn has_dirty_descendants(&self) -> bool {
@@ -514,7 +326,7 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
         #[cfg(debug_assertions)]
         let _access = {
             debug_assert!(
-                self.tree().in_flush(),
+                self.in_flush(),
                 "TElement::ensure_data called outside a style traversal"
             );
             self.slot_guard.begin_write()
@@ -530,7 +342,7 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
         #[cfg(debug_assertions)]
         let _access = {
             debug_assert!(
-                self.tree().in_flush(),
+                self.in_flush(),
                 "TElement::clear_data called outside a style traversal"
             );
             self.slot_guard.begin_write()
@@ -599,11 +411,11 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
         false
     }
 
-    fn shadow_root(&self) -> Option<DomNode<'a, T>> {
+    fn shadow_root(&self) -> Option<&'a Node<T>> {
         None
     }
 
-    fn containing_shadow(&self) -> Option<DomNode<'a, T>> {
+    fn containing_shadow(&self) -> Option<&'a Node<T>> {
         None
     }
 
@@ -659,7 +471,7 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
         }
         // Synthetic / reflected attributes are the embedder's: consulted only
         // after the real attribute map misses, matching `attr_matches`.
-        self.ext.extra_attr_value(name)
+        Node::ext(self).extra_attr_value(name)
     }
 }
 
@@ -768,7 +580,7 @@ impl<T: ExternalState> Element for &Node<T> {
         }
         // Synthetic / reflected attributes are the embedder's: consulted only
         // after the real attribute map misses (see `ExternalState::extra_attr_value`).
-        self.ext
+        Node::ext(self)
             .extra_attr_value(name)
             .is_some_and(|value| operation.eval_str(&value))
     }
@@ -856,7 +668,7 @@ impl<T: ExternalState> Element for &Node<T> {
         // Selectors Level 4: `:root` matches the document element. A
         // detached parentless element has an owner document but is not its
         // element child, so it must not match.
-        self.tree().document_element() == Some(Node::id(self))
+        Node::parent(*self).is_some_and(Node::is_document)
     }
 
     fn add_element_unique_hashes(&self, filter: &mut BloomFilter) -> bool {

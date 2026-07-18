@@ -17,9 +17,10 @@ Document/Node design (this document describes the current shape).
 
 ## The w3c-dom core: one tree, Document-mediated mutation
 
-- **ONE TREE policy.** `Document<T>` is the single owner of everything tree-shaped: node storage
-  (a `Slab` of mixed element/text nodes with versioned handles), the real DOM document node and
-  its optional `documentElement`, and the private style context (`SharedRwLock` + base URL). Each
+- **ONE TREE policy.** `Document<T>` owns one fixed-address `Box<Slab<Node<T>>>`. Slot zero is the
+  real `NodeData::Document`; its ordinary child list contains the optional root element, and its
+  node data owns the private style context (`SharedRwLock` + base URL). All later slots are element
+  or text nodes, addressed by their raw `usize` slab index. Each
   pending pre-mutation snapshot is owned by its node in a pointer-sized optional box, allocated
   only when a previously styled element is first mutated between flushes. There is no separate
   arena/tree object, and no public way to construct or mutate a `Node<T>` outside its document —
@@ -32,25 +33,27 @@ Document/Node design (this document describes the current shape).
   not asked of embedders. The one embedder obligation left: pair `Document::ext_mut` with
   `Document::note_external_attribute_change` when a payload change affects a synthetic /
   reflected attribute (e.g. Lynx's `l-css-id`, `data-*`).
-- **Let it crash.** Query methods return `Option`; mutation methods treat stale `NodeId`s,
+- **Let it crash.** Query methods return `Option`; mutation methods treat vacant/out-of-range
+  `NodeId`s,
   cycle-creating links, a second document element, and invalid insertion references as
   caller bugs — `debug_assert!`ed and panicking rather than silently ignored. Layers holding
   untrusted handles validate first (`WidgetTree` maps violations to `WidgetError`, including its
   Lynx-specific `<page>` root protection).
-- **Identity is context-scoped.** `NodeId` is only `(index, generation)` and is meaningful inside
-  the `Document` that minted it. Separate JS contexts do not exchange handles; generation exists
-  solely to detect same-Slab index reuse. A native `WidgetHandle` already carries its context's
-  `Reaper` owner, so a host-side routing bug can still be rejected without adding identity to the
-  DOM. Engine/document pairing similarly uses their shared `Arc<SharedRwLock>` identity rather
-  than an integer token.
+- **Identity and lifetime are context-owned.** `NodeId` is a raw `usize` slab index. It carries no
+  document token and no allocation generation: after a node is removed and its slot reused, the
+  same number names the new occupant. Separate JS contexts do not exchange handles, and a native
+  `WidgetHandle` carries its context's `Reaper` owner while retaining its node, so no live handle
+  survives reclamation and a host-side routing bug is rejected outside the DOM. Engine/document
+  pairing similarly uses their shared `Arc<SharedRwLock>` identity rather than an integer token.
 - **Debug contract instrumentation.** The `stylo_data` `UnsafeCell` slot carries a debug-only
   guard (reader/writer state, owning thread, unwind poisoning) and the document a debug
   traversal-phase flag; violations of stylo's one-worker-per-element discipline crash debug
   builds instead of being UB. Release builds compile it all away.
-- **Backpointers, one-word handles, no mirror tree.** The document core is heap-pinned and every
-  node carries a pointer back to it, so tree navigation needs nothing but `&Node`. stylo's DOM
-  element traits remain implemented directly on **`&'a Node<T>`**; a small `DomNode` value gives
-  `TNode` the broader document/element/text view, and `DomDocument` supplies `TDocument`. The
+- **Slab backpointers, one-word handles, no mirror tree.** Every node carries a pointer directly
+  to the fixed-address slab, so it can resolve parents/children and recover slot zero using only
+  `&Node`. The same **`&'a Node<T>`** implements Stylo's `TNode`, `TElement`, `TDocument`, and
+  `TShadowRoot` associated-type stub; `NodeData` decides whether that node is the document, an
+  element, or text. No `Core`, document/node view, or iterator adapter exists. The
   restyle traversal runs **in place on the document**; no second tree is materialized. Text nodes
   remain in DOM/layout child iteration but are skipped by selector matching and cascade. The
   word-sized `TElement` handle is load-bearing: stylo's style-sharing cache sizes its TLS for a
@@ -61,7 +64,7 @@ Document/Node design (this document describes the current shape).
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| `w3c-dom` | `Document<T>` (the real document node, mixed-node storage, document-element link, lock), `Node<T>` (elements/text, including node-owned pending snapshots), `NodeId`, the stylo DOM traits, invalidation-carrying mutation, inline parsing, `Stylist`, rule matching, cascade, media evaluation, computed values | Lynx tags/PAPI, `<page>` root policy, `WidgetState`, Lynx unit metrics, touch-device policy |
+| `w3c-dom` | `Document<T>` (fixed-address node slab), slot-zero document `Node<T>` (style context + ordinary child list), element/text nodes (including node-owned pending snapshots), raw-index `NodeId`, direct `&Node` Stylo DOM traits, invalidation-carrying mutation, inline parsing, `Stylist`, rule matching, cascade, media evaluation, computed values | Lynx tags/PAPI, `<page>` root policy, `WidgetState`, Lynx unit metrics, touch-device policy |
 | `lynx-widget` | `WidgetState`, `WidgetTree` (PAPI validation plus its own `<page>` root over the generic document), `WidgetHandle` (canonical registry, context ownership, node retention, drop-driven reclamation of detached subtrees), `EngineMetrics`, touch-first `Device` construction, viewport-relative `rpx` integration | A second stylist, cascade implementation, stylesheet lock sharing, direct node construction, raw-id public APIs |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, the maintained Lynx CSS extension patch set **and the Lynx supported-property/value grammar definition** (`style/properties/lynx_properties.txt`, `lynx` feature gates) | Runtime Widget/PAPI policy |
 
@@ -94,7 +97,8 @@ Document/Node design (this document describes the current shape).
    hints** scoped by the selector flags stylo recorded during matching;
    inline-style updates post the style-attribute replacement hint.
 6. `StyleEngine::flush_widget_tree(&mut tree)` drives **stylo's own restyle
-   traversal** (`crates/w3c-dom/src/flush.rs`) from the DOM document element:
+   traversal** (`crates/w3c-dom/src/flush.rs`) from `Document::root_element()`, the first element
+   child of the slot-zero document node:
    reachable pending node snapshots are moved along the dirty spine into the
    temporary map required by stylo's traversal API, followed by
    snapshot-driven invalidation, the style sharing cache, bloom filter, and

@@ -1,5 +1,5 @@
 //! Integration tests for the `w3c-dom` primitives an embedder's API layer
-//! delegates to: the ONE-TREE [`Document`] (generational storage, structure
+//! delegates to: the ONE-TREE [`Document`] (raw slab-index storage, structure
 //! ops, queries), `&Node` navigation, invalidation scheduling carried by
 //! the setters, inline-style parsing, the [`ExternalState`] hook defaults,
 //! and the let-it-crash mutation contract.
@@ -13,7 +13,7 @@
 //! `remove_subtree` harvest test, which uses a payload type to observe what
 //! the document returns.
 
-use w3c_dom::{Document, ExternalState, Node, NodeId, NodeType};
+use w3c_dom::{DOCUMENT_NODE_ID, Document, ExternalState, Node, NodeId, NodeType};
 
 /// Create an element with the given tag (no-op payload) and return its handle.
 fn node(doc: &mut Document<()>, tag: &str) -> NodeId {
@@ -21,21 +21,31 @@ fn node(doc: &mut Document<()>, tag: &str) -> NodeId {
 }
 
 #[test]
-fn document_generational_reuse() {
+fn document_is_slot_zero_and_node_ids_are_raw_slab_indices() {
     let mut doc = Document::new();
+    assert_eq!(doc.root_node().id(), DOCUMENT_NODE_ID);
+    assert_eq!(doc.root_node().node_type(), NodeType::Document);
+
     let a = node(&mut doc, "div");
     assert!(doc.get(a).is_some());
+    doc.append_child(a);
+    assert_eq!(doc.root_element().map(Node::id), Some(a));
+    assert_eq!(doc.root_node().first_child().map(Node::id), Some(a));
+    assert_eq!(doc.get(a).unwrap().parent_id(), Some(DOCUMENT_NODE_ID));
 
     doc.remove_subtree(a);
     assert!(doc.get(a).is_none());
 
-    // The next create reuses the freed slot with a bumped generation.
+    // A raw Slab index deliberately identifies the slot, not an allocation
+    // generation. The ownership layer ensures no live handle survives the
+    // removal; once reused, the same numeric ID names the new occupant.
     let b = node(&mut doc, "div");
-    assert_eq!(a.index(), b.index(), "slot should have been reused");
-    assert_ne!(a.generation(), b.generation());
-    assert!(doc.get(a).is_none(), "the stale handle no longer resolves");
+    assert_eq!(a, b, "Slab should reuse the vacant slot");
+    assert!(
+        doc.get(a).is_some(),
+        "the raw index now resolves to its new occupant"
+    );
     assert!(doc.get(b).is_some());
-    assert_ne!(a, b);
 }
 
 #[test]
@@ -255,18 +265,18 @@ fn remove_subtree_frees_detaches_and_returns_payloads() {
 }
 
 #[test]
-fn remove_subtree_clears_the_document_element() {
+fn remove_subtree_clears_the_root_element() {
     let mut doc = Document::new();
     let root = node(&mut doc, "page");
     doc.append_child(root);
-    assert_eq!(doc.document_element(), Some(root));
+    assert_eq!(doc.root_element().map(Node::id), Some(root));
     assert!(
         doc.needs_flush(),
         "a fresh document element needs its initial pass"
     );
 
     doc.remove_subtree(root);
-    assert_eq!(doc.document_element(), None);
+    assert_eq!(doc.root_element().map(Node::id), None);
     assert!(!doc.needs_flush());
 }
 
@@ -336,22 +346,24 @@ fn root_matching_uses_document_structure() {
 
 #[test]
 fn stylo_sees_a_distinct_document_node_and_real_owner_document() {
-    use stylo::dom::{TDocument as _, TElement as _, TNode as _};
+    use stylo::dom::{TDocument as _, TNode as _};
 
     let mut doc = Document::new();
     let root = node(&mut doc, "html");
     let detached = node(&mut doc, "section");
     doc.append_child(root);
 
-    let root_node = doc.get(root).unwrap().as_node();
-    let document_node = root_node.owner_doc().as_node();
+    let root_node = doc.get(root).unwrap();
+    let document_node = root_node.owner_doc();
     assert!(document_node.as_document().is_some());
+    assert_eq!(document_node.as_node(), document_node);
+    assert_eq!(document_node, doc.root_node());
     assert_eq!(root_node.parent_node(), Some(document_node));
     assert_eq!(document_node.first_child(), Some(root_node));
     assert!(root_node.is_in_document());
 
-    let detached_node = doc.get(detached).unwrap().as_node();
-    assert_eq!(detached_node.owner_doc().as_node(), document_node);
+    let detached_node = doc.get(detached).unwrap();
+    assert_eq!(detached_node.owner_doc(), document_node);
     assert_eq!(detached_node.parent_node(), None);
     assert!(!detached_node.is_in_document());
 }
@@ -381,14 +393,14 @@ fn external_state_default_attr_hooks() {
 }
 
 #[test]
-fn reparenting_the_document_element_detaches_it_from_the_document() {
+fn reparenting_the_root_element_detaches_it_from_the_document() {
     let mut doc = Document::new();
     let root = node(&mut doc, "page");
     doc.append_child(root);
     let other = node(&mut doc, "view");
     doc.append(other, root);
 
-    assert_eq!(doc.document_element(), None);
+    assert_eq!(doc.root_element().map(Node::id), None);
     assert_eq!(doc.get(root).unwrap().parent_id(), Some(other));
     assert!(!doc.is_connected(root));
 }

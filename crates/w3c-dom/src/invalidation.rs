@@ -48,7 +48,7 @@ use stylo::stylesheets::{CssRuleType, Origin};
 use stylo_atoms::Atom;
 use stylo_traits::ParsingMode;
 
-use crate::document::{Document, NodeId};
+use crate::document::{DOCUMENT_NODE_ID, Document, NodeId};
 use crate::ext::ExternalState;
 use crate::node::Node;
 
@@ -110,7 +110,7 @@ impl<T> Document<T> {
         let node = self.live(id);
         assert!(
             node.is_element(),
-            "element-only Document mutation called with a text node"
+            "element-only Document mutation called with a non-element node"
         );
         node
     }
@@ -119,7 +119,7 @@ impl<T> Document<T> {
     /// been styled before. A node without style data needs no hint: the
     /// traversal styles data-less nodes unconditionally.
     pub(crate) fn add_restyle_hint(&mut self, id: NodeId, hint: RestyleHint) {
-        if let Some(wrapper) = self.core_mut().node_mut(id).and_then(Node::stylo_data_mut) {
+        if let Some(wrapper) = self.tree_mut().get_mut(id).and_then(Node::stylo_data_mut) {
             wrapper.borrow_mut().hint.insert(hint);
         }
     }
@@ -127,10 +127,13 @@ impl<T> Document<T> {
     /// Walk from `id`'s parent to the root setting `dirty_descendants`,
     /// stopping at the first ancestor already marked.
     pub(crate) fn mark_ancestors_dirty_descendants(&mut self, id: NodeId) {
-        let core = self.core_mut();
-        let mut next = core.node(id).and_then(Node::parent_id);
+        let tree = self.tree();
+        let mut next = tree.get(id).and_then(Node::parent_id);
         while let Some(pid) = next {
-            let parent = core.link(pid);
+            if pid == DOCUMENT_NODE_ID {
+                break;
+            }
+            let parent = tree.get(pid).expect("internal tree links always resolve");
             if parent.has_dirty_descendants() {
                 break;
             }
@@ -220,10 +223,13 @@ impl<T> Document<T> {
         self.add_restyle_hint(id, RestyleHint::restyle_subtree());
         self.live(id).set_style_dirty(true);
         let later_siblings: Vec<NodeId> = {
-            let core = self.core();
-            core.node(id)
+            let tree = self.tree();
+            tree.get(id)
                 .and_then(|node| {
-                    let siblings = core.link(node.parent_id()?).child_ids();
+                    let siblings = tree
+                        .get(node.parent_id()?)
+                        .expect("internal tree links always resolve")
+                        .child_ids();
                     let pos = siblings.iter().position(|&c| c == id)?;
                     Some(siblings[pos + 1..].to_vec())
                 })
@@ -248,8 +254,8 @@ impl<T: ExternalState> Document<T> {
     pub fn set_classes(&mut self, id: NodeId, classes: &str) {
         self.live_element(id);
         self.note_class_change(id);
-        self.core_mut()
-            .node_mut(id)
+        self.tree_mut()
+            .get_mut(id)
             .expect("stale NodeId passed to Document::set_classes")
             .classes = classes.split_whitespace().map(Atom::from).collect();
     }
@@ -266,8 +272,8 @@ impl<T: ExternalState> Document<T> {
             return;
         }
         self.note_class_change(id);
-        self.core_mut()
-            .node_mut(id)
+        self.tree_mut()
+            .get_mut(id)
             .expect("stale NodeId passed to Document::add_class")
             .classes
             .push(class);
@@ -285,8 +291,8 @@ impl<T: ExternalState> Document<T> {
             return;
         }
         self.note_class_change(id);
-        self.core_mut()
-            .node_mut(id)
+        self.tree_mut()
+            .get_mut(id)
             .expect("stale NodeId passed to Document::remove_class")
             .classes
             .retain(|existing| *existing != class);
@@ -301,8 +307,8 @@ impl<T: ExternalState> Document<T> {
     pub fn set_id_attr(&mut self, id: NodeId, value: Option<&str>) {
         self.live_element(id);
         self.note_id_change(id);
-        self.core_mut()
-            .node_mut(id)
+        self.tree_mut()
+            .get_mut(id)
             .expect("stale NodeId passed to Document::set_id_attr")
             .id_attr = value.map(Atom::from);
     }
@@ -316,8 +322,8 @@ impl<T: ExternalState> Document<T> {
     pub fn set_attribute(&mut self, id: NodeId, name: &str, value: &str) {
         self.live_element(id);
         self.note_attribute_change(id, name);
-        self.core_mut()
-            .node_mut(id)
+        self.tree_mut()
+            .get_mut(id)
             .expect("stale NodeId passed to Document::set_attribute")
             .attrs
             .insert(name.into(), value.to_owned());
@@ -332,8 +338,8 @@ impl<T: ExternalState> Document<T> {
     pub fn remove_attribute(&mut self, id: NodeId, name: &str) {
         self.live_element(id);
         self.note_attribute_change(id, name);
-        self.core_mut()
-            .node_mut(id)
+        self.tree_mut()
+            .get_mut(id)
             .expect("stale NodeId passed to Document::remove_attribute")
             .attrs
             .remove(name);
@@ -352,8 +358,8 @@ impl<T: ExternalState> Document<T> {
         // invalidation keys off `snapshot.state`, so nothing further to flag.
         self.ensure_snapshot(id);
         self.mark_mutated(id);
-        self.core_mut()
-            .node_mut(id)
+        self.tree_mut()
+            .get_mut(id)
             .expect("stale NodeId passed to Document::set_state")
             .element_state
             .set(flags, on);
@@ -393,8 +399,8 @@ impl<T: ExternalState> Document<T> {
         } else {
             text
         };
-        self.core_mut()
-            .node_mut(id)
+        self.tree_mut()
+            .get_mut(id)
             .expect("stale NodeId passed to Document::set_text")
             .text = text;
         if let Some(element) = affected_element
@@ -440,18 +446,18 @@ impl<T: ExternalState> Document<T> {
         let block = if css.is_empty() {
             None
         } else {
-            let core = self.core();
+            let document = self.root_node();
             let parsed = parse_style_attribute(
                 css,
-                &core.url_data,
+                document.document_url_data(),
                 None,
                 QuirksMode::NoQuirks,
                 CssRuleType::Style,
             );
-            Some(Arc::new(core.lock.wrap(parsed)))
+            Some(Arc::new(document.document_lock().wrap(parsed)))
         };
-        self.core_mut()
-            .node_mut(id)
+        self.tree_mut()
+            .get_mut(id)
             .expect("stale NodeId passed to Document::set_inline_style")
             .inline_block = block;
         self.note_inline_style_change(id);
@@ -476,14 +482,14 @@ impl<T: ExternalState> Document<T> {
             return;
         };
 
-        let core = self.core();
+        let document = self.root_node();
         let mut source = SourcePropertyDeclaration::default();
         if parse_one_declaration_into(
             &mut source,
             property_id,
             value,
             Origin::Author,
-            &core.url_data,
+            document.document_url_data(),
             None,
             ParsingMode::DEFAULT,
             QuirksMode::NoQuirks,
@@ -496,16 +502,16 @@ impl<T: ExternalState> Document<T> {
 
         let mut block = match &self.live(id).inline_block {
             Some(existing) => {
-                let guard = core.lock.read();
+                let guard = document.document_lock().read();
                 existing.read_with(&guard).clone()
             }
             None => PropertyDeclarationBlock::new(),
         };
         block.extend(source.drain(), Importance::Normal);
-        let wrapped = Arc::new(core.lock.wrap(block));
+        let wrapped = Arc::new(document.document_lock().wrap(block));
 
-        self.core_mut()
-            .node_mut(id)
+        self.tree_mut()
+            .get_mut(id)
             .expect("stale NodeId passed to Document::add_inline_style")
             .inline_block = Some(wrapped);
         self.note_inline_style_change(id);
@@ -522,11 +528,11 @@ impl<T: ExternalState> Document<T> {
     #[must_use]
     pub fn inline_style_declaration_count(&self, id: NodeId) -> usize {
         self.live_element(id);
-        let core = self.core();
+        let document = self.root_node();
         let Some(block) = &self.live(id).inline_block else {
             return 0;
         };
-        let guard = core.lock.read();
+        let guard = document.document_lock().read();
         block.read_with(&guard).declarations().len()
     }
 
@@ -614,14 +620,14 @@ impl<T: ExternalState> Document<T> {
             // old state.
             let snapshot = build_snapshot(node);
             let node = self
-                .core_mut()
-                .node_mut(id)
+                .tree_mut()
+                .get_mut(id)
                 .expect("live node disappeared while recording its snapshot");
             node.snapshot = Some(Box::new(snapshot));
             node.set_snapshot_present();
         }
-        self.core_mut()
-            .node_mut(id)
+        self.tree_mut()
+            .get_mut(id)
             .expect("live node disappeared while refining its snapshot")
             .snapshot
             .as_deref_mut()

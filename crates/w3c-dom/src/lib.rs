@@ -4,17 +4,17 @@
 //! everything stylo needs to run its cascade over it in place. The public
 //! surface is deliberately small:
 //!
-//! - [`Document<T>`] — **the one tree and its actual DOM document node.** It owns every stored
-//!   node, its optional `documentElement`, and the private style context. Element and text nodes
-//!   are created by [`Document::create_element`] / [`Document::create_text_node`] and mutated
-//!   exclusively through `Document` methods; there is no way to construct, mutate, or re-home a
-//!   node outside its document (ONE TREE policy).
-//! - [`Node<T>`] — the compositional unit. [`NodeType::Element`] nodes carry the W3C-DOM-subset
-//!   element fields and stylo bookkeeping; [`NodeType::Text`] nodes carry character data. Both
-//!   kinds share tree links, the embedder payload, and a node-owned pending invalidation snapshot
-//!   slot. Read-only from outside the crate.
-//! - [`NodeId`] — a generational, staleness-detecting handle. The *read* handle is a plain
-//!   `&Node<T>`; the stylo element traits are implemented directly on it (no wrapper type).
+//! - [`Document<T>`] — **the one tree.** It owns a fixed-address slab whose slot zero is the actual
+//!   DOM document node. Element and text nodes are created by [`Document::create_element`] /
+//!   [`Document::create_text_node`] and mutated exclusively through `Document` methods; there is no
+//!   way to construct, mutate, or re-home a node outside its document (ONE TREE policy).
+//! - [`Node<T>`] — the compositional unit. [`NodeType::Document`] is slot zero,
+//!   [`NodeType::Element`] nodes carry the W3C-DOM-subset element fields and stylo bookkeeping;
+//!   [`NodeType::Text`] nodes carry character data. Element and text variants own the embedder
+//!   payload; all nodes share tree links and the common bookkeeping layout. Read-only from outside
+//!   the crate.
+//! - [`NodeId`] — the raw `usize` slab index, scoped to its runtime context. The *read* handle is a
+//!   plain `&Node<T>`; every stylo DOM trait is implemented directly on it (no wrapper type).
 //! - [`StyleEngine`] — stylesheet parsing/building, matching, rule-tree insertion, cascade, and the
 //!   style flush ([`StyleEngine::flush_document`]).
 //! - [`ExternalState`] — the embedder-payload trait; the only channel through which the payload `T`
@@ -22,11 +22,13 @@
 //!
 //! # Contract: let it crash
 //!
-//! Mutation methods treat invalid input — stale [`NodeId`]s, cycle-creating
-//! links, unrelated insertion references — as **caller bugs**, not conditions
-//! to absorb: preconditions are `debug_assert!`ed and the internal lookups
-//! panic rather than silently no-op. Query methods (`get`, `node_ref`,
-//! `child_position`, …) return `Option` instead; asking is always legal.
+//! Mutation methods treat invalid input — vacant/out-of-range [`NodeId`]s,
+//! cycle-creating links, unrelated insertion references — as **caller bugs**,
+//! not conditions to absorb: preconditions are `debug_assert!`ed and the
+//! internal lookups panic rather than silently no-op. Query methods (`get`,
+//! `child_position`, …) return `Option` instead; asking is always legal. The
+//! ownership layer must not retain a raw ID after its node is removed and the
+//! slab slot becomes reusable.
 //! Embedders facing untrusted handles (a scripting runtime) validate first
 //! and map violations to their own error types.
 //!
@@ -35,18 +37,18 @@
 //! Element tags/classes/ids are interned as stylo atoms and each element node
 //! owns stylo's interior-mutable style state; the crate-private `traits` module
 //! implements stylo's
-//! element traits with `&'a Node<T>` as the hot [`TElement`](stylo::dom::TElement)
-//! handle and a small internal node view for
-//! [`TNode`](stylo::dom::TNode)/[`TDocument`](stylo::dom::TDocument), so the
-//! distinct document node is represented without turning it into an Element.
+//! node traits with `&'a Node<T>` as the common
+//! [`TElement`](stylo::dom::TElement)/[`TNode`](stylo::dom::TNode)/
+//! [`TDocument`](stylo::dom::TDocument) handle. The internal `NodeData` distinguishes the
+//! document, element, and text cases without wrapper structs.
 //! Styling therefore runs **on the document itself** — no mirror tree is
 //! built to enter the styling engine. Two design points make that work:
 //!
-//! - every node carries a **backpointer** to its (heap-pinned) document core, so tree navigation
+//! - every node carries a **backpointer** to its document's fixed-address slab, so tree navigation
 //!   needs nothing but `&Node` — a shared reference is exactly the one-word `Copy` value stylo's
 //!   style-sharing cache requires of a `TElement` handle;
-//! - node identity for snapshots/traversal roots ([`OpaqueNode`](stylo::dom::OpaqueNode)) derives
-//!   from the generational [`NodeId`], so it survives slab-storage growth moving nodes.
+//! - node identity for snapshots/traversal roots ([`OpaqueNode`](stylo::dom::OpaqueNode)) is the
+//!   raw slab index, so it survives slab-storage growth moving nodes.
 //!
 //! Inline styles are parsed at mutation time into a stylo
 //! [`PropertyDeclarationBlock`](stylo::properties::PropertyDeclarationBlock)
@@ -91,12 +93,10 @@ mod traits;
 /// on the vendored stylo packages directly.
 pub use dom::ElementState;
 
-pub use crate::document::{Document, NodeId};
+pub use crate::document::{DOCUMENT_NODE_ID, Document, NodeId};
 pub use crate::engine::{
     ComputedStyle, CssRule, RawDeclaration, StyleEngine, StylesheetOrigin, property_is_supported,
 };
 pub use crate::ext::ExternalState;
 pub use crate::flush::Parallelism;
 pub use crate::node::{ChildrenIter, Node, NodeType};
-#[doc(hidden)]
-pub use crate::traits::{DomChildrenIter, DomDocument, DomNode};
