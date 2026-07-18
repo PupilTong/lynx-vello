@@ -459,6 +459,26 @@ impl CssPropertyId {
     pub fn name(self) -> &'static str {
         STYLE_PROPERTY_MAP[self as u32 as usize]
     }
+
+    /// Converts a wire/property-table discriminant to its enum value.
+    ///
+    /// The web `CSSPropertyEnum` is intentionally contiguous because its
+    /// discriminants index [`STYLE_PROPERTY_MAP`].
+    #[must_use]
+    #[expect(
+        unsafe_code,
+        reason = "the range check covers every value of the contiguous repr(u32) wire enum"
+    )]
+    pub fn from_u32(id: u32) -> Option<Self> {
+        if id <= Self::OffsetDistance as u32 {
+            // SAFETY: every integer from Unknown (0) through OffsetDistance
+            // (215) is an explicitly declared discriminant of this repr(u32)
+            // enum, with no gaps.
+            Some(unsafe { std::mem::transmute::<u32, Self>(id) })
+        } else {
+            None
+        }
+    }
 }
 
 /// A CSS property reference: an interned id, or `Unknown` plus the raw name.
@@ -473,6 +493,31 @@ pub struct CssProperty {
 }
 
 impl CssProperty {
+    /// Builds a property reference from its canonical or custom name.
+    #[must_use]
+    pub fn from_name(name: impl Into<String>) -> Self {
+        let name = name.into();
+        let id = STYLE_PROPERTY_MAP
+            .iter()
+            .position(|candidate| *candidate == name.as_str())
+            .and_then(|index| u32::try_from(index).ok())
+            .and_then(CssPropertyId::from_u32)
+            .unwrap_or(CssPropertyId::Unknown);
+        Self {
+            unknown_name: (id == CssPropertyId::Unknown).then_some(name),
+            id,
+        }
+    }
+
+    /// Builds an interned property reference from its numeric wire id.
+    #[must_use]
+    pub fn from_u32(id: u32) -> Option<Self> {
+        CssPropertyId::from_u32(id).map(|id| Self {
+            id,
+            unknown_name: None,
+        })
+    }
+
     /// The property name as written in the source CSS.
     #[must_use]
     pub fn name(&self) -> &str {

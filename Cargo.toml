@@ -19,6 +19,7 @@ rust-version = "1.95"
 bobcat-engine = { path = "crates/bobcat-engine" }
 bobcat-quickjs = { path = "crates/bobcat-quickjs" }
 lynx-template-decoder = { path = "crates/lynx-template-decoder" }
+lynx-template-converter = { path = "crates/lynx-template-converter" }
 lynx-widget = { path = "crates/lynx-widget" }
 neutron-star = { path = "crates/neutron-star" }
 quickjs-rust-bridge = { path = "crates/quickjs-rust-bridge" }

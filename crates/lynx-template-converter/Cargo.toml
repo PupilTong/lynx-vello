@@ -1,0 +1,18 @@
+[package]
+name = "lynx-template-converter"
+description = "Convert source-based Lynx native external bundles into the SDRA/WROF web binary template format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cssparser = { workspace = true }
+lynx-template-decoder = { workspace = true }
+rkyv = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

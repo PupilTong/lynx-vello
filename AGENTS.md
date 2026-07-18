@@ -28,9 +28,10 @@ runtime adapter remains pending. See
 and behave the same as they do under `web-core` today. "Behave the same" means
 matching rendering output and user-interaction behavior — **not** pixel-perfect
 fidelity, and **not** reimplementing Android/iOS native platform code paths.
-This project does not touch the native `.lynx.bundle` format or platform
-bridges (`docs/lynx-binary-template.md` is kept for reference only, not a
-target).
+The runtime does not consume the native `.lynx.bundle` format or platform
+bridges. The one tooling exception is `lynx-template-converter`, which reads
+source-based native external bundles solely to translate them into the web
+binary format; native bytecode remains outside the runtime target.
 
 ## Standards policy
 
@@ -114,6 +115,15 @@ useful signal for currently-compatible versions of those libraries.
 - `crates/lynx-template-decoder` — decodes `.web.bundle` (magic `SDRA WROF`):
   manifest, rkyv `StyleInfo`, Lepus/JS code, custom sections. Scope: binary
   template parsing only, no JS runtime, no CSS engine (yet).
+- `crates/lynx-template-converter` — converts flexible, source-based native
+  external `.lynx.bundle` files into `.web.bundle`. It maps source custom
+  sections to main/background script maps, translates serialized native CSS
+  selectors and declarations into the decoder crate's rkyv 0.7 `StyleInfo`,
+  and carries compatible configuration flags across. It must reject any real
+  root/chunk/background/custom QuickJS bytecode with
+  `ConvertError::CodeCacheBundle`; decompilation and native-card execution are
+  not in scope. The inert empty root emitted for external bundles is the only
+  accepted native MTS bytecode.
 - `crates/bobcat-engine` — native runtime integration crate. Its independent
   `resource` module owns the protocol-only, host-injected, object-safe Tokio
   `ResourceFetcher` contract; `script` owns the ShadowRealm-inspired isolated
@@ -234,7 +244,8 @@ this section is the only place the absolute paths are spelled out.
   1:1 in the decoder crate — field/variant order there is wire format, do not
   reorder).
 - `docs/lynx-binary-template.md` — the *native* `.lynx.bundle` format ("lynx"
-  target), reference only, not implemented here.
+  target), implemented only to the source-external conversion subset by
+  `lynx-template-converter`; it is not a runtime input format.
 - `docs/tracking/` — the behavior/feature inventory (CSS properties, layout
   algorithms, DOM/event model, JS runtime APIs, `web-core` runtime
   architecture, built-in components, ReactLynx surface) that future
