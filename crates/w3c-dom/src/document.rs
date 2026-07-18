@@ -110,13 +110,14 @@ impl<T> Document<T> {
     ///
     /// This is derived from the real child list rather than cached as a
     /// second root pointer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an internal document child link does not resolve. Public
+    /// mutation APIs preserve this invariant.
     #[must_use]
     pub fn root_element(&self) -> Option<&Node<T>> {
-        self.root_node()
-            .child_ids()
-            .iter()
-            .filter_map(|&id| self.get(id))
-            .find(|node| node.is_element())
+        self.root_node().children().find(|node| node.is_element())
     }
 
     /// The document node's shared style lock.
@@ -485,5 +486,24 @@ impl Drop for FlushPhaseToken {
         unsafe {
             self.flag.as_ref().store(false, Ordering::Release);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "internal tree links always resolve")]
+    fn root_element_panics_on_a_dangling_document_child() {
+        let mut document: Document<()> = Document::new();
+        document
+            .nodes
+            .get_mut(DOCUMENT_NODE_ID)
+            .expect("the document node is present")
+            .children
+            .push(usize::MAX);
+
+        let _ = document.root_element();
     }
 }
