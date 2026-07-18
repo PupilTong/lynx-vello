@@ -9,8 +9,9 @@ This is the **"web" target** template format. It is *not* the native
 the web platform never ships Lepus/QuickJS bytecode; its main-thread code is
 plain JavaScript, and its CSS is pre-parsed into rkyv-serialized Rust structs.
 
-`crates/lynx-template-decoder` in this repo implements a native Rust decoder
-for exactly this format.
+`crates/lynx-template-decoder` implements a native Rust decoder for exactly
+this format. `crates/lynx-template-converter` also emits it when translating a
+source-based native external bundle.
 
 Hand-written [Lynx XML markup templates](lynx-xml-template.md) are a **source
 format**, not another `.web.bundle` encoding. The merged `encodeLynxXML()` path
