@@ -98,9 +98,17 @@ pub(super) fn normalize_item_alignment(
     } else if value == AlignFlags::STRETCH {
         Some(AlignItems::Stretch)
     } else if value == AlignFlags::LEFT && inline_axis {
-        Some(if rtl { AlignItems::End } else { AlignItems::Start })
+        Some(if rtl {
+            AlignItems::End
+        } else {
+            AlignItems::Start
+        })
     } else if value == AlignFlags::RIGHT && inline_axis {
-        Some(if rtl { AlignItems::Start } else { AlignItems::End })
+        Some(if rtl {
+            AlignItems::Start
+        } else {
+            AlignItems::End
+        })
     } else {
         // Physical keywords in the block axis, `self-start`/`self-end`
         // (unreachable from the lynx grammar), and unknown fabricated values
@@ -139,9 +147,17 @@ pub(super) fn normalize_content_alignment(
     } else if value == AlignFlags::SPACE_EVENLY {
         Some(AlignContent::SpaceEvenly)
     } else if value == AlignFlags::LEFT && inline_axis {
-        Some(if rtl { AlignContent::End } else { AlignContent::Start })
+        Some(if rtl {
+            AlignContent::End
+        } else {
+            AlignContent::Start
+        })
     } else if value == AlignFlags::RIGHT && inline_axis {
-        Some(if rtl { AlignContent::Start } else { AlignContent::End })
+        Some(if rtl {
+            AlignContent::Start
+        } else {
+            AlignContent::End
+        })
     } else {
         // Baseline content-alignment (unimplemented) and unknown fabricated
         // values fall back to their specified fallback: start.
@@ -285,7 +301,10 @@ mod tests {
 
     #[test]
     fn align_flags_normalize_with_physical_and_fallback_handling() {
-        assert_eq!(normalize_item_alignment(AlignFlags::AUTO, false, false), None);
+        assert_eq!(
+            normalize_item_alignment(AlignFlags::AUTO, false, false),
+            None
+        );
         assert_eq!(
             normalize_item_alignment(AlignFlags::NORMAL, false, false),
             None

@@ -19,9 +19,6 @@ mod sizing;
 mod tracks;
 mod types;
 
-use stylo::computed_values::direction;
-use stylo::values::computed::{PositionProperty, Size as StyleSize};
-
 use alignment::{
     AlignContent, AlignItems, align_tracks, alignment_spacing_from_free_space,
     item_alignment_offset, normalize_content_alignment, normalize_item_alignment,
@@ -34,6 +31,8 @@ use sizing::{
     CrossAxisTracks, initialize_tracks, probe_raw_min_content, resolve_item_intrinsic_dimensions,
     size_tracks,
 };
+use stylo::computed_values::direction;
+use stylo::values::computed::{PositionProperty, Size as StyleSize};
 use tracks::{ExpandedTemplate, MAX_MATERIALIZED_TRACKS, build_axis_tracks, expand_template};
 use types::{Axis, GridItem, TrackSet, TrackSizingFunction};
 
@@ -1050,10 +1049,8 @@ where
         (outer_size.height - border.vertical_sum()).max(0.0),
     );
     let content_origin = Point::new(border.left + padding.left, border.top + padding.top);
-    let logical_content_start = Point::new(
-        if rtl { padding.right } else { padding.left },
-        padding.top,
-    );
+    let logical_content_start =
+        Point::new(if rtl { padding.right } else { padding.left }, padding.top);
     for pending in items {
         let key = pending.key();
         let inset_auto = {
@@ -1163,7 +1160,7 @@ where
     let style_definite = if input.sizing_mode == SizingMode::ContentSize {
         Size::new(false, false)
     } else {
-        preferred_size_definiteness(style.size(), input.parent_size, style.aspect_ratio())
+        preferred_size_definiteness(&style.size(), input.parent_size, style.aspect_ratio())
     };
     let outer_definite = Size::new(
         input.definite_dimensions.width || style_definite.width,

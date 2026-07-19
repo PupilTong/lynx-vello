@@ -332,7 +332,11 @@ fn map_cross_flags(flags: AlignFlags, axes: LinearAxes) -> CrossGravity {
     } else if flags == AlignFlags::LEFT || flags == AlignFlags::RIGHT {
         if axes.cross == Axis::Horizontal {
             let end = (flags == AlignFlags::RIGHT) ^ axes.cross_reverse;
-            if end { CrossGravity::End } else { CrossGravity::Start }
+            if end {
+                CrossGravity::End
+            } else {
+                CrossGravity::Start
+            }
         } else {
             CrossGravity::Start
         }
@@ -377,7 +381,11 @@ fn computed_main_gravity(justify_content: ContentDistribution, axes: LinearAxes)
         && axes.main == Axis::Horizontal
     {
         let end = (flags == AlignFlags::RIGHT) ^ axes.main_reverse;
-        if end { MainGravity::End } else { MainGravity::Start }
+        if end {
+            MainGravity::End
+        } else {
+            MainGravity::Start
+        }
     } else {
         MainGravity::Start
     }
@@ -422,7 +430,7 @@ fn inset_depends_on_basis(value: &Inset) -> bool {
 fn resolve_lp(value: &LengthPercentage, basis: Option<f32>) -> Option<f32> {
     let resolved = value
         .maybe_percentage_relative_to(basis.map(Length::new))
-        .map(|length| length.px());
+        .map(Length::px);
     debug_assert!(
         resolved.is_none_or(f32::is_finite),
         "layout values must be finite"
@@ -497,9 +505,7 @@ fn padding_border_size(padding: Edges<f32>, border: Edges<f32>) -> Size<f32> {
 fn used_aspect_ratio(value: AspectRatio) -> Option<f32> {
     match value.ratio {
         PreferredRatio::None => None,
-        PreferredRatio::Ratio(ratio) => {
-            (!ratio.is_degenerate()).then(|| ratio.0.0 / ratio.1.0)
-        }
+        PreferredRatio::Ratio(ratio) => (!ratio.is_degenerate()).then(|| ratio.0.0 / ratio.1.0),
     }
 }
 
@@ -543,9 +549,7 @@ fn max_size_is_intrinsic(value: &MaxSize) -> bool {
 #[inline]
 fn style_size_axis_is_definite(value: &StyleSize, parent_basis: Option<f32>) -> bool {
     match value {
-        StyleSize::LengthPercentage(lp) => {
-            !lp_depends_on_basis(&lp.0) || parent_basis.is_some()
-        }
+        StyleSize::LengthPercentage(lp) => !lp_depends_on_basis(&lp.0) || parent_basis.is_some(),
         _ => false,
     }
 }
@@ -762,9 +766,11 @@ fn refresh_item_edges<N>(
     if item.flags.needs_padding_refresh() {
         // Border widths are absolute in the stylo vocabulary; only padding
         // can carry percentages and need this refresh.
-        item.padding = style
-            .padding()
-            .map(|side| resolve_lp(&side.0, percentage_basis.width).unwrap_or(0.0).max(0.0));
+        item.padding = style.padding().map(|side| {
+            resolve_lp(&side.0, percentage_basis.width)
+                .unwrap_or(0.0)
+                .max(0.0)
+        });
     }
     if item.flags.needs_margin_refresh() {
         let margin_value = style.margin();
@@ -806,16 +812,22 @@ where
 
 #[inline]
 fn needs_min_content(values: [&SizingKeyword; 3]) -> bool {
-    values
-        .into_iter()
-        .any(|value| matches!(value, SizingKeyword::MinContent | SizingKeyword::FitContent(_)))
+    values.into_iter().any(|value| {
+        matches!(
+            value,
+            SizingKeyword::MinContent | SizingKeyword::FitContent(_)
+        )
+    })
 }
 
 #[inline]
 fn needs_max_content(values: [&SizingKeyword; 3]) -> bool {
-    values
-        .into_iter()
-        .any(|value| matches!(value, SizingKeyword::MaxContent | SizingKeyword::FitContent(_)))
+    values.into_iter().any(|value| {
+        matches!(
+            value,
+            SizingKeyword::MaxContent | SizingKeyword::FitContent(_)
+        )
+    })
 }
 
 fn intrinsic_measurement<N>(
@@ -926,7 +938,10 @@ where
         let max_size = style.max_size();
         (
             Size::new(size_keyword(&size.width), size_keyword(&size.height)),
-            Size::new(size_keyword(&min_size.width), size_keyword(&min_size.height)),
+            Size::new(
+                size_keyword(&min_size.width),
+                size_keyword(&min_size.height),
+            ),
             Size::new(
                 max_size_keyword(&max_size.width),
                 max_size_keyword(&max_size.height),
@@ -2326,6 +2341,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn gravity_re_keying_matches_the_legacy_mappings() {
         let ltr_column = LinearAxes::new(linear_direction::T::Column, direction::T::Ltr);
         let rtl_column = LinearAxes::new(linear_direction::T::Column, direction::T::Rtl);

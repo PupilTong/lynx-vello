@@ -7,99 +7,63 @@
 //! views through [`LayoutNode::style`], narrowing the node's style type with
 //! `FlexContainerStyle + FlexItemStyle` bounds.
 //!
+//! Alignment values are stylo's `AlignFlags`-based wrappers
+//! ([`ContentDistribution`], [`ItemPlacement`], [`SelfAlignment`]); the
+//! `normal`/`auto` keywords are encoded in the flags and normalized by the
+//! algorithm at style-read time.
+//!
 //! [`LayoutNode::style`]: crate::tree::LayoutNode::style
+
+use stylo::computed_values::{flex_direction, flex_wrap};
+use stylo::values::computed::length::NonNegativeLengthPercentageOrNormal;
+use stylo::values::computed::{
+    ContentDistribution, FlexBasis, ItemPlacement, NonNegativeNumber, SelfAlignment,
+};
 
 use crate::geometry::Size;
 use crate::style::CoreStyle;
-use crate::style::alignment::{AlignContent, AlignItems, AlignSelf, JustifyContent};
-use crate::style::value::{Dimension, LengthPercentage};
-
-/// `flex-direction`: which physical axis is the main axis, and its direction.
-///
-/// Note `Row`/`RowReverse` are additionally flipped by
-/// [`CoreStyle::direction`] being [`Direction::Rtl`](crate::style::Direction)
-/// — the flip is applied inside the algorithm.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum FlexDirection {
-    /// Main axis horizontal, items flow left→right (in `ltr`).
-    #[default]
-    Row,
-    /// Main axis vertical, items flow top→bottom.
-    Column,
-    /// Main axis horizontal, items flow right→left (in `ltr`).
-    RowReverse,
-    /// Main axis vertical, items flow bottom→top.
-    ColumnReverse,
-}
-
-impl FlexDirection {
-    /// Is the main axis the horizontal axis?
-    #[must_use]
-    pub const fn is_row(self) -> bool {
-        matches!(self, Self::Row | Self::RowReverse)
-    }
-
-    /// Is the main axis the vertical axis?
-    #[must_use]
-    pub const fn is_column(self) -> bool {
-        !self.is_row()
-    }
-
-    /// Does the main axis run against its natural direction?
-    #[must_use]
-    pub const fn is_reverse(self) -> bool {
-        matches!(self, Self::RowReverse | Self::ColumnReverse)
-    }
-}
-
-/// `flex-wrap`: single-line vs multi-line flex containers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum FlexWrap {
-    /// Single line; items shrink (or overflow) rather than wrap.
-    #[default]
-    NoWrap,
-    /// Multi-line; new lines stack in the cross-axis direction.
-    Wrap,
-    /// Multi-line; new lines stack against the cross-axis direction.
-    WrapReverse,
-}
 
 /// Style of a node *as a flex container*.
 ///
 /// Defaults are the CSS initial values.
 pub trait FlexContainerStyle: CoreStyle {
-    /// `flex-direction`.
-    fn flex_direction(&self) -> FlexDirection {
-        FlexDirection::Row
+    /// `flex-direction`. Note `Row`/`RowReverse` are additionally flipped
+    /// when [`CoreStyle::direction`] is `Rtl` — the flip is applied inside
+    /// the algorithm.
+    fn flex_direction(&self) -> flex_direction::T {
+        flex_direction::T::Row
     }
 
     /// `flex-wrap`.
-    fn flex_wrap(&self) -> FlexWrap {
-        FlexWrap::NoWrap
+    fn flex_wrap(&self) -> flex_wrap::T {
+        flex_wrap::T::Nowrap
     }
 
-    /// `gap` (`column-gap` is `width`, `row-gap` is `height`).
+    /// `gap` (`column-gap` is `width`, `row-gap` is `height`); `normal`
+    /// resolves to zero.
     ///
     /// Percentage basis: the container's content-box size in the gap's axis.
-    fn gap(&self) -> Size<LengthPercentage> {
-        Size::new(LengthPercentage::ZERO, LengthPercentage::ZERO)
+    fn gap(&self) -> Size<NonNegativeLengthPercentageOrNormal> {
+        Size::new(
+            NonNegativeLengthPercentageOrNormal::Normal,
+            NonNegativeLengthPercentageOrNormal::Normal,
+        )
     }
 
-    /// `align-content` — cross-axis distribution of lines. `None` = `normal`.
-    fn align_content(&self) -> Option<AlignContent> {
-        None
+    /// `align-content` — cross-axis distribution of lines.
+    fn align_content(&self) -> ContentDistribution {
+        ContentDistribution::normal()
     }
 
-    /// `align-items` — default cross-axis alignment of items. `None` =
-    /// `normal` (which behaves as `stretch` here).
-    fn align_items(&self) -> Option<AlignItems> {
-        None
+    /// `align-items` — default cross-axis alignment of items (`normal`
+    /// behaves as `stretch` here).
+    fn align_items(&self) -> ItemPlacement {
+        ItemPlacement::normal()
     }
 
-    /// `justify-content` — main-axis distribution of items. `None` =
-    /// `normal`.
-    fn justify_content(&self) -> Option<JustifyContent> {
-        None
+    /// `justify-content` — main-axis distribution of items.
+    fn justify_content(&self) -> ContentDistribution {
+        ContentDistribution::normal()
     }
 }
 
@@ -108,27 +72,28 @@ pub trait FlexContainerStyle: CoreStyle {
 ///
 /// Defaults are the CSS initial values.
 pub trait FlexItemStyle: CoreStyle {
-    /// `flex-basis`.
+    /// `flex-basis`. `content` has no Starlight sizing behavior and defers
+    /// to [`CoreStyle::size`] (documented behavior delta of the stylo
+    /// vocabulary swap).
     ///
     /// Percentage basis: the container's content-box main-axis size.
-    fn flex_basis(&self) -> Dimension {
-        Dimension::Auto
+    fn flex_basis(&self) -> FlexBasis {
+        FlexBasis::auto()
     }
 
     /// `flex-grow`.
-    fn flex_grow(&self) -> f32 {
-        0.0
+    fn flex_grow(&self) -> NonNegativeNumber {
+        NonNegativeNumber::from(0.0)
     }
 
     /// `flex-shrink`.
-    fn flex_shrink(&self) -> f32 {
-        1.0
+    fn flex_shrink(&self) -> NonNegativeNumber {
+        NonNegativeNumber::from(1.0)
     }
 
-    /// `align-self`. `None` = `auto` (defer to the container's
-    /// `align-items`).
-    fn align_self(&self) -> Option<AlignSelf> {
-        None
+    /// `align-self`. `auto` defers to the container's `align-items`.
+    fn align_self(&self) -> SelfAlignment {
+        SelfAlignment::auto()
     }
 
     /// `order` — layout/paint reordering among siblings; lower comes first.
@@ -139,45 +104,45 @@ pub trait FlexItemStyle: CoreStyle {
 }
 
 impl<S: FlexContainerStyle> FlexContainerStyle for &S {
-    fn flex_direction(&self) -> FlexDirection {
+    fn flex_direction(&self) -> flex_direction::T {
         (**self).flex_direction()
     }
 
-    fn flex_wrap(&self) -> FlexWrap {
+    fn flex_wrap(&self) -> flex_wrap::T {
         (**self).flex_wrap()
     }
 
-    fn gap(&self) -> Size<LengthPercentage> {
+    fn gap(&self) -> Size<NonNegativeLengthPercentageOrNormal> {
         (**self).gap()
     }
 
-    fn align_content(&self) -> Option<AlignContent> {
+    fn align_content(&self) -> ContentDistribution {
         (**self).align_content()
     }
 
-    fn align_items(&self) -> Option<AlignItems> {
+    fn align_items(&self) -> ItemPlacement {
         (**self).align_items()
     }
 
-    fn justify_content(&self) -> Option<JustifyContent> {
+    fn justify_content(&self) -> ContentDistribution {
         (**self).justify_content()
     }
 }
 
 impl<S: FlexItemStyle> FlexItemStyle for &S {
-    fn flex_basis(&self) -> Dimension {
+    fn flex_basis(&self) -> FlexBasis {
         (**self).flex_basis()
     }
 
-    fn flex_grow(&self) -> f32 {
+    fn flex_grow(&self) -> NonNegativeNumber {
         (**self).flex_grow()
     }
 
-    fn flex_shrink(&self) -> f32 {
+    fn flex_shrink(&self) -> NonNegativeNumber {
         (**self).flex_shrink()
     }
 
-    fn align_self(&self) -> Option<AlignSelf> {
+    fn align_self(&self) -> SelfAlignment {
         (**self).align_self()
     }
 
@@ -191,12 +156,18 @@ impl<S: FlexItemStyle> FlexItemStyle for &S {
 mod tests {
     #![allow(clippy::float_cmp)]
 
+    use stylo::values::computed::Display;
+
     use super::*;
 
     #[derive(Debug)]
     struct Defaults;
 
-    impl CoreStyle for Defaults {}
+    impl CoreStyle for Defaults {
+        fn display(&self) -> Display {
+            Display::Flex
+        }
+    }
     impl FlexContainerStyle for Defaults {}
     impl FlexItemStyle for Defaults {}
 
@@ -204,33 +175,28 @@ mod tests {
     fn flex_container_defaults_are_css_initial_values() {
         let style = Defaults;
 
-        assert_eq!(style.flex_direction(), FlexDirection::Row);
-        assert_eq!(style.flex_wrap(), FlexWrap::NoWrap);
+        assert_eq!(style.flex_direction(), flex_direction::T::Row);
+        assert_eq!(style.flex_wrap(), flex_wrap::T::Nowrap);
         assert_eq!(
-            FlexContainerStyle::gap(&style),
-            Size::new(LengthPercentage::ZERO, LengthPercentage::ZERO)
+            style.gap(),
+            Size::new(
+                NonNegativeLengthPercentageOrNormal::Normal,
+                NonNegativeLengthPercentageOrNormal::Normal,
+            )
         );
-        assert_eq!(FlexContainerStyle::align_content(&style), None);
-        assert_eq!(FlexContainerStyle::align_items(&style), None);
-        assert_eq!(FlexContainerStyle::justify_content(&style), None);
+        assert_eq!(style.align_content(), ContentDistribution::normal());
+        assert_eq!(style.align_items(), ItemPlacement::normal());
+        assert_eq!(style.justify_content(), ContentDistribution::normal());
     }
 
     #[test]
-    fn flex_item_defaults_and_direction_helpers_cover_all_axes() {
+    fn flex_item_defaults_are_css_initial_values() {
         let style = Defaults;
 
-        assert_eq!(style.flex_basis(), Dimension::Auto);
-        assert_eq!(style.flex_grow(), 0.0);
-        assert_eq!(style.flex_shrink(), 1.0);
-        assert_eq!(FlexItemStyle::align_self(&style), None);
+        assert_eq!(style.flex_basis(), FlexBasis::auto());
+        assert_eq!(style.flex_grow().0, 0.0);
+        assert_eq!(style.flex_shrink().0, 1.0);
+        assert_eq!(FlexItemStyle::align_self(&style), SelfAlignment::auto());
         assert_eq!(style.order(), 0);
-
-        assert!(FlexDirection::Row.is_row());
-        assert!(FlexDirection::RowReverse.is_row());
-        assert!(FlexDirection::Column.is_column());
-        assert!(FlexDirection::ColumnReverse.is_column());
-        assert!(!FlexDirection::Row.is_reverse());
-        assert!(FlexDirection::RowReverse.is_reverse());
-        assert!(FlexDirection::ColumnReverse.is_reverse());
     }
 }

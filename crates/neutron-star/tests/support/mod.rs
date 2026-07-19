@@ -34,9 +34,8 @@ use stylo::values::computed::{
     Length, LengthPercentage, Margin, MaxSize, NonNegativeLengthPercentage, NonNegativeNumber,
     Overflow, Percentage, PositionProperty, Ratio, SelfAlignment, Size as StyleSize,
 };
-use stylo::values::generics::NonNegative;
-use stylo::values::generics::grid as generic_grid;
 use stylo::values::generics::position::PreferredRatio;
+use stylo::values::generics::{NonNegative, grid as generic_grid};
 use stylo::values::specified::align::AlignFlags;
 
 // ---------------------------------------------------------------------------
@@ -387,7 +386,7 @@ pub(super) fn track_fit_content(limit: TestTrackBreadth) -> TestTrack {
 pub(super) fn track_repeat(count: TestRepeatCount, tracks: Vec<TestTrack>) -> TestTrackListValue {
     generic_grid::TrackListValue::TrackRepeat(generic_grid::TrackRepeat {
         count,
-        line_names: vec![Default::default(); tracks.len() + 1].into(),
+        line_names: vec![stylo::OwnedSlice::default(); tracks.len() + 1].into(),
         track_sizes: tracks.into(),
     })
 }
@@ -403,7 +402,7 @@ pub(super) fn template_values(
     GridTemplateComponent::TrackList(Box::new(generic_grid::TrackList {
         auto_repeat_index,
         values: values.into(),
-        line_names: vec![Default::default(); count + 1].into(),
+        line_names: vec![stylo::OwnedSlice::default(); count + 1].into(),
     }))
 }
 
@@ -512,7 +511,7 @@ pub(super) struct TestStyle {
 impl Default for TestStyle {
     fn default() -> Self {
         Self {
-            display: Display::Block,
+            display: Display::Flex,
             visibility: visibility::T::Visible,
             position: PositionProperty::Relative,
             inset: Edges::uniform(inset_auto()),

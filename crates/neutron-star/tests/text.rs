@@ -84,8 +84,8 @@ fn indent_px(value: f32) -> TextIndent {
     }
 }
 
-fn font_tag(tag: &[u8; 4]) -> FontTag {
-    FontTag(u32::from_be_bytes(*tag))
+fn font_tag(tag: [u8; 4]) -> FontTag {
+    FontTag(u32::from_be_bytes(tag))
 }
 
 #[derive(Debug, Clone)]
@@ -181,7 +181,7 @@ impl Default for ContainerStyle {
 
 impl CoreStyle for ContainerStyle {
     fn display(&self) -> Display {
-        Display::Block
+        Display::Flex
     }
 
     fn direction(&self) -> direction::T {
@@ -636,14 +636,14 @@ fn run_spacing_line_height_and_mixed_sizes_affect_exact_geometry() {
     spaced.font_style = FontStyle::ITALIC;
     spaced.features = FontSettings(
         vec![FeatureTagValue {
-            tag: font_tag(b"kern"),
+            tag: font_tag(*b"kern"),
             value: 0,
         }]
         .into(),
     );
     spaced.variations = FontSettings(
         vec![VariationValue {
-            tag: font_tag(b"wght"),
+            tag: font_tag(*b"wght"),
             value: 700.0,
         }]
         .into(),
@@ -842,7 +842,8 @@ fn compute_leaf_layout_adds_box_model_and_exports_first_baseline() {
     }];
     let mut context = text_context();
     let mut artifacts = ArtifactSlots::default();
-    let mut measurer = TextMeasurer::new(&mut context, &mut artifacts, &container, runs.into_iter());
+    let mut measurer =
+        TextMeasurer::new(&mut context, &mut artifacts, &container, runs.into_iter());
 
     let output = compute_leaf_layout(LayoutInput::default(), &container, &mut measurer);
 
@@ -873,7 +874,7 @@ struct HostStyle {
 impl Default for HostStyle {
     fn default() -> Self {
         Self {
-            display: Display::Block,
+            display: Display::Flex,
             align_items: ItemPlacement::normal(),
         }
     }

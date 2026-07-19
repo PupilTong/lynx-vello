@@ -1067,7 +1067,10 @@ mod tests {
     #[test]
     fn stylo_grid_lines_decode_to_placements() {
         assert_eq!(grid_placement(&GridLine::auto()), GridPlacement::Auto);
-        assert_eq!(grid_placement(&stylo_line(2, false)), GridPlacement::Line(2));
+        assert_eq!(
+            grid_placement(&stylo_line(2, false)),
+            GridPlacement::Line(2)
+        );
         assert_eq!(
             grid_placement(&stylo_line(-3, false)),
             GridPlacement::Line(-3)

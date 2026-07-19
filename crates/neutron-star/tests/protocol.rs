@@ -26,8 +26,8 @@ use stylo::Zero;
 use stylo::computed_values::{relative_center, relative_layout_once, visibility};
 use stylo::values::computed::length_percentage::{CalcNode, ComputedLeaf};
 use stylo::values::computed::{
-    Display, GridLine, GridTemplateComponent, ImplicitGridTracks, Length, LengthPercentage,
-    Margin, NonNegativeLengthPercentage, NonNegativeNumber, PositionProperty, Percentage,
+    Display, GridLine, GridTemplateComponent, ImplicitGridTracks, Length, LengthPercentage, Margin,
+    NonNegativeLengthPercentage, NonNegativeNumber, Percentage, PositionProperty,
     Size as StyleSize,
 };
 use stylo::values::generics::NonNegative;
@@ -75,15 +75,13 @@ fn fr_track(value: f32) -> TrackSize<LengthPercentage> {
 /// A template track list from plain tracks (no repetitions; empty line
 /// names honoring the `line_names.len() == values.len() + 1` invariant).
 fn track_list(tracks: Vec<TrackSize<LengthPercentage>>) -> GridTemplateComponent {
-    let values: Vec<TrackListValue<LengthPercentage, i32>> = tracks
-        .into_iter()
-        .map(TrackListValue::TrackSize)
-        .collect();
+    let values: Vec<TrackListValue<LengthPercentage, i32>> =
+        tracks.into_iter().map(TrackListValue::TrackSize).collect();
     let count = values.len();
     GridTemplateComponent::TrackList(Box::new(TrackList {
         auto_repeat_index: usize::MAX,
         values: values.into(),
-        line_names: vec![Default::default(); count + 1].into(),
+        line_names: vec![stylo::OwnedSlice::default(); count + 1].into(),
     }))
 }
 
@@ -119,7 +117,7 @@ impl Default for MockStyle {
             flex_grow: NonNegativeNumber::from(0.0),
             grid_column: Line::new(GridLine::auto(), GridLine::auto()),
             template_columns: GridTemplateComponent::None,
-            implicit_tracks: GenericImplicitGridTracks(Default::default()),
+            implicit_tracks: GenericImplicitGridTracks(stylo::OwnedSlice::default()),
         }
     }
 }
@@ -422,7 +420,7 @@ fn grid_template_borrow_serves_stylo_track_lists() {
     // a single track plus an auto-repeat group, exactly as stylo computes it.
     let repeat = TrackRepeat {
         count: RepeatCount::AutoFill,
-        line_names: vec![Default::default(); 3].into(),
+        line_names: vec![stylo::OwnedSlice::default(); 3].into(),
         track_sizes: vec![fr_track(1.0), TrackSize::default()].into(),
     };
     let style = MockStyle {
@@ -433,7 +431,7 @@ fn grid_template_borrow_serves_stylo_track_lists() {
                 TrackListValue::TrackRepeat(repeat),
             ]
             .into(),
-            line_names: vec![Default::default(); 3].into(),
+            line_names: vec![stylo::OwnedSlice::default(); 3].into(),
         })),
         ..MockStyle::default()
     };
@@ -446,7 +444,7 @@ fn grid_template_borrow_serves_stylo_track_lists() {
     assert_eq!(list.values.len(), 2);
     match &list.values[0] {
         TrackListValue::TrackSize(track) => assert_eq!(*track, fixed_track(100.0)),
-        other => panic!("expected a single track, got {other:?}"),
+        other @ TrackListValue::TrackRepeat(_) => panic!("expected a single track, got {other:?}"),
     }
     match &list.values[1] {
         TrackListValue::TrackRepeat(repetition) => {
@@ -455,7 +453,7 @@ fn grid_template_borrow_serves_stylo_track_lists() {
             // front to solve the repetition count.
             assert_eq!(repetition.track_sizes.len(), 2);
         }
-        other => panic!("expected a repetition, got {other:?}"),
+        other @ TrackListValue::TrackSize(_) => panic!("expected a repetition, got {other:?}"),
     }
     // An axis without explicit tracks serves `None`.
     assert!(matches!(
@@ -484,7 +482,9 @@ fn grid_track_view_remains_live_across_recursive_session_layout() {
     };
     match &tracks.values[0] {
         TrackListValue::TrackSize(track) => assert_eq!(*track, fixed_track(10.0)),
-        other => panic!("expected first single track, got {other:?}"),
+        other @ TrackListValue::TrackRepeat(_) => {
+            panic!("expected first single track, got {other:?}")
+        }
     }
 
     // The style view borrows the tree's immutable side through the handle.
@@ -503,7 +503,9 @@ fn grid_track_view_remains_live_across_recursive_session_layout() {
     assert_eq!(output.size, Size::new(25.0, 10.0));
     match &tracks.values[1] {
         TrackListValue::TrackSize(track) => assert_eq!(*track, fr_track(1.0)),
-        other => panic!("expected second single track, got {other:?}"),
+        other @ TrackListValue::TrackRepeat(_) => {
+            panic!("expected second single track, got {other:?}")
+        }
     }
 }
 
@@ -630,10 +632,7 @@ fn explicit_hidden_cleanup_clears_stale_geometry() {
 #[test]
 fn compute_leaf_layout_uses_the_host_measurement() {
     let style = MockStyle {
-        size: Size::new(
-            StyleSize::LengthPercentage(npx(50.0)),
-            StyleSize::auto(),
-        ),
+        size: Size::new(StyleSize::LengthPercentage(npx(50.0)), StyleSize::auto()),
         padding: Edges::uniform(npx(5.0)),
         ..MockStyle::default()
     };
@@ -681,10 +680,7 @@ fn calc_padding_resolves_through_stylo_style_values() {
     // against the layout-time percentage basis (the parent width, here 200
     // CSS px, for padding on every edge): calc(10px + 5%) = 20px per side.
     let style = MockStyle {
-        size: Size::new(
-            StyleSize::LengthPercentage(npx(50.0)),
-            StyleSize::auto(),
-        ),
+        size: Size::new(StyleSize::LengthPercentage(npx(50.0)), StyleSize::auto()),
         padding: Edges::uniform(calc_lp(10.0, 0.05)),
         ..MockStyle::default()
     };

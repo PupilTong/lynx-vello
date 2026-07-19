@@ -75,8 +75,8 @@ impl Axis {
 /// the CSS Grid §7.2 single-value expansions so the sizing passes match on
 /// plain [`TrackBreadth`] halves:
 /// - a lone `<flex>` breadth becomes `minmax(auto, <flex>)`;
-/// - `fit-content(limit)` becomes `minmax(auto, max-content)` with the limit
-///   retained in [`fit_content`](Self::fit_content) (the §12.5 clamp).
+/// - `fit-content(limit)` becomes `minmax(auto, max-content)` with the limit retained in
+///   [`fit_content`](Self::fit_content) (the §12.5 clamp).
 ///
 /// A `Flex` breadth in the *minimum* half is unrepresentable in the track
 /// grammar; the sizing passes treat it as `auto` (CSS Grid §7.2.4).

@@ -4,9 +4,11 @@
 //! Starlight Linear/Relative engine for host-owned trees.
 //!
 //! Built as lynx-vello's from-scratch successor to the Lynx C++ engine's
-//! `starlight`, while remaining standalone-publishable: zero required
-//! dependencies and no assumptions about the host's DOM, style engine, or
-//! storage.
+//! `starlight`. The engine owns no tree and no styles, but it **speaks
+//! stylo's computed-value vocabulary**: style accessors return the lynx
+//! stylo fork's computed types directly, so a stylo-backed host serves style
+//! views without any translation layer. (The former zero-dependency pillar
+//! is retired; `stylo` is a required dependency.)
 //!
 //! # Architecture
 //!
@@ -29,8 +31,8 @@
 //!   views, dispatch, layout/cache slots), the layout wire format
 //!   ([`LayoutInput`](tree::LayoutInput)/[`LayoutOutput`](tree::LayoutOutput)/
 //!   [`Layout`](tree::Layout)), and the **recursion contract** (start there).
-//! - [`style`] — the style protocol: engine-owned value types plus the `CoreStyle`/container/item
-//!   traits hosts implement as cheap views over their computed styles.
+//! - [`style`] — the style protocol: the `CoreStyle`/container/item traits hosts implement as cheap
+//!   views over their computed styles, speaking stylo computed values re-exported there.
 //! - [`compute`] — the machinery entry points hosts call from their dispatch (root, cache wrapper,
 //!   subtree hiding, leaf, the positioned pass, rounding), the canonical dispatch skeleton, and the
 //!   implemented Flexbox, Grid, Linear, and Relative entry points.
@@ -71,9 +73,11 @@
 //!
 //! # Dependencies and feature flags
 //!
-//! The style/tree/box-layout protocol is unconditional and compiles with zero
-//! dependencies under `default-features = false`. Default builds enable the
-//! `text` feature and its optional Parley dependency.
+//! The style protocol requires the workspace's `stylo` fork (building it
+//! needs the vendored submodule and `python3` for stylo's build script; a
+//! cold build takes minutes). Default builds additionally enable the `text`
+//! feature and its optional Parley dependency; `default-features = false`
+//! keeps the protocol and box-layout core only.
 //!
 //! # Minimal host sketch
 //!
@@ -84,11 +88,16 @@
 //! use std::cell::Cell;
 //!
 //! use neutron_star::prelude::*;
-//! use neutron_star::style::CalcHandle;
+//! use neutron_star::style::Display;
 //!
 //! #[derive(Default)]
 //! struct Style; // your computed-style type
-//! impl CoreStyle for Style {} // CSS initial values from the defaults
+//! impl CoreStyle for Style {
+//!     // Every other accessor defaults to the fork's initial value.
+//!     fn display(&self) -> Display {
+//!         Display::Flex
+//!     }
+//! }
 //!
 //! struct Node {
 //!     style: Style,
@@ -159,10 +168,6 @@
 //!         &self.node().style
 //!     }
 //!
-//!     fn resolve_calc(self, _calc: CalcHandle, _basis: f32) -> f32 {
-//!         unreachable!("this host's styles never carry calc()")
-//!     }
-//!
 //!     fn compute_child_layout(self, input: LayoutInput) -> LayoutOutput {
 //!         // Real hosts route on display: handle display:none with
 //!         // hide_subtree, then dispatch visible nodes inside
@@ -228,18 +233,18 @@ pub mod tree;
 /// One-stop imports for implementing a host: the node-handle trait plus the
 /// types that appear in its signatures.
 ///
-/// Value-type vocabulary that only appears *inside* style accessors
-/// (`Dimension`, alignment enums, grid track types, …) is not re-exported
-/// here — pull it from [`style`] as needed.
+/// Value-type vocabulary that only appears *inside* style accessors (stylo
+/// computed sizes, alignment wrappers, grid track types, …) is not
+/// re-exported here — pull it from [`style`] (or the stylo crate) as needed.
 pub mod prelude {
     pub use crate::compute::{
         FnLeafMeasurer, LeafMeasureInput, LeafMeasurement, LeafMeasurer, LeafMetrics,
     };
     pub use crate::geometry::{Edges, Line, Point, Size};
     pub use crate::style::{
-        CalcHandle, CoreStyle, FlexContainerStyle, FlexItemStyle, GridContainerStyle,
-        GridItemStyle, GridTemplateRepetition, LinearContainerStyle, LinearItemStyle,
-        RelativeContainerStyle, RelativeItemStyle, TextContainerStyle, TextRunStyle,
+        CoreStyle, FlexContainerStyle, FlexItemStyle, GridContainerStyle, GridItemStyle,
+        LinearContainerStyle, LinearItemStyle, RelativeContainerStyle, RelativeItemStyle,
+        TextContainerStyle, TextRunStyle,
     };
     pub use crate::tree::{
         AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,

@@ -5,6 +5,10 @@
 //! over integer ids and position physical margin edges relative to the parent
 //! or sibling edges.
 
+use stylo::computed_values::{box_sizing, direction, relative_center, relative_layout_once};
+use stylo::values::computed::lynx_layout::RelativeReference;
+use stylo::values::computed::{LengthPercentage, MaxSize, PositionProperty, Size as StyleSize};
+
 use super::compute_absolute_layout;
 use super::util::{
     ItemKey, OrderedItem, ResolvedContainerBox, ResolvedItemBox, box_inset_size, clamp_axis,
@@ -12,15 +16,19 @@ use super::util::{
     resolve_length_percentage, sort_and_assign_layout_order, subtract_available_space,
 };
 use crate::geometry::{Edges, Line, Point, Size};
-use crate::style::value::Dimension;
-use crate::style::{
-    BoxGenerationMode, BoxSizing, CoreStyle, Direction, Position, RelativeCenter,
-    RelativeContainerStyle, RelativeItemStyle, RelativeReference,
-};
+use crate::style::relative::{RELATIVE_REFERENCE_NONE, RELATIVE_REFERENCE_PARENT};
+use crate::style::{CoreStyle, RelativeContainerStyle, RelativeItemStyle};
 use crate::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
     SizingMode,
 };
+
+/// Whether a computed reference identifies another relative item (any value
+/// other than the reserved `-1` none and `0` parent sentinels).
+#[inline]
+const fn reference_is_item(reference: RelativeReference) -> bool {
+    reference != RELATIVE_REFERENCE_NONE && reference != RELATIVE_REFERENCE_PARENT
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Axis {
@@ -82,10 +90,24 @@ impl Axis {
     }
 
     #[inline]
-    fn centers(self, center: RelativeCenter) -> bool {
+    fn size_ref<T>(self, size: &Size<T>) -> &T {
         match self {
-            Self::Horizontal => center.is_horizontal(),
-            Self::Vertical => center.is_vertical(),
+            Self::Horizontal => &size.width,
+            Self::Vertical => &size.height,
+        }
+    }
+
+    #[inline]
+    fn centers(self, center: relative_center::T) -> bool {
+        match self {
+            Self::Horizontal => matches!(
+                center,
+                relative_center::T::Horizontal | relative_center::T::Both
+            ),
+            Self::Vertical => matches!(
+                center,
+                relative_center::T::Vertical | relative_center::T::Both
+            ),
         }
     }
 
@@ -138,9 +160,9 @@ impl ResolvedReference {
 
     #[inline]
     fn resolve(reference: RelativeReference, lookup: &IdLookup) -> Self {
-        if reference.is_none() {
+        if reference == RELATIVE_REFERENCE_NONE {
             Self::NONE
-        } else if reference.is_parent() {
+        } else if reference == RELATIVE_REFERENCE_PARENT {
             Self::PARENT
         } else {
             lookup.get(reference).map_or(Self::NONE, |index| {
@@ -175,23 +197,26 @@ struct RelativeItem<N> {
     key: ItemKey<N>,
     align: Edges<ResolvedReference>,
     adjacent: Edges<ResolvedReference>,
-    center: RelativeCenter,
-    raw_size: Size<Dimension>,
-    raw_min_size: Size<Dimension>,
-    raw_max_size: Size<Dimension>,
+    center: relative_center::T,
+    /// The item's positioning scheme. In-flow schemes lay out identically
+    /// except that only `relative` applies the definite-inset visual nudge
+    /// (`sticky` is nudged by the host at scroll time, `static` never).
+    position: PositionProperty,
+    raw_size: Size<StyleSize>,
+    raw_min_size: Size<StyleSize>,
+    raw_max_size: Size<MaxSize>,
     preferred_size: Size<Option<f32>>,
     intrinsic_preferred_size: Size<Option<f32>>,
     intrinsic_sizes_ready: bool,
     preferred_size_is_definite: Size<bool>,
     min_size: Size<Option<f32>>,
     max_size: Size<Option<f32>>,
-    box_sizing: BoxSizing,
+    box_sizing: box_sizing::T,
     margin: Edges<f32>,
     padding: Edges<f32>,
     border: Edges<f32>,
-    scrollbar: Size<f32>,
     inset: Edges<Option<f32>>,
-    direction: Direction,
+    direction: direction::T,
     positions: Size<Line<f32>>,
     output: LayoutOutput,
     last_measure: Option<LayoutInput>,
@@ -207,7 +232,7 @@ impl<N> RelativeItem<N> {
 
     #[inline]
     fn box_floor(&self) -> Size<f32> {
-        box_inset_size(self.padding, self.border, self.scrollbar)
+        box_inset_size(self.padding, self.border)
     }
 
     #[inline]
@@ -227,7 +252,6 @@ impl<N> RelativeItem<N> {
             && self.margin == refreshed.margin
             && self.padding == refreshed.padding
             && self.border == refreshed.border
-            && self.scrollbar == refreshed.scrollbar
     }
 }
 
@@ -247,17 +271,17 @@ where
         raw_min_size,
         raw_max_size,
         preferred_size,
-        aspect_ratio,
         box_sizing,
         min_size,
         max_size,
         margin,
         padding,
         border,
-        scrollbar,
         inset,
         ..
     } = resolve_item_box_with_bases(key.node, &style, size_percentage_basis, edge_inline_basis);
+    let preferred_size_is_definite =
+        preferred_size_definiteness(&style.size(), size_percentage_basis, style.aspect_ratio());
 
     RelativeItem {
         key,
@@ -268,24 +292,20 @@ where
             .relative_adjacent()
             .map(|reference| ResolvedReference::resolve(reference, lookup)),
         center: style.relative_center(),
+        position: style.position(),
         raw_size,
         raw_min_size,
         raw_max_size,
         preferred_size,
         intrinsic_preferred_size: Size::NONE,
         intrinsic_sizes_ready: false,
-        preferred_size_is_definite: preferred_size_definiteness(
-            raw_size,
-            size_percentage_basis,
-            aspect_ratio,
-        ),
+        preferred_size_is_definite,
         min_size,
         max_size,
         box_sizing,
         margin,
         padding,
         border,
-        scrollbar,
         inset,
         direction: style.direction(),
         positions: Size::new(Line::new(0.0, 0.0), Line::new(0.0, 0.0)),
@@ -313,8 +333,8 @@ impl IdLookup {
         let mut entries = Vec::with_capacity(items.len());
         for (index, item) in items.iter().enumerate() {
             let relative_id = item.node.style().relative_id();
-            if relative_id.is_item() {
-                entries.push((relative_id.get(), index));
+            if reference_is_item(relative_id) {
+                entries.push((relative_id, index));
             }
         }
         entries.sort_unstable();
@@ -335,11 +355,11 @@ impl IdLookup {
 
     #[inline]
     fn get(&self, id: RelativeReference) -> Option<usize> {
-        if !id.is_item() {
+        if !reference_is_item(id) {
             return None;
         }
         self.entries
-            .binary_search_by_key(&id.get(), |entry| entry.0)
+            .binary_search_by_key(&id, |entry| entry.0)
             .ok()
             .map(|index| self.entries[index].1)
     }
@@ -659,27 +679,65 @@ fn constrained_border_size(constraints: Line<Option<f32>>, margin_sum: f32) -> O
     }
 }
 
-fn fit_content_available<N>(
-    node: N,
-    value: Dimension,
+/// Private normalized view of one sizing-property axis: the intrinsic
+/// keywords the sizing passes dispatch on, with everything quantitative
+/// (auto, lengths, percentages, and the treated-as-auto keywords) collapsed
+/// into one arm.
+#[derive(Debug, Clone)]
+enum SizeKeyword {
+    Quantitative,
+    MinContent,
+    MaxContent,
+    FitContent(LengthPercentage),
+}
+
+fn size_keyword(value: &StyleSize) -> SizeKeyword {
+    match value {
+        StyleSize::MinContent => SizeKeyword::MinContent,
+        StyleSize::MaxContent => SizeKeyword::MaxContent,
+        StyleSize::FitContentFunction(limit) => SizeKeyword::FitContent(limit.0.clone()),
+        StyleSize::Auto
+        | StyleSize::LengthPercentage(_)
+        | StyleSize::FitContent
+        | StyleSize::Stretch
+        | StyleSize::WebkitFillAvailable => SizeKeyword::Quantitative,
+        StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
+            unreachable!("anchor sizing is pref-dead under the lynx feature")
+        }
+    }
+}
+
+fn max_size_keyword(value: &MaxSize) -> SizeKeyword {
+    match value {
+        MaxSize::MinContent => SizeKeyword::MinContent,
+        MaxSize::MaxContent => SizeKeyword::MaxContent,
+        MaxSize::FitContentFunction(limit) => SizeKeyword::FitContent(limit.0.clone()),
+        MaxSize::None
+        | MaxSize::LengthPercentage(_)
+        | MaxSize::FitContent
+        | MaxSize::Stretch
+        | MaxSize::WebkitFillAvailable => SizeKeyword::Quantitative,
+        MaxSize::AnchorSizeFunction(_) | MaxSize::AnchorContainingCalcFunction(_) => {
+            unreachable!("anchor sizing is pref-dead under the lynx feature")
+        }
+    }
+}
+
+fn fit_content_available(
+    value: &SizeKeyword,
     axis: Axis,
     parent_size: Size<Option<f32>>,
     available: AvailableSpace,
-    box_sizing: BoxSizing,
+    box_sizing: box_sizing::T,
     box_floor: f32,
-) -> AvailableSpace
-where
-    N: LayoutNode,
-    N::Style: RelativeContainerStyle + RelativeItemStyle,
-{
+) -> AvailableSpace {
     match value {
-        Dimension::MinContent => AvailableSpace::MinContent,
-        Dimension::MaxContent => AvailableSpace::MaxContent,
-        Dimension::FitContent(limit) => {
+        SizeKeyword::MinContent => AvailableSpace::MinContent,
+        SizeKeyword::MaxContent => AvailableSpace::MaxContent,
+        SizeKeyword::FitContent(limit) => {
             let owner = axis.size(parent_size).or_else(|| available.into_option());
-            let resolve_calc = |handle, basis| node.resolve_calc(handle, basis);
-            let limit = resolve_length_percentage(limit, owner, &resolve_calc).map(|limit| {
-                if box_sizing == BoxSizing::ContentBox {
+            let limit = resolve_length_percentage(limit, owner).map(|limit| {
+                if box_sizing == box_sizing::T::ContentBox {
                     limit + box_floor
                 } else {
                     limit
@@ -693,20 +751,18 @@ where
                 (available, None) => available,
             }
         }
-        Dimension::Length(_) | Dimension::Percent(_) | Dimension::Calc(_) | Dimension::Auto => {
-            available
-        }
+        SizeKeyword::Quantitative => available,
     }
 }
 
 #[inline]
-fn needs_min_content(value: Dimension) -> bool {
-    matches!(value, Dimension::MinContent | Dimension::FitContent(_))
+fn needs_min_content(value: &SizeKeyword) -> bool {
+    matches!(value, SizeKeyword::MinContent | SizeKeyword::FitContent(_))
 }
 
 #[inline]
-fn needs_max_content(value: Dimension) -> bool {
-    matches!(value, Dimension::MaxContent | Dimension::FitContent(_))
+fn needs_max_content(value: &SizeKeyword) -> bool {
+    matches!(value, SizeKeyword::MaxContent | SizeKeyword::FitContent(_))
 }
 
 fn intrinsic_probe<N>(
@@ -730,44 +786,35 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn resolve_intrinsic_dimension<N>(
-    node: N,
-    value: Dimension,
+fn resolve_intrinsic_dimension(
+    value: &SizeKeyword,
     axis: Axis,
     min_content: Option<f32>,
     max_content: Option<f32>,
     parent_size: Size<Option<f32>>,
     available_content: Size<AvailableSpace>,
-    box_sizing: BoxSizing,
+    box_sizing: box_sizing::T,
     box_floor: f32,
-) -> Option<f32>
-where
-    N: LayoutNode,
-    N::Style: RelativeContainerStyle + RelativeItemStyle,
-{
+) -> Option<f32> {
     match value {
-        Dimension::MinContent => min_content,
-        Dimension::MaxContent => max_content,
-        Dimension::FitContent(limit) => {
+        SizeKeyword::MinContent => min_content,
+        SizeKeyword::MaxContent => max_content,
+        SizeKeyword::FitContent(limit) => {
             let min_content = min_content.unwrap_or(0.0);
             let max_content = max_content.unwrap_or(min_content);
             let owner = axis
                 .size(parent_size)
                 .or_else(|| axis.size(available_content).into_option());
-            let resolve_calc = |handle, basis| node.resolve_calc(handle, basis);
-            let limit = resolve_length_percentage(limit, owner, &resolve_calc).map_or(
-                max_content,
-                |limit| {
-                    if box_sizing == BoxSizing::ContentBox {
-                        limit + box_floor
-                    } else {
-                        limit
-                    }
-                },
-            );
+            let limit = resolve_length_percentage(limit, owner).map_or(max_content, |limit| {
+                if box_sizing == box_sizing::T::ContentBox {
+                    limit + box_floor
+                } else {
+                    limit
+                }
+            });
             Some(max_content.min(limit.max(min_content)))
         }
-        Dimension::Length(_) | Dimension::Percent(_) | Dimension::Calc(_) | Dimension::Auto => None,
+        SizeKeyword::Quantitative => None,
     }
 }
 
@@ -784,13 +831,13 @@ fn prepare_intrinsic_sizes<N>(
     }
 
     for axis in Axis::ALL {
-        let raw_size = axis.size(item.raw_size);
-        let raw_min = axis.size(item.raw_min_size);
-        let raw_max = axis.size(item.raw_max_size);
-        let needs_min = [raw_size, raw_min, raw_max]
+        let raw_size = size_keyword(axis.size_ref(&item.raw_size));
+        let raw_min = size_keyword(axis.size_ref(&item.raw_min_size));
+        let raw_max = max_size_keyword(axis.size_ref(&item.raw_max_size));
+        let needs_min = [&raw_size, &raw_min, &raw_max]
             .into_iter()
             .any(needs_min_content);
-        let needs_max = [raw_size, raw_min, raw_max]
+        let needs_max = [&raw_size, &raw_min, &raw_max]
             .into_iter()
             .any(needs_max_content);
         if !needs_min && !needs_max {
@@ -817,8 +864,7 @@ fn prepare_intrinsic_sizes<N>(
         });
         let floor = axis.size(item.box_floor());
         let preferred = resolve_intrinsic_dimension(
-            item.key.node,
-            raw_size,
+            &raw_size,
             axis,
             min_content,
             max_content,
@@ -829,8 +875,7 @@ fn prepare_intrinsic_sizes<N>(
         );
         axis.set_size(&mut item.intrinsic_preferred_size, preferred);
         if let Some(min) = resolve_intrinsic_dimension(
-            item.key.node,
-            raw_min,
+            &raw_min,
             axis,
             min_content,
             max_content,
@@ -842,8 +887,7 @@ fn prepare_intrinsic_sizes<N>(
             axis.set_size(&mut item.min_size, Some(min));
         }
         if let Some(max) = resolve_intrinsic_dimension(
-            item.key.node,
-            raw_max,
+            &raw_max,
             axis,
             min_content,
             max_content,
@@ -893,9 +937,9 @@ where
         let line = axis.size(constraints);
         let has_one_sided_constraint =
             matches!((line.start, line.end), (Some(_), None) | (None, Some(_)));
-        let raw_size = axis.size(item.raw_size);
+        let raw_size = size_keyword(axis.size_ref(&item.raw_size));
         let fit_content_needs_one_sided_measurement =
-            matches!(raw_size, Dimension::FitContent(_)) && has_one_sided_constraint;
+            matches!(raw_size, SizeKeyword::FitContent(_)) && has_one_sided_constraint;
         let constrained = constrained_border_size(line, axis.margin_sum(item.margin)).map(|size| {
             clamp_axis(
                 size,
@@ -926,8 +970,7 @@ where
                 let child_available =
                     subtract_available_space(axis.size(available_space), margin_sum);
                 let fitted_child_available = fit_content_available(
-                    item.key.node,
-                    raw_size,
+                    &raw_size,
                     axis,
                     parent_size,
                     child_available,
@@ -966,8 +1009,7 @@ where
                     (_, _, available) => available,
                 };
                 fit_content_available(
-                    item.key.node,
-                    raw_size,
+                    &raw_size,
                     axis,
                     parent_size,
                     one_sided_available,
@@ -1347,10 +1389,10 @@ where
 }
 
 #[inline]
-fn relative_offset(inset: Edges<Option<f32>>, direction: Direction) -> Point<f32> {
+fn relative_offset(inset: Edges<Option<f32>>, direction: direction::T) -> Point<f32> {
     let x = match (inset.left, inset.right) {
         (Some(left), Some(right)) => {
-            if direction == Direction::Rtl {
+            if direction == direction::T::Rtl {
                 -right
             } else {
                 left
@@ -1385,7 +1427,13 @@ where
         let output = item.key.node.compute_child_layout(input);
         item.output = output;
 
-        let offset = relative_offset(item.inset, item.direction);
+        // Only `relative` nudges at layout time; `static` has no offsets and
+        // `sticky` is a host scroll-time post-pass.
+        let offset = if item.position == PositionProperty::Relative {
+            relative_offset(item.inset, item.direction)
+        } else {
+            Point::ZERO
+        };
         let horizontal = item.positions.width;
         let vertical = item.positions.height;
         let location = Point::new(
@@ -1396,7 +1444,6 @@ where
         layout.location = location;
         layout.size = output.size;
         layout.content_size = output.content_size;
-        layout.scrollbar_size = item.scrollbar;
         layout.border = item.border;
         layout.padding = item.padding;
         layout.margin = item.margin;
@@ -1429,7 +1476,7 @@ where
     for pending in items {
         let style = pending.node.style();
         match style.position() {
-            Position::Absolute => {
+            PositionProperty::Absolute => {
                 let mut layout =
                     compute_absolute_layout(pending.node, padding_box_size, Point::ZERO);
                 layout.order = pending.layout_order;
@@ -1443,12 +1490,15 @@ where
                     .max(layout.location.y + layout.size.height.max(layout.content_size.height));
                 pending.node.set_unrounded_layout(&layout);
             }
-            Position::AbsoluteHoisted => {
+            // The containing block is not the layout parent (CSS `fixed`):
+            // record the static position; the host completes layout in its
+            // positioned pass.
+            PositionProperty::Fixed => {
                 pending
                     .node
                     .set_static_position(Point::new(border.left, border.top));
             }
-            _ => {}
+            PositionProperty::Static | PositionProperty::Relative | PositionProperty::Sticky => {}
         }
     }
     scrollable_size
@@ -1470,11 +1520,11 @@ where
     N::Style: RelativeContainerStyle + RelativeItemStyle,
 {
     let style = node.style();
-    let layout_once = style.relative_layout_once();
+    let layout_once = style.relative_layout_once() == relative_layout_once::T::True;
     let style_definite = if input.sizing_mode == SizingMode::ContentSize {
         Size::new(false, false)
     } else {
-        preferred_size_definiteness(style.size(), input.parent_size, style.aspect_ratio())
+        preferred_size_definiteness(&style.size(), input.parent_size, style.aspect_ratio())
     };
     let outer_definite = Size::new(
         input.definite_dimensions.width || style_definite.width,
@@ -1483,7 +1533,6 @@ where
     let ResolvedContainerBox {
         padding,
         border,
-        scrollbar: _,
         box_inset,
         min: min_size,
         max: max_size,
@@ -1518,7 +1567,7 @@ where
     let mut hidden = Vec::new();
     for (document_index, child) in node.children().enumerate() {
         let child_style = child.style();
-        if child_style.box_generation_mode() == BoxGenerationMode::None {
+        if child_style.display().is_none() {
             hidden.push((document_index, child));
             continue;
         }
@@ -1530,7 +1579,7 @@ where
         };
         if matches!(
             child_style.position(),
-            Position::Absolute | Position::AbsoluteHoisted
+            PositionProperty::Absolute | PositionProperty::Fixed
         ) {
             absolute_items.push(pending);
         } else {

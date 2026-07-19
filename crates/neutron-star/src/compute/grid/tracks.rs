@@ -399,7 +399,10 @@ mod tests {
         TrackSize::Minmax(min, max)
     }
 
-    fn repeat(count: RepeatCount<Integer>, sizes: Vec<TrackSize>) -> TrackListValue<LengthPercentage, Integer> {
+    fn repeat(
+        count: RepeatCount<Integer>,
+        sizes: Vec<TrackSize>,
+    ) -> TrackListValue<LengthPercentage, Integer> {
         TrackListValue::TrackRepeat(TrackRepeat {
             count,
             line_names: vec![stylo::OwnedSlice::default(); sizes.len() + 1].into(),
@@ -431,9 +434,8 @@ mod tests {
 
     #[test]
     fn normalization_expands_the_single_value_forms() {
-        let fr = TrackSizingFunction::from_style(&TrackSize::Breadth(TrackBreadth::Flex(Flex(
-            2.0,
-        ))));
+        let fr =
+            TrackSizingFunction::from_style(&TrackSize::Breadth(TrackBreadth::Flex(Flex(2.0))));
         assert_eq!(fr.min, TrackBreadth::Auto);
         assert_eq!(fr.max, TrackBreadth::Flex(Flex(2.0)));
         assert_eq!(fr.fit_content, None);
@@ -461,10 +463,7 @@ mod tests {
     fn fixed_repeat_expands_in_source_order() {
         let value = template(vec![
             TrackListValue::TrackSize(px_size(10.0)),
-            repeat(
-                RepeatCount::Number(3),
-                vec![px_size(20.0), px_size(30.0)],
-            ),
+            repeat(RepeatCount::Number(3), vec![px_size(20.0), px_size(30.0)]),
             TrackListValue::TrackSize(px_size(40.0)),
         ]);
         let expanded = expand_template(&value, Some(500.0), None, 0.0);

@@ -20,31 +20,25 @@
 //!
 //! use neutron_star::compute::compute_leaf_layout;
 //! use neutron_star::style::{
-//!     CoreStyle, FontFamily, FontFeatureSetting, FontVariationSetting, TextContainerStyle,
-//!     TextRun, TextRunStyle,
+//!     CoreStyle, Display, FontFamily, TextContainerStyle, TextRun, TextRunStyle,
 //! };
 //! use neutron_star::text::{ArtifactSlots, TextContext, TextMeasurer};
 //! use neutron_star::tree::LayoutInput;
+//! use stylo::values::computed::font::GenericFontFamily;
 //!
 //! #[derive(Default)]
 //! struct BoxStyle;
-//! impl CoreStyle for BoxStyle {}
+//! impl CoreStyle for BoxStyle {
+//!     fn display(&self) -> Display {
+//!         Display::Flex
+//!     }
+//! }
 //! impl TextContainerStyle for BoxStyle {}
 //!
 //! struct RunStyle;
 //! impl TextRunStyle for RunStyle {
-//!     type FontFamilies<'a> = core::iter::Once<FontFamily<'a>>;
-//!     type FontFeatureSettings<'a> = core::iter::Empty<FontFeatureSetting>;
-//!     type FontVariationSettings<'a> = core::iter::Empty<FontVariationSetting>;
-//!
-//!     fn font_families(&self) -> Self::FontFamilies<'_> {
-//!         core::iter::once(FontFamily::Generic(Default::default()))
-//!     }
-//!     fn font_feature_settings(&self) -> Self::FontFeatureSettings<'_> {
-//!         core::iter::empty()
-//!     }
-//!     fn font_variation_settings(&self) -> Self::FontVariationSettings<'_> {
-//!         core::iter::empty()
+//!     fn font_family(&self) -> FontFamily {
+//!         FontFamily::generic(GenericFontFamily::SansSerif).clone()
 //!     }
 //! }
 //!
@@ -78,14 +72,8 @@
 //!         &mut artifacts,
 //!         &node.container_style,
 //!         runs.into_iter(),
-//!         |_, _| unreachable!("this style contains no calc()"),
 //!     );
-//!     compute_leaf_layout(
-//!         input,
-//!         &node.container_style,
-//!         |_, _| unreachable!("this box style contains no calc()"),
-//!         &mut measurer,
-//!     )
+//!     compute_leaf_layout(input, &node.container_style, &mut measurer)
 //! }
 //!
 //! let node = TextNode {

@@ -611,11 +611,19 @@ fn build_flex_axis_alignment_matrix(nodes: usize) -> BenchCase {
             let size = if is_row(axis) {
                 Size::new(
                     px(basis),
-                    if auto_cross { StyleSize::Auto } else { px(cross) },
+                    if auto_cross {
+                        StyleSize::Auto
+                    } else {
+                        px(cross)
+                    },
                 )
             } else {
                 Size::new(
-                    if auto_cross { StyleSize::Auto } else { px(cross) },
+                    if auto_cross {
+                        StyleSize::Auto
+                    } else {
+                        px(cross)
+                    },
                     px(basis),
                 )
             };
@@ -1372,62 +1380,60 @@ fn build_box_sizing_matrix(nodes: usize) -> BenchCase {
             content_width,
             content_height,
         );
-        containers.push(
-            tree.push_flex(
-                TestStyle {
-                    box_sizing: if case_index.is_multiple_of(2) {
-                        box_sizing::T::ContentBox
-                    } else {
-                        box_sizing::T::BorderBox
-                    },
-                    size: Size::new(
-                        width,
-                        if case_index.is_multiple_of(4) {
-                            StyleSize::Auto
-                        } else {
-                            px(20.0 + (case_index % 9) as f32)
-                        },
-                    ),
-                    min_size: Size::new(
-                        px(24.0 + (case_index % 5) as f32),
-                        px(12.0 + (case_index % 4) as f32),
-                    ),
-                    max_size: Size::new(max_width, max_height),
-                    aspect_ratio: if case_index.is_multiple_of(4) {
-                        ratio(1.15 + (case_index % 5) as f32 * 0.12)
-                    } else {
-                        AspectRatio::auto()
-                    },
-                    flex_direction: if case_index.is_multiple_of(2) {
-                        flex_direction::T::Row
-                    } else {
-                        flex_direction::T::Column
-                    },
-                    align_items: ItemPlacement(AlignFlags::CENTER),
-                    justify_content: ContentDistribution::new(AlignFlags::CENTER),
-                    margin: margin_px(
-                        (case_index % 3) as f32,
-                        (case_index % 4) as f32 * 0.5,
-                        (case_index % 2) as f32,
-                        0.0,
-                    ),
-                    padding: edges(
-                        pad(1.0 + (case_index % 2) as f32),
-                        pad(2.0 + (case_index % 3) as f32),
-                        pad(1.0 + (case_index % 4) as f32 * 0.5),
-                        pad(1.0),
-                    ),
-                    border: edges(
-                        bw(1.0 + (case_index % 2) as f32),
-                        bw(0.5 + (case_index % 3) as f32 * 0.5),
-                        bw(1.0),
-                        bw(0.5 + (case_index % 2) as f32),
-                    ),
-                    ..TestStyle::default()
+        containers.push(tree.push_flex(
+            TestStyle {
+                box_sizing: if case_index.is_multiple_of(2) {
+                    box_sizing::T::ContentBox
+                } else {
+                    box_sizing::T::BorderBox
                 },
-                vec![content],
-            ),
-        );
+                size: Size::new(
+                    width,
+                    if case_index.is_multiple_of(4) {
+                        StyleSize::Auto
+                    } else {
+                        px(20.0 + (case_index % 9) as f32)
+                    },
+                ),
+                min_size: Size::new(
+                    px(24.0 + (case_index % 5) as f32),
+                    px(12.0 + (case_index % 4) as f32),
+                ),
+                max_size: Size::new(max_width, max_height),
+                aspect_ratio: if case_index.is_multiple_of(4) {
+                    ratio(1.15 + (case_index % 5) as f32 * 0.12)
+                } else {
+                    AspectRatio::auto()
+                },
+                flex_direction: if case_index.is_multiple_of(2) {
+                    flex_direction::T::Row
+                } else {
+                    flex_direction::T::Column
+                },
+                align_items: ItemPlacement(AlignFlags::CENTER),
+                justify_content: ContentDistribution::new(AlignFlags::CENTER),
+                margin: margin_px(
+                    (case_index % 3) as f32,
+                    (case_index % 4) as f32 * 0.5,
+                    (case_index % 2) as f32,
+                    0.0,
+                ),
+                padding: edges(
+                    pad(1.0 + (case_index % 2) as f32),
+                    pad(2.0 + (case_index % 3) as f32),
+                    pad(1.0 + (case_index % 4) as f32 * 0.5),
+                    pad(1.0),
+                ),
+                border: edges(
+                    bw(1.0 + (case_index % 2) as f32),
+                    bw(0.5 + (case_index % 3) as f32 * 0.5),
+                    bw(1.0),
+                    bw(0.5 + (case_index % 2) as f32),
+                ),
+                ..TestStyle::default()
+            },
+            vec![content],
+        ));
     }
     let root = tree.push_flex(
         TestStyle {

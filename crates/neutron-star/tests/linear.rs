@@ -51,8 +51,8 @@ mod flow_direction {
         let second = fixed_leaf(&mut tree, 20.0, 10.0);
         let root = tree.push_linear(
             TestStyle {
-                linear_direction,
                 direction,
+                linear_direction,
                 ..TestStyle::default()
             },
             vec![first, second],
@@ -466,7 +466,11 @@ fn vertical_cross_axis_auto_margins_export_the_correct_edges() {
                     margin_px(0.0),
                     margin_px(0.0),
                     if top { margin_auto() } else { margin_px(0.0) },
-                    if bottom { margin_auto() } else { margin_px(0.0) },
+                    if bottom {
+                        margin_auto()
+                    } else {
+                        margin_px(0.0)
+                    },
                 ),
                 ..fixed_style(20.0, 10.0)
             },

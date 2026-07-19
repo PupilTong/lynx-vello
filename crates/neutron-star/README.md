@@ -3,9 +3,12 @@
 A trait-first, statically-dispatched CSS **flexbox**, CSS **Grid**, and
 Starlight **Linear**/**relative-layout** engine for host-owned trees. Built as
 the from-scratch successor to the Lynx C++ engine's `starlight` layout engine.
-It is host- and storage-agnostic despite exposing Lynx-specific algorithms:
-its protocol and box-layout core have zero dependencies when default features
-are disabled, and the crate is designed to be published and used standalone.
+The host hands the engine stylo-style `Copy` **node handles**
+(`LayoutNode`) borrowed from its tree — per-node layout/cache slots are
+host-owned interior-mutable state written through the handle — and the style
+traits speak the **stylo fork's computed-value vocabulary directly**
+(`stylo` with the `lynx` feature is a required dependency, and its build
+script needs `python3`; the crate is no longer standalone-publishable).
 
 > **Status: Flexbox, Grid, Linear, Relative Level 1, and text measurement
 > implemented.** The

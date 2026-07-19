@@ -164,10 +164,14 @@ useful signal for currently-compatible versions of those libraries.
   public disposal API). Also owns Lynx view metrics, touch-first device
   policy, and the viewport-relative `rpx` integration. Standard CSS parsing,
   matching, cascade, and lock ownership remain in `w3c-dom`.
-- `crates/neutron-star` — the standalone-publishable Flexbox, Grid, and
+- `crates/neutron-star` — the Flexbox, Grid, and
   Starlight Relative and Linear engine: trait-based host⇄engine integration
-  with static dispatch only (no `dyn`), an immutable topology/style source
-  physically separated from mutable layout/cache/measurement sessions, and
+  with static dispatch only (no `dyn`), a stylo-style `LayoutNode: Copy`
+  node-handle protocol (immutable topology/styles for the flush; per-node
+  layout/cache slots are host-owned interior-mutable state written through
+  the handle), style traits that speak the stylo fork's computed-value
+  vocabulary directly (requires the `stylo` workspace dep + python3 for its
+  build script; the old zero-dependency/standalone pillar is retired), and
   host-side
   display dispatch. Leaf content engines integrate through the generic
   lending `LeafMeasurer` protocol. **Flexbox, Grid, Relative, and Linear
@@ -177,8 +181,7 @@ useful signal for currently-compatible versions of those libraries.
   Starlight Relative Layout Level 1, and Lynx's `display: linear` algorithm
   and `linear-*` style/source protocol are live. Text shaping, line breaking,
   intrinsic/height-for-width measurement, baselines, and retained Parley
-  layouts live behind the default-on `text` feature; the protocol and
-  box-layout core stay dependency-free with `default-features = false`.
+  layouts live behind the default-on `text` feature.
   Read
   `docs/layout-architecture.md` before touching it. It must not depend on
   other workspace crates or own host tree/style storage, DOM/widget types,

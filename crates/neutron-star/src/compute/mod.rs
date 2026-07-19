@@ -24,12 +24,12 @@
 //!
 //! ```
 //! use neutron_star::compute::{
-//!     compute_cached_layout, compute_flexbox_layout, compute_grid_layout,
-//!     compute_linear_layout, compute_relative_layout, hide_subtree,
+//!     compute_cached_layout, compute_flexbox_layout, compute_grid_layout, compute_linear_layout,
+//!     compute_relative_layout, hide_subtree,
 //! };
 //! use neutron_star::style::{
-//!     FlexContainerStyle, FlexItemStyle, GridContainerStyle, GridItemStyle,
-//!     LinearContainerStyle, LinearItemStyle, RelativeContainerStyle, RelativeItemStyle,
+//!     FlexContainerStyle, FlexItemStyle, GridContainerStyle, GridItemStyle, LinearContainerStyle,
+//!     LinearItemStyle, RelativeContainerStyle, RelativeItemStyle,
 //! };
 //! use neutron_star::tree::{LayoutInput, LayoutNode, LayoutOutput};
 //!
@@ -69,7 +69,7 @@
 //!             Display::Grid => compute_grid_layout(node, input),
 //!             Display::Linear => compute_linear_layout(node, input),
 //!             Display::Relative => compute_relative_layout(node, input),
-//!             // host: Display::Leaf => compute_leaf_layout(input, &style, resolve, &mut measurer),
+//!             // host: Display::Leaf => compute_leaf_layout(input, &style, &mut measurer),
 //!         }
 //!     })
 //! }
@@ -87,7 +87,7 @@
 //!
 //! 1. [`compute_root_layout`] — in-flow layout of the whole (dirty part of the) tree in unrounded
 //!    CSS pixels. Out-of-flow nodes whose containing block is not their formatting parent
-//!    ([`Position::AbsoluteHoisted`](crate::style::Position)) only get their static positions
+//!    ([`PositionProperty::Fixed`](crate::style::PositionProperty)) only get their static positions
 //!    recorded here.
 //! 2. [`compute_absolute_layout`] — the positioned pass: once per hoisted node, against its real
 //!    containing block.
@@ -109,13 +109,16 @@ pub use leaf::{
 };
 pub use linear::compute_linear_layout;
 pub use relative::compute_relative_layout;
+use stylo::computed_values::direction;
+use stylo::values::computed::Size as StyleSize;
 
 use self::util::{
-    apply_box_sizing, auto_edges_to_zero, clamp, resolve_edges, resolve_insets,
-    resolve_length_percentage, resolve_optional_edges, resolve_size, scrollbar_size,
+    apply_box_sizing, auto_edges_to_zero, clamp, resolve_border, resolve_insets,
+    resolve_length_percentage, resolve_margins, resolve_max_sizes, resolve_padding, resolve_size,
+    used_aspect_ratio,
 };
 use crate::geometry::{Edges, Point, Size};
-use crate::style::{BoxGenerationMode, CoreStyle, Dimension, Direction};
+use crate::style::CoreStyle;
 use crate::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
 };
@@ -144,19 +147,17 @@ pub fn compute_root_layout<N: LayoutNode>(root: N, available_space: Size<Availab
     ));
 
     let style = root.style();
-    let resolve_calc = |handle, basis| root.resolve_calc(handle, basis);
     let margin_value = style.margin();
-    let optional_margin = resolve_optional_edges(margin_value, parent_size.width, &resolve_calc);
-    let hidden = style.box_generation_mode() == BoxGenerationMode::None;
+    let optional_margin = resolve_margins(&margin_value, parent_size.width);
+    let hidden = style.display().is_none();
     let margin = resolve_root_margins(
         optional_margin,
-        margin_value.map(crate::style::LengthPercentageAuto::is_auto),
+        margin_value.map(|side| side.is_auto()),
         available_space.width,
         output.size.width,
     );
-    let padding = resolve_edges(style.padding(), parent_size.width, &resolve_calc);
-    let border = resolve_edges(style.border(), parent_size.width, &resolve_calc);
-    let scrollbar_size = scrollbar_size(&style);
+    let padding = resolve_padding(&style.padding(), parent_size.width);
+    let border = resolve_border(&style.border());
 
     if hidden {
         root.set_unrounded_layout(&Layout::default());
@@ -167,7 +168,6 @@ pub fn compute_root_layout<N: LayoutNode>(root: N, available_space: Size<Availab
     layout.location = Point::new(margin.left, margin.top);
     layout.size = output.size;
     layout.content_size = output.content_size;
-    layout.scrollbar_size = scrollbar_size;
     layout.border = border;
     layout.padding = padding;
     layout.margin = margin;
@@ -263,7 +263,7 @@ pub fn hide_subtree<N: LayoutNode>(node: N) {
 
 /// Sizes and positions one out-of-flow node against its containing block —
 /// the host-driven **positioned pass** for
-/// [`Position::AbsoluteHoisted`](crate::style::Position) nodes.
+/// [`PositionProperty::Fixed`](crate::style::PositionProperty) nodes.
 ///
 /// Runs after in-flow layout. The node's formatting parent computed and
 /// recorded the node's static position
@@ -368,7 +368,6 @@ where
         optional_margin,
         padding,
         border,
-        scrollbar_size,
         preferred_available,
         direction,
         ..
@@ -426,7 +425,7 @@ where
             start_margin: margin.left,
             end_margin: margin.right,
             static_position: static_position.x,
-            prefer_end: direction == Direction::Rtl,
+            prefer_end: direction == direction::T::Rtl,
         }),
         absolute_axis_location(AbsoluteAxis {
             containing_size: containing_block.height,
@@ -444,7 +443,6 @@ where
     layout.location = location;
     layout.size = output.size;
     layout.content_size = output.content_size;
-    layout.scrollbar_size = scrollbar_size;
     layout.border = border;
     layout.padding = padding;
     layout.margin = margin;
@@ -459,7 +457,6 @@ struct ResolvedAbsoluteStyle {
     optional_margin: Edges<Option<f32>>,
     padding: Edges<f32>,
     border: Edges<f32>,
-    scrollbar_size: Size<f32>,
     /// Intrinsic preferred sizes must be measured in their own sizing mode;
     /// the inset-modified containing block is only the fallback available
     /// space for `auto`. A definite fit-content limit is retained here even
@@ -470,7 +467,7 @@ struct ResolvedAbsoluteStyle {
     min_size: Size<Option<f32>>,
     max_size: Size<Option<f32>>,
     aspect_ratio: Option<f32>,
-    direction: Direction,
+    direction: direction::T,
     padding_border_size: Size<f32>,
 }
 
@@ -514,58 +511,94 @@ fn absolute_known_dimensions(
     )
 }
 
+/// Whether a preferred-size value behaves as `auto` for stretch purposes.
+/// The lynx-parseable keywords Starlight has no sizing behavior for (bare
+/// `fit-content`, `stretch`, `-webkit-fill-available`) are treated as `auto`
+/// (documented vocabulary-swap delta).
+#[inline]
+fn style_size_behaves_auto(value: &StyleSize) -> bool {
+    match value {
+        StyleSize::Auto
+        | StyleSize::FitContent
+        | StyleSize::Stretch
+        | StyleSize::WebkitFillAvailable => true,
+        StyleSize::LengthPercentage(_)
+        | StyleSize::MinContent
+        | StyleSize::MaxContent
+        | StyleSize::FitContentFunction(_) => false,
+        StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
+            unreachable!("anchor sizing is pref-dead under the lynx feature")
+        }
+    }
+}
+
 fn resolve_absolute_style<N: LayoutNode>(
     node: N,
     parent_size: Size<Option<f32>>,
 ) -> ResolvedAbsoluteStyle {
     let style = node.style();
-    let resolve_calc = |handle, basis| node.resolve_calc(handle, basis);
-    let padding = resolve_edges(style.padding(), parent_size.width, &resolve_calc);
-    let border = resolve_edges(style.border(), parent_size.width, &resolve_calc);
+    let padding = resolve_padding(&style.padding(), parent_size.width);
+    let border = resolve_border(&style.border());
     let padding_border_size = Size::new(
         padding.horizontal_sum() + border.horizontal_sum(),
         padding.vertical_sum() + border.vertical_sum(),
     );
     let style_size = style.size();
-    let preferred_available = style_size.zip_map(parent_size, |dimension, basis| match dimension {
-        Dimension::MinContent => Some(AvailableSpace::MinContent),
-        Dimension::MaxContent => Some(AvailableSpace::MaxContent),
-        Dimension::FitContent(limit) => resolve_length_percentage(limit, basis, &resolve_calc)
-            .map(|limit| AvailableSpace::Definite(limit.max(0.0))),
-        Dimension::Length(_) | Dimension::Percent(_) | Dimension::Calc(_) | Dimension::Auto => None,
-    });
+    let preferred_available = Size::new(
+        absolute_preferred_available(&style_size.width, parent_size.width),
+        absolute_preferred_available(&style_size.height, parent_size.height),
+    );
     let resolved_style_size = apply_box_sizing(
-        resolve_size(style_size, parent_size, &resolve_calc),
+        resolve_size(&style_size, parent_size),
         style.box_sizing(),
         padding_border_size,
     );
     let min_size = apply_box_sizing(
-        resolve_size(style.min_size(), parent_size, &resolve_calc),
+        resolve_size(&style.min_size(), parent_size),
         style.box_sizing(),
         padding_border_size,
     );
     let max_size = apply_box_sizing(
-        resolve_size(style.max_size(), parent_size, &resolve_calc),
+        resolve_max_sizes(&style.max_size(), parent_size),
         style.box_sizing(),
         padding_border_size,
     );
 
     ResolvedAbsoluteStyle {
-        insets: resolve_insets(style.inset(), parent_size, &resolve_calc),
-        optional_margin: resolve_optional_edges(style.margin(), parent_size.width, &resolve_calc),
+        insets: resolve_insets(&style.inset(), parent_size),
+        optional_margin: resolve_margins(&style.margin(), parent_size.width),
         padding,
         border,
-        scrollbar_size: scrollbar_size(&style),
         preferred_available,
         auto_size: Size::new(
-            style_size.width.is_auto() && resolved_style_size.width.is_none(),
-            style_size.height.is_auto() && resolved_style_size.height.is_none(),
+            style_size_behaves_auto(&style_size.width) && resolved_style_size.width.is_none(),
+            style_size_behaves_auto(&style_size.height) && resolved_style_size.height.is_none(),
         ),
         min_size,
         max_size,
-        aspect_ratio: style.aspect_ratio(),
+        aspect_ratio: used_aspect_ratio(style.aspect_ratio()),
         direction: style.direction(),
         padding_border_size,
+    }
+}
+
+/// The intrinsic available-space override selected by an intrinsic preferred
+/// size on an absolutely positioned box.
+#[inline]
+fn absolute_preferred_available(value: &StyleSize, basis: Option<f32>) -> Option<AvailableSpace> {
+    match value {
+        StyleSize::MinContent => Some(AvailableSpace::MinContent),
+        StyleSize::MaxContent => Some(AvailableSpace::MaxContent),
+        StyleSize::FitContentFunction(limit) => resolve_length_percentage(&limit.0, basis)
+            .map(|limit| AvailableSpace::Definite(limit.max(0.0))),
+        StyleSize::LengthPercentage(_)
+        | StyleSize::Auto
+        | StyleSize::FitContent
+        | StyleSize::Stretch
+        | StyleSize::WebkitFillAvailable => None,
+        StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
+            unreachable!("anchor sizing is pref-dead under the lynx feature")
+        }
     }
 }
 
@@ -620,7 +653,7 @@ fn resolve_absolute_margins(
     insets: Edges<Option<f32>>,
     available: Size<f32>,
     size: Size<f32>,
-    direction: Direction,
+    direction: direction::T,
 ) -> Edges<f32> {
     let mut margin = auto_edges_to_zero(optional);
 
@@ -630,7 +663,7 @@ fn resolve_absolute_margins(
             - optional.left.unwrap_or(0.0)
             - optional.right.unwrap_or(0.0);
         match (optional.left.is_none(), optional.right.is_none()) {
-            (true, true) if remaining < 0.0 && direction == Direction::Rtl => {
+            (true, true) if remaining < 0.0 && direction == direction::T::Rtl => {
                 margin.left = remaining;
             }
             (true, true) if remaining < 0.0 => margin.right = remaining,
@@ -717,12 +750,6 @@ fn round_layout_inner<N: LayoutNode>(node: N, scale: f32, parent_position: Point
     rounded.content_size = Size::new(
         snap(position.x + unrounded.content_size.width) - snap(position.x),
         snap(position.y + unrounded.content_size.height) - snap(position.y),
-    );
-    rounded.scrollbar_size = Size::new(
-        snap(position.x + unrounded.size.width)
-            - snap(position.x + unrounded.size.width - unrounded.scrollbar_size.width),
-        snap(position.y + unrounded.size.height)
-            - snap(position.y + unrounded.size.height - unrounded.scrollbar_size.height),
     );
     rounded.border.left = snap(position.x + unrounded.border.left) - snap(position.x);
     rounded.border.right = snap(position.x + unrounded.size.width)
@@ -833,13 +860,12 @@ mod tests {
             optional_margin: Edges::uniform(None),
             padding: Edges::ZERO,
             border: Edges::ZERO,
-            scrollbar_size: Size::ZERO,
             preferred_available: Size::new(None, None),
             auto_size: Size::new(true, true),
             min_size: Size::new(Some(20.0), Some(10.0)),
             max_size: Size::new(Some(90.0), Some(60.0)),
             aspect_ratio: None,
-            direction: Direction::Ltr,
+            direction: direction::T::Ltr,
             padding_border_size: Size::new(8.0, 6.0),
         }
     }
@@ -875,7 +901,7 @@ mod tests {
             insets,
             Size::new(100.0, 80.0),
             Size::new(60.0, 40.0),
-            Direction::Ltr,
+            direction::T::Ltr,
         );
         assert_eq!(centered, Edges::uniform(20.0));
 
@@ -884,7 +910,7 @@ mod tests {
             insets,
             Size::new(40.0, 80.0),
             Size::new(60.0, 40.0),
-            Direction::Ltr,
+            direction::T::Ltr,
         );
         assert_eq!((ltr_overflow.left, ltr_overflow.right), (0.0, -20.0));
         let rtl_overflow = resolve_absolute_margins(
@@ -892,7 +918,7 @@ mod tests {
             insets,
             Size::new(40.0, 80.0),
             Size::new(60.0, 40.0),
-            Direction::Rtl,
+            direction::T::Rtl,
         );
         assert_eq!((rtl_overflow.left, rtl_overflow.right), (-20.0, 0.0));
 
@@ -906,7 +932,7 @@ mod tests {
             insets,
             Size::new(100.0, 80.0),
             Size::new(60.0, 40.0),
-            Direction::Ltr,
+            direction::T::Ltr,
         );
         assert_eq!((start_auto.left, start_auto.top), (37.0, 36.0));
         let end_auto = resolve_absolute_margins(
@@ -919,7 +945,7 @@ mod tests {
             insets,
             Size::new(100.0, 80.0),
             Size::new(60.0, 40.0),
-            Direction::Ltr,
+            direction::T::Ltr,
         );
         assert_eq!((end_auto.right, end_auto.bottom), (38.0, 35.0));
     }

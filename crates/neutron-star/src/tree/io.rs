@@ -212,7 +212,7 @@ pub struct LayoutOutput {
     /// The node's border-box size.
     pub size: Size<f32>,
     /// The node's scrollable-overflow size: the extent of content measured
-    /// from the border-box origin, ≥ `size` minus borders/scrollbars. Feeds
+    /// from the border-box origin, ≥ `size` minus borders. Feeds
     /// ancestors' own `content_size` and the host's scroll ranges.
     pub content_size: Size<f32>,
     /// First-baseline offsets from the border-box origin, per axis, if the
@@ -269,9 +269,6 @@ pub struct Layout {
     pub size: Size<f32>,
     /// Scrollable-overflow size (see [`LayoutOutput::content_size`]).
     pub content_size: Size<f32>,
-    /// Scrollbar space reserved on each axis (`x` is width reserved by a
-    /// vertical scrollbar, `y` height by a horizontal one).
-    pub scrollbar_size: Size<f32>,
     /// Used border widths.
     pub border: Edges<f32>,
     /// Used padding.

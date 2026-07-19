@@ -485,7 +485,7 @@ fn auto_track() -> TrackSize {
 /// `line_names.len() == values.len() + 1` invariant stylo's parser upholds.
 fn template(tracks: Vec<TrackSize>) -> GridTemplateComponent {
     let values: Vec<_> = tracks.into_iter().map(TrackListValue::TrackSize).collect();
-    let line_names = vec![Default::default(); values.len() + 1];
+    let line_names = vec![stylo::OwnedSlice::default(); values.len() + 1];
     GridTemplateComponent::TrackList(Box::new(TrackList {
         auto_repeat_index: usize::MAX,
         values: values.into(),

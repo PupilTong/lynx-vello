@@ -9,8 +9,8 @@
 //! of its DOM (`TNode`/`TElement` implemented on `&'dom Node`), so a host
 //! tree can serve both engines with one set of one-word handles.
 //!
-//! Everything the engine reads through a handle — topology, style views,
-//! `calc()` resolution — is immutable for the whole flush. Everything the
+//! Everything the engine reads through a handle — topology and style views —
+//! is immutable for the whole flush. Everything the
 //! engine writes — unrounded/final layouts, static positions, cache slots —
 //! goes through the handle into **host-owned interior-mutable per-node
 //! slots** (`Cell`/`RefCell`, or `AtomicRefCell`/`UnsafeCell` under the
@@ -48,8 +48,8 @@
 //!
 //! # The layout epoch
 //!
-//! A layout flush is an **immutable epoch**: topology, computed style,
-//! display dispatch inputs, and calc data must not change until the flush
+//! A layout flush is an **immutable epoch**: topology, computed style, and
+//! display dispatch inputs must not change until the flush
 //! finishes. Handles must stay valid for the whole flush. Per-node layout,
 //! cache, and measurement state may mutate through the handles — that is the
 //! host's interior-mutability discipline, and layout is single-threaded, so
@@ -92,13 +92,12 @@ pub use io::{
 
 use crate::geometry::Point;
 use crate::style::CoreStyle;
-use crate::style::value::CalcHandle;
 
 /// A copy-free node handle borrowed from the host's tree for one layout
 /// epoch.
 ///
 /// Implement this on a cheap `Copy` value that can reach both the node's
-/// immutable data (topology, style, calc storage) and its interior-mutable
+/// immutable data (topology, style) and its interior-mutable
 /// layout slots: a plain `&'dom Node`, a `(&'dom Tree, index)` pair, or an
 /// equivalent wrapper. Keep handles at most two words — they are stored in
 /// per-item scratch by every algorithm.
@@ -128,18 +127,6 @@ pub trait LayoutNode: Copy + core::fmt::Debug {
 
     /// The style view of this node (see [`Style`](Self::Style)).
     fn style(self) -> Self::Style;
-
-    /// Resolves a host-owned `calc()` expression against a percentage
-    /// `basis` (in CSS pixels), returning CSS pixels.
-    ///
-    /// Called whenever an algorithm resolves a style value carrying a
-    /// [`CalcHandle`]. The resolver is a property of the **tree**, not the
-    /// node: it must return the same result for the same
-    /// `(handle, basis)` pair through any handle of the same tree, because
-    /// algorithms resolve one node's values through whichever handle is in
-    /// scope. Hosts whose styles never produce `Calc` values may implement
-    /// this as `unreachable!()`.
-    fn resolve_calc(self, calc: CalcHandle, basis: f32) -> f32;
 
     /// Lays out or measures this node, returning the result to the caller —
     /// the host's **display dispatch**, and the point where layout
@@ -180,7 +167,7 @@ pub trait LayoutNode: Copy + core::fmt::Debug {
 
     /// Records the CSS static position of an out-of-flow node whose
     /// containing block is elsewhere
-    /// ([`Position::AbsoluteHoisted`](crate::style::Position)).
+    /// ([`PositionProperty::Fixed`](crate::style::PositionProperty)).
     ///
     /// During a [`LayoutGoal::Commit`] run this is the origin of the node's
     /// hypothetical margin box in its formatting parent's border-box space.

@@ -304,12 +304,18 @@ pub(super) fn resolve_item_intrinsic_dimensions<N>(
         )
     };
     let values = [&preferred_value, &min_value, &max_value];
-    let needs_min_content = values
-        .iter()
-        .any(|value| matches!(value, IntrinsicSize::MinContent | IntrinsicSize::FitContent(_)));
-    let needs_max_content = values
-        .iter()
-        .any(|value| matches!(value, IntrinsicSize::MaxContent | IntrinsicSize::FitContent(_)));
+    let needs_min_content = values.iter().any(|value| {
+        matches!(
+            value,
+            IntrinsicSize::MinContent | IntrinsicSize::FitContent(_)
+        )
+    });
+    let needs_max_content = values.iter().any(|value| {
+        matches!(
+            value,
+            IntrinsicSize::MaxContent | IntrinsicSize::FitContent(_)
+        )
+    });
     if !needs_min_content && !needs_max_content {
         return;
     }
@@ -341,8 +347,8 @@ pub(super) fn resolve_item_intrinsic_dimensions<N>(
             IntrinsicSize::MinContent => Some(min_content),
             IntrinsicSize::MaxContent => Some(max_content),
             IntrinsicSize::FitContent(limit) => {
-                let limit = resolve_length_percentage(limit, axis.size(inner_size))
-                    .unwrap_or(max_content);
+                let limit =
+                    resolve_length_percentage(limit, axis.size(inner_size)).unwrap_or(max_content);
                 Some(max_content.min(limit.max(min_content)))
             }
             IntrinsicSize::None => None,
@@ -452,10 +458,7 @@ where
                 let automatic_min_applies = axis.size(item.minimum_is_auto)
                     && !item.overflow_point(axis).is_scrollable()
                     && tracks.tracks[indexes.clone()].iter().any(|track| {
-                        matches!(
-                            track.sizing.min,
-                            TrackBreadth::Auto | TrackBreadth::Flex(_)
-                        )
+                        matches!(track.sizing.min, TrackBreadth::Auto | TrackBreadth::Flex(_))
                     })
                     && (item.span(axis) == 1
                         || !tracks.tracks[indexes.clone()]
@@ -549,9 +552,7 @@ fn fixed_max_span_limit(
         };
         let maximum = resolve_length_percentage(maximum, percentage_basis)?;
         let minimum = match &track.sizing.min {
-            TrackBreadth::Breadth(minimum) => {
-                resolve_length_percentage(minimum, percentage_basis)?
-            }
+            TrackBreadth::Breadth(minimum) => resolve_length_percentage(minimum, percentage_basis)?,
             TrackBreadth::Auto
             | TrackBreadth::MinContent
             | TrackBreadth::MaxContent
@@ -589,12 +590,11 @@ where
     let contribution = measure_contribution(item, axis, kind, tracks, cross_tracks, inner_size);
     let span = span_for(item, axis);
     let range = tracks.span_indices(span.start, span.end);
-    let fixed_limit = fixed_max_span_limit(axis, tracks, range.clone(), inner_size)
-        .or_else(|| {
-            (range.len() == 1)
-                .then(|| tracks.tracks[range.start].fit_content_limit)
-                .filter(|limit| limit.is_finite())
-        });
+    let fixed_limit = fixed_max_span_limit(axis, tracks, range.clone(), inner_size).or_else(|| {
+        (range.len() == 1)
+            .then(|| tracks.tracks[range.start].fit_content_limit)
+            .filter(|limit| limit.is_finite())
+    });
     let Some(limit) = fixed_limit else {
         return contribution;
     };
@@ -1143,10 +1143,7 @@ fn resolve_intrinsic_sizes<N>(
     for (index, item) in items.iter().enumerate() {
         let span = span_for(item, axis);
         let range = tracks.span_indices(span.start, span.end);
-        if tracks.tracks[range.clone()]
-            .iter()
-            .any(Track::is_flexible)
-        {
+        if tracks.tracks[range.clone()].iter().any(Track::is_flexible) {
             crosses_flexible.push(index);
         } else if item.span(axis) > 1
             && tracks.tracks[range]
@@ -1288,7 +1285,12 @@ fn resolve_intrinsic_sizes<N>(
             group,
             inner_size,
             ContributionKind::MaxContent,
-            |track| matches!(track.sizing.max, TrackBreadth::MaxContent | TrackBreadth::Auto),
+            |track| {
+                matches!(
+                    track.sizing.max,
+                    TrackBreadth::MaxContent | TrackBreadth::Auto
+                )
+            },
             &mut planned,
             &mut touched,
             &mut affected_scratch,
@@ -1506,10 +1508,7 @@ fn expand_flexible_tracks<N>(
         for item in items.iter_mut() {
             let span = span_for(item, axis);
             let range = tracks.span_indices(span.start, span.end);
-            if !tracks.tracks[range.clone()]
-                .iter()
-                .any(Track::is_flexible)
-            {
+            if !tracks.tracks[range.clone()].iter().any(Track::is_flexible) {
                 continue;
             }
             let contribution = measure_contribution(
