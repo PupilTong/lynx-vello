@@ -28,9 +28,9 @@ use stylo::values::specified::align::AlignFlags;
 use super::compute_absolute_layout;
 use super::util::{
     ItemKey, OrderedItem, ResolvedContainerBox, ResolvedItemBox, box_inset_size, clamp_axis,
-    preferred_size_definiteness, relative_offset, resolve_container_box, resolve_gap,
-    resolve_gap_axis, resolve_item_box, resolve_length_percentage, resolve_style_size,
-    sort_and_assign_layout_order, used_aspect_ratio,
+    normalize_content_alignment, normalize_item_alignment, preferred_size_definiteness,
+    relative_offset, resolve_container_box, resolve_gap, resolve_gap_axis, resolve_item_box,
+    resolve_length_percentage, resolve_style_size, sort_and_assign_layout_order, used_aspect_ratio,
 };
 use crate::geometry::{Edges, Point, Size};
 use crate::style::{CoreStyle, FlexContainerStyle, FlexItemStyle};
@@ -92,135 +92,6 @@ impl Axis {
             Self::Horizontal => RequestedAxis::Horizontal,
             Self::Vertical => RequestedAxis::Vertical,
         }
-    }
-}
-
-/// Engine-private normalized item self-alignment (the flexbox value space of
-/// `align-items`/`align-self` after `AlignFlags` interpretation).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AlignItems {
-    Start,
-    End,
-    FlexStart,
-    FlexEnd,
-    Center,
-    Baseline,
-    Stretch,
-}
-
-/// Engine-private normalized content distribution (the flexbox value space
-/// of `align-content`/`justify-content` after `AlignFlags` interpretation).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AlignContent {
-    Start,
-    End,
-    FlexStart,
-    FlexEnd,
-    Center,
-    Stretch,
-    SpaceBetween,
-    SpaceEvenly,
-    SpaceAround,
-}
-
-/// Interprets one `AlignFlags` value as flexbox item self-alignment.
-///
-/// `None` means `auto`/`normal` (the caller applies its contextual default).
-/// The engine interprets the flags it understands; `SAFE`/`UNSAFE` are
-/// stripped by [`AlignFlags::value`] (safe fallback ignored, as before the
-/// vocabulary swap); last-baseline uses its specified fallback (the end
-/// edge); `LEFT`/`RIGHT` are physical and map through the container's inline
-/// direction where the aligned axis is horizontal, else to start; unknown
-/// fabricated values fall back to start rather than crashing (design
-/// amendment F).
-fn normalize_item_alignment(
-    flags: AlignFlags,
-    horizontal_axis: bool,
-    rtl: bool,
-) -> Option<AlignItems> {
-    let value = flags.value();
-    if value == AlignFlags::AUTO || value == AlignFlags::NORMAL {
-        None
-    } else if value == AlignFlags::START {
-        Some(AlignItems::Start)
-    } else if value == AlignFlags::END {
-        Some(AlignItems::End)
-    } else if value == AlignFlags::FLEX_START {
-        Some(AlignItems::FlexStart)
-    } else if value == AlignFlags::FLEX_END {
-        Some(AlignItems::FlexEnd)
-    } else if value == AlignFlags::CENTER {
-        Some(AlignItems::Center)
-    } else if value == AlignFlags::BASELINE {
-        Some(AlignItems::Baseline)
-    } else if value == AlignFlags::LAST_BASELINE {
-        // Last-baseline sharing is not implemented; its specified fallback
-        // alignment is the end edge (CSS Box Alignment §4.2).
-        Some(AlignItems::End)
-    } else if value == AlignFlags::STRETCH {
-        Some(AlignItems::Stretch)
-    } else if value == AlignFlags::LEFT && horizontal_axis {
-        Some(if rtl {
-            AlignItems::End
-        } else {
-            AlignItems::Start
-        })
-    } else if value == AlignFlags::RIGHT && horizontal_axis {
-        Some(if rtl {
-            AlignItems::Start
-        } else {
-            AlignItems::End
-        })
-    } else {
-        Some(AlignItems::Start)
-    }
-}
-
-/// Interprets one `AlignFlags` value as flexbox content distribution.
-///
-/// `None` means `normal`; the caller applies the property's flexbox default
-/// (`stretch` for `align-content`, `flex-start` for `justify-content`). The
-/// flag policy matches [`normalize_item_alignment`].
-fn normalize_content_alignment(
-    flags: AlignFlags,
-    horizontal_axis: bool,
-    rtl: bool,
-) -> Option<AlignContent> {
-    let value = flags.value();
-    if value == AlignFlags::NORMAL || value == AlignFlags::AUTO {
-        None
-    } else if value == AlignFlags::START {
-        Some(AlignContent::Start)
-    } else if value == AlignFlags::END {
-        Some(AlignContent::End)
-    } else if value == AlignFlags::FLEX_START {
-        Some(AlignContent::FlexStart)
-    } else if value == AlignFlags::FLEX_END {
-        Some(AlignContent::FlexEnd)
-    } else if value == AlignFlags::CENTER {
-        Some(AlignContent::Center)
-    } else if value == AlignFlags::STRETCH {
-        Some(AlignContent::Stretch)
-    } else if value == AlignFlags::SPACE_BETWEEN {
-        Some(AlignContent::SpaceBetween)
-    } else if value == AlignFlags::SPACE_AROUND {
-        Some(AlignContent::SpaceAround)
-    } else if value == AlignFlags::SPACE_EVENLY {
-        Some(AlignContent::SpaceEvenly)
-    } else if value == AlignFlags::LEFT && horizontal_axis {
-        Some(if rtl {
-            AlignContent::End
-        } else {
-            AlignContent::Start
-        })
-    } else if value == AlignFlags::RIGHT && horizontal_axis {
-        Some(if rtl {
-            AlignContent::Start
-        } else {
-            AlignContent::End
-        })
-    } else {
-        Some(AlignContent::Start)
     }
 }
 
@@ -303,7 +174,9 @@ struct FlexItem<N> {
     /// except that only `relative` applies the definite-inset visual nudge
     /// (`sticky` is nudged by the host at scroll time, `static` never).
     position: PositionProperty,
-    align_self: AlignItems,
+    /// The item's resolved self-alignment: one of the canonical
+    /// [`normalize_item_alignment`] keywords, never `AUTO`/`NORMAL`.
+    align_self: AlignFlags,
     size_is_auto: Size<bool>,
     flex_grow: f32,
     flex_shrink: f32,
@@ -432,7 +305,7 @@ fn set_flow_end(edges: &mut Edges<f32>, axis: Axis, reverse: bool, value: f32) {
 }
 
 fn alignment_distribution(
-    value: AlignContent,
+    value: AlignFlags,
     free_space: f32,
     count: usize,
     flow_reverse: bool,
@@ -443,42 +316,46 @@ fn alignment_distribution(
     }
 
     let value = if free_space < 0.0 {
-        match value {
-            AlignContent::SpaceBetween | AlignContent::Stretch => AlignContent::FlexStart,
-            AlignContent::SpaceAround | AlignContent::SpaceEvenly => AlignContent::Center,
-            other => other,
+        // Distributed values (and stretch) fall back safely when space is
+        // negative; positional values keep overflowing both edges.
+        if value == AlignFlags::SPACE_BETWEEN || value == AlignFlags::STRETCH {
+            AlignFlags::FLEX_START
+        } else if value == AlignFlags::SPACE_AROUND || value == AlignFlags::SPACE_EVENLY {
+            AlignFlags::CENTER
+        } else {
+            value
         }
     } else {
         value
     };
 
-    match value {
-        AlignContent::Start => {
-            if flow_reverse == base_reverse {
-                (0.0, 0.0)
-            } else {
-                (free_space, 0.0)
-            }
+    if value == AlignFlags::START {
+        if flow_reverse == base_reverse {
+            (0.0, 0.0)
+        } else {
+            (free_space, 0.0)
         }
-        AlignContent::End => {
-            if flow_reverse == base_reverse {
-                (free_space, 0.0)
-            } else {
-                (0.0, 0.0)
-            }
+    } else if value == AlignFlags::END {
+        if flow_reverse == base_reverse {
+            (free_space, 0.0)
+        } else {
+            (0.0, 0.0)
         }
-        AlignContent::FlexEnd => (free_space, 0.0),
-        AlignContent::Center => (free_space / 2.0, 0.0),
-        AlignContent::SpaceBetween if count > 1 => (0.0, free_space / (count - 1) as f32),
-        AlignContent::FlexStart | AlignContent::Stretch | AlignContent::SpaceBetween => (0.0, 0.0),
-        AlignContent::SpaceAround => {
-            let between = free_space / count as f32;
-            (between / 2.0, between)
-        }
-        AlignContent::SpaceEvenly => {
-            let between = free_space / (count + 1) as f32;
-            (between, between)
-        }
+    } else if value == AlignFlags::FLEX_END {
+        (free_space, 0.0)
+    } else if value == AlignFlags::CENTER {
+        (free_space / 2.0, 0.0)
+    } else if value == AlignFlags::SPACE_BETWEEN && count > 1 {
+        (0.0, free_space / (count - 1) as f32)
+    } else if value == AlignFlags::SPACE_AROUND {
+        let between = free_space / count as f32;
+        (between / 2.0, between)
+    } else if value == AlignFlags::SPACE_EVENLY {
+        let between = free_space / (count + 1) as f32;
+        (between, between)
+    } else {
+        // FLEX_START, STRETCH, and single-item SPACE_BETWEEN pack at start.
+        (0.0, 0.0)
     }
 }
 
@@ -530,7 +407,7 @@ fn resolve_item<N>(
     container_inner_size: Size<Option<f32>>,
     axes: Axes,
     rtl: bool,
-    default_alignment: AlignItems,
+    default_alignment: AlignFlags,
 ) -> FlexItem<N>
 where
     N: LayoutNode,
@@ -558,7 +435,7 @@ where
         border,
         inset,
         ..
-    } = resolve_item_box(key.node, &style, container_inner_size);
+    } = resolve_item_box(&style, container_inner_size);
     let preferred_size_is_definite =
         preferred_size_definiteness(&style.size(), container_inner_size, style.aspect_ratio());
 
@@ -567,7 +444,7 @@ where
         direction: style.direction(),
         position: style.position(),
         align_self: normalize_item_alignment(
-            FlexItemStyle::align_self(&style).0.value(),
+            FlexItemStyle::align_self(&style).0,
             axes.cross == Axis::Horizontal,
             rtl,
         )
@@ -1253,7 +1130,7 @@ fn calculate_line_cross_sizes<N>(
         for item in &items[line.start..line.end] {
             let outer_cross = item.hypothetical_cross + axis_sum(item.margin, axes.cross);
             if axes.main == Axis::Horizontal
-                && item.align_self == AlignItems::Baseline
+                && item.align_self == AlignFlags::BASELINE
                 && !flow_start_bool(item.margin_auto, axes.cross, axes.cross_reverse)
                 && !flow_end_bool(item.margin_auto, axes.cross, axes.cross_reverse)
             {
@@ -1303,11 +1180,11 @@ fn determine_auto_cross_size(
 fn stretch_lines(
     lines: &mut [FlexLine],
     wrap: flex_wrap::T,
-    align_content: AlignContent,
+    align_content: AlignFlags,
     inner_cross: f32,
     cross_gap: f32,
 ) {
-    if wrap == flex_wrap::T::Nowrap || align_content != AlignContent::Stretch || lines.is_empty() {
+    if wrap == flex_wrap::T::Nowrap || align_content != AlignFlags::STRETCH || lines.is_empty() {
         return;
     }
     let used = lines.iter().map(|line| line.cross_size).sum::<f32>()
@@ -1325,7 +1202,7 @@ fn determine_used_cross_sizes<N>(items: &mut [FlexItem<N>], lines: &[FlexLine], 
         for item in &mut items[line.start..line.end] {
             let inset_size = box_inset_size(item.padding, item.border);
             let cross_floor = axes.cross.size(inset_size);
-            let should_stretch = item.align_self == AlignItems::Stretch
+            let should_stretch = item.align_self == AlignFlags::STRETCH
                 && axes.cross.size(item.size_is_auto)
                 && !flow_start_bool(item.margin_auto, axes.cross, axes.cross_reverse)
                 && !flow_end_bool(item.margin_auto, axes.cross, axes.cross_reverse);
@@ -1349,7 +1226,7 @@ fn distribute_main_axis<N>(
     axes: Axes,
     inner_main: f32,
     main_gap: f32,
-    justify_content: AlignContent,
+    justify_content: AlignFlags,
 ) {
     for line in lines {
         let line_items = &mut items[line.start..line.end];
@@ -1423,7 +1300,7 @@ fn align_lines(
     lines: &mut [FlexLine],
     axes: Axes,
     wrap: flex_wrap::T,
-    align_content: AlignContent,
+    align_content: AlignFlags,
     inner_cross: f32,
     cross_gap: f32,
 ) {
@@ -1431,7 +1308,7 @@ fn align_lines(
         + cross_gap * lines.len().saturating_sub(1) as f32;
     let free_space = inner_cross - used;
     let effective_alignment = if wrap == flex_wrap::T::Nowrap {
-        AlignContent::FlexStart
+        AlignFlags::FLEX_START
     } else {
         align_content
     };
@@ -1459,7 +1336,7 @@ fn align_items_cross_axis<N>(items: &mut [FlexItem<N>], lines: &[FlexLine], axes
             items[line.start..line.end]
                 .iter()
                 .filter(|item| {
-                    item.align_self == AlignItems::Baseline
+                    item.align_self == AlignFlags::BASELINE
                         && !flow_start_bool(item.margin_auto, axes.cross, axes.cross_reverse)
                         && !flow_end_bool(item.margin_auto, axes.cross, axes.cross_reverse)
                 })
@@ -1514,7 +1391,7 @@ fn align_items_cross_axis<N>(items: &mut [FlexItem<N>], lines: &[FlexLine], axes
                 continue;
             }
 
-            if item.align_self == AlignItems::Baseline && axes.main == Axis::Horizontal {
+            if item.align_self == AlignFlags::BASELINE && axes.main == Axis::Horizontal {
                 let physical_top = max_physical_baseline - item.baseline;
                 item.cross_position = if axes.cross_reverse {
                     line.cross_size - physical_top - item.target_cross
@@ -1524,24 +1401,26 @@ fn align_items_cross_axis<N>(items: &mut [FlexItem<N>], lines: &[FlexLine], axes
                 continue;
             }
 
-            let alignment_offset = match item.align_self {
-                AlignItems::Start => {
-                    if axes.cross_reverse == axes.cross_base_reverse {
-                        0.0
-                    } else {
-                        free
-                    }
+            let alignment_offset = if item.align_self == AlignFlags::START {
+                if axes.cross_reverse == axes.cross_base_reverse {
+                    0.0
+                } else {
+                    free
                 }
-                AlignItems::End => {
-                    if axes.cross_reverse == axes.cross_base_reverse {
-                        free
-                    } else {
-                        0.0
-                    }
+            } else if item.align_self == AlignFlags::END {
+                if axes.cross_reverse == axes.cross_base_reverse {
+                    free
+                } else {
+                    0.0
                 }
-                AlignItems::FlexStart | AlignItems::Stretch | AlignItems::Baseline => 0.0,
-                AlignItems::FlexEnd => free,
-                AlignItems::Center => free / 2.0,
+            } else if item.align_self == AlignFlags::FLEX_END {
+                free
+            } else if item.align_self == AlignFlags::CENTER {
+                free / 2.0
+            } else {
+                // FLEX_START, STRETCH, and BASELINE (in a column container)
+                // align to the flex cross-start edge.
+                0.0
             };
             item.cross_position =
                 alignment_offset + flow_start(item.margin, axes.cross, axes.cross_reverse);
@@ -1594,7 +1473,7 @@ fn first_container_baseline<N>(
     let line = *lines.first()?;
     let first = items[line.start..line.end]
         .iter()
-        .find(|item| axes.main == Axis::Vertical || item.align_self == AlignItems::Baseline)
+        .find(|item| axes.main == Axis::Vertical || item.align_self == AlignFlags::BASELINE)
         .or_else(|| items[line.start..line.end].first())?;
     let location = item_border_box_location(first, line, axes, inner_size, content_origin);
     Some(
@@ -1664,7 +1543,7 @@ where
             content_size.height = content_size.height.max(location.y + overflow_height);
 
             if first_baseline.is_none()
-                && (axes.main == Axis::Vertical || item.align_self == AlignItems::Baseline)
+                && (axes.main == Axis::Vertical || item.align_self == AlignFlags::BASELINE)
             {
                 first_baseline =
                     Some(location.y + output.first_baselines.y.unwrap_or(output.size.height));
@@ -1683,7 +1562,7 @@ fn static_position_for_absolute<N>(
     axes: Axes,
     inner_size: Size<f32>,
     content_origin: Point<f32>,
-    justify_content: AlignContent,
+    justify_content: AlignFlags,
 ) -> Point<f32> {
     let free_main =
         axes.main.size(inner_size) - item.target_main - axis_sum(item.margin, axes.main);
@@ -1698,24 +1577,25 @@ fn static_position_for_absolute<N>(
 
     let free_cross =
         axes.cross.size(inner_size) - item.target_cross - axis_sum(item.margin, axes.cross);
-    let cross_alignment = match item.align_self {
-        AlignItems::Start => {
-            if axes.cross_reverse == axes.cross_base_reverse {
-                0.0
-            } else {
-                free_cross
-            }
+    let cross_alignment = if item.align_self == AlignFlags::START {
+        if axes.cross_reverse == axes.cross_base_reverse {
+            0.0
+        } else {
+            free_cross
         }
-        AlignItems::End => {
-            if axes.cross_reverse == axes.cross_base_reverse {
-                free_cross
-            } else {
-                0.0
-            }
+    } else if item.align_self == AlignFlags::END {
+        if axes.cross_reverse == axes.cross_base_reverse {
+            free_cross
+        } else {
+            0.0
         }
-        AlignItems::FlexEnd => free_cross,
-        AlignItems::Center => free_cross / 2.0,
-        AlignItems::FlexStart | AlignItems::Baseline | AlignItems::Stretch => 0.0,
+    } else if item.align_self == AlignFlags::FLEX_END {
+        free_cross
+    } else if item.align_self == AlignFlags::CENTER {
+        free_cross / 2.0
+    } else {
+        // FLEX_START, BASELINE, and STRETCH use the flex cross-start edge.
+        0.0
     };
     let cross_flow = cross_alignment + flow_start(item.margin, axes.cross, axes.cross_reverse);
 
@@ -1752,8 +1632,8 @@ fn perform_absolute_children<N>(
     container_size: Size<f32>,
     padding: Edges<f32>,
     border: Edges<f32>,
-    justify_content: AlignContent,
-    default_alignment: AlignItems,
+    justify_content: AlignFlags,
+    default_alignment: AlignFlags,
 ) -> Size<f32>
 where
     N: LayoutNode,
@@ -1854,26 +1734,21 @@ where
     let rtl = style.direction() == direction::T::Rtl;
     let main_horizontal = axes.main == Axis::Horizontal;
     let cross_horizontal = axes.cross == Axis::Horizontal;
-    let align_content = normalize_content_alignment(
-        style.align_content().primary().value(),
-        cross_horizontal,
-        rtl,
-    )
-    .unwrap_or(AlignContent::Stretch);
+    let align_content =
+        normalize_content_alignment(style.align_content().primary(), cross_horizontal, rtl)
+            .unwrap_or(AlignFlags::STRETCH);
     let align_items = normalize_item_alignment(
-        FlexContainerStyle::align_items(&style).0.value(),
+        FlexContainerStyle::align_items(&style).0,
         cross_horizontal,
         rtl,
     )
-    .unwrap_or(AlignItems::Stretch);
+    .unwrap_or(AlignFlags::STRETCH);
     let justify_content = normalize_content_alignment(
-        FlexContainerStyle::justify_content(&style)
-            .primary()
-            .value(),
+        FlexContainerStyle::justify_content(&style).primary(),
         main_horizontal,
         rtl,
     )
-    .unwrap_or(AlignContent::FlexStart);
+    .unwrap_or(AlignFlags::FLEX_START);
     let style_definite = if input.sizing_mode == SizingMode::ContentSize {
         Size::new(false, false)
     } else {
@@ -1893,7 +1768,7 @@ where
         inner: mut inner_size,
         available_inner: inner_available_space,
         ..
-    } = resolve_container_box(node, &style, input);
+    } = resolve_container_box(&style, input);
     let item_inline_basis_was_indefinite = !outer_definite.width;
     let main_percentage_basis_was_indefinite = !axes.main.size(outer_definite);
     let gap_value = style.gap();
@@ -2202,7 +2077,7 @@ mod tests {
             },
             direction: direction::T::Ltr,
             position: PositionProperty::Relative,
-            align_self: AlignItems::Stretch,
+            align_self: AlignFlags::STRETCH,
             size_is_auto: Size::new(true, true),
             flex_grow: 0.0,
             flex_shrink: 1.0,
@@ -2235,55 +2110,6 @@ mod tests {
     }
 
     #[test]
-    fn alignment_normalization_covers_flags_defaults_and_physical_keywords() {
-        assert_eq!(
-            normalize_item_alignment(AlignFlags::AUTO, true, false),
-            None
-        );
-        assert_eq!(
-            normalize_item_alignment(AlignFlags::NORMAL, true, false),
-            None
-        );
-        assert_eq!(
-            normalize_item_alignment(AlignFlags::SAFE | AlignFlags::CENTER, true, false),
-            Some(AlignItems::Center)
-        );
-        assert_eq!(
-            normalize_item_alignment(AlignFlags::LAST_BASELINE, true, false),
-            Some(AlignItems::End)
-        );
-        assert_eq!(
-            normalize_item_alignment(AlignFlags::LEFT, true, true),
-            Some(AlignItems::End)
-        );
-        assert_eq!(
-            normalize_item_alignment(AlignFlags::LEFT, false, true),
-            Some(AlignItems::Start)
-        );
-        assert_eq!(
-            normalize_content_alignment(AlignFlags::NORMAL, true, false),
-            None
-        );
-        assert_eq!(
-            normalize_content_alignment(AlignFlags::SPACE_BETWEEN, true, false),
-            Some(AlignContent::SpaceBetween)
-        );
-        assert_eq!(
-            normalize_content_alignment(AlignFlags::RIGHT, true, false),
-            Some(AlignContent::End)
-        );
-        assert_eq!(
-            normalize_content_alignment(AlignFlags::RIGHT, false, false),
-            Some(AlignContent::Start)
-        );
-        // Fabricated/unknown flag values fall back to start (amendment F).
-        assert_eq!(
-            normalize_item_alignment(AlignFlags::SELF_START, true, false),
-            Some(AlignItems::Start)
-        );
-    }
-
-    #[test]
     fn physical_edge_and_alignment_helpers_cover_reverse_and_overflow_rules() {
         let mut edges = Edges::ZERO;
         set_flow_start(&mut edges, Axis::Horizontal, true, 1.0);
@@ -2301,51 +2127,51 @@ mod tests {
         );
 
         assert_eq!(
-            alignment_distribution(AlignContent::Start, 12.0, 2, false, false),
+            alignment_distribution(AlignFlags::START, 12.0, 2, false, false),
             (0.0, 0.0)
         );
         assert_eq!(
-            alignment_distribution(AlignContent::Start, 12.0, 2, true, false),
+            alignment_distribution(AlignFlags::START, 12.0, 2, true, false),
             (12.0, 0.0)
         );
         assert_eq!(
-            alignment_distribution(AlignContent::End, 12.0, 2, false, false),
+            alignment_distribution(AlignFlags::END, 12.0, 2, false, false),
             (12.0, 0.0)
         );
         assert_eq!(
-            alignment_distribution(AlignContent::End, 12.0, 2, true, false),
+            alignment_distribution(AlignFlags::END, 12.0, 2, true, false),
             (0.0, 0.0)
         );
         assert_eq!(
-            alignment_distribution(AlignContent::FlexEnd, 12.0, 2, false, false),
+            alignment_distribution(AlignFlags::FLEX_END, 12.0, 2, false, false),
             (12.0, 0.0)
         );
         assert_eq!(
-            alignment_distribution(AlignContent::Center, 12.0, 2, false, false),
+            alignment_distribution(AlignFlags::CENTER, 12.0, 2, false, false),
             (6.0, 0.0)
         );
         assert_eq!(
-            alignment_distribution(AlignContent::SpaceBetween, 12.0, 3, false, false),
+            alignment_distribution(AlignFlags::SPACE_BETWEEN, 12.0, 3, false, false),
             (0.0, 6.0)
         );
         assert_eq!(
-            alignment_distribution(AlignContent::SpaceAround, 12.0, 3, false, false),
+            alignment_distribution(AlignFlags::SPACE_AROUND, 12.0, 3, false, false),
             (2.0, 4.0)
         );
         assert_eq!(
-            alignment_distribution(AlignContent::SpaceEvenly, 12.0, 3, false, false),
+            alignment_distribution(AlignFlags::SPACE_EVENLY, 12.0, 3, false, false),
             (3.0, 3.0)
         );
         assert_eq!(
-            alignment_distribution(AlignContent::SpaceAround, -12.0, 3, false, false),
+            alignment_distribution(AlignFlags::SPACE_AROUND, -12.0, 3, false, false),
             (-6.0, 0.0)
         );
         assert_eq!(
-            alignment_distribution(AlignContent::SpaceBetween, -12.0, 3, false, false),
+            alignment_distribution(AlignFlags::SPACE_BETWEEN, -12.0, 3, false, false),
             (0.0, 0.0)
         );
         assert_eq!(
-            alignment_distribution(AlignContent::Center, 12.0, 0, false, false),
+            alignment_distribution(AlignFlags::CENTER, 12.0, 0, false, false),
             (0.0, 0.0)
         );
 
@@ -2465,7 +2291,7 @@ mod tests {
             direction::T::Ltr,
         );
         let mut baseline_items = vec![item(10.0, 20.0), item(10.0, 15.0)];
-        baseline_items[0].align_self = AlignItems::Baseline;
+        baseline_items[0].align_self = AlignFlags::BASELINE;
         baseline_items[0].baseline = 12.0;
         baseline_items[0].margin = Edges {
             left: 0.0,
@@ -2473,7 +2299,7 @@ mod tests {
             top: 2.0,
             bottom: 1.0,
         };
-        baseline_items[1].align_self = AlignItems::Baseline;
+        baseline_items[1].align_self = AlignFlags::BASELINE;
         baseline_items[1].baseline = 5.0;
         baseline_items[1].margin = Edges {
             left: 0.0,
@@ -2527,7 +2353,7 @@ mod tests {
         assert_eq!(overflowing[0].margin.bottom, -10.0);
 
         let mut baseline = item(10.0, 20.0);
-        baseline.align_self = AlignItems::Baseline;
+        baseline.align_self = AlignFlags::BASELINE;
         baseline.baseline = 8.0;
         let mut baseline = [baseline];
         align_items_cross_axis(
@@ -2543,7 +2369,7 @@ mod tests {
         assert_eq!(baseline[0].cross_position, 20.0);
 
         let mut end = item(10.0, 20.0);
-        end.align_self = AlignItems::End;
+        end.align_self = AlignFlags::END;
         let mut normal_end = [end];
         align_items_cross_axis(
             &mut normal_end,
@@ -2557,7 +2383,7 @@ mod tests {
         );
         assert_eq!(normal_end[0].cross_position, 20.0);
         let mut end = item(10.0, 20.0);
-        end.align_self = AlignItems::End;
+        end.align_self = AlignFlags::END;
         let mut reversed_end = [end];
         align_items_cross_axis(
             &mut reversed_end,
@@ -2588,15 +2414,9 @@ mod tests {
         let origin = Point::new(5.0, 7.0);
         let mut candidate = item(20.0, 10.0);
 
-        candidate.align_self = AlignItems::Start;
+        candidate.align_self = AlignFlags::START;
         assert_eq!(
-            static_position_for_absolute(
-                &candidate,
-                normal,
-                inner,
-                origin,
-                AlignContent::FlexStart
-            ),
+            static_position_for_absolute(&candidate, normal, inner, origin, AlignFlags::FLEX_START),
             origin
         );
         assert_eq!(
@@ -2605,19 +2425,13 @@ mod tests {
                 reversed,
                 inner,
                 origin,
-                AlignContent::FlexStart
+                AlignFlags::FLEX_START
             ),
             origin
         );
-        candidate.align_self = AlignItems::End;
+        candidate.align_self = AlignFlags::END;
         assert_eq!(
-            static_position_for_absolute(
-                &candidate,
-                normal,
-                inner,
-                origin,
-                AlignContent::FlexStart
-            ),
+            static_position_for_absolute(&candidate, normal, inner, origin, AlignFlags::FLEX_START),
             Point::new(5.0, 47.0)
         );
         assert_eq!(
@@ -2626,19 +2440,13 @@ mod tests {
                 reversed,
                 inner,
                 origin,
-                AlignContent::FlexStart
+                AlignFlags::FLEX_START
             ),
             Point::new(5.0, 47.0)
         );
-        candidate.align_self = AlignItems::FlexEnd;
+        candidate.align_self = AlignFlags::FLEX_END;
         assert_eq!(
-            static_position_for_absolute(
-                &candidate,
-                normal,
-                inner,
-                origin,
-                AlignContent::FlexStart
-            ),
+            static_position_for_absolute(&candidate, normal, inner, origin, AlignFlags::FLEX_START),
             Point::new(5.0, 47.0)
         );
     }

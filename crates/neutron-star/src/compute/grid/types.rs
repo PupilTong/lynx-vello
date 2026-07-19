@@ -8,8 +8,8 @@ use stylo::computed_values::{box_sizing, direction};
 use stylo::values::computed::{
     LengthPercentage, Overflow, PositionProperty, TrackBreadth, TrackSize,
 };
+use stylo::values::specified::align::AlignFlags;
 
-use super::alignment::AlignItems;
 use super::placement::GridArea;
 use crate::compute::util::ItemKey;
 use crate::geometry::{Edges, Point, Size};
@@ -146,8 +146,10 @@ pub(super) struct GridItem<N> {
     /// except that only `relative` applies the definite-inset visual nudge
     /// (`sticky` is nudged by the host at scroll time, `static` never).
     pub(super) position: PositionProperty,
-    pub(super) align_self: AlignItems,
-    pub(super) justify_self: AlignItems,
+    /// Resolved self-alignment keywords: one of the canonical
+    /// `normalize_item_alignment` values, never `AUTO`/`NORMAL`.
+    pub(super) align_self: AlignFlags,
+    pub(super) justify_self: AlignFlags,
     /// The item's own inline base direction. Baseline fallback uses
     /// self-start, which can differ from the Grid container's inline start.
     pub(super) direction: direction::T,

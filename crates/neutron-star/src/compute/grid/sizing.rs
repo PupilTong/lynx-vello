@@ -12,9 +12,9 @@ use stylo::computed_values::box_sizing;
 use stylo::values::computed::{
     LengthPercentage, MaxSize as StyleMaxSize, Size as StyleSize, TrackBreadth,
 };
+use stylo::values::specified::align::AlignFlags;
 
 use super::super::util::{clamp, resolve_length_percentage};
-use super::alignment::{AlignContent, AlignItems};
 use super::tracks::AxisTrackSpec;
 use super::types::{Axis, GridItem, Track, TrackSet};
 use crate::style::{CoreStyle, GridContainerStyle, GridItemStyle};
@@ -183,7 +183,6 @@ fn raw_content_size<N>(
     axis: Axis,
     kind: ContributionKind,
     cross_tracks: Option<CrossAxisTracks<'_>>,
-    _inner_size: crate::geometry::Size<Option<f32>>,
 ) -> f32
 where
     N: LayoutNode,
@@ -202,7 +201,7 @@ where
     let cross_stretches = match cross {
         Axis::Horizontal => item.justify_self,
         Axis::Vertical => item.align_self,
-    } == AlignItems::Stretch
+    } == AlignFlags::STRETCH
         && cross.size(item.preferred_size).is_none()
         && !cross.start(item.margin_auto)
         && !cross.end(item.margin_auto);
@@ -227,7 +226,7 @@ where
     input.sizing_mode = SizingMode::ContentSize;
     let output = item.key.node.compute_child_layout(input);
     let size = output.size;
-    if axis == Axis::Vertical && item.align_self == AlignItems::Baseline {
+    if axis == Axis::Vertical && item.align_self == AlignFlags::BASELINE {
         // CSS synthesizes a baseline when the child does not expose one. A
         // bottom-border-edge fallback gives the correct ascent/descent
         // envelope for track sizing and matches the final layout pass.
@@ -271,19 +270,12 @@ pub(super) fn probe_raw_min_content<N>(
     item: &mut GridItem<N>,
     axis: Axis,
     cross_tracks: Option<CrossAxisTracks<'_>>,
-    inner_size: crate::geometry::Size<Option<f32>>,
 ) -> f32
 where
     N: LayoutNode,
     N::Style: GridContainerStyle + GridItemStyle,
 {
-    raw_content_size(
-        item,
-        axis,
-        ContributionKind::MinContent,
-        cross_tracks,
-        inner_size,
-    )
+    raw_content_size(item, axis, ContributionKind::MinContent, cross_tracks)
 }
 
 pub(super) fn resolve_item_intrinsic_dimensions<N>(
@@ -321,24 +313,12 @@ pub(super) fn resolve_item_intrinsic_dimensions<N>(
     }
 
     let min_content = if needs_min_content {
-        raw_content_size(
-            item,
-            axis,
-            ContributionKind::MinContent,
-            cross_tracks,
-            inner_size,
-        )
+        raw_content_size(item, axis, ContributionKind::MinContent, cross_tracks)
     } else {
         0.0
     };
     let max_content = if needs_max_content {
-        raw_content_size(
-            item,
-            axis,
-            ContributionKind::MaxContent,
-            cross_tracks,
-            inner_size,
-        )
+        raw_content_size(item, axis, ContributionKind::MaxContent, cross_tracks)
     } else {
         0.0
     };
@@ -465,13 +445,9 @@ where
                             .iter()
                             .any(Track::is_flexible));
                 if automatic_min_applies {
-                    let raw_outer = raw_content_size(
-                        item,
-                        axis,
-                        ContributionKind::MinContent,
-                        cross_tracks,
-                        inner_size,
-                    ) + margin_sum(item, axis);
+                    let raw_outer =
+                        raw_content_size(item, axis, ContributionKind::MinContent, cross_tracks)
+                            + margin_sum(item, axis);
                     // The specified-size suggestion caps the content-size
                     // suggestion when a percentage became definite.
                     let suggestion = preferred.map_or(raw_outer, |size| raw_outer.min(size));
@@ -482,8 +458,7 @@ where
                     // contribution only when Grid's content-based automatic
                     // minimum does not apply.
                     preferred.unwrap_or_else(|| {
-                        raw_content_size(item, axis, kind, cross_tracks, inner_size)
-                            + margin_sum(item, axis)
+                        raw_content_size(item, axis, kind, cross_tracks) + margin_sum(item, axis)
                     })
                 } else {
                     axis.sum(item.padding) + axis.sum(item.border) + margin_sum(item, axis)
@@ -492,12 +467,10 @@ where
         }
         ContributionKind::MinContent | ContributionKind::MaxContent => {
             if preferred_behaves_auto_or_depends {
-                raw_content_size(item, axis, kind, cross_tracks, inner_size)
-                    + margin_sum(item, axis)
+                raw_content_size(item, axis, kind, cross_tracks) + margin_sum(item, axis)
             } else {
                 preferred.unwrap_or_else(|| {
-                    raw_content_size(item, axis, kind, cross_tracks, inner_size)
-                        + margin_sum(item, axis)
+                    raw_content_size(item, axis, kind, cross_tracks) + margin_sum(item, axis)
                 })
             }
         }
@@ -617,7 +590,6 @@ fn prepare_baseline_shims<N>(
     tracks: &TrackSet,
     cross_tracks: Option<CrossAxisTracks<'_>>,
     items: &mut [GridItem<N>],
-    inner_size: crate::geometry::Size<Option<f32>>,
 ) where
     N: LayoutNode,
     N::Style: GridContainerStyle + GridItemStyle,
@@ -628,19 +600,13 @@ fn prepare_baseline_shims<N>(
     let mut candidates = Vec::<(i32, usize, f32)>::new();
     for (index, item) in items.iter_mut().enumerate() {
         item.baseline_shim = 0.0;
-        if item.align_self != AlignItems::Baseline
+        if item.align_self != AlignFlags::BASELINE
             || item.margin_auto.top
             || item.margin_auto.bottom
         {
             continue;
         }
-        let _ = raw_content_size(
-            item,
-            axis,
-            ContributionKind::MinContent,
-            cross_tracks,
-            inner_size,
-        );
+        let _ = raw_content_size(item, axis, ContributionKind::MinContent, cross_tracks);
         let Some(baseline) = item.measured_baselines.y else {
             continue;
         };
@@ -1530,8 +1496,8 @@ fn expand_flexible_tracks<N>(
     }
 }
 
-fn stretch_auto_tracks(tracks: &mut TrackSet, available: AvailableSpace, alignment: AlignContent) {
-    if alignment != AlignContent::Stretch {
+fn stretch_auto_tracks(tracks: &mut TrackSet, available: AvailableSpace, alignment: AlignFlags) {
+    if alignment != AlignFlags::STRETCH {
         return;
     }
     let AvailableSpace::Definite(space) = available else {
@@ -1564,7 +1530,7 @@ pub(super) fn size_tracks<N>(
     items: &mut [GridItem<N>],
     inner_size: crate::geometry::Size<Option<f32>>,
     available: AvailableSpace,
-    alignment: AlignContent,
+    alignment: AlignFlags,
 ) where
     N: LayoutNode,
     N::Style: GridContainerStyle + GridItemStyle,
@@ -1584,7 +1550,7 @@ pub(super) fn size_tracks<N>(
     for item in items.iter_mut() {
         resolve_item_intrinsic_dimensions(item, axis, cross_tracks, inner_size);
     }
-    prepare_baseline_shims(axis, tracks, cross_tracks, items, inner_size);
+    prepare_baseline_shims(axis, tracks, cross_tracks, items);
     resolve_intrinsic_sizes(axis, tracks, cross_tracks, items, inner_size, available);
     maximize_tracks(tracks, available);
     expand_flexible_tracks(axis, tracks, cross_tracks, items, inner_size, available);
@@ -1789,8 +1755,8 @@ mod tests {
                 row: TrackSpan { start: 0, end: 1 },
             },
             position: PositionProperty::Relative,
-            align_self: AlignItems::Start,
-            justify_self: AlignItems::Start,
+            align_self: AlignFlags::START,
+            justify_self: AlignFlags::START,
             direction: direction::T::Ltr,
             aspect_ratio: None,
             box_sizing: box_sizing::T::ContentBox,
@@ -1960,14 +1926,13 @@ mod tests {
         item.preferred_size.width = Some(40.0);
         item.aspect_ratio = Some(2.0);
         item.box_sizing = box_sizing::T::BorderBox;
-        item.align_self = AlignItems::Baseline;
+        item.align_self = AlignFlags::BASELINE;
 
         let measured = raw_content_size(
             &mut item,
             Axis::Vertical,
             ContributionKind::MinContent,
             None,
-            Size::NONE,
         );
         assert_eq!(measured, 20.0);
         assert_eq!(item.measured_baselines.y, Some(10.0));
@@ -2111,7 +2076,7 @@ mod tests {
         stretch_auto_tracks(
             &mut tracks,
             AvailableSpace::Definite(50.0),
-            AlignContent::Stretch,
+            AlignFlags::STRETCH,
         );
         assert_eq!(tracks.tracks[0].base, 50.0);
         assert_eq!(tracks.tracks[0].growth_limit, 50.0);

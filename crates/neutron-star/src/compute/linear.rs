@@ -108,23 +108,6 @@ impl LinearAxes {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CrossGravity {
-    None,
-    Start,
-    End,
-    Center,
-    Stretch,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MainGravity {
-    Start,
-    End,
-    Center,
-    SpaceBetween,
-}
-
 #[derive(Debug, Clone, Copy)]
 struct ItemKey<N> {
     node: N,
@@ -142,7 +125,7 @@ enum NonFlowItem<N> {
     Absolute {
         key: ItemKey<N>,
         position: PositionProperty,
-        gravity: CrossGravity,
+        gravity: AlignFlags,
         static_axes: Size<bool>,
     },
 }
@@ -206,7 +189,9 @@ struct LinearItemSeed<N> {
 #[allow(clippy::struct_excessive_bools)]
 struct LinearItem<N> {
     key: ItemKey<N>,
-    gravity: CrossGravity,
+    /// Cross-axis gravity: one of the canonical [`map_cross_flags`] keywords
+    /// (`NORMAL` = no explicit gravity, default stretch behavior).
+    gravity: AlignFlags,
     weight: f32,
     size_is_auto: Size<bool>,
     size_is_intrinsic: Size<bool>,
@@ -309,39 +294,39 @@ fn flow_to_physical(flow: f32, box_size: f32, container_size: f32, reverse: bool
     }
 }
 
-/// Classifies one alignment keyword for the cross axis.
+/// Classifies one alignment keyword for the cross axis, yielding one of the
+/// canonical gravities `STRETCH`/`START`/`END`/`CENTER`, or `NORMAL` for no
+/// explicit gravity (the default-stretch behavior).
 ///
 /// The engine interprets the flags it understands; `SAFE`/`UNSAFE` are
 /// stripped by [`AlignFlags::value`] before this runs (safe fallback ignored,
 /// as before the vocabulary swap). `NORMAL`, `AUTO`, and both baseline
-/// keywords yield [`CrossGravity::None`] (the pre-swap `map_align` sent
-/// `Baseline` to `None` the same way). `LEFT`/`RIGHT` are physical: on a
-/// horizontal cross axis they map through the flow direction; on a vertical
-/// cross axis they fall back to start. Unknown flag values — a cascade-less
-/// host may fabricate any bit pattern — fall back to normal behavior rather
-/// than crashing.
-fn map_cross_flags(flags: AlignFlags, axes: LinearAxes) -> CrossGravity {
-    if flags == AlignFlags::STRETCH {
-        CrossGravity::Stretch
+/// keywords yield `NORMAL` (the pre-swap `map_align` sent `Baseline` to
+/// `None` the same way). `LEFT`/`RIGHT` are physical: on a horizontal cross
+/// axis they map through the flow direction; on a vertical cross axis they
+/// fall back to start. Unknown flag values — a cascade-less host may
+/// fabricate any bit pattern — fall back to normal behavior rather than
+/// crashing.
+fn map_cross_flags(flags: AlignFlags, axes: LinearAxes) -> AlignFlags {
+    if flags == AlignFlags::STRETCH || flags == AlignFlags::CENTER {
+        flags
     } else if flags == AlignFlags::START || flags == AlignFlags::FLEX_START {
-        CrossGravity::Start
+        AlignFlags::START
     } else if flags == AlignFlags::END || flags == AlignFlags::FLEX_END {
-        CrossGravity::End
-    } else if flags == AlignFlags::CENTER {
-        CrossGravity::Center
+        AlignFlags::END
     } else if flags == AlignFlags::LEFT || flags == AlignFlags::RIGHT {
         if axes.cross == Axis::Horizontal {
             let end = (flags == AlignFlags::RIGHT) ^ axes.cross_reverse;
             if end {
-                CrossGravity::End
+                AlignFlags::END
             } else {
-                CrossGravity::Start
+                AlignFlags::START
             }
         } else {
-            CrossGravity::Start
+            AlignFlags::START
         }
     } else {
-        CrossGravity::None
+        AlignFlags::NORMAL
     }
 }
 
@@ -353,11 +338,11 @@ fn computed_cross_gravity(
     align_self: SelfAlignment,
     align_items: ItemPlacement,
     axes: LinearAxes,
-) -> CrossGravity {
+) -> AlignFlags {
     let self_flags = align_self.0.value();
     if self_flags != AlignFlags::AUTO {
         let mapped = map_cross_flags(self_flags, axes);
-        if mapped != CrossGravity::None {
+        if mapped != AlignFlags::NORMAL {
             return mapped;
         }
     }
@@ -365,29 +350,29 @@ fn computed_cross_gravity(
 }
 
 /// Main-axis gravity from `justify-content` (the deleted `linear-gravity`
-/// channel). `space-around`/`space-evenly`/`stretch` keep their pre-swap
+/// channel), yielding one of the canonical gravities
+/// `START`/`END`/`CENTER`/`SPACE_BETWEEN`.
+/// `space-around`/`space-evenly`/`stretch` keep their pre-swap
 /// pack-at-start behavior; `left`/`right` are physical on a horizontal main
 /// axis and fall back to start on a vertical one; unknown flags fall back to
 /// start.
-fn computed_main_gravity(justify_content: ContentDistribution, axes: LinearAxes) -> MainGravity {
+fn computed_main_gravity(justify_content: ContentDistribution, axes: LinearAxes) -> AlignFlags {
     let flags = justify_content.primary().value();
     if flags == AlignFlags::END || flags == AlignFlags::FLEX_END {
-        MainGravity::End
-    } else if flags == AlignFlags::CENTER {
-        MainGravity::Center
-    } else if flags == AlignFlags::SPACE_BETWEEN {
-        MainGravity::SpaceBetween
+        AlignFlags::END
+    } else if flags == AlignFlags::CENTER || flags == AlignFlags::SPACE_BETWEEN {
+        flags
     } else if (flags == AlignFlags::LEFT || flags == AlignFlags::RIGHT)
         && axes.main == Axis::Horizontal
     {
         let end = (flags == AlignFlags::RIGHT) ^ axes.main_reverse;
         if end {
-            MainGravity::End
+            AlignFlags::END
         } else {
-            MainGravity::Start
+            AlignFlags::START
         }
     } else {
-        MainGravity::Start
+        AlignFlags::START
     }
 }
 
@@ -577,50 +562,6 @@ fn size_definiteness(
     definite
 }
 
-/// Private normalized view of one sizing-property axis: the intrinsic
-/// keywords the sizing passes dispatch on, with everything quantitative
-/// (auto, lengths, percentages, and the treated-as-auto keywords) collapsed
-/// into one arm.
-#[derive(Debug, Clone)]
-enum SizingKeyword {
-    Quantitative,
-    MinContent,
-    MaxContent,
-    FitContent(LengthPercentage),
-}
-
-fn size_keyword(value: &StyleSize) -> SizingKeyword {
-    match value {
-        StyleSize::MinContent => SizingKeyword::MinContent,
-        StyleSize::MaxContent => SizingKeyword::MaxContent,
-        StyleSize::FitContentFunction(limit) => SizingKeyword::FitContent(limit.0.clone()),
-        StyleSize::Auto
-        | StyleSize::LengthPercentage(_)
-        | StyleSize::FitContent
-        | StyleSize::Stretch
-        | StyleSize::WebkitFillAvailable => SizingKeyword::Quantitative,
-        StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor sizing is pref-dead under the lynx feature")
-        }
-    }
-}
-
-fn max_size_keyword(value: &MaxSize) -> SizingKeyword {
-    match value {
-        MaxSize::MinContent => SizingKeyword::MinContent,
-        MaxSize::MaxContent => SizingKeyword::MaxContent,
-        MaxSize::FitContentFunction(limit) => SizingKeyword::FitContent(limit.0.clone()),
-        MaxSize::None
-        | MaxSize::LengthPercentage(_)
-        | MaxSize::FitContent
-        | MaxSize::Stretch
-        | MaxSize::WebkitFillAvailable => SizingKeyword::Quantitative,
-        MaxSize::AnchorSizeFunction(_) | MaxSize::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor sizing is pref-dead under the lynx feature")
-        }
-    }
-}
-
 #[inline]
 fn initial_item_flags(
     style: &impl LinearItemStyle,
@@ -672,7 +613,6 @@ fn initial_item_flags(
 }
 
 fn resolve_item<N>(
-    node: N,
     style: impl LinearItemStyle,
     seed: LinearItemSeed<N>,
     percentage_basis: Size<Option<f32>>,
@@ -703,7 +643,7 @@ where
         border,
         inset,
         ..
-    } = resolve_item_box(node, &style, percentage_basis);
+    } = resolve_item_box(&style, percentage_basis);
     let relative_offset = if nudges {
         relative_offset(inset, direction)
     } else {
@@ -810,24 +750,36 @@ where
     node.compute_child_layout(input)
 }
 
+/// Whether resolving one axis of these raw sizing properties requires a
+/// min-content probe (`min-content` or a `fit-content()` clamp).
 #[inline]
-fn needs_min_content(values: [&SizingKeyword; 3]) -> bool {
-    values.into_iter().any(|value| {
-        matches!(
-            value,
-            SizingKeyword::MinContent | SizingKeyword::FitContent(_)
-        )
-    })
+fn needs_min_content(size: &StyleSize, min_size: &StyleSize, max_size: &MaxSize) -> bool {
+    matches!(
+        size,
+        StyleSize::MinContent | StyleSize::FitContentFunction(_)
+    ) || matches!(
+        min_size,
+        StyleSize::MinContent | StyleSize::FitContentFunction(_)
+    ) || matches!(
+        max_size,
+        MaxSize::MinContent | MaxSize::FitContentFunction(_)
+    )
 }
 
+/// Whether resolving one axis of these raw sizing properties requires a
+/// max-content probe (`max-content` or a `fit-content()` clamp).
 #[inline]
-fn needs_max_content(values: [&SizingKeyword; 3]) -> bool {
-    values.into_iter().any(|value| {
-        matches!(
-            value,
-            SizingKeyword::MaxContent | SizingKeyword::FitContent(_)
-        )
-    })
+fn needs_max_content(size: &StyleSize, min_size: &StyleSize, max_size: &MaxSize) -> bool {
+    matches!(
+        size,
+        StyleSize::MaxContent | StyleSize::FitContentFunction(_)
+    ) || matches!(
+        min_size,
+        StyleSize::MaxContent | StyleSize::FitContentFunction(_)
+    ) || matches!(
+        max_size,
+        MaxSize::MaxContent | MaxSize::FitContentFunction(_)
+    )
 }
 
 fn intrinsic_measurement<N>(
@@ -897,10 +849,30 @@ where
     )
 }
 
+/// Resolves one `fit-content(limit)` axis against the measured contributions.
+#[inline]
+fn fit_content_axis_value(
+    limit: &LengthPercentage,
+    minimum: f32,
+    maximum: f32,
+    basis: Option<f32>,
+    inset: f32,
+    box_sizing: box_sizing::T,
+) -> f32 {
+    let mut limit = resolve_lp(limit, basis).unwrap_or(maximum);
+    if box_sizing == box_sizing::T::ContentBox {
+        limit += inset;
+    }
+    maximum.min(limit.max(minimum))
+}
+
+/// Resolves one intrinsic preferred/minimum sizing axis. Quantitative values
+/// (auto, lengths, percentages, and the treated-as-auto keywords) keep their
+/// already-resolved value.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn intrinsic_axis_value(
-    value: &SizingKeyword,
+    value: &StyleSize,
     quantitative: Option<f32>,
     minimum: f32,
     maximum: f32,
@@ -909,16 +881,49 @@ fn intrinsic_axis_value(
     box_sizing: box_sizing::T,
 ) -> Option<f32> {
     match value {
-        SizingKeyword::MinContent => Some(minimum),
-        SizingKeyword::MaxContent => Some(maximum),
-        SizingKeyword::FitContent(limit) => {
-            let mut limit = resolve_lp(limit, basis).unwrap_or(maximum);
-            if box_sizing == box_sizing::T::ContentBox {
-                limit += inset;
-            }
-            Some(maximum.min(limit.max(minimum)))
+        StyleSize::MinContent => Some(minimum),
+        StyleSize::MaxContent => Some(maximum),
+        StyleSize::FitContentFunction(limit) => Some(fit_content_axis_value(
+            &limit.0, minimum, maximum, basis, inset, box_sizing,
+        )),
+        StyleSize::Auto
+        | StyleSize::LengthPercentage(_)
+        | StyleSize::FitContent
+        | StyleSize::Stretch
+        | StyleSize::WebkitFillAvailable => quantitative,
+        StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
+            unreachable!("anchor sizing is pref-dead under the lynx feature")
         }
-        SizingKeyword::Quantitative => quantitative,
+    }
+}
+
+/// Resolves one intrinsic maximum sizing axis (`none` behaves as
+/// quantitative).
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn intrinsic_max_axis_value(
+    value: &MaxSize,
+    quantitative: Option<f32>,
+    minimum: f32,
+    maximum: f32,
+    basis: Option<f32>,
+    inset: f32,
+    box_sizing: box_sizing::T,
+) -> Option<f32> {
+    match value {
+        MaxSize::MinContent => Some(minimum),
+        MaxSize::MaxContent => Some(maximum),
+        MaxSize::FitContentFunction(limit) => Some(fit_content_axis_value(
+            &limit.0, minimum, maximum, basis, inset, box_sizing,
+        )),
+        MaxSize::None
+        | MaxSize::LengthPercentage(_)
+        | MaxSize::FitContent
+        | MaxSize::Stretch
+        | MaxSize::WebkitFillAvailable => quantitative,
+        MaxSize::AnchorSizeFunction(_) | MaxSize::AnchorContainingCalcFunction(_) => {
+            unreachable!("anchor sizing is pref-dead under the lynx feature")
+        }
     }
 }
 
@@ -933,28 +938,15 @@ where
     }
     let (size, min_size, max_size) = {
         let style = item.key.node.style();
-        let size = style.size();
-        let min_size = style.min_size();
-        let max_size = style.max_size();
-        (
-            Size::new(size_keyword(&size.width), size_keyword(&size.height)),
-            Size::new(
-                size_keyword(&min_size.width),
-                size_keyword(&min_size.height),
-            ),
-            Size::new(
-                max_size_keyword(&max_size.width),
-                max_size_keyword(&max_size.height),
-            ),
-        )
+        (style.size(), style.min_size(), style.max_size())
     };
     let need_min = Size::new(
-        needs_min_content([&size.width, &min_size.width, &max_size.width]),
-        needs_min_content([&size.height, &min_size.height, &max_size.height]),
+        needs_min_content(&size.width, &min_size.width, &max_size.width),
+        needs_min_content(&size.height, &min_size.height, &max_size.height),
     );
     let need_max = Size::new(
-        needs_max_content([&size.width, &min_size.width, &max_size.width]),
-        needs_max_content([&size.height, &min_size.height, &max_size.height]),
+        needs_max_content(&size.width, &min_size.width, &max_size.width),
+        needs_max_content(&size.height, &min_size.height, &max_size.height),
     );
     let min_content = if need_min.width || need_min.height {
         intrinsic_measurement(item, percentage_basis, need_min, AvailableSpace::MinContent).size
@@ -1009,7 +1001,7 @@ where
         ),
     );
     item.max_size = Size::new(
-        intrinsic_axis_value(
+        intrinsic_max_axis_value(
             &max_size.width,
             item.max_size.width,
             min_content.width,
@@ -1018,7 +1010,7 @@ where
             inset.width,
             item.box_sizing,
         ),
-        intrinsic_axis_value(
+        intrinsic_max_axis_value(
             &max_size.height,
             item.max_size.height,
             min_content.height,
@@ -1167,8 +1159,8 @@ fn measure_item<N>(
         .and_then(|main| ratio_cross_size(item, axes, main))
         .is_some();
     let should_stretch = cross_constraint.is_some()
-        && (item.gravity == CrossGravity::Stretch
-            || (item.gravity == CrossGravity::None
+        && (item.gravity == AlignFlags::STRETCH
+            || (item.gravity == AlignFlags::NORMAL
                 && axes.cross.size(item.size_is_auto)
                 && !axes.cross.size(item.size_is_intrinsic)
                 && !ratio_fixed_cross));
@@ -1423,26 +1415,31 @@ where
 
 #[inline]
 fn main_axis_distribution(
-    main_gravity: MainGravity,
+    main_gravity: AlignFlags,
     free_main: f32,
     item_count: usize,
 ) -> (f32, f32) {
-    match main_gravity {
-        MainGravity::End => (free_main, 0.0),
-        MainGravity::Center => (free_main / 2.0, 0.0),
-        MainGravity::SpaceBetween if item_count > 1 => {
-            (0.0, free_main.max(0.0) / (item_count - 1) as f32)
-        }
-        MainGravity::Start | MainGravity::SpaceBetween => (0.0, 0.0),
+    if main_gravity == AlignFlags::END {
+        (free_main, 0.0)
+    } else if main_gravity == AlignFlags::CENTER {
+        (free_main / 2.0, 0.0)
+    } else if main_gravity == AlignFlags::SPACE_BETWEEN && item_count > 1 {
+        (0.0, free_main.max(0.0) / (item_count - 1) as f32)
+    } else {
+        // START and single-item SPACE_BETWEEN pack at start.
+        (0.0, 0.0)
     }
 }
 
 #[inline]
-fn cross_alignment_offset(gravity: CrossGravity, free_cross: f32) -> f32 {
-    match gravity {
-        CrossGravity::End => free_cross,
-        CrossGravity::Center => free_cross / 2.0,
-        CrossGravity::None | CrossGravity::Start | CrossGravity::Stretch => 0.0,
+fn cross_alignment_offset(gravity: AlignFlags, free_cross: f32) -> f32 {
+    if gravity == AlignFlags::END {
+        free_cross
+    } else if gravity == AlignFlags::CENTER {
+        free_cross / 2.0
+    } else {
+        // NORMAL, START, and STRETCH use the cross-start edge.
+        0.0
     }
 }
 
@@ -1450,7 +1447,7 @@ fn position_items<N>(
     items: &mut [LinearItem<N>],
     axes: LinearAxes,
     inner_size: Size<f32>,
-    main_gravity: MainGravity,
+    main_gravity: AlignFlags,
     used_main: f32,
 ) where
     N: LayoutNode,
@@ -1526,8 +1523,8 @@ fn absolute_static_position(
     containing_origin: Point<f32>,
     size: Size<f32>,
     margin: Edges<f32>,
-    gravity: CrossGravity,
-    main_gravity: MainGravity,
+    gravity: AlignFlags,
+    main_gravity: AlignFlags,
 ) -> Point<f32> {
     let main_size = axes.main.size(size);
     let free_main = axes.main.size(containing_size) - main_size - axis_sum(margin, axes.main);
@@ -1693,7 +1690,7 @@ fn commit_non_in_flow_children<N>(
     axes: LinearAxes,
     outer_size: Size<f32>,
     border: Edges<f32>,
-    main_gravity: MainGravity,
+    main_gravity: AlignFlags,
     mut content_size: Size<f32>,
 ) -> Size<f32>
 where
@@ -1844,7 +1841,7 @@ where
         outer: mut outer_size,
         available_inner: initial_available_inner,
         ..
-    } = resolve_container_box(node, &style, input);
+    } = resolve_container_box(&style, input);
     let mut outer_definite = Size::new(
         input.definite_dimensions.width || style_definite.width,
         input.definite_dimensions.height || style_definite.height,
@@ -1964,7 +1961,6 @@ where
         let nudges = position == PositionProperty::Relative;
         let flags = initial_item_flags(&child_style, percentage_basis.width, nudges);
         let item = resolve_item(
-            child,
             child_style,
             LinearItemSeed {
                 key: ItemKey {
@@ -2351,22 +2347,22 @@ mod tests {
         // Main axis <- justify-content.
         assert_eq!(
             computed_main_gravity(ContentDistribution::normal(), ltr_column),
-            MainGravity::Start
+            AlignFlags::START
         );
         assert_eq!(
             computed_main_gravity(ContentDistribution::new(AlignFlags::FLEX_END), ltr_column),
-            MainGravity::End
+            AlignFlags::END
         );
         assert_eq!(
             computed_main_gravity(ContentDistribution::new(AlignFlags::CENTER), ltr_column),
-            MainGravity::Center
+            AlignFlags::CENTER
         );
         assert_eq!(
             computed_main_gravity(
                 ContentDistribution::new(AlignFlags::SPACE_BETWEEN),
                 ltr_column
             ),
-            MainGravity::SpaceBetween
+            AlignFlags::SPACE_BETWEEN
         );
         // space-around/space-evenly keep the pre-swap pack-at-start behavior.
         assert_eq!(
@@ -2374,26 +2370,26 @@ mod tests {
                 ContentDistribution::new(AlignFlags::SPACE_AROUND),
                 ltr_column
             ),
-            MainGravity::Start
+            AlignFlags::START
         );
         // Physical left/right act on a horizontal main axis only.
         assert_eq!(
             computed_main_gravity(ContentDistribution::new(AlignFlags::RIGHT), ltr_row),
-            MainGravity::End
+            AlignFlags::END
         );
         assert_eq!(
             computed_main_gravity(ContentDistribution::new(AlignFlags::RIGHT), ltr_row_reverse),
-            MainGravity::Start
+            AlignFlags::START
         );
         assert_eq!(
             computed_main_gravity(ContentDistribution::new(AlignFlags::RIGHT), ltr_column),
-            MainGravity::Start
+            AlignFlags::START
         );
 
         // Cross axis <- align-self falling back to align-items.
         assert_eq!(
             computed_cross_gravity(SelfAlignment::auto(), ItemPlacement::normal(), ltr_column),
-            CrossGravity::None
+            AlignFlags::NORMAL
         );
         assert_eq!(
             computed_cross_gravity(
@@ -2401,7 +2397,7 @@ mod tests {
                 ItemPlacement(AlignFlags::FLEX_END),
                 ltr_column
             ),
-            CrossGravity::Center
+            AlignFlags::CENTER
         );
         assert_eq!(
             computed_cross_gravity(
@@ -2409,7 +2405,7 @@ mod tests {
                 ItemPlacement(AlignFlags::STRETCH),
                 ltr_column
             ),
-            CrossGravity::Stretch
+            AlignFlags::STRETCH
         );
         // Baseline defers to the container channel, exactly as the pre-swap
         // `map_align` sent `Baseline` to `None`.
@@ -2419,7 +2415,7 @@ mod tests {
                 ItemPlacement(AlignFlags::END),
                 ltr_column
             ),
-            CrossGravity::End
+            AlignFlags::END
         );
         // Physical left/right on the horizontal cross axis follow direction.
         assert_eq!(
@@ -2428,7 +2424,7 @@ mod tests {
                 ItemPlacement::normal(),
                 ltr_column
             ),
-            CrossGravity::Start
+            AlignFlags::START
         );
         assert_eq!(
             computed_cross_gravity(
@@ -2436,7 +2432,7 @@ mod tests {
                 ItemPlacement::normal(),
                 rtl_column
             ),
-            CrossGravity::End
+            AlignFlags::END
         );
         // On a vertical cross axis the physical keywords fall back to start.
         assert_eq!(
@@ -2445,7 +2441,7 @@ mod tests {
                 ItemPlacement::normal(),
                 ltr_row
             ),
-            CrossGravity::Start
+            AlignFlags::START
         );
         // `safe`/`unsafe` modifiers are stripped by `AlignFlags::value`.
         assert_eq!(
@@ -2454,7 +2450,7 @@ mod tests {
                 ItemPlacement::normal(),
                 ltr_column
             ),
-            CrossGravity::Center
+            AlignFlags::CENTER
         );
     }
 }

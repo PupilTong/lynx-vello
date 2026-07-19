@@ -279,7 +279,7 @@ where
         border,
         inset,
         ..
-    } = resolve_item_box_with_bases(key.node, &style, size_percentage_basis, edge_inline_basis);
+    } = resolve_item_box_with_bases(&style, size_percentage_basis, edge_inline_basis);
     let preferred_size_is_definite =
         preferred_size_definiteness(&style.size(), size_percentage_basis, style.aspect_ratio());
 
@@ -554,7 +554,6 @@ fn reference_position<N>(
     target_end: bool,
     axis: Axis,
     parent_size: Size<Option<f32>>,
-    _lookup: &IdLookup,
     items: &[RelativeItem<N>],
     allow_item_references: bool,
 ) -> Option<f32>
@@ -584,7 +583,6 @@ fn axis_constraints<N>(
     item: &RelativeItem<N>,
     axis: Axis,
     parent_size: Size<Option<f32>>,
-    lookup: &IdLookup,
     items: &[RelativeItem<N>],
     allow_item_references: bool,
 ) -> Line<Option<f32>>
@@ -602,27 +600,15 @@ where
         false,
         axis,
         parent_size,
-        lookup,
         items,
         allow_item_references,
     )
-    .or_else(|| {
-        reference_position(
-            after,
-            true,
-            axis,
-            parent_size,
-            lookup,
-            items,
-            allow_item_references,
-        )
-    });
+    .or_else(|| reference_position(after, true, axis, parent_size, items, allow_item_references));
     let end = reference_position(
         align_end,
         true,
         axis,
         parent_size,
-        lookup,
         items,
         allow_item_references,
     )
@@ -632,7 +618,6 @@ where
             false,
             axis,
             parent_size,
-            lookup,
             items,
             allow_item_references,
         )
@@ -643,7 +628,6 @@ where
 fn all_constraints<N>(
     item: &RelativeItem<N>,
     parent_size: Size<Option<f32>>,
-    lookup: &IdLookup,
     items: &[RelativeItem<N>],
     allow_item_references: bool,
 ) -> Size<Line<Option<f32>>>
@@ -656,7 +640,6 @@ where
             item,
             Axis::Horizontal,
             parent_size,
-            lookup,
             items,
             allow_item_references,
         ),
@@ -664,7 +647,6 @@ where
             item,
             Axis::Vertical,
             parent_size,
-            lookup,
             items,
             allow_item_references,
         ),
@@ -679,52 +661,8 @@ fn constrained_border_size(constraints: Line<Option<f32>>, margin_sum: f32) -> O
     }
 }
 
-/// Private normalized view of one sizing-property axis: the intrinsic
-/// keywords the sizing passes dispatch on, with everything quantitative
-/// (auto, lengths, percentages, and the treated-as-auto keywords) collapsed
-/// into one arm.
-#[derive(Debug, Clone)]
-enum SizeKeyword {
-    Quantitative,
-    MinContent,
-    MaxContent,
-    FitContent(LengthPercentage),
-}
-
-fn size_keyword(value: &StyleSize) -> SizeKeyword {
-    match value {
-        StyleSize::MinContent => SizeKeyword::MinContent,
-        StyleSize::MaxContent => SizeKeyword::MaxContent,
-        StyleSize::FitContentFunction(limit) => SizeKeyword::FitContent(limit.0.clone()),
-        StyleSize::Auto
-        | StyleSize::LengthPercentage(_)
-        | StyleSize::FitContent
-        | StyleSize::Stretch
-        | StyleSize::WebkitFillAvailable => SizeKeyword::Quantitative,
-        StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor sizing is pref-dead under the lynx feature")
-        }
-    }
-}
-
-fn max_size_keyword(value: &MaxSize) -> SizeKeyword {
-    match value {
-        MaxSize::MinContent => SizeKeyword::MinContent,
-        MaxSize::MaxContent => SizeKeyword::MaxContent,
-        MaxSize::FitContentFunction(limit) => SizeKeyword::FitContent(limit.0.clone()),
-        MaxSize::None
-        | MaxSize::LengthPercentage(_)
-        | MaxSize::FitContent
-        | MaxSize::Stretch
-        | MaxSize::WebkitFillAvailable => SizeKeyword::Quantitative,
-        MaxSize::AnchorSizeFunction(_) | MaxSize::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor sizing is pref-dead under the lynx feature")
-        }
-    }
-}
-
 fn fit_content_available(
-    value: &SizeKeyword,
+    value: &StyleSize,
     axis: Axis,
     parent_size: Size<Option<f32>>,
     available: AvailableSpace,
@@ -732,11 +670,11 @@ fn fit_content_available(
     box_floor: f32,
 ) -> AvailableSpace {
     match value {
-        SizeKeyword::MinContent => AvailableSpace::MinContent,
-        SizeKeyword::MaxContent => AvailableSpace::MaxContent,
-        SizeKeyword::FitContent(limit) => {
+        StyleSize::MinContent => AvailableSpace::MinContent,
+        StyleSize::MaxContent => AvailableSpace::MaxContent,
+        StyleSize::FitContentFunction(limit) => {
             let owner = axis.size(parent_size).or_else(|| available.into_option());
-            let limit = resolve_length_percentage(limit, owner).map(|limit| {
+            let limit = resolve_length_percentage(&limit.0, owner).map(|limit| {
                 if box_sizing == box_sizing::T::ContentBox {
                     limit + box_floor
                 } else {
@@ -751,18 +689,47 @@ fn fit_content_available(
                 (available, None) => available,
             }
         }
-        SizeKeyword::Quantitative => available,
+        StyleSize::Auto
+        | StyleSize::LengthPercentage(_)
+        | StyleSize::FitContent
+        | StyleSize::Stretch
+        | StyleSize::WebkitFillAvailable => available,
+        StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
+            unreachable!("anchor sizing is pref-dead under the lynx feature")
+        }
     }
 }
 
+/// Whether resolving one axis of these raw sizing properties requires a
+/// min-content probe (`min-content` or a `fit-content()` clamp).
 #[inline]
-fn needs_min_content(value: &SizeKeyword) -> bool {
-    matches!(value, SizeKeyword::MinContent | SizeKeyword::FitContent(_))
+fn needs_min_content(size: &StyleSize, min_size: &StyleSize, max_size: &MaxSize) -> bool {
+    matches!(
+        size,
+        StyleSize::MinContent | StyleSize::FitContentFunction(_)
+    ) || matches!(
+        min_size,
+        StyleSize::MinContent | StyleSize::FitContentFunction(_)
+    ) || matches!(
+        max_size,
+        MaxSize::MinContent | MaxSize::FitContentFunction(_)
+    )
 }
 
+/// Whether resolving one axis of these raw sizing properties requires a
+/// max-content probe (`max-content` or a `fit-content()` clamp).
 #[inline]
-fn needs_max_content(value: &SizeKeyword) -> bool {
-    matches!(value, SizeKeyword::MaxContent | SizeKeyword::FitContent(_))
+fn needs_max_content(size: &StyleSize, min_size: &StyleSize, max_size: &MaxSize) -> bool {
+    matches!(
+        size,
+        StyleSize::MaxContent | StyleSize::FitContentFunction(_)
+    ) || matches!(
+        min_size,
+        StyleSize::MaxContent | StyleSize::FitContentFunction(_)
+    ) || matches!(
+        max_size,
+        MaxSize::MaxContent | MaxSize::FitContentFunction(_)
+    )
 }
 
 fn intrinsic_probe<N>(
@@ -785,9 +752,39 @@ where
     axis.size(item.key.node.compute_child_layout(input).size)
 }
 
+/// Resolves one `fit-content(limit)` axis against the probed contributions.
+#[allow(clippy::too_many_arguments)]
+fn fit_content_dimension(
+    limit: &LengthPercentage,
+    axis: Axis,
+    min_content: Option<f32>,
+    max_content: Option<f32>,
+    parent_size: Size<Option<f32>>,
+    available_content: Size<AvailableSpace>,
+    box_sizing: box_sizing::T,
+    box_floor: f32,
+) -> f32 {
+    let min_content = min_content.unwrap_or(0.0);
+    let max_content = max_content.unwrap_or(min_content);
+    let owner = axis
+        .size(parent_size)
+        .or_else(|| axis.size(available_content).into_option());
+    let limit = resolve_length_percentage(limit, owner).map_or(max_content, |limit| {
+        if box_sizing == box_sizing::T::ContentBox {
+            limit + box_floor
+        } else {
+            limit
+        }
+    });
+    max_content.min(limit.max(min_content))
+}
+
+/// Resolves one intrinsic preferred/minimum sizing axis; quantitative values
+/// (auto, lengths, percentages, and the treated-as-auto keywords) yield
+/// `None` and keep their already-resolved value.
 #[allow(clippy::too_many_arguments)]
 fn resolve_intrinsic_dimension(
-    value: &SizeKeyword,
+    value: &StyleSize,
     axis: Axis,
     min_content: Option<f32>,
     max_content: Option<f32>,
@@ -797,24 +794,63 @@ fn resolve_intrinsic_dimension(
     box_floor: f32,
 ) -> Option<f32> {
     match value {
-        SizeKeyword::MinContent => min_content,
-        SizeKeyword::MaxContent => max_content,
-        SizeKeyword::FitContent(limit) => {
-            let min_content = min_content.unwrap_or(0.0);
-            let max_content = max_content.unwrap_or(min_content);
-            let owner = axis
-                .size(parent_size)
-                .or_else(|| axis.size(available_content).into_option());
-            let limit = resolve_length_percentage(limit, owner).map_or(max_content, |limit| {
-                if box_sizing == box_sizing::T::ContentBox {
-                    limit + box_floor
-                } else {
-                    limit
-                }
-            });
-            Some(max_content.min(limit.max(min_content)))
+        StyleSize::MinContent => min_content,
+        StyleSize::MaxContent => max_content,
+        StyleSize::FitContentFunction(limit) => Some(fit_content_dimension(
+            &limit.0,
+            axis,
+            min_content,
+            max_content,
+            parent_size,
+            available_content,
+            box_sizing,
+            box_floor,
+        )),
+        StyleSize::Auto
+        | StyleSize::LengthPercentage(_)
+        | StyleSize::FitContent
+        | StyleSize::Stretch
+        | StyleSize::WebkitFillAvailable => None,
+        StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
+            unreachable!("anchor sizing is pref-dead under the lynx feature")
         }
-        SizeKeyword::Quantitative => None,
+    }
+}
+
+/// Resolves one intrinsic maximum sizing axis (`none` behaves as
+/// quantitative).
+#[allow(clippy::too_many_arguments)]
+fn resolve_intrinsic_max_dimension(
+    value: &MaxSize,
+    axis: Axis,
+    min_content: Option<f32>,
+    max_content: Option<f32>,
+    parent_size: Size<Option<f32>>,
+    available_content: Size<AvailableSpace>,
+    box_sizing: box_sizing::T,
+    box_floor: f32,
+) -> Option<f32> {
+    match value {
+        MaxSize::MinContent => min_content,
+        MaxSize::MaxContent => max_content,
+        MaxSize::FitContentFunction(limit) => Some(fit_content_dimension(
+            &limit.0,
+            axis,
+            min_content,
+            max_content,
+            parent_size,
+            available_content,
+            box_sizing,
+            box_floor,
+        )),
+        MaxSize::None
+        | MaxSize::LengthPercentage(_)
+        | MaxSize::FitContent
+        | MaxSize::Stretch
+        | MaxSize::WebkitFillAvailable => None,
+        MaxSize::AnchorSizeFunction(_) | MaxSize::AnchorContainingCalcFunction(_) => {
+            unreachable!("anchor sizing is pref-dead under the lynx feature")
+        }
     }
 }
 
@@ -831,15 +867,11 @@ fn prepare_intrinsic_sizes<N>(
     }
 
     for axis in Axis::ALL {
-        let raw_size = size_keyword(axis.size_ref(&item.raw_size));
-        let raw_min = size_keyword(axis.size_ref(&item.raw_min_size));
-        let raw_max = max_size_keyword(axis.size_ref(&item.raw_max_size));
-        let needs_min = [&raw_size, &raw_min, &raw_max]
-            .into_iter()
-            .any(needs_min_content);
-        let needs_max = [&raw_size, &raw_min, &raw_max]
-            .into_iter()
-            .any(needs_max_content);
+        let raw_size = axis.size_ref(&item.raw_size);
+        let raw_min = axis.size_ref(&item.raw_min_size);
+        let raw_max = axis.size_ref(&item.raw_max_size);
+        let needs_min = needs_min_content(raw_size, raw_min, raw_max);
+        let needs_max = needs_max_content(raw_size, raw_min, raw_max);
         if !needs_min && !needs_max {
             continue;
         }
@@ -864,7 +896,27 @@ fn prepare_intrinsic_sizes<N>(
         });
         let floor = axis.size(item.box_floor());
         let preferred = resolve_intrinsic_dimension(
-            &raw_size,
+            raw_size,
+            axis,
+            min_content,
+            max_content,
+            parent_size,
+            available_content,
+            item.box_sizing,
+            floor,
+        );
+        let min = resolve_intrinsic_dimension(
+            raw_min,
+            axis,
+            min_content,
+            max_content,
+            parent_size,
+            available_content,
+            item.box_sizing,
+            floor,
+        );
+        let max = resolve_intrinsic_max_dimension(
+            raw_max,
             axis,
             min_content,
             max_content,
@@ -874,28 +926,10 @@ fn prepare_intrinsic_sizes<N>(
             floor,
         );
         axis.set_size(&mut item.intrinsic_preferred_size, preferred);
-        if let Some(min) = resolve_intrinsic_dimension(
-            &raw_min,
-            axis,
-            min_content,
-            max_content,
-            parent_size,
-            available_content,
-            item.box_sizing,
-            floor,
-        ) {
+        if let Some(min) = min {
             axis.set_size(&mut item.min_size, Some(min));
         }
-        if let Some(max) = resolve_intrinsic_dimension(
-            &raw_max,
-            axis,
-            min_content,
-            max_content,
-            parent_size,
-            available_content,
-            item.box_sizing,
-            floor,
-        ) {
+        if let Some(max) = max {
             axis.set_size(&mut item.max_size, Some(max));
         }
     }
@@ -937,9 +971,9 @@ where
         let line = axis.size(constraints);
         let has_one_sided_constraint =
             matches!((line.start, line.end), (Some(_), None) | (None, Some(_)));
-        let raw_size = size_keyword(axis.size_ref(&item.raw_size));
+        let raw_size = axis.size_ref(&item.raw_size);
         let fit_content_needs_one_sided_measurement =
-            matches!(raw_size, SizeKeyword::FitContent(_)) && has_one_sided_constraint;
+            matches!(raw_size, StyleSize::FitContentFunction(_)) && has_one_sided_constraint;
         let constrained = constrained_border_size(line, axis.margin_sum(item.margin)).map(|size| {
             clamp_axis(
                 size,
@@ -970,7 +1004,7 @@ where
                 let child_available =
                     subtract_available_space(axis.size(available_space), margin_sum);
                 let fitted_child_available = fit_content_available(
-                    &raw_size,
+                    raw_size,
                     axis,
                     parent_size,
                     child_available,
@@ -1009,7 +1043,7 @@ where
                     (_, _, available) => available,
                 };
                 fit_content_available(
-                    &raw_size,
+                    raw_size,
                     axis,
                     parent_size,
                     one_sided_available,
@@ -1136,7 +1170,6 @@ fn position_axis<N>(
     order: &[usize],
     axis: Axis,
     parent_size: Size<Option<f32>>,
-    lookup: &IdLookup,
 ) -> Bounds
 where
     N: LayoutNode,
@@ -1144,7 +1177,7 @@ where
 {
     let mut bounds = Bounds::new(axis.size(parent_size));
     for &index in order {
-        let constraints = axis_constraints(&items[index], axis, parent_size, lookup, items, true);
+        let constraints = axis_constraints(&items[index], axis, parent_size, items, true);
         let position = position_from_constraints(&items[index], axis, constraints, bounds);
         axis.set_position(&mut items[index].positions, position);
         bounds.include(position);
@@ -1156,7 +1189,6 @@ fn measure_all<N>(
     items: &mut [RelativeItem<N>],
     parent_size: Size<Option<f32>>,
     available_content: Size<AvailableSpace>,
-    lookup: &IdLookup,
     allow_item_references: bool,
 ) where
     N: LayoutNode,
@@ -1164,13 +1196,7 @@ fn measure_all<N>(
 {
     for index in 0..items.len() {
         prepare_intrinsic_sizes(&mut items[index], parent_size, available_content);
-        let constraints = all_constraints(
-            &items[index],
-            parent_size,
-            lookup,
-            items,
-            allow_item_references,
-        );
+        let constraints = all_constraints(&items[index], parent_size, items, allow_item_references);
         let input = measurement_input(&items[index], constraints, parent_size, available_content);
         measure_item(&mut items[index], input);
     }
@@ -1181,7 +1207,6 @@ fn one_pass_layout<N>(
     order: &[usize],
     parent_size: Size<Option<f32>>,
     available_content: Size<AvailableSpace>,
-    lookup: &IdLookup,
 ) -> Size<Bounds>
 where
     N: LayoutNode,
@@ -1193,7 +1218,7 @@ where
     );
     for &index in order {
         prepare_intrinsic_sizes(&mut items[index], parent_size, available_content);
-        let constraints = all_constraints(&items[index], parent_size, lookup, items, true);
+        let constraints = all_constraints(&items[index], parent_size, items, true);
         let input = measurement_input(&items[index], constraints, parent_size, available_content);
         measure_item(&mut items[index], input);
 
@@ -1279,38 +1304,25 @@ where
 {
     // Initial measurement only has parent-edge constraints. Sibling edges
     // become available as the separate axis orders are positioned.
-    measure_all(items, initial_parent_size, available_content, lookup, false);
+    measure_all(items, initial_parent_size, available_content, false);
     let _ = position_axis(
         items,
         horizontal_order,
         Axis::Horizontal,
         initial_parent_size,
-        lookup,
     );
-    let _ = position_axis(
-        items,
-        vertical_order,
-        Axis::Vertical,
-        initial_parent_size,
-        lookup,
-    );
+    let _ = position_axis(items, vertical_order, Axis::Vertical, initial_parent_size);
 
     // Refine both-sided sibling constraints and selectively remeasure.
-    measure_all(items, initial_parent_size, available_content, lookup, true);
+    measure_all(items, initial_parent_size, available_content, true);
     let horizontal_bounds = position_axis(
         items,
         horizontal_order,
         Axis::Horizontal,
         initial_parent_size,
-        lookup,
     );
-    let mut vertical_bounds = position_axis(
-        items,
-        vertical_order,
-        Axis::Vertical,
-        initial_parent_size,
-        lookup,
-    );
+    let mut vertical_bounds =
+        position_axis(items, vertical_order, Axis::Vertical, initial_parent_size);
 
     let outer_width = final_outer_axis(
         initial_outer.width,
@@ -1337,23 +1349,16 @@ where
             horizontal_order,
             Axis::Horizontal,
             resolved_parent_size,
-            lookup,
         );
-        measure_all(items, resolved_parent_size, available_content, lookup, true);
+        measure_all(items, resolved_parent_size, available_content, true);
         let _ = position_axis(
             items,
             horizontal_order,
             Axis::Horizontal,
             resolved_parent_size,
-            lookup,
         );
-        vertical_bounds = position_axis(
-            items,
-            vertical_order,
-            Axis::Vertical,
-            resolved_parent_size,
-            lookup,
-        );
+        vertical_bounds =
+            position_axis(items, vertical_order, Axis::Vertical, resolved_parent_size);
     }
 
     let outer_height = final_outer_axis(
@@ -1375,15 +1380,8 @@ where
         horizontal_order,
         Axis::Horizontal,
         resolved_parent_size,
-        lookup,
     );
-    let _ = position_axis(
-        items,
-        vertical_order,
-        Axis::Vertical,
-        resolved_parent_size,
-        lookup,
-    );
+    let _ = position_axis(items, vertical_order, Axis::Vertical, resolved_parent_size);
 
     Size::new(outer_width, outer_height)
 }
@@ -1539,7 +1537,7 @@ where
         outer: initial_outer,
         inner: initial_inner,
         available_inner,
-    } = resolve_container_box(node, &style, input);
+    } = resolve_container_box(&style, input);
 
     let initial_parent_size = Size::new(
         outer_definite
@@ -1597,13 +1595,7 @@ where
 
     let outer_size = if layout_once {
         let order = dependency_order(&items, DependencyScope::Combined);
-        let bounds = one_pass_layout(
-            &mut items,
-            &order,
-            initial_parent_size,
-            available_content,
-            &lookup,
-        );
+        let bounds = one_pass_layout(&mut items, &order, initial_parent_size, available_content);
         Size::new(
             final_outer_axis(
                 initial_outer.width,

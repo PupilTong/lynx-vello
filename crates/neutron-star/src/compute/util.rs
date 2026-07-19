@@ -14,10 +14,110 @@ use stylo::values::computed::{
     NonNegativeLengthPercentage, Overflow, Size as StyleSize,
 };
 use stylo::values::generics::position::PreferredRatio;
+use stylo::values::specified::align::AlignFlags;
 
 use crate::geometry::{Edges, Point, Size};
 use crate::style::CoreStyle;
-use crate::tree::{AvailableSpace, LayoutInput, LayoutNode, SizingMode};
+use crate::tree::{AvailableSpace, LayoutInput, SizingMode};
+
+/// Interprets one alignment property's [`AlignFlags`] as item
+/// self-alignment, yielding the canonical keyword subset the Flexbox and
+/// Grid algorithms compare against (`START`/`END`/`FLEX_START`/`FLEX_END`/
+/// `CENTER`/`BASELINE`/`STRETCH`).
+///
+/// `None` means `auto`/`normal` — the caller applies its contextual default.
+/// Normalization policy (design amendment F): the engine interprets the
+/// flags it understands; `SAFE`/`UNSAFE` are stripped by
+/// [`AlignFlags::value`] (safe fallback ignored, as before the vocabulary
+/// swap); last-baseline uses its specified fallback (the end edge, CSS Box
+/// Alignment §4.2); the physical `LEFT`/`RIGHT` keywords map through the
+/// alignment container's inline direction where the aligned axis is the
+/// horizontal one (`inline_axis`) and fall back to start otherwise;
+/// `self-start`/`self-end` (unreachable from the lynx grammar) and unknown
+/// fabricated values fall back to start rather than crashing, because
+/// cascade-less hosts may fabricate flag values.
+pub(super) fn normalize_item_alignment(
+    flags: AlignFlags,
+    inline_axis: bool,
+    rtl: bool,
+) -> Option<AlignFlags> {
+    let value = flags.value();
+    if value == AlignFlags::AUTO || value == AlignFlags::NORMAL {
+        None
+    } else if value == AlignFlags::LAST_BASELINE {
+        // Last-baseline sharing is not implemented; its specified fallback
+        // alignment is the end edge (CSS Box Alignment §4.2).
+        Some(AlignFlags::END)
+    } else if value == AlignFlags::START
+        || value == AlignFlags::END
+        || value == AlignFlags::FLEX_START
+        || value == AlignFlags::FLEX_END
+        || value == AlignFlags::CENTER
+        || value == AlignFlags::BASELINE
+        || value == AlignFlags::STRETCH
+    {
+        Some(value)
+    } else if value == AlignFlags::LEFT && inline_axis {
+        Some(if rtl {
+            AlignFlags::END
+        } else {
+            AlignFlags::START
+        })
+    } else if value == AlignFlags::RIGHT && inline_axis {
+        Some(if rtl {
+            AlignFlags::START
+        } else {
+            AlignFlags::END
+        })
+    } else {
+        Some(AlignFlags::START)
+    }
+}
+
+/// Interprets one alignment property's [`AlignFlags`] as content
+/// distribution, yielding the canonical keyword subset the Flexbox and Grid
+/// algorithms compare against (`START`/`END`/`FLEX_START`/`FLEX_END`/
+/// `CENTER`/`STRETCH`/`SPACE_BETWEEN`/`SPACE_AROUND`/`SPACE_EVENLY`).
+///
+/// `None` means `normal`; the caller applies the property's contextual
+/// default. The flag policy matches [`normalize_item_alignment`]; baseline
+/// content-alignment (unimplemented) and unknown fabricated values fall back
+/// to their specified fallback: start.
+pub(super) fn normalize_content_alignment(
+    flags: AlignFlags,
+    inline_axis: bool,
+    rtl: bool,
+) -> Option<AlignFlags> {
+    let value = flags.value();
+    if value == AlignFlags::AUTO || value == AlignFlags::NORMAL {
+        None
+    } else if value == AlignFlags::START
+        || value == AlignFlags::END
+        || value == AlignFlags::FLEX_START
+        || value == AlignFlags::FLEX_END
+        || value == AlignFlags::CENTER
+        || value == AlignFlags::STRETCH
+        || value == AlignFlags::SPACE_BETWEEN
+        || value == AlignFlags::SPACE_AROUND
+        || value == AlignFlags::SPACE_EVENLY
+    {
+        Some(value)
+    } else if value == AlignFlags::LEFT && inline_axis {
+        Some(if rtl {
+            AlignFlags::END
+        } else {
+            AlignFlags::START
+        })
+    } else if value == AlignFlags::RIGHT && inline_axis {
+        Some(if rtl {
+            AlignFlags::START
+        } else {
+            AlignFlags::END
+        })
+    } else {
+        Some(AlignFlags::START)
+    }
+}
 
 /// Node handle and order-modified paint index shared by formatting
 /// algorithm scratch.
@@ -555,12 +655,11 @@ pub(super) fn resolve_gap(
     clippy::inline_always,
     reason = "avoids a large resolver result and copy chain in release LLVM IR"
 )]
-pub(super) fn resolve_item_box<N: LayoutNode>(
-    node: N,
+pub(super) fn resolve_item_box(
     style: &impl CoreStyle,
     percentage_basis: Size<Option<f32>>,
 ) -> ResolvedItemBox {
-    resolve_item_box_with_bases(node, style, percentage_basis, percentage_basis.width)
+    resolve_item_box_with_bases(style, percentage_basis, percentage_basis.width)
 }
 
 /// Resolves an item's box when sizing percentages and physical edge
@@ -574,8 +673,7 @@ pub(super) fn resolve_item_box<N: LayoutNode>(
     clippy::inline_always,
     reason = "avoids a large resolver result and copy chain in release LLVM IR"
 )]
-pub(super) fn resolve_item_box_with_bases<N: LayoutNode>(
-    _node: N,
+pub(super) fn resolve_item_box_with_bases(
     style: &impl CoreStyle,
     size_percentage_basis: Size<Option<f32>>,
     edge_inline_basis: Option<f32>,
@@ -636,8 +734,7 @@ pub(super) fn resolve_item_box_with_bases<N: LayoutNode>(
 
 /// Resolves the common container box before algorithm-specific sizing.
 #[inline]
-pub(super) fn resolve_container_box<N: LayoutNode>(
-    _node: N,
+pub(super) fn resolve_container_box(
     style: &impl CoreStyle,
     input: LayoutInput,
 ) -> ResolvedContainerBox {
@@ -809,6 +906,84 @@ mod tests {
                 Some(10.0),
             ),
             5.0
+        );
+    }
+
+    #[test]
+    fn item_align_flags_normalize_with_physical_and_fallback_handling() {
+        assert_eq!(
+            normalize_item_alignment(AlignFlags::AUTO, true, false),
+            None
+        );
+        assert_eq!(
+            normalize_item_alignment(AlignFlags::NORMAL, false, false),
+            None
+        );
+        // The SAFE qualifier is stripped; the value nibble decides.
+        assert_eq!(
+            normalize_item_alignment(AlignFlags::SAFE | AlignFlags::CENTER, false, false),
+            Some(AlignFlags::CENTER)
+        );
+        // Last baseline uses its specified fallback: the end edge.
+        assert_eq!(
+            normalize_item_alignment(AlignFlags::LAST_BASELINE, false, false),
+            Some(AlignFlags::END)
+        );
+        // Physical keywords map through direction on the inline axis...
+        assert_eq!(
+            normalize_item_alignment(AlignFlags::LEFT, true, false),
+            Some(AlignFlags::START)
+        );
+        assert_eq!(
+            normalize_item_alignment(AlignFlags::LEFT, true, true),
+            Some(AlignFlags::END)
+        );
+        assert_eq!(
+            normalize_item_alignment(AlignFlags::RIGHT, true, true),
+            Some(AlignFlags::START)
+        );
+        // ...and fall back to start in the block axis.
+        assert_eq!(
+            normalize_item_alignment(AlignFlags::RIGHT, false, false),
+            Some(AlignFlags::START)
+        );
+        // Values outside the engine's understood set fall back to start.
+        assert_eq!(
+            normalize_item_alignment(AlignFlags::SELF_START, true, false),
+            Some(AlignFlags::START)
+        );
+        assert_eq!(
+            normalize_item_alignment(AlignFlags::SELF_END, false, false),
+            Some(AlignFlags::START)
+        );
+    }
+
+    #[test]
+    fn content_align_flags_normalize_with_physical_and_fallback_handling() {
+        assert_eq!(
+            normalize_content_alignment(AlignFlags::NORMAL, false, false),
+            None
+        );
+        assert_eq!(
+            normalize_content_alignment(AlignFlags::AUTO, true, false),
+            None
+        );
+        assert_eq!(
+            normalize_content_alignment(AlignFlags::SPACE_BETWEEN, true, false),
+            Some(AlignFlags::SPACE_BETWEEN)
+        );
+        assert_eq!(
+            normalize_content_alignment(AlignFlags::RIGHT, true, false),
+            Some(AlignFlags::END)
+        );
+        assert_eq!(
+            normalize_content_alignment(AlignFlags::RIGHT, false, false),
+            Some(AlignFlags::START)
+        );
+        // Baseline content alignment falls back to start.
+        assert_eq!(
+            normalize_content_alignment(AlignFlags::BASELINE, false, false),
+            Some(AlignFlags::START)
         );
     }
 

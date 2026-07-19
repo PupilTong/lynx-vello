@@ -19,10 +19,7 @@ mod sizing;
 mod tracks;
 mod types;
 
-use alignment::{
-    AlignContent, AlignItems, align_tracks, alignment_spacing_from_free_space,
-    item_alignment_offset, normalize_content_alignment, normalize_item_alignment,
-};
+use alignment::{align_tracks, alignment_spacing_from_free_space, item_alignment_offset};
 use placement::{
     AxisPlacement, GridArea, GridPlacement, PlacementInput, grid_placement, place_items,
     resolve_axis_placement,
@@ -33,13 +30,15 @@ use sizing::{
 };
 use stylo::computed_values::direction;
 use stylo::values::computed::{PositionProperty, Size as StyleSize};
+use stylo::values::specified::align::AlignFlags;
 use tracks::{ExpandedTemplate, MAX_MATERIALIZED_TRACKS, build_axis_tracks, expand_template};
 use types::{Axis, GridItem, TrackSet, TrackSizingFunction};
 
 use super::util::{
     ItemKey, OrderedItem, PendingLayoutItem, ResolvedContainerBox, ResolvedItemBox,
-    apply_aspect_ratio, box_inset_size, clamp, clamp_axis, preferred_size_definiteness,
-    resolve_container_box, resolve_gap, resolve_item_box, sort_and_assign_layout_order,
+    apply_aspect_ratio, box_inset_size, clamp, clamp_axis, normalize_content_alignment,
+    normalize_item_alignment, preferred_size_definiteness, resolve_container_box, resolve_gap,
+    resolve_item_box, sort_and_assign_layout_order,
 };
 use super::{compute_absolute_layout, hide_subtree};
 use crate::geometry::{Edges, Line, Point, Size};
@@ -51,9 +50,9 @@ use crate::tree::{
 
 #[derive(Debug, Clone, Copy)]
 struct ItemDefaults {
-    align_items: AlignItems,
+    align_items: AlignFlags,
     align_items_normal: bool,
-    justify_items: AlignItems,
+    justify_items: AlignFlags,
     /// The container's inline direction (for the physical `left`/`right`
     /// alignment keywords).
     rtl: bool,
@@ -152,7 +151,7 @@ where
         border,
         inset,
         ..
-    } = resolve_item_box(key.node, &style, percentage_basis);
+    } = resolve_item_box(&style, percentage_basis);
     // Percentages (and calc() trees still carrying a percentage) depend on
     // the grid area; the keyword sizes `fit-content`/`stretch`/
     // `-webkit-fill-available` are treated as `auto` (behavior delta #8).
@@ -185,7 +184,7 @@ where
         align_self: normalize_item_alignment(style.align_self().0, false, defaults.rtl)
             .unwrap_or_else(|| {
                 if defaults.align_items_normal && aspect_ratio.is_some() {
-                    AlignItems::Start
+                    AlignFlags::START
                 } else {
                     defaults.align_items
                 }
@@ -256,8 +255,8 @@ fn run_track_sizing<N>(
     inner_basis: Size<Option<f32>>,
     available: Size<AvailableSpace>,
     gap: Size<f32>,
-    justify_content: AlignContent,
-    align_content: AlignContent,
+    justify_content: AlignFlags,
+    align_content: AlignFlags,
 ) -> (TrackSet, TrackSet)
 where
     N: LayoutNode,
@@ -336,7 +335,6 @@ where
                             item,
                             Axis::Horizontal,
                             Some(initial_column_cross_tracks),
-                            inner_basis,
                         )
                     },
                 ),
@@ -379,7 +377,6 @@ where
                 item,
                 Axis::Horizontal,
                 Some(CrossAxisTracks::resolved(&rows)),
-                inner_basis,
             );
             let tolerance = f32::EPSILON * before.abs().max(after.abs()).max(1.0);
             column_feedback_changed |= (before - after).abs() > tolerance;
@@ -490,7 +487,7 @@ where
         border,
         inset,
         ..
-    } = resolve_item_box(item.key.node, &style, percentage_basis);
+    } = resolve_item_box(&style, percentage_basis);
     item.preferred_size = preferred_size;
     item.min_size = min_size;
     item.max_size = max_size;
@@ -542,7 +539,7 @@ where
     let baseline_item_count = items
         .iter()
         .filter(|item| {
-            item.align_self == AlignItems::Baseline
+            item.align_self == AlignFlags::BASELINE
                 && !item.margin_auto.top
                 && !item.margin_auto.bottom
         })
@@ -589,12 +586,12 @@ where
         if intrinsic_height {
             known.height = None;
         }
-        let horizontal_stretch = item.justify_self == AlignItems::Stretch
+        let horizontal_stretch = item.justify_self == AlignFlags::STRETCH
             && known.width.is_none()
             && !intrinsic_width
             && !item.margin_auto.left
             && !item.margin_auto.right;
-        let vertical_stretch = item.align_self == AlignItems::Stretch
+        let vertical_stretch = item.align_self == AlignFlags::STRETCH
             && known.height.is_none()
             && !intrinsic_height
             && !item.margin_auto.top
@@ -708,9 +705,9 @@ where
         let item_baseline = output
             .first_baselines
             .y
-            .or_else(|| (item.align_self == AlignItems::Baseline).then_some(output.size.height));
+            .or_else(|| (item.align_self == AlignFlags::BASELINE).then_some(output.size.height));
         item.measured_baselines = Point::new(output.first_baselines.x, item_baseline);
-        let participates_in_baseline = item.align_self == AlignItems::Baseline
+        let participates_in_baseline = item.align_self == AlignFlags::BASELINE
             && !item.margin_auto.top
             && !item.margin_auto.bottom;
         if !participates_in_baseline {
@@ -739,7 +736,7 @@ where
             node: item.key.node,
             area_row: item.area.row.start,
             area_column: item.area.column.start,
-            align_baseline: item.align_self == AlignItems::Baseline
+            align_baseline: item.align_self == AlignFlags::BASELINE
                 && !item.margin_auto.top
                 && !item.margin_auto.bottom,
             area_top: content_origin.y + area_offset.y,
@@ -1146,15 +1143,15 @@ where
     // `normal` behaves as `stretch` for both content distribution and item
     // alignment on a grid container.
     let align_content = normalize_content_alignment(style.align_content().primary(), false, rtl)
-        .unwrap_or(AlignContent::Stretch);
+        .unwrap_or(AlignFlags::STRETCH);
     let justify_content = normalize_content_alignment(style.justify_content().primary(), true, rtl)
-        .unwrap_or(AlignContent::Stretch);
+        .unwrap_or(AlignFlags::STRETCH);
     let align_items = normalize_item_alignment(style.align_items().0, false, rtl);
     let item_defaults = ItemDefaults {
-        align_items: align_items.unwrap_or(AlignItems::Stretch),
+        align_items: align_items.unwrap_or(AlignFlags::STRETCH),
         align_items_normal: align_items.is_none(),
         justify_items: normalize_item_alignment(style.justify_items().computed.0.0, true, rtl)
-            .unwrap_or(AlignItems::Stretch),
+            .unwrap_or(AlignFlags::STRETCH),
         rtl,
     };
     let style_definite = if input.sizing_mode == SizingMode::ContentSize {
@@ -1166,7 +1163,7 @@ where
         input.definite_dimensions.width || style_definite.width,
         input.definite_dimensions.height || style_definite.height,
     );
-    let mut metrics = resolve_container_box(node, &style, input);
+    let mut metrics = resolve_container_box(&style, input);
     if input.sizing_mode != SizingMode::ContentSize {
         let preferred = style.size();
         if metrics.inner.width.is_none() {
