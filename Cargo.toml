@@ -41,6 +41,7 @@ stylo = { path = "vendor/stylo/style", package = "stylo", features = ["lynx"] }
 stylo_atoms = { path = "vendor/stylo/stylo_atoms" }
 dom = { path = "vendor/stylo/stylo_dom", package = "stylo_dom" }
 stylo_traits = { path = "vendor/stylo/style_traits", package = "stylo_traits" }
+style_traits = { path = "vendor/stylo/style_traits", package = "stylo_traits" }
 selectors = { path = "vendor/stylo/selectors" }
 servo_arc = { path = "vendor/stylo/servo_arc" }
 

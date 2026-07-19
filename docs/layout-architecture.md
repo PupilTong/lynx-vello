@@ -18,8 +18,8 @@ Relative Layout Level 1, Starlight Linear algorithms, and the default-on
 Parley text measurement core are implemented and conformance-tested against
 plain-storage mock hosts. Grid excludes subgrid and named lines/areas, which
 are outside the current protocol. Text truncation, inline boxes, and the
-concrete Widget/stylo adapter (including text-style translation and session
-wiring) are not implemented yet. Crate
+concrete Widget/stylo adapter (including text-style translation and
+text-context/artifact-slot storage wiring) are not implemented yet. Crate
 rustdoc is the API reference; this document is the rationale, performance
 architecture, and remaining plan.
 
@@ -49,44 +49,52 @@ Text behavior is inventoried in
 │ styles and tree                  │     │ tree/style/text protocols       │
 │                                  │     │ flex / grid / relative / linear │
 │ future runtime integration:      │────▶│ text feature: Parley measure    │
-│ source/session/display dispatch  │     │ leaf/hidden/cache/position/round│
+│ LayoutNode handles + dispatch    │     │ leaf/hidden/cache/position/round│
 │ fixed/dirty/staggered integration│     │ no host storage, DOM, or stylo  │
 └──────────────────────────────────┘     └─────────────────────────────────┘
 ```
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| `neutron-star` | Implemented Flex, Grid, Relative, and Linear algorithms; their generic value/style/source protocols (including `relative-*` and `linear-*`); the parley-free text style/run protocol; leaf boxing, hidden-subtree cleanup, positioned layout, rounding; shared private arithmetic; geometry and layout IO; cache semantics | Node/style/content storage, display dispatch, DOM/widget/stylo types, resolved device-unit policy (`rpx`, etc.), stacking/paint order |
-| `neutron-star::text` (`text` feature, default-on) | Parley context/font registration, whitespace processing, shaping, line breaking, intrinsic and height-for-width measurement, baselines, and retained `TextLayout` artifact types | Text truncation and ellipsis, inline boxes, paint styling, stylo/widget translation, resource fetching, or host cache/session storage |
-| Future runtime integration *(location not yet established)* | Immutable views over the widget/style tree; mutable layout/cache session; display dispatch; Relative/Linear/text computed-style and attribute translation; text-context/artifact-slot storage; `staggered` integration; dirty tracking + cache invalidation; fixed/sticky lowering | A second Flex/Grid/Relative/Linear/text-measurement implementation, engine-side copies of styles |
+| `neutron-star` | Implemented Flex, Grid, Relative, and Linear algorithms; their generic value and style-view protocols (including `relative-*` and `linear-*`); the parley-free text style/run protocol; leaf boxing, hidden-subtree cleanup, positioned layout, rounding; shared private arithmetic; geometry and layout IO; cache semantics | Node/style/content storage, display dispatch, DOM/widget/stylo types, resolved device-unit policy (`rpx`, etc.), stacking/paint order |
+| `neutron-star::text` (`text` feature, default-on) | Parley context/font registration, whitespace processing, shaping, line breaking, intrinsic and height-for-width measurement, baselines, and retained `TextLayout` artifact types | Text truncation and ellipsis, inline boxes, paint styling, stylo/widget translation, resource fetching, or host cache and per-node slot storage |
+| Future runtime integration *(location not yet established)* | The `LayoutNode` handle impl over the widget/style tree (style views, display dispatch, interior-mutable per-node layout/cache slots); Relative/Linear/text computed-style and attribute translation; text-context/artifact-slot storage; `staggered` integration; dirty tracking + cache invalidation; fixed/sticky lowering | A second Flex/Grid/Relative/Linear/text-measurement implementation, engine-side copies of styles |
 
 The engine/host seam is exactly the seam that makes the crate publishable.
 The Lynx-specific values and algorithms for Relative and Linear live in
 `neutron-star`, but the crate still owns no host storage or style-engine
 representation. Both are first-class peers rather than translations into
 Flex or Grid. The still-future concrete adapter is otherwise mechanical:
-computed-style accessor translation, separate source/session storage, and one
-display-mode dispatch.
+computed-style accessor translation, per-node layout slots on the host's
+nodes, and one display-mode dispatch — the same `Copy`-handle shape the tree
+already implements for stylo's `TNode`/`TElement`.
 
 ## The protocol in one page
 
-Traits (`neutron_star::tree` and `neutron_star::style`), layered by capability
-so each entry point demands only what it uses:
+One tree trait (`neutron_star::tree`) plus style-view traits
+(`neutron_star::style`). The host hands the engine **`Copy` node handles**
+borrowed from its tree for the duration of one layout flush — a plain
+`&'dom Node`, or a `(&'dom Tree, index)` pair. The trait carries no lifetime
+parameter and no GATs; the concrete handle type carries the tree lifetime,
+exactly like stylo's `TNode`/`TElement` (which w3c-dom already implements
+directly on `&'a Node<T>`):
 
-| Trait | Adds | Consumed by |
+| Item | Provides | Consumed by |
 | --- | --- | --- |
-| `TraverseTree` | immutable child iteration (GAT iterator) | everything |
-| `LayoutSource: TraverseTree` | immutable `CoreStyle` views and `resolve_calc` | all algorithms |
-| `FlexSource: LayoutSource` | immutable flex container/item style views | the L1 flexbox algorithm |
-| `GridSource: LayoutSource` | immutable grid container/item views, including GAT track-list iterators | the L2 grid algorithm |
-| `RelativeSource: LayoutSource` | immutable relative container/item style views | the Starlight Relative L1 algorithm |
-| `LinearSource: LayoutSource` | immutable Starlight Linear container/item style views | the Linear algorithm |
+| `LayoutNode: Copy + Debug` | child iteration (`children`/`child_count`), the borrowed `Style` view, `resolve_calc`, **`compute_child_layout` (the host display/algorithm dispatch point)**, unrounded/final layout and static-position writes, and per-node cache slots (all three cache methods required — a caching host cannot accidentally omit `cache_clear`; uncached hosts no-op all three) | everything |
+| `CoreStyle` | the box-universal style view every algorithm reads | all algorithms |
+| `FlexContainerStyle`/`FlexItemStyle` | flex views (bounds on `N::Style`) | the L1 flexbox algorithm |
+| `GridContainerStyle`/`GridItemStyle` | grid views, including GAT track-list iterators | the L2 grid algorithm |
+| `RelativeContainerStyle`/`RelativeItemStyle` | relative views | the Starlight Relative L1 algorithm |
+| `LinearContainerStyle`/`LinearItemStyle` | Starlight Linear views | the Linear algorithm |
 | `TextContainerStyle: CoreStyle` | paragraph-level alignment, whitespace, word-break, and indent values | the Parley `TextMeasurer` |
 | `TextRunStyle` | run-level font, spacing, line-height, family, feature, and variation views | the Parley `TextMeasurer` |
-| `LayoutState` | mutable unrounded-layout and static-position storage | committing algorithms and hidden cleanup |
-| `CacheState` | mutable per-node measurement-cache slots | `compute_cached_layout` and hidden cleanup |
-| `LayoutSession<Source>: LayoutState + CacheState` | **`compute_child_layout(source, …)`**, the host display/algorithm dispatch point | recursive algorithms |
-| `RoundState` | mutable unrounded → final layout storage | `round_layout` |
+
+One `Style` associated type serves every algorithm: hosts implement the
+container/item style traits once, on one view type, and each entry point
+narrows `N::Style` with the bounds it actually needs. Everything the engine
+reads through a handle is immutable for the flush; everything it writes goes
+through the handle into host-owned **interior-mutable per-node slots**.
 
 Entry points (`neutron_star::compute`) are free generic functions — there is
 no engine object, so unused entry points never monomorphize into the host.
@@ -96,32 +104,24 @@ Implemented machinery: `compute_root_layout`, `compute_leaf_layout`
 (keyed on the **complete `LayoutInput`** — see the caching section),
 `compute_absolute_layout` (the positioned pass for out-of-flow nodes whose
 containing block is not their formatting parent), and
-`round_layout(source, state, root, scale)` (device-pixel snapping), plus
+`round_layout(root, scale)` (device-pixel snapping), plus
 `compute_flexbox_layout`, `compute_grid_layout`, `compute_relative_layout`,
 and `compute_linear_layout`. All four algorithms share private allocation-free
 length, edge, box-sizing, aspect-ratio, clamp, and relative-offset machinery.
 Their public entry points use the same fixed shape:
 
 ```rust
-pub fn compute_flexbox_layout<Source, Session>(
-    source: &Source, session: &mut Session, node: NodeId, input: LayoutInput)
-    -> LayoutOutput
-where Source: FlexSource, Session: LayoutSession<Source>;
+pub fn compute_flexbox_layout<N>(node: N, input: LayoutInput) -> LayoutOutput
+where N: LayoutNode, N::Style: FlexContainerStyle + FlexItemStyle;
 
-pub fn compute_grid_layout<Source, Session>(
-    source: &Source, session: &mut Session, node: NodeId, input: LayoutInput)
-    -> LayoutOutput
-where Source: GridSource, Session: LayoutSession<Source>;
+pub fn compute_grid_layout<N>(node: N, input: LayoutInput) -> LayoutOutput
+where N: LayoutNode, N::Style: GridContainerStyle + GridItemStyle;
 
-pub fn compute_relative_layout<Source, Session>(
-    source: &Source, session: &mut Session, node: NodeId, input: LayoutInput)
-    -> LayoutOutput
-where Source: RelativeSource, Session: LayoutSession<Source>;
+pub fn compute_relative_layout<N>(node: N, input: LayoutInput) -> LayoutOutput
+where N: LayoutNode, N::Style: RelativeContainerStyle + RelativeItemStyle;
 
-pub fn compute_linear_layout<Source, Session>(
-    source: &Source, session: &mut Session, node: NodeId, input: LayoutInput)
-    -> LayoutOutput
-where Source: LinearSource, Session: LayoutSession<Source>;
+pub fn compute_linear_layout<N>(node: N, input: LayoutInput) -> LayoutOutput
+where N: LayoutNode, N::Style: LinearContainerStyle + LinearItemStyle;
 ```
 
 All four signatures are public; hosts select them in their display dispatch.
@@ -143,8 +143,8 @@ Hidden-subtree cleanup is deliberately outside this sizing API.
 collapsing is the known future widener).
 
 **Recursion round-trips through the host.** An algorithm reads topology and
-styles from `source`, then calls
-`session.compute_child_layout(source, child, input)`. The host
+styles through node handles, then calls
+`child.compute_child_layout(input)`. The host's implementation
 first handles `BoxGenerationMode::None` by calling `hide_subtree` and
 returning `LayoutOutput::HIDDEN`; this explicit cleanup precedes and bypasses
 the cache. For a generated box, the host routes to a neutron-star algorithm,
@@ -156,7 +156,7 @@ once:
    non-CSS `display: relative` (id-anchored sibling constraint solving) and
    `display: linear` (Android `LinearLayout` semantics:
    `linear-weight`/`linear-gravity`/…) are implemented peers in
-   `neutron-star`, against the same source and session protocol. The `<list>`
+   `neutron-star`, against the same node-handle protocol. The `<list>`
    component's staggered-grid remains a future host peer. The engine has **no
    `Display`
    enum** — dispatch identity belongs to the future concrete host adapter.
@@ -169,34 +169,38 @@ once:
 
 ## Design decisions and their rationale
 
-**No `dyn`, enforced structurally.** Source and measurement traits carry GATs
-(borrowed child iterators, borrowed style views, borrowed grid track
-iterators), which makes them non-object-safe: `dyn LayoutSource` and
-`dyn LeafMeasurer` are compile errors — there is a `compile_fail` doctest
-pinning this. What the constraint buys: every
-host⇄engine call site monomorphizes, inlines, and const-folds (style
+**No `dyn`, enforced structurally.** `LayoutNode` is dyn-incompatible (a
+`Copy` supertrait plus associated types without defaults), and `LeafMeasurer`
+carries a GAT: `dyn LayoutNode` and `dyn LeafMeasurer` are compile errors —
+there is a `compile_fail` doctest pinning this. What the constraint buys:
+every host⇄engine call site monomorphizes, inlines, and const-folds (style
 accessors returning constants collapse into the algorithm); no vtable
-indirection in the hottest recursion of the frame. Mutable layout/cache/round
-capability traits additionally require `Sized`, so they cannot be passed as
-trait objects around the GAT boundary. The accepted costs:
+indirection in the hottest recursion of the frame. The accepted costs:
 compile time and per-host codegen (one copy of the algorithms per concrete
-source/session combination — in practice one pair per binary), and no
-heterogeneous "list of engines" (not a goal).
+handle type — in practice one per binary), and no heterogeneous "list of
+engines" (not a goal).
 
-**The host owns—and separates—all storage.** Immutable semantic data
-(topology, child order, computed styles, calc expressions, and leaf content)
-lives behind `LayoutSource`; mutable results, caches, measurement contexts,
-and retained text artifacts live behind `LayoutSession`. Both sides use the
-same opaque `NodeId(u64)`. This is a real storage/lifetime boundary, not two
-traits implemented on one `&mut Tree`: source views must remain valid while
-recursion mutates the session. A host normally uses parallel document/layout
-arenas or constructs an ephemeral session borrowing its mutable stores.
-`RefCell`/`UnsafeCell` is not an acceptable substitute for this split.
+**The host owns all storage; handles are the stylo shape.** A node handle
+reaches two kinds of per-node data. Immutable epoch data — topology, child
+order, computed styles, calc expressions, leaf content — is read through
+plain shared borrows, so a borrowed style view stays valid across recursive
+child layout by construction (the protocol has no `&mut` anywhere). Mutable
+results — unrounded/final layouts, static positions, cache slots,
+measurement contexts, retained text artifacts — live in **host-owned
+interior-mutable slots on the nodes** (`Cell`/`RefCell`; or
+`AtomicRefCell`/`UnsafeCell` under the host's own discipline, exactly how
+the tree already stores stylo's per-element style data). Layout is
+single-threaded, and two rules keep runtime borrow tracking trivial: host
+dispatch must not hold a per-node slot borrow across the recursive
+`compute_child_layout` call, and the engine never re-enters a node's cache
+while that node's leaf measurer is live. Per-node derived state therefore
+lives *on the node* — no id-keyed side tables, no parallel source/session
+arenas kept in lockstep.
 
-A layout run observes one immutable **source epoch**. Style, content, child
-order, and `NodeId` validity cannot change during recursion; such mutations
-are staged, invalidate the affected box and measurement caches, and start a
-new epoch. Virtualized components therefore realize their visible topology
+A layout run observes one immutable **epoch**. Style, content, child order,
+and handle validity cannot change during recursion; such mutations are
+staged, invalidate the affected box and measurement caches, and start a new
+epoch. Virtualized components therefore realize their visible topology
 before layout or explicitly restart after realization.
 
 **Style is read through views, in engine vocabulary.** Style traits
@@ -224,8 +228,10 @@ system:
 **`calc()` without a CSS dependency.** Percent-bearing `calc()` can only be
 resolved during layout, and its AST lives in stylo. The protocol carries an
 opaque `CalcHandle(u64)`; algorithms resolve through
-`LayoutSource::resolve_calc(handle, basis)`. Zero parser dependency, full
-`calc()` support.
+`LayoutNode::resolve_calc(handle, basis)`. The resolver is a property of the
+tree, not the node — it must answer identically through any handle of the
+same tree, because algorithms resolve one node's values through whichever
+handle is in scope. Zero parser dependency, full `calc()` support.
 
 **Leaf measurement is generic behavior with a borrowed result view.**
 `LeafMeasurer` is a GAT-based, statically-dispatched interface whose
@@ -235,10 +241,11 @@ view into the concrete `LeafMetrics` POD used by box math. The default-on
 `text` module follows this shape: `TextLayout` retains an owned
 `parley::Layout`, and its borrowed measurement view exposes size and first
 baseline without cloning or reshaping. The host's leaf dispatch constructs a
-node-scoped `TextMeasurer` by borrowing immutable text/style content from the
-source and mutable `TextContext`/artifact slots from the session. Different
-leaf dispatch arms may instantiate `compute_leaf_layout` with different
-concrete measurer types
+node-scoped `TextMeasurer` by borrowing immutable text/style content through
+the handle and mutable `TextContext`/artifact slots from its interior-mutable
+storage (borrows that end before the cache wrapper stores the result).
+Different leaf dispatch arms may instantiate `compute_leaf_layout` with
+different concrete measurer types
 (text, image, custom content), so no common trait object or engine enum is
 required. The text artifact cache is separate from the box cache: measurement
 probes must not evict the committed paint artifact, and the artifact must
@@ -263,13 +270,13 @@ What varies is where the containing block is, encoded per node by the host:
 - `Position::AbsoluteHoisted` — CB is **not** the parent (CSS `fixed`; or
   `absolute` escaping non-positioned ancestors in non-Lynx hosts). The
   parent's algorithm computes the node's flex/grid-aware static position
-  and records it via `LayoutState::set_static_position`, but does not size
+  and records it via `LayoutNode::set_static_position`, but does not size
   or place it. After in-flow layout the host runs the **positioned pass**:
   it resolves the CB node (for Lynx `fixed`: the viewport root, or the
   nearest transformed/filtered/`will-change` ancestor per the W3C rule the
   tracking doc mandates), converts the recorded static position into CB
   padding-box space (all unrounded layouts exist by then), and calls
-  `compute_absolute_layout(source, session, node, cb_padding_box_size,
+  `compute_absolute_layout(node, cb_padding_box_size,
   static_position)`. That entry sizes the node per the CSS abs-pos rules,
   lays out its subtree normally, and *returns* the node's own layout in CB
   space; the host converts it into formatting-parent space and stores it,
@@ -289,8 +296,10 @@ physical edges by the style system before layout.
 
 **Two layout copies, one rounding pass — on the device-pixel grid.**
 Algorithms produce **unrounded** `f32` layouts (`set_unrounded_layout`);
-`round_layout(source, state, root, scale)` derives snapped finals through
-`TraverseTree` + `RoundState`. `scale` is the device-pixel ratio (physical px per CSS px):
+`round_layout(root, scale)` derives snapped finals through the handles'
+`unrounded_layout`/`set_final_layout` (whose impl may target a different
+store, e.g. the paint-facing side of a widget tree). `scale` is the
+device-pixel ratio (physical px per CSS px):
 coordinates are CSS pixels but crisp edges are physical, so snapping is
 `snap(v) = css_round(v × scale) / scale` — on a DPR-2 screen `0.5` CSS px is
 already an exact physical edge and must survive. The cumulative-error-free
@@ -317,7 +326,7 @@ Target: modern multi-core CPUs with wide SIMD, deep caches, and GPUs doing
 the painting — layout's job is to never be the frame's bottleneck.
 
 - **Static dispatch end-to-end** (above). The protocol's hot calls
-  (`child_ids`, style accessors, `compute_child_layout`) are all
+  (`children`, style accessors, `compute_child_layout`) are all
   monomorphized; hosts should `#[inline]` their impls of the first two.
 - **POD boundary.** Geometry and IO types are small `Copy` structs
   (`#[repr(C)]`), passed by value in registers; `f32` throughout (GPU/SIMD
@@ -386,19 +395,19 @@ the painting — layout's job is to never be the frame's bottleneck.
   track/contribution state stays in contiguous vectors. Profiles may justify
   further structure-of-arrays storage or explicit SIMD later; these remain
   engine-internal changes, invisible to the protocol.
-- **Parallelism: designed, deferred, additive.** The immutable source is
-  naturally shareable, but `LayoutSession::compute_child_layout`'s mutable
-  session recursion is inherently sequential — correct for v0 (layout is
-  rarely the bottleneck vs paint/style, and Yoga/Taffy/Starlight are all
-  sequential). The planned extension is a **batched child-layout hook**: a
-  defaulted `LayoutSession` method like
-  `compute_child_layouts(&mut self, source, requests)`
+- **Parallelism: designed, deferred, additive.** Immutable epoch data is
+  naturally shareable, but layout recursion is inherently sequential and the
+  per-node slots assume single-threaded interior mutability — correct for v0
+  (layout is rarely the bottleneck vs paint/style, and Yoga/Taffy/Starlight
+  are all sequential). The planned extension is a **batched child-layout
+  hook**: a defaulted `LayoutNode` method like
+  `compute_child_layouts(self, requests)`
   that algorithms call at fan-out points (independent flex-item measure
   probes, grid item contributions); the default body is today's sequential
   loop, and a parallel host overrides it to shard sub-trees across its own
-  pool (host storage, host threading policy — the engine stays
-  thread-unaware). Adding a defaulted method is semver-minor, so this ships
-  when profiles earn it, without a protocol break.
+  pool with thread-safe slots (host storage, host threading policy — the
+  engine stays thread-unaware). Adding a defaulted method is semver-minor,
+  so this ships when profiles earn it, without a protocol break.
 - **Flex, Grid, Relative, and Linear benchmarks are landed; broader
   performance hardening remains.** The `divan` (CodSpeed-compatible) suite
   measures engine-native workloads through neutron-star's public host
@@ -502,7 +511,7 @@ The automatic minimum size (§4.5, `min-size: auto`) resolves inside steps
    writes, retaining the same `LayoutInput`/cache semantics as flexbox.
 
 Like Flex and Grid, this is a generic neutron-star algorithm over
-`LinearSource` and `LayoutSession<Source>`; it is not yet wired to
+`LayoutNode` handles with Linear style-view bounds; it is not yet wired to
 `WidgetTree` or stylo computed values.
 
 **Grid (L2)** — CSS Grid Level 2 (minus subgrid), as a pipeline:
@@ -560,11 +569,11 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
 
 ## Testing strategy
 
-- **L0/L1/L2/L2R (landed):** `tests/protocol.rs` — a complete mock host implementing
-  every trait over physically separate immutable-source and mutable-session
-  `Vec` storage; proves the protocol is implementable
-  without `dyn` (plus `compile_fail` doctests pinning both the GAT and explicit
-  `Sized` barriers), exercises the GAT track-list machinery and all shared
+- **L0/L1/L2/L2R (landed):** `tests/protocol.rs` — a complete mock host
+  implementing the `LayoutNode` handle protocol over one tree with
+  interior-mutable per-node slots; proves the protocol is implementable
+  without `dyn` (plus a `compile_fail` doctest pinning the barrier),
+  exercises the GAT track-list machinery and all shared
   machinery entry points. `tests/support` is the shared real-protocol host for
   Flex, Linear, Relative, and cross-algorithm Grid coverage; Grid additionally
   keeps a local borrowed-repetition host for its track-list GAT cases.
@@ -619,19 +628,20 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
 - **L2 — grid** *(complete)*: `compute_grid_layout`, `auto-fill`/`auto-fit`,
   dense packing, first-baseline alignment, and direct-child
   grid-area-relative absolute positioning.
-- **L2R — Starlight relative** *(complete)*: `RelativeSource`, the one-pass
-  combined and two-pass per-axis dependency solvers, intrinsic/percentage
-  remeasurement, deterministic cycles, out-of-flow handling, engine-native
-  conformance fixtures, and CodSpeed benchmarks.
+- **L2R — Starlight relative** *(complete)*: the relative style protocol,
+  the one-pass combined and two-pass per-axis dependency solvers,
+  intrinsic/percentage remeasurement, deterministic cycles, out-of-flow
+  handling, engine-native conformance fixtures, and CodSpeed benchmarks.
 - **L3 — Starlight modes + runtime integration** *(partial)*: the Lynx-linear
-  value/style/source protocol, generic `compute_linear_layout` algorithm, and
+  value and style-view protocol, generic `compute_linear_layout` algorithm, and
   feature-gated Parley text measurement core are complete in `neutron-star`.
   Remaining L3 work is the concrete
-  `lynx-widget`/stylo adapter (including `CalcHandle` translation), mutable
-  session and display dispatch, dirty→cache invalidation wiring, the root
+  `lynx-widget`/stylo adapter (including `CalcHandle` translation) — a
+  `LayoutNode` impl with interior-mutable per-node layout/cache slots and
+  display dispatch, dirty→cache invalidation wiring, the root
   fixed-position pass and sticky lowering, Relative and Linear computed-style
   translation, text computed-style/attribute translation, and text-context and
-  artifact-slot session wiring. The integration layer's final module or crate
+  artifact-slot storage wiring. The integration layer's final module or crate
   placement remains undecided; no separate text crate is planned.
 - **L4 — performance**: probe-trace-tuned cache slots, SoA scratch, arena
   exploration, the batched-children parallel hook if profiles justify it.

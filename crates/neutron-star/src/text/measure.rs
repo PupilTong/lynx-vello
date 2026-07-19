@@ -25,10 +25,11 @@ use crate::tree::{AvailableSpace, LayoutGoal};
 /// Node-scoped Parley adapter for a host-owned paragraph.
 ///
 /// The immutable container style and cloneable run iterator normally borrow
-/// from the host's layout source. The mutable [`TextContext`] and
-/// [`ArtifactSlots`] borrow separately from its layout session. `resolve_calc`
-/// is the same host callback used by box layout and is needed only when
-/// `text-indent` contains a `calc()` value.
+/// from the node's epoch-immutable text/style data. The mutable
+/// [`TextContext`] and [`ArtifactSlots`] borrow separately from host-owned
+/// interior-mutable slots; both borrows are node-scoped and end with the
+/// measurer. `resolve_calc` is the same host callback used by box layout and
+/// is needed only when `text-indent` contains a `calc()` value.
 pub struct TextMeasurer<'session, 'source, Container, RunStyle, Runs, ResolveCalc>
 where
     Container: TextContainerStyle,
@@ -51,7 +52,7 @@ where
     Runs: Iterator<Item = TextRun<'source, RunStyle>> + Clone,
     ResolveCalc: Fn(CalcHandle, f32) -> f32,
 {
-    /// Borrows one node's text inputs and session-owned measurement state.
+    /// Borrows one node's text inputs and host-owned measurement state.
     pub fn new(
         context: &'session mut TextContext,
         artifacts: &'session mut ArtifactSlots,

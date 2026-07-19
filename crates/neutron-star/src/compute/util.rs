@@ -4,32 +4,33 @@
 use crate::geometry::{Edges, Point, Size};
 use crate::style::value::{CalcHandle, Dimension, LengthPercentage, LengthPercentageAuto};
 use crate::style::{BoxSizing, CoreStyle, Direction, Overflow};
-use crate::tree::{AvailableSpace, LayoutInput, LayoutSource, NodeId, SizingMode};
+use crate::tree::{AvailableSpace, LayoutInput, LayoutNode, SizingMode};
 
-/// Stable host identity and order-modified paint index shared by formatting
+/// Node handle and order-modified paint index shared by formatting
 /// algorithm scratch.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct ItemKey {
-    pub(super) node: NodeId,
+pub(super) struct ItemKey<N> {
+    pub(super) node: N,
     pub(super) layout_order: u32,
 }
 
 /// Algorithm-neutral ordering data collected before formatting-context item
 /// classification. The field order intentionally packs this to 24 bytes on
-/// 64-bit targets; each algorithm keeps one record per generated child.
+/// 64-bit targets with a one-word handle (32 with a two-word handle); each
+/// algorithm keeps one record per generated child.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct OrderedItem {
-    pub(super) node: NodeId,
+pub(super) struct OrderedItem<N> {
+    pub(super) node: N,
     pub(super) document_index: usize,
     pub(super) css_order: i32,
     pub(super) layout_order: u32,
 }
 
-impl OrderedItem {
+impl<N: Copy> OrderedItem<N> {
     /// Materializes the compact identity copied into algorithm-specific
     /// scratch after ordering is complete.
     #[inline]
-    pub(super) const fn key(self) -> ItemKey {
+    pub(super) const fn key(self) -> ItemKey<N> {
         ItemKey {
             node: self.node,
             layout_order: self.layout_order,
@@ -38,19 +39,19 @@ impl OrderedItem {
 }
 
 /// Access to the common ordering record retained by pre-layout item scratch.
-pub(super) trait PendingLayoutItem {
-    fn ordered(&self) -> &OrderedItem;
-    fn ordered_mut(&mut self) -> &mut OrderedItem;
+pub(super) trait PendingLayoutItem<N> {
+    fn ordered(&self) -> &OrderedItem<N>;
+    fn ordered_mut(&mut self) -> &mut OrderedItem<N>;
 }
 
-impl PendingLayoutItem for OrderedItem {
+impl<N> PendingLayoutItem<N> for OrderedItem<N> {
     #[inline]
-    fn ordered(&self) -> &OrderedItem {
+    fn ordered(&self) -> &OrderedItem<N> {
         self
     }
 
     #[inline]
-    fn ordered_mut(&mut self) -> &mut OrderedItem {
+    fn ordered_mut(&mut self) -> &mut OrderedItem<N> {
         self
     }
 }
@@ -61,7 +62,7 @@ impl PendingLayoutItem for OrderedItem {
 /// Out-of-flow children contribute the initial `order` value (`0`) because
 /// they are not formatting-context items. Both input slices must be in source
 /// order on entry; only `in_flow` is reordered.
-pub(super) fn sort_and_assign_layout_order<Item: PendingLayoutItem>(
+pub(super) fn sort_and_assign_layout_order<N, Item: PendingLayoutItem<N>>(
     in_flow: &mut [Item],
     absolute: &mut [Item],
 ) {
@@ -465,12 +466,12 @@ fn scrollbar_size_from(overflow: Point<Overflow>, width: f32) -> Size<f32> {
     clippy::inline_always,
     reason = "avoids a large resolver result and copy chain in release LLVM IR"
 )]
-pub(super) fn resolve_item_box<Source: LayoutSource>(
-    source: &Source,
+pub(super) fn resolve_item_box<N: LayoutNode>(
+    node: N,
     style: &impl CoreStyle,
     percentage_basis: Size<Option<f32>>,
 ) -> ResolvedItemBox {
-    resolve_item_box_with_bases(source, style, percentage_basis, percentage_basis.width)
+    resolve_item_box_with_bases(node, style, percentage_basis, percentage_basis.width)
 }
 
 /// Resolves an item's box when sizing percentages and physical edge
@@ -484,13 +485,13 @@ pub(super) fn resolve_item_box<Source: LayoutSource>(
     clippy::inline_always,
     reason = "avoids a large resolver result and copy chain in release LLVM IR"
 )]
-pub(super) fn resolve_item_box_with_bases<Source: LayoutSource>(
-    source: &Source,
+pub(super) fn resolve_item_box_with_bases<N: LayoutNode>(
+    node: N,
     style: &impl CoreStyle,
     size_percentage_basis: Size<Option<f32>>,
     edge_inline_basis: Option<f32>,
 ) -> ResolvedItemBox {
-    let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
+    let resolve_calc = |handle, basis| node.resolve_calc(handle, basis);
     let raw_size = style.size();
     let raw_min_size = style.min_size();
     let raw_max_size = style.max_size();
@@ -552,12 +553,12 @@ pub(super) fn resolve_item_box_with_bases<Source: LayoutSource>(
 
 /// Resolves the common container box before algorithm-specific sizing.
 #[inline]
-pub(super) fn resolve_container_box<Source: LayoutSource>(
-    source: &Source,
+pub(super) fn resolve_container_box<N: LayoutNode>(
+    node: N,
     style: &impl CoreStyle,
     input: LayoutInput,
 ) -> ResolvedContainerBox {
-    let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
+    let resolve_calc = |handle, basis| node.resolve_calc(handle, basis);
     let padding = resolve_edges(style.padding(), input.parent_size.width, &resolve_calc);
     let border = resolve_edges(style.border(), input.parent_size.width, &resolve_calc);
     let scrollbar = scrollbar_size(style);
@@ -650,12 +651,12 @@ pub(super) fn resolve_container_box<Source: LayoutSource>(
 
 /// Resolves non-negative row/column gaps against their respective bases.
 #[inline]
-pub(super) fn resolve_gap<Source: LayoutSource>(
-    source: &Source,
+pub(super) fn resolve_gap<N: LayoutNode>(
+    node: N,
     value: Size<LengthPercentage>,
     basis: Size<Option<f32>>,
 ) -> Size<f32> {
-    let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
+    let resolve_calc = |handle, basis| node.resolve_calc(handle, basis);
     Size::new(
         resolve_length_percentage(value.width, basis.width, &resolve_calc)
             .unwrap_or(0.0)
@@ -750,6 +751,9 @@ mod tests {
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn ordered_item_stays_compact_on_64_bit_targets() {
-        assert_eq!(core::mem::size_of::<OrderedItem>(), 24);
+        // One-word handles (a plain `&Node`) keep the historical 24-byte
+        // packing; two-word handles (`(&Tree, index)`) pay one extra word.
+        assert_eq!(core::mem::size_of::<OrderedItem<usize>>(), 24);
+        assert_eq!(core::mem::size_of::<OrderedItem<[usize; 2]>>(), 32);
     }
 }

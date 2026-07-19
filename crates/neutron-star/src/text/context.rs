@@ -9,9 +9,9 @@ use crate::style::TextBrush;
 
 /// Reusable resources for text shaping and layout.
 ///
-/// Construct one per layout session (or other coarse host boundary) and lend
-/// it mutably to node-scoped
-/// [`TextMeasurer`](super::TextMeasurer) values. [`Self::new`] discovers
+/// Construct one per tree (or other coarse host boundary), keep it in a
+/// host-owned interior-mutable slot, and lend it mutably to node-scoped
+/// [`TextMeasurer`](super::TextMeasurer) values during each layout flush. [`Self::new`] discovers
 /// platform fonts; [`Self::without_system_fonts`] starts with an empty font
 /// collection for deterministic tests and explicitly-managed applications.
 pub struct TextContext {

@@ -21,37 +21,39 @@ are disabled, and the crate is designed to be published and used standalone.
 ## Design in one paragraph
 
 The engine owns **algorithms and vocabulary**; the host owns **the tree, the
-styles, and all storage**. The protocol deliberately exposes those through
-two separate objects: an immutable `LayoutSource` (`TraverseTree`,
-`FlexSource`, `GridSource`, `LinearSource`, `RelativeSource`) containing
-topology and computed-style views, and
-a mutable object implementing `LayoutSession` (`LayoutState` + `CacheState`)
-and, when pixel snapping is used, the independent `RoundState` capability.
-That mutable side contains results, caches, measurement resources, and
-display dispatch.
+styles, and all storage**. The protocol is one trait: `LayoutNode`, a cheap
+`Copy` **node handle** borrowed from the host's tree for one layout flush —
+a plain `&'dom Node` or a `(&'dom Tree, index)` pair, the same shape stylo
+demands of its DOM. Through the handle the engine reads topology, borrowed
+computed-style views (one `Style` associated type; entry points narrow it
+with per-algorithm bounds), and `calc()` resolution — all immutable for the
+flush — and writes unrounded/final layouts, static positions, and cache
+slots into host-owned **interior-mutable per-node slots**. There is no
+`&mut` anywhere in the protocol, so borrowed style/track views trivially
+stay live across recursive layout.
 Recursion flows *through the host*: the engine calls
-`LayoutSession::compute_child_layout(source, …)`, and the host dispatches each
+`child.compute_child_layout(input)`, and the host's impl dispatches each
 child to the right algorithm. Flex, Grid, and Lynx's non-CSS Linear and
-Relative modes are all first-class neutron-star entry points; a host can still
-add other modes through the same dispatch seam. The split lets every algorithm
-retain borrowed style/track views while recursive layout mutates only the
-session.
+Relative modes are all first-class neutron-star entry points; a host can
+still add other modes through the same dispatch seam.
 The optional text adapter uses the same seam: host-owned run/style views are
 immutable, while the host stores a reusable `TextContext` and per-node
-`ArtifactSlots` in its mutable session.
+`ArtifactSlots` in interior-mutable slots.
 `display:none` cleanup is an explicit host precheck: call `hide_subtree` and
 return `LayoutOutput::HIDDEN` before entering the generated-box cache/dispatch
 path.
 
 ## Hard rules
 
-- **No `dyn`.** Every host boundary is generic. Source/measurement traits use
-  GATs and mutable capability traits explicitly require `Sized`, so trait
-  objects are impossible by construction and every call can inline.
+- **No `dyn`.** Every host boundary is generic. `LayoutNode` is
+  dyn-incompatible by construction (`Copy` supertrait, associated types) and
+  the measurement seam uses GATs, so trait objects are impossible and every
+  call can inline.
 - **No storage.** The engine allocates only transient algorithm scratch; node
   data, styles, caches, retained text layouts, and results all live in
-  host-chosen storage addressed by opaque `NodeId`s. Semantic source data is
-  immutable for a layout epoch; mutable results and caches live separately.
+  host-chosen storage reached through the handle. Semantic data is immutable
+  for a layout epoch; per-node results and caches mutate through the handle
+  behind the host's interior-mutability discipline.
 - **POD box protocol, lending measurement seam.** Layout inputs, outputs, and
   geometry are small `Copy`, `#[repr(C)]` where layout matters, and
   `f32`-based. `LeafMeasurer` may additionally lend an engine-specific rich
@@ -72,7 +74,10 @@ Parley dependency for shaping, line breaking, and retained text measurement.
 
 ## Prior art
 
-The source/session/style protocol split is informed by [Taffy]'s `LayoutPartialTree`
+The `Copy` node-handle protocol mirrors [stylo]'s `TNode`/`TElement` DOM
+pattern (handles carry the tree lifetime; per-node mutable state sits in
+interior-mutable slots), the host-dispatch recursion is informed by
+[Taffy]'s `LayoutPartialTree`
 design (proven to keep a layout engine storage-agnostic without trait
 objects), the implemented Flex and Grid algorithms by the CSS specs directly
 (Flexbox Level 1, Grid Level 2, Sizing Level 3), Linear behavior by

@@ -1,21 +1,26 @@
 // Portions copyright 2026 The Lynx Authors. Licensed under Apache-2.0.
 //
 // Engine-native Linear behavior tests plus protocol-level checks for
-// neutron-star's split source/session host.
+// neutron-star's `LayoutNode` handle host.
+//
+// The deleted `linear-gravity`/`linear-cross-gravity`/`linear-layout-gravity`
+// channels are expressed through `justify-content`/`align-items`/`align-self`
+// now; the fixtures below assert the same geometry through those properties.
 
 #[path = "support/mod.rs"]
 mod support;
 
 use neutron_star::compute::{LeafMeasureInput, LeafMetrics};
 use neutron_star::prelude::*;
-use neutron_star::style::{
-    AlignContent, AlignItems, BoxGenerationMode, BoxSizing, Dimension, Direction, LengthPercentage,
-    LengthPercentageAuto, LinearCrossGravity, LinearGravity, LinearLayoutGravity,
-    LinearOrientation, Position, Visibility,
-};
+use stylo::computed_values::{box_sizing, direction, linear_direction, visibility};
+use stylo::values::computed::{ContentDistribution, Display, PositionProperty};
+use stylo::values::specified::align::AlignFlags;
 use support::{
-    TestStyle, TestTree, assert_close, assert_point, assert_size, definite_layout, fixed_leaf,
-    measure_layout, perform_layout,
+    TestId, TestStyle, TestTree, assert_close, assert_point, assert_size, border_px, content,
+    definite_layout, fixed_leaf, inset_auto, inset_pct, inset_px, items, margin_auto, margin_pct,
+    margin_px, max_none, max_pct, max_px, measure_layout, nn, npx, perform_layout, ratio,
+    self_align, size_auto, size_calc, size_fit_content_px, size_max_content, size_min_content,
+    size_pct, size_px,
 };
 
 fn edges<T>(left: T, right: T, top: T, bottom: T) -> Edges<T> {
@@ -27,83 +32,59 @@ fn edges<T>(left: T, right: T, top: T, bottom: T) -> Edges<T> {
     }
 }
 
-fn px(value: f32) -> Dimension {
-    Dimension::Length(value)
-}
-
 fn fixed_style(width: f32, height: f32) -> TestStyle {
     TestStyle {
-        size: Size::new(px(width), px(height)),
+        size: Size::new(size_px(width), size_px(height)),
         ..TestStyle::default()
     }
 }
 
-mod direction {
+mod flow_direction {
     use super::*;
 
     fn axis_positions(
-        orientation: LinearOrientation,
-        direction: Direction,
+        linear_direction: linear_direction::T,
+        direction: direction::T,
     ) -> (Point<f32>, Point<f32>) {
         let mut tree = TestTree::default();
         let first = fixed_leaf(&mut tree, 10.0, 10.0);
         let second = fixed_leaf(&mut tree, 20.0, 10.0);
         let root = tree.push_linear(
             TestStyle {
-                linear_orientation: orientation,
+                linear_direction,
                 direction,
                 ..TestStyle::default()
             },
             vec![first, second],
         );
-        definite_layout(&mut tree, root, 100.0, 100.0);
+        definite_layout(&tree, root, 100.0, 100.0);
         (tree.layout(first).location, tree.layout(second).location)
     }
 
     #[test]
-    fn orientation_aliases_match_their_row_and_column_forms() {
+    fn row_reverse_and_rtl_each_flip_the_main_axis() {
         assert_eq!(
-            axis_positions(LinearOrientation::Row, Direction::Ltr),
-            axis_positions(LinearOrientation::Horizontal, Direction::Ltr)
-        );
-        assert_eq!(
-            axis_positions(LinearOrientation::Column, Direction::Ltr),
-            axis_positions(LinearOrientation::Vertical, Direction::Ltr)
-        );
-        assert_eq!(
-            axis_positions(LinearOrientation::RowReverse, Direction::Ltr),
-            axis_positions(LinearOrientation::HorizontalReverse, Direction::Ltr)
-        );
-        assert_eq!(
-            axis_positions(LinearOrientation::ColumnReverse, Direction::Ltr),
-            axis_positions(LinearOrientation::VerticalReverse, Direction::Ltr)
-        );
-    }
-
-    #[test]
-    fn horizontal_reverse_and_rtl_each_flip_the_main_axis() {
-        assert_eq!(
-            axis_positions(LinearOrientation::Horizontal, Direction::Ltr),
+            axis_positions(linear_direction::T::Row, direction::T::Ltr),
             (Point::new(0.0, 0.0), Point::new(10.0, 0.0))
         );
         assert_eq!(
-            axis_positions(LinearOrientation::HorizontalReverse, Direction::Ltr),
+            axis_positions(linear_direction::T::RowReverse, direction::T::Ltr),
             (Point::new(90.0, 0.0), Point::new(70.0, 0.0))
         );
         assert_eq!(
-            axis_positions(LinearOrientation::Horizontal, Direction::Rtl),
+            axis_positions(linear_direction::T::Row, direction::T::Rtl),
             (Point::new(90.0, 0.0), Point::new(70.0, 0.0))
         );
         assert_eq!(
-            axis_positions(LinearOrientation::HorizontalReverse, Direction::Rtl),
+            axis_positions(linear_direction::T::RowReverse, direction::T::Rtl),
             (Point::new(0.0, 0.0), Point::new(10.0, 0.0))
         );
     }
 
     #[test]
-    fn vertical_reverse_uses_bottom_main_start_and_rtl_cross_start() {
+    fn column_reverse_uses_bottom_main_start_and_rtl_cross_start() {
         assert_eq!(
-            axis_positions(LinearOrientation::VerticalReverse, Direction::Rtl),
+            axis_positions(linear_direction::T::ColumnReverse, direction::T::Rtl),
             (Point::new(90.0, 90.0), Point::new(80.0, 80.0))
         );
     }
@@ -139,13 +120,13 @@ fn order_is_stable_and_layout_order_is_exported() {
     let middle = fixed_leaf(&mut tree, 10.0, 10.0);
     let root = tree.push_linear(
         TestStyle {
-            linear_orientation: LinearOrientation::Horizontal,
+            linear_direction: linear_direction::T::Row,
             ..TestStyle::default()
         },
         vec![source_first, equal_first, equal_second, middle],
     );
 
-    definite_layout(&mut tree, root, 100.0, 20.0);
+    definite_layout(&tree, root, 100.0, 20.0);
 
     for (node, x, order) in [
         (equal_first, 0.0, 0),
@@ -163,7 +144,7 @@ fn absolute_and_in_flow_children_share_merged_layout_order() {
     let mut tree = TestTree::default();
     let first_absolute = tree.push_leaf(
         TestStyle {
-            position: Position::Absolute,
+            position: PositionProperty::Absolute,
             ..fixed_style(10.0, 10.0)
         },
         Size::new(10.0, 10.0),
@@ -187,7 +168,7 @@ fn absolute_and_in_flow_children_share_merged_layout_order() {
     );
     let last_absolute = tree.push_leaf(
         TestStyle {
-            position: Position::Absolute,
+            position: PositionProperty::Absolute,
             ..fixed_style(10.0, 10.0)
         },
         Size::new(10.0, 10.0),
@@ -195,13 +176,13 @@ fn absolute_and_in_flow_children_share_merged_layout_order() {
     );
     let root = tree.push_linear(
         TestStyle {
-            linear_orientation: LinearOrientation::Horizontal,
+            linear_direction: linear_direction::T::Row,
             ..TestStyle::default()
         },
         vec![first_absolute, positive, negative, last_absolute],
     );
 
-    definite_layout(&mut tree, root, 100.0, 20.0);
+    definite_layout(&tree, root, 100.0, 20.0);
 
     assert_eq!(tree.layout(negative).order, 0);
     assert_eq!(tree.layout(first_absolute).order, 1);
@@ -210,28 +191,20 @@ fn absolute_and_in_flow_children_share_merged_layout_order() {
 }
 
 #[test]
-fn display_none_is_zeroed_while_hidden_and_collapse_stay_in_flow() {
+fn display_none_is_zeroed_while_hidden_stays_in_flow() {
     let mut tree = TestTree::default();
     let first = fixed_leaf(&mut tree, 10.0, 10.0);
     let hidden_descendant = fixed_leaf(&mut tree, 8.0, 8.0);
     let display_none = tree.push_linear(
         TestStyle {
-            box_generation_mode: BoxGenerationMode::None,
+            display: Display::None,
             ..fixed_style(10.0, 10.0)
         },
         vec![hidden_descendant],
     );
     let visibility_hidden = tree.push_leaf(
         TestStyle {
-            visibility: Visibility::Hidden,
-            ..fixed_style(10.0, 10.0)
-        },
-        Size::new(10.0, 10.0),
-        None,
-    );
-    let visibility_collapse = tree.push_leaf(
-        TestStyle {
-            visibility: Visibility::Collapse,
+            visibility: visibility::T::Hidden,
             ..fixed_style(10.0, 10.0)
         },
         Size::new(10.0, 10.0),
@@ -240,82 +213,54 @@ fn display_none_is_zeroed_while_hidden_and_collapse_stay_in_flow() {
     let last = fixed_leaf(&mut tree, 10.0, 10.0);
     let root = tree.push_linear(
         TestStyle::default(),
-        vec![
-            first,
-            display_none,
-            visibility_hidden,
-            visibility_collapse,
-            last,
-        ],
+        vec![first, display_none, visibility_hidden, last],
     );
 
-    definite_layout(&mut tree, root, 50.0, 50.0);
+    definite_layout(&tree, root, 50.0, 50.0);
 
     assert_eq!(tree.layout(display_none), Layout::with_order(1));
     assert_eq!(tree.layout(hidden_descendant), Layout::default());
     assert_close(tree.layout(first).location.y, 0.0);
     assert_close(tree.layout(visibility_hidden).location.y, 10.0);
-    assert_close(tree.layout(visibility_collapse).location.y, 20.0);
-    assert_close(tree.layout(last).location.y, 30.0);
+    assert_close(tree.layout(last).location.y, 20.0);
 }
 
-fn single_item_main_offset(
-    gravity: LinearGravity,
-    justify_content: Option<AlignContent>,
-    direction: Direction,
-) -> f32 {
+fn single_item_main_offset(justify_content: ContentDistribution, direction: direction::T) -> f32 {
     let mut tree = TestTree::default();
     let child = fixed_leaf(&mut tree, 20.0, 10.0);
     let root = tree.push_linear(
         TestStyle {
             direction,
-            linear_orientation: LinearOrientation::Horizontal,
-            linear_gravity: gravity,
+            linear_direction: linear_direction::T::Row,
             justify_content,
             ..TestStyle::default()
         },
         vec![child],
     );
-    definite_layout(&mut tree, root, 100.0, 20.0);
+    definite_layout(&tree, root, 100.0, 20.0);
     tree.layout(child).location.x
 }
 
 #[test]
-fn main_gravity_overrides_justify_and_maps_distribution_fallbacks() {
+fn justify_content_maps_gravity_keywords_and_distribution_fallbacks() {
     assert_close(
-        single_item_main_offset(
-            LinearGravity::End,
-            Some(AlignContent::Start),
-            Direction::Ltr,
-        ),
+        single_item_main_offset(content(AlignFlags::END), direction::T::Ltr),
         80.0,
     );
     assert_close(
-        single_item_main_offset(
-            LinearGravity::Center,
-            Some(AlignContent::Start),
-            Direction::Ltr,
-        ),
+        single_item_main_offset(content(AlignFlags::CENTER), direction::T::Ltr),
         40.0,
     );
     assert_close(
-        single_item_main_offset(
-            LinearGravity::None,
-            Some(AlignContent::FlexEnd),
-            Direction::Ltr,
-        ),
+        single_item_main_offset(content(AlignFlags::FLEX_END), direction::T::Ltr),
         80.0,
     );
     assert_close(
-        single_item_main_offset(
-            LinearGravity::None,
-            Some(AlignContent::SpaceAround),
-            Direction::Ltr,
-        ),
+        single_item_main_offset(content(AlignFlags::SPACE_AROUND), direction::T::Ltr),
         0.0,
     );
     assert_close(
-        single_item_main_offset(LinearGravity::Right, None, Direction::Rtl),
+        single_item_main_offset(content(AlignFlags::RIGHT), direction::T::Rtl),
         80.0,
     );
 }
@@ -327,39 +272,39 @@ fn space_between_distributes_only_non_negative_free_space() {
     let second = fixed_leaf(&mut tree, 20.0, 10.0);
     let root = tree.push_linear(
         TestStyle {
-            linear_orientation: LinearOrientation::Horizontal,
-            linear_gravity: LinearGravity::SpaceBetween,
+            linear_direction: linear_direction::T::Row,
+            justify_content: content(AlignFlags::SPACE_BETWEEN),
             ..TestStyle::default()
         },
         vec![first, second],
     );
-    definite_layout(&mut tree, root, 100.0, 20.0);
+    definite_layout(&tree, root, 100.0, 20.0);
     assert_close(tree.layout(first).location.x, 0.0);
     assert_close(tree.layout(second).location.x, 80.0);
 
-    definite_layout(&mut tree, root, 20.0, 20.0);
+    definite_layout(&tree, root, 20.0, 20.0);
     assert_close(tree.layout(first).location.x, 0.0);
     assert_close(tree.layout(second).location.x, 10.0);
 }
 
 #[test]
 fn end_and_center_preserve_negative_free_space_offsets() {
-    for (gravity, expected_first, expected_second) in [
-        (LinearGravity::End, -20.0, 0.0),
-        (LinearGravity::Center, -10.0, 10.0),
+    for (justify, expected_first, expected_second) in [
+        (AlignFlags::END, -20.0, 0.0),
+        (AlignFlags::CENTER, -10.0, 10.0),
     ] {
         let mut tree = TestTree::default();
         let first = fixed_leaf(&mut tree, 20.0, 10.0);
         let second = fixed_leaf(&mut tree, 20.0, 10.0);
         let root = tree.push_linear(
             TestStyle {
-                linear_orientation: LinearOrientation::Horizontal,
-                linear_gravity: gravity,
+                linear_direction: linear_direction::T::Row,
+                justify_content: content(justify),
                 ..TestStyle::default()
             },
             vec![first, second],
         );
-        definite_layout(&mut tree, root, 20.0, 20.0);
+        definite_layout(&tree, root, 20.0, 20.0);
         assert_close(tree.layout(first).location.x, expected_first);
         assert_close(tree.layout(second).location.x, expected_second);
     }
@@ -369,21 +314,19 @@ fn cross_case(container: TestStyle, child: TestStyle) -> Layout {
     let mut tree = TestTree::default();
     let child = tree.push_leaf(child, Size::new(20.0, 10.0), None);
     let root = tree.push_linear(container, vec![child]);
-    definite_layout(&mut tree, root, 100.0, 50.0);
+    definite_layout(&tree, root, 100.0, 50.0);
     tree.layout(child)
 }
 
 #[test]
-fn item_layout_gravity_overrides_align_self_and_container_cross_gravity() {
+fn align_self_end_overrides_container_align_items() {
     let layout = cross_case(
         TestStyle {
-            linear_cross_gravity: LinearCrossGravity::Center,
-            align_items: Some(AlignItems::Start),
+            align_items: items(AlignFlags::START),
             ..TestStyle::default()
         },
         TestStyle {
-            linear_layout_gravity: LinearLayoutGravity::End,
-            align_self: Some(AlignItems::Start),
+            align_self: self_align(AlignFlags::END),
             ..fixed_style(20.0, 10.0)
         },
     );
@@ -391,15 +334,14 @@ fn item_layout_gravity_overrides_align_self_and_container_cross_gravity() {
 }
 
 #[test]
-fn align_self_overrides_container_cross_gravity() {
+fn align_self_center_overrides_container_align_items_end() {
     let layout = cross_case(
         TestStyle {
-            linear_cross_gravity: LinearCrossGravity::End,
-            align_items: Some(AlignItems::End),
+            align_items: items(AlignFlags::END),
             ..TestStyle::default()
         },
         TestStyle {
-            align_self: Some(AlignItems::Center),
+            align_self: self_align(AlignFlags::CENTER),
             ..fixed_style(20.0, 10.0)
         },
     );
@@ -407,11 +349,10 @@ fn align_self_overrides_container_cross_gravity() {
 }
 
 #[test]
-fn container_cross_gravity_overrides_align_items() {
+fn align_items_center_positions_an_explicitly_sized_item() {
     let layout = cross_case(
         TestStyle {
-            linear_cross_gravity: LinearCrossGravity::Center,
-            align_items: Some(AlignItems::End),
+            align_items: items(AlignFlags::CENTER),
             ..TestStyle::default()
         },
         fixed_style(20.0, 10.0),
@@ -420,24 +361,33 @@ fn container_cross_gravity_overrides_align_items() {
 }
 
 #[test]
-fn align_items_stretch_is_not_a_linear_layout_gravity_fallback() {
-    let layout = cross_case(
-        TestStyle {
-            align_items: Some(AlignItems::Stretch),
-            ..TestStyle::default()
-        },
-        fixed_style(20.0, 10.0),
-    );
+fn align_items_normal_does_not_stretch_an_explicitly_sized_item() {
+    let layout = cross_case(TestStyle::default(), fixed_style(20.0, 10.0));
     assert_close(layout.location.x, 0.0);
     assert_close(layout.size.width, 20.0);
 }
 
 #[test]
-fn layout_gravity_stretch_overrides_an_explicit_cross_size() {
+fn align_items_stretch_maps_to_the_legacy_fill_gravity() {
+    // The deleted `linear-cross-gravity: fill-*` channel maps to `stretch`,
+    // which (like the legacy gravity) overrides an explicit cross size.
+    let layout = cross_case(
+        TestStyle {
+            align_items: items(AlignFlags::STRETCH),
+            ..TestStyle::default()
+        },
+        fixed_style(20.0, 10.0),
+    );
+    assert_close(layout.location.x, 0.0);
+    assert_close(layout.size.width, 100.0);
+}
+
+#[test]
+fn align_self_stretch_overrides_an_explicit_cross_size() {
     let layout = cross_case(
         TestStyle::default(),
         TestStyle {
-            linear_layout_gravity: LinearLayoutGravity::Stretch,
+            align_self: self_align(AlignFlags::STRETCH),
             ..fixed_style(20.0, 10.0)
         },
     );
@@ -446,18 +396,15 @@ fn layout_gravity_stretch_overrides_an_explicit_cross_size() {
 }
 
 #[test]
-fn physical_cross_gravity_stays_physical_in_vertical_rtl() {
-    for (gravity, expected_x) in [
-        (LinearLayoutGravity::Left, 0.0),
-        (LinearLayoutGravity::Right, 80.0),
-    ] {
+fn physical_cross_alignment_stays_physical_in_vertical_rtl() {
+    for (flags, expected_x) in [(AlignFlags::LEFT, 0.0), (AlignFlags::RIGHT, 80.0)] {
         let layout = cross_case(
             TestStyle {
-                direction: Direction::Rtl,
+                direction: direction::T::Rtl,
                 ..TestStyle::default()
             },
             TestStyle {
-                linear_layout_gravity: gravity,
+                align_self: self_align(flags),
                 ..fixed_style(20.0, 10.0)
             },
         );
@@ -473,22 +420,14 @@ fn cross_axis_auto_margins_override_alignment_and_export_used_values() {
         (false, true, 0.0, 0.0, 80.0),
     ] {
         let margin = edges(
-            if left {
-                LengthPercentageAuto::Auto
-            } else {
-                LengthPercentageAuto::ZERO
-            },
-            if right {
-                LengthPercentageAuto::Auto
-            } else {
-                LengthPercentageAuto::ZERO
-            },
-            LengthPercentageAuto::ZERO,
-            LengthPercentageAuto::ZERO,
+            if left { margin_auto() } else { margin_px(0.0) },
+            if right { margin_auto() } else { margin_px(0.0) },
+            margin_px(0.0),
+            margin_px(0.0),
         );
         let layout = cross_case(
             TestStyle {
-                linear_cross_gravity: LinearCrossGravity::End,
+                align_items: items(AlignFlags::END),
                 ..TestStyle::default()
             },
             TestStyle {
@@ -504,7 +443,7 @@ fn cross_axis_auto_margins_override_alignment_and_export_used_values() {
     let overflow = cross_case(
         TestStyle::default(),
         TestStyle {
-            margin: Edges::uniform(LengthPercentageAuto::Auto),
+            margin: Edges::uniform(margin_auto()),
             ..fixed_style(120.0, 10.0)
         },
     );
@@ -524,18 +463,10 @@ fn vertical_cross_axis_auto_margins_export_the_correct_edges() {
         let child = tree.push_leaf(
             TestStyle {
                 margin: edges(
-                    LengthPercentageAuto::ZERO,
-                    LengthPercentageAuto::ZERO,
-                    if top {
-                        LengthPercentageAuto::Auto
-                    } else {
-                        LengthPercentageAuto::ZERO
-                    },
-                    if bottom {
-                        LengthPercentageAuto::Auto
-                    } else {
-                        LengthPercentageAuto::ZERO
-                    },
+                    margin_px(0.0),
+                    margin_px(0.0),
+                    if top { margin_auto() } else { margin_px(0.0) },
+                    if bottom { margin_auto() } else { margin_px(0.0) },
                 ),
                 ..fixed_style(20.0, 10.0)
             },
@@ -544,13 +475,13 @@ fn vertical_cross_axis_auto_margins_export_the_correct_edges() {
         );
         let root = tree.push_linear(
             TestStyle {
-                linear_orientation: LinearOrientation::Horizontal,
-                linear_cross_gravity: LinearCrossGravity::End,
+                linear_direction: linear_direction::T::Row,
+                align_items: items(AlignFlags::END),
                 ..TestStyle::default()
             },
             vec![child],
         );
-        definite_layout(&mut tree, root, 100.0, 50.0);
+        definite_layout(&tree, root, 100.0, 50.0);
         let layout = tree.layout(child);
         assert_close(layout.location.y, expected_y);
         assert_close(layout.margin.top, expected_top);
@@ -558,13 +489,18 @@ fn vertical_cross_axis_auto_margins_export_the_correct_edges() {
     }
 }
 
-fn weighted_leaf(tree: &mut TestTree, weight: f32, min: Dimension, max: Dimension) -> NodeId {
+fn weighted_leaf(
+    tree: &mut TestTree,
+    weight: f32,
+    min: stylo::values::computed::Size,
+    max: stylo::values::computed::MaxSize,
+) -> TestId {
     tree.push_leaf(
         TestStyle {
-            size: Size::new(Dimension::Auto, px(10.0)),
-            min_size: Size::new(min, Dimension::Auto),
-            max_size: Size::new(max, Dimension::Auto),
-            linear_weight: weight,
+            size: Size::new(size_auto(), size_px(10.0)),
+            min_size: Size::new(min, size_auto()),
+            max_size: Size::new(max, max_none()),
+            linear_weight: nn(weight),
             ..TestStyle::default()
         },
         Size::new(13.0, 10.0),
@@ -577,27 +513,27 @@ fn weighted_pair(
     weight_sum: f32,
     first_weight: f32,
     second_weight: f32,
-    first_min: Dimension,
-    first_max: Dimension,
+    first_min: stylo::values::computed::Size,
+    first_max: stylo::values::computed::MaxSize,
 ) -> (Layout, Layout) {
     let mut tree = TestTree::default();
     let first = weighted_leaf(&mut tree, first_weight, first_min, first_max);
-    let second = weighted_leaf(&mut tree, second_weight, Dimension::Auto, Dimension::Auto);
+    let second = weighted_leaf(&mut tree, second_weight, size_auto(), max_none());
     let root = tree.push_linear(
         TestStyle {
-            linear_orientation: LinearOrientation::Horizontal,
-            linear_weight_sum: weight_sum,
+            linear_direction: linear_direction::T::Row,
+            linear_weight_sum: nn(weight_sum),
             ..TestStyle::default()
         },
         vec![first, second],
     );
-    definite_layout(&mut tree, root, width, 20.0);
+    definite_layout(&tree, root, width, 20.0);
     (tree.layout(first), tree.layout(second))
 }
 
 #[test]
 fn weights_split_main_space_in_proportion_to_their_values() {
-    let (first, second) = weighted_pair(90.0, 0.0, 1.0, 2.0, Dimension::Auto, Dimension::Auto);
+    let (first, second) = weighted_pair(90.0, 0.0, 1.0, 2.0, size_auto(), max_none());
     assert_close(first.size.width, 30.0);
     assert_close(second.size.width, 60.0);
     assert_close(second.location.x, 30.0);
@@ -605,7 +541,7 @@ fn weights_split_main_space_in_proportion_to_their_values() {
 
 #[test]
 fn an_explicit_weight_sum_can_reserve_unallocated_main_space() {
-    let (first, second) = weighted_pair(100.0, 4.0, 1.0, 1.0, Dimension::Auto, Dimension::Auto);
+    let (first, second) = weighted_pair(100.0, 4.0, 1.0, 1.0, size_auto(), max_none());
     assert_close(first.size.width, 25.0);
     assert_close(second.size.width, 25.0);
     assert_close(second.location.x, 25.0);
@@ -613,7 +549,7 @@ fn an_explicit_weight_sum_can_reserve_unallocated_main_space() {
 
 #[test]
 fn a_total_weight_below_one_leaves_part_of_the_main_space_unallocated() {
-    let (first, second) = weighted_pair(100.0, 0.0, 0.25, 0.25, Dimension::Auto, Dimension::Auto);
+    let (first, second) = weighted_pair(100.0, 0.0, 0.25, 0.25, size_auto(), max_none());
     assert_close(first.size.width, 25.0);
     assert_close(second.size.width, 25.0);
     assert_close(second.location.x, 25.0);
@@ -621,22 +557,15 @@ fn a_total_weight_below_one_leaves_part_of_the_main_space_unallocated() {
 
 #[test]
 fn weighted_min_and_max_violations_freeze_and_redistribute() {
-    let (first, second) = weighted_pair(100.0, 0.0, 1.0, 1.0, Dimension::Auto, px(30.0));
+    let (first, second) = weighted_pair(100.0, 0.0, 1.0, 1.0, size_auto(), max_px(30.0));
     assert_close(first.size.width, 30.0);
     assert_close(second.size.width, 70.0);
 
-    let (first, second) = weighted_pair(100.0, 0.0, 1.0, 1.0, px(70.0), Dimension::Auto);
+    let (first, second) = weighted_pair(100.0, 0.0, 1.0, 1.0, size_px(70.0), max_none());
     assert_close(first.size.width, 70.0);
     assert_close(second.size.width, 30.0);
 
-    let (first, second) = weighted_pair(
-        100.0,
-        0.0,
-        1.0,
-        1.0,
-        Dimension::Percent(0.7),
-        Dimension::Auto,
-    );
+    let (first, second) = weighted_pair(100.0, 0.0, 1.0, 1.0, size_pct(0.7), max_none());
     assert_close(first.size.width, 70.0);
     assert_close(second.size.width, 30.0);
 }
@@ -647,8 +576,8 @@ fn an_exhausted_main_axis_assigns_zero_size_to_a_weighted_item() {
     let fixed = fixed_leaf(&mut tree, 20.0, 30.0);
     let weighted = tree.push_leaf(
         TestStyle {
-            size: Size::new(px(20.0), Dimension::Auto),
-            linear_weight: 1.0,
+            size: Size::new(size_px(20.0), size_auto()),
+            linear_weight: nn(1.0),
             ..TestStyle::default()
         },
         Size::new(20.0, 10.0),
@@ -656,7 +585,7 @@ fn an_exhausted_main_axis_assigns_zero_size_to_a_weighted_item() {
     );
     let root = tree.push_linear(TestStyle::default(), vec![fixed, weighted]);
 
-    definite_layout(&mut tree, root, 100.0, 20.0);
+    definite_layout(&tree, root, 100.0, 20.0);
 
     assert_size(tree.layout(fixed).size, Size::new(20.0, 30.0));
     assert_point(tree.layout(weighted).location, Point::new(0.0, 30.0));
@@ -668,7 +597,7 @@ fn indefinite_main_axis_disables_weight_distribution() {
     let mut tree = TestTree::default();
     let first = tree.push_leaf(
         TestStyle {
-            linear_weight: 1.0,
+            linear_weight: nn(1.0),
             ..fixed_style(15.0, 10.0)
         },
         Size::new(15.0, 10.0),
@@ -676,7 +605,7 @@ fn indefinite_main_axis_disables_weight_distribution() {
     );
     let second = tree.push_leaf(
         TestStyle {
-            linear_weight: 2.0,
+            linear_weight: nn(2.0),
             ..fixed_style(25.0, 10.0)
         },
         Size::new(25.0, 10.0),
@@ -684,13 +613,13 @@ fn indefinite_main_axis_disables_weight_distribution() {
     );
     let root = tree.push_linear(
         TestStyle {
-            linear_orientation: LinearOrientation::Horizontal,
+            linear_direction: linear_direction::T::Row,
             ..TestStyle::default()
         },
         vec![first, second],
     );
     let output = perform_layout(
-        &mut tree,
+        &tree,
         root,
         Size::new(None, Some(20.0)),
         Size::new(
@@ -708,10 +637,10 @@ fn weighted_main_size_reapplies_aspect_ratio_to_cross_axis() {
     let mut tree = TestTree::default();
     let child = tree.push_leaf(
         TestStyle {
-            size: Size::new(Dimension::Auto, Dimension::Auto),
-            aspect_ratio: Some(2.0),
-            linear_weight: 1.0,
-            linear_layout_gravity: LinearLayoutGravity::Start,
+            size: Size::new(size_auto(), size_auto()),
+            aspect_ratio: ratio(2.0),
+            linear_weight: nn(1.0),
+            align_self: self_align(AlignFlags::START),
             ..TestStyle::default()
         },
         Size::new(10.0, 10.0),
@@ -719,12 +648,12 @@ fn weighted_main_size_reapplies_aspect_ratio_to_cross_axis() {
     );
     let root = tree.push_linear(
         TestStyle {
-            linear_orientation: LinearOrientation::Horizontal,
+            linear_direction: linear_direction::T::Row,
             ..TestStyle::default()
         },
         vec![child],
     );
-    definite_layout(&mut tree, root, 100.0, 100.0);
+    definite_layout(&tree, root, 100.0, 100.0);
     assert_size(tree.layout(child).size, Size::new(100.0, 50.0));
 }
 
@@ -734,13 +663,13 @@ fn container_aspect_ratio_derives_unknown_axis_from_caller_known_axis() {
     let child = fixed_leaf(&mut tree, 10.0, 10.0);
     let root = tree.push_linear(
         TestStyle {
-            aspect_ratio: Some(2.0),
+            aspect_ratio: ratio(2.0),
             ..TestStyle::default()
         },
         vec![child],
     );
     let output = perform_layout(
-        &mut tree,
+        &tree,
         root,
         Size::new(Some(100.0), None),
         Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
@@ -754,12 +683,12 @@ fn padding_border_margins_and_box_sizing_use_border_box_geometry() {
     let child = tree.push_leaf(
         TestStyle {
             margin: edges(
-                LengthPercentageAuto::Length(3.0),
-                LengthPercentageAuto::Length(7.0),
-                LengthPercentageAuto::Length(4.0),
-                LengthPercentageAuto::Length(6.0),
+                margin_px(3.0),
+                margin_px(7.0),
+                margin_px(4.0),
+                margin_px(6.0),
             ),
-            box_sizing: BoxSizing::BorderBox,
+            box_sizing: box_sizing::T::BorderBox,
             ..fixed_style(20.0, 10.0)
         },
         Size::new(20.0, 10.0),
@@ -767,14 +696,14 @@ fn padding_border_margins_and_box_sizing_use_border_box_geometry() {
     );
     let root = tree.push_linear(
         TestStyle {
-            linear_orientation: LinearOrientation::Horizontal,
-            padding: Edges::uniform(LengthPercentage::Length(10.0)),
-            border: Edges::uniform(LengthPercentage::Length(2.0)),
+            linear_direction: linear_direction::T::Row,
+            padding: Edges::uniform(npx(10.0)),
+            border: Edges::uniform(border_px(2.0)),
             ..TestStyle::default()
         },
         vec![child],
     );
-    definite_layout(&mut tree, root, 120.0, 60.0);
+    definite_layout(&tree, root, 120.0, 60.0);
     assert_point(tree.layout(child).location, Point::new(15.0, 16.0));
     assert_size(tree.layout(child).size, Size::new(20.0, 10.0));
     assert_eq!(tree.layout(child).margin, edges(3.0, 7.0, 4.0, 6.0));
@@ -800,18 +729,15 @@ fn fit_content_and_definite_cross_stretch_reach_leaf_measurement() {
     let mut tree = TestTree::default();
     let fit = tree.push_measured_leaf(
         TestStyle {
-            size: Size::new(
-                Dimension::FitContent(LengthPercentage::Length(30.0)),
-                px(10.0),
-            ),
-            linear_layout_gravity: LinearLayoutGravity::Start,
+            size: Size::new(size_fit_content_px(30.0), size_px(10.0)),
+            align_self: self_align(AlignFlags::START),
             ..TestStyle::default()
         },
         responsive_measure,
     );
     let stretched = tree.push_measured_leaf(TestStyle::default(), responsive_measure);
     let root = tree.push_linear(TestStyle::default(), vec![fit, stretched]);
-    definite_layout(&mut tree, root, 100.0, 40.0);
+    definite_layout(&tree, root, 100.0, 40.0);
 
     assert_close(tree.layout(fit).size.width, 30.0);
     assert_close(tree.layout(stretched).size.width, 100.0);
@@ -828,20 +754,20 @@ fn auto_main_axis_preserves_grid_min_and_max_content_probes() {
     let child = tree.push_measured_leaf(TestStyle::default(), responsive_measure);
     let root = tree.push_linear(
         TestStyle {
-            linear_orientation: LinearOrientation::Horizontal,
+            linear_direction: linear_direction::T::Row,
             ..TestStyle::default()
         },
         vec![child],
     );
 
     let min_content = perform_layout(
-        &mut tree,
+        &tree,
         root,
         Size::NONE,
         Size::new(AvailableSpace::MinContent, AvailableSpace::MaxContent),
     );
     let max_content = perform_layout(
-        &mut tree,
+        &tree,
         root,
         Size::NONE,
         Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
@@ -866,21 +792,21 @@ fn intrinsic_keyword_probe_requests_one_axis_and_preserves_the_cross_size() {
     let mut tree = TestTree::default();
     let child = tree.push_measured_leaf(
         TestStyle {
-            size: Size::new(Dimension::MinContent, px(30.0)),
-            linear_layout_gravity: LinearLayoutGravity::Start,
+            size: Size::new(size_min_content(), size_px(30.0)),
+            align_self: self_align(AlignFlags::START),
             ..TestStyle::default()
         },
         responsive_measure,
     );
     let root = tree.push_linear(
         TestStyle {
-            linear_orientation: LinearOrientation::Horizontal,
+            linear_direction: linear_direction::T::Row,
             ..TestStyle::default()
         },
         vec![child],
     );
 
-    definite_layout(&mut tree, root, 100.0, 50.0);
+    definite_layout(&tree, root, 100.0, 50.0);
 
     assert!(tree.measure_inputs(child).iter().any(|input| {
         input.goal == LayoutGoal::Measure(RequestedAxis::Horizontal)
@@ -895,21 +821,21 @@ fn max_content_keyword_does_not_issue_a_min_content_probe() {
     let mut tree = TestTree::default();
     let child = tree.push_measured_leaf(
         TestStyle {
-            size: Size::new(Dimension::MaxContent, px(30.0)),
-            linear_layout_gravity: LinearLayoutGravity::Start,
+            size: Size::new(size_max_content(), size_px(30.0)),
+            align_self: self_align(AlignFlags::START),
             ..TestStyle::default()
         },
         responsive_measure,
     );
     let root = tree.push_linear(
         TestStyle {
-            linear_orientation: LinearOrientation::Horizontal,
+            linear_direction: linear_direction::T::Row,
             ..TestStyle::default()
         },
         vec![child],
     );
 
-    definite_layout(&mut tree, root, 100.0, 50.0);
+    definite_layout(&tree, root, 100.0, 50.0);
 
     assert!(tree.measure_inputs(child).iter().any(|input| {
         input.goal == LayoutGoal::Measure(RequestedAxis::Horizontal)
@@ -933,29 +859,29 @@ mod baseline {
         let late = row_tree.push_leaf(fixed_style(10.0, 20.0), Size::new(10.0, 20.0), Some(15.0));
         let row = row_tree.push_linear(
             TestStyle {
-                linear_orientation: LinearOrientation::Horizontal,
+                linear_direction: linear_direction::T::Row,
                 ..TestStyle::default()
             },
             vec![early, late],
         );
-        let output = definite_layout(&mut row_tree, row, 100.0, 40.0);
+        let output = definite_layout(&row_tree, row, 100.0, 40.0);
         assert_close(output.first_baselines.y.unwrap(), 15.0);
     }
 
     #[test]
-    fn vertical_linear_baseline_includes_main_axis_gravity_offset() {
+    fn vertical_linear_baseline_includes_main_axis_alignment_offset() {
         let mut column_tree = TestTree::default();
         let first =
             column_tree.push_leaf(fixed_style(10.0, 20.0), Size::new(10.0, 20.0), Some(5.0));
         let second = fixed_leaf(&mut column_tree, 10.0, 10.0);
         let column = column_tree.push_linear(
             TestStyle {
-                linear_gravity: LinearGravity::Center,
+                justify_content: content(AlignFlags::CENTER),
                 ..TestStyle::default()
             },
             vec![first, second],
         );
-        let output = definite_layout(&mut column_tree, column, 20.0, 100.0);
+        let output = definite_layout(&column_tree, column, 20.0, 100.0);
         assert_close(output.first_baselines.y.unwrap(), 40.0);
     }
 
@@ -963,7 +889,7 @@ mod baseline {
     fn empty_linear_container_has_no_first_baseline() {
         let mut tree = TestTree::default();
         let empty = tree.push_linear(TestStyle::default(), Vec::new());
-        let output = definite_layout(&mut tree, empty, 20.0, 20.0);
+        let output = definite_layout(&tree, empty, 20.0, 20.0);
         assert_eq!(output.first_baselines.y, None);
     }
 
@@ -973,28 +899,28 @@ mod baseline {
         let child = tree.push_measured_leaf(TestStyle::default(), probe_only_baseline);
         let root = tree.push_linear(TestStyle::default(), vec![child]);
 
-        let output = definite_layout(&mut tree, root, 20.0, 20.0);
+        let output = definite_layout(&tree, root, 20.0, 20.0);
 
         assert_eq!(output.first_baselines.y, Some(10.0));
     }
 }
 
 #[test]
-fn nested_linear_container_applies_its_inner_gravity() {
+fn nested_linear_container_applies_its_inner_justify_content() {
     let mut tree = TestTree::default();
     let first = fixed_leaf(&mut tree, 10.0, 10.0);
     let second = fixed_leaf(&mut tree, 20.0, 10.0);
     let inner = tree.push_linear(
         TestStyle {
-            size: Size::new(px(100.0), px(20.0)),
-            linear_orientation: LinearOrientation::Horizontal,
-            linear_gravity: LinearGravity::End,
+            size: Size::new(size_px(100.0), size_px(20.0)),
+            linear_direction: linear_direction::T::Row,
+            justify_content: content(AlignFlags::END),
             ..TestStyle::default()
         },
         vec![first, second],
     );
     let outer = tree.push_linear(TestStyle::default(), vec![inner]);
-    definite_layout(&mut tree, outer, 100.0, 100.0);
+    definite_layout(&tree, outer, 100.0, 100.0);
     assert_close(tree.layout(inner).location.y, 0.0);
     assert_close(tree.layout(first).location.x, 70.0);
     assert_close(tree.layout(second).location.x, 80.0);
@@ -1007,12 +933,12 @@ fn a_linear_item_can_be_a_grid_container() {
     let grid = linear_root_tree.push_grid(fixed_style(30.0, 20.0), vec![grid_leaf]);
     let linear_root = linear_root_tree.push_linear(
         TestStyle {
-            linear_orientation: LinearOrientation::Horizontal,
+            linear_direction: linear_direction::T::Row,
             ..TestStyle::default()
         },
         vec![grid],
     );
-    definite_layout(&mut linear_root_tree, linear_root, 100.0, 40.0);
+    definite_layout(&linear_root_tree, linear_root, 100.0, 40.0);
     assert_size(linear_root_tree.layout(grid).size, Size::new(30.0, 20.0));
     assert_size(
         linear_root_tree.layout(grid_leaf).size,
@@ -1026,15 +952,15 @@ fn a_grid_item_can_be_a_linear_container() {
     let linear_leaf = fixed_leaf(&mut grid_root_tree, 10.0, 6.0);
     let linear = grid_root_tree.push_linear(
         TestStyle {
-            size: Size::new(px(30.0), px(20.0)),
-            linear_orientation: LinearOrientation::Horizontal,
-            linear_gravity: LinearGravity::End,
+            size: Size::new(size_px(30.0), size_px(20.0)),
+            linear_direction: linear_direction::T::Row,
+            justify_content: content(AlignFlags::END),
             ..TestStyle::default()
         },
         vec![linear_leaf],
     );
     let grid_root = grid_root_tree.push_grid(fixed_style(100.0, 40.0), vec![linear]);
-    definite_layout(&mut grid_root_tree, grid_root, 100.0, 40.0);
+    definite_layout(&grid_root_tree, grid_root, 100.0, 40.0);
     assert_size(grid_root_tree.layout(linear).size, Size::new(30.0, 20.0));
     assert_point(
         grid_root_tree.layout(linear_leaf).location,
@@ -1049,12 +975,12 @@ fn a_linear_item_can_be_a_flex_container() {
     let flex = linear_root_tree.push_flex(fixed_style(30.0, 20.0), vec![flex_leaf]);
     let linear_root = linear_root_tree.push_linear(
         TestStyle {
-            linear_orientation: LinearOrientation::Horizontal,
+            linear_direction: linear_direction::T::Row,
             ..TestStyle::default()
         },
         vec![flex],
     );
-    definite_layout(&mut linear_root_tree, linear_root, 100.0, 40.0);
+    definite_layout(&linear_root_tree, linear_root, 100.0, 40.0);
     assert_size(linear_root_tree.layout(flex).size, Size::new(30.0, 20.0));
     assert_size(
         linear_root_tree.layout(flex_leaf).size,
@@ -1068,15 +994,15 @@ fn a_flex_item_can_be_a_linear_container() {
     let linear_leaf = fixed_leaf(&mut flex_root_tree, 10.0, 6.0);
     let linear = flex_root_tree.push_linear(
         TestStyle {
-            size: Size::new(px(30.0), px(20.0)),
-            linear_orientation: LinearOrientation::Horizontal,
-            linear_gravity: LinearGravity::End,
+            size: Size::new(size_px(30.0), size_px(20.0)),
+            linear_direction: linear_direction::T::Row,
+            justify_content: content(AlignFlags::END),
             ..TestStyle::default()
         },
         vec![linear_leaf],
     );
     let flex_root = flex_root_tree.push_flex(fixed_style(100.0, 40.0), vec![linear]);
-    definite_layout(&mut flex_root_tree, flex_root, 100.0, 40.0);
+    definite_layout(&flex_root_tree, flex_root, 100.0, 40.0);
     assert_size(flex_root_tree.layout(linear).size, Size::new(30.0, 20.0));
     assert_point(
         flex_root_tree.layout(linear_leaf).location,
@@ -1089,7 +1015,7 @@ fn flex_max_content_target_enables_linear_weight_distribution() {
     let mut tree = TestTree::default();
     let narrow = tree.push_leaf(
         TestStyle {
-            linear_weight: 1.0,
+            linear_weight: nn(1.0),
             ..fixed_style(10.0, 10.0)
         },
         Size::new(10.0, 10.0),
@@ -1097,7 +1023,7 @@ fn flex_max_content_target_enables_linear_weight_distribution() {
     );
     let wide = tree.push_leaf(
         TestStyle {
-            linear_weight: 1.0,
+            linear_weight: nn(1.0),
             ..fixed_style(90.0, 10.0)
         },
         Size::new(90.0, 10.0),
@@ -1105,7 +1031,7 @@ fn flex_max_content_target_enables_linear_weight_distribution() {
     );
     let linear = tree.push_linear(
         TestStyle {
-            linear_orientation: LinearOrientation::Horizontal,
+            linear_direction: linear_direction::T::Row,
             ..TestStyle::default()
         },
         vec![narrow, wide],
@@ -1113,7 +1039,7 @@ fn flex_max_content_target_enables_linear_weight_distribution() {
     let flex = tree.push_flex(TestStyle::default(), vec![linear]);
 
     let output = perform_layout(
-        &mut tree,
+        &tree,
         flex,
         Size::new(None, Some(20.0)),
         Size::new(AvailableSpace::MaxContent, AvailableSpace::Definite(20.0)),
@@ -1130,7 +1056,7 @@ fn flex_max_content_target_enables_linear_default_cross_stretch() {
     let mut tree = TestTree::default();
     let narrow = tree.push_leaf(
         TestStyle {
-            size: Size::new(Dimension::Auto, px(10.0)),
+            size: Size::new(size_auto(), size_px(10.0)),
             ..TestStyle::default()
         },
         Size::new(10.0, 10.0),
@@ -1138,7 +1064,7 @@ fn flex_max_content_target_enables_linear_default_cross_stretch() {
     );
     let wide = tree.push_leaf(
         TestStyle {
-            size: Size::new(Dimension::Auto, px(10.0)),
+            size: Size::new(size_auto(), size_px(10.0)),
             ..TestStyle::default()
         },
         Size::new(90.0, 10.0),
@@ -1148,7 +1074,7 @@ fn flex_max_content_target_enables_linear_default_cross_stretch() {
     let flex = tree.push_flex(TestStyle::default(), vec![linear]);
 
     let output = perform_layout(
-        &mut tree,
+        &tree,
         flex,
         Size::new(None, Some(20.0)),
         Size::new(AvailableSpace::MaxContent, AvailableSpace::Definite(20.0)),
@@ -1165,7 +1091,7 @@ fn flex_known_but_indefinite_linear_size_is_not_a_percentage_basis() {
     let mut tree = TestTree::default();
     let percentage = tree.push_leaf(
         TestStyle {
-            size: Size::new(Dimension::Percent(0.5), px(10.0)),
+            size: Size::new(size_pct(0.5), size_px(10.0)),
             ..TestStyle::default()
         },
         Size::new(80.0, 10.0),
@@ -1174,7 +1100,7 @@ fn flex_known_but_indefinite_linear_size_is_not_a_percentage_basis() {
     let fixed = fixed_leaf(&mut tree, 20.0, 10.0);
     let linear = tree.push_linear(
         TestStyle {
-            linear_orientation: LinearOrientation::Horizontal,
+            linear_direction: linear_direction::T::Row,
             ..TestStyle::default()
         },
         vec![percentage, fixed],
@@ -1182,7 +1108,7 @@ fn flex_known_but_indefinite_linear_size_is_not_a_percentage_basis() {
     let flex = tree.push_flex(TestStyle::default(), vec![linear]);
 
     let output = perform_layout(
-        &mut tree,
+        &tree,
         flex,
         Size::new(None, Some(20.0)),
         Size::new(AvailableSpace::MaxContent, AvailableSpace::Definite(20.0)),
@@ -1202,12 +1128,7 @@ fn relative_insets_move_visual_box_without_advancing_following_flow() {
     let mut tree = TestTree::default();
     let shifted = tree.push_leaf(
         TestStyle {
-            inset: edges(
-                LengthPercentageAuto::Length(5.0),
-                LengthPercentageAuto::Auto,
-                LengthPercentageAuto::Length(3.0),
-                LengthPercentageAuto::Auto,
-            ),
+            inset: edges(inset_px(5.0), inset_auto(), inset_px(3.0), inset_auto()),
             ..fixed_style(10.0, 10.0)
         },
         Size::new(10.0, 10.0),
@@ -1216,12 +1137,12 @@ fn relative_insets_move_visual_box_without_advancing_following_flow() {
     let following = fixed_leaf(&mut tree, 10.0, 10.0);
     let root = tree.push_linear(
         TestStyle {
-            linear_orientation: LinearOrientation::Horizontal,
+            linear_direction: linear_direction::T::Row,
             ..TestStyle::default()
         },
         vec![shifted, following],
     );
-    definite_layout(&mut tree, root, 100.0, 20.0);
+    definite_layout(&tree, root, 100.0, 20.0);
     assert_point(tree.layout(shifted).location, Point::new(5.0, 3.0));
     assert_point(tree.layout(following).location, Point::new(10.0, 0.0));
 }
@@ -1231,8 +1152,8 @@ fn absolute_children_use_linear_static_alignment_and_insets_override_it() {
     let mut tree = TestTree::default();
     let centered = tree.push_leaf(
         TestStyle {
-            position: Position::Absolute,
-            linear_layout_gravity: LinearLayoutGravity::Center,
+            position: PositionProperty::Absolute,
+            align_self: self_align(AlignFlags::CENTER),
             ..fixed_style(10.0, 8.0)
         },
         Size::new(10.0, 8.0),
@@ -1240,13 +1161,8 @@ fn absolute_children_use_linear_static_alignment_and_insets_override_it() {
     );
     let inset = tree.push_leaf(
         TestStyle {
-            position: Position::Absolute,
-            inset: edges(
-                LengthPercentageAuto::Length(5.0),
-                LengthPercentageAuto::Auto,
-                LengthPercentageAuto::Length(7.0),
-                LengthPercentageAuto::Auto,
-            ),
+            position: PositionProperty::Absolute,
+            inset: edges(inset_px(5.0), inset_auto(), inset_px(7.0), inset_auto()),
             ..fixed_style(10.0, 8.0)
         },
         Size::new(10.0, 8.0),
@@ -1254,13 +1170,13 @@ fn absolute_children_use_linear_static_alignment_and_insets_override_it() {
     );
     let root = tree.push_linear(
         TestStyle {
-            linear_orientation: LinearOrientation::Horizontal,
-            linear_gravity: LinearGravity::Center,
+            linear_direction: linear_direction::T::Row,
+            justify_content: content(AlignFlags::CENTER),
             ..TestStyle::default()
         },
         vec![centered, inset],
     );
-    definite_layout(&mut tree, root, 100.0, 50.0);
+    definite_layout(&tree, root, 100.0, 50.0);
     assert_point(tree.layout(centered).location, Point::new(45.0, 21.0));
     assert_point(tree.layout(inset).location, Point::new(5.0, 7.0));
     assert!(
@@ -1280,8 +1196,8 @@ fn absolute_static_alignment_uses_the_padding_box() {
     let mut tree = TestTree::default();
     let child = tree.push_leaf(
         TestStyle {
-            position: Position::Absolute,
-            linear_layout_gravity: LinearLayoutGravity::Center,
+            position: PositionProperty::Absolute,
+            align_self: self_align(AlignFlags::CENTER),
             ..fixed_style(10.0, 10.0)
         },
         Size::new(10.0, 10.0),
@@ -1289,20 +1205,15 @@ fn absolute_static_alignment_uses_the_padding_box() {
     );
     let root = tree.push_linear(
         TestStyle {
-            linear_orientation: LinearOrientation::Horizontal,
-            linear_gravity: LinearGravity::Center,
-            padding: edges(
-                LengthPercentage::Length(10.0),
-                LengthPercentage::Length(20.0),
-                LengthPercentage::Length(5.0),
-                LengthPercentage::Length(15.0),
-            ),
-            border: Edges::uniform(LengthPercentage::Length(2.0)),
+            linear_direction: linear_direction::T::Row,
+            justify_content: content(AlignFlags::CENTER),
+            padding: edges(npx(10.0), npx(20.0), npx(5.0), npx(15.0)),
+            border: Edges::uniform(border_px(2.0)),
             ..TestStyle::default()
         },
         vec![child],
     );
-    definite_layout(&mut tree, root, 100.0, 60.0);
+    definite_layout(&tree, root, 100.0, 60.0);
     assert_point(tree.layout(child).location, Point::new(45.0, 25.0));
 }
 
@@ -1311,15 +1222,10 @@ fn absolute_static_alignment_uses_common_inset_and_aspect_ratio_sizing() {
     let mut tree = TestTree::default();
     let child = tree.push_leaf(
         TestStyle {
-            position: Position::Absolute,
-            inset: edges(
-                LengthPercentageAuto::Length(10.0),
-                LengthPercentageAuto::Length(10.0),
-                LengthPercentageAuto::Auto,
-                LengthPercentageAuto::Auto,
-            ),
-            aspect_ratio: Some(2.0),
-            linear_layout_gravity: LinearLayoutGravity::Center,
+            position: PositionProperty::Absolute,
+            inset: edges(inset_px(10.0), inset_px(10.0), inset_auto(), inset_auto()),
+            aspect_ratio: ratio(2.0),
+            align_self: self_align(AlignFlags::CENTER),
             ..TestStyle::default()
         },
         Size::new(12.0, 12.0),
@@ -1327,12 +1233,12 @@ fn absolute_static_alignment_uses_common_inset_and_aspect_ratio_sizing() {
     );
     let root = tree.push_linear(
         TestStyle {
-            linear_orientation: LinearOrientation::Horizontal,
+            linear_direction: linear_direction::T::Row,
             ..TestStyle::default()
         },
         vec![child],
     );
-    definite_layout(&mut tree, root, 100.0, 100.0);
+    definite_layout(&tree, root, 100.0, 100.0);
     assert_size(tree.layout(child).size, Size::new(80.0, 40.0));
     assert_point(tree.layout(child).location, Point::new(10.0, 30.0));
     assert!(
@@ -1347,14 +1253,14 @@ fn absolute_static_alignment_preserves_reversal_and_margin_box_edges() {
     let mut tree = TestTree::default();
     let child = tree.push_leaf(
         TestStyle {
-            position: Position::Absolute,
+            position: PositionProperty::Absolute,
             margin: edges(
-                LengthPercentageAuto::Length(3.0),
-                LengthPercentageAuto::Length(7.0),
-                LengthPercentageAuto::Length(2.0),
-                LengthPercentageAuto::Length(4.0),
+                margin_px(3.0),
+                margin_px(7.0),
+                margin_px(2.0),
+                margin_px(4.0),
             ),
-            linear_layout_gravity: LinearLayoutGravity::End,
+            align_self: self_align(AlignFlags::END),
             ..fixed_style(10.0, 8.0)
         },
         Size::new(10.0, 8.0),
@@ -1362,14 +1268,14 @@ fn absolute_static_alignment_preserves_reversal_and_margin_box_edges() {
     );
     let root = tree.push_linear(
         TestStyle {
-            linear_orientation: LinearOrientation::HorizontalReverse,
-            linear_gravity: LinearGravity::End,
+            linear_direction: linear_direction::T::RowReverse,
+            justify_content: content(AlignFlags::END),
             ..TestStyle::default()
         },
         vec![child],
     );
 
-    definite_layout(&mut tree, root, 100.0, 50.0);
+    definite_layout(&tree, root, 100.0, 50.0);
 
     assert_point(tree.layout(child).location, Point::new(3.0, 38.0));
 }
@@ -1379,21 +1285,21 @@ fn hoisted_children_record_static_position_without_local_commit() {
     let mut tree = TestTree::default();
     let hoisted = tree.push_measured_leaf(
         TestStyle {
-            position: Position::AbsoluteHoisted,
-            linear_layout_gravity: LinearLayoutGravity::End,
+            position: PositionProperty::Fixed,
+            align_self: self_align(AlignFlags::END),
             ..fixed_style(20.0, 10.0)
         },
         responsive_measure,
     );
     let root = tree.push_linear(
         TestStyle {
-            linear_orientation: LinearOrientation::Horizontal,
-            linear_gravity: LinearGravity::Center,
+            linear_direction: linear_direction::T::Row,
+            justify_content: content(AlignFlags::CENTER),
             ..TestStyle::default()
         },
         vec![hoisted],
     );
-    definite_layout(&mut tree, root, 100.0, 50.0);
+    definite_layout(&tree, root, 100.0, 50.0);
 
     assert_point(
         tree.static_position(hoisted)
@@ -1414,29 +1320,24 @@ fn hoisted_static_fallback_measures_only_the_axis_with_auto_insets() {
     let mut tree = TestTree::default();
     let hoisted = tree.push_measured_leaf(
         TestStyle {
-            position: Position::AbsoluteHoisted,
-            inset: edges(
-                LengthPercentageAuto::Length(10.0),
-                LengthPercentageAuto::Length(10.0),
-                LengthPercentageAuto::Auto,
-                LengthPercentageAuto::Auto,
-            ),
-            linear_layout_gravity: LinearLayoutGravity::End,
-            size: Size::new(px(20.0), Dimension::Auto),
+            position: PositionProperty::Fixed,
+            inset: edges(inset_px(10.0), inset_px(10.0), inset_auto(), inset_auto()),
+            align_self: self_align(AlignFlags::END),
+            size: Size::new(size_px(20.0), size_auto()),
             ..TestStyle::default()
         },
         responsive_measure,
     );
     let root = tree.push_linear(
         TestStyle {
-            linear_orientation: LinearOrientation::Horizontal,
-            linear_gravity: LinearGravity::Center,
+            linear_direction: linear_direction::T::Row,
+            justify_content: content(AlignFlags::CENTER),
             ..TestStyle::default()
         },
         vec![hoisted],
     );
 
-    definite_layout(&mut tree, root, 100.0, 50.0);
+    definite_layout(&tree, root, 100.0, 50.0);
 
     assert!(
         tree.measure_inputs(hoisted)
@@ -1457,23 +1358,23 @@ fn real_cache_does_not_let_linear_measurement_satisfy_commit() {
     let measured = tree.push_measured_leaf(TestStyle::default(), responsive_measure);
     let hoisted = tree.push_measured_leaf(
         TestStyle {
-            position: Position::AbsoluteHoisted,
+            position: PositionProperty::Fixed,
             ..fixed_style(10.0, 10.0)
         },
         responsive_measure,
     );
     let root = tree.push_linear(TestStyle::default(), vec![measured, hoisted]);
-    tree.session.enable_cache();
+    tree.enable_cache();
 
     let output = measure_layout(
-        &mut tree,
+        &tree,
         root,
         Size::new(Some(100.0), None),
         Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
     );
     assert!(output.size.width.is_finite() && output.size.height.is_finite());
-    assert_eq!(tree.session.layout_writes, 0);
-    assert_eq!(tree.session.static_position_writes, 0);
+    assert_eq!(tree.layout_writes.get(), 0);
+    assert_eq!(tree.static_position_writes.get(), 0);
     assert!(
         tree.measure_inputs(measured)
             .iter()
@@ -1482,7 +1383,7 @@ fn real_cache_does_not_let_linear_measurement_satisfy_commit() {
 
     let measured_calls = tree.measure_inputs(measured).len();
     let cached = measure_layout(
-        &mut tree,
+        &tree,
         root,
         Size::new(Some(100.0), None),
         Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
@@ -1491,7 +1392,7 @@ fn real_cache_does_not_let_linear_measurement_satisfy_commit() {
     assert_eq!(tree.measure_inputs(measured).len(), measured_calls);
 
     let resized = measure_layout(
-        &mut tree,
+        &tree,
         root,
         Size::new(Some(80.0), None),
         Size::new(AvailableSpace::Definite(80.0), AvailableSpace::MaxContent),
@@ -1501,13 +1402,13 @@ fn real_cache_does_not_let_linear_measurement_satisfy_commit() {
     let before_commit = tree.measure_inputs(measured).len();
 
     perform_layout(
-        &mut tree,
+        &tree,
         root,
         Size::new(Some(80.0), None),
         Size::new(AvailableSpace::Definite(80.0), AvailableSpace::MaxContent),
     );
-    assert!(tree.session.layout_writes > 0);
-    assert!(tree.session.static_position_writes > 0);
+    assert!(tree.layout_writes.get() > 0);
+    assert!(tree.static_position_writes.get() > 0);
     assert!(
         tree.measure_inputs(measured)[before_commit..]
             .iter()
@@ -1522,15 +1423,15 @@ fn content_sized_container_applies_min_max_after_natural_size() {
     let second = fixed_leaf(&mut tree, 10.0, 20.0);
     let root = tree.push_linear(
         TestStyle {
-            linear_orientation: LinearOrientation::Horizontal,
-            min_size: Size::new(px(50.0), Dimension::Auto),
-            max_size: Size::new(Dimension::Auto, px(30.0)),
+            linear_direction: linear_direction::T::Row,
+            min_size: Size::new(size_px(50.0), size_auto()),
+            max_size: Size::new(max_none(), max_px(30.0)),
             ..TestStyle::default()
         },
         vec![first, second],
     );
     let output = perform_layout(
-        &mut tree,
+        &tree,
         root,
         Size::NONE,
         Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
@@ -1541,12 +1442,11 @@ fn content_sized_container_applies_min_max_after_natural_size() {
 #[test]
 fn calc_item_size_and_percent_min_max_resolve_against_container_content_box() {
     let mut tree = TestTree::default();
-    let width = tree.push_calc(5.0, 0.5);
     let child = tree.push_leaf(
         TestStyle {
-            size: Size::new(Dimension::Calc(width), px(10.0)),
-            min_size: Size::new(Dimension::Percent(0.4), Dimension::Auto),
-            max_size: Size::new(Dimension::Percent(0.6), Dimension::Auto),
+            size: Size::new(size_calc(5.0, 0.5), size_px(10.0)),
+            min_size: Size::new(size_pct(0.4), size_auto()),
+            max_size: Size::new(max_pct(0.6), max_none()),
             ..TestStyle::default()
         },
         Size::new(1.0, 10.0),
@@ -1554,23 +1454,18 @@ fn calc_item_size_and_percent_min_max_resolve_against_container_content_box() {
     );
     let root = tree.push_linear(
         TestStyle {
-            padding: edges(
-                LengthPercentage::Length(10.0),
-                LengthPercentage::Length(10.0),
-                LengthPercentage::ZERO,
-                LengthPercentage::ZERO,
-            ),
+            padding: edges(npx(10.0), npx(10.0), npx(0.0), npx(0.0)),
             border: edges(
-                LengthPercentage::Length(2.0),
-                LengthPercentage::Length(2.0),
-                LengthPercentage::ZERO,
-                LengthPercentage::ZERO,
+                border_px(2.0),
+                border_px(2.0),
+                border_px(0.0),
+                border_px(0.0),
             ),
             ..TestStyle::default()
         },
         vec![child],
     );
-    definite_layout(&mut tree, root, 124.0, 40.0);
+    definite_layout(&tree, root, 124.0, 40.0);
     // The content box is 100px wide, so calc(5px + 50%) resolves to 55px.
     assert_close(tree.layout(child).size.width, 55.0);
     assert_close(tree.layout(child).location.x, 12.0);
@@ -1582,10 +1477,10 @@ fn intrinsic_inline_percentage_edges_resolve_without_changing_their_basis() {
     let child = tree.push_leaf(
         TestStyle {
             margin: edges(
-                LengthPercentageAuto::Percent(0.5),
-                LengthPercentageAuto::ZERO,
-                LengthPercentageAuto::ZERO,
-                LengthPercentageAuto::ZERO,
+                margin_pct(0.5),
+                margin_px(0.0),
+                margin_px(0.0),
+                margin_px(0.0),
             ),
             ..fixed_style(20.0, 10.0)
         },
@@ -1594,7 +1489,7 @@ fn intrinsic_inline_percentage_edges_resolve_without_changing_their_basis() {
     );
     let root = tree.push_linear(TestStyle::default(), vec![child]);
     let output = perform_layout(
-        &mut tree,
+        &tree,
         root,
         Size::NONE,
         Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
@@ -1610,12 +1505,12 @@ fn intrinsic_percentage_box_refresh_does_not_remeasure_children() {
     let mut tree = TestTree::default();
     let dependent = tree.push_leaf(
         TestStyle {
-            size: Size::new(Dimension::Percent(0.5), px(10.0)),
+            size: Size::new(size_pct(0.5), size_px(10.0)),
             margin: edges(
-                LengthPercentageAuto::Percent(0.5),
-                LengthPercentageAuto::ZERO,
-                LengthPercentageAuto::ZERO,
-                LengthPercentageAuto::ZERO,
+                margin_pct(0.5),
+                margin_px(0.0),
+                margin_px(0.0),
+                margin_px(0.0),
             ),
             ..TestStyle::default()
         },
@@ -1625,18 +1520,18 @@ fn intrinsic_percentage_box_refresh_does_not_remeasure_children() {
     let independent = fixed_leaf(&mut tree, 20.0, 10.0);
     let root = tree.push_linear(
         TestStyle {
-            linear_orientation: LinearOrientation::Horizontal,
+            linear_direction: linear_direction::T::Row,
             // End alignment also locks in Starlight's original intrinsic main
             // total: feeding the refreshed 50px margin back into that total
             // would shift both children 50px toward main-start.
-            linear_gravity: LinearGravity::End,
+            justify_content: content(AlignFlags::END),
             ..TestStyle::default()
         },
         vec![dependent, independent],
     );
 
     let output = perform_layout(
-        &mut tree,
+        &tree,
         root,
         Size::NONE,
         Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
@@ -1673,17 +1568,12 @@ fn intrinsic_percentage_box_refresh_precedes_container_min_clamp() {
     let child = tree.push_leaf(
         TestStyle {
             margin: edges(
-                LengthPercentageAuto::Percent(0.5),
-                LengthPercentageAuto::ZERO,
-                LengthPercentageAuto::ZERO,
-                LengthPercentageAuto::ZERO,
+                margin_pct(0.5),
+                margin_px(0.0),
+                margin_px(0.0),
+                margin_px(0.0),
             ),
-            inset: edges(
-                LengthPercentageAuto::Auto,
-                LengthPercentageAuto::Auto,
-                LengthPercentageAuto::Percent(0.5),
-                LengthPercentageAuto::Auto,
-            ),
+            inset: edges(inset_auto(), inset_auto(), inset_pct(0.5), inset_auto()),
             ..fixed_style(20.0, 10.0)
         },
         Size::new(20.0, 10.0),
@@ -1691,14 +1581,14 @@ fn intrinsic_percentage_box_refresh_precedes_container_min_clamp() {
     );
     let root = tree.push_linear(
         TestStyle {
-            min_size: Size::new(px(100.0), px(100.0)),
+            min_size: Size::new(size_px(100.0), size_px(100.0)),
             ..TestStyle::default()
         },
         vec![child],
     );
 
     let output = perform_layout(
-        &mut tree,
+        &tree,
         root,
         Size::NONE,
         Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),

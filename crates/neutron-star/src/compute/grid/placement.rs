@@ -1,13 +1,48 @@
 //! Numeric CSS Grid placement (Grid §8).
 //!
-//! Named lines are resolved by the host style adapter, so this pass only has
-//! to handle numeric lines, spans, and automatic positions. Coordinates are
+//! Line names carried by the stylo placement values are ignored (the engine
+//! is numeric-lines-only), so this pass only has to handle numeric lines,
+//! spans, and automatic positions. Coordinates are
 //! zero-based track coordinates: explicit line `1` is coordinate `0`, and a
 //! [`TrackSpan`] is half-open. Negative coordinates represent leading
 //! implicit tracks.
 
+use stylo::values::computed::{GridAutoFlow, GridLine};
+
 use crate::geometry::Line;
-use crate::style::{GridAutoFlow, GridPlacement};
+
+/// One normalized side of a `grid-row` / `grid-column` placement.
+///
+/// Engine-private scratch decoded from stylo's [`GridLine`] by
+/// [`grid_placement`]: `line_num == 0` means the number is absent, `is_span`
+/// selects the span form, and the line name is ignored (the engine is
+/// numeric-lines-only; hosts lower names before layout).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum GridPlacement {
+    /// `auto`: placed by the auto-placement algorithm.
+    #[default]
+    Auto,
+    /// A specific 1-based (possibly negative) line number. `0` is invalid
+    /// per the CSS grammar and is decoded as [`GridPlacement::Auto`].
+    Line(i32),
+    /// `span <n>` relative to the opposite side. Values below one are
+    /// clamped when the span is normalized (CSS treats `span 0` as invalid).
+    Span(i32),
+}
+
+/// Decodes one stylo grid line into the engine's placement scratch.
+///
+/// A `span` carrying only an ident (no number) spans one track: the engine
+/// cannot search named lines, and the parsed default span count is one.
+pub(super) fn grid_placement(line: &GridLine) -> GridPlacement {
+    if line.is_span {
+        GridPlacement::Span(if line.line_num == 0 { 1 } else { line.line_num })
+    } else if line.line_num == 0 {
+        GridPlacement::Auto
+    } else {
+        GridPlacement::Line(line.line_num)
+    }
+}
 
 const MIN_GRID_LINE: i32 = -10_000;
 const MAX_GRID_LINE: i32 = 10_000;
@@ -104,8 +139,8 @@ pub(super) fn resolve_axis_placement(
 
     match (start, end) {
         (GridPlacement::Line(start), GridPlacement::Line(end)) => {
-            let mut start = resolve_line(start.as_i16(), explicit_tracks);
-            let mut end = resolve_line(end.as_i16(), explicit_tracks);
+            let mut start = resolve_line(start, explicit_tracks);
+            let mut end = resolve_line(end, explicit_tracks);
             if start > end {
                 core::mem::swap(&mut start, &mut end);
             } else if start == end {
@@ -115,19 +150,19 @@ pub(super) fn resolve_axis_placement(
             AxisPlacement::Definite(clamp_area(start, end))
         }
         (GridPlacement::Line(start), GridPlacement::Span(span)) => {
-            let start = resolve_line(start.as_i16(), explicit_tracks);
+            let start = resolve_line(start, explicit_tracks);
             AxisPlacement::Definite(clamp_area(start, start + normalized_span_i64(span)))
         }
         (GridPlacement::Span(span), GridPlacement::Line(end)) => {
-            let end = resolve_line(end.as_i16(), explicit_tracks);
+            let end = resolve_line(end, explicit_tracks);
             AxisPlacement::Definite(clamp_area(end - normalized_span_i64(span), end))
         }
         (GridPlacement::Line(start), GridPlacement::Auto) => {
-            let start = resolve_line(start.as_i16(), explicit_tracks);
+            let start = resolve_line(start, explicit_tracks);
             AxisPlacement::Definite(clamp_area(start, start.saturating_add(1)))
         }
         (GridPlacement::Auto, GridPlacement::Line(end)) => {
-            let end = resolve_line(end.as_i16(), explicit_tracks);
+            let end = resolve_line(end, explicit_tracks);
             AxisPlacement::Definite(clamp_area(end.saturating_sub(1), end))
         }
         // Two spans conflict: the end-side span is discarded. A lone
@@ -150,8 +185,8 @@ pub(super) fn place_items(
     explicit_rows: usize,
     flow: GridAutoFlow,
 ) -> PlacementResult {
-    let row_flow = flow.is_row_flow();
-    let dense = flow.is_dense();
+    let row_flow = flow.contains(GridAutoFlow::ROW);
+    let dense = flow.contains(GridAutoFlow::DENSE);
     let explicit_column_range = explicit_range(explicit_columns);
     let explicit_row_range = explicit_range(explicit_rows);
 
@@ -815,23 +850,27 @@ impl RangeMax {
 #[inline]
 fn normalized(placement: GridPlacement) -> GridPlacement {
     match placement {
-        GridPlacement::Line(line) if line.as_i16() == 0 => GridPlacement::Auto,
+        // `grid_placement` never produces a zero line, but placements are
+        // also built directly by in-crate callers; stay defensive.
+        GridPlacement::Line(0) => GridPlacement::Auto,
         other => other,
     }
 }
 
 #[inline]
-fn normalized_span(span: u16) -> usize {
-    usize::from(span.max(1)).min(MAX_GRID_TRACKS)
+fn normalized_span(span: i32) -> usize {
+    usize::try_from(span.max(1))
+        .expect("span is clamped to at least one")
+        .min(MAX_GRID_TRACKS)
 }
 
 #[inline]
-fn normalized_span_i64(span: u16) -> i64 {
+fn normalized_span_i64(span: i32) -> i64 {
     i64::try_from(normalized_span(span)).unwrap()
 }
 
 #[inline]
-fn resolve_line(line: i16, explicit_tracks: usize) -> i64 {
+fn resolve_line(line: i32, explicit_tracks: usize) -> i64 {
     let explicit_tracks = i64::try_from(explicit_tracks).unwrap_or(i64::MAX);
     let line = i64::from(line);
     if line > 0 {
@@ -1005,18 +1044,37 @@ fn last_set_bit(words: &[u64], start: usize, end: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::style::GridLine;
 
     fn auto() -> GridPlacement {
         GridPlacement::Auto
     }
 
-    fn line(value: i16) -> GridPlacement {
-        GridPlacement::Line(GridLine::new(value))
+    fn line(value: i32) -> GridPlacement {
+        GridPlacement::Line(value)
     }
 
-    fn span(value: u16) -> GridPlacement {
+    fn span(value: i32) -> GridPlacement {
         GridPlacement::Span(value)
+    }
+
+    fn stylo_line(line_num: i32, is_span: bool) -> GridLine {
+        let mut line = GridLine::auto();
+        line.line_num = line_num;
+        line.is_span = is_span;
+        line
+    }
+
+    #[test]
+    fn stylo_grid_lines_decode_to_placements() {
+        assert_eq!(grid_placement(&GridLine::auto()), GridPlacement::Auto);
+        assert_eq!(grid_placement(&stylo_line(2, false)), GridPlacement::Line(2));
+        assert_eq!(
+            grid_placement(&stylo_line(-3, false)),
+            GridPlacement::Line(-3)
+        );
+        assert_eq!(grid_placement(&stylo_line(3, true)), GridPlacement::Span(3));
+        // `span <ident>` carries no number; the engine spans one track.
+        assert_eq!(grid_placement(&stylo_line(0, true)), GridPlacement::Span(1));
     }
 
     fn input(
@@ -1066,8 +1124,8 @@ mod tests {
             input(auto(), span(2), auto(), auto()),
             input(auto(), auto(), auto(), auto()),
         ];
-        let sparse = place_items(&inputs, 3, 0, GridAutoFlow::Row);
-        let dense = place_items(&inputs, 3, 0, GridAutoFlow::RowDense);
+        let sparse = place_items(&inputs, 3, 0, GridAutoFlow::ROW);
+        let dense = place_items(&inputs, 3, 0, GridAutoFlow::ROW | GridAutoFlow::DENSE);
 
         assert_eq!(
             sparse.areas[2],
@@ -1091,8 +1149,8 @@ mod tests {
             input(auto(), auto(), auto(), auto()),
             input(auto(), auto(), auto(), auto()),
         ];
-        let rows = place_items(&inputs, 2, 2, GridAutoFlow::Row);
-        let columns = place_items(&inputs, 2, 2, GridAutoFlow::Column);
+        let rows = place_items(&inputs, 2, 2, GridAutoFlow::ROW);
+        let columns = place_items(&inputs, 2, 2, GridAutoFlow::COLUMN);
         assert_eq!(rows.areas[0].column, TrackSpan { start: 0, end: 1 });
         assert_eq!(rows.areas[1].column, TrackSpan { start: 1, end: 2 });
         assert_eq!(rows.areas[1].row, TrackSpan { start: 0, end: 1 });
@@ -1107,7 +1165,7 @@ mod tests {
             input(line(-5), line(-4), line(1), line(2)),
             input(auto(), auto(), auto(), auto()),
         ];
-        let result = place_items(&inputs, 2, 1, GridAutoFlow::Row);
+        let result = place_items(&inputs, 2, 1, GridAutoFlow::ROW);
         assert_eq!(result.column_range, TrackSpan { start: -2, end: 2 });
         assert_eq!(result.areas[0].column, TrackSpan { start: -2, end: -1 });
         assert_eq!(result.areas[1].column, TrackSpan { start: -1, end: 0 });
@@ -1120,7 +1178,7 @@ mod tests {
             &[input(auto(), span(2), auto(), span(2))],
             3,
             2,
-            GridAutoFlow::Row,
+            GridAutoFlow::ROW,
         );
         assert_eq!(
             result.areas[0],
@@ -1134,7 +1192,7 @@ mod tests {
     #[test]
     fn explicit_items_may_overlap() {
         let placed = input(line(1), line(3), line(1), line(2));
-        let result = place_items(&[placed, placed], 2, 1, GridAutoFlow::Row);
+        let result = place_items(&[placed, placed], 2, 1, GridAutoFlow::ROW);
         assert_eq!(result.areas[0], result.areas[1]);
         assert_eq!(result.occupied_columns, [true, true]);
         assert_eq!(result.occupied_rows, [true]);
@@ -1143,21 +1201,21 @@ mod tests {
     #[test]
     fn clamps_areas_to_supported_grid_lines() {
         assert_eq!(
-            resolve_axis_placement(Line::new(line(32_767), auto()), 1),
+            resolve_axis_placement(Line::new(line(1_000_000), auto()), 1),
             AxisPlacement::Definite(TrackSpan {
                 start: 9_999,
                 end: 10_000,
             })
         );
         assert_eq!(
-            resolve_axis_placement(Line::new(line(-32_768), auto()), 1),
+            resolve_axis_placement(Line::new(line(-1_000_000), auto()), 1),
             AxisPlacement::Definite(TrackSpan {
                 start: -10_000,
                 end: -9_999,
             })
         );
         assert_eq!(
-            resolve_axis_placement(Line::new(line(1), span(u16::MAX)), 1),
+            resolve_axis_placement(Line::new(line(1), span(i32::MAX)), 1),
             AxisPlacement::Definite(TrackSpan {
                 start: 0,
                 end: 10_000,
@@ -1168,12 +1226,12 @@ mod tests {
         // move the step-2 item's oversized automatic span startward.
         let result = place_items(
             &[
-                input(auto(), span(u16::MAX), line(1), line(2)),
+                input(auto(), span(i32::MAX), line(1), line(2)),
                 input(line(-10_001), line(-10_000), auto(), auto()),
             ],
             0,
             1,
-            GridAutoFlow::Row,
+            GridAutoFlow::ROW,
         );
         assert_eq!(
             result.areas[0].column,

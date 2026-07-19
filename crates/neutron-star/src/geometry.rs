@@ -149,12 +149,12 @@ impl<T> Edges<T> {
     #[must_use]
     pub fn uniform(value: T) -> Self
     where
-        T: Copy,
+        T: Clone,
     {
         Self {
-            left: value,
-            right: value,
-            top: value,
+            left: value.clone(),
+            right: value.clone(),
+            top: value.clone(),
             bottom: value,
         }
     }

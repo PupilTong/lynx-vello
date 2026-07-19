@@ -1,7 +1,8 @@
 //! The style protocol: how the engine reads computed style.
 //!
-//! The engine never sees the host's style representation. Instead, the
-//! immutable `LayoutSource` traits hand out short-lived **style views** —
+//! The engine never sees the host's style representation. Instead, the node
+//! handle's [`style`](crate::tree::LayoutNode::style) hands out borrowed
+//! **style views** —
 //! cheap borrowed values implementing [`CoreStyle`] plus the per-algorithm traits
 //! ([`FlexContainerStyle`]/[`FlexItemStyle`], [`GridContainerStyle`]/
 //! [`GridItemStyle`], [`LinearContainerStyle`]/[`LinearItemStyle`],
@@ -33,7 +34,7 @@
 //! symbolic ([`value::LengthPercentage::Percent`]) because their basis is
 //! only known during layout; `calc()` stays symbolic as a
 //! [`value::CalcHandle`] resolved through
-//! [`LayoutSource::resolve_calc`](crate::tree::LayoutSource::resolve_calc). All
+//! [`LayoutNode::resolve_calc`](crate::tree::LayoutNode::resolve_calc). All
 //! values must be finite — `NaN`/`±∞` at the boundary is a host bug
 //! (debug-asserted by the algorithms, not defended against in release).
 
@@ -135,7 +136,7 @@ pub enum Position {
     /// `position: fixed`, or `absolute` escaping non-positioned ancestors in
     /// non-Lynx hosts). The parent's algorithm computes and records the
     /// node's static position via
-    /// [`LayoutState::set_static_position`](crate::tree::LayoutState::set_static_position)
+    /// [`LayoutNode::set_static_position`](crate::tree::LayoutNode::set_static_position)
     /// but does **not** size or place it; the host completes it after
     /// in-flow layout in a positioned pass via
     /// [`compute_absolute_layout`](crate::compute::compute_absolute_layout)

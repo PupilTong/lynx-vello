@@ -1,14 +1,18 @@
 //! Transient, algorithm-private Grid state.
 //!
-//! Raw style remains in the immutable source and is reborrowed by node id.
+//! Raw style remains host-owned and is re-fetched through the node handle.
 //! Only stable identity, resolved values, and compact hot fields needed by
 //! repeated sizing passes live in the contiguous scratch vectors below.
 
+use stylo::computed_values::{box_sizing, direction};
+use stylo::values::computed::{
+    LengthPercentage, Overflow, PositionProperty, TrackBreadth, TrackSize,
+};
+
+use super::alignment::AlignItems;
 use super::placement::GridArea;
 use crate::compute::util::ItemKey;
 use crate::geometry::{Edges, Point, Size};
-use crate::style::alignment::AlignItems;
-use crate::style::{BoxSizing, Direction, Overflow, TrackSizingFunction};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Axis {
@@ -28,7 +32,7 @@ impl Axis {
     }
 
     #[inline]
-    pub(super) fn size<T: Copy>(self, size: Size<T>) -> T {
+    pub(super) fn size<T>(self, size: Size<T>) -> T {
         match self {
             Self::Horizontal => size.width,
             Self::Vertical => size.height,
@@ -65,20 +69,90 @@ impl Axis {
     }
 }
 
+/// The normalized `minmax()` halves of one track sizing function.
+///
+/// Engine-private scratch built once from stylo's [`TrackSize`], applying
+/// the CSS Grid §7.2 single-value expansions so the sizing passes match on
+/// plain [`TrackBreadth`] halves:
+/// - a lone `<flex>` breadth becomes `minmax(auto, <flex>)`;
+/// - `fit-content(limit)` becomes `minmax(auto, max-content)` with the limit
+///   retained in [`fit_content`](Self::fit_content) (the §12.5 clamp).
+///
+/// A `Flex` breadth in the *minimum* half is unrepresentable in the track
+/// grammar; the sizing passes treat it as `auto` (CSS Grid §7.2.4).
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct TrackSizingFunction {
+    /// The minimum sizing function.
+    pub(super) min: TrackBreadth,
+    /// The maximum sizing function (`Flex` = `<flex>`; `MaxContent` when
+    /// [`fit_content`](Self::fit_content) is set).
+    pub(super) max: TrackBreadth,
+    /// `Some(limit)` iff the track is `fit-content(limit)`.
+    pub(super) fit_content: Option<LengthPercentage>,
+}
+
+impl TrackSizingFunction {
+    /// `auto` (i.e. `minmax(auto, auto)`).
+    pub(super) const AUTO: Self = Self {
+        min: TrackBreadth::Auto,
+        max: TrackBreadth::Auto,
+        fit_content: None,
+    };
+
+    /// Normalizes one stylo track size into minmax halves.
+    pub(super) fn from_style(size: &TrackSize) -> Self {
+        match size {
+            TrackSize::Breadth(TrackBreadth::Flex(flex)) => Self {
+                min: TrackBreadth::Auto,
+                max: TrackBreadth::Flex(*flex),
+                fit_content: None,
+            },
+            TrackSize::Breadth(breadth) => Self {
+                min: breadth.clone(),
+                max: breadth.clone(),
+                fit_content: None,
+            },
+            TrackSize::Minmax(min, max) => Self {
+                min: min.clone(),
+                max: max.clone(),
+                fit_content: None,
+            },
+            TrackSize::FitContent(TrackBreadth::Breadth(limit)) => Self {
+                min: TrackBreadth::Auto,
+                max: TrackBreadth::MaxContent,
+                fit_content: Some(limit.clone()),
+            },
+            TrackSize::FitContent(_) => {
+                unreachable!("fit-content() stores a <length-percentage> breadth by construction")
+            }
+        }
+    }
+}
+
+impl Default for TrackSizingFunction {
+    fn default() -> Self {
+        Self::AUTO
+    }
+}
+
 /// One placed in-flow item with resolved box values and local contribution
 /// caches.  Contributions are invalidated only for the bounded column/row
 /// reruns required by Grid sizing.
 #[derive(Debug, Clone)]
-pub(super) struct GridItem {
-    pub(super) key: ItemKey,
+pub(super) struct GridItem<N> {
+    pub(super) key: ItemKey<N>,
     pub(super) area: GridArea,
+    /// The item's positioning scheme. In-flow schemes lay out identically
+    /// except that only `relative` applies the definite-inset visual nudge
+    /// (`sticky` is nudged by the host at scroll time, `static` never).
+    pub(super) position: PositionProperty,
     pub(super) align_self: AlignItems,
     pub(super) justify_self: AlignItems,
     /// The item's own inline base direction. Baseline fallback uses
     /// self-start, which can differ from the Grid container's inline start.
-    pub(super) direction: Direction,
+    pub(super) direction: direction::T,
     pub(super) aspect_ratio: Option<f32>,
-    pub(super) box_sizing: BoxSizing,
+    pub(super) box_sizing: box_sizing::T,
     pub(super) overflow: Point<Overflow>,
     pub(super) preferred_behaves_auto_or_depends: Size<bool>,
     pub(super) minimum_is_auto: Size<bool>,
@@ -89,7 +163,6 @@ pub(super) struct GridItem {
     pub(super) margin_auto: Edges<bool>,
     pub(super) padding: Edges<f32>,
     pub(super) border: Edges<f32>,
-    pub(super) scrollbar: Size<f32>,
     pub(super) inset: Edges<Option<f32>>,
     pub(super) raw_min_content: Size<Option<f32>>,
     pub(super) raw_max_content: Size<Option<f32>>,
@@ -102,7 +175,7 @@ pub(super) struct GridItem {
     pub(super) baseline_shim: f32,
 }
 
-impl GridItem {
+impl<N> GridItem<N> {
     #[inline]
     pub(super) fn span(&self, axis: Axis) -> usize {
         let span = match axis {
@@ -127,7 +200,7 @@ impl GridItem {
 }
 
 /// Cold style plus hot used values for one concrete explicit/implicit track.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 #[allow(clippy::struct_excessive_bools)]
 pub(super) struct Track {
     pub(super) sizing: TrackSizingFunction,
@@ -149,7 +222,7 @@ pub(super) struct Track {
 
 impl Track {
     #[inline]
-    pub(super) fn is_flexible(self) -> bool {
+    pub(super) fn is_flexible(&self) -> bool {
         self.flexible
     }
 }
@@ -269,6 +342,7 @@ impl TrackSet {
             .iter()
             .filter(|track| !track.collapsed)
             .count();
+        #[allow(clippy::cast_precision_loss)]
         let mut size = (self.gap + distributed_gap) * visible.saturating_sub(1) as f32;
         for track in &self.tracks[range] {
             if track.collapsed {

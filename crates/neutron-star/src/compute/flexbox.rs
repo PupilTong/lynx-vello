@@ -1,10 +1,11 @@
 //! CSS Flexible Box Layout Module Level 1 layout algorithm.
 //!
-//! The implementation follows the pass ordering in Flexbox §9. Style and
-//! topology stay in an immutable [`FlexSource`], while recursive measurement
-//! and durable writes go through a separate [`LayoutSession`]. This separation
-//! lets borrowed GAT style views remain live across child layout without raw
-//! style snapshots or self-referential scratch structures.
+//! The implementation follows the pass ordering in Flexbox §9. Topology and
+//! styles are immutable for the layout epoch, while recursive measurement and
+//! durable writes go through the [`LayoutNode`] handle into host-owned
+//! interior-mutable per-node slots. This lets borrowed style views remain
+//! live across child layout without raw style snapshots or self-referential
+//! scratch structures.
 //!
 //! The current protocol deliberately leaves formatting-tree preprocessing
 //! (anonymous item generation) to the host and has no representation for
@@ -32,8 +33,8 @@ use crate::style::{
     FlexItemStyle, FlexWrap, Position, Visibility,
 };
 use crate::tree::{
-    AvailableSpace, FlexSource, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutSession,
-    NodeId, RequestedAxis, SizingMode,
+    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
+    SizingMode,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,8 +136,8 @@ impl Axes {
 /// flexing, cross-size, and alignment passes. It stores only resolved values
 /// and compact hot style fields; raw CSS values are reborrowed from `node`.
 #[derive(Debug)]
-struct FlexItem {
-    key: ItemKey,
+struct FlexItem<N> {
+    key: ItemKey<N>,
     direction: Direction,
     align_self: AlignItems,
     size_is_auto: Size<bool>,
@@ -172,7 +173,7 @@ struct FlexItem {
     collapse_strut_cross: Option<f32>,
 }
 
-impl FlexItem {
+impl<N> FlexItem<N> {
     #[inline]
     fn is_suppressed(&self) -> bool {
         self.collapsed && self.collapse_strut_cross.is_some()
@@ -327,13 +328,16 @@ fn alignment_distribution(
     }
 }
 
-fn resolve_item<Source: FlexSource>(
-    source: &Source,
-    key: ItemKey,
+fn resolve_item<N>(
+    key: ItemKey<N>,
     container_inner_size: Size<Option<f32>>,
     default_alignment: AlignItems,
-) -> FlexItem {
-    let style = source.flex_item_style(key.node);
+) -> FlexItem<N>
+where
+    N: LayoutNode,
+    N::Style: FlexContainerStyle + FlexItemStyle,
+{
+    let style = key.node.style();
     let flex_grow = style.flex_grow();
     let flex_shrink = style.flex_shrink();
     debug_assert!(
@@ -357,7 +361,7 @@ fn resolve_item<Source: FlexSource>(
         scrollbar,
         inset,
         ..
-    } = resolve_item_box(source, &style, container_inner_size);
+    } = resolve_item_box(key.node, &style, container_inner_size);
     let preferred_size_is_definite =
         preferred_size_definiteness(raw_size, container_inner_size, aspect_ratio);
 
@@ -400,10 +404,8 @@ fn resolve_item<Source: FlexSource>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn child_measurement<Source, Session>(
-    source: &Source,
-    session: &mut Session,
-    node: NodeId,
+fn child_measurement<N>(
+    node: N,
     known_dimensions: Size<Option<f32>>,
     definite_dimensions: Size<bool>,
     parent_size: Size<Option<f32>>,
@@ -412,8 +414,8 @@ fn child_measurement<Source, Session>(
     requested_axis: RequestedAxis,
 ) -> LayoutOutput
 where
-    Source: FlexSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: FlexContainerStyle + FlexItemStyle,
 {
     let mut input = LayoutInput::compute_size(
         known_dimensions,
@@ -423,30 +425,30 @@ where
     );
     input.definite_dimensions = definite_dimensions;
     input.sizing_mode = sizing_mode;
-    session.compute_child_layout(source, node, input)
+    node.compute_child_layout(input)
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn determine_flex_base_sizes<Source, Session>(
-    source: &Source,
-    session: &mut Session,
-    items: &mut [FlexItem],
+fn determine_flex_base_sizes<N>(
+    items: &mut [FlexItem<N>],
     axes: Axes,
     container_inner_size: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
     flex_basis_percentage_basis: Option<f32>,
     container_main_is_definite: bool,
 ) where
-    Source: FlexSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: FlexContainerStyle + FlexItemStyle,
 {
     let container_main = axes.main.size(container_inner_size);
     let available_main = axes.main.size(available_space);
 
     for item in items {
-        // Source and session are deliberately separate: this borrowed style
-        // view remains valid across both recursive measurements below.
-        let style = source.flex_item_style(item.key.node);
+        let node = item.key.node;
+        // Recursive measurement mutates only host-owned per-node slots, so
+        // this borrowed style view remains valid across both recursive
+        // measurements below.
+        let style = node.style();
         let inset_size = box_inset_size(item.padding, item.border, item.scrollbar);
         let main_floor = axes.main.size(inset_size);
         let cross_preferred = axes.cross.size(item.preferred_size);
@@ -472,9 +474,7 @@ fn determine_flex_base_sizes<Source, Session>(
             size_from_axes(axes, None, axes.cross.size(container_inner_size));
         let min_content = axes.main.size(
             child_measurement(
-                source,
-                session,
-                item.key.node,
+                node,
                 known,
                 known_is_definite,
                 contribution_parent_size,
@@ -486,9 +486,7 @@ fn determine_flex_base_sizes<Source, Session>(
         );
         let max_content = axes.main.size(
             child_measurement(
-                source,
-                session,
-                item.key.node,
+                node,
                 known,
                 known_is_definite,
                 contribution_parent_size,
@@ -501,9 +499,7 @@ fn determine_flex_base_sizes<Source, Session>(
         let available_content = if matches!(available_main, AvailableSpace::Definite(_)) {
             axes.main.size(
                 child_measurement(
-                    source,
-                    session,
-                    item.key.node,
+                    node,
                     known,
                     known_is_definite,
                     contribution_parent_size,
@@ -522,7 +518,7 @@ fn determine_flex_base_sizes<Source, Session>(
                 Dimension::MinContent => Some(min_content),
                 Dimension::MaxContent => Some(max_content),
                 Dimension::FitContent(limit) => {
-                    let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
+                    let resolve_calc = |handle, basis| node.resolve_calc(handle, basis);
                     let limit = resolve_length_percentage(limit, container_main, &resolve_calc)
                         .unwrap_or(max_content);
                     Some(max_content.min(limit.max(min_content)))
@@ -550,7 +546,7 @@ fn determine_flex_base_sizes<Source, Session>(
         }
 
         let resolved_basis = {
-            let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
+            let resolve_calc = |handle, basis| node.resolve_calc(handle, basis);
             resolve_dimension(
                 style.flex_basis(),
                 flex_basis_percentage_basis,
@@ -585,7 +581,7 @@ fn determine_flex_base_sizes<Source, Session>(
                 Dimension::MinContent => min_content,
                 Dimension::MaxContent | Dimension::Length(_) | Dimension::Calc(_) => max_content,
                 Dimension::FitContent(limit) => {
-                    let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
+                    let resolve_calc = |handle, basis| node.resolve_calc(handle, basis);
                     let limit = super::util::resolve_length_percentage(
                         limit,
                         flex_basis_percentage_basis,
@@ -672,7 +668,11 @@ fn determine_flex_base_sizes<Source, Session>(
 }
 
 #[inline]
-fn item_outer_hypothetical_main(item: &FlexItem, axes: Axes) -> f32 {
+fn item_outer_hypothetical_main<N>(item: &FlexItem<N>, axes: Axes) -> f32
+where
+    N: LayoutNode,
+    N::Style: FlexContainerStyle + FlexItemStyle,
+{
     if item.is_suppressed() {
         0.0
     } else {
@@ -681,7 +681,11 @@ fn item_outer_hypothetical_main(item: &FlexItem, axes: Axes) -> f32 {
 }
 
 #[inline]
-fn item_outer_target_main(item: &FlexItem, axes: Axes) -> f32 {
+fn item_outer_target_main<N>(item: &FlexItem<N>, axes: Axes) -> f32
+where
+    N: LayoutNode,
+    N::Style: FlexContainerStyle + FlexItemStyle,
+{
     if item.is_suppressed() {
         0.0
     } else {
@@ -690,11 +694,19 @@ fn item_outer_target_main(item: &FlexItem, axes: Axes) -> f32 {
 }
 
 #[inline]
-fn participating_count(items: &[FlexItem]) -> usize {
+fn participating_count<N>(items: &[FlexItem<N>]) -> usize
+where
+    N: LayoutNode,
+    N::Style: FlexContainerStyle + FlexItemStyle,
+{
     items.iter().filter(|item| !item.is_suppressed()).count()
 }
 
-fn apply_collapse_struts(items: &mut [FlexItem], struts: &[Option<f32>]) {
+fn apply_collapse_struts<N>(items: &mut [FlexItem<N>], struts: &[Option<f32>])
+where
+    N: LayoutNode,
+    N::Style: FlexContainerStyle + FlexItemStyle,
+{
     debug_assert_eq!(items.len(), struts.len());
     for (item, strut) in items.iter_mut().zip(struts.iter().copied()) {
         item.collapse_strut_cross = strut;
@@ -710,13 +722,17 @@ fn apply_collapse_struts(items: &mut [FlexItem], struts: &[Option<f32>]) {
     }
 }
 
-fn collect_flex_lines(
-    items: &[FlexItem],
+fn collect_flex_lines<N>(
+    items: &[FlexItem<N>],
     wrap: FlexWrap,
     available_main: AvailableSpace,
     gap: f32,
     axes: Axes,
-) -> Vec<FlexLine> {
+) -> Vec<FlexLine>
+where
+    N: LayoutNode,
+    N::Style: FlexContainerStyle + FlexItemStyle,
+{
     if wrap == FlexWrap::NoWrap || available_main == AvailableSpace::MaxContent {
         return vec![FlexLine {
             start: 0,
@@ -798,7 +814,11 @@ fn collect_flex_lines(
     lines
 }
 
-fn line_intrinsic_main(items: &[FlexItem], line: FlexLine, gap: f32, axes: Axes) -> f32 {
+fn line_intrinsic_main<N>(items: &[FlexItem<N>], line: FlexLine, gap: f32, axes: Axes) -> f32
+where
+    N: LayoutNode,
+    N::Style: FlexContainerStyle + FlexItemStyle,
+{
     let line_items = &items[line.start..line.end];
     let item_sum = line_items
         .iter()
@@ -808,7 +828,16 @@ fn line_intrinsic_main(items: &[FlexItem], line: FlexLine, gap: f32, axes: Axes)
     item_sum + gap * participating_count(line_items).saturating_sub(1) as f32
 }
 
-fn line_content_contribution(items: &[FlexItem], line: FlexLine, gap: f32, maximum: bool) -> f32 {
+fn line_content_contribution<N>(
+    items: &[FlexItem<N>],
+    line: FlexLine,
+    gap: f32,
+    maximum: bool,
+) -> f32
+where
+    N: LayoutNode,
+    N::Style: FlexContainerStyle + FlexItemStyle,
+{
     let line_items = &items[line.start..line.end];
     let item_sum = line_items
         .iter()
@@ -825,8 +854,8 @@ fn line_content_contribution(items: &[FlexItem], line: FlexLine, gap: f32, maxim
 }
 
 #[allow(clippy::too_many_arguments)]
-fn determine_auto_main_size(
-    items: &[FlexItem],
+fn determine_auto_main_size<N>(
+    items: &[FlexItem<N>],
     lines: &[FlexLine],
     gap: f32,
     axes: Axes,
@@ -834,7 +863,11 @@ fn determine_auto_main_size(
     inset_main: f32,
     min_outer: Option<f32>,
     max_outer: Option<f32>,
-) -> f32 {
+) -> f32
+where
+    N: LayoutNode,
+    N::Style: FlexContainerStyle + FlexItemStyle,
+{
     let content = match available_main {
         AvailableSpace::MaxContent => lines
             .iter()
@@ -859,13 +892,16 @@ fn determine_auto_main_size(
 }
 
 #[allow(clippy::too_many_lines)]
-fn resolve_flexible_lengths(
-    items: &mut [FlexItem],
+fn resolve_flexible_lengths<N>(
+    items: &mut [FlexItem<N>],
     line: FlexLine,
     inner_main_size: f32,
     gap: f32,
     axes: Axes,
-) {
+) where
+    N: LayoutNode,
+    N::Style: FlexContainerStyle + FlexItemStyle,
+{
     let line_items = &mut items[line.start..line.end];
     if participating_count(line_items) == 0 {
         for item in line_items {
@@ -1035,17 +1071,15 @@ fn resolve_flexible_lengths(
     debug_assert!(false, "flex freeze loop exceeded the item-count bound");
 }
 
-fn determine_hypothetical_cross_sizes<Source, Session>(
-    source: &Source,
-    session: &mut Session,
-    items: &mut [FlexItem],
+fn determine_hypothetical_cross_sizes<N>(
+    items: &mut [FlexItem<N>],
     lines: &[FlexLine],
     axes: Axes,
     container_inner_size: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
 ) where
-    Source: FlexSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: FlexContainerStyle + FlexItemStyle,
 {
     for line in lines {
         for item in &mut items[line.start..line.end] {
@@ -1069,8 +1103,6 @@ fn determine_hypothetical_cross_sizes<Source, Session>(
                 axes.cross.size(available_space),
             );
             let output = child_measurement(
-                source,
-                session,
                 item.key.node,
                 known,
                 known_is_definite,
@@ -1098,13 +1130,16 @@ fn determine_hypothetical_cross_sizes<Source, Session>(
     }
 }
 
-fn calculate_line_cross_sizes(
-    items: &[FlexItem],
+fn calculate_line_cross_sizes<N>(
+    items: &[FlexItem<N>],
     lines: &mut [FlexLine],
     axes: Axes,
     wrap: FlexWrap,
     known_inner_cross: Option<f32>,
-) {
+) where
+    N: LayoutNode,
+    N::Style: FlexContainerStyle + FlexItemStyle,
+{
     if wrap == FlexWrap::NoWrap
         && let (Some(line), Some(cross_size)) = (lines.first_mut(), known_inner_cross)
     {
@@ -1201,7 +1236,11 @@ fn stretch_lines(
     }
 }
 
-fn determine_used_cross_sizes(items: &mut [FlexItem], lines: &[FlexLine], axes: Axes) {
+fn determine_used_cross_sizes<N>(items: &mut [FlexItem<N>], lines: &[FlexLine], axes: Axes)
+where
+    N: LayoutNode,
+    N::Style: FlexContainerStyle + FlexItemStyle,
+{
     for line in lines {
         for item in &mut items[line.start..line.end] {
             if item.is_suppressed() {
@@ -1228,14 +1267,17 @@ fn determine_used_cross_sizes(items: &mut [FlexItem], lines: &[FlexLine], axes: 
     }
 }
 
-fn distribute_main_axis(
-    items: &mut [FlexItem],
+fn distribute_main_axis<N>(
+    items: &mut [FlexItem<N>],
     lines: &[FlexLine],
     axes: Axes,
     inner_main: f32,
     main_gap: f32,
     justify_content: AlignContent,
-) {
+) where
+    N: LayoutNode,
+    N::Style: FlexContainerStyle + FlexItemStyle,
+{
     for line in lines {
         let line_items = &mut items[line.start..line.end];
         let participant_count = participating_count(line_items);
@@ -1343,7 +1385,11 @@ fn align_lines(
     }
 }
 
-fn align_items_cross_axis(items: &mut [FlexItem], lines: &[FlexLine], axes: Axes) {
+fn align_items_cross_axis<N>(items: &mut [FlexItem<N>], lines: &[FlexLine], axes: Axes)
+where
+    N: LayoutNode,
+    N::Style: FlexContainerStyle + FlexItemStyle,
+{
     for line in lines {
         let max_physical_baseline = if axes.main == Axis::Horizontal {
             items[line.start..line.end]
@@ -1453,13 +1499,17 @@ fn flow_to_physical(flow: f32, box_size: f32, container_size: f32, reverse: bool
     }
 }
 
-fn item_border_box_location(
-    item: &FlexItem,
+fn item_border_box_location<N>(
+    item: &FlexItem<N>,
     line: FlexLine,
     axes: Axes,
     inner_size: Size<f32>,
     content_origin: Point<f32>,
-) -> Point<f32> {
+) -> Point<f32>
+where
+    N: LayoutNode,
+    N::Style: FlexContainerStyle + FlexItemStyle,
+{
     let main = flow_to_physical(
         item.main_position,
         item.target_main,
@@ -1479,13 +1529,17 @@ fn item_border_box_location(
     point
 }
 
-fn first_container_baseline(
-    items: &[FlexItem],
+fn first_container_baseline<N>(
+    items: &[FlexItem<N>],
     lines: &[FlexLine],
     axes: Axes,
     inner_size: Size<f32>,
     content_origin: Point<f32>,
-) -> Option<f32> {
+) -> Option<f32>
+where
+    N: LayoutNode,
+    N::Style: FlexContainerStyle + FlexItemStyle,
+{
     let line = *lines.first()?;
     let first = items[line.start..line.end]
         .iter()
@@ -1506,10 +1560,8 @@ fn first_container_baseline(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn perform_in_flow_layout<Source, Session>(
-    source: &Source,
-    session: &mut Session,
-    items: &mut [FlexItem],
+fn perform_in_flow_layout<N>(
+    items: &mut [FlexItem<N>],
     lines: &[FlexLine],
     axes: Axes,
     inner_size: Size<f32>,
@@ -1517,8 +1569,8 @@ fn perform_in_flow_layout<Source, Session>(
     container_size: Size<f32>,
 ) -> (Size<f32>, Option<f32>)
 where
-    Source: FlexSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: FlexContainerStyle + FlexItemStyle,
 {
     let parent_size = inner_size.map(Some);
     let mut content_size = container_size;
@@ -1527,11 +1579,10 @@ where
     for line in lines {
         for item in &mut items[line.start..line.end] {
             if item.is_suppressed() {
-                super::hide_subtree(source, session, item.key.node);
-                session.set_unrounded_layout(
-                    item.key.node,
-                    &Layout::with_order(item.key.layout_order),
-                );
+                super::hide_subtree(item.key.node);
+                item.key
+                    .node
+                    .set_unrounded_layout(&Layout::with_order(item.key.layout_order));
                 continue;
             }
             let target_size = size_from_axes(axes, item.target_main, item.target_cross);
@@ -1545,7 +1596,7 @@ where
             // The parent has already applied the flex item's own sizing,
             // min/max and aspect-ratio rules to both target axes.
             input.sizing_mode = SizingMode::ContentSize;
-            let output = session.compute_child_layout(source, item.key.node, input);
+            let output = item.key.node.compute_child_layout(input);
             let offset = relative_offset(item.inset, item.direction);
             let mut location =
                 item_border_box_location(item, *line, axes, inner_size, content_origin);
@@ -1560,7 +1611,7 @@ where
             layout.border = item.border;
             layout.padding = item.padding;
             layout.margin = item.margin;
-            session.set_unrounded_layout(item.key.node, &layout);
+            item.key.node.set_unrounded_layout(&layout);
 
             let overflow_width = output.size.width.max(output.content_size.width);
             let overflow_height = output.size.height.max(output.content_size.height);
@@ -1582,13 +1633,17 @@ where
     (content_size, first_baseline)
 }
 
-fn static_position_for_absolute(
-    item: &FlexItem,
+fn static_position_for_absolute<N>(
+    item: &FlexItem<N>,
     axes: Axes,
     inner_size: Size<f32>,
     content_origin: Point<f32>,
     justify_content: AlignContent,
-) -> Point<f32> {
+) -> Point<f32>
+where
+    N: LayoutNode,
+    N::Style: FlexContainerStyle + FlexItemStyle,
+{
     let free_main =
         axes.main.size(inner_size) - item.target_main - axis_sum(item.margin, axes.main);
     let (leading_main, _) = alignment_distribution(
@@ -1648,10 +1703,8 @@ fn static_position_for_absolute(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn perform_absolute_children<Source, Session>(
-    source: &Source,
-    session: &mut Session,
-    absolute_items: &[OrderedItem],
+fn perform_absolute_children<N>(
+    absolute_items: &[OrderedItem<N>],
     axes: Axes,
     inner_size: Size<f32>,
     container_size: Size<f32>,
@@ -1661,8 +1714,8 @@ fn perform_absolute_children<Source, Session>(
     default_alignment: AlignItems,
 ) -> Size<f32>
 where
-    Source: FlexSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: FlexContainerStyle + FlexItemStyle,
 {
     let content_origin = Point::new(border.left + padding.left, border.top + padding.top);
     let parent_size = inner_size.map(Some);
@@ -1674,15 +1727,14 @@ where
 
     for pending in absolute_items {
         let key = pending.key();
-        // The borrowed view is safe across recursive session calls; only
-        // layout/cache state mutates while the source epoch stays immutable.
-        let style = source.flex_item_style(key.node);
-        let mut item = resolve_item(source, key, parent_size, default_alignment);
+        // The borrowed view is safe across recursive child layout; only
+        // host-owned layout/cache slots mutate while topology and styles
+        // stay immutable for the flush.
+        let style = key.node.style();
+        let mut item = resolve_item(key, parent_size, default_alignment);
         let mut known = item.preferred_size;
         let available = inner_size.map(AvailableSpace::Definite);
         let output = child_measurement(
-            source,
-            session,
             key.node,
             known,
             item.preferred_size_is_definite,
@@ -1715,13 +1767,8 @@ where
                     static_position.x - border.left,
                     static_position.y - border.top,
                 );
-                let mut layout = compute_absolute_layout(
-                    source,
-                    session,
-                    key.node,
-                    padding_box_size,
-                    static_in_padding_space,
-                );
+                let mut layout =
+                    compute_absolute_layout(key.node, padding_box_size, static_in_padding_space);
                 layout.order = key.layout_order;
                 layout.location.x += border.left;
                 layout.location.y += border.top;
@@ -1731,10 +1778,10 @@ where
                 content_size.height = content_size
                     .height
                     .max(layout.location.y + layout.size.height.max(layout.content_size.height));
-                session.set_unrounded_layout(key.node, &layout);
+                key.node.set_unrounded_layout(&layout);
             }
             Position::AbsoluteHoisted => {
-                session.set_static_position(key.node, static_position);
+                key.node.set_static_position(static_position);
             }
             _ => {}
         }
@@ -1744,39 +1791,33 @@ where
 
 /// Computes one flex container according to CSS Flexible Box Layout §9.
 ///
-/// Style, calc resolution, and child topology are read only from `source`;
-/// recursive layout and durable geometry writes use `session`. The function
-/// has no dependency on a DOM or styling engine. Child layouts are stored only
-/// for [`LayoutGoal::Commit`].
+/// Style, calc resolution, and child topology are read through the node
+/// handle and stay immutable for the flush; recursive layout and durable
+/// geometry writes go through the handle into host-owned per-node slots. The
+/// function has no dependency on a DOM or styling engine. Child layouts are
+/// stored only for [`LayoutGoal::Commit`].
 #[allow(clippy::too_many_lines)]
-pub fn compute_flexbox_layout<Source, Session>(
-    source: &Source,
-    session: &mut Session,
-    node: NodeId,
-    input: LayoutInput,
-) -> LayoutOutput
+pub fn compute_flexbox_layout<N>(node: N, input: LayoutInput) -> LayoutOutput
 where
-    Source: FlexSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: FlexContainerStyle + FlexItemStyle,
 {
-    compute_flexbox_layout_with_collapse_struts(source, session, node, input, None)
+    compute_flexbox_layout_with_collapse_struts(node, input, None)
 }
 
 #[allow(clippy::too_many_lines)]
-fn compute_flexbox_layout_with_collapse_struts<Source, Session>(
-    source: &Source,
-    session: &mut Session,
-    node: NodeId,
+fn compute_flexbox_layout_with_collapse_struts<N>(
+    node: N,
     input: LayoutInput,
     collapse_struts: Option<&[Option<f32>]>,
 ) -> LayoutOutput
 where
-    Source: FlexSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: FlexContainerStyle + FlexItemStyle,
 {
-    // Unlike the former owned snapshot, this GAT view remains borrowed for
-    // the whole algorithm while recursive calls mutate only `session`.
-    let style = source.flex_container_style(node);
+    // This borrowed style view remains live for the whole algorithm;
+    // recursive calls mutate only host-owned per-node layout slots.
+    let style = node.style();
     let flex_wrap = style.flex_wrap();
     let align_content = style.align_content().unwrap_or(AlignContent::Stretch);
     let align_items = style.align_items().unwrap_or(AlignItems::Stretch);
@@ -1801,18 +1842,16 @@ where
         inner: mut inner_size,
         available_inner: inner_available_space,
         ..
-    } = resolve_container_box(source, &style, input);
+    } = resolve_container_box(node, &style, input);
     let item_inline_basis_was_indefinite = !outer_definite.width;
     let main_percentage_basis_was_indefinite = !axes.main.size(outer_definite);
     let gap_value = style.gap();
-    let mut gap = resolve_gap(source, gap_value, inner_size);
+    let mut gap = resolve_gap(node, gap_value, inner_size);
     let mut generated = Vec::new();
     let mut absolute_items = Vec::new();
     let mut hidden = Vec::new();
-    let child_count = source.child_count(node);
-    for document_index in 0..child_count {
-        let child = source.child_id(node, document_index);
-        let child_style = source.flex_item_style(child);
+    for (document_index, child) in node.children().enumerate() {
+        let child_style = child.style();
         if child_style.box_generation_mode() == BoxGenerationMode::None {
             hidden.push((document_index, child));
             continue;
@@ -1844,12 +1883,10 @@ where
             if !outer_definite.height {
                 percentage_basis.height = None;
             }
-            resolve_item(source, item.key(), percentage_basis, align_items)
+            resolve_item(item.key(), percentage_basis, align_items)
         })
         .collect::<Vec<_>>();
     determine_flex_base_sizes(
-        source,
-        session,
         &mut items,
         axes,
         inner_size,
@@ -1885,7 +1922,7 @@ where
         axes.main.set_size(&mut outer_size, Some(outer_main));
         axes.main
             .set_size(&mut inner_size, Some((outer_main - inset_main).max(0.0)));
-        let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
+        let resolve_calc = |handle, basis| node.resolve_calc(handle, basis);
         let resolved_main_gap = resolve_length_percentage(
             axes.main.size(gap_value),
             axes.main.size(inner_size),
@@ -1901,15 +1938,7 @@ where
         resolve_flexible_lengths(&mut items, line, inner_main, main_gap, axes);
     }
 
-    determine_hypothetical_cross_sizes(
-        source,
-        session,
-        &mut items,
-        &lines,
-        axes,
-        inner_size,
-        inner_available_space,
-    );
+    determine_hypothetical_cross_sizes(&mut items, &lines, axes, inner_size, inner_available_space);
     calculate_line_cross_sizes(
         &items,
         &mut lines,
@@ -1935,7 +1964,7 @@ where
             .set_size(&mut inner_size, Some((outer_cross - inset_cross).max(0.0)));
     }
     if cross_was_definite {
-        let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
+        let resolve_calc = |handle, basis| node.resolve_calc(handle, basis);
         let resolved_cross_gap = resolve_length_percentage(
             axes.cross.size(gap_value),
             axes.cross.size(inner_size),
@@ -1951,21 +1980,20 @@ where
         // used values resolve against the resulting content-box width. Run
         // the item/line phases once more with that now-definite basis while
         // keeping the intrinsic container size fixed.
-        gap = resolve_gap(source, gap_value, inner_size);
+        gap = resolve_gap(node, gap_value, inner_size);
         main_gap = axes.main.size(gap);
-        // Re-resolve compact scratch in place. Raw style is fetched by NodeId;
-        // no second full-style snapshot or parallel style Vec is needed.
+        // Re-resolve compact scratch in place. Raw style is refetched through
+        // the node handle; no second full-style snapshot or parallel style
+        // Vec is needed.
         for item in &mut items {
             let key = item.key;
-            *item = resolve_item(source, key, inner_size, align_items);
+            *item = resolve_item(key, inner_size, align_items);
         }
         let final_available_space = Size::new(
             AvailableSpace::Definite(inner_size.width.unwrap_or(0.0)),
             AvailableSpace::Definite(inner_size.height.unwrap_or(0.0)),
         );
         determine_flex_base_sizes(
-            source,
-            session,
             &mut items,
             axes,
             inner_size,
@@ -1991,8 +2019,6 @@ where
             resolve_flexible_lengths(&mut items, line, inner_main, main_gap, axes);
         }
         determine_hypothetical_cross_sizes(
-            source,
-            session,
             &mut items,
             &lines,
             axes,
@@ -2021,13 +2047,7 @@ where
                 }
             }
         }
-        return compute_flexbox_layout_with_collapse_struts(
-            source,
-            session,
-            node,
-            input,
-            Some(&struts),
-        );
+        return compute_flexbox_layout_with_collapse_struts(node, input, Some(&struts));
     }
     determine_used_cross_sizes(&mut items, &lines, axes);
     distribute_main_axis(
@@ -2059,8 +2079,6 @@ where
     }
 
     let (mut content_size, first_baseline) = perform_in_flow_layout(
-        source,
-        session,
         &mut items,
         &lines,
         axes,
@@ -2069,15 +2087,12 @@ where
         outer_size,
     );
     for (document_index, child) in hidden {
-        super::hide_subtree(source, session, child);
-        session.set_unrounded_layout(
-            child,
-            &Layout::with_order(u32::try_from(document_index).unwrap_or(u32::MAX)),
-        );
+        super::hide_subtree(child);
+        child.set_unrounded_layout(&Layout::with_order(
+            u32::try_from(document_index).unwrap_or(u32::MAX),
+        ));
     }
     let absolute_content_size = perform_absolute_children(
-        source,
-        session,
         &absolute_items,
         axes,
         inner_size,
@@ -2098,11 +2113,71 @@ where
 #[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
+    use crate::style::value::CalcHandle;
 
-    fn item(main: f32, cross: f32) -> FlexItem {
+    #[derive(Debug)]
+    struct TestStyle;
+
+    impl CoreStyle for TestStyle {}
+    impl FlexContainerStyle for TestStyle {}
+    impl FlexItemStyle for TestStyle {}
+
+    /// Minimal zero-sized handle for the line-math scratch: these tests
+    /// fabricate `FlexItem` records directly, so the handle only has to
+    /// satisfy the `LayoutNode` bounds — no accessor is ever reached.
+    #[derive(Debug, Clone, Copy)]
+    struct TestRef;
+
+    impl LayoutNode for TestRef {
+        type Style = &'static TestStyle;
+        type ChildIter = core::iter::Empty<Self>;
+
+        fn children(self) -> Self::ChildIter {
+            core::iter::empty()
+        }
+
+        fn style(self) -> &'static TestStyle {
+            &TestStyle
+        }
+
+        fn resolve_calc(self, _calc: CalcHandle, _basis: f32) -> f32 {
+            unreachable!("line-math tests never resolve calc()")
+        }
+
+        fn compute_child_layout(self, _input: LayoutInput) -> LayoutOutput {
+            unreachable!("line-math tests never recurse into children")
+        }
+
+        fn set_unrounded_layout(self, _layout: &Layout) {
+            unreachable!("line-math tests never store layouts")
+        }
+
+        fn unrounded_layout(self) -> Layout {
+            unreachable!("line-math tests never read layouts")
+        }
+
+        fn set_final_layout(self, _layout: &Layout) {
+            unreachable!("line-math tests never round layouts")
+        }
+
+        fn set_static_position(self, _static_position: Point<f32>) {
+            unreachable!("line-math tests never hoist items")
+        }
+
+        // Caching deliberately disabled.
+        fn cache_get(self, _input: LayoutInput) -> Option<LayoutOutput> {
+            None
+        }
+
+        fn cache_store(self, _input: LayoutInput, _output: LayoutOutput) {}
+
+        fn cache_clear(self) {}
+    }
+
+    fn item(main: f32, cross: f32) -> FlexItem<TestRef> {
         FlexItem {
             key: ItemKey {
-                node: NodeId::new(0),
+                node: TestRef,
                 layout_order: 0,
             },
             direction: Direction::Ltr,
@@ -2227,7 +2302,7 @@ mod tests {
     fn intrinsic_line_helpers_cover_empty_min_max_and_definite_constraints() {
         let axes = Axes::new(FlexDirection::Row, FlexWrap::Wrap, Direction::Ltr);
         assert!(
-            collect_flex_lines(
+            collect_flex_lines::<TestRef>(
                 &[],
                 FlexWrap::Wrap,
                 AvailableSpace::Definite(10.0),

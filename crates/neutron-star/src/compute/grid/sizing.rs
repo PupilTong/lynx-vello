@@ -8,14 +8,17 @@
 
 #![allow(clippy::cast_precision_loss)]
 
+use stylo::computed_values::box_sizing;
+use stylo::values::computed::{
+    LengthPercentage, MaxSize as StyleMaxSize, Size as StyleSize, TrackBreadth,
+};
+
 use super::super::util::{clamp, resolve_length_percentage};
+use super::alignment::{AlignContent, AlignItems};
 use super::tracks::AxisTrackSpec;
 use super::types::{Axis, GridItem, Track, TrackSet};
-use crate::style::alignment::AlignContent;
-use crate::style::{CoreStyle, Dimension, MaxTrackSizingFunction, MinTrackSizingFunction};
-use crate::tree::{
-    AvailableSpace, GridSource, LayoutInput, LayoutSession, RequestedAxis, SizingMode,
-};
+use crate::style::{CoreStyle, GridContainerStyle, GridItemStyle};
+use crate::tree::{AvailableSpace, LayoutInput, LayoutNode, RequestedAxis, SizingMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContributionKind {
@@ -41,43 +44,37 @@ fn available_for(kind: ContributionKind) -> AvailableSpace {
 }
 
 /// Initializes used track state per Grid §12.4.
-pub(super) fn initialize_tracks<Source: GridSource>(
-    source: &Source,
+pub(super) fn initialize_tracks(
     specs: &[AxisTrackSpec],
     percentage_basis: Option<f32>,
     gap: f32,
 ) -> TrackSet {
     let mut tracks = Vec::with_capacity(specs.len());
     for spec in specs {
-        let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
-        let min_fixed = match spec.sizing.min {
-            MinTrackSizingFunction::Fixed(value) => {
-                resolve_length_percentage(value, percentage_basis, &resolve_calc)
-            }
+        let min_fixed = match &spec.sizing.min {
+            TrackBreadth::Breadth(value) => resolve_length_percentage(value, percentage_basis),
             _ => None,
         };
-        let max_fixed = match spec.sizing.max {
-            MaxTrackSizingFunction::Fixed(value) => {
-                resolve_length_percentage(value, percentage_basis, &resolve_calc)
-            }
+        let max_fixed = match &spec.sizing.max {
+            TrackBreadth::Breadth(value) => resolve_length_percentage(value, percentage_basis),
             _ => None,
         };
-        // Percentage/calc tracks in an indefinite axis are treated as
-        // `auto` during intrinsic sizing, then reconstructed with a definite
-        // basis by the bounded post-sizing rerun.
-        let mut effective_sizing = spec.sizing;
-        if matches!(effective_sizing.min, MinTrackSizingFunction::Fixed(_)) && min_fixed.is_none() {
-            effective_sizing.min = MinTrackSizingFunction::Auto;
+        // Percentage tracks in an indefinite axis are treated as `auto`
+        // during intrinsic sizing, then reconstructed with a definite basis
+        // by the bounded post-sizing rerun. (Length-only `calc()` folds to a
+        // length at computed-value time, so it always resolves here.)
+        let mut effective_sizing = spec.sizing.clone();
+        if matches!(effective_sizing.min, TrackBreadth::Breadth(_)) && min_fixed.is_none() {
+            effective_sizing.min = TrackBreadth::Auto;
         }
-        if matches!(effective_sizing.max, MaxTrackSizingFunction::Fixed(_)) && max_fixed.is_none() {
-            effective_sizing.max = MaxTrackSizingFunction::Auto;
+        if matches!(effective_sizing.max, TrackBreadth::Breadth(_)) && max_fixed.is_none() {
+            effective_sizing.max = TrackBreadth::Auto;
         }
-        let fit_content_limit = match spec.sizing.max {
-            MaxTrackSizingFunction::FitContent(value) => {
-                resolve_length_percentage(value, percentage_basis, &resolve_calc)
-                    .unwrap_or(f32::INFINITY)
+        let fit_content_limit = match &spec.sizing.fit_content {
+            Some(value) => {
+                resolve_length_percentage(value, percentage_basis).unwrap_or(f32::INFINITY)
             }
-            _ => f32::INFINITY,
+            None => f32::INFINITY,
         };
         let collapsed = spec.collapsed;
         let base = if collapsed {
@@ -94,11 +91,19 @@ pub(super) fn initialize_tracks<Source: GridSource>(
             0.0
         } else {
             match effective_sizing.max {
-                MaxTrackSizingFunction::Fr(factor) if factor.is_finite() && factor > 0.0 => factor,
+                TrackBreadth::Flex(flex) if flex.0.is_finite() && flex.0 > 0.0 => flex.0,
                 _ => 0.0,
             }
         };
-        let flexible = !collapsed && matches!(effective_sizing.max, MaxTrackSizingFunction::Fr(_));
+        let flexible = !collapsed && matches!(effective_sizing.max, TrackBreadth::Flex(_));
+        // A `Flex` minimum is unrepresentable in the grammar and behaves as
+        // `auto`, hence it stays intrinsic.
+        let intrinsic_min = !matches!(effective_sizing.min, TrackBreadth::Breadth(_));
+        let intrinsic_max = !matches!(
+            effective_sizing.max,
+            TrackBreadth::Breadth(_) | TrackBreadth::Flex(_)
+        );
+        let auto_max = matches!(effective_sizing.max, TrackBreadth::Auto);
         tracks.push(Track {
             sizing: effective_sizing,
             base,
@@ -106,12 +111,9 @@ pub(super) fn initialize_tracks<Source: GridSource>(
             fit_content_limit,
             flex_factor,
             flexible,
-            intrinsic_min: !matches!(effective_sizing.min, MinTrackSizingFunction::Fixed(_)),
-            intrinsic_max: !matches!(
-                effective_sizing.max,
-                MaxTrackSizingFunction::Fixed(_) | MaxTrackSizingFunction::Fr(_)
-            ),
-            auto_max: matches!(effective_sizing.max, MaxTrackSizingFunction::Auto),
+            intrinsic_min,
+            intrinsic_max,
+            auto_max,
             infinitely_growable: false,
             collapsed,
             position: 0.0,
@@ -126,7 +128,7 @@ pub(super) fn initialize_tracks<Source: GridSource>(
 }
 
 #[inline]
-fn span_for(item: &GridItem, axis: Axis) -> super::placement::TrackSpan {
+fn span_for<N>(item: &GridItem<N>, axis: Axis) -> super::placement::TrackSpan {
     match axis {
         Axis::Horizontal => item.area.column,
         Axis::Vertical => item.area.row,
@@ -134,7 +136,7 @@ fn span_for(item: &GridItem, axis: Axis) -> super::placement::TrackSpan {
 }
 
 #[inline]
-fn margin_sum(item: &GridItem, axis: Axis) -> f32 {
+fn margin_sum<N>(item: &GridItem<N>, axis: Axis) -> f32 {
     axis.sum(item.margin)
 }
 
@@ -159,8 +161,8 @@ impl<'a> CrossAxisTracks<'a> {
     }
 }
 
-fn cross_area_size(
-    item: &GridItem,
+fn cross_area_size<N>(
+    item: &GridItem<N>,
     axis: Axis,
     cross_tracks: Option<CrossAxisTracks<'_>>,
 ) -> Option<f32> {
@@ -176,18 +178,16 @@ fn cross_area_size(
     Some((size - margin_sum(item, cross)).max(0.0))
 }
 
-fn raw_content_size<Source, Session>(
-    source: &Source,
-    session: &mut Session,
-    item: &mut GridItem,
+fn raw_content_size<N>(
+    item: &mut GridItem<N>,
     axis: Axis,
     kind: ContributionKind,
     cross_tracks: Option<CrossAxisTracks<'_>>,
     _inner_size: crate::geometry::Size<Option<f32>>,
 ) -> f32
 where
-    Source: GridSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: GridContainerStyle + GridItemStyle,
 {
     let cached = match kind {
         ContributionKind::Minimum | ContributionKind::MinContent => axis.size(item.raw_min_content),
@@ -202,7 +202,7 @@ where
     let cross_stretches = match cross {
         Axis::Horizontal => item.justify_self,
         Axis::Vertical => item.align_self,
-    } == crate::style::AlignItems::Stretch
+    } == AlignItems::Stretch
         && cross.size(item.preferred_size).is_none()
         && !cross.start(item.margin_auto)
         && !cross.end(item.margin_auto);
@@ -225,9 +225,9 @@ where
     };
     let mut input = LayoutInput::compute_size(known, parent_size, available, requested_axis(axis));
     input.sizing_mode = SizingMode::ContentSize;
-    let output = session.compute_child_layout(source, item.key.node, input);
+    let output = item.key.node.compute_child_layout(input);
     let size = output.size;
-    if axis == Axis::Vertical && item.align_self == crate::style::AlignItems::Baseline {
+    if axis == Axis::Vertical && item.align_self == AlignItems::Baseline {
         // CSS synthesizes a baseline when the child does not expose one. A
         // bottom-border-edge fallback gives the correct ascent/descent
         // envelope for track sizing and matches the final layout pass.
@@ -240,7 +240,7 @@ where
     {
         let axis_inset = axis.sum(item.padding) + axis.sum(item.border);
         let cross_inset = cross.sum(item.padding) + cross.sum(item.border);
-        let sizing_cross = if item.box_sizing == crate::style::BoxSizing::ContentBox {
+        let sizing_cross = if item.box_sizing == box_sizing::T::ContentBox {
             (cross_size - cross_inset).max(0.0)
         } else {
             cross_size
@@ -249,7 +249,7 @@ where
             Axis::Horizontal => sizing_cross * ratio,
             Axis::Vertical => sizing_cross / ratio,
         };
-        let ratio_size = if item.box_sizing == crate::style::BoxSizing::ContentBox {
+        let ratio_size = if item.box_sizing == box_sizing::T::ContentBox {
             sizing_axis + axis_inset
         } else {
             sizing_axis
@@ -267,21 +267,17 @@ where
     measured
 }
 
-pub(super) fn probe_raw_min_content<Source, Session>(
-    source: &Source,
-    session: &mut Session,
-    item: &mut GridItem,
+pub(super) fn probe_raw_min_content<N>(
+    item: &mut GridItem<N>,
     axis: Axis,
     cross_tracks: Option<CrossAxisTracks<'_>>,
     inner_size: crate::geometry::Size<Option<f32>>,
 ) -> f32
 where
-    Source: GridSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: GridContainerStyle + GridItemStyle,
 {
     raw_content_size(
-        source,
-        session,
         item,
         axis,
         ContributionKind::MinContent,
@@ -290,40 +286,36 @@ where
     )
 }
 
-pub(super) fn resolve_item_intrinsic_dimensions<Source, Session>(
-    source: &Source,
-    session: &mut Session,
-    item: &mut GridItem,
+pub(super) fn resolve_item_intrinsic_dimensions<N>(
+    item: &mut GridItem<N>,
     axis: Axis,
     cross_tracks: Option<CrossAxisTracks<'_>>,
     inner_size: crate::geometry::Size<Option<f32>>,
 ) where
-    Source: GridSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: GridContainerStyle + GridItemStyle,
 {
     let (preferred_value, min_value, max_value) = {
-        let style = source.grid_item_style(item.key.node);
+        let style = item.key.node.style();
         (
-            axis.size(style.size()),
-            axis.size(style.min_size()),
-            axis.size(style.max_size()),
+            IntrinsicSize::from_size(&axis.size(style.size())),
+            IntrinsicSize::from_size(&axis.size(style.min_size())),
+            IntrinsicSize::from_max_size(&axis.size(style.max_size())),
         )
     };
-    let values = [preferred_value, min_value, max_value];
+    let values = [&preferred_value, &min_value, &max_value];
     let needs_min_content = values
         .iter()
-        .any(|value| matches!(value, Dimension::MinContent | Dimension::FitContent(_)));
+        .any(|value| matches!(value, IntrinsicSize::MinContent | IntrinsicSize::FitContent(_)));
     let needs_max_content = values
         .iter()
-        .any(|value| matches!(value, Dimension::MaxContent | Dimension::FitContent(_)));
+        .any(|value| matches!(value, IntrinsicSize::MaxContent | IntrinsicSize::FitContent(_)));
     if !needs_min_content && !needs_max_content {
         return;
     }
 
     let min_content = if needs_min_content {
         raw_content_size(
-            source,
-            session,
             item,
             axis,
             ContributionKind::MinContent,
@@ -335,8 +327,6 @@ pub(super) fn resolve_item_intrinsic_dimensions<Source, Session>(
     };
     let max_content = if needs_max_content {
         raw_content_size(
-            source,
-            session,
             item,
             axis,
             ContributionKind::MaxContent,
@@ -346,37 +336,79 @@ pub(super) fn resolve_item_intrinsic_dimensions<Source, Session>(
     } else {
         0.0
     };
-    let resolve = |value: Dimension| -> Option<f32> {
+    let resolve = |value: &IntrinsicSize| -> Option<f32> {
         match value {
-            Dimension::MinContent => Some(min_content),
-            Dimension::MaxContent => Some(max_content),
-            Dimension::FitContent(limit) => {
-                let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
-                let limit = resolve_length_percentage(limit, axis.size(inner_size), &resolve_calc)
+            IntrinsicSize::MinContent => Some(min_content),
+            IntrinsicSize::MaxContent => Some(max_content),
+            IntrinsicSize::FitContent(limit) => {
+                let limit = resolve_length_percentage(limit, axis.size(inner_size))
                     .unwrap_or(max_content);
                 Some(max_content.min(limit.max(min_content)))
             }
-            Dimension::Length(_) | Dimension::Percent(_) | Dimension::Calc(_) | Dimension::Auto => {
-                None
-            }
+            IntrinsicSize::None => None,
         }
     };
     if axis.size(item.preferred_size).is_none() {
-        axis.set_size(&mut item.preferred_size, resolve(preferred_value));
+        axis.set_size(&mut item.preferred_size, resolve(&preferred_value));
     }
     if axis.size(item.min_size).is_none() {
-        axis.set_size(&mut item.min_size, resolve(min_value));
+        axis.set_size(&mut item.min_size, resolve(&min_value));
     }
     if axis.size(item.max_size).is_none() {
-        axis.set_size(&mut item.max_size, resolve(max_value));
+        axis.set_size(&mut item.max_size, resolve(&max_value));
+    }
+}
+
+/// The intrinsic-keyword projection of one sizing property value.
+///
+/// The bare `fit-content`/`stretch`/`-webkit-fill-available` keywords are
+/// treated as `auto` (behavior delta #8), so they project to `None` like
+/// `auto` and quantitative values do.
+#[derive(Debug, Clone, PartialEq)]
+enum IntrinsicSize {
+    MinContent,
+    MaxContent,
+    FitContent(LengthPercentage),
+    None,
+}
+
+impl IntrinsicSize {
+    fn from_size(value: &StyleSize) -> Self {
+        match value {
+            StyleSize::MinContent => Self::MinContent,
+            StyleSize::MaxContent => Self::MaxContent,
+            StyleSize::FitContentFunction(limit) => Self::FitContent(limit.0.clone()),
+            StyleSize::Auto
+            | StyleSize::LengthPercentage(_)
+            | StyleSize::FitContent
+            | StyleSize::Stretch
+            | StyleSize::WebkitFillAvailable => Self::None,
+            StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
+                unreachable!("anchor positioning is pref-disabled under lynx")
+            }
+        }
+    }
+
+    fn from_max_size(value: &StyleMaxSize) -> Self {
+        match value {
+            StyleMaxSize::MinContent => Self::MinContent,
+            StyleMaxSize::MaxContent => Self::MaxContent,
+            StyleMaxSize::FitContentFunction(limit) => Self::FitContent(limit.0.clone()),
+            StyleMaxSize::None
+            | StyleMaxSize::LengthPercentage(_)
+            | StyleMaxSize::FitContent
+            | StyleMaxSize::Stretch
+            | StyleMaxSize::WebkitFillAvailable => Self::None,
+            StyleMaxSize::AnchorSizeFunction(_) | StyleMaxSize::AnchorContainingCalcFunction(_) => {
+                unreachable!("anchor positioning is pref-disabled under lynx")
+            }
+        }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn measure_contribution<Source, Session>(
-    source: &Source,
-    session: &mut Session,
-    item: &mut GridItem,
+fn measure_contribution<N>(
+    item: &mut GridItem<N>,
     axis: Axis,
     kind: ContributionKind,
     tracks: &TrackSet,
@@ -384,8 +416,8 @@ fn measure_contribution<Source, Session>(
     inner_size: crate::geometry::Size<Option<f32>>,
 ) -> f32
 where
-    Source: GridSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: GridContainerStyle + GridItemStyle,
 {
     let cached = match kind {
         ContributionKind::Minimum => axis.size(item.minimum_contribution),
@@ -418,18 +450,19 @@ where
                 let span = span_for(item, axis);
                 let indexes = tracks.span_indices(span.start, span.end);
                 let automatic_min_applies = axis.size(item.minimum_is_auto)
-                    && !item.overflow_point(axis).is_scroll_container()
-                    && tracks.tracks[indexes.clone()]
-                        .iter()
-                        .any(|track| matches!(track.sizing.min, MinTrackSizingFunction::Auto))
+                    && !item.overflow_point(axis).is_scrollable()
+                    && tracks.tracks[indexes.clone()].iter().any(|track| {
+                        matches!(
+                            track.sizing.min,
+                            TrackBreadth::Auto | TrackBreadth::Flex(_)
+                        )
+                    })
                     && (item.span(axis) == 1
                         || !tracks.tracks[indexes.clone()]
                             .iter()
-                            .any(|track| track.is_flexible()));
+                            .any(Track::is_flexible));
                 if automatic_min_applies {
                     let raw_outer = raw_content_size(
-                        source,
-                        session,
                         item,
                         axis,
                         ContributionKind::MinContent,
@@ -439,38 +472,28 @@ where
                     // The specified-size suggestion caps the content-size
                     // suggestion when a percentage became definite.
                     let suggestion = preferred.map_or(raw_outer, |size| raw_outer.min(size));
-                    fixed_max_span_limit(source, axis, tracks, indexes, inner_size)
+                    fixed_max_span_limit(axis, tracks, indexes, inner_size)
                         .map_or(suggestion, |limit| suggestion.min(limit))
                 } else if !preferred_behaves_auto_or_depends {
                     // A definite preferred size defines the box's minimum
                     // contribution only when Grid's content-based automatic
                     // minimum does not apply.
                     preferred.unwrap_or_else(|| {
-                        raw_content_size(
-                            source,
-                            session,
-                            item,
-                            axis,
-                            kind,
-                            cross_tracks,
-                            inner_size,
-                        ) + margin_sum(item, axis)
+                        raw_content_size(item, axis, kind, cross_tracks, inner_size)
+                            + margin_sum(item, axis)
                     })
                 } else {
-                    axis.sum(item.padding)
-                        + axis.sum(item.border)
-                        + axis.size(item.scrollbar)
-                        + margin_sum(item, axis)
+                    axis.sum(item.padding) + axis.sum(item.border) + margin_sum(item, axis)
                 }
             }
         }
         ContributionKind::MinContent | ContributionKind::MaxContent => {
             if preferred_behaves_auto_or_depends {
-                raw_content_size(source, session, item, axis, kind, cross_tracks, inner_size)
+                raw_content_size(item, axis, kind, cross_tracks, inner_size)
                     + margin_sum(item, axis)
             } else {
                 preferred.unwrap_or_else(|| {
-                    raw_content_size(source, session, item, axis, kind, cross_tracks, inner_size)
+                    raw_content_size(item, axis, kind, cross_tracks, inner_size)
                         + margin_sum(item, axis)
                 })
             }
@@ -507,8 +530,7 @@ fn span_gap(tracks: &TrackSet, range: core::ops::Range<usize>) -> f32 {
 /// has a fixed max track sizing function. Grid §6.6 includes intervening
 /// gutters in this stretch-fit clamp; collapsed tracks contribute zero, and
 /// `span_gap` preserves only the gutters between surviving visible tracks.
-fn fixed_max_span_limit<Source: GridSource>(
-    source: &Source,
+fn fixed_max_span_limit(
     axis: Axis,
     tracks: &TrackSet,
     range: core::ops::Range<usize>,
@@ -516,22 +538,24 @@ fn fixed_max_span_limit<Source: GridSource>(
 ) -> Option<f32> {
     let mut limit = span_gap(tracks, range.clone());
     let percentage_basis = axis.size(inner_size);
-    let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
     for track in &tracks.tracks[range] {
         if track.collapsed {
             continue;
         }
-        let MaxTrackSizingFunction::Fixed(maximum) = track.sizing.max else {
+        // A fit-content() maximum is normalized to `MaxContent`, so it is
+        // correctly rejected as non-fixed here.
+        let TrackBreadth::Breadth(maximum) = &track.sizing.max else {
             return None;
         };
-        let maximum = resolve_length_percentage(maximum, percentage_basis, &resolve_calc)?;
-        let minimum = match track.sizing.min {
-            MinTrackSizingFunction::Fixed(minimum) => {
-                resolve_length_percentage(minimum, percentage_basis, &resolve_calc)?
+        let maximum = resolve_length_percentage(maximum, percentage_basis)?;
+        let minimum = match &track.sizing.min {
+            TrackBreadth::Breadth(minimum) => {
+                resolve_length_percentage(minimum, percentage_basis)?
             }
-            MinTrackSizingFunction::Auto
-            | MinTrackSizingFunction::MinContent
-            | MinTrackSizingFunction::MaxContent => 0.0,
+            TrackBreadth::Auto
+            | TrackBreadth::MinContent
+            | TrackBreadth::MaxContent
+            | TrackBreadth::Flex(_) => 0.0,
         };
         // `minmax()` gives its minimum precedence when a declared fixed max
         // is smaller. Resolve from immutable sizing functions rather than a
@@ -546,10 +570,8 @@ fn fixed_max_span_limit<Source: GridSource>(
 /// one track, a resolved `fit-content()` argument is also an allowed limit.
 /// The result is always floored by the item's minimum contribution.
 #[allow(clippy::too_many_arguments)]
-fn measure_limited_contribution<Source, Session>(
-    source: &Source,
-    session: &mut Session,
-    item: &mut GridItem,
+fn measure_limited_contribution<N>(
+    item: &mut GridItem<N>,
     axis: Axis,
     kind: ContributionKind,
     tracks: &TrackSet,
@@ -557,26 +579,17 @@ fn measure_limited_contribution<Source, Session>(
     inner_size: crate::geometry::Size<Option<f32>>,
 ) -> f32
 where
-    Source: GridSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: GridContainerStyle + GridItemStyle,
 {
     debug_assert!(matches!(
         kind,
         ContributionKind::MinContent | ContributionKind::MaxContent
     ));
-    let contribution = measure_contribution(
-        source,
-        session,
-        item,
-        axis,
-        kind,
-        tracks,
-        cross_tracks,
-        inner_size,
-    );
+    let contribution = measure_contribution(item, axis, kind, tracks, cross_tracks, inner_size);
     let span = span_for(item, axis);
     let range = tracks.span_indices(span.start, span.end);
-    let fixed_limit = fixed_max_span_limit(source, axis, tracks, range.clone(), inner_size)
+    let fixed_limit = fixed_max_span_limit(axis, tracks, range.clone(), inner_size)
         .or_else(|| {
             (range.len() == 1)
                 .then(|| tracks.tracks[range.start].fit_content_limit)
@@ -586,8 +599,6 @@ where
         return contribution;
     };
     let minimum = measure_contribution(
-        source,
-        session,
         item,
         axis,
         ContributionKind::Minimum,
@@ -601,17 +612,15 @@ where
 /// Computes first-baseline start shims before row contributions are used.
 /// Groups are keyed by their shared start row; sorting once keeps this
 /// linear after `O(B log B)` setup and avoids pairwise baseline scans.
-fn prepare_baseline_shims<Source, Session>(
-    source: &Source,
-    session: &mut Session,
+fn prepare_baseline_shims<N>(
     axis: Axis,
     tracks: &TrackSet,
     cross_tracks: Option<CrossAxisTracks<'_>>,
-    items: &mut [GridItem],
+    items: &mut [GridItem<N>],
     inner_size: crate::geometry::Size<Option<f32>>,
 ) where
-    Source: GridSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: GridContainerStyle + GridItemStyle,
 {
     if axis != Axis::Vertical {
         return;
@@ -619,15 +628,13 @@ fn prepare_baseline_shims<Source, Session>(
     let mut candidates = Vec::<(i32, usize, f32)>::new();
     for (index, item) in items.iter_mut().enumerate() {
         item.baseline_shim = 0.0;
-        if item.align_self != crate::style::AlignItems::Baseline
+        if item.align_self != AlignItems::Baseline
             || item.margin_auto.top
             || item.margin_auto.bottom
         {
             continue;
         }
         let _ = raw_content_size(
-            source,
-            session,
             item,
             axis,
             ContributionKind::MinContent,
@@ -828,9 +835,7 @@ fn distribute_extra<P>(
                 }
                 (PlannedSize::Base, ContributionKind::MaxContent) => matches!(
                     track.sizing.max,
-                    MaxTrackSizingFunction::MaxContent
-                        | MaxTrackSizingFunction::Auto
-                        | MaxTrackSizingFunction::FitContent(_)
+                    TrackBreadth::MaxContent | TrackBreadth::Auto
                 ),
                 (PlannedSize::GrowthLimit, _) => {
                     track.intrinsic_max && track.fit_content_limit.is_infinite()
@@ -886,13 +891,11 @@ fn apply_planned_growth(tracks: &mut TrackSet, planned: &mut [f32], touched: &mu
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_spanning_base_phase<Source, Session, P>(
-    source: &Source,
-    session: &mut Session,
+fn run_spanning_base_phase<N, P>(
     axis: Axis,
     tracks: &mut TrackSet,
     cross_tracks: Option<CrossAxisTracks<'_>>,
-    items: &mut [GridItem],
+    items: &mut [GridItem<N>],
     item_indices: &[usize],
     inner_size: crate::geometry::Size<Option<f32>>,
     kind: ContributionKind,
@@ -904,8 +907,8 @@ fn run_spanning_base_phase<Source, Session, P>(
     affected_scratch: &mut Vec<DistributionEntry>,
     non_affected_scratch: &mut Vec<DistributionEntry>,
 ) where
-    Source: GridSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: GridContainerStyle + GridItemStyle,
     P: Fn(&Track) -> bool + Copy,
 {
     for &item_index in item_indices {
@@ -919,8 +922,6 @@ fn run_spanning_base_phase<Source, Session, P>(
         }
         let contribution = if limited {
             measure_limited_contribution(
-                source,
-                session,
                 &mut items[item_index],
                 axis,
                 kind,
@@ -930,8 +931,6 @@ fn run_spanning_base_phase<Source, Session, P>(
             )
         } else {
             measure_contribution(
-                source,
-                session,
                 &mut items[item_index],
                 axis,
                 kind,
@@ -959,13 +958,11 @@ fn run_spanning_base_phase<Source, Session, P>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_spanning_growth_phase<Source, Session, P>(
-    source: &Source,
-    session: &mut Session,
+fn run_spanning_growth_phase<N, P>(
     axis: Axis,
     tracks: &mut TrackSet,
     cross_tracks: Option<CrossAxisTracks<'_>>,
-    items: &mut [GridItem],
+    items: &mut [GridItem<N>],
     item_indices: &[usize],
     inner_size: crate::geometry::Size<Option<f32>>,
     kind: ContributionKind,
@@ -975,8 +972,8 @@ fn run_spanning_growth_phase<Source, Session, P>(
     affected_scratch: &mut Vec<DistributionEntry>,
     non_affected_scratch: &mut Vec<DistributionEntry>,
 ) where
-    Source: GridSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: GridContainerStyle + GridItemStyle,
     P: Fn(&Track) -> bool + Copy,
 {
     for &item_index in item_indices {
@@ -989,8 +986,6 @@ fn run_spanning_growth_phase<Source, Session, P>(
             continue;
         }
         let contribution = measure_contribution(
-            source,
-            session,
             &mut items[item_index],
             axis,
             kind,
@@ -1018,18 +1013,16 @@ fn run_spanning_growth_phase<Source, Session, P>(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn resolve_intrinsic_sizes<Source, Session>(
-    source: &Source,
-    session: &mut Session,
+fn resolve_intrinsic_sizes<N>(
     axis: Axis,
     tracks: &mut TrackSet,
     cross_tracks: Option<CrossAxisTracks<'_>>,
-    items: &mut [GridItem],
+    items: &mut [GridItem<N>],
     inner_size: crate::geometry::Size<Option<f32>>,
     available: AvailableSpace,
 ) where
-    Source: GridSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: GridContainerStyle + GridItemStyle,
 {
     // Non-flexible single-track items resolve directly to maxima without
     // span scratch (Grid §12.5 step 2).
@@ -1037,15 +1030,13 @@ fn resolve_intrinsic_sizes<Source, Session>(
     for item in items.iter_mut().filter(|item| item.span(axis) == 1) {
         let span = span_for(item, axis);
         let index = tracks.index_of(span.start);
-        let track = tracks.tracks[index];
+        let track = tracks.tracks[index].clone();
         if track.collapsed || track.is_flexible() {
             continue;
         }
-        let base = match track.sizing.min {
-            MinTrackSizingFunction::Fixed(_) => track.base,
-            MinTrackSizingFunction::MinContent => measure_contribution(
-                source,
-                session,
+        let base = match &track.sizing.min {
+            TrackBreadth::Breadth(_) => track.base,
+            TrackBreadth::MinContent => measure_contribution(
                 item,
                 axis,
                 ContributionKind::MinContent,
@@ -1053,9 +1044,7 @@ fn resolve_intrinsic_sizes<Source, Session>(
                 cross_tracks,
                 inner_size,
             ),
-            MinTrackSizingFunction::MaxContent => measure_contribution(
-                source,
-                session,
+            TrackBreadth::MaxContent => measure_contribution(
                 item,
                 axis,
                 ContributionKind::MaxContent,
@@ -1063,10 +1052,10 @@ fn resolve_intrinsic_sizes<Source, Session>(
                 cross_tracks,
                 inner_size,
             ),
-            MinTrackSizingFunction::Auto if available == AvailableSpace::MinContent => {
+            TrackBreadth::Auto | TrackBreadth::Flex(_)
+                if available == AvailableSpace::MinContent =>
+            {
                 measure_limited_contribution(
-                    source,
-                    session,
                     item,
                     axis,
                     ContributionKind::MinContent,
@@ -1075,15 +1064,15 @@ fn resolve_intrinsic_sizes<Source, Session>(
                     inner_size,
                 )
             }
-            MinTrackSizingFunction::Auto if available == AvailableSpace::MaxContent => {
+            TrackBreadth::Auto | TrackBreadth::Flex(_)
+                if available == AvailableSpace::MaxContent =>
+            {
                 // The max-content constrained branch still performs the
                 // limited min-content probe first. Besides providing the
                 // automatic-minimum floor required by §12.5, this preserves
                 // cross-axis feedback when the two intrinsic contributions
                 // respond differently to the resolved opposite track.
                 let _ = measure_limited_contribution(
-                    source,
-                    session,
                     item,
                     axis,
                     ContributionKind::MinContent,
@@ -1092,8 +1081,6 @@ fn resolve_intrinsic_sizes<Source, Session>(
                     inner_size,
                 );
                 measure_limited_contribution(
-                    source,
-                    session,
                     item,
                     axis,
                     ContributionKind::MaxContent,
@@ -1102,9 +1089,7 @@ fn resolve_intrinsic_sizes<Source, Session>(
                     inner_size,
                 )
             }
-            MinTrackSizingFunction::Auto => measure_contribution(
-                source,
-                session,
+            TrackBreadth::Auto | TrackBreadth::Flex(_) => measure_contribution(
                 item,
                 axis,
                 ContributionKind::Minimum,
@@ -1115,24 +1100,16 @@ fn resolve_intrinsic_sizes<Source, Session>(
         };
         tracks.tracks[index].base = tracks.tracks[index].base.max(base);
 
-        let max_kind = match track.sizing.max {
-            MaxTrackSizingFunction::Fixed(_) | MaxTrackSizingFunction::Fr(_) => None,
-            MaxTrackSizingFunction::MinContent => Some(ContributionKind::MinContent),
-            MaxTrackSizingFunction::MaxContent
-            | MaxTrackSizingFunction::Auto
-            | MaxTrackSizingFunction::FitContent(_) => Some(ContributionKind::MaxContent),
+        // A fit-content() maximum is normalized to `MaxContent` plus a
+        // retained limit, so it takes the max-content contribution arm.
+        let max_kind = match &track.sizing.max {
+            TrackBreadth::Breadth(_) | TrackBreadth::Flex(_) => None,
+            TrackBreadth::MinContent => Some(ContributionKind::MinContent),
+            TrackBreadth::MaxContent | TrackBreadth::Auto => Some(ContributionKind::MaxContent),
         };
         if let Some(kind) = max_kind {
-            let contribution = measure_contribution(
-                source,
-                session,
-                item,
-                axis,
-                kind,
-                tracks,
-                cross_tracks,
-                inner_size,
-            );
+            let contribution =
+                measure_contribution(item, axis, kind, tracks, cross_tracks, inner_size);
             let limit = contribution
                 .max(tracks.tracks[index].base)
                 .min(tracks.tracks[index].fit_content_limit);
@@ -1168,7 +1145,7 @@ fn resolve_intrinsic_sizes<Source, Session>(
         let range = tracks.span_indices(span.start, span.end);
         if tracks.tracks[range.clone()]
             .iter()
-            .any(|track| track.is_flexible())
+            .any(Track::is_flexible)
         {
             crosses_flexible.push(index);
         } else if item.span(axis) > 1
@@ -1214,8 +1191,6 @@ fn resolve_intrinsic_sizes<Source, Session>(
         }
         let group = &non_flexible[start..end];
         run_spanning_base_phase(
-            source,
-            session,
             axis,
             tracks,
             cross_tracks,
@@ -1232,8 +1207,6 @@ fn resolve_intrinsic_sizes<Source, Session>(
             &mut non_affected_scratch,
         );
         run_spanning_base_phase(
-            source,
-            session,
             axis,
             tracks,
             cross_tracks,
@@ -1246,7 +1219,7 @@ fn resolve_intrinsic_sizes<Source, Session>(
             |track| {
                 matches!(
                     track.sizing.min,
-                    MinTrackSizingFunction::MinContent | MinTrackSizingFunction::MaxContent
+                    TrackBreadth::MinContent | TrackBreadth::MaxContent
                 )
             },
             &mut planned,
@@ -1256,8 +1229,6 @@ fn resolve_intrinsic_sizes<Source, Session>(
         );
         if available == AvailableSpace::MaxContent {
             run_spanning_base_phase(
-                source,
-                session,
                 axis,
                 tracks,
                 cross_tracks,
@@ -1270,7 +1241,7 @@ fn resolve_intrinsic_sizes<Source, Session>(
                 |track| {
                     matches!(
                         track.sizing.min,
-                        MinTrackSizingFunction::Auto | MinTrackSizingFunction::MaxContent
+                        TrackBreadth::Auto | TrackBreadth::Flex(_) | TrackBreadth::MaxContent
                     )
                 },
                 &mut planned,
@@ -1280,8 +1251,6 @@ fn resolve_intrinsic_sizes<Source, Session>(
             );
         }
         run_spanning_base_phase(
-            source,
-            session,
             axis,
             tracks,
             cross_tracks,
@@ -1291,15 +1260,13 @@ fn resolve_intrinsic_sizes<Source, Session>(
             ContributionKind::MaxContent,
             false,
             false,
-            |track| matches!(track.sizing.min, MinTrackSizingFunction::MaxContent),
+            |track| matches!(track.sizing.min, TrackBreadth::MaxContent),
             &mut planned,
             &mut touched,
             &mut affected_scratch,
             &mut non_affected_scratch,
         );
         run_spanning_growth_phase(
-            source,
-            session,
             axis,
             tracks,
             cross_tracks,
@@ -1314,8 +1281,6 @@ fn resolve_intrinsic_sizes<Source, Session>(
             &mut non_affected_scratch,
         );
         run_spanning_growth_phase(
-            source,
-            session,
             axis,
             tracks,
             cross_tracks,
@@ -1323,14 +1288,7 @@ fn resolve_intrinsic_sizes<Source, Session>(
             group,
             inner_size,
             ContributionKind::MaxContent,
-            |track| {
-                matches!(
-                    track.sizing.max,
-                    MaxTrackSizingFunction::MaxContent
-                        | MaxTrackSizingFunction::Auto
-                        | MaxTrackSizingFunction::FitContent(_)
-                )
-            },
+            |track| matches!(track.sizing.max, TrackBreadth::MaxContent | TrackBreadth::Auto),
             &mut planned,
             &mut touched,
             &mut affected_scratch,
@@ -1367,8 +1325,6 @@ fn resolve_intrinsic_sizes<Source, Session>(
                 spanning_minimum_kind
             };
         run_spanning_base_phase(
-            source,
-            session,
             axis,
             tracks,
             cross_tracks,
@@ -1378,15 +1334,13 @@ fn resolve_intrinsic_sizes<Source, Session>(
             flexible_base_kind,
             use_limited_min_content,
             true,
-            |track| track.is_flexible(),
+            Track::is_flexible,
             &mut planned,
             &mut touched,
             &mut affected_scratch,
             &mut non_affected_scratch,
         );
         run_spanning_base_phase(
-            source,
-            session,
             axis,
             tracks,
             cross_tracks,
@@ -1400,7 +1354,7 @@ fn resolve_intrinsic_sizes<Source, Session>(
                 track.is_flexible()
                     && matches!(
                         track.sizing.min,
-                        MinTrackSizingFunction::MinContent | MinTrackSizingFunction::MaxContent
+                        TrackBreadth::MinContent | TrackBreadth::MaxContent
                     )
             },
             &mut planned,
@@ -1508,20 +1462,18 @@ fn find_fr_size(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn expand_flexible_tracks<Source, Session>(
-    source: &Source,
-    session: &mut Session,
+fn expand_flexible_tracks<N>(
     axis: Axis,
     tracks: &mut TrackSet,
     cross_tracks: Option<CrossAxisTracks<'_>>,
-    items: &mut [GridItem],
+    items: &mut [GridItem<N>],
     inner_size: crate::geometry::Size<Option<f32>>,
     available: AvailableSpace,
 ) where
-    Source: GridSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: GridContainerStyle + GridItemStyle,
 {
-    if !tracks.tracks.iter().any(|track| track.is_flexible()) {
+    if !tracks.tracks.iter().any(Track::is_flexible) {
         return;
     }
 
@@ -1556,13 +1508,11 @@ fn expand_flexible_tracks<Source, Session>(
             let range = tracks.span_indices(span.start, span.end);
             if !tracks.tracks[range.clone()]
                 .iter()
-                .any(|track| track.is_flexible())
+                .any(Track::is_flexible)
             {
                 continue;
             }
             let contribution = measure_contribution(
-                source,
-                session,
                 item,
                 axis,
                 ContributionKind::MaxContent,
@@ -1608,19 +1558,17 @@ fn stretch_auto_tracks(tracks: &mut TrackSet, available: AvailableSpace, alignme
 
 /// Runs the track sizing algorithm for one physical axis.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn size_tracks<Source, Session>(
-    source: &Source,
-    session: &mut Session,
+pub(super) fn size_tracks<N>(
     axis: Axis,
     tracks: &mut TrackSet,
     cross_tracks: Option<CrossAxisTracks<'_>>,
-    items: &mut [GridItem],
+    items: &mut [GridItem<N>],
     inner_size: crate::geometry::Size<Option<f32>>,
     available: AvailableSpace,
     alignment: AlignContent,
 ) where
-    Source: GridSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: GridContainerStyle + GridItemStyle,
 {
     if tracks.tracks.is_empty() {
         return;
@@ -1635,49 +1583,23 @@ pub(super) fn size_tracks<Source, Session>(
         return;
     }
     for item in items.iter_mut() {
-        resolve_item_intrinsic_dimensions(source, session, item, axis, cross_tracks, inner_size);
+        resolve_item_intrinsic_dimensions(item, axis, cross_tracks, inner_size);
     }
-    prepare_baseline_shims(
-        source,
-        session,
-        axis,
-        tracks,
-        cross_tracks,
-        items,
-        inner_size,
-    );
-    resolve_intrinsic_sizes(
-        source,
-        session,
-        axis,
-        tracks,
-        cross_tracks,
-        items,
-        inner_size,
-        available,
-    );
+    prepare_baseline_shims(axis, tracks, cross_tracks, items, inner_size);
+    resolve_intrinsic_sizes(axis, tracks, cross_tracks, items, inner_size, available);
     maximize_tracks(tracks, available);
-    expand_flexible_tracks(
-        source,
-        session,
-        axis,
-        tracks,
-        cross_tracks,
-        items,
-        inner_size,
-        available,
-    );
+    expand_flexible_tracks(axis, tracks, cross_tracks, items, inner_size, available);
     stretch_auto_tracks(tracks, available, alignment);
     tracks.rebuild_positions();
 }
 
 trait ItemOverflowAxis {
-    fn overflow_point(&self, axis: Axis) -> crate::style::Overflow;
+    fn overflow_point(&self, axis: Axis) -> stylo::values::computed::Overflow;
 }
 
-impl ItemOverflowAxis for GridItem {
+impl<N> ItemOverflowAxis for GridItem<N> {
     #[inline]
-    fn overflow_point(&self, axis: Axis) -> crate::style::Overflow {
+    fn overflow_point(&self, axis: Axis) -> stylo::values::computed::Overflow {
         match axis {
             Axis::Horizontal => self.overflow.x,
             Axis::Vertical => self.overflow.y,
@@ -1689,186 +1611,140 @@ impl ItemOverflowAxis for GridItem {
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::float_cmp)]
 mod tests {
+    use core::cell::RefCell;
+
+    use stylo::Zero;
+    use stylo::computed_values::direction;
+    use stylo::values::computed::{
+        Display, GridTemplateComponent, ImplicitGridTracks, Length, Overflow, PositionProperty,
+    };
+    use stylo::values::generics::NonNegative;
+    use stylo::values::generics::grid::{Flex, ImplicitGridTracks as GenericImplicitGridTracks};
+
+    use super::super::types::TrackSizingFunction;
     use super::*;
     use crate::compute::grid::placement::{GridArea, TrackSpan};
     use crate::geometry::{Edges, Point, Size};
-    use crate::style::{
-        BoxSizing, CalcHandle, CoreStyle, GridContainerStyle, GridItemStyle, GridTemplateComponent,
-        GridTemplateRepetition, LengthPercentage, Overflow, RepetitionCount, TrackSizingFunction,
-    };
-    use crate::tree::{
-        CacheState, GridSource, Layout, LayoutInput, LayoutOutput, LayoutSource, LayoutState,
-        NodeId, TraverseTree,
-    };
+    use crate::tree::{Layout, LayoutInput, LayoutOutput};
 
-    #[derive(Debug, Clone, Copy)]
+    fn lp_px(value: f32) -> LengthPercentage {
+        LengthPercentage::new_length(Length::new(value))
+    }
+
+    #[derive(Debug, Clone)]
     struct TestStyle {
-        size: Size<Dimension>,
-        min_size: Size<Dimension>,
-        max_size: Size<Dimension>,
+        size: Size<StyleSize>,
+        min_size: Size<StyleSize>,
+        max_size: Size<StyleMaxSize>,
+        template: GridTemplateComponent,
+        auto_tracks: ImplicitGridTracks,
     }
 
     impl Default for TestStyle {
         fn default() -> Self {
             Self {
-                size: Size::new(Dimension::Auto, Dimension::Auto),
-                min_size: Size::new(Dimension::Auto, Dimension::Auto),
-                max_size: Size::new(Dimension::Auto, Dimension::Auto),
+                size: Size::new(StyleSize::Auto, StyleSize::Auto),
+                min_size: Size::new(StyleSize::Auto, StyleSize::Auto),
+                max_size: Size::new(StyleMaxSize::None, StyleMaxSize::None),
+                template: GridTemplateComponent::None,
+                auto_tracks: GenericImplicitGridTracks(Vec::new().into()),
             }
         }
     }
 
     impl CoreStyle for TestStyle {
-        fn size(&self) -> Size<Dimension> {
-            self.size
+        fn display(&self) -> Display {
+            Display::Grid
         }
 
-        fn min_size(&self) -> Size<Dimension> {
-            self.min_size
+        fn size(&self) -> Size<StyleSize> {
+            self.size.clone()
         }
 
-        fn max_size(&self) -> Size<Dimension> {
-            self.max_size
-        }
-    }
-
-    #[derive(Debug, Clone, Copy)]
-    struct EmptyRepetition;
-
-    impl GridTemplateRepetition for EmptyRepetition {
-        type Tracks<'a> = core::iter::Empty<TrackSizingFunction>;
-
-        fn count(&self) -> RepetitionCount {
-            RepetitionCount::Count(1)
+        fn min_size(&self) -> Size<StyleSize> {
+            self.min_size.clone()
         }
 
-        fn tracks(&self) -> Self::Tracks<'_> {
-            core::iter::empty()
+        fn max_size(&self) -> Size<StyleMaxSize> {
+            self.max_size.clone()
         }
     }
 
     impl GridContainerStyle for TestStyle {
-        type Repetition<'a> = EmptyRepetition;
-        type TemplateTracks<'a> = core::iter::Empty<GridTemplateComponent<EmptyRepetition>>;
-        type AutoTracks<'a> = core::iter::Empty<TrackSizingFunction>;
-
-        fn grid_template_rows(&self) -> Self::TemplateTracks<'_> {
-            core::iter::empty()
+        fn grid_template_rows(&self) -> &GridTemplateComponent {
+            &self.template
         }
 
-        fn grid_template_columns(&self) -> Self::TemplateTracks<'_> {
-            core::iter::empty()
+        fn grid_template_columns(&self) -> &GridTemplateComponent {
+            &self.template
         }
 
-        fn grid_auto_rows(&self) -> Self::AutoTracks<'_> {
-            core::iter::empty()
+        fn grid_auto_rows(&self) -> &ImplicitGridTracks {
+            &self.auto_tracks
         }
 
-        fn grid_auto_columns(&self) -> Self::AutoTracks<'_> {
-            core::iter::empty()
+        fn grid_auto_columns(&self) -> &ImplicitGridTracks {
+            &self.auto_tracks
         }
     }
 
     impl GridItemStyle for TestStyle {}
 
-    #[derive(Debug, Default)]
-    struct TestSource {
-        style: TestStyle,
-    }
-
-    impl TraverseTree for TestSource {
-        type ChildIter<'a> = core::iter::Empty<NodeId>;
-
-        fn child_ids(&self, _parent: NodeId) -> Self::ChildIter<'_> {
-            core::iter::empty()
-        }
-
-        fn child_count(&self, _parent: NodeId) -> usize {
-            0
-        }
-
-        fn child_id(&self, _parent: NodeId, _index: usize) -> NodeId {
-            unreachable!("the sizing test source has no children")
-        }
-    }
-
-    impl LayoutSource for TestSource {
-        type CoreStyle<'a> = &'a TestStyle;
-
-        fn core_style(&self, _node: NodeId) -> Self::CoreStyle<'_> {
-            &self.style
-        }
-
-        fn resolve_calc(&self, _calc: CalcHandle, _basis: f32) -> f32 {
-            unreachable!("sizing test styles do not contain calc()")
-        }
-    }
-
-    impl GridSource for TestSource {
-        type ContainerStyle<'a> = &'a TestStyle;
-        type ItemStyle<'a> = &'a TestStyle;
-
-        fn grid_container_style(&self, _container: NodeId) -> Self::ContainerStyle<'_> {
-            &self.style
-        }
-
-        fn grid_item_style(&self, _item: NodeId) -> Self::ItemStyle<'_> {
-            &self.style
-        }
-    }
-
+    /// Minimal handle-based test host: one shared style, no children, canned
+    /// min-/max-content measurements, and an interior-mutable call log.
     #[derive(Debug)]
-    struct TestSession {
+    struct TestTree {
+        style: TestStyle,
         min_content: Size<f32>,
         max_content: Size<f32>,
         first_baseline: Option<f32>,
-        calls: Vec<LayoutInput>,
+        calls: RefCell<Vec<LayoutInput>>,
     }
 
-    impl Default for TestSession {
+    impl Default for TestTree {
         fn default() -> Self {
             Self {
+                style: TestStyle::default(),
                 min_content: Size::new(20.0, 10.0),
                 max_content: Size::new(80.0, 40.0),
                 first_baseline: None,
-                calls: Vec::new(),
+                calls: RefCell::new(Vec::new()),
             }
         }
     }
 
-    impl LayoutState for TestSession {
-        fn set_unrounded_layout(&mut self, _node: NodeId, _layout: &Layout) {}
-
-        fn set_static_position(&mut self, _child: NodeId, _static_position: Point<f32>) {}
+    #[derive(Debug, Clone, Copy)]
+    struct TestRef<'t> {
+        tree: &'t TestTree,
     }
 
-    impl CacheState for TestSession {
-        fn cache_get(&self, _node: NodeId, _input: LayoutInput) -> Option<LayoutOutput> {
-            None
+    impl<'t> LayoutNode for TestRef<'t> {
+        type Style = &'t TestStyle;
+        type ChildIter = core::iter::Empty<Self>;
+
+        fn children(self) -> Self::ChildIter {
+            core::iter::empty()
         }
 
-        fn cache_store(&mut self, _node: NodeId, _input: LayoutInput, _output: LayoutOutput) {}
+        fn child_count(self) -> usize {
+            0
+        }
 
-        fn cache_clear(&mut self, _node: NodeId) {}
-    }
+        fn style(self) -> &'t TestStyle {
+            &self.tree.style
+        }
 
-    impl LayoutSession<TestSource> for TestSession {
-        fn compute_child_layout(
-            &mut self,
-            _source: &TestSource,
-            _child: NodeId,
-            input: LayoutInput,
-        ) -> LayoutOutput {
-            self.calls.push(input);
+        fn compute_child_layout(self, input: LayoutInput) -> LayoutOutput {
+            self.tree.calls.borrow_mut().push(input);
             let measured = Size::new(
                 match input.available_space.width {
-                    AvailableSpace::MinContent => self.min_content.width,
-                    AvailableSpace::MaxContent => self.max_content.width,
+                    AvailableSpace::MinContent => self.tree.min_content.width,
+                    AvailableSpace::MaxContent => self.tree.max_content.width,
                     AvailableSpace::Definite(value) => value,
                 },
                 match input.available_space.height {
-                    AvailableSpace::MinContent => self.min_content.height,
-                    AvailableSpace::MaxContent => self.max_content.height,
+                    AvailableSpace::MinContent => self.tree.min_content.height,
+                    AvailableSpace::MaxContent => self.tree.max_content.height,
                     AvailableSpace::Definite(value) => value,
                 },
             );
@@ -1877,14 +1753,33 @@ mod tests {
                 input.known_dimensions.height.unwrap_or(measured.height),
             );
             LayoutOutput::new(size, size)
-                .with_first_baselines(Point::new(None, self.first_baseline))
+                .with_first_baselines(Point::new(None, self.tree.first_baseline))
         }
+
+        fn set_unrounded_layout(self, _layout: &Layout) {}
+
+        fn unrounded_layout(self) -> Layout {
+            Layout::default()
+        }
+
+        fn set_final_layout(self, _layout: &Layout) {}
+
+        fn set_static_position(self, _static_position: Point<f32>) {}
+
+        // Caching deliberately disabled.
+        fn cache_get(self, _input: LayoutInput) -> Option<LayoutOutput> {
+            None
+        }
+
+        fn cache_store(self, _input: LayoutInput, _output: LayoutOutput) {}
+
+        fn cache_clear(self) {}
     }
 
-    fn test_item(column_start: i32, column_end: i32) -> GridItem {
+    fn test_item(node: TestRef<'_>, column_start: i32, column_end: i32) -> GridItem<TestRef<'_>> {
         GridItem {
             key: crate::compute::util::ItemKey {
-                node: NodeId::from(0_usize),
+                node,
                 layout_order: 0,
             },
             area: GridArea {
@@ -1894,11 +1789,12 @@ mod tests {
                 },
                 row: TrackSpan { start: 0, end: 1 },
             },
-            align_self: crate::style::AlignItems::Start,
-            justify_self: crate::style::AlignItems::Start,
-            direction: crate::style::Direction::Ltr,
+            position: PositionProperty::Relative,
+            align_self: AlignItems::Start,
+            justify_self: AlignItems::Start,
+            direction: direction::T::Ltr,
             aspect_ratio: None,
-            box_sizing: BoxSizing::ContentBox,
+            box_sizing: box_sizing::T::ContentBox,
             overflow: Point::new(Overflow::Visible, Overflow::Visible),
             preferred_behaves_auto_or_depends: Size::new(true, true),
             minimum_is_auto: Size::new(true, true),
@@ -1909,7 +1805,6 @@ mod tests {
             margin_auto: Edges::uniform(false),
             padding: Edges::uniform(0.0),
             border: Edges::uniform(0.0),
-            scrollbar: Size::ZERO,
             inset: Edges::uniform(None),
             raw_min_content: Size::NONE,
             raw_max_content: Size::NONE,
@@ -1949,7 +1844,8 @@ mod tests {
 
     #[test]
     fn initial_column_cross_area_uses_only_definite_row_maximums() {
-        let mut item = test_item(0, 1);
+        let tree = TestTree::default();
+        let mut item = test_item(TestRef { tree: &tree }, 0, 1);
         item.area.row = TrackSpan { start: 0, end: 2 };
         item.margin.top = 2.0;
         item.margin.bottom = 3.0;
@@ -1988,21 +1884,20 @@ mod tests {
 
     #[test]
     fn intrinsic_keywords_resolve_each_raw_dimension_form() {
-        let source = TestSource {
+        let tree = TestTree {
             style: TestStyle {
-                size: Size::new(Dimension::MinContent, Dimension::Auto),
-                min_size: Size::new(Dimension::MaxContent, Dimension::Auto),
+                size: Size::new(StyleSize::MinContent, StyleSize::Auto),
+                min_size: Size::new(StyleSize::MaxContent, StyleSize::Auto),
                 max_size: Size::new(
-                    Dimension::FitContent(LengthPercentage::length(50.0)),
-                    Dimension::Auto,
+                    StyleMaxSize::FitContentFunction(NonNegative(lp_px(50.0))),
+                    StyleMaxSize::None,
                 ),
+                ..TestStyle::default()
             },
+            ..TestTree::default()
         };
-        let mut session = TestSession::default();
-        let mut item = test_item(0, 1);
+        let mut item = test_item(TestRef { tree: &tree }, 0, 1);
         resolve_item_intrinsic_dimensions(
-            &source,
-            &mut session,
             &mut item,
             Axis::Horizontal,
             None,
@@ -2011,62 +1906,64 @@ mod tests {
         assert_eq!(item.preferred_size.width, Some(20.0));
         assert_eq!(item.min_size.width, Some(80.0));
         assert_eq!(item.max_size.width, Some(50.0));
-        assert_eq!(session.calls.len(), 2);
+        assert_eq!(tree.calls.borrow().len(), 2);
 
-        let source = TestSource {
+        let tree = TestTree {
             style: TestStyle {
-                min_size: Size::new(Dimension::MinContent, Dimension::Auto),
+                min_size: Size::new(StyleSize::MinContent, StyleSize::Auto),
                 ..TestStyle::default()
             },
+            ..TestTree::default()
         };
-        let mut session = TestSession::default();
-        let mut item = test_item(0, 1);
-        resolve_item_intrinsic_dimensions(
-            &source,
-            &mut session,
-            &mut item,
-            Axis::Horizontal,
-            None,
-            Size::NONE,
-        );
+        let mut item = test_item(TestRef { tree: &tree }, 0, 1);
+        resolve_item_intrinsic_dimensions(&mut item, Axis::Horizontal, None, Size::NONE);
         assert_eq!(item.preferred_size.width, None);
         assert_eq!(item.min_size.width, Some(20.0));
         assert_eq!(item.max_size.width, None);
-        assert_eq!(session.calls.len(), 1);
+        assert_eq!(tree.calls.borrow().len(), 1);
 
-        let source = TestSource {
+        let tree = TestTree {
             style: TestStyle {
-                size: Size::new(Dimension::MaxContent, Dimension::Auto),
+                size: Size::new(StyleSize::MaxContent, StyleSize::Auto),
                 ..TestStyle::default()
             },
+            ..TestTree::default()
         };
-        let mut session = TestSession::default();
-        let mut item = test_item(0, 1);
-        resolve_item_intrinsic_dimensions(
-            &source,
-            &mut session,
-            &mut item,
-            Axis::Horizontal,
-            None,
-            Size::NONE,
-        );
+        let mut item = test_item(TestRef { tree: &tree }, 0, 1);
+        resolve_item_intrinsic_dimensions(&mut item, Axis::Horizontal, None, Size::NONE);
         assert_eq!(item.preferred_size.width, Some(80.0));
-        assert_eq!(session.calls.len(), 1);
+        assert_eq!(tree.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn keyword_sizes_behave_as_auto() {
+        // `stretch`/`-webkit-fill-available`/bare `fit-content` are treated
+        // as `auto` (behavior delta #8): no intrinsic probes, no resolution.
+        let tree = TestTree {
+            style: TestStyle {
+                size: Size::new(StyleSize::Stretch, StyleSize::WebkitFillAvailable),
+                min_size: Size::new(StyleSize::FitContent, StyleSize::Auto),
+                ..TestStyle::default()
+            },
+            ..TestTree::default()
+        };
+        let mut item = test_item(TestRef { tree: &tree }, 0, 1);
+        resolve_item_intrinsic_dimensions(&mut item, Axis::Horizontal, None, Size::NONE);
+        assert_eq!(item.preferred_size.width, None);
+        assert_eq!(item.min_size.width, None);
+        assert!(tree.calls.borrow().is_empty());
     }
 
     #[test]
     fn vertical_border_box_ratio_and_synthesized_baseline_affect_raw_content() {
-        let source = TestSource::default();
-        let mut session = TestSession::default();
-        let mut item = test_item(0, 1);
+        let tree = TestTree::default();
+        let mut item = test_item(TestRef { tree: &tree }, 0, 1);
         item.preferred_size.width = Some(40.0);
         item.aspect_ratio = Some(2.0);
-        item.box_sizing = BoxSizing::BorderBox;
-        item.align_self = crate::style::AlignItems::Baseline;
+        item.box_sizing = box_sizing::T::BorderBox;
+        item.align_self = AlignItems::Baseline;
 
         let measured = raw_content_size(
-            &source,
-            &mut session,
             &mut item,
             Axis::Vertical,
             ContributionKind::MinContent,
@@ -2079,15 +1976,12 @@ mod tests {
 
     #[test]
     fn non_auto_contribution_without_a_preferred_size_falls_back_to_content() {
-        let source = TestSource::default();
-        let mut session = TestSession::default();
-        let mut item = test_item(0, 1);
+        let tree = TestTree::default();
+        let mut item = test_item(TestRef { tree: &tree }, 0, 1);
         item.preferred_behaves_auto_or_depends.width = false;
         let tracks = track_set(vec![test_track(0.0, f32::INFINITY)]);
 
         let minimum = measure_contribution(
-            &source,
-            &mut session,
             &mut item,
             Axis::Horizontal,
             ContributionKind::Minimum,
@@ -2096,8 +1990,6 @@ mod tests {
             Size::NONE,
         );
         let maximum = measure_contribution(
-            &source,
-            &mut session,
             &mut item,
             Axis::Horizontal,
             ContributionKind::MaxContent,
@@ -2107,7 +1999,7 @@ mod tests {
         );
         assert_eq!(minimum, 20.0);
         assert_eq!(maximum, 80.0);
-        assert_eq!(session.calls.len(), 2);
+        assert_eq!(tree.calls.borrow().len(), 2);
     }
 
     #[test]
@@ -2138,6 +2030,11 @@ mod tests {
         );
         assert!(touched.is_empty());
 
+        let fixed_zero = TrackSizingFunction {
+            min: TrackBreadth::Breadth(LengthPercentage::zero()),
+            max: TrackBreadth::Breadth(LengthPercentage::zero()),
+            fit_content: None,
+        };
         let cases = [
             (
                 PlannedSize::Base,
@@ -2160,7 +2057,7 @@ mod tests {
             (
                 PlannedSize::Base,
                 ContributionKind::MaxContent,
-                TrackSizingFunction::fixed(LengthPercentage::ZERO),
+                fixed_zero,
                 false,
             ),
         ];
@@ -2223,23 +2120,29 @@ mod tests {
 
     #[test]
     fn indefinite_fr_sizing_considers_only_items_crossing_flexible_tracks() {
-        let source = TestSource::default();
-        let mut session = TestSession::default();
+        let tree = TestTree::default();
+        let node = TestRef { tree: &tree };
         let fixed = test_track(10.0, 10.0);
         let mut flexible = test_track(10.0, f32::INFINITY);
-        flexible.sizing = TrackSizingFunction::fr(2.0);
+        flexible.sizing = TrackSizingFunction {
+            min: TrackBreadth::Auto,
+            max: TrackBreadth::Flex(Flex(2.0)),
+            fit_content: None,
+        };
         flexible.flex_factor = 2.0;
         flexible.flexible = true;
         let mut subunit_flexible = test_track(7.0, f32::INFINITY);
-        subunit_flexible.sizing = TrackSizingFunction::fr(0.5);
+        subunit_flexible.sizing = TrackSizingFunction {
+            min: TrackBreadth::Auto,
+            max: TrackBreadth::Flex(Flex(0.5)),
+            fit_content: None,
+        };
         subunit_flexible.flex_factor = 0.5;
         subunit_flexible.flexible = true;
         let mut tracks = track_set(vec![fixed, flexible, subunit_flexible]);
-        let mut items = vec![test_item(0, 1), test_item(1, 2)];
+        let mut items = vec![test_item(node, 0, 1), test_item(node, 1, 2)];
 
         expand_flexible_tracks(
-            &source,
-            &mut session,
             Axis::Horizontal,
             &mut tracks,
             None,
@@ -2250,7 +2153,7 @@ mod tests {
         assert_eq!(tracks.tracks[0].base, 10.0);
         assert_eq!(tracks.tracks[1].base, 80.0);
         assert_eq!(tracks.tracks[2].base, 20.0);
-        assert_eq!(session.calls.len(), 1);
+        assert_eq!(tree.calls.borrow().len(), 1);
         assert_eq!(items[0].overflow_point(Axis::Vertical), Overflow::Visible);
     }
 }

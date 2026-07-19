@@ -18,8 +18,8 @@ use crate::style::{
     RelativeContainerStyle, RelativeItemStyle, RelativeReference,
 };
 use crate::tree::{
-    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutSession, NodeId,
-    RelativeSource, RequestedAxis, SizingMode,
+    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
+    SizingMode,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,8 +171,8 @@ impl ResolvedReference {
 }
 
 #[derive(Debug)]
-struct RelativeItem {
-    key: ItemKey,
+struct RelativeItem<N> {
+    key: ItemKey<N>,
     align: Edges<ResolvedReference>,
     adjacent: Edges<ResolvedReference>,
     center: RelativeCenter,
@@ -199,7 +199,7 @@ struct RelativeItem {
     reuse_fixed_measurement: bool,
 }
 
-impl RelativeItem {
+impl<N> RelativeItem<N> {
     #[inline]
     fn outer_size(&self, axis: Axis) -> f32 {
         axis.size(self.output.size) + axis.margin_sum(self.margin)
@@ -231,14 +231,17 @@ impl RelativeItem {
     }
 }
 
-fn resolve_item<Source: RelativeSource>(
-    source: &Source,
-    key: ItemKey,
+fn resolve_item<N>(
+    key: ItemKey<N>,
     size_percentage_basis: Size<Option<f32>>,
     edge_inline_basis: Option<f32>,
     lookup: &IdLookup,
-) -> RelativeItem {
-    let style = source.relative_item_style(key.node);
+) -> RelativeItem<N>
+where
+    N: LayoutNode,
+    N::Style: RelativeContainerStyle + RelativeItemStyle,
+{
+    let style = key.node.style();
     let ResolvedItemBox {
         raw_size,
         raw_min_size,
@@ -254,7 +257,7 @@ fn resolve_item<Source: RelativeSource>(
         scrollbar,
         inset,
         ..
-    } = resolve_item_box_with_bases(source, &style, size_percentage_basis, edge_inline_basis);
+    } = resolve_item_box_with_bases(key.node, &style, size_percentage_basis, edge_inline_basis);
 
     RelativeItem {
         key,
@@ -302,10 +305,14 @@ struct IdLookup {
 }
 
 impl IdLookup {
-    fn new<Source: RelativeSource>(source: &Source, items: &[OrderedItem]) -> Self {
+    fn new<N>(items: &[OrderedItem<N>]) -> Self
+    where
+        N: LayoutNode,
+        N::Style: RelativeContainerStyle + RelativeItemStyle,
+    {
         let mut entries = Vec::with_capacity(items.len());
         for (index, item) in items.iter().enumerate() {
-            let relative_id = source.relative_item_style(item.node).relative_id();
+            let relative_id = item.node.style().relative_id();
             if relative_id.is_item() {
                 entries.push((relative_id.get(), index));
             }
@@ -374,7 +381,11 @@ impl Dependencies {
 }
 
 #[inline]
-fn has_axis_dependencies(item: &RelativeItem, axis: Axis) -> bool {
+fn has_axis_dependencies<N>(item: &RelativeItem<N>, axis: Axis) -> bool
+where
+    N: LayoutNode,
+    N::Style: RelativeContainerStyle + RelativeItemStyle,
+{
     let references = [
         axis.start_reference(item.align),
         axis.end_reference(item.align),
@@ -386,7 +397,11 @@ fn has_axis_dependencies(item: &RelativeItem, axis: Axis) -> bool {
         .any(|reference| reference.item_index_u32().is_some())
 }
 
-fn add_axis_dependencies(item: &RelativeItem, axis: Axis, dependencies: &mut Dependencies) {
+fn add_axis_dependencies<N>(item: &RelativeItem<N>, axis: Axis, dependencies: &mut Dependencies)
+where
+    N: LayoutNode,
+    N::Style: RelativeContainerStyle + RelativeItemStyle,
+{
     let align_start = axis.start_reference(item.align);
     let align_end = axis.end_reference(item.align);
     // Adjacency is opposite-sided: right/bottom-of constrain start;
@@ -403,7 +418,11 @@ fn add_axis_dependencies(item: &RelativeItem, axis: Axis, dependencies: &mut Dep
 /// Topological order with CSR reverse edges and a monotonic cycle cursor.
 /// Every item has at most eight distinct dependencies, so graph construction
 /// and sorting are `O(n + e)` after id lookup resolution.
-fn dependency_order(items: &[RelativeItem], scope: DependencyScope) -> Vec<usize> {
+fn dependency_order<N>(items: &[RelativeItem<N>], scope: DependencyScope) -> Vec<usize>
+where
+    N: LayoutNode,
+    N::Style: RelativeContainerStyle + RelativeItemStyle,
+{
     let count = items.len();
     let has_dependencies = items.iter().any(|item| match scope {
         DependencyScope::Horizontal => has_axis_dependencies(item, Axis::Horizontal),
@@ -510,15 +529,19 @@ fn dependency_order(items: &[RelativeItem], scope: DependencyScope) -> Vec<usize
 }
 
 #[inline]
-fn reference_position(
+fn reference_position<N>(
     reference: ResolvedReference,
     target_end: bool,
     axis: Axis,
     parent_size: Size<Option<f32>>,
     _lookup: &IdLookup,
-    items: &[RelativeItem],
+    items: &[RelativeItem<N>],
     allow_item_references: bool,
-) -> Option<f32> {
+) -> Option<f32>
+where
+    N: LayoutNode,
+    N::Style: RelativeContainerStyle + RelativeItemStyle,
+{
     if reference.is_parent() {
         return axis
             .size(parent_size)
@@ -537,14 +560,18 @@ fn reference_position(
     })
 }
 
-fn axis_constraints(
-    item: &RelativeItem,
+fn axis_constraints<N>(
+    item: &RelativeItem<N>,
     axis: Axis,
     parent_size: Size<Option<f32>>,
     lookup: &IdLookup,
-    items: &[RelativeItem],
+    items: &[RelativeItem<N>],
     allow_item_references: bool,
-) -> Line<Option<f32>> {
+) -> Line<Option<f32>>
+where
+    N: LayoutNode,
+    N::Style: RelativeContainerStyle + RelativeItemStyle,
+{
     let align_start = axis.start_reference(item.align);
     let align_end = axis.end_reference(item.align);
     let after = axis.end_reference(item.adjacent);
@@ -593,13 +620,17 @@ fn axis_constraints(
     Line::new(start, end)
 }
 
-fn all_constraints(
-    item: &RelativeItem,
+fn all_constraints<N>(
+    item: &RelativeItem<N>,
     parent_size: Size<Option<f32>>,
     lookup: &IdLookup,
-    items: &[RelativeItem],
+    items: &[RelativeItem<N>],
     allow_item_references: bool,
-) -> Size<Line<Option<f32>>> {
+) -> Size<Line<Option<f32>>>
+where
+    N: LayoutNode,
+    N::Style: RelativeContainerStyle + RelativeItemStyle,
+{
     Size::new(
         axis_constraints(
             item,
@@ -628,21 +659,25 @@ fn constrained_border_size(constraints: Line<Option<f32>>, margin_sum: f32) -> O
     }
 }
 
-fn fit_content_available<Source: RelativeSource>(
-    source: &Source,
+fn fit_content_available<N>(
+    node: N,
     value: Dimension,
     axis: Axis,
     parent_size: Size<Option<f32>>,
     available: AvailableSpace,
     box_sizing: BoxSizing,
     box_floor: f32,
-) -> AvailableSpace {
+) -> AvailableSpace
+where
+    N: LayoutNode,
+    N::Style: RelativeContainerStyle + RelativeItemStyle,
+{
     match value {
         Dimension::MinContent => AvailableSpace::MinContent,
         Dimension::MaxContent => AvailableSpace::MaxContent,
         Dimension::FitContent(limit) => {
             let owner = axis.size(parent_size).or_else(|| available.into_option());
-            let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
+            let resolve_calc = |handle, basis| node.resolve_calc(handle, basis);
             let limit = resolve_length_percentage(limit, owner, &resolve_calc).map(|limit| {
                 if box_sizing == BoxSizing::ContentBox {
                     limit + box_floor
@@ -674,18 +709,16 @@ fn needs_max_content(value: Dimension) -> bool {
     matches!(value, Dimension::MaxContent | Dimension::FitContent(_))
 }
 
-fn intrinsic_probe<Source, Session>(
-    source: &Source,
-    session: &mut Session,
-    item: &RelativeItem,
+fn intrinsic_probe<N>(
+    item: &RelativeItem<N>,
     axis: Axis,
     intrinsic_space: AvailableSpace,
     parent_size: Size<Option<f32>>,
     available_content: Size<AvailableSpace>,
 ) -> f32
 where
-    Source: RelativeSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: RelativeContainerStyle + RelativeItemStyle,
 {
     // LayoutInput carries the containing space. The recursively dispatched
     // child owns its box model and removes its margins exactly once.
@@ -693,16 +726,12 @@ where
     axis.set_size(&mut available, intrinsic_space);
     let mut input = LayoutInput::compute_size(Size::NONE, parent_size, available, axis.requested());
     input.sizing_mode = SizingMode::ContentSize;
-    axis.size(
-        session
-            .compute_child_layout(source, item.key.node, input)
-            .size,
-    )
+    axis.size(item.key.node.compute_child_layout(input).size)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn resolve_intrinsic_dimension<Source: RelativeSource>(
-    source: &Source,
+fn resolve_intrinsic_dimension<N>(
+    node: N,
     value: Dimension,
     axis: Axis,
     min_content: Option<f32>,
@@ -711,7 +740,11 @@ fn resolve_intrinsic_dimension<Source: RelativeSource>(
     available_content: Size<AvailableSpace>,
     box_sizing: BoxSizing,
     box_floor: f32,
-) -> Option<f32> {
+) -> Option<f32>
+where
+    N: LayoutNode,
+    N::Style: RelativeContainerStyle + RelativeItemStyle,
+{
     match value {
         Dimension::MinContent => min_content,
         Dimension::MaxContent => max_content,
@@ -721,7 +754,7 @@ fn resolve_intrinsic_dimension<Source: RelativeSource>(
             let owner = axis
                 .size(parent_size)
                 .or_else(|| axis.size(available_content).into_option());
-            let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
+            let resolve_calc = |handle, basis| node.resolve_calc(handle, basis);
             let limit = resolve_length_percentage(limit, owner, &resolve_calc).map_or(
                 max_content,
                 |limit| {
@@ -738,15 +771,13 @@ fn resolve_intrinsic_dimension<Source: RelativeSource>(
     }
 }
 
-fn prepare_intrinsic_sizes<Source, Session>(
-    source: &Source,
-    session: &mut Session,
-    item: &mut RelativeItem,
+fn prepare_intrinsic_sizes<N>(
+    item: &mut RelativeItem<N>,
     parent_size: Size<Option<f32>>,
     available_content: Size<AvailableSpace>,
 ) where
-    Source: RelativeSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: RelativeContainerStyle + RelativeItemStyle,
 {
     if item.intrinsic_sizes_ready {
         return;
@@ -768,8 +799,6 @@ fn prepare_intrinsic_sizes<Source, Session>(
 
         let min_content = needs_min.then(|| {
             intrinsic_probe(
-                source,
-                session,
                 item,
                 axis,
                 AvailableSpace::MinContent,
@@ -779,8 +808,6 @@ fn prepare_intrinsic_sizes<Source, Session>(
         });
         let max_content = needs_max.then(|| {
             intrinsic_probe(
-                source,
-                session,
                 item,
                 axis,
                 AvailableSpace::MaxContent,
@@ -790,7 +817,7 @@ fn prepare_intrinsic_sizes<Source, Session>(
         });
         let floor = axis.size(item.box_floor());
         let preferred = resolve_intrinsic_dimension(
-            source,
+            item.key.node,
             raw_size,
             axis,
             min_content,
@@ -802,7 +829,7 @@ fn prepare_intrinsic_sizes<Source, Session>(
         );
         axis.set_size(&mut item.intrinsic_preferred_size, preferred);
         if let Some(min) = resolve_intrinsic_dimension(
-            source,
+            item.key.node,
             raw_min,
             axis,
             min_content,
@@ -815,7 +842,7 @@ fn prepare_intrinsic_sizes<Source, Session>(
             axis.set_size(&mut item.min_size, Some(min));
         }
         if let Some(max) = resolve_intrinsic_dimension(
-            source,
+            item.key.node,
             raw_max,
             axis,
             min_content,
@@ -845,13 +872,16 @@ fn prepare_intrinsic_sizes<Source, Session>(
     item.intrinsic_sizes_ready = true;
 }
 
-fn measurement_input<Source: RelativeSource>(
-    source: &Source,
-    item: &RelativeItem,
+fn measurement_input<N>(
+    item: &RelativeItem<N>,
     constraints: Size<Line<Option<f32>>>,
     parent_size: Size<Option<f32>>,
     available_content: Size<AvailableSpace>,
-) -> LayoutInput {
+) -> LayoutInput
+where
+    N: LayoutNode,
+    N::Style: RelativeContainerStyle + RelativeItemStyle,
+{
     let mut known_dimensions = Size::NONE;
     let mut constraint_definite = Size::new(false, false);
     // Keep this as containing space. Leaf and container entry points remove
@@ -896,7 +926,7 @@ fn measurement_input<Source: RelativeSource>(
                 let child_available =
                     subtract_available_space(axis.size(available_space), margin_sum);
                 let fitted_child_available = fit_content_available(
-                    source,
+                    item.key.node,
                     raw_size,
                     axis,
                     parent_size,
@@ -936,7 +966,7 @@ fn measurement_input<Source: RelativeSource>(
                     (_, _, available) => available,
                 };
                 fit_content_available(
-                    source,
+                    item.key.node,
                     raw_size,
                     axis,
                     parent_size,
@@ -963,14 +993,10 @@ fn measurement_input<Source: RelativeSource>(
     input
 }
 
-fn measure_item<Source, Session>(
-    source: &Source,
-    session: &mut Session,
-    item: &mut RelativeItem,
-    input: LayoutInput,
-) where
-    Source: RelativeSource,
-    Session: LayoutSession<Source>,
+fn measure_item<N>(item: &mut RelativeItem<N>, input: LayoutInput)
+where
+    N: LayoutNode,
+    N::Style: RelativeContainerStyle + RelativeItemStyle,
 {
     if let Some(previous) = item.last_measure {
         if previous == input {
@@ -988,7 +1014,7 @@ fn measure_item<Source, Session>(
         }
     }
     item.reuse_fixed_measurement = false;
-    let mut output = session.compute_child_layout(source, item.key.node, input);
+    let mut output = item.key.node.compute_child_layout(input);
     let floor = item.box_floor();
     if input.known_dimensions.width.is_none() {
         let clamped_width = clamp_axis(
@@ -1011,7 +1037,7 @@ fn measure_item<Source, Session>(
                 refined.known_dimensions.height = None;
                 refined.available_space.height = input.available_space.height;
             }
-            output = session.compute_child_layout(source, item.key.node, refined);
+            output = item.key.node.compute_child_layout(refined);
             output.size.width = clamped_width;
         }
     }
@@ -1033,12 +1059,16 @@ fn measure_item<Source, Session>(
     );
 }
 
-fn position_from_constraints(
-    item: &RelativeItem,
+fn position_from_constraints<N>(
+    item: &RelativeItem<N>,
     axis: Axis,
     constraints: Line<Option<f32>>,
     bounds: Bounds,
-) -> Line<f32> {
+) -> Line<f32>
+where
+    N: LayoutNode,
+    N::Style: RelativeContainerStyle + RelativeItemStyle,
+{
     let outer_size = item.outer_size(axis);
     match (constraints.start, constraints.end) {
         (Some(start), Some(end)) => Line::new(start, end.max(start)),
@@ -1059,13 +1089,17 @@ fn position_from_constraints(
     }
 }
 
-fn position_axis(
-    items: &mut [RelativeItem],
+fn position_axis<N>(
+    items: &mut [RelativeItem<N>],
     order: &[usize],
     axis: Axis,
     parent_size: Size<Option<f32>>,
     lookup: &IdLookup,
-) -> Bounds {
+) -> Bounds
+where
+    N: LayoutNode,
+    N::Style: RelativeContainerStyle + RelativeItemStyle,
+{
     let mut bounds = Bounds::new(axis.size(parent_size));
     for &index in order {
         let constraints = axis_constraints(&items[index], axis, parent_size, lookup, items, true);
@@ -1076,26 +1110,18 @@ fn position_axis(
     bounds
 }
 
-fn measure_all<Source, Session>(
-    source: &Source,
-    session: &mut Session,
-    items: &mut [RelativeItem],
+fn measure_all<N>(
+    items: &mut [RelativeItem<N>],
     parent_size: Size<Option<f32>>,
     available_content: Size<AvailableSpace>,
     lookup: &IdLookup,
     allow_item_references: bool,
 ) where
-    Source: RelativeSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: RelativeContainerStyle + RelativeItemStyle,
 {
     for index in 0..items.len() {
-        prepare_intrinsic_sizes(
-            source,
-            session,
-            &mut items[index],
-            parent_size,
-            available_content,
-        );
+        prepare_intrinsic_sizes(&mut items[index], parent_size, available_content);
         let constraints = all_constraints(
             &items[index],
             parent_size,
@@ -1103,51 +1129,31 @@ fn measure_all<Source, Session>(
             items,
             allow_item_references,
         );
-        let input = measurement_input(
-            source,
-            &items[index],
-            constraints,
-            parent_size,
-            available_content,
-        );
-        measure_item(source, session, &mut items[index], input);
+        let input = measurement_input(&items[index], constraints, parent_size, available_content);
+        measure_item(&mut items[index], input);
     }
 }
 
-fn one_pass_layout<Source, Session>(
-    source: &Source,
-    session: &mut Session,
-    items: &mut [RelativeItem],
+fn one_pass_layout<N>(
+    items: &mut [RelativeItem<N>],
     order: &[usize],
     parent_size: Size<Option<f32>>,
     available_content: Size<AvailableSpace>,
     lookup: &IdLookup,
 ) -> Size<Bounds>
 where
-    Source: RelativeSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: RelativeContainerStyle + RelativeItemStyle,
 {
     let mut bounds = Size::new(
         Bounds::new(parent_size.width),
         Bounds::new(parent_size.height),
     );
     for &index in order {
-        prepare_intrinsic_sizes(
-            source,
-            session,
-            &mut items[index],
-            parent_size,
-            available_content,
-        );
+        prepare_intrinsic_sizes(&mut items[index], parent_size, available_content);
         let constraints = all_constraints(&items[index], parent_size, lookup, items, true);
-        let input = measurement_input(
-            source,
-            &items[index],
-            constraints,
-            parent_size,
-            available_content,
-        );
-        measure_item(source, session, &mut items[index], input);
+        let input = measurement_input(&items[index], constraints, parent_size, available_content);
+        measure_item(&mut items[index], input);
 
         for axis in Axis::ALL {
             let axis_constraints = axis.size(constraints);
@@ -1163,13 +1169,15 @@ where
     bounds
 }
 
-fn refresh_item_bases<Source: RelativeSource>(
-    source: &Source,
-    items: &mut [RelativeItem],
+fn refresh_item_bases<N>(
+    items: &mut [RelativeItem<N>],
     size_percentage_basis: Size<Option<f32>>,
     edge_inline_basis: Option<f32>,
     lookup: &IdLookup,
-) {
+) where
+    N: LayoutNode,
+    N::Style: RelativeContainerStyle + RelativeItemStyle,
+{
     for item in items {
         let positions = item.positions;
         let output = item.output;
@@ -1177,13 +1185,8 @@ fn refresh_item_bases<Source: RelativeSource>(
         let intrinsic_preferred_size = item.intrinsic_preferred_size;
         let intrinsic_sizes_ready = item.intrinsic_sizes_ready;
         let size_is_definite = item.size_is_definite;
-        let mut refreshed = resolve_item(
-            source,
-            item.key,
-            size_percentage_basis,
-            edge_inline_basis,
-            lookup,
-        );
+        let mut refreshed =
+            resolve_item(item.key, size_percentage_basis, edge_inline_basis, lookup);
         let reuse_fixed_measurement = item.fixed_measurement_matches(&refreshed);
         refreshed.positions = positions;
         refreshed.output = output;
@@ -1215,10 +1218,8 @@ fn final_outer_axis(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn two_pass_layout<Source, Session>(
-    source: &Source,
-    session: &mut Session,
-    items: &mut [RelativeItem],
+fn two_pass_layout<N>(
+    items: &mut [RelativeItem<N>],
     horizontal_order: &[usize],
     vertical_order: &[usize],
     initial_parent_size: Size<Option<f32>>,
@@ -1231,20 +1232,12 @@ fn two_pass_layout<Source, Session>(
     max_size: Size<Option<f32>>,
 ) -> Size<f32>
 where
-    Source: RelativeSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: RelativeContainerStyle + RelativeItemStyle,
 {
     // Initial measurement only has parent-edge constraints. Sibling edges
     // become available as the separate axis orders are positioned.
-    measure_all(
-        source,
-        session,
-        items,
-        initial_parent_size,
-        available_content,
-        lookup,
-        false,
-    );
+    measure_all(items, initial_parent_size, available_content, lookup, false);
     let _ = position_axis(
         items,
         horizontal_order,
@@ -1261,15 +1254,7 @@ where
     );
 
     // Refine both-sided sibling constraints and selectively remeasure.
-    measure_all(
-        source,
-        session,
-        items,
-        initial_parent_size,
-        available_content,
-        lookup,
-        true,
-    );
+    measure_all(items, initial_parent_size, available_content, lookup, true);
     let horizontal_bounds = position_axis(
         items,
         horizontal_order,
@@ -1302,15 +1287,9 @@ where
 
         // Percentages whose owner width was cyclic now resolve against the
         // content-sized width. Relative references and ids cannot change
-        // during the immutable source epoch, so the existing lookup remains
+        // during the immutable layout epoch, so the existing lookup remains
         // valid.
-        refresh_item_bases(
-            source,
-            items,
-            resolved_parent_size,
-            Some(content_width),
-            lookup,
-        );
+        refresh_item_bases(items, resolved_parent_size, Some(content_width), lookup);
         let _ = position_axis(
             items,
             horizontal_order,
@@ -1318,15 +1297,7 @@ where
             resolved_parent_size,
             lookup,
         );
-        measure_all(
-            source,
-            session,
-            items,
-            resolved_parent_size,
-            available_content,
-            lookup,
-            true,
-        );
+        measure_all(items, resolved_parent_size, available_content, lookup, true);
         let _ = position_axis(
             items,
             horizontal_order,
@@ -1392,17 +1363,15 @@ fn relative_offset(inset: Edges<Option<f32>>, direction: Direction) -> Point<f32
     Point::new(x, inset.top.unwrap_or_else(|| -inset.bottom.unwrap_or(0.0)))
 }
 
-fn commit_in_flow<Source, Session>(
-    source: &Source,
-    session: &mut Session,
-    items: &mut [RelativeItem],
+fn commit_in_flow<N>(
+    items: &mut [RelativeItem<N>],
     content_size: Size<f32>,
     content_origin: Point<f32>,
     container_size: Size<f32>,
 ) -> Size<f32>
 where
-    Source: RelativeSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: RelativeContainerStyle + RelativeItemStyle,
 {
     let parent_size = content_size.map(Some);
     let available = content_size.map(AvailableSpace::Definite);
@@ -1413,7 +1382,7 @@ where
             LayoutInput::perform_layout(item.output.size.map(Some), parent_size, available);
         input.definite_dimensions = item.size_is_definite;
         input.sizing_mode = SizingMode::ContentSize;
-        let output = session.compute_child_layout(source, item.key.node, input);
+        let output = item.key.node.compute_child_layout(input);
         item.output = output;
 
         let offset = relative_offset(item.inset, item.direction);
@@ -1431,7 +1400,7 @@ where
         layout.border = item.border;
         layout.padding = item.padding;
         layout.margin = item.margin;
-        session.set_unrounded_layout(item.key.node, &layout);
+        item.key.node.set_unrounded_layout(&layout);
 
         scrollable_size.width = scrollable_size
             .width
@@ -1443,16 +1412,14 @@ where
     scrollable_size
 }
 
-fn commit_out_of_flow<Source, Session>(
-    source: &Source,
-    session: &mut Session,
-    items: &[OrderedItem],
+fn commit_out_of_flow<N>(
+    items: &[OrderedItem<N>],
     container_size: Size<f32>,
     border: Edges<f32>,
 ) -> Size<f32>
 where
-    Source: RelativeSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: RelativeContainerStyle + RelativeItemStyle,
 {
     let padding_box_size = Size::new(
         (container_size.width - border.horizontal_sum()).max(0.0),
@@ -1460,16 +1427,11 @@ where
     );
     let mut scrollable_size = container_size;
     for pending in items {
-        let style = source.relative_item_style(pending.node);
+        let style = pending.node.style();
         match style.position() {
             Position::Absolute => {
-                let mut layout = compute_absolute_layout(
-                    source,
-                    session,
-                    pending.node,
-                    padding_box_size,
-                    Point::ZERO,
-                );
+                let mut layout =
+                    compute_absolute_layout(pending.node, padding_box_size, Point::ZERO);
                 layout.order = pending.layout_order;
                 layout.location.x += border.left;
                 layout.location.y += border.top;
@@ -1479,10 +1441,12 @@ where
                 scrollable_size.height = scrollable_size
                     .height
                     .max(layout.location.y + layout.size.height.max(layout.content_size.height));
-                session.set_unrounded_layout(pending.node, &layout);
+                pending.node.set_unrounded_layout(&layout);
             }
             Position::AbsoluteHoisted => {
-                session.set_static_position(pending.node, Point::new(border.left, border.top));
+                pending
+                    .node
+                    .set_static_position(Point::new(border.left, border.top));
             }
             _ => {}
         }
@@ -1492,24 +1456,20 @@ where
 
 /// Computes a Starlight relative-layout container.
 ///
-/// Relative ids and physical-edge properties are supplied by a generic
-/// [`RelativeSource`]; recursive measurement and durable geometry writes flow
-/// through the host's [`LayoutSession`]. The implementation uses compact
-/// sorted id lookup, fixed-width dependency deduplication, CSR reverse edges,
-/// and a linear Kahn/cycle-fallback traversal. Child layouts are stored only
-/// for [`LayoutGoal::Commit`], and the container exports no baseline.
+/// Relative ids and physical-edge properties come from each handle's style
+/// view (`N::Style: RelativeContainerStyle + RelativeItemStyle`); recursive
+/// measurement and durable geometry writes flow through the [`LayoutNode`]
+/// handles. The implementation uses compact sorted id lookup, fixed-width
+/// dependency deduplication, CSR reverse edges, and a linear
+/// Kahn/cycle-fallback traversal. Child layouts are stored only for
+/// [`LayoutGoal::Commit`], and the container exports no baseline.
 #[allow(clippy::too_many_lines)]
-pub fn compute_relative_layout<Source, Session>(
-    source: &Source,
-    session: &mut Session,
-    node: NodeId,
-    input: LayoutInput,
-) -> LayoutOutput
+pub fn compute_relative_layout<N>(node: N, input: LayoutInput) -> LayoutOutput
 where
-    Source: RelativeSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
+    N::Style: RelativeContainerStyle + RelativeItemStyle,
 {
-    let style = source.relative_container_style(node);
+    let style = node.style();
     let layout_once = style.relative_layout_once();
     let style_definite = if input.sizing_mode == SizingMode::ContentSize {
         Size::new(false, false)
@@ -1530,7 +1490,7 @@ where
         outer: initial_outer,
         inner: initial_inner,
         available_inner,
-    } = resolve_container_box(source, &style, input);
+    } = resolve_container_box(node, &style, input);
 
     let initial_parent_size = Size::new(
         outer_definite
@@ -1552,13 +1512,12 @@ where
     );
     let edge_inline_basis = available_content.width.into_option();
 
-    let child_count = source.child_count(node);
+    let child_count = node.child_count();
     let mut generated = Vec::with_capacity(child_count);
     let mut absolute_items = Vec::new();
     let mut hidden = Vec::new();
-    for document_index in 0..child_count {
-        let child = source.child_id(node, document_index);
-        let child_style = source.relative_item_style(child);
+    for (document_index, child) in node.children().enumerate() {
+        let child_style = child.style();
         if child_style.box_generation_mode() == BoxGenerationMode::None {
             hidden.push((document_index, child));
             continue;
@@ -1581,25 +1540,15 @@ where
 
     sort_and_assign_layout_order(&mut generated, &mut absolute_items);
 
-    let lookup = IdLookup::new(source, &generated);
+    let lookup = IdLookup::new(&generated);
     let mut items = generated
         .into_iter()
-        .map(|item| {
-            resolve_item(
-                source,
-                item.key(),
-                initial_parent_size,
-                edge_inline_basis,
-                &lookup,
-            )
-        })
+        .map(|item| resolve_item(item.key(), initial_parent_size, edge_inline_basis, &lookup))
         .collect::<Vec<_>>();
 
     let outer_size = if layout_once {
         let order = dependency_order(&items, DependencyScope::Combined);
         let bounds = one_pass_layout(
-            source,
-            session,
             &mut items,
             &order,
             initial_parent_size,
@@ -1628,8 +1577,6 @@ where
         let horizontal_order = dependency_order(&items, DependencyScope::Horizontal);
         let vertical_order = dependency_order(&items, DependencyScope::Vertical);
         two_pass_layout(
-            source,
-            session,
             &mut items,
             &horizontal_order,
             &vertical_order,
@@ -1652,23 +1599,15 @@ where
     }
 
     let content_origin = Point::new(border.left + padding.left, border.top + padding.top);
-    let mut scrollable_size = commit_in_flow(
-        source,
-        session,
-        &mut items,
-        content_size,
-        content_origin,
-        outer_size,
-    );
+    let mut scrollable_size = commit_in_flow(&mut items, content_size, content_origin, outer_size);
     for (document_index, child) in hidden {
-        super::hide_subtree(source, session, child);
-        session.set_unrounded_layout(
-            child,
-            &Layout::with_order(u32::try_from(document_index).unwrap_or(u32::MAX)),
-        );
+        super::hide_subtree(child);
+        child.set_unrounded_layout(&Layout::with_order(
+            u32::try_from(document_index).unwrap_or(u32::MAX),
+        ));
     }
     scrollable_size = scrollable_size.zip_map(
-        commit_out_of_flow(source, session, &absolute_items, outer_size, border),
+        commit_out_of_flow(&absolute_items, outer_size, border),
         f32::max,
     );
 

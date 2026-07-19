@@ -3,12 +3,11 @@
 //! Two traits, mirroring the spec's split of responsibilities: the
 //! **container** decides axes, wrapping, and distribution
 //! ([`FlexContainerStyle`]); each **item** decides its own flexibility and
-//! self-alignment ([`FlexItemStyle`]). The L1 flexbox algorithm reads
-//! containers through [`FlexSource::flex_container_style`] and items through
-//! [`FlexSource::flex_item_style`].
+//! self-alignment ([`FlexItemStyle`]). The L1 flexbox algorithm reads both
+//! views through [`LayoutNode::style`], narrowing the node's style type with
+//! `FlexContainerStyle + FlexItemStyle` bounds.
 //!
-//! [`FlexSource::flex_container_style`]: crate::tree::FlexSource::flex_container_style
-//! [`FlexSource::flex_item_style`]: crate::tree::FlexSource::flex_item_style
+//! [`LayoutNode::style`]: crate::tree::LayoutNode::style
 
 use crate::geometry::Size;
 use crate::style::CoreStyle;
