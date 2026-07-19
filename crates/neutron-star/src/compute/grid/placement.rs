@@ -347,8 +347,7 @@ pub(super) fn place_items(
             usize::try_from(MAX_GRID_LINE - step_two_cross_range.start).unwrap();
         let cross_span = span.min(step_two_available).max(1);
         let start = if let Some(cursors) = sparse_locked_cursors.as_mut() {
-            let cursor_range = occupancy.primary_indices(primary);
-            cursors.query(cursor_range.clone())
+            cursors.query(occupancy.primary_indices(primary))
         } else {
             step_two_cross_range.start
         };

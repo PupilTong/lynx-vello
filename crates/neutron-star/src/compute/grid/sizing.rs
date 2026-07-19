@@ -996,10 +996,19 @@ fn resolve_intrinsic_sizes<N>(
     for item in items.iter_mut().filter(|item| item.span(axis) == 1) {
         let span = span_for(item, axis);
         let index = tracks.index_of(span.start);
-        let track = tracks.tracks[index].clone();
+        // Borrow rather than clone: the sizing functions are immutable during
+        // this loop, and the shared borrow ends before the base write below.
+        let track = &tracks.tracks[index];
         if track.collapsed || track.is_flexible() {
             continue;
         }
+        // A fit-content() maximum is normalized to `MaxContent` plus a
+        // retained limit, so it takes the max-content contribution arm.
+        let max_kind = match &track.sizing.max {
+            TrackBreadth::Breadth(_) | TrackBreadth::Flex(_) => None,
+            TrackBreadth::MinContent => Some(ContributionKind::MinContent),
+            TrackBreadth::MaxContent | TrackBreadth::Auto => Some(ContributionKind::MaxContent),
+        };
         let base = match &track.sizing.min {
             TrackBreadth::Breadth(_) => track.base,
             TrackBreadth::MinContent => measure_contribution(
@@ -1066,13 +1075,6 @@ fn resolve_intrinsic_sizes<N>(
         };
         tracks.tracks[index].base = tracks.tracks[index].base.max(base);
 
-        // A fit-content() maximum is normalized to `MaxContent` plus a
-        // retained limit, so it takes the max-content contribution arm.
-        let max_kind = match &track.sizing.max {
-            TrackBreadth::Breadth(_) | TrackBreadth::Flex(_) => None,
-            TrackBreadth::MinContent => Some(ContributionKind::MinContent),
-            TrackBreadth::MaxContent | TrackBreadth::Auto => Some(ContributionKind::MaxContent),
-        };
         if let Some(kind) = max_kind {
             let contribution =
                 measure_contribution(item, axis, kind, tracks, cross_tracks, inner_size);
@@ -1280,7 +1282,7 @@ fn resolve_intrinsic_sizes<N>(
             .iter()
             .flat_map(|&index| {
                 let span = span_for(&items[index], axis);
-                tracks.tracks[tracks.span_indices(span.start, span.end).clone()]
+                tracks.tracks[tracks.span_indices(span.start, span.end)]
                     .iter()
                     .filter(|track| track.is_flexible())
                     .map(|track| track.flex_factor)
