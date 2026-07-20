@@ -355,10 +355,20 @@ When resolved positions are converted back into measurement constraints:
    subtract that start position from the available size.
 3. If only the end side is definite and the current constraint is at-most,
    use the end position as the available size.
+4. Definite measurement sizes — a resolved definite preferred size or a
+   both-sides distance — are clamped by the item's resolved minimum and
+   maximum sizes before the item is measured, so content is measured at the
+   clamped size.
 
 These one-sided reductions match
 `RelativeLayoutAlgorithm::ComputeConstraints`; they prevent measured content
-from overflowing the remaining part of a definite relative container.
+from overflowing the remaining part of a definite relative container. The
+definite-size clamp matches `ApplyMinMaxToConstraints`, which Starlight
+applies to every incoming child constraint at `LayoutObject::UpdateMeasure`.
+Native Starlight resolves only quantitative min/max values there (an
+intrinsic keyword resolves to the property default); this implementation
+resolves intrinsic-keyword min/max bounds through content probes and clamps
+with them under the same rule.
 
 ### 4. One-Pass Relative Layout
 

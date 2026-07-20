@@ -1277,6 +1277,80 @@ fn intrinsic_minimums_and_heights_probe_their_axes() {
     assert_close(tree.layout(item).size.height, 48.0);
 }
 
+/// Definite preferred sizes are clamped by the item's resolved min/max
+/// bounds — intrinsic keywords included — before the item is measured.
+/// Starlight applies min/max to every incoming child constraint
+/// (`ApplyMinMaxToConstraints` at `LayoutObject::UpdateMeasure`), so a
+/// definite mode never bypasses the clamp.
+#[test]
+fn definite_preferred_sizes_clamp_by_resolved_min_max_bounds() {
+    let width_of = |style: TestStyle| -> f32 {
+        let mut tree = TestTree::default();
+        let item = tree.push_measured_leaf(style, intrinsic_width_bounded_by_available);
+        let root = relative_container(&mut tree, TestStyle::default(), &[item]);
+        definite_layout(&tree, root, 300.0, 100.0);
+        tree.layout(item).size.width
+    };
+
+    // width:250px with max-width:max-content (the 200px probe) clamps down.
+    assert_close(
+        width_of(TestStyle {
+            size: Size::new(size_px(250.0), size_auto()),
+            max_size: Size::new(max_max_content(), max_none()),
+            ..TestStyle::default()
+        }),
+        200.0,
+    );
+    // A quantitative maximum clamps the same definite width identically.
+    assert_close(
+        width_of(TestStyle {
+            size: Size::new(size_px(250.0), size_auto()),
+            max_size: Size::new(max_px(180.0), max_none()),
+            ..TestStyle::default()
+        }),
+        180.0,
+    );
+    // min-width:max-content raises a narrow definite width.
+    assert_close(
+        width_of(TestStyle {
+            size: Size::new(size_px(50.0), size_auto()),
+            min_size: Size::new(size_max_content(), size_auto()),
+            ..TestStyle::default()
+        }),
+        200.0,
+    );
+
+    // The clamp precedes measurement: content measured at the clamped
+    // 20px min-content width reports the tall wrapped height.
+    let mut tree = TestTree::default();
+    let wrapped = tree.push_measured_leaf(
+        TestStyle {
+            size: Size::new(size_px(250.0), size_auto()),
+            max_size: Size::new(max_min_content(), max_none()),
+            ..TestStyle::default()
+        },
+        width_sensitive_intrinsic_max,
+    );
+    let root = relative_container(&mut tree, TestStyle::default(), &[wrapped]);
+    definite_layout(&tree, root, 300.0, 100.0);
+    assert_size(tree.layout(wrapped).size, Size::new(20.0, 50.0));
+
+    // The vertical axis clamps through the same rule.
+    let mut tree = TestTree::default();
+    let short = tree.push_intrinsic_leaf(
+        TestStyle {
+            size: Size::new(size_px(30.0), size_px(40.0)),
+            max_size: Size::new(max_none(), max_max_content()),
+            ..TestStyle::default()
+        },
+        Size::new(20.0, 10.0),
+        Size::new(200.0, 10.0),
+    );
+    let root = relative_container(&mut tree, TestStyle::default(), &[short]);
+    definite_layout(&tree, root, 300.0, 100.0);
+    assert_close(tree.layout(short).size.height, 10.0);
+}
+
 /// The container's own measurement resolves child `fit-content()` limits
 /// when they are lengths and passes intrinsic constraints through when a
 /// percentage limit has no basis.
