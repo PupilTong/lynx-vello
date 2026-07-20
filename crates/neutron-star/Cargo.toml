@@ -9,9 +9,10 @@ rust-version.workspace = true
 keywords = ["layout", "flexbox", "grid", "css", "ui"]
 categories = ["gui"]
 
-# The protocol and box-layout core remain dependency-free when default features
-# are disabled. Default builds enable the optional Parley-backed text
-# measurement core.
+# The style protocol requires the workspace's stylo fork unconditionally.
+# Default builds additionally enable the optional Parley-backed text
+# measurement core; default-features = false keeps the protocol and
+# box-layout core only.
 [features]
 default = ["text"]
 text = ["dep:parley"]

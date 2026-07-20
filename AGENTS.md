@@ -187,10 +187,10 @@ useful signal for currently-compatible versions of those libraries.
   other workspace crates or own host tree/style storage, DOM/widget types,
   resolved device-unit policy, or paint order.
 - Future runtime-layout integration — the concrete Widget/stylo
-  source/session adapter, display dispatch and dirty→cache invalidation
+  `LayoutNode` adapter, display dispatch and dirty→cache invalidation
   wiring, root fixed-position pass, component-specific staggered layout, and
-  text-style translation and text-session wiring remain L3 work. No separate
-  crate for this layer has been established yet.
+  text style/attribute wiring plus text-context/artifact-slot storage remain
+  L3 work. No separate crate for this layer has been established yet.
 - *(planned, not yet scaffolded)* render / runtime crates — see
   `docs/tracking/` for the behavior surface each will need to cover before
   scaffolding begins, and `.claude/agents/` for the subsystem-scoped agent

@@ -84,7 +84,7 @@ The project's own `default_layout_style.h` already encodes a "Lynx default vs W3
 | `border-width`/`border-{side}-width`, `border-style`, `border-color` (+side/logical variants) | Border box contribution to size when box-sizing=border-box | Core | Yes (values differ by default) | Default style `solid` in Lynx vs `none` in W3C-aligned mode (explicit dual-default in code) | `default_layout_style.h` (`SL_DEFAULT_BORDER_STYLE` vs `W3C_DEFAULT_BORDER_STYLE`), `css_defines/17-21,74,115-118,154-159` |
 | `border-radius` (+corner, logical corner variants) | Corner rounding; paint-only, not layout-affecting for box size | Extended | Yes | — | `css_defines/12-16,160-163` |
 | `overflow`/`overflow-x`/`overflow-y` | Clipping of children beyond box; default **`hidden`** | Core | Partial | CSS default is `visible`; Lynx defaults to `hidden`. Match Lynx default for behavior compat | `css_defines/25-overflow.json` ("default_value": "hidden"), `120,121` |
-| `visibility` | `visible\|hidden\|none\|collapse`; marked `consumption_status: skip` (handled outside layout-only path) but affects paint, and `none` here behaves like display:none (Lynx-specific overload) | Core | Partial | Standard `hidden` keeps its box; standard `collapse` on a flex item removes main-axis participation but preserves a cross-size strut (implemented by neutron-star's two-round Flex pass). Lynx's non-standard `none` value still belongs in the host lowering and behaves like removing layout entirely, colliding with `display:none`'s job — confirm its exact element-layer behavior before wiring the adapter | `css_defines/104-visibility.json` |
+| `visibility` | `visible\|hidden\|none\|collapse`; marked `consumption_status: skip` (handled outside layout-only path) but affects paint, and `none` here behaves like display:none (Lynx-specific overload) | Core | Partial | Standard `hidden` keeps its box. The stylo fork's lynx grammar accepts only `visible\|hidden`: `collapse` — and the flex cross-size strut behavior an earlier neutron-star pass implemented for it — was dropped with the stylo vocabulary swap, and the non-standard `none` overload is not carried either, so in lynx-vello visibility is paint-only and never affects box geometry. If legacy bundles need Lynx's `none`-as-`display:none` behavior it would be a host lowering to `display: none` — confirm its exact element-layer behavior before wiring the adapter | `css_defines/104-visibility.json` |
 | `z-index` | Integer stacking order for stacking-context participants; default `0` | Core | **No** | See dedicated stacking-context section above; also marked `"consumption_status": "skip"` in property metadata (not part of Starlight's generic layout-only styles — handled specially in the element/paint tree) | `css_defines/147-z-index.json`, `lynx/core/renderer/dom/element_container.cc`, `lynx/core/renderer/dom/element.cc:1903-1908` |
 | Stacking context triggers | root / non-zero z-index while positioned / `fixed` / has transform / has opacity | Core | **No** | CSS also triggers stacking contexts for filter, mask, clip-path, `isolation:isolate`, `mix-blend-mode≠normal`, `contain: layout\|paint`, `will-change` naming any of the above, flex/grid items with z-index≠auto. Implement full W3C list + recursive per-context painting instead of Lynx's flatten-and-sort | `lynx/core/renderer/dom/element.cc:1903` (`IsStackingContextNode`) |
 | `flex`, `flex-grow`, `flex-shrink`, `flex-basis`, `flex-flow` (shorthand) | Standard flex item sizing | Core | Yes | — | `css_defines/49-52,146` |
@@ -106,13 +106,17 @@ The project's own `default_layout_style.h` already encodes a "Lynx default vs W3
 context as the generic `compute_linear_layout` peer algorithm plus the
 `LinearContainerStyle` and `LinearItemStyle` style protocols (read through
 the `LayoutNode` handle), alongside its Flex, Grid, and Relative protocols
-and algorithms. Linear uses
+and algorithms. The style surface follows the stylo fork's grammar: the
+deprecated gravity longhands and `linear-orientation` do not exist there
+(see `deviations.md`), so orientation is `linear-direction` and the gravity
+channels ride the standard `justify-content`/`align-items`/`align-self`
+values, with the legacy `fill-*` gravities mapping to `stretch`. Linear uses
 the same layout IO, cached handle recursion, private box-model machinery, leaf
 dispatch, absolute-position helper, and hidden-subtree cleanup; it does not
 translate linear into Flex. The concrete Widget/stylo adapter (a `LayoutNode`
 impl over the widget tree), dirty/cache
-invalidation wiring, root fixed-position pass, Relative and Linear
-computed-style translation, and text-style translation and text-context slot
+invalidation wiring, root fixed-position pass, host lowering of legacy
+spellings, and text style/attribute and text-context slot
 wiring remain future L3 work. The feature-gated Parley measurement core itself now lives in
 `neutron-star`; no separate integration crate has been established.
 
@@ -148,7 +152,7 @@ Flex polyfill, which can reflow a percentage-sized child.
 
 Normative algorithm: [Starlight Relative Layout Module Level 1](../starlight-relative-layout.md).
 
-`display:relative` ports Android's `RelativeLayout`. Each child is optionally tagged with a small integer `relative-id` (scope: unique among siblings) so other siblings can anchor to it by id; `relative-{top,right,bottom,left}-of` / `relative-inline-{start,end}-of` reference another sibling's `relative-id` (or the special parent id) to position this child's respective edge adjacent to that sibling; `relative-align-{top,right,bottom,left}` / `relative-align-inline-{start,end}` align this child's edge flush with another element's *same-side* edge (rather than adjacent-placement); `relative-center` centers the child within the parent on one or both axes; `relative-layout-once` is a perf/correctness toggle (when true, it uses one combined dependency order and measures each item as encountered; false uses separate horizontal/vertical orders plus selective remeasurement). Native Lynx computes the property default as `true`; neutron-star's standalone trait surface deliberately defaults it to `false`, and the future Lynx adapter must materialize native's `true`. This is fundamentally a same-generation dependency-graph solver, not a CSS box-flow model — nothing in standard CSS does sibling-referential anchoring by id within a single containing block (closest analogs are grid named lines/areas, which are still index/name-based grid slots not per-element anchors), and CSS Anchor Positioning (`anchor()`/`position-anchor`) is document-wide/absolute-positioning-only, not a same-parent relative-layout mode.
+`display:relative` ports Android's `RelativeLayout`. Each child is optionally tagged with a small integer `relative-id` (scope: unique among siblings) so other siblings can anchor to it by id; `relative-{top,right,bottom,left}-of` / `relative-inline-{start,end}-of` reference another sibling's `relative-id` (or the special parent id) to position this child's respective edge adjacent to that sibling; `relative-align-{top,right,bottom,left}` / `relative-align-inline-{start,end}` align this child's edge flush with another element's *same-side* edge (rather than adjacent-placement); `relative-center` centers the child within the parent on one or both axes; `relative-layout-once` is a perf/correctness toggle (when true, it uses one combined dependency order and measures each item as encountered; false uses separate horizontal/vertical orders plus selective remeasurement). Native Lynx computes the property default as `true`, and neutron-star's trait default follows the fork's computed initial — also `true` — so the Lynx default arrives with no adapter override (an intentional flip from the earlier engine-owned trait surface, which defaulted to `false`). This is fundamentally a same-generation dependency-graph solver, not a CSS box-flow model — nothing in standard CSS does sibling-referential anchoring by id within a single containing block (closest analogs are grid named lines/areas, which are still index/name-based grid slots not per-element anchors), and CSS Anchor Positioning (`anchor()`/`position-anchor`) is document-wide/absolute-positioning-only, not a same-parent relative-layout mode.
 
 | Item | Description | Tier | W3C-compliant? | Deviation & what we should do instead | Source refs |
 |---|---|---|---|---|---|
@@ -159,7 +163,7 @@ Normative algorithm: [Starlight Relative Layout Module Level 1](../starlight-rel
 | `relative-align-top`/`-right`/`-bottom`/`-left` | Align this element's edge flush with referenced sibling's same-side edge (id-based) | Extended | No (non-CSS) | No CSS equivalent | `css_defines/132-135` |
 | `relative-align-inline-start`/`-end` | Logical variants | Extended | No (non-CSS) | Host adapter lowers to physical left/right references using computed writing direction before layout | `css_defines/164,165` |
 | `relative-center` | Center child within parent: `none\|vertical\|horizontal\|both`; default `none` | Extended | No (non-CSS) | ≈ combination of `align-self:center`+`justify-self:center`, but scoped to `relative` mode only | `css_defines/141-relative-center.json` |
-| `relative-layout-once` | Selects one combined dependency/measurement pass (`true`) or separate-axis two-pass solving (`false`); native computed default `true` | Rare | No (non-CSS) | Implemented in neutron-star; its reusable trait default is intentionally `false`, so the Lynx adapter must pass native's computed `true` explicitly | `css_defines/140-relative-layout-once.json`, `relative_layout_algorithm.h` (`InlineDependencies`, `Sort()`) |
+| `relative-layout-once` | Selects one combined dependency/measurement pass (`true`) or separate-axis two-pass solving (`false`); native computed default `true` | Rare | No (non-CSS) | Implemented in neutron-star; the trait default is the fork's computed initial `true` (the Lynx default), so no adapter override is needed | `css_defines/140-relative-layout-once.json`, `relative_layout_algorithm.h` (`InlineDependencies`, `Sort()`) |
 | Web-lynx (web-core) support | All `relative-*` properties show `"web_lynx": {"version_added": false}` in compat data | — | — | Confirms `web-core` (the prior reference implementation) never implemented `display:relative` at all — lynx-vello has no working prior-art reference for this mode and must implement solely from Starlight's C++ source | `css_defines/131,140,141-relative-*.json` (each `"web_lynx":{"version_added": false}`) |
 
 The standalone Relative Level 1 contract also makes three explicit repairs
@@ -211,9 +215,9 @@ implements — see `.claude/agents/lynx-layout-engine.md`. The engine crate is
 [`crates/neutron-star`](../../crates/neutron-star): its protocol, shared
 machinery, and Flexbox, Grid, Starlight Relative, and Linear algorithms are
 implemented alongside its feature-gated Parley measurement core. Its concrete
-L3 Widget/stylo runtime adapter, including text-style translation and
-text-session wiring, remains pending; no separate integration crate has been
-established. The design, ownership boundaries, and milestones are in
+L3 Widget/stylo runtime adapter, including text style/attribute wiring and
+text-context/artifact-slot wiring, remains pending; no separate integration
+crate has been established. The design, ownership boundaries, and milestones are in
 [`docs/layout-architecture.md`](../layout-architecture.md).
 
 Implementation-pattern reference (not a behavior spec): `Paws/engine/src/layout/stacking.rs` for a real, WPT-conformance-tested CSS stacking-context implementation over `stylo` computed style — the concrete reference for the z-index deviation.

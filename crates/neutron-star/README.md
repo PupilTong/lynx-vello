@@ -27,11 +27,13 @@ The engine owns **algorithms and vocabulary**; the host owns **the tree, the
 styles, and all storage**. The protocol is one trait: `LayoutNode`, a cheap
 `Copy` **node handle** borrowed from the host's tree for one layout flush —
 a plain `&'dom Node` or a `(&'dom Tree, index)` pair, the same shape stylo
-demands of its DOM. Through the handle the engine reads topology, borrowed
+demands of its DOM. Through the handle the engine reads topology and borrowed
 computed-style views (one `Style` associated type; entry points narrow it
-with per-algorithm bounds), and `calc()` resolution — all immutable for the
+with per-algorithm bounds) — all immutable for the
 flush — and writes unrounded/final layouts, static positions, and cache
-slots into host-owned **interior-mutable per-node slots**. There is no
+slots into host-owned **interior-mutable per-node slots**. `calc()` needs no
+protocol plumbing: stylo's `LengthPercentage` carries and resolves it
+itself. There is no
 `&mut` anywhere in the protocol, so borrowed style/track views trivially
 stay live across recursive layout.
 Recursion flows *through the host*: the engine calls
@@ -62,18 +64,21 @@ path.
   `f32`-based. `LeafMeasurer` may additionally lend an engine-specific rich
   artifact view; leaf boxing immediately copies its size/baselines into
   `LeafMetrics`, while the host retains the artifact for painting.
-- **Specification-owned defaults.** Core/Flex/Grid trait methods use CSS
-  initial values; Linear and Relative methods use their Starlight
-  specification initial values. Host-specific defaults (e.g. Lynx's
-  `box-sizing: border-box`, `overflow: hidden`, or
-  `relative-layout-once: true`) are the host's job.
+- **Fork-initial defaults.** Defaulted trait methods return the lynx stylo
+  fork's initial values — the CSS initial value except where Lynx documents
+  otherwise (e.g. `relative-layout-once: true`). Host *computed-value*
+  policy (e.g. Lynx computing `box-sizing: auto` to `border-box`, or
+  `overflow` to `hidden`) stays the host style system's job.
 
 ## Dependencies and feature flags
 
-The Flex, Grid, Linear, Relative, and text-style protocols are unconditional,
-and `default-features = false` keeps that protocol and box-layout core at zero
-dependencies. Default builds enable the `text` feature and its optional
-Parley dependency for shaping, line breaking, and retained text measurement.
+The Flex, Grid, Linear, Relative, and text-style protocols are unconditional
+and require the workspace's `stylo` fork in every configuration (building it
+needs the vendored submodule and `python3` for stylo's build script; a cold
+build takes minutes). Default builds enable the `text` feature and its
+optional Parley dependency for shaping, line breaking, and retained text
+measurement; `default-features = false` keeps the protocol and box-layout
+core only.
 
 ## Prior art
 

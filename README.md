@@ -11,7 +11,7 @@ Rust monorepo exploring a native [Lynx](https://lynxjs.org) rendering stack.
 | [`crates/lynx-template-decoder`](crates/lynx-template-decoder) | Native Rust decoder for the Lynx **web** binary template (`.web.bundle`), a port of `@lynx-js/web-core`'s `decodeTemplate` incl. the rkyv `StyleInfo` model. |
 | [`crates/w3c-dom`](crates/w3c-dom) | Generic W3C-DOM-subset `Document<T>`/`Node<T>` tree and standards-oriented stylo cascade/invalidation core. |
 | [`crates/lynx-widget`](crates/lynx-widget) | Lynx Widget/PAPI tree and Lynx-specific style/device adapter over `w3c-dom`. |
-| [`crates/neutron-star`](crates/neutron-star) | Standalone, statically-dispatched box-layout engine: CSS Flexbox, numeric CSS Grid Level 2, Starlight `display: linear` and `display: relative`, and shared leaf/cache/positioned/rounding machinery are implemented. |
+| [`crates/neutron-star`](crates/neutron-star) | Statically-dispatched box-layout engine speaking the stylo fork's computed-value vocabulary: CSS Flexbox, numeric CSS Grid Level 2, Starlight `display: linear` and `display: relative`, and shared leaf/cache/positioned/rounding machinery are implemented. |
 | [`crates/quickjs-rust-bridge`](crates/quickjs-rust-bridge) | Owner-thread-bound Rust wrapper around the pinned QuickJS C submodule, including exact values, sanitized exceptions, and pending jobs; it is independent of Bobcat and runtime policy. |
 
 `neutron-star` exposes Flex, Grid, Linear, and Relative as peer generic
