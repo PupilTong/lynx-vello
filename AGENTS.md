@@ -181,11 +181,11 @@ useful signal for currently-compatible versions of those libraries.
   must not contain Lynx widget vocabulary or Lynx device/unit policy —
   Lynx computed defaults (border-box, `overflow: hidden`, `display: linear`
   on every element, …) stay embedder cascade policy (UA sheet). Relies on
-  the vendored stylo fork (`vendor/stylo`, submodule
-  branch `lynx-contain`, tip `5d79805ab`): `contain` was already seeded in
-  the fork's lynx grammar; the branch adds `content-visibility` /
-  `contain-intrinsic-size` under the `lynx` feature — pushing that fork
-  branch is a pending **user action**.
+  the vendored stylo fork (`vendor/stylo`, tracking the
+  canonical `lynx` branch, tip `7ed1b07ec`): `contain` was already seeded
+  in the fork's lynx grammar; fork PR #9 (squash-merged into `lynx`) added
+  `content-visibility` / `contain-intrinsic-size` under the `lynx` feature,
+  pref-gated for stock servo builds.
 - `crates/lynx-widget` — Lynx Element-PAPI and style adapter over `w3c-dom`.
   Owns `WidgetState` / `WidgetTree` (a validation layer over the document:
   untrusted PAPI input becomes `WidgetError`s before it reaches the
