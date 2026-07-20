@@ -21,9 +21,15 @@ sizing, rounding, CSS Flexbox Level 1, numeric CSS Grid Level 2, Starlight
 Relative Layout Level 1, Starlight Linear algorithms, and the default-on
 Parley text measurement core are implemented and conformance-tested against
 plain-storage mock hosts. Grid excludes subgrid and named lines/areas, which
-are outside the current protocol. Text truncation, inline boxes, and the
-concrete Widget/stylo adapter (including text style/attribute wiring and
-text-context/artifact-slot storage wiring) are not implemented yet. Crate
+are outside the current protocol. The concrete document/stylo host is
+implemented in `w3c-dom`'s `layout` module (`StyleEngine::layout_document`):
+a two-word `Copy` `LayoutNode` handle over the document slab, style views
+lending `ComputedValues` fields (materialized once per pass), display
+dispatch, per-node layout state on each `Node`, the fixed/hoisted
+positioned pass, and device-pixel rounding, with leaf content measurement
+left to an embedder hook. Text truncation, inline boxes, and the
+Lynx-widget policy layer (text style/attribute wiring and
+text-context/artifact-slot storage included) are not implemented yet. Crate
 rustdoc is the API reference; this document is the rationale, performance
 architecture, and remaining plan.
 
@@ -62,7 +68,8 @@ Text behavior is inventoried in
 | --- | --- | --- |
 | `neutron-star` | Implemented Flex, Grid, Relative, and Linear algorithms; their style-view protocols speaking stylo computed values (including the `relative-*` and `linear-*` longhands); the text style/run protocol; leaf boxing, hidden-subtree cleanup, positioned layout, rounding; shared private arithmetic; geometry and layout IO; cache semantics | Node/style/content storage, display dispatch, DOM/widget types, an engine-side style value vocabulary (it re-exports stylo's), resolved device-unit policy (`rpx`, etc.), stacking/paint order |
 | `neutron-star::text` (`text` feature, default-on) | Parley context/font registration, whitespace processing, shaping, line breaking, intrinsic and height-for-width measurement, baselines, and retained `TextLayout` artifact types | Text truncation and ellipsis, inline boxes, paint styling, widget/attribute lowering, resource fetching, or host cache and per-node slot storage |
-| Future runtime integration *(location not yet established)* | The `LayoutNode` handle impl over the widget/style tree (style views over `ComputedValues`, display dispatch, interior-mutable per-node layout/cache slots); legacy-spelling and text-attribute lowering (`linear-orientation`, logical `relative-inline-*`); text-context/artifact-slot storage; `staggered` integration; dirty tracking + cache invalidation; fixed/sticky lowering | A second Flex/Grid/Relative/Linear/text-measurement implementation, engine-side copies of styles |
+| `w3c-dom::layout` (implemented) | The `LayoutNode` handle over the document slab (node + pass context, two words); style views lending `ComputedValues` fields (materialized once per pass; logical `relative-*-inline-*` lowering; the W3C fixed/absolute containing-block rule expressed through the protocol's `position()` scheme); display dispatch (flex/grid/linear/relative, `display: none` hiding, leaf fallback); per-node `LayoutData` on `Node` (`AtomicRefCell` — measurement cache, unrounded + rounded layouts, created and dropped with the node); the hoisted positioned pass; device-pixel rounding; the embedder leaf-measurement hook and the manual `Document::invalidate_layout` API | A second layout algorithm, engine-side style copies, Lynx widget vocabulary or device-unit policy (`rpx`), Lynx computed defaults (cascade/UA-sheet policy), text shaping |
+| Remaining runtime integration (`lynx-widget`, future) | Automatic style-damage → `Document::invalidate_layout` wiring; Lynx view metrics and `rpx` policy; text style/attribute wiring and text-context/artifact-slot storage behind the leaf hook; `staggered` integration; sticky lowering | A second Flex/Grid/Relative/Linear/text-measurement implementation, engine-side copies of styles |
 
 The engine/host seam keeps the engine storage-free even though its
 vocabulary is stylo's: the Lynx-specific values and algorithms for Relative
@@ -70,10 +77,10 @@ and Linear live in `neutron-star`, but the crate owns no host storage — its
 style accessors return the same computed values the stylo cascade produces,
 so a stylo-backed host serves style views with no translation layer. Both
 are first-class peers rather than translations into Flex or Grid. The
-still-future concrete adapter is otherwise mechanical: style views as direct
-`ComputedValues` field reads, per-node layout slots on the host's nodes, and
-one display-mode dispatch — the same `Copy`-handle shape the tree already
-implements for stylo's `TNode`/`TElement`.
+concrete adapter proved as mechanical as designed (`w3c-dom::layout`):
+style views as direct `ComputedValues` field reads, per-node layout slots
+on the host's nodes, and one display-mode dispatch — the same `Copy`-handle
+shape the tree already implements for stylo's `TNode`/`TElement`.
 
 ## The protocol in one page
 

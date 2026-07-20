@@ -19,8 +19,10 @@ cross-platform engine built on:
 The from-scratch layout engine (successor to the C++ engine's `starlight`) is
 `crates/neutron-star` — its host protocol, shared layout machinery, and CSS
 flexbox, Grid, and Starlight `display: relative` and `display: linear`
-algorithms are implemented as first-class peers. The concrete Widget/stylo
-runtime adapter remains pending. See
+algorithms are implemented as first-class peers. Its concrete document/stylo
+host lives in `crates/w3c-dom`'s `layout` module
+(`StyleEngine::layout_document`, results on each `Node`); the Lynx-widget
+policy layer and text measurement wiring remain pending. See
 `docs/layout-architecture.md` for its design and
 `docs/tracking/css-layout.md` for the behavior it must cover.
 
@@ -152,8 +154,24 @@ useful signal for currently-compatible versions of those libraries.
   inline-style parsing, the `Stylist` /
   cascade pipeline, and the private `SharedRwLock` shared by an engine and
   its documents. Mutation APIs follow a let-it-crash contract
-  (`debug_assert` + panic on stale handles rather than silent no-ops). It
-  must not contain Lynx widget vocabulary or Lynx device/unit policy.
+  (`debug_assert` + panic on stale handles rather than silent no-ops).
+  Its `layout` module is the concrete `neutron-star` host:
+  `StyleEngine::layout_document` flushes styles then lays out through a
+  two-word `Copy` `LayoutNode` handle — style views lend stylo
+  `ComputedValues` fields straight to the engine (materialized once per
+  pass, no translation layer), display dispatch routes
+  flex/grid/linear/relative with `display: none` hiding and a leaf
+  fallback, and the positioned pass implements the W3C `position: fixed`
+  containing-block rule via the protocol's scheme override. Per-node layout
+  state (measurement cache + layouts) lives **on each `Node`**
+  (`AtomicRefCell<LayoutData>`, the Servo layout_data pattern; read via
+  `Node::layout`), so it is created and dropped with its node;
+  invalidation is embedder-driven (`Document::invalidate_layout`). Leaf
+  content (text/images) measures through an embedder hook; the crate pulls
+  `neutron-star` without its `text` feature. It
+  must not contain Lynx widget vocabulary or Lynx device/unit policy —
+  Lynx computed defaults (border-box, `overflow: hidden`, `display: linear`
+  on every element, …) stay embedder cascade policy (UA sheet).
 - `crates/lynx-widget` — Lynx Element-PAPI and style adapter over `w3c-dom`.
   Owns `WidgetState` / `WidgetTree` (a validation layer over the document:
   untrusted PAPI input becomes `WidgetError`s before it reaches the
@@ -186,11 +204,14 @@ useful signal for currently-compatible versions of those libraries.
   `docs/layout-architecture.md` before touching it. It must not depend on
   other workspace crates or own host tree/style storage, DOM/widget types,
   resolved device-unit policy, or paint order.
-- Future runtime-layout integration — the concrete Widget/stylo
-  `LayoutNode` adapter, display dispatch and dirty→cache invalidation
-  wiring, root fixed-position pass, component-specific staggered layout, and
-  text style/attribute wiring plus text-context/artifact-slot storage remain
-  L3 work. No separate crate for this layer has been established yet.
+- Remaining runtime-layout integration — the `LayoutNode` handle, display
+  dispatch, fixed/hoisted positioned pass, and per-node cache storage with
+  manual invalidation now live in `w3c-dom::layout` (see above). Still L3
+  work: `lynx-widget`-level policy (automatic
+  dirty→`Document::invalidate_layout` wiring off style damage, `rpx`-aware
+  view metrics, sticky lowering), component-specific staggered layout, and
+  text style/attribute wiring plus text-context/artifact-slot storage
+  behind the leaf-measurement hook.
 - *(planned, not yet scaffolded)* render / runtime crates — see
   `docs/tracking/` for the behavior surface each will need to cover before
   scaffolding begins, and `.claude/agents/` for the subsystem-scoped agent

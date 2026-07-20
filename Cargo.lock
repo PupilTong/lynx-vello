@@ -2066,6 +2066,7 @@ dependencies = [
  "codspeed-divan-compat",
  "cssparser",
  "euclid",
+ "neutron-star",
  "rustc-hash",
  "selectors",
  "slab",
