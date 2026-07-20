@@ -9,6 +9,7 @@
 
 use stylo::computed_values::{box_sizing, direction};
 use stylo::values::computed::length::NonNegativeLengthPercentageOrNormal;
+use stylo::values::computed::length_percentage::Unpacked as UnpackedLengthPercentage;
 use stylo::values::computed::{
     AspectRatio, BorderSideWidth, Inset, Length, LengthPercentage, Margin, MaxSize,
     NonNegativeLengthPercentage, Overflow, Size as StyleSize,
@@ -280,9 +281,16 @@ pub(super) fn resolve_length_percentage(
     value: &LengthPercentage,
     basis: Option<f32>,
 ) -> Option<f32> {
-    value
-        .maybe_percentage_relative_to(basis.map(Length::new))
-        .map(|length| checked(length.px()))
+    let length = match basis {
+        Some(basis) => value.resolve(Length::new(basis)),
+        None => match value.unpack() {
+            UnpackedLengthPercentage::Length(length) => length,
+            UnpackedLengthPercentage::Percentage(_) | UnpackedLengthPercentage::Calc(_) => {
+                return None;
+            }
+        },
+    };
+    Some(checked(length.px()))
 }
 
 /// Resolves one margin edge, retaining `auto` as `None`.
@@ -874,6 +882,35 @@ mod tests {
         let max = MaxSize::LengthPercentage(NonNegative(percent));
         assert_eq!(resolve_max_size(&max, Some(40.0)), Some(20.0));
         assert_eq!(resolve_max_size(&MaxSize::none(), Some(40.0)), None);
+    }
+
+    #[test]
+    fn length_percentage_fast_path_matches_stylo_used_value_resolution() {
+        let clamped_calc = LengthPercentage::new_calc(
+            CalcNode::Sum(
+                vec![
+                    CalcNode::Leaf(ComputedLeaf::Percentage(Percentage(0.25))),
+                    CalcNode::Leaf(ComputedLeaf::Length(Length::new(-8.0))),
+                ]
+                .into(),
+            ),
+            AllowedNumericType::NonNegative,
+        );
+        let values = [
+            LengthPercentage::new_length(Length::new(7.0)),
+            LengthPercentage::new_percent(Percentage(0.25)),
+            clamped_calc,
+        ];
+
+        for value in &values {
+            for basis in [None, Some(0.0), Some(20.0), Some(80.0)] {
+                let expected = value
+                    .maybe_percentage_relative_to(basis.map(Length::new))
+                    .map(|length| length.px().to_bits());
+                let actual = resolve_length_percentage(value, basis).map(f32::to_bits);
+                assert_eq!(actual, expected, "value={value:?}, basis={basis:?}");
+            }
+        }
     }
 
     #[test]
