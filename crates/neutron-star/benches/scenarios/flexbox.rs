@@ -56,7 +56,6 @@ impl BenchCase {
         known_dimensions: Size<Option<f32>>,
         available_space: Size<AvailableSpace>,
     ) -> Self {
-        tree.record_measure_inputs.set(false);
         Self {
             tree,
             root,
