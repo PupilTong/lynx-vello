@@ -63,19 +63,24 @@
 //!
 //! [`LayoutNode::style`] returns [`LayoutNode::Style`] — typically
 //! `&'dom S` (blanket impls make any `&S` a view when `S` implements the
-//! style traits) or a small `Copy` wrapper translating host storage lazily,
-//! per accessor call. Because the handle carries the tree lifetime, the view
-//! is **not** tied to a borrow of the handle: it can be held across child
+//! style traits) or a small `Copy` wrapper projecting references into host
+//! storage. Because the handle carries the tree lifetime, the view is
+//! **not** tied to a borrow of the handle: it can be held across child
 //! recursion, stored in a local, and re-fetched at will. One view type
 //! serves every algorithm; each entry point narrows it with the style-trait
 //! bounds it actually needs (e.g.
 //! `N::Style: FlexContainerStyle + FlexItemStyle` for Flexbox), so hosts
 //! implement the style traits once, on one type.
 //!
-//! One discipline note: accessors returning borrowed *iterators* (grid
-//! templates, font families) borrow from the view **value**, so bind the
-//! view first — `let style = node.style();` — before iterating. Never
-//! return a style-derived iterator from a helper.
+//! One discipline note: accessors returning **borrowed values** — the
+//! `LengthPercentage`-family geometry properties (`Edges<&Margin>`,
+//! `Size<&StyleSize>`, `&FlexBasis`, …) and the borrowed sequences (grid
+//! templates, font families) — borrow from the view **value**, so bind the
+//! view first — `let style = node.style();` — before reading. Never return
+//! a style-derived borrow or iterator from a helper. Consequently a view
+//! cannot lend values it synthesizes on the fly: a host that computes style
+//! per call must materialize the computed values in per-node storage (once
+//! per style change) and lend references from there.
 //!
 //! # Static dispatch — no `dyn`
 //!

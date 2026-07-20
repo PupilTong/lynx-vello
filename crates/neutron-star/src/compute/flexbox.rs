@@ -22,7 +22,7 @@
 #![allow(clippy::cast_precision_loss)]
 
 use stylo::computed_values::{box_sizing, direction, flex_direction, flex_wrap};
-use stylo::values::computed::{FlexBasis, MaxSize, PositionProperty, Size as StyleSize};
+use stylo::values::computed::{FlexBasis, MaxSize, Overflow, PositionProperty, Size as StyleSize};
 use stylo::values::specified::align::AlignFlags;
 
 use super::compute_absolute_layout;
@@ -51,14 +51,6 @@ impl Axis {
         match self {
             Self::Horizontal => size.width,
             Self::Vertical => size.height,
-        }
-    }
-
-    #[inline]
-    fn size_ref<T>(self, size: &Size<T>) -> &T {
-        match self {
-            Self::Horizontal => &size.width,
-            Self::Vertical => &size.height,
         }
     }
 
@@ -165,7 +157,9 @@ impl Axes {
 
 /// Transient per-item state accumulated across the Flexbox §9 sizing,
 /// flexing, cross-size, and alignment passes. It stores only resolved values
-/// and compact hot style fields; raw CSS values are reborrowed from `node`.
+/// and compact hot style fields; the raw sizing properties the base-size
+/// pass classifies are re-borrowed from the style view (borrowed accessors
+/// make a re-fetch a pointer projection, never a clone).
 #[derive(Debug)]
 struct FlexItem<N> {
     key: ItemKey<N>,
@@ -177,6 +171,9 @@ struct FlexItem<N> {
     /// The item's resolved self-alignment: one of the canonical
     /// [`normalize_item_alignment`] keywords, never `AUTO`/`NORMAL`.
     align_self: AlignFlags,
+    aspect_ratio: Option<f32>,
+    box_sizing: box_sizing::T,
+    overflow: Point<Overflow>,
     size_is_auto: Size<bool>,
     flex_grow: f32,
     flex_shrink: f32,
@@ -426,6 +423,9 @@ where
     );
     let ResolvedItemBox {
         raw_size,
+        aspect_ratio,
+        box_sizing,
+        overflow,
         preferred_size,
         min_size,
         max_size,
@@ -437,7 +437,7 @@ where
         ..
     } = resolve_item_box(&style, container_inner_size);
     let preferred_size_is_definite =
-        preferred_size_definiteness(&style.size(), container_inner_size, style.aspect_ratio());
+        preferred_size_definiteness(raw_size, container_inner_size, aspect_ratio);
 
     FlexItem {
         key,
@@ -450,9 +450,12 @@ where
         )
         .unwrap_or(default_alignment),
         size_is_auto: Size::new(
-            style_size_behaves_auto(&raw_size.width),
-            style_size_behaves_auto(&raw_size.height),
+            style_size_behaves_auto(raw_size.width),
+            style_size_behaves_auto(raw_size.height),
         ),
+        aspect_ratio,
+        box_sizing,
+        overflow,
         flex_grow,
         flex_shrink,
         preferred_size,
@@ -526,9 +529,13 @@ fn determine_flex_base_sizes<N>(
     for item in items {
         let node = item.key.node;
         // Recursive measurement mutates only host-owned per-node slots, so
-        // this borrowed style view remains valid across both recursive
-        // measurements below.
+        // this borrowed style view (and the raw values lent from it) stays
+        // valid across the recursive measurements below.
         let style = node.style();
+        let raw_size = style.size();
+        let raw_min_size = style.min_size();
+        let raw_max_size = style.max_size();
+        let raw_flex_basis = style.flex_basis();
         let inset_size = box_inset_size(item.padding, item.border);
         let main_floor = axes.main.size(inset_size);
         let cross_preferred = axes.cross.size(item.preferred_size);
@@ -593,9 +600,6 @@ fn determine_flex_base_sizes<N>(
             max_content
         };
 
-        let raw_size = style.size();
-        let raw_min_size = style.min_size();
-        let raw_max_size = style.max_size();
         let resolve_intrinsic_size = |value: &StyleSize| -> Option<f32> {
             match value {
                 StyleSize::MinContent => Some(min_content),
@@ -621,26 +625,25 @@ fn determine_flex_base_sizes<N>(
             }
         };
         if axes.main.size(item.preferred_size).is_none()
-            && let Some(value) = resolve_intrinsic_size(axes.main.size_ref(&raw_size))
+            && let Some(value) = resolve_intrinsic_size(axes.main.size(raw_size))
         {
             axes.main.set_size(&mut item.preferred_size, Some(value));
         }
         if axes.main.size(item.min_size).is_none()
-            && let Some(value) = resolve_intrinsic_size(axes.main.size_ref(&raw_min_size))
+            && let Some(value) = resolve_intrinsic_size(axes.main.size(raw_min_size))
         {
             axes.main.set_size(&mut item.min_size, Some(value));
         }
         if axes.main.size(item.max_size).is_none()
-            && let Some(value) = resolve_intrinsic_max(axes.main.size_ref(&raw_max_size))
+            && let Some(value) = resolve_intrinsic_max(axes.main.size(raw_max_size))
         {
             axes.main.set_size(&mut item.max_size, Some(value));
         }
 
-        let raw_flex_basis = style.flex_basis();
-        let flex_basis_is_auto = flex_basis_behaves_auto(&raw_flex_basis);
+        let flex_basis_is_auto = flex_basis_behaves_auto(raw_flex_basis);
         let resolved_basis =
-            resolve_flex_basis(&raw_flex_basis, flex_basis_percentage_basis).map(|basis| {
-                if style.box_sizing() == box_sizing::T::ContentBox {
+            resolve_flex_basis(raw_flex_basis, flex_basis_percentage_basis).map(|basis| {
+                if item.box_sizing == box_sizing::T::ContentBox {
                     basis + main_floor
                 } else {
                     basis
@@ -662,9 +665,9 @@ fn determine_flex_base_sizes<N>(
             // non-auto basis whose quantitative resolution failed keeps its
             // own value form.
             let content_basis: &StyleSize = if flex_basis_is_auto {
-                axes.main.size_ref(&raw_size)
+                axes.main.size(raw_size)
             } else {
-                match &raw_flex_basis {
+                match raw_flex_basis {
                     FlexBasis::Size(size) => size,
                     FlexBasis::Content => {
                         unreachable!("flex-basis: content behaves as auto and was handled above")
@@ -709,14 +712,13 @@ fn determine_flex_base_sizes<N>(
         let explicit_min = axes.main.size(item.min_size);
         item.resolved_min_main = if let Some(minimum) = explicit_min {
             minimum.max(main_floor)
-        } else if style.overflow().x.is_scrollable() || style.overflow().y.is_scrollable() {
+        } else if item.overflow.x.is_scrollable() || item.overflow.y.is_scrollable() {
             main_floor
         } else {
-            let main_is_auto = style_size_behaves_auto(axes.main.size_ref(&raw_size));
-            let cross_is_auto = style_size_behaves_auto(axes.cross.size_ref(&raw_size));
+            let main_is_auto = style_size_behaves_auto(axes.main.size(raw_size));
+            let cross_is_auto = style_size_behaves_auto(axes.cross.size(raw_size));
             let specified_suggestion = (!main_is_auto).then_some(preferred_main).flatten();
-            let transferred_suggestion = (used_aspect_ratio(style.aspect_ratio()).is_some()
-                && !cross_is_auto)
+            let transferred_suggestion = (item.aspect_ratio.is_some() && !cross_is_auto)
                 .then_some(preferred_main)
                 .flatten();
             let mut content_suggestion = min_content;
@@ -1752,7 +1754,11 @@ where
     let style_definite = if input.sizing_mode == SizingMode::ContentSize {
         Size::new(false, false)
     } else {
-        preferred_size_definiteness(&style.size(), input.parent_size, style.aspect_ratio())
+        preferred_size_definiteness(
+            style.size(),
+            input.parent_size,
+            used_aspect_ratio(style.aspect_ratio()),
+        )
     };
     let outer_definite = Size::new(
         input.definite_dimensions.width || style_definite.width,
@@ -1772,7 +1778,7 @@ where
     let item_inline_basis_was_indefinite = !outer_definite.width;
     let main_percentage_basis_was_indefinite = !axes.main.size(outer_definite);
     let gap_value = style.gap();
-    let mut gap = resolve_gap(&gap_value, inner_size);
+    let mut gap = resolve_gap(gap_value, inner_size);
     let mut generated = Vec::new();
     let mut absolute_items = Vec::new();
     let mut hidden = Vec::new();
@@ -1846,7 +1852,7 @@ where
         axes.main
             .set_size(&mut inner_size, Some((outer_main - inset_main).max(0.0)));
         let resolved_main_gap =
-            resolve_gap_axis(axes.main.size_ref(&gap_value), axes.main.size(inner_size));
+            resolve_gap_axis(axes.main.size(gap_value), axes.main.size(inner_size));
         axes.main.set_size(&mut gap, resolved_main_gap);
     }
     let inner_main = axes.main.size(inner_size).unwrap_or(0.0);
@@ -1882,7 +1888,7 @@ where
     }
     if cross_was_definite {
         let resolved_cross_gap =
-            resolve_gap_axis(axes.cross.size_ref(&gap_value), axes.cross.size(inner_size));
+            resolve_gap_axis(axes.cross.size(gap_value), axes.cross.size(inner_size));
         axes.cross.set_size(&mut gap, resolved_cross_gap);
     }
     let inner_cross = axes.cross.size(inner_size).unwrap_or(0.0);
@@ -1891,7 +1897,7 @@ where
         // used values resolve against the resulting content-box width. Run
         // the item/line phases once more with that now-definite basis while
         // keeping the intrinsic container size fixed.
-        gap = resolve_gap(&gap_value, inner_size);
+        gap = resolve_gap(gap_value, inner_size);
         main_gap = axes.main.size(gap);
         // Re-resolve compact scratch in place. Raw style is refetched through
         // the node handle; no second full-style snapshot or parallel style
@@ -2078,6 +2084,9 @@ mod tests {
             direction: direction::T::Ltr,
             position: PositionProperty::Relative,
             align_self: AlignFlags::STRETCH,
+            aspect_ratio: None,
+            box_sizing: box_sizing::T::ContentBox,
+            overflow: Point::new(Overflow::Visible, Overflow::Visible),
             size_is_auto: Size::new(true, true),
             flex_grow: 0.0,
             flex_shrink: 1.0,

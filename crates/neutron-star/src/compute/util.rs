@@ -230,13 +230,13 @@ pub(super) fn sort_and_assign_layout_order<N, Item: PendingLayoutItem<N>>(
 /// This is a short-lived resolver result. Each algorithm destructures it into
 /// its own flat hot scratch so shared code does not constrain data layout.
 /// Raw stylo values needed by algorithm-specific classification are returned
-/// beside their resolved forms to avoid calling lazy host style accessors
-/// twice; they make this struct `Clone`-only.
-#[derive(Debug, Clone)]
-pub(super) struct ResolvedItemBox {
-    pub(super) raw_size: Size<StyleSize>,
-    pub(super) raw_min_size: Size<StyleSize>,
-    pub(super) raw_max_size: Size<MaxSize>,
+/// beside their resolved forms as borrows of the style view, so the resolver
+/// never clones a computed value; the whole struct is `Copy`.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ResolvedItemBox<'a> {
+    pub(super) raw_size: Size<&'a StyleSize>,
+    pub(super) raw_min_size: Size<&'a StyleSize>,
+    pub(super) raw_max_size: Size<&'a MaxSize>,
     pub(super) aspect_ratio: Option<f32>,
     pub(super) box_sizing: box_sizing::T,
     pub(super) overflow: Point<Overflow>,
@@ -353,21 +353,21 @@ pub(super) fn resolve_max_size(value: &MaxSize, basis: Option<f32>) -> Option<f3
 }
 
 #[inline]
-pub(super) fn resolve_size(value: &Size<StyleSize>, basis: Size<Option<f32>>) -> Size<Option<f32>> {
+pub(super) fn resolve_size(value: Size<&StyleSize>, basis: Size<Option<f32>>) -> Size<Option<f32>> {
     Size::new(
-        resolve_style_size(&value.width, basis.width),
-        resolve_style_size(&value.height, basis.height),
+        resolve_style_size(value.width, basis.width),
+        resolve_style_size(value.height, basis.height),
     )
 }
 
 #[inline]
 pub(super) fn resolve_max_sizes(
-    value: &Size<MaxSize>,
+    value: Size<&MaxSize>,
     basis: Size<Option<f32>>,
 ) -> Size<Option<f32>> {
     Size::new(
-        resolve_max_size(&value.width, basis.width),
-        resolve_max_size(&value.height, basis.height),
+        resolve_max_size(value.width, basis.width),
+        resolve_max_size(value.height, basis.height),
     )
 }
 
@@ -375,14 +375,14 @@ pub(super) fn resolve_max_sizes(
 /// sides against the containing block's width.
 #[inline]
 pub(super) fn resolve_padding(
-    value: &Edges<NonNegativeLengthPercentage>,
+    value: Edges<&NonNegativeLengthPercentage>,
     inline_basis: Option<f32>,
 ) -> Edges<f32> {
     Edges {
-        left: resolve_padding_edge(&value.left, inline_basis),
-        right: resolve_padding_edge(&value.right, inline_basis),
-        top: resolve_padding_edge(&value.top, inline_basis),
-        bottom: resolve_padding_edge(&value.bottom, inline_basis),
+        left: resolve_padding_edge(value.left, inline_basis),
+        right: resolve_padding_edge(value.right, inline_basis),
+        top: resolve_padding_edge(value.top, inline_basis),
+        bottom: resolve_padding_edge(value.bottom, inline_basis),
     }
 }
 
@@ -409,14 +409,14 @@ pub(super) fn resolve_border(value: &Edges<BorderSideWidth>) -> Edges<f32> {
 /// Resolves margins while retaining `auto` as `None`.
 #[inline]
 pub(super) fn resolve_margins(
-    value: &Edges<Margin>,
+    value: Edges<&Margin>,
     inline_basis: Option<f32>,
 ) -> Edges<Option<f32>> {
     Edges {
-        left: resolve_margin(&value.left, inline_basis),
-        right: resolve_margin(&value.right, inline_basis),
-        top: resolve_margin(&value.top, inline_basis),
-        bottom: resolve_margin(&value.bottom, inline_basis),
+        left: resolve_margin(value.left, inline_basis),
+        right: resolve_margin(value.right, inline_basis),
+        top: resolve_margin(value.top, inline_basis),
+        bottom: resolve_margin(value.bottom, inline_basis),
     }
 }
 
@@ -432,12 +432,12 @@ pub(super) fn auto_edges_to_zero(value: Edges<Option<f32>>) -> Edges<f32> {
     clippy::inline_always,
     reason = "avoids a per-item call after the shared box resolver is inlined"
 )]
-pub(super) fn resolve_insets(value: &Edges<Inset>, basis: Size<Option<f32>>) -> Edges<Option<f32>> {
+pub(super) fn resolve_insets(value: Edges<&Inset>, basis: Size<Option<f32>>) -> Edges<Option<f32>> {
     Edges {
-        left: resolve_inset(&value.left, basis.width),
-        right: resolve_inset(&value.right, basis.width),
-        top: resolve_inset(&value.top, basis.height),
-        bottom: resolve_inset(&value.bottom, basis.height),
+        left: resolve_inset(value.left, basis.width),
+        right: resolve_inset(value.right, basis.width),
+        top: resolve_inset(value.top, basis.height),
+        bottom: resolve_inset(value.bottom, basis.height),
     }
 }
 
@@ -519,19 +519,19 @@ fn style_size_is_definite(value: &StyleSize, parent_basis: Option<f32>) -> bool 
 }
 
 /// Returns which preferred-size axes establish a definite percentage basis.
-/// A preferred aspect ratio transfers definiteness across axes just as it
-/// transfers the resolved preferred size.
+/// A preferred aspect ratio (the [`used_aspect_ratio`] value) transfers
+/// definiteness across axes just as it transfers the resolved preferred size.
 #[inline]
 pub(super) fn preferred_size_definiteness(
-    size: &Size<StyleSize>,
+    size: Size<&StyleSize>,
     parent_size: Size<Option<f32>>,
-    aspect_ratio: AspectRatio,
+    aspect_ratio: Option<f32>,
 ) -> Size<bool> {
     let mut definite = Size::new(
-        style_size_is_definite(&size.width, parent_size.width),
-        style_size_is_definite(&size.height, parent_size.height),
+        style_size_is_definite(size.width, parent_size.width),
+        style_size_is_definite(size.height, parent_size.height),
     );
-    if used_aspect_ratio(aspect_ratio).is_some() {
+    if aspect_ratio.is_some() {
         if definite.width {
             definite.height = true;
         } else if definite.height {
@@ -575,7 +575,7 @@ pub(super) fn box_inset_size(padding: Edges<f32>, border: Edges<f32>) -> Size<f3
 /// Resolves preferred/min quantitative sizes into border-box values.
 #[inline]
 pub(super) fn resolve_quantitative_sizes(
-    value: &Size<StyleSize>,
+    value: Size<&StyleSize>,
     basis: Size<Option<f32>>,
     aspect_ratio: Option<f32>,
     box_sizing: box_sizing::T,
@@ -591,7 +591,7 @@ pub(super) fn resolve_quantitative_sizes(
 /// Resolves max quantitative sizes into border-box values.
 #[inline]
 pub(super) fn resolve_quantitative_max_sizes(
-    value: &Size<MaxSize>,
+    value: Size<&MaxSize>,
     basis: Size<Option<f32>>,
     aspect_ratio: Option<f32>,
     box_sizing: box_sizing::T,
@@ -640,12 +640,12 @@ pub(super) fn resolve_gap_axis(
 /// Resolves non-negative row/column gaps against their respective bases.
 #[inline]
 pub(super) fn resolve_gap(
-    value: &Size<NonNegativeLengthPercentageOrNormal>,
+    value: Size<&NonNegativeLengthPercentageOrNormal>,
     basis: Size<Option<f32>>,
 ) -> Size<f32> {
     Size::new(
-        resolve_gap_axis(&value.width, basis.width),
-        resolve_gap_axis(&value.height, basis.height),
+        resolve_gap_axis(value.width, basis.width),
+        resolve_gap_axis(value.height, basis.height),
     )
 }
 
@@ -658,7 +658,7 @@ pub(super) fn resolve_gap(
 pub(super) fn resolve_item_box(
     style: &impl CoreStyle,
     percentage_basis: Size<Option<f32>>,
-) -> ResolvedItemBox {
+) -> ResolvedItemBox<'_> {
     resolve_item_box_with_bases(style, percentage_basis, percentage_basis.width)
 }
 
@@ -677,7 +677,7 @@ pub(super) fn resolve_item_box_with_bases(
     style: &impl CoreStyle,
     size_percentage_basis: Size<Option<f32>>,
     edge_inline_basis: Option<f32>,
-) -> ResolvedItemBox {
+) -> ResolvedItemBox<'_> {
     let raw_size = style.size();
     let raw_min_size = style.min_size();
     let raw_max_size = style.max_size();
@@ -687,32 +687,32 @@ pub(super) fn resolve_item_box_with_bases(
     let padding_value = style.padding();
     let border_value = style.border();
     let inset_value = style.inset();
-    let padding = resolve_padding(&padding_value, edge_inline_basis);
+    let padding = resolve_padding(padding_value, edge_inline_basis);
     let border = resolve_border(&border_value);
     let box_inset = box_inset_size(padding, border);
     let preferred_size = resolve_quantitative_sizes(
-        &raw_size,
+        raw_size,
         size_percentage_basis,
         aspect_ratio,
         box_sizing,
         box_inset,
     );
     let min_size = resolve_quantitative_sizes(
-        &raw_min_size,
+        raw_min_size,
         size_percentage_basis,
         aspect_ratio,
         box_sizing,
         box_inset,
     );
     let max_size = resolve_quantitative_max_sizes(
-        &raw_max_size,
+        raw_max_size,
         size_percentage_basis,
         aspect_ratio,
         box_sizing,
         box_inset,
     );
     let margin_value = style.margin();
-    let optional_margin = resolve_margins(&margin_value, edge_inline_basis);
+    let optional_margin = resolve_margins(margin_value, edge_inline_basis);
 
     ResolvedItemBox {
         raw_size,
@@ -725,10 +725,10 @@ pub(super) fn resolve_item_box_with_bases(
         min_size,
         max_size,
         margin: auto_edges_to_zero(optional_margin),
-        margin_auto: margin_value.map(|side| side.is_auto()),
+        margin_auto: margin_value.map(Margin::is_auto),
         padding,
         border,
-        inset: resolve_insets(&inset_value, size_percentage_basis),
+        inset: resolve_insets(inset_value, size_percentage_basis),
     }
 }
 
@@ -738,10 +738,10 @@ pub(super) fn resolve_container_box(
     style: &impl CoreStyle,
     input: LayoutInput,
 ) -> ResolvedContainerBox {
-    let padding = resolve_padding(&style.padding(), input.parent_size.width);
+    let padding = resolve_padding(style.padding(), input.parent_size.width);
     let border = resolve_border(&style.border());
     let box_inset = box_inset_size(padding, border);
-    let margin = auto_edges_to_zero(resolve_margins(&style.margin(), input.parent_size.width));
+    let margin = auto_edges_to_zero(resolve_margins(style.margin(), input.parent_size.width));
     let (preferred, min, max) = if input.sizing_mode == SizingMode::ContentSize {
         (Size::NONE, Size::NONE, Size::NONE)
     } else {
@@ -749,21 +749,21 @@ pub(super) fn resolve_container_box(
         let box_sizing = style.box_sizing();
         (
             resolve_quantitative_sizes(
-                &style.size(),
+                style.size(),
                 input.parent_size,
                 aspect_ratio,
                 box_sizing,
                 box_inset,
             ),
             resolve_quantitative_sizes(
-                &style.min_size(),
+                style.min_size(),
                 input.parent_size,
                 aspect_ratio,
                 box_sizing,
                 box_inset,
             ),
             resolve_quantitative_max_sizes(
-                &style.max_size(),
+                style.max_size(),
                 input.parent_size,
                 aspect_ratio,
                 box_sizing,

@@ -221,11 +221,19 @@ track lists, and keyword enums the stylo cascade produces, re-exported from
 materialized engine-side style structs: a stylo-backed host implements the
 accessors as direct field reads of its `ComputedValues`, and a cascade-less
 host (tests, benches) constructs the same stylo values by hand. Small `Copy`
-and Clone-cheap values are returned owned inside the geometry wrappers;
-sequence values — grid track lists (`&GridTemplateComponent`,
-`&ImplicitGridTracks`), font families, features, and variations — are
-returned borrowed from the style view, so they cross the boundary without
-allocation. Defaulted trait methods return the **fork's initial values**:
+values (keyword enums, alignment flags, `Au` border widths, numbers) are
+returned owned; the `LengthPercentage`-family geometry properties — inset,
+size, min/max size, margin, padding, flex-basis, gap, grid-line placements —
+are returned **borrowed** as per-field references inside the geometry
+wrappers (`Edges<&Margin>`, `Size<&StyleSize>`, `&FlexBasis`), and sequence
+values — grid track lists (`&GridTemplateComponent`, `&ImplicitGridTracks`)
+— are returned borrowed whole, so no read ever clones a `calc()` tree or
+bumps a refcount. Per-field reference wrappers are lendable from any host
+storage (a `ComputedValues` host keeps the four margin edges as separate
+fields); a host that synthesizes style values per call must materialize them
+in per-node storage once per style change and lend from there. Text-run
+accessors (font families, features, variations) stay owned — they run once
+per (re)shape, amortized by the measurement cache. Defaulted trait methods return the **fork's initial values**:
 the CSS initial value except where Lynx documents otherwise
 (`relative-layout-once: true` — the Lynx computed default *is* the fork
 initial, so the trait default needs no adapter override). Alignment `normal`

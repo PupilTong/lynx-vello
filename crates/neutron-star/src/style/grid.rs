@@ -4,11 +4,12 @@
 //! where the protocol leans hardest on borrowing: [`GridContainerStyle`]
 //! exposes `grid-template-*` and `grid-auto-*` as **borrowed stylo values**
 //! (`&GridTemplateComponent`, `&ImplicitGridTracks`) lent from the style
-//! view. A stylo-backed host returns references straight into its
-//! `ComputedValues`; the algorithm expands `repeat()` groups into its own
-//! scratch exactly once. Bind the style view first (`let style =
-//! node.style();`) before borrowing — the discipline documented in
-//! [`tree`](crate::tree).
+//! view, and the placements/gap follow the crate-wide borrowed-accessor
+//! convention (`&GridLine`, `Size<&…>`). A stylo-backed host returns
+//! references straight into its `ComputedValues`; the algorithm expands
+//! `repeat()` groups into its own scratch exactly once. Bind the style view
+//! first (`let style = node.style();`) before borrowing — the discipline
+//! documented in [`tree`](crate::tree).
 //!
 //! # Numeric lines only
 //!
@@ -20,6 +21,8 @@
 //! implemented named lines/areas, so the lynx-vello adapter needs no such
 //! resolution.
 
+use std::sync::LazyLock;
+
 use stylo::values::computed::length::NonNegativeLengthPercentageOrNormal;
 use stylo::values::computed::{
     ContentDistribution, GridAutoFlow, GridLine, GridTemplateComponent, ImplicitGridTracks,
@@ -28,6 +31,12 @@ use stylo::values::computed::{
 
 use crate::geometry::Size;
 use crate::style::CoreStyle;
+
+/// Lendable initial values for the defaulted borrowed accessors (the
+/// `GridLine` constructor is not `const`; the atom it carries is static).
+static GRID_LINE_AUTO: LazyLock<GridLine> = LazyLock::new(GridLine::auto);
+static GAP_NORMAL: NonNegativeLengthPercentageOrNormal =
+    NonNegativeLengthPercentageOrNormal::Normal;
 
 /// Style of a node *as a grid container*.
 ///
@@ -56,15 +65,12 @@ pub trait GridContainerStyle: CoreStyle {
         GridAutoFlow::ROW
     }
 
-    /// `gap` (`column-gap` is `width`, `row-gap` is `height`); `normal`
-    /// resolves to zero.
+    /// `gap` (`column-gap` is `width`, `row-gap` is `height`), lent from
+    /// the style view; `normal` resolves to zero.
     ///
     /// Percentage basis: the container's content-box size in the gap's axis.
-    fn gap(&self) -> Size<NonNegativeLengthPercentageOrNormal> {
-        Size::new(
-            NonNegativeLengthPercentageOrNormal::Normal,
-            NonNegativeLengthPercentageOrNormal::Normal,
-        )
+    fn gap(&self) -> Size<&NonNegativeLengthPercentageOrNormal> {
+        Size::new(&GAP_NORMAL, &GAP_NORMAL)
     }
 
     /// `align-content` — block-axis distribution of tracks.
@@ -96,24 +102,24 @@ pub trait GridContainerStyle: CoreStyle {
 ///
 /// Defaults are the CSS initial values.
 pub trait GridItemStyle: CoreStyle {
-    /// `grid-row-start`.
-    fn grid_row_start(&self) -> GridLine {
-        GridLine::auto()
+    /// `grid-row-start`, lent from the style view (line idents are refcounted).
+    fn grid_row_start(&self) -> &GridLine {
+        &GRID_LINE_AUTO
     }
 
-    /// `grid-row-end`.
-    fn grid_row_end(&self) -> GridLine {
-        GridLine::auto()
+    /// `grid-row-end`, lent from the style view (line idents are refcounted).
+    fn grid_row_end(&self) -> &GridLine {
+        &GRID_LINE_AUTO
     }
 
-    /// `grid-column-start`.
-    fn grid_column_start(&self) -> GridLine {
-        GridLine::auto()
+    /// `grid-column-start`, lent from the style view (line idents are refcounted).
+    fn grid_column_start(&self) -> &GridLine {
+        &GRID_LINE_AUTO
     }
 
-    /// `grid-column-end`.
-    fn grid_column_end(&self) -> GridLine {
-        GridLine::auto()
+    /// `grid-column-end`, lent from the style view (line idents are refcounted).
+    fn grid_column_end(&self) -> &GridLine {
+        &GRID_LINE_AUTO
     }
 
     /// `align-self`. `auto` defers to the container's `align-items`.
@@ -153,7 +159,7 @@ impl<S: GridContainerStyle> GridContainerStyle for &S {
         (**self).grid_auto_flow()
     }
 
-    fn gap(&self) -> Size<NonNegativeLengthPercentageOrNormal> {
+    fn gap(&self) -> Size<&NonNegativeLengthPercentageOrNormal> {
         (**self).gap()
     }
 
@@ -175,19 +181,19 @@ impl<S: GridContainerStyle> GridContainerStyle for &S {
 }
 
 impl<S: GridItemStyle> GridItemStyle for &S {
-    fn grid_row_start(&self) -> GridLine {
+    fn grid_row_start(&self) -> &GridLine {
         (**self).grid_row_start()
     }
 
-    fn grid_row_end(&self) -> GridLine {
+    fn grid_row_end(&self) -> &GridLine {
         (**self).grid_row_end()
     }
 
-    fn grid_column_start(&self) -> GridLine {
+    fn grid_column_start(&self) -> &GridLine {
         (**self).grid_column_start()
     }
 
-    fn grid_column_end(&self) -> GridLine {
+    fn grid_column_end(&self) -> &GridLine {
         (**self).grid_column_end()
     }
 

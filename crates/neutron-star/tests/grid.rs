@@ -128,32 +128,32 @@ impl CoreStyle for TestStyle {
         self.position
     }
 
-    fn inset(&self) -> Edges<Inset> {
-        self.inset.clone()
+    fn inset(&self) -> Edges<&Inset> {
+        self.inset.as_ref()
     }
 
-    fn size(&self) -> Size<StyleSize> {
-        self.size.clone()
+    fn size(&self) -> Size<&StyleSize> {
+        self.size.as_ref()
     }
 
-    fn min_size(&self) -> Size<StyleSize> {
-        self.min_size.clone()
+    fn min_size(&self) -> Size<&StyleSize> {
+        self.min_size.as_ref()
     }
 
-    fn max_size(&self) -> Size<MaxSize> {
-        self.max_size.clone()
+    fn max_size(&self) -> Size<&MaxSize> {
+        self.max_size.as_ref()
     }
 
     fn aspect_ratio(&self) -> AspectRatio {
         self.aspect_ratio
     }
 
-    fn margin(&self) -> Edges<Margin> {
-        self.margin.clone()
+    fn margin(&self) -> Edges<&Margin> {
+        self.margin.as_ref()
     }
 
-    fn padding(&self) -> Edges<NonNegativeLengthPercentage> {
-        self.padding.clone()
+    fn padding(&self) -> Edges<&NonNegativeLengthPercentage> {
+        self.padding.as_ref()
     }
 
     fn border(&self) -> Edges<BorderSideWidth> {
@@ -194,8 +194,8 @@ impl GridContainerStyle for TestStyle {
         self.auto_flow
     }
 
-    fn gap(&self) -> Size<NonNegativeLengthPercentageOrNormal> {
-        self.gap.clone()
+    fn gap(&self) -> Size<&NonNegativeLengthPercentageOrNormal> {
+        self.gap.as_ref()
     }
 
     fn align_content(&self) -> ContentDistribution {
@@ -216,20 +216,20 @@ impl GridContainerStyle for TestStyle {
 }
 
 impl GridItemStyle for TestStyle {
-    fn grid_row_start(&self) -> GridLine {
-        self.grid_row.start.clone()
+    fn grid_row_start(&self) -> &GridLine {
+        &self.grid_row.start
     }
 
-    fn grid_row_end(&self) -> GridLine {
-        self.grid_row.end.clone()
+    fn grid_row_end(&self) -> &GridLine {
+        &self.grid_row.end
     }
 
-    fn grid_column_start(&self) -> GridLine {
-        self.grid_column.start.clone()
+    fn grid_column_start(&self) -> &GridLine {
+        &self.grid_column.start
     }
 
-    fn grid_column_end(&self) -> GridLine {
-        self.grid_column.end.clone()
+    fn grid_column_end(&self) -> &GridLine {
+        &self.grid_column.end
     }
 
     fn align_self(&self) -> SelfAlignment {
@@ -254,8 +254,8 @@ impl FlexContainerStyle for TestStyle {
         flex_wrap::T::Nowrap
     }
 
-    fn gap(&self) -> Size<NonNegativeLengthPercentageOrNormal> {
-        self.gap.clone()
+    fn gap(&self) -> Size<&NonNegativeLengthPercentageOrNormal> {
+        self.gap.as_ref()
     }
 
     fn align_content(&self) -> ContentDistribution {
@@ -272,8 +272,8 @@ impl FlexContainerStyle for TestStyle {
 }
 
 impl FlexItemStyle for TestStyle {
-    fn flex_basis(&self) -> FlexBasis {
-        self.flex_basis.clone()
+    fn flex_basis(&self) -> &FlexBasis {
+        &self.flex_basis
     }
 
     fn flex_grow(&self) -> NonNegativeNumber {

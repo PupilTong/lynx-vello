@@ -452,12 +452,12 @@ fn resolve_inset_edge(value: &Inset, basis: Option<f32>) -> Option<f32> {
 /// Resolves physical insets. Horizontal percentages use the containing block
 /// width; vertical percentages use its height.
 #[inline]
-fn resolve_inset_edges(value: &Edges<Inset>, basis: Size<Option<f32>>) -> Edges<Option<f32>> {
+fn resolve_inset_edges(value: Edges<&Inset>, basis: Size<Option<f32>>) -> Edges<Option<f32>> {
     Edges {
-        left: resolve_inset_edge(&value.left, basis.width),
-        right: resolve_inset_edge(&value.right, basis.width),
-        top: resolve_inset_edge(&value.top, basis.height),
-        bottom: resolve_inset_edge(&value.bottom, basis.height),
+        left: resolve_inset_edge(value.left, basis.width),
+        right: resolve_inset_edge(value.right, basis.width),
+        top: resolve_inset_edge(value.top, basis.height),
+        bottom: resolve_inset_edge(value.bottom, basis.height),
     }
 }
 
@@ -544,13 +544,13 @@ fn style_size_axis_is_definite(value: &StyleSize, parent_basis: Option<f32>) -> 
 /// transfers the resolved preferred size.
 #[inline]
 fn size_definiteness(
-    size: &Size<StyleSize>,
+    size: Size<&StyleSize>,
     parent_size: Size<Option<f32>>,
     aspect_ratio: Option<f32>,
 ) -> Size<bool> {
     let mut definite = Size::new(
-        style_size_axis_is_definite(&size.width, parent_size.width),
-        style_size_axis_is_definite(&size.height, parent_size.height),
+        style_size_axis_is_definite(size.width, parent_size.width),
+        style_size_axis_is_definite(size.height, parent_size.height),
     );
     if aspect_ratio.is_some() {
         if definite.width {
@@ -573,10 +573,10 @@ fn initial_item_flags(
     // scroll-time post-pass).
     let relative_offset = nudges && {
         let inset = style.inset();
-        inset_depends_on_basis(&inset.left)
-            || inset_depends_on_basis(&inset.right)
-            || inset_depends_on_basis(&inset.top)
-            || inset_depends_on_basis(&inset.bottom)
+        inset_depends_on_basis(inset.left)
+            || inset_depends_on_basis(inset.right)
+            || inset_depends_on_basis(inset.top)
+            || inset_depends_on_basis(inset.bottom)
     };
     let (margin_refresh, padding_refresh) = if inline_basis.is_none() {
         // Only used edges can affect the remaining layout phases. Starlight's
@@ -587,10 +587,10 @@ fn initial_item_flags(
         let margin = style.margin();
         let padding = style.padding();
         (
-            margin_depends_on_basis(&margin.left)
-                || margin_depends_on_basis(&margin.right)
-                || margin_depends_on_basis(&margin.top)
-                || margin_depends_on_basis(&margin.bottom),
+            margin_depends_on_basis(margin.left)
+                || margin_depends_on_basis(margin.right)
+                || margin_depends_on_basis(margin.top)
+                || margin_depends_on_basis(margin.bottom),
             lp_depends_on_basis(&padding.left.0)
                 || lp_depends_on_basis(&padding.right.0)
                 || lp_depends_on_basis(&padding.top.0)
@@ -632,6 +632,9 @@ where
     let direction = style.direction();
     let gravity = computed_cross_gravity(style.align_self(), align_items, axes);
     let ResolvedItemBox {
+        raw_size,
+        raw_min_size,
+        raw_max_size,
         aspect_ratio,
         box_sizing,
         preferred_size,
@@ -649,33 +652,27 @@ where
     } else {
         Point::ZERO
     };
-    // The raw sizing properties classify auto/intrinsic axes; the stylo
-    // values are Clone-only, so re-read them from the style view instead of
-    // routing owned copies through the shared resolver result.
-    let raw_size = style.size();
-    let raw_min_size = style.min_size();
-    let raw_max_size = style.max_size();
 
     LinearItem {
         key: seed.key,
         gravity,
         weight,
         size_is_auto: Size::new(
-            style_size_is_auto(&raw_size.width),
-            style_size_is_auto(&raw_size.height),
+            style_size_is_auto(raw_size.width),
+            style_size_is_auto(raw_size.height),
         ),
         size_is_intrinsic: Size::new(
-            style_size_is_intrinsic(&raw_size.width),
-            style_size_is_intrinsic(&raw_size.height),
+            style_size_is_intrinsic(raw_size.width),
+            style_size_is_intrinsic(raw_size.height),
         ),
-        has_intrinsic_size: style_size_is_intrinsic(&raw_size.width)
-            || style_size_is_intrinsic(&raw_size.height)
-            || style_size_is_intrinsic(&raw_min_size.width)
-            || style_size_is_intrinsic(&raw_min_size.height)
-            || max_size_is_intrinsic(&raw_max_size.width)
-            || max_size_is_intrinsic(&raw_max_size.height),
+        has_intrinsic_size: style_size_is_intrinsic(raw_size.width)
+            || style_size_is_intrinsic(raw_size.height)
+            || style_size_is_intrinsic(raw_min_size.width)
+            || style_size_is_intrinsic(raw_min_size.height)
+            || max_size_is_intrinsic(raw_max_size.width)
+            || max_size_is_intrinsic(raw_max_size.height),
         preferred_size,
-        preferred_size_is_definite: size_definiteness(&raw_size, percentage_basis, aspect_ratio),
+        preferred_size_is_definite: size_definiteness(raw_size, percentage_basis, aspect_ratio),
         min_size,
         max_size,
         margin,
@@ -715,13 +712,13 @@ fn refresh_item_edges<N>(
     if item.flags.needs_margin_refresh() {
         let margin_value = style.margin();
         let optional_margin = Edges {
-            left: resolve_margin_edge(&margin_value.left, percentage_basis.width),
-            right: resolve_margin_edge(&margin_value.right, percentage_basis.width),
-            top: resolve_margin_edge(&margin_value.top, percentage_basis.width),
-            bottom: resolve_margin_edge(&margin_value.bottom, percentage_basis.width),
+            left: resolve_margin_edge(margin_value.left, percentage_basis.width),
+            right: resolve_margin_edge(margin_value.right, percentage_basis.width),
+            top: resolve_margin_edge(margin_value.top, percentage_basis.width),
+            bottom: resolve_margin_edge(margin_value.bottom, percentage_basis.width),
         };
         item.margin = auto_edges_to_zero(optional_margin);
-        item.margin_auto = margin_value.map(|side| side.is_auto());
+        item.margin_auto = margin_value.map(Margin::is_auto);
     }
 }
 
@@ -936,17 +933,19 @@ where
     if !item.has_intrinsic_size {
         return;
     }
-    let (size, min_size, max_size) = {
-        let style = item.key.node.style();
-        (style.size(), style.min_size(), style.max_size())
-    };
+    // The borrowed raw values stay lent from this style view for the whole
+    // resolution; recursive probes mutate only host-owned per-node slots.
+    let style = item.key.node.style();
+    let size = style.size();
+    let min_size = style.min_size();
+    let max_size = style.max_size();
     let need_min = Size::new(
-        needs_min_content(&size.width, &min_size.width, &max_size.width),
-        needs_min_content(&size.height, &min_size.height, &max_size.height),
+        needs_min_content(size.width, min_size.width, max_size.width),
+        needs_min_content(size.height, min_size.height, max_size.height),
     );
     let need_max = Size::new(
-        needs_max_content(&size.width, &min_size.width, &max_size.width),
-        needs_max_content(&size.height, &min_size.height, &max_size.height),
+        needs_max_content(size.width, min_size.width, max_size.width),
+        needs_max_content(size.height, min_size.height, max_size.height),
     );
     let min_content = if need_min.width || need_min.height {
         intrinsic_measurement(item, percentage_basis, need_min, AvailableSpace::MinContent).size
@@ -962,7 +961,7 @@ where
 
     item.preferred_size = Size::new(
         intrinsic_axis_value(
-            &size.width,
+            size.width,
             item.preferred_size.width,
             min_content.width,
             max_content.width,
@@ -971,7 +970,7 @@ where
             item.box_sizing,
         ),
         intrinsic_axis_value(
-            &size.height,
+            size.height,
             item.preferred_size.height,
             min_content.height,
             max_content.height,
@@ -982,7 +981,7 @@ where
     );
     item.min_size = Size::new(
         intrinsic_axis_value(
-            &min_size.width,
+            min_size.width,
             item.min_size.width,
             min_content.width,
             max_content.width,
@@ -991,7 +990,7 @@ where
             item.box_sizing,
         ),
         intrinsic_axis_value(
-            &min_size.height,
+            min_size.height,
             item.min_size.height,
             min_content.height,
             max_content.height,
@@ -1002,7 +1001,7 @@ where
     );
     item.max_size = Size::new(
         intrinsic_max_axis_value(
-            &max_size.width,
+            max_size.width,
             item.max_size.width,
             min_content.width,
             max_content.width,
@@ -1011,7 +1010,7 @@ where
             item.box_sizing,
         ),
         intrinsic_max_axis_value(
-            &max_size.height,
+            max_size.height,
             item.max_size.height,
             min_content.height,
             max_content.height,
@@ -1830,7 +1829,7 @@ where
     let style_definite = if input.sizing_mode == SizingMode::ContentSize {
         Size::new(false, false)
     } else {
-        size_definiteness(&style.size(), input.parent_size, container_aspect_ratio)
+        size_definiteness(style.size(), input.parent_size, container_aspect_ratio)
     };
     let ResolvedContainerBox {
         padding,
@@ -2094,7 +2093,7 @@ where
                 continue;
             }
             let item_style = item.key.node.style();
-            let inset = resolve_inset_edges(&item_style.inset(), final_percentage_basis);
+            let inset = resolve_inset_edges(item_style.inset(), final_percentage_basis);
             item.relative_offset = relative_offset(inset, item_style.direction());
         }
     }
@@ -2174,28 +2173,28 @@ mod tests {
             Display::Linear
         }
 
-        fn inset(&self) -> Edges<Inset> {
-            self.inset.clone()
+        fn inset(&self) -> Edges<&Inset> {
+            self.inset.as_ref()
         }
 
-        fn size(&self) -> Size<StyleSize> {
-            self.size.clone()
+        fn size(&self) -> Size<&StyleSize> {
+            self.size.as_ref()
         }
 
-        fn min_size(&self) -> Size<StyleSize> {
-            self.min_size.clone()
+        fn min_size(&self) -> Size<&StyleSize> {
+            self.min_size.as_ref()
         }
 
-        fn max_size(&self) -> Size<MaxSize> {
-            self.max_size.clone()
+        fn max_size(&self) -> Size<&MaxSize> {
+            self.max_size.as_ref()
         }
 
-        fn margin(&self) -> Edges<Margin> {
-            self.margin.clone()
+        fn margin(&self) -> Edges<&Margin> {
+            self.margin.as_ref()
         }
 
-        fn padding(&self) -> Edges<NonNegativeLengthPercentage> {
-            self.padding.clone()
+        fn padding(&self) -> Edges<&NonNegativeLengthPercentage> {
+            self.padding.as_ref()
         }
     }
 

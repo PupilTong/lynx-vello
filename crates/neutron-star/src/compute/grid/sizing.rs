@@ -9,15 +9,13 @@
 #![allow(clippy::cast_precision_loss)]
 
 use stylo::computed_values::box_sizing;
-use stylo::values::computed::{
-    LengthPercentage, MaxSize as StyleMaxSize, Size as StyleSize, TrackBreadth,
-};
+use stylo::values::computed::TrackBreadth;
 use stylo::values::specified::align::AlignFlags;
 
 use super::super::util::{clamp, resolve_length_percentage};
 use super::tracks::AxisTrackSpec;
-use super::types::{Axis, GridItem, Track, TrackSet};
-use crate::style::{CoreStyle, GridContainerStyle, GridItemStyle};
+use super::types::{Axis, GridItem, IntrinsicSize, Track, TrackSet, TrackSizingFunction};
+use crate::style::{GridContainerStyle, GridItemStyle};
 use crate::tree::{AvailableSpace, LayoutInput, LayoutNode, RequestedAxis, SizingMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,87 +41,171 @@ fn available_for(kind: ContributionKind) -> AvailableSpace {
     }
 }
 
-/// Initializes used track state per Grid §12.4.
+/// Initializes used track state per Grid §12.4, into `set`.
+///
+/// The expanded specs are the per-layout scratch; the used [`TrackSet`] is
+/// re-initialized from them for the bounded column-feedback and
+/// definite-basis reruns. Reuse keeps the track allocation and replaces the
+/// stored effective sizing halves only when the substitution outcome
+/// actually changes, so a rerun never re-clones every track sizing function.
 pub(super) fn initialize_tracks(
+    set: &mut TrackSet,
     specs: &[AxisTrackSpec],
     percentage_basis: Option<f32>,
     gap: f32,
-) -> TrackSet {
-    let mut tracks = Vec::with_capacity(specs.len());
-    for spec in specs {
-        let min_fixed = match &spec.sizing.min {
-            TrackBreadth::Breadth(value) => resolve_length_percentage(value, percentage_basis),
-            _ => None,
-        };
-        let max_fixed = match &spec.sizing.max {
-            TrackBreadth::Breadth(value) => resolve_length_percentage(value, percentage_basis),
-            _ => None,
-        };
-        // Percentage tracks in an indefinite axis are treated as `auto`
-        // during intrinsic sizing, then reconstructed with a definite basis
-        // by the bounded post-sizing rerun. (Length-only `calc()` folds to a
-        // length at computed-value time, so it always resolves here.)
-        let mut effective_sizing = spec.sizing.clone();
-        if matches!(effective_sizing.min, TrackBreadth::Breadth(_)) && min_fixed.is_none() {
-            effective_sizing.min = TrackBreadth::Auto;
-        }
-        if matches!(effective_sizing.max, TrackBreadth::Breadth(_)) && max_fixed.is_none() {
-            effective_sizing.max = TrackBreadth::Auto;
-        }
-        let fit_content_limit = match &spec.sizing.fit_content {
-            Some(value) => {
-                resolve_length_percentage(value, percentage_basis).unwrap_or(f32::INFINITY)
+) {
+    let reuse = set.tracks.len() == specs.len();
+    if !reuse {
+        set.tracks.clear();
+        set.tracks.reserve(specs.len());
+    }
+    for (index, spec) in specs.iter().enumerate() {
+        let plan = plan_track(spec, percentage_basis);
+        if reuse {
+            let track = &mut set.tracks[index];
+            if plan.min_behaves_auto {
+                if track.sizing.min != TrackBreadth::Auto {
+                    track.sizing.min = TrackBreadth::Auto;
+                }
+            } else if track.sizing.min != spec.sizing.min {
+                track.sizing.min.clone_from(&spec.sizing.min);
             }
-            None => f32::INFINITY,
-        };
-        let collapsed = spec.collapsed;
-        let base = if collapsed {
-            0.0
-        } else {
-            min_fixed.unwrap_or(0.0).max(0.0)
-        };
-        let growth_limit = if collapsed {
-            0.0
-        } else {
-            max_fixed.map_or(f32::INFINITY, |value| value.max(base).max(0.0))
-        };
-        let flex_factor = if collapsed {
-            0.0
-        } else {
-            match effective_sizing.max {
-                TrackBreadth::Flex(flex) if flex.0.is_finite() && flex.0 > 0.0 => flex.0,
-                _ => 0.0,
+            if plan.max_behaves_auto {
+                if track.sizing.max != TrackBreadth::Auto {
+                    track.sizing.max = TrackBreadth::Auto;
+                }
+            } else if track.sizing.max != spec.sizing.max {
+                track.sizing.max.clone_from(&spec.sizing.max);
             }
-        };
-        let flexible = !collapsed && matches!(effective_sizing.max, TrackBreadth::Flex(_));
+            if track.sizing.fit_content != spec.sizing.fit_content {
+                track
+                    .sizing
+                    .fit_content
+                    .clone_from(&spec.sizing.fit_content);
+            }
+            plan.apply_used_state(track);
+        } else {
+            let mut track = Track {
+                sizing: TrackSizingFunction {
+                    min: if plan.min_behaves_auto {
+                        TrackBreadth::Auto
+                    } else {
+                        spec.sizing.min.clone()
+                    },
+                    max: if plan.max_behaves_auto {
+                        TrackBreadth::Auto
+                    } else {
+                        spec.sizing.max.clone()
+                    },
+                    fit_content: spec.sizing.fit_content.clone(),
+                },
+                ..Track::default()
+            };
+            plan.apply_used_state(&mut track);
+            set.tracks.push(track);
+        }
+    }
+    set.gap = gap;
+    set.first_coordinate = specs.first().map_or(0, |spec| spec.coordinate);
+    set.collapsed_line_positions = None;
+}
+
+/// The §12.4 used state derived from one track spec against one percentage
+/// basis, separated from the (clone-carrying) effective sizing halves so
+/// reruns can refresh tracks in place.
+#[derive(Debug, Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)]
+struct TrackInit {
+    min_behaves_auto: bool,
+    max_behaves_auto: bool,
+    base: f32,
+    growth_limit: f32,
+    fit_content_limit: f32,
+    flex_factor: f32,
+    flexible: bool,
+    intrinsic_min: bool,
+    intrinsic_max: bool,
+    auto_max: bool,
+    collapsed: bool,
+}
+
+impl TrackInit {
+    fn apply_used_state(self, track: &mut Track) {
+        track.base = self.base;
+        track.growth_limit = self.growth_limit;
+        track.fit_content_limit = self.fit_content_limit;
+        track.flex_factor = self.flex_factor;
+        track.flexible = self.flexible;
+        track.intrinsic_min = self.intrinsic_min;
+        track.intrinsic_max = self.intrinsic_max;
+        track.auto_max = self.auto_max;
+        track.infinitely_growable = false;
+        track.collapsed = self.collapsed;
+        track.position = 0.0;
+    }
+}
+
+fn plan_track(spec: &AxisTrackSpec, percentage_basis: Option<f32>) -> TrackInit {
+    let min_fixed = match &spec.sizing.min {
+        TrackBreadth::Breadth(value) => resolve_length_percentage(value, percentage_basis),
+        _ => None,
+    };
+    let max_fixed = match &spec.sizing.max {
+        TrackBreadth::Breadth(value) => resolve_length_percentage(value, percentage_basis),
+        _ => None,
+    };
+    // Percentage tracks in an indefinite axis are treated as `auto` during
+    // intrinsic sizing, then reconstructed with a definite basis by the
+    // bounded post-sizing rerun. (Length-only `calc()` folds to a length at
+    // computed-value time, so it always resolves here.)
+    let min_behaves_auto =
+        matches!(spec.sizing.min, TrackBreadth::Breadth(_)) && min_fixed.is_none();
+    let max_behaves_auto =
+        matches!(spec.sizing.max, TrackBreadth::Breadth(_)) && max_fixed.is_none();
+    let fit_content_limit = match &spec.sizing.fit_content {
+        Some(value) => resolve_length_percentage(value, percentage_basis).unwrap_or(f32::INFINITY),
+        None => f32::INFINITY,
+    };
+    let collapsed = spec.collapsed;
+    let base = if collapsed {
+        0.0
+    } else {
+        min_fixed.unwrap_or(0.0).max(0.0)
+    };
+    let growth_limit = if collapsed {
+        0.0
+    } else {
+        max_fixed.map_or(f32::INFINITY, |value| value.max(base).max(0.0))
+    };
+    let flex_factor = if collapsed {
+        0.0
+    } else {
+        match spec.sizing.max {
+            TrackBreadth::Flex(flex) if flex.0.is_finite() && flex.0 > 0.0 => flex.0,
+            _ => 0.0,
+        }
+    };
+    TrackInit {
+        min_behaves_auto,
+        max_behaves_auto,
+        base,
+        growth_limit,
+        fit_content_limit,
+        flex_factor,
+        // The effective halves substitute `auto` for unresolvable
+        // percentages; `Flex` is never substituted, so the flexibility
+        // classification can read the spec directly.
+        flexible: !collapsed && matches!(spec.sizing.max, TrackBreadth::Flex(_)),
         // A `Flex` minimum is unrepresentable in the grammar and behaves as
         // `auto`, hence it stays intrinsic.
-        let intrinsic_min = !matches!(effective_sizing.min, TrackBreadth::Breadth(_));
-        let intrinsic_max = !matches!(
-            effective_sizing.max,
-            TrackBreadth::Breadth(_) | TrackBreadth::Flex(_)
-        );
-        let auto_max = matches!(effective_sizing.max, TrackBreadth::Auto);
-        tracks.push(Track {
-            sizing: effective_sizing,
-            base,
-            growth_limit,
-            fit_content_limit,
-            flex_factor,
-            flexible,
-            intrinsic_min,
-            intrinsic_max,
-            auto_max,
-            infinitely_growable: false,
-            collapsed,
-            position: 0.0,
-        });
-    }
-    TrackSet {
-        tracks,
-        gap,
-        first_coordinate: specs.first().map_or(0, |spec| spec.coordinate),
-        collapsed_line_positions: None,
+        intrinsic_min: min_behaves_auto || !matches!(spec.sizing.min, TrackBreadth::Breadth(_)),
+        intrinsic_max: max_behaves_auto
+            || !matches!(
+                spec.sizing.max,
+                TrackBreadth::Breadth(_) | TrackBreadth::Flex(_)
+            ),
+        auto_max: max_behaves_auto || matches!(spec.sizing.max, TrackBreadth::Auto),
+        collapsed,
     }
 }
 
@@ -287,27 +369,27 @@ pub(super) fn resolve_item_intrinsic_dimensions<N>(
     N: LayoutNode,
     N::Style: GridContainerStyle + GridItemStyle,
 {
-    let (preferred_value, min_value, max_value) = {
-        let style = item.key.node.style();
+    let (needs_min_content, needs_max_content) = {
+        let values = [
+            axis.size_ref(&item.intrinsic_preferred),
+            axis.size_ref(&item.intrinsic_min),
+            axis.size_ref(&item.intrinsic_max),
+        ];
         (
-            IntrinsicSize::from_size(&axis.size(style.size())),
-            IntrinsicSize::from_size(&axis.size(style.min_size())),
-            IntrinsicSize::from_max_size(&axis.size(style.max_size())),
+            values.iter().any(|value| {
+                matches!(
+                    value,
+                    IntrinsicSize::MinContent | IntrinsicSize::FitContent(_)
+                )
+            }),
+            values.iter().any(|value| {
+                matches!(
+                    value,
+                    IntrinsicSize::MaxContent | IntrinsicSize::FitContent(_)
+                )
+            }),
         )
     };
-    let values = [&preferred_value, &min_value, &max_value];
-    let needs_min_content = values.iter().any(|value| {
-        matches!(
-            value,
-            IntrinsicSize::MinContent | IntrinsicSize::FitContent(_)
-        )
-    });
-    let needs_max_content = values.iter().any(|value| {
-        matches!(
-            value,
-            IntrinsicSize::MaxContent | IntrinsicSize::FitContent(_)
-        )
-    });
     if !needs_min_content && !needs_max_content {
         return;
     }
@@ -335,60 +417,16 @@ pub(super) fn resolve_item_intrinsic_dimensions<N>(
         }
     };
     if axis.size(item.preferred_size).is_none() {
-        axis.set_size(&mut item.preferred_size, resolve(&preferred_value));
+        let resolved = resolve(axis.size_ref(&item.intrinsic_preferred));
+        axis.set_size(&mut item.preferred_size, resolved);
     }
     if axis.size(item.min_size).is_none() {
-        axis.set_size(&mut item.min_size, resolve(&min_value));
+        let resolved = resolve(axis.size_ref(&item.intrinsic_min));
+        axis.set_size(&mut item.min_size, resolved);
     }
     if axis.size(item.max_size).is_none() {
-        axis.set_size(&mut item.max_size, resolve(&max_value));
-    }
-}
-
-/// The intrinsic-keyword projection of one sizing property value.
-///
-/// The bare `fit-content`/`stretch`/`-webkit-fill-available` keywords are
-/// treated as `auto` (behavior delta #8), so they project to `None` like
-/// `auto` and quantitative values do.
-#[derive(Debug, Clone, PartialEq)]
-enum IntrinsicSize {
-    MinContent,
-    MaxContent,
-    FitContent(LengthPercentage),
-    None,
-}
-
-impl IntrinsicSize {
-    fn from_size(value: &StyleSize) -> Self {
-        match value {
-            StyleSize::MinContent => Self::MinContent,
-            StyleSize::MaxContent => Self::MaxContent,
-            StyleSize::FitContentFunction(limit) => Self::FitContent(limit.0.clone()),
-            StyleSize::Auto
-            | StyleSize::LengthPercentage(_)
-            | StyleSize::FitContent
-            | StyleSize::Stretch
-            | StyleSize::WebkitFillAvailable => Self::None,
-            StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-                unreachable!("anchor positioning is pref-disabled under lynx")
-            }
-        }
-    }
-
-    fn from_max_size(value: &StyleMaxSize) -> Self {
-        match value {
-            StyleMaxSize::MinContent => Self::MinContent,
-            StyleMaxSize::MaxContent => Self::MaxContent,
-            StyleMaxSize::FitContentFunction(limit) => Self::FitContent(limit.0.clone()),
-            StyleMaxSize::None
-            | StyleMaxSize::LengthPercentage(_)
-            | StyleMaxSize::FitContent
-            | StyleMaxSize::Stretch
-            | StyleMaxSize::WebkitFillAvailable => Self::None,
-            StyleMaxSize::AnchorSizeFunction(_) | StyleMaxSize::AnchorContainingCalcFunction(_) => {
-                unreachable!("anchor positioning is pref-disabled under lynx")
-            }
-        }
+        let resolved = resolve(axis.size_ref(&item.intrinsic_max));
+        axis.set_size(&mut item.max_size, resolved);
     }
 }
 
@@ -1583,7 +1621,8 @@ mod tests {
     use stylo::Zero;
     use stylo::computed_values::direction;
     use stylo::values::computed::{
-        Display, GridTemplateComponent, ImplicitGridTracks, Length, Overflow, PositionProperty,
+        Display, GridTemplateComponent, ImplicitGridTracks, Length, LengthPercentage,
+        MaxSize as StyleMaxSize, Overflow, PositionProperty, Size as StyleSize,
     };
     use stylo::values::generics::NonNegative;
     use stylo::values::generics::grid::{Flex, ImplicitGridTracks as GenericImplicitGridTracks};
@@ -1592,6 +1631,7 @@ mod tests {
     use super::*;
     use crate::compute::grid::placement::{GridArea, TrackSpan};
     use crate::geometry::{Edges, Point, Size};
+    use crate::style::CoreStyle;
     use crate::tree::{Layout, LayoutInput, LayoutOutput};
 
     fn lp_px(value: f32) -> LengthPercentage {
@@ -1624,16 +1664,16 @@ mod tests {
             Display::Grid
         }
 
-        fn size(&self) -> Size<StyleSize> {
-            self.size.clone()
+        fn size(&self) -> Size<&StyleSize> {
+            self.size.as_ref()
         }
 
-        fn min_size(&self) -> Size<StyleSize> {
-            self.min_size.clone()
+        fn min_size(&self) -> Size<&StyleSize> {
+            self.min_size.as_ref()
         }
 
-        fn max_size(&self) -> Size<StyleMaxSize> {
-            self.max_size.clone()
+        fn max_size(&self) -> Size<&StyleMaxSize> {
+            self.max_size.as_ref()
         }
     }
 
@@ -1744,6 +1784,12 @@ mod tests {
     }
 
     fn test_item(node: TestRef<'_>, column_start: i32, column_end: i32) -> GridItem<TestRef<'_>> {
+        // Mirror `resolve_grid_item`: the intrinsic-keyword projections are
+        // built once from the node's raw style at item construction.
+        let style = node.style();
+        let raw_size = style.size();
+        let raw_min_size = style.min_size();
+        let raw_max_size = style.max_size();
         GridItem {
             key: crate::compute::util::ItemKey {
                 node,
@@ -1765,6 +1811,18 @@ mod tests {
             overflow: Point::new(Overflow::Visible, Overflow::Visible),
             preferred_behaves_auto_or_depends: Size::new(true, true),
             minimum_is_auto: Size::new(true, true),
+            intrinsic_preferred: Size::new(
+                IntrinsicSize::from_size(raw_size.width),
+                IntrinsicSize::from_size(raw_size.height),
+            ),
+            intrinsic_min: Size::new(
+                IntrinsicSize::from_size(raw_min_size.width),
+                IntrinsicSize::from_size(raw_min_size.height),
+            ),
+            intrinsic_max: Size::new(
+                IntrinsicSize::from_max_size(raw_max_size.width),
+                IntrinsicSize::from_max_size(raw_max_size.height),
+            ),
             preferred_size: Size::NONE,
             min_size: Size::NONE,
             max_size: Size::NONE,

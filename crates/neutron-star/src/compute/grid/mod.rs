@@ -29,16 +29,16 @@ use sizing::{
     size_tracks,
 };
 use stylo::computed_values::direction;
-use stylo::values::computed::{PositionProperty, Size as StyleSize};
+use stylo::values::computed::{Inset, PositionProperty, Size as StyleSize};
 use stylo::values::specified::align::AlignFlags;
 use tracks::{ExpandedTemplate, MAX_MATERIALIZED_TRACKS, build_axis_tracks, expand_template};
-use types::{Axis, GridItem, TrackSet, TrackSizingFunction};
+use types::{Axis, GridItem, IntrinsicSize, TrackSet, TrackSizingFunction};
 
 use super::util::{
     ItemKey, OrderedItem, PendingLayoutItem, ResolvedContainerBox, ResolvedItemBox,
     apply_aspect_ratio, box_inset_size, clamp, clamp_axis, normalize_content_alignment,
     normalize_item_alignment, preferred_size_definiteness, resolve_container_box, resolve_gap,
-    resolve_item_box, sort_and_assign_layout_order,
+    resolve_item_box, sort_and_assign_layout_order, used_aspect_ratio,
 };
 use super::{compute_absolute_layout, hide_subtree};
 use crate::geometry::{Edges, Line, Point, Size};
@@ -115,12 +115,12 @@ where
         },
         position,
         row: Line::new(
-            grid_placement(&style.grid_row_start()),
-            grid_placement(&style.grid_row_end()),
+            grid_placement(style.grid_row_start()),
+            grid_placement(style.grid_row_end()),
         ),
         column: Line::new(
-            grid_placement(&style.grid_column_start()),
-            grid_placement(&style.grid_column_end()),
+            grid_placement(style.grid_column_start()),
+            grid_placement(style.grid_column_end()),
         ),
     })
 }
@@ -139,6 +139,7 @@ where
     let ResolvedItemBox {
         raw_size,
         raw_min_size,
+        raw_max_size,
         aspect_ratio,
         box_sizing,
         overflow,
@@ -150,7 +151,6 @@ where
         padding,
         border,
         inset,
-        ..
     } = resolve_item_box(&style, percentage_basis);
     // Percentages (and calc() trees still carrying a percentage) depend on
     // the grid area; the keyword sizes `fit-content`/`stretch`/
@@ -196,12 +196,24 @@ where
         box_sizing,
         overflow,
         preferred_behaves_auto_or_depends: Size::new(
-            behaves_auto_or_depends(&raw_size.width),
-            behaves_auto_or_depends(&raw_size.height),
+            behaves_auto_or_depends(raw_size.width),
+            behaves_auto_or_depends(raw_size.height),
         ),
         minimum_is_auto: Size::new(
-            minimum_behaves_auto(&raw_min_size.width),
-            minimum_behaves_auto(&raw_min_size.height),
+            minimum_behaves_auto(raw_min_size.width),
+            minimum_behaves_auto(raw_min_size.height),
+        ),
+        intrinsic_preferred: Size::new(
+            IntrinsicSize::from_size(raw_size.width),
+            IntrinsicSize::from_size(raw_size.height),
+        ),
+        intrinsic_min: Size::new(
+            IntrinsicSize::from_size(raw_min_size.width),
+            IntrinsicSize::from_size(raw_min_size.height),
+        ),
+        intrinsic_max: Size::new(
+            IntrinsicSize::from_max_size(raw_max_size.width),
+            IntrinsicSize::from_max_size(raw_max_size.height),
         ),
         preferred_size,
         min_size,
@@ -249,6 +261,8 @@ where
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn run_track_sizing<N>(
+    columns: &mut TrackSet,
+    rows: &mut TrackSet,
     column_specs: &[tracks::AxisTrackSpec],
     row_specs: &[tracks::AxisTrackSpec],
     items: &mut [GridItem<N>],
@@ -257,8 +271,7 @@ fn run_track_sizing<N>(
     gap: Size<f32>,
     justify_content: AlignFlags,
     align_content: AlignFlags,
-) -> (TrackSet, TrackSet)
-where
+) where
     N: LayoutNode,
     N::Style: GridContainerStyle + GridItemStyle,
 {
@@ -271,7 +284,7 @@ where
     // an item sees each row with a definite max track sizing function at
     // that maximum and every other row as infinite. Only when the container
     // and every row are definite does content alignment affect this estimate.
-    let mut rows = initialize_tracks(row_specs, inner_basis.height, gap.height);
+    initialize_tracks(rows, row_specs, inner_basis.height, gap.height);
     let all_rows_definite = rows
         .tracks
         .iter()
@@ -292,13 +305,13 @@ where
         0.0
     };
     let initial_column_cross_tracks = CrossAxisTracks::DefiniteMaximums {
-        tracks: &rows,
+        tracks: rows,
         distributed_gap,
     };
-    let mut columns = initialize_tracks(column_specs, inner_basis.width, gap.width);
+    initialize_tracks(columns, column_specs, inner_basis.width, gap.width);
     size_tracks(
         Axis::Horizontal,
-        &mut columns,
+        columns,
         Some(initial_column_cross_tracks),
         items,
         inner_basis,
@@ -308,7 +321,7 @@ where
         justify_content,
     );
     if let Some(width) = inner_basis.width {
-        align_tracks(&mut columns, width, justify_content);
+        align_tracks(columns, width, justify_content);
     }
 
     // Record the pre-row min-content probes only for items that can affect a
@@ -353,8 +366,8 @@ where
     row_basis.width = row_basis.width.or(Some(columns.used_size()));
     size_tracks(
         Axis::Vertical,
-        &mut rows,
-        Some(CrossAxisTracks::resolved(&columns)),
+        rows,
+        Some(CrossAxisTracks::resolved(columns)),
         items,
         row_basis,
         inner_basis
@@ -363,7 +376,7 @@ where
         align_content,
     );
     if let Some(height) = inner_basis.height {
-        align_tracks(&mut rows, height, align_content);
+        align_tracks(rows, height, align_content);
     }
 
     let mut column_feedback_changed = false;
@@ -376,7 +389,7 @@ where
             let after = probe_raw_min_content(
                 item,
                 Axis::Horizontal,
-                Some(CrossAxisTracks::resolved(&rows)),
+                Some(CrossAxisTracks::resolved(rows)),
             );
             let tolerance = f32::EPSILON * before.abs().max(after.abs()).max(1.0);
             column_feedback_changed |= (before - after).abs() > tolerance;
@@ -395,11 +408,11 @@ where
         for item in items.iter_mut() {
             item.clear_contribution_cache(Axis::Horizontal);
         }
-        let mut rerun_columns = initialize_tracks(column_specs, inner_basis.width, gap.width);
+        initialize_tracks(columns, column_specs, inner_basis.width, gap.width);
         size_tracks(
             Axis::Horizontal,
-            &mut rerun_columns,
-            Some(CrossAxisTracks::resolved(&rows)),
+            columns,
+            Some(CrossAxisTracks::resolved(rows)),
             items,
             inner_basis,
             inner_basis
@@ -408,22 +421,21 @@ where
             justify_content,
         );
         if let Some(width) = inner_basis.width {
-            align_tracks(&mut rerun_columns, width, justify_content);
+            align_tracks(columns, width, justify_content);
         }
-        columns = rerun_columns;
         for item in items.iter_mut() {
             let width = columns.area_size(item.area.column.start, item.area.column.end);
             let height = rows.area_size(item.area.row.start, item.area.row.end);
             refresh_item_basis(item, Size::new(Some(width), Some(height)));
             item.clear_contribution_cache(Axis::Vertical);
         }
-        let mut rerun_rows = initialize_tracks(row_specs, inner_basis.height, gap.height);
+        initialize_tracks(rows, row_specs, inner_basis.height, gap.height);
         let mut final_row_basis = inner_basis;
         final_row_basis.width = final_row_basis.width.or(Some(columns.used_size()));
         size_tracks(
             Axis::Vertical,
-            &mut rerun_rows,
-            Some(CrossAxisTracks::resolved(&columns)),
+            rows,
+            Some(CrossAxisTracks::resolved(columns)),
             items,
             final_row_basis,
             inner_basis
@@ -432,11 +444,9 @@ where
             align_content,
         );
         if let Some(height) = inner_basis.height {
-            align_tracks(&mut rerun_rows, height, align_content);
+            align_tracks(rows, height, align_content);
         }
-        rows = rerun_rows;
     }
-    (columns, rows)
 }
 
 fn final_outer_size(metrics: &ResolvedContainerBox, tracks: Size<f32>) -> Size<f32> {
@@ -569,17 +579,10 @@ where
             Some(CrossAxisTracks::resolved(columns)),
             Size::new(Some(area_size.width), Some(area_size.height)),
         );
-        let raw_size = item.key.node.style().size();
         let mut known = item.preferred_size;
         let resolved_preferred = item.preferred_size;
-        let intrinsic_width = matches!(
-            raw_size.width,
-            StyleSize::MinContent | StyleSize::MaxContent | StyleSize::FitContentFunction(_)
-        );
-        let intrinsic_height = matches!(
-            raw_size.height,
-            StyleSize::MinContent | StyleSize::MaxContent | StyleSize::FitContentFunction(_)
-        );
+        let intrinsic_width = !matches!(item.intrinsic_preferred.width, IntrinsicSize::None);
+        let intrinsic_height = !matches!(item.intrinsic_preferred.height, IntrinsicSize::None);
         if intrinsic_width {
             known.width = None;
         }
@@ -611,28 +614,28 @@ where
             .map(|value| clamp(value, item.min_size.height, item.max_size.height));
 
         let available = Size::new(
-            match raw_size.width {
+            match item.intrinsic_preferred.width {
                 // An intrinsic preferred size selects the matching
                 // measurement constraint so the child re-resolves at that
                 // size instead of the grid-area default.
-                StyleSize::MinContent => AvailableSpace::MinContent,
-                StyleSize::MaxContent => AvailableSpace::MaxContent,
-                StyleSize::FitContentFunction(_) => resolved_preferred
+                IntrinsicSize::MinContent => AvailableSpace::MinContent,
+                IntrinsicSize::MaxContent => AvailableSpace::MaxContent,
+                IntrinsicSize::FitContent(_) => resolved_preferred
                     .width
                     .map_or(AvailableSpace::MaxContent, AvailableSpace::Definite),
-                _ => known.width.map_or(AvailableSpace::MaxContent, |_| {
+                IntrinsicSize::None => known.width.map_or(AvailableSpace::MaxContent, |_| {
                     AvailableSpace::Definite(
                         (area_size.width - item.margin.horizontal_sum()).max(0.0),
                     )
                 }),
             },
-            match raw_size.height {
-                StyleSize::MinContent => AvailableSpace::MinContent,
-                StyleSize::MaxContent => AvailableSpace::MaxContent,
-                StyleSize::FitContentFunction(_) => resolved_preferred
+            match item.intrinsic_preferred.height {
+                IntrinsicSize::MinContent => AvailableSpace::MinContent,
+                IntrinsicSize::MaxContent => AvailableSpace::MaxContent,
+                IntrinsicSize::FitContent(_) => resolved_preferred
                     .height
                     .map_or(AvailableSpace::MaxContent, AvailableSpace::Definite),
-                _ => known.height.map_or(AvailableSpace::MaxContent, |_| {
+                IntrinsicSize::None => known.height.map_or(AvailableSpace::MaxContent, |_| {
                     AvailableSpace::Definite(
                         (area_size.height - item.margin.vertical_sum()).max(0.0),
                     )
@@ -951,21 +954,15 @@ where
     N::Style: GridContainerStyle + GridItemStyle,
 {
     let basis = Size::new(Some(containing_size.width), Some(containing_size.height));
-    let raw_size = item.key.node.style().size();
-    let intrinsic_available =
-        raw_size.zip_map(containing_size, |dimension, available| match dimension {
-            StyleSize::MinContent => AvailableSpace::MinContent,
-            StyleSize::MaxContent => AvailableSpace::MaxContent,
-            StyleSize::LengthPercentage(_)
-            | StyleSize::Auto
-            | StyleSize::FitContent
-            | StyleSize::Stretch
-            | StyleSize::WebkitFillAvailable
-            | StyleSize::FitContentFunction(_) => AvailableSpace::Definite(available),
-            StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-                unreachable!("anchor positioning is pref-disabled under lynx")
-            }
-        });
+    let axis_available = |dimension: &IntrinsicSize, available: f32| match dimension {
+        IntrinsicSize::MinContent => AvailableSpace::MinContent,
+        IntrinsicSize::MaxContent => AvailableSpace::MaxContent,
+        IntrinsicSize::FitContent(_) | IntrinsicSize::None => AvailableSpace::Definite(available),
+    };
+    let intrinsic_available = Size::new(
+        axis_available(&item.intrinsic_preferred.width, containing_size.width),
+        axis_available(&item.intrinsic_preferred.height, containing_size.height),
+    );
     let output = item
         .key
         .node
@@ -1057,7 +1054,7 @@ where
         let key = pending.key();
         let inset_auto = {
             let style = key.node.style();
-            style.inset().map(|value| value.is_auto())
+            style.inset().map(Inset::is_auto)
         };
         let needs_static_measurement =
             (inset_auto.left && inset_auto.right) || (inset_auto.top && inset_auto.bottom);
@@ -1159,10 +1156,15 @@ where
             .unwrap_or(AlignFlags::STRETCH),
         rtl,
     };
+    let raw_preferred = style.size();
     let style_definite = if input.sizing_mode == SizingMode::ContentSize {
         Size::new(false, false)
     } else {
-        preferred_size_definiteness(&style.size(), input.parent_size, style.aspect_ratio())
+        preferred_size_definiteness(
+            raw_preferred,
+            input.parent_size,
+            used_aspect_ratio(style.aspect_ratio()),
+        )
     };
     let outer_definite = Size::new(
         input.definite_dimensions.width || style_definite.width,
@@ -1170,7 +1172,7 @@ where
     );
     let mut metrics = resolve_container_box(&style, input);
     if input.sizing_mode != SizingMode::ContentSize {
-        let preferred = style.size();
+        let preferred = raw_preferred;
         if metrics.inner.width.is_none() {
             metrics.available_inner.width = match preferred.width {
                 StyleSize::MinContent => AvailableSpace::MinContent,
@@ -1206,7 +1208,7 @@ where
             .then_some(metrics.outer.height)
             .flatten(),
     );
-    let initial_gap = resolve_gap(&gap_value, initial_percentage_basis);
+    let initial_gap = resolve_gap(gap_value, initial_percentage_basis);
     // Auto-repeat's preferred/max constraint must be clamped by min/max
     // first; CSS gives the minimum precedence when max < min. Track counts
     // use the resulting content-box constraint, not the raw border-box
@@ -1237,7 +1239,7 @@ where
         repeat_max_basis.width.or(repeat_min_basis.width),
         repeat_max_basis.height.or(repeat_min_basis.height),
     );
-    let repeat_count_gap = resolve_gap(&gap_value, repeat_count_basis);
+    let repeat_count_gap = resolve_gap(gap_value, repeat_count_basis);
     let (explicit_columns, explicit_rows) =
         expand_explicit_tracks(node, repeat_max_basis, repeat_min_basis, repeat_count_gap);
 
@@ -1329,7 +1331,11 @@ where
         .map(|(item, area)| resolve_grid_item(item.key(), area, Size::NONE, item_defaults))
         .collect::<Vec<_>>();
 
-    let (mut columns, mut rows) = run_track_sizing(
+    let mut columns = TrackSet::default();
+    let mut rows = TrackSet::default();
+    run_track_sizing(
+        &mut columns,
+        &mut rows,
         &column_specs,
         &row_specs,
         &mut items,
@@ -1350,14 +1356,16 @@ where
     // became definite after intrinsic container sizing. Exactly one rerun is
     // allowed by Grid's bounded sizing feedback.
     let final_gap = resolve_gap(
-        &gap_value,
+        gap_value,
         Size::new(Some(final_inner.width), Some(final_inner.height)),
     );
     let needs_definite_rerun = initial_percentage_basis.width.is_none()
         || initial_percentage_basis.height.is_none()
         || final_gap != initial_gap;
     if needs_definite_rerun {
-        (columns, rows) = run_track_sizing(
+        run_track_sizing(
+            &mut columns,
+            &mut rows,
             &column_specs,
             &row_specs,
             &mut items,

@@ -98,7 +98,9 @@ enum MockDisplay {
 #[derive(Debug, Clone)]
 struct MockStyle {
     display: MockDisplay,
-    auto_horizontal_margin: bool,
+    /// Borrowed accessors lend from storage, so the margin value is
+    /// materialized here instead of synthesized per call.
+    margin: Edges<Margin>,
     size: Size<StyleSize>,
     padding: Edges<NonNegativeLengthPercentage>,
     flex_grow: NonNegativeNumber,
@@ -107,11 +109,20 @@ struct MockStyle {
     implicit_tracks: ImplicitGridTracks,
 }
 
+fn auto_horizontal_margin() -> Edges<Margin> {
+    Edges {
+        left: Margin::Auto,
+        right: Margin::Auto,
+        top: Margin::zero(),
+        bottom: Margin::zero(),
+    }
+}
+
 impl Default for MockStyle {
     fn default() -> Self {
         Self {
             display: MockDisplay::Leaf,
-            auto_horizontal_margin: false,
+            margin: Edges::uniform(Margin::zero()),
             size: Size::new(StyleSize::auto(), StyleSize::auto()),
             padding: Edges::uniform(NonNegative(LengthPercentage::zero())),
             flex_grow: NonNegativeNumber::from(0.0),
@@ -131,25 +142,16 @@ impl CoreStyle for MockStyle {
         }
     }
 
-    fn size(&self) -> Size<StyleSize> {
-        self.size.clone()
+    fn size(&self) -> Size<&StyleSize> {
+        self.size.as_ref()
     }
 
-    fn padding(&self) -> Edges<NonNegativeLengthPercentage> {
-        self.padding.clone()
+    fn padding(&self) -> Edges<&NonNegativeLengthPercentage> {
+        self.padding.as_ref()
     }
 
-    fn margin(&self) -> Edges<Margin> {
-        if self.auto_horizontal_margin {
-            Edges {
-                left: Margin::Auto,
-                right: Margin::Auto,
-                top: Margin::zero(),
-                bottom: Margin::zero(),
-            }
-        } else {
-            Edges::uniform(Margin::zero())
-        }
+    fn margin(&self) -> Edges<&Margin> {
+        self.margin.as_ref()
     }
 }
 
@@ -186,12 +188,12 @@ impl GridContainerStyle for MockStyle {
 }
 
 impl GridItemStyle for MockStyle {
-    fn grid_column_start(&self) -> GridLine {
-        self.grid_column.start.clone()
+    fn grid_column_start(&self) -> &GridLine {
+        &self.grid_column.start
     }
 
-    fn grid_column_end(&self) -> GridLine {
-        self.grid_column.end.clone()
+    fn grid_column_end(&self) -> &GridLine {
+        &self.grid_column.end
     }
 }
 
@@ -408,10 +410,10 @@ fn style_views_serve_initial_defaults() {
         RelativeItemStyle::relative_center(&view),
         relative_center::T::None
     );
-    assert_eq!(GridItemStyle::grid_column_start(&view), GridLine::auto());
-    assert_eq!(GridItemStyle::grid_column_end(&view), GridLine::auto());
-    assert_eq!(GridItemStyle::grid_row_start(&view), GridLine::auto());
-    assert_eq!(GridItemStyle::grid_row_end(&view), GridLine::auto());
+    assert_eq!(GridItemStyle::grid_column_start(&view), &GridLine::auto());
+    assert_eq!(GridItemStyle::grid_column_end(&view), &GridLine::auto());
+    assert_eq!(GridItemStyle::grid_row_start(&view), &GridLine::auto());
+    assert_eq!(GridItemStyle::grid_row_end(&view), &GridLine::auto());
 }
 
 #[test]
@@ -565,7 +567,7 @@ fn compute_root_layout_resolves_horizontal_auto_margins() {
     let mut tree = MockTree::default();
     let root = tree.push(
         MockStyle {
-            auto_horizontal_margin: true,
+            margin: auto_horizontal_margin(),
             ..MockStyle::default()
         },
         vec![],
@@ -588,7 +590,7 @@ fn compute_root_layout_preserves_a_hidden_zero_box() {
     let root = tree.push(
         MockStyle {
             display: MockDisplay::Hidden,
-            auto_horizontal_margin: true,
+            margin: auto_horizontal_margin(),
             ..MockStyle::default()
         },
         vec![],

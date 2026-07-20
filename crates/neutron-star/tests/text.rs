@@ -188,8 +188,8 @@ impl CoreStyle for ContainerStyle {
         self.direction
     }
 
-    fn padding(&self) -> Edges<NonNegativeLengthPercentage> {
-        self.padding.clone()
+    fn padding(&self) -> Edges<&NonNegativeLengthPercentage> {
+        self.padding.as_ref()
     }
 }
 

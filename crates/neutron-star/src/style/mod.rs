@@ -16,9 +16,28 @@
 //! stylo values by hand. Blanket impls are provided for `&S`, so implementing
 //! a trait on your style struct makes plain references usable as views.
 //!
-//! Small `Copy` values and Clone-cheap `LengthPercentage`-family values are
-//! returned owned (cloned) inside the geometry wrappers; large sequences
-//! (grid track lists) are returned borrowed from the style view.
+//! # Accessor conventions: `Copy` values owned, everything else borrowed
+//!
+//! Small `Copy` values (keyword enums, alignment flags, `Au` border widths,
+//! numbers) are returned owned. The `LengthPercentage`-family geometry
+//! properties — inset, size, min/max size, margin, padding, flex-basis, gap,
+//! and grid-line placements — are returned **borrowed** as per-field
+//! references inside the geometry wrappers (`Edges<&Margin>`,
+//! `Size<&StyleSize>`, `&FlexBasis`, …), and large sequences (grid track
+//! lists) are returned borrowed whole. Per-field reference wrappers (built
+//! with [`Edges::as_ref`]/[`Size::as_ref`] or field-by-field) are lendable
+//! from any host storage — a stylo `ComputedValues` host keeps its four
+//! margin edges in separate fields and still lends `Edges<&Margin>`. Borrowed
+//! returns mean a read never clones a `calc()` tree or bumps a refcount; the
+//! resolvers lower values to `f32` without ever owning them. The borrow is
+//! tied to the style-view binding, so bind the view first (`let style =
+//! node.style();`) — the discipline documented in [`tree`](crate::tree). A
+//! host whose style views *synthesize* values on the fly must materialize
+//! them in per-node storage and lend from there (the convert-once-per-style-
+//! change pattern); temporaries cannot be lent.
+//!
+//! Text accessors ([`TextRunStyle`], [`TextContainerStyle`]) keep owned
+//! returns: they run once per (re)shape, amortized by the measurement cache.
 //!
 //! # Defaults are the fork's initial values
 //!
@@ -52,7 +71,6 @@ pub use flex::{FlexContainerStyle, FlexItemStyle};
 pub use grid::{GridContainerStyle, GridItemStyle};
 pub use linear::{LinearContainerStyle, LinearItemStyle};
 pub use relative::{RelativeContainerStyle, RelativeItemStyle};
-use stylo::Zero;
 // Re-export every stylo type the protocol mentions so hosts can write
 // `neutron_star::style::Margin` etc. without naming the stylo crate. The
 // keyword enums live in per-property modules (`visibility::T`, …), matching
@@ -75,6 +93,26 @@ pub use stylo::values::specified::align::AlignFlags;
 pub use text::{TextBrush, TextContainerStyle, TextRun, TextRunStyle};
 
 use crate::geometry::{Edges, Point, Size};
+
+/// Lendable initial values for the defaulted borrowed accessors.
+///
+/// Trait defaults must return references that outlive the style view, and
+/// the stylo constructors are not `const`, so the fork's initial values live
+/// in lazily-initialized statics. Visible to the sibling style modules only.
+pub(in crate::style) mod defaults {
+    use std::sync::LazyLock;
+
+    use stylo::Zero;
+
+    use super::{Inset, Margin, MaxSize, NonNegativeLengthPercentage, StyleSize};
+
+    pub(in crate::style) static INSET_AUTO: LazyLock<Inset> = LazyLock::new(Inset::auto);
+    pub(in crate::style) static SIZE_AUTO: LazyLock<StyleSize> = LazyLock::new(StyleSize::auto);
+    pub(in crate::style) static MAX_SIZE_NONE: LazyLock<MaxSize> = LazyLock::new(MaxSize::none);
+    pub(in crate::style) static MARGIN_ZERO: LazyLock<Margin> = LazyLock::new(Margin::zero);
+    pub(in crate::style) static PADDING_ZERO: LazyLock<NonNegativeLengthPercentage> =
+        LazyLock::new(NonNegativeLengthPercentage::zero);
+}
 
 /// Style every box has, regardless of which algorithm lays it out.
 ///
@@ -114,28 +152,29 @@ pub trait CoreStyle: Sized {
         PositionProperty::Static
     }
 
-    /// `top`/`right`/`bottom`/`left`.
-    fn inset(&self) -> Edges<Inset> {
-        Edges::uniform(Inset::auto())
+    /// `top`/`right`/`bottom`/`left`, lent from the style view.
+    fn inset(&self) -> Edges<&Inset> {
+        Edges::uniform(&*defaults::INSET_AUTO)
     }
 
-    /// `width`/`height` (interpreted per [`box_sizing`](Self::box_sizing)).
+    /// `width`/`height` (interpreted per [`box_sizing`](Self::box_sizing)),
+    /// lent from the style view.
     ///
     /// The lynx-parseable keywords Starlight has no sizing behavior for
     /// (bare `fit-content`, `stretch`, `-webkit-fill-available`) are treated
     /// as `auto` by every algorithm.
-    fn size(&self) -> Size<StyleSize> {
-        Size::new(StyleSize::auto(), StyleSize::auto())
+    fn size(&self) -> Size<&StyleSize> {
+        Size::new(&*defaults::SIZE_AUTO, &*defaults::SIZE_AUTO)
     }
 
-    /// `min-width`/`min-height`.
-    fn min_size(&self) -> Size<StyleSize> {
-        Size::new(StyleSize::auto(), StyleSize::auto())
+    /// `min-width`/`min-height`, lent from the style view.
+    fn min_size(&self) -> Size<&StyleSize> {
+        Size::new(&*defaults::SIZE_AUTO, &*defaults::SIZE_AUTO)
     }
 
-    /// `max-width`/`max-height`.
-    fn max_size(&self) -> Size<MaxSize> {
-        Size::new(MaxSize::none(), MaxSize::none())
+    /// `max-width`/`max-height`, lent from the style view.
+    fn max_size(&self) -> Size<&MaxSize> {
+        Size::new(&*defaults::MAX_SIZE_NONE, &*defaults::MAX_SIZE_NONE)
     }
 
     /// `aspect-ratio`. The engine uses the preferred ratio as `width /
@@ -144,14 +183,15 @@ pub trait CoreStyle: Sized {
         AspectRatio::auto()
     }
 
-    /// `margin`. `Auto` margins absorb free space per the algorithm's rules.
-    fn margin(&self) -> Edges<Margin> {
-        Edges::uniform(Margin::zero())
+    /// `margin`, lent from the style view. `Auto` margins absorb free space
+    /// per the algorithm's rules.
+    fn margin(&self) -> Edges<&Margin> {
+        Edges::uniform(&*defaults::MARGIN_ZERO)
     }
 
-    /// `padding`.
-    fn padding(&self) -> Edges<NonNegativeLengthPercentage> {
-        Edges::uniform(NonNegativeLengthPercentage::zero())
+    /// `padding`, lent from the style view.
+    fn padding(&self) -> Edges<&NonNegativeLengthPercentage> {
+        Edges::uniform(&*defaults::PADDING_ZERO)
     }
 
     /// Used `border-*-width` (i.e. `0` when the border style is `none`).
@@ -198,19 +238,19 @@ impl<S: CoreStyle> CoreStyle for &S {
         (**self).position()
     }
 
-    fn inset(&self) -> Edges<Inset> {
+    fn inset(&self) -> Edges<&Inset> {
         (**self).inset()
     }
 
-    fn size(&self) -> Size<StyleSize> {
+    fn size(&self) -> Size<&StyleSize> {
         (**self).size()
     }
 
-    fn min_size(&self) -> Size<StyleSize> {
+    fn min_size(&self) -> Size<&StyleSize> {
         (**self).min_size()
     }
 
-    fn max_size(&self) -> Size<MaxSize> {
+    fn max_size(&self) -> Size<&MaxSize> {
         (**self).max_size()
     }
 
@@ -218,11 +258,11 @@ impl<S: CoreStyle> CoreStyle for &S {
         (**self).aspect_ratio()
     }
 
-    fn margin(&self) -> Edges<Margin> {
+    fn margin(&self) -> Edges<&Margin> {
         (**self).margin()
     }
 
-    fn padding(&self) -> Edges<NonNegativeLengthPercentage> {
+    fn padding(&self) -> Edges<&NonNegativeLengthPercentage> {
         (**self).padding()
     }
 
@@ -246,6 +286,8 @@ impl<S: CoreStyle> CoreStyle for &S {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use stylo::Zero;
+
     use super::*;
 
     #[derive(Debug)]
@@ -264,24 +306,24 @@ mod tests {
         assert!(!style.display().is_none());
         assert_eq!(style.visibility(), visibility::T::Visible);
         assert_eq!(style.position(), PositionProperty::Static);
-        assert_eq!(style.inset(), Edges::uniform(Inset::auto()));
+        assert_eq!(style.inset(), Edges::uniform(&Inset::auto()));
         assert_eq!(
             style.size(),
-            Size::new(StyleSize::auto(), StyleSize::auto())
+            Size::new(&StyleSize::auto(), &StyleSize::auto())
         );
         assert_eq!(
             style.min_size(),
-            Size::new(StyleSize::auto(), StyleSize::auto())
+            Size::new(&StyleSize::auto(), &StyleSize::auto())
         );
         assert_eq!(
             style.max_size(),
-            Size::new(MaxSize::none(), MaxSize::none())
+            Size::new(&MaxSize::none(), &MaxSize::none())
         );
         assert!(style.aspect_ratio().auto);
-        assert_eq!(style.margin(), Edges::uniform(Margin::zero()));
+        assert_eq!(style.margin(), Edges::uniform(&Margin::zero()));
         assert_eq!(
             style.padding(),
-            Edges::uniform(NonNegativeLengthPercentage::zero())
+            Edges::uniform(&NonNegativeLengthPercentage::zero())
         );
         assert_eq!(style.border(), Edges::uniform(BorderSideWidth(Au(0))));
         assert_eq!(

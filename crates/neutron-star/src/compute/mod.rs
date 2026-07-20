@@ -110,7 +110,7 @@ pub use leaf::{
 pub use linear::compute_linear_layout;
 pub use relative::compute_relative_layout;
 use stylo::computed_values::direction;
-use stylo::values::computed::Size as StyleSize;
+use stylo::values::computed::{Margin, Size as StyleSize};
 
 use self::util::{
     apply_box_sizing, auto_edges_to_zero, clamp, resolve_border, resolve_insets,
@@ -148,15 +148,15 @@ pub fn compute_root_layout<N: LayoutNode>(root: N, available_space: Size<Availab
 
     let style = root.style();
     let margin_value = style.margin();
-    let optional_margin = resolve_margins(&margin_value, parent_size.width);
+    let optional_margin = resolve_margins(margin_value, parent_size.width);
     let hidden = style.display().is_none();
     let margin = resolve_root_margins(
         optional_margin,
-        margin_value.map(|side| side.is_auto()),
+        margin_value.map(Margin::is_auto),
         available_space.width,
         output.size.width,
     );
-    let padding = resolve_padding(&style.padding(), parent_size.width);
+    let padding = resolve_padding(style.padding(), parent_size.width);
     let border = resolve_border(&style.border());
 
     if hidden {
@@ -537,7 +537,7 @@ fn resolve_absolute_style<N: LayoutNode>(
     parent_size: Size<Option<f32>>,
 ) -> ResolvedAbsoluteStyle {
     let style = node.style();
-    let padding = resolve_padding(&style.padding(), parent_size.width);
+    let padding = resolve_padding(style.padding(), parent_size.width);
     let border = resolve_border(&style.border());
     let padding_border_size = Size::new(
         padding.horizontal_sum() + border.horizontal_sum(),
@@ -545,34 +545,34 @@ fn resolve_absolute_style<N: LayoutNode>(
     );
     let style_size = style.size();
     let preferred_available = Size::new(
-        absolute_preferred_available(&style_size.width, parent_size.width),
-        absolute_preferred_available(&style_size.height, parent_size.height),
+        absolute_preferred_available(style_size.width, parent_size.width),
+        absolute_preferred_available(style_size.height, parent_size.height),
     );
     let resolved_style_size = apply_box_sizing(
-        resolve_size(&style_size, parent_size),
+        resolve_size(style_size, parent_size),
         style.box_sizing(),
         padding_border_size,
     );
     let min_size = apply_box_sizing(
-        resolve_size(&style.min_size(), parent_size),
+        resolve_size(style.min_size(), parent_size),
         style.box_sizing(),
         padding_border_size,
     );
     let max_size = apply_box_sizing(
-        resolve_max_sizes(&style.max_size(), parent_size),
+        resolve_max_sizes(style.max_size(), parent_size),
         style.box_sizing(),
         padding_border_size,
     );
 
     ResolvedAbsoluteStyle {
-        insets: resolve_insets(&style.inset(), parent_size),
-        optional_margin: resolve_margins(&style.margin(), parent_size.width),
+        insets: resolve_insets(style.inset(), parent_size),
+        optional_margin: resolve_margins(style.margin(), parent_size.width),
         padding,
         border,
         preferred_available,
         auto_size: Size::new(
-            style_size_behaves_auto(&style_size.width) && resolved_style_size.width.is_none(),
-            style_size_behaves_auto(&style_size.height) && resolved_style_size.height.is_none(),
+            style_size_behaves_auto(style_size.width) && resolved_style_size.width.is_none(),
+            style_size_behaves_auto(style_size.height) && resolved_style_size.height.is_none(),
         ),
         min_size,
         max_size,

@@ -63,8 +63,8 @@ impl CoreStyle for BenchStyle {
     }
 
     #[inline]
-    fn size(&self) -> Size<StyleSize> {
-        self.size.clone()
+    fn size(&self) -> Size<&StyleSize> {
+        self.size.as_ref()
     }
 
     #[inline]

@@ -445,8 +445,8 @@ struct LeafSizing {
 
 fn resolve_leaf_sizing(input: LayoutInput, style: &impl CoreStyle) -> LeafSizing {
     let inline_basis = input.parent_size.width;
-    let margin = auto_edges_to_zero(resolve_margins(&style.margin(), inline_basis));
-    let padding = resolve_padding(&style.padding(), inline_basis);
+    let margin = auto_edges_to_zero(resolve_margins(style.margin(), inline_basis));
+    let padding = resolve_padding(style.padding(), inline_basis);
     let border = resolve_border(&style.border());
     let padding_border_size = Size::new(
         padding.horizontal_sum() + border.horizontal_sum(),
@@ -463,7 +463,7 @@ fn resolve_leaf_sizing(input: LayoutInput, style: &impl CoreStyle) -> LeafSizing
             // Aspect ratio operates on the box selected by box-sizing. The
             // caller's known dimensions are always border-box, so translate
             // them into that sizing box before deriving the opposite axis.
-            let style_size = resolve_size(&style.size(), input.parent_size);
+            let style_size = resolve_size(style.size(), input.parent_size);
             let known_sizing_box =
                 border_box_to_sizing_box(input.known_dimensions, box_sizing, padding_border_size);
             let preferred_sizing_box =
@@ -474,12 +474,12 @@ fn resolve_leaf_sizing(input: LayoutInput, style: &impl CoreStyle) -> LeafSizing
                 padding_border_size,
             ));
             let min_size = apply_box_sizing(
-                resolve_size(&style.min_size(), input.parent_size),
+                resolve_size(style.min_size(), input.parent_size),
                 box_sizing,
                 padding_border_size,
             );
             let max_size = apply_box_sizing(
-                resolve_max_sizes(&style.max_size(), input.parent_size),
+                resolve_max_sizes(style.max_size(), input.parent_size),
                 box_sizing,
                 padding_border_size,
             );
@@ -958,7 +958,10 @@ mod tests {
         );
     }
 
-    struct ConflictingMinMaxStyle;
+    struct ConflictingMinMaxStyle {
+        min_size: Size<StyleSize>,
+        max_size: Size<MaxSize>,
+    }
 
     fn size_px(value: f32) -> StyleSize {
         StyleSize::LengthPercentage(NonNegative(LengthPercentage::new_length(Length::new(
@@ -972,23 +975,32 @@ mod tests {
         ))))
     }
 
+    impl ConflictingMinMaxStyle {
+        fn new() -> Self {
+            Self {
+                min_size: Size::new(size_px(80.0), size_px(70.0)),
+                max_size: Size::new(max_px(40.0), max_px(90.0)),
+            }
+        }
+    }
+
     impl CoreStyle for ConflictingMinMaxStyle {
         fn display(&self) -> Display {
             Display::Flex
         }
 
-        fn min_size(&self) -> Size<StyleSize> {
-            Size::new(size_px(80.0), size_px(70.0))
+        fn min_size(&self) -> Size<&StyleSize> {
+            self.min_size.as_ref()
         }
 
-        fn max_size(&self) -> Size<MaxSize> {
-            Size::new(max_px(40.0), max_px(90.0))
+        fn max_size(&self) -> Size<&MaxSize> {
+            self.max_size.as_ref()
         }
     }
 
     #[test]
     fn sizing_helpers_honor_min_precedence_known_dimensions_and_box_sizing() {
-        let sizing = resolve_leaf_sizing(LayoutInput::default(), &ConflictingMinMaxStyle);
+        let sizing = resolve_leaf_sizing(LayoutInput::default(), &ConflictingMinMaxStyle::new());
         assert_eq!(sizing.node_size, Size::new(Some(80.0), None));
 
         assert_eq!(

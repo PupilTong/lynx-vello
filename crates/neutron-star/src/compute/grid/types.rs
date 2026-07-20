@@ -6,7 +6,8 @@
 
 use stylo::computed_values::{box_sizing, direction};
 use stylo::values::computed::{
-    LengthPercentage, Overflow, PositionProperty, TrackBreadth, TrackSize,
+    LengthPercentage, MaxSize as StyleMaxSize, Overflow, PositionProperty, Size as StyleSize,
+    TrackBreadth, TrackSize,
 };
 use stylo::values::specified::align::AlignFlags;
 
@@ -66,6 +67,64 @@ impl Axis {
     #[inline]
     pub(super) fn sum(self, edges: Edges<f32>) -> f32 {
         self.start(edges) + self.end(edges)
+    }
+
+    #[inline]
+    pub(super) fn size_ref<T>(self, size: &Size<T>) -> &T {
+        match self {
+            Self::Horizontal => &size.width,
+            Self::Vertical => &size.height,
+        }
+    }
+}
+
+/// The intrinsic-keyword projection of one sizing property value, retained
+/// per item so repeated sizing rounds never refetch (and re-clone) the raw
+/// stylo aggregates through the style accessors.
+///
+/// The bare `fit-content`/`stretch`/`-webkit-fill-available` keywords are
+/// treated as `auto` (behavior delta #8), so they project to `None` like
+/// `auto` and quantitative values do. The `fit-content()` limit stays
+/// unresolved: its percentage basis differs per sizing round.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum IntrinsicSize {
+    MinContent,
+    MaxContent,
+    FitContent(LengthPercentage),
+    None,
+}
+
+impl IntrinsicSize {
+    pub(super) fn from_size(value: &StyleSize) -> Self {
+        match value {
+            StyleSize::MinContent => Self::MinContent,
+            StyleSize::MaxContent => Self::MaxContent,
+            StyleSize::FitContentFunction(limit) => Self::FitContent(limit.0.clone()),
+            StyleSize::Auto
+            | StyleSize::LengthPercentage(_)
+            | StyleSize::FitContent
+            | StyleSize::Stretch
+            | StyleSize::WebkitFillAvailable => Self::None,
+            StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
+                unreachable!("anchor positioning is pref-disabled under lynx")
+            }
+        }
+    }
+
+    pub(super) fn from_max_size(value: &StyleMaxSize) -> Self {
+        match value {
+            StyleMaxSize::MinContent => Self::MinContent,
+            StyleMaxSize::MaxContent => Self::MaxContent,
+            StyleMaxSize::FitContentFunction(limit) => Self::FitContent(limit.0.clone()),
+            StyleMaxSize::None
+            | StyleMaxSize::LengthPercentage(_)
+            | StyleMaxSize::FitContent
+            | StyleMaxSize::Stretch
+            | StyleMaxSize::WebkitFillAvailable => Self::None,
+            StyleMaxSize::AnchorSizeFunction(_) | StyleMaxSize::AnchorContainingCalcFunction(_) => {
+                unreachable!("anchor positioning is pref-disabled under lynx")
+            }
+        }
     }
 }
 
@@ -158,6 +217,12 @@ pub(super) struct GridItem<N> {
     pub(super) overflow: Point<Overflow>,
     pub(super) preferred_behaves_auto_or_depends: Size<bool>,
     pub(super) minimum_is_auto: Size<bool>,
+    /// Intrinsic-keyword projections of `width`/`height`, `min-*`, and
+    /// `max-*`, in that order. Basis-independent, so they survive every
+    /// [`refresh_item_basis`](super::refresh_item_basis) re-resolution.
+    pub(super) intrinsic_preferred: Size<IntrinsicSize>,
+    pub(super) intrinsic_min: Size<IntrinsicSize>,
+    pub(super) intrinsic_max: Size<IntrinsicSize>,
     pub(super) preferred_size: Size<Option<f32>>,
     pub(super) min_size: Size<Option<f32>>,
     pub(super) max_size: Size<Option<f32>>,
@@ -202,7 +267,7 @@ impl<N> GridItem<N> {
 }
 
 /// Cold style plus hot used values for one concrete explicit/implicit track.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[allow(clippy::struct_excessive_bools)]
 pub(super) struct Track {
     pub(super) sizing: TrackSizingFunction,

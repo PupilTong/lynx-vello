@@ -14,6 +14,8 @@
 //!
 //! [`LayoutNode::style`]: crate::tree::LayoutNode::style
 
+use std::sync::LazyLock;
+
 use stylo::computed_values::{flex_direction, flex_wrap};
 use stylo::values::computed::length::NonNegativeLengthPercentageOrNormal;
 use stylo::values::computed::{
@@ -22,6 +24,12 @@ use stylo::values::computed::{
 
 use crate::geometry::Size;
 use crate::style::CoreStyle;
+
+/// Lendable initial values for the defaulted borrowed accessors (stylo
+/// constructors are not `const`).
+static FLEX_BASIS_AUTO: LazyLock<FlexBasis> = LazyLock::new(FlexBasis::auto);
+static GAP_NORMAL: NonNegativeLengthPercentageOrNormal =
+    NonNegativeLengthPercentageOrNormal::Normal;
 
 /// Style of a node *as a flex container*.
 ///
@@ -39,15 +47,12 @@ pub trait FlexContainerStyle: CoreStyle {
         flex_wrap::T::Nowrap
     }
 
-    /// `gap` (`column-gap` is `width`, `row-gap` is `height`); `normal`
-    /// resolves to zero.
+    /// `gap` (`column-gap` is `width`, `row-gap` is `height`), lent from
+    /// the style view; `normal` resolves to zero.
     ///
     /// Percentage basis: the container's content-box size in the gap's axis.
-    fn gap(&self) -> Size<NonNegativeLengthPercentageOrNormal> {
-        Size::new(
-            NonNegativeLengthPercentageOrNormal::Normal,
-            NonNegativeLengthPercentageOrNormal::Normal,
-        )
+    fn gap(&self) -> Size<&NonNegativeLengthPercentageOrNormal> {
+        Size::new(&GAP_NORMAL, &GAP_NORMAL)
     }
 
     /// `align-content` — cross-axis distribution of lines.
@@ -72,13 +77,13 @@ pub trait FlexContainerStyle: CoreStyle {
 ///
 /// Defaults are the CSS initial values.
 pub trait FlexItemStyle: CoreStyle {
-    /// `flex-basis`. `content` has no Starlight sizing behavior and defers
-    /// to [`CoreStyle::size`] (documented behavior delta of the stylo
-    /// vocabulary swap).
+    /// `flex-basis`, lent from the style view. `content` has no Starlight
+    /// sizing behavior and defers to [`CoreStyle::size`] (documented
+    /// behavior delta of the stylo vocabulary swap).
     ///
     /// Percentage basis: the container's content-box main-axis size.
-    fn flex_basis(&self) -> FlexBasis {
-        FlexBasis::auto()
+    fn flex_basis(&self) -> &FlexBasis {
+        &FLEX_BASIS_AUTO
     }
 
     /// `flex-grow`.
@@ -112,7 +117,7 @@ impl<S: FlexContainerStyle> FlexContainerStyle for &S {
         (**self).flex_wrap()
     }
 
-    fn gap(&self) -> Size<NonNegativeLengthPercentageOrNormal> {
+    fn gap(&self) -> Size<&NonNegativeLengthPercentageOrNormal> {
         (**self).gap()
     }
 
@@ -130,7 +135,7 @@ impl<S: FlexContainerStyle> FlexContainerStyle for &S {
 }
 
 impl<S: FlexItemStyle> FlexItemStyle for &S {
-    fn flex_basis(&self) -> FlexBasis {
+    fn flex_basis(&self) -> &FlexBasis {
         (**self).flex_basis()
     }
 
@@ -180,8 +185,8 @@ mod tests {
         assert_eq!(
             style.gap(),
             Size::new(
-                NonNegativeLengthPercentageOrNormal::Normal,
-                NonNegativeLengthPercentageOrNormal::Normal,
+                &NonNegativeLengthPercentageOrNormal::Normal,
+                &NonNegativeLengthPercentageOrNormal::Normal,
             )
         );
         assert_eq!(style.align_content(), ContentDistribution::normal());
@@ -193,7 +198,7 @@ mod tests {
     fn flex_item_defaults_are_css_initial_values() {
         let style = Defaults;
 
-        assert_eq!(style.flex_basis(), FlexBasis::auto());
+        assert_eq!(style.flex_basis(), &FlexBasis::auto());
         assert_eq!(style.flex_grow().0, 0.0);
         assert_eq!(style.flex_shrink().0, 1.0);
         assert_eq!(FlexItemStyle::align_self(&style), SelfAlignment::auto());

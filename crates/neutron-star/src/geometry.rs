@@ -90,6 +90,17 @@ impl<T> Size<T> {
             height: f(self.height, other.height),
         }
     }
+
+    /// Borrows both extents, producing a per-extent reference pair — the
+    /// shape borrowed style accessors return, buildable from any host
+    /// storage (the two extents need not be stored contiguously).
+    #[must_use]
+    pub const fn as_ref(&self) -> Size<&T> {
+        Size {
+            width: &self.width,
+            height: &self.height,
+        }
+    }
 }
 
 impl Size<f32> {
@@ -167,6 +178,19 @@ impl<T> Edges<T> {
             right: f(self.right),
             top: f(self.top),
             bottom: f(self.bottom),
+        }
+    }
+
+    /// Borrows all four edges, producing per-edge references — the shape
+    /// borrowed style accessors return, buildable from any host storage
+    /// (the four edges need not be stored contiguously).
+    #[must_use]
+    pub const fn as_ref(&self) -> Edges<&T> {
+        Edges {
+            left: &self.left,
+            right: &self.right,
+            top: &self.top,
+            bottom: &self.bottom,
         }
     }
 }

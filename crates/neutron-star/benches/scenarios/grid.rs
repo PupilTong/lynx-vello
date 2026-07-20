@@ -42,8 +42,8 @@ impl CoreStyle for BoxStyle {
     }
 
     #[inline]
-    fn size(&self) -> Size<StyleSize> {
-        self.size.clone()
+    fn size(&self) -> Size<&StyleSize> {
+        self.size.as_ref()
     }
 }
 
@@ -123,8 +123,8 @@ impl CoreStyle for GridStyleView<'_> {
     }
 
     #[inline]
-    fn size(&self) -> Size<StyleSize> {
-        self.core.size.clone()
+    fn size(&self) -> Size<&StyleSize> {
+        self.core.size.as_ref()
     }
 }
 
@@ -155,30 +155,30 @@ impl GridContainerStyle for GridStyleView<'_> {
     }
 
     #[inline]
-    fn gap(&self) -> Size<NonNegativeLengthPercentageOrNormal> {
-        self.container().gap.clone()
+    fn gap(&self) -> Size<&NonNegativeLengthPercentageOrNormal> {
+        self.container().gap.as_ref()
     }
 }
 
 impl GridItemStyle for GridStyleView<'_> {
     #[inline]
-    fn grid_row_start(&self) -> GridLine {
-        self.item.row_start.clone()
+    fn grid_row_start(&self) -> &GridLine {
+        &self.item.row_start
     }
 
     #[inline]
-    fn grid_row_end(&self) -> GridLine {
-        self.item.row_end.clone()
+    fn grid_row_end(&self) -> &GridLine {
+        &self.item.row_end
     }
 
     #[inline]
-    fn grid_column_start(&self) -> GridLine {
-        self.item.column_start.clone()
+    fn grid_column_start(&self) -> &GridLine {
+        &self.item.column_start
     }
 
     #[inline]
-    fn grid_column_end(&self) -> GridLine {
-        self.item.column_end.clone()
+    fn grid_column_end(&self) -> &GridLine {
+        &self.item.column_end
     }
 
     #[inline]

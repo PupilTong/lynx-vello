@@ -14,6 +14,7 @@ use super::util::{
     ItemKey, OrderedItem, ResolvedContainerBox, ResolvedItemBox, box_inset_size, clamp_axis,
     preferred_size_definiteness, resolve_container_box, resolve_item_box_with_bases,
     resolve_length_percentage, sort_and_assign_layout_order, subtract_available_space,
+    used_aspect_ratio,
 };
 use crate::geometry::{Edges, Line, Point, Size};
 use crate::style::relative::{RELATIVE_REFERENCE_NONE, RELATIVE_REFERENCE_PARENT};
@@ -86,14 +87,6 @@ impl Axis {
         match self {
             Self::Horizontal => edges.right,
             Self::Vertical => edges.bottom,
-        }
-    }
-
-    #[inline]
-    fn size_ref<T>(self, size: &Size<T>) -> &T {
-        match self {
-            Self::Horizontal => &size.width,
-            Self::Vertical => &size.height,
         }
     }
 
@@ -202,9 +195,6 @@ struct RelativeItem<N> {
     /// except that only `relative` applies the definite-inset visual nudge
     /// (`sticky` is nudged by the host at scroll time, `static` never).
     position: PositionProperty,
-    raw_size: Size<StyleSize>,
-    raw_min_size: Size<StyleSize>,
-    raw_max_size: Size<MaxSize>,
     preferred_size: Size<Option<f32>>,
     intrinsic_preferred_size: Size<Option<f32>>,
     intrinsic_sizes_ready: bool,
@@ -237,13 +227,13 @@ impl<N> RelativeItem<N> {
 
     #[inline]
     fn fixed_measurement_matches(&self, refreshed: &Self) -> bool {
+        // Both sides resolve the same node's style within one flush, and
+        // style is immutable for the whole flush, so the raw computed values
+        // cannot differ — only the basis-dependent resolved fields can.
         self.preferred_size.width.is_some()
             && self.preferred_size.height.is_some()
             && self.preferred_size_is_definite.width
             && self.preferred_size_is_definite.height
-            && self.raw_size == refreshed.raw_size
-            && self.raw_min_size == refreshed.raw_min_size
-            && self.raw_max_size == refreshed.raw_max_size
             && self.preferred_size == refreshed.preferred_size
             && self.preferred_size_is_definite == refreshed.preferred_size_is_definite
             && self.min_size == refreshed.min_size
@@ -268,8 +258,7 @@ where
     let style = key.node.style();
     let ResolvedItemBox {
         raw_size,
-        raw_min_size,
-        raw_max_size,
+        aspect_ratio,
         preferred_size,
         box_sizing,
         min_size,
@@ -281,7 +270,7 @@ where
         ..
     } = resolve_item_box_with_bases(&style, size_percentage_basis, edge_inline_basis);
     let preferred_size_is_definite =
-        preferred_size_definiteness(&style.size(), size_percentage_basis, style.aspect_ratio());
+        preferred_size_definiteness(raw_size, size_percentage_basis, aspect_ratio);
 
     RelativeItem {
         key,
@@ -293,9 +282,6 @@ where
             .map(|reference| ResolvedReference::resolve(reference, lookup)),
         center: style.relative_center(),
         position: style.position(),
-        raw_size,
-        raw_min_size,
-        raw_max_size,
         preferred_size,
         intrinsic_preferred_size: Size::NONE,
         intrinsic_sizes_ready: false,
@@ -866,10 +852,16 @@ fn prepare_intrinsic_sizes<N>(
         return;
     }
 
+    // The borrowed raw values stay lent from this style view for the whole
+    // resolution; recursive probes mutate only host-owned per-node slots.
+    let style = item.key.node.style();
+    let full_raw_size = style.size();
+    let full_raw_min = style.min_size();
+    let full_raw_max = style.max_size();
     for axis in Axis::ALL {
-        let raw_size = axis.size_ref(&item.raw_size);
-        let raw_min = axis.size_ref(&item.raw_min_size);
-        let raw_max = axis.size_ref(&item.raw_max_size);
+        let raw_size = axis.size(full_raw_size);
+        let raw_min = axis.size(full_raw_min);
+        let raw_max = axis.size(full_raw_max);
         let needs_min = needs_min_content(raw_size, raw_min, raw_max);
         let needs_max = needs_max_content(raw_size, raw_min, raw_max);
         if !needs_min && !needs_max {
@@ -966,12 +958,14 @@ where
     // their own margins when translating LayoutInput into content constraints.
     let mut available_space = available_content;
     let floor = item.box_floor();
+    let style = item.key.node.style();
+    let full_raw_size = style.size();
 
     for axis in Axis::ALL {
         let line = axis.size(constraints);
         let has_one_sided_constraint =
             matches!((line.start, line.end), (Some(_), None) | (None, Some(_)));
-        let raw_size = axis.size_ref(&item.raw_size);
+        let raw_size = axis.size(full_raw_size);
         let fit_content_needs_one_sided_measurement =
             matches!(raw_size, StyleSize::FitContentFunction(_)) && has_one_sided_constraint;
         let constrained = constrained_border_size(line, axis.margin_sum(item.margin)).map(|size| {
@@ -1522,7 +1516,11 @@ where
     let style_definite = if input.sizing_mode == SizingMode::ContentSize {
         Size::new(false, false)
     } else {
-        preferred_size_definiteness(&style.size(), input.parent_size, style.aspect_ratio())
+        preferred_size_definiteness(
+            style.size(),
+            input.parent_size,
+            used_aspect_ratio(style.aspect_ratio()),
+        )
     };
     let outer_definite = Size::new(
         input.definite_dimensions.width || style_definite.width,
