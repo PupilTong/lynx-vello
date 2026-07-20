@@ -267,6 +267,28 @@ mod tests {
             TextContainerStyle::text_wrap_mode(&view),
             text_wrap_mode::T::Wrap
         );
+        // Every forwarder on the blanket `&S` impls serves the underlying
+        // style's value; a lost delegation would surface as the wrong value
+        // (or a stack overflow) here.
+        assert_eq!(TextContainerStyle::text_align(&view), TextAlign::Start);
+        assert_eq!(
+            TextContainerStyle::white_space_collapse(&view),
+            white_space_collapse::T::Collapse
+        );
+        assert_eq!(TextContainerStyle::word_break(&view), WordBreak::Normal);
+        assert!(TextContainerStyle::text_indent(&view).length.is_zero());
+        assert_eq!(TextRunStyle::font_weight(&view), FontWeight::NORMAL);
+        assert_eq!(TextRunStyle::font_style(&view), FontStyle::NORMAL);
+        assert_eq!(TextRunStyle::letter_spacing(&view), LetterSpacing::normal());
+        assert_eq!(TextRunStyle::line_height(&view), LineHeight::normal());
+        assert_eq!(
+            TextRunStyle::font_feature_settings(&view),
+            FontFeatureSettings::normal()
+        );
+        assert_eq!(
+            TextRunStyle::font_variation_settings(&view),
+            FontVariationSettings::normal()
+        );
 
         let run = TextRun {
             text: "hello",

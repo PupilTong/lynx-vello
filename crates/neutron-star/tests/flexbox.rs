@@ -12,7 +12,7 @@ use neutron_star::compute::{
 };
 use neutron_star::prelude::*;
 use stylo::computed_values::{box_sizing, direction, flex_direction, flex_wrap};
-use stylo::values::computed::{Display, Overflow, PositionProperty};
+use stylo::values::computed::{Display, MaxSize, Overflow, PositionProperty};
 use stylo::values::specified::align::AlignFlags;
 use support::*;
 
@@ -1179,4 +1179,201 @@ fn container_preferred_axes_clamp_with_minimum_precedence_and_content_mode_ignor
     content_input.sizing_mode = SizingMode::ContentSize;
     let content = tree.compute_child_layout(root, content_input);
     assert_size(content.size, Size::ZERO);
+}
+
+// ---------------------------------------------------------------------------
+// Coverage restoration: content basis, intrinsic keywords, auto margins.
+// ---------------------------------------------------------------------------
+
+/// `flex-basis: content` and the intrinsic width keywords pick the item's
+/// content-based main size, and the treated-as-auto keywords fill the line.
+#[test]
+fn content_basis_and_intrinsic_width_keywords_set_main_sizes() {
+    use stylo::values::computed::Size as StyleSize;
+
+    let width_of = |style: TestStyle| -> f32 {
+        let mut tree = TestTree::default();
+        let item = tree.push_intrinsic_leaf(style, Size::new(30.0, 10.0), Size::new(90.0, 10.0));
+        let root = flex_container(&mut tree, TestStyle::default(), &[item]);
+        definite_layout(&tree, root, 300.0, 50.0);
+        tree.layout(item).size.width
+    };
+
+    // `flex-basis: content` defers to the (auto) width and measures.
+    assert_close(
+        width_of(TestStyle {
+            flex_basis: basis_content(),
+            ..TestStyle::default()
+        }),
+        90.0,
+    );
+    // Width keywords route through the deferred flex basis.
+    assert_close(
+        width_of(TestStyle {
+            size: Size::new(size_min_content(), size_auto()),
+            ..TestStyle::default()
+        }),
+        30.0,
+    );
+    assert_close(
+        width_of(TestStyle {
+            size: Size::new(size_max_content(), size_auto()),
+            ..TestStyle::default()
+        }),
+        90.0,
+    );
+    // The treated-as-auto keywords behave exactly like `auto`.
+    for keyword in [
+        StyleSize::FitContent,
+        StyleSize::Stretch,
+        StyleSize::WebkitFillAvailable,
+    ] {
+        assert_close(
+            width_of(TestStyle {
+                size: Size::new(keyword, size_auto()),
+                ..TestStyle::default()
+            }),
+            90.0,
+        );
+    }
+}
+
+/// A percentage-carrying `calc()` width with no definite basis sizes the
+/// flex base to max-content, and a min-content container probe sizes auto
+/// bases to min-content.
+#[test]
+fn indefinite_bases_fall_back_to_the_probe_extreme() {
+    let mut tree = TestTree::default();
+    let calc_item = tree.push_intrinsic_leaf(
+        TestStyle {
+            size: Size::new(size_calc(20.0, 0.1), size_auto()),
+            ..TestStyle::default()
+        },
+        Size::new(30.0, 10.0),
+        Size::new(90.0, 10.0),
+    );
+    let root = flex_container(&mut tree, TestStyle::default(), &[calc_item]);
+    // Width measured under max-content: the calc() cannot resolve, so the
+    // flex base is the max-content contribution.
+    let output = measure_layout(
+        &tree,
+        root,
+        Size::NONE,
+        Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
+    );
+    assert_close(output.size.width, 90.0);
+
+    let mut tree = TestTree::default();
+    let auto_item = tree.push_intrinsic_leaf(
+        TestStyle::default(),
+        Size::new(30.0, 10.0),
+        Size::new(90.0, 10.0),
+    );
+    let root = flex_container(&mut tree, TestStyle::default(), &[auto_item]);
+    let output = measure_layout(
+        &tree,
+        root,
+        Size::NONE,
+        Size::new(AvailableSpace::MinContent, AvailableSpace::MinContent),
+    );
+    assert_close(output.size.width, 30.0);
+}
+
+/// Intrinsic keywords on `max-width` clamp a growing flex item.
+#[test]
+fn max_width_intrinsic_keywords_clamp_growth() {
+    let clamped_width = |max_size: MaxSize| -> f32 {
+        let mut tree = TestTree::default();
+        let item = tree.push_intrinsic_leaf(
+            TestStyle {
+                flex_grow: nn(1.0),
+                max_size: Size::new(max_size, max_none()),
+                ..TestStyle::default()
+            },
+            Size::new(30.0, 10.0),
+            Size::new(90.0, 10.0),
+        );
+        let root = flex_container(&mut tree, TestStyle::default(), &[item]);
+        definite_layout(&tree, root, 300.0, 50.0);
+        tree.layout(item).size.width
+    };
+
+    assert_close(clamped_width(max_max_content()), 90.0);
+    assert_close(clamped_width(max_min_content()), 30.0);
+    // fit-content(50px) = min(90, max(50, 30)).
+    assert_close(clamped_width(max_fit_content_px(50.0)), 50.0);
+}
+
+/// A main-axis end auto margin absorbs the free space, overriding the
+/// container's content distribution.
+#[test]
+fn main_end_auto_margin_absorbs_free_space() {
+    let mut tree = TestTree::default();
+    let mut style = fixed_leaf_style(50.0, 20.0);
+    style.margin.right = margin_auto();
+    let item = tree.push_leaf(style, Size::new(50.0, 20.0), None);
+    let root = flex_container(
+        &mut tree,
+        TestStyle {
+            justify_content: content(AlignFlags::CENTER),
+            ..TestStyle::default()
+        },
+        &[item],
+    );
+
+    definite_layout(&tree, root, 200.0, 20.0);
+
+    // Without the auto margin, centering would put the item at x=75.
+    assert_close(tree.layout(item).location.x, 0.0);
+    assert_close(tree.layout(item).margin.right, 150.0);
+}
+
+/// Zero flex bases cannot shrink: a gap-overflowed line freezes cleanly at
+/// zero sizes instead of oscillating.
+#[test]
+fn zero_basis_items_freeze_under_gap_overflow() {
+    let mut tree = TestTree::default();
+    let first = tree.push_leaf(fixed_leaf_style(0.0, 10.0), Size::ZERO, None);
+    let second = tree.push_leaf(fixed_leaf_style(0.0, 10.0), Size::ZERO, None);
+    let root = flex_container(
+        &mut tree,
+        TestStyle {
+            gap: Size::new(gap_px(50.0), gap_normal()),
+            ..TestStyle::default()
+        },
+        &[first, second],
+    );
+
+    definite_layout(&tree, root, 30.0, 20.0);
+
+    assert_close(tree.layout(first).size.width, 0.0);
+    assert_close(tree.layout(second).size.width, 0.0);
+    assert_close(tree.layout(first).location.x, 0.0);
+    // The 50px gutter still separates the items; the line overflows.
+    assert_close(tree.layout(second).location.x, 50.0);
+}
+
+/// Explicit `flex-basis: min-content`/`max-content` values (not routed
+/// through the width) set the flex base size from the contributions.
+#[test]
+fn intrinsic_keyword_flex_bases_use_contributions() {
+    use stylo::values::computed::FlexBasis;
+
+    let width_of = |basis: FlexBasis| -> f32 {
+        let mut tree = TestTree::default();
+        let item = tree.push_intrinsic_leaf(
+            TestStyle {
+                flex_basis: basis,
+                ..TestStyle::default()
+            },
+            Size::new(30.0, 10.0),
+            Size::new(90.0, 10.0),
+        );
+        let root = flex_container(&mut tree, TestStyle::default(), &[item]);
+        definite_layout(&tree, root, 300.0, 50.0);
+        tree.layout(item).size.width
+    };
+
+    assert_close(width_of(FlexBasis::Size(size_min_content())), 30.0);
+    assert_close(width_of(FlexBasis::Size(size_max_content())), 90.0);
 }

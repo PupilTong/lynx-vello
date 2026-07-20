@@ -551,6 +551,10 @@ mod tests {
         ] {
             let _ = translate_generic_family(generic);
         }
+        assert!(matches!(
+            translate_generic_family(GenericFontFamily::SystemUi),
+            ParleyGenericFamily::SystemUi
+        ));
 
         let empty = EmptyRunStyle {
             font_style: FontStyle::ITALIC,
@@ -585,5 +589,64 @@ mod tests {
         assert_eq!(translated.text_wrap_mode, ParleyTextWrapMode::Wrap);
 
         let _ = LetterSpacing::normal();
+
+        // Any non-normal, non-italic computed style is an oblique angle.
+        let oblique = EmptyRunStyle {
+            font_style: FontStyle::oblique(20.0),
+            line_height: LineHeight::Normal,
+            weight: FontWeight::NORMAL,
+        };
+        let translated = translate_run_style(&oblique, WordBreak::KeepAll, text_wrap_mode::T::Wrap);
+        assert_eq!(translated.font_style, ParleyFontStyle::Oblique(Some(20.0)));
+        assert_eq!(translated.word_break, ParleyWordBreak::KeepAll);
+    }
+
+    struct GenericRunStyle;
+
+    impl TextRunStyle for GenericRunStyle {
+        fn font_family(&self) -> FontFamily {
+            FontFamily {
+                families: FontFamilyList {
+                    list: stylo::ArcSlice::from_iter(std::iter::once(SingleFontFamily::Generic(
+                        GenericFontFamily::Monospace,
+                    ))),
+                },
+                is_system_font: false,
+                is_initial: false,
+            }
+        }
+    }
+
+    #[test]
+    fn generic_families_translate_without_the_empty_list_fallback() {
+        let translated =
+            translate_run_style(&GenericRunStyle, WordBreak::Normal, text_wrap_mode::T::Wrap);
+        let ParleyFontFamily::List(list) = translated.font_family else {
+            panic!("family translation always produces a list");
+        };
+        assert_eq!(list.len(), 1);
+        assert!(matches!(
+            list[0],
+            ParleyFontFamilyName::Generic(ParleyGenericFamily::Monospace)
+        ));
+    }
+
+    #[test]
+    fn measurer_debug_is_non_exhaustive_and_stable() {
+        let mut context = TextContext::without_system_fonts();
+        assert_eq!(context.register_fonts(AHEM), 1);
+        let style = RunStyle {
+            family: named_family("Ahem"),
+        };
+        let container = ContainerStyle::default();
+        let runs = [TextRun {
+            text: "a",
+            style: &style,
+            preserve_newlines: false,
+        }];
+        let mut artifacts = ArtifactSlots::default();
+        let measurer =
+            TextMeasurer::new(&mut context, &mut artifacts, &container, runs.into_iter());
+        assert_eq!(format!("{measurer:?}"), "TextMeasurer { .. }");
     }
 }

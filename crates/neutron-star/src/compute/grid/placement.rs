@@ -1255,6 +1255,32 @@ mod tests {
     }
 
     #[test]
+    fn bit_range_scans_reach_middle_and_boundary_words() {
+        // A lone bit in the range's final word is found only by the
+        // last-word probe of the multi-word scan.
+        let mut tail_only = vec![0_u64; 4];
+        set_bit_range(&mut tail_only, 130, 131);
+        assert!(bit_range_any(&tail_only, 0, 131));
+        assert!(!bit_range_any(&tail_only, 0, 130));
+        assert_eq!(last_set_bit(&tail_only, 0, 131), Some(130));
+
+        // A lone bit in an interior word is found by the middle-word scans
+        // of both the any-set probe and the reverse search.
+        let mut middle_only = vec![0_u64; 4];
+        set_bit_range(&mut middle_only, 70, 71);
+        assert!(bit_range_any(&middle_only, 0, 200));
+        assert_eq!(last_set_bit(&middle_only, 0, 200), Some(70));
+
+        // A lone bit in the first word is the reverse search's last resort.
+        let mut head_only = vec![0_u64; 4];
+        set_bit_range(&mut head_only, 3, 4);
+        assert_eq!(last_set_bit(&head_only, 0, 200), Some(3));
+        assert_eq!(last_set_bit(&head_only, 0, 3), None);
+        // A single-word window that misses the bit reports no match.
+        assert_eq!(last_set_bit(&head_only, 8, 60), None);
+    }
+
+    #[test]
     fn oversized_occupancy_uses_sparse_merged_intervals() {
         let mut occupancy = Occupancy::new(
             TrackSpan { start: 0, end: 500 },

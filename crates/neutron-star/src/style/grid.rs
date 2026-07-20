@@ -269,6 +269,15 @@ mod tests {
         assert!(style.grid_auto_columns().0.is_empty());
         assert_eq!(style.grid_auto_flow(), GridAutoFlow::ROW);
         assert!(!style.grid_auto_flow().contains(GridAutoFlow::DENSE));
+        let gap = GridContainerStyle::gap(&style);
+        assert!(matches!(
+            gap.width,
+            NonNegativeLengthPercentageOrNormal::Normal
+        ));
+        assert!(matches!(
+            gap.height,
+            NonNegativeLengthPercentageOrNormal::Normal
+        ));
         assert_eq!(
             GridContainerStyle::align_content(&style),
             ContentDistribution::normal()

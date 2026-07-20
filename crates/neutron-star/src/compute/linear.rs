@@ -2337,6 +2337,48 @@ mod tests {
     }
 
     #[test]
+    fn flow_edge_writes_map_to_physical_edges_under_reversal() {
+        // Forward flows write the physical start edge; reversed flows write
+        // the opposite physical edge for the same flow-relative slot.
+        let mut edges = Edges::uniform(0.0_f32);
+        set_flow_start(&mut edges, Axis::Horizontal, false, 1.0);
+        set_flow_start(&mut edges, Axis::Horizontal, true, 2.0);
+        set_flow_start(&mut edges, Axis::Vertical, false, 3.0);
+        set_flow_start(&mut edges, Axis::Vertical, true, 4.0);
+        assert_eq!(
+            (edges.left, edges.right, edges.top, edges.bottom),
+            (1.0, 2.0, 3.0, 4.0)
+        );
+
+        let mut edges = Edges::uniform(0.0_f32);
+        set_flow_end(&mut edges, Axis::Horizontal, false, 1.0);
+        set_flow_end(&mut edges, Axis::Horizontal, true, 2.0);
+        set_flow_end(&mut edges, Axis::Vertical, false, 3.0);
+        set_flow_end(&mut edges, Axis::Vertical, true, 4.0);
+        assert_eq!(
+            (edges.left, edges.right, edges.top, edges.bottom),
+            (2.0, 1.0, 4.0, 3.0)
+        );
+
+        // The read-side helpers agree with the writes.
+        let edges = Edges {
+            left: 10.0,
+            right: 20.0,
+            top: 30.0,
+            bottom: 40.0,
+        };
+        assert_eq!(
+            (
+                flow_start(edges, Axis::Horizontal, true),
+                flow_end(edges, Axis::Horizontal, true),
+                flow_start(edges, Axis::Vertical, true),
+                flow_end(edges, Axis::Vertical, true),
+            ),
+            (20.0, 10.0, 40.0, 30.0)
+        );
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)]
     fn gravity_re_keying_matches_the_legacy_mappings() {
         let ltr_column = LinearAxes::new(linear_direction::T::Column, direction::T::Ltr);

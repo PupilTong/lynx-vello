@@ -297,4 +297,16 @@ mod tests {
         assert!(!Overflow::Visible.is_scrollable());
         assert!(Overflow::Hidden.is_scrollable());
     }
+
+    #[test]
+    fn reference_views_forward_core_accessors() {
+        // Engines consume `N::Style` views that are usually references; the
+        // blanket `&S` impl must serve the same values as the underlying
+        // style.
+        let style = Defaults;
+        let view = &style;
+        assert_eq!(CoreStyle::visibility(&view), visibility::T::Visible);
+        assert_eq!(CoreStyle::position(&view), PositionProperty::Static);
+        assert!(!CoreStyle::display(&view).is_none());
+    }
 }

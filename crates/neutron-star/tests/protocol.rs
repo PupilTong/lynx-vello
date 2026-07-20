@@ -849,3 +849,103 @@ fn embeddable_cache_round_trips_a_complete_key() {
     same_geometry_but_indefinite.definite_dimensions.width = false;
     assert_eq!(cache.get(same_geometry_but_indefinite), None);
 }
+
+/// A minimal host that does not override `child_count`: the protocol
+/// default must count through the `children()` iterator.
+#[derive(Clone, Copy)]
+struct CountingRef<'t> {
+    tree: &'t MockTree,
+    index: usize,
+}
+
+impl fmt::Debug for CountingRef<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("CountingRef")
+            .field(&self.index)
+            .finish()
+    }
+}
+
+struct CountingChildren<'t> {
+    tree: &'t MockTree,
+    ids: std::slice::Iter<'t, usize>,
+}
+
+impl<'t> Iterator for CountingChildren<'t> {
+    type Item = CountingRef<'t>;
+
+    fn next(&mut self) -> Option<CountingRef<'t>> {
+        let index = *self.ids.next()?;
+        Some(CountingRef {
+            tree: self.tree,
+            index,
+        })
+    }
+}
+
+impl<'t> LayoutNode for CountingRef<'t> {
+    type Style = &'t MockStyle;
+    type ChildIter = CountingChildren<'t>;
+
+    fn children(self) -> CountingChildren<'t> {
+        CountingChildren {
+            tree: self.tree,
+            ids: self.tree.nodes[self.index].children.iter(),
+        }
+    }
+
+    // `child_count` deliberately not overridden: the default counts.
+
+    fn style(self) -> &'t MockStyle {
+        &self.tree.nodes[self.index].style
+    }
+
+    fn compute_child_layout(self, input: LayoutInput) -> LayoutOutput {
+        LayoutOutput::new(input.known_dimensions.unwrap_or(Size::ZERO), Size::ZERO)
+    }
+
+    fn set_unrounded_layout(self, layout: &Layout) {
+        self.tree.session[self.index].unrounded.set(*layout);
+    }
+
+    fn unrounded_layout(self) -> Layout {
+        self.tree.session[self.index].unrounded.get()
+    }
+
+    fn set_final_layout(self, layout: &Layout) {
+        self.tree.session[self.index].finalized.set(*layout);
+    }
+
+    fn set_static_position(self, static_position: Point<f32>) {
+        self.tree.session[self.index]
+            .static_position
+            .set(static_position);
+    }
+
+    fn cache_get(self, _input: LayoutInput) -> Option<LayoutOutput> {
+        None
+    }
+
+    fn cache_store(self, _input: LayoutInput, _output: LayoutOutput) {}
+
+    fn cache_clear(self) {}
+}
+
+#[test]
+fn default_child_count_counts_the_children_iterator() {
+    let (tree, root) = leaf_tree();
+    let handle = CountingRef {
+        tree: &tree,
+        index: root,
+    };
+    assert_eq!(handle.child_count(), 2);
+    assert_eq!(
+        CountingRef {
+            tree: &tree,
+            index: tree.nodes[root].children[0],
+        }
+        .child_count(),
+        0
+    );
+}

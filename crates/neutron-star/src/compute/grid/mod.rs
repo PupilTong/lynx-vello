@@ -611,27 +611,32 @@ where
             .map(|value| clamp(value, item.min_size.height, item.max_size.height));
 
         let available = Size::new(
-            if matches!(raw_size.width, StyleSize::FitContentFunction(_)) {
-                resolved_preferred
+            match raw_size.width {
+                // An intrinsic preferred size selects the matching
+                // measurement constraint so the child re-resolves at that
+                // size instead of the grid-area default.
+                StyleSize::MinContent => AvailableSpace::MinContent,
+                StyleSize::MaxContent => AvailableSpace::MaxContent,
+                StyleSize::FitContentFunction(_) => resolved_preferred
                     .width
-                    .map_or(AvailableSpace::MaxContent, AvailableSpace::Definite)
-            } else {
-                known.width.map_or(AvailableSpace::MaxContent, |_| {
+                    .map_or(AvailableSpace::MaxContent, AvailableSpace::Definite),
+                _ => known.width.map_or(AvailableSpace::MaxContent, |_| {
                     AvailableSpace::Definite(
                         (area_size.width - item.margin.horizontal_sum()).max(0.0),
                     )
-                })
+                }),
             },
-            if matches!(raw_size.height, StyleSize::FitContentFunction(_)) {
-                resolved_preferred
+            match raw_size.height {
+                StyleSize::MinContent => AvailableSpace::MinContent,
+                StyleSize::MaxContent => AvailableSpace::MaxContent,
+                StyleSize::FitContentFunction(_) => resolved_preferred
                     .height
-                    .map_or(AvailableSpace::MaxContent, AvailableSpace::Definite)
-            } else {
-                known.height.map_or(AvailableSpace::MaxContent, |_| {
+                    .map_or(AvailableSpace::MaxContent, AvailableSpace::Definite),
+                _ => known.height.map_or(AvailableSpace::MaxContent, |_| {
                     AvailableSpace::Definite(
                         (area_size.height - item.margin.vertical_sum()).max(0.0),
                     )
-                })
+                }),
             },
         );
         let parent_size = Size::new(Some(area_size.width), Some(area_size.height));
@@ -1415,6 +1420,39 @@ mod tests {
 
     fn line(value: i32) -> GridPlacement {
         GridPlacement::Line(value)
+    }
+
+    #[test]
+    fn absolute_axis_lines_resolve_edges_independently() {
+        // Grid Â§10.1: two definite lines resolve independently, keeping a
+        // reversed pair as-is instead of swapping.
+        assert_eq!(
+            absolute_axis_lines(Line::new(line(3), line(2)), 4),
+            (Some(2), Some(1))
+        );
+        // The invalid line 0 is defensively normalized to `auto` even on
+        // the direct in-crate constructor path.
+        assert_eq!(
+            absolute_axis_lines(Line::new(line(0), line(2)), 4),
+            (None, Some(1))
+        );
+        assert_eq!(
+            absolute_axis_lines(Line::new(line(2), line(0)), 4),
+            (Some(1), None)
+        );
+        assert_eq!(
+            absolute_axis_lines(Line::new(GridPlacement::Auto, line(0)), 4),
+            (None, None)
+        );
+        // span/line binds both edges; span/span binds neither.
+        assert_eq!(
+            absolute_axis_lines(Line::new(GridPlacement::Span(1), line(3)), 4),
+            (Some(1), Some(2))
+        );
+        assert_eq!(
+            absolute_axis_lines(Line::new(GridPlacement::Span(2), GridPlacement::Span(2)), 4),
+            (None, None)
+        );
     }
 
     #[test]

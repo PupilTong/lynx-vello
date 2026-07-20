@@ -13,14 +13,16 @@ mod support;
 use neutron_star::compute::{LeafMeasureInput, LeafMetrics};
 use neutron_star::prelude::*;
 use stylo::computed_values::{box_sizing, direction, linear_direction, visibility};
-use stylo::values::computed::{ContentDistribution, Display, PositionProperty};
+use stylo::values::computed::{
+    ContentDistribution, Display, MaxSize, PositionProperty, Size as StyleSize,
+};
 use stylo::values::specified::align::AlignFlags;
 use support::{
     TestId, TestStyle, TestTree, assert_close, assert_point, assert_size, border_px, content,
     definite_layout, fixed_leaf, inset_auto, inset_pct, inset_px, items, margin_auto, margin_pct,
-    margin_px, max_none, max_pct, max_px, measure_layout, nn, npx, perform_layout, ratio,
-    self_align, size_auto, size_calc, size_fit_content_px, size_max_content, size_min_content,
-    size_pct, size_px,
+    margin_px, max_fit_content_px, max_max_content, max_min_content, max_none, max_pct, max_px,
+    measure_layout, nn, npx, perform_layout, ratio, self_align, size_auto, size_calc,
+    size_fit_content_px, size_max_content, size_min_content, size_pct, size_px,
 };
 
 fn edges<T>(left: T, right: T, top: T, bottom: T) -> Edges<T> {
@@ -1605,4 +1607,489 @@ fn intrinsic_percentage_box_refresh_precedes_container_min_clamp() {
     assert_size(output.size, Size::new(100.0, 100.0));
     assert_close(tree.layout(child).margin.left, 10.0);
     assert_point(tree.layout(child).location, Point::new(10.0, 50.0));
+}
+
+// ---------------------------------------------------------------------------
+// Coverage restoration: weight freezing, intrinsic keywords, refreshes.
+// ---------------------------------------------------------------------------
+
+/// When every weighted item is clamped up by its minimum, all of them
+/// freeze and the distribution loop exits with the overflowing minima.
+#[test]
+fn weighted_minima_freeze_every_item_and_overflow_the_axis() {
+    let mut tree = TestTree::default();
+    let make_item = |tree: &mut TestTree| {
+        tree.push_leaf(
+            TestStyle {
+                linear_weight: nn(1.0),
+                min_size: Size::new(size_auto(), size_px(80.0)),
+                ..TestStyle::default()
+            },
+            Size::ZERO,
+            None,
+        )
+    };
+    let first = make_item(&mut tree);
+    let second = make_item(&mut tree);
+    let root = tree.push_linear(TestStyle::default(), vec![first, second]);
+
+    definite_layout(&tree, root, 50.0, 100.0);
+
+    // Each item wanted 50 but is floored at 80; the column overflows.
+    assert_close(tree.layout(first).size.height, 80.0);
+    assert_close(tree.layout(second).size.height, 80.0);
+    assert_close(tree.layout(first).location.y, 0.0);
+    assert_close(tree.layout(second).location.y, 80.0);
+}
+
+/// Intrinsic sizing keywords on the preferred, minimum, and maximum sizes
+/// of linear items resolve through content probes on both axes.
+#[test]
+fn intrinsic_keywords_resolve_on_linear_items() {
+    // Leaf contributions: min-content 30x12, max-content 90x48.
+    let run = |style: TestStyle| -> Size<f32> {
+        let mut tree = TestTree::default();
+        let item = tree.push_intrinsic_leaf(style, Size::new(30.0, 12.0), Size::new(90.0, 48.0));
+        let root = tree.push_linear(TestStyle::default(), vec![item]);
+        definite_layout(&tree, root, 200.0, 100.0);
+        tree.layout(item).size
+    };
+
+    // Preferred keywords on the cross (width) axis of a column.
+    assert_close(
+        run(TestStyle {
+            size: Size::new(size_min_content(), size_auto()),
+            ..TestStyle::default()
+        })
+        .width,
+        30.0,
+    );
+    assert_close(
+        run(TestStyle {
+            size: Size::new(size_max_content(), size_auto()),
+            ..TestStyle::default()
+        })
+        .width,
+        90.0,
+    );
+    // Height keywords request a vertical-axis probe.
+    assert_close(
+        run(TestStyle {
+            size: Size::new(size_px(40.0), size_max_content()),
+            ..TestStyle::default()
+        })
+        .height,
+        48.0,
+    );
+    // Both axes intrinsic in one item: a single dual-axis probe.
+    let both = run(TestStyle {
+        size: Size::new(size_min_content(), size_min_content()),
+        ..TestStyle::default()
+    });
+    assert_size(both, Size::new(30.0, 12.0));
+
+    // The bare `stretch` keyword behaves as auto (fills the container)
+    // even while the minimum requests an intrinsic probe.
+    let stretched = run(TestStyle {
+        size: Size::new(StyleSize::Stretch, size_auto()),
+        min_size: Size::new(size_min_content(), size_auto()),
+        ..TestStyle::default()
+    });
+    assert_close(stretched.width, 200.0);
+    let fit_keyword = run(TestStyle {
+        size: Size::new(StyleSize::FitContent, size_auto()),
+        min_size: Size::new(size_max_content(), size_auto()),
+        ..TestStyle::default()
+    });
+    // min-width:max-content floors the auto-behaving keyword at 90... the
+    // stretch fill is already wider, so the floor is inert here.
+    assert_close(fit_keyword.width, 200.0);
+
+    // Maximum keywords clamp the default cross-axis stretch.
+    assert_close(
+        run(TestStyle {
+            max_size: Size::new(max_min_content(), max_none()),
+            ..TestStyle::default()
+        })
+        .width,
+        30.0,
+    );
+    assert_close(
+        run(TestStyle {
+            max_size: Size::new(max_max_content(), max_none()),
+            ..TestStyle::default()
+        })
+        .width,
+        90.0,
+    );
+    assert_close(
+        run(TestStyle {
+            max_size: Size::new(max_fit_content_px(40.0), max_none()),
+            ..TestStyle::default()
+        })
+        .width,
+        40.0,
+    );
+    // A definite max still clamps while the minimum probes intrinsically.
+    assert_close(
+        run(TestStyle {
+            min_size: Size::new(size_min_content(), size_auto()),
+            max_size: Size::new(max_px(50.0), max_none()),
+            ..TestStyle::default()
+        })
+        .width,
+        50.0,
+    );
+    // The bare keywords behave as `none` on max sizes.
+    assert_close(
+        run(TestStyle {
+            max_size: Size::new(MaxSize::FitContent, max_none()),
+            min_size: Size::new(size_min_content(), size_auto()),
+            ..TestStyle::default()
+        })
+        .width,
+        200.0,
+    );
+    assert_close(
+        run(TestStyle {
+            max_size: Size::new(MaxSize::Stretch, max_none()),
+            min_size: Size::new(size_min_content(), size_auto()),
+            ..TestStyle::default()
+        })
+        .width,
+        200.0,
+    );
+}
+
+/// Percentage padding and auto margins re-resolve against the container's
+/// final content-box width once it is known.
+#[test]
+fn percentage_padding_and_auto_margins_refresh_after_container_sizing() {
+    let mut tree = TestTree::default();
+    let wide = fixed_leaf(&mut tree, 100.0, 10.0);
+    let padded = tree.push_leaf(
+        TestStyle {
+            size: Size::new(size_px(20.0), size_px(10.0)),
+            padding: Edges {
+                left: support::npct(0.1),
+                ..Edges::uniform(npx(0.0))
+            },
+            margin: Edges {
+                left: margin_auto(),
+                right: margin_auto(),
+                top: margin_px(0.0),
+                bottom: margin_px(0.0),
+            },
+            ..TestStyle::default()
+        },
+        Size::new(20.0, 10.0),
+        None,
+    );
+    let root = tree.push_linear(TestStyle::default(), vec![wide, padded]);
+
+    // The container's width comes from its content (the 100px child).
+    let output = perform_layout(
+        &tree,
+        root,
+        Size::NONE,
+        Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
+    );
+
+    assert_close(output.size.width, 100.0);
+    let layout = tree.layout(padded);
+    // 10% of the final 100px content box, re-resolved after sizing.
+    assert_close(layout.padding.left, 10.0);
+    // Sizing keeps its Starlight fast-path value (padding was indefinite
+    // during measurement); only the exported edges refresh.
+    assert_close(layout.size.width, 20.0);
+    // The refreshed auto margins center the 20px box.
+    assert_close(layout.location.x, 40.0);
+}
+
+/// `position: relative` insets follow item direction physically, and only
+/// percentage-carrying insets are re-resolved after container sizing.
+#[test]
+fn relative_insets_follow_item_direction_and_refresh_percentages() {
+    let mut tree = TestTree::default();
+    // Both edges set: LTR takes `left`, RTL takes `-right`.
+    let rtl_item = tree.push_leaf(
+        TestStyle {
+            direction: direction::T::Rtl,
+            inset: Edges {
+                left: inset_pct(0.1),
+                right: inset_px(10.0),
+                top: inset_auto(),
+                bottom: inset_auto(),
+            },
+            ..fixed_style(20.0, 10.0)
+        },
+        Size::new(20.0, 10.0),
+        None,
+    );
+    // Only the far edge set: offset is negative.
+    let right_only = tree.push_leaf(
+        TestStyle {
+            inset: Edges {
+                left: inset_auto(),
+                right: inset_px(5.0),
+                top: inset_auto(),
+                bottom: inset_auto(),
+            },
+            ..fixed_style(20.0, 10.0)
+        },
+        Size::new(20.0, 10.0),
+        None,
+    );
+    // Absolute-length insets keep their fast-path value while a sibling
+    // forces the percentage refresh pass.
+    let px_item = tree.push_leaf(
+        TestStyle {
+            inset: Edges {
+                left: inset_px(7.0),
+                right: inset_auto(),
+                top: inset_auto(),
+                bottom: inset_auto(),
+            },
+            ..fixed_style(20.0, 10.0)
+        },
+        Size::new(20.0, 10.0),
+        None,
+    );
+    let root = tree.push_linear(TestStyle::default(), vec![rtl_item, right_only, px_item]);
+
+    definite_layout(&tree, root, 200.0, 100.0);
+
+    // RTL: -right wins over the (10% = 20px) left inset.
+    assert_close(tree.layout(rtl_item).location.x, -10.0);
+    assert_close(tree.layout(right_only).location.x, -5.0);
+    assert_close(tree.layout(px_item).location.x, 7.0);
+    assert_close(tree.layout(right_only).location.y, 10.0);
+}
+
+/// A linear container's `aspect-ratio` derives the missing outer axis in
+/// both directions, honoring box-sizing and the min/max clamp.
+#[test]
+fn container_aspect_ratio_derives_missing_axis_with_clamps() {
+    // Height-definite content-box container with padding: the ratio applies
+    // to the content box, then padding is added back.
+    let mut tree = TestTree::default();
+    let root = tree.push_linear(
+        TestStyle {
+            aspect_ratio: ratio(2.0),
+            padding: Edges::uniform(npx(10.0)),
+            ..TestStyle::default()
+        },
+        Vec::new(),
+    );
+    let output = perform_layout(
+        &tree,
+        root,
+        Size::new(None, Some(100.0)),
+        Size::new(AvailableSpace::MaxContent, AvailableSpace::Definite(100.0)),
+    );
+    assert_size(output.size, Size::new(180.0, 100.0));
+
+    // The derived width is still clamped by max-width.
+    let mut tree = TestTree::default();
+    let root = tree.push_linear(
+        TestStyle {
+            aspect_ratio: ratio(2.0),
+            max_size: Size::new(max_px(150.0), max_none()),
+            ..TestStyle::default()
+        },
+        Vec::new(),
+    );
+    let output = perform_layout(
+        &tree,
+        root,
+        Size::new(None, Some(100.0)),
+        Size::new(AvailableSpace::MaxContent, AvailableSpace::Definite(100.0)),
+    );
+    assert_size(output.size, Size::new(150.0, 100.0));
+
+    // Width-definite border-box container: the ratio applies to the border
+    // box directly.
+    let mut tree = TestTree::default();
+    let root = tree.push_linear(
+        TestStyle {
+            aspect_ratio: ratio(2.0),
+            box_sizing: box_sizing::T::BorderBox,
+            padding: Edges::uniform(npx(10.0)),
+            size: Size::new(size_px(100.0), size_auto()),
+            ..TestStyle::default()
+        },
+        Vec::new(),
+    );
+    let output = perform_layout(
+        &tree,
+        root,
+        Size::new(Some(100.0), None),
+        Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
+    );
+    assert_size(output.size, Size::new(100.0, 50.0));
+}
+
+/// Weighted items with an aspect ratio derive their cross size from the
+/// forced main size; an explicit cross size suppresses the transfer.
+#[test]
+fn weighted_ratio_items_derive_cross_from_forced_main() {
+    let mut tree = TestTree::default();
+    let derived = tree.push_leaf(
+        TestStyle {
+            linear_weight: nn(1.0),
+            aspect_ratio: ratio(2.0),
+            box_sizing: box_sizing::T::BorderBox,
+            ..TestStyle::default()
+        },
+        Size::ZERO,
+        None,
+    );
+    let explicit = tree.push_leaf(
+        TestStyle {
+            linear_weight: nn(1.0),
+            aspect_ratio: ratio(2.0),
+            size: Size::new(size_px(40.0), size_auto()),
+            ..TestStyle::default()
+        },
+        Size::ZERO,
+        None,
+    );
+    let root = tree.push_linear(TestStyle::default(), vec![derived, explicit]);
+
+    definite_layout(&tree, root, 300.0, 100.0);
+
+    // Each weighted item gets 50px of main (height); the ratio item's width
+    // follows the border box: 50 * 2 = 100.
+    assert_size(tree.layout(derived).size, Size::new(100.0, 50.0));
+    // The explicit 40px width wins over the ratio transfer.
+    assert_close(tree.layout(explicit).size.width, 40.0);
+}
+
+/// `position: static` children lay out in flow but never take the
+/// relative inset nudge.
+#[test]
+fn static_children_skip_relative_inset_nudges() {
+    let mut tree = TestTree::default();
+    let static_item = tree.push_leaf(
+        TestStyle {
+            position: PositionProperty::Static,
+            inset: Edges {
+                left: inset_px(15.0),
+                top: inset_px(5.0),
+                right: inset_auto(),
+                bottom: inset_auto(),
+            },
+            ..fixed_style(20.0, 10.0)
+        },
+        Size::new(20.0, 10.0),
+        None,
+    );
+    let root = tree.push_linear(TestStyle::default(), vec![static_item]);
+
+    definite_layout(&tree, root, 100.0, 100.0);
+
+    assert_point(tree.layout(static_item).location, Point::new(0.0, 0.0));
+}
+
+/// A fixed child whose insets pin both axes needs no static-position
+/// measurement; the recorded static position is the padding-box origin.
+#[test]
+fn fixed_child_with_pinned_axes_skips_static_measurement() {
+    let mut tree = TestTree::default();
+    let fixed_child = tree.push_leaf(
+        TestStyle {
+            position: PositionProperty::Fixed,
+            inset: Edges {
+                left: inset_px(4.0),
+                right: inset_auto(),
+                top: inset_px(6.0),
+                bottom: inset_auto(),
+            },
+            ..fixed_style(20.0, 10.0)
+        },
+        Size::new(20.0, 10.0),
+        None,
+    );
+    let root = tree.push_linear(
+        TestStyle {
+            border: Edges::uniform(border_px(2.0)),
+            padding: Edges::uniform(npx(5.0)),
+            ..TestStyle::default()
+        },
+        vec![fixed_child],
+    );
+
+    definite_layout(&tree, root, 100.0, 100.0);
+
+    // No measurement ran; the host resolves the pinned insets later from
+    // the recorded padding-box origin.
+    assert_eq!(
+        tree.static_position(fixed_child),
+        Some(Point::new(2.0, 2.0))
+    );
+    assert_eq!(
+        tree.session_node(fixed_child).measure_inputs.borrow().len(),
+        0
+    );
+}
+
+/// A percentage margin edge forces the post-sizing margin refresh, which
+/// re-resolves auto edges on the same box as auto (not zero).
+#[test]
+fn margin_refresh_preserves_auto_edges_alongside_percentages() {
+    let mut tree = TestTree::default();
+    let wide = fixed_leaf(&mut tree, 100.0, 10.0);
+    let item = tree.push_leaf(
+        TestStyle {
+            size: Size::new(size_px(20.0), size_px(10.0)),
+            margin: Edges {
+                left: margin_pct(0.1),
+                right: margin_auto(),
+                top: margin_px(0.0),
+                bottom: margin_px(0.0),
+            },
+            ..TestStyle::default()
+        },
+        Size::new(20.0, 10.0),
+        None,
+    );
+    let root = tree.push_linear(TestStyle::default(), vec![wide, item]);
+
+    let output = perform_layout(
+        &tree,
+        root,
+        Size::NONE,
+        Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
+    );
+
+    assert_close(output.size.width, 100.0);
+    let layout = tree.layout(item);
+    // 10% of the 100px content box on the left; the auto right edge soaks
+    // up the remaining 70px of cross space.
+    assert_close(layout.margin.left, 10.0);
+    assert_close(layout.location.x, 10.0);
+    assert_close(layout.margin.right, 70.0);
+}
+
+/// An aspect ratio transfers percentage-height definiteness to the width,
+/// so the child resolves before any content probe.
+#[test]
+fn aspect_ratio_transfers_percentage_definiteness_across_axes() {
+    let mut tree = TestTree::default();
+    let item = tree.push_leaf(
+        TestStyle {
+            size: Size::new(size_auto(), size_pct(0.5)),
+            aspect_ratio: ratio(2.0),
+            align_self: self_align(AlignFlags::START),
+            ..TestStyle::default()
+        },
+        Size::ZERO,
+        None,
+    );
+    let root = tree.push_linear(TestStyle::default(), vec![item]);
+
+    definite_layout(&tree, root, 300.0, 100.0);
+
+    // height: 50% of 100 = 50; the 2:1 ratio derives width 100.
+    assert_size(tree.layout(item).size, Size::new(100.0, 50.0));
 }

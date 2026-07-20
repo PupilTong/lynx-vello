@@ -7,7 +7,9 @@
 mod support;
 
 use neutron_star::prelude::*;
-use stylo::computed_values::{relative_center, relative_layout_once, visibility};
+use stylo::computed_values::{
+    box_sizing, direction, relative_center, relative_layout_once, visibility,
+};
 use stylo::values::computed::lynx_layout::RelativeReference;
 use stylo::values::computed::{Display, PositionProperty};
 use support::*;
@@ -1137,4 +1139,327 @@ fn intrinsic_max_width_remeasures_width_sensitive_height() {
     definite_layout(&tree, root, 100.0, 100.0);
 
     assert_size(tree.layout(child).size, Size::new(20.0, 50.0));
+}
+
+// ---------------------------------------------------------------------------
+// Coverage restoration: intrinsic keywords, offsets, dependency fallbacks.
+// ---------------------------------------------------------------------------
+
+/// Intrinsic keyword widths on relative children resolve through content
+/// probes; the treated-as-auto keywords take the available space.
+#[test]
+fn intrinsic_keyword_widths_resolve_on_relative_children() {
+    use stylo::values::computed::{MaxSize, Size as StyleSize};
+
+    let width_of = |style: TestStyle| -> f32 {
+        let mut tree = TestTree::default();
+        let item = tree.push_measured_leaf(style, intrinsic_width_bounded_by_available);
+        let root = relative_container(&mut tree, TestStyle::default(), &[item]);
+        definite_layout(&tree, root, 300.0, 100.0);
+        tree.layout(item).size.width
+    };
+
+    // The measurer answers 20 at min-content, 200 at max-content, and caps
+    // definite available widths at 200.
+    assert_close(
+        width_of(TestStyle {
+            size: Size::new(size_min_content(), size_auto()),
+            ..TestStyle::default()
+        }),
+        20.0,
+    );
+    assert_close(
+        width_of(TestStyle {
+            size: Size::new(size_max_content(), size_auto()),
+            ..TestStyle::default()
+        }),
+        200.0,
+    );
+    // fit-content(150px) measures inside a definite 150px window.
+    assert_close(
+        width_of(TestStyle {
+            size: Size::new(size_fit_content_px(150.0), size_auto()),
+            ..TestStyle::default()
+        }),
+        150.0,
+    );
+    // fit-content(50%) resolves against the 300px containing block.
+    assert_close(
+        width_of(TestStyle {
+            size: Size::new(size_fit_content_pct(0.5), size_auto()),
+            ..TestStyle::default()
+        }),
+        150.0,
+    );
+    // Under border-box sizing the limit already includes the edges.
+    assert_close(
+        width_of(TestStyle {
+            size: Size::new(size_fit_content_px(150.0), size_auto()),
+            box_sizing: box_sizing::T::BorderBox,
+            padding: Edges::uniform(npx(10.0)),
+            ..TestStyle::default()
+        }),
+        150.0,
+    );
+    // Bare keywords behave as auto: the measurer caps the 300px window.
+    for keyword in [StyleSize::FitContent, StyleSize::Stretch] {
+        assert_close(
+            width_of(TestStyle {
+                size: Size::new(keyword, size_auto()),
+                ..TestStyle::default()
+            }),
+            200.0,
+        );
+    }
+
+    // Intrinsic minimum and maximum keywords clamp measured auto widths.
+    assert_close(
+        width_of(TestStyle {
+            max_size: Size::new(max_max_content(), max_none()),
+            ..TestStyle::default()
+        }),
+        200.0,
+    );
+    assert_close(
+        width_of(TestStyle {
+            max_size: Size::new(max_min_content(), max_none()),
+            ..TestStyle::default()
+        }),
+        20.0,
+    );
+    assert_close(
+        width_of(TestStyle {
+            max_size: Size::new(max_fit_content_px(150.0), max_none()),
+            ..TestStyle::default()
+        }),
+        150.0,
+    );
+    // Bare keyword maximums behave as `none`.
+    assert_close(
+        width_of(TestStyle {
+            size: Size::new(size_px(250.0), size_auto()),
+            max_size: Size::new(MaxSize::Stretch, max_none()),
+            ..TestStyle::default()
+        }),
+        250.0,
+    );
+}
+
+/// An intrinsic minimum floors a narrow measured width, and intrinsic
+/// keyword heights request a vertical probe.
+#[test]
+fn intrinsic_minimums_and_heights_probe_their_axes() {
+    // min-width:max-content floors a narrow measured width.
+    let mut tree = TestTree::default();
+    let floored = tree.push_measured_leaf(
+        TestStyle {
+            min_size: Size::new(size_max_content(), size_auto()),
+            ..TestStyle::default()
+        },
+        intrinsic_width_bounded_by_available,
+    );
+    let root = relative_container(&mut tree, TestStyle::default(), &[floored]);
+    definite_layout(&tree, root, 100.0, 50.0);
+    assert_close(tree.layout(floored).size.width, 200.0);
+
+    // Intrinsic keyword heights request a vertical probe.
+    let mut tree = TestTree::default();
+    let item = tree.push_intrinsic_leaf(
+        TestStyle {
+            size: Size::new(size_px(40.0), size_max_content()),
+            ..TestStyle::default()
+        },
+        Size::new(30.0, 12.0),
+        Size::new(90.0, 48.0),
+    );
+    let root = relative_container(&mut tree, TestStyle::default(), &[item]);
+    definite_layout(&tree, root, 300.0, 100.0);
+    assert_close(tree.layout(item).size.height, 48.0);
+}
+
+/// The container's own measurement resolves child `fit-content()` limits
+/// when they are lengths and passes intrinsic constraints through when a
+/// percentage limit has no basis.
+#[test]
+fn container_measurement_resolves_child_fit_content_limits() {
+    let measured_width = |size: stylo::values::computed::Size| -> f32 {
+        let mut tree = TestTree::default();
+        let item = tree.push_measured_leaf(
+            TestStyle {
+                size: Size::new(size, size_auto()),
+                ..TestStyle::default()
+            },
+            intrinsic_width_bounded_by_available,
+        );
+        let root = relative_container(&mut tree, TestStyle::default(), &[item]);
+        measure_layout(
+            &tree,
+            root,
+            Size::NONE,
+            Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
+        )
+        .size
+        .width
+    };
+
+    assert_close(measured_width(size_fit_content_px(150.0)), 150.0);
+    // A percentage limit cannot resolve during the intrinsic measure; the
+    // child answers with its max-content width.
+    assert_close(measured_width(size_fit_content_pct(0.5)), 200.0);
+}
+
+/// Relative-position insets: with both edges set LTR honors `left` and RTL
+/// honors `-right`; a lone far edge produces a negative offset; `static`
+/// children never take the nudge.
+#[test]
+fn relative_insets_follow_direction_and_skip_static_children() {
+    let run = |style: TestStyle| -> Point<f32> {
+        let mut tree = TestTree::default();
+        let item = tree.push_leaf(style, Size::new(20.0, 10.0), None);
+        let root = relative_container(&mut tree, TestStyle::default(), &[item]);
+        definite_layout(&tree, root, 100.0, 50.0);
+        tree.layout(item).location
+    };
+
+    let both_edges = |direction: direction::T| TestStyle {
+        direction,
+        inset: Edges {
+            left: inset_px(12.0),
+            right: inset_px(30.0),
+            top: inset_auto(),
+            bottom: inset_auto(),
+        },
+        size: Size::new(size_px(20.0), size_px(10.0)),
+        ..TestStyle::default()
+    };
+    assert_point(run(both_edges(direction::T::Ltr)), Point::new(12.0, 0.0));
+    assert_point(run(both_edges(direction::T::Rtl)), Point::new(-30.0, 0.0));
+
+    assert_point(
+        run(TestStyle {
+            inset: Edges {
+                left: inset_auto(),
+                right: inset_px(8.0),
+                top: inset_auto(),
+                bottom: inset_auto(),
+            },
+            size: Size::new(size_px(20.0), size_px(10.0)),
+            ..TestStyle::default()
+        }),
+        Point::new(-8.0, 0.0),
+    );
+
+    assert_point(
+        run(TestStyle {
+            position: PositionProperty::Static,
+            inset: Edges {
+                left: inset_px(15.0),
+                right: inset_auto(),
+                top: inset_px(5.0),
+                bottom: inset_auto(),
+            },
+            size: Size::new(size_px(20.0), size_px(10.0)),
+            ..TestStyle::default()
+        }),
+        Point::new(0.0, 0.0),
+    );
+}
+
+/// Same-axis adjacency cycles cannot deadlock: the loop falls back to
+/// document order for each cycle and later members still resolve against
+/// the fallback-positioned ones.
+#[test]
+fn same_axis_adjacency_cycles_fall_back_to_document_order() {
+    let mut tree = TestTree::default();
+    let mut a_style = relative_leaf_style(10.0, 10.0, 1);
+    a_style.relative_adjacent.right = id(2);
+    let a = tree.push_leaf(a_style, Size::new(10.0, 10.0), None);
+    let mut b_style = relative_leaf_style(10.0, 10.0, 2);
+    b_style.relative_adjacent.right = id(1);
+    let b = tree.push_leaf(b_style, Size::new(10.0, 10.0), None);
+    // A second, independent cycle exercises the fallback scan resuming
+    // past already-ordered items.
+    let mut c_style = relative_leaf_style(10.0, 10.0, 3);
+    c_style.relative_adjacent.right = id(4);
+    let c = tree.push_leaf(c_style, Size::new(10.0, 10.0), None);
+    let mut d_style = relative_leaf_style(10.0, 10.0, 4);
+    d_style.relative_adjacent.right = id(3);
+    let d = tree.push_leaf(d_style, Size::new(10.0, 10.0), None);
+    let root = relative_container(&mut tree, TestStyle::default(), &[a, b, c, d]);
+
+    definite_layout(&tree, root, 100.0, 50.0);
+
+    // The first cycle member takes its default position; its partner then
+    // resolves adjacency against it normally.
+    assert_close(tree.layout(a).location.x, 0.0);
+    assert_close(tree.layout(b).location.x, 10.0);
+    assert_close(tree.layout(c).location.x, 0.0);
+    assert_close(tree.layout(d).location.x, 10.0);
+}
+
+/// The parent sentinel in an adjacency channel is not an item lookup: it
+/// resolves against the parent's edge (and creates no item dependency).
+#[test]
+fn parent_sentinel_in_adjacency_channel_uses_the_parent_edge() {
+    let mut tree = TestTree::default();
+    let mut style = relative_leaf_style(10.0, 10.0, 1);
+    style.relative_adjacent.right = RELATIVE_PARENT;
+    let item = tree.push_leaf(style, Size::new(10.0, 10.0), None);
+    let root = relative_container(&mut tree, TestStyle::default(), &[item]);
+
+    definite_layout(&tree, root, 100.0, 50.0);
+
+    // "To the right of the parent": the left edge lands on the parent's
+    // right content edge.
+    assert_point(tree.layout(item).location, Point::new(100.0, 0.0));
+}
+
+/// Quantitative axes keep their values while a sibling axis property
+/// requests an intrinsic probe: the resolver leaves lengths, and the
+/// treated-as-auto keywords, untouched.
+#[test]
+fn quantitative_values_survive_intrinsic_resolution() {
+    use stylo::values::computed::Size as StyleSize;
+
+    let mut tree = TestTree::default();
+    // width:120px + min-width:min-content — the length wins (120 > 20).
+    let fixed_width = tree.push_measured_leaf(
+        TestStyle {
+            size: Size::new(size_px(120.0), size_auto()),
+            min_size: Size::new(size_min_content(), size_auto()),
+            ..TestStyle::default()
+        },
+        intrinsic_width_bounded_by_available,
+    );
+    // width:fit-content (bare keyword) + intrinsic minimum: behaves auto.
+    let fit_keyword = tree.push_measured_leaf(
+        TestStyle {
+            size: Size::new(StyleSize::FitContent, size_auto()),
+            min_size: Size::new(size_min_content(), size_auto()),
+            ..TestStyle::default()
+        },
+        intrinsic_width_bounded_by_available,
+    );
+    // width:stretch + max-width:150px: the definite maximum still clamps.
+    let stretch_keyword = tree.push_measured_leaf(
+        TestStyle {
+            size: Size::new(StyleSize::Stretch, size_auto()),
+            min_size: Size::new(size_min_content(), size_auto()),
+            max_size: Size::new(max_px(150.0), max_none()),
+            ..TestStyle::default()
+        },
+        intrinsic_width_bounded_by_available,
+    );
+    let root = relative_container(
+        &mut tree,
+        TestStyle::default(),
+        &[fixed_width, fit_keyword, stretch_keyword],
+    );
+
+    definite_layout(&tree, root, 300.0, 100.0);
+
+    assert_close(tree.layout(fixed_width).size.width, 120.0);
+    // Auto-behaving keyword: available 300 capped at the measurer's 200.
+    assert_close(tree.layout(fit_keyword).size.width, 200.0);
+    assert_close(tree.layout(stretch_keyword).size.width, 150.0);
 }

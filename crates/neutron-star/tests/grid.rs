@@ -2539,3 +2539,795 @@ mod visibility {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Cross-size feedback, keyword sizing, and defensive-placement behavior.
+// ---------------------------------------------------------------------------
+
+/// Grid §12.1: an item whose inline contribution depends on its block size
+/// (here through `aspect-ratio` + `align-self: stretch`) gets exactly one
+/// columns→rows rerun once row sizes are known.
+#[test]
+fn cross_size_dependent_ratio_item_forces_one_column_feedback_rerun() {
+    let mut tree = TestTree::default();
+    let fixed = fixed_leaf(&mut tree, 40.0, 80.0);
+    let square_style = TestStyle {
+        aspect_ratio: ratio(1.0, 1.0),
+        align_self: SelfAlignment(AlignFlags::STRETCH),
+        ..TestStyle::default()
+    };
+    let square = tree.push_leaf(square_style, Size::new(10.0, 10.0), Size::new(10.0, 10.0));
+    let style = grid_style(&[auto_track(), auto_track()], &[]);
+    let root = tree.push_grid(style, vec![fixed, square]);
+
+    let output = intrinsic_layout(&tree, root);
+
+    // Before rows are sized the ratio item's min/max-content width is its
+    // 10px content. The 80px row makes it 80px wide, so the second column
+    // must be re-sized to 80 rather than staying at 10.
+    assert_size(output.size, Size::new(120.0, 80.0));
+    assert_point(tree.layout(square).location, Point::new(40.0, 0.0));
+    assert_size(tree.layout(square).size, Size::new(80.0, 80.0));
+    assert_size(tree.layout(fixed).size, Size::new(40.0, 80.0));
+}
+
+/// Grid §11.6: the container baseline comes from the first non-empty row.
+/// A non-baseline item there synthesizes from its bottom border edge and
+/// wins over a real baseline-sharing group in a later row.
+#[test]
+fn container_baseline_prefers_first_row_synthesis_over_later_baseline_group() {
+    let mut tree = TestTree::default();
+    let top = fixed_leaf(&mut tree, 20.0, 10.0);
+    let mut bottom_style = fixed_leaf_style(20.0, 10.0);
+    bottom_style.align_self = SelfAlignment(AlignFlags::BASELINE);
+    bottom_style.grid_row = placement(line(2), line(3));
+    let bottom = tree.push_leaf(bottom_style, Size::new(20.0, 10.0), Size::new(20.0, 10.0));
+    tree.source_node_mut(bottom).first_baseline = Some(6.0);
+    let mut style = grid_style(&[px(50.0)], &[px(30.0), px(30.0)]);
+    style.align_items = ItemPlacement(AlignFlags::START);
+    style.justify_items = justify_items(AlignFlags::START);
+    let root = tree.push_grid(style, vec![top, bottom]);
+
+    let output = definite_layout(&tree, root, 50.0, 60.0);
+
+    // Row 1's only item exposes no baseline, so its bottom edge (y=10)
+    // becomes the container baseline; row 2's group (y=30+6) is ignored.
+    assert_eq!(output.first_baselines.y, Some(10.0));
+    assert_close(tree.layout(bottom).location.y, 30.0);
+}
+
+/// A text-like leaf for keyword-sizing tests: min-content 30, max-content
+/// 90, and it wraps into a definite available width like real text.
+fn wrapping_leaf(input: neutron_star::compute::LeafMeasureInput) -> LeafMetrics {
+    let width = input
+        .known_dimensions
+        .width
+        .unwrap_or(match input.available_space.width {
+            AvailableSpace::MinContent => 30.0,
+            AvailableSpace::MaxContent => 90.0,
+            AvailableSpace::Definite(limit) => limit.clamp(30.0, 90.0),
+        });
+    let height = input.known_dimensions.height.unwrap_or(10.0);
+    LeafMetrics::new(Size::new(width, height))
+}
+
+/// The intrinsic sizing keywords resolve against content on grid items:
+/// `min-content`/`max-content`/`fit-content()` size to their contributions,
+/// while the bare keywords `fit-content`/`stretch` behave as `auto` and
+/// stretch to the track.
+#[test]
+fn intrinsic_keyword_preferred_sizes_resolve_against_content() {
+    let mut tree = support::TestTree::default();
+    let widths = [
+        (StyleSize::MinContent, 30.0),
+        (StyleSize::MaxContent, 90.0),
+        (StyleSize::FitContentFunction(NonNegative(lp(50.0))), 50.0),
+        (StyleSize::FitContent, 100.0),
+        (StyleSize::Stretch, 100.0),
+    ];
+    let mut items = Vec::new();
+    for (width, _) in &widths {
+        let style = support::TestStyle {
+            size: Size::new(width.clone(), StyleSize::Auto),
+            ..support::TestStyle::default()
+        };
+        items.push(tree.push_measured_leaf(style, wrapping_leaf));
+    }
+    let root = tree.push_grid(
+        support::TestStyle {
+            template_columns: support::track_list(vec![support::track_px(100.0)]),
+            ..support::TestStyle::default()
+        },
+        items.clone(),
+    );
+
+    support::definite_layout(&tree, root, 100.0, 50.0);
+
+    for (item, (width, expected)) in items.iter().zip(&widths) {
+        assert_close(tree.layout(*item).size.width, *expected);
+        let _ = width;
+    }
+}
+
+/// Intrinsic keywords on `max-width` clamp a stretched grid item, while the
+/// bare `fit-content`/`stretch` keywords behave as `none` on `max-width`
+/// and as `auto` on `min-width`.
+#[test]
+fn intrinsic_keyword_minimum_and_maximum_sizes_clamp_grid_items() {
+    let mut tree = support::TestTree::default();
+    let cases: Vec<(support::TestStyle, f32)> = vec![
+        // The default stretch fills the 100px track.
+        (support::TestStyle::default(), 100.0),
+        // max-width:min-content clamps the stretch down to 30.
+        (
+            support::TestStyle {
+                max_size: Size::new(MaxSize::MinContent, MaxSize::none()),
+                ..support::TestStyle::default()
+            },
+            30.0,
+        ),
+        // max-width:max-content clamps it to 90.
+        (
+            support::TestStyle {
+                max_size: Size::new(MaxSize::MaxContent, MaxSize::none()),
+                ..support::TestStyle::default()
+            },
+            90.0,
+        ),
+        // max-width:60px clamps between the contributions.
+        (
+            support::TestStyle {
+                max_size: Size::new(max_px(60.0), MaxSize::none()),
+                ..support::TestStyle::default()
+            },
+            60.0,
+        ),
+        // The bare keywords behave as `none`.
+        (
+            support::TestStyle {
+                max_size: Size::new(MaxSize::FitContent, MaxSize::none()),
+                ..support::TestStyle::default()
+            },
+            100.0,
+        ),
+        (
+            support::TestStyle {
+                max_size: Size::new(MaxSize::Stretch, MaxSize::none()),
+                ..support::TestStyle::default()
+            },
+            100.0,
+        ),
+        // min-width bare keywords behave as `auto` (no forced floor).
+        (
+            support::TestStyle {
+                min_size: Size::new(StyleSize::FitContent, StyleSize::Auto),
+                ..support::TestStyle::default()
+            },
+            100.0,
+        ),
+        (
+            support::TestStyle {
+                min_size: Size::new(StyleSize::Stretch, StyleSize::Auto),
+                ..support::TestStyle::default()
+            },
+            100.0,
+        ),
+    ];
+    let mut items = Vec::new();
+    for (style, _) in &cases {
+        items.push(tree.push_measured_leaf(style.clone(), wrapping_leaf));
+    }
+    let root = tree.push_grid(
+        support::TestStyle {
+            template_columns: support::track_list(vec![support::track_px(100.0)]),
+            ..support::TestStyle::default()
+        },
+        items.clone(),
+    );
+
+    support::definite_layout(&tree, root, 100.0, 100.0);
+
+    for (item, (_, expected)) in items.iter().zip(&cases) {
+        assert_close(tree.layout(*item).size.width, *expected);
+    }
+}
+
+/// `justify-content: end` packs tracks against the end edge, and the
+/// physical `left`/`right` keywords keep their physical meaning under both
+/// directions for content and item alignment.
+#[test]
+fn physical_alignment_keywords_stay_physical_across_directions() {
+    // (justify_content, justify_items, direction, expected item x)
+    let track_x =
+        |content_flags: AlignFlags, item_flags: AlignFlags, text_direction: direction::T| -> f32 {
+            let mut tree = TestTree::default();
+            let item = fixed_leaf(&mut tree, 30.0, 10.0);
+            let mut style = grid_style(&[px(30.0)], &[px(10.0)]);
+            style.justify_content = ContentDistribution::new(content_flags);
+            style.justify_items = justify_items(item_flags);
+            style.direction = text_direction;
+            let root = tree.push_grid(style, vec![item]);
+            definite_layout(&tree, root, 100.0, 10.0);
+            tree.layout(item).location.x
+        };
+
+    // Content distribution: end packs the lone track at the far edge.
+    assert_close(
+        track_x(AlignFlags::END, AlignFlags::START, direction::T::Ltr),
+        70.0,
+    );
+    // `left` puts the track at the physical left under both directions.
+    assert_close(
+        track_x(AlignFlags::LEFT, AlignFlags::START, direction::T::Ltr),
+        0.0,
+    );
+    assert_close(
+        track_x(AlignFlags::LEFT, AlignFlags::START, direction::T::Rtl),
+        0.0,
+    );
+    // `right` puts the track at the physical right under both directions.
+    assert_close(
+        track_x(AlignFlags::RIGHT, AlignFlags::START, direction::T::Ltr),
+        70.0,
+    );
+    assert_close(
+        track_x(AlignFlags::RIGHT, AlignFlags::START, direction::T::Rtl),
+        70.0,
+    );
+
+    // Item self-alignment inside a wide track: physical keywords again.
+    let item_x = |item_flags: AlignFlags, text_direction: direction::T| -> f32 {
+        let mut tree = TestTree::default();
+        let item = fixed_leaf(&mut tree, 30.0, 10.0);
+        let mut style = grid_style(&[px(100.0)], &[px(10.0)]);
+        style.justify_items = justify_items(item_flags);
+        style.direction = text_direction;
+        let root = tree.push_grid(style, vec![item]);
+        definite_layout(&tree, root, 100.0, 10.0);
+        tree.layout(item).location.x
+    };
+    assert_close(item_x(AlignFlags::LEFT, direction::T::Ltr), 0.0);
+    assert_close(item_x(AlignFlags::LEFT, direction::T::Rtl), 0.0);
+    assert_close(item_x(AlignFlags::RIGHT, direction::T::Ltr), 70.0);
+    assert_close(item_x(AlignFlags::RIGHT, direction::T::Rtl), 70.0);
+}
+
+/// Absolutely positioned grid children with intrinsic preferred widths
+/// measure at those sizes for their static-position fallback, and the bare
+/// keywords behave as `auto`.
+#[test]
+fn absolute_children_resolve_intrinsic_preferred_widths() {
+    let mut tree = support::TestTree::default();
+    let widths = [
+        (StyleSize::MinContent, 30.0),
+        (StyleSize::MaxContent, 90.0),
+        (StyleSize::FitContentFunction(NonNegative(lp(60.0))), 60.0),
+        // The treated-as-auto keywords measure against the containing block.
+        (StyleSize::FitContent, 90.0),
+        (StyleSize::Stretch, 90.0),
+        (StyleSize::WebkitFillAvailable, 90.0),
+    ];
+    let mut items = Vec::new();
+    for (width, _) in &widths {
+        let style = support::TestStyle {
+            position: PositionProperty::Absolute,
+            size: Size::new(width.clone(), support::size_px(10.0)),
+            ..support::TestStyle::default()
+        };
+        items.push(tree.push_measured_leaf(style, wrapping_leaf));
+    }
+    let root = tree.push_grid(
+        support::TestStyle {
+            template_columns: support::track_list(vec![support::track_px(100.0)]),
+            template_rows: support::track_list(vec![support::track_px(40.0)]),
+            ..support::TestStyle::default()
+        },
+        items.clone(),
+    );
+
+    support::definite_layout(&tree, root, 100.0, 40.0);
+
+    for (item, (width, expected)) in items.iter().zip(&widths) {
+        assert_close(tree.layout(*item).size.width, *expected);
+        let _ = width;
+    }
+}
+
+/// An absolutely positioned child with fully-auto insets and horizontal
+/// auto margins centers in the containing block via the margin share.
+#[test]
+fn absolute_child_auto_margins_share_free_space_in_static_position() {
+    let mut tree = TestTree::default();
+    let mut child_style = fixed_leaf_style(40.0, 10.0);
+    child_style.position = PositionProperty::Absolute;
+    child_style.margin.left = Margin::Auto;
+    child_style.margin.right = Margin::Auto;
+    let child = tree.push_leaf(child_style, Size::new(40.0, 10.0), Size::new(40.0, 10.0));
+    let root = tree.push_grid(grid_style(&[px(100.0)], &[px(50.0)]), vec![child]);
+
+    definite_layout(&tree, root, 100.0, 50.0);
+
+    assert_close(tree.layout(child).location.x, 30.0);
+    assert_size(tree.layout(child).size, Size::new(40.0, 10.0));
+}
+
+/// Grid §8.3 defensive placements on absolutely positioned children: the
+/// invalid line number 0 behaves as `auto`, and span/span placements leave
+/// both edges attached to the padding box.
+#[test]
+fn absolute_defensive_placements_fall_back_to_padding_edges() {
+    let mut tree = TestTree::default();
+    // Line 0 on the start side: only the end line binds.
+    let mut zero_start = fixed_leaf_style(10.0, 10.0);
+    zero_start.position = PositionProperty::Absolute;
+    zero_start.grid_column = placement(line(0), line(2));
+    zero_start.inset.left = inset_px(0.0);
+    let zero_start = tree.push_leaf(zero_start, Size::new(10.0, 10.0), Size::new(10.0, 10.0));
+
+    // Line 0 on the end side of an otherwise-auto axis: both edges auto,
+    // so opposing insets stretch across the whole padding box.
+    let zero_end_style = TestStyle {
+        position: PositionProperty::Absolute,
+        inset: Edges::uniform(inset_px(0.0)),
+        grid_column: placement(GridLine::auto(), line(0)),
+        ..TestStyle::default()
+    };
+    let zero_end = tree.push_leaf(zero_end_style, Size::ZERO, Size::ZERO);
+
+    // span/span is indefinite in both directions: full padding box.
+    let span_span_style = TestStyle {
+        position: PositionProperty::Absolute,
+        inset: Edges::uniform(inset_px(0.0)),
+        grid_column: placement(span(1), span(1)),
+        ..TestStyle::default()
+    };
+    let span_span = tree.push_leaf(span_span_style, Size::ZERO, Size::ZERO);
+
+    // span/line binds both edges through §8.3 conflict handling.
+    let span_line_style = TestStyle {
+        position: PositionProperty::Absolute,
+        inset: Edges::uniform(inset_px(0.0)),
+        grid_column: placement(span(1), line(2)),
+        ..TestStyle::default()
+    };
+    let span_line = tree.push_leaf(span_line_style, Size::ZERO, Size::ZERO);
+
+    let style = grid_style(&[px(60.0), px(40.0)], &[px(20.0)]);
+    let root = tree.push_grid(style, vec![zero_start, zero_end, span_span, span_line]);
+
+    definite_layout(&tree, root, 100.0, 20.0);
+
+    // Start fell back to the padding edge; the end line (x=60) held.
+    assert_close(tree.layout(zero_start).location.x, 0.0);
+    // Both-auto axes stretch across the whole 100x20 padding box.
+    assert_size(tree.layout(zero_end).size, Size::new(100.0, 20.0));
+    assert_size(tree.layout(span_span).size, Size::new(100.0, 20.0));
+    // The span start resolved against line 2: containing block is track 1.
+    assert_close(tree.layout(span_line).location.x, 0.0);
+    assert_size(tree.layout(span_line).size, Size::new(60.0, 20.0));
+}
+
+/// `position: static` grid items ignore their insets while `relative` items
+/// are nudged; an end-side auto margin absorbs free space without moving
+/// the item.
+#[test]
+fn static_items_ignore_insets_and_end_auto_margins_absorb_space() {
+    let mut tree = TestTree::default();
+    let mut static_style = fixed_leaf_style(20.0, 10.0);
+    static_style.position = PositionProperty::Static;
+    static_style.inset.left = inset_px(15.0);
+    static_style.inset.top = inset_px(5.0);
+    let static_item = tree.push_leaf(static_style, Size::new(20.0, 10.0), Size::new(20.0, 10.0));
+
+    let mut relative_style = fixed_leaf_style(20.0, 10.0);
+    relative_style.inset.left = inset_px(15.0);
+    relative_style.inset.top = inset_px(5.0);
+    let relative_item =
+        tree.push_leaf(relative_style, Size::new(20.0, 10.0), Size::new(20.0, 10.0));
+
+    let mut margin_style = fixed_leaf_style(20.0, 10.0);
+    margin_style.margin.right = Margin::Auto;
+    margin_style.margin.bottom = Margin::Auto;
+    let margin_item = tree.push_leaf(margin_style, Size::new(20.0, 10.0), Size::new(20.0, 10.0));
+
+    let mut style = grid_style(&[px(100.0)], &[px(20.0), px(20.0), px(30.0)]);
+    style.justify_items = justify_items(AlignFlags::START);
+    style.align_items = ItemPlacement(AlignFlags::START);
+    let root = tree.push_grid(style, vec![static_item, relative_item, margin_item]);
+
+    definite_layout(&tree, root, 100.0, 70.0);
+
+    assert_point(tree.layout(static_item).location, Point::new(0.0, 0.0));
+    assert_point(tree.layout(relative_item).location, Point::new(15.0, 25.0));
+    // The auto end margins soak up the 80x20 free space; the item stays at
+    // the start of its 100x30 area.
+    assert_point(tree.layout(margin_item).location, Point::new(0.0, 40.0));
+    let margin = tree.layout(margin_item).margin;
+    assert_close(margin.right, 80.0);
+    assert_close(margin.bottom, 20.0);
+}
+
+/// `repeat(auto-fill, ...)` derives its count from the definite side of
+/// each repeated track and runs exactly once when no side is definite or
+/// nothing fits.
+#[test]
+fn auto_fill_counts_use_definite_breadths_or_run_once() {
+    // Returns the columns of the first three auto-placed 10x10 items.
+    let columns_of = |template: TrackSize, inner: f32, gap: f32| -> Vec<f32> {
+        let mut tree = TestTree::default();
+        let items = [
+            fixed_leaf(&mut tree, 10.0, 10.0),
+            fixed_leaf(&mut tree, 10.0, 10.0),
+            fixed_leaf(&mut tree, 10.0, 10.0),
+        ];
+        let mut style = grid_style(&[], &[]);
+        style.template_columns = track_list(vec![repeat(RepeatCount::AutoFill, vec![template])]);
+        if gap > 0.0 {
+            style.gap.width = gap_px(gap);
+        }
+        style.justify_items = justify_items(AlignFlags::START);
+        style.align_items = ItemPlacement(AlignFlags::START);
+        let root = tree.push_grid(style, items.to_vec());
+        definite_layout(&tree, root, inner, 40.0);
+        items
+            .iter()
+            .map(|item| tree.layout(*item).location.x)
+            .collect()
+    };
+
+    // minmax(auto, 40px): the 40px maximum counts. 100px fits two
+    // repetitions once the 10px gutter is charged: item 3 wraps.
+    let positions = columns_of(minmax(TrackBreadth::Auto, fixed_breadth(40.0)), 100.0, 10.0);
+    assert_eq!(positions, vec![0.0, 50.0, 0.0]);
+
+    // minmax(min-content, 40px): the fixed maximum still counts.
+    let positions = columns_of(
+        minmax(TrackBreadth::MinContent, fixed_breadth(40.0)),
+        90.0,
+        0.0,
+    );
+    assert_eq!(positions, vec![0.0, 40.0, 0.0]);
+
+    // minmax(20px, min-content): only the 20px minimum is definite.
+    let positions = columns_of(
+        minmax(fixed_breadth(20.0), TrackBreadth::MinContent),
+        50.0,
+        0.0,
+    );
+    assert_eq!(positions, vec![0.0, 20.0, 0.0]);
+
+    // minmax(30px, max-content): likewise counted by the 30px minimum.
+    let positions = columns_of(
+        minmax(fixed_breadth(30.0), TrackBreadth::MaxContent),
+        70.0,
+        0.0,
+    );
+    assert_eq!(positions, vec![0.0, 30.0, 0.0]);
+
+    // minmax(max-content, 40px): the intrinsic minimum has no counting
+    // breadth, so only the 40px maximum counts.
+    let positions = columns_of(
+        minmax(TrackBreadth::MaxContent, fixed_breadth(40.0)),
+        90.0,
+        0.0,
+    );
+    assert_eq!(positions, vec![0.0, 40.0, 0.0]);
+
+    // A fully intrinsic track has no counting breadth: one repetition, so
+    // every item lands at x=0 in its own row.
+    let positions = columns_of(auto_track(), 300.0, 0.0);
+    assert_eq!(positions, vec![0.0, 0.0, 0.0]);
+
+    // A repetition wider than the container still occurs once.
+    let positions = columns_of(px(200.0), 100.0, 0.0);
+    assert_eq!(positions, vec![0.0, 0.0, 0.0]);
+
+    // A zero-sized repetition is counted with the 1px anti-DoS floor, so
+    // expansion terminates; every zero-width column starts at x=0.
+    let positions = columns_of(px(0.0), 100.0, 0.0);
+    assert_eq!(positions, vec![0.0, 0.0, 0.0]);
+}
+
+/// Template tracks size an itemless grid: fixed tracks contribute their
+/// length and intrinsic tracks contribute nothing.
+#[test]
+fn empty_template_tracks_size_an_itemless_grid() {
+    let mut tree = TestTree::default();
+    let style = grid_style(&[auto_track(), px(50.0)], &[auto_track()]);
+    let root = tree.push_grid(style, Vec::new());
+
+    let output = intrinsic_layout(&tree, root);
+
+    assert_size(output.size, Size::new(50.0, 0.0));
+}
+
+/// Two items with the same multi-track span form one distribution group;
+/// the larger minimum drives both intrinsic columns.
+#[test]
+fn equal_span_groups_distribute_min_contributions_together() {
+    let mut tree = TestTree::default();
+    let narrow_style = TestStyle {
+        grid_column: placement(line(1), line(3)),
+        ..TestStyle::default()
+    };
+    let narrow = tree.push_leaf(narrow_style, Size::new(60.0, 10.0), Size::new(60.0, 10.0));
+    let wide_style = TestStyle {
+        grid_column: placement(line(1), line(3)),
+        ..TestStyle::default()
+    };
+    let wide = tree.push_leaf(wide_style, Size::new(80.0, 10.0), Size::new(80.0, 10.0));
+    let mut style = grid_style(&[auto_track(), auto_track()], &[]);
+    style.justify_content = ContentDistribution::new(AlignFlags::START);
+    let root = tree.push_grid(style, vec![narrow, wide]);
+
+    definite_layout(&tree, root, 200.0, 20.0);
+
+    assert_size(tree.layout(narrow).size, Size::new(80.0, 10.0));
+    assert_size(tree.layout(wide).size, Size::new(80.0, 10.0));
+}
+
+/// Intrinsic min-/max-content measurement of the container sizes auto and
+/// `minmax(min-content, 1fr)` columns from item contributions.
+#[test]
+fn container_intrinsic_measures_size_auto_and_flexible_tracks() {
+    let measure = |track: TrackSize, available: AvailableSpace| -> f32 {
+        let mut tree = TestTree::default();
+        let item = intrinsic_leaf(&mut tree, Size::new(30.0, 10.0), Size::new(90.0, 10.0));
+        let style = grid_style(&[track], &[]);
+        let root = tree.push_grid(style, vec![item]);
+        let output = tree.compute_child_layout(
+            root,
+            LayoutInput::compute_size(
+                Size::NONE,
+                Size::NONE,
+                Size::new(available, available),
+                RequestedAxis::Both,
+            ),
+        );
+        output.size.width
+    };
+
+    assert_close(measure(auto_track(), AvailableSpace::MinContent), 30.0);
+    assert_close(measure(auto_track(), AvailableSpace::MaxContent), 90.0);
+    assert_close(
+        measure(
+            minmax(TrackBreadth::MinContent, TrackBreadth::Flex(Flex(1.0))),
+            AvailableSpace::MinContent,
+        ),
+        30.0,
+    );
+    assert_close(
+        measure(
+            minmax(TrackBreadth::MinContent, TrackBreadth::Flex(Flex(1.0))),
+            AvailableSpace::MaxContent,
+        ),
+        90.0,
+    );
+}
+
+/// `minmax(20px, min-content)` and hostile fixed repetition counts: the
+/// min-content maximum caps growth at the contribution, and huge repeat
+/// counts clamp to the UA track limit instead of allocating unbounded
+/// track lists.
+#[test]
+fn min_content_maximums_and_hostile_repeat_counts_stay_bounded() {
+    let mut tree = TestTree::default();
+    let item = intrinsic_leaf(&mut tree, Size::new(30.0, 10.0), Size::new(90.0, 10.0));
+    let mut style = grid_style(
+        &[minmax(fixed_breadth(20.0), TrackBreadth::MinContent)],
+        &[],
+    );
+    style.justify_content = ContentDistribution::new(AlignFlags::START);
+    let root = tree.push_grid(style, vec![item]);
+    definite_layout(&tree, root, 200.0, 20.0);
+    // Base 20 grows to the 30px min-content growth limit, no further.
+    assert_close(tree.layout(item).size.width, 30.0);
+
+    // 40,000 requested 1px tracks clamp to the 10,000-track UA limit.
+    let mut tree = TestTree::default();
+    let mut probe_style = fixed_leaf_style(1.0, 10.0);
+    probe_style.grid_column = placement(line(-1), line(-2));
+    let probe = tree.push_leaf(probe_style, Size::new(1.0, 10.0), Size::new(1.0, 10.0));
+    let mut style = grid_style(&[], &[px(10.0)]);
+    style.template_columns = track_list(vec![repeat(RepeatCount::Number(40_000), vec![px(1.0)])]);
+    let root = tree.push_grid(style, vec![probe]);
+    let output = intrinsic_layout(&tree, root);
+    assert_size(output.size, Size::new(10_000.0, 10.0));
+    // The probe sits in the final (10,000th) track.
+    assert_close(tree.layout(probe).location.x, 9_999.0);
+}
+
+/// Intrinsic keyword heights on grid items request the matching vertical
+/// measurement constraint in the final positioning pass.
+#[test]
+fn intrinsic_keyword_heights_resolve_against_content() {
+    // A text-like leaf on the block axis: min-content 12, max-content 48,
+    // and a definite available height is honored like a wrap constraint.
+    fn column_leaf(input: neutron_star::compute::LeafMeasureInput) -> LeafMetrics {
+        let height = input
+            .known_dimensions
+            .height
+            .unwrap_or(match input.available_space.height {
+                AvailableSpace::MinContent => 12.0,
+                AvailableSpace::MaxContent => 48.0,
+                AvailableSpace::Definite(limit) => limit.clamp(12.0, 48.0),
+            });
+        let width = input.known_dimensions.width.unwrap_or(40.0);
+        LeafMetrics::new(Size::new(width, height))
+    }
+
+    let mut tree = support::TestTree::default();
+    let heights = [
+        (StyleSize::MinContent, 12.0),
+        (StyleSize::MaxContent, 48.0),
+        (StyleSize::FitContentFunction(NonNegative(lp(20.0))), 20.0),
+    ];
+    let mut items = Vec::new();
+    for (height, _) in &heights {
+        let style = support::TestStyle {
+            size: Size::new(support::size_px(40.0), height.clone()),
+            ..support::TestStyle::default()
+        };
+        items.push(tree.push_measured_leaf(style, column_leaf));
+    }
+    let root = tree.push_grid(
+        support::TestStyle {
+            template_columns: support::track_list(vec![support::track_px(50.0)]),
+            ..support::TestStyle::default()
+        },
+        items.clone(),
+    );
+
+    support::definite_layout(&tree, root, 50.0, 200.0);
+
+    for (item, (height, expected)) in items.iter().zip(&heights) {
+        assert_close(tree.layout(*item).size.height, *expected);
+        let _ = height;
+    }
+}
+
+/// A grid container whose own preferred width is an intrinsic keyword sizes
+/// its tracks under that constraint even inside definite available space.
+#[test]
+fn container_intrinsic_keyword_widths_override_available_space() {
+    let width_of = |width: StyleSize| -> f32 {
+        let mut tree = TestTree::default();
+        let item = intrinsic_leaf(&mut tree, Size::new(30.0, 10.0), Size::new(90.0, 10.0));
+        let mut style = grid_style(&[auto_track()], &[]);
+        style.size = Size::new(width, StyleSize::Auto);
+        let root = tree.push_grid(style, vec![item]);
+        let output = tree.compute_child_layout(
+            root,
+            LayoutInput::perform_layout(
+                Size::NONE,
+                Size::new(Some(200.0), Some(50.0)),
+                Size::new(
+                    AvailableSpace::Definite(200.0),
+                    AvailableSpace::Definite(50.0),
+                ),
+            ),
+        );
+        output.size.width
+    };
+
+    assert_close(width_of(StyleSize::MinContent), 30.0);
+    assert_close(width_of(StyleSize::MaxContent), 90.0);
+
+    // The block axis takes the same override.
+    let height_of = |height: StyleSize| -> f32 {
+        let mut tree = TestTree::default();
+        let item = intrinsic_leaf(&mut tree, Size::new(30.0, 10.0), Size::new(90.0, 40.0));
+        let mut style = grid_style(&[px(90.0)], &[auto_track()]);
+        style.size = Size::new(StyleSize::Auto, height);
+        let root = tree.push_grid(style, vec![item]);
+        let output = tree.compute_child_layout(
+            root,
+            LayoutInput::perform_layout(
+                Size::NONE,
+                Size::new(Some(200.0), Some(200.0)),
+                Size::new(
+                    AvailableSpace::Definite(200.0),
+                    AvailableSpace::Definite(200.0),
+                ),
+            ),
+        );
+        output.size.height
+    };
+    assert_close(height_of(StyleSize::MinContent), 10.0);
+    assert_close(height_of(StyleSize::MaxContent), 40.0);
+}
+
+/// Auto-placement details: an `auto / <line>` placement binds the end edge,
+/// fully definite items exit placement early under column flow, and
+/// definite-column items steer the sparse and dense cursors.
+#[test]
+fn placement_binds_end_lines_and_flows_around_definite_items() {
+    // auto / 3 occupies the track just before line 3.
+    let mut tree = TestTree::default();
+    let mut style = fixed_leaf_style(10.0, 10.0);
+    style.grid_column = placement(GridLine::auto(), line(3));
+    let item = tree.push_leaf(style, Size::new(10.0, 10.0), Size::new(10.0, 10.0));
+    let mut grid = grid_style(&[px(20.0), px(20.0), px(20.0)], &[px(10.0)]);
+    grid.justify_items = justify_items(AlignFlags::START);
+    let root = tree.push_grid(grid, vec![item]);
+    definite_layout(&tree, root, 60.0, 10.0);
+    assert_close(tree.layout(item).location.x, 20.0);
+
+    // Fully definite placements under column flow keep their areas.
+    let mut tree = TestTree::default();
+    let mut style = fixed_leaf_style(10.0, 10.0);
+    style.grid_column = placement(line(2), line(3));
+    style.grid_row = placement(line(1), line(2));
+    let definite = tree.push_leaf(style, Size::new(10.0, 10.0), Size::new(10.0, 10.0));
+    let mut grid = grid_style(&[px(20.0), px(20.0)], &[px(10.0), px(10.0)]);
+    grid.auto_flow = GridAutoFlow::COLUMN;
+    grid.justify_items = justify_items(AlignFlags::START);
+    grid.align_items = ItemPlacement(AlignFlags::START);
+    let root = tree.push_grid(grid, vec![definite]);
+    definite_layout(&tree, root, 40.0, 20.0);
+    assert_point(tree.layout(definite).location, Point::new(20.0, 0.0));
+
+    // Sparse row flow: a definite-column item behind the cursor wraps to
+    // the next row instead of backtracking.
+    let sparse = |dense: bool| -> (Point<f32>, Point<f32>, Point<f32>) {
+        let mut tree = TestTree::default();
+        let first = fixed_leaf(&mut tree, 10.0, 10.0);
+        let mut second_style = fixed_leaf_style(10.0, 10.0);
+        second_style.grid_column = placement(line(2), line(3));
+        let second = tree.push_leaf(second_style, Size::new(10.0, 10.0), Size::new(10.0, 10.0));
+        let mut third_style = fixed_leaf_style(10.0, 10.0);
+        third_style.grid_column = placement(line(1), line(2));
+        let third = tree.push_leaf(third_style, Size::new(10.0, 10.0), Size::new(10.0, 10.0));
+        let mut grid = grid_style(&[px(20.0), px(20.0)], &[px(10.0), px(10.0), px(10.0)]);
+        grid.auto_flow = if dense {
+            GridAutoFlow::ROW | GridAutoFlow::DENSE
+        } else {
+            GridAutoFlow::ROW
+        };
+        grid.justify_items = justify_items(AlignFlags::START);
+        grid.align_items = ItemPlacement(AlignFlags::START);
+        let root = tree.push_grid(grid, vec![first, second, third]);
+        definite_layout(&tree, root, 40.0, 30.0);
+        (
+            tree.layout(first).location,
+            tree.layout(second).location,
+            tree.layout(third).location,
+        )
+    };
+
+    let (first, second, third) = sparse(false);
+    assert_point(first, Point::new(0.0, 0.0));
+    assert_point(second, Point::new(20.0, 0.0));
+    // Sparse: the cursor is past column 1, so the item wraps to row 2.
+    assert_point(third, Point::new(0.0, 10.0));
+
+    let (first, second, third) = sparse(true);
+    assert_point(first, Point::new(0.0, 0.0));
+    assert_point(second, Point::new(20.0, 0.0));
+    // Dense: packing restarts from the row start; both cells of row 1 are
+    // taken, so the item still lands in row 2 after probing row 1.
+    assert_point(third, Point::new(0.0, 10.0));
+}
+
+/// Trailing template components after the UA track limit are dropped
+/// rather than materialized.
+#[test]
+fn template_components_after_the_track_limit_are_dropped() {
+    let mut tree = TestTree::default();
+    let mut probe_style = fixed_leaf_style(1.0, 10.0);
+    probe_style.grid_column = placement(line(-1), line(-2));
+    let probe = tree.push_leaf(probe_style, Size::new(1.0, 10.0), Size::new(1.0, 10.0));
+    let mut style = grid_style(&[], &[px(10.0)]);
+    style.template_columns = track_list(vec![
+        repeat(RepeatCount::Number(10_000), vec![px(1.0)]),
+        TrackListValue::TrackSize(px(50.0)),
+    ]);
+    let root = tree.push_grid(style, vec![probe]);
+
+    let output = intrinsic_layout(&tree, root);
+
+    // The 50px track fell past the 10,000-track limit: total width is the
+    // repetition alone and the last line is still the 1px track.
+    assert_size(output.size, Size::new(10_000.0, 10.0));
+    assert_close(tree.layout(probe).location.x, 9_999.0);
+}
