@@ -28,12 +28,12 @@ Normative and source references:
 
 | Algorithm | Observable behavior covered by native tests | Reference area |
 |---|---|---|
-| Flex | line collection including exact fits and oversized items; per-line flexible-length resolution; grow, shrink, and freezing; gaps and wrapping; direction and alignment; auto margins; collapsed-item struts; intrinsic measurement and baselines; absolute and hoisted static positions | Flexbox §§4, 5–9 |
+| Flex | line collection including exact fits and oversized items; per-line flexible-length resolution; grow, shrink, and freezing; gaps and wrapping; direction and alignment; auto margins; intrinsic measurement and baselines; absolute and hoisted static positions | Flexbox §§4, 5–9 |
 | Grid | explicit, automatic, dense, implicit, negative-line, and span placement; fixed, intrinsic, flexible, fit-content, and minmax tracks; item and content alignment; auto margins and baselines; RTL; measurement; absolute grid areas and hoisted static positions | Grid §§7–8, 10–12 |
 | Linear | orientation and direction; gravity precedence; weight sums, exhausted space, min/max freezing, and redistribution; order and visibility; intrinsic and constrained measurement; baseline synthesis; auto margins; absolute and hoisted static positions; nested algorithm dispatch | Starlight `DetermineItemSize`, `LayoutWeightedChildren`, `AlignInFlowItems`, `CrossAxisAlignment`, and `SetContainerBaseline` |
 | Relative | parent and sibling alignment/adjacency; missing and duplicate ids; deterministic dependency ordering and cycle fallback; one-pass and two-pass measurement; one-sided and double-sided measurement constraints; wrap/minmax feedback; visibility; absolute and hoisted static positions | Starlight `ComputeConstraints`, `GetPositionConstraints`, `Sort`, `LayoutItems`, and `PositionItems` |
 
-The integration suites use the same `LayoutSource`/`LayoutState` split and
+The integration suites use the same `LayoutNode` handle and
 leaf-measurement protocol as a real host. Every retained case asserts an exact
 observable result such as geometry, used margins, baseline, layout order,
 static position, measurement input, or cache traffic. Determinism, finite

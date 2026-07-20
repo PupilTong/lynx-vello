@@ -1,14 +1,25 @@
 //! Track and item alignment for Grid §11 / CSS Box Alignment.
+//!
+//! The style protocol speaks stylo's `AlignFlags`-based wrappers
+//! (`ItemPlacement`/`SelfAlignment`/`ContentDistribution`/`JustifyItems`).
+//! The shared [`normalize_item_alignment`]/[`normalize_content_alignment`]
+//! helpers in `compute::util` reduce those flags once, at style-read time,
+//! to the canonical keyword subset the sizing and placement passes below
+//! compare against.
+//!
+//! [`normalize_item_alignment`]: super::super::util::normalize_item_alignment
+//! [`normalize_content_alignment`]: super::super::util::normalize_content_alignment
 
 #![allow(clippy::cast_precision_loss)]
 
+use stylo::values::specified::align::AlignFlags;
+
 use super::types::TrackSet;
-use crate::style::AlignContent;
 
 pub(super) fn track_alignment_spacing(
     tracks: &TrackSet,
     container_size: f32,
-    alignment: AlignContent,
+    alignment: AlignFlags,
 ) -> (f32, f32) {
     let free = container_size - tracks.used_size();
     let visible = tracks
@@ -22,39 +33,35 @@ pub(super) fn track_alignment_spacing(
 pub(super) fn alignment_spacing_from_free_space(
     free: f32,
     visible: usize,
-    alignment: AlignContent,
+    alignment: AlignFlags,
 ) -> (f32, f32) {
-    match alignment {
-        AlignContent::End | AlignContent::FlexEnd => (free, 0.0),
-        AlignContent::Center => (free / 2.0, 0.0),
-        AlignContent::SpaceBetween if visible > 1 && free > 0.0 => {
-            (0.0, free / (visible - 1) as f32)
-        }
-        AlignContent::SpaceAround if visible > 0 && free > 0.0 => {
-            let spacing = free / visible as f32;
-            (spacing / 2.0, spacing)
-        }
-        AlignContent::SpaceEvenly if visible > 0 && free > 0.0 => {
-            let spacing = free / (visible + 1) as f32;
-            (spacing, spacing)
-        }
-        AlignContent::Start
-        | AlignContent::FlexStart
-        | AlignContent::Stretch
-        | AlignContent::SpaceBetween
-        | AlignContent::SpaceAround
-        | AlignContent::SpaceEvenly => (0.0, 0.0),
+    if alignment == AlignFlags::END || alignment == AlignFlags::FLEX_END {
+        (free, 0.0)
+    } else if alignment == AlignFlags::CENTER {
+        (free / 2.0, 0.0)
+    } else if alignment == AlignFlags::SPACE_BETWEEN && visible > 1 && free > 0.0 {
+        (0.0, free / (visible - 1) as f32)
+    } else if alignment == AlignFlags::SPACE_AROUND && visible > 0 && free > 0.0 {
+        let spacing = free / visible as f32;
+        (spacing / 2.0, spacing)
+    } else if alignment == AlignFlags::SPACE_EVENLY && visible > 0 && free > 0.0 {
+        let spacing = free / (visible + 1) as f32;
+        (spacing, spacing)
+    } else {
+        // START/FLEX_START/STRETCH pack at start; distributed values without
+        // positive free space use their safe start fallback.
+        (0.0, 0.0)
     }
 }
 
 /// Positions tracks in logical start-to-end order. Inline RTL conversion is
 /// deliberately deferred until child locations are materialized, keeping
 /// placement and sizing coordinate systems identical.
-pub(super) fn align_tracks(tracks: &mut TrackSet, container_size: f32, alignment: AlignContent) {
-    // Positional alignment is unsafe unless the style protocol explicitly
-    // represents a `safe` qualifier (it currently does not), so center/end
-    // retain negative free space and may overflow both edges. Distributed
-    // values use their safe fallback when space is negative.
+pub(super) fn align_tracks(tracks: &mut TrackSet, container_size: f32, alignment: AlignFlags) {
+    // Positional alignment is unsafe (the `SAFE` flag is stripped during
+    // normalization), so center/end retain negative free space and may
+    // overflow both edges. Distributed values use their safe fallback when
+    // space is negative.
     let (offset, distributed_gap) = track_alignment_spacing(tracks, container_size, alignment);
 
     tracks.rebuild_aligned_positions(offset, distributed_gap);
@@ -64,39 +71,35 @@ pub(super) fn align_tracks(tracks: &mut TrackSet, container_size: f32, alignment
 #[inline]
 pub(super) fn item_alignment_offset(
     free_space: f32,
-    alignment: crate::style::AlignItems,
+    alignment: AlignFlags,
     container_axis_reversed: bool,
     self_axis_reversed: bool,
 ) -> f32 {
-    match alignment {
-        crate::style::AlignItems::Start
-        | crate::style::AlignItems::FlexStart
-        | crate::style::AlignItems::Stretch => {
-            // Stretch falls back to the alignment container's start edge.
-            if container_axis_reversed {
-                free_space
-            } else {
-                0.0
-            }
+    if alignment == AlignFlags::END || alignment == AlignFlags::FLEX_END {
+        if container_axis_reversed {
+            0.0
+        } else {
+            free_space
         }
-        crate::style::AlignItems::End | crate::style::AlignItems::FlexEnd => {
-            if container_axis_reversed {
-                0.0
-            } else {
-                free_space
-            }
-        }
-        crate::style::AlignItems::Center => free_space / 2.0,
+    } else if alignment == AlignFlags::CENTER {
+        free_space / 2.0
+    } else if alignment == AlignFlags::BASELINE {
         // First-baseline's fallback is safe self-start, so the alignment
         // subject's own writing direction controls the physical edge unless
         // overflow triggers `safe`'s fallback to the container's start edge.
-        crate::style::AlignItems::Baseline => {
-            let reversed = if free_space < 0.0 {
-                container_axis_reversed
-            } else {
-                self_axis_reversed
-            };
-            if reversed { free_space } else { 0.0 }
+        let reversed = if free_space < 0.0 {
+            container_axis_reversed
+        } else {
+            self_axis_reversed
+        };
+        if reversed { free_space } else { 0.0 }
+    } else {
+        // START/FLEX_START/STRETCH: stretch falls back to the alignment
+        // container's start edge.
+        if container_axis_reversed {
+            free_space
+        } else {
+            0.0
         }
     }
 }
@@ -105,8 +108,8 @@ pub(super) fn item_alignment_offset(
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::float_cmp)]
 mod tests {
+    use super::super::types::TrackSizingFunction;
     use super::*;
-    use crate::style::{AlignItems, TrackSizingFunction};
 
     fn track(base: f32, collapsed: bool) -> super::super::types::Track {
         super::super::types::Track {
@@ -144,7 +147,7 @@ mod tests {
     #[test]
     fn distributed_alignment_places_tracks_for_each_spacing_mode() {
         let mut tracks = three_tracks();
-        align_tracks(&mut tracks, 50.0, AlignContent::SpaceBetween);
+        align_tracks(&mut tracks, 50.0, AlignFlags::SPACE_BETWEEN);
         assert_eq!(
             tracks
                 .tracks
@@ -155,13 +158,13 @@ mod tests {
         );
 
         let mut tracks = three_tracks();
-        align_tracks(&mut tracks, 50.0, AlignContent::SpaceAround);
+        align_tracks(&mut tracks, 50.0, AlignFlags::SPACE_AROUND);
         assert_close(tracks.tracks[0].position, 10.0 / 3.0);
         assert_close(tracks.tracks[1].position, 20.0);
         assert_close(tracks.tracks[2].position, 110.0 / 3.0);
 
         let mut tracks = three_tracks();
-        align_tracks(&mut tracks, 50.0, AlignContent::SpaceEvenly);
+        align_tracks(&mut tracks, 50.0, AlignFlags::SPACE_EVENLY);
         assert_eq!(
             tracks
                 .tracks
@@ -194,7 +197,7 @@ mod tests {
         assert_eq!(tracks.line_position(1), 17.0);
         assert_eq!(tracks.line_position(2), 17.0);
 
-        align_tracks(&mut tracks, 27.0, AlignContent::Start);
+        align_tracks(&mut tracks, 27.0, AlignFlags::START);
         assert_eq!(tracks.tracks[0].position, 0.0);
         assert_eq!(tracks.tracks[1].position, 10.0);
         assert_eq!(tracks.tracks[2].position, 10.0);
@@ -204,7 +207,7 @@ mod tests {
         assert_eq!(tracks.area_size(1, 4), 10.0);
         assert_eq!(tracks.area_size(1, 2), 0.0);
 
-        align_tracks(&mut tracks, 50.0, AlignContent::SpaceBetween);
+        align_tracks(&mut tracks, 50.0, AlignFlags::SPACE_BETWEEN);
         assert_eq!(tracks.tracks[0].position, 0.0);
         assert_eq!(tracks.tracks[1].position, 10.0);
         assert_eq!(tracks.tracks[2].position, 10.0);
@@ -213,27 +216,27 @@ mod tests {
         assert_eq!(tracks.area_size(1, 4), 10.0);
 
         assert_eq!(
-            item_alignment_offset(13.0, AlignItems::FlexEnd, true, false),
+            item_alignment_offset(13.0, AlignFlags::FLEX_END, true, false),
             0.0
         );
         assert_eq!(
-            item_alignment_offset(13.0, AlignItems::Stretch, true, false),
+            item_alignment_offset(13.0, AlignFlags::STRETCH, true, false),
             13.0
         );
         assert_eq!(
-            item_alignment_offset(13.0, AlignItems::Baseline, true, false),
+            item_alignment_offset(13.0, AlignFlags::BASELINE, true, false),
             0.0
         );
         assert_eq!(
-            item_alignment_offset(13.0, AlignItems::Baseline, false, true),
+            item_alignment_offset(13.0, AlignFlags::BASELINE, false, true),
             13.0
         );
         assert_eq!(
-            item_alignment_offset(-13.0, AlignItems::Baseline, false, true),
+            item_alignment_offset(-13.0, AlignFlags::BASELINE, false, true),
             0.0
         );
         assert_eq!(
-            item_alignment_offset(-13.0, AlignItems::Baseline, true, false),
+            item_alignment_offset(-13.0, AlignFlags::BASELINE, true, false),
             -13.0
         );
     }

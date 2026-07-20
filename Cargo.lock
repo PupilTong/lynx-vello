@@ -985,6 +985,8 @@ version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
  "parley",
+ "stylo",
+ "stylo_traits",
 ]
 
 [[package]]

@@ -62,15 +62,16 @@ linear item
 
 : An in-flow direct child of a linear container. Children with
   `display: none` and out-of-flow positioned children are not linear items.
-  Children with `visibility: hidden` or `visibility: collapse` remain linear
-  items unless they also have `display: none`.
+  Children with `visibility: hidden` remain linear
+  items unless they also have `display: none`; visibility never affects box
+  geometry.
 
 main axis
 
 : The primary axis along which linear items are laid out. The main axis is
-  horizontal for `row`, `row-reverse`, `horizontal`, and `horizontal-reverse`;
-  vertical for `column`, `column-reverse`, `vertical`, and
-  `vertical-reverse`.
+  horizontal for `row` and `row-reverse`; vertical for `column` and
+  `column-reverse` (the legacy `horizontal*`/`vertical*` spellings are
+  lowered to these before layout — see `linear-direction`).
 
 cross axis
 
@@ -104,11 +105,18 @@ weighted item
 The following value names describe computed style data, not raw CSS parser
 tokens.
 
-Initial values in this section document the current Rust standalone style
-surface. If another Starlight bridge materializes different compatibility
-defaults before layout, the bridge owns that defaulting decision; this
-document defines layout behavior for the computed values that reach the
-algorithm.
+Initial values in this section document the current Rust trait surface,
+which follows the stylo fork's computed grammar. That grammar carries no
+gravity longhands and no `linear-orientation`: orientation reaches layout as
+`linear-direction`, and the legacy gravity channels ride the standard
+alignment properties — `justify-content` (main axis) and
+`align-items`/`align-self` (cross axis). The gravity keyword vocabulary
+defined below remains this module's internal model; the algorithm derives a
+gravity from those standard properties, and the legacy `fill-*` gravities
+compute to `stretch`. If another Starlight bridge materializes different
+compatibility defaults before layout, the bridge owns that defaulting
+decision; this document defines layout behavior for the computed values
+that reach the algorithm.
 
 ### `display: linear`
 
@@ -121,67 +129,60 @@ Applies to: layout containers
 Effect: establishes a linear formatting context for the container's in-flow
 children.
 
-### `linear-orientation`
+### `linear-direction`
 
-Name: `linear-orientation`
+Name: `linear-direction`
 
-Value: `row | row-reverse | column | column-reverse | horizontal |
-horizontal-reverse | vertical | vertical-reverse`
+Value: `column | row | column-reverse | row-reverse`
 
-Initial: `vertical`
+Initial: `column`
 
 Applies to: linear containers
 
-The `row` and `horizontal` values establish a horizontal main axis. The
-`column` and `vertical` values establish a vertical main axis. The `*-reverse`
+The `row` values establish a horizontal main axis and the `column` values a
+vertical main axis. The `*-reverse`
 values reverse the main axis before final physical offset export. The
-`horizontal*` and `vertical*` values are compatibility aliases for the
-corresponding row/column directions; they are still accepted by the current
-public API and are therefore part of this non-deprecated layout surface.
+deprecated `linear-orientation` longhand and the legacy
+`horizontal*`/`vertical*` value spellings are not part of the computed
+grammar; a host with legacy sources lowers them onto `linear-direction`
+(`vertical*` → `column*`, `horizontal*` → `row*`) before layout.
 
-### `linear-gravity`
+### Main-axis gravity (via `justify-content`)
 
-Name: `linear-gravity`
+Name: none — a derived channel; the dropped `linear-gravity` longhand named
+it and is not part of the computed grammar
 
-Value: `none | start | end | center | space-between | left | right | top |
-bottom | center-horizontal | center-vertical`
+Value: `start | end | center | space-between` (derived)
 
-Initial: `none`
-
-Applies to: linear containers
-
-This property packs linear items along the main axis. If it is `none`,
-`justify-content` is mapped into linear gravity as defined in
-"Main-Axis Alignment".
-
-### `linear-cross-gravity`
-
-Name: `linear-cross-gravity`
-
-Value: `none | start | end | center | stretch`
-
-Initial: `none`
+Initial: `start` (`justify-content: normal`)
 
 Applies to: linear containers
 
-This property provides the container-level fallback for cross-axis alignment
-when an item does not specify `linear-layout-gravity` and no applicable
-`align-self` value supplies one.
+Main-axis gravity packs linear items along the main axis. It is derived from
+the container's `justify-content` as defined in "Main-Axis Alignment"; the
+legacy absolute `top`/`bottom`/`center-horizontal`/`center-vertical`
+keywords existed only on the dropped longhand and have no computed-value
+channel.
 
-### `linear-layout-gravity`
+### Cross-axis gravity (via `align-self`/`align-items`)
 
-Name: `linear-layout-gravity`
+Name: none — a derived channel; the dropped `linear-layout-gravity` (item)
+and `linear-cross-gravity` (container) longhands named it and are not part
+of the computed grammar
 
-Value: `none | start | end | center | stretch | left | right | top | bottom |
-center-horizontal | center-vertical | fill-horizontal | fill-vertical`
+Value: `start | end | center | stretch`, or none (derived)
 
-Initial: `none`
+Initial: none (`align-self: auto` over `align-items: normal` — the
+default-stretch behavior)
 
 Applies to: linear items
 
-This property aligns an individual item in the cross axis. The `fill-*` and
-`stretch` values force a definite cross-axis constraint when the container's
-cross-axis content size is definite.
+Cross-axis gravity aligns an individual item in the cross axis. It is
+derived per item from `align-self`, falling back to the container's
+`align-items`, as defined in "Cross-Axis Alignment". The legacy
+`fill-horizontal`/`fill-vertical` gravities compute to `stretch`; `stretch`
+forces a definite cross-axis constraint when the container's cross-axis
+content size is definite.
 
 ### `linear-weight`
 
@@ -235,7 +236,7 @@ This section defines the linear layout algorithm.
    parent constraints.
 2. Resolve the container's definite width and height, including
    `box-sizing`, min/max constraints, and aspect ratio.
-3. Establish the main and cross axes from `linear-orientation`.
+3. Establish the main and cross axes from `linear-direction`.
 4. Determine whether the main or cross axis has a definite content size from
    resolved container size or definite parent constraints.
 5. Lay out `display: none` direct children as hidden zero-sized subtrees.
@@ -256,9 +257,9 @@ For each linear item:
    Otherwise the main-axis constraint is indefinite unless the child sizing
    rules provide a definite value.
 5. If the cross-axis constraint is definite and either:
-   - the computed linear layout gravity is `stretch`, `fill-horizontal`, or
-     `fill-vertical`; or
-   - the computed linear layout gravity is `none`, the item cross-size is
+   - the computed cross gravity is `stretch` (which includes the legacy
+     `fill-*` gravities); or
+   - no cross gravity applies, the item cross-size is
      `auto`, and the cross-size is not intrinsic;
    then use the available cross-axis content size minus cross-axis margins as a
    definite cross-axis constraint.
@@ -307,16 +308,16 @@ If it has a definite content main size:
 Let free space be the final content main size minus the sum of item outer main
 sizes.
 
-1. Compute the logical main gravity:
-   1. If `linear-gravity` is not `none`, use it.
-   2. Otherwise map `justify-content` as follows:
+1. Compute the logical main gravity from `justify-content`:
+   1. Map its keyword as follows:
       - `flex-end` and `end` -> `end`;
       - `center` -> `center`;
       - `space-between` -> `space-between`;
       - `stretch`, `flex-start`, `start`, `space-around`, and
         `space-evenly` -> `start`.
-   3. Convert physical `left`, `right`, `top`, and `bottom` values to
-      logical `start` or `end` using the main axis and reversal state.
+   2. Convert physical `left` and `right` values to
+      logical `start` or `end` using the main axis and reversal state; on a
+      vertical main axis they fall back to `start`.
 2. If gravity is `end`, the first item starts at the free space.
 3. If gravity is `center`, the first item starts at half the free space.
 4. If gravity is `space-between` and there is more than one item, the first
@@ -334,20 +335,20 @@ space does not create negative `space-between` gaps.
 
 For each item:
 
-1. Compute item linear layout gravity:
-   1. Start with the item's `linear-layout-gravity`.
-   2. If it is `none` and `align-self` is present, map `align-self`:
+1. Compute the item's cross gravity:
+   1. Map the item's `align-self` (unless it is `auto`):
       - `stretch` -> `stretch`;
       - `flex-start` and `start` -> `start`;
       - `center` -> `center`;
       - `flex-end` and `end` -> `end`;
-      - `baseline` -> `none`.
-   3. If it is still `none`, map container `linear-cross-gravity` to the same
-      `start`/`end`/`center`/`stretch` values.
-   4. If it is still `none` and container `align-items` is not `stretch`, map
-      `align-items` in the same way as `align-self`.
-   5. For vertical linear containers in RTL direction, swap physical `left`
-      and `right` layout gravity.
+      - `baseline` keywords and `normal` -> none.
+   2. If `align-self` is `auto` or mapped to none, map the container's
+      `align-items` the same way.
+   3. Convert physical `left` and `right` values to logical `start` or
+      `end` using the cross axis and its reversal state (RTL direction
+      reverses the horizontal cross axis of a vertical linear container,
+      swapping the `left`/`right` mappings); on a vertical cross axis they
+      fall back to `start`.
 2. If either cross-axis margin is `auto`, auto margins take precedence over
    item alignment:
    - if both logical cross margins are auto and the item is smaller than the
@@ -384,7 +385,7 @@ container size is known:
 1. Use the container padding box as the containing block.
 2. Resolve the child size and insets with the common out-of-flow algorithm.
 3. If an inset pair is auto and a static-position fallback is required, use
-   linear main-axis gravity for the main axis and computed linear layout
+   the derived main-axis gravity for the main axis and the derived cross
    gravity for the cross axis.
 4. Lay out the child at the resolved out-of-flow offset.
 

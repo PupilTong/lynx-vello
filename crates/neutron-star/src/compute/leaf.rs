@@ -11,13 +11,15 @@
 
 use core::marker::PhantomData;
 
+use stylo::computed_values::box_sizing;
+
 use super::util::{
-    apply_aspect_ratio, apply_box_sizing, auto_edges_to_zero, clamp, resolve_edges,
-    resolve_optional_edges, resolve_size, scrollbar_size, subtract_available_space,
+    apply_aspect_ratio, apply_box_sizing, auto_edges_to_zero, clamp, resolve_border,
+    resolve_margins, resolve_max_sizes, resolve_padding, resolve_size, subtract_available_space,
+    used_aspect_ratio,
 };
 use crate::geometry::{Edges, Point, Size};
-use crate::style::value::CalcHandle;
-use crate::style::{BoxSizing, CoreStyle};
+use crate::style::CoreStyle;
 use crate::tree::{
     AvailableSpace, LayoutGoal, LayoutInput, LayoutOutput, RequestedAxis, SizingMode,
 };
@@ -33,11 +35,6 @@ use crate::tree::{
 /// skip it; full layout and both-axis probes still measure so text/image
 /// overflow, retained paint artifacts, and baselines remain available.
 ///
-/// `resolve_calc` mirrors
-/// [`LayoutSource::resolve_calc`](crate::tree::LayoutSource::resolve_calc)
-/// (leaf layout takes the style view directly rather than a whole tree, so
-/// the resolver is passed alongside it).
-///
 /// The returned size applies, in order: known dimensions verbatim; style
 /// size/aspect-ratio (per [`SizingMode`](crate::tree::SizingMode)); measured
 /// content size; min/max clamps; and a padding+border floor on axes the
@@ -45,16 +42,14 @@ use crate::tree::{
 /// `content_size` is the border-origin scrollable extent, including measured
 /// overflow.
 #[allow(clippy::too_many_lines)]
-pub fn compute_leaf_layout<Style, Measurer, CalcResolver>(
+pub fn compute_leaf_layout<Style, Measurer>(
     input: LayoutInput,
     style: &Style,
-    resolve_calc: CalcResolver,
     measurer: &mut Measurer,
 ) -> LayoutOutput
 where
     Style: CoreStyle,
     Measurer: LeafMeasurer,
-    CalcResolver: Fn(CalcHandle, f32) -> f32,
 {
     let measurement_axis = match input.goal {
         LayoutGoal::Measure(axis) => Some(axis),
@@ -64,14 +59,13 @@ where
     let LeafSizing {
         margin,
         padding_border_size,
-        content_box_inset,
         content_origin,
         mut node_size,
         min_size,
         max_size,
         aspect_ratio,
         box_sizing,
-    } = resolve_leaf_sizing(input, style, &resolve_calc);
+    } = resolve_leaf_sizing(input, style);
 
     node_size = clamp_resolved_size(
         node_size,
@@ -100,17 +94,17 @@ where
     let measure_known_dimensions = Size::new(
         node_size
             .width
-            .map(|width| (width - content_box_inset.width).max(0.0)),
+            .map(|width| (width - padding_border_size.width).max(0.0)),
         node_size
             .height
-            .map(|height| (height - content_box_inset.height).max(0.0)),
+            .map(|height| (height - padding_border_size.height).max(0.0)),
     );
     let available_space = Size::new(
         measurement_available_space(
             measure_known_dimensions.width,
             input.available_space.width,
             margin.horizontal_sum(),
-            content_box_inset.width,
+            padding_border_size.width,
             min_size.width,
             max_size.width,
         ),
@@ -118,7 +112,7 @@ where
             measure_known_dimensions.height,
             input.available_space.height,
             margin.vertical_sum(),
-            content_box_inset.height,
+            padding_border_size.height,
             min_size.height,
             max_size.height,
         ),
@@ -144,8 +138,8 @@ where
     );
 
     let measured_border_box = Size::new(
-        measured_content.width.max(0.0) + content_box_inset.width,
-        measured_content.height.max(0.0) + content_box_inset.height,
+        measured_content.width.max(0.0) + padding_border_size.width,
+        measured_content.height.max(0.0) + padding_border_size.height,
     );
     let originally_indefinite = Size::new(node_size.width.is_none(), node_size.height.is_none());
     node_size = node_size.or(Size::new(
@@ -187,7 +181,7 @@ where
 ///
 /// The dimensions have already been translated through the leaf's box model:
 /// known dimensions are content-box extents, and available space excludes its
-/// margins, padding, borders, and reserved scrollbar space. [`Self::goal`]
+/// margins, padding, and borders. [`Self::goal`]
 /// lets a host distinguish a transient probe from the committed layout whose
 /// rich artifact may need to remain available for painting.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -246,12 +240,12 @@ pub trait LeafMeasurement: Sized {
 /// or other shaping inputs change.
 ///
 /// The canonical integration is a **node-scoped adapter**, constructed inside
-/// [`LayoutSession::compute_child_layout`](crate::tree::LayoutSession::compute_child_layout):
-/// it borrows the current node's immutable text/style content from the
-/// [`LayoutSource`](crate::tree::LayoutSource), and separately borrows the
-/// mutable Parley contexts plus that node's artifact-cache slot from the
-/// session. The node is therefore explicit in adapter construction; no
-/// session-global "current node" side channel is needed.
+/// [`LayoutNode::compute_child_layout`](crate::tree::LayoutNode::compute_child_layout):
+/// it reads the current node's immutable text/style content through the
+/// handle, and separately borrows the mutable Parley contexts plus that
+/// node's host-owned interior-mutable artifact-cache slot. The node is
+/// therefore explicit in adapter construction; no host-global "current node"
+/// side channel is needed.
 ///
 /// This trait is intentionally not object-safe: the layout boundary remains
 /// static dispatch end to end.
@@ -391,7 +385,7 @@ fn apply_measured_aspect_ratio(
     originally_indefinite: Size<bool>,
     measurement_axis: Option<RequestedAxis>,
     aspect_ratio: Option<f32>,
-    box_sizing: BoxSizing,
+    box_sizing: box_sizing::T,
     padding_border_size: Size<f32>,
 ) -> Size<Option<f32>> {
     let Some(ratio) = aspect_ratio else {
@@ -441,36 +435,22 @@ fn apply_measured_aspect_ratio(
 struct LeafSizing {
     margin: Edges<f32>,
     padding_border_size: Size<f32>,
-    content_box_inset: Size<f32>,
     content_origin: Point<f32>,
     node_size: Size<Option<f32>>,
     min_size: Size<Option<f32>>,
     max_size: Size<Option<f32>>,
     aspect_ratio: Option<f32>,
-    box_sizing: BoxSizing,
+    box_sizing: box_sizing::T,
 }
 
-fn resolve_leaf_sizing(
-    input: LayoutInput,
-    style: &impl CoreStyle,
-    resolve_calc: &impl Fn(CalcHandle, f32) -> f32,
-) -> LeafSizing {
+fn resolve_leaf_sizing(input: LayoutInput, style: &impl CoreStyle) -> LeafSizing {
     let inline_basis = input.parent_size.width;
-    let margin = auto_edges_to_zero(resolve_optional_edges(
-        style.margin(),
-        inline_basis,
-        resolve_calc,
-    ));
-    let padding = resolve_edges(style.padding(), inline_basis, resolve_calc);
-    let border = resolve_edges(style.border(), inline_basis, resolve_calc);
+    let margin = auto_edges_to_zero(resolve_margins(style.margin(), inline_basis));
+    let padding = resolve_padding(style.padding(), inline_basis);
+    let border = resolve_border(&style.border());
     let padding_border_size = Size::new(
         padding.horizontal_sum() + border.horizontal_sum(),
         padding.vertical_sum() + border.vertical_sum(),
-    );
-    let scrollbars = scrollbar_size(style);
-    let content_box_inset = Size::new(
-        padding_border_size.width + scrollbars.width,
-        padding_border_size.height + scrollbars.height,
     );
     let content_origin = Point::new(border.left + padding.left, border.top + padding.top);
     let box_sizing = style.box_sizing();
@@ -478,12 +458,12 @@ fn resolve_leaf_sizing(
     let (node_size, min_size, max_size, aspect_ratio) = match input.sizing_mode {
         SizingMode::ContentSize => (input.known_dimensions, Size::NONE, Size::NONE, None),
         SizingMode::InherentSize => {
-            let aspect_ratio = style.aspect_ratio();
+            let aspect_ratio = used_aspect_ratio(style.aspect_ratio());
 
             // Aspect ratio operates on the box selected by box-sizing. The
             // caller's known dimensions are always border-box, so translate
             // them into that sizing box before deriving the opposite axis.
-            let style_size = resolve_size(style.size(), input.parent_size, resolve_calc);
+            let style_size = resolve_size(style.size(), input.parent_size);
             let known_sizing_box =
                 border_box_to_sizing_box(input.known_dimensions, box_sizing, padding_border_size);
             let preferred_sizing_box =
@@ -494,12 +474,12 @@ fn resolve_leaf_sizing(
                 padding_border_size,
             ));
             let min_size = apply_box_sizing(
-                resolve_size(style.min_size(), input.parent_size, resolve_calc),
+                resolve_size(style.min_size(), input.parent_size),
                 box_sizing,
                 padding_border_size,
             );
             let max_size = apply_box_sizing(
-                resolve_size(style.max_size(), input.parent_size, resolve_calc),
+                resolve_max_sizes(style.max_size(), input.parent_size),
                 box_sizing,
                 padding_border_size,
             );
@@ -520,7 +500,6 @@ fn resolve_leaf_sizing(
     LeafSizing {
         margin,
         padding_border_size,
-        content_box_inset,
         content_origin,
         node_size,
         min_size,
@@ -533,7 +512,7 @@ fn resolve_leaf_sizing(
 #[inline]
 fn border_box_to_sizing_box(
     value: Size<Option<f32>>,
-    box_sizing: BoxSizing,
+    box_sizing: box_sizing::T,
     padding_border_size: Size<f32>,
 ) -> Size<Option<f32>> {
     Size::new(
@@ -547,8 +526,8 @@ fn border_box_to_sizing_box(
 }
 
 #[inline]
-fn sizing_box_axis(value: f32, padding_border: f32, box_sizing: BoxSizing) -> f32 {
-    if box_sizing == BoxSizing::ContentBox {
+fn sizing_box_axis(value: f32, padding_border: f32, box_sizing: box_sizing::T) -> f32 {
+    if box_sizing == box_sizing::T::ContentBox {
         (value - padding_border).max(0.0)
     } else {
         value
@@ -556,8 +535,8 @@ fn sizing_box_axis(value: f32, padding_border: f32, box_sizing: BoxSizing) -> f3
 }
 
 #[inline]
-fn border_box_axis(value: f32, padding_border: f32, box_sizing: BoxSizing) -> f32 {
-    if box_sizing == BoxSizing::ContentBox {
+fn border_box_axis(value: f32, padding_border: f32, box_sizing: box_sizing::T) -> f32 {
+    if box_sizing == box_sizing::T::ContentBox {
         value + padding_border
     } else {
         value
@@ -634,15 +613,24 @@ fn finalize_size(
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::float_cmp)]
 mod tests {
+    use core::cell::RefCell;
+
+    use stylo::values::computed::{Display, Length, LengthPercentage, MaxSize, Size as StyleSize};
+    use stylo::values::generics::NonNegative;
+
     use super::*;
     use crate::cache::Cache;
     use crate::compute::compute_cached_layout;
-    use crate::tree::{CacheState, NodeId};
+    use crate::tree::{Layout, LayoutNode};
 
     #[derive(Default)]
     struct EmptyStyle;
 
-    impl CoreStyle for EmptyStyle {}
+    impl CoreStyle for EmptyStyle {
+        fn display(&self) -> Display {
+            Display::Flex
+        }
+    }
 
     struct RetainedArtifact {
         metrics: LeafMetrics,
@@ -690,12 +678,7 @@ mod tests {
         };
         let input = LayoutInput::perform_layout(Size::NONE, Size::NONE, Size::MAX_CONTENT);
 
-        let output = compute_leaf_layout(
-            input,
-            &EmptyStyle,
-            |_, _| unreachable!("empty style has no calc() values"),
-            &mut measurer,
-        );
+        let output = compute_leaf_layout(input, &EmptyStyle, &mut measurer);
 
         assert_eq!(output.size, Size::new(31.0, 17.0));
         assert_eq!(output.first_baselines.y, Some(11.0));
@@ -741,56 +724,97 @@ mod tests {
         }
     }
 
+    /// A one-leaf test host: the box cache and the retained shaping
+    /// artifacts live in host-owned interior-mutable slots reached through a
+    /// `Copy` node handle.
     #[derive(Default)]
     struct LeafHostState {
-        box_cache: Cache,
-        artifacts: ArtifactCache,
+        box_cache: RefCell<Cache>,
+        artifacts: RefCell<ArtifactCache>,
     }
 
     impl LeafHostState {
-        fn invalidate_content(&mut self) {
-            self.box_cache.clear();
-            self.artifacts.committed = None;
-            self.artifacts.probe = None;
+        fn invalidate_content(&self) {
+            self.box_cache.borrow_mut().clear();
+            let mut artifacts = self.artifacts.borrow_mut();
+            artifacts.committed = None;
+            artifacts.probe = None;
         }
     }
 
-    impl CacheState for LeafHostState {
-        fn cache_get(&self, _node: NodeId, input: LayoutInput) -> Option<LayoutOutput> {
-            self.box_cache.get(input)
+    #[derive(Clone, Copy)]
+    struct LeafRef<'t> {
+        host: &'t LeafHostState,
+    }
+
+    impl core::fmt::Debug for LeafRef<'_> {
+        fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            formatter.write_str("LeafRef")
+        }
+    }
+
+    impl LayoutNode for LeafRef<'_> {
+        type Style = &'static EmptyStyle;
+        type ChildIter = core::iter::Empty<Self>;
+
+        fn children(self) -> Self::ChildIter {
+            core::iter::empty()
         }
 
-        fn cache_store(&mut self, _node: NodeId, input: LayoutInput, output: LayoutOutput) {
-            self.box_cache.store(input, output);
+        fn style(self) -> Self::Style {
+            &EmptyStyle
         }
 
-        fn cache_clear(&mut self, _node: NodeId) {
-            self.invalidate_content();
+        fn compute_child_layout(self, _input: LayoutInput) -> LayoutOutput {
+            unreachable!("leaf tests drive compute_cached_layout directly")
+        }
+
+        fn set_unrounded_layout(self, _layout: &Layout) {
+            unreachable!("leaf tests store no durable geometry")
+        }
+
+        fn unrounded_layout(self) -> Layout {
+            unreachable!("leaf tests store no durable geometry")
+        }
+
+        fn set_final_layout(self, _layout: &Layout) {
+            unreachable!("leaf tests store no durable geometry")
+        }
+
+        fn set_static_position(self, _static_position: Point<f32>) {
+            unreachable!("leaf tests store no durable geometry")
+        }
+
+        fn cache_get(self, input: LayoutInput) -> Option<LayoutOutput> {
+            self.host.box_cache.borrow().get(input)
+        }
+
+        fn cache_store(self, input: LayoutInput, output: LayoutOutput) {
+            self.host.box_cache.borrow_mut().store(input, output);
+        }
+
+        fn cache_clear(self) {
+            self.host.invalidate_content();
         }
     }
 
     #[test]
     fn committed_artifact_survives_probes_and_box_cache_hits() {
-        let mut state = LeafHostState::default();
-        let node = NodeId::new(0);
+        let host = LeafHostState::default();
+        let node = LeafRef { host: &host };
         let commit_input = LayoutInput::perform_layout(Size::NONE, Size::NONE, Size::MAX_CONTENT);
 
-        let committed =
-            compute_cached_layout(&mut state, node, commit_input, |state, _node, input| {
-                let mut measurer = CachingMeasurer {
-                    artifacts: &mut state.artifacts,
-                };
-                compute_leaf_layout(
-                    input,
-                    &EmptyStyle,
-                    |_, _| unreachable!("empty style has no calc() values"),
-                    &mut measurer,
-                )
-            });
-        assert_eq!(state.artifacts.shape_calls, 1);
+        let committed = compute_cached_layout(node, commit_input, |node, input| {
+            let mut artifacts = node.host.artifacts.borrow_mut();
+            let mut measurer = CachingMeasurer {
+                artifacts: &mut artifacts,
+            };
+            compute_leaf_layout(input, &EmptyStyle, &mut measurer)
+        });
+        assert_eq!(host.artifacts.borrow().shape_calls, 1);
         assert_eq!(
-            state
-                .artifacts
+            host.artifacts
+                .borrow()
                 .committed
                 .as_ref()
                 .expect("commit must retain a paint artifact")
@@ -804,20 +828,18 @@ mod tests {
             Size::MAX_CONTENT,
             RequestedAxis::Both,
         );
-        let mut probe_measurer = CachingMeasurer {
-            artifacts: &mut state.artifacts,
+        let probe = {
+            let mut artifacts = host.artifacts.borrow_mut();
+            let mut probe_measurer = CachingMeasurer {
+                artifacts: &mut artifacts,
+            };
+            compute_leaf_layout(probe_input, &EmptyStyle, &mut probe_measurer)
         };
-        let probe = compute_leaf_layout(
-            probe_input,
-            &EmptyStyle,
-            |_, _| unreachable!("empty style has no calc() values"),
-            &mut probe_measurer,
-        );
         assert_eq!(probe.size, committed.size);
-        assert_eq!(state.artifacts.shape_calls, 2);
+        assert_eq!(host.artifacts.borrow().shape_calls, 2);
         assert_eq!(
-            state
-                .artifacts
+            host.artifacts
+                .borrow()
                 .committed
                 .as_ref()
                 .expect("probe must not evict the committed artifact")
@@ -825,8 +847,8 @@ mod tests {
             [b'C']
         );
         assert_eq!(
-            state
-                .artifacts
+            host.artifacts
+                .borrow()
                 .probe
                 .as_ref()
                 .expect("probe artifact must use its own slot")
@@ -834,18 +856,17 @@ mod tests {
             [b'P']
         );
 
-        let cached =
-            compute_cached_layout(&mut state, node, commit_input, |_state, _node, _input| {
-                panic!("committed cache hit must skip shaping")
-            });
+        let cached = compute_cached_layout(node, commit_input, |_node, _input| {
+            panic!("committed cache hit must skip shaping")
+        });
         assert_eq!(cached, committed);
-        assert_eq!(state.artifacts.shape_calls, 2);
-        assert!(state.artifacts.committed.is_some());
+        assert_eq!(host.artifacts.borrow().shape_calls, 2);
+        assert!(host.artifacts.borrow().committed.is_some());
 
-        state.invalidate_content();
-        assert!(state.box_cache.is_empty());
-        assert!(state.artifacts.committed.is_none());
-        assert!(state.artifacts.probe.is_none());
+        host.invalidate_content();
+        assert!(host.box_cache.borrow().is_empty());
+        assert!(host.artifacts.borrow().committed.is_none());
+        assert!(host.artifacts.borrow().probe.is_none());
     }
 
     #[test]
@@ -855,12 +876,7 @@ mod tests {
             Size::new(23.0, 9.0)
         });
 
-        let output = compute_leaf_layout(
-            LayoutInput::default(),
-            &EmptyStyle,
-            |_, _| unreachable!("empty style has no calc() values"),
-            &mut measurer,
-        );
+        let output = compute_leaf_layout(LayoutInput::default(), &EmptyStyle, &mut measurer);
 
         assert_eq!(output.size, Size::new(23.0, 9.0));
         assert_eq!(output.first_baselines, Point::NONE);
@@ -892,7 +908,7 @@ mod tests {
             both_indefinite,
             Some(RequestedAxis::Vertical),
             Some(2.0),
-            BoxSizing::ContentBox,
+            box_sizing::T::ContentBox,
             padding_border,
         );
         assert_eq!(vertical, Size::new(Some(90.0), Some(50.0)));
@@ -902,7 +918,7 @@ mod tests {
             both_indefinite,
             Some(RequestedAxis::Both),
             Some(2.0),
-            BoxSizing::ContentBox,
+            box_sizing::T::ContentBox,
             padding_border,
         );
         assert_eq!(horizontal, Size::new(Some(100.0), Some(55.0)));
@@ -912,7 +928,7 @@ mod tests {
             both_indefinite,
             None,
             Some(2.0),
-            BoxSizing::BorderBox,
+            box_sizing::T::BorderBox,
             padding_border,
         );
         assert_eq!(border_box, Size::new(Some(100.0), Some(50.0)));
@@ -924,7 +940,7 @@ mod tests {
                 Size::new(false, true),
                 None,
                 Some(2.0),
-                BoxSizing::ContentBox,
+                box_sizing::T::ContentBox,
                 padding_border,
             ),
             unchanged
@@ -935,50 +951,69 @@ mod tests {
                 both_indefinite,
                 None,
                 Some(0.0),
-                BoxSizing::ContentBox,
+                box_sizing::T::ContentBox,
                 padding_border,
             ),
             unchanged
         );
     }
 
-    struct ConflictingMinMaxStyle;
+    struct ConflictingMinMaxStyle {
+        min_size: Size<StyleSize>,
+        max_size: Size<MaxSize>,
+    }
+
+    fn size_px(value: f32) -> StyleSize {
+        StyleSize::LengthPercentage(NonNegative(LengthPercentage::new_length(Length::new(
+            value,
+        ))))
+    }
+
+    fn max_px(value: f32) -> MaxSize {
+        MaxSize::LengthPercentage(NonNegative(LengthPercentage::new_length(Length::new(
+            value,
+        ))))
+    }
+
+    impl ConflictingMinMaxStyle {
+        fn new() -> Self {
+            Self {
+                min_size: Size::new(size_px(80.0), size_px(70.0)),
+                max_size: Size::new(max_px(40.0), max_px(90.0)),
+            }
+        }
+    }
 
     impl CoreStyle for ConflictingMinMaxStyle {
-        fn min_size(&self) -> Size<crate::style::Dimension> {
-            Size::new(
-                crate::style::Dimension::Length(80.0),
-                crate::style::Dimension::Length(70.0),
-            )
+        fn display(&self) -> Display {
+            Display::Flex
         }
 
-        fn max_size(&self) -> Size<crate::style::Dimension> {
-            Size::new(
-                crate::style::Dimension::Length(40.0),
-                crate::style::Dimension::Length(90.0),
-            )
+        fn min_size(&self) -> Size<&StyleSize> {
+            self.min_size.as_ref()
+        }
+
+        fn max_size(&self) -> Size<&MaxSize> {
+            self.max_size.as_ref()
         }
     }
 
     #[test]
     fn sizing_helpers_honor_min_precedence_known_dimensions_and_box_sizing() {
-        let sizing =
-            resolve_leaf_sizing(LayoutInput::default(), &ConflictingMinMaxStyle, &|_, _| {
-                unreachable!("test style has no calc() values")
-            });
+        let sizing = resolve_leaf_sizing(LayoutInput::default(), &ConflictingMinMaxStyle::new());
         assert_eq!(sizing.node_size, Size::new(Some(80.0), None));
 
         assert_eq!(
             border_box_to_sizing_box(
                 Size::new(Some(30.0), Some(20.0)),
-                BoxSizing::ContentBox,
+                box_sizing::T::ContentBox,
                 Size::new(8.0, 6.0),
             ),
             Size::new(Some(22.0), Some(14.0))
         );
-        assert_eq!(sizing_box_axis(30.0, 8.0, BoxSizing::BorderBox), 30.0);
-        assert_eq!(border_box_axis(22.0, 8.0, BoxSizing::ContentBox), 30.0);
-        assert_eq!(border_box_axis(22.0, 8.0, BoxSizing::BorderBox), 22.0);
+        assert_eq!(sizing_box_axis(30.0, 8.0, box_sizing::T::BorderBox), 30.0);
+        assert_eq!(border_box_axis(22.0, 8.0, box_sizing::T::ContentBox), 30.0);
+        assert_eq!(border_box_axis(22.0, 8.0, box_sizing::T::BorderBox), 22.0);
 
         assert_eq!(
             clamp_resolved_size(
@@ -994,20 +1029,20 @@ mod tests {
 
     #[test]
     fn cache_clear_capability_invalidates_box_and_retained_artifacts_together() {
-        let mut state = LeafHostState::default();
-        state.artifacts.committed = Some(RetainedArtifact {
+        let host = LeafHostState::default();
+        host.artifacts.borrow_mut().committed = Some(RetainedArtifact {
             metrics: LeafMetrics::new(Size::new(1.0, 1.0)),
             paint_data: vec![b'C'],
         });
-        state.artifacts.probe = Some(RetainedArtifact {
+        host.artifacts.borrow_mut().probe = Some(RetainedArtifact {
             metrics: LeafMetrics::new(Size::new(1.0, 1.0)),
             paint_data: vec![b'P'],
         });
 
-        CacheState::cache_clear(&mut state, NodeId::new(0));
+        LayoutNode::cache_clear(LeafRef { host: &host });
 
-        assert!(state.box_cache.is_empty());
-        assert!(state.artifacts.committed.is_none());
-        assert!(state.artifacts.probe.is_none());
+        assert!(host.box_cache.borrow().is_empty());
+        assert!(host.artifacts.borrow().committed.is_none());
+        assert!(host.artifacts.borrow().probe.is_none());
     }
 }

@@ -1,18 +1,21 @@
 //! Parley shape, rebreak, and cache benchmarks tracked by CodSpeed/Divan.
 
+use std::cell::RefCell;
+
 use divan::counter::ItemsCount;
 use neutron_star::cache::Cache;
 use neutron_star::compute::{
     LeafMeasureInput, LeafMeasurement, LeafMeasurer, compute_cached_layout,
 };
-use neutron_star::geometry::Size;
-use neutron_star::style::{
-    CoreStyle, FontFamily, FontFeatureSetting, FontVariationSetting, TextContainerStyle, TextRun,
-    TextRunStyle,
-};
+use neutron_star::geometry::{Point, Size};
+use neutron_star::style::{CoreStyle, TextContainerStyle, TextRun, TextRunStyle};
 use neutron_star::text::{ArtifactSlots, TextContext, TextMeasurer};
 use neutron_star::tree::{
-    AvailableSpace, CacheState, LayoutGoal, LayoutInput, LayoutOutput, NodeId,
+    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput,
+};
+use stylo::values::computed::Display;
+use stylo::values::computed::font::{
+    FamilyName, FontFamily, FontFamilyList, FontFamilyNameSyntax, SingleFontFamily,
 };
 
 const AHEM: &[u8] = include_bytes!("../tests/fixtures/Ahem.ttf");
@@ -36,36 +39,45 @@ fn main() {
     divan::main();
 }
 
+/// The one named family every benchmark run resolves against.
+fn ahem_family() -> FontFamily {
+    FontFamily {
+        families: FontFamilyList {
+            list: stylo::ArcSlice::from_iter(std::iter::once(SingleFontFamily::FamilyName(
+                FamilyName {
+                    name: stylo::Atom::from("Ahem"),
+                    syntax: FontFamilyNameSyntax::Identifiers,
+                },
+            ))),
+        },
+        is_system_font: false,
+        is_initial: false,
+    }
+}
+
 #[derive(Debug, Default)]
 struct ContainerStyle;
 
-impl CoreStyle for ContainerStyle {}
+impl CoreStyle for ContainerStyle {
+    fn display(&self) -> Display {
+        Display::Flex
+    }
+}
 impl TextContainerStyle for ContainerStyle {}
 
 #[derive(Debug)]
 struct RunStyle {
+    family: FontFamily,
     font_size: f32,
 }
 
 impl TextRunStyle for RunStyle {
-    type FontFamilies<'a> = core::iter::Once<FontFamily<'a>>;
-    type FontFeatureSettings<'a> = core::iter::Empty<FontFeatureSetting>;
-    type FontVariationSettings<'a> = core::iter::Empty<FontVariationSetting>;
-
-    fn font_families(&self) -> Self::FontFamilies<'_> {
-        core::iter::once(FontFamily::Named("Ahem"))
+    fn font_family(&self) -> FontFamily {
+        self.family.clone()
     }
 
     fn font_size(&self) -> f32 {
         self.font_size
-    }
-
-    fn font_feature_settings(&self) -> Self::FontFeatureSettings<'_> {
-        core::iter::empty()
-    }
-
-    fn font_variation_settings(&self) -> Self::FontVariationSettings<'_> {
-        core::iter::empty()
     }
 }
 
@@ -85,6 +97,7 @@ impl TextCase {
             run_styles: spec
                 .iter()
                 .map(|(_, font_size)| RunStyle {
+                    family: ahem_family(),
                     font_size: *font_size,
                 })
                 .collect(),
@@ -108,7 +121,6 @@ impl TextCase {
             &mut self.artifacts,
             &self.container,
             runs.into_iter(),
-            |_, _| unreachable!("benchmark styles contain no calc()"),
         );
         measurer
             .measure(LeafMeasureInput::new(
@@ -200,11 +212,13 @@ text_benchmarks!(
     1_024
 );
 
+/// A one-leaf cache-hit host: the box cache and the retained text batch live
+/// in interior-mutable slots reached through the `Copy` handle [`CachedRef`].
 #[derive(Debug)]
 struct CachedCase {
-    cache: Cache,
+    cache: RefCell<Cache>,
     input: LayoutInput,
-    text: TextBatch,
+    text: RefCell<TextBatch>,
 }
 
 impl CachedCase {
@@ -218,29 +232,79 @@ impl CachedCase {
         );
         let mut cache = Cache::default();
         cache.store(input, LayoutOutput::new(size, size));
-        Self { cache, input, text }
+        Self {
+            cache: RefCell::new(cache),
+            input,
+            text: RefCell::new(text),
+        }
     }
 
     fn hit(&mut self) -> LayoutOutput {
         let input = self.input;
-        compute_cached_layout(self, NodeId::new(0), input, |case, _, _| {
-            let size = case.text.measure_all(320.0, LayoutGoal::Commit);
+        compute_cached_layout(CachedRef { case: self }, input, |node, _| {
+            let size = node
+                .case
+                .text
+                .borrow_mut()
+                .measure_all(320.0, LayoutGoal::Commit);
             LayoutOutput::new(size, size)
         })
     }
 }
 
-impl CacheState for CachedCase {
-    fn cache_get(&self, _node: NodeId, input: LayoutInput) -> Option<LayoutOutput> {
-        self.cache.get(input)
+#[derive(Clone, Copy)]
+struct CachedRef<'t> {
+    case: &'t CachedCase,
+}
+
+impl std::fmt::Debug for CachedRef<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CachedRef")
+    }
+}
+
+impl<'t> LayoutNode for CachedRef<'t> {
+    type Style = &'t ContainerStyle;
+    type ChildIter = std::iter::Empty<Self>;
+
+    fn children(self) -> Self::ChildIter {
+        std::iter::empty()
     }
 
-    fn cache_store(&mut self, _node: NodeId, input: LayoutInput, output: LayoutOutput) {
-        self.cache.store(input, output);
+    fn style(self) -> Self::Style {
+        &ContainerStyle
     }
 
-    fn cache_clear(&mut self, _node: NodeId) {
-        self.cache.clear();
+    fn compute_child_layout(self, _input: LayoutInput) -> LayoutOutput {
+        unreachable!("the cache-hit benchmark drives compute_cached_layout directly")
+    }
+
+    fn set_unrounded_layout(self, _layout: &Layout) {
+        unreachable!("the cache-hit benchmark stores no durable geometry")
+    }
+
+    fn unrounded_layout(self) -> Layout {
+        unreachable!("the cache-hit benchmark stores no durable geometry")
+    }
+
+    fn set_final_layout(self, _layout: &Layout) {
+        unreachable!("the cache-hit benchmark stores no durable geometry")
+    }
+
+    fn set_static_position(self, _static_position: Point<f32>) {
+        unreachable!("the cache-hit benchmark stores no durable geometry")
+    }
+
+    fn cache_get(self, input: LayoutInput) -> Option<LayoutOutput> {
+        self.case.cache.borrow().get(input)
+    }
+
+    fn cache_store(self, input: LayoutInput, output: LayoutOutput) {
+        self.case.cache.borrow_mut().store(input, output);
+    }
+
+    fn cache_clear(self) {
+        self.case.cache.borrow_mut().clear();
     }
 }
 

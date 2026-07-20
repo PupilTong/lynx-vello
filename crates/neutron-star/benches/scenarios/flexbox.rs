@@ -10,12 +10,21 @@
 
 use neutron_star::compute::{LeafMeasureInput, LeafMetrics};
 use neutron_star::prelude::*;
-use neutron_star::style::{
-    AlignContent, AlignItems, BoxGenerationMode, BoxSizing, Dimension, Direction, FlexDirection,
-    FlexWrap, LengthPercentage, LengthPercentageAuto, Position,
+use style_traits::values::specified::AllowedNumericType;
+use stylo::Zero;
+use stylo::computed_values::{box_sizing, direction, flex_direction, flex_wrap};
+use stylo::values::computed::length::NonNegativeLengthPercentageOrNormal;
+use stylo::values::computed::length_percentage::{CalcNode, ComputedLeaf};
+use stylo::values::computed::{
+    AspectRatio, Au, BorderSideWidth, ContentDistribution, Display, FlexBasis, Inset,
+    ItemPlacement, Length, LengthPercentage, Margin, MaxSize, NonNegativeLengthPercentage,
+    Percentage, PositionProperty, Ratio, SelfAlignment, Size as StyleSize,
 };
+use stylo::values::generics::NonNegative;
+use stylo::values::generics::position::PreferredRatio;
+use stylo::values::specified::align::AlignFlags;
 
-use crate::support::{TestStyle, TestTree, perform_layout};
+use crate::support::{TestId, TestStyle, TestTree, perform_layout};
 
 #[derive(Clone, Copy)]
 pub(super) struct Scenario {
@@ -35,7 +44,7 @@ impl std::fmt::Debug for Scenario {
 #[derive(Debug)]
 pub(super) struct BenchCase {
     pub(super) tree: TestTree,
-    pub(super) root: NodeId,
+    pub(super) root: TestId,
     pub(super) known_dimensions: Size<Option<f32>>,
     pub(super) available_space: Size<AvailableSpace>,
 }
@@ -43,7 +52,7 @@ pub(super) struct BenchCase {
 impl BenchCase {
     fn new(
         tree: TestTree,
-        root: NodeId,
+        root: TestId,
         known_dimensions: Size<Option<f32>>,
         available_space: Size<AvailableSpace>,
     ) -> Self {
@@ -56,12 +65,12 @@ impl BenchCase {
     }
 
     pub(super) fn node_count(&self) -> usize {
-        self.tree.source.nodes.len()
+        self.tree.nodes.len()
     }
 
     pub(super) fn run(&mut self) -> LayoutOutput {
         perform_layout(
-            &mut self.tree,
+            &self.tree,
             self.root,
             self.known_dimensions,
             self.available_space,
@@ -127,85 +136,180 @@ fn edges<T>(left: T, right: T, top: T, bottom: T) -> Edges<T> {
     }
 }
 
-fn px(value: f32) -> Dimension {
-    Dimension::Length(value)
+fn uniform<T: Clone>(value: T) -> Edges<T> {
+    Edges {
+        left: value.clone(),
+        right: value.clone(),
+        top: value.clone(),
+        bottom: value,
+    }
 }
 
 fn lp(value: f32) -> LengthPercentage {
-    LengthPercentage::Length(value)
+    LengthPercentage::new_length(Length::new(value))
 }
 
-fn margin_px(left: f32, right: f32, top: f32, bottom: f32) -> Edges<LengthPercentageAuto> {
-    edges(
-        LengthPercentageAuto::Length(left),
-        LengthPercentageAuto::Length(right),
-        LengthPercentageAuto::Length(top),
-        LengthPercentageAuto::Length(bottom),
+fn pct_lp(fraction: f32) -> LengthPercentage {
+    LengthPercentage::new_percent(Percentage(fraction))
+}
+
+/// `calc(<percentage> + <length>)`, the shape the deleted test-calc arena
+/// used to describe symbolically.
+fn calc_lp(length: f32, percentage: f32) -> LengthPercentage {
+    LengthPercentage::new_calc(
+        CalcNode::Sum(
+            vec![
+                CalcNode::Leaf(ComputedLeaf::Percentage(Percentage(percentage))),
+                CalcNode::Leaf(ComputedLeaf::Length(Length::new(length))),
+            ]
+            .into(),
+        ),
+        AllowedNumericType::All,
     )
 }
 
-fn direction(index: usize) -> Direction {
+fn px(value: f32) -> StyleSize {
+    StyleSize::LengthPercentage(NonNegative(lp(value)))
+}
+
+fn pct(fraction: f32) -> StyleSize {
+    StyleSize::LengthPercentage(NonNegative(pct_lp(fraction)))
+}
+
+fn calc_size(length: f32, percentage: f32) -> StyleSize {
+    StyleSize::LengthPercentage(NonNegative(calc_lp(length, percentage)))
+}
+
+fn fit_content(limit: LengthPercentage) -> StyleSize {
+    StyleSize::FitContentFunction(NonNegative(limit))
+}
+
+fn max_px(value: f32) -> MaxSize {
+    MaxSize::LengthPercentage(NonNegative(lp(value)))
+}
+
+fn max_pct(fraction: f32) -> MaxSize {
+    MaxSize::LengthPercentage(NonNegative(pct_lp(fraction)))
+}
+
+fn max_calc(length: f32, percentage: f32) -> MaxSize {
+    MaxSize::LengthPercentage(NonNegative(calc_lp(length, percentage)))
+}
+
+fn basis_px(value: f32) -> FlexBasis {
+    FlexBasis::Size(px(value))
+}
+
+fn margin_len(value: f32) -> Margin {
+    Margin::LengthPercentage(lp(value))
+}
+
+fn margin_px(left: f32, right: f32, top: f32, bottom: f32) -> Edges<Margin> {
+    edges(
+        margin_len(left),
+        margin_len(right),
+        margin_len(top),
+        margin_len(bottom),
+    )
+}
+
+fn pad(value: f32) -> NonNegativeLengthPercentage {
+    NonNegative(lp(value))
+}
+
+fn bw(value: f32) -> BorderSideWidth {
+    BorderSideWidth(Au::from_f32_px(value))
+}
+
+fn gap_of(value: NonNegativeLengthPercentage) -> NonNegativeLengthPercentageOrNormal {
+    NonNegativeLengthPercentageOrNormal::LengthPercentage(value)
+}
+
+fn gap_px(value: f32) -> NonNegativeLengthPercentageOrNormal {
+    gap_of(pad(value))
+}
+
+fn ratio(value: f32) -> AspectRatio {
+    AspectRatio {
+        auto: false,
+        ratio: PreferredRatio::Ratio(Ratio::new(value, 1.0)),
+    }
+}
+
+fn direction(index: usize) -> direction::T {
     if index.is_multiple_of(2) {
-        Direction::Ltr
+        direction::T::Ltr
     } else {
-        Direction::Rtl
+        direction::T::Rtl
     }
 }
 
-fn flex_direction(index: usize) -> FlexDirection {
+fn flex_direction(index: usize) -> flex_direction::T {
     match index % 4 {
-        0 => FlexDirection::Row,
-        1 => FlexDirection::RowReverse,
-        2 => FlexDirection::Column,
-        _ => FlexDirection::ColumnReverse,
+        0 => flex_direction::T::Row,
+        1 => flex_direction::T::RowReverse,
+        2 => flex_direction::T::Column,
+        _ => flex_direction::T::ColumnReverse,
     }
 }
 
-fn justify_content(index: usize) -> AlignContent {
-    match index % 9 {
-        0 => AlignContent::Stretch,
-        1 => AlignContent::FlexStart,
-        2 => AlignContent::Start,
-        3 => AlignContent::Center,
-        4 => AlignContent::FlexEnd,
-        5 => AlignContent::End,
-        6 => AlignContent::SpaceBetween,
-        7 => AlignContent::SpaceAround,
-        _ => AlignContent::SpaceEvenly,
-    }
+fn is_row(axis: flex_direction::T) -> bool {
+    matches!(axis, flex_direction::T::Row | flex_direction::T::RowReverse)
 }
 
-fn align_items(index: usize) -> AlignItems {
-    match (index / 9) % 7 {
-        0 => AlignItems::Stretch,
-        1 => AlignItems::FlexStart,
-        2 => AlignItems::Start,
-        3 => AlignItems::Center,
-        4 => AlignItems::FlexEnd,
-        5 => AlignItems::End,
-        _ => AlignItems::Baseline,
-    }
+fn justify_content(index: usize) -> ContentDistribution {
+    ContentDistribution::new(match index % 9 {
+        0 => AlignFlags::STRETCH,
+        1 => AlignFlags::FLEX_START,
+        2 => AlignFlags::START,
+        3 => AlignFlags::CENTER,
+        4 => AlignFlags::FLEX_END,
+        5 => AlignFlags::END,
+        6 => AlignFlags::SPACE_BETWEEN,
+        7 => AlignFlags::SPACE_AROUND,
+        _ => AlignFlags::SPACE_EVENLY,
+    })
 }
 
-fn flex_wrap(index: usize) -> FlexWrap {
+fn align_items(index: usize) -> ItemPlacement {
+    ItemPlacement(match (index / 9) % 7 {
+        0 => AlignFlags::STRETCH,
+        1 => AlignFlags::FLEX_START,
+        2 => AlignFlags::START,
+        3 => AlignFlags::CENTER,
+        4 => AlignFlags::FLEX_END,
+        5 => AlignFlags::END,
+        _ => AlignFlags::BASELINE,
+    })
+}
+
+fn flex_wrap(index: usize) -> flex_wrap::T {
     match index % 3 {
-        0 => FlexWrap::NoWrap,
-        1 => FlexWrap::Wrap,
-        _ => FlexWrap::WrapReverse,
+        0 => flex_wrap::T::Nowrap,
+        1 => flex_wrap::T::Wrap,
+        _ => flex_wrap::T::WrapReverse,
     }
 }
 
-fn align_content(index: usize) -> AlignContent {
-    match index % 9 {
-        0 => AlignContent::FlexStart,
-        1 => AlignContent::Start,
-        2 => AlignContent::Center,
-        3 => AlignContent::FlexEnd,
-        4 => AlignContent::End,
-        5 => AlignContent::SpaceBetween,
-        6 => AlignContent::SpaceAround,
-        7 => AlignContent::SpaceEvenly,
-        _ => AlignContent::Stretch,
+fn align_content(index: usize) -> ContentDistribution {
+    ContentDistribution::new(match index % 9 {
+        0 => AlignFlags::FLEX_START,
+        1 => AlignFlags::START,
+        2 => AlignFlags::CENTER,
+        3 => AlignFlags::FLEX_END,
+        4 => AlignFlags::END,
+        5 => AlignFlags::SPACE_BETWEEN,
+        6 => AlignFlags::SPACE_AROUND,
+        7 => AlignFlags::SPACE_EVENLY,
+        _ => AlignFlags::STRETCH,
+    })
+}
+
+fn baseline_self(trigger: bool) -> SelfAlignment {
+    if trigger {
+        SelfAlignment(AlignFlags::BASELINE)
+    } else {
+        SelfAlignment::auto()
     }
 }
 
@@ -238,22 +342,22 @@ fn definite(width: f32, height: f32) -> (Size<Option<f32>>, Size<AvailableSpace>
 
 fn finish(
     tree: TestTree,
-    root: NodeId,
+    root: TestId,
     constraints: (Size<Option<f32>>, Size<AvailableSpace>),
 ) -> BenchCase {
     BenchCase::new(tree, root, constraints.0, constraints.1)
 }
 
-fn fixed_leaf(tree: &mut TestTree, style: TestStyle, width: f32, height: f32) -> NodeId {
+fn fixed_leaf(tree: &mut TestTree, style: TestStyle, width: f32, height: f32) -> TestId {
     tree.push_leaf(style, Size::new(width, height), None)
 }
 
-fn column_wrapper(tree: &mut TestTree, children: Vec<NodeId>, width: f32, height: f32) -> NodeId {
+fn column_wrapper(tree: &mut TestTree, children: Vec<TestId>, width: f32, height: f32) -> TestId {
     tree.push_flex(
         TestStyle {
             size: Size::new(px(width), px(height)),
-            flex_direction: FlexDirection::Column,
-            align_items: Some(AlignItems::FlexStart),
+            flex_direction: flex_direction::T::Column,
+            align_items: ItemPlacement(AlignFlags::FLEX_START),
             ..TestStyle::default()
         },
         children,
@@ -270,8 +374,8 @@ fn build_flex_grow_row(nodes: usize) -> BenchCase {
             &mut tree,
             TestStyle {
                 size: Size::new(px(basis), px(10.0)),
-                flex_basis: px(basis),
-                flex_grow: 1.0 + (index % 3) as f32,
+                flex_basis: basis_px(basis),
+                flex_grow: (1.0 + (index % 3) as f32).into(),
                 ..TestStyle::default()
             },
             basis,
@@ -280,9 +384,9 @@ fn build_flex_grow_row(nodes: usize) -> BenchCase {
     }
     let root = tree.push_flex(
         TestStyle {
-            size: Size::new(Dimension::Auto, px(10.0)),
-            align_items: Some(AlignItems::Stretch),
-            justify_content: Some(AlignContent::FlexStart),
+            size: Size::new(StyleSize::Auto, px(10.0)),
+            align_items: ItemPlacement(AlignFlags::STRETCH),
+            justify_content: ContentDistribution::new(AlignFlags::FLEX_START),
             ..TestStyle::default()
         },
         children,
@@ -301,7 +405,7 @@ fn build_flex_wrap_gaps(nodes: usize) -> BenchCase {
             &mut tree,
             TestStyle {
                 size: Size::new(px(basis), px(height)),
-                flex_basis: px(basis),
+                flex_basis: basis_px(basis),
                 ..TestStyle::default()
             },
             basis,
@@ -310,11 +414,11 @@ fn build_flex_wrap_gaps(nodes: usize) -> BenchCase {
     }
     let root = tree.push_flex(
         TestStyle {
-            size: Size::new(px(320.0), Dimension::Auto),
-            flex_wrap: FlexWrap::Wrap,
-            gap: Size::new(lp(1.0), lp(1.0)),
-            align_items: Some(AlignItems::FlexStart),
-            justify_content: Some(AlignContent::FlexStart),
+            size: Size::new(px(320.0), StyleSize::Auto),
+            flex_wrap: flex_wrap::T::Wrap,
+            gap: Size::new(gap_px(1.0), gap_px(1.0)),
+            align_items: ItemPlacement(AlignFlags::FLEX_START),
+            justify_content: ContentDistribution::new(AlignFlags::FLEX_START),
             ..TestStyle::default()
         },
         children,
@@ -332,8 +436,8 @@ fn build_flex_at_most_root(nodes: usize) -> BenchCase {
         children.push(fixed_leaf(
             &mut tree,
             TestStyle {
-                size: Size::new(Dimension::Auto, px(height)),
-                flex_basis: px(basis),
+                size: Size::new(StyleSize::Auto, px(height)),
+                flex_basis: basis_px(basis),
                 ..TestStyle::default()
             },
             basis,
@@ -342,8 +446,8 @@ fn build_flex_at_most_root(nodes: usize) -> BenchCase {
     }
     let root = tree.push_flex(
         TestStyle {
-            align_items: Some(AlignItems::FlexStart),
-            justify_content: Some(AlignContent::FlexStart),
+            align_items: ItemPlacement(AlignFlags::FLEX_START),
+            justify_content: ContentDistribution::new(AlignFlags::FLEX_START),
             ..TestStyle::default()
         },
         children,
@@ -358,52 +462,46 @@ fn build_at_most_owner_matrix(nodes: usize) -> BenchCase {
     let mut containers = Vec::with_capacity(count);
     for index in 0..count {
         let case_index = index;
-        let max_width = tree.push_calc(24.0, 0.60);
-        let max_height = tree.push_calc(12.0, 0.70);
+        let max_width = max_calc(24.0, 0.60);
+        let max_height = max_calc(12.0, 0.70);
         let width = if case_index.is_multiple_of(2) {
-            Dimension::Percent(0.42 + (case_index % 5) as f32 / 100.0)
+            pct(0.42 + (case_index % 5) as f32 / 100.0)
         } else {
-            Dimension::FitContent(LengthPercentage::Calc(
-                tree.push_calc(18.0 + (case_index % 4) as f32, 0.45),
-            ))
+            fit_content(calc_lp(18.0 + (case_index % 4) as f32, 0.45))
         };
         let height = if case_index.is_multiple_of(3) {
-            Dimension::Auto
+            StyleSize::Auto
         } else {
-            Dimension::FitContent(LengthPercentage::Length(34.0 + (case_index % 6) as f32))
+            fit_content(lp(34.0 + (case_index % 6) as f32))
         };
 
         let mut children = Vec::with_capacity(3);
         for child_index in 0..3 {
-            let child_max_width = tree.push_calc(18.0 + child_index as f32 * 3.0, 0.45);
-            let child_max_height = tree.push_calc(10.0 + child_index as f32 * 2.0, 0.55);
+            let child_max_width = max_calc(18.0 + child_index as f32 * 3.0, 0.45);
+            let child_max_height = max_calc(10.0 + child_index as f32 * 2.0, 0.55);
             let intrinsic = Size::new(
                 20.0 + (case_index % 7) as f32 + child_index as f32 * 4.0,
                 10.0 + (case_index % 5) as f32 + child_index as f32 * 3.0,
             );
-            let fit_content_width = tree.push_calc(6.0, 0.40);
             children.push(tree.push_leaf(
                 TestStyle {
                     size: Size::new(
                         match child_index {
-                            0 => Dimension::Auto,
-                            1 => Dimension::FitContent(LengthPercentage::Calc(fit_content_width)),
-                            _ => Dimension::Percent(0.35),
+                            0 => StyleSize::Auto,
+                            1 => fit_content(calc_lp(6.0, 0.40)),
+                            _ => pct(0.35),
                         },
                         match child_index {
-                            0 => Dimension::FitContent(LengthPercentage::Length(18.0)),
-                            1 => Dimension::Auto,
-                            _ => Dimension::Percent(0.30),
+                            0 => fit_content(lp(18.0)),
+                            1 => StyleSize::Auto,
+                            _ => pct(0.30),
                         },
                     ),
                     min_size: Size::new(
                         px(12.0 + child_index as f32 * 2.0),
                         px(8.0 + child_index as f32),
                     ),
-                    max_size: Size::new(
-                        Dimension::Calc(child_max_width),
-                        Dimension::Calc(child_max_height),
-                    ),
+                    max_size: Size::new(child_max_width, child_max_height),
                     margin: margin_px(
                         (child_index % 2) as f32,
                         (child_index % 3) as f32 * 0.5,
@@ -421,13 +519,13 @@ fn build_at_most_owner_matrix(nodes: usize) -> BenchCase {
             TestStyle {
                 size: Size::new(width, height),
                 min_size: Size::new(px(36.0), px(18.0)),
-                max_size: Size::new(Dimension::Calc(max_width), Dimension::Calc(max_height)),
-                flex_wrap: FlexWrap::Wrap,
-                align_items: Some(AlignItems::FlexStart),
-                align_content: Some(AlignContent::FlexStart),
-                justify_content: Some(AlignContent::FlexStart),
-                gap: Size::new(lp(1.0), lp(1.0)),
-                padding: Edges::uniform(lp(1.0)),
+                max_size: Size::new(max_width, max_height),
+                flex_wrap: flex_wrap::T::Wrap,
+                align_items: ItemPlacement(AlignFlags::FLEX_START),
+                align_content: ContentDistribution::new(AlignFlags::FLEX_START),
+                justify_content: ContentDistribution::new(AlignFlags::FLEX_START),
+                gap: Size::new(gap_px(1.0), gap_px(1.0)),
+                padding: uniform(pad(1.0)),
                 margin: margin_px(1.0, 0.0, 1.0, 0.0),
                 ..TestStyle::default()
             },
@@ -435,25 +533,18 @@ fn build_at_most_owner_matrix(nodes: usize) -> BenchCase {
         ));
     }
 
-    let root_width = tree.push_calc(12.0, 0.80);
-    let root_height = tree.push_calc(8.0, 0.70);
-    let root_max_width = tree.push_calc(36.0, 0.80);
-    let root_max_height = tree.push_calc(20.0, 0.85);
     // A column Flex wrapper supplies the owner constraints for this workload.
     let root = tree.push_flex(
         TestStyle {
             size: Size::new(
-                Dimension::FitContent(LengthPercentage::Calc(root_width)),
-                Dimension::FitContent(LengthPercentage::Calc(root_height)),
+                fit_content(calc_lp(12.0, 0.80)),
+                fit_content(calc_lp(8.0, 0.70)),
             ),
-            min_size: Size::new(Dimension::Percent(0.35), px(48.0)),
-            max_size: Size::new(
-                Dimension::Calc(root_max_width),
-                Dimension::Calc(root_max_height),
-            ),
-            flex_direction: FlexDirection::Column,
-            align_items: Some(AlignItems::FlexStart),
-            padding: Edges::uniform(lp(1.0)),
+            min_size: Size::new(pct(0.35), px(48.0)),
+            max_size: Size::new(max_calc(36.0, 0.80), max_calc(20.0, 0.85)),
+            flex_direction: flex_direction::T::Column,
+            align_items: ItemPlacement(AlignFlags::FLEX_START),
+            padding: uniform(pad(1.0)),
             ..TestStyle::default()
         },
         containers,
@@ -466,14 +557,14 @@ fn build_owner_direction_inheritance(nodes: usize) -> BenchCase {
     let mut tree = TestTree::default();
     let mut rows = Vec::with_capacity(count * 2);
     for index in 0..count {
-        for row_direction in [Direction::Rtl, Direction::Ltr] {
+        for row_direction in [direction::T::Rtl, direction::T::Ltr] {
             let width = 10.0 + (index % 3) as f32;
             let height = 5.0 + (index % 2) as f32;
             let leaf = fixed_leaf(
                 &mut tree,
                 TestStyle {
                     size: Size::new(px(width), px(height)),
-                    flex_basis: px(width),
+                    flex_basis: basis_px(width),
                     direction: row_direction,
                     ..TestStyle::default()
                 },
@@ -483,10 +574,10 @@ fn build_owner_direction_inheritance(nodes: usize) -> BenchCase {
             rows.push(tree.push_flex(
                 TestStyle {
                     size: Size::new(px(30.0), px(10.0 + (index % 2) as f32)),
-                    flex_basis: px(10.0),
+                    flex_basis: basis_px(10.0),
                     direction: row_direction,
-                    justify_content: Some(AlignContent::FlexStart),
-                    align_items: Some(AlignItems::FlexStart),
+                    justify_content: ContentDistribution::new(AlignFlags::FLEX_START),
+                    align_items: ItemPlacement(AlignFlags::FLEX_START),
                     ..TestStyle::default()
                 },
                 vec![leaf],
@@ -496,9 +587,9 @@ fn build_owner_direction_inheritance(nodes: usize) -> BenchCase {
     let root = tree.push_flex(
         TestStyle {
             size: Size::new(px(30.0), px(count as f32 * 20.0)),
-            direction: Direction::Rtl,
-            flex_direction: FlexDirection::Column,
-            align_items: Some(AlignItems::FlexStart),
+            direction: direction::T::Rtl,
+            flex_direction: flex_direction::T::Column,
+            align_items: ItemPlacement(AlignFlags::FLEX_START),
             ..TestStyle::default()
         },
         rows,
@@ -517,11 +608,11 @@ fn build_flex_axis_alignment_matrix(nodes: usize) -> BenchCase {
             let basis = [18.0, 24.0, 30.0][child_index];
             let cross = [8.0, 12.0, 16.0][child_index];
             let auto_cross = child_index == 1;
-            let size = if axis.is_row() {
+            let size = if is_row(axis) {
                 Size::new(
                     px(basis),
                     if auto_cross {
-                        Dimension::Auto
+                        StyleSize::Auto
                     } else {
                         px(cross)
                     },
@@ -529,7 +620,7 @@ fn build_flex_axis_alignment_matrix(nodes: usize) -> BenchCase {
             } else {
                 Size::new(
                     if auto_cross {
-                        Dimension::Auto
+                        StyleSize::Auto
                     } else {
                         px(cross)
                     },
@@ -539,7 +630,7 @@ fn build_flex_axis_alignment_matrix(nodes: usize) -> BenchCase {
             children.push(tree.push_leaf(
                 TestStyle {
                     size,
-                    flex_basis: px(basis),
+                    flex_basis: basis_px(basis),
                     margin: margin_px(
                         child_index as f32,
                         (2 - child_index) as f32,
@@ -555,11 +646,11 @@ fn build_flex_axis_alignment_matrix(nodes: usize) -> BenchCase {
         containers.push(tree.push_flex(
             TestStyle {
                 size: Size::new(px(120.0), px(80.0)),
-                flex_basis: px(80.0),
+                flex_basis: basis_px(80.0),
                 direction: direction(index),
                 flex_direction: axis,
-                justify_content: Some(justify_content(index)),
-                align_items: Some(align_items(index)),
+                justify_content: justify_content(index),
+                align_items: align_items(index),
                 margin: margin_px(1.0, 0.0, 1.0, 0.0),
                 ..TestStyle::default()
             },
@@ -580,42 +671,42 @@ fn build_flex_distribution_matrix(nodes: usize) -> BenchCase {
         let grow_case = index.is_multiple_of(2);
         let main = if grow_case { 178.0 } else { 94.0 };
         let cross = 58.0;
-        let container_size = if axis.is_row() {
+        let container_size = if is_row(axis) {
             Size::new(px(main), px(cross))
         } else {
             Size::new(px(cross), px(main))
         };
         let mut children = Vec::with_capacity(5);
         for child_index in 0..5 {
-            let basis = [
-                px(18.0),
-                px(28.0),
-                px(36.0),
-                px(22.0),
-                Dimension::Percent(0.18),
-            ][child_index];
+            let basis = match child_index {
+                0 => basis_px(18.0),
+                1 => basis_px(28.0),
+                2 => basis_px(36.0),
+                3 => basis_px(22.0),
+                _ => FlexBasis::Size(pct(0.18)),
+            };
             let grow = [0.0, 1.0, 2.0, 1.5, 0.5][child_index];
             let shrink = [1.0, 2.0, 0.5, 1.5, 0.0][child_index];
             let order = [-1, 2, 0, 3, -2][child_index] + [0, 1][index % 2];
             let cross_size = 12.0 + child_index as f32 * 2.0;
             let (min_main, max_main) = match child_index {
-                0 => (px(24.0), Dimension::Auto),
-                1 => (Dimension::Auto, px(32.0)),
-                2 => (Dimension::Percent(0.22), Dimension::Auto),
-                3 => (Dimension::Auto, Dimension::Percent(0.24)),
-                _ => (Dimension::Auto, Dimension::Auto),
+                0 => (px(24.0), MaxSize::None),
+                1 => (StyleSize::Auto, max_px(32.0)),
+                2 => (pct(0.22), MaxSize::None),
+                3 => (StyleSize::Auto, max_pct(0.24)),
+                _ => (StyleSize::Auto, MaxSize::None),
             };
-            let (size, min_size, max_size) = if axis.is_row() {
+            let (size, min_size, max_size) = if is_row(axis) {
                 (
-                    Size::new(Dimension::Auto, px(cross_size)),
-                    Size::new(min_main, Dimension::Auto),
-                    Size::new(max_main, Dimension::Auto),
+                    Size::new(StyleSize::Auto, px(cross_size)),
+                    Size::new(min_main, StyleSize::Auto),
+                    Size::new(max_main, MaxSize::None),
                 )
             } else {
                 (
-                    Size::new(px(cross_size), Dimension::Auto),
-                    Size::new(Dimension::Auto, min_main),
-                    Size::new(Dimension::Auto, max_main),
+                    Size::new(px(cross_size), StyleSize::Auto),
+                    Size::new(StyleSize::Auto, min_main),
+                    Size::new(MaxSize::None, max_main),
                 )
             };
             children.push(tree.push_leaf(
@@ -624,8 +715,8 @@ fn build_flex_distribution_matrix(nodes: usize) -> BenchCase {
                     min_size,
                     max_size,
                     flex_basis: basis,
-                    flex_grow: grow,
-                    flex_shrink: shrink,
+                    flex_grow: grow.into(),
+                    flex_shrink: shrink.into(),
                     order,
                     margin: margin_px(
                         (child_index % 2) as f32,
@@ -642,14 +733,14 @@ fn build_flex_distribution_matrix(nodes: usize) -> BenchCase {
         containers.push(tree.push_flex(
             TestStyle {
                 size: container_size,
-                flex_basis: px(84.0),
+                flex_basis: basis_px(84.0),
                 direction: direction(index),
                 flex_direction: axis,
-                flex_wrap: FlexWrap::NoWrap,
-                justify_content: Some(AlignContent::FlexStart),
-                align_items: Some(AlignItems::FlexStart),
-                gap: Size::new(lp(1.0), lp(1.0)),
-                padding: edges(lp(2.0), lp(2.0), lp(1.0), lp(1.0)),
+                flex_wrap: flex_wrap::T::Nowrap,
+                justify_content: ContentDistribution::new(AlignFlags::FLEX_START),
+                align_items: ItemPlacement(AlignFlags::FLEX_START),
+                gap: Size::new(gap_px(1.0), gap_px(1.0)),
+                padding: edges(pad(2.0), pad(2.0), pad(1.0), pad(1.0)),
                 margin: margin_px(1.0, 0.0, 1.0, 0.0),
                 ..TestStyle::default()
             },
@@ -674,7 +765,7 @@ fn build_flex_wrap_alignment_matrix(nodes: usize) -> BenchCase {
                 &mut tree,
                 TestStyle {
                     size: Size::new(px(width), px(height)),
-                    flex_basis: px(if axis.is_row() { width } else { height }),
+                    flex_basis: basis_px(if is_row(axis) { width } else { height }),
                     margin: margin_px(
                         (child_index % 2) as f32,
                         (child_index % 3) as f32,
@@ -690,15 +781,15 @@ fn build_flex_wrap_alignment_matrix(nodes: usize) -> BenchCase {
         containers.push(tree.push_flex(
             TestStyle {
                 size: Size::new(px(76.0), px(64.0)),
-                flex_basis: px(70.0),
+                flex_basis: basis_px(70.0),
                 direction: direction(index),
                 flex_direction: axis,
                 flex_wrap: flex_wrap(index),
-                justify_content: Some(AlignContent::FlexStart),
-                align_content: Some(align_content(index)),
-                align_items: Some(align_items(index)),
-                gap: Size::new(lp(2.0), lp(3.0)),
-                padding: edges(lp(3.0), lp(5.0), lp(2.0), lp(4.0)),
+                justify_content: ContentDistribution::new(AlignFlags::FLEX_START),
+                align_content: align_content(index),
+                align_items: align_items(index),
+                gap: Size::new(gap_px(2.0), gap_px(3.0)),
+                padding: edges(pad(3.0), pad(5.0), pad(2.0), pad(4.0)),
                 margin: margin_px(1.0, 0.0, 1.0, 0.0),
                 ..TestStyle::default()
             },
@@ -720,7 +811,7 @@ fn build_flex_baseline_measured(nodes: usize) -> BenchCase {
         let baseline = (2.0 + (index % 5) as f32).min(height);
         children.push(tree.push_leaf(
             TestStyle {
-                align_self: index.is_multiple_of(3).then_some(AlignItems::Baseline),
+                align_self: baseline_self(index.is_multiple_of(3)),
                 margin: margin_px(
                     (index % 2) as f32,
                     (index % 3) as f32,
@@ -735,9 +826,9 @@ fn build_flex_baseline_measured(nodes: usize) -> BenchCase {
     }
     let root = tree.push_flex(
         TestStyle {
-            size: Size::new(px(320.0), Dimension::Auto),
-            align_items: Some(AlignItems::Baseline),
-            justify_content: Some(AlignContent::FlexStart),
+            size: Size::new(px(320.0), StyleSize::Auto),
+            align_items: ItemPlacement(AlignFlags::BASELINE),
+            justify_content: ContentDistribution::new(AlignFlags::FLEX_START),
             ..TestStyle::default()
         },
         children,
@@ -745,11 +836,11 @@ fn build_flex_baseline_measured(nodes: usize) -> BenchCase {
     finish(tree, root, known_width(320.0))
 }
 
-fn baseline_leaf(tree: &mut TestTree, width: f32, height: f32, baseline: f32) -> NodeId {
+fn baseline_leaf(tree: &mut TestTree, width: f32, height: f32, baseline: f32) -> TestId {
     tree.push_leaf(
         TestStyle {
             size: Size::new(px(width), px(height)),
-            flex_basis: px(width),
+            flex_basis: basis_px(width),
             ..TestStyle::default()
         },
         Size::new(width, height),
@@ -757,29 +848,29 @@ fn baseline_leaf(tree: &mut TestTree, width: f32, height: f32, baseline: f32) ->
     )
 }
 
-fn nested_baseline_flex(tree: &mut TestTree, column: bool, trigger: bool) -> NodeId {
+fn nested_baseline_flex(tree: &mut TestTree, column: bool, trigger: bool) -> TestId {
     let first = baseline_leaf(tree, 10.0, 18.0, 7.0);
     let second = baseline_leaf(tree, 12.0, 24.0, 18.0);
     tree.push_flex(
         TestStyle {
             size: Size::new(px(28.0), px(if column { 40.0 } else { 26.0 })),
-            flex_basis: px(28.0),
+            flex_basis: basis_px(28.0),
             flex_direction: if column {
-                FlexDirection::Column
+                flex_direction::T::Column
             } else {
-                FlexDirection::Row
+                flex_direction::T::Row
             },
-            align_items: Some(if column {
-                AlignItems::FlexStart
+            align_items: ItemPlacement(if column {
+                AlignFlags::FLEX_START
             } else {
-                AlignItems::Baseline
+                AlignFlags::BASELINE
             }),
-            justify_content: Some(if column {
-                AlignContent::Center
+            justify_content: ContentDistribution::new(if column {
+                AlignFlags::CENTER
             } else {
-                AlignContent::FlexStart
+                AlignFlags::FLEX_START
             }),
-            align_self: trigger.then_some(AlignItems::Baseline),
+            align_self: baseline_self(trigger),
             margin: margin_px(1.0, 1.0, 2.0, 1.0),
             ..TestStyle::default()
         },
@@ -795,7 +886,7 @@ fn build_baseline_propagation_matrix(nodes: usize) -> BenchCase {
         let reference = tree.push_leaf(
             TestStyle {
                 size: Size::new(px(12.0), px(32.0)),
-                flex_basis: px(12.0),
+                flex_basis: basis_px(12.0),
                 margin: margin_px(1.0, 1.0, 2.0, 1.0),
                 ..TestStyle::default()
             },
@@ -807,8 +898,8 @@ fn build_baseline_propagation_matrix(nodes: usize) -> BenchCase {
             0 => tree.push_leaf(
                 TestStyle {
                     size: Size::new(px(18.0), px(22.0)),
-                    flex_basis: px(18.0),
-                    align_self: trigger.then_some(AlignItems::Baseline),
+                    flex_basis: basis_px(18.0),
+                    align_self: baseline_self(trigger),
                     margin: margin_px(1.0, 2.0, 1.0, 2.0),
                     ..TestStyle::default()
                 },
@@ -821,7 +912,7 @@ fn build_baseline_propagation_matrix(nodes: usize) -> BenchCase {
         let trailing = tree.push_leaf(
             TestStyle {
                 size: Size::new(px(10.0), px(12.0)),
-                flex_basis: px(10.0),
+                flex_basis: basis_px(10.0),
                 margin: margin_px(0.0, 1.0, 0.0, 0.0),
                 ..TestStyle::default()
             },
@@ -831,14 +922,14 @@ fn build_baseline_propagation_matrix(nodes: usize) -> BenchCase {
         rows.push(tree.push_flex(
             TestStyle {
                 size: Size::new(px(116.0), px(48.0)),
-                flex_basis: px(52.0),
-                align_items: Some(if index.is_multiple_of(2) {
-                    AlignItems::Baseline
+                flex_basis: basis_px(52.0),
+                align_items: ItemPlacement(if index.is_multiple_of(2) {
+                    AlignFlags::BASELINE
                 } else {
-                    AlignItems::FlexStart
+                    AlignFlags::FLEX_START
                 }),
-                justify_content: Some(AlignContent::FlexStart),
-                padding: edges(lp(2.0), lp(2.0), lp(1.0), lp(1.0)),
+                justify_content: ContentDistribution::new(AlignFlags::FLEX_START),
+                padding: edges(pad(2.0), pad(2.0), pad(1.0), pad(1.0)),
                 margin: margin_px(1.0, 0.0, 1.0, 0.0),
                 ..TestStyle::default()
             },
@@ -887,43 +978,41 @@ fn build_measured_callback_matrix(nodes: usize) -> BenchCase {
             let style = TestStyle {
                 size: Size::new(
                     if child_index == 0 {
-                        Dimension::FitContent(lp(36.0))
+                        fit_content(lp(36.0))
                     } else {
-                        Dimension::Auto
+                        StyleSize::Auto
                     },
                     if child_index == 1 {
-                        Dimension::FitContent(lp(18.0))
+                        fit_content(lp(18.0))
                     } else {
-                        Dimension::Auto
+                        StyleSize::Auto
                     },
                 ),
                 min_size: Size::new(
                     if child_index == 2 {
                         px(20.0)
                     } else {
-                        Dimension::Auto
+                        StyleSize::Auto
                     },
                     if child_index == 1 {
                         px(10.0)
                     } else {
-                        Dimension::Auto
+                        StyleSize::Auto
                     },
                 ),
                 max_size: Size::new(
                     if child_index == 3 {
-                        px(54.0)
+                        max_px(54.0)
                     } else {
-                        Dimension::Auto
+                        MaxSize::None
                     },
                     if child_index == 2 {
-                        px(32.0)
+                        max_px(32.0)
                     } else {
-                        Dimension::Auto
+                        MaxSize::None
                     },
                 ),
-                align_self: child_index
-                    .is_multiple_of(2)
-                    .then_some(AlignItems::Baseline),
+                align_self: baseline_self(child_index.is_multiple_of(2)),
                 margin: margin_px(
                     (child_index % 2) as f32,
                     (child_index % 3) as f32 * 0.5,
@@ -948,26 +1037,26 @@ fn build_measured_callback_matrix(nodes: usize) -> BenchCase {
             TestStyle {
                 size: Size::new(
                     if case_index.is_multiple_of(3) {
-                        Dimension::FitContent(lp(126.0))
+                        fit_content(lp(126.0))
                     } else {
                         px(136.0)
                     },
                     if case_index.is_multiple_of(4) {
-                        Dimension::FitContent(lp(44.0))
+                        fit_content(lp(44.0))
                     } else {
                         px(58.0)
                     },
                 ),
                 min_size: Size::new(px(72.0), px(28.0)),
-                max_size: Size::new(px(180.0), px(92.0)),
-                flex_basis: px(68.0),
-                flex_wrap: FlexWrap::Wrap,
-                align_items: Some(AlignItems::Baseline),
-                align_content: Some(AlignContent::FlexStart),
-                justify_content: Some(AlignContent::FlexStart),
-                gap: Size::new(lp(1.0), lp(1.0)),
-                padding: Edges::uniform(lp(1.0)),
-                border: Edges::uniform(lp((case_index % 2) as f32 * 0.5)),
+                max_size: Size::new(max_px(180.0), max_px(92.0)),
+                flex_basis: basis_px(68.0),
+                flex_wrap: flex_wrap::T::Wrap,
+                align_items: ItemPlacement(AlignFlags::BASELINE),
+                align_content: ContentDistribution::new(AlignFlags::FLEX_START),
+                justify_content: ContentDistribution::new(AlignFlags::FLEX_START),
+                gap: Size::new(gap_px(1.0), gap_px(1.0)),
+                padding: uniform(pad(1.0)),
+                border: uniform(bw((case_index % 2) as f32 * 0.5)),
                 margin: margin_px(1.0, 0.0, 1.0, 0.0),
                 ..TestStyle::default()
             },
@@ -989,15 +1078,15 @@ fn build_absolute_children(nodes: usize) -> BenchCase {
         children.push(fixed_leaf(
             &mut tree,
             TestStyle {
-                position: Position::Absolute,
+                position: PositionProperty::Absolute,
                 inset: edges(
-                    LengthPercentageAuto::Length((index % 64) as f32 * 5.0),
-                    LengthPercentageAuto::Auto,
-                    LengthPercentageAuto::Length((index / 64) as f32 * 4.0),
-                    LengthPercentageAuto::Auto,
+                    Inset::LengthPercentage(lp((index % 64) as f32 * 5.0)),
+                    Inset::Auto,
+                    Inset::LengthPercentage(lp((index / 64) as f32 * 4.0)),
+                    Inset::Auto,
                 ),
                 size: Size::new(px(4.0), px(3.0)),
-                flex_basis: px(4.0),
+                flex_basis: basis_px(4.0),
                 ..TestStyle::default()
             },
             4.0,
@@ -1041,7 +1130,7 @@ fn build_nested_column_flex(nodes: usize) -> BenchCase {
                 &mut tree,
                 TestStyle {
                     size: Size::new(px(width), px(2.0)),
-                    flex_basis: px(2.0),
+                    flex_basis: basis_px(2.0),
                     ..TestStyle::default()
                 },
                 width,
@@ -1050,10 +1139,10 @@ fn build_nested_column_flex(nodes: usize) -> BenchCase {
         }
         branches.push(tree.push_flex(
             TestStyle {
-                flex_direction: FlexDirection::Column,
-                flex_basis: px(8.0 + (branch_index % 4) as f32),
-                gap: Size::new(lp(0.0), lp(0.5)),
-                align_items: Some(AlignItems::FlexStart),
+                flex_direction: flex_direction::T::Column,
+                flex_basis: basis_px(8.0 + (branch_index % 4) as f32),
+                gap: Size::new(gap_px(0.0), gap_px(0.5)),
+                align_items: ItemPlacement(AlignFlags::FLEX_START),
                 ..TestStyle::default()
             },
             leaves,
@@ -1061,8 +1150,8 @@ fn build_nested_column_flex(nodes: usize) -> BenchCase {
     }
     let root = tree.push_flex(
         TestStyle {
-            align_items: Some(AlignItems::FlexStart),
-            justify_content: Some(AlignContent::FlexStart),
+            align_items: ItemPlacement(AlignFlags::FLEX_START),
+            justify_content: ContentDistribution::new(AlignFlags::FLEX_START),
             ..TestStyle::default()
         },
         branches,
@@ -1084,7 +1173,7 @@ fn build_in_flow_order_matrix(nodes: usize) -> BenchCase {
                 &mut tree,
                 TestStyle {
                     size: Size::new(px(width), px(height)),
-                    flex_basis: px(width),
+                    flex_basis: basis_px(width),
                     order: [-2, 3, 0, 1, -1][child_index] + [-1, 0, 1][case_index % 3],
                     margin: margin_px(
                         (child_index % 2) as f32 * 0.5,
@@ -1101,13 +1190,13 @@ fn build_in_flow_order_matrix(nodes: usize) -> BenchCase {
         containers.push(tree.push_flex(
             TestStyle {
                 size: Size::new(px(122.0), px(52.0)),
-                flex_basis: px(58.0),
+                flex_basis: basis_px(58.0),
                 direction: direction(case_index),
                 flex_direction: flex_direction(case_index),
-                justify_content: Some(AlignContent::FlexStart),
-                align_items: Some(AlignItems::FlexStart),
-                gap: Size::new(lp(1.0), lp(0.0)),
-                padding: Edges::uniform(lp(1.0)),
+                justify_content: ContentDistribution::new(AlignFlags::FLEX_START),
+                align_items: ItemPlacement(AlignFlags::FLEX_START),
+                gap: Size::new(gap_px(1.0), gap_px(0.0)),
+                padding: uniform(pad(1.0)),
                 margin: margin_px(1.0, 0.0, 1.0, 0.0),
                 ..TestStyle::default()
             },
@@ -1119,31 +1208,48 @@ fn build_in_flow_order_matrix(nodes: usize) -> BenchCase {
     finish(tree, root, known_width(320.0))
 }
 
-fn spacing(tree: &mut TestTree, index: usize) -> LengthPercentage {
+fn spacing(index: usize) -> NonNegativeLengthPercentage {
     match index % 9 {
-        0 => lp(2.0 + (index % 5) as f32),
-        1 => LengthPercentage::Percent(0.04 + (index % 7) as f32 / 100.0),
-        2 => LengthPercentage::Calc(
-            tree.push_calc(1.0 + (index % 3) as f32, 0.03 + (index % 5) as f32 / 100.0),
-        ),
+        0 => pad(2.0 + (index % 5) as f32),
+        1 => NonNegative(pct_lp(0.04 + (index % 7) as f32 / 100.0)),
+        2 => NonNegative(calc_lp(
+            1.0 + (index % 3) as f32,
+            0.03 + (index % 5) as f32 / 100.0,
+        )),
         // auto/fr/intrinsic values are not valid for CSS padding/gap. Keep
         // their phase in the nine-value period while mapping unsupported raw
         // values to the host's initial zero.
-        3..=8 => LengthPercentage::ZERO,
+        3..=8 => NonNegativeLengthPercentage::zero(),
         _ => unreachable!(),
     }
 }
 
-fn spacing_auto(tree: &mut TestTree, index: usize) -> LengthPercentageAuto {
+fn margin_spacing(index: usize) -> Margin {
     match index % 9 {
-        0 => LengthPercentageAuto::Length(2.0 + (index % 5) as f32),
-        1 => LengthPercentageAuto::Percent(0.04 + (index % 7) as f32 / 100.0),
-        2 => LengthPercentageAuto::Calc(
-            tree.push_calc(1.0 + (index % 3) as f32, 0.03 + (index % 5) as f32 / 100.0),
-        ),
-        3 => LengthPercentageAuto::Auto,
-        // fr/intrinsic/fit-content are not valid CSS margin/inset values.
-        4..=8 => LengthPercentageAuto::ZERO,
+        0 => margin_len(2.0 + (index % 5) as f32),
+        1 => Margin::LengthPercentage(pct_lp(0.04 + (index % 7) as f32 / 100.0)),
+        2 => Margin::LengthPercentage(calc_lp(
+            1.0 + (index % 3) as f32,
+            0.03 + (index % 5) as f32 / 100.0,
+        )),
+        3 => Margin::Auto,
+        // fr/intrinsic/fit-content are not valid CSS margin values.
+        4..=8 => Margin::LengthPercentage(LengthPercentage::zero()),
+        _ => unreachable!(),
+    }
+}
+
+fn inset_spacing(index: usize) -> Inset {
+    match index % 9 {
+        0 => Inset::LengthPercentage(lp(2.0 + (index % 5) as f32)),
+        1 => Inset::LengthPercentage(pct_lp(0.04 + (index % 7) as f32 / 100.0)),
+        2 => Inset::LengthPercentage(calc_lp(
+            1.0 + (index % 3) as f32,
+            0.03 + (index % 5) as f32 / 100.0,
+        )),
+        3 => Inset::Auto,
+        // fr/intrinsic/fit-content are not valid CSS inset values.
+        4..=8 => Inset::LengthPercentage(LengthPercentage::zero()),
         _ => unreachable!(),
     }
 }
@@ -1155,52 +1261,52 @@ fn build_full_value_spacing_matrix(nodes: usize) -> BenchCase {
     for index in 0..count {
         let case_index = index;
         let padding = edges(
-            spacing(&mut tree, case_index),
-            spacing(&mut tree, case_index + 1),
-            spacing(&mut tree, case_index + 2),
-            spacing(&mut tree, case_index + 3),
+            spacing(case_index),
+            spacing(case_index + 1),
+            spacing(case_index + 2),
+            spacing(case_index + 3),
         );
         let gap = Size::new(
-            spacing(&mut tree, case_index + 5),
-            spacing(&mut tree, case_index + 4),
+            gap_of(spacing(case_index + 5)),
+            gap_of(spacing(case_index + 4)),
         );
         let mut children = Vec::with_capacity(4);
         for child_index in 0..4 {
             let base = case_index + child_index * 3;
             let inset = edges(
-                spacing_auto(&mut tree, base),
-                LengthPercentageAuto::Auto,
-                spacing_auto(&mut tree, base + 1),
-                LengthPercentageAuto::Auto,
+                inset_spacing(base),
+                Inset::Auto,
+                inset_spacing(base + 1),
+                Inset::Auto,
             );
             let margin = edges(
-                spacing_auto(&mut tree, base + 2),
-                spacing_auto(&mut tree, base + 3),
-                spacing_auto(&mut tree, base + 4),
-                spacing_auto(&mut tree, base + 5),
+                margin_spacing(base + 2),
+                margin_spacing(base + 3),
+                margin_spacing(base + 4),
+                margin_spacing(base + 5),
             );
             let child_padding = edges(
-                spacing(&mut tree, base + 6),
-                spacing(&mut tree, base + 7),
-                spacing(&mut tree, base + 8),
-                spacing(&mut tree, base + 9),
+                spacing(base + 6),
+                spacing(base + 7),
+                spacing(base + 8),
+                spacing(base + 9),
             );
             let width = 18.0 + child_index as f32 * 3.0;
             let height = 8.0 + child_index as f32 * 2.0;
             children.push(fixed_leaf(
                 &mut tree,
                 TestStyle {
-                    position: Position::Relative,
+                    position: PositionProperty::Relative,
                     inset,
                     size: Size::new(px(width), px(height)),
-                    flex_basis: px(width),
+                    flex_basis: basis_px(width),
                     margin,
                     padding: child_padding,
                     border: edges(
-                        lp(child_index as f32 * 0.5),
-                        lp(0.5 + (child_index % 2) as f32),
-                        lp((child_index % 3) as f32 * 0.25),
-                        lp(1.0),
+                        bw(child_index as f32 * 0.5),
+                        bw(0.5 + (child_index % 2) as f32),
+                        bw((child_index % 3) as f32 * 0.25),
+                        bw(1.0),
                     ),
                     ..TestStyle::default()
                 },
@@ -1211,19 +1317,19 @@ fn build_full_value_spacing_matrix(nodes: usize) -> BenchCase {
         containers.push(tree.push_flex(
             TestStyle {
                 size: Size::new(px(128.0), px(64.0)),
-                flex_basis: px(70.0),
+                flex_basis: basis_px(70.0),
                 direction: direction(case_index),
                 flex_direction: flex_direction(case_index),
-                flex_wrap: FlexWrap::Wrap,
-                justify_content: Some(AlignContent::FlexStart),
-                align_items: Some(AlignItems::FlexStart),
-                align_content: Some(AlignContent::FlexStart),
+                flex_wrap: flex_wrap::T::Wrap,
+                justify_content: ContentDistribution::new(AlignFlags::FLEX_START),
+                align_items: ItemPlacement(AlignFlags::FLEX_START),
+                align_content: ContentDistribution::new(AlignFlags::FLEX_START),
                 padding,
                 border: edges(
-                    lp(1.0 + (case_index % 2) as f32),
-                    lp((case_index % 3) as f32 * 0.5),
-                    lp(0.5 + (case_index % 2) as f32),
-                    lp((case_index % 4) as f32 * 0.25),
+                    bw(1.0 + (case_index % 2) as f32),
+                    bw((case_index % 3) as f32 * 0.5),
+                    bw(0.5 + (case_index % 2) as f32),
+                    bw((case_index % 4) as f32 * 0.25),
                 ),
                 gap,
                 margin: margin_px(1.0, 0.0, 1.0, 0.0),
@@ -1246,96 +1352,96 @@ fn build_box_sizing_matrix(nodes: usize) -> BenchCase {
         let case_index = index;
         let width = match case_index % 3 {
             0 => px(42.0 + (case_index % 11) as f32),
-            1 => Dimension::Percent(0.26 + (case_index % 7) as f32 / 100.0),
-            _ => Dimension::Calc(tree.push_calc(
+            1 => pct(0.26 + (case_index % 7) as f32 / 100.0),
+            _ => calc_size(
                 8.0 + (case_index % 5) as f32,
                 0.18 + (case_index % 4) as f32 / 100.0,
-            )),
+            ),
         };
-        let max_width = Dimension::Calc(tree.push_calc(40.0 + (case_index % 9) as f32, 0.32));
-        let max_height = Dimension::Calc(tree.push_calc(24.0 + (case_index % 6) as f32, 0.45));
+        let max_width = max_calc(40.0 + (case_index % 9) as f32, 0.32);
+        let max_height = max_calc(24.0 + (case_index % 6) as f32, 0.45);
         let content_width = 18.0 + (case_index % 9) as f32;
         let content_height = 8.0 + (case_index % 5) as f32;
         let content = fixed_leaf(
             &mut tree,
             TestStyle {
                 size: Size::new(px(content_width), px(content_height)),
-                flex_basis: px(content_width),
+                flex_basis: basis_px(content_width),
                 margin: margin_px(
                     (case_index % 2) as f32,
                     0.0,
                     (case_index % 3) as f32 * 0.5,
                     (case_index % 2) as f32,
                 ),
-                padding: Edges::uniform(lp((case_index % 3) as f32 * 0.5)),
-                border: Edges::uniform(lp((case_index % 2) as f32)),
+                padding: uniform(pad((case_index % 3) as f32 * 0.5)),
+                border: uniform(bw((case_index % 2) as f32)),
                 ..TestStyle::default()
             },
             content_width,
             content_height,
         );
-        containers.push(
-            tree.push_flex(
-                TestStyle {
-                    box_sizing: if case_index.is_multiple_of(2) {
-                        BoxSizing::ContentBox
-                    } else {
-                        BoxSizing::BorderBox
-                    },
-                    size: Size::new(
-                        width,
-                        if case_index.is_multiple_of(4) {
-                            Dimension::Auto
-                        } else {
-                            px(20.0 + (case_index % 9) as f32)
-                        },
-                    ),
-                    min_size: Size::new(
-                        px(24.0 + (case_index % 5) as f32),
-                        px(12.0 + (case_index % 4) as f32),
-                    ),
-                    max_size: Size::new(max_width, max_height),
-                    aspect_ratio: case_index
-                        .is_multiple_of(4)
-                        .then_some(1.15 + (case_index % 5) as f32 * 0.12),
-                    flex_direction: if case_index.is_multiple_of(2) {
-                        FlexDirection::Row
-                    } else {
-                        FlexDirection::Column
-                    },
-                    align_items: Some(AlignItems::Center),
-                    justify_content: Some(AlignContent::Center),
-                    margin: margin_px(
-                        (case_index % 3) as f32,
-                        (case_index % 4) as f32 * 0.5,
-                        (case_index % 2) as f32,
-                        0.0,
-                    ),
-                    padding: edges(
-                        lp(1.0 + (case_index % 2) as f32),
-                        lp(2.0 + (case_index % 3) as f32),
-                        lp(1.0 + (case_index % 4) as f32 * 0.5),
-                        lp(1.0),
-                    ),
-                    border: edges(
-                        lp(1.0 + (case_index % 2) as f32),
-                        lp(0.5 + (case_index % 3) as f32 * 0.5),
-                        lp(1.0),
-                        lp(0.5 + (case_index % 2) as f32),
-                    ),
-                    ..TestStyle::default()
+        containers.push(tree.push_flex(
+            TestStyle {
+                box_sizing: if case_index.is_multiple_of(2) {
+                    box_sizing::T::ContentBox
+                } else {
+                    box_sizing::T::BorderBox
                 },
-                vec![content],
-            ),
-        );
+                size: Size::new(
+                    width,
+                    if case_index.is_multiple_of(4) {
+                        StyleSize::Auto
+                    } else {
+                        px(20.0 + (case_index % 9) as f32)
+                    },
+                ),
+                min_size: Size::new(
+                    px(24.0 + (case_index % 5) as f32),
+                    px(12.0 + (case_index % 4) as f32),
+                ),
+                max_size: Size::new(max_width, max_height),
+                aspect_ratio: if case_index.is_multiple_of(4) {
+                    ratio(1.15 + (case_index % 5) as f32 * 0.12)
+                } else {
+                    AspectRatio::auto()
+                },
+                flex_direction: if case_index.is_multiple_of(2) {
+                    flex_direction::T::Row
+                } else {
+                    flex_direction::T::Column
+                },
+                align_items: ItemPlacement(AlignFlags::CENTER),
+                justify_content: ContentDistribution::new(AlignFlags::CENTER),
+                margin: margin_px(
+                    (case_index % 3) as f32,
+                    (case_index % 4) as f32 * 0.5,
+                    (case_index % 2) as f32,
+                    0.0,
+                ),
+                padding: edges(
+                    pad(1.0 + (case_index % 2) as f32),
+                    pad(2.0 + (case_index % 3) as f32),
+                    pad(1.0 + (case_index % 4) as f32 * 0.5),
+                    pad(1.0),
+                ),
+                border: edges(
+                    bw(1.0 + (case_index % 2) as f32),
+                    bw(0.5 + (case_index % 3) as f32 * 0.5),
+                    bw(1.0),
+                    bw(0.5 + (case_index % 2) as f32),
+                ),
+                ..TestStyle::default()
+            },
+            vec![content],
+        ));
     }
     let root = tree.push_flex(
         TestStyle {
-            size: Size::new(px(360.0), Dimension::Auto),
-            flex_direction: FlexDirection::Column,
-            align_items: Some(AlignItems::FlexStart),
-            padding: Edges::uniform(lp(2.0)),
-            border: Edges::uniform(lp(1.0)),
+            size: Size::new(px(360.0), StyleSize::Auto),
+            flex_direction: flex_direction::T::Column,
+            align_items: ItemPlacement(AlignFlags::FLEX_START),
+            padding: uniform(pad(2.0)),
+            border: uniform(bw(1.0)),
             ..TestStyle::default()
         },
         containers,
@@ -1355,43 +1461,41 @@ fn build_fit_content_subtrees(nodes: usize) -> BenchCase {
             &mut tree,
             TestStyle {
                 size: Size::new(px(content_width), px(content_height)),
-                flex_basis: px(content_width),
-                padding: Edges::uniform(lp((case_index % 2) as f32)),
-                border: Edges::uniform(lp((case_index % 3) as f32 * 0.5)),
+                flex_basis: basis_px(content_width),
+                padding: uniform(pad((case_index % 2) as f32)),
+                border: uniform(bw((case_index % 3) as f32 * 0.5)),
                 ..TestStyle::default()
             },
             content_width,
             content_height,
         );
-        let width = tree.push_calc(
-            4.0 + (case_index % 3) as f32,
-            0.40 + (case_index % 5) as f32 * 0.03,
-        );
-        let height = tree.push_calc(
-            2.0 + (case_index % 2) as f32,
-            0.25 + (case_index % 4) as f32 * 0.04,
-        );
         containers.push(tree.push_flex(
             TestStyle {
                 size: Size::new(
-                    Dimension::FitContent(LengthPercentage::Calc(width)),
-                    Dimension::FitContent(LengthPercentage::Calc(height)),
+                    fit_content(calc_lp(
+                        4.0 + (case_index % 3) as f32,
+                        0.40 + (case_index % 5) as f32 * 0.03,
+                    )),
+                    fit_content(calc_lp(
+                        2.0 + (case_index % 2) as f32,
+                        0.25 + (case_index % 4) as f32 * 0.04,
+                    )),
                 ),
                 flex_direction: if case_index.is_multiple_of(2) {
-                    FlexDirection::Row
+                    flex_direction::T::Row
                 } else {
-                    FlexDirection::Column
+                    flex_direction::T::Column
                 },
-                align_items: Some(AlignItems::FlexStart),
-                justify_content: Some(AlignContent::FlexStart),
+                align_items: ItemPlacement(AlignFlags::FLEX_START),
+                justify_content: ContentDistribution::new(AlignFlags::FLEX_START),
                 margin: margin_px(
                     (case_index % 2) as f32,
                     (case_index % 3) as f32,
                     (case_index % 4) as f32 * 0.5,
                     0.0,
                 ),
-                padding: Edges::uniform(lp((case_index % 3) as f32 * 0.5)),
-                border: Edges::uniform(lp((case_index % 2) as f32)),
+                padding: uniform(pad((case_index % 3) as f32 * 0.5)),
+                border: uniform(bw((case_index % 2) as f32)),
                 ..TestStyle::default()
             },
             vec![content],
@@ -1399,10 +1503,10 @@ fn build_fit_content_subtrees(nodes: usize) -> BenchCase {
     }
     let root = tree.push_flex(
         TestStyle {
-            size: Size::new(px(320.0), Dimension::Auto),
-            flex_direction: FlexDirection::Column,
-            align_items: Some(AlignItems::FlexStart),
-            padding: Edges::uniform(lp(2.0)),
+            size: Size::new(px(320.0), StyleSize::Auto),
+            flex_direction: flex_direction::T::Column,
+            align_items: ItemPlacement(AlignFlags::FLEX_START),
+            padding: uniform(pad(2.0)),
             ..TestStyle::default()
         },
         containers,
@@ -1420,7 +1524,7 @@ fn build_mixed_display_none(nodes: usize) -> BenchCase {
             &mut tree,
             TestStyle {
                 size: Size::new(px(first_width), px(10.0)),
-                flex_basis: px(first_width),
+                flex_basis: basis_px(first_width),
                 ..TestStyle::default()
             },
             first_width,
@@ -1429,9 +1533,9 @@ fn build_mixed_display_none(nodes: usize) -> BenchCase {
         let hidden = fixed_leaf(
             &mut tree,
             TestStyle {
-                box_generation_mode: BoxGenerationMode::None,
+                display: Display::None,
                 size: Size::new(px(80.0), px(20.0)),
-                flex_basis: px(80.0),
+                flex_basis: basis_px(80.0),
                 ..TestStyle::default()
             },
             80.0,
@@ -1442,7 +1546,7 @@ fn build_mixed_display_none(nodes: usize) -> BenchCase {
             &mut tree,
             TestStyle {
                 size: Size::new(px(second_width), px(10.0)),
-                flex_basis: px(second_width),
+                flex_basis: basis_px(second_width),
                 ..TestStyle::default()
             },
             second_width,
@@ -1451,8 +1555,8 @@ fn build_mixed_display_none(nodes: usize) -> BenchCase {
         rows.push(tree.push_flex(
             TestStyle {
                 size: Size::new(px(320.0), px(12.0)),
-                flex_basis: px(12.0),
-                align_items: Some(AlignItems::FlexStart),
+                flex_basis: basis_px(12.0),
+                align_items: ItemPlacement(AlignFlags::FLEX_START),
                 ..TestStyle::default()
             },
             vec![first, hidden, second],

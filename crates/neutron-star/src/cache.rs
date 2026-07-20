@@ -6,12 +6,15 @@
 //! probe recurses. The cache collapses that blow-up back to roughly one
 //! visit per constraint shape — it is the single most important performance
 //! mechanism in the protocol, which is why the *protocol* (not the host)
-//! defines its semantics, while the *host* still owns its storage via
-//! [`CacheState`](crate::tree::CacheState).
+//! defines its semantics, while the *host* still owns its storage via the
+//! [`LayoutNode`](crate::tree::LayoutNode) cache methods.
 //!
 //! [`Cache`] is the reference container hosts are expected to embed
-//! per-node (delegating `CacheState`'s methods to it), keeping the slot
-//! policy uniform across hosts. It is a fixed-size, allocation-free array of
+//! per-node in an interior-mutable slot (delegating
+//! [`cache_get`](crate::tree::LayoutNode::cache_get)/
+//! [`cache_store`](crate::tree::LayoutNode::cache_store)/
+//! [`cache_clear`](crate::tree::LayoutNode::cache_clear) to it), keeping the
+//! slot policy uniform across hosts. It is a fixed-size, allocation-free array of
 //! slots: one slot for the final [`Commit`](crate::tree::LayoutGoal::Commit)
 //! result, the rest for [`Measure`](crate::tree::LayoutGoal::Measure) probes
 //! keyed by constraint shape.
@@ -65,22 +68,24 @@ struct CacheSlot {
 
 /// A fixed-size, allocation-free per-node layout cache.
 ///
-/// Embed one per node and delegate
-/// [`CacheState`](crate::tree::CacheState)'s methods to it:
+/// Embed one per node behind interior mutability and delegate the
+/// [`LayoutNode`](crate::tree::LayoutNode) cache methods to it:
 ///
 /// ```
+/// use std::cell::RefCell;
+///
 /// use neutron_star::cache::Cache;
 ///
-/// // Mutable layout state is physically separate from the immutable
-/// // topology/style source, but both sides use the same NodeId indexing.
-/// struct LayoutStateNode {
-///     cache: Cache,
+/// // Layout is single-threaded; a RefCell keeps the per-node slot
+/// // writable through the Copy node handle.
+/// struct HostNode {
+///     cache: RefCell<Cache>,
 /// }
 ///
-/// let node = LayoutStateNode {
-///     cache: Cache::new(),
+/// let node = HostNode {
+///     cache: RefCell::new(Cache::new()),
 /// };
-/// assert!(node.cache.is_empty());
+/// assert!(node.cache.borrow().is_empty());
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Cache {

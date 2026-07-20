@@ -1,5 +1,7 @@
 //! Parley text measurement conformance and host-integration tests.
 
+use std::cell::{Cell, RefCell};
+
 use neutron_star::cache::Cache;
 use neutron_star::compute::{
     LeafMeasureInput, LeafMeasurement, LeafMeasurer, compute_cached_layout, compute_flexbox_layout,
@@ -7,16 +9,27 @@ use neutron_star::compute::{
 };
 use neutron_star::geometry::{Edges, Point, Size};
 use neutron_star::style::{
-    AlignItems, CalcHandle, CoreStyle, Direction, FlexContainerStyle, FlexItemStyle, FontFamily,
-    FontFeatureSetting, FontStyle, FontVariationSetting, FontWeight, LengthPercentage, LineHeight,
-    TextAlign, TextContainerStyle, TextRun, TextRunStyle, WhiteSpace, WordBreak,
+    CoreStyle, FlexContainerStyle, FlexItemStyle, TextContainerStyle, TextRun, TextRunStyle,
 };
 use neutron_star::text::{ArtifactSlots, TextContext, TextMeasurer};
 use neutron_star::tree::{
-    AvailableSpace, CacheState, FlexSource, Layout, LayoutGoal, LayoutInput, LayoutOutput,
-    LayoutSession, LayoutSource, LayoutState, NodeId, RequestedAxis, TraverseTree,
+    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
 };
 use parley::layout::BreakReason;
+use stylo::Atom;
+use stylo::computed_values::{direction, text_wrap_mode, white_space_collapse};
+use stylo::values::computed::font::{
+    FamilyName, FontFamily, FontFamilyList, FontFamilyNameSyntax, SingleFontFamily,
+};
+use stylo::values::computed::text::GenericLetterSpacing;
+use stylo::values::computed::{
+    Display, FontFeatureSettings, FontStyle, FontVariationSettings, FontWeight, ItemPlacement,
+    Length, LengthPercentage, LetterSpacing, LineHeight, NonNegativeLength,
+    NonNegativeLengthPercentage, NonNegativeNumber, TextAlign, TextIndent, WordBreak,
+};
+use stylo::values::generics::NonNegative;
+use stylo::values::generics::font::{FeatureTagValue, FontSettings, FontTag, VariationValue};
+use stylo::values::specified::align::AlignFlags;
 
 const AHEM: &[u8] = include_bytes!("fixtures/Ahem.ttf");
 const EPSILON: f32 = 0.01;
@@ -39,48 +52,72 @@ fn text_context() -> TextContext {
     context
 }
 
+/// A single-entry `font-family` list naming the Ahem test font.
+fn ahem_family() -> FontFamily {
+    FontFamily {
+        families: FontFamilyList {
+            list: stylo::ArcSlice::from_iter(std::iter::once(SingleFontFamily::FamilyName(
+                FamilyName {
+                    name: Atom::from("Ahem"),
+                    syntax: FontFamilyNameSyntax::Identifiers,
+                },
+            ))),
+        },
+        is_system_font: false,
+        is_initial: false,
+    }
+}
+
+fn px(value: f32) -> LengthPercentage {
+    LengthPercentage::new_length(Length::new(value))
+}
+
+fn npx(value: f32) -> NonNegativeLengthPercentage {
+    NonNegative(px(value))
+}
+
+fn indent_px(value: f32) -> TextIndent {
+    TextIndent {
+        length: px(value),
+        hanging: false,
+        each_line: false,
+    }
+}
+
+fn font_tag(tag: [u8; 4]) -> FontTag {
+    FontTag(u32::from_be_bytes(tag))
+}
+
 #[derive(Debug, Clone)]
 struct RunStyle {
-    families: Vec<FontFamily<'static>>,
+    family: FontFamily,
     font_size: f32,
     font_weight: FontWeight,
     font_style: FontStyle,
-    letter_spacing: f32,
+    letter_spacing: LetterSpacing,
     line_height: LineHeight,
-    features: Vec<FontFeatureSetting>,
-    variations: Vec<FontVariationSetting>,
+    features: FontFeatureSettings,
+    variations: FontVariationSettings,
 }
 
 impl RunStyle {
     fn ahem(font_size: f32) -> Self {
         Self {
-            families: vec![FontFamily::Named("Ahem")],
+            family: ahem_family(),
             font_size,
-            font_weight: FontWeight::Normal,
-            font_style: FontStyle::Normal,
-            letter_spacing: 0.0,
-            line_height: LineHeight::Normal,
-            features: Vec::new(),
-            variations: Vec::new(),
+            font_weight: FontWeight::NORMAL,
+            font_style: FontStyle::NORMAL,
+            letter_spacing: LetterSpacing::normal(),
+            line_height: LineHeight::normal(),
+            features: FontFeatureSettings::normal(),
+            variations: FontVariationSettings::normal(),
         }
     }
 }
 
-fn copy_font_family<'a>(family: &'a FontFamily<'static>) -> FontFamily<'a> {
-    *family
-}
-
 impl TextRunStyle for RunStyle {
-    type FontFamilies<'a> = core::iter::Map<
-        core::slice::Iter<'a, FontFamily<'static>>,
-        fn(&'a FontFamily<'static>) -> FontFamily<'a>,
-    >;
-    type FontFeatureSettings<'a> = core::iter::Copied<core::slice::Iter<'a, FontFeatureSetting>>;
-    type FontVariationSettings<'a> =
-        core::iter::Copied<core::slice::Iter<'a, FontVariationSetting>>;
-
-    fn font_families(&self) -> Self::FontFamilies<'_> {
-        self.families.iter().map(copy_font_family as _)
+    fn font_family(&self) -> FontFamily {
+        self.family.clone()
     }
 
     fn font_size(&self) -> f32 {
@@ -95,40 +132,64 @@ impl TextRunStyle for RunStyle {
         self.font_style
     }
 
-    fn letter_spacing(&self) -> f32 {
-        self.letter_spacing
+    fn letter_spacing(&self) -> LetterSpacing {
+        self.letter_spacing.clone()
     }
 
     fn line_height(&self) -> LineHeight {
         self.line_height
     }
 
-    fn font_feature_settings(&self) -> Self::FontFeatureSettings<'_> {
-        self.features.iter().copied()
+    fn font_feature_settings(&self) -> FontFeatureSettings {
+        self.features.clone()
     }
 
-    fn font_variation_settings(&self) -> Self::FontVariationSettings<'_> {
-        self.variations.iter().copied()
+    fn font_variation_settings(&self) -> FontVariationSettings {
+        self.variations.clone()
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct ContainerStyle {
     align: TextAlign,
-    white_space: WhiteSpace,
+    wrap: text_wrap_mode::T,
+    collapse: white_space_collapse::T,
     word_break: WordBreak,
-    indent: LengthPercentage,
-    direction: Direction,
-    padding: Edges<LengthPercentage>,
+    indent: TextIndent,
+    direction: direction::T,
+    padding: Edges<NonNegativeLengthPercentage>,
+}
+
+impl Default for ContainerStyle {
+    fn default() -> Self {
+        Self {
+            align: TextAlign::Start,
+            wrap: text_wrap_mode::T::Wrap,
+            collapse: white_space_collapse::T::Collapse,
+            word_break: WordBreak::Normal,
+            indent: TextIndent::zero(),
+            direction: direction::T::Ltr,
+            padding: Edges {
+                left: npx(0.0),
+                right: npx(0.0),
+                top: npx(0.0),
+                bottom: npx(0.0),
+            },
+        }
+    }
 }
 
 impl CoreStyle for ContainerStyle {
-    fn direction(&self) -> Direction {
+    fn display(&self) -> Display {
+        Display::Flex
+    }
+
+    fn direction(&self) -> direction::T {
         self.direction
     }
 
-    fn padding(&self) -> Edges<LengthPercentage> {
-        self.padding
+    fn padding(&self) -> Edges<&NonNegativeLengthPercentage> {
+        self.padding.as_ref()
     }
 }
 
@@ -137,16 +198,20 @@ impl TextContainerStyle for ContainerStyle {
         self.align
     }
 
-    fn white_space(&self) -> WhiteSpace {
-        self.white_space
+    fn text_wrap_mode(&self) -> text_wrap_mode::T {
+        self.wrap
+    }
+
+    fn white_space_collapse(&self) -> white_space_collapse::T {
+        self.collapse
     }
 
     fn word_break(&self) -> WordBreak {
         self.word_break
     }
 
-    fn text_indent(&self) -> LengthPercentage {
-        self.indent
+    fn text_indent(&self) -> TextIndent {
+        self.indent.clone()
     }
 }
 
@@ -172,13 +237,7 @@ fn observe(
     runs: &[TextRun<'_, RunStyle>],
     input: LeafMeasureInput,
 ) -> Observation {
-    let mut measurer = TextMeasurer::new(
-        context,
-        artifacts,
-        container,
-        runs.iter().copied(),
-        |_, _| unreachable!("test text-indent has no calc()"),
-    );
+    let mut measurer = TextMeasurer::new(context, artifacts, container, runs.iter().copied());
     let measurement = measurer.measure(input);
     Observation {
         size: measurement.size(),
@@ -332,7 +391,7 @@ fn intrinsic_width_and_nowrap_rebreak_retained_shape() {
         Some(16.0)
     );
 
-    container.white_space = WhiteSpace::NoWrap;
+    container.wrap = text_wrap_mode::T::Nowrap;
     artifacts.invalidate();
     let nowrap_intrinsic = observe(
         &mut context,
@@ -364,7 +423,7 @@ fn auto_sized_alignment_uses_the_measured_text_width() {
     let style = RunStyle::ahem(16.0);
     let mut container = ContainerStyle {
         align: TextAlign::Right,
-        white_space: WhiteSpace::NoWrap,
+        wrap: text_wrap_mode::T::Nowrap,
         ..ContainerStyle::default()
     };
     let run = [TextRun {
@@ -397,7 +456,7 @@ fn auto_sized_alignment_uses_the_measured_text_width() {
         0.0,
     );
 
-    container.white_space = WhiteSpace::Normal;
+    container.wrap = text_wrap_mode::T::Wrap;
     artifacts.invalidate();
     let wrapped_run = [TextRun {
         text: "abc de",
@@ -439,7 +498,7 @@ fn known_inline_size_aligns_without_changing_content_metrics() {
     let style = RunStyle::ahem(16.0);
     let container = ContainerStyle {
         align: TextAlign::Right,
-        white_space: WhiteSpace::NoWrap,
+        wrap: text_wrap_mode::T::Nowrap,
         ..ContainerStyle::default()
     };
     let run = [TextRun {
@@ -572,11 +631,23 @@ fn word_break_modes_change_regular_break_opportunities() {
 #[test]
 fn run_spacing_line_height_and_mixed_sizes_affect_exact_geometry() {
     let mut spaced = RunStyle::ahem(16.0);
-    spaced.letter_spacing = 2.0;
-    spaced.font_weight = FontWeight::Bold;
-    spaced.font_style = FontStyle::Italic;
-    spaced.features.push((*b"kern", 0));
-    spaced.variations.push((*b"wght", 700.0));
+    spaced.letter_spacing = GenericLetterSpacing(px(2.0));
+    spaced.font_weight = FontWeight::BOLD;
+    spaced.font_style = FontStyle::ITALIC;
+    spaced.features = FontSettings(
+        vec![FeatureTagValue {
+            tag: font_tag(*b"kern"),
+            value: 0,
+        }]
+        .into(),
+    );
+    spaced.variations = FontSettings(
+        vec![VariationValue {
+            tag: font_tag(*b"wght"),
+            value: 700.0,
+        }]
+        .into(),
+    );
     let container = ContainerStyle::default();
     let mut context = text_context();
     let mut artifacts = ArtifactSlots::default();
@@ -595,7 +666,7 @@ fn run_spacing_line_height_and_mixed_sizes_affect_exact_geometry() {
     assert_close(measured.size.width, 54.0);
 
     let mut factor = RunStyle::ahem(16.0);
-    factor.line_height = LineHeight::Factor(2.0);
+    factor.line_height = LineHeight::Number(NonNegativeNumber::from(2.0));
     artifacts.invalidate();
     let factor_run = [TextRun {
         text: "abc",
@@ -611,7 +682,7 @@ fn run_spacing_line_height_and_mixed_sizes_affect_exact_geometry() {
     );
     assert_close(measured.size.height, 32.0);
 
-    factor.line_height = LineHeight::Length(24.0);
+    factor.line_height = LineHeight::Length(NonNegativeLength::new(24.0));
     artifacts.invalidate();
     let factor_run = [TextRun {
         text: "abc",
@@ -656,7 +727,7 @@ fn run_spacing_line_height_and_mixed_sizes_affect_exact_geometry() {
 fn indent_newline_preservation_alignment_and_rtl_are_exported() {
     let style = RunStyle::ahem(16.0);
     let mut container = ContainerStyle {
-        indent: LengthPercentage::Length(16.0),
+        indent: indent_px(16.0),
         ..ContainerStyle::default()
     };
     let mut context = text_context();
@@ -694,7 +765,7 @@ fn indent_newline_preservation_alignment_and_rtl_are_exported() {
         0.0,
     );
 
-    container.indent = LengthPercentage::ZERO;
+    container.indent = TextIndent::zero();
     artifacts.invalidate();
     let collapsed = [TextRun {
         text: "ab\ncd",
@@ -726,7 +797,7 @@ fn indent_newline_preservation_alignment_and_rtl_are_exported() {
     assert_size(preserved.size, Size::new(32.0, 32.0));
     assert_eq!(preserved.line_count, 2);
 
-    container.direction = Direction::Rtl;
+    container.direction = direction::T::Rtl;
     container.align = TextAlign::Start;
     artifacts.invalidate();
     let rtl = [TextRun {
@@ -756,7 +827,12 @@ fn indent_newline_preservation_alignment_and_rtl_are_exported() {
 fn compute_leaf_layout_adds_box_model_and_exports_first_baseline() {
     let style = RunStyle::ahem(16.0);
     let container = ContainerStyle {
-        padding: Edges::uniform(LengthPercentage::Length(2.0)),
+        padding: Edges {
+            left: npx(2.0),
+            right: npx(2.0),
+            top: npx(2.0),
+            bottom: npx(2.0),
+        },
         ..ContainerStyle::default()
     };
     let runs = [TextRun {
@@ -766,20 +842,10 @@ fn compute_leaf_layout_adds_box_model_and_exports_first_baseline() {
     }];
     let mut context = text_context();
     let mut artifacts = ArtifactSlots::default();
-    let mut measurer = TextMeasurer::new(
-        &mut context,
-        &mut artifacts,
-        &container,
-        runs.into_iter(),
-        |_, _| unreachable!("no calc()"),
-    );
+    let mut measurer =
+        TextMeasurer::new(&mut context, &mut artifacts, &container, runs.into_iter());
 
-    let output = compute_leaf_layout(
-        LayoutInput::default(),
-        &container,
-        |_, _| unreachable!("no calc()"),
-        &mut measurer,
-    );
+    let output = compute_leaf_layout(LayoutInput::default(), &container, &mut measurer);
 
     assert_size(output.size, Size::new(52.0, 20.0));
     assert_close(
@@ -791,248 +857,288 @@ fn compute_leaf_layout_adds_box_model_and_exports_first_baseline() {
     );
 }
 
+/// Host-private dispatch: which algorithm lays out a [`SourceNode`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-enum Display {
+enum HostDisplay {
     #[default]
     Text,
     Flex,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct HostStyle {
-    align_items: Option<AlignItems>,
+    display: Display,
+    align_items: ItemPlacement,
 }
 
-impl CoreStyle for HostStyle {}
+impl Default for HostStyle {
+    fn default() -> Self {
+        Self {
+            display: Display::Flex,
+            align_items: ItemPlacement::normal(),
+        }
+    }
+}
+
+impl CoreStyle for HostStyle {
+    fn display(&self) -> Display {
+        self.display
+    }
+}
+
 impl FlexItemStyle for HostStyle {}
 impl TextContainerStyle for HostStyle {}
 
 impl FlexContainerStyle for HostStyle {
-    fn align_items(&self) -> Option<AlignItems> {
+    fn align_items(&self) -> ItemPlacement {
         self.align_items
     }
 }
 
 #[derive(Debug, Clone)]
 struct SourceNode {
-    display: Display,
+    display: HostDisplay,
     style: HostStyle,
     run_style: RunStyle,
     text: &'static str,
-    children: Vec<NodeId>,
+    children: Vec<usize>,
 }
 
-#[derive(Debug)]
-struct Source {
-    nodes: Vec<SourceNode>,
-}
-
-impl Source {
-    fn node(&self, node: NodeId) -> &SourceNode {
-        &self.nodes[usize::from(node)]
-    }
-}
-
-impl TraverseTree for Source {
-    type ChildIter<'a> = core::iter::Copied<core::slice::Iter<'a, NodeId>>;
-
-    fn child_ids(&self, parent: NodeId) -> Self::ChildIter<'_> {
-        self.node(parent).children.iter().copied()
-    }
-
-    fn child_count(&self, parent: NodeId) -> usize {
-        self.node(parent).children.len()
-    }
-
-    fn child_id(&self, parent: NodeId, index: usize) -> NodeId {
-        self.node(parent).children[index]
-    }
-}
-
-impl LayoutSource for Source {
-    type CoreStyle<'a> = &'a HostStyle;
-
-    fn core_style(&self, node: NodeId) -> Self::CoreStyle<'_> {
-        &self.node(node).style
-    }
-
-    fn resolve_calc(&self, _calc: CalcHandle, _basis: f32) -> f32 {
-        unreachable!("host test has no calc()")
-    }
-}
-
-impl FlexSource for Source {
-    type ContainerStyle<'a> = &'a HostStyle;
-    type ItemStyle<'a> = &'a HostStyle;
-
-    fn flex_container_style(&self, container: NodeId) -> Self::ContainerStyle<'_> {
-        &self.node(container).style
-    }
-
-    fn flex_item_style(&self, item: NodeId) -> Self::ItemStyle<'_> {
-        &self.node(item).style
-    }
-}
-
+/// Per-node interior-mutable session slots, written through [`HostRef`]
+/// handles.
 #[derive(Debug, Default)]
 struct SessionNode {
-    cache: Cache,
-    layout: Layout,
-    artifacts: ArtifactSlots,
-    static_position: Point<f32>,
+    cache: RefCell<Cache>,
+    layout: Cell<Layout>,
+    artifacts: RefCell<ArtifactSlots>,
+    static_position: Cell<Point<f32>>,
 }
 
+/// The one host tree: immutable source nodes plus parallel session slots,
+/// a tree-level [`TextContext`], and instrumentation counters.
 #[derive(Debug)]
-struct Session {
-    nodes: Vec<SessionNode>,
-    text: TextContext,
-    leaf_measure_calls: usize,
+struct HostTree {
+    nodes: Vec<SourceNode>,
+    session: Vec<SessionNode>,
+    text: RefCell<TextContext>,
+    leaf_measure_calls: Cell<usize>,
 }
 
-impl Session {
-    fn new(node_count: usize) -> Self {
+impl HostTree {
+    fn new(nodes: Vec<SourceNode>) -> Self {
+        let session = nodes.iter().map(|_| SessionNode::default()).collect();
         Self {
-            nodes: (0..node_count).map(|_| SessionNode::default()).collect(),
-            text: text_context(),
-            leaf_measure_calls: 0,
+            nodes,
+            session,
+            text: RefCell::new(text_context()),
+            leaf_measure_calls: Cell::new(0),
         }
     }
 
-    fn node(&self, node: NodeId) -> &SessionNode {
-        &self.nodes[usize::from(node)]
+    fn node(&self, index: usize) -> HostRef<'_> {
+        HostRef { tree: self, index }
+    }
+
+    fn session_node(&self, index: usize) -> &SessionNode {
+        &self.session[index]
     }
 }
 
-impl LayoutState for Session {
-    fn set_unrounded_layout(&mut self, node: NodeId, layout: &Layout) {
-        self.nodes[usize::from(node)].layout = *layout;
-    }
+/// The `Copy` node handle: a borrow of the tree plus a node index.
+#[derive(Clone, Copy)]
+struct HostRef<'t> {
+    tree: &'t HostTree,
+    index: usize,
+}
 
-    fn set_static_position(&mut self, child: NodeId, static_position: Point<f32>) {
-        self.nodes[usize::from(child)].static_position = static_position;
+impl core::fmt::Debug for HostRef<'_> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.debug_tuple("HostRef").field(&self.index).finish()
     }
 }
 
-impl CacheState for Session {
-    fn cache_get(&self, node: NodeId, input: LayoutInput) -> Option<LayoutOutput> {
-        self.node(node).cache.get(input)
+impl<'t> HostRef<'t> {
+    fn source(self) -> &'t SourceNode {
+        &self.tree.nodes[self.index]
     }
 
-    fn cache_store(&mut self, node: NodeId, input: LayoutInput, output: LayoutOutput) {
-        self.nodes[usize::from(node)].cache.store(input, output);
-    }
-
-    fn cache_clear(&mut self, node: NodeId) {
-        let state = &mut self.nodes[usize::from(node)];
-        state.cache.clear();
-        state.artifacts.invalidate();
+    fn slots(self) -> &'t SessionNode {
+        &self.tree.session[self.index]
     }
 }
 
-impl LayoutSession<Source> for Session {
-    fn compute_child_layout(
-        &mut self,
-        source: &Source,
-        child: NodeId,
-        input: LayoutInput,
-    ) -> LayoutOutput {
-        let display = source.node(child).display;
-        compute_cached_layout(self, child, input, |session, child, input| match display {
-            Display::Flex => compute_flexbox_layout(source, session, child, input),
-            Display::Text => {
-                session.leaf_measure_calls += 1;
-                let source_node = source.node(child);
+struct HostChildren<'t> {
+    tree: &'t HostTree,
+    ids: core::slice::Iter<'t, usize>,
+}
+
+impl<'t> Iterator for HostChildren<'t> {
+    type Item = HostRef<'t>;
+
+    fn next(&mut self) -> Option<HostRef<'t>> {
+        let index = *self.ids.next()?;
+        Some(HostRef {
+            tree: self.tree,
+            index,
+        })
+    }
+}
+
+impl<'t> LayoutNode for HostRef<'t> {
+    type Style = &'t HostStyle;
+    type ChildIter = HostChildren<'t>;
+
+    fn children(self) -> HostChildren<'t> {
+        HostChildren {
+            tree: self.tree,
+            ids: self.source().children.iter(),
+        }
+    }
+
+    fn child_count(self) -> usize {
+        self.source().children.len()
+    }
+
+    fn style(self) -> &'t HostStyle {
+        &self.source().style
+    }
+
+    fn compute_child_layout(self, input: LayoutInput) -> LayoutOutput {
+        let node = self.source();
+        let display = node.display;
+        compute_cached_layout(self, input, |handle, input| match display {
+            HostDisplay::Flex => compute_flexbox_layout(handle, input),
+            HostDisplay::Text => {
+                let tree = handle.tree;
+                tree.leaf_measure_calls
+                    .set(tree.leaf_measure_calls.get() + 1);
                 let run = [TextRun {
-                    text: source_node.text,
-                    style: &source_node.run_style,
+                    text: node.text,
+                    style: &node.run_style,
                     preserve_newlines: false,
                 }];
-                let index = usize::from(child);
-                let (text, nodes) = (&mut session.text, &mut session.nodes);
-                let mut measurer = TextMeasurer::new(
-                    text,
-                    &mut nodes[index].artifacts,
-                    &source_node.style,
-                    run.into_iter(),
-                    |_, _| unreachable!("host test has no calc()"),
-                );
-                compute_leaf_layout(
-                    input,
-                    &source_node.style,
-                    |_, _| unreachable!("host test has no calc()"),
-                    &mut measurer,
-                )
+                // Node-scoped `RefMut` borrows: both drop with the measurer
+                // before the cache wrapper stores the result.
+                let mut text = tree.text.borrow_mut();
+                let mut artifacts = handle.slots().artifacts.borrow_mut();
+                let mut measurer =
+                    TextMeasurer::new(&mut text, &mut artifacts, &node.style, run.into_iter());
+                compute_leaf_layout(input, &node.style, &mut measurer)
             }
         })
+    }
+
+    fn set_unrounded_layout(self, layout: &Layout) {
+        self.slots().layout.set(*layout);
+    }
+
+    fn unrounded_layout(self) -> Layout {
+        self.slots().layout.get()
+    }
+
+    fn set_final_layout(self, _layout: &Layout) {
+        unreachable!("host test never rounds layouts")
+    }
+
+    fn set_static_position(self, static_position: Point<f32>) {
+        self.slots().static_position.set(static_position);
+    }
+
+    fn cache_get(self, input: LayoutInput) -> Option<LayoutOutput> {
+        self.slots().cache.borrow().get(input)
+    }
+
+    fn cache_store(self, input: LayoutInput, output: LayoutOutput) {
+        self.slots().cache.borrow_mut().store(input, output);
+    }
+
+    fn cache_clear(self) {
+        // Joint invalidation: dropping the box cache also drops the node's
+        // retained shaping artifacts.
+        let slots = self.slots();
+        slots.cache.borrow_mut().clear();
+        slots.artifacts.borrow_mut().invalidate();
     }
 }
 
 #[test]
 fn flex_baseline_integration_reuses_artifacts_and_jointly_invalidates_caches() {
-    let root = NodeId::from(0_usize);
-    let small = NodeId::from(1_usize);
-    let large = NodeId::from(2_usize);
-    let source = Source {
-        nodes: vec![
-            SourceNode {
+    let root = 0;
+    let small = 1;
+    let large = 2;
+    let tree = HostTree::new(vec![
+        SourceNode {
+            display: HostDisplay::Flex,
+            style: HostStyle {
                 display: Display::Flex,
-                style: HostStyle {
-                    align_items: Some(AlignItems::Baseline),
-                },
-                run_style: RunStyle::ahem(16.0),
-                text: "",
-                children: vec![small, large],
+                align_items: ItemPlacement(AlignFlags::BASELINE),
             },
-            SourceNode {
-                display: Display::Text,
-                style: HostStyle::default(),
-                run_style: RunStyle::ahem(16.0),
-                text: "aaa",
-                children: Vec::new(),
-            },
-            SourceNode {
-                display: Display::Text,
-                style: HostStyle::default(),
-                run_style: RunStyle::ahem(32.0),
-                text: "BBB",
-                children: Vec::new(),
-            },
-        ],
-    };
-    let mut session = Session::new(source.nodes.len());
+            run_style: RunStyle::ahem(16.0),
+            text: "",
+            children: vec![small, large],
+        },
+        SourceNode {
+            display: HostDisplay::Text,
+            style: HostStyle::default(),
+            run_style: RunStyle::ahem(16.0),
+            text: "aaa",
+            children: Vec::new(),
+        },
+        SourceNode {
+            display: HostDisplay::Text,
+            style: HostStyle::default(),
+            run_style: RunStyle::ahem(32.0),
+            text: "BBB",
+            children: Vec::new(),
+        },
+    ]);
 
-    compute_root_layout(&source, &mut session, root, Size::MAX_CONTENT);
+    compute_root_layout(tree.node(root), Size::MAX_CONTENT);
 
-    let small_state = session.node(small);
-    let large_state = session.node(large);
-    let small_baseline = small_state.layout.location.y
+    let small_state = tree.session_node(small);
+    let large_state = tree.session_node(large);
+    let small_baseline = small_state.layout.get().location.y
         + small_state
             .artifacts
+            .borrow()
             .committed()
             .expect("small committed text")
             .first_baseline()
             .expect("small baseline");
-    let large_baseline = large_state.layout.location.y
+    let large_baseline = large_state.layout.get().location.y
         + large_state
             .artifacts
+            .borrow()
             .committed()
             .expect("large committed text")
             .first_baseline()
             .expect("large baseline");
     assert_close(small_baseline, large_baseline);
-    assert!(small_state.artifacts.probe().is_none());
-    assert!(large_state.artifacts.probe().is_none());
+    assert!(small_state.artifacts.borrow().probe().is_none());
+    assert!(large_state.artifacts.borrow().probe().is_none());
 
-    let calls_after_first_layout = session.leaf_measure_calls;
+    let calls_after_first_layout = tree.leaf_measure_calls.get();
     assert!(calls_after_first_layout >= 4);
-    compute_root_layout(&source, &mut session, root, Size::MAX_CONTENT);
-    assert_eq!(session.leaf_measure_calls, calls_after_first_layout);
+    compute_root_layout(tree.node(root), Size::MAX_CONTENT);
+    assert_eq!(tree.leaf_measure_calls.get(), calls_after_first_layout);
 
-    session.cache_clear(small);
-    assert!(session.node(small).cache.is_empty());
-    assert!(session.node(small).artifacts.probe().is_none());
-    assert!(session.node(small).artifacts.committed().is_none());
-    session.cache_clear(root);
-    compute_root_layout(&source, &mut session, root, Size::MAX_CONTENT);
-    assert!(session.leaf_measure_calls > calls_after_first_layout);
+    tree.node(small).cache_clear();
+    assert!(tree.session_node(small).cache.borrow().is_empty());
+    assert!(
+        tree.session_node(small)
+            .artifacts
+            .borrow()
+            .probe()
+            .is_none()
+    );
+    assert!(
+        tree.session_node(small)
+            .artifacts
+            .borrow()
+            .committed()
+            .is_none()
+    );
+    tree.node(root).cache_clear();
+    compute_root_layout(tree.node(root), Size::MAX_CONTENT);
+    assert!(tree.leaf_measure_calls.get() > calls_after_first_layout);
 }

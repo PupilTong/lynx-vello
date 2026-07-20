@@ -4,192 +4,186 @@
 //! region. The measured closure therefore covers layout and the host-owned
 //! cache protocol, but not DOM/style construction or fixture allocation.
 
+use std::cell::{Cell, RefCell};
+
 use divan::counter::ItemsCount;
 use neutron_star::cache::Cache;
 use neutron_star::compute::{
     FnLeafMeasurer, LeafMetrics, compute_cached_layout, compute_grid_layout, compute_leaf_layout,
 };
 use neutron_star::prelude::*;
-use neutron_star::style::{
-    CalcHandle, Dimension, GridAutoFlow, GridLine, GridPlacement, GridTemplateComponent,
-    LengthPercentage, MaxTrackSizingFunction, MinTrackSizingFunction, RepetitionCount,
-    TrackSizingFunction,
+use stylo::values::computed::length::NonNegativeLengthPercentageOrNormal;
+use stylo::values::computed::{
+    Display, GridAutoFlow, GridLine, GridTemplateComponent, ImplicitGridTracks, Length,
+    LengthPercentage, Size as StyleSize, TrackList, TrackSize,
+};
+use stylo::values::generics::NonNegative;
+use stylo::values::generics::grid::{
+    Flex, ImplicitGridTracks as GenericImplicitGridTracks, TrackBreadth, TrackListValue,
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct BoxStyle {
-    size: Size<Dimension>,
+    size: Size<StyleSize>,
 }
 
 impl Default for BoxStyle {
     fn default() -> Self {
         Self {
-            size: Size::new(Dimension::Auto, Dimension::Auto),
+            size: Size::new(StyleSize::Auto, StyleSize::Auto),
         }
     }
 }
 
 impl CoreStyle for BoxStyle {
     #[inline]
-    fn size(&self) -> Size<Dimension> {
-        self.size
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct NoRepetition;
-
-impl GridTemplateRepetition for NoRepetition {
-    type Tracks<'a> = std::iter::Empty<TrackSizingFunction>;
-
-    #[inline]
-    fn count(&self) -> RepetitionCount {
-        RepetitionCount::Count(1)
+    fn display(&self) -> Display {
+        Display::Grid
     }
 
     #[inline]
-    fn tracks(&self) -> Self::Tracks<'_> {
-        std::iter::empty()
+    fn size(&self) -> Size<&StyleSize> {
+        self.size.as_ref()
     }
 }
-
-#[inline]
-fn single_track(track: TrackSizingFunction) -> GridTemplateComponent<NoRepetition> {
-    GridTemplateComponent::Single(track)
-}
-
-type TemplateTracks<'a> = std::iter::Map<
-    std::iter::Copied<std::slice::Iter<'a, TrackSizingFunction>>,
-    fn(TrackSizingFunction) -> GridTemplateComponent<NoRepetition>,
->;
 
 #[derive(Debug, Clone)]
 struct ContainerData {
-    rows: Vec<TrackSizingFunction>,
-    columns: Vec<TrackSizingFunction>,
-    auto_rows: Vec<TrackSizingFunction>,
-    auto_columns: Vec<TrackSizingFunction>,
+    rows: GridTemplateComponent,
+    columns: GridTemplateComponent,
+    auto_rows: ImplicitGridTracks,
+    auto_columns: ImplicitGridTracks,
     auto_flow: GridAutoFlow,
-    gap: Size<LengthPercentage>,
+    gap: Size<NonNegativeLengthPercentageOrNormal>,
 }
 
 impl Default for ContainerData {
     fn default() -> Self {
         Self {
-            rows: Vec::new(),
-            columns: Vec::new(),
+            rows: GridTemplateComponent::None,
+            columns: GridTemplateComponent::None,
             // Empty auto-track lists have the protocol-defined `auto`
             // behavior and avoid allocating for the common default.
-            auto_rows: Vec::new(),
-            auto_columns: Vec::new(),
-            auto_flow: GridAutoFlow::Row,
-            gap: Size::new(LengthPercentage::ZERO, LengthPercentage::ZERO),
+            auto_rows: ImplicitGridTracks::default(),
+            auto_columns: ImplicitGridTracks::default(),
+            auto_flow: GridAutoFlow::ROW,
+            gap: Size::new(
+                NonNegativeLengthPercentageOrNormal::Normal,
+                NonNegativeLengthPercentageOrNormal::Normal,
+            ),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ContainerStyleView<'a> {
-    core: BoxStyle,
-    grid: &'a ContainerData,
-}
-
-impl CoreStyle for ContainerStyleView<'_> {
-    #[inline]
-    fn size(&self) -> Size<Dimension> {
-        self.core.size
-    }
-}
-
-impl GridContainerStyle for ContainerStyleView<'_> {
-    type Repetition<'a>
-        = NoRepetition
-    where
-        Self: 'a;
-    type TemplateTracks<'a>
-        = TemplateTracks<'a>
-    where
-        Self: 'a;
-    type AutoTracks<'a>
-        = std::iter::Copied<std::slice::Iter<'a, TrackSizingFunction>>
-    where
-        Self: 'a;
-
-    #[inline]
-    fn grid_template_rows(&self) -> Self::TemplateTracks<'_> {
-        self.grid.rows.iter().copied().map(single_track as _)
-    }
-
-    #[inline]
-    fn grid_template_columns(&self) -> Self::TemplateTracks<'_> {
-        self.grid.columns.iter().copied().map(single_track as _)
-    }
-
-    #[inline]
-    fn grid_auto_rows(&self) -> Self::AutoTracks<'_> {
-        self.grid.auto_rows.iter().copied()
-    }
-
-    #[inline]
-    fn grid_auto_columns(&self) -> Self::AutoTracks<'_> {
-        self.grid.auto_columns.iter().copied()
-    }
-
-    #[inline]
-    fn grid_auto_flow(&self) -> GridAutoFlow {
-        self.grid.auto_flow
-    }
-
-    #[inline]
-    fn gap(&self) -> Size<LengthPercentage> {
-        self.grid.gap
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct ItemData {
-    row: Line<GridPlacement>,
-    column: Line<GridPlacement>,
+    row_start: GridLine,
+    row_end: GridLine,
+    column_start: GridLine,
+    column_end: GridLine,
     order: i32,
 }
 
 impl Default for ItemData {
     fn default() -> Self {
         Self {
-            row: Line::new(GridPlacement::Auto, GridPlacement::Auto),
-            column: Line::new(GridPlacement::Auto, GridPlacement::Auto),
+            row_start: GridLine::auto(),
+            row_end: GridLine::auto(),
+            column_start: GridLine::auto(),
+            column_end: GridLine::auto(),
             order: 0,
         }
     }
 }
 
+/// The merged style view: one `Copy` handle serves the core, container, and
+/// item roles of the protocol. Container data stays behind an `Option` that
+/// is `None` for leaves, so materializing the view on every `style()` call
+/// never touches the container side table for non-containers; container
+/// accessors fetch through the reference lazily.
 #[derive(Debug, Clone, Copy)]
-struct ItemStyleView {
-    core: BoxStyle,
-    grid: ItemData,
+struct GridStyleView<'t> {
+    core: &'t BoxStyle,
+    container: Option<&'t ContainerData>,
+    item: &'t ItemData,
 }
 
-impl CoreStyle for ItemStyleView {
+impl<'t> GridStyleView<'t> {
     #[inline]
-    fn size(&self) -> Size<Dimension> {
-        self.core.size
+    fn container(&self) -> &'t ContainerData {
+        self.container
+            .expect("container style accessors are only called on grid containers")
     }
 }
 
-impl GridItemStyle for ItemStyleView {
+impl CoreStyle for GridStyleView<'_> {
     #[inline]
-    fn grid_row(&self) -> Line<GridPlacement> {
-        self.grid.row
+    fn display(&self) -> Display {
+        Display::Grid
     }
 
     #[inline]
-    fn grid_column(&self) -> Line<GridPlacement> {
-        self.grid.column
+    fn size(&self) -> Size<&StyleSize> {
+        self.core.size.as_ref()
+    }
+}
+
+impl GridContainerStyle for GridStyleView<'_> {
+    #[inline]
+    fn grid_template_rows(&self) -> &GridTemplateComponent {
+        &self.container().rows
+    }
+
+    #[inline]
+    fn grid_template_columns(&self) -> &GridTemplateComponent {
+        &self.container().columns
+    }
+
+    #[inline]
+    fn grid_auto_rows(&self) -> &ImplicitGridTracks {
+        &self.container().auto_rows
+    }
+
+    #[inline]
+    fn grid_auto_columns(&self) -> &ImplicitGridTracks {
+        &self.container().auto_columns
+    }
+
+    #[inline]
+    fn grid_auto_flow(&self) -> GridAutoFlow {
+        self.container().auto_flow
+    }
+
+    #[inline]
+    fn gap(&self) -> Size<&NonNegativeLengthPercentageOrNormal> {
+        self.container().gap.as_ref()
+    }
+}
+
+impl GridItemStyle for GridStyleView<'_> {
+    #[inline]
+    fn grid_row_start(&self) -> &GridLine {
+        &self.item.row_start
+    }
+
+    #[inline]
+    fn grid_row_end(&self) -> &GridLine {
+        &self.item.row_end
+    }
+
+    #[inline]
+    fn grid_column_start(&self) -> &GridLine {
+        &self.item.column_start
+    }
+
+    #[inline]
+    fn grid_column_end(&self) -> &GridLine {
+        &self.item.column_end
     }
 
     #[inline]
     fn order(&self) -> i32 {
-        self.grid.order
+        self.item.order
     }
 }
 
@@ -200,67 +194,38 @@ struct IntrinsicSize {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum Display {
+enum BenchDisplay {
     Grid,
     Leaf,
 }
 
 #[derive(Debug)]
 struct BenchSourceNode {
-    display: Display,
+    display: BenchDisplay,
     core_style: BoxStyle,
     container_index: usize,
     item_style: ItemData,
-    children: Vec<NodeId>,
+    children: Vec<usize>,
     intrinsic: IntrinsicSize,
 }
 
-#[derive(Debug)]
+/// Per-node mutable layout slots, written through [`BenchRef`] handles.
+/// Layout is single-threaded, so `Cell`/`RefCell` interior mutability is the
+/// whole synchronization story.
+#[derive(Debug, Default)]
 struct BenchSessionNode {
-    cache: Cache,
-    layout: Layout,
+    cache: RefCell<Cache>,
+    layout: Cell<Layout>,
 }
 
-#[derive(Debug, Default)]
-struct BenchSource {
-    nodes: Vec<BenchSourceNode>,
-    containers: Vec<ContainerData>,
-}
-
-impl BenchSource {
-    #[inline]
-    fn node(&self, node: NodeId) -> &BenchSourceNode {
-        &self.nodes[usize::from(node)]
-    }
-
-    #[inline]
-    fn node_mut(&mut self, node: NodeId) -> &mut BenchSourceNode {
-        &mut self.nodes[usize::from(node)]
-    }
-}
-
-#[derive(Debug, Default)]
-struct BenchSession {
-    nodes: Vec<BenchSessionNode>,
-}
-
-impl BenchSession {
-    #[inline]
-    fn node(&self, node: NodeId) -> &BenchSessionNode {
-        &self.nodes[usize::from(node)]
-    }
-
-    #[inline]
-    fn node_mut(&mut self, node: NodeId) -> &mut BenchSessionNode {
-        &mut self.nodes[usize::from(node)]
-    }
-}
-
-/// Builder and benchmark facade. Layout receives the two stores separately.
+/// The one host tree: source-shaped immutable node data plus a parallel
+/// `Vec` of interior-mutable session slots, keeping memory layout comparable
+/// with the pre-handle two-store host.
 #[derive(Debug, Default)]
 struct BenchTree {
-    source: BenchSource,
-    session: BenchSession,
+    nodes: Vec<BenchSourceNode>,
+    containers: Vec<ContainerData>,
+    session: Vec<BenchSessionNode>,
 }
 
 impl BenchTree {
@@ -269,9 +234,9 @@ impl BenchTree {
         core_style: BoxStyle,
         item_style: ItemData,
         intrinsic: IntrinsicSize,
-    ) -> NodeId {
+    ) -> usize {
         self.push(BenchSourceNode {
-            display: Display::Leaf,
+            display: BenchDisplay::Leaf,
             core_style,
             container_index: usize::MAX,
             item_style,
@@ -284,12 +249,12 @@ impl BenchTree {
         &mut self,
         container_style: ContainerData,
         item_style: ItemData,
-        children: Vec<NodeId>,
-    ) -> NodeId {
-        let container_index = self.source.containers.len();
-        self.source.containers.push(container_style);
+        children: Vec<usize>,
+    ) -> usize {
+        let container_index = self.containers.len();
+        self.containers.push(container_style);
         self.push(BenchSourceNode {
-            display: Display::Grid,
+            display: BenchDisplay::Grid,
             core_style: BoxStyle::default(),
             container_index,
             item_style,
@@ -301,154 +266,167 @@ impl BenchTree {
         })
     }
 
-    fn push(&mut self, node: BenchSourceNode) -> NodeId {
-        debug_assert_eq!(self.source.nodes.len(), self.session.nodes.len());
-        let id = NodeId::from(self.source.nodes.len());
-        self.source.nodes.push(node);
-        self.session.nodes.push(BenchSessionNode {
-            cache: Cache::new(),
-            layout: Layout::default(),
-        });
+    fn push(&mut self, node: BenchSourceNode) -> usize {
+        debug_assert_eq!(self.nodes.len(), self.session.len());
+        let id = self.nodes.len();
+        self.nodes.push(node);
+        self.session.push(BenchSessionNode::default());
         id
     }
-}
 
-impl TraverseTree for BenchSource {
-    type ChildIter<'a> = std::iter::Copied<std::slice::Iter<'a, NodeId>>;
-
+    /// Resolves a builder-returned index to a borrowed node handle.
     #[inline]
-    fn child_ids(&self, parent: NodeId) -> Self::ChildIter<'_> {
-        self.node(parent).children.iter().copied()
+    fn node(&self, index: usize) -> BenchRef<'_> {
+        BenchRef { tree: self, index }
     }
 
     #[inline]
-    fn child_count(&self, parent: NodeId) -> usize {
-        self.node(parent).children.len()
-    }
-
-    #[inline]
-    fn child_id(&self, parent: NodeId, index: usize) -> NodeId {
-        self.node(parent).children[index]
+    fn layout(&self, index: usize) -> Layout {
+        self.session[index].layout.get()
     }
 }
 
-impl LayoutSource for BenchSource {
-    type CoreStyle<'a> = BoxStyle;
+/// The `Copy` node handle: a borrow of the tree plus a node index.
+#[derive(Clone, Copy)]
+struct BenchRef<'t> {
+    tree: &'t BenchTree,
+    index: usize,
+}
 
-    #[inline]
-    fn core_style(&self, node: NodeId) -> Self::CoreStyle<'_> {
-        self.node(node).core_style
-    }
-
-    #[inline]
-    fn resolve_calc(&self, _calc: CalcHandle, _basis: f32) -> f32 {
-        unreachable!("benchmark styles do not contain calc() values")
+impl std::fmt::Debug for BenchRef<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("BenchRef")
+            .field(&self.index)
+            .finish()
     }
 }
 
-impl GridSource for BenchSource {
-    type ContainerStyle<'a> = ContainerStyleView<'a>;
-    type ItemStyle<'a> = ItemStyleView;
+impl<'t> BenchRef<'t> {
+    #[inline]
+    fn source(self) -> &'t BenchSourceNode {
+        &self.tree.nodes[self.index]
+    }
 
     #[inline]
-    fn grid_container_style(&self, container: NodeId) -> Self::ContainerStyle<'_> {
-        let node = self.node(container);
-        ContainerStyleView {
-            core: node.core_style,
-            grid: &self.containers[node.container_index],
+    fn slots(self) -> &'t BenchSessionNode {
+        &self.tree.session[self.index]
+    }
+}
+
+struct BenchChildren<'t> {
+    tree: &'t BenchTree,
+    ids: std::slice::Iter<'t, usize>,
+}
+
+impl<'t> Iterator for BenchChildren<'t> {
+    type Item = BenchRef<'t>;
+
+    fn next(&mut self) -> Option<BenchRef<'t>> {
+        let index = *self.ids.next()?;
+        Some(BenchRef {
+            tree: self.tree,
+            index,
+        })
+    }
+}
+
+impl<'t> LayoutNode for BenchRef<'t> {
+    type Style = GridStyleView<'t>;
+    type ChildIter = BenchChildren<'t>;
+
+    #[inline]
+    fn children(self) -> BenchChildren<'t> {
+        BenchChildren {
+            tree: self.tree,
+            ids: self.source().children.iter(),
         }
     }
 
     #[inline]
-    fn grid_item_style(&self, item: NodeId) -> Self::ItemStyle<'_> {
-        let node = self.node(item);
-        ItemStyleView {
-            core: node.core_style,
-            grid: node.item_style,
+    fn child_count(self) -> usize {
+        self.source().children.len()
+    }
+
+    #[inline]
+    fn style(self) -> GridStyleView<'t> {
+        let node = self.source();
+        GridStyleView {
+            core: &node.core_style,
+            container: (node.container_index != usize::MAX)
+                .then(|| &self.tree.containers[node.container_index]),
+            item: &node.item_style,
         }
     }
-}
 
-impl LayoutState for BenchSession {
-    #[inline]
-    fn set_unrounded_layout(&mut self, node: NodeId, layout: &Layout) {
-        self.node_mut(node).layout = *layout;
+    fn compute_child_layout(self, input: LayoutInput) -> LayoutOutput {
+        let node = self.source();
+        let display = node.display;
+        let style = &node.core_style;
+        let intrinsic = node.intrinsic;
+        compute_cached_layout(self, input, move |handle, input| match display {
+            BenchDisplay::Grid => compute_grid_layout(handle, input),
+            BenchDisplay::Leaf => {
+                let mut measurer = FnLeafMeasurer::new(move |measure_input| {
+                    let measured = Size::new(
+                        if measure_input.available_space.width == AvailableSpace::MinContent {
+                            intrinsic.min.width
+                        } else {
+                            intrinsic.max.width
+                        },
+                        if measure_input.available_space.height == AvailableSpace::MinContent {
+                            intrinsic.min.height
+                        } else {
+                            intrinsic.max.height
+                        },
+                    );
+                    LeafMetrics::new(measure_input.known_dimensions.unwrap_or(measured))
+                });
+                compute_leaf_layout(input, style, &mut measurer)
+            }
+        })
     }
 
     #[inline]
-    fn set_static_position(&mut self, _child: NodeId, _static_position: Point<f32>) {
+    fn set_unrounded_layout(self, layout: &Layout) {
+        self.slots().layout.set(*layout);
+    }
+
+    #[inline]
+    fn unrounded_layout(self) -> Layout {
+        self.slots().layout.get()
+    }
+
+    fn set_final_layout(self, _layout: &Layout) {
+        unreachable!("grid benchmarks do not run the rounding pass")
+    }
+
+    fn set_static_position(self, _static_position: Point<f32>) {
         unreachable!("benchmark fixtures do not contain hoisted positioned nodes")
     }
-}
 
-impl CacheState for BenchSession {
     #[inline]
-    fn cache_get(&self, node: NodeId, input: LayoutInput) -> Option<LayoutOutput> {
-        self.node(node).cache.get(input)
+    fn cache_get(self, input: LayoutInput) -> Option<LayoutOutput> {
+        self.slots().cache.borrow().get(input)
     }
 
     #[inline]
-    fn cache_store(&mut self, node: NodeId, input: LayoutInput, output: LayoutOutput) {
-        self.node_mut(node).cache.store(input, output);
+    fn cache_store(self, input: LayoutInput, output: LayoutOutput) {
+        self.slots().cache.borrow_mut().store(input, output);
     }
 
     #[inline]
-    fn cache_clear(&mut self, node: NodeId) {
-        self.node_mut(node).cache.clear();
-    }
-}
-
-impl LayoutSession<BenchSource> for BenchSession {
-    fn compute_child_layout(
-        &mut self,
-        source: &BenchSource,
-        child: NodeId,
-        input: LayoutInput,
-    ) -> LayoutOutput {
-        let node = source.node(child);
-        let display = node.display;
-        let style = node.core_style;
-        let intrinsic = node.intrinsic;
-        compute_cached_layout(
-            self,
-            child,
-            input,
-            move |session, child, input| match display {
-                Display::Grid => compute_grid_layout(source, session, child, input),
-                Display::Leaf => {
-                    let mut measurer = FnLeafMeasurer::new(move |measure_input| {
-                        let measured = Size::new(
-                            if measure_input.available_space.width == AvailableSpace::MinContent {
-                                intrinsic.min.width
-                            } else {
-                                intrinsic.max.width
-                            },
-                            if measure_input.available_space.height == AvailableSpace::MinContent {
-                                intrinsic.min.height
-                            } else {
-                                intrinsic.max.height
-                            },
-                        );
-                        LeafMetrics::new(measure_input.known_dimensions.unwrap_or(measured))
-                    });
-                    compute_leaf_layout(
-                        input,
-                        &style,
-                        |_calc, _basis| unreachable!("benchmark styles contain no calc() values"),
-                        &mut measurer,
-                    )
-                }
-            },
-        )
+    fn cache_clear(self) {
+        self.slots().cache.borrow_mut().clear();
     }
 }
 
 #[derive(Debug)]
 struct Fixture {
     tree: BenchTree,
-    root: NodeId,
-    probe_a: NodeId,
-    probe_b: NodeId,
+    root: usize,
+    probe_a: usize,
+    probe_b: usize,
     viewport: Size<f32>,
 }
 
@@ -462,38 +440,74 @@ impl Fixture {
             AvailableSpace::Definite(self.viewport.height),
         );
         let known = Size::new(Some(self.viewport.width), Some(self.viewport.height));
-        let output = self.tree.session.compute_child_layout(
-            &self.tree.source,
-            self.root,
-            LayoutInput::perform_layout(known, known, available),
-        );
+        let output = self
+            .tree
+            .node(self.root)
+            .compute_child_layout(LayoutInput::perform_layout(known, known, available));
         (
             output,
-            self.tree.session.node(self.probe_a).layout,
-            self.tree.session.node(self.probe_b).layout,
+            self.tree.layout(self.probe_a),
+            self.tree.layout(self.probe_b),
         )
     }
 
     #[inline]
     fn clear_root_cache(&mut self) {
-        self.tree.session.cache_clear(self.root);
+        self.tree.node(self.root).cache_clear();
     }
 }
 
 #[inline]
-fn px(value: f32) -> TrackSizingFunction {
-    TrackSizingFunction::fixed(LengthPercentage::length(value))
+fn px(value: f32) -> TrackSize {
+    TrackSize::Breadth(TrackBreadth::Breadth(LengthPercentage::new_length(
+        Length::new(value),
+    )))
 }
 
 #[inline]
-fn fr(value: f32) -> TrackSizingFunction {
-    TrackSizingFunction::fr(value)
+fn fr(value: f32) -> TrackSize {
+    TrackSize::Breadth(TrackBreadth::Flex(Flex(value)))
+}
+
+/// A `minmax(min-content, max-content)` track.
+#[inline]
+fn intrinsic_track() -> TrackSize {
+    TrackSize::Minmax(TrackBreadth::MinContent, TrackBreadth::MaxContent)
+}
+
+/// An `auto` track (i.e. `minmax(auto, auto)`).
+#[inline]
+fn auto_track() -> TrackSize {
+    TrackSize::Breadth(TrackBreadth::Auto)
+}
+
+/// Builds an explicit template from a plain track-size list, respecting the
+/// `line_names.len() == values.len() + 1` invariant stylo's parser upholds.
+fn template(tracks: Vec<TrackSize>) -> GridTemplateComponent {
+    let values: Vec<_> = tracks.into_iter().map(TrackListValue::TrackSize).collect();
+    let line_names = vec![stylo::OwnedSlice::default(); values.len() + 1];
+    GridTemplateComponent::TrackList(Box::new(TrackList {
+        auto_repeat_index: usize::MAX,
+        values: values.into(),
+        line_names: line_names.into(),
+    }))
+}
+
+fn implicit(tracks: Vec<TrackSize>) -> ImplicitGridTracks {
+    GenericImplicitGridTracks(tracks.into())
 }
 
 #[inline]
 fn fixed_box(width: f32, height: f32) -> BoxStyle {
     BoxStyle {
-        size: Size::new(Dimension::Length(width), Dimension::Length(height)),
+        size: Size::new(
+            StyleSize::LengthPercentage(NonNegative(LengthPercentage::new_length(Length::new(
+                width,
+            )))),
+            StyleSize::LengthPercentage(NonNegative(LengthPercentage::new_length(Length::new(
+                height,
+            )))),
+        ),
     }
 }
 
@@ -515,16 +529,28 @@ fn small_f32(value: usize) -> f32 {
     f32::from(small_u16(value))
 }
 
+/// A numeric (non-span) grid line.
 #[inline]
-fn positive_grid_line(value: usize) -> GridLine {
-    GridLine::new(i16::try_from(value).expect("benchmark grid line fits in i16"))
+fn line(value: usize) -> GridLine {
+    let mut line = GridLine::auto();
+    line.line_num = i32::try_from(value).expect("benchmark grid line fits in i32");
+    line
+}
+
+/// A `span <n>` grid line.
+#[inline]
+fn span(value: usize) -> GridLine {
+    let mut line = GridLine::auto();
+    line.is_span = true;
+    line.line_num = i32::try_from(value).expect("benchmark span fits in i32");
+    line
 }
 
 fn sparse_auto_fixture(item_count: usize) -> Fixture {
     const COLUMNS: usize = 32;
     let mut tree = BenchTree::default();
-    tree.source.nodes.reserve(item_count + 1);
-    tree.session.nodes.reserve(item_count + 1);
+    tree.nodes.reserve(item_count + 1);
+    tree.session.reserve(item_count + 1);
     let mut children = Vec::with_capacity(item_count);
     for index in 0..item_count {
         let width = 6.0 + small_f32(index % 5);
@@ -539,8 +565,8 @@ fn sparse_auto_fixture(item_count: usize) -> Fixture {
     let rows = item_count.div_ceil(COLUMNS);
     let root = tree.push_grid(
         ContainerData {
-            columns: vec![px(16.0); COLUMNS],
-            auto_rows: vec![px(12.0)],
+            columns: template(vec![px(16.0); COLUMNS]),
+            auto_rows: implicit(vec![px(12.0)]),
             ..ContainerData::default()
         },
         ItemData::default(),
@@ -558,19 +584,19 @@ fn sparse_auto_fixture(item_count: usize) -> Fixture {
 fn dense_holes_fixture(item_count: usize) -> Fixture {
     const COLUMNS: usize = 16;
     let mut tree = BenchTree::default();
-    tree.source.nodes.reserve(item_count + 1);
-    tree.session.nodes.reserve(item_count + 1);
+    tree.nodes.reserve(item_count + 1);
+    tree.session.reserve(item_count + 1);
     let mut children = Vec::with_capacity(item_count);
     for index in 0..item_count {
         // Alternating wide items repeatedly strand short holes which later
         // one-track items can backfill in dense mode.
-        let span = match index % 8 {
+        let span_length = match index % 8 {
             0 | 3 => 7,
             1 | 5 => 5,
             _ => 1,
         };
         let item_style = ItemData {
-            column: Line::new(GridPlacement::Auto, GridPlacement::Span(span)),
+            column_end: span(span_length),
             ..ItemData::default()
         };
         children.push(tree.push_leaf(fixed_box(6.0, 6.0), item_style, intrinsic(6.0, 6.0, 6.0)));
@@ -579,9 +605,9 @@ fn dense_holes_fixture(item_count: usize) -> Fixture {
     let probe_b = children[item_count - 1];
     let root = tree.push_grid(
         ContainerData {
-            columns: vec![px(20.0); COLUMNS],
-            auto_rows: vec![px(12.0)],
-            auto_flow: GridAutoFlow::RowDense,
+            columns: template(vec![px(20.0); COLUMNS]),
+            auto_rows: implicit(vec![px(12.0)]),
+            auto_flow: GridAutoFlow::ROW | GridAutoFlow::DENSE,
             ..ContainerData::default()
         },
         ItemData::default(),
@@ -600,8 +626,8 @@ fn fixed_fr_fixture() -> Fixture {
     const COLUMNS: usize = 24;
     const ITEMS: usize = 768;
     let mut tree = BenchTree::default();
-    tree.source.nodes.reserve(ITEMS + 1);
-    tree.session.nodes.reserve(ITEMS + 1);
+    tree.nodes.reserve(ITEMS + 1);
+    tree.session.reserve(ITEMS + 1);
     let mut children = Vec::with_capacity(ITEMS);
     for index in 0..ITEMS {
         let min_width = 4.0 + small_f32(index % 7);
@@ -625,9 +651,9 @@ fn fixed_fr_fixture() -> Fixture {
         .collect();
     let root = tree.push_grid(
         ContainerData {
-            columns,
-            auto_rows: vec![px(14.0)],
-            gap: Size::new(LengthPercentage::length(2.0), LengthPercentage::length(1.0)),
+            columns: template(columns),
+            auto_rows: implicit(vec![px(14.0)]),
+            gap: Size::new(gap_px(2.0), gap_px(1.0)),
             ..ContainerData::default()
         },
         ItemData::default(),
@@ -642,21 +668,28 @@ fn fixed_fr_fixture() -> Fixture {
     }
 }
 
+#[inline]
+fn gap_px(value: f32) -> NonNegativeLengthPercentageOrNormal {
+    NonNegativeLengthPercentageOrNormal::LengthPercentage(NonNegative(
+        LengthPercentage::new_length(Length::new(value)),
+    ))
+}
+
 fn intrinsic_spans_fixture() -> Fixture {
     const COLUMNS: usize = 12;
     const ITEMS: usize = 256;
     let mut tree = BenchTree::default();
-    tree.source.nodes.reserve(ITEMS + 1);
-    tree.session.nodes.reserve(ITEMS + 1);
+    tree.nodes.reserve(ITEMS + 1);
+    tree.session.reserve(ITEMS + 1);
     let mut children = Vec::with_capacity(ITEMS);
     for index in 0..ITEMS {
-        let span = 2 + small_u16(index % 4);
+        let span_length = 2 + index % 4;
         let min_width = 14.0 + small_f32(index % 13);
         let max_width = min_width + 40.0 + small_f32(index % 29);
         children.push(tree.push_leaf(
             BoxStyle::default(),
             ItemData {
-                column: Line::new(GridPlacement::Auto, GridPlacement::Span(span)),
+                column_end: span(span_length),
                 ..ItemData::default()
             },
             intrinsic(min_width, max_width, 10.0 + small_f32(index % 5)),
@@ -664,15 +697,11 @@ fn intrinsic_spans_fixture() -> Fixture {
     }
     let probe_a = children[ITEMS / 2];
     let probe_b = children[ITEMS - 1];
-    let intrinsic_track = TrackSizingFunction::minmax(
-        MinTrackSizingFunction::MinContent,
-        MaxTrackSizingFunction::MaxContent,
-    );
     let root = tree.push_grid(
         ContainerData {
-            columns: vec![intrinsic_track; COLUMNS],
-            auto_rows: vec![TrackSizingFunction::AUTO],
-            gap: Size::new(LengthPercentage::length(3.0), LengthPercentage::length(2.0)),
+            columns: template(vec![intrinsic_track(); COLUMNS]),
+            auto_rows: implicit(vec![auto_track()]),
+            gap: Size::new(gap_px(3.0), gap_px(2.0)),
             ..ContainerData::default()
         },
         ItemData::default(),
@@ -694,16 +723,16 @@ fn intrinsic_spans_fixture() -> Fixture {
 fn unique_intrinsic_spans_fixture(track_count: usize) -> Fixture {
     assert!(track_count >= 2);
     let mut tree = BenchTree::default();
-    tree.source.nodes.reserve(track_count + 1);
-    tree.session.nodes.reserve(track_count + 1);
+    tree.nodes.reserve(track_count + 1);
+    tree.session.reserve(track_count + 1);
     let mut children = Vec::with_capacity(track_count);
-    for span in 1..=track_count {
-        let min_width = 6.0 + small_f32(span % 17);
-        let max_width = min_width + small_f32(span) * 0.75;
+    for span_length in 1..=track_count {
+        let min_width = 6.0 + small_f32(span_length % 17);
+        let max_width = min_width + small_f32(span_length) * 0.75;
         children.push(tree.push_leaf(
             BoxStyle::default(),
             ItemData {
-                column: Line::new(GridPlacement::Auto, GridPlacement::Span(small_u16(span))),
+                column_end: span(span_length),
                 ..ItemData::default()
             },
             intrinsic(min_width, max_width, 8.0),
@@ -711,14 +740,10 @@ fn unique_intrinsic_spans_fixture(track_count: usize) -> Fixture {
     }
     let probe_a = children[track_count / 2];
     let probe_b = children[track_count - 1];
-    let intrinsic_track = TrackSizingFunction::minmax(
-        MinTrackSizingFunction::MinContent,
-        MaxTrackSizingFunction::MaxContent,
-    );
     let root = tree.push_grid(
         ContainerData {
-            columns: vec![intrinsic_track; track_count],
-            auto_rows: vec![px(10.0)],
+            columns: template(vec![intrinsic_track(); track_count]),
+            auto_rows: implicit(vec![px(10.0)]),
             ..ContainerData::default()
         },
         ItemData::default(),
@@ -739,22 +764,18 @@ fn unique_intrinsic_spans_fixture(track_count: usize) -> Fixture {
 fn flex_freeze_threshold_fixture(track_count: usize) -> Fixture {
     assert!(track_count >= 2);
     let mut tree = BenchTree::default();
-    tree.source.nodes.reserve(track_count + 1);
-    tree.session.nodes.reserve(track_count + 1);
+    tree.nodes.reserve(track_count + 1);
+    tree.session.reserve(track_count + 1);
     let mut children = Vec::with_capacity(track_count);
     for index in 0..track_count {
         let threshold = 4.0 + small_f32(index);
         children.push(tree.push_leaf(
             BoxStyle::default(),
             ItemData {
-                row: Line::new(
-                    GridPlacement::Line(positive_grid_line(1)),
-                    GridPlacement::Line(positive_grid_line(2)),
-                ),
-                column: Line::new(
-                    GridPlacement::Line(positive_grid_line(index + 1)),
-                    GridPlacement::Line(positive_grid_line(index + 2)),
-                ),
+                row_start: line(1),
+                row_end: line(2),
+                column_start: line(index + 1),
+                column_end: line(index + 2),
                 order: 0,
             },
             intrinsic(threshold, threshold, 8.0),
@@ -764,8 +785,8 @@ fn flex_freeze_threshold_fixture(track_count: usize) -> Fixture {
     let probe_b = children[track_count - 1];
     let root = tree.push_grid(
         ContainerData {
-            rows: vec![px(12.0)],
-            columns: vec![fr(1.0); track_count],
+            rows: template(vec![px(12.0)]),
+            columns: template(vec![fr(1.0); track_count]),
             ..ContainerData::default()
         },
         ItemData::default(),
@@ -787,11 +808,8 @@ fn nested_fixture() -> Fixture {
     const INNER_GRIDS: usize = 16;
     const LEAVES_PER_GRID: usize = 64;
     let mut tree = BenchTree::default();
-    tree.source
-        .nodes
-        .reserve(INNER_GRIDS * (LEAVES_PER_GRID + 1) + 1);
+    tree.nodes.reserve(INNER_GRIDS * (LEAVES_PER_GRID + 1) + 1);
     tree.session
-        .nodes
         .reserve(INNER_GRIDS * (LEAVES_PER_GRID + 1) + 1);
     let mut inner_grids = Vec::with_capacity(INNER_GRIDS);
     let mut first_leaf = None;
@@ -811,9 +829,9 @@ fn nested_fixture() -> Fixture {
         }
         inner_grids.push(tree.push_grid(
             ContainerData {
-                columns: vec![fr(1.0); 8],
-                auto_rows: vec![px(18.0)],
-                gap: Size::new(LengthPercentage::length(1.0), LengthPercentage::length(1.0)),
+                columns: template(vec![fr(1.0); 8]),
+                auto_rows: implicit(vec![px(18.0)]),
+                gap: Size::new(gap_px(1.0), gap_px(1.0)),
                 ..ContainerData::default()
             },
             ItemData::default(),
@@ -822,9 +840,9 @@ fn nested_fixture() -> Fixture {
     }
     let root = tree.push_grid(
         ContainerData {
-            rows: vec![fr(1.0); 4],
-            columns: vec![fr(1.0); 4],
-            gap: Size::new(LengthPercentage::length(4.0), LengthPercentage::length(4.0)),
+            rows: template(vec![fr(1.0); 4]),
+            columns: template(vec![fr(1.0); 4]),
+            gap: Size::new(gap_px(4.0), gap_px(4.0)),
             ..ContainerData::default()
         },
         ItemData::default(),
@@ -842,8 +860,8 @@ fn nested_fixture() -> Fixture {
 #[derive(Debug)]
 struct DirtyNestedFixture {
     fixture: Fixture,
-    dirty_leaf: NodeId,
-    dirty_ancestor: NodeId,
+    dirty_leaf: usize,
+    dirty_ancestor: usize,
     wide: bool,
 }
 
@@ -856,11 +874,9 @@ impl DirtyNestedFixture {
         let dirty_leaf = fixture.probe_a;
         let dirty_ancestor = fixture
             .tree
-            .source
             .nodes
             .iter()
             .position(|node| node.children.contains(&dirty_leaf))
-            .map(NodeId::from)
             .expect("nested fixture leaf has a Grid parent");
         Self {
             fixture,
@@ -873,11 +889,11 @@ impl DirtyNestedFixture {
     #[inline]
     fn run(&mut self) -> GeometrySample {
         self.wide = !self.wide;
-        let intrinsic = &mut self.fixture.tree.source.node_mut(self.dirty_leaf).intrinsic;
-        intrinsic.max.width = if self.wide { 24.0 } else { 16.0 };
-        self.fixture.tree.session.cache_clear(self.dirty_leaf);
-        self.fixture.tree.session.cache_clear(self.dirty_ancestor);
-        self.fixture.tree.session.cache_clear(self.fixture.root);
+        self.fixture.tree.nodes[self.dirty_leaf].intrinsic.max.width =
+            if self.wide { 24.0 } else { 16.0 };
+        self.fixture.tree.node(self.dirty_leaf).cache_clear();
+        self.fixture.tree.node(self.dirty_ancestor).cache_clear();
+        self.fixture.tree.node(self.fixture.root).cache_clear();
         self.fixture.run()
     }
 }

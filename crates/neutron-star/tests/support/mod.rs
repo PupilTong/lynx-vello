@@ -1,8 +1,17 @@
 //! Shared styling-engine-free host for neutron-star integration tests and benchmarks.
+//!
+//! The host speaks the engine's stylo vocabulary directly: `TestStyle` fields
+//! are stylo computed values, and the constructor helpers below absorb the
+//! fixture-site boilerplate of building them (`px`/`pct`/`calc_lp`,
+//! `size_*`/`max_*`, `margin_*`/`inset_*`, grid track builders, and the
+//! alignment wrappers over `AlignFlags`).
 
 // Every integration-test or benchmark target includes this module separately, and each target
 // intentionally uses only a subset of the helpers.
 #![allow(dead_code)]
+
+use std::cell::{Cell, RefCell};
+use std::fmt;
 
 use neutron_star::cache::Cache;
 use neutron_star::compute::{
@@ -11,14 +20,438 @@ use neutron_star::compute::{
     hide_subtree,
 };
 use neutron_star::prelude::*;
-use neutron_star::style::{
-    AlignContent, AlignItems, AlignSelf, BoxGenerationMode, BoxSizing, CalcHandle, Dimension,
-    Direction, FlexDirection, FlexWrap, GridAutoFlow, GridPlacement, GridTemplateComponent,
-    JustifyContent, JustifyItems, JustifySelf, LengthPercentage, LengthPercentageAuto,
-    LinearContainerStyle, LinearCrossGravity, LinearGravity, LinearItemStyle, LinearLayoutGravity,
-    LinearOrientation, Overflow, Position, RelativeCenter, RelativeContainerStyle,
-    RelativeItemStyle, RelativeReference, RepetitionCount, TrackSizingFunction, Visibility,
+use style_traits::values::specified::AllowedNumericType;
+use stylo::computed_values::{
+    box_sizing, direction, flex_direction, flex_wrap, linear_direction, relative_center,
+    relative_layout_once, visibility,
 };
+use stylo::values::computed::length::NonNegativeLengthPercentageOrNormal;
+use stylo::values::computed::length_percentage::{CalcNode, ComputedLeaf};
+use stylo::values::computed::lynx_layout::{RelativeAlign, RelativeReference};
+use stylo::values::computed::{
+    AspectRatio, Au, BorderSideWidth, ContentDistribution, Display, FlexBasis, GridAutoFlow,
+    GridLine, GridTemplateComponent, ImplicitGridTracks, Inset, ItemPlacement, JustifyItems,
+    Length, LengthPercentage, Margin, MaxSize, NonNegativeLengthPercentage, NonNegativeNumber,
+    Overflow, Percentage, PositionProperty, Ratio, SelfAlignment, Size as StyleSize,
+};
+use stylo::values::generics::position::PreferredRatio;
+use stylo::values::generics::{NonNegative, grid as generic_grid};
+use stylo::values::specified::align::AlignFlags;
+
+// ---------------------------------------------------------------------------
+// Stylo computed-value constructor helpers
+// ---------------------------------------------------------------------------
+
+/// `<length>` in CSS pixels.
+pub(super) fn px(value: f32) -> LengthPercentage {
+    LengthPercentage::new_length(Length::new(value))
+}
+
+/// `<percentage>`; `0.5` is `50%`.
+pub(super) fn pct(fraction: f32) -> LengthPercentage {
+    LengthPercentage::new_percent(Percentage(fraction))
+}
+
+/// `calc(<length> + <percentage>)`; `percentage` is a fraction, so `0.5`
+/// represents `50%`. Replaces the deleted host calc-handle arena.
+pub(super) fn calc_lp(length: f32, percentage: f32) -> LengthPercentage {
+    LengthPercentage::new_calc(
+        CalcNode::Sum(
+            vec![
+                CalcNode::Leaf(ComputedLeaf::Length(Length::new(length))),
+                CalcNode::Leaf(ComputedLeaf::Percentage(Percentage(percentage))),
+            ]
+            .into(),
+        ),
+        AllowedNumericType::All,
+    )
+}
+
+/// Non-negative `<length>` (padding, gap inner value).
+pub(super) fn npx(value: f32) -> NonNegativeLengthPercentage {
+    NonNegative(px(value))
+}
+
+/// Non-negative `<percentage>`.
+pub(super) fn npct(fraction: f32) -> NonNegativeLengthPercentage {
+    NonNegative(pct(fraction))
+}
+
+/// Non-negative `calc()`.
+pub(super) fn ncalc(length: f32, percentage: f32) -> NonNegativeLengthPercentage {
+    NonNegative(calc_lp(length, percentage))
+}
+
+/// Non-negative `<number>` (flex factors, linear weights).
+pub(super) fn nn(value: f32) -> NonNegativeNumber {
+    NonNegativeNumber::from(value)
+}
+
+/// `width`/`height`/`min-*`: `auto`.
+pub(super) fn size_auto() -> StyleSize {
+    StyleSize::auto()
+}
+
+/// `width`/`height`/`min-*`: `<length>`.
+pub(super) fn size_px(value: f32) -> StyleSize {
+    StyleSize::LengthPercentage(npx(value))
+}
+
+/// `width`/`height`/`min-*`: `<percentage>`.
+pub(super) fn size_pct(fraction: f32) -> StyleSize {
+    StyleSize::LengthPercentage(npct(fraction))
+}
+
+/// `width`/`height`/`min-*`: `calc()`.
+pub(super) fn size_calc(length: f32, percentage: f32) -> StyleSize {
+    StyleSize::LengthPercentage(ncalc(length, percentage))
+}
+
+/// `width`/`height`/`min-*`: `min-content`.
+pub(super) fn size_min_content() -> StyleSize {
+    StyleSize::MinContent
+}
+
+/// `width`/`height`/`min-*`: `max-content`.
+pub(super) fn size_max_content() -> StyleSize {
+    StyleSize::MaxContent
+}
+
+/// `width`/`height`/`min-*`: `fit-content(<length>)`.
+pub(super) fn size_fit_content_px(value: f32) -> StyleSize {
+    StyleSize::FitContentFunction(npx(value))
+}
+
+/// `width`/`height`/`min-*`: `fit-content(<percentage>)`.
+pub(super) fn size_fit_content_pct(fraction: f32) -> StyleSize {
+    StyleSize::FitContentFunction(npct(fraction))
+}
+
+/// `max-width`/`max-height`: `none`.
+pub(super) fn max_none() -> MaxSize {
+    MaxSize::none()
+}
+
+/// `max-width`/`max-height`: `<length>`.
+pub(super) fn max_px(value: f32) -> MaxSize {
+    MaxSize::LengthPercentage(npx(value))
+}
+
+/// `max-width`/`max-height`: `<percentage>`.
+pub(super) fn max_pct(fraction: f32) -> MaxSize {
+    MaxSize::LengthPercentage(npct(fraction))
+}
+
+/// `max-width`/`max-height`: `calc()`.
+pub(super) fn max_calc(length: f32, percentage: f32) -> MaxSize {
+    MaxSize::LengthPercentage(ncalc(length, percentage))
+}
+
+/// `max-width`/`max-height`: `min-content`.
+pub(super) fn max_min_content() -> MaxSize {
+    MaxSize::MinContent
+}
+
+/// `max-width`/`max-height`: `max-content`.
+pub(super) fn max_max_content() -> MaxSize {
+    MaxSize::MaxContent
+}
+
+/// `max-width`/`max-height`: `fit-content(<length>)`.
+pub(super) fn max_fit_content_px(value: f32) -> MaxSize {
+    MaxSize::FitContentFunction(npx(value))
+}
+
+/// `margin-*`: `<length>`.
+pub(super) fn margin_px(value: f32) -> Margin {
+    Margin::LengthPercentage(px(value))
+}
+
+/// `margin-*`: `<percentage>`.
+pub(super) fn margin_pct(fraction: f32) -> Margin {
+    Margin::LengthPercentage(pct(fraction))
+}
+
+/// `margin-*`: `calc()`.
+pub(super) fn margin_calc(length: f32, percentage: f32) -> Margin {
+    Margin::LengthPercentage(calc_lp(length, percentage))
+}
+
+/// `margin-*`: `auto`.
+pub(super) fn margin_auto() -> Margin {
+    Margin::Auto
+}
+
+/// `top`/`right`/`bottom`/`left`: `auto`.
+pub(super) fn inset_auto() -> Inset {
+    Inset::Auto
+}
+
+/// `top`/`right`/`bottom`/`left`: `<length>`.
+pub(super) fn inset_px(value: f32) -> Inset {
+    Inset::LengthPercentage(px(value))
+}
+
+/// `top`/`right`/`bottom`/`left`: `<percentage>`.
+pub(super) fn inset_pct(fraction: f32) -> Inset {
+    Inset::LengthPercentage(pct(fraction))
+}
+
+/// A used border width in CSS pixels.
+pub(super) fn border_px(value: f32) -> BorderSideWidth {
+    BorderSideWidth(Au::from_f32_px(value))
+}
+
+/// `flex-basis: auto`.
+pub(super) fn basis_auto() -> FlexBasis {
+    FlexBasis::auto()
+}
+
+/// `flex-basis: <length>`.
+pub(super) fn basis_px(value: f32) -> FlexBasis {
+    FlexBasis::Size(size_px(value))
+}
+
+/// `flex-basis: <percentage>`.
+pub(super) fn basis_pct(fraction: f32) -> FlexBasis {
+    FlexBasis::Size(size_pct(fraction))
+}
+
+/// `flex-basis: calc()`.
+pub(super) fn basis_calc(length: f32, percentage: f32) -> FlexBasis {
+    FlexBasis::Size(size_calc(length, percentage))
+}
+
+/// `flex-basis: fit-content(<length>)`.
+pub(super) fn basis_fit_content_px(value: f32) -> FlexBasis {
+    FlexBasis::Size(size_fit_content_px(value))
+}
+
+/// `flex-basis: content`.
+pub(super) fn basis_content() -> FlexBasis {
+    FlexBasis::Content
+}
+
+/// One `gap` axis: `normal` (resolves to zero).
+pub(super) fn gap_normal() -> NonNegativeLengthPercentageOrNormal {
+    NonNegativeLengthPercentageOrNormal::Normal
+}
+
+/// One `gap` axis: `<length>`.
+pub(super) fn gap_px(value: f32) -> NonNegativeLengthPercentageOrNormal {
+    NonNegativeLengthPercentageOrNormal::LengthPercentage(npx(value))
+}
+
+/// One `gap` axis: `<percentage>`.
+pub(super) fn gap_pct(fraction: f32) -> NonNegativeLengthPercentageOrNormal {
+    NonNegativeLengthPercentageOrNormal::LengthPercentage(npct(fraction))
+}
+
+/// `aspect-ratio: <ratio>` (as width / height).
+pub(super) fn ratio(value: f32) -> AspectRatio {
+    AspectRatio {
+        auto: false,
+        ratio: PreferredRatio::Ratio(Ratio::new(value, 1.0)),
+    }
+}
+
+/// `align-items` / the container half of the deleted cross-gravity channel.
+pub(super) fn items(flags: AlignFlags) -> ItemPlacement {
+    ItemPlacement(flags)
+}
+
+/// `align-self`/`justify-self` / the deleted per-item layout-gravity channel.
+pub(super) fn self_align(flags: AlignFlags) -> SelfAlignment {
+    SelfAlignment(flags)
+}
+
+/// `align-content`/`justify-content` / the deleted main-gravity channel.
+pub(super) fn content(flags: AlignFlags) -> ContentDistribution {
+    ContentDistribution::new(flags)
+}
+
+/// `justify-items`.
+pub(super) fn justify_items(flags: AlignFlags) -> JustifyItems {
+    let specified = stylo::values::specified::align::JustifyItems(ItemPlacement(flags));
+    JustifyItems {
+        specified,
+        computed: specified,
+    }
+}
+
+/// The reserved "no reference" relative-layout sentinel.
+pub(super) const RELATIVE_NONE: i32 = -1;
+
+/// The reserved "the parent" relative-layout sentinel.
+pub(super) const RELATIVE_PARENT: i32 = 0;
+
+// ---------------------------------------------------------------------------
+// Grid track constructor helpers
+// ---------------------------------------------------------------------------
+
+/// One computed grid track sizing function.
+pub(super) type TestTrack = generic_grid::TrackSize<LengthPercentage>;
+
+/// One computed track breadth.
+pub(super) type TestTrackBreadth = generic_grid::TrackBreadth<LengthPercentage>;
+
+/// One computed track-list entry (a track or a repetition).
+pub(super) type TestTrackListValue = generic_grid::TrackListValue<LengthPercentage, i32>;
+
+/// A `repeat()` count.
+pub(super) type TestRepeatCount = generic_grid::RepeatCount<i32>;
+
+/// Track breadth: `<length>`.
+pub(super) fn breadth_px(value: f32) -> TestTrackBreadth {
+    generic_grid::TrackBreadth::Breadth(px(value))
+}
+
+/// Track breadth: `<percentage>`.
+pub(super) fn breadth_pct(fraction: f32) -> TestTrackBreadth {
+    generic_grid::TrackBreadth::Breadth(pct(fraction))
+}
+
+/// Track breadth: `calc()`.
+pub(super) fn breadth_calc(length: f32, percentage: f32) -> TestTrackBreadth {
+    generic_grid::TrackBreadth::Breadth(calc_lp(length, percentage))
+}
+
+/// Track breadth: `<flex>` (`fr`).
+pub(super) fn breadth_fr(value: f32) -> TestTrackBreadth {
+    generic_grid::TrackBreadth::Flex(generic_grid::Flex(value))
+}
+
+/// Track breadth: `auto`.
+pub(super) fn breadth_auto() -> TestTrackBreadth {
+    generic_grid::TrackBreadth::Auto
+}
+
+/// Track breadth: `min-content`.
+pub(super) fn breadth_min_content() -> TestTrackBreadth {
+    generic_grid::TrackBreadth::MinContent
+}
+
+/// Track breadth: `max-content`.
+pub(super) fn breadth_max_content() -> TestTrackBreadth {
+    generic_grid::TrackBreadth::MaxContent
+}
+
+/// Track: single breadth.
+pub(super) fn track(breadth: TestTrackBreadth) -> TestTrack {
+    generic_grid::TrackSize::Breadth(breadth)
+}
+
+/// Track: `<length>`.
+pub(super) fn track_px(value: f32) -> TestTrack {
+    track(breadth_px(value))
+}
+
+/// Track: `<percentage>`.
+pub(super) fn track_pct(fraction: f32) -> TestTrack {
+    track(breadth_pct(fraction))
+}
+
+/// Track: `<flex>` (`fr`).
+pub(super) fn track_fr(value: f32) -> TestTrack {
+    track(breadth_fr(value))
+}
+
+/// Track: `auto`.
+pub(super) fn track_auto() -> TestTrack {
+    track(breadth_auto())
+}
+
+/// Track: `min-content`.
+pub(super) fn track_min_content() -> TestTrack {
+    track(breadth_min_content())
+}
+
+/// Track: `max-content`.
+pub(super) fn track_max_content() -> TestTrack {
+    track(breadth_max_content())
+}
+
+/// Track: `minmax(<breadth>, <breadth>)`.
+pub(super) fn track_minmax(min: TestTrackBreadth, max: TestTrackBreadth) -> TestTrack {
+    generic_grid::TrackSize::Minmax(min, max)
+}
+
+/// Track: `fit-content(<length-percentage>)`.
+pub(super) fn track_fit_content(limit: TestTrackBreadth) -> TestTrack {
+    generic_grid::TrackSize::FitContent(limit)
+}
+
+/// A `repeat()` track-list entry (line names left empty, honoring the
+/// `line_names.len() == track_sizes.len() + 1` invariant).
+pub(super) fn track_repeat(count: TestRepeatCount, tracks: Vec<TestTrack>) -> TestTrackListValue {
+    generic_grid::TrackListValue::TrackRepeat(generic_grid::TrackRepeat {
+        count,
+        line_names: vec![stylo::OwnedSlice::default(); tracks.len() + 1].into(),
+        track_sizes: tracks.into(),
+    })
+}
+
+/// A template from explicit track-list entries. `auto_repeat_index` is the
+/// index of the `auto-fill`/`auto-fit` repetition in `values`, or
+/// `usize::MAX` when there is none.
+pub(super) fn template_values(
+    values: Vec<TestTrackListValue>,
+    auto_repeat_index: usize,
+) -> GridTemplateComponent {
+    let count = values.len();
+    GridTemplateComponent::TrackList(Box::new(generic_grid::TrackList {
+        auto_repeat_index,
+        values: values.into(),
+        line_names: vec![stylo::OwnedSlice::default(); count + 1].into(),
+    }))
+}
+
+/// A template of plain tracks (no repetitions, no line names).
+pub(super) fn track_list(tracks: Vec<TestTrack>) -> GridTemplateComponent {
+    template_values(
+        tracks
+            .into_iter()
+            .map(generic_grid::TrackListValue::TrackSize)
+            .collect(),
+        usize::MAX,
+    )
+}
+
+/// `grid-template-rows`/`-columns`: `none`.
+pub(super) fn template_none() -> GridTemplateComponent {
+    GridTemplateComponent::None
+}
+
+/// `grid-auto-rows`/`-columns`.
+pub(super) fn implicit_tracks(tracks: Vec<TestTrack>) -> ImplicitGridTracks {
+    generic_grid::ImplicitGridTracks(tracks.into())
+}
+
+/// Grid placement: a 1-based (possibly negative) line number.
+pub(super) fn grid_line(line: i32) -> GridLine {
+    GridLine {
+        line_num: line,
+        ..GridLine::auto()
+    }
+}
+
+/// Grid placement: `span <n>`.
+pub(super) fn grid_span(span: i32) -> GridLine {
+    GridLine {
+        line_num: span,
+        is_span: true,
+        ..GridLine::auto()
+    }
+}
+
+/// Grid placement: `auto`.
+pub(super) fn grid_auto_placement() -> GridLine {
+    GridLine::auto()
+}
+
+// ---------------------------------------------------------------------------
+// Host tree
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TestDisplay {
@@ -29,231 +462,183 @@ pub(super) enum TestDisplay {
     Leaf,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(super) struct NoRepetition;
-
-impl GridTemplateRepetition for NoRepetition {
-    type Tracks<'a> = std::iter::Empty<TrackSizingFunction>;
-
-    fn count(&self) -> RepetitionCount {
-        RepetitionCount::Count(1)
-    }
-
-    fn tracks(&self) -> Self::Tracks<'_> {
-        std::iter::empty()
-    }
-}
-
-fn single_track(track: TrackSizingFunction) -> GridTemplateComponent<NoRepetition> {
-    GridTemplateComponent::Single(track)
-}
-
-type TemplateTracks<'a> = std::iter::Map<
-    std::iter::Copied<std::slice::Iter<'a, TrackSizingFunction>>,
-    fn(TrackSizingFunction) -> GridTemplateComponent<NoRepetition>,
->;
-
 #[derive(Debug, Clone)]
 pub(super) struct TestStyle {
-    pub(super) box_generation_mode: BoxGenerationMode,
-    pub(super) visibility: Visibility,
-    pub(super) position: Position,
-    pub(super) inset: Edges<LengthPercentageAuto>,
-    pub(super) size: Size<Dimension>,
-    pub(super) min_size: Size<Dimension>,
-    pub(super) max_size: Size<Dimension>,
-    pub(super) aspect_ratio: Option<f32>,
-    pub(super) margin: Edges<LengthPercentageAuto>,
-    pub(super) padding: Edges<LengthPercentage>,
-    pub(super) border: Edges<LengthPercentage>,
+    pub(super) display: Display,
+    pub(super) visibility: visibility::T,
+    pub(super) position: PositionProperty,
+    pub(super) inset: Edges<Inset>,
+    pub(super) size: Size<StyleSize>,
+    pub(super) min_size: Size<StyleSize>,
+    pub(super) max_size: Size<MaxSize>,
+    pub(super) aspect_ratio: AspectRatio,
+    pub(super) margin: Edges<Margin>,
+    pub(super) padding: Edges<NonNegativeLengthPercentage>,
+    pub(super) border: Edges<BorderSideWidth>,
     pub(super) overflow: Point<Overflow>,
-    pub(super) scrollbar_width: f32,
-    pub(super) box_sizing: BoxSizing,
-    pub(super) direction: Direction,
-    pub(super) linear_orientation: LinearOrientation,
-    pub(super) linear_gravity: LinearGravity,
-    pub(super) linear_cross_gravity: LinearCrossGravity,
-    pub(super) linear_weight_sum: f32,
-    pub(super) flex_direction: FlexDirection,
-    pub(super) flex_wrap: FlexWrap,
-    pub(super) gap: Size<LengthPercentage>,
-    pub(super) align_content: Option<AlignContent>,
-    pub(super) align_items: Option<AlignItems>,
-    pub(super) justify_content: Option<JustifyContent>,
-    pub(super) flex_basis: Dimension,
-    pub(super) flex_grow: f32,
-    pub(super) flex_shrink: f32,
-    pub(super) linear_layout_gravity: LinearLayoutGravity,
-    pub(super) linear_weight: f32,
-    pub(super) align_self: Option<AlignSelf>,
+    pub(super) box_sizing: box_sizing::T,
+    pub(super) direction: direction::T,
+    pub(super) linear_direction: linear_direction::T,
+    pub(super) linear_weight_sum: NonNegativeNumber,
+    pub(super) flex_direction: flex_direction::T,
+    pub(super) flex_wrap: flex_wrap::T,
+    pub(super) gap: Size<NonNegativeLengthPercentageOrNormal>,
+    pub(super) align_content: ContentDistribution,
+    pub(super) align_items: ItemPlacement,
+    pub(super) justify_content: ContentDistribution,
+    pub(super) flex_basis: FlexBasis,
+    pub(super) flex_grow: NonNegativeNumber,
+    pub(super) flex_shrink: NonNegativeNumber,
+    pub(super) linear_weight: NonNegativeNumber,
+    pub(super) align_self: SelfAlignment,
     pub(super) order: i32,
-    pub(super) template_rows: Vec<TrackSizingFunction>,
-    pub(super) template_columns: Vec<TrackSizingFunction>,
-    pub(super) auto_rows: Vec<TrackSizingFunction>,
-    pub(super) auto_columns: Vec<TrackSizingFunction>,
+    pub(super) template_rows: GridTemplateComponent,
+    pub(super) template_columns: GridTemplateComponent,
+    pub(super) auto_rows: ImplicitGridTracks,
+    pub(super) auto_columns: ImplicitGridTracks,
     pub(super) auto_flow: GridAutoFlow,
-    pub(super) justify_items: Option<JustifyItems>,
-    pub(super) grid_row: Line<GridPlacement>,
-    pub(super) grid_column: Line<GridPlacement>,
-    pub(super) justify_self: Option<JustifySelf>,
-    pub(super) relative_layout_once: bool,
+    pub(super) justify_items: JustifyItems,
+    pub(super) grid_row: Line<GridLine>,
+    pub(super) grid_column: Line<GridLine>,
+    pub(super) justify_self: SelfAlignment,
+    pub(super) relative_layout_once: relative_layout_once::T,
     pub(super) relative_id: RelativeReference,
-    pub(super) relative_align: Edges<RelativeReference>,
+    pub(super) relative_align: Edges<RelativeAlign>,
     pub(super) relative_adjacent: Edges<RelativeReference>,
-    pub(super) relative_center: RelativeCenter,
+    pub(super) relative_center: relative_center::T,
 }
 
 impl Default for TestStyle {
     fn default() -> Self {
         Self {
-            box_generation_mode: BoxGenerationMode::Normal,
-            visibility: Visibility::Visible,
-            position: Position::Relative,
-            inset: Edges::uniform(LengthPercentageAuto::Auto),
-            size: Size::new(Dimension::Auto, Dimension::Auto),
-            min_size: Size::new(Dimension::Auto, Dimension::Auto),
-            max_size: Size::new(Dimension::Auto, Dimension::Auto),
-            aspect_ratio: None,
-            margin: Edges::uniform(LengthPercentageAuto::ZERO),
-            padding: Edges::uniform(LengthPercentage::ZERO),
-            border: Edges::uniform(LengthPercentage::ZERO),
+            display: Display::Flex,
+            visibility: visibility::T::Visible,
+            position: PositionProperty::Relative,
+            inset: Edges::uniform(inset_auto()),
+            size: Size::new(size_auto(), size_auto()),
+            min_size: Size::new(size_auto(), size_auto()),
+            max_size: Size::new(max_none(), max_none()),
+            aspect_ratio: AspectRatio::auto(),
+            margin: Edges::uniform(margin_px(0.0)),
+            padding: Edges::uniform(npx(0.0)),
+            border: Edges::uniform(border_px(0.0)),
             overflow: Point::new(Overflow::Visible, Overflow::Visible),
-            scrollbar_width: 0.0,
-            box_sizing: BoxSizing::ContentBox,
-            direction: Direction::Ltr,
-            linear_orientation: LinearOrientation::Vertical,
-            linear_gravity: LinearGravity::None,
-            linear_cross_gravity: LinearCrossGravity::None,
-            linear_weight_sum: 0.0,
-            flex_direction: FlexDirection::Row,
-            flex_wrap: FlexWrap::NoWrap,
-            gap: Size::new(LengthPercentage::ZERO, LengthPercentage::ZERO),
-            align_content: None,
-            align_items: None,
-            justify_content: None,
-            flex_basis: Dimension::Auto,
-            flex_grow: 0.0,
-            flex_shrink: 1.0,
-            linear_layout_gravity: LinearLayoutGravity::None,
-            linear_weight: 0.0,
-            align_self: None,
+            box_sizing: box_sizing::T::ContentBox,
+            direction: direction::T::Ltr,
+            linear_direction: linear_direction::T::Column,
+            linear_weight_sum: nn(0.0),
+            flex_direction: flex_direction::T::Row,
+            flex_wrap: flex_wrap::T::Nowrap,
+            gap: Size::new(gap_normal(), gap_normal()),
+            align_content: ContentDistribution::normal(),
+            align_items: ItemPlacement::normal(),
+            justify_content: ContentDistribution::normal(),
+            flex_basis: basis_auto(),
+            flex_grow: nn(0.0),
+            flex_shrink: nn(1.0),
+            linear_weight: nn(0.0),
+            align_self: SelfAlignment::auto(),
             order: 0,
-            template_rows: Vec::new(),
-            template_columns: Vec::new(),
-            auto_rows: Vec::new(),
-            auto_columns: Vec::new(),
-            auto_flow: GridAutoFlow::Row,
-            justify_items: None,
-            grid_row: Line::new(GridPlacement::Auto, GridPlacement::Auto),
-            grid_column: Line::new(GridPlacement::Auto, GridPlacement::Auto),
-            justify_self: None,
-            relative_layout_once: false,
-            relative_id: RelativeReference::NONE,
-            relative_align: Edges::uniform(RelativeReference::NONE),
-            relative_adjacent: Edges::uniform(RelativeReference::NONE),
-            relative_center: RelativeCenter::None,
+            template_rows: template_none(),
+            template_columns: template_none(),
+            auto_rows: implicit_tracks(Vec::new()),
+            auto_columns: implicit_tracks(Vec::new()),
+            auto_flow: GridAutoFlow::ROW,
+            justify_items: justify_items(AlignFlags::NORMAL),
+            grid_row: Line::new(grid_auto_placement(), grid_auto_placement()),
+            grid_column: Line::new(grid_auto_placement(), grid_auto_placement()),
+            justify_self: SelfAlignment::auto(),
+            relative_layout_once: relative_layout_once::T::True,
+            relative_id: RELATIVE_NONE,
+            relative_align: Edges::uniform(RELATIVE_NONE),
+            relative_adjacent: Edges::uniform(RELATIVE_NONE),
+            relative_center: relative_center::T::None,
         }
     }
 }
 
 impl CoreStyle for TestStyle {
-    fn box_generation_mode(&self) -> BoxGenerationMode {
-        self.box_generation_mode
+    fn display(&self) -> Display {
+        self.display
     }
 
-    fn visibility(&self) -> Visibility {
+    fn visibility(&self) -> visibility::T {
         self.visibility
     }
 
-    fn position(&self) -> Position {
+    fn position(&self) -> PositionProperty {
         self.position
     }
 
-    fn inset(&self) -> Edges<LengthPercentageAuto> {
-        self.inset
+    fn inset(&self) -> Edges<&Inset> {
+        self.inset.as_ref()
     }
 
-    fn size(&self) -> Size<Dimension> {
-        self.size
+    fn size(&self) -> Size<&StyleSize> {
+        self.size.as_ref()
     }
 
-    fn min_size(&self) -> Size<Dimension> {
-        self.min_size
+    fn min_size(&self) -> Size<&StyleSize> {
+        self.min_size.as_ref()
     }
 
-    fn max_size(&self) -> Size<Dimension> {
-        self.max_size
+    fn max_size(&self) -> Size<&MaxSize> {
+        self.max_size.as_ref()
     }
 
-    fn aspect_ratio(&self) -> Option<f32> {
+    fn aspect_ratio(&self) -> AspectRatio {
         self.aspect_ratio
     }
 
-    fn margin(&self) -> Edges<LengthPercentageAuto> {
-        self.margin
+    fn margin(&self) -> Edges<&Margin> {
+        self.margin.as_ref()
     }
 
-    fn padding(&self) -> Edges<LengthPercentage> {
-        self.padding
+    fn padding(&self) -> Edges<&NonNegativeLengthPercentage> {
+        self.padding.as_ref()
     }
 
-    fn border(&self) -> Edges<LengthPercentage> {
-        self.border
+    fn border(&self) -> Edges<BorderSideWidth> {
+        self.border.clone()
     }
 
     fn overflow(&self) -> Point<Overflow> {
         self.overflow
     }
 
-    fn scrollbar_width(&self) -> f32 {
-        self.scrollbar_width
-    }
-
-    fn box_sizing(&self) -> BoxSizing {
+    fn box_sizing(&self) -> box_sizing::T {
         self.box_sizing
     }
 
-    fn direction(&self) -> Direction {
+    fn direction(&self) -> direction::T {
         self.direction
     }
 }
 
 impl LinearContainerStyle for TestStyle {
-    fn linear_orientation(&self) -> LinearOrientation {
-        self.linear_orientation
+    fn linear_direction(&self) -> linear_direction::T {
+        self.linear_direction
     }
 
-    fn linear_gravity(&self) -> LinearGravity {
-        self.linear_gravity
-    }
-
-    fn linear_cross_gravity(&self) -> LinearCrossGravity {
-        self.linear_cross_gravity
-    }
-
-    fn linear_weight_sum(&self) -> f32 {
+    fn linear_weight_sum(&self) -> NonNegativeNumber {
         self.linear_weight_sum
     }
 
-    fn justify_content(&self) -> Option<JustifyContent> {
+    fn justify_content(&self) -> ContentDistribution {
         self.justify_content
     }
 
-    fn align_items(&self) -> Option<AlignItems> {
+    fn align_items(&self) -> ItemPlacement {
         self.align_items
     }
 }
 
 impl LinearItemStyle for TestStyle {
-    fn linear_layout_gravity(&self) -> LinearLayoutGravity {
-        self.linear_layout_gravity
-    }
-
-    fn linear_weight(&self) -> f32 {
+    fn linear_weight(&self) -> NonNegativeNumber {
         self.linear_weight
     }
 
-    fn align_self(&self) -> Option<AlignSelf> {
+    fn align_self(&self) -> SelfAlignment {
         self.align_self
     }
 
@@ -263,45 +648,45 @@ impl LinearItemStyle for TestStyle {
 }
 
 impl FlexContainerStyle for TestStyle {
-    fn flex_direction(&self) -> FlexDirection {
+    fn flex_direction(&self) -> flex_direction::T {
         self.flex_direction
     }
 
-    fn flex_wrap(&self) -> FlexWrap {
+    fn flex_wrap(&self) -> flex_wrap::T {
         self.flex_wrap
     }
 
-    fn gap(&self) -> Size<LengthPercentage> {
-        self.gap
+    fn gap(&self) -> Size<&NonNegativeLengthPercentageOrNormal> {
+        self.gap.as_ref()
     }
 
-    fn align_content(&self) -> Option<AlignContent> {
+    fn align_content(&self) -> ContentDistribution {
         self.align_content
     }
 
-    fn align_items(&self) -> Option<AlignItems> {
+    fn align_items(&self) -> ItemPlacement {
         self.align_items
     }
 
-    fn justify_content(&self) -> Option<JustifyContent> {
+    fn justify_content(&self) -> ContentDistribution {
         self.justify_content
     }
 }
 
 impl FlexItemStyle for TestStyle {
-    fn flex_basis(&self) -> Dimension {
-        self.flex_basis
+    fn flex_basis(&self) -> &FlexBasis {
+        &self.flex_basis
     }
 
-    fn flex_grow(&self) -> f32 {
+    fn flex_grow(&self) -> NonNegativeNumber {
         self.flex_grow
     }
 
-    fn flex_shrink(&self) -> f32 {
+    fn flex_shrink(&self) -> NonNegativeNumber {
         self.flex_shrink
     }
 
-    fn align_self(&self) -> Option<AlignSelf> {
+    fn align_self(&self) -> SelfAlignment {
         self.align_self
     }
 
@@ -311,65 +696,69 @@ impl FlexItemStyle for TestStyle {
 }
 
 impl GridContainerStyle for TestStyle {
-    type Repetition<'a> = NoRepetition;
-    type TemplateTracks<'a> = TemplateTracks<'a>;
-    type AutoTracks<'a> = std::iter::Copied<std::slice::Iter<'a, TrackSizingFunction>>;
-
-    fn grid_template_rows(&self) -> Self::TemplateTracks<'_> {
-        self.template_rows.iter().copied().map(single_track as _)
+    fn grid_template_rows(&self) -> &GridTemplateComponent {
+        &self.template_rows
     }
 
-    fn grid_template_columns(&self) -> Self::TemplateTracks<'_> {
-        self.template_columns.iter().copied().map(single_track as _)
+    fn grid_template_columns(&self) -> &GridTemplateComponent {
+        &self.template_columns
     }
 
-    fn grid_auto_rows(&self) -> Self::AutoTracks<'_> {
-        self.auto_rows.iter().copied()
+    fn grid_auto_rows(&self) -> &ImplicitGridTracks {
+        &self.auto_rows
     }
 
-    fn grid_auto_columns(&self) -> Self::AutoTracks<'_> {
-        self.auto_columns.iter().copied()
+    fn grid_auto_columns(&self) -> &ImplicitGridTracks {
+        &self.auto_columns
     }
 
     fn grid_auto_flow(&self) -> GridAutoFlow {
         self.auto_flow
     }
 
-    fn gap(&self) -> Size<LengthPercentage> {
-        self.gap
+    fn gap(&self) -> Size<&NonNegativeLengthPercentageOrNormal> {
+        self.gap.as_ref()
     }
 
-    fn align_content(&self) -> Option<AlignContent> {
+    fn align_content(&self) -> ContentDistribution {
         self.align_content
     }
 
-    fn justify_content(&self) -> Option<JustifyContent> {
+    fn justify_content(&self) -> ContentDistribution {
         self.justify_content
     }
 
-    fn align_items(&self) -> Option<AlignItems> {
+    fn align_items(&self) -> ItemPlacement {
         self.align_items
     }
 
-    fn justify_items(&self) -> Option<JustifyItems> {
+    fn justify_items(&self) -> JustifyItems {
         self.justify_items
     }
 }
 
 impl GridItemStyle for TestStyle {
-    fn grid_row(&self) -> Line<GridPlacement> {
-        self.grid_row
+    fn grid_row_start(&self) -> &GridLine {
+        &self.grid_row.start
     }
 
-    fn grid_column(&self) -> Line<GridPlacement> {
-        self.grid_column
+    fn grid_row_end(&self) -> &GridLine {
+        &self.grid_row.end
     }
 
-    fn align_self(&self) -> Option<AlignSelf> {
+    fn grid_column_start(&self) -> &GridLine {
+        &self.grid_column.start
+    }
+
+    fn grid_column_end(&self) -> &GridLine {
+        &self.grid_column.end
+    }
+
+    fn align_self(&self) -> SelfAlignment {
         self.align_self
     }
 
-    fn justify_self(&self) -> Option<JustifySelf> {
+    fn justify_self(&self) -> SelfAlignment {
         self.justify_self
     }
 
@@ -379,7 +768,7 @@ impl GridItemStyle for TestStyle {
 }
 
 impl RelativeContainerStyle for TestStyle {
-    fn relative_layout_once(&self) -> bool {
+    fn relative_layout_once(&self) -> relative_layout_once::T {
         self.relative_layout_once
     }
 }
@@ -389,7 +778,7 @@ impl RelativeItemStyle for TestStyle {
         self.relative_id
     }
 
-    fn relative_align(&self) -> Edges<RelativeReference> {
+    fn relative_align(&self) -> Edges<RelativeAlign> {
         self.relative_align
     }
 
@@ -397,7 +786,7 @@ impl RelativeItemStyle for TestStyle {
         self.relative_adjacent
     }
 
-    fn relative_center(&self) -> RelativeCenter {
+    fn relative_center(&self) -> relative_center::T {
         self.relative_center
     }
 
@@ -749,81 +1138,230 @@ impl TestIntrinsicMeasure {
     }
 }
 
+/// Test-local node identity: a dense index into [`TestTree`]. Builders hand
+/// these out during the mutation phase; layout and assertions resolve them
+/// to borrowed [`TestRef`] handles.
+pub(super) type TestId = usize;
+
 #[derive(Debug, Clone)]
 pub(super) struct TestSourceNode {
     pub(super) display: TestDisplay,
     pub(super) style: TestStyle,
-    pub(super) children: Vec<NodeId>,
+    pub(super) children: Vec<TestId>,
     pub(super) measure: TestMeasure,
 }
 
-#[derive(Debug, Clone, Default)]
-pub(super) struct TestSessionNode {
-    pub(super) layout: Layout,
-    pub(super) final_layout: Layout,
-    pub(super) static_position: Option<Point<f32>>,
-    pub(super) output: LayoutOutput,
-    pub(super) measure_inputs: Vec<LeafMeasureInput>,
-    pub(super) measure_calls: Vec<TestMeasureCall>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct TestCalc {
-    length: f32,
-    percentage: f32,
-}
-
+/// Per-node mutable layout slots, written through [`TestRef`] handles.
+/// Layout is single-threaded, so `Cell`/`RefCell` interior mutability is the
+/// whole synchronization story.
 #[derive(Debug, Default)]
-pub(super) struct TestSource {
-    pub(super) nodes: Vec<TestSourceNode>,
-    calcs: Vec<TestCalc>,
+pub(super) struct TestSessionNode {
+    pub(super) layout: Cell<Layout>,
+    pub(super) final_layout: Cell<Layout>,
+    pub(super) static_position: Cell<Option<Point<f32>>>,
+    pub(super) output: Cell<LayoutOutput>,
+    pub(super) measure_inputs: RefCell<Vec<LeafMeasureInput>>,
+    pub(super) measure_calls: RefCell<Vec<TestMeasureCall>>,
 }
 
+/// The one host tree: immutable node data plus interior-mutable session
+/// slots and instrumentation. The session slots deliberately live in a
+/// parallel `Vec` (not inline in `TestSourceNode`) so bench fixtures keep
+/// the same memory layout the pre-handle host had.
 #[derive(Debug)]
-pub(super) struct TestSession {
-    pub(super) nodes: Vec<TestSessionNode>,
-    pub(super) child_layout_calls: usize,
-    pub(super) layout_writes: usize,
-    pub(super) static_position_writes: usize,
-    pub(super) leaf_measure_calls: usize,
-    pub(super) record_measure_inputs: bool,
-    caches: Option<Vec<Cache>>,
+pub(super) struct TestTree {
+    pub(super) nodes: Vec<TestSourceNode>,
+    pub(super) session: Vec<TestSessionNode>,
+    caches: Option<Vec<RefCell<Cache>>>,
+    pub(super) child_layout_calls: Cell<usize>,
+    pub(super) layout_writes: Cell<usize>,
+    pub(super) static_position_writes: Cell<usize>,
+    pub(super) leaf_measure_calls: Cell<usize>,
+    pub(super) record_measure_inputs: Cell<bool>,
 }
 
-impl Default for TestSession {
+impl Default for TestTree {
     fn default() -> Self {
         Self {
             nodes: Vec::new(),
-            child_layout_calls: 0,
-            layout_writes: 0,
-            static_position_writes: 0,
-            leaf_measure_calls: 0,
-            record_measure_inputs: true,
+            session: Vec::new(),
             caches: None,
+            child_layout_calls: Cell::new(0),
+            layout_writes: Cell::new(0),
+            static_position_writes: Cell::new(0),
+            leaf_measure_calls: Cell::new(0),
+            record_measure_inputs: Cell::new(true),
         }
     }
 }
 
-impl TestSession {
-    pub(super) fn enable_cache(&mut self) {
-        self.caches = Some(vec![Cache::new(); self.nodes.len()]);
+/// The `Copy` node handle: a borrow of the tree plus a node index.
+#[derive(Clone, Copy)]
+pub(super) struct TestRef<'t> {
+    tree: &'t TestTree,
+    index: TestId,
+}
+
+impl fmt::Debug for TestRef<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_tuple("TestRef").field(&self.index).finish()
     }
 }
 
-/// Builder and assertion facade; layout receives its fields separately.
-#[derive(Debug, Default)]
-pub(super) struct TestTree {
-    pub(super) source: TestSource,
-    pub(super) session: TestSession,
+impl<'t> TestRef<'t> {
+    fn source(self) -> &'t TestSourceNode {
+        &self.tree.nodes[self.index]
+    }
+
+    fn slots(self) -> &'t TestSessionNode {
+        &self.tree.session[self.index]
+    }
+}
+
+pub(super) struct TestChildren<'t> {
+    tree: &'t TestTree,
+    ids: std::slice::Iter<'t, TestId>,
+}
+
+impl<'t> Iterator for TestChildren<'t> {
+    type Item = TestRef<'t>;
+
+    fn next(&mut self) -> Option<TestRef<'t>> {
+        let index = *self.ids.next()?;
+        Some(TestRef {
+            tree: self.tree,
+            index,
+        })
+    }
+}
+
+impl<'t> LayoutNode for TestRef<'t> {
+    type Style = &'t TestStyle;
+    type ChildIter = TestChildren<'t>;
+
+    fn children(self) -> TestChildren<'t> {
+        TestChildren {
+            tree: self.tree,
+            ids: self.source().children.iter(),
+        }
+    }
+
+    fn child_count(self) -> usize {
+        self.source().children.len()
+    }
+
+    fn style(self) -> &'t TestStyle {
+        &self.source().style
+    }
+
+    fn compute_child_layout(self, input: LayoutInput) -> LayoutOutput {
+        let tree = self.tree;
+        tree.child_layout_calls
+            .set(tree.child_layout_calls.get() + 1);
+        let node = self.source();
+        let display = node.display;
+
+        if node.style.display.is_none() {
+            hide_subtree(self);
+            return LayoutOutput::HIDDEN;
+        }
+
+        let output = compute_cached_layout(self, input, |handle, input| match display {
+            TestDisplay::Flex => compute_flexbox_layout(handle, input),
+            TestDisplay::Grid => compute_grid_layout(handle, input),
+            TestDisplay::Linear => compute_linear_layout(handle, input),
+            TestDisplay::Relative => compute_relative_layout(handle, input),
+            TestDisplay::Leaf => {
+                let style = &node.style;
+                let measure = node.measure;
+                let slots = handle.slots();
+                let mut measurer = FnLeafMeasurer::new(|measure_input| {
+                    tree.leaf_measure_calls
+                        .set(tree.leaf_measure_calls.get() + 1);
+                    if tree.record_measure_inputs.get() {
+                        slots.measure_inputs.borrow_mut().push(measure_input);
+                    }
+                    let (metrics, call) = measure.measure(measure_input);
+                    if let Some(call) = call {
+                        slots.measure_calls.borrow_mut().push(call);
+                    }
+                    metrics
+                });
+                compute_leaf_layout(input, style, &mut measurer)
+            }
+        });
+        self.slots().output.set(output);
+        output
+    }
+
+    fn set_unrounded_layout(self, layout: &Layout) {
+        self.tree
+            .layout_writes
+            .set(self.tree.layout_writes.get() + 1);
+        self.slots().layout.set(*layout);
+    }
+
+    fn unrounded_layout(self) -> Layout {
+        self.slots().layout.get()
+    }
+
+    fn set_final_layout(self, layout: &Layout) {
+        self.slots().final_layout.set(*layout);
+    }
+
+    fn set_static_position(self, static_position: Point<f32>) {
+        self.tree
+            .static_position_writes
+            .set(self.tree.static_position_writes.get() + 1);
+        self.slots().static_position.set(Some(static_position));
+    }
+
+    fn cache_get(self, input: LayoutInput) -> Option<LayoutOutput> {
+        self.tree.caches.as_ref()?[self.index].borrow().get(input)
+    }
+
+    fn cache_store(self, input: LayoutInput, output: LayoutOutput) {
+        if let Some(caches) = &self.tree.caches {
+            caches[self.index].borrow_mut().store(input, output);
+        }
+    }
+
+    fn cache_clear(self) {
+        if let Some(caches) = &self.tree.caches {
+            caches[self.index].borrow_mut().clear();
+        }
+    }
 }
 
 impl TestTree {
+    /// Resolves a builder-returned id to a borrowed node handle.
+    pub(super) fn node(&self, id: TestId) -> TestRef<'_> {
+        TestRef {
+            tree: self,
+            index: id,
+        }
+    }
+
+    /// Dispatches layout on `id` — the entry point tests use directly.
+    pub(super) fn compute_child_layout(&self, id: TestId, input: LayoutInput) -> LayoutOutput {
+        self.node(id).compute_child_layout(input)
+    }
+
+    pub(super) fn enable_cache(&mut self) {
+        self.caches = Some(
+            self.nodes
+                .iter()
+                .map(|_| RefCell::new(Cache::new()))
+                .collect(),
+        );
+    }
+
     pub(super) fn push_leaf(
         &mut self,
         style: TestStyle,
         intrinsic_size: Size<f32>,
         first_baseline: Option<f32>,
-    ) -> NodeId {
+    ) -> TestId {
         self.push(TestSourceNode {
             display: TestDisplay::Leaf,
             style,
@@ -841,7 +1379,7 @@ impl TestTree {
         style: TestStyle,
         min_content_size: Size<f32>,
         max_content_size: Size<f32>,
-    ) -> NodeId {
+    ) -> TestId {
         self.push(TestSourceNode {
             display: TestDisplay::Leaf,
             style,
@@ -858,7 +1396,7 @@ impl TestTree {
         &mut self,
         style: TestStyle,
         measure: fn(LeafMeasureInput) -> LeafMetrics,
-    ) -> NodeId {
+    ) -> TestId {
         self.push(TestSourceNode {
             display: TestDisplay::Leaf,
             style,
@@ -867,13 +1405,13 @@ impl TestTree {
         })
     }
 
-    pub(super) fn set_leaf_measure(&mut self, node: NodeId, measure: TestMeasure) {
+    pub(super) fn set_leaf_measure(&mut self, node: TestId, measure: TestMeasure) {
         let source_node = self.source_node_mut(node);
         assert_eq!(source_node.display, TestDisplay::Leaf);
         source_node.measure = measure;
     }
 
-    pub(super) fn push_flex(&mut self, style: TestStyle, children: Vec<NodeId>) -> NodeId {
+    pub(super) fn push_flex(&mut self, style: TestStyle, children: Vec<TestId>) -> TestId {
         self.push(TestSourceNode {
             display: TestDisplay::Flex,
             style,
@@ -886,7 +1424,7 @@ impl TestTree {
         })
     }
 
-    pub(super) fn push_grid(&mut self, style: TestStyle, children: Vec<NodeId>) -> NodeId {
+    pub(super) fn push_grid(&mut self, style: TestStyle, children: Vec<TestId>) -> TestId {
         self.push(TestSourceNode {
             display: TestDisplay::Grid,
             style,
@@ -899,7 +1437,7 @@ impl TestTree {
         })
     }
 
-    pub(super) fn push_linear(&mut self, style: TestStyle, children: Vec<NodeId>) -> NodeId {
+    pub(super) fn push_linear(&mut self, style: TestStyle, children: Vec<TestId>) -> TestId {
         self.push(TestSourceNode {
             display: TestDisplay::Linear,
             style,
@@ -912,7 +1450,7 @@ impl TestTree {
         })
     }
 
-    pub(super) fn push_relative(&mut self, style: TestStyle, children: Vec<NodeId>) -> NodeId {
+    pub(super) fn push_relative(&mut self, style: TestStyle, children: Vec<TestId>) -> TestId {
         self.push(TestSourceNode {
             display: TestDisplay::Relative,
             style,
@@ -925,240 +1463,53 @@ impl TestTree {
         })
     }
 
-    pub(super) fn push(&mut self, node: TestSourceNode) -> NodeId {
-        debug_assert_eq!(self.source.nodes.len(), self.session.nodes.len());
-        let id = NodeId::from(self.source.nodes.len());
-        self.source.nodes.push(node);
-        self.session.nodes.push(TestSessionNode::default());
-        if let Some(caches) = &mut self.session.caches {
-            caches.push(Cache::new());
+    pub(super) fn push(&mut self, node: TestSourceNode) -> TestId {
+        debug_assert_eq!(self.nodes.len(), self.session.len());
+        let id = self.nodes.len();
+        self.nodes.push(node);
+        self.session.push(TestSessionNode::default());
+        if let Some(caches) = &mut self.caches {
+            caches.push(RefCell::new(Cache::new()));
         }
         id
     }
 
-    /// Stores a test `calc()` expression and returns its source-local handle.
-    ///
-    /// `percentage` is a fraction, so `0.5` represents `50%`.
-    pub(super) fn push_calc(&mut self, length: f32, percentage: f32) -> CalcHandle {
-        let handle = CalcHandle::from_raw(self.source.calcs.len() as u64);
-        self.source.calcs.push(TestCalc { length, percentage });
-        handle
+    pub(super) fn source_node_mut(&mut self, id: TestId) -> &mut TestSourceNode {
+        &mut self.nodes[id]
     }
 
-    pub(super) fn source_node_mut(&mut self, id: NodeId) -> &mut TestSourceNode {
-        &mut self.source.nodes[usize::from(id)]
+    /// The interior-mutable session slots of one node; tests mutate them
+    /// through the `Cell`/`RefCell` fields.
+    pub(super) fn session_node(&self, id: TestId) -> &TestSessionNode {
+        &self.session[id]
     }
 
-    pub(super) fn session_node(&self, id: NodeId) -> &TestSessionNode {
-        &self.session.nodes[usize::from(id)]
+    pub(super) fn layout(&self, id: TestId) -> Layout {
+        self.session_node(id).layout.get()
     }
 
-    pub(super) fn session_node_mut(&mut self, id: NodeId) -> &mut TestSessionNode {
-        &mut self.session.nodes[usize::from(id)]
+    pub(super) fn final_layout(&self, id: TestId) -> Layout {
+        self.session_node(id).final_layout.get()
     }
 
-    pub(super) fn layout(&self, id: NodeId) -> Layout {
-        self.session_node(id).layout
+    pub(super) fn static_position(&self, id: TestId) -> Option<Point<f32>> {
+        self.session_node(id).static_position.get()
     }
 
-    pub(super) fn final_layout(&self, id: NodeId) -> Layout {
-        self.session_node(id).final_layout
-    }
-
-    pub(super) fn static_position(&self, id: NodeId) -> Option<Point<f32>> {
-        self.session_node(id).static_position
-    }
-
-    pub(super) fn measure_inputs(&self, id: NodeId) -> &[LeafMeasureInput] {
-        &self.session_node(id).measure_inputs
-    }
-}
-
-impl TraverseTree for TestSource {
-    type ChildIter<'a> = std::iter::Copied<std::slice::Iter<'a, NodeId>>;
-
-    fn child_ids(&self, parent: NodeId) -> Self::ChildIter<'_> {
-        self.nodes[usize::from(parent)].children.iter().copied()
-    }
-
-    fn child_count(&self, parent: NodeId) -> usize {
-        self.nodes[usize::from(parent)].children.len()
-    }
-
-    fn child_id(&self, parent: NodeId, index: usize) -> NodeId {
-        self.nodes[usize::from(parent)].children[index]
-    }
-}
-
-impl LayoutSource for TestSource {
-    type CoreStyle<'a> = &'a TestStyle;
-
-    fn core_style(&self, node: NodeId) -> Self::CoreStyle<'_> {
-        &self.nodes[usize::from(node)].style
-    }
-
-    fn resolve_calc(&self, calc: CalcHandle, basis: f32) -> f32 {
-        let expression = self
-            .calcs
-            .get(usize::try_from(calc.raw()).expect("test calc handle fits usize"))
-            .expect("test calc handle belongs to this source");
-        expression.length + expression.percentage * basis
-    }
-}
-
-impl FlexSource for TestSource {
-    type ContainerStyle<'a> = &'a TestStyle;
-    type ItemStyle<'a> = &'a TestStyle;
-
-    fn flex_container_style(&self, container: NodeId) -> Self::ContainerStyle<'_> {
-        &self.nodes[usize::from(container)].style
-    }
-
-    fn flex_item_style(&self, item: NodeId) -> Self::ItemStyle<'_> {
-        &self.nodes[usize::from(item)].style
-    }
-}
-
-impl GridSource for TestSource {
-    type ContainerStyle<'a> = &'a TestStyle;
-    type ItemStyle<'a> = &'a TestStyle;
-
-    fn grid_container_style(&self, container: NodeId) -> Self::ContainerStyle<'_> {
-        &self.nodes[usize::from(container)].style
-    }
-
-    fn grid_item_style(&self, item: NodeId) -> Self::ItemStyle<'_> {
-        &self.nodes[usize::from(item)].style
-    }
-}
-
-impl LinearSource for TestSource {
-    type ContainerStyle<'a> = &'a TestStyle;
-    type ItemStyle<'a> = &'a TestStyle;
-
-    fn linear_container_style(&self, container: NodeId) -> Self::ContainerStyle<'_> {
-        &self.nodes[usize::from(container)].style
-    }
-
-    fn linear_item_style(&self, item: NodeId) -> Self::ItemStyle<'_> {
-        &self.nodes[usize::from(item)].style
-    }
-}
-
-impl RelativeSource for TestSource {
-    type ContainerStyle<'a> = &'a TestStyle;
-    type ItemStyle<'a> = &'a TestStyle;
-
-    fn relative_container_style(&self, container: NodeId) -> Self::ContainerStyle<'_> {
-        &self.nodes[usize::from(container)].style
-    }
-
-    fn relative_item_style(&self, item: NodeId) -> Self::ItemStyle<'_> {
-        &self.nodes[usize::from(item)].style
-    }
-}
-
-impl LayoutState for TestSession {
-    fn set_unrounded_layout(&mut self, node: NodeId, layout: &Layout) {
-        self.layout_writes += 1;
-        self.nodes[usize::from(node)].layout = *layout;
-    }
-
-    fn set_static_position(&mut self, child: NodeId, static_position: Point<f32>) {
-        self.static_position_writes += 1;
-        self.nodes[usize::from(child)].static_position = Some(static_position);
-    }
-}
-
-impl CacheState for TestSession {
-    fn cache_get(&self, node: NodeId, input: LayoutInput) -> Option<LayoutOutput> {
-        self.caches.as_ref()?[usize::from(node)].get(input)
-    }
-
-    fn cache_store(&mut self, node: NodeId, input: LayoutInput, output: LayoutOutput) {
-        if let Some(caches) = &mut self.caches {
-            caches[usize::from(node)].store(input, output);
-        }
-    }
-
-    fn cache_clear(&mut self, node: NodeId) {
-        if let Some(caches) = &mut self.caches {
-            caches[usize::from(node)].clear();
-        }
-    }
-}
-
-impl RoundState for TestSession {
-    fn unrounded_layout(&self, node: NodeId) -> Layout {
-        self.nodes[usize::from(node)].layout
-    }
-
-    fn set_final_layout(&mut self, node: NodeId, layout: &Layout) {
-        self.nodes[usize::from(node)].final_layout = *layout;
-    }
-}
-
-impl LayoutSession<TestSource> for TestSession {
-    fn compute_child_layout(
-        &mut self,
-        source: &TestSource,
-        child: NodeId,
-        input: LayoutInput,
-    ) -> LayoutOutput {
-        self.child_layout_calls += 1;
-        let node = &source.nodes[usize::from(child)];
-        let display = node.display;
-
-        if node.style.box_generation_mode == BoxGenerationMode::None {
-            hide_subtree(source, self, child);
-            return LayoutOutput::HIDDEN;
-        }
-
-        let output =
-            compute_cached_layout(self, child, input, |session, child, input| match display {
-                TestDisplay::Flex => compute_flexbox_layout(source, session, child, input),
-                TestDisplay::Grid => compute_grid_layout(source, session, child, input),
-                TestDisplay::Linear => compute_linear_layout(source, session, child, input),
-                TestDisplay::Relative => compute_relative_layout(source, session, child, input),
-                TestDisplay::Leaf => {
-                    let style = &node.style;
-                    let measure = node.measure;
-                    let record_measure_inputs = session.record_measure_inputs;
-                    let leaf_measure_calls = &mut session.leaf_measure_calls;
-                    let session_node = &mut session.nodes[usize::from(child)];
-                    let measure_inputs = &mut session_node.measure_inputs;
-                    let measure_calls = &mut session_node.measure_calls;
-                    let mut measurer = FnLeafMeasurer::new(|measure_input| {
-                        *leaf_measure_calls += 1;
-                        if record_measure_inputs {
-                            measure_inputs.push(measure_input);
-                        }
-                        let (metrics, call) = measure.measure(measure_input);
-                        measure_calls.extend(call);
-                        metrics
-                    });
-                    compute_leaf_layout(
-                        input,
-                        style,
-                        |calc, basis| source.resolve_calc(calc, basis),
-                        &mut measurer,
-                    )
-                }
-            });
-        self.nodes[usize::from(child)].output = output;
-        output
+    pub(super) fn measure_inputs(&self, id: TestId) -> Vec<LeafMeasureInput> {
+        self.session_node(id).measure_inputs.borrow().clone()
     }
 }
 
 pub(super) fn fixed_leaf_style(width: f32, height: f32) -> TestStyle {
     TestStyle {
-        size: Size::new(Dimension::Length(width), Dimension::Length(height)),
-        flex_basis: Dimension::Length(width),
+        size: Size::new(size_px(width), size_px(height)),
+        flex_basis: basis_px(width),
         ..TestStyle::default()
     }
 }
 
-pub(super) fn fixed_leaf(tree: &mut TestTree, width: f32, height: f32) -> NodeId {
+pub(super) fn fixed_leaf(tree: &mut TestTree, width: f32, height: f32) -> TestId {
     tree.push_leaf(
         fixed_leaf_style(width, height),
         Size::new(width, height),
@@ -1166,34 +1517,33 @@ pub(super) fn fixed_leaf(tree: &mut TestTree, width: f32, height: f32) -> NodeId
     )
 }
 
-pub(super) fn flex_container(tree: &mut TestTree, style: TestStyle, children: &[NodeId]) -> NodeId {
+pub(super) fn flex_container(tree: &mut TestTree, style: TestStyle, children: &[TestId]) -> TestId {
     tree.push_flex(style, children.to_vec())
 }
 
 pub(super) fn relative_container(
     tree: &mut TestTree,
     style: TestStyle,
-    children: &[NodeId],
-) -> NodeId {
+    children: &[TestId],
+) -> TestId {
     tree.push_relative(style, children.to_vec())
 }
 
 pub(super) fn linear_container(
     tree: &mut TestTree,
     style: TestStyle,
-    children: &[NodeId],
-) -> NodeId {
+    children: &[TestId],
+) -> TestId {
     tree.push_linear(style, children.to_vec())
 }
 
 pub(super) fn perform_layout(
-    tree: &mut TestTree,
-    root: NodeId,
+    tree: &TestTree,
+    root: TestId,
     known_dimensions: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
 ) -> LayoutOutput {
-    tree.session.compute_child_layout(
-        &tree.source,
+    tree.compute_child_layout(
         root,
         LayoutInput::perform_layout(
             known_dimensions,
@@ -1204,8 +1554,8 @@ pub(super) fn perform_layout(
 }
 
 pub(super) fn definite_layout(
-    tree: &mut TestTree,
-    root: NodeId,
+    tree: &TestTree,
+    root: TestId,
     width: f32,
     height: f32,
 ) -> LayoutOutput {
@@ -1221,13 +1571,12 @@ pub(super) fn definite_layout(
 }
 
 pub(super) fn measure_layout(
-    tree: &mut TestTree,
-    root: NodeId,
+    tree: &TestTree,
+    root: TestId,
     known_dimensions: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
 ) -> LayoutOutput {
-    tree.session.compute_child_layout(
-        &tree.source,
+    tree.compute_child_layout(
         root,
         LayoutInput::compute_size(
             known_dimensions,

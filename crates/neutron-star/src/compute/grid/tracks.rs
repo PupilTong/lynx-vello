@@ -1,17 +1,20 @@
 //! Explicit-template expansion and implicit-track construction.
 //!
 //! This module keeps the sequence work at the edge of the Grid algorithm:
-//! borrowed host iterators are expanded once into compact, parallel vectors,
-//! then placement coordinates are mapped to concrete track sizing functions.
+//! the borrowed stylo track lists are expanded once into compact, parallel
+//! vectors of normalized [`TrackSizingFunction`]s, then placement
+//! coordinates are mapped to concrete track sizing functions. Line names
+//! carried by the stylo values are deliberately ignored — the engine is
+//! numeric-lines-only, as documented in the style protocol.
 
 // Track counts are bounded to 20,000, well inside f64's exact integer range.
 #![allow(clippy::cast_precision_loss)]
 
+use stylo::values::computed::{GridTemplateComponent, Length, LengthPercentage, TrackBreadth};
+use stylo::values::generics::grid::{RepeatCount, TrackListValue};
+
 use super::placement;
-use crate::style::{
-    CalcHandle, GridTemplateComponent, GridTemplateRepetition, LengthPercentage,
-    MaxTrackSizingFunction, MinTrackSizingFunction, RepetitionCount, TrackSizingFunction,
-};
+use super::types::TrackSizingFunction;
 
 /// Grid line coordinates are clamped to `[-10_000, 10_000]` by placement.
 /// The corresponding half-open track span can therefore contain 20,000
@@ -22,7 +25,7 @@ const GRID_LINE_LIMIT: i32 = 10_000;
 // still make the final materialized axis 20,000 tracks wide.
 const MAX_AXIS_TRACKS: usize = 10_000;
 /// Maximum number of tracks materialized after adding leading implicit
-/// tracks. Also bounds hostile/infinite host auto-track iterators.
+/// tracks. Also bounds hostile auto-track lists.
 pub(super) const MAX_MATERIALIZED_TRACKS: usize = 20_000;
 const AUTO_REPEAT_TRACK_FLOOR: f64 = 1.0;
 
@@ -41,64 +44,75 @@ struct AutoRepeat {
     len: usize,
 }
 
-/// Expands a borrowed template iterator into concrete tracks.
+/// Expands one `grid-template-rows`/`grid-template-columns` value into
+/// concrete tracks.
 ///
 /// CSS syntax permits at most one automatic repetition. Invalid host input
 /// containing more is handled deterministically by expanding later automatic
 /// repetitions once, which is also the indefinite-size fallback.
-pub(super) fn expand_template<I, R>(
-    components: I,
+/// `Subgrid`/`Masonry` cannot be produced by the lynx grammar and crash per
+/// the repo's let-it-crash policy.
+pub(super) fn expand_template(
+    template: &GridTemplateComponent,
     definite_or_max_inner_size: Option<f32>,
     minimum_inner_size: Option<f32>,
     gap: f32,
-    resolve_calc: &impl Fn(CalcHandle, f32) -> f32,
-) -> ExpandedTemplate
-where
-    I: Iterator<Item = GridTemplateComponent<R>>,
-    R: GridTemplateRepetition,
-{
+) -> ExpandedTemplate {
+    let list = match template {
+        GridTemplateComponent::None => {
+            return ExpandedTemplate::default();
+        }
+        GridTemplateComponent::TrackList(list) => list,
+        GridTemplateComponent::Subgrid(_) | GridTemplateComponent::Masonry => {
+            unreachable!("subgrid and masonry are not parseable under the lynx grammar")
+        }
+    };
+
     let mut tracks = Vec::new();
     let mut auto_fit = Vec::new();
     let mut auto_repeat = None;
 
-    // A direct protocol host can provide an unbounded iterator even though a
-    // parsed CSS track list is finite. Every valid component contributes at
-    // least one track, so inspecting more components than the UA track limit
-    // cannot affect a supported template. Capping both inspected components
-    // and emitted tracks also makes invalid infinite empty repetitions
-    // terminate deterministically.
-    let mut components = components.take(MAX_AXIS_TRACKS);
-    while tracks.len() < MAX_AXIS_TRACKS {
-        let Some(component) = components.next() else {
+    // Every valid component contributes at least one track, so both emitted
+    // tracks and per-repetition expansion are capped at the UA track limit;
+    // hostile fixed repetition counts terminate deterministically.
+    'components: for component in list.values.iter() {
+        if tracks.len() >= MAX_AXIS_TRACKS {
             break;
-        };
+        }
         match component {
-            GridTemplateComponent::Single(track) => {
-                push_track(&mut tracks, &mut auto_fit, track, false);
+            TrackListValue::TrackSize(size) => {
+                push_track(
+                    &mut tracks,
+                    &mut auto_fit,
+                    TrackSizingFunction::from_style(size),
+                    false,
+                );
             }
-            GridTemplateComponent::Repeat(repetition) => {
-                let count = repetition.count();
-                let repeated_tracks = repetition.tracks();
-                let repeated_len = repeated_tracks.len();
-                if repeated_len == 0 {
-                    continue;
+            TrackListValue::TrackRepeat(repetition) => {
+                let repeated = repetition
+                    .track_sizes
+                    .iter()
+                    .map(TrackSizingFunction::from_style)
+                    .collect::<Vec<_>>();
+                if repeated.is_empty() {
+                    continue 'components;
                 }
 
-                match count {
-                    RepetitionCount::Count(count) => {
-                        // A zero count cannot be produced by valid CSS, but
-                        // treating it as one keeps direct protocol hosts safe.
-                        let repetitions = usize::from(count.max(1));
-                        let requested = repeated_len.saturating_mul(repetitions);
+                match repetition.count {
+                    RepeatCount::Number(count) => {
+                        // Parsing clamps the count to >= 1; treating smaller
+                        // fabricated values as one keeps direct hosts safe.
+                        let repetitions = usize::try_from(count).unwrap_or(1).max(1);
+                        let requested = repeated.len().saturating_mul(repetitions);
                         let append = requested.min(MAX_AXIS_TRACKS - tracks.len());
-                        tracks.extend(repeated_tracks.cycle().take(append));
+                        tracks.extend(repeated.iter().cycle().take(append).cloned());
                         auto_fit.resize(tracks.len(), false);
                     }
-                    RepetitionCount::AutoFill | RepetitionCount::AutoFit => {
-                        let is_auto_fit = count == RepetitionCount::AutoFit;
+                    RepeatCount::AutoFill | RepeatCount::AutoFit => {
+                        let is_auto_fit = repetition.count == RepeatCount::AutoFit;
                         let start = tracks.len();
-                        let append = repeated_len.min(MAX_AXIS_TRACKS - start);
-                        tracks.extend(repeated_tracks.take(append));
+                        let append = repeated.len().min(MAX_AXIS_TRACKS - start);
+                        tracks.extend(repeated.into_iter().take(append));
                         auto_fit.resize(tracks.len(), is_auto_fit);
 
                         let group = AutoRepeat {
@@ -127,7 +141,6 @@ where
         definite_or_max_inner_size,
         minimum_inner_size,
         gap,
-        resolve_calc,
     );
     if repetitions == 1 {
         return ExpandedTemplate { tracks, auto_fit };
@@ -182,7 +195,6 @@ fn automatic_repetition_count(
     definite_or_max_inner_size: Option<f32>,
     minimum_inner_size: Option<f32>,
     gap: f32,
-    resolve_calc: &impl Fn(CalcHandle, f32) -> f32,
 ) -> usize {
     let (basis, fulfill_minimum) =
         if let Some(value) = definite_or_max_inner_size.filter(|value| value.is_finite()) {
@@ -200,7 +212,7 @@ fn automatic_repetition_count(
     let mut repeated_tracks_size = 0.0;
     let group_end = group.start + group.len;
     for (index, track) in tracks.iter().enumerate() {
-        let Some(size) = definite_repeat_breadth(*track, basis, resolve_calc) else {
+        let Some(size) = definite_repeat_breadth(track, basis) else {
             // If even one track has no definite counting breadth, the auto
             // repetition is required to occur exactly once.
             return 1;
@@ -247,24 +259,22 @@ fn automatic_repetition_count(
 /// The definite maximum is preferred; a definite minimum is the fallback,
 /// and floors the maximum when both are definite.
 #[inline]
-fn definite_repeat_breadth(
-    track: TrackSizingFunction,
-    basis: f32,
-    resolve_calc: &impl Fn(CalcHandle, f32) -> f32,
-) -> Option<f64> {
-    let minimum = match track.min {
-        MinTrackSizingFunction::Fixed(value) => resolve_fixed_breadth(value, basis, resolve_calc),
-        MinTrackSizingFunction::MinContent
-        | MinTrackSizingFunction::MaxContent
-        | MinTrackSizingFunction::Auto => None,
+fn definite_repeat_breadth(track: &TrackSizingFunction, basis: f32) -> Option<f64> {
+    let minimum = match &track.min {
+        TrackBreadth::Breadth(value) => resolve_fixed_breadth(value, basis),
+        TrackBreadth::MinContent
+        | TrackBreadth::MaxContent
+        | TrackBreadth::Auto
+        | TrackBreadth::Flex(_) => None,
     };
-    let maximum = match track.max {
-        MaxTrackSizingFunction::Fixed(value) => resolve_fixed_breadth(value, basis, resolve_calc),
-        MaxTrackSizingFunction::MinContent
-        | MaxTrackSizingFunction::MaxContent
-        | MaxTrackSizingFunction::Auto
-        | MaxTrackSizingFunction::Fr(_)
-        | MaxTrackSizingFunction::FitContent(_) => None,
+    // A `fit-content()` maximum is normalized to `MaxContent`, so it is
+    // correctly indefinite here.
+    let maximum = match &track.max {
+        TrackBreadth::Breadth(value) => resolve_fixed_breadth(value, basis),
+        TrackBreadth::MinContent
+        | TrackBreadth::MaxContent
+        | TrackBreadth::Auto
+        | TrackBreadth::Flex(_) => None,
     };
 
     match (minimum, maximum) {
@@ -276,17 +286,10 @@ fn definite_repeat_breadth(
 }
 
 #[inline]
-fn resolve_fixed_breadth(
-    breadth: LengthPercentage,
-    basis: f32,
-    resolve_calc: &impl Fn(CalcHandle, f32) -> f32,
-) -> Option<f64> {
-    let value = match breadth {
-        LengthPercentage::Length(value) => value,
-        LengthPercentage::Percent(fraction) => basis * fraction,
-        LengthPercentage::Calc(handle) => resolve_calc(handle, basis),
-    };
-    finite_non_negative(value)
+fn resolve_fixed_breadth(breadth: &LengthPercentage, basis: f32) -> Option<f64> {
+    // The counting basis is always definite here, so percentages (and calc
+    // trees) resolve directly.
+    finite_non_negative(breadth.resolve(Length::new(basis)).px())
 }
 
 #[inline]
@@ -295,7 +298,7 @@ fn finite_non_negative(value: f32) -> Option<f64> {
 }
 
 /// One concrete track spanning `coordinate..coordinate + 1`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(super) struct AxisTrackSpec {
     pub(super) coordinate: i32,
     pub(super) sizing: TrackSizingFunction,
@@ -328,7 +331,7 @@ pub(super) fn build_axis_tracks(
             .filter(|&index| index < explicit_len);
         let (sizing, is_auto_fit) = if let Some(index) = explicit_index {
             (
-                explicit.tracks[index],
+                explicit.tracks[index].clone(),
                 explicit.auto_fit.get(index).copied().unwrap_or(false),
             )
         } else {
@@ -371,63 +374,102 @@ fn implicit_track(
         (coordinate - i64::try_from(explicit_len).expect("track count fits in i64"))
             .rem_euclid(pattern_len)
     };
-    auto_tracks[usize::try_from(index).expect("Euclidean remainder is non-negative")]
+    auto_tracks[usize::try_from(index).expect("Euclidean remainder is non-negative")].clone()
 }
 
 #[cfg(test)]
 mod tests {
+    use style_traits::values::specified::AllowedNumericType;
+    use stylo::Zero;
+    use stylo::values::computed::length_percentage::{CalcNode, ComputedLeaf};
+    use stylo::values::computed::{Integer, Percentage, TrackList, TrackSize};
+    use stylo::values::generics::grid::{Flex, TrackRepeat};
+
     use super::*;
 
-    #[derive(Debug)]
-    struct Repetition {
-        count: RepetitionCount,
-        tracks: Vec<TrackSizingFunction>,
+    fn lp_px(value: f32) -> LengthPercentage {
+        LengthPercentage::new_length(Length::new(value))
     }
 
-    impl GridTemplateRepetition for Repetition {
-        type Tracks<'a>
-            = core::iter::Copied<core::slice::Iter<'a, TrackSizingFunction>>
-        where
-            Self: 'a;
+    fn px_size(value: f32) -> TrackSize {
+        TrackSize::Breadth(TrackBreadth::Breadth(lp_px(value)))
+    }
 
-        fn count(&self) -> RepetitionCount {
-            self.count
-        }
+    fn minmax(min: TrackBreadth, max: TrackBreadth) -> TrackSize {
+        TrackSize::Minmax(min, max)
+    }
 
-        fn tracks(&self) -> Self::Tracks<'_> {
-            self.tracks.iter().copied()
-        }
+    fn repeat(
+        count: RepeatCount<Integer>,
+        sizes: Vec<TrackSize>,
+    ) -> TrackListValue<LengthPercentage, Integer> {
+        TrackListValue::TrackRepeat(TrackRepeat {
+            count,
+            line_names: vec![stylo::OwnedSlice::default(); sizes.len() + 1].into(),
+            track_sizes: sizes.into(),
+        })
+    }
+
+    fn template(values: Vec<TrackListValue<LengthPercentage, Integer>>) -> GridTemplateComponent {
+        let auto_repeat_index = values
+            .iter()
+            .position(|value| {
+                matches!(
+                    value,
+                    TrackListValue::TrackRepeat(repetition)
+                        if matches!(repetition.count, RepeatCount::AutoFill | RepeatCount::AutoFit)
+                )
+            })
+            .unwrap_or(usize::MAX);
+        GridTemplateComponent::TrackList(Box::new(TrackList {
+            auto_repeat_index,
+            line_names: vec![stylo::OwnedSlice::default(); values.len() + 1].into(),
+            values: values.into(),
+        }))
     }
 
     fn px(value: f32) -> TrackSizingFunction {
-        TrackSizingFunction::fixed(LengthPercentage::length(value))
+        TrackSizingFunction::from_style(&px_size(value))
     }
 
-    fn no_calc(_handle: CalcHandle, _basis: f32) -> f32 {
-        unreachable!("test track has no calc() value")
+    #[test]
+    fn normalization_expands_the_single_value_forms() {
+        let fr =
+            TrackSizingFunction::from_style(&TrackSize::Breadth(TrackBreadth::Flex(Flex(2.0))));
+        assert_eq!(fr.min, TrackBreadth::Auto);
+        assert_eq!(fr.max, TrackBreadth::Flex(Flex(2.0)));
+        assert_eq!(fr.fit_content, None);
+
+        let fit = TrackSizingFunction::from_style(&TrackSize::FitContent(TrackBreadth::Breadth(
+            lp_px(40.0),
+        )));
+        assert_eq!(fit.min, TrackBreadth::Auto);
+        assert_eq!(fit.max, TrackBreadth::MaxContent);
+        assert_eq!(fit.fit_content, Some(lp_px(40.0)));
+
+        let fixed = px(10.0);
+        assert_eq!(fixed.min, TrackBreadth::Breadth(lp_px(10.0)));
+        assert_eq!(fixed.max, TrackBreadth::Breadth(lp_px(10.0)));
+    }
+
+    #[test]
+    fn none_template_expands_to_no_tracks() {
+        let expanded = expand_template(&GridTemplateComponent::None, Some(100.0), None, 0.0);
+        assert!(expanded.tracks.is_empty());
+        assert!(expanded.auto_fit.is_empty());
     }
 
     #[test]
     fn fixed_repeat_expands_in_source_order() {
-        let repeated = Repetition {
-            count: RepetitionCount::Count(3),
-            tracks: vec![px(20.0), px(30.0)],
-        };
-        let template = expand_template(
-            vec![
-                GridTemplateComponent::Single(px(10.0)),
-                GridTemplateComponent::Repeat(&repeated),
-                GridTemplateComponent::Single(px(40.0)),
-            ]
-            .into_iter(),
-            Some(500.0),
-            None,
-            0.0,
-            &no_calc,
-        );
+        let value = template(vec![
+            TrackListValue::TrackSize(px_size(10.0)),
+            repeat(RepeatCount::Number(3), vec![px_size(20.0), px_size(30.0)]),
+            TrackListValue::TrackSize(px_size(40.0)),
+        ]);
+        let expanded = expand_template(&value, Some(500.0), None, 0.0);
 
         assert_eq!(
-            template.tracks,
+            expanded.tracks,
             vec![
                 px(10.0),
                 px(20.0),
@@ -439,148 +481,101 @@ mod tests {
                 px(40.0),
             ]
         );
-        assert_eq!(template.auto_fit, vec![false; 8]);
+        assert_eq!(expanded.auto_fit, vec![false; 8]);
     }
 
     #[test]
     fn auto_fill_counts_all_tracks_and_gaps() {
-        let repeated = Repetition {
-            count: RepetitionCount::AutoFill,
-            tracks: vec![
-                TrackSizingFunction::minmax(
-                    MinTrackSizingFunction::Fixed(LengthPercentage::length(20.0)),
-                    MaxTrackSizingFunction::Fixed(LengthPercentage::length(40.0)),
-                ),
-                px(10.0),
-            ],
-        };
-        let template = expand_template(
-            vec![
-                GridTemplateComponent::Single(px(50.0)),
-                GridTemplateComponent::Repeat(&repeated),
-                GridTemplateComponent::Single(px(30.0)),
-            ]
-            .into_iter(),
-            Some(265.0),
-            None,
-            5.0,
-            &no_calc,
-        );
+        let value = template(vec![
+            TrackListValue::TrackSize(px_size(50.0)),
+            repeat(
+                RepeatCount::AutoFill,
+                vec![
+                    minmax(
+                        TrackBreadth::Breadth(lp_px(20.0)),
+                        TrackBreadth::Breadth(lp_px(40.0)),
+                    ),
+                    px_size(10.0),
+                ],
+            ),
+            TrackListValue::TrackSize(px_size(30.0)),
+        ]);
+        let expanded = expand_template(&value, Some(265.0), None, 5.0);
 
-        assert_eq!(template.tracks.len(), 8);
-        assert_eq!(template.tracks[0], px(50.0));
-        assert_eq!(template.tracks[7], px(30.0));
-        assert!(template.auto_fit.iter().all(|is_auto_fit| !is_auto_fit));
+        assert_eq!(expanded.tracks.len(), 8);
+        assert_eq!(expanded.tracks[0], px(50.0));
+        assert_eq!(expanded.tracks[7], px(30.0));
+        assert!(expanded.auto_fit.iter().all(|is_auto_fit| !is_auto_fit));
     }
 
     #[test]
     fn auto_repeat_uses_one_pixel_floor_and_one_indefinite_fallback() {
-        let repeated = Repetition {
-            count: RepetitionCount::AutoFit,
-            tracks: vec![TrackSizingFunction::minmax(
-                MinTrackSizingFunction::Fixed(LengthPercentage::ZERO),
-                MaxTrackSizingFunction::Fr(1.0),
+        let value = template(vec![repeat(
+            RepeatCount::AutoFit,
+            vec![minmax(
+                TrackBreadth::Breadth(LengthPercentage::zero()),
+                TrackBreadth::Flex(Flex(1.0)),
             )],
-        };
+        )]);
 
-        let definite = expand_template(
-            core::iter::once(GridTemplateComponent::Repeat(&repeated)),
-            Some(3.0),
-            None,
-            0.0,
-            &no_calc,
-        );
+        let definite = expand_template(&value, Some(3.0), None, 0.0);
         assert_eq!(definite.tracks.len(), 3);
         assert_eq!(definite.auto_fit, vec![true; 3]);
 
-        let indefinite = expand_template(
-            core::iter::once(GridTemplateComponent::Repeat(&repeated)),
-            None,
-            None,
-            0.0,
-            &no_calc,
-        );
+        let indefinite = expand_template(&value, None, None, 0.0);
         assert_eq!(indefinite.tracks.len(), 1);
         assert_eq!(indefinite.auto_fit, vec![true]);
     }
 
     #[test]
     fn auto_repeat_resolves_percent_and_calc_and_floors_max_by_min() {
-        let repeated = Repetition {
-            count: RepetitionCount::AutoFill,
-            tracks: vec![TrackSizingFunction::minmax(
-                MinTrackSizingFunction::Fixed(LengthPercentage::percent(0.3)),
-                MaxTrackSizingFunction::Fixed(LengthPercentage::Calc(CalcHandle::from_raw(7))),
-            )],
-        };
-        let resolve = |handle: CalcHandle, basis: f32| {
-            assert_eq!(handle.raw(), 7);
-            basis * 0.2
-        };
-        let template = expand_template(
-            core::iter::once(GridTemplateComponent::Repeat(&repeated)),
-            Some(100.0),
-            None,
-            0.0,
-            &resolve,
+        // calc(10% + 10px) at basis 100 resolves to 20; the 30% minimum
+        // floors it, hence three repetitions fit a 100px axis.
+        let calc = LengthPercentage::new_calc(
+            CalcNode::Sum(
+                vec![
+                    CalcNode::Leaf(ComputedLeaf::Percentage(Percentage(0.1))),
+                    CalcNode::Leaf(ComputedLeaf::Length(Length::new(10.0))),
+                ]
+                .into(),
+            ),
+            AllowedNumericType::All,
         );
+        let value = template(vec![repeat(
+            RepeatCount::AutoFill,
+            vec![minmax(
+                TrackBreadth::Breadth(LengthPercentage::new_percent(Percentage(0.3))),
+                TrackBreadth::Breadth(calc),
+            )],
+        )]);
+        let expanded = expand_template(&value, Some(100.0), None, 0.0);
 
-        // max=20px is floored by min=30px, hence three repetitions.
-        assert_eq!(template.tracks.len(), 3);
+        assert_eq!(expanded.tracks.len(), 3);
     }
 
     #[test]
     fn expansion_is_clamped_without_count_overflow() {
-        let repeated = Repetition {
-            count: RepetitionCount::Count(u16::MAX),
-            tracks: vec![px(1.0), px(2.0)],
-        };
-        let template = expand_template(
-            core::iter::once(GridTemplateComponent::Repeat(&repeated)),
-            Some(f32::MAX),
-            None,
-            0.0,
-            &no_calc,
-        );
+        let value = template(vec![repeat(
+            RepeatCount::Number(i32::MAX),
+            vec![px_size(1.0), px_size(2.0)],
+        )]);
+        let expanded = expand_template(&value, Some(f32::MAX), None, 0.0);
 
-        assert_eq!(template.tracks.len(), MAX_AXIS_TRACKS);
-        assert_eq!(template.auto_fit.len(), MAX_AXIS_TRACKS);
-        assert_eq!(template.tracks[MAX_AXIS_TRACKS - 2], px(1.0));
-        assert_eq!(template.tracks[MAX_AXIS_TRACKS - 1], px(2.0));
+        assert_eq!(expanded.tracks.len(), MAX_AXIS_TRACKS);
+        assert_eq!(expanded.auto_fit.len(), MAX_AXIS_TRACKS);
+        assert_eq!(expanded.tracks[MAX_AXIS_TRACKS - 2], px(1.0));
+        assert_eq!(expanded.tracks[MAX_AXIS_TRACKS - 1], px(2.0));
     }
 
     #[test]
-    fn infinite_single_track_components_stop_at_the_axis_limit() {
-        let mut yielded = 0;
-        let components = core::iter::from_fn(|| {
-            yielded += 1;
-            Some(GridTemplateComponent::<Repetition>::Single(px(1.0)))
-        });
+    fn empty_repetitions_are_skipped() {
+        let value = template(vec![
+            repeat(RepeatCount::Number(7), Vec::new()),
+            TrackListValue::TrackSize(px_size(10.0)),
+        ]);
+        let expanded = expand_template(&value, None, None, 0.0);
 
-        let template = expand_template(components, None, None, 0.0, &no_calc);
-
-        assert_eq!(yielded, MAX_AXIS_TRACKS);
-        assert_eq!(template.tracks.len(), MAX_AXIS_TRACKS);
-        assert_eq!(template.auto_fit.len(), MAX_AXIS_TRACKS);
-    }
-
-    #[test]
-    fn infinite_empty_repetitions_stop_at_the_component_limit() {
-        let repeated = Repetition {
-            count: RepetitionCount::Count(1),
-            tracks: Vec::new(),
-        };
-        let mut yielded = 0;
-        let components = core::iter::from_fn(|| {
-            yielded += 1;
-            Some(GridTemplateComponent::Repeat(&repeated))
-        });
-
-        let template = expand_template(components, None, None, 0.0, &no_calc);
-
-        assert_eq!(yielded, MAX_AXIS_TRACKS);
-        assert!(template.tracks.is_empty());
-        assert!(template.auto_fit.is_empty());
+        assert_eq!(expanded.tracks, vec![px(10.0)]);
     }
 
     #[test]
@@ -603,7 +598,10 @@ mod tests {
             vec![-3, -2, -1, 0, 1, 2, 3, 4]
         );
         assert_eq!(
-            tracks.iter().map(|track| track.sizing).collect::<Vec<_>>(),
+            tracks
+                .iter()
+                .map(|track| track.sizing.clone())
+                .collect::<Vec<_>>(),
             vec![
                 px(1.0),
                 px(2.0),

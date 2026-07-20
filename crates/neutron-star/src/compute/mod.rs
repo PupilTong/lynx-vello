@@ -1,13 +1,14 @@
-//! Protocol machinery entry points — free generic functions over an immutable
-//! layout source and separate mutable session/state traits.
+//! Protocol machinery entry points — free generic functions over
+//! [`LayoutNode`] handles.
 //!
 //! There is deliberately no engine object: everything callable is a function
 //! so that hosts compose them freely inside their
-//! [`compute_child_layout`](crate::tree::LayoutSession::compute_child_layout)
+//! [`compute_child_layout`](crate::tree::LayoutNode::compute_child_layout)
 //! dispatch, and so that unused entry points (and their monomorphizations)
-//! never exist in the host's binary. Keeping the arguments separate is
-//! intentional: style and topology views borrowed from the source remain
-//! valid while recursive layout mutates only the session.
+//! never exist in the host's binary. Every function takes the node it
+//! operates on as a `Copy` handle; mutation flows through the handle into
+//! host-owned interior-mutable per-node slots, so borrowed style views stay
+//! valid across recursive child layout.
 //!
 //! This module contains the generic machinery (root entry, cache wrapper,
 //! hidden-subtree zeroing, leaf boxing, the positioned pass, rounding) and the
@@ -16,19 +17,21 @@
 //!
 //! # The canonical dispatch skeleton
 //!
-//! Every host implements the same shape once; this is the whole integration
+//! Every host implements the same shape once inside its
+//! [`LayoutNode::compute_child_layout`]; this is the whole integration
 //! surface of the engine (a host with additional layout modes adds arms that
 //! call its own algorithms):
 //!
 //! ```
 //! use neutron_star::compute::{
-//!     compute_cached_layout, compute_flexbox_layout, compute_grid_layout,
-//!     compute_linear_layout, compute_relative_layout, hide_subtree,
+//!     compute_cached_layout, compute_flexbox_layout, compute_grid_layout, compute_linear_layout,
+//!     compute_relative_layout, hide_subtree,
 //! };
-//! use neutron_star::tree::{
-//!     FlexSource, GridSource, LayoutInput, LayoutOutput, LayoutSession, LayoutSource,
-//!     LinearSource, NodeId, RelativeSource,
+//! use neutron_star::style::{
+//!     FlexContainerStyle, FlexItemStyle, GridContainerStyle, GridItemStyle, LinearContainerStyle,
+//!     LinearItemStyle, RelativeContainerStyle, RelativeItemStyle,
 //! };
+//! use neutron_star::tree::{LayoutInput, LayoutNode, LayoutOutput};
 //!
 //! # #[derive(Clone, Copy)]
 //! enum Display {
@@ -39,42 +42,44 @@
 //!     Hidden,
 //! }
 //!
-//! fn dispatch<Source, Session>(
-//!     source: &Source,
-//!     session: &mut Session,
-//!     node: NodeId,
-//!     input: LayoutInput,
-//! ) -> LayoutOutput
+//! fn dispatch<N>(node: N, input: LayoutInput) -> LayoutOutput
 //! where
-//!     Source: FlexSource + GridSource + LinearSource + RelativeSource,
-//!     Session: LayoutSession<Source>,
+//!     N: LayoutNode,
+//!     N::Style: FlexContainerStyle
+//!         + FlexItemStyle
+//!         + GridContainerStyle
+//!         + GridItemStyle
+//!         + LinearContainerStyle
+//!         + LinearItemStyle
+//!         + RelativeContainerStyle
+//!         + RelativeItemStyle,
 //! {
-//!     let display = host_display_of(source, node);
+//!     let display = host_display_of(node);
 //!     if let Display::Hidden = display {
 //!         // Hidden mutation must precede the cache wrapper: caching HIDDEN as
 //!         // a committed result would suppress geometry when the node reappears.
-//!         hide_subtree(source, session, node);
+//!         hide_subtree(node);
 //!         return LayoutOutput::HIDDEN;
 //!     }
 //!
-//!     compute_cached_layout(session, node, input, |session, node, input| {
+//!     compute_cached_layout(node, input, |node, input| {
 //!         match display {
 //!             Display::Hidden => unreachable!(),
-//!             Display::Flex => compute_flexbox_layout(source, session, node, input),
-//!             Display::Grid => compute_grid_layout(source, session, node, input),
-//!             Display::Linear => compute_linear_layout(source, session, node, input),
-//!             Display::Relative => compute_relative_layout(source, session, node, input),
-//!             // host: Display::Leaf => compute_leaf_layout(input, &style, resolve, &mut measurer),
+//!             Display::Flex => compute_flexbox_layout(node, input),
+//!             Display::Grid => compute_grid_layout(node, input),
+//!             Display::Linear => compute_linear_layout(node, input),
+//!             Display::Relative => compute_relative_layout(node, input),
+//!             // host: Display::Leaf => compute_leaf_layout(input, &style, &mut measurer),
 //!         }
 //!     })
 //! }
-//! # fn host_display_of<T>(_: &T, _: NodeId) -> Display { Display::Flex }
+//! # fn host_display_of<N>(_: N) -> Display { Display::Flex }
 //! ```
 //!
-//! The host's `LayoutSession::compute_child_layout` implementation simply
-//! calls its `dispatch`. Algorithms call back into `compute_child_layout` for
-//! each child, so the same routing (and the same cache) applies at every level
-//! of the tree.
+//! The host's `LayoutNode::compute_child_layout` implementation simply calls
+//! its `dispatch`. Algorithms call back into `compute_child_layout` for each
+//! child, so the same routing (and the same cache) applies at every level of
+//! the tree.
 //!
 //! # Pass structure
 //!
@@ -82,7 +87,7 @@
 //!
 //! 1. [`compute_root_layout`] — in-flow layout of the whole (dirty part of the) tree in unrounded
 //!    CSS pixels. Out-of-flow nodes whose containing block is not their formatting parent
-//!    ([`Position::AbsoluteHoisted`](crate::style::Position)) only get their static positions
+//!    ([`PositionProperty::Fixed`](crate::style::PositionProperty)) only get their static positions
 //!    recorded here.
 //! 2. [`compute_absolute_layout`] — the positioned pass: once per hoisted node, against its real
 //!    containing block.
@@ -104,16 +109,18 @@ pub use leaf::{
 };
 pub use linear::compute_linear_layout;
 pub use relative::compute_relative_layout;
+use stylo::computed_values::direction;
+use stylo::values::computed::{Margin, Size as StyleSize};
 
 use self::util::{
-    apply_box_sizing, auto_edges_to_zero, clamp, resolve_edges, resolve_insets,
-    resolve_length_percentage, resolve_optional_edges, resolve_size, scrollbar_size,
+    apply_box_sizing, auto_edges_to_zero, clamp, resolve_border, resolve_insets,
+    resolve_length_percentage, resolve_margins, resolve_max_sizes, resolve_padding, resolve_size,
+    used_aspect_ratio,
 };
 use crate::geometry::{Edges, Point, Size};
-use crate::style::{BoxGenerationMode, CoreStyle, Dimension, Direction};
+use crate::style::CoreStyle;
 use crate::tree::{
-    AvailableSpace, CacheState, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutSession,
-    LayoutSource, LayoutState, NodeId, RequestedAxis, RoundState, TraverseTree,
+    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
 };
 
 /// Lays out the tree under `root` into `available_space`.
@@ -122,48 +129,38 @@ use crate::tree::{
 /// [`LayoutInput`] ([`LayoutGoal::Commit`],
 /// no known dimensions, `parent_size` from
 /// the definite parts of `available_space`), routes it through
-/// [`compute_child_layout`](LayoutSession::compute_child_layout) — so the root
+/// [`compute_child_layout`](LayoutNode::compute_child_layout) — so the root
 /// dispatches like any other node — resolves the root's own margins, and
 /// stores the root's [`Layout`] (at location `(0, 0)`
 /// plus resolved margins) via
-/// [`set_unrounded_layout`](LayoutState::set_unrounded_layout).
+/// [`set_unrounded_layout`](LayoutNode::set_unrounded_layout).
 ///
 /// Incrementality: this walks — and pays for — only what caches miss. For a
-/// clean subtree the recursion is answered from [`CacheState`] storage at its
-/// root.
-pub fn compute_root_layout<Source, Session>(
-    source: &Source,
-    session: &mut Session,
-    root: NodeId,
-    available_space: Size<AvailableSpace>,
-) where
-    Source: LayoutSource,
-    Session: LayoutSession<Source>,
-{
+/// clean subtree the recursion is answered from the host's cache slots at
+/// its root.
+pub fn compute_root_layout<N: LayoutNode>(root: N, available_space: Size<AvailableSpace>) {
     let parent_size = available_space.into_options();
-    let output = session.compute_child_layout(
-        source,
-        root,
-        LayoutInput::perform_layout(Size::NONE, parent_size, available_space),
-    );
+    let output = root.compute_child_layout(LayoutInput::perform_layout(
+        Size::NONE,
+        parent_size,
+        available_space,
+    ));
 
-    let style = source.core_style(root);
-    let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
+    let style = root.style();
     let margin_value = style.margin();
-    let optional_margin = resolve_optional_edges(margin_value, parent_size.width, &resolve_calc);
-    let hidden = style.box_generation_mode() == BoxGenerationMode::None;
+    let optional_margin = resolve_margins(margin_value, parent_size.width);
+    let hidden = style.display().is_none();
     let margin = resolve_root_margins(
         optional_margin,
-        margin_value.map(crate::style::LengthPercentageAuto::is_auto),
+        margin_value.map(Margin::is_auto),
         available_space.width,
         output.size.width,
     );
-    let padding = resolve_edges(style.padding(), parent_size.width, &resolve_calc);
-    let border = resolve_edges(style.border(), parent_size.width, &resolve_calc);
-    let scrollbar_size = scrollbar_size(&style);
+    let padding = resolve_padding(style.padding(), parent_size.width);
+    let border = resolve_border(&style.border());
 
     if hidden {
-        session.set_unrounded_layout(root, &Layout::default());
+        root.set_unrounded_layout(&Layout::default());
         return;
     }
 
@@ -171,11 +168,10 @@ pub fn compute_root_layout<Source, Session>(
     layout.location = Point::new(margin.left, margin.top);
     layout.size = output.size;
     layout.content_size = output.content_size;
-    layout.scrollbar_size = scrollbar_size;
     layout.border = border;
     layout.padding = padding;
     layout.margin = margin;
-    session.set_unrounded_layout(root, &layout);
+    root.set_unrounded_layout(&layout);
 }
 
 fn resolve_root_margins(
@@ -216,8 +212,8 @@ fn resolve_root_margins(
 /// After handling `display: none` with [`hide_subtree`], the host calls this
 /// at the top of its visible-node dispatch (see the module docs);
 /// `compute_uncached` is the actual routing closure. The **complete
-/// `input` is the cache key** — it is passed through to
-/// [`CacheState`] unmodified, so no result-affecting
+/// `input` is the cache key** — it is passed through to the node's cache
+/// slots unmodified, so no result-affecting
 /// field (`goal`, `sizing_mode`, `parent_size`, …) can alias. On
 /// a usable cached entry (matching per the [`cache`](crate::cache) module's
 /// contract) the closure is skipped entirely; otherwise its result is
@@ -226,22 +222,21 @@ fn resolve_root_margins(
 /// Hidden nodes must never enter this wrapper: [`hide_subtree`] invalidates
 /// their cache before zeroing geometry, whereas storing
 /// [`LayoutOutput::HIDDEN`] as a committed answer would undo that invariant.
-pub fn compute_cached_layout<State, ComputeFn>(
-    state: &mut State,
-    node: NodeId,
+pub fn compute_cached_layout<N, ComputeFn>(
+    node: N,
     input: LayoutInput,
     compute_uncached: ComputeFn,
 ) -> LayoutOutput
 where
-    State: CacheState,
-    ComputeFn: FnOnce(&mut State, NodeId, LayoutInput) -> LayoutOutput,
+    N: LayoutNode,
+    ComputeFn: FnOnce(N, LayoutInput) -> LayoutOutput,
 {
-    if let Some(output) = state.cache_get(node, input) {
+    if let Some(output) = node.cache_get(input) {
         return output;
     }
 
-    let output = compute_uncached(state, node, input);
-    state.cache_store(node, input, output);
+    let output = compute_uncached(node, input);
+    node.cache_store(input, output);
     output
 }
 
@@ -249,36 +244,30 @@ where
 ///
 /// Recurses directly through tree children, storing an all-zero [`Layout`] for
 /// every visited node so previously-laid-out geometry cannot leak from a
-/// subtree that just became hidden. Every node is first passed to
-/// [`CacheState::cache_clear`], preventing a later cache hit from
-/// restoring only a revealed subtree's root while its descendants stay
+/// subtree that just became hidden. Every node is first
+/// [`cache_clear`](LayoutNode::cache_clear)ed, preventing a later cache hit
+/// from restoring only a revealed subtree's root while its descendants stay
 /// zeroed.
 ///
 /// Host dispatch must call this command **before** [`compute_cached_layout`]
 /// and then return [`LayoutOutput::HIDDEN`] itself.
-pub fn hide_subtree<Source, State>(source: &Source, state: &mut State, node: NodeId)
-where
-    Source: TraverseTree,
-    State: LayoutState + CacheState,
-{
-    state.cache_clear(node);
+pub fn hide_subtree<N: LayoutNode>(node: N) {
+    node.cache_clear();
     let hidden_layout = Layout::with_order(0);
-    state.set_unrounded_layout(node, &hidden_layout);
+    node.set_unrounded_layout(&hidden_layout);
 
-    let child_count = source.child_count(node);
-    for index in 0..child_count {
-        let child = source.child_id(node, index);
-        hide_subtree(source, state, child);
+    for child in node.children() {
+        hide_subtree(child);
     }
 }
 
 /// Sizes and positions one out-of-flow node against its containing block —
 /// the host-driven **positioned pass** for
-/// [`Position::AbsoluteHoisted`](crate::style::Position) nodes.
+/// [`PositionProperty::Fixed`](crate::style::PositionProperty) nodes.
 ///
 /// Runs after in-flow layout. The node's formatting parent computed and
 /// recorded the node's static position
-/// ([`set_static_position`](LayoutState::set_static_position)) but did not
+/// ([`set_static_position`](LayoutNode::set_static_position)) but did not
 /// size or place it. The host resolves which node is the containing block
 /// (for Lynx `fixed`: the viewport root, or the nearest
 /// transformed/filtered ancestor per the W3C rule), converts the recorded
@@ -292,32 +281,24 @@ where
 ///   whose insets are both `auto` (CSS Position / Flexbox §4.1 / Grid §10.2 semantics).
 ///
 /// The node's subtree is laid out normally through
-/// [`compute_child_layout`](LayoutSession::compute_child_layout) (descendants
+/// [`compute_child_layout`](LayoutNode::compute_child_layout) (descendants
 /// store parent-relative layouts as usual, with normal caching). The node's
 /// **own** layout is *returned, not stored*: its `location` is relative to
 /// the containing block's **padding box**, which is generally not the
 /// node's tree parent — the host converts it into formatting-parent space
 /// and stores it via
-/// [`set_unrounded_layout`](LayoutState::set_unrounded_layout), keeping
+/// [`set_unrounded_layout`](LayoutNode::set_unrounded_layout), keeping
 /// [`Layout::location`]'s parent-relative contract intact for rounding and
 /// painting. The returned [`Layout::order`] is zero; the host's positioned
 /// pass assigns the formatting parent's order-modified paint index when it
 /// stores a hoisted node.
 #[must_use = "the returned layout is in containing-block space; the host must convert and store it"]
-pub fn compute_absolute_layout<Source, Session>(
-    source: &Source,
-    session: &mut Session,
-    node: NodeId,
+pub fn compute_absolute_layout<N: LayoutNode>(
+    node: N,
     containing_block: Size<f32>,
     static_position: Point<f32>,
-) -> Layout
-where
-    Source: LayoutSource,
-    Session: LayoutSession<Source>,
-{
+) -> Layout {
     absolute_layout(
-        source,
-        session,
         node,
         containing_block,
         move |_, _| static_position,
@@ -327,26 +308,16 @@ where
 
 /// Commits one out-of-flow child while deriving its static position from the
 /// resolved border-box size and used margins.
-pub(super) fn compute_absolute_layout_with_static_position<Source, Session, StaticPosition>(
-    source: &Source,
-    session: &mut Session,
-    node: NodeId,
+pub(super) fn compute_absolute_layout_with_static_position<N, StaticPosition>(
+    node: N,
     containing_block: Size<f32>,
     static_position: StaticPosition,
 ) -> Layout
 where
-    Source: LayoutSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
     StaticPosition: FnOnce(Size<f32>, Edges<f32>) -> Point<f32>,
 {
-    absolute_layout(
-        source,
-        session,
-        node,
-        containing_block,
-        static_position,
-        LayoutGoal::Commit,
-    )
+    absolute_layout(node, containing_block, static_position, LayoutGoal::Commit)
 }
 
 /// Measures an out-of-flow node with the same inset, automatic-size,
@@ -360,20 +331,12 @@ where
 /// static position for the later positioned pass. No durable child geometry
 /// is written by this measurement.
 #[must_use]
-pub(super) fn measure_absolute_layout<Source, Session>(
-    source: &Source,
-    session: &mut Session,
-    node: NodeId,
+pub(super) fn measure_absolute_layout<N: LayoutNode>(
+    node: N,
     containing_block: Size<f32>,
     requested_axis: RequestedAxis,
-) -> Layout
-where
-    Source: LayoutSource,
-    Session: LayoutSession<Source>,
-{
+) -> Layout {
     absolute_layout(
-        source,
-        session,
         node,
         containing_block,
         |_, _| Point::ZERO,
@@ -381,17 +344,14 @@ where
     )
 }
 
-fn absolute_layout<Source, Session, StaticPosition>(
-    source: &Source,
-    session: &mut Session,
-    node: NodeId,
+fn absolute_layout<N, StaticPosition>(
+    node: N,
     containing_block: Size<f32>,
     static_position: StaticPosition,
     goal: LayoutGoal,
 ) -> Layout
 where
-    Source: LayoutSource,
-    Session: LayoutSession<Source>,
+    N: LayoutNode,
     StaticPosition: FnOnce(Size<f32>, Edges<f32>) -> Point<f32>,
 {
     debug_assert!(
@@ -402,13 +362,12 @@ where
         "containing-block sizes must be finite and non-negative"
     );
     let parent_size = Size::new(Some(containing_block.width), Some(containing_block.height));
-    let resolved_style = resolve_absolute_style(source, node, parent_size);
+    let resolved_style = resolve_absolute_style(node, parent_size);
     let ResolvedAbsoluteStyle {
         insets,
         optional_margin,
         padding,
         border,
-        scrollbar_size,
         preferred_available,
         direction,
         ..
@@ -443,7 +402,7 @@ where
             requested_axis,
         ),
     };
-    let output = session.compute_child_layout(source, node, child_input);
+    let output = node.compute_child_layout(child_input);
 
     let margin = resolve_absolute_margins(
         optional_margin,
@@ -466,7 +425,7 @@ where
             start_margin: margin.left,
             end_margin: margin.right,
             static_position: static_position.x,
-            prefer_end: direction == Direction::Rtl,
+            prefer_end: direction == direction::T::Rtl,
         }),
         absolute_axis_location(AbsoluteAxis {
             containing_size: containing_block.height,
@@ -484,7 +443,6 @@ where
     layout.location = location;
     layout.size = output.size;
     layout.content_size = output.content_size;
-    layout.scrollbar_size = scrollbar_size;
     layout.border = border;
     layout.padding = padding;
     layout.margin = margin;
@@ -499,7 +457,6 @@ struct ResolvedAbsoluteStyle {
     optional_margin: Edges<Option<f32>>,
     padding: Edges<f32>,
     border: Edges<f32>,
-    scrollbar_size: Size<f32>,
     /// Intrinsic preferred sizes must be measured in their own sizing mode;
     /// the inset-modified containing block is only the fallback available
     /// space for `auto`. A definite fit-content limit is retained here even
@@ -510,7 +467,7 @@ struct ResolvedAbsoluteStyle {
     min_size: Size<Option<f32>>,
     max_size: Size<Option<f32>>,
     aspect_ratio: Option<f32>,
-    direction: Direction,
+    direction: direction::T,
     padding_border_size: Size<f32>,
 }
 
@@ -554,68 +511,104 @@ fn absolute_known_dimensions(
     )
 }
 
-fn resolve_absolute_style<Source: LayoutSource>(
-    source: &Source,
-    node: NodeId,
+/// Whether a preferred-size value behaves as `auto` for stretch purposes.
+/// The lynx-parseable keywords Starlight has no sizing behavior for (bare
+/// `fit-content`, `stretch`, `-webkit-fill-available`) are treated as `auto`
+/// (documented vocabulary-swap delta).
+#[inline]
+fn style_size_behaves_auto(value: &StyleSize) -> bool {
+    match value {
+        StyleSize::Auto
+        | StyleSize::FitContent
+        | StyleSize::Stretch
+        | StyleSize::WebkitFillAvailable => true,
+        StyleSize::LengthPercentage(_)
+        | StyleSize::MinContent
+        | StyleSize::MaxContent
+        | StyleSize::FitContentFunction(_) => false,
+        StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
+            unreachable!("anchor sizing is pref-dead under the lynx feature")
+        }
+    }
+}
+
+fn resolve_absolute_style<N: LayoutNode>(
+    node: N,
     parent_size: Size<Option<f32>>,
 ) -> ResolvedAbsoluteStyle {
-    let style = source.core_style(node);
-    let resolve_calc = |handle, basis| source.resolve_calc(handle, basis);
-    let padding = resolve_edges(style.padding(), parent_size.width, &resolve_calc);
-    let border = resolve_edges(style.border(), parent_size.width, &resolve_calc);
+    let style = node.style();
+    let padding = resolve_padding(style.padding(), parent_size.width);
+    let border = resolve_border(&style.border());
     let padding_border_size = Size::new(
         padding.horizontal_sum() + border.horizontal_sum(),
         padding.vertical_sum() + border.vertical_sum(),
     );
     let style_size = style.size();
-    let preferred_available = style_size.zip_map(parent_size, |dimension, basis| match dimension {
-        Dimension::MinContent => Some(AvailableSpace::MinContent),
-        Dimension::MaxContent => Some(AvailableSpace::MaxContent),
-        Dimension::FitContent(limit) => resolve_length_percentage(limit, basis, &resolve_calc)
-            .map(|limit| AvailableSpace::Definite(limit.max(0.0))),
-        Dimension::Length(_) | Dimension::Percent(_) | Dimension::Calc(_) | Dimension::Auto => None,
-    });
+    let preferred_available = Size::new(
+        absolute_preferred_available(style_size.width, parent_size.width),
+        absolute_preferred_available(style_size.height, parent_size.height),
+    );
     let resolved_style_size = apply_box_sizing(
-        resolve_size(style_size, parent_size, &resolve_calc),
+        resolve_size(style_size, parent_size),
         style.box_sizing(),
         padding_border_size,
     );
     let min_size = apply_box_sizing(
-        resolve_size(style.min_size(), parent_size, &resolve_calc),
+        resolve_size(style.min_size(), parent_size),
         style.box_sizing(),
         padding_border_size,
     );
     let max_size = apply_box_sizing(
-        resolve_size(style.max_size(), parent_size, &resolve_calc),
+        resolve_max_sizes(style.max_size(), parent_size),
         style.box_sizing(),
         padding_border_size,
     );
 
     ResolvedAbsoluteStyle {
-        insets: resolve_insets(style.inset(), parent_size, &resolve_calc),
-        optional_margin: resolve_optional_edges(style.margin(), parent_size.width, &resolve_calc),
+        insets: resolve_insets(style.inset(), parent_size),
+        optional_margin: resolve_margins(style.margin(), parent_size.width),
         padding,
         border,
-        scrollbar_size: scrollbar_size(&style),
         preferred_available,
         auto_size: Size::new(
-            style_size.width.is_auto() && resolved_style_size.width.is_none(),
-            style_size.height.is_auto() && resolved_style_size.height.is_none(),
+            style_size_behaves_auto(style_size.width) && resolved_style_size.width.is_none(),
+            style_size_behaves_auto(style_size.height) && resolved_style_size.height.is_none(),
         ),
         min_size,
         max_size,
-        aspect_ratio: style.aspect_ratio(),
+        aspect_ratio: used_aspect_ratio(style.aspect_ratio()),
         direction: style.direction(),
         padding_border_size,
+    }
+}
+
+/// The intrinsic available-space override selected by an intrinsic preferred
+/// size on an absolutely positioned box.
+#[inline]
+fn absolute_preferred_available(value: &StyleSize, basis: Option<f32>) -> Option<AvailableSpace> {
+    match value {
+        StyleSize::MinContent => Some(AvailableSpace::MinContent),
+        StyleSize::MaxContent => Some(AvailableSpace::MaxContent),
+        StyleSize::FitContentFunction(limit) => resolve_length_percentage(&limit.0, basis)
+            .map(|limit| AvailableSpace::Definite(limit.max(0.0))),
+        StyleSize::LengthPercentage(_)
+        | StyleSize::Auto
+        | StyleSize::FitContent
+        | StyleSize::Stretch
+        | StyleSize::WebkitFillAvailable => None,
+        StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
+            unreachable!("anchor sizing is pref-dead under the lynx feature")
+        }
     }
 }
 
 /// Derives device-pixel-snapped final layouts from the unrounded layouts
 /// under `root`.
 ///
-/// Walks topology via [`TraverseTree`], reading each
-/// [`unrounded_layout`](RoundState::unrounded_layout) and writing a rounded
-/// copy through [`set_final_layout`](RoundState::set_final_layout).
+/// Walks the subtree rooted at `root` (including `root` itself), reading
+/// each node's [`unrounded_layout`](LayoutNode::unrounded_layout) and
+/// writing a rounded copy through
+/// [`set_final_layout`](LayoutNode::set_final_layout).
 ///
 /// `scale` is the device-pixel ratio — physical pixels per CSS pixel (e.g.
 /// `2.0`/`3.0` on high-DPI displays; `1.0` snaps to whole CSS pixels). It
@@ -633,16 +626,12 @@ fn resolve_absolute_style<Source: LayoutSource>(
 /// sizes may snap to sizes differing by one device pixel (the standard
 /// trade-off, also made by browsers). Idempotent given unchanged unrounded
 /// inputs and scale.
-pub fn round_layout<Source, State>(source: &Source, state: &mut State, root: NodeId, scale: f32)
-where
-    Source: TraverseTree,
-    State: RoundState,
-{
+pub fn round_layout<N: LayoutNode>(root: N, scale: f32) {
     debug_assert!(
         scale.is_finite() && scale > 0.0,
         "scale must be positive and finite"
     );
-    round_layout_inner(source, state, root, scale, Point::ZERO);
+    round_layout_inner(root, scale, Point::ZERO);
 }
 
 /// CSS Values' nearest-integer rule: choose the upper integer on an exact
@@ -664,7 +653,7 @@ fn resolve_absolute_margins(
     insets: Edges<Option<f32>>,
     available: Size<f32>,
     size: Size<f32>,
-    direction: Direction,
+    direction: direction::T,
 ) -> Edges<f32> {
     let mut margin = auto_edges_to_zero(optional);
 
@@ -674,7 +663,7 @@ fn resolve_absolute_margins(
             - optional.left.unwrap_or(0.0)
             - optional.right.unwrap_or(0.0);
         match (optional.left.is_none(), optional.right.is_none()) {
-            (true, true) if remaining < 0.0 && direction == Direction::Rtl => {
+            (true, true) if remaining < 0.0 && direction == direction::T::Rtl => {
                 margin.left = remaining;
             }
             (true, true) if remaining < 0.0 => margin.right = remaining,
@@ -741,17 +730,8 @@ struct AbsoluteAxis {
     prefer_end: bool,
 }
 
-fn round_layout_inner<Source, State>(
-    source: &Source,
-    state: &mut State,
-    node: NodeId,
-    scale: f32,
-    parent_position: Point<f32>,
-) where
-    Source: TraverseTree,
-    State: RoundState,
-{
-    let unrounded = state.unrounded_layout(node);
+fn round_layout_inner<N: LayoutNode>(node: N, scale: f32, parent_position: Point<f32>) {
+    let unrounded = node.unrounded_layout();
     let position = Point::new(
         parent_position.x + unrounded.location.x,
         parent_position.y + unrounded.location.y,
@@ -770,12 +750,6 @@ fn round_layout_inner<Source, State>(
     rounded.content_size = Size::new(
         snap(position.x + unrounded.content_size.width) - snap(position.x),
         snap(position.y + unrounded.content_size.height) - snap(position.y),
-    );
-    rounded.scrollbar_size = Size::new(
-        snap(position.x + unrounded.size.width)
-            - snap(position.x + unrounded.size.width - unrounded.scrollbar_size.width),
-        snap(position.y + unrounded.size.height)
-            - snap(position.y + unrounded.size.height - unrounded.scrollbar_size.height),
     );
     rounded.border.left = snap(position.x + unrounded.border.left) - snap(position.x);
     rounded.border.right = snap(position.x + unrounded.size.width)
@@ -802,12 +776,10 @@ fn round_layout_inner<Source, State>(
     rounded.margin.bottom = snap(position.y + unrounded.size.height + unrounded.margin.bottom)
         - snap(position.y + unrounded.size.height);
 
-    state.set_final_layout(node, &rounded);
+    node.set_final_layout(&rounded);
 
-    let child_count = source.child_count(node);
-    for index in 0..child_count {
-        let child = source.child_id(node, index);
-        round_layout_inner(source, state, child, scale, position);
+    for child in node.children() {
+        round_layout_inner(child, scale, position);
     }
 }
 
@@ -888,13 +860,12 @@ mod tests {
             optional_margin: Edges::uniform(None),
             padding: Edges::ZERO,
             border: Edges::ZERO,
-            scrollbar_size: Size::ZERO,
             preferred_available: Size::new(None, None),
             auto_size: Size::new(true, true),
             min_size: Size::new(Some(20.0), Some(10.0)),
             max_size: Size::new(Some(90.0), Some(60.0)),
             aspect_ratio: None,
-            direction: Direction::Ltr,
+            direction: direction::T::Ltr,
             padding_border_size: Size::new(8.0, 6.0),
         }
     }
@@ -930,7 +901,7 @@ mod tests {
             insets,
             Size::new(100.0, 80.0),
             Size::new(60.0, 40.0),
-            Direction::Ltr,
+            direction::T::Ltr,
         );
         assert_eq!(centered, Edges::uniform(20.0));
 
@@ -939,7 +910,7 @@ mod tests {
             insets,
             Size::new(40.0, 80.0),
             Size::new(60.0, 40.0),
-            Direction::Ltr,
+            direction::T::Ltr,
         );
         assert_eq!((ltr_overflow.left, ltr_overflow.right), (0.0, -20.0));
         let rtl_overflow = resolve_absolute_margins(
@@ -947,7 +918,7 @@ mod tests {
             insets,
             Size::new(40.0, 80.0),
             Size::new(60.0, 40.0),
-            Direction::Rtl,
+            direction::T::Rtl,
         );
         assert_eq!((rtl_overflow.left, rtl_overflow.right), (-20.0, 0.0));
 
@@ -961,7 +932,7 @@ mod tests {
             insets,
             Size::new(100.0, 80.0),
             Size::new(60.0, 40.0),
-            Direction::Ltr,
+            direction::T::Ltr,
         );
         assert_eq!((start_auto.left, start_auto.top), (37.0, 36.0));
         let end_auto = resolve_absolute_margins(
@@ -974,7 +945,7 @@ mod tests {
             insets,
             Size::new(100.0, 80.0),
             Size::new(60.0, 40.0),
-            Direction::Ltr,
+            direction::T::Ltr,
         );
         assert_eq!((end_auto.right, end_auto.bottom), (38.0, 35.0));
     }

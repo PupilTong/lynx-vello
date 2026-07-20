@@ -1,295 +1,100 @@
 //! Grid style protocol (CSS Grid Layout Module Level 2, minus subgrid).
 //!
 //! Track lists are the one place a style value is a *sequence*, so this is
-//! where the protocol works hardest to stay allocation-free and `dyn`-free:
-//! [`GridContainerStyle`] exposes template/auto track lists as **GAT
-//! iterators** borrowed from the style view, and `repeat(...)` groups as a
-//! nested [`GridTemplateRepetition`] value. Hosts adapt whatever their style
-//! engine stores (stylo's `GenericGridTemplateComponent`, a plain `Vec`, …)
-//! without materializing engine-side copies; the algorithm collects into its
-//! own scratch exactly once, after `repeat()` expansion.
+//! where the protocol leans hardest on borrowing: [`GridContainerStyle`]
+//! exposes `grid-template-*` and `grid-auto-*` as **borrowed stylo values**
+//! (`&GridTemplateComponent`, `&ImplicitGridTracks`) lent from the style
+//! view, and the placements/gap follow the crate-wide borrowed-accessor
+//! convention (`&GridLine`, `Size<&…>`). A stylo-backed host returns
+//! references straight into its `ComputedValues`; the algorithm expands
+//! `repeat()` groups into its own scratch exactly once. Bind the style view
+//! first (`let style = node.style();`) before borrowing — the discipline
+//! documented in [`tree`](crate::tree).
 //!
 //! # Numeric lines only
 //!
-//! Placements are numeric lines and spans. Named lines, named areas
-//! (`grid-template-areas`), and `subgrid` are **not protocol**: name→number
-//! resolution is a host concern. Lynx never implemented named lines/areas, so
-//! the lynx-vello adapter needs no such resolution. A browser-grade host can
-//! lower ordinary names in its style adapter, but names inside `auto-repeat`
-//! depend on the used repetition count and would require a future protocol
-//! extension.
+//! Placements are stylo [`GridLine`] values consumed numerically:
+//! `line_num == 0` means the number is absent (`auto` unless `is_span`), and
+//! line *names* — in placements and in template line-name lists — are
+//! ignored. Named lines, named areas (`grid-template-areas`), and `subgrid`
+//! are **not protocol**: name→number resolution is a host concern. Lynx never
+//! implemented named lines/areas, so the lynx-vello adapter needs no such
+//! resolution.
 
-use crate::geometry::{Line, Size};
-use crate::style::CoreStyle;
-use crate::style::alignment::{
-    AlignContent, AlignItems, AlignSelf, JustifyContent, JustifyItems, JustifySelf,
+use std::sync::LazyLock;
+
+use stylo::values::computed::length::NonNegativeLengthPercentageOrNormal;
+use stylo::values::computed::{
+    ContentDistribution, GridAutoFlow, GridLine, GridTemplateComponent, ImplicitGridTracks,
+    ItemPlacement, JustifyItems, SelfAlignment,
 };
-use crate::style::value::LengthPercentage;
 
-/// `grid-auto-flow`: the axis and packing mode of the auto-placement
-/// algorithm (CSS Grid §8.5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum GridAutoFlow {
-    /// Fill each row in turn, adding new rows as needed (sparse packing).
-    #[default]
-    Row,
-    /// Fill each column in turn, adding new columns as needed (sparse).
-    Column,
-    /// Row flow with dense backfilling of earlier holes.
-    RowDense,
-    /// Column flow with dense backfilling of earlier holes.
-    ColumnDense,
-}
+use crate::geometry::Size;
+use crate::style::CoreStyle;
 
-impl GridAutoFlow {
-    /// Is this a `dense` packing mode?
-    #[must_use]
-    pub const fn is_dense(self) -> bool {
-        matches!(self, Self::RowDense | Self::ColumnDense)
-    }
-
-    /// Is the primary placement axis the row axis (items fill rows)?
-    #[must_use]
-    pub const fn is_row_flow(self) -> bool {
-        matches!(self, Self::Row | Self::RowDense)
-    }
-}
-
-/// A 1-based grid line number.
-///
-/// Positive counts from the start (line 1 is the start edge), negative from
-/// the end (line -1 is the end edge). `0` is invalid per CSS grammar — hosts
-/// must never produce it; the engine treats a placement carrying it as
-/// [`GridPlacement::Auto`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GridLine(i16);
-
-impl GridLine {
-    /// Wraps a 1-based (possibly negative) line number.
-    #[must_use]
-    pub const fn new(line: i16) -> Self {
-        Self(line)
-    }
-
-    /// The raw 1-based line number.
-    #[must_use]
-    pub const fn as_i16(self) -> i16 {
-        self.0
-    }
-}
-
-/// One side of a `grid-row` / `grid-column` placement.
-///
-/// A full placement is a [`Line<GridPlacement>`]; resolution of the
-/// start/end/span combinations is CSS Grid §8.3 (the "grid placement
-/// conflict handling" rules) and happens inside the algorithm.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum GridPlacement {
-    /// `auto`: placed by the auto-placement algorithm.
-    #[default]
-    Auto,
-    /// A specific line.
-    Line(GridLine),
-    /// `span <n>` relative to the opposite side. `n` is clamped to ≥ 1 by
-    /// the algorithm (CSS treats `span 0` as invalid).
-    Span(u16),
-}
-
-/// The repetition count of a `repeat(...)` in a template track list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RepetitionCount {
-    /// `repeat(<n>, …)` — a fixed count.
-    Count(u16),
-    /// `repeat(auto-fill, …)` — as many tracks as fit the definite axis size.
-    AutoFill,
-    /// `repeat(auto-fit, …)` — like `auto-fill`, then collapse empty tracks.
-    AutoFit,
-}
-
-/// The *minimum* half of a track sizing function (CSS Grid §7.2).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub enum MinTrackSizingFunction {
-    /// A fixed `<length-percentage>` breadth.
-    Fixed(LengthPercentage),
-    /// The `min-content` intrinsic size of the track's items.
-    MinContent,
-    /// The `max-content` intrinsic size of the track's items.
-    MaxContent,
-    /// `auto`: largest item minimum, growable.
-    #[default]
-    Auto,
-}
-
-/// The *maximum* half of a track sizing function (CSS Grid §7.2).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub enum MaxTrackSizingFunction {
-    /// A fixed `<length-percentage>` breadth.
-    Fixed(LengthPercentage),
-    /// The `min-content` intrinsic size of the track's items.
-    MinContent,
-    /// The `max-content` intrinsic size of the track's items.
-    MaxContent,
-    /// `auto`: `max-content`, but stretchable by `align/justify-content`.
-    #[default]
-    Auto,
-    /// `<flex>` (`fr`) — a share of the leftover space.
-    Fr(f32),
-    /// `fit-content(<length-percentage>)`.
-    FitContent(LengthPercentage),
-}
-
-/// A full track sizing function: `minmax(min, max)`, or the single-value
-/// forms which set both halves (per CSS Grid §7.2's expansion rules).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct TrackSizingFunction {
-    /// The minimum sizing function.
-    pub min: MinTrackSizingFunction,
-    /// The maximum sizing function.
-    pub max: MaxTrackSizingFunction,
-}
-
-impl TrackSizingFunction {
-    /// `auto` (i.e. `minmax(auto, auto)`).
-    pub const AUTO: Self = Self {
-        min: MinTrackSizingFunction::Auto,
-        max: MaxTrackSizingFunction::Auto,
-    };
-
-    /// An explicit `minmax(min, max)`.
-    #[must_use]
-    pub const fn minmax(min: MinTrackSizingFunction, max: MaxTrackSizingFunction) -> Self {
-        Self { min, max }
-    }
-
-    /// A fixed breadth: `minmax(fixed, fixed)`.
-    #[must_use]
-    pub const fn fixed(breadth: LengthPercentage) -> Self {
-        Self {
-            min: MinTrackSizingFunction::Fixed(breadth),
-            max: MaxTrackSizingFunction::Fixed(breadth),
-        }
-    }
-
-    /// `<flex>` single-value form: `minmax(auto, <flex>)` per spec.
-    #[must_use]
-    pub const fn fr(flex: f32) -> Self {
-        Self {
-            min: MinTrackSizingFunction::Auto,
-            max: MaxTrackSizingFunction::Fr(flex),
-        }
-    }
-
-    /// `fit-content(limit)`: `minmax(auto, fit-content(limit))` per spec.
-    #[must_use]
-    pub const fn fit_content(limit: LengthPercentage) -> Self {
-        Self {
-            min: MinTrackSizingFunction::Auto,
-            max: MaxTrackSizingFunction::FitContent(limit),
-        }
-    }
-}
-
-/// One `repeat(count, <track list>)` group inside a template track list,
-/// borrowed from the host's style storage.
-///
-/// The track iterator must be `Clone` (the algorithm iterates a repetition
-/// once per expansion) and `ExactSizeIterator` (auto-fill/auto-fit need the
-/// per-repetition track count up front to solve the repetition count).
-pub trait GridTemplateRepetition: Sized {
-    /// Borrowed iterator over the tracks inside this repetition.
-    type Tracks<'a>: Iterator<Item = TrackSizingFunction> + ExactSizeIterator + Clone
-    where
-        Self: 'a;
-
-    /// How many times the group repeats.
-    fn count(&self) -> RepetitionCount;
-
-    /// The tracks repeated by this group.
-    fn tracks(&self) -> Self::Tracks<'_>;
-}
-
-/// One component of a `grid-template-rows`/`grid-template-columns` list:
-/// either a single track or a `repeat(...)` group.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum GridTemplateComponent<R> {
-    /// A single track sizing function.
-    Single(TrackSizingFunction),
-    /// A `repeat(...)` group (a borrowed host value implementing
-    /// [`GridTemplateRepetition`]).
-    Repeat(R),
-}
+/// Lendable initial values for the defaulted borrowed accessors (the
+/// `GridLine` constructor is not `const`; the atom it carries is static).
+static GRID_LINE_AUTO: LazyLock<GridLine> = LazyLock::new(GridLine::auto);
+static GAP_NORMAL: NonNegativeLengthPercentageOrNormal =
+    NonNegativeLengthPercentageOrNormal::Normal;
 
 /// Style of a node *as a grid container*.
 ///
-/// Track-list accessors have no defaults (a default would have to conjure an
-/// iterator type); everything else defaults to the CSS initial value. An
-/// empty template iterator means "no explicit tracks in this axis".
+/// The borrowed track-list accessors have no defaults (they lend host
+/// storage); everything else defaults to the CSS initial value.
+/// [`GridTemplateComponent::None`] means "no explicit tracks in this axis",
+/// and an empty [`ImplicitGridTracks`] means `auto`.
 pub trait GridContainerStyle: CoreStyle {
-    /// The borrowed `repeat(...)` view yielded by template track lists.
-    type Repetition<'a>: GridTemplateRepetition
-    where
-        Self: 'a;
-
-    /// Borrowed iterator over a template track list
-    /// (`grid-template-rows`/`-columns`).
-    type TemplateTracks<'a>: Iterator<Item = GridTemplateComponent<Self::Repetition<'a>>>
-    where
-        Self: 'a;
-
-    /// Borrowed iterator over an auto track list
-    /// (`grid-auto-rows`/`-columns`).
-    type AutoTracks<'a>: Iterator<Item = TrackSizingFunction> + Clone
-    where
-        Self: 'a;
-
     /// `grid-template-rows`.
-    fn grid_template_rows(&self) -> Self::TemplateTracks<'_>;
+    fn grid_template_rows(&self) -> &GridTemplateComponent;
 
     /// `grid-template-columns`.
-    fn grid_template_columns(&self) -> Self::TemplateTracks<'_>;
+    fn grid_template_columns(&self) -> &GridTemplateComponent;
 
     /// `grid-auto-rows` — sizing for implicitly-created rows. Cycled if more
     /// implicit tracks exist than entries (CSS Grid §7.6); empty means
     /// `auto`.
-    fn grid_auto_rows(&self) -> Self::AutoTracks<'_>;
+    fn grid_auto_rows(&self) -> &ImplicitGridTracks;
 
     /// `grid-auto-columns` — sizing for implicitly-created columns.
-    fn grid_auto_columns(&self) -> Self::AutoTracks<'_>;
+    fn grid_auto_columns(&self) -> &ImplicitGridTracks;
 
-    /// `grid-auto-flow`.
+    /// `grid-auto-flow` (bitflags: `ROW`/`COLUMN` axis plus `DENSE`
+    /// backfilling, CSS Grid §8.5).
     fn grid_auto_flow(&self) -> GridAutoFlow {
-        GridAutoFlow::Row
+        GridAutoFlow::ROW
     }
 
-    /// `gap` (`column-gap` is `width`, `row-gap` is `height`).
+    /// `gap` (`column-gap` is `width`, `row-gap` is `height`), lent from
+    /// the style view; `normal` resolves to zero.
     ///
     /// Percentage basis: the container's content-box size in the gap's axis.
-    fn gap(&self) -> Size<LengthPercentage> {
-        Size::new(LengthPercentage::ZERO, LengthPercentage::ZERO)
+    fn gap(&self) -> Size<&NonNegativeLengthPercentageOrNormal> {
+        Size::new(&GAP_NORMAL, &GAP_NORMAL)
     }
 
-    /// `align-content` — block-axis distribution of tracks. `None` =
-    /// `normal`.
-    fn align_content(&self) -> Option<AlignContent> {
-        None
+    /// `align-content` — block-axis distribution of tracks.
+    fn align_content(&self) -> ContentDistribution {
+        ContentDistribution::normal()
     }
 
-    /// `justify-content` — inline-axis distribution of tracks. `None` =
-    /// `normal`.
-    fn justify_content(&self) -> Option<JustifyContent> {
-        None
+    /// `justify-content` — inline-axis distribution of tracks.
+    fn justify_content(&self) -> ContentDistribution {
+        ContentDistribution::normal()
     }
 
-    /// `align-items` — default block-axis alignment of items. `None` =
-    /// `normal`.
-    fn align_items(&self) -> Option<AlignItems> {
-        None
+    /// `align-items` — default block-axis alignment of items.
+    fn align_items(&self) -> ItemPlacement {
+        ItemPlacement::normal()
     }
 
-    /// `justify-items` — default inline-axis alignment of items. `None` =
-    /// `normal`.
-    fn justify_items(&self) -> Option<JustifyItems> {
-        None
+    /// `justify-items` — default inline-axis alignment of items.
+    fn justify_items(&self) -> JustifyItems {
+        let specified = stylo::values::specified::align::JustifyItems(ItemPlacement::normal());
+        JustifyItems {
+            specified,
+            computed: specified,
+        }
     }
 }
 
@@ -297,26 +102,34 @@ pub trait GridContainerStyle: CoreStyle {
 ///
 /// Defaults are the CSS initial values.
 pub trait GridItemStyle: CoreStyle {
-    /// `grid-row` (`grid-row-start` / `grid-row-end`).
-    fn grid_row(&self) -> Line<GridPlacement> {
-        Line::new(GridPlacement::Auto, GridPlacement::Auto)
+    /// `grid-row-start`, lent from the style view (line idents are refcounted).
+    fn grid_row_start(&self) -> &GridLine {
+        &GRID_LINE_AUTO
     }
 
-    /// `grid-column` (`grid-column-start` / `grid-column-end`).
-    fn grid_column(&self) -> Line<GridPlacement> {
-        Line::new(GridPlacement::Auto, GridPlacement::Auto)
+    /// `grid-row-end`, lent from the style view (line idents are refcounted).
+    fn grid_row_end(&self) -> &GridLine {
+        &GRID_LINE_AUTO
     }
 
-    /// `align-self`. `None` = `auto` (defer to the container's
-    /// `align-items`).
-    fn align_self(&self) -> Option<AlignSelf> {
-        None
+    /// `grid-column-start`, lent from the style view (line idents are refcounted).
+    fn grid_column_start(&self) -> &GridLine {
+        &GRID_LINE_AUTO
     }
 
-    /// `justify-self`. `None` = `auto` (defer to the container's
-    /// `justify-items`).
-    fn justify_self(&self) -> Option<JustifySelf> {
-        None
+    /// `grid-column-end`, lent from the style view (line idents are refcounted).
+    fn grid_column_end(&self) -> &GridLine {
+        &GRID_LINE_AUTO
+    }
+
+    /// `align-self`. `auto` defers to the container's `align-items`.
+    fn align_self(&self) -> SelfAlignment {
+        SelfAlignment::auto()
+    }
+
+    /// `justify-self`. `auto` defers to the container's `justify-items`.
+    fn justify_self(&self) -> SelfAlignment {
+        SelfAlignment::auto()
     }
 
     /// `order` — layout/paint reordering among siblings; lower comes first.
@@ -325,90 +138,70 @@ pub trait GridItemStyle: CoreStyle {
     }
 }
 
-impl<R: GridTemplateRepetition> GridTemplateRepetition for &R {
-    type Tracks<'a>
-        = R::Tracks<'a>
-    where
-        Self: 'a;
-
-    fn count(&self) -> RepetitionCount {
-        (**self).count()
-    }
-
-    fn tracks(&self) -> Self::Tracks<'_> {
-        (**self).tracks()
-    }
-}
-
 impl<S: GridContainerStyle> GridContainerStyle for &S {
-    type Repetition<'a>
-        = S::Repetition<'a>
-    where
-        Self: 'a;
-    type TemplateTracks<'a>
-        = S::TemplateTracks<'a>
-    where
-        Self: 'a;
-    type AutoTracks<'a>
-        = S::AutoTracks<'a>
-    where
-        Self: 'a;
-
-    fn grid_template_rows(&self) -> Self::TemplateTracks<'_> {
-        S::grid_template_rows(&**self)
+    fn grid_template_rows(&self) -> &GridTemplateComponent {
+        (**self).grid_template_rows()
     }
 
-    fn grid_template_columns(&self) -> Self::TemplateTracks<'_> {
-        S::grid_template_columns(&**self)
+    fn grid_template_columns(&self) -> &GridTemplateComponent {
+        (**self).grid_template_columns()
     }
 
-    fn grid_auto_rows(&self) -> Self::AutoTracks<'_> {
-        S::grid_auto_rows(&**self)
+    fn grid_auto_rows(&self) -> &ImplicitGridTracks {
+        (**self).grid_auto_rows()
     }
 
-    fn grid_auto_columns(&self) -> Self::AutoTracks<'_> {
-        S::grid_auto_columns(&**self)
+    fn grid_auto_columns(&self) -> &ImplicitGridTracks {
+        (**self).grid_auto_columns()
     }
 
     fn grid_auto_flow(&self) -> GridAutoFlow {
         (**self).grid_auto_flow()
     }
 
-    fn gap(&self) -> Size<LengthPercentage> {
+    fn gap(&self) -> Size<&NonNegativeLengthPercentageOrNormal> {
         (**self).gap()
     }
 
-    fn align_content(&self) -> Option<AlignContent> {
+    fn align_content(&self) -> ContentDistribution {
         (**self).align_content()
     }
 
-    fn justify_content(&self) -> Option<JustifyContent> {
+    fn justify_content(&self) -> ContentDistribution {
         (**self).justify_content()
     }
 
-    fn align_items(&self) -> Option<AlignItems> {
+    fn align_items(&self) -> ItemPlacement {
         (**self).align_items()
     }
 
-    fn justify_items(&self) -> Option<JustifyItems> {
+    fn justify_items(&self) -> JustifyItems {
         (**self).justify_items()
     }
 }
 
 impl<S: GridItemStyle> GridItemStyle for &S {
-    fn grid_row(&self) -> Line<GridPlacement> {
-        (**self).grid_row()
+    fn grid_row_start(&self) -> &GridLine {
+        (**self).grid_row_start()
     }
 
-    fn grid_column(&self) -> Line<GridPlacement> {
-        (**self).grid_column()
+    fn grid_row_end(&self) -> &GridLine {
+        (**self).grid_row_end()
     }
 
-    fn align_self(&self) -> Option<AlignSelf> {
+    fn grid_column_start(&self) -> &GridLine {
+        (**self).grid_column_start()
+    }
+
+    fn grid_column_end(&self) -> &GridLine {
+        (**self).grid_column_end()
+    }
+
+    fn align_self(&self) -> SelfAlignment {
         (**self).align_self()
     }
 
-    fn justify_self(&self) -> Option<JustifySelf> {
+    fn justify_self(&self) -> SelfAlignment {
         (**self).justify_self()
     }
 
@@ -420,47 +213,47 @@ impl<S: GridItemStyle> GridItemStyle for &S {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use stylo::values::computed::Display;
+    use stylo::values::specified::align::AlignFlags;
+
     use super::*;
 
-    #[derive(Debug, Clone, Copy)]
-    struct EmptyRepetition;
+    #[derive(Debug)]
+    struct Defaults {
+        template: GridTemplateComponent,
+        auto_tracks: ImplicitGridTracks,
+    }
 
-    impl GridTemplateRepetition for EmptyRepetition {
-        type Tracks<'a> = core::iter::Empty<TrackSizingFunction>;
-
-        fn count(&self) -> RepetitionCount {
-            RepetitionCount::Count(1)
-        }
-
-        fn tracks(&self) -> Self::Tracks<'_> {
-            core::iter::empty()
+    impl Default for Defaults {
+        fn default() -> Self {
+            Self {
+                template: GridTemplateComponent::None,
+                auto_tracks: stylo::values::generics::grid::ImplicitGridTracks(Vec::new().into()),
+            }
         }
     }
 
-    #[derive(Debug)]
-    struct Defaults;
-
-    impl CoreStyle for Defaults {}
+    impl CoreStyle for Defaults {
+        fn display(&self) -> Display {
+            Display::Grid
+        }
+    }
 
     impl GridContainerStyle for Defaults {
-        type Repetition<'a> = EmptyRepetition;
-        type TemplateTracks<'a> = core::iter::Empty<GridTemplateComponent<EmptyRepetition>>;
-        type AutoTracks<'a> = core::iter::Empty<TrackSizingFunction>;
-
-        fn grid_template_rows(&self) -> Self::TemplateTracks<'_> {
-            core::iter::empty()
+        fn grid_template_rows(&self) -> &GridTemplateComponent {
+            &self.template
         }
 
-        fn grid_template_columns(&self) -> Self::TemplateTracks<'_> {
-            core::iter::empty()
+        fn grid_template_columns(&self) -> &GridTemplateComponent {
+            &self.template
         }
 
-        fn grid_auto_rows(&self) -> Self::AutoTracks<'_> {
-            core::iter::empty()
+        fn grid_auto_rows(&self) -> &ImplicitGridTracks {
+            &self.auto_tracks
         }
 
-        fn grid_auto_columns(&self) -> Self::AutoTracks<'_> {
-            core::iter::empty()
+        fn grid_auto_columns(&self) -> &ImplicitGridTracks {
+            &self.auto_tracks
         }
     }
 
@@ -468,45 +261,57 @@ mod tests {
 
     #[test]
     fn grid_container_defaults_are_css_initial_values() {
-        let style = Defaults;
+        let style = Defaults::default();
 
-        assert_eq!(style.grid_template_rows().count(), 0);
-        assert_eq!(style.grid_template_columns().count(), 0);
-        assert_eq!(style.grid_auto_rows().count(), 0);
-        assert_eq!(style.grid_auto_columns().count(), 0);
-        assert_eq!(style.grid_auto_flow(), GridAutoFlow::Row);
+        assert!(matches!(
+            style.grid_template_rows(),
+            GridTemplateComponent::None
+        ));
+        assert!(matches!(
+            style.grid_template_columns(),
+            GridTemplateComponent::None
+        ));
+        assert!(style.grid_auto_rows().0.is_empty());
+        assert!(style.grid_auto_columns().0.is_empty());
+        assert_eq!(style.grid_auto_flow(), GridAutoFlow::ROW);
+        assert!(!style.grid_auto_flow().contains(GridAutoFlow::DENSE));
+        let gap = GridContainerStyle::gap(&style);
+        assert!(matches!(
+            gap.width,
+            NonNegativeLengthPercentageOrNormal::Normal
+        ));
+        assert!(matches!(
+            gap.height,
+            NonNegativeLengthPercentageOrNormal::Normal
+        ));
         assert_eq!(
-            GridContainerStyle::gap(&style),
-            Size::new(LengthPercentage::ZERO, LengthPercentage::ZERO)
+            GridContainerStyle::align_content(&style),
+            ContentDistribution::normal()
         );
-        assert_eq!(GridContainerStyle::align_content(&style), None);
-        assert_eq!(GridContainerStyle::justify_content(&style), None);
-        assert_eq!(GridContainerStyle::align_items(&style), None);
-        assert_eq!(GridContainerStyle::justify_items(&style), None);
+        assert_eq!(
+            GridContainerStyle::justify_content(&style),
+            ContentDistribution::normal()
+        );
+        assert_eq!(
+            GridContainerStyle::align_items(&style),
+            ItemPlacement::normal()
+        );
+        assert_eq!(
+            style.justify_items().computed.0.0.value(),
+            AlignFlags::NORMAL
+        );
     }
 
     #[test]
-    fn grid_item_defaults_and_value_helpers_cover_all_flow_modes() {
-        let style = Defaults;
-        let automatic = Line::new(GridPlacement::Auto, GridPlacement::Auto);
+    fn grid_item_defaults_are_automatic_placements() {
+        let style = Defaults::default();
 
-        assert_eq!(style.grid_row(), automatic);
-        assert_eq!(style.grid_column(), automatic);
-        assert_eq!(GridItemStyle::align_self(&style), None);
-        assert_eq!(GridItemStyle::justify_self(&style), None);
+        assert!(style.grid_row_start().is_auto());
+        assert!(style.grid_row_end().is_auto());
+        assert!(style.grid_column_start().is_auto());
+        assert!(style.grid_column_end().is_auto());
+        assert_eq!(GridItemStyle::align_self(&style), SelfAlignment::auto());
+        assert_eq!(style.justify_self(), SelfAlignment::auto());
         assert_eq!(style.order(), 0);
-
-        assert!(!GridAutoFlow::Row.is_dense());
-        assert!(GridAutoFlow::Row.is_row_flow());
-        assert!(!GridAutoFlow::Column.is_dense());
-        assert!(!GridAutoFlow::Column.is_row_flow());
-        assert!(GridAutoFlow::RowDense.is_dense());
-        assert!(GridAutoFlow::RowDense.is_row_flow());
-        assert!(GridAutoFlow::ColumnDense.is_dense());
-        assert!(!GridAutoFlow::ColumnDense.is_row_flow());
-
-        let line = GridLine::new(-3);
-        assert_eq!(line.as_i16(), -3);
-        assert_eq!(TrackSizingFunction::default(), TrackSizingFunction::AUTO);
     }
 }

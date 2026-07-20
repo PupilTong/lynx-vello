@@ -8,91 +8,82 @@
 //!
 //! # Host leaf dispatch
 //!
-//! A real host obtains `container_style` and runs from its immutable source,
-//! then borrows `text_context` and the node's artifacts from its mutable
-//! session inside `LayoutSession::compute_child_layout`. This compact source /
-//! session pair mirrors that dispatch boundary:
+//! A real host obtains `container_style` and runs from its immutable node
+//! data, then borrows `text_context` and the node's artifacts from
+//! interior-mutable slots inside
+//! [`LayoutNode::compute_child_layout`](crate::tree::LayoutNode::compute_child_layout);
+//! the borrows are node-scoped and end before the cache wrapper stores the
+//! result. This compact example mirrors that dispatch boundary:
 //!
 //! ```
+//! use std::cell::RefCell;
+//!
 //! use neutron_star::compute::compute_leaf_layout;
 //! use neutron_star::style::{
-//!     CoreStyle, FontFamily, FontFeatureSetting, FontVariationSetting, TextContainerStyle,
-//!     TextRun, TextRunStyle,
+//!     CoreStyle, Display, FontFamily, TextContainerStyle, TextRun, TextRunStyle,
 //! };
 //! use neutron_star::text::{ArtifactSlots, TextContext, TextMeasurer};
 //! use neutron_star::tree::LayoutInput;
+//! use stylo::values::computed::font::GenericFontFamily;
 //!
 //! #[derive(Default)]
 //! struct BoxStyle;
-//! impl CoreStyle for BoxStyle {}
+//! impl CoreStyle for BoxStyle {
+//!     fn display(&self) -> Display {
+//!         Display::Flex
+//!     }
+//! }
 //! impl TextContainerStyle for BoxStyle {}
 //!
 //! struct RunStyle;
 //! impl TextRunStyle for RunStyle {
-//!     type FontFamilies<'a> = core::iter::Once<FontFamily<'a>>;
-//!     type FontFeatureSettings<'a> = core::iter::Empty<FontFeatureSetting>;
-//!     type FontVariationSettings<'a> = core::iter::Empty<FontVariationSetting>;
-//!
-//!     fn font_families(&self) -> Self::FontFamilies<'_> {
-//!         core::iter::once(FontFamily::Generic(Default::default()))
-//!     }
-//!     fn font_feature_settings(&self) -> Self::FontFeatureSettings<'_> {
-//!         core::iter::empty()
-//!     }
-//!     fn font_variation_settings(&self) -> Self::FontVariationSettings<'_> {
-//!         core::iter::empty()
+//!     fn font_family(&self) -> FontFamily {
+//!         FontFamily::generic(GenericFontFamily::SansSerif).clone()
 //!     }
 //! }
 //!
-//! struct TextSource {
+//! /// One text node: immutable epoch data plus the node's interior-mutable
+//! /// artifact slot, exactly as a host embeds them on its tree nodes.
+//! struct TextNode {
 //!     container_style: BoxStyle,
 //!     run_style: RunStyle,
 //!     text: &'static str,
+//!     artifacts: RefCell<ArtifactSlots>,
 //! }
 //!
-//! struct TextSession {
-//!     text_context: TextContext,
-//!     artifacts: ArtifactSlots,
+//! // A host runs an equivalent arm inside LayoutNode::compute_child_layout:
+//! // node-scoped RefMut borrows feed the measurer and drop with it, before
+//! // the cache wrapper stores the result. `text_context` lives in a
+//! // tree-level slot.
+//! fn compute_text_leaf(
+//!     node: &TextNode,
+//!     text_context: &RefCell<TextContext>,
+//!     input: LayoutInput,
+//! ) -> neutron_star::tree::LayoutOutput {
+//!     let runs = [TextRun {
+//!         text: node.text,
+//!         style: &node.run_style,
+//!         preserve_newlines: false,
+//!     }];
+//!     let mut context = text_context.borrow_mut();
+//!     let mut artifacts = node.artifacts.borrow_mut();
+//!     let mut measurer = TextMeasurer::new(
+//!         &mut context,
+//!         &mut artifacts,
+//!         &node.container_style,
+//!         runs.into_iter(),
+//!     );
+//!     compute_leaf_layout(input, &node.container_style, &mut measurer)
 //! }
 //!
-//! impl TextSession {
-//!     // A host calls an equivalent branch from compute_child_layout.
-//!     fn compute_text_leaf(
-//!         &mut self,
-//!         source: &TextSource,
-//!         input: LayoutInput,
-//!     ) -> neutron_star::tree::LayoutOutput {
-//!         let runs = [TextRun {
-//!             text: source.text,
-//!             style: &source.run_style,
-//!             preserve_newlines: false,
-//!         }];
-//!         let mut measurer = TextMeasurer::new(
-//!             &mut self.text_context,
-//!             &mut self.artifacts,
-//!             &source.container_style,
-//!             runs.into_iter(),
-//!             |_, _| unreachable!("this style contains no calc()"),
-//!         );
-//!         compute_leaf_layout(
-//!             input,
-//!             &source.container_style,
-//!             |_, _| unreachable!("this box style contains no calc()"),
-//!             &mut measurer,
-//!         )
-//!     }
-//! }
-//!
-//! let source = TextSource {
+//! let node = TextNode {
 //!     container_style: BoxStyle,
 //!     run_style: RunStyle,
 //!     text: "Hello from a host-owned run",
+//!     artifacts: RefCell::new(ArtifactSlots::default()),
 //! };
-//! let mut session = TextSession {
-//!     text_context: TextContext::new(),
-//!     artifacts: ArtifactSlots::default(),
-//! };
-//! let output = session.compute_text_leaf(&source, LayoutInput::default());
+//! let text_context = RefCell::new(TextContext::new());
+//! let output = compute_text_leaf(&node, &text_context, LayoutInput::default());
 //! assert!(output.size.width >= 0.0);
 //! ```
 

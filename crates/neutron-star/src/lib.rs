@@ -4,31 +4,35 @@
 //! Starlight Linear/Relative engine for host-owned trees.
 //!
 //! Built as lynx-vello's from-scratch successor to the Lynx C++ engine's
-//! `starlight`, while remaining standalone-publishable: zero required
-//! dependencies and no assumptions about the host's DOM, style engine, or
-//! storage.
+//! `starlight`. The engine owns no tree and no styles, but it **speaks
+//! stylo's computed-value vocabulary**: style accessors return the lynx
+//! stylo fork's computed types directly, so a stylo-backed host serves style
+//! views without any translation layer. (The former zero-dependency pillar
+//! is retired; `stylo` is a required dependency.)
 //!
 //! # Architecture
 //!
 //! The engine owns **algorithms and vocabulary**; the host owns **the tree,
-//! the styles, and all storage**:
+//! the styles, and all storage**. The host hands the engine `Copy` **node
+//! handles** borrowed from its tree — the same shape stylo demands of its
+//! DOM — and the engine lays out through them copy-free:
 //!
 //! ```text
 //!            host owns                          engine owns
-//!  ┌───────────────────────────┐   traits    ┌───────────────────────────┐
-//!  │ immutable source:         │◀───────────▶│ compute_root_layout       │
-//!  │ · topology + styles       │  NodeId +   │ compute_leaf_layout       │
-//!  │ mutable session:          │  POD values │ cache/hide/abs-pos/round  │
-//!  │ · layouts/cache/dispatch  │◀───────────▶│ flex/grid/linear/relative │
+//!  ┌───────────────────────────┐  LayoutNode ┌───────────────────────────┐
+//!  │ the tree:                 │◀───────────▶│ compute_root_layout       │
+//!  │ · topology + styles       │   handles + │ compute_leaf_layout       │
+//!  │ · interior-mutable        │  POD values │ cache/hide/abs-pos/round  │
+//!  │   layout/cache slots      │◀───────────▶│ flex/grid/linear/relative │
 //!  └───────────────────────────┘  recursion  └───────────────────────────┘
 //! ```
 //!
-//! - [`tree`] — the tree protocol: [`NodeId`](tree::NodeId), traversal, style views, the layout
-//!   wire format ([`LayoutInput`](tree::LayoutInput)/[`LayoutOutput`](tree::LayoutOutput)/
-//!   [`Layout`](tree::Layout)), caching and rounding capabilities, and the **recursion contract**
-//!   (start there).
-//! - [`style`] — the style protocol: engine-owned value types plus the `CoreStyle`/container/item
-//!   traits hosts implement as cheap views over their computed styles.
+//! - [`tree`] — the tree protocol: the [`LayoutNode`](tree::LayoutNode) handle (traversal, style
+//!   views, dispatch, layout/cache slots), the layout wire format
+//!   ([`LayoutInput`](tree::LayoutInput)/[`LayoutOutput`](tree::LayoutOutput)/
+//!   [`Layout`](tree::Layout)), and the **recursion contract** (start there).
+//! - [`style`] — the style protocol: the `CoreStyle`/container/item traits hosts implement as cheap
+//!   views over their computed styles, speaking stylo computed values re-exported there.
 //! - [`compute`] — the machinery entry points hosts call from their dispatch (root, cache wrapper,
 //!   subtree hiding, leaf, the positioned pass, rounding), the canonical dispatch skeleton, and the
 //!   implemented Flexbox, Grid, Linear, and Relative entry points.
@@ -36,27 +40,25 @@
 //! - [`geometry`] — `Copy`/`#[repr(C)]` geometry primitives.
 //!
 //! Layout recursion round-trips through the host's
-//! [`compute_child_layout`](tree::LayoutSession::compute_child_layout) on
-//! every node. The immutable [`LayoutSource`](tree::LayoutSource) is passed
-//! separately from the mutable session, so borrowed computed-style views can
-//! remain live across recursion. The host routes each node to a neutron-star
-//! algorithm or to its own additional layout mode. Starlight's non-CSS
-//! `display: linear` and relative layout are first-class algorithms in this
-//! crate.
+//! [`compute_child_layout`](tree::LayoutNode::compute_child_layout) on every
+//! node. Handles and the style views borrowed through them stay valid across
+//! recursion because all mutation flows into host-owned interior-mutable
+//! per-node slots — the protocol has no `&mut` anywhere. The host routes
+//! each node to a neutron-star algorithm or to its own additional layout
+//! mode. Starlight's non-CSS `display: linear` and relative layout are
+//! first-class algorithms in this crate.
 //!
 //! # No `dyn`, by construction
 //!
-//! Every host boundary is generic. Source/measurement protocols use GATs
-//! (borrowed iterators, style views, and measurement views), while mutable
-//! capability traits explicitly require `Sized`; none can be erased to a
-//! trait object, and every engine⇄host call monomorphizes and can inline.
-//! There is no erased fallback and none is planned:
+//! Every host boundary is generic over the concrete handle type.
+//! [`LayoutNode`](tree::LayoutNode) is structurally dyn-incompatible (a
+//! `Copy` supertrait plus associated types without defaults), so every
+//! engine⇄host call monomorphizes and can inline. There is no erased
+//! fallback and none is planned:
 //!
 //! ```compile_fail
-//! // GAT-based protocols cannot be made into trait objects:
-//! fn erased(tree: &dyn neutron_star::tree::TraverseTree) {}
-//! // Mutable protocol capabilities are also explicitly Sized:
-//! fn erased_state(state: &mut dyn neutron_star::tree::LayoutState) {}
+//! // The Copy supertrait and associated types keep the protocol static:
+//! fn erased(node: &dyn neutron_star::tree::LayoutNode) {}
 //! ```
 //!
 //! # Status: Flexbox, Grid, Linear, Relative, and text measurement implemented
@@ -71,116 +73,152 @@
 //!
 //! # Dependencies and feature flags
 //!
-//! The style/tree/box-layout protocol is unconditional and compiles with zero
-//! dependencies under `default-features = false`. Default builds enable the
-//! `text` feature and its optional Parley dependency.
+//! The style protocol requires the workspace's `stylo` fork (building it
+//! needs the vendored submodule and `python3` for stylo's build script; a
+//! cold build takes minutes). Default builds additionally enable the `text`
+//! feature and its optional Parley dependency; `default-features = false`
+//! keeps the protocol and box-layout core only.
 //!
 //! # Minimal host sketch
 //!
-//! A slab-backed host implementing the core protocol (style traits via the
-//! blanket `&S` impls):
+//! A slab-backed host implementing the protocol (style traits via the
+//! blanket `&S` impls; per-node layout slots as `Cell`s):
 //!
 //! ```
+//! use std::cell::Cell;
+//!
 //! use neutron_star::prelude::*;
-//! use neutron_star::style::CalcHandle;
+//! use neutron_star::style::Display;
 //!
 //! #[derive(Default)]
 //! struct Style; // your computed-style type
-//! impl CoreStyle for Style {} // CSS initial values from the defaults
+//! impl CoreStyle for Style {
+//!     // Every other accessor defaults to the fork's initial value.
+//!     fn display(&self) -> Display {
+//!         Display::Flex
+//!     }
+//! }
 //!
-//! struct SourceNode {
+//! struct Node {
 //!     style: Style,
-//!     children: Vec<NodeId>,
+//!     children: Vec<usize>,
+//!     // Host-owned interior-mutable layout slots, written through handles.
+//!     layout: Cell<Layout>,
+//!     final_layout: Cell<Layout>,
 //! }
 //!
-//! struct Source {
-//!     nodes: Vec<SourceNode>,
+//! struct Tree {
+//!     nodes: Vec<Node>,
 //! }
 //!
-//! impl Source {
-//!     fn node(&self, id: NodeId) -> &SourceNode {
-//!         &self.nodes[usize::from(id)]
-//!     }
+//! /// The Copy node handle: a borrow of the tree plus a slab index.
+//! /// (A `Box`-per-node host would use `&'dom Node` directly.)
+//! #[derive(Clone, Copy)]
+//! struct NodeRef<'dom> {
+//!     tree: &'dom Tree,
+//!     index: usize,
 //! }
 //!
-//! impl TraverseTree for Source {
-//!     type ChildIter<'a> = std::iter::Copied<std::slice::Iter<'a, NodeId>>;
-//!
-//!     fn child_ids(&self, parent: NodeId) -> Self::ChildIter<'_> {
-//!         self.node(parent).children.iter().copied()
-//!     }
-//!
-//!     fn child_count(&self, parent: NodeId) -> usize {
-//!         self.node(parent).children.len()
-//!     }
-//!
-//!     fn child_id(&self, parent: NodeId, index: usize) -> NodeId {
-//!         self.node(parent).children[index]
+//! // Identify the node, not the whole tree, in debug output.
+//! impl std::fmt::Debug for NodeRef<'_> {
+//!     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//!         formatter.debug_tuple("NodeRef").field(&self.index).finish()
 //!     }
 //! }
 //!
-//! impl LayoutSource for Source {
-//!     type CoreStyle<'a> = &'a Style;
-//!
-//!     fn core_style(&self, node: NodeId) -> Self::CoreStyle<'_> {
-//!         &self.node(node).style
-//!     }
-//!
-//!     fn resolve_calc(&self, _calc: CalcHandle, _basis: f32) -> f32 {
-//!         unreachable!("this host's styles never carry calc()")
+//! impl<'dom> NodeRef<'dom> {
+//!     fn node(self) -> &'dom Node {
+//!         &self.tree.nodes[self.index]
 //!     }
 //! }
 //!
-//! struct Session {
-//!     layouts: Vec<Layout>,
+//! struct Children<'dom> {
+//!     tree: &'dom Tree,
+//!     ids: std::slice::Iter<'dom, usize>,
 //! }
 //!
-//! impl LayoutState for Session {
-//!     fn set_unrounded_layout(&mut self, node: NodeId, layout: &Layout) {
-//!         self.layouts[usize::from(node)] = *layout;
-//!     }
+//! impl<'dom> Iterator for Children<'dom> {
+//!     type Item = NodeRef<'dom>;
 //!
-//!     fn set_static_position(&mut self, child: NodeId, static_position: Point<f32>) {
-//!         // This toy has no hoisted out-of-flow nodes; real hosts store
-//!         // this for the positioned pass (compute_absolute_layout).
-//!         let _ = (child, static_position);
+//!     fn next(&mut self) -> Option<NodeRef<'dom>> {
+//!         let index = *self.ids.next()?;
+//!         Some(NodeRef {
+//!             tree: self.tree,
+//!             index,
+//!         })
 //!     }
 //! }
 //!
-//! impl CacheState for Session {
-//!     fn cache_get(&self, _: NodeId, _: LayoutInput) -> Option<LayoutOutput> {
-//!         None
-//!     }
-//!     fn cache_store(&mut self, _: NodeId, _: LayoutInput, _: LayoutOutput) {}
-//!     fn cache_clear(&mut self, _: NodeId) {}
-//! }
+//! impl<'dom> LayoutNode for NodeRef<'dom> {
+//!     type Style = &'dom Style;
+//!     type ChildIter = Children<'dom>;
 //!
-//! impl LayoutSession<Source> for Session {
-//!     fn compute_child_layout(
-//!         &mut self,
-//!         source: &Source,
-//!         child: NodeId,
-//!         input: LayoutInput,
-//!     ) -> LayoutOutput {
-//!         // Real hosts handle display:none before compute_cached_layout,
-//!         // then dispatch visible nodes (see the `compute` module docs).
+//!     fn children(self) -> Children<'dom> {
+//!         Children {
+//!             tree: self.tree,
+//!             ids: self.node().children.iter(),
+//!         }
+//!     }
+//!
+//!     fn child_count(self) -> usize {
+//!         self.node().children.len()
+//!     }
+//!
+//!     fn style(self) -> &'dom Style {
+//!         &self.node().style
+//!     }
+//!
+//!     fn compute_child_layout(self, input: LayoutInput) -> LayoutOutput {
+//!         // Real hosts route on display: handle display:none with
+//!         // hide_subtree, then dispatch visible nodes inside
+//!         // compute_cached_layout (see the `compute` module docs).
 //!         // This toy treats every node as an empty visible leaf:
-//!         let _ = source.core_style(child);
+//!         let _ = self.style();
 //!         LayoutOutput::new(input.known_dimensions.unwrap_or(Size::ZERO), Size::ZERO)
 //!     }
+//!
+//!     fn set_unrounded_layout(self, layout: &Layout) {
+//!         self.node().layout.set(*layout);
+//!     }
+//!
+//!     fn unrounded_layout(self) -> Layout {
+//!         self.node().layout.get()
+//!     }
+//!
+//!     fn set_final_layout(self, layout: &Layout) {
+//!         self.node().final_layout.set(*layout);
+//!     }
+//!
+//!     fn set_static_position(self, static_position: Point<f32>) {
+//!         // This toy has no hoisted out-of-flow nodes; real hosts store
+//!         // this for the positioned pass (compute_absolute_layout).
+//!         let _ = static_position;
+//!     }
+//!
+//!     // Caching deliberately disabled; real hosts embed one
+//!     // `RefCell<neutron_star::cache::Cache>` per node and delegate.
+//!     fn cache_get(self, _input: LayoutInput) -> Option<LayoutOutput> {
+//!         None
+//!     }
+//!
+//!     fn cache_store(self, _input: LayoutInput, _output: LayoutOutput) {}
+//!
+//!     fn cache_clear(self) {}
 //! }
 //!
-//! let source = Source {
-//!     nodes: vec![SourceNode {
+//! let tree = Tree {
+//!     nodes: vec![Node {
 //!         style: Style,
 //!         children: vec![],
+//!         layout: Cell::new(Layout::default()),
+//!         final_layout: Cell::new(Layout::default()),
 //!     }],
 //! };
-//! let mut session = Session {
-//!     layouts: vec![Layout::default()],
+//! let root = NodeRef {
+//!     tree: &tree,
+//!     index: 0,
 //! };
-//! let root = NodeId::from(0_usize);
-//! let output = session.compute_child_layout(&source, root, LayoutInput::default());
+//! let output = root.compute_child_layout(LayoutInput::default());
 //! assert_eq!(output.size, Size::ZERO);
 //! ```
 
@@ -192,12 +230,12 @@ pub mod style;
 pub mod text;
 pub mod tree;
 
-/// One-stop imports for implementing a host: every protocol trait plus the
-/// types that appear in their signatures.
+/// One-stop imports for implementing a host: the node-handle trait plus the
+/// types that appear in its signatures.
 ///
-/// Value-type vocabulary that only appears *inside* style accessors
-/// (`Dimension`, alignment enums, grid track types, …) is not re-exported
-/// here — pull it from [`style`] as needed.
+/// Value-type vocabulary that only appears *inside* style accessors (stylo
+/// computed sizes, alignment wrappers, grid track types, …) is not
+/// re-exported here — pull it from [`style`] (or the stylo crate) as needed.
 pub mod prelude {
     pub use crate::compute::{
         FnLeafMeasurer, LeafMeasureInput, LeafMeasurement, LeafMeasurer, LeafMetrics,
@@ -205,12 +243,11 @@ pub mod prelude {
     pub use crate::geometry::{Edges, Line, Point, Size};
     pub use crate::style::{
         CoreStyle, FlexContainerStyle, FlexItemStyle, GridContainerStyle, GridItemStyle,
-        GridTemplateRepetition, LinearContainerStyle, LinearItemStyle, RelativeContainerStyle,
-        RelativeItemStyle, TextContainerStyle, TextRunStyle,
+        LinearContainerStyle, LinearItemStyle, RelativeContainerStyle, RelativeItemStyle,
+        TextContainerStyle, TextRunStyle,
     };
     pub use crate::tree::{
-        AvailableSpace, CacheState, FlexSource, GridSource, Layout, LayoutGoal, LayoutInput,
-        LayoutOutput, LayoutSession, LayoutSource, LayoutState, LinearSource, NodeId,
-        RelativeSource, RequestedAxis, RoundState, SizingMode, TraverseTree,
+        AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
+        SizingMode,
     };
 }

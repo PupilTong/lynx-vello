@@ -4,6 +4,8 @@
 //! the timed region. The measured closure covers layout, dependency solving,
 //! recursive child dispatch, and host-owned cache traffic.
 
+use std::cell::{Cell, RefCell};
+
 use divan::counter::ItemsCount;
 use neutron_star::cache::Cache;
 use neutron_star::compute::{
@@ -11,57 +13,69 @@ use neutron_star::compute::{
     compute_relative_layout, hide_subtree,
 };
 use neutron_star::prelude::*;
-use neutron_star::style::{
-    BoxGenerationMode, CalcHandle, Dimension, Position, RelativeCenter, RelativeContainerStyle,
-    RelativeItemStyle, RelativeReference,
+use stylo::computed_values::{relative_center, relative_layout_once};
+use stylo::values::computed::lynx_layout::{RelativeAlign, RelativeReference};
+use stylo::values::computed::{
+    Display, Length, LengthPercentage, PositionProperty, Size as StyleSize,
 };
+use stylo::values::generics::NonNegative;
+
+/// `relative-id` / `relative-align` / `relative-*-of` share the fork's `i32`
+/// sentinel encoding: `-1` = none, `0` = parent (align only), `>0` = sibling.
+const NO_REFERENCE: RelativeReference = -1;
+const PARENT_REFERENCE: RelativeAlign = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Display {
+enum BenchDisplay {
     Relative,
     Leaf,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct BenchStyle {
-    size: Size<Dimension>,
-    position: Position,
+    size: Size<StyleSize>,
+    position: PositionProperty,
     relative_id: RelativeReference,
-    align: Edges<RelativeReference>,
+    align: Edges<RelativeAlign>,
     adjacent: Edges<RelativeReference>,
-    center: RelativeCenter,
-    layout_once: bool,
+    center: relative_center::T,
+    layout_once: relative_layout_once::T,
 }
 
 impl Default for BenchStyle {
     fn default() -> Self {
         Self {
-            size: Size::new(Dimension::Auto, Dimension::Auto),
-            position: Position::Relative,
-            relative_id: RelativeReference::NONE,
-            align: Edges::uniform(RelativeReference::NONE),
-            adjacent: Edges::uniform(RelativeReference::NONE),
-            center: RelativeCenter::None,
-            layout_once: false,
+            size: Size::new(StyleSize::Auto, StyleSize::Auto),
+            position: PositionProperty::Relative,
+            relative_id: NO_REFERENCE,
+            align: Edges::uniform(NO_REFERENCE),
+            adjacent: Edges::uniform(NO_REFERENCE),
+            center: relative_center::T::None,
+            layout_once: relative_layout_once::T::False,
         }
     }
 }
 
 impl CoreStyle for BenchStyle {
     #[inline]
-    fn size(&self) -> Size<Dimension> {
-        self.size
+    fn display(&self) -> Display {
+        Display::LynxRelative
     }
 
     #[inline]
-    fn position(&self) -> Position {
+    fn size(&self) -> Size<&StyleSize> {
+        self.size.as_ref()
+    }
+
+    #[inline]
+    fn position(&self) -> PositionProperty {
         self.position
     }
 }
 
 impl RelativeContainerStyle for BenchStyle {
     #[inline]
-    fn relative_layout_once(&self) -> bool {
+    fn relative_layout_once(&self) -> relative_layout_once::T {
         self.layout_once
     }
 }
@@ -73,7 +87,7 @@ impl RelativeItemStyle for BenchStyle {
     }
 
     #[inline]
-    fn relative_align(&self) -> Edges<RelativeReference> {
+    fn relative_align(&self) -> Edges<RelativeAlign> {
         self.align
     }
 
@@ -83,202 +97,211 @@ impl RelativeItemStyle for BenchStyle {
     }
 
     #[inline]
-    fn relative_center(&self) -> RelativeCenter {
+    fn relative_center(&self) -> relative_center::T {
         self.center
     }
 }
 
 #[derive(Debug)]
 struct SourceNode {
-    display: Display,
+    display: BenchDisplay,
     style: BenchStyle,
-    children: Vec<NodeId>,
+    children: Vec<usize>,
     intrinsic: Size<f32>,
 }
 
-#[derive(Debug, Default)]
-struct Source {
-    nodes: Vec<SourceNode>,
-}
-
-impl Source {
-    #[inline]
-    fn node(&self, node: NodeId) -> &SourceNode {
-        &self.nodes[usize::from(node)]
-    }
-}
-
+/// Per-node mutable layout slots, written through [`BenchRef`] handles.
+/// Layout is single-threaded, so `Cell`/`RefCell` interior mutability is the
+/// whole synchronization story.
 #[derive(Debug, Default)]
 struct SessionNode {
-    cache: Cache,
-    layout: Layout,
-    static_position: Point<f32>,
+    cache: RefCell<Cache>,
+    layout: Cell<Layout>,
+    static_position: Cell<Point<f32>>,
 }
 
-#[derive(Debug, Default)]
-struct Session {
-    nodes: Vec<SessionNode>,
-}
-
+/// The one host tree: source-shaped immutable node data plus a parallel
+/// `Vec` of interior-mutable session slots, keeping memory layout comparable
+/// with the pre-handle two-store host.
 #[derive(Debug, Default)]
 struct Tree {
-    source: Source,
-    session: Session,
+    nodes: Vec<SourceNode>,
+    session: Vec<SessionNode>,
 }
 
 impl Tree {
-    fn push(&mut self, node: SourceNode) -> NodeId {
-        let id = NodeId::from(self.source.nodes.len());
-        self.source.nodes.push(node);
-        self.session.nodes.push(SessionNode::default());
+    fn push(&mut self, node: SourceNode) -> usize {
+        let id = self.nodes.len();
+        self.nodes.push(node);
+        self.session.push(SessionNode::default());
         id
     }
 
-    fn leaf(&mut self, style: BenchStyle, intrinsic: Size<f32>) -> NodeId {
+    fn leaf(&mut self, style: BenchStyle, intrinsic: Size<f32>) -> usize {
         self.push(SourceNode {
-            display: Display::Leaf,
+            display: BenchDisplay::Leaf,
             style,
             children: Vec::new(),
             intrinsic,
         })
     }
 
-    fn relative(&mut self, style: BenchStyle, children: Vec<NodeId>) -> NodeId {
+    fn relative(&mut self, style: BenchStyle, children: Vec<usize>) -> usize {
         self.push(SourceNode {
-            display: Display::Relative,
+            display: BenchDisplay::Relative,
             style,
             children,
             intrinsic: Size::ZERO,
         })
     }
-}
 
-impl TraverseTree for Source {
-    type ChildIter<'a> = std::iter::Copied<std::slice::Iter<'a, NodeId>>;
-
+    /// Resolves a builder-returned index to a borrowed node handle.
     #[inline]
-    fn child_ids(&self, parent: NodeId) -> Self::ChildIter<'_> {
-        self.node(parent).children.iter().copied()
+    fn node(&self, index: usize) -> BenchRef<'_> {
+        BenchRef { tree: self, index }
     }
 
     #[inline]
-    fn child_count(&self, parent: NodeId) -> usize {
-        self.node(parent).children.len()
-    }
-
-    #[inline]
-    fn child_id(&self, parent: NodeId, index: usize) -> NodeId {
-        self.node(parent).children[index]
+    fn layout(&self, index: usize) -> Layout {
+        self.session[index].layout.get()
     }
 }
 
-impl LayoutSource for Source {
-    type CoreStyle<'a> = &'a BenchStyle;
+/// The `Copy` node handle: a borrow of the tree plus a node index.
+#[derive(Clone, Copy)]
+struct BenchRef<'t> {
+    tree: &'t Tree,
+    index: usize,
+}
 
-    #[inline]
-    fn core_style(&self, node: NodeId) -> Self::CoreStyle<'_> {
-        &self.node(node).style
-    }
-
-    fn resolve_calc(&self, _calc: CalcHandle, _basis: f32) -> f32 {
-        unreachable!("relative benchmarks contain no calc() values")
+impl std::fmt::Debug for BenchRef<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("BenchRef")
+            .field(&self.index)
+            .finish()
     }
 }
 
-impl RelativeSource for Source {
-    type ContainerStyle<'a> = &'a BenchStyle;
-    type ItemStyle<'a> = &'a BenchStyle;
-
+impl<'t> BenchRef<'t> {
     #[inline]
-    fn relative_container_style(&self, container: NodeId) -> Self::ContainerStyle<'_> {
-        &self.node(container).style
+    fn source(self) -> &'t SourceNode {
+        &self.tree.nodes[self.index]
     }
 
     #[inline]
-    fn relative_item_style(&self, item: NodeId) -> Self::ItemStyle<'_> {
-        &self.node(item).style
+    fn slots(self) -> &'t SessionNode {
+        &self.tree.session[self.index]
     }
 }
 
-impl LayoutState for Session {
-    #[inline]
-    fn set_unrounded_layout(&mut self, node: NodeId, layout: &Layout) {
-        self.nodes[usize::from(node)].layout = *layout;
-    }
+struct BenchChildren<'t> {
+    tree: &'t Tree,
+    ids: std::slice::Iter<'t, usize>,
+}
 
-    #[inline]
-    fn set_static_position(&mut self, child: NodeId, static_position: Point<f32>) {
-        self.nodes[usize::from(child)].static_position = static_position;
+impl<'t> Iterator for BenchChildren<'t> {
+    type Item = BenchRef<'t>;
+
+    fn next(&mut self) -> Option<BenchRef<'t>> {
+        let index = *self.ids.next()?;
+        Some(BenchRef {
+            tree: self.tree,
+            index,
+        })
     }
 }
 
-impl CacheState for Session {
+impl<'t> LayoutNode for BenchRef<'t> {
+    type Style = &'t BenchStyle;
+    type ChildIter = BenchChildren<'t>;
+
     #[inline]
-    fn cache_get(&self, node: NodeId, input: LayoutInput) -> Option<LayoutOutput> {
-        self.nodes[usize::from(node)].cache.get(input)
+    fn children(self) -> BenchChildren<'t> {
+        BenchChildren {
+            tree: self.tree,
+            ids: self.source().children.iter(),
+        }
     }
 
     #[inline]
-    fn cache_store(&mut self, node: NodeId, input: LayoutInput, output: LayoutOutput) {
-        self.nodes[usize::from(node)].cache.store(input, output);
+    fn child_count(self) -> usize {
+        self.source().children.len()
     }
 
     #[inline]
-    fn cache_clear(&mut self, node: NodeId) {
-        self.nodes[usize::from(node)].cache.clear();
+    fn style(self) -> &'t BenchStyle {
+        &self.source().style
     }
-}
 
-impl LayoutSession<Source> for Session {
-    #[inline]
-    fn compute_child_layout(
-        &mut self,
-        source: &Source,
-        child: NodeId,
-        input: LayoutInput,
-    ) -> LayoutOutput {
-        let node = source.node(child);
-        if node.style.box_generation_mode() == BoxGenerationMode::None {
-            hide_subtree(source, self, child);
+    fn compute_child_layout(self, input: LayoutInput) -> LayoutOutput {
+        let node = self.source();
+        if node.style.display().is_none() {
+            hide_subtree(self);
             return LayoutOutput::HIDDEN;
         }
 
-        compute_cached_layout(self, child, input, |session, child, input| {
-            match node.display {
-                Display::Relative => compute_relative_layout(source, session, child, input),
-                Display::Leaf => {
-                    let intrinsic = node.intrinsic;
-                    let mut measurer = FnLeafMeasurer::new(move |measure_input| {
-                        LeafMetrics::new(Size::new(
-                            measure_input
-                                .known_dimensions
-                                .width
-                                .unwrap_or(intrinsic.width),
-                            measure_input
-                                .known_dimensions
-                                .height
-                                .unwrap_or(intrinsic.height),
-                        ))
-                    });
-                    compute_leaf_layout(
-                        input,
-                        &node.style,
-                        |_calc, _basis| {
-                            unreachable!("relative benchmarks contain no calc() values")
-                        },
-                        &mut measurer,
-                    )
-                }
+        compute_cached_layout(self, input, |handle, input| match node.display {
+            BenchDisplay::Relative => compute_relative_layout(handle, input),
+            BenchDisplay::Leaf => {
+                let intrinsic = node.intrinsic;
+                let mut measurer = FnLeafMeasurer::new(move |measure_input| {
+                    LeafMetrics::new(Size::new(
+                        measure_input
+                            .known_dimensions
+                            .width
+                            .unwrap_or(intrinsic.width),
+                        measure_input
+                            .known_dimensions
+                            .height
+                            .unwrap_or(intrinsic.height),
+                    ))
+                });
+                compute_leaf_layout(input, &node.style, &mut measurer)
             }
         })
+    }
+
+    #[inline]
+    fn set_unrounded_layout(self, layout: &Layout) {
+        self.slots().layout.set(*layout);
+    }
+
+    #[inline]
+    fn unrounded_layout(self) -> Layout {
+        self.slots().layout.get()
+    }
+
+    fn set_final_layout(self, _layout: &Layout) {
+        unreachable!("relative benchmarks do not run the rounding pass")
+    }
+
+    #[inline]
+    fn set_static_position(self, static_position: Point<f32>) {
+        self.slots().static_position.set(static_position);
+    }
+
+    #[inline]
+    fn cache_get(self, input: LayoutInput) -> Option<LayoutOutput> {
+        self.slots().cache.borrow().get(input)
+    }
+
+    #[inline]
+    fn cache_store(self, input: LayoutInput, output: LayoutOutput) {
+        self.slots().cache.borrow_mut().store(input, output);
+    }
+
+    #[inline]
+    fn cache_clear(self) {
+        self.slots().cache.borrow_mut().clear();
     }
 }
 
 #[derive(Debug)]
 struct Fixture {
     tree: Tree,
-    root: NodeId,
-    probes: [NodeId; 3],
+    root: usize,
+    probes: [usize; 3],
     viewport: Size<f32>,
     item_count: usize,
 }
@@ -290,16 +313,15 @@ impl Fixture {
     fn run(&mut self) -> GeometrySample {
         let known = self.viewport.map(Some);
         let available = self.viewport.map(AvailableSpace::Definite);
-        let output = self.tree.session.compute_child_layout(
-            &self.tree.source,
-            self.root,
-            LayoutInput::perform_layout(known, known, available),
-        );
+        let output = self
+            .tree
+            .node(self.root)
+            .compute_child_layout(LayoutInput::perform_layout(known, known, available));
         (
             output,
-            self.tree.session.nodes[usize::from(self.probes[0])].layout,
-            self.tree.session.nodes[usize::from(self.probes[1])].layout,
-            self.tree.session.nodes[usize::from(self.probes[2])].layout,
+            self.tree.layout(self.probes[0]),
+            self.tree.layout(self.probes[1]),
+            self.tree.layout(self.probes[2]),
         )
     }
 
@@ -308,22 +330,21 @@ impl Fixture {
         let known = Size::new(None, Some(self.viewport.height));
         let parent_size = self.viewport.map(Some);
         let available = self.viewport.map(AvailableSpace::Definite);
-        let output = self.tree.session.compute_child_layout(
-            &self.tree.source,
-            self.root,
-            LayoutInput::perform_layout(known, parent_size, available),
-        );
+        let output = self
+            .tree
+            .node(self.root)
+            .compute_child_layout(LayoutInput::perform_layout(known, parent_size, available));
         (
             output,
-            self.tree.session.nodes[usize::from(self.probes[0])].layout,
-            self.tree.session.nodes[usize::from(self.probes[1])].layout,
-            self.tree.session.nodes[usize::from(self.probes[2])].layout,
+            self.tree.layout(self.probes[0]),
+            self.tree.layout(self.probes[1]),
+            self.tree.layout(self.probes[2]),
         )
     }
 
     #[inline]
     fn clear_root_cache(&mut self) {
-        self.tree.session.cache_clear(self.root);
+        self.tree.node(self.root).cache_clear();
     }
 }
 
@@ -337,7 +358,23 @@ enum GraphKind {
 
 #[inline]
 fn reference(value: usize) -> RelativeReference {
-    RelativeReference::new(i32::try_from(value).expect("benchmark ids fit i32"))
+    i32::try_from(value).expect("benchmark ids fit i32")
+}
+
+#[inline]
+fn once(flag: bool) -> relative_layout_once::T {
+    if flag {
+        relative_layout_once::T::True
+    } else {
+        relative_layout_once::T::False
+    }
+}
+
+#[inline]
+fn px_size(value: f32) -> StyleSize {
+    StyleSize::LengthPercentage(NonNegative(LengthPercentage::new_length(Length::new(
+        value,
+    ))))
 }
 
 #[inline]
@@ -356,7 +393,7 @@ fn graph_fixture(item_count: usize, layout_once: bool, kind: GraphKind) -> Fixtu
             }
         };
         let mut style = BenchStyle {
-            size: Size::new(Dimension::Length(4.0), Dimension::Length(4.0)),
+            size: Size::new(px_size(4.0), px_size(4.0)),
             relative_id,
             ..BenchStyle::default()
         };
@@ -371,7 +408,7 @@ fn graph_fixture(item_count: usize, layout_once: bool, kind: GraphKind) -> Fixtu
                 }
             }
             GraphKind::DuplicateIds => {
-                style.align.left = RelativeReference::PARENT;
+                style.align.left = PARENT_REFERENCE;
                 if index >= 32 {
                     style.adjacent.bottom = reference(index % 32 + 1);
                 }
@@ -390,7 +427,7 @@ fn graph_fixture(item_count: usize, layout_once: bool, kind: GraphKind) -> Fixtu
     ];
     let root = tree.relative(
         BenchStyle {
-            layout_once,
+            layout_once: once(layout_once),
             ..BenchStyle::default()
         },
         children,
@@ -414,7 +451,7 @@ fn nested_fixture() -> Fixture {
         let mut children = Vec::with_capacity(ITEMS);
         for index in 0..ITEMS {
             let mut style = BenchStyle {
-                size: Size::new(Dimension::Length(4.0), Dimension::Length(4.0)),
+                size: Size::new(px_size(4.0), px_size(4.0)),
                 relative_id: reference(index + 1),
                 ..BenchStyle::default()
             };

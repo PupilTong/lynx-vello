@@ -46,7 +46,7 @@ pub enum RequestedAxis {
 /// Measurement is side-effect free: child layouts must not be stored. A
 /// commit produces final sizes and positions for the node's children and
 /// stores them through
-/// [`LayoutState::set_unrounded_layout`](crate::tree::LayoutState::set_unrounded_layout).
+/// [`LayoutNode::set_unrounded_layout`](crate::tree::LayoutNode::set_unrounded_layout).
 /// Hidden-subtree zeroing is a separate operation provided by
 /// [`hide_subtree`](crate::compute::hide_subtree), not a
 /// sizing goal.
@@ -205,14 +205,14 @@ impl LayoutInput {
 ///
 /// This is the *transient* answer the parent algorithm consumes; the durable
 /// per-node record is [`Layout`], stored separately via
-/// [`LayoutState::set_unrounded_layout`](crate::tree::LayoutState::set_unrounded_layout).
+/// [`LayoutNode::set_unrounded_layout`](crate::tree::LayoutNode::set_unrounded_layout).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct LayoutOutput {
     /// The node's border-box size.
     pub size: Size<f32>,
     /// The node's scrollable-overflow size: the extent of content measured
-    /// from the border-box origin, ≥ `size` minus borders/scrollbars. Feeds
+    /// from the border-box origin, ≥ `size` minus borders. Feeds
     /// ancestors' own `content_size` and the host's scroll ranges.
     pub content_size: Size<f32>,
     /// First-baseline offsets from the border-box origin, per axis, if the
@@ -255,7 +255,7 @@ impl LayoutOutput {
 /// by the host/renderer). Relative-position insets are already applied.
 /// Values are unrounded CSS pixels until
 /// [`round_layout`](crate::compute::round_layout) writes the rounded copy
-/// via [`RoundState`](crate::tree::RoundState).
+/// via [`LayoutNode::set_final_layout`](crate::tree::LayoutNode::set_final_layout).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct Layout {
@@ -269,9 +269,6 @@ pub struct Layout {
     pub size: Size<f32>,
     /// Scrollable-overflow size (see [`LayoutOutput::content_size`]).
     pub content_size: Size<f32>,
-    /// Scrollbar space reserved on each axis (`x` is width reserved by a
-    /// vertical scrollbar, `y` height by a horizontal one).
-    pub scrollbar_size: Size<f32>,
     /// Used border widths.
     pub border: Edges<f32>,
     /// Used padding.

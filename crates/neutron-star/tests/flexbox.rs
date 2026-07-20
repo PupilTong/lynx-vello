@@ -1,8 +1,9 @@
 //! Spec-focused flexbox integration tests over a plain `Vec`-backed host.
 //!
 //! The host deliberately has no styling engine. `TestStyle` is already the
-//! computed style view, and leaf measurement is a deterministic intrinsic
-//! size stored alongside each node.
+//! computed style view — stylo computed values served straight from struct
+//! fields — and leaf measurement is a deterministic intrinsic size stored
+//! alongside each node.
 
 mod support;
 
@@ -10,25 +11,23 @@ use neutron_star::compute::{
     FnLeafMeasurer, LeafMetrics, compute_absolute_layout, compute_leaf_layout,
 };
 use neutron_star::prelude::*;
-use neutron_star::style::{
-    AlignContent, AlignItems, AlignSelf, BoxGenerationMode, BoxSizing, Dimension, Direction,
-    FlexDirection, FlexWrap, JustifyContent, LengthPercentage, LengthPercentageAuto, Overflow,
-    Position, Visibility,
-};
+use stylo::computed_values::{box_sizing, direction, flex_direction, flex_wrap};
+use stylo::values::computed::{Display, MaxSize, Overflow, PositionProperty};
+use stylo::values::specified::align::AlignFlags;
 use support::*;
 
 #[test]
 fn flex_grow_distributes_free_space_proportionally() {
     let mut tree = TestTree::default();
     let mut first_style = fixed_leaf_style(50.0, 20.0);
-    first_style.flex_grow = 1.0;
+    first_style.flex_grow = nn(1.0);
     let first = tree.push_leaf(first_style, Size::new(50.0, 20.0), None);
     let mut second_style = fixed_leaf_style(50.0, 20.0);
-    second_style.flex_grow = 2.0;
+    second_style.flex_grow = nn(2.0);
     let second = tree.push_leaf(second_style, Size::new(50.0, 20.0), None);
     let root = flex_container(&mut tree, TestStyle::default(), &[first, second]);
 
-    definite_layout(&mut tree, root, 300.0, 20.0);
+    definite_layout(&tree, root, 300.0, 20.0);
 
     assert_close(tree.layout(first).size.width, 350.0 / 3.0);
     assert_close(tree.layout(second).size.width, 550.0 / 3.0);
@@ -39,14 +38,14 @@ fn flex_grow_distributes_free_space_proportionally() {
 fn flex_grow_sum_below_one_leaves_part_of_the_free_space() {
     let mut tree = TestTree::default();
     let mut first_style = fixed_leaf_style(50.0, 20.0);
-    first_style.flex_grow = 0.2;
+    first_style.flex_grow = nn(0.2);
     let first = tree.push_leaf(first_style, Size::new(50.0, 20.0), None);
     let mut second_style = fixed_leaf_style(50.0, 20.0);
-    second_style.flex_grow = 0.2;
+    second_style.flex_grow = nn(0.2);
     let second = tree.push_leaf(second_style, Size::new(50.0, 20.0), None);
     let root = flex_container(&mut tree, TestStyle::default(), &[first, second]);
 
-    definite_layout(&mut tree, root, 300.0, 20.0);
+    definite_layout(&tree, root, 300.0, 20.0);
 
     assert_close(tree.layout(first).size.width, 90.0);
     assert_close(tree.layout(second).size.width, 90.0);
@@ -57,14 +56,14 @@ fn flex_grow_sum_below_one_leaves_part_of_the_free_space() {
 fn flex_shrink_uses_scaled_flex_shrink_factors() {
     let mut tree = TestTree::default();
     let mut first_style = fixed_leaf_style(100.0, 20.0);
-    first_style.min_size.width = Dimension::ZERO;
+    first_style.min_size.width = size_px(0.0);
     let first = tree.push_leaf(first_style, Size::new(100.0, 20.0), None);
     let mut second_style = fixed_leaf_style(200.0, 20.0);
-    second_style.min_size.width = Dimension::ZERO;
+    second_style.min_size.width = size_px(0.0);
     let second = tree.push_leaf(second_style, Size::new(200.0, 20.0), None);
     let root = flex_container(&mut tree, TestStyle::default(), &[first, second]);
 
-    definite_layout(&mut tree, root, 180.0, 20.0);
+    definite_layout(&tree, root, 180.0, 20.0);
 
     assert_close(tree.layout(first).size.width, 60.0);
     assert_close(tree.layout(second).size.width, 120.0);
@@ -75,24 +74,24 @@ fn flex_shrink_uses_scaled_flex_shrink_factors() {
 fn min_and_max_constraints_refreeze_flexible_items() {
     let mut grow_tree = TestTree::default();
     let mut capped_style = fixed_leaf_style(100.0, 20.0);
-    capped_style.flex_grow = 1.0;
-    capped_style.max_size.width = Dimension::Length(120.0);
+    capped_style.flex_grow = nn(1.0);
+    capped_style.max_size.width = max_px(120.0);
     let capped = grow_tree.push_leaf(capped_style, Size::new(100.0, 20.0), None);
     let mut growing_style = fixed_leaf_style(100.0, 20.0);
-    growing_style.flex_grow = 1.0;
+    growing_style.flex_grow = nn(1.0);
     let growing = grow_tree.push_leaf(growing_style, Size::new(100.0, 20.0), None);
     let grow_root = flex_container(&mut grow_tree, TestStyle::default(), &[capped, growing]);
 
-    definite_layout(&mut grow_tree, grow_root, 300.0, 20.0);
+    definite_layout(&grow_tree, grow_root, 300.0, 20.0);
     assert_close(grow_tree.layout(capped).size.width, 120.0);
     assert_close(grow_tree.layout(growing).size.width, 180.0);
 
     let mut shrink_tree = TestTree::default();
     let mut floored_style = fixed_leaf_style(100.0, 20.0);
-    floored_style.min_size.width = Dimension::Length(90.0);
+    floored_style.min_size.width = size_px(90.0);
     let floored = shrink_tree.push_leaf(floored_style, Size::new(100.0, 20.0), None);
     let mut shrinking_style = fixed_leaf_style(100.0, 20.0);
-    shrinking_style.min_size.width = Dimension::ZERO;
+    shrinking_style.min_size.width = size_px(0.0);
     let shrinking = shrink_tree.push_leaf(shrinking_style, Size::new(100.0, 20.0), None);
     let shrink_root = flex_container(
         &mut shrink_tree,
@@ -100,7 +99,7 @@ fn min_and_max_constraints_refreeze_flexible_items() {
         &[floored, shrinking],
     );
 
-    definite_layout(&mut shrink_tree, shrink_root, 160.0, 20.0);
+    definite_layout(&shrink_tree, shrink_root, 160.0, 20.0);
     assert_close(shrink_tree.layout(floored).size.width, 90.0);
     assert_close(shrink_tree.layout(shrinking).size.width, 70.0);
 }
@@ -112,17 +111,14 @@ fn wrapping_accounts_for_column_and_row_gaps() {
     let second = fixed_leaf(&mut tree, 100.0, 20.0);
     let third = fixed_leaf(&mut tree, 100.0, 20.0);
     let container_style = TestStyle {
-        flex_wrap: FlexWrap::Wrap,
-        gap: Size::new(
-            LengthPercentage::length(10.0),
-            LengthPercentage::length(5.0),
-        ),
+        flex_wrap: flex_wrap::T::Wrap,
+        gap: Size::new(gap_px(10.0), gap_px(5.0)),
         ..TestStyle::default()
     };
     let root = flex_container(&mut tree, container_style, &[first, second, third]);
 
     let output = perform_layout(
-        &mut tree,
+        &tree,
         root,
         Size::new(Some(210.0), None),
         Size::new(AvailableSpace::Definite(210.0), AvailableSpace::MaxContent),
@@ -146,15 +142,15 @@ mod line_collection {
         let root = flex_container(
             &mut tree,
             TestStyle {
-                flex_wrap: FlexWrap::Wrap,
-                align_items: Some(AlignItems::FlexStart),
+                flex_wrap: flex_wrap::T::Wrap,
+                align_items: items(AlignFlags::FLEX_START),
                 ..TestStyle::default()
             },
             &[exact_fit, zero_sized, next_line],
         );
 
         let output = perform_layout(
-            &mut tree,
+            &tree,
             root,
             Size::new(Some(50.0), None),
             Size::new(AvailableSpace::Definite(50.0), AvailableSpace::MaxContent),
@@ -172,7 +168,7 @@ mod line_collection {
         let mut tree = TestTree::default();
         let oversized = tree.push_leaf(
             TestStyle {
-                flex_shrink: 0.0,
+                flex_shrink: nn(0.0),
                 ..fixed_leaf_style(50.0, 10.0)
             },
             Size::new(50.0, 10.0),
@@ -182,15 +178,15 @@ mod line_collection {
         let root = flex_container(
             &mut tree,
             TestStyle {
-                flex_wrap: FlexWrap::Wrap,
-                align_items: Some(AlignItems::FlexStart),
+                flex_wrap: flex_wrap::T::Wrap,
+                align_items: items(AlignFlags::FLEX_START),
                 ..TestStyle::default()
             },
             &[oversized, next],
         );
 
         let output = perform_layout(
-            &mut tree,
+            &tree,
             root,
             Size::new(Some(30.0), None),
             Size::new(AvailableSpace::Definite(30.0), AvailableSpace::MaxContent),
@@ -208,7 +204,7 @@ mod line_collection {
         let mut growing = |basis| {
             tree.push_leaf(
                 TestStyle {
-                    flex_grow: 1.0,
+                    flex_grow: nn(1.0),
                     ..fixed_leaf_style(basis, 10.0)
                 },
                 Size::new(basis, 10.0),
@@ -222,15 +218,15 @@ mod line_collection {
         let root = flex_container(
             &mut tree,
             TestStyle {
-                flex_wrap: FlexWrap::Wrap,
-                align_items: Some(AlignItems::FlexStart),
+                flex_wrap: flex_wrap::T::Wrap,
+                align_items: items(AlignFlags::FLEX_START),
                 ..TestStyle::default()
             },
             &[first, second, third, fourth],
         );
 
         let output = perform_layout(
-            &mut tree,
+            &tree,
             root,
             Size::new(Some(100.0), None),
             Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
@@ -247,9 +243,9 @@ mod line_collection {
 }
 
 fn direction_fixture(
-    flex_direction: FlexDirection,
-    direction: Direction,
-) -> (TestTree, NodeId, NodeId, NodeId) {
+    flex_direction: flex_direction::T,
+    direction: direction::T,
+) -> (TestTree, TestId, TestId, TestId) {
     let mut tree = TestTree::default();
     let first = fixed_leaf(&mut tree, 20.0, 20.0);
     let second = fixed_leaf(&mut tree, 30.0, 30.0);
@@ -258,7 +254,7 @@ fn direction_fixture(
         TestStyle {
             flex_direction,
             direction,
-            align_items: Some(AlignItems::FlexStart),
+            align_items: items(AlignFlags::FLEX_START),
             ..TestStyle::default()
         },
         &[first, second],
@@ -270,46 +266,46 @@ fn direction_fixture(
 fn row_column_reverse_and_rtl_resolve_physical_main_axes() {
     let cases = [
         (
-            FlexDirection::Row,
-            Direction::Ltr,
+            flex_direction::T::Row,
+            direction::T::Ltr,
             Point::new(0.0, 0.0),
             Point::new(20.0, 0.0),
         ),
         (
-            FlexDirection::RowReverse,
-            Direction::Ltr,
+            flex_direction::T::RowReverse,
+            direction::T::Ltr,
             Point::new(80.0, 0.0),
             Point::new(50.0, 0.0),
         ),
         (
-            FlexDirection::Row,
-            Direction::Rtl,
+            flex_direction::T::Row,
+            direction::T::Rtl,
             Point::new(80.0, 0.0),
             Point::new(50.0, 0.0),
         ),
         (
-            FlexDirection::RowReverse,
-            Direction::Rtl,
+            flex_direction::T::RowReverse,
+            direction::T::Rtl,
             Point::new(0.0, 0.0),
             Point::new(20.0, 0.0),
         ),
         (
-            FlexDirection::Column,
-            Direction::Ltr,
+            flex_direction::T::Column,
+            direction::T::Ltr,
             Point::new(0.0, 0.0),
             Point::new(0.0, 20.0),
         ),
         (
-            FlexDirection::ColumnReverse,
-            Direction::Ltr,
+            flex_direction::T::ColumnReverse,
+            direction::T::Ltr,
             Point::new(0.0, 80.0),
             Point::new(0.0, 50.0),
         ),
     ];
 
     for (flex_direction, direction, expected_first, expected_second) in cases {
-        let (mut tree, root, first, second) = direction_fixture(flex_direction, direction);
-        definite_layout(&mut tree, root, 100.0, 100.0);
+        let (tree, root, first, second) = direction_fixture(flex_direction, direction);
+        definite_layout(&tree, root, 100.0, 100.0);
         assert_point(tree.layout(first).location, expected_first);
         assert_point(tree.layout(second).location, expected_second);
     }
@@ -332,7 +328,7 @@ fn order_is_stable_and_layout_order_is_the_sorted_index() {
     let d = tree.push_leaf(style_d, Size::new(10.0, 10.0), None);
     let root = flex_container(&mut tree, TestStyle::default(), &[a, b, c, d]);
 
-    definite_layout(&mut tree, root, 100.0, 20.0);
+    definite_layout(&tree, root, 100.0, 20.0);
 
     for (node, expected_x, expected_order) in
         [(b, 0.0, 0), (c, 10.0, 1), (a, 20.0, 2), (d, 30.0, 3)]
@@ -350,13 +346,13 @@ fn space_between_places_two_items_at_opposite_main_edges() {
     let root = flex_container(
         &mut tree,
         TestStyle {
-            justify_content: Some(JustifyContent::SpaceBetween),
+            justify_content: content(AlignFlags::SPACE_BETWEEN),
             ..TestStyle::default()
         },
         &[first, second],
     );
 
-    definite_layout(&mut tree, root, 100.0, 20.0);
+    definite_layout(&tree, root, 100.0, 20.0);
     assert_close(tree.layout(first).location.x, 0.0);
     assert_close(tree.layout(second).location.x, 80.0);
 }
@@ -368,13 +364,13 @@ fn a_single_space_between_item_falls_back_to_main_start() {
     let root = flex_container(
         &mut tree,
         TestStyle {
-            justify_content: Some(JustifyContent::SpaceBetween),
+            justify_content: content(AlignFlags::SPACE_BETWEEN),
             ..TestStyle::default()
         },
         &[child],
     );
 
-    definite_layout(&mut tree, root, 100.0, 20.0);
+    definite_layout(&tree, root, 100.0, 20.0);
     assert_point(tree.layout(child).location, Point::new(0.0, 0.0));
 }
 
@@ -382,19 +378,19 @@ fn a_single_space_between_item_falls_back_to_main_start() {
 fn a_main_start_auto_margin_consumes_space_before_justify_content() {
     let mut tree = TestTree::default();
     let mut auto_margin_style = fixed_leaf_style(20.0, 10.0);
-    auto_margin_style.margin.left = LengthPercentageAuto::Auto;
+    auto_margin_style.margin.left = margin_auto();
     let auto_margin = tree.push_leaf(auto_margin_style, Size::new(20.0, 10.0), None);
     let trailing = fixed_leaf(&mut tree, 20.0, 10.0);
     let root = flex_container(
         &mut tree,
         TestStyle {
-            justify_content: Some(JustifyContent::Center),
+            justify_content: content(AlignFlags::CENTER),
             ..TestStyle::default()
         },
         &[auto_margin, trailing],
     );
 
-    definite_layout(&mut tree, root, 100.0, 20.0);
+    definite_layout(&tree, root, 100.0, 20.0);
     assert_close(tree.layout(auto_margin).margin.left, 60.0);
     assert_close(tree.layout(auto_margin).location.x, 60.0);
     assert_close(tree.layout(trailing).location.x, 80.0);
@@ -408,18 +404,18 @@ mod alignment {
         let mut align_tree = TestTree::default();
         let centered = fixed_leaf(&mut align_tree, 20.0, 20.0);
         let mut end_style = fixed_leaf_style(20.0, 20.0);
-        end_style.align_self = Some(AlignSelf::FlexEnd);
+        end_style.align_self = self_align(AlignFlags::FLEX_END);
         let ended = align_tree.push_leaf(end_style, Size::new(20.0, 20.0), None);
         let root = flex_container(
             &mut align_tree,
             TestStyle {
-                align_items: Some(AlignItems::Center),
+                align_items: items(AlignFlags::CENTER),
                 ..TestStyle::default()
             },
             &[centered, ended],
         );
 
-        definite_layout(&mut align_tree, root, 100.0, 60.0);
+        definite_layout(&align_tree, root, 100.0, 60.0);
         assert_close(align_tree.layout(centered).location.y, 20.0);
         assert_close(align_tree.layout(ended).location.y, 40.0);
     }
@@ -429,7 +425,7 @@ mod alignment {
         let mut stretch_tree = TestTree::default();
         let stretched = stretch_tree.push_leaf(TestStyle::default(), Size::new(20.0, 10.0), None);
         let root = flex_container(&mut stretch_tree, TestStyle::default(), &[stretched]);
-        definite_layout(&mut stretch_tree, root, 100.0, 60.0);
+        definite_layout(&stretch_tree, root, 100.0, 60.0);
         assert_close(stretch_tree.layout(stretched).size.height, 60.0);
     }
 
@@ -437,81 +433,20 @@ mod alignment {
     fn a_cross_start_auto_margin_absorbs_free_space_before_alignment() {
         let mut margin_tree = TestTree::default();
         let mut auto_margin_style = fixed_leaf_style(20.0, 20.0);
-        auto_margin_style.margin.top = LengthPercentageAuto::Auto;
+        auto_margin_style.margin.top = margin_auto();
         let auto_margin = margin_tree.push_leaf(auto_margin_style, Size::new(20.0, 20.0), None);
         let root = flex_container(
             &mut margin_tree,
             TestStyle {
-                align_items: Some(AlignItems::Center),
+                align_items: items(AlignFlags::CENTER),
                 ..TestStyle::default()
             },
             &[auto_margin],
         );
 
-        definite_layout(&mut margin_tree, root, 100.0, 60.0);
+        definite_layout(&margin_tree, root, 100.0, 60.0);
         assert_close(margin_tree.layout(auto_margin).margin.top, 40.0);
         assert_close(margin_tree.layout(auto_margin).location.y, 40.0);
-    }
-
-    #[test]
-    fn a_collapsed_item_preserves_its_first_round_baseline_strut() {
-        let mut tree = TestTree::default();
-        let mut collapsed_style = fixed_leaf_style(10.0, 40.0);
-        collapsed_style.visibility = Visibility::Collapse;
-        let collapsed = tree.push_leaf(collapsed_style, Size::new(10.0, 40.0), Some(5.0));
-        let visible = tree.push_leaf(
-            fixed_leaf_style(10.0, 40.0),
-            Size::new(10.0, 40.0),
-            Some(35.0),
-        );
-        let root = flex_container(
-            &mut tree,
-            TestStyle {
-                align_items: Some(AlignItems::Baseline),
-                ..TestStyle::default()
-            },
-            &[collapsed, visible],
-        );
-
-        let output = perform_layout(
-            &mut tree,
-            root,
-            Size::new(Some(100.0), None),
-            Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
-        );
-
-        assert_size(output.size, Size::new(100.0, 70.0));
-        assert_size(tree.layout(collapsed).size, Size::ZERO);
-        assert_size(tree.layout(visible).size, Size::new(10.0, 40.0));
-    }
-
-    #[test]
-    fn a_collapsed_item_removes_main_space_but_preserves_its_cross_strut() {
-        let mut tree = TestTree::default();
-        let mut collapsed_style = fixed_leaf_style(100.0, 80.0);
-        collapsed_style.visibility = Visibility::Collapse;
-        let collapsed = tree.push_leaf(collapsed_style, Size::new(100.0, 80.0), None);
-        let visible = fixed_leaf(&mut tree, 40.0, 20.0);
-        let root = flex_container(
-            &mut tree,
-            TestStyle {
-                align_items: Some(AlignItems::FlexStart),
-                ..TestStyle::default()
-            },
-            &[collapsed, visible],
-        );
-
-        let output = perform_layout(
-            &mut tree,
-            root,
-            Size::new(Some(200.0), None),
-            Size::new(AvailableSpace::Definite(200.0), AvailableSpace::MaxContent),
-        );
-
-        assert_size(output.size, Size::new(200.0, 80.0));
-        assert_size(tree.layout(collapsed).size, Size::ZERO);
-        assert_point(tree.layout(visible).location, Point::ZERO);
-        assert_size(tree.layout(visible).size, Size::new(40.0, 20.0));
     }
 
     #[test]
@@ -522,16 +457,16 @@ mod alignment {
         let root = flex_container(
             &mut tree,
             TestStyle {
-                flex_wrap: FlexWrap::Wrap,
-                gap: Size::new(LengthPercentage::ZERO, LengthPercentage::length(10.0)),
-                align_content: Some(AlignContent::Center),
-                align_items: Some(AlignItems::FlexStart),
+                flex_wrap: flex_wrap::T::Wrap,
+                gap: Size::new(gap_px(0.0), gap_px(10.0)),
+                align_content: content(AlignFlags::CENTER),
+                align_items: items(AlignFlags::FLEX_START),
                 ..TestStyle::default()
             },
             &[first, second],
         );
 
-        definite_layout(&mut tree, root, 100.0, 60.0);
+        definite_layout(&tree, root, 100.0, 60.0);
 
         assert_close(tree.layout(first).location.y, 15.0);
         assert_close(tree.layout(second).location.y, 35.0);
@@ -553,13 +488,13 @@ mod alignment {
         let root = flex_container(
             &mut tree,
             TestStyle {
-                align_items: Some(AlignItems::Baseline),
+                align_items: items(AlignFlags::BASELINE),
                 ..TestStyle::default()
             },
             &[first, second],
         );
 
-        let output = definite_layout(&mut tree, root, 100.0, 40.0);
+        let output = definite_layout(&tree, root, 100.0, 40.0);
 
         assert_close(tree.layout(first).location.y + 15.0, 15.0);
         assert_close(tree.layout(second).location.y + 10.0, 15.0);
@@ -574,7 +509,7 @@ fn hidden_and_out_of_flow_children_do_not_participate_in_flexing() {
 
     let hidden = tree.push_leaf(
         TestStyle {
-            box_generation_mode: BoxGenerationMode::None,
+            display: Display::None,
             ..fixed_leaf_style(1_000.0, 10.0)
         },
         Size::new(1_000.0, 10.0),
@@ -582,7 +517,7 @@ fn hidden_and_out_of_flow_children_do_not_participate_in_flexing() {
     );
     let absolute = tree.push_leaf(
         TestStyle {
-            position: Position::Absolute,
+            position: PositionProperty::Absolute,
             ..fixed_leaf_style(1_000.0, 10.0)
         },
         Size::new(1_000.0, 10.0),
@@ -590,7 +525,7 @@ fn hidden_and_out_of_flow_children_do_not_participate_in_flexing() {
     );
     let hoisted = tree.push_leaf(
         TestStyle {
-            position: Position::AbsoluteHoisted,
+            position: PositionProperty::Fixed,
             ..fixed_leaf_style(1_000.0, 10.0)
         },
         Size::new(1_000.0, 10.0),
@@ -600,13 +535,13 @@ fn hidden_and_out_of_flow_children_do_not_participate_in_flexing() {
     let root = flex_container(
         &mut tree,
         TestStyle {
-            justify_content: Some(JustifyContent::SpaceBetween),
+            justify_content: content(AlignFlags::SPACE_BETWEEN),
             ..TestStyle::default()
         },
         &[first, hidden, absolute, hoisted, second],
     );
 
-    definite_layout(&mut tree, root, 100.0, 20.0);
+    definite_layout(&tree, root, 100.0, 20.0);
 
     assert_close(tree.layout(first).location.x, 0.0);
     assert_close(tree.layout(second).location.x, 80.0);
@@ -622,12 +557,11 @@ fn measure_goal_does_not_write_durable_layouts() {
     let mut sentinel = Layout::default();
     sentinel.location = Point::new(123.0, 456.0);
     sentinel.size = Size::new(7.0, 8.0);
-    tree.session_node_mut(first).layout = sentinel;
-    tree.session_node_mut(second).layout = sentinel;
-    tree.session_node_mut(root).layout = sentinel;
+    tree.session_node(first).layout.set(sentinel);
+    tree.session_node(second).layout.set(sentinel);
+    tree.session_node(root).layout.set(sentinel);
 
-    let output = tree.session.compute_child_layout(
-        &tree.source,
+    let output = tree.compute_child_layout(
         root,
         LayoutInput::compute_size(
             Size::new(Some(100.0), None),
@@ -638,7 +572,7 @@ fn measure_goal_does_not_write_durable_layouts() {
     );
 
     assert_size(output.size, Size::new(100.0, 20.0));
-    assert_eq!(tree.session.layout_writes, 0);
+    assert_eq!(tree.layout_writes.get(), 0);
     assert_eq!(tree.layout(first), sentinel);
     assert_eq!(tree.layout(second), sentinel);
     assert_eq!(tree.layout(root), sentinel);
@@ -655,51 +589,45 @@ fn leaf_measure_goal_preserves_the_single_axis_fast_path() {
         AvailableSpace::Definite(100.0),
     );
 
-    let measured = tree.session.compute_child_layout(
-        &tree.source,
+    let measured = tree.compute_child_layout(
         leaf,
         LayoutInput::compute_size(known, parent, available, RequestedAxis::Horizontal),
     );
     assert_size(measured.size, Size::new(40.0, 20.0));
-    assert_eq!(tree.session.leaf_measure_calls, 0);
+    assert_eq!(tree.leaf_measure_calls.get(), 0);
 
-    let _ = tree.session.compute_child_layout(
-        &tree.source,
+    let _ = tree.compute_child_layout(
         leaf,
         LayoutInput::compute_size(known, parent, available, RequestedAxis::Both),
     );
-    assert_eq!(tree.session.leaf_measure_calls, 1);
+    assert_eq!(tree.leaf_measure_calls.get(), 1);
 
-    let _ = tree.session.compute_child_layout(
-        &tree.source,
-        leaf,
-        LayoutInput::perform_layout(known, parent, available),
-    );
-    assert_eq!(tree.session.leaf_measure_calls, 2);
+    let _ = tree.compute_child_layout(leaf, LayoutInput::perform_layout(known, parent, available));
+    assert_eq!(tree.leaf_measure_calls.get(), 2);
 }
 
 #[test]
 fn relative_insets_shift_visual_positions_without_affecting_flow() {
     let mut tree = TestTree::default();
     let mut first_style = fixed_leaf_style(20.0, 10.0);
-    first_style.inset.left = LengthPercentageAuto::Length(10.0);
-    first_style.inset.top = LengthPercentageAuto::Length(5.0);
+    first_style.inset.left = inset_px(10.0);
+    first_style.inset.top = inset_px(5.0);
     let first = tree.push_leaf(first_style, Size::new(20.0, 10.0), None);
 
     let mut second_style = fixed_leaf_style(20.0, 10.0);
-    second_style.inset.right = LengthPercentageAuto::Length(7.0);
-    second_style.inset.bottom = LengthPercentageAuto::Length(3.0);
+    second_style.inset.right = inset_px(7.0);
+    second_style.inset.bottom = inset_px(3.0);
     let second = tree.push_leaf(second_style, Size::new(20.0, 10.0), None);
     let root = flex_container(
         &mut tree,
         TestStyle {
-            align_items: Some(AlignItems::FlexStart),
+            align_items: items(AlignFlags::FLEX_START),
             ..TestStyle::default()
         },
         &[first, second],
     );
 
-    definite_layout(&mut tree, root, 100.0, 20.0);
+    definite_layout(&tree, root, 100.0, 20.0);
 
     assert_point(tree.layout(first).location, Point::new(10.0, 5.0));
     assert_point(tree.layout(second).location, Point::new(13.0, -3.0));
@@ -709,13 +637,13 @@ fn relative_insets_shift_visual_positions_without_affecting_flow() {
 fn percentages_box_sizing_padding_and_gap_use_the_container_bases() {
     let mut tree = TestTree::default();
     let item_style = TestStyle {
-        size: Size::new(Dimension::Length(20.0), Dimension::Length(10.0)),
-        flex_basis: Dimension::Length(20.0),
+        size: Size::new(size_px(20.0), size_px(10.0)),
+        flex_basis: basis_px(20.0),
         padding: Edges {
-            left: LengthPercentage::length(10.0),
-            right: LengthPercentage::length(10.0),
-            top: LengthPercentage::ZERO,
-            bottom: LengthPercentage::ZERO,
+            left: npx(10.0),
+            right: npx(10.0),
+            top: npx(0.0),
+            bottom: npx(0.0),
         },
         ..TestStyle::default()
     };
@@ -724,16 +652,16 @@ fn percentages_box_sizing_padding_and_gap_use_the_container_bases() {
     let root = flex_container(
         &mut tree,
         TestStyle {
-            padding: Edges::uniform(LengthPercentage::percent(0.1)),
-            border: Edges::uniform(LengthPercentage::length(5.0)),
-            gap: Size::new(LengthPercentage::percent(0.1), LengthPercentage::ZERO),
-            align_items: Some(AlignItems::FlexStart),
+            padding: Edges::uniform(npct(0.1)),
+            border: Edges::uniform(border_px(5.0)),
+            gap: Size::new(gap_pct(0.1), gap_px(0.0)),
+            align_items: items(AlignFlags::FLEX_START),
             ..TestStyle::default()
         },
         &[first, second],
     );
 
-    definite_layout(&mut tree, root, 200.0, 80.0);
+    definite_layout(&tree, root, 200.0, 80.0);
 
     // Container padding percentages (including top/bottom) use its parent's
     // width: content width = 200 - 2*(20 padding + 5 border) = 150.
@@ -749,7 +677,7 @@ fn automatic_minimum_size_depends_on_scroll_container_overflow() {
     let visible =
         visible_tree.push_leaf(fixed_leaf_style(100.0, 10.0), Size::new(100.0, 10.0), None);
     let root = flex_container(&mut visible_tree, TestStyle::default(), &[visible]);
-    definite_layout(&mut visible_tree, root, 50.0, 10.0);
+    definite_layout(&visible_tree, root, 50.0, 10.0);
     assert_close(visible_tree.layout(visible).size.width, 100.0);
 
     let mut scroll_tree = TestTree::default();
@@ -757,7 +685,7 @@ fn automatic_minimum_size_depends_on_scroll_container_overflow() {
     scroll_style.overflow = Point::new(Overflow::Hidden, Overflow::Hidden);
     let scroll = scroll_tree.push_leaf(scroll_style, Size::new(100.0, 10.0), None);
     let root = flex_container(&mut scroll_tree, TestStyle::default(), &[scroll]);
-    definite_layout(&mut scroll_tree, root, 50.0, 10.0);
+    definite_layout(&scroll_tree, root, 50.0, 10.0);
     assert_close(scroll_tree.layout(scroll).size.width, 50.0);
 }
 
@@ -765,33 +693,33 @@ fn automatic_minimum_size_depends_on_scroll_container_overflow() {
 fn column_wrapping_uses_rtl_and_wrap_reverse_for_cross_start() {
     for (wrap, expected) in [
         (
-            FlexWrap::Wrap,
+            flex_wrap::T::Wrap,
             [Point::new(50.0, 0.0), Point::new(40.0, 0.0)],
         ),
         (
-            FlexWrap::WrapReverse,
+            flex_wrap::T::WrapReverse,
             [Point::new(0.0, 0.0), Point::new(10.0, 0.0)],
         ),
     ] {
         let mut tree = TestTree::default();
         let mut child_style = fixed_leaf_style(10.0, 30.0);
-        child_style.flex_basis = Dimension::Length(30.0);
+        child_style.flex_basis = basis_px(30.0);
         let first = tree.push_leaf(child_style.clone(), Size::new(10.0, 30.0), None);
         let second = tree.push_leaf(child_style, Size::new(10.0, 30.0), None);
         let root = flex_container(
             &mut tree,
             TestStyle {
-                direction: Direction::Rtl,
-                flex_direction: FlexDirection::Column,
+                direction: direction::T::Rtl,
+                flex_direction: flex_direction::T::Column,
                 flex_wrap: wrap,
-                align_content: Some(AlignContent::FlexStart),
-                align_items: Some(AlignItems::FlexStart),
+                align_content: content(AlignFlags::FLEX_START),
+                align_items: items(AlignFlags::FLEX_START),
                 ..TestStyle::default()
             },
             &[first, second],
         );
 
-        definite_layout(&mut tree, root, 60.0, 50.0);
+        definite_layout(&tree, root, 60.0, 50.0);
         assert_point(tree.layout(first).location, expected[0]);
         assert_point(tree.layout(second).location, expected[1]);
     }
@@ -799,12 +727,12 @@ fn column_wrapping_uses_rtl_and_wrap_reverse_for_cross_start() {
 
 #[test]
 fn max_content_container_size_uses_flex_item_contributions() {
-    fn intrinsic_fixture(grow: f32) -> (TestTree, NodeId, NodeId) {
+    fn intrinsic_fixture(grow: f32) -> (TestTree, TestId, TestId) {
         let mut tree = TestTree::default();
         let item = tree.push_leaf(
             TestStyle {
-                flex_basis: Dimension::Length(100.0),
-                flex_grow: grow,
+                flex_basis: basis_px(100.0),
+                flex_grow: nn(grow),
                 overflow: Point::new(Overflow::Hidden, Overflow::Hidden),
                 ..TestStyle::default()
             },
@@ -815,13 +743,13 @@ fn max_content_container_size_uses_flex_item_contributions() {
         (tree, root, item)
     }
 
-    let (mut inflexible_tree, root, item) = intrinsic_fixture(0.0);
-    let output = perform_layout(&mut inflexible_tree, root, Size::NONE, Size::MAX_CONTENT);
+    let (inflexible_tree, root, item) = intrinsic_fixture(0.0);
+    let output = perform_layout(&inflexible_tree, root, Size::NONE, Size::MAX_CONTENT);
     assert_close(output.size.width, 100.0);
     assert_close(inflexible_tree.layout(item).size.width, 100.0);
 
-    let (mut flexible_tree, root, item) = intrinsic_fixture(1.0);
-    let output = perform_layout(&mut flexible_tree, root, Size::NONE, Size::MAX_CONTENT);
+    let (flexible_tree, root, item) = intrinsic_fixture(1.0);
+    let output = perform_layout(&flexible_tree, root, Size::NONE, Size::MAX_CONTENT);
     assert_close(output.size.width, 200.0);
     assert_close(flexible_tree.layout(item).size.width, 200.0);
 }
@@ -831,8 +759,8 @@ fn indefinite_percentage_flex_basis_falls_back_to_content_not_width() {
     let mut tree = TestTree::default();
     let item = tree.push_leaf(
         TestStyle {
-            size: Size::new(Dimension::Length(50.0), Dimension::Length(10.0)),
-            flex_basis: Dimension::Percent(0.5),
+            size: Size::new(size_px(50.0), size_px(10.0)),
+            flex_basis: basis_pct(0.5),
             overflow: Point::new(Overflow::Hidden, Overflow::Hidden),
             ..TestStyle::default()
         },
@@ -841,7 +769,7 @@ fn indefinite_percentage_flex_basis_falls_back_to_content_not_width() {
     );
     let root = flex_container(&mut tree, TestStyle::default(), &[item]);
 
-    let output = perform_layout(&mut tree, root, Size::NONE, Size::MAX_CONTENT);
+    let output = perform_layout(&tree, root, Size::NONE, Size::MAX_CONTENT);
     assert_close(output.size.width, 80.0);
     assert_close(tree.layout(item).size.width, 80.0);
 }
@@ -851,15 +779,15 @@ fn border_box_zero_basis_keeps_a_negative_inner_base_during_flexing() {
     let mut tree = TestTree::default();
     let item = tree.push_leaf(
         TestStyle {
-            box_sizing: BoxSizing::BorderBox,
-            flex_basis: Dimension::ZERO,
-            flex_grow: 0.5,
-            min_size: Size::new(Dimension::ZERO, Dimension::ZERO),
+            box_sizing: box_sizing::T::BorderBox,
+            flex_basis: basis_px(0.0),
+            flex_grow: nn(0.5),
+            min_size: Size::new(size_px(0.0), size_px(0.0)),
             padding: Edges {
-                left: LengthPercentage::length(20.0),
-                right: LengthPercentage::length(20.0),
-                top: LengthPercentage::ZERO,
-                bottom: LengthPercentage::ZERO,
+                left: npx(20.0),
+                right: npx(20.0),
+                top: npx(0.0),
+                bottom: npx(0.0),
             },
             overflow: Point::new(Overflow::Hidden, Overflow::Hidden),
             ..TestStyle::default()
@@ -869,7 +797,7 @@ fn border_box_zero_basis_keeps_a_negative_inner_base_during_flexing() {
     );
     let root = flex_container(&mut tree, TestStyle::default(), &[item]);
 
-    definite_layout(&mut tree, root, 100.0, 10.0);
+    definite_layout(&tree, root, 100.0, 10.0);
     assert_close(tree.layout(item).size.width, 50.0);
 }
 
@@ -877,21 +805,21 @@ fn border_box_zero_basis_keeps_a_negative_inner_base_during_flexing() {
 fn hoisted_static_position_is_the_aligned_margin_box_origin() {
     let mut tree = TestTree::default();
     let mut child_style = fixed_leaf_style(20.0, 10.0);
-    child_style.position = Position::AbsoluteHoisted;
-    child_style.margin.left = LengthPercentageAuto::Length(5.0);
-    child_style.margin.top = LengthPercentageAuto::Length(3.0);
+    child_style.position = PositionProperty::Fixed;
+    child_style.margin.left = margin_px(5.0);
+    child_style.margin.top = margin_px(3.0);
     let child = tree.push_leaf(child_style, Size::new(20.0, 10.0), None);
     let root = flex_container(
         &mut tree,
         TestStyle {
-            justify_content: Some(JustifyContent::Center),
-            align_items: Some(AlignItems::Center),
+            justify_content: content(AlignFlags::CENTER),
+            align_items: items(AlignFlags::CENTER),
             ..TestStyle::default()
         },
         &[child],
     );
 
-    definite_layout(&mut tree, root, 100.0, 50.0);
+    definite_layout(&tree, root, 100.0, 50.0);
     assert_eq!(tree.static_position(child), Some(Point::new(37.5, 18.5)));
 }
 
@@ -900,9 +828,9 @@ fn aspect_ratio_does_not_disable_cross_axis_stretch() {
     let mut tree = TestTree::default();
     let item = tree.push_leaf(
         TestStyle {
-            size: Size::new(Dimension::Length(50.0), Dimension::Auto),
-            flex_basis: Dimension::Length(50.0),
-            aspect_ratio: Some(1.0),
+            size: Size::new(size_px(50.0), size_auto()),
+            flex_basis: basis_px(50.0),
+            aspect_ratio: ratio(1.0),
             ..TestStyle::default()
         },
         Size::new(50.0, 50.0),
@@ -910,7 +838,7 @@ fn aspect_ratio_does_not_disable_cross_axis_stretch() {
     );
     let root = flex_container(&mut tree, TestStyle::default(), &[item]);
 
-    definite_layout(&mut tree, root, 100.0, 100.0);
+    definite_layout(&tree, root, 100.0, 100.0);
     assert_size(tree.layout(item).size, Size::new(50.0, 100.0));
 }
 
@@ -921,14 +849,14 @@ fn nowrap_auto_cross_size_clamped_by_min_stretches_its_line() {
     let root = flex_container(
         &mut tree,
         TestStyle {
-            min_size: Size::new(Dimension::Auto, Dimension::Length(100.0)),
+            min_size: Size::new(size_auto(), size_px(100.0)),
             ..TestStyle::default()
         },
         &[item],
     );
 
     let output = perform_layout(
-        &mut tree,
+        &tree,
         root,
         Size::new(Some(100.0), None),
         Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent),
@@ -942,8 +870,8 @@ fn automatic_minimum_uses_aspect_ratio_transferred_size() {
     let mut tree = TestTree::default();
     let item = tree.push_intrinsic_leaf(
         TestStyle {
-            size: Size::new(Dimension::Auto, Dimension::Length(80.0)),
-            aspect_ratio: Some(2.0),
+            size: Size::new(size_auto(), size_px(80.0)),
+            aspect_ratio: ratio(2.0),
             ..TestStyle::default()
         },
         Size::new(10.0, 80.0),
@@ -951,7 +879,7 @@ fn automatic_minimum_uses_aspect_ratio_transferred_size() {
     );
     let root = flex_container(&mut tree, TestStyle::default(), &[item]);
 
-    definite_layout(&mut tree, root, 100.0, 80.0);
+    definite_layout(&tree, root, 100.0, 80.0);
     assert_close(tree.layout(item).size.width, 160.0);
 }
 
@@ -960,9 +888,9 @@ fn intrinsic_main_size_keywords_use_content_contributions() {
     let mut tree = TestTree::default();
     let item = tree.push_intrinsic_leaf(
         TestStyle {
-            size: Size::new(Dimension::MinContent, Dimension::Length(10.0)),
-            flex_basis: Dimension::Auto,
-            min_size: Size::new(Dimension::MinContent, Dimension::Auto),
+            size: Size::new(size_min_content(), size_px(10.0)),
+            flex_basis: basis_auto(),
+            min_size: Size::new(size_min_content(), size_auto()),
             overflow: Point::new(Overflow::Hidden, Overflow::Hidden),
             ..TestStyle::default()
         },
@@ -971,7 +899,7 @@ fn intrinsic_main_size_keywords_use_content_contributions() {
     );
     let root = flex_container(&mut tree, TestStyle::default(), &[item]);
 
-    definite_layout(&mut tree, root, 300.0, 10.0);
+    definite_layout(&tree, root, 300.0, 10.0);
     assert_close(tree.layout(item).size.width, 50.0);
 }
 
@@ -979,21 +907,21 @@ fn intrinsic_main_size_keywords_use_content_contributions() {
 fn multiline_column_min_content_cross_size_uses_largest_column() {
     let mut tree = TestTree::default();
     let mut child_style = fixed_leaf_style(30.0, 30.0);
-    child_style.flex_basis = Dimension::Length(30.0);
+    child_style.flex_basis = basis_px(30.0);
     let first = tree.push_leaf(child_style.clone(), Size::new(30.0, 30.0), None);
     let second = tree.push_leaf(child_style, Size::new(30.0, 30.0), None);
     let root = flex_container(
         &mut tree,
         TestStyle {
-            flex_direction: FlexDirection::Column,
-            flex_wrap: FlexWrap::Wrap,
+            flex_direction: flex_direction::T::Column,
+            flex_wrap: flex_wrap::T::Wrap,
             ..TestStyle::default()
         },
         &[first, second],
     );
 
     let output = perform_layout(
-        &mut tree,
+        &tree,
         root,
         Size::new(None, Some(50.0)),
         Size::new(AvailableSpace::MinContent, AvailableSpace::Definite(50.0)),
@@ -1004,27 +932,23 @@ fn multiline_column_min_content_cross_size_uses_largest_column() {
 #[test]
 fn start_and_flex_start_remain_distinct_under_reversal() {
     for (alignment, expected) in [
-        (AlignItems::Start, Point::new(0.0, 0.0)),
-        (AlignItems::FlexStart, Point::new(80.0, 40.0)),
+        (AlignFlags::START, Point::new(0.0, 0.0)),
+        (AlignFlags::FLEX_START, Point::new(80.0, 40.0)),
     ] {
         let mut tree = TestTree::default();
         let item = fixed_leaf(&mut tree, 20.0, 10.0);
         let root = flex_container(
             &mut tree,
             TestStyle {
-                flex_direction: FlexDirection::RowReverse,
-                flex_wrap: FlexWrap::WrapReverse,
-                justify_content: Some(match alignment {
-                    AlignItems::Start => JustifyContent::Start,
-                    AlignItems::FlexStart => JustifyContent::FlexStart,
-                    _ => unreachable!(),
-                }),
-                align_items: Some(alignment),
+                flex_direction: flex_direction::T::RowReverse,
+                flex_wrap: flex_wrap::T::WrapReverse,
+                justify_content: content(alignment),
+                align_items: items(alignment),
                 ..TestStyle::default()
             },
             &[item],
         );
-        definite_layout(&mut tree, root, 100.0, 50.0);
+        definite_layout(&tree, root, 100.0, 50.0);
         assert_point(tree.layout(item).location, expected);
     }
 }
@@ -1034,20 +958,20 @@ fn negative_margin_affects_line_breaking_without_being_clamped() {
     let mut tree = TestTree::default();
     let first = fixed_leaf(&mut tree, 80.0, 10.0);
     let mut second_style = fixed_leaf_style(40.0, 10.0);
-    second_style.margin.left = LengthPercentageAuto::Length(-20.0);
+    second_style.margin.left = margin_px(-20.0);
     let second = tree.push_leaf(second_style, Size::new(40.0, 10.0), None);
     let third = fixed_leaf(&mut tree, 1.0, 10.0);
     let root = flex_container(
         &mut tree,
         TestStyle {
-            flex_wrap: FlexWrap::Wrap,
-            align_items: Some(AlignItems::FlexStart),
+            flex_wrap: flex_wrap::T::Wrap,
+            align_items: items(AlignFlags::FLEX_START),
             ..TestStyle::default()
         },
         &[first, second, third],
     );
 
-    definite_layout(&mut tree, root, 100.0, 20.0);
+    definite_layout(&tree, root, 100.0, 20.0);
     assert_point(tree.layout(first).location, Point::new(0.0, 0.0));
     assert_point(tree.layout(second).location, Point::new(60.0, 0.0));
     assert_point(tree.layout(third).location, Point::new(0.0, 10.0));
@@ -1060,11 +984,11 @@ fn absolute_children_use_order_zero_for_paint_order() {
     inflow_style.order = 5;
     let inflow = tree.push_leaf(inflow_style, Size::new(20.0, 10.0), None);
     let mut absolute_style = fixed_leaf_style(20.0, 10.0);
-    absolute_style.position = Position::Absolute;
+    absolute_style.position = PositionProperty::Absolute;
     let absolute = tree.push_leaf(absolute_style, Size::new(20.0, 10.0), None);
     let root = flex_container(&mut tree, TestStyle::default(), &[inflow, absolute]);
 
-    definite_layout(&mut tree, root, 100.0, 20.0);
+    definite_layout(&tree, root, 100.0, 20.0);
     assert_eq!(tree.layout(absolute).order, 0);
     assert_eq!(tree.layout(inflow).order, 1);
 }
@@ -1078,7 +1002,6 @@ fn leaf_measurement_reports_baselines_for_a_fully_sized_box() {
     let output = compute_leaf_layout(
         LayoutInput::perform_layout(Size::NONE, Size::NONE, Size::MAX_CONTENT),
         &style,
-        |_calc, _basis| unreachable!(),
         &mut measurer,
     );
     assert_size(output.size, Size::new(100.0, 20.0));
@@ -1089,8 +1012,8 @@ fn leaf_measurement_reports_baselines_for_a_fully_sized_box() {
 #[test]
 fn leaf_max_width_constrains_measurement_and_preserves_overflow_extent() {
     let style = TestStyle {
-        max_size: Size::new(Dimension::Length(100.0), Dimension::Auto),
-        padding: Edges::uniform(LengthPercentage::length(10.0)),
+        max_size: Size::new(max_px(100.0), max_none()),
+        padding: Edges::uniform(npx(10.0)),
         ..TestStyle::default()
     };
     let mut measurer = FnLeafMeasurer::new(|input| {
@@ -1107,7 +1030,6 @@ fn leaf_max_width_constrains_measurement_and_preserves_overflow_extent() {
             ),
         ),
         &style,
-        |_calc, _basis| unreachable!(),
         &mut measurer,
     );
     // max-width is content-box: 100 content + 20 padding.
@@ -1121,27 +1043,21 @@ fn absolute_aspect_ratio_uses_vertical_inset_stretch_when_horizontal_is_auto() {
     let mut tree = TestTree::default();
     let child = tree.push_leaf(
         TestStyle {
-            position: Position::Absolute,
+            position: PositionProperty::Absolute,
             inset: Edges {
-                left: LengthPercentageAuto::Auto,
-                right: LengthPercentageAuto::Auto,
-                top: LengthPercentageAuto::Length(10.0),
-                bottom: LengthPercentageAuto::Length(10.0),
+                left: inset_auto(),
+                right: inset_auto(),
+                top: inset_px(10.0),
+                bottom: inset_px(10.0),
             },
-            aspect_ratio: Some(2.0),
+            aspect_ratio: ratio(2.0),
             ..TestStyle::default()
         },
         Size::ZERO,
         None,
     );
 
-    let layout = compute_absolute_layout(
-        &tree.source,
-        &mut tree.session,
-        child,
-        Size::new(100.0, 100.0),
-        Point::ZERO,
-    );
+    let layout = compute_absolute_layout(tree.node(child), Size::new(100.0, 100.0), Point::ZERO);
     assert_size(layout.size, Size::new(160.0, 80.0));
     assert_point(layout.location, Point::new(0.0, 10.0));
 }
@@ -1150,20 +1066,20 @@ fn absolute_aspect_ratio_uses_vertical_inset_stretch_when_horizontal_is_auto() {
 fn cyclic_percentage_item_margin_resolves_after_intrinsic_container_sizing() {
     let mut tree = TestTree::default();
     let mut child_style = fixed_leaf_style(100.0, 10.0);
-    child_style.flex_basis = Dimension::Length(10.0);
-    child_style.margin.left = LengthPercentageAuto::Percent(0.1);
+    child_style.flex_basis = basis_px(10.0);
+    child_style.margin.left = margin_pct(0.1);
     let child = tree.push_leaf(child_style, Size::new(100.0, 10.0), None);
     let root = flex_container(
         &mut tree,
         TestStyle {
-            flex_direction: FlexDirection::Column,
+            flex_direction: flex_direction::T::Column,
             ..TestStyle::default()
         },
         &[child],
     );
 
     let output = perform_layout(
-        &mut tree,
+        &tree,
         root,
         Size::new(None, Some(20.0)),
         Size::new(AvailableSpace::MaxContent, AvailableSpace::Definite(20.0)),
@@ -1179,10 +1095,10 @@ fn overflowing_auto_margins_follow_main_and_cross_axis_rules() {
     let mut tree = TestTree::default();
     let item = tree.push_leaf(
         TestStyle {
-            size: Size::new(Dimension::Length(120.0), Dimension::Length(80.0)),
-            flex_basis: Dimension::Length(120.0),
-            flex_shrink: 0.0,
-            margin: Edges::uniform(LengthPercentageAuto::Auto),
+            size: Size::new(size_px(120.0), size_px(80.0)),
+            flex_basis: basis_px(120.0),
+            flex_shrink: nn(0.0),
+            margin: Edges::uniform(margin_auto()),
             ..TestStyle::default()
         },
         Size::new(120.0, 80.0),
@@ -1191,13 +1107,13 @@ fn overflowing_auto_margins_follow_main_and_cross_axis_rules() {
     let root = flex_container(
         &mut tree,
         TestStyle {
-            justify_content: Some(JustifyContent::Center),
+            justify_content: content(AlignFlags::CENTER),
             ..TestStyle::default()
         },
         &[item],
     );
 
-    definite_layout(&mut tree, root, 100.0, 50.0);
+    definite_layout(&tree, root, 100.0, 50.0);
     let layout = tree.layout(item);
     assert_point(layout.location, Point::new(-10.0, 0.0));
     assert_close(layout.margin.left, 0.0);
@@ -1211,12 +1127,9 @@ fn intrinsic_item_keywords_resolve_preferred_min_max_and_fit_content_basis() {
     let mut tree = TestTree::default();
     let constrained = tree.push_intrinsic_leaf(
         TestStyle {
-            size: Size::new(Dimension::MaxContent, Dimension::Length(10.0)),
-            min_size: Size::new(
-                Dimension::FitContent(LengthPercentage::length(30.0)),
-                Dimension::Auto,
-            ),
-            max_size: Size::new(Dimension::MinContent, Dimension::Auto),
+            size: Size::new(size_max_content(), size_px(10.0)),
+            min_size: Size::new(size_fit_content_px(30.0), size_auto()),
+            max_size: Size::new(max_min_content(), max_none()),
             ..TestStyle::default()
         },
         Size::new(20.0, 10.0),
@@ -1224,8 +1137,8 @@ fn intrinsic_item_keywords_resolve_preferred_min_max_and_fit_content_basis() {
     );
     let fit_basis = tree.push_intrinsic_leaf(
         TestStyle {
-            min_size: Size::new(Dimension::ZERO, Dimension::Auto),
-            flex_basis: Dimension::FitContent(LengthPercentage::length(50.0)),
+            min_size: Size::new(size_px(0.0), size_auto()),
+            flex_basis: basis_fit_content_px(50.0),
             ..TestStyle::default()
         },
         Size::new(20.0, 10.0),
@@ -1233,7 +1146,7 @@ fn intrinsic_item_keywords_resolve_preferred_min_max_and_fit_content_basis() {
     );
     let root = flex_container(&mut tree, TestStyle::default(), &[constrained, fit_basis]);
 
-    definite_layout(&mut tree, root, 200.0, 20.0);
+    definite_layout(&tree, root, 200.0, 20.0);
 
     // CSS minimums take precedence over a smaller maximum.
     assert_close(tree.layout(constrained).size.width, 30.0);
@@ -1246,16 +1159,16 @@ fn container_preferred_axes_clamp_with_minimum_precedence_and_content_mode_ignor
     let root = flex_container(
         &mut tree,
         TestStyle {
-            size: Size::new(Dimension::Length(300.0), Dimension::Length(100.0)),
-            min_size: Size::new(Dimension::Length(400.0), Dimension::Length(120.0)),
-            max_size: Size::new(Dimension::Length(200.0), Dimension::Length(80.0)),
+            size: Size::new(size_px(300.0), size_px(100.0)),
+            min_size: Size::new(size_px(400.0), size_px(120.0)),
+            max_size: Size::new(max_px(200.0), max_px(80.0)),
             ..TestStyle::default()
         },
         &[],
     );
 
     let inherent = perform_layout(
-        &mut tree,
+        &tree,
         root,
         Size::NONE,
         Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
@@ -1264,8 +1177,203 @@ fn container_preferred_axes_clamp_with_minimum_precedence_and_content_mode_ignor
 
     let mut content_input = LayoutInput::perform_layout(Size::NONE, Size::NONE, Size::MAX_CONTENT);
     content_input.sizing_mode = SizingMode::ContentSize;
-    let content = tree
-        .session
-        .compute_child_layout(&tree.source, root, content_input);
+    let content = tree.compute_child_layout(root, content_input);
     assert_size(content.size, Size::ZERO);
+}
+
+// ---------------------------------------------------------------------------
+// Coverage restoration: content basis, intrinsic keywords, auto margins.
+// ---------------------------------------------------------------------------
+
+/// `flex-basis: content` and the intrinsic width keywords pick the item's
+/// content-based main size, and the treated-as-auto keywords fill the line.
+#[test]
+fn content_basis_and_intrinsic_width_keywords_set_main_sizes() {
+    use stylo::values::computed::Size as StyleSize;
+
+    let width_of = |style: TestStyle| -> f32 {
+        let mut tree = TestTree::default();
+        let item = tree.push_intrinsic_leaf(style, Size::new(30.0, 10.0), Size::new(90.0, 10.0));
+        let root = flex_container(&mut tree, TestStyle::default(), &[item]);
+        definite_layout(&tree, root, 300.0, 50.0);
+        tree.layout(item).size.width
+    };
+
+    // `flex-basis: content` defers to the (auto) width and measures.
+    assert_close(
+        width_of(TestStyle {
+            flex_basis: basis_content(),
+            ..TestStyle::default()
+        }),
+        90.0,
+    );
+    // Width keywords route through the deferred flex basis.
+    assert_close(
+        width_of(TestStyle {
+            size: Size::new(size_min_content(), size_auto()),
+            ..TestStyle::default()
+        }),
+        30.0,
+    );
+    assert_close(
+        width_of(TestStyle {
+            size: Size::new(size_max_content(), size_auto()),
+            ..TestStyle::default()
+        }),
+        90.0,
+    );
+    // The treated-as-auto keywords behave exactly like `auto`.
+    for keyword in [
+        StyleSize::FitContent,
+        StyleSize::Stretch,
+        StyleSize::WebkitFillAvailable,
+    ] {
+        assert_close(
+            width_of(TestStyle {
+                size: Size::new(keyword, size_auto()),
+                ..TestStyle::default()
+            }),
+            90.0,
+        );
+    }
+}
+
+/// A percentage-carrying `calc()` width with no definite basis sizes the
+/// flex base to max-content, and a min-content container probe sizes auto
+/// bases to min-content.
+#[test]
+fn indefinite_bases_fall_back_to_the_probe_extreme() {
+    let mut tree = TestTree::default();
+    let calc_item = tree.push_intrinsic_leaf(
+        TestStyle {
+            size: Size::new(size_calc(20.0, 0.1), size_auto()),
+            ..TestStyle::default()
+        },
+        Size::new(30.0, 10.0),
+        Size::new(90.0, 10.0),
+    );
+    let root = flex_container(&mut tree, TestStyle::default(), &[calc_item]);
+    // Width measured under max-content: the calc() cannot resolve, so the
+    // flex base is the max-content contribution.
+    let output = measure_layout(
+        &tree,
+        root,
+        Size::NONE,
+        Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
+    );
+    assert_close(output.size.width, 90.0);
+
+    let mut tree = TestTree::default();
+    let auto_item = tree.push_intrinsic_leaf(
+        TestStyle::default(),
+        Size::new(30.0, 10.0),
+        Size::new(90.0, 10.0),
+    );
+    let root = flex_container(&mut tree, TestStyle::default(), &[auto_item]);
+    let output = measure_layout(
+        &tree,
+        root,
+        Size::NONE,
+        Size::new(AvailableSpace::MinContent, AvailableSpace::MinContent),
+    );
+    assert_close(output.size.width, 30.0);
+}
+
+/// Intrinsic keywords on `max-width` clamp a growing flex item.
+#[test]
+fn max_width_intrinsic_keywords_clamp_growth() {
+    let clamped_width = |max_size: MaxSize| -> f32 {
+        let mut tree = TestTree::default();
+        let item = tree.push_intrinsic_leaf(
+            TestStyle {
+                flex_grow: nn(1.0),
+                max_size: Size::new(max_size, max_none()),
+                ..TestStyle::default()
+            },
+            Size::new(30.0, 10.0),
+            Size::new(90.0, 10.0),
+        );
+        let root = flex_container(&mut tree, TestStyle::default(), &[item]);
+        definite_layout(&tree, root, 300.0, 50.0);
+        tree.layout(item).size.width
+    };
+
+    assert_close(clamped_width(max_max_content()), 90.0);
+    assert_close(clamped_width(max_min_content()), 30.0);
+    // fit-content(50px) = min(90, max(50, 30)).
+    assert_close(clamped_width(max_fit_content_px(50.0)), 50.0);
+}
+
+/// A main-axis end auto margin absorbs the free space, overriding the
+/// container's content distribution.
+#[test]
+fn main_end_auto_margin_absorbs_free_space() {
+    let mut tree = TestTree::default();
+    let mut style = fixed_leaf_style(50.0, 20.0);
+    style.margin.right = margin_auto();
+    let item = tree.push_leaf(style, Size::new(50.0, 20.0), None);
+    let root = flex_container(
+        &mut tree,
+        TestStyle {
+            justify_content: content(AlignFlags::CENTER),
+            ..TestStyle::default()
+        },
+        &[item],
+    );
+
+    definite_layout(&tree, root, 200.0, 20.0);
+
+    // Without the auto margin, centering would put the item at x=75.
+    assert_close(tree.layout(item).location.x, 0.0);
+    assert_close(tree.layout(item).margin.right, 150.0);
+}
+
+/// Zero flex bases cannot shrink: a gap-overflowed line freezes cleanly at
+/// zero sizes instead of oscillating.
+#[test]
+fn zero_basis_items_freeze_under_gap_overflow() {
+    let mut tree = TestTree::default();
+    let first = tree.push_leaf(fixed_leaf_style(0.0, 10.0), Size::ZERO, None);
+    let second = tree.push_leaf(fixed_leaf_style(0.0, 10.0), Size::ZERO, None);
+    let root = flex_container(
+        &mut tree,
+        TestStyle {
+            gap: Size::new(gap_px(50.0), gap_normal()),
+            ..TestStyle::default()
+        },
+        &[first, second],
+    );
+
+    definite_layout(&tree, root, 30.0, 20.0);
+
+    assert_close(tree.layout(first).size.width, 0.0);
+    assert_close(tree.layout(second).size.width, 0.0);
+    assert_close(tree.layout(first).location.x, 0.0);
+    // The 50px gutter still separates the items; the line overflows.
+    assert_close(tree.layout(second).location.x, 50.0);
+}
+
+/// Explicit `flex-basis: min-content`/`max-content` values (not routed
+/// through the width) set the flex base size from the contributions.
+#[test]
+fn intrinsic_keyword_flex_bases_use_contributions() {
+    use stylo::values::computed::FlexBasis;
+
+    let width_of = |basis: FlexBasis| -> f32 {
+        let mut tree = TestTree::default();
+        let item = tree.push_intrinsic_leaf(
+            TestStyle {
+                flex_basis: basis,
+                ..TestStyle::default()
+            },
+            Size::new(30.0, 10.0),
+            Size::new(90.0, 10.0),
+        );
+        let root = flex_container(&mut tree, TestStyle::default(), &[item]);
+        definite_layout(&tree, root, 300.0, 50.0);
+        tree.layout(item).size.width
+    };
+
+    assert_close(width_of(FlexBasis::Size(size_min_content())), 30.0);
+    assert_close(width_of(FlexBasis::Size(size_max_content())), 90.0);
 }

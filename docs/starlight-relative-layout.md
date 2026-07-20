@@ -108,14 +108,15 @@ two-pass relative layout
 The following value names describe computed style data, not raw CSS parser
 tokens.
 
-The standalone layout trait surface is physical. Before layout, a host bridge
+The Rust layout trait surface is physical. Before layout, a host bridge
 lowers `relative-inline-start-of`, `relative-inline-end-of`,
 `relative-align-inline-start`, and `relative-align-inline-end` to the
 corresponding left or right property using the computed writing direction.
 The algorithm consumes only the resulting physical side references.
 
-Initial values in this section document the current Rust standalone style
-surface. If another Starlight bridge materializes different compatibility
+Initial values in this section document the current Rust trait surface,
+which follows the stylo fork's computed initial values. If another Starlight
+bridge materializes different compatibility
 defaults before layout, the bridge owns that defaulting decision; this
 document defines layout behavior for the computed values that reach the
 algorithm.
@@ -218,7 +219,8 @@ Name: `relative-layout-once`
 
 Value: `false | true`
 
-Initial: `false`
+Initial: `true` (the stylo fork's initial value, matching native Lynx's
+computed default)
 
 Applies to: relative containers
 
