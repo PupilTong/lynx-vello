@@ -11,15 +11,16 @@ use core::cmp::Ordering;
 
 use stylo::computed_values::{box_sizing, direction, linear_direction};
 use stylo::values::computed::{
-    AspectRatio, ContentDistribution, Inset, ItemPlacement, Length, LengthPercentage, Margin,
-    MaxSize, PositionProperty, SelfAlignment, Size as StyleSize,
+    AspectRatio, ContentDistribution, Inset, ItemPlacement, LengthPercentage, Margin, MaxSize,
+    PositionProperty, SelfAlignment, Size as StyleSize,
 };
 use stylo::values::generics::position::PreferredRatio;
 use stylo::values::specified::align::AlignFlags;
 
 use super::util::{
     ResolvedContainerBox, ResolvedItemBox, apply_aspect_ratio, auto_edges_to_zero, clamp_axis,
-    resolve_container_box, resolve_item_box,
+    resolve_container_box, resolve_insets, resolve_item_box, resolve_length_percentage,
+    resolve_margins, resolve_padding,
 };
 use super::{compute_absolute_layout_with_static_position, hide_subtree, measure_absolute_layout};
 use crate::geometry::{Edges, Point, Size};
@@ -409,58 +410,6 @@ fn inset_depends_on_basis(value: &Inset) -> bool {
     }
 }
 
-/// Resolves a non-auto length-percentage against an optional basis.
-/// Percentage-carrying values remain unresolved when the basis is indefinite.
-#[inline]
-fn resolve_lp(value: &LengthPercentage, basis: Option<f32>) -> Option<f32> {
-    let resolved = value
-        .maybe_percentage_relative_to(basis.map(Length::new))
-        .map(Length::px);
-    debug_assert!(
-        resolved.is_none_or(f32::is_finite),
-        "layout values must be finite"
-    );
-    resolved
-}
-
-/// Resolves one margin edge, retaining `auto` as `None`.
-#[inline]
-fn resolve_margin_edge(value: &Margin, basis: Option<f32>) -> Option<f32> {
-    match value {
-        Margin::LengthPercentage(lp) => resolve_lp(lp, basis),
-        Margin::Auto => None,
-        Margin::AnchorSizeFunction(_) | Margin::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor margins are pref-dead under the lynx feature")
-        }
-    }
-}
-
-/// Resolves one inset edge, retaining `auto` as `None`.
-#[inline]
-fn resolve_inset_edge(value: &Inset, basis: Option<f32>) -> Option<f32> {
-    match value {
-        Inset::LengthPercentage(lp) => resolve_lp(lp, basis),
-        Inset::Auto => None,
-        Inset::AnchorFunction(_)
-        | Inset::AnchorSizeFunction(_)
-        | Inset::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor insets are pref-dead under the lynx feature")
-        }
-    }
-}
-
-/// Resolves physical insets. Horizontal percentages use the containing block
-/// width; vertical percentages use its height.
-#[inline]
-fn resolve_inset_edges(value: Edges<&Inset>, basis: Size<Option<f32>>) -> Edges<Option<f32>> {
-    Edges {
-        left: resolve_inset_edge(value.left, basis.width),
-        right: resolve_inset_edge(value.right, basis.width),
-        top: resolve_inset_edge(value.top, basis.height),
-        bottom: resolve_inset_edge(value.bottom, basis.height),
-    }
-}
-
 /// Resolves relative-position insets to a physical visual offset.
 #[inline]
 fn relative_offset(inset: Edges<Option<f32>>, direction: direction::T) -> Point<f32> {
@@ -703,20 +652,11 @@ fn refresh_item_edges<N>(
     if item.flags.needs_padding_refresh() {
         // Border widths are absolute in the stylo vocabulary; only padding
         // can carry percentages and need this refresh.
-        item.padding = style.padding().map(|side| {
-            resolve_lp(&side.0, percentage_basis.width)
-                .unwrap_or(0.0)
-                .max(0.0)
-        });
+        item.padding = resolve_padding(style.padding(), percentage_basis.width);
     }
     if item.flags.needs_margin_refresh() {
         let margin_value = style.margin();
-        let optional_margin = Edges {
-            left: resolve_margin_edge(margin_value.left, percentage_basis.width),
-            right: resolve_margin_edge(margin_value.right, percentage_basis.width),
-            top: resolve_margin_edge(margin_value.top, percentage_basis.width),
-            bottom: resolve_margin_edge(margin_value.bottom, percentage_basis.width),
-        };
+        let optional_margin = resolve_margins(margin_value, percentage_basis.width);
         item.margin = auto_edges_to_zero(optional_margin);
         item.margin_auto = margin_value.map(Margin::is_auto);
     }
@@ -856,7 +796,7 @@ fn fit_content_axis_value(
     inset: f32,
     box_sizing: box_sizing::T,
 ) -> f32 {
-    let mut limit = resolve_lp(limit, basis).unwrap_or(maximum);
+    let mut limit = resolve_length_percentage(limit, basis).unwrap_or(maximum);
     if box_sizing == box_sizing::T::ContentBox {
         limit += inset;
     }
@@ -2093,7 +2033,7 @@ where
                 continue;
             }
             let item_style = item.key.node.style();
-            let inset = resolve_inset_edges(item_style.inset(), final_percentage_basis);
+            let inset = resolve_insets(item_style.inset(), final_percentage_basis);
             item.relative_offset = relative_offset(inset, item_style.direction());
         }
     }
@@ -2127,7 +2067,7 @@ mod tests {
     use style_traits::values::specified::AllowedNumericType;
     use stylo::Zero;
     use stylo::values::computed::length_percentage::{CalcNode, ComputedLeaf};
-    use stylo::values::computed::{Display, NonNegativeLengthPercentage, Percentage};
+    use stylo::values::computed::{Display, Length, NonNegativeLengthPercentage, Percentage};
     use stylo::values::generics::NonNegative;
 
     use super::*;
