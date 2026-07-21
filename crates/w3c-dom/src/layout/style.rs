@@ -110,9 +110,14 @@ pub(crate) fn establishes_fixed_containing_block<T>(
         // Motion Path: a non-none `offset-path` has "the usual transform
         // property effects", containing-block creation included.
         || !matches!(box_style.offset_path, OffsetPath::None)
+        // Will Change §2: naming a property whose non-initial values create
+        // a containing block must create one too. `transform`-family and
+        // `filter`-family names set TRANSFORM/PERSPECTIVE/FIXPOS_CB_NON_SVG;
+        // `contain` sets its own bit.
         || box_style.will_change.bits.intersects(
             WillChangeBits::TRANSFORM
                 | WillChangeBits::PERSPECTIVE
+                | WillChangeBits::CONTAIN
                 | WillChangeBits::FIXPOS_CB_NON_SVG,
         )
         || box_style
@@ -122,13 +127,20 @@ pub(crate) fn establishes_fixed_containing_block<T>(
 }
 
 /// Whether `node` establishes a containing block for `position: absolute`
-/// descendants: any positioned element, plus everything that would already
+/// descendants: any positioned element — including `will-change: position`,
+/// which per Will Change §2 must reproduce the containing block a
+/// non-initial `position` would create — plus everything that would already
 /// capture a `fixed` descendant.
 pub(crate) fn establishes_absolute_containing_block<T>(
     node: &Node<T>,
     style: &ComputedValues,
 ) -> bool {
     style.clone_position() != PositionProperty::Static
+        || style
+            .get_box()
+            .will_change
+            .bits
+            .intersects(WillChangeBits::POSITION)
         || establishes_fixed_containing_block(node, style)
 }
 

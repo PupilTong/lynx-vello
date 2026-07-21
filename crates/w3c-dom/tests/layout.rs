@@ -433,6 +433,66 @@ fn offset_path_establishes_the_fixed_containing_block() {
 }
 
 #[test]
+fn fixed_descendants_of_the_leaf_fallback_stay_zeroed() {
+    // A flow container falls back to leaf layout and zeroes its children;
+    // the positioned pass must not revive a hoisted descendant inside that
+    // zeroed subtree.
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; align-items: flex-start; }
+         .flow { width: 40px; height: 30px; }
+         .fixed { position: fixed; left: 10px; top: 20px; width: 30px; height: 40px; }",
+    );
+    let root = h.doc.root;
+    let flow = h.doc.el(root, ".flow");
+    let fixed = h.doc.el(flow, ".fixed");
+    h.layout();
+
+    assert_eq!(h.rect(flow), (0.0, 0.0, 40.0, 30.0));
+    assert_eq!(h.rect(fixed), (0.0, 0.0, 0.0, 0.0));
+}
+
+#[test]
+fn will_change_contain_establishes_the_fixed_containing_block() {
+    // Will Change §2: naming `contain` must reproduce the containing block
+    // a non-initial `contain` (layout/paint) would create.
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .host { display: flex; width: 300px; height: 200px; margin-left: 100px;
+                 will-change: contain; }
+         .fixed { position: fixed; left: 10px; top: 20px; width: 30px; height: 40px; }",
+    );
+    let root = h.doc.root;
+    let host = h.doc.el(root, ".host");
+    let fixed = h.doc.el(host, ".fixed");
+    h.layout();
+
+    // Captured by the host's padding box, not the viewport (which would be
+    // parent-relative x = -90).
+    assert_eq!(h.rect(fixed), (10.0, 20.0, 30.0, 40.0));
+}
+
+#[test]
+fn will_change_position_establishes_the_absolute_containing_block() {
+    // Will Change §2: naming `position` must reproduce the containing block
+    // a non-initial `position` would create — for *absolute* descendants
+    // (a positioned ancestor does not capture `fixed`).
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .host { display: flex; width: 300px; height: 200px; margin-left: 100px;
+                 will-change: position; }
+         .abs { position: absolute; left: 10px; top: 20px; width: 30px; height: 40px; }",
+    );
+    let root = h.doc.root;
+    let host = h.doc.el(root, ".host");
+    let abs = h.doc.el(host, ".abs");
+    h.layout();
+
+    // Resolved against the host's padding box, not the viewport (which
+    // would be parent-relative x = -90).
+    assert_eq!(h.rect(abs), (10.0, 20.0, 30.0, 40.0));
+}
+
+#[test]
 fn root_filter_is_exempt_from_fixed_containing_block_creation() {
     // Filter Effects §5 exempts the document root element: a filtered root
     // does not capture fixed descendants (they stay viewport-anchored),

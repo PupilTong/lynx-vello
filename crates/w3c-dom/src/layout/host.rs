@@ -174,7 +174,8 @@ fn position_hoisted_subtree<T: MeasureLeaf>(node: &Node<T>, viewport: Size<f32>)
     let Some(style) = node.computed_style() else {
         return; // text nodes are never positioned and have no children
     };
-    if display_mode(style.clone_display()) == DisplayMode::None {
+    let display = display_mode(style.clone_display());
+    if display == DisplayMode::None {
         return; // hidden subtrees are zeroed, not positioned
     }
     // The root element is laid out by `compute_root_layout`, never hoisted
@@ -183,6 +184,12 @@ fn position_hoisted_subtree<T: MeasureLeaf>(node: &Node<T>, viewport: Size<f32>)
         && resolve_position(node, &style) == PositionProperty::Fixed
     {
         position_hoisted(node, viewport);
+    }
+    // The leaf fallback (flow/contents containers) zeroes its children —
+    // they do not participate in layout, so the walk must not revive a
+    // hoisted descendant inside the zeroed subtree.
+    if display == DisplayMode::Leaf {
+        return;
     }
     for child in Node::children(node) {
         position_hoisted_subtree(child, viewport);
