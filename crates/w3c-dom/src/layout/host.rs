@@ -104,12 +104,9 @@ impl<'dom, T> LayoutNode for &'dom Node<T> {
                     };
                     let mut context = node.text_context().borrow_mut();
                     let mut layout_data = node.layout_data.borrow_mut();
-                    let mut measurer = TextMeasurer::new(
-                        &mut context,
-                        &mut layout_data.text_artifacts,
-                        &view,
-                        std::iter::once(run),
-                    );
+                    let artifacts = layout_data.text_artifacts.get_or_insert_with(Box::default);
+                    let mut measurer =
+                        TextMeasurer::new(&mut context, artifacts, &view, std::iter::once(run));
                     measurer.compute_layout(input)
                 } else {
                     #[cfg(feature = "layout-test-utils")]

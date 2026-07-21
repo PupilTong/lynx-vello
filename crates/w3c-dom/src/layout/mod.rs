@@ -219,9 +219,10 @@ pub(crate) struct LayoutData {
     /// as images. This stays below the generic Widget/PAPI layer; layout
     /// consumes the value without an embedder measurement callback.
     pub(crate) natural_size: NaturalSize,
-    /// Per-text-node Parley artifacts. Probe and committed layouts stay
-    /// separate so intrinsic queries cannot evict paint-ready geometry.
-    pub(crate) text_artifacts: ArtifactSlots,
+    /// Lazily allocated per-text-node Parley artifacts. Probe and committed
+    /// layouts stay separate so intrinsic queries cannot evict paint-ready
+    /// geometry, while non-text nodes retain only one nullable pointer.
+    pub(crate) text_artifacts: Option<Box<ArtifactSlots>>,
     /// Synthetic measured content for production-host tests and benchmarks.
     /// It is never present in a normal build.
     #[cfg(feature = "layout-test-utils")]
@@ -251,7 +252,7 @@ impl Default for LayoutData {
     fn default() -> Self {
         Self {
             natural_size: NaturalSize::NONE,
-            text_artifacts: ArtifactSlots::default(),
+            text_artifacts: None,
             #[cfg(feature = "layout-test-utils")]
             test_leaf_metrics: None,
             measure_cache: Cache::new(),
@@ -266,7 +267,9 @@ impl LayoutData {
     /// Invalidate every retained answer derived from content or style.
     pub(crate) fn invalidate_measurement(&mut self) {
         self.measure_cache.clear();
-        self.text_artifacts.invalidate();
+        if let Some(artifacts) = self.text_artifacts.as_mut() {
+            artifacts.invalidate();
+        }
     }
 }
 
