@@ -1,8 +1,8 @@
-//! Dedicated Linear layout benchmarks, tracked by `CodSpeed` through Divan.
+//! Linear layout benchmarks through w3c-dom's production host.
 
 #[path = "scenarios/linear.rs"]
 mod scenarios;
-#[path = "../tests/support/mod.rs"]
+#[path = "support/mod.rs"]
 mod support;
 
 use divan::counter::ItemsCount;

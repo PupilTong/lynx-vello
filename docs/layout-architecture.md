@@ -444,8 +444,11 @@ the painting — layout's job is to never be the frame's bottleneck.
   so this ships when profiles earn it, without a protocol break.
 - **Flex, Grid, Relative, and Linear benchmarks are landed; broader
   performance hardening remains.** The `divan` (CodSpeed-compatible) suite
-  measures engine-native workloads through neutron-star's public host
-  protocol. The Flex suite covers deep and wide trees, wrapping, weighted
+  measures CSS-built documents through w3c-dom's production host: styles are
+  flushed outside the timed region, while measured calls enter through
+  `StyleEngine::layout_document` and include the real `&Node` protocol,
+  per-node caches, positioned pass, and rounding. The Flex suite covers deep
+  and wide trees, wrapping, weighted
   distribution, measurement, nested containers, and positioned children.
   The Grid suite covers scaled
   sparse/dense auto-placement, fixed/`fr` tracks, unique intrinsic span
@@ -638,7 +641,8 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
   production source while excluding test and benchmark source from the
   metric.
 - **Behavior/performance hardening:** each algorithm has an engine-native
-  behavior suite and a CodSpeed-compatible benchmark target. Tests use exact
+  behavior suite and a CodSpeed-compatible production-host benchmark target.
+  Tests use exact
   geometry, used-edge, baseline, measurement-trace, static-position, layout
   order, or cache-result oracles; repository-text inventories and
   source-migration cardinality guards are intentionally excluded. Browser
@@ -671,7 +675,8 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
 - **L2R — Starlight relative** *(complete)*: the relative style protocol,
   the one-pass combined and two-pass per-axis dependency solvers,
   intrinsic/percentage remeasurement, deterministic cycles, out-of-flow
-  handling, engine-native conformance fixtures, and CodSpeed benchmarks.
+  handling, engine-native conformance fixtures, and w3c-dom-hosted CodSpeed
+  benchmarks.
 - **L3 — Starlight modes + runtime integration** *(partial)*: the Lynx-linear
   value and style-view protocol, generic `compute_linear_layout` algorithm, and
   feature-gated Parley text measurement core are complete in `neutron-star`.

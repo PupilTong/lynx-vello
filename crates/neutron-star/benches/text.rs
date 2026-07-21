@@ -1,22 +1,19 @@
 //! Parley shape, rebreak, and cache benchmarks tracked by CodSpeed/Divan.
 
-use std::cell::RefCell;
+#[path = "support/mod.rs"]
+mod support;
 
 use divan::counter::ItemsCount;
-use neutron_star::cache::Cache;
-use neutron_star::compute::{
-    LeafMeasureInput, LeafMeasurement, LeafMeasurer, compute_cached_layout,
-};
-use neutron_star::geometry::{Point, Size};
+use neutron_star::compute::{LeafMeasureInput, LeafMeasurement, LeafMeasurer};
+use neutron_star::geometry::Size;
 use neutron_star::style::{CoreStyle, TextContainerStyle, TextRun, TextRunStyle};
 use neutron_star::text::{ArtifactSlots, TextContext, TextMeasurer};
-use neutron_star::tree::{
-    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput,
-};
+use neutron_star::tree::{AvailableSpace, LayoutGoal};
 use stylo::values::computed::Display;
 use stylo::values::computed::font::{
     FamilyName, FontFamily, FontFamilyList, FontFamilyNameSyntax, SingleFontFamily,
 };
+use support::LayoutFixture;
 
 const AHEM: &[u8] = include_bytes!("../tests/fixtures/Ahem.ttf");
 const LABEL: &[(&str, f32)] = &[("Settings", 16.0)];
@@ -212,103 +209,36 @@ text_benchmarks!(
     1_024
 );
 
-/// A one-leaf cache-hit host: the box cache and the retained text batch live
-/// in interior-mutable slots reached through the `Copy` handle [`CachedRef`].
+/// A one-leaf production document with a warmed committed-layout cache.
 #[derive(Debug)]
 struct CachedCase {
-    cache: RefCell<Cache>,
-    input: LayoutInput,
-    text: RefCell<TextBatch>,
+    fixture: LayoutFixture,
 }
 
 impl CachedCase {
     fn new() -> Self {
-        let mut text = TextBatch::new(PARAGRAPH, 1);
-        let size = text.measure_all(320.0, LayoutGoal::Commit);
-        let input = LayoutInput::perform_layout(
-            Size::NONE,
-            Size::NONE,
-            Size::new(AvailableSpace::Definite(320.0), AvailableSpace::MaxContent),
+        let mut fixture = LayoutFixture::new(
+            Size::new(320.0, 32.0),
+            "display:flex; width:320px; height:32px; align-items:flex-start",
         );
-        let mut cache = Cache::default();
-        cache.store(input, LayoutOutput::new(size, size));
-        Self {
-            cache: RefCell::new(cache),
-            input,
-            text: RefCell::new(text),
-        }
+        let root = fixture.root();
+        fixture.leaf(
+            root,
+            "width:auto; height:auto",
+            Size::new(180.0, 16.0),
+            Some(14.0),
+        );
+        let mut fixture = fixture.prepare();
+        let _ = fixture.run();
+        Self { fixture }
     }
 
-    fn hit(&mut self) -> LayoutOutput {
-        let input = self.input;
-        compute_cached_layout(CachedRef { case: self }, input, |node, _| {
-            let size = node
-                .case
-                .text
-                .borrow_mut()
-                .measure_all(320.0, LayoutGoal::Commit);
-            LayoutOutput::new(size, size)
-        })
+    fn hit(&mut self) -> w3c_dom::layout::Layout {
+        self.fixture.run()
     }
 }
 
-#[derive(Clone, Copy)]
-struct CachedRef<'t> {
-    case: &'t CachedCase,
-}
-
-impl std::fmt::Debug for CachedRef<'_> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("CachedRef")
-    }
-}
-
-impl<'t> LayoutNode for CachedRef<'t> {
-    type Style = &'t ContainerStyle;
-    type ChildIter = std::iter::Empty<Self>;
-
-    fn children(self) -> Self::ChildIter {
-        std::iter::empty()
-    }
-
-    fn style(self) -> Self::Style {
-        &ContainerStyle
-    }
-
-    fn compute_child_layout(self, _input: LayoutInput) -> LayoutOutput {
-        unreachable!("the cache-hit benchmark drives compute_cached_layout directly")
-    }
-
-    fn set_unrounded_layout(self, _layout: &Layout) {
-        unreachable!("the cache-hit benchmark stores no durable geometry")
-    }
-
-    fn unrounded_layout(self) -> Layout {
-        unreachable!("the cache-hit benchmark stores no durable geometry")
-    }
-
-    fn set_final_layout(self, _layout: &Layout) {
-        unreachable!("the cache-hit benchmark stores no durable geometry")
-    }
-
-    fn set_static_position(self, _static_position: Point<f32>) {
-        unreachable!("the cache-hit benchmark stores no durable geometry")
-    }
-
-    fn cache_get(self, input: LayoutInput) -> Option<LayoutOutput> {
-        self.case.cache.borrow().get(input)
-    }
-
-    fn cache_store(self, input: LayoutInput, output: LayoutOutput) {
-        self.case.cache.borrow_mut().store(input, output);
-    }
-
-    fn cache_clear(self) {
-        self.case.cache.borrow_mut().clear();
-    }
-}
-
-const CACHE_HIT_BATCH: usize = 524_288;
+const CACHE_HIT_BATCH: usize = 32_768;
 
 #[divan::bench]
 fn committed_box_cache_hit(bencher: divan::Bencher<'_, '_>) {
