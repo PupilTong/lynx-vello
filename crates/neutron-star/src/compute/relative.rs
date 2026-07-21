@@ -942,6 +942,17 @@ fn prepare_intrinsic_sizes<N>(
     item.intrinsic_sizes_ready = true;
 }
 
+/// Clamps one axis value by the item's resolved min/max and box floor.
+#[inline]
+fn clamped_item_axis<N>(item: &RelativeItem<N>, axis: Axis, value: f32, floor: Size<f32>) -> f32 {
+    clamp_axis(
+        value,
+        axis.size(item.min_size),
+        axis.size(item.max_size),
+        axis.size(floor),
+    )
+}
+
 fn measurement_input<N>(
     item: &RelativeItem<N>,
     constraints: Size<Line<Option<f32>>>,
@@ -968,21 +979,24 @@ where
         let raw_size = axis.size(full_raw_size);
         let fit_content_needs_one_sided_measurement =
             matches!(raw_size, StyleSize::FitContentFunction(_)) && has_one_sided_constraint;
-        let constrained = constrained_border_size(line, axis.margin_sum(item.margin)).map(|size| {
-            clamp_axis(
-                size,
-                axis.size(item.min_size),
-                axis.size(item.max_size),
-                axis.size(floor),
-            )
-        });
+        let constrained = constrained_border_size(line, axis.margin_sum(item.margin))
+            .map(|size| clamped_item_axis(item, axis, size, floor));
         let known_is_definite = constrained.is_some() || axis.size(item.preferred_size_is_definite);
         axis.set_size(&mut constraint_definite, known_is_definite);
-        let known = constrained.or(axis.size(item.preferred_size)).or_else(|| {
-            (!fit_content_needs_one_sided_measurement)
-                .then(|| axis.size(item.intrinsic_preferred_size))
-                .flatten()
-        });
+        // Starlight clamps every incoming child constraint by min/max at
+        // `LayoutObject::UpdateMeasure` before measuring, so a definite
+        // preferred size never bypasses resolved bounds (intrinsic-keyword
+        // bounds included) and content is measured at the clamped size.
+        let known = constrained
+            .or_else(|| {
+                axis.size(item.preferred_size)
+                    .map(|preferred| clamped_item_axis(item, axis, preferred, floor))
+            })
+            .or_else(|| {
+                (!fit_content_needs_one_sided_measurement)
+                    .then(|| axis.size(item.intrinsic_preferred_size))
+                    .flatten()
+            });
         axis.set_size(&mut known_dimensions, known);
         if let Some(known) = known {
             axis.set_size(&mut available_space, AvailableSpace::Definite(known));
