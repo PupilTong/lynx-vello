@@ -493,6 +493,34 @@ fn will_change_position_establishes_the_absolute_containing_block() {
 }
 
 #[test]
+fn root_will_change_filter_is_exempt_from_fixed_containing_block_creation() {
+    // Will Change §2 reproduces the named property's behavior — including
+    // Filter Effects §5's document-root exemption: `will-change: filter` on
+    // the root must not capture fixed descendants (the WPT will-change
+    // fixed-CB suite pins this), while the same declaration on a non-root
+    // ancestor must.
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; border: 10px solid black;
+                will-change: filter; }
+         .host { display: flex; width: 300px; height: 200px; margin-left: 100px;
+                 will-change: filter; }
+         .fixed { position: fixed; left: 0; top: 0; width: 30px; height: 40px; }",
+    );
+    let root = h.doc.root;
+    let root_fixed = h.doc.el(root, ".fixed");
+    let host = h.doc.el(root, ".host");
+    let captured_fixed = h.doc.el(host, ".fixed");
+    h.layout();
+
+    // Exempt: anchored to the viewport origin, not the root's padding box
+    // (which starts at (10, 10) inside the border).
+    assert_eq!(h.rect(root_fixed), (0.0, 0.0, 30.0, 40.0));
+    // Non-root `will-change: filter` captures normally.
+    assert_eq!(h.rect(captured_fixed), (0.0, 0.0, 30.0, 40.0));
+    assert_eq!(h.rect(host).0, 110.0); // border 10 + margin 100
+}
+
+#[test]
 fn root_filter_is_exempt_from_fixed_containing_block_creation() {
     // Filter Effects §5 exempts the document root element: a filtered root
     // does not capture fixed descendants (they stay viewport-anchored),

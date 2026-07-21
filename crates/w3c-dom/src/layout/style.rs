@@ -112,14 +112,19 @@ pub(crate) fn establishes_fixed_containing_block<T>(
         || !matches!(box_style.offset_path, OffsetPath::None)
         // Will Change §2: naming a property whose non-initial values create
         // a containing block must create one too. `transform`-family and
-        // `filter`-family names set TRANSFORM/PERSPECTIVE/FIXPOS_CB_NON_SVG;
-        // `contain` sets its own bit.
+        // `contain` names set TRANSFORM/PERSPECTIVE/CONTAIN — no root
+        // carve-out, exactly like the real properties.
         || box_style.will_change.bits.intersects(
-            WillChangeBits::TRANSFORM
-                | WillChangeBits::PERSPECTIVE
-                | WillChangeBits::CONTAIN
-                | WillChangeBits::FIXPOS_CB_NON_SVG,
+            WillChangeBits::TRANSFORM | WillChangeBits::PERSPECTIVE | WillChangeBits::CONTAIN,
         )
+        // FIXPOS_CB_NON_SVG is the `filter`-family proxy bit; like the real
+        // `filter` below it must reproduce Filter Effects §5's document-root
+        // exemption (the WPT will-change fixed-CB suite pins this).
+        || (box_style
+            .will_change
+            .bits
+            .intersects(WillChangeBits::FIXPOS_CB_NON_SVG)
+            && !is_root_element(node))
         || box_style
             .contain
             .intersects(Contain::LAYOUT | Contain::PAINT)
