@@ -14,7 +14,7 @@ script needs `python3`; the crate is no longer standalone-publishable).
 > implemented.** The
 > protocol, shared layout machinery, leaf/absolute sizing, cache, rounding,
 > CSS Flexbox Level 1, numeric CSS Grid Level 2, Starlight `display: linear`,
-> Starlight Relative Layout Level 1, and the feature-gated Parley shaping and
+> Starlight Relative Layout Level 1, and the concrete Parley shaping and
 > line-breaking core are implemented. Grid
 > deliberately excludes subgrid and
 > host-lowered named lines/areas. See
@@ -42,7 +42,7 @@ child to the right algorithm. Flex, Grid, and Lynx's non-CSS Linear and
 Relative modes are all first-class neutron-star entry points; a host can
 still add other container algorithms through the same dispatch seam.
 Leaf content is closed rather than extensible: replaced content enters as a
-`NaturalSize`, and the optional concrete Parley path accepts host-owned
+`NaturalSize`, and the concrete Parley path accepts host-owned
 run/style views while the host stores a reusable `TextContext` and per-node
 `ArtifactSlots` in interior-mutable slots.
 `display:none` cleanup is an explicit host precheck: call `hide_subtree` and
@@ -71,15 +71,13 @@ path.
   policy (e.g. Lynx computing `box-sizing: auto` to `border-box`, or
   `overflow` to `hidden`) stays the host style system's job.
 
-## Dependencies and feature flags
+## Dependencies
 
-The Flex, Grid, Linear, Relative, and text-style protocols are unconditional
-and require the workspace's `stylo` fork in every configuration (building it
-needs the vendored submodule and `python3` for stylo's build script; a cold
-build takes minutes). Default builds enable the `text` feature and its
-optional Parley dependency for shaping, line breaking, and retained text
-measurement; `default-features = false` keeps the protocol and box-layout
-core only.
+The Flex, Grid, Linear, Relative, and text paths are unconditional and require
+the workspace's `stylo` fork plus Parley in every configuration (building
+stylo needs the vendored submodule and `python3`; a cold build takes minutes).
+There is no box-layout-only build: keeping one would make the closed leaf model
+and its host behavior configuration-dependent.
 
 ## Prior art
 

@@ -20,13 +20,16 @@
 use neutron_star::geometry::{Edges, Point, Size};
 use neutron_star::style::{
     AspectRatio, Au, BorderSideWidth, Contain, ContainIntrinsicSize, ContentDistribution,
-    CoreStyle, Display, FlexBasis, FlexContainerStyle, FlexItemStyle, GridAutoFlow,
+    CoreStyle, Display, FlexBasis, FlexContainerStyle, FlexItemStyle, FontFamily,
+    FontFeatureSettings, FontStyle, FontVariationSettings, FontWeight, GridAutoFlow,
     GridContainerStyle, GridItemStyle, GridLine, GridTemplateComponent, ImplicitGridTracks, Inset,
-    ItemPlacement, JustifyItems, LinearContainerStyle, LinearItemStyle, Margin, MaxSize,
-    NonNegativeLengthPercentage, NonNegativeLengthPercentageOrNormal, NonNegativeNumber, Overflow,
-    PositionProperty, RelativeAlign, RelativeContainerStyle, RelativeItemStyle, RelativeReference,
-    SelfAlignment, StyleSize, box_sizing, direction, flex_direction, flex_wrap, linear_direction,
-    relative_center, relative_layout_once, visibility,
+    ItemPlacement, JustifyItems, LetterSpacing, LineHeight, LinearContainerStyle, LinearItemStyle,
+    Margin, MaxSize, NonNegativeLengthPercentage, NonNegativeLengthPercentageOrNormal,
+    NonNegativeNumber, Overflow, PositionProperty, RelativeAlign, RelativeContainerStyle,
+    RelativeItemStyle, RelativeReference, SelfAlignment, StyleSize, TextAlign, TextContainerStyle,
+    TextIndent, TextRunStyle, WordBreak, box_sizing, direction, flex_direction, flex_wrap,
+    linear_direction, relative_center, relative_layout_once, text_wrap_mode, visibility,
+    white_space_collapse,
 };
 use stylo::properties::ComputedValues;
 use stylo::properties::style_structs::Position as PositionStruct;
@@ -53,8 +56,8 @@ pub(crate) enum DisplayMode {
     Relative,
     /// Flow (block/inline) and `display: contents` — **not implemented** as
     /// container layout: the node is laid out as a leaf (its own box styles
-    /// apply, content measured through the embedder hook) and any children
-    /// are zeroed. Flow containers never survive in a Lynx tree (the
+    /// apply, decoded natural size is used when present) and any children are
+    /// zeroed. Flow containers never survive in a Lynx tree (the
     /// embedder's UA sheet assigns every element a supported display) and
     /// neutron-star has no block/inline-flow algorithm yet.
     Leaf,
@@ -238,7 +241,11 @@ fn lower_relative_logical(physical: i32, logical: i32) -> i32 {
 /// lending discipline the engine's style protocol documents.
 pub struct StyleView<'dom, T> {
     node: &'dom Node<T>,
+    /// Geometry style. Text nodes use anonymous-box initial values.
     style: Arc<ComputedValues>,
+    /// Inherited text/run style for a text node, taken from its parent.
+    /// Elements use `style` for both roles and leave this empty.
+    text_style: Option<Arc<ComputedValues>>,
 }
 
 impl<T> std::fmt::Debug for StyleView<'_, T> {
@@ -257,19 +264,33 @@ impl<'dom, T> StyleView<'dom, T> {
     /// [`hide_subtree`](neutron_star::compute::hide_subtree) ever visits
     /// them, without reading styles).
     pub(crate) fn of(node: &'dom Node<T>) -> Self {
-        let style = if node.is_text_node() {
-            None
+        let (style, text_style) = if node.is_text_node() {
+            (
+                super::ANONYMOUS_STYLE.clone(),
+                node.parent()
+                    .and_then(Node::computed_style)
+                    .or_else(|| Some(super::ANONYMOUS_STYLE.clone())),
+            )
         } else {
-            node.computed_style()
+            (
+                node.computed_style()
+                    .unwrap_or_else(|| super::ANONYMOUS_STYLE.clone()),
+                None,
+            )
         };
         Self {
             node,
-            style: style.unwrap_or_else(|| super::ANONYMOUS_STYLE.clone()),
+            style,
+            text_style,
         }
     }
 
     fn position_struct(&self) -> &PositionStruct {
         self.style.get_position()
+    }
+
+    fn text_values(&self) -> &ComputedValues {
+        self.text_style.as_deref().unwrap_or(&self.style)
     }
 }
 
@@ -430,6 +451,74 @@ impl<T> FlexContainerStyle for StyleView<'_, T> {
 
     fn justify_content(&self) -> ContentDistribution {
         self.position_struct().justify_content
+    }
+}
+
+impl<T> TextContainerStyle for StyleView<'_, T> {
+    fn text_align(&self) -> TextAlign {
+        self.text_values().get_inherited_text().clone_text_align()
+    }
+
+    fn text_wrap_mode(&self) -> text_wrap_mode::T {
+        self.text_values()
+            .get_inherited_text()
+            .clone_text_wrap_mode()
+    }
+
+    fn white_space_collapse(&self) -> white_space_collapse::T {
+        self.text_values()
+            .get_inherited_text()
+            .clone_white_space_collapse()
+    }
+
+    fn word_break(&self) -> WordBreak {
+        self.text_values().get_inherited_text().clone_word_break()
+    }
+
+    fn text_indent(&self) -> TextIndent {
+        self.text_values().get_inherited_text().clone_text_indent()
+    }
+}
+
+impl<T> TextRunStyle for StyleView<'_, T> {
+    fn font_family(&self) -> FontFamily {
+        self.text_values().get_font().clone_font_family()
+    }
+
+    fn font_size(&self) -> f32 {
+        self.text_values()
+            .get_font()
+            .clone_font_size()
+            .computed_size()
+            .px()
+    }
+
+    fn font_weight(&self) -> FontWeight {
+        self.text_values().get_font().clone_font_weight()
+    }
+
+    fn font_style(&self) -> FontStyle {
+        self.text_values().get_font().clone_font_style()
+    }
+
+    fn letter_spacing(&self) -> LetterSpacing {
+        self.text_values()
+            .get_inherited_text()
+            .clone_letter_spacing()
+    }
+
+    fn line_height(&self) -> LineHeight {
+        self.text_values().get_font().clone_line_height()
+    }
+
+    fn font_feature_settings(&self) -> FontFeatureSettings {
+        self.text_values().get_font().clone_font_feature_settings()
+    }
+
+    fn font_variation_settings(&self) -> FontVariationSettings {
+        self.text_values()
+            .get_font()
+            .clone_font_variation_settings()
     }
 }
 

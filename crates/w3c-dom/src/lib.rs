@@ -77,8 +77,8 @@
 //! implements `neutron-star`'s handle protocol (`LayoutNode` on a Copy
 //! handle, stylo-vocabulary style views lent straight from
 //! `ComputedValues`) directly over the document — Flexbox, Grid, and
-//! Starlight Linear/Relative containers, with leaf content measured through
-//! an embedder hook. Run it with [`Document::layout`] (styles
+//! Starlight Linear/Relative containers, decoded natural-size leaves, and
+//! concrete Parley text. Run it with [`Document::layout`] (styles
 //! flush first — the style → layout phase barrier); results live **on the
 //! nodes** ([`Node::layout`]), so layout state is created and dropped with
 //! its node. See the module docs for the phase and invalidation contracts.

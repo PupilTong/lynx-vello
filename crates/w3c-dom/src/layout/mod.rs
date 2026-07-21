@@ -29,17 +29,17 @@
 //! engine holds the view. The values lent are the per-node storage the
 //! style flush wrote (materialized once per *style change*, per the
 //! protocol's lending rule); the `Arc` in the view only keeps that storage
-//! borrowable. Text nodes are lent the fork's initial values — the
-//! anonymous box CSS wraps a text run in. Their concrete Parley content path
-//! remains a higher-layer integration task.
+//! borrowable. Text nodes use the fork's initial values for anonymous-box
+//! geometry and inherit font/text values from their parent. Their character
+//! data always runs through neutron-star's concrete Parley path.
 //!
 //! # Layout results live on the node
 //!
 //! Every [`Node`] carries its own `LayoutData` (an
 //! `AtomicRefCell`, the same shape Servo uses for per-node layout data):
-//! replaced-content natural size, the measurement cache, the unrounded and
-//! device-snapped [`Layout`]s, and the out-of-flow bookkeeping. Read results with
-//! [`Node::layout`](crate::Node::layout) /
+//! replaced-content natural size, retained text artifacts, the measurement
+//! cache, the unrounded and device-snapped [`Layout`]s, and the out-of-flow bookkeeping. Read
+//! results with [`Node::layout`](crate::Node::layout) /
 //! [`Node::unrounded_layout`](crate::Node::unrounded_layout). Because the
 //! state lives **on** the node, it is created and dropped with the node —
 //! there is no side table to keep in sync with the tree. The positioned
@@ -66,6 +66,15 @@
 //! the next layout pass observes new dimensions. This is intrinsic replaced
 //! content data, not a synthesized CSS `contain-intrinsic-size` value, and no
 //! arbitrary embedder measurement callback exists.
+//!
+//! # Text always uses Parley
+//!
+//! The document node owns one reusable [`TextContext`](neutron_star::text::TextContext), while
+//! each text node retains separate probe and committed Parley artifacts in
+//! its layout data. Anonymous-box geometry uses initial CSS values; shaping
+//! and paragraph values are read from the parent element's inherited
+//! computed style. [`Document::register_fonts`] installs decoded fonts into
+//! the document context and invalidates retained measurements.
 //!
 //! # Using it
 //!
@@ -147,17 +156,16 @@
 //!
 //! - **character-data / child-list** mutations that leave every computed style identical (stylo
 //!   emits no damage for them);
-//! - **content inputs** that are not computed style. The internal natural-size update path
-//!   performs its own targeted invalidation.
+//! - **content inputs** that are not computed style. The internal natural-size update path performs
+//!   its own targeted invalidation.
 //!
 //! When in doubt, [`Document::invalidate_layout_all`] is always correct,
 //! merely slower.
 //!
 //! # What is deliberately *not* here (yet)
 //!
-//! - **Text shaping.** The Parley-backed text engine stays outside this crate (`neutron-star`'s
-//!   `text` feature). The future widget integration uses its concrete
-//!   `TextMeasurer::compute_layout` path; w3c-dom deliberately exposes no generic content hook.
+//! - **Lynx text policy.** Element-backed raw text, Lynx-specific attributes, inline boxes,
+//!   truncation/ellipsis, and paint lowering remain widget/render work.
 //! - **Flow (block/inline) container layout.** neutron-star has no flow algorithm yet; a flow or
 //!   `display: contents` node lays out as a leaf and its children are zeroed. Lynx trees give every
 //!   element a supported display via the embedder's UA sheet, so this arm is a generic-DOM
@@ -184,10 +192,13 @@ mod style;
 use std::sync::LazyLock;
 
 use neutron_star::cache::Cache;
+#[cfg(feature = "layout-test-utils")]
+use neutron_star::compute::LeafMetrics;
 use neutron_star::compute::NaturalSize;
 pub use neutron_star::geometry::{Edges, Point, Size};
 use neutron_star::invalidate::is_relayout_boundary;
 use neutron_star::style::CoreStyle;
+use neutron_star::text::ArtifactSlots;
 pub use neutron_star::tree::Layout;
 use stylo::properties::ComputedValues;
 use stylo::servo_arc::Arc;
@@ -208,6 +219,13 @@ pub(crate) struct LayoutData {
     /// as images. This stays below the generic Widget/PAPI layer; layout
     /// consumes the value without an embedder measurement callback.
     pub(crate) natural_size: NaturalSize,
+    /// Per-text-node Parley artifacts. Probe and committed layouts stay
+    /// separate so intrinsic queries cannot evict paint-ready geometry.
+    pub(crate) text_artifacts: ArtifactSlots,
+    /// Synthetic measured content for production-host tests and benchmarks.
+    /// It is never present in a normal build.
+    #[cfg(feature = "layout-test-utils")]
+    pub(crate) test_leaf_metrics: Option<LeafMetrics>,
     /// The neutron-star **measurement cache** — not a copy of the final
     /// result, but memoized answers to the different constraint questions
     /// (`LayoutInput`) the parent algorithms ask during sizing. This is the
@@ -233,11 +251,22 @@ impl Default for LayoutData {
     fn default() -> Self {
         Self {
             natural_size: NaturalSize::NONE,
+            text_artifacts: ArtifactSlots::default(),
+            #[cfg(feature = "layout-test-utils")]
+            test_leaf_metrics: None,
             measure_cache: Cache::new(),
             unrounded: Layout::default(),
             rounded: Layout::default(),
             static_position: Point::ZERO,
         }
+    }
+}
+
+impl LayoutData {
+    /// Invalidate every retained answer derived from content or style.
+    pub(crate) fn invalidate_measurement(&mut self) {
+        self.measure_cache.clear();
+        self.text_artifacts.invalidate();
     }
 }
 
@@ -298,12 +327,9 @@ impl<T> Document<T> {
     ///
     /// Panics when `id` is vacant or does not identify an element (the
     /// let-it-crash mutation contract).
-    #[cfg_attr(
-        not(any(test, feature = "layout-test-utils")),
-        allow(
-            dead_code,
-            reason = "reserved for the internal replaced-content integration"
-        )
+    #[allow(
+        dead_code,
+        reason = "owned by the future internal replaced-content loader"
     )]
     pub(crate) fn set_natural_size(&mut self, id: crate::NodeId, natural_size: NaturalSize) {
         let changed = {
@@ -328,15 +354,47 @@ impl<T> Document<T> {
         }
     }
 
-    /// Install a synthetic natural size for layout benchmarks.
+    /// Install synthetic content-box metrics for layout tests and
+    /// production-host benchmarks.
     ///
-    /// This is intentionally available only through the opt-in
-    /// `layout-test-utils` feature; production replaced-content state remains
-    /// crate-internal.
+    /// This routes through neutron-star's real leaf box-model routine; only
+    /// the content engine is synthetic. The API is absent from normal builds.
     #[cfg(feature = "layout-test-utils")]
     #[doc(hidden)]
-    pub fn set_natural_size_for_testing(&mut self, id: crate::NodeId, size: Size<f32>) {
-        self.set_natural_size(id, NaturalSize::from_size(size));
+    pub fn set_leaf_metrics_for_testing(
+        &mut self,
+        id: crate::NodeId,
+        size: Size<f32>,
+        first_baseline: Option<f32>,
+    ) {
+        let node = self
+            .tree_mut()
+            .get_mut(id)
+            .expect("vacant NodeId passed to Document::set_leaf_metrics_for_testing");
+        assert!(
+            node.is_element(),
+            "non-element NodeId passed to Document::set_leaf_metrics_for_testing"
+        );
+        node.layout_data.get_mut().test_leaf_metrics =
+            Some(LeafMetrics::new(size).with_first_baselines(Point::new(None, first_baseline)));
+        self.invalidate_layout(id);
+    }
+
+    /// Register decoded font data in this document's shared Parley context.
+    ///
+    /// Every readable face becomes available to subsequent text layout. A
+    /// successful registration invalidates box caches and retained text
+    /// artifacts because fallback selection may change anywhere in the tree.
+    pub fn register_fonts(&mut self, bytes: &[u8]) -> usize {
+        let registered = self
+            .root_node()
+            .text_context()
+            .borrow_mut()
+            .register_fonts(bytes);
+        if registered != 0 {
+            self.invalidate_layout_all();
+        }
+        registered
     }
 
     /// Record that `id`'s layout inputs changed since the last layout pass:
@@ -404,7 +462,7 @@ impl<T> Document<T> {
             let start = tree
                 .get(id)
                 .expect("vacant NodeId passed to Document::invalidate_layout");
-            start.layout_data.borrow_mut().measure_cache.clear();
+            start.layout_data.borrow_mut().invalidate_measurement();
 
             let mut boundary = None;
             let mut current = start.parent();
@@ -445,7 +503,7 @@ impl<T> Document<T> {
                 let boundary_input = is_boundary
                     .then(|| node.layout_data.borrow().measure_cache.committed_input())
                     .flatten();
-                node.layout_data.borrow_mut().measure_cache.clear();
+                node.layout_data.borrow_mut().invalidate_measurement();
                 if let Some(input) = boundary_input {
                     // Case (1): a laid-out boundary — park it and stop; its own
                     // outer size cannot change from an interior mutation, so
@@ -471,7 +529,7 @@ impl<T> Document<T> {
     /// fallback.
     pub fn invalidate_layout_all(&mut self) {
         for (_, node) in self.tree_mut().iter_mut() {
-            node.layout_data.get_mut().measure_cache.clear();
+            node.layout_data.get_mut().invalidate_measurement();
         }
         self.clear_relayout_roots();
     }

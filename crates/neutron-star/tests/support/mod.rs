@@ -16,8 +16,8 @@ use std::fmt;
 use neutron_star::cache::Cache;
 use neutron_star::compute::{
     LeafMeasureInput, LeafMetrics, compute_cached_layout, compute_flexbox_layout,
-    compute_grid_layout, compute_leaf_layout, compute_linear_layout, compute_relative_layout,
-    compute_skipped_contents_layout, hide_subtree,
+    compute_grid_layout, compute_leaf_layout_with_measurement_for_testing, compute_linear_layout,
+    compute_relative_layout, compute_skipped_contents_layout, hide_subtree,
 };
 use neutron_star::prelude::*;
 use style_traits::values::specified::AllowedNumericType;
@@ -1270,29 +1270,6 @@ impl<'t> Iterator for TestChildren<'t> {
     }
 }
 
-fn test_margin_value(value: &Margin, inline_basis: Option<f32>) -> f32 {
-    match value {
-        Margin::LengthPercentage(value) => {
-            if inline_basis.is_none() && value.has_percentage() {
-                0.0
-            } else {
-                value.resolve(Length::new(inline_basis.unwrap_or(0.0))).px()
-            }
-        }
-        Margin::Auto => 0.0,
-        Margin::AnchorSizeFunction(_) | Margin::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor margins are unavailable in test styles")
-        }
-    }
-}
-
-fn subtract_test_margin(space: AvailableSpace, margin: f32) -> AvailableSpace {
-    match space {
-        AvailableSpace::Definite(value) => AvailableSpace::Definite((value - margin).max(0.0)),
-        intrinsic => intrinsic,
-    }
-}
-
 impl<'t> LayoutNode for TestRef<'t> {
     type Style = &'t TestStyle;
     type ChildIter = TestChildren<'t>;
@@ -1341,48 +1318,23 @@ impl<'t> LayoutNode for TestRef<'t> {
                 let style = &node.style;
                 let measure = node.measure;
                 let slots = handle.slots();
-                let inline_basis = input.parent_size.width;
-                let horizontal_margin = test_margin_value(&style.margin.left, inline_basis)
-                    + test_margin_value(&style.margin.right, inline_basis);
-                let vertical_margin = test_margin_value(&style.margin.top, inline_basis)
-                    + test_margin_value(&style.margin.bottom, inline_basis);
-                let measure_input = LeafMeasureInput::new(
-                    input.known_dimensions,
-                    Size::new(
-                        subtract_test_margin(input.available_space.width, horizontal_margin),
-                        subtract_test_margin(input.available_space.height, vertical_margin),
-                    ),
-                    input.goal,
-                );
-                let skips_content = matches!(
-                    input.goal,
-                    LayoutGoal::Measure(RequestedAxis::Horizontal | RequestedAxis::Vertical)
-                ) && input.known_dimensions.width.is_some()
-                    && input.known_dimensions.height.is_some();
-                let metrics = if skips_content {
-                    LeafMetrics::default()
-                } else {
-                    tree.leaf_measure_calls
-                        .set(tree.leaf_measure_calls.get() + 1);
-                    if tree.record_measure_inputs.get() {
-                        slots.measure_inputs.borrow_mut().push(measure_input);
-                    }
-                    let (metrics, call) = measure.measure(measure_input);
-                    if let Some(call) = call {
-                        slots.measure_calls.borrow_mut().push(call);
-                    }
-                    metrics
-                };
-                let mut output = compute_leaf_layout(
+                compute_leaf_layout_with_measurement_for_testing(
                     input,
                     style,
-                    NaturalSize::new(
-                        Size::new(Some(metrics.size.width), Some(metrics.size.height)),
-                        None,
-                    ),
-                );
-                output.first_baselines = metrics.first_baselines;
-                output
+                    None,
+                    |measure_input| {
+                        tree.leaf_measure_calls
+                            .set(tree.leaf_measure_calls.get() + 1);
+                        if tree.record_measure_inputs.get() {
+                            slots.measure_inputs.borrow_mut().push(measure_input);
+                        }
+                        let (metrics, call) = measure.measure(measure_input);
+                        if let Some(call) = call {
+                            slots.measure_calls.borrow_mut().push(call);
+                        }
+                        metrics
+                    },
+                )
             }
         });
         self.slots().output.set(output);

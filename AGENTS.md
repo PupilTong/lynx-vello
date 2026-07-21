@@ -22,7 +22,8 @@ flexbox, Grid, and Starlight `display: relative` and `display: linear`
 algorithms are implemented as first-class peers. Its concrete document/stylo
 host lives in `crates/w3c-dom`'s `layout` module
 (`Document::layout`, results on each `Node`); the Lynx-widget
-policy layer and text measurement wiring remain pending. See
+policy layer remains pending, while W3C text nodes already use the concrete
+Parley path. See
 `docs/layout-architecture.md` for its design and
 `docs/tracking/css-layout.md` for the behavior it must cover.
 
@@ -178,21 +179,23 @@ useful signal for currently-compatible versions of those libraries.
   own style data) and lend stylo `ComputedValues` fields straight to the
   engine (no translation layer), display dispatch routes
   flex/grid/linear/relative with `display: none` hiding and a leaf
-  fallback, and the positioned pass implements the W3C `position: fixed`
+  fallback, text nodes through concrete Parley measurement, and the
+  positioned pass implements the W3C `position: fixed`
   containing-block rule via the protocol's scheme override. Replaced leaf
   content reads a closed `NaturalSize` value stored in each node's layout
   data; its internal update path automatically invalidates the affected
   cache path. Per-node layout state (natural size + measurement cache +
-  layouts) lives **on each `Node`**
+  layouts + retained text artifacts) lives **on each `Node`**
   (`AtomicRefCell<LayoutData>`, the Servo layout_data pattern; read via
   `Node::layout`), so it is created and dropped with its node. Style-driven
   relayout is automatic (every style flush consumes harvested `StyleDamage`
   into boundary-stopped invalidation); `Document::invalidate_layout` remains the
   embedder API for the mutations styles cannot see (content/child-list changes
   with identical computed styles). The internal natural-size update path
-  performs that invalidation itself. The crate pulls
-  `neutron-star` without its `text` feature; text wiring is
-  intentionally not an arbitrary payload callback. It
+  performs that invalidation itself.
+  The document node owns the shared Parley `TextContext`; text nodes retain
+  probe/commit artifacts and read inherited font/text values from their
+  parent. Parley is unconditional and there is no arbitrary payload callback. It
   must not contain Lynx widget vocabulary or Lynx device/unit policy —
   Lynx computed defaults (border-box, `overflow: hidden`, `display: linear`
   on every element, …) stay embedder cascade policy (UA sheet). Relies on
@@ -235,7 +238,7 @@ useful signal for currently-compatible versions of those libraries.
   Starlight Relative Layout Level 1, and Lynx's `display: linear` algorithm
   and `linear-*` style/source protocol are live. Text shaping, line breaking,
   intrinsic/height-for-width measurement, baselines, and retained Parley
-  layouts live behind the default-on `text` feature.
+  layouts are unconditional crate behavior.
   **CSS containment (css-contain-2)** is landed layout-side: the stylo
   `Contain`/`ContainIntrinsicSize` containment accessors on `CoreStyle`,
   size-substitution + layout-containment baseline suppression,
@@ -252,8 +255,8 @@ useful signal for currently-compatible versions of those libraries.
   engine-internal — not a widget-layer concern) now live in `w3c-dom`
   (see above). Still L3 work: `lynx-widget`-level policy (`rpx`-aware
   view metrics, sticky lowering), component-specific staggered layout, and
-  text style/attribute wiring plus text-context/artifact-slot storage for the
-  concrete Parley path.
+  Lynx-specific text attribute/raw-text/truncation policy. Generic W3C text
+  style, document context, and artifact storage already live in `w3c-dom`.
 - *(planned, not yet scaffolded)* render / runtime crates — see
   `docs/tracking/` for the behavior surface each will need to cover before
   scaffolding begins, and `.claude/agents/` for the subsystem-scoped agent

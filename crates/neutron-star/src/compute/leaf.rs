@@ -35,7 +35,7 @@ pub fn compute_leaf_layout<Style: CoreStyle>(
     compute_leaf_layout_with_measurement(
         input,
         style,
-        natural_size.used_aspect_ratio(),
+        natural_size.aspect_ratio(),
         |measure_input| natural_size.measure(measure_input),
     )
 }
@@ -66,7 +66,6 @@ where
         min_size,
         max_size,
         aspect_ratio,
-        box_sizing,
     } = resolve_leaf_sizing(input, style, natural_aspect_ratio);
 
     node_size = clamp_resolved_size(
@@ -160,7 +159,6 @@ where
         originally_indefinite,
         measurement_axis,
         aspect_ratio,
-        box_sizing,
         padding_border_size,
     );
 
@@ -184,6 +182,27 @@ where
             .map(|baseline| content_origin.y + baseline),
     );
     LayoutOutput::new(size, content_size).with_first_baselines(first_baselines)
+}
+
+/// Test-only entry to the real leaf box-model routine.
+///
+/// Integration-test hosts use this to observe the normalized content-box
+/// request and return synthetic metrics without reconstructing production
+/// sizing, skip, or baseline behavior. It is absent unless the explicit
+/// `layout-test-utils` feature is enabled.
+#[cfg(feature = "layout-test-utils")]
+#[doc(hidden)]
+pub fn compute_leaf_layout_with_measurement_for_testing<Style, Measure>(
+    input: LayoutInput,
+    style: &Style,
+    natural_aspect_ratio: Option<f32>,
+    measure: Measure,
+) -> LayoutOutput
+where
+    Style: CoreStyle,
+    Measure: FnMut(LeafMeasureInput) -> LeafMetrics,
+{
+    compute_leaf_layout_with_measurement(input, style, natural_aspect_ratio, measure)
 }
 
 /// Content-box constraints consumed by neutron-star's closed leaf engines.
@@ -273,17 +292,9 @@ impl NaturalSize {
         self.aspect_ratio
     }
 
-    fn used_dimensions(self) -> Size<Option<f32>> {
-        self.dimensions
-    }
-
-    fn used_aspect_ratio(self) -> Option<f32> {
-        self.aspect_ratio
-    }
-
     fn measure(self, input: LeafMeasureInput) -> LeafMetrics {
-        let natural = self.used_dimensions();
-        let ratio = self.used_aspect_ratio();
+        let natural = self.dimensions();
+        let ratio = self.aspect_ratio();
         let size = match input.known_dimensions {
             Size {
                 width: Some(width),
@@ -398,11 +409,10 @@ fn apply_measured_aspect_ratio(
     mut size: Size<Option<f32>>,
     originally_indefinite: Size<bool>,
     measurement_axis: Option<RequestedAxis>,
-    aspect_ratio: Option<f32>,
-    box_sizing: box_sizing::T,
+    aspect_ratio: Option<PreferredAspectRatio>,
     padding_border_size: Size<f32>,
 ) -> Size<Option<f32>> {
-    let Some(ratio) = aspect_ratio else {
+    let Some(PreferredAspectRatio { ratio, sizing_box }) = aspect_ratio else {
         return size;
     };
     if !originally_indefinite.width
@@ -420,28 +430,39 @@ fn apply_measured_aspect_ratio(
             let sizing_height = sizing_box_axis(
                 size.height.unwrap_or(0.0),
                 padding_border_size.height,
-                box_sizing,
+                sizing_box,
             );
             size.width = Some(border_box_axis(
                 sizing_height * ratio,
                 padding_border_size.width,
-                box_sizing,
+                sizing_box,
             ));
         }
         None | Some(RequestedAxis::Horizontal | RequestedAxis::Both) => {
             let sizing_width = sizing_box_axis(
                 size.width.unwrap_or(0.0),
                 padding_border_size.width,
-                box_sizing,
+                sizing_box,
             );
             size.height = Some(border_box_axis(
                 sizing_width / ratio,
                 padding_border_size.height,
-                box_sizing,
+                sizing_box,
             ));
         }
     }
     size
+}
+
+/// A preferred ratio together with the box whose width/height it relates.
+///
+/// A plain specified `<ratio>` uses the box selected by `box-sizing`.
+/// Natural ratios and every `auto <ratio>` branch use the content box per
+/// CSS Sizing 4, independently of the element's `box-sizing` value.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PreferredAspectRatio {
+    ratio: f32,
+    sizing_box: box_sizing::T,
 }
 
 /// Resolved box-model and sizing inputs reused throughout one leaf-layout
@@ -453,8 +474,7 @@ struct LeafSizing {
     node_size: Size<Option<f32>>,
     min_size: Size<Option<f32>>,
     max_size: Size<Option<f32>>,
-    aspect_ratio: Option<f32>,
-    box_sizing: box_sizing::T,
+    aspect_ratio: Option<PreferredAspectRatio>,
 }
 
 fn resolve_leaf_sizing(
@@ -476,21 +496,33 @@ fn resolve_leaf_sizing(
     let (node_size, min_size, max_size, aspect_ratio) = match input.sizing_mode {
         SizingMode::ContentSize => (input.known_dimensions, Size::NONE, Size::NONE, None),
         SizingMode::InherentSize => {
-            let aspect_ratio = preferred_aspect_ratio(style.aspect_ratio(), natural_aspect_ratio);
+            let aspect_ratio =
+                preferred_aspect_ratio(style.aspect_ratio(), natural_aspect_ratio, box_sizing);
 
-            // Aspect ratio operates on the box selected by box-sizing. The
-            // caller's known dimensions are always border-box, so translate
-            // them into that sizing box before deriving the opposite axis.
+            // First normalize specified width/height into border-box values.
+            // The preferred ratio may use a *different* box (natural and
+            // `auto <ratio>` always use content-box), so translate the
+            // combined known/preferred dimensions through that ratio box,
+            // derive the missing axis there, then return to border-box space.
             let style_size = resolve_size(style.size(), input.parent_size);
-            let known_sizing_box =
-                border_box_to_sizing_box(input.known_dimensions, box_sizing, padding_border_size);
-            let preferred_sizing_box =
-                apply_aspect_ratio(known_sizing_box.or(style_size), aspect_ratio);
-            let node_size = input.known_dimensions.or(apply_box_sizing(
-                preferred_sizing_box,
+            let preferred_border_box = input.known_dimensions.or(apply_box_sizing(
+                style_size,
                 box_sizing,
                 padding_border_size,
             ));
+            let ratio_applied_border_box = aspect_ratio.map_or(preferred_border_box, |preferred| {
+                let ratio_box = border_box_to_sizing_box(
+                    preferred_border_box,
+                    preferred.sizing_box,
+                    padding_border_size,
+                );
+                apply_box_sizing(
+                    apply_aspect_ratio(ratio_box, Some(preferred.ratio)),
+                    preferred.sizing_box,
+                    padding_border_size,
+                )
+            });
+            let node_size = input.known_dimensions.or(ratio_applied_border_box);
             let min_size = apply_box_sizing(
                 resolve_size(style.min_size(), input.parent_size),
                 box_sizing,
@@ -523,19 +555,27 @@ fn resolve_leaf_sizing(
         min_size,
         max_size,
         aspect_ratio,
-        box_sizing,
     }
 }
 
 fn preferred_aspect_ratio(
     value: stylo::values::computed::AspectRatio,
     natural_aspect_ratio: Option<f32>,
-) -> Option<f32> {
+    box_sizing: box_sizing::T,
+) -> Option<PreferredAspectRatio> {
     let specified = used_aspect_ratio(value);
     if value.auto {
-        sanitize_ratio(natural_aspect_ratio).or(specified)
+        natural_aspect_ratio
+            .or(specified)
+            .map(|ratio| PreferredAspectRatio {
+                ratio,
+                sizing_box: box_sizing::T::ContentBox,
+            })
     } else {
-        specified
+        specified.map(|ratio| PreferredAspectRatio {
+            ratio,
+            sizing_box: box_sizing,
+        })
     }
 }
 
@@ -645,8 +685,13 @@ fn finalize_size(
 mod tests {
     use core::cell::RefCell;
 
-    use stylo::values::computed::{Display, Length, LengthPercentage, MaxSize, Size as StyleSize};
+    use stylo::values::computed::{
+        AspectRatio, Display, Length, LengthPercentage, MaxSize, NonNegativeLengthPercentage,
+        Size as StyleSize,
+    };
     use stylo::values::generics::NonNegative;
+    use stylo::values::generics::position::PreferredRatio;
+    use stylo::values::generics::ratio::Ratio;
 
     use super::*;
     use crate::cache::Cache;
@@ -868,6 +913,120 @@ mod tests {
         );
     }
 
+    struct BoxStyle {
+        size: Size<StyleSize>,
+        padding: Edges<NonNegativeLengthPercentage>,
+        box_sizing: box_sizing::T,
+        aspect_ratio: AspectRatio,
+    }
+
+    impl BoxStyle {
+        fn new(size: Size<StyleSize>) -> Self {
+            Self {
+                size,
+                padding: Edges::uniform(NonNegative(LengthPercentage::new_length(Length::new(
+                    0.0,
+                )))),
+                box_sizing: box_sizing::T::ContentBox,
+                aspect_ratio: AspectRatio::auto(),
+            }
+        }
+
+        fn with_padding_and_border_box(mut self, padding: f32) -> Self {
+            self.padding = Edges::uniform(NonNegative(LengthPercentage::new_length(Length::new(
+                padding,
+            ))));
+            self.box_sizing = box_sizing::T::BorderBox;
+            self
+        }
+    }
+
+    impl CoreStyle for BoxStyle {
+        fn display(&self) -> Display {
+            Display::Flex
+        }
+
+        fn size(&self) -> Size<&StyleSize> {
+            self.size.as_ref()
+        }
+
+        fn padding(&self) -> Edges<&NonNegativeLengthPercentage> {
+            self.padding.as_ref()
+        }
+
+        fn box_sizing(&self) -> box_sizing::T {
+            self.box_sizing
+        }
+
+        fn aspect_ratio(&self) -> AspectRatio {
+            self.aspect_ratio
+        }
+    }
+
+    fn aspect_ratio(auto: bool, width: f32, height: f32) -> AspectRatio {
+        AspectRatio {
+            auto,
+            ratio: PreferredRatio::Ratio(Ratio(NonNegative(width), NonNegative(height))),
+        }
+    }
+
+    #[test]
+    fn natural_ratio_uses_the_content_box_with_border_box_sizing() {
+        let natural = NaturalSize::from_size(Size::new(100.0, 50.0));
+        let fixed_width = BoxStyle::new(Size::new(size_px(100.0), StyleSize::auto()))
+            .with_padding_and_border_box(10.0);
+        let fixed = compute_leaf_layout(LayoutInput::default(), &fixed_width, natural);
+        assert_eq!(fixed.size, Size::new(100.0, 60.0));
+        assert_eq!(fixed.content_size, Size::new(100.0, 60.0));
+
+        let automatic = BoxStyle::new(Size::new(StyleSize::auto(), StyleSize::auto()))
+            .with_padding_and_border_box(10.0);
+        let intrinsic = compute_leaf_layout(LayoutInput::default(), &automatic, natural);
+        assert_eq!(intrinsic.size, Size::new(120.0, 70.0));
+        assert_eq!(intrinsic.content_size, Size::new(120.0, 70.0));
+    }
+
+    #[test]
+    fn auto_ratio_fallback_uses_content_box_but_plain_ratio_uses_box_sizing() {
+        let base = BoxStyle::new(Size::new(size_px(100.0), StyleSize::auto()))
+            .with_padding_and_border_box(10.0);
+        let automatic = BoxStyle {
+            aspect_ratio: aspect_ratio(true, 2.0, 1.0),
+            ..base
+        };
+        let automatic_output =
+            compute_leaf_layout(LayoutInput::default(), &automatic, NaturalSize::NONE);
+        assert_eq!(automatic_output.size, Size::new(100.0, 60.0));
+
+        let explicit = BoxStyle {
+            aspect_ratio: aspect_ratio(false, 2.0, 1.0),
+            ..automatic
+        };
+        let explicit_output =
+            compute_leaf_layout(LayoutInput::default(), &explicit, NaturalSize::NONE);
+        assert_eq!(explicit_output.size, Size::new(100.0, 50.0));
+    }
+
+    #[test]
+    fn single_axis_probe_skips_measurement_after_resolving_style_sizes() {
+        let style = BoxStyle::new(Size::new(size_px(40.0), size_px(20.0)));
+        let input = LayoutInput::compute_size(
+            Size::NONE,
+            Size::new(Some(100.0), Some(100.0)),
+            Size::new(
+                AvailableSpace::Definite(100.0),
+                AvailableSpace::Definite(100.0),
+            ),
+            RequestedAxis::Horizontal,
+        );
+
+        let output = compute_leaf_layout_with_measurement(input, &style, None, |_input| {
+            panic!("a fully resolved single-axis probe must not measure content")
+        });
+
+        assert_eq!(output.size, Size::new(40.0, 20.0));
+    }
+
     #[test]
     fn measured_aspect_ratio_respects_requested_axis_and_sizing_box() {
         let both_indefinite = Size::new(true, true);
@@ -877,8 +1036,10 @@ mod tests {
             Size::new(Some(40.0), Some(50.0)),
             both_indefinite,
             Some(RequestedAxis::Vertical),
-            Some(2.0),
-            box_sizing::T::ContentBox,
+            Some(PreferredAspectRatio {
+                ratio: 2.0,
+                sizing_box: box_sizing::T::ContentBox,
+            }),
             padding_border,
         );
         assert_eq!(vertical, Size::new(Some(90.0), Some(50.0)));
@@ -887,8 +1048,10 @@ mod tests {
             Size::new(Some(100.0), Some(20.0)),
             both_indefinite,
             Some(RequestedAxis::Both),
-            Some(2.0),
-            box_sizing::T::ContentBox,
+            Some(PreferredAspectRatio {
+                ratio: 2.0,
+                sizing_box: box_sizing::T::ContentBox,
+            }),
             padding_border,
         );
         assert_eq!(horizontal, Size::new(Some(100.0), Some(55.0)));
@@ -897,8 +1060,10 @@ mod tests {
             Size::new(Some(100.0), Some(20.0)),
             both_indefinite,
             None,
-            Some(2.0),
-            box_sizing::T::BorderBox,
+            Some(PreferredAspectRatio {
+                ratio: 2.0,
+                sizing_box: box_sizing::T::BorderBox,
+            }),
             padding_border,
         );
         assert_eq!(border_box, Size::new(Some(100.0), Some(50.0)));
@@ -909,8 +1074,10 @@ mod tests {
                 unchanged,
                 Size::new(false, true),
                 None,
-                Some(2.0),
-                box_sizing::T::ContentBox,
+                Some(PreferredAspectRatio {
+                    ratio: 2.0,
+                    sizing_box: box_sizing::T::ContentBox,
+                }),
                 padding_border,
             ),
             unchanged
@@ -920,8 +1087,10 @@ mod tests {
                 unchanged,
                 both_indefinite,
                 None,
-                Some(0.0),
-                box_sizing::T::ContentBox,
+                Some(PreferredAspectRatio {
+                    ratio: 0.0,
+                    sizing_box: box_sizing::T::ContentBox,
+                }),
                 padding_border,
             ),
             unchanged

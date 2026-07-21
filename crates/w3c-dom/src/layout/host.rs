@@ -14,6 +14,8 @@
 //! at all: the positioned pass re-walks the tree instead of consuming a
 //! queue (see [`position_hoisted_subtree`]).
 
+#[cfg(feature = "layout-test-utils")]
+use neutron_star::compute::compute_leaf_layout_with_measurement_for_testing;
 use neutron_star::compute::{
     compute_absolute_layout, compute_boundary_relayout, compute_cached_layout,
     compute_flexbox_layout, compute_grid_layout, compute_leaf_layout, compute_linear_layout,
@@ -22,7 +24,8 @@ use neutron_star::compute::{
 };
 use neutron_star::geometry::{Point, Size};
 use neutron_star::invalidate::is_relayout_boundary;
-use neutron_star::style::{CoreStyle, PositionProperty};
+use neutron_star::style::{CoreStyle, PositionProperty, TextRun};
+use neutron_star::text::TextMeasurer;
 use neutron_star::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput,
 };
@@ -57,9 +60,9 @@ impl<'dom, T> LayoutNode for &'dom Node<T> {
     /// the cache); every generated, non-skipping box routes to its algorithm
     /// inside it.
     fn compute_child_layout(self, input: LayoutInput) -> LayoutOutput {
-        // Text nodes carry no computed style: they lay out as leaves inside
-        // an anonymous box (initial box values). Until the concrete Parley
-        // path is wired above w3c-dom, it has no natural content size.
+        // Text nodes carry no computed box style: they lay out through the
+        // concrete Parley path inside an anonymous box, with inherited text
+        // style read from their parent.
         let display = if self.is_text_node() {
             DisplayMode::Leaf
         } else {
@@ -93,7 +96,36 @@ impl<'dom, T> LayoutNode for &'dom Node<T> {
             DisplayMode::Relative => compute_relative_layout(node, input),
             DisplayMode::Leaf => {
                 let view = node.style();
-                let output = compute_leaf_layout(input, &view, node.natural_size());
+                let output = if node.is_text_node() {
+                    let run = TextRun {
+                        text: node.text().unwrap_or_default(),
+                        style: &view,
+                        preserve_newlines: false,
+                    };
+                    let mut context = node.text_context().borrow_mut();
+                    let mut layout_data = node.layout_data.borrow_mut();
+                    let mut measurer = TextMeasurer::new(
+                        &mut context,
+                        &mut layout_data.text_artifacts,
+                        &view,
+                        std::iter::once(run),
+                    );
+                    measurer.compute_layout(input)
+                } else {
+                    #[cfg(feature = "layout-test-utils")]
+                    if let Some(metrics) = node.layout_data.borrow().test_leaf_metrics {
+                        compute_leaf_layout_with_measurement_for_testing(
+                            input,
+                            &view,
+                            None,
+                            |_measure_input| metrics,
+                        )
+                    } else {
+                        compute_leaf_layout(input, &view, node.natural_size())
+                    }
+                    #[cfg(not(feature = "layout-test-utils"))]
+                    compute_leaf_layout(input, &view, node.natural_size())
+                };
                 // Flow/contents container layout is unimplemented (see
                 // `DisplayMode::Leaf`): the box itself is a leaf, and any
                 // children are zeroed so stale geometry cannot survive a
@@ -150,7 +182,7 @@ impl<'dom, T> LayoutNode for &'dom Node<T> {
     }
 
     fn cache_clear(self) {
-        self.layout_data.borrow_mut().measure_cache.clear();
+        self.layout_data.borrow_mut().invalidate_measurement();
     }
 }
 

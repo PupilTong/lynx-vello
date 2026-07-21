@@ -53,6 +53,7 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicPtr, AtomicU8, AtomicUsiz
 use atomic_refcell::{AtomicRef, AtomicRefCell};
 use dom::ElementState;
 use neutron_star::compute::NaturalSize;
+use neutron_star::text::TextContext;
 use neutron_star::tree::Layout;
 use rustc_hash::FxHashMap;
 use selectors::matching::ElementSelectorFlags;
@@ -278,6 +279,10 @@ pub(crate) enum NodeData<T> {
     Document {
         lock: StdArc<SharedRwLock>,
         url_data: UrlExtraData,
+        /// One reusable Parley session for the whole document. Layout is
+        /// single-threaded; the atomic borrow cell preserves the node's
+        /// thread-safe shape during parallel style traversal.
+        text_context: Box<AtomicRefCell<TextContext>>,
         #[cfg(debug_assertions)]
         in_flush: AtomicBool,
     },
@@ -394,6 +399,7 @@ impl<T> Node<T> {
             NodeData::Document {
                 lock,
                 url_data,
+                text_context: Box::new(AtomicRefCell::new(TextContext::new())),
                 #[cfg(debug_assertions)]
                 in_flush: AtomicBool::new(false),
             },
@@ -489,6 +495,14 @@ impl<T> Node<T> {
     pub(crate) fn document_url_data(&self) -> &UrlExtraData {
         match &self.owner_document().data {
             NodeData::Document { url_data, .. } => url_data,
+            _ => unreachable!("slot zero must contain the document node"),
+        }
+    }
+
+    /// The owner document's reusable Parley text session.
+    pub(crate) fn text_context(&self) -> &AtomicRefCell<TextContext> {
+        match &self.owner_document().data {
+            NodeData::Document { text_context, .. } => text_context,
             _ => unreachable!("slot zero must contain the document node"),
         }
     }

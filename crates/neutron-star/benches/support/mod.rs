@@ -114,17 +114,21 @@ impl LayoutFixture {
         intrinsic: Size<f32>,
         first_baseline: Option<f32>,
     ) -> NodeId {
-        let _ = first_baseline;
-        self.push(parent, style, Some(intrinsic))
+        self.push(parent, style, Some((intrinsic, first_baseline)))
     }
 
-    fn push(&mut self, parent: NodeId, style: &str, natural_size: Option<Size<f32>>) -> NodeId {
+    fn push(
+        &mut self,
+        parent: NodeId,
+        style: &str,
+        leaf_metrics: Option<(Size<f32>, Option<f32>)>,
+    ) -> NodeId {
         let node = self.document.create_element("view", ());
         self.document.set_inline_style(node, style);
         self.document.append(parent, node);
-        if let Some(natural_size) = natural_size {
+        if let Some((size, first_baseline)) = leaf_metrics {
             self.document
-                .set_natural_size_for_testing(node, natural_size);
+                .set_leaf_metrics_for_testing(node, size, first_baseline);
         }
         self.node_count += 1;
         node

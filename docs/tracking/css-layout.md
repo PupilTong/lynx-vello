@@ -116,12 +116,13 @@ channels ride the standard `justify-content`/`align-items`/`align-self`
 values, with the legacy `fill-*` gravities mapping to `stretch`. Linear uses
 the same layout IO, cached handle recursion, private box-model machinery, leaf
 dispatch, absolute-position helper, and hidden-subtree cleanup; it does not
-translate linear into Flex. The concrete Widget/stylo adapter (a `LayoutNode`
-impl over the widget tree), dirty/cache
-invalidation wiring, root fixed-position pass, host lowering of legacy
-spellings, and text style/attribute and text-context slot
-wiring remain future L3 work. The feature-gated Parley measurement core itself now lives in
-`neutron-star`; no separate integration crate has been established.
+translate linear into Flex. The concrete `w3c-dom` adapter now implements
+`LayoutNode` directly on the document tree, including the fixed-position pass
+and unconditional Parley measurement for W3C text nodes with document/per-node
+retained state. Future L3 work is dirty/cache invalidation wiring, host
+lowering of legacy spellings, and Lynx-specific text attributes,
+element-backed raw text, and truncation policy; no separate integration crate
+has been established.
 
 Two Starlight-specific sizing rules are deliberately pinned rather than
 inherited from Flexbox/web-core. First, Linear weights and default cross-axis
@@ -218,10 +219,10 @@ from-scratch layout engine (successor to the C++ engine's `starlight`)
 implements — see `.claude/agents/lynx-layout-engine.md`. The engine crate is
 [`crates/neutron-star`](../../crates/neutron-star): its protocol, shared
 machinery, and Flexbox, Grid, Starlight Relative, and Linear algorithms are
-implemented alongside its feature-gated Parley measurement core. Its concrete
-L3 Widget/stylo runtime adapter, including text style/attribute wiring and
-text-context/artifact-slot wiring, remains pending; no separate integration
-crate has been established. The design, ownership boundaries, and milestones are in
+implemented alongside its unconditional Parley measurement core. Its concrete
+`w3c-dom` runtime adapter, including W3C text style, document context, and
+per-node artifacts, is implemented; Lynx-specific policy remains pending. No
+separate integration crate has been established. The design, ownership boundaries, and milestones are in
 [`docs/layout-architecture.md`](../layout-architecture.md).
 
 Implementation-pattern reference (not a behavior spec): `Paws/engine/src/layout/stacking.rs` for a real, WPT-conformance-tested CSS stacking-context implementation over `stylo` computed style — the concrete reference for the z-index deviation.

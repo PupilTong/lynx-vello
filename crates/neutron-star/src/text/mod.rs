@@ -1,4 +1,4 @@
-//! Optional Parley text measurement core.
+//! Parley text measurement core.
 //!
 //! This module shapes host-assembled [`TextRun`](crate::style::TextRun)
 //! sequences, re-breaks retained layouts for intrinsic and definite

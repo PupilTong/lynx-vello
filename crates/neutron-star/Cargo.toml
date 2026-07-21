@@ -9,16 +9,13 @@ rust-version.workspace = true
 keywords = ["layout", "flexbox", "grid", "css", "ui"]
 categories = ["gui"]
 
-# The style protocol requires the workspace's stylo fork unconditionally.
-# Default builds additionally enable the optional Parley-backed text
-# measurement core; default-features = false keeps the protocol and
-# box-layout core only.
+# Parley is an unconditional part of the closed leaf model. The only feature
+# is a non-production seam used by the engine's integration-test hosts.
 [features]
-default = ["text"]
-text = ["dep:parley"]
+layout-test-utils = []
 
 [dependencies]
-parley = { workspace = true, optional = true }
+parley = { workspace = true }
 stylo = { workspace = true }
 
 [dev-dependencies]
@@ -28,10 +25,6 @@ style_traits = { workspace = true }
 # Dev-only reverse edge: benchmarks exercise this crate through the concrete
 # production document host instead of a benchmark-owned LayoutNode.
 w3c-dom = { workspace = true, features = ["layout-test-utils"] }
-
-[[test]]
-name = "text"
-required-features = ["text"]
 
 [[bench]]
 name = "flexbox"
@@ -59,4 +52,3 @@ harness = false
 [[bench]]
 name = "text"
 harness = false
-required-features = ["text"]
