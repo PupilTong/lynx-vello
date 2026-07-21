@@ -1,24 +1,37 @@
 //! Box layout over the document tree — the concrete [`neutron_star`] host.
 //!
-//! This module implements neutron-star's **handle protocol** directly over
-//! [`Document<T>`]: a two-word `Copy` handle (node + layout-pass context)
-//! implements [`LayoutNode`](neutron_star::tree::LayoutNode), style views
-//! lend stylo [`ComputedValues`] fields straight to the engine (no
-//! translation layer, no engine-side style copies), and per-node layout
-//! state lives on each [`Node`](crate::Node). Flexbox, Grid, and Starlight
+//! This module implements neutron-star's handle protocol on the crate's one
+//! read handle: [`LayoutNode`](neutron_star::tree::LayoutNode) is
+//! implemented **directly on `&Node<T>`** — the same one-word `Copy` value
+//! the stylo `TNode`/`TElement` traits already use — so the engine traverses
+//! the document itself, with no wrapper handle, no adapter objects, and no
+//! engine-side tree or style copies. Flexbox, Grid, and Starlight
 //! Linear/Relative containers dispatch to their neutron-star algorithms;
-//! `display: none` subtrees are hidden; leaves are measured through an
-//! embedder hook.
+//! `display: none` subtrees are hidden; leaves are measured through the
+//! embedder payload's [`MeasureLeaf`] hook.
 //!
 //! ```text
 //!  Document<T> + ComputedValues          (immutable for the pass)
-//!        │  LayoutHandle: LayoutNode — children/style/dispatch/slots
+//!        │  impl LayoutNode for &Node<T> — children/style/dispatch/slots
 //!        ▼
 //!  neutron-star algorithms  ◀──▶  per-node Node::layout_data (interior-mutable)
 //!        │                         dispatch: flex │ grid │ linear │ relative │ leaf
 //!        ▼
 //!  positioned pass (fixed/hoisted absolute) → device-pixel rounding
 //! ```
+//!
+//! # Styles are fetched when the engine asks
+//!
+//! [`LayoutNode::style`](neutron_star::tree::LayoutNode::style) reads the
+//! node's computed style **at request time** — an `Arc` clone out of the
+//! node's own style data, nothing is pre-collected — and the view lends
+//! `ComputedValues` field references from that `Arc` for as long as the
+//! engine holds the view. The values lent are the per-node storage the
+//! style flush wrote (materialized once per *style change*, per the
+//! protocol's lending rule); the `Arc` in the view only keeps that storage
+//! borrowable. Text nodes are lent the fork's initial values — the
+//! anonymous box CSS wraps a text run in; their content comes from the
+//! measurement hook.
 //!
 //! # Layout results live on the node
 //!
@@ -29,7 +42,8 @@
 //! [`Node::layout`](crate::Node::layout) /
 //! [`Node::unrounded_layout`](crate::Node::unrounded_layout). Because the
 //! state lives **on** the node, it is created and dropped with the node —
-//! there is no side table to keep in sync with the tree.
+//! there is no side table to keep in sync with the tree. The document
+//! node's slot additionally carries the pass's hoisted out-of-flow queue.
 //!
 //! # Phases: style first, then layout
 //!
@@ -38,11 +52,16 @@
 //! styles strictly after the restyle traversal has finished, mirroring the
 //! style → layout phase barrier every production engine uses. The `&mut
 //! Document` it takes is what guarantees the tree cannot change mid-pass.
-//! At the start of each pass the element styles are gathered once into the
-//! pass context (one `Arc` clone per node), so style views can lend
-//! `ComputedValues` references for the whole pass — the
-//! materialize-once-and-lend pattern the engine's style protocol asks of
-//! hosts.
+//!
+//! # Leaf content measures through the payload
+//!
+//! Content measurement (text runs, images, replaced content) is the
+//! embedder's: implement [`MeasureLeaf`] on the document's payload type
+//! `T`. The hook receives the node and the engine's content-box
+//! constraints; the default measures nothing (`()` implements it). Hooks
+//! run through `&self` — an embedder retaining artifacts (a shaped
+//! paragraph for painting) uses interior mutability in its payload, keyed
+//! by [`LeafMeasureInput::goal`].
 //!
 //! # Using it
 //!
@@ -117,9 +136,8 @@
 //!
 //! # What is deliberately *not* here (yet)
 //!
-//! - **Text/content measurement.** Leaves measure through the [`MeasureLeaf`] hook
-//!   ([`StyleEngine::layout_document_with_measurer`]); the Parley-backed text engine stays outside
-//!   this crate (`neutron-star`'s `text` feature) and plugs in through the same hook.
+//! - **Text shaping.** The Parley-backed text engine stays outside this crate (`neutron-star`'s
+//!   `text` feature) and plugs in through the [`MeasureLeaf`] hook.
 //! - **Flow (block/inline) container layout.** neutron-star has no flow algorithm yet; a flow or
 //!   `display: contents` node lays out as a leaf and its children are zeroed. Lynx trees give every
 //!   element a supported display via the embedder's UA sheet, so this arm is a generic-DOM
@@ -139,20 +157,48 @@
 //! `will-change`, `contain: layout/paint`) — not Lynx's unconditional
 //! escape-to-root.
 
-mod handle;
+mod host;
 mod style;
+
+use std::sync::LazyLock;
 
 use neutron_star::cache::Cache;
 pub use neutron_star::compute::{LeafMeasureInput, LeafMetrics};
 pub use neutron_star::geometry::{Edges, Point, Size};
 pub use neutron_star::tree::Layout;
 use stylo::properties::ComputedValues;
+use stylo::servo_arc::Arc;
 
-pub use self::handle::MeasureLeaf;
+pub use self::style::StyleView;
 use crate::document::Document;
 use crate::engine::StyleEngine;
 use crate::ext::ExternalState;
 use crate::node::Node;
+
+/// The embedder's leaf content measurement hook, implemented by the
+/// document's payload type `T` (the layout-side sibling of
+/// [`ExternalState`]'s matching hooks).
+///
+/// Consulted for every leaf-laid node — childless boxes and the
+/// flow-container fallback — whose size is not already fully determined by
+/// its box styles: text runs, images, and other replaced content measure
+/// here. Measurement must not touch the document; it may retain
+/// embedder-side artifacts (a shaped paragraph for painting) in the payload
+/// via interior mutability, keyed by [`LeafMeasureInput::goal`]. The
+/// default measures nothing.
+pub trait MeasureLeaf: Sized {
+    /// Measure `node`'s content under the engine's content-box constraints.
+    ///
+    /// `self` is `node`'s own payload (`node.ext()`), passed as the
+    /// receiver so payload state is directly at hand.
+    fn measure_leaf(&self, node: &Node<Self>, input: LeafMeasureInput) -> LeafMetrics {
+        let _ = (node, input);
+        LeafMetrics::default()
+    }
+}
+
+/// The no-op payload measures nothing.
+impl MeasureLeaf for () {}
 
 /// One node's layout state, carried by the node itself
 /// ([`Node::layout_data`](crate::Node)): created with the node, dropped with
@@ -179,6 +225,10 @@ pub(crate) struct LayoutData {
     pub(crate) static_position: Point<f32>,
     /// Whether this node is already in the current pass's hoisted queue.
     pub(crate) hoisted_recorded: bool,
+    /// The pass's hoisted out-of-flow queue (FIFO). Only the **document
+    /// node**'s slot uses this — it is the natural pass-shared anchor every
+    /// `&Node` handle can reach; ordinary nodes keep it empty.
+    pub(crate) hoisted: Vec<crate::NodeId>,
 }
 
 impl Default for LayoutData {
@@ -189,16 +239,25 @@ impl Default for LayoutData {
             rounded: Layout::default(),
             static_position: Point::ZERO,
             hoisted_recorded: false,
+            hoisted: Vec::new(),
         }
     }
 }
 
+/// The style lent to text nodes (and any style-less node): the fork's
+/// initial computed values — exactly the box style CSS gives the anonymous
+/// box wrapping a text run. Content sizing comes from the [`MeasureLeaf`]
+/// hook, not from box properties. Process-wide, like the engine's own
+/// lendable defaults.
+pub(crate) static ANONYMOUS_STYLE: LazyLock<Arc<ComputedValues>> = LazyLock::new(|| {
+    use stylo::properties::style_structs::Font;
+    ComputedValues::initial_values_with_font_override(Font::initial_values())
+});
+
 impl StyleEngine {
     /// Flush pending styles, then lay the document out against this engine's
-    /// viewport and device-pixel ratio. Leaf content is not measured (leaves
-    /// size from their box styles alone); use
-    /// [`layout_document_with_measurer`](Self::layout_document_with_measurer)
-    /// to supply text/image measurement.
+    /// viewport and device-pixel ratio. Leaf content measures through the
+    /// payload's [`MeasureLeaf`] hook.
     ///
     /// Results land on the nodes: read them with
     /// [`Node::layout`](crate::Node::layout).
@@ -206,36 +265,14 @@ impl StyleEngine {
     /// # Panics
     ///
     /// Panics when `document` was created by a different engine.
-    pub fn layout_document<T: ExternalState>(&self, document: &mut Document<T>) {
-        self.layout_document_with_measurer(document, |_: &Node<T>, _| LeafMetrics::default());
-    }
-
-    /// [`layout_document`](Self::layout_document) with an embedder leaf
-    /// measurement hook.
-    ///
-    /// `measure` is consulted for every leaf-laid node (childless nodes and
-    /// the unsupported flow-container fallback) whose size is not already
-    /// fully determined by its box styles: text runs, images, and other
-    /// replaced content measure here. Measurement must not touch the
-    /// document; it may retain embedder-side artifacts (a shaped paragraph
-    /// for painting) keyed by [`LeafMeasureInput::goal`].
-    pub fn layout_document_with_measurer<T: ExternalState, M: MeasureLeaf<T>>(
-        &self,
-        document: &mut Document<T>,
-        measure: M,
-    ) {
+    pub fn layout_document<T: ExternalState + MeasureLeaf>(&self, document: &mut Document<T>) {
         // Phase barrier: layout reads computed styles only after the restyle
         // traversal has completed (no-op when nothing is scheduled). Also
         // asserts this engine owns the document.
         self.flush_document(document);
         let viewport = self.device().viewport_size();
         let scale = self.device().device_pixel_ratio().get();
-        handle::run_layout(
-            document,
-            measure,
-            Size::new(viewport.width, viewport.height),
-            scale,
-        );
+        host::run_layout(document, Size::new(viewport.width, viewport.height), scale);
     }
 }
 
@@ -271,13 +308,4 @@ impl<T> Document<T> {
             node.layout_data.get_mut().measure_cache.clear();
         }
     }
-}
-
-/// The anonymous-box style lent for text nodes (and any style-less node):
-/// the fork's initial computed values — exactly the box style CSS gives the
-/// anonymous box wrapping a text run. Content sizing comes from the leaf
-/// measurement hook, not from box properties.
-pub(crate) fn anonymous_style() -> stylo::servo_arc::Arc<ComputedValues> {
-    use stylo::properties::style_structs::Font;
-    ComputedValues::initial_values_with_font_override(Font::initial_values())
 }

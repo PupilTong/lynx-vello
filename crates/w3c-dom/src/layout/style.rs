@@ -13,9 +13,9 @@
 //! - The Lynx logical `relative-*-inline-*` longhands are lowered onto physical edges by
 //!   `direction`, with the physical property winning when both are set.
 //!
-//! Text nodes carry no computed style; the pass context lends them the
-//! fork's initial values instead ([`super::anonymous_style`]) — the
-//! anonymous box CSS wraps a text run in.
+//! Text nodes carry no computed style; the view lends them the fork's
+//! initial values instead ([`super::ANONYMOUS_STYLE`]) — the anonymous box
+//! CSS wraps a text run in.
 
 use neutron_star::geometry::{Edges, Point, Size};
 use neutron_star::style::{
@@ -30,6 +30,7 @@ use neutron_star::style::{
 };
 use stylo::properties::ComputedValues;
 use stylo::properties::style_structs::Position as PositionStruct;
+use stylo::servo_arc::Arc;
 use stylo::values::specified::box_::{Contain, DisplayInside, DisplayOutside, WillChangeBits};
 
 use crate::node::Node;
@@ -162,23 +163,47 @@ fn lower_relative_logical(physical: i32, logical: i32) -> i32 {
     if physical == -1 { logical } else { physical }
 }
 
-/// The borrowed computed-style view neutron-star reads: the node handle (for
-/// the parent-dependent [`resolve_position`]) plus its `ComputedValues`,
-/// lent from the pass context for the whole layout pass.
-pub(crate) struct StyleView<'dom, T> {
-    pub(crate) node: &'dom Node<T>,
-    pub(crate) style: &'dom ComputedValues,
+/// The computed-style view neutron-star reads: the node handle (for the
+/// parent-dependent [`resolve_position`]) plus its `ComputedValues`.
+///
+/// Constructed **when the engine requests the style** ([`StyleView::of`]) —
+/// nothing is pre-collected. The view owns an `Arc` handle to the node's
+/// own computed style (a refcount bump; the values themselves were
+/// materialized by the style flush, once per style change) and lends field
+/// references from it for as long as the engine holds the view, exactly the
+/// lending discipline the engine's style protocol documents.
+pub struct StyleView<'dom, T> {
+    node: &'dom Node<T>,
+    style: Arc<ComputedValues>,
 }
 
-impl<T> Clone for StyleView<'_, T> {
-    fn clone(&self) -> Self {
-        *self
+impl<T> std::fmt::Debug for StyleView<'_, T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("StyleView")
+            .field(&self.node.id())
+            .finish()
     }
 }
 
-impl<T> Copy for StyleView<'_, T> {}
+impl<'dom, T> StyleView<'dom, T> {
+    /// The style lent for `node`: its computed style, fetched now, or the
+    /// anonymous-box initial values for text nodes (and, defensively, any
+    /// style-less node — only `display: none` descendants qualify, and only
+    /// [`hide_subtree`](neutron_star::compute::hide_subtree) ever visits
+    /// them, without reading styles).
+    pub(crate) fn of(node: &'dom Node<T>) -> Self {
+        let style = if node.is_text_node() {
+            None
+        } else {
+            node.computed_style()
+        };
+        Self {
+            node,
+            style: style.unwrap_or_else(|| super::ANONYMOUS_STYLE.clone()),
+        }
+    }
 
-impl<T> StyleView<'_, T> {
     fn position_struct(&self) -> &PositionStruct {
         self.style.get_position()
     }
@@ -194,7 +219,7 @@ impl<T> CoreStyle for StyleView<'_, T> {
     }
 
     fn position(&self) -> PositionProperty {
-        resolve_position(self.node, self.style)
+        resolve_position(self.node, &self.style)
     }
 
     fn inset(&self) -> Edges<&Inset> {

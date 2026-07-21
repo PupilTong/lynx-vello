@@ -156,13 +156,16 @@ useful signal for currently-compatible versions of those libraries.
   its documents. Mutation APIs follow a let-it-crash contract
   (`debug_assert` + panic on stale handles rather than silent no-ops).
   Its `layout` module is the concrete `neutron-star` host:
-  `StyleEngine::layout_document` flushes styles then lays out through a
-  two-word `Copy` `LayoutNode` handle — style views lend stylo
-  `ComputedValues` fields straight to the engine (materialized once per
-  pass, no translation layer), display dispatch routes
+  `StyleEngine::layout_document` flushes styles then lays out with
+  `LayoutNode` implemented **directly on `&Node<T>`** (the same one-word
+  handle as the stylo traits — no wrapper, no adapter objects) — style
+  views are fetched when the engine asks (an `Arc` bump out of the node's
+  own style data) and lend stylo `ComputedValues` fields straight to the
+  engine (no translation layer), display dispatch routes
   flex/grid/linear/relative with `display: none` hiding and a leaf
   fallback, and the positioned pass implements the W3C `position: fixed`
-  containing-block rule via the protocol's scheme override. Per-node layout
+  containing-block rule via the protocol's scheme override. Leaf content
+  measures through the payload's `MeasureLeaf` hook. Per-node layout
   state (measurement cache + layouts) lives **on each `Node`**
   (`AtomicRefCell<LayoutData>`, the Servo layout_data pattern; read via
   `Node::layout`), so it is created and dropped with its node;

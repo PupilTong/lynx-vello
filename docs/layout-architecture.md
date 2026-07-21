@@ -23,11 +23,11 @@ Parley text measurement core are implemented and conformance-tested against
 plain-storage mock hosts. Grid excludes subgrid and named lines/areas, which
 are outside the current protocol. The concrete document/stylo host is
 implemented in `w3c-dom`'s `layout` module (`StyleEngine::layout_document`):
-a two-word `Copy` `LayoutNode` handle over the document slab, style views
-lending `ComputedValues` fields (materialized once per pass), display
-dispatch, per-node layout state on each `Node`, the fixed/hoisted
-positioned pass, and device-pixel rounding, with leaf content measurement
-left to an embedder hook. Text truncation, inline boxes, and the
+`LayoutNode` on the plain `&Node` handle (the same one-word value the
+stylo traits use), style views fetched on engine request and lending
+`ComputedValues` fields, display dispatch, per-node layout state on each
+`Node`, the fixed/hoisted positioned pass, and device-pixel rounding, with
+leaf content measurement left to the payload's `MeasureLeaf` hook. Text truncation, inline boxes, and the
 Lynx-widget policy layer (text style/attribute wiring and
 text-context/artifact-slot storage included) are not implemented yet. Crate
 rustdoc is the API reference; this document is the rationale, performance
@@ -68,7 +68,7 @@ Text behavior is inventoried in
 | --- | --- | --- |
 | `neutron-star` | Implemented Flex, Grid, Relative, and Linear algorithms; their style-view protocols speaking stylo computed values (including the `relative-*` and `linear-*` longhands); the text style/run protocol; leaf boxing, hidden-subtree cleanup, positioned layout, rounding; shared private arithmetic; geometry and layout IO; cache semantics | Node/style/content storage, display dispatch, DOM/widget types, an engine-side style value vocabulary (it re-exports stylo's), resolved device-unit policy (`rpx`, etc.), stacking/paint order |
 | `neutron-star::text` (`text` feature, default-on) | Parley context/font registration, whitespace processing, shaping, line breaking, intrinsic and height-for-width measurement, baselines, and retained `TextLayout` artifact types | Text truncation and ellipsis, inline boxes, paint styling, widget/attribute lowering, resource fetching, or host cache and per-node slot storage |
-| `w3c-dom::layout` (implemented) | The `LayoutNode` handle over the document slab (node + pass context, two words); style views lending `ComputedValues` fields (materialized once per pass; logical `relative-*-inline-*` lowering; the W3C fixed/absolute containing-block rule expressed through the protocol's `position()` scheme); display dispatch (flex/grid/linear/relative, `display: none` hiding, leaf fallback); per-node `LayoutData` on `Node` (`AtomicRefCell` — measurement cache, unrounded + rounded layouts, created and dropped with the node); the hoisted positioned pass; device-pixel rounding; the embedder leaf-measurement hook and the manual `Document::invalidate_layout` API | A second layout algorithm, engine-side style copies, Lynx widget vocabulary or device-unit policy (`rpx`), Lynx computed defaults (cascade/UA-sheet policy), text shaping |
+| `w3c-dom::layout` (implemented) | `LayoutNode` implemented directly on `&Node<T>` (the stylo-trait handle; no wrapper, no adapter objects); style views fetched on engine request (`Arc` bump of the node's own style data) lending `ComputedValues` fields (logical `relative-*-inline-*` lowering; the W3C fixed/absolute containing-block rule expressed through the protocol's `position()` scheme; anonymous-box initial values for text nodes); display dispatch (flex/grid/linear/relative, `display: none` hiding, leaf fallback); per-node `LayoutData` on `Node` (`AtomicRefCell` — measurement cache, unrounded + rounded layouts, hoisted queue on the document node's slot); the hoisted positioned pass; device-pixel rounding; the payload `MeasureLeaf` hook and the manual `Document::invalidate_layout` API | A second layout algorithm, engine-side style copies, Lynx widget vocabulary or device-unit policy (`rpx`), Lynx computed defaults (cascade/UA-sheet policy), text shaping |
 | Remaining runtime integration (`lynx-widget`, future) | Automatic style-damage → `Document::invalidate_layout` wiring; Lynx view metrics and `rpx` policy; text style/attribute wiring and text-context/artifact-slot storage behind the leaf hook; `staggered` integration; sticky lowering | A second Flex/Grid/Relative/Linear/text-measurement implementation, engine-side copies of styles |
 
 The engine/host seam keeps the engine storage-free even though its

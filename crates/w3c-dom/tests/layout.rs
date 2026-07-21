@@ -17,7 +17,7 @@ mod common;
 use common::{Doc, device_with};
 use stylo::queries::values::PrefersColorScheme;
 use w3c_dom::NodeId;
-use w3c_dom::layout::{Layout, LeafMetrics, Size};
+use w3c_dom::layout::{Layout, LeafMeasureInput, LeafMetrics, MeasureLeaf, Size};
 
 /// [`Doc`] plus layout helpers (results are read straight off the nodes).
 struct Harness {
@@ -414,56 +414,87 @@ fn flow_containers_fall_back_to_leaves_and_zero_their_children() {
     assert_eq!(h.rect(child), (0.0, 0.0, 0.0, 0.0));
 }
 
-#[test]
-fn leaves_measure_through_the_embedder_hook() {
-    let mut h = Harness::new(
-        "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }",
-    );
-    let root = h.doc.root;
-    let text = h.doc.el(root, "text");
-    h.doc.dom.set_text(text, Some("hello".into()));
-    h.doc.engine.layout_document_with_measurer(
-        &mut h.doc.dom,
-        |node: &w3c_dom::Node<()>, _input| {
-            if node.text().is_some() {
-                LeafMetrics::new(Size::new(42.0, 17.0))
-            } else {
-                LeafMetrics::default()
-            }
-        },
-    );
+/// A payload whose [`MeasureLeaf`] hook gives every content-bearing leaf a
+/// fixed measurement — the embedder-measurement stand-in for these tests
+/// (real embedders plug a text engine in here).
+#[derive(Debug)]
+struct FixedMeasure(f32, f32);
 
-    assert_eq!(h.rect(text), (0.0, 0.0, 42.0, 17.0));
+impl w3c_dom::ExternalState for FixedMeasure {}
+
+impl MeasureLeaf for FixedMeasure {
+    fn measure_leaf(&self, node: &w3c_dom::Node<Self>, _input: LeafMeasureInput) -> LeafMetrics {
+        if node.text().is_some() {
+            LeafMetrics::new(Size::new(self.0, self.1))
+        } else {
+            LeafMetrics::default()
+        }
+    }
+}
+
+#[test]
+fn leaves_measure_through_the_payload_hook() {
+    // Element-backed character data (Lynx's `<raw-text>` shape): the node is
+    // an element leaf whose content size comes from the payload's hook.
+    let mut engine = w3c_dom::StyleEngine::new(common::device(800.0, 600.0));
+    engine.add_stylesheet_str(
+        "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }",
+        w3c_dom::StylesheetOrigin::Author,
+    );
+    let mut dom = engine.new_document();
+    let root = dom.create_element("page", FixedMeasure(42.0, 17.0));
+    dom.append_child(root);
+    let text = dom.create_element("text", FixedMeasure(42.0, 17.0));
+    dom.append(root, text);
+    dom.set_text(text, Some("hello".into()));
+    engine.layout_document(&mut dom);
+
+    let layout = dom.get(text).unwrap().layout();
+    assert_eq!(
+        (
+            layout.location.x,
+            layout.location.y,
+            layout.size.width,
+            layout.size.height
+        ),
+        (0.0, 0.0, 42.0, 17.0)
+    );
 }
 
 #[test]
 fn text_nodes_lay_out_as_anonymous_leaf_boxes() {
     // A real text node (no computed style): box properties take their
     // initial values — the anonymous box CSS wraps a text run in — and the
-    // content size comes from the measure hook.
-    let mut h = Harness::new(
+    // content size comes from the payload's measure hook.
+    let mut engine = w3c_dom::StyleEngine::new(common::device(800.0, 600.0));
+    engine.add_stylesheet_str(
         "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }
          .sibling { width: 50px; height: 10px; }",
+        w3c_dom::StylesheetOrigin::Author,
     );
-    let root = h.doc.root;
-    let sibling = h.doc.el(root, ".sibling");
-    let text = h.doc.dom.create_text_node("hello", ());
-    h.doc.dom.append(root, text);
-    h.doc.engine.layout_document_with_measurer(
-        &mut h.doc.dom,
-        |node: &w3c_dom::Node<()>, _input| {
-            if node.is_text_node() {
-                LeafMetrics::new(Size::new(30.0, 12.0))
-            } else {
-                LeafMetrics::default()
-            }
-        },
-    );
+    let mut dom = engine.new_document();
+    let root = dom.create_element("page", FixedMeasure(30.0, 12.0));
+    dom.append_child(root);
+    let sibling = dom.create_element("view", FixedMeasure(30.0, 12.0));
+    dom.add_class(sibling, "sibling");
+    dom.append(root, sibling);
+    let text = dom.create_text_node("hello", FixedMeasure(30.0, 12.0));
+    dom.append(root, text);
+    engine.layout_document(&mut dom);
 
-    assert_eq!(h.rect(sibling), (0.0, 0.0, 50.0, 10.0));
+    let rect = |id: NodeId| {
+        let layout = dom.get(id).unwrap().layout();
+        (
+            layout.location.x,
+            layout.location.y,
+            layout.size.width,
+            layout.size.height,
+        )
+    };
+    assert_eq!(rect(sibling), (0.0, 0.0, 50.0, 10.0));
     // The text item follows its sibling with zero margins/padding (initial
     // values), sized purely by the hook's measurement.
-    assert_eq!(h.rect(text), (50.0, 0.0, 30.0, 12.0));
+    assert_eq!(rect(text), (50.0, 0.0, 30.0, 12.0));
 }
 
 #[test]
