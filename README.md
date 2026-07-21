@@ -23,7 +23,7 @@ placement has not been established.
 
 ## Toolchain
 
-The workspace pins the latest **nightly** toolchain via [`rust-toolchain.toml`](rust-toolchain.toml)
+The workspace pins the **2026-07-01 nightly** toolchain via [`rust-toolchain.toml`](rust-toolchain.toml)
 (edition 2024, resolver 3, workspace lints, nightly `rustfmt` options).
 Initialize the pinned Stylo and QuickJS sources before the first build:
 

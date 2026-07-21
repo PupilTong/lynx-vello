@@ -1,6 +1,6 @@
 [toolchain]
-# Latest nightly (repo developed against rustc 1.98.0-nightly, 2026-07-01).
-channel = "nightly"
+# Repo developed against rustc 1.98.0-nightly (2026-07-01).
+channel = "nightly-2026-07-01"
 components = ["rustfmt", "clippy", "rust-analyzer", "rust-src", "llvm-tools-preview"]
 targets = ["wasm32-unknown-unknown"]
 profile = "default"
