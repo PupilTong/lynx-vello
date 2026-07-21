@@ -50,7 +50,9 @@ use std::fmt;
 use std::sync::Arc as StdArc;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 
+use atomic_refcell::AtomicRefCell;
 use dom::ElementState;
+use neutron_star::tree::Layout;
 use rustc_hash::FxHashMap;
 use selectors::matching::ElementSelectorFlags;
 use slab::Slab;
@@ -65,6 +67,7 @@ use stylo::stylesheets::UrlExtraData;
 use stylo_atoms::Atom;
 
 use crate::document::{DOCUMENT_NODE_ID, NodeId};
+use crate::layout::LayoutData;
 
 /// Debug-only instrumentation for the `stylo_data` slot (finding: a bare
 /// `UnsafeCell` makes contract violations undefined behavior instead of a
@@ -367,6 +370,17 @@ pub struct Node<T> {
     /// may also carry data for embedder-defined element-backed text carriers
     /// (Lynx's `<raw-text>` is one); ordinary W3C text uses a child text node.
     pub(crate) text: Option<String>,
+
+    /// This node's layout state (measurement cache, unrounded and
+    /// device-snapped layouts, out-of-flow bookkeeping) — created and dropped
+    /// with the node, so tree mutation can never leave layout state to
+    /// synchronize (see [`crate::layout`]).
+    ///
+    /// An `AtomicRefCell` (the Servo per-node layout-data shape): keeps the
+    /// node shareable for stylo's parallel restyle traversal while the
+    /// single-threaded, post-style layout pass writes through `&Node` handles
+    /// in short scoped borrows.
+    pub(crate) layout_data: AtomicRefCell<LayoutData>,
 }
 
 impl<T> Node<T> {
@@ -439,6 +453,7 @@ impl<T> Node<T> {
             #[cfg(debug_assertions)]
             slot_guard: slot_guard::SlotGuard::new(),
             text,
+            layout_data: AtomicRefCell::new(LayoutData::default()),
         }
     }
 
@@ -662,6 +677,29 @@ impl<T> Node<T> {
         let slot = self.stylo_data.get_mut();
         let wrapper = slot.get_or_insert_with(ElementDataWrapper::default);
         wrapper.borrow_mut().styles.primary = Some(style);
+    }
+
+    // --- layout reads ---------------------------------------------------------
+
+    /// The device-pixel-snapped [`Layout`] from the last layout pass
+    /// ([`StyleEngine::layout_document`](crate::StyleEngine::layout_document)):
+    /// the border box painting consumes, `location` relative to the parent's
+    /// border box. All-zero when the node has never been laid out or is
+    /// inside a `display: none` subtree.
+    ///
+    /// Must not be called while a layout pass is running on the document
+    /// (impossible through the public API: layout holds `&mut Document`).
+    #[must_use]
+    pub fn layout(&self) -> Layout {
+        self.layout_data.borrow().rounded
+    }
+
+    /// The unrounded CSS-pixel [`Layout`] from the last layout pass — the
+    /// values relayout derives from (rounded output is presentation, this is
+    /// truth).
+    #[must_use]
+    pub fn unrounded_layout(&self) -> Layout {
+        self.layout_data.borrow().unrounded
     }
 
     /// The accumulated stylo selector flags.

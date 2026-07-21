@@ -67,6 +67,18 @@
 //! pair [`Document::ext_mut`] with
 //! [`Document::note_external_attribute_change`].
 //!
+//! # Layout
+//!
+//! The [`layout`] module is the crate's box-layout integration: it
+//! implements `neutron-star`'s handle protocol (`LayoutNode` on a Copy
+//! handle, stylo-vocabulary style views lent straight from
+//! `ComputedValues`) directly over the document — Flexbox, Grid, and
+//! Starlight Linear/Relative containers, with leaf content measured through
+//! an embedder hook. Run it with [`StyleEngine::layout_document`] (styles
+//! flush first — the style → layout phase barrier); results live **on the
+//! nodes** ([`Node::layout`]), so layout state is created and dropped with
+//! its node. See the module docs for the phase and invalidation contracts.
+//!
 //! # Thread-safety
 //!
 //! Style flushes ([`StyleEngine::flush_document`]) run **stylo's own restyle
@@ -85,6 +97,7 @@ mod engine;
 mod ext;
 mod flush;
 mod invalidation;
+pub mod layout;
 mod node;
 mod traits;
 
