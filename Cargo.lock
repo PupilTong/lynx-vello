@@ -984,9 +984,11 @@ name = "neutron-star"
 version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
+ "euclid",
  "parley",
  "stylo",
  "stylo_traits",
+ "w3c-dom",
 ]
 
 [[package]]

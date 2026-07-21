@@ -175,10 +175,11 @@ These are user-confirmed module semantics, not accidental attempts to extend
 the raw value grammar.
 
 Executable coverage lives in neutron-star's engine-native Relative behavior
-suite and benchmark target. Tests assert geometry, dependency-order fallback,
-measurement traces, visibility, static positions, and cache behavior through
-the public host protocol; source inventories and external-runner terminology
-are not part of the contract.
+suite and its w3c-dom-hosted benchmark target. Tests assert geometry,
+dependency-order fallback, measurement traces, visibility, static positions,
+and cache behavior through the public host protocol; benchmarks exercise the
+production document/style/layout pipeline. Source inventories and
+external-runner terminology are not part of the contract.
 
 #### Units and value types (layout-relevant)
 

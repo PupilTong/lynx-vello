@@ -12,6 +12,7 @@
 //! retained its node.
 
 use std::fmt;
+#[cfg(debug_assertions)]
 use std::ptr::NonNull;
 use std::sync::Arc;
 

@@ -1,8 +1,8 @@
-//! Engine-native Flex benchmark scenarios.
+//! Flex benchmarks through w3c-dom's production host.
 
 #[path = "scenarios/flexbox.rs"]
 mod scenarios;
-#[path = "../tests/support/mod.rs"]
+#[path = "support/mod.rs"]
 mod support;
 
 use divan::counter::ItemsCount;
