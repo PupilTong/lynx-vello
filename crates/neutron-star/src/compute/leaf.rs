@@ -409,10 +409,10 @@ fn apply_measured_aspect_ratio(
     mut size: Size<Option<f32>>,
     originally_indefinite: Size<bool>,
     measurement_axis: Option<RequestedAxis>,
-    aspect_ratio: Option<PreferredAspectRatio>,
+    aspect_ratio: PreferredAspectRatio,
     padding_border_size: Size<f32>,
 ) -> Size<Option<f32>> {
-    let Some(PreferredAspectRatio { ratio, sizing_box }) = aspect_ratio else {
+    let Some((ratio, sizing_box)) = aspect_ratio.components() else {
         return size;
     };
     if !originally_indefinite.width
@@ -460,9 +460,21 @@ fn apply_measured_aspect_ratio(
 /// Natural ratios and every `auto <ratio>` branch use the content box per
 /// CSS Sizing 4, independently of the element's `box-sizing` value.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct PreferredAspectRatio {
-    ratio: f32,
-    sizing_box: box_sizing::T,
+enum PreferredAspectRatio {
+    None,
+    ContentBox(f32),
+    BorderBox(f32),
+}
+
+impl PreferredAspectRatio {
+    #[inline]
+    fn components(self) -> Option<(f32, box_sizing::T)> {
+        match self {
+            Self::None => None,
+            Self::ContentBox(ratio) => Some((ratio, box_sizing::T::ContentBox)),
+            Self::BorderBox(ratio) => Some((ratio, box_sizing::T::BorderBox)),
+        }
+    }
 }
 
 /// Resolved box-model and sizing inputs reused throughout one leaf-layout
@@ -474,7 +486,7 @@ struct LeafSizing {
     node_size: Size<Option<f32>>,
     min_size: Size<Option<f32>>,
     max_size: Size<Option<f32>>,
-    aspect_ratio: Option<PreferredAspectRatio>,
+    aspect_ratio: PreferredAspectRatio,
 }
 
 fn resolve_leaf_sizing(
@@ -494,7 +506,12 @@ fn resolve_leaf_sizing(
     let box_sizing = style.box_sizing();
 
     let (node_size, min_size, max_size, aspect_ratio) = match input.sizing_mode {
-        SizingMode::ContentSize => (input.known_dimensions, Size::NONE, Size::NONE, None),
+        SizingMode::ContentSize => (
+            input.known_dimensions,
+            Size::NONE,
+            Size::NONE,
+            PreferredAspectRatio::None,
+        ),
         SizingMode::InherentSize => {
             let aspect_ratio =
                 preferred_aspect_ratio(style.aspect_ratio(), natural_aspect_ratio, box_sizing);
@@ -510,18 +527,21 @@ fn resolve_leaf_sizing(
                 box_sizing,
                 padding_border_size,
             ));
-            let ratio_applied_border_box = aspect_ratio.map_or(preferred_border_box, |preferred| {
-                let ratio_box = border_box_to_sizing_box(
-                    preferred_border_box,
-                    preferred.sizing_box,
-                    padding_border_size,
-                );
-                apply_box_sizing(
-                    apply_aspect_ratio(ratio_box, Some(preferred.ratio)),
-                    preferred.sizing_box,
-                    padding_border_size,
-                )
-            });
+            let ratio_applied_border_box =
+                aspect_ratio
+                    .components()
+                    .map_or(preferred_border_box, |(ratio, sizing_box)| {
+                        let ratio_box = border_box_to_sizing_box(
+                            preferred_border_box,
+                            sizing_box,
+                            padding_border_size,
+                        );
+                        apply_box_sizing(
+                            apply_aspect_ratio(ratio_box, Some(ratio)),
+                            sizing_box,
+                            padding_border_size,
+                        )
+                    });
             let node_size = input.known_dimensions.or(ratio_applied_border_box);
             let min_size = apply_box_sizing(
                 resolve_size(style.min_size(), input.parent_size),
@@ -562,20 +582,20 @@ fn preferred_aspect_ratio(
     value: stylo::values::computed::AspectRatio,
     natural_aspect_ratio: Option<f32>,
     box_sizing: box_sizing::T,
-) -> Option<PreferredAspectRatio> {
+) -> PreferredAspectRatio {
     let specified = used_aspect_ratio(value);
-    if value.auto {
-        natural_aspect_ratio
-            .or(specified)
-            .map(|ratio| PreferredAspectRatio {
-                ratio,
-                sizing_box: box_sizing::T::ContentBox,
-            })
+    let ratio = if value.auto {
+        natural_aspect_ratio.or(specified)
     } else {
-        specified.map(|ratio| PreferredAspectRatio {
-            ratio,
-            sizing_box: box_sizing,
-        })
+        specified
+    };
+    let Some(ratio) = ratio else {
+        return PreferredAspectRatio::None;
+    };
+    if value.auto || box_sizing == box_sizing::T::ContentBox {
+        PreferredAspectRatio::ContentBox(ratio)
+    } else {
+        PreferredAspectRatio::BorderBox(ratio)
     }
 }
 
@@ -1036,10 +1056,7 @@ mod tests {
             Size::new(Some(40.0), Some(50.0)),
             both_indefinite,
             Some(RequestedAxis::Vertical),
-            Some(PreferredAspectRatio {
-                ratio: 2.0,
-                sizing_box: box_sizing::T::ContentBox,
-            }),
+            PreferredAspectRatio::ContentBox(2.0),
             padding_border,
         );
         assert_eq!(vertical, Size::new(Some(90.0), Some(50.0)));
@@ -1048,10 +1065,7 @@ mod tests {
             Size::new(Some(100.0), Some(20.0)),
             both_indefinite,
             Some(RequestedAxis::Both),
-            Some(PreferredAspectRatio {
-                ratio: 2.0,
-                sizing_box: box_sizing::T::ContentBox,
-            }),
+            PreferredAspectRatio::ContentBox(2.0),
             padding_border,
         );
         assert_eq!(horizontal, Size::new(Some(100.0), Some(55.0)));
@@ -1060,10 +1074,7 @@ mod tests {
             Size::new(Some(100.0), Some(20.0)),
             both_indefinite,
             None,
-            Some(PreferredAspectRatio {
-                ratio: 2.0,
-                sizing_box: box_sizing::T::BorderBox,
-            }),
+            PreferredAspectRatio::BorderBox(2.0),
             padding_border,
         );
         assert_eq!(border_box, Size::new(Some(100.0), Some(50.0)));
@@ -1074,10 +1085,7 @@ mod tests {
                 unchanged,
                 Size::new(false, true),
                 None,
-                Some(PreferredAspectRatio {
-                    ratio: 2.0,
-                    sizing_box: box_sizing::T::ContentBox,
-                }),
+                PreferredAspectRatio::ContentBox(2.0),
                 padding_border,
             ),
             unchanged
@@ -1087,10 +1095,7 @@ mod tests {
                 unchanged,
                 both_indefinite,
                 None,
-                Some(PreferredAspectRatio {
-                    ratio: 0.0,
-                    sizing_box: box_sizing::T::ContentBox,
-                }),
+                PreferredAspectRatio::ContentBox(0.0),
                 padding_border,
             ),
             unchanged
