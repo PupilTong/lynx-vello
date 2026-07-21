@@ -187,6 +187,7 @@ impl LayoutFixture {
             .get(node)
             .expect("benchmark node remains live")
             .layout()
+            .clone()
     }
 
     pub(super) fn invalidate(&mut self, node: NodeId) {

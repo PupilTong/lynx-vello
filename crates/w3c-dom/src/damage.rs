@@ -9,12 +9,13 @@
 //! below it).
 //!
 //! The harvest at the end of the flush (the crate-private
-//! `Document::harvest_flush`) reads that damage, wraps it in [`StyleDamage`],
-//! streams it to the embedder, and **clears it** from stylo's `ElementData`.
-//! Clearing is not optional: stylo never clears damage for a normal restyle,
-//! and in servo builds `element_needs_traversal` re-traverses any element that
-//! still carries non-empty damage, so an un-harvested node would be re-styled
-//! on every later flush forever (see
+//! `Document::harvest_flush`) copies that damage into [`StyleDamage`],
+//! **clears it** from stylo's `ElementData`, then immediately consumes the
+//! relayout-class effect into the document's layout caches and streams all
+//! damage to the embedder. Clearing is not optional: stylo never clears damage for a
+//! normal restyle, and in servo builds `element_needs_traversal` re-traverses
+//! any element that still carries non-empty damage, so an un-harvested node
+//! would be re-styled on every later flush forever (see
 //! [`StyleEngine::flush_document_with_sink`](crate::StyleEngine::flush_document_with_sink)
 //! for the full argument).
 //!
@@ -115,7 +116,10 @@ impl From<StyleDamage> for ServoRestyleDamage {
 /// Returned by [`StyleEngine::flush_document`](crate::StyleEngine::flush_document)
 /// and friends. Deliberately **not** `#[must_use]`: many callers flush purely
 /// for its side effect (styles land on the document) and legitimately ignore
-/// the summary in statement position.
+/// the summary in statement position. Layout correctness does not depend on
+/// consuming it: relayout-class damage has already invalidated the document's
+/// layout caches during harvest. The entries remain useful to downstream
+/// paint, stacking-context, and overflow phases.
 ///
 /// `#[non_exhaustive]` so future damage-adjacent fields can be added without a
 /// breaking change; construct the empty value with
@@ -124,14 +128,14 @@ impl From<StyleDamage> for ServoRestyleDamage {
 /// # Id staleness
 ///
 /// The [`NodeId`]s in [`damage`](Self::damage) are raw slab indices carrying
-/// no generation, so **consume the summary before mutating the document
-/// again.** Once a harvested node is freed (a
+/// no generation, so a downstream phase that uses the entries must **consume
+/// the summary before mutating the document again.** Once a harvested node is freed (a
 /// [`remove_subtree`](crate::Document::remove_subtree)) the next node-factory
 /// call can reuse its slot, at which point a retained id silently resolves to
 /// an *unrelated* node instead of failing closed — there is no generation to
 /// detect the reuse. Within a single flush-then-consume step every id is live.
 #[non_exhaustive]
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct FlushSummary {
     /// One entry per node whose style changed with non-empty damage, in the
     /// order the harvest visited them (a pre-order spine walk; under

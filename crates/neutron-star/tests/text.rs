@@ -909,7 +909,7 @@ struct SourceNode {
 #[derive(Debug, Default)]
 struct SessionNode {
     cache: RefCell<Cache>,
-    layout: Cell<Layout>,
+    layout: RefCell<Layout>,
     artifacts: RefCell<ArtifactSlots>,
     static_position: Cell<Point<f32>>,
 }
@@ -1028,15 +1028,16 @@ impl<'t> LayoutNode for HostRef<'t> {
         })
     }
 
-    fn set_unrounded_layout(self, layout: &Layout) {
-        self.slots().layout.set(*layout);
+    fn set_unrounded_layout(self, layout: Layout) {
+        *self.slots().layout.borrow_mut() = layout;
     }
 
-    fn unrounded_layout(self) -> Layout {
-        self.slots().layout.get()
+    fn with_unrounded_layout<R>(self, read: impl FnOnce(&Layout) -> R) -> R {
+        let layout = self.slots().layout.borrow();
+        read(&layout)
     }
 
-    fn set_final_layout(self, _layout: &Layout) {
+    fn set_final_layout(self, _layout: Layout) {
         unreachable!("host test never rounds layouts")
     }
 
@@ -1097,7 +1098,7 @@ fn flex_baseline_integration_reuses_artifacts_and_jointly_invalidates_caches() {
 
     let small_state = tree.session_node(small);
     let large_state = tree.session_node(large);
-    let small_baseline = small_state.layout.get().location.y
+    let small_baseline = small_state.layout.borrow().location.y
         + small_state
             .artifacts
             .borrow()
@@ -1105,7 +1106,7 @@ fn flex_baseline_integration_reuses_artifacts_and_jointly_invalidates_caches() {
             .expect("small committed text")
             .first_baseline()
             .expect("small baseline");
-    let large_baseline = large_state.layout.get().location.y
+    let large_baseline = large_state.layout.borrow().location.y
         + large_state
             .artifacts
             .borrow()

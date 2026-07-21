@@ -17,11 +17,12 @@
 //!
 //! Computed styles land in each element node's stylo `ElementData`
 //! ([`Node::computed_style`](crate::Node::computed_style) reads them); the
-//! document's harvest then collects the per-node restyle damage into a
-//! [`FlushSummary`], drops the consumed snapshots, and clears stylo's restyle
-//! state so the next flush does not re-traverse. The harvest is rooted at the
-//! traversal's **actual** root, which stylo may raise to the passed root's
-//! parent when a subtree flush invalidated the root's siblings (see
+//! document's harvest then consumes relayout-class damage into layout-cache
+//! invalidation, exposes all per-node damage through a [`FlushSummary`] or
+//! sink, drops the consumed snapshots, and clears stylo's restyle state so the
+//! next flush does not re-traverse. The harvest is rooted at the traversal's
+//! **actual** root, which stylo may raise to the passed root's parent when a
+//! subtree flush invalidated the root's siblings (see
 //! [`StyleEngine::flush_document_with_sink`]).
 //!
 //! # Safety
@@ -165,6 +166,9 @@ impl StyleEngine {
     /// embedders lay out a freshly styled subtree from their own structural
     /// knowledge. A `display: none → visible` flip does produce `RELAYOUT`
     /// damage on the flipped node, which covers its whole subtree.
+    /// Relayout-class damage has already invalidated the document's layout
+    /// caches before this method returns, so discarding the summary cannot make
+    /// a later [`layout_document`](Self::layout_document) reuse stale layout.
     ///
     /// A no-op (empty summary, `traversed == false`) when the document has no
     /// element child or nothing is scheduled.
@@ -204,11 +208,13 @@ impl StyleEngine {
         FlushSummary { damage, traversed }
     }
 
-    /// The zero-alloc flush primitive: restyle under the document element, then
-    /// stream each node's non-empty restyle damage to `sink` as it is
-    /// harvested, instead of collecting it into a `Vec`. Returns whether the
-    /// traversal ran (stylo's `pre_traverse` scheduling token said there was
-    /// work) — the `traversed` flag
+    /// The allocation-free damage-delivery primitive: restyle under the
+    /// document element, then stream each node's non-empty restyle damage to
+    /// `sink` as it is harvested, instead of collecting it into a `Vec`.
+    /// Relayout-class damage first drives the document's internal cache
+    /// invalidation; the sink remains for paint/stacking/overflow consumers and
+    /// observability. Returns whether the traversal ran (stylo's `pre_traverse`
+    /// scheduling token said there was work) — the `traversed` flag
     /// [`flush_document_with`](Self::flush_document_with) records.
     ///
     /// `sink` is a `&mut dyn FnMut` rather than a generic `impl FnMut` so the

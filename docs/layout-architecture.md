@@ -24,10 +24,10 @@ plain-storage mock hosts. **CSS containment (css-contain-2)** is landed on
 the layout side: size/layout containment, `content-visibility` skipped
 contents, the relayout-boundary predicate, and containment-bounded cache
 invalidation (`invalidate_for_relayout`) — its `w3c-dom` damage producer,
-containment folding, and the damage→layout seam all ship alongside:
-`StyleEngine::layout_document` now consumes its own flush's `StyleDamage` and
-drives `Document::invalidate_layout` automatically, boundary-stopped, entirely
-inside the engine layer (the widget layer is untouched). Grid excludes subgrid
+containment folding, and the damage→layout seam all ship alongside: every
+style flush consumes harvested relayout-class `StyleDamage` into
+`Document::invalidate_layout` automatically, boundary-stopped, entirely inside
+the engine layer (the widget layer is untouched). Grid excludes subgrid
 and named lines/areas, which are outside the current protocol. The concrete
 document/stylo host is
 implemented in `w3c-dom`'s `layout` module (`StyleEngine::layout_document`):
@@ -82,8 +82,8 @@ Text behavior is inventoried in
 | --- | --- | --- |
 | `neutron-star` | Implemented Flex, Grid, Relative, and Linear algorithms; their style-view protocols speaking stylo computed values (including the `relative-*` and `linear-*` longhands); the text style/run protocol; leaf boxing, hidden-subtree cleanup, positioned layout, rounding; shared private arithmetic; geometry and layout IO; cache semantics | Node/style/content storage, display dispatch, DOM/widget types, an engine-side style value vocabulary (it re-exports stylo's), resolved device-unit policy (`rpx`, etc.), stacking/paint order |
 | `neutron-star::text` (`text` feature, default-on) | Parley context/font registration, whitespace processing, shaping, line breaking, intrinsic and height-for-width measurement, baselines, and retained `TextLayout` artifact types | Text truncation and ellipsis, inline boxes, paint styling, widget/attribute lowering, resource fetching, or host cache and per-node slot storage |
-| `w3c-dom::layout` (implemented) | `LayoutNode` implemented directly on `&Node<T>` (the stylo-trait handle; no wrapper, no adapter objects); style views fetched on engine request (`Arc` bump of the node's own style data) lending `ComputedValues` fields (logical `relative-*-inline-*` lowering; the W3C fixed/absolute containing-block rule expressed through the protocol's `position()` scheme; anonymous-box initial values for text nodes); display dispatch (flex/grid/linear/relative, `display: none` hiding, `content-visibility: hidden` skipped-contents routing before the cache, leaf fallback); per-node `LayoutData` on `Node` (`AtomicRefCell` — measurement cache, unrounded + rounded layouts, persistent static positions); the positioned pass as a fresh pre-order tree walk each pass (cache-proof for hoisted nodes whose parents answer from cache, pruned at skipped-contents subtrees so a hoisted descendant cannot be revived, and the engine's effective-`order`-0 paint rule for out-of-flow children); device-pixel rounding; the effective-containment fold on the style view (feeding both the relayout-boundary predicate and the content-visibility-aware fixed/absolute containing-block predicate); **automatic style-damage consumption** (`layout_document` streams its flush's `StyleDamage`, boundary-stops `Document::invalidate_layout` per relayout-damaged node, and re-runs each parked `contain: strict`/skipped boundary in place before the root pass, merging the re-run's scrollable `content_size` back into the boundary's stored layout); and the `Document::invalidate_layout` API embedders still call for the mutations the style system cannot see (content/child-list/measurement-input changes); the payload `MeasureLeaf` hook | A second layout algorithm, engine-side style copies, Lynx widget vocabulary or device-unit policy (`rpx`), Lynx computed defaults (cascade/UA-sheet policy), text shaping |
-| Remaining runtime integration (`lynx-widget`, future) | Lynx view metrics and `rpx` policy; text style/attribute wiring and text-context/artifact-slot storage behind the leaf hook; `staggered` integration; sticky lowering | A second Flex/Grid/Relative/Linear/text-measurement implementation, engine-side copies of styles, the style-damage→layout wiring (now engine-internal in `w3c-dom::layout`) |
+| `w3c-dom::layout` (implemented) | `LayoutNode` implemented directly on `&Node<T>` (the stylo-trait handle; no wrapper, no adapter objects); style views fetched on engine request (`Arc` bump of the node's own style data) lending `ComputedValues` fields (logical `relative-*-inline-*` lowering; the W3C fixed/absolute containing-block rule expressed through the protocol's `position()` scheme; anonymous-box initial values for text nodes); display dispatch (flex/grid/linear/relative, `display: none` hiding, `content-visibility: hidden` skipped-contents routing before the cache, leaf fallback); per-node `LayoutData` on `Node` (`AtomicRefCell` — measurement cache, unrounded + rounded layouts, persistent static positions); the positioned pass as a fresh pre-order tree walk each pass (cache-proof for hoisted nodes whose parents answer from cache, pruned at skipped-contents subtrees so a hoisted descendant cannot be revived, and the engine's effective-`order`-0 paint rule for out-of-flow children); device-pixel rounding; the effective-containment fold on the style view (feeding both the relayout-boundary predicate and the content-visibility-aware fixed/absolute containing-block predicate); **automatic style-damage consumption** (every harvest boundary-stops `Document::invalidate_layout` per relayout-damaged node before returning/streaming damage; `layout_document` re-runs each parked `contain: strict`/skipped boundary in place before the root pass, merging the re-run's scrollable `content_size` back into the boundary's stored layout); and the `Document::invalidate_layout` API embedders still call for the mutations the style system cannot see (content/child-list/measurement-input changes); the payload `MeasureLeaf` hook | A second layout algorithm, engine-side style copies, Lynx widget vocabulary or device-unit policy (`rpx`), Lynx computed defaults (cascade/UA-sheet policy), text shaping |
+| Remaining runtime integration (`lynx-widget`, future) | Lynx view metrics and `rpx` policy; text style/attribute wiring and text-context/artifact-slot storage behind the leaf hook; `staggered` integration; sticky lowering | A second Flex/Grid/Relative/Linear/text-measurement implementation, engine-side copies of styles, the style-damage→layout wiring (now engine-internal in `w3c-dom`) |
 
 The engine/host seam keeps the engine storage-free even though its
 vocabulary is stylo's: the Lynx-specific values and algorithms for Relative
@@ -153,11 +153,16 @@ where N: LayoutNode, N::Style: LinearContainerStyle + LinearItemStyle;
 
 All four signatures are public; hosts select them in their display dispatch.
 
-Layout IO is three `Copy` PODs: `LayoutInput` (layout goal, sizing mode,
-known dimensions, whether those dimensions establish definite percentage
-bases, parent size, and available space) → `LayoutOutput` (size, content size,
-baselines) per call, and `Layout` (order, location, size, content size,
-border/padding/margin) as the durable per-node result. The
+Layout's transient call boundary uses two small `Copy` PODs: `LayoutInput`
+(layout goal, sizing mode, known dimensions, whether those dimensions
+establish definite percentage bases, parent size, and available space) →
+`LayoutOutput` (size, content size, baselines). `Layout` (order, location,
+size, content size, border/padding/margin) is the larger durable per-node
+result and is deliberately **not** `Copy`: algorithms move it into host
+storage, ordinary readers use a scoped `with_unrounded_layout` borrow, and
+the rounding pass uses the deliberately named `clone_unrounded_layout` for
+its one required complete duplicate. Whole-record duplication therefore
+remains explicit. The
 separate `definite_dimensions` field is necessary because Flexbox can decide
 an item's used geometry while §9.8 still classifies that size as indefinite
 for percentages in descendants; Grid has the same distinction. A geometric
@@ -345,8 +350,11 @@ physical edges by the style system before layout.
 **Two layout copies, one rounding pass — on the device-pixel grid.**
 Algorithms produce **unrounded** `f32` layouts (`set_unrounded_layout`);
 `round_layout(root, scale)` derives snapped finals through the handles'
-`unrounded_layout`/`set_final_layout` (whose impl may target a different
-store, e.g. the paint-facing side of a widget tree). `scale` is the
+explicit `clone_unrounded_layout`/owned `set_final_layout` pair (whose impl
+may target a different store, e.g. the paint-facing side of a widget tree).
+Other readers use the scoped `with_unrounded_layout` API. The one whole-record
+clone in the rounding pass is required because the host durably retains both
+unrounded and rounded results. `scale` is the
 device-pixel ratio (physical px per CSS px):
 coordinates are CSS pixels but crisp edges are physical, so snapping is
 `snap(v) = css_round(v × scale) / scale` — on a DPR-2 screen `0.5` CSS px is
@@ -476,9 +484,12 @@ the painting — layout's job is to never be the frame's bottleneck.
 - **Static dispatch end-to-end** (above). The protocol's hot calls
   (`children`, style accessors, `compute_child_layout`) are all
   monomorphized; hosts should `#[inline]` their impls of the first two.
-- **POD boundary.** Geometry and IO types are small `Copy` structs
-  (`#[repr(C)]`), passed by value in registers; `f32` throughout (GPU/SIMD
-  native, halves cache traffic vs `f64`; Starlight/Yoga/Taffy all agree).
+- **Cheap transient boundary; explicit durable records.** Geometry,
+  `LayoutInput`, and `LayoutOutput` are small `Copy` structs (`#[repr(C)]`),
+  passed by value; `Layout` is a larger non-`Copy` record moved into host
+  storage and read through a scoped borrow, so a whole-layout clone can never
+  happen accidentally. Values use `f32` throughout (GPU/SIMD native, halves
+  cache traffic vs `f64`; Starlight/Yoga/Taffy all agree).
   No `NaN` sentinel games — unknowns are `Option<f32>`/enum variants, and
   boundary values must be finite (debug-asserted).
 - **Shared setup, flat hot scratch.** Flex, Grid, Relative, and Linear reuse
@@ -523,10 +534,11 @@ the painting — layout's job is to never be the frame's bottleneck.
   the recommended re-layout root, so a dirty leaf inside a contained subtree
   never invalidates past the boundary. `w3c-dom::layout` now drives this
   end-to-end: `Document::invalidate_layout` inlines the boundary-stopped
-  ancestor walk (with real parent links, so no re-root return value is needed),
-  and `layout_document` classifies its flush's `StyleDamage` into those calls
-  and re-runs each parked boundary via `compute_boundary_relayout` before the
-  root pass. Because it re-runs from the document root, a boundary's interior
+  ancestor walk (with real parent links, so no re-root return value is needed).
+  Every `w3c-dom` style harvest classifies `StyleDamage` into those calls before
+  returning or streaming it, and `layout_document` re-runs each parked boundary
+  via `compute_boundary_relayout` before the root pass. Because it re-runs from
+  the document root, a boundary's interior
   is unreachable while the boundary's ancestors stay warm, so the in-place
   boundary re-run is what actually refreshes it (`compute_root_layout` from the
   warm root would answer from cache and never descend).
@@ -809,11 +821,12 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
   `neutron-star`; `w3c-dom` produces per-node `StyleDamage`/`FlushSummary` and
   the `effective_containment` fold as its style-to-layout seam (kept internal —
   the widget layer neither forwards nor re-exports it), and its `layout` module
-  now **closes** the damage→layout loop: `layout_document` consumes its own
-  flush's `StyleDamage`, boundary-stops `Document::invalidate_layout` per
-  relayout-damaged node, and re-runs each parked `contain: strict` boundary via
-  `compute_boundary_relayout` — entirely engine-internal, with the widget layer
-  unchanged. Remaining L3 work is the rest of the `lynx-widget`/stylo policy
+  now **closes** the damage→layout loop: every style harvest consumes
+  relayout-class `StyleDamage` through boundary-stopped
+  `Document::invalidate_layout`, and `layout_document` re-runs each parked
+  `contain: strict` boundary via `compute_boundary_relayout` — entirely
+  engine-internal, with the widget layer unchanged. Remaining L3 work is the
+  rest of the `lynx-widget`/stylo policy
   layer — the root
   fixed-position pass and sticky lowering, style-view wiring over
   `ComputedValues` (plus host lowering of legacy spellings: `linear-orientation`

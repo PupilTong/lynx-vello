@@ -84,10 +84,10 @@
 //! # Minimal host sketch
 //!
 //! A slab-backed host implementing the protocol (style traits via the
-//! blanket `&S` impls; per-node layout slots as `Cell`s):
+//! blanket `&S` impls; per-node layout slots as `RefCell`s):
 //!
 //! ```
-//! use std::cell::Cell;
+//! use std::cell::RefCell;
 //!
 //! use neutron_star::prelude::*;
 //! use neutron_star::style::Display;
@@ -105,8 +105,8 @@
 //!     style: Style,
 //!     children: Vec<usize>,
 //!     // Host-owned interior-mutable layout slots, written through handles.
-//!     layout: Cell<Layout>,
-//!     final_layout: Cell<Layout>,
+//!     layout: RefCell<Layout>,
+//!     final_layout: RefCell<Layout>,
 //! }
 //!
 //! struct Tree {
@@ -180,16 +180,17 @@
 //!         LayoutOutput::new(input.known_dimensions.unwrap_or(Size::ZERO), Size::ZERO)
 //!     }
 //!
-//!     fn set_unrounded_layout(self, layout: &Layout) {
-//!         self.node().layout.set(*layout);
+//!     fn set_unrounded_layout(self, layout: Layout) {
+//!         *self.node().layout.borrow_mut() = layout;
 //!     }
 //!
-//!     fn unrounded_layout(self) -> Layout {
-//!         self.node().layout.get()
+//!     fn with_unrounded_layout<R>(self, read: impl FnOnce(&Layout) -> R) -> R {
+//!         let layout = self.node().layout.borrow();
+//!         read(&layout)
 //!     }
 //!
-//!     fn set_final_layout(self, layout: &Layout) {
-//!         self.node().final_layout.set(*layout);
+//!     fn set_final_layout(self, layout: Layout) {
+//!         *self.node().final_layout.borrow_mut() = layout;
 //!     }
 //!
 //!     fn set_static_position(self, static_position: Point<f32>) {
@@ -213,8 +214,8 @@
 //!     nodes: vec![Node {
 //!         style: Style,
 //!         children: vec![],
-//!         layout: Cell::new(Layout::default()),
-//!         final_layout: Cell::new(Layout::default()),
+//!         layout: RefCell::new(Layout::default()),
+//!         final_layout: RefCell::new(Layout::default()),
 //!     }],
 //! };
 //! let root = NodeRef {

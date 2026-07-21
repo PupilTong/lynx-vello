@@ -104,6 +104,10 @@ impl StyleEngine {
     /// style-sharing enabled). Styles land on the widgets; read them with
     /// [`WidgetTree::computed`].
     ///
+    /// The core flush summary is intentionally not exposed here. Its harvest
+    /// has already consumed relayout-class damage into the document's layout
+    /// caches, so discarding the summary cannot lose later layout work.
+    ///
     /// A no-op without a page root.
     pub fn flush_widget_tree(&self, tree: &mut WidgetTree) {
         self.flush_widget_tree_with(tree, Parallelism::Auto);

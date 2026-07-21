@@ -1465,7 +1465,7 @@ where
         layout.border = item.border;
         layout.padding = item.padding;
         layout.margin = item.margin;
-        item.key.node.set_unrounded_layout(&layout);
+        item.key.node.set_unrounded_layout(layout);
 
         // A scroll-container child traps its interior scrollable overflow;
         // any other child propagates border box ∪ content_size (§3.3).
@@ -1510,7 +1510,7 @@ where
                     layout.content_size,
                     style.overflow(),
                 );
-                pending.node.set_unrounded_layout(&layout);
+                pending.node.set_unrounded_layout(layout);
             }
             // The containing block is not the layout parent (CSS `fixed`):
             // record the static position; the host completes layout in its
@@ -1679,7 +1679,7 @@ where
     let mut scrollable_size = commit_in_flow(&mut items, content_size, content_origin, outer_size);
     for (document_index, child) in hidden {
         super::hide_subtree(child);
-        child.set_unrounded_layout(&Layout::with_order(
+        child.set_unrounded_layout(Layout::with_order(
             u32::try_from(document_index).unwrap_or(u32::MAX),
         ));
     }

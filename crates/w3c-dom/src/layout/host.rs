@@ -115,16 +115,25 @@ impl<'dom, T: MeasureLeaf> LayoutNode for &'dom Node<T> {
         })
     }
 
-    fn set_unrounded_layout(self, layout: &Layout) {
-        self.layout_data.borrow_mut().unrounded = *layout;
+    #[inline]
+    fn set_unrounded_layout(self, layout: Layout) {
+        self.layout_data.borrow_mut().unrounded = layout;
     }
 
-    fn unrounded_layout(self) -> Layout {
-        self.layout_data.borrow().unrounded
+    #[inline]
+    fn with_unrounded_layout<R>(self, read: impl FnOnce(&Layout) -> R) -> R {
+        let data = self.layout_data.borrow();
+        read(&data.unrounded)
     }
 
-    fn set_final_layout(self, layout: &Layout) {
-        self.layout_data.borrow_mut().rounded = *layout;
+    #[inline]
+    fn clone_unrounded_layout(self) -> Layout {
+        self.layout_data.borrow().unrounded.clone()
+    }
+
+    #[inline]
+    fn set_final_layout(self, layout: Layout) {
+        self.layout_data.borrow_mut().rounded = layout;
     }
 
     fn set_static_position(self, static_position: Point<f32>) {
@@ -340,8 +349,9 @@ fn position_hoisted<T: MeasureLeaf>(node: &Node<T>, viewport: Size<f32>) {
     // The containing block's padding box (the abs-pos resolution basis).
     let (containing_origin, containing_size) = match containing {
         Some(block) => {
-            let layout = block.layout_data.borrow().unrounded;
             let origin = absolute_origin(block);
+            let data = block.layout_data.borrow();
+            let layout = &data.unrounded;
             (
                 Point::new(origin.x + layout.border.left, origin.y + layout.border.top),
                 Size::new(
@@ -372,7 +382,7 @@ fn position_hoisted<T: MeasureLeaf>(node: &Node<T>, viewport: Size<f32>) {
         containing_origin.y + layout.location.y - parent_origin.y,
     );
     layout.order = sibling_paint_order(parent, node.id());
-    LayoutNode::set_unrounded_layout(node, &layout);
+    LayoutNode::set_unrounded_layout(node, layout);
 }
 
 /// The node's paint index among its siblings, per the engine's paint-key

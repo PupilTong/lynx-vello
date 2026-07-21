@@ -1191,8 +1191,8 @@ pub(super) struct TestSourceNode {
 /// whole synchronization story.
 #[derive(Debug, Default)]
 pub(super) struct TestSessionNode {
-    pub(super) layout: Cell<Layout>,
-    pub(super) final_layout: Cell<Layout>,
+    pub(super) layout: RefCell<Layout>,
+    pub(super) final_layout: RefCell<Layout>,
     pub(super) static_position: Cell<Option<Point<f32>>>,
     pub(super) output: Cell<LayoutOutput>,
     pub(super) measure_inputs: RefCell<Vec<LeafMeasureInput>>,
@@ -1337,19 +1337,20 @@ impl<'t> LayoutNode for TestRef<'t> {
         output
     }
 
-    fn set_unrounded_layout(self, layout: &Layout) {
+    fn set_unrounded_layout(self, layout: Layout) {
         self.tree
             .layout_writes
             .set(self.tree.layout_writes.get() + 1);
-        self.slots().layout.set(*layout);
+        *self.slots().layout.borrow_mut() = layout;
     }
 
-    fn unrounded_layout(self) -> Layout {
-        self.slots().layout.get()
+    fn with_unrounded_layout<R>(self, read: impl FnOnce(&Layout) -> R) -> R {
+        let layout = self.slots().layout.borrow();
+        read(&layout)
     }
 
-    fn set_final_layout(self, layout: &Layout) {
-        self.slots().final_layout.set(*layout);
+    fn set_final_layout(self, layout: Layout) {
+        *self.slots().final_layout.borrow_mut() = layout;
     }
 
     fn set_static_position(self, static_position: Point<f32>) {
@@ -1535,11 +1536,11 @@ impl TestTree {
     }
 
     pub(super) fn layout(&self, id: TestId) -> Layout {
-        self.session_node(id).layout.get()
+        self.session_node(id).layout.borrow().clone()
     }
 
     pub(super) fn final_layout(&self, id: TestId) -> Layout {
-        self.session_node(id).final_layout.get()
+        self.session_node(id).final_layout.borrow().clone()
     }
 
     pub(super) fn static_position(&self, id: TestId) -> Option<Point<f32>> {

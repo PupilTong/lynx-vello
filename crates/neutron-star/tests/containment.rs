@@ -476,7 +476,7 @@ fn skipped_contents_measure_probe_does_not_hide_children() {
     // Prime stale child geometry.
     let mut stale = tree.layout(child);
     stale.size = Size::new(7.0, 7.0);
-    tree.session_node(child).layout.set(stale);
+    *tree.session_node(child).layout.borrow_mut() = stale;
 
     // A measure probe must stay side-effect free (no hiding).
     let output = measure(&tree, container, Size::MAX_CONTENT);
