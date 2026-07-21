@@ -701,6 +701,24 @@ impl<T> Node<T> {
         self.layout_data.borrow().unrounded
     }
 
+    /// Whether this node's layout **measurement cache** currently holds no
+    /// memoized answer — i.e. the next layout pass must recompute it rather
+    /// than answer from cache.
+    ///
+    /// Observes the incremental-relayout invalidation state: after a
+    /// [`Document::invalidate_layout`](crate::Document::invalidate_layout) the
+    /// dirty spine reports `true` up to (and including) the nearest relayout
+    /// boundary, while the boundary's ancestors and every clean subtree keep
+    /// their caches and report `false`. A freshly laid-out (or never laid-out)
+    /// node reports `false` / `true` respectively.
+    ///
+    /// Must not be called while a layout pass is running on the document
+    /// (impossible through the public API: layout holds `&mut Document`).
+    #[must_use]
+    pub fn layout_cache_is_empty(&self) -> bool {
+        self.layout_data.borrow().measure_cache.is_empty()
+    }
+
     /// The accumulated stylo selector flags.
     #[must_use]
     pub fn selector_flags(&self) -> ElementSelectorFlags {

@@ -35,7 +35,7 @@
 //!
 //! # Layout results live on the node
 //!
-//! Every [`Node`](crate::Node) carries its own [`LayoutData`] (an
+//! Every [`Node`] carries its own `LayoutData` (an
 //! `AtomicRefCell`, the same shape Servo uses for per-node layout data):
 //! the measurement cache, the unrounded and device-snapped [`Layout`]s, and
 //! the out-of-flow bookkeeping. Read results with
@@ -50,10 +50,12 @@
 //! # Phases: style first, then layout
 //!
 //! [`StyleEngine::layout_document`] runs the style flush itself (a no-op
-//! when nothing is scheduled) and only then lays out — layout reads computed
-//! styles strictly after the restyle traversal has finished, mirroring the
-//! style → layout phase barrier every production engine uses. The `&mut
-//! Document` it takes is what guarantees the tree cannot change mid-pass.
+//! when nothing is scheduled), **consumes the flush's own restyle damage**
+//! into layout invalidation (see below), and only then lays out — layout
+//! reads computed styles strictly after the restyle traversal has finished,
+//! mirroring the style → layout phase barrier every production engine uses.
+//! The `&mut Document` it takes is what guarantees the tree cannot change
+//! mid-pass.
 //!
 //! # Leaf content measures through the payload
 //!
@@ -125,16 +127,33 @@
 //! assert_eq!(document.get(child).unwrap().layout().size.width, 100.0);
 //! ```
 //!
-//! # Invalidation is the embedder's job (like snapshots, inverted)
+//! # Style-driven relayout is automatic; content/structure stays the embedder's
 //!
-//! Layout only fills and reads each node's measurement cache; whenever a
-//! node's **layout inputs** change between passes — computed style,
-//! children, character data — call [`Document::invalidate_layout`] with
-//! that node (for a removal: the old parent). It clears the node's cache
-//! and every ancestor's, per neutron-star's dirty-path contract, so the
-//! next pass recomputes exactly the dirty spine while clean subtrees answer
-//! from their caches. When in doubt,
-//! [`Document::invalidate_layout_all`] is always correct, merely slower.
+//! Layout only fills and reads each node's measurement cache; between passes
+//! a node's **layout inputs** must be re-derived wherever they changed. The
+//! flush [`StyleEngine::layout_document`] runs first classifies exactly the
+//! style-visible half of that: it streams the restyle
+//! [`StyleDamage`] and, for every node that
+//! [`needs_relayout`](crate::StyleDamage::needs_relayout), runs
+//! [`Document::invalidate_layout`] on it (and its parent on a
+//! reconstruct) — so **any change stylo can see drives relayout on its own**,
+//! with no embedder call. That invalidation is boundary-stopped: it clears the
+//! dirty spine up to the nearest `contain: strict` / skipped
+//! `content-visibility` ancestor, leaving that boundary's ancestors' caches
+//! warm and re-running the boundary's interior in place (see
+//! [`Document::invalidate_layout`]).
+//!
+//! What the flush **cannot** see stays the embedder's job — call
+//! [`Document::invalidate_layout`] directly for it (for a removal: the old
+//! parent):
+//!
+//! - **character-data / child-list** mutations that leave every computed style identical (stylo
+//!   emits no damage for them);
+//! - **external-state measurement inputs** — anything a [`MeasureLeaf`] hook reads that is not a
+//!   computed style (a font load, an image's intrinsic size arriving, a locale flip).
+//!
+//! When in doubt, [`Document::invalidate_layout_all`] is always correct,
+//! merely slower.
 //!
 //! # What is deliberately *not* here (yet)
 //!
@@ -156,8 +175,9 @@
 //! computed `fixed` (or an `absolute` escaping an unpositioned parent) is
 //! hoisted to the viewport **unless** an ancestor establishes a fixed
 //! containing block (`transform`, `perspective`, `filter`, qualifying
-//! `will-change`, `contain: layout/paint`) — not Lynx's unconditional
-//! escape-to-root.
+//! `will-change`, effective `contain: layout/paint` — including the
+//! containment `content-visibility: hidden`/`auto` implies) — not Lynx's
+//! unconditional escape-to-root.
 
 mod host;
 mod style;
@@ -167,14 +187,18 @@ use std::sync::LazyLock;
 use neutron_star::cache::Cache;
 pub use neutron_star::compute::{LeafMeasureInput, LeafMetrics};
 pub use neutron_star::geometry::{Edges, Point, Size};
+use neutron_star::invalidate::is_relayout_boundary;
+use neutron_star::style::CoreStyle;
 pub use neutron_star::tree::Layout;
 use stylo::properties::ComputedValues;
 use stylo::servo_arc::Arc;
 
 pub use self::style::StyleView;
+use crate::damage::StyleDamage;
 use crate::document::Document;
 use crate::engine::StyleEngine;
 use crate::ext::ExternalState;
+use crate::flush::Parallelism;
 use crate::node::Node;
 
 /// The embedder's leaf content measurement hook, implemented by the
@@ -253,9 +277,20 @@ pub(crate) static ANONYMOUS_STYLE: LazyLock<Arc<ComputedValues>> = LazyLock::new
 });
 
 impl StyleEngine {
-    /// Flush pending styles, then lay the document out against this engine's
+    /// Flush pending styles — consuming the flush's own restyle damage into
+    /// layout invalidation — then lay the document out against this engine's
     /// viewport and device-pixel ratio. Leaf content measures through the
     /// payload's [`MeasureLeaf`] hook.
+    ///
+    /// Style-driven relayout is **automatic**: the internal flush streams its
+    /// per-node [`StyleDamage`] and, for each node whose damage
+    /// [`needs_relayout`](StyleDamage::needs_relayout), runs a boundary-stopped
+    /// [`Document::invalidate_layout`] on it (plus its parent when the damage
+    /// [`is_reconstruct`](StyleDamage::is_reconstruct) — box generation changed,
+    /// so the parent must re-collect its children). Repaint / stacking-context
+    /// / overflow-only damage touches no layout cache. An embedder therefore
+    /// never invalidates layout for a change stylo can see; see
+    /// [`Document::invalidate_layout`] for the mutations that remain its job.
     ///
     /// Results land on the nodes: read them with
     /// [`Node::layout`](crate::Node::layout).
@@ -266,44 +301,173 @@ impl StyleEngine {
     pub fn layout_document<T: ExternalState + MeasureLeaf>(&self, document: &mut Document<T>) {
         // Phase barrier: layout reads computed styles only after the restyle
         // traversal has completed (no-op when nothing is scheduled). Also
-        // asserts this engine owns the document.
-        self.flush_document(document);
+        // asserts this engine owns the document. Consume the flush's damage
+        // with the zero-alloc sink: only relayout-class damage is collected,
+        // so a clean or paint-only flush allocates nothing here.
+        let mut relayout_targets: Vec<(crate::NodeId, StyleDamage)> = Vec::new();
+        self.flush_document_with_sink(document, Parallelism::Auto, &mut |id, damage| {
+            if damage.needs_relayout() {
+                relayout_targets.push((id, damage));
+            }
+        });
+        // The flush's `&mut Document` borrow is released now, so the harvested
+        // damage can drive invalidation.
+        for (id, damage) in relayout_targets {
+            document.invalidate_layout(id);
+            if damage.is_reconstruct() {
+                // A reconstruct changes this node's generated box, so its parent
+                // must re-collect children; invalidate the parent too.
+                let parent = document.get(id).and_then(Node::parent_id);
+                if let Some(parent) = parent {
+                    document.invalidate_layout(parent);
+                }
+            }
+        }
+
         let viewport = self.device().viewport_size();
         let scale = self.device().device_pixel_ratio().get();
         host::run_layout(document, Size::new(viewport.width, viewport.height), scale);
+        // The pass consumed every parked relayout root (`run_layout` re-ran each
+        // boundary in place); forget them so they cannot fire again next pass.
+        document.clear_relayout_roots();
     }
 }
 
 impl<T> Document<T> {
     /// Record that `id`'s layout inputs changed since the last layout pass:
-    /// clears its measurement cache and every ancestor's up to the document
-    /// node (cached entries encode children's contributions — neutron-star's
-    /// dirty-path invalidation contract).
+    /// clears its measurement cache and its ancestors', **stopping at the
+    /// nearest ancestor that is a relayout boundary** (`contain: strict`, or a
+    /// skipped `content-visibility` box — [`is_relayout_boundary`] over the
+    /// same [`StyleView`] the layout pass reads). A cached measurement encodes
+    /// its children's contributions, so a size-affecting change to `id`
+    /// invalidates ancestors up the chain — but a boundary's own outer size
+    /// cannot change from an interior mutation, so nothing above it needs
+    /// clearing. The boundary itself **is** cleared (its interior changed) and,
+    /// with its last committed [`LayoutInput`](neutron_star::tree::LayoutInput)
+    /// captured beforehand, parked for the next layout pass to re-run in place
+    /// via [`compute_boundary_relayout`](neutron_star::compute::compute_boundary_relayout)
+    /// — the engine-internal version of neutron-star's `invalidate_for_relayout`
+    /// re-layout root, which needs no re-root call because this host owns real
+    /// parent links. A style-less node (text / the document node) is never a
+    /// boundary, so the walk runs to the document root there, exactly as before.
     ///
-    /// Call it for style, character-data, and child-list changes; for a
-    /// removed node, invalidate its **old parent** instead (the removed
+    /// `id` (the damaged node) is cleared and walked past regardless of its own
+    /// containment: a `contain: strict` node whose **own** style changed can
+    /// still resize (containment isolates it from its *contents*, not from its
+    /// own box), so the boundary test applies only to strict *ancestors* — the
+    /// same shape as
+    /// [`invalidate_for_relayout`](neutron_star::invalidate::invalidate_for_relayout).
+    ///
+    /// The walk resolves each ancestor into one of four cases:
+    ///
+    /// 0. **Skips contents** (`content-visibility: hidden`) — the ancestor lays out none of its
+    ///    contents, so an interior mutation cannot change any layout output; its own box is sized
+    ///    from styles alone and never enters the measurement cache. Stop immediately, parking
+    ///    nothing and clearing nothing above it. Checked **first** because a skipped box also folds
+    ///    `LAYOUT | SIZE` (it is a relayout boundary) yet never records a committed input — without
+    ///    this case it would fall through to case 3 and wrongly empty every warm ancestor cache up
+    ///    to the root. A later `hidden → visible` flip re-lays-out the interior through the
+    ///    container's own `RELAYOUT` damage.
+    /// 1. **Boundary with a committed layout** — park it (with that captured input) and stop; its
+    ///    own outer size cannot change from an interior mutation, so nothing above it needs
+    ///    clearing.
+    /// 2. **Boundary already parked earlier in this same batch** — a second damaged node under the
+    ///    one boundary, or a manual invalidate inside a boundary the flush already parked. Parking
+    ///    already cleared its cache, so re-reading its committed input would see `None`; without
+    ///    this case the walk would fall through to case 3 and clear on to the root, silently
+    ///    defeating the containment the first walk established. Stop instead, clearing neither it
+    ///    nor anything above it.
+    /// 3. **Non-boundary, or a boundary never laid out** (no committed input, not parked) — not yet
+    ///    a valid re-layout root, so clear it and keep walking toward the document root.
+    ///
+    /// Style changes are consumed automatically by
+    /// [`StyleEngine::layout_document`]; call this directly only for mutations
+    /// the style system cannot see — character-data and child-list changes that
+    /// leave computed styles identical, and external-state measurement inputs.
+    /// For a removed node, invalidate its **old parent** instead (the removed
     /// node's layout state died with it).
     ///
     /// # Panics
     ///
     /// Panics when `id` is vacant (the let-it-crash mutation contract).
     pub fn invalidate_layout(&mut self, id: crate::NodeId) {
-        let mut current = Some(id);
-        while let Some(id) = current {
-            let node = self
-                .tree_mut()
-                .get_mut(id)
+        let boundary = {
+            let tree = self.tree();
+            // Boundaries already parked earlier in this invalidation batch (a
+            // tiny vec — a linear scan beats a set).
+            let parked = self.relayout_roots();
+            let start = tree
+                .get(id)
                 .expect("vacant NodeId passed to Document::invalidate_layout");
-            node.layout_data.get_mut().measure_cache.clear();
-            current = node.parent_id();
+            start.layout_data.borrow_mut().measure_cache.clear();
+
+            let mut boundary = None;
+            let mut current = start.parent();
+            while let Some(node) = current {
+                // Elements are the only nodes that carry containment styles; a
+                // text or document node is never a boundary and never skips
+                // contents. Build the view once and reuse it for both tests.
+                let style_view = node.is_element().then(|| StyleView::of(node));
+                // Case (0): a **skipped-contents** ancestor (`content-visibility:
+                // hidden`) lays out *none* of its contents, so an interior
+                // mutation cannot affect any layout output; its own box is sized
+                // from styles alone and bypasses the measurement cache entirely.
+                // There is nothing to park and no ancestor to clear — stop
+                // immediately, leaving the warm caches above (and the skipped
+                // box's empty cache) untouched.
+                //
+                // Ordered **before** the boundary/committed-input cases below: a
+                // skipped box folds `LAYOUT | SIZE` (so `is_relayout_boundary`
+                // holds) yet never records a committed input, which would
+                // otherwise fall through to case (3) ("never laid out → keep
+                // clearing") and wrongly clear every warm ancestor cache up to
+                // the document root. A later `hidden → visible` flip drives its
+                // own invalidation through the container's `RELAYOUT` damage.
+                if style_view.as_ref().is_some_and(CoreStyle::skips_contents) {
+                    break;
+                }
+                let is_boundary = style_view.as_ref().is_some_and(is_relayout_boundary);
+                // Case (2): a boundary already parked earlier in this batch has
+                // an already-cleared cache — stop here rather than re-reading a
+                // now-`None` committed input and clearing on to the root (which
+                // would defeat the containment the first walk established).
+                if is_boundary && parked.iter().any(|&(parked_id, _)| parked_id == node.id()) {
+                    break;
+                }
+                // Capture a boundary's committed input *before* the clear below
+                // wipes it; a non-boundary (or a boundary never laid out) yields
+                // `None`.
+                let boundary_input = is_boundary
+                    .then(|| node.layout_data.borrow().measure_cache.committed_input())
+                    .flatten();
+                node.layout_data.borrow_mut().measure_cache.clear();
+                if let Some(input) = boundary_input {
+                    // Case (1): a laid-out boundary — park it and stop; its own
+                    // outer size cannot change from an interior mutation, so
+                    // nothing above it needs clearing.
+                    boundary = Some((node.id(), input));
+                    break;
+                }
+                // Case (3) / non-boundary: a boundary never laid out is not yet
+                // a valid re-layout root, and an ordinary ancestor's cache
+                // encodes this subtree's contribution — clear (done) and keep
+                // walking toward the document root.
+                current = node.parent();
+            }
+            boundary
+        };
+        if let Some((boundary_id, committed_input)) = boundary {
+            self.record_relayout_root(boundary_id, committed_input);
         }
     }
 
-    /// Drop every node's measurement cache (all layouts stay readable). The
-    /// always-correct, never-incremental fallback.
+    /// Drop every node's measurement cache (all layouts stay readable) and
+    /// forget any parked relayout roots. The always-correct, never-incremental
+    /// fallback.
     pub fn invalidate_layout_all(&mut self) {
         for (_, node) in self.tree_mut().iter_mut() {
             node.layout_data.get_mut().measure_cache.clear();
         }
+        self.clear_relayout_roots();
     }
 }

@@ -18,6 +18,7 @@ use std::fmt;
 use std::ptr::NonNull;
 use std::sync::Arc;
 
+use neutron_star::tree::LayoutInput;
 use slab::Slab;
 use stylo::dom::OpaqueNode;
 use stylo::selector_parser::SnapshotMap;
@@ -48,6 +49,30 @@ pub(crate) fn about_blank_url_data() -> UrlExtraData {
 /// every node's slab backpointer remains valid until the document is dropped.
 pub struct Document<T> {
     nodes: Box<Slab<Node<T>>>,
+    /// Relayout boundaries that a boundary-stopped
+    /// [`invalidate_layout`](Self::invalidate_layout) parked for the next
+    /// layout pass, each paired with the exact [`LayoutInput`] it was last
+    /// committed with.
+    ///
+    /// When the ancestor walk stops at a `contain: strict` / skipped
+    /// `content-visibility` boundary it leaves that boundary's *ancestors'*
+    /// caches warm — so the next `compute_root_layout` from the document root
+    /// answers them from cache and never descends into the boundary. The
+    /// boundary's own interior still changed, so it is re-run in place with its
+    /// committed input via
+    /// [`compute_boundary_relayout`](neutron_star::compute::compute_boundary_relayout)
+    /// at the start of the layout pass (the engine-internal equivalent of
+    /// neutron-star's `invalidate_for_relayout` re-layout root, using real
+    /// parent links). Drained and cleared once the pass consumes it.
+    ///
+    /// The layout pass re-runs these **deepest-first** (by tree depth): when
+    /// nested boundaries are parked together, an outer boundary's re-run
+    /// re-imposes its inner boundaries' sizes and so must run last to have the
+    /// final say over an inner boundary's stale committed replay (see
+    /// `layout::host::run_layout`). Parking is duplicate-free by construction:
+    /// [`invalidate_layout`](Self::invalidate_layout) stops at a boundary
+    /// already present here instead of parking it twice or clearing past it.
+    relayout_roots: Vec<(NodeId, LayoutInput)>,
 }
 
 impl<T: fmt::Debug> fmt::Debug for Document<T> {
@@ -55,7 +80,7 @@ impl<T: fmt::Debug> fmt::Debug for Document<T> {
         f.debug_struct("Document")
             .field("root_element", &self.root_element().map(Node::id))
             .field("nodes", &self.nodes)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -81,7 +106,30 @@ impl<T> Document<T> {
             root, DOCUMENT_NODE_ID,
             "the DOM document node must occupy slab slot zero"
         );
-        Self { nodes }
+        Self {
+            nodes,
+            relayout_roots: Vec::new(),
+        }
+    }
+
+    /// Park a boundary-stopped relayout root for the next layout pass (see
+    /// [`relayout_roots`](Self::relayout_roots)). Called only by
+    /// [`invalidate_layout`](Self::invalidate_layout).
+    pub(crate) fn record_relayout_root(&mut self, id: NodeId, committed_input: LayoutInput) {
+        self.relayout_roots.push((id, committed_input));
+    }
+
+    /// The relayout boundaries parked since the last pass (see
+    /// [`relayout_roots`](Self::relayout_roots)).
+    pub(crate) fn relayout_roots(&self) -> &[(NodeId, LayoutInput)] {
+        &self.relayout_roots
+    }
+
+    /// Forget every parked relayout root (the layout pass has consumed them, or
+    /// an [`invalidate_layout_all`](Self::invalidate_layout_all) subsumed them
+    /// with a full re-layout).
+    pub(crate) fn clear_relayout_roots(&mut self) {
+        self.relayout_roots.clear();
     }
 
     /// Borrow the complete node slab.

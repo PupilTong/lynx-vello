@@ -14,6 +14,9 @@
 
 mod common;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use common::{Doc, device_with};
 use stylo::queries::values::PrefersColorScheme;
 use w3c_dom::NodeId;
@@ -50,6 +53,16 @@ impl Harness {
             layout.size.width,
             layout.size.height,
         )
+    }
+
+    /// Whether `id`'s measurement cache is currently empty — the observable for
+    /// boundary-stopped invalidation (a cleared spine vs. a surviving cache).
+    fn node_cache_empty(&self, id: NodeId) -> bool {
+        self.doc
+            .dom
+            .get(id)
+            .expect("node id is live")
+            .layout_cache_is_empty()
     }
 }
 
@@ -752,4 +765,728 @@ fn layout_document_flushes_pending_styles_itself() {
     h.layout(); // no doc.flush() anywhere
 
     assert_eq!(h.rect(child).2, 60.0);
+}
+
+// --- damage → layout wiring ---------------------------------------------------
+//
+// `layout_document` consumes its own flush's restyle damage into layout
+// invalidation, so a plain style change re-lays-out with no explicit
+// `invalidate_layout` call, and a `contain: strict` boundary stops the
+// invalidation walk so its ancestors keep their caches.
+
+/// A [`MeasureLeaf`] payload that reports a fixed size for text-bearing leaves
+/// and tallies how often the engine measured one — the "did layout do work?"
+/// probe for the incremental-relayout tests. The tally is shared across every
+/// node in the document.
+#[derive(Debug, Clone)]
+struct CountingMeasure {
+    width: f32,
+    height: f32,
+    measures: Arc<AtomicUsize>,
+}
+
+impl CountingMeasure {
+    fn new(width: f32, height: f32, measures: &Arc<AtomicUsize>) -> Self {
+        Self {
+            width,
+            height,
+            measures: Arc::clone(measures),
+        }
+    }
+}
+
+impl w3c_dom::ExternalState for CountingMeasure {}
+
+impl MeasureLeaf for CountingMeasure {
+    fn measure_leaf(&self, node: &w3c_dom::Node<Self>, _input: LeafMeasureInput) -> LeafMetrics {
+        if node.text().is_some() {
+            self.measures.fetch_add(1, Ordering::Relaxed);
+            LeafMetrics::new(Size::new(self.width, self.height))
+        } else {
+            LeafMetrics::default()
+        }
+    }
+}
+
+#[test]
+fn style_width_change_relayouts_without_manual_invalidation() {
+    // A width change is RELAYOUT damage; layout_document consumes it and
+    // re-lays-out with NO explicit invalidate_layout call.
+    let mut h = Harness::new(
+        "page { display: flex; width: 200px; height: 50px; }
+         view { flex-grow: 1; }",
+    );
+    let root = h.doc.root;
+    let a = h.doc.el(root, "view");
+    let b = h.doc.el(root, "view");
+    h.layout();
+    assert_eq!(h.rect(a).2, 100.0);
+    assert_eq!(h.rect(b).2, 100.0);
+
+    h.doc.set_inline(a, "flex-grow: 0; width: 40px");
+    h.layout(); // no h.doc.dom.invalidate_layout anywhere
+
+    assert_eq!(h.rect(a).2, 40.0);
+    assert_eq!(h.rect(b).2, 160.0);
+}
+
+#[test]
+fn color_only_change_relayouts_nothing() {
+    // A paint-only (REPAINT) change produces no relayout damage, so
+    // layout_document invalidates nothing and the second pass answers entirely
+    // from cache — the leaf is never re-measured.
+    let measures = Arc::new(AtomicUsize::new(0));
+    let mut engine = w3c_dom::StyleEngine::new(common::device(800.0, 600.0));
+    engine.add_stylesheet_str(
+        "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }",
+        w3c_dom::StylesheetOrigin::Author,
+    );
+    let mut dom = engine.new_document();
+    let root = dom.create_element("page", CountingMeasure::new(0.0, 0.0, &measures));
+    dom.append_child(root);
+    let text = dom.create_element("text", CountingMeasure::new(30.0, 12.0, &measures));
+    dom.set_text(text, Some("hello".into()));
+    dom.append(root, text);
+
+    engine.layout_document(&mut dom);
+    let after_first = measures.load(Ordering::Relaxed);
+    assert!(after_first >= 1, "the initial pass measures the text leaf");
+
+    dom.set_inline_style(text, "color: rgb(0, 0, 255)");
+    engine.layout_document(&mut dom);
+    assert_eq!(
+        measures.load(Ordering::Relaxed),
+        after_first,
+        "a color-only change re-measures nothing",
+    );
+    // No relayout damage means no invalidation: the whole measurement-cache
+    // spine survives, so the second pass answered entirely from cache.
+    assert!(
+        !dom.get(text).unwrap().layout_cache_is_empty(),
+        "the leaf keeps its measurement cache across a paint-only change",
+    );
+    assert!(
+        !dom.get(root).unwrap().layout_cache_is_empty(),
+        "the leaf's ancestor keeps its measurement cache too",
+    );
+}
+
+#[test]
+fn contain_strict_boundary_keeps_ancestor_caches_and_relayouts_interior() {
+    // The `contain: strict` box is a relayout boundary: an interior mutation
+    // clears the dirty node and the boundary, but leaves the boundary's
+    // ancestor (the root) cache warm — and the interior still re-lays-out (the
+    // boundary is re-run in place).
+    let mut h = Harness::new(
+        "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }
+         .outer { display: flex; contain: strict; width: 80px; height: 80px; }
+         .inner { width: 30px; height: 30px; }",
+    );
+    let root = h.doc.root;
+    let outer = h.doc.el(root, ".outer");
+    let inner = h.doc.el(outer, ".inner");
+    h.layout();
+    assert_eq!(h.rect(outer).2, 80.0);
+    assert_eq!(h.rect(inner).2, 30.0);
+
+    // Flush the interior style change, then invalidate: boundary-stopped
+    // clearing keeps the root's cache warm.
+    h.doc.set_inline(inner, "width: 50px; height: 30px");
+    h.doc.flush();
+    h.doc.dom.invalidate_layout(inner);
+    assert!(h.node_cache_empty(inner), "the dirty node is cleared");
+    assert!(h.node_cache_empty(outer), "the boundary itself is cleared");
+    assert!(
+        !h.node_cache_empty(root),
+        "the boundary's ancestor keeps its cache",
+    );
+
+    h.layout();
+    assert_eq!(h.rect(inner).2, 50.0, "the boundary interior re-lays-out");
+    assert_eq!(
+        h.rect(outer).2,
+        80.0,
+        "the contained box keeps its outer size"
+    );
+}
+
+#[test]
+fn uncontained_interior_change_clears_the_ancestor_caches() {
+    // The control for the boundary test: with no containment the walk runs to
+    // the document root, so the ancestor's cache is cleared.
+    let mut h = Harness::new(
+        "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }
+         .outer { display: flex; width: 80px; height: 80px; }
+         .inner { width: 30px; height: 30px; }",
+    );
+    let root = h.doc.root;
+    let outer = h.doc.el(root, ".outer");
+    let inner = h.doc.el(outer, ".inner");
+    h.layout();
+
+    h.doc.set_inline(inner, "width: 50px; height: 30px");
+    h.doc.flush();
+    h.doc.dom.invalidate_layout(inner);
+    assert!(h.node_cache_empty(outer), "the container is cleared");
+    assert!(
+        h.node_cache_empty(root),
+        "the ancestor is cleared — no boundary stops the walk",
+    );
+}
+
+#[test]
+fn contained_interior_relayouts_automatically() {
+    // The automatic path end to end: the flush's RELAYOUT damage on `inner`
+    // drives a boundary-stopped invalidate and the boundary re-root, with no
+    // manual invalidate_layout call.
+    let mut h = Harness::new(
+        "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }
+         .outer { display: flex; contain: strict; width: 80px; height: 80px; }
+         .inner { width: 30px; height: 30px; }",
+    );
+    let root = h.doc.root;
+    let outer = h.doc.el(root, ".outer");
+    let inner = h.doc.el(outer, ".inner");
+    h.layout();
+    assert_eq!(h.rect(inner).2, 30.0);
+
+    h.doc.set_inline(inner, "width: 50px; height: 30px");
+    h.layout(); // automatic: no manual invalidate
+
+    assert_eq!(h.rect(inner).2, 50.0);
+    assert_eq!(h.rect(outer).2, 80.0);
+}
+
+#[test]
+fn a_damaged_boundary_still_clears_its_ancestors() {
+    // Decision: the boundary test applies to *ancestors*, never to the damaged
+    // node itself. A `contain: strict` node whose own style changes can still
+    // resize (size containment isolates it from its contents, not from its own
+    // box), so its ancestors must be cleared.
+    let mut h = Harness::new(
+        "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }
+         .boundary { display: flex; contain: strict; width: 60px; height: 60px; }
+         .inner { width: 20px; height: 20px; }",
+    );
+    let root = h.doc.root;
+    let boundary = h.doc.el(root, ".boundary");
+    h.doc.el(boundary, ".inner");
+    h.layout();
+    assert_eq!(h.rect(boundary).2, 60.0);
+
+    h.doc.set_inline(boundary, "width: 90px; height: 60px");
+    h.doc.flush();
+    h.doc.dom.invalidate_layout(boundary);
+    assert!(
+        h.node_cache_empty(boundary),
+        "the damaged boundary is cleared"
+    );
+    assert!(
+        h.node_cache_empty(root),
+        "its ancestor is cleared: the boundary's own size can change",
+    );
+
+    h.layout();
+    assert_eq!(h.rect(boundary).2, 90.0, "its own size change takes effect");
+}
+
+#[test]
+fn display_flip_relayouts_the_parent_automatically() {
+    // A child's display flip changes box generation; the parent re-collects its
+    // children on the next layout_document, with no manual invalidate.
+    let mut h = Harness::new(
+        "page { display: flex; width: 100px; height: 40px; }
+         view { flex-grow: 1; }",
+    );
+    let root = h.doc.root;
+    let a = h.doc.el(root, "view");
+    let b = h.doc.el(root, "view");
+    h.layout();
+    assert_eq!(h.rect(a).2, 50.0);
+    assert_eq!(h.rect(b).2, 50.0);
+
+    h.doc.set_inline(a, "display: none");
+    h.layout();
+    assert_eq!(h.rect(a).2, 0.0);
+    assert_eq!(h.rect(b).2, 100.0);
+
+    h.doc.set_inline(a, "");
+    h.layout();
+    assert_eq!(h.rect(a).2, 50.0);
+    assert_eq!(h.rect(b).2, 50.0);
+}
+
+#[test]
+fn boundary_reroot_and_root_pass_coexist_in_one_flush() {
+    // One flush carries both a contained-interior change (parked as a boundary
+    // re-root) and a clears-to-root change (a sibling). The boundary re-run and
+    // the root pass must both land: the boundary interior updates while its
+    // fixed outer size holds, and the sibling re-lays-out.
+    let mut h = Harness::new(
+        "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }
+         .outer { display: flex; contain: strict; width: 80px; height: 80px; }
+         .inner { width: 30px; height: 30px; }
+         .sib { width: 40px; height: 40px; }",
+    );
+    let root = h.doc.root;
+    let outer = h.doc.el(root, ".outer");
+    let inner = h.doc.el(outer, ".inner");
+    let sib = h.doc.el(root, ".sib");
+    h.layout();
+    assert_eq!(h.rect(inner).2, 30.0);
+    assert_eq!(h.rect(sib), (80.0, 0.0, 40.0, 40.0));
+
+    h.doc.set_inline(inner, "width: 50px; height: 30px");
+    h.doc.set_inline(sib, "width: 70px; height: 40px");
+    h.layout(); // one automatic pass drives both
+
+    assert_eq!(h.rect(inner).2, 50.0, "the boundary interior updates");
+    assert_eq!(h.rect(outer).2, 80.0, "the contained outer size holds");
+    assert_eq!(h.rect(sib).2, 70.0, "the clears-to-root sibling updates");
+}
+
+#[test]
+fn nested_boundaries_relayout_deepest_first() {
+    // page > B1(contain:strict) > M(flex) > B2(contain:strict, flex-grow) >
+    // Dinner. One flush changes M's horizontal padding (resizing B2's flex-imposed
+    // width) AND Dinner's height. M's damage parks B1; Dinner's parks B2 — in that
+    // outer-first push order. Re-running the parked boundaries in push order lets
+    // B2's stale committed input (the OLD imposed width) overwrite Dinner *after*
+    // B1 already re-laid it at the NEW width, and the root pass cannot repair it
+    // (B1's ancestors stay warm). Re-running deepest-first (B2 then B1) lets the
+    // outer boundary have the final say.
+    let mut h = Harness::new(
+        "page { display: flex; width: 400px; height: 300px; align-items: flex-start; }
+         .b1 { display: flex; contain: strict; width: 200px; height: 200px; }
+         .m { display: flex; flex-grow: 1; padding-left: 10px; padding-right: 10px; }
+         .b2 { display: flex; flex-direction: column; contain: strict; flex-grow: 1;
+               align-items: stretch; }
+         .dinner { height: 20px; }",
+    );
+    let root = h.doc.root;
+    let b1 = h.doc.el(root, ".b1");
+    let m = h.doc.el(b1, ".m");
+    let b2 = h.doc.el(m, ".b2");
+    let dinner = h.doc.el(b2, ".dinner");
+    h.layout();
+    // Initial: M content width = 200 - 2*10 = 180, so B2 and Dinner are 180 wide.
+    assert_eq!(h.rect(b2).2, 180.0);
+    assert_eq!(h.rect(dinner).2, 180.0);
+    assert_eq!(h.rect(dinner).3, 20.0);
+
+    // One flush: grow M's horizontal padding (B2's imposed width 180 → 140) and
+    // change Dinner's height (the interior mutation that parks B2).
+    h.doc
+        .set_inline(m, "padding-left: 30px; padding-right: 30px");
+    h.doc.set_inline(dinner, "height: 40px");
+    h.layout(); // automatic: both parked, re-run deepest-first
+
+    // Dinner ends at the NEW imposed width (140), not B2's stale-replay 180.
+    assert_eq!(
+        h.rect(dinner).2,
+        140.0,
+        "Dinner tracks B2's new parent-imposed width, not the stale inner replay"
+    );
+    assert_eq!(h.rect(dinner).3, 40.0, "Dinner's own height change applied");
+    assert_eq!(
+        h.rect(b2).2,
+        140.0,
+        "B2's outer width is the new imposed size"
+    );
+}
+
+#[test]
+fn boundary_own_and_interior_change_in_one_flush() {
+    // A boundary whose OWN size changes AND an interior descendant change, in one
+    // flush. The boundary's own damage clears to the root (its outer size can
+    // change) — which clears the boundary's own cache first — so the interior
+    // walk finds no committed input to park and also clears to the root; the root
+    // pass then re-lays-out everything. Pins that this (currently-correct)
+    // interleaving survives the already-parked stop: the boundary is never parked
+    // here, so case 3 (never-laid-out) still applies and clears upward.
+    let mut h = Harness::new(
+        "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }
+         .boundary { display: flex; contain: strict; width: 60px; height: 60px; }
+         .inner { width: 20px; height: 20px; }",
+    );
+    let root = h.doc.root;
+    let boundary = h.doc.el(root, ".boundary");
+    let inner = h.doc.el(boundary, ".inner");
+    h.layout();
+    assert_eq!(h.rect(boundary).2, 60.0);
+    assert_eq!(h.rect(inner).2, 20.0);
+
+    h.doc.set_inline(boundary, "width: 90px; height: 60px");
+    h.doc.set_inline(inner, "width: 50px; height: 20px");
+    h.layout(); // automatic: both changes ride one flush
+
+    assert_eq!(
+        h.rect(boundary).2,
+        90.0,
+        "the boundary's own size change applied"
+    );
+    assert_eq!(h.rect(inner).2, 50.0, "the interior change applied");
+}
+
+#[test]
+fn two_damaged_nodes_under_one_boundary_keep_root_warm() {
+    // Two interior nodes under one boundary, both damaged in one flush. The first
+    // walk parks the boundary and clears its cache; the second must recognize the
+    // boundary as ALREADY PARKED and stop, rather than seeing its now-empty
+    // committed slot and clearing on to the root. Pins FINDING 2: the ancestor
+    // (root) cache stays warm after BOTH invalidations.
+    let mut h = Harness::new(
+        "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }
+         .outer { display: flex; contain: strict; width: 80px; height: 80px; }
+         .a { width: 20px; height: 20px; }
+         .b { width: 20px; height: 20px; }",
+    );
+    let root = h.doc.root;
+    let outer = h.doc.el(root, ".outer");
+    let a = h.doc.el(outer, ".a");
+    let b = h.doc.el(outer, ".b");
+    h.layout();
+    assert_eq!(h.rect(a).2, 20.0);
+    assert_eq!(h.rect(b).3, 20.0);
+
+    // Flush both interior changes, then invalidate both manually so the cache
+    // state can be observed between the two ancestor walks.
+    h.doc.set_inline(a, "width: 30px; height: 20px");
+    h.doc.set_inline(b, "width: 20px; height: 30px");
+    h.doc.flush();
+    h.doc.dom.invalidate_layout(a);
+    h.doc.dom.invalidate_layout(b);
+    assert!(h.node_cache_empty(a), "the first damaged node is cleared");
+    assert!(h.node_cache_empty(b), "the second damaged node is cleared");
+    assert!(h.node_cache_empty(outer), "the boundary is cleared");
+    assert!(
+        !h.node_cache_empty(root),
+        "the boundary's ancestor stays warm after both invalidations",
+    );
+
+    h.layout();
+    assert_eq!(h.rect(a).2, 30.0, "the first interior change applied");
+    assert_eq!(h.rect(b).3, 30.0, "the second interior change applied");
+    assert_eq!(h.rect(outer).2, 80.0, "the contained outer size holds");
+}
+
+// --- content-visibility skipping + implied containment ------------------------
+//
+// `content-visibility: hidden` skips laying out its contents (P1-1); the
+// containment it (and `auto`) implies establishes the fixed/absolute containing
+// block (P1-2); and a `contain: strict` boundary re-run refreshes its stored
+// scrollable overflow (P1-3).
+
+#[test]
+fn content_visibility_hidden_skips_descendant_layout_and_measurement() {
+    // `content-visibility: hidden` sizes the container from its own styles and
+    // skips laying out its contents: descendants get zero geometry, their
+    // `MeasureLeaf` hook is never called, and a `position: fixed` descendant
+    // generates no positioned box. Revealing the container restores layout.
+    let measures = Arc::new(AtomicUsize::new(0));
+    let mut engine = w3c_dom::StyleEngine::new(common::device(800.0, 600.0));
+    engine.add_stylesheet_str(
+        "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }
+         .container { display: flex; width: 60px; height: 80px; align-items: flex-start; }
+         .fixed { position: fixed; left: 10px; top: 20px; width: 30px; height: 40px; }",
+        w3c_dom::StylesheetOrigin::Author,
+    );
+    let mut dom = engine.new_document();
+    let root = dom.create_element("page", CountingMeasure::new(0.0, 0.0, &measures));
+    dom.append_child(root);
+    let container = dom.create_element("view", CountingMeasure::new(0.0, 0.0, &measures));
+    dom.add_class(container, "container");
+    dom.set_inline_style(container, "content-visibility: hidden");
+    dom.append(root, container);
+    let text = dom.create_element("text", CountingMeasure::new(50.0, 70.0, &measures));
+    dom.set_text(text, Some("hi".into()));
+    dom.append(container, text);
+    let fixed = dom.create_element("view", CountingMeasure::new(0.0, 0.0, &measures));
+    dom.add_class(fixed, "fixed");
+    dom.append(container, fixed);
+
+    engine.layout_document(&mut dom);
+
+    // A borrow-free reader (takes `dom` by reference) so it can be used on both
+    // sides of the reveal mutation below.
+    let rect = |dom: &w3c_dom::Document<CountingMeasure>, id: NodeId| {
+        let l = dom.get(id).expect("live").layout();
+        (l.location.x, l.location.y, l.size.width, l.size.height)
+    };
+    // The container still generates its own box, sized purely from its styles.
+    assert_eq!(rect(&dom, container), (0.0, 0.0, 60.0, 80.0));
+    // Its contents are skipped: zeroed, and the text leaf is never measured.
+    assert_eq!(rect(&dom, text), (0.0, 0.0, 0.0, 0.0));
+    // A `position: fixed` descendant inside the skipped subtree produces no
+    // positioned box (the positioned pass prunes at the skip root).
+    assert_eq!(rect(&dom, fixed), (0.0, 0.0, 0.0, 0.0));
+    assert_eq!(
+        measures.load(Ordering::Relaxed),
+        0,
+        "a skipped text leaf is never measured",
+    );
+
+    // Reveal the container: its contents lay out again (transition cleanliness).
+    dom.set_inline_style(container, "");
+    engine.layout_document(&mut dom);
+    assert_eq!(
+        rect(&dom, text),
+        (0.0, 0.0, 50.0, 70.0),
+        "revealing the container lays its text back out",
+    );
+    assert!(
+        measures.load(Ordering::Relaxed) >= 1,
+        "the revealed text leaf is now measured",
+    );
+}
+
+#[test]
+fn content_visibility_auto_establishes_the_fixed_containing_block() {
+    // css-contain-2 / CSS Position: `content-visibility: auto` implies layout +
+    // paint containment, which establishes the containing block for fixed (and
+    // absolute) descendants — a fixed child resolves against the host, not the
+    // viewport. `auto` does not skip contents in v1, so the child is a normal
+    // in-flow-captured absolute box.
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .host { display: flex; width: 300px; height: 200px; margin-left: 100px;
+                 margin-top: 50px; }
+         .cv { content-visibility: auto; }
+         .fixed { position: fixed; left: 10px; top: 20px; width: 30px; height: 40px; }",
+    );
+    let root = h.doc.root;
+    // The plain host is the first flex item (origin (100, 50)); the cv host is
+    // the second (origin (500, 50)). A captured fixed child is host-relative, so
+    // its rect is position-independent — but a viewport-anchored one is not.
+    let plain = h.doc.el(root, ".host");
+    let plain_fixed = h.doc.el(plain, ".fixed");
+    let cv = h.doc.el(root, ".host.cv");
+    let cv_fixed = h.doc.el(cv, ".fixed");
+    h.layout();
+
+    // Control (no containment): the fixed child anchors to the viewport, stored
+    // parent-relative — viewport (10, 20) minus the plain host origin (100, 50).
+    assert_eq!(h.rect(plain_fixed), (-90.0, -30.0, 30.0, 40.0));
+    // The content-visibility:auto host captures it: resolved against the host's
+    // padding box, so it sits at its own inset (10, 20) relative to the host,
+    // wherever the host is — the reviewer's (100,50)+(10,20)→(110,70) shape,
+    // expressed host-relative. (Pre-fix it hoisted to the viewport at
+    // (10 - 500, 20 - 50) = (-490, -30).)
+    assert_eq!(h.rect(cv_fixed), (10.0, 20.0, 30.0, 40.0));
+}
+
+#[test]
+fn contained_boundary_relayout_refreshes_scrollable_content_size() {
+    // A `contain: strict` boundary that is ALSO a scroll container
+    // (`overflow: hidden`) has a fixed outer size (the relayout-boundary theorem)
+    // but a `content_size` (scrollable overflow) that tracks its interior: as a
+    // scroll container it keeps its full interior union as its own scroll range
+    // (css-overflow-3 §3.3), even though that no longer leaks to the root. A child
+    // growing past the boundary must refresh the STORED content_size even though
+    // the boundary is re-run in place via `compute_boundary_relayout`, which
+    // deliberately does not restore the boundary's own `Layout`. The merge lands
+    // before the rounding pass snaps it.
+    let mut h = Harness::new(
+        "page { display: flex; width: 200px; height: 200px; align-items: flex-start; }
+         .scroll { display: flex; flex-direction: column; contain: strict; overflow: hidden;
+                   width: 80px; height: 80px; align-items: flex-start; }
+         .child { width: 40px; height: 30px; flex-shrink: 0; }",
+    );
+    let root = h.doc.root;
+    let scroll = h.doc.el(root, ".scroll");
+    let child = h.doc.el(scroll, ".child");
+    h.layout();
+
+    let content_height = |harness: &Harness, id: NodeId| {
+        harness
+            .doc
+            .dom
+            .get(id)
+            .expect("live")
+            .layout()
+            .content_size
+            .height
+    };
+    // The 30px child fits inside the 80px box: content_size equals the border box.
+    assert_eq!(h.rect(scroll), (0.0, 0.0, 80.0, 80.0));
+    assert_eq!(content_height(&h, scroll), 80.0);
+
+    // Grow the child past the boundary via the automatic damage path (no manual
+    // invalidate): the boundary is parked and re-run in place.
+    h.doc.set_inline(child, "height: 120px");
+    h.layout();
+
+    // The outer size still holds (the theorem)...
+    assert_eq!(h.rect(scroll), (0.0, 0.0, 80.0, 80.0));
+    // ...while the stored content_size now reflects the 120px interior — the
+    // merged value the rounding pass snapped (reviewer repro: 30→120, no longer
+    // stale at 80).
+    assert_eq!(content_height(&h, scroll), 120.0);
+    assert_eq!(
+        h.doc
+            .dom
+            .get(child)
+            .expect("live")
+            .unrounded_layout()
+            .size
+            .height,
+        120.0,
+        "the boundary interior actually re-laid-out",
+    );
+}
+
+#[test]
+fn layout_contained_visible_boundary_excludes_descendant_scrollable_overflow() {
+    // css-contain-2 §3.3 companion to the test above: the same shape with
+    // `overflow: visible` on the contained boundary. Layout containment makes the
+    // 120px child's overflow *ink* overflow (item 3), so the boundary's scrollable
+    // overflow equals its own 80px border box — it does NOT include the child.
+    let mut h = Harness::new(
+        "page { display: flex; width: 200px; height: 200px; align-items: flex-start; }
+         .scroll { display: flex; flex-direction: column; contain: strict; overflow: visible;
+                   width: 80px; height: 80px; align-items: flex-start; }
+         .child { width: 40px; height: 120px; flex-shrink: 0; }",
+    );
+    let root = h.doc.root;
+    let scroll = h.doc.el(root, ".scroll");
+    let child = h.doc.el(scroll, ".child");
+    h.layout();
+
+    // The child is still laid out and overflows the box...
+    assert_eq!(
+        h.doc
+            .dom
+            .get(child)
+            .expect("live")
+            .unrounded_layout()
+            .size
+            .height,
+        120.0,
+        "the descendant is laid out (only its overflow is ink-only)",
+    );
+    // ...but the boundary's scrollable overflow is just its border box (§3.3).
+    assert_eq!(
+        h.doc
+            .dom
+            .get(scroll)
+            .expect("live")
+            .layout()
+            .content_size
+            .height,
+        80.0,
+        "layout containment + overflow:visible excludes descendant overflow",
+    );
+}
+
+#[test]
+fn boundary_scrollable_overflow_is_consistent_across_incremental_and_cold_layout() {
+    // Reviewer's repro: an 80px root contains a scroll-container boundary
+    // (`contain: strict; overflow: hidden`, 60x60) whose child grows 30 -> 120.
+    // The boundary traps its interior, so it contributes only its 60px border box
+    // to the root: boundary.content_size == 120 (its own scroll range) but
+    // root.content_size == 80. This must hold BOTH via the incremental damage
+    // path (parked boundary re-run) AND after a cold `invalidate_layout_all` — the
+    // cold path previously leaked the boundary's 120 up to the root.
+    let mut h = Harness::new(
+        "page { display: flex; flex-direction: column; width: 80px; height: 80px;
+                align-items: flex-start; }
+         .boundary { display: flex; flex-direction: column; contain: strict; overflow: hidden;
+                     width: 60px; height: 60px; align-items: flex-start; }
+         .child { width: 40px; height: 30px; flex-shrink: 0; }",
+    );
+    let root = h.doc.root;
+    let boundary = h.doc.el(root, ".boundary");
+    let child = h.doc.el(boundary, ".child");
+    h.layout();
+
+    let content_h = |harness: &Harness, id: NodeId| {
+        harness
+            .doc
+            .dom
+            .get(id)
+            .expect("live")
+            .layout()
+            .content_size
+            .height
+    };
+    // Initial: the 30px child fits the 60px boundary; the root sees the border box.
+    assert_eq!(content_h(&h, boundary), 60.0);
+    assert_eq!(content_h(&h, root), 80.0);
+
+    // Grow the child past the boundary via the automatic damage path (parked
+    // boundary re-run, root left warm).
+    h.doc.set_inline(child, "height: 120px");
+    h.layout();
+    assert_eq!(
+        content_h(&h, boundary),
+        120.0,
+        "incremental: the boundary tracks its interior scroll range",
+    );
+    assert_eq!(
+        content_h(&h, root),
+        80.0,
+        "incremental: the boundary is trapped, so the root stays at its border box",
+    );
+
+    // A cold full relayout must agree by construction (this is where the leak was:
+    // the root previously accumulated the boundary's 120 instead of its border box).
+    h.doc.dom.invalidate_layout_all();
+    h.layout();
+    assert_eq!(
+        content_h(&h, boundary),
+        120.0,
+        "cold: the boundary tracks its interior scroll range",
+    );
+    assert_eq!(
+        content_h(&h, root),
+        80.0,
+        "cold: the boundary is trapped, so the root matches the incremental path",
+    );
+}
+
+#[test]
+fn mutation_inside_a_skipped_container_keeps_ancestor_caches_warm() {
+    // A `content-visibility: hidden` container lays out none of its contents and
+    // bypasses the measurement cache, so it never records a committed input. An
+    // interior mutation must NOT empty the warm ancestor caches: boundary case 0
+    // stops the invalidation walk at the skipped container immediately (it folds
+    // LAYOUT|SIZE, so without case 0 it would fall through the "never laid out"
+    // case and clear every ancestor cache up to the root).
+    let mut h = Harness::new(
+        "page { display: flex; width: 200px; height: 200px; }
+         .hidden { display: flex; content-visibility: hidden;
+                   contain-intrinsic-size: 40px 30px; width: 40px; height: 30px; }
+         .child { width: 20px; height: 20px; }",
+    );
+    let root = h.doc.root;
+    let hidden = h.doc.el(root, ".hidden");
+    let child = h.doc.el(hidden, ".child");
+    h.layout();
+
+    // Warm: the root holds its committed layout; the hidden box is sized from
+    // its own styles and its child is not laid out.
+    assert!(
+        !h.node_cache_empty(root),
+        "the root cache is warm after the first pass",
+    );
+    assert_eq!(h.rect(hidden), (0.0, 0.0, 40.0, 30.0));
+
+    // Invalidate a descendant of the skipped container. The walk must stop at the
+    // skipped box (case 0) and leave the root cache warm.
+    h.doc.dom.invalidate_layout(child);
+    assert!(
+        !h.node_cache_empty(root),
+        "the root cache stays warm past a skipped container",
+    );
+
+    // A subsequent pass is still correct (the root answers from its warm cache).
+    h.layout();
+    assert_eq!(h.rect(hidden), (0.0, 0.0, 40.0, 30.0));
+
+    // Flipping hidden -> visible produces correct fresh layout: the flip's own
+    // RELAYOUT damage on the container drives the real invalidation, so the child
+    // is now laid out inside the (visible) container.
+    h.doc.set_inline(hidden, "content-visibility: visible");
+    h.layout();
+    assert_eq!(h.rect(child), (0.0, 0.0, 20.0, 20.0));
 }

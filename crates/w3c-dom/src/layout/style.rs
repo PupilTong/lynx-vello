@@ -19,21 +19,22 @@
 
 use neutron_star::geometry::{Edges, Point, Size};
 use neutron_star::style::{
-    AspectRatio, Au, BorderSideWidth, ContentDistribution, CoreStyle, Display, FlexBasis,
-    FlexContainerStyle, FlexItemStyle, GridAutoFlow, GridContainerStyle, GridItemStyle, GridLine,
-    GridTemplateComponent, ImplicitGridTracks, Inset, ItemPlacement, JustifyItems,
-    LinearContainerStyle, LinearItemStyle, Margin, MaxSize, NonNegativeLengthPercentage,
-    NonNegativeLengthPercentageOrNormal, NonNegativeNumber, Overflow, PositionProperty,
-    RelativeAlign, RelativeContainerStyle, RelativeItemStyle, RelativeReference, SelfAlignment,
-    StyleSize, box_sizing, direction, flex_direction, flex_wrap, linear_direction, relative_center,
-    relative_layout_once, visibility,
+    AspectRatio, Au, BorderSideWidth, Contain, ContainIntrinsicSize, ContentDistribution,
+    CoreStyle, Display, FlexBasis, FlexContainerStyle, FlexItemStyle, GridAutoFlow,
+    GridContainerStyle, GridItemStyle, GridLine, GridTemplateComponent, ImplicitGridTracks, Inset,
+    ItemPlacement, JustifyItems, LinearContainerStyle, LinearItemStyle, Margin, MaxSize,
+    NonNegativeLengthPercentage, NonNegativeLengthPercentageOrNormal, NonNegativeNumber, Overflow,
+    PositionProperty, RelativeAlign, RelativeContainerStyle, RelativeItemStyle, RelativeReference,
+    SelfAlignment, StyleSize, box_sizing, direction, flex_direction, flex_wrap, linear_direction,
+    relative_center, relative_layout_once, visibility,
 };
 use stylo::properties::ComputedValues;
 use stylo::properties::style_structs::Position as PositionStruct;
 use stylo::servo_arc::Arc;
 use stylo::values::computed::motion::OffsetPath;
-use stylo::values::specified::box_::{Contain, DisplayInside, DisplayOutside, WillChangeBits};
+use stylo::values::specified::box_::{DisplayInside, DisplayOutside, WillChangeBits};
 
+use crate::contain::{ContentVisibility, effective_containment};
 use crate::node::Node;
 
 /// How the host dispatch lays a generated box out — the `display` projection
@@ -88,6 +89,20 @@ fn is_root_element<T>(node: &Node<T>) -> bool {
     node.parent().is_none_or(Node::is_document)
 }
 
+/// Whether a box with `style` skips laying out its contents —
+/// `content-visibility: hidden`.
+///
+/// `auto` deliberately stays `false`: v1 has no relevance tracking, so an
+/// `auto` box is always treated as on-screen and lays its contents out
+/// normally (the relevance/skipping signal is the deferred, host-pushed bit
+/// recorded in `docs/style-assumptions.md` §F.19). Only `hidden` — whose
+/// contents are *always* skipped — returns `true`. The single source of truth
+/// for both [`StyleView::skips_contents`](CoreStyle::skips_contents) and the
+/// positioned pass's skip-root pruning.
+pub(crate) fn skips_contents(style: &ComputedValues) -> bool {
+    style.clone_content_visibility() == ContentVisibility::Hidden
+}
+
 /// Whether `node` establishes the containing block for `position: fixed`
 /// descendants (and, a fortiori, for `absolute` ones) per CSS Transforms /
 /// Motion Path / Filter Effects / `will-change` / css-contain-2.
@@ -97,6 +112,13 @@ fn is_root_element<T>(node: &Node<T>) -> bool {
 /// The node itself is needed for one spec carve-out: Filter Effects §5
 /// exempts the **document root element**, whose `filter` does not create a
 /// containing block.
+///
+/// The css-contain-2 leg reads **effective** containment
+/// ([`effective_containment`], folding in what `content-visibility` implies),
+/// so a `content-visibility: hidden` *or* `auto` box establishes the CB too —
+/// each contributes layout + paint containment — not only a raw
+/// `contain: layout`/`paint`. The effect bits are queried individually
+/// (`LAYOUT`/`PAINT`), never the `CONTENT`/`STRICT` composite markers.
 pub(crate) fn establishes_fixed_containing_block<T>(
     node: &Node<T>,
     style: &ComputedValues,
@@ -125,8 +147,13 @@ pub(crate) fn establishes_fixed_containing_block<T>(
             .bits
             .intersects(WillChangeBits::FIXPOS_CB_NON_SVG)
             && !is_root_element(node))
-        || box_style
-            .contain
+        // css-contain-2: layout **or** paint containment establishes the CB.
+        // Read *effective* containment so `content-visibility` (hidden/auto,
+        // both of which imply layout+paint) counts, not only a raw `contain`.
+        // `skipped` mirrors P1-1 (derived from `hidden`); it only gates the
+        // SIZE bit, which this predicate does not read, so it is consistent
+        // either way. Effect bits queried individually — never CONTENT/STRICT.
+        || effective_containment(style, skips_contents(style))
             .intersects(Contain::LAYOUT | Contain::PAINT)
         || (!style.get_effects().filter.0.is_empty() && !is_root_element(node))
 }
@@ -201,9 +228,9 @@ fn lower_relative_logical(physical: i32, logical: i32) -> i32 {
 }
 
 /// The computed-style view neutron-star reads: the node handle (for the
-/// parent-dependent [`resolve_position`]) plus its `ComputedValues`.
+/// parent-dependent `resolve_position`) plus its `ComputedValues`.
 ///
-/// Constructed **when the engine requests the style** ([`StyleView::of`]) —
+/// Constructed **when the engine requests the style** (`StyleView::of`) —
 /// nothing is pre-collected. The view owns an `Arc` handle to the node's
 /// own computed style (a refcount bump; the values themselves were
 /// materialized by the style flush, once per style change) and lends field
@@ -331,6 +358,51 @@ impl<T> CoreStyle for StyleView<'_, T> {
 
     fn direction(&self) -> direction::T {
         self.style.clone_direction()
+    }
+
+    /// The box's **effective** CSS containment: the raw `contain` value folded
+    /// with what `content-visibility` implies (see [`effective_containment`]).
+    ///
+    /// The `skipped` argument is hard-coded `false` here, which stays correct
+    /// for both `content-visibility` values this view reports:
+    /// - **`hidden`** — the fold's `hidden` arm adds `SIZE | LAYOUT | PAINT | STYLE` *regardless*
+    ///   of `skipped`, so a hidden box is size-contained (hence a [relayout
+    ///   boundary](neutron_star::invalidate::is_relayout_boundary)) even with `false`.
+    ///   [`skips_contents`](CoreStyle::skips_contents) reports `true` for it, routing dispatch to
+    ///   the skipped-contents layout.
+    /// - **`auto`** — v1 has no relevance tracking, so an `auto` box is treated as on-screen and
+    ///   must *not* be size-contained, which `false` gives (the fold's `auto` arm adds `SIZE` only
+    ///   when `skipped`). It still contributes `LAYOUT | PAINT | STYLE` — enough to establish a
+    ///   containing block for fixed/absolute descendants, but not a relayout boundary.
+    ///
+    /// A `contain: strict` box is likewise a relayout boundary, through the raw
+    /// `SIZE | LAYOUT` effect bits.
+    fn containment(&self) -> Contain {
+        effective_containment(&self.style, false)
+    }
+
+    fn contain_intrinsic_width(&self) -> ContainIntrinsicSize {
+        self.style.clone_contain_intrinsic_width()
+    }
+
+    fn contain_intrinsic_height(&self) -> ContainIntrinsicSize {
+        self.style.clone_contain_intrinsic_height()
+    }
+
+    /// Whether this box skips laying out its contents: `content-visibility:
+    /// hidden` returns `true`, `auto` returns `false`.
+    ///
+    /// `auto`'s relevance signal is deferred in v1 (there is no event layer to
+    /// flip it — `docs/style-assumptions.md` §F.19), so an `auto` box is always
+    /// treated as on-screen and lays its contents out normally; only `hidden`
+    /// skips. When this is `true`, host dispatch routes the node to
+    /// [`compute_skipped_contents_layout`](neutron_star::compute::compute_skipped_contents_layout)
+    /// (before the cache wrapper), and [`containment`](CoreStyle::containment)
+    /// already reports `SIZE | LAYOUT | PAINT | STYLE` for `hidden` — so a hidden
+    /// box is a relayout boundary and a fixed/absolute containing block
+    /// independently of this flag.
+    fn skips_contents(&self) -> bool {
+        skips_contents(&self.style)
     }
 }
 

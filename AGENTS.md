@@ -174,8 +174,11 @@ useful signal for currently-compatible versions of those libraries.
   measures through the payload's `MeasureLeaf` hook. Per-node layout
   state (measurement cache + layouts) lives **on each `Node`**
   (`AtomicRefCell<LayoutData>`, the Servo layout_data pattern; read via
-  `Node::layout`), so it is created and dropped with its node;
-  invalidation is embedder-driven (`Document::invalidate_layout`). Leaf
+  `Node::layout`), so it is created and dropped with its node. Style-driven
+  relayout is automatic (`layout_document` consumes its own flush's
+  `StyleDamage`, boundary-stopped); `Document::invalidate_layout` remains the
+  embedder API for the mutations styles cannot see (content/child-list changes
+  with identical computed styles, external measurement inputs). Leaf
   content (text/images) measures through an embedder hook; the crate pulls
   `neutron-star` without its `text` feature. It
   must not contain Lynx widget vocabulary or Lynx device/unit policy —
@@ -225,10 +228,10 @@ useful signal for currently-compatible versions of those libraries.
   other workspace crates or own host tree/style storage, DOM/widget types,
   resolved device-unit policy, or paint order.
 - Remaining runtime-layout integration — the `LayoutNode` handle, display
-  dispatch, fixed/hoisted positioned pass, and per-node cache storage with
-  manual invalidation now live in `w3c-dom::layout` (see above). Still L3
-  work: `lynx-widget`-level policy (automatic
-  dirty→`Document::invalidate_layout` wiring off style damage, `rpx`-aware
+  dispatch, fixed/hoisted positioned pass, per-node cache storage, and the
+  automatic style-damage→`Document::invalidate_layout` wiring (boundary-stopped,
+  engine-internal — not a widget-layer concern) now live in `w3c-dom::layout`
+  (see above). Still L3 work: `lynx-widget`-level policy (`rpx`-aware
   view metrics, sticky lowering), component-specific staggered layout, and
   text style/attribute wiring plus text-context/artifact-slot storage
   behind the leaf-measurement hook.
