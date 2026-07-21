@@ -360,7 +360,106 @@ fn fixed_anchors_to_the_viewport_unless_an_ancestor_establishes_the_cb() {
 }
 
 #[test]
-fn fixed_inside_nested_hoisted_subtrees_completes_via_the_queue() {
+fn fixed_stays_viewport_anchored_when_its_parent_answers_from_cache() {
+    // The formatting parent's LayoutInput does not change when only an
+    // *ancestor* offset moves, so the parent answers from its measurement
+    // cache and its algorithm (which records static positions) never
+    // re-runs. The positioned pass must still re-anchor the fixed child to
+    // the viewport from current ancestor geometry.
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .spacer { width: 100px; height: 10px; }
+         .host { display: flex; width: 200px; height: 100px; }
+         .fixed { position: fixed; left: 10px; top: 20px; width: 30px; height: 40px; }",
+    );
+    let root = h.doc.root;
+    let spacer = h.doc.el(root, ".spacer");
+    let host = h.doc.el(root, ".host");
+    let fixed = h.doc.el(host, ".fixed");
+    h.layout();
+    // Viewport (10, 20) expressed relative to the host at x = 100.
+    assert_eq!(h.rect(fixed), (-90.0, 20.0, 30.0, 40.0));
+
+    // Move the ancestor: only the spacer (and its ancestors) are
+    // invalidated; the host's own cache stays warm.
+    h.doc.set_inline(spacer, "width: 150px");
+    h.doc.dom.invalidate_layout(spacer);
+    h.layout();
+
+    // The host moved to x = 150; the fixed child must still sit at viewport
+    // (10, 20), i.e. a *different* parent-relative location.
+    assert_eq!(h.rect(host).0, 150.0);
+    assert_eq!(h.rect(fixed), (-140.0, 20.0, 30.0, 40.0));
+}
+
+#[test]
+fn hoisted_children_paint_with_effective_order_zero() {
+    // The engine's paint-key rule gives out-of-flow children effective
+    // `order` 0 — their authored `order` must not reorder them.
+    let mut h = Harness::new(
+        "page { display: flex; width: 300px; height: 50px; }
+         .fixed { position: fixed; order: 5; left: 0; top: 0; width: 10px; height: 10px; }
+         .plain { width: 30px; }
+         .early { order: 1; width: 30px; }",
+    );
+    let root = h.doc.root;
+    let fixed = h.doc.el(root, ".fixed");
+    let plain = h.doc.el(root, ".plain");
+    let early = h.doc.el(root, ".early");
+    h.layout();
+
+    // Merged paint keys: fixed (0, doc 0), plain (0, doc 1), early (1, doc 2).
+    assert_eq!(h.layout_of(fixed).order, 0);
+    assert_eq!(h.layout_of(plain).order, 1);
+    assert_eq!(h.layout_of(early).order, 2);
+}
+
+#[test]
+fn offset_path_establishes_the_fixed_containing_block() {
+    // Motion Path: a non-none `offset-path` has the usual `transform`
+    // effects, containing-block creation for fixed descendants included.
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .mover { display: flex; width: 300px; height: 200px; margin-left: 100px;
+                  offset-path: path(\"M 0 0 H 100\"); }
+         .fixed { position: fixed; left: 10px; top: 20px; width: 30px; height: 40px; }",
+    );
+    let root = h.doc.root;
+    let mover = h.doc.el(root, ".mover");
+    let fixed = h.doc.el(mover, ".fixed");
+    h.layout();
+
+    assert_eq!(h.rect(fixed), (10.0, 20.0, 30.0, 40.0));
+}
+
+#[test]
+fn root_filter_is_exempt_from_fixed_containing_block_creation() {
+    // Filter Effects §5 exempts the document root element: a filtered root
+    // does not capture fixed descendants (they stay viewport-anchored),
+    // while the same filter on a non-root ancestor does.
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; border: 10px solid black;
+                filter: grayscale(1); }
+         .filtered { display: flex; width: 300px; height: 200px; margin-left: 100px;
+                     filter: grayscale(1); }
+         .fixed { position: fixed; left: 0; top: 0; width: 30px; height: 40px; }",
+    );
+    let root = h.doc.root;
+    let root_fixed = h.doc.el(root, ".fixed");
+    let filtered = h.doc.el(root, ".filtered");
+    let captured_fixed = h.doc.el(filtered, ".fixed");
+    h.layout();
+
+    // Exempt: anchored to the viewport origin, not the root's padding box
+    // (which starts at (10, 10) inside the border).
+    assert_eq!(h.rect(root_fixed), (0.0, 0.0, 30.0, 40.0));
+    // Non-root filter captures: anchored to the filtered box's padding box.
+    assert_eq!(h.rect(captured_fixed), (0.0, 0.0, 30.0, 40.0));
+    assert_eq!(h.rect(filtered).0, 110.0); // border 10 + margin 100
+}
+
+#[test]
+fn fixed_inside_nested_hoisted_subtrees_completes_in_preorder() {
     let mut h = Harness::new(
         "page { display: flex; width: 800px; height: 600px; }
          .outer { position: fixed; left: 100px; top: 100px; width: 200px; height: 200px;

@@ -10,9 +10,9 @@
 //! interior-mutable [`LayoutData`](super::LayoutData) in short scoped
 //! borrows — never held across a recursive
 //! [`compute_child_layout`](LayoutNode::compute_child_layout), per the
-//! protocol's re-entrancy contract. The pass's only shared state — the
-//! hoisted out-of-flow queue — lives in the **document node**'s
-//! `LayoutData`, reachable from any handle through the slab backpointer.
+//! protocol's re-entrancy contract. The pipeline has no pass-shared state
+//! at all: the positioned pass re-walks the tree instead of consuming a
+//! queue (see [`position_hoisted_subtree`]).
 
 use neutron_star::compute::{
     FnLeafMeasurer, compute_absolute_layout, compute_cached_layout, compute_flexbox_layout,
@@ -28,7 +28,7 @@ use neutron_star::tree::{
 use super::MeasureLeaf;
 use super::style::{
     DisplayMode, StyleView, display_mode, establishes_absolute_containing_block,
-    establishes_fixed_containing_block,
+    establishes_fixed_containing_block, resolve_position,
 };
 use crate::document::Document;
 use crate::node::{ChildrenIter, Node};
@@ -112,19 +112,11 @@ impl<'dom, T: MeasureLeaf> LayoutNode for &'dom Node<T> {
     }
 
     fn set_static_position(self, static_position: Point<f32>) {
-        let mut data = self.layout_data.borrow_mut();
-        data.static_position = static_position;
-        // Queue the hoisted node — once per pass — on the document node's
-        // slot, the pass-shared anchor every handle can reach.
-        if !data.hoisted_recorded {
-            data.hoisted_recorded = true;
-            drop(data);
-            self.owner_document()
-                .layout_data
-                .borrow_mut()
-                .hoisted
-                .push(self.id());
-        }
+        // The recorded value persists across passes on purpose: it is
+        // relative to the formatting parent, so it stays valid exactly as
+        // long as the parent's own layout answers from its cache — the
+        // positioned pass re-reads it every pass.
+        self.layout_data.borrow_mut().static_position = static_position;
     }
 
     fn cache_get(self, input: LayoutInput) -> Option<LayoutOutput> {
@@ -153,15 +145,6 @@ pub(super) fn run_layout<T: MeasureLeaf>(document: &Document<T>, viewport: Size<
     let Some(root) = document.root_element() else {
         return;
     };
-    // A panicked earlier pass may have left queue entries behind; the queue
-    // is per-pass state.
-    document
-        .root_node()
-        .layout_data
-        .borrow_mut()
-        .hoisted
-        .clear();
-
     compute_root_layout(
         root,
         Size::new(
@@ -169,50 +152,46 @@ pub(super) fn run_layout<T: MeasureLeaf>(document: &Document<T>, viewport: Size<
             AvailableSpace::Definite(viewport.height),
         ),
     );
-    run_positioned_pass(document, viewport);
+    position_hoisted_subtree(root, viewport);
     round_layout(root, scale);
 }
 
 // --- the positioned pass ------------------------------------------------------
 
-/// Complete every hoisted out-of-flow node recorded during in-flow layout.
+/// Complete every hoisted out-of-flow node in the visible tree.
 ///
-/// FIFO over the pass's queue: a hoisted node nested inside another hoisted
-/// subtree is recorded while its formatting parent commits during the outer
-/// node's `compute_absolute_layout`, i.e. strictly after its containing
-/// block's own layout is stored — so each dequeued node can convert its
-/// static position through already-final ancestor geometry.
-fn run_positioned_pass<T: MeasureLeaf>(document: &Document<T>, viewport: Size<f32>) {
-    let queue = |index: usize| {
-        let data = document.root_node().layout_data.borrow();
-        data.hoisted.get(index).copied()
+/// This is a fresh pre-order walk **every pass**, deliberately not a queue
+/// filled during in-flow layout: a hoisted node whose formatting parent
+/// answered from its measurement cache is never re-visited by the
+/// algorithms, yet its viewport-anchored position must still be recomputed
+/// when an *ancestor* moved. The static position recorded on the node is
+/// parent-relative, so it stays valid exactly as long as the parent's
+/// cached layout does; this walk re-derives everything else from current
+/// ancestor geometry. Pre-order also gives hoisted-inside-hoisted nesting
+/// for free: an outer hoisted ancestor is finalized before any hoisted
+/// descendant converts its static position through it.
+fn position_hoisted_subtree<T: MeasureLeaf>(node: &Node<T>, viewport: Size<f32>) {
+    let Some(style) = node.computed_style() else {
+        return; // text nodes are never positioned and have no children
     };
-    let mut index = 0;
-    while let Some(id) = queue(index) {
-        index += 1;
-        position_hoisted(document, id, viewport);
+    if display_mode(style.clone_display()) == DisplayMode::None {
+        return; // hidden subtrees are zeroed, not positioned
     }
-    document
-        .root_node()
-        .layout_data
-        .borrow_mut()
-        .hoisted
-        .clear();
+    // The root element is laid out by `compute_root_layout`, never hoisted
+    // (it has no element formatting parent).
+    if node.parent().is_some_and(Node::is_element)
+        && resolve_position(node, &style) == PositionProperty::Fixed
+    {
+        position_hoisted(node, viewport);
+    }
+    for child in Node::children(node) {
+        position_hoisted_subtree(child, viewport);
+    }
 }
 
-fn position_hoisted<T: MeasureLeaf>(
-    document: &Document<T>,
-    id: crate::NodeId,
-    viewport: Size<f32>,
-) {
-    let node = document
-        .get(id)
-        .expect("hoisted node ids stay live for the whole layout pass");
-    // Reset the dedupe flag as the node is dequeued, so the next pass can
-    // queue it again.
-    node.layout_data.borrow_mut().hoisted_recorded = false;
+fn position_hoisted<T: MeasureLeaf>(node: &Node<T>, viewport: Size<f32>) {
     let Some(parent) = node.parent() else {
-        return; // the root is never hoisted; a detached node cannot be queued
+        return;
     };
     // The *computed* position picks the containing-block rule; the style
     // view's scheme override already decided this node is hoisted.
@@ -229,9 +208,9 @@ fn position_hoisted<T: MeasureLeaf>(
             break; // reached the document node
         };
         let establishes = if fixed {
-            establishes_fixed_containing_block(&style)
+            establishes_fixed_containing_block(current, &style)
         } else {
-            establishes_absolute_containing_block(&style)
+            establishes_absolute_containing_block(current, &style)
         };
         if establishes {
             containing = Some(current);
@@ -287,30 +266,50 @@ fn position_hoisted<T: MeasureLeaf>(
         containing_origin.x + layout.location.x - parent_origin.x,
         containing_origin.y + layout.location.y - parent_origin.y,
     );
-    layout.order = sibling_paint_order(document, parent, id);
+    layout.order = sibling_paint_order(parent, node.id());
     LayoutNode::set_unrounded_layout(node, &layout);
 }
 
-/// The node's paint index among its siblings: document position after a
-/// stable sort by style `order` — the same order-modified index the
-/// algorithms assign to the in-flow children they place.
-fn sibling_paint_order<T>(document: &Document<T>, parent: &Node<T>, id: crate::NodeId) -> u32 {
-    let children = parent.child_ids();
-    let order_of = |child: &crate::NodeId| {
-        document
-            .get(*child)
-            .and_then(Node::computed_style)
-            .map_or(0, |style| style.get_position().order)
+/// The node's paint index among its siblings, per the engine's paint-key
+/// rule (`sort_and_assign_layout_order`): non-generated (`display: none`)
+/// children are excluded, **out-of-flow children participate with effective
+/// `order` 0** (their authored `order` deliberately does not reorder them),
+/// and ties break by document index — the same order-modified index the
+/// algorithms assign to the children they place.
+fn sibling_paint_order<T>(parent: &Node<T>, target: crate::NodeId) -> u32 {
+    let mut keys: Vec<(i32, usize)> = Vec::new();
+    let mut target_key = None;
+    for (index, child) in Node::children(parent).enumerate() {
+        let effective_order = match child.computed_style() {
+            Some(style) => {
+                if display_mode(style.clone_display()) == DisplayMode::None {
+                    continue; // no box generated: not part of the paint order
+                }
+                if matches!(
+                    style.clone_position(),
+                    PositionProperty::Absolute | PositionProperty::Fixed
+                ) {
+                    0
+                } else {
+                    style.get_position().order
+                }
+            }
+            // Text nodes (anonymous boxes): in-flow, initial `order`.
+            None => 0,
+        };
+        let key = (effective_order, index);
+        if child.id() == target {
+            target_key = Some(key);
+        }
+        keys.push(key);
+    }
+    let Some(target_key) = target_key else {
+        return 0;
     };
-    let mut ranks: Vec<(i32, usize)> = children
+    keys.sort_unstable();
+    let position = keys
         .iter()
-        .enumerate()
-        .map(|(index, child)| (order_of(child), index))
-        .collect();
-    ranks.sort_by_key(|&(order, index)| (order, index));
-    let position = ranks
-        .iter()
-        .position(|&(_, index)| children[index] == id)
-        .expect("hoisted node is a child of its formatting parent");
+        .position(|&key| key == target_key)
+        .expect("the target's own key was pushed");
     u32::try_from(position).unwrap_or(u32::MAX)
 }

@@ -42,8 +42,10 @@
 //! [`Node::layout`](crate::Node::layout) /
 //! [`Node::unrounded_layout`](crate::Node::unrounded_layout). Because the
 //! state lives **on** the node, it is created and dropped with the node —
-//! there is no side table to keep in sync with the tree. The document
-//! node's slot additionally carries the pass's hoisted out-of-flow queue.
+//! there is no side table to keep in sync with the tree. The positioned
+//! pass for hoisted out-of-flow nodes is a fresh tree walk every pass (no
+//! queue), so fixed-position geometry stays correct even when a hoisted
+//! node's formatting parent answers from its measurement cache.
 //!
 //! # Phases: style first, then layout
 //!
@@ -221,14 +223,12 @@ pub(crate) struct LayoutData {
     /// The device-pixel-snapped layout — what painting consumes.
     pub(crate) rounded: Layout,
     /// The static position recorded for a hoisted out-of-flow node by its
-    /// formatting parent (border-box space), consumed by the positioned pass.
+    /// formatting parent (border-box space), consumed by the positioned
+    /// pass. Persists across passes deliberately: it is parent-relative, so
+    /// it stays valid exactly as long as the parent's cached layout does —
+    /// the positioned pass re-reads it even when the parent's algorithm
+    /// answered from its cache.
     pub(crate) static_position: Point<f32>,
-    /// Whether this node is already in the current pass's hoisted queue.
-    pub(crate) hoisted_recorded: bool,
-    /// The pass's hoisted out-of-flow queue (FIFO). Only the **document
-    /// node**'s slot uses this — it is the natural pass-shared anchor every
-    /// `&Node` handle can reach; ordinary nodes keep it empty.
-    pub(crate) hoisted: Vec<crate::NodeId>,
 }
 
 impl Default for LayoutData {
@@ -238,8 +238,6 @@ impl Default for LayoutData {
             unrounded: Layout::default(),
             rounded: Layout::default(),
             static_position: Point::ZERO,
-            hoisted_recorded: false,
-            hoisted: Vec::new(),
         }
     }
 }

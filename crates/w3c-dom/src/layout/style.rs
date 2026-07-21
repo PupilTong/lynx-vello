@@ -31,6 +31,7 @@ use neutron_star::style::{
 use stylo::properties::ComputedValues;
 use stylo::properties::style_structs::Position as PositionStruct;
 use stylo::servo_arc::Arc;
+use stylo::values::computed::motion::OffsetPath;
 use stylo::values::specified::box_::{Contain, DisplayInside, DisplayOutside, WillChangeBits};
 
 use crate::node::Node;
@@ -81,19 +82,34 @@ pub(crate) fn display_mode(display: Display) -> DisplayMode {
     }
 }
 
-/// Whether `style` establishes the containing block for `position: fixed`
+/// Whether `node` (the element `style` was computed for) is the document's
+/// root element — the sole element child of the document node.
+fn is_root_element<T>(node: &Node<T>) -> bool {
+    node.parent().is_none_or(Node::is_document)
+}
+
+/// Whether `node` establishes the containing block for `position: fixed`
 /// descendants (and, a fortiori, for `absolute` ones) per CSS Transforms /
-/// Filter Effects / `will-change` / css-contain-2.
+/// Motion Path / Filter Effects / `will-change` / css-contain-2.
 ///
 /// This is the **real W3C rule** the repository's standards policy mandates
 /// for `position: fixed` — not Lynx's unconditional escape-to-root behavior.
-pub(crate) fn establishes_fixed_containing_block(style: &ComputedValues) -> bool {
+/// The node itself is needed for one spec carve-out: Filter Effects §5
+/// exempts the **document root element**, whose `filter` does not create a
+/// containing block.
+pub(crate) fn establishes_fixed_containing_block<T>(
+    node: &Node<T>,
+    style: &ComputedValues,
+) -> bool {
     let box_style = style.get_box();
     !box_style.transform.0.is_empty()
         || !matches!(
             box_style.perspective,
             stylo::values::generics::box_::Perspective::None
         )
+        // Motion Path: a non-none `offset-path` has "the usual transform
+        // property effects", containing-block creation included.
+        || !matches!(box_style.offset_path, OffsetPath::None)
         || box_style.will_change.bits.intersects(
             WillChangeBits::TRANSFORM
                 | WillChangeBits::PERSPECTIVE
@@ -102,14 +118,18 @@ pub(crate) fn establishes_fixed_containing_block(style: &ComputedValues) -> bool
         || box_style
             .contain
             .intersects(Contain::LAYOUT | Contain::PAINT)
-        || !style.get_effects().filter.0.is_empty()
+        || (!style.get_effects().filter.0.is_empty() && !is_root_element(node))
 }
 
-/// Whether `style` establishes a containing block for `position: absolute`
+/// Whether `node` establishes a containing block for `position: absolute`
 /// descendants: any positioned element, plus everything that would already
 /// capture a `fixed` descendant.
-pub(crate) fn establishes_absolute_containing_block(style: &ComputedValues) -> bool {
-    style.clone_position() != PositionProperty::Static || establishes_fixed_containing_block(style)
+pub(crate) fn establishes_absolute_containing_block<T>(
+    node: &Node<T>,
+    style: &ComputedValues,
+) -> bool {
+    style.clone_position() != PositionProperty::Static
+        || establishes_fixed_containing_block(node, style)
 }
 
 /// Resolve a node's engine positioning **scheme** — the one style
@@ -124,15 +144,15 @@ pub(crate) fn establishes_absolute_containing_block(style: &ComputedValues) -> b
 /// not exist yet).
 pub(crate) fn resolve_position<T>(node: &Node<T>, style: &ComputedValues) -> PositionProperty {
     let parent_establishes = |fixed: bool| {
-        node.parent()
-            .and_then(Node::computed_style)
-            .is_some_and(|parent| {
+        node.parent().is_some_and(|parent| {
+            parent.computed_style().is_some_and(|parent_style| {
                 if fixed {
-                    establishes_fixed_containing_block(&parent)
+                    establishes_fixed_containing_block(parent, &parent_style)
                 } else {
-                    establishes_absolute_containing_block(&parent)
+                    establishes_absolute_containing_block(parent, &parent_style)
                 }
             })
+        })
     };
     match style.clone_position() {
         computed @ (PositionProperty::Static
