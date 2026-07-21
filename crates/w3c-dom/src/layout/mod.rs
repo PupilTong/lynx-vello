@@ -37,9 +37,10 @@
 //!
 //! Every [`Node`] carries its own `LayoutData` (an
 //! `AtomicRefCell`, the same shape Servo uses for per-node layout data):
-//! replaced-content natural size, retained text artifacts, the measurement
-//! cache, the unrounded and device-snapped [`Layout`]s, and the out-of-flow bookkeeping. Read
-//! results with [`Node::layout`](crate::Node::layout) /
+//! the measurement cache, the unrounded and device-snapped [`Layout`]s, and
+//! the out-of-flow bookkeeping. Natural size and retained text artifacts
+//! share the node's existing nullable content slot. Read results with
+//! [`Node::layout`](crate::Node::layout) /
 //! [`Node::unrounded_layout`](crate::Node::unrounded_layout). Because the
 //! state lives **on** the node, it is created and dropped with the node —
 //! there is no side table to keep in sync with the tree. The positioned
@@ -71,7 +72,7 @@
 //!
 //! The document node lazily creates and then owns one reusable
 //! [`TextContext`](neutron_star::text::TextContext), while each text node retains separate probe
-//! and committed Parley artifacts in its layout data. Anonymous-box geometry uses initial CSS
+//! and committed Parley artifacts in its content record. Anonymous-box geometry uses initial CSS
 //! values; shaping and paragraph values are read from the parent element's inherited
 //! computed style. [`Document::register_fonts`] installs decoded fonts into
 //! the document context and invalidates retained measurements.
@@ -198,7 +199,6 @@ use neutron_star::compute::NaturalSize;
 pub use neutron_star::geometry::{Edges, Point, Size};
 use neutron_star::invalidate::is_relayout_boundary;
 use neutron_star::style::CoreStyle;
-use neutron_star::text::ArtifactSlots;
 pub use neutron_star::tree::Layout;
 use stylo::properties::ComputedValues;
 use stylo::servo_arc::Arc;
@@ -206,22 +206,6 @@ use stylo::servo_arc::Arc;
 pub use self::style::StyleView;
 use crate::document::Document;
 use crate::flush::Parallelism;
-
-/// State carried only by nodes whose leaf content needs it.
-///
-/// The variants are mutually exclusive in the closed content model: an
-/// element is replaced content, a text node retains Parley artifacts, and
-/// test hosts may install synthetic metrics. Keeping the enum behind one
-/// nullable pointer avoids enlarging every ordinary container node for
-/// leaf-only data.
-pub(crate) enum LeafContent {
-    Replaced(NaturalSize),
-    // Keep the large retained layouts behind their own allocation so the
-    // outer box stays small for replaced and synthetic leaves.
-    Text(Box<ArtifactSlots>),
-    #[cfg(feature = "layout-test-utils")]
-    Test(LeafMetrics),
-}
 
 /// One node's layout state, carried by the node itself
 /// ([`Node::layout_data`](crate::Node)): created with the node, dropped with
@@ -231,9 +215,6 @@ pub(crate) enum LeafContent {
 /// the node stays shareable for stylo's parallel restyle traversal, while
 /// the (single-threaded, post-style) layout pass takes short scoped borrows.
 pub(crate) struct LayoutData {
-    /// Lazily allocated state for replaced content, text, or synthetic test
-    /// leaves. Ordinary containers retain only one nullable pointer.
-    pub(crate) leaf_content: Option<Box<LeafContent>>,
     /// The neutron-star **measurement cache** — not a copy of the final
     /// result, but memoized answers to the different constraint questions
     /// (`LayoutInput`) the parent algorithms ask during sizing. This is the
@@ -258,7 +239,6 @@ pub(crate) struct LayoutData {
 impl Default for LayoutData {
     fn default() -> Self {
         Self {
-            leaf_content: None,
             measure_cache: Cache::new(),
             unrounded: Layout::default(),
             rounded: Layout::default(),
@@ -268,51 +248,9 @@ impl Default for LayoutData {
 }
 
 impl LayoutData {
-    pub(crate) fn natural_size(&self) -> NaturalSize {
-        match self.leaf_content.as_deref() {
-            Some(LeafContent::Replaced(natural_size)) => *natural_size,
-            _ => NaturalSize::NONE,
-        }
-    }
-
-    pub(crate) fn set_natural_size(&mut self, natural_size: NaturalSize) -> bool {
-        if self.natural_size() == natural_size {
-            return false;
-        }
-        self.leaf_content = (natural_size != NaturalSize::NONE)
-            .then(|| Box::new(LeafContent::Replaced(natural_size)));
-        true
-    }
-
-    pub(crate) fn text_artifacts(&mut self) -> &mut ArtifactSlots {
-        if self.leaf_content.is_none() {
-            self.leaf_content = Some(Box::new(LeafContent::Text(Box::default())));
-        }
-        match self.leaf_content.as_deref_mut() {
-            Some(LeafContent::Text(artifacts)) => artifacts.as_mut(),
-            _ => unreachable!("text nodes cannot carry non-text leaf content"),
-        }
-    }
-
-    #[cfg(feature = "layout-test-utils")]
-    pub(crate) fn test_leaf_metrics(&self) -> Option<LeafMetrics> {
-        match self.leaf_content.as_deref() {
-            Some(LeafContent::Test(metrics)) => Some(*metrics),
-            _ => None,
-        }
-    }
-
-    #[cfg(feature = "layout-test-utils")]
-    pub(crate) fn set_test_leaf_metrics(&mut self, metrics: LeafMetrics) {
-        self.leaf_content = Some(Box::new(LeafContent::Test(metrics)));
-    }
-
-    /// Invalidate every retained answer derived from content or style.
-    pub(crate) fn invalidate_measurement(&mut self) {
+    /// Clear every cached box-layout answer derived from content or style.
+    pub(crate) fn clear_measurement_cache(&mut self) {
         self.measure_cache.clear();
-        if let Some(LeafContent::Text(artifacts)) = self.leaf_content.as_deref_mut() {
-            artifacts.invalidate();
-        }
     }
 }
 
@@ -387,7 +325,7 @@ impl<T> Document<T> {
                 node.is_element(),
                 "non-element NodeId passed to Document::set_natural_size"
             );
-            node.layout_data.get_mut().set_natural_size(natural_size)
+            node.set_natural_size(natural_size)
         };
         if changed {
             self.invalidate_layout(id);
@@ -415,7 +353,7 @@ impl<T> Document<T> {
             node.is_element(),
             "non-element NodeId passed to Document::set_leaf_metrics_for_testing"
         );
-        node.layout_data.get_mut().set_test_leaf_metrics(
+        node.set_test_leaf_metrics(
             LeafMetrics::new(size).with_first_baselines(Point::new(None, first_baseline)),
         );
         self.invalidate_layout(id);
@@ -503,7 +441,8 @@ impl<T> Document<T> {
             let start = tree
                 .get(id)
                 .expect("vacant NodeId passed to Document::invalidate_layout");
-            start.layout_data.borrow_mut().invalidate_measurement();
+            start.layout_data.borrow_mut().clear_measurement_cache();
+            start.invalidate_text_artifacts();
 
             let mut boundary = None;
             let mut current = start.parent();
@@ -544,7 +483,8 @@ impl<T> Document<T> {
                 let boundary_input = is_boundary
                     .then(|| node.layout_data.borrow().measure_cache.committed_input())
                     .flatten();
-                node.layout_data.borrow_mut().invalidate_measurement();
+                node.layout_data.borrow_mut().clear_measurement_cache();
+                node.invalidate_text_artifacts();
                 if let Some(input) = boundary_input {
                     // Case (1): a laid-out boundary — park it and stop; its own
                     // outer size cannot change from an interior mutation, so
@@ -570,7 +510,8 @@ impl<T> Document<T> {
     /// fallback.
     pub fn invalidate_layout_all(&mut self) {
         for (_, node) in self.tree_mut().iter_mut() {
-            node.layout_data.get_mut().invalidate_measurement();
+            node.layout_data.get_mut().clear_measurement_cache();
+            node.invalidate_text_artifacts();
         }
         self.clear_relayout_roots();
     }
@@ -592,17 +533,6 @@ mod tests {
         let image = document.create_element("image", ());
         document.append(root, image);
 
-        assert!(
-            document
-                .get(image)
-                .unwrap()
-                .layout_data
-                .borrow()
-                .leaf_content
-                .is_none(),
-            "ordinary nodes must not allocate leaf-only state"
-        );
-
         let input = LayoutInput::default();
         for id in [DOCUMENT_NODE_ID, root, image] {
             document
@@ -618,16 +548,6 @@ mod tests {
         document.set_natural_size(image, natural_size);
 
         assert_eq!(document.get(image).unwrap().natural_size(), natural_size);
-        assert!(matches!(
-            document
-                .get(image)
-                .unwrap()
-                .layout_data
-                .borrow()
-                .leaf_content
-                .as_deref(),
-            Some(LeafContent::Replaced(value)) if *value == natural_size
-        ));
         for id in [DOCUMENT_NODE_ID, root, image] {
             assert!(
                 document

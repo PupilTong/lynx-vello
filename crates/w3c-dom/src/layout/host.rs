@@ -103,14 +103,17 @@ impl<'dom, T> LayoutNode for &'dom Node<T> {
                         preserve_newlines: false,
                     };
                     let mut context = node.text_context().borrow_mut();
-                    let mut layout_data = node.layout_data.borrow_mut();
-                    let artifacts = layout_data.text_artifacts();
-                    let mut measurer =
-                        TextMeasurer::new(&mut context, artifacts, &view, std::iter::once(run));
+                    let mut artifacts = node.text_artifacts().borrow_mut();
+                    let mut measurer = TextMeasurer::new(
+                        &mut context,
+                        &mut artifacts,
+                        &view,
+                        std::iter::once(run),
+                    );
                     measurer.compute_layout(input)
                 } else {
                     #[cfg(feature = "layout-test-utils")]
-                    if let Some(metrics) = node.layout_data.borrow().test_leaf_metrics() {
+                    if let Some(metrics) = node.test_leaf_metrics() {
                         compute_leaf_layout_with_measurement_for_testing(
                             input,
                             &view,
@@ -179,7 +182,8 @@ impl<'dom, T> LayoutNode for &'dom Node<T> {
     }
 
     fn cache_clear(self) {
-        self.layout_data.borrow_mut().invalidate_measurement();
+        self.layout_data.borrow_mut().clear_measurement_cache();
+        self.invalidate_text_artifacts();
     }
 }
 

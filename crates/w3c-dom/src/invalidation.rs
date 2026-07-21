@@ -445,7 +445,7 @@ impl<T> Document<T> {
         self.tree_mut()
             .get_mut(id)
             .expect("stale NodeId passed to Document::set_text")
-            .text = text;
+            .set_literal_text(text);
         if let Some(element) = affected_element
             && watches_empty
             && was_empty != self.live_element(element).is_empty_element()
@@ -453,6 +453,7 @@ impl<T> Document<T> {
             self.note_emptiness_change(element);
             self.mark_ancestors_dirty_descendants(element);
         }
+        self.invalidate_layout(id);
     }
 
     /// Replace a text node's character data.
