@@ -739,7 +739,7 @@ impl<T> Node<T> {
     /// replaced content.
     #[must_use]
     pub(crate) fn natural_size(&self) -> NaturalSize {
-        self.layout_data.borrow().natural_size
+        self.layout_data.borrow().natural_size()
     }
 
     /// The accumulated stylo selector flags.

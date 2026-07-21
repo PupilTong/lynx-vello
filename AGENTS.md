@@ -182,10 +182,11 @@ useful signal for currently-compatible versions of those libraries.
   fallback, text nodes through concrete Parley measurement, and the
   positioned pass implements the W3C `position: fixed`
   containing-block rule via the protocol's scheme override. Replaced leaf
-  content reads a closed `NaturalSize` value stored in each node's layout
-  data; its internal update path automatically invalidates the affected
-  cache path. Per-node layout state (natural size + measurement cache +
-  layouts + retained text artifacts) lives **on each `Node`**
+  content reads a closed `NaturalSize` value stored in lazily allocated
+  leaf-only layout state; its internal update path automatically invalidates
+  the affected cache path. Per-node layout state (one nullable pointer for
+  mutually exclusive natural-size/text content + measurement cache +
+  layouts) lives **on each `Node`**
   (`AtomicRefCell<LayoutData>`, the Servo layout_data pattern; read via
   `Node::layout`), so it is created and dropped with its node. Style-driven
   relayout is automatic (every style flush consumes harvested `StyleDamage`
@@ -194,8 +195,8 @@ useful signal for currently-compatible versions of those libraries.
   with identical computed styles). The internal natural-size update path
   performs that invalidation itself.
   The document node lazily creates and then owns the shared Parley
-  `TextContext`; text nodes retain
-  probe/commit artifacts and read inherited font/text values from their
+  `TextContext`; text nodes lazily retain probe/commit artifacts in that
+  same leaf-only state and read inherited font/text values from their
   parent. Parley is unconditional and there is no arbitrary payload callback. It
   must not contain Lynx widget vocabulary or Lynx device/unit policy —
   Lynx computed defaults (border-box, `overflow: hidden`, `display: linear`

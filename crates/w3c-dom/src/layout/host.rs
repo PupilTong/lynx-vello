@@ -104,13 +104,13 @@ impl<'dom, T> LayoutNode for &'dom Node<T> {
                     };
                     let mut context = node.text_context().borrow_mut();
                     let mut layout_data = node.layout_data.borrow_mut();
-                    let artifacts = layout_data.text_artifacts.get_or_insert_with(Box::default);
+                    let artifacts = layout_data.text_artifacts();
                     let mut measurer =
                         TextMeasurer::new(&mut context, artifacts, &view, std::iter::once(run));
                     measurer.compute_layout(input)
                 } else {
                     #[cfg(feature = "layout-test-utils")]
-                    if let Some(metrics) = node.layout_data.borrow().test_leaf_metrics {
+                    if let Some(metrics) = node.layout_data.borrow().test_leaf_metrics() {
                         compute_leaf_layout_with_measurement_for_testing(
                             input,
                             &view,
