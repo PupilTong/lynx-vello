@@ -47,8 +47,8 @@
 
 use std::cell::UnsafeCell;
 use std::fmt;
-use std::sync::Arc as StdArc;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicPtr, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc as StdArc, OnceLock};
 
 use atomic_refcell::{AtomicRef, AtomicRefCell};
 use dom::ElementState;
@@ -279,10 +279,11 @@ pub(crate) enum NodeData<T> {
     Document {
         lock: StdArc<SharedRwLock>,
         url_data: UrlExtraData,
-        /// One reusable Parley session for the whole document. Layout is
-        /// single-threaded; the atomic borrow cell preserves the node's
-        /// thread-safe shape during parallel style traversal.
-        text_context: Box<AtomicRefCell<TextContext>>,
+        /// One lazily-created, reusable Parley session for the whole
+        /// document. Non-text documents never pay font-context setup cost;
+        /// layout is single-threaded, while the atomic borrow cell preserves
+        /// the node's thread-safe shape during parallel style traversal.
+        text_context: Box<OnceLock<AtomicRefCell<TextContext>>>,
         #[cfg(debug_assertions)]
         in_flush: AtomicBool,
     },
@@ -399,7 +400,7 @@ impl<T> Node<T> {
             NodeData::Document {
                 lock,
                 url_data,
-                text_context: Box::new(AtomicRefCell::new(TextContext::new())),
+                text_context: Box::default(),
                 #[cfg(debug_assertions)]
                 in_flush: AtomicBool::new(false),
             },
@@ -502,7 +503,9 @@ impl<T> Node<T> {
     /// The owner document's reusable Parley text session.
     pub(crate) fn text_context(&self) -> &AtomicRefCell<TextContext> {
         match &self.owner_document().data {
-            NodeData::Document { text_context, .. } => text_context,
+            NodeData::Document { text_context, .. } => {
+                text_context.get_or_init(|| AtomicRefCell::new(TextContext::new()))
+            }
             _ => unreachable!("slot zero must contain the document node"),
         }
     }
@@ -982,5 +985,26 @@ impl<'a, T> Iterator for ChildrenIter<'a, T> {
                 .get(id)
                 .expect("internal tree links always resolve"),
         )
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use crate::Document;
+
+    #[test]
+    fn document_text_context_is_lazy_and_reused() {
+        let document = Document::<()>::new();
+        let root = document.root_node();
+        let NodeData::Document { text_context, .. } = &root.data else {
+            unreachable!("slot zero is the document node")
+        };
+
+        assert!(text_context.get().is_none());
+        let first = root.text_context();
+        assert!(text_context.get().is_some());
+        assert!(std::ptr::eq(first, root.text_context()));
     }
 }

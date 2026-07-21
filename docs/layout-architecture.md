@@ -41,7 +41,7 @@ subtrees), device-pixel rounding, and automatic
 style-damage→`invalidate_layout` consumption with in-place boundary re-layout
 that refreshes the boundary's scrollable `content_size`, with
 replaced leaves reading their node-owned `NaturalSize`, plus W3C text nodes
-using inherited parent text style, a document-owned `TextContext`, and
+using inherited parent text style, a lazily-created document-owned `TextContext`, and
 per-node retained artifacts. Updating replaced metadata automatically
 invalidates the affected cache path; it is not exposed through `WidgetTree`
 or Element PAPI. Text truncation, inline boxes, element-backed raw text, and

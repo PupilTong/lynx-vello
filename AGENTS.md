@@ -193,7 +193,8 @@ useful signal for currently-compatible versions of those libraries.
   embedder API for the mutations styles cannot see (content/child-list changes
   with identical computed styles). The internal natural-size update path
   performs that invalidation itself.
-  The document node owns the shared Parley `TextContext`; text nodes retain
+  The document node lazily creates and then owns the shared Parley
+  `TextContext`; text nodes retain
   probe/commit artifacts and read inherited font/text values from their
   parent. Parley is unconditional and there is no arbitrary payload callback. It
   must not contain Lynx widget vocabulary or Lynx device/unit policy —

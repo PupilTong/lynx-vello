@@ -69,10 +69,10 @@
 //!
 //! # Text always uses Parley
 //!
-//! The document node owns one reusable [`TextContext`](neutron_star::text::TextContext), while
-//! each text node retains separate probe and committed Parley artifacts in
-//! its layout data. Anonymous-box geometry uses initial CSS values; shaping
-//! and paragraph values are read from the parent element's inherited
+//! The document node lazily creates and then owns one reusable
+//! [`TextContext`](neutron_star::text::TextContext), while each text node retains separate probe
+//! and committed Parley artifacts in its layout data. Anonymous-box geometry uses initial CSS
+//! values; shaping and paragraph values are read from the parent element's inherited
 //! computed style. [`Document::register_fonts`] installs decoded fonts into
 //! the document context and invalidates retained measurements.
 //!
