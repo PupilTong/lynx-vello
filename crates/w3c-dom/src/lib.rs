@@ -16,7 +16,8 @@
 //! - [`NodeId`] — the raw `usize` slab index, scoped to its runtime context. The *read* handle is a
 //!   plain `&Node<T>`; every stylo DOM trait is implemented directly on it (no wrapper type).
 //! - [`StyleEngine`] — stylesheet parsing/building, matching, rule-tree insertion, cascade, and the
-//!   style flush ([`StyleEngine::flush_document`]).
+//!   style flush ([`StyleEngine::flush_document`], returning a [`FlushSummary`] of per-node
+//!   [`StyleDamage`]).
 //! - [`ExternalState`] — the embedder-payload trait; the only channel through which the payload `T`
 //!   influences matching (synthetic / reflected attributes).
 //!
@@ -92,6 +93,8 @@
 //! nothing races. This discipline is what the upcoming parallel style
 //! resolving relies on; do not add non-atomic `&self` mutability to [`Node`].
 
+mod contain;
+mod damage;
 mod document;
 mod engine;
 mod ext;
@@ -106,6 +109,12 @@ mod traits;
 /// on the vendored stylo packages directly.
 pub use dom::ElementState;
 
+/// stylo's computed containment value types ([`Contain`] /
+/// [`ContentVisibility`]) are re-exported alongside the
+/// [`effective_containment`] fold so downstream crates never name the
+/// vendored stylo packages directly.
+pub use crate::contain::{Contain, ContentVisibility, effective_containment};
+pub use crate::damage::{FlushSummary, StyleDamage};
 pub use crate::document::{DOCUMENT_NODE_ID, Document, NodeId};
 pub use crate::engine::{
     ComputedStyle, CssRule, RawDeclaration, StyleEngine, StylesheetOrigin, property_is_supported,

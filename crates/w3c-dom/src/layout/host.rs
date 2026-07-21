@@ -15,12 +15,14 @@
 //! queue (see [`position_hoisted_subtree`]).
 
 use neutron_star::compute::{
-    FnLeafMeasurer, compute_absolute_layout, compute_cached_layout, compute_flexbox_layout,
-    compute_grid_layout, compute_leaf_layout, compute_linear_layout, compute_relative_layout,
-    compute_root_layout, hide_subtree, round_layout,
+    FnLeafMeasurer, compute_absolute_layout, compute_boundary_relayout, compute_cached_layout,
+    compute_flexbox_layout, compute_grid_layout, compute_leaf_layout, compute_linear_layout,
+    compute_relative_layout, compute_root_layout, compute_skipped_contents_layout, hide_subtree,
+    round_layout,
 };
 use neutron_star::geometry::{Point, Size};
-use neutron_star::style::PositionProperty;
+use neutron_star::invalidate::is_relayout_boundary;
+use neutron_star::style::{CoreStyle, PositionProperty};
 use neutron_star::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput,
 };
@@ -28,7 +30,7 @@ use neutron_star::tree::{
 use super::MeasureLeaf;
 use super::style::{
     DisplayMode, StyleView, display_mode, establishes_absolute_containing_block,
-    establishes_fixed_containing_block, resolve_position,
+    establishes_fixed_containing_block, resolve_position, skips_contents,
 };
 use crate::document::Document;
 use crate::node::{ChildrenIter, Node};
@@ -51,8 +53,10 @@ impl<'dom, T: MeasureLeaf> LayoutNode for &'dom Node<T> {
     }
 
     /// The canonical dispatch skeleton (see `neutron_star::compute`):
-    /// `display: none` is hidden **before** the cache wrapper; every
-    /// generated box routes to its algorithm inside it.
+    /// `display: none` is hidden and `content-visibility: hidden` skips its
+    /// contents **before** the cache wrapper (their subtree-hiding must bypass
+    /// the cache); every generated, non-skipping box routes to its algorithm
+    /// inside it.
     fn compute_child_layout(self, input: LayoutInput) -> LayoutOutput {
         // Text nodes carry no computed style: they lay out as leaves inside
         // an anonymous box (initial box values; content via the payload's
@@ -68,6 +72,18 @@ impl<'dom, T: MeasureLeaf> LayoutNode for &'dom Node<T> {
         if display == DisplayMode::None {
             hide_subtree(self);
             return LayoutOutput::HIDDEN;
+        }
+
+        // `content-visibility: hidden` skips its contents: the box is sized from
+        // its own styles + `contain-intrinsic-size` and its subtree is hidden,
+        // laying out no children. Like `display: none`, this routes **before**
+        // the cache wrapper (the child-hiding must bypass the cache), right after
+        // the `display: none` check — the host dispatch contract
+        // `compute_skipped_contents_layout` documents. Text nodes are lent the
+        // anonymous initial values (`content-visibility: visible`), so this never
+        // fires for them.
+        if self.style().skips_contents() {
+            return compute_skipped_contents_layout(self, input);
         }
 
         compute_cached_layout(self, input, |node, input| match display {
@@ -135,16 +151,77 @@ impl<'dom, T: MeasureLeaf> LayoutNode for &'dom Node<T> {
     }
 }
 
-/// Run the full layout pipeline over a flushed document: in-flow root pass →
-/// positioned pass for hoisted out-of-flow nodes → device-pixel rounding.
+/// Run the full layout pipeline over a flushed document: parked-boundary
+/// re-runs → in-flow root pass → positioned pass for hoisted out-of-flow
+/// nodes → device-pixel rounding.
 ///
 /// Takes the document as a shared borrow — the caller's `&mut Document`
 /// (relinquished for the duration) is what guarantees the immutable pass;
 /// all writes go through the nodes' `layout_data` cells.
+///
+/// # Parked relayout boundaries run first, deepest-first
+///
+/// A boundary-stopped [`invalidate_layout`](Document::invalidate_layout) parks
+/// each `contain: strict` / skipped `content-visibility` boundary it stops at,
+/// paired with the committed [`LayoutInput`] that preserves the boundary's
+/// parent-imposed outer size. Those boundaries are re-run in place **before**
+/// [`compute_root_layout`]: their ancestors kept warm caches, so the root pass
+/// answers those ancestors from cache and never descends into a boundary's
+/// interior — the in-place re-run is what refreshes it. The root pass still
+/// keeps the final say for any boundary a change *above* it also cleared to the
+/// document root (it re-runs that boundary with its now-current input and
+/// overwrites this preview).
+///
+/// The parked boundaries are re-run **deepest-first** (greatest tree depth
+/// first). When one flush parks nested boundaries — an outer `B1` and an inner
+/// `B2` inside it — `B1`'s re-run re-lays-out its whole interior, `B2` and
+/// `B2`'s subtree included, at `B2`'s *current* parent-imposed size, whereas
+/// `B2`'s own re-run only replays its stale committed input. Running the inner
+/// boundary first and the outer last lets the outer win, so an interior whose
+/// imposed size changed ends at the new size instead of being overwritten by
+/// the inner boundary's stale replay. The inner boundary is still re-run (never
+/// dropped as redundant): the outer re-run can cache-hit before it reaches the
+/// inner one when the path between them was not invalidated, and then only the
+/// inner boundary's own re-run refreshes its interior. Independent boundaries
+/// have unordered depths and are order-insensitive, so a plain depth sort
+/// suffices.
 pub(super) fn run_layout<T: MeasureLeaf>(document: &Document<T>, viewport: Size<f32>, scale: f32) {
     let Some(root) = document.root_element() else {
         return;
     };
+    // Re-run parked relayout boundaries deepest-first, before the root pass
+    // (see this function's docs for why both matter). Depth orders them; the
+    // inner boundary is kept, not deduped. A parked root a later flush turned
+    // non-boundary (its `contain` was removed) is skipped — that flush already
+    // cleared its cache toward the root, so the root pass covers it.
+    let mut parked: Vec<(usize, crate::NodeId, LayoutInput)> = document
+        .relayout_roots()
+        .iter()
+        .map(|&(id, input)| (boundary_depth(document, id), id, input))
+        .collect();
+    parked.sort_by_key(|&(depth, ..)| std::cmp::Reverse(depth));
+    for (_, id, input) in parked {
+        if let Some(node) = document.get(id)
+            && node.is_element()
+            && is_relayout_boundary(&StyleView::of(node))
+        {
+            let output = compute_boundary_relayout(node, input);
+            // `compute_boundary_relayout` deliberately does not restore the
+            // boundary's own `Layout`: by the relayout-boundary theorem its
+            // outer `size` and parent-relative `location` cannot change from an
+            // interior mutation, so that record stays owned by the still-warm
+            // parent. But `content_size` (scrollable overflow) IS derived from
+            // the interior that just re-arranged, so the stored value is now
+            // stale — merge only that field into the stored unrounded layout,
+            // before `round_layout` below snaps it, so scroll ranges track the
+            // new interior. Every other `Layout` field
+            // (order/size/location/border/padding/margin, and there is no
+            // scrollbar-size field — Lynx scrollbars are overlay-only) depends
+            // solely on the boundary's own unchanged style and its
+            // parent-imposed input, so it stays valid without a merge.
+            node.layout_data.borrow_mut().unrounded.content_size = output.content_size;
+        }
+    }
     compute_root_layout(
         root,
         Size::new(
@@ -154,6 +231,21 @@ pub(super) fn run_layout<T: MeasureLeaf>(document: &Document<T>, viewport: Size<
     );
     position_hoisted_subtree(root, viewport);
     round_layout(root, scale);
+}
+
+/// The number of ancestor links from `id` up to (and including) the document
+/// node — the key that orders parked relayout boundaries **deepest-first** in
+/// [`run_layout`] (see its docs). Walks real parent links (the host owns them),
+/// so this is a cheap spine walk, not a search. A vacant `id` reports depth 0
+/// and is harmlessly skipped by the re-run loop.
+fn boundary_depth<T>(document: &Document<T>, id: crate::NodeId) -> usize {
+    let mut depth = 0;
+    let mut current = document.get(id).and_then(Node::parent);
+    while let Some(node) = current {
+        depth += 1;
+        current = node.parent();
+    }
+    depth
 }
 
 // --- the positioned pass ------------------------------------------------------
@@ -185,10 +277,16 @@ fn position_hoisted_subtree<T: MeasureLeaf>(node: &Node<T>, viewport: Size<f32>)
     {
         position_hoisted(node, viewport);
     }
-    // The leaf fallback (flow/contents containers) zeroes its children —
-    // they do not participate in layout, so the walk must not revive a
-    // hoisted descendant inside the zeroed subtree.
-    if display == DisplayMode::Leaf {
+    // Two cases generate no boxes for their contents, so the walk must not
+    // descend and revive a hoisted descendant inside them:
+    //   * the leaf fallback (flow/contents containers) zeroes its children;
+    //   * a skipped-contents box (`content-visibility: hidden`) had its whole subtree hidden by
+    //     `compute_skipped_contents_layout` on Commit.
+    // Pruning here mirrors the `display: none` early return above: the node
+    // itself may still be a hoisted box (handled just above), but its skipped
+    // contents cannot — a `position: fixed` descendant of skipped contents
+    // produces no positioned box (css-contain-2 skipping).
+    if display == DisplayMode::Leaf || skips_contents(&style) {
         return;
     }
     for child in Node::children(node) {

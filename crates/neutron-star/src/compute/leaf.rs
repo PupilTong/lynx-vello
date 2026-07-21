@@ -120,7 +120,21 @@ where
 
     // End the GAT borrow immediately. The host may retain a rich artifact
     // behind the returned view, but box layout needs only these Copy metrics.
-    let measurement = {
+    //
+    // Size containment (`contain: size`/`strict`, `content-visibility`) sizes
+    // the leaf **as if it had no content**: the measurer is never called and
+    // `contain-intrinsic-{width,height}` (both `None` ⇒ zero, collapsing to
+    // border + padding) stands in for the measured content. Baselines are
+    // therefore absent, matching layout containment.
+    let measurement = if let Some(intrinsic) = crate::style::containment::size_containment(style) {
+        LeafMetrics {
+            size: Size::new(
+                intrinsic.width.unwrap_or(0.0),
+                intrinsic.height.unwrap_or(0.0),
+            ),
+            first_baselines: Point::NONE,
+        }
+    } else {
         let measurement = measurer.measure(LeafMeasureInput::new(
             measure_known_dimensions,
             available_space,

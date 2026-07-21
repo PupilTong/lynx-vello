@@ -37,6 +37,8 @@
 //!   subtree hiding, leaf, the positioned pass, rounding), the canonical dispatch skeleton, and the
 //!   implemented Flexbox, Grid, Linear, and Relative entry points.
 //! - [`cache`] — the embeddable per-node measurement cache and its matching contract.
+//! - [`invalidate`] — containment-bounded, damage-driven cache invalidation (relayout-boundary
+//!   detection and the ancestor-walking invalidator).
 //! - [`geometry`] — `Copy`/`#[repr(C)]` geometry primitives.
 //!
 //! Layout recursion round-trips through the host's
@@ -170,9 +172,10 @@
 //!
 //!     fn compute_child_layout(self, input: LayoutInput) -> LayoutOutput {
 //!         // Real hosts route on display: handle display:none with
-//!         // hide_subtree, then dispatch visible nodes inside
-//!         // compute_cached_layout (see the `compute` module docs).
-//!         // This toy treats every node as an empty visible leaf:
+//!         // hide_subtree (and content-visibility skipping via skips_contents
+//!         // → compute_skipped_contents_layout) before compute_cached_layout,
+//!         // then dispatch visible nodes inside it (see the `compute` module
+//!         // docs). This toy treats every node as an empty visible leaf:
 //!         let _ = self.style();
 //!         LayoutOutput::new(input.known_dimensions.unwrap_or(Size::ZERO), Size::ZERO)
 //!     }
@@ -225,6 +228,7 @@
 pub mod cache;
 pub mod compute;
 pub mod geometry;
+pub mod invalidate;
 pub mod style;
 #[cfg(feature = "text")]
 pub mod text;

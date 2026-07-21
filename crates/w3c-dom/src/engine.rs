@@ -511,11 +511,17 @@ impl StyleEngine {
 }
 
 impl<T> Document<T> {
-    /// Store a resolved style and mark the node's own style work complete.
+    /// Store a resolved style, creating the node's stylo `ElementData` slot
+    /// if needed.
     ///
     /// Descendant dirtiness is left intact. Used with the standalone
     /// [`StyleEngine::resolve`] path; the flush traversal
     /// ([`StyleEngine::flush_document`]) stores styles itself.
+    ///
+    /// This does not clear the node's restyle hint, so a node with a pending
+    /// hint stays [`is_style_dirty`](crate::Node::is_style_dirty) until a
+    /// flush (or [`Document::clear_dirty`]) drains it — the standalone
+    /// `resolve` path does not participate in stylo's hint scheduling.
     ///
     /// # Panics
     ///
@@ -531,6 +537,5 @@ impl<T> Document<T> {
             "Document::store_computed_style called with a text node"
         );
         node.set_computed_style(style);
-        node.set_style_dirty(false);
     }
 }

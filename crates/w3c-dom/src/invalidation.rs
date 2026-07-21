@@ -21,11 +21,12 @@
 //!    recorded during matching (`:empty` / position-dependent / edge selectors), so inserting a
 //!    child into a parent nothing depends on costs nothing.
 //!
-//! Both paths also maintain the embedder-visible dirty bits
-//! ([`Node::is_style_dirty`](crate::Node::is_style_dirty) /
-//! [`Node::has_dirty_descendants`](crate::Node::has_dirty_descendants)):
-//! `dirty_descendants` on the ancestor chain is what lets the traversal reach
-//! the invalidated node.
+//! Both paths also set `dirty_descendants` on the mutated node's ancestor
+//! chain: that is what lets stylo's traversal descend to the invalidated
+//! node. The node's *own* dirtiness is not tracked by a separate flag —
+//! [`Node::is_style_dirty`](crate::Node::is_style_dirty) derives it from
+//! stylo's scheduling state (a pending snapshot, a queued restyle hint, or
+//! the absence of any style data on a never-styled node).
 //!
 //! The one seam an embedder must handle itself: synthetic / reflected
 //! attributes served by its [`ExternalState`](crate::ExternalState) hooks.
@@ -75,8 +76,10 @@ impl<T> Document<T> {
     /// Panics when `id` is stale or identifies a text node (the let-it-crash
     /// mutation contract; see the crate docs).
     pub fn mark_style_dirty(&mut self, id: NodeId) {
+        // Validate up front (let-it-crash): the hint path below silently
+        // skips data-less nodes, which must not absorb a stale handle or a
+        // text node (element-only mutation contract).
         self.live_element(id);
-        self.live(id).set_style_dirty(true);
         self.add_restyle_hint(id, RestyleHint::RESTYLE_SELF);
         self.mark_ancestors_dirty_descendants(id);
     }
@@ -90,7 +93,6 @@ impl<T> Document<T> {
     /// mutation contract; see the crate docs).
     pub fn mark_subtree_dirty(&mut self, id: NodeId) {
         let node = self.live_element(id);
-        node.set_style_dirty(true);
         if !node.child_ids().is_empty() {
             node.set_dirty_descendants_bit(true);
         }
@@ -142,9 +144,15 @@ impl<T> Document<T> {
         }
     }
 
-    /// Set the node's own dirty bit and make it reachable from the root.
+    /// Make `id` reachable from the root so the next flush's traversal
+    /// descends to it. `id`'s own dirtiness is recorded by its caller — a
+    /// pre-mutation snapshot (the `note_*_change` recorders) or, for a
+    /// never-styled node, the absent [`ElementData`](stylo::data::ElementData)
+    /// that [`is_style_dirty`](crate::Node::is_style_dirty) reads directly.
     fn mark_mutated(&mut self, id: NodeId) {
-        self.live(id).set_style_dirty(true);
+        // Validate up front (let-it-crash) — the reachability walk below
+        // silently skips stale ids.
+        let _ = self.live(id);
         self.mark_ancestors_dirty_descendants(id);
     }
 
@@ -221,7 +229,6 @@ impl<T> Document<T> {
     /// later siblings' subtrees (Gecko's `RestyleForEmptyChange`).
     fn note_emptiness_change(&mut self, id: NodeId) {
         self.add_restyle_hint(id, RestyleHint::restyle_subtree());
-        self.live(id).set_style_dirty(true);
         let later_siblings: Vec<NodeId> = {
             let tree = self.tree();
             tree.get(id)
@@ -537,7 +544,9 @@ impl<T: ExternalState> Document<T> {
     }
 
     fn note_inline_style_change(&mut self, id: NodeId) {
-        self.live(id).set_style_dirty(true);
+        // Callers (the inline-style setters) already crashed on a stale id;
+        // the hint below is the node's own dirtiness signal (a data-less node
+        // is derived-dirty without one).
         self.add_restyle_hint(id, RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
         self.mark_ancestors_dirty_descendants(id);
     }

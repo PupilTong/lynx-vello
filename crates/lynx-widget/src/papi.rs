@@ -802,11 +802,13 @@ impl WidgetTree {
         Ok(self.doc.get(id).and_then(Widget::computed_style))
     }
 
-    /// Store an element's resolved computed style and clear its `style_dirty`
-    /// bit. Used with the standalone
+    /// Store an element's resolved computed style. Used with the standalone
     /// [`StyleEngine::resolve_widget`](crate::StyleEngine::resolve_widget)
     /// path; [`StyleEngine::flush_widget_tree`](crate::StyleEngine::flush_widget_tree)
-    /// stores styles itself.
+    /// stores styles itself. A widget styled this way reports clean through
+    /// the derived [`Widget::is_style_dirty`](crate::Widget::is_style_dirty)
+    /// unless a snapshot or restyle hint is still pending (the resolve path
+    /// does not participate in stylo's hint scheduling).
     pub fn set_computed(
         &mut self,
         handle: &WidgetHandle,
@@ -826,7 +828,12 @@ impl WidgetTree {
         self.doc.needs_flush()
     }
 
-    /// Clear every element's dirty bits (called after a restyle pass).
+    /// Reset all flush-scheduling state (dirty bits, pending snapshots,
+    /// queued restyle hints/damage), restoring a clean baseline. Computed
+    /// styles are kept; a never-styled widget stays
+    /// [`is_style_dirty`](crate::Widget::is_style_dirty) (it still needs
+    /// styling). The flush path clears its own state — this is for tests and
+    /// embedder-driven resets.
     pub fn clear_dirty(&mut self) {
         self.doc.clear_dirty();
     }

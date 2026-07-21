@@ -36,13 +36,15 @@ use types::{Axis, GridItem, IntrinsicSize, TrackSet, TrackSizingFunction};
 
 use super::util::{
     ItemKey, OrderedItem, PendingLayoutItem, ResolvedContainerBox, ResolvedItemBox,
-    apply_aspect_ratio, box_inset_size, clamp, clamp_axis, normalize_content_alignment,
-    normalize_item_alignment, preferred_size_definiteness, resolve_container_box, resolve_gap,
-    resolve_item_box, sort_and_assign_layout_order, used_aspect_ratio,
+    accumulate_scrollable_overflow, apply_aspect_ratio, box_inset_size, clamp, clamp_axis,
+    normalize_content_alignment, normalize_item_alignment, own_scrollable_overflow,
+    preferred_size_definiteness, resolve_container_box, resolve_gap, resolve_item_box,
+    sort_and_assign_layout_order, used_aspect_ratio,
 };
 use super::{compute_absolute_layout, hide_subtree};
 use crate::geometry::{Edges, Line, Point, Size};
-use crate::style::{CoreStyle, GridContainerStyle, GridItemStyle};
+use crate::style::containment::size_containment;
+use crate::style::{Contain, CoreStyle, GridContainerStyle, GridItemStyle, Overflow};
 use crate::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
     SizingMode,
@@ -479,6 +481,10 @@ struct PendingBaselineItem<N> {
     area_top: f32,
     layout: Layout,
     baseline: Option<f32>,
+    /// The item's `overflow`, retained so the deferred scrollable-overflow
+    /// accumulation applies the same scroll-container trapping as the direct
+    /// path (see [`accumulate_scrollable_overflow`]).
+    overflow: Point<Overflow>,
 }
 
 fn refresh_item_basis<N>(item: &mut GridItem<N>, percentage_basis: Size<Option<f32>>)
@@ -729,12 +735,13 @@ where
             {
                 direct_baseline_candidate = Some(candidate);
             }
-            content_size.width = content_size
-                .width
-                .max(layout.location.x + layout.size.width.max(layout.content_size.width));
-            content_size.height = content_size
-                .height
-                .max(layout.location.y + layout.size.height.max(layout.content_size.height));
+            accumulate_scrollable_overflow(
+                &mut content_size,
+                layout.location,
+                layout.size,
+                layout.content_size,
+                item.overflow,
+            );
             if goal == LayoutGoal::Commit {
                 item.key.node.set_unrounded_layout(&layout);
             }
@@ -750,6 +757,7 @@ where
             area_top: content_origin.y + area_offset.y,
             layout,
             baseline: item_baseline,
+            overflow: item.overflow,
         });
     }
 
@@ -837,11 +845,12 @@ where
             })
     });
     for item in pending {
-        content_size.width = content_size.width.max(
-            item.layout.location.x + item.layout.size.width.max(item.layout.content_size.width),
-        );
-        content_size.height = content_size.height.max(
-            item.layout.location.y + item.layout.size.height.max(item.layout.content_size.height),
+        accumulate_scrollable_overflow(
+            &mut content_size,
+            item.layout.location,
+            item.layout.size,
+            item.layout.content_size,
+            item.overflow,
         );
         if goal == LayoutGoal::Commit {
             item.node.set_unrounded_layout(&item.layout);
@@ -1103,12 +1112,13 @@ where
                 layout.location.x += origin.x;
                 layout.location.y += origin.y;
                 layout.order = key.layout_order;
-                content_size.width = content_size
-                    .width
-                    .max(layout.location.x + layout.size.width.max(layout.content_size.width));
-                content_size.height = content_size
-                    .height
-                    .max(layout.location.y + layout.size.height.max(layout.content_size.height));
+                accumulate_scrollable_overflow(
+                    &mut content_size,
+                    layout.location,
+                    layout.size,
+                    layout.content_size,
+                    key.node.style().overflow(),
+                );
                 key.node.set_unrounded_layout(&layout);
             }
             // The containing block is not the layout parent (CSS `fixed`):
@@ -1138,6 +1148,12 @@ where
     // all mutation flows through handles into host-owned interior-mutable
     // per-node slots — so no owned raw-style snapshot is needed.
     let style = node.style();
+    // Size containment substitutes contain-intrinsic-size for the grid's
+    // content-derived container size (the tracks' used size); layout
+    // containment suppresses the exported baseline. Tracks and items are still
+    // sized/placed against the resulting definite container size.
+    let size_containment = size_containment(&style);
+    let layout_contained = style.containment().contains(Contain::LAYOUT);
     let gap_value = style.gap();
     let auto_flow = style.grid_auto_flow();
     let direction = style.direction();
@@ -1346,7 +1362,17 @@ where
         align_content,
     );
     let provisional_track_size = Size::new(columns.used_size(), rows.used_size());
-    let outer_size = final_outer_size(&metrics, provisional_track_size);
+    // Under size containment the container ignores its tracks' used size and
+    // substitutes contain-intrinsic-size; the tracks are still laid out (below)
+    // against the resulting definite inner size.
+    let container_track_size = match size_containment {
+        Some(intrinsic) => Size::new(
+            intrinsic.width.unwrap_or(0.0),
+            intrinsic.height.unwrap_or(0.0),
+        ),
+        None => provisional_track_size,
+    };
+    let outer_size = final_outer_size(&metrics, container_track_size);
     let final_inner = Size::new(
         (outer_size.width - metrics.box_inset.width).max(0.0),
         (outer_size.height - metrics.box_inset.height).max(0.0),
@@ -1418,6 +1444,17 @@ where
         );
         content_size = content_size.zip_map(absolute_content_size, f32::max);
     }
+    // css-contain-2 §3.3: a layout-contained grid with `overflow: visible`
+    // reports its border box as its scrollable overflow (descendant overflow is
+    // ink-only); a scroll container keeps the interior union.
+    let content_size = own_scrollable_overflow(&style, outer_size, content_size);
+    // Layout containment: the container is an independent formatting context;
+    // no child baseline escapes to the parent.
+    let baselines = if layout_contained {
+        Point::NONE
+    } else {
+        baselines
+    };
     LayoutOutput::new(outer_size, content_size).with_first_baselines(baselines)
 }
 

@@ -35,8 +35,8 @@
 //! the tree), so every piece of node state that stylo touches during a
 //! traversal is either
 //!
-//! - atomic ([`selector_flags`](Node::selector_flags), the dirty bits, the snapshot bits, the
-//!   traversal counter), or
+//! - atomic ([`selector_flags`](Node::selector_flags), the dirty-descendants bit, the snapshot
+//!   bits, the traversal counter), or
 //! - owned by exactly one worker at a time under stylo's traversal discipline (`stylo_data`, an
 //!   [`UnsafeCell`]; see [`crate::traits`] for the per-access safety arguments).
 //!
@@ -343,12 +343,12 @@ pub struct Node<T> {
     /// parent.
     pub(crate) selector_flags: AtomicUsize,
 
-    /// Whether this node itself has pending style work (embedder-visible
-    /// dirty signal; stylo's own scheduling uses `ElementData::hint`).
-    style_dirty: AtomicBool,
     /// Whether some descendant of this node has pending style work. This is
     /// the bit stylo's traversal walks down
     /// ([`TElement::has_dirty_descendants`](stylo::dom::TElement::has_dirty_descendants)).
+    /// The node's *own* dirtiness carries no separate flag — see
+    /// [`is_style_dirty`](Node::is_style_dirty), which derives it from stylo's
+    /// scheduling state.
     dirty_descendants: AtomicBool,
 
     /// Snapshot lifecycle bits ([`SNAPSHOT_PRESENT`] / [`SNAPSHOT_HANDLED`]),
@@ -446,7 +446,6 @@ impl<T> Node<T> {
             snapshot: None,
             stylo_data: UnsafeCell::new(None),
             selector_flags: AtomicUsize::new(0),
-            style_dirty: AtomicBool::new(false),
             dirty_descendants: AtomicBool::new(false),
             snapshot_flags: AtomicU8::new(0),
             children_to_process: AtomicIsize::new(0),
@@ -702,24 +701,81 @@ impl<T> Node<T> {
         self.layout_data.borrow().unrounded
     }
 
+    /// Whether this node's layout **measurement cache** currently holds no
+    /// memoized answer — i.e. the next layout pass must recompute it rather
+    /// than answer from cache.
+    ///
+    /// Observes the incremental-relayout invalidation state: after a
+    /// [`Document::invalidate_layout`](crate::Document::invalidate_layout) the
+    /// dirty spine reports `true` up to (and including) the nearest relayout
+    /// boundary, while the boundary's ancestors and every clean subtree keep
+    /// their caches and report `false`. A freshly laid-out (or never laid-out)
+    /// node reports `false` / `true` respectively.
+    ///
+    /// Must not be called while a layout pass is running on the document
+    /// (impossible through the public API: layout holds `&mut Document`).
+    #[must_use]
+    pub fn layout_cache_is_empty(&self) -> bool {
+        self.layout_data.borrow().measure_cache.is_empty()
+    }
+
     /// The accumulated stylo selector flags.
     #[must_use]
     pub fn selector_flags(&self) -> ElementSelectorFlags {
         ElementSelectorFlags::from_bits_retain(self.selector_flags.load(Ordering::Relaxed))
     }
 
-    /// Whether this node itself has pending style work.
+    /// Whether this node itself has pending style work, **derived from
+    /// stylo's own scheduling state** rather than a separate embedder flag:
     ///
-    /// A scheduling breadcrumb, not ground truth: the authoritative "does the
-    /// tree need a flush" signal is the document element's bits
-    /// ([`Document::needs_flush`](crate::Document::needs_flush)). In one
-    /// corner the breadcrumb can go stale — a descendant of a subtree that
-    /// became `display: none` in the same flush keeps its bit set (stylo
-    /// prunes the none-subtree from traversal and drops its style data; the
-    /// bit clears the next time the node is scheduled while reachable).
+    /// - a node stylo has never styled (no [`ElementData`] slot) is always dirty — it needs a full
+    ///   style computation the moment the traversal reaches it;
+    /// - a styled node is dirty iff a pre-mutation snapshot is pending (`snapshot_present`) or
+    ///   stylo has a queued
+    ///   [`RestyleHint`](stylo::invalidation::element::restyle_hints::RestyleHint) for it
+    ///   (`ElementData::hint` is non-empty).
+    ///
+    /// Dirtiness is an **element** concept: only element nodes enter the
+    /// cascade. The document node at slot zero and text nodes never receive
+    /// `ElementData`, so the "no data ⇒ dirty" rule above would perpetually
+    /// mislabel them dirty; they are reported clean instead. That preserves the
+    /// pre-derived contract (the document node's dirty bit defaulted clear) and
+    /// scopes the derived rule to the only nodes the scheduler ever consults:
+    /// [`Document::needs_flush`](crate::Document::needs_flush) reads the
+    /// document element ([`root_element`](crate::Document::root_element)), and
+    /// the flush roots the traversal there.
+    ///
+    /// This is a scheduling signal, not ground truth about the tree: the
+    /// authoritative "does the tree need a flush" query is the document
+    /// element's bits ([`Document::needs_flush`](crate::Document::needs_flush)
+    /// — this OR [`has_dirty_descendants`](Self::has_dirty_descendants)).
+    ///
+    /// Must not be called while a style flush is running on the node's
+    /// document (impossible through the public API: a flush holds
+    /// `&mut Document`, this borrows `&self` from it) — the same
+    /// no-concurrent-flush contract as [`computed_style`](Self::computed_style).
+    ///
+    /// [`ElementData`]: stylo::data::ElementData
     #[must_use]
     pub fn is_style_dirty(&self) -> bool {
-        self.style_dirty.load(Ordering::Relaxed)
+        // Dirtiness is an element concept (see the method docs): the document
+        // node and text nodes never enter the cascade, so they never carry
+        // element style data and must not be reported dirty for lacking it.
+        if !self.is_element() {
+            return false;
+        }
+        // SAFETY: no flush is running (flushes require `&mut Document`, and
+        // we hold `&self` borrowed from it), so reading the slot and taking a
+        // shared borrow of the wrapper cannot race.
+        #[expect(unsafe_code, reason = "UnsafeCell read outside any flush")]
+        let slot = unsafe { (*self.stylo_data.get()).as_ref() };
+        match slot {
+            // Never styled: dirty until it is reached and styled.
+            None => true,
+            // Styled: dirty iff a snapshot is pending or a restyle hint is
+            // queued.
+            Some(wrapper) => self.snapshot_present() || !wrapper.borrow().hint.is_empty(),
+        }
     }
 
     /// Whether a descendant has pending style work.
@@ -729,10 +785,6 @@ impl<T> Node<T> {
     }
 
     // --- crate-internal bookkeeping -------------------------------------------
-
-    pub(crate) fn set_style_dirty(&self, dirty: bool) {
-        self.style_dirty.store(dirty, Ordering::Relaxed);
-    }
 
     pub(crate) fn set_dirty_descendants_bit(&self, dirty: bool) {
         self.dirty_descendants.store(dirty, Ordering::Relaxed);
@@ -894,9 +946,11 @@ impl<T> Node<T> {
 
 // `stylo_data` (an `UnsafeCell`) and the `ext` payload are deliberately
 // omitted: the former is not `Debug` (and reading it would need the
-// no-concurrent-flush invariant), and printing the latter would demand a
-// `T: Debug` bound this impl cannot carry — stylo's `TNode`/`TElement`
-// require `&Node<T>: Debug` for every payload type.
+// no-concurrent-flush invariant — stylo debug-prints nodes *during* the
+// traversal, which also rules out the derived `is_style_dirty` here), and
+// printing the latter would demand a `T: Debug` bound this impl cannot carry
+// — stylo's `TNode`/`TElement` require `&Node<T>: Debug` for every payload
+// type.
 impl<T> fmt::Debug for Node<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Node")
@@ -908,7 +962,6 @@ impl<T> fmt::Debug for Node<T> {
             .field("id_attr", &self.id_attr)
             .field("element_state", &self.element_state)
             .field("has_inline_block", &self.inline_block.is_some())
-            .field("style_dirty", &self.is_style_dirty())
             .field("dirty_descendants", &self.has_dirty_descendants())
             .field("children", &self.children)
             .finish_non_exhaustive()

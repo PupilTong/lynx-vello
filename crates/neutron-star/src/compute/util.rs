@@ -18,7 +18,7 @@ use stylo::values::generics::position::PreferredRatio;
 use stylo::values::specified::align::AlignFlags;
 
 use crate::geometry::{Edges, Point, Size};
-use crate::style::CoreStyle;
+use crate::style::{Contain, CoreStyle};
 use crate::tree::{AvailableSpace, LayoutInput, SizingMode};
 
 /// Interprets one alignment property's [`AlignFlags`] as item
@@ -824,6 +824,89 @@ pub(super) fn resolve_container_box(
         outer,
         inner,
         available_inner,
+    }
+}
+
+/// Whether these `overflow` values make the box a **scroll container** per
+/// [CSS Overflow 3 §3.1][overflow-3-3.1]: any axis whose value is one of the
+/// *scrollable* values (`scroll`/`auto`/`hidden`) — i.e. any non-`visible`
+/// axis. (Under the stylo `lynx` feature the only non-`visible` value is
+/// `hidden`, which CSS Overflow 3 still classifies as a scroll container: it is
+/// programmatically scrollable and clips.)
+///
+/// A scroll container **traps** its interior scrollable overflow
+/// ([CSS Overflow 3 §3.3][overflow-3-3.3]: a descendant's scrollable-overflow
+/// rectangle is "clipped to their overflow clip edge if overflow is not
+/// visible"): it contributes only its border box to an ancestor's scrollable
+/// overflow, while keeping its own `content_size` as its private scroll range
+/// — see [`accumulate_scrollable_overflow`].
+///
+/// [overflow-3-3.1]: https://drafts.csswg.org/css-overflow-3/#overflow-properties
+/// [overflow-3-3.3]: https://drafts.csswg.org/css-overflow-3/#scrollable
+#[inline]
+pub(super) fn is_scroll_container(overflow: Point<Overflow>) -> bool {
+    overflow.x.is_scrollable() || overflow.y.is_scrollable()
+}
+
+/// Folds one child's scrollable-overflow contribution into the container's
+/// running `content_size`, at the child's border-box `location` (container
+/// border-box space), applying the [CSS Overflow 3 §3.3][overflow-3-3.3]
+/// trapping rule.
+///
+/// A **scroll-container** child ([`is_scroll_container`]) contributes only its
+/// border box (`child_size`): its own `content_size` is its private, trapped
+/// scroll range and must never leak into an ancestor's scrollable overflow. Any
+/// other child contributes the union of its border box and its own (already
+/// trapping-aware) `content_size` — the standard transitive scrollable-overflow
+/// propagation.
+///
+/// [overflow-3-3.3]: https://drafts.csswg.org/css-overflow-3/#scrollable
+#[inline]
+pub(super) fn accumulate_scrollable_overflow(
+    content_size: &mut Size<f32>,
+    location: Point<f32>,
+    child_size: Size<f32>,
+    child_content_size: Size<f32>,
+    child_overflow: Point<Overflow>,
+) {
+    let reach = if is_scroll_container(child_overflow) {
+        child_size
+    } else {
+        Size::new(
+            child_size.width.max(child_content_size.width),
+            child_size.height.max(child_content_size.height),
+        )
+    };
+    content_size.width = content_size.width.max(location.x + reach.width);
+    content_size.height = content_size.height.max(location.y + reach.height);
+}
+
+/// A container's **own** scrollable overflow (`content_size`), applying
+/// [CSS Contain 2 §3.3 Layout Containment][contain-2-3.3].
+///
+/// A box with effective **layout containment** whose `overflow` is `visible`
+/// (or `clip`) — i.e. **not** a scroll container — treats descendant overflow
+/// as *ink* overflow (§3.3 item 3: "any overflow must be treated as ink
+/// overflow"), which is excluded from the scrollable overflow region. It
+/// therefore reports only its own border box, ignoring the accumulated
+/// `interior` union.
+///
+/// A scroll container, or an uncontained box, reports the accumulated
+/// `interior` union unchanged; for a scroll container that union is its real
+/// scroll range (CSS Overflow 3), and the trapping toward *ancestors* happens
+/// at their accumulation site instead (see [`accumulate_scrollable_overflow`]).
+///
+/// [contain-2-3.3]: https://drafts.csswg.org/css-contain-2/#containment-layout
+#[inline]
+pub(super) fn own_scrollable_overflow<S: CoreStyle>(
+    style: &S,
+    border_box: Size<f32>,
+    interior: Size<f32>,
+) -> Size<f32> {
+    if style.containment().contains(Contain::LAYOUT) && !is_scroll_container(style.overflow()) {
+        border_box
+    } else {
+        interior
     }
 }
 

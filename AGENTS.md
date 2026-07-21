@@ -154,7 +154,13 @@ useful signal for currently-compatible versions of those libraries.
   inline-style parsing, the `Stylist` /
   cascade pipeline, and the private `SharedRwLock` shared by an engine and
   its documents. Mutation APIs follow a let-it-crash contract
-  (`debug_assert` + panic on stale handles rather than silent no-ops).
+  (`debug_assert` + panic on stale handles rather than silent no-ops). A
+  flush returns a `FlushSummary` — the per-node `StyleDamage` (repaint /
+  stacking / overflow / relayout classes) the flush harvested from stylo's
+  `ElementData` and then **cleared** (the fix for stylo's
+  never-cleared-damage re-traversal bug); it also owns the
+  `effective_containment` fold (`contain` + `content-visibility` → effect
+  bits).
   Its `layout` module is the concrete `neutron-star` host:
   `StyleEngine::layout_document` flushes styles then lays out with
   `LayoutNode` implemented **directly on `&Node<T>`** (the same one-word
@@ -168,13 +174,21 @@ useful signal for currently-compatible versions of those libraries.
   measures through the payload's `MeasureLeaf` hook. Per-node layout
   state (measurement cache + layouts) lives **on each `Node`**
   (`AtomicRefCell<LayoutData>`, the Servo layout_data pattern; read via
-  `Node::layout`), so it is created and dropped with its node;
-  invalidation is embedder-driven (`Document::invalidate_layout`). Leaf
+  `Node::layout`), so it is created and dropped with its node. Style-driven
+  relayout is automatic (`layout_document` consumes its own flush's
+  `StyleDamage`, boundary-stopped); `Document::invalidate_layout` remains the
+  embedder API for the mutations styles cannot see (content/child-list changes
+  with identical computed styles, external measurement inputs). Leaf
   content (text/images) measures through an embedder hook; the crate pulls
   `neutron-star` without its `text` feature. It
   must not contain Lynx widget vocabulary or Lynx device/unit policy —
   Lynx computed defaults (border-box, `overflow: hidden`, `display: linear`
-  on every element, …) stay embedder cascade policy (UA sheet).
+  on every element, …) stay embedder cascade policy (UA sheet). Relies on
+  the vendored stylo fork (`vendor/stylo`, tracking the
+  canonical `lynx` branch, tip `7ed1b07ec`): `contain` was already seeded
+  in the fork's lynx grammar; fork PR #9 (squash-merged into `lynx`) added
+  `content-visibility` / `contain-intrinsic-size` under the `lynx` feature,
+  pref-gated for stock servo builds.
 - `crates/lynx-widget` — Lynx Element-PAPI and style adapter over `w3c-dom`.
   Owns `WidgetState` / `WidgetTree` (a validation layer over the document:
   untrusted PAPI input becomes `WidgetError`s before it reaches the
@@ -203,15 +217,21 @@ useful signal for currently-compatible versions of those libraries.
   and `linear-*` style/source protocol are live. Text shaping, line breaking,
   intrinsic/height-for-width measurement, baselines, and retained Parley
   layouts live behind the default-on `text` feature.
-  Read
+  **CSS containment (css-contain-2)** is landed layout-side: the stylo
+  `Contain`/`ContainIntrinsicSize` containment accessors on `CoreStyle`,
+  size-substitution + layout-containment baseline suppression,
+  `compute_skipped_contents_layout`, and the `invalidate` module
+  (`is_relayout_boundary`, `invalidate_for_relayout`) — the
+  containment-bounded, damage-driven cache-invalidation host workflow
+  (single-axis / container queries out of scope). Read
   `docs/layout-architecture.md` before touching it. It must not depend on
   other workspace crates or own host tree/style storage, DOM/widget types,
   resolved device-unit policy, or paint order.
 - Remaining runtime-layout integration — the `LayoutNode` handle, display
-  dispatch, fixed/hoisted positioned pass, and per-node cache storage with
-  manual invalidation now live in `w3c-dom::layout` (see above). Still L3
-  work: `lynx-widget`-level policy (automatic
-  dirty→`Document::invalidate_layout` wiring off style damage, `rpx`-aware
+  dispatch, fixed/hoisted positioned pass, per-node cache storage, and the
+  automatic style-damage→`Document::invalidate_layout` wiring (boundary-stopped,
+  engine-internal — not a widget-layer concern) now live in `w3c-dom::layout`
+  (see above). Still L3 work: `lynx-widget`-level policy (`rpx`-aware
   view metrics, sticky lowering), component-specific staggered layout, and
   text style/attribute wiring plus text-context/artifact-slot storage
   behind the leaf-measurement hook.

@@ -18,13 +18,14 @@ use stylo::values::generics::position::PreferredRatio;
 use stylo::values::specified::align::AlignFlags;
 
 use super::util::{
-    ResolvedContainerBox, ResolvedItemBox, apply_aspect_ratio, auto_edges_to_zero, clamp_axis,
-    resolve_container_box, resolve_insets, resolve_item_box, resolve_length_percentage,
-    resolve_margins, resolve_padding,
+    ResolvedContainerBox, ResolvedItemBox, accumulate_scrollable_overflow, apply_aspect_ratio,
+    auto_edges_to_zero, clamp_axis, own_scrollable_overflow, resolve_container_box, resolve_insets,
+    resolve_item_box, resolve_length_percentage, resolve_margins, resolve_padding,
 };
 use super::{compute_absolute_layout_with_static_position, hide_subtree, measure_absolute_layout};
 use crate::geometry::{Edges, Point, Size};
-use crate::style::{CoreStyle, LinearContainerStyle, LinearItemStyle};
+use crate::style::containment::size_containment;
+use crate::style::{Contain, CoreStyle, LinearContainerStyle, LinearItemStyle};
 use crate::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
     SizingMode,
@@ -1593,12 +1594,15 @@ where
         layout.margin = item.margin;
         item.key.node.set_unrounded_layout(&layout);
 
-        content_size.width = content_size
-            .width
-            .max(location.x + output.size.width.max(output.content_size.width));
-        content_size.height = content_size
-            .height
-            .max(location.y + output.size.height.max(output.content_size.height));
+        // A scroll-container child traps its interior scrollable overflow;
+        // any other child propagates border box ∪ content_size (§3.3).
+        accumulate_scrollable_overflow(
+            &mut content_size,
+            location,
+            output.size,
+            output.content_size,
+            item.key.node.style().overflow(),
+        );
     }
     content_size
 }
@@ -1711,12 +1715,13 @@ where
                 layout.order = layout_order;
                 layout.location.x += border.left;
                 layout.location.y += border.top;
-                content_size.width = content_size
-                    .width
-                    .max(layout.location.x + layout.size.width.max(layout.content_size.width));
-                content_size.height = content_size
-                    .height
-                    .max(layout.location.y + layout.size.height.max(layout.content_size.height));
+                accumulate_scrollable_overflow(
+                    &mut content_size,
+                    layout.location,
+                    layout.size,
+                    layout.content_size,
+                    child.style().overflow(),
+                );
                 child.set_unrounded_layout(&layout);
             }
             PositionProperty::Fixed => {
@@ -1755,6 +1760,11 @@ where
     N::Style: LinearContainerStyle + LinearItemStyle,
 {
     let style = node.style();
+    // Size containment substitutes contain-intrinsic-size for the container's
+    // natural content size; layout containment suppresses the exported
+    // baseline. Items are still measured and committed.
+    let size_containment = size_containment(&style);
+    let layout_contained = style.containment().contains(Contain::LAYOUT);
     let axes = LinearAxes::new(style.linear_direction(), style.direction());
     let align_items = style.align_items();
     let main_gravity = computed_main_gravity(style.justify_content(), axes);
@@ -1958,9 +1968,19 @@ where
         weight_sum,
     );
     let (natural, used_main) = natural_content_size(&items, axes);
+    // Under size containment the container ignores its items' natural extent
+    // and substitutes contain-intrinsic-size; items are still positioned and
+    // committed against the resulting definite inner size (they may overflow).
+    let container_natural = match size_containment {
+        Some(intrinsic) => Size::new(
+            intrinsic.width.unwrap_or(0.0),
+            intrinsic.height.unwrap_or(0.0),
+        ),
+        None => natural,
+    };
     if outer_size.width.is_none() {
         outer_size.width = Some(clamp_axis(
-            natural.width + container_inset.width,
+            container_natural.width + container_inset.width,
             min_size.width,
             max_size.width,
             container_inset.width,
@@ -1968,7 +1988,7 @@ where
     }
     if outer_size.height.is_none() {
         outer_size.height = Some(clamp_axis(
-            natural.height + container_inset.height,
+            container_natural.height + container_inset.height,
             min_size.height,
             max_size.height,
             container_inset.height,
@@ -1986,12 +2006,22 @@ where
     if !outer_definite.width && has_box_basis_dependency {
         // Starlight refreshes BoxInfo before the container's provisional
         // border-box size is clamped by min/max. A previously constrained axis
-        // keeps that constraint; an intrinsic axis uses its natural content
-        // size. Keep the final, clamped inner size solely for container
-        // geometry below.
+        // keeps that constraint; an intrinsic axis uses its content size. Keep
+        // the final, clamped inner size solely for container geometry below.
+        //
+        // Under size containment the container's used size ignores its items'
+        // natural extent (it is `contain-intrinsic-size`), so the cyclic-
+        // percentage basis for an intrinsic axis must be the *contained* inner
+        // size, not the uncontained natural one — matching flexbox/grid/relative,
+        // which resolve against their contained size here.
+        let contained_basis = if size_containment.is_some() {
+            final_inner_size
+        } else {
+            natural
+        };
         percentage_basis = Size::new(
-            inner_size.width.unwrap_or(natural.width),
-            inner_size.height.unwrap_or(natural.height),
+            inner_size.width.unwrap_or(contained_basis.width),
+            inner_size.height.unwrap_or(contained_basis.height),
         )
         .map(Some);
         for item in &mut items {
@@ -2016,7 +2046,11 @@ where
     position_items(&mut items, axes, final_inner_size, main_gravity, used_main);
     let content_origin = Point::new(border.left + padding.left, border.top + padding.top);
     if !commits_layout {
-        let baseline = container_baseline(&items, axes, final_inner_size, content_origin);
+        let baseline = if layout_contained {
+            None
+        } else {
+            container_baseline(&items, axes, final_inner_size, content_origin)
+        };
         return LayoutOutput::new(final_outer_size, final_outer_size)
             .with_first_baselines(Point::new(None, baseline));
     }
@@ -2056,7 +2090,15 @@ where
             content_size,
         );
     }
-    let baseline = container_baseline(&items, axes, final_inner_size, content_origin);
+    // css-contain-2 §3.3: a layout-contained container with `overflow: visible`
+    // reports its border box as its scrollable overflow (descendant overflow is
+    // ink-only); a scroll container keeps the interior union.
+    let content_size = own_scrollable_overflow(&style, final_outer_size, content_size);
+    let baseline = if layout_contained {
+        None
+    } else {
+        container_baseline(&items, axes, final_inner_size, content_origin)
+    };
     LayoutOutput::new(final_outer_size, content_size)
         .with_first_baselines(Point::new(None, baseline))
 }

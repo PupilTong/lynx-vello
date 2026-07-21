@@ -112,6 +112,29 @@ impl Cache {
         self.committed_layout.is_none() && self.measurements.iter().all(Option::is_none)
     }
 
+    /// The [`LayoutInput`] stored in the committed
+    /// ([`LayoutGoal::Commit`]) slot, if the node has been committed.
+    ///
+    /// This is the exact input the node was last laid out with — including any
+    /// caller-imposed constraints (a stretched cross size, a flex-grown main
+    /// size, a resolved percentage size) that made its **used** size differ
+    /// from its self-determined size. When re-rooting a relayout at a
+    /// size-and-layout containment boundary, this is the input to reuse via
+    /// [`compute_boundary_relayout`](crate::compute::compute_boundary_relayout):
+    /// re-deriving the boundary's size from `available_space` alone
+    /// ([`compute_root_layout`](crate::compute::compute_root_layout)) would drop
+    /// those constraints and desync the boundary from its un-invalidated
+    /// ancestors. Capture it **before**
+    /// [`invalidate_for_relayout`](crate::invalidate::invalidate_for_relayout)
+    /// clears the cache.
+    #[must_use]
+    pub const fn committed_input(&self) -> Option<LayoutInput> {
+        match self.committed_layout {
+            Some(slot) => Some(slot.input),
+            None => None,
+        }
+    }
+
     /// Looks up an entry usable for the complete `input` key (see the
     /// module docs for the matching contract and its allowed equivalences).
     #[must_use]

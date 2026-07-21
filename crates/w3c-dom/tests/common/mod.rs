@@ -45,7 +45,7 @@ use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_traits::{CSSPixel, DevicePixel};
-use w3c_dom::{Document, ElementState, NodeId, StyleEngine, StylesheetOrigin};
+use w3c_dom::{Document, ElementState, FlushSummary, NodeId, StyleEngine, StylesheetOrigin};
 
 /// The base URL every harness parse uses (mirrors `StyleEngine::new`).
 #[must_use]
@@ -178,9 +178,11 @@ impl Doc {
         specs.iter().map(|spec| self.el(parent, spec)).collect()
     }
 
-    /// Run a style flush (stylo's restyle traversal) over the whole tree.
-    pub fn flush(&mut self) {
-        self.engine.flush_document(&mut self.dom);
+    /// Run a style flush (stylo's restyle traversal) over the whole tree,
+    /// returning the [`FlushSummary`] (per-node restyle damage + whether a
+    /// traversal ran).
+    pub fn flush(&mut self) -> FlushSummary {
+        self.engine.flush_document(&mut self.dom)
     }
 
     /// The flushed computed style of `id`. Panics when `id` is stale or the

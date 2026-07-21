@@ -12,16 +12,20 @@
 //! retained its node.
 
 use std::fmt;
+// `NonNull` is only used by the debug-only flush-phase marker below, so the
+// import is gated to match (unused in release/bench builds otherwise).
 #[cfg(debug_assertions)]
 use std::ptr::NonNull;
 use std::sync::Arc;
 
+use neutron_star::tree::LayoutInput;
 use slab::Slab;
 use stylo::dom::OpaqueNode;
 use stylo::selector_parser::SnapshotMap;
 use stylo::shared_lock::SharedRwLock;
 use stylo::stylesheets::UrlExtraData;
 
+use crate::damage::StyleDamage;
 use crate::node::Node;
 
 /// A node's raw index in its owning document's slab.
@@ -45,6 +49,30 @@ pub(crate) fn about_blank_url_data() -> UrlExtraData {
 /// every node's slab backpointer remains valid until the document is dropped.
 pub struct Document<T> {
     nodes: Box<Slab<Node<T>>>,
+    /// Relayout boundaries that a boundary-stopped
+    /// [`invalidate_layout`](Self::invalidate_layout) parked for the next
+    /// layout pass, each paired with the exact [`LayoutInput`] it was last
+    /// committed with.
+    ///
+    /// When the ancestor walk stops at a `contain: strict` / skipped
+    /// `content-visibility` boundary it leaves that boundary's *ancestors'*
+    /// caches warm — so the next `compute_root_layout` from the document root
+    /// answers them from cache and never descends into the boundary. The
+    /// boundary's own interior still changed, so it is re-run in place with its
+    /// committed input via
+    /// [`compute_boundary_relayout`](neutron_star::compute::compute_boundary_relayout)
+    /// at the start of the layout pass (the engine-internal equivalent of
+    /// neutron-star's `invalidate_for_relayout` re-layout root, using real
+    /// parent links). Drained and cleared once the pass consumes it.
+    ///
+    /// The layout pass re-runs these **deepest-first** (by tree depth): when
+    /// nested boundaries are parked together, an outer boundary's re-run
+    /// re-imposes its inner boundaries' sizes and so must run last to have the
+    /// final say over an inner boundary's stale committed replay (see
+    /// `layout::host::run_layout`). Parking is duplicate-free by construction:
+    /// [`invalidate_layout`](Self::invalidate_layout) stops at a boundary
+    /// already present here instead of parking it twice or clearing past it.
+    relayout_roots: Vec<(NodeId, LayoutInput)>,
 }
 
 impl<T: fmt::Debug> fmt::Debug for Document<T> {
@@ -52,7 +80,7 @@ impl<T: fmt::Debug> fmt::Debug for Document<T> {
         f.debug_struct("Document")
             .field("root_element", &self.root_element().map(Node::id))
             .field("nodes", &self.nodes)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -78,7 +106,30 @@ impl<T> Document<T> {
             root, DOCUMENT_NODE_ID,
             "the DOM document node must occupy slab slot zero"
         );
-        Self { nodes }
+        Self {
+            nodes,
+            relayout_roots: Vec::new(),
+        }
+    }
+
+    /// Park a boundary-stopped relayout root for the next layout pass (see
+    /// [`relayout_roots`](Self::relayout_roots)). Called only by
+    /// [`invalidate_layout`](Self::invalidate_layout).
+    pub(crate) fn record_relayout_root(&mut self, id: NodeId, committed_input: LayoutInput) {
+        self.relayout_roots.push((id, committed_input));
+    }
+
+    /// The relayout boundaries parked since the last pass (see
+    /// [`relayout_roots`](Self::relayout_roots)).
+    pub(crate) fn relayout_roots(&self) -> &[(NodeId, LayoutInput)] {
+        &self.relayout_roots
+    }
+
+    /// Forget every parked relayout root (the layout pass has consumed them, or
+    /// an [`invalidate_layout_all`](Self::invalidate_layout_all) subsumed them
+    /// with a full re-layout).
+    pub(crate) fn clear_relayout_roots(&mut self) {
+        self.relayout_roots.clear();
     }
 
     /// Borrow the complete node slab.
@@ -437,18 +488,78 @@ impl<T> Document<T> {
             .is_some_and(|node| node.is_style_dirty() || node.has_dirty_descendants())
     }
 
-    /// Clear every node's dirty and snapshot state.
+    /// Reset **all** flush-scheduling state across the whole document,
+    /// restoring a clean baseline (tests, or an embedder resetting a tree).
+    /// Computed styles are left intact — only the scheduling state is cleared.
+    ///
+    /// Specifically, for every live node:
+    /// - clears `dirty_descendants`;
+    /// - drops any pending pre-mutation snapshot and clears the snapshot lifecycle bits;
+    /// - clears stylo's own restyle state on its `ElementData` (the pending `hint`, the accumulated
+    ///   `damage`, and the restyle flags) via `ElementData::clear_restyle_state`.
+    ///
+    /// Because [`Node::is_style_dirty`](crate::Node::is_style_dirty) is derived
+    /// from exactly this state (plus the presence of style data), a styled
+    /// element is clean afterward; a never-styled element stays dirty (it still
+    /// needs styling). The per-flush path uses the cheaper targeted
+    /// `harvest_flush` instead.
     pub fn clear_dirty(&mut self) {
         for (_, node) in &mut *self.nodes {
-            node.set_style_dirty(false);
             node.set_dirty_descendants_bit(false);
             node.snapshot = None;
             node.clear_snapshot_flags();
+            if let Some(wrapper) = node.stylo_data_mut() {
+                wrapper.borrow_mut().clear_restyle_state();
+            }
         }
     }
 
-    /// Clear state consumed by one completed style traversal.
-    pub(crate) fn complete_flush(&mut self, root: NodeId, snapshots: &SnapshotMap) {
+    /// Harvest the damage a style traversal produced and clear all of stylo's
+    /// per-node restyle state, called once from
+    /// [`StyleEngine::flush_document_with_sink`](crate::StyleEngine::flush_document_with_sink)
+    /// after the traversal returns.
+    ///
+    /// Two passes:
+    /// 1. **Snapshot cleanup.** Clears the snapshot lifecycle bits on exactly the snapshotted set
+    ///    (the [`SnapshotMap`] keys, so a snapshot on a node pruned mid-flush by a `display: none`
+    ///    ancestor is still cleared). The per-node snapshot boxes were already drained into
+    ///    `snapshots` by [`take_snapshot_map`](Self::take_snapshot_map), which is dropped when the
+    ///    flush returns.
+    /// 2. **Spine walk + harvest.** Walks from `root`, descending only where `dirty_descendants` is
+    ///    set (the bit stylo sets while descending to restyled nodes and — in this postorder-less
+    ///    servo config — never clears). `root` is always inspected even with no dirty bits. For
+    ///    each visited node with style data it reads `ElementData::damage`, and if non-empty
+    ///    streams `(id, StyleDamage(damage))` to `sink`; then it calls
+    ///    `ElementData::clear_restyle_state` (draining `hint` + `damage` + the restyle flags),
+    ///    unsets `dirty_descendants`, and clears the snapshot bits.
+    ///
+    /// Clearing damage on harvest is the fix for a latent re-traversal bug:
+    /// stylo never clears damage for a normal restyle, and in servo builds
+    /// `element_needs_traversal` (`vendor/stylo/style/traversal.rs:226-228`)
+    /// returns `true` for any element with non-empty damage — so without this
+    /// pass every previously-restyled node would be re-traversed on every
+    /// subsequent flush. The traversal already drained the visited nodes'
+    /// hints (via `RestyleHint::propagate`'s `mem::replace`); re-clearing them
+    /// here is belt-and-braces.
+    ///
+    /// The no-lingering-snapshot guarantee is scoped to **connected** nodes: a
+    /// node snapshotted and then detached before the flush keeps its slot and
+    /// `SNAPSHOT_PRESENT` bit (it is in neither the collected map nor the
+    /// spine). That orphan state is inert while detached, is dominated by the
+    /// subtree restyle a reattach schedules, and is swept by
+    /// [`clear_dirty`](Self::clear_dirty)'s whole-slab reset.
+    ///
+    /// # Safety discipline (crate-internal)
+    ///
+    /// Runs under `&mut Document` after `driver::traverse_dom` has returned, so
+    /// no rayon worker is concurrently touching any `ElementData` `UnsafeCell`;
+    /// the `stylo_data_mut` reborrow below is exclusive.
+    pub(crate) fn harvest_flush(
+        &mut self,
+        root: NodeId,
+        snapshots: &SnapshotMap,
+        sink: &mut dyn FnMut(NodeId, StyleDamage),
+    ) {
         for opaque in snapshots.keys() {
             if let Some(node) = self.nodes.get(opaque.0) {
                 node.clear_snapshot_flags();
@@ -457,12 +568,25 @@ impl<T> Document<T> {
 
         let mut stack = vec![root];
         while let Some(current) = stack.pop() {
-            let Some(node) = self.nodes.get(current) else {
+            let Some(node) = self.nodes.get_mut(current) else {
                 continue;
             };
-            node.set_style_dirty(false);
-            if node.has_dirty_descendants() {
-                node.set_dirty_descendants_bit(false);
+            let mut harvested = None;
+            if let Some(wrapper) = node.stylo_data_mut() {
+                let mut data = wrapper.borrow_mut();
+                let damage = data.damage;
+                data.clear_restyle_state();
+                if !damage.is_empty() {
+                    harvested = Some(StyleDamage::from(damage));
+                }
+            }
+            if let Some(damage) = harvested {
+                sink(current, damage);
+            }
+            let descend = node.has_dirty_descendants();
+            node.set_dirty_descendants_bit(false);
+            node.clear_snapshot_flags();
+            if descend {
                 stack.extend_from_slice(&node.children);
             }
         }

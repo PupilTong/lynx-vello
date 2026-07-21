@@ -27,13 +27,15 @@ use stylo::values::specified::align::AlignFlags;
 
 use super::compute_absolute_layout;
 use super::util::{
-    ItemKey, OrderedItem, ResolvedContainerBox, ResolvedItemBox, box_inset_size, clamp_axis,
-    normalize_content_alignment, normalize_item_alignment, preferred_size_definiteness,
-    relative_offset, resolve_container_box, resolve_gap, resolve_gap_axis, resolve_item_box,
-    resolve_length_percentage, resolve_style_size, sort_and_assign_layout_order, used_aspect_ratio,
+    ItemKey, OrderedItem, ResolvedContainerBox, ResolvedItemBox, accumulate_scrollable_overflow,
+    box_inset_size, clamp_axis, normalize_content_alignment, normalize_item_alignment,
+    own_scrollable_overflow, preferred_size_definiteness, relative_offset, resolve_container_box,
+    resolve_gap, resolve_gap_axis, resolve_item_box, resolve_length_percentage, resolve_style_size,
+    sort_and_assign_layout_order, used_aspect_ratio,
 };
 use crate::geometry::{Edges, Point, Size};
-use crate::style::{CoreStyle, FlexContainerStyle, FlexItemStyle};
+use crate::style::containment::size_containment;
+use crate::style::{Contain, CoreStyle, FlexContainerStyle, FlexItemStyle};
 use crate::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
     SizingMode,
@@ -1539,10 +1541,15 @@ where
             layout.margin = item.margin;
             item.key.node.set_unrounded_layout(&layout);
 
-            let overflow_width = output.size.width.max(output.content_size.width);
-            let overflow_height = output.size.height.max(output.content_size.height);
-            content_size.width = content_size.width.max(location.x + overflow_width);
-            content_size.height = content_size.height.max(location.y + overflow_height);
+            // A scroll-container child traps its interior scrollable overflow;
+            // any other child propagates border box ∪ content_size (§3.3).
+            accumulate_scrollable_overflow(
+                &mut content_size,
+                location,
+                output.size,
+                output.content_size,
+                item.overflow,
+            );
 
             if first_baseline.is_none()
                 && (axes.main == Axis::Vertical || item.align_self == AlignFlags::BASELINE)
@@ -1696,12 +1703,13 @@ where
                 layout.order = key.layout_order;
                 layout.location.x += border.left;
                 layout.location.y += border.top;
-                content_size.width = content_size
-                    .width
-                    .max(layout.location.x + layout.size.width.max(layout.content_size.width));
-                content_size.height = content_size
-                    .height
-                    .max(layout.location.y + layout.size.height.max(layout.content_size.height));
+                accumulate_scrollable_overflow(
+                    &mut content_size,
+                    layout.location,
+                    layout.size,
+                    layout.content_size,
+                    item.overflow,
+                );
                 key.node.set_unrounded_layout(&layout);
             }
             // The containing block is not the layout parent (CSS `fixed`):
@@ -1731,6 +1739,12 @@ where
     // This borrowed style view remains live for the whole algorithm;
     // recursive calls mutate only host-owned per-node layout slots.
     let style = node.style();
+    // Size containment substitutes contain-intrinsic-size for the container's
+    // content-derived auto size (§4.2); layout containment suppresses the
+    // baseline the container would export to its parent. Children are still
+    // laid out either way.
+    let size_containment = size_containment(&style);
+    let layout_contained = style.containment().contains(Contain::LAYOUT);
     let flex_wrap = style.flex_wrap();
     let axes = Axes::new(style.flex_direction(), flex_wrap, style.direction());
     let rtl = style.direction() == direction::T::Rtl;
@@ -1838,16 +1852,25 @@ where
 
     let inset_main = axes.main.size(container_inset_size);
     if axes.main.size(outer_size).is_none() {
-        let outer_main = determine_auto_main_size(
-            &items,
-            &lines,
-            main_gap,
-            axes,
-            line_available_main,
-            inset_main,
-            axes.main.size(min_size),
-            axes.main.size(max_size),
-        );
+        let outer_main = if let Some(intrinsic) = size_containment {
+            clamp_axis(
+                axes.main.size(intrinsic).unwrap_or(0.0) + inset_main,
+                axes.main.size(min_size),
+                axes.main.size(max_size),
+                inset_main,
+            )
+        } else {
+            determine_auto_main_size(
+                &items,
+                &lines,
+                main_gap,
+                axes,
+                line_available_main,
+                inset_main,
+                axes.main.size(min_size),
+                axes.main.size(max_size),
+            )
+        };
         axes.main.set_size(&mut outer_size, Some(outer_main));
         axes.main
             .set_size(&mut inner_size, Some((outer_main - inset_main).max(0.0)));
@@ -1873,15 +1896,24 @@ where
     let cross_was_definite = axes.cross.size(outer_size).is_some();
     let inset_cross = axes.cross.size(container_inset_size);
     if !cross_was_definite {
-        let outer_cross = determine_auto_cross_size(
-            &lines,
-            axes.cross.size(gap),
-            inset_cross,
-            axes.cross.size(min_size),
-            axes.cross.size(max_size),
-            axes,
-            axes.cross.size(inner_available_space),
-        );
+        let outer_cross = if let Some(intrinsic) = size_containment {
+            clamp_axis(
+                axes.cross.size(intrinsic).unwrap_or(0.0) + inset_cross,
+                axes.cross.size(min_size),
+                axes.cross.size(max_size),
+                inset_cross,
+            )
+        } else {
+            determine_auto_cross_size(
+                &lines,
+                axes.cross.size(gap),
+                inset_cross,
+                axes.cross.size(min_size),
+                axes.cross.size(max_size),
+                axes,
+                axes.cross.size(inner_available_space),
+            )
+        };
         axes.cross.set_size(&mut outer_size, Some(outer_cross));
         axes.cross
             .set_size(&mut inner_size, Some((outer_cross - inset_cross).max(0.0)));
@@ -1973,8 +2005,15 @@ where
     let provisional_baseline =
         first_container_baseline(&items, &lines, axes, inner_size, content_origin);
     if matches!(input.goal, LayoutGoal::Measure(_)) {
+        // Layout containment makes the box an independent formatting context
+        // whose contents cannot contribute a baseline to the parent.
+        let baseline = if layout_contained {
+            None
+        } else {
+            provisional_baseline
+        };
         return LayoutOutput::new(outer_size, outer_size)
-            .with_first_baselines(Point::new(None, provisional_baseline));
+            .with_first_baselines(Point::new(None, baseline));
     }
 
     let (mut content_size, first_baseline) = perform_in_flow_layout(
@@ -2003,9 +2042,18 @@ where
         align_items,
     );
     content_size = content_size.zip_map(absolute_content_size, f32::max);
+    // css-contain-2 §3.3: with `overflow: visible`, a layout-contained box's
+    // descendant overflow is ink-only, so its scrollable overflow collapses to
+    // its border box. A scroll container keeps the interior union (its own
+    // scroll range).
+    let content_size = own_scrollable_overflow(&style, outer_size, content_size);
 
-    LayoutOutput::new(outer_size, content_size)
-        .with_first_baselines(Point::new(None, first_baseline.or(provisional_baseline)))
+    let baseline = if layout_contained {
+        None
+    } else {
+        first_baseline.or(provisional_baseline)
+    };
+    LayoutOutput::new(outer_size, content_size).with_first_baselines(Point::new(None, baseline))
 }
 
 #[cfg(test)]

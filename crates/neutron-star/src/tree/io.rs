@@ -212,8 +212,13 @@ pub struct LayoutOutput {
     /// The node's border-box size.
     pub size: Size<f32>,
     /// The node's scrollable-overflow size: the extent of content measured
-    /// from the border-box origin, ≥ `size` minus borders. Feeds
-    /// ancestors' own `content_size` and the host's scroll ranges.
+    /// from the border-box origin, ≥ `size` minus borders. This is the node's
+    /// **own** scroll range and the host's scroll extent. It feeds an
+    /// ancestor's `content_size` only when the node is *not* a scroll container
+    /// (`overflow: visible`): a scroll container traps its interior overflow
+    /// and contributes only its border box upward (CSS Overflow 3 §3.3). A
+    /// layout-contained box with `overflow: visible` reports its border box
+    /// here (descendant overflow is ink overflow, css-contain-2 §3.3).
     pub content_size: Size<f32>,
     /// First-baseline offsets from the border-box origin, per axis, if the
     /// node has baselines (`y` is the horizontal-text baseline used by

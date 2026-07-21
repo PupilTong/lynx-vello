@@ -17,7 +17,7 @@ use neutron_star::cache::Cache;
 use neutron_star::compute::{
     FnLeafMeasurer, LeafMeasureInput, LeafMetrics, compute_cached_layout, compute_flexbox_layout,
     compute_grid_layout, compute_leaf_layout, compute_linear_layout, compute_relative_layout,
-    hide_subtree,
+    compute_skipped_contents_layout, hide_subtree,
 };
 use neutron_star::prelude::*;
 use style_traits::values::specified::AllowedNumericType;
@@ -29,10 +29,11 @@ use stylo::values::computed::length::NonNegativeLengthPercentageOrNormal;
 use stylo::values::computed::length_percentage::{CalcNode, ComputedLeaf};
 use stylo::values::computed::lynx_layout::{RelativeAlign, RelativeReference};
 use stylo::values::computed::{
-    AspectRatio, Au, BorderSideWidth, ContentDistribution, Display, FlexBasis, GridAutoFlow,
-    GridLine, GridTemplateComponent, ImplicitGridTracks, Inset, ItemPlacement, JustifyItems,
-    Length, LengthPercentage, Margin, MaxSize, NonNegativeLengthPercentage, NonNegativeNumber,
-    Overflow, Percentage, PositionProperty, Ratio, SelfAlignment, Size as StyleSize,
+    AspectRatio, Au, BorderSideWidth, Contain, ContainIntrinsicSize, ContentDistribution, Display,
+    FlexBasis, GridAutoFlow, GridLine, GridTemplateComponent, ImplicitGridTracks, Inset,
+    ItemPlacement, JustifyItems, Length, LengthPercentage, Margin, MaxSize,
+    NonNegativeLengthPercentage, NonNegativeNumber, Overflow, Percentage, PositionProperty, Ratio,
+    SelfAlignment, Size as StyleSize,
 };
 use stylo::values::generics::position::PreferredRatio;
 use stylo::values::generics::{NonNegative, grid as generic_grid};
@@ -200,6 +201,16 @@ pub(super) fn inset_pct(fraction: f32) -> Inset {
 /// A used border width in CSS pixels.
 pub(super) fn border_px(value: f32) -> BorderSideWidth {
     BorderSideWidth(Au::from_f32_px(value))
+}
+
+/// `contain-intrinsic-*: <length>`.
+pub(super) fn contain_intrinsic_px(value: f32) -> ContainIntrinsicSize {
+    ContainIntrinsicSize::Length(NonNegative(Length::new(value)))
+}
+
+/// `contain-intrinsic-*: auto <length>` (treated as its length in v1).
+pub(super) fn contain_intrinsic_auto_px(value: f32) -> ContainIntrinsicSize {
+    ContainIntrinsicSize::AutoLength(NonNegative(Length::new(value)))
 }
 
 /// `flex-basis: auto`.
@@ -506,6 +517,10 @@ pub(super) struct TestStyle {
     pub(super) relative_align: Edges<RelativeAlign>,
     pub(super) relative_adjacent: Edges<RelativeReference>,
     pub(super) relative_center: relative_center::T,
+    pub(super) containment: Contain,
+    pub(super) contain_intrinsic_width: ContainIntrinsicSize,
+    pub(super) contain_intrinsic_height: ContainIntrinsicSize,
+    pub(super) skips_contents: bool,
 }
 
 impl Default for TestStyle {
@@ -553,6 +568,10 @@ impl Default for TestStyle {
             relative_align: Edges::uniform(RELATIVE_NONE),
             relative_adjacent: Edges::uniform(RELATIVE_NONE),
             relative_center: relative_center::T::None,
+            containment: Contain::empty(),
+            contain_intrinsic_width: ContainIntrinsicSize::None,
+            contain_intrinsic_height: ContainIntrinsicSize::None,
+            skips_contents: false,
         }
     }
 }
@@ -612,6 +631,22 @@ impl CoreStyle for TestStyle {
 
     fn direction(&self) -> direction::T {
         self.direction
+    }
+
+    fn containment(&self) -> Contain {
+        self.containment
+    }
+
+    fn contain_intrinsic_width(&self) -> ContainIntrinsicSize {
+        self.contain_intrinsic_width.clone()
+    }
+
+    fn contain_intrinsic_height(&self) -> ContainIntrinsicSize {
+        self.contain_intrinsic_height.clone()
+    }
+
+    fn skips_contents(&self) -> bool {
+        self.skips_contents
     }
 }
 
@@ -1266,6 +1301,14 @@ impl<'t> LayoutNode for TestRef<'t> {
             return LayoutOutput::HIDDEN;
         }
 
+        // content-visibility skipping routes here before the cache boundary,
+        // mirroring the display:none discipline (see compute module docs).
+        if node.style.skips_contents {
+            let output = compute_skipped_contents_layout(self, input);
+            self.slots().output.set(output);
+            return output;
+        }
+
         let output = compute_cached_layout(self, input, |handle, input| match display {
             TestDisplay::Flex => compute_flexbox_layout(handle, input),
             TestDisplay::Grid => compute_grid_layout(handle, input),
@@ -1476,6 +1519,13 @@ impl TestTree {
 
     pub(super) fn source_node_mut(&mut self, id: TestId) -> &mut TestSourceNode {
         &mut self.nodes[id]
+    }
+
+    /// The [`LayoutInput`] a node's reference cache was last committed with,
+    /// if caching is enabled and it holds a committed layout. The containment
+    /// benchmark captures a relayout boundary's input before invalidation.
+    pub(super) fn committed_input(&self, id: TestId) -> Option<LayoutInput> {
+        self.caches.as_ref()?[id].borrow().committed_input()
     }
 
     /// The interior-mutable session slots of one node; tests mutate them
