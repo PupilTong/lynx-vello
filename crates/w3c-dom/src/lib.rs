@@ -1,3 +1,5 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
 //! `w3c-dom` — a generic, stylo-integrated W3C-DOM-subset document tree.
 //!
 //! This crate is a **pure DOM layer** composed of [`Node<T>`]s, plus
