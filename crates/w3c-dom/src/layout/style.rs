@@ -241,11 +241,7 @@ fn lower_relative_logical(physical: i32, logical: i32) -> i32 {
 /// lending discipline the engine's style protocol documents.
 pub struct StyleView<'dom, T> {
     node: &'dom Node<T>,
-    /// Geometry style. Text nodes use anonymous-box initial values.
     style: Arc<ComputedValues>,
-    /// Inherited text/run style for a text node, taken from its parent.
-    /// Elements use `style` for both roles and leave this empty.
-    text_style: Option<Arc<ComputedValues>>,
 }
 
 impl<T> std::fmt::Debug for StyleView<'_, T> {
@@ -264,33 +260,113 @@ impl<'dom, T> StyleView<'dom, T> {
     /// [`hide_subtree`](neutron_star::compute::hide_subtree) ever visits
     /// them, without reading styles).
     pub(crate) fn of(node: &'dom Node<T>) -> Self {
-        let (style, text_style) = if node.is_text_node() {
-            (
-                super::ANONYMOUS_STYLE.clone(),
-                node.parent()
-                    .and_then(Node::computed_style)
-                    .or_else(|| Some(super::ANONYMOUS_STYLE.clone())),
-            )
+        let style = if node.is_text_node() {
+            None
         } else {
-            (
-                node.computed_style()
-                    .unwrap_or_else(|| super::ANONYMOUS_STYLE.clone()),
-                None,
-            )
+            node.computed_style()
         };
         Self {
             node,
-            style,
-            text_style,
+            style: style.unwrap_or_else(|| super::ANONYMOUS_STYLE.clone()),
         }
     }
 
     fn position_struct(&self) -> &PositionStruct {
         self.style.get_position()
     }
+}
+
+/// Text-only style view: anonymous-box geometry plus inherited paragraph and
+/// run values. Keeping this separate leaves the ubiquitous box [`StyleView`]
+/// at two words; only literal text pays for the second computed-style handle.
+pub(crate) struct TextStyleView<'dom, T> {
+    box_style: StyleView<'dom, T>,
+    text_style: Arc<ComputedValues>,
+}
+
+impl<T> std::fmt::Debug for TextStyleView<'_, T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("TextStyleView")
+            .field(&self.box_style.node.id())
+            .finish()
+    }
+}
+
+impl<'dom, T> TextStyleView<'dom, T> {
+    pub(crate) fn of(node: &'dom Node<T>) -> Self {
+        debug_assert!(node.is_text_node(), "text style requires a text node");
+        Self {
+            box_style: StyleView::of(node),
+            text_style: node
+                .parent()
+                .and_then(Node::computed_style)
+                .unwrap_or_else(|| super::ANONYMOUS_STYLE.clone()),
+        }
+    }
 
     fn text_values(&self) -> &ComputedValues {
-        self.text_style.as_deref().unwrap_or(&self.style)
+        &self.text_style
+    }
+}
+
+impl<T> CoreStyle for TextStyleView<'_, T> {
+    fn display(&self) -> Display {
+        self.box_style.display()
+    }
+
+    fn visibility(&self) -> visibility::T {
+        self.box_style.visibility()
+    }
+
+    fn position(&self) -> PositionProperty {
+        self.box_style.position()
+    }
+
+    fn inset(&self) -> Edges<&Inset> {
+        self.box_style.inset()
+    }
+
+    fn size(&self) -> Size<&StyleSize> {
+        self.box_style.size()
+    }
+
+    fn min_size(&self) -> Size<&StyleSize> {
+        self.box_style.min_size()
+    }
+
+    fn max_size(&self) -> Size<&MaxSize> {
+        self.box_style.max_size()
+    }
+
+    fn aspect_ratio(&self) -> AspectRatio {
+        self.box_style.aspect_ratio()
+    }
+
+    fn margin(&self) -> Edges<&Margin> {
+        self.box_style.margin()
+    }
+
+    fn padding(&self) -> Edges<&NonNegativeLengthPercentage> {
+        self.box_style.padding()
+    }
+
+    fn border(&self) -> Edges<BorderSideWidth> {
+        self.box_style.border()
+    }
+
+    fn overflow(&self) -> Point<Overflow> {
+        self.box_style.overflow()
+    }
+
+    fn box_sizing(&self) -> box_sizing::T {
+        self.box_style.box_sizing()
+    }
+
+    fn direction(&self) -> direction::T {
+        // Direction is inherited text state and participates in physical
+        // alignment; anonymous-box geometry otherwise stays at initial CSS.
+        self.text_values().clone_direction()
     }
 }
 
@@ -454,7 +530,7 @@ impl<T> FlexContainerStyle for StyleView<'_, T> {
     }
 }
 
-impl<T> TextContainerStyle for StyleView<'_, T> {
+impl<T> TextContainerStyle for TextStyleView<'_, T> {
     fn text_align(&self) -> TextAlign {
         self.text_values().get_inherited_text().clone_text_align()
     }
@@ -480,7 +556,7 @@ impl<T> TextContainerStyle for StyleView<'_, T> {
     }
 }
 
-impl<T> TextRunStyle for StyleView<'_, T> {
+impl<T> TextRunStyle for TextStyleView<'_, T> {
     fn font_family(&self) -> FontFamily {
         self.text_values().get_font().clone_font_family()
     }
@@ -703,5 +779,20 @@ impl<T> RelativeItemStyle for StyleView<'_, T> {
 
     fn order(&self) -> i32 {
         FlexItemStyle::order(self)
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use core::mem::size_of;
+
+    use super::{StyleView, TextStyleView};
+
+    #[test]
+    fn ordinary_style_views_stay_two_words() {
+        let word = size_of::<usize>();
+        assert_eq!(size_of::<StyleView<'static, ()>>(), 2 * word);
+        assert_eq!(size_of::<TextStyleView<'static, ()>>(), 3 * word);
     }
 }

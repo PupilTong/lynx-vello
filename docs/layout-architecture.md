@@ -41,11 +41,13 @@ subtrees), device-pixel rounding, and automatic
 style-damage→`invalidate_layout` consumption with in-place boundary re-layout
 that refreshes the boundary's scrollable `content_size`, with
 replaced leaves reading their node-owned `NaturalSize`, plus W3C text nodes
-using inherited parent text style, a lazily-created document-owned `TextContext`, and
-per-node lazily retained artifacts. Mutually exclusive natural-size and text
-state reuse the node's existing nullable content pointer, so ordinary
-container nodes do not carry either payload. Updating replaced metadata automatically
-invalidates the affected cache path; it is not exposed through `WidgetTree`
+using a dedicated text-only inherited-style view, a lazily-created
+document-owned `TextContext`, and per-node lazily retained artifacts. Keeping
+the text-only handle separate leaves the box-algorithm style view at two words.
+Mutually exclusive natural-size and text state reuse the node's existing
+nullable content pointer, so ordinary container nodes do not carry either
+payload. Updating replaced metadata automatically invalidates the affected
+cache path; it is not exposed through `WidgetTree`
 or Element PAPI. Text truncation, inline boxes, element-backed raw text, and
 Lynx-specific text attribute policy are not implemented yet. Crate
 rustdoc is the API reference; this document is the rationale, performance

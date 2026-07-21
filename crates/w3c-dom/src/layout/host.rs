@@ -31,7 +31,7 @@ use neutron_star::tree::{
 };
 
 use super::style::{
-    DisplayMode, StyleView, display_mode, establishes_absolute_containing_block,
+    DisplayMode, StyleView, TextStyleView, display_mode, establishes_absolute_containing_block,
     establishes_fixed_containing_block, resolve_position, skips_contents,
 };
 use crate::document::Document;
@@ -95,8 +95,8 @@ impl<'dom, T> LayoutNode for &'dom Node<T> {
             DisplayMode::Linear => compute_linear_layout(node, input),
             DisplayMode::Relative => compute_relative_layout(node, input),
             DisplayMode::Leaf => {
-                let view = node.style();
                 let output = if node.is_text_node() {
+                    let view = TextStyleView::of(node);
                     let run = TextRun {
                         text: node.text().unwrap_or_default(),
                         style: &view,
@@ -112,6 +112,7 @@ impl<'dom, T> LayoutNode for &'dom Node<T> {
                     );
                     measurer.compute_layout(input)
                 } else {
+                    let view = node.style();
                     #[cfg(feature = "layout-test-utils")]
                     if let Some(metrics) = node.test_leaf_metrics() {
                         compute_leaf_layout_with_measurement_for_testing(

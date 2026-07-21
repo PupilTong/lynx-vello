@@ -459,20 +459,34 @@ fn apply_measured_aspect_ratio(
 /// A plain specified `<ratio>` uses the box selected by `box-sizing`.
 /// Natural ratios and every `auto <ratio>` branch use the content box per
 /// CSS Sizing 4, independently of the element's `box-sizing` value.
+/// The private scalar stays one word in the leaf hot path: zero means no
+/// ratio, a positive value selects content-box sizing, and a negative value
+/// stores the magnitude for border-box sizing. Constructors enforce the
+/// positive finite ratio invariant before the sign is used as the tag.
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum PreferredAspectRatio {
-    None,
-    ContentBox(f32),
-    BorderBox(f32),
-}
+struct PreferredAspectRatio(f32);
 
 impl PreferredAspectRatio {
+    const NONE: Self = Self(0.0);
+
+    fn content_box(ratio: f32) -> Self {
+        debug_assert!(ratio.is_finite() && ratio > 0.0);
+        Self(ratio)
+    }
+
+    fn border_box(ratio: f32) -> Self {
+        debug_assert!(ratio.is_finite() && ratio > 0.0);
+        Self(-ratio)
+    }
+
     #[inline]
     fn components(self) -> Option<(f32, box_sizing::T)> {
-        match self {
-            Self::None => None,
-            Self::ContentBox(ratio) => Some((ratio, box_sizing::T::ContentBox)),
-            Self::BorderBox(ratio) => Some((ratio, box_sizing::T::BorderBox)),
+        if self.0 > 0.0 {
+            Some((self.0, box_sizing::T::ContentBox))
+        } else if self.0 < 0.0 {
+            Some((-self.0, box_sizing::T::BorderBox))
+        } else {
+            None
         }
     }
 }
@@ -489,6 +503,11 @@ struct LeafSizing {
     aspect_ratio: PreferredAspectRatio,
 }
 
+#[inline(always)]
+#[allow(
+    clippy::inline_always,
+    reason = "keeps the compact leaf sizing state in its caller on the measured hot path"
+)]
 fn resolve_leaf_sizing(
     input: LayoutInput,
     style: &impl CoreStyle,
@@ -510,7 +529,7 @@ fn resolve_leaf_sizing(
             input.known_dimensions,
             Size::NONE,
             Size::NONE,
-            PreferredAspectRatio::None,
+            PreferredAspectRatio::NONE,
         ),
         SizingMode::InherentSize => {
             let aspect_ratio =
@@ -590,12 +609,12 @@ fn preferred_aspect_ratio(
         specified
     };
     let Some(ratio) = ratio else {
-        return PreferredAspectRatio::None;
+        return PreferredAspectRatio::NONE;
     };
     if value.auto || box_sizing == box_sizing::T::ContentBox {
-        PreferredAspectRatio::ContentBox(ratio)
+        PreferredAspectRatio::content_box(ratio)
     } else {
-        PreferredAspectRatio::BorderBox(ratio)
+        PreferredAspectRatio::border_box(ratio)
     }
 }
 
@@ -1056,7 +1075,7 @@ mod tests {
             Size::new(Some(40.0), Some(50.0)),
             both_indefinite,
             Some(RequestedAxis::Vertical),
-            PreferredAspectRatio::ContentBox(2.0),
+            PreferredAspectRatio::content_box(2.0),
             padding_border,
         );
         assert_eq!(vertical, Size::new(Some(90.0), Some(50.0)));
@@ -1065,7 +1084,7 @@ mod tests {
             Size::new(Some(100.0), Some(20.0)),
             both_indefinite,
             Some(RequestedAxis::Both),
-            PreferredAspectRatio::ContentBox(2.0),
+            PreferredAspectRatio::content_box(2.0),
             padding_border,
         );
         assert_eq!(horizontal, Size::new(Some(100.0), Some(55.0)));
@@ -1074,7 +1093,7 @@ mod tests {
             Size::new(Some(100.0), Some(20.0)),
             both_indefinite,
             None,
-            PreferredAspectRatio::BorderBox(2.0),
+            PreferredAspectRatio::border_box(2.0),
             padding_border,
         );
         assert_eq!(border_box, Size::new(Some(100.0), Some(50.0)));
@@ -1085,7 +1104,7 @@ mod tests {
                 unchanged,
                 Size::new(false, true),
                 None,
-                PreferredAspectRatio::ContentBox(2.0),
+                PreferredAspectRatio::content_box(2.0),
                 padding_border,
             ),
             unchanged
@@ -1095,7 +1114,7 @@ mod tests {
                 unchanged,
                 both_indefinite,
                 None,
-                PreferredAspectRatio::ContentBox(0.0),
+                PreferredAspectRatio(0.0),
                 padding_border,
             ),
             unchanged
