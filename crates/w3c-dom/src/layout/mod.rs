@@ -7,8 +7,8 @@
 //! the document itself, with no wrapper handle, no adapter objects, and no
 //! engine-side tree or style copies. Flexbox, Grid, and Starlight
 //! Linear/Relative containers dispatch to their neutron-star algorithms;
-//! `display: none` subtrees are hidden; leaves are measured through the
-//! embedder payload's [`MeasureLeaf`] hook.
+//! `display: none` subtrees are hidden; replaced leaves consume the
+//! node-owned [`NaturalSize`]. There is no payload measurement callback.
 //!
 //! ```text
 //!  Document<T> + ComputedValues          (immutable for the pass)
@@ -30,15 +30,15 @@
 //! style flush wrote (materialized once per *style change*, per the
 //! protocol's lending rule); the `Arc` in the view only keeps that storage
 //! borrowable. Text nodes are lent the fork's initial values — the
-//! anonymous box CSS wraps a text run in; their content comes from the
-//! measurement hook.
+//! anonymous box CSS wraps a text run in. Their concrete Parley content path
+//! remains a higher-layer integration task.
 //!
 //! # Layout results live on the node
 //!
 //! Every [`Node`] carries its own `LayoutData` (an
 //! `AtomicRefCell`, the same shape Servo uses for per-node layout data):
-//! the measurement cache, the unrounded and device-snapped [`Layout`]s, and
-//! the out-of-flow bookkeeping. Read results with
+//! replaced-content natural size, the measurement cache, the unrounded and
+//! device-snapped [`Layout`]s, and the out-of-flow bookkeeping. Read results with
 //! [`Node::layout`](crate::Node::layout) /
 //! [`Node::unrounded_layout`](crate::Node::unrounded_layout). Because the
 //! state lives **on** the node, it is created and dropped with the node —
@@ -58,15 +58,15 @@
 //! before this layout pass. The `&mut Document` it takes is what guarantees
 //! the tree cannot change mid-pass.
 //!
-//! # Leaf content measures through the payload
+//! # Replaced content uses node-owned natural size
 //!
-//! Content measurement (text runs, images, replaced content) is the
-//! embedder's: implement [`MeasureLeaf`] on the document's payload type
-//! `T`. The hook receives the node and the engine's content-box
-//! constraints; the default measures nothing (`()` implements it). Hooks
-//! run through `&self` — an embedder retaining artifacts (a shaped
-//! paragraph for painting) uses interior mutability in its payload, keyed
-//! by [`LeafMeasureInput::goal`].
+//! Resource acquisition and decoding live above this crate. Once image
+//! metadata is available, call [`Document::set_natural_size`]; leaf layout
+//! reads the resulting [`NaturalSize`] directly from the node. The setter
+//! automatically clears the node-to-root measurement-cache path so the next
+//! layout pass observes the new dimensions. This is intrinsic replaced
+//! content data, not a synthesized CSS `contain-intrinsic-size` value, and no
+//! arbitrary embedder measurement callback exists.
 //!
 //! # Using it
 //!
@@ -148,8 +148,8 @@
 //!
 //! - **character-data / child-list** mutations that leave every computed style identical (stylo
 //!   emits no damage for them);
-//! - **external-state measurement inputs** — anything a [`MeasureLeaf`] hook reads that is not a
-//!   computed style (a font load, an image's intrinsic size arriving, a locale flip).
+//! - **content inputs** that are not computed style. The internal natural-size update path
+//!   performs its own targeted invalidation.
 //!
 //! When in doubt, [`Document::invalidate_layout_all`] is always correct,
 //! merely slower.
@@ -157,7 +157,8 @@
 //! # What is deliberately *not* here (yet)
 //!
 //! - **Text shaping.** The Parley-backed text engine stays outside this crate (`neutron-star`'s
-//!   `text` feature) and plugs in through the [`MeasureLeaf`] hook.
+//!   `text` feature). The future widget integration uses its concrete
+//!   `TextMeasurer::compute_layout` path; w3c-dom deliberately exposes no generic content hook.
 //! - **Flow (block/inline) container layout.** neutron-star has no flow algorithm yet; a flow or
 //!   `display: contents` node lays out as a leaf and its children are zeroed. Lynx trees give every
 //!   element a supported display via the embedder's UA sheet, so this arm is a generic-DOM
@@ -184,7 +185,7 @@ mod style;
 use std::sync::LazyLock;
 
 use neutron_star::cache::Cache;
-pub use neutron_star::compute::{LeafMeasureInput, LeafMetrics};
+pub use neutron_star::compute::NaturalSize;
 pub use neutron_star::geometry::{Edges, Point, Size};
 use neutron_star::invalidate::is_relayout_boundary;
 use neutron_star::style::CoreStyle;
@@ -195,31 +196,6 @@ use stylo::servo_arc::Arc;
 pub use self::style::StyleView;
 use crate::document::Document;
 use crate::flush::Parallelism;
-use crate::node::Node;
-
-/// The embedder's leaf content measurement hook, implemented by the
-/// document's opaque payload type `T`.
-///
-/// Consulted for every leaf-laid node — childless boxes and the
-/// flow-container fallback — whose size is not already fully determined by
-/// its box styles: text runs, images, and other replaced content measure
-/// here. Measurement must not touch the document; it may retain
-/// embedder-side artifacts (a shaped paragraph for painting) in the payload
-/// via interior mutability, keyed by [`LeafMeasureInput::goal`]. The
-/// default measures nothing.
-pub trait MeasureLeaf: Sized {
-    /// Measure `node`'s content under the engine's content-box constraints.
-    ///
-    /// `self` is `node`'s own payload (`node.payload()`), passed as the
-    /// receiver so payload state is directly at hand.
-    fn measure_leaf(&self, node: &Node<Self>, input: LeafMeasureInput) -> LeafMetrics {
-        let _ = (node, input);
-        LeafMetrics::default()
-    }
-}
-
-/// The no-op payload measures nothing.
-impl MeasureLeaf for () {}
 
 /// One node's layout state, carried by the node itself
 /// ([`Node::layout_data`](crate::Node)): created with the node, dropped with
@@ -229,6 +205,10 @@ impl MeasureLeaf for () {}
 /// the node stays shareable for stylo's parallel restyle traversal, while
 /// the (single-threaded, post-style) layout pass takes short scoped borrows.
 pub(crate) struct LayoutData {
+    /// Decoded intrinsic dimensions/ratio for closed replaced content such
+    /// as images. Resource acquisition and decoding live above this crate;
+    /// layout only consumes the resulting value.
+    pub(crate) natural_size: NaturalSize,
     /// The neutron-star **measurement cache** — not a copy of the final
     /// result, but memoized answers to the different constraint questions
     /// (`LayoutInput`) the parent algorithms ask during sizing. This is the
@@ -253,6 +233,7 @@ pub(crate) struct LayoutData {
 impl Default for LayoutData {
     fn default() -> Self {
         Self {
+            natural_size: NaturalSize::NONE,
             measure_cache: Cache::new(),
             unrounded: Layout::default(),
             rounded: Layout::default(),
@@ -263,18 +244,17 @@ impl Default for LayoutData {
 
 /// The style lent to text nodes (and any style-less node): the fork's
 /// initial computed values — exactly the box style CSS gives the anonymous
-/// box wrapping a text run. Content sizing comes from the [`MeasureLeaf`]
-/// hook, not from box properties. Process-wide, like the engine's own
-/// lendable defaults.
+/// box wrapping a text run. Process-wide, like the engine's own lendable
+/// defaults.
 pub(crate) static ANONYMOUS_STYLE: LazyLock<Arc<ComputedValues>> = LazyLock::new(|| {
     use stylo::properties::style_structs::Font;
     ComputedValues::initial_values_with_font_override(Font::initial_values())
 });
 
-impl<T: Sync + MeasureLeaf> Document<T> {
+impl<T: Sync> Document<T> {
     /// Flush pending styles, then lay the document out against its private
-    /// viewport and device-pixel ratio. Leaf content measures through the
-    /// payload's [`MeasureLeaf`] hook.
+    /// viewport and device-pixel ratio. Replaced leaves use their node-owned
+    /// [`NaturalSize`].
     ///
     /// Style-driven relayout is **automatic**: every style flush consumes
     /// relayout-class damage into boundary-stopped layout invalidation while
@@ -307,6 +287,40 @@ impl<T: Sync + MeasureLeaf> Document<T> {
 }
 
 impl<T> Document<T> {
+    /// Updates a node's decoded natural dimensions/ratio and invalidates the
+    /// affected layout-cache path when the value changed.
+    ///
+    /// Image/resource code calls this after decoding enough metadata to know
+    /// the intrinsic size. This is ordinary content invalidation, not CSS
+    /// size containment: no `contain-*` computed value is synthesized.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `id` is vacant or does not identify an element (the
+    /// let-it-crash mutation contract).
+    pub fn set_natural_size(&mut self, id: crate::NodeId, natural_size: NaturalSize) {
+        let changed = {
+            let node = self
+                .tree_mut()
+                .get_mut(id)
+                .expect("vacant NodeId passed to Document::set_natural_size");
+            assert!(
+                node.is_element(),
+                "non-element NodeId passed to Document::set_natural_size"
+            );
+            let data = node.layout_data.get_mut();
+            if data.natural_size == natural_size {
+                false
+            } else {
+                data.natural_size = natural_size;
+                true
+            }
+        };
+        if changed {
+            self.invalidate_layout(id);
+        }
+    }
+
     /// Record that `id`'s layout inputs changed since the last layout pass:
     /// clears its measurement cache and its ancestors', **stopping at the
     /// nearest ancestor that is a relayout boundary** (`contain: strict`, or a

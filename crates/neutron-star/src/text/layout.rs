@@ -2,7 +2,7 @@
 
 use parley::{Alignment, AlignmentOptions, IndentOptions, Layout};
 
-use crate::compute::{LeafMeasurement, LeafMetrics};
+use crate::compute::LeafMetrics;
 use crate::geometry::{Point, Size};
 use crate::style::TextBrush;
 
@@ -101,7 +101,7 @@ impl TextLayout {
     }
 }
 
-/// Borrowed [`LeafMeasurement`] view over a retained [`TextLayout`].
+/// Borrowed view over a retained [`TextLayout`].
 #[derive(Debug, Clone, Copy)]
 pub struct TextLayoutView<'a> {
     artifact: &'a TextLayout,
@@ -117,15 +117,21 @@ impl<'a> TextLayoutView<'a> {
     pub const fn artifact(self) -> &'a TextLayout {
         self.artifact
     }
-}
 
-impl LeafMeasurement for TextLayoutView<'_> {
-    fn size(&self) -> Size<f32> {
+    /// Measured content-box size.
+    #[must_use]
+    pub const fn size(self) -> Size<f32> {
         self.artifact.size()
     }
 
-    fn first_baselines(&self) -> Point<Option<f32>> {
+    /// First baseline offsets from the content-box origin.
+    #[must_use]
+    pub const fn first_baselines(self) -> Point<Option<f32>> {
         self.artifact.metrics.first_baselines
+    }
+
+    pub(super) const fn metrics(self) -> LeafMetrics {
+        self.artifact.metrics
     }
 }
 

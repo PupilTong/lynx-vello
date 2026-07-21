@@ -4,7 +4,7 @@
 mod support;
 
 use divan::counter::ItemsCount;
-use neutron_star::compute::{LeafMeasureInput, LeafMeasurement, LeafMeasurer};
+use neutron_star::compute::LeafMeasureInput;
 use neutron_star::geometry::Size;
 use neutron_star::style::{CoreStyle, TextContainerStyle, TextRun, TextRunStyle};
 use neutron_star::text::{ArtifactSlots, TextContext, TextMeasurer};

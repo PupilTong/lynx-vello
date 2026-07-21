@@ -1,4 +1,4 @@
-//! Parley-backed implementation of the generic leaf measurement protocol.
+//! Parley-backed implementation of neutron-star's fixed text-content path.
 
 use core::fmt;
 use std::borrow::Cow;
@@ -19,9 +19,9 @@ use stylo::values::computed::{FontStyle, Length, LineHeight, TextAlign, WordBrea
 
 use super::content::normalize_runs;
 use super::{ArtifactSlots, TextContext, TextLayout, TextLayoutView};
-use crate::compute::{LeafMeasureInput, LeafMeasurer};
+use crate::compute::{LeafMeasureInput, compute_leaf_layout_with_measurement};
 use crate::style::{TextContainerStyle, TextRun, TextRunStyle};
-use crate::tree::{AvailableSpace, LayoutGoal};
+use crate::tree::{AvailableSpace, LayoutGoal, LayoutInput, LayoutOutput};
 
 /// Node-scoped Parley adapter for a host-owned paragraph.
 ///
@@ -62,6 +62,17 @@ where
             container_style,
             runs,
         }
+    }
+
+    /// Runs text measurement and leaf box layout as one closed engine path.
+    ///
+    /// The caller supplies text/style data and retained slots, but cannot
+    /// replace Parley with an arbitrary content measurer.
+    pub fn compute_layout(&mut self, input: LayoutInput) -> LayoutOutput {
+        let container_style = self.container_style;
+        compute_leaf_layout_with_measurement(input, container_style, None, |measure_input| {
+            self.measure(measure_input).metrics()
+        })
     }
 
     fn shape(&mut self) -> TextLayout {
@@ -136,19 +147,20 @@ where
     }
 }
 
-impl<'source, Container, RunStyle, Runs> LeafMeasurer
-    for TextMeasurer<'_, 'source, Container, RunStyle, Runs>
+impl<'source, Container, RunStyle, Runs> TextMeasurer<'_, 'source, Container, RunStyle, Runs>
 where
     Container: TextContainerStyle,
     RunStyle: TextRunStyle + 'source,
     Runs: Iterator<Item = TextRun<'source, RunStyle>> + Clone,
 {
-    type Measurement<'a>
-        = TextLayoutView<'a>
-    where
-        Self: 'a;
-
-    fn measure(&mut self, input: LeafMeasureInput) -> Self::Measurement<'_> {
+    /// Measures and retains one Parley text artifact under normalized
+    /// content-box constraints.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the internal artifact-slot installation invariant is
+    /// violated.
+    pub fn measure(&mut self, input: LeafMeasureInput) -> TextLayoutView<'_> {
         let inline_basis = definite_inline_size(input).unwrap_or(0.0).max(0.0);
         // The `hanging`/`each-line` flags are ignored (documented
         // vocabulary-swap delta); only the length component participates in
@@ -346,7 +358,6 @@ mod tests {
     use stylo::values::generics::font::{FeatureTagValue, FontSettings, FontTag, VariationValue};
 
     use super::*;
-    use crate::compute::LeafMeasurement;
     use crate::geometry::Size;
     use crate::style::CoreStyle;
     use crate::tree::RequestedAxis;

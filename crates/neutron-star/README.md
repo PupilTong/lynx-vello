@@ -40,9 +40,10 @@ Recursion flows *through the host*: the engine calls
 `child.compute_child_layout(input)`, and the host's impl dispatches each
 child to the right algorithm. Flex, Grid, and Lynx's non-CSS Linear and
 Relative modes are all first-class neutron-star entry points; a host can
-still add other modes through the same dispatch seam.
-The optional text adapter uses the same seam: host-owned run/style views are
-immutable, while the host stores a reusable `TextContext` and per-node
+still add other container algorithms through the same dispatch seam.
+Leaf content is closed rather than extensible: replaced content enters as a
+`NaturalSize`, and the optional concrete Parley path accepts host-owned
+run/style views while the host stores a reusable `TextContext` and per-node
 `ArtifactSlots` in interior-mutable slots.
 `display:none` cleanup is an explicit host precheck: call `hide_subtree` and
 return `LayoutOutput::HIDDEN` before entering the generated-box cache/dispatch
@@ -51,19 +52,19 @@ path.
 ## Hard rules
 
 - **No `dyn`.** Every host boundary is generic. `LayoutNode` is
-  dyn-incompatible by construction (`Copy` supertrait, associated types) and
-  the measurement seam uses GATs, so trait objects are impossible and every
-  call can inline.
+  dyn-incompatible by construction (`Copy` supertrait, associated types), so
+  trait objects are impossible and every call can inline. There is no public
+  leaf-measurer trait at all.
 - **No storage.** The engine allocates only transient algorithm scratch; node
   data, styles, caches, retained text layouts, and results all live in
   host-chosen storage reached through the handle. Semantic data is immutable
   for a layout epoch; per-node results and caches mutate through the handle
   behind the host's interior-mutability discipline.
-- **POD box protocol, lending measurement seam.** Layout inputs, outputs, and
-  geometry are small `Copy`, `#[repr(C)]` where layout matters, and
-  `f32`-based. `LeafMeasurer` may additionally lend an engine-specific rich
-  artifact view; leaf boxing immediately copies its size/baselines into
-  `LeafMetrics`, while the host retains the artifact for painting.
+- **POD box protocol, closed leaf content.** Layout inputs, outputs, geometry,
+  and `NaturalSize` are small `Copy`, `#[repr(C)]` where layout matters, and
+  `f32`-based. Images provide decoded dimensions/ratio; concrete Parley text
+  retains its rich layout artifact for painting. Arbitrary host content has
+  no measurement extension point.
 - **Fork-initial defaults.** Defaulted trait methods return the lynx stylo
   fork's initial values — the CSS initial value except where Lynx documents
   otherwise (e.g. `relative-layout-once: true`). Host *computed-value*

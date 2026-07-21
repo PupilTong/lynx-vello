@@ -669,7 +669,7 @@ fn explicit_hidden_cleanup_clears_stale_geometry() {
 }
 
 #[test]
-fn compute_leaf_layout_uses_the_host_measurement() {
+fn compute_leaf_layout_uses_internal_natural_size() {
     let style = MockStyle {
         size: Size::new(StyleSize::LengthPercentage(npx(50.0)), StyleSize::auto()),
         padding: Edges::uniform(npx(5.0)),
@@ -683,33 +683,15 @@ fn compute_leaf_layout_uses_the_host_measurement() {
             AvailableSpace::Definite(100.0),
         ),
     );
-    let mut seen = None;
-    let output = {
-        let mut measurer = FnLeafMeasurer::new(|request: LeafMeasureInput| {
-            seen = Some(request);
-            LeafMetrics::new(Size::new(
-                request.known_dimensions.width.unwrap_or(31.0),
-                17.0,
-            ))
-            .with_first_baselines(Point::new(None, Some(12.0)))
-        });
-        compute_leaf_layout(input, &style, &mut measurer)
-    };
-
-    assert_eq!(
-        seen,
-        Some(LeafMeasureInput::new(
-            Size::new(Some(50.0), None),
-            Size::new(
-                AvailableSpace::Definite(50.0),
-                AvailableSpace::Definite(90.0),
-            ),
-            LayoutGoal::Commit,
-        ))
+    let output = compute_leaf_layout(
+        input,
+        &style,
+        NaturalSize::new(Size::new(None, Some(17.0)), None),
     );
+
     assert_eq!(output.size, Size::new(60.0, 27.0));
     assert_eq!(output.content_size, Size::new(60.0, 27.0));
-    assert_eq!(output.first_baselines.y, Some(17.0));
+    assert_eq!(output.first_baselines, Point::NONE);
 }
 
 #[test]
@@ -731,84 +713,14 @@ fn calc_padding_resolves_through_stylo_style_values() {
             AvailableSpace::Definite(100.0),
         ),
     );
-    let output = {
-        let mut measurer = FnLeafMeasurer::new(|request: LeafMeasureInput| {
-            LeafMetrics::new(Size::new(
-                request.known_dimensions.width.unwrap_or(31.0),
-                17.0,
-            ))
-        });
-        compute_leaf_layout(input, &style, &mut measurer)
-    };
+    let output = compute_leaf_layout(
+        input,
+        &style,
+        NaturalSize::new(Size::new(None, Some(17.0)), None),
+    );
 
     // 50px content box + 20px calc padding per side.
     assert_eq!(output.size, Size::new(90.0, 57.0));
-}
-
-struct RetainedLeafArtifact {
-    metrics: LeafMetrics,
-    paint_data: Vec<u8>,
-}
-
-struct BorrowedLeafMeasurement<'a>(&'a RetainedLeafArtifact);
-
-impl LeafMeasurement for BorrowedLeafMeasurement<'_> {
-    fn size(&self) -> Size<f32> {
-        self.0.metrics.size
-    }
-
-    fn first_baselines(&self) -> Point<Option<f32>> {
-        self.0.metrics.first_baselines
-    }
-}
-
-struct BorrowingLeafMeasurer {
-    artifact: RetainedLeafArtifact,
-    last_input: Option<LeafMeasureInput>,
-}
-
-impl LeafMeasurer for BorrowingLeafMeasurer {
-    type Measurement<'a>
-        = BorrowedLeafMeasurement<'a>
-    where
-        Self: 'a;
-
-    fn measure(&mut self, input: LeafMeasureInput) -> Self::Measurement<'_> {
-        self.last_input = Some(input);
-        BorrowedLeafMeasurement(&self.artifact)
-    }
-}
-
-#[test]
-fn compute_leaf_layout_accepts_a_non_clone_borrowed_measurement() {
-    let input = LayoutInput::compute_size(
-        Size::NONE,
-        Size::NONE,
-        Size::MAX_CONTENT,
-        RequestedAxis::Both,
-    );
-    let mut measurer = BorrowingLeafMeasurer {
-        artifact: RetainedLeafArtifact {
-            metrics: LeafMetrics::new(Size::new(31.0, 17.0))
-                .with_first_baselines(Point::new(None, Some(11.0))),
-            paint_data: vec![1, 2, 3],
-        },
-        last_input: None,
-    };
-
-    let output = compute_leaf_layout(input, &MockStyle::default(), &mut measurer);
-
-    assert_eq!(output.size, Size::new(31.0, 17.0));
-    assert_eq!(output.first_baselines.y, Some(11.0));
-    assert_eq!(
-        measurer.last_input,
-        Some(LeafMeasureInput::new(
-            Size::NONE,
-            Size::MAX_CONTENT,
-            LayoutGoal::Measure(RequestedAxis::Both),
-        ))
-    );
-    assert_eq!(measurer.artifact.paint_data, [1, 2, 3]);
 }
 
 #[test]

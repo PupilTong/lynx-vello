@@ -15,7 +15,7 @@
 //! queue (see [`position_hoisted_subtree`]).
 
 use neutron_star::compute::{
-    FnLeafMeasurer, compute_absolute_layout, compute_boundary_relayout, compute_cached_layout,
+    compute_absolute_layout, compute_boundary_relayout, compute_cached_layout,
     compute_flexbox_layout, compute_grid_layout, compute_leaf_layout, compute_linear_layout,
     compute_relative_layout, compute_root_layout, compute_skipped_contents_layout, hide_subtree,
     round_layout,
@@ -27,7 +27,6 @@ use neutron_star::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput,
 };
 
-use super::MeasureLeaf;
 use super::style::{
     DisplayMode, StyleView, display_mode, establishes_absolute_containing_block,
     establishes_fixed_containing_block, resolve_position, skips_contents,
@@ -35,7 +34,7 @@ use super::style::{
 use crate::document::Document;
 use crate::node::{ChildrenIter, Node};
 
-impl<'dom, T: MeasureLeaf> LayoutNode for &'dom Node<T> {
+impl<'dom, T> LayoutNode for &'dom Node<T> {
     type Style = StyleView<'dom, T>;
     type ChildIter = ChildrenIter<'dom, T>;
 
@@ -59,8 +58,8 @@ impl<'dom, T: MeasureLeaf> LayoutNode for &'dom Node<T> {
     /// inside it.
     fn compute_child_layout(self, input: LayoutInput) -> LayoutOutput {
         // Text nodes carry no computed style: they lay out as leaves inside
-        // an anonymous box (initial box values; content via the payload's
-        // measurement hook).
+        // an anonymous box (initial box values). Until the concrete Parley
+        // path is wired above w3c-dom, it has no natural content size.
         let display = if self.is_text_node() {
             DisplayMode::Leaf
         } else {
@@ -94,12 +93,7 @@ impl<'dom, T: MeasureLeaf> LayoutNode for &'dom Node<T> {
             DisplayMode::Relative => compute_relative_layout(node, input),
             DisplayMode::Leaf => {
                 let view = node.style();
-                let output = {
-                    let mut measurer = FnLeafMeasurer::new(|measure_input| {
-                        node.payload().measure_leaf(node, measure_input)
-                    });
-                    compute_leaf_layout(input, &view, &mut measurer)
-                };
+                let output = compute_leaf_layout(input, &view, node.natural_size());
                 // Flow/contents container layout is unimplemented (see
                 // `DisplayMode::Leaf`): the box itself is a leaf, and any
                 // children are zeroed so stale geometry cannot survive a
@@ -194,7 +188,7 @@ impl<'dom, T: MeasureLeaf> LayoutNode for &'dom Node<T> {
 /// inner boundary's own re-run refreshes its interior. Independent boundaries
 /// have unordered depths and are order-insensitive, so a plain depth sort
 /// suffices.
-pub(super) fn run_layout<T: MeasureLeaf>(document: &Document<T>, viewport: Size<f32>, scale: f32) {
+pub(super) fn run_layout<T>(document: &Document<T>, viewport: Size<f32>, scale: f32) {
     let Some(root) = document.root_element() else {
         return;
     };
@@ -271,7 +265,7 @@ fn boundary_depth<T>(document: &Document<T>, id: crate::NodeId) -> usize {
 /// ancestor geometry. Pre-order also gives hoisted-inside-hoisted nesting
 /// for free: an outer hoisted ancestor is finalized before any hoisted
 /// descendant converts its static position through it.
-fn position_hoisted_subtree<T: MeasureLeaf>(node: &Node<T>, viewport: Size<f32>) {
+fn position_hoisted_subtree<T>(node: &Node<T>, viewport: Size<f32>) {
     let Some(style) = node.computed_style() else {
         return; // text nodes are never positioned and have no children
     };
@@ -303,7 +297,7 @@ fn position_hoisted_subtree<T: MeasureLeaf>(node: &Node<T>, viewport: Size<f32>)
     }
 }
 
-fn position_hoisted<T: MeasureLeaf>(node: &Node<T>, viewport: Size<f32>) {
+fn position_hoisted<T>(node: &Node<T>, viewport: Size<f32>) {
     let Some(parent) = node.parent() else {
         return;
     };

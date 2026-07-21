@@ -52,6 +52,7 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicPtr, AtomicU8, AtomicUsiz
 
 use atomic_refcell::{AtomicRef, AtomicRefCell};
 use dom::ElementState;
+use neutron_star::compute::NaturalSize;
 use neutron_star::tree::Layout;
 use rustc_hash::FxHashMap;
 use selectors::matching::ElementSelectorFlags;
@@ -368,10 +369,10 @@ pub struct Node<T> {
     /// (Lynx's `<raw-text>` is one); ordinary W3C text uses a child text node.
     pub(crate) text: Option<String>,
 
-    /// This node's layout state (measurement cache, unrounded and
-    /// device-snapped layouts, out-of-flow bookkeeping) — created and dropped
-    /// with the node, so tree mutation can never leave layout state to
-    /// synchronize (see [`crate::layout`]).
+    /// This node's layout state (replaced-content natural size, measurement
+    /// cache, unrounded and device-snapped layouts, out-of-flow bookkeeping)
+    /// — created and dropped with the node, so tree mutation can never leave
+    /// layout state to synchronize (see [`crate::layout`]).
     ///
     /// An `AtomicRefCell` (the Servo per-node layout-data shape): keeps the
     /// node shareable for stylo's parallel restyle traversal while the
@@ -715,6 +716,13 @@ impl<T> Node<T> {
     #[must_use]
     pub fn layout_cache_is_empty(&self) -> bool {
         self.layout_data.borrow().measure_cache.is_empty()
+    }
+
+    /// The decoded intrinsic dimensions/ratio used when this node lays out as
+    /// replaced content.
+    #[must_use]
+    pub fn natural_size(&self) -> NaturalSize {
+        self.layout_data.borrow().natural_size
     }
 
     /// The accumulated stylo selector flags.

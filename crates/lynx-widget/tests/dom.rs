@@ -5,7 +5,8 @@
 use std::collections::HashSet;
 
 use lynx_widget::{
-    ElementState, EngineMetrics, EventKind, WidgetError, WidgetHandle, WidgetKind, WidgetTree,
+    ElementState, EngineMetrics, EventKind, NaturalSize, Size, WidgetError, WidgetHandle,
+    WidgetKind, WidgetTree,
 };
 
 fn tree() -> WidgetTree {
@@ -100,6 +101,21 @@ fn create_elements_kinds_and_structure() {
     assert_eq!(doc.get_parent(&page).unwrap(), None);
     assert_eq!(doc.first_element(&view).unwrap(), Some(text.clone()));
     assert_eq!(doc.next_element(&text).unwrap(), Some(li.clone()));
+}
+
+#[test]
+fn natural_size_is_a_closed_image_only_content_path() {
+    let mut doc = tree();
+    let image = doc.create_image();
+    let view = doc.create_view();
+    let natural_size = NaturalSize::from_size(Size::new(64.0, 32.0));
+
+    doc.set_image_natural_size(&image, natural_size).unwrap();
+    assert_eq!(doc.widget(&image).unwrap().natural_size(), natural_size);
+    assert!(matches!(
+        doc.set_image_natural_size(&view, natural_size),
+        Err(WidgetError::NotAnImage(_))
+    ));
 }
 
 #[test]

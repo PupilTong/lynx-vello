@@ -242,9 +242,7 @@ pub mod tree;
 /// computed sizes, alignment wrappers, grid track types, …) is not
 /// re-exported here — pull it from [`style`] (or the stylo crate) as needed.
 pub mod prelude {
-    pub use crate::compute::{
-        FnLeafMeasurer, LeafMeasureInput, LeafMeasurement, LeafMeasurer, LeafMetrics,
-    };
+    pub use crate::compute::{LeafMeasureInput, LeafMetrics, NaturalSize};
     pub use crate::geometry::{Edges, Line, Point, Size};
     pub use crate::style::{
         CoreStyle, FlexContainerStyle, FlexItemStyle, GridContainerStyle, GridItemStyle,

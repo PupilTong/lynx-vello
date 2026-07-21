@@ -179,17 +179,20 @@ useful signal for currently-compatible versions of those libraries.
   engine (no translation layer), display dispatch routes
   flex/grid/linear/relative with `display: none` hiding and a leaf
   fallback, and the positioned pass implements the W3C `position: fixed`
-  containing-block rule via the protocol's scheme override. Leaf content
-  measures through the payload's `MeasureLeaf` hook. Per-node layout
-  state (measurement cache + layouts) lives **on each `Node`**
+  containing-block rule via the protocol's scheme override. Replaced leaf
+  content reads a closed `NaturalSize` value stored in each node's layout
+  data; `Document::set_natural_size` updates it and automatically invalidates
+  the affected cache path. Per-node layout state (natural size + measurement
+  cache + layouts) lives **on each `Node`**
   (`AtomicRefCell<LayoutData>`, the Servo layout_data pattern; read via
   `Node::layout`), so it is created and dropped with its node. Style-driven
   relayout is automatic (every style flush consumes harvested `StyleDamage`
   into boundary-stopped invalidation); `Document::invalidate_layout` remains the
   embedder API for the mutations styles cannot see (content/child-list changes
-  with identical computed styles, external measurement inputs). Leaf
-  content (text/images) measures through an embedder hook; the crate pulls
-  `neutron-star` without its `text` feature. It
+  with identical computed styles). The internal natural-size update path
+  performs that invalidation itself. The crate pulls
+  `neutron-star` without its `text` feature; text wiring is
+  intentionally not an arbitrary payload callback. It
   must not contain Lynx widget vocabulary or Lynx device/unit policy —
   Lynx computed defaults (border-box, `overflow: hidden`, `display: linear`
   on every element, …) stay embedder cascade policy (UA sheet). Relies on
@@ -209,8 +212,9 @@ useful signal for currently-compatible versions of those libraries.
   PAPI traffics exclusively in canonical, context-owned handles; a live
   handle retains its node, and detached subtrees are reclaimed automatically
   once their last handle drops (the native stand-in for the browser GC; no
-  public disposal API). Also owns Lynx view metrics, touch-first device
-  policy, and the viewport-relative `rpx` integration. Standard CSS parsing,
+  public disposal API). It exposes the image-only
+  `WidgetTree::set_image_natural_size` validation boundary for decoded image
+  metadata. Also owns Lynx view metrics, touch-first device policy, and the viewport-relative `rpx` integration. Standard CSS parsing,
   matching, cascade, and lock ownership remain in `w3c-dom`.
 - `crates/neutron-star` — the Flexbox, Grid, and
   Starlight Relative and Linear engine: trait-based host⇄engine integration
@@ -220,9 +224,10 @@ useful signal for currently-compatible versions of those libraries.
   the handle), style traits that speak the stylo fork's computed-value
   vocabulary directly (requires the `stylo` workspace dep + python3 for its
   build script; the old zero-dependency/standalone pillar is retired), and
-  host-side
-  display dispatch. Leaf content engines integrate through the generic
-  lending `LeafMeasurer` protocol. **Flexbox, Grid, Relative, and Linear
+  host-side display dispatch. Leaf content is deliberately closed: replaced
+  content uses the `NaturalSize` value path, while text uses the crate's
+  concrete Parley `TextMeasurer::compute_layout` path; arbitrary host
+  measurers are not supported. **Flexbox, Grid, Relative, and Linear
   implemented** —
   the shared root/leaf/cache/positioned/rounding machinery, CSS Flexbox Level
   1, numeric CSS Grid Level 2 (excluding subgrid/named areas), id-constrained
@@ -246,8 +251,8 @@ useful signal for currently-compatible versions of those libraries.
   engine-internal — not a widget-layer concern) now live in `w3c-dom`
   (see above). Still L3 work: `lynx-widget`-level policy (`rpx`-aware
   view metrics, sticky lowering), component-specific staggered layout, and
-  text style/attribute wiring plus text-context/artifact-slot storage
-  behind the leaf-measurement hook.
+  text style/attribute wiring plus text-context/artifact-slot storage for the
+  concrete Parley path.
 - *(planned, not yet scaffolded)* render / runtime crates — see
   `docs/tracking/` for the behavior surface each will need to cover before
   scaffolding begins, and `.claude/agents/` for the subsystem-scoped agent
