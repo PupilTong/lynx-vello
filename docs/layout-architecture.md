@@ -42,7 +42,8 @@ subtrees), device-pixel rounding, and automatic
 style-damage→`invalidate_layout` consumption with in-place boundary re-layout
 that refreshes the boundary's scrollable `content_size`, with
 replaced leaves reading their node-owned `NaturalSize`; its internal update
-path automatically invalidates the affected layout-cache path. Text truncation, inline boxes, and the
+path automatically invalidates the affected layout-cache path and is not
+exposed through `WidgetTree` or Element PAPI. Text truncation, inline boxes, and the
 Lynx-widget policy layer (text style/attribute wiring and
 text-context/artifact-slot storage included) are not implemented yet. Crate
 rustdoc is the API reference; this document is the rationale, performance
@@ -289,14 +290,13 @@ without a basis (a documented behavior delta of the vocabulary swap).
 content currently means images and enters `compute_leaf_layout` as a Copy
 `NaturalSize`: independently optional natural dimensions plus a natural
 width/height ratio. Before image metadata is decoded the value is
-`NaturalSize::NONE`; after `ResourceFetcher` returns bytes and the image layer
-decodes metadata, `WidgetTree::set_image_natural_size` validates that the
-target is an image and calls `Document::set_natural_size`. That setter stores
-the value on the node and clears the node-to-root box-cache path, so the next
-normal layout pass observes it. It does **not** mutate `contain-*` or
-`contain-intrinsic-size`: natural replaced size is content metadata, whereas
-CSS size containment changes which intrinsic contributions layout is allowed
-to inspect.
+`NaturalSize::NONE`; the future replaced-content implementation below the
+generic Widget/PAPI layer owns installing decoded metadata into the node's
+layout state and invalidating the node-to-root box-cache path. `WidgetTree`
+does not expose a natural-size mutation API. This internal state does **not**
+mutate `contain-*` or `contain-intrinsic-size`: natural replaced size is
+content metadata, whereas CSS size containment changes which intrinsic
+contributions layout is allowed to inspect.
 
 Text is the other fixed path. `TextMeasurer::compute_layout` enters the same
 crate-private leaf box routine using Parley; external code cannot substitute a

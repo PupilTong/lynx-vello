@@ -49,7 +49,6 @@ use rustc_hash::FxHashMap;
 use stylo::properties::ComputedValues;
 use stylo::servo_arc::Arc;
 use thiserror::Error;
-use w3c_dom::layout::NaturalSize;
 use w3c_dom::{Document, ElementState, Node, NodeId};
 
 use crate::handle::{HandleInner, Reaper, WidgetHandle};
@@ -89,9 +88,6 @@ pub enum WidgetError {
     /// The `<page>` root cannot be linked under a parent.
     #[error("the page root {0:?} cannot be reparented")]
     CannotReparentRoot(NodeId),
-    /// Natural replaced-content dimensions are accepted only for `<image>`.
-    #[error("widget {0:?} is not an image")]
-    NotAnImage(NodeId),
 }
 
 /// The widget tree: one [`Document`] of [`Widget`]s plus the Lynx `unique_id`
@@ -322,31 +318,6 @@ impl WidgetTree {
     /// Create an `<image>` element.
     pub fn create_image(&mut self) -> WidgetHandle {
         self.create(WidgetKind::Image, "image")
-    }
-
-    /// Store decoded intrinsic image dimensions/ratio.
-    ///
-    /// Resource acquisition and image decoding happen outside the layout
-    /// crates. Once metadata is available, this method updates the image's
-    /// node-owned natural size and automatically invalidates the affected
-    /// layout-cache path. Passing [`NaturalSize::NONE`] clears loaded
-    /// metadata (for example when `src` changes).
-    pub fn set_image_natural_size(
-        &mut self,
-        image: &WidgetHandle,
-        natural_size: NaturalSize,
-    ) -> Result<(), WidgetError> {
-        self.sweep_dropped();
-        let id = self.resolve(image)?;
-        if self
-            .doc
-            .get(id)
-            .is_none_or(|node| node.ext().kind != WidgetKind::Image)
-        {
-            return Err(WidgetError::NotAnImage(id));
-        }
-        self.doc.set_natural_size(id, natural_size);
-        Ok(())
     }
 
     /// Create a `<scroll-view>` element.

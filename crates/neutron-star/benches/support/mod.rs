@@ -26,7 +26,7 @@ use stylo::servo::media_features::PointerCapabilities;
 use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Display, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
-use w3c_dom::layout::{Layout, NaturalSize};
+use w3c_dom::layout::Layout;
 use w3c_dom::{Document, Node, NodeId};
 
 #[derive(Debug)]
@@ -124,7 +124,7 @@ impl LayoutFixture {
         self.document.append(parent, node);
         if let Some(natural_size) = natural_size {
             self.document
-                .set_natural_size(node, NaturalSize::from_size(natural_size));
+                .set_natural_size_for_testing(node, natural_size);
         }
         self.node_count += 1;
         node

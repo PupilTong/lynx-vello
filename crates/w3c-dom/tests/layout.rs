@@ -17,7 +17,7 @@ mod common;
 use common::{Doc, device_with};
 use stylo::queries::values::PrefersColorScheme;
 use w3c_dom::NodeId;
-use w3c_dom::layout::{Layout, NaturalSize, Size};
+use w3c_dom::layout::Layout;
 
 /// [`Doc`] plus layout helpers (results are read straight off the nodes).
 struct Harness {
@@ -617,41 +617,6 @@ fn flow_containers_fall_back_to_leaves_and_zero_their_children() {
 }
 
 #[test]
-fn decoded_natural_size_reflows_a_replaced_leaf() {
-    // An image starts without decoded intrinsic metadata, then gains it after
-    // the resource layer has decoded the response.
-    let mut dom = w3c_dom::Document::new(common::device(800.0, 600.0));
-    dom.add_stylesheet_str(
-        "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }
-         image { width: 80px; }",
-        w3c_dom::StylesheetOrigin::Author,
-    );
-    let root = dom.create_element("page", ());
-    dom.append_child(root);
-    let image = dom.create_element("image", ());
-    dom.append(root, image);
-    dom.layout();
-    assert_eq!(dom.get(image).unwrap().layout().size, Size::new(80.0, 0.0));
-
-    // This models image metadata becoming available after ResourceFetcher
-    // completes. The setter owns cache invalidation; no CSS containment
-    // property or separate invalidate_layout call is involved.
-    dom.set_natural_size(image, NaturalSize::from_size(Size::new(40.0, 20.0)));
-    dom.layout();
-
-    let layout = dom.get(image).unwrap().layout();
-    assert_eq!(
-        (
-            layout.location.x,
-            layout.location.y,
-            layout.size.width,
-            layout.size.height
-        ),
-        (0.0, 0.0, 80.0, 40.0)
-    );
-}
-
-#[test]
 fn text_nodes_do_not_use_the_replaced_content_path() {
     // A real text node (no computed style): box properties take their
     // initial values — the anonymous box CSS wraps a text run in. Until the
@@ -883,13 +848,13 @@ fn color_only_change_relayouts_nothing() {
     // from cache.
     let mut dom = w3c_dom::Document::new(common::device(800.0, 600.0));
     dom.add_stylesheet_str(
-        "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }",
+        "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }
+         image { width: 30px; height: 12px; }",
         w3c_dom::StylesheetOrigin::Author,
     );
     let root = dom.create_element("page", ());
     dom.append_child(root);
     let leaf = dom.create_element("image", ());
-    dom.set_natural_size(leaf, NaturalSize::from_size(Size::new(30.0, 12.0)));
     dom.append(root, leaf);
 
     dom.layout();
@@ -1220,6 +1185,7 @@ fn content_visibility_hidden_skips_descendant_layout_and_measurement() {
     dom.add_stylesheet_str(
         "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }
          .container { display: flex; width: 60px; height: 80px; align-items: flex-start; }
+         image { width: 50px; height: 70px; }
          .fixed { position: fixed; left: 10px; top: 20px; width: 30px; height: 40px; }",
         w3c_dom::StylesheetOrigin::Author,
     );
@@ -1230,7 +1196,6 @@ fn content_visibility_hidden_skips_descendant_layout_and_measurement() {
     dom.set_inline_style(container, "content-visibility: hidden");
     dom.append(root, container);
     let leaf = dom.create_element("image", ());
-    dom.set_natural_size(leaf, NaturalSize::from_size(Size::new(50.0, 70.0)));
     dom.append(container, leaf);
     let fixed = dom.create_element("view", ());
     dom.add_class(fixed, "fixed");

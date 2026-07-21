@@ -181,9 +181,9 @@ useful signal for currently-compatible versions of those libraries.
   fallback, and the positioned pass implements the W3C `position: fixed`
   containing-block rule via the protocol's scheme override. Replaced leaf
   content reads a closed `NaturalSize` value stored in each node's layout
-  data; `Document::set_natural_size` updates it and automatically invalidates
-  the affected cache path. Per-node layout state (natural size + measurement
-  cache + layouts) lives **on each `Node`**
+  data; its internal update path automatically invalidates the affected
+  cache path. Per-node layout state (natural size + measurement cache +
+  layouts) lives **on each `Node`**
   (`AtomicRefCell<LayoutData>`, the Servo layout_data pattern; read via
   `Node::layout`), so it is created and dropped with its node. Style-driven
   relayout is automatic (every style flush consumes harvested `StyleDamage`
@@ -212,9 +212,10 @@ useful signal for currently-compatible versions of those libraries.
   PAPI traffics exclusively in canonical, context-owned handles; a live
   handle retains its node, and detached subtrees are reclaimed automatically
   once their last handle drops (the native stand-in for the browser GC; no
-  public disposal API). It exposes the image-only
-  `WidgetTree::set_image_natural_size` validation boundary for decoded image
-  metadata. Also owns Lynx view metrics, touch-first device policy, and the viewport-relative `rpx` integration. Standard CSS parsing,
+  public disposal API). Also owns Lynx view metrics, touch-first device
+  policy, and the viewport-relative `rpx` integration. Replaced-content
+  natural sizing remains below this layer and is not an Element-PAPI method.
+  Standard CSS parsing,
   matching, cascade, and lock ownership remain in `w3c-dom`.
 - `crates/neutron-star` — the Flexbox, Grid, and
   Starlight Relative and Linear engine: trait-based host⇄engine integration

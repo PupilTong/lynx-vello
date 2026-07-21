@@ -27,7 +27,7 @@ euclid = { workspace = true }
 style_traits = { workspace = true }
 # Dev-only reverse edge: benchmarks exercise this crate through the concrete
 # production document host instead of a benchmark-owned LayoutNode.
-w3c-dom = { workspace = true }
+w3c-dom = { workspace = true, features = ["layout-test-utils"] }
 
 [[test]]
 name = "text"

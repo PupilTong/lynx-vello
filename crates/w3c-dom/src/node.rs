@@ -721,7 +721,7 @@ impl<T> Node<T> {
     /// The decoded intrinsic dimensions/ratio used when this node lays out as
     /// replaced content.
     #[must_use]
-    pub fn natural_size(&self) -> NaturalSize {
+    pub(crate) fn natural_size(&self) -> NaturalSize {
         self.layout_data.borrow().natural_size
     }
 

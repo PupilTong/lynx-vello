@@ -54,7 +54,6 @@ pub use papi::{WidgetError, WidgetTree};
 pub use state::{EventKind, EventReg, WidgetState};
 pub use style::{EngineMetrics, StyleEngine};
 pub use ua::PageConfig;
-pub use w3c_dom::layout::{NaturalSize, Size};
 pub use w3c_dom::{
     ComputedStyle, ElementState, Parallelism, StylesheetOrigin, property_is_supported,
 };

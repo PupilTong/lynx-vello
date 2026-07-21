@@ -60,11 +60,10 @@
 //!
 //! # Replaced content uses node-owned natural size
 //!
-//! Resource acquisition and decoding live above this crate. Once image
-//! metadata is available, call [`Document::set_natural_size`]; leaf layout
-//! reads the resulting [`NaturalSize`] directly from the node. The setter
-//! automatically clears the node-to-root measurement-cache path so the next
-//! layout pass observes the new dimensions. This is intrinsic replaced
+//! Natural size is internal replaced-content state below the generic
+//! Widget/PAPI layer. Leaf layout reads it directly from the node; the
+//! lower-level update path clears the node-to-root measurement-cache path so
+//! the next layout pass observes new dimensions. This is intrinsic replaced
 //! content data, not a synthesized CSS `contain-intrinsic-size` value, and no
 //! arbitrary embedder measurement callback exists.
 //!
@@ -185,7 +184,7 @@ mod style;
 use std::sync::LazyLock;
 
 use neutron_star::cache::Cache;
-pub use neutron_star::compute::NaturalSize;
+use neutron_star::compute::NaturalSize;
 pub use neutron_star::geometry::{Edges, Point, Size};
 use neutron_star::invalidate::is_relayout_boundary;
 use neutron_star::style::CoreStyle;
@@ -206,8 +205,8 @@ use crate::flush::Parallelism;
 /// the (single-threaded, post-style) layout pass takes short scoped borrows.
 pub(crate) struct LayoutData {
     /// Decoded intrinsic dimensions/ratio for closed replaced content such
-    /// as images. Resource acquisition and decoding live above this crate;
-    /// layout only consumes the resulting value.
+    /// as images. This stays below the generic Widget/PAPI layer; layout
+    /// consumes the value without an embedder measurement callback.
     pub(crate) natural_size: NaturalSize,
     /// The neutron-star **measurement cache** — not a copy of the final
     /// result, but memoized answers to the different constraint questions
@@ -254,7 +253,7 @@ pub(crate) static ANONYMOUS_STYLE: LazyLock<Arc<ComputedValues>> = LazyLock::new
 impl<T: Sync> Document<T> {
     /// Flush pending styles, then lay the document out against its private
     /// viewport and device-pixel ratio. Replaced leaves use their node-owned
-    /// [`NaturalSize`].
+    /// internal `NaturalSize`.
     ///
     /// Style-driven relayout is **automatic**: every style flush consumes
     /// relayout-class damage into boundary-stopped layout invalidation while
@@ -290,15 +289,23 @@ impl<T> Document<T> {
     /// Updates a node's decoded natural dimensions/ratio and invalidates the
     /// affected layout-cache path when the value changed.
     ///
-    /// Image/resource code calls this after decoding enough metadata to know
-    /// the intrinsic size. This is ordinary content invalidation, not CSS
-    /// size containment: no `contain-*` computed value is synthesized.
+    /// The lower-level replaced-content implementation calls this after it
+    /// knows the intrinsic size. This is ordinary content invalidation, not
+    /// CSS size containment: no `contain-*` computed value is synthesized,
+    /// and the operation is not surfaced through Widget/PAPI.
     ///
     /// # Panics
     ///
     /// Panics when `id` is vacant or does not identify an element (the
     /// let-it-crash mutation contract).
-    pub fn set_natural_size(&mut self, id: crate::NodeId, natural_size: NaturalSize) {
+    #[cfg_attr(
+        not(any(test, feature = "layout-test-utils")),
+        allow(
+            dead_code,
+            reason = "reserved for the internal replaced-content integration"
+        )
+    )]
+    pub(crate) fn set_natural_size(&mut self, id: crate::NodeId, natural_size: NaturalSize) {
         let changed = {
             let node = self
                 .tree_mut()
@@ -319,6 +326,17 @@ impl<T> Document<T> {
         if changed {
             self.invalidate_layout(id);
         }
+    }
+
+    /// Install a synthetic natural size for layout benchmarks.
+    ///
+    /// This is intentionally available only through the opt-in
+    /// `layout-test-utils` feature; production replaced-content state remains
+    /// crate-internal.
+    #[cfg(feature = "layout-test-utils")]
+    #[doc(hidden)]
+    pub fn set_natural_size_for_testing(&mut self, id: crate::NodeId, size: Size<f32>) {
+        self.set_natural_size(id, NaturalSize::from_size(size));
     }
 
     /// Record that `id`'s layout inputs changed since the last layout pass:
@@ -456,5 +474,50 @@ impl<T> Document<T> {
             node.layout_data.get_mut().measure_cache.clear();
         }
         self.clear_relayout_roots();
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use neutron_star::tree::{LayoutInput, LayoutOutput};
+
+    use super::*;
+    use crate::DOCUMENT_NODE_ID;
+
+    #[test]
+    fn internal_natural_size_update_invalidates_the_dirty_spine() {
+        let mut document = Document::new();
+        let root = document.create_element("page", ());
+        document.append_child(root);
+        let image = document.create_element("image", ());
+        document.append(root, image);
+
+        let input = LayoutInput::default();
+        for id in [DOCUMENT_NODE_ID, root, image] {
+            document
+                .get(id)
+                .unwrap()
+                .layout_data
+                .borrow_mut()
+                .measure_cache
+                .store(input, LayoutOutput::default());
+        }
+
+        let natural_size = NaturalSize::from_size(Size::new(40.0, 20.0));
+        document.set_natural_size(image, natural_size);
+
+        assert_eq!(document.get(image).unwrap().natural_size(), natural_size);
+        for id in [DOCUMENT_NODE_ID, root, image] {
+            assert!(
+                document
+                    .get(id)
+                    .unwrap()
+                    .layout_data
+                    .borrow()
+                    .measure_cache
+                    .is_empty()
+            );
+        }
     }
 }

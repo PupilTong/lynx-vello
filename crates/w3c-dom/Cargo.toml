@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+# Keeps synthetic intrinsic sizes available to neutron-star's production-host
+# benchmarks without exposing a runtime replaced-content mutation API.
+layout-test-utils = []
+
 [dependencies]
 rustc-hash = { workspace = true }
 slab = { workspace = true }
