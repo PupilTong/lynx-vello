@@ -4,8 +4,7 @@ use std::cell::{Cell, RefCell};
 
 use neutron_star::cache::Cache;
 use neutron_star::compute::{
-    LeafMeasureInput, LeafMeasurement, LeafMeasurer, compute_cached_layout, compute_flexbox_layout,
-    compute_leaf_layout, compute_root_layout,
+    LeafMeasureInput, compute_cached_layout, compute_flexbox_layout, compute_root_layout,
 };
 use neutron_star::geometry::{Edges, Point, Size};
 use neutron_star::style::{
@@ -845,7 +844,7 @@ fn compute_leaf_layout_adds_box_model_and_exports_first_baseline() {
     let mut measurer =
         TextMeasurer::new(&mut context, &mut artifacts, &container, runs.into_iter());
 
-    let output = compute_leaf_layout(LayoutInput::default(), &container, &mut measurer);
+    let output = measurer.compute_layout(LayoutInput::default());
 
     assert_size(output.size, Size::new(52.0, 20.0));
     assert_close(
@@ -1023,7 +1022,7 @@ impl<'t> LayoutNode for HostRef<'t> {
                 let mut artifacts = handle.slots().artifacts.borrow_mut();
                 let mut measurer =
                     TextMeasurer::new(&mut text, &mut artifacts, &node.style, run.into_iter());
-                compute_leaf_layout(input, &node.style, &mut measurer)
+                measurer.compute_layout(input)
             }
         })
     }

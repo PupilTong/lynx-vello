@@ -1,8 +1,8 @@
 //! Text measurement style protocol.
 //!
-//! This module is deliberately independent of Parley. It is the stable seam
-//! between host-owned computed styles and an optional text measurement
-//! adapter: the host lends paragraph and run style views in stylo's computed
+//! This module is deliberately independent of Parley's value types. It is the
+//! stable seam between host-owned computed styles and the concrete text
+//! engine: the host lends paragraph and run style views in stylo's computed
 //! font/text vocabulary, and the adapter translates their values only when it
 //! shapes text. Paint-only values (brushes, color, decoration, shadow, and
 //! stroke) are outside this measurement protocol.

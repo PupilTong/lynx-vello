@@ -1,9 +1,8 @@
-//! Optional Parley text measurement core.
+//! Parley text measurement core.
 //!
 //! This module shapes host-assembled [`TextRun`](crate::style::TextRun)
 //! sequences, re-breaks retained layouts for intrinsic and definite
-//! constraints, and lends their metrics through
-//! [`LeafMeasurer`](crate::compute::LeafMeasurer). It owns no widget tree,
+//! constraints, and feeds the fixed Parley path into leaf box layout. It owns no widget tree,
 //! computed-style storage, resource fetching, box cache, or paint policy.
 //!
 //! # Host leaf dispatch
@@ -18,7 +17,6 @@
 //! ```
 //! use std::cell::RefCell;
 //!
-//! use neutron_star::compute::compute_leaf_layout;
 //! use neutron_star::style::{
 //!     CoreStyle, Display, FontFamily, TextContainerStyle, TextRun, TextRunStyle,
 //! };
@@ -73,7 +71,7 @@
 //!         &node.container_style,
 //!         runs.into_iter(),
 //!     );
-//!     compute_leaf_layout(input, &node.container_style, &mut measurer)
+//!     measurer.compute_layout(input)
 //! }
 //!
 //! let node = TextNode {

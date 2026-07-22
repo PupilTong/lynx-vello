@@ -12,7 +12,7 @@
 )]
 
 use euclid::{Scale, Size2D};
-use neutron_star::geometry::{Point, Size};
+use neutron_star::geometry::Size;
 use style_traits::{CSSPixel, DevicePixel};
 use stylo::context::QuirksMode;
 use stylo::device::Device;
@@ -26,7 +26,7 @@ use stylo::servo::media_features::PointerCapabilities;
 use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Display, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
-use w3c_dom::layout::{Layout, LeafMeasureInput, LeafMetrics, MeasureLeaf};
+use w3c_dom::layout::Layout;
 use w3c_dom::{Document, Node, NodeId};
 
 #[derive(Debug)]
@@ -66,30 +66,10 @@ fn device(viewport: Size<f32>) -> Device {
     )
 }
 
-/// Embedder payload used by benchmark leaves.
-#[derive(Debug, Clone, Copy, Default)]
-struct BenchLeaf {
-    intrinsic: Size<f32>,
-    first_baseline: Option<f32>,
-}
-
-impl MeasureLeaf for BenchLeaf {
-    fn measure_leaf(&self, _node: &Node<Self>, input: LeafMeasureInput) -> LeafMetrics {
-        let size = Size::new(
-            input.known_dimensions.width.unwrap_or(self.intrinsic.width),
-            input
-                .known_dimensions
-                .height
-                .unwrap_or(self.intrinsic.height),
-        );
-        LeafMetrics::new(size).with_first_baselines(Point::new(None, self.first_baseline))
-    }
-}
-
 /// A styled w3c-dom document ready for a cold production layout pass.
 #[derive(Debug)]
 pub(super) struct LayoutFixture {
-    document: Document<BenchLeaf>,
+    document: Document<()>,
     root: NodeId,
     node_count: usize,
     expected_display: Display,
@@ -108,7 +88,7 @@ impl LayoutFixture {
             })
             .expect("every box benchmark root declares its production display mode");
         let mut document = Document::new(device(viewport));
-        let root = document.create_element("page", BenchLeaf::default());
+        let root = document.create_element("page", ());
         document.set_inline_style(root, root_style);
         document.append_child(root);
         Self {
@@ -124,7 +104,7 @@ impl LayoutFixture {
     }
 
     pub(super) fn container(&mut self, parent: NodeId, style: &str) -> NodeId {
-        self.push(parent, style, BenchLeaf::default())
+        self.push(parent, style, None)
     }
 
     pub(super) fn leaf(
@@ -134,20 +114,22 @@ impl LayoutFixture {
         intrinsic: Size<f32>,
         first_baseline: Option<f32>,
     ) -> NodeId {
-        self.push(
-            parent,
-            style,
-            BenchLeaf {
-                intrinsic,
-                first_baseline,
-            },
-        )
+        self.push(parent, style, Some((intrinsic, first_baseline)))
     }
 
-    fn push(&mut self, parent: NodeId, style: &str, payload: BenchLeaf) -> NodeId {
-        let node = self.document.create_element("view", payload);
+    fn push(
+        &mut self,
+        parent: NodeId,
+        style: &str,
+        leaf_metrics: Option<(Size<f32>, Option<f32>)>,
+    ) -> NodeId {
+        let node = self.document.create_element("view", ());
         self.document.set_inline_style(node, style);
         self.document.append(parent, node);
+        if let Some((size, first_baseline)) = leaf_metrics {
+            self.document
+                .set_leaf_metrics_for_testing(node, size, first_baseline);
+        }
         self.node_count += 1;
         node
     }

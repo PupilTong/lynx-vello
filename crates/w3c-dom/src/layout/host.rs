@@ -14,28 +14,30 @@
 //! at all: the positioned pass re-walks the tree instead of consuming a
 //! queue (see [`position_hoisted_subtree`]).
 
+#[cfg(feature = "layout-test-utils")]
+use neutron_star::compute::compute_leaf_layout_with_measurement_for_testing;
 use neutron_star::compute::{
-    FnLeafMeasurer, compute_absolute_layout, compute_boundary_relayout, compute_cached_layout,
+    compute_absolute_layout, compute_boundary_relayout, compute_cached_layout,
     compute_flexbox_layout, compute_grid_layout, compute_leaf_layout, compute_linear_layout,
     compute_relative_layout, compute_root_layout, compute_skipped_contents_layout, hide_subtree,
     round_layout,
 };
 use neutron_star::geometry::{Point, Size};
 use neutron_star::invalidate::is_relayout_boundary;
-use neutron_star::style::{CoreStyle, PositionProperty};
+use neutron_star::style::{CoreStyle, PositionProperty, TextRun};
+use neutron_star::text::TextMeasurer;
 use neutron_star::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput,
 };
 
-use super::MeasureLeaf;
 use super::style::{
-    DisplayMode, StyleView, display_mode, establishes_absolute_containing_block,
+    DisplayMode, StyleView, TextStyleView, display_mode, establishes_absolute_containing_block,
     establishes_fixed_containing_block, resolve_position, skips_contents,
 };
 use crate::document::Document;
 use crate::node::{ChildrenIter, Node};
 
-impl<'dom, T: MeasureLeaf> LayoutNode for &'dom Node<T> {
+impl<'dom, T> LayoutNode for &'dom Node<T> {
     type Style = StyleView<'dom, T>;
     type ChildIter = ChildrenIter<'dom, T>;
 
@@ -58,9 +60,9 @@ impl<'dom, T: MeasureLeaf> LayoutNode for &'dom Node<T> {
     /// the cache); every generated, non-skipping box routes to its algorithm
     /// inside it.
     fn compute_child_layout(self, input: LayoutInput) -> LayoutOutput {
-        // Text nodes carry no computed style: they lay out as leaves inside
-        // an anonymous box (initial box values; content via the payload's
-        // measurement hook).
+        // Text nodes carry no computed box style: they lay out through the
+        // concrete Parley path inside an anonymous box, with inherited text
+        // style read from their parent.
         let display = if self.is_text_node() {
             DisplayMode::Leaf
         } else {
@@ -93,12 +95,37 @@ impl<'dom, T: MeasureLeaf> LayoutNode for &'dom Node<T> {
             DisplayMode::Linear => compute_linear_layout(node, input),
             DisplayMode::Relative => compute_relative_layout(node, input),
             DisplayMode::Leaf => {
-                let view = node.style();
-                let output = {
-                    let mut measurer = FnLeafMeasurer::new(|measure_input| {
-                        node.payload().measure_leaf(node, measure_input)
-                    });
-                    compute_leaf_layout(input, &view, &mut measurer)
+                let output = if node.is_text_node() {
+                    let view = TextStyleView::of(node);
+                    let run = TextRun {
+                        text: node.text().unwrap_or_default(),
+                        style: &view,
+                        preserve_newlines: false,
+                    };
+                    let mut context = node.text_context().borrow_mut();
+                    let mut artifacts = node.text_artifacts().borrow_mut();
+                    let mut measurer = TextMeasurer::new(
+                        &mut context,
+                        &mut artifacts,
+                        &view,
+                        std::iter::once(run),
+                    );
+                    measurer.compute_layout(input)
+                } else {
+                    let view = node.style();
+                    #[cfg(feature = "layout-test-utils")]
+                    if let Some(metrics) = node.test_leaf_metrics() {
+                        compute_leaf_layout_with_measurement_for_testing(
+                            input,
+                            &view,
+                            None,
+                            |_measure_input| metrics,
+                        )
+                    } else {
+                        compute_leaf_layout(input, &view, node.natural_size())
+                    }
+                    #[cfg(not(feature = "layout-test-utils"))]
+                    compute_leaf_layout(input, &view, node.natural_size())
                 };
                 // Flow/contents container layout is unimplemented (see
                 // `DisplayMode::Leaf`): the box itself is a leaf, and any
@@ -156,7 +183,8 @@ impl<'dom, T: MeasureLeaf> LayoutNode for &'dom Node<T> {
     }
 
     fn cache_clear(self) {
-        self.layout_data.borrow_mut().measure_cache.clear();
+        self.layout_data.borrow_mut().clear_measurement_cache();
+        self.invalidate_text_artifacts();
     }
 }
 
@@ -194,7 +222,7 @@ impl<'dom, T: MeasureLeaf> LayoutNode for &'dom Node<T> {
 /// inner boundary's own re-run refreshes its interior. Independent boundaries
 /// have unordered depths and are order-insensitive, so a plain depth sort
 /// suffices.
-pub(super) fn run_layout<T: MeasureLeaf>(document: &Document<T>, viewport: Size<f32>, scale: f32) {
+pub(super) fn run_layout<T>(document: &Document<T>, viewport: Size<f32>, scale: f32) {
     let Some(root) = document.root_element() else {
         return;
     };
@@ -271,7 +299,7 @@ fn boundary_depth<T>(document: &Document<T>, id: crate::NodeId) -> usize {
 /// ancestor geometry. Pre-order also gives hoisted-inside-hoisted nesting
 /// for free: an outer hoisted ancestor is finalized before any hoisted
 /// descendant converts its static position through it.
-fn position_hoisted_subtree<T: MeasureLeaf>(node: &Node<T>, viewport: Size<f32>) {
+fn position_hoisted_subtree<T>(node: &Node<T>, viewport: Size<f32>) {
     let Some(style) = node.computed_style() else {
         return; // text nodes are never positioned and have no children
     };
@@ -303,7 +331,7 @@ fn position_hoisted_subtree<T: MeasureLeaf>(node: &Node<T>, viewport: Size<f32>)
     }
 }
 
-fn position_hoisted<T: MeasureLeaf>(node: &Node<T>, viewport: Size<f32>) {
+fn position_hoisted<T>(node: &Node<T>, viewport: Size<f32>) {
     let Some(parent) = node.parent() else {
         return;
     };

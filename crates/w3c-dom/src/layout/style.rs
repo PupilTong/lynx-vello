@@ -20,13 +20,16 @@
 use neutron_star::geometry::{Edges, Point, Size};
 use neutron_star::style::{
     AspectRatio, Au, BorderSideWidth, Contain, ContainIntrinsicSize, ContentDistribution,
-    CoreStyle, Display, FlexBasis, FlexContainerStyle, FlexItemStyle, GridAutoFlow,
+    CoreStyle, Display, FlexBasis, FlexContainerStyle, FlexItemStyle, FontFamily,
+    FontFeatureSettings, FontStyle, FontVariationSettings, FontWeight, GridAutoFlow,
     GridContainerStyle, GridItemStyle, GridLine, GridTemplateComponent, ImplicitGridTracks, Inset,
-    ItemPlacement, JustifyItems, LinearContainerStyle, LinearItemStyle, Margin, MaxSize,
-    NonNegativeLengthPercentage, NonNegativeLengthPercentageOrNormal, NonNegativeNumber, Overflow,
-    PositionProperty, RelativeAlign, RelativeContainerStyle, RelativeItemStyle, RelativeReference,
-    SelfAlignment, StyleSize, box_sizing, direction, flex_direction, flex_wrap, linear_direction,
-    relative_center, relative_layout_once, visibility,
+    ItemPlacement, JustifyItems, LetterSpacing, LineHeight, LinearContainerStyle, LinearItemStyle,
+    Margin, MaxSize, NonNegativeLengthPercentage, NonNegativeLengthPercentageOrNormal,
+    NonNegativeNumber, Overflow, PositionProperty, RelativeAlign, RelativeContainerStyle,
+    RelativeItemStyle, RelativeReference, SelfAlignment, StyleSize, TextAlign, TextContainerStyle,
+    TextIndent, TextRunStyle, WordBreak, box_sizing, direction, flex_direction, flex_wrap,
+    linear_direction, relative_center, relative_layout_once, text_wrap_mode, visibility,
+    white_space_collapse,
 };
 use stylo::properties::ComputedValues;
 use stylo::properties::style_structs::Position as PositionStruct;
@@ -53,8 +56,8 @@ pub(crate) enum DisplayMode {
     Relative,
     /// Flow (block/inline) and `display: contents` — **not implemented** as
     /// container layout: the node is laid out as a leaf (its own box styles
-    /// apply, content measured through the embedder hook) and any children
-    /// are zeroed. Flow containers never survive in a Lynx tree (the
+    /// apply, decoded natural size is used when present) and any children are
+    /// zeroed. Flow containers never survive in a Lynx tree (the
     /// embedder's UA sheet assigns every element a supported display) and
     /// neutron-star has no block/inline-flow algorithm yet.
     Leaf,
@@ -273,6 +276,100 @@ impl<'dom, T> StyleView<'dom, T> {
     }
 }
 
+/// Text-only style view: anonymous-box geometry plus inherited paragraph and
+/// run values. Keeping this separate leaves the ubiquitous box [`StyleView`]
+/// at two words; only literal text pays for the second computed-style handle.
+pub(crate) struct TextStyleView<'dom, T> {
+    box_style: StyleView<'dom, T>,
+    text_style: Arc<ComputedValues>,
+}
+
+impl<T> std::fmt::Debug for TextStyleView<'_, T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("TextStyleView")
+            .field(&self.box_style.node.id())
+            .finish()
+    }
+}
+
+impl<'dom, T> TextStyleView<'dom, T> {
+    pub(crate) fn of(node: &'dom Node<T>) -> Self {
+        debug_assert!(node.is_text_node(), "text style requires a text node");
+        Self {
+            box_style: StyleView::of(node),
+            text_style: node
+                .parent()
+                .and_then(Node::computed_style)
+                .unwrap_or_else(|| super::ANONYMOUS_STYLE.clone()),
+        }
+    }
+
+    fn text_values(&self) -> &ComputedValues {
+        &self.text_style
+    }
+}
+
+impl<T> CoreStyle for TextStyleView<'_, T> {
+    fn display(&self) -> Display {
+        self.box_style.display()
+    }
+
+    fn visibility(&self) -> visibility::T {
+        self.box_style.visibility()
+    }
+
+    fn position(&self) -> PositionProperty {
+        self.box_style.position()
+    }
+
+    fn inset(&self) -> Edges<&Inset> {
+        self.box_style.inset()
+    }
+
+    fn size(&self) -> Size<&StyleSize> {
+        self.box_style.size()
+    }
+
+    fn min_size(&self) -> Size<&StyleSize> {
+        self.box_style.min_size()
+    }
+
+    fn max_size(&self) -> Size<&MaxSize> {
+        self.box_style.max_size()
+    }
+
+    fn aspect_ratio(&self) -> AspectRatio {
+        self.box_style.aspect_ratio()
+    }
+
+    fn margin(&self) -> Edges<&Margin> {
+        self.box_style.margin()
+    }
+
+    fn padding(&self) -> Edges<&NonNegativeLengthPercentage> {
+        self.box_style.padding()
+    }
+
+    fn border(&self) -> Edges<BorderSideWidth> {
+        self.box_style.border()
+    }
+
+    fn overflow(&self) -> Point<Overflow> {
+        self.box_style.overflow()
+    }
+
+    fn box_sizing(&self) -> box_sizing::T {
+        self.box_style.box_sizing()
+    }
+
+    fn direction(&self) -> direction::T {
+        // Direction is inherited text state and participates in physical
+        // alignment; anonymous-box geometry otherwise stays at initial CSS.
+        self.text_values().clone_direction()
+    }
+}
+
 impl<T> CoreStyle for StyleView<'_, T> {
     fn display(&self) -> Display {
         self.style.clone_display()
@@ -430,6 +527,74 @@ impl<T> FlexContainerStyle for StyleView<'_, T> {
 
     fn justify_content(&self) -> ContentDistribution {
         self.position_struct().justify_content
+    }
+}
+
+impl<T> TextContainerStyle for TextStyleView<'_, T> {
+    fn text_align(&self) -> TextAlign {
+        self.text_values().get_inherited_text().clone_text_align()
+    }
+
+    fn text_wrap_mode(&self) -> text_wrap_mode::T {
+        self.text_values()
+            .get_inherited_text()
+            .clone_text_wrap_mode()
+    }
+
+    fn white_space_collapse(&self) -> white_space_collapse::T {
+        self.text_values()
+            .get_inherited_text()
+            .clone_white_space_collapse()
+    }
+
+    fn word_break(&self) -> WordBreak {
+        self.text_values().get_inherited_text().clone_word_break()
+    }
+
+    fn text_indent(&self) -> TextIndent {
+        self.text_values().get_inherited_text().clone_text_indent()
+    }
+}
+
+impl<T> TextRunStyle for TextStyleView<'_, T> {
+    fn font_family(&self) -> FontFamily {
+        self.text_values().get_font().clone_font_family()
+    }
+
+    fn font_size(&self) -> f32 {
+        self.text_values()
+            .get_font()
+            .clone_font_size()
+            .computed_size()
+            .px()
+    }
+
+    fn font_weight(&self) -> FontWeight {
+        self.text_values().get_font().clone_font_weight()
+    }
+
+    fn font_style(&self) -> FontStyle {
+        self.text_values().get_font().clone_font_style()
+    }
+
+    fn letter_spacing(&self) -> LetterSpacing {
+        self.text_values()
+            .get_inherited_text()
+            .clone_letter_spacing()
+    }
+
+    fn line_height(&self) -> LineHeight {
+        self.text_values().get_font().clone_line_height()
+    }
+
+    fn font_feature_settings(&self) -> FontFeatureSettings {
+        self.text_values().get_font().clone_font_feature_settings()
+    }
+
+    fn font_variation_settings(&self) -> FontVariationSettings {
+        self.text_values()
+            .get_font()
+            .clone_font_variation_settings()
     }
 }
 
@@ -614,5 +779,20 @@ impl<T> RelativeItemStyle for StyleView<'_, T> {
 
     fn order(&self) -> i32 {
         FlexItemStyle::order(self)
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use core::mem::size_of;
+
+    use super::{StyleView, TextStyleView};
+
+    #[test]
+    fn ordinary_style_views_stay_two_words() {
+        let word = size_of::<usize>();
+        assert_eq!(size_of::<StyleView<'static, ()>>(), 2 * word);
+        assert_eq!(size_of::<TextStyleView<'static, ()>>(), 3 * word);
     }
 }

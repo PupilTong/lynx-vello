@@ -37,9 +37,9 @@
 //! for) and routes to an engine algorithm entry point (Flexbox, Grid, and
 //! Starlight Linear and Relative are implemented in
 //! [`compute`](crate::compute)),
-//! [`compute_leaf_layout`](crate::compute::compute_leaf_layout) (text/images
-//! via a generic [`LeafMeasurer`](crate::compute::LeafMeasurer)), or a
-//! host-provided additional algorithm. The host handles `display: none` first
+//! [`compute_leaf_layout`](crate::compute::compute_leaf_layout) (images via
+//! [`NaturalSize`](crate::compute::NaturalSize); text uses the closed Parley
+//! path), or a host-provided additional container algorithm. The host handles `display: none` first
 //! with [`hide_subtree`](crate::compute::hide_subtree), then wraps
 //! visible-node routing in
 //! [`compute_cached_layout`](crate::compute::compute_cached_layout) so every
@@ -56,8 +56,8 @@
 //! `Cell`/`RefCell` suffice. Two rules keep runtime borrow tracking trivial:
 //! the host must not hold a per-node slot borrow across a recursive
 //! [`compute_child_layout`](LayoutNode::compute_child_layout) call, and the
-//! engine never re-enters a node's cache while that node's leaf measurer is
-//! live.
+//! engine never re-enters a node's cache while that node's concrete Parley
+//! adapter is live.
 //!
 //! # Style views are borrowed, copy-free
 //!
@@ -147,8 +147,8 @@ pub trait LayoutNode: Copy + core::fmt::Debug {
     /// Re-entrancy contract: the implementation must not hold any per-node
     /// slot borrow across the engine algorithm it routes to (the algorithm
     /// recurses back into other nodes' `compute_child_layout`). Borrows
-    /// needed by a leaf measurer are node-scoped and end before the cache
-    /// wrapper stores the result.
+    /// needed by the concrete Parley text path are node-scoped and end before
+    /// the cache wrapper stores the result.
     fn compute_child_layout(self, input: LayoutInput) -> LayoutOutput;
 
     /// Stores the durable, unrounded layout of this node.

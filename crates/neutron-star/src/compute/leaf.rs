@@ -1,15 +1,10 @@
-//! Leaf layout: nodes whose content the engine cannot see.
+//! Leaf layout for the engine's two closed content paths.
 //!
-//! Text runs, images, and other replaced/host-rendered content are measured
-//! by the **host** (in lynx-vello: the parley-based text engine) and boxed
-//! by the **engine** (sizing styles, aspect ratio, min/max clamps, padding
-//! and border floors). The seam between the two is [`LeafMeasurer`], a
-//! statically-dispatched lending trait. Its GAT output can be an owned metric
-//! value or a borrowed view into a host-retained artifact such as a shaped
-//! Parley layout; neutron-star immediately copies only the small
-//! [`LeafMetrics`] value it needs.
-
-use core::marker::PhantomData;
+//! Replaced content (currently images) supplies an already-decoded
+//! [`NaturalSize`]. Text is measured by neutron-star's concrete Parley engine
+//! and enters the same private box-layout routine. There is deliberately no
+//! host measurement trait or callback in the public protocol: arbitrary host
+//! content is not a supported leaf kind.
 
 use stylo::computed_values::box_sizing;
 
@@ -24,32 +19,39 @@ use crate::tree::{
     AvailableSpace, LayoutGoal, LayoutInput, LayoutOutput, RequestedAxis, SizingMode,
 };
 
-/// Sizes a content leaf, delegating content measurement to `measurer`.
-///
-/// [`LeafMeasurer::measure`] returns the content's size and optional first
-/// baselines for a [`LeafMeasureInput`]. Its known dimensions are resolved or
-/// caller-decided border-box dimensions converted to content-box extents
-/// (measure the other axis against them — e.g. text height for a known width);
-/// its available space constrains the free axes. The measurer is called at
-/// most once. A single-axis size probe whose box is already fully known can
-/// skip it; full layout and both-axis probes still measure so text/image
-/// overflow, retained paint artifacts, and baselines remain available.
+/// Sizes replaced content from its decoded natural dimensions and ratio.
 ///
 /// The returned size applies, in order: known dimensions verbatim; style
-/// size/aspect-ratio (per [`SizingMode`](crate::tree::SizingMode)); measured
+/// size/aspect-ratio (per [`SizingMode`](crate::tree::SizingMode)); natural
 /// content size; min/max clamps; and a padding+border floor on axes the
 /// engine resolves itself. Caller-supplied known dimensions remain verbatim.
 /// `content_size` is the border-origin scrollable extent, including measured
 /// overflow.
-#[allow(clippy::too_many_lines)]
-pub fn compute_leaf_layout<Style, Measurer>(
+pub fn compute_leaf_layout<Style: CoreStyle>(
     input: LayoutInput,
     style: &Style,
-    measurer: &mut Measurer,
+    natural_size: NaturalSize,
+) -> LayoutOutput {
+    compute_leaf_layout_with_measurement(
+        input,
+        style,
+        natural_size.aspect_ratio(),
+        |measure_input| natural_size.measure(measure_input),
+    )
+}
+
+/// Shared box-model routine used only by the closed natural-size and Parley
+/// content paths.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn compute_leaf_layout_with_measurement<Style, Measure>(
+    input: LayoutInput,
+    style: &Style,
+    natural_aspect_ratio: Option<f32>,
+    mut measure: Measure,
 ) -> LayoutOutput
 where
     Style: CoreStyle,
-    Measurer: LeafMeasurer,
+    Measure: FnMut(LeafMeasureInput) -> LeafMetrics,
 {
     let measurement_axis = match input.goal {
         LayoutGoal::Measure(axis) => Some(axis),
@@ -64,8 +66,7 @@ where
         min_size,
         max_size,
         aspect_ratio,
-        box_sizing,
-    } = resolve_leaf_sizing(input, style);
+    } = resolve_leaf_sizing(input, style, natural_aspect_ratio);
 
     node_size = clamp_resolved_size(
         node_size,
@@ -118,9 +119,6 @@ where
         ),
     );
 
-    // End the GAT borrow immediately. The host may retain a rich artifact
-    // behind the returned view, but box layout needs only these Copy metrics.
-    //
     // Size containment (`contain: size`/`strict`, `content-visibility`) sizes
     // the leaf **as if it had no content**: the measurer is never called and
     // `contain-intrinsic-{width,height}` (both `None` ⇒ zero, collapsing to
@@ -135,15 +133,11 @@ where
             first_baselines: Point::NONE,
         }
     } else {
-        let measurement = measurer.measure(LeafMeasureInput::new(
+        measure(LeafMeasureInput::new(
             measure_known_dimensions,
             available_space,
             input.goal,
-        ));
-        LeafMetrics {
-            size: measurement.size(),
-            first_baselines: measurement.first_baselines(),
-        }
+        ))
     };
     let measured_content = measurement.size;
     debug_assert!(
@@ -165,7 +159,6 @@ where
         originally_indefinite,
         measurement_axis,
         aspect_ratio,
-        box_sizing,
         padding_border_size,
     );
 
@@ -191,13 +184,34 @@ where
     LayoutOutput::new(size, content_size).with_first_baselines(first_baselines)
 }
 
-/// Content-box constraints handed to [`LeafMeasurer::measure`].
+/// Test-only entry to the real leaf box-model routine.
+///
+/// Integration-test hosts use this to observe the normalized content-box
+/// request and return synthetic metrics without reconstructing production
+/// sizing, skip, or baseline behavior. It is absent unless the explicit
+/// `layout-test-utils` feature is enabled.
+#[cfg(feature = "layout-test-utils")]
+#[doc(hidden)]
+pub fn compute_leaf_layout_with_measurement_for_testing<Style, Measure>(
+    input: LayoutInput,
+    style: &Style,
+    natural_aspect_ratio: Option<f32>,
+    measure: Measure,
+) -> LayoutOutput
+where
+    Style: CoreStyle,
+    Measure: FnMut(LeafMeasureInput) -> LeafMetrics,
+{
+    compute_leaf_layout_with_measurement(input, style, natural_aspect_ratio, measure)
+}
+
+/// Content-box constraints consumed by neutron-star's closed leaf engines.
 ///
 /// The dimensions have already been translated through the leaf's box model:
 /// known dimensions are content-box extents, and available space excludes its
 /// margins, padding, and borders. [`Self::goal`]
-/// lets a host distinguish a transient probe from the committed layout whose
-/// rich artifact may need to remain available for painting.
+/// lets the Parley path distinguish a transient probe from the committed
+/// layout whose rich artifact remains available for painting.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct LeafMeasureInput {
@@ -225,71 +239,139 @@ impl LeafMeasureInput {
     }
 }
 
-/// A host measurement consumable by leaf box layout.
+/// Decoded intrinsic data for replaced content.
 ///
-/// Implementations may be small owned values or borrowed views over rich,
-/// host-owned artifacts. The geometry stays in neutron-star's physical `f32`
-/// vocabulary; only its carrier is generic. Implementations need not be
-/// `Copy`, `Clone`, `'static`, `Send`, or `Sync`.
-pub trait LeafMeasurement: Sized {
-    /// Measured content-box size.
-    fn size(&self) -> Size<f32>;
+/// The dimensions are content-box CSS pixels. Either dimension may be absent
+/// (for example, ratio-only vector content); `aspect_ratio` is width / height.
+/// Invalid or negative values are discarded by the constructors. `NaturalSize::NONE`
+/// represents content whose metadata has not loaded yet and therefore
+/// contributes zero intrinsic size.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[non_exhaustive]
+pub struct NaturalSize {
+    /// Natural width and height, independently optional.
+    dimensions: Size<Option<f32>>,
+    /// Natural width / height ratio.
+    aspect_ratio: Option<f32>,
+}
 
-    /// First baseline offsets from the content-box origin.
-    fn first_baselines(&self) -> Point<Option<f32>> {
-        Point::NONE
+impl NaturalSize {
+    /// No decoded natural dimensions or ratio.
+    pub const NONE: Self = Self {
+        dimensions: Size::NONE,
+        aspect_ratio: None,
+    };
+
+    /// Creates natural data from independently optional dimensions and ratio.
+    #[must_use]
+    pub fn new(dimensions: Size<Option<f32>>, aspect_ratio: Option<f32>) -> Self {
+        Self {
+            dimensions: dimensions.map(sanitize_dimension),
+            aspect_ratio: sanitize_ratio(aspect_ratio),
+        }
+    }
+
+    /// Creates natural data from a decoded two-dimensional size.
+    #[must_use]
+    pub fn from_size(size: Size<f32>) -> Self {
+        Self::new(
+            Size::new(Some(size.width), Some(size.height)),
+            ratio_from_dimensions(size.width, size.height),
+        )
+    }
+
+    /// Returns the sanitized optional natural dimensions.
+    #[must_use]
+    pub const fn dimensions(self) -> Size<Option<f32>> {
+        self.dimensions
+    }
+
+    /// Returns the sanitized natural width / height ratio.
+    #[must_use]
+    pub const fn aspect_ratio(self) -> Option<f32> {
+        self.aspect_ratio
+    }
+
+    fn measure(self, input: LeafMeasureInput) -> LeafMetrics {
+        let natural = self.dimensions();
+        let ratio = self.aspect_ratio();
+        let size = match input.known_dimensions {
+            Size {
+                width: Some(width),
+                height: Some(height),
+            } => Size::new(width, height),
+            Size {
+                width: Some(width),
+                height: None,
+            } => Size::new(
+                width,
+                ratio
+                    .map(|ratio| width / ratio)
+                    .or(natural.height)
+                    .unwrap_or(0.0),
+            ),
+            Size {
+                width: None,
+                height: Some(height),
+            } => Size::new(
+                ratio
+                    .map(|ratio| height * ratio)
+                    .or(natural.width)
+                    .unwrap_or(0.0),
+                height,
+            ),
+            Size {
+                width: None,
+                height: None,
+            } => match natural {
+                Size {
+                    width: Some(width),
+                    height: Some(height),
+                } => Size::new(width, height),
+                Size {
+                    width: Some(width),
+                    height: None,
+                } => Size::new(width, ratio.map_or(0.0, |ratio| width / ratio)),
+                Size {
+                    width: None,
+                    height: Some(height),
+                } => Size::new(ratio.map_or(0.0, |ratio| height * ratio), height),
+                Size {
+                    width: None,
+                    height: None,
+                } => Size::ZERO,
+            },
+        };
+        LeafMetrics::new(size)
     }
 }
 
-/// Statically-dispatched host content measurement.
-///
-/// The GAT permits `Measurement<'a>` to borrow a layout retained inside the
-/// measurer. For example, a Parley adapter can build and store an owned
-/// `parley::Layout`, return a lightweight view of it, and reuse the same layout
-/// for painting after [`compute_leaf_layout`] releases the view. A measurement
-/// probe must not evict the artifact for the last committed layout. Because a
-/// cached committed [`LayoutOutput`] can skip measurement entirely, hosts must
-/// retain that artifact for at least as long as the corresponding layout-cache
-/// entry and invalidate both caches together when content, text style, fonts,
-/// or other shaping inputs change.
-///
-/// The canonical integration is a **node-scoped adapter**, constructed inside
-/// [`LayoutNode::compute_child_layout`](crate::tree::LayoutNode::compute_child_layout):
-/// it reads the current node's immutable text/style content through the
-/// handle, and separately borrows the mutable Parley contexts plus that
-/// node's host-owned interior-mutable artifact-cache slot. The node is
-/// therefore explicit in adapter construction; no host-global "current node"
-/// side channel is needed.
-///
-/// This trait is intentionally not object-safe: the layout boundary remains
-/// static dispatch end to end.
-///
-/// ```compile_fail
-/// use neutron_star::compute::LeafMeasurer;
-/// fn erase(_: &mut dyn LeafMeasurer) {}
-/// ```
-pub trait LeafMeasurer: Sized {
-    /// Measurement value or borrowed measurement view returned by one call.
-    type Measurement<'a>: LeafMeasurement
-    where
-        Self: 'a;
-
-    /// Measures content for already-normalized content-box constraints.
-    ///
-    /// [`compute_leaf_layout`] calls this at most once. Implementations may
-    /// populate host-owned caches, but a [`LayoutGoal::Measure`] call must
-    /// remain externally side-effect free with respect to durable box geometry.
-    fn measure(&mut self, input: LeafMeasureInput) -> Self::Measurement<'_>;
+impl From<Size<f32>> for NaturalSize {
+    fn from(size: Size<f32>) -> Self {
+        Self::from_size(size)
+    }
 }
 
-/// The default engine-facing leaf metrics.
+fn sanitize_dimension(value: Option<f32>) -> Option<f32> {
+    value.filter(|value| value.is_finite() && *value >= 0.0)
+}
+
+fn sanitize_ratio(value: Option<f32>) -> Option<f32> {
+    value.filter(|value| value.is_finite() && *value > 0.0)
+}
+
+fn ratio_from_dimensions(width: f32, height: f32) -> Option<f32> {
+    sanitize_ratio((height > 0.0).then_some(width / height))
+}
+
+/// Metrics produced by neutron-star's concrete content engines.
 ///
 /// This contains content-box data only; leaf layout adds box-model surrounds,
 /// applies constraints, and converts baselines to border-box coordinates.
 ///
 /// `size` is the measured content-box extent. `first_baselines` contains
-/// offsets from the content-box origin. A plain [`Size<f32>`] also implements
-/// [`LeafMeasurement`] for leaves without baseline information.
+/// offsets from the content-box origin. Natural-size leaves do not report a
+/// baseline; Parley text does.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct LeafMetrics {
@@ -323,86 +405,14 @@ impl From<Size<f32>> for LeafMetrics {
     }
 }
 
-impl LeafMeasurement for LeafMetrics {
-    fn size(&self) -> Size<f32> {
-        self.size
-    }
-
-    fn first_baselines(&self) -> Point<Option<f32>> {
-        self.first_baselines
-    }
-}
-
-impl LeafMeasurement for Size<f32> {
-    fn size(&self) -> Size<f32> {
-        *self
-    }
-}
-
-impl<T> LeafMeasurement for &T
-where
-    T: LeafMeasurement,
-{
-    fn size(&self) -> Size<f32> {
-        T::size(*self)
-    }
-
-    fn first_baselines(&self) -> Point<Option<f32>> {
-        T::first_baselines(*self)
-    }
-}
-
-/// Closure adapter for measurers returning one fixed owned output type.
-///
-/// Use [`FnLeafMeasurer::new`] for simple leaves and tests. A measurer whose
-/// output borrows storage from itself should implement [`LeafMeasurer`]
-/// directly so its associated output can use the GAT lifetime.
-#[derive(Debug)]
-pub struct FnLeafMeasurer<MeasureFn, Measurement> {
-    measure: MeasureFn,
-    measurement: PhantomData<fn() -> Measurement>,
-}
-
-impl<MeasureFn, Measurement> FnLeafMeasurer<MeasureFn, Measurement>
-where
-    MeasureFn: FnMut(LeafMeasureInput) -> Measurement,
-    Measurement: LeafMeasurement,
-{
-    /// Adapts an `FnMut(LeafMeasureInput) -> Measurement` closure to
-    /// [`LeafMeasurer`].
-    #[must_use]
-    pub fn new(measure: MeasureFn) -> Self {
-        Self {
-            measure,
-            measurement: PhantomData,
-        }
-    }
-}
-
-impl<MeasureFn, Measurement> LeafMeasurer for FnLeafMeasurer<MeasureFn, Measurement>
-where
-    MeasureFn: FnMut(LeafMeasureInput) -> Measurement,
-    Measurement: LeafMeasurement,
-{
-    type Measurement<'a>
-        = Measurement
-    where
-        Self: 'a;
-
-    fn measure(&mut self, input: LeafMeasureInput) -> Self::Measurement<'_> {
-        (self.measure)(input)
-    }
-}
-
 fn apply_measured_aspect_ratio(
     mut size: Size<Option<f32>>,
     originally_indefinite: Size<bool>,
     measurement_axis: Option<RequestedAxis>,
-    aspect_ratio: Option<f32>,
-    box_sizing: box_sizing::T,
+    aspect_ratio: PreferredAspectRatio,
     padding_border_size: Size<f32>,
 ) -> Size<Option<f32>> {
-    let Some(ratio) = aspect_ratio else {
+    let Some((ratio, sizing_box)) = aspect_ratio.components() else {
         return size;
     };
     if !originally_indefinite.width
@@ -420,28 +430,65 @@ fn apply_measured_aspect_ratio(
             let sizing_height = sizing_box_axis(
                 size.height.unwrap_or(0.0),
                 padding_border_size.height,
-                box_sizing,
+                sizing_box,
             );
             size.width = Some(border_box_axis(
                 sizing_height * ratio,
                 padding_border_size.width,
-                box_sizing,
+                sizing_box,
             ));
         }
         None | Some(RequestedAxis::Horizontal | RequestedAxis::Both) => {
             let sizing_width = sizing_box_axis(
                 size.width.unwrap_or(0.0),
                 padding_border_size.width,
-                box_sizing,
+                sizing_box,
             );
             size.height = Some(border_box_axis(
                 sizing_width / ratio,
                 padding_border_size.height,
-                box_sizing,
+                sizing_box,
             ));
         }
     }
     size
+}
+
+/// A preferred ratio together with the box whose width/height it relates.
+///
+/// A plain specified `<ratio>` uses the box selected by `box-sizing`.
+/// Natural ratios and every `auto <ratio>` branch use the content box per
+/// CSS Sizing 4, independently of the element's `box-sizing` value.
+/// The private scalar stays one word in the leaf hot path: zero means no
+/// ratio, a positive value selects content-box sizing, and a negative value
+/// stores the magnitude for border-box sizing. Constructors enforce the
+/// positive finite ratio invariant before the sign is used as the tag.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PreferredAspectRatio(f32);
+
+impl PreferredAspectRatio {
+    const NONE: Self = Self(0.0);
+
+    fn content_box(ratio: f32) -> Self {
+        debug_assert!(ratio.is_finite() && ratio > 0.0);
+        Self(ratio)
+    }
+
+    fn border_box(ratio: f32) -> Self {
+        debug_assert!(ratio.is_finite() && ratio > 0.0);
+        Self(-ratio)
+    }
+
+    #[inline]
+    fn components(self) -> Option<(f32, box_sizing::T)> {
+        if self.0 > 0.0 {
+            Some((self.0, box_sizing::T::ContentBox))
+        } else if self.0 < 0.0 {
+            Some((-self.0, box_sizing::T::BorderBox))
+        } else {
+            None
+        }
+    }
 }
 
 /// Resolved box-model and sizing inputs reused throughout one leaf-layout
@@ -453,11 +500,19 @@ struct LeafSizing {
     node_size: Size<Option<f32>>,
     min_size: Size<Option<f32>>,
     max_size: Size<Option<f32>>,
-    aspect_ratio: Option<f32>,
-    box_sizing: box_sizing::T,
+    aspect_ratio: PreferredAspectRatio,
 }
 
-fn resolve_leaf_sizing(input: LayoutInput, style: &impl CoreStyle) -> LeafSizing {
+#[inline(always)]
+#[allow(
+    clippy::inline_always,
+    reason = "keeps the compact leaf sizing state in its caller on the measured hot path"
+)]
+fn resolve_leaf_sizing(
+    input: LayoutInput,
+    style: &impl CoreStyle,
+    natural_aspect_ratio: Option<f32>,
+) -> LeafSizing {
     let inline_basis = input.parent_size.width;
     let margin = auto_edges_to_zero(resolve_margins(style.margin(), inline_basis));
     let padding = resolve_padding(style.padding(), inline_basis);
@@ -470,23 +525,43 @@ fn resolve_leaf_sizing(input: LayoutInput, style: &impl CoreStyle) -> LeafSizing
     let box_sizing = style.box_sizing();
 
     let (node_size, min_size, max_size, aspect_ratio) = match input.sizing_mode {
-        SizingMode::ContentSize => (input.known_dimensions, Size::NONE, Size::NONE, None),
+        SizingMode::ContentSize => (
+            input.known_dimensions,
+            Size::NONE,
+            Size::NONE,
+            PreferredAspectRatio::NONE,
+        ),
         SizingMode::InherentSize => {
-            let aspect_ratio = used_aspect_ratio(style.aspect_ratio());
+            let aspect_ratio =
+                preferred_aspect_ratio(style.aspect_ratio(), natural_aspect_ratio, box_sizing);
 
-            // Aspect ratio operates on the box selected by box-sizing. The
-            // caller's known dimensions are always border-box, so translate
-            // them into that sizing box before deriving the opposite axis.
+            // First normalize specified width/height into border-box values.
+            // The preferred ratio may use a *different* box (natural and
+            // `auto <ratio>` always use content-box), so translate the
+            // combined known/preferred dimensions through that ratio box,
+            // derive the missing axis there, then return to border-box space.
             let style_size = resolve_size(style.size(), input.parent_size);
-            let known_sizing_box =
-                border_box_to_sizing_box(input.known_dimensions, box_sizing, padding_border_size);
-            let preferred_sizing_box =
-                apply_aspect_ratio(known_sizing_box.or(style_size), aspect_ratio);
-            let node_size = input.known_dimensions.or(apply_box_sizing(
-                preferred_sizing_box,
+            let preferred_border_box = input.known_dimensions.or(apply_box_sizing(
+                style_size,
                 box_sizing,
                 padding_border_size,
             ));
+            let ratio_applied_border_box =
+                aspect_ratio
+                    .components()
+                    .map_or(preferred_border_box, |(ratio, sizing_box)| {
+                        let ratio_box = border_box_to_sizing_box(
+                            preferred_border_box,
+                            sizing_box,
+                            padding_border_size,
+                        );
+                        apply_box_sizing(
+                            apply_aspect_ratio(ratio_box, Some(ratio)),
+                            sizing_box,
+                            padding_border_size,
+                        )
+                    });
+            let node_size = input.known_dimensions.or(ratio_applied_border_box);
             let min_size = apply_box_sizing(
                 resolve_size(style.min_size(), input.parent_size),
                 box_sizing,
@@ -519,7 +594,27 @@ fn resolve_leaf_sizing(input: LayoutInput, style: &impl CoreStyle) -> LeafSizing
         min_size,
         max_size,
         aspect_ratio,
-        box_sizing,
+    }
+}
+
+fn preferred_aspect_ratio(
+    value: stylo::values::computed::AspectRatio,
+    natural_aspect_ratio: Option<f32>,
+    box_sizing: box_sizing::T,
+) -> PreferredAspectRatio {
+    let specified = used_aspect_ratio(value);
+    let ratio = if value.auto {
+        natural_aspect_ratio.or(specified)
+    } else {
+        specified
+    };
+    let Some(ratio) = ratio else {
+        return PreferredAspectRatio::NONE;
+    };
+    if value.auto || box_sizing == box_sizing::T::ContentBox {
+        PreferredAspectRatio::content_box(ratio)
+    } else {
+        PreferredAspectRatio::border_box(ratio)
     }
 }
 
@@ -629,8 +724,13 @@ fn finalize_size(
 mod tests {
     use core::cell::RefCell;
 
-    use stylo::values::computed::{Display, Length, LengthPercentage, MaxSize, Size as StyleSize};
+    use stylo::values::computed::{
+        AspectRatio, Display, Length, LengthPercentage, MaxSize, NonNegativeLengthPercentage,
+        Size as StyleSize,
+    };
     use stylo::values::generics::NonNegative;
+    use stylo::values::generics::position::PreferredRatio;
+    use stylo::values::generics::ratio::Ratio;
 
     use super::*;
     use crate::cache::Cache;
@@ -651,62 +751,6 @@ mod tests {
         paint_data: Vec<u8>,
     }
 
-    struct ArtifactMeasurement<'a>(&'a RetainedArtifact);
-
-    impl LeafMeasurement for ArtifactMeasurement<'_> {
-        fn size(&self) -> Size<f32> {
-            self.0.metrics.size
-        }
-
-        fn first_baselines(&self) -> Point<Option<f32>> {
-            self.0.metrics.first_baselines
-        }
-    }
-
-    struct BorrowingMeasurer {
-        artifact: RetainedArtifact,
-        last_input: Option<LeafMeasureInput>,
-    }
-
-    impl LeafMeasurer for BorrowingMeasurer {
-        type Measurement<'a>
-            = ArtifactMeasurement<'a>
-        where
-            Self: 'a;
-
-        fn measure(&mut self, input: LeafMeasureInput) -> Self::Measurement<'_> {
-            self.last_input = Some(input);
-            ArtifactMeasurement(&self.artifact)
-        }
-    }
-
-    #[test]
-    fn borrowed_measurement_reads_metrics_without_consuming_retained_artifact() {
-        let mut measurer = BorrowingMeasurer {
-            artifact: RetainedArtifact {
-                metrics: LeafMetrics::new(Size::new(31.0, 17.0))
-                    .with_first_baselines(Point::new(None, Some(11.0))),
-                paint_data: vec![1, 2, 3],
-            },
-            last_input: None,
-        };
-        let input = LayoutInput::perform_layout(Size::NONE, Size::NONE, Size::MAX_CONTENT);
-
-        let output = compute_leaf_layout(input, &EmptyStyle, &mut measurer);
-
-        assert_eq!(output.size, Size::new(31.0, 17.0));
-        assert_eq!(output.first_baselines.y, Some(11.0));
-        assert_eq!(
-            measurer.last_input,
-            Some(LeafMeasureInput::new(
-                Size::NONE,
-                Size::MAX_CONTENT,
-                LayoutGoal::Commit,
-            ))
-        );
-        assert_eq!(measurer.artifact.paint_data, [1, 2, 3]);
-    }
-
     #[derive(Default)]
     struct ArtifactCache {
         committed: Option<RetainedArtifact>,
@@ -718,13 +762,8 @@ mod tests {
         artifacts: &'a mut ArtifactCache,
     }
 
-    impl LeafMeasurer for CachingMeasurer<'_> {
-        type Measurement<'a>
-            = ArtifactMeasurement<'a>
-        where
-            Self: 'a;
-
-        fn measure(&mut self, input: LeafMeasureInput) -> Self::Measurement<'_> {
+    impl CachingMeasurer<'_> {
+        fn measure(&mut self, input: LeafMeasureInput) -> LeafMetrics {
             self.artifacts.shape_calls += 1;
             let (slot, paint_tag) = match input.goal {
                 LayoutGoal::Commit => (&mut self.artifacts.committed, b'C'),
@@ -734,7 +773,7 @@ mod tests {
                 metrics: LeafMetrics::new(Size::new(40.0, 12.0)),
                 paint_data: vec![paint_tag],
             });
-            ArtifactMeasurement(slot.as_ref().expect("artifact was just populated"))
+            slot.as_ref().expect("artifact was just populated").metrics
         }
     }
 
@@ -823,7 +862,9 @@ mod tests {
             let mut measurer = CachingMeasurer {
                 artifacts: &mut artifacts,
             };
-            compute_leaf_layout(input, &EmptyStyle, &mut measurer)
+            compute_leaf_layout_with_measurement(input, &EmptyStyle, None, |input| {
+                measurer.measure(input)
+            })
         });
         assert_eq!(host.artifacts.borrow().shape_calls, 1);
         assert_eq!(
@@ -847,7 +888,9 @@ mod tests {
             let mut probe_measurer = CachingMeasurer {
                 artifacts: &mut artifacts,
             };
-            compute_leaf_layout(probe_input, &EmptyStyle, &mut probe_measurer)
+            compute_leaf_layout_with_measurement(probe_input, &EmptyStyle, None, |input| {
+                probe_measurer.measure(input)
+            })
         };
         assert_eq!(probe.size, committed.size);
         assert_eq!(host.artifacts.borrow().shape_calls, 2);
@@ -884,32 +927,143 @@ mod tests {
     }
 
     #[test]
-    fn closure_adapter_accepts_plain_size_measurements() {
-        let mut measurer = FnLeafMeasurer::new(|input: LeafMeasureInput| {
-            assert_eq!(input.goal, LayoutGoal::Commit);
-            Size::new(23.0, 9.0)
-        });
-
-        let output = compute_leaf_layout(LayoutInput::default(), &EmptyStyle, &mut measurer);
+    fn natural_size_supplies_replaced_content_without_a_host_callback() {
+        let output = compute_leaf_layout(
+            LayoutInput::default(),
+            &EmptyStyle,
+            NaturalSize::from_size(Size::new(23.0, 9.0)),
+        );
 
         assert_eq!(output.size, Size::new(23.0, 9.0));
         assert_eq!(output.first_baselines, Point::NONE);
     }
 
     #[test]
-    fn measurement_conversion_and_reference_forwarding_preserve_metrics() {
-        let metrics = LeafMetrics::from(Size::new(19.0, 7.0))
-            .with_first_baselines(Point::new(Some(3.0), Some(5.0)));
-        let reference = &metrics;
+    fn natural_size_derives_a_missing_axis_and_rejects_invalid_data() {
+        let ratio_only = NaturalSize::new(Size::new(Some(40.0), None), Some(2.0));
+        assert_eq!(
+            ratio_only.measure(LeafMeasureInput::default()).size,
+            Size::new(40.0, 20.0)
+        );
+        let invalid = NaturalSize::new(Size::new(Some(f32::NAN), Some(-1.0)), Some(0.0));
+        assert_eq!(
+            invalid.measure(LeafMeasureInput::default()).size,
+            Size::ZERO
+        );
+    }
 
-        assert_eq!(
-            <&LeafMetrics as LeafMeasurement>::size(&reference),
-            Size::new(19.0, 7.0)
+    struct BoxStyle {
+        size: Size<StyleSize>,
+        padding: Edges<NonNegativeLengthPercentage>,
+        box_sizing: box_sizing::T,
+        aspect_ratio: AspectRatio,
+    }
+
+    impl BoxStyle {
+        fn new(size: Size<StyleSize>) -> Self {
+            Self {
+                size,
+                padding: Edges::uniform(NonNegative(LengthPercentage::new_length(Length::new(
+                    0.0,
+                )))),
+                box_sizing: box_sizing::T::ContentBox,
+                aspect_ratio: AspectRatio::auto(),
+            }
+        }
+
+        fn with_padding_and_border_box(mut self, padding: f32) -> Self {
+            self.padding = Edges::uniform(NonNegative(LengthPercentage::new_length(Length::new(
+                padding,
+            ))));
+            self.box_sizing = box_sizing::T::BorderBox;
+            self
+        }
+    }
+
+    impl CoreStyle for BoxStyle {
+        fn display(&self) -> Display {
+            Display::Flex
+        }
+
+        fn size(&self) -> Size<&StyleSize> {
+            self.size.as_ref()
+        }
+
+        fn padding(&self) -> Edges<&NonNegativeLengthPercentage> {
+            self.padding.as_ref()
+        }
+
+        fn box_sizing(&self) -> box_sizing::T {
+            self.box_sizing
+        }
+
+        fn aspect_ratio(&self) -> AspectRatio {
+            self.aspect_ratio
+        }
+    }
+
+    fn aspect_ratio(auto: bool, width: f32, height: f32) -> AspectRatio {
+        AspectRatio {
+            auto,
+            ratio: PreferredRatio::Ratio(Ratio(NonNegative(width), NonNegative(height))),
+        }
+    }
+
+    #[test]
+    fn natural_ratio_uses_the_content_box_with_border_box_sizing() {
+        let natural = NaturalSize::from_size(Size::new(100.0, 50.0));
+        let fixed_width = BoxStyle::new(Size::new(size_px(100.0), StyleSize::auto()))
+            .with_padding_and_border_box(10.0);
+        let fixed = compute_leaf_layout(LayoutInput::default(), &fixed_width, natural);
+        assert_eq!(fixed.size, Size::new(100.0, 60.0));
+        assert_eq!(fixed.content_size, Size::new(100.0, 60.0));
+
+        let automatic = BoxStyle::new(Size::new(StyleSize::auto(), StyleSize::auto()))
+            .with_padding_and_border_box(10.0);
+        let intrinsic = compute_leaf_layout(LayoutInput::default(), &automatic, natural);
+        assert_eq!(intrinsic.size, Size::new(120.0, 70.0));
+        assert_eq!(intrinsic.content_size, Size::new(120.0, 70.0));
+    }
+
+    #[test]
+    fn auto_ratio_fallback_uses_content_box_but_plain_ratio_uses_box_sizing() {
+        let base = BoxStyle::new(Size::new(size_px(100.0), StyleSize::auto()))
+            .with_padding_and_border_box(10.0);
+        let automatic = BoxStyle {
+            aspect_ratio: aspect_ratio(true, 2.0, 1.0),
+            ..base
+        };
+        let automatic_output =
+            compute_leaf_layout(LayoutInput::default(), &automatic, NaturalSize::NONE);
+        assert_eq!(automatic_output.size, Size::new(100.0, 60.0));
+
+        let explicit = BoxStyle {
+            aspect_ratio: aspect_ratio(false, 2.0, 1.0),
+            ..automatic
+        };
+        let explicit_output =
+            compute_leaf_layout(LayoutInput::default(), &explicit, NaturalSize::NONE);
+        assert_eq!(explicit_output.size, Size::new(100.0, 50.0));
+    }
+
+    #[test]
+    fn single_axis_probe_skips_measurement_after_resolving_style_sizes() {
+        let style = BoxStyle::new(Size::new(size_px(40.0), size_px(20.0)));
+        let input = LayoutInput::compute_size(
+            Size::NONE,
+            Size::new(Some(100.0), Some(100.0)),
+            Size::new(
+                AvailableSpace::Definite(100.0),
+                AvailableSpace::Definite(100.0),
+            ),
+            RequestedAxis::Horizontal,
         );
-        assert_eq!(
-            <&LeafMetrics as LeafMeasurement>::first_baselines(&reference),
-            Point::new(Some(3.0), Some(5.0))
-        );
+
+        let output = compute_leaf_layout_with_measurement(input, &style, None, |_input| {
+            panic!("a fully resolved single-axis probe must not measure content")
+        });
+
+        assert_eq!(output.size, Size::new(40.0, 20.0));
     }
 
     #[test]
@@ -921,8 +1075,7 @@ mod tests {
             Size::new(Some(40.0), Some(50.0)),
             both_indefinite,
             Some(RequestedAxis::Vertical),
-            Some(2.0),
-            box_sizing::T::ContentBox,
+            PreferredAspectRatio::content_box(2.0),
             padding_border,
         );
         assert_eq!(vertical, Size::new(Some(90.0), Some(50.0)));
@@ -931,8 +1084,7 @@ mod tests {
             Size::new(Some(100.0), Some(20.0)),
             both_indefinite,
             Some(RequestedAxis::Both),
-            Some(2.0),
-            box_sizing::T::ContentBox,
+            PreferredAspectRatio::content_box(2.0),
             padding_border,
         );
         assert_eq!(horizontal, Size::new(Some(100.0), Some(55.0)));
@@ -941,8 +1093,7 @@ mod tests {
             Size::new(Some(100.0), Some(20.0)),
             both_indefinite,
             None,
-            Some(2.0),
-            box_sizing::T::BorderBox,
+            PreferredAspectRatio::border_box(2.0),
             padding_border,
         );
         assert_eq!(border_box, Size::new(Some(100.0), Some(50.0)));
@@ -953,8 +1104,7 @@ mod tests {
                 unchanged,
                 Size::new(false, true),
                 None,
-                Some(2.0),
-                box_sizing::T::ContentBox,
+                PreferredAspectRatio::content_box(2.0),
                 padding_border,
             ),
             unchanged
@@ -964,8 +1114,7 @@ mod tests {
                 unchanged,
                 both_indefinite,
                 None,
-                Some(0.0),
-                box_sizing::T::ContentBox,
+                PreferredAspectRatio(0.0),
                 padding_border,
             ),
             unchanged
@@ -1014,7 +1163,8 @@ mod tests {
 
     #[test]
     fn sizing_helpers_honor_min_precedence_known_dimensions_and_box_sizing() {
-        let sizing = resolve_leaf_sizing(LayoutInput::default(), &ConflictingMinMaxStyle::new());
+        let sizing =
+            resolve_leaf_sizing(LayoutInput::default(), &ConflictingMinMaxStyle::new(), None);
         assert_eq!(sizing.node_size, Size::new(Some(80.0), None));
 
         assert_eq!(

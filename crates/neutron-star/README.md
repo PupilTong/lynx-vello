@@ -14,7 +14,7 @@ script needs `python3`; the crate is no longer standalone-publishable).
 > implemented.** The
 > protocol, shared layout machinery, leaf/absolute sizing, cache, rounding,
 > CSS Flexbox Level 1, numeric CSS Grid Level 2, Starlight `display: linear`,
-> Starlight Relative Layout Level 1, and the feature-gated Parley shaping and
+> Starlight Relative Layout Level 1, and the concrete Parley shaping and
 > line-breaking core are implemented. Grid
 > deliberately excludes subgrid and
 > host-lowered named lines/areas. See
@@ -40,9 +40,10 @@ Recursion flows *through the host*: the engine calls
 `child.compute_child_layout(input)`, and the host's impl dispatches each
 child to the right algorithm. Flex, Grid, and Lynx's non-CSS Linear and
 Relative modes are all first-class neutron-star entry points; a host can
-still add other modes through the same dispatch seam.
-The optional text adapter uses the same seam: host-owned run/style views are
-immutable, while the host stores a reusable `TextContext` and per-node
+still add other container algorithms through the same dispatch seam.
+Leaf content is closed rather than extensible: replaced content enters as a
+`NaturalSize`, and the concrete Parley path accepts host-owned
+run/style views while the host stores a reusable `TextContext` and per-node
 `ArtifactSlots` in interior-mutable slots.
 `display:none` cleanup is an explicit host precheck: call `hide_subtree` and
 return `LayoutOutput::HIDDEN` before entering the generated-box cache/dispatch
@@ -51,34 +52,32 @@ path.
 ## Hard rules
 
 - **No `dyn`.** Every host boundary is generic. `LayoutNode` is
-  dyn-incompatible by construction (`Copy` supertrait, associated types) and
-  the measurement seam uses GATs, so trait objects are impossible and every
-  call can inline.
+  dyn-incompatible by construction (`Copy` supertrait, associated types), so
+  trait objects are impossible and every call can inline. There is no public
+  leaf-measurer trait at all.
 - **No storage.** The engine allocates only transient algorithm scratch; node
   data, styles, caches, retained text layouts, and results all live in
   host-chosen storage reached through the handle. Semantic data is immutable
   for a layout epoch; per-node results and caches mutate through the handle
   behind the host's interior-mutability discipline.
-- **POD box protocol, lending measurement seam.** Layout inputs, outputs, and
-  geometry are small `Copy`, `#[repr(C)]` where layout matters, and
-  `f32`-based. `LeafMeasurer` may additionally lend an engine-specific rich
-  artifact view; leaf boxing immediately copies its size/baselines into
-  `LeafMetrics`, while the host retains the artifact for painting.
+- **POD box protocol, closed leaf content.** Layout inputs, outputs, geometry,
+  and `NaturalSize` are small `Copy`, `#[repr(C)]` where layout matters, and
+  `f32`-based. Images provide decoded dimensions/ratio; concrete Parley text
+  retains its rich layout artifact for painting. Arbitrary host content has
+  no measurement extension point.
 - **Fork-initial defaults.** Defaulted trait methods return the lynx stylo
   fork's initial values — the CSS initial value except where Lynx documents
   otherwise (e.g. `relative-layout-once: true`). Host *computed-value*
   policy (e.g. Lynx computing `box-sizing: auto` to `border-box`, or
   `overflow` to `hidden`) stays the host style system's job.
 
-## Dependencies and feature flags
+## Dependencies
 
-The Flex, Grid, Linear, Relative, and text-style protocols are unconditional
-and require the workspace's `stylo` fork in every configuration (building it
-needs the vendored submodule and `python3` for stylo's build script; a cold
-build takes minutes). Default builds enable the `text` feature and its
-optional Parley dependency for shaping, line breaking, and retained text
-measurement; `default-features = false` keeps the protocol and box-layout
-core only.
+The Flex, Grid, Linear, Relative, and text paths are unconditional and require
+the workspace's `stylo` fork plus Parley in every configuration (building
+stylo needs the vendored submodule and `python3`; a cold build takes minutes).
+There is no box-layout-only build: keeping one would make the closed leaf model
+and its host behavior configuration-dependent.
 
 ## Prior art
 

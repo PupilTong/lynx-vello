@@ -14,17 +14,26 @@
 
 mod common;
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 use common::{Doc, device_with};
 use stylo::queries::values::PrefersColorScheme;
 use w3c_dom::NodeId;
-use w3c_dom::layout::{Layout, LeafMeasureInput, LeafMetrics, MeasureLeaf, Size};
+use w3c_dom::layout::Layout;
+
+const AHEM: &[u8] = include_bytes!("../../neutron-star/tests/fixtures/Ahem.ttf");
 
 /// [`Doc`] plus layout helpers (results are read straight off the nodes).
 struct Harness {
     doc: Doc,
+}
+
+fn dom_rect(dom: &w3c_dom::Document<()>, id: NodeId) -> (f32, f32, f32, f32) {
+    let layout = dom.get(id).expect("node id is live").layout();
+    (
+        layout.location.x,
+        layout.location.y,
+        layout.size.width,
+        layout.size.height,
+    )
 }
 
 impl Harness {
@@ -619,83 +628,88 @@ fn flow_containers_fall_back_to_leaves_and_zero_their_children() {
     assert_eq!(h.rect(child), (0.0, 0.0, 0.0, 0.0));
 }
 
-/// A payload whose [`MeasureLeaf`] hook gives every content-bearing leaf a
-/// fixed measurement — the embedder-measurement stand-in for these tests
-/// (real embedders plug a text engine in here).
-#[derive(Debug)]
-struct FixedMeasure(f32, f32);
-
-impl MeasureLeaf for FixedMeasure {
-    fn measure_leaf(&self, node: &w3c_dom::Node<Self>, _input: LeafMeasureInput) -> LeafMetrics {
-        if node.text().is_some() {
-            LeafMetrics::new(Size::new(self.0, self.1))
-        } else {
-            LeafMetrics::default()
-        }
-    }
-}
-
 #[test]
-fn leaves_measure_through_the_payload_hook() {
-    // Element-backed character data (Lynx's `<raw-text>` shape): the node is
-    // an element leaf whose content size comes from the payload's hook.
+fn text_nodes_use_parley_with_their_parents_inherited_style() {
+    // A real text node has anonymous initial box geometry but inherits its
+    // parent's font/text style. The concrete engine is always Parley; there
+    // is no payload callback or replaced-content fallback.
     let mut dom = w3c_dom::Document::new(common::device(800.0, 600.0));
     dom.add_stylesheet_str(
-        "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }",
-        w3c_dom::StylesheetOrigin::Author,
-    );
-    let root = dom.create_element("page", FixedMeasure(42.0, 17.0));
-    dom.append_child(root);
-    let text = dom.create_element("text", FixedMeasure(42.0, 17.0));
-    dom.append(root, text);
-    dom.set_text(text, Some("hello".into()));
-    dom.layout();
-
-    let layout = dom.get(text).unwrap().layout();
-    assert_eq!(
-        (
-            layout.location.x,
-            layout.location.y,
-            layout.size.width,
-            layout.size.height
-        ),
-        (0.0, 0.0, 42.0, 17.0)
-    );
-}
-
-#[test]
-fn text_nodes_lay_out_as_anonymous_leaf_boxes() {
-    // A real text node (no computed style): box properties take their
-    // initial values — the anonymous box CSS wraps a text run in — and the
-    // content size comes from the payload's measure hook.
-    let mut dom = w3c_dom::Document::new(common::device(800.0, 600.0));
-    dom.add_stylesheet_str(
-        "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }
+        "page { display: flex; width: 200px; height: 100px; align-items: flex-start;
+                font-family: Ahem; font-size: 16px; }
          .sibling { width: 50px; height: 10px; }",
         w3c_dom::StylesheetOrigin::Author,
     );
-    let root = dom.create_element("page", FixedMeasure(30.0, 12.0));
+    assert_eq!(dom.register_fonts(AHEM), 1);
+    let root = dom.create_element("page", ());
     dom.append_child(root);
-    let sibling = dom.create_element("view", FixedMeasure(30.0, 12.0));
+    let sibling = dom.create_element("view", ());
     dom.add_class(sibling, "sibling");
     dom.append(root, sibling);
-    let text = dom.create_text_node("hello", FixedMeasure(30.0, 12.0));
+    let text = dom.create_text_node("hello", ());
     dom.append(root, text);
     dom.layout();
 
-    let rect = |id: NodeId| {
-        let layout = dom.get(id).unwrap().layout();
-        (
-            layout.location.x,
-            layout.location.y,
-            layout.size.width,
-            layout.size.height,
-        )
-    };
-    assert_eq!(rect(sibling), (0.0, 0.0, 50.0, 10.0));
-    // The text item follows its sibling with zero margins/padding (initial
-    // values), sized purely by the hook's measurement.
-    assert_eq!(rect(text), (50.0, 0.0, 30.0, 12.0));
+    assert_eq!(dom_rect(&dom, sibling), (0.0, 0.0, 50.0, 10.0));
+    assert_eq!(dom_rect(&dom, text), (50.0, 0.0, 80.0, 16.0));
+
+    dom.set_text_data(text, "hi");
+    dom.layout();
+    assert_eq!(dom_rect(&dom, text), (50.0, 0.0, 32.0, 16.0));
+}
+
+#[test]
+fn inherited_text_style_change_remeasures_text_child() {
+    let mut dom = w3c_dom::Document::new(common::device(800.0, 600.0));
+    dom.add_stylesheet_str(
+        "page { display: flex; width: 200px; height: 100px; align-items: flex-start;
+                font-family: Ahem; font-size: 16px; }",
+        w3c_dom::StylesheetOrigin::Author,
+    );
+    assert_eq!(dom.register_fonts(AHEM), 1);
+    let root = dom.create_element("page", ());
+    dom.append_child(root);
+    let text = dom.create_text_node("hello", ());
+    dom.append(root, text);
+
+    dom.layout();
+    assert_eq!(dom_rect(&dom, text), (0.0, 0.0, 80.0, 16.0));
+
+    // Text nodes have no stylo data of their own, but their measurement reads
+    // inherited text values from the direct parent. Changing those values must
+    // invalidate both the child's box cache and its retained Parley artifacts.
+    dom.set_inline_style(root, "font-size: 32px");
+    dom.layout();
+
+    assert_eq!(dom_rect(&dom, text), (0.0, 0.0, 160.0, 32.0));
+}
+
+#[test]
+fn inherited_text_style_change_remeasures_nested_text_child() {
+    let mut dom = w3c_dom::Document::new(common::device(800.0, 600.0));
+    dom.add_stylesheet_str(
+        "page, view { display: flex; width: 200px; height: 100px;
+                      align-items: flex-start; }
+         page { font-family: Ahem; font-size: 16px; }",
+        w3c_dom::StylesheetOrigin::Author,
+    );
+    assert_eq!(dom.register_fonts(AHEM), 1);
+    let root = dom.create_element("page", ());
+    dom.append_child(root);
+    let parent = dom.create_element("view", ());
+    dom.append(root, parent);
+    let text = dom.create_text_node("hello", ());
+    dom.append(parent, text);
+
+    dom.layout();
+    assert_eq!(dom_rect(&dom, text), (0.0, 0.0, 80.0, 16.0));
+
+    // Stylo propagates inherited damage to `parent`; harvest then invalidates
+    // the direct text dependency there without walking arbitrary descendants.
+    dom.set_inline_style(root, "font-size: 32px");
+    dom.layout();
+
+    assert_eq!(dom_rect(&dom, text), (0.0, 0.0, 160.0, 32.0));
 }
 
 #[test]
@@ -770,42 +784,10 @@ fn layout_flushes_pending_styles_itself() {
 
 // --- damage → layout wiring ---------------------------------------------------
 //
-// `Document::layout` consumes its own flush's restyle damage into layout
-// invalidation, so a plain style change re-lays-out with no explicit
-// `invalidate_layout` call, and a `contain: strict` boundary stops the
-// invalidation walk so its ancestors keep their caches.
-
-/// A [`MeasureLeaf`] payload that reports a fixed size for text-bearing leaves
-/// and tallies how often the engine measured one — the "did layout do work?"
-/// probe for the incremental-relayout tests. The tally is shared across every
-/// node in the document.
-#[derive(Debug)]
-struct CountingMeasure {
-    width: f32,
-    height: f32,
-    measures: Arc<AtomicUsize>,
-}
-
-impl CountingMeasure {
-    fn new(width: f32, height: f32, measures: &Arc<AtomicUsize>) -> Self {
-        Self {
-            width,
-            height,
-            measures: Arc::clone(measures),
-        }
-    }
-}
-
-impl MeasureLeaf for CountingMeasure {
-    fn measure_leaf(&self, node: &w3c_dom::Node<Self>, _input: LeafMeasureInput) -> LeafMetrics {
-        if node.text().is_some() {
-            self.measures.fetch_add(1, Ordering::Relaxed);
-            LeafMetrics::new(Size::new(self.width, self.height))
-        } else {
-            LeafMetrics::default()
-        }
-    }
-}
+// Every style harvest consumes restyle damage into layout invalidation, so a
+// plain style change re-lays-out with no explicit `invalidate_layout` call,
+// and a `contain: strict` boundary stops the invalidation walk so its
+// ancestors keep their caches.
 
 #[test]
 fn style_width_change_relayouts_without_manual_invalidation() {
@@ -924,41 +906,47 @@ fn removed_boundary_is_not_replayed_after_its_node_id_is_reused() {
 #[test]
 fn color_only_change_relayouts_nothing() {
     // A paint-only (REPAINT) change produces no relayout damage, so
-    // `Document::layout` invalidates nothing and the second pass answers entirely
-    // from cache — the leaf is never re-measured.
-    let measures = Arc::new(AtomicUsize::new(0));
+    // harvesting invalidates nothing and the second pass answers entirely from
+    // cache. This exercises the concrete Parley path, not a host callback.
     let mut dom = w3c_dom::Document::new(common::device(800.0, 600.0));
     dom.add_stylesheet_str(
-        "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }",
+        "page { display: flex; width: 200px; height: 100px; align-items: flex-start;
+                font-family: Ahem; font-size: 16px; }",
         w3c_dom::StylesheetOrigin::Author,
     );
-    let root = dom.create_element("page", CountingMeasure::new(0.0, 0.0, &measures));
+    assert_eq!(dom.register_fonts(AHEM), 1);
+    let root = dom.create_element("page", ());
     dom.append_child(root);
-    let text = dom.create_element("text", CountingMeasure::new(30.0, 12.0, &measures));
-    dom.set_text(text, Some("hello".into()));
+    let text = dom.create_text_node("hello", ());
     dom.append(root, text);
 
     dom.layout();
-    let after_first = measures.load(Ordering::Relaxed);
-    assert!(after_first >= 1, "the initial pass measures the text leaf");
+    assert_eq!(dom_rect(&dom, text), (0.0, 0.0, 80.0, 16.0));
+    assert!(!dom.get(text).unwrap().layout_cache_is_empty());
+    assert!(!dom.get(root).unwrap().layout_cache_is_empty());
 
-    dom.set_inline_style(text, "color: rgb(0, 0, 255)");
-    dom.layout();
+    dom.set_inline_style(root, "color: rgb(0, 0, 255)");
+    let summary = dom.flush_styles();
     assert_eq!(
-        measures.load(Ordering::Relaxed),
-        after_first,
-        "a color-only change re-measures nothing",
+        summary
+            .damage
+            .iter()
+            .filter(|(_, damage)| damage.needs_relayout())
+            .count(),
+        0,
+        "a color-only change produces no relayout damage",
     );
-    // No relayout damage means no invalidation: the whole measurement-cache
-    // spine survives, so the second pass answered entirely from cache.
     assert!(
         !dom.get(text).unwrap().layout_cache_is_empty(),
-        "the leaf keeps its measurement cache across a paint-only change",
+        "the Parley leaf keeps its measurement cache after the flush",
     );
     assert!(
         !dom.get(root).unwrap().layout_cache_is_empty(),
-        "the leaf's ancestor keeps its measurement cache too",
+        "the leaf's ancestor keeps its measurement cache after the flush",
     );
+
+    dom.layout();
+    assert_eq!(dom_rect(&dom, text), (0.0, 0.0, 80.0, 16.0));
 }
 
 #[test]
@@ -1267,26 +1255,26 @@ fn two_damaged_nodes_under_one_boundary_keep_root_warm() {
 fn content_visibility_hidden_skips_descendant_layout_and_measurement() {
     // `content-visibility: hidden` sizes the container from its own styles and
     // skips laying out its contents: descendants get zero geometry, their
-    // `MeasureLeaf` hook is never called, and a `position: fixed` descendant
+    // Parley path is never entered, and a `position: fixed` descendant
     // generates no positioned box. Revealing the container restores layout.
-    let measures = Arc::new(AtomicUsize::new(0));
     let mut dom = w3c_dom::Document::new(common::device(800.0, 600.0));
     dom.add_stylesheet_str(
-        "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }
+        "page { display: flex; width: 200px; height: 100px; align-items: flex-start;
+                font-family: Ahem; font-size: 16px; }
          .container { display: flex; width: 60px; height: 80px; align-items: flex-start; }
          .fixed { position: fixed; left: 10px; top: 20px; width: 30px; height: 40px; }",
         w3c_dom::StylesheetOrigin::Author,
     );
-    let root = dom.create_element("page", CountingMeasure::new(0.0, 0.0, &measures));
+    assert_eq!(dom.register_fonts(AHEM), 1);
+    let root = dom.create_element("page", ());
     dom.append_child(root);
-    let container = dom.create_element("view", CountingMeasure::new(0.0, 0.0, &measures));
+    let container = dom.create_element("view", ());
     dom.add_class(container, "container");
     dom.set_inline_style(container, "content-visibility: hidden");
     dom.append(root, container);
-    let text = dom.create_element("text", CountingMeasure::new(50.0, 70.0, &measures));
-    dom.set_text(text, Some("hi".into()));
+    let text = dom.create_text_node("hi", ());
     dom.append(container, text);
-    let fixed = dom.create_element("view", CountingMeasure::new(0.0, 0.0, &measures));
+    let fixed = dom.create_element("view", ());
     dom.add_class(fixed, "fixed");
     dom.append(container, fixed);
 
@@ -1294,7 +1282,7 @@ fn content_visibility_hidden_skips_descendant_layout_and_measurement() {
 
     // A borrow-free reader (takes `dom` by reference) so it can be used on both
     // sides of the reveal mutation below.
-    let rect = |dom: &w3c_dom::Document<CountingMeasure>, id: NodeId| {
+    let rect = |dom: &w3c_dom::Document<()>, id: NodeId| {
         let l = dom.get(id).expect("live").layout();
         (l.location.x, l.location.y, l.size.width, l.size.height)
     };
@@ -1305,23 +1293,21 @@ fn content_visibility_hidden_skips_descendant_layout_and_measurement() {
     // A `position: fixed` descendant inside the skipped subtree produces no
     // positioned box (the positioned pass prunes at the skip root).
     assert_eq!(rect(&dom, fixed), (0.0, 0.0, 0.0, 0.0));
-    assert_eq!(
-        measures.load(Ordering::Relaxed),
-        0,
-        "a skipped text leaf is never measured",
+    assert!(
+        dom.get(text).unwrap().layout_cache_is_empty(),
+        "a skipped text leaf never populates its measurement cache",
     );
-
     // Reveal the container: its contents lay out again (transition cleanliness).
     dom.set_inline_style(container, "");
     dom.layout();
     assert_eq!(
         rect(&dom, text),
-        (0.0, 0.0, 50.0, 70.0),
+        (0.0, 0.0, 32.0, 16.0),
         "revealing the container lays its text back out",
     );
     assert!(
-        measures.load(Ordering::Relaxed) >= 1,
-        "the revealed text leaf is now measured",
+        !dom.get(text).unwrap().layout_cache_is_empty(),
+        "the revealed text leaf now has a Parley measurement",
     );
 }
 

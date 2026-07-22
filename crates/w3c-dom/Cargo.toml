@@ -7,17 +7,21 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+# Keeps synthetic content metrics available to neutron-star's production-host
+# tests and benchmarks; the callback seam is absent from normal builds.
+layout-test-utils = ["neutron-star/layout-test-utils"]
+
 [dependencies]
 rustc-hash = { workspace = true }
 slab = { workspace = true }
 smallvec = { workspace = true }
 
-# Box-layout integration: the `layout` module implements neutron-star's
-# handle protocol (`LayoutNode` on a Copy handle, stylo-vocabulary style
-# views) directly over `Document<T>`. Protocol + algorithms only — the
-# workspace entry disables default features, so the Parley `text`
-# measurement core is not pulled in; content measurement stays an embedder
-# hook.
+# Layout integration: the `layout` module implements neutron-star's handle
+# protocol (`LayoutNode` on a Copy handle, stylo-vocabulary style views)
+# directly over `Document<T>`. Replaced leaves consume node-owned
+# `NaturalSize`; text nodes always use neutron-star's concrete Parley path;
+# there is no embedder measurement hook.
 neutron-star = { workspace = true }
 
 # stylo integration: element `Node`s own stylo's interior-mutable per-element state

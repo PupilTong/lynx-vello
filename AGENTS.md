@@ -22,7 +22,8 @@ flexbox, Grid, and Starlight `display: relative` and `display: linear`
 algorithms are implemented as first-class peers. Its concrete document/stylo
 host lives in `crates/w3c-dom`'s `layout` module
 (`Document::layout`, results on each `Node`); the Lynx-widget
-policy layer and text measurement wiring remain pending. See
+policy layer remains pending, while W3C text nodes already use the concrete
+Parley path. See
 `docs/layout-architecture.md` for its design and
 `docs/tracking/css-layout.md` for the behavior it must cover.
 
@@ -178,19 +179,29 @@ useful signal for currently-compatible versions of those libraries.
   own style data) and lend stylo `ComputedValues` fields straight to the
   engine (no translation layer), display dispatch routes
   flex/grid/linear/relative with `display: none` hiding and a leaf
-  fallback, and the positioned pass implements the W3C `position: fixed`
-  containing-block rule via the protocol's scheme override. Leaf content
-  measures through the payload's `MeasureLeaf` hook. Per-node layout
-  state (measurement cache + layouts) lives **on each `Node`**
+  fallback, text nodes through concrete Parley measurement, and the
+  positioned pass implements the W3C `position: fixed`
+  containing-block rule via the protocol's scheme override. Replaced leaf
+  content reads a closed `NaturalSize` value stored in lazily allocated
+  node content; its internal update path automatically invalidates the
+  affected cache path. Mutually exclusive literal text, natural size, and
+  retained text artifacts reuse the node's single nullable content pointer.
+  Per-node derived layout state (measurement cache + layouts) lives **on each `Node`**
   (`AtomicRefCell<LayoutData>`, the Servo layout_data pattern; read via
   `Node::layout`), so it is created and dropped with its node. Style-driven
   relayout is automatic (every style flush consumes harvested `StyleDamage`
   into boundary-stopped invalidation); `Document::invalidate_layout` remains the
   embedder API for the mutations styles cannot see (content/child-list changes
-  with identical computed styles, external measurement inputs). Leaf
-  content (text/images) measures through an embedder hook; the crate pulls
-  `neutron-star` without its `text` feature. It
-  must not contain Lynx widget vocabulary or Lynx device/unit policy —
+  with identical computed styles). The internal natural-size update path
+  performs that invalidation itself.
+  The document node lazily creates and then owns the shared Parley
+  `TextContext`; text nodes lazily retain probe/commit artifacts in that
+  same content record and read inherited font/text values from their
+  parent. Relayout damage on an element evicts its direct text children's
+  measurement caches and retained artifacts because text nodes have no Stylo
+  damage record of their own. Parley is unconditional and there is no
+  arbitrary payload callback. It must not contain Lynx widget vocabulary or
+  Lynx device/unit policy —
   Lynx computed defaults (border-box, `overflow: hidden`, `display: linear`
   on every element, …) stay embedder cascade policy (UA sheet). Relies on
   the vendored stylo fork (`vendor/stylo`, tracking the
@@ -210,7 +221,9 @@ useful signal for currently-compatible versions of those libraries.
   handle retains its node, and detached subtrees are reclaimed automatically
   once their last handle drops (the native stand-in for the browser GC; no
   public disposal API). Also owns Lynx view metrics, touch-first device
-  policy, and the viewport-relative `rpx` integration. Standard CSS parsing,
+  policy, and the viewport-relative `rpx` integration. Replaced-content
+  natural sizing remains below this layer and is not an Element-PAPI method.
+  Standard CSS parsing,
   matching, cascade, and lock ownership remain in `w3c-dom`.
 - `crates/neutron-star` — the Flexbox, Grid, and
   Starlight Relative and Linear engine: trait-based host⇄engine integration
@@ -220,16 +233,17 @@ useful signal for currently-compatible versions of those libraries.
   the handle), style traits that speak the stylo fork's computed-value
   vocabulary directly (requires the `stylo` workspace dep + python3 for its
   build script; the old zero-dependency/standalone pillar is retired), and
-  host-side
-  display dispatch. Leaf content engines integrate through the generic
-  lending `LeafMeasurer` protocol. **Flexbox, Grid, Relative, and Linear
+  host-side display dispatch. Leaf content is deliberately closed: replaced
+  content uses the `NaturalSize` value path, while text uses the crate's
+  concrete Parley `TextMeasurer::compute_layout` path; arbitrary host
+  measurers are not supported. **Flexbox, Grid, Relative, and Linear
   implemented** —
   the shared root/leaf/cache/positioned/rounding machinery, CSS Flexbox Level
   1, numeric CSS Grid Level 2 (excluding subgrid/named areas), id-constrained
   Starlight Relative Layout Level 1, and Lynx's `display: linear` algorithm
   and `linear-*` style/source protocol are live. Text shaping, line breaking,
   intrinsic/height-for-width measurement, baselines, and retained Parley
-  layouts live behind the default-on `text` feature.
+  layouts are unconditional crate behavior.
   **CSS containment (css-contain-2)** is landed layout-side: the stylo
   `Contain`/`ContainIntrinsicSize` containment accessors on `CoreStyle`,
   size-substitution + layout-containment baseline suppression,
@@ -246,8 +260,8 @@ useful signal for currently-compatible versions of those libraries.
   engine-internal — not a widget-layer concern) now live in `w3c-dom`
   (see above). Still L3 work: `lynx-widget`-level policy (`rpx`-aware
   view metrics, sticky lowering), component-specific staggered layout, and
-  text style/attribute wiring plus text-context/artifact-slot storage
-  behind the leaf-measurement hook.
+  Lynx-specific text attribute/raw-text/truncation policy. Generic W3C text
+  style, document context, and artifact storage already live in `w3c-dom`.
 - *(planned, not yet scaffolded)* render / runtime crates — see
   `docs/tracking/` for the behavior surface each will need to cover before
   scaffolding begins, and `.claude/agents/` for the subsystem-scoped agent

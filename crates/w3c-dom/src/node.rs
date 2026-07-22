@@ -47,11 +47,15 @@
 
 use std::cell::UnsafeCell;
 use std::fmt;
-use std::sync::Arc as StdArc;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicPtr, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc as StdArc, OnceLock};
 
 use atomic_refcell::{AtomicRef, AtomicRefCell};
 use dom::ElementState;
+#[cfg(feature = "layout-test-utils")]
+use neutron_star::compute::LeafMetrics;
+use neutron_star::compute::NaturalSize;
+use neutron_star::text::{ArtifactSlots, TextContext};
 use neutron_star::tree::Layout;
 use rustc_hash::FxHashMap;
 use selectors::matching::ElementSelectorFlags;
@@ -277,11 +281,43 @@ pub(crate) enum NodeData<T> {
     Document {
         lock: StdArc<SharedRwLock>,
         url_data: UrlExtraData,
+        /// One lazily-created, reusable Parley session for the whole
+        /// document. Non-text documents never pay font-context setup cost;
+        /// layout is single-threaded, while the atomic borrow cell preserves
+        /// the node's thread-safe shape during parallel style traversal.
+        text_context: Box<OnceLock<AtomicRefCell<TextContext>>>,
         #[cfg(debug_assertions)]
         in_flush: AtomicBool,
     },
     Element(T),
     Text(T),
+}
+
+/// Literal or replaced content carried only by nodes that have it.
+///
+/// Keeping this behind one nullable pointer reuses the storage that literal
+/// text already required instead of enlarging every ordinary element for
+/// natural sizes or retained Parley artifacts.
+enum NodeContent {
+    Text {
+        value: String,
+        /// Artifact slots are much larger than the string descriptor. Keep
+        /// them behind a second lazy allocation so untouched text nodes pay
+        /// only for the content record.
+        artifacts: OnceLock<Box<AtomicRefCell<ArtifactSlots>>>,
+    },
+    Replaced(NaturalSize),
+    #[cfg(feature = "layout-test-utils")]
+    Test(LeafMetrics),
+}
+
+impl NodeContent {
+    fn text(value: String) -> Self {
+        Self::Text {
+            value,
+            artifacts: OnceLock::new(),
+        }
+    }
 }
 
 /// A single node in a [`Document`](crate::Document) tree.
@@ -363,12 +399,13 @@ pub struct Node<T> {
     #[cfg(debug_assertions)]
     pub(crate) slot_guard: slot_guard::SlotGuard,
 
-    /// Literal character data. Always `Some` for a text node. Element nodes
-    /// may also carry data for embedder-defined element-backed text carriers
-    /// (Lynx's `<raw-text>` is one); ordinary W3C text uses a child text node.
-    pub(crate) text: Option<String>,
+    /// Mutually exclusive literal or replaced content. Literal data is always
+    /// present for a text node; element nodes use the same nullable slot for
+    /// an element-backed text carrier, natural size, or synthetic test data.
+    /// Ordinary container elements therefore retain only one null pointer.
+    content: Option<Box<NodeContent>>,
 
-    /// This node's layout state (measurement cache, unrounded and
+    /// This node's derived layout state (measurement cache, unrounded and
     /// device-snapped layouts, out-of-flow bookkeeping) — created and dropped
     /// with the node, so tree mutation can never leave layout state to
     /// synchronize (see [`crate::layout`]).
@@ -393,6 +430,7 @@ impl<T> Node<T> {
             NodeData::Document {
                 lock,
                 url_data,
+                text_context: Box::default(),
                 #[cfg(debug_assertions)]
                 in_flush: AtomicBool::new(false),
             },
@@ -447,7 +485,7 @@ impl<T> Node<T> {
             children_to_process: AtomicIsize::new(0),
             #[cfg(debug_assertions)]
             slot_guard: slot_guard::SlotGuard::new(),
-            text,
+            content: text.map(|value| Box::new(NodeContent::text(value))),
             layout_data: AtomicRefCell::new(LayoutData::default()),
         }
     }
@@ -488,6 +526,16 @@ impl<T> Node<T> {
     pub(crate) fn document_url_data(&self) -> &UrlExtraData {
         match &self.owner_document().data {
             NodeData::Document { url_data, .. } => url_data,
+            _ => unreachable!("slot zero must contain the document node"),
+        }
+    }
+
+    /// The owner document's reusable Parley text session.
+    pub(crate) fn text_context(&self) -> &AtomicRefCell<TextContext> {
+        match &self.owner_document().data {
+            NodeData::Document { text_context, .. } => {
+                text_context.get_or_init(|| AtomicRefCell::new(TextContext::new()))
+            }
             _ => unreachable!("slot zero must contain the document node"),
         }
     }
@@ -619,7 +667,10 @@ impl<T> Node<T> {
     /// embedder-defined element-backed text carrier.
     #[must_use]
     pub fn text(&self) -> Option<&str> {
-        self.text.as_deref()
+        match self.content.as_deref() {
+            Some(NodeContent::Text { value, .. }) => Some(value),
+            _ => None,
+        }
     }
 
     /// The node's opaque payload.
@@ -717,6 +768,59 @@ impl<T> Node<T> {
         self.layout_data.borrow().measure_cache.is_empty()
     }
 
+    /// The decoded intrinsic dimensions/ratio used when this node lays out as
+    /// replaced content.
+    #[must_use]
+    pub(crate) fn natural_size(&self) -> NaturalSize {
+        match self.content.as_deref() {
+            Some(NodeContent::Replaced(natural_size)) => *natural_size,
+            _ => NaturalSize::NONE,
+        }
+    }
+
+    pub(crate) fn set_natural_size(&mut self, natural_size: NaturalSize) -> bool {
+        if self.natural_size() == natural_size {
+            return false;
+        }
+        self.content = (natural_size != NaturalSize::NONE)
+            .then(|| Box::new(NodeContent::Replaced(natural_size)));
+        true
+    }
+
+    pub(crate) fn text_artifacts(&self) -> &AtomicRefCell<ArtifactSlots> {
+        match self.content.as_deref() {
+            Some(NodeContent::Text { artifacts, .. }) => artifacts
+                .get_or_init(|| Box::new(AtomicRefCell::new(ArtifactSlots::default())))
+                .as_ref(),
+            _ => unreachable!("only literal-text content has Parley artifacts"),
+        }
+    }
+
+    pub(crate) fn invalidate_text_artifacts(&self) {
+        if let Some(NodeContent::Text { artifacts, .. }) = self.content.as_deref()
+            && let Some(artifacts) = artifacts.get()
+        {
+            artifacts.borrow_mut().invalidate();
+        }
+    }
+
+    #[cfg(feature = "layout-test-utils")]
+    pub(crate) fn test_leaf_metrics(&self) -> Option<LeafMetrics> {
+        match self.content.as_deref() {
+            Some(NodeContent::Test(metrics)) => Some(*metrics),
+            _ => None,
+        }
+    }
+
+    #[cfg(feature = "layout-test-utils")]
+    pub(crate) fn set_test_leaf_metrics(&mut self, metrics: LeafMetrics) {
+        self.content = Some(Box::new(NodeContent::Test(metrics)));
+    }
+
+    pub(crate) fn set_literal_text(&mut self, text: Option<String>) {
+        self.content = text.map(|value| Box::new(NodeContent::text(value)));
+    }
+
     /// The accumulated stylo selector flags.
     pub(crate) fn selector_flags(&self) -> ElementSelectorFlags {
         ElementSelectorFlags::from_bits_retain(self.selector_flags.load(Ordering::Relaxed))
@@ -779,14 +883,14 @@ impl<T> Node<T> {
     /// subjects, so callers only use this for elements.
     pub(crate) fn is_empty_element(&self) -> bool {
         debug_assert!(self.is_element(), "`:empty` is only defined for elements");
-        self.text.as_ref().is_none_or(String::is_empty)
+        self.text().is_none_or(str::is_empty)
             && self.children.iter().all(|&id| {
                 let child = self
                     .tree()
                     .get(id)
                     .expect("internal tree links always resolve");
                 !child.is_element()
-                    && (!child.is_text_node() || child.text.as_ref().is_none_or(String::is_empty))
+                    && (!child.is_text_node() || child.text().is_none_or(str::is_empty))
             })
     }
 }
@@ -900,7 +1004,7 @@ impl<T> fmt::Debug for Node<T> {
             .field("id", &self.id)
             .field("node_type", &self.node_type())
             .field("tag", &self.tag())
-            .field("text", &self.text)
+            .field("text", &self.text())
             .field("classes", &self.classes)
             .field("id_attr", &self.id_attr)
             .field("element_state", &self.element_state)
@@ -960,5 +1064,43 @@ impl<'a, T> Iterator for ChildrenIter<'a, T> {
                 .get(id)
                 .expect("internal tree links always resolve"),
         )
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use crate::Document;
+
+    #[test]
+    fn document_text_context_is_lazy_and_reused() {
+        let document = Document::<()>::new(crate::document::tests::device());
+        let root = document.root_node();
+        let NodeData::Document { text_context, .. } = &root.data else {
+            unreachable!("slot zero is the document node")
+        };
+
+        assert!(text_context.get().is_none());
+        let first = root.text_context();
+        assert!(text_context.get().is_some());
+        assert!(std::ptr::eq(first, root.text_context()));
+    }
+
+    #[test]
+    fn node_content_and_text_artifacts_are_lazy() {
+        let mut document = Document::<()>::new(crate::document::tests::device());
+        let element = document.create_element("view", ());
+        assert!(document.get(element).unwrap().content.is_none());
+
+        let text = document.create_text_node("hello", ());
+        let text = document.get(text).unwrap();
+        let Some(NodeContent::Text { artifacts, .. }) = text.content.as_deref() else {
+            unreachable!("text nodes carry literal-text content")
+        };
+        assert!(artifacts.get().is_none());
+        let first = text.text_artifacts();
+        assert!(artifacts.get().is_some());
+        assert!(std::ptr::eq(first, text.text_artifacts()));
     }
 }

@@ -75,7 +75,7 @@
 //!             Display::Grid => compute_grid_layout(node, input),
 //!             Display::Linear => compute_linear_layout(node, input),
 //!             Display::Relative => compute_relative_layout(node, input),
-//!             // host: Display::Leaf => compute_leaf_layout(input, &style, &mut measurer),
+//!             // host: Display::Leaf => compute_leaf_layout(input, &style, natural_size),
 //!         }
 //!     })
 //! }
@@ -129,10 +129,11 @@ mod util;
 
 pub use flexbox::compute_flexbox_layout;
 pub use grid::compute_grid_layout;
-pub use leaf::{
-    FnLeafMeasurer, LeafMeasureInput, LeafMeasurement, LeafMeasurer, LeafMetrics,
-    compute_leaf_layout,
-};
+pub(crate) use leaf::compute_leaf_layout_with_measurement;
+#[cfg(feature = "layout-test-utils")]
+#[doc(hidden)]
+pub use leaf::compute_leaf_layout_with_measurement_for_testing;
+pub use leaf::{LeafMeasureInput, LeafMetrics, NaturalSize, compute_leaf_layout};
 pub use linear::compute_linear_layout;
 pub use relative::compute_relative_layout;
 use stylo::computed_values::direction;

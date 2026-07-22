@@ -2,14 +2,12 @@
 //!
 //! The host deliberately has no styling engine. `TestStyle` is already the
 //! computed style view — stylo computed values served straight from struct
-//! fields — and leaf measurement is a deterministic intrinsic size stored
+//! fields — and leaf content is deterministic intrinsic data stored
 //! alongside each node.
 
 mod support;
 
-use neutron_star::compute::{
-    FnLeafMeasurer, LeafMetrics, compute_absolute_layout, compute_leaf_layout,
-};
+use neutron_star::compute::{compute_absolute_layout, compute_leaf_layout};
 use neutron_star::prelude::*;
 use stylo::computed_values::{box_sizing, direction, flex_direction, flex_wrap};
 use stylo::values::computed::{Display, MaxSize, Overflow, PositionProperty};
@@ -994,19 +992,16 @@ fn absolute_children_use_order_zero_for_paint_order() {
 }
 
 #[test]
-fn leaf_measurement_reports_baselines_for_a_fully_sized_box() {
+fn natural_sized_leaf_has_no_content_baseline() {
     let style = fixed_leaf_style(100.0, 20.0);
-    let mut measurer = FnLeafMeasurer::new(|_input| {
-        LeafMetrics::new(Size::new(100.0, 20.0)).with_first_baselines(Point::new(None, Some(15.0)))
-    });
     let output = compute_leaf_layout(
         LayoutInput::perform_layout(Size::NONE, Size::NONE, Size::MAX_CONTENT),
         &style,
-        &mut measurer,
+        NaturalSize::from_size(Size::new(100.0, 20.0)),
     );
     assert_size(output.size, Size::new(100.0, 20.0));
     assert_size(output.content_size, Size::new(100.0, 20.0));
-    assert_eq!(output.first_baselines.y, Some(15.0));
+    assert_eq!(output.first_baselines, Point::NONE);
 }
 
 #[test]
@@ -1016,10 +1011,6 @@ fn leaf_max_width_constrains_measurement_and_preserves_overflow_extent() {
         padding: Edges::uniform(npx(10.0)),
         ..TestStyle::default()
     };
-    let mut measurer = FnLeafMeasurer::new(|input| {
-        assert_eq!(input.available_space.width, AvailableSpace::Definite(100.0));
-        LeafMetrics::new(Size::new(200.0, 30.0)).with_first_baselines(Point::new(None, Some(15.0)))
-    });
     let output = compute_leaf_layout(
         LayoutInput::perform_layout(
             Size::NONE,
@@ -1030,12 +1021,12 @@ fn leaf_max_width_constrains_measurement_and_preserves_overflow_extent() {
             ),
         ),
         &style,
-        &mut measurer,
+        NaturalSize::from_size(Size::new(200.0, 30.0)),
     );
     // max-width is content-box: 100 content + 20 padding.
     assert_size(output.size, Size::new(120.0, 50.0));
     assert_size(output.content_size, Size::new(220.0, 50.0));
-    assert_eq!(output.first_baselines.y, Some(25.0));
+    assert_eq!(output.first_baselines, Point::NONE);
 }
 
 #[test]

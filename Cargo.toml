@@ -20,10 +20,10 @@ bobcat-engine = { path = "crates/bobcat-engine" }
 bobcat-quickjs = { path = "crates/bobcat-quickjs" }
 lynx-template-decoder = { path = "crates/lynx-template-decoder" }
 lynx-widget = { path = "crates/lynx-widget" }
-# Default features off workspace-wide: the box-layout protocol/algorithms
-# need only the stylo fork; a member that wants the Parley text measurement
-# core opts in with `features = ["text"]` (w3c-dom's box-layout host doesn't).
-neutron-star = { path = "crates/neutron-star", default-features = false }
+# Parley is part of neutron-star's closed leaf model in every build: hosts
+# choose between decoded `NaturalSize` and the concrete text engine, never an
+# optional arbitrary-content measurement seam.
+neutron-star = { path = "crates/neutron-star" }
 quickjs-rust-bridge = { path = "crates/quickjs-rust-bridge" }
 w3c-dom = { path = "crates/w3c-dom" }
 

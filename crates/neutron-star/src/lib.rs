@@ -67,19 +67,18 @@
 //!
 //! The generic protocol and machinery are implemented together with CSS
 //! Flexbox Level 1, numeric CSS Grid Level 2 (excluding subgrid and named
-//! areas), Starlight Linear layout, Starlight Relative Layout Level 1, and an
-//! optional Parley shaping/line-breaking measurement core.
+//! areas), Starlight Linear layout, Starlight Relative Layout Level 1, and a
+//! concrete Parley shaping/line-breaking measurement core.
 //! See `docs/layout-architecture.md` in the lynx-vello repository for the
 //! design rationale, represented conformance surface, and remaining parity
 //! milestones.
 //!
-//! # Dependencies and feature flags
+//! # Dependencies
 //!
 //! The style protocol requires the workspace's `stylo` fork (building it
 //! needs the vendored submodule and `python3` for stylo's build script; a
-//! cold build takes minutes). Default builds additionally enable the `text`
-//! feature and its optional Parley dependency; `default-features = false`
-//! keeps the protocol and box-layout core only.
+//! cold build takes minutes). Parley is unconditional: decoded natural size
+//! and concrete text are the engine's only leaf-content paths.
 //!
 //! # Minimal host sketch
 //!
@@ -231,7 +230,6 @@ pub mod compute;
 pub mod geometry;
 pub mod invalidate;
 pub mod style;
-#[cfg(feature = "text")]
 pub mod text;
 pub mod tree;
 
@@ -242,9 +240,7 @@ pub mod tree;
 /// computed sizes, alignment wrappers, grid track types, …) is not
 /// re-exported here — pull it from [`style`] (or the stylo crate) as needed.
 pub mod prelude {
-    pub use crate::compute::{
-        FnLeafMeasurer, LeafMeasureInput, LeafMeasurement, LeafMeasurer, LeafMetrics,
-    };
+    pub use crate::compute::{LeafMeasureInput, LeafMetrics, NaturalSize};
     pub use crate::geometry::{Edges, Line, Point, Size};
     pub use crate::style::{
         CoreStyle, FlexContainerStyle, FlexItemStyle, GridContainerStyle, GridItemStyle,

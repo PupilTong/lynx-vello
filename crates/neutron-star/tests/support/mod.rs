@@ -15,9 +15,9 @@ use std::fmt;
 
 use neutron_star::cache::Cache;
 use neutron_star::compute::{
-    FnLeafMeasurer, LeafMeasureInput, LeafMetrics, compute_cached_layout, compute_flexbox_layout,
-    compute_grid_layout, compute_leaf_layout, compute_linear_layout, compute_relative_layout,
-    compute_skipped_contents_layout, hide_subtree,
+    LeafMeasureInput, LeafMetrics, compute_cached_layout, compute_flexbox_layout,
+    compute_grid_layout, compute_leaf_layout_with_measurement_for_testing, compute_linear_layout,
+    compute_relative_layout, compute_skipped_contents_layout, hide_subtree,
 };
 use neutron_star::prelude::*;
 use style_traits::values::specified::AllowedNumericType;
@@ -1318,19 +1318,23 @@ impl<'t> LayoutNode for TestRef<'t> {
                 let style = &node.style;
                 let measure = node.measure;
                 let slots = handle.slots();
-                let mut measurer = FnLeafMeasurer::new(|measure_input| {
-                    tree.leaf_measure_calls
-                        .set(tree.leaf_measure_calls.get() + 1);
-                    if tree.record_measure_inputs.get() {
-                        slots.measure_inputs.borrow_mut().push(measure_input);
-                    }
-                    let (metrics, call) = measure.measure(measure_input);
-                    if let Some(call) = call {
-                        slots.measure_calls.borrow_mut().push(call);
-                    }
-                    metrics
-                });
-                compute_leaf_layout(input, style, &mut measurer)
+                compute_leaf_layout_with_measurement_for_testing(
+                    input,
+                    style,
+                    None,
+                    |measure_input| {
+                        tree.leaf_measure_calls
+                            .set(tree.leaf_measure_calls.get() + 1);
+                        if tree.record_measure_inputs.get() {
+                            slots.measure_inputs.borrow_mut().push(measure_input);
+                        }
+                        let (metrics, call) = measure.measure(measure_input);
+                        if let Some(call) = call {
+                            slots.measure_calls.borrow_mut().push(call);
+                        }
+                        metrics
+                    },
+                )
             }
         });
         self.slots().output.set(output);

@@ -13,8 +13,8 @@ use std::cell::{Cell, RefCell};
 use std::fmt;
 
 use neutron_star::compute::{
-    FnLeafMeasurer, LeafMetrics, compute_absolute_layout, compute_cached_layout,
-    compute_flexbox_layout, compute_grid_layout, compute_leaf_layout, hide_subtree,
+    compute_absolute_layout, compute_cached_layout, compute_flexbox_layout, compute_grid_layout,
+    compute_leaf_layout_with_measurement_for_testing, hide_subtree,
 };
 use neutron_star::prelude::*;
 use stylo::computed_values::{box_sizing, direction, flex_direction, flex_wrap};
@@ -488,35 +488,39 @@ impl<'t> LayoutNode for TestRef<'t> {
                 let max_content_size = node.max_content_size;
                 let first_baseline = node.first_baseline;
                 let slots = handle.slots();
-                let mut measurer = FnLeafMeasurer::new(|measure_input| {
-                    tree.leaf_measure_calls
-                        .set(tree.leaf_measure_calls.get() + 1);
-                    slots.measure_calls.set(slots.measure_calls.get() + 1);
-                    let measured = Size::new(
-                        if measure_input.available_space.width == AvailableSpace::MinContent {
-                            min_content_size.width
-                        } else {
-                            max_content_size.width
-                        },
-                        if measure_input.available_space.height == AvailableSpace::MinContent {
-                            min_content_size.height
-                        } else {
-                            max_content_size.height
-                        },
-                    );
-                    let size = Size::new(
-                        measure_input
-                            .known_dimensions
-                            .width
-                            .unwrap_or(measured.width),
-                        measure_input
-                            .known_dimensions
-                            .height
-                            .unwrap_or(measured.height),
-                    );
-                    LeafMetrics::new(size).with_first_baselines(Point::new(None, first_baseline))
-                });
-                compute_leaf_layout(input, style, &mut measurer)
+                compute_leaf_layout_with_measurement_for_testing(
+                    input,
+                    style,
+                    None,
+                    |measure_input| {
+                        tree.leaf_measure_calls
+                            .set(tree.leaf_measure_calls.get() + 1);
+                        slots.measure_calls.set(slots.measure_calls.get() + 1);
+                        let intrinsic = Size::new(
+                            if measure_input.available_space.width == AvailableSpace::MinContent {
+                                min_content_size.width
+                            } else {
+                                max_content_size.width
+                            },
+                            if measure_input.available_space.height == AvailableSpace::MinContent {
+                                min_content_size.height
+                            } else {
+                                max_content_size.height
+                            },
+                        );
+                        LeafMetrics::new(Size::new(
+                            measure_input
+                                .known_dimensions
+                                .width
+                                .unwrap_or(intrinsic.width),
+                            measure_input
+                                .known_dimensions
+                                .height
+                                .unwrap_or(intrinsic.height),
+                        ))
+                        .with_first_baselines(Point::new(None, first_baseline))
+                    },
+                )
             }
         })
     }

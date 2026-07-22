@@ -11,14 +11,13 @@ directly, so `stylo` (feature `lynx`) is a required dependency and the former
 zero-dependency/standalone-publishable pillar is retired (building needs the
 `vendor/stylo` submodule and `python3` for stylo's build script; a cold build
 takes minutes). Every host boundary is **static dispatch**: `dyn` is
-impossible by construction, not by convention. Default builds additionally
-enable the optional `text` feature and its Parley-backed measurement core;
-`default-features = false` keeps the protocol and box-layout core only.
+impossible by construction, not by convention. Parley is unconditional:
+decoded natural size and concrete Parley text are the only leaf-content paths.
 
 Status: **Flexbox, Grid, Relative, Linear, and text measurement implemented** —
 `neutron-star`'s protocol, generic machinery, cache, leaf and positioned
 sizing, rounding, CSS Flexbox Level 1, numeric CSS Grid Level 2, Starlight
-Relative Layout Level 1, Starlight Linear algorithms, and the default-on
+Relative Layout Level 1, Starlight Linear algorithms, and the
 Parley text measurement core are implemented and conformance-tested against
 plain-storage mock hosts. **CSS containment (css-contain-2)** is landed on
 the layout side: size/layout containment, `content-visibility` skipped
@@ -41,9 +40,16 @@ state on each `Node`, the fixed/hoisted positioned pass (pruned at skipped
 subtrees), device-pixel rounding, and automatic
 style-damage→`invalidate_layout` consumption with in-place boundary re-layout
 that refreshes the boundary's scrollable `content_size`, with
-leaf content measurement left to the payload's `MeasureLeaf` hook. Text truncation, inline boxes, and the
-Lynx-widget policy layer (text style/attribute wiring and
-text-context/artifact-slot storage included) are not implemented yet. Crate
+replaced leaves reading their node-owned `NaturalSize`, plus W3C text nodes
+using a dedicated text-only inherited-style view, a lazily-created
+document-owned `TextContext`, and per-node lazily retained artifacts. Keeping
+the text-only handle separate leaves the box-algorithm style view at two words.
+Mutually exclusive natural-size and text state reuse the node's existing
+nullable content pointer, so ordinary container nodes do not carry either
+payload. Updating replaced metadata automatically invalidates the affected
+cache path; it is not exposed through `WidgetTree`
+or Element PAPI. Text truncation, inline boxes, element-backed raw text, and
+Lynx-specific text attribute policy are not implemented yet. Crate
 rustdoc is the API reference; this document is the rationale, performance
 architecture, and remaining plan.
 
@@ -72,7 +78,7 @@ Text behavior is inventoried in
 │ lynx-widget + w3c-dom          │     │ neutron-star                    │
 │ styles and tree                  │     │ tree/style/text protocols       │
 │                                  │     │ flex / grid / relative / linear │
-│ future runtime integration:      │────▶│ text feature: Parley measure    │
+│ document text context/artifacts  │────▶│ concrete Parley measurement     │
 │ LayoutNode handles + dispatch    │     │ leaf/hidden/cache/position/round│
 │ fixed/dirty/staggered integration│     │ stylo vocabulary, no storage    │
 └──────────────────────────────────┘     └─────────────────────────────────┘
@@ -80,10 +86,10 @@ Text behavior is inventoried in
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| `neutron-star` | Implemented Flex, Grid, Relative, and Linear algorithms; their style-view protocols speaking stylo computed values (including the `relative-*` and `linear-*` longhands); the text style/run protocol; leaf boxing, hidden-subtree cleanup, positioned layout, rounding; shared private arithmetic; geometry and layout IO; cache semantics | Node/style/content storage, display dispatch, DOM/widget types, an engine-side style value vocabulary (it re-exports stylo's), resolved device-unit policy (`rpx`, etc.), stacking/paint order |
-| `neutron-star::text` (`text` feature, default-on) | Parley context/font registration, whitespace processing, shaping, line breaking, intrinsic and height-for-width measurement, baselines, and retained `TextLayout` artifact types | Text truncation and ellipsis, inline boxes, paint styling, widget/attribute lowering, resource fetching, or host cache and per-node slot storage |
-| `w3c-dom::layout` (implemented) | `LayoutNode` implemented directly on `&Node<T>` (the stylo-trait handle; no wrapper, no adapter objects); style views fetched on engine request (`Arc` bump of the node's own style data) lending `ComputedValues` fields (logical `relative-*-inline-*` lowering; the W3C fixed/absolute containing-block rule expressed through the protocol's `position()` scheme; anonymous-box initial values for text nodes); display dispatch (flex/grid/linear/relative, `display: none` hiding, `content-visibility: hidden` skipped-contents routing before the cache, leaf fallback); per-node `LayoutData` on `Node` (`AtomicRefCell` — measurement cache, unrounded + rounded layouts, persistent static positions); the positioned pass as a fresh pre-order tree walk each pass (cache-proof for hoisted nodes whose parents answer from cache, pruned at skipped-contents subtrees so a hoisted descendant cannot be revived, and the engine's effective-`order`-0 paint rule for out-of-flow children); device-pixel rounding; the effective-containment fold on the style view (feeding both the relayout-boundary predicate and the content-visibility-aware fixed/absolute containing-block predicate); **automatic style-damage consumption** (every harvest boundary-stops `Document::invalidate_layout` per relayout-damaged node before returning/streaming damage; `Document::layout` re-runs each parked `contain: strict`/skipped boundary in place before the root pass, merging the re-run's scrollable `content_size` back into the boundary's stored layout); and the `Document::invalidate_layout` API embedders still call for the mutations the style system cannot see (content/child-list/measurement-input changes); the payload `MeasureLeaf` hook | A second layout algorithm, engine-side style copies, Lynx widget vocabulary or device-unit policy (`rpx`), Lynx computed defaults (cascade/UA-sheet policy), text shaping |
-| Remaining runtime integration (`lynx-widget`, future) | Lynx view metrics and `rpx` policy; text style/attribute wiring and text-context/artifact-slot storage behind the leaf hook; `staggered` integration; sticky lowering | A second Flex/Grid/Relative/Linear/text-measurement implementation, engine-side copies of styles, the style-damage→layout wiring (now engine-internal in `w3c-dom`) |
+| `neutron-star` | Implemented Flex, Grid, Relative, and Linear algorithms; their style-view protocols speaking stylo computed values (including the `relative-*` and `linear-*` longhands); the text style/run protocol; closed natural-size and Parley leaf paths, hidden-subtree cleanup, positioned layout, rounding; shared private arithmetic; geometry and layout IO; cache semantics | Node/style/content storage, display dispatch, arbitrary host content/measurers, DOM/widget types, an engine-side style value vocabulary (it re-exports stylo's), resolved device-unit policy (`rpx`, etc.), stacking/paint order |
+| `neutron-star::text` (unconditional) | Parley context/font registration, whitespace processing, shaping, line breaking, intrinsic and height-for-width measurement, baselines, and retained `TextLayout` artifact types | Text truncation and ellipsis, inline boxes, paint styling, widget/attribute lowering, resource fetching, or host cache and per-node slot storage |
+| `w3c-dom::layout` (implemented) | `LayoutNode` implemented directly on `&Node<T>` (the stylo-trait handle; no wrapper, no adapter objects); style views fetched on engine request (`Arc` bump of the node's own style data) lending `ComputedValues` fields (logical `relative-*-inline-*` lowering; the W3C fixed/absolute containing-block rule expressed through the protocol's `position()` scheme; anonymous box geometry plus inherited parent font/text values for text nodes); display dispatch (flex/grid/linear/relative, `display: none` hiding, `content-visibility: hidden` skipped-contents routing before the cache, natural-size leaf, concrete Parley text); document-owned `TextContext`; mutually exclusive internal `NaturalSize`/literal-text/retained-artifact state in the node's one nullable content slot; per-node `LayoutData` on `Node` (`AtomicRefCell` — measurement cache, unrounded + rounded layouts, persistent static positions) with automatic dirty-path invalidation when content changes; the positioned pass as a fresh pre-order tree walk each pass (cache-proof for hoisted nodes whose parents answer from cache, pruned at skipped-contents subtrees so a hoisted descendant cannot be revived, and the engine's effective-`order`-0 paint rule for out-of-flow children); device-pixel rounding; the effective-containment fold on the style view (feeding both the relayout-boundary predicate and the content-visibility-aware fixed/absolute containing-block predicate); **automatic style-damage consumption** (every harvest boundary-stops `Document::invalidate_layout` per relayout-damaged node before returning/streaming damage; it also evicts direct text children's measurement caches and retained artifacts because those children read inherited style from the damaged element but have no Stylo damage record of their own; `Document::layout` re-runs each parked `contain: strict`/skipped boundary in place before the root pass, merging the re-run's scrollable `content_size` back into the boundary's stored layout); and the `Document::invalidate_layout` API embedders still call for mutations the style system cannot see | A second layout algorithm, generic content-measurement callbacks, engine-side style copies, Lynx widget vocabulary or device-unit policy (`rpx`), Lynx computed defaults (cascade/UA-sheet policy), text shaping algorithms |
+| Remaining runtime integration (`lynx-widget`, future) | Lynx view metrics and `rpx` policy; Lynx-specific text attributes, element-backed raw text and truncation; `staggered` integration; sticky lowering | A second Flex/Grid/Relative/Linear/text-measurement implementation, arbitrary host content, engine-side copies of styles, the style-damage→layout wiring (now engine-internal in `w3c-dom`) |
 
 The engine/host seam keeps the engine storage-free even though its
 vocabulary is stylo's: the Lynx-specific values and algorithms for Relative
@@ -126,7 +132,7 @@ through the handle into host-owned **interior-mutable per-node slots**.
 Entry points (`neutron_star::compute`) are free generic functions — there is
 no engine object, so unused entry points never monomorphize into the host.
 Implemented machinery: `compute_root_layout`, `compute_leaf_layout`
-(generic `LeafMeasurer`), explicit hidden-subtree cleanup via
+(closed `NaturalSize` replaced-content path), explicit hidden-subtree cleanup via
 `hide_subtree`, `compute_cached_layout`
 (keyed on the **complete `LayoutInput`** — see the caching section),
 `compute_absolute_layout` (the positioned pass for out-of-flow nodes whose
@@ -180,8 +186,9 @@ styles through node handles, then calls
 first handles a non-generated box (`display: none`, i.e. stylo
 `Display::is_none`) by calling `hide_subtree` and
 returning `LayoutOutput::HIDDEN`; this explicit cleanup precedes and bypasses
-the cache. For a generated box, the host routes to a neutron-star algorithm,
-leaf measurement, or a future additional host algorithm, wrapping that
+the cache. For a generated box, the host routes to a neutron-star container
+algorithm, the natural-size leaf path, the concrete Parley text path, or a
+future additional container algorithm, wrapping that
 routing in `compute_cached_layout`. This decision buys three properties at
 once:
 
@@ -204,9 +211,10 @@ once:
 ## Design decisions and their rationale
 
 **No `dyn`, enforced structurally.** `LayoutNode` is dyn-incompatible (a
-`Copy` supertrait plus associated types without defaults), and `LeafMeasurer`
-carries a GAT: `dyn LayoutNode` and `dyn LeafMeasurer` are compile errors —
-there is a `compile_fail` doctest pinning this. What the constraint buys:
+`Copy` supertrait plus associated types without defaults), so
+`dyn LayoutNode` is a compile error — there is a `compile_fail` doctest
+pinning this. Leaf content has no host trait to erase: its public choices are
+the `NaturalSize` value path and the concrete Parley implementation. What the constraint buys:
 every host⇄engine call site monomorphizes, inlines, and const-folds (style
 accessors returning constants collapse into the algorithm); no vtable
 indirection in the hottest recursion of the frame. The accepted costs:
@@ -227,7 +235,7 @@ the tree already stores stylo's per-element style data). Layout is
 single-threaded, and two rules keep runtime borrow tracking trivial: host
 dispatch must not hold a per-node slot borrow across the recursive
 `compute_child_layout` call, and the engine never re-enters a node's cache
-while that node's leaf measurer is live. Per-node derived state therefore
+while that node's Parley artifact slots are borrowed. Per-node derived state therefore
 lives *on the node* — no id-keyed side tables, no parallel source/session
 arenas kept in lockstep.
 
@@ -282,25 +290,33 @@ and `LayoutNode::resolve_calc(handle, basis)` callback are deleted.
 Length-only `calc()` folds to a length at computed-value time and resolves
 without a basis (a documented behavior delta of the vocabulary swap).
 
-**Leaf measurement is generic behavior with a borrowed result view.**
-`LeafMeasurer` is a GAT-based, statically-dispatched interface whose
-engine-specific `Measurement<'a>` implements the accessor-only
-`LeafMeasurement` trait. `compute_leaf_layout` immediately normalizes that
-view into the concrete `LeafMetrics` POD used by box math. The default-on
-`text` module follows this shape: `TextLayout` retains an owned
-`parley::Layout`, and its borrowed measurement view exposes size and first
-baseline without cloning or reshaping. The host's leaf dispatch constructs a
-node-scoped `TextMeasurer` by borrowing immutable text/style content through
-the handle and mutable `TextContext`/artifact slots from its interior-mutable
-storage (borrows that end before the cache wrapper stores the result).
-Different leaf dispatch arms may instantiate `compute_leaf_layout` with
-different concrete measurer types
-(text, image, custom content), so no common trait object or engine enum is
-required. The text artifact cache is separate from the box cache: measurement
-probes must not evict the committed paint artifact, and the artifact must
-outlive any committed box-cache entry that can skip shaping.
-`LeafMeasureInput::goal` carries that probe/commit distinction; no separate
-run-mode flag is needed.
+**Leaf content is a closed model, not a host extension point.** Replaced
+content currently means images and enters `compute_leaf_layout` as a Copy
+`NaturalSize`: independently optional natural dimensions plus a natural
+width/height ratio. Before image metadata is decoded the value is
+`NaturalSize::NONE`; the future replaced-content implementation below the
+generic Widget/PAPI layer owns installing decoded metadata through a
+crate-private `w3c-dom` path and invalidating the node-to-root box-cache path.
+That placement is deliberate: decoded intrinsic metadata is W3C replaced-
+content state, while fetch/decode transport remains outside the generic DOM
+API. `WidgetTree` does not expose a natural-size mutation API. This internal state does **not**
+mutate `contain-*` or `contain-intrinsic-size`: natural replaced size is
+content metadata, whereas CSS size containment changes which intrinsic
+contributions layout is allowed to inspect.
+
+Text is the other fixed path. `TextMeasurer::compute_layout` enters the same
+crate-private leaf box routine using Parley; external code cannot substitute a
+different callback. `TextLayout` retains an owned `parley::Layout`, and its
+borrowed view exposes size and first baseline without cloning or reshaping.
+The `w3c-dom` host constructs a node-scoped `TextMeasurer` by borrowing
+immutable text/style content and mutable `TextContext`/artifact slots (borrows
+that end before the cache wrapper stores the result). The text artifact cache
+is separate from the box cache: probes must not evict the committed paint
+artifact, and the artifact must outlive any committed box-cache entry that can
+skip shaping. `LeafMeasureInput::goal` carries that probe/commit distinction;
+no separate run-mode flag is needed. There is deliberately no
+`LeafMeasurer`, `LeafMeasurement`, `FnLeafMeasurer`, or payload `MeasureLeaf`
+API and no support for arbitrary host-rendered leaf content.
 
 **Out-of-flow: the layout tree is the formatting structure; the containing
 block is data, not topology.** Out-of-flow nodes are **never reparented** —
@@ -815,7 +831,7 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
   benchmarks.
 - **L3 — Starlight modes + runtime integration** *(partial)*: the Lynx-linear
   value and style-view protocol, generic `compute_linear_layout` algorithm,
-  feature-gated Parley text measurement core, and CSS-containment machinery
+  unconditional Parley text measurement core, and CSS-containment machinery
   (size/layout containment, `content-visibility` skipped contents, the
   relayout-boundary predicate, and `invalidate_for_relayout`) are complete in
   `neutron-star`; `w3c-dom` produces per-node `StyleDamage`/`FlushSummary` and
@@ -825,15 +841,12 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
   relayout-class `StyleDamage` through boundary-stopped
   `Document::invalidate_layout`, and `Document::layout` re-runs each parked
   `contain: strict` boundary via `compute_boundary_relayout` — entirely
-  engine-internal, with the widget layer unchanged. Remaining L3 work is the
-  rest of the `lynx-widget`/stylo policy
-  layer — the root
-  fixed-position pass and sticky lowering, style-view wiring over
-  `ComputedValues` (plus host lowering of legacy spellings: `linear-orientation`
-  into `linear-direction`, logical `relative-inline-*` to physical sides), text
-  computed-style/attribute wiring, and text-context and artifact-slot storage
-  wiring. The integration layer's final module or crate
-  placement remains undecided; no separate text crate is planned.
+  engine-internal, with the widget layer unchanged. The concrete host also
+  includes `LayoutNode` on `&Node`, display dispatch, fixed positioning,
+  computed-style views, W3C text style lowering, a document text context, and
+  per-node artifacts. Remaining L3 work is sticky lowering, legacy Lynx spelling/attribute lowering,
+  element-backed raw text and truncation, view metrics/`rpx`, and component
+  modes such as `staggered`. No separate text crate is planned.
 - **L4 — performance**: probe-trace-tuned cache slots, SoA scratch, arena
   exploration, the batched-children parallel hook if profiles justify it.
 - **L5 — parity hardening**: WPT-derived flex/grid suites, web-core
