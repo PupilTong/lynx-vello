@@ -4,7 +4,7 @@
 
 use neutron_star::geometry::Size;
 
-use crate::support::LayoutFixture;
+use crate::support::{LayoutFixture, TEXT_SAMPLES};
 
 #[derive(Clone, Copy)]
 pub(super) struct Scenario {
@@ -51,6 +51,7 @@ pub(super) const SCENARIOS: &[Scenario] = &[
         build_flex_wrap_alignment_matrix
     ),
     scenario!("flex_baseline_measured", build_flex_baseline_measured),
+    scenario!("flex_text_wrapping", build_flex_text_wrapping),
     scenario!(
         "baseline_propagation_matrix",
         build_baseline_propagation_matrix
@@ -244,6 +245,28 @@ fn build_flex_baseline_measured(nodes: usize) -> BenchCase {
             Size::new(width, height),
             Some(height - 2.0),
         );
+    }
+    fixture.prepare()
+}
+
+fn build_flex_text_wrapping(nodes: usize) -> BenchCase {
+    let item_count = nodes.max(2).div_ceil(2);
+    let rows = item_count.div_ceil(8);
+    let mut fixture = flex_fixture(
+        960.0,
+        rows as f32 * 160.0,
+        "flex-wrap:wrap; gap:2px; align-content:flex-start; align-items:baseline",
+    );
+    let root = fixture.root();
+    for index in 0..item_count {
+        let font_size = 12.0 + (index % 4) as f32 * 2.0;
+        let item = fixture.container(
+            root,
+            &format!(
+                "display:flex; box-sizing:border-box; width:118px; min-width:0; height:auto; flex:0 0 118px; padding:2px; align-items:flex-start; font-family:Ahem; font-size:{font_size}px"
+            ),
+        );
+        fixture.text(item, TEXT_SAMPLES[index % TEXT_SAMPLES.len()]);
     }
     fixture.prepare()
 }

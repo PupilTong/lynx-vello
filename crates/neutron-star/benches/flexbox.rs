@@ -63,6 +63,7 @@ flex_bench!(flex_axis_alignment_matrix, "flex_axis_alignment_matrix");
 flex_bench!(flex_distribution_matrix, "flex_distribution_matrix");
 flex_bench!(flex_wrap_alignment_matrix, "flex_wrap_alignment_matrix");
 flex_bench!(flex_baseline_measured, "flex_baseline_measured");
+flex_bench!(flex_text_wrapping, "flex_text_wrapping");
 flex_bench!(baseline_propagation_matrix, "baseline_propagation_matrix");
 flex_bench!(measured_callback_matrix, "measured_callback_matrix");
 flex_bench!(absolute_children, "absolute_children");

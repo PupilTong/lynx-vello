@@ -10,12 +10,26 @@ Each layout algorithm has one Cargo benchmark target and one scenario module:
 `text.rs` measures the Parley-backed text core directly; its committed box
 cache workload also uses the shared production host.
 
+The box-layout targets also include text-bearing production-host workloads:
+
+- Flex wraps baseline-participating text inside fixed-basis items.
+- Grid sizes intrinsic tracks containing wrapped text.
+- Linear stacks naturally sized, wrapping text items.
+- Relative solves two-axis sibling constraints whose item heights come from
+  wrapped text.
+
 All box-layout scenarios build real `w3c_dom::Document` trees with CSS styles.
 The shared `support::LayoutFixture` resolves those styles outside the timed
 region, then measured calls enter through `Document::layout`.
 Consequently the timed path includes w3c-dom's production `&Node` host,
 per-node layout caches, positioned pass, and device-pixel rounding. There is
 no benchmark-only `LayoutNode`, style view, node arena, or parallel tree.
+Text-bearing scenarios additionally create real DOM text nodes, register the
+deterministic embedded Ahem font, and inherit computed font styles from their
+parent boxes. They run through the document's concrete Parley path: one shared
+text context per document and retained artifacts per text node. Shaping,
+rebreaking, baseline propagation, and box layout therefore share the same
+timed layout call.
 
 Benchmarks measure representative layout and cache workloads. They do not
 prove correctness or compatibility. Exact geometry, measurement traces,

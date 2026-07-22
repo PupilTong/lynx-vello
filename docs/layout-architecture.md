@@ -668,7 +668,12 @@ the painting — layout's job is to never be the frame's bottleneck.
   percentage-dependent or newly double-anchored items remeasure. The Linear
   suite covers fixed stacks,
   weighted distribution and freeze paths, ordering, gravity matrices,
-  measurement/stretch, and mixed hidden/absolute children. Equivalent-tree
+  measurement/stretch, and mixed hidden/absolute children. Each algorithm
+  suite also has a text-bearing workload that enters through the same
+  production document host and invokes the Parley measurer during box layout:
+  wrapping/baseline items for Flex, intrinsic text tracks for Grid, natural
+  wrapping items for Linear, and text-sized two-axis constraints for Relative.
+  Equivalent-tree
   Taffy/Yoga and other cross-engine differential baselines remain future
   additions — not to copy those engines' designs, but to keep
   "high-performance" falsifiable.

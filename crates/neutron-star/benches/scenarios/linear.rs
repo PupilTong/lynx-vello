@@ -4,7 +4,7 @@
 
 use neutron_star::geometry::Size;
 
-use crate::support::LayoutFixture;
+use crate::support::{LayoutFixture, TEXT_SAMPLES};
 
 #[derive(Clone, Copy)]
 pub(super) struct Scenario {
@@ -40,6 +40,7 @@ macro_rules! for_each_linear_scenario {
             weighted_distribution, build_weighted_distribution;
             weighted_freeze, build_weighted_freeze;
             measured_stretch, build_measured_stretch;
+            linear_text_wrapping, build_linear_text_wrapping;
             mixed_hidden_absolute, build_mixed_hidden_absolute;
             intrinsic_pure_length, build_intrinsic_pure_length;
             intrinsic_sparse_percentage, build_intrinsic_sparse_percentage;
@@ -173,6 +174,27 @@ fn build_measured_stretch(nodes: usize) -> BenchCase {
             Size::new(width, height),
             Some(height - 1.0),
         );
+    }
+    fixture.prepare()
+}
+
+fn build_linear_text_wrapping(nodes: usize) -> BenchCase {
+    let item_count = nodes.max(2).div_ceil(2);
+    let mut fixture = linear_fixture(
+        320.0,
+        item_count as f32 * 160.0,
+        "linear-direction:column; align-items:stretch",
+    );
+    let root = fixture.root();
+    for index in 0..item_count {
+        let font_size = 12.0 + (index % 4) as f32 * 2.0;
+        let item = fixture.container(
+            root,
+            &format!(
+                "display:flex; box-sizing:border-box; min-width:0; width:auto; height:auto; padding:2px; align-items:flex-start; font-family:Ahem; font-size:{font_size}px"
+            ),
+        );
+        fixture.text(item, TEXT_SAMPLES[index % TEXT_SAMPLES.len()]);
     }
     fixture.prepare()
 }

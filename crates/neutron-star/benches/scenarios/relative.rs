@@ -5,7 +5,7 @@
 use divan::counter::ItemsCount;
 use neutron_star::geometry::Size;
 
-use crate::support::LayoutFixture;
+use crate::support::{LayoutFixture, TEXT_SAMPLES};
 
 #[derive(Debug, Clone, Copy)]
 enum GraphKind {
@@ -109,11 +109,51 @@ fn nested_fixture() -> LayoutFixture {
     fixture.prepare()
 }
 
+fn text_constraints_fixture(item_count: usize) -> LayoutFixture {
+    const COLUMNS: usize = 4;
+
+    let count = item_count.max(1);
+    let rows = count.div_ceil(COLUMNS);
+    let mut fixture = LayoutFixture::new(
+        Size::new(640.0, rows as f32 * 160.0),
+        &format!(
+            "display:relative; width:640px; height:{}px; relative-layout-once:false",
+            rows as f32 * 160.0
+        ),
+    );
+    let root = fixture.root();
+    for index in 0..count {
+        let id = index + 1;
+        let column = index % COLUMNS;
+        let row = index / COLUMNS;
+        let horizontal = if column == 0 {
+            "relative-align-left:parent".to_owned()
+        } else {
+            format!("relative-right-of:{}", id - 1)
+        };
+        let vertical = if row == 0 {
+            "relative-align-top:parent".to_owned()
+        } else {
+            format!("relative-bottom-of:{}", id - COLUMNS)
+        };
+        let font_size = 12.0 + (index % 4) as f32 * 2.0;
+        let item = fixture.container(
+            root,
+            &format!(
+                "display:flex; box-sizing:border-box; width:156px; min-width:0; height:auto; padding:2px; relative-id:{id}; {horizontal}; {vertical}; font-family:Ahem; font-size:{font_size}px"
+            ),
+        );
+        fixture.text(item, TEXT_SAMPLES[index % TEXT_SAMPLES.len()]);
+    }
+    fixture.prepare()
+}
+
 const SMALL_GRAPH_BATCH: usize = 64;
 const LARGE_GRAPH_BATCH: usize = 4;
 const NESTED_COLD_BATCH: usize = 8;
 const WARM_DESCENDANTS_BATCH: usize = 256;
 const ROOT_CACHE_HIT_BATCH: usize = 1_024;
+const TEXT_CONSTRAINT_ITEMS: usize = 256;
 
 const fn graph_batch_size(item_count: usize) -> usize {
     if item_count <= 256 {
@@ -223,6 +263,17 @@ fn nested_relative_cold(bencher: divan::Bencher<'_, '_>) {
                 divan::black_box(fixture.run());
             }
             fixtures
+        });
+}
+
+#[divan::bench]
+fn text_constraints_cold(bencher: divan::Bencher<'_, '_>) {
+    bencher
+        .with_inputs(|| text_constraints_fixture(TEXT_CONSTRAINT_ITEMS))
+        .input_counter(LayoutFixture::node_count)
+        .bench_local_values(|mut fixture| {
+            divan::black_box(fixture.run());
+            fixture
         });
 }
 

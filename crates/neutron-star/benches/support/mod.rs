@@ -29,6 +29,15 @@ use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use w3c_dom::layout::Layout;
 use w3c_dom::{Document, Node, NodeId};
 
+pub(super) const TEXT_SAMPLES: &[&str] = &[
+    "Settings",
+    "The quick brown fox jumps over the lazy dog.",
+    "Text layout shapes once and reflows under the inline constraint.",
+    "Responsive interfaces mix short labels with longer paragraphs.",
+];
+
+pub(super) const AHEM: &[u8] = include_bytes!("../../tests/fixtures/Ahem.ttf");
+
 #[derive(Debug)]
 struct BenchFontMetrics;
 
@@ -73,6 +82,7 @@ pub(super) struct LayoutFixture {
     root: NodeId,
     node_count: usize,
     expected_display: Display,
+    text_fonts_registered: bool,
 }
 
 impl LayoutFixture {
@@ -96,6 +106,7 @@ impl LayoutFixture {
             root,
             node_count: 1,
             expected_display,
+            text_fonts_registered: false,
         }
     }
 
@@ -115,6 +126,17 @@ impl LayoutFixture {
         first_baseline: Option<f32>,
     ) -> NodeId {
         self.push(parent, style, Some((intrinsic, first_baseline)))
+    }
+
+    pub(super) fn text(&mut self, parent: NodeId, text: &str) -> NodeId {
+        if !self.text_fonts_registered {
+            assert_eq!(self.document.register_fonts(AHEM), 1);
+            self.text_fonts_registered = true;
+        }
+        let node = self.document.create_text_node(text, ());
+        self.document.append(parent, node);
+        self.node_count += 1;
+        node
     }
 
     fn push(

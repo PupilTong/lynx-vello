@@ -16,6 +16,7 @@ fn main() {
 
 fn scenario_batch_size(name: &str) -> usize {
     match name {
+        "linear_text_wrapping" => 1,
         "linear_cross_gravity_matrix"
         | "linear_gravity_matrix"
         | "linear_layout_gravity_matrix" => 3,

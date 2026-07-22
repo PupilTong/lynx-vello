@@ -6,7 +6,7 @@ use divan::counter::ItemsCount;
 use neutron_star::geometry::Size;
 use w3c_dom::NodeId;
 
-use crate::support::LayoutFixture;
+use crate::support::{LayoutFixture, TEXT_SAMPLES};
 
 fn grid_fixture(width: f32, height: f32, extra: &str) -> LayoutFixture {
     let style = format!("display:grid; width:{width}px; height:{height}px; {extra}");
@@ -93,6 +93,28 @@ fn intrinsic_spans_fixture() -> LayoutFixture {
             Size::new(width, 8.0 + (index % 5) as f32),
             None,
         );
+    }
+    fixture.prepare()
+}
+
+fn text_intrinsic_tracks_fixture() -> LayoutFixture {
+    const ITEMS: usize = 512;
+    let mut fixture = grid_fixture(
+        960.0,
+        ITEMS.div_ceil(6) as f32 * 160.0,
+        "grid-template-columns:repeat(8, minmax(min-content, 1fr)); grid-auto-rows:auto; gap:2px; align-content:start; align-items:start",
+    );
+    let root = fixture.root();
+    for index in 0..ITEMS {
+        let span = if index % 7 == 0 { 2 } else { 1 };
+        let font_size = 12.0 + (index % 4) as f32 * 2.0;
+        let item = fixture.container(
+            root,
+            &format!(
+                "display:flex; grid-column:span {span}; min-width:0; width:auto; height:auto; padding:2px; align-items:flex-start; font-family:Ahem; font-size:{font_size}px"
+            ),
+        );
+        fixture.text(item, TEXT_SAMPLES[index % TEXT_SAMPLES.len()]);
     }
     fixture.prepare()
 }
@@ -280,6 +302,11 @@ fn fixed_and_fractional_tracks_cold(bencher: divan::Bencher<'_, '_>) {
 #[divan::bench]
 fn intrinsic_spanning_items_cold(bencher: divan::Bencher<'_, '_>) {
     bench_cold(bencher, INTRINSIC_SPANS_BATCH, intrinsic_spans_fixture);
+}
+
+#[divan::bench]
+fn text_intrinsic_tracks_cold(bencher: divan::Bencher<'_, '_>) {
+    bench_cold(bencher, 1, text_intrinsic_tracks_fixture);
 }
 
 #[divan::bench(args = [32, 128, 512])]
