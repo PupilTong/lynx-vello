@@ -4,7 +4,7 @@
 
 use neutron_star::geometry::Size;
 
-use crate::support::{LayoutFixture, TEXT_SAMPLES};
+use crate::support::{LayoutFixture, LeafContent};
 
 #[derive(Clone, Copy)]
 pub(super) struct Scenario {
@@ -39,19 +39,23 @@ macro_rules! for_each_linear_scenario {
             ordered_stack, build_ordered_stack;
             weighted_distribution, build_weighted_distribution;
             weighted_freeze, build_weighted_freeze;
+            weighted_freeze_with_text, build_weighted_freeze_with_text;
             measured_stretch, build_measured_stretch;
-            linear_text_wrapping, build_linear_text_wrapping;
             mixed_hidden_absolute, build_mixed_hidden_absolute;
+            mixed_hidden_absolute_with_text, build_mixed_hidden_absolute_with_text;
             intrinsic_pure_length, build_intrinsic_pure_length;
             intrinsic_sparse_percentage, build_intrinsic_sparse_percentage;
             intrinsic_dense_percentage, build_intrinsic_dense_percentage;
             intrinsic_dense_padding_percentage, build_intrinsic_dense_padding_percentage;
+            intrinsic_dense_padding_percentage_with_text, build_intrinsic_dense_padding_percentage_with_text;
             intrinsic_percentage_size_only, build_intrinsic_percentage_size_only;
             intrinsic_percentage_min_max_only, build_intrinsic_percentage_min_max_only;
+            intrinsic_percentage_min_max_only_with_text, build_intrinsic_percentage_min_max_only_with_text;
             intrinsic_relative_inset_only, build_intrinsic_relative_inset_only;
             linear_gravity_matrix, build_linear_gravity_matrix;
             linear_layout_gravity_matrix, build_linear_layout_gravity_matrix;
             linear_cross_gravity_matrix, build_linear_cross_gravity_matrix;
+            linear_cross_gravity_matrix_with_text, build_linear_cross_gravity_matrix_with_text;
         }
     };
 }
@@ -134,7 +138,7 @@ fn build_weighted_distribution(nodes: usize) -> BenchCase {
     fixture.prepare()
 }
 
-fn build_weighted_freeze(nodes: usize) -> BenchCase {
+fn build_weighted_freeze_with_content(nodes: usize, content: LeafContent) -> BenchCase {
     let count = nodes.max(1);
     let mut fixture = linear_fixture(240.0, count as f32 * 3.0, "linear-weight-sum:0");
     let root = fixture.root();
@@ -144,7 +148,7 @@ fn build_weighted_freeze(nodes: usize) -> BenchCase {
             1 => "max-height:2px",
             _ => "min-height:1px; max-height:5px",
         };
-        fixture.leaf(
+        fixture.leaf_with_content(
             root,
             &format!(
                 "width:20px; height:0; linear-weight:{}; {clamp}",
@@ -152,9 +156,19 @@ fn build_weighted_freeze(nodes: usize) -> BenchCase {
             ),
             Size::new(20.0, 2.0),
             None,
+            content,
+            index,
         );
     }
     fixture.prepare()
+}
+
+fn build_weighted_freeze(nodes: usize) -> BenchCase {
+    build_weighted_freeze_with_content(nodes, LeafContent::Synthetic)
+}
+
+fn build_weighted_freeze_with_text(nodes: usize) -> BenchCase {
+    build_weighted_freeze_with_content(nodes, LeafContent::Text)
 }
 
 fn build_measured_stretch(nodes: usize) -> BenchCase {
@@ -178,28 +192,7 @@ fn build_measured_stretch(nodes: usize) -> BenchCase {
     fixture.prepare()
 }
 
-fn build_linear_text_wrapping(nodes: usize) -> BenchCase {
-    let item_count = nodes.max(2).div_ceil(2);
-    let mut fixture = linear_fixture(
-        320.0,
-        item_count as f32 * 160.0,
-        "linear-direction:column; align-items:stretch",
-    );
-    let root = fixture.root();
-    for index in 0..item_count {
-        let font_size = 12.0 + (index % 4) as f32 * 2.0;
-        let item = fixture.container(
-            root,
-            &format!(
-                "display:flex; box-sizing:border-box; min-width:0; width:auto; height:auto; padding:2px; align-items:flex-start; font-family:Ahem; font-size:{font_size}px"
-            ),
-        );
-        fixture.text(item, TEXT_SAMPLES[index % TEXT_SAMPLES.len()]);
-    }
-    fixture.prepare()
-}
-
-fn build_mixed_hidden_absolute(nodes: usize) -> BenchCase {
+fn build_mixed_hidden_absolute_with_content(nodes: usize, content: LeafContent) -> BenchCase {
     let count = nodes.max(1);
     let mut fixture = linear_fixture(640.0, 480.0, "position:relative");
     let root = fixture.root();
@@ -217,9 +210,17 @@ fn build_mixed_hidden_absolute(nodes: usize) -> BenchCase {
                 index % 3
             ),
         };
-        fixture.leaf(root, &style, Size::new(8.0, 4.0), None);
+        fixture.leaf_with_content(root, &style, Size::new(8.0, 4.0), None, content, index);
     }
     fixture.prepare()
+}
+
+fn build_mixed_hidden_absolute(nodes: usize) -> BenchCase {
+    build_mixed_hidden_absolute_with_content(nodes, LeafContent::Synthetic)
+}
+
+fn build_mixed_hidden_absolute_with_text(nodes: usize) -> BenchCase {
+    build_mixed_hidden_absolute_with_content(nodes, LeafContent::Text)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -233,7 +234,7 @@ enum IntrinsicKind {
     RelativeInsetOnly,
 }
 
-fn build_intrinsic(nodes: usize, kind: IntrinsicKind) -> BenchCase {
+fn build_intrinsic(nodes: usize, kind: IntrinsicKind, content: LeafContent) -> BenchCase {
     let count = nodes.max(1);
     let style = "display:linear; linear-direction:row; width:auto; max-width:4096px; height:16px; align-items:flex-start";
     let mut fixture = LayoutFixture::new(Size::new(4096.0, 16.0), style);
@@ -258,37 +259,77 @@ fn build_intrinsic(nodes: usize, kind: IntrinsicKind) -> BenchCase {
             _ if uses_percentage => "width:6%; height:8px".to_owned(),
             _ => format!("width:{}px; height:8px", 8 + index % 7),
         };
-        fixture.leaf(root, &style, Size::new(12.0, 8.0), None);
+        fixture.leaf_with_content(root, &style, Size::new(12.0, 8.0), None, content, index);
     }
     fixture.prepare()
 }
 
 fn build_intrinsic_pure_length(nodes: usize) -> BenchCase {
-    build_intrinsic(nodes, IntrinsicKind::PureLength)
+    build_intrinsic(nodes, IntrinsicKind::PureLength, LeafContent::Synthetic)
 }
 
 fn build_intrinsic_sparse_percentage(nodes: usize) -> BenchCase {
-    build_intrinsic(nodes, IntrinsicKind::SparsePercentage)
+    build_intrinsic(
+        nodes,
+        IntrinsicKind::SparsePercentage,
+        LeafContent::Synthetic,
+    )
 }
 
 fn build_intrinsic_dense_percentage(nodes: usize) -> BenchCase {
-    build_intrinsic(nodes, IntrinsicKind::DensePercentage)
+    build_intrinsic(
+        nodes,
+        IntrinsicKind::DensePercentage,
+        LeafContent::Synthetic,
+    )
 }
 
 fn build_intrinsic_dense_padding_percentage(nodes: usize) -> BenchCase {
-    build_intrinsic(nodes, IntrinsicKind::DensePaddingPercentage)
+    build_intrinsic(
+        nodes,
+        IntrinsicKind::DensePaddingPercentage,
+        LeafContent::Synthetic,
+    )
+}
+
+fn build_intrinsic_dense_padding_percentage_with_text(nodes: usize) -> BenchCase {
+    build_intrinsic(
+        nodes,
+        IntrinsicKind::DensePaddingPercentage,
+        LeafContent::Text,
+    )
 }
 
 fn build_intrinsic_percentage_size_only(nodes: usize) -> BenchCase {
-    build_intrinsic(nodes, IntrinsicKind::PercentageSizeOnly)
+    build_intrinsic(
+        nodes,
+        IntrinsicKind::PercentageSizeOnly,
+        LeafContent::Synthetic,
+    )
 }
 
 fn build_intrinsic_percentage_min_max_only(nodes: usize) -> BenchCase {
-    build_intrinsic(nodes, IntrinsicKind::PercentageMinMaxOnly)
+    build_intrinsic(
+        nodes,
+        IntrinsicKind::PercentageMinMaxOnly,
+        LeafContent::Synthetic,
+    )
+}
+
+fn build_intrinsic_percentage_min_max_only_with_text(nodes: usize) -> BenchCase {
+    build_intrinsic(
+        nodes,
+        IntrinsicKind::PercentageMinMaxOnly,
+        LeafContent::Text,
+    )
 }
 
 fn build_intrinsic_relative_inset_only(nodes: usize) -> BenchCase {
-    build_intrinsic(nodes, IntrinsicKind::RelativeInsetOnly)
+    build_intrinsic(
+        nodes,
+        IntrinsicKind::RelativeInsetOnly,
+        LeafContent::Synthetic,
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -298,7 +339,7 @@ enum GravityKind {
     Cross,
 }
 
-fn build_gravity_matrix(nodes: usize, kind: GravityKind) -> BenchCase {
+fn build_gravity_matrix(nodes: usize, kind: GravityKind, content: LeafContent) -> BenchCase {
     let groups = nodes.max(4).div_ceil(4);
     let mut fixture = linear_fixture(
         360.0,
@@ -326,7 +367,7 @@ fn build_gravity_matrix(nodes: usize, kind: GravityKind) -> BenchCase {
             } else {
                 "auto"
             };
-            fixture.leaf(
+            fixture.leaf_with_content(
                 container,
                 &format!(
                     "width:{}px; height:{}px; align-self:{align_self}; linear-weight:{}",
@@ -336,6 +377,8 @@ fn build_gravity_matrix(nodes: usize, kind: GravityKind) -> BenchCase {
                 ),
                 Size::new((20 + child * 4) as f32, (10 + child * 3) as f32),
                 None,
+                content,
+                index * 3 + child,
             );
         }
     }
@@ -343,13 +386,17 @@ fn build_gravity_matrix(nodes: usize, kind: GravityKind) -> BenchCase {
 }
 
 fn build_linear_gravity_matrix(nodes: usize) -> BenchCase {
-    build_gravity_matrix(nodes, GravityKind::Main)
+    build_gravity_matrix(nodes, GravityKind::Main, LeafContent::Synthetic)
 }
 
 fn build_linear_layout_gravity_matrix(nodes: usize) -> BenchCase {
-    build_gravity_matrix(nodes, GravityKind::Item)
+    build_gravity_matrix(nodes, GravityKind::Item, LeafContent::Synthetic)
 }
 
 fn build_linear_cross_gravity_matrix(nodes: usize) -> BenchCase {
-    build_gravity_matrix(nodes, GravityKind::Cross)
+    build_gravity_matrix(nodes, GravityKind::Cross, LeafContent::Synthetic)
+}
+
+fn build_linear_cross_gravity_matrix_with_text(nodes: usize) -> BenchCase {
+    build_gravity_matrix(nodes, GravityKind::Cross, LeafContent::Text)
 }

@@ -5,7 +5,7 @@
 use divan::counter::ItemsCount;
 use neutron_star::geometry::Size;
 
-use crate::support::{LayoutFixture, TEXT_SAMPLES};
+use crate::support::{LayoutFixture, LeafContent};
 
 #[derive(Debug, Clone, Copy)]
 enum GraphKind {
@@ -20,6 +20,7 @@ fn graph_fixture(
     layout_once: bool,
     kind: GraphKind,
     auto_width: bool,
+    content: LeafContent,
 ) -> LayoutFixture {
     let count = item_count.max(1);
     let width = count as f32 * 4.0;
@@ -75,12 +76,12 @@ fn graph_fixture(
             "width:4px"
         };
         let style = format!("{sizing}; height:4px; relative-id:{relative_id}; {constraints}");
-        fixture.leaf(root, &style, Size::new(4.0, 4.0), None);
+        fixture.leaf_with_content(root, &style, Size::new(4.0, 4.0), None, content, index);
     }
     fixture.prepare()
 }
 
-fn nested_fixture() -> LayoutFixture {
+fn nested_fixture(content: LeafContent) -> LayoutFixture {
     const CONTAINERS: usize = 32;
     const ITEMS: usize = 32;
     let mut fixture = LayoutFixture::new(
@@ -103,47 +104,8 @@ fn nested_fixture() -> LayoutFixture {
                 "width:4px; height:4px; relative-id:{}; {constraint}",
                 index + 1
             );
-            fixture.leaf(container, &style, Size::new(4.0, 4.0), None);
+            fixture.leaf_with_content(container, &style, Size::new(4.0, 4.0), None, content, index);
         }
-    }
-    fixture.prepare()
-}
-
-fn text_constraints_fixture(item_count: usize) -> LayoutFixture {
-    const COLUMNS: usize = 4;
-
-    let count = item_count.max(1);
-    let rows = count.div_ceil(COLUMNS);
-    let mut fixture = LayoutFixture::new(
-        Size::new(640.0, rows as f32 * 160.0),
-        &format!(
-            "display:relative; width:640px; height:{}px; relative-layout-once:false",
-            rows as f32 * 160.0
-        ),
-    );
-    let root = fixture.root();
-    for index in 0..count {
-        let id = index + 1;
-        let column = index % COLUMNS;
-        let row = index / COLUMNS;
-        let horizontal = if column == 0 {
-            "relative-align-left:parent".to_owned()
-        } else {
-            format!("relative-right-of:{}", id - 1)
-        };
-        let vertical = if row == 0 {
-            "relative-align-top:parent".to_owned()
-        } else {
-            format!("relative-bottom-of:{}", id - COLUMNS)
-        };
-        let font_size = 12.0 + (index % 4) as f32 * 2.0;
-        let item = fixture.container(
-            root,
-            &format!(
-                "display:flex; box-sizing:border-box; width:156px; min-width:0; height:auto; padding:2px; relative-id:{id}; {horizontal}; {vertical}; font-family:Ahem; font-size:{font_size}px"
-            ),
-        );
-        fixture.text(item, TEXT_SAMPLES[index % TEXT_SAMPLES.len()]);
     }
     fixture.prepare()
 }
@@ -153,7 +115,6 @@ const LARGE_GRAPH_BATCH: usize = 4;
 const NESTED_COLD_BATCH: usize = 8;
 const WARM_DESCENDANTS_BATCH: usize = 256;
 const ROOT_CACHE_HIT_BATCH: usize = 1_024;
-const TEXT_CONSTRAINT_ITEMS: usize = 256;
 
 const fn graph_batch_size(item_count: usize) -> usize {
     if item_count <= 256 {
@@ -168,12 +129,17 @@ fn bench_graph(
     item_count: usize,
     layout_once: bool,
     kind: GraphKind,
+    content: LeafContent,
 ) {
-    let batch_size = graph_batch_size(item_count);
+    let batch_size = if content.is_text() {
+        1
+    } else {
+        graph_batch_size(item_count)
+    };
     bencher
         .with_inputs(|| {
             (0..batch_size)
-                .map(|_| graph_fixture(item_count, layout_once, kind, false))
+                .map(|_| graph_fixture(item_count, layout_once, kind, false, content))
                 .collect::<Vec<_>>()
         })
         .input_counter(|fixtures: &Vec<LayoutFixture>| {
@@ -194,16 +160,25 @@ fn bench_graph(
 
 #[divan::bench(args = [256, 4_096])]
 fn independent_two_pass_cold(bencher: divan::Bencher<'_, '_>, item_count: usize) {
-    bench_graph(bencher, item_count, false, GraphKind::Independent);
+    bench_graph(
+        bencher,
+        item_count,
+        false,
+        GraphKind::Independent,
+        LeafContent::Synthetic,
+    );
 }
 
-#[divan::bench(args = [256, 4_096])]
-fn independent_two_pass_wrap_width_cold(bencher: divan::Bencher<'_, '_>, item_count: usize) {
-    let batch_size = graph_batch_size(item_count);
+fn bench_wrap_width(bencher: divan::Bencher<'_, '_>, item_count: usize, content: LeafContent) {
+    let batch_size = if content.is_text() {
+        1
+    } else {
+        graph_batch_size(item_count)
+    };
     bencher
         .with_inputs(|| {
             (0..batch_size)
-                .map(|_| graph_fixture(item_count, false, GraphKind::Independent, true))
+                .map(|_| graph_fixture(item_count, false, GraphKind::Independent, true, content))
                 .collect::<Vec<_>>()
         })
         .input_counter(|fixtures: &Vec<LayoutFixture>| {
@@ -223,23 +198,93 @@ fn independent_two_pass_wrap_width_cold(bencher: divan::Bencher<'_, '_>, item_co
 }
 
 #[divan::bench(args = [256, 4_096])]
+fn independent_two_pass_wrap_width_cold(bencher: divan::Bencher<'_, '_>, item_count: usize) {
+    bench_wrap_width(bencher, item_count, LeafContent::Synthetic);
+}
+
+#[divan::bench(args = [256, 4_096])]
+fn independent_two_pass_wrap_width_with_text_cold(
+    bencher: divan::Bencher<'_, '_>,
+    item_count: usize,
+) {
+    bench_wrap_width(bencher, item_count, LeafContent::Text);
+}
+
+#[divan::bench(args = [256, 4_096])]
 fn reverse_chain_two_pass_cold(bencher: divan::Bencher<'_, '_>, item_count: usize) {
-    bench_graph(bencher, item_count, false, GraphKind::ReverseChain);
+    bench_graph(
+        bencher,
+        item_count,
+        false,
+        GraphKind::ReverseChain,
+        LeafContent::Synthetic,
+    );
+}
+
+#[divan::bench(args = [256, 4_096])]
+fn reverse_chain_two_pass_with_text_cold(bencher: divan::Bencher<'_, '_>, item_count: usize) {
+    bench_graph(
+        bencher,
+        item_count,
+        false,
+        GraphKind::ReverseChain,
+        LeafContent::Text,
+    );
 }
 
 #[divan::bench(args = [256, 4_096])]
 fn reverse_chain_one_pass_cold(bencher: divan::Bencher<'_, '_>, item_count: usize) {
-    bench_graph(bencher, item_count, true, GraphKind::ReverseChain);
+    bench_graph(
+        bencher,
+        item_count,
+        true,
+        GraphKind::ReverseChain,
+        LeafContent::Synthetic,
+    );
 }
 
 #[divan::bench(args = [256, 4_096])]
 fn disjoint_cycles_cold(bencher: divan::Bencher<'_, '_>, item_count: usize) {
-    bench_graph(bencher, item_count, true, GraphKind::DisjointCycles);
+    bench_graph(
+        bencher,
+        item_count,
+        true,
+        GraphKind::DisjointCycles,
+        LeafContent::Synthetic,
+    );
+}
+
+#[divan::bench(args = [256, 4_096])]
+fn disjoint_cycles_with_text_cold(bencher: divan::Bencher<'_, '_>, item_count: usize) {
+    bench_graph(
+        bencher,
+        item_count,
+        true,
+        GraphKind::DisjointCycles,
+        LeafContent::Text,
+    );
 }
 
 #[divan::bench(args = [256, 4_096])]
 fn duplicate_ids_cold(bencher: divan::Bencher<'_, '_>, item_count: usize) {
-    bench_graph(bencher, item_count, false, GraphKind::DuplicateIds);
+    bench_graph(
+        bencher,
+        item_count,
+        false,
+        GraphKind::DuplicateIds,
+        LeafContent::Synthetic,
+    );
+}
+
+#[divan::bench(args = [256, 4_096])]
+fn duplicate_ids_with_text_cold(bencher: divan::Bencher<'_, '_>, item_count: usize) {
+    bench_graph(
+        bencher,
+        item_count,
+        false,
+        GraphKind::DuplicateIds,
+        LeafContent::Text,
+    );
 }
 
 #[divan::bench]
@@ -247,7 +292,7 @@ fn nested_relative_cold(bencher: divan::Bencher<'_, '_>) {
     bencher
         .with_inputs(|| {
             (0..NESTED_COLD_BATCH)
-                .map(|_| nested_fixture())
+                .map(|_| nested_fixture(LeafContent::Synthetic))
                 .collect::<Vec<_>>()
         })
         .input_counter(|fixtures: &Vec<LayoutFixture>| {
@@ -267,9 +312,9 @@ fn nested_relative_cold(bencher: divan::Bencher<'_, '_>) {
 }
 
 #[divan::bench]
-fn text_constraints_cold(bencher: divan::Bencher<'_, '_>) {
+fn nested_relative_with_text_cold(bencher: divan::Bencher<'_, '_>) {
     bencher
-        .with_inputs(|| text_constraints_fixture(TEXT_CONSTRAINT_ITEMS))
+        .with_inputs(|| nested_fixture(LeafContent::Text))
         .input_counter(LayoutFixture::node_count)
         .bench_local_values(|mut fixture| {
             divan::black_box(fixture.run());
@@ -281,7 +326,7 @@ fn text_constraints_cold(bencher: divan::Bencher<'_, '_>) {
 fn nested_relative_warm_descendants(bencher: divan::Bencher<'_, '_>) {
     bencher
         .with_inputs(|| {
-            let mut fixture = nested_fixture();
+            let mut fixture = nested_fixture(LeafContent::Synthetic);
             let _ = fixture.run();
             fixture.invalidate_root();
             fixture
@@ -299,7 +344,7 @@ fn nested_relative_warm_descendants(bencher: divan::Bencher<'_, '_>) {
 fn nested_relative_root_cache_hit(bencher: divan::Bencher<'_, '_>) {
     bencher
         .with_inputs(|| {
-            let mut fixture = nested_fixture();
+            let mut fixture = nested_fixture(LeafContent::Synthetic);
             let _ = fixture.run();
             fixture
         })

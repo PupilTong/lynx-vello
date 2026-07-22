@@ -29,7 +29,7 @@ use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use w3c_dom::layout::Layout;
 use w3c_dom::{Document, Node, NodeId};
 
-pub(super) const TEXT_SAMPLES: &[&str] = &[
+const TEXT_SAMPLES: &[&str] = &[
     "Settings",
     "The quick brown fox jumps over the lazy dog.",
     "Text layout shapes once and reflows under the inline constraint.",
@@ -37,6 +37,18 @@ pub(super) const TEXT_SAMPLES: &[&str] = &[
 ];
 
 pub(super) const AHEM: &[u8] = include_bytes!("../../tests/fixtures/Ahem.ttf");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LeafContent {
+    Synthetic,
+    Text,
+}
+
+impl LeafContent {
+    pub(super) const fn is_text(self) -> bool {
+        matches!(self, Self::Text)
+    }
+}
 
 #[derive(Debug)]
 struct BenchFontMetrics;
@@ -126,6 +138,29 @@ impl LayoutFixture {
         first_baseline: Option<f32>,
     ) -> NodeId {
         self.push(parent, style, Some((intrinsic, first_baseline)))
+    }
+
+    pub(super) fn leaf_with_content(
+        &mut self,
+        parent: NodeId,
+        style: &str,
+        intrinsic: Size<f32>,
+        first_baseline: Option<f32>,
+        content: LeafContent,
+        sample_index: usize,
+    ) -> NodeId {
+        match content {
+            LeafContent::Synthetic => self.leaf(parent, style, intrinsic, first_baseline),
+            LeafContent::Text => {
+                let font_size = 12 + sample_index % 4 * 2;
+                let style = format!(
+                    "display:flex; align-items:flex-start; font-family:Ahem; font-size:{font_size}px; {style}"
+                );
+                let node = self.container(parent, &style);
+                self.text(node, TEXT_SAMPLES[sample_index % TEXT_SAMPLES.len()]);
+                node
+            }
+        }
     }
 
     pub(super) fn text(&mut self, parent: NodeId, text: &str) -> NodeId {
