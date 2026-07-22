@@ -28,21 +28,20 @@ use stylo::servo::media_features::PointerCapabilities;
 use stylo::stylesheets::{CssRuleType, Origin};
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo_traits::{CSSPixel, DevicePixel, ParsingMode, ToCss};
-use w3c_dom::{Document, StyleEngine, StylesheetOrigin};
+use w3c_dom::{Document, StylesheetOrigin};
 
 /// End-to-end evaluation of `query` against an explicit device: does a
 /// probe rule guarded by it apply?
 fn matches_dev(device: Device, query: &str) -> bool {
-    let mut engine = StyleEngine::new(device);
-    engine.add_stylesheet_with_media(
+    let mut doc: Document<()> = Document::new(device);
+    doc.add_stylesheet_with_media(
         ".probe { color: rgb(1, 2, 3) }",
         StylesheetOrigin::Author,
         query,
     );
-    let mut doc: Document<()> = engine.new_document();
-    let probe = doc.create_node("view", ());
+    let probe = doc.create_element("view", ());
     doc.add_class(probe, "probe");
-    let style = engine.resolve(doc.get(probe).expect("fresh node"), None);
+    let style = doc.resolve_style(doc.get(probe).expect("fresh node"), None);
     style.clone_color() == rgb(1, 2, 3)
 }
 

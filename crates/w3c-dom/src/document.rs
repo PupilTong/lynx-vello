@@ -16,17 +16,17 @@ use std::fmt;
 // import is gated to match (unused in release/bench builds otherwise).
 #[cfg(debug_assertions)]
 use std::ptr::NonNull;
-use std::sync::Arc;
 
 use neutron_star::tree::LayoutInput;
 use slab::Slab;
 use stylo::LocalName;
+use stylo::device::Device;
 use stylo::dom::OpaqueNode;
 use stylo::selector_parser::SnapshotMap;
-use stylo::shared_lock::SharedRwLock;
 use stylo::stylesheets::UrlExtraData;
 
 use crate::damage::StyleDamage;
+use crate::engine::StyleEngine;
 use crate::node::Node;
 
 /// A node's raw index in its owning document's slab.
@@ -49,6 +49,8 @@ pub(crate) fn about_blank_url_data() -> UrlExtraData {
 /// The box is load-bearing: moving `Document` never moves the `Slab` value, so
 /// every node's slab backpointer remains valid until the document is dropped.
 pub struct Document<T> {
+    /// This document's private stylesheet, device, cascade, and lock state.
+    style_engine: StyleEngine,
     nodes: Box<Slab<Node<T>>>,
     /// Relayout boundaries that a boundary-stopped
     /// [`invalidate_layout`](Self::invalidate_layout) parked for the next
@@ -82,26 +84,32 @@ impl<T: fmt::Debug> fmt::Debug for Document<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Document")
             .field("root_element", &self.root_element().map(Node::id))
+            .field("style_engine", &self.style_engine)
             .field("nodes", &self.nodes)
             .finish_non_exhaustive()
     }
 }
 
-impl<T> Default for Document<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl<T> Document<T> {
-    /// Create an empty standalone document with an `about:blank` style context.
+    /// Create an empty document with an independent `about:blank` style
+    /// engine/context around the embedder-supplied device.
     #[must_use]
-    pub fn new() -> Self {
-        Self::with_style_context(Arc::new(SharedRwLock::new()), about_blank_url_data())
+    pub fn new(device: Device) -> Self {
+        Self::with_url_data(device, about_blank_url_data())
     }
 
-    /// Create a document paired with a [`StyleEngine`](crate::StyleEngine).
-    pub(crate) fn with_style_context(lock: Arc<SharedRwLock>, url_data: UrlExtraData) -> Self {
+    /// Create an empty document with an independent style engine/context and
+    /// explicit CSS base URL.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the internal empty-slab invariant is broken and its
+    /// first insertion does not occupy slot zero.
+    #[must_use]
+    pub fn with_url_data(device: Device, url_data: UrlExtraData) -> Self {
+        let style_engine = StyleEngine::with_url_data(device, url_data);
+        let lock = style_engine.lock();
+        let url_data = style_engine.url_data();
         let mut nodes = Box::new(Slab::new());
         let tree = std::ptr::from_mut::<Slab<Node<T>>>(nodes.as_mut());
         let root = nodes.insert(Node::new_document(tree, lock, url_data));
@@ -110,9 +118,20 @@ impl<T> Document<T> {
             "the DOM document node must occupy slab slot zero"
         );
         Self {
+            style_engine,
             nodes,
             relayout_roots: Vec::new(),
         }
+    }
+
+    /// This document's private style engine.
+    pub(crate) const fn style_engine(&self) -> &StyleEngine {
+        &self.style_engine
+    }
+
+    /// This document's private style engine.
+    pub(crate) const fn style_engine_mut(&mut self) -> &mut StyleEngine {
+        &mut self.style_engine
     }
 
     /// Park a boundary-stopped relayout root for the next layout pass (see
@@ -175,11 +194,6 @@ impl<T> Document<T> {
         self.root_node().children().find(|node| node.is_element())
     }
 
-    /// The document node's shared style lock.
-    pub(crate) fn style_lock(&self) -> &Arc<SharedRwLock> {
-        self.root_node().document_lock()
-    }
-
     /// Debug-only: mark the document as inside a style traversal until the
     /// returned token is dropped, including while unwinding.
     #[cfg(debug_assertions)]
@@ -197,20 +211,15 @@ impl<T> Document<T> {
     // --- node factories ---------------------------------------------------
 
     /// Create a detached element and return its raw slab index.
-    pub fn create_element(&mut self, tag: &str, ext: T) -> NodeId {
+    pub fn create_element(&mut self, tag: &str, payload: T) -> NodeId {
         let local_name = LocalName::from(tag);
-        self.allocate_node(|tree, id| Node::new_element(tree, id, local_name, ext))
-    }
-
-    /// Backwards-compatible name for [`create_element`](Self::create_element).
-    pub fn create_node(&mut self, tag: &str, ext: T) -> NodeId {
-        self.create_element(tag, ext)
+        self.allocate_node(|tree, id| Node::new_element(tree, id, local_name, payload))
     }
 
     /// Create a detached text node and return its raw slab index.
-    pub fn create_text_node(&mut self, text: impl Into<String>, ext: T) -> NodeId {
+    pub fn create_text_node(&mut self, text: impl Into<String>, payload: T) -> NodeId {
         let text = text.into();
-        self.allocate_node(|tree, id| Node::new_text(tree, id, text, ext))
+        self.allocate_node(|tree, id| Node::new_text(tree, id, text, payload))
     }
 
     fn allocate_node(
@@ -318,20 +327,6 @@ impl<T> Document<T> {
             next = self.get(current).and_then(Node::parent_id);
         }
         false
-    }
-
-    // --- embedder payload -------------------------------------------------
-
-    /// Mutably borrow an element/text node's embedder payload.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `id` is vacant/out of range or identifies the document node.
-    pub fn ext_mut(&mut self, id: NodeId) -> &mut T {
-        self.nodes
-            .get_mut(id)
-            .expect("stale NodeId passed to Document::ext_mut")
-            .ext_mut()
     }
 
     // --- structure --------------------------------------------------------
@@ -455,7 +450,7 @@ impl<T> Document<T> {
                 .try_remove(current)
                 .expect("subtree links always resolve while removing");
             stack.extend_from_slice(&node.children);
-            removed.push(node.into_ext());
+            removed.push(node.into_payload());
         }
         // Parked roots carry raw, generation-less slab ids. Prune every
         // removed entry once, after the traversal, before a later node factory
@@ -493,42 +488,9 @@ impl<T> Document<T> {
         snapshots
     }
 
-    /// Whether the connected root element has pending style work.
-    #[must_use]
-    pub fn needs_flush(&self) -> bool {
-        self.root_element()
-            .is_some_and(|node| node.is_style_dirty() || node.has_dirty_descendants())
-    }
-
-    /// Reset **all** flush-scheduling state across the whole document,
-    /// restoring a clean baseline (tests, or an embedder resetting a tree).
-    /// Computed styles are left intact — only the scheduling state is cleared.
-    ///
-    /// Specifically, for every live node:
-    /// - clears `dirty_descendants`;
-    /// - drops any pending pre-mutation snapshot and clears the snapshot lifecycle bits;
-    /// - clears stylo's own restyle state on its `ElementData` (the pending `hint`, the accumulated
-    ///   `damage`, and the restyle flags) via `ElementData::clear_restyle_state`.
-    ///
-    /// Because [`Node::is_style_dirty`](crate::Node::is_style_dirty) is derived
-    /// from exactly this state (plus the presence of style data), a styled
-    /// element is clean afterward; a never-styled element stays dirty (it still
-    /// needs styling). The per-flush path uses the cheaper targeted
-    /// `harvest_flush` instead.
-    pub fn clear_dirty(&mut self) {
-        for (_, node) in &mut *self.nodes {
-            node.set_dirty_descendants_bit(false);
-            node.snapshot = None;
-            node.clear_snapshot_flags();
-            if let Some(wrapper) = node.stylo_data_mut() {
-                wrapper.borrow_mut().clear_restyle_state();
-            }
-        }
-    }
-
     /// Harvest the damage a style traversal produced and clear all of stylo's
     /// per-node restyle state, called once from
-    /// [`StyleEngine::flush_document_with_sink`](crate::StyleEngine::flush_document_with_sink)
+    /// [`Document::flush_styles_with_sink`](Self::flush_styles_with_sink)
     /// after the traversal returns.
     ///
     /// Two passes:
@@ -548,7 +510,7 @@ impl<T> Document<T> {
     ///
     /// Consuming layout damage here is load-bearing: callers may legitimately
     /// discard [`FlushSummary`](crate::FlushSummary), and a later
-    /// [`StyleEngine::layout_document`](crate::StyleEngine::layout_document)
+    /// [`Document::layout`](Self::layout)
     /// performs a no-op style flush. Invalidating while the harvested ids are
     /// known-live avoids retaining the damaged ids themselves. Boundary-stopped
     /// invalidation may park live ancestor [`NodeId`]s on the document; the
@@ -568,8 +530,8 @@ impl<T> Document<T> {
     /// node snapshotted and then detached before the flush keeps its slot and
     /// `SNAPSHOT_PRESENT` bit (it is in neither the collected map nor the
     /// spine). That orphan state is inert while detached, is dominated by the
-    /// subtree restyle a reattach schedules, and is swept by
-    /// [`clear_dirty`](Self::clear_dirty)'s whole-slab reset.
+    /// subtree restyle a reattach schedules, and is dropped with the detached
+    /// node if it is reclaimed.
     ///
     /// # Safety discipline (crate-internal)
     ///
@@ -654,12 +616,59 @@ impl Drop for FlushPhaseToken {
 
 #[cfg(test)]
 mod tests {
+    use euclid::{Scale, Size2D};
+    use stylo::context::QuirksMode;
+    use stylo::device::servo::FontMetricsProvider;
+    use stylo::font_metrics::FontMetrics;
+    use stylo::media_queries::MediaType;
+    use stylo::properties::ComputedValues;
+    use stylo::properties::style_structs::Font;
+    use stylo::queries::values::PrefersColorScheme;
+    use stylo::servo::media_features::PointerCapabilities;
+    use stylo::values::computed::font::GenericFontFamily;
+    use stylo::values::computed::{CSSPixelLength, Length};
+    use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
+
     use super::*;
+
+    #[derive(Debug)]
+    struct NoFonts;
+
+    impl FontMetricsProvider for NoFonts {
+        fn query_font_metrics(
+            &self,
+            _: bool,
+            _: &Font,
+            _: CSSPixelLength,
+            _: QueryFontMetricsFlags,
+        ) -> FontMetrics {
+            FontMetrics::default()
+        }
+
+        fn base_size_for_generic(&self, _: GenericFontFamily) -> Length {
+            Length::new(FONT_MEDIUM_PX)
+        }
+    }
+
+    fn device() -> Device {
+        Device::new(
+            MediaType::screen(),
+            QuirksMode::NoQuirks,
+            Size2D::new(800.0, 600.0),
+            Size2D::new(800.0, 600.0),
+            Scale::new(1.0),
+            Box::new(NoFonts),
+            ComputedValues::initial_values_with_font_override(Font::initial_values()),
+            PrefersColorScheme::Light,
+            PointerCapabilities::empty(),
+            PointerCapabilities::empty(),
+        )
+    }
 
     #[test]
     #[should_panic(expected = "internal tree links always resolve")]
     fn root_element_panics_on_a_dangling_document_child() {
-        let mut document: Document<()> = Document::new();
+        let mut document: Document<()> = Document::new(device());
         document
             .nodes
             .get_mut(DOCUMENT_NODE_ID)

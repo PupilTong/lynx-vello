@@ -22,9 +22,8 @@ use crate::script::ScriptEngine;
 
 /// One view-local instance of the `lynx-widget` Element PAPI and style engine.
 ///
-/// The tree is always created by this exact [`StyleEngine`], binding its arena
-/// to the style engine's private Stylo lock/context. The engine stays private,
-/// and operations that use it are paired with this tree internally.
+/// The tree owns its private Stylo engine/context. The Lynx adapter stays
+/// private and routes style operations to that document.
 #[derive(Debug)]
 pub struct LynxWidgetApi {
     style_engine: StyleEngine,
@@ -62,19 +61,16 @@ impl LynxWidgetApi {
         self.style_engine.flush_widget_tree(&mut self.tree);
     }
 
-    /// Update this view's viewport and schedule its tree for restyling.
+    /// Update this view's viewport and schedule its private document.
     pub fn set_viewport(&mut self, width: f32, height: f32) {
-        self.style_engine.set_viewport(width, height);
         self.style_engine
-            .restyle_after_device_change(&mut self.tree);
+            .set_viewport(&mut self.tree, width, height);
     }
 
-    /// Update this view's device-pixel ratio and schedule its tree for
-    /// restyling.
+    /// Update this view's device-pixel ratio and schedule its private document.
     pub fn set_device_pixel_ratio(&mut self, device_pixel_ratio: f32) {
-        self.style_engine.set_device_pixel_ratio(device_pixel_ratio);
         self.style_engine
-            .restyle_after_device_change(&mut self.tree);
+            .set_device_pixel_ratio(&mut self.tree, device_pixel_ratio);
     }
 }
 

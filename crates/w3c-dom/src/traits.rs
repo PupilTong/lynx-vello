@@ -20,7 +20,7 @@
 //! - **`:hover`/`:active`/`:focus`** are matched from the node's
 //!   [`ElementState`](crate::ElementState).
 //! - **`:root`** matches the document element, never a detached parentless element.
-//! - **Attributes** are read exclusively from the node's real attribute map.
+//! - **Attributes** come exclusively from the node's real DOM attribute map.
 //! - **Shadow DOM / pseudo-elements / animations** are stubbed (`None`/`false`) — none exist in
 //!   this model yet.
 //!
@@ -63,7 +63,6 @@ use stylo::values::{AtomIdent, AtomString};
 use stylo::{CaseSensitivityExt, LocalName, Namespace};
 use stylo_atoms::Atom;
 
-use crate::ext::ExternalState;
 use crate::node::{ChildrenIter, Node};
 
 /// The single shared empty namespace, returned by [`TElement::namespace`]
@@ -75,7 +74,7 @@ fn empty_namespace() -> &'static <SelectorImpl as selectors::SelectorImpl>::Borr
 
 // --- NodeInfo + TNode -------------------------------------------------------
 
-impl<T: ExternalState> NodeInfo for &Node<T> {
+impl<T: Sync> NodeInfo for &Node<T> {
     fn is_element(&self) -> bool {
         Node::is_element(self)
     }
@@ -85,7 +84,7 @@ impl<T: ExternalState> NodeInfo for &Node<T> {
     }
 }
 
-impl<'a, T: ExternalState> TNode for &'a Node<T> {
+impl<'a, T: Sync> TNode for &'a Node<T> {
     type ConcreteElement = &'a Node<T>;
     type ConcreteDocument = &'a Node<T>;
     type ConcreteShadowRoot = &'a Node<T>;
@@ -155,7 +154,7 @@ impl<'a, T: ExternalState> TNode for &'a Node<T> {
 
 // --- TDocument + TShadowRoot --------------------------------------------------
 
-impl<'a, T: ExternalState> TDocument for &'a Node<T> {
+impl<'a, T: Sync> TDocument for &'a Node<T> {
     type ConcreteNode = &'a Node<T>;
 
     fn as_node(&self) -> Self::ConcreteNode {
@@ -177,7 +176,7 @@ impl<'a, T: ExternalState> TDocument for &'a Node<T> {
     }
 }
 
-impl<'a, T: ExternalState> TShadowRoot for &'a Node<T> {
+impl<'a, T: Sync> TShadowRoot for &'a Node<T> {
     type ConcreteNode = &'a Node<T>;
 
     fn as_node(&self) -> Self::ConcreteNode {
@@ -198,7 +197,7 @@ impl<'a, T: ExternalState> TShadowRoot for &'a Node<T> {
 
 // --- TElement -----------------------------------------------------------------
 
-impl<'a, T: ExternalState> TElement for &'a Node<T> {
+impl<'a, T: Sync> TElement for &'a Node<T> {
     type ConcreteNode = &'a Node<T>;
     type TraversalChildrenIterator = ChildrenIter<'a, T>;
 
@@ -468,8 +467,8 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
 
 /// id/class matching is **case-sensitive**; `:hover`/`:active`/`:focus` are
 /// matched from the node's [`ElementState`]; attribute
-/// matching covers the node's real attributes.
-impl<T: ExternalState> Element for &Node<T> {
+/// matching covers the node's real DOM attributes.
+impl<T: Sync> Element for &Node<T> {
     type Impl = SelectorImpl;
 
     fn opaque(&self) -> OpaqueElement {
@@ -557,13 +556,6 @@ impl<T: ExternalState> Element for &Node<T> {
         local_name: &LocalName,
         operation: &AttrSelectorOperation<&AtomString>,
     ) -> bool {
-        // Known gap: `class`/`id` live in their own fields (`classes`,
-        // `id_attr`), not in `attrs`, and are not reflected here — so
-        // attribute-form selectors like `[class~=x]`/`[id=y]` never match
-        // them (use `.x`/`#y`). Reflecting them costs a string build on this
-        // hot path for a selector form ReactLynx CSS does not use;
-        // invalidation (the class/id snapshot recorders) is consistent with
-        // this choice.
         self.attr_local_name(local_name)
             .is_some_and(|value| operation.eval_str(value))
     }

@@ -1,18 +1,15 @@
 //! Standards-oriented CSS parsing, selector matching, and cascade execution.
 //!
-//! [`StyleEngine`] is the style-system owner for an embedder: it owns stylo's
-//! [`Stylist`], the single [`SharedRwLock`] protecting stylesheet and inline
+//! Every [`Document`] owns one private [`StyleEngine`]: stylo's [`Stylist`],
+//! the [`SharedRwLock`] protecting that document's stylesheet and inline
 //! declaration blocks, and the base URL used while parsing CSS. Embedders
-//! provide a stylo [`Device`] and an [`ExternalState`] payload (an opaque,
-//! `Sync` marker type); no
+//! provide a stylo [`Device`] when constructing the document; no
 //! platform-specific metrics, units, or widget vocabulary live here.
 //!
-//! Styling runs **in place on the one tree**: create documents with
-//! [`StyleEngine::new_document`] so they share this engine's private style
-//! context, mutate them through [`Document`] methods, and
-//! [`flush_document`](StyleEngine::flush_document) (see [`crate::flush`])
-//! drives stylo's restyle traversal directly over the document's nodes — no
-//! separate style tree is ever built.
+//! Styling runs **in place on the one tree**: construct and mutate a
+//! [`Document`], then [`flush_styles`](Document::flush_styles) (see
+//! [`crate::flush`]) drives stylo's restyle traversal directly over its nodes
+//! — no separate style tree is ever built.
 
 use std::sync::Arc as StdArc;
 use std::sync::atomic::AtomicBool;
@@ -29,7 +26,7 @@ use stylo::dom::TElement;
 use stylo::font_face::parse_font_face_block;
 use stylo::media_queries::MediaList;
 use stylo::parser::ParserContext;
-/// The computed style produced by [`StyleEngine::resolve`].
+/// The computed style produced by [`Document::resolve_style`].
 pub use stylo::properties::ComputedValues as ComputedStyle;
 use stylo::properties::cascade::{FirstLineReparenting, cascade};
 use stylo::properties::declaration_block::parse_one_declaration_into;
@@ -43,26 +40,44 @@ use stylo::rule_tree::RuleCascadeFlags;
 use stylo::selector_parser::SelectorParser;
 use stylo::servo_arc::Arc;
 use stylo::shared_lock::{SharedRwLock, StylesheetGuards};
-/// A single CSS rule, as built by the [`StyleEngine`] rule builders.
-pub use stylo::stylesheets::CssRule;
 /// A stylesheet's cascade origin.
 pub use stylo::stylesheets::Origin as StylesheetOrigin;
 use stylo::stylesheets::keyframes_rule::{KeyframesRule, parse_keyframe_list};
 use stylo::stylesheets::{
-    AllowImportRules, CssRuleType, CssRules, DocumentStyleSheet, Origin, StyleRule, Stylesheet,
-    StylesheetContents, UrlExtraData,
+    AllowImportRules, CssRule as StyloCssRule, CssRuleType, CssRules, DocumentStyleSheet, Origin,
+    StyleRule, Stylesheet, StylesheetContents, UrlExtraData,
 };
 use stylo::stylist::{RuleInclusion, Stylist};
 use stylo::values::KeyframesName;
 use stylo::values::specified::position::PositionTryFallbacksTryTactic;
 use stylo_traits::ParsingMode;
 
-use crate::document::about_blank_url_data;
-use crate::{Document, ExternalState, Node, NodeId};
+use crate::{Document, Node};
 
 /// One declaration for direct rule construction: property name, value text,
 /// and whether it carries `!important`.
 pub type RawDeclaration<'a> = (&'a str, &'a str, bool);
+
+/// One pre-built CSS rule branded with the private document context that
+/// parsed and locked it.
+///
+/// Rules can be collected outside a mutable document borrow and later mounted
+/// with [`Document::append_rules`], but cannot be mounted into another
+/// document.
+#[derive(Clone, Debug)]
+pub struct CssRule {
+    inner: StyloCssRule,
+    owner: StdArc<SharedRwLock>,
+}
+
+impl CssRule {
+    fn new(inner: StyloCssRule, owner: &StdArc<SharedRwLock>) -> Self {
+        Self {
+            inner,
+            owner: StdArc::clone(owner),
+        }
+    }
+}
 
 /// Whether `name` is a real, non-custom property in this stylo build.
 #[must_use]
@@ -73,15 +88,11 @@ pub fn property_is_supported(name: &str) -> bool {
     )
 }
 
-/// A generic stylo style engine for [`Document`] trees.
-///
-/// The engine owns the only style lock an attached document needs. Create
-/// styled documents with [`new_document`](Self::new_document); callers never
-/// need to construct, share, or synchronize a `SharedRwLock` themselves.
-pub struct StyleEngine {
+/// The private stylo state owned by exactly one [`Document`].
+pub(crate) struct StyleEngine {
     stylist: Stylist,
-    /// Shared style-context identity and the lock protecting every stylesheet
-    /// and inline declaration created by this engine.
+    /// The lock protecting this document's stylesheets and inline
+    /// declarations.
     lock: StdArc<SharedRwLock>,
     url_data: UrlExtraData,
 }
@@ -99,15 +110,9 @@ impl std::fmt::Debug for StyleEngine {
 }
 
 impl StyleEngine {
-    /// Build an engine around an embedder-supplied stylo [`Device`].
-    #[must_use]
-    pub fn new(device: Device) -> Self {
-        Self::with_url_data(device, about_blank_url_data())
-    }
-
     /// Build an engine with an explicit base URL for CSS parsing.
     #[must_use]
-    pub fn with_url_data(device: Device, url_data: UrlExtraData) -> Self {
+    pub(crate) fn with_url_data(device: Device, url_data: UrlExtraData) -> Self {
         Self {
             stylist: Stylist::new(device, QuirksMode::NoQuirks),
             lock: StdArc::new(SharedRwLock::new()),
@@ -115,37 +120,12 @@ impl StyleEngine {
         }
     }
 
-    /// Create an empty document sharing this engine's private style context.
-    ///
-    /// The document is permanently paired with this engine: flushing or
-    /// resolving it through any other engine panics at the entry point (the
-    /// crate-private `assert_owns` boundary check).
-    #[must_use]
-    pub fn new_document<T>(&self) -> Document<T> {
-        Document::with_style_context(StdArc::clone(&self.lock), self.url_data.clone())
+    pub(crate) fn lock(&self) -> StdArc<SharedRwLock> {
+        StdArc::clone(&self.lock)
     }
 
-    /// Assert that `document` was created by **this** engine.
-    ///
-    /// Every entry point that runs this engine's stylist or takes this
-    /// engine's lock against a document's nodes calls this first. Skipping it
-    /// would not make a mismatched pair work — inline styles are locked under
-    /// the creating engine's `SharedRwLock`, so stylo panics deep inside
-    /// (`Locked::read_with called with a guard from an unrelated
-    /// SharedRwLock`), and a document *without* inline styles would silently
-    /// cascade against the wrong stylist — it only makes the failure late,
-    /// obscure, or invisible. Failing here is the let-it-crash contract with
-    /// a nameable cause.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `document` was created by a different engine or standalone
-    /// (`Document::new`).
-    pub(crate) fn assert_owns<T>(&self, document: &Document<T>) {
-        assert!(
-            StdArc::ptr_eq(document.style_lock(), &self.lock),
-            "document is not paired with this StyleEngine (created by a different engine or standalone)"
-        );
+    pub(crate) fn url_data(&self) -> UrlExtraData {
+        self.url_data.clone()
     }
 
     /// The engine's stylist (crate-internal: the flush traversal needs it).
@@ -160,7 +140,7 @@ impl StyleEngine {
 
     /// Inspect the device used for viewport units and media evaluation.
     #[must_use]
-    pub fn device(&self) -> &Device {
+    pub(crate) fn device(&self) -> &Device {
         self.stylist.device()
     }
 
@@ -168,13 +148,13 @@ impl StyleEngine {
     ///
     /// Keeping device mutation behind this method prevents embedders from
     /// changing viewport state without also notifying the [`Stylist`].
-    pub fn update_device(&mut self, update: impl FnOnce(&mut Device)) {
+    pub(crate) fn update_device(&mut self, update: impl FnOnce(&mut Device)) {
         update(self.stylist.device_mut());
         self.refresh_device();
     }
 
     /// Update the CSS viewport while preserving the current device-pixel ratio.
-    pub fn set_viewport(&mut self, width: f32, height: f32) {
+    pub(crate) fn set_viewport(&mut self, width: f32, height: f32) {
         self.update_device(|device| {
             let dpr = device.device_pixel_ratio().get();
             device.set_viewport_size(euclid::Size2D::new(width, height));
@@ -183,7 +163,7 @@ impl StyleEngine {
     }
 
     /// Update the device-pixel ratio while preserving the CSS viewport.
-    pub fn set_device_pixel_ratio(&mut self, device_pixel_ratio: f32) {
+    pub(crate) fn set_device_pixel_ratio(&mut self, device_pixel_ratio: f32) {
         self.update_device(|device| {
             device.set_device_pixel_ratio(euclid::Scale::new(device_pixel_ratio));
             let viewport = device.viewport_size();
@@ -195,12 +175,17 @@ impl StyleEngine {
     }
 
     /// Parse and append a stylesheet that applies to all media.
-    pub fn add_stylesheet_str(&mut self, css: &str, origin: Origin) {
+    pub(crate) fn add_stylesheet_str(&mut self, css: &str, origin: Origin) {
         self.add_stylesheet_with_media(css, origin, "");
     }
 
     /// Parse and append a stylesheet with an explicit media query.
-    pub fn add_stylesheet_with_media(&mut self, css: &str, origin: Origin, media_query: &str) {
+    pub(crate) fn add_stylesheet_with_media(
+        &mut self,
+        css: &str,
+        origin: Origin,
+        media_query: &str,
+    ) {
         let media = self.parse_media_list(media_query);
         let sheet = Stylesheet::from_str(
             css,
@@ -215,10 +200,12 @@ impl StyleEngine {
         );
         let document_sheet = DocumentStyleSheet(Arc::new(sheet));
 
-        let guard = self.lock.read();
-        self.stylist.append_stylesheet(document_sheet, &guard);
-        let guards = StylesheetGuards::same(&guard);
-        self.stylist.flush(&guards);
+        {
+            let guard = self.lock.read();
+            self.stylist.append_stylesheet(document_sheet, &guard);
+            let guards = StylesheetGuards::same(&guard);
+            self.stylist.flush(&guards);
+        }
     }
 
     /// Append pre-built rules as one stylesheet of the given origin, without
@@ -229,7 +216,14 @@ impl StyleEngine {
     /// [`build_style_rule`](Self::build_style_rule) /
     /// [`build_keyframes_rule`](Self::build_keyframes_rule) /
     /// [`build_font_face_rule`](Self::build_font_face_rule).
-    pub fn append_rules(&mut self, rules: Vec<CssRule>, origin: Origin) {
+    pub(crate) fn append_rules(&mut self, rules: Vec<CssRule>, origin: Origin) {
+        assert!(
+            rules
+                .iter()
+                .all(|rule| StdArc::ptr_eq(&rule.owner, &self.lock)),
+            "CSS rule belongs to another Document"
+        );
+        let rules = rules.into_iter().map(|rule| rule.inner).collect();
         let rules = CssRules::new(rules, &self.lock);
         let contents = StylesheetContents::from_rules(
             rules,
@@ -245,10 +239,12 @@ impl StyleEngine {
         };
         let document_sheet = DocumentStyleSheet(Arc::new(sheet));
 
-        let guard = self.lock.read();
-        self.stylist.append_stylesheet(document_sheet, &guard);
-        let guards = StylesheetGuards::same(&guard);
-        self.stylist.flush(&guards);
+        {
+            let guard = self.lock.read();
+            self.stylist.append_stylesheet(document_sheet, &guard);
+            let guards = StylesheetGuards::same(&guard);
+            self.stylist.flush(&guards);
+        }
     }
 
     /// Build a style rule from selector text plus individual declarations.
@@ -259,7 +255,7 @@ impl StyleEngine {
     /// Returns `None` when the selector list fails to parse — the whole rule
     /// is invalid per CSS error handling.
     #[must_use]
-    pub fn build_style_rule<'d>(
+    pub(crate) fn build_style_rule<'d>(
         &self,
         selectors: &str,
         declarations: impl IntoIterator<Item = RawDeclaration<'d>>,
@@ -267,12 +263,15 @@ impl StyleEngine {
         let selectors =
             SelectorParser::parse_author_origin_no_namespace(selectors, &self.url_data).ok()?;
         let block = self.parse_declaration_block(declarations, CssRuleType::Style);
-        Some(CssRule::Style(Arc::new(self.lock.wrap(StyleRule {
-            selectors,
-            block: Arc::new(self.lock.wrap(block)),
-            rules: None,
-            source_location: SourceLocation { line: 0, column: 0 },
-        }))))
+        Some(CssRule::new(
+            StyloCssRule::Style(Arc::new(self.lock.wrap(StyleRule {
+                selectors,
+                block: Arc::new(self.lock.wrap(block)),
+                rules: None,
+                source_location: SourceLocation { line: 0, column: 0 },
+            }))),
+            &self.lock,
+        ))
     }
 
     /// Build an `@keyframes` rule from its name and the keyframe-list body
@@ -282,7 +281,7 @@ impl StyleEngine {
     /// the reassembled body through stylo's keyframe-list parser keeps this
     /// exact without a bespoke stop builder.
     #[must_use]
-    pub fn build_keyframes_rule(&self, name: &str, body: &str) -> Option<CssRule> {
+    pub(crate) fn build_keyframes_rule(&self, name: &str, body: &str) -> Option<CssRule> {
         if name.is_empty() {
             return None;
         }
@@ -290,26 +289,30 @@ impl StyleEngine {
         let mut input = ParserInput::new(body);
         let mut parser = Parser::new(&mut input);
         let keyframes = parse_keyframe_list(&mut context, &mut parser, &self.lock);
-        Some(CssRule::Keyframes(Arc::new(self.lock.wrap(
-            KeyframesRule {
+        Some(CssRule::new(
+            StyloCssRule::Keyframes(Arc::new(self.lock.wrap(KeyframesRule {
                 name: KeyframesName::from_ident(name),
                 keyframes,
                 vendor_prefix: None,
                 source_location: SourceLocation { line: 0, column: 0 },
-            },
-        ))))
+            }))),
+            &self.lock,
+        ))
     }
 
     /// Build an `@font-face` rule from its descriptor-block text
     /// (`"font-family: X; src: url(…);"`).
     #[must_use]
-    pub fn build_font_face_rule(&self, body: &str) -> Option<CssRule> {
+    pub(crate) fn build_font_face_rule(&self, body: &str) -> CssRule {
         let context = self.parser_context(CssRuleType::FontFace);
         let mut input = ParserInput::new(body);
         let mut parser = Parser::new(&mut input);
         let rule =
             parse_font_face_block(&context, &mut parser, SourceLocation { line: 0, column: 0 });
-        Some(CssRule::FontFace(Arc::new(self.lock.wrap(rule))))
+        CssRule::new(
+            StyloCssRule::FontFace(Arc::new(self.lock.wrap(rule))),
+            &self.lock,
+        )
     }
 
     /// Parse individual declarations into one declaration block.
@@ -372,7 +375,7 @@ impl StyleEngine {
     /// (via any appended stylesheet). The node picks the cascade data the
     /// lookup runs against; pass the tree root for document-level rules.
     #[must_use]
-    pub fn has_keyframes_animation<T: ExternalState>(&self, name: &str, node: &Node<T>) -> bool {
+    pub(crate) fn has_keyframes_animation<T: Sync>(&self, name: &str, node: &Node<T>) -> bool {
         self.stylist
             .lookup_keyframes(&stylo_atoms::Atom::from(name), node)
             .is_some()
@@ -380,7 +383,7 @@ impl StyleEngine {
 
     /// The number of registered `@font-face` rules across all origins.
     #[must_use]
-    pub fn font_face_count(&self) -> usize {
+    pub(crate) fn font_face_count(&self) -> usize {
         self.stylist
             .iter_extra_data_origins()
             .map(|(data, _)| data.font_faces.len())
@@ -389,7 +392,7 @@ impl StyleEngine {
 
     /// Parse a media-query string using this engine's URL and lock context.
     #[must_use]
-    pub fn parse_media_list(
+    pub(crate) fn parse_media_list(
         &self,
         media_query: &str,
     ) -> Arc<stylo::shared_lock::Locked<MediaList>> {
@@ -416,21 +419,20 @@ impl StyleEngine {
     /// pass `None` to inherit from stylo's initial values.
     /// # Panics
     ///
-    /// Panics when `node` is a text node or belongs to a document not created
-    /// by this engine (the same boundary check as `flush_document`).
+    /// Panics when `node` is a text node or belongs to another document.
     #[must_use]
-    pub fn resolve<T: ExternalState>(
+    pub(crate) fn resolve<T: Sync>(
         &self,
         node: &Node<T>,
         parent_style: Option<&ComputedValues>,
     ) -> Arc<ComputedValues> {
         assert!(
             node.is_element(),
-            "StyleEngine::resolve called with a text node"
+            "Document::resolve_style called with a text node"
         );
         assert!(
             StdArc::ptr_eq(node.document_lock(), &self.lock),
-            "node's document is not paired with this StyleEngine"
+            "node does not belong to this Document"
         );
         let guard = self.lock.read();
         let guards = StylesheetGuards::same(&guard);
@@ -512,31 +514,117 @@ impl StyleEngine {
 }
 
 impl<T> Document<T> {
-    /// Store a resolved style, creating the node's stylo `ElementData` slot
-    /// if needed.
-    ///
-    /// Descendant dirtiness is left intact. Used with the standalone
-    /// [`StyleEngine::resolve`] path; the flush traversal
-    /// ([`StyleEngine::flush_document`]) stores styles itself.
-    ///
-    /// This does not clear the node's restyle hint, so a node with a pending
-    /// hint stays [`is_style_dirty`](crate::Node::is_style_dirty) until a
-    /// flush (or [`Document::clear_dirty`]) drains it — the standalone
-    /// `resolve` path does not participate in stylo's hint scheduling.
+    /// Inspect this document's private device used for viewport units and
+    /// media-query evaluation.
+    #[must_use]
+    pub fn device(&self) -> &Device {
+        self.style_engine().device()
+    }
+
+    /// Mutate this document's private device and schedule a full restyle.
+    pub fn update_device(&mut self, update: impl FnOnce(&mut Device)) {
+        self.style_engine_mut().update_device(update);
+        self.schedule_full_restyle();
+    }
+
+    /// Update this document's CSS viewport while preserving its device-pixel
+    /// ratio.
+    pub fn set_viewport(&mut self, width: f32, height: f32) {
+        self.style_engine_mut().set_viewport(width, height);
+        self.schedule_full_restyle();
+    }
+
+    /// Update this document's device-pixel ratio while preserving its CSS
+    /// viewport.
+    pub fn set_device_pixel_ratio(&mut self, device_pixel_ratio: f32) {
+        self.style_engine_mut()
+            .set_device_pixel_ratio(device_pixel_ratio);
+        self.schedule_full_restyle();
+    }
+
+    /// Parse and append a document-private stylesheet that applies to all
+    /// media.
+    pub fn add_stylesheet_str(&mut self, css: &str, origin: Origin) {
+        self.style_engine_mut().add_stylesheet_str(css, origin);
+        self.schedule_full_restyle();
+    }
+
+    /// Parse and append a document-private stylesheet with an explicit media
+    /// query.
+    pub fn add_stylesheet_with_media(&mut self, css: &str, origin: Origin, media_query: &str) {
+        self.style_engine_mut()
+            .add_stylesheet_with_media(css, origin, media_query);
+        self.schedule_full_restyle();
+    }
+
+    /// Append pre-built rules as one document-private stylesheet of the given
+    /// origin.
     ///
     /// # Panics
     ///
-    /// Panics when `id` is stale (the let-it-crash mutation contract; see
-    /// the crate docs), or when it names a text node.
-    pub fn store_computed_style(&mut self, id: NodeId, style: Arc<ComputedValues>) {
-        let node = self
-            .tree_mut()
-            .get_mut(id)
-            .expect("stale NodeId passed to Document::store_computed_style");
-        assert!(
-            node.is_element(),
-            "Document::store_computed_style called with a text node"
-        );
-        node.set_computed_style(style);
+    /// Panics when any rule was built by another document.
+    pub fn append_rules(&mut self, rules: Vec<CssRule>, origin: Origin) {
+        self.style_engine_mut().append_rules(rules, origin);
+        self.schedule_full_restyle();
+    }
+
+    /// Build a style rule in this document's private parsing and lock context.
+    #[must_use]
+    pub fn build_style_rule<'d>(
+        &self,
+        selectors: &str,
+        declarations: impl IntoIterator<Item = RawDeclaration<'d>>,
+    ) -> Option<CssRule> {
+        self.style_engine()
+            .build_style_rule(selectors, declarations)
+    }
+
+    /// Build a keyframes rule in this document's private parsing and lock
+    /// context.
+    #[must_use]
+    pub fn build_keyframes_rule(&self, name: &str, body: &str) -> Option<CssRule> {
+        self.style_engine().build_keyframes_rule(name, body)
+    }
+
+    /// Build a font-face rule in this document's private parsing and lock
+    /// context.
+    #[must_use]
+    pub fn build_font_face_rule(&self, body: &str) -> CssRule {
+        self.style_engine().build_font_face_rule(body)
+    }
+
+    /// Whether this document has a named keyframes animation available to
+    /// `node`.
+    #[must_use]
+    pub fn has_keyframes_animation(&self, name: &str, node: &Node<T>) -> bool
+    where
+        T: Sync,
+    {
+        self.style_engine().has_keyframes_animation(name, node)
+    }
+
+    /// The number of `@font-face` rules registered in this document.
+    #[must_use]
+    pub fn font_face_count(&self) -> usize {
+        self.style_engine().font_face_count()
+    }
+
+    /// Match and cascade one of this document's element nodes.
+    #[must_use]
+    pub fn resolve_style(
+        &self,
+        node: &Node<T>,
+        parent_style: Option<&ComputedValues>,
+    ) -> Arc<ComputedValues>
+    where
+        T: Sync,
+    {
+        self.style_engine().resolve(node, parent_style)
+    }
+
+    fn schedule_full_restyle(&mut self) {
+        if let Some(root) = self.root_element().map(Node::id) {
+            self.mark_subtree_dirty(root);
+        }
     }
 }

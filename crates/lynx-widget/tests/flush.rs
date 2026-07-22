@@ -90,10 +90,13 @@ fn style_info(sheets: Vec<(i32, StyleSheet)>) -> StyleInfo {
 
 #[test]
 fn flush_styles_the_tree_and_inherits() {
-    let mut engine = StyleEngine::new(metrics());
-    engine.add_stylesheet_str(".c { color: red; }", lynx_widget::StylesheetOrigin::Author);
-
+    let engine = StyleEngine::new(metrics());
     let mut tree = engine.new_widget_tree();
+    engine.add_stylesheet_str(
+        &mut tree,
+        ".c { color: red; }",
+        lynx_widget::StylesheetOrigin::Author,
+    );
     let page = tree.create_page();
     let view = tree.create_view();
     let inner = tree.create_view();
@@ -109,7 +112,6 @@ fn flush_styles_the_tree_and_inherits() {
         red(),
         "color inherits into the child"
     );
-    assert!(!tree.has_dirty(), "flush clears the dirty state");
 }
 
 #[test]
@@ -158,12 +160,13 @@ fn ua_defaults_apply_and_follow_page_config() {
 
 #[test]
 fn author_styles_override_ua_defaults() {
-    let mut engine = StyleEngine::new(metrics());
+    let engine = StyleEngine::new(metrics());
+    let mut tree = engine.new_widget_tree();
     engine.add_stylesheet_str(
+        &mut tree,
         ".v { overflow: visible; display: flex; }",
         lynx_widget::StylesheetOrigin::Author,
     );
-    let mut tree = engine.new_widget_tree();
     let page = tree.create_page();
     let view = tree.create_view();
     tree.append_element(&view, &page).unwrap();
@@ -179,13 +182,14 @@ fn author_styles_override_ua_defaults() {
 
 #[test]
 fn class_flip_restyles_precisely() {
-    let mut engine = StyleEngine::new(metrics());
+    let engine = StyleEngine::new(metrics());
+    let mut tree = engine.new_widget_tree();
     engine.add_stylesheet_str(
+        &mut tree,
         ".hot { color: red; }",
         lynx_widget::StylesheetOrigin::Author,
     );
 
-    let mut tree = engine.new_widget_tree();
     let page = tree.create_page();
     let target = tree.create_view();
     let bystander = tree.create_view();
@@ -198,7 +202,6 @@ fn class_flip_restyles_precisely() {
     assert_ne!(before_target.clone_color(), red());
 
     tree.set_classes(&target, "hot").unwrap();
-    assert!(tree.has_dirty());
     engine.flush_widget_tree(&mut tree);
 
     assert_eq!(color_of(&tree, &target), red());
@@ -212,10 +215,13 @@ fn class_flip_restyles_precisely() {
 
 #[test]
 fn inline_style_update_applies_on_flush() {
-    let mut engine = StyleEngine::new(metrics());
-    engine.add_stylesheet_str(".c { color: red; }", lynx_widget::StylesheetOrigin::Author);
-
+    let engine = StyleEngine::new(metrics());
     let mut tree = engine.new_widget_tree();
+    engine.add_stylesheet_str(
+        &mut tree,
+        ".c { color: red; }",
+        lynx_widget::StylesheetOrigin::Author,
+    );
     let page = tree.create_page();
     let view = tree.create_view();
     tree.append_element(&view, &page).unwrap();
@@ -234,13 +240,14 @@ fn inline_style_update_applies_on_flush() {
 
 #[test]
 fn pseudo_state_change_restyles_via_snapshot() {
-    let mut engine = StyleEngine::new(metrics());
+    let engine = StyleEngine::new(metrics());
+    let mut tree = engine.new_widget_tree();
     engine.add_stylesheet_str(
+        &mut tree,
         ".btn:active { color: red; }",
         lynx_widget::StylesheetOrigin::Author,
     );
 
-    let mut tree = engine.new_widget_tree();
     let page = tree.create_page();
     let btn = tree.create_view();
     tree.append_element(&btn, &page).unwrap();
@@ -264,13 +271,14 @@ fn empty_flip_restyles_later_sibling() {
     // `.list:empty + .hint` — removing the list's only child flips `:empty`,
     // which must restyle the *later sibling* (selector-flags-driven
     // structural invalidation).
-    let mut engine = StyleEngine::new(metrics());
+    let engine = StyleEngine::new(metrics());
+    let mut tree = engine.new_widget_tree();
     engine.add_stylesheet_str(
+        &mut tree,
         ".list:empty + .hint { color: red; }",
         lynx_widget::StylesheetOrigin::Author,
     );
 
-    let mut tree = engine.new_widget_tree();
     let page = tree.create_page();
     let list = tree.create_view();
     let hint = tree.create_view();
@@ -297,6 +305,59 @@ fn empty_flip_restyles_later_sibling() {
 // --- StyleInfo ingestion ---------------------------------------------------
 
 #[test]
+fn dataset_attributes_match_and_invalidate_selectors() {
+    let engine = StyleEngine::new(metrics());
+    let mut tree = engine.new_widget_tree();
+    engine.add_stylesheet_str(
+        &mut tree,
+        r#"[data-role="hero"] { color: red; }"#,
+        lynx_widget::StylesheetOrigin::Author,
+    );
+
+    let page = tree.create_page();
+    let view = tree.create_view();
+    tree.append_element(&view, &page).unwrap();
+    engine.flush_widget_tree(&mut tree);
+    assert_ne!(color_of(&tree, &view), red());
+
+    tree.set_dataset(&view, [("role", "hero")]).unwrap();
+    assert_eq!(tree.widget(&view).unwrap().attr("data-role"), Some("hero"));
+    engine.flush_widget_tree(&mut tree);
+    assert_eq!(color_of(&tree, &view), red());
+
+    tree.set_dataset(&view, [("role", "ordinary")]).unwrap();
+    engine.flush_widget_tree(&mut tree);
+    assert_ne!(color_of(&tree, &view), red());
+}
+
+#[test]
+fn loading_style_info_restyles_an_already_flushed_tree() {
+    let info = style_info(vec![(
+        0,
+        StyleSheet {
+            imports: vec![],
+            rules: vec![style_rule(
+                vec![class_selector("late")],
+                vec![declaration(CssPropertyId::Color, None, "red")],
+            )],
+        },
+    )]);
+
+    let engine = StyleEngine::new(metrics());
+    let mut tree = engine.new_widget_tree();
+    let page = tree.create_page();
+    let view = tree.create_view();
+    tree.append_element(&view, &page).unwrap();
+    tree.set_classes(&view, "late").unwrap();
+    engine.flush_widget_tree(&mut tree);
+    assert_ne!(color_of(&tree, &view), red());
+
+    engine.load_style_info(&mut tree, &info);
+    engine.flush_widget_tree(&mut tree);
+    assert_eq!(color_of(&tree, &view), red());
+}
+
+#[test]
 fn scoped_rules_match_only_their_css_id() {
     let info = style_info(vec![(
         2,
@@ -309,10 +370,9 @@ fn scoped_rules_match_only_their_css_id() {
         },
     )]);
 
-    let mut engine = StyleEngine::new(metrics());
-    engine.load_style_info(&info);
-
+    let engine = StyleEngine::new(metrics());
     let mut tree = engine.new_widget_tree();
+    engine.load_style_info(&mut tree, &info);
     let page = tree.create_page();
     let scoped = tree.create_view();
     let unscoped = tree.create_view();
@@ -348,10 +408,9 @@ fn css_id_zero_rules_are_global() {
         },
     )]);
 
-    let mut engine = StyleEngine::new(metrics());
-    engine.load_style_info(&info);
-
+    let engine = StyleEngine::new(metrics());
     let mut tree = engine.new_widget_tree();
+    engine.load_style_info(&mut tree, &info);
     let page = tree.create_page();
     let plain = tree.create_view();
     let with_scope = tree.create_view();
@@ -390,10 +449,9 @@ fn imports_flatten_to_every_importer_scope() {
         ),
     ]);
 
-    let mut engine = StyleEngine::new(metrics());
-    engine.load_style_info(&info);
-
+    let engine = StyleEngine::new(metrics());
     let mut tree = engine.new_widget_tree();
+    engine.load_style_info(&mut tree, &info);
     let page = tree.create_page();
     let importer = tree.create_view();
     let owner = tree.create_view();
@@ -466,17 +524,14 @@ fn keyframes_and_font_face_are_registered() {
         },
     )]);
 
-    let mut engine = StyleEngine::new(metrics());
-    engine.load_style_info(&info);
-    assert_eq!(engine.core().font_face_count(), 1);
-
+    let engine = StyleEngine::new(metrics());
     let mut tree = engine.new_widget_tree();
+    engine.load_style_info(&mut tree, &info);
+    assert_eq!(engine.font_face_count(&tree), 1);
     let page = tree.create_page();
     engine.flush_widget_tree(&mut tree);
     assert!(
-        engine
-            .core()
-            .has_keyframes_animation("spin", tree.widget_ref(&page).unwrap()),
+        engine.has_keyframes_animation(&tree, "spin", tree.widget_ref(&page).unwrap()),
         "@keyframes spin must be registered with the stylist"
     );
 }
@@ -490,10 +545,9 @@ fn fixture_bundle_styles_end_to_end() {
     let template = lynx_template_decoder::decode(BUNDLE).unwrap();
     let info = template.style_info.expect("fixture carries StyleInfo");
 
-    let mut engine = StyleEngine::new(metrics());
-    engine.load_style_info(&info);
-
+    let engine = StyleEngine::new(metrics());
     let mut tree = engine.new_widget_tree();
+    engine.load_style_info(&mut tree, &info);
     let page = tree.create_page();
     let card = tree.create_view();
     tree.append_element(&card, &page).unwrap();
@@ -510,8 +564,14 @@ fn fixture_bundle_styles_end_to_end() {
 
 #[test]
 fn parallel_flush_matches_sequential() {
-    fn build(engine: &StyleEngine, parallelism: Parallelism) -> Vec<(f32, AbsoluteColor)> {
+    fn build(parallelism: Parallelism) -> Vec<(f32, AbsoluteColor)> {
+        let engine = StyleEngine::new(metrics());
         let mut tree = engine.new_widget_tree();
+        engine.add_stylesheet_str(
+            &mut tree,
+            ".outer { color: red; } .even { width: 10px; } .odd { width: 20px; color: blue; }",
+            lynx_widget::StylesheetOrigin::Author,
+        );
         let page = tree.create_page();
         let mut leaves = Vec::new();
         for section in 0..16 {
@@ -544,14 +604,8 @@ fn parallel_flush_matches_sequential() {
             .collect()
     }
 
-    let mut engine = StyleEngine::new(metrics());
-    engine.add_stylesheet_str(
-        ".outer { color: red; } .even { width: 10px; } .odd { width: 20px; color: blue; }",
-        lynx_widget::StylesheetOrigin::Author,
-    );
-
-    let sequential = build(&engine, Parallelism::Sequential);
-    let parallel = build(&engine, Parallelism::Auto);
+    let sequential = build(Parallelism::Sequential);
+    let parallel = build(Parallelism::Auto);
     assert_eq!(sequential, parallel);
 }
 
@@ -562,13 +616,14 @@ fn edge_child_restyle_on_append_and_prepend() {
     // Appending displaces the old `:last-child` (prepending the old
     // `:first-child`) one slot inward; the displaced element must drop its
     // edge styling.
-    let mut engine = StyleEngine::new(metrics());
+    let engine = StyleEngine::new(metrics());
+    let mut tree = engine.new_widget_tree();
     engine.add_stylesheet_str(
+        &mut tree,
         ".item:last-child { color: red; } .item:first-child { width: 42px; }",
         lynx_widget::StylesheetOrigin::Author,
     );
 
-    let mut tree = engine.new_widget_tree();
     let page = tree.create_page();
     let a = tree.create_view();
     let b = tree.create_view();
@@ -621,13 +676,14 @@ fn edge_child_restyle_on_append_and_prepend() {
 
 #[test]
 fn viewport_change_restyles_flushed_tree() {
-    let mut engine = StyleEngine::new(metrics());
+    let engine = StyleEngine::new(metrics());
+    let mut tree = engine.new_widget_tree();
     engine.add_stylesheet_str(
+        &mut tree,
         ".box { width: 100rpx; }",
         lynx_widget::StylesheetOrigin::Author,
     );
 
-    let mut tree = engine.new_widget_tree();
     let page = tree.create_page();
     let view = tree.create_view();
     tree.append_element(&view, &page).unwrap();
@@ -639,8 +695,7 @@ fn viewport_change_restyles_flushed_tree() {
     );
 
     // 1rpx = viewport_width / 750: doubling the width doubles rpx lengths.
-    engine.set_viewport(1500.0, 1334.0);
-    engine.restyle_after_device_change(&mut tree);
+    engine.set_viewport(&mut tree, 1500.0, 1334.0);
     engine.flush_widget_tree(&mut tree);
     assert_eq!(
         width_px(tree.computed(&view).unwrap().unwrap().clone_width()),
@@ -676,10 +731,9 @@ fn self_importing_fragment_is_dropped() {
         ),
     ]);
 
-    let mut engine = StyleEngine::new(metrics());
-    engine.load_style_info(&info);
-
+    let engine = StyleEngine::new(metrics());
     let mut tree = engine.new_widget_tree();
+    engine.load_style_info(&mut tree, &info);
     let page = tree.create_page();
     let cyclic = tree.create_view();
     let leaf = tree.create_view();

@@ -1,6 +1,6 @@
 //! Restyle damage — what a style change means for downstream layout/paint.
 //!
-//! A style flush ([`StyleEngine::flush_document`](crate::StyleEngine::flush_document))
+//! A style flush ([`Document::flush_styles`](crate::Document::flush_styles))
 //! restyles the affected nodes and, for each node whose computed style
 //! actually changed, stylo records a
 //! [`ServoRestyleDamage`] bitset in its `ElementData` classifying the change:
@@ -16,7 +16,7 @@
 //! normal restyle, and in servo builds `element_needs_traversal` re-traverses
 //! any element that still carries non-empty damage, so an un-harvested node
 //! would be re-styled on every later flush forever (see
-//! [`StyleEngine::flush_document_with_sink`](crate::StyleEngine::flush_document_with_sink)
+//! [`Document::flush_styles_with_sink`](crate::Document::flush_styles_with_sink)
 //! for the full argument).
 //!
 //! # No damage on initial styling
@@ -113,7 +113,7 @@ impl From<StyleDamage> for ServoRestyleDamage {
 /// The result of a style flush: the per-node damage it produced and whether a
 /// traversal actually ran.
 ///
-/// Returned by [`StyleEngine::flush_document`](crate::StyleEngine::flush_document)
+/// Returned by [`Document::flush_styles`](crate::Document::flush_styles)
 /// and friends. Deliberately **not** `#[must_use]`: many callers flush purely
 /// for its side effect (styles land on the document) and legitimately ignore
 /// the summary in statement position. Layout correctness does not depend on

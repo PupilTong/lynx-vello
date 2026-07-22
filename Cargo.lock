@@ -941,7 +941,6 @@ dependencies = [
  "rustc-hash",
  "smallvec",
  "stylo",
- "stylo_atoms",
  "stylo_traits",
  "thiserror",
  "w3c-dom",

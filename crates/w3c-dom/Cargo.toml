@@ -1,6 +1,6 @@
 [package]
 name = "w3c-dom"
-description = "Generic W3C-DOM-subset document tree and standards-oriented CSS computation core over stylo, parameterized by embedder state"
+description = "Generic W3C-DOM-subset document tree and standards-oriented CSS computation core over stylo with opaque node payloads"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

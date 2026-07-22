@@ -1,4 +1,4 @@
-//! Lynx-specific adaptation of [`w3c_dom::StyleEngine`].
+//! Lynx-specific construction and adaptation of document-owned style engines.
 //!
 //! The generic crate owns CSS parsing, matching, cascade, and locking. This
 //! module supplies only the platform policy that is actually Lynx-specific:
@@ -15,12 +15,11 @@ use stylo::properties::ComputedValues;
 use stylo::properties::style_structs::Font;
 use stylo::queries::values::PrefersColorScheme;
 use stylo::servo::media_features::PointerCapabilities;
-use stylo::servo_arc::Arc;
 use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_traits::{CSSPixel, DevicePixel};
-use w3c_dom::{Parallelism, StyleEngine as DomStyleEngine, StylesheetOrigin};
+use w3c_dom::{Document, Parallelism, StylesheetOrigin};
 
 use crate::ua::{PageConfig, ua_stylesheet};
 use crate::{WidgetRef, WidgetTree, ingest};
@@ -55,11 +54,12 @@ impl EngineMetrics {
 
 /// The Widget-facing style adapter.
 ///
-/// All standard CSS work and `SharedRwLock` ownership stay in the inner
-/// [`w3c_dom::StyleEngine`]. This wrapper owns no second stylist or lock.
+/// Each tree created by this adapter receives a fresh `w3c_dom::Document` and
+/// therefore its own stylist, stylesheets, device, and lock. This adapter only
+/// retains the Lynx construction policy shared by those independent trees.
 #[derive(Debug)]
 pub struct StyleEngine {
-    core: DomStyleEngine,
+    metrics: EngineMetrics,
     page_config: PageConfig,
 }
 
@@ -78,9 +78,10 @@ impl StyleEngine {
     /// the styling engine.
     #[must_use]
     pub fn with_page_config(metrics: EngineMetrics, page_config: PageConfig) -> Self {
-        let mut core = DomStyleEngine::new(build_device(metrics));
-        core.add_stylesheet_str(&ua_stylesheet(page_config), StylesheetOrigin::UserAgent);
-        Self { core, page_config }
+        Self {
+            metrics,
+            page_config,
+        }
     }
 
     /// The page configuration this engine's UA styles were generated for.
@@ -94,9 +95,10 @@ impl StyleEngine {
     /// scoping included; see the crate-private `ingest` module) and mount them
     /// as one author
     /// stylesheet.
-    pub fn load_style_info(&mut self, info: &StyleInfo) {
-        let rules = ingest::build_rules(&self.core, info);
-        self.core.append_rules(rules, StylesheetOrigin::Author);
+    pub fn load_style_info(&self, tree: &mut WidgetTree, info: &StyleInfo) {
+        let rules = ingest::build_rules(tree.document(), info);
+        tree.document_mut()
+            .append_rules(rules, StylesheetOrigin::Author);
     }
 
     /// Restyle everything scheduled since the last flush (stylo's traversal:
@@ -119,87 +121,73 @@ impl StyleEngine {
         // Reclaim handle-dropped detached subtrees before styling: the flush
         // is the reliable once-per-frame boundary.
         tree.sweep_dropped();
-        self.core
-            .flush_document_with(tree.document_mut(), parallelism);
+        tree.document_mut().flush_styles_with(parallelism);
     }
 
-    /// Access the generic CSS engine.
-    #[must_use]
-    pub const fn core(&self) -> &DomStyleEngine {
-        &self.core
-    }
-
-    /// Mutably access the generic CSS engine for standard device operations.
-    pub const fn core_mut(&mut self) -> &mut DomStyleEngine {
-        &mut self.core
-    }
-
-    /// Create a Widget tree bound to this engine's private style context.
+    /// Create an independent Widget tree and install its private UA
+    /// stylesheet.
     #[must_use]
     pub fn new_widget_tree(&self) -> WidgetTree {
-        WidgetTree::from_document(self.core.new_document())
+        let mut document = Document::new(build_device(self.metrics));
+        document.add_stylesheet_str(
+            &ua_stylesheet(self.page_config),
+            StylesheetOrigin::UserAgent,
+        );
+        WidgetTree::from_document(document)
     }
 
     /// Parse and append a stylesheet that applies to all media.
-    pub fn add_stylesheet_str(&mut self, css: &str, origin: StylesheetOrigin) {
-        self.core.add_stylesheet_str(css, origin);
+    pub fn add_stylesheet_str(&self, tree: &mut WidgetTree, css: &str, origin: StylesheetOrigin) {
+        tree.document_mut().add_stylesheet_str(css, origin);
     }
 
     /// Parse and append a stylesheet with an explicit media query.
     pub fn add_stylesheet_with_media(
-        &mut self,
+        &self,
+        tree: &mut WidgetTree,
         css: &str,
         origin: StylesheetOrigin,
         media_query: &str,
     ) {
-        self.core
+        tree.document_mut()
             .add_stylesheet_with_media(css, origin, media_query);
     }
 
-    /// Resolve one Widget through the generic standards-oriented cascade.
+    /// The number of registered `@font-face` rules.
     #[must_use]
-    pub fn resolve_widget(
+    pub fn font_face_count(&self, tree: &WidgetTree) -> usize {
+        tree.document().font_face_count()
+    }
+
+    /// Whether a named keyframes animation is available to `widget`.
+    #[must_use]
+    pub fn has_keyframes_animation(
         &self,
+        tree: &WidgetTree,
+        name: &str,
         widget: WidgetRef<'_>,
-        parent_style: Option<&ComputedValues>,
-    ) -> Arc<ComputedValues> {
-        self.core.resolve(widget, parent_style)
+    ) -> bool {
+        tree.document().has_keyframes_animation(name, widget)
     }
 
     /// Update the Lynx view viewport.
     ///
-    /// Already-styled trees keep computed values resolved against the old
-    /// viewport (`rpx`/`vw`/`vh` lengths, media-dependent rules) until the
-    /// embedder calls [`restyle_after_device_change`] on each of them.
-    ///
-    /// [`restyle_after_device_change`]: Self::restyle_after_device_change
-    pub fn set_viewport(&mut self, width: f32, height: f32) {
-        self.core.set_viewport(width, height);
+    /// The tree's document schedules itself internally in the same operation.
+    pub fn set_viewport(&self, tree: &mut WidgetTree, width: f32, height: f32) {
+        tree.document_mut().set_viewport(width, height);
     }
 
     /// Update the device-pixel ratio while preserving the CSS viewport.
     ///
-    /// As with [`set_viewport`](Self::set_viewport), follow up with
-    /// [`restyle_after_device_change`](Self::restyle_after_device_change) on
-    /// every styled tree.
-    pub fn set_device_pixel_ratio(&mut self, device_pixel_ratio: f32) {
-        self.core.set_device_pixel_ratio(device_pixel_ratio);
-    }
-
-    /// Schedule a full restyle of `tree` after a device change
-    /// ([`set_viewport`](Self::set_viewport) /
-    /// [`set_device_pixel_ratio`](Self::set_device_pixel_ratio)): viewport
-    /// units (`rpx`/`vw`/`vh`) re-resolve and media-dependent rules re-match
-    /// on the tree's next flush. A no-op without a page root.
-    pub fn restyle_after_device_change(&self, tree: &mut WidgetTree) {
-        if let Some(page) = tree.page_id() {
-            tree.document_mut().mark_subtree_dirty(page);
-        }
+    /// The tree's document schedules itself internally in the same operation.
+    pub fn set_device_pixel_ratio(&self, tree: &mut WidgetTree, device_pixel_ratio: f32) {
+        tree.document_mut()
+            .set_device_pixel_ratio(device_pixel_ratio);
     }
 }
 
 /// Build the touch-first servo device used by the Lynx adapter.
-fn build_device(metrics: EngineMetrics) -> Device {
+pub(crate) fn build_device(metrics: EngineMetrics) -> Device {
     let default_values = ComputedValues::initial_values_with_font_override(Font::initial_values());
     let viewport = Size2D::<f32, CSSPixel>::new(metrics.viewport_width, metrics.viewport_height);
     let device_size = Size2D::<f32, DevicePixel>::new(

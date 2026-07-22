@@ -1,6 +1,6 @@
 //! The stylo-traversal-driven style flush.
 //!
-//! [`StyleEngine::flush_document`] restyles everything scheduled since the
+//! [`Document::flush_styles`] restyles everything scheduled since the
 //! last flush by driving **stylo's own restyle traversal**
 //! ([`driver::traverse_dom`]) over the document — in place, on the one tree
 //! (the one-word `&Node` reference is the traversal's element type; no
@@ -23,7 +23,7 @@
 //! next flush does not re-traverse. The harvest is rooted at the traversal's
 //! **actual** root, which stylo may raise to the passed root's parent when a
 //! subtree flush invalidated the root's siblings (see
-//! [`StyleEngine::flush_document_with_sink`]).
+//! [`Document::flush_styles_with_sink`]).
 //!
 //! # Safety
 //!
@@ -48,11 +48,9 @@ use stylo_atoms::Atom;
 
 use crate::damage::{FlushSummary, StyleDamage};
 use crate::document::{Document, NodeId};
-use crate::engine::StyleEngine;
-use crate::ext::ExternalState;
 use crate::node::Node;
 
-/// How [`StyleEngine::flush_document_with`] schedules the traversal.
+/// How [`Document::flush_styles_with`] schedules the traversal.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Parallelism {
     /// Use stylo's global style thread pool when it exists; stylo still
@@ -113,7 +111,7 @@ struct RecalcStyle<'a> {
     shared: SharedStyleContext<'a>,
 }
 
-impl<'a, T: ExternalState> DomTraversal<&'a Node<T>> for RecalcStyle<'a> {
+impl<'a, T: Sync> DomTraversal<&'a Node<T>> for RecalcStyle<'a> {
     fn process_preorder<F>(
         &self,
         traversal_data: &PerLevelTraversalData,
@@ -155,7 +153,7 @@ impl<'a, T: ExternalState> DomTraversal<&'a Node<T>> for RecalcStyle<'a> {
     }
 }
 
-impl StyleEngine {
+impl<T: Sync> Document<T> {
     /// Restyle everything scheduled since the last flush under the document
     /// element, using the style thread pool when the tree is wide enough
     /// ([`Parallelism::Auto`]).
@@ -168,7 +166,7 @@ impl StyleEngine {
     /// damage on the flipped node, which covers its whole subtree.
     /// Relayout-class damage has already invalidated the document's layout
     /// caches before this method returns, so discarding the summary cannot make
-    /// a later [`layout_document`](Self::layout_document) reuse stale layout.
+    /// a later [`layout`](Self::layout) reuse stale layout.
     ///
     /// A no-op (empty summary, `traversed == false`) when the document has no
     /// element child or nothing is scheduled.
@@ -177,32 +175,20 @@ impl StyleEngine {
     /// pending snapshots) is left unspecified; an embedder that catches the
     /// unwind should discard or rebuild the document rather than keep
     /// flushing it.
-    pub fn flush_document<T: ExternalState>(&self, document: &mut Document<T>) -> FlushSummary {
-        self.flush_document_with(document, Parallelism::Auto)
+    pub fn flush_styles(&mut self) -> FlushSummary {
+        self.flush_styles_with(Parallelism::Auto)
     }
 
-    /// [`flush_document`](Self::flush_document) with explicit traversal
+    /// [`flush_styles`](Self::flush_styles) with explicit traversal
     /// scheduling.
     ///
     /// Collects the harvested damage into the returned [`FlushSummary`]'s
     /// `Vec`. Embedders that want to avoid that allocation stream the damage
     /// directly with
-    /// [`flush_document_with_sink`](Self::flush_document_with_sink).
-    ///
-    /// # Panics
-    ///
-    /// Panics when `document` was not created by this engine
-    /// (`StyleEngine::new_document` pairs them; flushing across the pair
-    /// boundary would run the wrong stylist and take the wrong lock), or
-    /// if an internal child link from the document node is dangling —
-    /// impossible through the public mutation API.
-    pub fn flush_document_with<T: ExternalState>(
-        &self,
-        document: &mut Document<T>,
-        parallelism: Parallelism,
-    ) -> FlushSummary {
+    /// [`flush_styles_with_sink`](Self::flush_styles_with_sink).
+    pub fn flush_styles_with(&mut self, parallelism: Parallelism) -> FlushSummary {
         let mut damage = Vec::new();
-        let traversed = self.flush_document_with_sink(document, parallelism, &mut |id, d| {
+        let traversed = self.flush_styles_with_sink(parallelism, &mut |id, d| {
             damage.push((id, d));
         });
         FlushSummary { damage, traversed }
@@ -215,10 +201,10 @@ impl StyleEngine {
     /// invalidation; the sink remains for paint/stacking/overflow consumers and
     /// observability. Returns whether the traversal ran (stylo's `pre_traverse`
     /// scheduling token said there was work) — the `traversed` flag
-    /// [`flush_document_with`](Self::flush_document_with) records.
+    /// [`flush_styles_with`](Self::flush_styles_with) records.
     ///
     /// `sink` is a `&mut dyn FnMut` rather than a generic `impl FnMut` so the
-    /// harvest walk (already monomorphized per external-state payload `T`) is
+    /// harvest walk (already monomorphized per opaque payload `T`) is
     /// not additionally monomorphized per closure; the per-node dynamic call
     /// is negligible next to the cascade work that produced the damage.
     ///
@@ -244,15 +230,13 @@ impl StyleEngine {
     ///
     /// # Panics
     ///
-    /// As [`flush_document_with`](Self::flush_document_with).
-    pub fn flush_document_with_sink<T: ExternalState>(
-        &self,
-        document: &mut Document<T>,
+    /// As [`flush_styles_with`](Self::flush_styles_with).
+    pub fn flush_styles_with_sink(
+        &mut self,
         parallelism: Parallelism,
         sink: &mut dyn FnMut(NodeId, StyleDamage),
     ) -> bool {
-        self.assert_owns(document);
-        let Some(root) = document.root_element().map(Node::id) else {
+        let Some(root) = self.root_element().map(Node::id) else {
             // No document element: no traversal, and nothing to harvest.
             return false;
         };
@@ -260,20 +244,20 @@ impl StyleEngine {
         // expects a map for the traversal, so drain the reachable snapshots
         // along the dirty spine into this temporary adapter; it is dropped
         // when this flush returns.
-        let snapshots = document.take_snapshot_map(root);
+        let snapshots = self.take_snapshot_map(root);
         // Debug traversal-phase marker: per-node style readers assert they
         // never run concurrently with the traversal, and the trait accessors
         // assert they only run inside one. Cleared on unwind too (individual
         // slot poisoning covers mid-panic node state).
         #[cfg(debug_assertions)]
-        let phase = document.begin_flush_phase();
+        let phase = self.begin_flush_phase();
         let (harvest_root, traversed) = {
-            let root_ref = document
+            let root_ref = self
                 .get(root)
                 .expect("the root element child is kept live or absent");
-            let guard = self.shared_lock().read();
+            let guard = self.style_engine().shared_lock().read();
             let shared = SharedStyleContext {
-                stylist: self.stylist(),
+                stylist: self.style_engine().stylist(),
                 visited_styles_enabled: false,
                 options: StyleSystemOptions::default(),
                 guards: StylesheetGuards::same(&guard),
@@ -332,7 +316,7 @@ impl StyleEngine {
         // Harvest runs under `&mut Document` now that the traversal (which
         // borrowed the document through `root_ref`/the shared context) has
         // finished.
-        document.harvest_flush(harvest_root, &snapshots, sink);
+        self.harvest_flush(harvest_root, &snapshots, sink);
         traversed
     }
 }

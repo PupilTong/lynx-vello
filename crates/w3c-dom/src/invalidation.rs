@@ -5,7 +5,7 @@
 //! public "mutate without invalidating" path — which is what makes the
 //! "snapshot before mutating" rule an implementation detail instead of an
 //! embedder obligation. Two cooperating mechanisms decide what the next
-//! [`StyleEngine::flush_document`](crate::StyleEngine::flush_document)
+//! [`Document::flush_styles`](crate::Document::flush_styles)
 //! recomputes:
 //!
 //! 1. **Snapshots** (fine-grained, for attribute / class / id / state changes): before mutating,
@@ -21,15 +21,12 @@
 //!    recorded during matching (`:empty` / position-dependent / edge selectors), so inserting a
 //!    child into a parent nothing depends on costs nothing.
 //!
-//! Both paths also set `dirty_descendants` on the mutated node's ancestor
-//! chain: that is what lets stylo's traversal descend to the invalidated
-//! node. The node's *own* dirtiness is not tracked by a separate flag —
-//! [`Node::is_style_dirty`](crate::Node::is_style_dirty) derives it from
-//! stylo's scheduling state (a pending snapshot, a queued restyle hint, or
-//! the absence of any style data on a never-styled node).
-//!
-//! Selector-visible state always lives in the DOM fields mutated here. The
-//! embedder payload is opaque and cannot inject synthetic matching state.
+//! Both paths also maintain `dirty_descendants` on the ancestor chain, which
+//! is what lets the traversal reach the invalidated node. Scheduling state is
+//! wholly internal: embedders mutate real DOM fields and never set or clear
+//! dirty state themselves. Selector-visible state always lives in the DOM
+//! fields mutated here; the embedder payload is opaque and cannot inject
+//! synthetic matching state.
 
 use selectors::matching::ElementSelectorFlags;
 use stylo::LocalName;
@@ -47,7 +44,6 @@ use stylo_atoms::Atom;
 use stylo_traits::ParsingMode;
 
 use crate::document::{DOCUMENT_NODE_ID, Document, NodeId};
-use crate::ext::ExternalState;
 use crate::node::Node;
 
 /// Selector-flag bits on a parent that make child-list mutations observable
@@ -62,25 +58,6 @@ const STRUCTURE_SENSITIVE: ElementSelectorFlags = ElementSelectorFlags::HAS_SLOW
 impl<T> Document<T> {
     // --- scheduling primitives ---------------------------------------------
 
-    /// Mark `id` as needing its own style recomputed, and flag its ancestors
-    /// as having a dirty descendant.
-    ///
-    /// The ancestor walk stops early once it reaches an ancestor already
-    /// marked `dirty_descendants`.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `id` is stale or identifies a text node (the let-it-crash
-    /// mutation contract; see the crate docs).
-    pub fn mark_style_dirty(&mut self, id: NodeId) {
-        // Validate up front (let-it-crash): the hint path below silently
-        // skips data-less nodes, which must not absorb a stale handle or a
-        // text node (element-only mutation contract).
-        self.live_element(id);
-        self.add_restyle_hint(id, RestyleHint::RESTYLE_SELF);
-        self.mark_ancestors_dirty_descendants(id);
-    }
-
     /// Mark the entire subtree rooted at `id` as needing style recomputed,
     /// and flag `id`'s ancestors as having a dirty descendant.
     ///
@@ -88,7 +65,7 @@ impl<T> Document<T> {
     ///
     /// Panics when `id` is stale or identifies a text node (the let-it-crash
     /// mutation contract; see the crate docs).
-    pub fn mark_subtree_dirty(&mut self, id: NodeId) {
+    pub(crate) fn mark_subtree_dirty(&mut self, id: NodeId) {
         let node = self.live_element(id);
         if !node.child_ids().is_empty() {
             node.set_dirty_descendants_bit(true);
@@ -141,15 +118,11 @@ impl<T> Document<T> {
         }
     }
 
-    /// Make `id` reachable from the root so the next flush's traversal
-    /// descends to it. `id`'s own dirtiness is recorded by its caller — a
-    /// pre-mutation snapshot (the `note_*_change` recorders) or, for a
-    /// never-styled node, the absent [`ElementData`](stylo::data::ElementData)
-    /// that [`is_style_dirty`](crate::Node::is_style_dirty) reads directly.
+    /// Make the mutation reachable from the root.
     fn mark_mutated(&mut self, id: NodeId) {
         // Validate up front (let-it-crash) — the reachability walk below
         // silently skips stale ids.
-        let _ = self.live(id);
+        self.live(id);
         self.mark_ancestors_dirty_descendants(id);
     }
 
@@ -245,7 +218,7 @@ impl<T> Document<T> {
     }
 }
 
-impl<T: ExternalState> Document<T> {
+impl<T> Document<T> {
     // --- matching-relevant setters -------------------------------------------
 
     /// Replace the node's class list from a whitespace-separated string
@@ -257,11 +230,14 @@ impl<T: ExternalState> Document<T> {
     /// the crate docs), or when it names a text node.
     pub fn set_classes(&mut self, id: NodeId, classes: &str) {
         self.live_element(id);
-        self.note_class_change(id);
-        self.tree_mut()
+        self.note_class_attribute_change(id);
+        let node = self
+            .tree_mut()
             .get_mut(id)
-            .expect("stale NodeId passed to Document::set_classes")
-            .classes = classes.split_whitespace().map(Atom::from).collect();
+            .expect("stale NodeId passed to Document::set_classes");
+        node.classes = classes.split_whitespace().map(Atom::from).collect();
+        node.attrs
+            .insert(LocalName::from("class"), classes.to_owned());
     }
 
     /// Add one class (a no-op when already present, costing no snapshot).
@@ -275,12 +251,19 @@ impl<T: ExternalState> Document<T> {
         if self.live_element(id).classes.contains(&class) {
             return;
         }
-        self.note_class_change(id);
-        self.tree_mut()
+        self.note_class_attribute_change(id);
+        let node = self
+            .tree_mut()
             .get_mut(id)
-            .expect("stale NodeId passed to Document::add_class")
+            .expect("stale NodeId passed to Document::add_class");
+        node.classes.push(class);
+        let class_value = node
             .classes
-            .push(class);
+            .iter()
+            .map(AsRef::<str>::as_ref)
+            .collect::<Vec<_>>()
+            .join(" ");
+        node.attrs.insert(LocalName::from("class"), class_value);
     }
 
     /// Remove one class (a no-op when absent, costing no snapshot).
@@ -294,12 +277,19 @@ impl<T: ExternalState> Document<T> {
         if !self.live_element(id).classes.contains(&class) {
             return;
         }
-        self.note_class_change(id);
-        self.tree_mut()
+        self.note_class_attribute_change(id);
+        let node = self
+            .tree_mut()
             .get_mut(id)
-            .expect("stale NodeId passed to Document::remove_class")
+            .expect("stale NodeId passed to Document::remove_class");
+        node.classes.retain(|existing| *existing != class);
+        let class_value = node
             .classes
-            .retain(|existing| *existing != class);
+            .iter()
+            .map(AsRef::<str>::as_ref)
+            .collect::<Vec<_>>()
+            .join(" ");
+        node.attrs.insert(LocalName::from("class"), class_value);
     }
 
     /// Set or clear the node's `id` selector value.
@@ -310,14 +300,24 @@ impl<T: ExternalState> Document<T> {
     /// the crate docs), or when it names a text node.
     pub fn set_id_attr(&mut self, id: NodeId, value: Option<&str>) {
         self.live_element(id);
-        self.note_id_change(id);
-        self.tree_mut()
+        self.note_id_attribute_change(id);
+        let node = self
+            .tree_mut()
             .get_mut(id)
-            .expect("stale NodeId passed to Document::set_id_attr")
-            .id_attr = value.map(Atom::from);
+            .expect("stale NodeId passed to Document::set_id_attr");
+        node.id_attr = value.map(Atom::from);
+        match value {
+            Some(value) => {
+                node.attrs.insert(LocalName::from("id"), value.to_owned());
+            }
+            None => {
+                node.attrs.remove(&LocalName::from("id"));
+            }
+        }
     }
 
-    /// Set a plain attribute.
+    /// Set a DOM attribute. `id`, `class`, and `style` update their reflected
+    /// selector/cascade state through the same operation.
     ///
     /// The authored string name is interned as a [`LocalName`] before it is
     /// stored or exposed to stylo's invalidation machinery.
@@ -327,6 +327,12 @@ impl<T: ExternalState> Document<T> {
     /// Panics when `id` is stale (the let-it-crash mutation contract; see
     /// the crate docs), or when it names a text node.
     pub fn set_attribute(&mut self, id: NodeId, name: &str, value: &str) {
+        match name {
+            "id" => return self.set_id_attr(id, Some(value)),
+            "class" => return self.set_classes(id, value),
+            "style" => return self.set_inline_style(id, value),
+            _ => {}
+        }
         self.live_element(id);
         let name = LocalName::from(name);
         self.note_attribute_change(id, &name);
@@ -337,14 +343,42 @@ impl<T: ExternalState> Document<T> {
             .insert(name, value.to_owned());
     }
 
-    /// Remove a plain attribute (a no-op when absent).
+    /// Remove a DOM attribute (a no-op when absent), including its reflected
+    /// `id`, `class`, or inline-style state.
     ///
     /// # Panics
     ///
     /// Panics when `id` is stale (the let-it-crash mutation contract; see
     /// the crate docs), or when it names a text node.
     pub fn remove_attribute(&mut self, id: NodeId, name: &str) {
-        self.live_element(id);
+        if self.live_element(id).attr(name).is_none() {
+            return;
+        }
+        match name {
+            "id" => return self.set_id_attr(id, None),
+            "class" => {
+                self.note_class_attribute_change(id);
+                let node = self
+                    .tree_mut()
+                    .get_mut(id)
+                    .expect("stale NodeId passed to Document::remove_attribute");
+                node.classes.clear();
+                node.attrs.remove(&LocalName::from("class"));
+                return;
+            }
+            "style" => {
+                self.note_attribute_change(id, &LocalName::from("style"));
+                let node = self
+                    .tree_mut()
+                    .get_mut(id)
+                    .expect("stale NodeId passed to Document::remove_attribute");
+                node.inline_block = None;
+                node.attrs.remove(&LocalName::from("style"));
+                self.note_inline_style_change(id);
+                return;
+            }
+            _ => {}
+        }
         let name = LocalName::from(name);
         self.note_attribute_change(id, &name);
         self.tree_mut()
@@ -452,6 +486,7 @@ impl<T: ExternalState> Document<T> {
     /// the crate docs), or when it names a text node.
     pub fn set_inline_style(&mut self, id: NodeId, css: &str) {
         self.live_element(id);
+        self.note_attribute_change(id, &LocalName::from("style"));
         let block = if css.is_empty() {
             None
         } else {
@@ -465,10 +500,12 @@ impl<T: ExternalState> Document<T> {
             );
             Some(Arc::new(document.document_lock().wrap(parsed)))
         };
-        self.tree_mut()
+        let node = self
+            .tree_mut()
             .get_mut(id)
-            .expect("stale NodeId passed to Document::set_inline_style")
-            .inline_block = block;
+            .expect("stale NodeId passed to Document::set_inline_style");
+        node.inline_block = block;
+        node.attrs.insert(LocalName::from("style"), css.to_owned());
         self.note_inline_style_change(id);
     }
 
@@ -519,10 +556,25 @@ impl<T: ExternalState> Document<T> {
         block.extend(source.drain(), Importance::Normal);
         let wrapped = Arc::new(document.document_lock().wrap(block));
 
-        self.tree_mut()
+        let mut css = self.live(id).attr("style").unwrap_or_default().to_owned();
+        if !css.is_empty() && !css.trim_end().ends_with(';') {
+            css.push(';');
+        }
+        if !css.is_empty() {
+            css.push(' ');
+        }
+        css.push_str(name);
+        css.push_str(": ");
+        css.push_str(value);
+        css.push(';');
+
+        self.note_attribute_change(id, &LocalName::from("style"));
+        let node = self
+            .tree_mut()
             .get_mut(id)
-            .expect("stale NodeId passed to Document::add_inline_style")
-            .inline_block = Some(wrapped);
+            .expect("stale NodeId passed to Document::add_inline_style");
+        node.inline_block = Some(wrapped);
+        node.attrs.insert(LocalName::from("style"), css);
         self.note_inline_style_change(id);
     }
 
@@ -546,25 +598,29 @@ impl<T: ExternalState> Document<T> {
     }
 
     fn note_inline_style_change(&mut self, id: NodeId) {
-        // Callers (the inline-style setters) already crashed on a stale id;
-        // the hint below is the node's own dirtiness signal (a data-less node
-        // is derived-dirty without one).
         self.add_restyle_hint(id, RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
-        self.mark_ancestors_dirty_descendants(id);
     }
 
     // --- snapshot recording ------------------------------------------------------
 
-    fn note_class_change(&mut self, id: NodeId) {
+    /// A reflected `class` mutation can affect both `.token` selectors and
+    /// ordinary attribute selectors such as `[class~="token"]`.
+    fn note_class_attribute_change(&mut self, id: NodeId) {
         if let Some(snapshot) = self.ensure_snapshot(id) {
             snapshot.class_changed = true;
+            snapshot.other_attributes_changed = true;
+            push_changed_attr(snapshot, &LocalName::from("class"));
         }
         self.mark_mutated(id);
     }
 
-    fn note_id_change(&mut self, id: NodeId) {
+    /// A reflected `id` mutation can affect both `#id` selectors and ordinary
+    /// attribute selectors such as `[id="value"]`.
+    fn note_id_attribute_change(&mut self, id: NodeId) {
         if let Some(snapshot) = self.ensure_snapshot(id) {
             snapshot.id_changed = true;
+            snapshot.other_attributes_changed = true;
+            push_changed_attr(snapshot, &LocalName::from("id"));
         }
         self.mark_mutated(id);
     }
@@ -572,9 +628,7 @@ impl<T: ExternalState> Document<T> {
     fn note_attribute_change(&mut self, id: NodeId, name: &LocalName) {
         if let Some(snapshot) = self.ensure_snapshot(id) {
             snapshot.other_attributes_changed = true;
-            if !snapshot.changed_attrs.contains(name) {
-                snapshot.changed_attrs.push(name.clone());
-            }
+            push_changed_attr(snapshot, name);
         }
         self.mark_mutated(id);
     }
@@ -608,17 +662,22 @@ impl<T: ExternalState> Document<T> {
     }
 }
 
+fn push_changed_attr(snapshot: &mut Snapshot, name: &LocalName) {
+    if !snapshot.changed_attrs.contains(name) {
+        snapshot.changed_attrs.push(name.clone());
+    }
+}
+
 /// Build a stylo element snapshot of the node's *current* (soon to be old)
-/// state: dynamic pseudo-class bits plus every matching-relevant attribute —
-/// the id selector value, classes, and real attributes.
-fn build_snapshot<T: ExternalState>(node: &Node<T>) -> Snapshot {
+/// state: dynamic pseudo-class bits plus every matching-relevant DOM
+/// attribute — the id selector value, classes, and real attributes.
+fn build_snapshot<T>(node: &Node<T>) -> Snapshot {
     let mut attrs: Vec<(AttrIdentifier, AttrValue)> = Vec::new();
 
     // "id" and "class" go FIRST, and with the exact `AttrValue` variants the
     // snapshot accessors demand (`id_attr` calls `as_atom`, `has_class`/
-    // `each_class` call `as_tokens`). Being first also means the snapshot's
-    // first-match `get_attr` finds these canonical entries even if the node
-    // carries plain attributes with the same names.
+    // `each_class` call `as_tokens`). The reflected entries in `attrs` are
+    // skipped below so every real DOM attribute appears exactly once.
     if let Some(id_atom) = &node.id_attr {
         attrs.push((
             attr_identifier(LocalName::from("id")),
@@ -635,6 +694,9 @@ fn build_snapshot<T: ExternalState>(node: &Node<T>) -> Snapshot {
         ));
     }
     for (name, value) in &node.attrs {
+        if matches!(name.0.as_ref(), "id" | "class") {
+            continue;
+        }
         attrs.push((
             attr_identifier(name.clone()),
             AttrValue::String(value.clone()),

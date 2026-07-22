@@ -1,16 +1,15 @@
-//! The Lynx external state carried by every widget ([`WidgetState`]), plus the
+//! The Lynx-owned payload carried by every widget ([`WidgetState`]), plus the
 //! event-registration types.
 //!
-//! `w3c-dom`'s [`Node`](w3c_dom::Node) covers only the W3C-DOM subset;
-//! everything Lynx-specific about a widget — its [`WidgetKind`], the
-//! `unique_id`, the `css_id` style scope, the `data-*` dataset, and event
-//! bindings — lives here, in the node's `ext` payload. Selector-visible
-//! counterparts such as `l-css-id` and `data-*` are real node attributes,
-//! written by [`WidgetTree`](crate::WidgetTree) alongside this state.
+//! `w3c-dom`'s [`Node`](w3c_dom::Node) covers only the W3C-DOM
+//! subset; Lynx-only identity and event registrations live in the node's
+//! opaque payload. CSS scope (`l-css-id`) and dataset values are real DOM
+//! attributes, so selector matching and invalidation never consult this
+//! payload.
 
-use rustc_hash::FxHashMap;
+use std::sync::{PoisonError, RwLock, RwLockReadGuard};
+
 use smallvec::SmallVec;
-use w3c_dom::ExternalState;
 
 use crate::kind::WidgetKind;
 
@@ -46,7 +45,7 @@ pub struct EventReg {
     pub handler: Box<str>,
 }
 
-/// The Lynx-specific per-widget state, carried as the `ext` payload of
+/// The Lynx-specific per-widget state, carried as the opaque payload of
 /// [`Widget`](crate::Widget) (= `w3c_dom::Node<WidgetState>`).
 #[derive(Debug)]
 pub struct WidgetState {
@@ -56,16 +55,10 @@ pub struct WidgetState {
     /// [`WidgetTree`](crate::WidgetTree) on creation (1-based, monotonically
     /// increasing).
     pub unique_id: i32,
-    /// The `css_id` scoping this widget's styles: `0` means unset / global.
-    /// Stamped directly by Lynx's `__SetCSSId` (there is no `<component>`
-    /// element in this engine to inherit it from). [`WidgetTree`](crate::WidgetTree)
-    /// mirrors it into the real `l-css-id` attribute.
-    pub css_id: i32,
-    /// `data-*` dataset entries (keys stored without the `data-` prefix),
-    /// mirrored into real `data-*` attributes by [`WidgetTree`](crate::WidgetTree).
-    pub dataset: FxHashMap<Box<str>, String>,
-    /// Event bindings on this widget.
-    pub events: SmallVec<[EventReg; 2]>,
+    /// Event bindings on this widget. Interior mutability lets the widget
+    /// layer update its own payload through w3c-dom's read-only payload view;
+    /// it does not mutate DOM or style-engine tree state.
+    events: RwLock<SmallVec<[EventReg; 2]>>,
 }
 
 impl WidgetState {
@@ -76,11 +69,20 @@ impl WidgetState {
         Self {
             kind,
             unique_id,
-            css_id: 0,
-            dataset: FxHashMap::default(),
-            events: SmallVec::new(),
+            events: RwLock::new(SmallVec::new()),
         }
     }
-}
+    /// Borrow this widget's event registrations.
+    pub fn events(&self) -> RwLockReadGuard<'_, SmallVec<[EventReg; 2]>> {
+        self.events.read().unwrap_or_else(PoisonError::into_inner)
+    }
 
-impl ExternalState for WidgetState {}
+    /// Register an event without exposing mutable payload access through
+    /// w3c-dom.
+    pub(crate) fn push_event(&self, event: EventReg) {
+        self.events
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(event);
+    }
+}

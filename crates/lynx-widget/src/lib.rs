@@ -11,16 +11,17 @@
 //! expose node construction), so style invalidation is carried by the
 //! operations themselves. This crate also owns the Lynx-specific style
 //! adapter: view metrics, viewport-relative `rpx`, and touch-first device
-//! policy wrapped around [`w3c_dom::StyleEngine`]'s standards-oriented
-//! cascade.
+//! policy used to construct each [`w3c_dom::Document`]'s private,
+//! standards-oriented cascade.
 //!
 //! # Vocabulary
 //!
 //! A Lynx-Element-PAPI-created instance is a [`Widget`] in this repo. The
-//! `w3c-dom` core speaks W3C DOM (`Node<T>`, generic over an external state);
+//! `w3c-dom` core speaks W3C DOM (`Node<T>`, generic over an opaque payload);
 //! the Lynx layer instantiates it with [`WidgetState`] — the Lynx-specific
-//! payload carrying the [`WidgetKind`], `unique_id`, `css_id`, `data-*`
-//! dataset, and event bindings — and names the result Widget-first:
+//! payload carrying the [`WidgetKind`], `unique_id`, and event bindings — and
+//! names the result Widget-first. CSS scope and dataset values are real DOM
+//! attributes, not payload-provided selector state:
 //!
 //! - [`Widget`] = `w3c_dom::Node<WidgetState>`
 //! - [`WidgetRef`] = `&w3c_dom::Node<WidgetState>` (a plain reference — the stylo traits live on
@@ -35,7 +36,7 @@
 //! - [`papi`] — the [`WidgetTree`] type and its Element-PAPI-shaped methods, plus [`WidgetError`].
 //! - [`handle`] — [`WidgetHandle`], the canonical handle registry types.
 //! - [`kind`] — the Lynx tag-name ↔ [`WidgetKind`] mapping.
-//! - [`state`] — [`WidgetState`] (the `ExternalState` payload) and the event-registration types.
+//! - [`state`] — the opaque [`WidgetState`] payload and event-registration types.
 //! - [`style`] — the Lynx metrics/device adapter around the generic style engine.
 
 pub mod handle;
@@ -58,7 +59,7 @@ pub use w3c_dom::{
 };
 
 /// A Lynx widget: the generic W3C-DOM-subset node carrying the Lynx-specific
-/// [`WidgetState`] payload in its `ext` field.
+/// [`WidgetState`] payload.
 pub type Widget = w3c_dom::Node<WidgetState>;
 
 /// A read-only navigation handle over a [`Widget`]: a plain shared
