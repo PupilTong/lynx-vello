@@ -8,9 +8,8 @@
 //! `__ReplaceElement`, [`create_element`] ↔ `__CreateElement`) even though
 //! the values they carry are [`Widget`]s. JS bindings live in a later runtime
 //! crate; this is the pure native validation layer. [`crate::StyleEngine`]
-//! adapts `w3c-dom`'s generic cascade to the Widget tree and reads the dirty
-//! state maintained here (see [`WidgetTree::has_dirty`] /
-//! [`WidgetTree::clear_dirty`]).
+//! adapts `w3c-dom`'s generic cascade to the Widget tree; style scheduling is
+//! private to the DOM/style engine.
 //!
 //! This layer validates PAPI semantics — misrouted/stale handles, cycles,
 //! insertion reference resolution, root protection, error mapping, the
@@ -55,6 +54,7 @@ use w3c_dom::{Document, ElementState, Node, NodeId};
 use crate::handle::{HandleInner, Reaper, WidgetHandle};
 use crate::kind::WidgetKind;
 use crate::state::{EventKind, EventReg, WidgetState};
+use crate::style::{EngineMetrics, build_device};
 use crate::{Widget, WidgetRef};
 
 /// An error from a [`WidgetTree`] operation on untrusted PAPI input.
@@ -113,21 +113,12 @@ pub struct WidgetTree {
     reaper: StdArc<Reaper>,
 }
 
-impl Default for WidgetTree {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl WidgetTree {
-    /// Create a standalone Widget tree for DOM-only use.
-    ///
-    /// A tree that will be styled should be created with
-    /// [`StyleEngine::new_widget_tree`](crate::StyleEngine::new_widget_tree),
-    /// which binds it to the generic style engine's private context.
+    /// Create a standalone Widget tree for DOM-only use with an independent
+    /// document style engine/context.
     #[must_use]
-    pub fn new() -> Self {
-        Self::from_document(Document::new())
+    pub fn new(metrics: EngineMetrics) -> Self {
+        Self::from_document(Document::new(build_device(metrics)))
     }
 
     pub(crate) fn from_document(doc: Document<WidgetState>) -> Self {
@@ -150,16 +141,10 @@ impl WidgetTree {
 
     /// Mutably borrow the underlying document.
     ///
-    /// The Widget style adapter uses this to flush and to schedule
-    /// device-change restyles; everything it exposes carries its own
-    /// invalidation.
+    /// The Widget style adapter uses this only to let `w3c-dom` run its own
+    /// style traversal. PAPI code mutates it through DOM-shaped methods.
     pub(crate) const fn document_mut(&mut self) -> &mut Document<WidgetState> {
         &mut self.doc
-    }
-
-    /// The Lynx page root id, if one has been created.
-    pub(crate) const fn page_id(&self) -> Option<NodeId> {
-        self.page
     }
 
     // --- handles ------------------------------------------------------------
@@ -565,11 +550,8 @@ impl WidgetTree {
         Ok(())
     }
 
-    /// Set a plain attribute.
-    ///
-    /// Note: unlike the DOM, a plain `"id"` attribute is stored as an ordinary
-    /// attribute here — Lynx sets the id selector separately via
-    /// [`WidgetTree::set_id`] (its `__SetID`).
+    /// Set a DOM attribute. Reflected `id`, `class`, and `style` state is
+    /// handled by `w3c-dom`'s browser-shaped attribute operation.
     pub fn set_attribute(
         &mut self,
         handle: &WidgetHandle,
@@ -587,8 +569,11 @@ impl WidgetTree {
     pub fn set_id(&mut self, handle: &WidgetHandle, id_selector: &str) -> Result<(), WidgetError> {
         self.sweep_dropped();
         let id = self.resolve(handle)?;
-        self.doc
-            .set_id_attr(id, (!id_selector.is_empty()).then_some(id_selector));
+        if id_selector.is_empty() {
+            self.doc.remove_attribute(id, "id");
+        } else {
+            self.doc.set_attribute(id, "id", id_selector);
+        }
         Ok(())
     }
 
@@ -603,10 +588,44 @@ impl WidgetTree {
             .iter()
             .map(|handle| self.resolve(handle))
             .collect::<Result<Vec<_>, _>>()?;
-        let value = css_id.to_string();
+        let css_id = css_id.to_string();
         for id in ids {
-            self.doc.set_attribute(id, "l-css-id", &value);
-            self.doc.ext_mut(id).css_id = css_id;
+            self.doc.set_attribute(id, "l-css-id", &css_id);
+        }
+        Ok(())
+    }
+
+    /// Replace an element's `data-*` dataset.
+    pub fn set_dataset<I, K, V>(
+        &mut self,
+        handle: &WidgetHandle,
+        entries: I,
+    ) -> Result<(), WidgetError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<Box<str>>,
+        V: Into<String>,
+    {
+        self.sweep_dropped();
+        let id = self.resolve(handle)?;
+        let old_names: Vec<Box<str>> = self
+            .doc
+            .get(id)
+            .map(|widget| {
+                widget
+                    .attrs()
+                    .filter(|(name, _)| name.starts_with("data-"))
+                    .map(|(name, _)| Box::<str>::from(name))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for name in old_names {
+            self.doc.remove_attribute(id, &name);
+        }
+        for (key, value) in entries {
+            let key: Box<str> = key.into();
+            let value: String = value.into();
+            self.doc.set_attribute(id, &format!("data-{key}"), &value);
         }
         Ok(())
     }
@@ -620,12 +639,7 @@ impl WidgetTree {
     ) -> Result<(), WidgetError> {
         self.sweep_dropped();
         let id = self.resolve(handle)?;
-        let name = format!("data-{key}");
-        self.doc.set_attribute(id, &name, value);
-        self.doc
-            .ext_mut(id)
-            .dataset
-            .insert(key.into(), value.to_owned());
+        self.doc.set_attribute(id, &format!("data-{key}"), value);
         Ok(())
     }
 
@@ -640,7 +654,12 @@ impl WidgetTree {
     ) -> Result<(), WidgetError> {
         self.sweep_dropped();
         let id = self.resolve(handle)?;
-        self.doc.ext_mut(id).events.push(EventReg {
+        let state = self
+            .doc
+            .get(id)
+            .ok_or(WidgetError::StaleElement(id))?
+            .payload();
+        state.push_event(EventReg {
             name: name.into(),
             kind,
             handler: event_handler.into(),
@@ -675,7 +694,8 @@ impl WidgetTree {
         widget.tag().ok_or(WidgetError::StaleElement(id))
     }
 
-    /// An element's plain attributes as string name/value pairs.
+    /// An element's DOM attributes as string name/value pairs, including
+    /// reflected `id`, `class`, and `style` entries.
     pub fn get_attributes<'a>(
         &'a self,
         handle: &WidgetHandle,
@@ -690,7 +710,7 @@ impl WidgetTree {
         let id = self.resolve(handle)?;
         self.doc
             .get(id)
-            .map(|widget| widget.ext().unique_id)
+            .map(|widget| widget.payload().unique_id)
             .ok_or(WidgetError::StaleElement(id))
     }
 
@@ -740,42 +760,6 @@ impl WidgetTree {
     ) -> Result<Option<Arc<ComputedValues>>, WidgetError> {
         let id = self.resolve(handle)?;
         Ok(self.doc.get(id).and_then(Widget::computed_style))
-    }
-
-    /// Store an element's resolved computed style. Used with the standalone
-    /// [`StyleEngine::resolve_widget`](crate::StyleEngine::resolve_widget)
-    /// path; [`StyleEngine::flush_widget_tree`](crate::StyleEngine::flush_widget_tree)
-    /// stores styles itself. A widget styled this way reports clean through
-    /// the derived [`Widget::is_style_dirty`](crate::Widget::is_style_dirty)
-    /// unless a snapshot or restyle hint is still pending (the resolve path
-    /// does not participate in stylo's hint scheduling).
-    pub fn set_computed(
-        &mut self,
-        handle: &WidgetHandle,
-        style: Arc<ComputedValues>,
-    ) -> Result<(), WidgetError> {
-        self.sweep_dropped();
-        let id = self.resolve(handle)?;
-        self.doc.store_computed_style(id, style);
-        Ok(())
-    }
-
-    // --- dirty state ------------------------------------------------------
-
-    /// Whether the tree has any pending style work, checked at the page root.
-    #[must_use]
-    pub fn has_dirty(&self) -> bool {
-        self.doc.needs_flush()
-    }
-
-    /// Reset all flush-scheduling state (dirty bits, pending snapshots,
-    /// queued restyle hints/damage), restoring a clean baseline. Computed
-    /// styles are kept; a never-styled widget stays
-    /// [`is_style_dirty`](crate::Widget::is_style_dirty) (it still needs
-    /// styling). The flush path clears its own state — this is for tests and
-    /// embedder-driven resets.
-    pub fn clear_dirty(&mut self) {
-        self.doc.clear_dirty();
     }
 
     /// Reclaim now instead of at the next operation boundary: drain the

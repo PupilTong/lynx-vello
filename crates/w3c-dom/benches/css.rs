@@ -29,7 +29,7 @@ use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_traits::{CSSPixel, DevicePixel};
-use w3c_dom::{Document, ElementState, NodeId, Parallelism, StyleEngine, StylesheetOrigin};
+use w3c_dom::{Document, ElementState, NodeId, Parallelism, StylesheetOrigin};
 
 fn main() {
     divan::main();
@@ -126,43 +126,48 @@ fn author_sheet() -> String {
     css
 }
 
-fn engine_with_author_sheet() -> StyleEngine {
-    let mut engine = StyleEngine::new(device(800.0, 600.0));
-    engine.add_stylesheet_str(&author_sheet(), StylesheetOrigin::Author);
-    engine
+fn document_with_author_sheet() -> Document<()> {
+    let mut doc = Document::new(device(800.0, 600.0));
+    doc.add_stylesheet_str(&author_sheet(), StylesheetOrigin::Author);
+    doc
 }
 
 /// `page > 32 × section > 32 × view`, classes cycling through the rule set,
 /// every section carrying a `data-row` attribute. ~1.1k nodes.
-fn build_tree(engine: &StyleEngine) -> (Document<()>, NodeId) {
-    let mut doc: Document<()> = engine.new_document();
-    let root = doc.create_node("page", ());
+fn build_tree(doc: &mut Document<()>) -> NodeId {
+    let root = doc.create_element("page", ());
     doc.append_child(root);
     let mut probe = root;
     let mut class = 0usize;
     for row in 0..32 {
         class += 1;
-        let section = doc.create_node("section", ());
+        let section = doc.create_element("section", ());
         doc.add_class(section, &format!("c{}", class % CLASS_RULES));
         doc.set_attribute(section, "data-row", &row.to_string());
         doc.append(root, section);
         for _ in 0..32 {
             class += 1;
-            let leaf = doc.create_node("view", ());
+            let leaf = doc.create_element("view", ());
             doc.add_class(leaf, &format!("c{}", class % CLASS_RULES));
             doc.append(section, leaf);
             probe = leaf;
         }
     }
+    probe
+}
+
+/// An unflushed document populated with the generated author sheet and tree.
+fn unflushed() -> (Document<()>, NodeId) {
+    let mut doc = document_with_author_sheet();
+    let probe = build_tree(&mut doc);
     (doc, probe)
 }
 
 /// A flushed document plus a probe leaf, ready for incremental cases.
-fn flushed() -> (StyleEngine, Document<()>, NodeId) {
-    let engine = engine_with_author_sheet();
-    let (mut doc, probe) = build_tree(&engine);
-    engine.flush_document(&mut doc);
-    (engine, doc, probe)
+fn flushed() -> (Document<()>, NodeId) {
+    let (mut doc, probe) = unflushed();
+    doc.flush_styles();
+    (doc, probe)
 }
 
 // --- stylesheet parsing ------------------------------------------------------
@@ -176,14 +181,14 @@ fn parse_author_sheet_text(bencher: divan::Bencher) {
         .counter(ItemsCount::new(PARSE_BATCH))
         .with_inputs(|| {
             (0..PARSE_BATCH)
-                .map(|_| StyleEngine::new(device(800.0, 600.0)))
+                .map(|_| Document::<()>::new(device(800.0, 600.0)))
                 .collect::<Vec<_>>()
         })
-        .bench_local_values(|mut engines| {
-            for engine in &mut engines {
-                engine.add_stylesheet_str(black_box(&css), StylesheetOrigin::Author);
+        .bench_local_values(|mut pairs| {
+            for doc in &mut pairs {
+                doc.add_stylesheet_str(black_box(&css), StylesheetOrigin::Author);
             }
-            engines
+            pairs
         });
 }
 
@@ -191,37 +196,35 @@ fn parse_author_sheet_text(bencher: divan::Bencher) {
 
 #[divan::bench]
 fn initial_flush_sequential(bencher: divan::Bencher) {
-    let engine = engine_with_author_sheet();
     bencher
         .counter(ItemsCount::new(INITIAL_FLUSH_BATCH))
         .with_inputs(|| {
             (0..INITIAL_FLUSH_BATCH)
-                .map(|_| build_tree(&engine).0)
+                .map(|_| unflushed())
                 .collect::<Vec<_>>()
         })
-        .bench_local_values(|mut docs| {
-            for doc in &mut docs {
-                black_box(engine.flush_document_with(doc, Parallelism::Sequential));
+        .bench_local_values(|mut states| {
+            for (doc, _) in &mut states {
+                black_box(doc.flush_styles_with(Parallelism::Sequential));
             }
-            docs
+            states
         });
 }
 
 #[divan::bench]
 fn initial_flush_parallel(bencher: divan::Bencher) {
-    let engine = engine_with_author_sheet();
     bencher
         .counter(ItemsCount::new(INITIAL_FLUSH_BATCH))
         .with_inputs(|| {
             (0..INITIAL_FLUSH_BATCH)
-                .map(|_| build_tree(&engine).0)
+                .map(|_| unflushed())
                 .collect::<Vec<_>>()
         })
-        .bench_local_values(|mut docs| {
-            for doc in &mut docs {
-                black_box(engine.flush_document_with(doc, Parallelism::Auto));
+        .bench_local_values(|mut states| {
+            for (doc, _) in &mut states {
+                black_box(doc.flush_styles_with(Parallelism::Auto));
             }
-            docs
+            states
         });
 }
 
@@ -237,14 +240,14 @@ fn incremental_class_flip(bencher: divan::Bencher) {
         .counter(ItemsCount::new(INCREMENTAL_BATCH))
         .bench_local(|| {
             for _ in 0..INCREMENTAL_BATCH {
-                let (engine, doc, probe) = &mut *state.borrow_mut();
+                let (doc, probe) = &mut *state.borrow_mut();
                 on = !on;
                 if on {
                     doc.add_class(*probe, "c1");
                 } else {
                     doc.remove_class(*probe, "c1");
                 }
-                black_box(engine.flush_document(doc));
+                black_box(doc.flush_styles());
             }
         });
 }
@@ -258,7 +261,7 @@ fn incremental_inline_style(bencher: divan::Bencher) {
         .counter(ItemsCount::new(INCREMENTAL_BATCH))
         .bench_local(|| {
             for _ in 0..INCREMENTAL_BATCH {
-                let (engine, doc, probe) = &mut *state.borrow_mut();
+                let (doc, probe) = &mut *state.borrow_mut();
                 on = !on;
                 let css = if on {
                     "color: rgb(9, 9, 9); width: 10px"
@@ -266,7 +269,7 @@ fn incremental_inline_style(bencher: divan::Bencher) {
                     "color: rgb(3, 3, 3); width: 20px"
                 };
                 doc.set_inline_style(*probe, black_box(css));
-                black_box(engine.flush_document(doc));
+                black_box(doc.flush_styles());
             }
         });
 }
@@ -274,23 +277,22 @@ fn incremental_inline_style(bencher: divan::Bencher) {
 /// `:hover` state flip on one deep leaf (state-keyed invalidation).
 #[divan::bench]
 fn incremental_state_flip(bencher: divan::Bencher) {
-    let mut engine = engine_with_author_sheet();
-    engine.add_stylesheet_str(
+    let (mut doc, probe) = unflushed();
+    doc.add_stylesheet_str(
         "view:hover { color: rgb(250, 250, 250); }",
         StylesheetOrigin::Author,
     );
-    let (mut doc, probe) = build_tree(&engine);
-    engine.flush_document(&mut doc);
-    let state = RefCell::new((engine, doc));
+    doc.flush_styles();
+    let state = RefCell::new(doc);
     let mut on = false;
     bencher
         .counter(ItemsCount::new(INCREMENTAL_BATCH))
         .bench_local(|| {
             for _ in 0..INCREMENTAL_BATCH {
-                let (engine, doc) = &mut *state.borrow_mut();
+                let doc = &mut *state.borrow_mut();
                 on = !on;
                 doc.set_state(probe, ElementState::HOVER, on);
-                black_box(engine.flush_document(doc));
+                black_box(doc.flush_styles());
             }
         });
 }
@@ -299,21 +301,20 @@ fn incremental_state_flip(bencher: divan::Bencher) {
 /// REPAINT-only (no relayout class), the layout-skippable fast path.
 #[divan::bench]
 fn incremental_class_flip_repaint_only(bencher: divan::Bencher) {
-    let mut engine = engine_with_author_sheet();
-    engine.add_stylesheet_str(
+    let (mut doc, probe) = unflushed();
+    doc.add_stylesheet_str(
         "view.rp-a { color: rgb(17, 17, 17); } view.rp-b { color: rgb(68, 68, 68); }",
         StylesheetOrigin::Author,
     );
-    let (mut doc, probe) = build_tree(&engine);
     doc.add_class(probe, "rp-a");
-    engine.flush_document(&mut doc);
-    let state = RefCell::new((engine, doc));
+    doc.flush_styles();
+    let state = RefCell::new(doc);
     let mut on = false;
     bencher
         .counter(ItemsCount::new(INCREMENTAL_BATCH))
         .bench_local(|| {
             for _ in 0..INCREMENTAL_BATCH {
-                let (engine, doc) = &mut *state.borrow_mut();
+                let doc = &mut *state.borrow_mut();
                 on = !on;
                 if on {
                     doc.remove_class(probe, "rp-a");
@@ -322,7 +323,7 @@ fn incremental_class_flip_repaint_only(bencher: divan::Bencher) {
                     doc.remove_class(probe, "rp-b");
                     doc.add_class(probe, "rp-a");
                 }
-                black_box(engine.flush_document(doc));
+                black_box(doc.flush_styles());
             }
         });
 }
@@ -335,8 +336,8 @@ fn noop_flush(bencher: divan::Bencher) {
         .counter(ItemsCount::new(NO_OP_BATCH))
         .bench_local(|| {
             for _ in 0..NO_OP_BATCH {
-                let (engine, doc, _) = &mut *state.borrow_mut();
-                black_box(engine.flush_document(doc));
+                let (doc, _) = &mut *state.borrow_mut();
+                black_box(doc.flush_styles());
             }
         });
 }
@@ -347,22 +348,21 @@ fn noop_flush(bencher: divan::Bencher) {
 /// root, inherited by every descendant).
 #[divan::bench]
 fn inheritance_deep_chain(bencher: divan::Bencher) {
-    let mut engine = StyleEngine::new(device(800.0, 600.0));
-    engine.add_stylesheet_str(
-        "page { color: rgb(120, 30, 40); font-size: 18px; }",
-        StylesheetOrigin::Author,
-    );
     bencher
         .counter(ItemsCount::new(INHERITANCE_BATCH))
         .with_inputs(|| {
             (0..INHERITANCE_BATCH)
                 .map(|_| {
-                    let mut doc: Document<()> = engine.new_document();
-                    let root = doc.create_node("page", ());
+                    let mut doc: Document<()> = Document::new(device(800.0, 600.0));
+                    doc.add_stylesheet_str(
+                        "page { color: rgb(120, 30, 40); font-size: 18px; }",
+                        StylesheetOrigin::Author,
+                    );
+                    let root = doc.create_element("page", ());
                     doc.append_child(root);
                     let mut parent = root;
                     for _ in 0..256 {
-                        let child = doc.create_node("view", ());
+                        let child = doc.create_element("view", ());
                         doc.append(parent, child);
                         parent = child;
                     }
@@ -370,11 +370,11 @@ fn inheritance_deep_chain(bencher: divan::Bencher) {
                 })
                 .collect::<Vec<_>>()
         })
-        .bench_local_values(|mut docs| {
-            for doc in &mut docs {
-                engine.flush_document(doc);
+        .bench_local_values(|mut states| {
+            for doc in &mut states {
+                doc.flush_styles();
             }
-            docs
+            states
         });
 }
 
@@ -387,20 +387,23 @@ fn var_chain_cascade(bencher: divan::Bencher) {
         let _ = write!(css, "--v{i}: var(--v{});", i - 1);
     }
     css.push_str("} view { color: var(--v31); }");
-    let mut engine = StyleEngine::new(device(800.0, 600.0));
-    engine.add_stylesheet_str(&css, StylesheetOrigin::Author);
     bencher
         .counter(ItemsCount::new(VAR_CHAIN_BATCH))
         .with_inputs(|| {
             (0..VAR_CHAIN_BATCH)
-                .map(|_| build_tree(&engine).0)
+                .map(|_| {
+                    let mut doc = Document::new(device(800.0, 600.0));
+                    doc.add_stylesheet_str(&css, StylesheetOrigin::Author);
+                    let probe = build_tree(&mut doc);
+                    (doc, probe)
+                })
                 .collect::<Vec<_>>()
         })
-        .bench_local_values(|mut docs| {
-            for doc in &mut docs {
-                engine.flush_document(doc);
+        .bench_local_values(|mut states| {
+            for (doc, _) in &mut states {
+                doc.flush_styles();
             }
-            docs
+            states
         });
 }
 
@@ -410,29 +413,23 @@ fn var_chain_cascade(bencher: divan::Bencher) {
 /// device-change restyle.
 #[divan::bench]
 fn media_viewport_flip(bencher: divan::Bencher) {
-    let mut engine = engine_with_author_sheet();
-    engine.add_stylesheet_with_media(
+    let (mut doc, _) = unflushed();
+    doc.add_stylesheet_with_media(
         ".c1 { color: rgb(200, 100, 50); } view { padding-top: 3px; }",
         StylesheetOrigin::Author,
         "(min-width: 700px)",
     );
-    let (mut doc, _) = build_tree(&engine);
-    engine.flush_document(&mut doc);
-    let root = doc
-        .root_element()
-        .expect("document has an element child")
-        .id();
-    let state = RefCell::new((engine, doc));
+    doc.flush_styles();
+    let state = RefCell::new(doc);
     let mut wide = true;
     bencher
         .counter(ItemsCount::new(MEDIA_BATCH))
         .bench_local(move || {
             for _ in 0..MEDIA_BATCH {
-                let (engine, doc) = &mut *state.borrow_mut();
+                let doc = &mut *state.borrow_mut();
                 wide = !wide;
-                engine.set_viewport(if wide { 800.0 } else { 400.0 }, 600.0);
-                doc.mark_subtree_dirty(black_box(root));
-                engine.flush_document(doc);
+                doc.set_viewport(if wide { 800.0 } else { 400.0 }, 600.0);
+                doc.flush_styles();
             }
         });
 }
@@ -443,15 +440,14 @@ fn media_viewport_flip(bencher: divan::Bencher) {
 /// media/value helpers use).
 #[divan::bench]
 fn resolve_single_element(bencher: divan::Bencher) {
-    let engine = engine_with_author_sheet();
-    let (doc, probe) = build_tree(&engine);
+    let (doc, probe) = unflushed();
     bencher
         .counter(ItemsCount::new(RESOLVE_BATCH))
         .with_inputs(|| Vec::with_capacity(RESOLVE_BATCH))
         .bench_local_values(|mut styles| {
             for _ in 0..RESOLVE_BATCH {
                 let node = doc.get(black_box(probe)).expect("probe is live");
-                styles.push(engine.resolve(node, None));
+                styles.push(doc.resolve_style(node, None));
             }
             styles
         });

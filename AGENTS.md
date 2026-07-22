@@ -21,7 +21,7 @@ The from-scratch layout engine (successor to the C++ engine's `starlight`) is
 flexbox, Grid, and Starlight `display: relative` and `display: linear`
 algorithms are implemented as first-class peers. Its concrete document/stylo
 host lives in `crates/w3c-dom`'s `layout` module
-(`StyleEngine::layout_document`, results on each `Node`); the Lynx-widget
+(`Document::layout`, results on each `Node`); the Lynx-widget
 policy layer and text measurement wiring remain pending. See
 `docs/layout-architecture.md` for its design and
 `docs/tracking/css-layout.md` for the behavior it must cover.
@@ -151,9 +151,15 @@ useful signal for currently-compatible versions of those libraries.
   the affected nodes). Every node points directly back to the slab, and the
   same plain one-word `&Node` implements Stylo's document/node/element traits
   according to its `NodeData` (styling runs in place, no mirror tree),
-  inline-style parsing, the `Stylist` /
-  cascade pipeline, and the private `SharedRwLock` shared by an engine and
-  its documents. Mutation APIs follow a let-it-crash contract
+  inline-style parsing, and a private per-document `StyleEngine` containing
+  the `Stylist`, cascade pipeline, device, stylesheet set, and
+  `SharedRwLock`. `Document::new` creates that entire context afresh, so
+  different documents cannot share stylesheets. The generic `T` payload remains stored on each node but is
+  opaque and read-only to the DOM core; selector-visible state comes only
+  from real DOM fields, so payloads cannot synthesize attributes. DOM setters
+  own snapshot/restyle scheduling, while stylesheet and device methods on the
+  document schedule its root in the same call — embedders cannot
+  set/clear dirty state or write computed styles. Mutation APIs follow a let-it-crash contract
   (`debug_assert` + panic on stale handles rather than silent no-ops). A
   flush returns a `FlushSummary` — the per-node `StyleDamage` (repaint /
   stacking / overflow / relayout classes) the flush harvested from stylo's
@@ -165,7 +171,7 @@ useful signal for currently-compatible versions of those libraries.
   `effective_containment` fold (`contain` + `content-visibility` → effect
   bits).
   Its `layout` module is the concrete `neutron-star` host:
-  `StyleEngine::layout_document` flushes styles then lays out with
+  `Document::layout` flushes styles then lays out with
   `LayoutNode` implemented **directly on `&Node<T>`** (the same one-word
   handle as the stylo traits — no wrapper, no adapter objects) — style
   views are fetched when the engine asks (an `Arc` bump out of the node's
@@ -193,9 +199,13 @@ useful signal for currently-compatible versions of those libraries.
   `content-visibility` / `contain-intrinsic-size` under the `lynx` feature,
   pref-gated for stock servo builds.
 - `crates/lynx-widget` — Lynx Element-PAPI and style adapter over `w3c-dom`.
-  Owns `WidgetState` / `WidgetTree` (a validation layer over the document:
-  untrusted PAPI input becomes `WidgetError`s before it reaches the
-  crash-on-misuse DOM core) and the `WidgetHandle` ownership layer — the
+  `WidgetTree` instantiates `Document<WidgetState>` and validates the document
+  boundary: untrusted PAPI input becomes `WidgetError`s before it reaches the
+  crash-on-misuse DOM core. `WidgetState` remains the opaque payload on each
+  `Node<WidgetState>`; widget identity and events live there, and the event
+  list owns its own interior synchronization rather than mutating w3c-dom
+  tree/style state. CSS scope and dataset values are real DOM attributes. The
+  crate also owns the `WidgetHandle` ownership layer — the
   PAPI traffics exclusively in canonical, context-owned handles; a live
   handle retains its node, and detached subtrees are reclaimed automatically
   once their last handle drops (the native stand-in for the browser GC; no

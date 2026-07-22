@@ -104,7 +104,7 @@ fn edge_child_structural_path_reports_relayout() {
     doc.flush();
     assert_eq!(doc.value(first, "width"), "30px");
 
-    let new_first = doc.dom.create_node("view", ());
+    let new_first = doc.dom.create_element("view", ());
     doc.dom.insert_before(list, new_first, Some(first));
     let summary = doc.flush();
 
@@ -172,10 +172,10 @@ fn sibling_invalidation_damage_is_harvested_and_cleared() {
     // stylo raise the traversal to A's *parent*, and the harvest must follow
     // that actual root — `driver::traverse_dom`'s return value — or B's
     // damage and the parent's dirty bit leak, forcing perpetual
-    // re-traversal). `flush_document` is always rooted at the parentless
+    // re-traversal). `flush_styles` is always rooted at the parentless
     // document root, so the substitution cannot fire through this public API;
     // the flush still harvests from the driver-returned actual root by
-    // contract (see `StyleEngine::flush_document_with_sink`), and this test
+    // contract (see `Document::flush_styles_with_sink`), and this test
     // pins the observable half: sibling-invalidated damage is reported once
     // and cleared.
     let mut doc = Doc::with_css(".a + .b { color: rgb(255, 0, 0) }");
@@ -218,7 +218,7 @@ fn incremental_damage_set(parallelism: Parallelism) -> BTreeSet<(NodeId, u16)> {
     doc.flush();
 
     doc.add_class(doc.root, "theme");
-    let summary = doc.engine.flush_document_with(&mut doc.dom, parallelism);
+    let summary = doc.dom.flush_styles_with(parallelism);
     summary
         .damage
         .into_iter()

@@ -36,7 +36,7 @@ impl Harness {
 
     /// Run the style-then-layout pipeline.
     fn layout(&mut self) {
-        self.doc.engine.layout_document(&mut self.doc.dom);
+        self.doc.dom.layout();
     }
 
     fn layout_of(&self, id: NodeId) -> Layout {
@@ -625,8 +625,6 @@ fn flow_containers_fall_back_to_leaves_and_zero_their_children() {
 #[derive(Debug)]
 struct FixedMeasure(f32, f32);
 
-impl w3c_dom::ExternalState for FixedMeasure {}
-
 impl MeasureLeaf for FixedMeasure {
     fn measure_leaf(&self, node: &w3c_dom::Node<Self>, _input: LeafMeasureInput) -> LeafMetrics {
         if node.text().is_some() {
@@ -641,18 +639,17 @@ impl MeasureLeaf for FixedMeasure {
 fn leaves_measure_through_the_payload_hook() {
     // Element-backed character data (Lynx's `<raw-text>` shape): the node is
     // an element leaf whose content size comes from the payload's hook.
-    let mut engine = w3c_dom::StyleEngine::new(common::device(800.0, 600.0));
-    engine.add_stylesheet_str(
+    let mut dom = w3c_dom::Document::new(common::device(800.0, 600.0));
+    dom.add_stylesheet_str(
         "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }",
         w3c_dom::StylesheetOrigin::Author,
     );
-    let mut dom = engine.new_document();
     let root = dom.create_element("page", FixedMeasure(42.0, 17.0));
     dom.append_child(root);
     let text = dom.create_element("text", FixedMeasure(42.0, 17.0));
     dom.append(root, text);
     dom.set_text(text, Some("hello".into()));
-    engine.layout_document(&mut dom);
+    dom.layout();
 
     let layout = dom.get(text).unwrap().layout();
     assert_eq!(
@@ -671,13 +668,12 @@ fn text_nodes_lay_out_as_anonymous_leaf_boxes() {
     // A real text node (no computed style): box properties take their
     // initial values — the anonymous box CSS wraps a text run in — and the
     // content size comes from the payload's measure hook.
-    let mut engine = w3c_dom::StyleEngine::new(common::device(800.0, 600.0));
-    engine.add_stylesheet_str(
+    let mut dom = w3c_dom::Document::new(common::device(800.0, 600.0));
+    dom.add_stylesheet_str(
         "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }
          .sibling { width: 50px; height: 10px; }",
         w3c_dom::StylesheetOrigin::Author,
     );
-    let mut dom = engine.new_document();
     let root = dom.create_element("page", FixedMeasure(30.0, 12.0));
     dom.append_child(root);
     let sibling = dom.create_element("view", FixedMeasure(30.0, 12.0));
@@ -685,7 +681,7 @@ fn text_nodes_lay_out_as_anonymous_leaf_boxes() {
     dom.append(root, sibling);
     let text = dom.create_text_node("hello", FixedMeasure(30.0, 12.0));
     dom.append(root, text);
-    engine.layout_document(&mut dom);
+    dom.layout();
 
     let rect = |id: NodeId| {
         let layout = dom.get(id).unwrap().layout();
@@ -759,9 +755,9 @@ fn viewport_percentages_resolve_against_the_engine_viewport() {
 }
 
 #[test]
-fn layout_document_flushes_pending_styles_itself() {
+fn layout_flushes_pending_styles_itself() {
     // The style → layout phase barrier is enforced by construction:
-    // layout_document runs the restyle traversal first, so no explicit
+    // `Document::layout` runs the restyle traversal first, so no explicit
     // flush call is needed between mutation and layout.
     let mut h = Harness::new("page { display: flex; width: 200px; height: 50px; }");
     let root = h.doc.root;
@@ -774,7 +770,7 @@ fn layout_document_flushes_pending_styles_itself() {
 
 // --- damage → layout wiring ---------------------------------------------------
 //
-// `layout_document` consumes its own flush's restyle damage into layout
+// `Document::layout` consumes its own flush's restyle damage into layout
 // invalidation, so a plain style change re-lays-out with no explicit
 // `invalidate_layout` call, and a `contain: strict` boundary stops the
 // invalidation walk so its ancestors keep their caches.
@@ -800,8 +796,6 @@ impl CountingMeasure {
     }
 }
 
-impl w3c_dom::ExternalState for CountingMeasure {}
-
 impl MeasureLeaf for CountingMeasure {
     fn measure_leaf(&self, node: &w3c_dom::Node<Self>, _input: LeafMeasureInput) -> LeafMetrics {
         if node.text().is_some() {
@@ -815,7 +809,7 @@ impl MeasureLeaf for CountingMeasure {
 
 #[test]
 fn style_width_change_relayouts_without_manual_invalidation() {
-    // A width change is RELAYOUT damage; layout_document consumes it and
+    // A width change is RELAYOUT damage; `Document::layout` consumes it and
     // re-lays-out with NO explicit invalidate_layout call.
     let mut h = Harness::new(
         "page { display: flex; width: 200px; height: 50px; }
@@ -901,15 +895,15 @@ fn removed_boundary_is_not_replayed_after_its_node_id_is_reused() {
     // `Slab` reuses the two freed slots. Put a new containment boundary in the
     // old boundary's slot, but under skipped contents where the root pass must
     // never lay it or its child out.
-    let first_reused = h.doc.dom.create_node("view", ());
-    let second_reused = h.doc.dom.create_node("view", ());
+    let first_reused = h.doc.dom.create_element("view", ());
+    let second_reused = h.doc.dom.create_element("view", ());
     let reused_boundary = if first_reused == old_boundary {
         first_reused
     } else {
         assert_eq!(second_reused, old_boundary, "the freed slot is reused");
         second_reused
     };
-    let reused_child = h.doc.dom.create_node("view", ());
+    let reused_child = h.doc.dom.create_element("view", ());
     h.doc.dom.append(reused_boundary, reused_child);
     h.doc.dom.append(hidden, reused_boundary);
     h.doc.set_inline(
@@ -930,27 +924,26 @@ fn removed_boundary_is_not_replayed_after_its_node_id_is_reused() {
 #[test]
 fn color_only_change_relayouts_nothing() {
     // A paint-only (REPAINT) change produces no relayout damage, so
-    // layout_document invalidates nothing and the second pass answers entirely
+    // `Document::layout` invalidates nothing and the second pass answers entirely
     // from cache — the leaf is never re-measured.
     let measures = Arc::new(AtomicUsize::new(0));
-    let mut engine = w3c_dom::StyleEngine::new(common::device(800.0, 600.0));
-    engine.add_stylesheet_str(
+    let mut dom = w3c_dom::Document::new(common::device(800.0, 600.0));
+    dom.add_stylesheet_str(
         "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }",
         w3c_dom::StylesheetOrigin::Author,
     );
-    let mut dom = engine.new_document();
     let root = dom.create_element("page", CountingMeasure::new(0.0, 0.0, &measures));
     dom.append_child(root);
     let text = dom.create_element("text", CountingMeasure::new(30.0, 12.0, &measures));
     dom.set_text(text, Some("hello".into()));
     dom.append(root, text);
 
-    engine.layout_document(&mut dom);
+    dom.layout();
     let after_first = measures.load(Ordering::Relaxed);
     assert!(after_first >= 1, "the initial pass measures the text leaf");
 
     dom.set_inline_style(text, "color: rgb(0, 0, 255)");
-    engine.layout_document(&mut dom);
+    dom.layout();
     assert_eq!(
         measures.load(Ordering::Relaxed),
         after_first,
@@ -1087,7 +1080,7 @@ fn a_damaged_boundary_still_clears_its_ancestors() {
 #[test]
 fn display_flip_relayouts_the_parent_automatically() {
     // A child's display flip changes box generation; the parent re-collects its
-    // children on the next layout_document, with no manual invalidate.
+    // children on the next `Document::layout`, with no manual invalidate.
     let mut h = Harness::new(
         "page { display: flex; width: 100px; height: 40px; }
          view { flex-grow: 1; }",
@@ -1277,14 +1270,13 @@ fn content_visibility_hidden_skips_descendant_layout_and_measurement() {
     // `MeasureLeaf` hook is never called, and a `position: fixed` descendant
     // generates no positioned box. Revealing the container restores layout.
     let measures = Arc::new(AtomicUsize::new(0));
-    let mut engine = w3c_dom::StyleEngine::new(common::device(800.0, 600.0));
-    engine.add_stylesheet_str(
+    let mut dom = w3c_dom::Document::new(common::device(800.0, 600.0));
+    dom.add_stylesheet_str(
         "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }
          .container { display: flex; width: 60px; height: 80px; align-items: flex-start; }
          .fixed { position: fixed; left: 10px; top: 20px; width: 30px; height: 40px; }",
         w3c_dom::StylesheetOrigin::Author,
     );
-    let mut dom = engine.new_document();
     let root = dom.create_element("page", CountingMeasure::new(0.0, 0.0, &measures));
     dom.append_child(root);
     let container = dom.create_element("view", CountingMeasure::new(0.0, 0.0, &measures));
@@ -1298,7 +1290,7 @@ fn content_visibility_hidden_skips_descendant_layout_and_measurement() {
     dom.add_class(fixed, "fixed");
     dom.append(container, fixed);
 
-    engine.layout_document(&mut dom);
+    dom.layout();
 
     // A borrow-free reader (takes `dom` by reference) so it can be used on both
     // sides of the reveal mutation below.
@@ -1321,7 +1313,7 @@ fn content_visibility_hidden_skips_descendant_layout_and_measurement() {
 
     // Reveal the container: its contents lay out again (transition cleanliness).
     dom.set_inline_style(container, "");
-    engine.layout_document(&mut dom);
+    dom.layout();
     assert_eq!(
         rect(&dom, text),
         (0.0, 0.0, 50.0, 70.0),

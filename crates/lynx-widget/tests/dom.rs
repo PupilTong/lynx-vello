@@ -4,7 +4,13 @@
 
 use std::collections::HashSet;
 
-use lynx_widget::{ElementState, EventKind, WidgetError, WidgetHandle, WidgetKind, WidgetTree};
+use lynx_widget::{
+    ElementState, EngineMetrics, EventKind, WidgetError, WidgetHandle, WidgetKind, WidgetTree,
+};
+
+fn tree() -> WidgetTree {
+    WidgetTree::new(EngineMetrics::new(800.0, 600.0, 1.0))
+}
 
 /// `page > container > [a, b, c]`.
 struct ThreeChildren {
@@ -16,7 +22,7 @@ struct ThreeChildren {
 }
 
 fn three_children() -> (WidgetTree, ThreeChildren) {
-    let mut doc = WidgetTree::new();
+    let mut doc = tree();
     let page = doc.create_page();
     let container = doc.create_view();
     doc.append_element(&container, &page).unwrap();
@@ -43,7 +49,7 @@ fn child_uids(doc: &WidgetTree, parent: &WidgetHandle) -> Vec<i32> {
     doc.widget(parent)
         .unwrap()
         .children()
-        .map(|node| node.ext().unique_id)
+        .map(|node| node.payload().unique_id)
         .collect()
 }
 
@@ -55,9 +61,9 @@ fn uid(doc: &WidgetTree, handle: &WidgetHandle) -> i32 {
 
 #[test]
 fn create_elements_kinds_and_structure() {
-    let mut doc = WidgetTree::new();
+    let mut doc = tree();
     let page = doc.create_page();
-    assert_eq!(doc.widget(&page).unwrap().ext().kind, WidgetKind::Page);
+    assert_eq!(doc.widget(&page).unwrap().payload().kind, WidgetKind::Page);
     assert_eq!(doc.get_tag(&page).unwrap(), "page");
     assert_eq!(doc.get_page_element(), Some(page.clone()));
 
@@ -65,22 +71,28 @@ fn create_elements_kinds_and_structure() {
     let text = doc.create_text();
     doc.append_element(&view, &page).unwrap();
     doc.append_element(&text, &view).unwrap();
-    assert_eq!(doc.widget(&text).unwrap().ext().kind, WidgetKind::Text);
+    assert_eq!(doc.widget(&text).unwrap().payload().kind, WidgetKind::Text);
 
     let raw = doc.create_raw_text("hello");
     doc.append_element(&raw, &text).unwrap();
     let raw_node = doc.widget(&raw).unwrap();
-    assert_eq!(raw_node.ext().kind, WidgetKind::RawText);
+    assert_eq!(raw_node.payload().kind, WidgetKind::RawText);
     assert_eq!(raw_node.text(), Some("hello"));
 
     let li = doc.create_element("list-item");
     doc.append_element(&li, &view).unwrap();
-    assert_eq!(doc.widget(&li).unwrap().ext().kind, WidgetKind::ListItem);
+    assert_eq!(
+        doc.widget(&li).unwrap().payload().kind,
+        WidgetKind::ListItem
+    );
     assert_eq!(doc.get_tag(&li).unwrap(), "list-item");
 
     let custom = doc.create_element("marquee");
     doc.append_element(&custom, &view).unwrap();
-    assert_eq!(doc.widget(&custom).unwrap().ext().kind, WidgetKind::Unknown);
+    assert_eq!(
+        doc.widget(&custom).unwrap().payload().kind,
+        WidgetKind::Unknown
+    );
     assert_eq!(doc.get_tag(&custom).unwrap(), "marquee", "real tag kept");
 
     // Parent / child navigation.
@@ -92,7 +104,7 @@ fn create_elements_kinds_and_structure() {
 
 #[test]
 fn page_tag_alone_does_not_become_the_widget_root() {
-    let mut tree = WidgetTree::new();
+    let mut tree = tree();
     let detached_page = tree.create_element("page");
     assert_eq!(tree.get_page_element(), None);
     assert!(
@@ -111,7 +123,7 @@ fn page_tag_alone_does_not_become_the_widget_root() {
 
 #[test]
 fn unique_ids_are_monotonic_and_one_based() {
-    let mut doc = WidgetTree::new();
+    let mut doc = tree();
     let page = doc.create_page();
     let view = doc.create_view();
     assert_eq!(uid(&doc, &page), 1);
@@ -371,7 +383,7 @@ fn attached_nodes_are_never_collected() {
 
 #[test]
 fn never_attached_nodes_reclaim_on_drop() {
-    let mut doc = WidgetTree::new();
+    let mut doc = tree();
     let _page = doc.create_page();
     let orphan = doc.create_view();
     let orphan_uid = uid(&doc, &orphan);
@@ -401,7 +413,7 @@ fn reclaimed_unique_ids_do_not_resurrect() {
 
 #[test]
 fn classes_and_inline_styles() {
-    let mut doc = WidgetTree::new();
+    let mut doc = tree();
     let view = doc.create_view();
     doc.set_classes(&view, "  foo   bar baz ").unwrap();
     let classes: Vec<&str> = doc.widget(&view).unwrap().classes().collect();
@@ -411,12 +423,20 @@ fn classes_and_inline_styles() {
     doc.add_class(&view, "bar").unwrap();
     doc.add_class(&view, "qux").unwrap();
     assert_eq!(doc.widget(&view).unwrap().classes().len(), 4);
+    assert_eq!(
+        doc.widget(&view).unwrap().attr("class"),
+        Some("foo bar baz qux")
+    );
 
     // Inline styles are parsed into a stylo `PropertyDeclarationBlock`; lock
     // ownership stays encapsulated in `w3c-dom`.
     doc.add_inline_style(&view, "color", "red").unwrap();
     doc.add_inline_style(&view, "width", "10px").unwrap();
     assert_eq!(inline_declaration_count(&doc, &view), 2);
+    assert_eq!(
+        doc.widget(&view).unwrap().attr("style"),
+        Some("color: red; width: 10px;")
+    );
 
     // `set_inline_styles` replaces the whole block.
     doc.set_inline_styles(&view, "display:flex").unwrap();
@@ -425,6 +445,7 @@ fn classes_and_inline_styles() {
     // An empty string clears the inline block.
     doc.set_inline_styles(&view, "").unwrap();
     assert_eq!(inline_declaration_count(&doc, &view), 0);
+    assert_eq!(doc.widget(&view).unwrap().attr("style"), Some(""));
 }
 
 /// The number of declarations in an element's parsed inline style block.
@@ -435,10 +456,10 @@ fn inline_declaration_count(doc: &WidgetTree, handle: &WidgetHandle) -> usize {
 
 #[test]
 fn attributes_id_dataset_and_events() {
-    let mut doc = WidgetTree::new();
+    let mut doc = tree();
     let view = doc.create_view();
 
-    // Plain attribute (including a literal "id" attr) goes to attrs, not id_attr.
+    // Standard reflected attributes have one DOM source of truth.
     doc.set_attribute(&view, "id", "not-a-selector").unwrap();
     doc.set_attribute(&view, "aria-label", "hi").unwrap();
     let attributes: Vec<_> = doc.get_attributes(&view).unwrap().collect();
@@ -453,23 +474,21 @@ fn attributes_id_dataset_and_events() {
         doc.widget(&view).unwrap().attr("id"),
         Some("not-a-selector")
     );
-    assert!(doc.widget(&view).unwrap().id_attr().is_none());
+    assert_eq!(doc.widget(&view).unwrap().id_attr(), Some("not-a-selector"));
 
-    // set_id populates the id selector separately.
+    // The Lynx `__SetID` adapter writes that same reflected attribute.
     doc.set_id(&view, "my-id").unwrap();
     assert_eq!(doc.widget(&view).unwrap().id_attr(), Some("my-id"));
+    assert_eq!(doc.widget(&view).unwrap().attr("id"), Some("my-id"));
     doc.set_id(&view, "").unwrap();
     assert!(doc.widget(&view).unwrap().id_attr().is_none());
+    assert_eq!(doc.widget(&view).unwrap().attr("id"), None);
 
     // Dataset.
     doc.add_dataset(&view, "role", "hero").unwrap();
     doc.add_dataset(&view, "index", "3").unwrap();
     doc.add_dataset(&view, "extra", "yes").unwrap();
     let node = doc.widget(&view).unwrap();
-    let dataset = &node.ext().dataset;
-    assert_eq!(dataset.get("role").map(String::as_str), Some("hero"));
-    assert_eq!(dataset.get("index").map(String::as_str), Some("3"));
-    assert_eq!(dataset.get("extra").map(String::as_str), Some("yes"));
     assert_eq!(node.attr("data-role"), Some("hero"));
     assert_eq!(node.attr("data-index"), Some("3"));
     assert_eq!(node.attr("data-extra"), Some("yes"));
@@ -477,10 +496,16 @@ fn attributes_id_dataset_and_events() {
     // Overwriting one dataset entry also overwrites its real attribute.
     doc.add_dataset(&view, "role", "villain").unwrap();
     let node = doc.widget(&view).unwrap();
-    assert_eq!(node.ext().dataset.len(), 3);
     assert_eq!(node.attr("data-role"), Some("villain"));
     assert_eq!(node.attr("data-index"), Some("3"));
     assert_eq!(node.attr("data-extra"), Some("yes"));
+
+    // Replacing the dataset removes entries absent from the new value.
+    doc.set_dataset(&view, [("role", "updated")]).unwrap();
+    let node = doc.widget(&view).unwrap();
+    assert_eq!(node.attr("data-role"), Some("updated"));
+    assert_eq!(node.attr("data-index"), None);
+    assert_eq!(node.attr("data-extra"), None);
 
     // Events are stored verbatim.
     doc.add_event(&view, EventKind::Bind, "tap", "onTap")
@@ -488,23 +513,20 @@ fn attributes_id_dataset_and_events() {
     doc.add_event(&view, EventKind::CaptureCatch, "touchstart", "onTouch")
         .unwrap();
     let node = doc.widget(&view).unwrap();
-    assert_eq!(node.ext().events.len(), 2);
-    assert_eq!(&*node.ext().events[0].name, "tap");
-    assert_eq!(node.ext().events[1].kind, EventKind::CaptureCatch);
+    let events = node.payload().events();
+    assert_eq!(events.len(), 2);
+    assert_eq!(&*events[0].name, "tap");
+    assert_eq!(events[1].kind, EventKind::CaptureCatch);
 }
 
 #[test]
 fn set_css_id_batch() {
     let (mut doc, t) = three_children();
     doc.set_css_id(&[&t.a, &t.b, &t.c], 42).unwrap();
-    assert_eq!(doc.widget(&t.a).unwrap().ext().css_id, 42);
-    assert_eq!(doc.widget(&t.b).unwrap().ext().css_id, 42);
-    assert_eq!(doc.widget(&t.c).unwrap().ext().css_id, 42);
     assert_eq!(doc.widget(&t.a).unwrap().attr("l-css-id"), Some("42"));
     assert_eq!(doc.widget(&t.b).unwrap().attr("l-css-id"), Some("42"));
     assert_eq!(doc.widget(&t.c).unwrap().attr("l-css-id"), Some("42"));
     // The page keeps its default (unset) css_id.
-    assert_eq!(doc.widget(&t.page).unwrap().ext().css_id, 0);
     assert_eq!(doc.widget(&t.page).unwrap().attr("l-css-id"), Some("0"));
 
     // A misrouted handle anywhere in the batch fails the whole call.
@@ -513,17 +535,16 @@ fn set_css_id_batch() {
         doc.set_css_id(&[&t.b, &other_t.a], 7),
         Err(WidgetError::ForeignWidget(_))
     ));
-    assert_eq!(doc.widget(&t.b).unwrap().ext().css_id, 42, "batch atomic");
     assert_eq!(
         doc.widget(&t.b).unwrap().attr("l-css-id"),
         Some("42"),
-        "real attribute batch is atomic too"
+        "batch atomic"
     );
 }
 
 #[test]
 fn set_pseudo_state_toggles_bits() {
-    let mut doc = WidgetTree::new();
+    let mut doc = tree();
     let page = doc.create_page();
     let view = doc.create_view();
     doc.append_element(&view, &page).unwrap();
@@ -542,57 +563,4 @@ fn set_pseudo_state_toggles_bits() {
     let state = doc.pseudo_state(&view).unwrap();
     assert!(!state.contains(ElementState::HOVER));
     assert!(state.contains(ElementState::FOCUS));
-}
-
-// --- dirty state ------------------------------------------------------------------
-
-#[test]
-fn structural_and_attribute_changes_schedule_flush_work() {
-    let mut doc = WidgetTree::new();
-    let page = doc.create_page();
-    let list = doc.create_view();
-    let hint = doc.create_view();
-    doc.append_element(&list, &page).unwrap();
-    doc.append_element(&hint, &page).unwrap();
-    let child = doc.create_view();
-    doc.append_element(&child, &list).unwrap();
-    doc.clear_dirty();
-    // These widgets are never styled, so under the derived dirty semantics
-    // they stay `is_style_dirty` and the tree-level `has_dirty` (dominated by
-    // the never-styled page) is not a meaningful baseline. `clear_dirty`
-    // still resets the reachability spine — assert on that, mirroring
-    // w3c-dom's own `attach_detach_marks_reachability`.
-    assert!(!doc.widget(&page).unwrap().has_dirty_descendants());
-
-    doc.remove_element(&list, &child).unwrap();
-    assert!(
-        doc.widget(&page).unwrap().has_dirty_descendants(),
-        "removal under `list` must be reachable from the page root"
-    );
-    // `dirty_descendants` is the mutation-time reachability signal; a
-    // bystanding sibling gains none of it.
-    assert!(
-        !doc.widget(&hint).unwrap().has_dirty_descendants(),
-        "siblings are not blanket-dirtied at mutation time"
-    );
-
-    doc.clear_dirty();
-    doc.append_element(&child, &list).unwrap();
-    assert!(
-        doc.widget(&list).unwrap().has_dirty_descendants(),
-        "insertion under `list` marks its spine reachable"
-    );
-    assert!(doc.widget(&page).unwrap().has_dirty_descendants());
-
-    doc.clear_dirty();
-    doc.set_classes(&child, "hot").unwrap();
-    // `child`'s ancestor spine gains reachability bits; `child` itself is the
-    // mutated widget, not a spine node, and the bystander gains nothing.
-    assert!(doc.widget(&list).unwrap().has_dirty_descendants());
-    assert!(doc.widget(&page).unwrap().has_dirty_descendants());
-    assert!(!doc.widget(&child).unwrap().has_dirty_descendants());
-    assert!(!doc.widget(&hint).unwrap().has_dirty_descendants());
-    // The tree still needs a flush: every widget here is never-styled, so the
-    // page reports derived `is_style_dirty` and the tree-level query is true.
-    assert!(doc.has_dirty(), "class change must schedule flush work");
 }

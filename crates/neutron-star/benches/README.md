@@ -12,7 +12,7 @@ cache workload also uses the shared production host.
 
 All box-layout scenarios build real `w3c_dom::Document` trees with CSS styles.
 The shared `support::LayoutFixture` resolves those styles outside the timed
-region, then measured calls enter through `StyleEngine::layout_document`.
+region, then measured calls enter through `Document::layout`.
 Consequently the timed path includes w3c-dom's production `&Node` host,
 per-node layout caches, positioned pass, and device-pixel rounding. There is
 no benchmark-only `LayoutNode`, style view, node arena, or parallel tree.

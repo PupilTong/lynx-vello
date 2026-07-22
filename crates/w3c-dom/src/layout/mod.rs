@@ -49,7 +49,7 @@
 //!
 //! # Phases: style first, then layout
 //!
-//! [`StyleEngine::layout_document`] runs the style flush itself (a no-op
+//! [`Document::layout`] runs the style flush itself (a no-op
 //! when nothing is scheduled) and only then lays out — layout reads computed
 //! styles strictly after the restyle traversal has finished, mirroring the
 //! style → layout phase barrier every production engine uses. Every style
@@ -71,7 +71,7 @@
 //! # Using it
 //!
 //! ```
-//! use w3c_dom::StyleEngine;
+//! use w3c_dom::Document;
 //! # use euclid::{Scale, Size2D};
 //! # use stylo::context::QuirksMode;
 //! # use stylo::device::Device;
@@ -113,18 +113,17 @@
 //! #     PointerCapabilities::empty(),
 //! #     PointerCapabilities::empty(),
 //! # );
-//! let mut engine = StyleEngine::new(device);
-//! engine.add_stylesheet_str(
+//! let mut document = Document::new(device);
+//! document.add_stylesheet_str(
 //!     "page { display: flex; width: 100px; height: 50px; } view { flex-grow: 1; }",
 //!     w3c_dom::StylesheetOrigin::Author,
 //! );
-//! let mut document = engine.new_document();
 //! let root = document.create_element("page", ());
 //! document.append_child(root);
 //! let child = document.create_element("view", ());
 //! document.append(root, child);
 //!
-//! engine.layout_document(&mut document); // flushes styles, then lays out
+//! document.layout(); // flushes styles, then lays out
 //! assert_eq!(document.get(child).unwrap().layout().size.width, 100.0);
 //! ```
 //!
@@ -195,13 +194,11 @@ use stylo::servo_arc::Arc;
 
 pub use self::style::StyleView;
 use crate::document::Document;
-use crate::engine::StyleEngine;
-use crate::ext::ExternalState;
 use crate::flush::Parallelism;
 use crate::node::Node;
 
 /// The embedder's leaf content measurement hook, implemented by the
-/// document's [`ExternalState`] payload type `T`.
+/// document's opaque payload type `T`.
 ///
 /// Consulted for every leaf-laid node — childless boxes and the
 /// flow-container fallback — whose size is not already fully determined by
@@ -213,7 +210,7 @@ use crate::node::Node;
 pub trait MeasureLeaf: Sized {
     /// Measure `node`'s content under the engine's content-box constraints.
     ///
-    /// `self` is `node`'s own payload (`node.ext()`), passed as the
+    /// `self` is `node`'s own payload (`node.payload()`), passed as the
     /// receiver so payload state is directly at hand.
     fn measure_leaf(&self, node: &Node<Self>, input: LeafMeasureInput) -> LeafMetrics {
         let _ = (node, input);
@@ -274,15 +271,15 @@ pub(crate) static ANONYMOUS_STYLE: LazyLock<Arc<ComputedValues>> = LazyLock::new
     ComputedValues::initial_values_with_font_override(Font::initial_values())
 });
 
-impl StyleEngine {
-    /// Flush pending styles, then lay the document out against this engine's
+impl<T: Sync + MeasureLeaf> Document<T> {
+    /// Flush pending styles, then lay the document out against its private
     /// viewport and device-pixel ratio. Leaf content measures through the
     /// payload's [`MeasureLeaf`] hook.
     ///
     /// Style-driven relayout is **automatic**: every style flush consumes
     /// relayout-class damage into boundary-stopped layout invalidation while
     /// harvesting it. This includes a standalone
-    /// [`flush_document`](Self::flush_document) performed before this method;
+    /// [`flush_styles`](Self::flush_styles) performed before this method;
     /// its summary may be discarded without losing layout invalidation.
     /// Repaint / stacking-context / overflow-only damage touches no layout
     /// cache. An embedder therefore never invalidates layout for a change
@@ -291,24 +288,21 @@ impl StyleEngine {
     ///
     /// Results land on the nodes: read them with
     /// [`Node::layout`](crate::Node::layout).
-    ///
-    /// # Panics
-    ///
-    /// Panics when `document` was created by a different engine.
-    pub fn layout_document<T: ExternalState + MeasureLeaf>(&self, document: &mut Document<T>) {
+    pub fn layout(&mut self) {
         // Phase barrier: layout reads computed styles only after the restyle
         // traversal and damage harvest have completed (no-op when nothing is
         // scheduled). Harvest itself consumes relayout-class damage into the
-        // caches, so this sink need not retain anything. The call also asserts
-        // this engine owns the document.
-        self.flush_document_with_sink(document, Parallelism::Auto, &mut |_, _| {});
+        // caches, so this sink need not retain anything. The style engine used
+        // here is structurally private to this document.
+        self.flush_styles_with_sink(Parallelism::Auto, &mut |_, _| {});
 
         let viewport = self.device().viewport_size();
         let scale = self.device().device_pixel_ratio().get();
-        host::run_layout(document, Size::new(viewport.width, viewport.height), scale);
+        let viewport = Size::new(viewport.width, viewport.height);
+        host::run_layout(self, viewport, scale);
         // The pass consumed every parked relayout root (`run_layout` re-ran each
         // boundary in place); forget them so they cannot fire again next pass.
-        document.clear_relayout_roots();
+        self.clear_relayout_roots();
     }
 }
 

@@ -96,7 +96,7 @@ impl<'dom, T: MeasureLeaf> LayoutNode for &'dom Node<T> {
                 let view = node.style();
                 let output = {
                     let mut measurer = FnLeafMeasurer::new(|measure_input| {
-                        node.ext().measure_leaf(node, measure_input)
+                        node.payload().measure_leaf(node, measure_input)
                     });
                     compute_leaf_layout(input, &view, &mut measurer)
                 };

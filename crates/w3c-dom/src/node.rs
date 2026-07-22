@@ -5,8 +5,8 @@
 //! node and owns the shared style context. Element nodes carry a tag, id,
 //! classes, attributes, dynamic pseudo-class state, an inline style block,
 //! and the per-element style bookkeeping Stylo needs; text nodes carry
-//! character data. Element/text variants share tree links and an
-//! embedder-owned [`ext`](Node::ext) payload.
+//! character data. Element/text variants share tree links and an opaque
+//! [`payload`](Node::payload) value that is not part of DOM or selector state.
 //!
 //! Nodes are created by
 //! [`Document::create_element`](crate::Document::create_element) or
@@ -40,9 +40,9 @@
 //! - owned by exactly one worker at a time under stylo's traversal discipline (`stylo_data`, an
 //!   [`UnsafeCell`]; see [`crate::traits`] for the per-access safety arguments).
 //!
-//! Everything else (tag/classes/attrs/text/`ext`) is **immutable during a
+//! Everything else (tag/classes/attrs/text/payload) is **immutable during a
 //! flush**: mutation requires `&mut Document`, which
-//! [`StyleEngine::flush_document`](crate::StyleEngine::flush_document) holds
+//! [`Document::flush_styles`](crate::Document::flush_styles) holds
 //! exclusively for the whole traversal.
 
 use std::cell::UnsafeCell;
@@ -307,11 +307,11 @@ pub struct Node<T> {
     pub(crate) local_name: Option<LocalName>,
     /// The node's classes, interned as atoms.
     pub(crate) classes: SmallVec<[Atom; 4]>,
-    /// The node's `id` selector value, distinct from a plain `id` attribute
-    /// (the embedder decides whether/how the two are linked).
+    /// Parsed reflection of the node's `id` DOM attribute.
     pub(crate) id_attr: Option<Atom>,
-    /// Plain attributes, keyed by their interned local names. This is the sole
-    /// source of selector-visible attribute state.
+    /// DOM attributes, keyed by their interned local names. This is the
+    /// complete source of selector-visible attribute state; opaque payloads
+    /// cannot synthesize attributes.
     pub(crate) attrs: FxHashMap<LocalName, String>,
     /// Active dynamic pseudo-classes (`:hover` / `:active` / `:focus`) as
     /// stylo state bits.
@@ -343,11 +343,9 @@ pub struct Node<T> {
     pub(crate) selector_flags: AtomicUsize,
 
     /// Whether some descendant of this node has pending style work. This is
-    /// the bit stylo's traversal walks down
-    /// ([`TElement::has_dirty_descendants`](stylo::dom::TElement::has_dirty_descendants)).
-    /// The node's *own* dirtiness carries no separate flag — see
-    /// [`is_style_dirty`](Node::is_style_dirty), which derives it from stylo's
-    /// scheduling state.
+    /// the internal bit stylo's traversal walks down
+    /// ([`TElement::has_dirty_descendants`](stylo::dom::TElement::has_dirty_descendants));
+    /// embedders cannot inspect or manipulate it.
     dirty_descendants: AtomicBool,
 
     /// Snapshot lifecycle bits ([`SNAPSHOT_PRESENT`] / [`SNAPSHOT_HANDLED`]),
@@ -410,16 +408,16 @@ impl<T> Node<T> {
         tree: *mut Slab<Node<T>>,
         id: NodeId,
         local_name: LocalName,
-        ext: T,
+        payload: T,
     ) -> Self {
-        Self::new(tree, id, NodeData::Element(ext), Some(local_name), None)
+        Self::new(tree, id, NodeData::Element(payload), Some(local_name), None)
     }
 
     /// Create a detached text node bound to its owning document slab.
     /// Crate-only: embedders go through
     /// [`Document::create_text_node`](crate::Document::create_text_node).
-    pub(crate) fn new_text(tree: *mut Slab<Node<T>>, id: NodeId, text: String, ext: T) -> Self {
-        Self::new(tree, id, NodeData::Text(ext), None, Some(text))
+    pub(crate) fn new_text(tree: *mut Slab<Node<T>>, id: NodeId, text: String, payload: T) -> Self {
+        Self::new(tree, id, NodeData::Text(payload), None, Some(text))
     }
 
     fn new(
@@ -588,7 +586,7 @@ impl<T> Node<T> {
         self.classes.iter().map(AsRef::as_ref)
     }
 
-    /// A plain attribute's value, addressed by its authored name.
+    /// A DOM attribute's value, addressed by its authored name.
     ///
     /// Attribute names are converted to stylo's interned [`LocalName`] at
     /// this DOM boundary; embedders do not need to traffic in stylo types.
@@ -603,7 +601,8 @@ impl<T> Node<T> {
         self.attrs.get(name).map(String::as_str)
     }
 
-    /// The element's plain attributes as string name/value pairs.
+    /// The complete DOM attribute map as string name/value pairs, including
+    /// reflected `id`, `class`, and `style` attributes.
     pub fn attrs(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
         self.attrs
             .iter()
@@ -623,26 +622,17 @@ impl<T> Node<T> {
         self.text.as_deref()
     }
 
-    /// The embedder's external-state payload.
+    /// The node's opaque payload.
     ///
     /// # Panics
     ///
     /// Panics when called on the document node, which deliberately has no
-    /// embedder payload.
+    /// payload.
     #[must_use]
-    pub fn ext(&self) -> &T {
+    pub fn payload(&self) -> &T {
         match &self.data {
-            NodeData::Element(ext) | NodeData::Text(ext) => ext,
-            NodeData::Document { .. } => panic!("the document node has no external payload"),
-        }
-    }
-
-    /// Payload mutation remains `Document`-mediated so nodes cannot be
-    /// mutated outside their owning tree.
-    pub(crate) fn ext_mut(&mut self) -> &mut T {
-        match &mut self.data {
-            NodeData::Element(ext) | NodeData::Text(ext) => ext,
-            NodeData::Document { .. } => panic!("the document node has no external payload"),
+            NodeData::Element(payload) | NodeData::Text(payload) => payload,
+            NodeData::Document { .. } => panic!("the document node has no payload"),
         }
     }
 
@@ -655,8 +645,7 @@ impl<T> Node<T> {
     /// Must not be called while a style flush is running on the node's
     /// document (impossible through the public API: a flush holds
     /// `&mut Document`).
-    #[must_use]
-    pub fn has_style_data(&self) -> bool {
+    pub(crate) fn has_style_data(&self) -> bool {
         // SAFETY: reads only the `Option` discriminant; no flush is running
         // (flushes require `&mut Document`, we hold `&self` from it).
         #[expect(unsafe_code, reason = "UnsafeCell discriminant read outside any flush")]
@@ -681,20 +670,10 @@ impl<T> Node<T> {
         slot.and_then(|wrapper| wrapper.borrow().styles.primary.clone())
     }
 
-    /// Store a resolved computed style, creating the stylo `ElementData` slot
-    /// if needed. Used by the standalone
-    /// [`StyleEngine::resolve`](crate::StyleEngine::resolve) path; the flush
-    /// traversal writes styles through stylo itself.
-    pub(crate) fn set_computed_style(&mut self, style: Arc<ComputedValues>) {
-        let slot = self.stylo_data.get_mut();
-        let wrapper = slot.get_or_insert_with(ElementDataWrapper::default);
-        wrapper.borrow_mut().styles.primary = Some(style);
-    }
-
     // --- layout reads ---------------------------------------------------------
 
     /// A borrowed view of the device-pixel-snapped [`Layout`] from the last layout pass
-    /// ([`StyleEngine::layout_document`](crate::StyleEngine::layout_document)):
+    /// ([`Document::layout`](crate::Document::layout)):
     /// the border box painting consumes, `location` relative to the parent's
     /// border box. All-zero when the node has never been laid out or is
     /// inside a `display: none` subtree.
@@ -739,67 +718,12 @@ impl<T> Node<T> {
     }
 
     /// The accumulated stylo selector flags.
-    #[must_use]
-    pub fn selector_flags(&self) -> ElementSelectorFlags {
+    pub(crate) fn selector_flags(&self) -> ElementSelectorFlags {
         ElementSelectorFlags::from_bits_retain(self.selector_flags.load(Ordering::Relaxed))
     }
 
-    /// Whether this node itself has pending style work, **derived from
-    /// stylo's own scheduling state** rather than a separate embedder flag:
-    ///
-    /// - a node stylo has never styled (no [`ElementData`] slot) is always dirty — it needs a full
-    ///   style computation the moment the traversal reaches it;
-    /// - a styled node is dirty iff a pre-mutation snapshot is pending (`snapshot_present`) or
-    ///   stylo has a queued
-    ///   [`RestyleHint`](stylo::invalidation::element::restyle_hints::RestyleHint) for it
-    ///   (`ElementData::hint` is non-empty).
-    ///
-    /// Dirtiness is an **element** concept: only element nodes enter the
-    /// cascade. The document node at slot zero and text nodes never receive
-    /// `ElementData`, so the "no data ⇒ dirty" rule above would perpetually
-    /// mislabel them dirty; they are reported clean instead. That preserves the
-    /// pre-derived contract (the document node's dirty bit defaulted clear) and
-    /// scopes the derived rule to the only nodes the scheduler ever consults:
-    /// [`Document::needs_flush`](crate::Document::needs_flush) reads the
-    /// document element ([`root_element`](crate::Document::root_element)), and
-    /// the flush roots the traversal there.
-    ///
-    /// This is a scheduling signal, not ground truth about the tree: the
-    /// authoritative "does the tree need a flush" query is the document
-    /// element's bits ([`Document::needs_flush`](crate::Document::needs_flush)
-    /// — this OR [`has_dirty_descendants`](Self::has_dirty_descendants)).
-    ///
-    /// Must not be called while a style flush is running on the node's
-    /// document (impossible through the public API: a flush holds
-    /// `&mut Document`, this borrows `&self` from it) — the same
-    /// no-concurrent-flush contract as [`computed_style`](Self::computed_style).
-    ///
-    /// [`ElementData`]: stylo::data::ElementData
-    #[must_use]
-    pub fn is_style_dirty(&self) -> bool {
-        // Dirtiness is an element concept (see the method docs): the document
-        // node and text nodes never enter the cascade, so they never carry
-        // element style data and must not be reported dirty for lacking it.
-        if !self.is_element() {
-            return false;
-        }
-        // SAFETY: no flush is running (flushes require `&mut Document`, and
-        // we hold `&self` borrowed from it), so reading the slot and taking a
-        // shared borrow of the wrapper cannot race.
-        #[expect(unsafe_code, reason = "UnsafeCell read outside any flush")]
-        let slot = unsafe { (*self.stylo_data.get()).as_ref() };
-        match slot {
-            // Never styled: dirty until it is reached and styled.
-            None => true,
-            // Styled: dirty iff a snapshot is pending or a restyle hint is
-            // queued.
-            Some(wrapper) => self.snapshot_present() || !wrapper.borrow().hint.is_empty(),
-        }
-    }
-
     /// Whether a descendant has pending style work.
-    #[must_use]
-    pub fn has_dirty_descendants(&self) -> bool {
+    pub(crate) fn has_dirty_descendants(&self) -> bool {
         self.dirty_descendants.load(Ordering::Relaxed)
     }
 
@@ -840,9 +764,9 @@ impl<T> Node<T> {
     }
 
     /// Take ownership of the payload when the node is freed.
-    pub(crate) fn into_ext(self) -> T {
+    pub(crate) fn into_payload(self) -> T {
         match self.data {
-            NodeData::Element(ext) | NodeData::Text(ext) => ext,
+            NodeData::Element(payload) | NodeData::Text(payload) => payload,
             NodeData::Document { .. } => unreachable!("the document node is never removed"),
         }
     }
@@ -963,10 +887,10 @@ impl<T> Node<T> {
     }
 }
 
-// `stylo_data` (an `UnsafeCell`) and the `ext` payload are deliberately
+// `stylo_data` (an `UnsafeCell`) and the opaque payload are deliberately
 // omitted: the former is not `Debug` (and reading it would need the
 // no-concurrent-flush invariant — stylo debug-prints nodes *during* the
-// traversal, which also rules out the derived `is_style_dirty` here), and
+// traversal), and
 // printing the latter would demand a `T: Debug` bound this impl cannot carry
 // — stylo's `TNode`/`TElement` require `&Node<T>: Debug` for every payload
 // type.

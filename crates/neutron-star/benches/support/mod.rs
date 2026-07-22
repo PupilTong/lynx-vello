@@ -1,7 +1,7 @@
 //! Shared production-host fixture for box-layout benchmarks.
 //!
 //! Construction and the initial style flush happen in Divan's input factory;
-//! measured calls enter through `StyleEngine::layout_document`, exactly like
+//! measured calls enter through `Document::layout`, exactly like
 //! an embedder. The benchmark suite therefore exercises neutron-star through
 //! w3c-dom's real `&Node` handle, computed styles, per-node caches, positioned
 //! pass, and rounding pass instead of maintaining a benchmark-only host.
@@ -27,7 +27,7 @@ use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Display, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use w3c_dom::layout::{Layout, LeafMeasureInput, LeafMetrics, MeasureLeaf};
-use w3c_dom::{Document, ExternalState, Node, NodeId, StyleEngine};
+use w3c_dom::{Document, Node, NodeId};
 
 #[derive(Debug)]
 struct BenchFontMetrics;
@@ -73,8 +73,6 @@ struct BenchLeaf {
     first_baseline: Option<f32>,
 }
 
-impl ExternalState for BenchLeaf {}
-
 impl MeasureLeaf for BenchLeaf {
     fn measure_leaf(&self, _node: &Node<Self>, input: LeafMeasureInput) -> LeafMetrics {
         let size = Size::new(
@@ -91,7 +89,6 @@ impl MeasureLeaf for BenchLeaf {
 /// A styled w3c-dom document ready for a cold production layout pass.
 #[derive(Debug)]
 pub(super) struct LayoutFixture {
-    engine: StyleEngine,
     document: Document<BenchLeaf>,
     root: NodeId,
     node_count: usize,
@@ -110,13 +107,11 @@ impl LayoutFixture {
                 _ => None,
             })
             .expect("every box benchmark root declares its production display mode");
-        let engine = StyleEngine::new(device(viewport));
-        let mut document = engine.new_document();
+        let mut document = Document::new(device(viewport));
         let root = document.create_element("page", BenchLeaf::default());
         document.set_inline_style(root, root_style);
         document.append_child(root);
         Self {
-            engine,
             document,
             root,
             node_count: 1,
@@ -159,7 +154,7 @@ impl LayoutFixture {
 
     /// Resolve all CSS outside the timed region while leaving layout caches cold.
     pub(super) fn prepare(mut self) -> Self {
-        self.engine.flush_document(&mut self.document);
+        self.document.flush_styles();
         let display = self
             .document
             .get(self.root)
@@ -178,7 +173,7 @@ impl LayoutFixture {
     }
 
     pub(super) fn run(&mut self) -> Layout {
-        self.engine.layout_document(&mut self.document);
+        self.document.layout();
         self.node_layout(self.root)
     }
 

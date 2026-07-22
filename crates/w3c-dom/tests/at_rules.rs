@@ -7,7 +7,7 @@
 //! Descriptor-level assertions parse a stylesheet under a test-owned
 //! `SharedRwLock` (the same public stylo API `w3c-dom` builds on) and read
 //! the rule objects back; registration-level assertions go through
-//! `StyleEngine`'s rule builders.
+//! each document's private rule builders.
 
 mod common;
 
@@ -18,7 +18,7 @@ use stylo::properties::font_face::DescriptorId;
 use stylo::shared_lock::SharedRwLock;
 use stylo::stylesheets::{AllowImportRules, CssRule, Origin, Stylesheet};
 use stylo_traits::ToCss;
-use w3c_dom::{StyleEngine, StylesheetOrigin};
+use w3c_dom::{Document, StylesheetOrigin};
 
 /// Parse one stylesheet under a private lock and return `(lock, rules)`.
 fn parse_sheet(css: &str) -> (SharedRwLock, Stylesheet) {
@@ -102,23 +102,21 @@ fn keyframe_selectors_normalize_and_reject() {
 // Registration behavior through the engine's direct-construction builders.
 #[test]
 fn keyframes_rules_register_and_resolve_by_name() {
-    let mut engine = StyleEngine::new(device(800.0, 600.0));
-    let rule = engine
+    let mut doc: Document<()> = Document::new(device(800.0, 600.0));
+    let rule = doc
         .build_keyframes_rule("slide", "from { opacity: 0 } to { opacity: 1 }")
         .expect("named rule builds");
-    engine.append_rules(vec![rule], StylesheetOrigin::Author);
+    doc.append_rules(vec![rule], StylesheetOrigin::Author);
     assert!(
-        engine
-            .build_keyframes_rule("", "from { opacity: 0 }")
+        doc.build_keyframes_rule("", "from { opacity: 0 }")
             .is_none(),
         "an empty animation name is invalid"
     );
 
-    let mut doc: w3c_dom::Document<()> = engine.new_document();
-    let root = doc.create_node("page", ());
+    let root = doc.create_element("page", ());
     let root_ref = doc.get(root).expect("root is live");
-    assert!(engine.has_keyframes_animation("slide", root_ref));
-    assert!(!engine.has_keyframes_animation("missing", root_ref));
+    assert!(doc.has_keyframes_animation("slide", root_ref));
+    assert!(!doc.has_keyframes_animation("missing", root_ref));
 }
 
 // C++: font_face_parser_test.cc::ParseRequiredDescriptorsAndRanges.
@@ -331,10 +329,10 @@ fn font_face_src_list_is_forgiving_per_entry() {
 #[test]
 fn font_face_rules_register_in_the_stylist() {
     let mut doc = Doc::new();
-    assert_eq!(doc.engine.font_face_count(), 0);
+    assert_eq!(doc.dom.font_face_count(), 0);
     doc.add_css("@font-face { font-family: A; src: url(a.woff2); }");
     doc.add_css("@font-face { font-family: B; src: url(b.woff2); }");
-    assert_eq!(doc.engine.font_face_count(), 2);
+    assert_eq!(doc.dom.font_face_count(), 2);
 }
 
 // Skipped (skip-internal): css_font_face_token_unittest.cc dictionary

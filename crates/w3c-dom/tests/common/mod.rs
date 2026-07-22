@@ -45,9 +45,9 @@ use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_traits::{CSSPixel, DevicePixel};
-use w3c_dom::{Document, ElementState, FlushSummary, NodeId, StyleEngine, StylesheetOrigin};
+use w3c_dom::{Document, ElementState, FlushSummary, NodeId, StylesheetOrigin};
 
-/// The base URL every harness parse uses (mirrors `StyleEngine::new`).
+/// The base URL every harness parse uses (mirrors `Document::new`).
 #[must_use]
 pub fn url_data() -> UrlExtraData {
     UrlExtraData::from(url::Url::parse("about:blank").expect("about:blank is a valid URL"))
@@ -103,12 +103,11 @@ impl FontMetricsProvider for TestFontMetricsProvider {
     }
 }
 
-/// An engine + document + root, with node construction and mutation helpers.
+/// A document + root, with node construction and mutation helpers.
 /// Every mutation goes through `Document` methods, which carry their own
 /// snapshot/invalidation bookkeeping.
 #[derive(Debug)]
 pub struct Doc {
-    pub engine: StyleEngine,
     pub dom: Document<()>,
     pub root: NodeId,
 }
@@ -131,22 +130,20 @@ impl Doc {
     /// A document over an explicit device.
     #[must_use]
     pub fn with_device(device: Device) -> Self {
-        let engine = StyleEngine::new(device);
-        let mut dom = engine.new_document();
-        let root = dom.create_node("page", ());
+        let mut dom = Document::new(device);
+        let root = dom.create_element("page", ());
         dom.append_child(root);
-        Self { engine, dom, root }
+        Self { dom, root }
     }
 
     /// Append an author-origin stylesheet.
     pub fn add_css(&mut self, css: &str) {
-        self.engine
-            .add_stylesheet_str(css, StylesheetOrigin::Author);
+        self.dom.add_stylesheet_str(css, StylesheetOrigin::Author);
     }
 
     /// Append a user-agent-origin stylesheet.
     pub fn add_ua_css(&mut self, css: &str) {
-        self.engine
+        self.dom
             .add_stylesheet_str(css, StylesheetOrigin::UserAgent);
     }
 
@@ -159,7 +156,7 @@ impl Doc {
     /// values may be single- or double-quoted.
     pub fn el(&mut self, parent: NodeId, spec: &str) -> NodeId {
         let parsed = NodeSpec::parse(spec);
-        let id = self.dom.create_node(&parsed.tag, ());
+        let id = self.dom.create_element(&parsed.tag, ());
         if let Some(id_attr) = parsed.id {
             self.dom.set_id_attr(id, Some(&id_attr));
         }
@@ -182,7 +179,7 @@ impl Doc {
     /// returning the [`FlushSummary`] (per-node restyle damage + whether a
     /// traversal ran).
     pub fn flush(&mut self) -> FlushSummary {
-        self.engine.flush_document(&mut self.dom)
+        self.dom.flush_styles()
     }
 
     /// The flushed computed style of `id`. Panics when `id` is stale or the
@@ -393,12 +390,11 @@ pub fn media_matches_on(
     scheme: PrefersColorScheme,
 ) -> bool {
     const PROBE: &str = ".probe { color: rgb(1, 2, 3) }";
-    let mut engine = StyleEngine::new(device_with(width, height, dpr, scheme));
-    engine.add_stylesheet_with_media(PROBE, StylesheetOrigin::Author, query);
-    let mut doc: Document<()> = engine.new_document();
-    let probe = doc.create_node("view", ());
+    let mut doc: Document<()> = Document::new(device_with(width, height, dpr, scheme));
+    doc.add_stylesheet_with_media(PROBE, StylesheetOrigin::Author, query);
+    let probe = doc.create_element("view", ());
     doc.add_class(probe, "probe");
-    let style = engine.resolve(doc.get(probe).expect("fresh node"), None);
+    let style = doc.resolve_style(doc.get(probe).expect("fresh node"), None);
     style.clone_color() == rgb(1, 2, 3)
 }
 

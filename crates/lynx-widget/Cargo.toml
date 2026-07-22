@@ -22,11 +22,9 @@ euclid = { workspace = true }
 # rules straight into stylo objects (see `src/ingest.rs`).
 lynx-template-decoder = { workspace = true }
 
-# The Lynx adapter names computed values, Device metrics, atoms, and
-# `ExternalState` attribute names directly. Lock ownership and the cascade
-# remain encapsulated by `w3c-dom`.
+# The Lynx adapter names computed values and Device metrics directly. Lock
+# ownership and the cascade remain encapsulated by `w3c-dom`.
 stylo = { workspace = true }
-stylo_atoms = { workspace = true }
 stylo_traits = { workspace = true }
 
 [dev-dependencies]
