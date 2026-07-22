@@ -35,8 +35,10 @@ stylo traits use), style views fetched on engine request and lending
 `ComputedValues` fields (including the effective-containment fold that makes a
 `contain: strict` box a relayout boundary), display dispatch (including
 `content-visibility: hidden` skipped-contents routing and the
-content-visibility-implied fixed/absolute containing block), per-node layout
-state on each `Node`, the fixed/hoisted positioned pass (pruned at skipped
+content-visibility-implied fixed/absolute containing block), durable rounded/
+unrounded results on each `Node` plus `NodeId`-indexed measurement-cache and
+static-position state in the document's layout secondary arena, the
+fixed/hoisted positioned pass (pruned at skipped
 subtrees), device-pixel rounding, and automatic
 style-damage→`invalidate_layout` consumption with in-place boundary re-layout
 that refreshes the boundary's scrollable `content_size`, with
@@ -88,7 +90,7 @@ Text behavior is inventoried in
 | --- | --- | --- |
 | `neutron-star` | Implemented Flex, Grid, Relative, and Linear algorithms; their style-view protocols speaking stylo computed values (including the `relative-*` and `linear-*` longhands); the text style/run protocol; closed natural-size and Parley leaf paths, hidden-subtree cleanup, positioned layout, rounding; shared private arithmetic; geometry and layout IO; cache semantics | Node/style/content storage, display dispatch, arbitrary host content/measurers, DOM/widget types, an engine-side style value vocabulary (it re-exports stylo's), resolved device-unit policy (`rpx`, etc.), stacking/paint order |
 | `neutron-star::text` (unconditional) | Parley context/font registration, whitespace processing, shaping, line breaking, intrinsic and height-for-width measurement, baselines, and retained `TextLayout` artifact types | Text truncation and ellipsis, inline boxes, paint styling, widget/attribute lowering, resource fetching, or host cache and per-node slot storage |
-| `w3c-dom::layout` (implemented) | `LayoutNode` implemented directly on `&Node<T>` (the stylo-trait handle; no wrapper, no adapter objects); style views fetched on engine request (`Arc` bump of the node's own style data) lending `ComputedValues` fields (logical `relative-*-inline-*` lowering; the W3C fixed/absolute containing-block rule expressed through the protocol's `position()` scheme; anonymous box geometry plus inherited parent font/text values for text nodes); display dispatch (flex/grid/linear/relative, `display: none` hiding, `content-visibility: hidden` skipped-contents routing before the cache, natural-size leaf, concrete Parley text); document-owned `TextContext`; mutually exclusive internal `NaturalSize`/literal-text/retained-artifact state in the node's one nullable content slot; per-node `LayoutData` on `Node` (`AtomicRefCell` — measurement cache, unrounded + rounded layouts, persistent static positions) with automatic dirty-path invalidation when content changes; the positioned pass as a fresh pre-order tree walk each pass (cache-proof for hoisted nodes whose parents answer from cache, pruned at skipped-contents subtrees so a hoisted descendant cannot be revived, and the engine's effective-`order`-0 paint rule for out-of-flow children); device-pixel rounding; the effective-containment fold on the style view (feeding both the relayout-boundary predicate and the content-visibility-aware fixed/absolute containing-block predicate); **automatic style-damage consumption** (every harvest boundary-stops `Document::invalidate_layout` per relayout-damaged node before returning/streaming damage; it also evicts direct text children's measurement caches and retained artifacts because those children read inherited style from the damaged element but have no Stylo damage record of their own; `Document::layout` re-runs each parked `contain: strict`/skipped boundary in place before the root pass, merging the re-run's scrollable `content_size` back into the boundary's stored layout); and the `Document::invalidate_layout` API embedders still call for mutations the style system cannot see | A second layout algorithm, generic content-measurement callbacks, engine-side style copies, Lynx widget vocabulary or device-unit policy (`rpx`), Lynx computed defaults (cascade/UA-sheet policy), text shaping algorithms |
+| `w3c-dom::layout` (implemented) | `LayoutNode` implemented directly on `&Node<T>` (the stylo-trait handle; no wrapper, no adapter objects); style views fetched on engine request by borrowing the node's Stylo `ElementData` guard (no `Arc<ComputedValues>` refcount bump) and lending `ComputedValues` fields (logical `relative-*-inline-*` lowering; the W3C fixed/absolute containing-block rule expressed through the protocol's `position()` scheme; anonymous box geometry plus inherited parent font/text values for text nodes); display dispatch (flex/grid/linear/relative, `display: none` hiding, `content-visibility: hidden` skipped-contents routing before the cache, natural-size leaf, concrete Parley text); document-owned `TextContext`; mutually exclusive internal `NaturalSize`/literal-text/retained-artifact state in the node's one nullable content slot; durable unrounded + rounded layouts on the primary `Node`, with measurement cache and persistent static position in an `AtomicRefCell<LayoutData>` in the document's NodeId-indexed layout secondary slab; automatic dirty-path invalidation when content changes; the positioned pass as a fresh pre-order tree walk each pass (cache-proof for hoisted nodes whose parents answer from cache, pruned at skipped-contents subtrees so a hoisted descendant cannot be revived, and the engine's effective-`order`-0 paint rule for out-of-flow children); device-pixel rounding; the effective-containment fold on the style view (feeding both the relayout-boundary predicate and the content-visibility-aware fixed/absolute containing-block predicate); **automatic style-damage consumption** (every harvest boundary-stops `Document::invalidate_layout` per relayout-damaged node before returning/streaming damage; it also evicts direct text children's measurement caches and retained artifacts because those children read inherited style from the damaged element but have no Stylo damage record of their own; `Document::layout` re-runs each parked `contain: strict`/skipped boundary in place before the root pass, merging the re-run's scrollable `content_size` back into the boundary's stored layout); and the `Document::invalidate_layout` API embedders still call for mutations the style system cannot see | A second layout algorithm, generic content-measurement callbacks, engine-side style copies, Lynx widget vocabulary or device-unit policy (`rpx`), Lynx computed defaults (cascade/UA-sheet policy), text shaping algorithms |
 | Remaining runtime integration (`lynx-widget`, future) | Lynx view metrics and `rpx` policy; Lynx-specific text attributes, element-backed raw text and truncation; `staggered` integration; sticky lowering | A second Flex/Grid/Relative/Linear/text-measurement implementation, arbitrary host content, engine-side copies of styles, the style-damage→layout wiring (now engine-internal in `w3c-dom`) |
 
 The engine/host seam keeps the engine storage-free even though its
@@ -99,7 +101,8 @@ so a stylo-backed host serves style views with no translation layer. Both
 are first-class peers rather than translations into Flex or Grid. The
 concrete adapter proved as mechanical as designed (`w3c-dom::layout`):
 style views as direct `ComputedValues` field reads, per-node layout slots
-on the host's nodes, and one display-mode dispatch — the same `Copy`-handle
+resolved through the host's primary/secondary arenas, and one display-mode
+dispatch — the same `Copy`-handle
 shape the tree already implements for stylo's `TNode`/`TElement`.
 
 ## The protocol in one page
@@ -229,15 +232,17 @@ plain shared borrows, so a borrowed style view stays valid across recursive
 child layout by construction (the protocol has no `&mut` anywhere). Mutable
 results — unrounded/final layouts, static positions, cache slots,
 measurement contexts, retained text artifacts — live in **host-owned
-interior-mutable slots on the nodes** (`Cell`/`RefCell`; or
-`AtomicRefCell`/`UnsafeCell` under the host's own discipline, exactly how
-the tree already stores stylo's per-element style data). Layout is
+interior-mutable slots** (`Cell`/`RefCell`; or `AtomicRefCell`/`UnsafeCell`
+under the host's own discipline). The protocol does not prescribe whether a
+slot is inline or reached through an ID. The concrete `w3c-dom` host keeps
+durable layouts on the primary node and cache/static-position state in a
+document-owned NodeId-aligned secondary `Slab`; the primary node slab selects
+the ID, every side slab asserts the same free-list key, and removal drops all
+four entries before reuse. Layout is
 single-threaded, and two rules keep runtime borrow tracking trivial: host
 dispatch must not hold a per-node slot borrow across the recursive
 `compute_child_layout` call, and the engine never re-enters a node's cache
-while that node's Parley artifact slots are borrowed. Per-node derived state therefore
-lives *on the node* — no id-keyed side tables, no parallel source/session
-arenas kept in lockstep.
+while that node's Parley artifact slots are borrowed.
 
 A layout run observes one immutable **epoch**. Style, content, child order,
 and handle validity cannot change during recursion; such mutations are
@@ -508,6 +513,38 @@ the painting — layout's job is to never be the frame's bottleneck.
   cache traffic vs `f64`; Starlight/Yoga/Taffy all agree).
   No `NaN` sentinel games — unknowns are `Option<f32>`/enum variants, and
   boundary values must be finite (debug-asserted).
+- **Document data is split by phase, benchmark-gated.** `w3c-dom`'s primary
+  Node arena keeps topology/attributes, computed styles, and durable layout
+  results; `T`, Stylo traversal state, and layout cache/static-position state
+  occupy NodeId-indexed secondary `Slab`s. The split was retained after
+  alternating baseline/head CodSpeed walltime runs (three run medians, 100
+  samples per benchmark): 12 of 16 production Grid scenarios improved by more
+  than 5%, including fixed/fractional tracks (15%), flex-track freezing
+  (11–14%), intrinsic spanning (10%), the warm root cache hit (13%), and
+  sparse-256 placement (14%). The lone slower Grid median was sparse-4096 at
+  3.2%. The real-`WidgetState` style suite stayed within a 3% regression while
+  initial sequential/parallel flushes improved 7%/5%; batched construction and
+  destruction of 1,057 widgets cost 1.3% more. Replacing the initial
+  `Vec<Option<_>>` side-storage prototype with lockstep `Slab`s was
+  performance-neutral in the follow-up run (1k-widget construction/drop moved
+  from 2.507 ms to 2.463 ms; style medians otherwise stayed inside roughly
+  ±5% run noise), so that change is retained for uniform lifecycle semantics,
+  not claimed as a separate speedup. A live-node slot fast path avoids
+  rechecking secondary occupancy after `&Node` has already proved it. The
+  primary slab selects IDs and removal clears all four slabs before reuse, so
+  locality does not weaken lifecycle ownership.
+- **Layout style views do not bump computed-style refcounts.** A `StyleView`
+  holds Stylo's element-data read guard and lends its existing
+  `Arc<ComputedValues>` target instead of cloning the Arc. Same-machine
+  three-run CodSpeed A/B medians (100 samples per run) improved fixed/fractional
+  cold Grid by 11.4% (8.163 → 7.229 ms), nested cold by 13.7% (3.950 → 3.408
+  ms), nested dirty by 13.5% (4.603 → 3.983 ms), warm descendants by 6.4%
+  (9.508 → 8.898 ms), and the warm root cache path by 4.1% (21.610 → 20.730
+  ms). An experiment that bypassed `AtomicRefCell` layout-slot borrow counters
+  under a scoped exclusive-pass proof was not retained: most medians moved
+  only within ±2%, while the warm root-cache case regressed about 4%, and
+  encoding the exclusive layout-pass proof safely would require additional
+  TLS/phase bookkeeping.
 - **Shared setup, flat hot scratch.** Flex, Grid, Relative, and Linear reuse
   the same
   inline, statically-dispatched ordering and box-resolution helpers. Their

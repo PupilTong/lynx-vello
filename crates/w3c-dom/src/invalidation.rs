@@ -28,6 +28,8 @@
 //! fields mutated here; the embedder payload is opaque and cannot inject
 //! synthetic matching state.
 
+use std::sync::atomic::Ordering;
+
 use selectors::matching::ElementSelectorFlags;
 use stylo::LocalName;
 use stylo::attr::{AttrIdentifier, AttrValue};
@@ -44,7 +46,7 @@ use stylo_atoms::Atom;
 use stylo_traits::ParsingMode;
 
 use crate::document::{DOCUMENT_NODE_ID, Document, NodeId};
-use crate::node::Node;
+use crate::node::{Node, SNAPSHOT_PRESENT};
 
 /// Selector-flag bits on a parent that make child-list mutations observable
 /// by some matched rule. (`HAS_SLOW_SELECTOR_NTH`/`_NTH_OF` only refine the
@@ -644,19 +646,24 @@ impl<T> Document<T> {
         if !node.has_style_data() {
             return None;
         }
-        if node.snapshot.is_none() {
+        if self
+            .styling_data(id)
+            .expect("live node must have styling-arena state")
+            .snapshot
+            .is_none()
+        {
             // First snapshot for this node since the last flush: capture the
             // old state.
             let snapshot = build_snapshot(node);
-            let node = self
-                .tree_mut()
-                .get_mut(id)
+            let styling = self
+                .styling_data_mut(id)
                 .expect("live node disappeared while recording its snapshot");
-            node.snapshot = Some(Box::new(snapshot));
-            node.set_snapshot_present();
+            styling.snapshot = Some(Box::new(snapshot));
+            styling
+                .snapshot_flags
+                .fetch_or(SNAPSHOT_PRESENT, Ordering::Relaxed);
         }
-        self.tree_mut()
-            .get_mut(id)
+        self.styling_data_mut(id)
             .expect("live node disappeared while refining its snapshot")
             .snapshot
             .as_deref_mut()

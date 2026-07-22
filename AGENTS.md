@@ -144,19 +144,26 @@ useful signal for currently-compatible versions of those libraries.
   the future preloaded module graph belong here rather than in the generic
   QuickJS bridge or engine-neutral protocol.
 - `crates/w3c-dom` — generic W3C-DOM-subset document tree and
-  standards-oriented CSS computation core. Owns the single, distinct
-  fixed-address `Box<Slab<Node<T>>>`: slot zero is the real DOM Document node
-  and owns the document style context; later slots are element/text nodes,
-  addressed by raw `usize` indices (ONE TREE policy: nodes are created and
-  mutated only through `Document` methods, with pending snapshots stored on
-  the affected nodes). Every node points directly back to the slab, and the
+  standards-oriented CSS computation core. Owns one fixed-address boxed arena
+  set of four `Slab`s: a primary `Slab<Node<T>>` (slot zero is the real DOM
+  Document node and carries its node-visible style context; later slots are
+  element/text nodes), plus NodeId-aligned payload, Stylo
+  traversal/invalidation, and layout measurement-cache/out-of-flow slabs. The
+  primary slab selects each raw-`usize` ID; every side slab allocates/removes
+  in lockstep and asserts it received that same key (the payload slab reserves
+  a payload-less sentinel at document slot zero). Node removal drops all four
+  entries before the ID can be reused (ONE TREE policy: nodes are created and
+  mutated only through `Document` methods). Computed styles and
+  durable rounded/unrounded layout results remain in the primary Node arena.
+  Every node points directly back to the fixed arena set, and the
   same plain one-word `&Node` implements Stylo's document/node/element traits
   according to its `NodeData` (styling runs in place, no mirror tree),
   inline-style parsing, and a private per-document `StyleEngine` containing
   the `Stylist`, cascade pipeline, device, stylesheet set, and
   `SharedRwLock`. `Document::new` creates that entire context afresh, so
-  different documents cannot share stylesheets. The generic `T` payload remains stored on each node but is
-  opaque and read-only to the DOM core; selector-visible state comes only
+  different documents cannot share stylesheets. The generic `T` payload remains associated with
+  each element/text node in the NodeId-aligned payload slab but is opaque and read-only to the DOM
+  core; selector-visible state comes only
   from real DOM fields, so payloads cannot synthesize attributes. DOM setters
   own snapshot/restyle scheduling, while stylesheet and device methods on the
   document schedule its root in the same call — embedders cannot
@@ -174,10 +181,10 @@ useful signal for currently-compatible versions of those libraries.
   Its `layout` module is the concrete `neutron-star` host:
   `Document::layout` flushes styles then lays out with
   `LayoutNode` implemented **directly on `&Node<T>`** (the same one-word
-  handle as the stylo traits — no wrapper, no adapter objects) — style
-  views are fetched when the engine asks (an `Arc` bump out of the node's
-  own style data) and lend stylo `ComputedValues` fields straight to the
-  engine (no translation layer), display dispatch routes
+  handle as the stylo traits — no wrapper, no adapter objects) — style views
+  are fetched when the engine asks and borrow the node's Stylo `ElementData`
+  guard, lending `ComputedValues` fields straight to the engine with no
+  `Arc` refcount bump or translation layer; display dispatch routes
   flex/grid/linear/relative with `display: none` hiding and a leaf
   fallback, text nodes through concrete Parley measurement, and the
   positioned pass implements the W3C `position: fixed`
@@ -186,11 +193,12 @@ useful signal for currently-compatible versions of those libraries.
   node content; its internal update path automatically invalidates the
   affected cache path. Mutually exclusive literal text, natural size, and
   retained text artifacts reuse the node's single nullable content pointer.
-  Per-node derived layout state (measurement cache + layouts) lives **on each `Node`**
-  (`AtomicRefCell<LayoutData>`, the Servo layout_data pattern; read via
-  `Node::layout`), so it is created and dropped with its node. Style-driven
-  relayout is automatic (every style flush consumes harvested `StyleDamage`
-  into boundary-stopped invalidation); `Document::invalidate_layout` remains the
+  Durable rounded and unrounded layout results live **on each `Node`** (read
+  via `Node::layout`); measurement cache and
+  static-position state live in the document's layout secondary arena behind
+  `AtomicRefCell<LayoutData>`. Style-driven relayout is automatic (every style
+  flush consumes harvested `StyleDamage` into boundary-stopped invalidation);
+  `Document::invalidate_layout` remains the
   embedder API for the mutations styles cannot see (content/child-list changes
   with identical computed styles). The internal natural-size update path
   performs that invalidation itself.

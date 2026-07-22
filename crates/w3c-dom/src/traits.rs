@@ -4,7 +4,9 @@
 //! values distinguished by their `NodeData`. Consequently the same `&Node`
 //! type implements [`TNode`], [`TElement`], [`TDocument`], and the unused
 //! [`TShadowRoot`] associated-type stub. No document/node wrapper or iterator
-//! adapter is needed, and Stylo traverses the one slab-backed tree in place.
+//! adapter is needed, and Stylo traverses the one primary-arena-backed tree
+//! in place while its ancillary traversal state is resolved from the styling
+//! secondary arena.
 //!
 //! Implementation note: inside these impls, inherent `Node` methods that
 //! share a name with a trait method (`parent`, `first_child`,
@@ -307,11 +309,16 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
     }
 
     fn store_children_to_process(&self, n: isize) {
-        self.children_to_process.store(n, Ordering::SeqCst);
+        self.styling_data()
+            .children_to_process
+            .store(n, Ordering::SeqCst);
     }
 
     fn did_process_child(&self) -> isize {
-        self.children_to_process.fetch_sub(1, Ordering::SeqCst) - 1
+        self.styling_data()
+            .children_to_process
+            .fetch_sub(1, Ordering::SeqCst)
+            - 1
     }
 
     unsafe fn ensure_data(&self) -> ElementDataMut<'_> {
@@ -323,7 +330,7 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
                 self.in_flush(),
                 "TElement::ensure_data called outside a style traversal"
             );
-            self.slot_guard.begin_write()
+            self.styling_data().slot_guard.begin_write()
         };
         // SAFETY: traversal discipline — the caller holds exclusive access to
         // this node, so creating/borrowing its `ElementData` cannot race.
@@ -339,19 +346,21 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
                 self.in_flush(),
                 "TElement::clear_data called outside a style traversal"
             );
-            self.slot_guard.begin_write()
+            self.styling_data().slot_guard.begin_write()
         };
         // SAFETY: traversal discipline — exclusive access to this node, no
         // concurrent borrow of its stylo state.
         unsafe {
             *self.stylo_data.get() = None;
         }
-        self.selector_flags.store(0, Ordering::Relaxed);
+        self.styling_data()
+            .selector_flags
+            .store(0, Ordering::Relaxed);
     }
 
     fn has_data(&self) -> bool {
         #[cfg(debug_assertions)]
-        let _access = self.slot_guard.begin_read();
+        let _access = self.styling_data().slot_guard.begin_read();
         // SAFETY: reads only the `Option` discriminant; the slot is only
         // created/removed by this node's owning worker (or under
         // `&mut Document`), never concurrently with this read.
@@ -360,7 +369,7 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
 
     fn borrow_data(&self) -> Option<ElementDataRef<'_>> {
         #[cfg(debug_assertions)]
-        let _access = self.slot_guard.begin_read();
+        let _access = self.styling_data().slot_guard.begin_read();
         // SAFETY: `ElementDataWrapper` tracks borrows internally (debug
         // builds); the traversal discipline rules out a concurrent mutable
         // borrow.
@@ -375,7 +384,7 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
         // Slot-wise this is a *read* (`as_ref`); the mutable borrow of the
         // inner data is tracked by `ElementDataWrapper` itself.
         #[cfg(debug_assertions)]
-        let _access = self.slot_guard.begin_read();
+        let _access = self.styling_data().slot_guard.begin_read();
         // SAFETY: as `borrow_data`, plus exclusive access under the traversal
         // discipline.
         unsafe {
@@ -590,7 +599,8 @@ impl<T: Sync> Element for &Node<T> {
         // both push parent flags onto the shared parent.
         let self_flags = flags.for_self();
         if !self_flags.is_empty() {
-            self.selector_flags
+            self.styling_data()
+                .selector_flags
                 .fetch_or(self_flags.bits(), Ordering::Relaxed);
         }
         let parent_flags = flags.for_parent();
@@ -598,6 +608,7 @@ impl<T: Sync> Element for &Node<T> {
             && let Some(parent) = Node::parent(*self)
         {
             parent
+                .styling_data()
                 .selector_flags
                 .fetch_or(parent_flags.bits(), Ordering::Relaxed);
         }

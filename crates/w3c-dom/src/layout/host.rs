@@ -7,8 +7,8 @@
 //! (the existing [`ChildrenIter`] already yields `&Node` and *is* the
 //! protocol's child iterator); styles are fetched from the node when the
 //! engine asks ([`StyleView::of`]); layout writes go through the node's
-//! interior-mutable [`LayoutData`](super::LayoutData) in short scoped
-//! borrows — never held across a recursive
+//! node-resident result cell plus the document's interior-mutable layout
+//! secondary arena in short scoped borrows — never held across a recursive
 //! [`compute_child_layout`](LayoutNode::compute_child_layout), per the
 //! protocol's re-entrancy contract. The pipeline has no pass-shared state
 //! at all: the positioned pass re-walks the tree instead of consuming a
@@ -145,23 +145,23 @@ impl<'dom, T> LayoutNode for &'dom Node<T> {
 
     #[inline]
     fn set_unrounded_layout(self, layout: Layout) {
-        self.layout_data.borrow_mut().unrounded = layout;
+        self.layout_results.borrow_mut().unrounded = layout;
     }
 
     #[inline]
     fn with_unrounded_layout<R>(self, read: impl FnOnce(&Layout) -> R) -> R {
-        let data = self.layout_data.borrow();
-        read(&data.unrounded)
+        let results = self.layout_results.borrow();
+        read(&results.unrounded)
     }
 
     #[inline]
     fn clone_unrounded_layout(self) -> Layout {
-        self.layout_data.borrow().unrounded.clone()
+        self.layout_results.borrow().unrounded.clone()
     }
 
     #[inline]
     fn set_final_layout(self, layout: Layout) {
-        self.layout_data.borrow_mut().rounded = layout;
+        self.layout_results.borrow_mut().rounded = layout;
     }
 
     fn set_static_position(self, static_position: Point<f32>) {
@@ -169,22 +169,22 @@ impl<'dom, T> LayoutNode for &'dom Node<T> {
         // relative to the formatting parent, so it stays valid exactly as
         // long as the parent's own layout answers from its cache — the
         // positioned pass re-reads it every pass.
-        self.layout_data.borrow_mut().static_position = static_position;
+        self.layout_data().borrow_mut().static_position = static_position;
     }
 
     fn cache_get(self, input: LayoutInput) -> Option<LayoutOutput> {
-        self.layout_data.borrow().measure_cache.get(input)
+        self.layout_data().borrow().measure_cache.get(input)
     }
 
     fn cache_store(self, input: LayoutInput, output: LayoutOutput) {
-        self.layout_data
+        self.layout_data()
             .borrow_mut()
             .measure_cache
             .store(input, output);
     }
 
     fn cache_clear(self) {
-        self.layout_data.borrow_mut().clear_measurement_cache();
+        self.layout_data().borrow_mut().clear_measurement_cache();
         self.invalidate_text_artifacts();
     }
 }
@@ -195,7 +195,8 @@ impl<'dom, T> LayoutNode for &'dom Node<T> {
 ///
 /// Takes the document as a shared borrow — the caller's `&mut Document`
 /// (relinquished for the duration) is what guarantees the immutable pass;
-/// all writes go through the nodes' `layout_data` cells.
+/// all writes go through the nodes' result cells or their NodeId-indexed
+/// layout-arena cells.
 ///
 /// # `full`: whole-tree vs. containment-scoped post-processing
 ///
@@ -270,7 +271,7 @@ pub(super) fn run_layout<T>(document: &Document<T>, viewport: Size<f32>, scale: 
             // scrollbar-size field — Lynx scrollbars are overlay-only) depends
             // solely on the boundary's own unchanged style and its
             // parent-imposed input, so it stays valid without a merge.
-            node.layout_data.borrow_mut().unrounded.content_size = output.content_size;
+            node.layout_results.borrow_mut().unrounded.content_size = output.content_size;
         }
     }
     compute_root_layout(
@@ -377,7 +378,7 @@ fn accumulated_unrounded_origin<T>(node: &Node<T>) -> Point<f32> {
     let mut origin = Point::ZERO;
     let mut current = Some(node);
     while let Some(step) = current {
-        let location = step.layout_data.borrow().unrounded.location;
+        let location = step.layout_results.borrow().unrounded.location;
         origin.x += location.x;
         origin.y += location.y;
         current = step.parent();
@@ -415,17 +416,17 @@ fn boundary_depth<T>(document: &Document<T>, id: crate::NodeId) -> usize {
 /// for free: an outer hoisted ancestor is finalized before any hoisted
 /// descendant converts its static position through it.
 fn position_hoisted_subtree<T>(node: &Node<T>, viewport: Size<f32>) {
-    let Some(style) = node.computed_style() else {
+    let Some(style) = StyleView::try_of(node) else {
         return; // text nodes are never positioned and have no children
     };
-    let display = display_mode(style.clone_display());
+    let display = display_mode(style.display());
     if display == DisplayMode::None {
         return; // hidden subtrees are zeroed, not positioned
     }
     // The root element is laid out by `compute_root_layout`, never hoisted
     // (it has no element formatting parent).
     if node.parent().is_some_and(Node::is_element)
-        && resolve_position(node, &style) == PositionProperty::Fixed
+        && resolve_position(node, style.values()) == PositionProperty::Fixed
     {
         position_hoisted(node, viewport);
     }
@@ -438,7 +439,7 @@ fn position_hoisted_subtree<T>(node: &Node<T>, viewport: Size<f32>) {
     // itself may still be a hoisted box (handled just above), but its skipped
     // contents cannot — a `position: fixed` descendant of skipped contents
     // produces no positioned box (css-contain-2 skipping).
-    if display == DisplayMode::Leaf || skips_contents(&style) {
+    if display == DisplayMode::Leaf || skips_contents(style.values()) {
         return;
     }
     for child in Node::children(node) {
@@ -452,22 +453,21 @@ fn position_hoisted<T>(node: &Node<T>, viewport: Size<f32>) {
     };
     // The *computed* position picks the containing-block rule; the style
     // view's scheme override already decided this node is hoisted.
-    let fixed = node
-        .computed_style()
-        .is_some_and(|style| style.clone_position() == PositionProperty::Fixed);
+    let fixed = StyleView::try_of(node)
+        .is_some_and(|style| style.values().clone_position() == PositionProperty::Fixed);
 
     // Resolve the containing block: the nearest qualifying element ancestor,
     // else the viewport (the initial containing block).
     let mut containing = None;
     let mut ancestor = node.parent();
     while let Some(current) = ancestor {
-        let Some(style) = current.computed_style() else {
+        let Some(style) = StyleView::try_of(current) else {
             break; // reached the document node
         };
         let establishes = if fixed {
-            establishes_fixed_containing_block(current, &style)
+            establishes_fixed_containing_block(current, style.values())
         } else {
-            establishes_absolute_containing_block(current, &style)
+            establishes_absolute_containing_block(current, style.values())
         };
         if establishes {
             containing = Some(current);
@@ -480,8 +480,8 @@ fn position_hoisted<T>(node: &Node<T>, viewport: Size<f32>) {
     let (containing_origin, containing_size) = match containing {
         Some(block) => {
             let origin = accumulated_unrounded_origin(block);
-            let data = block.layout_data.borrow();
-            let layout = &data.unrounded;
+            let results = block.layout_results.borrow();
+            let layout = &results.unrounded;
             (
                 Point::new(origin.x + layout.border.left, origin.y + layout.border.top),
                 Size::new(
@@ -496,7 +496,7 @@ fn position_hoisted<T>(node: &Node<T>, viewport: Size<f32>) {
     // Convert the recorded static position (formatting-parent border-box
     // space) into containing-block padding-box space.
     let parent_origin = accumulated_unrounded_origin(parent);
-    let static_position = node.layout_data.borrow().static_position;
+    let static_position = node.layout_data().borrow().static_position;
     let static_in_cb = Point::new(
         parent_origin.x + static_position.x - containing_origin.x,
         parent_origin.y + static_position.y - containing_origin.y,
@@ -559,17 +559,17 @@ fn sibling_paint_order<T>(parent: &Node<T>, target: crate::NodeId) -> u32 {
 /// nodes (anonymous boxes) take the initial in-flow `order` 0, and every other
 /// child takes its authored `order`.
 fn sibling_effective_paint_order<T>(child: &Node<T>) -> Option<i32> {
-    match child.computed_style() {
+    match StyleView::try_of(child) {
         Some(style) => {
-            if display_mode(style.clone_display()) == DisplayMode::None {
+            if display_mode(style.display()) == DisplayMode::None {
                 None
             } else if matches!(
-                style.clone_position(),
+                style.values().clone_position(),
                 PositionProperty::Absolute | PositionProperty::Fixed
             ) {
                 Some(0)
             } else {
-                Some(style.get_position().order)
+                Some(style.values().get_position().order)
             }
         }
         None => Some(0),

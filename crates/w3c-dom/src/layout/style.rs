@@ -17,6 +17,8 @@
 //! initial values instead ([`super::ANONYMOUS_STYLE`]) — the anonymous box
 //! CSS wraps a text run in.
 
+use std::ops::Deref;
+
 use neutron_star::geometry::{Edges, Point, Size};
 use neutron_star::style::{
     AspectRatio, Au, BorderSideWidth, Contain, ContainIntrinsicSize, ContentDistribution,
@@ -31,9 +33,9 @@ use neutron_star::style::{
     linear_direction, relative_center, relative_layout_once, text_wrap_mode, visibility,
     white_space_collapse,
 };
+use stylo::data::ElementDataRef;
 use stylo::properties::ComputedValues;
 use stylo::properties::style_structs::Position as PositionStruct;
-use stylo::servo_arc::Arc;
 use stylo::values::computed::motion::OffsetPath;
 use stylo::values::specified::box_::{DisplayInside, DisplayOutside, WillChangeBits};
 
@@ -192,11 +194,11 @@ pub(crate) fn establishes_absolute_containing_block<T>(
 pub(crate) fn resolve_position<T>(node: &Node<T>, style: &ComputedValues) -> PositionProperty {
     let parent_establishes = |fixed: bool| {
         node.parent().is_some_and(|parent| {
-            parent.computed_style().is_some_and(|parent_style| {
+            StyleView::try_of(parent).is_some_and(|parent_style| {
                 if fixed {
-                    establishes_fixed_containing_block(parent, &parent_style)
+                    establishes_fixed_containing_block(parent, parent_style.values())
                 } else {
-                    establishes_absolute_containing_block(parent, &parent_style)
+                    establishes_absolute_containing_block(parent, parent_style.values())
                 }
             })
         })
@@ -230,18 +232,39 @@ fn lower_relative_logical(physical: i32, logical: i32) -> i32 {
     if physical == -1 { logical } else { physical }
 }
 
+/// A computed style borrowed from Stylo's node-resident `ElementData`, or the
+/// process-wide anonymous-box defaults. Keeping the element-data guard avoids
+/// cloning its `Arc<ComputedValues>` for every layout style view.
+enum StyleBorrow<'dom> {
+    Computed(ElementDataRef<'dom>),
+    Anonymous,
+}
+
+impl Deref for StyleBorrow<'_> {
+    type Target = ComputedValues;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Computed(data) => data
+                .styles
+                .primary
+                .as_ref()
+                .expect("computed-style borrow was validated at construction"),
+            Self::Anonymous => &super::ANONYMOUS_STYLE,
+        }
+    }
+}
+
 /// The computed-style view neutron-star reads: the node handle (for the
 /// parent-dependent `resolve_position`) plus its `ComputedValues`.
 ///
 /// Constructed **when the engine requests the style** (`StyleView::of`) —
-/// nothing is pre-collected. The view owns an `Arc` handle to the node's
-/// own computed style (a refcount bump; the values themselves were
-/// materialized by the style flush, once per style change) and lends field
-/// references from it for as long as the engine holds the view, exactly the
-/// lending discipline the engine's style protocol documents.
+/// nothing is pre-collected. The view borrows the node's element data (with
+/// Stylo's debug-only access guard) and lends fields from its computed style;
+/// creating a layout view performs no `Arc` refcount operation.
 pub struct StyleView<'dom, T> {
     node: &'dom Node<T>,
-    style: Arc<ComputedValues>,
+    style: StyleBorrow<'dom>,
 }
 
 impl<T> std::fmt::Debug for StyleView<'_, T> {
@@ -254,21 +277,30 @@ impl<T> std::fmt::Debug for StyleView<'_, T> {
 }
 
 impl<'dom, T> StyleView<'dom, T> {
+    /// Borrow this element's computed style, returning `None` for text,
+    /// document, or a defensively style-less element.
+    pub(crate) fn try_of(node: &'dom Node<T>) -> Option<Self> {
+        Some(Self {
+            node,
+            style: StyleBorrow::Computed(node.borrow_computed_style()?),
+        })
+    }
+
     /// The style lent for `node`: its computed style, fetched now, or the
     /// anonymous-box initial values for text nodes (and, defensively, any
     /// style-less node — only `display: none` descendants qualify, and only
     /// [`hide_subtree`](neutron_star::compute::hide_subtree) ever visits
     /// them, without reading styles).
     pub(crate) fn of(node: &'dom Node<T>) -> Self {
-        let style = if node.is_text_node() {
-            None
-        } else {
-            node.computed_style()
-        };
-        Self {
+        Self::try_of(node).unwrap_or(Self {
             node,
-            style: style.unwrap_or_else(|| super::ANONYMOUS_STYLE.clone()),
-        }
+            style: StyleBorrow::Anonymous,
+        })
+    }
+
+    /// The computed values behind this view.
+    pub(crate) fn values(&self) -> &ComputedValues {
+        &self.style
     }
 
     fn position_struct(&self) -> &PositionStruct {
@@ -277,11 +309,11 @@ impl<'dom, T> StyleView<'dom, T> {
 }
 
 /// Text-only style view: anonymous-box geometry plus inherited paragraph and
-/// run values. Keeping this separate leaves the ubiquitous box [`StyleView`]
-/// at two words; only literal text pays for the second computed-style handle.
+/// run values. Keeping this separate means only literal text pays for the
+/// second guarded computed-style borrow.
 pub(crate) struct TextStyleView<'dom, T> {
     box_style: StyleView<'dom, T>,
-    text_style: Arc<ComputedValues>,
+    text_style: StyleBorrow<'dom>,
 }
 
 impl<T> std::fmt::Debug for TextStyleView<'_, T> {
@@ -300,8 +332,8 @@ impl<'dom, T> TextStyleView<'dom, T> {
             box_style: StyleView::of(node),
             text_style: node
                 .parent()
-                .and_then(Node::computed_style)
-                .unwrap_or_else(|| super::ANONYMOUS_STYLE.clone()),
+                .and_then(Node::borrow_computed_style)
+                .map_or(StyleBorrow::Anonymous, StyleBorrow::Computed),
         }
     }
 
@@ -790,9 +822,9 @@ mod tests {
     use super::{StyleView, TextStyleView};
 
     #[test]
-    fn ordinary_style_views_stay_two_words() {
+    fn guarded_style_views_stay_within_their_expected_footprint() {
         let word = size_of::<usize>();
-        assert_eq!(size_of::<StyleView<'static, ()>>(), 2 * word);
-        assert_eq!(size_of::<TextStyleView<'static, ()>>(), 3 * word);
+        assert_eq!(size_of::<StyleView<'static, ()>>(), 4 * word);
+        assert_eq!(size_of::<TextStyleView<'static, ()>>(), 7 * word);
     }
 }

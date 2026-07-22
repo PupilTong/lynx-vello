@@ -1,9 +1,10 @@
-//! The [`Document`] — one fixed-address slab containing the whole DOM tree.
+//! The [`Document`] — one fixed-address set of NodeId-keyed arenas containing
+//! the DOM tree and its phase-specific state.
 //!
-//! `Document<T>` owns a boxed [`Slab`] whose address never changes. Every
-//! [`Node`] stores a backpointer to that slab, so a plain `&Node` can navigate
-//! the tree and recover its owner document without a wrapper handle or a
-//! separate tree/core object.
+//! `Document<T>` owns one boxed [`DocumentArenas`] value whose address never
+//! changes. Every [`Node`] stores a backpointer to it, so a plain `&Node` can
+//! navigate the tree and resolve payload/styling/layout secondary state by its
+//! [`NodeId`] without a wrapper handle or a mirror tree.
 //!
 //! Slot zero is always the real DOM document node. Element and text nodes are
 //! allocated in the remaining slab slots and use the raw slab index as their
@@ -16,7 +17,9 @@ use std::fmt;
 // import is gated to match (unused in release/bench builds otherwise).
 #[cfg(debug_assertions)]
 use std::ptr::NonNull;
+use std::sync::atomic::Ordering;
 
+use atomic_refcell::AtomicRefCell;
 use neutron_star::geometry::Size;
 use neutron_star::tree::LayoutInput;
 use rustc_hash::FxHashSet;
@@ -29,7 +32,8 @@ use stylo::stylesheets::UrlExtraData;
 
 use crate::damage::StyleDamage;
 use crate::engine::StyleEngine;
-use crate::node::Node;
+use crate::layout::LayoutData;
+use crate::node::{Node, StylingData};
 
 /// A node's raw index in its owning document's slab.
 ///
@@ -41,19 +45,81 @@ pub type NodeId = usize;
 /// The fixed slab slot occupied by the DOM document node.
 pub const DOCUMENT_NODE_ID: NodeId = 0;
 
+/// Payload entry paired with a primary node slot. Slot zero is occupied by the
+/// real document node, which deliberately has no embedder payload; reserving a
+/// sentinel there keeps this slab's keys exactly aligned with every `NodeId`.
+pub(crate) enum PayloadSlot<T> {
+    Document,
+    Node(T),
+}
+
+/// Borrow an entry paired with an already-borrowed live primary node.
+///
+/// A shared `&Node` cannot outlive its primary slab entry or coexist with node
+/// removal. All four slabs insert and remove the same key in lockstep, so the
+/// bounds and vacancy branches would only recheck an invariant already
+/// established by the node borrow.
+#[inline]
+pub(crate) fn slab_get_for_live_node<V>(slab: &Slab<V>, id: NodeId) -> &V {
+    debug_assert!(
+        slab.contains(id),
+        "live primary node must have matching arena state"
+    );
+    // SAFETY: callers reach this helper through a live `&Node` from the
+    // primary slab. Matching entries are installed before that node is
+    // exposed and cleared only after it is removed, which requires an
+    // exclusive document borrow and therefore cannot coexist with the
+    // caller's node borrow.
+    #[expect(
+        unsafe_code,
+        reason = "elide redundant bounds/vacancy checks for a live-node slot"
+    )]
+    unsafe {
+        slab.get_unchecked(id)
+    }
+}
+
+/// The fixed-address, document-owned arena set. `nodes` selects each `NodeId`;
+/// the other slabs insert/remove in exactly the same order and assert that
+/// their own free lists return that same key.
+///
+/// This aggregate is the generalized form of the old boxed single slab, not
+/// another lookup layer: `Document` is movable, so one boxed pointee is what
+/// lets every node retain one stable owner pointer. Storing the four slabs as
+/// direct `Document` fields would instead require four stable boxes/pointers
+/// (and enlarge every primary node handle's backing record).
+pub(crate) struct DocumentArenas<T> {
+    pub(crate) nodes: Slab<Node<T>>,
+    pub(crate) payloads: Slab<PayloadSlot<T>>,
+    pub(crate) styling: Slab<StylingData>,
+    pub(crate) layout: Slab<AtomicRefCell<LayoutData>>,
+}
+
+impl<T> DocumentArenas<T> {
+    fn new() -> Self {
+        Self {
+            nodes: Slab::new(),
+            payloads: Slab::new(),
+            styling: Slab::new(),
+            layout: Slab::new(),
+        }
+    }
+}
+
 /// The placeholder base URL for parsing a standalone document's inline styles.
 pub(crate) fn about_blank_url_data() -> UrlExtraData {
     UrlExtraData::from(::url::Url::parse("about:blank").expect("about:blank is a valid URL"))
 }
 
-/// One DOM tree, including its actual document node at slab slot zero.
+/// One DOM tree, including its actual document node at primary-arena slot
+/// zero.
 ///
-/// The box is load-bearing: moving `Document` never moves the `Slab` value, so
-/// every node's slab backpointer remains valid until the document is dropped.
+/// The box is load-bearing: moving `Document` never moves the arena set, so
+/// every node's owner backpointer remains valid until the document is dropped.
 pub struct Document<T> {
     /// This document's private stylesheet, device, cascade, and lock state.
     style_engine: StyleEngine,
-    nodes: Box<Slab<Node<T>>>,
+    arenas: Box<DocumentArenas<T>>,
     /// Relayout boundaries that a boundary-stopped
     /// [`invalidate_layout`](Self::invalidate_layout) parked for the next
     /// layout pass, each paired with the exact [`LayoutInput`] it was last
@@ -120,7 +186,7 @@ impl<T: fmt::Debug> fmt::Debug for Document<T> {
         f.debug_struct("Document")
             .field("root_element", &self.root_element().map(Node::id))
             .field("style_engine", &self.style_engine)
-            .field("nodes", &self.nodes)
+            .field("nodes", &self.arenas.nodes)
             .finish_non_exhaustive()
     }
 }
@@ -145,16 +211,26 @@ impl<T> Document<T> {
         let style_engine = StyleEngine::with_url_data(device, url_data);
         let lock = style_engine.lock();
         let url_data = style_engine.url_data();
-        let mut nodes = Box::new(Slab::new());
-        let tree = std::ptr::from_mut::<Slab<Node<T>>>(nodes.as_mut());
-        let root = nodes.insert(Node::new_document(tree, lock, url_data));
+        let mut arenas = Box::new(DocumentArenas::new());
+        let owner = std::ptr::from_mut::<DocumentArenas<T>>(arenas.as_mut());
+        let root = arenas
+            .nodes
+            .insert(Node::new_document(owner, lock, url_data));
         assert_eq!(
             root, DOCUMENT_NODE_ID,
             "the DOM document node must occupy slab slot zero"
         );
+        assert_eq!(arenas.payloads.insert(PayloadSlot::Document), root);
+        assert_eq!(arenas.styling.insert(StylingData::default()), root);
+        assert_eq!(
+            arenas
+                .layout
+                .insert(AtomicRefCell::new(LayoutData::default())),
+            root
+        );
         Self {
             style_engine,
-            nodes,
+            arenas,
             relayout_roots: Vec::new(),
             relayout_root_ids: FxHashSet::default(),
             layout_dirty: false,
@@ -247,7 +323,7 @@ impl<T> Document<T> {
 
     /// Borrow the complete node slab.
     pub(crate) fn tree(&self) -> &Slab<Node<T>> {
-        &self.nodes
+        &self.arenas.nodes
     }
 
     /// Mutably borrow the complete node slab.
@@ -255,7 +331,26 @@ impl<T> Document<T> {
     /// Mutation is only reachable through `&mut Document`, so no shared node
     /// reference can coexist with this borrow.
     pub(crate) fn tree_mut(&mut self) -> &mut Slab<Node<T>> {
-        &mut self.nodes
+        &mut self.arenas.nodes
+    }
+
+    /// Mutably iterate the layout secondary arena. Every yielded entry belongs
+    /// to one currently live node (including the document node).
+    pub(crate) fn layout_data_mut(
+        &mut self,
+    ) -> impl Iterator<Item = (NodeId, &mut AtomicRefCell<LayoutData>)> {
+        self.arenas.layout.iter_mut()
+    }
+
+    /// Borrow one styling secondary-arena entry by its primary node ID.
+    pub(crate) fn styling_data(&self, id: NodeId) -> Option<&StylingData> {
+        self.arenas.styling.get(id)
+    }
+
+    /// Mutably borrow one styling secondary-arena entry by its primary node
+    /// ID.
+    pub(crate) fn styling_data_mut(&mut self, id: NodeId) -> Option<&mut StylingData> {
+        self.arenas.styling.get_mut(id)
     }
 
     /// The actual DOM document node, permanently stored at slot zero.
@@ -266,7 +361,8 @@ impl<T> Document<T> {
     /// removed or replaced; the public mutation API cannot do either.
     #[must_use]
     pub fn root_node(&self) -> &Node<T> {
-        self.nodes
+        self.arenas
+            .nodes
             .get(DOCUMENT_NODE_ID)
             .expect("the document node is never removed")
     }
@@ -304,23 +400,37 @@ impl<T> Document<T> {
     /// Create a detached element and return its raw slab index.
     pub fn create_element(&mut self, tag: &str, payload: T) -> NodeId {
         let local_name = LocalName::from(tag);
-        self.allocate_node(|tree, id| Node::new_element(tree, id, local_name, payload))
+        self.allocate_node(payload, |owner, id| {
+            Node::new_element(owner, id, local_name)
+        })
     }
 
     /// Create a detached text node and return its raw slab index.
     pub fn create_text_node(&mut self, text: impl Into<String>, payload: T) -> NodeId {
         let text = text.into();
-        self.allocate_node(|tree, id| Node::new_text(tree, id, text, payload))
+        self.allocate_node(payload, |owner, id| Node::new_text(owner, id, text))
     }
 
     fn allocate_node(
         &mut self,
-        make: impl FnOnce(*mut Slab<Node<T>>, NodeId) -> Node<T>,
+        payload: T,
+        make: impl FnOnce(*mut DocumentArenas<T>, NodeId) -> Node<T>,
     ) -> NodeId {
-        let tree = std::ptr::from_mut::<Slab<Node<T>>>(self.nodes.as_mut());
-        let entry = self.nodes.vacant_entry();
+        let owner = std::ptr::from_mut::<DocumentArenas<T>>(self.arenas.as_mut());
+        let entry = self.arenas.nodes.vacant_entry();
         let id = entry.key();
-        entry.insert(make(tree, id));
+        assert_eq!(self.arenas.payloads.vacant_key(), id);
+        assert_eq!(self.arenas.styling.vacant_key(), id);
+        assert_eq!(self.arenas.layout.vacant_key(), id);
+        entry.insert(make(owner, id));
+        assert_eq!(self.arenas.payloads.insert(PayloadSlot::Node(payload)), id);
+        assert_eq!(self.arenas.styling.insert(StylingData::default()), id);
+        assert_eq!(
+            self.arenas
+                .layout
+                .insert(AtomicRefCell::new(LayoutData::default())),
+            id
+        );
         id
     }
 
@@ -354,12 +464,14 @@ impl<T> Document<T> {
         );
 
         self.detach(child);
-        self.nodes
+        self.arenas
+            .nodes
             .get_mut(DOCUMENT_NODE_ID)
             .expect("the document node is never removed")
             .children
             .push(child);
-        self.nodes
+        self.arenas
+            .nodes
             .get_mut(child)
             .expect("the attached child was validated as live")
             .parent = Some(DOCUMENT_NODE_ID);
@@ -371,13 +483,13 @@ impl<T> Document<T> {
     /// Borrow a node by its raw slab index.
     #[must_use]
     pub fn get(&self, id: NodeId) -> Option<&Node<T>> {
-        self.nodes.get(id)
+        self.arenas.nodes.get(id)
     }
 
     /// Whether the slab index is currently occupied.
     #[must_use]
     pub fn contains(&self, id: NodeId) -> bool {
-        self.nodes.contains(id)
+        self.arenas.nodes.contains(id)
     }
 
     /// Whether `id` is connected beneath the slot-zero document node.
@@ -462,12 +574,14 @@ impl<T> Document<T> {
                 .expect("insert_before reference must be a child of parent"),
         };
 
-        self.nodes
+        self.arenas
+            .nodes
             .get_mut(parent)
             .expect("stale NodeId passed to Document::insert_before")
             .children
             .insert(index, child);
-        self.nodes
+        self.arenas
+            .nodes
             .get_mut(child)
             .expect("stale NodeId passed to Document::insert_before")
             .parent = Some(parent);
@@ -501,6 +615,7 @@ impl<T> Document<T> {
 
         let removed_index = {
             let parent_node = self
+                .arenas
                 .nodes
                 .get_mut(parent)
                 .expect("internal tree link must resolve to a live node");
@@ -512,7 +627,8 @@ impl<T> Document<T> {
             parent_node.children.remove(index);
             index
         };
-        self.nodes
+        self.arenas
+            .nodes
             .get_mut(child)
             .expect("stale NodeId passed to Document::detach")
             .parent = None;
@@ -536,12 +652,33 @@ impl<T> Document<T> {
         let mut removed = Vec::new();
         let mut stack = vec![id];
         while let Some(current) = stack.pop() {
-            let node = self
-                .nodes
+            {
+                let node = self
+                    .arenas
+                    .nodes
+                    .try_remove(current)
+                    .expect("subtree links always resolve while removing");
+                stack.extend_from_slice(&node.children);
+            }
+            // Once the primary node is gone, use its NodeId to drop the same
+            // slot from every phase-specific slab before any ID is reused.
+            let payload = self
+                .arenas
+                .payloads
                 .try_remove(current)
-                .expect("subtree links always resolve while removing");
-            stack.extend_from_slice(&node.children);
-            removed.push(node.into_payload());
+                .expect("removed element/text node must have payload-arena state");
+            self.arenas
+                .styling
+                .try_remove(current)
+                .expect("removed node must have styling-arena state");
+            self.arenas
+                .layout
+                .try_remove(current)
+                .expect("removed node must have layout-arena state");
+            match payload {
+                PayloadSlot::Node(payload) => removed.push(payload),
+                PayloadSlot::Document => unreachable!("the document node cannot be removed"),
+            }
         }
         // Parked roots carry raw, generation-less slab ids. Prune every
         // removed entry once, after the traversal, before a later node factory
@@ -552,7 +689,7 @@ impl<T> Document<T> {
         // left behind would, once its slab slot is reused by an unrelated node,
         // make that node read as already-parked and wrongly stop a later
         // invalidation walk or incremental post-pass.
-        let nodes = &self.nodes;
+        let nodes = &self.arenas.nodes;
         self.relayout_roots
             .retain(|&(parked_id, _)| nodes.contains(parked_id));
         self.relayout_root_ids
@@ -567,18 +704,23 @@ impl<T> Document<T> {
         let mut snapshots = SnapshotMap::new();
         let mut stack = vec![root];
         while let Some(id) = stack.pop() {
-            let Some(node) = self.nodes.get_mut(id) else {
+            let Some(node) = self.arenas.nodes.get(id) else {
                 continue;
             };
+            let styling = self
+                .arenas
+                .styling
+                .get_mut(id)
+                .expect("live node must have styling-arena state");
             debug_assert_eq!(
-                node.snapshot.is_some(),
-                node.snapshot_present(),
+                styling.snapshot.is_some(),
+                styling.snapshot_flags.load(Ordering::Relaxed) & crate::node::SNAPSHOT_PRESENT != 0,
                 "snapshot slot and lifecycle flag diverged before flush"
             );
-            if let Some(snapshot) = node.snapshot.take() {
+            if let Some(snapshot) = styling.snapshot.take() {
                 snapshots.insert(OpaqueNode(node.id()), *snapshot);
             }
-            if node.has_dirty_descendants() {
+            if styling.dirty_descendants.load(Ordering::Relaxed) {
                 stack.extend_from_slice(&node.children);
             }
         }
@@ -645,17 +787,22 @@ impl<T> Document<T> {
         sink: &mut dyn FnMut(NodeId, StyleDamage),
     ) {
         for opaque in snapshots.keys() {
-            if let Some(node) = self.nodes.get(opaque.0) {
-                node.clear_snapshot_flags();
+            if let Some(styling) = self.arenas.styling.get(opaque.0) {
+                styling.snapshot_flags.store(0, Ordering::Relaxed);
             }
         }
 
         let mut stack = vec![root];
         while let Some(current) = stack.pop() {
             let harvested = {
-                let Some(node) = self.nodes.get_mut(current) else {
+                let arenas = &mut *self.arenas;
+                let Some(node) = arenas.nodes.get_mut(current) else {
                     continue;
                 };
+                let styling = arenas
+                    .styling
+                    .get_mut(current)
+                    .expect("live node must have styling-arena state");
                 let mut harvested = None;
                 if let Some(wrapper) = node.stylo_data_mut() {
                     let mut data = wrapper.borrow_mut();
@@ -665,9 +812,9 @@ impl<T> Document<T> {
                         harvested = Some(StyleDamage::from(damage));
                     }
                 }
-                let descend = node.has_dirty_descendants();
-                node.set_dirty_descendants_bit(false);
-                node.clear_snapshot_flags();
+                let descend = styling.dirty_descendants.load(Ordering::Relaxed);
+                styling.dirty_descendants.store(false, Ordering::Relaxed);
+                styling.snapshot_flags.store(0, Ordering::Relaxed);
                 if descend {
                     stack.extend_from_slice(&node.children);
                 }
@@ -685,7 +832,7 @@ impl<T> Document<T> {
                 // would otherwise reuse the stale committed shape artifact.
                 if let Some(element) = self.get(current) {
                     for child in element.children().filter(|child| child.is_text_node()) {
-                        child.layout_data.borrow_mut().clear_measurement_cache();
+                        child.layout_data().borrow_mut().clear_measurement_cache();
                         child.invalidate_text_artifacts();
                     }
                 }
@@ -777,10 +924,55 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn slabs_follow_primary_node_lifetime_and_id_reuse() {
+        let mut document: Document<u32> = Document::new(device());
+        let id = document.create_element("view", 7);
+
+        assert!(document.arenas.nodes.contains(id));
+        assert!(matches!(
+            document.arenas.payloads.get(id),
+            Some(PayloadSlot::Node(7))
+        ));
+        assert!(document.arenas.styling.get(id).is_some());
+        assert!(document.arenas.layout.get(id).is_some());
+
+        assert_eq!(document.remove_subtree(id), vec![7]);
+        assert!(!document.arenas.nodes.contains(id));
+        assert!(document.arenas.payloads.get(id).is_none());
+        assert!(document.arenas.styling.get(id).is_none());
+        assert!(document.arenas.layout.get(id).is_none());
+        assert_eq!(document.arenas.nodes.vacant_key(), id);
+        assert_eq!(document.arenas.payloads.vacant_key(), id);
+        assert_eq!(document.arenas.styling.vacant_key(), id);
+        assert_eq!(document.arenas.layout.vacant_key(), id);
+
+        let reused = document.create_text_node("replacement", 11);
+        assert_eq!(reused, id, "the primary slab should reuse its vacant ID");
+        assert_eq!(document.get(reused).unwrap().payload(), &11);
+        assert!(document.get(reused).unwrap().layout_cache_is_empty());
+        assert!(
+            document
+                .arenas
+                .styling
+                .get(reused)
+                .is_some_and(|state| state.snapshot.is_none())
+        );
+    }
+
+    #[test]
+    fn payload_size_does_not_change_primary_node_stride() {
+        assert_eq!(
+            std::mem::size_of::<Node<()>>(),
+            std::mem::size_of::<Node<[u8; 1_024]>>()
+        );
+    }
+
+    #[test]
     #[should_panic(expected = "internal tree links always resolve")]
     fn root_element_panics_on_a_dangling_document_child() {
         let mut document: Document<()> = Document::new(device());
         document
+            .arenas
             .nodes
             .get_mut(DOCUMENT_NODE_ID)
             .expect("the document node is present")

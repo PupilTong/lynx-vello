@@ -6,16 +6,18 @@
 //! everything stylo needs to run its cascade over it in place. The public
 //! surface is deliberately small:
 //!
-//! - [`Document<T>`] — **the one tree and style owner.** It owns a fixed-address slab whose slot
-//!   zero is the actual DOM document node plus one private Stylist/device/stylesheet/lock context.
-//!   Element and text nodes are created by [`Document::create_element`] /
-//!   [`Document::create_text_node`] and mutated exclusively through `Document` methods; there is no
-//!   way to construct, mutate, or re-home a node outside its document (ONE TREE policy).
+//! - [`Document<T>`] — **the one tree and style owner.** It owns one private
+//!   Stylist/device/stylesheet/lock context plus a fixed-address set of four `Slab`s: one primary
+//!   node slab whose slot zero is the actual DOM document node, and NodeId-aligned payload,
+//!   styling, and layout-cache slabs. Element and text nodes are created by
+//!   [`Document::create_element`] / [`Document::create_text_node`] and mutated exclusively through
+//!   `Document` methods; there is no way to construct, mutate, or re-home a node outside its
+//!   document (ONE TREE policy).
 //! - [`Node<T>`] — the compositional unit. [`NodeType::Document`] is slot zero,
-//!   [`NodeType::Element`] nodes carry the W3C-DOM-subset element fields and stylo bookkeeping;
-//!   [`NodeType::Text`] nodes carry character data. Element and text variants own an opaque
-//!   payload; it is not DOM or selector state. All nodes share tree links and the common
-//!   bookkeeping layout. Read-only from outside the crate.
+//!   [`NodeType::Element`] nodes carry the W3C-DOM-subset element fields and computed style;
+//!   [`NodeType::Text`] nodes carry character data. Element/text payloads and phase-specific
+//!   intermediate state are resolved through the owning document's secondary arenas; durable layout
+//!   results remain on the node. Read-only from outside the crate.
 //! - [`NodeId`] — the raw `usize` slab index, scoped to its runtime context. The *read* handle is a
 //!   plain `&Node<T>`; every stylo DOM trait is implemented directly on it (no wrapper type).
 //!
@@ -46,9 +48,9 @@
 //! Styling therefore runs **on the document itself** — no mirror tree is
 //! built to enter the styling engine. Two design points make that work:
 //!
-//! - every node carries a **backpointer** to its document's fixed-address slab, so tree navigation
-//!   needs nothing but `&Node` — a shared reference is exactly the one-word `Copy` value stylo's
-//!   style-sharing cache requires of a `TElement` handle;
+//! - every node carries a **backpointer** to its document's fixed-address arena set, so tree
+//!   navigation and secondary-state lookup need nothing but `&Node` — a shared reference is exactly
+//!   the one-word `Copy` value stylo's style-sharing cache requires of a `TElement` handle;
 //! - node identity for snapshots/traversal roots ([`OpaqueNode`](stylo::dom::OpaqueNode)) is the
 //!   raw slab index, so it survives slab-storage growth moving nodes.
 //!
@@ -79,9 +81,10 @@
 //! `ComputedValues`) directly over the document — Flexbox, Grid, and
 //! Starlight Linear/Relative containers, decoded natural-size leaves, and
 //! concrete Parley text. Run it with [`Document::layout`] (styles
-//! flush first — the style → layout phase barrier); results live **on the
-//! nodes** ([`Node::layout`]), so layout state is created and dropped with
-//! its node. See the module docs for the phase and invalidation contracts.
+//! flush first — the style → layout phase barrier); durable results live **on
+//! the nodes** ([`Node::layout`]), while measurement caches and positioned
+//! bookkeeping live in the layout secondary arena. See the module docs for
+//! the phase and invalidation contracts.
 //!
 //! # Thread-safety
 //!

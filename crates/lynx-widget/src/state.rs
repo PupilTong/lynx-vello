@@ -45,8 +45,9 @@ pub struct EventReg {
     pub handler: Box<str>,
 }
 
-/// The Lynx-specific per-widget state, carried as the opaque payload of
-/// [`Widget`](crate::Widget) (= `w3c_dom::Node<WidgetState>`).
+/// The Lynx-specific per-widget state, stored in `w3c-dom`'s NodeId-indexed
+/// payload arena and exposed as the opaque payload of [`Widget`](crate::Widget)
+/// (= `w3c_dom::Node<WidgetState>`).
 #[derive(Debug)]
 pub struct WidgetState {
     /// The widget kind (the Lynx tag classification).

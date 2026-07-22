@@ -763,8 +763,9 @@ fn layout_state_dies_with_its_node() {
     assert_eq!(h.rect(old).2, 100.0);
 
     h.doc.dom.remove_subtree(old);
-    // The layout state was dropped with the node: the slab slot is vacant
-    // (raw ids carry no generation — the runtime layer owns id lifetime).
+    // The primary node and its layout-arena state were dropped together: the
+    // primary slab slot is vacant (raw ids carry no generation — the runtime
+    // layer owns id lifetime).
     assert!(h.doc.dom.get(old).is_none());
 
     // Removal changed the parent's child list: invalidate the old parent.
