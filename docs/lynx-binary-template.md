@@ -158,3 +158,24 @@ rspeedy build (rsbuild/webpack)
 The encoder input is JSON (sourceContent/css/customSections/lepusCode/manifest…),
 assembled by `LynxTemplatePlugin`; the C++ side parses CSS + TTML, compiles Lepus
 to QuickJS bytecode, and serializes all sections.
+
+## Native-to-web converter subset
+
+`crates/lynx-template-converter` reads the flexible (target SDK >= 2.8)
+source-external subset of this format and writes the `SDRA WROF` web binary
+format. It supports:
+
+- source custom sections, routed to web `LepusCode` for conventional
+  `__main-thread` names and to `Manifest` otherwise;
+- custom sections with `encoding = CSS`, translating serialized selector
+  lists, raw declaration values, CSS variables, keyframes, and font faces into
+  rkyv 0.7 `StyleInfo`;
+- compatible page/header configuration and the inert empty QuickJS root stub
+  that TASM emits even for external bundles.
+
+QuickJS bytecode has no reversible mapping to the JavaScript-source maps used
+by the web format. A nonempty `ROOT_LEPUS`, `LEPUS_CHUNK`, `JS_BYTECODE`, or
+custom section with `encoding = JS_BYTECODE` therefore returns
+`ConvertError::CodeCacheBundle` without producing partial output. Full native
+cards, parsed-value CSS, legacy non-flexible bundles, and legacy Lepus VM
+bundles remain unsupported.

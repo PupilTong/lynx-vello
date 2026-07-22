@@ -19,6 +19,7 @@ rust-version = "1.95"
 bobcat-engine = { path = "crates/bobcat-engine" }
 bobcat-quickjs = { path = "crates/bobcat-quickjs" }
 lynx-template-decoder = { path = "crates/lynx-template-decoder" }
+lynx-template-converter = { path = "crates/lynx-template-converter" }
 lynx-widget = { path = "crates/lynx-widget" }
 # Parley is part of neutron-star's closed leaf model in every build: hosts
 # choose between decoded `NaturalSize` and the concrete text engine, never an
