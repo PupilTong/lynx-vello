@@ -730,10 +730,10 @@ fn layout_flushes_pending_styles_itself() {
 
 // --- damage → layout wiring ---------------------------------------------------
 //
-// `Document::layout` consumes its own flush's restyle damage into layout
-// invalidation, so a plain style change re-lays-out with no explicit
-// `invalidate_layout` call, and a `contain: strict` boundary stops the
-// invalidation walk so its ancestors keep their caches.
+// Every style harvest consumes restyle damage into layout invalidation, so a
+// plain style change re-lays-out with no explicit `invalidate_layout` call,
+// and a `contain: strict` boundary stops the invalidation walk so its
+// ancestors keep their caches.
 
 #[test]
 fn style_width_change_relayouts_without_manual_invalidation() {
