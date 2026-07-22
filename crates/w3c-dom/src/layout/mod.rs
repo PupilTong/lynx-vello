@@ -202,8 +202,7 @@ use crate::flush::Parallelism;
 use crate::node::Node;
 
 /// The embedder's leaf content measurement hook, implemented by the
-/// document's payload type `T` (the layout-side sibling of
-/// [`ExternalState`]'s matching hooks).
+/// document's [`ExternalState`] payload type `T`.
 ///
 /// Consulted for every leaf-laid node — childless boxes and the
 /// flow-container fallback — whose size is not already fully determined by

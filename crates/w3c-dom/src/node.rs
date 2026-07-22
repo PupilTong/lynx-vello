@@ -310,10 +310,8 @@ pub struct Node<T> {
     /// The node's `id` selector value, distinct from a plain `id` attribute
     /// (the embedder decides whether/how the two are linked).
     pub(crate) id_attr: Option<Atom>,
-    /// Plain attributes, keyed by their interned local names. Synthetic /
-    /// reflected attributes beyond this map are served by the
-    /// [`ext`](Node::ext) payload's
-    /// [`extra_attr_value`](crate::ExternalState::extra_attr_value) hook.
+    /// Plain attributes, keyed by their interned local names. This is the sole
+    /// source of selector-visible attribute state.
     pub(crate) attrs: FxHashMap<LocalName, String>,
     /// Active dynamic pseudo-classes (`:hover` / `:active` / `:focus`) as
     /// stylo state bits.
@@ -629,9 +627,8 @@ impl<T> Node<T> {
         }
     }
 
-    /// Payload mutation is `Document`-mediated
-    /// ([`Document::ext_mut`](crate::Document::ext_mut)) so synthetic-attribute
-    /// snapshots can be demanded contractually alongside it.
+    /// Payload mutation remains `Document`-mediated so nodes cannot be
+    /// mutated outside their owning tree.
     pub(crate) fn ext_mut(&mut self) -> &mut T {
         match &mut self.data {
             NodeData::Element(ext) | NodeData::Text(ext) => ext,

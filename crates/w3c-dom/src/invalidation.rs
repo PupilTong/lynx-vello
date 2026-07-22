@@ -28,11 +28,8 @@
 //! stylo's scheduling state (a pending snapshot, a queued restyle hint, or
 //! the absence of any style data on a never-styled node).
 //!
-//! The one seam an embedder must handle itself: synthetic / reflected
-//! attributes served by its [`ExternalState`](crate::ExternalState) hooks.
-//! Their values live in the payload, so the document cannot see them change —
-//! [`Document::note_external_attribute_change`] is the contractual companion
-//! to [`Document::ext_mut`](crate::Document::ext_mut).
+//! Selector-visible state always lives in the DOM fields mutated here. The
+//! embedder payload is opaque and cannot inject synthetic matching state.
 
 use selectors::matching::ElementSelectorFlags;
 use stylo::LocalName;
@@ -551,42 +548,6 @@ impl<T: ExternalState> Document<T> {
         self.mark_ancestors_dirty_descendants(id);
     }
 
-    // --- external (synthetic / reflected) attributes ---------------------------
-
-    /// Record that the synthetic / reflected attribute `name` — served by the
-    /// payload's [`ExternalState`](crate::ExternalState) hooks — is changing.
-    ///
-    /// Call **before** the [`ext_mut`](crate::Document::ext_mut) mutation for
-    /// names that existed before it, so the snapshot captures the old values;
-    /// names that only exist *after* the mutation are also noted through this
-    /// method (the snapshot keeps whatever state its first capture saw).
-    ///
-    /// # Panics
-    ///
-    /// Panics when `id` is stale or identifies a text node (the let-it-crash
-    /// mutation contract; see the crate docs).
-    pub fn note_external_attribute_change(&mut self, id: NodeId, name: &LocalName) {
-        self.live_element(id);
-        self.note_attribute_change(id, name);
-    }
-
-    /// Record a bulk synthetic / reflected attribute change (e.g. a dataset
-    /// replacement) before naming individual attributes. Callers follow up
-    /// with [`note_external_attribute_change`](Self::note_external_attribute_change)
-    /// per affected name.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `id` is stale or identifies a text node (the let-it-crash
-    /// mutation contract; see the crate docs).
-    pub fn note_external_attributes_change(&mut self, id: NodeId) {
-        self.live_element(id);
-        if let Some(snapshot) = self.ensure_snapshot(id) {
-            snapshot.other_attributes_changed = true;
-        }
-        self.mark_mutated(id);
-    }
-
     // --- snapshot recording ------------------------------------------------------
 
     fn note_class_change(&mut self, id: NodeId) {
@@ -644,8 +605,7 @@ impl<T: ExternalState> Document<T> {
 
 /// Build a stylo element snapshot of the node's *current* (soon to be old)
 /// state: dynamic pseudo-class bits plus every matching-relevant attribute —
-/// the id selector value, classes, real attributes, and the embedder's
-/// synthetic / reflected attributes.
+/// the id selector value, classes, and real attributes.
 fn build_snapshot<T: ExternalState>(node: &Node<T>) -> Snapshot {
     let mut attrs: Vec<(AttrIdentifier, AttrValue)> = Vec::new();
 
@@ -675,12 +635,6 @@ fn build_snapshot<T: ExternalState>(node: &Node<T>) -> Snapshot {
             AttrValue::String(value.clone()),
         ));
     }
-    node.ext().each_extra_attr_name(&mut |name| {
-        if let Some(value) = node.ext().extra_attr_value(name) {
-            attrs.push((attr_identifier(name.clone()), AttrValue::String(value)));
-        }
-    });
-
     let mut snapshot = Snapshot::new();
     snapshot.state = Some(node.element_state());
     snapshot.attrs = Some(attrs);

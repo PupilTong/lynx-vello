@@ -20,8 +20,7 @@
 //! - **`:hover`/`:active`/`:focus`** are matched from the node's
 //!   [`ElementState`](crate::ElementState).
 //! - **`:root`** matches the document element, never a detached parentless element.
-//! - **Synthetic / reflected attributes** beyond the node's real attribute map are served by the
-//!   [`ExternalState`] attribute hooks.
+//! - **Attributes** are read exclusively from the node's real attribute map.
 //! - **Shadow DOM / pseudo-elements / animations** are stubbed (`None`/`false`) — none exist in
 //!   this model yet.
 //!
@@ -280,10 +279,6 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
         for name in self.attrs.keys() {
             callback(name);
         }
-        // Synthetic / reflected attribute names come from the embedder, so
-        // the bloom filter accounts for them too (see
-        // `ExternalState::each_extra_attr_name`).
-        Node::ext(self).each_extra_attr_name(&mut callback);
     }
 
     fn has_dirty_descendants(&self) -> bool {
@@ -465,12 +460,7 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
     }
 
     fn get_attr(&self, attr: &LocalName, _namespace: &Namespace) -> Option<String> {
-        if let Some(value) = self.attr(attr) {
-            return Some(value.to_owned());
-        }
-        // Synthetic / reflected attributes are the embedder's: consulted only
-        // after the real attribute map misses, matching `attr_matches`.
-        Node::ext(self).extra_attr_value(attr)
+        self.attr(attr).map(str::to_owned)
     }
 }
 
@@ -478,8 +468,7 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
 
 /// id/class matching is **case-sensitive**; `:hover`/`:active`/`:focus` are
 /// matched from the node's [`ElementState`]; attribute
-/// matching covers the node's real attributes plus whatever synthetic /
-/// reflected attributes the embedder's [`ExternalState`] hooks serve.
+/// matching covers the node's real attributes.
 impl<T: ExternalState> Element for &Node<T> {
     type Impl = SelectorImpl;
 
@@ -575,14 +564,8 @@ impl<T: ExternalState> Element for &Node<T> {
         // hot path for a selector form ReactLynx CSS does not use;
         // invalidation (the class/id snapshot recorders) is consistent with
         // this choice.
-        if let Some(value) = self.attr(local_name) {
-            return operation.eval_str(value);
-        }
-        // Synthetic / reflected attributes are the embedder's: consulted only
-        // after the real attribute map misses (see `ExternalState::extra_attr_value`).
-        Node::ext(self)
-            .extra_attr_value(local_name)
-            .is_some_and(|value| operation.eval_str(&value))
+        self.attr(local_name)
+            .is_some_and(|value| operation.eval_str(value))
     }
 
     fn match_non_ts_pseudo_class(

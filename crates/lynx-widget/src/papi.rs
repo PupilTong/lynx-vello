@@ -294,6 +294,8 @@ impl WidgetTree {
         let id = self
             .doc
             .create_element(tag, WidgetState::new(kind, unique_id));
+        // The css scope is selector-visible real DOM state from creation.
+        self.doc.set_attribute(id, LocalName::from("l-css-id"), "0");
         self.by_unique_id.insert(unique_id, id);
         self.handle_for(id)
     }
@@ -603,10 +605,9 @@ impl WidgetTree {
             .map(|handle| self.resolve(handle))
             .collect::<Result<Vec<_>, _>>()?;
         let name = LocalName::from("l-css-id");
+        let value = css_id.to_string();
         for id in ids {
-            // The css_id is reflected as the synthetic `l-css-id` attribute;
-            // snapshot it before the payload mutation.
-            self.doc.note_external_attribute_change(id, &name);
+            self.doc.set_attribute(id, name.clone(), &value);
             self.doc.ext_mut(id).css_id = css_id;
         }
         Ok(())
@@ -625,49 +626,26 @@ impl WidgetTree {
     {
         self.sweep_dropped();
         let id = self.resolve(handle)?;
-        // Snapshot the old values first, and name every old reflected
-        // attribute while they still exist.
-        self.doc.note_external_attributes_change(id);
-        let old_keys: Vec<LocalName> = self
+        let dataset: FxHashMap<Box<str>, String> = entries
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect();
+        let old_keys: Vec<Box<str>> = self
             .doc
             .get(id)
-            .map(|widget| {
-                widget
-                    .ext()
-                    .dataset
-                    .keys()
-                    .map(|key| LocalName::from(format!("data-{key}").as_str()))
-                    .collect()
-            })
+            .map(|widget| widget.ext().dataset.keys().cloned().collect())
             .unwrap_or_default();
         for key in &old_keys {
-            self.doc.note_external_attribute_change(id, key);
-        }
-
-        self.doc.ext_mut(id).dataset = entries
-            .into_iter()
-            .map(|(k, v)| (k.into(), v.into()))
-            .collect();
-
-        // Names that only exist in the new dataset still need to be flagged
-        // as changed; the snapshot keeps the pre-mutation values.
-        let new_keys: Vec<LocalName> = self
-            .doc
-            .get(id)
-            .map(|widget| {
-                widget
-                    .ext()
-                    .dataset
-                    .keys()
-                    .map(|key| LocalName::from(format!("data-{key}").as_str()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        for key in &new_keys {
-            if !old_keys.contains(key) {
-                self.doc.note_external_attribute_change(id, key);
+            if !dataset.contains_key(key.as_ref()) {
+                let name = LocalName::from(format!("data-{key}").as_str());
+                self.doc.remove_attribute(id, &name);
             }
         }
+        for (key, value) in &dataset {
+            let name = LocalName::from(format!("data-{key}").as_str());
+            self.doc.set_attribute(id, name, value);
+        }
+        self.doc.ext_mut(id).dataset = dataset;
         Ok(())
     }
 
@@ -681,7 +659,7 @@ impl WidgetTree {
         self.sweep_dropped();
         let id = self.resolve(handle)?;
         let name = LocalName::from(format!("data-{key}").as_str());
-        self.doc.note_external_attribute_change(id, &name);
+        self.doc.set_attribute(id, name, value);
         self.doc
             .ext_mut(id)
             .dataset

@@ -1,7 +1,7 @@
 //! Integration tests for the `w3c-dom` primitives an embedder's API layer
 //! delegates to: the ONE-TREE [`Document`] (raw slab-index storage, structure
 //! ops, queries), `&Node` navigation, invalidation scheduling carried by
-//! the setters, inline-style parsing, the [`ExternalState`] hook defaults,
+//! the setters, inline-style parsing, the [`ExternalState`] payload marker,
 //! and the let-it-crash mutation contract.
 //!
 //! Invalidation *scheduling* (dirty bits making mutations reachable from the
@@ -381,11 +381,11 @@ fn stylo_sees_a_distinct_document_node_and_real_owner_document() {
 }
 
 #[test]
-fn external_state_default_attr_hooks() {
+fn attributes_come_only_from_the_real_map() {
     use stylo::dom::TElement;
 
-    // The `()` payload serves no synthetic attributes: only the real attrs
-    // map answers `get_attr`.
+    // The opaque `()` payload cannot serve synthetic attributes: only the
+    // real attrs map answers `get_attr`.
     let mut doc = Document::new();
     let el = node(&mut doc, "div");
     doc.set_attribute(el, stylo::LocalName::from("title"), "hi");

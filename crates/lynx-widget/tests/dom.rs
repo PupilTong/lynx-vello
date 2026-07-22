@@ -444,6 +444,14 @@ fn attributes_id_dataset_and_events() {
     assert_eq!(
         doc.get_attributes(&view)
             .unwrap()
+            .get(&stylo::LocalName::from("l-css-id"))
+            .map(String::as_str),
+        Some("0"),
+        "the default css scope is a real attribute"
+    );
+    assert_eq!(
+        doc.get_attributes(&view)
+            .unwrap()
             .get(&stylo::LocalName::from("id"))
             .map(String::as_str),
         Some("not-a-selector")
@@ -465,6 +473,27 @@ fn attributes_id_dataset_and_events() {
     assert_eq!(dataset.get("role").map(String::as_str), Some("hero"));
     assert_eq!(dataset.get("index").map(String::as_str), Some("3"));
     assert_eq!(dataset.get("extra").map(String::as_str), Some("yes"));
+    assert_eq!(
+        node.attr(&stylo::LocalName::from("data-role")),
+        Some("hero")
+    );
+    assert_eq!(node.attr(&stylo::LocalName::from("data-index")), Some("3"));
+    assert_eq!(
+        node.attr(&stylo::LocalName::from("data-extra")),
+        Some("yes")
+    );
+
+    // Replacing the dataset updates and removes the corresponding real
+    // attributes, rather than leaving stale selector-visible entries.
+    doc.set_dataset(&view, [("role", "villain")]).unwrap();
+    let node = doc.widget(&view).unwrap();
+    assert_eq!(node.ext().dataset.len(), 1);
+    assert_eq!(
+        node.attr(&stylo::LocalName::from("data-role")),
+        Some("villain")
+    );
+    assert_eq!(node.attr(&stylo::LocalName::from("data-index")), None);
+    assert_eq!(node.attr(&stylo::LocalName::from("data-extra")), None);
 
     // Events are stored verbatim.
     doc.add_event(&view, EventKind::Bind, "tap", "onTap")
@@ -484,8 +513,13 @@ fn set_css_id_batch() {
     assert_eq!(doc.widget(&t.a).unwrap().ext().css_id, 42);
     assert_eq!(doc.widget(&t.b).unwrap().ext().css_id, 42);
     assert_eq!(doc.widget(&t.c).unwrap().ext().css_id, 42);
+    let css_id_name = stylo::LocalName::from("l-css-id");
+    assert_eq!(doc.widget(&t.a).unwrap().attr(&css_id_name), Some("42"));
+    assert_eq!(doc.widget(&t.b).unwrap().attr(&css_id_name), Some("42"));
+    assert_eq!(doc.widget(&t.c).unwrap().attr(&css_id_name), Some("42"));
     // The page keeps its default (unset) css_id.
     assert_eq!(doc.widget(&t.page).unwrap().ext().css_id, 0);
+    assert_eq!(doc.widget(&t.page).unwrap().attr(&css_id_name), Some("0"));
 
     // A misrouted handle anywhere in the batch fails the whole call.
     let (_other, other_t) = three_children();
@@ -494,6 +528,11 @@ fn set_css_id_batch() {
         Err(WidgetError::ForeignWidget(_))
     ));
     assert_eq!(doc.widget(&t.b).unwrap().ext().css_id, 42, "batch atomic");
+    assert_eq!(
+        doc.widget(&t.b).unwrap().attr(&css_id_name),
+        Some("42"),
+        "real attribute batch is atomic too"
+    );
 }
 
 #[test]
