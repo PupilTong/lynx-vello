@@ -40,10 +40,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Install cargo-llvm-cov and cargo-codspeed
+      - name: Install cargo-llvm-cov and cargo-codspeed 5
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-llvm-cov,cargo-codspeed
+          # Keep cargo-codspeed's major aligned with codspeed-divan-compat.
+          tool: cargo-llvm-cov,cargo-codspeed@5
 
       # Runs the test suite under coverage instrumentation (replaces a plain
       # `cargo test` run for lib/integration tests). The vendored stylo fork
@@ -108,6 +109,47 @@ jobs:
         with:
           mode: walltime
           run: cargo codspeed run -m walltime
+          # Tokenless upload works for public repos; set CODSPEED_TOKEN in the
+          # repo secrets once the project is registered on codspeed.io to make
+          # uploads authenticated.
+          token: ${{ secrets.CODSPEED_TOKEN }}
+
+  memory-benchmarks:
+    name: bench (CodSpeed memory, Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # vendor/stylo (the Lynx-patched stylo fork) is a submodule.
+          submodules: recursive
+
+      # Installs the nightly toolchain + components pinned in rust-toolchain.toml.
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+
+      - name: Install benchmark system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libfontconfig1-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-codspeed 5
+        uses: taiki-e/install-action@v2
+        with:
+          # Keep cargo-codspeed's major aligned with codspeed-divan-compat.
+          tool: cargo-codspeed@5
+
+      # The memory instrument uses Linux eBPF to track heap allocations, so it
+      # runs separately from the macOS walltime benchmarks above.
+      - name: Build benchmarks (CodSpeed, memory)
+        run: cargo codspeed build -m memory
+
+      - name: Run benchmarks (CodSpeed, memory)
+        uses: CodSpeedHQ/action@v4
+        with:
+          mode: memory
+          run: cargo codspeed run -m memory
           # Tokenless upload works for public repos; set CODSPEED_TOKEN in the
           # repo secrets once the project is registered on codspeed.io to make
           # uploads authenticated.
