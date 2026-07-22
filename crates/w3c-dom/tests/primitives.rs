@@ -1,7 +1,7 @@
 //! Integration tests for the `w3c-dom` primitives an embedder's API layer
 //! delegates to: the ONE-TREE [`Document`] (raw slab-index storage, structure
 //! ops, queries), `&Node` navigation, invalidation scheduling carried by
-//! the setters, inline-style parsing, the [`ExternalState`] hook defaults,
+//! the setters, inline-style parsing, the [`ExternalState`] payload marker,
 //! and the let-it-crash mutation contract.
 //!
 //! Invalidation *scheduling* (dirty bits making mutations reachable from the
@@ -62,6 +62,8 @@ fn node_ref_navigation() {
     doc.append(container, c);
 
     let cref = doc.get(container).unwrap();
+    let div = stylo::LocalName::from("div");
+    assert_eq!(cref.local_name(), Some(&div));
     assert_eq!(cref.tag(), Some("div"));
     assert_eq!(cref.parent().unwrap().id(), root);
     let kids: Vec<_> = cref.children().map(Node::id).collect();
@@ -379,26 +381,24 @@ fn stylo_sees_a_distinct_document_node_and_real_owner_document() {
 }
 
 #[test]
-fn external_state_default_attr_hooks() {
+fn attributes_come_only_from_the_real_map() {
     use stylo::dom::TElement;
 
-    // The `()` payload serves no synthetic attributes: only the real attrs
-    // map answers `get_attr`.
+    // The opaque `()` payload cannot serve synthetic attributes: only the
+    // real attrs map answers `get_attr`.
     let mut doc = Document::new();
     let el = node(&mut doc, "div");
     doc.set_attribute(el, "title", "hi");
 
     let elem = doc.get(el).unwrap();
     let ns = stylo::Namespace::default();
+    let title = stylo::LocalName::from("title");
     assert_eq!(
         elem.attr("title"),
         Some("hi"),
         "the accessor sees the plain attribute"
     );
-    assert_eq!(
-        elem.get_attr(&stylo::LocalName::from("title"), &ns),
-        Some("hi".to_owned())
-    );
+    assert_eq!(elem.get_attr(&title, &ns), Some("hi".to_owned()));
     assert_eq!(elem.get_attr(&stylo::LocalName::from("data-x"), &ns), None);
 }
 

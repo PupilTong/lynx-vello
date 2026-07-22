@@ -293,6 +293,8 @@ impl WidgetTree {
         let id = self
             .doc
             .create_element(tag, WidgetState::new(kind, unique_id));
+        // The css scope is selector-visible real DOM state from creation.
+        self.doc.set_attribute(id, "l-css-id", "0");
         self.by_unique_id.insert(unique_id, id);
         self.handle_for(id)
     }
@@ -601,70 +603,10 @@ impl WidgetTree {
             .iter()
             .map(|handle| self.resolve(handle))
             .collect::<Result<Vec<_>, _>>()?;
+        let value = css_id.to_string();
         for id in ids {
-            // The css_id is reflected as the synthetic `l-css-id` attribute;
-            // snapshot it before the payload mutation.
-            self.doc.note_external_attribute_change(id, "l-css-id");
+            self.doc.set_attribute(id, "l-css-id", &value);
             self.doc.ext_mut(id).css_id = css_id;
-        }
-        Ok(())
-    }
-
-    /// Replace an element's `data-*` dataset.
-    pub fn set_dataset<I, K, V>(
-        &mut self,
-        handle: &WidgetHandle,
-        entries: I,
-    ) -> Result<(), WidgetError>
-    where
-        I: IntoIterator<Item = (K, V)>,
-        K: Into<Box<str>>,
-        V: Into<String>,
-    {
-        self.sweep_dropped();
-        let id = self.resolve(handle)?;
-        // Snapshot the old values first, and name every old reflected
-        // attribute while they still exist.
-        self.doc.note_external_attributes_change(id);
-        let old_keys: Vec<String> = self
-            .doc
-            .get(id)
-            .map(|widget| {
-                widget
-                    .ext()
-                    .dataset
-                    .keys()
-                    .map(|key| format!("data-{key}"))
-                    .collect()
-            })
-            .unwrap_or_default();
-        for key in &old_keys {
-            self.doc.note_external_attribute_change(id, key);
-        }
-
-        self.doc.ext_mut(id).dataset = entries
-            .into_iter()
-            .map(|(k, v)| (k.into(), v.into()))
-            .collect();
-
-        // Names that only exist in the new dataset still need to be flagged
-        // as changed; the snapshot keeps the pre-mutation values.
-        let new_keys: Vec<String> = self
-            .doc
-            .get(id)
-            .map(|widget| {
-                widget
-                    .ext()
-                    .dataset
-                    .keys()
-                    .map(|key| format!("data-{key}"))
-                    .collect()
-            })
-            .unwrap_or_default();
-        for key in &new_keys {
-            if !old_keys.contains(key) {
-                self.doc.note_external_attribute_change(id, key);
-            }
         }
         Ok(())
     }
@@ -678,8 +620,8 @@ impl WidgetTree {
     ) -> Result<(), WidgetError> {
         self.sweep_dropped();
         let id = self.resolve(handle)?;
-        self.doc
-            .note_external_attribute_change(id, &format!("data-{key}"));
+        let name = format!("data-{key}");
+        self.doc.set_attribute(id, &name, value);
         self.doc
             .ext_mut(id)
             .dataset
@@ -733,16 +675,14 @@ impl WidgetTree {
         widget.tag().ok_or(WidgetError::StaleElement(id))
     }
 
-    /// An element's plain attribute map.
-    pub fn get_attributes(
-        &self,
+    /// An element's plain attributes as string name/value pairs.
+    pub fn get_attributes<'a>(
+        &'a self,
         handle: &WidgetHandle,
-    ) -> Result<&FxHashMap<Box<str>, String>, WidgetError> {
+    ) -> Result<impl ExactSizeIterator<Item = (&'a str, &'a str)> + 'a, WidgetError> {
         let id = self.resolve(handle)?;
-        self.doc
-            .get(id)
-            .map(Widget::attrs)
-            .ok_or(WidgetError::StaleElement(id))
+        let widget = self.doc.get(id).ok_or(WidgetError::StaleElement(id))?;
+        Ok(widget.attrs())
     }
 
     /// An element's Lynx `unique_id`.

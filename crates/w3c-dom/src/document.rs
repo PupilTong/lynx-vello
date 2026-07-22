@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use neutron_star::tree::LayoutInput;
 use slab::Slab;
+use stylo::LocalName;
 use stylo::dom::OpaqueNode;
 use stylo::selector_parser::SnapshotMap;
 use stylo::shared_lock::SharedRwLock;
@@ -195,7 +196,8 @@ impl<T> Document<T> {
 
     /// Create a detached element and return its raw slab index.
     pub fn create_element(&mut self, tag: &str, ext: T) -> NodeId {
-        self.allocate_node(|tree, id| Node::new_element(tree, id, tag, ext))
+        let local_name = LocalName::from(tag);
+        self.allocate_node(|tree, id| Node::new_element(tree, id, local_name, ext))
     }
 
     /// Backwards-compatible name for [`create_element`](Self::create_element).

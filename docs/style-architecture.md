@@ -30,9 +30,9 @@ Document/Node design (this document describes the current shape).
   (`set_classes`, `set_attribute`, `set_state`, `set_inline_style`, structural
   `insert_before`/`detach`/`remove_subtree`, …) records its own pre-mutation snapshot or scoped
   restyle hint before touching the node. "Snapshot before mutating" is enforced by construction,
-  not asked of embedders. The one embedder obligation left: pair `Document::ext_mut` with
-  `Document::note_external_attribute_change` when a payload change affects a synthetic /
-  reflected attribute (e.g. Lynx's `l-css-id`, `data-*`).
+  not asked of embedders. Selector-visible attributes always live in the real node attribute map;
+  Lynx's `l-css-id` and `data-*` values are written through `Document::set_attribute`, never
+  synthesized from the opaque payload during matching.
 - **Let it crash.** Query methods return `Option`; mutation methods treat vacant/out-of-range
   `NodeId`s,
   cycle-creating links, a second document element, and invalid insertion references as
@@ -169,9 +169,9 @@ Document/Node design (this document describes the current shape).
   `lynx_widget::StyleEngine::restyle_after_device_change` on each styled tree
   so `rpx`/`vw`/`vh` lengths re-resolve and media-dependent rules re-match on
   the next flush.
-- Snapshot-before-mutate is **internal** to the `Document` setters; the only
-  embedder-side pairing is `note_external_attribute_change` before an
-  `ext_mut` that changes a synthetic / reflected attribute.
+- Snapshot-before-mutate is **internal** to the `Document` setters. Payload
+  mutation cannot affect selector matching by itself; selector-visible state
+  must be written through the corresponding DOM setter.
 - Node state stylo touches through `&self` during a traversal is atomic; the
   `ElementData` slot is single-owner under stylo's traversal discipline
   (`SAFETY` notes in `w3c-dom`'s `traits`/`flush`). Concurrent parallel

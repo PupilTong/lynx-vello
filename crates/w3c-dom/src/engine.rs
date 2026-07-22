@@ -3,7 +3,8 @@
 //! [`StyleEngine`] is the style-system owner for an embedder: it owns stylo's
 //! [`Stylist`], the single [`SharedRwLock`] protecting stylesheet and inline
 //! declaration blocks, and the base URL used while parsing CSS. Embedders
-//! provide a stylo [`Device`] and an [`ExternalState`] payload; no
+//! provide a stylo [`Device`] and an [`ExternalState`] payload (an opaque,
+//! `Sync` marker type); no
 //! platform-specific metrics, units, or widget vocabulary live here.
 //!
 //! Styling runs **in place on the one tree**: create documents with

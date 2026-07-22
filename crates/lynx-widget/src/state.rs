@@ -1,18 +1,15 @@
 //! The Lynx external state carried by every widget ([`WidgetState`]), plus the
 //! event-registration types.
 //!
-//! `w3c-dom`'s [`Node`](w3c_dom::Node) covers only the W3C-DOM
-//! subset; everything Lynx-specific about a widget — its [`WidgetKind`], the
+//! `w3c-dom`'s [`Node`](w3c_dom::Node) covers only the W3C-DOM subset;
+//! everything Lynx-specific about a widget — its [`WidgetKind`], the
 //! `unique_id`, the `css_id` style scope, the `data-*` dataset, and event
-//! bindings — lives here, in the node's `ext` payload. The
-//! [`ExternalState`] impl is what feeds the Lynx-specific bits back into
-//! selector matching (the synthetic `l-css-id` attribute and `data-*`
-//! dataset reflection). Structural selectors such as `:root` stay entirely
-//! in `w3c-dom`.
+//! bindings — lives here, in the node's `ext` payload. Selector-visible
+//! counterparts such as `l-css-id` and `data-*` are real node attributes,
+//! written by [`WidgetTree`](crate::WidgetTree) alongside this state.
 
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
-use stylo::LocalName;
 use w3c_dom::ExternalState;
 
 use crate::kind::WidgetKind;
@@ -61,12 +58,11 @@ pub struct WidgetState {
     pub unique_id: i32,
     /// The `css_id` scoping this widget's styles: `0` means unset / global.
     /// Stamped directly by Lynx's `__SetCSSId` (there is no `<component>`
-    /// element in this engine to inherit it from). It is also exposed to
-    /// selector matching as the synthetic `l-css-id` attribute (see the
-    /// [`ExternalState`] impl below).
+    /// element in this engine to inherit it from). [`WidgetTree`](crate::WidgetTree)
+    /// mirrors it into the real `l-css-id` attribute.
     pub css_id: i32,
     /// `data-*` dataset entries (keys stored without the `data-` prefix),
-    /// reflected as `data-*` attributes via the [`ExternalState`] hooks.
+    /// mirrored into real `data-*` attributes by [`WidgetTree`](crate::WidgetTree).
     pub dataset: FxHashMap<Box<str>, String>,
     /// Event bindings on this widget.
     pub events: SmallVec<[EventReg; 2]>,
@@ -87,30 +83,4 @@ impl WidgetState {
     }
 }
 
-impl ExternalState for WidgetState {
-    fn extra_attr_value(&self, name: &str) -> Option<String> {
-        if name == "l-css-id" {
-            // The synthetic `l-css-id` attribute exposes the widget's style
-            // scope for the future scoped-CSS mode.
-            return Some(self.css_id.to_string());
-        }
-        // web-core reflects dataset entries as `data-*` attributes (DOM
-        // dataset reflection), so `[data-x]` selectors must see them too.
-        // Keys are matched verbatim after the `data-` prefix; camelCase↔kebab
-        // reflection is revisited with StyleInfo ingestion (M3) if ReactLynx
-        // turns out to emit camelCase dataset keys.
-        name.strip_prefix("data-")
-            .and_then(|key| self.dataset.get(key).cloned())
-    }
-
-    fn each_extra_attr_name(&self, callback: &mut dyn FnMut(&LocalName)) {
-        // Dataset entries are reflected as `data-*` attributes (web-core
-        // parity; see `extra_attr_value`).
-        for key in self.dataset.keys() {
-            callback(&LocalName::from(format!("data-{key}").as_str()));
-        }
-        // Expose the synthetic `l-css-id` attribute (see `extra_attr_value`)
-        // so the bloom filter accounts for it in the future scoped-CSS mode.
-        callback(&LocalName::from("l-css-id"));
-    }
-}
+impl ExternalState for WidgetState {}

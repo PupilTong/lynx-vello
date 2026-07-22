@@ -18,8 +18,8 @@
 //! - [`StyleEngine`] — stylesheet parsing/building, matching, rule-tree insertion, cascade, and the
 //!   style flush ([`StyleEngine::flush_document`], returning a [`FlushSummary`] of per-node
 //!   [`StyleDamage`]).
-//! - [`ExternalState`] — the embedder-payload trait; the only channel through which the payload `T`
-//!   influences matching (synthetic / reflected attributes).
+//! - [`ExternalState`] — the `Sync` marker for the opaque embedder payload `T`; payload data cannot
+//!   influence matching except by being copied into real DOM state through `Document` mutations.
 //!
 //! # Contract: let it crash
 //!
@@ -35,9 +35,9 @@
 //!
 //! # stylo integration — one tree, one-word handles
 //!
-//! Element tags/classes/ids are interned as stylo atoms and each element node
-//! owns stylo's interior-mutable style state; the crate-private `traits` module
-//! implements stylo's
+//! Element local names, attribute names, classes, and ids are interned as
+//! stylo atoms, and each element node owns stylo's interior-mutable style
+//! state; the crate-private `traits` module implements stylo's
 //! node traits with `&'a Node<T>` as the common
 //! [`TElement`](stylo::dom::TElement)/[`TNode`](stylo::dom::TNode)/
 //! [`TDocument`](stylo::dom::TDocument) handle. The internal `NodeData` distinguishes the
@@ -63,10 +63,8 @@
 //! [`Document::set_attribute`], [`Document::set_state`], structural
 //! mutation, …) records its own pre-mutation snapshot or scoped restyle hint
 //! before touching the node — the "snapshot before mutate" rule is enforced
-//! by construction rather than asked of the embedder. The single exception
-//! an embedder must handle is its own synthetic / reflected attributes:
-//! pair [`Document::ext_mut`] with
-//! [`Document::note_external_attribute_change`].
+//! by construction rather than asked of the embedder. Selector-visible
+//! attributes always live in the real attribute map and use the same setter.
 //!
 //! # Layout
 //!

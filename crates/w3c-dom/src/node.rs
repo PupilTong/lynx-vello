@@ -301,19 +301,18 @@ pub struct Node<T> {
     pub(crate) parent: Option<NodeId>,
     /// Child nodes, in document order.
     pub(crate) children: Vec<NodeId>,
-    /// The element's tag name, interned as a stylo [`LocalName`] atom so
+    /// The element's local name, interned as a stylo [`LocalName`] atom so
     /// `selectors::Element::has_local_name` is a cheap atom comparison.
-    /// `None` for text nodes.
-    pub(crate) tag: Option<LocalName>,
+    /// `None` for document and text nodes.
+    pub(crate) local_name: Option<LocalName>,
     /// The node's classes, interned as atoms.
     pub(crate) classes: SmallVec<[Atom; 4]>,
     /// The node's `id` selector value, distinct from a plain `id` attribute
     /// (the embedder decides whether/how the two are linked).
     pub(crate) id_attr: Option<Atom>,
-    /// Plain attributes. Synthetic / reflected attributes beyond this map are
-    /// served by the [`ext`](Node::ext) payload's
-    /// [`extra_attr_value`](crate::ExternalState::extra_attr_value) hook.
-    pub(crate) attrs: FxHashMap<Box<str>, String>,
+    /// Plain attributes, keyed by their interned local names. This is the sole
+    /// source of selector-visible attribute state.
+    pub(crate) attrs: FxHashMap<LocalName, String>,
     /// Active dynamic pseudo-classes (`:hover` / `:active` / `:focus`) as
     /// stylo state bits.
     pub(crate) element_state: ElementState,
@@ -407,14 +406,13 @@ impl<T> Node<T> {
     /// Create a detached element bound to its owning document slab.
     /// Crate-only: embedders go through
     /// [`Document::create_element`](crate::Document::create_element).
-    pub(crate) fn new_element(tree: *mut Slab<Node<T>>, id: NodeId, tag: &str, ext: T) -> Self {
-        Self::new(
-            tree,
-            id,
-            NodeData::Element(ext),
-            Some(LocalName::from(tag)),
-            None,
-        )
+    pub(crate) fn new_element(
+        tree: *mut Slab<Node<T>>,
+        id: NodeId,
+        local_name: LocalName,
+        ext: T,
+    ) -> Self {
+        Self::new(tree, id, NodeData::Element(ext), Some(local_name), None)
     }
 
     /// Create a detached text node bound to its owning document slab.
@@ -428,7 +426,7 @@ impl<T> Node<T> {
         tree: *mut Slab<Node<T>>,
         id: NodeId,
         data: NodeData<T>,
-        tag: Option<LocalName>,
+        local_name: Option<LocalName>,
         text: Option<String>,
     ) -> Self {
         Self {
@@ -437,7 +435,7 @@ impl<T> Node<T> {
             data,
             parent: None,
             children: Vec::new(),
-            tag,
+            local_name,
             classes: SmallVec::new(),
             id_attr: None,
             attrs: FxHashMap::default(),
@@ -559,10 +557,16 @@ impl<T> Node<T> {
         &self.children
     }
 
-    /// The element's tag name, or `None` for a text node.
+    /// The element's interned local name, or `None` for a non-element node.
+    #[must_use]
+    pub fn local_name(&self) -> Option<&LocalName> {
+        self.local_name.as_ref()
+    }
+
+    /// The element's tag name as a string, or `None` for a non-element node.
     #[must_use]
     pub fn tag(&self) -> Option<&str> {
-        self.tag.as_ref().map(|tag| tag.0.as_ref())
+        self.local_name().map(|name| name.0.as_ref())
     }
 
     /// The node's `id` selector value.
@@ -584,16 +588,26 @@ impl<T> Node<T> {
         self.classes.iter().map(AsRef::as_ref)
     }
 
-    /// A plain attribute's value.
+    /// A plain attribute's value, addressed by its authored name.
+    ///
+    /// Attribute names are converted to stylo's interned [`LocalName`] at
+    /// this DOM boundary; embedders do not need to traffic in stylo types.
     #[must_use]
     pub fn attr(&self, name: &str) -> Option<&str> {
+        let name = LocalName::from(name);
+        self.attr_local_name(&name)
+    }
+
+    /// Look up an already-interned attribute name on stylo's matching paths.
+    pub(crate) fn attr_local_name(&self, name: &LocalName) -> Option<&str> {
         self.attrs.get(name).map(String::as_str)
     }
 
-    /// The plain attribute map.
-    #[must_use]
-    pub fn attrs(&self) -> &FxHashMap<Box<str>, String> {
-        &self.attrs
+    /// The element's plain attributes as string name/value pairs.
+    pub fn attrs(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
+        self.attrs
+            .iter()
+            .map(|(name, value)| (name.0.as_ref(), value.as_str()))
     }
 
     /// The active dynamic pseudo-class state bits.
@@ -623,9 +637,8 @@ impl<T> Node<T> {
         }
     }
 
-    /// Payload mutation is `Document`-mediated
-    /// ([`Document::ext_mut`](crate::Document::ext_mut)) so synthetic-attribute
-    /// snapshots can be demanded contractually alongside it.
+    /// Payload mutation remains `Document`-mediated so nodes cannot be
+    /// mutated outside their owning tree.
     pub(crate) fn ext_mut(&mut self) -> &mut T {
         match &mut self.data {
             NodeData::Element(ext) | NodeData::Text(ext) => ext,

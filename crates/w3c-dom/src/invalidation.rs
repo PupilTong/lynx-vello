@@ -28,11 +28,8 @@
 //! stylo's scheduling state (a pending snapshot, a queued restyle hint, or
 //! the absence of any style data on a never-styled node).
 //!
-//! The one seam an embedder must handle itself: synthetic / reflected
-//! attributes served by its [`ExternalState`](crate::ExternalState) hooks.
-//! Their values live in the payload, so the document cannot see them change —
-//! [`Document::note_external_attribute_change`] is the contractual companion
-//! to [`Document::ext_mut`](crate::Document::ext_mut).
+//! Selector-visible state always lives in the DOM fields mutated here. The
+//! embedder payload is opaque and cannot inject synthetic matching state.
 
 use selectors::matching::ElementSelectorFlags;
 use stylo::LocalName;
@@ -322,18 +319,22 @@ impl<T: ExternalState> Document<T> {
 
     /// Set a plain attribute.
     ///
+    /// The authored string name is interned as a [`LocalName`] before it is
+    /// stored or exposed to stylo's invalidation machinery.
+    ///
     /// # Panics
     ///
     /// Panics when `id` is stale (the let-it-crash mutation contract; see
     /// the crate docs), or when it names a text node.
     pub fn set_attribute(&mut self, id: NodeId, name: &str, value: &str) {
         self.live_element(id);
-        self.note_attribute_change(id, name);
+        let name = LocalName::from(name);
+        self.note_attribute_change(id, &name);
         self.tree_mut()
             .get_mut(id)
             .expect("stale NodeId passed to Document::set_attribute")
             .attrs
-            .insert(name.into(), value.to_owned());
+            .insert(name, value.to_owned());
     }
 
     /// Remove a plain attribute (a no-op when absent).
@@ -344,12 +345,13 @@ impl<T: ExternalState> Document<T> {
     /// the crate docs), or when it names a text node.
     pub fn remove_attribute(&mut self, id: NodeId, name: &str) {
         self.live_element(id);
-        self.note_attribute_change(id, name);
+        let name = LocalName::from(name);
+        self.note_attribute_change(id, &name);
         self.tree_mut()
             .get_mut(id)
             .expect("stale NodeId passed to Document::remove_attribute")
             .attrs
-            .remove(name);
+            .remove(&name);
     }
 
     /// Set or clear dynamic pseudo-class state bits (`:hover` / `:active` /
@@ -551,42 +553,6 @@ impl<T: ExternalState> Document<T> {
         self.mark_ancestors_dirty_descendants(id);
     }
 
-    // --- external (synthetic / reflected) attributes ---------------------------
-
-    /// Record that the synthetic / reflected attribute `name` — served by the
-    /// payload's [`ExternalState`](crate::ExternalState) hooks — is changing.
-    ///
-    /// Call **before** the [`ext_mut`](crate::Document::ext_mut) mutation for
-    /// names that existed before it, so the snapshot captures the old values;
-    /// names that only exist *after* the mutation are also noted through this
-    /// method (the snapshot keeps whatever state its first capture saw).
-    ///
-    /// # Panics
-    ///
-    /// Panics when `id` is stale or identifies a text node (the let-it-crash
-    /// mutation contract; see the crate docs).
-    pub fn note_external_attribute_change(&mut self, id: NodeId, name: &str) {
-        self.live_element(id);
-        self.note_attribute_change(id, name);
-    }
-
-    /// Record a bulk synthetic / reflected attribute change (e.g. a dataset
-    /// replacement) before naming individual attributes. Callers follow up
-    /// with [`note_external_attribute_change`](Self::note_external_attribute_change)
-    /// per affected name.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `id` is stale or identifies a text node (the let-it-crash
-    /// mutation contract; see the crate docs).
-    pub fn note_external_attributes_change(&mut self, id: NodeId) {
-        self.live_element(id);
-        if let Some(snapshot) = self.ensure_snapshot(id) {
-            snapshot.other_attributes_changed = true;
-        }
-        self.mark_mutated(id);
-    }
-
     // --- snapshot recording ------------------------------------------------------
 
     fn note_class_change(&mut self, id: NodeId) {
@@ -603,12 +569,11 @@ impl<T: ExternalState> Document<T> {
         self.mark_mutated(id);
     }
 
-    fn note_attribute_change(&mut self, id: NodeId, name: &str) {
+    fn note_attribute_change(&mut self, id: NodeId, name: &LocalName) {
         if let Some(snapshot) = self.ensure_snapshot(id) {
             snapshot.other_attributes_changed = true;
-            let local = LocalName::from(name);
-            if !snapshot.changed_attrs.contains(&local) {
-                snapshot.changed_attrs.push(local);
+            if !snapshot.changed_attrs.contains(name) {
+                snapshot.changed_attrs.push(name.clone());
             }
         }
         self.mark_mutated(id);
@@ -645,8 +610,7 @@ impl<T: ExternalState> Document<T> {
 
 /// Build a stylo element snapshot of the node's *current* (soon to be old)
 /// state: dynamic pseudo-class bits plus every matching-relevant attribute —
-/// the id selector value, classes, real attributes, and the embedder's
-/// synthetic / reflected attributes.
+/// the id selector value, classes, and real attributes.
 fn build_snapshot<T: ExternalState>(node: &Node<T>) -> Snapshot {
     let mut attrs: Vec<(AttrIdentifier, AttrValue)> = Vec::new();
 
@@ -656,11 +620,14 @@ fn build_snapshot<T: ExternalState>(node: &Node<T>) -> Snapshot {
     // first-match `get_attr` finds these canonical entries even if the node
     // carries plain attributes with the same names.
     if let Some(id_atom) = &node.id_attr {
-        attrs.push((attr_identifier("id"), AttrValue::Atom(id_atom.clone())));
+        attrs.push((
+            attr_identifier(LocalName::from("id")),
+            AttrValue::Atom(id_atom.clone()),
+        ));
     }
     if !node.classes.is_empty() {
         attrs.push((
-            attr_identifier("class"),
+            attr_identifier(LocalName::from("class")),
             AttrValue::TokenList(
                 std::sync::OnceLock::new(),
                 node.classes.iter().cloned().collect(),
@@ -668,26 +635,21 @@ fn build_snapshot<T: ExternalState>(node: &Node<T>) -> Snapshot {
         ));
     }
     for (name, value) in &node.attrs {
-        attrs.push((attr_identifier(name), AttrValue::String(value.clone())));
+        attrs.push((
+            attr_identifier(name.clone()),
+            AttrValue::String(value.clone()),
+        ));
     }
-    node.ext().each_extra_attr_name(&mut |name| {
-        let name_str: &str = name.0.as_ref();
-        if let Some(value) = node.ext().extra_attr_value(name_str) {
-            attrs.push((attr_identifier(name_str), AttrValue::String(value)));
-        }
-    });
-
     let mut snapshot = Snapshot::new();
     snapshot.state = Some(node.element_state());
     snapshot.attrs = Some(attrs);
     snapshot
 }
 
-fn attr_identifier(name: &str) -> AttrIdentifier {
-    let local = LocalName::from(name);
+fn attr_identifier(local_name: LocalName) -> AttrIdentifier {
     AttrIdentifier {
-        local_name: local.clone(),
-        name: local,
+        name: local_name.clone(),
+        local_name,
         namespace: stylo::Namespace::default(),
         prefix: None,
     }

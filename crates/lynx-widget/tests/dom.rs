@@ -441,11 +441,16 @@ fn attributes_id_dataset_and_events() {
     // Plain attribute (including a literal "id" attr) goes to attrs, not id_attr.
     doc.set_attribute(&view, "id", "not-a-selector").unwrap();
     doc.set_attribute(&view, "aria-label", "hi").unwrap();
+    let attributes: Vec<_> = doc.get_attributes(&view).unwrap().collect();
+    assert!(attributes.contains(&("l-css-id", "0")));
+    assert!(attributes.contains(&("id", "not-a-selector")));
     assert_eq!(
-        doc.get_attributes(&view)
-            .unwrap()
-            .get("id")
-            .map(String::as_str),
+        doc.widget(&view).unwrap().attr("l-css-id"),
+        Some("0"),
+        "the default css scope is a real attribute"
+    );
+    assert_eq!(
+        doc.widget(&view).unwrap().attr("id"),
         Some("not-a-selector")
     );
     assert!(doc.widget(&view).unwrap().id_attr().is_none());
@@ -457,14 +462,25 @@ fn attributes_id_dataset_and_events() {
     assert!(doc.widget(&view).unwrap().id_attr().is_none());
 
     // Dataset.
-    doc.set_dataset(&view, [("role", "hero"), ("index", "3")])
-        .unwrap();
+    doc.add_dataset(&view, "role", "hero").unwrap();
+    doc.add_dataset(&view, "index", "3").unwrap();
     doc.add_dataset(&view, "extra", "yes").unwrap();
     let node = doc.widget(&view).unwrap();
     let dataset = &node.ext().dataset;
     assert_eq!(dataset.get("role").map(String::as_str), Some("hero"));
     assert_eq!(dataset.get("index").map(String::as_str), Some("3"));
     assert_eq!(dataset.get("extra").map(String::as_str), Some("yes"));
+    assert_eq!(node.attr("data-role"), Some("hero"));
+    assert_eq!(node.attr("data-index"), Some("3"));
+    assert_eq!(node.attr("data-extra"), Some("yes"));
+
+    // Overwriting one dataset entry also overwrites its real attribute.
+    doc.add_dataset(&view, "role", "villain").unwrap();
+    let node = doc.widget(&view).unwrap();
+    assert_eq!(node.ext().dataset.len(), 3);
+    assert_eq!(node.attr("data-role"), Some("villain"));
+    assert_eq!(node.attr("data-index"), Some("3"));
+    assert_eq!(node.attr("data-extra"), Some("yes"));
 
     // Events are stored verbatim.
     doc.add_event(&view, EventKind::Bind, "tap", "onTap")
@@ -484,8 +500,12 @@ fn set_css_id_batch() {
     assert_eq!(doc.widget(&t.a).unwrap().ext().css_id, 42);
     assert_eq!(doc.widget(&t.b).unwrap().ext().css_id, 42);
     assert_eq!(doc.widget(&t.c).unwrap().ext().css_id, 42);
+    assert_eq!(doc.widget(&t.a).unwrap().attr("l-css-id"), Some("42"));
+    assert_eq!(doc.widget(&t.b).unwrap().attr("l-css-id"), Some("42"));
+    assert_eq!(doc.widget(&t.c).unwrap().attr("l-css-id"), Some("42"));
     // The page keeps its default (unset) css_id.
     assert_eq!(doc.widget(&t.page).unwrap().ext().css_id, 0);
+    assert_eq!(doc.widget(&t.page).unwrap().attr("l-css-id"), Some("0"));
 
     // A misrouted handle anywhere in the batch fails the whole call.
     let (_other, other_t) = three_children();
@@ -494,6 +514,11 @@ fn set_css_id_batch() {
         Err(WidgetError::ForeignWidget(_))
     ));
     assert_eq!(doc.widget(&t.b).unwrap().ext().css_id, 42, "batch atomic");
+    assert_eq!(
+        doc.widget(&t.b).unwrap().attr("l-css-id"),
+        Some("42"),
+        "real attribute batch is atomic too"
+    );
 }
 
 #[test]
