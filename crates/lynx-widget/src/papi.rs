@@ -47,7 +47,6 @@
 use std::sync::{Arc as StdArc, Mutex, Weak};
 
 use rustc_hash::FxHashMap;
-use stylo::LocalName;
 use stylo::properties::ComputedValues;
 use stylo::servo_arc::Arc;
 use thiserror::Error;
@@ -738,7 +737,7 @@ impl WidgetTree {
     pub fn get_attributes(
         &self,
         handle: &WidgetHandle,
-    ) -> Result<&FxHashMap<LocalName, String>, WidgetError> {
+    ) -> Result<&FxHashMap<Box<str>, String>, WidgetError> {
         let id = self.resolve(handle)?;
         self.doc
             .get(id)

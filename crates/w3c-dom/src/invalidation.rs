@@ -328,13 +328,12 @@ impl<T: ExternalState> Document<T> {
     /// the crate docs), or when it names a text node.
     pub fn set_attribute(&mut self, id: NodeId, name: &str, value: &str) {
         self.live_element(id);
-        let name = LocalName::from(name);
-        self.note_attribute_change(id, &name);
+        self.note_attribute_change(id, name);
         self.tree_mut()
             .get_mut(id)
             .expect("stale NodeId passed to Document::set_attribute")
             .attrs
-            .insert(name, value.to_owned());
+            .insert(name.into(), value.to_owned());
     }
 
     /// Remove a plain attribute (a no-op when absent).
@@ -345,13 +344,12 @@ impl<T: ExternalState> Document<T> {
     /// the crate docs), or when it names a text node.
     pub fn remove_attribute(&mut self, id: NodeId, name: &str) {
         self.live_element(id);
-        let name = LocalName::from(name);
-        self.note_attribute_change(id, &name);
+        self.note_attribute_change(id, name);
         self.tree_mut()
             .get_mut(id)
             .expect("stale NodeId passed to Document::remove_attribute")
             .attrs
-            .remove(&name);
+            .remove(name);
     }
 
     /// Set or clear dynamic pseudo-class state bits (`:hover` / `:active` /
@@ -569,8 +567,7 @@ impl<T: ExternalState> Document<T> {
     /// mutation contract; see the crate docs).
     pub fn note_external_attribute_change(&mut self, id: NodeId, name: &str) {
         self.live_element(id);
-        let name = LocalName::from(name);
-        self.note_attribute_change(id, &name);
+        self.note_attribute_change(id, name);
     }
 
     /// Record a bulk synthetic / reflected attribute change (e.g. a dataset
@@ -606,11 +603,12 @@ impl<T: ExternalState> Document<T> {
         self.mark_mutated(id);
     }
 
-    fn note_attribute_change(&mut self, id: NodeId, name: &LocalName) {
+    fn note_attribute_change(&mut self, id: NodeId, name: &str) {
         if let Some(snapshot) = self.ensure_snapshot(id) {
             snapshot.other_attributes_changed = true;
-            if !snapshot.changed_attrs.contains(name) {
-                snapshot.changed_attrs.push(name.clone());
+            let local = LocalName::from(name);
+            if !snapshot.changed_attrs.contains(&local) {
+                snapshot.changed_attrs.push(local);
             }
         }
         self.mark_mutated(id);
@@ -658,14 +656,11 @@ fn build_snapshot<T: ExternalState>(node: &Node<T>) -> Snapshot {
     // first-match `get_attr` finds these canonical entries even if the node
     // carries plain attributes with the same names.
     if let Some(id_atom) = &node.id_attr {
-        attrs.push((
-            attr_identifier(LocalName::from("id")),
-            AttrValue::Atom(id_atom.clone()),
-        ));
+        attrs.push((attr_identifier("id"), AttrValue::Atom(id_atom.clone())));
     }
     if !node.classes.is_empty() {
         attrs.push((
-            attr_identifier(LocalName::from("class")),
+            attr_identifier("class"),
             AttrValue::TokenList(
                 std::sync::OnceLock::new(),
                 node.classes.iter().cloned().collect(),
@@ -673,14 +668,12 @@ fn build_snapshot<T: ExternalState>(node: &Node<T>) -> Snapshot {
         ));
     }
     for (name, value) in &node.attrs {
-        attrs.push((
-            attr_identifier(name.clone()),
-            AttrValue::String(value.clone()),
-        ));
+        attrs.push((attr_identifier(name), AttrValue::String(value.clone())));
     }
     node.ext().each_extra_attr_name(&mut |name| {
-        if let Some(value) = node.ext().extra_attr_value(name) {
-            attrs.push((attr_identifier(name.clone()), AttrValue::String(value)));
+        let name_str: &str = name.0.as_ref();
+        if let Some(value) = node.ext().extra_attr_value(name_str) {
+            attrs.push((attr_identifier(name_str), AttrValue::String(value)));
         }
     });
 
@@ -690,10 +683,11 @@ fn build_snapshot<T: ExternalState>(node: &Node<T>) -> Snapshot {
     snapshot
 }
 
-fn attr_identifier(local_name: LocalName) -> AttrIdentifier {
+fn attr_identifier(name: &str) -> AttrIdentifier {
+    let local = LocalName::from(name);
     AttrIdentifier {
-        name: local_name.clone(),
-        local_name,
+        local_name: local.clone(),
+        name: local,
         namespace: stylo::Namespace::default(),
         prefix: None,
     }

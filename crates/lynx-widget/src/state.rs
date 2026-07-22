@@ -88,8 +88,7 @@ impl WidgetState {
 }
 
 impl ExternalState for WidgetState {
-    fn extra_attr_value(&self, name: &LocalName) -> Option<String> {
-        let name: &str = name.0.as_ref();
+    fn extra_attr_value(&self, name: &str) -> Option<String> {
         if name == "l-css-id" {
             // The synthetic `l-css-id` attribute exposes the widget's style
             // scope for the future scoped-CSS mode.

@@ -35,8 +35,8 @@
 //!
 //! # stylo integration — one tree, one-word handles
 //!
-//! Element local names, attribute names, classes, and ids are interned as stylo
-//! atoms, and each element node owns stylo's interior-mutable style state; the crate-private
+//! Element local names, classes, and ids are interned as stylo atoms, and each
+//! element node owns stylo's interior-mutable style state; the crate-private
 //! `traits` module implements stylo's
 //! node traits with `&'a Node<T>` as the common
 //! [`TElement`](stylo::dom::TElement)/[`TNode`](stylo::dom::TNode)/

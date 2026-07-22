@@ -62,6 +62,8 @@ fn node_ref_navigation() {
     doc.append(container, c);
 
     let cref = doc.get(container).unwrap();
+    let div = stylo::LocalName::from("div");
+    assert_eq!(cref.local_name(), Some(&div));
     assert_eq!(cref.tag(), Some("div"));
     assert_eq!(cref.parent().unwrap().id(), root);
     let kids: Vec<_> = cref.children().map(Node::id).collect();
@@ -397,7 +399,6 @@ fn external_state_default_attr_hooks() {
         "the accessor sees the plain attribute"
     );
     assert_eq!(elem.attr_local_name(&title), Some("hi"));
-    assert!(elem.attrs().contains_key(&title));
     assert_eq!(elem.get_attr(&title, &ns), Some("hi".to_owned()));
     assert_eq!(elem.get_attr(&stylo::LocalName::from("data-x"), &ns), None);
 }

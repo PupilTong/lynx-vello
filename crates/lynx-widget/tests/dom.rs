@@ -444,7 +444,7 @@ fn attributes_id_dataset_and_events() {
     assert_eq!(
         doc.get_attributes(&view)
             .unwrap()
-            .get(&stylo::LocalName::from("id"))
+            .get("id")
             .map(String::as_str),
         Some("not-a-selector")
     );
