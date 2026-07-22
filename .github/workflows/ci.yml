@@ -127,6 +127,11 @@ jobs:
       - name: Install pinned toolchain
         run: rustup toolchain install
 
+      - name: Install benchmark system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libfontconfig1-dev
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-codspeed 5
