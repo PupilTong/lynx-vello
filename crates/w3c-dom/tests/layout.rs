@@ -659,6 +659,60 @@ fn text_nodes_use_parley_with_their_parents_inherited_style() {
 }
 
 #[test]
+fn inherited_text_style_change_remeasures_text_child() {
+    let mut dom = w3c_dom::Document::new(common::device(800.0, 600.0));
+    dom.add_stylesheet_str(
+        "page { display: flex; width: 200px; height: 100px; align-items: flex-start;
+                font-family: Ahem; font-size: 16px; }",
+        w3c_dom::StylesheetOrigin::Author,
+    );
+    assert_eq!(dom.register_fonts(AHEM), 1);
+    let root = dom.create_element("page", ());
+    dom.append_child(root);
+    let text = dom.create_text_node("hello", ());
+    dom.append(root, text);
+
+    dom.layout();
+    assert_eq!(dom_rect(&dom, text), (0.0, 0.0, 80.0, 16.0));
+
+    // Text nodes have no stylo data of their own, but their measurement reads
+    // inherited text values from the direct parent. Changing those values must
+    // invalidate both the child's box cache and its retained Parley artifacts.
+    dom.set_inline_style(root, "font-size: 32px");
+    dom.layout();
+
+    assert_eq!(dom_rect(&dom, text), (0.0, 0.0, 160.0, 32.0));
+}
+
+#[test]
+fn inherited_text_style_change_remeasures_nested_text_child() {
+    let mut dom = w3c_dom::Document::new(common::device(800.0, 600.0));
+    dom.add_stylesheet_str(
+        "page, view { display: flex; width: 200px; height: 100px;
+                      align-items: flex-start; }
+         page { font-family: Ahem; font-size: 16px; }",
+        w3c_dom::StylesheetOrigin::Author,
+    );
+    assert_eq!(dom.register_fonts(AHEM), 1);
+    let root = dom.create_element("page", ());
+    dom.append_child(root);
+    let parent = dom.create_element("view", ());
+    dom.append(root, parent);
+    let text = dom.create_text_node("hello", ());
+    dom.append(parent, text);
+
+    dom.layout();
+    assert_eq!(dom_rect(&dom, text), (0.0, 0.0, 80.0, 16.0));
+
+    // Stylo propagates inherited damage to `parent`; harvest then invalidates
+    // the direct text dependency there without walking arbitrary descendants.
+    dom.set_inline_style(root, "font-size: 32px");
+    dom.layout();
+
+    assert_eq!(dom_rect(&dom, text), (0.0, 0.0, 160.0, 32.0));
+}
+
+#[test]
 fn rounding_snaps_to_the_device_pixel_grid() {
     let mut h = Harness {
         doc: Doc::with_device(device_with(800.0, 600.0, 2.0, PrefersColorScheme::Light)),

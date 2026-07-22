@@ -197,8 +197,11 @@ useful signal for currently-compatible versions of those libraries.
   The document node lazily creates and then owns the shared Parley
   `TextContext`; text nodes lazily retain probe/commit artifacts in that
   same content record and read inherited font/text values from their
-  parent. Parley is unconditional and there is no arbitrary payload callback. It
-  must not contain Lynx widget vocabulary or Lynx device/unit policy —
+  parent. Relayout damage on an element evicts its direct text children's
+  measurement caches and retained artifacts because text nodes have no Stylo
+  damage record of their own. Parley is unconditional and there is no
+  arbitrary payload callback. It must not contain Lynx widget vocabulary or
+  Lynx device/unit policy —
   Lynx computed defaults (border-box, `overflow: hidden`, `display: linear`
   on every element, …) stay embedder cascade policy (UA sheet). Relies on
   the vendored stylo fork (`vendor/stylo`, tracking the

@@ -506,7 +506,10 @@ impl<T> Document<T> {
     ///    `ElementData::clear_restyle_state` (draining `hint` + `damage` + the restyle flags),
     ///    unsets `dirty_descendants`, and clears the snapshot bits. If the copied damage is
     ///    non-empty, it consumes any relayout-class effect into the document's layout caches and
-    ///    then streams `(id, StyleDamage(damage))` to `sink`.
+    ///    then streams `(id, StyleDamage(damage))` to `sink`. Because text nodes read inherited
+    ///    text style from their direct parent but carry no stylo data of their own, relayout damage
+    ///    on an element also clears each direct text child's box cache and retained Parley
+    ///    artifacts.
     ///
     /// Consuming layout damage here is load-bearing: callers may legitimately
     /// discard [`FlushSummary`](crate::FlushSummary), and a later
@@ -578,6 +581,17 @@ impl<T> Document<T> {
             };
 
             if damage.needs_relayout() {
+                // Text nodes never receive stylo damage themselves, yet their
+                // measurement depends on inherited values read from the direct
+                // parent's ComputedValues. Clear both layers of their retained
+                // state: the box cache alone is insufficient because Parley
+                // would otherwise reuse the stale committed shape artifact.
+                if let Some(element) = self.get(current) {
+                    for child in element.children().filter(|child| child.is_text_node()) {
+                        child.layout_data.borrow_mut().clear_measurement_cache();
+                        child.invalidate_text_artifacts();
+                    }
+                }
                 self.invalidate_layout(current);
                 if damage.is_reconstruct() {
                     // Box generation changed, so the parent must re-collect
@@ -615,7 +629,7 @@ impl Drop for FlushPhaseToken {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use euclid::{Scale, Size2D};
     use stylo::context::QuirksMode;
     use stylo::device::servo::FontMetricsProvider;
@@ -650,7 +664,7 @@ mod tests {
         }
     }
 
-    fn device() -> Device {
+    pub(crate) fn device() -> Device {
         Device::new(
             MediaType::screen(),
             QuirksMode::NoQuirks,

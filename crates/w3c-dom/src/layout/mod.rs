@@ -527,7 +527,7 @@ mod tests {
 
     #[test]
     fn internal_natural_size_update_invalidates_the_dirty_spine() {
-        let mut document = Document::new();
+        let mut document = Document::new(crate::document::tests::device());
         let root = document.create_element("page", ());
         document.append_child(root);
         let image = document.create_element("image", ());

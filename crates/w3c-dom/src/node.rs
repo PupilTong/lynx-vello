@@ -1075,7 +1075,7 @@ mod tests {
 
     #[test]
     fn document_text_context_is_lazy_and_reused() {
-        let document = Document::<()>::new();
+        let document = Document::<()>::new(crate::document::tests::device());
         let root = document.root_node();
         let NodeData::Document { text_context, .. } = &root.data else {
             unreachable!("slot zero is the document node")
@@ -1089,7 +1089,7 @@ mod tests {
 
     #[test]
     fn node_content_and_text_artifacts_are_lazy() {
-        let mut document = Document::<()>::new();
+        let mut document = Document::<()>::new(crate::document::tests::device());
         let element = document.create_element("view", ());
         assert!(document.get(element).unwrap().content.is_none());
 
