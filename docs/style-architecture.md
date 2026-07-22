@@ -119,8 +119,10 @@ Document/Node design (this document describes the current shape).
    cumulative) plus a `traversed` flag, keyed by `NodeId`. Initial styling of
    a subtree reports **no** damage by design (no old values to diff); a later
    geometry/`display` change reports the matching damage on the affected
-   nodes, which the engine-level layout pass consumes to invalidate
-   incrementally. The summary is *not* `#[must_use]`, and
+   nodes. Harvest immediately consumes relayout-class entries into incremental
+   layout invalidation before exposing the summary, so a later layout stays
+   correct even when an independent flush's return value is discarded. The
+   summary is *not* `#[must_use]`, and
    `flush_document_with_sink` streams the same damage without allocating the
    `Vec`. **Damage stays inside the engine layer**: `lynx-widget` is the
    web-core analogue over `w3c-dom`'s browser-DOM analogue, so
@@ -135,10 +137,12 @@ Document/Node design (this document describes the current shape).
    the substitute via `parent_element_or_host()`, `None` for the document
    element — so the harvest follows the driver's returned root purely by
    contract, as insurance for a future subtree-flush entry point), reads each
-   visited node's
-   `ElementData::damage` into the summary, then **clears** stylo's per-node
-   restyle state (hint + damage + flags) and the `dirty_descendants` /
-   snapshot bits. Clearing damage is not optional — see the invariant below.
+   visited node's `ElementData::damage`, copies it out, then **clears** stylo's
+   per-node restyle state (hint + damage + flags) and the `dirty_descendants` /
+   snapshot bits. The copied relayout-class damage drives boundary-stopped
+   `Document::invalidate_layout` (plus the parent for a reconstruct), and all
+   copied damage remains exposed through the summary/sink. Clearing damage is
+   not optional — see the invariant below.
    `Document::clear_dirty` is the same reset applied to the whole document at
    once (a full scheduling reset, computed styles preserved); the per-flush
    path uses the cheaper spine-targeted harvest.

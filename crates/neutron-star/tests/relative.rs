@@ -617,9 +617,9 @@ fn display_none_is_zeroed_and_excluded_from_relative_ids() {
     hidden_style.display = Display::None;
     let hidden = tree.push_leaf(hidden_style, Size::new(80.0, 50.0), None);
     let hidden_slots = tree.session_node(hidden);
-    let mut hidden_layout = hidden_slots.layout.get();
+    let mut hidden_layout = hidden_slots.layout.borrow().clone();
     hidden_layout.size = Size::new(80.0, 50.0);
-    hidden_slots.layout.set(hidden_layout);
+    *hidden_slots.layout.borrow_mut() = hidden_layout;
     let mut child_style = relative_leaf_style(10.0, 10.0, 2);
     child_style.relative_adjacent.right = id(1);
     let child = tree.push_leaf(child_style, Size::new(10.0, 10.0), None);

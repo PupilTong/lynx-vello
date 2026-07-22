@@ -40,7 +40,12 @@ impl Harness {
     }
 
     fn layout_of(&self, id: NodeId) -> Layout {
-        self.doc.dom.get(id).expect("node id is live").layout()
+        self.doc
+            .dom
+            .get(id)
+            .expect("node id is live")
+            .layout()
+            .clone()
     }
 
     /// `(x, y, width, height)` of the node's rounded border box, relative to
@@ -778,7 +783,7 @@ fn layout_document_flushes_pending_styles_itself() {
 /// and tallies how often the engine measured one — the "did layout do work?"
 /// probe for the incremental-relayout tests. The tally is shared across every
 /// node in the document.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct CountingMeasure {
     width: f32,
     height: f32,
@@ -828,6 +833,33 @@ fn style_width_change_relayouts_without_manual_invalidation() {
 
     assert_eq!(h.rect(a).2, 40.0);
     assert_eq!(h.rect(b).2, 160.0);
+}
+
+#[test]
+fn standalone_style_flush_preserves_relayout_for_next_layout() {
+    let mut h = Harness::new("page { display: flex; width: 200px; height: 50px; }");
+    let root = h.doc.root;
+    let child = h.doc.el(root, "view");
+    h.doc.set_inline(child, "width: 40px");
+    h.layout();
+    assert_eq!(h.rect(child).2, 40.0);
+
+    h.doc.set_inline(child, "width: 60px");
+    let summary = h.doc.flush();
+    assert!(
+        summary
+            .damage
+            .iter()
+            .any(|&(id, damage)| id == child && damage.needs_relayout()),
+        "the standalone flush reports RELAYOUT damage for the width change",
+    );
+    drop(summary);
+
+    // The following layout's internal flush is a no-op. The standalone flush
+    // must nevertheless have preserved its relayout effect internally rather
+    // than leaving the warm 40px layout cache valid forever.
+    h.layout();
+    assert_eq!(h.rect(child).2, 60.0);
 }
 
 #[test]
@@ -889,11 +921,10 @@ fn contain_strict_boundary_keeps_ancestor_caches_and_relayouts_interior() {
     assert_eq!(h.rect(outer).2, 80.0);
     assert_eq!(h.rect(inner).2, 30.0);
 
-    // Flush the interior style change, then invalidate: boundary-stopped
-    // clearing keeps the root's cache warm.
+    // Harvesting the standalone flush's damage performs boundary-stopped
+    // invalidation even though its summary is discarded.
     h.doc.set_inline(inner, "width: 50px; height: 30px");
     h.doc.flush();
-    h.doc.dom.invalidate_layout(inner);
     assert!(h.node_cache_empty(inner), "the dirty node is cleared");
     assert!(h.node_cache_empty(outer), "the boundary itself is cleared");
     assert!(
@@ -926,7 +957,6 @@ fn uncontained_interior_change_clears_the_ancestor_caches() {
 
     h.doc.set_inline(inner, "width: 50px; height: 30px");
     h.doc.flush();
-    h.doc.dom.invalidate_layout(inner);
     assert!(h.node_cache_empty(outer), "the container is cleared");
     assert!(
         h.node_cache_empty(root),
@@ -976,7 +1006,6 @@ fn a_damaged_boundary_still_clears_its_ancestors() {
 
     h.doc.set_inline(boundary, "width: 90px; height: 60px");
     h.doc.flush();
-    h.doc.dom.invalidate_layout(boundary);
     assert!(
         h.node_cache_empty(boundary),
         "the damaged boundary is cleared"

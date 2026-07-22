@@ -1763,13 +1763,13 @@ mod tests {
                 .with_first_baselines(Point::new(None, self.tree.first_baseline))
         }
 
-        fn set_unrounded_layout(self, _layout: &Layout) {}
+        fn set_unrounded_layout(self, _layout: Layout) {}
 
-        fn unrounded_layout(self) -> Layout {
-            Layout::default()
+        fn with_unrounded_layout<R>(self, read: impl FnOnce(&Layout) -> R) -> R {
+            read(&Layout::default())
         }
 
-        fn set_final_layout(self, _layout: &Layout) {}
+        fn set_final_layout(self, _layout: Layout) {}
 
         fn set_static_position(self, _static_position: Point<f32>) {}
 

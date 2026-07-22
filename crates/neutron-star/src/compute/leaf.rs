@@ -783,15 +783,15 @@ mod tests {
             unreachable!("leaf tests drive compute_cached_layout directly")
         }
 
-        fn set_unrounded_layout(self, _layout: &Layout) {
+        fn set_unrounded_layout(self, _layout: Layout) {
             unreachable!("leaf tests store no durable geometry")
         }
 
-        fn unrounded_layout(self) -> Layout {
+        fn with_unrounded_layout<R>(self, _read: impl FnOnce(&Layout) -> R) -> R {
             unreachable!("leaf tests store no durable geometry")
         }
 
-        fn set_final_layout(self, _layout: &Layout) {
+        fn set_final_layout(self, _layout: Layout) {
             unreachable!("leaf tests store no durable geometry")
         }
 

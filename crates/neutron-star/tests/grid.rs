@@ -9,7 +9,7 @@
 
 mod support;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
 
 use neutron_star::compute::{
@@ -309,12 +309,12 @@ struct TestSourceNode {
 }
 
 /// Per-node mutable layout slots and instrumentation, written through
-/// [`TestRef`] handles. Layout is single-threaded, so `Cell` interior
-/// mutability is the whole synchronization story.
+/// [`TestRef`] handles. Layout is single-threaded, so `Cell`/`RefCell`
+/// interior mutability is the whole synchronization story.
 #[derive(Debug, Default)]
 struct TestSessionNode {
-    layout: Cell<Layout>,
-    final_layout: Cell<Layout>,
+    layout: RefCell<Layout>,
+    final_layout: RefCell<Layout>,
     last_input: Cell<Option<LayoutInput>>,
     static_position: Cell<Option<Point<f32>>>,
     layout_writes: Cell<usize>,
@@ -400,7 +400,7 @@ impl TestTree {
     }
 
     fn layout(&self, id: TestId) -> Layout {
-        self.session_node(id).layout.get()
+        self.session_node(id).layout.borrow().clone()
     }
 
     /// Dispatches layout on `id` — the entry point tests use directly.
@@ -521,21 +521,22 @@ impl<'t> LayoutNode for TestRef<'t> {
         })
     }
 
-    fn set_unrounded_layout(self, layout: &Layout) {
+    fn set_unrounded_layout(self, layout: Layout) {
         self.tree
             .layout_writes
             .set(self.tree.layout_writes.get() + 1);
         let slots = self.slots();
         slots.layout_writes.set(slots.layout_writes.get() + 1);
-        slots.layout.set(*layout);
+        *slots.layout.borrow_mut() = layout;
     }
 
-    fn unrounded_layout(self) -> Layout {
-        self.slots().layout.get()
+    fn with_unrounded_layout<R>(self, read: impl FnOnce(&Layout) -> R) -> R {
+        let layout = self.slots().layout.borrow();
+        read(&layout)
     }
 
-    fn set_final_layout(self, layout: &Layout) {
-        self.slots().final_layout.set(*layout);
+    fn set_final_layout(self, layout: Layout) {
+        *self.slots().final_layout.borrow_mut() = layout;
     }
 
     fn set_static_position(self, static_position: Point<f32>) {
@@ -1603,8 +1604,8 @@ fn measure_goal_probes_intrinsics_without_durable_writes() {
     let mut sentinel = Layout::default();
     sentinel.location = Point::new(123.0, 456.0);
     sentinel.size = Size::new(7.0, 8.0);
-    tree.session_node(child).layout.set(sentinel);
-    tree.session_node(root).layout.set(sentinel);
+    *tree.session_node(child).layout.borrow_mut() = sentinel.clone();
+    *tree.session_node(root).layout.borrow_mut() = sentinel.clone();
 
     let output = tree.compute_child_layout(
         root,
@@ -1634,9 +1635,9 @@ fn hidden_and_out_of_flow_children_do_not_occupy_grid_cells() {
     hidden_style.display = Display::None;
     let hidden = tree.push_leaf(hidden_style, Size::ZERO, Size::new(1_000.0, 1_000.0));
     let hidden_slots = tree.session_node(hidden);
-    let mut hidden_sentinel = hidden_slots.layout.get();
+    let mut hidden_sentinel = hidden_slots.layout.borrow().clone();
     hidden_sentinel.size = Size::new(999.0, 999.0);
-    hidden_slots.layout.set(hidden_sentinel);
+    *hidden_slots.layout.borrow_mut() = hidden_sentinel;
 
     let mut absolute_style = fixed_leaf_style(20.0, 10.0);
     absolute_style.position = PositionProperty::Absolute;

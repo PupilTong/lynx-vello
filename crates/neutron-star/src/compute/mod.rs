@@ -188,7 +188,7 @@ pub fn compute_root_layout<N: LayoutNode>(root: N, available_space: Size<Availab
     let border = resolve_border(&style.border());
 
     if hidden {
-        root.set_unrounded_layout(&Layout::default());
+        root.set_unrounded_layout(Layout::default());
         return;
     }
 
@@ -199,7 +199,7 @@ pub fn compute_root_layout<N: LayoutNode>(root: N, available_space: Size<Availab
     layout.border = border;
     layout.padding = padding;
     layout.margin = margin;
-    root.set_unrounded_layout(&layout);
+    root.set_unrounded_layout(layout);
 }
 
 fn resolve_root_margins(
@@ -322,8 +322,7 @@ where
 /// and then return [`LayoutOutput::HIDDEN`] itself.
 pub fn hide_subtree<N: LayoutNode>(node: N) {
     node.cache_clear();
-    let hidden_layout = Layout::with_order(0);
-    node.set_unrounded_layout(&hidden_layout);
+    node.set_unrounded_layout(Layout::with_order(0));
 
     for child in node.children() {
         hide_subtree(child);
@@ -748,7 +747,7 @@ fn absolute_preferred_available(value: &StyleSize, basis: Option<f32>) -> Option
 /// under `root`.
 ///
 /// Walks the subtree rooted at `root` (including `root` itself), reading
-/// each node's [`unrounded_layout`](LayoutNode::unrounded_layout) and
+/// each node's [`clone_unrounded_layout`](LayoutNode::clone_unrounded_layout) and
 /// writing a rounded copy through
 /// [`set_final_layout`](LayoutNode::set_final_layout).
 ///
@@ -873,52 +872,55 @@ struct AbsoluteAxis {
 }
 
 fn round_layout_inner<N: LayoutNode>(node: N, scale: f32, parent_position: Point<f32>) {
-    let unrounded = node.unrounded_layout();
+    // The rounded result is a second durable record by design. Keep this one
+    // required whole-Layout duplication explicit in the protocol operation's
+    // name rather than making a large by-value read look free.
+    let unrounded = node.clone_unrounded_layout();
     let position = Point::new(
         parent_position.x + unrounded.location.x,
         parent_position.y + unrounded.location.y,
     );
+    let source_size = unrounded.size;
+    let source_content_size = unrounded.content_size;
+    let source_border = unrounded.border;
+    let source_padding = unrounded.padding;
+    let source_margin = unrounded.margin;
     let snap = |value: f32| css_round_to_integer(value * scale) / scale;
-
     let mut rounded = unrounded;
     rounded.location = Point::new(
         snap(position.x) - snap(parent_position.x),
         snap(position.y) - snap(parent_position.y),
     );
     rounded.size = Size::new(
-        snap(position.x + unrounded.size.width) - snap(position.x),
-        snap(position.y + unrounded.size.height) - snap(position.y),
+        snap(position.x + source_size.width) - snap(position.x),
+        snap(position.y + source_size.height) - snap(position.y),
     );
     rounded.content_size = Size::new(
-        snap(position.x + unrounded.content_size.width) - snap(position.x),
-        snap(position.y + unrounded.content_size.height) - snap(position.y),
+        snap(position.x + source_content_size.width) - snap(position.x),
+        snap(position.y + source_content_size.height) - snap(position.y),
     );
-    rounded.border.left = snap(position.x + unrounded.border.left) - snap(position.x);
-    rounded.border.right = snap(position.x + unrounded.size.width)
-        - snap(position.x + unrounded.size.width - unrounded.border.right);
-    rounded.border.top = snap(position.y + unrounded.border.top) - snap(position.y);
-    rounded.border.bottom = snap(position.y + unrounded.size.height)
-        - snap(position.y + unrounded.size.height - unrounded.border.bottom);
-    rounded.padding.left = snap(position.x + unrounded.border.left + unrounded.padding.left)
-        - snap(position.x + unrounded.border.left);
-    rounded.padding.right = snap(position.x + unrounded.size.width - unrounded.border.right)
-        - snap(
-            position.x + unrounded.size.width - unrounded.border.right - unrounded.padding.right,
-        );
-    rounded.padding.top = snap(position.y + unrounded.border.top + unrounded.padding.top)
-        - snap(position.y + unrounded.border.top);
-    rounded.padding.bottom = snap(position.y + unrounded.size.height - unrounded.border.bottom)
-        - snap(
-            position.y + unrounded.size.height - unrounded.border.bottom - unrounded.padding.bottom,
-        );
-    rounded.margin.left = snap(position.x) - snap(position.x - unrounded.margin.left);
-    rounded.margin.right = snap(position.x + unrounded.size.width + unrounded.margin.right)
-        - snap(position.x + unrounded.size.width);
-    rounded.margin.top = snap(position.y) - snap(position.y - unrounded.margin.top);
-    rounded.margin.bottom = snap(position.y + unrounded.size.height + unrounded.margin.bottom)
-        - snap(position.y + unrounded.size.height);
+    rounded.border.left = snap(position.x + source_border.left) - snap(position.x);
+    rounded.border.right = snap(position.x + source_size.width)
+        - snap(position.x + source_size.width - source_border.right);
+    rounded.border.top = snap(position.y + source_border.top) - snap(position.y);
+    rounded.border.bottom = snap(position.y + source_size.height)
+        - snap(position.y + source_size.height - source_border.bottom);
+    rounded.padding.left = snap(position.x + source_border.left + source_padding.left)
+        - snap(position.x + source_border.left);
+    rounded.padding.right = snap(position.x + source_size.width - source_border.right)
+        - snap(position.x + source_size.width - source_border.right - source_padding.right);
+    rounded.padding.top = snap(position.y + source_border.top + source_padding.top)
+        - snap(position.y + source_border.top);
+    rounded.padding.bottom = snap(position.y + source_size.height - source_border.bottom)
+        - snap(position.y + source_size.height - source_border.bottom - source_padding.bottom);
+    rounded.margin.left = snap(position.x) - snap(position.x - source_margin.left);
+    rounded.margin.right = snap(position.x + source_size.width + source_margin.right)
+        - snap(position.x + source_size.width);
+    rounded.margin.top = snap(position.y) - snap(position.y - source_margin.top);
+    rounded.margin.bottom = snap(position.y + source_size.height + source_margin.bottom)
+        - snap(position.y + source_size.height);
 
-    node.set_final_layout(&rounded);
+    node.set_final_layout(rounded);
 
     for child in node.children() {
         round_layout_inner(child, scale, position);

@@ -87,7 +87,7 @@ struct CacheSlot {
 /// };
 /// assert!(node.cache.borrow().is_empty());
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, PartialEq, Default)]
 pub struct Cache {
     /// The final full-layout entry ([`LayoutGoal::Commit`]).
     committed_layout: Option<CacheSlot>,

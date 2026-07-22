@@ -1592,7 +1592,7 @@ where
         layout.border = item.border;
         layout.padding = item.padding;
         layout.margin = item.margin;
-        item.key.node.set_unrounded_layout(&layout);
+        item.key.node.set_unrounded_layout(layout);
 
         // A scroll-container child traps its interior scrollable overflow;
         // any other child propagates border box ∪ content_size (§3.3).
@@ -1655,7 +1655,7 @@ where
                 document_index,
             } => {
                 hide_subtree(node);
-                node.set_unrounded_layout(&Layout::with_order(
+                node.set_unrounded_layout(Layout::with_order(
                     u32::try_from(document_index).unwrap_or(u32::MAX),
                 ));
                 continue;
@@ -1722,7 +1722,7 @@ where
                     layout.content_size,
                     child.style().overflow(),
                 );
-                child.set_unrounded_layout(&layout);
+                child.set_unrounded_layout(layout);
             }
             PositionProperty::Fixed => {
                 let measured = measure_absolute_static_box(child, padding_box_size, static_axes);

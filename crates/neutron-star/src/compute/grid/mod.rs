@@ -743,7 +743,7 @@ where
                 item.overflow,
             );
             if goal == LayoutGoal::Commit {
-                item.key.node.set_unrounded_layout(&layout);
+                item.key.node.set_unrounded_layout(layout);
             }
             continue;
         }
@@ -853,7 +853,7 @@ where
             item.overflow,
         );
         if goal == LayoutGoal::Commit {
-            item.node.set_unrounded_layout(&item.layout);
+            item.node.set_unrounded_layout(item.layout);
         }
     }
     (content_size, Point::new(None, first_baseline))
@@ -1119,7 +1119,7 @@ where
                     layout.content_size,
                     key.node.style().overflow(),
                 );
-                key.node.set_unrounded_layout(&layout);
+                key.node.set_unrounded_layout(layout);
             }
             // The containing block is not the layout parent (CSS `fixed`):
             // record the static position; the host completes layout in its
@@ -1425,7 +1425,7 @@ where
     if input.goal == LayoutGoal::Commit {
         for (document_index, child) in hidden {
             hide_subtree(child);
-            child.set_unrounded_layout(&Layout::with_order(
+            child.set_unrounded_layout(Layout::with_order(
                 u32::try_from(document_index).unwrap_or(u32::MAX),
             ));
         }

@@ -154,21 +154,36 @@ pub trait LayoutNode: Copy + core::fmt::Debug {
     /// Stores the durable, unrounded layout of this node.
     ///
     /// Called by algorithms for each child they position and by the root
-    /// entry point. Hosts retain this copy for incremental relayout and let
+    /// entry point. Ownership is transferred to the host so storing this
+    /// larger record never requires an implicit whole-value copy. Hosts retain
+    /// it for incremental relayout and let
     /// [`round_layout`](crate::compute::round_layout) derive pixel-snapped
     /// output separately.
-    fn set_unrounded_layout(self, layout: &Layout);
+    fn set_unrounded_layout(self, layout: Layout);
 
     /// The unrounded layout previously stored via
-    /// [`set_unrounded_layout`](Self::set_unrounded_layout). Read by the
-    /// rounding pass.
-    fn unrounded_layout(self) -> Layout;
+    /// [`set_unrounded_layout`](Self::set_unrounded_layout). The host lends the
+    /// record only for `read`'s duration, making a whole-record clone explicit
+    /// at the call site while preventing an interior-mutability guard from
+    /// escaping. Implementations must release the borrow when `read` returns.
+    fn with_unrounded_layout<R>(self, read: impl FnOnce(&Layout) -> R) -> R;
+
+    /// Explicitly clones the complete unrounded layout.
+    ///
+    /// Most readers should prefer [`with_unrounded_layout`](Self::with_unrounded_layout)
+    /// and copy only the small fields they need. The rounding pass genuinely
+    /// needs a second complete durable record, so it uses this deliberately
+    /// named operation rather than making a large by-value return look free.
+    #[inline]
+    fn clone_unrounded_layout(self) -> Layout {
+        self.with_unrounded_layout(Layout::clone)
+    }
 
     /// Stores the final, pixel-snapped layout of this node, written by
     /// [`round_layout`](crate::compute::round_layout). The implementation
     /// chooses the target store — it may be a different store than the
     /// unrounded copy (e.g. the paint-facing side of a widget tree).
-    fn set_final_layout(self, layout: &Layout);
+    fn set_final_layout(self, layout: Layout);
 
     /// Records the CSS static position of an out-of-flow node whose
     /// containing block is elsewhere

@@ -528,10 +528,19 @@ impl<T> Document<T> {
     /// 2. **Spine walk + harvest.** Walks from `root`, descending only where `dirty_descendants` is
     ///    set (the bit stylo sets while descending to restyled nodes and — in this postorder-less
     ///    servo config — never clears). `root` is always inspected even with no dirty bits. For
-    ///    each visited node with style data it reads `ElementData::damage`, and if non-empty
-    ///    streams `(id, StyleDamage(damage))` to `sink`; then it calls
+    ///    each visited node with style data it copies `ElementData::damage`, calls
     ///    `ElementData::clear_restyle_state` (draining `hint` + `damage` + the restyle flags),
-    ///    unsets `dirty_descendants`, and clears the snapshot bits.
+    ///    unsets `dirty_descendants`, and clears the snapshot bits. If the copied damage is
+    ///    non-empty, it consumes any relayout-class effect into the document's layout caches and
+    ///    then streams `(id, StyleDamage(damage))` to `sink`.
+    ///
+    /// Consuming layout damage here is load-bearing: callers may legitimately
+    /// discard [`FlushSummary`](crate::FlushSummary), and a later
+    /// [`StyleEngine::layout_document`](crate::StyleEngine::layout_document)
+    /// performs a no-op style flush. Invalidating while the harvested ids are
+    /// known-live avoids retaining raw, generation-less [`NodeId`]s across DOM
+    /// mutations. Boundary-stopped invalidation may park relayout roots on the
+    /// document; the next layout pass consumes those roots.
     ///
     /// Clearing damage on harvest is the fix for a latent re-traversal bug:
     /// stylo never clears damage for a normal restyle, and in servo builds
@@ -568,27 +577,43 @@ impl<T> Document<T> {
 
         let mut stack = vec![root];
         while let Some(current) = stack.pop() {
-            let Some(node) = self.nodes.get_mut(current) else {
+            let harvested = {
+                let Some(node) = self.nodes.get_mut(current) else {
+                    continue;
+                };
+                let mut harvested = None;
+                if let Some(wrapper) = node.stylo_data_mut() {
+                    let mut data = wrapper.borrow_mut();
+                    let damage = data.damage;
+                    data.clear_restyle_state();
+                    if !damage.is_empty() {
+                        harvested = Some(StyleDamage::from(damage));
+                    }
+                }
+                let descend = node.has_dirty_descendants();
+                node.set_dirty_descendants_bit(false);
+                node.clear_snapshot_flags();
+                if descend {
+                    stack.extend_from_slice(&node.children);
+                }
+                harvested
+            };
+            let Some(damage) = harvested else {
                 continue;
             };
-            let mut harvested = None;
-            if let Some(wrapper) = node.stylo_data_mut() {
-                let mut data = wrapper.borrow_mut();
-                let damage = data.damage;
-                data.clear_restyle_state();
-                if !damage.is_empty() {
-                    harvested = Some(StyleDamage::from(damage));
+
+            if damage.needs_relayout() {
+                self.invalidate_layout(current);
+                if damage.is_reconstruct() {
+                    // Box generation changed, so the parent must re-collect
+                    // its children as well as the node clearing its own cache.
+                    let parent = self.get(current).and_then(Node::parent_id);
+                    if let Some(parent) = parent {
+                        self.invalidate_layout(parent);
+                    }
                 }
             }
-            if let Some(damage) = harvested {
-                sink(current, damage);
-            }
-            let descend = node.has_dirty_descendants();
-            node.set_dirty_descendants_bit(false);
-            node.clear_snapshot_flags();
-            if descend {
-                stack.extend_from_slice(&node.children);
-            }
+            sink(current, damage);
         }
     }
 }

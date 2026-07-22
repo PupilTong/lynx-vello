@@ -236,8 +236,8 @@ struct MockSourceNode {
 /// synchronization story — the protocol has no `&mut`.
 #[derive(Debug, Default)]
 struct MockSessionNode {
-    unrounded: Cell<Layout>,
-    finalized: Cell<Layout>,
+    unrounded: RefCell<Layout>,
+    finalized: RefCell<Layout>,
     /// Static position recorded for `PositionProperty::Fixed` children.
     static_position: Cell<Point<f32>>,
     cache: RefCell<Cache>,
@@ -282,11 +282,11 @@ impl MockTree {
     }
 
     fn unrounded_layout(&self, id: usize) -> Layout {
-        self.session_node(id).unrounded.get()
+        self.session_node(id).unrounded.borrow().clone()
     }
 
     fn final_layout(&self, id: usize) -> Layout {
-        self.session_node(id).finalized.get()
+        self.session_node(id).finalized.borrow().clone()
     }
 }
 
@@ -371,16 +371,17 @@ impl<'t> LayoutNode for MockRef<'t> {
         })
     }
 
-    fn set_unrounded_layout(self, layout: &Layout) {
-        self.slots().unrounded.set(*layout);
+    fn set_unrounded_layout(self, layout: Layout) {
+        *self.slots().unrounded.borrow_mut() = layout;
     }
 
-    fn unrounded_layout(self) -> Layout {
-        self.slots().unrounded.get()
+    fn with_unrounded_layout<R>(self, read: impl FnOnce(&Layout) -> R) -> R {
+        let layout = self.slots().unrounded.borrow();
+        read(&layout)
     }
 
-    fn set_final_layout(self, layout: &Layout) {
-        self.slots().finalized.set(*layout);
+    fn set_final_layout(self, layout: Layout) {
+        *self.slots().finalized.borrow_mut() = layout;
     }
 
     fn set_static_position(self, static_position: Point<f32>) {
@@ -557,8 +558,11 @@ fn leaf_dispatch_round_trips_layout_io() {
     // `Layout` is #[non_exhaustive]: construct via default + field writes.
     let mut layout = Layout::with_order(0);
     layout.size = output.size;
-    child.set_unrounded_layout(&layout);
-    assert_eq!(child.unrounded_layout().size, Size::new(40.0, 0.0));
+    child.set_unrounded_layout(layout);
+    assert_eq!(
+        child.with_unrounded_layout(|layout| layout.size),
+        Size::new(40.0, 0.0)
+    );
 }
 
 #[test]
@@ -649,14 +653,13 @@ fn explicit_hidden_cleanup_clears_stale_geometry() {
         },
         vec![root],
     );
-    // Seed stale geometry through the interior-mutable slots (get-modify-set:
-    // the slots are `Cell`s).
-    let mut stale = tree.session_node(hidden).unrounded.get();
+    // Seed stale geometry through the interior-mutable slots.
+    let mut stale = tree.session_node(hidden).unrounded.borrow().clone();
     stale.size = Size::new(50.0, 20.0);
-    tree.session_node(hidden).unrounded.set(stale);
-    let mut stale = tree.session_node(root).unrounded.get();
+    *tree.session_node(hidden).unrounded.borrow_mut() = stale;
+    let mut stale = tree.session_node(root).unrounded.borrow().clone();
     stale.size = Size::new(40.0, 10.0);
-    tree.session_node(root).unrounded.set(stale);
+    *tree.session_node(root).unrounded.borrow_mut() = stale;
 
     hide_subtree(tree.node(hidden));
     assert_eq!(tree.unrounded_layout(hidden), Layout::default());
@@ -836,11 +839,11 @@ fn round_layout_snaps_on_the_device_pixel_grid() {
     let mut root_layout = Layout::default();
     root_layout.location = Point::new(0.24, 0.24);
     root_layout.size = Size::new(10.26, 10.26);
-    tree.session_node(root).unrounded.set(root_layout);
+    *tree.session_node(root).unrounded.borrow_mut() = root_layout;
     let mut child_layout = Layout::default();
     child_layout.location = Point::new(0.26, 0.26);
     child_layout.size = Size::new(4.74, 4.74);
-    tree.session_node(child).unrounded.set(child_layout);
+    *tree.session_node(child).unrounded.borrow_mut() = child_layout;
 
     round_layout(tree.node(root), 2.0);
     assert_eq!(tree.final_layout(root).location, Point::ZERO);
@@ -856,7 +859,7 @@ fn round_layout_uses_css_positive_infinity_tie_breaking() {
     // At DPR 2 these become -1.5 and +1.5 device pixels. CSS nearest-
     // integer rounding chooses the upper integer in both cases: -1 and +2.
     root_layout.location = Point::new(-0.75, 0.75);
-    tree.session_node(root).unrounded.set(root_layout);
+    *tree.session_node(root).unrounded.borrow_mut() = root_layout;
 
     round_layout(tree.node(root), 2.0);
 
@@ -941,16 +944,17 @@ impl<'t> LayoutNode for CountingRef<'t> {
         LayoutOutput::new(input.known_dimensions.unwrap_or(Size::ZERO), Size::ZERO)
     }
 
-    fn set_unrounded_layout(self, layout: &Layout) {
-        self.tree.session[self.index].unrounded.set(*layout);
+    fn set_unrounded_layout(self, layout: Layout) {
+        *self.tree.session[self.index].unrounded.borrow_mut() = layout;
     }
 
-    fn unrounded_layout(self) -> Layout {
-        self.tree.session[self.index].unrounded.get()
+    fn with_unrounded_layout<R>(self, read: impl FnOnce(&Layout) -> R) -> R {
+        let layout = self.tree.session[self.index].unrounded.borrow();
+        read(&layout)
     }
 
-    fn set_final_layout(self, layout: &Layout) {
-        self.tree.session[self.index].finalized.set(*layout);
+    fn set_final_layout(self, layout: Layout) {
+        *self.tree.session[self.index].finalized.borrow_mut() = layout;
     }
 
     fn set_static_position(self, static_position: Point<f32>) {
@@ -1218,9 +1222,9 @@ fn skipped_contents_dispatch_sizes_from_intrinsic_and_hides_descendants() {
     );
     // Give the child stale geometry from a hypothetical earlier non-skipped
     // pass; the skipped commit must clean it.
-    let mut stale = tree.session_node(child).unrounded.get();
+    let mut stale = tree.session_node(child).unrounded.borrow().clone();
     stale.size = Size::new(99.0, 99.0);
-    tree.session_node(child).unrounded.set(stale);
+    *tree.session_node(child).unrounded.borrow_mut() = stale;
 
     let output = tree.compute_child_layout(
         skipped,

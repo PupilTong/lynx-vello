@@ -1539,7 +1539,7 @@ where
             layout.border = item.border;
             layout.padding = item.padding;
             layout.margin = item.margin;
-            item.key.node.set_unrounded_layout(&layout);
+            item.key.node.set_unrounded_layout(layout);
 
             // A scroll-container child traps its interior scrollable overflow;
             // any other child propagates border box ∪ content_size (§3.3).
@@ -1710,7 +1710,7 @@ where
                     layout.content_size,
                     item.overflow,
                 );
-                key.node.set_unrounded_layout(&layout);
+                key.node.set_unrounded_layout(layout);
             }
             // The containing block is not the layout parent (CSS `fixed`):
             // record the static position; the host completes layout in its
@@ -2026,7 +2026,7 @@ where
     );
     for (document_index, child) in hidden {
         super::hide_subtree(child);
-        child.set_unrounded_layout(&Layout::with_order(
+        child.set_unrounded_layout(Layout::with_order(
             u32::try_from(document_index).unwrap_or(u32::MAX),
         ));
     }
@@ -2097,15 +2097,15 @@ mod tests {
             unreachable!("line-math tests never recurse into children")
         }
 
-        fn set_unrounded_layout(self, _layout: &Layout) {
+        fn set_unrounded_layout(self, _layout: Layout) {
             unreachable!("line-math tests never store layouts")
         }
 
-        fn unrounded_layout(self) -> Layout {
+        fn with_unrounded_layout<R>(self, _read: impl FnOnce(&Layout) -> R) -> R {
             unreachable!("line-math tests never read layouts")
         }
 
-        fn set_final_layout(self, _layout: &Layout) {
+        fn set_final_layout(self, _layout: Layout) {
             unreachable!("line-math tests never round layouts")
         }
 

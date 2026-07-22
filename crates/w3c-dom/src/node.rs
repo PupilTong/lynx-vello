@@ -50,7 +50,7 @@ use std::fmt;
 use std::sync::Arc as StdArc;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 
-use atomic_refcell::AtomicRefCell;
+use atomic_refcell::{AtomicRef, AtomicRefCell};
 use dom::ElementState;
 use neutron_star::tree::Layout;
 use rustc_hash::FxHashMap;
@@ -680,25 +680,31 @@ impl<T> Node<T> {
 
     // --- layout reads ---------------------------------------------------------
 
-    /// The device-pixel-snapped [`Layout`] from the last layout pass
+    /// A borrowed view of the device-pixel-snapped [`Layout`] from the last layout pass
     /// ([`StyleEngine::layout_document`](crate::StyleEngine::layout_document)):
     /// the border box painting consumes, `location` relative to the parent's
     /// border box. All-zero when the node has never been laid out or is
     /// inside a `display: none` subtree.
     ///
+    /// The returned guard keeps this node's layout slot shared-borrowed; copy
+    /// out individual fields as needed and do not retain it across code that
+    /// may mutate layout. Clone the dereferenced [`Layout`] explicitly only
+    /// when an owned whole-record snapshot is required.
+    ///
     /// Must not be called while a layout pass is running on the document
     /// (impossible through the public API: layout holds `&mut Document`).
     #[must_use]
-    pub fn layout(&self) -> Layout {
-        self.layout_data.borrow().rounded
+    pub fn layout(&self) -> impl std::ops::Deref<Target = Layout> + '_ {
+        AtomicRef::map(self.layout_data.borrow(), |data| &data.rounded)
     }
 
-    /// The unrounded CSS-pixel [`Layout`] from the last layout pass — the
+    /// A borrowed view of the unrounded CSS-pixel [`Layout`] from the last layout pass — the
     /// values relayout derives from (rounded output is presentation, this is
-    /// truth).
+    /// truth). As with [`layout`](Self::layout), clone the dereferenced record
+    /// explicitly only when an owned snapshot is required.
     #[must_use]
-    pub fn unrounded_layout(&self) -> Layout {
-        self.layout_data.borrow().unrounded
+    pub fn unrounded_layout(&self) -> impl std::ops::Deref<Target = Layout> + '_ {
+        AtomicRef::map(self.layout_data.borrow(), |data| &data.unrounded)
     }
 
     /// Whether this node's layout **measurement cache** currently holds no

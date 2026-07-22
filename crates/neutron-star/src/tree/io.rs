@@ -1,12 +1,14 @@
 //! The layout **wire format**: the value types that flow between host and
 //! engine on every `compute_child_layout` call.
 //!
-//! One node-layout exchange is `LayoutInput → LayoutOutput`; the durable
-//! per-node result the host stores is [`Layout`]. All three are `Copy` PODs.
-//! [`LayoutInput`] and [`LayoutOutput`] are `#[non_exhaustive]` because the
-//! protocol is expected to grow (e.g. block-layout margin collapsing adds
-//! fields); construct them with the provided constructors, or via
-//! `..Default::default()`-style field assignment on a `default()` value.
+//! One node-layout exchange is `LayoutInput → LayoutOutput`; both transient
+//! wire values are small `Copy` PODs. The durable per-node result the host
+//! stores is [`Layout`], which is deliberately **not** `Copy`: it is a larger
+//! record, and whole-record duplication must remain explicit. All three are
+//! `#[non_exhaustive]` because the protocol is expected to grow (e.g.
+//! block-layout margin collapsing adds fields); construct them with the
+//! provided constructors, or via `..Default::default()`-style field
+//! assignment on a `default()` value.
 
 use crate::geometry::{Edges, Point, Size};
 
@@ -261,7 +263,7 @@ impl LayoutOutput {
 /// Values are unrounded CSS pixels until
 /// [`round_layout`](crate::compute::round_layout) writes the rounded copy
 /// via [`LayoutNode::set_final_layout`](crate::tree::LayoutNode::set_final_layout).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 #[non_exhaustive]
 pub struct Layout {
     /// Paint/traversal order among siblings: the node's index after sorting

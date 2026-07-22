@@ -50,12 +50,13 @@
 //! # Phases: style first, then layout
 //!
 //! [`StyleEngine::layout_document`] runs the style flush itself (a no-op
-//! when nothing is scheduled), **consumes the flush's own restyle damage**
-//! into layout invalidation (see below), and only then lays out — layout
-//! reads computed styles strictly after the restyle traversal has finished,
-//! mirroring the style → layout phase barrier every production engine uses.
-//! The `&mut Document` it takes is what guarantees the tree cannot change
-//! mid-pass.
+//! when nothing is scheduled) and only then lays out — layout reads computed
+//! styles strictly after the restyle traversal has finished, mirroring the
+//! style → layout phase barrier every production engine uses. Every style
+//! flush consumes relayout-class damage into cache invalidation as it is
+//! harvested, so an earlier standalone flush cannot lose the invalidation
+//! before this layout pass. The `&mut Document` it takes is what guarantees
+//! the tree cannot change mid-pass.
 //!
 //! # Leaf content measures through the payload
 //!
@@ -131,9 +132,8 @@
 //!
 //! Layout only fills and reads each node's measurement cache; between passes
 //! a node's **layout inputs** must be re-derived wherever they changed. The
-//! flush [`StyleEngine::layout_document`] runs first classifies exactly the
-//! style-visible half of that: it streams the restyle
-//! [`StyleDamage`] and, for every node that
+//! style flush classifies exactly the style-visible half of that: it streams the restyle
+//! [`StyleDamage`](crate::StyleDamage) and, for every node that
 //! [`needs_relayout`](crate::StyleDamage::needs_relayout), runs
 //! [`Document::invalidate_layout`] on it (and its parent on a
 //! reconstruct) — so **any change stylo can see drives relayout on its own**,
@@ -194,7 +194,6 @@ use stylo::properties::ComputedValues;
 use stylo::servo_arc::Arc;
 
 pub use self::style::StyleView;
-use crate::damage::StyleDamage;
 use crate::document::Document;
 use crate::engine::StyleEngine;
 use crate::ext::ExternalState;
@@ -277,20 +276,19 @@ pub(crate) static ANONYMOUS_STYLE: LazyLock<Arc<ComputedValues>> = LazyLock::new
 });
 
 impl StyleEngine {
-    /// Flush pending styles — consuming the flush's own restyle damage into
-    /// layout invalidation — then lay the document out against this engine's
+    /// Flush pending styles, then lay the document out against this engine's
     /// viewport and device-pixel ratio. Leaf content measures through the
     /// payload's [`MeasureLeaf`] hook.
     ///
-    /// Style-driven relayout is **automatic**: the internal flush streams its
-    /// per-node [`StyleDamage`] and, for each node whose damage
-    /// [`needs_relayout`](StyleDamage::needs_relayout), runs a boundary-stopped
-    /// [`Document::invalidate_layout`] on it (plus its parent when the damage
-    /// [`is_reconstruct`](StyleDamage::is_reconstruct) — box generation changed,
-    /// so the parent must re-collect its children). Repaint / stacking-context
-    /// / overflow-only damage touches no layout cache. An embedder therefore
-    /// never invalidates layout for a change stylo can see; see
-    /// [`Document::invalidate_layout`] for the mutations that remain its job.
+    /// Style-driven relayout is **automatic**: every style flush consumes
+    /// relayout-class damage into boundary-stopped layout invalidation while
+    /// harvesting it. This includes a standalone
+    /// [`flush_document`](Self::flush_document) performed before this method;
+    /// its summary may be discarded without losing layout invalidation.
+    /// Repaint / stacking-context / overflow-only damage touches no layout
+    /// cache. An embedder therefore never invalidates layout for a change
+    /// stylo can see; see [`Document::invalidate_layout`] for the mutations
+    /// that remain its job.
     ///
     /// Results land on the nodes: read them with
     /// [`Node::layout`](crate::Node::layout).
@@ -300,29 +298,11 @@ impl StyleEngine {
     /// Panics when `document` was created by a different engine.
     pub fn layout_document<T: ExternalState + MeasureLeaf>(&self, document: &mut Document<T>) {
         // Phase barrier: layout reads computed styles only after the restyle
-        // traversal has completed (no-op when nothing is scheduled). Also
-        // asserts this engine owns the document. Consume the flush's damage
-        // with the zero-alloc sink: only relayout-class damage is collected,
-        // so a clean or paint-only flush allocates nothing here.
-        let mut relayout_targets: Vec<(crate::NodeId, StyleDamage)> = Vec::new();
-        self.flush_document_with_sink(document, Parallelism::Auto, &mut |id, damage| {
-            if damage.needs_relayout() {
-                relayout_targets.push((id, damage));
-            }
-        });
-        // The flush's `&mut Document` borrow is released now, so the harvested
-        // damage can drive invalidation.
-        for (id, damage) in relayout_targets {
-            document.invalidate_layout(id);
-            if damage.is_reconstruct() {
-                // A reconstruct changes this node's generated box, so its parent
-                // must re-collect children; invalidate the parent too.
-                let parent = document.get(id).and_then(Node::parent_id);
-                if let Some(parent) = parent {
-                    document.invalidate_layout(parent);
-                }
-            }
-        }
+        // traversal and damage harvest have completed (no-op when nothing is
+        // scheduled). Harvest itself consumes relayout-class damage into the
+        // caches, so this sink need not retain anything. The call also asserts
+        // this engine owns the document.
+        self.flush_document_with_sink(document, Parallelism::Auto, &mut |_, _| {});
 
         let viewport = self.device().viewport_size();
         let scale = self.device().device_pixel_ratio().get();
@@ -380,12 +360,12 @@ impl<T> Document<T> {
     /// 3. **Non-boundary, or a boundary never laid out** (no committed input, not parked) — not yet
     ///    a valid re-layout root, so clear it and keep walking toward the document root.
     ///
-    /// Style changes are consumed automatically by
-    /// [`StyleEngine::layout_document`]; call this directly only for mutations
-    /// the style system cannot see — character-data and child-list changes that
-    /// leave computed styles identical, and external-state measurement inputs.
-    /// For a removed node, invalidate its **old parent** instead (the removed
-    /// node's layout state died with it).
+    /// Style changes are consumed automatically by every style flush; call
+    /// this directly only for mutations the style system cannot see —
+    /// character-data and child-list changes that leave computed styles
+    /// identical, and external-state measurement inputs. For a removed node,
+    /// invalidate its **old parent** instead (the removed node's layout state
+    /// died with it).
     ///
     /// # Panics
     ///

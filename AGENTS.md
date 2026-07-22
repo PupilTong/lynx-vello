@@ -158,7 +158,10 @@ useful signal for currently-compatible versions of those libraries.
   flush returns a `FlushSummary` — the per-node `StyleDamage` (repaint /
   stacking / overflow / relayout classes) the flush harvested from stylo's
   `ElementData` and then **cleared** (the fix for stylo's
-  never-cleared-damage re-traversal bug); it also owns the
+  never-cleared-damage re-traversal bug). During that same harvest,
+  relayout-class damage is consumed immediately into boundary-stopped layout
+  cache invalidation, so discarding the summary cannot lose layout work; it
+  also owns the
   `effective_containment` fold (`contain` + `content-visibility` → effect
   bits).
   Its `layout` module is the concrete `neutron-star` host:
@@ -175,8 +178,8 @@ useful signal for currently-compatible versions of those libraries.
   state (measurement cache + layouts) lives **on each `Node`**
   (`AtomicRefCell<LayoutData>`, the Servo layout_data pattern; read via
   `Node::layout`), so it is created and dropped with its node. Style-driven
-  relayout is automatic (`layout_document` consumes its own flush's
-  `StyleDamage`, boundary-stopped); `Document::invalidate_layout` remains the
+  relayout is automatic (every style flush consumes harvested `StyleDamage`
+  into boundary-stopped invalidation); `Document::invalidate_layout` remains the
   embedder API for the mutations styles cannot see (content/child-list changes
   with identical computed styles, external measurement inputs). Leaf
   content (text/images) measures through an embedder hook; the crate pulls
@@ -230,7 +233,7 @@ useful signal for currently-compatible versions of those libraries.
 - Remaining runtime-layout integration — the `LayoutNode` handle, display
   dispatch, fixed/hoisted positioned pass, per-node cache storage, and the
   automatic style-damage→`Document::invalidate_layout` wiring (boundary-stopped,
-  engine-internal — not a widget-layer concern) now live in `w3c-dom::layout`
+  engine-internal — not a widget-layer concern) now live in `w3c-dom`
   (see above). Still L3 work: `lynx-widget`-level policy (`rpx`-aware
   view metrics, sticky lowering), component-specific staggered layout, and
   text style/attribute wiring plus text-context/artifact-slot storage
