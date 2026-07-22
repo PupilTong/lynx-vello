@@ -144,11 +144,7 @@ fn build_tree(engine: &StyleEngine) -> (Document<()>, NodeId) {
         class += 1;
         let section = doc.create_node("section", ());
         doc.add_class(section, &format!("c{}", class % CLASS_RULES));
-        doc.set_attribute(
-            section,
-            stylo::LocalName::from("data-row"),
-            &row.to_string(),
-        );
+        doc.set_attribute(section, "data-row", &row.to_string());
         doc.append(root, section);
         for _ in 0..32 {
             class += 1;

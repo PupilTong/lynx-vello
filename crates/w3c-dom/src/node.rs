@@ -588,16 +588,26 @@ impl<T> Node<T> {
         self.classes.iter().map(AsRef::as_ref)
     }
 
-    /// A plain attribute's value, addressed by its local name.
+    /// A plain attribute's value, addressed by its authored name.
+    ///
+    /// Attribute names are converted to stylo's interned [`LocalName`] at
+    /// this DOM boundary; embedders do not need to traffic in stylo types.
     #[must_use]
-    pub fn attr(&self, name: &LocalName) -> Option<&str> {
+    pub fn attr(&self, name: &str) -> Option<&str> {
+        let name = LocalName::from(name);
+        self.attr_local_name(&name)
+    }
+
+    /// Look up an already-interned attribute name on stylo's matching paths.
+    pub(crate) fn attr_local_name(&self, name: &LocalName) -> Option<&str> {
         self.attrs.get(name).map(String::as_str)
     }
 
-    /// The plain attribute map.
-    #[must_use]
-    pub fn attrs(&self) -> &FxHashMap<LocalName, String> {
-        &self.attrs
+    /// The element's plain attributes as string name/value pairs.
+    pub fn attrs(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
+        self.attrs
+            .iter()
+            .map(|(name, value)| (name.0.as_ref(), value.as_str()))
     }
 
     /// The active dynamic pseudo-class state bits.

@@ -319,12 +319,16 @@ impl<T: ExternalState> Document<T> {
 
     /// Set a plain attribute.
     ///
+    /// The authored string name is interned as a [`LocalName`] before it is
+    /// stored or exposed to stylo's invalidation machinery.
+    ///
     /// # Panics
     ///
     /// Panics when `id` is stale (the let-it-crash mutation contract; see
     /// the crate docs), or when it names a text node.
-    pub fn set_attribute(&mut self, id: NodeId, name: LocalName, value: &str) {
+    pub fn set_attribute(&mut self, id: NodeId, name: &str, value: &str) {
         self.live_element(id);
+        let name = LocalName::from(name);
         self.note_attribute_change(id, &name);
         self.tree_mut()
             .get_mut(id)
@@ -339,14 +343,15 @@ impl<T: ExternalState> Document<T> {
     ///
     /// Panics when `id` is stale (the let-it-crash mutation contract; see
     /// the crate docs), or when it names a text node.
-    pub fn remove_attribute(&mut self, id: NodeId, name: &LocalName) {
+    pub fn remove_attribute(&mut self, id: NodeId, name: &str) {
         self.live_element(id);
-        self.note_attribute_change(id, name);
+        let name = LocalName::from(name);
+        self.note_attribute_change(id, &name);
         self.tree_mut()
             .get_mut(id)
             .expect("stale NodeId passed to Document::remove_attribute")
             .attrs
-            .remove(name);
+            .remove(&name);
     }
 
     /// Set or clear dynamic pseudo-class state bits (`:hover` / `:active` /

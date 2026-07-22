@@ -47,7 +47,6 @@
 use std::sync::{Arc as StdArc, Mutex, Weak};
 
 use rustc_hash::FxHashMap;
-use stylo::LocalName;
 use stylo::properties::ComputedValues;
 use stylo::servo_arc::Arc;
 use thiserror::Error;
@@ -295,7 +294,7 @@ impl WidgetTree {
             .doc
             .create_element(tag, WidgetState::new(kind, unique_id));
         // The css scope is selector-visible real DOM state from creation.
-        self.doc.set_attribute(id, LocalName::from("l-css-id"), "0");
+        self.doc.set_attribute(id, "l-css-id", "0");
         self.by_unique_id.insert(unique_id, id);
         self.handle_for(id)
     }
@@ -579,7 +578,7 @@ impl WidgetTree {
     ) -> Result<(), WidgetError> {
         self.sweep_dropped();
         let id = self.resolve(handle)?;
-        self.doc.set_attribute(id, LocalName::from(name), value);
+        self.doc.set_attribute(id, name, value);
         Ok(())
     }
 
@@ -604,48 +603,11 @@ impl WidgetTree {
             .iter()
             .map(|handle| self.resolve(handle))
             .collect::<Result<Vec<_>, _>>()?;
-        let name = LocalName::from("l-css-id");
         let value = css_id.to_string();
         for id in ids {
-            self.doc.set_attribute(id, name.clone(), &value);
+            self.doc.set_attribute(id, "l-css-id", &value);
             self.doc.ext_mut(id).css_id = css_id;
         }
-        Ok(())
-    }
-
-    /// Replace an element's `data-*` dataset.
-    pub fn set_dataset<I, K, V>(
-        &mut self,
-        handle: &WidgetHandle,
-        entries: I,
-    ) -> Result<(), WidgetError>
-    where
-        I: IntoIterator<Item = (K, V)>,
-        K: Into<Box<str>>,
-        V: Into<String>,
-    {
-        self.sweep_dropped();
-        let id = self.resolve(handle)?;
-        let dataset: FxHashMap<Box<str>, String> = entries
-            .into_iter()
-            .map(|(key, value)| (key.into(), value.into()))
-            .collect();
-        let old_keys: Vec<Box<str>> = self
-            .doc
-            .get(id)
-            .map(|widget| widget.ext().dataset.keys().cloned().collect())
-            .unwrap_or_default();
-        for key in &old_keys {
-            if !dataset.contains_key(key.as_ref()) {
-                let name = LocalName::from(format!("data-{key}").as_str());
-                self.doc.remove_attribute(id, &name);
-            }
-        }
-        for (key, value) in &dataset {
-            let name = LocalName::from(format!("data-{key}").as_str());
-            self.doc.set_attribute(id, name, value);
-        }
-        self.doc.ext_mut(id).dataset = dataset;
         Ok(())
     }
 
@@ -658,8 +620,8 @@ impl WidgetTree {
     ) -> Result<(), WidgetError> {
         self.sweep_dropped();
         let id = self.resolve(handle)?;
-        let name = LocalName::from(format!("data-{key}").as_str());
-        self.doc.set_attribute(id, name, value);
+        let name = format!("data-{key}");
+        self.doc.set_attribute(id, &name, value);
         self.doc
             .ext_mut(id)
             .dataset
@@ -713,16 +675,14 @@ impl WidgetTree {
         widget.tag().ok_or(WidgetError::StaleElement(id))
     }
 
-    /// An element's plain attribute map.
-    pub fn get_attributes(
-        &self,
+    /// An element's plain attributes as string name/value pairs.
+    pub fn get_attributes<'a>(
+        &'a self,
         handle: &WidgetHandle,
-    ) -> Result<&FxHashMap<LocalName, String>, WidgetError> {
+    ) -> Result<impl ExactSizeIterator<Item = (&'a str, &'a str)> + 'a, WidgetError> {
         let id = self.resolve(handle)?;
-        self.doc
-            .get(id)
-            .map(Widget::attrs)
-            .ok_or(WidgetError::StaleElement(id))
+        let widget = self.doc.get(id).ok_or(WidgetError::StaleElement(id))?;
+        Ok(widget.attrs())
     }
 
     /// An element's Lynx `unique_id`.

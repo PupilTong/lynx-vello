@@ -233,7 +233,7 @@ fn attribute_change_marks_node_and_ancestors() {
     doc.append(b, b1);
     doc.clear_dirty();
 
-    doc.set_attribute(b, stylo::LocalName::from("title"), "hi");
+    doc.set_attribute(b, "title", "hi");
 
     // `container` (b's parent) and `root` are on the reachability spine.
     assert!(doc.get(container).unwrap().has_dirty_descendants());
@@ -388,13 +388,13 @@ fn attributes_come_only_from_the_real_map() {
     // real attrs map answers `get_attr`.
     let mut doc = Document::new();
     let el = node(&mut doc, "div");
-    doc.set_attribute(el, stylo::LocalName::from("title"), "hi");
+    doc.set_attribute(el, "title", "hi");
 
     let elem = doc.get(el).unwrap();
     let ns = stylo::Namespace::default();
     let title = stylo::LocalName::from("title");
     assert_eq!(
-        elem.attr(&title),
+        elem.attr("title"),
         Some("hi"),
         "the accessor sees the plain attribute"
     );
@@ -437,7 +437,7 @@ fn text_nodes_cannot_be_the_document_root() {
 fn text_nodes_reject_element_attributes() {
     let mut doc = Document::new();
     let text = doc.create_text_node("hello", ());
-    doc.set_attribute(text, stylo::LocalName::from("title"), "not an element");
+    doc.set_attribute(text, "title", "not an element");
 }
 
 // --- the let-it-crash mutation contract -------------------------------------
@@ -450,7 +450,7 @@ fn mutating_through_a_stale_handle_crashes() {
     doc.remove_subtree(a);
     // Queries answer `None`; mutations crash.
     assert!(doc.get(a).is_none());
-    doc.set_attribute(a, stylo::LocalName::from("title"), "boom");
+    doc.set_attribute(a, "title", "boom");
 }
 
 #[test]

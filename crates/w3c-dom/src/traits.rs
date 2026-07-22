@@ -460,7 +460,7 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
     }
 
     fn get_attr(&self, attr: &LocalName, _namespace: &Namespace) -> Option<String> {
-        self.attr(attr).map(str::to_owned)
+        self.attr_local_name(attr).map(str::to_owned)
     }
 }
 
@@ -564,7 +564,7 @@ impl<T: ExternalState> Element for &Node<T> {
         // hot path for a selector form ReactLynx CSS does not use;
         // invalidation (the class/id snapshot recorders) is consistent with
         // this choice.
-        self.attr(local_name)
+        self.attr_local_name(local_name)
             .is_some_and(|value| operation.eval_str(value))
     }
 
