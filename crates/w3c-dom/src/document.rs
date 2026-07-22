@@ -73,6 +73,8 @@ pub struct Document<T> {
     /// `layout::host::run_layout`). Parking is duplicate-free by construction:
     /// [`invalidate_layout`](Self::invalidate_layout) stops at a boundary
     /// already present here instead of parking it twice or clearing past it.
+    /// [`remove_subtree`](Self::remove_subtree) drops entries for every removed
+    /// node before its raw slab id can be reused.
     relayout_roots: Vec<(NodeId, LayoutInput)>,
 }
 
@@ -455,6 +457,14 @@ impl<T> Document<T> {
             stack.extend_from_slice(&node.children);
             removed.push(node.into_ext());
         }
+        // Parked roots carry raw, generation-less slab ids. Prune every
+        // removed entry once, after the traversal, before a later node factory
+        // can reuse any vacant slot. Keeping the slab borrow separate lets the
+        // two vectors be borrowed independently and avoids an O(nodes × roots)
+        // scan for large removed subtrees.
+        let nodes = &self.nodes;
+        self.relayout_roots
+            .retain(|&(parked_id, _)| nodes.contains(parked_id));
         removed
     }
 
@@ -540,9 +550,10 @@ impl<T> Document<T> {
     /// discard [`FlushSummary`](crate::FlushSummary), and a later
     /// [`StyleEngine::layout_document`](crate::StyleEngine::layout_document)
     /// performs a no-op style flush. Invalidating while the harvested ids are
-    /// known-live avoids retaining raw, generation-less [`NodeId`]s across DOM
-    /// mutations. Boundary-stopped invalidation may park relayout roots on the
-    /// document; the next layout pass consumes those roots.
+    /// known-live avoids retaining the damaged ids themselves. Boundary-stopped
+    /// invalidation may park live ancestor [`NodeId`]s on the document; the
+    /// next layout pass consumes those roots, and subtree removal purges them
+    /// before their slab slots can be reused.
     ///
     /// Clearing damage on harvest is the fix for a latent re-traversal bug:
     /// stylo never clears damage for a normal restyle, and in servo builds

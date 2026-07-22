@@ -863,6 +863,71 @@ fn standalone_style_flush_preserves_relayout_for_next_layout() {
 }
 
 #[test]
+fn removed_boundary_is_not_replayed_after_its_node_id_is_reused() {
+    let mut h = Harness::new("page { display: flex; width: 300px; height: 100px; }");
+    let root = h.doc.root;
+    let outer = h.doc.el(root, "view");
+    let parent = h.doc.el(outer, "view");
+    let old_boundary = h.doc.el(parent, "view");
+    let old_child = h.doc.el(old_boundary, "view");
+    let hidden = h.doc.el(root, "view");
+    h.doc.set_inline(
+        outer,
+        "display: flex; contain: strict; width: 120px; height: 60px",
+    );
+    h.doc
+        .set_inline(parent, "display: flex; width: 100%; height: 100%");
+    h.doc.set_inline(
+        old_boundary,
+        "display: flex; contain: strict; width: 60px; height: 40px",
+    );
+    h.doc.set_inline(old_child, "width: 20px; height: 20px");
+    h.doc.set_inline(
+        hidden,
+        "display: flex; content-visibility: hidden; width: 100px; height: 50px",
+    );
+    h.layout();
+
+    // The standalone flush parks `old_boundary` for an in-place relayout.
+    h.doc.set_inline(old_child, "width: 30px; height: 20px");
+    h.doc.flush();
+
+    // Remove the parked boundary before the next layout. Invalidating its old
+    // parent is the documented structural-mutation half of the layout seam;
+    // the surrounding boundary keeps the document root warm.
+    assert_eq!(h.doc.dom.remove_subtree(old_boundary).len(), 2);
+    h.doc.dom.invalidate_layout(parent);
+
+    // `Slab` reuses the two freed slots. Put a new containment boundary in the
+    // old boundary's slot, but under skipped contents where the root pass must
+    // never lay it or its child out.
+    let first_reused = h.doc.dom.create_node("view", ());
+    let second_reused = h.doc.dom.create_node("view", ());
+    let reused_boundary = if first_reused == old_boundary {
+        first_reused
+    } else {
+        assert_eq!(second_reused, old_boundary, "the freed slot is reused");
+        second_reused
+    };
+    let reused_child = h.doc.dom.create_node("view", ());
+    h.doc.dom.append(reused_boundary, reused_child);
+    h.doc.dom.append(hidden, reused_boundary);
+    h.doc.set_inline(
+        reused_boundary,
+        "display: flex; contain: strict; width: 80px; height: 40px",
+    );
+    h.doc.set_inline(reused_child, "width: 10px; height: 10px");
+    h.doc.dom.invalidate_layout(reused_boundary);
+
+    h.layout();
+    assert_eq!(
+        h.rect(reused_child),
+        (0.0, 0.0, 0.0, 0.0),
+        "a stale parked root must not lay out a replacement node under skipped contents",
+    );
+}
+
+#[test]
 fn color_only_change_relayouts_nothing() {
     // A paint-only (REPAINT) change produces no relayout damage, so
     // layout_document invalidates nothing and the second pass answers entirely
@@ -1178,13 +1243,12 @@ fn two_damaged_nodes_under_one_boundary_keep_root_warm() {
     assert_eq!(h.rect(a).2, 20.0);
     assert_eq!(h.rect(b).3, 20.0);
 
-    // Flush both interior changes, then invalidate both manually so the cache
-    // state can be observed between the two ancestor walks.
+    // The standalone flush consumes both damage entries. The second
+    // invalidation must stop at the boundary parked by the first rather than
+    // clearing through it to the root.
     h.doc.set_inline(a, "width: 30px; height: 20px");
     h.doc.set_inline(b, "width: 20px; height: 30px");
     h.doc.flush();
-    h.doc.dom.invalidate_layout(a);
-    h.doc.dom.invalidate_layout(b);
     assert!(h.node_cache_empty(a), "the first damaged node is cleared");
     assert!(h.node_cache_empty(b), "the second damaged node is cleared");
     assert!(h.node_cache_empty(outer), "the boundary is cleared");

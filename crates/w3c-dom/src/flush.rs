@@ -266,7 +266,7 @@ impl StyleEngine {
         // assert they only run inside one. Cleared on unwind too (individual
         // slot poisoning covers mid-panic node state).
         #[cfg(debug_assertions)]
-        let _phase = document.begin_flush_phase();
+        let phase = document.begin_flush_phase();
         let (harvest_root, traversed) = {
             let root_ref = document
                 .get(root)
@@ -324,6 +324,11 @@ impl StyleEngine {
             };
             (harvest_root, should_traverse)
         };
+        // `invalidate_layout` reads the freshly computed styles while harvest
+        // consumes relayout damage. The parallel traversal has joined, so end
+        // its debug phase before those ordinary style reads begin.
+        #[cfg(debug_assertions)]
+        drop(phase);
         // Harvest runs under `&mut Document` now that the traversal (which
         // borrowed the document through `root_ref`/the shared context) has
         // finished.
