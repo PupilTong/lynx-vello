@@ -87,9 +87,11 @@ pub struct Document<T> {
     /// answering them by scanning the vec is `O(B)` each, so a batch that parks
     /// `B` independent boundaries (one dirty leaf per contained row of a long
     /// virtualized list) costs `O(B²)`. This set makes each query `O(1)`, so
-    /// the batch is `O(B)`. Kept in lockstep with the vec by
-    /// [`record_relayout_root`](Self::record_relayout_root) /
-    /// [`clear_relayout_roots`](Self::clear_relayout_roots).
+    /// the batch is `O(B)`. Kept in lockstep with the vec everywhere the vec is
+    /// mutated — [`record_relayout_root`](Self::record_relayout_root),
+    /// [`clear_relayout_roots`](Self::clear_relayout_roots), and the
+    /// `remove_subtree` pruning — so a reused slab id can never read as parked
+    /// while no matching vec entry exists.
     relayout_root_ids: FxHashSet<NodeId>,
     /// Whether any layout-affecting invalidation is pending since the last
     /// completed layout pass. Set by [`invalidate_layout`](Self::invalidate_layout)
@@ -545,10 +547,16 @@ impl<T> Document<T> {
         // removed entry once, after the traversal, before a later node factory
         // can reuse any vacant slot. Keeping the slab borrow separate lets the
         // two vectors be borrowed independently and avoids an O(nodes × roots)
-        // scan for large removed subtrees.
+        // scan for large removed subtrees. The `relayout_root_ids` membership
+        // set must be pruned in lockstep on the **same** predicate: a stale id
+        // left behind would, once its slab slot is reused by an unrelated node,
+        // make that node read as already-parked and wrongly stop a later
+        // invalidation walk or incremental post-pass.
         let nodes = &self.nodes;
         self.relayout_roots
             .retain(|&(parked_id, _)| nodes.contains(parked_id));
+        self.relayout_root_ids
+            .retain(|&parked_id| nodes.contains(parked_id));
         removed
     }
 
@@ -780,5 +788,41 @@ pub(crate) mod tests {
             .push(usize::MAX);
 
         let _ = document.root_element();
+    }
+
+    #[test]
+    fn remove_subtree_prunes_the_parked_id_set_so_a_reused_slot_is_not_stale() {
+        // Regression: `relayout_root_ids` must be pruned in lockstep with
+        // `relayout_roots` on `remove_subtree`. Slab ids are reused, so a stale
+        // set entry would make an unrelated replacement node read as
+        // already-parked and wrongly stop a later invalidation walk or
+        // incremental post-pass.
+        let mut document: Document<()> = Document::new(device());
+        let a = document.create_element("view", ());
+        document.append_child(a);
+        let b = document.create_element("view", ());
+        document.append(a, b);
+
+        // A real pass parks a laid-out boundary; the set must track every id the
+        // vector holds regardless of how it got there.
+        document.record_relayout_root(b, LayoutInput::default());
+        assert!(document.is_relayout_root_parked(b));
+
+        // Removing `b` must drop its parked entry from BOTH the vector and the
+        // set.
+        assert_eq!(document.remove_subtree(b).len(), 1);
+        assert!(
+            !document.is_relayout_root_parked(b),
+            "the removed id must not remain in the parked set",
+        );
+
+        // The slab reuses `b`'s freed slot for the next node; it must start
+        // unparked (before the fix, the stale set entry aliased it).
+        let reused = document.create_element("view", ());
+        assert_eq!(reused, b, "the freed slab slot is reused");
+        assert!(
+            !document.is_relayout_root_parked(reused),
+            "a reused slab id must not inherit stale parked state",
+        );
     }
 }

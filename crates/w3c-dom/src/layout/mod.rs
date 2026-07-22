@@ -439,6 +439,15 @@ impl<T> Document<T> {
     /// 3. **Non-boundary, or a boundary never laid out** (no committed input, not parked) — not yet
     ///    a valid re-layout root, so clear it and keep walking toward the document root.
     ///
+    /// Only case 3 — a walk that exhausts the ancestor chain to the document
+    /// root — marks the next pass as needing a **whole-tree** positioned +
+    /// rounding walk. Cases 0, 1, and 2 each confine the change (a skipped
+    /// container, a freshly parked boundary, or an already-parked one), so the
+    /// pass re-processes only the parked boundaries' subtrees. Conflating them
+    /// (e.g. keying off "no boundary was parked") would force a full-document
+    /// pass for a second mutation under one boundary or any mutation under
+    /// `content-visibility: hidden`, defeating the containment optimization.
+    ///
     /// Style changes are consumed automatically by every style flush; call
     /// this directly only for mutations the style system cannot see —
     /// character-data and child-list changes that leave computed styles
@@ -450,7 +459,16 @@ impl<T> Document<T> {
     ///
     /// Panics when `id` is vacant (the let-it-crash mutation contract).
     pub fn invalidate_layout(&mut self, id: crate::NodeId) {
-        let boundary = {
+        // `reached_root` is set only when the walk runs to the document root
+        // through case (3) without a boundary, skip, or already-parked stop
+        // confining it — the one outcome that forces the next pass's positioned +
+        // rounding walks to run over the whole tree (`layout_root_dirty`).
+        // `boundary.is_none()` must **not** stand in for it: cases (0) and (2)
+        // also break with `boundary == None`, and treating those as
+        // root-reaching would defeat containment (a second mutation under one
+        // parked boundary, or any mutation under `content-visibility: hidden`,
+        // would force a full-document pass).
+        let (boundary, reached_root) = {
             let tree = self.tree();
             let start = tree
                 .get(id)
@@ -459,6 +477,10 @@ impl<T> Document<T> {
             start.invalidate_text_artifacts();
 
             let mut boundary = None;
+            // Stays `true` only if the loop exits by exhausting the ancestor
+            // chain (case 3 all the way to the document root); every `break`
+            // below is a containment-confined stop and clears it.
+            let mut reached_root = true;
             let mut current = start.parent();
             while let Some(node) = current {
                 // Elements are the only nodes that carry containment styles; a
@@ -481,6 +503,7 @@ impl<T> Document<T> {
                 // the document root. A later `hidden → visible` flip drives its
                 // own invalidation through the container's `RELAYOUT` damage.
                 if style_view.as_ref().is_some_and(CoreStyle::skips_contents) {
+                    reached_root = false;
                     break;
                 }
                 let is_boundary = style_view.as_ref().is_some_and(is_relayout_boundary);
@@ -492,6 +515,7 @@ impl<T> Document<T> {
                 // parks `B` boundaries (a dirty leaf per contained row of a long
                 // list) must not pay `O(B²)` here.
                 if is_boundary && self.is_relayout_root_parked(node.id()) {
+                    reached_root = false;
                     break;
                 }
                 // Capture a boundary's committed input *before* the clear below
@@ -507,6 +531,7 @@ impl<T> Document<T> {
                     // outer size cannot change from an interior mutation, so
                     // nothing above it needs clearing.
                     boundary = Some((node.id(), input));
+                    reached_root = false;
                     break;
                 }
                 // Case (3) / non-boundary: a boundary never laid out is not yet
@@ -515,12 +540,12 @@ impl<T> Document<T> {
                 // walking toward the document root.
                 current = node.parent();
             }
-            boundary
+            (boundary, reached_root)
         };
-        // A boundary confined the change; `None` means the walk cleared caches
-        // to the document root, so the next pass's positioned + rounding walks
-        // cannot be scoped to parked boundaries.
-        self.mark_layout_dirty(boundary.is_none());
+        // Only a walk that reached the document root forces the next pass to run
+        // positioned + rounding over the whole tree; a boundary/skip/already-parked
+        // stop keeps it scoped to the parked boundaries.
+        self.mark_layout_dirty(reached_root);
         if let Some((boundary_id, committed_input)) = boundary {
             self.record_relayout_root(boundary_id, committed_input);
         }
@@ -547,7 +572,7 @@ mod tests {
     use neutron_star::tree::{LayoutInput, LayoutOutput};
 
     use super::*;
-    use crate::DOCUMENT_NODE_ID;
+    use crate::{DOCUMENT_NODE_ID, StylesheetOrigin};
 
     #[test]
     fn internal_natural_size_update_invalidates_the_dirty_spine() {
@@ -583,5 +608,84 @@ mod tests {
                     .is_empty()
             );
         }
+    }
+
+    /// Only a walk that reaches the document root may force the next pass to be a
+    /// whole-tree positioned/rounding walk. The confined stops — a
+    /// `content-visibility: hidden` skip (case 0), a freshly parked boundary
+    /// (case 1), and an already-parked one (case 2) — must all keep
+    /// `layout_root_dirty` clear, or a second mutation under one boundary (or any
+    /// mutation under skipped contents) would defeat the containment scoping.
+    #[test]
+    fn only_a_root_reaching_invalidation_forces_a_full_pass() {
+        // Reuse the shared 800×600 test device; the assertions compare against
+        // that viewport (the document's own device), which is what a completed
+        // pass records.
+        let mut doc: Document<()> = Document::new(crate::document::tests::device());
+        doc.add_stylesheet_str(
+            "page { display: flex; width: 300px; height: 100px; }
+             .box { display: flex; contain: strict; width: 80px; height: 40px; }
+             .skip { display: flex; content-visibility: hidden;
+                     contain-intrinsic-size: 40px 30px; width: 40px; height: 30px; }
+             .leaf { width: 10px; height: 10px; }",
+            StylesheetOrigin::Author,
+        );
+        let root = doc.create_element("page", ());
+        doc.append_child(root);
+
+        let boundary = doc.create_element("view", ());
+        doc.add_class(boundary, "box");
+        doc.append(root, boundary);
+        let c1 = doc.create_element("view", ());
+        doc.add_class(c1, "leaf");
+        doc.append(boundary, c1);
+        let c2 = doc.create_element("view", ());
+        doc.add_class(c2, "leaf");
+        doc.append(boundary, c2);
+
+        let plain = doc.create_element("view", ());
+        doc.add_class(plain, "leaf");
+        doc.append(root, plain);
+
+        let skip = doc.create_element("view", ());
+        doc.add_class(skip, "skip");
+        doc.append(root, skip);
+        let hidden_child = doc.create_element("view", ());
+        doc.add_class(hidden_child, "leaf");
+        doc.append(skip, hidden_child);
+
+        doc.layout();
+
+        // Read the same inputs the pass recorded (the document's device
+        // viewport), so `layout_requires_full_pass` isolates `layout_root_dirty`.
+        let viewport = Size::new(800.0, 600.0);
+        let scale = 1.0;
+        assert!(
+            !doc.layout_needs_pass(viewport, scale),
+            "an unchanged frame after layout needs no pass at all",
+        );
+
+        // Case 0 — a mutation under `content-visibility: hidden` is confined.
+        doc.invalidate_layout(hidden_child);
+        assert!(
+            !doc.layout_requires_full_pass(viewport, scale),
+            "a skipped-contents mutation must not force a whole-tree pass",
+        );
+
+        // Cases 1 + 2 — park the boundary, then a second mutation under it hits
+        // the already-parked stop; both stay incremental.
+        doc.invalidate_layout(c1);
+        doc.invalidate_layout(c2);
+        assert!(
+            !doc.layout_requires_full_pass(viewport, scale),
+            "a second mutation under one parked boundary must stay incremental",
+        );
+
+        // Case 3 — a mutation whose walk reaches the document root forces it.
+        doc.invalidate_layout(plain);
+        assert!(
+            doc.layout_requires_full_pass(viewport, scale),
+            "a root-reaching mutation forces a whole-tree pass",
+        );
     }
 }

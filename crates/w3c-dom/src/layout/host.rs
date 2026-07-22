@@ -239,12 +239,7 @@ impl<'dom, T> LayoutNode for &'dom Node<T> {
 /// inner boundary's own re-run refreshes its interior. Independent boundaries
 /// have unordered depths and are order-insensitive, so a plain depth sort
 /// suffices.
-pub(super) fn run_layout<T>(
-    document: &Document<T>,
-    viewport: Size<f32>,
-    scale: f32,
-    full: bool,
-) {
+pub(super) fn run_layout<T>(document: &Document<T>, viewport: Size<f32>, scale: f32, full: bool) {
     let Some(root) = document.root_element() else {
         return;
     };
