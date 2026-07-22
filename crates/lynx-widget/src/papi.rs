@@ -47,6 +47,7 @@
 use std::sync::{Arc as StdArc, Mutex, Weak};
 
 use rustc_hash::FxHashMap;
+use stylo::LocalName;
 use stylo::properties::ComputedValues;
 use stylo::servo_arc::Arc;
 use thiserror::Error;
@@ -576,7 +577,7 @@ impl WidgetTree {
     ) -> Result<(), WidgetError> {
         self.sweep_dropped();
         let id = self.resolve(handle)?;
-        self.doc.set_attribute(id, name, value);
+        self.doc.set_attribute(id, LocalName::from(name), value);
         Ok(())
     }
 
@@ -601,10 +602,11 @@ impl WidgetTree {
             .iter()
             .map(|handle| self.resolve(handle))
             .collect::<Result<Vec<_>, _>>()?;
+        let name = LocalName::from("l-css-id");
         for id in ids {
             // The css_id is reflected as the synthetic `l-css-id` attribute;
             // snapshot it before the payload mutation.
-            self.doc.note_external_attribute_change(id, "l-css-id");
+            self.doc.note_external_attribute_change(id, &name);
             self.doc.ext_mut(id).css_id = css_id;
         }
         Ok(())
@@ -626,7 +628,7 @@ impl WidgetTree {
         // Snapshot the old values first, and name every old reflected
         // attribute while they still exist.
         self.doc.note_external_attributes_change(id);
-        let old_keys: Vec<String> = self
+        let old_keys: Vec<LocalName> = self
             .doc
             .get(id)
             .map(|widget| {
@@ -634,7 +636,7 @@ impl WidgetTree {
                     .ext()
                     .dataset
                     .keys()
-                    .map(|key| format!("data-{key}"))
+                    .map(|key| LocalName::from(format!("data-{key}").as_str()))
                     .collect()
             })
             .unwrap_or_default();
@@ -649,7 +651,7 @@ impl WidgetTree {
 
         // Names that only exist in the new dataset still need to be flagged
         // as changed; the snapshot keeps the pre-mutation values.
-        let new_keys: Vec<String> = self
+        let new_keys: Vec<LocalName> = self
             .doc
             .get(id)
             .map(|widget| {
@@ -657,7 +659,7 @@ impl WidgetTree {
                     .ext()
                     .dataset
                     .keys()
-                    .map(|key| format!("data-{key}"))
+                    .map(|key| LocalName::from(format!("data-{key}").as_str()))
                     .collect()
             })
             .unwrap_or_default();
@@ -678,8 +680,8 @@ impl WidgetTree {
     ) -> Result<(), WidgetError> {
         self.sweep_dropped();
         let id = self.resolve(handle)?;
-        self.doc
-            .note_external_attribute_change(id, &format!("data-{key}"));
+        let name = LocalName::from(format!("data-{key}").as_str());
+        self.doc.note_external_attribute_change(id, &name);
         self.doc
             .ext_mut(id)
             .dataset
@@ -737,7 +739,7 @@ impl WidgetTree {
     pub fn get_attributes(
         &self,
         handle: &WidgetHandle,
-    ) -> Result<&FxHashMap<Box<str>, String>, WidgetError> {
+    ) -> Result<&FxHashMap<LocalName, String>, WidgetError> {
         let id = self.resolve(handle)?;
         self.doc
             .get(id)

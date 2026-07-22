@@ -38,7 +38,7 @@ pub trait ExternalState: Sync {
     /// and [`TElement::get_attr`](stylo::dom::TElement::get_attr)) only
     /// **after** the node's real attribute map misses `name`. The default
     /// exposes nothing.
-    fn extra_attr_value(&self, _name: &str) -> Option<String> {
+    fn extra_attr_value(&self, _name: &LocalName) -> Option<String> {
         None
     }
 

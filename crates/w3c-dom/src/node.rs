@@ -310,10 +310,11 @@ pub struct Node<T> {
     /// The node's `id` selector value, distinct from a plain `id` attribute
     /// (the embedder decides whether/how the two are linked).
     pub(crate) id_attr: Option<Atom>,
-    /// Plain attributes. Synthetic / reflected attributes beyond this map are
-    /// served by the [`ext`](Node::ext) payload's
+    /// Plain attributes, keyed by their interned local names. Synthetic /
+    /// reflected attributes beyond this map are served by the
+    /// [`ext`](Node::ext) payload's
     /// [`extra_attr_value`](crate::ExternalState::extra_attr_value) hook.
-    pub(crate) attrs: FxHashMap<Box<str>, String>,
+    pub(crate) attrs: FxHashMap<LocalName, String>,
     /// Active dynamic pseudo-classes (`:hover` / `:active` / `:focus`) as
     /// stylo state bits.
     pub(crate) element_state: ElementState,
@@ -589,21 +590,15 @@ impl<T> Node<T> {
         self.classes.iter().map(AsRef::as_ref)
     }
 
-    /// A plain attribute's value.
+    /// A plain attribute's value, addressed by its local name.
     #[must_use]
-    pub fn attr(&self, name: &str) -> Option<&str> {
+    pub fn attr(&self, name: &LocalName) -> Option<&str> {
         self.attrs.get(name).map(String::as_str)
-    }
-
-    /// A plain attribute's value, using its already-interned local name.
-    #[must_use]
-    pub fn attr_local_name(&self, name: &LocalName) -> Option<&str> {
-        self.attr(name.0.as_ref())
     }
 
     /// The plain attribute map.
     #[must_use]
-    pub fn attrs(&self) -> &FxHashMap<Box<str>, String> {
+    pub fn attrs(&self) -> &FxHashMap<LocalName, String> {
         &self.attrs
     }
 

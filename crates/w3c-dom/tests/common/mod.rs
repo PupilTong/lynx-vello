@@ -28,6 +28,7 @@ use selectors::matching::{
     MatchingContext, MatchingForInvalidation, MatchingMode, NeedsSelectorFlags, SelectorCaches,
     matches_selector_list,
 };
+use stylo::LocalName;
 use stylo::color::AbsoluteColor;
 use stylo::context::QuirksMode;
 use stylo::device::Device;
@@ -167,7 +168,8 @@ impl Doc {
             self.dom.add_class(id, &class);
         }
         for (name, value) in parsed.attrs {
-            self.dom.set_attribute(id, &name, &value);
+            self.dom
+                .set_attribute(id, LocalName::from(name.as_str()), &value);
         }
         self.dom.append(parent, id);
         id
@@ -259,12 +261,12 @@ impl Doc {
 
     /// Set an attribute value.
     pub fn set_attr(&mut self, id: NodeId, name: &str, value: &str) {
-        self.dom.set_attribute(id, name, value);
+        self.dom.set_attribute(id, LocalName::from(name), value);
     }
 
     /// Remove an attribute.
     pub fn remove_attr(&mut self, id: NodeId, name: &str) {
-        self.dom.remove_attribute(id, name);
+        self.dom.remove_attribute(id, &LocalName::from(name));
     }
 
     /// Set or clear dynamic pseudo-class state bits (`:hover`/`:active`/…).

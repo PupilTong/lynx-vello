@@ -278,7 +278,7 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
         F: FnMut(&LocalName),
     {
         for name in self.attrs.keys() {
-            callback(&LocalName::from(name.as_ref()));
+            callback(name);
         }
         // Synthetic / reflected attribute names come from the embedder, so
         // the bloom filter accounts for them too (see
@@ -465,13 +465,12 @@ impl<'a, T: ExternalState> TElement for &'a Node<T> {
     }
 
     fn get_attr(&self, attr: &LocalName, _namespace: &Namespace) -> Option<String> {
-        let name: &str = attr.0.as_ref();
-        if let Some(value) = self.attr_local_name(attr) {
+        if let Some(value) = self.attr(attr) {
             return Some(value.to_owned());
         }
         // Synthetic / reflected attributes are the embedder's: consulted only
         // after the real attribute map misses, matching `attr_matches`.
-        Node::ext(self).extra_attr_value(name)
+        Node::ext(self).extra_attr_value(attr)
     }
 }
 
@@ -576,14 +575,13 @@ impl<T: ExternalState> Element for &Node<T> {
         // hot path for a selector form ReactLynx CSS does not use;
         // invalidation (the class/id snapshot recorders) is consistent with
         // this choice.
-        let name: &str = local_name.0.as_ref();
-        if let Some(value) = self.attr_local_name(local_name) {
+        if let Some(value) = self.attr(local_name) {
             return operation.eval_str(value);
         }
         // Synthetic / reflected attributes are the embedder's: consulted only
         // after the real attribute map misses (see `ExternalState::extra_attr_value`).
         Node::ext(self)
-            .extra_attr_value(name)
+            .extra_attr_value(local_name)
             .is_some_and(|value| operation.eval_str(&value))
     }
 
