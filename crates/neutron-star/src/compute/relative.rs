@@ -19,7 +19,7 @@ use super::util::{
 use crate::geometry::{Edges, Line, Point, Size};
 use crate::style::containment::size_containment;
 use crate::style::relative::{RELATIVE_REFERENCE_NONE, RELATIVE_REFERENCE_PARENT};
-use crate::style::{CoreStyle, RelativeContainerStyle, RelativeItemStyle};
+use crate::style::{CoreStyle, Overflow, RelativeContainerStyle, RelativeItemStyle};
 use crate::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
     SizingMode,
@@ -206,6 +206,11 @@ struct RelativeItem<N> {
     margin: Edges<f32>,
     padding: Edges<f32>,
     border: Edges<f32>,
+    /// The item's `overflow`, resolved once by the shared box resolver and
+    /// retained so the deferred scrollable-overflow accumulation at commit reads
+    /// it from scratch instead of re-fetching a style view per child (see
+    /// [`accumulate_scrollable_overflow`]).
+    overflow: Point<Overflow>,
     inset: Edges<Option<f32>>,
     direction: direction::T,
     positions: Size<Line<f32>>,
@@ -268,6 +273,7 @@ where
         padding,
         border,
         inset,
+        overflow,
         ..
     } = resolve_item_box_with_bases(&style, size_percentage_basis, edge_inline_basis);
     let preferred_size_is_definite =
@@ -293,6 +299,7 @@ where
         margin,
         padding,
         border,
+        overflow,
         inset,
         direction: style.direction(),
         positions: Size::new(Line::new(0.0, 0.0), Line::new(0.0, 0.0)),
@@ -1468,13 +1475,15 @@ where
         item.key.node.set_unrounded_layout(layout);
 
         // A scroll-container child traps its interior scrollable overflow;
-        // any other child propagates border box ∪ content_size (§3.3).
+        // any other child propagates border box ∪ content_size (§3.3). The
+        // item's overflow was resolved once during item sizing and kept in
+        // scratch, so this reads no fresh style view per child.
         accumulate_scrollable_overflow(
             &mut scrollable_size,
             location,
             output.size,
             output.content_size,
-            item.key.node.style().overflow(),
+            item.overflow,
         );
     }
     scrollable_size

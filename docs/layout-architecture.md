@@ -557,7 +557,25 @@ the painting — layout's job is to never be the frame's bottleneck.
   the document root, a boundary's interior
   is unreachable while the boundary's ancestors stay warm, so the in-place
   boundary re-run is what actually refreshes it (`compute_root_layout` from the
-  warm root would answer from cache and never descend).
+  warm root would answer from cache and never descend). Parked boundaries are
+  deduplicated through an `O(1)` `FxHashSet` companion to the parked list, so a
+  batch that parks `B` independent boundaries (a dirty leaf per contained row of
+  a virtualized list) stays `O(B)`, not `O(B²)`.
+- **The positioned + rounding tail is scoped to what changed, not the whole
+  tree.** The parked-boundary re-runs and the root pass are cache-incremental,
+  but the positioned pass (hoisted out-of-flow anchoring) and device-pixel
+  rounding are plain tree walks. `layout_document` scopes them: when nothing has
+  been invalidated since the last pass and the viewport/scale are unchanged it
+  **skips the whole pass** (an idle frame is `O(1)`, not an `O(N)` re-walk); when
+  every pending change is confined to parked containment boundaries it re-runs
+  those two walks **only over each outermost parked boundary's subtree**
+  (`compute::round_layout_subtree` re-snaps a subtree from its parent's
+  accumulated unrounded origin, byte-identically to a full re-round), leaving
+  every clean subtree's stored geometry untouched; only a change that reached the
+  document root or a viewport/scale move falls back to the whole-tree walk. This
+  is what keeps a single contained mutation `O(boundary subtree)` end-to-end,
+  closing the gap where containment shrank the core compute but the frame still
+  paid an `O(N)` positioned + rounding tail.
 - **Allocation strategy (current).** Algorithms use bounded transient `Vec`
   scratch. Relative deduplicates each item's at-most-eight dependencies in a
   fixed inline `u32` array, bypasses graph construction entirely when no
@@ -866,3 +884,25 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
   crate depends on the vendored stylo fork (not publishable as-is); recheck
   only if a publishable stylo dependency ever materializes. The protocol
   doesn't depend on the name.
+- **Deeper hot-path allocation/atomic trims (benchmark-gated).** The
+  containment-scoped positioned + rounding tail and the idle-frame skip cover
+  the asymptotic end-to-end cost; the remaining items are constant-factor and
+  should land only behind a profile that shows them:
+  - The per-node layout slot is an `AtomicRefCell` (the Servo shape that keeps
+    a node shareable for stylo's *parallel* restyle). Layout itself is
+    single-threaded, so a Stylo-`ElementDataWrapper`-style `UnsafeCell` +
+    debug-only borrow guard would drop the atomic borrow bookkeeping from the
+    release layout phase — a deliberate, invariant-heavy change, not a plain
+    `RefCell` swap.
+  - The incremental positioned pass still walks a whole boundary *subtree* to
+    find its hoisted nodes; a per-boundary hoisted-node registry would visit
+    only the out-of-flow nodes. Similarly, an already-hidden subtree is still
+    re-zeroed inside a boundary re-run rather than only on the visible↔hidden
+    transition.
+  - The rounding, hide-subtree, and positioned walks are recursive, so a
+    pathologically deep single subtree still carries stack-depth risk; an
+    explicit worklist would remove it (systemic and pre-existing, not
+    containment-specific).
+  - The flush's zero-alloc damage sink still seeds its spine walk from a
+    one-element `Vec`; a reusable scratch stack would make a clean flush truly
+    allocation-free.

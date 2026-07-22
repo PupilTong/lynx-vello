@@ -15,6 +15,7 @@
 mod common;
 
 use common::{Doc, device_with};
+use stylo::device::Device;
 use stylo::queries::values::PrefersColorScheme;
 use w3c_dom::NodeId;
 use w3c_dom::layout::Layout;
@@ -43,6 +44,14 @@ impl Harness {
         }
     }
 
+    /// A harness over an explicit device (viewport + device-pixel ratio) — for
+    /// tests that stress positioned anchoring and fractional-DPI rounding.
+    fn with_device(css: &str, device: Device) -> Self {
+        let mut doc = Doc::with_device(device);
+        doc.add_css(css);
+        Self { doc }
+    }
+
     /// Run the style-then-layout pipeline.
     fn layout(&mut self) {
         self.doc.dom.layout();
@@ -55,6 +64,13 @@ impl Harness {
             .expect("node id is live")
             .layout()
             .clone()
+    }
+
+    /// Every listed node's full rounded [`Layout`] (paint order, geometry, box
+    /// edges) — the differential oracle for incremental-vs-full relayout: an
+    /// incremental pass must reproduce a full relayout field-for-field.
+    fn layouts_of(&self, ids: &[NodeId]) -> Vec<Layout> {
+        ids.iter().map(|&id| self.layout_of(id)).collect()
     }
 
     /// `(x, y, width, height)` of the node's rounded border box, relative to
@@ -1560,4 +1576,198 @@ fn mutation_inside_a_skipped_container_keeps_ancestor_caches_warm() {
     h.doc.set_inline(hidden, "content-visibility: visible");
     h.layout();
     assert_eq!(h.rect(child), (0.0, 0.0, 20.0, 20.0));
+}
+
+// --- incremental post-processing: idle skip + containment-scoped relayout ------
+//
+// `layout_document` skips the positioned + rounding walks when nothing is dirty
+// and the viewport/scale are unchanged, and scopes them to the parked
+// containment boundaries when every pending change is boundary-confined. The
+// differential tests below pin the correctness contract: an incremental pass
+// must reproduce a full cold relayout field-for-field.
+
+#[test]
+fn idle_frames_are_skipped_and_stay_idempotent() {
+    // Nothing invalidated + unchanged viewport/scale ⇒ the pass is skipped and
+    // the stored geometry still holds. Repeated idle passes must be identical,
+    // and a real mutation afterward must still relayout (the skip left the
+    // dirty-tracking state intact).
+    let mut h = Harness::new(
+        "page { display: flex; width: 200px; height: 100px; }
+         .a { flex-grow: 1; height: 20px; }
+         .fixed { position: fixed; left: 5px; top: 7px; width: 10px; height: 12px; }",
+    );
+    let root = h.doc.root;
+    let a = h.doc.el(root, ".a");
+    let fixed = h.doc.el(root, ".fixed");
+    let ids = [root, a, fixed];
+    h.layout();
+    let snapshot = h.layouts_of(&ids);
+
+    // Two idle frames.
+    h.layout();
+    h.layout();
+    assert_eq!(h.layouts_of(&ids), snapshot, "idle passes are idempotent");
+
+    // A real change still lands after the idle skips.
+    h.doc.set_inline(a, "flex-grow: 0; width: 40px");
+    h.layout();
+    assert_eq!(
+        h.rect(a).2,
+        40.0,
+        "a mutation after idle frames still relayouts"
+    );
+}
+
+#[test]
+fn incremental_boundary_relayout_matches_a_full_relayout() {
+    // A `contain: strict` boundary confines an interior change, so the pass is
+    // incremental — only the boundary's subtree is re-positioned and re-rounded.
+    // That must be byte-identical to a full cold relayout of the whole tree.
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .spacer { width: 137px; height: 40px; }
+         .boundary { display: flex; contain: strict; width: 200px; height: 100px;
+                     align-items: flex-start; }
+         .a { width: 30px; height: 20px; }
+         .b { width: 40px; height: 25px; }",
+    );
+    let root = h.doc.root;
+    let spacer = h.doc.el(root, ".spacer");
+    let boundary = h.doc.el(root, ".boundary");
+    let a = h.doc.el(boundary, ".a");
+    let b = h.doc.el(boundary, ".b");
+    let ids = [root, spacer, boundary, a, b];
+    h.layout();
+
+    // Grow a leaf inside the boundary; `b` shifts, but the size-contained
+    // boundary's outer 200×100 cannot change, so the change stays confined.
+    h.doc.set_inline(a, "width: 55px");
+    h.layout();
+    let incremental = h.layouts_of(&ids);
+    assert_eq!(h.rect(a).2, 55.0, "the interior actually changed");
+    assert_eq!(h.rect(b).0, 55.0, "the sibling shifted with it");
+
+    // A cold full relayout must reach the same geometry everywhere.
+    h.doc.dom.invalidate_layout_all();
+    h.layout();
+    assert_eq!(incremental, h.layouts_of(&ids), "incremental == full");
+}
+
+#[test]
+fn incremental_relayout_matches_full_under_fractional_device_pixels() {
+    // The incremental rounding pass snaps a boundary's subtree from its parent's
+    // *accumulated* unrounded origin. On a 2× screen with fractional
+    // coordinates, that origin must match what a full root-anchored walk reaches,
+    // or interior device-pixel snapping drifts. Assert incremental == full,
+    // every field.
+    let mut h = Harness::with_device(
+        "page { display: flex; width: 400px; height: 300px; }
+         .spacer { width: 37.5px; height: 20.5px; }
+         .boundary { display: flex; contain: strict; width: 121.5px; height: 80px;
+                     align-items: flex-start; }
+         .a { width: 20.5px; height: 15.5px; }
+         .b { width: 30.5px; height: 18.5px; }",
+        device_with(400.0, 300.0, 2.0, PrefersColorScheme::Light),
+    );
+    let root = h.doc.root;
+    let spacer = h.doc.el(root, ".spacer");
+    let boundary = h.doc.el(root, ".boundary");
+    let a = h.doc.el(boundary, ".a");
+    let b = h.doc.el(boundary, ".b");
+    let ids = [root, spacer, boundary, a, b];
+    h.layout();
+
+    h.doc.set_inline(a, "width: 44.5px");
+    h.layout();
+    let incremental = h.layouts_of(&ids);
+
+    h.doc.dom.invalidate_layout_all();
+    h.layout();
+    assert_eq!(
+        incremental,
+        h.layouts_of(&ids),
+        "fractional incremental rounding must equal a full re-round"
+    );
+}
+
+#[test]
+fn nested_parked_boundaries_incremental_matches_full() {
+    // Two nested `contain: strict` boundaries are parked in one batch (a change
+    // inside the inner one, and a change to a sibling under the outer one). The
+    // incremental pass rounds the OUTER boundary once — its walk already covers
+    // the inner one, which is skipped via the parked-ancestor check — and must
+    // match a full relayout.
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .outer { display: flex; contain: strict; width: 300px; height: 200px;
+                  align-items: flex-start; }
+         .inner { display: flex; contain: strict; width: 120px; height: 80px;
+                  align-items: flex-start; }
+         .x { width: 30px; height: 20px; }
+         .sib { width: 40px; height: 25px; }",
+    );
+    let root = h.doc.root;
+    let outer = h.doc.el(root, ".outer");
+    let inner = h.doc.el(outer, ".inner");
+    let x = h.doc.el(inner, ".x");
+    let sib = h.doc.el(outer, ".sib");
+    let ids = [root, outer, inner, x, sib];
+    h.layout();
+
+    // One flush, two boundary-confined changes ⇒ both boundaries parked.
+    h.doc.set_inline(x, "width: 55px");
+    h.doc.set_inline(sib, "width: 60px");
+    h.layout();
+    let incremental = h.layouts_of(&ids);
+    assert_eq!(h.rect(x).2, 55.0, "the inner interior changed");
+    assert_eq!(h.rect(sib).2, 60.0, "the outer sibling changed");
+
+    h.doc.dom.invalidate_layout_all();
+    h.layout();
+    assert_eq!(
+        incremental,
+        h.layouts_of(&ids),
+        "nested incremental == full"
+    );
+}
+
+#[test]
+fn incremental_relayout_reanchors_a_hoisted_node_inside_a_boundary() {
+    // A `position: fixed` node hoisted to a *transformed* containing block nested
+    // inside a `contain: strict` boundary. Growing a boundary sibling shifts that
+    // CB, so the hoisted node must be re-anchored — by the boundary-scoped
+    // positioned pass, not a full one. Assert incremental == full.
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .boundary { display: flex; contain: strict; width: 400px; height: 200px;
+                     align-items: flex-start; }
+         .filler { width: 20px; height: 30px; }
+         .cb { display: flex; width: 120px; height: 100px; transform: translateX(0px);
+               align-items: flex-start; }
+         .mid { display: flex; width: 60px; height: 60px; }
+         .fixed { position: fixed; left: 8px; top: 6px; width: 12px; height: 10px; }",
+    );
+    let root = h.doc.root;
+    let boundary = h.doc.el(root, ".boundary");
+    let filler = h.doc.el(boundary, ".filler");
+    let cb = h.doc.el(boundary, ".cb");
+    let mid = h.doc.el(cb, ".mid");
+    let fixed = h.doc.el(mid, ".fixed");
+    let ids = [root, boundary, filler, cb, mid, fixed];
+    h.layout();
+
+    // Grow the filler: `cb` shifts right, so the fixed node anchored to it must
+    // move with it. The change is confined to the boundary.
+    h.doc.set_inline(filler, "width: 50px");
+    h.layout();
+    let incremental = h.layouts_of(&ids);
+
+    h.doc.dom.invalidate_layout_all();
+    h.layout();
+    assert_eq!(
+        incremental,
+        h.layouts_of(&ids),
+        "hoisted re-anchor incremental == full"
+    );
 }
