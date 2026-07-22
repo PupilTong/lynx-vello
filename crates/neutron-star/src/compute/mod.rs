@@ -769,11 +769,39 @@ fn absolute_preferred_available(value: &StyleSize, basis: Option<f32>) -> Option
 /// trade-off, also made by browsers). Idempotent given unchanged unrounded
 /// inputs and scale.
 pub fn round_layout<N: LayoutNode>(root: N, scale: f32) {
+    round_layout_subtree(root, scale, Point::ZERO);
+}
+
+/// Like [`round_layout`], but snaps the subtree rooted at `node` as though its
+/// tree parent's accumulated (root-relative) **unrounded** border-box origin
+/// were `parent_position` — the anchor a full [`round_layout`] walk would have
+/// reached by the time it descended to `node`.
+///
+/// [`round_layout`] is `round_layout_subtree(root, scale, Point::ZERO)`. A host
+/// doing containment-scoped incremental relayout uses this to re-snap only a
+/// changed subtree — e.g. a `contain: strict` boundary's interior, whose outer
+/// geometry the relayout-boundary theorem (see
+/// [`is_relayout_boundary`](crate::invalidate::is_relayout_boundary)) holds
+/// fixed — without re-walking the whole tree. Passing the boundary parent's
+/// accumulated unrounded origin makes the result **byte-identical** to a full
+/// re-round,
+/// because device-pixel snapping is a pure function of the accumulated position,
+/// size, and scale (positions snap in accumulated space; sizes derive as
+/// `snap(pos + size) − snap(pos)`). The unchanged geometry outside `node`'s
+/// subtree keeps its previously snapped values.
+///
+/// `scale` must be finite and `> 0`, `parent_position` finite (both
+/// debug-asserted).
+pub fn round_layout_subtree<N: LayoutNode>(node: N, scale: f32, parent_position: Point<f32>) {
     debug_assert!(
         scale.is_finite() && scale > 0.0,
         "scale must be positive and finite"
     );
-    round_layout_inner(root, scale, Point::ZERO);
+    debug_assert!(
+        parent_position.x.is_finite() && parent_position.y.is_finite(),
+        "accumulated parent position must be finite"
+    );
+    round_layout_inner(node, scale, parent_position);
 }
 
 /// CSS Values' nearest-integer rule: choose the upper integer on an exact

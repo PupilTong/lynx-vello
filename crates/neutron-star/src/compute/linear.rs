@@ -25,7 +25,7 @@ use super::util::{
 use super::{compute_absolute_layout_with_static_position, hide_subtree, measure_absolute_layout};
 use crate::geometry::{Edges, Point, Size};
 use crate::style::containment::size_containment;
-use crate::style::{Contain, CoreStyle, LinearContainerStyle, LinearItemStyle};
+use crate::style::{Contain, CoreStyle, LinearContainerStyle, LinearItemStyle, Overflow};
 use crate::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
     SizingMode,
@@ -206,6 +206,11 @@ struct LinearItem<N> {
     margin_auto: Edges<bool>,
     padding: Edges<f32>,
     border: Edges<f32>,
+    /// The item's `overflow`, resolved once by [`resolve_item_box`] and retained
+    /// so the deferred scrollable-overflow accumulation at commit reads it from
+    /// scratch instead of re-fetching (`node.style().overflow()`) a style view
+    /// per child — see [`accumulate_scrollable_overflow`].
+    overflow: Point<Overflow>,
     relative_offset: Point<f32>,
     box_sizing: box_sizing::T,
     aspect_ratio: Option<f32>,
@@ -595,6 +600,7 @@ where
         padding,
         border,
         inset,
+        overflow,
         ..
     } = resolve_item_box(&style, percentage_basis);
     let relative_offset = if nudges {
@@ -629,6 +635,7 @@ where
         margin_auto,
         padding,
         border,
+        overflow,
         relative_offset,
         box_sizing,
         aspect_ratio,
@@ -1595,13 +1602,15 @@ where
         item.key.node.set_unrounded_layout(layout);
 
         // A scroll-container child traps its interior scrollable overflow;
-        // any other child propagates border box ∪ content_size (§3.3).
+        // any other child propagates border box ∪ content_size (§3.3). The
+        // item's overflow was resolved once during item sizing and kept in
+        // scratch, so this reads no fresh style view per child.
         accumulate_scrollable_overflow(
             &mut content_size,
             location,
             output.size,
             output.content_size,
-            item.key.node.style().overflow(),
+            item.overflow,
         );
     }
     content_size

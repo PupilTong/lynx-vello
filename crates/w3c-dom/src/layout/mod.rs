@@ -288,13 +288,30 @@ impl<T: Sync> Document<T> {
         // here is structurally private to this document.
         self.flush_styles_with_sink(Parallelism::Auto, &mut |_, _| {});
 
-        let viewport = self.device().viewport_size();
+        let viewport_size = self.device().viewport_size();
+        let viewport = Size::new(viewport_size.width, viewport_size.height);
         let scale = self.device().device_pixel_ratio().get();
-        let viewport = Size::new(viewport.width, viewport.height);
-        host::run_layout(self, viewport, scale);
+
+        // Idle-frame fast path: nothing has been invalidated since the last pass
+        // and the viewport/scale are unchanged, so the stored positioned +
+        // rounded geometry still holds. Skip the whole pass — an unchanged frame
+        // costs O(1), not an O(N) re-walk of the visible tree. (A clean flush
+        // above already parked nothing and cleared no cache, so there is no
+        // pending work to lose.)
+        if !self.layout_needs_pass(viewport, scale) {
+            return;
+        }
+
+        // A full pass re-runs positioned + rounding from the document root; an
+        // incremental one re-processes only the parked containment boundaries'
+        // subtrees, leaving every clean subtree's stored geometry untouched.
+        let full = self.layout_requires_full_pass(viewport, scale);
+        host::run_layout(self, viewport, scale, full);
         // The pass consumed every parked relayout root (`run_layout` re-ran each
-        // boundary in place); forget them so they cannot fire again next pass.
+        // boundary in place); forget them so they cannot fire again next pass,
+        // and record this pass's inputs so the next idle frame can be skipped.
         self.clear_relayout_roots();
+        self.mark_layout_complete(viewport, scale);
     }
 }
 
@@ -435,9 +452,6 @@ impl<T> Document<T> {
     pub fn invalidate_layout(&mut self, id: crate::NodeId) {
         let boundary = {
             let tree = self.tree();
-            // Boundaries already parked earlier in this invalidation batch (a
-            // tiny vec — a linear scan beats a set).
-            let parked = self.relayout_roots();
             let start = tree
                 .get(id)
                 .expect("vacant NodeId passed to Document::invalidate_layout");
@@ -474,7 +488,10 @@ impl<T> Document<T> {
                 // an already-cleared cache — stop here rather than re-reading a
                 // now-`None` committed input and clearing on to the root (which
                 // would defeat the containment the first walk established).
-                if is_boundary && parked.iter().any(|&(parked_id, _)| parked_id == node.id()) {
+                // `is_relayout_root_parked` is an `O(1)` set query: a batch that
+                // parks `B` boundaries (a dirty leaf per contained row of a long
+                // list) must not pay `O(B²)` here.
+                if is_boundary && self.is_relayout_root_parked(node.id()) {
                     break;
                 }
                 // Capture a boundary's committed input *before* the clear below
@@ -500,6 +517,10 @@ impl<T> Document<T> {
             }
             boundary
         };
+        // A boundary confined the change; `None` means the walk cleared caches
+        // to the document root, so the next pass's positioned + rounding walks
+        // cannot be scoped to parked boundaries.
+        self.mark_layout_dirty(boundary.is_none());
         if let Some((boundary_id, committed_input)) = boundary {
             self.record_relayout_root(boundary_id, committed_input);
         }
@@ -514,6 +535,9 @@ impl<T> Document<T> {
             node.invalidate_text_artifacts();
         }
         self.clear_relayout_roots();
+        // A blanket invalidation reaches the root by definition: the next pass
+        // must re-run positioned + rounding over the whole tree.
+        self.mark_layout_dirty(true);
     }
 }
 

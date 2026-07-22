@@ -17,7 +17,9 @@ use std::fmt;
 #[cfg(debug_assertions)]
 use std::ptr::NonNull;
 
+use neutron_star::geometry::Size;
 use neutron_star::tree::LayoutInput;
+use rustc_hash::FxHashSet;
 use slab::Slab;
 use stylo::LocalName;
 use stylo::device::Device;
@@ -78,6 +80,37 @@ pub struct Document<T> {
     /// [`remove_subtree`](Self::remove_subtree) drops entries for every removed
     /// node before its raw slab id can be reused.
     relayout_roots: Vec<(NodeId, LayoutInput)>,
+    /// O(1)-membership companion to [`relayout_roots`](Self::relayout_roots),
+    /// holding the same parked ids. `invalidate_layout`'s "already parked in
+    /// this batch?" test (case 2 of its ancestor walk) and the incremental
+    /// post-pass's "is an ancestor parked?" test are both membership queries;
+    /// answering them by scanning the vec is `O(B)` each, so a batch that parks
+    /// `B` independent boundaries (one dirty leaf per contained row of a long
+    /// virtualized list) costs `O(B²)`. This set makes each query `O(1)`, so
+    /// the batch is `O(B)`. Kept in lockstep with the vec by
+    /// [`record_relayout_root`](Self::record_relayout_root) /
+    /// [`clear_relayout_roots`](Self::clear_relayout_roots).
+    relayout_root_ids: FxHashSet<NodeId>,
+    /// Whether any layout-affecting invalidation is pending since the last
+    /// completed layout pass. Set by [`invalidate_layout`](Self::invalidate_layout)
+    /// / [`invalidate_layout_all`](Self::invalidate_layout_all); cleared when a
+    /// pass completes. When it is `false` and the viewport/scale are unchanged,
+    /// [`layout_document`](crate::StyleEngine::layout_document) skips the whole
+    /// pass — the previous pass's geometry still holds, so an idle frame costs
+    /// `O(1)` instead of re-walking the tree for positioned + rounding output.
+    layout_dirty: bool,
+    /// Whether a pending invalidation cleared the cache spine all the way to the
+    /// document root (no containment boundary confined it). When it did, the
+    /// next pass's positioned + rounding walks cannot be scoped to the parked
+    /// boundaries — geometry may have shifted anywhere — so the pass runs them
+    /// from the document root. When every pending change is boundary-confined,
+    /// the pass re-processes only the parked boundaries' subtrees.
+    layout_root_dirty: bool,
+    /// The `(viewport, device-pixel-ratio)` the last completed layout pass ran
+    /// with, or `None` before the first pass. A pass is skippable only when this
+    /// still matches (positioned anchoring and device-pixel snapping both depend
+    /// on it) and nothing is dirty; a mismatch forces a full-tree pass.
+    last_layout_inputs: Option<(Size<f32>, f32)>,
 }
 
 impl<T: fmt::Debug> fmt::Debug for Document<T> {
@@ -121,6 +154,10 @@ impl<T> Document<T> {
             style_engine,
             nodes,
             relayout_roots: Vec::new(),
+            relayout_root_ids: FxHashSet::default(),
+            layout_dirty: false,
+            layout_root_dirty: false,
+            last_layout_inputs: None,
         }
     }
 
@@ -139,6 +176,7 @@ impl<T> Document<T> {
     /// [`invalidate_layout`](Self::invalidate_layout).
     pub(crate) fn record_relayout_root(&mut self, id: NodeId, committed_input: LayoutInput) {
         self.relayout_roots.push((id, committed_input));
+        self.relayout_root_ids.insert(id);
     }
 
     /// The relayout boundaries parked since the last pass (see
@@ -147,11 +185,62 @@ impl<T> Document<T> {
         &self.relayout_roots
     }
 
+    /// Whether `id` is already a parked relayout root — the `O(1)` membership
+    /// query backing `invalidate_layout`'s already-parked check and the
+    /// incremental post-pass's parked-ancestor check (see
+    /// [`relayout_root_ids`](Self::relayout_root_ids)).
+    pub(crate) fn is_relayout_root_parked(&self, id: NodeId) -> bool {
+        self.relayout_root_ids.contains(&id)
+    }
+
     /// Forget every parked relayout root (the layout pass has consumed them, or
     /// an [`invalidate_layout_all`](Self::invalidate_layout_all) subsumed them
     /// with a full re-layout).
     pub(crate) fn clear_relayout_roots(&mut self) {
         self.relayout_roots.clear();
+        self.relayout_root_ids.clear();
+    }
+
+    /// Whether a layout pass has anything to do for this `(viewport, scale)`.
+    ///
+    /// `false` exactly when nothing has been invalidated since the last pass
+    /// **and** the last pass ran with the same viewport/scale — an idle frame
+    /// whose stored geometry still holds, so
+    /// [`layout_document`](crate::StyleEngine::layout_document) returns without
+    /// walking the tree.
+    pub(crate) fn layout_needs_pass(&self, viewport: Size<f32>, scale: f32) -> bool {
+        self.layout_dirty || self.last_layout_inputs != Some((viewport, scale))
+    }
+
+    /// Whether the next pass must run positioned + rounding over the whole tree
+    /// rather than only the parked boundaries: some pending change escaped to
+    /// the document root, or the viewport/scale moved (which re-anchors every
+    /// positioned box and re-snaps every device pixel). `viewport`/`scale` are
+    /// the pass's current inputs.
+    pub(crate) fn layout_requires_full_pass(&self, viewport: Size<f32>, scale: f32) -> bool {
+        self.layout_root_dirty || self.last_layout_inputs != Some((viewport, scale))
+    }
+
+    /// Record that a layout pass just completed for `(viewport, scale)`: clears
+    /// the dirty flags and remembers the inputs so the next idle frame can be
+    /// skipped. The caller also [`clear_relayout_roots`](Self::clear_relayout_roots).
+    pub(crate) fn mark_layout_complete(&mut self, viewport: Size<f32>, scale: f32) {
+        self.layout_dirty = false;
+        self.layout_root_dirty = false;
+        self.last_layout_inputs = Some((viewport, scale));
+    }
+
+    /// Note that a layout-affecting invalidation just occurred (so the next
+    /// pass cannot be skipped). `reached_root` is whether its cache-clearing
+    /// walk ran to the document root without a containment boundary confining
+    /// it — if so, the next pass must also re-run positioned + rounding over the
+    /// whole tree, not just the parked boundaries. Called by
+    /// [`invalidate_layout`](Self::invalidate_layout) /
+    /// [`invalidate_layout_all`](Self::invalidate_layout_all), which own the
+    /// private layout-generation flags.
+    pub(crate) fn mark_layout_dirty(&mut self, reached_root: bool) {
+        self.layout_dirty = true;
+        self.layout_root_dirty |= reached_root;
     }
 
     /// Borrow the complete node slab.
