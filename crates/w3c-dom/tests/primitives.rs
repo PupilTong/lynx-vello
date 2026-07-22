@@ -390,15 +390,15 @@ fn external_state_default_attr_hooks() {
 
     let elem = doc.get(el).unwrap();
     let ns = stylo::Namespace::default();
+    let title = stylo::LocalName::from("title");
     assert_eq!(
         elem.attr("title"),
         Some("hi"),
         "the accessor sees the plain attribute"
     );
-    assert_eq!(
-        elem.get_attr(&stylo::LocalName::from("title"), &ns),
-        Some("hi".to_owned())
-    );
+    assert_eq!(elem.attr_local_name(&title), Some("hi"));
+    assert!(elem.attrs().contains_key(&title));
+    assert_eq!(elem.get_attr(&title, &ns), Some("hi".to_owned()));
     assert_eq!(elem.get_attr(&stylo::LocalName::from("data-x"), &ns), None);
 }
 
