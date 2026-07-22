@@ -17,16 +17,21 @@ Document/Node design (this document describes the current shape).
 
 ## The w3c-dom core: one tree, Document-mediated mutation
 
-- **ONE TREE policy.** `Document<T>` owns one fixed-address `Box<Slab<Node<T>>>` and one private
-  style engine (`Stylist` + device + stylesheets + `SharedRwLock` + base URL). Slot zero is the
-  real `NodeData::Document`; its ordinary child list contains the optional root element and carries
-  the lock/base-URL context needed by its nodes. All later slots are element
-  or text nodes, addressed by their raw `usize` slab index. Each
-  pending pre-mutation snapshot is owned by its node in a pointer-sized optional box, allocated
-  only when a previously styled element is first mutated between flushes. There is no separate
-  arena/tree object, and no public way to construct or mutate a `Node<T>` outside its document —
-  `Document::create_element` and `Document::create_text_node` are the kind-specific factories,
-  and every DOM operation is a `Document` method.
+- **ONE TREE, multiple arenas.** `Document<T>` owns one fixed-address boxed arena set. Its primary
+  `Slab<Node<T>>` selects each ID: slot zero is the real `NodeData::Document`, whose ordinary child
+  list contains the optional root element and whose node data carries the node-visible
+  `SharedRwLock` and base URL; later slots are element/text nodes addressed by their raw `usize`
+  index. The `Document` also owns the complete private style engine (`Stylist` + device +
+  stylesheets + lock + base URL). Three secondary `Slab`s use that same `NodeId`: the opaque
+  embedder payload `T`, Stylo
+  traversal/invalidation state (pending snapshot, selector/dirty/snapshot/traversal flags), and
+  layout measurement-cache/static-position state. The payload slab reserves a payload-less sentinel
+  at document slot zero. All four free lists stay in lockstep: every side insertion asserts that its
+  slab returned the key selected by the primary slab, and removal clears all four entries before
+  reuse. Computed styles and durable rounded/unrounded layouts remain in the primary Node arena.
+  There is still one logical tree and no public way to construct or mutate a `Node<T>` outside its
+  document — `Document::create_element` and `Document::create_text_node` are the kind-specific
+  factories, and every DOM operation is a `Document` method.
 - **Invalidation is carried by the operations.** Each matching-relevant setter
   (`set_classes`, `set_attribute`, `set_state`, `set_inline_style`, structural
   `insert_before`/`detach`/`remove_subtree`, …) records its own pre-mutation snapshot or scoped
@@ -38,8 +43,9 @@ Document/Node design (this document describes the current shape).
   internally in the same call. `Document::new` constructs a fresh style engine/context, so
   different documents cannot share stylesheets. Embedders cannot set, clear, or query the core's
   pending style state.
-- **Payloads are opaque to the DOM core.** `Node<T>` retains the embedder payload supplied at
-  creation and exposes it through a shared reference for non-DOM state such as leaf measurement.
+- **Payloads are opaque to the DOM core.** The payload arena retains the `T` supplied for each
+  element/text node, and `Node<T>::payload` exposes it through a shared reference for non-DOM state
+  such as leaf measurement.
   `w3c-dom` neither mutates that payload nor asks it to synthesize selector-visible state. IDs,
   classes, inline style, Lynx CSS scope (`l-css-id`), and dataset entries (`data-*`) are ordinary
   DOM attributes and change only through the corresponding `Document` mutation APIs.
@@ -55,13 +61,15 @@ Document/Node design (this document describes the current shape).
   `WidgetHandle` carries its context's `Reaper` owner while retaining its node, so no live handle
   survives reclamation and a host-side routing bug is rejected outside the DOM. The private style
   lock is created and owned by the same document, so there is no externally pairable engine token.
-- **Debug contract instrumentation.** The `stylo_data` `UnsafeCell` slot carries a debug-only
-  guard (reader/writer state, owning thread, unwind poisoning) and the document a debug
+- **Debug contract instrumentation.** The styling-arena entry paired with each node's `stylo_data`
+  `UnsafeCell` carries a debug-only guard (reader/writer state, owning thread, unwind poisoning)
+  and the document a debug
   traversal-phase flag; violations of stylo's one-worker-per-element discipline crash debug
   builds instead of being UB. Release builds compile it all away.
-- **Slab backpointers, one-word handles, no mirror tree.** Every node carries a pointer directly
-  to the fixed-address slab, so it can resolve parents/children and recover slot zero using only
-  `&Node`. The same **`&'a Node<T>`** implements Stylo's `TNode`, `TElement`, `TDocument`, and
+- **Arena-set backpointers, one-word handles, no mirror tree.** Every node carries a pointer directly
+  to the fixed-address arena set, so it can resolve parents/children, payload and phase-specific
+  state, and recover slot zero using only `&Node`. The same **`&'a Node<T>`** implements Stylo's
+  `TNode`, `TElement`, `TDocument`, and
   `TShadowRoot` associated-type stub; `NodeData` decides whether that node is the document, an
   element, or text. No `Core`, document/node view, or iterator adapter exists. The
   restyle traversal runs **in place on the document**; no second tree is materialized. Text nodes
@@ -74,8 +82,8 @@ Document/Node design (this document describes the current shape).
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| `w3c-dom` | `Document<T>` (fixed-address node slab + private `StyleEngine`/device/stylesheet/lock context), slot-zero document `Node<T>` (ordinary child list + node-visible style context), element/text nodes (including opaque embedder payloads and node-owned pending snapshots), raw-index `NodeId`, direct `&Node` Stylo DOM traits, invalidation-carrying DOM mutation, inline parsing, `Stylist`, rule matching, cascade, media evaluation, computed values, the **damage vocabulary** (`StyleDamage`/`FlushSummary`) + `effective_containment` derivation | Lynx tags/PAPI, payload semantics or mutation, payload-derived selector state, `<page>` root policy, Lynx unit metrics, touch-device policy |
-| `lynx-widget` | `Document<WidgetState>` through `WidgetTree`, the semantics and interior synchronization of the node-carried `WidgetState`, PAPI validation plus its own `<page>` root, `WidgetHandle` (canonical registry, context ownership, node retention, drop-driven reclamation of detached subtrees), `EngineMetrics`, touch-first `Device` construction, viewport-relative `rpx` integration | A second stylist, cascade implementation, stylesheet lock sharing, direct node construction, raw-id public APIs, writes to w3c-dom styling/traversal state |
+| `w3c-dom` | `Document<T>` (one fixed-address set of four NodeId-aligned `Slab`s plus a private `StyleEngine`/device/stylesheet/lock context), slot-zero document `Node<T>` (ordinary child list + node-visible style context), element/text nodes and their opaque payload/styling/layout side entries, raw-index `NodeId`, direct `&Node` Stylo DOM traits, invalidation-carrying DOM mutation, inline parsing, `Stylist`, rule matching, cascade, media evaluation, computed values, the **damage vocabulary** (`StyleDamage`/`FlushSummary`) + `effective_containment` derivation | Lynx tags/PAPI, payload semantics or mutation, payload-derived selector state, `<page>` root policy, Lynx unit metrics, touch-device policy |
+| `lynx-widget` | `Document<WidgetState>` through `WidgetTree`, the semantics and interior synchronization of each node-associated `WidgetState`, PAPI validation plus its own `<page>` root, `WidgetHandle` (canonical registry, context ownership, node retention, drop-driven reclamation of detached subtrees), `EngineMetrics`, touch-first `Device` construction, viewport-relative `rpx` integration | A second stylist, cascade implementation, stylesheet lock sharing, direct node construction, raw-id public APIs, writes to w3c-dom styling/traversal state |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, the maintained Lynx CSS extension patch set **and the Lynx supported-property/value grammar definition** (`style/properties/lynx_properties.txt`, `lynx` feature gates) | Runtime Widget/PAPI policy |
 
 ## Style lifecycle

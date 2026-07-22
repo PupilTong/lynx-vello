@@ -2,11 +2,12 @@
 //! macOS CI runner).
 //!
 //! Covers the hot paths of the high-performance goals in
-//! `docs/style-assumptions.md`: `StyleInfo` ingestion by direct construction
-//! (§B.5), the initial cascade over a realistic tree — sequential and
-//! parallel (§B.6) — and the incremental restyle paths driven by
-//! invalidation sets (§B.7). No native-C++-Lynx comparison harness yet; these
-//! establish the absolute numbers and guard against regressions.
+//! `docs/style-assumptions.md`: real-`WidgetState` tree arena lifecycle,
+//! `StyleInfo` ingestion by direct construction (§B.5), the initial cascade
+//! over a realistic tree — sequential and parallel (§B.6) — and the
+//! incremental restyle paths driven by invalidation sets (§B.7). No
+//! native-C++-Lynx comparison harness yet; these establish the absolute
+//! numbers and guard against regressions.
 
 use std::cell::RefCell;
 
@@ -32,6 +33,8 @@ const INGEST_BATCH: usize = 16;
 const INITIAL_FLUSH_BATCH: usize = 2;
 const INCREMENTAL_BATCH: usize = 1_024;
 const NO_OP_BATCH: usize = 65_536;
+const TREE_WIDGETS: usize = 1 + 32 + 32 * 32;
+const TREE_BUILD_BATCH: usize = 8;
 
 /// A 750×1334 CSS-px view (so `1rpx = 1px`) at DPR 2.
 fn metrics() -> EngineMetrics {
@@ -81,6 +84,27 @@ fn unflushed() -> (StyleEngine, WidgetTree, WidgetHandle) {
     let (engine, mut tree) = engine_with_large_css();
     let probe = build_tree(&mut tree);
     (engine, tree, probe)
+}
+
+/// Construct and drop the production `WidgetState` tree. This covers primary
+/// ID allocation, all secondary-arena inserts, canonical handle registration,
+/// and drop-driven reclamation rather than hiding arena lifecycle work in a
+/// benchmark input factory.
+#[divan::bench]
+fn build_drop_widget_tree_1k(bencher: divan::Bencher<'_, '_>) {
+    let engine = StyleEngine::new(metrics());
+    bencher
+        .counter(ItemsCount::new(TREE_WIDGETS * TREE_BUILD_BATCH))
+        .bench_local(|| {
+            for _ in 0..TREE_BUILD_BATCH {
+                let mut tree = engine.new_widget_tree();
+                let probe = build_tree(&mut tree);
+                black_box(&tree);
+                black_box(&probe);
+                drop(probe);
+                drop(tree);
+            }
+        });
 }
 
 /// `StyleInfo` → stylo rule objects + stylist flush, by direct construction

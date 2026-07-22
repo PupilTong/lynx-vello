@@ -14,7 +14,7 @@
 //!  Document<T> + ComputedValues          (immutable for the pass)
 //!        │  impl LayoutNode for &Node<T> — children/style/dispatch/slots
 //!        ▼
-//!  neutron-star algorithms  ◀──▶  per-node Node::layout_data (interior-mutable)
+//!  neutron-star algorithms  ◀──▶  Node results + layout secondary arena
 //!        │                         dispatch: flex │ grid │ linear │ relative │ leaf
 //!        ▼
 //!  positioned pass (fixed/hoisted absolute) → device-pixel rounding
@@ -23,30 +23,27 @@
 //! # Styles are fetched when the engine asks
 //!
 //! [`LayoutNode::style`](neutron_star::tree::LayoutNode::style) reads the
-//! node's computed style **at request time** — an `Arc` clone out of the
-//! node's own style data, nothing is pre-collected — and the view lends
-//! `ComputedValues` field references from that `Arc` for as long as the
-//! engine holds the view. The values lent are the per-node storage the
-//! style flush wrote (materialized once per *style change*, per the
-//! protocol's lending rule); the `Arc` in the view only keeps that storage
-//! borrowable. Text nodes use the fork's initial values for anonymous-box
-//! geometry and inherit font/text values from their parent. Their character
-//! data always runs through neutron-star's concrete Parley path.
+//! node's computed style **at request time** — nothing is pre-collected. The
+//! view holds Stylo's element-data read guard and lends `ComputedValues` field
+//! references from the existing `Arc` target without cloning that Arc. The
+//! values lent are the per-node storage the style flush wrote (materialized
+//! once per *style change*, per the protocol's lending rule). Text nodes use
+//! the fork's initial values for anonymous-box geometry and inherit font/text
+//! values from their parent. Their character data always runs through
+//! neutron-star's concrete Parley path.
 //!
 //! # Layout results live on the node
 //!
-//! Every [`Node`] carries its own `LayoutData` (an
-//! `AtomicRefCell`, the same shape Servo uses for per-node layout data):
-//! the measurement cache, the unrounded and device-snapped [`Layout`]s, and
-//! the out-of-flow bookkeeping. Natural size and retained text artifacts
-//! share the node's existing nullable content slot. Read results with
+//! Every [`Node`] carries the durable unrounded and device-snapped [`Layout`]
+//! results behind an `AtomicRefCell`; read them with
 //! [`Node::layout`](crate::Node::layout) /
-//! [`Node::unrounded_layout`](crate::Node::unrounded_layout). Because the
-//! state lives **on** the node, it is created and dropped with the node —
-//! there is no side table to keep in sync with the tree. The positioned
+//! [`Node::unrounded_layout`](crate::Node::unrounded_layout). Its measurement
+//! cache and static-position bookkeeping live in the document's layout
+//! secondary arena, indexed by the same `NodeId`; the primary node arena owns
+//! lifecycle and removes that entry before an ID is reused. The positioned
 //! pass for hoisted out-of-flow nodes is a fresh tree walk every pass (no
-//! queue), so fixed-position geometry stays correct even when a hoisted
-//! node's formatting parent answers from its measurement cache.
+//! queue), so fixed-position geometry stays correct even when a hoisted node's
+//! formatting parent answers from its measurement cache.
 //!
 //! # Phases: style first, then layout
 //!
@@ -207,13 +204,8 @@ pub use self::style::StyleView;
 use crate::document::Document;
 use crate::flush::Parallelism;
 
-/// One node's layout state, carried by the node itself
-/// ([`Node::layout_data`](crate::Node)): created with the node, dropped with
-/// the node — no side table to synchronize with the tree.
-///
-/// Lives behind an `AtomicRefCell` (the Servo per-node layout-data pattern):
-/// the node stays shareable for stylo's parallel restyle traversal, while
-/// the (single-threaded, post-style) layout pass takes short scoped borrows.
+/// One node's intermediate layout state, stored in the document's layout
+/// secondary arena under the node's `NodeId`.
 pub(crate) struct LayoutData {
     /// The neutron-star **measurement cache** — not a copy of the final
     /// result, but memoized answers to the different constraint questions
@@ -222,11 +214,6 @@ pub(crate) struct LayoutData {
     /// probes recurse exponentially. Its committed-layout slot is also what
     /// lets a clean subtree answer relayout without being walked.
     pub(crate) measure_cache: Cache,
-    /// The durable unrounded layout (CSS pixels) — what relayout derives
-    /// from; re-rounding rounded values is how engines drift.
-    pub(crate) unrounded: Layout,
-    /// The device-pixel-snapped layout — what painting consumes.
-    pub(crate) rounded: Layout,
     /// The static position recorded for a hoisted out-of-flow node by its
     /// formatting parent (border-box space), consumed by the positioned
     /// pass. Persists across passes deliberately: it is parent-relative, so
@@ -240,8 +227,6 @@ impl Default for LayoutData {
     fn default() -> Self {
         Self {
             measure_cache: Cache::new(),
-            unrounded: Layout::default(),
-            rounded: Layout::default(),
             static_position: Point::ZERO,
         }
     }
@@ -252,6 +237,15 @@ impl LayoutData {
     pub(crate) fn clear_measurement_cache(&mut self) {
         self.measure_cache.clear();
     }
+}
+
+/// Durable layout outputs kept in the primary node arena. Painting consumes
+/// `rounded`; incremental layout and positioned-coordinate conversion consume
+/// `unrounded` so snapped values are never fed back into layout.
+#[derive(Default)]
+pub(crate) struct LayoutResults {
+    pub(crate) unrounded: Layout,
+    pub(crate) rounded: Layout,
 }
 
 /// The style lent to text nodes (and any style-less node): the fork's
@@ -473,7 +467,7 @@ impl<T> Document<T> {
             let start = tree
                 .get(id)
                 .expect("vacant NodeId passed to Document::invalidate_layout");
-            start.layout_data.borrow_mut().clear_measurement_cache();
+            start.layout_data().borrow_mut().clear_measurement_cache();
             start.invalidate_text_artifacts();
 
             let mut boundary = None;
@@ -522,9 +516,9 @@ impl<T> Document<T> {
                 // wipes it; a non-boundary (or a boundary never laid out) yields
                 // `None`.
                 let boundary_input = is_boundary
-                    .then(|| node.layout_data.borrow().measure_cache.committed_input())
+                    .then(|| node.layout_data().borrow().measure_cache.committed_input())
                     .flatten();
-                node.layout_data.borrow_mut().clear_measurement_cache();
+                node.layout_data().borrow_mut().clear_measurement_cache();
                 node.invalidate_text_artifacts();
                 if let Some(input) = boundary_input {
                     // Case (1): a laid-out boundary — park it and stop; its own
@@ -555,8 +549,10 @@ impl<T> Document<T> {
     /// forget any parked relayout roots. The always-correct, never-incremental
     /// fallback.
     pub fn invalidate_layout_all(&mut self) {
+        for (_, data) in self.layout_data_mut() {
+            data.get_mut().clear_measurement_cache();
+        }
         for (_, node) in self.tree_mut().iter_mut() {
-            node.layout_data.get_mut().clear_measurement_cache();
             node.invalidate_text_artifacts();
         }
         self.clear_relayout_roots();
@@ -587,7 +583,7 @@ mod tests {
             document
                 .get(id)
                 .unwrap()
-                .layout_data
+                .layout_data()
                 .borrow_mut()
                 .measure_cache
                 .store(input, LayoutOutput::default());
@@ -602,7 +598,7 @@ mod tests {
                 document
                     .get(id)
                     .unwrap()
-                    .layout_data
+                    .layout_data()
                     .borrow()
                     .measure_cache
                     .is_empty()
