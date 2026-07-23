@@ -10,7 +10,7 @@ use bobcat_engine::script::{
     ScriptEngine, ScriptError, ScriptErrorKind, ScriptErrorPhase, ScriptFuture,
     ScriptSourceLocation, ScriptValue,
 };
-use bobcat_engine::view::{LynxView, LynxWidgetApi, ViewMetrics};
+use bobcat_engine::view::LynxView;
 use quickjs_rust_bridge as quickjs;
 
 const DEFAULT_MAX_JOBS_PER_CHECKPOINT: NonZeroUsize =
@@ -434,33 +434,22 @@ impl<R: ResourceFetcher + ?Sized> QuickJsLynxView<R> {
     pub const fn shared_resource_fetcher(&self) -> &Arc<R> {
         self.inner.shared_resource_fetcher()
     }
-
-    #[must_use]
-    pub const fn widget_api(&self) -> &LynxWidgetApi {
-        self.inner.widget_api()
-    }
-
-    pub const fn widget_api_mut(&mut self) -> &mut LynxWidgetApi {
-        self.inner.widget_api_mut()
-    }
 }
 
 impl<R: ResourceFetcher + ?Sized> fmt::Debug for QuickJsLynxView<R> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("QuickJsLynxView")
-            .field("widget_api", &self.widget_api())
             .finish_non_exhaustive()
     }
 }
 
 pub fn new_quickjs_view<R: ResourceFetcher>(
     resource_fetcher: R,
-    metrics: ViewMetrics,
 ) -> Result<QuickJsLynxView<R>, QuickJsInitializationError> {
     let script_engine = QuickJsScriptEngine::new()?;
     Ok(QuickJsLynxView {
-        inner: LynxView::new(resource_fetcher, script_engine, metrics),
+        inner: LynxView::new(resource_fetcher, script_engine),
     })
 }
 

@@ -13,7 +13,6 @@ use bobcat_engine::resource::{
     ResourceRequest, ResourceResponse, ResourceStream, RetryAdvice,
 };
 use bobcat_engine::script::{ScriptEngine, ScriptErrorKind, ScriptErrorPhase, ScriptValue};
-use bobcat_engine::view::ViewMetrics;
 use quickjs_rust_bridge::EvalSource;
 
 use super::{
@@ -564,14 +563,12 @@ impl ResourceFetcher for NullResourceFetcher {
 
 #[test]
 fn quickjs_engine_composes_into_a_lynx_view() {
-    let mut view = new_quickjs_view(NullResourceFetcher, ViewMetrics::new(390.0, 844.0, 3.0))
-        .expect("view should initialize");
+    let mut view = new_quickjs_view(NullResourceFetcher).expect("view should initialize");
 
     assert_eq!(
         view.inner.script_engine().config(),
         QuickJsConfig::default()
     );
-    assert!(format!("{:?}", view.widget_api()).contains("LynxWidgetApi"));
     let view_debug = format!("{view:?}");
     assert!(!view_debug.contains("ScriptEngine"));
     assert!(!view_debug.contains("QuickJsConfig"));
