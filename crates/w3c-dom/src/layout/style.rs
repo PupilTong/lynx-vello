@@ -29,6 +29,11 @@ use crate::node::Node;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DisplayMode {
     None,
+    /// `display: contents` — the element generates no box; its children
+    /// dissolve into the nearest box-generating ancestor's child list
+    /// (css-display-3 §2.5). The root never computes to this (stylo
+    /// blockifies root `contents` before the host sees it).
+    Contents,
     Flex,
     Grid,
     Linear,
@@ -39,18 +44,19 @@ pub(crate) enum DisplayMode {
 pub(crate) fn display_mode(display: Display) -> DisplayMode {
     if display.outside() == DisplayOutside::None {
         return if display.inside() == DisplayInside::Contents {
-            DisplayMode::Leaf
+            DisplayMode::Contents
         } else {
             DisplayMode::None
         };
     }
     match display.inside() {
         DisplayInside::None => DisplayMode::None,
+        DisplayInside::Contents => DisplayMode::Contents,
         DisplayInside::Flex => DisplayMode::Flex,
         DisplayInside::Grid => DisplayMode::Grid,
         DisplayInside::LynxLinear => DisplayMode::Linear,
         DisplayInside::LynxRelative => DisplayMode::Relative,
-        DisplayInside::Contents | DisplayInside::Flow => DisplayMode::Leaf,
+        DisplayInside::Flow => DisplayMode::Leaf,
     }
 }
 
@@ -67,6 +73,13 @@ pub(crate) fn establishes_fixed_containing_block<T>(
     style: &ComputedValues,
 ) -> bool {
     let box_style = style.get_box();
+    // A boxless element cannot be a containing block: transform, filter,
+    // will-change, and containment are all inert without a principal box
+    // (css-display-3 §2.5; css-contain-2 §3; css-transforms-1 §"transformable
+    // element").
+    if box_style.display.is_contents() {
+        return false;
+    }
     !box_style.transform.0.is_empty()
         || !matches!(
             box_style.perspective,
@@ -90,6 +103,10 @@ pub(crate) fn establishes_absolute_containing_block<T>(
     node: &Node<T>,
     style: &ComputedValues,
 ) -> bool {
+    // Positioning is inert on a boxless element (see the fixed predicate).
+    if style.get_box().display.is_contents() {
+        return false;
+    }
     style.clone_position() != PositionProperty::Static
         || style
             .get_box()

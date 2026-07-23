@@ -16,7 +16,12 @@ pub use neutron_star::tree::Layout;
 use stylo::properties::ComputedValues;
 use stylo::servo_arc::Arc;
 
+pub(crate) use self::host::{box_tree_children, box_tree_parent};
 pub use self::style::StyleView;
+pub(crate) use self::style::{
+    DisplayMode, display_mode, establishes_absolute_containing_block,
+    establishes_fixed_containing_block, skips_contents,
+};
 use crate::document::Document;
 use crate::flush::Parallelism;
 
@@ -145,6 +150,19 @@ impl<T> Document<T> {
             let mut current = start.parent();
             while let Some(node) = current {
                 let style_view = node.is_element().then(|| StyleView::of(node));
+                // A display:contents ancestor is transparent: it has no box,
+                // so neither content-visibility nor containment applies to
+                // it (it can never be a relayout boundary) — clear its
+                // (unused) caches and keep walking.
+                if style_view
+                    .as_ref()
+                    .is_some_and(|view| display_mode(view.display()) == DisplayMode::Contents)
+                {
+                    node.layout_data().borrow_mut().clear_measurement_cache();
+                    node.invalidate_text_artifacts();
+                    current = node.parent();
+                    continue;
+                }
                 if style_view.as_ref().is_some_and(CoreStyle::skips_contents) {
                     reached_root = false;
                     break;

@@ -11,6 +11,7 @@ mod invalidation;
 pub mod layout;
 mod node;
 mod traits;
+pub mod visual;
 
 pub use dom::ElementState;
 

@@ -392,10 +392,15 @@ is how engines drift.
 
 **`order` is protocol; `z-index` is not.** Flex/grid items expose `order`
 (Lynx supports it) and `Layout.order` records the resulting sibling
-traversal/paint index. Stacking contexts and `z-index` are per the tracking
-doc a **render-layer** concern implemented W3C-correctly over stylo (see
-`Paws/engine/src/layout/stacking.rs` as the pattern reference) — box layout
-neither knows nor cares.
+traversal/paint index. Stacking contexts and `z-index` are implemented
+W3C-correctly over stylo in **`w3c-dom`'s `visual` module**
+(`Document::paint_order` / `Document::hit_test`: the full trigger set,
+CSS2 Appendix E paint order, transform matrices, overflow clip chains with
+containing-block escape, and reverse-paint-order hit testing) — box layout
+neither knows nor cares, and the future render crate consumes the built
+`PaintOrder` rather than recomputing it. The visual pass consumes
+`Layout.order` as its sibling tiebreak, so paint order and layout can never
+disagree about order-modified document order.
 
 **CSS containment ([css-contain-2](https://drafts.csswg.org/css-contain-2/)).**
 `contain` / `content-visibility` are a deliberate user-directed extension
@@ -431,7 +436,9 @@ them). Only `SIZE` and `LAYOUT` have v1 box-layout effects:
   box a **containing block for abs/fixed descendants** — a *host* contract, not engine topology: the
   host treats it like transform/filter/`will-change` in its positioned pass (see
   `PositionProperty::Fixed`). `PAINT` (clip + stacking context) and `STYLE` (counter/quote
-  scoping) are carried for fidelity but have no v1 box-layout consumer — paint is a render-layer
+  scoping) are carried for fidelity but have no v1 box-layout consumer — paint clipping and the
+  stacking context are consumed by `w3c-dom`'s `visual` module (paint order + hit testing), not by
+  box layout; style containment remains a
   concern, and this engine has no counters/quotes. Effect bits are queried individually via
   `Contain::contains` (never the `CONTENT`/`STRICT` marker composites, which carry serialization
   marker bits).
