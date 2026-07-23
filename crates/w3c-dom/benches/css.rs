@@ -1,14 +1,5 @@
 //! CSS-engine benchmarks for `w3c-dom`, tracked by `CodSpeed` (walltime
 //! mode on the macOS CI runner).
-//!
-//! Pure engine-level cases — stylesheet text parsing, initial cascade
-//! (sequential and parallel), invalidation-driven incremental restyles,
-//! inheritance and `var()` chains, selector-stress matching, and media
-//! re-evaluation — mirroring the CSS behavior surface ported from the
-//! `LynxJS`
-//! C++ engine tests. **No comparison harness** (native C++ Lynx or
-//! otherwise) at this stage: these establish absolute numbers and guard
-//! against regressions.
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
@@ -34,8 +25,6 @@ use w3c_dom::{Document, ElementState, NodeId, Parallelism, StylesheetOrigin};
 fn main() {
     divan::main();
 }
-
-// --- fixtures ---------------------------------------------------------------
 
 #[derive(Debug)]
 struct BenchFontMetricsProvider;
@@ -76,10 +65,6 @@ fn device(width: f32, height: f32) -> Device {
 
 const CLASS_RULES: usize = 200;
 
-// CodSpeed's instrumented Divan adapter invokes each measured closure once.
-// Batch independent cold inputs or repeated state transitions so even the
-// fastest paths have millisecond-scale samples while counters retain the
-// logical operation count.
 const PARSE_BATCH: usize = 8;
 const INITIAL_FLUSH_BATCH: usize = 2;
 const INCREMENTAL_BATCH: usize = 1_024;
@@ -89,8 +74,6 @@ const VAR_CHAIN_BATCH: usize = 8;
 const MEDIA_BATCH: usize = 2;
 const RESOLVE_BATCH: usize = 1_024;
 
-/// `CLASS_RULES` simple class rules plus a band of combinator/pseudo-heavy
-/// rules — the same selector families the ported behavior tests exercise.
 fn author_sheet() -> String {
     let mut css = String::with_capacity(64 * 1024);
     for i in 0..CLASS_RULES {
@@ -128,15 +111,13 @@ fn author_sheet() -> String {
 
 fn document_with_author_sheet() -> Document<()> {
     let mut doc = Document::new(device(800.0, 600.0));
-    doc.add_stylesheet_str(&author_sheet(), StylesheetOrigin::Author);
+    doc.add_stylesheet(&author_sheet(), StylesheetOrigin::Author);
     doc
 }
 
-/// `page > 32 × section > 32 × view`, classes cycling through the rule set,
-/// every section carrying a `data-row` attribute. ~1.1k nodes.
 fn build_tree(doc: &mut Document<()>) -> NodeId {
     let root = doc.create_element("page", ());
-    doc.append_child(root);
+    doc.append_document_element(root);
     let mut probe = root;
     let mut class = 0usize;
     for row in 0..32 {
@@ -144,36 +125,30 @@ fn build_tree(doc: &mut Document<()>) -> NodeId {
         let section = doc.create_element("section", ());
         doc.add_class(section, &format!("c{}", class % CLASS_RULES));
         doc.set_attribute(section, "data-row", &row.to_string());
-        doc.append(root, section);
+        doc.append_child(root, section);
         for _ in 0..32 {
             class += 1;
             let leaf = doc.create_element("view", ());
             doc.add_class(leaf, &format!("c{}", class % CLASS_RULES));
-            doc.append(section, leaf);
+            doc.append_child(section, leaf);
             probe = leaf;
         }
     }
     probe
 }
 
-/// An unflushed document populated with the generated author sheet and tree.
 fn unflushed() -> (Document<()>, NodeId) {
     let mut doc = document_with_author_sheet();
     let probe = build_tree(&mut doc);
     (doc, probe)
 }
 
-/// A flushed document plus a probe leaf, ready for incremental cases.
 fn flushed() -> (Document<()>, NodeId) {
     let (mut doc, probe) = unflushed();
     doc.flush_styles();
     (doc, probe)
 }
 
-// --- stylesheet parsing ------------------------------------------------------
-
-/// Parse + register the generated author sheet from CSS text (one stylist
-/// flush included), on a fresh engine per iteration.
 #[divan::bench]
 fn parse_author_sheet_text(bencher: divan::Bencher) {
     let css = author_sheet();
@@ -186,13 +161,11 @@ fn parse_author_sheet_text(bencher: divan::Bencher) {
         })
         .bench_local_values(|mut pairs| {
             for doc in &mut pairs {
-                doc.add_stylesheet_str(black_box(&css), StylesheetOrigin::Author);
+                doc.add_stylesheet(black_box(&css), StylesheetOrigin::Author);
             }
             pairs
         });
 }
-
-// --- initial cascade ---------------------------------------------------------
 
 #[divan::bench]
 fn initial_flush_sequential(bencher: divan::Bencher) {
@@ -205,7 +178,7 @@ fn initial_flush_sequential(bencher: divan::Bencher) {
         })
         .bench_local_values(|mut states| {
             for (doc, _) in &mut states {
-                black_box(doc.flush_styles_with(Parallelism::Sequential));
+                black_box(doc.flush_styles_with_parallelism(Parallelism::Sequential));
             }
             states
         });
@@ -222,16 +195,12 @@ fn initial_flush_parallel(bencher: divan::Bencher) {
         })
         .bench_local_values(|mut states| {
             for (doc, _) in &mut states {
-                black_box(doc.flush_styles_with(Parallelism::Auto));
+                black_box(doc.flush_styles_with_parallelism(Parallelism::Auto));
             }
             states
         });
 }
 
-// --- incremental restyles (invalidation sets) --------------------------------
-
-/// Class flip on one deep leaf: snapshot, invalidate, restyle the affected
-/// nodes only.
 #[divan::bench]
 fn incremental_class_flip(bencher: divan::Bencher) {
     let state = RefCell::new(flushed());
@@ -252,7 +221,6 @@ fn incremental_class_flip(bencher: divan::Bencher) {
         });
 }
 
-/// Inline `style` update on one deep leaf.
 #[divan::bench]
 fn incremental_inline_style(bencher: divan::Bencher) {
     let state = RefCell::new(flushed());
@@ -274,11 +242,10 @@ fn incremental_inline_style(bencher: divan::Bencher) {
         });
 }
 
-/// `:hover` state flip on one deep leaf (state-keyed invalidation).
 #[divan::bench]
 fn incremental_state_flip(bencher: divan::Bencher) {
     let (mut doc, probe) = unflushed();
-    doc.add_stylesheet_str(
+    doc.add_stylesheet(
         "view:hover { color: rgb(250, 250, 250); }",
         StylesheetOrigin::Author,
     );
@@ -291,18 +258,20 @@ fn incremental_state_flip(bencher: divan::Bencher) {
             for _ in 0..INCREMENTAL_BATCH {
                 let doc = &mut *state.borrow_mut();
                 on = !on;
-                doc.set_state(probe, ElementState::HOVER, on);
+                if on {
+                    doc.add_element_state(probe, ElementState::HOVER);
+                } else {
+                    doc.remove_element_state(probe, ElementState::HOVER);
+                }
                 black_box(doc.flush_styles());
             }
         });
 }
 
-/// Class flip whose rules differ only in `color`: the harvested damage is
-/// REPAINT-only (no relayout class), the layout-skippable fast path.
 #[divan::bench]
 fn incremental_class_flip_repaint_only(bencher: divan::Bencher) {
     let (mut doc, probe) = unflushed();
-    doc.add_stylesheet_str(
+    doc.add_stylesheet(
         "view.rp-a { color: rgb(17, 17, 17); } view.rp-b { color: rgb(68, 68, 68); }",
         StylesheetOrigin::Author,
     );
@@ -328,7 +297,6 @@ fn incremental_class_flip_repaint_only(bencher: divan::Bencher) {
         });
 }
 
-/// A flush with nothing scheduled — the per-frame floor.
 #[divan::bench]
 fn noop_flush(bencher: divan::Bencher) {
     let state = RefCell::new(flushed());
@@ -342,10 +310,6 @@ fn noop_flush(bencher: divan::Bencher) {
         });
 }
 
-// --- inheritance & custom properties -----------------------------------------
-
-/// Initial cascade down a 256-deep inheritance chain (`color` set at the
-/// root, inherited by every descendant).
 #[divan::bench]
 fn inheritance_deep_chain(bencher: divan::Bencher) {
     bencher
@@ -354,16 +318,16 @@ fn inheritance_deep_chain(bencher: divan::Bencher) {
             (0..INHERITANCE_BATCH)
                 .map(|_| {
                     let mut doc: Document<()> = Document::new(device(800.0, 600.0));
-                    doc.add_stylesheet_str(
+                    doc.add_stylesheet(
                         "page { color: rgb(120, 30, 40); font-size: 18px; }",
                         StylesheetOrigin::Author,
                     );
                     let root = doc.create_element("page", ());
-                    doc.append_child(root);
+                    doc.append_document_element(root);
                     let mut parent = root;
                     for _ in 0..256 {
                         let child = doc.create_element("view", ());
-                        doc.append(parent, child);
+                        doc.append_child(parent, child);
                         parent = child;
                     }
                     doc
@@ -378,8 +342,6 @@ fn inheritance_deep_chain(bencher: divan::Bencher) {
         });
 }
 
-/// Initial cascade with a 32-link `var()` chain feeding `color` on ~1.1k
-/// nodes (registration + substitution cost).
 #[divan::bench]
 fn var_chain_cascade(bencher: divan::Bencher) {
     let mut css = String::from("page { --v0: rgb(1, 2, 3);");
@@ -393,7 +355,7 @@ fn var_chain_cascade(bencher: divan::Bencher) {
             (0..VAR_CHAIN_BATCH)
                 .map(|_| {
                     let mut doc = Document::new(device(800.0, 600.0));
-                    doc.add_stylesheet_str(&css, StylesheetOrigin::Author);
+                    doc.add_stylesheet(&css, StylesheetOrigin::Author);
                     let probe = build_tree(&mut doc);
                     (doc, probe)
                 })
@@ -407,10 +369,6 @@ fn var_chain_cascade(bencher: divan::Bencher) {
         });
 }
 
-// --- media re-evaluation ------------------------------------------------------
-
-/// Viewport flip across a `@media` boundary: stylist re-flush plus the
-/// device-change restyle.
 #[divan::bench]
 fn media_viewport_flip(bencher: divan::Bencher) {
     let (mut doc, _) = unflushed();
@@ -434,10 +392,6 @@ fn media_viewport_flip(bencher: divan::Bencher) {
         });
 }
 
-// --- standalone resolve baseline ----------------------------------------------
-
-/// Match + cascade one node outside the traversal (the `resolve` path the
-/// media/value helpers use).
 #[divan::bench]
 fn resolve_single_element(bencher: divan::Bencher) {
     let (doc, probe) = unflushed();

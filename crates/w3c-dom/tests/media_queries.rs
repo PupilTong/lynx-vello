@@ -2,16 +2,6 @@
 //! `lynx/core/renderer/css/ng/media_query/media_query_evaluator_test.cc`,
 //! `ng/media_query/media_query_test.cc`, and
 //! `ng/parser/media_query_parser_test.cc`.
-//!
-//! Scope: `enableCSSSelector = true` / `enableRemoveCSSScope = true`. The
-//! `.web.bundle` wire format cannot carry `@media` yet; per
-//! `docs/style-assumptions.md` §C.10 the engine supports it ahead of the
-//! format, with the C++ NG evaluator as the behavioral reference. Ports
-//! assert end-to-end evaluation (a probe rule guarded by the query applies
-//! or not) and serialization idempotence — never Lynx's internal node/Lepus
-//! models (those are skip-internal).
-//!
-//! Reference evaluator device: 375×812 CSS px at DPR 3, root font 16px.
 
 mod common;
 
@@ -30,8 +20,6 @@ use stylo::values::computed::{CSSPixelLength, Length};
 use stylo_traits::{CSSPixel, DevicePixel, ParsingMode, ToCss};
 use w3c_dom::{Document, StylesheetOrigin};
 
-/// End-to-end evaluation of `query` against an explicit device: does a
-/// probe rule guarded by it apply?
 fn matches_dev(device: Device, query: &str) -> bool {
     let mut doc: Document<()> = Document::new(device);
     doc.add_stylesheet_with_media(
@@ -45,7 +33,6 @@ fn matches_dev(device: Device, query: &str) -> bool {
     style.clone_color() == rgb(1, 2, 3)
 }
 
-/// The reference device from the C++ evaluator fixture: 375×812 @ DPR 3.
 fn reference() -> Device {
     device_with(375.0, 812.0, 3.0, PrefersColorScheme::Light)
 }
@@ -54,7 +41,6 @@ fn matches(query: &str) -> bool {
     matches_dev(reference(), query)
 }
 
-/// A device with explicit pointer/hover capabilities.
 fn pointer_device(capabilities: PointerCapabilities) -> Device {
     use euclid::{Scale, Size2D};
     Device::new(
@@ -71,7 +57,6 @@ fn pointer_device(capabilities: PointerCapabilities) -> Device {
     )
 }
 
-/// Parse a media list (author context) and serialize it back.
 fn media_css(query: &str) -> String {
     let mut input = cssparser::ParserInput::new(query);
     let mut parser = cssparser::Parser::new(&mut input);
@@ -90,12 +75,9 @@ fn media_css(query: &str) -> String {
     MediaList::parse(&mut context, &mut parser).to_css_string()
 }
 
-// Quiet the unused-length-import lint tripped by the Device constructor
-// signature types above.
 #[allow(dead_code)]
 fn _length_types(_: CSSPixelLength, _: Length) {}
 
-// C++: media_query_evaluator_test.cc media_type cases.
 #[test]
 fn media_type_matching() {
     let rows: &[(&str, bool)] = &[
@@ -111,8 +93,6 @@ fn media_type_matching() {
     }
 }
 
-// C++: MediaQueryEvaluatorTest empty/whitespace/invalid query cases +
-// media_query_parser_test.cc empty_whitespace_input / wholly_invalid.
 #[test]
 fn empty_matches_and_invalid_never_matches() {
     assert!(matches(""));
@@ -122,7 +102,6 @@ fn empty_matches_and_invalid_never_matches() {
     assert!(!matches("(some-unknown-feature: 1)"));
 }
 
-// C++: MediaQueryEvaluatorTest width/height feature tables (375×812 device).
 #[test]
 fn width_and_height_features() {
     let rows: &[(&str, bool)] = &[
@@ -145,12 +124,9 @@ fn width_and_height_features() {
     for &(query, expected) in rows {
         assert_eq!(matches(query), expected, "query `{query}`");
     }
-    // Boolean (width) is false on a zero-width device.
     assert!(!matches_dev(device(0.0, 0.0), "(width)"));
 }
 
-// C++: MediaQueryEvaluatorTest invalid width values (Lynx kept a feature
-// node; W3C-corrected: the query is dropped to `not all` at parse).
 #[test]
 fn invalid_feature_values_never_match() {
     for query in ["(width: 10foo)", "(min-width: 10foo)", "(width: 50%)"] {
@@ -158,18 +134,17 @@ fn invalid_feature_values_never_match() {
     }
 }
 
-// C++: MediaQueryEvaluatorTest font-relative and viewport-relative units.
 #[test]
 fn relative_units_resolve_against_device() {
     let rows: &[(&str, bool)] = &[
-        ("(min-width: 20rem)", true),  // 320px <= 375px
-        ("(min-width: 25em)", false),  // 400px > 375px
-        ("(min-width: 50vw)", true),   // 187.5px
-        ("(min-width: 200vw)", false), // 750px
+        ("(min-width: 20rem)", true),
+        ("(min-width: 25em)", false),
+        ("(min-width: 50vw)", true),
+        ("(min-width: 200vw)", false),
         ("(min-height: 50vh)", true),
         ("(min-height: 150vh)", false),
         ("(max-height: 200vh)", true),
-        ("(width: 10vh)", false), // 81.2px != 375px
+        ("(width: 10vh)", false),
         ("(min-width: 1.5em)", true),
         ("(min-width: 2.5rem)", true),
     ];
@@ -178,8 +153,6 @@ fn relative_units_resolve_against_device() {
     }
 }
 
-// C++: MediaQueryEvaluatorTest orientation cases (portrait when
-// height >= width, including the square viewport).
 #[test]
 fn orientation_follows_viewport() {
     assert!(matches("(orientation: portrait)"));
@@ -196,13 +169,6 @@ fn orientation_follows_viewport() {
     assert!(matches_dev(device(500.0, 500.0), "(orientation: portrait)"));
 }
 
-// C++: MediaQueryEvaluatorTest resolution + device-pixel-ratio tables
-// (DPR 3 device; 3dppx = 288dpi). Lynx's bare `device-pixel-ratio` spelling
-// is a Lynx-only extension; the engine follows compat-standard naming
-// (`-webkit-`/`-moz-` prefixed, per WHATWG compat spec) plus the real MQ4
-// `resolution` feature. The bare spelling never matches — an intentional,
-// recorded divergence (no `.web.bundle` can carry `@media` yet, so nothing
-// observable depends on it).
 #[test]
 fn resolution_and_device_pixel_ratio() {
     let rows: &[(&str, bool)] = &[
@@ -210,17 +176,14 @@ fn resolution_and_device_pixel_ratio() {
         ("(resolution >= 2dppx)", true),
         ("(resolution: 3dppx)", true),
         ("(resolution: 2dppx)", false),
-        // Standard `resolution` equivalents of Lynx's device-pixel-ratio rows.
         ("(min-resolution: 2dppx)", true),
         ("(min-resolution: 4dppx)", false),
         ("(max-resolution: 3dppx)", true),
         ("(max-resolution: 2dppx)", false),
-        // Compat-spec prefixed spellings servo implements.
         ("(-webkit-device-pixel-ratio: 3)", true),
         ("(-webkit-min-device-pixel-ratio: 2)", true),
         ("(-webkit-max-device-pixel-ratio: 2)", false),
         ("(-moz-device-pixel-ratio: 3)", true),
-        // Lynx's bare spelling: not a recognized feature here.
         ("(device-pixel-ratio: 3)", false),
         ("(device-pixel-ratio)", false),
     ];
@@ -229,9 +192,6 @@ fn resolution_and_device_pixel_ratio() {
     }
 }
 
-// C++: MediaQueryEvaluatorTest aspect-ratio table + parser
-// aspect_ratio_parsing. A plain <number> is a ratio with denominator 1;
-// degenerate and malformed ratios never match.
 #[test]
 fn aspect_ratio_feature() {
     let landscape = || device(1024.0, 768.0);
@@ -242,7 +202,6 @@ fn aspect_ratio_feature() {
     assert!(matches_dev(landscape(), "(aspect-ratio: 16 / 12)"));
     assert!(matches_dev(square(), "(aspect-ratio: 1)"));
     assert!(matches_dev(square(), "(aspect-ratio: 1/1)"));
-    // Malformed forms never match (parse-rejected to `not all`).
     for query in [
         "(aspect-ratio: 16 / landscape)",
         "(aspect-ratio: 16/9 extra)",
@@ -250,14 +209,9 @@ fn aspect_ratio_feature() {
     ] {
         assert!(!matches_dev(square(), query), "query `{query}`");
     }
-    // Degenerate 1/0 ratio: infinite; never equal to a finite viewport ratio.
     assert!(!matches_dev(square(), "(aspect-ratio: 1/0)"));
 }
 
-// C++: MediaQueryEvaluatorTest device-aspect-ratio rows. MQ Level 4
-// deprecates device-* features and servo drops them entirely, matching this
-// repo's deprecated-feature policy (deviations.md): the queries are invalid
-// and never match. Lynx-native would have matched them.
 #[test]
 fn deprecated_device_aspect_ratio_never_matches() {
     for query in [
@@ -268,8 +222,6 @@ fn deprecated_device_aspect_ratio_never_matches() {
     }
 }
 
-// C++: MediaQueryEvaluatorTest hover/pointer rows (device: hover-capable,
-// fine pointer; and the no-capability counterpart).
 #[test]
 fn hover_and_pointer_features() {
     let capable = PointerCapabilities::FINE | PointerCapabilities::HOVER;
@@ -304,7 +256,6 @@ fn hover_and_pointer_features() {
     }
 }
 
-// C++: MediaQueryEvaluatorTest prefers-color-scheme rows.
 #[test]
 fn prefers_color_scheme_feature() {
     let dark = || device_with(375.0, 812.0, 1.0, PrefersColorScheme::Dark);
@@ -314,10 +265,6 @@ fn prefers_color_scheme_feature() {
     assert!(matches("(prefers-color-scheme: light)"));
 }
 
-// C++: MediaQueryEvaluatorTest color-feature rows (Lynx hardcodes 8
-// bits/component). `color` is a real MQ Level 3 feature; the vendored servo
-// Device does not implement it, so the queries currently drop to `not all`.
-// Spec-correct expectations kept; unignore when the fork grows the feature.
 #[test]
 #[ignore = "engine-gap: servo Device implements no `color` media feature; (color)/(min-color) parse to `not all`"]
 fn color_feature() {
@@ -335,9 +282,6 @@ fn color_feature() {
     }
 }
 
-// C++: MediaQueryEvaluatorTest compound conditions + list OR semantics +
-// media_query_parser_test.cc combinators / media_type_plus_condition /
-// mixing_and_or_invalid / min_max_prefix_rejects_range_op.
 #[test]
 fn compound_conditions_and_list_semantics() {
     let rows: &[(&str, bool)] = &[
@@ -347,22 +291,18 @@ fn compound_conditions_and_list_semantics() {
         ("(min-width: 1000px) or (max-width: 500px)", true),
         ("(min-width: 1000px) or (min-width: 800px)", false),
         ("((width >= 300px))", true),
-        ("(not (hover))", true), // pointer-less reference device
+        ("(not (hover))", true),
         ("screen and (min-width: 300px)", true),
         ("not print and (min-width: 300px)", true),
         ("only screen and (min-width: 300px)", true),
-        // OR across the comma list.
         ("print, screen and (min-width: 300px)", true),
         ("print, screen and (min-width: 1000px)", false),
-        // and/or may not mix without parentheses.
         (
             "(min-width: 100px) and (max-width: 800px) or (hover)",
             false,
         ),
         ("screen and (min-width: 100px) or (hover)", false),
-        // min-/max- prefixes reject range operators.
         ("(min-width >= 300px)", false),
-        // Case-insensitivity.
         ("NOT PRINT AND (MIN-WIDTH: 300px)", true),
         ("(Min-Width: 100px)", true),
     ];
@@ -371,21 +311,18 @@ fn compound_conditions_and_list_semantics() {
     }
 }
 
-// C++: media_query_parser_test.cc range_operators / range_form_b /
-// double_range_direction_constraints.
 #[test]
 fn range_syntax_forms() {
     let rows: &[(&str, bool)] = &[
         ("(width < 800px)", true),
         ("(width <= 800px)", true),
-        ("(width > 400px)", false), // 375px
+        ("(width > 400px)", false),
         ("(width = 375px)", true),
-        ("(width == 100px)", false), // `==` is invalid
+        ("(width == 100px)", false),
         ("(600px >= width)", true),
         ("(1024px > width)", true),
         ("(300px < width)", true),
         ("(foo < bar)", false),
-        // Direction must be consistent in double-range form.
         ("(100px < width > 500px)", false),
         ("(100px = width < 200px)", false),
     ];
@@ -394,9 +331,6 @@ fn range_syntax_forms() {
     }
 }
 
-// C++: media_query_parser_test.cc error_recovery_invalid_inputs +
-// unclosed_paren_recovery (cssparser auto-closes blocks at EOF, so `(width`
-// evaluates as boolean width — accepted).
 #[test]
 fn error_recovery() {
     for query in [
@@ -415,8 +349,6 @@ fn error_recovery() {
     assert!(matches("(width"), "unclosed block auto-closes at EOF");
 }
 
-// C++: media_query_parser_test.cc comma_list_invalid_entry_recovery — an
-// invalid entry becomes `not all` in place; the rest of the list survives.
 #[test]
 fn invalid_list_entries_recover_in_place() {
     assert!(matches("screen, ???, (hover)"));
@@ -430,9 +362,6 @@ fn invalid_list_entries_recover_in_place() {
     );
 }
 
-// C++: media_query_test.cc Serialize() cases + media_query_parser_test.cc
-// serialize_roundtrip — replaced by stylo's canonical `to_css` and its
-// parse→serialize idempotence (the Lepus round-trip is skip-internal).
 #[test]
 fn serialization_is_canonical_and_idempotent() {
     assert_eq!(media_css("(min-width: 600px)"), "(min-width: 600px)");
@@ -451,17 +380,3 @@ fn serialization_is_canonical_and_idempotent() {
         assert_eq!(first, second, "serialization of `{query}` is idempotent");
     }
 }
-
-// Skipped (skip-internal): media_query_test.cc value/feature/node model +
-// Lepus round-trips (MediaFeatureValue factories, MediaQueryExpNode
-// serialize/ToLepus/FromLepus, MediaQuerySet model) — native data-model
-// plumbing; observable parse/serialize/evaluate behavior is covered above.
-// Skipped (skip-internal): MediaQueryEvaluatorTest.media_values_defaults —
-// MediaValues factory defaults; our Device is embedder-constructed.
-// Skipped (skip-internal): orientation_env_hooks — SetOrientation platform
-// override with no stylo analog (orientation derives from the viewport).
-// Skipped (skip-out-of-scope): null_guards — C++ nullptr-safety of Eval().
-// Skipped (folded): parse_media_condition_entrypoint — stylo's internal
-// MediaCondition entry is not reachable through the engine; the observable
-// grammar (bare types rejected as conditions) is covered by
-// `compound_conditions_and_list_semantics`.

@@ -37,14 +37,14 @@ itself. There is no
 `&mut` anywhere in the protocol, so borrowed style/track views trivially
 stay live across recursive layout.
 Recursion flows *through the host*: the engine calls
-`child.compute_child_layout(input)`, and the host's impl dispatches each
+`child.compute_layout(input)`, and the host's impl dispatches each
 child to the right algorithm. Flex, Grid, and Lynx's non-CSS Linear and
 Relative modes are all first-class neutron-star entry points; a host can
 still add other container algorithms through the same dispatch seam.
 Leaf content is closed rather than extensible: replaced content enters as a
 `NaturalSize`, and the concrete Parley path accepts host-owned
 run/style views while the host stores a reusable `TextContext` and per-node
-`ArtifactSlots` in interior-mutable slots.
+`TextLayoutStore` in interior-mutable slots.
 `display:none` cleanup is an explicit host precheck: call `hide_subtree` and
 return `LayoutOutput::HIDDEN` before entering the generated-box cache/dispatch
 path.

@@ -1,50 +1,5 @@
 //! [`Node`] — the unit the tree is composed of — and its `&Node` read/
 //! navigation handle.
-//!
-//! A node models a strict subset of the W3C DOM. Slot zero is the document
-//! node and owns the shared style context. Element nodes carry a tag, id,
-//! classes, attributes, dynamic pseudo-class state, an inline style block,
-//! and the resolved computed style; text nodes carry character data.
-//! Element/text variants share tree links and resolve their opaque
-//! [`payload`](Node::payload) plus phase-specific intermediate state through
-//! the document's `NodeId`-indexed secondary arenas.
-//!
-//! Nodes are created by
-//! [`Document::create_element`](crate::Document::create_element) or
-//! [`Document::create_text_node`](crate::Document::create_text_node) — never
-//! directly — and every DOM mutation goes through `Document` methods, so
-//! pre-mutation snapshots and restyle hints can never be skipped. Shared
-//! accessors on `Node` are the read surface.
-//!
-//! # The backpointer, and why `&Node` is the handle
-//!
-//! Each node carries a pointer back to the fixed-address arena set owned by
-//! its [`Document`](crate::Document). Tree navigation and secondary-state
-//! lookup therefore need nothing but the node itself,
-//! and stylo's element traits are implemented **directly on `&'a Node<T>`**
-//! (see the crate-private `traits` module) — no wrapper handle exists. This
-//! is load-bearing beyond convenience — stylo's style-sharing cache sizes its
-//! thread-local storage for a word-sized `TElement` handle (see
-//! `style/sharing/mod.rs`, `FakeCandidate`), and a shared reference is
-//! exactly one word and `Copy` by nature — and it is what lets the restyle
-//! traversal run over the one tree in place, with no mirror tree built for
-//! styling.
-//!
-//! # Thread-safety
-//!
-//! stylo's restyle traversal may run **in parallel** (rayon workers sharing
-//! the tree), so every piece of node state that stylo touches during a
-//! traversal is either
-//!
-//! - atomic ([`selector_flags`](Node::selector_flags), the dirty-descendants bit, the snapshot
-//!   bits, the traversal counter), or
-//! - owned by exactly one worker at a time under stylo's traversal discipline (`stylo_data`, an
-//!   [`UnsafeCell`]; see [`crate::traits`] for the per-access safety arguments).
-//!
-//! Everything else (tag/classes/attrs/text and the payload-arena entry) is
-//! **immutable during a flush**: mutation requires `&mut Document`, which
-//! [`Document::flush_styles`](crate::Document::flush_styles) holds
-//! exclusively for the whole traversal.
 
 use std::cell::UnsafeCell;
 use std::fmt;
@@ -57,7 +12,7 @@ use dom::ElementState;
 #[cfg(feature = "layout-test-utils")]
 use neutron_star::compute::LeafMetrics;
 use neutron_star::compute::NaturalSize;
-use neutron_star::text::{ArtifactSlots, TextContext};
+use neutron_star::text::{TextContext, TextLayoutStore};
 use neutron_star::tree::Layout;
 use rustc_hash::FxHashMap;
 use selectors::matching::ElementSelectorFlags;
@@ -77,20 +32,10 @@ use crate::document::{
 };
 use crate::layout::{LayoutData, LayoutResults};
 
-/// Debug-only instrumentation for the `stylo_data` slot (finding: a bare
-/// `UnsafeCell` makes contract violations undefined behavior instead of a
-/// loud failure). The inner `ElementData` borrows are already checked by
-/// stylo's `ElementDataWrapper` (debug borrow tracking); this guard covers
-/// the layer that wrapper cannot see — the **`Option` slot itself**
-/// (`ensure_data`/`clear_data` writing the slot while another worker reads
-/// its discriminant), plus traversal-phase discipline and unwind poisoning.
-/// Release builds compile all of it away.
 #[cfg(debug_assertions)]
 pub(crate) mod slot_guard {
     use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-    /// A process-unique token for the current thread
-    /// (`ThreadId::as_u64` is unstable; this is its moral equivalent).
     fn current_thread_token() -> u64 {
         use std::cell::Cell;
         static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -133,7 +78,6 @@ pub(crate) mod slot_guard {
             );
         }
 
-        /// Begin an exclusive (slot-mutating) access.
         pub(crate) fn begin_write(&self) -> WriteToken<'_> {
             self.check_poison();
             let prev = self.state.swap(WRITER, Ordering::AcqRel);
@@ -153,7 +97,6 @@ pub(crate) mod slot_guard {
             WriteToken { guard: self }
         }
 
-        /// Begin a shared (discriminant/`as_ref`) access.
         pub(crate) fn begin_read(&self) -> ReadToken<'_> {
             self.check_poison();
             let prev = self.state.fetch_add(1, Ordering::AcqRel);
@@ -207,7 +150,6 @@ pub(crate) mod slot_guard {
                 let _t = guard.begin_write();
             }));
             assert!(second.is_err(), "second writer must panic");
-            // The violation poisons the guard for every later access.
             assert!(
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let _t = guard.begin_read();
@@ -257,37 +199,20 @@ pub(crate) mod slot_guard {
     }
 }
 
-/// Bit set in [`StylingData::snapshot_flags`] when this node has a
-/// pre-mutation snapshot pending in its [`StylingData::snapshot`] slot or
-/// being consumed by a style flush.
 pub(crate) const SNAPSHOT_PRESENT: u8 = 1 << 0;
-/// Bit set once stylo's invalidation pass has consumed the snapshot.
 pub(crate) const SNAPSHOT_HANDLED: u8 = 1 << 1;
 
-/// The kind of a DOM [`Node`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum NodeType {
-    /// The real DOM document node, permanently stored at slab slot zero.
     Document,
-    /// An element node with a local tag name and CSS style state.
     Element,
-    /// A text node containing character data and no element identity.
     Text,
 }
 
-/// Kind-specific primary-node data. The document variant owns the context
-/// every node reaches through its arena-set backpointer. Element/text payloads
-/// live in the payload secondary slab; its document-node slot contains a
-/// payload-less enum sentinel, so creating `Document<T>` never requires
-/// `T: Default`.
 pub(crate) enum NodeData {
     Document {
         lock: StdArc<SharedRwLock>,
         url_data: UrlExtraData,
-        /// One lazily-created, reusable Parley session for the whole
-        /// document. Non-text documents never pay font-context setup cost;
-        /// layout is single-threaded, while the atomic borrow cell preserves
-        /// the node's thread-safe shape during parallel style traversal.
         text_context: Box<OnceLock<AtomicRefCell<TextContext>>>,
         #[cfg(debug_assertions)]
         in_flush: AtomicBool,
@@ -298,25 +223,12 @@ pub(crate) enum NodeData {
 
 /// Stylo's per-node traversal and invalidation bookkeeping, stored in the
 /// document's styling secondary arena under the owning node's [`NodeId`].
-///
-/// The resolved [`ComputedValues`] deliberately do not live here: Stylo keeps
-/// them in the small, indivisible [`ElementDataWrapper`] on [`Node`]. That
-/// wrapper co-locates 16 bytes of computed-style handles with its eight-byte
-/// restyle tail, so moving only the tail would require changing Stylo's DOM
-/// protocol or duplicating the computed style.
 pub(crate) struct StylingData {
-    /// Matching-relevant state before the first mutation since the last
-    /// flush. Only mutated through `&mut Document`.
     pub(crate) snapshot: Option<Box<Snapshot>>,
-    /// Selector flags accumulated during matching.
     pub(crate) selector_flags: AtomicUsize,
-    /// Whether a descendant has pending style work.
     pub(crate) dirty_descendants: AtomicBool,
-    /// Snapshot lifecycle flags.
     pub(crate) snapshot_flags: AtomicU8,
-    /// Bottom-up traversal bookkeeping.
     pub(crate) children_to_process: AtomicIsize,
-    /// Debug-only access guard for the node-resident `ElementData` slot.
     #[cfg(debug_assertions)]
     pub(crate) slot_guard: slot_guard::SlotGuard,
 }
@@ -335,18 +247,10 @@ impl Default for StylingData {
     }
 }
 
-/// Literal or replaced content carried only by nodes that have it.
-///
-/// Keeping this behind one nullable pointer reuses the storage that literal
-/// text already required instead of enlarging every ordinary element for
-/// natural sizes or retained Parley artifacts.
 enum NodeContent {
     Text {
         value: String,
-        /// Artifact slots are much larger than the string descriptor. Keep
-        /// them behind a second lazy allocation so untouched text nodes pay
-        /// only for the content record.
-        artifacts: OnceLock<Box<AtomicRefCell<ArtifactSlots>>>,
+        artifacts: OnceLock<Box<AtomicRefCell<TextLayoutStore>>>,
     },
     Replaced(NaturalSize),
     #[cfg(feature = "layout-test-utils")]
@@ -363,67 +267,30 @@ impl NodeContent {
 }
 
 /// A single node in a [`Document`](crate::Document) tree.
-///
-/// See the crate docs for the model, the backpointer, and the
-/// thread-safety story. All fields are crate-private: reads go through the
-/// accessors below, writes through `Document` methods.
 pub struct Node<T> {
-    /// Backpointer to the owning fixed-address set of document arenas.
     owner: AtomicPtr<DocumentArenas<T>>,
-    /// This node's raw slab index and stable Stylo `OpaqueNode` identity.
     id: NodeId,
-    /// Whether this is the document, an element, or text.
     data: NodeData,
-    /// Preserve `T`'s ownership/auto-trait relationship even though its value
-    /// lives in the document's payload arena rather than inline in this node.
     payload: PhantomData<T>,
 
-    /// The parent node. The connected root element points to slot zero.
     pub(crate) parent: Option<NodeId>,
-    /// Child nodes, in document order.
     pub(crate) children: Vec<NodeId>,
-    /// The element's local name, interned as a stylo [`LocalName`] atom so
-    /// `selectors::Element::has_local_name` is a cheap atom comparison.
-    /// `None` for document and text nodes.
     pub(crate) local_name: Option<LocalName>,
-    /// The node's classes, interned as atoms.
     pub(crate) classes: SmallVec<[Atom; 4]>,
-    /// Parsed reflection of the node's `id` DOM attribute.
-    pub(crate) id_attr: Option<Atom>,
-    /// DOM attributes, keyed by their interned local names. This is the
-    /// complete source of selector-visible attribute state; opaque payloads
-    /// cannot synthesize attributes.
+    pub(crate) id_attribute: Option<Atom>,
     pub(crate) attrs: FxHashMap<LocalName, String>,
-    /// Active dynamic pseudo-classes (`:hover` / `:active` / `:focus`) as
-    /// stylo state bits.
     pub(crate) element_state: ElementState,
 
-    /// The node's parsed inline style block (the `style` attribute), locked
-    /// under the document's [`SharedRwLock`](stylo::shared_lock::SharedRwLock).
-    /// `None` when no inline style is set.
     pub(crate) inline_block: Option<Arc<Locked<PropertyDeclarationBlock>>>,
 
-    /// stylo's per-element style data (`ElementData`), created lazily via
-    /// `TElement::ensure_data`. The resolved computed style lives here (see
-    /// [`computed_style`](Node::computed_style)). It remains empty for text
-    /// nodes and is only touched through the [`traits`](crate::traits) impls
-    /// under stylo's traversal discipline.
     pub(crate) stylo_data: UnsafeCell<Option<ElementDataWrapper>>,
 
-    /// Mutually exclusive literal or replaced content. Literal data is always
-    /// present for a text node; element nodes use the same nullable slot for
-    /// an element-backed text carrier, natural size, or synthetic test data.
-    /// Ordinary container elements therefore retain only one null pointer.
     content: Option<Box<NodeContent>>,
 
-    /// Durable unrounded and device-snapped layout results. Intermediate
-    /// measurement cache and positioned-pass state live in the document's
-    /// layout secondary arena.
     pub(crate) layout_results: AtomicRefCell<LayoutResults>,
 }
 
 impl<T> Node<T> {
-    /// Create the slot-zero document node.
     pub(crate) fn new_document(
         owner: *mut DocumentArenas<T>,
         lock: StdArc<SharedRwLock>,
@@ -444,9 +311,6 @@ impl<T> Node<T> {
         )
     }
 
-    /// Create a detached element bound to its owning document slab.
-    /// Crate-only: embedders go through
-    /// [`Document::create_element`](crate::Document::create_element).
     pub(crate) fn new_element(
         owner: *mut DocumentArenas<T>,
         id: NodeId,
@@ -455,9 +319,6 @@ impl<T> Node<T> {
         Self::new(owner, id, NodeData::Element, Some(local_name), None)
     }
 
-    /// Create a detached text node bound to its owning document slab.
-    /// Crate-only: embedders go through
-    /// [`Document::create_text_node`](crate::Document::create_text_node).
     pub(crate) fn new_text(owner: *mut DocumentArenas<T>, id: NodeId, text: String) -> Self {
         Self::new(owner, id, NodeData::Text, None, Some(text))
     }
@@ -478,7 +339,7 @@ impl<T> Node<T> {
             children: Vec::new(),
             local_name,
             classes: SmallVec::new(),
-            id_attr: None,
+            id_attribute: None,
             attrs: FxHashMap::default(),
             element_state: ElementState::empty(),
             inline_block: None,
@@ -488,50 +349,33 @@ impl<T> Node<T> {
         }
     }
 
-    /// Borrow the owning document's fixed-address arena set through the
-    /// backpointer.
-    ///
-    /// # Safety discipline (crate-internal)
-    ///
-    /// Callable only from shared-borrow contexts (`&Node` navigation and
-    /// the stylo trait impls), where the `&self` was itself derived from the
-    /// primary arena. The boxed arena set outlives every node and mutation
-    /// requires `&mut Document`, so no mutable arena borrow can coexist.
     pub(crate) fn arenas(&self) -> &DocumentArenas<T> {
-        // SAFETY: the private `Document` field keeps the boxed arena set at
-        // this address until after every node is dropped; see the method
-        // contract.
         #[expect(unsafe_code, reason = "deref the owning arena-set backpointer")]
         unsafe {
             &*self.owner.load(Ordering::Relaxed)
         }
     }
 
-    /// Borrow the owning document's node arena.
     pub(crate) fn tree(&self) -> &slab::Slab<Node<T>> {
         &self.arenas().nodes
     }
 
-    /// Borrow this node's Stylo traversal state from the styling arena.
     #[inline]
     pub(crate) fn styling_data(&self) -> &StylingData {
         slab_get_for_live_node(&self.arenas().styling, self.id)
     }
 
-    /// Borrow this node's layout cache/bookkeeping cell from the layout arena.
     #[inline]
     pub(crate) fn layout_data(&self) -> &AtomicRefCell<LayoutData> {
         slab_get_for_live_node(&self.arenas().layout, self.id)
     }
 
-    /// The owner document node at the slab's fixed slot zero.
     pub(crate) fn owner_document(&self) -> &Node<T> {
         self.tree()
             .get(DOCUMENT_NODE_ID)
             .expect("the document node is never removed")
     }
 
-    /// The owner document's style lock.
     pub(crate) fn document_lock(&self) -> &StdArc<SharedRwLock> {
         match &self.owner_document().data {
             NodeData::Document { lock, .. } => lock,
@@ -539,7 +383,6 @@ impl<T> Node<T> {
         }
     }
 
-    /// The owner document's base URL data.
     pub(crate) fn document_url_data(&self) -> &UrlExtraData {
         match &self.owner_document().data {
             NodeData::Document { url_data, .. } => url_data,
@@ -547,7 +390,6 @@ impl<T> Node<T> {
         }
     }
 
-    /// The owner document's reusable Parley text session.
     pub(crate) fn text_context(&self) -> &AtomicRefCell<TextContext> {
         match &self.owner_document().data {
             NodeData::Document { text_context, .. } => {
@@ -557,7 +399,6 @@ impl<T> Node<T> {
         }
     }
 
-    /// The owner document's traversal-phase flag.
     #[cfg(debug_assertions)]
     pub(crate) fn flush_flag(&self) -> &AtomicBool {
         match &self.owner_document().data {
@@ -566,21 +407,16 @@ impl<T> Node<T> {
         }
     }
 
-    /// Whether the owner document is inside a style traversal.
     #[cfg(debug_assertions)]
     pub(crate) fn in_flush(&self) -> bool {
         self.flush_flag().load(Ordering::Relaxed)
     }
 
-    // --- identity & DOM reads ------------------------------------------------
-
-    /// This node's handle in its document.
     #[must_use]
     pub fn id(&self) -> NodeId {
         self.id
     }
 
-    /// This node's DOM kind.
     #[must_use]
     pub fn node_type(&self) -> NodeType {
         match &self.data {
@@ -590,55 +426,46 @@ impl<T> Node<T> {
         }
     }
 
-    /// Whether this is the document node.
     #[must_use]
     pub fn is_document(&self) -> bool {
         matches!(&self.data, NodeData::Document { .. })
     }
 
-    /// Whether this is an element node.
     #[must_use]
     pub fn is_element(&self) -> bool {
         matches!(&self.data, NodeData::Element)
     }
 
-    /// Whether this is a text node.
     #[must_use]
     pub fn is_text_node(&self) -> bool {
         matches!(&self.data, NodeData::Text)
     }
 
-    /// The parent node's handle, or `None` for the document/detached nodes.
     #[must_use]
     pub fn parent_id(&self) -> Option<NodeId> {
         self.parent
     }
 
-    /// The children's handles, in document order.
     #[must_use]
     pub fn child_ids(&self) -> &[NodeId] {
         &self.children
     }
 
-    /// The element's interned local name, or `None` for a non-element node.
     #[must_use]
     pub fn local_name(&self) -> Option<&LocalName> {
         self.local_name.as_ref()
     }
 
-    /// The element's tag name as a string, or `None` for a non-element node.
     #[must_use]
-    pub fn tag(&self) -> Option<&str> {
+    pub fn tag_name(&self) -> Option<&str> {
         self.local_name().map(|name| name.0.as_ref())
     }
 
-    /// The node's `id` selector value.
     #[must_use]
-    pub fn id_attr(&self) -> Option<&str> {
-        self.id_attr.as_deref()
+    pub fn id_attribute(&self) -> Option<&str> {
+        self.id_attribute.as_deref()
     }
 
-    /// Whether `class` is in the node's class list (case-sensitive).
     #[must_use]
     pub fn has_class(&self, class: &str) -> bool {
         self.classes
@@ -646,42 +473,31 @@ impl<T> Node<T> {
             .any(|existing| existing.as_ref() == class)
     }
 
-    /// The node's classes, in authored order.
     pub fn classes(&self) -> impl ExactSizeIterator<Item = &str> {
         self.classes.iter().map(AsRef::as_ref)
     }
 
-    /// A DOM attribute's value, addressed by its authored name.
-    ///
-    /// Attribute names are converted to stylo's interned [`LocalName`] at
-    /// this DOM boundary; embedders do not need to traffic in stylo types.
     #[must_use]
-    pub fn attr(&self, name: &str) -> Option<&str> {
+    pub fn attribute(&self, name: &str) -> Option<&str> {
         let name = LocalName::from(name);
         self.attr_local_name(&name)
     }
 
-    /// Look up an already-interned attribute name on stylo's matching paths.
     pub(crate) fn attr_local_name(&self, name: &LocalName) -> Option<&str> {
         self.attrs.get(name).map(String::as_str)
     }
 
-    /// The complete DOM attribute map as string name/value pairs, including
-    /// reflected `id`, `class`, and `style` attributes.
-    pub fn attrs(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
+    pub fn attributes(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
         self.attrs
             .iter()
             .map(|(name, value)| (name.0.as_ref(), value.as_str()))
     }
 
-    /// The active dynamic pseudo-class state bits.
     #[must_use]
     pub fn element_state(&self) -> ElementState {
         self.element_state
     }
 
-    /// The literal character data, if this is a text node or an
-    /// embedder-defined element-backed text carrier.
     #[must_use]
     pub fn text(&self) -> Option<&str> {
         match self.content.as_deref() {
@@ -690,12 +506,6 @@ impl<T> Node<T> {
         }
     }
 
-    /// The node's opaque payload.
-    ///
-    /// # Panics
-    ///
-    /// Panics when called on the document node, which deliberately has no
-    /// payload.
     #[must_use]
     pub fn payload(&self) -> &T {
         match &self.data {
@@ -711,43 +521,20 @@ impl<T> Node<T> {
         }
     }
 
-    // --- style reads ----------------------------------------------------------
-
-    /// Whether stylo has ever created element style data here.
-    ///
-    /// Always `false` for text nodes, which do not enter the cascade.
-    ///
-    /// Must not be called while a style flush is running on the node's
-    /// document (impossible through the public API: a flush holds
-    /// `&mut Document`).
     pub(crate) fn has_style_data(&self) -> bool {
-        // SAFETY: reads only the `Option` discriminant; no flush is running
-        // (flushes require `&mut Document`, we hold `&self` from it).
         #[expect(unsafe_code, reason = "UnsafeCell discriminant read outside any flush")]
         unsafe {
             (*self.stylo_data.get()).is_some()
         }
     }
 
-    /// The resolved computed style, if this element has been styled.
-    ///
-    /// Text nodes return `None`. The style lives in stylo's per-element
-    /// `ElementData`; this clones the `Arc` out of it. Must not be called while
-    /// a style flush is running on the node's document (impossible through the
-    /// public API: a flush holds `&mut Document`).
     #[must_use]
     pub fn computed_style(&self) -> Option<Arc<ComputedValues>> {
         self.borrow_computed_style()
             .and_then(|data| data.styles.primary.clone())
     }
 
-    /// Borrow the element data that owns this node's computed style without
-    /// bumping the style `Arc`'s reference count. Layout views keep this guard
-    /// for exactly as long as they lend fields from the computed values.
     pub(crate) fn borrow_computed_style(&self) -> Option<ElementDataRef<'_>> {
-        // SAFETY: no flush is running (flushes require `&mut Document`, and
-        // we hold `&self` borrowed from it), so reading the slot and taking a
-        // shared borrow of the wrapper cannot race.
         #[expect(unsafe_code, reason = "UnsafeCell read outside any flush")]
         let slot = unsafe { (*self.stylo_data.get()).as_ref() };
         let data = slot?.borrow();
@@ -755,55 +542,21 @@ impl<T> Node<T> {
         Some(data)
     }
 
-    // --- layout reads ---------------------------------------------------------
-
-    /// A borrowed view of the device-pixel-snapped [`Layout`] from the last layout pass
-    /// ([`Document::layout`](crate::Document::layout)):
-    /// the border box painting consumes, `location` relative to the parent's
-    /// border box. All-zero when the node has never been laid out or is
-    /// inside a `display: none` subtree.
-    ///
-    /// The returned guard keeps this node's layout slot shared-borrowed; copy
-    /// out individual fields as needed and do not retain it across code that
-    /// may mutate layout. Clone the dereferenced [`Layout`] explicitly only
-    /// when an owned whole-record snapshot is required.
-    ///
-    /// Must not be called while a layout pass is running on the document
-    /// (impossible through the public API: layout holds `&mut Document`).
     #[must_use]
-    pub fn layout(&self) -> impl std::ops::Deref<Target = Layout> + '_ {
+    pub fn rounded_layout(&self) -> impl std::ops::Deref<Target = Layout> + '_ {
         AtomicRef::map(self.layout_results.borrow(), |results| &results.rounded)
     }
 
-    /// A borrowed view of the unrounded CSS-pixel [`Layout`] from the last layout pass — the
-    /// values relayout derives from (rounded output is presentation, this is
-    /// truth). As with [`layout`](Self::layout), clone the dereferenced record
-    /// explicitly only when an owned snapshot is required.
     #[must_use]
     pub fn unrounded_layout(&self) -> impl std::ops::Deref<Target = Layout> + '_ {
         AtomicRef::map(self.layout_results.borrow(), |results| &results.unrounded)
     }
 
-    /// Whether this node's layout **measurement cache** currently holds no
-    /// memoized answer — i.e. the next layout pass must recompute it rather
-    /// than answer from cache.
-    ///
-    /// Observes the incremental-relayout invalidation state: after a
-    /// [`Document::invalidate_layout`](crate::Document::invalidate_layout) the
-    /// dirty spine reports `true` up to (and including) the nearest relayout
-    /// boundary, while the boundary's ancestors and every clean subtree keep
-    /// their caches and report `false`. A freshly laid-out (or never laid-out)
-    /// node reports `false` / `true` respectively.
-    ///
-    /// Must not be called while a layout pass is running on the document
-    /// (impossible through the public API: layout holds `&mut Document`).
     #[must_use]
     pub fn layout_cache_is_empty(&self) -> bool {
         self.layout_data().borrow().measure_cache.is_empty()
     }
 
-    /// The decoded intrinsic dimensions/ratio used when this node lays out as
-    /// replaced content.
     #[must_use]
     pub(crate) fn natural_size(&self) -> NaturalSize {
         match self.content.as_deref() {
@@ -821,10 +574,10 @@ impl<T> Node<T> {
         true
     }
 
-    pub(crate) fn text_artifacts(&self) -> &AtomicRefCell<ArtifactSlots> {
+    pub(crate) fn text_artifacts(&self) -> &AtomicRefCell<TextLayoutStore> {
         match self.content.as_deref() {
             Some(NodeContent::Text { artifacts, .. }) => artifacts
-                .get_or_init(|| Box::new(AtomicRefCell::new(ArtifactSlots::default())))
+                .get_or_init(|| Box::new(AtomicRefCell::new(TextLayoutStore::default())))
                 .as_ref(),
             _ => unreachable!("only literal-text content has Parley artifacts"),
         }
@@ -855,21 +608,17 @@ impl<T> Node<T> {
         self.content = text.map(|value| Box::new(NodeContent::text(value)));
     }
 
-    /// The accumulated stylo selector flags.
     pub(crate) fn selector_flags(&self) -> ElementSelectorFlags {
         ElementSelectorFlags::from_bits_retain(
             self.styling_data().selector_flags.load(Ordering::Relaxed),
         )
     }
 
-    /// Whether a descendant has pending style work.
     pub(crate) fn has_dirty_descendants(&self) -> bool {
         self.styling_data()
             .dirty_descendants
             .load(Ordering::Relaxed)
     }
-
-    // --- crate-internal bookkeeping -------------------------------------------
 
     pub(crate) fn set_dirty_descendants_bit(&self, dirty: bool) {
         self.styling_data()
@@ -891,20 +640,10 @@ impl<T> Node<T> {
             .fetch_or(SNAPSHOT_HANDLED, Ordering::Relaxed);
     }
 
-    /// Mutable access to the stylo `ElementData` wrapper, if it exists.
-    ///
-    /// Safe because it goes through `&mut self`: exclusive access to the node
-    /// means no traversal is concurrently touching the `UnsafeCell`.
     pub(crate) fn stylo_data_mut(&mut self) -> Option<&mut ElementDataWrapper> {
         self.stylo_data.get_mut().as_mut()
     }
 
-    /// Whether this element has no element children, non-empty text-node
-    /// children, or element-backed character data.
-    ///
-    /// Empty text nodes do not affect `:empty`; non-empty text nodes (including
-    /// whitespace-only data) do. Text nodes themselves are never selector
-    /// subjects, so callers only use this for elements.
     pub(crate) fn is_empty_element(&self) -> bool {
         debug_assert!(self.is_element(), "`:empty` is only defined for elements");
         self.text().is_none_or(str::is_empty)
@@ -919,25 +658,7 @@ impl<T> Node<T> {
     }
 }
 
-// --- tree navigation ----------------------------------------------------------
-//
-// Navigation lives directly on `Node` (resolving ids through the document
-// backpointer), so a plain `&'a Node<T>` is the crate's only read handle —
-// the same one-word value stylo's element traits are implemented on (see
-// the crate-private `traits` module; stylo's style-sharing cache sizes its
-// TLS for a word-sized `TElement` handle). References being `Copy` is what
-// the traversal relies on; no wrapper type is needed.
-//
-// The trait impls on `&Node` reuse these method names (`first_child`,
-// `next_sibling`, …) and delegate to them **fully qualified**
-// (`Node::first_child(node)`): with a stylo trait in scope, method-call
-// syntax on a `&Node` receiver would resolve to the trait impl first.
 impl<T> Node<T> {
-    /// The parent node, if any.
-    ///
-    /// # Panics
-    ///
-    /// Panics only if an internal parent link is dangling.
     #[must_use]
     pub fn parent(&self) -> Option<&Node<T>> {
         self.parent.map(|id| {
@@ -947,11 +668,6 @@ impl<T> Node<T> {
         })
     }
 
-    /// The first child node, if any.
-    ///
-    /// # Panics
-    ///
-    /// Panics only if an internal child link is dangling.
     #[must_use]
     pub fn first_child(&self) -> Option<&Node<T>> {
         self.children.first().map(|&id| {
@@ -961,11 +677,6 @@ impl<T> Node<T> {
         })
     }
 
-    /// The last child node, if any.
-    ///
-    /// # Panics
-    ///
-    /// Panics only if an internal child link is dangling.
     #[must_use]
     pub fn last_child(&self) -> Option<&Node<T>> {
         self.children.last().map(|&id| {
@@ -975,15 +686,13 @@ impl<T> Node<T> {
         })
     }
 
-    /// The next sibling node, if any.
     #[must_use]
     pub fn next_sibling(&self) -> Option<&Node<T>> {
         self.sibling_at(1)
     }
 
-    /// The previous sibling node, if any.
     #[must_use]
-    pub fn prev_sibling(&self) -> Option<&Node<T>> {
+    pub fn previous_sibling(&self) -> Option<&Node<T>> {
         self.sibling_at(-1)
     }
 
@@ -1004,7 +713,6 @@ impl<T> Node<T> {
         )
     }
 
-    /// Iterate over the node's children in document order.
     #[must_use]
     pub fn children(&self) -> ChildrenIter<'_, T> {
         ChildrenIter {
@@ -1015,22 +723,15 @@ impl<T> Node<T> {
     }
 }
 
-// `stylo_data` (an `UnsafeCell`) and the payload-arena value are
-// deliberately omitted: the former is not `Debug` (and reading it would need the
-// no-concurrent-flush invariant — stylo debug-prints nodes *during* the
-// traversal), and
-// printing the latter would demand a `T: Debug` bound this impl cannot carry
-// — stylo's `TNode`/`TElement` require `&Node<T>: Debug` for every payload
-// type.
 impl<T> fmt::Debug for Node<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Node")
             .field("id", &self.id)
             .field("node_type", &self.node_type())
-            .field("tag", &self.tag())
+            .field("tag", &self.tag_name())
             .field("text", &self.text())
             .field("classes", &self.classes)
-            .field("id_attr", &self.id_attr)
+            .field("id_attribute", &self.id_attribute)
             .field("element_state", &self.element_state)
             .field("has_inline_block", &self.inline_block.is_some())
             .field("dirty_descendants", &self.has_dirty_descendants())
@@ -1039,13 +740,6 @@ impl<T> fmt::Debug for Node<T> {
     }
 }
 
-/// Node equality is **identity**: two nodes are equal exactly when they are
-/// the same node (compared by address, which is stable for the lifetime of
-/// any borrow — mutation, and thus node motion, needs `&mut Document`).
-///
-/// A DOM node is an entity, not a value; this is also what stylo's
-/// `TElement`/`TNode` bounds (`Eq`/`Hash` on the `&Node` handle) require of
-/// element identity. `Hash` matches: it hashes the address.
 impl<T> PartialEq for Node<T> {
     fn eq(&self, other: &Self) -> bool {
         std::ptr::eq(self, other)

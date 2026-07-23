@@ -1,15 +1,4 @@
 //! CSS Grid Layout (Level 2 wording, excluding `subgrid`).
-//!
-//! The implementation follows the specification's explicit-grid,
-//! placement, track-sizing, alignment, and item-layout passes. Named lines
-//! and areas are intentionally host-lowered to numeric lines by the public
-//! protocol; writing modes, fragmentation, and subgrid are outside this
-//! physical-axis engine's scope.
-//!
-//! All host interaction is statically dispatched through [`LayoutNode`]
-//! handles. Borrowed stylo track lists are normalized into engine scratch
-//! before the first child callback, durable storage remains host-owned, and
-//! all transient work is bounded by the Grid §5.4 line limits.
 
 #![allow(clippy::cast_precision_loss)]
 
@@ -55,8 +44,6 @@ struct ItemDefaults {
     align_items: AlignFlags,
     align_items_normal: bool,
     justify_items: AlignFlags,
-    /// The container's inline direction (for the physical `left`/`right`
-    /// alignment keywords).
     rtl: bool,
 }
 
@@ -154,11 +141,6 @@ where
         border,
         inset,
     } = resolve_item_box(&style, percentage_basis);
-    // Percentages (and calc() trees still carrying a percentage) depend on
-    // the grid area; the keyword sizes `fit-content`/`stretch`/
-    // `-webkit-fill-available` are treated as `auto` (behavior delta #8).
-    // Length-only calc() folds to a length at computed-value time and is
-    // therefore definite here (behavior delta #10).
     let behaves_auto_or_depends = |value: &StyleSize| match value {
         StyleSize::Auto
         | StyleSize::FitContent
@@ -282,10 +264,6 @@ fn run_track_sizing<N>(
         item.clear_contribution_cache(Axis::Horizontal);
         item.clear_contribution_cache(Axis::Vertical);
     }
-    // Grid §12.1 sizes columns before rows. During that first column pass,
-    // an item sees each row with a definite max track sizing function at
-    // that maximum and every other row as infinite. Only when the container
-    // and every row are definite does content alignment affect this estimate.
     initialize_tracks(rows, row_specs, inner_basis.height, gap.height);
     let all_rows_definite = rows
         .tracks
@@ -326,11 +304,6 @@ fn run_track_sizing<N>(
         align_tracks(columns, width, justify_content);
     }
 
-    // Record the pre-row min-content probes only for items that can affect a
-    // content/flex-sized column and whose inline size is not already fixed.
-    // Comparing these after row sizing detects descendant ratios, wrapped
-    // column flexboxes, and other cross-size dependencies without rerunning
-    // every intrinsic grid unconditionally.
     let needs_column_feedback = columns
         .tracks
         .iter()
@@ -356,9 +329,6 @@ fn run_track_sizing<N>(
             );
         }
     }
-    // Grid-item percentages use the grid area, not the whole container. The
-    // inline area is now definite, so resolve width-dependent padding,
-    // margins, sizes, and aspect-ratio inputs before row contributions.
     for item in items.iter_mut() {
         let width = columns.area_size(item.area.column.start, item.area.column.end);
         refresh_item_basis(item, Size::new(Some(width), None));
@@ -398,9 +368,6 @@ fn run_track_sizing<N>(
         }
     }
 
-    // Cross-size-sensitive content can change an inline contribution once
-    // row sizes are known. Grid bounds this feedback to a single
-    // columns→rows rerun.
     if column_feedback_changed {
         for item in items.iter_mut() {
             let width = columns.area_size(item.area.column.start, item.area.column.end);
@@ -481,9 +448,6 @@ struct PendingBaselineItem<N> {
     area_top: f32,
     layout: Layout,
     baseline: Option<f32>,
-    /// The item's `overflow`, retained so the deferred scrollable-overflow
-    /// accumulation applies the same scroll-container trapping as the direct
-    /// path (see [`accumulate_scrollable_overflow`]).
     overflow: Point<Overflow>,
 }
 
@@ -621,9 +585,6 @@ where
 
         let available = Size::new(
             match item.intrinsic_preferred.width {
-                // An intrinsic preferred size selects the matching
-                // measurement constraint so the child re-resolves at that
-                // size instead of the grid-area default.
                 IntrinsicSize::MinContent => AvailableSpace::MinContent,
                 IntrinsicSize::MaxContent => AvailableSpace::MaxContent,
                 IntrinsicSize::FitContent(_) => resolved_preferred
@@ -650,12 +611,12 @@ where
         );
         let parent_size = Size::new(Some(area_size.width), Some(area_size.height));
         let input = match goal {
-            LayoutGoal::Commit => LayoutInput::perform_layout(known, parent_size, available),
+            LayoutGoal::Commit => LayoutInput::commit(known, parent_size, available),
             LayoutGoal::Measure(requested) => {
-                LayoutInput::compute_size(known, parent_size, available, requested)
+                LayoutInput::measure(known, parent_size, available, requested)
             }
         };
-        let output = item.key.node.compute_child_layout(input);
+        let output = item.key.node.compute_layout(input);
 
         let mut margin = item.margin;
         for axis in Axis::ALL {
@@ -685,14 +646,9 @@ where
 
         let free_x = area_size.width - output.size.width - margin.horizontal_sum();
         let free_y = area_size.height - output.size.height - margin.vertical_sum();
-        // Positive free space has already been consumed by auto margins, so
-        // these offsets are zero in that case. On overflow auto margins are
-        // zero and self-alignment still applies (Grid §11.2).
         let item_rtl = item.direction == direction::T::Rtl;
         let offset_x = item_alignment_offset(free_x, item.justify_self, rtl, item_rtl);
         let offset_y = item_alignment_offset(free_y, item.align_self, false, false);
-        // Only `relative` nudges at layout time. `static` has no offsets and
-        // `sticky` is a host scroll-time post-pass (behavior delta #6).
         let (relative_x, relative_y) = if item.position == PositionProperty::Relative {
             (
                 item.inset
@@ -768,8 +724,6 @@ where
         );
     }
 
-    // First-baseline sharing groups are row-local. Applying the largest
-    // ascent after every child is measured avoids order-dependent results.
     let mut baseline_candidates = Vec::<(i32, f32)>::new();
     for item in pending.iter().filter(|item| item.align_baseline) {
         let Some(baseline) = item.baseline else {
@@ -800,10 +754,6 @@ where
         }
     }
 
-    // Grid §11.6 selects from the first non-empty row, not the globally
-    // smallest exposed child baseline. Prefer that row's baseline-sharing
-    // group, otherwise use the first item in grid order and synthesize from
-    // its bottom border edge when necessary.
     let first_row = pending
         .iter()
         .map(|item| item.area_row)
@@ -863,11 +813,6 @@ fn absolute_axis_lines(
     placement: Line<GridPlacement>,
     explicit_tracks: usize,
 ) -> (Option<i32>, Option<i32>) {
-    // Unlike in-flow placement, two definite lines on an absolutely
-    // positioned item are not reordered when the end precedes the start.
-    // Grid §10.1 makes that a zero-sized containing block at the start line.
-    // Resolve the two line coordinates independently so the subsequent area
-    // calculation can retain that start edge.
     if matches!(placement.start, GridPlacement::Line(_))
         && matches!(placement.end, GridPlacement::Line(_))
     {
@@ -972,15 +917,12 @@ where
         axis_available(&item.intrinsic_preferred.width, containing_size.width),
         axis_available(&item.intrinsic_preferred.height, containing_size.height),
     );
-    let output = item
-        .key
-        .node
-        .compute_child_layout(LayoutInput::compute_size(
-            item.preferred_size,
-            basis,
-            intrinsic_available,
-            RequestedAxis::Both,
-        ));
+    let output = item.key.node.compute_layout(LayoutInput::measure(
+        item.preferred_size,
+        basis,
+        intrinsic_available,
+        RequestedAxis::Both,
+    ));
     let item_floor = box_inset_size(item.padding, item.border);
     let used_size = Size::new(
         clamp_axis(
@@ -1100,10 +1042,6 @@ where
                 );
                 let origin = Point::new(padding_box_origin.x + x, padding_box_origin.y + y);
                 let containing_size = Size::new(width, height);
-                // Grid §10.2 defines the static-position rectangle as the
-                // container's content box even when §10.1 selects a smaller
-                // grid-area containing block. Convert that content-box point
-                // into the selected containing block's local coordinates.
                 let static_offset = Point::new(
                     padding.left + content_static_offset.x - x,
                     padding.top + content_static_offset.y - y,
@@ -1121,9 +1059,6 @@ where
                 );
                 key.node.set_unrounded_layout(layout);
             }
-            // The containing block is not the layout parent (CSS `fixed`):
-            // record the static position; the host completes layout in its
-            // positioned pass.
             PositionProperty::Fixed => {
                 key.node.set_static_position(Point::new(
                     content_origin.x + content_static_offset.x,
@@ -1136,30 +1071,19 @@ where
     content_size
 }
 
-/// Computes CSS Grid layout for `node` using only generic, statically
-/// dispatched host capabilities.
 #[allow(clippy::too_many_lines)]
 pub fn compute_grid_layout<N>(node: N, input: LayoutInput) -> LayoutOutput
 where
     N: LayoutNode,
     N::Style: GridContainerStyle + GridItemStyle,
 {
-    // The container style view stays live across recursive child layout —
-    // all mutation flows through handles into host-owned interior-mutable
-    // per-node slots — so no owned raw-style snapshot is needed.
     let style = node.style();
-    // Size containment substitutes contain-intrinsic-size for the grid's
-    // content-derived container size (the tracks' used size); layout
-    // containment suppresses the exported baseline. Tracks and items are still
-    // sized/placed against the resulting definite container size.
     let size_containment = size_containment(&style);
     let layout_contained = style.containment().contains(Contain::LAYOUT);
     let gap_value = style.gap();
     let auto_flow = style.grid_auto_flow();
     let direction = style.direction();
     let rtl = direction == direction::T::Rtl;
-    // `normal` behaves as `stretch` for both content distribution and item
-    // alignment on a grid container.
     let align_content = normalize_content_alignment(style.align_content().primary(), false, rtl)
         .unwrap_or(AlignFlags::STRETCH);
     let justify_content = normalize_content_alignment(style.justify_content().primary(), true, rtl)
@@ -1173,7 +1097,7 @@ where
         rtl,
     };
     let raw_preferred = style.size();
-    let style_definite = if input.sizing_mode == SizingMode::ContentSize {
+    let style_definite = if input.sizing_mode == SizingMode::IgnoreSizeStyles {
         Size::new(false, false)
     } else {
         preferred_size_definiteness(
@@ -1187,7 +1111,7 @@ where
         input.definite_dimensions.height || style_definite.height,
     );
     let mut metrics = resolve_container_box(&style, input);
-    if input.sizing_mode != SizingMode::ContentSize {
+    if input.sizing_mode != SizingMode::IgnoreSizeStyles {
         let preferred = raw_preferred;
         if metrics.inner.width.is_none() {
             metrics.available_inner.width = match preferred.width {
@@ -1225,10 +1149,6 @@ where
             .flatten(),
     );
     let initial_gap = resolve_gap(gap_value, initial_percentage_basis);
-    // Auto-repeat's preferred/max constraint must be clamped by min/max
-    // first; CSS gives the minimum precedence when max < min. Track counts
-    // use the resulting content-box constraint, not the raw border-box
-    // property value.
     let repeat_max_basis = Size::new(
         definite_outer.width.or(metrics.max.width).map(|value| {
             (clamp(value, metrics.min.width, metrics.max.width) - metrics.box_inset.width).max(0.0)
@@ -1248,9 +1168,6 @@ where
             .height
             .map(|value| (value - metrics.box_inset.height).max(0.0)),
     );
-    // Percentage gutters are cyclic (zero) during intrinsic track sizing,
-    // but auto-repeat counting resolves them against the definite preferred,
-    // max, or min constraint selected above.
     let repeat_count_basis = Size::new(
         repeat_max_basis.width.or(repeat_min_basis.width),
         repeat_max_basis.height.or(repeat_min_basis.height),
@@ -1277,8 +1194,6 @@ where
             in_flow.push(child_style);
         }
     }
-    // Assign paint order without the quadratic node lookup used by many
-    // straightforward implementations.
     sort_and_assign_layout_order(&mut in_flow, &mut absolute);
 
     let placement_inputs = in_flow
@@ -1295,9 +1210,6 @@ where
         auto_flow,
     );
     drop(placement_inputs);
-    // Normalize auto-track patterns only if placement created implicit
-    // tracks, and cap consumption at the UA's materialized-grid limit so
-    // both work and memory stay finite even for hostile host values.
     let needs_auto_columns = placement.column_range.start < 0
         || placement.column_range.end
             > i32::try_from(explicit_columns.tracks.len()).unwrap_or(i32::MAX);
@@ -1362,9 +1274,6 @@ where
         align_content,
     );
     let provisional_track_size = Size::new(columns.used_size(), rows.used_size());
-    // Under size containment the container ignores its tracks' used size and
-    // substitutes contain-intrinsic-size; the tracks are still laid out (below)
-    // against the resulting definite inner size.
     let container_track_size = match size_containment {
         Some(intrinsic) => Size::new(
             intrinsic.width.unwrap_or(0.0),
@@ -1378,9 +1287,6 @@ where
         (outer_size.height - metrics.box_inset.height).max(0.0),
     );
 
-    // Resolve cyclic percentages and any flexible/auto track that only
-    // became definite after intrinsic container sizing. Exactly one rerun is
-    // allowed by Grid's bounded sizing feedback.
     let final_gap = resolve_gap(
         gap_value,
         Size::new(Some(final_inner.width), Some(final_inner.height)),
@@ -1444,12 +1350,7 @@ where
         );
         content_size = content_size.zip_map(absolute_content_size, f32::max);
     }
-    // css-contain-2 §3.3: a layout-contained grid with `overflow: visible`
-    // reports its border box as its scrollable overflow (descendant overflow is
-    // ink-only); a scroll container keeps the interior union.
     let content_size = own_scrollable_overflow(&style, outer_size, content_size);
-    // Layout containment: the container is an independent formatting context;
-    // no child baseline escapes to the parent.
     let baselines = if layout_contained {
         Point::NONE
     } else {
@@ -1469,14 +1370,10 @@ mod tests {
 
     #[test]
     fn absolute_axis_lines_resolve_edges_independently() {
-        // Grid Â§10.1: two definite lines resolve independently, keeping a
-        // reversed pair as-is instead of swapping.
         assert_eq!(
             absolute_axis_lines(Line::new(line(3), line(2)), 4),
             (Some(2), Some(1))
         );
-        // The invalid line 0 is defensively normalized to `auto` even on
-        // the direct in-crate constructor path.
         assert_eq!(
             absolute_axis_lines(Line::new(line(0), line(2)), 4),
             (None, Some(1))
@@ -1489,7 +1386,6 @@ mod tests {
             absolute_axis_lines(Line::new(GridPlacement::Auto, line(0)), 4),
             (None, None)
         );
-        // span/line binds both edges; span/span binds neither.
         assert_eq!(
             absolute_axis_lines(Line::new(GridPlacement::Span(1), line(3)), 4),
             (Some(1), Some(2))

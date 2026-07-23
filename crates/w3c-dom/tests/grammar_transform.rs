@@ -3,18 +3,11 @@
 //! `transform_origin_handler_unittest.cc`,
 //! `offset_distance_handler_unittest.cc`, and the offset-rotate rows of
 //! `css_string_parser_unittest.cc`.
-//!
-//! Scope: `enableCSSSelector = true` / `enableRemoveCSSScope = true`. W3C
-//! corrections: the legacy lenient forms (`rotate(20)` without a unit,
-//! three-argument `translate()`, comma-separated transform-origin) reject;
-//! angles are kept literal (no mod-360 at parse); percentages stay
-//! percentages.
 
 mod common;
 
 use common::{Doc, parses, specified};
 
-// C++: transform_handler_unittest.cc valid function lists.
 #[test]
 fn transform_function_lists() {
     for valid in [
@@ -36,8 +29,6 @@ fn transform_function_lists() {
     assert_eq!(specified("transform", "none").as_deref(), Some("none"));
 }
 
-// C++: transform_handler_unittest.cc strict invalid rows + the legacy
-// lenient equivalences (W3C-corrected to rejections).
 #[test]
 fn transform_rejects() {
     for invalid in [
@@ -58,13 +49,10 @@ fn transform_rejects() {
     }
 }
 
-// C++: transform_origin_handler_unittest.cc — keywords resolve to
-// percentages at computed value; comma form rejects (W3C-corrected).
 #[test]
 fn transform_origin_grammar() {
     let mut doc = Doc::new();
     let el = doc.el(doc.root, "view");
-    // (input, computed) — computed origin serializes "x y z".
     let rows: &[(&str, &str)] = &[
         ("10px", "10px 50% 0px"),
         ("10px 10%", "10px 10% 0px"),
@@ -84,8 +72,6 @@ fn transform_origin_grammar() {
     );
 }
 
-// C++: offset_distance_handler_unittest.cc — W3C-corrected: unitless
-// non-zero rejects; percentages stay percentages.
 #[test]
 fn offset_distance_grammar() {
     assert!(parses("offset-distance", "0"), "unitless zero length");
@@ -107,11 +93,6 @@ fn offset_distance_grammar() {
     }
 }
 
-// C++: css_string_parser_unittest.cc offset_rotate_value. Fork decision
-// (vendor/stylo, lynx feature): the grammar is `auto | <angle>` with the
-// angle required to be within 0..=360deg — no `reverse`, no
-// keyword+angle combination, and out-of-range angles reject instead of
-// normalizing mod 360 (the C++ parser normalizes; the fork rejects).
 #[test]
 fn offset_rotate_grammar() {
     for (input, expected) in [
@@ -145,9 +126,6 @@ fn offset_rotate_grammar() {
     }
 }
 
-// C++: css_string_parser_unittest.cc parse_cursor. Fork decision
-// (vendor/stylo, lynx feature): `cursor` is keyword-only — image cursors
-// (`url(...) <hotspot>?`) are not part of the Lynx grammar.
 #[test]
 fn cursor_grammar() {
     assert_eq!(specified("cursor", "help").as_deref(), Some("help"));
@@ -163,8 +141,3 @@ fn cursor_grammar() {
         );
     }
 }
-
-// Skipped (skip-internal): the lepus null/type-guard rows and Lynx's
-// [value, pattern] flat-array encodings across all four files.
-// Skipped (skip-legacy): the enable_new_transform_handler=false lenient
-// branch — pre-W3C pipeline out of scope under enableCSSSelector=true.

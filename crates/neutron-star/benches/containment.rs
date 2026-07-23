@@ -1,19 +1,5 @@
 //! Containment-bounded incremental relayout benchmarks over the shared
 //! cache-embedding [`TestTree`] host.
-//!
-//! The scenario is the perf payoff of `css-contain-2`: a deep, bushy flex tree
-//! with a dirty leaf buried inside one subtree. When that subtree is
-//! `contain: strict` it is a **relayout boundary**, so
-//! [`invalidate_for_relayout`](neutron_star::invalidate::invalidate_for_relayout)
-//! stops cache clearing at the boundary and layout re-runs only from there —
-//! via [`compute_boundary_relayout`](neutron_star::compute::compute_boundary_relayout)
-//! with the boundary's preserved committed input — versus clearing the whole
-//! ancestor path and re-running from the document root, versus a fully cold
-//! layout. A no-containment control makes the win falsifiable: without the
-//! boundary, invalidation walks to the root and there is no saving.
-//!
-//! Fixture construction and cache warming happen in divan's input generator,
-//! outside the timed region.
 
 #[path = "../tests/support/mod.rs"]
 mod support;
@@ -53,19 +39,12 @@ struct Fixture {
     tree: TestTree,
     root: TestId,
     dirty_leaf: TestId,
-    /// The relayout boundary (the dirty branch's `contain: strict` chain root),
-    /// when the fixture is contained.
     boundary: Option<TestId>,
-    /// Ancestor path of `dirty_leaf`, nearest first, up to `root` — the host
-    /// supplies this to `invalidate_for_relayout` (the engine keeps no parent
-    /// links).
     ancestors: Vec<TestId>,
     viewport: Size<f32>,
     wide: bool,
 }
 
-/// Builds one nested flex chain of `DEPTH` containers ending in a leaf,
-/// recording the leaf's ancestor chain (nearest first).
 fn build_chain(
     tree: &mut TestTree,
     boundary_style: Option<&TestStyle>,
@@ -82,7 +61,6 @@ fn build_chain(
         current = tree.push_flex(style, vec![current]);
         ancestors.push(current);
     }
-    // `current` is the chain root; its style is the (optional) boundary.
     (current, leaf, ancestors)
 }
 
@@ -120,9 +98,7 @@ fn fixture(contained: bool) -> Fixture {
     }
 
     let root = tree.push_flex(TestStyle::default(), branches);
-    // Append the document root to the dirty leaf's ancestor path.
     ancestors.push(root);
-    // Enable the reference caches the invalidation workflow operates over.
     tree.enable_cache();
 
     Fixture {
@@ -144,26 +120,20 @@ impl Fixture {
         )
     }
 
-    /// Warms every cache with a full cold layout from the root.
     fn warm(self) -> Self {
         let available = self.available();
         compute_root_layout(self.tree.node(self.root), available);
         self
     }
 
-    /// Perturbs the dirty leaf so a relayout is genuinely required.
     fn dirty_the_leaf(&mut self) {
         self.wide = !self.wide;
         let width = if self.wide { 24.0 } else { 16.0 };
         self.tree.source_node_mut(self.dirty_leaf).style = dirty_leaf_style(width);
     }
 
-    /// Boundary-stopped incremental relayout: invalidate from the leaf,
-    /// stopping at the nearest relayout boundary, and re-run from there with
-    /// the boundary's preserved committed input.
     fn run_boundary_stopped(&mut self) -> LayoutOutput {
         self.dirty_the_leaf();
-        // Capture the boundary's committed input before invalidation clears it.
         let committed = self.boundary.map(|b| {
             self.tree
                 .committed_input(b)
@@ -176,31 +146,27 @@ impl Fixture {
         if let Some(input) = committed {
             compute_boundary_relayout(re_root, input)
         } else {
-            // No boundary: re_root is the document root; re-run from there.
             let available = self.available();
             compute_root_layout(re_root, available);
             self.tree.layout(self.root).into_output()
         }
     }
 
-    /// Whole-path invalidation: clear the leaf and every ancestor up to the
-    /// root, then re-run from the root.
     fn run_whole_path(&mut self) -> LayoutOutput {
         self.dirty_the_leaf();
-        self.tree.node(self.dirty_leaf).cache_clear();
+        self.tree.node(self.dirty_leaf).clear_layout_cache();
         for &ancestor in &self.ancestors {
-            self.tree.node(ancestor).cache_clear();
+            self.tree.node(ancestor).clear_layout_cache();
         }
         let available = self.available();
         compute_root_layout(self.tree.node(self.root), available);
         self.tree.layout(self.root).into_output()
     }
 
-    /// Cold layout: clear every cache and lay out the whole tree from scratch.
     fn run_cold(&mut self) -> LayoutOutput {
         self.dirty_the_leaf();
         for id in 0..self.tree.nodes.len() {
-            self.tree.node(id).cache_clear();
+            self.tree.node(id).clear_layout_cache();
         }
         let available = self.available();
         compute_root_layout(self.tree.node(self.root), available);
@@ -240,9 +206,6 @@ fn contained_cold(bencher: divan::Bencher<'_, '_>) {
         .bench_local_refs(Fixture::run_cold);
 }
 
-/// Falsifiability control: the same dirty-leaf incremental relayout without the
-/// containment boundary. `invalidate_for_relayout` walks all the way to the
-/// root, so there is no boundary-stopped saving to be had.
 #[divan::bench]
 fn uncontained_boundary_stopped_control(bencher: divan::Bencher<'_, '_>) {
     bencher

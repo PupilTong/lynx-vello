@@ -4,10 +4,6 @@
 //! inline-style parsing, and the let-it-crash mutation contract. Internal
 //! style scheduling is asserted behaviorally by the style/flush tests rather
 //! than exposed here as mutable dirty state.
-//!
-//! Everything runs against `Node<()>` (the no-op payload) except the
-//! `remove_subtree` harvest test, which uses a payload type to observe what
-//! the document returns.
 
 mod common;
 
@@ -17,7 +13,6 @@ fn test_document<T>() -> Document<T> {
     Document::new(common::device(800.0, 600.0))
 }
 
-/// Create an element with the given tag (no-op payload) and return its handle.
 fn node(doc: &mut Document<()>, tag: &str) -> NodeId {
     doc.create_element(tag, ())
 }
@@ -30,7 +25,7 @@ fn document_is_slot_zero_and_node_ids_are_raw_slab_indices() {
 
     let a = node(&mut doc, "div");
     assert!(doc.get(a).is_some());
-    doc.append_child(a);
+    doc.append_document_element(a);
     assert_eq!(doc.root_element().map(Node::id), Some(a));
     assert_eq!(doc.root_node().first_child().map(Node::id), Some(a));
     assert_eq!(doc.get(a).unwrap().parent_id(), Some(DOCUMENT_NODE_ID));
@@ -38,9 +33,6 @@ fn document_is_slot_zero_and_node_ids_are_raw_slab_indices() {
     doc.remove_subtree(a);
     assert!(doc.get(a).is_none());
 
-    // A raw Slab index deliberately identifies the slot, not an allocation
-    // generation. The ownership layer ensures no live handle survives the
-    // removal; once reused, the same numeric ID names the new occupant.
     let b = node(&mut doc, "div");
     assert_eq!(a, b, "Slab should reuse the vacant slot");
     assert!(
@@ -55,27 +47,27 @@ fn node_ref_navigation() {
     let mut doc = test_document();
     let root = node(&mut doc, "html");
     let container = node(&mut doc, "div");
-    doc.append(root, container);
+    doc.append_child(root, container);
     let a = node(&mut doc, "div");
     let b = node(&mut doc, "div");
     let c = node(&mut doc, "div");
-    doc.append(container, a);
-    doc.append(container, b);
-    doc.append(container, c);
+    doc.append_child(container, a);
+    doc.append_child(container, b);
+    doc.append_child(container, c);
 
     let cref = doc.get(container).unwrap();
     let div = stylo::LocalName::from("div");
     assert_eq!(cref.local_name(), Some(&div));
-    assert_eq!(cref.tag(), Some("div"));
+    assert_eq!(cref.tag_name(), Some("div"));
     assert_eq!(cref.parent().unwrap().id(), root);
     let kids: Vec<_> = cref.children().map(Node::id).collect();
     assert_eq!(kids, vec![a, b, c]);
     assert_eq!(cref.first_child().unwrap().id(), a);
     assert_eq!(cref.last_child().unwrap().id(), c);
 
-    assert!(doc.get(a).unwrap().prev_sibling().is_none());
+    assert!(doc.get(a).unwrap().previous_sibling().is_none());
     assert_eq!(doc.get(a).unwrap().next_sibling().unwrap().id(), b);
-    assert_eq!(doc.get(b).unwrap().prev_sibling().unwrap().id(), a);
+    assert_eq!(doc.get(b).unwrap().previous_sibling().unwrap().id(), a);
     assert!(doc.get(c).unwrap().next_sibling().is_none());
 }
 
@@ -84,25 +76,25 @@ fn element_and_text_nodes_share_the_document_tree() {
     let mut doc = test_document();
     let parent = doc.create_element("p", ());
     let text = doc.create_text_node("hello", ());
-    doc.append(parent, text);
+    doc.append_child(parent, text);
 
     let element = doc.get(parent).unwrap();
     assert_eq!(element.node_type(), NodeType::Element);
     assert!(element.is_element());
     assert!(!element.is_text_node());
-    assert_eq!(element.tag(), Some("p"));
+    assert_eq!(element.tag_name(), Some("p"));
     assert_eq!(element.text(), None);
 
     let text_node = doc.get(text).unwrap();
     assert_eq!(text_node.node_type(), NodeType::Text);
     assert!(!text_node.is_element());
     assert!(text_node.is_text_node());
-    assert_eq!(text_node.tag(), None);
+    assert_eq!(text_node.tag_name(), None);
     assert_eq!(text_node.text(), Some("hello"));
     assert_eq!(text_node.parent_id(), Some(parent));
     assert_eq!(element.first_child().unwrap().id(), text);
 
-    doc.set_text_data(text, "updated");
+    doc.set_text_node_data(text, "updated");
     assert_eq!(doc.get(text).unwrap().text(), Some("updated"));
 }
 
@@ -116,10 +108,10 @@ fn element_navigation_and_empty_matching_handle_text_children() {
     let first = node(&mut doc, "span");
     let middle_text = doc.create_text_node("between", ());
     let second = node(&mut doc, "span");
-    doc.append(parent, leading_text);
-    doc.append(parent, first);
-    doc.append(parent, middle_text);
-    doc.append(parent, second);
+    doc.append_child(parent, leading_text);
+    doc.append_child(parent, first);
+    doc.append_child(parent, middle_text);
+    doc.append_child(parent, second);
 
     let parent_ref = doc.get(parent).unwrap();
     assert_eq!(parent_ref.first_child().unwrap().id(), leading_text);
@@ -143,12 +135,12 @@ fn element_navigation_and_empty_matching_handle_text_children() {
 
     let empty_parent = node(&mut doc, "div");
     let empty_text = doc.create_text_node("", ());
-    doc.append(empty_parent, empty_text);
+    doc.append_child(empty_parent, empty_text);
     assert!(
         doc.get(empty_parent).unwrap().is_empty(),
         "an empty text child does not affect :empty"
     );
-    doc.set_text_data(empty_text, " ");
+    doc.set_text_node_data(empty_text, " ");
     assert!(
         !doc.get(empty_parent).unwrap().is_empty(),
         "whitespace character data is non-empty"
@@ -162,11 +154,10 @@ fn insert_before_reorders_within_one_parent() {
     let a = node(&mut doc, "div");
     let b = node(&mut doc, "div");
     let c = node(&mut doc, "div");
-    doc.append(parent, a);
-    doc.append(parent, b);
-    doc.append(parent, c);
+    doc.append_child(parent, a);
+    doc.append_child(parent, b);
+    doc.append_child(parent, c);
 
-    // Moving `c` before `a` detaches it first, then re-links.
     doc.insert_before(parent, c, Some(a));
     assert_eq!(doc.get(parent).unwrap().child_ids(), &[c, a, b]);
     assert_eq!(doc.get(c).unwrap().parent_id(), Some(parent));
@@ -180,9 +171,9 @@ fn remove_subtree_frees_detaches_and_returns_payloads() {
     let mut doc: Document<Payload> = test_document();
     let container = doc.create_element("div", Payload(10));
     let child = doc.create_element("div", Payload(11));
-    doc.append(container, child);
+    doc.append_child(container, child);
     let grandchild = doc.create_text_node("payload", Payload(12));
-    doc.append(child, grandchild);
+    doc.append_child(child, grandchild);
 
     let mut removed = doc.remove_subtree(child);
     removed.sort_unstable();
@@ -194,7 +185,6 @@ fn remove_subtree_frees_detaches_and_returns_payloads() {
 
     assert!(doc.get(child).is_none());
     assert!(doc.get(grandchild).is_none());
-    // `container` survives, with the removed child unlinked.
     assert!(doc.get(container).is_some());
     assert!(doc.get(container).unwrap().child_ids().is_empty());
 }
@@ -203,7 +193,7 @@ fn remove_subtree_frees_detaches_and_returns_payloads() {
 fn remove_subtree_clears_the_root_element() {
     let mut doc = test_document();
     let root = node(&mut doc, "page");
-    doc.append_child(root);
+    doc.append_document_element(root);
     assert_eq!(doc.root_element().map(Node::id), Some(root));
     doc.remove_subtree(root);
     assert_eq!(doc.root_element().map(Node::id), None);
@@ -214,9 +204,9 @@ fn ancestor_and_child_queries() {
     let mut doc = test_document();
     let root = node(&mut doc, "html");
     let container = node(&mut doc, "div");
-    doc.append(root, container);
+    doc.append_child(root, container);
     let leaf = node(&mut doc, "div");
-    doc.append(container, leaf);
+    doc.append_child(container, leaf);
 
     assert!(doc.is_ancestor(root, leaf));
     assert!(doc.is_ancestor(container, leaf));
@@ -232,21 +222,16 @@ fn inline_style_helpers_parse_merge_and_clear() {
     let mut doc = test_document();
     let view = node(&mut doc, "div");
 
-    // `add_inline_style` parses and folds one declaration at a time.
     doc.add_inline_style(view, "color", "red");
     doc.add_inline_style(view, "width", "10px");
     assert_eq!(doc.inline_style_declaration_count(view), 2);
 
-    // An unparseable property/value is dropped — CSS error handling, not an
-    // unexpected parameter.
     doc.add_inline_style(view, "definitely-not-a-property", "1");
     assert_eq!(doc.inline_style_declaration_count(view), 2);
 
-    // `set_inline_style` replaces the whole block.
     doc.set_inline_style(view, "display:flex");
     assert_eq!(doc.inline_style_declaration_count(view), 1);
 
-    // An empty string clears it.
     doc.set_inline_style(view, "");
     assert_eq!(doc.inline_style_declaration_count(view), 0);
 }
@@ -259,8 +244,8 @@ fn root_matching_uses_document_structure() {
     let root = node(&mut doc, "html");
     let child = node(&mut doc, "div");
     let detached = node(&mut doc, "section");
-    doc.append(root, child);
-    doc.append_child(root);
+    doc.append_child(root, child);
+    doc.append_document_element(root);
 
     assert!(doc.get(root).unwrap().is_root());
     assert!(!doc.get(child).unwrap().is_root());
@@ -280,7 +265,7 @@ fn stylo_sees_a_distinct_document_node_and_real_owner_document() {
     let mut doc = test_document();
     let root = node(&mut doc, "html");
     let detached = node(&mut doc, "section");
-    doc.append_child(root);
+    doc.append_document_element(root);
 
     let root_node = doc.get(root).unwrap();
     let document_node = root_node.owner_doc();
@@ -301,8 +286,6 @@ fn stylo_sees_a_distinct_document_node_and_real_owner_document() {
 fn attributes_come_only_from_the_real_map() {
     use stylo::dom::TElement;
 
-    // The opaque `()` payload cannot serve synthetic attributes: only the
-    // real attrs map answers `get_attr`.
     let mut doc = test_document();
     let el = node(&mut doc, "div");
     doc.set_attribute(el, "title", "hi");
@@ -311,7 +294,7 @@ fn attributes_come_only_from_the_real_map() {
     let ns = stylo::Namespace::default();
     let title = stylo::LocalName::from("title");
     assert_eq!(
-        elem.attr("title"),
+        elem.attribute("title"),
         Some("hi"),
         "the accessor sees the DOM attribute"
     );
@@ -323,9 +306,9 @@ fn attributes_come_only_from_the_real_map() {
 fn reparenting_the_root_element_detaches_it_from_the_document() {
     let mut doc = test_document();
     let root = node(&mut doc, "page");
-    doc.append_child(root);
+    doc.append_document_element(root);
     let other = node(&mut doc, "view");
-    doc.append(other, root);
+    doc.append_child(other, root);
 
     assert_eq!(doc.root_element().map(Node::id), None);
     assert_eq!(doc.get(root).unwrap().parent_id(), Some(other));
@@ -338,7 +321,7 @@ fn text_nodes_cannot_have_children() {
     let mut doc = test_document();
     let text = doc.create_text_node("parent", ());
     let child = node(&mut doc, "span");
-    doc.append(text, child);
+    doc.append_child(text, child);
 }
 
 #[test]
@@ -346,7 +329,7 @@ fn text_nodes_cannot_have_children() {
 fn text_nodes_cannot_be_the_document_root() {
     let mut doc = test_document();
     let text = doc.create_text_node("root", ());
-    doc.append_child(text);
+    doc.append_document_element(text);
 }
 
 #[test]
@@ -357,15 +340,12 @@ fn text_nodes_reject_element_attributes() {
     doc.set_attribute(text, "title", "not an element");
 }
 
-// --- the let-it-crash mutation contract -------------------------------------
-
 #[test]
 #[should_panic(expected = "stale NodeId")]
 fn mutating_through_a_stale_handle_crashes() {
     let mut doc = test_document();
     let a = node(&mut doc, "div");
     doc.remove_subtree(a);
-    // Queries answer `None`; mutations crash.
     assert!(doc.get(a).is_none());
     doc.set_attribute(a, "title", "boom");
 }
@@ -377,9 +357,8 @@ fn cycle_creating_insert_crashes_in_debug() {
     let mut doc = test_document();
     let outer = node(&mut doc, "div");
     let inner = node(&mut doc, "div");
-    doc.append(outer, inner);
-    // Linking `outer` under its own descendant must crash (debug builds).
-    doc.append(inner, outer);
+    doc.append_child(outer, inner);
+    doc.append_child(inner, outer);
 }
 
 #[cfg(debug_assertions)]
@@ -390,6 +369,5 @@ fn foreign_insert_reference_crashes_in_debug() {
     let parent = node(&mut doc, "div");
     let child = node(&mut doc, "div");
     let stranger = node(&mut doc, "div");
-    // `stranger` is not a child of `parent`.
     doc.insert_before(parent, child, Some(stranger));
 }

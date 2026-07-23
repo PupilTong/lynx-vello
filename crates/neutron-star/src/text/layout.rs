@@ -7,10 +7,6 @@ use crate::geometry::{Point, Size};
 use crate::style::TextBrush;
 
 /// A shaped paragraph retained across line-breaking constraints and painting.
-///
-/// Shaping data lives in [`Self::parley_layout`]; the remaining fields are
-/// cheap derived values used by the box-layout protocol. A `TextLayout` can be
-/// re-broken repeatedly without invoking Parley's shaping pipeline again.
 #[derive(Debug, Clone)]
 pub struct TextLayout {
     parley_layout: Layout<TextBrush>,
@@ -70,31 +66,26 @@ impl TextLayout {
         };
     }
 
-    /// The owned Parley layout used later by text painting.
     #[must_use]
     pub const fn parley_layout(&self) -> &Layout<TextBrush> {
         &self.parley_layout
     }
 
-    /// Measured content-box size, including inline overflow.
     #[must_use]
     pub const fn size(&self) -> Size<f32> {
         self.metrics.size
     }
 
-    /// First horizontal-line baseline from the content-box top edge.
     #[must_use]
     pub const fn first_baseline(&self) -> Option<f32> {
         self.metrics.first_baselines.y
     }
 
-    /// Number of lines after the most recent break operation.
     #[must_use]
     pub const fn line_count(&self) -> usize {
         self.line_count
     }
 
-    /// Inline constraint used by the most recent break operation.
     #[must_use]
     pub const fn max_advance(&self) -> Option<f32> {
         self.max_advance
@@ -103,67 +94,53 @@ impl TextLayout {
 
 /// Borrowed view over a retained [`TextLayout`].
 #[derive(Debug, Clone, Copy)]
-pub struct TextLayoutView<'a> {
-    artifact: &'a TextLayout,
+pub struct TextMeasurement<'a> {
+    layout: &'a TextLayout,
 }
 
-impl<'a> TextLayoutView<'a> {
-    pub(super) const fn new(artifact: &'a TextLayout) -> Self {
-        Self { artifact }
+impl<'a> TextMeasurement<'a> {
+    pub(super) const fn new(layout: &'a TextLayout) -> Self {
+        Self { layout }
     }
 
-    /// Returns the retained artifact behind this lightweight view.
     #[must_use]
-    pub const fn artifact(self) -> &'a TextLayout {
-        self.artifact
+    pub const fn layout(self) -> &'a TextLayout {
+        self.layout
     }
 
-    /// Measured content-box size.
     #[must_use]
     pub const fn size(self) -> Size<f32> {
-        self.artifact.size()
+        self.layout.size()
     }
 
-    /// First baseline offsets from the content-box origin.
     #[must_use]
     pub const fn first_baselines(self) -> Point<Option<f32>> {
-        self.artifact.metrics.first_baselines
+        self.layout.metrics.first_baselines
     }
 
     pub(super) const fn metrics(self) -> LeafMetrics {
-        self.artifact.metrics
+        self.layout.metrics
     }
 }
 
 /// Per-node retained artifacts for transient probes and durable layout.
-///
-/// A probe is always written to `probe` and therefore never evicts the last
-/// committed layout needed by painting. Hosts must call [`Self::invalidate`]
-/// together with clearing that node's box-layout cache when text, shaping
-/// style, or registered fonts change.
 #[derive(Debug, Default)]
-pub struct ArtifactSlots {
+pub struct TextLayoutStore {
     pub(super) probe: Option<TextLayout>,
     pub(super) committed: Option<TextLayout>,
 }
 
-impl ArtifactSlots {
-    /// The most recent transient measurement artifact.
+impl TextLayoutStore {
     #[must_use]
     pub const fn probe(&self) -> Option<&TextLayout> {
         self.probe.as_ref()
     }
 
-    /// The durable artifact corresponding to committed box geometry.
     #[must_use]
     pub const fn committed(&self) -> Option<&TextLayout> {
         self.committed.as_ref()
     }
 
-    /// Clears both text artifacts.
-    ///
-    /// The host must clear the corresponding box-layout cache in the same
-    /// invalidation operation.
     pub fn invalidate(&mut self) {
         self.probe = None;
         self.committed = None;
@@ -183,12 +160,9 @@ mod tests {
     fn borrowed_view_exposes_artifact_metrics() {
         let mut artifact = empty_artifact();
         artifact.rebreak(Some(30.0), 0.0);
-        let view = TextLayoutView::new(&artifact);
+        let view = TextMeasurement::new(&artifact);
 
-        assert!(core::ptr::eq(
-            view.artifact(),
-            core::ptr::from_ref(&artifact)
-        ));
+        assert!(core::ptr::eq(view.layout(), core::ptr::from_ref(&artifact)));
         assert_eq!(view.size(), artifact.size());
         assert_eq!(view.first_baselines(), Point::NONE);
         assert_eq!(artifact.max_advance(), Some(30.0));
@@ -197,7 +171,7 @@ mod tests {
 
     #[test]
     fn artifact_invalidation_clears_both_lifetimes() {
-        let mut slots = ArtifactSlots {
+        let mut slots = TextLayoutStore {
             probe: Some(empty_artifact()),
             committed: Some(empty_artifact()),
         };

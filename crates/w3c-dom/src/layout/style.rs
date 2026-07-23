@@ -1,21 +1,5 @@
 //! The computed-style **view**: lending stylo [`ComputedValues`] fields to
 //! neutron-star.
-//!
-//! The engine's style protocol speaks stylo's computed-value vocabulary, so
-//! this view is nearly translation-free: every accessor lends the
-//! `ComputedValues` field the trait asks for (per-field references for the
-//! `LengthPercentage`-family geometry, owned copies for keyword enums). Two
-//! places carry real logic:
-//!
-//! - [`CoreStyle::position`] reports the engine's positioning **scheme** (`absolute` = containing
-//!   block is the layout parent, `fixed` = hoisted to the positioned pass) after resolving the W3C
-//!   containing-block rule against the parent — see [`resolve_position`].
-//! - The Lynx logical `relative-*-inline-*` longhands are lowered onto physical edges by
-//!   `direction`, with the physical property winning when both are set.
-//!
-//! Text nodes carry no computed style; the view lends them the fork's
-//! initial values instead ([`super::ANONYMOUS_STYLE`]) — the anonymous box
-//! CSS wraps a text run in.
 
 use std::ops::Deref;
 
@@ -42,36 +26,18 @@ use stylo::values::specified::box_::{DisplayInside, DisplayOutside, WillChangeBi
 use crate::contain::{ContentVisibility, effective_containment};
 use crate::node::Node;
 
-/// How the host dispatch lays a generated box out — the `display` projection
-/// this integration routes on (neutron-star deliberately has no such enum).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DisplayMode {
-    /// `display: none` — no box; the subtree is hidden.
     None,
-    /// CSS flexbox.
     Flex,
-    /// CSS Grid.
     Grid,
-    /// Starlight `display: linear`.
     Linear,
-    /// Starlight `display: relative`.
     Relative,
-    /// Flow (block/inline) and `display: contents` — **not implemented** as
-    /// container layout: the node is laid out as a leaf (its own box styles
-    /// apply, decoded natural size is used when present) and any children are
-    /// zeroed. Flow containers never survive in a Lynx tree (the
-    /// embedder's UA sheet assigns every element a supported display) and
-    /// neutron-star has no block/inline-flow algorithm yet.
     Leaf,
 }
 
-/// Project stylo's `display` onto the dispatch routing.
 pub(crate) fn display_mode(display: Display) -> DisplayMode {
     if display.outside() == DisplayOutside::None {
-        // `none` and `contents` both have no outside display. `contents`
-        // should splice its children into the parent's formatting context;
-        // until that flattening exists, treat it as a leaf so its own box
-        // vanishes-ish (zero-size) rather than hiding content silently.
         return if display.inside() == DisplayInside::Contents {
             DisplayMode::Leaf
         } else {
@@ -88,42 +54,14 @@ pub(crate) fn display_mode(display: Display) -> DisplayMode {
     }
 }
 
-/// Whether `node` (the element `style` was computed for) is the document's
-/// root element — the sole element child of the document node.
 fn is_root_element<T>(node: &Node<T>) -> bool {
     node.parent().is_none_or(Node::is_document)
 }
 
-/// Whether a box with `style` skips laying out its contents —
-/// `content-visibility: hidden`.
-///
-/// `auto` deliberately stays `false`: v1 has no relevance tracking, so an
-/// `auto` box is always treated as on-screen and lays its contents out
-/// normally (the relevance/skipping signal is the deferred, host-pushed bit
-/// recorded in `docs/style-assumptions.md` §F.19). Only `hidden` — whose
-/// contents are *always* skipped — returns `true`. The single source of truth
-/// for both [`StyleView::skips_contents`](CoreStyle::skips_contents) and the
-/// positioned pass's skip-root pruning.
 pub(crate) fn skips_contents(style: &ComputedValues) -> bool {
     style.clone_content_visibility() == ContentVisibility::Hidden
 }
 
-/// Whether `node` establishes the containing block for `position: fixed`
-/// descendants (and, a fortiori, for `absolute` ones) per CSS Transforms /
-/// Motion Path / Filter Effects / `will-change` / css-contain-2.
-///
-/// This is the **real W3C rule** the repository's standards policy mandates
-/// for `position: fixed` — not Lynx's unconditional escape-to-root behavior.
-/// The node itself is needed for one spec carve-out: Filter Effects §5
-/// exempts the **document root element**, whose `filter` does not create a
-/// containing block.
-///
-/// The css-contain-2 leg reads **effective** containment
-/// ([`effective_containment`], folding in what `content-visibility` implies),
-/// so a `content-visibility: hidden` *or* `auto` box establishes the CB too —
-/// each contributes layout + paint containment — not only a raw
-/// `contain: layout`/`paint`. The effect bits are queried individually
-/// (`LAYOUT`/`PAINT`), never the `CONTENT`/`STRICT` composite markers.
 pub(crate) fn establishes_fixed_containing_block<T>(
     node: &Node<T>,
     style: &ComputedValues,
@@ -134,40 +72,20 @@ pub(crate) fn establishes_fixed_containing_block<T>(
             box_style.perspective,
             stylo::values::generics::box_::Perspective::None
         )
-        // Motion Path: a non-none `offset-path` has "the usual transform
-        // property effects", containing-block creation included.
         || !matches!(box_style.offset_path, OffsetPath::None)
-        // Will Change §2: naming a property whose non-initial values create
-        // a containing block must create one too. `transform`-family and
-        // `contain` names set TRANSFORM/PERSPECTIVE/CONTAIN — no root
-        // carve-out, exactly like the real properties.
         || box_style.will_change.bits.intersects(
             WillChangeBits::TRANSFORM | WillChangeBits::PERSPECTIVE | WillChangeBits::CONTAIN,
         )
-        // FIXPOS_CB_NON_SVG is the `filter`-family proxy bit; like the real
-        // `filter` below it must reproduce Filter Effects §5's document-root
-        // exemption (the WPT will-change fixed-CB suite pins this).
         || (box_style
             .will_change
             .bits
             .intersects(WillChangeBits::FIXPOS_CB_NON_SVG)
             && !is_root_element(node))
-        // css-contain-2: layout **or** paint containment establishes the CB.
-        // Read *effective* containment so `content-visibility` (hidden/auto,
-        // both of which imply layout+paint) counts, not only a raw `contain`.
-        // `skipped` mirrors P1-1 (derived from `hidden`); it only gates the
-        // SIZE bit, which this predicate does not read, so it is consistent
-        // either way. Effect bits queried individually — never CONTENT/STRICT.
         || effective_containment(style, skips_contents(style))
             .intersects(Contain::LAYOUT | Contain::PAINT)
         || (!style.get_effects().filter.0.is_empty() && !is_root_element(node))
 }
 
-/// Whether `node` establishes a containing block for `position: absolute`
-/// descendants: any positioned element — including `will-change: position`,
-/// which per Will Change §2 must reproduce the containing block a
-/// non-initial `position` would create — plus everything that would already
-/// capture a `fixed` descendant.
 pub(crate) fn establishes_absolute_containing_block<T>(
     node: &Node<T>,
     style: &ComputedValues,
@@ -181,16 +99,6 @@ pub(crate) fn establishes_absolute_containing_block<T>(
         || establishes_fixed_containing_block(node, style)
 }
 
-/// Resolve a node's engine positioning **scheme** — the one style
-/// translation that must look at the parent.
-///
-/// The protocol reads [`PositionProperty::Absolute`] as "the layout parent
-/// is the containing block" and [`PositionProperty::Fixed`] as "hoisted:
-/// record the static position, the host's positioned pass completes it".
-/// This maps the *computed* position onto that scheme per the W3C
-/// containing-block rules; `static`/`relative`/`sticky` pass through
-/// (`sticky` offsets are scroll-time, applied by a host post-pass that does
-/// not exist yet).
 pub(crate) fn resolve_position<T>(node: &Node<T>, style: &ComputedValues) -> PositionProperty {
     let parent_establishes = |fixed: bool| {
         node.parent().is_some_and(|parent| {
@@ -224,17 +132,10 @@ pub(crate) fn resolve_position<T>(node: &Node<T>, style: &ComputedValues) -> Pos
     }
 }
 
-/// Lower a Lynx logical relative reference pair onto a physical edge:
-/// `inline-start`/`inline-end` map to `left`/`right` under `ltr` and
-/// `right`/`left` under `rtl`; the logical value fills a physical side only
-/// where the physical property is unset (`-1`).
 fn lower_relative_logical(physical: i32, logical: i32) -> i32 {
     if physical == -1 { logical } else { physical }
 }
 
-/// A computed style borrowed from Stylo's node-resident `ElementData`, or the
-/// process-wide anonymous-box defaults. Keeping the element-data guard avoids
-/// cloning its `Arc<ComputedValues>` for every layout style view.
 enum StyleBorrow<'dom> {
     Computed(ElementDataRef<'dom>),
     Anonymous,
@@ -257,11 +158,6 @@ impl Deref for StyleBorrow<'_> {
 
 /// The computed-style view neutron-star reads: the node handle (for the
 /// parent-dependent `resolve_position`) plus its `ComputedValues`.
-///
-/// Constructed **when the engine requests the style** (`StyleView::of`) —
-/// nothing is pre-collected. The view borrows the node's element data (with
-/// Stylo's debug-only access guard) and lends fields from its computed style;
-/// creating a layout view performs no `Arc` refcount operation.
 pub struct StyleView<'dom, T> {
     node: &'dom Node<T>,
     style: StyleBorrow<'dom>,
@@ -277,8 +173,6 @@ impl<T> std::fmt::Debug for StyleView<'_, T> {
 }
 
 impl<'dom, T> StyleView<'dom, T> {
-    /// Borrow this element's computed style, returning `None` for text,
-    /// document, or a defensively style-less element.
     pub(crate) fn try_of(node: &'dom Node<T>) -> Option<Self> {
         Some(Self {
             node,
@@ -286,11 +180,6 @@ impl<'dom, T> StyleView<'dom, T> {
         })
     }
 
-    /// The style lent for `node`: its computed style, fetched now, or the
-    /// anonymous-box initial values for text nodes (and, defensively, any
-    /// style-less node — only `display: none` descendants qualify, and only
-    /// [`hide_subtree`](neutron_star::compute::hide_subtree) ever visits
-    /// them, without reading styles).
     pub(crate) fn of(node: &'dom Node<T>) -> Self {
         Self::try_of(node).unwrap_or(Self {
             node,
@@ -298,7 +187,6 @@ impl<'dom, T> StyleView<'dom, T> {
         })
     }
 
-    /// The computed values behind this view.
     pub(crate) fn values(&self) -> &ComputedValues {
         &self.style
     }
@@ -396,8 +284,6 @@ impl<T> CoreStyle for TextStyleView<'_, T> {
     }
 
     fn direction(&self) -> direction::T {
-        // Direction is inherited text state and participates in physical
-        // alignment; anonymous-box geometry otherwise stays at initial CSS.
         self.text_values().clone_direction()
     }
 }
@@ -489,23 +375,6 @@ impl<T> CoreStyle for StyleView<'_, T> {
         self.style.clone_direction()
     }
 
-    /// The box's **effective** CSS containment: the raw `contain` value folded
-    /// with what `content-visibility` implies (see [`effective_containment`]).
-    ///
-    /// The `skipped` argument is hard-coded `false` here, which stays correct
-    /// for both `content-visibility` values this view reports:
-    /// - **`hidden`** — the fold's `hidden` arm adds `SIZE | LAYOUT | PAINT | STYLE` *regardless*
-    ///   of `skipped`, so a hidden box is size-contained (hence a [relayout
-    ///   boundary](neutron_star::invalidate::is_relayout_boundary)) even with `false`.
-    ///   [`skips_contents`](CoreStyle::skips_contents) reports `true` for it, routing dispatch to
-    ///   the skipped-contents layout.
-    /// - **`auto`** — v1 has no relevance tracking, so an `auto` box is treated as on-screen and
-    ///   must *not* be size-contained, which `false` gives (the fold's `auto` arm adds `SIZE` only
-    ///   when `skipped`). It still contributes `LAYOUT | PAINT | STYLE` — enough to establish a
-    ///   containing block for fixed/absolute descendants, but not a relayout boundary.
-    ///
-    /// A `contain: strict` box is likewise a relayout boundary, through the raw
-    /// `SIZE | LAYOUT` effect bits.
     fn containment(&self) -> Contain {
         effective_containment(&self.style, false)
     }
@@ -518,18 +387,6 @@ impl<T> CoreStyle for StyleView<'_, T> {
         self.style.clone_contain_intrinsic_height()
     }
 
-    /// Whether this box skips laying out its contents: `content-visibility:
-    /// hidden` returns `true`, `auto` returns `false`.
-    ///
-    /// `auto`'s relevance signal is deferred in v1 (there is no event layer to
-    /// flip it — `docs/style-assumptions.md` §F.19), so an `auto` box is always
-    /// treated as on-screen and lays its contents out normally; only `hidden`
-    /// skips. When this is `true`, host dispatch routes the node to
-    /// [`compute_skipped_contents_layout`](neutron_star::compute::compute_skipped_contents_layout)
-    /// (before the cache wrapper), and [`containment`](CoreStyle::containment)
-    /// already reports `SIZE | LAYOUT | PAINT | STYLE` for `hidden` — so a hidden
-    /// box is a relayout boundary and a fixed/absolute containing block
-    /// independently of this flag.
     fn skips_contents(&self) -> bool {
         skips_contents(&self.style)
     }

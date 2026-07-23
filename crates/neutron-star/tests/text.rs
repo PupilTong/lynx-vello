@@ -10,7 +10,7 @@ use neutron_star::geometry::{Edges, Point, Size};
 use neutron_star::style::{
     CoreStyle, FlexContainerStyle, FlexItemStyle, TextContainerStyle, TextRun, TextRunStyle,
 };
-use neutron_star::text::{ArtifactSlots, TextContext, TextMeasurer};
+use neutron_star::text::{TextContext, TextLayoutStore, TextMeasurer};
 use neutron_star::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
 };
@@ -51,7 +51,6 @@ fn text_context() -> TextContext {
     context
 }
 
-/// A single-entry `font-family` list naming the Ahem test font.
 fn ahem_family() -> FontFamily {
     FontFamily {
         families: FontFamilyList {
@@ -231,7 +230,7 @@ fn request(width: AvailableSpace, goal: LayoutGoal) -> LeafMeasureInput {
 
 fn observe(
     context: &mut TextContext,
-    artifacts: &mut ArtifactSlots,
+    artifacts: &mut TextLayoutStore,
     container: &ContainerStyle,
     runs: &[TextRun<'_, RunStyle>],
     input: LeafMeasureInput,
@@ -241,7 +240,7 @@ fn observe(
     Observation {
         size: measurement.size(),
         baseline: measurement.first_baselines().y,
-        line_count: measurement.artifact().line_count(),
+        line_count: measurement.layout().line_count(),
     }
 }
 
@@ -250,7 +249,7 @@ fn exact_ahem_geometry_covers_empty_whitespace_single_word_and_wrapping() {
     let style = RunStyle::ahem(16.0);
     let container = ContainerStyle::default();
     let mut context = text_context();
-    let mut artifacts = ArtifactSlots::default();
+    let mut artifacts = TextLayoutStore::default();
 
     let empty = [TextRun {
         text: "",
@@ -338,7 +337,7 @@ fn intrinsic_width_and_nowrap_rebreak_retained_shape() {
         preserve_newlines: false,
     }];
     let mut context = text_context();
-    let mut artifacts = ArtifactSlots::default();
+    let mut artifacts = TextLayoutStore::default();
     let mut container = ContainerStyle::default();
 
     let maximum = observe(
@@ -431,7 +430,7 @@ fn auto_sized_alignment_uses_the_measured_text_width() {
         preserve_newlines: false,
     }];
     let mut context = text_context();
-    let mut artifacts = ArtifactSlots::default();
+    let mut artifacts = TextLayoutStore::default();
 
     let measured = observe(
         &mut context,
@@ -506,7 +505,7 @@ fn known_inline_size_aligns_without_changing_content_metrics() {
         preserve_newlines: false,
     }];
     let mut context = text_context();
-    let mut artifacts = ArtifactSlots::default();
+    let mut artifacts = TextLayoutStore::default();
     let input = LeafMeasureInput::new(
         Size::new(Some(80.0), None),
         Size::new(AvailableSpace::Definite(80.0), AvailableSpace::MaxContent),
@@ -538,7 +537,7 @@ fn word_break_modes_change_regular_break_opportunities() {
         preserve_newlines: false,
     }];
     let mut context = text_context();
-    let mut artifacts = ArtifactSlots::default();
+    let mut artifacts = TextLayoutStore::default();
     let mut container = ContainerStyle::default();
 
     for word_break in [WordBreak::BreakAll, WordBreak::KeepAll] {
@@ -649,7 +648,7 @@ fn run_spacing_line_height_and_mixed_sizes_affect_exact_geometry() {
     );
     let container = ContainerStyle::default();
     let mut context = text_context();
-    let mut artifacts = ArtifactSlots::default();
+    let mut artifacts = TextLayoutStore::default();
     let run = [TextRun {
         text: "abc",
         style: &spaced,
@@ -730,7 +729,7 @@ fn indent_newline_preservation_alignment_and_rtl_are_exported() {
         ..ContainerStyle::default()
     };
     let mut context = text_context();
-    let mut artifacts = ArtifactSlots::default();
+    let mut artifacts = TextLayoutStore::default();
     let text = [TextRun {
         text: "abcdefghij",
         style: &style,
@@ -840,7 +839,7 @@ fn compute_leaf_layout_adds_box_model_and_exports_first_baseline() {
         preserve_newlines: false,
     }];
     let mut context = text_context();
-    let mut artifacts = ArtifactSlots::default();
+    let mut artifacts = TextLayoutStore::default();
     let mut measurer =
         TextMeasurer::new(&mut context, &mut artifacts, &container, runs.into_iter());
 
@@ -856,7 +855,6 @@ fn compute_leaf_layout_adds_box_model_and_exports_first_baseline() {
     );
 }
 
-/// Host-private dispatch: which algorithm lays out a [`SourceNode`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum HostDisplay {
     #[default]
@@ -909,7 +907,7 @@ struct SourceNode {
 struct SessionNode {
     cache: RefCell<Cache>,
     layout: RefCell<Layout>,
-    artifacts: RefCell<ArtifactSlots>,
+    artifacts: RefCell<TextLayoutStore>,
     static_position: Cell<Point<f32>>,
 }
 
@@ -1002,7 +1000,7 @@ impl<'t> LayoutNode for HostRef<'t> {
         &self.source().style
     }
 
-    fn compute_child_layout(self, input: LayoutInput) -> LayoutOutput {
+    fn compute_layout(self, input: LayoutInput) -> LayoutOutput {
         let node = self.source();
         let display = node.display;
         compute_cached_layout(self, input, |handle, input| match display {
@@ -1016,8 +1014,6 @@ impl<'t> LayoutNode for HostRef<'t> {
                     style: &node.run_style,
                     preserve_newlines: false,
                 }];
-                // Node-scoped `RefMut` borrows: both drop with the measurer
-                // before the cache wrapper stores the result.
                 let mut text = tree.text.borrow_mut();
                 let mut artifacts = handle.slots().artifacts.borrow_mut();
                 let mut measurer =
@@ -1036,7 +1032,7 @@ impl<'t> LayoutNode for HostRef<'t> {
         read(&layout)
     }
 
-    fn set_final_layout(self, _layout: Layout) {
+    fn set_rounded_layout(self, _layout: Layout) {
         unreachable!("host test never rounds layouts")
     }
 
@@ -1044,17 +1040,15 @@ impl<'t> LayoutNode for HostRef<'t> {
         self.slots().static_position.set(static_position);
     }
 
-    fn cache_get(self, input: LayoutInput) -> Option<LayoutOutput> {
+    fn cached_layout(self, input: LayoutInput) -> Option<LayoutOutput> {
         self.slots().cache.borrow().get(input)
     }
 
-    fn cache_store(self, input: LayoutInput, output: LayoutOutput) {
+    fn store_cached_layout(self, input: LayoutInput, output: LayoutOutput) {
         self.slots().cache.borrow_mut().store(input, output);
     }
 
-    fn cache_clear(self) {
-        // Joint invalidation: dropping the box cache also drops the node's
-        // retained shaping artifacts.
+    fn clear_layout_cache(self) {
         let slots = self.slots();
         slots.cache.borrow_mut().clear();
         slots.artifacts.borrow_mut().invalidate();
@@ -1122,7 +1116,7 @@ fn flex_baseline_integration_reuses_artifacts_and_jointly_invalidates_caches() {
     compute_root_layout(tree.node(root), Size::MAX_CONTENT);
     assert_eq!(tree.leaf_measure_calls.get(), calls_after_first_layout);
 
-    tree.node(small).cache_clear();
+    tree.node(small).clear_layout_cache();
     assert!(tree.session_node(small).cache.borrow().is_empty());
     assert!(
         tree.session_node(small)
@@ -1138,7 +1132,7 @@ fn flex_baseline_integration_reuses_artifacts_and_jointly_invalidates_caches() {
             .committed()
             .is_none()
     );
-    tree.node(root).cache_clear();
+    tree.node(root).clear_layout_cache();
     compute_root_layout(tree.node(root), Size::MAX_CONTENT);
     assert!(tree.leaf_measure_calls.get() > calls_after_first_layout);
 }

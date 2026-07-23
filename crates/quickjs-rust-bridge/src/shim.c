@@ -140,7 +140,6 @@ QjsRuntime *qjs_runtime_new(void) {
     }
     runtime->raw = JS_NewRuntime();
     if (runtime->raw != NULL) {
-        /* Native UI runtimes must never block the owner thread in Atomics.wait. */
         JS_SetCanBlock(runtime->raw, 0);
         JS_SetHostPromiseRejectionTracker(runtime->raw,
                                           qjs_promise_rejection_tracker,
@@ -171,7 +170,6 @@ void qjs_runtime_free(QjsRuntime *runtime) {
 }
 
 JSContext *qjs_context_new(QjsRuntime *runtime) {
-    /* The rejection sidecar uses this sole context to own captured reasons. */
     assert(runtime->context == NULL);
     runtime->context = JS_NewContext(runtime->raw);
     return runtime->context;

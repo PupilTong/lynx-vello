@@ -7,7 +7,7 @@ use divan::counter::ItemsCount;
 use neutron_star::compute::LeafMeasureInput;
 use neutron_star::geometry::Size;
 use neutron_star::style::{CoreStyle, TextContainerStyle, TextRun, TextRunStyle};
-use neutron_star::text::{ArtifactSlots, TextContext, TextMeasurer};
+use neutron_star::text::{TextContext, TextLayoutStore, TextMeasurer};
 use neutron_star::tree::{AvailableSpace, LayoutGoal};
 use stylo::values::computed::Display;
 use stylo::values::computed::font::{
@@ -35,7 +35,6 @@ fn main() {
     divan::main();
 }
 
-/// The one named family every benchmark run resolves against.
 fn ahem_family() -> FontFamily {
     FontFamily {
         families: FontFamilyList {
@@ -79,7 +78,7 @@ impl TextRunStyle for RunStyle {
 
 #[derive(Debug)]
 struct TextCase {
-    artifacts: ArtifactSlots,
+    artifacts: TextLayoutStore,
     container: ContainerStyle,
     run_styles: Vec<RunStyle>,
     spec: &'static [(&'static str, f32)],
@@ -88,7 +87,7 @@ struct TextCase {
 impl TextCase {
     fn new(spec: &'static [(&'static str, f32)]) -> Self {
         Self {
-            artifacts: ArtifactSlots::default(),
+            artifacts: TextLayoutStore::default(),
             container: ContainerStyle,
             run_styles: spec
                 .iter()

@@ -1,21 +1,12 @@
 //! Inheritance and computed-value semantics — ported from
 //! `lynx/core/renderer/css/computed_css_style_unittest.cc` and
 //! `computed_css_style_css_text_helper_unittest.cc`.
-//!
-//! Scope: `enableCSSSelector = true` / `enableRemoveCSSScope = true`.
-//! Inheritance policy is web-core parity (deviations.md): stylo's always-on
-//! W3C inheritance — each property's intrinsic `inherited` flag — replaces
-//! native Lynx's `enableCSSInheritance` allowlist, with identical observable
-//! results for the properties exercised here. Custom properties inherit
-//! unconditionally in both worlds.
 
 mod common;
 
 use common::{Doc, parses, rgb, specified};
 use w3c_dom::property_is_supported;
 
-// C++: ComputedCSSStyleTest inherit-helper cases (W3C-corrected: intrinsic
-// inherited-flags instead of an explicit allowlist; same outcomes).
 #[test]
 fn inherited_and_non_inherited_properties() {
     let mut doc = Doc::with_css(
@@ -34,10 +25,6 @@ fn inherited_and_non_inherited_properties() {
     }
 }
 
-// C++: ComputedCSSStyleTest.FinalizeCustomPropertiesResolvesVariables +
-// CopyFromPreservesComputedCssStateIndependently — modeled as sibling
-// subtrees whose --base differs; dependent --accent re-resolves per subtree
-// with no aliasing.
 #[test]
 fn custom_properties_resolve_and_inherit_independently() {
     let mut doc = Doc::with_css(
@@ -55,9 +42,6 @@ fn custom_properties_resolve_and_inherit_independently() {
     assert_eq!(doc.color(green_probe), rgb(0, 128, 0));
 }
 
-// C++: ComputedCSSStyleCSSTextHelperTest.direction_css_text — kNormal/
-// kLynxRtl are Lynx-internal enum states; the author-facing surface is
-// ltr/rtl with initial ltr.
 #[test]
 fn direction_computed_values() {
     let mut doc = Doc::with_css(".rtl { direction: rtl } .ltr { direction: ltr }");
@@ -72,8 +56,6 @@ fn direction_computed_values() {
     assert_eq!(doc.value(inherited, "direction"), "rtl", "inherits");
 }
 
-// C++: ComputedCSSStyleCSSTextHelperTest.background_position_one_value_syntax
-// — the missing axis defaults to center (50%).
 #[test]
 fn background_position_one_value_syntax() {
     let rows: &[(&str, &str, &str)] = &[
@@ -98,9 +80,6 @@ fn background_position_one_value_syntax() {
     }
 }
 
-// C++: ComputedCSSStyleCSSTextHelperTest.background_position_two_value_syntax
-// — all 30 rows; edge keywords are order-independent across axes, units are
-// preserved.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn background_position_two_value_syntax() {
@@ -144,17 +123,10 @@ fn background_position_two_value_syntax() {
         assert_eq!(doc.value(el, "background-position-x"), x, "`{input}` x");
         assert_eq!(doc.value(el, "background-position-y"), y, "`{input}` y");
     }
-    // A vertical/horizontal keyword pair in the wrong slots without being
-    // reorderable is invalid: `top bottom` never parses.
     assert!(!parses("background-position", "top bottom"));
     assert!(!parses("background-position", "left right"));
 }
 
-// C++: ComputedCSSStyleCSSTextHelperTest.background_position_multi_
-// background_images — W3C-corrected: per css-backgrounds-3 the COMPUTED list
-// is the specified list; repeating it across N image layers is a used-value
-// (paint-time) operation, not a computed-value one. Lynx materialized the
-// repetition in computed style.
 #[test]
 fn background_position_list_stays_specified_length() {
     let mut doc = Doc::with_css(
@@ -176,10 +148,6 @@ fn background_position_list_stays_specified_length() {
     );
 }
 
-// C++: ComputedCSSStyleCSSTextHelperTest.border_width_css_text — computed
-// border width is 0 when border-style is none (Lynx flag-off default ==
-// stylo == W3C used-value rule applied at computed time). The
-// css_align_with_legacy_w3c_ 3px branch is native-only config, not ported.
 #[test]
 fn border_widths_require_a_border_style() {
     let mut doc = Doc::with_css(
@@ -201,10 +169,6 @@ fn border_widths_require_a_border_style() {
     assert_eq!(doc.value(solid, "border-bottom-width"), "30px");
     assert_eq!(doc.value(solid, "border-left-width"), "40px");
 
-    // Fractional widths: computed border widths snap DOWN to whole device
-    // pixels (minimum one device pixel for nonzero values) — Gecko/stylo
-    // behavior, intentionally diverging from native Lynx's raw floats. At
-    // DPR 1 the C++ float rows (2.5/3.75/1.25/0.5) land on whole px:
     doc.set_inline(solid, "border-width: 2.5px 3.75px 1.25px 0.5px");
     doc.flush();
     assert_eq!(doc.value(solid, "border-top-width"), "2px");
@@ -216,8 +180,6 @@ fn border_widths_require_a_border_style() {
         "nonzero widths never snap to zero"
     );
 
-    // On a DPR-2 device half-pixel granularity survives, so the fractional
-    // intent of the C++ rows is still observable.
     let mut hidpi = Doc::with_device(common::device_with(
         800.0,
         600.0,
@@ -234,9 +196,6 @@ fn border_widths_require_a_border_style() {
     assert_eq!(hidpi.value(el, "border-left-width"), "0.5px");
 }
 
-// C++: ComputedCSSStyleCSSTextHelperTest border-color cases — W3C-corrected:
-// the initial border color is `currentColor` (resolving to the computed
-// `color`), not Lynx's hardcoded black. Exposed with a non-black color.
 #[test]
 fn border_color_defaults_to_current_color() {
     let mut doc = Doc::with_css(
@@ -263,13 +222,6 @@ fn border_color_defaults_to_current_color() {
     );
 }
 
-// C++: ComputedCSSStyleTest text-decoration extension cases — the whole
-// thickness family is an ENGINE GAP today: the vendored servo build
-// implements no `text-decoration-thickness` longhand at all (gecko-only
-// upstream), and the Lynx-only `-x-text-decoration-width`/`-x-…-gap`
-// longhands are not in the fork's property surface. Spec-correct
-// expectations kept below under #[ignore]; this live test pins the current
-// absence so any change is noticed.
 #[test]
 fn text_decoration_thickness_family_is_absent() {
     for missing in [
@@ -283,16 +235,10 @@ fn text_decoration_thickness_family_is_absent() {
              `text_decoration_thickness_values` and port the C++ rows"
         );
     }
-    // Without a thickness longhand the shorthand grammar has no <length>
-    // slot, so a thickness-bearing shorthand drops entirely (which also
-    // matches the C++ negative-thickness rejection row).
     assert!(!parses("text-decoration", "underline 2px"));
     assert!(!parses("text-decoration", "underline -1px"));
 }
 
-// C++: ComputedCSSStyleTest.StoresTextDecorationExtensionValues +
-// AppliesTextDecorationThicknessFromShorthand — spec-correct expectations,
-// blocked on the engine gap above.
 #[test]
 #[ignore = "engine-gap: no text-decoration-thickness longhand in the servo build (gecko-only upstream)"]
 fn text_decoration_thickness_values() {
@@ -320,9 +266,6 @@ fn text_decoration_thickness_values() {
     assert_eq!(doc.value(el, "text-decoration-thickness"), "auto");
 }
 
-// C++: RejectsInvalidTextDecorationThicknessInShorthand — the observable
-// half that works without the thickness longhand: invalid shorthands drop
-// entirely, valid line-only shorthands apply.
 #[test]
 fn text_decoration_shorthand_applies_line() {
     let mut doc = Doc::new();
@@ -339,14 +282,3 @@ fn text_decoration_shorthand_applies_line() {
         "invalid shorthand drops entirely (no partial application)"
     );
 }
-
-// Skipped (skip-internal): resolved-values map bookkeeping, dirty/reset
-// bitsets, IsPlatformProperty categorization, CanonicalComputedValue
-// variants and transition extraction, Lepus serialization helpers
-// (FloatToPixelString, Uint32ToRGBString, ConcatStrings…), and the
-// GetComputedStyleByPropertyID router — native data-structure plumbing.
-// Skipped (skip-out-of-scope): width/height/four-sides/padding/margin/
-// border-radius/filter CSSText — they read layout_result (layout output),
-// not cascade output; layout serialization belongs to the layout engine.
-// Skipped (skip-out-of-scope): canonical transition property surface — the
-// animation runtime lands with the render engine (§C.11/§C.12).

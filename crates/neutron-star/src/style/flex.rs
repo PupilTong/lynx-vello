@@ -1,18 +1,4 @@
 //! Flexbox style protocol (CSS Flexible Box Layout Module Level 1).
-//!
-//! Two traits, mirroring the spec's split of responsibilities: the
-//! **container** decides axes, wrapping, and distribution
-//! ([`FlexContainerStyle`]); each **item** decides its own flexibility and
-//! self-alignment ([`FlexItemStyle`]). The L1 flexbox algorithm reads both
-//! views through [`LayoutNode::style`], narrowing the node's style type with
-//! `FlexContainerStyle + FlexItemStyle` bounds.
-//!
-//! Alignment values are stylo's `AlignFlags`-based wrappers
-//! ([`ContentDistribution`], [`ItemPlacement`], [`SelfAlignment`]); the
-//! `normal`/`auto` keywords are encoded in the flags and normalized by the
-//! algorithm at style-read time.
-//!
-//! [`LayoutNode::style`]: crate::tree::LayoutNode::style
 
 use std::sync::LazyLock;
 
@@ -25,84 +11,53 @@ use stylo::values::computed::{
 use crate::geometry::Size;
 use crate::style::CoreStyle;
 
-/// Lendable initial values for the defaulted borrowed accessors (stylo
-/// constructors are not `const`).
 static FLEX_BASIS_AUTO: LazyLock<FlexBasis> = LazyLock::new(FlexBasis::auto);
 static GAP_NORMAL: NonNegativeLengthPercentageOrNormal =
     NonNegativeLengthPercentageOrNormal::Normal;
 
-/// Style of a node *as a flex container*.
-///
-/// Defaults are the CSS initial values.
 pub trait FlexContainerStyle: CoreStyle {
-    /// `flex-direction`. Note `Row`/`RowReverse` are additionally flipped
-    /// when [`CoreStyle::direction`] is `Rtl` — the flip is applied inside
-    /// the algorithm.
     fn flex_direction(&self) -> flex_direction::T {
         flex_direction::T::Row
     }
 
-    /// `flex-wrap`.
     fn flex_wrap(&self) -> flex_wrap::T {
         flex_wrap::T::Nowrap
     }
 
-    /// `gap` (`column-gap` is `width`, `row-gap` is `height`), lent from
-    /// the style view; `normal` resolves to zero.
-    ///
-    /// Percentage basis: the container's content-box size in the gap's axis.
     fn gap(&self) -> Size<&NonNegativeLengthPercentageOrNormal> {
         Size::new(&GAP_NORMAL, &GAP_NORMAL)
     }
 
-    /// `align-content` — cross-axis distribution of lines.
     fn align_content(&self) -> ContentDistribution {
         ContentDistribution::normal()
     }
 
-    /// `align-items` — default cross-axis alignment of items (`normal`
-    /// behaves as `stretch` here).
     fn align_items(&self) -> ItemPlacement {
         ItemPlacement::normal()
     }
 
-    /// `justify-content` — main-axis distribution of items.
     fn justify_content(&self) -> ContentDistribution {
         ContentDistribution::normal()
     }
 }
 
-/// Style of a node *as a flex item* (i.e. as read by its parent container's
-/// layout).
-///
-/// Defaults are the CSS initial values.
 pub trait FlexItemStyle: CoreStyle {
-    /// `flex-basis`, lent from the style view. `content` has no Starlight
-    /// sizing behavior and defers to [`CoreStyle::size`] (documented
-    /// behavior delta of the stylo vocabulary swap).
-    ///
-    /// Percentage basis: the container's content-box main-axis size.
     fn flex_basis(&self) -> &FlexBasis {
         &FLEX_BASIS_AUTO
     }
 
-    /// `flex-grow`.
     fn flex_grow(&self) -> NonNegativeNumber {
         NonNegativeNumber::from(0.0)
     }
 
-    /// `flex-shrink`.
     fn flex_shrink(&self) -> NonNegativeNumber {
         NonNegativeNumber::from(1.0)
     }
 
-    /// `align-self`. `auto` defers to the container's `align-items`.
     fn align_self(&self) -> SelfAlignment {
         SelfAlignment::auto()
     }
 
-    /// `order` — layout/paint reordering among siblings; lower comes first.
-    /// Lynx supports this standard property, so it is first-class protocol.
     fn order(&self) -> i32 {
         0
     }

@@ -1,24 +1,5 @@
 //! CSS Flexible Box Layout Module Level 1 layout algorithm.
-//!
-//! The implementation follows the pass ordering in Flexbox §9. Topology and
-//! styles are immutable for the layout epoch, while recursive measurement and
-//! durable writes go through the [`LayoutNode`] handle into host-owned
-//! interior-mutable per-node slots. This lets borrowed style views remain
-//! live across child layout without raw style snapshots or self-referential
-//! scratch structures.
-//!
-//! The current protocol deliberately leaves formatting-tree preprocessing
-//! (anonymous item generation) to the host and has no representation for
-//! replaced-vs-non-replaced automatic minimums or non-horizontal writing
-//! modes. `flex-basis: content` defers to the item's `size` (documented
-//! vocabulary-swap delta), and the lynx grammar has no `visibility: collapse`
-//! so no collapse-strut pass exists. The algorithm is spec-oriented over the
-//! representable surface; ordinary items use the non-replaced §4.5
-//! automatic-minimum rule.
 
-// Item and line counts are transient Vec lengths. A flex container cannot
-// practically approach f32's exact-integer limit, while alignment division
-// necessarily operates in the engine's f32 coordinate space.
 #![allow(clippy::cast_precision_loss)]
 
 use stylo::computed_values::{box_sizing, direction, flex_direction, flex_wrap};
@@ -106,21 +87,14 @@ const fn direction_is_reverse(direction: flex_direction::T) -> bool {
 }
 
 /// Physical main/cross-axis mapping used by every flex pass.
-///
-/// Scratch positions stay flow-relative; the reversal flags convert them to
-/// physical coordinates only when final child locations are produced.
 #[derive(Debug, Clone, Copy)]
 #[allow(clippy::struct_excessive_bools)]
 struct Axes {
     main: Axis,
     cross: Axis,
-    /// Physical direction of flex main-start: right/bottom when true.
     main_reverse: bool,
-    /// Physical direction of the un-reversed logical main-start.
     main_base_reverse: bool,
-    /// Physical direction of flex cross-start, including wrap-reverse.
     cross_reverse: bool,
-    /// Physical direction of the un-reversed logical cross-start.
     cross_base_reverse: bool,
 }
 
@@ -166,12 +140,7 @@ impl Axes {
 struct FlexItem<N> {
     key: ItemKey<N>,
     direction: direction::T,
-    /// The item's positioning scheme. In-flow schemes lay out identically
-    /// except that only `relative` applies the definite-inset visual nudge
-    /// (`sticky` is nudged by the host at scroll time, `static` never).
     position: PositionProperty,
-    /// The item's resolved self-alignment: one of the canonical
-    /// [`normalize_item_alignment`] keywords, never `AUTO`/`NORMAL`.
     align_self: AlignFlags,
     aspect_ratio: Option<f32>,
     box_sizing: box_sizing::T,
@@ -315,8 +284,6 @@ fn alignment_distribution(
     }
 
     let value = if free_space < 0.0 {
-        // Distributed values (and stretch) fall back safely when space is
-        // negative; positional values keep overflowing both edges.
         if value == AlignFlags::SPACE_BETWEEN || value == AlignFlags::STRETCH {
             AlignFlags::FLEX_START
         } else if value == AlignFlags::SPACE_AROUND || value == AlignFlags::SPACE_EVENLY {
@@ -353,15 +320,10 @@ fn alignment_distribution(
         let between = free_space / (count + 1) as f32;
         (between, between)
     } else {
-        // FLEX_START, STRETCH, and single-item SPACE_BETWEEN pack at start.
         (0.0, 0.0)
     }
 }
 
-/// Whether a preferred-size value behaves as `auto`. The lynx-parseable
-/// keywords Starlight has no sizing behavior for (bare `fit-content`,
-/// `stretch`, `-webkit-fill-available`) are treated as `auto` (documented
-/// vocabulary-swap delta).
 #[inline]
 fn style_size_behaves_auto(value: &StyleSize) -> bool {
     match value {
@@ -379,10 +341,6 @@ fn style_size_behaves_auto(value: &StyleSize) -> bool {
     }
 }
 
-/// Whether a `flex-basis` value behaves as `auto` (defer to the item's
-/// `size`). `content` has no protocol representation of its own and also
-/// defers to the size (documented vocabulary-swap delta), as do the
-/// treated-as-auto sizing keywords.
 #[inline]
 fn flex_basis_behaves_auto(value: &FlexBasis) -> bool {
     match value {
@@ -391,8 +349,6 @@ fn flex_basis_behaves_auto(value: &FlexBasis) -> bool {
     }
 }
 
-/// Resolves the quantitative part of `flex-basis` against the main-axis
-/// percentage basis.
 #[inline]
 fn resolve_flex_basis(value: &FlexBasis, basis: Option<f32>) -> Option<f32> {
     match value {
@@ -502,7 +458,7 @@ where
     N: LayoutNode,
     N::Style: FlexContainerStyle + FlexItemStyle,
 {
-    let mut input = LayoutInput::compute_size(
+    let mut input = LayoutInput::measure(
         known_dimensions,
         parent_size,
         available_space,
@@ -510,7 +466,7 @@ where
     );
     input.definite_dimensions = definite_dimensions;
     input.sizing_mode = sizing_mode;
-    node.compute_child_layout(input)
+    node.compute_layout(input)
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -530,9 +486,6 @@ fn determine_flex_base_sizes<N>(
 
     for item in items {
         let node = item.key.node;
-        // Recursive measurement mutates only host-owned per-node slots, so
-        // this borrowed style view (and the raw values lent from it) stays
-        // valid across the recursive measurements below.
         let style = node.style();
         let raw_size = style.size();
         let raw_min_size = style.min_size();
@@ -568,7 +521,7 @@ fn determine_flex_base_sizes<N>(
                 known_is_definite,
                 contribution_parent_size,
                 min_available,
-                SizingMode::ContentSize,
+                SizingMode::IgnoreSizeStyles,
                 axes.main.requested(),
             )
             .size,
@@ -580,7 +533,7 @@ fn determine_flex_base_sizes<N>(
                 known_is_definite,
                 contribution_parent_size,
                 max_available,
-                SizingMode::ContentSize,
+                SizingMode::IgnoreSizeStyles,
                 axes.main.requested(),
             )
             .size,
@@ -593,7 +546,7 @@ fn determine_flex_base_sizes<N>(
                     known_is_definite,
                     contribution_parent_size,
                     available_space,
-                    SizingMode::ContentSize,
+                    SizingMode::IgnoreSizeStyles,
                     axes.main.requested(),
                 )
                 .size,
@@ -663,9 +616,6 @@ fn determine_flex_base_sizes<N>(
         item.flex_basis = if let Some(basis) = definite_basis {
             basis
         } else {
-            // `flex-basis: auto`/`content` defer to the preferred size; a
-            // non-auto basis whose quantitative resolution failed keeps its
-            // own value form.
             let content_basis: &StyleSize = if flex_basis_is_auto {
                 axes.main.size(raw_size)
             } else {
@@ -684,13 +634,7 @@ fn determine_flex_base_sizes<N>(
                         .unwrap_or(max_content);
                     max_content.min(limit.max(min_content))
                 }
-                StyleSize::LengthPercentage(lp) if lp.0.to_percentage().is_none() => {
-                    // A calc() carrying a percentage without a definite basis
-                    // sizes to max-content, exactly like the old symbolic
-                    // `Calc` arm. (A plain percentage takes the arm below; a
-                    // plain length always resolved above.)
-                    max_content
-                }
+                StyleSize::LengthPercentage(lp) if lp.0.to_percentage().is_none() => max_content,
                 StyleSize::Auto
                 | StyleSize::LengthPercentage(_)
                 | StyleSize::FitContent
@@ -708,7 +652,6 @@ fn determine_flex_base_sizes<N>(
             }
         };
 
-        // Flexbox §9.2 deliberately allows a negative inner flex base.
         item.inner_flex_basis = item.flex_basis - main_floor;
 
         let explicit_min = axes.main.size(item.min_size);
@@ -724,9 +667,6 @@ fn determine_flex_base_sizes<N>(
                 .then_some(preferred_main)
                 .flatten();
             let mut content_suggestion = min_content;
-            // The current protocol cannot distinguish replaced elements;
-            // ordinary flex items use the non-replaced max(content,
-            // transferred) rule from §4.5.
             if let Some(transferred) = transferred_suggestion {
                 content_suggestion = content_suggestion.max(transferred);
             }
@@ -822,8 +762,6 @@ fn collect_flex_lines<N>(
             let item_size = item_outer_hypothetical_main(&items[end], axes);
             let candidate_gap = if prior_participants == 0 { 0.0 } else { gap };
             let candidate = occupied + candidate_gap + item_size;
-            // The first item always establishes a line. A zero-sized item at
-            // an exact boundary remains on the preceding line (§9.3 note).
             if prior_participants > 0
                 && candidate > limit
                 && !(item_size == 0.0 && candidate_gap == 0.0)
@@ -1048,8 +986,6 @@ fn resolve_flexible_lengths<N>(
             }
         }
         if !froze_any {
-            // Floating-point cancellation must not turn the normative freeze
-            // loop into an infinite loop.
             for item in line_items.iter_mut() {
                 item.frozen = true;
             }
@@ -1090,7 +1026,7 @@ fn determine_hypothetical_cross_sizes<N>(
                 known_is_definite,
                 container_inner_size,
                 child_available,
-                SizingMode::InherentSize,
+                SizingMode::ApplySizeStyles,
                 RequestedAxis::Both,
             );
             let inset_size = box_inset_size(item.padding, item.border);
@@ -1138,8 +1074,6 @@ fn calculate_line_cross_sizes<N>(
                 && !flow_start_bool(item.margin_auto, axes.cross, axes.cross_reverse)
                 && !flow_end_bool(item.margin_auto, axes.cross, axes.cross_reverse)
             {
-                // Baseline geometry is physical top-to-bottom even when
-                // wrap-reverse changes flex cross-start.
                 let before = item.margin.top + item.baseline;
                 let after = outer_cross - before;
                 largest_before_baseline = largest_before_baseline.max(before);
@@ -1365,9 +1299,6 @@ fn align_items_cross_axis<N>(items: &mut [FlexItem<N>], lines: &[FlexLine], axes
                         set_flow_end(&mut item.margin, axes.cross, axes.cross_reverse, share);
                     }
                 } else {
-                    // The overflow rule is keyed to logical block/inline
-                    // start, not flex cross-start; wrap-reverse must not
-                    // swap which auto margin is zeroed.
                     let logical_start_auto =
                         flow_start_bool(item.margin_auto, axes.cross, axes.cross_base_reverse);
                     let logical_end_auto =
@@ -1422,8 +1353,6 @@ fn align_items_cross_axis<N>(items: &mut [FlexItem<N>], lines: &[FlexLine], axes
             } else if item.align_self == AlignFlags::CENTER {
                 free / 2.0
             } else {
-                // FLEX_START, STRETCH, and BASELINE (in a column container)
-                // align to the flex cross-start edge.
                 0.0
             };
             item.cross_position =
@@ -1508,20 +1437,16 @@ where
     for line in lines {
         for item in &mut items[line.start..line.end] {
             let target_size = size_from_axes(axes, item.target_main, item.target_cross);
-            let mut input = LayoutInput::perform_layout(
+            let mut input = LayoutInput::commit(
                 target_size.map(Some),
                 parent_size,
                 target_size.map(AvailableSpace::Definite),
             );
             axes.main
                 .set_size(&mut input.definite_dimensions, item.main_size_is_definite);
-            // The parent has already applied the flex item's own sizing,
-            // min/max and aspect-ratio rules to both target axes.
-            input.sizing_mode = SizingMode::ContentSize;
-            let output = item.key.node.compute_child_layout(input);
+            input.sizing_mode = SizingMode::IgnoreSizeStyles;
+            let output = item.key.node.compute_layout(input);
 
-            // Only `relative` nudges at layout time; `static` has no offsets
-            // and `sticky` is a host scroll-time post-pass.
             let offset = if item.position == PositionProperty::Relative {
                 relative_offset(item.inset, item.direction)
             } else {
@@ -1541,8 +1466,6 @@ where
             layout.margin = item.margin;
             item.key.node.set_unrounded_layout(layout);
 
-            // A scroll-container child traps its interior scrollable overflow;
-            // any other child propagates border box ∪ content_size (§3.3).
             accumulate_scrollable_overflow(
                 &mut content_size,
                 location,
@@ -1603,7 +1526,6 @@ fn static_position_for_absolute<N>(
     } else if item.align_self == AlignFlags::CENTER {
         free_cross / 2.0
     } else {
-        // FLEX_START, BASELINE, and STRETCH use the flex cross-start edge.
         0.0
     };
     let cross_flow = cross_alignment + flow_start(item.margin, axes.cross, axes.cross_reverse);
@@ -1624,8 +1546,6 @@ fn static_position_for_absolute<N>(
     axes.main.set_point(&mut border_origin, main_border);
     axes.cross.set_point(&mut border_origin, cross_border);
 
-    // The protocol records the hypothetical margin-box origin in the
-    // parent's border-box coordinate space.
     Point::new(
         border_origin.x - item.margin.left,
         border_origin.y - item.margin.top,
@@ -1658,9 +1578,6 @@ where
 
     for pending in absolute_items {
         let key = pending.key();
-        // The borrowed view is safe across recursive child layout; only
-        // host-owned layout/cache slots mutate while topology and styles
-        // stay immutable for the flush.
         let style = key.node.style();
         let mut item = resolve_item(key, parent_size, axes, rtl, default_alignment);
         let mut known = item.preferred_size;
@@ -1671,7 +1588,7 @@ where
             item.preferred_size_is_definite,
             parent_size,
             available,
-            SizingMode::InherentSize,
+            SizingMode::ApplySizeStyles,
             RequestedAxis::Both,
         );
         let inset_size = box_inset_size(item.padding, item.border);
@@ -1712,9 +1629,6 @@ where
                 );
                 key.node.set_unrounded_layout(layout);
             }
-            // The containing block is not the layout parent (CSS `fixed`):
-            // record the static position; the host completes layout in its
-            // positioned pass.
             PositionProperty::Fixed => {
                 key.node.set_static_position(static_position);
             }
@@ -1724,25 +1638,13 @@ where
     content_size
 }
 
-/// Computes one flex container according to CSS Flexible Box Layout §9.
-///
-/// Style and child topology are read through the node handle and stay
-/// immutable for the flush; recursive layout and durable geometry writes go
-/// through the handle into host-owned per-node slots. Child layouts are
-/// stored only for [`LayoutGoal::Commit`].
 #[allow(clippy::too_many_lines)]
 pub fn compute_flexbox_layout<N>(node: N, input: LayoutInput) -> LayoutOutput
 where
     N: LayoutNode,
     N::Style: FlexContainerStyle + FlexItemStyle,
 {
-    // This borrowed style view remains live for the whole algorithm;
-    // recursive calls mutate only host-owned per-node layout slots.
     let style = node.style();
-    // Size containment substitutes contain-intrinsic-size for the container's
-    // content-derived auto size (§4.2); layout containment suppresses the
-    // baseline the container would export to its parent. Children are still
-    // laid out either way.
     let size_containment = size_containment(&style);
     let layout_contained = style.containment().contains(Contain::LAYOUT);
     let flex_wrap = style.flex_wrap();
@@ -1765,7 +1667,7 @@ where
         rtl,
     )
     .unwrap_or(AlignFlags::FLEX_START);
-    let style_definite = if input.sizing_mode == SizingMode::ContentSize {
+    let style_definite = if input.sizing_mode == SizingMode::IgnoreSizeStyles {
         Size::new(false, false)
     } else {
         preferred_size_definiteness(
@@ -1925,15 +1827,8 @@ where
     }
     let inner_cross = axes.cross.size(inner_size).unwrap_or(0.0);
     if item_inline_basis_was_indefinite {
-        // Cyclic percentages contribute zero to intrinsic sizing, but their
-        // used values resolve against the resulting content-box width. Run
-        // the item/line phases once more with that now-definite basis while
-        // keeping the intrinsic container size fixed.
         gap = resolve_gap(gap_value, inner_size);
         main_gap = axes.main.size(gap);
-        // Re-resolve compact scratch in place. Raw style is refetched through
-        // the node handle; no second full-style snapshot or parallel style
-        // Vec is needed.
         for item in &mut items {
             let key = item.key;
             *item = resolve_item(key, inner_size, axes, rtl, align_items);
@@ -2005,8 +1900,6 @@ where
     let provisional_baseline =
         first_container_baseline(&items, &lines, axes, inner_size, content_origin);
     if matches!(input.goal, LayoutGoal::Measure(_)) {
-        // Layout containment makes the box an independent formatting context
-        // whose contents cannot contribute a baseline to the parent.
         let baseline = if layout_contained {
             None
         } else {
@@ -2042,10 +1935,6 @@ where
         align_items,
     );
     content_size = content_size.zip_map(absolute_content_size, f32::max);
-    // css-contain-2 §3.3: with `overflow: visible`, a layout-contained box's
-    // descendant overflow is ink-only, so its scrollable overflow collapses to
-    // its border box. A scroll container keeps the interior union (its own
-    // scroll range).
     let content_size = own_scrollable_overflow(&style, outer_size, content_size);
 
     let baseline = if layout_contained {
@@ -2093,7 +1982,7 @@ mod tests {
             &TestStyle
         }
 
-        fn compute_child_layout(self, _input: LayoutInput) -> LayoutOutput {
+        fn compute_layout(self, _input: LayoutInput) -> LayoutOutput {
             unreachable!("line-math tests never recurse into children")
         }
 
@@ -2105,7 +1994,7 @@ mod tests {
             unreachable!("line-math tests never read layouts")
         }
 
-        fn set_final_layout(self, _layout: Layout) {
+        fn set_rounded_layout(self, _layout: Layout) {
             unreachable!("line-math tests never round layouts")
         }
 
@@ -2113,14 +2002,13 @@ mod tests {
             unreachable!("line-math tests never hoist items")
         }
 
-        // Caching deliberately disabled.
-        fn cache_get(self, _input: LayoutInput) -> Option<LayoutOutput> {
+        fn cached_layout(self, _input: LayoutInput) -> Option<LayoutOutput> {
             None
         }
 
-        fn cache_store(self, _input: LayoutInput, _output: LayoutOutput) {}
+        fn store_cached_layout(self, _input: LayoutInput, _output: LayoutOutput) {}
 
-        fn cache_clear(self) {}
+        fn clear_layout_cache(self) {}
     }
 
     fn item(main: f32, cross: f32) -> FlexItem<TestRef> {

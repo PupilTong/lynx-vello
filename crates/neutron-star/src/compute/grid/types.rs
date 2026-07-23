@@ -1,8 +1,4 @@
 //! Transient, algorithm-private Grid state.
-//!
-//! Raw style remains host-owned and is re-fetched through the node handle.
-//! Only stable identity, resolved values, and compact hot fields needed by
-//! repeated sizing passes live in the contiguous scratch vectors below.
 
 use stylo::computed_values::{box_sizing, direction};
 use stylo::values::computed::{
@@ -78,14 +74,6 @@ impl Axis {
     }
 }
 
-/// The intrinsic-keyword projection of one sizing property value, retained
-/// per item so repeated sizing rounds never refetch (and re-clone) the raw
-/// stylo aggregates through the style accessors.
-///
-/// The bare `fit-content`/`stretch`/`-webkit-fill-available` keywords are
-/// treated as `auto` (behavior delta #8), so they project to `None` like
-/// `auto` and quantitative values do. The `fit-content()` limit stays
-/// unresolved: its percentage basis differs per sizing round.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum IntrinsicSize {
     MinContent,
@@ -129,36 +117,20 @@ impl IntrinsicSize {
 }
 
 /// The normalized `minmax()` halves of one track sizing function.
-///
-/// Engine-private scratch built once from stylo's [`TrackSize`], applying
-/// the CSS Grid §7.2 single-value expansions so the sizing passes match on
-/// plain [`TrackBreadth`] halves:
-/// - a lone `<flex>` breadth becomes `minmax(auto, <flex>)`;
-/// - `fit-content(limit)` becomes `minmax(auto, max-content)` with the limit retained in
-///   [`fit_content`](Self::fit_content) (the §12.5 clamp).
-///
-/// A `Flex` breadth in the *minimum* half is unrepresentable in the track
-/// grammar; the sizing passes treat it as `auto` (CSS Grid §7.2.4).
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct TrackSizingFunction {
-    /// The minimum sizing function.
     pub(super) min: TrackBreadth,
-    /// The maximum sizing function (`Flex` = `<flex>`; `MaxContent` when
-    /// [`fit_content`](Self::fit_content) is set).
     pub(super) max: TrackBreadth,
-    /// `Some(limit)` iff the track is `fit-content(limit)`.
     pub(super) fit_content: Option<LengthPercentage>,
 }
 
 impl TrackSizingFunction {
-    /// `auto` (i.e. `minmax(auto, auto)`).
     pub(super) const AUTO: Self = Self {
         min: TrackBreadth::Auto,
         max: TrackBreadth::Auto,
         fit_content: None,
     };
 
-    /// Normalizes one stylo track size into minmax halves.
     pub(super) fn from_style(size: &TrackSize) -> Self {
         match size {
             TrackSize::Breadth(TrackBreadth::Flex(flex)) => Self {
@@ -201,25 +173,15 @@ impl Default for TrackSizingFunction {
 pub(super) struct GridItem<N> {
     pub(super) key: ItemKey<N>,
     pub(super) area: GridArea,
-    /// The item's positioning scheme. In-flow schemes lay out identically
-    /// except that only `relative` applies the definite-inset visual nudge
-    /// (`sticky` is nudged by the host at scroll time, `static` never).
     pub(super) position: PositionProperty,
-    /// Resolved self-alignment keywords: one of the canonical
-    /// `normalize_item_alignment` values, never `AUTO`/`NORMAL`.
     pub(super) align_self: AlignFlags,
     pub(super) justify_self: AlignFlags,
-    /// The item's own inline base direction. Baseline fallback uses
-    /// self-start, which can differ from the Grid container's inline start.
     pub(super) direction: direction::T,
     pub(super) aspect_ratio: Option<f32>,
     pub(super) box_sizing: box_sizing::T,
     pub(super) overflow: Point<Overflow>,
     pub(super) preferred_behaves_auto_or_depends: Size<bool>,
     pub(super) minimum_is_auto: Size<bool>,
-    /// Intrinsic-keyword projections of `width`/`height`, `min-*`, and
-    /// `max-*`, in that order. Basis-independent, so they survive every
-    /// [`refresh_item_basis`](super::refresh_item_basis) re-resolution.
     pub(super) intrinsic_preferred: Size<IntrinsicSize>,
     pub(super) intrinsic_min: Size<IntrinsicSize>,
     pub(super) intrinsic_max: Size<IntrinsicSize>,
@@ -237,8 +199,6 @@ pub(super) struct GridItem<N> {
     pub(super) min_content_contribution: Size<Option<f32>>,
     pub(super) max_content_contribution: Size<Option<f32>>,
     pub(super) measured_baselines: Point<Option<f32>>,
-    /// Start-side shim used while resolving intrinsic row sizes for a
-    /// first-baseline sharing group (Grid §12.5).
     pub(super) baseline_shim: f32,
 }
 
@@ -279,9 +239,6 @@ pub(super) struct Track {
     pub(super) intrinsic_min: bool,
     pub(super) intrinsic_max: bool,
     pub(super) auto_max: bool,
-    /// Temporary §12.5 state: an intrinsic growth limit resolved from
-    /// infinity in the immediately preceding phase may keep growing in the
-    /// following max-content phase.
     pub(super) infinitely_growable: bool,
     pub(super) collapsed: bool,
     pub(super) position: f32,
@@ -300,8 +257,6 @@ pub(super) struct TrackSet {
     pub(super) tracks: Vec<Track>,
     pub(super) gap: f32,
     pub(super) first_coordinate: i32,
-    /// Far-edge positions for start lines inside collapsed track runs.
-    /// Allocated only when `auto-fit` actually collapses a track.
     pub(super) collapsed_line_positions: Option<Vec<f32>>,
 }
 
@@ -329,17 +284,10 @@ impl TrackSet {
         }
     }
 
-    /// Rebuilds logical line positions from the current base sizes using
-    /// the ordinary (pre-alignment) gutter. Gutters adjoining an interior
-    /// collapsed track coincide, so consecutive surviving tracks still have
-    /// exactly one gutter between them. Track sizing calls this once per axis,
-    /// making the many later area queries constant-time.
     pub(super) fn rebuild_positions(&mut self) {
         self.rebuild_positions_with_spacing(0.0, 0.0);
     }
 
-    /// Rebuilds positions after content alignment has introduced an initial
-    /// offset and optional distributed space between visible tracks.
     pub(super) fn rebuild_aligned_positions(&mut self, offset: f32, distributed_gap: f32) {
         self.rebuild_positions_with_spacing(offset, distributed_gap);
     }
@@ -351,10 +299,6 @@ impl TrackSet {
         for track in &mut self.tracks {
             if track.collapsed {
                 saw_collapsed = true;
-                // Retain the preceding track's end edge. `line_position`
-                // selects the following visible track's start edge when this
-                // collapsed line is used as an area's start boundary, which
-                // models the two adjoining gutters as exactly overlapping.
                 track.position = cursor;
                 continue;
             }
@@ -379,25 +323,15 @@ impl TrackSet {
                 }
             }
         } else {
-            // Keep the common path allocation-free, including when a TrackSet
-            // instance is reused after a prior collapsed layout.
             self.collapsed_line_positions = None;
         }
     }
 
-    /// Size of an item area, including one coincident gutter between each
-    /// pair of surviving tracks. Collapsed runs at either span boundary add
-    /// no gutter to the area.
     #[inline]
     pub(super) fn area_size(&self, start: i32, end: i32) -> f32 {
         (self.end_line_position(end) - self.line_position(start)).max(0.0)
     }
 
-    /// Grid §12.1's cross-axis estimate used while columns are sized before
-    /// rows. A row with a definite max track sizing function contributes
-    /// that maximum; if any row in the span has an indefinite maximum, the
-    /// item's available block space is infinite and therefore has no finite
-    /// area estimate.
     pub(super) fn definite_max_area_size(
         &self,
         start: i32,
@@ -423,7 +357,6 @@ impl TrackSet {
         Some(size)
     }
 
-    /// Logical position of a grid line from the start of the content box.
     pub(super) fn line_position(&self, coordinate: i32) -> f32 {
         if coordinate <= self.first_coordinate {
             return self.tracks.first().map_or(0.0, |track| track.position);
@@ -443,19 +376,11 @@ impl TrackSet {
         if !track.collapsed {
             return track.position;
         }
-        // A collapsed track has zero breadth and its adjoining gutters
-        // overlap. For a start boundary, use the cached far edge of that
-        // coincident gutter: the next surviving track's start. The optional
-        // cache keeps every line lookup O(1) while avoiding an allocation for
-        // TrackSets without collapsed tracks.
         self.collapsed_line_positions
             .as_ref()
             .map_or(track.position, |positions| positions[index])
     }
 
-    /// End edge of the track immediately before a grid line. Gutters are
-    /// thick grid lines, so this differs from `line_position()` for an
-    /// internal line: an area's end edge excludes the following gutter.
     pub(super) fn end_line_position(&self, coordinate: i32) -> f32 {
         if coordinate <= self.first_coordinate {
             return self.tracks.first().map_or(0.0, |track| track.position);

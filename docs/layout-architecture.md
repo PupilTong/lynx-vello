@@ -117,7 +117,7 @@ directly on `&'a Node<T>`):
 
 | Item | Provides | Consumed by |
 | --- | --- | --- |
-| `LayoutNode: Copy + Debug` | child iteration (`children`/`child_count`), the borrowed `Style` view, **`compute_child_layout` (the host display/algorithm dispatch point)**, unrounded/final layout and static-position writes, and per-node cache slots (all three cache methods required — a caching host cannot accidentally omit `cache_clear`; uncached hosts no-op all three) | everything |
+| `LayoutNode: Copy + Debug` | child iteration (`children`/`child_count`), the borrowed `Style` view, **`compute_layout` (the host display/algorithm dispatch point)**, unrounded/rounded layout and static-position writes, and per-node cache slots (all three cache methods required — a caching host cannot accidentally omit `clear_layout_cache`; uncached hosts no-op all three) | everything |
 | `CoreStyle` | the box-universal style view every algorithm reads | all algorithms |
 | `FlexContainerStyle`/`FlexItemStyle` | flex views (bounds on `N::Style`) | the L1 flexbox algorithm |
 | `GridContainerStyle`/`GridItemStyle` | grid views, including borrowed `&GridTemplateComponent`/`&ImplicitGridTracks` track-list accessors | the L2 grid algorithm |
@@ -185,7 +185,7 @@ collapsing is the known future widener).
 
 **Recursion round-trips through the host.** An algorithm reads topology and
 styles through node handles, then calls
-`child.compute_child_layout(input)`. The host's implementation
+`child.compute_layout(input)`. The host's implementation
 first handles a non-generated box (`display: none`, i.e. stylo
 `Display::is_none`) by calling `hide_subtree` and
 returning `LayoutOutput::HIDDEN`; this explicit cleanup precedes and bypasses
@@ -241,7 +241,7 @@ the ID, every side slab asserts the same free-list key, and removal drops all
 four entries before reuse. Layout is
 single-threaded, and two rules keep runtime borrow tracking trivial: host
 dispatch must not hold a per-node slot borrow across the recursive
-`compute_child_layout` call, and the engine never re-enters a node's cache
+`compute_layout` call, and the engine never re-enters a node's cache
 while that node's Parley artifact slots are borrowed.
 
 A layout run observes one immutable **epoch**. Style, content, child order,
@@ -371,7 +371,7 @@ physical edges by the style system before layout.
 **Two layout copies, one rounding pass — on the device-pixel grid.**
 Algorithms produce **unrounded** `f32` layouts (`set_unrounded_layout`);
 `round_layout(root, scale)` derives snapped finals through the handles'
-explicit `clone_unrounded_layout`/owned `set_final_layout` pair (whose impl
+explicit `clone_unrounded_layout`/owned `set_rounded_layout` pair (whose impl
 may target a different store, e.g. the paint-facing side of a widget tree).
 Other readers use the scoped `with_unrounded_layout` API. The one whole-record
 clone in the rounding pass is required because the host durably retains both
@@ -488,7 +488,7 @@ captures the boundary's previous committed `LayoutInput`
 style ⇒ identical outer size,
 so only the interior re-arranges and the parent-owned frame stays valid
 (`compute_root_layout` remains the entry for the true tree root). This only
-ever `cache_clear`s;
+ever `clear_layout_cache`s;
 it never reads or weakens cache keys (the key stays the complete
 `LayoutInput`). The style-damage → host-action translation table (REPAINT /
 stacking / overflow-only → no cache work; RELAYOUT → invalidate + re-run;
@@ -503,7 +503,7 @@ Target: modern multi-core CPUs with wide SIMD, deep caches, and GPUs doing
 the painting — layout's job is to never be the frame's bottleneck.
 
 - **Static dispatch end-to-end** (above). The protocol's hot calls
-  (`children`, style accessors, `compute_child_layout`) are all
+  (`children`, style accessors, `compute_layout`) are all
   monomorphized; hosts should `#[inline]` their impls of the first two.
 - **Cheap transient boundary; explicit durable records.** Geometry,
   `LayoutInput`, and `LayoutOutput` are small `Copy` structs (`#[repr(C)]`),
@@ -601,7 +601,7 @@ the painting — layout's job is to never be the frame's bottleneck.
 - **The positioned + rounding tail is scoped to what changed, not the whole
   tree.** The parked-boundary re-runs and the root pass are cache-incremental,
   but the positioned pass (hoisted out-of-flow anchoring) and device-pixel
-  rounding are plain tree walks. `layout_document` scopes them: when nothing has
+  rounding are plain tree walks. `Document::layout` scopes them: when nothing has
   been invalidated since the last pass and the viewport/scale are unchanged it
   **skips the whole pass** (an idle frame is `O(1)`, not an `O(N)` re-walk); when
   every pending change is confined to parked containment boundaries it re-runs
@@ -642,7 +642,7 @@ the painting — layout's job is to never be the frame's bottleneck.
   (layout is rarely the bottleneck vs paint/style, and Yoga/Taffy/Starlight
   are all sequential). The planned extension is a **batched child-layout
   hook**: a defaulted `LayoutNode` method like
-  `compute_child_layouts(self, requests)`
+  `compute_layouts(self, requests)`
   that algorithms call at fan-out points (independent flex-item measure
   probes, grid item contributions); the default body is today's sequential
   loop, and a parallel host overrides it to shard sub-trees across its own
@@ -697,8 +697,8 @@ the engine we're succeeding.
    `display: none` boxes), stable-sort by style `order`, resolve container
    axes from `flex_direction` × `direction` (rtl flips row axes).
 2. **Available space & flex base sizes** (§9.2) — flex base + hypothetical
-   main size per item; child measurement via `compute_child_layout` probes
-   with `SizingMode::ContentSize`.
+   main size per item; child measurement via `compute_layout` probes
+   with `SizingMode::IgnoreSizeStyles`.
 3. **Line breaking** (§9.3) — single line for `NoWrap`, else greedy
    line-fill against main available size including `gap`.
 4. **Resolving flexible lengths** (§9.7) — the freeze/unfreeze grow/shrink

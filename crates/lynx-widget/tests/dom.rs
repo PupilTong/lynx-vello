@@ -5,11 +5,11 @@
 use std::collections::HashSet;
 
 use lynx_widget::{
-    ElementState, EngineMetrics, EventKind, WidgetError, WidgetHandle, WidgetKind, WidgetTree,
+    ElementState, EventBindingKind, ViewMetrics, WidgetError, WidgetHandle, WidgetKind, WidgetTree,
 };
 
 fn tree() -> WidgetTree {
-    WidgetTree::new(EngineMetrics::new(800.0, 600.0, 1.0))
+    WidgetTree::new(ViewMetrics::new(800.0, 600.0, 1.0))
 }
 
 /// `page > container > [a, b, c]`.
@@ -25,13 +25,13 @@ fn three_children() -> (WidgetTree, ThreeChildren) {
     let mut doc = tree();
     let page = doc.create_page();
     let container = doc.create_view();
-    doc.append_element(&container, &page).unwrap();
+    doc.append_child(&page, &container).unwrap();
     let a = doc.create_view();
     let b = doc.create_view();
     let c = doc.create_view();
-    doc.append_element(&a, &container).unwrap();
-    doc.append_element(&b, &container).unwrap();
-    doc.append_element(&c, &container).unwrap();
+    doc.append_child(&container, &a).unwrap();
+    doc.append_child(&container, &b).unwrap();
+    doc.append_child(&container, &c).unwrap();
     (
         doc,
         ThreeChildren {
@@ -44,7 +44,6 @@ fn three_children() -> (WidgetTree, ThreeChildren) {
     )
 }
 
-/// The children of `parent`, as their Lynx `unique_id`s (document order).
 fn child_uids(doc: &WidgetTree, parent: &WidgetHandle) -> Vec<i32> {
     doc.widget(parent)
         .unwrap()
@@ -54,59 +53,56 @@ fn child_uids(doc: &WidgetTree, parent: &WidgetHandle) -> Vec<i32> {
 }
 
 fn uid(doc: &WidgetTree, handle: &WidgetHandle) -> i32 {
-    doc.get_element_unique_id(handle).unwrap()
+    doc.unique_id(handle).unwrap()
 }
-
-// --- creation ---------------------------------------------------------------
 
 #[test]
 fn create_elements_kinds_and_structure() {
     let mut doc = tree();
     let page = doc.create_page();
     assert_eq!(doc.widget(&page).unwrap().payload().kind, WidgetKind::Page);
-    assert_eq!(doc.get_tag(&page).unwrap(), "page");
-    assert_eq!(doc.get_page_element(), Some(page.clone()));
+    assert_eq!(doc.tag_name(&page).unwrap(), "page");
+    assert_eq!(doc.page_root(), Some(page.clone()));
 
     let view = doc.create_view();
     let text = doc.create_text();
-    doc.append_element(&view, &page).unwrap();
-    doc.append_element(&text, &view).unwrap();
+    doc.append_child(&page, &view).unwrap();
+    doc.append_child(&view, &text).unwrap();
     assert_eq!(doc.widget(&text).unwrap().payload().kind, WidgetKind::Text);
 
     let raw = doc.create_raw_text("hello");
-    doc.append_element(&raw, &text).unwrap();
+    doc.append_child(&text, &raw).unwrap();
     let raw_node = doc.widget(&raw).unwrap();
     assert_eq!(raw_node.payload().kind, WidgetKind::RawText);
     assert_eq!(raw_node.text(), Some("hello"));
 
     let li = doc.create_element("list-item");
-    doc.append_element(&li, &view).unwrap();
+    doc.append_child(&view, &li).unwrap();
     assert_eq!(
         doc.widget(&li).unwrap().payload().kind,
         WidgetKind::ListItem
     );
-    assert_eq!(doc.get_tag(&li).unwrap(), "list-item");
+    assert_eq!(doc.tag_name(&li).unwrap(), "list-item");
 
     let custom = doc.create_element("marquee");
-    doc.append_element(&custom, &view).unwrap();
+    doc.append_child(&view, &custom).unwrap();
     assert_eq!(
         doc.widget(&custom).unwrap().payload().kind,
         WidgetKind::Unknown
     );
-    assert_eq!(doc.get_tag(&custom).unwrap(), "marquee", "real tag kept");
+    assert_eq!(doc.tag_name(&custom).unwrap(), "marquee", "real tag kept");
 
-    // Parent / child navigation.
-    assert_eq!(doc.get_parent(&view).unwrap(), Some(page.clone()));
-    assert_eq!(doc.get_parent(&page).unwrap(), None);
-    assert_eq!(doc.first_element(&view).unwrap(), Some(text.clone()));
-    assert_eq!(doc.next_element(&text).unwrap(), Some(li.clone()));
+    assert_eq!(doc.parent(&view).unwrap(), Some(page.clone()));
+    assert_eq!(doc.parent(&page).unwrap(), None);
+    assert_eq!(doc.first_child(&view).unwrap(), Some(text.clone()));
+    assert_eq!(doc.next_sibling(&text).unwrap(), Some(li.clone()));
 }
 
 #[test]
 fn page_tag_alone_does_not_become_the_widget_root() {
     let mut tree = tree();
     let detached_page = tree.create_element("page");
-    assert_eq!(tree.get_page_element(), None);
+    assert_eq!(tree.page_root(), None);
     assert!(
         !tree
             .document()
@@ -114,7 +110,7 @@ fn page_tag_alone_does_not_become_the_widget_root() {
     );
 
     let page = tree.create_page();
-    assert_eq!(tree.get_page_element(), Some(page.clone()));
+    assert_eq!(tree.page_root(), Some(page.clone()));
     assert!(
         tree.document()
             .is_connected(tree.widget(&page).unwrap().id())
@@ -128,38 +124,32 @@ fn unique_ids_are_monotonic_and_one_based() {
     let view = doc.create_view();
     assert_eq!(uid(&doc, &page), 1);
     assert_eq!(uid(&doc, &view), 2);
-    assert_eq!(doc.element_by_unique_id(2), Some(view.clone()));
-    assert_eq!(doc.element_by_unique_id(99), None);
+    assert_eq!(doc.widget_by_unique_id(2), Some(view.clone()));
+    assert_eq!(doc.widget_by_unique_id(99), None);
 }
 
 #[test]
 fn widget_kind_tag_mapping() {
-    assert_eq!(WidgetKind::from_tag("list-item"), WidgetKind::ListItem);
-    assert_eq!(WidgetKind::from_tag("none"), WidgetKind::NoneElement);
-    assert_eq!(WidgetKind::from_tag("marquee"), WidgetKind::Unknown);
+    assert_eq!(WidgetKind::from_tag_name("list-item"), WidgetKind::ListItem);
+    assert_eq!(WidgetKind::from_tag_name("none"), WidgetKind::NoneElement);
+    assert_eq!(WidgetKind::from_tag_name("marquee"), WidgetKind::Unknown);
     assert_eq!(WidgetKind::Page.tag_name(), "page");
     assert_eq!(WidgetKind::ScrollView.tag_name(), "scroll-view");
     assert_eq!(WidgetKind::Unknown.tag_name(), "unknown");
 }
 
-// --- handles: canonicality and context ownership -----------------------------
-
 #[test]
 fn handles_are_canonical() {
     let (doc, t) = three_children();
-    // Every lookup for the same node yields the *same* canonical handle.
-    let again = doc.get_page_element().unwrap();
+    let again = doc.page_root().unwrap();
     assert_eq!(again, t.page);
-    let by_uid = doc.element_by_unique_id(uid(&doc, &t.a)).unwrap();
+    let by_uid = doc.widget_by_unique_id(uid(&doc, &t.a)).unwrap();
     assert_eq!(by_uid, t.a);
     assert_ne!(t.a, t.b);
 }
 
 #[test]
 fn misrouted_handles_are_rejected_at_the_native_boundary() {
-    // Runtime JS contexts never exchange handles. If native code violates
-    // that boundary, the handle's existing Reaper owner rejects the routing;
-    // NodeId itself remains scoped to one Document.
     let (mut doc_a, t_a) = three_children();
     let (mut doc_b, t_b) = three_children();
 
@@ -175,7 +165,7 @@ fn misrouted_handles_are_rejected_at_the_native_boundary() {
         Err(WidgetError::ForeignWidget(_))
     ));
     assert!(matches!(
-        doc_b.append_element(&t_a.a, &t_b.container),
+        doc_b.append_child(&t_b.container, &t_a.a),
         Err(WidgetError::ForeignWidget(_))
     ));
     assert!(matches!(
@@ -183,23 +173,19 @@ fn misrouted_handles_are_rejected_at_the_native_boundary() {
         Err(WidgetError::ForeignWidget(_))
     ));
     assert!(matches!(
-        doc_b.computed(&t_a.a),
+        doc_b.computed_style(&t_a.a),
         Err(WidgetError::ForeignWidget(_))
     ));
-    // The corresponding node in context B is untouched.
     doc_a.set_classes(&t_a.a, "only-in-a").unwrap();
     let b_classes: Vec<&str> = doc_b.widget(&t_b.a).unwrap().classes().collect();
     assert!(b_classes.is_empty(), "misrouted mutation reached context B");
 }
 
-// --- structure opcodes --------------------------------------------------------
-
 #[test]
 fn insert_before_orders_and_reorders() {
     let (mut doc, t) = three_children();
     let d = doc.create_view();
-    doc.insert_element_before(&d, &t.container, Some(&t.b))
-        .unwrap();
+    doc.insert_before(&t.container, &d, Some(&t.b)).unwrap();
     assert_eq!(
         child_uids(&doc, &t.container),
         vec![
@@ -210,9 +196,7 @@ fn insert_before_orders_and_reorders() {
         ]
     );
 
-    // Re-inserting an attached child moves it.
-    doc.insert_element_before(&t.c, &t.container, Some(&t.a))
-        .unwrap();
+    doc.insert_before(&t.container, &t.c, Some(&t.a)).unwrap();
     assert_eq!(
         child_uids(&doc, &t.container),
         vec![
@@ -223,10 +207,7 @@ fn insert_before_orders_and_reorders() {
         ]
     );
 
-    // `insertBefore(n, n)` keeps `n` exactly where it is (DOM pre-insert
-    // resolves the reference to n's next sibling).
-    doc.insert_element_before(&t.a, &t.container, Some(&t.a))
-        .unwrap();
+    doc.insert_before(&t.container, &t.a, Some(&t.a)).unwrap();
     assert_eq!(
         child_uids(&doc, &t.container),
         vec![
@@ -237,11 +218,10 @@ fn insert_before_orders_and_reorders() {
         ]
     );
 
-    // A reference that is not a child of the parent errors.
     let stranger = doc.create_view();
     assert!(matches!(
-        doc.insert_element_before(&d, &t.container, Some(&stranger)),
-        Err(WidgetError::BadInsertReference(_))
+        doc.insert_before(&t.container, &d, Some(&stranger)),
+        Err(WidgetError::InvalidSiblingReference(_))
     ));
 }
 
@@ -249,136 +229,116 @@ fn insert_before_orders_and_reorders() {
 fn cycles_are_rejected() {
     let (mut doc, t) = three_children();
     assert!(matches!(
-        doc.append_element(&t.container, &t.container),
+        doc.append_child(&t.container, &t.container),
         Err(WidgetError::WouldCycle { .. })
     ));
     assert!(matches!(
-        doc.append_element(&t.container, &t.a),
+        doc.append_child(&t.a, &t.container),
         Err(WidgetError::WouldCycle { .. })
     ));
-    // The tree is unchanged.
-    assert_eq!(doc.get_parent(&t.container).unwrap(), Some(t.page.clone()));
-    assert_eq!(doc.get_parent(&t.a).unwrap(), Some(t.container.clone()));
+    assert_eq!(doc.parent(&t.container).unwrap(), Some(t.page.clone()));
+    assert_eq!(doc.parent(&t.a).unwrap(), Some(t.container.clone()));
 }
 
 #[test]
 fn the_page_root_cannot_be_reparented() {
     let (mut doc, t) = three_children();
     assert!(matches!(
-        doc.append_element(&t.page, &t.container),
+        doc.append_child(&t.container, &t.page),
         Err(WidgetError::CannotReparentRoot(_))
     ));
     assert!(matches!(
-        doc.insert_element_before(&t.page, &t.container, Some(&t.a)),
+        doc.insert_before(&t.container, &t.page, Some(&t.a)),
         Err(WidgetError::CannotReparentRoot(_))
     ));
-    // Structure is untouched; the page is still the WidgetTree root and has
-    // no parent widget (its DOM parent is the distinct Document node).
-    assert_eq!(doc.get_parent(&t.page).unwrap(), None);
-    assert_eq!(doc.get_page_element(), Some(t.page.clone()));
+    assert_eq!(doc.parent(&t.page).unwrap(), None);
+    assert_eq!(doc.page_root(), Some(t.page.clone()));
 }
 
 #[test]
 fn remove_detaches_and_keeps_the_subtree_alive() {
     let (mut doc, t) = three_children();
     let grandchild = doc.create_view();
-    doc.append_element(&grandchild, &t.b).unwrap();
+    doc.append_child(&t.b, &grandchild).unwrap();
 
-    // PAPI remove = DOM removeChild: detached, alive, mutable, re-insertable.
-    doc.remove_element(&t.container, &t.b).unwrap();
-    assert_eq!(doc.get_parent(&t.b).unwrap(), None);
-    assert_eq!(doc.get_parent(&grandchild).unwrap(), Some(t.b.clone()));
+    doc.remove_child(&t.container, &t.b).unwrap();
+    assert_eq!(doc.parent(&t.b).unwrap(), None);
+    assert_eq!(doc.parent(&grandchild).unwrap(), Some(t.b.clone()));
     assert_eq!(
         child_uids(&doc, &t.container),
         vec![uid(&doc, &t.a), uid(&doc, &t.c)]
     );
     doc.set_classes(&t.b, "pending").unwrap();
 
-    doc.append_element(&t.b, &t.container).unwrap();
-    assert_eq!(doc.get_parent(&t.b).unwrap(), Some(t.container.clone()));
+    doc.append_child(&t.container, &t.b).unwrap();
+    assert_eq!(doc.parent(&t.b).unwrap(), Some(t.container.clone()));
 
-    // Removing a non-child errors.
-    doc.remove_element(&t.container, &t.b).unwrap();
+    doc.remove_child(&t.container, &t.b).unwrap();
     assert!(matches!(
-        doc.remove_element(&t.container, &t.b),
+        doc.remove_child(&t.container, &t.b),
         Err(WidgetError::NotAChild { .. })
     ));
 }
 
 #[test]
-fn replace_element_keeps_position_and_old_survives() {
+fn replace_with_keeps_position_and_old_survives() {
     let (mut doc, t) = three_children();
     let new = doc.create_view();
-    doc.replace_element(&new, &t.b).unwrap();
+    doc.replace_with(&t.b, &new).unwrap();
     assert_eq!(
         child_uids(&doc, &t.container),
         vec![uid(&doc, &t.a), uid(&doc, &new), uid(&doc, &t.c)]
     );
-    // Like DOM replaceChild, the old node survives, detached, owned by its
-    // handles.
-    assert_eq!(doc.get_parent(&t.b).unwrap(), None);
+    assert_eq!(doc.parent(&t.b).unwrap(), None);
     assert!(doc.widget(&t.b).is_ok());
 
-    // Replacing a detached element is a no-op (DOM replaceWith on a
-    // parentless node).
     let another = doc.create_view();
-    doc.replace_element(&another, &t.b).unwrap();
-    assert_eq!(doc.get_parent(&another).unwrap(), None);
+    doc.replace_with(&t.b, &another).unwrap();
+    assert_eq!(doc.parent(&another).unwrap(), None);
 }
-
-// --- ownership-driven reclamation ---------------------------------------------
 
 #[test]
 fn detached_subtree_is_reclaimed_only_when_no_handle_survives() {
     let (mut doc, t) = three_children();
     let grandchild = doc.create_view();
-    doc.append_element(&grandchild, &t.b).unwrap();
+    doc.append_child(&t.b, &grandchild).unwrap();
     let b_uid = uid(&doc, &t.b);
     let grandchild_uid = uid(&doc, &grandchild);
 
-    doc.remove_element(&t.container, &t.b).unwrap();
+    doc.remove_child(&t.container, &t.b).unwrap();
 
-    // Drop the *parent* wrapper while the child wrapper survives — the
-    // finding-3 scenario. The whole detached subtree must stay alive: the
-    // held descendant retains it.
     drop(t.b);
-    doc.collect();
+    doc.reclaim_detached_widgets();
     assert_eq!(
-        doc.get_parent(&grandchild)
+        doc.parent(&grandchild)
             .unwrap()
             .map(|parent| uid(&doc, &parent)),
         Some(b_uid),
         "a held descendant handle keeps the whole detached subtree alive"
     );
-    assert!(doc.element_by_unique_id(b_uid).is_some());
+    assert!(doc.widget_by_unique_id(b_uid).is_some());
 
-    // The subtree can even be re-attached — nothing was lost.
-    let b_again = doc.element_by_unique_id(b_uid).unwrap();
-    doc.append_element(&b_again, &t.container).unwrap();
-    doc.remove_element(&t.container, &b_again).unwrap();
+    let b_again = doc.widget_by_unique_id(b_uid).unwrap();
+    doc.append_child(&t.container, &b_again).unwrap();
+    doc.remove_child(&t.container, &b_again).unwrap();
 
-    // Now drop every handle into the subtree: reclaimed atomically at the
-    // next boundary.
     drop(b_again);
     drop(grandchild);
-    doc.collect();
-    assert_eq!(doc.element_by_unique_id(b_uid), None);
-    assert_eq!(doc.element_by_unique_id(grandchild_uid), None);
+    doc.reclaim_detached_widgets();
+    assert_eq!(doc.widget_by_unique_id(b_uid), None);
+    assert_eq!(doc.widget_by_unique_id(grandchild_uid), None);
 }
 
 #[test]
 fn attached_nodes_are_never_collected() {
     let (mut doc, t) = three_children();
     let a_uid = uid(&doc, &t.a);
-    // Drop every handle to an *attached* node: the tree itself retains
-    // document content (browser semantics — GC only collects detached
-    // nodes).
     drop(t.a);
-    doc.collect();
+    doc.reclaim_detached_widgets();
     let a_again = doc
-        .element_by_unique_id(a_uid)
+        .widget_by_unique_id(a_uid)
         .expect("attached content survives with no external handles");
-    assert_eq!(doc.get_parent(&a_again).unwrap(), Some(t.container.clone()));
+    assert_eq!(doc.parent(&a_again).unwrap(), Some(t.container.clone()));
 }
 
 #[test]
@@ -388,9 +348,9 @@ fn never_attached_nodes_reclaim_on_drop() {
     let orphan = doc.create_view();
     let orphan_uid = uid(&doc, &orphan);
     drop(orphan);
-    doc.collect();
+    doc.reclaim_detached_widgets();
     assert_eq!(
-        doc.element_by_unique_id(orphan_uid),
+        doc.widget_by_unique_id(orphan_uid),
         None,
         "a created-but-never-attached node frees once its handle drops"
     );
@@ -400,16 +360,13 @@ fn never_attached_nodes_reclaim_on_drop() {
 fn reclaimed_unique_ids_do_not_resurrect() {
     let (mut doc, t) = three_children();
     let c_uid = uid(&doc, &t.c);
-    doc.remove_element(&t.container, &t.c).unwrap();
+    doc.remove_child(&t.container, &t.c).unwrap();
     drop(t.c);
-    // Force slot reuse: reclaim, then create a new element.
-    doc.collect();
+    doc.reclaim_detached_widgets();
     let fresh = doc.create_view();
-    assert_eq!(doc.element_by_unique_id(c_uid), None);
+    assert_eq!(doc.widget_by_unique_id(c_uid), None);
     assert_ne!(uid(&doc, &fresh), c_uid, "unique_ids are never reused");
 }
-
-// --- attributes / styles / state ------------------------------------------------
 
 #[test]
 fn classes_and_inline_styles() {
@@ -419,36 +376,30 @@ fn classes_and_inline_styles() {
     let classes: Vec<&str> = doc.widget(&view).unwrap().classes().collect();
     assert_eq!(classes, vec!["foo", "bar", "baz"]);
 
-    // add_class dedups.
     doc.add_class(&view, "bar").unwrap();
     doc.add_class(&view, "qux").unwrap();
     assert_eq!(doc.widget(&view).unwrap().classes().len(), 4);
     assert_eq!(
-        doc.widget(&view).unwrap().attr("class"),
+        doc.widget(&view).unwrap().attribute("class"),
         Some("foo bar baz qux")
     );
 
-    // Inline styles are parsed into a stylo `PropertyDeclarationBlock`; lock
-    // ownership stays encapsulated in `w3c-dom`.
     doc.add_inline_style(&view, "color", "red").unwrap();
     doc.add_inline_style(&view, "width", "10px").unwrap();
     assert_eq!(inline_declaration_count(&doc, &view), 2);
     assert_eq!(
-        doc.widget(&view).unwrap().attr("style"),
+        doc.widget(&view).unwrap().attribute("style"),
         Some("color: red; width: 10px;")
     );
 
-    // `set_inline_styles` replaces the whole block.
     doc.set_inline_styles(&view, "display:flex").unwrap();
     assert_eq!(inline_declaration_count(&doc, &view), 1);
 
-    // An empty string clears the inline block.
     doc.set_inline_styles(&view, "").unwrap();
     assert_eq!(inline_declaration_count(&doc, &view), 0);
-    assert_eq!(doc.widget(&view).unwrap().attr("style"), Some(""));
+    assert_eq!(doc.widget(&view).unwrap().attribute("style"), Some(""));
 }
 
-/// The number of declarations in an element's parsed inline style block.
 fn inline_declaration_count(doc: &WidgetTree, handle: &WidgetHandle) -> usize {
     let node = doc.widget(handle).unwrap();
     doc.document().inline_style_declaration_count(node.id())
@@ -459,106 +410,107 @@ fn attributes_id_dataset_and_events() {
     let mut doc = tree();
     let view = doc.create_view();
 
-    // Standard reflected attributes have one DOM source of truth.
     doc.set_attribute(&view, "id", "not-a-selector").unwrap();
     doc.set_attribute(&view, "aria-label", "hi").unwrap();
-    let attributes: Vec<_> = doc.get_attributes(&view).unwrap().collect();
+    let attributes: Vec<_> = doc.attributes(&view).unwrap().collect();
     assert!(attributes.contains(&("l-css-id", "0")));
     assert!(attributes.contains(&("id", "not-a-selector")));
     assert_eq!(
-        doc.widget(&view).unwrap().attr("l-css-id"),
+        doc.widget(&view).unwrap().attribute("l-css-id"),
         Some("0"),
         "the default css scope is a real attribute"
     );
     assert_eq!(
-        doc.widget(&view).unwrap().attr("id"),
+        doc.widget(&view).unwrap().attribute("id"),
         Some("not-a-selector")
     );
-    assert_eq!(doc.widget(&view).unwrap().id_attr(), Some("not-a-selector"));
+    assert_eq!(
+        doc.widget(&view).unwrap().id_attribute(),
+        Some("not-a-selector")
+    );
 
-    // The Lynx `__SetID` adapter writes that same reflected attribute.
-    doc.set_id(&view, "my-id").unwrap();
-    assert_eq!(doc.widget(&view).unwrap().id_attr(), Some("my-id"));
-    assert_eq!(doc.widget(&view).unwrap().attr("id"), Some("my-id"));
-    doc.set_id(&view, "").unwrap();
-    assert!(doc.widget(&view).unwrap().id_attr().is_none());
-    assert_eq!(doc.widget(&view).unwrap().attr("id"), None);
+    doc.set_id_attribute(&view, "my-id").unwrap();
+    assert_eq!(doc.widget(&view).unwrap().id_attribute(), Some("my-id"));
+    assert_eq!(doc.widget(&view).unwrap().attribute("id"), Some("my-id"));
+    doc.set_id_attribute(&view, "").unwrap();
+    assert!(doc.widget(&view).unwrap().id_attribute().is_none());
+    assert_eq!(doc.widget(&view).unwrap().attribute("id"), None);
 
-    // Dataset.
-    doc.add_dataset(&view, "role", "hero").unwrap();
-    doc.add_dataset(&view, "index", "3").unwrap();
-    doc.add_dataset(&view, "extra", "yes").unwrap();
+    doc.set_dataset_entry(&view, "role", "hero").unwrap();
+    doc.set_dataset_entry(&view, "index", "3").unwrap();
+    doc.set_dataset_entry(&view, "extra", "yes").unwrap();
     let node = doc.widget(&view).unwrap();
-    assert_eq!(node.attr("data-role"), Some("hero"));
-    assert_eq!(node.attr("data-index"), Some("3"));
-    assert_eq!(node.attr("data-extra"), Some("yes"));
+    assert_eq!(node.attribute("data-role"), Some("hero"));
+    assert_eq!(node.attribute("data-index"), Some("3"));
+    assert_eq!(node.attribute("data-extra"), Some("yes"));
 
-    // Overwriting one dataset entry also overwrites its real attribute.
-    doc.add_dataset(&view, "role", "villain").unwrap();
+    doc.set_dataset_entry(&view, "role", "villain").unwrap();
     let node = doc.widget(&view).unwrap();
-    assert_eq!(node.attr("data-role"), Some("villain"));
-    assert_eq!(node.attr("data-index"), Some("3"));
-    assert_eq!(node.attr("data-extra"), Some("yes"));
+    assert_eq!(node.attribute("data-role"), Some("villain"));
+    assert_eq!(node.attribute("data-index"), Some("3"));
+    assert_eq!(node.attribute("data-extra"), Some("yes"));
 
-    // Replacing the dataset removes entries absent from the new value.
     doc.set_dataset(&view, [("role", "updated")]).unwrap();
     let node = doc.widget(&view).unwrap();
-    assert_eq!(node.attr("data-role"), Some("updated"));
-    assert_eq!(node.attr("data-index"), None);
-    assert_eq!(node.attr("data-extra"), None);
+    assert_eq!(node.attribute("data-role"), Some("updated"));
+    assert_eq!(node.attribute("data-index"), None);
+    assert_eq!(node.attribute("data-extra"), None);
 
-    // Events are stored verbatim.
-    doc.add_event(&view, EventKind::Bind, "tap", "onTap")
+    doc.add_event_binding(&view, EventBindingKind::Bind, "tap", "onTap")
         .unwrap();
-    doc.add_event(&view, EventKind::CaptureCatch, "touchstart", "onTouch")
-        .unwrap();
+    doc.add_event_binding(
+        &view,
+        EventBindingKind::CaptureCatch,
+        "touchstart",
+        "onTouch",
+    )
+    .unwrap();
     let node = doc.widget(&view).unwrap();
     let events = node.payload().events();
     assert_eq!(events.len(), 2);
     assert_eq!(&*events[0].name, "tap");
-    assert_eq!(events[1].kind, EventKind::CaptureCatch);
+    assert_eq!(events[1].kind, EventBindingKind::CaptureCatch);
 }
 
 #[test]
 fn set_css_id_batch() {
     let (mut doc, t) = three_children();
     doc.set_css_id(&[&t.a, &t.b, &t.c], 42).unwrap();
-    assert_eq!(doc.widget(&t.a).unwrap().attr("l-css-id"), Some("42"));
-    assert_eq!(doc.widget(&t.b).unwrap().attr("l-css-id"), Some("42"));
-    assert_eq!(doc.widget(&t.c).unwrap().attr("l-css-id"), Some("42"));
-    // The page keeps its default (unset) css_id.
-    assert_eq!(doc.widget(&t.page).unwrap().attr("l-css-id"), Some("0"));
+    assert_eq!(doc.widget(&t.a).unwrap().attribute("l-css-id"), Some("42"));
+    assert_eq!(doc.widget(&t.b).unwrap().attribute("l-css-id"), Some("42"));
+    assert_eq!(doc.widget(&t.c).unwrap().attribute("l-css-id"), Some("42"));
+    assert_eq!(
+        doc.widget(&t.page).unwrap().attribute("l-css-id"),
+        Some("0")
+    );
 
-    // A misrouted handle anywhere in the batch fails the whole call.
     let (_other, other_t) = three_children();
     assert!(matches!(
         doc.set_css_id(&[&t.b, &other_t.a], 7),
         Err(WidgetError::ForeignWidget(_))
     ));
     assert_eq!(
-        doc.widget(&t.b).unwrap().attr("l-css-id"),
+        doc.widget(&t.b).unwrap().attribute("l-css-id"),
         Some("42"),
         "batch atomic"
     );
 }
 
 #[test]
-fn set_pseudo_state_toggles_bits() {
+fn pseudo_state_methods_toggle_bits() {
     let mut doc = tree();
     let page = doc.create_page();
     let view = doc.create_view();
-    doc.append_element(&view, &page).unwrap();
+    doc.append_child(&page, &view).unwrap();
 
-    doc.set_pseudo_state(&view, ElementState::HOVER, true)
-        .unwrap();
-    doc.set_pseudo_state(&view, ElementState::FOCUS, true)
-        .unwrap();
+    doc.enable_pseudo_state(&view, ElementState::HOVER).unwrap();
+    doc.enable_pseudo_state(&view, ElementState::FOCUS).unwrap();
     let state = doc.pseudo_state(&view).unwrap();
     assert!(state.contains(ElementState::HOVER));
     assert!(state.contains(ElementState::FOCUS));
     assert!(!state.contains(ElementState::ACTIVE));
 
-    doc.set_pseudo_state(&view, ElementState::HOVER, false)
+    doc.disable_pseudo_state(&view, ElementState::HOVER)
         .unwrap();
     let state = doc.pseudo_state(&view).unwrap();
     assert!(!state.contains(ElementState::HOVER));

@@ -20,7 +20,7 @@ impl<'a> Reader<'a> {
         self.remaining() == 0
     }
 
-    pub(crate) fn take(&mut self, len: usize) -> Result<&'a [u8], DecodeError> {
+    pub(crate) fn read_bytes(&mut self, len: usize) -> Result<&'a [u8], DecodeError> {
         if self.remaining() < len {
             return Err(DecodeError::UnexpectedEof {
                 offset: self.pos,
@@ -32,8 +32,8 @@ impl<'a> Reader<'a> {
         Ok(slice)
     }
 
-    pub(crate) fn u32(&mut self) -> Result<u32, DecodeError> {
-        let bytes = self.take(4)?;
+    pub(crate) fn read_u32(&mut self) -> Result<u32, DecodeError> {
+        let bytes = self.read_bytes(4)?;
         Ok(u32::from_le_bytes(
             bytes.try_into().expect("length checked"),
         ))

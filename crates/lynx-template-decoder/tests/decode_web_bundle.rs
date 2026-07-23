@@ -1,7 +1,7 @@
 //! Integration tests decoding real `.web.bundle` files produced by the
 //! lynx-stack build pipeline (see `fixtures/README.md`).
 
-use lynx_template_decoder::style_info::{RuleType, Selector};
+use lynx_template_decoder::style_info::{RuleKind, Selector};
 use lynx_template_decoder::{DecodeError, decode};
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -18,13 +18,10 @@ fn decodes_card_with_css() {
     assert!(!template.config_flag("isLazy"));
     assert!(template.config_flag("enableFiberArch"));
 
-    // Main-thread code is plain JavaScript, keyed by chunk name. The length
-    // matches the reference decoder's `lepusCode.root.byteLength`.
     let root = &template.lepus_code["root"];
     assert_eq!(root.len(), 26998);
     assert!(root.contains("use strict"), "lepus root should be JS text");
 
-    // Background-thread chunks.
     assert!(!template.manifest.is_empty());
     assert!(
         template
@@ -35,24 +32,19 @@ fn decodes_card_with_css() {
         template.manifest.keys().collect::<Vec<_>>()
     );
 
-    // The custom sections object exists (may be empty).
     assert!(template.custom_sections.as_ref().unwrap().is_object());
 
-    // Real CSS. Expected values cross-validated against the reference
-    // decoder (`@lynx-js/web-core` `decodeTemplate` + wasm), which flattens
-    // this bundle to:
-    //   .basic:not([l-e-name]){background-color:pink;height:100px;width:100px;}
     let style_info = template.style_info.as_ref().unwrap();
     assert_eq!(style_info.css_id_to_style_sheet.len(), 1);
     let sheet = &style_info.css_id_to_style_sheet[&0];
     assert!(sheet.imports.is_empty());
     assert_eq!(sheet.rules.len(), 1);
     let rule = &sheet.rules[0];
-    assert_eq!(rule.rule_type, RuleType::Declaration);
-    assert_eq!(rule.nested_rules.len(), 0);
+    assert_eq!(rule.kind, RuleKind::Style);
+    assert_eq!(rule.children.len(), 0);
     let selectors: Vec<String> = rule
         .prelude
-        .selector_list
+        .selectors
         .iter()
         .map(Selector::to_css_string)
         .collect();
@@ -61,7 +53,7 @@ fn decodes_card_with_css() {
         .declaration_block
         .declarations
         .iter()
-        .map(|d| format!("{}:{}", d.property_id.name(), d.value_text()))
+        .map(|d| format!("{}:{}", d.property.name(), d.value_text()))
         .collect();
     assert_eq!(
         declarations,
@@ -84,7 +76,6 @@ fn decodes_card_with_empty_style_info() {
     assert!(!template.config_flag("isLazy"));
     assert!(template.lepus_code.contains_key("root"));
 
-    // The section is present but its stylesheet map is empty.
     let style_info = template.style_info.as_ref().unwrap();
     assert!(style_info.css_id_to_style_sheet.is_empty());
 }
@@ -104,12 +95,10 @@ fn decodes_large_style_info() {
         "expected a large stylesheet, got {rule_count} rules"
     );
 
-    // Every interned property must resolve to a canonical name, and every
-    // declaration's tokens must reassemble to non-empty text.
     for sheet in style_info.css_id_to_style_sheet.values() {
         for rule in &sheet.rules {
             for declaration in &rule.declaration_block.declarations {
-                assert!(!declaration.property_id.name().is_empty());
+                assert!(!declaration.property.name().is_empty());
                 assert!(!declaration.value_text().is_empty());
             }
         }

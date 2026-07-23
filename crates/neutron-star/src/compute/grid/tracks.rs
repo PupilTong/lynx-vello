@@ -1,13 +1,5 @@
 //! Explicit-template expansion and implicit-track construction.
-//!
-//! This module keeps the sequence work at the edge of the Grid algorithm:
-//! the borrowed stylo track lists are expanded once into compact, parallel
-//! vectors of normalized [`TrackSizingFunction`]s, then placement
-//! coordinates are mapped to concrete track sizing functions. Line names
-//! carried by the stylo values are deliberately ignored — the engine is
-//! numeric-lines-only, as documented in the style protocol.
 
-// Track counts are bounded to 20,000, well inside f64's exact integer range.
 #![allow(clippy::cast_precision_loss)]
 
 use stylo::values::computed::{GridTemplateComponent, Length, LengthPercentage, TrackBreadth};
@@ -16,16 +8,8 @@ use stylo::values::generics::grid::{RepeatCount, TrackListValue};
 use super::placement;
 use super::types::TrackSizingFunction;
 
-/// Grid line coordinates are clamped to `[-10_000, 10_000]` by placement.
-/// The corresponding half-open track span can therefore contain 20,000
-/// tracks at most.
 const GRID_LINE_LIMIT: i32 = 10_000;
-// An explicit template starts at line zero, so only the non-negative half of
-// the UA-supported line range is addressable. Leading implicit tracks can
-// still make the final materialized axis 20,000 tracks wide.
 const MAX_AXIS_TRACKS: usize = 10_000;
-/// Maximum number of tracks materialized after adding leading implicit
-/// tracks. Also bounds hostile auto-track lists.
 pub(super) const MAX_MATERIALIZED_TRACKS: usize = 20_000;
 const AUTO_REPEAT_TRACK_FLOOR: f64 = 1.0;
 
@@ -33,8 +17,6 @@ const AUTO_REPEAT_TRACK_FLOOR: f64 = 1.0;
 #[derive(Debug, Clone, Default)]
 pub(super) struct ExpandedTemplate {
     pub(super) tracks: Vec<TrackSizingFunction>,
-    /// Parallel to `tracks`; true only for tracks originating in an
-    /// `auto-fit` repetition.
     pub(super) auto_fit: Vec<bool>,
 }
 
@@ -44,14 +26,6 @@ struct AutoRepeat {
     len: usize,
 }
 
-/// Expands one `grid-template-rows`/`grid-template-columns` value into
-/// concrete tracks.
-///
-/// CSS syntax permits at most one automatic repetition. Invalid host input
-/// containing more is handled deterministically by expanding later automatic
-/// repetitions once, which is also the indefinite-size fallback.
-/// `Subgrid`/`Masonry` cannot be produced by the lynx grammar and crash per
-/// the repo's let-it-crash policy.
 pub(super) fn expand_template(
     template: &GridTemplateComponent,
     definite_or_max_inner_size: Option<f32>,
@@ -72,9 +46,6 @@ pub(super) fn expand_template(
     let mut auto_fit = Vec::new();
     let mut auto_repeat = None;
 
-    // Every valid component contributes at least one track, so both emitted
-    // tracks and per-repetition expansion are capped at the UA track limit;
-    // hostile fixed repetition counts terminate deterministically.
     'components: for component in list.values.iter() {
         if tracks.len() >= MAX_AXIS_TRACKS {
             break;
@@ -100,8 +71,6 @@ pub(super) fn expand_template(
 
                 match repetition.count {
                     RepeatCount::Number(count) => {
-                        // Parsing clamps the count to >= 1; treating smaller
-                        // fabricated values as one keeps direct hosts safe.
                         let repetitions = usize::try_from(count).unwrap_or(1).max(1);
                         let requested = repeated.len().saturating_mul(repetitions);
                         let append = requested.min(MAX_AXIS_TRACKS - tracks.len());
@@ -156,8 +125,6 @@ pub(super) fn expand_template(
         .expect("the repetition count is clamped to the track limit");
     debug_assert!(final_len <= MAX_AXIS_TRACKS);
 
-    // Rebuild once instead of repeatedly inserting into the middle of the
-    // template. This is linear even when the auto-repeat precedes a long tail.
     let group_end = group.start + group.len;
     let mut expanded_tracks = Vec::with_capacity(final_len);
     let mut expanded_auto_fit = Vec::with_capacity(final_len);
@@ -213,8 +180,6 @@ fn automatic_repetition_count(
     let group_end = group.start + group.len;
     for (index, track) in tracks.iter().enumerate() {
         let Some(size) = definite_repeat_breadth(track, basis) else {
-            // If even one track has no definite counting breadth, the auto
-            // repetition is required to occur exactly once.
             return 1;
         };
         let size = size.max(AUTO_REPEAT_TRACK_FLOOR);
@@ -230,8 +195,6 @@ fn automatic_repetition_count(
         return 1;
     }
 
-    // Adding another repetition adds its tracks, its internal gaps, and the
-    // gutter separating it from the preceding repetition: `group.len` gaps.
     let added_repetition_size = repeated_tracks_size + group.len as f64 * gap;
     if added_repetition_size <= 0.0 {
         return 1;
@@ -254,10 +217,6 @@ fn automatic_repetition_count(
     1 + fitting_extra
 }
 
-/// Resolves the definite counting breadth from Grid §7.2.3.2.
-///
-/// The definite maximum is preferred; a definite minimum is the fallback,
-/// and floors the maximum when both are definite.
 #[inline]
 fn definite_repeat_breadth(track: &TrackSizingFunction, basis: f32) -> Option<f64> {
     let minimum = match &track.min {
@@ -267,8 +226,6 @@ fn definite_repeat_breadth(track: &TrackSizingFunction, basis: f32) -> Option<f6
         | TrackBreadth::Auto
         | TrackBreadth::Flex(_) => None,
     };
-    // A `fit-content()` maximum is normalized to `MaxContent`, so it is
-    // correctly indefinite here.
     let maximum = match &track.max {
         TrackBreadth::Breadth(value) => resolve_fixed_breadth(value, basis),
         TrackBreadth::MinContent
@@ -287,8 +244,6 @@ fn definite_repeat_breadth(track: &TrackSizingFunction, basis: f32) -> Option<f6
 
 #[inline]
 fn resolve_fixed_breadth(breadth: &LengthPercentage, basis: f32) -> Option<f64> {
-    // The counting basis is always definite here, so percentages (and calc
-    // trees) resolve directly.
     finite_non_negative(breadth.resolve(Length::new(basis)).px())
 }
 
@@ -306,10 +261,6 @@ pub(super) struct AxisTrackSpec {
     pub(super) collapsed: bool,
 }
 
-/// Builds the final explicit + implicit track sequence for one axis.
-///
-/// `occupied` is parallel to the returned coordinate range. Empty explicit
-/// auto-fit tracks collapse after placement; implicit tracks never do.
 pub(super) fn build_axis_tracks(
     explicit: &ExpandedTemplate,
     auto_tracks: &[TrackSizingFunction],
@@ -338,8 +289,6 @@ pub(super) fn build_axis_tracks(
             (implicit_track(auto_tracks, coordinate, explicit_len), false)
         };
 
-        // Valid placement ranges are already clamped, so `result_index` is
-        // the occupied index. Account for defensive start clamping as well.
         let occupied_index =
             usize::try_from(i64::from(coordinate) - i64::from(range.start)).unwrap_or(result_index);
         let collapsed = is_auto_fit && !occupied.get(occupied_index).copied().unwrap_or(false);
@@ -367,10 +316,8 @@ fn implicit_track(
     let pattern_len = i64::try_from(auto_tracks.len()).expect("track count fits in i64");
     let coordinate = i64::from(coordinate);
     let index = if coordinate < 0 {
-        // The last leading implicit track receives the last specified size.
         coordinate.rem_euclid(pattern_len)
     } else {
-        // The first trailing implicit track receives the first specified size.
         (coordinate - i64::try_from(explicit_len).expect("track count fits in i64"))
             .rem_euclid(pattern_len)
     };
@@ -529,8 +476,6 @@ mod tests {
 
     #[test]
     fn auto_repeat_resolves_percent_and_calc_and_floors_max_by_min() {
-        // calc(10% + 10px) at basis 100 resolves to 20; the 30% minimum
-        // floors it, hence three repetitions fit a 100px axis.
         let calc = LengthPercentage::new_calc(
             CalcNode::Sum(
                 vec![

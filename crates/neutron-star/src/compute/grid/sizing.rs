@@ -1,10 +1,4 @@
 //! CSS Grid §12 track sizing.
-//!
-//! The public protocol deliberately exposes no track storage.  This module
-//! materializes a compact vector for one axis, runs intrinsic contributions
-//! in span order, then maximizes fixed/intrinsic tracks and expands flexible
-//! tracks.  Child measurements always round-trip through the generic host
-//! callback, so mixed Grid/Flex/custom subtrees retain one cache policy.
 
 #![allow(clippy::cast_precision_loss)]
 
@@ -41,13 +35,6 @@ fn available_for(kind: ContributionKind) -> AvailableSpace {
     }
 }
 
-/// Initializes used track state per Grid §12.4, into `set`.
-///
-/// The expanded specs are the per-layout scratch; the used [`TrackSet`] is
-/// re-initialized from them for the bounded column-feedback and
-/// definite-basis reruns. Reuse keeps the track allocation and replaces the
-/// stored effective sizing halves only when the substitution outcome
-/// actually changes, so a rerun never re-clones every track sizing function.
 pub(super) fn initialize_tracks(
     set: &mut TrackSet,
     specs: &[AxisTrackSpec],
@@ -154,10 +141,6 @@ fn plan_track(spec: &AxisTrackSpec, percentage_basis: Option<f32>) -> TrackInit 
         TrackBreadth::Breadth(value) => resolve_length_percentage(value, percentage_basis),
         _ => None,
     };
-    // Percentage tracks in an indefinite axis are treated as `auto` during
-    // intrinsic sizing, then reconstructed with a definite basis by the
-    // bounded post-sizing rerun. (Length-only `calc()` folds to a length at
-    // computed-value time, so it always resolves here.)
     let min_behaves_auto =
         matches!(spec.sizing.min, TrackBreadth::Breadth(_)) && min_fixed.is_none();
     let max_behaves_auto =
@@ -192,12 +175,7 @@ fn plan_track(spec: &AxisTrackSpec, percentage_basis: Option<f32>) -> TrackInit 
         growth_limit,
         fit_content_limit,
         flex_factor,
-        // The effective halves substitute `auto` for unresolvable
-        // percentages; `Flex` is never substituted, so the flexibility
-        // classification can read the spec directly.
         flexible: !collapsed && matches!(spec.sizing.max, TrackBreadth::Flex(_)),
-        // A `Flex` minimum is unrepresentable in the grammar and behaves as
-        // `auto`, hence it stays intrinsic.
         intrinsic_min: min_behaves_auto || !matches!(spec.sizing.min, TrackBreadth::Breadth(_)),
         intrinsic_max: max_behaves_auto
             || !matches!(
@@ -222,11 +200,6 @@ fn margin_sum<N>(item: &GridItem<N>, axis: Axis) -> f32 {
     axis.sum(item.margin)
 }
 
-/// Cross-axis track state available to an intrinsic contribution probe.
-///
-/// Before rows have been sized, Grid §12.1 uses definite maximum row sizes
-/// and treats every other row as infinite. Once an axis has been sized, its
-/// actual aligned grid-area geometry is used instead.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum CrossAxisTracks<'a> {
     DefiniteMaximums {
@@ -304,14 +277,11 @@ where
         Axis::Horizontal => crate::geometry::Size::new(None, cross_area),
         Axis::Vertical => crate::geometry::Size::new(cross_area, None),
     };
-    let mut input = LayoutInput::compute_size(known, parent_size, available, requested_axis(axis));
-    input.sizing_mode = SizingMode::ContentSize;
-    let output = item.key.node.compute_child_layout(input);
+    let mut input = LayoutInput::measure(known, parent_size, available, requested_axis(axis));
+    input.sizing_mode = SizingMode::IgnoreSizeStyles;
+    let output = item.key.node.compute_layout(input);
     let size = output.size;
     if axis == Axis::Vertical && item.align_self == AlignFlags::BASELINE {
-        // CSS synthesizes a baseline when the child does not expose one. A
-        // bottom-border-edge fallback gives the correct ascent/descent
-        // envelope for track sizing and matches the final layout pass.
         item.measured_baselines.y = Some(output.first_baselines.y.unwrap_or(size.height));
     }
     let mut measured = axis.size(size);
@@ -468,9 +438,6 @@ where
             if let Some(minimum) = explicit_min {
                 minimum
             } else {
-                // Grid §6.6: an automatic minimum is content-based when
-                // the item spans an auto-min track; only multi-track spans
-                // are disqualified by crossing a flexible track.
                 let span = span_for(item, axis);
                 let indexes = tracks.span_indices(span.start, span.end);
                 let automatic_min_applies = axis.size(item.minimum_is_auto)
@@ -486,15 +453,10 @@ where
                     let raw_outer =
                         raw_content_size(item, axis, ContributionKind::MinContent, cross_tracks)
                             + margin_sum(item, axis);
-                    // The specified-size suggestion caps the content-size
-                    // suggestion when a percentage became definite.
                     let suggestion = preferred.map_or(raw_outer, |size| raw_outer.min(size));
                     fixed_max_span_limit(axis, tracks, indexes, inner_size)
                         .map_or(suggestion, |limit| suggestion.min(limit))
                 } else if !preferred_behaves_auto_or_depends {
-                    // A definite preferred size defines the box's minimum
-                    // contribution only when Grid's content-based automatic
-                    // minimum does not apply.
                     preferred.unwrap_or_else(|| {
                         raw_content_size(item, axis, kind, cross_tracks) + margin_sum(item, axis)
                     })
@@ -540,10 +502,6 @@ fn span_gap(tracks: &TrackSet, range: core::ops::Range<usize>) -> f32 {
     tracks.gap * visible.saturating_sub(1) as f32
 }
 
-/// Returns the maximum grid-area size when every visible track in the span
-/// has a fixed max track sizing function. Grid §6.6 includes intervening
-/// gutters in this stretch-fit clamp; collapsed tracks contribute zero, and
-/// `span_gap` preserves only the gutters between surviving visible tracks.
 fn fixed_max_span_limit(
     axis: Axis,
     tracks: &TrackSet,
@@ -556,8 +514,6 @@ fn fixed_max_span_limit(
         if track.collapsed {
             continue;
         }
-        // A fit-content() maximum is normalized to `MaxContent`, so it is
-        // correctly rejected as non-fixed here.
         let TrackBreadth::Breadth(maximum) = &track.sizing.max else {
             return None;
         };
@@ -569,18 +525,11 @@ fn fixed_max_span_limit(
             | TrackBreadth::MaxContent
             | TrackBreadth::Flex(_) => 0.0,
         };
-        // `minmax()` gives its minimum precedence when a declared fixed max
-        // is smaller. Resolve from immutable sizing functions rather than a
-        // growth limit that earlier item distribution may have raised.
         limit += maximum.max(minimum).max(0.0);
     }
     Some(limit)
 }
 
-/// Computes Grid §12.5's limited min-/max-content contribution. A spanning
-/// item is capped only when every track has a fixed max sizing function; for
-/// one track, a resolved `fit-content()` argument is also an allowed limit.
-/// The result is always floored by the item's minimum contribution.
 #[allow(clippy::too_many_arguments)]
 fn measure_limited_contribution<N>(
     item: &mut GridItem<N>,
@@ -620,9 +569,6 @@ where
     contribution.min(limit).max(minimum)
 }
 
-/// Computes first-baseline start shims before row contributions are used.
-/// Groups are keyed by their shared start row; sorting once keeps this
-/// linear after `O(B log B)` setup and avoids pairwise baseline scans.
 fn prepare_baseline_shims<N>(
     axis: Axis,
     tracks: &TrackSet,
@@ -714,8 +660,6 @@ fn distribute_up_to_limits(entries: &mut [DistributionEntry], remaining: &mut f3
     if entries.is_empty() || *remaining <= 0.0 {
         return;
     }
-    // Intrinsic tracks commonly all start with infinite capacity. Avoid the
-    // comparison sort entirely on that hot path.
     if entries.iter().all(|entry| entry.capacity.is_infinite()) {
         let share = *remaining / entries.len() as f32;
         for entry in entries {
@@ -1028,20 +972,14 @@ fn resolve_intrinsic_sizes<N>(
     N: LayoutNode,
     N::Style: GridContainerStyle + GridItemStyle,
 {
-    // Non-flexible single-track items resolve directly to maxima without
-    // span scratch (Grid §12.5 step 2).
     let mut single_growth_limits = None::<Vec<Option<f32>>>;
     for item in items.iter_mut().filter(|item| item.span(axis) == 1) {
         let span = span_for(item, axis);
         let index = tracks.index_of(span.start);
-        // Borrow rather than clone: the sizing functions are immutable during
-        // this loop, and the shared borrow ends before the base write below.
         let track = &tracks.tracks[index];
         if track.collapsed || track.is_flexible() {
             continue;
         }
-        // A fit-content() maximum is normalized to `MaxContent` plus a
-        // retained limit, so it takes the max-content contribution arm.
         let max_kind = match &track.sizing.max {
             TrackBreadth::Breadth(_) | TrackBreadth::Flex(_) => None,
             TrackBreadth::MinContent => Some(ContributionKind::MinContent),
@@ -1080,11 +1018,6 @@ fn resolve_intrinsic_sizes<N>(
             TrackBreadth::Auto | TrackBreadth::Flex(_)
                 if available == AvailableSpace::MaxContent =>
             {
-                // The max-content constrained branch still performs the
-                // limited min-content probe first. Besides providing the
-                // automatic-minimum floor required by §12.5, this preserves
-                // cross-axis feedback when the two intrinsic contributions
-                // respond differently to the resolved opposite track.
                 let _ = measure_limited_contribution(
                     item,
                     axis,
@@ -1133,17 +1066,10 @@ fn resolve_intrinsic_sizes<N>(
             }
         }
     }
-    // Grid §12.5 step 2 requires every growth limit to be at least its base
-    // size before spanning-item distribution. This also covers fixed maxima
-    // and fit-content clamps whose declared limit is smaller than an
-    // intrinsic minimum established by a single-track item.
     for track in &mut tracks.tracks {
         track.growth_limit = track.growth_limit.max(track.base);
     }
 
-    // Sort once by span, then process contiguous equal-span buckets. Each
-    // phase visits only its bucket; per-item freeze distribution is bounded
-    // by that item's span and skips sorting when capacities are all infinite.
     let mut non_flexible = Vec::<usize>::new();
     let mut crosses_flexible = Vec::<usize>::new();
     for (index, item) in items.iter().enumerate() {
@@ -1308,14 +1234,7 @@ fn resolve_intrinsic_sizes<N>(
         start = end;
     }
 
-    // Step 4 considers every item crossing a flexible track together. The
-    // flex-factor weighting includes the specified <1 remainder rule.
     if !crosses_flexible.is_empty() {
-        // Under a max-content constraint, flexible tracks' intrinsic base
-        // growth is driven by the item's max-content contribution. Using the
-        // automatic minimum here loses all contribution for ordinary
-        // measured items and makes sub-unit/zero `fr` tracks collapse before
-        // §12.7 can find a flex fraction.
         let spanned_flex_sum = crosses_flexible
             .iter()
             .flat_map(|&index| {
@@ -1372,7 +1291,6 @@ fn resolve_intrinsic_sizes<N>(
         );
     }
 
-    // Step 5 resolves every remaining infinity, including flexible tracks.
     for track in &mut tracks.tracks {
         if !track.growth_limit.is_finite() {
             track.growth_limit = track
@@ -1426,8 +1344,6 @@ fn maximize_tracks(tracks: &mut TrackSet, available: AvailableSpace) {
     }
 }
 
-/// Finds an `fr` size by sorting freeze thresholds once instead of restarting
-/// and rescanning every track for each newly inflexible track (§12.7.1).
 fn find_fr_size(
     tracks: &TrackSet,
     range: core::ops::Range<usize>,
@@ -1485,9 +1401,6 @@ fn expand_flexible_tracks<N>(
         return;
     }
 
-    // Grid §12.7: a min-content constraint forces the used flex fraction to
-    // zero. Intrinsic sizing has already established each flexible track's
-    // base, so no max-content item probes are needed in this branch.
     if available == AvailableSpace::MinContent {
         return;
     }
@@ -1561,7 +1474,6 @@ fn stretch_auto_tracks(tracks: &mut TrackSet, available: AvailableSpace, alignme
     }
 }
 
-/// Runs the track sizing algorithm for one physical axis.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn size_tracks<N>(
     axis: Axis,
@@ -1741,7 +1653,7 @@ mod tests {
             &self.tree.style
         }
 
-        fn compute_child_layout(self, input: LayoutInput) -> LayoutOutput {
+        fn compute_layout(self, input: LayoutInput) -> LayoutOutput {
             self.tree.calls.borrow_mut().push(input);
             let measured = Size::new(
                 match input.available_space.width {
@@ -1769,23 +1681,20 @@ mod tests {
             read(&Layout::default())
         }
 
-        fn set_final_layout(self, _layout: Layout) {}
+        fn set_rounded_layout(self, _layout: Layout) {}
 
         fn set_static_position(self, _static_position: Point<f32>) {}
 
-        // Caching deliberately disabled.
-        fn cache_get(self, _input: LayoutInput) -> Option<LayoutOutput> {
+        fn cached_layout(self, _input: LayoutInput) -> Option<LayoutOutput> {
             None
         }
 
-        fn cache_store(self, _input: LayoutInput, _output: LayoutOutput) {}
+        fn store_cached_layout(self, _input: LayoutInput, _output: LayoutOutput) {}
 
-        fn cache_clear(self) {}
+        fn clear_layout_cache(self) {}
     }
 
     fn test_item(node: TestRef<'_>, column_start: i32, column_end: i32) -> GridItem<TestRef<'_>> {
-        // Mirror `resolve_grid_item`: the intrinsic-keyword projections are
-        // built once from the node's raw style at item construction.
         let style = node.style();
         let raw_size = style.size();
         let raw_min_size = style.min_size();
@@ -1962,8 +1871,6 @@ mod tests {
 
     #[test]
     fn keyword_sizes_behave_as_auto() {
-        // `stretch`/`-webkit-fill-available`/bare `fit-content` are treated
-        // as `auto` (behavior delta #8): no intrinsic probes, no resolution.
         let tree = TestTree {
             style: TestStyle {
                 size: Size::new(StyleSize::Stretch, StyleSize::WebkitFillAvailable),

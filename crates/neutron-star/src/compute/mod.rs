@@ -1,125 +1,5 @@
 //! Protocol machinery entry points — free generic functions over
 //! [`LayoutNode`] handles.
-//!
-//! There is deliberately no engine object: everything callable is a function
-//! so that hosts compose them freely inside their
-//! [`compute_child_layout`](crate::tree::LayoutNode::compute_child_layout)
-//! dispatch, and so that unused entry points (and their monomorphizations)
-//! never exist in the host's binary. Every function takes the node it
-//! operates on as a `Copy` handle; mutation flows through the handle into
-//! host-owned interior-mutable per-node slots, so borrowed style views stay
-//! valid across recursive child layout.
-//!
-//! This module contains the generic machinery (root entry, cache wrapper,
-//! hidden-subtree zeroing, leaf boxing, the positioned pass, rounding) and the
-//! implemented [`compute_flexbox_layout`], [`compute_grid_layout`],
-//! [`compute_linear_layout`], and [`compute_relative_layout`] entry points.
-//!
-//! # The canonical dispatch skeleton
-//!
-//! Every host implements the same shape once inside its
-//! [`LayoutNode::compute_child_layout`]; this is the whole integration
-//! surface of the engine (a host with additional layout modes adds arms that
-//! call its own algorithms):
-//!
-//! ```
-//! use neutron_star::compute::{
-//!     compute_cached_layout, compute_flexbox_layout, compute_grid_layout, compute_linear_layout,
-//!     compute_relative_layout, compute_skipped_contents_layout, hide_subtree,
-//! };
-//! use neutron_star::style::{
-//!     CoreStyle, FlexContainerStyle, FlexItemStyle, GridContainerStyle, GridItemStyle,
-//!     LinearContainerStyle, LinearItemStyle, RelativeContainerStyle, RelativeItemStyle,
-//! };
-//! use neutron_star::tree::{LayoutInput, LayoutNode, LayoutOutput};
-//!
-//! # #[derive(Clone, Copy)]
-//! enum Display {
-//!     Flex,
-//!     Grid,
-//!     Linear,
-//!     Relative,
-//!     Hidden,
-//! }
-//!
-//! fn dispatch<N>(node: N, input: LayoutInput) -> LayoutOutput
-//! where
-//!     N: LayoutNode,
-//!     N::Style: FlexContainerStyle
-//!         + FlexItemStyle
-//!         + GridContainerStyle
-//!         + GridItemStyle
-//!         + LinearContainerStyle
-//!         + LinearItemStyle
-//!         + RelativeContainerStyle
-//!         + RelativeItemStyle,
-//! {
-//!     let display = host_display_of(node);
-//!     if let Display::Hidden = display {
-//!         // Hidden mutation must precede the cache wrapper: caching HIDDEN as
-//!         // a committed result would suppress geometry when the node reappears.
-//!         hide_subtree(node);
-//!         return LayoutOutput::HIDDEN;
-//!     }
-//!
-//!     // content-visibility skipping routes here next, still outside the cache:
-//!     // it sizes the box from contain-intrinsic-size and hides its contents.
-//!     if node.style().skips_contents() {
-//!         return compute_skipped_contents_layout(node, input);
-//!     }
-//!
-//!     compute_cached_layout(node, input, |node, input| {
-//!         match display {
-//!             Display::Hidden => unreachable!(),
-//!             Display::Flex => compute_flexbox_layout(node, input),
-//!             Display::Grid => compute_grid_layout(node, input),
-//!             Display::Linear => compute_linear_layout(node, input),
-//!             Display::Relative => compute_relative_layout(node, input),
-//!             // host: Display::Leaf => compute_leaf_layout(input, &style, natural_size),
-//!         }
-//!     })
-//! }
-//! # fn host_display_of<N>(_: N) -> Display { Display::Flex }
-//! ```
-//!
-//! # Independent formatting contexts and layout containment
-//!
-//! Each display mode here is already its own formatting context (there is no
-//! block flow and thus no margin collapsing yet), so `contain: layout`'s
-//! "independent formatting context / no margin-collapse across the boundary"
-//! requirement is satisfied structurally. When block layout and its margin
-//! collapsing land, a `LAYOUT`-contained box must additionally suppress
-//! collapsing through its boundary. Layout containment has two *active* v1
-//! effects, both at each algorithm's output construction: it suppresses the
-//! container baseline exported to the parent, and — per
-//! [css-contain-2 §3.3](https://drafts.csswg.org/css-contain-2/#containment-layout)
-//! — it collapses the box's own scrollable overflow to its border box when
-//! `overflow: visible` (descendant overflow becomes ink overflow), via the
-//! `own_scrollable_overflow` helper. Orthogonally, scrollable overflow is
-//! *trapped* at every scroll container ([css-overflow-3
-//! §3.3](https://drafts.csswg.org/css-overflow-3/#scrollable)): a
-//! scroll-container child contributes only its border box to its container's
-//! `content_size` (the `accumulate_scrollable_overflow` helper), regardless of
-//! containment.
-//!
-//! The host's `LayoutNode::compute_child_layout` implementation simply calls
-//! its `dispatch`. Algorithms call back into `compute_child_layout` for each
-//! child, so the same routing (and the same cache) applies at every level of
-//! the tree.
-//!
-//! # Pass structure
-//!
-//! A full layout run is host-initiated passes in this order:
-//!
-//! 1. [`compute_root_layout`] — in-flow layout of the whole (dirty part of the) tree in unrounded
-//!    CSS pixels. Out-of-flow nodes whose containing block is not their formatting parent
-//!    ([`PositionProperty::Fixed`](crate::style::PositionProperty)) only get their static positions
-//!    recorded here.
-//! 2. [`compute_absolute_layout`] — the positioned pass: once per hoisted node, against its real
-//!    containing block.
-//! 3. [`round_layout`] — derives the device-pixel-snapped layouts. Optional but recommended for
-//!    crisp rendering; kept separate so relayout always starts from unrounded values (re-rounding
-//!    rounded values drifts).
 mod flexbox;
 mod grid;
 mod leaf;
@@ -152,24 +32,9 @@ use crate::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
 };
 
-/// Lays out the tree under `root` into `available_space`.
-///
-/// The host's entry point for a layout flush. Builds the root
-/// [`LayoutInput`] ([`LayoutGoal::Commit`],
-/// no known dimensions, `parent_size` from
-/// the definite parts of `available_space`), routes it through
-/// [`compute_child_layout`](LayoutNode::compute_child_layout) — so the root
-/// dispatches like any other node — resolves the root's own margins, and
-/// stores the root's [`Layout`] (at location `(0, 0)`
-/// plus resolved margins) via
-/// [`set_unrounded_layout`](LayoutNode::set_unrounded_layout).
-///
-/// Incrementality: this walks — and pays for — only what caches miss. For a
-/// clean subtree the recursion is answered from the host's cache slots at
-/// its root.
 pub fn compute_root_layout<N: LayoutNode>(root: N, available_space: Size<AvailableSpace>) {
-    let parent_size = available_space.into_options();
-    let output = root.compute_child_layout(LayoutInput::perform_layout(
+    let parent_size = available_space.definite_values();
+    let output = root.compute_layout(LayoutInput::commit(
         Size::NONE,
         parent_size,
         available_space,
@@ -236,36 +101,6 @@ fn resolve_root_margins(
     margin
 }
 
-/// Re-runs a **relayout boundary** in place after an internal mutation, reusing
-/// the exact [`LayoutInput`] it was last committed with.
-///
-/// A [`is_relayout_boundary`] node
-/// (`contain: strict`, or a skipped `content-visibility` box) is safely
-/// re-rootable: an internal descendant change can neither escape the box's
-/// formatting context nor alter its own outer size. But a boundary's used size
-/// is frequently **parent-imposed** — a stretched cross size
-/// (`align-items: stretch`), a flex-grown main size, a resolved percentage.
-/// [`compute_root_layout`] would discard that, synthesizing a fresh input from
-/// `available_space` only, so the boundary would re-derive its *self-determined*
-/// size and desync from its un-invalidated ancestors.
-///
-/// This entry instead re-runs `node` with the **verbatim** `input` — obtain it
-/// from [`Cache::committed_input`](crate::cache::Cache::committed_input) *before*
-/// [`invalidate_for_relayout`](crate::invalidate::invalidate_for_relayout)
-/// clears the cache. Because identical input plus unchanged style
-/// deterministically yields an identical outer size (size containment
-/// guarantees interior changes cannot affect it), **only the interior
-/// re-arranges** and every ancestor stays valid. `input`'s
-/// [`goal`](LayoutGoal) is normalized to
-/// [`Commit`](LayoutGoal::Commit): a committed slot always carries `Commit`
-/// already, but a stray `Measure` input must not be replayed as a
-/// geometry-storing pass.
-///
-/// Unlike [`compute_root_layout`], this does **not** store `node`'s own
-/// [`Layout`]: at a boundary that record belongs to the still-valid parent and
-/// is unchanged. The recursive commit refreshes the interior and re-populates
-/// `node`'s cache; the returned [`LayoutOutput`] (its `size` equal to the
-/// boundary's unchanged outer size) is handed back for the host to consume.
 pub fn compute_boundary_relayout<N: LayoutNode>(node: N, input: LayoutInput) -> LayoutOutput {
     debug_assert!(
         is_relayout_boundary(&node.style()),
@@ -274,24 +109,9 @@ pub fn compute_boundary_relayout<N: LayoutNode>(node: N, input: LayoutInput) -> 
     );
     let mut input = input;
     input.goal = LayoutGoal::Commit;
-    node.compute_child_layout(input)
+    node.compute_layout(input)
 }
 
-/// Wraps one node's layout computation in the shared caching policy.
-///
-/// After handling `display: none` with [`hide_subtree`], the host calls this
-/// at the top of its visible-node dispatch (see the module docs);
-/// `compute_uncached` is the actual routing closure. The **complete
-/// `input` is the cache key** — it is passed through to the node's cache
-/// slots unmodified, so no result-affecting
-/// field (`goal`, `sizing_mode`, `parent_size`, …) can alias. On
-/// a usable cached entry (matching per the [`cache`](crate::cache) module's
-/// contract) the closure is skipped entirely; otherwise its result is
-/// stored before being returned.
-///
-/// Hidden nodes must never enter this wrapper: [`hide_subtree`] invalidates
-/// their cache before zeroing geometry, whereas storing
-/// [`LayoutOutput::HIDDEN`] as a committed answer would undo that invariant.
 pub fn compute_cached_layout<N, ComputeFn>(
     node: N,
     input: LayoutInput,
@@ -301,28 +121,17 @@ where
     N: LayoutNode,
     ComputeFn: FnOnce(N, LayoutInput) -> LayoutOutput,
 {
-    if let Some(output) = node.cache_get(input) {
+    if let Some(output) = node.cached_layout(input) {
         return output;
     }
 
     let output = compute_uncached(node, input);
-    node.cache_store(input, output);
+    node.store_cached_layout(input, output);
     output
 }
 
-/// Zeroes the layout of a `display: none` node and its whole subtree.
-///
-/// Recurses directly through tree children, storing an all-zero [`Layout`] for
-/// every visited node so previously-laid-out geometry cannot leak from a
-/// subtree that just became hidden. Every node is first
-/// [`cache_clear`](LayoutNode::cache_clear)ed, preventing a later cache hit
-/// from restoring only a revealed subtree's root while its descendants stay
-/// zeroed.
-///
-/// Host dispatch must call this command **before** [`compute_cached_layout`]
-/// and then return [`LayoutOutput::HIDDEN`] itself.
 pub fn hide_subtree<N: LayoutNode>(node: N) {
-    node.cache_clear();
+    node.clear_layout_cache();
     node.set_unrounded_layout(Layout::with_order(0));
 
     for child in node.children() {
@@ -330,42 +139,6 @@ pub fn hide_subtree<N: LayoutNode>(node: N) {
     }
 }
 
-/// Lays out a box whose **contents are skipped** — `content-visibility:
-/// hidden` (and `auto` while off-screen), reported by
-/// [`CoreStyle::skips_contents`].
-///
-/// The node still generates its own principal box: it is sized purely from its
-/// styles with `contain-intrinsic-{width,height}` substituted for the
-/// content-derived size (both axes, since a skipped box is size-contained by
-/// contract — see [`CoreStyle::skips_contents`]), and **none of its children
-/// are laid out**. On a [`LayoutGoal::Commit`] each child subtree is passed to
-/// [`hide_subtree`], mirroring the `display: none` discipline so stale
-/// descendant geometry and caches from a previous non-skipped pass are cleaned.
-/// A [`LayoutGoal::Measure`] probe stays side-effect free (no hiding).
-///
-/// Because the returned box has no laid-out contents, its `content_size`
-/// equals its border box and it exports no baseline (matching layout
-/// containment).
-///
-/// # Dispatch placement (host contract)
-///
-/// Route here **before** [`compute_cached_layout`], right after the
-/// `display: none` check:
-///
-/// ```text
-/// if style.display().is_none() { hide_subtree(node); return HIDDEN; }
-/// if style.skips_contents()    { return compute_skipped_contents_layout(node, input); }
-/// compute_cached_layout(node, input, <algorithm dispatch>)
-/// ```
-///
-/// Like [`hide_subtree`], the child-hiding here deliberately **precedes and
-/// bypasses the cache boundary**: caching a skipped result and later serving it
-/// on a hit would leave a re-populated child subtree un-hidden. Sizing a
-/// contentless box is cheap and `hide_subtree` is far cheaper than laying the
-/// subtree out, so recomputing it per pass is acceptable; a normal→skipped
-/// transition (the host [`cache_clear`](LayoutNode::cache_clear)s on the style
-/// change) therefore always re-hides the freshly-orphaned descendants, and a
-/// skipped→normal transition re-dispatches to the algorithm.
 pub fn compute_skipped_contents_layout<N: LayoutNode>(node: N, input: LayoutInput) -> LayoutOutput {
     let style = node.style();
     let metrics = resolve_container_box(&style, input);
@@ -393,8 +166,6 @@ pub fn compute_skipped_contents_layout<N: LayoutNode>(node: N, input: LayoutInpu
     );
 
     if input.goal == LayoutGoal::Commit {
-        // Clean any descendant geometry/caches left by a prior non-skipped
-        // pass. This precedes and bypasses the cache, mirroring hide_subtree.
         for child in node.children() {
             hide_subtree(child);
         }
@@ -403,37 +174,6 @@ pub fn compute_skipped_contents_layout<N: LayoutNode>(node: N, input: LayoutInpu
     LayoutOutput::new(outer_size, outer_size)
 }
 
-/// Sizes and positions one out-of-flow node against its containing block —
-/// the host-driven **positioned pass** for
-/// [`PositionProperty::Fixed`](crate::style::PositionProperty) nodes.
-///
-/// Runs after in-flow layout. The node's formatting parent computed and
-/// recorded the node's static position
-/// ([`set_static_position`](LayoutNode::set_static_position)) but did not
-/// size or place it. The host resolves which node is the containing block
-/// (for Lynx `fixed`: the viewport root, or the nearest
-/// transformed/filtered ancestor per the W3C rule), converts the recorded
-/// static position into that block's space once all required in-flow and
-/// ancestor layouts are available, and calls this once per hoisted node
-/// with:
-///
-/// - `containing_block`: the containing block's **padding-box size**, the basis for the node's
-///   inset and percentage resolution;
-/// - `static_position`: the converted static position (padding-box space), the anchor for any axis
-///   whose insets are both `auto` (CSS Position / Flexbox §4.1 / Grid §10.2 semantics).
-///
-/// The node's subtree is laid out normally through
-/// [`compute_child_layout`](LayoutNode::compute_child_layout) (descendants
-/// store parent-relative layouts as usual, with normal caching). The node's
-/// **own** layout is *returned, not stored*: its `location` is relative to
-/// the containing block's **padding box**, which is generally not the
-/// node's tree parent — the host converts it into formatting-parent space
-/// and stores it via
-/// [`set_unrounded_layout`](LayoutNode::set_unrounded_layout), keeping
-/// [`Layout::location`]'s parent-relative contract intact for rounding and
-/// painting. The returned [`Layout::order`] is zero; the host's positioned
-/// pass assigns the formatting parent's order-modified paint index when it
-/// stores a hoisted node.
 #[must_use = "the returned layout is in containing-block space; the host must convert and store it"]
 pub fn compute_absolute_layout<N: LayoutNode>(
     node: N,
@@ -448,8 +188,6 @@ pub fn compute_absolute_layout<N: LayoutNode>(
     )
 }
 
-/// Commits one out-of-flow child while deriving its static position from the
-/// resolved border-box size and used margins.
 pub(super) fn compute_absolute_layout_with_static_position<N, StaticPosition>(
     node: N,
     containing_block: Size<f32>,
@@ -462,16 +200,6 @@ where
     absolute_layout(node, containing_block, static_position, LayoutGoal::Commit)
 }
 
-/// Measures an out-of-flow node with the same inset, automatic-size,
-/// aspect-ratio, min/max, and margin rules as [`compute_absolute_layout`].
-///
-/// Formatting algorithms use this side-effect-free probe when a hoisted
-/// out-of-flow node's static position depends on its margin-box size. The
-/// requested axis can be narrowed to the inset pair that actually needs a
-/// static fallback. The returned layout uses a zero static position; callers
-/// consume its `size` and `margin` to record the formatting-context-specific
-/// static position for the later positioned pass. No durable child geometry
-/// is written by this measurement.
 #[must_use]
 pub(super) fn measure_absolute_layout<N: LayoutNode>(
     node: N,
@@ -534,17 +262,15 @@ where
             .unwrap_or(AvailableSpace::Definite(inset_modified_size.height)),
     );
     let child_input = match goal {
-        LayoutGoal::Commit => {
-            LayoutInput::perform_layout(known_dimensions, parent_size, available_space)
-        }
-        LayoutGoal::Measure(requested_axis) => LayoutInput::compute_size(
+        LayoutGoal::Commit => LayoutInput::commit(known_dimensions, parent_size, available_space),
+        LayoutGoal::Measure(requested_axis) => LayoutInput::measure(
             known_dimensions,
             parent_size,
             available_space,
             requested_axis,
         ),
     };
-    let output = node.compute_child_layout(child_input);
+    let output = node.compute_layout(child_input);
 
     let margin = resolve_absolute_margins(
         optional_margin,
@@ -599,11 +325,6 @@ struct ResolvedAbsoluteStyle {
     optional_margin: Edges<Option<f32>>,
     padding: Edges<f32>,
     border: Edges<f32>,
-    /// Intrinsic preferred sizes must be measured in their own sizing mode;
-    /// the inset-modified containing block is only the fallback available
-    /// space for `auto`. A definite fit-content limit is retained here even
-    /// though `resolve_size` deliberately leaves intrinsic dimensions
-    /// unresolved.
     preferred_available: Size<Option<AvailableSpace>>,
     auto_size: Size<bool>,
     min_size: Size<Option<f32>>,
@@ -618,11 +339,6 @@ fn absolute_known_dimensions(
     inset_modified_size: Size<f32>,
     fixed_margin: Edges<f32>,
 ) -> Size<Option<f32>> {
-    // `auto` stretches only when both opposing insets are definite. These
-    // are caller-decided border-box dimensions, clamped before they become
-    // known dimensions. When horizontal stretch first establishes the width
-    // of a two-auto-axis ratio box, height remains ratio-derived; otherwise
-    // definite vertical insets may stretch height independently.
     let horizontal_stretch =
         style.auto_size.width && style.insets.left.is_some() && style.insets.right.is_some();
     let ratio_dependent_height = style.aspect_ratio.is_some()
@@ -653,10 +369,6 @@ fn absolute_known_dimensions(
     )
 }
 
-/// Whether a preferred-size value behaves as `auto` for stretch purposes.
-/// The lynx-parseable keywords Starlight has no sizing behavior for (bare
-/// `fit-content`, `stretch`, `-webkit-fill-available`) are treated as `auto`
-/// (documented vocabulary-swap delta).
 #[inline]
 fn style_size_behaves_auto(value: &StyleSize) -> bool {
     match value {
@@ -724,8 +436,6 @@ fn resolve_absolute_style<N: LayoutNode>(
     }
 }
 
-/// The intrinsic available-space override selected by an intrinsic preferred
-/// size on an absolutely positioned box.
 #[inline]
 fn absolute_preferred_available(value: &StyleSize, basis: Option<f32>) -> Option<AvailableSpace> {
     match value {
@@ -744,54 +454,10 @@ fn absolute_preferred_available(value: &StyleSize, basis: Option<f32>) -> Option
     }
 }
 
-/// Derives device-pixel-snapped final layouts from the unrounded layouts
-/// under `root`.
-///
-/// Walks the subtree rooted at `root` (including `root` itself), reading
-/// each node's [`clone_unrounded_layout`](LayoutNode::clone_unrounded_layout) and
-/// writing a rounded copy through
-/// [`set_final_layout`](LayoutNode::set_final_layout).
-///
-/// `scale` is the device-pixel ratio — physical pixels per CSS pixel (e.g.
-/// `2.0`/`3.0` on high-DPI displays; `1.0` snaps to whole CSS pixels). It
-/// must be finite and `> 0` (debug-asserted). Snapping happens on the
-/// **device-pixel grid**, since layout coordinates are CSS pixels but crisp
-/// edges are physical: `snap(v) = css_round(v × scale) / scale`. CSS nearest-
-/// integer rounding chooses the value toward positive infinity at an exact
-/// half-way tie (`1.5 → 2`, `-1.5 → -1`).
-///
-/// Rounding contract (cumulative-error-free): positions are snapped in
-/// *accumulated* (root-relative) space and sizes derived as
-/// `snap(pos + size) - snap(pos)`, so adjacent edges land on the same
-/// physical pixel and a box's snapped size never drifts more than one
-/// device pixel from its unrounded size — at the cost that equal unrounded
-/// sizes may snap to sizes differing by one device pixel (the standard
-/// trade-off, also made by browsers). Idempotent given unchanged unrounded
-/// inputs and scale.
 pub fn round_layout<N: LayoutNode>(root: N, scale: f32) {
     round_layout_subtree(root, scale, Point::ZERO);
 }
 
-/// Like [`round_layout`], but snaps the subtree rooted at `node` as though its
-/// tree parent's accumulated (root-relative) **unrounded** border-box origin
-/// were `parent_position` — the anchor a full [`round_layout`] walk would have
-/// reached by the time it descended to `node`.
-///
-/// [`round_layout`] is `round_layout_subtree(root, scale, Point::ZERO)`. A host
-/// doing containment-scoped incremental relayout uses this to re-snap only a
-/// changed subtree — e.g. a `contain: strict` boundary's interior, whose outer
-/// geometry the relayout-boundary theorem (see
-/// [`is_relayout_boundary`](crate::invalidate::is_relayout_boundary)) holds
-/// fixed — without re-walking the whole tree. Passing the boundary parent's
-/// accumulated unrounded origin makes the result **byte-identical** to a full
-/// re-round,
-/// because device-pixel snapping is a pure function of the accumulated position,
-/// size, and scale (positions snap in accumulated space; sizes derive as
-/// `snap(pos + size) − snap(pos)`). The unchanged geometry outside `node`'s
-/// subtree keeps its previously snapped values.
-///
-/// `scale` must be finite and `> 0`, `parent_position` finite (both
-/// debug-asserted).
 pub fn round_layout_subtree<N: LayoutNode>(node: N, scale: f32, parent_position: Point<f32>) {
     debug_assert!(
         scale.is_finite() && scale > 0.0,
@@ -804,9 +470,6 @@ pub fn round_layout_subtree<N: LayoutNode>(node: N, scale: f32, parent_position:
     round_layout_inner(node, scale, parent_position);
 }
 
-/// CSS Values' nearest-integer rule: choose the upper integer on an exact
-/// half-way tie. This intentionally differs from Rust's `f32::round` for
-/// negative halves, where `-1.5` rounds away from zero to `-2`.
 #[inline]
 fn css_round_to_integer(value: f32) -> f32 {
     debug_assert!(value.is_finite(), "CSS pixel coordinates must be finite");
@@ -901,9 +564,6 @@ struct AbsoluteAxis {
 }
 
 fn round_layout_inner<N: LayoutNode>(node: N, scale: f32, parent_position: Point<f32>) {
-    // The rounded result is a second durable record by design. Keep this one
-    // required whole-Layout duplication explicit in the protocol operation's
-    // name rather than making a large by-value read look free.
     let unrounded = node.clone_unrounded_layout();
     let position = Point::new(
         parent_position.x + unrounded.location.x,
@@ -949,7 +609,7 @@ fn round_layout_inner<N: LayoutNode>(node: N, scale: f32, parent_position: Point
     rounded.margin.bottom = snap(position.y + source_size.height + source_margin.bottom)
         - snap(position.y + source_size.height);
 
-    node.set_final_layout(rounded);
+    node.set_rounded_layout(rounded);
 
     for child in node.children() {
         round_layout_inner(child, scale, position);

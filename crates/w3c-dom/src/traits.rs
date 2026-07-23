@@ -1,43 +1,4 @@
 //! Stylo DOM traits implemented directly on the one-word `&Node` handle.
-//!
-//! The slot-zero document, elements, and text nodes are all real [`Node`]
-//! values distinguished by their `NodeData`. Consequently the same `&Node`
-//! type implements [`TNode`], [`TElement`], [`TDocument`], and the unused
-//! [`TShadowRoot`] associated-type stub. No document/node wrapper or iterator
-//! adapter is needed, and Stylo traverses the one primary-arena-backed tree
-//! in place while its ancillary traversal state is resolved from the styling
-//! secondary arena.
-//!
-//! Implementation note: inside these impls, inherent `Node` methods that
-//! share a name with a trait method (`parent`, `first_child`,
-//! `next_sibling`, `id`, `has_dirty_descendants`, …) are called **fully
-//! qualified** (`Node::parent(*self)`), never with method syntax — on a
-//! `&Node` receiver with the trait in scope, method-call syntax resolves to
-//! the trait impl first, which here would recurse.
-//!
-//! # Model
-//!
-//! - **Document is a distinct node.** Slot zero is `NodeData::Document`; [`NodeInfo`] and
-//!   [`TNode::as_element`] distinguish it from elements and text.
-//! - **`:hover`/`:active`/`:focus`** are matched from the node's
-//!   [`ElementState`](crate::ElementState).
-//! - **`:root`** matches the document element, never a detached parentless element.
-//! - **Attributes** come exclusively from the node's real DOM attribute map.
-//! - **Shadow DOM / pseudo-elements / animations** are stubbed (`None`/`false`) — none exist in
-//!   this model yet.
-//!
-//! # Safety
-//!
-//! This module carries the `unsafe` for the interior-mutable per-element state
-//! stylo mandates ([`ensure_data`](TElement::ensure_data),
-//! [`clear_data`](TElement::clear_data), `borrow_data`, `mutate_data`). Each
-//! `unsafe` access relies on **stylo's traversal discipline**: during a
-//! (possibly parallel) restyle traversal, each element's
-//! [`stylo_data`](crate::Node) is touched by exactly one worker at a time (a
-//! parent reads/writes a child's data only in `note_children`, strictly
-//! before any worker takes ownership of that child), and outside a traversal
-//! the embedder holds `&mut Document`. All other per-node state stylo mutates
-//! through `&self` is atomic (see [`Node`](crate::Node)).
 #![allow(unsafe_code)]
 
 use std::sync::OnceLock;
@@ -67,14 +28,10 @@ use stylo_atoms::Atom;
 
 use crate::node::{ChildrenIter, Node};
 
-/// The single shared empty namespace, returned by [`TElement::namespace`]
-/// (tags are never namespaced here).
 fn empty_namespace() -> &'static <SelectorImpl as selectors::SelectorImpl>::BorrowedNamespaceUrl {
     static EMPTY: OnceLock<Namespace> = OnceLock::new();
     &EMPTY.get_or_init(Namespace::default).0
 }
-
-// --- NodeInfo + TNode -------------------------------------------------------
 
 impl<T: Sync> NodeInfo for &Node<T> {
     fn is_element(&self) -> bool {
@@ -104,7 +61,7 @@ impl<'a, T: Sync> TNode for &'a Node<T> {
     }
 
     fn prev_sibling(&self) -> Option<Self> {
-        Node::prev_sibling(*self)
+        Node::previous_sibling(*self)
     }
 
     fn next_sibling(&self) -> Option<Self> {
@@ -154,8 +111,6 @@ impl<'a, T: Sync> TNode for &'a Node<T> {
     }
 }
 
-// --- TDocument + TShadowRoot --------------------------------------------------
-
 impl<'a, T: Sync> TDocument for &'a Node<T> {
     type ConcreteNode = &'a Node<T>;
 
@@ -196,8 +151,6 @@ impl<'a, T: Sync> TShadowRoot for &'a Node<T> {
         None
     }
 }
-
-// --- TElement -----------------------------------------------------------------
 
 impl<'a, T: Sync> TElement for &'a Node<T> {
     type ConcreteNode = &'a Node<T>;
@@ -254,8 +207,7 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
     }
 
     fn id(&self) -> Option<&Atom> {
-        // In the servo build stylo's `WeakAtom` is `stylo_atoms::Atom`.
-        self.id_attr.as_ref()
+        self.id_attribute.as_ref()
     }
 
     fn each_class<F>(&self, mut callback: F)
@@ -287,8 +239,6 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
     }
 
     fn has_snapshot(&self) -> bool {
-        // Set when a document mutation records this node's snapshot (see
-        // `crate::invalidation`); consumed by stylo's invalidation pass.
         self.snapshot_present()
     }
 
@@ -322,8 +272,6 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
     }
 
     unsafe fn ensure_data(&self) -> ElementDataMut<'_> {
-        // Debug contract check: slot-exclusive access, traversal phase only.
-        // (The returned borrow is separately tracked by `ElementDataWrapper`.)
         #[cfg(debug_assertions)]
         let _access = {
             debug_assert!(
@@ -332,8 +280,6 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
             );
             self.styling_data().slot_guard.begin_write()
         };
-        // SAFETY: traversal discipline — the caller holds exclusive access to
-        // this node, so creating/borrowing its `ElementData` cannot race.
         let slot = unsafe { &mut *self.stylo_data.get() };
         slot.get_or_insert_with(ElementDataWrapper::default)
             .borrow_mut()
@@ -348,8 +294,6 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
             );
             self.styling_data().slot_guard.begin_write()
         };
-        // SAFETY: traversal discipline — exclusive access to this node, no
-        // concurrent borrow of its stylo state.
         unsafe {
             *self.stylo_data.get() = None;
         }
@@ -361,18 +305,12 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
     fn has_data(&self) -> bool {
         #[cfg(debug_assertions)]
         let _access = self.styling_data().slot_guard.begin_read();
-        // SAFETY: reads only the `Option` discriminant; the slot is only
-        // created/removed by this node's owning worker (or under
-        // `&mut Document`), never concurrently with this read.
         unsafe { (*self.stylo_data.get()).is_some() }
     }
 
     fn borrow_data(&self) -> Option<ElementDataRef<'_>> {
         #[cfg(debug_assertions)]
         let _access = self.styling_data().slot_guard.begin_read();
-        // SAFETY: `ElementDataWrapper` tracks borrows internally (debug
-        // builds); the traversal discipline rules out a concurrent mutable
-        // borrow.
         unsafe {
             (*self.stylo_data.get())
                 .as_ref()
@@ -381,12 +319,8 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
     }
 
     fn mutate_data(&self) -> Option<ElementDataMut<'_>> {
-        // Slot-wise this is a *read* (`as_ref`); the mutable borrow of the
-        // inner data is tracked by `ElementDataWrapper` itself.
         #[cfg(debug_assertions)]
         let _access = self.styling_data().slot_guard.begin_read();
-        // SAFETY: as `borrow_data`, plus exclusive access under the traversal
-        // discipline.
         unsafe {
             (*self.stylo_data.get())
                 .as_ref()
@@ -472,11 +406,6 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
     }
 }
 
-// --- selectors::Element ---------------------------------------------------------
-
-/// id/class matching is **case-sensitive**; `:hover`/`:active`/`:focus` are
-/// matched from the node's [`ElementState`]; attribute
-/// matching covers the node's real DOM attributes.
 impl<T: Sync> Element for &Node<T> {
     type Impl = SelectorImpl;
 
@@ -501,12 +430,12 @@ impl<T: Sync> Element for &Node<T> {
     }
 
     fn prev_sibling_element(&self) -> Option<Self> {
-        let mut sibling = Node::prev_sibling(*self);
+        let mut sibling = Node::previous_sibling(*self);
         while let Some(node) = sibling {
             if node.is_element() {
                 return Some(node);
             }
-            sibling = Node::prev_sibling(node);
+            sibling = Node::previous_sibling(node);
         }
         None
     }
@@ -550,8 +479,6 @@ impl<T: Sync> Element for &Node<T> {
         &self,
         ns: &<Self::Impl as selectors::SelectorImpl>::BorrowedNamespaceUrl,
     ) -> bool {
-        // Elements are never namespaced here: only the empty namespace
-        // matches. Text nodes have no namespace at all.
         self.is_element() && ns.is_empty()
     }
 
@@ -574,8 +501,6 @@ impl<T: Sync> Element for &Node<T> {
         pc: &NonTSPseudoClass,
         _context: &mut selectors::context::MatchingContext<Self::Impl>,
     ) -> bool {
-        // Match the dynamic pseudo-classes against the node's state. Every
-        // other non-tree-structural pseudo-class is unsupported → false.
         match pc {
             NonTSPseudoClass::Hover | NonTSPseudoClass::Active | NonTSPseudoClass::Focus => {
                 self.element_state.contains(pc.state_flag())
@@ -593,10 +518,6 @@ impl<T: Sync> Element for &Node<T> {
     }
 
     fn apply_selector_flags(&self, flags: ElementSelectorFlags) {
-        // stylo's contract splits the flags: `for_self()` bits land on this
-        // node, `for_parent()` bits (slow-selector / edge-child markers) on
-        // its parent. Atomic ORs: parallel workers matching sibling nodes may
-        // both push parent flags onto the shared parent.
         let self_flags = flags.for_self();
         if !self_flags.is_empty() {
             self.styling_data()
@@ -623,7 +544,7 @@ impl<T: Sync> Element for &Node<T> {
     }
 
     fn has_id(&self, id: &AtomIdent, case_sensitivity: CaseSensitivity) -> bool {
-        self.id_attr
+        self.id_attribute
             .as_ref()
             .is_some_and(|my_id| case_sensitivity.eq_atom(my_id, id))
     }
@@ -651,9 +572,6 @@ impl<T: Sync> Element for &Node<T> {
     }
 
     fn is_root(&self) -> bool {
-        // Selectors Level 4: `:root` matches the document element. A
-        // detached parentless element has an owner document but is not its
-        // element child, so it must not match.
         Node::parent(*self).is_some_and(Node::is_document)
     }
 

@@ -1,13 +1,4 @@
 //! A small, safe Rust boundary around the repository's pinned `QuickJS` source.
-//!
-//! A [`Realm`] owns one `QuickJS` runtime and context. Realms and their
-//! [`Value`] handles are deliberately owner-thread-bound (`!Send` and
-//! `!Sync`). Every value keeps its runtime alive, so dropping a realm before
-//! its handles is safe. No raw `QuickJS` pointer is part of the public API.
-//!
-//! The vendored engine builds on Unix targets and Windows GNU/MinGW. Windows
-//! MSVC is rejected explicitly because the upstream C sources do not support
-//! that ABI/toolchain.
 
 mod ffi;
 
@@ -39,31 +30,20 @@ mod implementation {
     /// Configuration applied before `QuickJS` creates a realm context.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct RealmOptions {
-        /// Heap limit in bytes. `None` uses `QuickJS`'s default (unlimited).
         pub memory_limit: Option<usize>,
-        /// Native stack limit in bytes. `None` uses `QuickJS`'s default.
         pub max_stack_size: Option<usize>,
-        /// Maximum wall time for one JavaScript entry or pending-job drain.
-        ///
-        /// The limit is cooperative: `QuickJS` checks it at engine interrupt
-        /// polling points. It cannot preempt a blocking native host callback.
-        /// `None` disables deadline-based interruption.
         pub execution_timeout: Option<Duration>,
     }
 
     /// Borrowed JavaScript source plus diagnostic metadata.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct EvalSource<'a> {
-        /// UTF-8 JavaScript source text.
         pub text: &'a str,
-        /// Diagnostic source name. `QuickJS` uses `"<eval>"` when absent.
         pub name: Option<&'a str>,
-        /// Number of lines to add before the first source line in diagnostics.
         pub line_offset: u32,
     }
 
     impl<'a> EvalSource<'a> {
-        /// Creates source with no explicit name or line offset.
         #[must_use]
         pub const fn new(text: &'a str) -> Self {
             Self {
@@ -81,17 +61,19 @@ mod implementation {
         reason = "these independent flags map directly to QuickJS evaluation flags"
     )]
     pub struct EvalOptions {
-        /// Parse as an ECMAScript module rather than a classic script.
-        pub module: bool,
-        /// Force strict mode for a classic script.
+        pub source_type: SourceType,
         pub strict: bool,
-        /// Hide stack frames that precede this evaluation.
         pub backtrace_barrier: bool,
-        /// Permit top-level await in a classic script.
         pub top_level_await: bool,
     }
 
-    /// Coarse, stable classification of a JavaScript value.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub enum SourceType {
+        #[default]
+        Script,
+        Module,
+    }
+
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     #[non_exhaustive]
     pub enum ValueKind {
@@ -107,7 +89,6 @@ mod implementation {
         Other,
     }
 
-    /// The bridge operation that failed.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     #[non_exhaustive]
     pub enum ErrorPhase {
@@ -119,7 +100,6 @@ mod implementation {
         PendingJob,
     }
 
-    /// Stable failure category, independent of `QuickJS` object identity.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     #[non_exhaustive]
     pub enum ErrorKind {
@@ -183,9 +163,7 @@ mod implementation {
     /// Result of running pending jobs with a finite budget.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct JobDrain {
-        /// Jobs executed during this drain attempt.
         pub executed: usize,
-        /// Whether at least one job remains queued.
         pub jobs_remaining: bool,
     }
 
@@ -194,30 +172,19 @@ mod implementation {
 
     #[derive(Debug)]
     struct InterruptShared {
-        /// Zero while idle. Otherwise the high 63 bits identify the active
-        /// execution and bit zero records a host interruption request.
         active: AtomicU64,
     }
 
     /// A thread-safe handle that can interrupt the JavaScript execution which
     /// is active when the request is made.
-    ///
-    /// The request is best-effort because the owner thread may finish between
-    /// observing the active execution and `QuickJS` reaching its next polling
-    /// point. An idle request is ignored and cannot affect a later execution.
     #[derive(Clone, Debug)]
     pub struct InterruptHandle {
         shared: Arc<InterruptShared>,
     }
 
     impl InterruptHandle {
-        /// Request interruption of the currently active JavaScript execution.
-        ///
-        /// Returns `false` if no JavaScript execution was active when the
-        /// request was observed. Returning `true` means the request was
-        /// recorded, not that the owner thread has already stopped.
         #[must_use]
-        pub fn request_interrupt(&self) -> bool {
+        pub fn request_interrupt_if_running(&self) -> bool {
             let active = self.shared.active.load(Ordering::Acquire);
             if active == 0 {
                 return false;
@@ -226,9 +193,6 @@ mod implementation {
                 return true;
             }
 
-            // Never retarget a late request to a newer generation. A strong
-            // compare-exchange can fail only because the active operation
-            // changed or another requester marked this exact generation.
             match self.shared.active.compare_exchange(
                 active,
                 active | INTERRUPT_REQUESTED,
@@ -363,14 +327,10 @@ mod implementation {
     }
 
     unsafe extern "C" fn interrupt_callback(opaque: *mut c_void) -> i32 {
-        // SAFETY: RealmInner unregisters the callback before dropping this
-        // stable Rc allocation. QuickJS invokes it only on the owner thread.
         let state = unsafe { &*opaque.cast::<InterruptState>() };
         if let Ok(interrupted) = catch_unwind(AssertUnwindSafe(|| state.poll())) {
             i32::from(interrupted)
         } else {
-            // No Rust panic may cross the C ABI. Fail closed if a platform
-            // clock implementation ever panics while polling the deadline.
             state.reason.set(Some(InterruptReason::HandlerFailure));
             1
         }
@@ -402,11 +362,6 @@ mod implementation {
 
     impl Drop for RealmInner {
         fn drop(&mut self) {
-            // SAFETY: this is the last `Rc<RealmInner>`, hence all ValueInner
-            // instances have already freed their values. The context belongs to
-            // this runtime and both pointers came from their matching constructors.
-            // Unregistering first makes the callback opaque invalid only after
-            // QuickJS can no longer dereference it.
             unsafe {
                 ffi::qjs_runtime_set_interrupt_handler(
                     self.runtime.as_ptr(),
@@ -421,16 +376,6 @@ mod implementation {
     }
 
     /// One owner-thread-bound `QuickJS` runtime and global realm.
-    ///
-    /// ```compile_fail,E0277
-    /// fn require_send<T: Send>() {}
-    /// require_send::<quickjs_rust_bridge::Realm>();
-    /// ```
-    ///
-    /// ```compile_fail,E0277
-    /// fn require_sync<T: Sync>() {}
-    /// require_sync::<quickjs_rust_bridge::Realm>();
-    /// ```
     pub struct Realm {
         inner: Rc<RealmInner>,
     }
@@ -448,12 +393,10 @@ mod implementation {
     }
 
     impl Realm {
-        /// Creates a realm with `QuickJS` defaults and blocking operations disabled.
         pub fn new() -> Result<Self, Error> {
             Self::with_options(RealmOptions::default())
         }
 
-        /// Creates a realm with optional heap, native-stack, and execution limits.
         pub fn with_options(options: RealmOptions) -> Result<Self, Error> {
             if options
                 .execution_timeout
@@ -466,8 +409,6 @@ mod implementation {
                 ));
             }
 
-            // SAFETY: the returned pointers are checked before use and immediately
-            // placed under `RealmInner`'s matching destruction path.
             unsafe {
                 let runtime = NonNull::new(ffi::qjs_runtime_new()).ok_or_else(|| {
                     Error::bridge(
@@ -506,10 +447,6 @@ mod implementation {
             }
         }
 
-        /// Returns a thread-safe handle for interrupting the active JavaScript entry.
-        ///
-        /// Requests are generation-scoped: an idle or late request cannot poison
-        /// the realm's next evaluation, call, or pending-job drain.
         #[must_use]
         pub fn interrupt_handle(&self) -> InterruptHandle {
             InterruptHandle {
@@ -517,55 +454,42 @@ mod implementation {
             }
         }
 
-        /// Creates JavaScript `undefined`.
         pub fn undefined(&self) -> Result<Value, Error> {
-            self.construct(ErrorPhase::ConstructValue, |context| {
-                // SAFETY: `context` is live for the duration of this call.
-                unsafe { ffi::qjs_new_undefined(context) }
+            self.construct(ErrorPhase::ConstructValue, |context| unsafe {
+                ffi::qjs_new_undefined(context)
             })
         }
 
-        /// Creates JavaScript `null`.
         pub fn null(&self) -> Result<Value, Error> {
-            self.construct(ErrorPhase::ConstructValue, |context| {
-                // SAFETY: `context` is live for the duration of this call.
-                unsafe { ffi::qjs_new_null(context) }
+            self.construct(ErrorPhase::ConstructValue, |context| unsafe {
+                ffi::qjs_new_null(context)
             })
         }
 
-        /// Creates a JavaScript Boolean.
         pub fn boolean(&self, value: bool) -> Result<Value, Error> {
-            self.construct(ErrorPhase::ConstructValue, |context| {
-                // SAFETY: `context` is live for the duration of this call.
-                unsafe { ffi::qjs_new_boolean(context, i32::from(value)) }
+            self.construct(ErrorPhase::ConstructValue, |context| unsafe {
+                ffi::qjs_new_boolean(context, i32::from(value))
             })
         }
 
-        /// Creates a JavaScript Number, preserving negative zero and non-finite values.
         pub fn number(&self, value: f64) -> Result<Value, Error> {
-            self.construct(ErrorPhase::ConstructValue, |context| {
-                // SAFETY: `context` is live for the duration of this call.
-                unsafe { ffi::qjs_new_number(context, value) }
+            self.construct(ErrorPhase::ConstructValue, |context| unsafe {
+                ffi::qjs_new_number(context, value)
             })
         }
 
-        /// Creates a JavaScript `BigInt` from a signed 64-bit integer.
         pub fn big_int64(&self, value: i64) -> Result<Value, Error> {
-            self.construct(ErrorPhase::ConstructValue, |context| {
-                // SAFETY: `context` is live for the duration of this call.
-                unsafe { ffi::qjs_new_big_int64(context, value) }
+            self.construct(ErrorPhase::ConstructValue, |context| unsafe {
+                ffi::qjs_new_big_int64(context, value)
             })
         }
 
-        /// Creates a JavaScript `BigInt` from an unsigned 64-bit integer.
         pub fn big_uint64(&self, value: u64) -> Result<Value, Error> {
-            self.construct(ErrorPhase::ConstructValue, |context| {
-                // SAFETY: `context` is live for the duration of this call.
-                unsafe { ffi::qjs_new_big_uint64(context, value) }
+            self.construct(ErrorPhase::ConstructValue, |context| unsafe {
+                ffi::qjs_new_big_uint64(context, value)
             })
         }
 
-        /// Creates an arbitrary-size `BigInt` from canonical signed decimal text.
         pub fn big_int_decimal(&mut self, decimal: &str) -> Result<Value, Error> {
             if !is_canonical_big_int(decimal) {
                 return Err(Error::bridge(
@@ -586,7 +510,7 @@ mod implementation {
                 })?;
             source.push_str(decimal);
             source.push('n');
-            self.eval(
+            self.evaluate(
                 EvalSource {
                     text: &source,
                     name: Some("<host bigint>"),
@@ -600,29 +524,23 @@ mod implementation {
             })
         }
 
-        /// Creates a JavaScript String from Unicode scalar-value text.
         pub fn string(&self, value: &str) -> Result<Value, Error> {
             let utf16: Vec<u16> = value.encode_utf16().collect();
             self.string_utf16(&utf16)
         }
 
-        /// Creates a JavaScript String from its exact UTF-16 code-unit sequence.
-        /// Unpaired surrogates are preserved.
         pub fn string_utf16(&self, units: &[u16]) -> Result<Value, Error> {
-            self.construct(ErrorPhase::ConstructValue, |context| {
-                // SAFETY: the slice remains live during the C call; the shim copies
-                // every code unit into a freshly allocated QuickJS string.
-                unsafe { ffi::qjs_new_string_utf16(context, units.as_ptr(), units.len()) }
+            self.construct(ErrorPhase::ConstructValue, |context| unsafe {
+                ffi::qjs_new_string_utf16(context, units.as_ptr(), units.len())
             })
         }
 
-        /// Evaluates source in this realm.
-        pub fn eval(
+        pub fn evaluate(
             &mut self,
             source: EvalSource<'_>,
             options: EvalOptions,
         ) -> Result<Value, Error> {
-            if options.module && options.top_level_await {
+            if options.source_type == SourceType::Module && options.top_level_await {
                 return Err(Error::bridge(
                     ErrorKind::InvalidInput,
                     ErrorPhase::Evaluate,
@@ -667,7 +585,7 @@ mod implementation {
             let source_length = terminated.len();
             terminated.push(0);
 
-            let mut flags = if options.module {
+            let mut flags = if options.source_type == SourceType::Module {
                 JS_EVAL_TYPE_MODULE
             } else {
                 JS_EVAL_TYPE_GLOBAL
@@ -684,9 +602,6 @@ mod implementation {
 
             let mut failure_stage = 0;
             let guard = self.inner.interrupt.begin();
-            // SAFETY: source is explicitly NUL-terminated, its length excludes the
-            // terminator, source_name and failure_stage are live, and context is
-            // live. The shim initializes failure_stage before returning.
             let raw = unsafe {
                 ffi::qjs_eval(
                     self.inner.context.as_ptr(),
@@ -709,7 +624,6 @@ mod implementation {
             guard.finish(result, ErrorPhase::Evaluate)
         }
 
-        /// Calls a function value after validating every handle's realm affinity.
         pub fn call(
             &mut self,
             callable: &Value,
@@ -742,8 +656,6 @@ mod implementation {
                 .map(|value| value.inner.raw.as_ptr().cast_const())
                 .collect();
             let guard = self.inner.interrupt.begin();
-            // SAFETY: affinity validation proves all handles use this live context;
-            // the pointer array remains live for the call and count fits `int`.
             let raw = unsafe {
                 ffi::qjs_call(
                     self.inner.context.as_ptr(),
@@ -758,19 +670,14 @@ mod implementation {
             guard.finish(result, ErrorPhase::Call)
         }
 
-        /// Executes at most one pending Promise/microtask job.
-        ///
-        /// Returns `true` when a job ran and `false` when the queue was empty.
-        pub fn execute_pending_job(&mut self) -> Result<bool, Error> {
+        pub fn try_execute_pending_job(&mut self) -> Result<bool, Error> {
             let guard = self.inner.interrupt.begin();
-            let result = self.execute_pending_job_inner();
+            let result = self.try_execute_pending_job_inner();
             guard.finish(result, ErrorPhase::PendingJob)
         }
 
-        fn execute_pending_job_inner(&mut self) -> Result<bool, Error> {
+        fn try_execute_pending_job_inner(&mut self) -> Result<bool, Error> {
             let mut job_context = ptr::null_mut();
-            // SAFETY: runtime is live; QuickJS initializes job_context whenever it
-            // reports a failing job.
             let result = unsafe {
                 ffi::qjs_execute_pending_job(self.inner.runtime.as_ptr(), &raw mut job_context)
             };
@@ -785,19 +692,16 @@ mod implementation {
             }
         }
 
-        /// Reports whether at least one Promise/microtask job is queued.
         #[must_use]
-        pub fn has_pending_job(&self) -> bool {
-            // SAFETY: this realm owns the live runtime pointer.
+        pub fn has_pending_jobs(&self) -> bool {
             unsafe { ffi::qjs_has_pending_job(self.inner.runtime.as_ptr()) != 0 }
         }
 
-        /// Runs pending jobs until `QuickJS` reports an empty queue.
         pub fn drain_pending_jobs(&mut self) -> Result<usize, Error> {
             let guard = self.inner.interrupt.begin();
             let result = (|| {
                 let mut executed = 0usize;
-                while self.execute_pending_job_inner()? {
+                while self.try_execute_pending_job_inner()? {
                     executed = executed.saturating_add(1);
                 }
                 Ok(executed)
@@ -805,15 +709,14 @@ mod implementation {
             guard.finish(result, ErrorPhase::PendingJob)
         }
 
-        /// Runs pending jobs until the queue is empty or `budget` jobs ran.
-        pub fn drain_pending_jobs_bounded(&mut self, budget: usize) -> Result<JobDrain, Error> {
+        pub fn drain_pending_jobs_up_to(&mut self, budget: usize) -> Result<JobDrain, Error> {
             let guard = self.inner.interrupt.begin();
             let result = (|| {
                 let mut executed = 0usize;
-                while executed < budget && self.execute_pending_job_inner()? {
+                while executed < budget && self.try_execute_pending_job_inner()? {
                     executed += 1;
                 }
-                let jobs_remaining = self.has_pending_job();
+                let jobs_remaining = self.has_pending_jobs();
                 if !jobs_remaining && let Some(error) = self.take_unhandled_rejection() {
                     return Err(error);
                 }
@@ -867,8 +770,6 @@ mod implementation {
             phase: ErrorPhase,
             syntax_is_parse_error: bool,
         ) -> Error {
-            // SAFETY: context is live and has just reported an exception. The shim
-            // transfers the exception into an ordinary rooted value box.
             let raw = unsafe { ffi::qjs_take_exception(context) };
             let Some(raw) = NonNull::new(raw) else {
                 return Error::bridge(
@@ -882,12 +783,9 @@ mod implementation {
         }
 
         fn take_unhandled_rejection(&self) -> Option<Error> {
-            // SAFETY: this realm owns the live runtime pointer.
             if unsafe { ffi::qjs_has_unhandled_rejection(self.inner.runtime.as_ptr()) } == 0 {
                 return None;
             }
-            // SAFETY: the preceding query reported a tracked rejection. The shim
-            // transfers one rooted reason into a value box.
             let raw = unsafe { ffi::qjs_take_unhandled_rejection(self.inner.runtime.as_ptr()) };
             let Some(raw) = NonNull::new(raw) else {
                 return Some(
@@ -906,23 +804,11 @@ mod implementation {
 
     impl Drop for ValueInner {
         fn drop(&mut self) {
-            // SAFETY: `owner` keeps the matching context live, and this is the sole
-            // `ValueInner` owning this C box.
             unsafe { ffi::qjs_value_free(self.owner.context.as_ptr(), self.raw.as_ptr()) }
         }
     }
 
     /// A rooted `QuickJS` value that keeps its owning realm alive.
-    ///
-    /// ```compile_fail,E0277
-    /// fn require_send<T: Send>() {}
-    /// require_send::<quickjs_rust_bridge::Value>();
-    /// ```
-    ///
-    /// ```compile_fail,E0277
-    /// fn require_sync<T: Sync>() {}
-    /// require_sync::<quickjs_rust_bridge::Value>();
-    /// ```
     #[derive(Clone)]
     pub struct Value {
         inner: Rc<ValueInner>,
@@ -944,10 +830,8 @@ mod implementation {
             }
         }
 
-        /// Returns the stable coarse type of this value.
         #[must_use]
         pub fn kind(&self) -> ValueKind {
-            // SAFETY: the owner keeps both context and value live.
             match unsafe {
                 ffi::qjs_value_kind(self.inner.owner.context.as_ptr(), self.inner.raw.as_ptr())
             } {
@@ -964,14 +848,12 @@ mod implementation {
             }
         }
 
-        /// Extracts a Boolean without coercion.
         #[must_use]
         pub fn as_boolean(&self) -> Option<bool> {
             if self.kind() != ValueKind::Boolean {
                 return None;
             }
             let mut result = 0;
-            // SAFETY: type was checked and both pointers remain live.
             let status = unsafe {
                 ffi::qjs_value_get_boolean(
                     self.inner.owner.context.as_ptr(),
@@ -982,14 +864,12 @@ mod implementation {
             (status == 0).then_some(result != 0)
         }
 
-        /// Extracts a Number without coercion.
         #[must_use]
         pub fn as_number(&self) -> Option<f64> {
             if self.kind() != ValueKind::Number {
                 return None;
             }
             let mut result = 0.0;
-            // SAFETY: type was checked and both pointers remain live.
             let status = unsafe {
                 ffi::qjs_value_get_number(
                     self.inner.owner.context.as_ptr(),
@@ -1000,7 +880,6 @@ mod implementation {
             (status == 0).then_some(result)
         }
 
-        /// Extracts an exact UTF-16 code-unit sequence from a String.
         pub fn to_utf16(&self) -> Result<Vec<u16>, Error> {
             if self.kind() != ValueKind::String {
                 return Err(Error::bridge(
@@ -1012,7 +891,6 @@ mod implementation {
             self.to_utf16_coerced()
         }
 
-        /// Extracts a `BigInt` as canonical signed decimal text.
         pub fn to_big_int_decimal(&self) -> Result<String, Error> {
             if self.kind() != ValueKind::BigInt {
                 return Err(Error::bridge(
@@ -1035,8 +913,6 @@ mod implementation {
             let context = self.inner.owner.context.as_ptr();
             let mut bytes = ptr::null();
             let mut length = 0usize;
-            // SAFETY: the owner keeps both values live; on success the returned
-            // allocation is owned by QuickJS until qjs_cesu8_free below.
             let status = unsafe {
                 ffi::qjs_value_to_cesu8(
                     context,
@@ -1046,8 +922,6 @@ mod implementation {
                 )
             };
             if status != 0 || bytes.is_null() {
-                // SAFETY: conversion failure leaves a pending exception, which is
-                // intentionally discarded because this API returns a stable error.
                 unsafe { ffi::qjs_discard_exception(context) };
                 return Err(Error::bridge(
                     ErrorKind::Engine,
@@ -1055,10 +929,8 @@ mod implementation {
                     "QuickJS could not convert the value to CESU-8",
                 ));
             }
-            // SAFETY: QuickJS returned `length` readable bytes.
             let encoded = unsafe { std::slice::from_raw_parts(bytes, length) };
             let decoded = decode_cesu8(encoded);
-            // SAFETY: bytes came from qjs_value_to_cesu8 in this context.
             unsafe { ffi::qjs_cesu8_free(context, bytes) };
             decoded.map_err(|message| {
                 Error::bridge(ErrorKind::Engine, ErrorPhase::ConvertValue, message)
@@ -1086,8 +958,6 @@ mod implementation {
 
         fn property(&self, name: &str) -> Option<Self> {
             let name = CString::new(name).ok()?;
-            // SAFETY: context/value/name are live. A null result means property
-            // lookup threw; that secondary exception is discarded below.
             let raw = unsafe {
                 ffi::qjs_get_property(
                     self.inner.owner.context.as_ptr(),
@@ -1098,7 +968,6 @@ mod implementation {
             if let Some(raw) = NonNull::new(raw) {
                 Some(Self::from_raw(Rc::clone(&self.inner.owner), raw))
             } else {
-                // SAFETY: a null qjs_get_property result means an exception marker.
                 unsafe { ffi::qjs_discard_exception(self.inner.owner.context.as_ptr()) }
                 None
             }
@@ -1296,7 +1165,7 @@ mod implementation {
                 let mut realm = Realm::new().expect("realm should initialize");
                 let error = operation(&mut realm, handle_sender);
                 let reused = realm
-                    .eval(EvalSource::new("14 * 3"), EvalOptions::default())
+                    .evaluate(EvalSource::new("14 * 3"), EvalOptions::default())
                     .expect("realm should remain reusable")
                     .as_number();
                 result_sender
@@ -1307,7 +1176,7 @@ mod implementation {
                 .recv_timeout(TEST_WATCHDOG_TIMEOUT)
                 .expect("worker should publish interrupt handle");
             let request_deadline = Instant::now() + TEST_WATCHDOG_TIMEOUT;
-            while !handle.request_interrupt() {
+            while !handle.request_interrupt_if_running() {
                 assert!(
                     Instant::now() < request_deadline,
                     "JavaScript operation never became interruptible"
@@ -1318,7 +1187,7 @@ mod implementation {
                 .recv_timeout(TEST_WATCHDOG_TIMEOUT)
                 .expect("external interruption watchdog expired");
             worker.join().expect("worker should finish cleanly");
-            assert!(!handle.request_interrupt());
+            assert!(!handle.request_interrupt_if_running());
             result
         }
 
@@ -1326,7 +1195,7 @@ mod implementation {
         fn evaluates_and_calls_functions() {
             let mut realm = Realm::new().unwrap();
             let function = realm
-                .eval(
+                .evaluate(
                     EvalSource::new("(left, right) => left + right"),
                     EvalOptions::default(),
                 )
@@ -1344,10 +1213,10 @@ mod implementation {
             let (kind, phase, reused) = run_with_watchdog(|| {
                 let mut realm = timed_realm();
                 let error = realm
-                    .eval(EvalSource::new("for (;;) {}"), EvalOptions::default())
+                    .evaluate(EvalSource::new("for (;;) {}"), EvalOptions::default())
                     .expect_err("infinite evaluation must time out");
                 let reused = realm
-                    .eval(EvalSource::new("21 * 2"), EvalOptions::default())
+                    .evaluate(EvalSource::new("21 * 2"), EvalOptions::default())
                     .expect("realm should remain reusable")
                     .as_number();
                 (error.kind, error.phase, reused)
@@ -1363,7 +1232,7 @@ mod implementation {
             let (kind, phase, reused) = run_with_watchdog(|| {
                 let mut realm = timed_realm();
                 let callable = realm
-                    .eval(
+                    .evaluate(
                         EvalSource::new("() => { while (true) {} }"),
                         EvalOptions::default(),
                     )
@@ -1372,7 +1241,7 @@ mod implementation {
                     .call(&callable, None, &[])
                     .expect_err("infinite call must time out");
                 let reused = realm
-                    .eval(EvalSource::new("6 * 7"), EvalOptions::default())
+                    .evaluate(EvalSource::new("6 * 7"), EvalOptions::default())
                     .expect("realm should remain reusable")
                     .as_number();
                 (error.kind, error.phase, reused)
@@ -1388,13 +1257,13 @@ mod implementation {
             let (kind, phase, reused) = run_with_watchdog(|| {
                 let mut realm = timed_realm();
                 let error = realm
-                    .eval(
+                    .evaluate(
                         EvalSource::new("throw new Proxy({}, { get() { while (true) {} } })"),
                         EvalOptions::default(),
                     )
                     .expect_err("malicious exception accessors must time out");
                 let reused = realm
-                    .eval(EvalSource::new("40 + 2"), EvalOptions::default())
+                    .evaluate(EvalSource::new("40 + 2"), EvalOptions::default())
                     .expect("realm should remain reusable")
                     .as_number();
                 (error.kind, error.phase, reused)
@@ -1410,7 +1279,7 @@ mod implementation {
             let (kind, phase, reused) = run_with_watchdog(|| {
                 let mut realm = timed_realm();
                 realm
-                    .eval(
+                    .evaluate(
                         EvalSource::new(
                             "Promise.resolve().then(() => { while (true) {} }); undefined",
                         ),
@@ -1418,10 +1287,10 @@ mod implementation {
                     )
                     .expect("job should be scheduled");
                 let error = realm
-                    .execute_pending_job()
+                    .try_execute_pending_job()
                     .expect_err("infinite pending job must time out");
                 let reused = realm
-                    .eval(EvalSource::new("7 * 6"), EvalOptions::default())
+                    .evaluate(EvalSource::new("7 * 6"), EvalOptions::default())
                     .expect("realm should remain reusable")
                     .as_number();
                 (error.kind, error.phase, reused)
@@ -1437,7 +1306,7 @@ mod implementation {
             let (kind, phase, reused) = run_with_watchdog(|| {
                 let mut realm = timed_realm();
                 realm
-                    .eval(
+                    .evaluate(
                         EvalSource::new(
                             "globalThis.reschedule = () => { \
                              Promise.resolve().then(reschedule); \
@@ -1447,10 +1316,10 @@ mod implementation {
                     )
                     .expect("self-replenishing job chain should start");
                 let error = realm
-                    .drain_pending_jobs_bounded(usize::MAX)
+                    .drain_pending_jobs_up_to(usize::MAX)
                     .expect_err("the whole drain must share one deadline");
                 let reused = realm
-                    .eval(EvalSource::new("84 / 2"), EvalOptions::default())
+                    .evaluate(EvalSource::new("84 / 2"), EvalOptions::default())
                     .expect("realm should remain reusable")
                     .as_number();
                 (error.kind, error.phase, reused)
@@ -1468,7 +1337,7 @@ mod implementation {
                     .send(realm.interrupt_handle())
                     .expect("test should receive interrupt handle");
                 realm
-                    .eval(EvalSource::new("for (;;) {}"), EvalOptions::default())
+                    .evaluate(EvalSource::new("for (;;) {}"), EvalOptions::default())
                     .expect_err("host request must interrupt evaluation")
             });
 
@@ -1481,7 +1350,7 @@ mod implementation {
         fn external_interrupt_covers_calls_and_preserves_realm() {
             let (kind, phase, reused) = run_with_external_interrupt(|realm, handle_sender| {
                 let callable = realm
-                    .eval(
+                    .evaluate(
                         EvalSource::new("() => { while (true) {} }"),
                         EvalOptions::default(),
                     )
@@ -1503,7 +1372,7 @@ mod implementation {
         fn external_interrupt_covers_pending_jobs_and_preserves_realm() {
             let (kind, phase, reused) = run_with_external_interrupt(|realm, handle_sender| {
                 realm
-                    .eval(
+                    .evaluate(
                         EvalSource::new(
                             "Promise.resolve().then(() => { while (true) {} }); undefined",
                         ),
@@ -1514,7 +1383,7 @@ mod implementation {
                     .send(realm.interrupt_handle())
                     .expect("test should receive interrupt handle");
                 realm
-                    .execute_pending_job()
+                    .try_execute_pending_job()
                     .expect_err("host request must interrupt pending job")
             });
 
@@ -1530,14 +1399,14 @@ mod implementation {
             assert_send_sync::<InterruptHandle>();
             let mut realm = Realm::new().expect("realm should initialize");
             let handle = realm.interrupt_handle();
-            assert!(!handle.request_interrupt());
+            assert!(!handle.request_interrupt_if_running());
             let result = realm
-                .eval(EvalSource::new("20 + 22"), EvalOptions::default())
+                .evaluate(EvalSource::new("20 + 22"), EvalOptions::default())
                 .expect("idle request must not affect evaluation");
             assert_eq!(result.as_number(), Some(42.0));
             drop(result);
             drop(realm);
-            assert!(!handle.request_interrupt());
+            assert!(!handle.request_interrupt_if_running());
         }
 
         #[test]
@@ -1580,7 +1449,7 @@ mod implementation {
             let mut first = Realm::new().unwrap();
             let second = Realm::new().unwrap();
             let function = first
-                .eval(EvalSource::new("value => value"), EvalOptions::default())
+                .evaluate(EvalSource::new("value => value"), EvalOptions::default())
                 .unwrap();
             let foreign = second.number(1.0).unwrap();
 
@@ -1592,7 +1461,7 @@ mod implementation {
         fn drains_pending_jobs() {
             let mut realm = Realm::new().unwrap();
             realm
-                .eval(
+                .evaluate(
                     EvalSource::new(
                         "globalThis.answer = 0; Promise.resolve().then(() => answer = 42)",
                     ),
@@ -1602,7 +1471,7 @@ mod implementation {
 
             assert_eq!(realm.drain_pending_jobs().unwrap(), 1);
             let result = realm
-                .eval(EvalSource::new("answer"), EvalOptions::default())
+                .evaluate(EvalSource::new("answer"), EvalOptions::default())
                 .unwrap();
             assert_eq!(result.as_number(), Some(42.0));
         }
@@ -1611,7 +1480,7 @@ mod implementation {
         fn reports_sanitized_source_location_with_offset() {
             let mut realm = Realm::new().unwrap();
             let error = realm
-                .eval(
+                .evaluate(
                     EvalSource {
                         text: "throw new Error('nope')",
                         name: Some("fixture.js"),
@@ -1641,10 +1510,10 @@ mod implementation {
         fn distinguishes_parse_errors_from_thrown_syntax_errors() {
             let mut realm = Realm::new().unwrap();
             let parse_error = realm
-                .eval(EvalSource::new("const = 1"), EvalOptions::default())
+                .evaluate(EvalSource::new("const = 1"), EvalOptions::default())
                 .unwrap_err();
             let thrown_error = realm
-                .eval(
+                .evaluate(
                     EvalSource::new("throw new SyntaxError('runtime')"),
                     EvalOptions::default(),
                 )
@@ -1664,7 +1533,7 @@ mod implementation {
                 let mut realm = Realm::new().unwrap();
                 let text = format!("#!/usr/bin/env qjs{terminator}40 + 2");
                 let result = realm
-                    .eval(
+                    .evaluate(
                         EvalSource {
                             text: &text,
                             name: Some("hashbang.js"),
@@ -1696,13 +1565,13 @@ mod implementation {
         fn reports_unhandled_promise_rejections_at_checkpoint() {
             let mut realm = Realm::new().unwrap();
             realm
-                .eval(
+                .evaluate(
                     EvalSource::new("void Promise.reject(new Error('unhandled'))"),
                     EvalOptions::default(),
                 )
                 .unwrap();
 
-            let error = realm.drain_pending_jobs_bounded(8).unwrap_err();
+            let error = realm.drain_pending_jobs_up_to(8).unwrap_err();
             assert_eq!(error.phase, ErrorPhase::PendingJob);
             assert_eq!(error.name.as_deref(), Some("Error"));
             assert_eq!(error.message, "unhandled");
@@ -1712,7 +1581,7 @@ mod implementation {
         fn clears_rejections_handled_before_checkpoint_finishes() {
             let mut realm = Realm::new().unwrap();
             realm
-                .eval(
+                .evaluate(
                     EvalSource::new(
                         "const rejected = Promise.reject(new Error('handled')); \
                      Promise.resolve().then(() => rejected.catch(() => {}))",
@@ -1728,7 +1597,7 @@ mod implementation {
         fn preserves_multiple_unhandled_rejections() {
             let mut realm = Realm::new().unwrap();
             realm
-                .eval(
+                .evaluate(
                     EvalSource::new(
                         "void Promise.reject(new Error('first')); \
                      void Promise.reject(new Error('second'))",
@@ -1737,8 +1606,8 @@ mod implementation {
                 )
                 .unwrap();
 
-            let first = realm.drain_pending_jobs_bounded(0).unwrap_err();
-            let second = realm.drain_pending_jobs_bounded(0).unwrap_err();
+            let first = realm.drain_pending_jobs_up_to(0).unwrap_err();
+            let second = realm.drain_pending_jobs_up_to(0).unwrap_err();
             assert_eq!(first.message, "first");
             assert_eq!(second.message, "second");
         }
@@ -1747,7 +1616,7 @@ mod implementation {
         fn bounded_drain_reports_remaining_jobs_precisely() {
             let mut realm = Realm::new().unwrap();
             realm
-                .eval(
+                .evaluate(
                     EvalSource::new(
                         "Promise.resolve().then(() => {}).then(() => {}).then(() => {})",
                     ),
@@ -1755,16 +1624,16 @@ mod implementation {
                 )
                 .unwrap();
 
-            let first = realm.drain_pending_jobs_bounded(1).unwrap();
+            let first = realm.drain_pending_jobs_up_to(1).unwrap();
             assert_eq!(first.executed, 1);
             assert!(first.jobs_remaining);
             assert!(realm.drain_pending_jobs().unwrap() > 0);
-            assert!(!realm.has_pending_job());
+            assert!(!realm.has_pending_jobs());
         }
     }
 }
 
 pub use implementation::{
     Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, InterruptHandle, JobDrain, Realm,
-    RealmOptions, SourceLocation, Value, ValueKind,
+    RealmOptions, SourceLocation, SourceType, Value, ValueKind,
 };

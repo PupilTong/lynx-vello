@@ -39,8 +39,6 @@ fn bench_scenario(bencher: divan::Bencher<'_, '_>, name: &'static str) {
             for case in &mut cases {
                 divan::black_box(case.run());
             }
-            // Preserve one fresh fixture per logical cold layout and move its
-            // destruction outside the timed region.
             cases
         });
 }

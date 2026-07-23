@@ -5,19 +5,12 @@
 //! `unit_handler_unittest.cc`, `font_length_handler_unittest.cc`,
 //! `auto_font_size*_handler_unittest.cc`, and the value-grammar half of
 //! `css_string_parser_unittest.cc`.
-//!
-//! Scope: `enableCSSSelector = true` / `enableRemoveCSSScope = true`. Lynx's
-//! lepus type-guard rows (bools/ints/null fed to handlers) have no CSS-text
-//! analog and are skipped throughout; `rpx` is fork-native, `ppx` is a
-//! pinned gap (see `grammar_background.rs`).
 
 mod common;
 
 use common::{Doc, parses, rgb, rgba, specified};
 use w3c_dom::property_is_supported;
 
-// C++: length_handler_unittest.cc width table + css_string_parser
-// length_valid_and_value / length_invalid_space / decimal_points.
 #[test]
 fn length_grammar() {
     for (value, expected) in [
@@ -51,8 +44,6 @@ fn length_grammar() {
     }
 }
 
-// C++: number_handler_unittest.cc opacity table (+ percentage form, which
-// computes to the same number).
 #[test]
 fn opacity_numbers() {
     assert_eq!(specified("opacity", "0.85").as_deref(), Some("0.85"));
@@ -66,8 +57,6 @@ fn opacity_numbers() {
     }
 }
 
-// C++: enum_handler_unittest.cc align-content keywords (the enum handlers
-// are code-generated; one property proves the family).
 #[test]
 fn enum_keywords() {
     for keyword in [
@@ -87,9 +76,6 @@ fn enum_keywords() {
     assert!(!parses("align-content", "align"));
 }
 
-// C++: bool_handler_unittest.cc — `implicit-animation` is a Lynx-only
-// boolean property outside the fork's surface; pinned so a fork addition is
-// noticed and the true/false keyword rows get ported.
 #[test]
 fn implicit_animation_is_absent() {
     assert!(
@@ -98,9 +84,6 @@ fn implicit_animation_is_absent() {
     );
 }
 
-// C++: string_handler_unittest.cc font-family table — W3C-corrected: a
-// symbol run is not a valid <custom-ident> family (Lynx stored it
-// verbatim); quoting it makes it a valid <string> family.
 #[test]
 fn font_family_strings() {
     assert_eq!(specified("font-family", "test").as_deref(), Some("test"));
@@ -112,7 +95,6 @@ fn font_family_strings() {
     );
 }
 
-// C++: font_length_handler_unittest.cc line-height table.
 #[test]
 fn line_height_grammar() {
     for (value, expected) in [
@@ -131,9 +113,6 @@ fn line_height_grammar() {
     assert!(!parses("line-height", "40px 123456"));
 }
 
-// C++: auto_font_size*_handler_unittest.cc — the `-x-auto-font-size` family
-// is Lynx-only (bespoke flag+lengths / line-range() grammar) and absent
-// from the fork; pinned for the same port-on-addition contract.
 #[test]
 fn auto_font_size_family_is_absent() {
     for missing in [
@@ -148,8 +127,6 @@ fn auto_font_size_family_is_absent() {
     }
 }
 
-// C++: css_string_parser_unittest.cc rgb/rgba tables (legacy commas, modern
-// spaces, percentages, `none` components).
 #[test]
 fn rgb_and_rgba_colors() {
     type ColorRow = (&'static str, (u8, u8, u8, f32));
@@ -176,8 +153,6 @@ fn rgb_and_rgba_colors() {
         } else {
             rgba(r, g, b, alpha)
         };
-        // Compare channels, not flags: modern `none` components resolve to
-        // zero but carry is-none flag bits.
         let actual = doc.color(el);
         let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
         assert!(
@@ -189,7 +164,7 @@ fn rgb_and_rgba_colors() {
         );
     }
     for invalid in [
-        "rgb(none, 128, 0)", // `none` needs modern syntax
+        "rgb(none, 128, 0)",
         "rgba(255, 128 0, 0.5)",
         "rgba(255, 128, 0 / 0.5)",
         "rgba(255 128 0, 0.5)",
@@ -201,12 +176,9 @@ fn rgb_and_rgba_colors() {
     ] {
         assert!(!parses("color", invalid), "`{invalid}` must be rejected");
     }
-    // Unclosed rgb( at the end of input auto-closes per CSS Syntax EOF
-    // rules (the C++ raw-parser rejected it — tokenizer-level difference).
     assert!(parses("color", "rgb(255, 128, 0"));
 }
 
-// C++: css_string_parser_unittest.cc hsl edge cases — hue wraps, s/l clamp.
 #[test]
 fn hsl_edge_cases() {
     let mut doc = Doc::new();
@@ -220,7 +192,6 @@ fn hsl_edge_cases() {
     ] {
         assert!(parses("color", input), "`{input}` must parse");
     }
-    // 480 == 120 (mod 360); -120 == 240.
     doc.set_inline(el, "color: hsl(480, 100%, 50%)");
     doc.flush();
     assert_eq!(doc.color(el), rgb(0, 255, 0));
@@ -229,8 +200,6 @@ fn hsl_edge_cases() {
     assert_eq!(doc.color(el), rgb(0, 0, 255));
 }
 
-// C++: css_string_parser_unittest.cc filter value tables — number and
-// percentage amounts are equivalent; blur takes a bare <length>.
 #[test]
 fn filter_value_forms() {
     for (a, b) in [
@@ -266,15 +235,13 @@ fn filter_value_forms() {
         "grayscale(50,5%)",
         "grayscale(50.5 percent)",
         "abd(2px)",
-        "blur(2px), grayscale(0.2)", // chains are space-separated, not comma
+        "blur(2px), grayscale(0.2)",
         "12px",
     ] {
         assert!(!parses("filter", invalid), "`{invalid}` must be rejected");
     }
 }
 
-// C++: css_string_parser_unittest.cc gap_value — W3C-corrected: Lynx's
-// substitute-0px-for-junk leniency becomes whole-declaration rejection.
 #[test]
 fn gap_grammar() {
     assert_eq!(specified("gap", "10px").as_deref(), Some("10px"));
@@ -285,9 +252,6 @@ fn gap_grammar() {
     }
 }
 
-// C++: css_string_parser_unittest.cc aspect_ratio_value — W3C-corrected:
-// ratios stay pairs, degenerate `2/0` PARSES (behaves as auto per
-// css-values-4; Lynx rejected it), negatives reject.
 #[test]
 fn aspect_ratio_string_rows() {
     assert_eq!(specified("aspect-ratio", "6").as_deref(), Some("6 / 1"));
@@ -306,9 +270,6 @@ fn aspect_ratio_string_rows() {
     }
 }
 
-// C++: css_string_parser_unittest.cc inset basic shapes — edge and corner
-// expansion per W3C; `rpx` participates; `ppx`/`super-ellipse` stay pinned
-// gaps (grammar_background.rs).
 #[test]
 fn inset_basic_shapes() {
     assert_eq!(
@@ -341,7 +302,6 @@ fn inset_basic_shapes() {
     }
 }
 
-// C++: css_string_parser_unittest.cc OpenType tag + font settings tables.
 #[test]
 fn font_feature_and_variation_settings() {
     assert_eq!(
@@ -390,22 +350,11 @@ fn font_feature_and_variation_settings() {
     }
 }
 
-// C++: css_string_parser_unittest.cc url token parsing — verbatim body plus
-// the historical crash input as a no-panic check.
 #[test]
 fn url_tokens() {
     let url = "https://example.com/calcfakq/env?x-/..&";
     let value =
         specified("background-image", &format!("url({url})")).expect("unquoted url token parses");
     assert!(value.contains(url), "verbatim body: {value}");
-    // No-crash robustness input (result unspecified).
     let _ = specified("background-image", "url(https://example.com/calc()fakq/..)");
 }
-
-// Skipped (skip-internal): unit_handler_unittest.cc property-id bounds
-// checks, lepus type guards across every file, LerpColor blending helper,
-// and Lynx VarReference byte-offset tracking (var() behavior itself is
-// covered in custom_properties.rs).
-// Skipped (folded): css_string_parser font-face src/weight rows — covered
-// at the descriptor level in at_rules.rs; the -x-text-decoration length
-// rows — pinned as engine gaps in inheritance_computed.rs.
