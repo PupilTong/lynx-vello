@@ -1484,3 +1484,305 @@ fn incremental_relayout_reanchors_a_hoisted_node_inside_a_boundary() {
         "hoisted re-anchor incremental == full"
     );
 }
+
+// --- display:contents dissolution (css-display-3 §2.5) ---
+
+#[test]
+fn display_contents_children_become_grandparent_items() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 100px; }
+         .wrap { display: contents; }
+         .cell { display: flex; width: 100px; height: 100px; }",
+    );
+    let root = h.doc.root;
+    let wrap = h.doc.el(root, "view.wrap");
+    let first = h.doc.el(wrap, "view.cell");
+    let second = h.doc.el(wrap, "view.cell");
+    let direct = h.doc.el(root, "view.cell");
+    h.layout();
+    // Dissolved grandchildren lay out as items of the flex container, in
+    // document order, with locations relative to the container.
+    assert_eq!(h.rect(first), (0.0, 0.0, 100.0, 100.0));
+    assert_eq!(h.rect(second), (100.0, 0.0, 100.0, 100.0));
+    assert_eq!(h.rect(direct), (200.0, 0.0, 100.0, 100.0));
+    // The contents element itself keeps a zeroed layout.
+    assert_eq!(h.rect(wrap), (0.0, 0.0, 0.0, 0.0));
+    assert_eq!(h.layout_of(wrap).order, 0);
+}
+
+#[test]
+fn nested_contents_chains_dissolve_transitively() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 100px; }
+         .wrap { display: contents; }
+         .cell { display: flex; width: 100px; height: 100px; }",
+    );
+    let root = h.doc.root;
+    let outer = h.doc.el(root, "view.wrap");
+    let inner = h.doc.el(outer, "view.wrap");
+    let leaf = h.doc.el(inner, "view.cell");
+    h.layout();
+    assert_eq!(h.rect(leaf), (0.0, 0.0, 100.0, 100.0));
+    assert_eq!(h.rect(outer), (0.0, 0.0, 0.0, 0.0));
+    assert_eq!(h.rect(inner), (0.0, 0.0, 0.0, 0.0));
+}
+
+#[test]
+fn contents_children_compete_in_the_container_order_sort() {
+    // Live-Chrome-verified interleave: order applies in the box parent's
+    // single item list, straddling the dissolved boundary.
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 100px; }
+         .wrap { display: contents; }
+         .cell { display: flex; width: 100px; height: 100px; }
+         .o0 { order: 0; } .o1 { order: 1; } .o2 { order: 2; } .o3 { order: 3; }",
+    );
+    let root = h.doc.root;
+    let second = h.doc.el(root, "view.cell.o2");
+    let wrap = h.doc.el(root, "view.wrap");
+    let inner_first = h.doc.el(wrap, "view.cell.o1");
+    let inner_last = h.doc.el(wrap, "view.cell.o3");
+    let leading = h.doc.el(root, "view.cell.o0");
+    h.layout();
+    assert_eq!(h.rect(leading).0, 0.0);
+    assert_eq!(h.rect(inner_first).0, 100.0);
+    assert_eq!(h.rect(second).0, 200.0);
+    assert_eq!(h.rect(inner_last).0, 300.0);
+}
+
+#[test]
+fn text_children_of_contents_measure_as_container_items() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 100px;
+                font-family: Ahem; font-size: 20px; }
+         .wrap { display: contents; }
+         .cell { display: flex; width: 100px; height: 100px; }",
+    );
+    h.doc.dom.register_fonts(AHEM);
+    let root = h.doc.root;
+    let wrap = h.doc.el(root, "view.wrap");
+    let text = h.doc.dom.create_text_node("hi", ());
+    h.doc.dom.append_child(wrap, text);
+    let after = h.doc.el(root, "view.cell");
+    h.layout();
+    // "hi" in 20px Ahem = 40px wide; the sibling box starts after it.
+    let text_rect = dom_rect(&h.doc.dom, text);
+    assert_eq!((text_rect.0, text_rect.2), (0.0, 40.0));
+    assert_eq!(h.rect(after).0, 40.0);
+}
+
+#[test]
+fn absolute_child_of_contents_anchors_to_the_box_ancestor() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .wrap { display: contents; position: relative; }
+         .abs { display: flex; position: absolute; left: 10px; top: 20px;
+                width: 50px; height: 50px; }",
+    );
+    let root = h.doc.root;
+    let wrap = h.doc.el(root, "view.wrap");
+    let abs = h.doc.el(wrap, "view.abs");
+    h.layout();
+    // The contents wrapper is boxless even with position: relative — it is
+    // never a containing block; the abs child anchors to the page. Its
+    // stored location is page-relative because the wrapper's layout is
+    // zeroed. (Recorded limitation: this host-hoisted path does not fold
+    // the abs box into the page's scrollable content_size.)
+    assert_eq!(h.rect(abs), (10.0, 20.0, 50.0, 50.0));
+    assert_eq!(h.rect(wrap), (0.0, 0.0, 0.0, 0.0));
+}
+
+#[test]
+fn box_properties_are_inert_on_contents_elements() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 100px; }
+         .wrap { display: contents; width: 300px; height: 90px;
+                 padding: 25px; margin: 5px; }
+         .cell { display: flex; width: 100px; height: 100px; }",
+    );
+    let root = h.doc.root;
+    let wrap = h.doc.el(root, "view.wrap");
+    let cell = h.doc.el(wrap, "view.cell");
+    h.layout();
+    assert_eq!(h.rect(cell), (0.0, 0.0, 100.0, 100.0));
+    assert_eq!(h.rect(wrap), (0.0, 0.0, 0.0, 0.0));
+}
+
+#[test]
+fn contents_with_position_absolute_stays_boxless() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 100px; }
+         .wrap { position: absolute; left: 500px; top: 500px; }
+         .cell { display: flex; width: 100px; height: 100px; }",
+    );
+    let root = h.doc.root;
+    let wrap = h.doc.el(root, "view.wrap");
+    h.doc.set_inline(wrap, "display: contents");
+    let cell = h.doc.el(wrap, "view.cell");
+    h.layout();
+    // position/insets are inert on the boxless wrapper and do NOT inherit:
+    // the child is an ordinary in-flow item at the container origin.
+    assert_eq!(h.rect(cell), (0.0, 0.0, 100.0, 100.0));
+}
+
+#[test]
+fn toggling_display_contents_relays_out_both_ways() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 100px; }
+         .cell { display: flex; width: 100px; height: 100px; }
+         .wrap { display: flex; width: 100px; height: 100px; }
+         .inner { display: flex; width: 50px; height: 50px; }",
+    );
+    let root = h.doc.root;
+    let a = h.doc.el(root, "view.cell");
+    let wrap = h.doc.el(root, "view.wrap");
+    let inner = h.doc.el(wrap, "view.inner");
+    let b = h.doc.el(root, "view.cell");
+    h.layout();
+    assert_eq!(h.rect(wrap).0, 100.0);
+    assert_eq!(h.rect(b).0, 200.0);
+
+    h.doc.set_inline(wrap, "display: contents");
+    h.layout();
+    // The wrapper dissolves: inner becomes the row's second item.
+    assert_eq!(h.rect(inner), (100.0, 0.0, 50.0, 50.0));
+    assert_eq!(h.rect(b).0, 150.0);
+    assert_eq!(h.rect(wrap), (0.0, 0.0, 0.0, 0.0));
+
+    h.doc.set_inline(wrap, "");
+    h.layout();
+    // And back: the wrapper is a box again.
+    assert_eq!(h.rect(wrap).0, 100.0);
+    assert_eq!(h.rect(b).0, 200.0);
+    let _ = a;
+}
+
+#[test]
+fn a_parked_boundary_that_flips_to_contents_is_dropped_gracefully() {
+    // Regression for the stale-parked-root trace: park a containment
+    // boundary, flip it to display:contents, and relayout — must not panic
+    // and must dissolve correctly.
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 100px; }
+         .boundary { display: flex; contain: strict; width: 100px; height: 100px; }
+         .inner { display: flex; width: 50px; height: 50px; }
+         .cell { display: flex; width: 100px; height: 100px; }",
+    );
+    let root = h.doc.root;
+    let boundary = h.doc.el(root, "view.boundary");
+    h.doc.set_inline(boundary, "contain: strict");
+    let inner = h.doc.el(boundary, "view.inner");
+    let after = h.doc.el(root, "view.cell");
+    h.layout();
+    assert_eq!(h.rect(after).0, 100.0);
+
+    // Park the boundary via a content mutation, then flip it to contents.
+    h.doc.dom.invalidate_layout(inner);
+    h.doc
+        .set_inline(boundary, "contain: strict; display: contents");
+    h.layout();
+    assert_eq!(h.rect(inner), (0.0, 0.0, 50.0, 50.0));
+    assert_eq!(h.rect(after).0, 50.0);
+}
+
+#[test]
+fn hoisted_boxes_rank_in_the_dissolved_sibling_space() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 100px; }
+         .wrap { display: contents; }
+         .cell { display: flex; width: 100px; height: 100px; }
+         .fixed { display: flex; position: fixed; left: 0; top: 0;
+                  width: 50px; height: 50px; }",
+    );
+    let root = h.doc.root;
+    let wrap = h.doc.el(root, "view.wrap");
+    let sibling = h.doc.el(wrap, "view.cell");
+    let fixed = h.doc.el(wrap, "view.fixed");
+    h.layout();
+    // The fixed box's paint rank counts its dissolved in-flow sibling in the
+    // box parent's merged space (a rank-0 regression would mean the
+    // dissolved target was not found).
+    assert_eq!(h.layout_of(sibling).order, 0);
+    assert_eq!(h.layout_of(fixed).order, 1);
+}
+
+#[test]
+fn hoisted_rank_counts_negative_order_siblings_after_the_target() {
+    // The after-target arm of the merged rank: an order:-1 in-flow sibling
+    // following the hoisted box still sorts below its (0, index) key.
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 100px; }
+         .wrap { display: contents; }
+         .cell { display: flex; width: 100px; height: 100px; }
+         .neg { order: -1; }
+         .fixed { display: flex; position: fixed; left: 0; top: 0;
+                  width: 50px; height: 50px; }",
+    );
+    let root = h.doc.root;
+    let cell = h.doc.el(root, "view.cell");
+    let wrap = h.doc.el(root, "view.wrap");
+    let fixed = h.doc.el(wrap, "view.fixed");
+    let neg = h.doc.el(wrap, "view.cell.neg");
+    h.layout();
+    assert_eq!(h.layout_of(neg).order, 0);
+    assert_eq!(h.layout_of(cell).order, 1);
+    assert_eq!(h.layout_of(fixed).order, 2);
+}
+
+#[test]
+fn hoisted_rank_resolves_through_nested_contents_levels() {
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 100px; }
+         .wrap { display: contents; }
+         .cell { display: flex; width: 100px; height: 100px; }
+         .fixed { display: flex; position: fixed; left: 0; top: 0;
+                  width: 50px; height: 50px; }",
+    );
+    let root = h.doc.root;
+    let sibling = h.doc.el(root, "view.cell");
+    let outer = h.doc.el(root, "view.wrap");
+    let inner = h.doc.el(outer, "view.wrap");
+    let fixed = h.doc.el(inner, "view.fixed");
+    h.layout();
+    // box_tree_parent walks two contents levels up to the page; the rank
+    // counts the page's dissolved list.
+    assert_eq!(h.layout_of(sibling).order, 0);
+    assert_eq!(h.layout_of(fixed).order, 1);
+}
+
+#[test]
+fn dissolution_applies_to_linear_containers() {
+    // Recorded bucket-2 extension: Lynx linear containers collect dissolved
+    // grandchildren as linear children (no Starlight precedent).
+    let mut h = Harness::new(
+        "page { display: linear; width: 800px; height: 300px; }
+         .wrap { display: contents; }
+         .cell { display: flex; width: 100px; height: 100px; }",
+    );
+    let root = h.doc.root;
+    let wrap = h.doc.el(root, "view.wrap");
+    let first = h.doc.el(wrap, "view.cell");
+    let direct = h.doc.el(root, "view.cell");
+    h.layout();
+    // Vertical linear stacking: the dissolved child is the first linear
+    // child, the direct sibling follows beneath it.
+    assert_eq!(h.rect(first), (0.0, 0.0, 100.0, 100.0));
+    assert_eq!(h.rect(direct), (0.0, 100.0, 100.0, 100.0));
+}
+
+#[test]
+fn content_visibility_is_inert_on_contents_elements() {
+    // css-contain-2: content-visibility has no effect without a principal
+    // box — the dissolved children still lay out.
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 100px; }
+         .cell { display: flex; width: 100px; height: 100px; }",
+    );
+    let root = h.doc.root;
+    let wrap = h.doc.el(root, "view");
+    h.doc
+        .set_inline(wrap, "display: contents; content-visibility: hidden");
+    let cell = h.doc.el(wrap, "view.cell");
+    h.layout();
+    assert_eq!(h.rect(cell), (0.0, 0.0, 100.0, 100.0));
+}

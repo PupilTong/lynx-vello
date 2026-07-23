@@ -187,7 +187,10 @@ useful signal for currently-compatible versions of those libraries.
   flex/grid/linear/relative with `display: none` hiding and a leaf
   fallback, text nodes through concrete Parley measurement, and the
   positioned pass implements the W3C `position: fixed`
-  containing-block rule via the protocol's scheme override. Replaced leaf
+  containing-block rule via the protocol's scheme override, and
+  `display: contents` dissolves at the protocol child iterator
+  (css-display-3 §2.5: the boxless element's children become box-parent
+  items for layout, paint order, and hit testing alike). Replaced leaf
   content reads a closed `NaturalSize` value stored in lazily allocated
   node content; its internal update path automatically invalidates the
   affected cache path. Mutually exclusive literal text, natural size, and
@@ -201,6 +204,19 @@ useful signal for currently-compatible versions of those libraries.
   embedder API for the mutations styles cannot see (content/child-list changes
   with identical computed styles). The internal natural-size update path
   performs that invalidation itself.
+  Its `visual` module owns the post-layout visual order:
+  the full W3C stacking-context predicate, CSS2 Appendix E paint order
+  (`Document::paint_order` → a flat back-to-front `PaintOrder` of items with
+  viewport-space transform matrices and overflow/`contain: paint` clip
+  chains that honor containing-block escape), transform resolution
+  (transform + transform-origin + parent perspective, always flattened —
+  the fork has no authorable `preserve-3d`), and reverse-paint-order hit
+  testing (`Document::hit_test`/`PaintOrder::hit_test`, honoring
+  `visibility`, `pointer-events`, border-radius, and inverse-matrix point
+  mapping). The future render crate consumes `PaintOrder`; widget-layer
+  hit-test policy (hit-slop, `user-interaction-enabled`, event-through)
+  layers on top in `lynx-widget`, never here. No retained visual cache
+  exists yet; `StyleDamage`'s stacking class is the designated hook.
   The document node lazily creates and then owns the shared Parley
   `TextContext`; text nodes lazily retain probe/commit artifacts in that
   same content record and read inherited font/text values from their

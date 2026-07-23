@@ -235,9 +235,10 @@ the semantics are stylo's.** Everything below refines that sentence.
       **not** fired — there is no event layer, and half-wiring it would break future `<list>`
       parity. `content-visibility: hidden` is fully implemented (skip contents + intrinsic size +
       strict-like containment).
-    - **Paint containment is layout-side only.** `contain: paint`'s IFC / containing-block effects
-      are computed and exposed; its clipping + stacking context are a **render-layer** concern
-      (compute the flags, do not claim paint conformance).
+    - **Paint containment: layout + visual order.** `contain: paint`'s IFC / containing-block
+      effects are computed and exposed by layout; since 2026-07-23 its stacking context and
+      paint/hit-area clipping are implemented by `w3c-dom`'s `visual` module (paint order + hit
+      testing). Actual pixel output still awaits the render crate.
     - **Style containment is N/A.** `contain: style` parses and feeds the `content` / `strict`
       composite math, but the engine has no counters, quotes, or `content` property, so it has no
       semantic effect.

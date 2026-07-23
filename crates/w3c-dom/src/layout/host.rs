@@ -24,15 +24,107 @@ use super::style::{
 use crate::document::Document;
 use crate::node::{ChildrenIter, Node};
 
+/// The box-tree child iterator: DOM children with `display: contents` levels
+/// dissolved away (css-display-3 §2.5 — a contents element is replaced by
+/// its children), recursively, in document order.
+///
+/// This is what the layout protocol, rounding, hiding, and the visual
+/// builder all traverse, so dissolved grandchildren become real layout items
+/// of the box parent with locations, static positions, and `Layout.order`
+/// ranks in the box parent's space. Stylo's restyle traversal keeps walking
+/// the plain DOM [`ChildrenIter`] — contents elements still cascade and
+/// relay inheritance.
+///
+/// Skipped contents nodes have their stored layouts zeroed here (guarded by
+/// an is-default read, so steady-state passes never write): this iterator is
+/// the only traversal guaranteed to visit them in every pass shape, and the
+/// zeroed layout is the invariant that keeps raw-DOM-chain origin sums
+/// (`accumulated_unrounded_origin`) equal to box-tree sums. Consequently no
+/// `layout_results` borrow of a `display: contents` node may be held across
+/// any walk that drives this iterator.
+#[derive(Debug)]
+pub struct BoxTreeChildren<'dom, T> {
+    stack: smallvec::SmallVec<[ChildrenIter<'dom, T>; 2]>,
+}
+
+pub(crate) fn box_tree_children<T>(node: &Node<T>) -> BoxTreeChildren<'_, T> {
+    let mut stack = smallvec::SmallVec::new();
+    stack.push(Node::children(node));
+    BoxTreeChildren { stack }
+}
+
+/// The nearest box-generating ancestor: the DOM parent unless it is a
+/// styled `display: contents` element, in which case the chain is walked
+/// upward past every contents level.
+pub(crate) fn box_tree_parent<T>(node: &Node<T>) -> Option<&Node<T>> {
+    let mut current = node.parent();
+    while let Some(candidate) = current {
+        if !dissolves(candidate) {
+            return Some(candidate);
+        }
+        current = candidate.parent();
+    }
+    None
+}
+
+/// Whether a node is dissolved by the box-tree traversal: a styled element
+/// whose computed display is `contents`. Unstyled elements (descendants of
+/// `display: none` roots) are not dissolved — they stay visible to the hide
+/// machinery exactly as before.
+fn dissolves<T>(node: &Node<T>) -> bool {
+    node.is_element()
+        && StyleView::try_of(node)
+            .is_some_and(|style| style.values().get_box().display.is_contents())
+}
+
+impl<'dom, T> Iterator for BoxTreeChildren<'dom, T> {
+    type Item = &'dom Node<T>;
+
+    fn next(&mut self) -> Option<&'dom Node<T>> {
+        loop {
+            let frame = self.stack.last_mut()?;
+            let Some(child) = frame.next() else {
+                self.stack.pop();
+                continue;
+            };
+            if dissolves(child) {
+                zero_dissolved_layout(child);
+                self.stack.push(Node::children(child));
+                continue;
+            }
+            return Some(child);
+        }
+    }
+}
+
+/// Enforces the zeroed-layout invariant on a dissolved node. Both stored
+/// layouts must be checked: `hide_subtree` zeroes only the unrounded side,
+/// so a contents child of a hidden interior can sit at default-unrounded /
+/// stale-rounded until this runs.
+fn zero_dissolved_layout<T>(node: &Node<T>) {
+    let stale = {
+        let results = node.layout_results.borrow();
+        results.unrounded != Layout::default() || results.rounded != Layout::default()
+    };
+    if stale {
+        let mut results = node.layout_results.borrow_mut();
+        results.unrounded = Layout::default();
+        results.rounded = Layout::default();
+    }
+}
+
 impl<'dom, T> LayoutNode for &'dom Node<T> {
     type Style = StyleView<'dom, T>;
-    type ChildIter = ChildrenIter<'dom, T>;
+    type ChildIter = BoxTreeChildren<'dom, T>;
 
     fn children(self) -> Self::ChildIter {
-        Node::children(self)
+        box_tree_children(self)
     }
 
     fn child_count(self) -> usize {
+        // Approximate capacity hint only (over-counts contents children,
+        // under-counts their dissolved grandchildren); the engine uses it
+        // solely for Vec::with_capacity.
         self.child_ids().len()
     }
 
@@ -50,6 +142,17 @@ impl<'dom, T> LayoutNode for &'dom Node<T> {
                 hide_subtree(self);
                 return LayoutOutput::HIDDEN;
             }
+            if display == DisplayMode::Contents {
+                // Reachable only out-of-band (e.g. a stale parked boundary
+                // that flipped to contents after parking — the parked loops
+                // also gate on this): the element has no box. Zero self
+                // WITHOUT recursing — a protocol hide here would clobber the
+                // box parent's live items. This check must precede
+                // skips_contents: content-visibility is inert on a boxless
+                // element and must not synthesize a box.
+                zero_dissolved_layout(self);
+                return LayoutOutput::HIDDEN;
+            }
             if view.skips_contents() {
                 return compute_skipped_contents_layout(self, input);
             }
@@ -57,7 +160,9 @@ impl<'dom, T> LayoutNode for &'dom Node<T> {
         };
 
         compute_cached_layout(self, input, move |node, input| match display {
-            DisplayMode::None => unreachable!("hidden nodes never reach the cache wrapper"),
+            DisplayMode::None | DisplayMode::Contents => {
+                unreachable!("hidden and boxless nodes never reach the cache wrapper")
+            }
             DisplayMode::Flex => compute_flexbox_layout(node, input),
             DisplayMode::Grid => compute_grid_layout(node, input),
             DisplayMode::Linear => compute_linear_layout(node, input),
@@ -155,7 +260,7 @@ pub(super) fn run_layout<T>(document: &Document<T>, viewport: Size<f32>, scale: 
     for &(_, id, input) in &parked {
         if let Some(node) = document.get(id)
             && node.is_element()
-            && is_relayout_boundary(&StyleView::of(node))
+            && parked_boundary_is_current(node)
         {
             let output = compute_boundary_relayout(node, input);
             node.layout_results.borrow_mut().unrounded.content_size = output.content_size;
@@ -209,7 +314,7 @@ fn position_and_round_parked_boundaries<T>(
         let Some(node) = document.get(id) else {
             continue;
         };
-        if !node.is_element() || !is_relayout_boundary(&StyleView::of(node)) {
+        if !node.is_element() || !parked_boundary_is_current(node) {
             continue;
         }
         if has_parked_ancestor(document, node) {
@@ -221,6 +326,18 @@ fn position_and_round_parked_boundaries<T>(
             .map_or(Point::ZERO, accumulated_unrounded_origin);
         round_layout_subtree(node, scale, parent_origin);
     }
+}
+
+/// Re-validates a parked relayout root against its *current* style: it must
+/// still be a containment boundary, and it must still generate a box — a
+/// boundary that flipped to `display: contents` after parking has no box to
+/// lay out (`is_relayout_boundary` is containment-only and display-agnostic,
+/// so it alone would let the stale root through). Skipping is safe: the
+/// flip's own damage cleared the box parent's spine, so the regular pass
+/// recomputes everything through the dissolving iterator.
+fn parked_boundary_is_current<T>(node: &Node<T>) -> bool {
+    let style = StyleView::of(node);
+    display_mode(style.display()) != DisplayMode::Contents && is_relayout_boundary(&style)
 }
 
 fn has_parked_ancestor<T>(document: &Document<T>, node: &Node<T>) -> bool {
@@ -262,6 +379,14 @@ fn position_hoisted_subtree<T>(node: &Node<T>, viewport: Size<f32>) {
     };
     let display = display_mode(style.display());
     if display == DisplayMode::None {
+        return;
+    }
+    if display == DisplayMode::Contents {
+        // Boxless: nothing to hoist (position is inert), and skips_contents
+        // does not apply — just walk through to the dissolved descendants.
+        for child in Node::children(node) {
+            position_hoisted_subtree(child, viewport);
+        }
         return;
     }
     if node.parent().is_some_and(Node::is_element)
@@ -335,29 +460,51 @@ fn position_hoisted<T>(node: &Node<T>, viewport: Size<f32>) {
     LayoutNode::set_unrounded_layout(node, layout);
 }
 
-fn sibling_paint_order<T>(parent: &Node<T>, target: crate::NodeId) -> u32 {
-    let Some(target_index) = parent.child_ids().iter().position(|&id| id == target) else {
-        return 0;
+/// The paint rank of a hoisted (out-of-flow) box among the **box-tree**
+/// siblings of its nearest box-generating ancestor — the same merged
+/// `(effective order, dissolved index)` space the layout algorithms rank
+/// in-flow items in, so `Layout.order` values stay comparable after
+/// `display: contents` dissolution merges DOM sibling sets.
+fn sibling_paint_order<T>(dom_parent: &Node<T>, target: crate::NodeId) -> u32 {
+    let box_parent = if dissolves(dom_parent) {
+        match box_tree_parent(dom_parent) {
+            Some(ancestor) => ancestor,
+            // Detached-tree guard: attached chains always end at the
+            // document node, which never dissolves.
+            None => dom_parent,
+        }
+    } else {
+        dom_parent
     };
-    let target_key = (0_i32, target_index);
-    let mut rank = 0u32;
-    for (index, child) in Node::children(parent).enumerate() {
+    let mut rank = 0_u32;
+    let mut earlier = 0_u32;
+    let mut seen_target = false;
+    for child in box_tree_children(box_parent) {
         let Some(order) = sibling_effective_paint_order(child) else {
             continue;
         };
-        if index == target_index {
+        if child.id() == target {
             debug_assert_eq!(
                 order, 0,
                 "sibling_paint_order is only called for out-of-flow (hoisted) \
                  targets, whose effective paint order is 0"
             );
+            seen_target = true;
+            rank += earlier;
             continue;
         }
-        if (order, index) < target_key {
-            rank += 1;
+        if seen_target {
+            // After the target: only strictly negative orders sort below
+            // the target's (0, index) key.
+            if order < 0 {
+                rank += 1;
+            }
+        } else if order <= 0 {
+            // Before the target: any non-positive order sorts below it.
+            earlier += 1;
         }
     }
-    rank
+    if seen_target { rank } else { 0 }
 }
 
 fn sibling_effective_paint_order<T>(child: &Node<T>) -> Option<i32> {
