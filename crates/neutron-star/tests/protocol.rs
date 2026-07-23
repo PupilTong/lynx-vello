@@ -2,15 +2,6 @@
 //! neutron-star node protocol, proving [`LayoutNode`] is implementable over
 //! plain storage with zero `dyn`, zero allocation at the boundary, and zero
 //! engine-side state.
-//!
-//! The style traits speak stylo computed values directly: the host stores
-//! stylo types and hands them out per accessor — no engine-side style
-//! vocabulary, no calc callback (stylo `LengthPercentage` self-resolves).
-//!
-//! Runtime tests exercise traversal, style/value plumbing, and shared
-//! machinery. Algorithm behavior lives in `tests/flexbox.rs`, `tests/grid.rs`,
-//! `tests/linear.rs`, and `tests/relative.rs`; this host proves their complete
-//! protocol surface is implementable.
 
 use std::cell::{Cell, RefCell};
 use std::fmt;
@@ -38,17 +29,14 @@ use stylo::values::generics::grid::{
     TrackListValue, TrackRepeat, TrackSize,
 };
 
-/// `<length>` in CSS pixels.
 fn px(value: f32) -> LengthPercentage {
     LengthPercentage::new_length(Length::new(value))
 }
 
-/// Non-negative `<length>` (padding).
 fn npx(value: f32) -> NonNegativeLengthPercentage {
     NonNegative(px(value))
 }
 
-/// `calc(<length> + <percentage>)`; `percentage` is a fraction (`0.05` = 5%).
 fn calc_lp(length: f32, percentage: f32) -> NonNegativeLengthPercentage {
     NonNegative(LengthPercentage::new_calc(
         CalcNode::Sum(
@@ -62,20 +50,16 @@ fn calc_lp(length: f32, percentage: f32) -> NonNegativeLengthPercentage {
     ))
 }
 
-/// A fixed-breadth track sizing function.
 fn fixed_track(value: f32) -> TrackSize<LengthPercentage> {
     TrackSize::Breadth(TrackBreadth::Breadth(px(value)))
 }
 
-/// A `<flex>` (`fr`) track sizing function.
 fn fr_track(value: f32) -> TrackSize<LengthPercentage> {
     TrackSize::Breadth(TrackBreadth::Flex(stylo::values::generics::grid::Flex(
         value,
     )))
 }
 
-/// A template track list from plain tracks (no repetitions; empty line
-/// names honoring the `line_names.len() == values.len() + 1` invariant).
 fn track_list(tracks: Vec<TrackSize<LengthPercentage>>) -> GridTemplateComponent {
     let values: Vec<TrackListValue<LengthPercentage, i32>> =
         tracks.into_iter().map(TrackListValue::TrackSize).collect();
@@ -87,9 +71,6 @@ fn track_list(tracks: Vec<TrackSize<LengthPercentage>>) -> GridTemplateComponent
     }))
 }
 
-/// The host's own display vocabulary — deliberately *not* an engine type
-/// (dispatch belongs to the host; see the `compute` module docs). The engine
-/// consumes only [`CoreStyle::display`]'s `is_none` projection.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 enum MockDisplay {
     #[default]
@@ -101,8 +82,6 @@ enum MockDisplay {
 #[derive(Debug, Clone)]
 struct MockStyle {
     display: MockDisplay,
-    /// Borrowed accessors lend from storage, so the margin value is
-    /// materialized here instead of synthesized per call.
     margin: Edges<Margin>,
     size: Size<StyleSize>,
     padding: Edges<NonNegativeLengthPercentage>,
@@ -238,7 +217,6 @@ struct MockSourceNode {
 struct MockSessionNode {
     unrounded: RefCell<Layout>,
     finalized: RefCell<Layout>,
-    /// Static position recorded for `PositionProperty::Fixed` children.
     static_position: Cell<Point<f32>>,
     cache: RefCell<Cache>,
 }
@@ -250,7 +228,6 @@ struct MockSessionNode {
 struct MockTree {
     nodes: Vec<MockSourceNode>,
     session: Vec<MockSessionNode>,
-    /// Instrumentation: every node whose cache the engine cleared, in order.
     invalidated: RefCell<Vec<usize>>,
 }
 
@@ -263,7 +240,6 @@ impl MockTree {
         id
     }
 
-    /// Resolves a builder-returned id to a borrowed node handle.
     fn node(&self, id: usize) -> MockRef<'_> {
         MockRef {
             tree: self,
@@ -271,12 +247,10 @@ impl MockTree {
         }
     }
 
-    /// Dispatches layout on `id` — the entry point tests use directly.
-    fn compute_child_layout(&self, id: usize, input: LayoutInput) -> LayoutOutput {
-        self.node(id).compute_child_layout(input)
+    fn compute_layout(&self, id: usize, input: LayoutInput) -> LayoutOutput {
+        self.node(id).compute_layout(input)
     }
 
-    /// The interior-mutable session slots of one node.
     fn session_node(&self, id: usize) -> &MockSessionNode {
         &self.session[id]
     }
@@ -349,15 +323,13 @@ impl<'t> LayoutNode for MockRef<'t> {
         &self.source().style
     }
 
-    fn compute_child_layout(self, input: LayoutInput) -> LayoutOutput {
+    fn compute_layout(self, input: LayoutInput) -> LayoutOutput {
         let style = self.style();
         if style.display().is_none() {
             hide_subtree(self);
             return LayoutOutput::HIDDEN;
         }
 
-        // content-visibility skipping routes here, outside the cache boundary,
-        // exactly like display:none (see the compute module docs).
         if style.skips_contents() {
             return compute_skipped_contents_layout(self, input);
         }
@@ -380,7 +352,7 @@ impl<'t> LayoutNode for MockRef<'t> {
         read(&layout)
     }
 
-    fn set_final_layout(self, layout: Layout) {
+    fn set_rounded_layout(self, layout: Layout) {
         *self.slots().finalized.borrow_mut() = layout;
     }
 
@@ -388,15 +360,15 @@ impl<'t> LayoutNode for MockRef<'t> {
         self.slots().static_position.set(static_position);
     }
 
-    fn cache_get(self, input: LayoutInput) -> Option<LayoutOutput> {
+    fn cached_layout(self, input: LayoutInput) -> Option<LayoutOutput> {
         self.slots().cache.borrow().get(input)
     }
 
-    fn cache_store(self, input: LayoutInput, output: LayoutOutput) {
+    fn store_cached_layout(self, input: LayoutInput, output: LayoutOutput) {
         self.slots().cache.borrow_mut().store(input, output);
     }
 
-    fn cache_clear(self) {
+    fn clear_layout_cache(self) {
         self.slots().cache.borrow_mut().clear();
         self.tree.invalidated.borrow_mut().push(self.index);
     }
@@ -416,8 +388,6 @@ fn traversal_over_host_storage() {
     let root_handle = tree.node(root);
     assert_eq!(root_handle.child_count(), 2);
     assert_eq!(root_handle.children().count(), 2);
-    // The iterator hands out handles in document order, straight from host
-    // storage.
     let ids: Vec<usize> = root_handle.children().map(|child| child.index).collect();
     assert_eq!(ids, tree.nodes[root].children);
 }
@@ -425,21 +395,15 @@ fn traversal_over_host_storage() {
 #[test]
 fn style_views_serve_initial_defaults() {
     let style = MockStyle::default();
-    // Through the handle's borrowed view type, as the engine will consume it.
     let view: <MockRef<'_> as LayoutNode>::Style = &style;
-    // The CSS initial value; Lynx hosts compute their default `relative`
-    // (which means CSS `static`) in their own style system.
     assert_eq!(view.position(), PositionProperty::Static);
     assert_eq!(view.visibility(), visibility::T::Visible);
     assert!(matches!(view.size().width, StyleSize::Auto));
     assert_eq!(FlexItemStyle::order(&view), 0);
-    // Lynx's `relative-layout-once` initial value is `true` (the fork's
-    // initial, adopted by the protocol default).
     assert_eq!(
         RelativeContainerStyle::relative_layout_once(&view),
         relative_layout_once::T::True
     );
-    // `-1` is the reserved "no reference" relative-layout sentinel.
     assert_eq!(RelativeItemStyle::relative_id(&view), -1);
     assert_eq!(
         RelativeItemStyle::relative_center(&view),
@@ -453,8 +417,6 @@ fn style_views_serve_initial_defaults() {
 
 #[test]
 fn grid_template_borrow_serves_stylo_track_lists() {
-    // [100px, repeat(auto-fill, [1fr, auto])] straight from host storage:
-    // a single track plus an auto-repeat group, exactly as stylo computes it.
     let repeat = TrackRepeat {
         count: RepeatCount::AutoFill,
         line_names: vec![stylo::OwnedSlice::default(); 3].into(),
@@ -486,18 +448,14 @@ fn grid_template_borrow_serves_stylo_track_lists() {
     match &list.values[1] {
         TrackListValue::TrackRepeat(repetition) => {
             assert_eq!(repetition.count, RepeatCount::AutoFill);
-            // Auto-fill/auto-fit need the per-repetition track count up
-            // front to solve the repetition count.
             assert_eq!(repetition.track_sizes.len(), 2);
         }
         other @ TrackListValue::TrackSize(_) => panic!("expected a repetition, got {other:?}"),
     }
-    // An axis without explicit tracks serves `None`.
     assert!(matches!(
         GridContainerStyle::grid_template_rows(&style),
         GridTemplateComponent::None
     ));
-    // Empty implicit track lists mean `auto` (the engine synthesizes).
     assert!(GridContainerStyle::grid_auto_rows(&style).0.is_empty());
 }
 
@@ -524,14 +482,9 @@ fn grid_track_view_remains_live_across_recursive_session_layout() {
         }
     }
 
-    // The style view borrows the tree's immutable side through the handle.
-    // Recursive layout writes only through host-owned interior-mutable
-    // per-node slots — the protocol has no `&mut` anywhere — so the borrow
-    // checker never sees a conflict and the borrowed stylo track list stays
-    // live across the recursion.
-    let output = tree.compute_child_layout(
+    let output = tree.compute_layout(
         child,
-        LayoutInput::perform_layout(
+        LayoutInput::commit(
             Size::new(Some(25.0), Some(10.0)),
             Size::NONE,
             Size::MAX_CONTENT,
@@ -550,12 +503,10 @@ fn grid_track_view_remains_live_across_recursive_session_layout() {
 fn leaf_dispatch_round_trips_layout_io() {
     let (tree, root) = leaf_tree();
     let child = tree.node(root).children().next().unwrap();
-    let input =
-        LayoutInput::perform_layout(Size::new(Some(40.0), None), Size::NONE, Size::MAX_CONTENT);
-    let output = child.compute_child_layout(input);
+    let input = LayoutInput::commit(Size::new(Some(40.0), None), Size::NONE, Size::MAX_CONTENT);
+    let output = child.compute_layout(input);
     assert_eq!(output.size, Size::new(40.0, 0.0));
 
-    // `Layout` is #[non_exhaustive]: construct via default + field writes.
     let mut layout = Layout::with_order(0);
     layout.size = output.size;
     child.set_unrounded_layout(layout);
@@ -567,9 +518,6 @@ fn leaf_dispatch_round_trips_layout_io() {
 
 #[test]
 fn static_position_round_trips_through_the_tree() {
-    // For `PositionProperty::Fixed` children the formatting parent records
-    // a static position instead of a layout; the host stores it for the
-    // positioned pass.
     let (tree, root) = leaf_tree();
     let child = tree.node(root).children().nth(1).unwrap();
     child.set_static_position(Point::new(12.5, 7.0));
@@ -600,7 +548,7 @@ fn compute_root_layout_stores_the_root_box() {
 }
 
 #[test]
-#[allow(clippy::float_cmp)] // Exact halves of an integer available size.
+#[allow(clippy::float_cmp)]
 fn compute_root_layout_resolves_horizontal_auto_margins() {
     let mut tree = MockTree::default();
     let root = tree.push(
@@ -653,7 +601,6 @@ fn explicit_hidden_cleanup_clears_stale_geometry() {
         },
         vec![root],
     );
-    // Seed stale geometry through the interior-mutable slots.
     let mut stale = tree.session_node(hidden).unrounded.borrow().clone();
     stale.size = Size::new(50.0, 20.0);
     *tree.session_node(hidden).unrounded.borrow_mut() = stale;
@@ -675,7 +622,7 @@ fn compute_leaf_layout_uses_internal_natural_size() {
         padding: Edges::uniform(npx(5.0)),
         ..MockStyle::default()
     };
-    let input = LayoutInput::perform_layout(
+    let input = LayoutInput::commit(
         Size::NONE,
         Size::new(Some(100.0), Some(100.0)),
         Size::new(
@@ -696,16 +643,12 @@ fn compute_leaf_layout_uses_internal_natural_size() {
 
 #[test]
 fn calc_padding_resolves_through_stylo_style_values() {
-    // Replaces the deleted `CalcHandle`/`resolve_calc` plumbing: a stylo
-    // `calc()` mixing length and percentage self-resolves inside the engine
-    // against the layout-time percentage basis (the parent width, here 200
-    // CSS px, for padding on every edge): calc(10px + 5%) = 20px per side.
     let style = MockStyle {
         size: Size::new(StyleSize::LengthPercentage(npx(50.0)), StyleSize::auto()),
         padding: Edges::uniform(calc_lp(10.0, 0.05)),
         ..MockStyle::default()
     };
-    let input = LayoutInput::perform_layout(
+    let input = LayoutInput::commit(
         Size::NONE,
         Size::new(Some(200.0), Some(100.0)),
         Size::new(
@@ -719,7 +662,6 @@ fn calc_padding_resolves_through_stylo_style_values() {
         NaturalSize::new(Size::new(None, Some(17.0)), None),
     );
 
-    // 50px content box + 20px calc padding per side.
     assert_eq!(output.size, Size::new(90.0, 57.0));
 }
 
@@ -729,7 +671,7 @@ fn compute_cached_layout_runs_an_uncached_dispatch() {
     let calls = Cell::new(0);
     let output = compute_cached_layout(tree.node(root), LayoutInput::default(), |node, input| {
         calls.set(calls.get() + 1);
-        node.compute_child_layout(input)
+        node.compute_layout(input)
     });
     assert_eq!(calls.get(), 1);
     assert_eq!(output, LayoutOutput::HIDDEN);
@@ -768,8 +710,6 @@ fn round_layout_snaps_on_the_device_pixel_grid() {
 fn round_layout_uses_css_positive_infinity_tie_breaking() {
     let (tree, root) = leaf_tree();
     let mut root_layout = Layout::default();
-    // At DPR 2 these become -1.5 and +1.5 device pixels. CSS nearest-
-    // integer rounding chooses the upper integer in both cases: -1 and +2.
     root_layout.location = Point::new(-0.75, 0.75);
     *tree.session_node(root).unrounded.borrow_mut() = root_layout;
 
@@ -781,7 +721,7 @@ fn round_layout_uses_css_positive_infinity_tie_breaking() {
 #[test]
 fn embeddable_cache_round_trips_a_complete_key() {
     let mut cache = Cache::new();
-    let input = LayoutInput::compute_size(
+    let input = LayoutInput::measure(
         Size::new(Some(20.0), None),
         Size::new(Some(100.0), Some(80.0)),
         Size::new(AvailableSpace::Definite(20.0), AvailableSpace::MaxContent),
@@ -846,13 +786,11 @@ impl<'t> LayoutNode for CountingRef<'t> {
         }
     }
 
-    // `child_count` deliberately not overridden: the default counts.
-
     fn style(self) -> &'t MockStyle {
         &self.tree.nodes[self.index].style
     }
 
-    fn compute_child_layout(self, input: LayoutInput) -> LayoutOutput {
+    fn compute_layout(self, input: LayoutInput) -> LayoutOutput {
         LayoutOutput::new(input.known_dimensions.unwrap_or(Size::ZERO), Size::ZERO)
     }
 
@@ -865,7 +803,7 @@ impl<'t> LayoutNode for CountingRef<'t> {
         read(&layout)
     }
 
-    fn set_final_layout(self, layout: Layout) {
+    fn set_rounded_layout(self, layout: Layout) {
         *self.tree.session[self.index].finalized.borrow_mut() = layout;
     }
 
@@ -875,13 +813,13 @@ impl<'t> LayoutNode for CountingRef<'t> {
             .set(static_position);
     }
 
-    fn cache_get(self, _input: LayoutInput) -> Option<LayoutOutput> {
+    fn cached_layout(self, _input: LayoutInput) -> Option<LayoutOutput> {
         None
     }
 
-    fn cache_store(self, _input: LayoutInput, _output: LayoutOutput) {}
+    fn store_cached_layout(self, _input: LayoutInput, _output: LayoutOutput) {}
 
-    fn cache_clear(self) {}
+    fn clear_layout_cache(self) {}
 }
 
 #[test]
@@ -901,10 +839,6 @@ fn default_child_count_counts_the_children_iterator() {
         0
     );
 }
-
-// ---------------------------------------------------------------------------
-// Containment-bounded, damage-driven cache invalidation.
-// ---------------------------------------------------------------------------
 
 fn size_px(value: f32) -> StyleSize {
     StyleSize::LengthPercentage(npx(value))
@@ -927,18 +861,14 @@ fn contained_style(containment: Contain) -> MockStyle {
 
 #[test]
 fn relayout_boundary_requires_both_layout_and_size() {
-    // Only layout AND size together (strict, or a skipped content-visibility
-    // box) close the upward path.
     assert!(is_relayout_boundary(&contained_style(Contain::STRICT)));
     assert!(is_relayout_boundary(&contained_style(
         Contain::SIZE | Contain::LAYOUT
     )));
-    // Layout alone is famously NOT a boundary; nor is size alone or content.
     assert!(!is_relayout_boundary(&contained_style(Contain::LAYOUT)));
     assert!(!is_relayout_boundary(&contained_style(Contain::SIZE)));
     assert!(!is_relayout_boundary(&contained_style(Contain::CONTENT)));
     assert!(!is_relayout_boundary(&contained_style(Contain::empty())));
-    // Single-axis inline-size never reaches the full SIZE bit test.
     assert!(!is_relayout_boundary(&contained_style(
         Contain::INLINE_SIZE | Contain::LAYOUT
     )));
@@ -951,7 +881,6 @@ fn invalidate_for_relayout_stops_at_the_nearest_boundary() {
     let boundary = tree.push(contained_style(Contain::STRICT), vec![leaf]);
     let root = tree.push(MockStyle::default(), vec![boundary]);
 
-    // Seed every cache so we can observe which ones get cleared.
     for node in [leaf, boundary, root] {
         tree.session_node(node).cache.borrow_mut().store(
             LayoutInput::default(),
@@ -964,7 +893,6 @@ fn invalidate_for_relayout_stops_at_the_nearest_boundary() {
         [tree.node(boundary), tree.node(root)].into_iter(),
     );
 
-    // Stops at (and returns) the boundary; the root above it is untouched.
     assert_eq!(re_root.index, boundary);
     assert_eq!(*tree.invalidated.borrow(), vec![leaf, boundary]);
     assert!(tree.session_node(leaf).cache.borrow().is_empty());
@@ -976,7 +904,6 @@ fn invalidate_for_relayout_stops_at_the_nearest_boundary() {
 fn invalidate_for_relayout_walks_to_root_without_a_boundary() {
     let mut tree = MockTree::default();
     let leaf = tree.push(MockStyle::default(), vec![]);
-    // `content` is layout+paint+style but no size — not a boundary.
     let mid = tree.push(contained_style(Contain::CONTENT), vec![leaf]);
     let root = tree.push(MockStyle::default(), vec![mid]);
 
@@ -985,8 +912,6 @@ fn invalidate_for_relayout_walks_to_root_without_a_boundary() {
         [tree.node(mid), tree.node(root)].into_iter(),
     );
 
-    // No ancestor is a boundary, so the last yielded node (the root) is
-    // returned and every cache on the path is cleared.
     assert_eq!(re_root.index, root);
     assert_eq!(*tree.invalidated.borrow(), vec![leaf, mid, root]);
 }
@@ -1002,12 +927,8 @@ fn invalidate_for_relayout_returns_the_node_when_it_is_the_root() {
     assert_eq!(*tree.invalidated.borrow(), vec![lone]);
 }
 
-/// A `contain: strict` flex container stretched on its cross axis by a flex
-/// parent, holding one interior leaf. Returns `(tree, parent, boundary,
-/// interior)` after an initial full layout.
 fn stretched_boundary_tree() -> (MockTree, usize, usize, usize) {
     let mut tree = MockTree::default();
-    // Interior leaf: 40px main size, auto cross (stretched by the boundary).
     let interior = tree.push(
         MockStyle {
             size: Size::new(size_px(40.0), StyleSize::auto()),
@@ -1015,9 +936,6 @@ fn stretched_boundary_tree() -> (MockTree, usize, usize, usize) {
         },
         vec![],
     );
-    // The boundary: a strict-contained flex row. Its 50px main size is
-    // self-determined, but its cross (height) is auto — so the parent stretches
-    // it to 200, well above its own contain-intrinsic-height of 30.
     let boundary = tree.push(
         MockStyle {
             display: MockDisplay::Flex,
@@ -1029,8 +947,6 @@ fn stretched_boundary_tree() -> (MockTree, usize, usize, usize) {
         },
         vec![interior],
     );
-    // The parent: a definite 300x200 flex row; `align-items` defaults to
-    // stretch, so it imposes height 200 on the boundary.
     let parent = tree.push(
         MockStyle {
             display: MockDisplay::Flex,
@@ -1040,9 +956,9 @@ fn stretched_boundary_tree() -> (MockTree, usize, usize, usize) {
         vec![boundary],
     );
 
-    tree.compute_child_layout(
+    tree.compute_layout(
         parent,
-        LayoutInput::perform_layout(Size::NONE, Size::NONE, Size::MAX_CONTENT),
+        LayoutInput::commit(Size::NONE, Size::NONE, Size::MAX_CONTENT),
     );
     (tree, parent, boundary, interior)
 }
@@ -1051,14 +967,10 @@ fn stretched_boundary_tree() -> (MockTree, usize, usize, usize) {
 fn compute_boundary_relayout_preserves_the_parent_imposed_size_and_updates_the_interior() {
     let (mut tree, parent, boundary, interior) = stretched_boundary_tree();
 
-    // The parent stretched the boundary's cross axis to 200 (its self-determined
-    // contain-intrinsic-height is only 30); its main size is the 50px style.
     let boundary_layout = tree.unrounded_layout(boundary);
     assert_eq!(boundary_layout.size, Size::new(50.0, 200.0));
     assert_eq!(tree.unrounded_layout(interior).size, Size::new(40.0, 200.0));
 
-    // Capture the exact input the boundary was committed with — carrying the
-    // stretched cross size — BEFORE invalidation clears the cache.
     let committed = tree
         .session_node(boundary)
         .cache
@@ -1066,37 +978,25 @@ fn compute_boundary_relayout_preserves_the_parent_imposed_size_and_updates_the_i
         .committed_input()
         .expect("the boundary has a committed layout");
 
-    // Mutate the interior; size containment means this cannot change the
-    // boundary's outer size.
     tree.nodes[interior].style.size.width = size_px(20.0);
 
-    // Invalidate up from the damaged interior; the walk stops at the boundary.
     let re_root = invalidate_for_relayout(
         tree.node(interior),
         [tree.node(boundary), tree.node(parent)].into_iter(),
     );
     assert_eq!(re_root.index, boundary);
 
-    // Re-root at the boundary with its preserved committed input.
     let output = compute_boundary_relayout(tree.node(boundary), committed);
 
-    // Deterministically identical outer size (size containment).
     assert_eq!(output.size, Size::new(50.0, 200.0));
-    // The boundary's own stored frame (owned by the un-invalidated parent) is
-    // untouched: same location, same size.
     let after = tree.unrounded_layout(boundary);
     assert_eq!(after.location, boundary_layout.location);
     assert_eq!(after.size, boundary_layout.size);
-    // The interior re-arranged to the mutated size.
     assert_eq!(tree.unrounded_layout(interior).size, Size::new(20.0, 200.0));
 }
 
 #[test]
 fn compute_root_layout_would_resize_a_stretched_boundary_regression_contrast() {
-    // Documents WHY compute_boundary_relayout preserves the committed input:
-    // re-rooting the SAME stretched boundary via compute_root_layout (which
-    // synthesizes a fresh input from available space) re-derives its
-    // self-determined size and desyncs from the parent's imposed 200.
     let (tree, _parent, boundary, _interior) = stretched_boundary_tree();
     let stretched = tree.unrounded_layout(boundary).size;
     assert_eq!(stretched, Size::new(50.0, 200.0));
@@ -1109,10 +1009,6 @@ fn compute_root_layout_would_resize_a_stretched_boundary_regression_contrast() {
         ),
     );
 
-    // Without the imposed cross size, the boundary falls back to its
-    // contain-intrinsic-height (30) — a different outer size than the
-    // parent-stretched one, which is exactly the desync the committed-input
-    // re-root avoids.
     let self_determined = tree.unrounded_layout(boundary).size;
     assert_eq!(self_determined, Size::new(50.0, 30.0));
     assert_ne!(self_determined, stretched);
@@ -1132,15 +1028,13 @@ fn skipped_contents_dispatch_sizes_from_intrinsic_and_hides_descendants() {
         },
         vec![child],
     );
-    // Give the child stale geometry from a hypothetical earlier non-skipped
-    // pass; the skipped commit must clean it.
     let mut stale = tree.session_node(child).unrounded.borrow().clone();
     stale.size = Size::new(99.0, 99.0);
     *tree.session_node(child).unrounded.borrow_mut() = stale;
 
-    let output = tree.compute_child_layout(
+    let output = tree.compute_layout(
         skipped,
-        LayoutInput::perform_layout(
+        LayoutInput::commit(
             Size::NONE,
             Size::new(Some(200.0), Some(200.0)),
             Size::new(
@@ -1150,11 +1044,8 @@ fn skipped_contents_dispatch_sizes_from_intrinsic_and_hides_descendants() {
         ),
     );
 
-    // Sized purely from contain-intrinsic-size (auto <len> behaves as <len>).
     assert_eq!(output.size, Size::new(40.0, 24.0));
-    // Skipped boxes are layout-contained: no baseline escapes.
     assert_eq!(output.first_baselines, Point::NONE);
-    // The child subtree was hidden (zeroed) on commit.
     assert_eq!(tree.unrounded_layout(child), Layout::default());
     assert!(tree.invalidated.borrow().contains(&child));
 }

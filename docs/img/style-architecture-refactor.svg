@@ -46,7 +46,7 @@
   <text x="92" y="340" class="crate">lynx-style</text>
   <text x="92" y="363" class="role">mixed generic CSS machinery and Lynx policy</text>
   <text x="92" y="390" class="item">Stylist · matching · cascade · stylesheets</text>
-  <text x="92" y="414" class="item">EngineMetrics · viewport rpx · Device policy</text>
+  <text x="92" y="414" class="item">ViewMetrics · viewport rpx · Device policy</text>
   <text x="92" y="438" class="item">SharedRwLock</text>
 
   <path d="M307 455V486" class="arrow"/>
@@ -65,7 +65,7 @@
   <text x="677" y="198" class="crate">lynx-widget</text>
   <text x="677" y="221" class="role">Lynx vocabulary and platform policy</text>
   <text x="677" y="248" class="item">WidgetTree · WidgetState · Element PAPI</text>
-  <text x="677" y="272" class="item">EngineMetrics · touch Device · viewport rpx</text>
+  <text x="677" y="272" class="item">ViewMetrics · touch Device · viewport rpx</text>
   <text x="677" y="296" class="item">thin StyleEngine adapter</text>
 
   <path d="M892 313V348" class="arrow"/>

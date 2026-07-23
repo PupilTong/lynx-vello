@@ -1,10 +1,5 @@
 //! Starlight linear layout.
-//!
-//! Linear is a Lynx-only, single-axis formatting context implemented as a
-//! first-class neutron-star algorithm alongside Flexbox and Grid.
 
-// Item counts are transient `Vec` lengths and layout coordinates are `f32`.
-// Converting a practical child count to `f32` for space distribution is safe.
 #![allow(clippy::cast_precision_loss)]
 
 use core::cmp::Ordering;
@@ -191,8 +186,6 @@ struct LinearItemSeed<N> {
 #[allow(clippy::struct_excessive_bools)]
 struct LinearItem<N> {
     key: ItemKey<N>,
-    /// Cross-axis gravity: one of the canonical [`map_cross_flags`] keywords
-    /// (`NORMAL` = no explicit gravity, default stretch behavior).
     gravity: AlignFlags,
     weight: f32,
     size_is_auto: Size<bool>,
@@ -206,10 +199,6 @@ struct LinearItem<N> {
     margin_auto: Edges<bool>,
     padding: Edges<f32>,
     border: Edges<f32>,
-    /// The item's `overflow`, resolved once by [`resolve_item_box`] and retained
-    /// so the deferred scrollable-overflow accumulation at commit reads it from
-    /// scratch instead of re-fetching (`node.style().overflow()`) a style view
-    /// per child — see [`accumulate_scrollable_overflow`].
     overflow: Point<Overflow>,
     relative_offset: Point<f32>,
     box_sizing: box_sizing::T,
@@ -301,19 +290,6 @@ fn flow_to_physical(flow: f32, box_size: f32, container_size: f32, reverse: bool
     }
 }
 
-/// Classifies one alignment keyword for the cross axis, yielding one of the
-/// canonical gravities `STRETCH`/`START`/`END`/`CENTER`, or `NORMAL` for no
-/// explicit gravity (the default-stretch behavior).
-///
-/// The engine interprets the flags it understands; `SAFE`/`UNSAFE` are
-/// stripped by [`AlignFlags::value`] before this runs (safe fallback ignored,
-/// as before the vocabulary swap). `NORMAL`, `AUTO`, and both baseline
-/// keywords yield `NORMAL` (the pre-swap `map_align` sent `Baseline` to
-/// `None` the same way). `LEFT`/`RIGHT` are physical: on a horizontal cross
-/// axis they map through the flow direction; on a vertical cross axis they
-/// fall back to start. Unknown flag values — a cascade-less host may
-/// fabricate any bit pattern — fall back to normal behavior rather than
-/// crashing.
 fn map_cross_flags(flags: AlignFlags, axes: LinearAxes) -> AlignFlags {
     if flags == AlignFlags::STRETCH || flags == AlignFlags::CENTER {
         flags
@@ -337,10 +313,6 @@ fn map_cross_flags(flags: AlignFlags, axes: LinearAxes) -> AlignFlags {
     }
 }
 
-/// Cross-axis gravity: `align-self` (per item) falling back to the
-/// container's `align-items`. The deleted `linear-layout-gravity` /
-/// `linear-cross-gravity` channels are expressed through these two
-/// properties now; the legacy `fill-*` gravities map to `stretch`.
 fn computed_cross_gravity(
     align_self: SelfAlignment,
     align_items: ItemPlacement,
@@ -356,13 +328,6 @@ fn computed_cross_gravity(
     map_cross_flags(align_items.0.value(), axes)
 }
 
-/// Main-axis gravity from `justify-content` (the deleted `linear-gravity`
-/// channel), yielding one of the canonical gravities
-/// `START`/`END`/`CENTER`/`SPACE_BETWEEN`.
-/// `space-around`/`space-evenly`/`stretch` keep their pre-swap
-/// pack-at-start behavior; `left`/`right` are physical on a horizontal main
-/// axis and fall back to start on a vertical one; unknown flags fall back to
-/// start.
 fn computed_main_gravity(justify_content: ContentDistribution, axes: LinearAxes) -> AlignFlags {
     let flags = justify_content.primary().value();
     if flags == AlignFlags::END || flags == AlignFlags::FLEX_END {
@@ -383,10 +348,6 @@ fn computed_main_gravity(justify_content: ContentDistribution, axes: LinearAxes)
     }
 }
 
-/// Whether a length-percentage needs a definite basis to resolve. Length-only
-/// `calc()` folds to an inline length at construction and resolves without a
-/// basis (a documented behavior delta of the stylo vocabulary swap); any calc
-/// expression that survives folding reports `has_percentage`.
 #[inline]
 fn lp_depends_on_basis(value: &LengthPercentage) -> bool {
     value.has_percentage()
@@ -416,7 +377,6 @@ fn inset_depends_on_basis(value: &Inset) -> bool {
     }
 }
 
-/// Resolves relative-position insets to a physical visual offset.
 #[inline]
 fn relative_offset(inset: Edges<Option<f32>>, direction: direction::T) -> Point<f32> {
     let x = match (inset.left, inset.right) {
@@ -429,8 +389,6 @@ fn relative_offset(inset: Edges<Option<f32>>, direction: direction::T) -> Point<
     Point::new(x, y)
 }
 
-/// Size consumed by padding and borders. Lynx is overlay-scrollbar only, so
-/// no scrollbar reservation exists anymore.
 #[inline]
 fn padding_border_size(padding: Edges<f32>, border: Edges<f32>) -> Size<f32> {
     Size::new(
@@ -439,8 +397,6 @@ fn padding_border_size(padding: Edges<f32>, border: Edges<f32>) -> Size<f32> {
     )
 }
 
-/// Converts the computed `aspect-ratio` to the engine's used `width / height`
-/// value; degenerate ratios behave as `auto` per CSS Sizing 4.
 #[inline]
 fn used_aspect_ratio(value: AspectRatio) -> Option<f32> {
     match value.ratio {
@@ -449,10 +405,6 @@ fn used_aspect_ratio(value: AspectRatio) -> Option<f32> {
     }
 }
 
-/// Whether a preferred-size value behaves as `auto`. The lynx-parseable
-/// keywords Starlight has no sizing behavior for (bare `fit-content`,
-/// `stretch`, `-webkit-fill-available`) are treated as `auto` (documented
-/// vocabulary-swap delta).
 #[inline]
 fn style_size_is_auto(value: &StyleSize) -> bool {
     match value {
@@ -494,9 +446,6 @@ fn style_size_axis_is_definite(value: &StyleSize, parent_basis: Option<f32>) -> 
     }
 }
 
-/// Returns which preferred-size axes establish a definite percentage basis.
-/// A preferred aspect ratio transfers definiteness across axes just as it
-/// transfers the resolved preferred size.
 #[inline]
 fn size_definiteness(
     size: Size<&StyleSize>,
@@ -523,9 +472,6 @@ fn initial_item_flags(
     inline_basis: Option<f32>,
     nudges: bool,
 ) -> LinearItemFlags {
-    // Only `position: relative` consumes insets as a visual nudge; static and
-    // sticky items lay out in flow with no inset offset (sticky is a host
-    // scroll-time post-pass).
     let relative_offset = nudges && {
         let inset = style.inset();
         inset_depends_on_basis(inset.left)
@@ -534,11 +480,6 @@ fn initial_item_flags(
             || inset_depends_on_basis(inset.bottom)
     };
     let (margin_refresh, padding_refresh) = if inline_basis.is_none() {
-        // Only used edges can affect the remaining layout phases. Starlight's
-        // internal min/max rewrite has no downstream consumer after sizing,
-        // while relative insets resolve independently against the final
-        // clamped containing block. Border widths are absolute (`Au`) in the
-        // stylo vocabulary and can never depend on the basis.
         let margin = style.margin();
         let padding = style.padding();
         (
@@ -658,8 +599,6 @@ fn refresh_item_edges<N>(
     percentage_basis: Size<Option<f32>>,
 ) {
     if item.flags.needs_padding_refresh() {
-        // Border widths are absolute in the stylo vocabulary; only padding
-        // can carry percentages and need this refresh.
         item.padding = resolve_padding(style.padding(), percentage_basis.width);
     }
     if item.flags.needs_margin_refresh() {
@@ -684,7 +623,7 @@ where
     N: LayoutNode,
     N::Style: LinearContainerStyle + LinearItemStyle,
 {
-    let mut input = LayoutInput::compute_size(
+    let mut input = LayoutInput::measure(
         known_dimensions,
         parent_size,
         available_space,
@@ -692,11 +631,9 @@ where
     );
     input.definite_dimensions = definite_dimensions;
     input.sizing_mode = sizing_mode;
-    node.compute_child_layout(input)
+    node.compute_layout(input)
 }
 
-/// Whether resolving one axis of these raw sizing properties requires a
-/// min-content probe (`min-content` or a `fit-content()` clamp).
 #[inline]
 fn needs_min_content(size: &StyleSize, min_size: &StyleSize, max_size: &MaxSize) -> bool {
     matches!(
@@ -711,8 +648,6 @@ fn needs_min_content(size: &StyleSize, min_size: &StyleSize, max_size: &MaxSize)
     )
 }
 
-/// Whether resolving one axis of these raw sizing properties requires a
-/// max-content probe (`max-content` or a `fit-content()` clamp).
 #[inline]
 fn needs_max_content(size: &StyleSize, min_size: &StyleSize, max_size: &MaxSize) -> bool {
     matches!(
@@ -789,12 +724,11 @@ where
         definite,
         percentage_basis,
         available,
-        SizingMode::ContentSize,
+        SizingMode::IgnoreSizeStyles,
         requested_axis,
     )
 }
 
-/// Resolves one `fit-content(limit)` axis against the measured contributions.
 #[inline]
 fn fit_content_axis_value(
     limit: &LengthPercentage,
@@ -811,9 +745,6 @@ fn fit_content_axis_value(
     maximum.min(limit.max(minimum))
 }
 
-/// Resolves one intrinsic preferred/minimum sizing axis. Quantitative values
-/// (auto, lengths, percentages, and the treated-as-auto keywords) keep their
-/// already-resolved value.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn intrinsic_axis_value(
@@ -842,8 +773,6 @@ fn intrinsic_axis_value(
     }
 }
 
-/// Resolves one intrinsic maximum sizing axis (`none` behaves as
-/// quantitative).
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn intrinsic_max_axis_value(
@@ -881,8 +810,6 @@ where
     if !item.has_intrinsic_size {
         return;
     }
-    // The borrowed raw values stay lent from this style view for the whole
-    // resolution; recursive probes mutate only host-owned per-node slots.
     let style = item.key.node.style();
     let size = style.size();
     let min_size = style.min_size();
@@ -1151,7 +1078,7 @@ fn measure_item<N>(
         known_definite,
         percentage_basis,
         child_available,
-        SizingMode::InherentSize,
+        SizingMode::ApplySizeStyles,
         RequestedAxis::Both,
     );
     item.main_size = forced_main.unwrap_or_else(|| {
@@ -1191,9 +1118,6 @@ where
     item.cross_size + axis_sum(item.margin, axes.cross)
 }
 
-/// Starlight uses the same signed-violation freeze rule as Flexbox, but with
-/// zero bases and positive weights only. The loop performs no child layout and
-/// needs no side vectors; every pass either freezes at least one item or exits.
 fn distribute_weighted_items<N>(
     items: &mut [LinearItem<N>],
     axes: LinearAxes,
@@ -1234,8 +1158,6 @@ fn distribute_weighted_items<N>(
         let adjusted_space = if weight_sum_override > 0.0 {
             initial_free_space * total_weight / weight_sum_override
         } else {
-            // This preserves Starlight's fractional-weight behavior: a total
-            // below one reserves the undistributed fraction of free space.
             initial_free_space * active_weight
         };
         let free_space = if adjusted_space.abs() < remaining_space.abs() {
@@ -1373,7 +1295,6 @@ fn main_axis_distribution(
     } else if main_gravity == AlignFlags::SPACE_BETWEEN && item_count > 1 {
         (0.0, free_main.max(0.0) / (item_count - 1) as f32)
     } else {
-        // START and single-item SPACE_BETWEEN pack at start.
         (0.0, 0.0)
     }
 }
@@ -1385,7 +1306,6 @@ fn cross_alignment_offset(gravity: AlignFlags, free_cross: f32) -> f32 {
     } else if gravity == AlignFlags::CENTER {
         free_cross / 2.0
     } else {
-        // NORMAL, START, and STRETCH use the cross-start edge.
         0.0
     }
 }
@@ -1549,9 +1469,6 @@ where
             .reduce(f32::max)
     } else {
         let first = items.first()?;
-        // Starlight's LayoutObject synthesizes a missing child baseline at
-        // the child's bottom border edge. For a vertical Linear container
-        // that edge lies in the main axis, so the fallback is its main size.
         let baseline = first.baseline.unwrap_or(first.main_size);
         Some(item_location(first, axes, inner_size, content_origin).y + baseline)
     }
@@ -1573,18 +1490,18 @@ where
     let mut content_size = outer_size;
     for item in items {
         let target_size = size_from_axes(axes, item.main_size, item.cross_size);
-        let mut input = LayoutInput::perform_layout(
+        let mut input = LayoutInput::commit(
             target_size.map(Some),
             parent_size,
             target_size.map(AvailableSpace::Definite),
         );
-        input.sizing_mode = SizingMode::ContentSize;
+        input.sizing_mode = SizingMode::IgnoreSizeStyles;
         input.definite_dimensions = size_from_axes(
             axes,
             item.main_size_is_definite,
             item.cross_size_is_definite,
         );
-        let output = item.key.node.compute_child_layout(input);
+        let output = item.key.node.compute_layout(input);
         item.baseline = output.first_baselines.y;
 
         let offset = item.relative_offset;
@@ -1601,10 +1518,6 @@ where
         layout.margin = item.margin;
         item.key.node.set_unrounded_layout(layout);
 
-        // A scroll-container child traps its interior scrollable overflow;
-        // any other child propagates border box ∪ content_size (§3.3). The
-        // item's overflow was resolved once during item sizing and kept in
-        // scratch, so this reads no fresh style view per child.
         accumulate_scrollable_overflow(
             &mut content_size,
             location,
@@ -1678,12 +1591,6 @@ where
         };
         let child = key.node;
         let document_index = key.document_index;
-        // Out-of-flow children participate in sibling paint order with an
-        // effective order of zero, even though they do not participate in
-        // linear sizing. `in_flow_items` is already sorted by (order,
-        // document index). Absolute children arrive in document order, so a
-        // monotonic merge cursor plus the number of earlier absolute siblings
-        // gives the rank without another allocation or repeated searches.
         while in_flow_before < in_flow_items.len()
             && (
                 in_flow_items[in_flow_before].key.css_order,
@@ -1698,10 +1605,6 @@ where
 
         match position {
             PositionProperty::Absolute => {
-                // The common positioned algorithm already knows the final
-                // border-box size and used margins before it consumes the
-                // static fallback. Derive Linear alignment there so this
-                // committing path lays out the child exactly once.
                 let mut layout = compute_absolute_layout_with_static_position(
                     child,
                     padding_box_size,
@@ -1735,9 +1638,6 @@ where
             }
             PositionProperty::Fixed => {
                 let measured = measure_absolute_static_box(child, padding_box_size, static_axes);
-                // Static-position fallback is gravity-driven. Out-of-flow
-                // automatic margins are resolved by the common positioned
-                // algorithm, not by Linear's in-flow auto-margin rule.
                 let static_position = absolute_static_position(
                     axes,
                     padding_box_size,
@@ -1755,13 +1655,6 @@ where
     content_size
 }
 
-/// Computes a Starlight `display: linear` formatting context.
-///
-/// The algorithm is single-line and single-axis: in-flow items are measured
-/// in order, positive weights share definite remaining main space, main and
-/// cross gravity place final margin boxes, and out-of-flow children are laid
-/// out after the container size is known. Child geometry is stored only for a
-/// [`LayoutGoal::Commit`] call.
 #[allow(clippy::too_many_lines)]
 pub fn compute_linear_layout<N>(node: N, input: LayoutInput) -> LayoutOutput
 where
@@ -1769,9 +1662,6 @@ where
     N::Style: LinearContainerStyle + LinearItemStyle,
 {
     let style = node.style();
-    // Size containment substitutes contain-intrinsic-size for the container's
-    // natural content size; layout containment suppresses the exported
-    // baseline. Items are still measured and committed.
     let size_containment = size_containment(&style);
     let layout_contained = style.containment().contains(Contain::LAYOUT);
     let axes = LinearAxes::new(style.linear_direction(), style.direction());
@@ -1785,7 +1675,7 @@ where
     );
     let container_aspect_ratio = used_aspect_ratio(style.aspect_ratio());
     let container_box_sizing = style.box_sizing();
-    let style_definite = if input.sizing_mode == SizingMode::ContentSize {
+    let style_definite = if input.sizing_mode == SizingMode::IgnoreSizeStyles {
         Size::new(false, false)
     } else {
         size_definiteness(style.size(), input.parent_size, container_aspect_ratio)
@@ -1811,7 +1701,7 @@ where
             outer_definite.width = true;
         }
     }
-    if input.sizing_mode != SizingMode::ContentSize {
+    if input.sizing_mode != SizingMode::IgnoreSizeStyles {
         let before_ratio = outer_size;
         outer_size = apply_border_box_ratio(
             outer_size,
@@ -1855,11 +1745,6 @@ where
     if !outer_definite.height {
         definite_inner_size.height = None;
     }
-    // Starlight gates Linear weight distribution and default cross stretch on
-    // the incoming constraint mode, not CSS percentage definiteness. Flex can
-    // decide an item's geometry while §9.8 still marks that size indefinite;
-    // keep that distinction for descendant percentage bases, but treat the
-    // decided inner size as a definite Linear constraint.
     let inner_available_space = Size::new(
         inner_size
             .width
@@ -1925,9 +1810,6 @@ where
                     node: child,
                     document_index,
                     css_order,
-                    // Temporarily retain the number of preceding effective-order
-                    // zero absolute siblings. After sorting this is exactly the
-                    // merge offset for a zero-order in-flow item.
                     layout_order: if commits_layout {
                         u32::try_from(absolute_count).unwrap_or(u32::MAX)
                     } else {
@@ -1946,9 +1828,6 @@ where
         items.push(item);
     }
     if has_nonzero_order {
-        // The document index makes the key unique. An allocation-free unstable
-        // sort therefore has exactly the required stable-within-equal-order
-        // result.
         items.sort_unstable_by(
             |left, right| match left.key.css_order.cmp(&right.key.css_order) {
                 Ordering::Equal => left.key.document_index.cmp(&right.key.document_index),
@@ -1977,9 +1856,6 @@ where
         weight_sum,
     );
     let (natural, used_main) = natural_content_size(&items, axes);
-    // Under size containment the container ignores its items' natural extent
-    // and substitutes contain-intrinsic-size; items are still positioned and
-    // committed against the resulting definite inner size (they may overflow).
     let container_natural = match size_containment {
         Some(intrinsic) => Size::new(
             intrinsic.width.unwrap_or(0.0),
@@ -2009,20 +1885,7 @@ where
         (final_outer_size.height - container_inset.height).max(0.0),
     );
 
-    // Cyclic percentages contribute zero while an inline size is intrinsic,
-    // then resolve against the resulting used width. Avoid the second pass for
-    // the overwhelmingly common all-absolute-length case.
     if !outer_definite.width && has_box_basis_dependency {
-        // Starlight refreshes BoxInfo before the container's provisional
-        // border-box size is clamped by min/max. A previously constrained axis
-        // keeps that constraint; an intrinsic axis uses its content size. Keep
-        // the final, clamped inner size solely for container geometry below.
-        //
-        // Under size containment the container's used size ignores its items'
-        // natural extent (it is `contain-intrinsic-size`), so the cyclic-
-        // percentage basis for an intrinsic axis must be the *contained* inner
-        // size, not the uncontained natural one — matching flexbox/grid/relative,
-        // which resolve against their contained size here.
         let contained_basis = if size_containment.is_some() {
             final_inner_size
         } else {
@@ -2037,19 +1900,9 @@ where
             if !item.flags.needs_box_refresh() {
                 continue;
             }
-            // Starlight's UpdateContainerSize refreshes percentage-dependent
-            // used edges after an intrinsic container becomes definite, but
-            // it deliberately does not measure the child again. Preserve the
-            // already-used size/baseline/definiteness and weight-freeze state.
-            // Min/max has no consumer after sizing, so re-resolving it here
-            // would only create dead stores.
             let item_style = item.key.node.style();
             refresh_item_edges(item_style, item, percentage_basis);
         }
-        // The intrinsic container size remains fixed. Percentage-dependent
-        // used values may overflow it, but neither item measurement nor the
-        // already-computed main total feeds back into the basis. This mirrors
-        // Starlight's UpdateContainerSize/UpdateBoxData split exactly.
     }
 
     position_items(&mut items, axes, final_inner_size, main_gravity, used_main);
@@ -2064,11 +1917,6 @@ where
             .with_first_baselines(Point::new(None, baseline));
     }
 
-    // Starlight applies relative positioning during alignment, after the
-    // container's own min/max clamp. Re-resolve percentage-dependent in-flow
-    // insets against that final containing block here, independently of the
-    // earlier provisional BoxInfo refresh. Absolute-length/auto insets retain
-    // their already-resolved fast-path value.
     if has_relative_basis_dependency {
         let final_percentage_basis = final_inner_size.map(Some);
         for item in &mut items {
@@ -2099,9 +1947,6 @@ where
             content_size,
         );
     }
-    // css-contain-2 §3.3: a layout-contained container with `overflow: visible`
-    // reports its border box as its scrollable overflow (descendant overflow is
-    // ink-only); a scroll container keeps the interior union.
     let content_size = own_scrollable_overflow(&style, final_outer_size, content_size);
     let baseline = if layout_contained {
         None
@@ -2193,10 +2038,6 @@ mod tests {
 
     #[test]
     fn linear_item_scratch_stays_cache_conscious() {
-        // The budget assumes the documented worst-case two-word handle
-        // (`(&Tree, index)`): the embedded `ItemKey<N>` pays one extra word
-        // over the historical 8-byte id, so the old 192-byte cap becomes 200.
-        // One-word handles (a plain `&Node`) shave those 8 bytes back off.
         let size = core::mem::size_of::<LinearItem<[usize; 2]>>();
         assert!(size <= 200, "LinearItem grew to {size} bytes");
     }
@@ -2214,8 +2055,6 @@ mod tests {
             ),
             AllowedNumericType::All,
         );
-        // Length-only calc folds to an inline length at construction and no
-        // longer depends on the basis (documented vocabulary-swap delta).
         let folded_calc = LengthPercentage::new_calc(
             CalcNode::Sum(
                 vec![
@@ -2274,8 +2113,6 @@ mod tests {
             assert!(!initial_item_flags(&style, None, true).needs_box_refresh());
         }
 
-        // Border widths are absolute in the stylo vocabulary, so only margin
-        // and padding can require the box refresh now.
         for (style, expected_refresh) in [
             (
                 DependencyStyle {
@@ -2320,16 +2157,12 @@ mod tests {
             let dependencies = initial_item_flags(&style, None, true);
             assert!(!dependencies.needs_box_refresh());
             assert!(dependencies.needs_relative_offset_refresh());
-            // Static and sticky items never take the relative nudge, so the
-            // refresh flag is gated off with them.
             assert!(!initial_item_flags(&style, None, false).needs_relative_offset_refresh());
         }
     }
 
     #[test]
     fn flow_edge_writes_map_to_physical_edges_under_reversal() {
-        // Forward flows write the physical start edge; reversed flows write
-        // the opposite physical edge for the same flow-relative slot.
         let mut edges = Edges::uniform(0.0_f32);
         set_flow_start(&mut edges, Axis::Horizontal, false, 1.0);
         set_flow_start(&mut edges, Axis::Horizontal, true, 2.0);
@@ -2350,7 +2183,6 @@ mod tests {
             (2.0, 1.0, 4.0, 3.0)
         );
 
-        // The read-side helpers agree with the writes.
         let edges = Edges {
             left: 10.0,
             right: 20.0,
@@ -2376,7 +2208,6 @@ mod tests {
         let ltr_row = LinearAxes::new(linear_direction::T::Row, direction::T::Ltr);
         let ltr_row_reverse = LinearAxes::new(linear_direction::T::RowReverse, direction::T::Ltr);
 
-        // Main axis <- justify-content.
         assert_eq!(
             computed_main_gravity(ContentDistribution::normal(), ltr_column),
             AlignFlags::START
@@ -2396,7 +2227,6 @@ mod tests {
             ),
             AlignFlags::SPACE_BETWEEN
         );
-        // space-around/space-evenly keep the pre-swap pack-at-start behavior.
         assert_eq!(
             computed_main_gravity(
                 ContentDistribution::new(AlignFlags::SPACE_AROUND),
@@ -2404,7 +2234,6 @@ mod tests {
             ),
             AlignFlags::START
         );
-        // Physical left/right act on a horizontal main axis only.
         assert_eq!(
             computed_main_gravity(ContentDistribution::new(AlignFlags::RIGHT), ltr_row),
             AlignFlags::END
@@ -2418,7 +2247,6 @@ mod tests {
             AlignFlags::START
         );
 
-        // Cross axis <- align-self falling back to align-items.
         assert_eq!(
             computed_cross_gravity(SelfAlignment::auto(), ItemPlacement::normal(), ltr_column),
             AlignFlags::NORMAL
@@ -2439,8 +2267,6 @@ mod tests {
             ),
             AlignFlags::STRETCH
         );
-        // Baseline defers to the container channel, exactly as the pre-swap
-        // `map_align` sent `Baseline` to `None`.
         assert_eq!(
             computed_cross_gravity(
                 SelfAlignment(AlignFlags::BASELINE),
@@ -2449,7 +2275,6 @@ mod tests {
             ),
             AlignFlags::END
         );
-        // Physical left/right on the horizontal cross axis follow direction.
         assert_eq!(
             computed_cross_gravity(
                 SelfAlignment(AlignFlags::LEFT),
@@ -2466,7 +2291,6 @@ mod tests {
             ),
             AlignFlags::END
         );
-        // On a vertical cross axis the physical keywords fall back to start.
         assert_eq!(
             computed_cross_gravity(
                 SelfAlignment(AlignFlags::RIGHT),
@@ -2475,7 +2299,6 @@ mod tests {
             ),
             AlignFlags::START
         );
-        // `safe`/`unsafe` modifiers are stripped by `AlignFlags::value`.
         assert_eq!(
             computed_cross_gravity(
                 SelfAlignment(AlignFlags::SAFE | AlignFlags::CENTER),

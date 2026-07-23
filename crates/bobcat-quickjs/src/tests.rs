@@ -13,7 +13,7 @@ use bobcat_engine::resource::{
     ResourceRequest, ResourceResponse, ResourceStream, RetryAdvice,
 };
 use bobcat_engine::script::{ScriptEngine, ScriptErrorKind, ScriptErrorPhase, ScriptValue};
-use bobcat_engine::view::EngineMetrics;
+use bobcat_engine::view::ViewMetrics;
 use quickjs_rust_bridge::EvalSource;
 
 use super::{
@@ -526,11 +526,11 @@ impl NullResourceFetcher {
 }
 
 impl ResourceFetcher for NullResourceFetcher {
-    fn supports(&self, _capability: ResourceCapability) -> bool {
+    fn supports_capability(&self, _capability: ResourceCapability) -> bool {
         false
     }
 
-    fn resolve(&self, _request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
+    fn resolve_locator(&self, _request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
         Self::failure(ResourceErrorPhase::Resolve)
     }
 
@@ -557,14 +557,14 @@ impl ResourceFetcher for NullResourceFetcher {
         Self::failure(ResourceErrorPhase::Prefetch)
     }
 
-    fn cancel(&self, _request_id: RequestId) -> ResourceFuture<'_, ()> {
+    fn cancel_request(&self, _request_id: RequestId) -> ResourceFuture<'_, ()> {
         Box::pin(async { Ok(()) })
     }
 }
 
 #[test]
 fn quickjs_engine_composes_into_a_lynx_view() {
-    let mut view = new_quickjs_view(NullResourceFetcher, EngineMetrics::new(390.0, 844.0, 3.0))
+    let mut view = new_quickjs_view(NullResourceFetcher, ViewMetrics::new(390.0, 844.0, 3.0))
         .expect("view should initialize");
 
     assert_eq!(
@@ -579,7 +579,11 @@ fn quickjs_engine_composes_into_a_lynx_view() {
         view.inner.script_engine_mut().evaluate("6 * 7"),
         Ok(Value::Number(42.0))
     ));
-    assert!(!view.resource_fetcher().supports(ResourceCapability::Http));
+    assert!(
+        !view
+            .resource_fetcher()
+            .supports_capability(ResourceCapability::Http)
+    );
 }
 
 #[test]

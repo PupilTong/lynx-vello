@@ -1,26 +1,6 @@
 //! Shared harness for the CSS behavior tests ported from the `LynxJS` C++
 //! engine (`lynx/core/renderer/css/**_test.cc` / `**_unittest.cc`).
-//!
-//! Scope and expectation policy for every port (see
-//! `docs/style-assumptions.md` and `docs/tracking/deviations.md`):
-//!
-//! - `enableCSSSelector = true` (NG selector path) and `enableRemoveCSSScope = true` (global
-//!   styles) only.
-//! - Real W3C features assert **W3C-correct** behavior — what stylo does — even where the C++
-//!   engine deviates (e.g. selectors Lynx parses but never matches must match here; `var()` cycles
-//!   use the spec's fallback rules).
-//! - Lynx-only extensions (`display: linear`, `linear-*`/`relative-*` longhands, `rpx`/`ppx` units)
-//!   assert Lynx's actual behavior.
-//!
-//! Tests build small trees through [`Doc`], flush through stylo's restyle
-//! traversal, and assert computed values by serialized longhand
-//! ([`Doc::value`]), typed color ([`Doc::color`]), raw selector matching
-//! ([`Doc::matches`]), specified-value grammar round trips ([`specified`] /
-//! [`parses`]), selector specificity ([`specificity`]), and media-query
-//! evaluation ([`media_matches`]).
 
-// Each integration-test crate compiles its own copy of this module and uses a
-// subset of it.
 #![allow(dead_code)]
 
 use euclid::{Scale, Size2D};
@@ -45,21 +25,18 @@ use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_traits::{CSSPixel, DevicePixel};
-use w3c_dom::{Document, ElementState, FlushSummary, NodeId, StylesheetOrigin};
+use w3c_dom::{Document, FlushSummary, NodeId, StylesheetOrigin};
 
-/// The base URL every harness parse uses (mirrors `Document::new`).
 #[must_use]
 pub fn url_data() -> UrlExtraData {
     UrlExtraData::from(url::Url::parse("about:blank").expect("about:blank is a valid URL"))
 }
 
-/// A stylo `Device` for tests: `screen`, light scheme, no pointer.
 #[must_use]
 pub fn device(width: f32, height: f32) -> Device {
     device_with(width, height, 1.0, PrefersColorScheme::Light)
 }
 
-/// [`device`] with explicit device-pixel ratio and color scheme.
 #[must_use]
 pub fn device_with(
     width: f32,
@@ -113,13 +90,11 @@ pub struct Doc {
 }
 
 impl Doc {
-    /// An empty document (800×600 viewport) rooted at a `page` element.
     #[must_use]
     pub fn new() -> Self {
         Self::with_device(device(800.0, 600.0))
     }
 
-    /// [`Doc::new`] plus one author stylesheet.
     #[must_use]
     pub fn with_css(css: &str) -> Self {
         let mut doc = Self::new();
@@ -127,38 +102,27 @@ impl Doc {
         doc
     }
 
-    /// A document over an explicit device.
     #[must_use]
     pub fn with_device(device: Device) -> Self {
         let mut dom = Document::new(device);
         let root = dom.create_element("page", ());
-        dom.append_child(root);
+        dom.append_document_element(root);
         Self { dom, root }
     }
 
-    /// Append an author-origin stylesheet.
     pub fn add_css(&mut self, css: &str) {
-        self.dom.add_stylesheet_str(css, StylesheetOrigin::Author);
+        self.dom.add_stylesheet(css, StylesheetOrigin::Author);
     }
 
-    /// Append a user-agent-origin stylesheet.
     pub fn add_ua_css(&mut self, css: &str) {
-        self.dom
-            .add_stylesheet_str(css, StylesheetOrigin::UserAgent);
+        self.dom.add_stylesheet(css, StylesheetOrigin::UserAgent);
     }
 
-    /// Create a node from a spec string and attach it as `parent`'s last
-    /// child.
-    ///
-    /// Spec grammar: `tag#id.class1.class2[attr=value][flag]` — tag first
-    /// (defaults to `view` when the spec starts with `#`/`.`/`[`), then any
-    /// number of `#id`, `.class`, and `[name]`/`[name=value]` parts. Attribute
-    /// values may be single- or double-quoted.
     pub fn el(&mut self, parent: NodeId, spec: &str) -> NodeId {
         let parsed = NodeSpec::parse(spec);
         let id = self.dom.create_element(&parsed.tag, ());
-        if let Some(id_attr) = parsed.id {
-            self.dom.set_id_attr(id, Some(&id_attr));
+        if let Some(id_attribute) = parsed.id {
+            self.dom.set_id_attribute(id, Some(&id_attribute));
         }
         for class in parsed.classes {
             self.dom.add_class(id, &class);
@@ -166,24 +130,18 @@ impl Doc {
         for (name, value) in parsed.attrs {
             self.dom.set_attribute(id, &name, &value);
         }
-        self.dom.append(parent, id);
+        self.dom.append_child(parent, id);
         id
     }
 
-    /// [`Doc::el`] for several children of one parent, in order.
     pub fn els(&mut self, parent: NodeId, specs: &[&str]) -> Vec<NodeId> {
         specs.iter().map(|spec| self.el(parent, spec)).collect()
     }
 
-    /// Run a style flush (stylo's restyle traversal) over the whole tree,
-    /// returning the [`FlushSummary`] (per-node restyle damage + whether a
-    /// traversal ran).
     pub fn flush(&mut self) -> FlushSummary {
         self.dom.flush_styles()
     }
 
-    /// The flushed computed style of `id`. Panics when `id` is stale or the
-    /// tree has not been flushed since the node was styled.
     #[must_use]
     pub fn style(&self, id: NodeId) -> Arc<ComputedValues> {
         self.dom
@@ -193,7 +151,6 @@ impl Doc {
             .expect("doc.flush() must run before reading computed style")
     }
 
-    /// The computed value of one longhand, serialized to CSS text.
     #[must_use]
     pub fn value(&self, id: NodeId, longhand: &str) -> String {
         let property = PropertyId::parse_enabled_for_all_content(longhand)
@@ -205,14 +162,11 @@ impl Doc {
         self.style(id).computed_value_to_string(declaration_id)
     }
 
-    /// The computed `color`.
     #[must_use]
     pub fn color(&self, id: NodeId) -> AbsoluteColor {
         self.style(id).clone_color()
     }
 
-    /// Raw selector matching against the flushed-or-not tree (no rules
-    /// involved). Panics when the selector list fails to parse.
     #[must_use]
     pub fn matches(&self, id: NodeId, selector: &str) -> bool {
         let list = SelectorParser::parse_author_origin_no_namespace(selector, &url_data())
@@ -231,45 +185,31 @@ impl Doc {
         matches_selector_list(&list, node_handle, &mut context)
     }
 
-    /// Whether `selector` parses at all in this build.
     #[must_use]
     pub fn selector_parses(selector: &str) -> bool {
         SelectorParser::parse_author_origin_no_namespace(selector, &url_data()).is_ok()
     }
 
-    // --- Mutation helpers (thin delegations; invalidation rides inside) ---
-
-    /// Add a class.
     pub fn add_class(&mut self, id: NodeId, class: &str) {
         self.dom.add_class(id, class);
     }
 
-    /// Remove a class (no-op when absent).
     pub fn remove_class(&mut self, id: NodeId, class: &str) {
         self.dom.remove_class(id, class);
     }
 
-    /// Set or clear the id attribute.
     pub fn set_id(&mut self, id: NodeId, value: Option<&str>) {
-        self.dom.set_id_attr(id, value);
+        self.dom.set_id_attribute(id, value);
     }
 
-    /// Set an attribute value.
     pub fn set_attr(&mut self, id: NodeId, name: &str, value: &str) {
         self.dom.set_attribute(id, name, value);
     }
 
-    /// Remove an attribute.
     pub fn remove_attr(&mut self, id: NodeId, name: &str) {
         self.dom.remove_attribute(id, name);
     }
 
-    /// Set or clear dynamic pseudo-class state bits (`:hover`/`:active`/…).
-    pub fn set_state(&mut self, id: NodeId, state: ElementState, on: bool) {
-        self.dom.set_state(id, state, on);
-    }
-
-    /// Replace the node's inline `style` declarations.
     pub fn set_inline(&mut self, id: NodeId, css: &str) {
         self.dom.set_inline_style(id, css);
     }
@@ -335,8 +275,6 @@ impl NodeSpec {
     }
 }
 
-/// Parse `property: value` as a specified declaration and serialize it back
-/// (shorthands re-serialize as shorthands). `None` = the grammar rejected it.
 #[must_use]
 pub fn specified(property: &str, value: &str) -> Option<String> {
     let css = format!("{property}: {value}");
@@ -356,17 +294,11 @@ pub fn specified(property: &str, value: &str) -> Option<String> {
     (!serialized.is_empty()).then_some(serialized)
 }
 
-/// Whether the specified-value grammar accepts `property: value`.
 #[must_use]
 pub fn parses(property: &str, value: &str) -> bool {
     specified(property, value).is_some()
 }
 
-/// Selector specificity as the `(id, class, type)` triple.
-///
-/// The C++ tests pack these as `id*0x10000 + class*0x100 + type`; the
-/// `selectors` crate packs 10-bit fields. Ports must compare **triples** (or
-/// relative order), never raw packed integers.
 #[must_use]
 pub fn specificity(selector: &str) -> Option<(u32, u32, u32)> {
     let list = SelectorParser::parse_author_origin_no_namespace(selector, &url_data()).ok()?;
@@ -379,8 +311,6 @@ pub fn specificity(selector: &str) -> Option<(u32, u32, u32)> {
     ))
 }
 
-/// Evaluate one media-query string end to end: does a rule guarded by it
-/// apply on a `width`×`height`, `dpr`-scaled, `scheme` device?
 #[must_use]
 pub fn media_matches_on(
     query: &str,
@@ -398,19 +328,16 @@ pub fn media_matches_on(
     style.clone_color() == rgb(1, 2, 3)
 }
 
-/// [`media_matches_on`] with the default 800×600, 1× light-scheme device.
 #[must_use]
 pub fn media_matches(query: &str) -> bool {
     media_matches_on(query, 800.0, 600.0, 1.0, PrefersColorScheme::Light)
 }
 
-/// Opaque legacy sRGB color.
 #[must_use]
 pub fn rgb(r: u8, g: u8, b: u8) -> AbsoluteColor {
     AbsoluteColor::srgb_legacy(r, g, b, 1.0)
 }
 
-/// Legacy sRGB color with alpha.
 #[must_use]
 pub fn rgba(r: u8, g: u8, b: u8, alpha: f32) -> AbsoluteColor {
     AbsoluteColor::srgb_legacy(r, g, b, alpha)

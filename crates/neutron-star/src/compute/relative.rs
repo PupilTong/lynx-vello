@@ -1,9 +1,4 @@
 //! Starlight id-constrained relative layout.
-//!
-//! This is the standalone implementation of `display: relative`, not CSS
-//! `position: relative`. Its direct in-flow children form a dependency graph
-//! over integer ids and position physical margin edges relative to the parent
-//! or sibling edges.
 
 use stylo::computed_values::{box_sizing, direction, relative_center, relative_layout_once};
 use stylo::values::computed::lynx_layout::RelativeReference;
@@ -25,8 +20,6 @@ use crate::tree::{
     SizingMode,
 };
 
-/// Whether a computed reference identifies another relative item (any value
-/// other than the reserved `-1` none and `0` parent sentinels).
 #[inline]
 const fn reference_is_item(reference: RelativeReference) -> bool {
     reference != RELATIVE_REFERENCE_NONE && reference != RELATIVE_REFERENCE_PARENT
@@ -192,9 +185,6 @@ struct RelativeItem<N> {
     align: Edges<ResolvedReference>,
     adjacent: Edges<ResolvedReference>,
     center: relative_center::T,
-    /// The item's positioning scheme. In-flow schemes lay out identically
-    /// except that only `relative` applies the definite-inset visual nudge
-    /// (`sticky` is nudged by the host at scroll time, `static` never).
     position: PositionProperty,
     preferred_size: Size<Option<f32>>,
     intrinsic_preferred_size: Size<Option<f32>>,
@@ -206,10 +196,6 @@ struct RelativeItem<N> {
     margin: Edges<f32>,
     padding: Edges<f32>,
     border: Edges<f32>,
-    /// The item's `overflow`, resolved once by the shared box resolver and
-    /// retained so the deferred scrollable-overflow accumulation at commit reads
-    /// it from scratch instead of re-fetching a style view per child (see
-    /// [`accumulate_scrollable_overflow`]).
     overflow: Point<Overflow>,
     inset: Edges<Option<f32>>,
     direction: direction::T,
@@ -233,9 +219,6 @@ impl<N> RelativeItem<N> {
 
     #[inline]
     fn fixed_measurement_matches(&self, refreshed: &Self) -> bool {
-        // Both sides resolve the same node's style within one flush, and
-        // style is immutable for the whole flush, so the raw computed values
-        // cannot differ — only the basis-dependent resolved fields can.
         self.preferred_size.width.is_some()
             && self.preferred_size.height.is_some()
             && self.preferred_size_is_definite.width
@@ -418,8 +401,6 @@ where
 {
     let align_start = axis.start_reference(item.align);
     let align_end = axis.end_reference(item.align);
-    // Adjacency is opposite-sided: right/bottom-of constrain start;
-    // left/top-of constrain end.
     let after = axis.end_reference(item.adjacent);
     let before = axis.start_reference(item.adjacent);
     for reference in [align_start, align_end, after, before] {
@@ -429,9 +410,6 @@ where
     }
 }
 
-/// Topological order with CSR reverse edges and a monotonic cycle cursor.
-/// Every item has at most eight distinct dependencies, so graph construction
-/// and sorting are `O(n + e)` after id lookup resolution.
 fn dependency_order<N>(items: &[RelativeItem<N>], scope: DependencyScope) -> Vec<usize>
 where
     N: LayoutNode,
@@ -667,7 +645,9 @@ fn fit_content_available(
         StyleSize::MinContent => AvailableSpace::MinContent,
         StyleSize::MaxContent => AvailableSpace::MaxContent,
         StyleSize::FitContentFunction(limit) => {
-            let owner = axis.size(parent_size).or_else(|| available.into_option());
+            let owner = axis
+                .size(parent_size)
+                .or_else(|| available.definite_value());
             let limit = resolve_length_percentage(&limit.0, owner).map(|limit| {
                 if box_sizing == box_sizing::T::ContentBox {
                     limit + box_floor
@@ -694,8 +674,6 @@ fn fit_content_available(
     }
 }
 
-/// Whether resolving one axis of these raw sizing properties requires a
-/// min-content probe (`min-content` or a `fit-content()` clamp).
 #[inline]
 fn needs_min_content(size: &StyleSize, min_size: &StyleSize, max_size: &MaxSize) -> bool {
     matches!(
@@ -710,8 +688,6 @@ fn needs_min_content(size: &StyleSize, min_size: &StyleSize, max_size: &MaxSize)
     )
 }
 
-/// Whether resolving one axis of these raw sizing properties requires a
-/// max-content probe (`max-content` or a `fit-content()` clamp).
 #[inline]
 fn needs_max_content(size: &StyleSize, min_size: &StyleSize, max_size: &MaxSize) -> bool {
     matches!(
@@ -737,16 +713,13 @@ where
     N: LayoutNode,
     N::Style: RelativeContainerStyle + RelativeItemStyle,
 {
-    // LayoutInput carries the containing space. The recursively dispatched
-    // child owns its box model and removes its margins exactly once.
     let mut available = available_content;
     axis.set_size(&mut available, intrinsic_space);
-    let mut input = LayoutInput::compute_size(Size::NONE, parent_size, available, axis.requested());
-    input.sizing_mode = SizingMode::ContentSize;
-    axis.size(item.key.node.compute_child_layout(input).size)
+    let mut input = LayoutInput::measure(Size::NONE, parent_size, available, axis.requested());
+    input.sizing_mode = SizingMode::IgnoreSizeStyles;
+    axis.size(item.key.node.compute_layout(input).size)
 }
 
-/// Resolves one `fit-content(limit)` axis against the probed contributions.
 #[allow(clippy::too_many_arguments)]
 fn fit_content_dimension(
     limit: &LengthPercentage,
@@ -762,7 +735,7 @@ fn fit_content_dimension(
     let max_content = max_content.unwrap_or(min_content);
     let owner = axis
         .size(parent_size)
-        .or_else(|| axis.size(available_content).into_option());
+        .or_else(|| axis.size(available_content).definite_value());
     let limit = resolve_length_percentage(limit, owner).map_or(max_content, |limit| {
         if box_sizing == box_sizing::T::ContentBox {
             limit + box_floor
@@ -773,9 +746,6 @@ fn fit_content_dimension(
     max_content.min(limit.max(min_content))
 }
 
-/// Resolves one intrinsic preferred/minimum sizing axis; quantitative values
-/// (auto, lengths, percentages, and the treated-as-auto keywords) yield
-/// `None` and keep their already-resolved value.
 #[allow(clippy::too_many_arguments)]
 fn resolve_intrinsic_dimension(
     value: &StyleSize,
@@ -811,8 +781,6 @@ fn resolve_intrinsic_dimension(
     }
 }
 
-/// Resolves one intrinsic maximum sizing axis (`none` behaves as
-/// quantitative).
 #[allow(clippy::too_many_arguments)]
 fn resolve_intrinsic_max_dimension(
     value: &MaxSize,
@@ -860,8 +828,6 @@ fn prepare_intrinsic_sizes<N>(
         return;
     }
 
-    // The borrowed raw values stay lent from this style view for the whole
-    // resolution; recursive probes mutate only host-owned per-node slots.
     let style = item.key.node.style();
     let full_raw_size = style.size();
     let full_raw_min = style.min_size();
@@ -950,7 +916,6 @@ fn prepare_intrinsic_sizes<N>(
     item.intrinsic_sizes_ready = true;
 }
 
-/// Clamps one axis value by the item's resolved min/max and box floor.
 #[inline]
 fn clamped_item_axis<N>(item: &RelativeItem<N>, axis: Axis, value: f32, floor: Size<f32>) -> f32 {
     clamp_axis(
@@ -973,8 +938,6 @@ where
 {
     let mut known_dimensions = Size::NONE;
     let mut constraint_definite = Size::new(false, false);
-    // Keep this as containing space. Leaf and container entry points remove
-    // their own margins when translating LayoutInput into content constraints.
     let mut available_space = available_content;
     let floor = item.box_floor();
     let style = item.key.node.style();
@@ -991,10 +954,6 @@ where
             .map(|size| clamped_item_axis(item, axis, size, floor));
         let known_is_definite = constrained.is_some() || axis.size(item.preferred_size_is_definite);
         axis.set_size(&mut constraint_definite, known_is_definite);
-        // Starlight clamps every incoming child constraint by min/max at
-        // `LayoutObject::UpdateMeasure` before measuring, so a definite
-        // preferred size never bypasses resolved bounds (intrinsic-keyword
-        // bounds included) and content is measured at the clamped size.
         let known = constrained
             .or_else(|| {
                 axis.size(item.preferred_size)
@@ -1011,12 +970,6 @@ where
         } else {
             let margin_sum = axis.margin_sum(item.margin);
             let available = if fit_content_needs_one_sided_measurement {
-                // Starlight resolves fit-content on the default
-                // margin-stripped AtMost constraint before a one-sided
-                // relative constraint changes it. Start subtracts from that
-                // fitted limit, while end replaces it with the end
-                // coordinate. Lift the result back to containing space so
-                // the child can remove its own margins exactly once.
                 let child_available =
                     subtract_available_space(axis.size(available_space), margin_sum);
                 let fitted_child_available = fit_content_available(
@@ -1049,11 +1002,6 @@ where
                         AvailableSpace::Definite((available - start).max(0.0))
                     }
                     (None, Some(end), AvailableSpace::Definite(_)) => {
-                        // Starlight replaces the default margin-stripped
-                        // AtMost constraint with the physical end
-                        // coordinate. Add the margins here because the
-                        // child entry point will remove them while
-                        // lowering LayoutInput.
                         AvailableSpace::Definite((end + margin_sum).max(0.0))
                     }
                     (_, _, available) => available,
@@ -1071,17 +1019,14 @@ where
         }
     }
 
-    let mut input = LayoutInput::compute_size(
+    let mut input = LayoutInput::measure(
         known_dimensions,
         parent_size,
         available_space,
         RequestedAxis::Both,
     );
-    // A dependency equation decides geometry, but an intrinsic keyword does
-    // not become a definite percentage basis merely because its used size is
-    // passed as a known dimension for this measurement.
     input.definite_dimensions = constraint_definite;
-    input.sizing_mode = SizingMode::InherentSize;
+    input.sizing_mode = SizingMode::ApplySizeStyles;
     input
 }
 
@@ -1106,7 +1051,7 @@ where
         }
     }
     item.reuse_fixed_measurement = false;
-    let mut output = item.key.node.compute_child_layout(input);
+    let mut output = item.key.node.compute_layout(input);
     let floor = item.box_floor();
     if input.known_dimensions.width.is_none() {
         let clamped_width = clamp_axis(
@@ -1118,10 +1063,6 @@ where
         if clamped_width.total_cmp(&output.size.width).is_eq() {
             output.size.width = clamped_width;
         } else {
-            // Intrinsic min/max values are resolved by Relative rather than
-            // by the recursively-dispatched child. A horizontal clamp can
-            // change wrapping and therefore height, so remeasure with that
-            // width fixed while keeping any dependency-decided height.
             let mut refined = input;
             refined.known_dimensions.width = Some(clamped_width);
             refined.available_space.width = AvailableSpace::Definite(clamped_width);
@@ -1129,7 +1070,7 @@ where
                 refined.known_dimensions.height = None;
                 refined.available_space.height = input.available_space.height;
             }
-            output = item.key.node.compute_child_layout(refined);
+            output = item.key.node.compute_layout(refined);
             output.size.width = clamped_width;
         }
     }
@@ -1284,9 +1225,6 @@ fn refresh_item_bases<N>(
     }
 }
 
-/// The substitute wrap-content extent for a size-contained axis, or `None`
-/// when the container is not size-contained (callers fall back to the real
-/// wrap-content bounds).
 #[inline]
 fn contained_extent(size_containment: Option<Size<Option<f32>>>, axis: Axis) -> Option<f32> {
     size_containment.map(|intrinsic| axis.size(intrinsic).unwrap_or(0.0))
@@ -1327,8 +1265,6 @@ where
     N: LayoutNode,
     N::Style: RelativeContainerStyle + RelativeItemStyle,
 {
-    // Initial measurement only has parent-edge constraints. Sibling edges
-    // become available as the separate axis orders are positioned.
     measure_all(items, initial_parent_size, available_content, false);
     let _ = position_axis(
         items,
@@ -1338,7 +1274,6 @@ where
     );
     let _ = position_axis(items, vertical_order, Axis::Vertical, initial_parent_size);
 
-    // Refine both-sided sibling constraints and selectively remeasure.
     measure_all(items, initial_parent_size, available_content, true);
     let horizontal_bounds = position_axis(
         items,
@@ -1365,10 +1300,6 @@ where
         resolved_parent_size.width = Some(content_width);
         available_content.width = AvailableSpace::Definite(content_width);
 
-        // Percentages whose owner width was cyclic now resolve against the
-        // content-sized width. Relative references and ids cannot change
-        // during the immutable layout epoch, so the existing lookup remains
-        // valid.
         refresh_item_bases(items, resolved_parent_size, Some(content_width), lookup);
         let _ = position_axis(
             items,
@@ -1399,9 +1330,6 @@ where
     let content_height = (outer_height - box_inset.height).max(0.0);
     resolved_parent_size.height = Some(content_height);
 
-    // Final positions see both final content extents. This intentionally does
-    // not add another measurement round: relative-layout Level 1 only
-    // repositions after final height determination.
     let _ = position_axis(
         items,
         horizontal_order,
@@ -1445,15 +1373,12 @@ where
     let mut scrollable_size = container_size;
 
     for item in items {
-        let mut input =
-            LayoutInput::perform_layout(item.output.size.map(Some), parent_size, available);
+        let mut input = LayoutInput::commit(item.output.size.map(Some), parent_size, available);
         input.definite_dimensions = item.size_is_definite;
-        input.sizing_mode = SizingMode::ContentSize;
-        let output = item.key.node.compute_child_layout(input);
+        input.sizing_mode = SizingMode::IgnoreSizeStyles;
+        let output = item.key.node.compute_layout(input);
         item.output = output;
 
-        // Only `relative` nudges at layout time; `static` has no offsets and
-        // `sticky` is a host scroll-time post-pass.
         let offset = if item.position == PositionProperty::Relative {
             relative_offset(item.inset, item.direction)
         } else {
@@ -1474,10 +1399,6 @@ where
         layout.margin = item.margin;
         item.key.node.set_unrounded_layout(layout);
 
-        // A scroll-container child traps its interior scrollable overflow;
-        // any other child propagates border box ∪ content_size (§3.3). The
-        // item's overflow was resolved once during item sizing and kept in
-        // scratch, so this reads no fresh style view per child.
         accumulate_scrollable_overflow(
             &mut scrollable_size,
             location,
@@ -1521,9 +1442,6 @@ where
                 );
                 pending.node.set_unrounded_layout(layout);
             }
-            // The containing block is not the layout parent (CSS `fixed`):
-            // record the static position; the host completes layout in its
-            // positioned pass.
             PositionProperty::Fixed => {
                 pending
                     .node
@@ -1535,15 +1453,6 @@ where
     scrollable_size
 }
 
-/// Computes a Starlight relative-layout container.
-///
-/// Relative ids and physical-edge properties come from each handle's style
-/// view (`N::Style: RelativeContainerStyle + RelativeItemStyle`); recursive
-/// measurement and durable geometry writes flow through the [`LayoutNode`]
-/// handles. The implementation uses compact sorted id lookup, fixed-width
-/// dependency deduplication, CSR reverse edges, and a linear
-/// Kahn/cycle-fallback traversal. Child layouts are stored only for
-/// [`LayoutGoal::Commit`], and the container exports no baseline.
 #[allow(clippy::too_many_lines)]
 pub fn compute_relative_layout<N>(node: N, input: LayoutInput) -> LayoutOutput
 where
@@ -1551,13 +1460,9 @@ where
     N::Style: RelativeContainerStyle + RelativeItemStyle,
 {
     let style = node.style();
-    // Size containment substitutes contain-intrinsic-size for the container's
-    // wrap-content bounds. Items are still measured, positioned, and committed
-    // (they may overflow the contained box). Relative containers export no
-    // baseline, so layout containment needs no extra suppression here.
     let size_containment = size_containment(&style);
     let layout_once = style.relative_layout_once() == relative_layout_once::T::True;
-    let style_definite = if input.sizing_mode == SizingMode::ContentSize {
+    let style_definite = if input.sizing_mode == SizingMode::IgnoreSizeStyles {
         Size::new(false, false)
     } else {
         preferred_size_definiteness(
@@ -1599,7 +1504,7 @@ where
             .height
             .map_or(available_inner.height, AvailableSpace::Definite),
     );
-    let edge_inline_basis = available_content.width.into_option();
+    let edge_inline_basis = available_content.width.definite_value();
 
     let child_count = node.child_count();
     let mut generated = Vec::with_capacity(child_count);
@@ -1697,9 +1602,6 @@ where
         f32::max,
     );
 
-    // css-contain-2 §3.3: a layout-contained container with `overflow: visible`
-    // reports its border box as its scrollable overflow (descendant overflow is
-    // ink-only); a scroll container keeps the interior union.
     let scrollable_size = own_scrollable_overflow(&style, outer_size, scrollable_size);
     LayoutOutput::new(outer_size, scrollable_size)
 }

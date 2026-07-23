@@ -1,14 +1,4 @@
 //! Track and item alignment for Grid §11 / CSS Box Alignment.
-//!
-//! The style protocol speaks stylo's `AlignFlags`-based wrappers
-//! (`ItemPlacement`/`SelfAlignment`/`ContentDistribution`/`JustifyItems`).
-//! The shared [`normalize_item_alignment`]/[`normalize_content_alignment`]
-//! helpers in `compute::util` reduce those flags once, at style-read time,
-//! to the canonical keyword subset the sizing and placement passes below
-//! compare against.
-//!
-//! [`normalize_item_alignment`]: super::super::util::normalize_item_alignment
-//! [`normalize_content_alignment`]: super::super::util::normalize_content_alignment
 
 #![allow(clippy::cast_precision_loss)]
 
@@ -48,26 +38,16 @@ pub(super) fn alignment_spacing_from_free_space(
         let spacing = free / (visible + 1) as f32;
         (spacing, spacing)
     } else {
-        // START/FLEX_START/STRETCH pack at start; distributed values without
-        // positive free space use their safe start fallback.
         (0.0, 0.0)
     }
 }
 
-/// Positions tracks in logical start-to-end order. Inline RTL conversion is
-/// deliberately deferred until child locations are materialized, keeping
-/// placement and sizing coordinate systems identical.
 pub(super) fn align_tracks(tracks: &mut TrackSet, container_size: f32, alignment: AlignFlags) {
-    // Positional alignment is unsafe (the `SAFE` flag is stripped during
-    // normalization), so center/end retain negative free space and may
-    // overflow both edges. Distributed values use their safe fallback when
-    // space is negative.
     let (offset, distributed_gap) = track_alignment_spacing(tracks, container_size, alignment);
 
     tracks.rebuild_aligned_positions(offset, distributed_gap);
 }
 
-/// Offset of an item inside the free space of one grid-area axis.
 #[inline]
 pub(super) fn item_alignment_offset(
     free_space: f32,
@@ -84,23 +64,16 @@ pub(super) fn item_alignment_offset(
     } else if alignment == AlignFlags::CENTER {
         free_space / 2.0
     } else if alignment == AlignFlags::BASELINE {
-        // First-baseline's fallback is safe self-start, so the alignment
-        // subject's own writing direction controls the physical edge unless
-        // overflow triggers `safe`'s fallback to the container's start edge.
         let reversed = if free_space < 0.0 {
             container_axis_reversed
         } else {
             self_axis_reversed
         };
         if reversed { free_space } else { 0.0 }
+    } else if container_axis_reversed {
+        free_space
     } else {
-        // START/FLEX_START/STRETCH: stretch falls back to the alignment
-        // container's start edge.
-        if container_axis_reversed {
-            free_space
-        } else {
-            0.0
-        }
+        0.0
     }
 }
 

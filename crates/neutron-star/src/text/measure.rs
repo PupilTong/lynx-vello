@@ -18,18 +18,12 @@ use stylo::values::computed::font::{GenericFontFamily, SingleFontFamily};
 use stylo::values::computed::{FontStyle, Length, LineHeight, TextAlign, WordBreak};
 
 use super::content::normalize_runs;
-use super::{ArtifactSlots, TextContext, TextLayout, TextLayoutView};
+use super::{TextContext, TextLayout, TextLayoutStore, TextMeasurement};
 use crate::compute::{LeafMeasureInput, compute_leaf_layout_with_measurement};
 use crate::style::{TextContainerStyle, TextRun, TextRunStyle};
 use crate::tree::{AvailableSpace, LayoutGoal, LayoutInput, LayoutOutput};
 
 /// Node-scoped Parley adapter for a host-owned paragraph.
-///
-/// The immutable container style and cloneable run iterator normally borrow
-/// from the node's epoch-immutable text/style data. The mutable
-/// [`TextContext`] and [`ArtifactSlots`] borrow separately from host-owned
-/// interior-mutable slots; both borrows are node-scoped and end with the
-/// measurer.
 pub struct TextMeasurer<'session, 'source, Container, RunStyle, Runs>
 where
     Container: TextContainerStyle,
@@ -37,7 +31,7 @@ where
     Runs: Iterator<Item = TextRun<'source, RunStyle>> + Clone,
 {
     context: &'session mut TextContext,
-    artifacts: &'session mut ArtifactSlots,
+    artifacts: &'session mut TextLayoutStore,
     container_style: &'source Container,
     runs: Runs,
 }
@@ -49,10 +43,9 @@ where
     RunStyle: TextRunStyle + 'source,
     Runs: Iterator<Item = TextRun<'source, RunStyle>> + Clone,
 {
-    /// Borrows one node's text inputs and host-owned measurement state.
     pub fn new(
         context: &'session mut TextContext,
-        artifacts: &'session mut ArtifactSlots,
+        artifacts: &'session mut TextLayoutStore,
         container_style: &'source Container,
         runs: Runs,
     ) -> Self {
@@ -64,10 +57,6 @@ where
         }
     }
 
-    /// Runs text measurement and leaf box layout as one closed engine path.
-    ///
-    /// The caller supplies text/style data and retained slots, but cannot
-    /// replace Parley with an arbitrary content measurer.
     pub fn compute_layout(&mut self, input: LayoutInput) -> LayoutOutput {
         let container_style = self.container_style;
         compute_leaf_layout_with_measurement(input, container_style, None, |measure_input| {
@@ -82,16 +71,10 @@ where
         );
         #[cfg(test)]
         self.context.record_shape();
-        let (font_context, layout_context) = self.context.parts();
-        // Keep layout in fractional CSS pixels. Device-pixel quantization belongs
-        // to the engine's later DPR-aware rounding and rendering passes.
+        let (font_context, layout_context) = self.context.font_and_layout_contexts();
         let mut builder =
             layout_context.style_run_builder(font_context, content.text.as_str(), 1.0, false);
         let word_break = self.container_style.word_break();
-        // Chromium's ordinary ASCII pair table deliberately suppresses
-        // breaks between AL-class characters. Applying it to `break-all`
-        // would erase opportunities created by that CSS value, so let ICU's
-        // selected BreakAll mode own those boundaries.
         if word_break != WordBreak::BreakAll {
             builder.set_line_break_override(Some(CHROMIUM_LINE_BREAK_OVERRIDE));
         }
@@ -153,18 +136,8 @@ where
     RunStyle: TextRunStyle + 'source,
     Runs: Iterator<Item = TextRun<'source, RunStyle>> + Clone,
 {
-    /// Measures and retains one Parley text artifact under normalized
-    /// content-box constraints.
-    ///
-    /// # Panics
-    ///
-    /// Panics only if the internal artifact-slot installation invariant is
-    /// violated.
-    pub fn measure(&mut self, input: LeafMeasureInput) -> TextLayoutView<'_> {
+    pub fn measure(&mut self, input: LeafMeasureInput) -> TextMeasurement<'_> {
         let inline_basis = definite_inline_size(input).unwrap_or(0.0).max(0.0);
-        // The `hanging`/`each-line` flags are ignored (documented
-        // vocabulary-swap delta); only the length component participates in
-        // measurement.
         let indent = self
             .container_style
             .text_indent()
@@ -196,14 +169,11 @@ where
             if input.known_dimensions.width.is_none()
                 && max_advance.is_some_and(|limit| limit > measured_width)
             {
-                // An available-space limit constrains wrapping, but it does not
-                // make an auto-sized text box fill that limit. Rebreak at the
-                // measured width so alignment positions glyphs inside the box.
                 artifact.rebreak(Some(measured_width), indent);
             }
             artifact.align(alignment);
         }
-        TextLayoutView::new(artifact)
+        TextMeasurement::new(artifact)
     }
 }
 
@@ -228,9 +198,6 @@ fn line_break_width(input: LeafMeasureInput, artifact: &TextLayout) -> Option<f3
     )
 }
 
-/// Maps `text-align` × `direction` to Parley's physical alignment.
-/// `justify` is not parseable under the lynx grammar, so no justification
-/// mode exists (documented vocabulary-swap delta).
 fn alignment(value: TextAlign, direction: direction::T) -> Alignment {
     match (value, direction) {
         (TextAlign::Left, _)
@@ -286,12 +253,8 @@ fn translate_run_style(
         line_height: match style.line_height() {
             LineHeight::Normal => ParleyLineHeight::MetricsRelative(1.0),
             LineHeight::Number(factor) => ParleyLineHeight::FontSizeRelative(factor.0),
-            // A computed line-height length is already absolute CSS pixels.
             LineHeight::Length(length) => ParleyLineHeight::Absolute(length.0.px()),
         },
-        // The lynx grammar is length-only; a `calc()` carrying a percentage
-        // cannot reach a computed letter-spacing, so a zero basis is only a
-        // defensive fallback.
         letter_spacing: style.letter_spacing().0.resolve(Length::zero()).px(),
         word_break: match word_break {
             WordBreak::Normal => ParleyWordBreak::Normal,
@@ -332,8 +295,6 @@ fn translate_font_family_list(style: &impl TextRunStyle) -> Vec<ParleyFontFamily
 
 const fn translate_generic_family(value: GenericFontFamily) -> ParleyGenericFamily {
     match value {
-        // `None` is stylo's internal "no generic" marker; the adapter's
-        // user-agent fallback family is sans-serif.
         GenericFontFamily::None | GenericFontFamily::SansSerif => ParleyGenericFamily::SansSerif,
         GenericFontFamily::Serif => ParleyGenericFamily::Serif,
         GenericFontFamily::Monospace => ParleyGenericFamily::Monospace,
@@ -454,7 +415,7 @@ mod tests {
             style: &style,
             preserve_newlines: false,
         }];
-        let mut artifacts = ArtifactSlots::default();
+        let mut artifacts = TextLayoutStore::default();
         let mut measurer =
             TextMeasurer::new(&mut context, &mut artifacts, &container, runs.into_iter());
         let probe = LeafMeasureInput::new(
@@ -478,7 +439,7 @@ mod tests {
             Size::new(AvailableSpace::Definite(80.0), AvailableSpace::MaxContent),
             LayoutGoal::Commit,
         );
-        assert_eq!(measurer.measure(commit).artifact().line_count(), 2);
+        assert_eq!(measurer.measure(commit).layout().line_count(), 2);
         assert_eq!(measurer.context.shape_count(), 1);
         assert!(measurer.artifacts.probe().is_none());
         assert!(measurer.artifacts.committed().is_some());
@@ -579,7 +540,6 @@ mod tests {
         assert_eq!(translated.word_break, ParleyWordBreak::BreakAll);
         assert_eq!(translated.text_wrap_mode, ParleyTextWrapMode::NoWrap);
         assert_eq!(translated.overflow_wrap, ParleyOverflowWrap::BreakWord);
-        // An empty family list falls back to the UA sans-serif family.
         assert!(matches!(
             translated.font_family,
             ParleyFontFamily::List(ref list) if !list.is_empty()
@@ -601,7 +561,6 @@ mod tests {
 
         let _ = LetterSpacing::normal();
 
-        // Any non-normal, non-italic computed style is an oblique angle.
         let oblique = EmptyRunStyle {
             font_style: FontStyle::oblique(20.0),
             line_height: LineHeight::Normal,
@@ -655,7 +614,7 @@ mod tests {
             style: &style,
             preserve_newlines: false,
         }];
-        let mut artifacts = ArtifactSlots::default();
+        let mut artifacts = TextLayoutStore::default();
         let measurer =
             TextMeasurer::new(&mut context, &mut artifacts, &container, runs.into_iter());
         assert_eq!(format!("{measurer:?}"), "TextMeasurer { .. }");

@@ -1,26 +1,17 @@
 //! Background / mask / clip-path value grammar — ported from
 //! `lynx/core/renderer/css/parser/background_*_handler_unittest.cc`,
 //! `mask_composite_handler_unittest.cc`, and `clip_path_handler_unittest.cc`.
-//!
-//! Scope: `enableCSSSelector = true` / `enableRemoveCSSScope = true`. W3C
-//! corrections per the inventory: no parse-time gradient color mixing
-//! (Lynx's `LerpColor` stop "correction" is not replicated — stops stay
-//! literal), bare-number gradient stop positions are invalid, and the
-//! `background` shorthand resets omitted longhands to their W3C initial
-//! values (`background-clip: border-box`, not Lynx's padding-box).
 
 mod common;
 
 use common::{Doc, parses, specified};
 
-/// Both inputs parse and serialize to the same specified value.
 fn equivalent(property: &str, a: &str, b: &str) {
     let left = specified(property, a).unwrap_or_else(|| panic!("`{property}: {a}` must parse"));
     let right = specified(property, b).unwrap_or_else(|| panic!("`{property}: {b}` must parse"));
     assert_eq!(left, right, "`{a}` and `{b}` must mean the same");
 }
 
-/// Computed value of `property` after applying `declaration` inline.
 fn computed(declaration: &str, property: &str) -> String {
     let mut doc = Doc::new();
     let el = doc.el(doc.root, "view");
@@ -29,7 +20,6 @@ fn computed(declaration: &str, property: &str) -> String {
     doc.value(el, property)
 }
 
-// C++: background_box_handler_unittest.cc (BackgroundOriginHandler).
 #[test]
 fn background_origin_grammar() {
     for keyword in ["content-box", "padding-box", "border-box"] {
@@ -57,7 +47,6 @@ fn background_origin_grammar() {
     }
 }
 
-// C++: background_clip_handler_unittest.cc.
 #[test]
 fn background_clip_grammar() {
     for keyword in ["content-box", "padding-box", "border-box"] {
@@ -73,14 +62,9 @@ fn background_clip_grammar() {
         ),
         "border-box, padding-box, content-box"
     );
-    // ENGINE GAP pinned live: `background-clip: text` (CSS Backgrounds-4,
-    // supported by Lynx via its text-gradient pipeline) does not parse in
-    // the servo build yet. See the ignored spec test below.
     assert!(!parses("background-clip", "text"));
 }
 
-// C++: background_clip_handler_unittest.cc `text` rows — spec-correct
-// expectations, blocked on the servo build growing the value.
 #[test]
 #[ignore = "engine-gap: background-clip:text not implemented in the servo build (Lynx clips text backgrounds)"]
 fn background_clip_text() {
@@ -94,7 +78,6 @@ fn background_clip_text() {
     );
 }
 
-// C++: background_image_handler_unittest.cc url cases.
 #[test]
 fn background_image_urls() {
     let list = "url('https://yyy/i/bg_flower.gif'), \
@@ -120,11 +103,6 @@ fn background_image_urls() {
     assert!(single.contains("data:image/png;base64,"));
 }
 
-// C++: background_image_handler_unittest.cc linear-gradient cases —
-// W3C-corrected: literal stops (no LerpColor pre-mixing, no materialized
-// auto midpoints). Stop positions use Lynx's fraction grammar (the fork's
-// lynx feature): a bare number is a fraction of 100%, so `green 0.9` is
-// `green 90%` (C++ `parse_linear_gradient` parity).
 #[test]
 fn background_image_linear_gradients() {
     let bare_number = computed(
@@ -142,7 +120,6 @@ fn background_image_linear_gradients() {
     assert!(corrected.contains("to left"), "direction kept: {corrected}");
     assert!(corrected.contains("30%") && corrected.contains("90%"));
 
-    // Default direction (no angle) is `to bottom`.
     let defaulted = computed(
         "background-image: linear-gradient(rgba(0, 0, 255, 0.5), rgba(255, 255, 0, 0.5))",
         "background-image",
@@ -152,7 +129,6 @@ fn background_image_linear_gradients() {
         "default to-bottom direction is omitted in serialization: {defaulted}"
     );
 
-    // Out-of-range and unordered stops stay literal.
     let literal = computed(
         "background-image: linear-gradient(to left, red -10%, blue 10%, green)",
         "background-image",
@@ -170,10 +146,6 @@ fn background_image_linear_gradients() {
     );
 }
 
-// C++: background_image_handler_unittest.cc angle-unit table. The fork's
-// lynx grammar supports `deg`/`rad`/`turn` only — `grad` is deliberately
-// excluded from the supported grammar (vendor/stylo `AngleUnit`, lynx
-// feature), so it is asserted invalid here.
 #[test]
 fn background_image_gradient_angle_units() {
     let rows: &[(&str, &str)] = &[
@@ -202,7 +174,6 @@ fn background_image_gradient_angle_units() {
     }
 }
 
-// C++: background_image_handler_unittest.cc radial-gradient family.
 #[test]
 fn background_image_radial_gradients() {
     for valid in [
@@ -217,7 +188,6 @@ fn background_image_radial_gradients() {
     ] {
         assert!(parses("background-image", valid), "`{valid}` must parse");
     }
-    // Shape inference: bare lengths imply circle (1) / ellipse (2).
     equivalent(
         "background-image",
         "radial-gradient(10px at top, red, transparent)",
@@ -242,7 +212,6 @@ fn background_image_radial_gradients() {
     }
 }
 
-// C++: background_image_handler_unittest.cc conic-gradient family.
 #[test]
 fn background_image_conic_gradients() {
     for valid in [
@@ -273,9 +242,6 @@ fn background_image_conic_gradients() {
     }
 }
 
-// C++: background_position_handler_unittest.cc — keyword resolution,
-// reorderable keyword pairs, calc, and rejects. (One/two-value resolution
-// tables live in inheritance_computed.rs with the css-text-helper ports.)
 #[test]
 fn background_position_grammar() {
     assert_eq!(
@@ -314,9 +280,6 @@ fn background_position_grammar() {
     ] {
         assert!(parses("background-position", valid), "`{valid}` must parse");
     }
-    // W3C-corrected over the C++ accept row: `10px * 2 * 50%` multiplies a
-    // length by a percentage, which css-values calc() forbids (at most one
-    // non-number multiplicand). Lynx's lax calc accepted it.
     assert!(!parses(
         "background-position",
         "calc(20px + (20px * 2)) calc(50% + (10px * 2 * 50%))"
@@ -336,7 +299,6 @@ fn background_position_grammar() {
     }
 }
 
-// C++: background_repeat_handler_unittest.cc (all four tests).
 #[test]
 fn background_repeat_grammar() {
     let rows: &[(&str, &str)] = &[
@@ -376,15 +338,11 @@ fn background_repeat_grammar() {
     }
 }
 
-// C++: background_shorthand_handler_unittest.cc — W3C-corrected: omitted
-// longhands reset to their W3C initial values (clip: border-box, origin:
-// padding-box), and one <box> value sets BOTH origin and clip.
 #[test]
 fn background_shorthand_expansion() {
     let mut doc = Doc::new();
     let el = doc.el(doc.root, "view");
 
-    // Case A: bare url.
     doc.set_inline(el, "background: url('https://yyy/i/bg_flower.gif')");
     doc.flush();
     assert!(doc.value(el, "background-image").contains("bg_flower.gif"));
@@ -399,7 +357,6 @@ fn background_shorthand_expansion() {
         "omitted clip resets to the W3C initial (border-box), not padding-box"
     );
 
-    // Case B: two layers, slash size, color in the final layer.
     doc.set_inline(
         el,
         "background: url('https://a/1.gif') left 5% / 15% 60% repeat-x, \
@@ -413,8 +370,6 @@ fn background_shorthand_expansion() {
     assert_eq!(doc.value(el, "background-size"), "15% 60%, auto");
     assert_eq!(doc.value(el, "background-repeat"), "repeat-x, repeat");
 
-    // Case C: box keywords — one <box> sets origin AND clip; two set them
-    // in order.
     doc.set_inline(
         el,
         "background: content-box center / contain no-repeat url(\"https://a/logo.svg\"), \
@@ -433,7 +388,6 @@ fn background_shorthand_expansion() {
     assert_eq!(doc.value(el, "background-position-y"), "50%, 50%");
 }
 
-// C++: background_shorthand_handler_unittest.cc none / color-only / invalid.
 #[test]
 fn background_shorthand_none_color_and_rejects() {
     assert_eq!(computed("background: NONE", "background-image"), "none");
@@ -467,7 +421,6 @@ fn background_shorthand_none_color_and_rejects() {
     }
 }
 
-// C++: background_size_handler_unittest.cc (both value tables + invalid).
 #[test]
 fn background_size_grammar() {
     let rows: &[(&str, &str)] = &[
@@ -500,7 +453,6 @@ fn background_size_grammar() {
     }
 }
 
-// C++: mask_composite_handler_unittest.cc.
 #[test]
 fn mask_composite_grammar() {
     assert_eq!(
@@ -518,10 +470,6 @@ fn mask_composite_grammar() {
     }
 }
 
-// C++: clip_path_handler_unittest.cc circle/ellipse/path — W3C basic
-// shapes. The C++ `ppx` rows are ported with `px` (same grammar shape):
-// the Lynx-only `ppx` unit is an ENGINE GAP pinned below (`rpx` exists in
-// the fork; `ppx` does not yet).
 #[test]
 fn clip_path_basic_shapes() {
     for valid in [
@@ -538,9 +486,6 @@ fn clip_path_basic_shapes() {
         !parses("width", "50ppx") && parses("width", "50rpx"),
         "ppx grew unit support — port the C++ ppx rows verbatim"
     );
-    // An omitted position means center; specified-value serialization
-    // preserves whether the position was authored, so equality is asserted
-    // between two authored spellings instead.
     equivalent(
         "clip-path",
         "circle(30% at center)",
@@ -558,10 +503,6 @@ fn clip_path_basic_shapes() {
     }
 }
 
-// C++: clip_path_handler_unittest.cc super-ellipse — Lynx-only shape with
-// no stylo grammar today; the guard pins its absence so a fork addition is
-// noticed and the C++ rows (defaults 2/2 exponents, center position, five
-// reject forms) get ported.
 #[test]
 fn super_ellipse_is_absent() {
     assert!(
@@ -569,9 +510,3 @@ fn super_ellipse_is_absent() {
         "super-ellipse grew grammar support — port the Lynx-faithful rows"
     );
 }
-
-// Skipped (skip-legacy): background_size_handler_unittest.cc legacy-parser
-// `auto` -> 100% 100% coercion — enable_legacy_parser is the pre-W3C
-// pipeline, out of scope with enableCSSSelector=true.
-// Skipped (skip-internal): lepus non-string input-type guards and the
-// LepusCheck/TupleForEach test plumbing — no CSS-text analog.

@@ -1,10 +1,4 @@
 //! QuickJS-backed runtime composition for [`bobcat_engine`].
-//!
-//! The public API exposes an opaque [`QuickJsLynxView`] and its default
-//! construction helper. Runtime configuration, the concrete script adapter,
-//! realm values and direct source-evaluation controls remain implementation
-//! details. The lower-level [`quickjs_rust_bridge`] crate remains independently
-//! usable.
 
 use std::fmt;
 use std::num::NonZeroUsize;
@@ -16,7 +10,7 @@ use bobcat_engine::script::{
     ScriptEngine, ScriptError, ScriptErrorKind, ScriptErrorPhase, ScriptFuture,
     ScriptSourceLocation, ScriptValue,
 };
-use bobcat_engine::view::{EngineMetrics, LynxView, LynxWidgetApi};
+use bobcat_engine::view::{LynxView, LynxWidgetApi, ViewMetrics};
 use quickjs_rust_bridge as quickjs;
 
 const DEFAULT_MAX_JOBS_PER_CHECKPOINT: NonZeroUsize =
@@ -182,7 +176,7 @@ impl QuickJsScriptEngine {
         self.resume_incomplete_checkpoint(ScriptErrorPhase::Evaluate)?;
         let result = self
             .realm
-            .eval(source, quickjs::EvalOptions::default())
+            .evaluate(source, quickjs::EvalOptions::default())
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::Evaluate));
         let value = self.finish_operation(result, ScriptErrorPhase::Evaluate)?;
         quickjs_to_script_value(value, ScriptErrorPhase::Evaluate)
@@ -261,10 +255,6 @@ impl QuickJsScriptEngine {
                 Ok(value)
             }
             Err(primary_error) => {
-                // JavaScript may enqueue Promise jobs before throwing. Drain
-                // them even when the main operation fails so older work never
-                // runs after a later host-to-JavaScript entry. Preserve the
-                // primary exception and defer any checkpoint failure.
                 if let Err(checkpoint_error) = self.checkpoint(phase) {
                     self.deferred_checkpoint_error
                         .get_or_insert(checkpoint_error);
@@ -277,14 +267,10 @@ impl QuickJsScriptEngine {
     fn checkpoint(&mut self, phase: ScriptErrorPhase) -> Result<usize, ScriptError> {
         let drain = match self
             .realm
-            .drain_pending_jobs_bounded(self.config.max_jobs_per_checkpoint.get())
+            .drain_pending_jobs_up_to(self.config.max_jobs_per_checkpoint.get())
         {
             Ok(drain) => drain,
             Err(error) => {
-                // The bridge can surface one unhandled rejection while more
-                // remain in its rejection sidecar even when the QuickJS job
-                // queue itself is empty. Conservatively require another
-                // checkpoint before JavaScript re-entry after every failure.
                 self.checkpoint_incomplete = true;
                 return Err(map_quickjs_error(error, phase));
             }
@@ -397,7 +383,6 @@ fn map_quickjs_error(error: quickjs::Error, phase: ScriptErrorPhase) -> ScriptEr
         }
         quickjs::ErrorKind::WrongRealm => ScriptErrorKind::WrongEngine,
         quickjs::ErrorKind::Interrupted | quickjs::ErrorKind::ExecutionTimeout => {
-            // Interruption ends only the current entry; the realm remains reusable.
             ScriptErrorKind::Other
         }
         _ => ScriptErrorKind::Other,
@@ -435,34 +420,26 @@ fn script_error(
 }
 
 /// A QuickJS-backed Bobcat view whose script runtime is kept private.
-///
-/// Host code can access resources and widgets through this facade. Script
-/// execution is driven by the runtime integration rather than by exposing the
-/// concrete [`bobcat_engine::script::ScriptEngine`] implementation.
 pub struct QuickJsLynxView<R: ResourceFetcher + ?Sized> {
     inner: LynxView<R, QuickJsScriptEngine>,
 }
 
 impl<R: ResourceFetcher + ?Sized> QuickJsLynxView<R> {
-    /// Borrow the host resource fetcher.
     #[must_use]
     pub fn resource_fetcher(&self) -> &R {
         self.inner.resource_fetcher()
     }
 
-    /// Borrow the shared ownership handle for the host resource fetcher.
     #[must_use]
     pub const fn shared_resource_fetcher(&self) -> &Arc<R> {
         self.inner.shared_resource_fetcher()
     }
 
-    /// Borrow this view's widget API.
     #[must_use]
     pub const fn widget_api(&self) -> &LynxWidgetApi {
         self.inner.widget_api()
     }
 
-    /// Mutably borrow this view's widget API.
     pub const fn widget_api_mut(&mut self) -> &mut LynxWidgetApi {
         self.inner.widget_api_mut()
     }
@@ -477,10 +454,9 @@ impl<R: ResourceFetcher + ?Sized> fmt::Debug for QuickJsLynxView<R> {
     }
 }
 
-/// Create a QuickJS-backed view with the crate-owned runtime policy.
 pub fn new_quickjs_view<R: ResourceFetcher>(
     resource_fetcher: R,
-    metrics: EngineMetrics,
+    metrics: ViewMetrics,
 ) -> Result<QuickJsLynxView<R>, QuickJsInitializationError> {
     let script_engine = QuickJsScriptEngine::new()?;
     Ok(QuickJsLynxView {

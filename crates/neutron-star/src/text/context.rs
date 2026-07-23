@@ -8,22 +8,14 @@ use parley::{FontContext, LayoutContext};
 use crate::style::TextBrush;
 
 /// Reusable resources for text shaping and layout.
-///
-/// Construct one per tree (or other coarse host boundary), keep it in a
-/// host-owned interior-mutable slot, and lend it mutably to node-scoped
-/// [`TextMeasurer`](super::TextMeasurer) values during each layout flush. [`Self::new`] discovers
-/// platform fonts; [`Self::without_system_fonts`] starts with an empty font
-/// collection for deterministic tests and explicitly-managed applications.
 pub struct TextContext {
     font: FontContext,
     layout: LayoutContext<TextBrush>,
-    // Unit-test instrumentation proving retained layouts rebreak without reshaping.
     #[cfg(test)]
     shape_count: usize,
 }
 
 impl TextContext {
-    /// Creates a context backed by the platform's system font collection.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -34,11 +26,6 @@ impl TextContext {
         }
     }
 
-    /// Creates a context with no system fonts.
-    ///
-    /// Fonts registered later through [`Self::register_fonts`] are still
-    /// available. This constructor makes text geometry independent of the
-    /// machine running the layout.
     #[must_use]
     pub fn without_system_fonts() -> Self {
         Self {
@@ -55,10 +42,6 @@ impl TextContext {
         }
     }
 
-    /// Registers every font face contained in `bytes`.
-    ///
-    /// The returned count is zero when the data contains no readable font
-    /// faces. Registered bytes are retained by Parley's font collection.
     pub fn register_fonts(&mut self, bytes: &[u8]) -> usize {
         self.font
             .collection
@@ -68,7 +51,9 @@ impl TextContext {
             .sum()
     }
 
-    pub(super) fn parts(&mut self) -> (&mut FontContext, &mut LayoutContext<TextBrush>) {
+    pub(super) fn font_and_layout_contexts(
+        &mut self,
+    ) -> (&mut FontContext, &mut LayoutContext<TextBrush>) {
         (&mut self.font, &mut self.layout)
     }
 

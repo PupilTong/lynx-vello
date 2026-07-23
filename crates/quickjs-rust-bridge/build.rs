@@ -41,8 +41,6 @@ fn main() {
         build
     };
 
-    // Emit the shim archive before its QuickJS dependency so static linkers see
-    // the bridge's unresolved JS_* symbols before scanning the engine archive.
     let mut shim_build = configure_build();
     shim_build
         .flag("-isystem")
@@ -52,8 +50,6 @@ fn main() {
         .warnings_into_errors(true)
         .compile("quickjs_bridge_shim");
 
-    // Keep diagnostics from the pinned third-party sources out of the
-    // project-owned shim's strict warning policy.
     let mut quickjs_build = configure_build();
     quickjs_build.include(&quickjs_dir).warnings(false);
     for source in sources {

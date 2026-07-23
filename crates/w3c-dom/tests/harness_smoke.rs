@@ -39,7 +39,7 @@ fn state_bits_participate_in_matching() {
     let mut doc = Doc::with_css("view:hover { color: rgb(0, 255, 0) }");
     let el = doc.el(doc.root, "view");
     doc.flush();
-    doc.set_state(el, ElementState::HOVER, true);
+    doc.dom.add_element_state(el, ElementState::HOVER);
     doc.flush();
     assert_eq!(doc.color(el), rgb(0, 255, 0));
 }

@@ -3,20 +3,12 @@
 //! `border_radius_handler_unittest.cc`, `shadow_handler_unittest.cc`,
 //! `text_stroke_handler_unittest.cc`, `text_decoration_handler_unittest.cc`,
 //! and `filter_handler_unittest.cc`.
-//!
-//! Scope: `enableCSSSelector = true` / `enableRemoveCSSScope = true`. W3C
-//! corrections: shorthands reset omitted longhands to initial values
-//! (border/outline color → currentColor, not "absent"); corner-radius
-//! longhands reject Lynx's compat slash form; unitless non-zero lengths
-//! reject (no `enable_length_unit_check` leniency); single-value
-//! -webkit-text-stroke is valid per the `||` grammar (Lynx rejected it).
 
 mod common;
 
 use common::{Doc, parses, rgb, specified};
 use w3c_dom::property_is_supported;
 
-/// Computed value of `property` after applying `declaration` inline.
 fn computed(declaration: &str, property: &str) -> String {
     let mut doc = Doc::new();
     let el = doc.el(doc.root, "view");
@@ -25,7 +17,6 @@ fn computed(declaration: &str, property: &str) -> String {
     doc.value(el, property)
 }
 
-// C++: border_handler_unittest.cc::border_shorthand_expansion.
 #[test]
 fn border_shorthand_expansion() {
     let mut doc = Doc::with_css("view { color: rgb(1, 2, 3) }");
@@ -43,8 +34,6 @@ fn border_shorthand_expansion() {
         );
     }
 
-    // Omitted color resets to currentColor (resolves through `color`) —
-    // W3C-corrected over Lynx's emit-nothing.
     doc.set_inline(el, "border: 10px double");
     doc.flush();
     assert_eq!(doc.value(el, "border-top-width"), "10px");
@@ -54,7 +43,6 @@ fn border_shorthand_expansion() {
         "omitted border color is currentColor"
     );
 
-    // Style-only shorthand: width resets to medium (3px used value).
     doc.set_inline(el, "border: double");
     doc.flush();
     assert_eq!(doc.value(el, "border-top-style"), "double");
@@ -67,8 +55,6 @@ fn border_shorthand_expansion() {
     assert!(!parses("border", "double double"));
 }
 
-// C++: border_handler_unittest.cc::border_side_and_outline_shorthands
-// (the border-side half; outline is guarded separately below).
 #[test]
 fn per_side_border_shorthands() {
     let mut doc = Doc::new();
@@ -82,11 +68,6 @@ fn per_side_border_shorthands() {
     }
 }
 
-// The `outline` family is not part of the fork's supported Lynx grammar
-// (`vendor/stylo/style/properties/lynx_properties.txt` has no outline
-// entries — the C++ engine's outline handler is not carried over). The guard
-// pins its absence so a fork addition is noticed and the C++
-// `outline_shorthand_named_widths_and_colors` rows get ported.
 #[test]
 fn outline_is_absent() {
     for property in ["outline", "outline-width", "outline-style", "outline-color"] {
@@ -97,7 +78,6 @@ fn outline_is_absent() {
     }
 }
 
-// C++: border_handler_unittest.cc keyword tables.
 #[test]
 fn border_style_and_width_keywords() {
     for style in [
@@ -123,12 +103,9 @@ fn border_style_and_width_keywords() {
     assert!(!parses("border-top-width", "invalid"));
 }
 
-// C++: border_radius_handler_unittest.cc shorthand expansion + calc.
 #[test]
 fn border_radius_expansion() {
-    // (input, [TL, TR, BR, BL] as "x y" computed pairs)
     let rows: &[(&str, [&str; 4])] = &[
-        // Equal x/y radii collapse to one value in serialization.
         ("50%", ["50%", "50%", "50%", "50%"]),
         ("50px 10%", ["50px", "10%", "50px", "10%"]),
         ("50px           10%", ["50px", "10%", "50px", "10%"]),
@@ -150,7 +127,6 @@ fn border_radius_expansion() {
             "10px 0 /12px",
             ["10px 12px", "0px 12px", "10px 12px", "0px 12px"],
         ),
-        // calc folds at computed-value time (length ×/÷ number is valid).
         (
             "calc(12px*3)  3px 6px / 5px calc(20px*2)",
             ["36px 5px", "3px 40px", "6px 5px", "3px 40px"],
@@ -177,10 +153,6 @@ fn border_radius_expansion() {
     }
 }
 
-// C++: border_radius_handler_unittest.cc longhand forms + invalid rows —
-// W3C-corrected: corner longhands take <length-percentage>{1,2}; Lynx's
-// compat slash form on a longhand must reject, as must unitless non-zero
-// numbers (no enable_length_unit_check=false leniency).
 #[test]
 fn border_radius_longhands_and_rejects() {
     assert_eq!(
@@ -191,8 +163,6 @@ fn border_radius_longhands_and_rejects() {
         computed("border-top-left-radius: 50% 10px", "border-top-left-radius"),
         "50% 10px"
     );
-    // Slash forms are valid for the SHORTHAND but not for corner longhands
-    // (Lynx accepted them on longhands "for compatibility").
     for slashed in ["50%/10px", "50%/calc(10px + 10px)"] {
         assert!(
             !parses("border-top-right-radius", slashed),
@@ -209,9 +179,6 @@ fn border_radius_longhands_and_rejects() {
             "`{invalid}` must be rejected"
         );
     }
-    // W3C-corrected over the C++ calc row: `calc(2px +2px)` has no
-    // whitespace after the `+`, so `+2px` is a signed dimension with no
-    // operator — invalid per css-values (Lynx's lax calc accepted it).
     assert!(!parses("border-radius", "1px / calc(2px +2px)"));
     assert!(parses("border-radius", "0/0"), "unitless zero is a length");
     assert!(parses("border-radius", "0 /     0"));
@@ -221,7 +188,6 @@ fn border_radius_longhands_and_rejects() {
     );
 }
 
-// C++: shadow_handler_unittest.cc box-shadow cases.
 #[test]
 fn box_shadow_grammar() {
     let full = computed("box-shadow: 1px 2px 3px 4px red", "box-shadow");
@@ -262,7 +228,6 @@ fn box_shadow_grammar() {
     }
 }
 
-// C++: shadow_handler_unittest.cc text-shadow rows — no inset, no spread.
 #[test]
 fn text_shadow_grammar() {
     let valid = computed("text-shadow: 1px 2px 3px red", "text-shadow");
@@ -281,12 +246,6 @@ fn text_shadow_grammar() {
     }
 }
 
-// C++: text_stroke_handler_unittest.cc — W3C-corrected: the `||` grammar
-// makes single-value forms valid (Lynx rejected them while still emitting
-// empty longhands), and there is no `none` value. The author-facing
-// spellings are Lynx's unprefixed `text-stroke*` (the fork exposes them as
-// aliases of the hidden `-webkit-text-stroke*` canonicals; the prefixed
-// spellings themselves are not in the Lynx property table).
 #[test]
 fn text_stroke_grammar() {
     let mut doc = Doc::with_css("view { color: rgb(9, 9, 9) }");
@@ -297,15 +256,12 @@ fn text_stroke_grammar() {
     assert_eq!(doc.value(el, "text-stroke-width"), "1px");
     assert_eq!(doc.value(el, "text-stroke-color"), "rgb(255, 255, 0)");
 
-    // Order-irrelevant + whitespace-tolerant.
     doc.set_inline(el, "         yellow         1px       ");
     doc.set_inline(el, "text-stroke:         yellow         1px       ");
     doc.flush();
     assert_eq!(doc.value(el, "text-stroke-width"), "1px");
     assert_eq!(doc.value(el, "text-stroke-color"), "rgb(255, 255, 0)");
 
-    // Single-value forms are valid; the other longhand resets to initial
-    // (width 0, color currentColor).
     doc.set_inline(el, "text-stroke: 1px");
     doc.flush();
     assert_eq!(doc.value(el, "text-stroke-width"), "1px");
@@ -329,8 +285,6 @@ fn text_stroke_grammar() {
     );
 }
 
-// C++: text_decoration_handler_unittest.cc — line/style/color via `||`;
-// thickness rows live with the engine-gap tests in inheritance_computed.rs.
 #[test]
 fn text_decoration_grammar() {
     let mut doc = Doc::new();
@@ -340,10 +294,6 @@ fn text_decoration_grammar() {
     doc.flush();
     assert_eq!(doc.value(el, "text-decoration-line"), "none");
 
-    // C++ row: "underline line-through" stores both flags — the line
-    // keywords are a combinable set (starlight's TextDecorationType is a
-    // bitmask; W3C `mixed` grammar). Serialization is canonical-order, so
-    // the swapped spelling computes to the same value.
     doc.set_inline(el, "text-decoration: underline line-through");
     doc.flush();
     assert_eq!(
@@ -359,9 +309,6 @@ fn text_decoration_grammar() {
     );
     assert!(parses("text-decoration-line", "underline line-through"));
 
-    // The keyword set stays trimmed to the C++ production (no overline or
-    // blink); `none` stays exclusive and repeats reject per W3C, where the
-    // C++ parser is merely tolerant of duplicates.
     assert!(!parses("text-decoration-line", "underline overline"));
     assert!(!parses("text-decoration-line", "underline underline"));
     assert!(!parses("text-decoration-line", "none underline"));
@@ -372,14 +319,10 @@ fn text_decoration_grammar() {
     assert_eq!(doc.value(el, "text-decoration-style"), "dashed");
     assert_eq!(doc.value(el, "text-decoration-color"), "rgb(255, 255, 0)");
 
-    // `none` cannot combine with other values; Lynx silently dropped the
-    // trailing token instead (W3C-corrected to a rejection).
     assert!(!parses("text-decoration", "none 2px"));
     assert!(!parses("text-decoration", "underline 1px 2px"));
 }
 
-// C++: filter_handler_unittest.cc — plus the multi-function chain Lynx's
-// parser could not handle (W3C-corrected addition).
 #[test]
 fn filter_grammar() {
     assert_eq!(
@@ -401,9 +344,3 @@ fn filter_grammar() {
         assert!(!parses("filter", invalid), "`{invalid}` must be rejected");
     }
 }
-
-// Skipped (skip-internal): every lepus non-string/type-guard row (numbers,
-// bools, empty lepus::Value()) — no CSS-text analog.
-// Skipped (skip-legacy): border_handler enable_new_border_handler=false OLD
-// default-fill behavior and border_radius/flex enable_length_unit_check
-// leniency — pre-W3C pipelines out of scope under enableCSSSelector=true.

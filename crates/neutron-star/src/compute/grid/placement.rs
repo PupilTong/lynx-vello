@@ -1,39 +1,17 @@
 //! Numeric CSS Grid placement (Grid §8).
-//!
-//! Line names carried by the stylo placement values are ignored (the engine
-//! is numeric-lines-only), so this pass only has to handle numeric lines,
-//! spans, and automatic positions. Coordinates are
-//! zero-based track coordinates: explicit line `1` is coordinate `0`, and a
-//! [`TrackSpan`] is half-open. Negative coordinates represent leading
-//! implicit tracks.
 
 use stylo::values::computed::{GridAutoFlow, GridLine};
 
 use crate::geometry::Line;
 
-/// One normalized side of a `grid-row` / `grid-column` placement.
-///
-/// Engine-private scratch decoded from stylo's [`GridLine`] by
-/// [`grid_placement`]: `line_num == 0` means the number is absent, `is_span`
-/// selects the span form, and the line name is ignored (the engine is
-/// numeric-lines-only; hosts lower names before layout).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum GridPlacement {
-    /// `auto`: placed by the auto-placement algorithm.
     #[default]
     Auto,
-    /// A specific 1-based (possibly negative) line number. `0` is invalid
-    /// per the CSS grammar and is decoded as [`GridPlacement::Auto`].
     Line(i32),
-    /// `span <n>` relative to the opposite side. Values below one are
-    /// clamped when the span is normalized (CSS treats `span 0` as invalid).
     Span(i32),
 }
 
-/// Decodes one stylo grid line into the engine's placement scratch.
-///
-/// A `span` carrying only an ident (no number) spans one track: the engine
-/// cannot search named lines, and the parsed default span count is one.
 pub(super) fn grid_placement(line: &GridLine) -> GridPlacement {
     if line.is_span {
         GridPlacement::Span(if line.line_num == 0 { 1 } else { line.line_num })
@@ -85,24 +63,16 @@ pub(super) struct GridArea {
 /// Result of resolving and auto-placing all in-flow items.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PlacementResult {
-    /// Parallel to the input slice.
     pub(super) areas: Vec<GridArea>,
-    /// Final explicit + implicit column-track coordinate range.
     pub(super) column_range: TrackSpan,
-    /// Final explicit + implicit row-track coordinate range.
     pub(super) row_range: TrackSpan,
-    /// Whether each track in `column_range` is covered by an item.
     pub(super) occupied_columns: Vec<bool>,
-    /// Whether each track in `row_range` is covered by an item.
     pub(super) occupied_rows: Vec<bool>,
 }
 
-/// One axis after Grid §8.3 conflict handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AxisPlacement {
-    /// Both bounding lines are known.
     Definite(TrackSpan),
-    /// The position is automatic, with the given (numeric) span.
     Indefinite { span: usize },
 }
 
@@ -124,12 +94,6 @@ impl AxisPlacement {
     }
 }
 
-/// Applies Grid §8.3 conflict handling and resolves numeric line indexes.
-///
-/// The returned definite area is already clamped to the supported grid-line
-/// interval from Grid §5.4. An indefinite span is capped to the maximum
-/// number of representable tracks; its final edge is clamped after automatic
-/// placement chooses a start line.
 pub(super) fn resolve_axis_placement(
     line: Line<GridPlacement>,
     explicit_tracks: usize,
@@ -144,7 +108,6 @@ pub(super) fn resolve_axis_placement(
             if start > end {
                 core::mem::swap(&mut start, &mut end);
             } else if start == end {
-                // The end line is discarded, so the default span is one.
                 end = end.saturating_add(1);
             }
             AxisPlacement::Definite(clamp_area(start, end))
@@ -165,8 +128,6 @@ pub(super) fn resolve_axis_placement(
             let end = resolve_line(end, explicit_tracks);
             AxisPlacement::Definite(clamp_area(end.saturating_sub(1), end))
         }
-        // Two spans conflict: the end-side span is discarded. A lone
-        // numeric span remains the span used by auto-placement.
         (GridPlacement::Span(span), GridPlacement::Span(_) | GridPlacement::Auto)
         | (GridPlacement::Auto, GridPlacement::Span(span)) => AxisPlacement::Indefinite {
             span: normalized_span(span),
@@ -175,9 +136,6 @@ pub(super) fn resolve_axis_placement(
     }
 }
 
-/// Places items in order-modified document order using Grid §8.5.
-// Keeping the four numbered spec passes together makes the cursor state and
-// occupancy mutations auditable against §8.5.
 #[allow(clippy::too_many_lines)]
 pub(super) fn place_items(
     inputs: &[PlacementInput],
@@ -222,9 +180,6 @@ pub(super) fn place_items(
         explicit_row_range
     };
 
-    // The primary range is fully known before step 4: auto-placement only
-    // grows it endward. The final cross range additionally accounts for all
-    // definite cross positions in step 3.
     let mut primary_range = explicit_primary;
     let mut all_cross_range = explicit_cross;
     let mut step_two_cross_range = explicit_cross;
@@ -243,8 +198,6 @@ pub(super) fn place_items(
         if let Some(cross) = item.cross.definite() {
             all_cross_range.include(cross);
             if item.primary.definite().is_some() {
-                // These are the items occupied by step 1 and therefore the
-                // implicit-grid extent visible while step 2 is running.
                 step_two_cross_range.include(cross);
             }
         } else if item.primary.definite().is_some() {
@@ -254,9 +207,6 @@ pub(super) fn place_items(
         }
     }
 
-    // Fully explicit grids permit overlap and need no occupancy search at
-    // all. Besides accelerating a common case, this keeps far-apart §5.4
-    // coordinates from materializing a mostly-empty bit matrix.
     if items
         .iter()
         .all(|item| item.primary.definite().is_some() && item.cross.definite().is_some())
@@ -277,9 +227,6 @@ pub(super) fn place_items(
         return finish_result(areas, column_range, row_range);
     }
 
-    // Allocate the occupancy matrix once. These are tight worst-case bounds:
-    // definite occupied tracks can force each later item past their end, and
-    // thereafter every item can add at most its own span.
     let occupancy_cross_min = all_cross_range.start.min(step_two_cross_range.start);
     let cross_after_locked = bounded_add(
         all_cross_range.end.max(step_two_cross_range.end),
@@ -309,7 +256,6 @@ pub(super) fn place_items(
     let mut logical_areas = vec![LogicalArea::default(); items.len()];
     let mut placed = vec![false; items.len()];
 
-    // Step 1: fully definite items are allowed to overlap.
     for (index, item) in items.iter().copied().enumerate() {
         let (Some(primary), Some(cross)) = (item.primary.definite(), item.cross.definite()) else {
             continue;
@@ -320,9 +266,6 @@ pub(super) fn place_items(
         placed[index] = true;
     }
 
-    // Step 2: items locked to a primary track search in the cross axis. In
-    // sparse mode, a range-max tree tracks the end cursor of every covered
-    // primary track without repeatedly scanning wide spans.
     let has_locked_cross_item = items.iter().any(|item| {
         item.primary.definite().is_some() && matches!(item.cross, AxisPlacement::Indefinite { .. })
     });
@@ -340,9 +283,6 @@ pub(super) fn place_items(
             continue;
         };
 
-        // Step 2 runs before step 3 can add leading tracks for an unplaced
-        // cross-definite item. Such later tracks must not make this item's
-        // span grow startward when §5.4 truncates it at the end limit.
         let step_two_available =
             usize::try_from(MAX_GRID_LINE - step_two_cross_range.start).unwrap();
         let cross_span = span.min(step_two_available).max(1);
@@ -370,7 +310,6 @@ pub(super) fn place_items(
         placed[index] = true;
     }
 
-    // Step 3: finish the fixed cross-axis implicit grid.
     let mut cross_range = all_cross_range;
     cross_range.end = cross_range.end.max(placed_by_step_two_end);
     if remaining_cross_span_max > cross_range.len() {
@@ -380,8 +319,6 @@ pub(super) fn place_items(
     }
     debug_assert!(cross_range.end <= occupancy.cross_range.end);
 
-    // Step 4: place the remaining items. The cursor is persistent in sparse
-    // mode and reset for every item in dense mode.
     let mut cursor_primary = primary_range.start;
     let mut cursor_cross = cross_range.start;
 
@@ -539,7 +476,6 @@ const DENSE_OCCUPANCY_CELL_LIMIT: usize = 8 * 1024 * 1024;
 #[derive(Debug)]
 enum OccupancyStorage {
     Dense(Vec<u64>),
-    /// Per-primary-track sorted, disjoint half-open cross-axis intervals.
     Sparse(Vec<Vec<(usize, usize)>>),
 }
 
@@ -602,8 +538,6 @@ impl Occupancy {
         }
     }
 
-    /// Finds the first free cross-axis position and skips directly beyond the
-    /// last colliding cell of each rejected candidate.
     fn find_cross(
         &self,
         primary: TrackSpan,
@@ -663,7 +597,6 @@ impl Occupancy {
         last
     }
 
-    /// Finds the first free primary position for a fixed cross-axis area.
     fn find_primary(&self, start: i32, span: usize, cross: TrackSpan) -> Option<i32> {
         let span = usize_to_i32(span);
         let last_start = self.primary_range.end.checked_sub(span)?;
@@ -849,8 +782,6 @@ impl RangeMax {
 #[inline]
 fn normalized(placement: GridPlacement) -> GridPlacement {
     match placement {
-        // `grid_placement` never produces a zero line, but placements are
-        // also built directly by in-crate callers; stay defensive.
         GridPlacement::Line(0) => GridPlacement::Auto,
         other => other,
     }
@@ -1075,7 +1006,6 @@ mod tests {
             GridPlacement::Line(-3)
         );
         assert_eq!(grid_placement(&stylo_line(3, true)), GridPlacement::Span(3));
-        // `span <ident>` carries no number; the engine spans one track.
         assert_eq!(grid_placement(&stylo_line(0, true)), GridPlacement::Span(1));
     }
 
@@ -1224,8 +1154,6 @@ mod tests {
             })
         );
 
-        // The leading implicit track is introduced in step 3. It must not
-        // move the step-2 item's oversized automatic span startward.
         let result = place_items(
             &[
                 input(auto(), span(i32::MAX), line(1), line(2)),
@@ -1256,27 +1184,21 @@ mod tests {
 
     #[test]
     fn bit_range_scans_reach_middle_and_boundary_words() {
-        // A lone bit in the range's final word is found only by the
-        // last-word probe of the multi-word scan.
         let mut tail_only = vec![0_u64; 4];
         set_bit_range(&mut tail_only, 130, 131);
         assert!(bit_range_any(&tail_only, 0, 131));
         assert!(!bit_range_any(&tail_only, 0, 130));
         assert_eq!(last_set_bit(&tail_only, 0, 131), Some(130));
 
-        // A lone bit in an interior word is found by the middle-word scans
-        // of both the any-set probe and the reverse search.
         let mut middle_only = vec![0_u64; 4];
         set_bit_range(&mut middle_only, 70, 71);
         assert!(bit_range_any(&middle_only, 0, 200));
         assert_eq!(last_set_bit(&middle_only, 0, 200), Some(70));
 
-        // A lone bit in the first word is the reverse search's last resort.
         let mut head_only = vec![0_u64; 4];
         set_bit_range(&mut head_only, 3, 4);
         assert_eq!(last_set_bit(&head_only, 0, 200), Some(3));
         assert_eq!(last_set_bit(&head_only, 0, 3), None);
-        // A single-word window that misses the bit reports no match.
         assert_eq!(last_set_bit(&head_only, 8, 60), None);
     }
 

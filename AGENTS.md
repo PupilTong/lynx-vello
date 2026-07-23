@@ -194,7 +194,7 @@ useful signal for currently-compatible versions of those libraries.
   affected cache path. Mutually exclusive literal text, natural size, and
   retained text artifacts reuse the node's single nullable content pointer.
   Durable rounded and unrounded layout results live **on each `Node`** (read
-  via `Node::layout`); measurement cache and
+  via `Node::rounded_layout`); measurement cache and
   static-position state live in the document's layout secondary arena behind
   `AtomicRefCell<LayoutData>`. Style-driven relayout is automatic (every style
   flush consumes harvested `StyleDamage` into boundary-stopped invalidation);

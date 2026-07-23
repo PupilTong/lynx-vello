@@ -18,18 +18,6 @@ pub(super) struct StyledRange<'a, R: TextRunStyle> {
     pub(super) style: &'a R,
 }
 
-/// Applies the container's `white-space-collapse` mode before Parley shapes
-/// the paragraph.
-///
-/// Under `collapse`, CSS document whitespace (space, tab, CR-as-space, and LF
-/// segment breaks) is collapsed to one ASCII space. Runs marked
-/// `preserve_newlines` — and every run under `preserve-breaks` — retain LF
-/// hard breaks while still collapsing other whitespace; spaces immediately
-/// adjacent to those breaks are removed. Under `preserve`/`break-spaces` the
-/// text passes through unmodified (newlines stay forced breaks; the
-/// `break-spaces` end-of-line wrapping refinement is out of measurement
-/// scope). Other controls, non-breaking spaces, and other Unicode spaces are
-/// deliberately passed through for Parley to render or otherwise process.
 pub(super) fn normalize_runs<'a, R, Runs>(
     runs: Runs,
     collapse: white_space_collapse::T,
@@ -150,11 +138,6 @@ fn should_remove_segment_break(previous: Option<char>, next: char) -> bool {
         })
 }
 
-// Chromium removes collapsible segment breaks between Chinese/Japanese and
-// related East Asian wide characters, but retains them for Hangul (whose
-// customary source-line joining uses spaces). These ranges cover the
-// non-Hangul scripts and symbols relevant to that heuristic, including the
-// supplementary CJK and Kana blocks.
 const fn is_east_asian_without_word_separators(character: char) -> bool {
     matches!(
         character as u32,
@@ -357,8 +340,6 @@ mod tests {
 
     #[test]
     fn trailing_collapsible_whitespace_keeps_one_space() {
-        // Phase-one collapsing keeps a single trailing space; trimming it is
-        // the line layout phase's job, not normalization's.
         let style = RunStyle;
         let content = normalize_runs(
             [TextRun {
@@ -375,21 +356,17 @@ mod tests {
 
     #[test]
     fn segment_break_removal_covers_supplementary_east_asian_blocks() {
-        // Chromium's heuristic removes a collapsible segment break between
-        // East Asian wide characters across every relevant block, including
-        // compatibility, vertical/halfwidth forms, and the supplementary
-        // planes.
         let style = RunStyle;
         for (source, expected) in [
-            ("\u{F900}\n\u{F900}", "\u{F900}\u{F900}"), // CJK Compatibility Ideographs
-            ("\u{FE10}\n\u{FE10}", "\u{FE10}\u{FE10}"), // Vertical Forms
-            ("\u{FE30}\n\u{FE30}", "\u{FE30}\u{FE30}"), // CJK Compatibility Forms
-            ("\u{FF01}\n\u{FF01}", "\u{FF01}\u{FF01}"), // Fullwidth Forms
-            ("\u{FFE0}\n\u{FFE0}", "\u{FFE0}\u{FFE0}"), // Fullwidth Signs
-            ("\u{17000}\n\u{17000}", "\u{17000}\u{17000}"), // Tangut
-            ("\u{1AFF0}\n\u{1AFF0}", "\u{1AFF0}\u{1AFF0}"), // Kana Extended-B
-            ("\u{1F200}\n\u{1F200}", "\u{1F200}\u{1F200}"), // Enclosed Ideographic Supplement
-            ("\u{20000}\n\u{20000}", "\u{20000}\u{20000}"), // CJK Extension B
+            ("\u{F900}\n\u{F900}", "\u{F900}\u{F900}"),
+            ("\u{FE10}\n\u{FE10}", "\u{FE10}\u{FE10}"),
+            ("\u{FE30}\n\u{FE30}", "\u{FE30}\u{FE30}"),
+            ("\u{FF01}\n\u{FF01}", "\u{FF01}\u{FF01}"),
+            ("\u{FFE0}\n\u{FFE0}", "\u{FFE0}\u{FFE0}"),
+            ("\u{17000}\n\u{17000}", "\u{17000}\u{17000}"),
+            ("\u{1AFF0}\n\u{1AFF0}", "\u{1AFF0}\u{1AFF0}"),
+            ("\u{1F200}\n\u{1F200}", "\u{1F200}\u{1F200}"),
+            ("\u{20000}\n\u{20000}", "\u{20000}\u{20000}"),
         ] {
             let content = normalize_runs(
                 [TextRun {
@@ -418,7 +395,6 @@ mod tests {
         assert_eq!(content.ranges.len(), 1);
         assert_eq!(content.ranges[0].bytes, 0..1);
 
-        // A lone-space range disappears entirely instead of surviving empty.
         let mut only_space = ShapingContent::<'_, RunStyle> {
             text: String::new(),
             ranges: Vec::new(),
@@ -428,7 +404,6 @@ mod tests {
         assert!(only_space.text.is_empty());
         assert!(only_space.ranges.is_empty());
 
-        // Without a trailing ASCII space the call is a no-op.
         content.remove_trailing_space();
         assert_eq!(content.text, "a");
     }

@@ -7,7 +7,7 @@ use bobcat_engine::resource::{
     ResourceRequest, ResourceResponse, ResourceStream, RetryAdvice,
 };
 use bobcat_engine::script::{ScriptEngine, ScriptError, ScriptFuture, ScriptValue};
-use bobcat_engine::view::{EngineMetrics, LynxView};
+use bobcat_engine::view::{LynxView, ViewMetrics};
 
 #[derive(Debug)]
 struct NullResourceFetcher;
@@ -32,11 +32,11 @@ impl NullResourceFetcher {
 }
 
 impl ResourceFetcher for NullResourceFetcher {
-    fn supports(&self, _capability: ResourceCapability) -> bool {
+    fn supports_capability(&self, _capability: ResourceCapability) -> bool {
         false
     }
 
-    fn resolve(&self, _request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
+    fn resolve_locator(&self, _request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
         Self::failure(
             ResourceErrorKind::InvalidRequest,
             ResourceErrorPhase::Resolve,
@@ -81,7 +81,7 @@ impl ResourceFetcher for NullResourceFetcher {
         )
     }
 
-    fn cancel(&self, _request_id: RequestId) -> ResourceFuture<'_, ()> {
+    fn cancel_request(&self, _request_id: RequestId) -> ResourceFuture<'_, ()> {
         Box::pin(async { Ok(()) })
     }
 }
@@ -128,8 +128,8 @@ impl ScriptEngine for EchoScriptEngine {
     }
 }
 
-fn metrics() -> EngineMetrics {
-    EngineMetrics::new(390.0, 844.0, 3.0)
+fn metrics() -> ViewMetrics {
+    ViewMetrics::new(390.0, 844.0, 3.0)
 }
 
 #[test]
@@ -141,27 +141,33 @@ fn traits_compose_into_owned_and_shared_views() {
         Ok(ScriptValue::String(value)) if value.as_ref() == "globalThis"
     ));
 
-    let (owned_fetcher, mut owned_engine, mut widget_api) = owned.into_parts();
-    assert!(!owned_fetcher.supports(ResourceCapability::Http));
+    let owned_parts = owned.into_parts();
+    assert!(
+        !owned_parts
+            .resource_fetcher
+            .supports_capability(ResourceCapability::Http)
+    );
+    let mut owned_engine = owned_parts.script_engine;
     let import = owned_engine.import_value("app.js", "default");
     drop(import);
+    let mut widget_api = owned_parts.widget_api;
     widget_api.set_viewport(430.0, 932.0);
     widget_api.set_device_pixel_ratio(2.0);
     widget_api.flush_styles();
 
     let shared_fetcher: Arc<dyn ResourceFetcher> = Arc::new(NullResourceFetcher);
-    let shared_view = LynxView::with_shared_resource_fetcher(
+    let shared_view = LynxView::from_shared_resource_fetcher(
         Arc::clone(&shared_fetcher),
         EchoScriptEngine,
         metrics(),
     );
-    let (returned_fetcher, returned_engine, returned_widget_api) = shared_view.into_parts();
+    let returned = shared_view.into_parts();
 
-    assert!(Arc::ptr_eq(&shared_fetcher, &returned_fetcher));
+    assert!(Arc::ptr_eq(&shared_fetcher, &returned.resource_fetcher));
     assert_eq!(Arc::strong_count(&shared_fetcher), 2);
-    assert_eq!(returned_widget_api.tree().element_by_unique_id(1), None);
+    assert_eq!(returned.widget_api.tree().widget_by_unique_id(1), None);
 
-    let mut returned_engine = returned_engine;
+    let mut returned_engine = returned.script_engine;
     let called = returned_engine.call(
         &EchoCallable,
         &ScriptValue::Undefined,

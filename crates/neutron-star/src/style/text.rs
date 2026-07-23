@@ -1,16 +1,4 @@
 //! Text measurement style protocol.
-//!
-//! This module is deliberately independent of Parley's value types. It is the
-//! stable seam between host-owned computed styles and the concrete text
-//! engine: the host lends paragraph and run style views in stylo's computed
-//! font/text vocabulary, and the adapter translates their values only when it
-//! shapes text. Paint-only values (brushes, color, decoration, shadow, and
-//! stroke) are outside this measurement protocol.
-//!
-//! The legacy single `white-space` value is replaced by the fork's property
-//! pair: [`TextContainerStyle::text_wrap_mode`] (wrap vs. nowrap) and
-//! [`TextContainerStyle::white_space_collapse`] (collapsing). `text-align:
-//! justify` is not parseable under the lynx grammar and has no handling.
 
 use stylo::computed_values::{text_wrap_mode, white_space_collapse};
 use stylo::values::computed::{
@@ -20,114 +8,65 @@ use stylo::values::computed::{
 
 use crate::style::CoreStyle;
 
-/// Paragraph-level style of a `<text>` leaf box.
-///
-/// Inline direction comes from [`CoreStyle::direction`]; it is not duplicated
-/// here. Defaults are the fork's initial values.
 pub trait TextContainerStyle: CoreStyle {
-    /// `text-align` (`justify` is not parseable under the lynx grammar).
     fn text_align(&self) -> TextAlign {
         TextAlign::Start
     }
 
-    /// `text-wrap-mode` — whether lines may wrap.
     fn text_wrap_mode(&self) -> text_wrap_mode::T {
         text_wrap_mode::T::Wrap
     }
 
-    /// `white-space-collapse` — how document whitespace collapses before
-    /// shaping.
     fn white_space_collapse(&self) -> white_space_collapse::T {
         white_space_collapse::T::Collapse
     }
 
-    /// `word-break`.
     fn word_break(&self) -> WordBreak {
         WordBreak::Normal
     }
 
-    /// `text-indent`. Only the length component participates in
-    /// measurement; the `hanging`/`each-line` flags are ignored (documented
-    /// vocabulary-swap delta).
-    ///
-    /// Percentage basis: the containing block's inline size.
     fn text_indent(&self) -> TextIndent {
         TextIndent::zero()
     }
 }
 
-/// Shaping style for one host-assembled text run.
-///
-/// Runs are inline content rather than boxes, so this intentionally does not
-/// inherit [`CoreStyle`]. [`font_family`](Self::font_family) is required (the
-/// initial family list is host policy); the scalar accessors default to the
-/// CSS initial values. Sequence values (`font-family`,
-/// `font-feature-settings`, `font-variation-settings`) are stylo's
-/// refcounted computed values, cloned per accessor call.
-///
-/// This trait is intentionally not object-safe; text measurement stays
-/// statically dispatched.
-///
-/// ```compile_fail
-/// use neutron_star::style::TextRunStyle;
-/// fn erased(_: &dyn TextRunStyle) {}
-/// ```
 pub trait TextRunStyle: Sized {
-    /// The computed `font-family` fallback list.
     fn font_family(&self) -> FontFamily;
 
-    /// Computed font size in CSS pixels.
     fn font_size(&self) -> f32 {
         16.0
     }
 
-    /// Computed `font-weight`.
     fn font_weight(&self) -> FontWeight {
         FontWeight::NORMAL
     }
 
-    /// Computed `font-style`.
     fn font_style(&self) -> FontStyle {
         FontStyle::NORMAL
     }
 
-    /// Computed `letter-spacing` (`normal` behaves as `0`; the lynx grammar
-    /// is length-only).
     fn letter_spacing(&self) -> LetterSpacing {
         LetterSpacing::normal()
     }
 
-    /// Computed `line-height` (a computed `Length` is already absolute CSS
-    /// pixels).
     fn line_height(&self) -> LineHeight {
         LineHeight::normal()
     }
 
-    /// Computed `font-feature-settings` entries.
     fn font_feature_settings(&self) -> FontFeatureSettings {
         FontFeatureSettings::normal()
     }
 
-    /// Computed `font-variation-settings` entries.
     fn font_variation_settings(&self) -> FontVariationSettings {
         FontVariationSettings::normal()
     }
 }
 
 /// One borrowed text/style run assembled by the host.
-///
-/// A paragraph is a sequence of these values, allowing mixed styles without
-/// flattening them into a single materialized style. `preserve_newlines`
-/// models `<raw-text>`'s hard-coded `white-space-collapse: preserve-breaks`
-/// behavior independently of the container's
-/// [`white_space_collapse`](TextContainerStyle::white_space_collapse) value.
 #[derive(Debug)]
 pub struct TextRun<'a, R: TextRunStyle> {
-    /// UTF-8 text covered by this run.
     pub text: &'a str,
-    /// Borrowed shaping style for this run.
     pub style: &'a R,
-    /// Whether newline characters create forced line breaks in this run.
     pub preserve_newlines: bool,
 }
 
@@ -139,10 +78,6 @@ impl<R: TextRunStyle> Clone for TextRun<'_, R> {
 
 impl<R: TextRunStyle> Copy for TextRun<'_, R> {}
 
-/// Measurement-only Parley brush.
-///
-/// Painting can widen this alias additively when render styling joins the
-/// protocol; measurement currently carries no paint data.
 pub type TextBrush = ();
 
 impl<S: TextContainerStyle> TextContainerStyle for &S {
@@ -267,9 +202,6 @@ mod tests {
             TextContainerStyle::text_wrap_mode(&view),
             text_wrap_mode::T::Wrap
         );
-        // Every forwarder on the blanket `&S` impls serves the underlying
-        // style's value; a lost delegation would surface as the wrong value
-        // (or a stack overflow) here.
         assert_eq!(TextContainerStyle::text_align(&view), TextAlign::Start);
         assert_eq!(
             TextContainerStyle::white_space_collapse(&view),

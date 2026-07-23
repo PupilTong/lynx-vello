@@ -1,7 +1,5 @@
 //! Dumps a decoded `.web.bundle` as JSON for inspection / cross-validation
 //! against the reference `@lynx-js/web-core` decoder.
-//!
-//! Usage: `cargo run --example dump -- path/to/main.web.bundle`
 
 use serde_json::json;
 
@@ -34,10 +32,10 @@ fn main() {
                 .iter()
                 .map(|rule| {
                     json!({
-                        "type": format!("{:?}", rule.rule_type),
+                        "type": format!("{:?}", rule.kind),
                         "selectors": rule
                             .prelude
-                            .selector_list
+                            .selectors
                             .iter()
                             .map(lynx_template_decoder::style_info::Selector::to_css_string)
                             .collect::<Vec<_>>(),
@@ -45,9 +43,9 @@ fn main() {
                             .declaration_block
                             .declarations
                             .iter()
-                            .map(|d| format!("{}:{}", d.property_id.name(), d.value_text()))
+                            .map(|d| format!("{}:{}", d.property.name(), d.value_text()))
                             .collect::<Vec<_>>(),
-                        "nested": rule.nested_rules.len(),
+                        "nested": rule.children.len(),
                     })
                 })
                 .collect();

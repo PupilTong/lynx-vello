@@ -1,20 +1,7 @@
 //! The [`Document`] — one fixed-address set of NodeId-keyed arenas containing
 //! the DOM tree and its phase-specific state.
-//!
-//! `Document<T>` owns one boxed [`DocumentArenas`] value whose address never
-//! changes. Every [`Node`] stores a backpointer to it, so a plain `&Node` can
-//! navigate the tree and resolve payload/styling/layout secondary state by its
-//! [`NodeId`] without a wrapper handle or a mirror tree.
-//!
-//! Slot zero is always the real DOM document node. Element and text nodes are
-//! allocated in the remaining slab slots and use the raw slab index as their
-//! [`NodeId`]. IDs are context-local: callers must not route an ID to another
-//! `Document`, and a removed ID must not outlive the ownership layer that
-//! retained its node.
 
 use std::fmt;
-// `NonNull` is only used by the debug-only flush-phase marker below, so the
-// import is gated to match (unused in release/bench builds otherwise).
 #[cfg(debug_assertions)]
 use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
@@ -35,41 +22,21 @@ use crate::engine::StyleEngine;
 use crate::layout::LayoutData;
 use crate::node::{Node, StylingData};
 
-/// A node's raw index in its owning document's slab.
-///
-/// IDs carry no document token and no allocation generation. The runtime
-/// context/handle layer owns routing and lifetime; `w3c-dom` only resolves the
-/// index in the `Document` passed to it.
 pub type NodeId = usize;
 
-/// The fixed slab slot occupied by the DOM document node.
 pub const DOCUMENT_NODE_ID: NodeId = 0;
 
-/// Payload entry paired with a primary node slot. Slot zero is occupied by the
-/// real document node, which deliberately has no embedder payload; reserving a
-/// sentinel there keeps this slab's keys exactly aligned with every `NodeId`.
 pub(crate) enum PayloadSlot<T> {
     Document,
     Node(T),
 }
 
-/// Borrow an entry paired with an already-borrowed live primary node.
-///
-/// A shared `&Node` cannot outlive its primary slab entry or coexist with node
-/// removal. All four slabs insert and remove the same key in lockstep, so the
-/// bounds and vacancy branches would only recheck an invariant already
-/// established by the node borrow.
 #[inline]
 pub(crate) fn slab_get_for_live_node<V>(slab: &Slab<V>, id: NodeId) -> &V {
     debug_assert!(
         slab.contains(id),
         "live primary node must have matching arena state"
     );
-    // SAFETY: callers reach this helper through a live `&Node` from the
-    // primary slab. Matching entries are installed before that node is
-    // exposed and cleared only after it is removed, which requires an
-    // exclusive document borrow and therefore cannot coexist with the
-    // caller's node borrow.
     #[expect(
         unsafe_code,
         reason = "elide redundant bounds/vacancy checks for a live-node slot"
@@ -82,12 +49,6 @@ pub(crate) fn slab_get_for_live_node<V>(slab: &Slab<V>, id: NodeId) -> &V {
 /// The fixed-address, document-owned arena set. `nodes` selects each `NodeId`;
 /// the other slabs insert/remove in exactly the same order and assert that
 /// their own free lists return that same key.
-///
-/// This aggregate is the generalized form of the old boxed single slab, not
-/// another lookup layer: `Document` is movable, so one boxed pointee is what
-/// lets every node retain one stable owner pointer. Storing the four slabs as
-/// direct `Document` fields would instead require four stable boxes/pointers
-/// (and enlarge every primary node handle's backing record).
 pub(crate) struct DocumentArenas<T> {
     pub(crate) nodes: Slab<Node<T>>,
     pub(crate) payloads: Slab<PayloadSlot<T>>,
@@ -106,78 +67,26 @@ impl<T> DocumentArenas<T> {
     }
 }
 
-/// The placeholder base URL for parsing a standalone document's inline styles.
 pub(crate) fn about_blank_url_data() -> UrlExtraData {
     UrlExtraData::from(::url::Url::parse("about:blank").expect("about:blank is a valid URL"))
 }
 
+/// A containment boundary scheduled for a committed-input relayout.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PendingRelayout {
+    pub node_id: NodeId,
+    pub input: LayoutInput,
+}
+
 /// One DOM tree, including its actual document node at primary-arena slot
 /// zero.
-///
-/// The box is load-bearing: moving `Document` never moves the arena set, so
-/// every node's owner backpointer remains valid until the document is dropped.
 pub struct Document<T> {
-    /// This document's private stylesheet, device, cascade, and lock state.
     style_engine: StyleEngine,
     arenas: Box<DocumentArenas<T>>,
-    /// Relayout boundaries that a boundary-stopped
-    /// [`invalidate_layout`](Self::invalidate_layout) parked for the next
-    /// layout pass, each paired with the exact [`LayoutInput`] it was last
-    /// committed with.
-    ///
-    /// When the ancestor walk stops at a `contain: strict` / skipped
-    /// `content-visibility` boundary it leaves that boundary's *ancestors'*
-    /// caches warm — so the next `compute_root_layout` from the document root
-    /// answers them from cache and never descends into the boundary. The
-    /// boundary's own interior still changed, so it is re-run in place with its
-    /// committed input via
-    /// [`compute_boundary_relayout`](neutron_star::compute::compute_boundary_relayout)
-    /// at the start of the layout pass (the engine-internal equivalent of
-    /// neutron-star's `invalidate_for_relayout` re-layout root, using real
-    /// parent links). Drained and cleared once the pass consumes it.
-    ///
-    /// The layout pass re-runs these **deepest-first** (by tree depth): when
-    /// nested boundaries are parked together, an outer boundary's re-run
-    /// re-imposes its inner boundaries' sizes and so must run last to have the
-    /// final say over an inner boundary's stale committed replay (see
-    /// `layout::host::run_layout`). Parking is duplicate-free by construction:
-    /// [`invalidate_layout`](Self::invalidate_layout) stops at a boundary
-    /// already present here instead of parking it twice or clearing past it.
-    /// [`remove_subtree`](Self::remove_subtree) drops entries for every removed
-    /// node before its raw slab id can be reused.
-    relayout_roots: Vec<(NodeId, LayoutInput)>,
-    /// O(1)-membership companion to [`relayout_roots`](Self::relayout_roots),
-    /// holding the same parked ids. `invalidate_layout`'s "already parked in
-    /// this batch?" test (case 2 of its ancestor walk) and the incremental
-    /// post-pass's "is an ancestor parked?" test are both membership queries;
-    /// answering them by scanning the vec is `O(B)` each, so a batch that parks
-    /// `B` independent boundaries (one dirty leaf per contained row of a long
-    /// virtualized list) costs `O(B²)`. This set makes each query `O(1)`, so
-    /// the batch is `O(B)`. Kept in lockstep with the vec everywhere the vec is
-    /// mutated — [`record_relayout_root`](Self::record_relayout_root),
-    /// [`clear_relayout_roots`](Self::clear_relayout_roots), and the
-    /// `remove_subtree` pruning — so a reused slab id can never read as parked
-    /// while no matching vec entry exists.
+    relayout_roots: Vec<PendingRelayout>,
     relayout_root_ids: FxHashSet<NodeId>,
-    /// Whether any layout-affecting invalidation is pending since the last
-    /// completed layout pass. Set by [`invalidate_layout`](Self::invalidate_layout)
-    /// / [`invalidate_layout_all`](Self::invalidate_layout_all); cleared when a
-    /// pass completes. When it is `false` and the viewport/scale are unchanged,
-    /// [`layout_document`](crate::StyleEngine::layout_document) skips the whole
-    /// pass — the previous pass's geometry still holds, so an idle frame costs
-    /// `O(1)` instead of re-walking the tree for positioned + rounding output.
     layout_dirty: bool,
-    /// Whether a pending invalidation cleared the cache spine all the way to the
-    /// document root (no containment boundary confined it). When it did, the
-    /// next pass's positioned + rounding walks cannot be scoped to the parked
-    /// boundaries — geometry may have shifted anywhere — so the pass runs them
-    /// from the document root. When every pending change is boundary-confined,
-    /// the pass re-processes only the parked boundaries' subtrees.
     layout_root_dirty: bool,
-    /// The `(viewport, device-pixel-ratio)` the last completed layout pass ran
-    /// with, or `None` before the first pass. A pass is skippable only when this
-    /// still matches (positioned anchoring and device-pixel snapping both depend
-    /// on it) and nothing is dirty; a mismatch forces a full-tree pass.
     last_layout_inputs: Option<(Size<f32>, f32)>,
 }
 
@@ -192,20 +101,11 @@ impl<T: fmt::Debug> fmt::Debug for Document<T> {
 }
 
 impl<T> Document<T> {
-    /// Create an empty document with an independent `about:blank` style
-    /// engine/context around the embedder-supplied device.
     #[must_use]
     pub fn new(device: Device) -> Self {
         Self::with_url_data(device, about_blank_url_data())
     }
 
-    /// Create an empty document with an independent style engine/context and
-    /// explicit CSS base URL.
-    ///
-    /// # Panics
-    ///
-    /// Panics only if the internal empty-slab invariant is broken and its
-    /// first insertion does not occupy slot zero.
     #[must_use]
     pub fn with_url_data(device: Device, url_data: UrlExtraData) -> Self {
         let style_engine = StyleEngine::with_url_data(device, url_data);
@@ -239,126 +139,76 @@ impl<T> Document<T> {
         }
     }
 
-    /// This document's private style engine.
     pub(crate) const fn style_engine(&self) -> &StyleEngine {
         &self.style_engine
     }
 
-    /// This document's private style engine.
     pub(crate) const fn style_engine_mut(&mut self) -> &mut StyleEngine {
         &mut self.style_engine
     }
 
-    /// Park a boundary-stopped relayout root for the next layout pass (see
-    /// [`relayout_roots`](Self::relayout_roots)). Called only by
-    /// [`invalidate_layout`](Self::invalidate_layout).
     pub(crate) fn record_relayout_root(&mut self, id: NodeId, committed_input: LayoutInput) {
-        self.relayout_roots.push((id, committed_input));
+        self.relayout_roots.push(PendingRelayout {
+            node_id: id,
+            input: committed_input,
+        });
         self.relayout_root_ids.insert(id);
     }
 
-    /// The relayout boundaries parked since the last pass (see
-    /// [`relayout_roots`](Self::relayout_roots)).
-    pub(crate) fn relayout_roots(&self) -> &[(NodeId, LayoutInput)] {
+    pub(crate) fn relayout_roots(&self) -> &[PendingRelayout] {
         &self.relayout_roots
     }
 
-    /// Whether `id` is already a parked relayout root — the `O(1)` membership
-    /// query backing `invalidate_layout`'s already-parked check and the
-    /// incremental post-pass's parked-ancestor check (see
-    /// [`relayout_root_ids`](Self::relayout_root_ids)).
     pub(crate) fn is_relayout_root_parked(&self, id: NodeId) -> bool {
         self.relayout_root_ids.contains(&id)
     }
 
-    /// Forget every parked relayout root (the layout pass has consumed them, or
-    /// an [`invalidate_layout_all`](Self::invalidate_layout_all) subsumed them
-    /// with a full re-layout).
     pub(crate) fn clear_relayout_roots(&mut self) {
         self.relayout_roots.clear();
         self.relayout_root_ids.clear();
     }
 
-    /// Whether a layout pass has anything to do for this `(viewport, scale)`.
-    ///
-    /// `false` exactly when nothing has been invalidated since the last pass
-    /// **and** the last pass ran with the same viewport/scale — an idle frame
-    /// whose stored geometry still holds, so
-    /// [`layout_document`](crate::StyleEngine::layout_document) returns without
-    /// walking the tree.
     pub(crate) fn layout_needs_pass(&self, viewport: Size<f32>, scale: f32) -> bool {
         self.layout_dirty || self.last_layout_inputs != Some((viewport, scale))
     }
 
-    /// Whether the next pass must run positioned + rounding over the whole tree
-    /// rather than only the parked boundaries: some pending change escaped to
-    /// the document root, or the viewport/scale moved (which re-anchors every
-    /// positioned box and re-snaps every device pixel). `viewport`/`scale` are
-    /// the pass's current inputs.
     pub(crate) fn layout_requires_full_pass(&self, viewport: Size<f32>, scale: f32) -> bool {
         self.layout_root_dirty || self.last_layout_inputs != Some((viewport, scale))
     }
 
-    /// Record that a layout pass just completed for `(viewport, scale)`: clears
-    /// the dirty flags and remembers the inputs so the next idle frame can be
-    /// skipped. The caller also [`clear_relayout_roots`](Self::clear_relayout_roots).
     pub(crate) fn mark_layout_complete(&mut self, viewport: Size<f32>, scale: f32) {
         self.layout_dirty = false;
         self.layout_root_dirty = false;
         self.last_layout_inputs = Some((viewport, scale));
     }
 
-    /// Note that a layout-affecting invalidation just occurred (so the next
-    /// pass cannot be skipped). `reached_root` is whether its cache-clearing
-    /// walk ran to the document root without a containment boundary confining
-    /// it — if so, the next pass must also re-run positioned + rounding over the
-    /// whole tree, not just the parked boundaries. Called by
-    /// [`invalidate_layout`](Self::invalidate_layout) /
-    /// [`invalidate_layout_all`](Self::invalidate_layout_all), which own the
-    /// private layout-generation flags.
     pub(crate) fn mark_layout_dirty(&mut self, reached_root: bool) {
         self.layout_dirty = true;
         self.layout_root_dirty |= reached_root;
     }
 
-    /// Borrow the complete node slab.
     pub(crate) fn tree(&self) -> &Slab<Node<T>> {
         &self.arenas.nodes
     }
 
-    /// Mutably borrow the complete node slab.
-    ///
-    /// Mutation is only reachable through `&mut Document`, so no shared node
-    /// reference can coexist with this borrow.
     pub(crate) fn tree_mut(&mut self) -> &mut Slab<Node<T>> {
         &mut self.arenas.nodes
     }
 
-    /// Mutably iterate the layout secondary arena. Every yielded entry belongs
-    /// to one currently live node (including the document node).
     pub(crate) fn layout_data_mut(
         &mut self,
     ) -> impl Iterator<Item = (NodeId, &mut AtomicRefCell<LayoutData>)> {
         self.arenas.layout.iter_mut()
     }
 
-    /// Borrow one styling secondary-arena entry by its primary node ID.
     pub(crate) fn styling_data(&self, id: NodeId) -> Option<&StylingData> {
         self.arenas.styling.get(id)
     }
 
-    /// Mutably borrow one styling secondary-arena entry by its primary node
-    /// ID.
     pub(crate) fn styling_data_mut(&mut self, id: NodeId) -> Option<&mut StylingData> {
         self.arenas.styling.get_mut(id)
     }
 
-    /// The actual DOM document node, permanently stored at slot zero.
-    ///
-    /// # Panics
-    ///
-    /// Panics only if an internal invariant was violated and slot zero was
-    /// removed or replaced; the public mutation API cannot do either.
     #[must_use]
     pub fn root_node(&self) -> &Node<T> {
         self.arenas
@@ -367,22 +217,11 @@ impl<T> Document<T> {
             .expect("the document node is never removed")
     }
 
-    /// The first element child of the document node.
-    ///
-    /// This is derived from the real child list rather than cached as a
-    /// second root pointer.
-    ///
-    /// # Panics
-    ///
-    /// Panics if an internal document child link does not resolve. Public
-    /// mutation APIs preserve this invariant.
     #[must_use]
     pub fn root_element(&self) -> Option<&Node<T>> {
         self.root_node().children().find(|node| node.is_element())
     }
 
-    /// Debug-only: mark the document as inside a style traversal until the
-    /// returned token is dropped, including while unwinding.
     #[cfg(debug_assertions)]
     pub(crate) fn begin_flush_phase(&self) -> FlushPhaseToken {
         use std::sync::atomic::Ordering;
@@ -395,9 +234,6 @@ impl<T> Document<T> {
         }
     }
 
-    // --- node factories ---------------------------------------------------
-
-    /// Create a detached element and return its raw slab index.
     pub fn create_element(&mut self, tag: &str, payload: T) -> NodeId {
         let local_name = LocalName::from(tag);
         self.allocate_node(payload, |owner, id| {
@@ -405,7 +241,6 @@ impl<T> Document<T> {
         })
     }
 
-    /// Create a detached text node and return its raw slab index.
     pub fn create_text_node(&mut self, text: impl Into<String>, payload: T) -> NodeId {
         let text = text.into();
         self.allocate_node(payload, |owner, id| Node::new_text(owner, id, text))
@@ -434,33 +269,21 @@ impl<T> Document<T> {
         id
     }
 
-    // --- document node ----------------------------------------------------
-
-    /// Attach one element beneath the document node.
-    ///
-    /// This DOM subset permits one element child. The relationship is stored
-    /// in the slot-zero node's ordinary `children` list, and the element's
-    /// parent is the document node just like every other DOM link.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `child` is not a live element, is the document node, or the
-    /// document already has a different element child.
-    pub fn append_child(&mut self, child: NodeId) {
+    pub fn append_document_element(&mut self, child: NodeId) {
         assert_ne!(
             child, DOCUMENT_NODE_ID,
-            "Document::append_child cannot append the document to itself"
+            "Document::append_document_element cannot append the document to itself"
         );
         assert!(
             self.get(child).is_some_and(Node::is_element),
-            "Document::append_child requires a live element"
+            "Document::append_document_element requires a live element"
         );
         if self.root_element().map(Node::id) == Some(child) {
             return;
         }
         assert!(
             self.root_element().is_none(),
-            "Document::append_child: a document may have only one element child"
+            "Document::append_document_element: a document may have only one element child"
         );
 
         self.detach(child);
@@ -478,21 +301,16 @@ impl<T> Document<T> {
         self.mark_subtree_dirty(child);
     }
 
-    // --- queries ----------------------------------------------------------
-
-    /// Borrow a node by its raw slab index.
     #[must_use]
     pub fn get(&self, id: NodeId) -> Option<&Node<T>> {
         self.arenas.nodes.get(id)
     }
 
-    /// Whether the slab index is currently occupied.
     #[must_use]
-    pub fn contains(&self, id: NodeId) -> bool {
+    pub fn contains_node(&self, id: NodeId) -> bool {
         self.arenas.nodes.contains(id)
     }
 
-    /// Whether `id` is connected beneath the slot-zero document node.
     #[must_use]
     pub fn is_connected(&self, id: NodeId) -> bool {
         let mut current = id;
@@ -510,7 +328,6 @@ impl<T> Document<T> {
         }
     }
 
-    /// The position of `child` in `parent`'s child list.
     #[must_use]
     pub fn child_position(&self, parent: NodeId, child: NodeId) -> Option<usize> {
         self.get(parent)?
@@ -519,7 +336,6 @@ impl<T> Document<T> {
             .position(|&candidate| candidate == child)
     }
 
-    /// Whether `ancestor` is a strict ancestor of `descendant`.
     #[must_use]
     pub fn is_ancestor(&self, ancestor: NodeId, descendant: NodeId) -> bool {
         let mut next = self.get(descendant).and_then(Node::parent_id);
@@ -532,18 +348,9 @@ impl<T> Document<T> {
         false
     }
 
-    // --- structure --------------------------------------------------------
-
-    /// Insert `child` into the element `parent` before `before`, or append.
-    ///
-    /// # Panics
-    ///
-    /// Panics for vacant IDs, a non-element parent, the document as `child`,
-    /// an invalid insertion reference, or a link that would violate the tree
-    /// invariants.
     pub fn insert_before(&mut self, parent: NodeId, child: NodeId, before: Option<NodeId>) {
-        debug_assert!(self.contains(parent), "insert_before: stale parent");
-        debug_assert!(self.contains(child), "insert_before: stale child");
+        debug_assert!(self.contains_node(parent), "insert_before: stale parent");
+        debug_assert!(self.contains_node(child), "insert_before: stale child");
         assert!(
             self.get(parent).is_some_and(Node::is_element),
             "insert_before: parent must be a live element"
@@ -590,16 +397,10 @@ impl<T> Document<T> {
         self.note_child_list_change(parent, index);
     }
 
-    /// Append `child` as the final child of the element `parent`.
-    pub fn append(&mut self, parent: NodeId, child: NodeId) {
+    pub fn append_child(&mut self, parent: NodeId, child: NodeId) {
         self.insert_before(parent, child, None);
     }
 
-    /// Detach a non-document node from its current parent.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `child` is vacant/out of range or is the document node.
     pub fn detach(&mut self, child: NodeId) {
         assert_ne!(
             child, DOCUMENT_NODE_ID,
@@ -638,11 +439,6 @@ impl<T> Document<T> {
         }
     }
 
-    /// Remove `id` and every descendant, returning their embedder payloads.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `id` is vacant/out of range or is the document node.
     pub fn remove_subtree(&mut self, id: NodeId) -> Vec<T> {
         assert_ne!(
             id, DOCUMENT_NODE_ID,
@@ -660,8 +456,6 @@ impl<T> Document<T> {
                     .expect("subtree links always resolve while removing");
                 stack.extend_from_slice(&node.children);
             }
-            // Once the primary node is gone, use its NodeId to drop the same
-            // slot from every phase-specific slab before any ID is reused.
             let payload = self
                 .arenas
                 .payloads
@@ -680,26 +474,14 @@ impl<T> Document<T> {
                 PayloadSlot::Document => unreachable!("the document node cannot be removed"),
             }
         }
-        // Parked roots carry raw, generation-less slab ids. Prune every
-        // removed entry once, after the traversal, before a later node factory
-        // can reuse any vacant slot. Keeping the slab borrow separate lets the
-        // two vectors be borrowed independently and avoids an O(nodes × roots)
-        // scan for large removed subtrees. The `relayout_root_ids` membership
-        // set must be pruned in lockstep on the **same** predicate: a stale id
-        // left behind would, once its slab slot is reused by an unrelated node,
-        // make that node read as already-parked and wrongly stop a later
-        // invalidation walk or incremental post-pass.
         let nodes = &self.arenas.nodes;
         self.relayout_roots
-            .retain(|&(parked_id, _)| nodes.contains(parked_id));
+            .retain(|pending| nodes.contains(pending.node_id));
         self.relayout_root_ids
             .retain(|&parked_id| nodes.contains(parked_id));
         removed
     }
 
-    // --- flush bookkeeping ------------------------------------------------
-
-    /// Move reachable pending snapshots into Stylo's temporary map.
     pub(crate) fn take_snapshot_map(&mut self, root: NodeId) -> SnapshotMap {
         let mut snapshots = SnapshotMap::new();
         let mut stack = vec![root];
@@ -727,59 +509,6 @@ impl<T> Document<T> {
         snapshots
     }
 
-    /// Harvest the damage a style traversal produced and clear all of stylo's
-    /// per-node restyle state, called once from
-    /// [`Document::flush_styles_with_sink`](Self::flush_styles_with_sink)
-    /// after the traversal returns.
-    ///
-    /// Two passes:
-    /// 1. **Snapshot cleanup.** Clears the snapshot lifecycle bits on exactly the snapshotted set
-    ///    (the [`SnapshotMap`] keys, so a snapshot on a node pruned mid-flush by a `display: none`
-    ///    ancestor is still cleared). The per-node snapshot boxes were already drained into
-    ///    `snapshots` by [`take_snapshot_map`](Self::take_snapshot_map), which is dropped when the
-    ///    flush returns.
-    /// 2. **Spine walk + harvest.** Walks from `root`, descending only where `dirty_descendants` is
-    ///    set (the bit stylo sets while descending to restyled nodes and — in this postorder-less
-    ///    servo config — never clears). `root` is always inspected even with no dirty bits. For
-    ///    each visited node with style data it copies `ElementData::damage`, calls
-    ///    `ElementData::clear_restyle_state` (draining `hint` + `damage` + the restyle flags),
-    ///    unsets `dirty_descendants`, and clears the snapshot bits. If the copied damage is
-    ///    non-empty, it consumes any relayout-class effect into the document's layout caches and
-    ///    then streams `(id, StyleDamage(damage))` to `sink`. Because text nodes read inherited
-    ///    text style from their direct parent but carry no stylo data of their own, relayout damage
-    ///    on an element also clears each direct text child's box cache and retained Parley
-    ///    artifacts.
-    ///
-    /// Consuming layout damage here is load-bearing: callers may legitimately
-    /// discard [`FlushSummary`](crate::FlushSummary), and a later
-    /// [`Document::layout`](Self::layout)
-    /// performs a no-op style flush. Invalidating while the harvested ids are
-    /// known-live avoids retaining the damaged ids themselves. Boundary-stopped
-    /// invalidation may park live ancestor [`NodeId`]s on the document; the
-    /// next layout pass consumes those roots, and subtree removal purges them
-    /// before their slab slots can be reused.
-    ///
-    /// Clearing damage on harvest is the fix for a latent re-traversal bug:
-    /// stylo never clears damage for a normal restyle, and in servo builds
-    /// `element_needs_traversal` (`vendor/stylo/style/traversal.rs:226-228`)
-    /// returns `true` for any element with non-empty damage — so without this
-    /// pass every previously-restyled node would be re-traversed on every
-    /// subsequent flush. The traversal already drained the visited nodes'
-    /// hints (via `RestyleHint::propagate`'s `mem::replace`); re-clearing them
-    /// here is belt-and-braces.
-    ///
-    /// The no-lingering-snapshot guarantee is scoped to **connected** nodes: a
-    /// node snapshotted and then detached before the flush keeps its slot and
-    /// `SNAPSHOT_PRESENT` bit (it is in neither the collected map nor the
-    /// spine). That orphan state is inert while detached, is dominated by the
-    /// subtree restyle a reattach schedules, and is dropped with the detached
-    /// node if it is reclaimed.
-    ///
-    /// # Safety discipline (crate-internal)
-    ///
-    /// Runs under `&mut Document` after `driver::traverse_dom` has returned, so
-    /// no rayon worker is concurrently touching any `ElementData` `UnsafeCell`;
-    /// the `stylo_data_mut` reborrow below is exclusive.
     pub(crate) fn harvest_flush(
         &mut self,
         root: NodeId,
@@ -825,11 +554,6 @@ impl<T> Document<T> {
             };
 
             if damage.needs_relayout() {
-                // Text nodes never receive stylo damage themselves, yet their
-                // measurement depends on inherited values read from the direct
-                // parent's ComputedValues. Clear both layers of their retained
-                // state: the box cache alone is insufficient because Parley
-                // would otherwise reuse the stale committed shape artifact.
                 if let Some(element) = self.get(current) {
                     for child in element.children().filter(|child| child.is_text_node()) {
                         child.layout_data().borrow_mut().clear_measurement_cache();
@@ -837,9 +561,7 @@ impl<T> Document<T> {
                     }
                 }
                 self.invalidate_layout(current);
-                if damage.is_reconstruct() {
-                    // Box generation changed, so the parent must re-collect
-                    // its children as well as the node clearing its own cache.
+                if damage.requires_reconstruction() {
                     let parent = self.get(current).and_then(Node::parent_id);
                     if let Some(parent) = parent {
                         self.invalidate_layout(parent);
@@ -862,9 +584,6 @@ impl Drop for FlushPhaseToken {
     fn drop(&mut self) {
         use std::sync::atomic::Ordering;
 
-        // SAFETY: the flag is stored in the slot-zero node, which cannot be
-        // removed and outlives this token. It is atomic specifically so the
-        // token need not retain a Rust borrow across the mutable flush.
         #[expect(unsafe_code, reason = "clear the document-node traversal flag")]
         unsafe {
             self.flag.as_ref().store(false, Ordering::Release);
@@ -984,32 +703,21 @@ pub(crate) mod tests {
 
     #[test]
     fn remove_subtree_prunes_the_parked_id_set_so_a_reused_slot_is_not_stale() {
-        // Regression: `relayout_root_ids` must be pruned in lockstep with
-        // `relayout_roots` on `remove_subtree`. Slab ids are reused, so a stale
-        // set entry would make an unrelated replacement node read as
-        // already-parked and wrongly stop a later invalidation walk or
-        // incremental post-pass.
         let mut document: Document<()> = Document::new(device());
         let a = document.create_element("view", ());
-        document.append_child(a);
+        document.append_document_element(a);
         let b = document.create_element("view", ());
-        document.append(a, b);
+        document.append_child(a, b);
 
-        // A real pass parks a laid-out boundary; the set must track every id the
-        // vector holds regardless of how it got there.
         document.record_relayout_root(b, LayoutInput::default());
         assert!(document.is_relayout_root_parked(b));
 
-        // Removing `b` must drop its parked entry from BOTH the vector and the
-        // set.
         assert_eq!(document.remove_subtree(b).len(), 1);
         assert!(
             !document.is_relayout_root_parked(b),
             "the removed id must not remain in the parked set",
         );
 
-        // The slab reuses `b`'s freed slot for the next node; it must start
-        // unparked (before the fix, the stale set entry aliased it).
         let reused = document.create_element("view", ());
         assert_eq!(reused, b, "the freed slab slot is reused");
         assert!(

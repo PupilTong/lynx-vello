@@ -56,7 +56,7 @@ impl FontMetricsProvider for TestFontMetricsProvider {
 #[test]
 fn standard_cascade_is_embedder_neutral() {
     let mut doc: Document<()> = Document::new(device(800.0, 600.0));
-    doc.add_stylesheet_str(
+    doc.add_stylesheet(
         ".parent { color: green; } .child { color: red; }",
         StylesheetOrigin::Author,
     );
@@ -65,7 +65,7 @@ fn standard_cascade_is_embedder_neutral() {
     let child = doc.create_element("span", ());
     doc.add_class(parent, "parent");
     doc.add_class(child, "child");
-    doc.append(parent, child);
+    doc.append_child(parent, child);
 
     let parent_style = doc.resolve_style(doc.get(parent).unwrap(), None);
     assert_eq!(
@@ -85,14 +85,14 @@ fn standard_cascade_is_embedder_neutral() {
 #[test]
 fn id_class_and_style_attributes_are_reflected_dom_state() {
     let mut doc: Document<()> = Document::new(device(800.0, 600.0));
-    doc.add_stylesheet_str(
+    doc.add_stylesheet(
         r#"[id="target"][class~="hot"][style] { color: red; }"#,
         StylesheetOrigin::Author,
     );
     let root = doc.create_element("page", ());
     let target = doc.create_element("view", ());
-    doc.append_child(root);
-    doc.append(root, target);
+    doc.append_document_element(root);
+    doc.append_child(root, target);
 
     doc.set_attribute(target, "id", "target");
     doc.set_attribute(target, "class", "hot other");
@@ -100,9 +100,9 @@ fn id_class_and_style_attributes_are_reflected_dom_state() {
     doc.flush_styles();
 
     let node = doc.get(target).unwrap();
-    assert_eq!(node.id_attr(), Some("target"));
+    assert_eq!(node.id_attribute(), Some("target"));
     assert!(node.has_class("hot"));
-    assert_eq!(node.attr("style"), Some("width: 10px"));
+    assert_eq!(node.attribute("style"), Some("width: 10px"));
     let red = AbsoluteColor::srgb_legacy(255, 0, 0, 1.0);
     assert_eq!(node.computed_style().unwrap().clone_color(), red);
 
@@ -110,7 +110,7 @@ fn id_class_and_style_attributes_are_reflected_dom_state() {
     doc.flush_styles();
     let node = doc.get(target).unwrap();
     assert!(!node.has_class("hot"));
-    assert_eq!(node.attr("class"), None);
+    assert_eq!(node.attribute("class"), None);
     assert_ne!(node.computed_style().unwrap().clone_color(), red);
 
     doc.set_attribute(target, "class", "hot");
@@ -161,13 +161,13 @@ fn id_class_and_style_attributes_are_reflected_dom_state() {
 #[test]
 fn style_traversal_skips_text_nodes_and_reaches_element_siblings() {
     let mut doc: Document<()> = Document::new(device(800.0, 600.0));
-    doc.add_stylesheet_str("span { color: red; }", StylesheetOrigin::Author);
+    doc.add_stylesheet("span { color: red; }", StylesheetOrigin::Author);
     let root = doc.create_element("page", ());
     let text = doc.create_text_node("hello", ());
     let span = doc.create_element("span", ());
-    doc.append(root, text);
-    doc.append(root, span);
-    doc.append_child(root);
+    doc.append_child(root, text);
+    doc.append_child(root, span);
+    doc.append_document_element(root);
 
     doc.flush_styles();
 
@@ -189,7 +189,7 @@ fn style_traversal_skips_text_nodes_and_reaches_element_siblings() {
 #[test]
 fn text_data_changes_invalidate_the_parent_empty_selector() {
     let mut doc: Document<()> = Document::new(device(800.0, 600.0));
-    doc.add_stylesheet_str(
+    doc.add_stylesheet(
         ".box { color: blue; } .box:empty { color: red; }",
         StylesheetOrigin::Author,
     );
@@ -198,9 +198,9 @@ fn text_data_changes_invalidate_the_parent_empty_selector() {
     let box_element = doc.create_element("view", ());
     let text = doc.create_text_node("", ());
     doc.add_class(box_element, "box");
-    doc.append(box_element, text);
-    doc.append(root, box_element);
-    doc.append_child(root);
+    doc.append_child(box_element, text);
+    doc.append_child(root, box_element);
+    doc.append_document_element(root);
 
     doc.flush_styles();
     assert_eq!(
@@ -213,7 +213,7 @@ fn text_data_changes_invalidate_the_parent_empty_selector() {
         "an empty text node preserves :empty"
     );
 
-    doc.set_text_data(text, "hello");
+    doc.set_text_node_data(text, "hello");
     doc.flush_styles();
     assert_eq!(
         doc.get(box_element)
@@ -225,7 +225,7 @@ fn text_data_changes_invalidate_the_parent_empty_selector() {
         "non-empty text makes the parent fail :empty"
     );
 
-    doc.set_text_data(text, "");
+    doc.set_text_node_data(text, "");
     doc.flush_styles();
     assert_eq!(
         doc.get(box_element)
@@ -239,8 +239,8 @@ fn text_data_changes_invalidate_the_parent_empty_selector() {
 
     doc.detach(text);
     doc.flush_styles();
-    doc.set_text_data(text, "reattached");
-    doc.append(box_element, text);
+    doc.set_text_node_data(text, "reattached");
+    doc.append_child(box_element, text);
     doc.flush_styles();
     assert_eq!(
         doc.get(box_element)
@@ -268,7 +268,7 @@ fn text_data_changes_invalidate_the_parent_empty_selector() {
 #[test]
 fn edge_child_selectors_ignore_interleaved_text_nodes_during_restyle() {
     let mut doc: Document<()> = Document::new(device(800.0, 600.0));
-    doc.add_stylesheet_str(
+    doc.add_stylesheet(
         ".item { color: blue; } .item:first-child { color: red; } \
          .item:last-child { color: green; }",
         StylesheetOrigin::Author,
@@ -284,9 +284,9 @@ fn edge_child_selectors_ignore_interleaved_text_nodes_during_restyle() {
     doc.add_class(first, "item");
     doc.add_class(last, "item");
     for child in [leading_a, leading_b, first, last, trailing_a, trailing_b] {
-        doc.append(root, child);
+        doc.append_child(root, child);
     }
-    doc.append_child(root);
+    doc.append_document_element(root);
     doc.flush_styles();
 
     let color =
@@ -316,7 +316,7 @@ fn edge_child_selectors_ignore_interleaved_text_nodes_during_restyle() {
 
     let new_last = doc.create_element("view", ());
     doc.add_class(new_last, "item");
-    doc.append(root, new_last);
+    doc.append_child(root, new_last);
     doc.flush_styles();
     assert_eq!(
         color(&doc, new_last),
@@ -356,7 +356,7 @@ fn media_queries_follow_standard_viewport_updates() {
 fn documents_own_independent_stylesheets() {
     let mut first: Document<()> = Document::new(device(800.0, 600.0));
     let mut second: Document<()> = Document::new(device(800.0, 600.0));
-    first.add_stylesheet_str(".probe { color: red; }", StylesheetOrigin::Author);
+    first.add_stylesheet(".probe { color: red; }", StylesheetOrigin::Author);
 
     let first_probe = first.create_element("view", ());
     first.add_class(first_probe, "probe");
@@ -378,7 +378,14 @@ fn prebuilt_rules_cannot_cross_document_contexts() {
     let first: Document<()> = Document::new(device(800.0, 600.0));
     let mut second: Document<()> = Document::new(device(800.0, 600.0));
     let rule = first
-        .build_style_rule(".probe", [("color", "red", false)])
+        .build_style_rule(
+            ".probe",
+            [w3c_dom::CssDeclaration {
+                property: "color",
+                value: "red".into(),
+                important: false,
+            }],
+        )
         .unwrap();
     second.append_rules(vec![rule], StylesheetOrigin::Author);
 }

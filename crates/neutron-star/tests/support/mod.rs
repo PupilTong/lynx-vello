@@ -1,13 +1,5 @@
 //! Shared styling-engine-free host for neutron-star integration tests and benchmarks.
-//!
-//! The host speaks the engine's stylo vocabulary directly: `TestStyle` fields
-//! are stylo computed values, and the constructor helpers below absorb the
-//! fixture-site boilerplate of building them (`px`/`pct`/`calc_lp`,
-//! `size_*`/`max_*`, `margin_*`/`inset_*`, grid track builders, and the
-//! alignment wrappers over `AlignFlags`).
 
-// Every integration-test or benchmark target includes this module separately, and each target
-// intentionally uses only a subset of the helpers.
 #![allow(dead_code)]
 
 use std::cell::{Cell, RefCell};
@@ -39,22 +31,14 @@ use stylo::values::generics::position::PreferredRatio;
 use stylo::values::generics::{NonNegative, grid as generic_grid};
 use stylo::values::specified::align::AlignFlags;
 
-// ---------------------------------------------------------------------------
-// Stylo computed-value constructor helpers
-// ---------------------------------------------------------------------------
-
-/// `<length>` in CSS pixels.
 pub(super) fn px(value: f32) -> LengthPercentage {
     LengthPercentage::new_length(Length::new(value))
 }
 
-/// `<percentage>`; `0.5` is `50%`.
 pub(super) fn pct(fraction: f32) -> LengthPercentage {
     LengthPercentage::new_percent(Percentage(fraction))
 }
 
-/// `calc(<length> + <percentage>)`; `percentage` is a fraction, so `0.5`
-/// represents `50%`. Replaces the deleted host calc-handle arena.
 pub(super) fn calc_lp(length: f32, percentage: f32) -> LengthPercentage {
     LengthPercentage::new_calc(
         CalcNode::Sum(
@@ -68,197 +52,158 @@ pub(super) fn calc_lp(length: f32, percentage: f32) -> LengthPercentage {
     )
 }
 
-/// Non-negative `<length>` (padding, gap inner value).
 pub(super) fn npx(value: f32) -> NonNegativeLengthPercentage {
     NonNegative(px(value))
 }
 
-/// Non-negative `<percentage>`.
 pub(super) fn npct(fraction: f32) -> NonNegativeLengthPercentage {
     NonNegative(pct(fraction))
 }
 
-/// Non-negative `calc()`.
 pub(super) fn ncalc(length: f32, percentage: f32) -> NonNegativeLengthPercentage {
     NonNegative(calc_lp(length, percentage))
 }
 
-/// Non-negative `<number>` (flex factors, linear weights).
 pub(super) fn nn(value: f32) -> NonNegativeNumber {
     NonNegativeNumber::from(value)
 }
 
-/// `width`/`height`/`min-*`: `auto`.
 pub(super) fn size_auto() -> StyleSize {
     StyleSize::auto()
 }
 
-/// `width`/`height`/`min-*`: `<length>`.
 pub(super) fn size_px(value: f32) -> StyleSize {
     StyleSize::LengthPercentage(npx(value))
 }
 
-/// `width`/`height`/`min-*`: `<percentage>`.
 pub(super) fn size_pct(fraction: f32) -> StyleSize {
     StyleSize::LengthPercentage(npct(fraction))
 }
 
-/// `width`/`height`/`min-*`: `calc()`.
 pub(super) fn size_calc(length: f32, percentage: f32) -> StyleSize {
     StyleSize::LengthPercentage(ncalc(length, percentage))
 }
 
-/// `width`/`height`/`min-*`: `min-content`.
 pub(super) fn size_min_content() -> StyleSize {
     StyleSize::MinContent
 }
 
-/// `width`/`height`/`min-*`: `max-content`.
 pub(super) fn size_max_content() -> StyleSize {
     StyleSize::MaxContent
 }
 
-/// `width`/`height`/`min-*`: `fit-content(<length>)`.
 pub(super) fn size_fit_content_px(value: f32) -> StyleSize {
     StyleSize::FitContentFunction(npx(value))
 }
 
-/// `width`/`height`/`min-*`: `fit-content(<percentage>)`.
 pub(super) fn size_fit_content_pct(fraction: f32) -> StyleSize {
     StyleSize::FitContentFunction(npct(fraction))
 }
 
-/// `max-width`/`max-height`: `none`.
 pub(super) fn max_none() -> MaxSize {
     MaxSize::none()
 }
 
-/// `max-width`/`max-height`: `<length>`.
 pub(super) fn max_px(value: f32) -> MaxSize {
     MaxSize::LengthPercentage(npx(value))
 }
 
-/// `max-width`/`max-height`: `<percentage>`.
 pub(super) fn max_pct(fraction: f32) -> MaxSize {
     MaxSize::LengthPercentage(npct(fraction))
 }
 
-/// `max-width`/`max-height`: `calc()`.
 pub(super) fn max_calc(length: f32, percentage: f32) -> MaxSize {
     MaxSize::LengthPercentage(ncalc(length, percentage))
 }
 
-/// `max-width`/`max-height`: `min-content`.
 pub(super) fn max_min_content() -> MaxSize {
     MaxSize::MinContent
 }
 
-/// `max-width`/`max-height`: `max-content`.
 pub(super) fn max_max_content() -> MaxSize {
     MaxSize::MaxContent
 }
 
-/// `max-width`/`max-height`: `fit-content(<length>)`.
 pub(super) fn max_fit_content_px(value: f32) -> MaxSize {
     MaxSize::FitContentFunction(npx(value))
 }
 
-/// `margin-*`: `<length>`.
 pub(super) fn margin_px(value: f32) -> Margin {
     Margin::LengthPercentage(px(value))
 }
 
-/// `margin-*`: `<percentage>`.
 pub(super) fn margin_pct(fraction: f32) -> Margin {
     Margin::LengthPercentage(pct(fraction))
 }
 
-/// `margin-*`: `calc()`.
 pub(super) fn margin_calc(length: f32, percentage: f32) -> Margin {
     Margin::LengthPercentage(calc_lp(length, percentage))
 }
 
-/// `margin-*`: `auto`.
 pub(super) fn margin_auto() -> Margin {
     Margin::Auto
 }
 
-/// `top`/`right`/`bottom`/`left`: `auto`.
 pub(super) fn inset_auto() -> Inset {
     Inset::Auto
 }
 
-/// `top`/`right`/`bottom`/`left`: `<length>`.
 pub(super) fn inset_px(value: f32) -> Inset {
     Inset::LengthPercentage(px(value))
 }
 
-/// `top`/`right`/`bottom`/`left`: `<percentage>`.
 pub(super) fn inset_pct(fraction: f32) -> Inset {
     Inset::LengthPercentage(pct(fraction))
 }
 
-/// A used border width in CSS pixels.
 pub(super) fn border_px(value: f32) -> BorderSideWidth {
     BorderSideWidth(Au::from_f32_px(value))
 }
 
-/// `contain-intrinsic-*: <length>`.
 pub(super) fn contain_intrinsic_px(value: f32) -> ContainIntrinsicSize {
     ContainIntrinsicSize::Length(NonNegative(Length::new(value)))
 }
 
-/// `contain-intrinsic-*: auto <length>` (treated as its length in v1).
 pub(super) fn contain_intrinsic_auto_px(value: f32) -> ContainIntrinsicSize {
     ContainIntrinsicSize::AutoLength(NonNegative(Length::new(value)))
 }
 
-/// `flex-basis: auto`.
 pub(super) fn basis_auto() -> FlexBasis {
     FlexBasis::auto()
 }
 
-/// `flex-basis: <length>`.
 pub(super) fn basis_px(value: f32) -> FlexBasis {
     FlexBasis::Size(size_px(value))
 }
 
-/// `flex-basis: <percentage>`.
 pub(super) fn basis_pct(fraction: f32) -> FlexBasis {
     FlexBasis::Size(size_pct(fraction))
 }
 
-/// `flex-basis: calc()`.
 pub(super) fn basis_calc(length: f32, percentage: f32) -> FlexBasis {
     FlexBasis::Size(size_calc(length, percentage))
 }
 
-/// `flex-basis: fit-content(<length>)`.
 pub(super) fn basis_fit_content_px(value: f32) -> FlexBasis {
     FlexBasis::Size(size_fit_content_px(value))
 }
 
-/// `flex-basis: content`.
 pub(super) fn basis_content() -> FlexBasis {
     FlexBasis::Content
 }
 
-/// One `gap` axis: `normal` (resolves to zero).
 pub(super) fn gap_normal() -> NonNegativeLengthPercentageOrNormal {
     NonNegativeLengthPercentageOrNormal::Normal
 }
 
-/// One `gap` axis: `<length>`.
 pub(super) fn gap_px(value: f32) -> NonNegativeLengthPercentageOrNormal {
     NonNegativeLengthPercentageOrNormal::LengthPercentage(npx(value))
 }
 
-/// One `gap` axis: `<percentage>`.
 pub(super) fn gap_pct(fraction: f32) -> NonNegativeLengthPercentageOrNormal {
     NonNegativeLengthPercentageOrNormal::LengthPercentage(npct(fraction))
 }
 
-/// `aspect-ratio: <ratio>` (as width / height).
 pub(super) fn ratio(value: f32) -> AspectRatio {
     AspectRatio {
         auto: false,
@@ -266,22 +211,18 @@ pub(super) fn ratio(value: f32) -> AspectRatio {
     }
 }
 
-/// `align-items` / the container half of the deleted cross-gravity channel.
 pub(super) fn items(flags: AlignFlags) -> ItemPlacement {
     ItemPlacement(flags)
 }
 
-/// `align-self`/`justify-self` / the deleted per-item layout-gravity channel.
 pub(super) fn self_align(flags: AlignFlags) -> SelfAlignment {
     SelfAlignment(flags)
 }
 
-/// `align-content`/`justify-content` / the deleted main-gravity channel.
 pub(super) fn content(flags: AlignFlags) -> ContentDistribution {
     ContentDistribution::new(flags)
 }
 
-/// `justify-items`.
 pub(super) fn justify_items(flags: AlignFlags) -> JustifyItems {
     let specified = stylo::values::specified::align::JustifyItems(ItemPlacement(flags));
     JustifyItems {
@@ -290,110 +231,82 @@ pub(super) fn justify_items(flags: AlignFlags) -> JustifyItems {
     }
 }
 
-/// The reserved "no reference" relative-layout sentinel.
 pub(super) const RELATIVE_NONE: i32 = -1;
 
-/// The reserved "the parent" relative-layout sentinel.
 pub(super) const RELATIVE_PARENT: i32 = 0;
 
-// ---------------------------------------------------------------------------
-// Grid track constructor helpers
-// ---------------------------------------------------------------------------
-
-/// One computed grid track sizing function.
 pub(super) type TestTrack = generic_grid::TrackSize<LengthPercentage>;
 
-/// One computed track breadth.
 pub(super) type TestTrackBreadth = generic_grid::TrackBreadth<LengthPercentage>;
 
-/// One computed track-list entry (a track or a repetition).
 pub(super) type TestTrackListValue = generic_grid::TrackListValue<LengthPercentage, i32>;
 
-/// A `repeat()` count.
 pub(super) type TestRepeatCount = generic_grid::RepeatCount<i32>;
 
-/// Track breadth: `<length>`.
 pub(super) fn breadth_px(value: f32) -> TestTrackBreadth {
     generic_grid::TrackBreadth::Breadth(px(value))
 }
 
-/// Track breadth: `<percentage>`.
 pub(super) fn breadth_pct(fraction: f32) -> TestTrackBreadth {
     generic_grid::TrackBreadth::Breadth(pct(fraction))
 }
 
-/// Track breadth: `calc()`.
 pub(super) fn breadth_calc(length: f32, percentage: f32) -> TestTrackBreadth {
     generic_grid::TrackBreadth::Breadth(calc_lp(length, percentage))
 }
 
-/// Track breadth: `<flex>` (`fr`).
 pub(super) fn breadth_fr(value: f32) -> TestTrackBreadth {
     generic_grid::TrackBreadth::Flex(generic_grid::Flex(value))
 }
 
-/// Track breadth: `auto`.
 pub(super) fn breadth_auto() -> TestTrackBreadth {
     generic_grid::TrackBreadth::Auto
 }
 
-/// Track breadth: `min-content`.
 pub(super) fn breadth_min_content() -> TestTrackBreadth {
     generic_grid::TrackBreadth::MinContent
 }
 
-/// Track breadth: `max-content`.
 pub(super) fn breadth_max_content() -> TestTrackBreadth {
     generic_grid::TrackBreadth::MaxContent
 }
 
-/// Track: single breadth.
 pub(super) fn track(breadth: TestTrackBreadth) -> TestTrack {
     generic_grid::TrackSize::Breadth(breadth)
 }
 
-/// Track: `<length>`.
 pub(super) fn track_px(value: f32) -> TestTrack {
     track(breadth_px(value))
 }
 
-/// Track: `<percentage>`.
 pub(super) fn track_pct(fraction: f32) -> TestTrack {
     track(breadth_pct(fraction))
 }
 
-/// Track: `<flex>` (`fr`).
 pub(super) fn track_fr(value: f32) -> TestTrack {
     track(breadth_fr(value))
 }
 
-/// Track: `auto`.
 pub(super) fn track_auto() -> TestTrack {
     track(breadth_auto())
 }
 
-/// Track: `min-content`.
 pub(super) fn track_min_content() -> TestTrack {
     track(breadth_min_content())
 }
 
-/// Track: `max-content`.
 pub(super) fn track_max_content() -> TestTrack {
     track(breadth_max_content())
 }
 
-/// Track: `minmax(<breadth>, <breadth>)`.
 pub(super) fn track_minmax(min: TestTrackBreadth, max: TestTrackBreadth) -> TestTrack {
     generic_grid::TrackSize::Minmax(min, max)
 }
 
-/// Track: `fit-content(<length-percentage>)`.
 pub(super) fn track_fit_content(limit: TestTrackBreadth) -> TestTrack {
     generic_grid::TrackSize::FitContent(limit)
 }
 
-/// A `repeat()` track-list entry (line names left empty, honoring the
-/// `line_names.len() == track_sizes.len() + 1` invariant).
 pub(super) fn track_repeat(count: TestRepeatCount, tracks: Vec<TestTrack>) -> TestTrackListValue {
     generic_grid::TrackListValue::TrackRepeat(generic_grid::TrackRepeat {
         count,
@@ -402,9 +315,6 @@ pub(super) fn track_repeat(count: TestRepeatCount, tracks: Vec<TestTrack>) -> Te
     })
 }
 
-/// A template from explicit track-list entries. `auto_repeat_index` is the
-/// index of the `auto-fill`/`auto-fit` repetition in `values`, or
-/// `usize::MAX` when there is none.
 pub(super) fn template_values(
     values: Vec<TestTrackListValue>,
     auto_repeat_index: usize,
@@ -417,7 +327,6 @@ pub(super) fn template_values(
     }))
 }
 
-/// A template of plain tracks (no repetitions, no line names).
 pub(super) fn track_list(tracks: Vec<TestTrack>) -> GridTemplateComponent {
     template_values(
         tracks
@@ -428,17 +337,14 @@ pub(super) fn track_list(tracks: Vec<TestTrack>) -> GridTemplateComponent {
     )
 }
 
-/// `grid-template-rows`/`-columns`: `none`.
 pub(super) fn template_none() -> GridTemplateComponent {
     GridTemplateComponent::None
 }
 
-/// `grid-auto-rows`/`-columns`.
 pub(super) fn implicit_tracks(tracks: Vec<TestTrack>) -> ImplicitGridTracks {
     generic_grid::ImplicitGridTracks(tracks.into())
 }
 
-/// Grid placement: a 1-based (possibly negative) line number.
 pub(super) fn grid_line(line: i32) -> GridLine {
     GridLine {
         line_num: line,
@@ -446,7 +352,6 @@ pub(super) fn grid_line(line: i32) -> GridLine {
     }
 }
 
-/// Grid placement: `span <n>`.
 pub(super) fn grid_span(span: i32) -> GridLine {
     GridLine {
         line_num: span,
@@ -455,14 +360,9 @@ pub(super) fn grid_span(span: i32) -> GridLine {
     }
 }
 
-/// Grid placement: `auto`.
 pub(super) fn grid_auto_placement() -> GridLine {
     GridLine::auto()
 }
-
-// ---------------------------------------------------------------------------
-// Host tree
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TestDisplay {
@@ -830,10 +730,6 @@ impl RelativeItemStyle for TestStyle {
     }
 }
 
-/// A static test-leaf measurement strategy.
-///
-/// `Function` accepts a function pointer rather than a trait object, keeping the shared host
-/// statically described while allowing measurements that depend on the normalized constraints.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum TestMeasure {
     Intrinsic {
@@ -1173,9 +1069,6 @@ impl TestIntrinsicMeasure {
     }
 }
 
-/// Test-local node identity: a dense index into [`TestTree`]. Builders hand
-/// these out during the mutation phase; layout and assertions resolve them
-/// to borrowed [`TestRef`] handles.
 pub(super) type TestId = usize;
 
 #[derive(Debug, Clone)]
@@ -1289,7 +1182,7 @@ impl<'t> LayoutNode for TestRef<'t> {
         &self.source().style
     }
 
-    fn compute_child_layout(self, input: LayoutInput) -> LayoutOutput {
+    fn compute_layout(self, input: LayoutInput) -> LayoutOutput {
         let tree = self.tree;
         tree.child_layout_calls
             .set(tree.child_layout_calls.get() + 1);
@@ -1301,8 +1194,6 @@ impl<'t> LayoutNode for TestRef<'t> {
             return LayoutOutput::HIDDEN;
         }
 
-        // content-visibility skipping routes here before the cache boundary,
-        // mirroring the display:none discipline (see compute module docs).
         if node.style.skips_contents {
             let output = compute_skipped_contents_layout(self, input);
             self.slots().output.set(output);
@@ -1353,7 +1244,7 @@ impl<'t> LayoutNode for TestRef<'t> {
         read(&layout)
     }
 
-    fn set_final_layout(self, layout: Layout) {
+    fn set_rounded_layout(self, layout: Layout) {
         *self.slots().final_layout.borrow_mut() = layout;
     }
 
@@ -1364,17 +1255,17 @@ impl<'t> LayoutNode for TestRef<'t> {
         self.slots().static_position.set(Some(static_position));
     }
 
-    fn cache_get(self, input: LayoutInput) -> Option<LayoutOutput> {
+    fn cached_layout(self, input: LayoutInput) -> Option<LayoutOutput> {
         self.tree.caches.as_ref()?[self.index].borrow().get(input)
     }
 
-    fn cache_store(self, input: LayoutInput, output: LayoutOutput) {
+    fn store_cached_layout(self, input: LayoutInput, output: LayoutOutput) {
         if let Some(caches) = &self.tree.caches {
             caches[self.index].borrow_mut().store(input, output);
         }
     }
 
-    fn cache_clear(self) {
+    fn clear_layout_cache(self) {
         if let Some(caches) = &self.tree.caches {
             caches[self.index].borrow_mut().clear();
         }
@@ -1382,7 +1273,6 @@ impl<'t> LayoutNode for TestRef<'t> {
 }
 
 impl TestTree {
-    /// Resolves a builder-returned id to a borrowed node handle.
     pub(super) fn node(&self, id: TestId) -> TestRef<'_> {
         TestRef {
             tree: self,
@@ -1390,9 +1280,8 @@ impl TestTree {
         }
     }
 
-    /// Dispatches layout on `id` — the entry point tests use directly.
-    pub(super) fn compute_child_layout(&self, id: TestId, input: LayoutInput) -> LayoutOutput {
-        self.node(id).compute_child_layout(input)
+    pub(super) fn compute_layout(&self, id: TestId, input: LayoutInput) -> LayoutOutput {
+        self.node(id).compute_layout(input)
     }
 
     pub(super) fn enable_cache(&mut self) {
@@ -1526,15 +1415,10 @@ impl TestTree {
         &mut self.nodes[id]
     }
 
-    /// The [`LayoutInput`] a node's reference cache was last committed with,
-    /// if caching is enabled and it holds a committed layout. The containment
-    /// benchmark captures a relayout boundary's input before invalidation.
     pub(super) fn committed_input(&self, id: TestId) -> Option<LayoutInput> {
         self.caches.as_ref()?[id].borrow().committed_input()
     }
 
-    /// The interior-mutable session slots of one node; tests mutate them
-    /// through the `Cell`/`RefCell` fields.
     pub(super) fn session_node(&self, id: TestId) -> &TestSessionNode {
         &self.session[id]
     }
@@ -1598,11 +1482,11 @@ pub(super) fn perform_layout(
     known_dimensions: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
 ) -> LayoutOutput {
-    tree.compute_child_layout(
+    tree.compute_layout(
         root,
-        LayoutInput::perform_layout(
+        LayoutInput::commit(
             known_dimensions,
-            available_space.into_options(),
+            available_space.definite_values(),
             available_space,
         ),
     )
@@ -1631,11 +1515,11 @@ pub(super) fn measure_layout(
     known_dimensions: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
 ) -> LayoutOutput {
-    tree.compute_child_layout(
+    tree.compute_layout(
         root,
-        LayoutInput::compute_size(
+        LayoutInput::measure(
             known_dimensions,
-            available_space.into_options(),
+            available_space.definite_values(),
             available_space,
             RequestedAxis::Both,
         ),

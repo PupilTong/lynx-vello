@@ -1,25 +1,4 @@
 //! Grid style protocol (CSS Grid Layout Module Level 2, minus subgrid).
-//!
-//! Track lists are the one place a style value is a *sequence*, so this is
-//! where the protocol leans hardest on borrowing: [`GridContainerStyle`]
-//! exposes `grid-template-*` and `grid-auto-*` as **borrowed stylo values**
-//! (`&GridTemplateComponent`, `&ImplicitGridTracks`) lent from the style
-//! view, and the placements/gap follow the crate-wide borrowed-accessor
-//! convention (`&GridLine`, `Size<&…>`). A stylo-backed host returns
-//! references straight into its `ComputedValues`; the algorithm expands
-//! `repeat()` groups into its own scratch exactly once. Bind the style view
-//! first (`let style = node.style();`) before borrowing — the discipline
-//! documented in [`tree`](crate::tree).
-//!
-//! # Numeric lines only
-//!
-//! Placements are stylo [`GridLine`] values consumed numerically:
-//! `line_num == 0` means the number is absent (`auto` unless `is_span`), and
-//! line *names* — in placements and in template line-name lists — are
-//! ignored. Named lines, named areas (`grid-template-areas`), and `subgrid`
-//! are **not protocol**: name→number resolution is a host concern. Lynx never
-//! implemented named lines/areas, so the lynx-vello adapter needs no such
-//! resolution.
 
 use std::sync::LazyLock;
 
@@ -32,63 +11,39 @@ use stylo::values::computed::{
 use crate::geometry::Size;
 use crate::style::CoreStyle;
 
-/// Lendable initial values for the defaulted borrowed accessors (the
-/// `GridLine` constructor is not `const`; the atom it carries is static).
 static GRID_LINE_AUTO: LazyLock<GridLine> = LazyLock::new(GridLine::auto);
 static GAP_NORMAL: NonNegativeLengthPercentageOrNormal =
     NonNegativeLengthPercentageOrNormal::Normal;
 
-/// Style of a node *as a grid container*.
-///
-/// The borrowed track-list accessors have no defaults (they lend host
-/// storage); everything else defaults to the CSS initial value.
-/// [`GridTemplateComponent::None`] means "no explicit tracks in this axis",
-/// and an empty [`ImplicitGridTracks`] means `auto`.
 pub trait GridContainerStyle: CoreStyle {
-    /// `grid-template-rows`.
     fn grid_template_rows(&self) -> &GridTemplateComponent;
 
-    /// `grid-template-columns`.
     fn grid_template_columns(&self) -> &GridTemplateComponent;
 
-    /// `grid-auto-rows` — sizing for implicitly-created rows. Cycled if more
-    /// implicit tracks exist than entries (CSS Grid §7.6); empty means
-    /// `auto`.
     fn grid_auto_rows(&self) -> &ImplicitGridTracks;
 
-    /// `grid-auto-columns` — sizing for implicitly-created columns.
     fn grid_auto_columns(&self) -> &ImplicitGridTracks;
 
-    /// `grid-auto-flow` (bitflags: `ROW`/`COLUMN` axis plus `DENSE`
-    /// backfilling, CSS Grid §8.5).
     fn grid_auto_flow(&self) -> GridAutoFlow {
         GridAutoFlow::ROW
     }
 
-    /// `gap` (`column-gap` is `width`, `row-gap` is `height`), lent from
-    /// the style view; `normal` resolves to zero.
-    ///
-    /// Percentage basis: the container's content-box size in the gap's axis.
     fn gap(&self) -> Size<&NonNegativeLengthPercentageOrNormal> {
         Size::new(&GAP_NORMAL, &GAP_NORMAL)
     }
 
-    /// `align-content` — block-axis distribution of tracks.
     fn align_content(&self) -> ContentDistribution {
         ContentDistribution::normal()
     }
 
-    /// `justify-content` — inline-axis distribution of tracks.
     fn justify_content(&self) -> ContentDistribution {
         ContentDistribution::normal()
     }
 
-    /// `align-items` — default block-axis alignment of items.
     fn align_items(&self) -> ItemPlacement {
         ItemPlacement::normal()
     }
 
-    /// `justify-items` — default inline-axis alignment of items.
     fn justify_items(&self) -> JustifyItems {
         let specified = stylo::values::specified::align::JustifyItems(ItemPlacement::normal());
         JustifyItems {
@@ -98,41 +53,31 @@ pub trait GridContainerStyle: CoreStyle {
     }
 }
 
-/// Style of a node *as a grid item*.
-///
-/// Defaults are the CSS initial values.
 pub trait GridItemStyle: CoreStyle {
-    /// `grid-row-start`, lent from the style view (line idents are refcounted).
     fn grid_row_start(&self) -> &GridLine {
         &GRID_LINE_AUTO
     }
 
-    /// `grid-row-end`, lent from the style view (line idents are refcounted).
     fn grid_row_end(&self) -> &GridLine {
         &GRID_LINE_AUTO
     }
 
-    /// `grid-column-start`, lent from the style view (line idents are refcounted).
     fn grid_column_start(&self) -> &GridLine {
         &GRID_LINE_AUTO
     }
 
-    /// `grid-column-end`, lent from the style view (line idents are refcounted).
     fn grid_column_end(&self) -> &GridLine {
         &GRID_LINE_AUTO
     }
 
-    /// `align-self`. `auto` defers to the container's `align-items`.
     fn align_self(&self) -> SelfAlignment {
         SelfAlignment::auto()
     }
 
-    /// `justify-self`. `auto` defers to the container's `justify-items`.
     fn justify_self(&self) -> SelfAlignment {
         SelfAlignment::auto()
     }
 
-    /// `order` — layout/paint reordering among siblings; lower comes first.
     fn order(&self) -> i32 {
         0
     }

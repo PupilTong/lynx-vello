@@ -1,40 +1,11 @@
 //! [`WidgetHandle`] — the canonical, retention-bearing element handle.
-//!
-//! The scripting engine owns widgets: each JS element wrapper holds one
-//! `WidgetHandle` clone, and **a live handle is a liveness guarantee** — the
-//! tree never frees a node while any handle into its subtree exists. That is
-//! what raw ids cannot express, and why the PAPI surface traffics
-//! exclusively in handles:
-//!
-//! - **Context ownership.** Runtime JS contexts do not exchange handles. The native PAPI boundary
-//!   can still reject a misrouted handle from its existing `Reaper` owner, without adding identity
-//!   state to the DOM or `NodeId`.
-//! - **Canonicality.** For each node there is at most one live `HandleInner`; every lookup for that
-//!   node clones the same `Arc`, so `Arc` strong counts are exactly the number of outstanding
-//!   external references — the retention signal reclamation is built on.
-//! - **Drop-driven reclamation.** Dropping the last clone for a node pushes its id onto the tree's
-//!   crate-private `Reaper` queue. At the next operation boundary the tree sweeps: a **detached**
-//!   subtree in which *no* node has a live handle is freed atomically (slab entries + `unique_id`
-//!   index). Attached nodes are never collected — the tree itself keeps document content alive,
-//!   exactly like the browser, where the DOM tree retains its nodes and GC only ever collects
-//!   *detached* ones nobody references.
-//!
-//! There is deliberately **no public disposal API**: freeing is a consequence
-//! of ownership (drop your handles), not an opcode.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use w3c_dom::NodeId;
 
-/// A shared, cloneable handle to one widget in one [`WidgetTree`].
-///
-/// Cheap to clone (`Arc`); equality and hashing are **identity** — two
-/// handles are equal exactly when they designate the same node of the same
-/// tree. While any clone lives, the node (and, transitively, the detached
-/// subtree containing it) is retained.
-///
-/// [`WidgetTree`]: crate::WidgetTree
+/// A shared, cloneable handle to one widget in one [`WidgetTree`](crate::WidgetTree).
 #[derive(Clone)]
 pub struct WidgetHandle {
     pub(crate) inner: Arc<HandleInner>,
@@ -45,7 +16,6 @@ impl WidgetHandle {
         self.inner.id
     }
 
-    /// Whether this handle was minted by the context using `reaper`.
     pub(crate) fn belongs_to(&self, reaper: &Arc<Reaper>) -> bool {
         std::ptr::eq(self.inner.reaper.as_ptr(), Arc::as_ptr(reaper))
     }
@@ -76,8 +46,6 @@ impl std::fmt::Debug for WidgetHandle {
 /// The canonical per-node allocation behind every [`WidgetHandle`] clone.
 pub(crate) struct HandleInner {
     pub(crate) id: NodeId,
-    /// Where to report this node when the last clone drops. `Weak`: handles
-    /// must not keep their tree's plumbing alive.
     reaper: Weak<Reaper>,
 }
 
@@ -92,9 +60,6 @@ impl HandleInner {
 
 impl Drop for HandleInner {
     fn drop(&mut self) {
-        // Last clone gone: the node is no longer externally retained. Queue
-        // it; the owning tree decides at its next sweep whether that makes a
-        // detached subtree collectible.
         if let Some(reaper) = self.reaper.upgrade() {
             reaper.note_dropped(self.id);
         }
@@ -102,14 +67,8 @@ impl Drop for HandleInner {
 }
 
 /// The drop-notification channel between handles and their tree.
-///
-/// Handles are dropped wherever the embedder pleases (including from wrapper
-/// finalizers on other threads — `Arc`/`Mutex`, not `Rc`/`RefCell`, so the
-/// tree stays `Send`); the tree drains the queue at operation boundaries.
 pub(crate) struct Reaper {
     dropped: Mutex<Vec<NodeId>>,
-    /// Cheap "anything queued?" flag so the per-operation sweep is a single
-    /// relaxed load in the steady state.
     dirty: AtomicBool,
 }
 
@@ -129,8 +88,6 @@ impl Reaper {
         self.dirty.store(true, Ordering::Release);
     }
 
-    /// Take the queued drop notices, if any (clears the dirty flag first, so
-    /// a drop racing the drain is picked up by the next sweep).
     pub(crate) fn take_dropped(&self) -> Option<Vec<NodeId>> {
         if !self.dirty.swap(false, Ordering::AcqRel) {
             return None;

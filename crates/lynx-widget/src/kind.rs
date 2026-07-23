@@ -1,40 +1,23 @@
 //! Lynx widget kinds and the tag-name mapping.
 
-/// The kind of a Lynx widget.
-///
-/// `NoneElement` is Lynx's `<none>` element — spelled that way (rather than
-/// `None`) to avoid clashing with `Option::None` at call sites that store a
-/// `WidgetKind` inside an `Option`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WidgetKind {
-    /// `<page>` — the root element.
     Page,
-    /// `<view>` — the generic box container.
     View,
-    /// `<text>` — a text container.
     Text,
-    /// `<raw-text>` — a leaf holding literal text content.
     RawText,
-    /// `<image>`.
     Image,
-    /// `<scroll-view>`.
     ScrollView,
-    /// `<list>`.
     List,
-    /// `<list-item>`.
     ListItem,
-    /// `<wrapper>` — a transparent grouping element.
     Wrapper,
-    /// `<none>` — Lynx's explicit "no element" element.
     NoneElement,
-    /// Any tag not recognised as a built-in Lynx element.
     Unknown,
 }
 
 impl WidgetKind {
-    /// Classify a Lynx tag name. Unrecognised tags map to [`WidgetKind::Unknown`].
     #[must_use]
-    pub fn from_tag(tag: &str) -> Self {
+    pub fn from_tag_name(tag: &str) -> Self {
         match tag {
             "page" => Self::Page,
             "view" => Self::View,
@@ -50,10 +33,6 @@ impl WidgetKind {
         }
     }
 
-    /// The canonical Lynx tag name for this kind.
-    ///
-    /// [`WidgetKind::Unknown`] has no canonical tag (the real tag string lives
-    /// in the widget's `tag` field); it reports `"unknown"`.
     #[must_use]
     pub const fn tag_name(self) -> &'static str {
         match self {

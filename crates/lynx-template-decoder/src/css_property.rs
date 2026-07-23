@@ -1,14 +1,8 @@
-//! CSS property model of the `StyleInfo` section.
-//!
-//! These types mirror
-//! `packages/web-platform/web-core/src/template/template_sections/style_info/css_property.rs`
-//! in lynx-stack **exactly** — field order and enum variant order define the
-//! rkyv wire format. Do not reorder anything here.
+//! rkyv 0.7 wire model for `StyleInfo` CSS properties; declaration and enum
+//! ordering is serialized ABI.
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
-/// Canonical property names, indexed by [`CssPropertyId`] discriminant.
-/// Mirrors `STYLE_PROPERTY_MAP` in web-core (index 0 is the Unknown slot).
 pub const STYLE_PROPERTY_MAP: &[&str] = &[
     "",
     "top",
@@ -228,7 +222,6 @@ pub const STYLE_PROPERTY_MAP: &[&str] = &[
     "offset-distance",
 ];
 
-/// Interned CSS property id. Mirrors web-core's `CSSPropertyEnum`.
 #[expect(missing_docs, reason = "216 self-describing CSS property variants")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Archive, RkyvDeserialize, RkyvSerialize)]
 #[archive(check_bytes)]
@@ -371,12 +364,12 @@ pub enum CssPropertyId {
     RelativeAlignRight = 133,
     RelativeAlignBottom = 134,
     RelativeAlignLeft = 135,
-    RelativeToTop = 136,
-    RelativeToRight = 137,
-    RelativeToBottom = 138,
-    RelativeToLeft = 139,
-    RelativeToLayoutOnce = 140,
-    RelativeToCenter = 141,
+    RelativeTopOf = 136,
+    RelativeRightOf = 137,
+    RelativeBottomOf = 138,
+    RelativeLeftOf = 139,
+    RelativeLayoutOnce = 140,
+    RelativeCenter = 141,
     EnterTransitionName = 142,
     ExitTransitionName = 143,
     PauseTransitionName = 144,
@@ -399,10 +392,10 @@ pub enum CssPropertyId {
     BorderEndStartRadius = 161,
     BorderStartEndRadius = 162,
     BorderEndEndRadius = 163,
-    RelativeToAlignInlineStart = 164,
-    RelativeToAlignInlineEnd = 165,
-    RelativeToInlineStartOf = 166,
-    RelativeToInlineEndOf = 167,
+    RelativeAlignInlineStart = 164,
+    RelativeAlignInlineEnd = 165,
+    RelativeInlineStartOf = 166,
+    RelativeInlineEndOf = 167,
     InsetInlineStart = 168,
     InsetInlineEnd = 169,
     MaskImage = 170,
@@ -454,7 +447,6 @@ pub enum CssPropertyId {
 }
 
 impl CssPropertyId {
-    /// The canonical hyphenated property name, or `""` for [`Self::Unknown`].
     #[must_use]
     pub fn name(self) -> &'static str {
         STYLE_PROPERTY_MAP[self as u32 as usize]
@@ -466,14 +458,11 @@ impl CssPropertyId {
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvDeserialize, RkyvSerialize)]
 #[archive(check_bytes)]
 pub struct CssProperty {
-    /// Interned property id.
     pub id: CssPropertyId,
-    /// Raw property name; `Some` only when `id` is [`CssPropertyId::Unknown`].
     pub unknown_name: Option<String>,
 }
 
 impl CssProperty {
-    /// The property name as written in the source CSS.
     #[must_use]
     pub fn name(&self) -> &str {
         if self.id == CssPropertyId::Unknown {
@@ -489,9 +478,7 @@ impl CssProperty {
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvDeserialize, RkyvSerialize)]
 #[archive(check_bytes)]
 pub struct ValueToken {
-    /// Token type; see [`token_types`].
     pub token_type: u8,
-    /// Raw token text (whitespace tokens carry the whitespace itself).
     pub value: String,
 }
 
@@ -500,27 +487,21 @@ pub struct ValueToken {
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvDeserialize, RkyvSerialize)]
 #[archive(check_bytes)]
 pub struct ParsedDeclaration {
-    /// The property being set.
-    pub property_id: CssProperty,
-    /// The declaration value, tokenized. Concatenating the token values
-    /// reproduces the source text (whitespace is preserved as tokens).
-    pub value_token_list: Vec<ValueToken>,
-    /// Always `false` in practice — Lynx does not support `!important`.
+    pub property: CssProperty,
+    pub value_tokens: Vec<ValueToken>,
     pub is_important: bool,
 }
 
 impl ParsedDeclaration {
-    /// Reassembles the declaration value text from its tokens.
     #[must_use]
     pub fn value_text(&self) -> String {
-        self.value_token_list
+        self.value_tokens
             .iter()
             .map(|token| token.value.as_str())
             .collect()
     }
 }
 
-/// CSS token type constants, mirroring web-core's `css_tokenizer/token_types.rs`.
 pub mod token_types {
     #![expect(missing_docs, reason = "names follow the CSS Syntax spec")]
     pub const EOF_TOKEN: u8 = 0;

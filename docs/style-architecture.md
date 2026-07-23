@@ -33,7 +33,8 @@ Document/Node design (this document describes the current shape).
   document — `Document::create_element` and `Document::create_text_node` are the kind-specific
   factories, and every DOM operation is a `Document` method.
 - **Invalidation is carried by the operations.** Each matching-relevant setter
-  (`set_classes`, `set_attribute`, `set_state`, `set_inline_style`, structural
+  (`set_classes`, `set_attribute`, `add_element_state` / `remove_element_state`,
+  `set_inline_style`, structural
   `insert_before`/`detach`/`remove_subtree`, …) records its own pre-mutation snapshot or scoped
   restyle hint before touching the node. "Snapshot before mutating" is enforced by construction,
   not asked of embedders. Selector-visible attributes always live in the real node attribute map,
@@ -83,15 +84,15 @@ Document/Node design (this document describes the current shape).
 | Layer | Owns | Must not own |
 | --- | --- | --- |
 | `w3c-dom` | `Document<T>` (one fixed-address set of four NodeId-aligned `Slab`s plus a private `StyleEngine`/device/stylesheet/lock context), slot-zero document `Node<T>` (ordinary child list + node-visible style context), element/text nodes and their opaque payload/styling/layout side entries, raw-index `NodeId`, direct `&Node` Stylo DOM traits, invalidation-carrying DOM mutation, inline parsing, `Stylist`, rule matching, cascade, media evaluation, computed values, the **damage vocabulary** (`StyleDamage`/`FlushSummary`) + `effective_containment` derivation | Lynx tags/PAPI, payload semantics or mutation, payload-derived selector state, `<page>` root policy, Lynx unit metrics, touch-device policy |
-| `lynx-widget` | `Document<WidgetState>` through `WidgetTree`, the semantics and interior synchronization of each node-associated `WidgetState`, PAPI validation plus its own `<page>` root, `WidgetHandle` (canonical registry, context ownership, node retention, drop-driven reclamation of detached subtrees), `EngineMetrics`, touch-first `Device` construction, viewport-relative `rpx` integration | A second stylist, cascade implementation, stylesheet lock sharing, direct node construction, raw-id public APIs, writes to w3c-dom styling/traversal state |
+| `lynx-widget` | `Document<WidgetState>` through `WidgetTree`, the semantics and interior synchronization of each node-associated `WidgetState`, PAPI validation plus its own `<page>` root, `WidgetHandle` (canonical registry, context ownership, node retention, drop-driven reclamation of detached subtrees), `ViewMetrics`, touch-first `Device` construction, viewport-relative `rpx` integration | A second stylist, cascade implementation, stylesheet lock sharing, direct node construction, raw-id public APIs, writes to w3c-dom styling/traversal state |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, the maintained Lynx CSS extension patch set **and the Lynx supported-property/value grammar definition** (`style/properties/lynx_properties.txt`, `lynx` feature gates) | Runtime Widget/PAPI policy |
 
 ## Style lifecycle
 
-1. `lynx_widget::StyleEngine::new(EngineMetrics)` (or `with_page_config`)
+1. `lynx_widget::StyleEngine::new(ViewMetrics)` (or `with_page_config`)
    retains the metrics and `PageConfig`; it owns no Stylist or stylesheet.
    Page config is never an engine branch.
-2. Every `StyleEngine::new_widget_tree()` constructs a touch-first stylo
+2. Every `StyleEngine::new_tree()` constructs a touch-first stylo
    `Device` — its viewport is the `rpx` basis — and passes it to
    `w3c_dom::Document::new`. That document immediately owns a fresh private
    `StyleEngine` (`Stylist`, device, stylesheet set, base URL, and
@@ -123,7 +124,7 @@ Document/Node design (this document describes the current shape).
    queries nor reset APIs. Stylesheet insertion and device mutation are methods
    on the owning document and schedule its root subtree in the same
    operation; no generation broadcast or adapter-managed dirty callback exists.
-5. `StyleEngine::flush_widget_tree(&mut tree)` delegates to
+5. `StyleEngine::flush_styles(&mut tree)` delegates to
    `Document::flush_styles`, which drives **stylo's own restyle
    traversal** (`crates/w3c-dom/src/flush.rs`) from `Document::root_element()`, the first element
    child of the slot-zero document node:
@@ -147,7 +148,7 @@ Document/Node design (this document describes the current shape).
    `Document::flush_styles_with_sink` streams the same damage without allocating the
    `Vec`. **Damage stays inside the engine layer**: `lynx-widget` is the
    web-core analogue over `w3c-dom`'s browser-DOM analogue, so
-   `flush_widget_tree` neither forwards nor re-exports the damage vocabulary
+   `flush_styles` neither forwards nor re-exports the damage vocabulary
    — style→layout damage flow is `w3c-dom`'s internal seam, not PAPI surface.
 6. **Harvest is the tail of the flush** (the crate-private
    `Document::harvest_flush`): after the traversal returns it walks the dirty

@@ -1,10 +1,4 @@
 //! Leaf layout for the engine's two closed content paths.
-//!
-//! Replaced content (currently images) supplies an already-decoded
-//! [`NaturalSize`]. Text is measured by neutron-star's concrete Parley engine
-//! and enters the same private box-layout routine. There is deliberately no
-//! host measurement trait or callback in the public protocol: arbitrary host
-//! content is not a supported leaf kind.
 
 use stylo::computed_values::box_sizing;
 
@@ -19,14 +13,6 @@ use crate::tree::{
     AvailableSpace, LayoutGoal, LayoutInput, LayoutOutput, RequestedAxis, SizingMode,
 };
 
-/// Sizes replaced content from its decoded natural dimensions and ratio.
-///
-/// The returned size applies, in order: known dimensions verbatim; style
-/// size/aspect-ratio (per [`SizingMode`](crate::tree::SizingMode)); natural
-/// content size; min/max clamps; and a padding+border floor on axes the
-/// engine resolves itself. Caller-supplied known dimensions remain verbatim.
-/// `content_size` is the border-origin scrollable extent, including measured
-/// overflow.
 pub fn compute_leaf_layout<Style: CoreStyle>(
     input: LayoutInput,
     style: &Style,
@@ -40,8 +26,6 @@ pub fn compute_leaf_layout<Style: CoreStyle>(
     )
 }
 
-/// Shared box-model routine used only by the closed natural-size and Parley
-/// content paths.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn compute_leaf_layout_with_measurement<Style, Measure>(
     input: LayoutInput,
@@ -76,8 +60,6 @@ where
         padding_border_size,
     );
 
-    // A single-axis probe needs no content or baseline information once the
-    // box is fully fixed. Both-axis probes are used by baseline alignment.
     if measurement_axis.is_some_and(|axis| axis != RequestedAxis::Both)
         && node_size.width.is_some()
         && node_size.height.is_some()
@@ -119,11 +101,6 @@ where
         ),
     );
 
-    // Size containment (`contain: size`/`strict`, `content-visibility`) sizes
-    // the leaf **as if it had no content**: the measurer is never called and
-    // `contain-intrinsic-{width,height}` (both `None` ⇒ zero, collapsing to
-    // border + padding) stands in for the measured content. Baselines are
-    // therefore absent, matching layout containment.
     let measurement = if let Some(intrinsic) = crate::style::containment::size_containment(style) {
         LeafMetrics {
             size: Size::new(
@@ -184,12 +161,6 @@ where
     LayoutOutput::new(size, content_size).with_first_baselines(first_baselines)
 }
 
-/// Test-only entry to the real leaf box-model routine.
-///
-/// Integration-test hosts use this to observe the normalized content-box
-/// request and return synthetic metrics without reconstructing production
-/// sizing, skip, or baseline behavior. It is absent unless the explicit
-/// `layout-test-utils` feature is enabled.
 #[cfg(feature = "layout-test-utils")]
 #[doc(hidden)]
 pub fn compute_leaf_layout_with_measurement_for_testing<Style, Measure>(
@@ -206,25 +177,15 @@ where
 }
 
 /// Content-box constraints consumed by neutron-star's closed leaf engines.
-///
-/// The dimensions have already been translated through the leaf's box model:
-/// known dimensions are content-box extents, and available space excludes its
-/// margins, padding, and borders. [`Self::goal`]
-/// lets the Parley path distinguish a transient probe from the committed
-/// layout whose rich artifact remains available for painting.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct LeafMeasureInput {
-    /// Content-box dimensions already decided by the caller.
     pub known_dimensions: Size<Option<f32>>,
-    /// Space available to unconstrained content-box axes.
     pub available_space: Size<AvailableSpace>,
-    /// Whether this is a sizing probe or a geometry commit.
     pub goal: LayoutGoal,
 }
 
 impl LeafMeasureInput {
-    /// Creates a leaf-measurement request.
     #[must_use]
     pub const fn new(
         known_dimensions: Size<Option<f32>>,
@@ -240,29 +201,19 @@ impl LeafMeasureInput {
 }
 
 /// Decoded intrinsic data for replaced content.
-///
-/// The dimensions are content-box CSS pixels. Either dimension may be absent
-/// (for example, ratio-only vector content); `aspect_ratio` is width / height.
-/// Invalid or negative values are discarded by the constructors. `NaturalSize::NONE`
-/// represents content whose metadata has not loaded yet and therefore
-/// contributes zero intrinsic size.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct NaturalSize {
-    /// Natural width and height, independently optional.
     dimensions: Size<Option<f32>>,
-    /// Natural width / height ratio.
     aspect_ratio: Option<f32>,
 }
 
 impl NaturalSize {
-    /// No decoded natural dimensions or ratio.
     pub const NONE: Self = Self {
         dimensions: Size::NONE,
         aspect_ratio: None,
     };
 
-    /// Creates natural data from independently optional dimensions and ratio.
     #[must_use]
     pub fn new(dimensions: Size<Option<f32>>, aspect_ratio: Option<f32>) -> Self {
         Self {
@@ -271,7 +222,6 @@ impl NaturalSize {
         }
     }
 
-    /// Creates natural data from a decoded two-dimensional size.
     #[must_use]
     pub fn from_size(size: Size<f32>) -> Self {
         Self::new(
@@ -280,13 +230,11 @@ impl NaturalSize {
         )
     }
 
-    /// Returns the sanitized optional natural dimensions.
     #[must_use]
     pub const fn dimensions(self) -> Size<Option<f32>> {
         self.dimensions
     }
 
-    /// Returns the sanitized natural width / height ratio.
     #[must_use]
     pub const fn aspect_ratio(self) -> Option<f32> {
         self.aspect_ratio
@@ -365,24 +313,14 @@ fn ratio_from_dimensions(width: f32, height: f32) -> Option<f32> {
 }
 
 /// Metrics produced by neutron-star's concrete content engines.
-///
-/// This contains content-box data only; leaf layout adds box-model surrounds,
-/// applies constraints, and converts baselines to border-box coordinates.
-///
-/// `size` is the measured content-box extent. `first_baselines` contains
-/// offsets from the content-box origin. Natural-size leaves do not report a
-/// baseline; Parley text does.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct LeafMetrics {
-    /// Measured content-box size.
     pub size: Size<f32>,
-    /// First baseline offsets from the content-box origin.
     pub first_baselines: Point<Option<f32>>,
 }
 
 impl LeafMetrics {
-    /// A measurement without baselines.
     #[must_use]
     pub fn new(size: Size<f32>) -> Self {
         Self {
@@ -391,7 +329,6 @@ impl LeafMetrics {
         }
     }
 
-    /// Adds first baseline offsets.
     #[must_use]
     pub fn with_first_baselines(mut self, first_baselines: Point<Option<f32>>) -> Self {
         self.first_baselines = first_baselines;
@@ -423,8 +360,6 @@ fn apply_measured_aspect_ratio(
         return size;
     }
 
-    // With both preferred axes automatic, the inline axis is normally the
-    // ratio-determining axis. A vertical-only probe can invert that choice.
     match measurement_axis {
         Some(RequestedAxis::Vertical) => {
             let sizing_height = sizing_box_axis(
@@ -455,14 +390,6 @@ fn apply_measured_aspect_ratio(
 }
 
 /// A preferred ratio together with the box whose width/height it relates.
-///
-/// A plain specified `<ratio>` uses the box selected by `box-sizing`.
-/// Natural ratios and every `auto <ratio>` branch use the content box per
-/// CSS Sizing 4, independently of the element's `box-sizing` value.
-/// The private scalar stays one word in the leaf hot path: zero means no
-/// ratio, a positive value selects content-box sizing, and a negative value
-/// stores the magnitude for border-box sizing. Constructors enforce the
-/// positive finite ratio invariant before the sign is used as the tag.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PreferredAspectRatio(f32);
 
@@ -525,21 +452,16 @@ fn resolve_leaf_sizing(
     let box_sizing = style.box_sizing();
 
     let (node_size, min_size, max_size, aspect_ratio) = match input.sizing_mode {
-        SizingMode::ContentSize => (
+        SizingMode::IgnoreSizeStyles => (
             input.known_dimensions,
             Size::NONE,
             Size::NONE,
             PreferredAspectRatio::NONE,
         ),
-        SizingMode::InherentSize => {
+        SizingMode::ApplySizeStyles => {
             let aspect_ratio =
                 preferred_aspect_ratio(style.aspect_ratio(), natural_aspect_ratio, box_sizing);
 
-            // First normalize specified width/height into border-box values.
-            // The preferred ratio may use a *different* box (natural and
-            // `auto <ratio>` always use content-box), so translate the
-            // combined known/preferred dimensions through that ratio box,
-            // derive the missing axis there, then return to border-box space.
             let style_size = resolve_size(style.size(), input.parent_size);
             let preferred_border_box = input.known_dimensions.or(apply_box_sizing(
                 style_size,
@@ -818,7 +740,7 @@ mod tests {
             &EmptyStyle
         }
 
-        fn compute_child_layout(self, _input: LayoutInput) -> LayoutOutput {
+        fn compute_layout(self, _input: LayoutInput) -> LayoutOutput {
             unreachable!("leaf tests drive compute_cached_layout directly")
         }
 
@@ -830,7 +752,7 @@ mod tests {
             unreachable!("leaf tests store no durable geometry")
         }
 
-        fn set_final_layout(self, _layout: Layout) {
+        fn set_rounded_layout(self, _layout: Layout) {
             unreachable!("leaf tests store no durable geometry")
         }
 
@@ -838,15 +760,15 @@ mod tests {
             unreachable!("leaf tests store no durable geometry")
         }
 
-        fn cache_get(self, input: LayoutInput) -> Option<LayoutOutput> {
+        fn cached_layout(self, input: LayoutInput) -> Option<LayoutOutput> {
             self.host.box_cache.borrow().get(input)
         }
 
-        fn cache_store(self, input: LayoutInput, output: LayoutOutput) {
+        fn store_cached_layout(self, input: LayoutInput, output: LayoutOutput) {
             self.host.box_cache.borrow_mut().store(input, output);
         }
 
-        fn cache_clear(self) {
+        fn clear_layout_cache(self) {
             self.host.invalidate_content();
         }
     }
@@ -855,7 +777,7 @@ mod tests {
     fn committed_artifact_survives_probes_and_box_cache_hits() {
         let host = LeafHostState::default();
         let node = LeafRef { host: &host };
-        let commit_input = LayoutInput::perform_layout(Size::NONE, Size::NONE, Size::MAX_CONTENT);
+        let commit_input = LayoutInput::commit(Size::NONE, Size::NONE, Size::MAX_CONTENT);
 
         let committed = compute_cached_layout(node, commit_input, |node, input| {
             let mut artifacts = node.host.artifacts.borrow_mut();
@@ -877,7 +799,7 @@ mod tests {
             [b'C']
         );
 
-        let probe_input = LayoutInput::compute_size(
+        let probe_input = LayoutInput::measure(
             Size::NONE,
             Size::NONE,
             Size::MAX_CONTENT,
@@ -1049,7 +971,7 @@ mod tests {
     #[test]
     fn single_axis_probe_skips_measurement_after_resolving_style_sizes() {
         let style = BoxStyle::new(Size::new(size_px(40.0), size_px(20.0)));
-        let input = LayoutInput::compute_size(
+        let input = LayoutInput::measure(
             Size::NONE,
             Size::new(Some(100.0), Some(100.0)),
             Size::new(
@@ -1192,7 +1114,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_clear_capability_invalidates_box_and_retained_artifacts_together() {
+    fn clear_layout_cache_capability_invalidates_box_and_retained_artifacts_together() {
         let host = LeafHostState::default();
         host.artifacts.borrow_mut().committed = Some(RetainedArtifact {
             metrics: LeafMetrics::new(Size::new(1.0, 1.0)),
@@ -1203,7 +1125,7 @@ mod tests {
             paint_data: vec![b'P'],
         });
 
-        LayoutNode::cache_clear(LeafRef { host: &host });
+        LayoutNode::clear_layout_cache(LeafRef { host: &host });
 
         assert!(host.box_cache.borrow().is_empty());
         assert!(host.artifacts.borrow().committed.is_none());

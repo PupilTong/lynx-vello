@@ -187,9 +187,9 @@ consequential choice about whether to follow the spec or the quirk.
 - **`@media` queries** — the C++ engine has a complete, recently-added,
   spec-modeled evaluator, but it is **wired only into the native `.lynx.bundle`
   pipeline**. The `.web.bundle` wire format lynx-vello actually decodes has
-  **no `@media` representation at all** (confirmed: `RuleType` has exactly
-  3 variants — `Declaration`/`FontFace`/`KeyFrames` — in both `lynx-stack`'s
-  encoder and our own decoder). Any `@media` block in ReactLynx-for-web
+  **no `@media` representation at all** (confirmed: upstream `RuleType` and
+  our decoder's `RuleKind` each have exactly three corresponding variants in
+  `lynx-stack`'s encoder and our decoder). Any `@media` block in ReactLynx-for-web
   source is dropped today. This is the single biggest at-rule gap: decide
   whether to (a) match today's web-bundle behavior (media queries never
   apply) or (b) extend the format, using the C++ engine's evaluator model as

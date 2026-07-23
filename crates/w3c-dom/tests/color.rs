@@ -1,24 +1,6 @@
 //! CSS `<color>` value-grammar tests ported from the `LynxJS` C++ engine.
-//!
-//! Ports:
-//! - `core/renderer/css/css_color_unittest.cc` (`CSSColor.Keywords`, `CSSColor.Parse`)
-//! - `core/renderer/css/parser/color_handler_unittest.cc` (`ColorHandler.Process`)
-//! - `core/renderer/css/css_keywords_unittest.cc` (`CSSKeywords.TokenTypeCheck` — skipped,
-//!   tokenizer-internal; see footer)
-//!
-//! Scope: `enableCSSSelector = true` / `enableRemoveCSSScope = true` only.
-//!
-//! Expectation policy (see `tests/common/mod.rs` and
-//! `docs/tracking/deviations.md`): each ported assertion uses the inventory's
-//! `ours_expected`. `<color>` is a real W3C feature, so W3C-correct behavior
-//! wins where the C++ engine deviates. The one flip vs. Lynx: legacy comma
-//! `rgb()` with *mixed* percentage+number channels (`rgb(100%, 0, 100%)`) is
-//! invalid per CSS Color 4 and must be rejected here even though Lynx's lenient
-//! parser accepts it.
 
 #![allow(clippy::too_many_lines)]
-// The AbsoluteColor -> u8 channel conversion rounds and clamps into `[0, 255]`
-// before the cast, so truncation/sign-loss cannot occur.
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
 mod common;
@@ -27,16 +9,6 @@ use common::{Doc, parses};
 use stylo::color::AbsoluteColor;
 use w3c_dom::NodeId;
 
-/// Assert a computed `AbsoluteColor` resolves to the given legacy-sRGB channels.
-///
-/// Every color under test is a legacy syntax color (`<named-color>`,
-/// `<hex-color>`, `rgb()/rgba()`, `hsl()/hsla()`), so we normalize through
-/// `into_srgb_legacy()` and compare rounded 8-bit channels — this is
-/// representation-independent (a color stored in the `hsl` color space compares
-/// equal to its sRGB equivalent). Alpha is a float and is compared with a
-/// tolerance below `1/255` so fractional alphas derived from hex nibbles or
-/// `hsla()` don't hinge on the float→u8 rounding convention the C++ test bakes
-/// into its packed `0xAARRGGBB`.
 fn assert_rgba(got: AbsoluteColor, r: u8, g: u8, b: u8, alpha: f32, ctx: &str) {
     let srgb = got.into_srgb_legacy();
     let comps = *srgb.raw_components();
@@ -50,15 +22,12 @@ fn assert_rgba(got: AbsoluteColor, r: u8, g: u8, b: u8, alpha: f32, ctx: &str) {
     );
 }
 
-/// The computed `background-color`, resolved to an absolute color.
 fn background_color(doc: &Doc, id: NodeId) -> AbsoluteColor {
     let style = doc.style(id);
     let current = style.clone_color();
     style.clone_background_color().resolve_to_absolute(&current)
 }
 
-/// The full Lynx `<named-color>` table (148 entries incl. `transparent`) with
-/// its canonical sRGB channels. Every non-transparent alpha is 1.0.
 const NAMED_COLORS: &[(&str, u8, u8, u8, f32)] = &[
     ("transparent", 0, 0, 0, 0.0),
     ("aliceblue", 240, 248, 255, 1.0),
@@ -210,12 +179,6 @@ const NAMED_COLORS: &[(&str, u8, u8, u8, f32)] = &[
     ("yellowgreen", 154, 205, 50, 1.0),
 ];
 
-/// C++: `css_color_unittest.cc::CSSColor.Keywords`
-///
-/// Every one of the 148 `<named-color>` keywords parses to its canonical sRGB
-/// triple (`transparent` -> `rgba(0,0,0,0)`). stylo supports the identical set
-/// (plus `rebeccapurple`/system colors as a superset the C++ table never
-/// asserts absent), so this ports as-is.
 #[test]
 fn named_color_keywords() {
     assert_eq!(
@@ -232,31 +195,19 @@ fn named_color_keywords() {
     }
 }
 
-/// C++: `css_color_unittest.cc::CSSColor.Parse`
-///
-/// The `<color>` value grammar: `<hex-color>` (4/6/8 digit), legacy
-/// `rgb()/rgba()` with clamping, `hsl()/hsla()`, `<named-color>`, and invalid
-/// rejection. Ported W3C-corrected: `rgb(100%, 0, 100%)` (mixed percentage +
-/// number channels) is rejected here, unlike Lynx's lenient accept.
 #[test]
 #[allow(clippy::items_after_statements)]
 fn color_string_parse_grammar() {
-    // (input, r, g, b, alpha). Fractional alphas come from hex nibbles / hsla
-    // and are compared with tolerance.
     const VALID: &[(&str, u8, u8, u8, f32)] = &[
         ("red", 255, 0, 0, 1.0),
         ("#00ff00", 0, 255, 0, 1.0),
-        // CSS Color 4 four-digit #RGBA: each nibble doubled.
-        ("#056b", 0, 85, 102, 0.733),    // A = 0xbb
-        ("#090a", 0, 153, 0, 0.667),     // A = 0xaa
-        ("#abcd", 170, 187, 204, 0.867), // A = 0xdd
-        // CSS Color 4 eight-digit #RRGGBBAA.
-        ("#00ff00ee", 0, 255, 0, 0.933), // A = 0xee
+        ("#056b", 0, 85, 102, 0.733),
+        ("#090a", 0, 153, 0, 0.667),
+        ("#abcd", 170, 187, 204, 0.867),
+        ("#00ff00ee", 0, 255, 0, 0.933),
         ("rgb(0,0,255)", 0, 0, 255, 1.0),
-        // Number channels clamp to [0,255]; negatives clamp to 0.
         ("rgb(2000,-1,255)", 255, 0, 255, 1.0),
         ("rgb(0, 0, 255)", 0, 0, 255, 1.0),
-        // Alpha <number> clamps to [0,1].
         ("rgba(0, 0, 255, 100)", 0, 0, 255, 1.0),
         ("hsl(240, 100%, 50%)", 0, 0, 255, 1.0),
         ("hsla(240, 100%, 50%, 0.3)", 0, 0, 255, 0.3),
@@ -269,29 +220,12 @@ fn color_string_parse_grammar() {
         assert_rgba(doc.color(el), r, g, b, a, input);
     }
 
-    // Invalid inputs: the declaration is dropped (parse fails).
-    const INVALID: &[&str] = &[
-        "not color", // non-color garbage
-        "#hello0",   // 6 chars, non-hex letters
-        "#errors",   // 6 chars, non-hex letters
-        // W3C-corrected flip: CSS Color 4 legacy comma rgb() is
-        // `rgb(<percentage>#{3} ...)` OR `rgb(<number>#{3} ...)`; mixing the two
-        // is invalid. Lynx accepts it; stylo (spec-correct) rejects it.
-        "rgb(100%, 0, 100%)",
-    ];
+    const INVALID: &[&str] = &["not color", "#hello0", "#errors", "rgb(100%, 0, 100%)"];
     for &input in INVALID {
         assert!(!parses("color", input), "`{input}` must be rejected");
     }
 }
 
-/// C++: `color_handler_unittest.cc::ColorHandler.Process`
-///
-/// The same `<color>` grammar exercised through a real color-typed property
-/// (`background-color`): named / hex / `rgb()/rgba()` / `hsl()/hsla()`,
-/// ASCII case-insensitive keyword matching, all-percentage `rgb()`, clamping,
-/// and invalid rejection (nothing emitted -> property stays at its transparent
-/// initial). Every `rgb()` row here is all-number or all-percentage, so unlike
-/// `CSSColor.Parse` nothing flips — pure port-as-is.
 #[test]
 #[allow(clippy::items_after_statements)]
 fn background_color_value_parse() {
@@ -307,11 +241,8 @@ fn background_color_value_parse() {
         ("rgba(0, 0, 255, 100)", 0, 0, 255, 1.0),
         ("hsl(240, 100%, 50%)", 0, 0, 255, 1.0),
         ("hsla(240, 100%, 50%, 0.3)", 0, 0, 255, 0.3),
-        // Named colors are ASCII case-insensitive.
         ("Red", 255, 0, 0, 1.0),
-        // All-percentage legacy rgb(): 50% -> round(0.5*255) = 128.
         ("rgb(50%, 0%, 100%)", 128, 0, 255, 1.0),
-        // Percentages > 100% clamp to 255.
         ("rgb(100%, 0%, 105%)", 255, 0, 255, 1.0),
     ];
     let mut doc = Doc::new();
@@ -322,30 +253,16 @@ fn background_color_value_parse() {
         assert_rgba(background_color(&doc, el), r, g, b, a, input);
     }
 
-    // Invalid inputs: `Process == false` / `output.empty()` — nothing is
-    // emitted, so background-color stays at its transparent initial.
-    const INVALID: &[&str] = &[
-        "not color", // garbage
-        "#ghff00",   // invalid hex letters g, h
-        "#unknow",   // 6 chars, non-hex letters
-    ];
+    const INVALID: &[&str] = &["not color", "#ghff00", "#unknow"];
     let initial = background_color(&doc, el);
-    let _ = initial; // (documented below; the check is per-input)
+    let _ = initial;
     for &input in INVALID {
         assert!(
             !parses("background-color", input),
             "`{input}` must be rejected"
         );
-        // Applying the invalid value leaves the property unset (transparent).
         doc.set_inline(el, &format!("background-color: {input}"));
         doc.flush();
         assert_rgba(background_color(&doc, el), 0, 0, 0, 0.0, input);
     }
 }
-
-// Skipped (disposition): CSSKeywords.TokenTypeCheck — skip-internal. Pure
-// tokenizer/internal-data-structure test (keyword string -> Lynx `TokenType`
-// enum perfect-hash lookup + enum-count completeness); stylo/cssparser has no
-// equivalent public keyword->token enum, and keyword *semantics* are covered by
-// the per-property value-grammar tests (named colors above, and unit/gradient/
-// transform/timing grammars elsewhere), not a flat lookup table.

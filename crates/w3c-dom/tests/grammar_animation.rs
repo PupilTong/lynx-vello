@@ -2,27 +2,17 @@
 //! `lynx/core/renderer/css/parser/animation_*_handler_unittest.cc`,
 //! `transition_shorthand_handler_unittest.cc`,
 //! `timing_function_handler_unittest.cc`, and `time_handler_unittest.cc`.
-//!
-//! Scope: `enableCSSSelector = true` / `enableRemoveCSSScope = true`. Value
-//! grammar only — animation *ticking* is out of scope (render engine,
-//! docs/style-assumptions.md §C.11). W3C corrections applied per the
-//! inventory: `ease` ≠ `ease-in-out` (distinct curves; Lynx aliased them),
-//! omitted timing functions default to `ease` (not Lynx's `linear`),
-//! `infinite` is a keyword (not Lynx's 1e9 sentinel), and unknown
-//! transition-property idents are valid custom-idents (not coerced to none).
 
 mod common;
 
 use common::{Doc, parses, specified};
 
-/// Both inputs parse and serialize to the same specified value.
 fn equivalent(property: &str, a: &str, b: &str) {
     let left = specified(property, a).unwrap_or_else(|| panic!("`{property}: {a}` must parse"));
     let right = specified(property, b).unwrap_or_else(|| panic!("`{property}: {b}` must parse"));
     assert_eq!(left, right, "`{a}` and `{b}` must mean the same");
 }
 
-// C++: animation_direction_handler_unittest.cc (all three tests).
 #[test]
 fn animation_direction_grammar() {
     for keyword in ["normal", "reverse", "alternate", "alternate-reverse"] {
@@ -44,7 +34,6 @@ fn animation_direction_grammar() {
     }
 }
 
-// C++: animation_fill_mode_handler_unittest.cc (all three tests).
 #[test]
 fn animation_fill_mode_grammar() {
     for keyword in ["none", "forwards", "backwards", "both"] {
@@ -65,8 +54,6 @@ fn animation_fill_mode_grammar() {
     }
 }
 
-// C++: animation_iteration_count_handler_unittest.cc — W3C-corrected:
-// `infinite` is the keyword, not Lynx's 1e9 sentinel.
 #[test]
 fn animation_iteration_count_grammar() {
     assert_eq!(
@@ -94,10 +81,6 @@ fn animation_iteration_count_grammar() {
     }
 }
 
-// C++: animation_property_handler_unittest.cc — W3C-corrected: an unknown
-// ident is a valid <custom-ident> transition-property that matches nothing,
-// NOT Lynx's coercion to none; and `none` may not appear in a multi-item
-// list.
 #[test]
 fn transition_property_grammar() {
     assert_eq!(
@@ -113,8 +96,6 @@ fn transition_property_grammar() {
         Some("hello"),
         "unknown idents are retained custom-idents"
     );
-    // The C++ 20-item list minus `none` (which invalidates a multi-item
-    // list per spec); scaleX/scaleY/scaleXY are retained custom-idents.
     let list = "opacity, scaleX, scaleY, scaleXY, width, height, \
                 background-color, color, visibility, left, top, right, \
                 bottom, transform, all, max-width, max-height, min-width, \
@@ -135,15 +116,11 @@ fn transition_property_grammar() {
     }
 }
 
-// C++: animation_shorthand_handler_unittest.cc — expansion + defaults.
-// W3C-corrected: omitted animation-timing-function is `ease` (initial), not
-// Lynx's linear; `infinite` is a keyword.
 #[test]
 fn animation_shorthand_expansion() {
     let mut doc = Doc::new();
     let el = doc.el(doc.root, "view");
 
-    // Row A: "rotate 10s ease 1s 10 forwards".
     doc.set_inline(el, "animation: rotate 10s ease 1s 10 forwards");
     doc.flush();
     assert_eq!(doc.value(el, "animation-name"), "rotate");
@@ -153,7 +130,6 @@ fn animation_shorthand_expansion() {
     assert_eq!(doc.value(el, "animation-iteration-count"), "10");
     assert_eq!(doc.value(el, "animation-fill-mode"), "forwards");
 
-    // Row B: "10" is a bare iteration count; everything else initial.
     doc.set_inline(el, "animation: 10");
     doc.flush();
     assert_eq!(doc.value(el, "animation-name"), "none");
@@ -166,7 +142,6 @@ fn animation_shorthand_expansion() {
         "omitted timing function is the `ease` initial, not linear"
     );
 
-    // Row C: "10s 10 test".
     doc.set_inline(el, "animation: 10s 10 test");
     doc.flush();
     assert_eq!(doc.value(el, "animation-name"), "test");
@@ -174,14 +149,12 @@ fn animation_shorthand_expansion() {
     assert_eq!(doc.value(el, "animation-iteration-count"), "10");
     assert_eq!(doc.value(el, "animation-timing-function"), "ease");
 
-    // Row D: "10s ease 1s forwards 10 item1-ani-frames".
     doc.set_inline(el, "animation: 10s ease 1s forwards 10 item1-ani-frames");
     doc.flush();
     assert_eq!(doc.value(el, "animation-name"), "item1-ani-frames");
     assert_eq!(doc.value(el, "animation-delay"), "1s");
     assert_eq!(doc.value(el, "animation-fill-mode"), "forwards");
 
-    // Row E: every slot filled.
     doc.set_inline(
         el,
         "animation: 10s ease 1ms forwards infinite test paused reverse",
@@ -201,8 +174,6 @@ fn animation_shorthand_expansion() {
     assert_eq!(doc.value(el, "animation-direction"), "reverse");
 }
 
-// C++: animation_shorthand_handler_unittest.cc single-name defaults +
-// invalid rows.
 #[test]
 fn animation_shorthand_defaults_and_rejects() {
     let mut doc = Doc::new();
@@ -224,24 +195,17 @@ fn animation_shorthand_defaults_and_rejects() {
             "`{invalid}` must be rejected"
         );
     }
-    // W3C-corrected over the C++ reject row: `animation: ease ease` is
-    // VALID — the first `ease` fills the timing-function slot, and easing
-    // keywords are not excluded from <custom-ident>, so the second becomes
-    // the animation-name.
     doc.set_inline(el, "animation: ease ease");
     doc.flush();
     assert_eq!(doc.value(el, "animation-timing-function"), "ease");
     assert_eq!(doc.value(el, "animation-name"), "ease");
 }
 
-// C++: transition_shorthand_handler_unittest.cc equivalence + defaults.
 #[test]
 fn transition_shorthand_expansion() {
     let mut doc = Doc::new();
     let el = doc.el(doc.root, "view");
 
-    // Shorthand == the four standalone longhands (first <time> = duration,
-    // second = delay).
     doc.set_inline(el, "transition: width 2s ease-in 1ms");
     doc.flush();
     assert_eq!(doc.value(el, "transition-property"), "width");
@@ -249,7 +213,6 @@ fn transition_shorthand_expansion() {
     assert_eq!(doc.value(el, "transition-delay"), "0.001s");
     assert_eq!(doc.value(el, "transition-timing-function"), "ease-in");
 
-    // Component defaults (W3C-corrected: omitted timing = ease).
     let rows: &[(&str, &str, &str, &str, &str)] = &[
         ("width 2s ease", "width", "2s", "0s", "ease"),
         ("width 2s", "width", "2s", "0s", "ease"),
@@ -271,7 +234,6 @@ fn transition_shorthand_expansion() {
         );
     }
 
-    // Multi-layer list; the second layer's omitted timing is ease.
     doc.set_inline(el, "transition: width 2s ease-in 1ms, height 10s");
     doc.flush();
     assert_eq!(doc.value(el, "transition-property"), "width, height");
@@ -280,11 +242,6 @@ fn transition_shorthand_expansion() {
     assert_eq!(doc.value(el, "transition-timing-function"), "ease-in, ease");
 }
 
-// C++: transition_shorthand_handler_unittest.cc negative-time + strict
-// invalid rows. Neither Lynx's time REORDERING nor a blanket rejection is
-// ported: the engine follows Gecko's slot-elimination — `-2s` cannot be a
-// duration (non-negative slot) so it fills the delay slot, and the later
-// `1ms` becomes the duration. Same declaration, Firefox-identical reading.
 #[test]
 fn transition_shorthand_rejects() {
     {
@@ -313,8 +270,6 @@ fn transition_shorthand_rejects() {
             "`{invalid}` must be rejected"
         );
     }
-    // The load-bearing open-ended-matching correction: unknown idents are
-    // valid custom-idents, so a none-free list of them parses.
     let mut doc = Doc::new();
     let el = doc.el(doc.root, "view");
     doc.set_inline(el, "transition: hello 1s, world 2s");
@@ -322,8 +277,6 @@ fn transition_shorthand_rejects() {
     assert_eq!(doc.value(el, "transition-property"), "hello, world");
 }
 
-// C++: timing_function_handler_unittest.cc keywords — W3C-corrected: `ease`
-// and `ease-in-out` are DISTINCT curves; `ease-in-ease-out` is not CSS.
 #[test]
 fn timing_function_keywords() {
     for keyword in ["linear", "ease", "ease-in", "ease-out", "ease-in-out"] {
@@ -343,17 +296,12 @@ fn timing_function_keywords() {
     );
 }
 
-// C++: timing_function_handler_unittest.cc cubic-bezier / steps families.
-// W3C-corrected: `steps(1)` is valid (position defaults to jump-end).
 #[test]
 fn timing_function_functions() {
     assert_eq!(
         specified("transition-timing-function", "cubic-bezier(1, 0.5, 0.5, 1)").as_deref(),
         Some("cubic-bezier(1, 0.5, 0.5, 1)")
     );
-    // Canonical serialization: the default end/jump-end position is
-    // omitted; `start` is kept; the authored `jump-start` spelling is
-    // preserved (spec-equivalent to `start`).
     assert_eq!(
         specified("transition-timing-function", "step-start").as_deref(),
         Some("steps(1, start)")
@@ -377,10 +325,7 @@ fn timing_function_functions() {
             "steps(2, {position}) must parse"
         );
     }
-    // W3C-corrected over the C++ steps(1, jump-none) row: jump-none
-    // requires at least TWO steps (css-easing-1), so one step is invalid.
     assert!(!parses("transition-timing-function", "steps(1, jump-none)"));
-    // Multi lists keep per-layer functions in order.
     assert_eq!(
         specified(
             "transition-timing-function",
@@ -404,10 +349,6 @@ fn timing_function_functions() {
     }
 }
 
-// C++: timing_function_handler_unittest.cc::Square — `square-bezier(x, y)`,
-// the Lynx-only two-control-point easing (bucket 2: match Lynx exactly, no
-// extension). Grammar landed with the fork's feature-gated CSS grammar
-// completion; exactly two comma-separated numbers.
 #[test]
 fn square_bezier_lynx_rows() {
     assert_eq!(
@@ -419,7 +360,6 @@ fn square_bezier_lynx_rows() {
         "square-bezier(1, 0.5)",
         "square-bezier( 1 ,0.5 )",
     );
-    // Multi lists mix with standard easings, order preserved.
     assert_eq!(
         specified(
             "transition-timing-function",
@@ -442,8 +382,6 @@ fn square_bezier_lynx_rows() {
     }
 }
 
-// C++: time_handler_unittest.cc — units required (no unitless-compat
-// coercion), property-specific negativity, comma lists.
 #[test]
 fn time_values() {
     assert_eq!(specified("animation-duration", "2s").as_deref(), Some("2s"));
@@ -465,10 +403,3 @@ fn time_values() {
         "delay accepts negative times"
     );
 }
-
-// Skipped (skip-legacy): animation_shorthand_handler_unittest.cc
-// enter_transition_name_legacy_table — kPropertyIDEnterTransitionName is a
-// Lynx-only page enter/exit transition property outside the CSS cascade
-// surface (deprecated pathway).
-// Skipped (skip-internal): time_handler_unittest.cc lepus boolean-input type
-// guard — no CSS-text analog.

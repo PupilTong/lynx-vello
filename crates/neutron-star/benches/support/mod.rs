@@ -1,10 +1,4 @@
 //! Shared production-host fixture for box-layout benchmarks.
-//!
-//! Construction and the initial style flush happen in Divan's input factory;
-//! measured calls enter through `Document::layout`, exactly like
-//! an embedder. The benchmark suite therefore exercises neutron-star through
-//! w3c-dom's real `&Node` handle, computed styles, per-node caches, positioned
-//! pass, and rounding pass instead of maintaining a benchmark-only host.
 
 #![allow(
     dead_code,
@@ -112,7 +106,7 @@ impl LayoutFixture {
         let mut document = Document::new(device(viewport));
         let root = document.create_element("page", ());
         document.set_inline_style(root, root_style);
-        document.append_child(root);
+        document.append_document_element(root);
         Self {
             document,
             root,
@@ -169,7 +163,7 @@ impl LayoutFixture {
             self.text_fonts_registered = true;
         }
         let node = self.document.create_text_node(text, ());
-        self.document.append(parent, node);
+        self.document.append_child(parent, node);
         self.node_count += 1;
         node
     }
@@ -182,7 +176,7 @@ impl LayoutFixture {
     ) -> NodeId {
         let node = self.document.create_element("view", ());
         self.document.set_inline_style(node, style);
-        self.document.append(parent, node);
+        self.document.append_child(parent, node);
         if let Some((size, first_baseline)) = leaf_metrics {
             self.document
                 .set_leaf_metrics_for_testing(node, size, first_baseline);
@@ -191,7 +185,6 @@ impl LayoutFixture {
         node
     }
 
-    /// Resolve all CSS outside the timed region while leaving layout caches cold.
     pub(super) fn prepare(mut self) -> Self {
         self.document.flush_styles();
         let display = self
@@ -220,7 +213,7 @@ impl LayoutFixture {
         self.document
             .get(node)
             .expect("benchmark node remains live")
-            .layout()
+            .rounded_layout()
             .clone()
     }
 
