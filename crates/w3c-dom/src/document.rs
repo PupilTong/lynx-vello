@@ -291,6 +291,12 @@ impl<T> Document<T> {
         (&self.tree, &mut self.layout, &self.relayout_root_ids)
     }
 
+    /// The shared-borrow twin of [`Self::layout_parts`] for post-layout
+    /// read-only passes (the `visual` module's paint-order build).
+    pub(crate) fn visual_parts(&self) -> (&TreeArenas<T>, &DocumentLayoutState) {
+        (&self.tree, &self.layout)
+    }
+
     pub(crate) fn layout_data_mut(
         &mut self,
     ) -> impl Iterator<Item = (NodeId, &mut NodeLayoutState)> {
