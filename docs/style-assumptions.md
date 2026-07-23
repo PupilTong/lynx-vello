@@ -14,9 +14,10 @@ the semantics are stylo's.** Everything below refines that sentence.
 
 ## Settled before this session (not re-decided)
 
-- stylo is the cascade engine, layered `lynx-widget → w3c-dom → vendor/stylo`
-  (fork with the `lynx` feature; Lynx-only properties and `rpx`/`ppx`/`sp`
-  units are first-class grammar in the fork, no side-channel tricks).
+- stylo is the cascade engine, layered `future runtime adapter → w3c-dom →
+  vendor/stylo` (fork with the `lynx` feature; Lynx-only properties and
+  `rpx`/`ppx`/`sp` units are first-class grammar in the fork, no side-channel
+  tricks). The runtime-adapter layer is not currently implemented.
 - Compat target is **web-core / `.web.bundle`** behavior, not native
   `.lynx.bundle`.
 - W3C-correct semantics for real spec features; faithful cloning for
@@ -153,13 +154,13 @@ the semantics are stylo's.** Everything below refines that sentence.
 14. **pageConfig becomes generated UA styles, not engine logic.** Flags like
     `defaultDisplayLinear` / `defaultOverflowVisible` are honored the way
     web-core honors them: they parameterize generated UA-sheet content at
-    the widget/adapter level. The styling core contains no pageConfig
+    the future runtime-adapter level. The styling core contains no pageConfig
     branches.
 
 15. **Built-in component defaults = a UA-origin stylesheet.** One
     user-agent-origin sheet in the stylist (mirroring web-elements' host
     styles), parameterized per §14. Correct cascade-origin semantics for
-    free — author styles override naturally. No hardcoded per-widget style
+    free — author styles override naturally. No hardcoded per-element style
     seeding.
 
     *Importance constraint*: in the browser, web-elements' defaults are
@@ -171,11 +172,11 @@ the semantics are stylo's.** Everything below refines that sentence.
     `scroll-view { display: flex !important }`) are instead owned by the
     native layout engine's element policy, not fought out in the cascade.
 
-16. **cssId scoping is a widget-layer concern.** The feature exists for
+16. **cssId scoping is a runtime-adapter concern.** The feature exists for
     pageConfig `enableRemoveCSSScope = false` (that is the exact
     `.web.bundle` key; this doc previously shortened it to
     "removeCSSScope"); `w3c-dom` stays scope-unaware. Mechanism: the
-    widget layer synthesizes `:where([l-css-id="N"])` guards onto
+    runtime adapter synthesizes `:where([l-css-id="N"])` guards onto
     selectors at ingest — string-parity with web-core's decoder output,
     trivially differential-testable, zero specificity perturbation. (With
     `enableRemoveCSSScope = true` the compiler emits css id `0`, guard

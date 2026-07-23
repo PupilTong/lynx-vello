@@ -1,236 +1,128 @@
 # Style architecture
 
-The style layer has one standards-oriented core and one Lynx adapter:
+The repository currently contains one standards-oriented DOM/CSS core:
 
 ```text
-lynx-widget  ───────▶  w3c-dom  ───────▶  vendor/stylo
-Lynx policy            DOM + CSS core     parser/cascade primitives
+future Lynx runtime adapter  ─ ─ ─▶  w3c-dom  ───────▶  vendor/stylo
+Element PAPI + Lynx policy          DOM + CSS core     parser/cascade primitives
 ```
 
-The previous standalone `lynx-style` crate has been removed; its generic
-stylesheet/matching/cascade implementation lives in the DOM core, its
-Lynx-only device and unit behavior in `lynx-widget`. The core itself was
-subsequently rebuilt from the arena-based `stylo-dom` into `w3c-dom`, a
-Document/Node design (this document describes the current shape).
-
-![Style architecture before and after](img/style-architecture-refactor.svg)
+The dashed layer is intentionally not implemented. `w3c-dom` owns the generic
+document, styling, invalidation, and layout seam; a future runtime adapter must
+provide Lynx Element-PAPI policy, view/device configuration, UA defaults, and
+decoded `.web.bundle` style ingestion without moving those concerns into the
+standards core.
 
 ## The w3c-dom core: one tree, Document-mediated mutation
 
-- **ONE TREE, multiple arenas.** `Document<T>` owns one fixed-address boxed arena set. Its primary
-  `Slab<Node<T>>` selects each ID: slot zero is the real `NodeData::Document`, whose ordinary child
-  list contains the optional root element and whose node data carries the node-visible
-  `SharedRwLock` and base URL; later slots are element/text nodes addressed by their raw `usize`
-  index. The `Document` also owns the complete private style engine (`Stylist` + device +
-  stylesheets + lock + base URL). Three secondary `Slab`s use that same `NodeId`: the opaque
-  embedder payload `T`, Stylo
-  traversal/invalidation state (pending snapshot, selector/dirty/snapshot/traversal flags), and
-  layout measurement-cache/static-position state. The payload slab reserves a payload-less sentinel
-  at document slot zero. All four free lists stay in lockstep: every side insertion asserts that its
-  slab returned the key selected by the primary slab, and removal clears all four entries before
-  reuse. Computed styles and durable rounded/unrounded layouts remain in the primary Node arena.
-  There is still one logical tree and no public way to construct or mutate a `Node<T>` outside its
-  document — `Document::create_element` and `Document::create_text_node` are the kind-specific
-  factories, and every DOM operation is a `Document` method.
-- **Invalidation is carried by the operations.** Each matching-relevant setter
-  (`set_classes`, `set_attribute`, `add_element_state` / `remove_element_state`,
-  `set_inline_style`, structural
-  `insert_before`/`detach`/`remove_subtree`, …) records its own pre-mutation snapshot or scoped
-  restyle hint before touching the node. "Snapshot before mutating" is enforced by construction,
-  not asked of embedders. Selector-visible attributes always live in the real node attribute map,
-  whose names are interned as stylo `LocalName`s. Lynx's `l-css-id` and `data-*` values are written
-  through `Document::set_attribute`, never synthesized from the opaque payload during matching.
-  Stylesheet and device operations are methods on the owning document and schedule its root
-  internally in the same call. `Document::new` constructs a fresh style engine/context, so
-  different documents cannot share stylesheets. Embedders cannot set, clear, or query the core's
-  pending style state.
-- **Payloads are opaque to the DOM core.** The payload arena retains the `T` supplied for each
-  element/text node, and `Node<T>::payload` exposes it through a shared reference for non-DOM state
-  such as leaf measurement.
-  `w3c-dom` neither mutates that payload nor asks it to synthesize selector-visible state. IDs,
-  classes, inline style, Lynx CSS scope (`l-css-id`), and dataset entries (`data-*`) are ordinary
-  DOM attributes and change only through the corresponding `Document` mutation APIs.
-- **Let it crash.** Query methods return `Option`; mutation methods treat vacant/out-of-range
-  `NodeId`s,
-  cycle-creating links, a second document element, and invalid insertion references as
-  caller bugs — `debug_assert!`ed and panicking rather than silently ignored. Layers holding
-  untrusted handles validate first (`WidgetTree` maps violations to `WidgetError`, including its
-  Lynx-specific `<page>` root protection).
-- **Identity and lifetime are context-owned.** `NodeId` is a raw `usize` slab index. It carries no
-  document token and no allocation generation: after a node is removed and its slot reused, the
-  same number names the new occupant. Separate JS contexts do not exchange handles, and a native
-  `WidgetHandle` carries its context's `Reaper` owner while retaining its node, so no live handle
-  survives reclamation and a host-side routing bug is rejected outside the DOM. The private style
-  lock is created and owned by the same document, so there is no externally pairable engine token.
-- **Debug contract instrumentation.** The styling-arena entry paired with each node's `stylo_data`
-  `UnsafeCell` carries a debug-only guard (reader/writer state, owning thread, unwind poisoning)
-  and the document a debug
-  traversal-phase flag; violations of stylo's one-worker-per-element discipline crash debug
-  builds instead of being UB. Release builds compile it all away.
-- **Arena-set backpointers, one-word handles, no mirror tree.** Every node carries a pointer directly
-  to the fixed-address arena set, so it can resolve parents/children, payload and phase-specific
-  state, and recover slot zero using only `&Node`. The same **`&'a Node<T>`** implements Stylo's
-  `TNode`, `TElement`, `TDocument`, and
-  `TShadowRoot` associated-type stub; `NodeData` decides whether that node is the document, an
-  element, or text. No `Core`, document/node view, or iterator adapter exists. The
-  restyle traversal runs **in place on the document**; no second tree is materialized. Text nodes
-  remain in DOM/layout child iteration but are skipped by selector matching and cascade. The
-  word-sized `TElement` handle is load-bearing: stylo's style-sharing cache sizes its TLS for a
-  one-word handle (`FakeCandidate` in `style/sharing/mod.rs`), and a shared reference is exactly
-  that (and `Copy` by nature).
+- **One tree, four aligned arenas.** `Document<T>` owns one fixed-address
+  arena set. Its primary `Slab<Node<T>>` selects every `NodeId`: slot zero is
+  the real `NodeData::Document`, and later slots are element/text nodes. Three
+  secondary `Slab`s store opaque payload, Stylo traversal/invalidation state,
+  and layout measurement/out-of-flow state under the same IDs. Every side
+  insertion asserts that it received the primary slab's key; removal clears
+  all four entries before an ID can be reused. Computed styles and durable
+  rounded/unrounded layouts remain on the primary nodes.
+- **Each document owns its style context.** `Document::new` constructs a
+  private style engine containing the `Stylist`, device, stylesheet set,
+  cascade pipeline, base URL, and `SharedRwLock`. Documents cannot share or
+  exchange stylesheets, rule objects, or locks accidentally.
+- **Mutation carries invalidation.** Matching-relevant setters such as
+  `set_classes`, `set_attribute`, `add_element_state`,
+  `remove_element_state`, `set_inline_style`, `insert_before`, `detach`, and
+  `remove_subtree` record their own pre-mutation snapshots or scoped restyle
+  hints before changing the tree. Stylesheet and device operations schedule
+  the document root in the same call. Embedders cannot set, clear, or query
+  internal traversal dirty state.
+- **Payloads are opaque.** The payload arena retains the `T` supplied for
+  each element/text node, and `Node<T>::payload` exposes a shared reference.
+  The DOM core neither mutates the payload nor derives selector-visible state
+  from it. IDs, classes, inline style, CSS scope markers, and dataset entries
+  must be ordinary DOM attributes.
+- **The public core is crash-on-misuse.** Query methods return `Option`;
+  mutation methods treat stale IDs, cycles, a second document element, and
+  invalid insertion references as caller bugs. An untrusted runtime protocol
+  must validate its handles before calling the DOM.
+- **IDs are document-local raw indices.** `NodeId` has no document token or
+  allocation generation, and an index may be reused after removal. A future
+  JS-facing adapter therefore owns context routing, canonical handles, and
+  garbage-collection/lifetime policy. Those guarantees are not synthesized
+  by `w3c-dom`.
+- **One-word handles, no mirror tree.** Every node points to the fixed arena
+  set. The same plain `&Node<T>` implements Stylo's `TNode`, `TElement`,
+  `TDocument`, and shadow-root stub traits according to `NodeData`. Styling
+  traverses the real document in place; text nodes remain in DOM/layout child
+  iteration but are skipped by selector matching and cascade.
+- **Debug-only contract checks.** Styling side data guards Stylo's
+  one-worker-per-element discipline and traversal phases in debug builds.
+  These checks compile away in release builds.
 
 ## Ownership boundaries
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| `w3c-dom` | `Document<T>` (one fixed-address set of four NodeId-aligned `Slab`s plus a private `StyleEngine`/device/stylesheet/lock context), slot-zero document `Node<T>` (ordinary child list + node-visible style context), element/text nodes and their opaque payload/styling/layout side entries, raw-index `NodeId`, direct `&Node` Stylo DOM traits, invalidation-carrying DOM mutation, inline parsing, `Stylist`, rule matching, cascade, media evaluation, computed values, the **damage vocabulary** (`StyleDamage`/`FlushSummary`) + `effective_containment` derivation | Lynx tags/PAPI, payload semantics or mutation, payload-derived selector state, `<page>` root policy, Lynx unit metrics, touch-device policy |
-| `lynx-widget` | `Document<WidgetState>` through `WidgetTree`, the semantics and interior synchronization of each node-associated `WidgetState`, PAPI validation plus its own `<page>` root, `WidgetHandle` (canonical registry, context ownership, node retention, drop-driven reclamation of detached subtrees), `ViewMetrics`, touch-first `Device` construction, viewport-relative `rpx` integration | A second stylist, cascade implementation, stylesheet lock sharing, direct node construction, raw-id public APIs, writes to w3c-dom styling/traversal state |
-| `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, the maintained Lynx CSS extension patch set **and the Lynx supported-property/value grammar definition** (`style/properties/lynx_properties.txt`, `lynx` feature gates) | Runtime Widget/PAPI policy |
+| `w3c-dom` | `Document<T>` and its aligned arenas; DOM topology and attributes; private style context; invalidation-carrying mutation; inline parsing; matching, cascade, media evaluation, computed values; `StyleDamage`/`FlushSummary`; the concrete `neutron-star` host and layout-cache invalidation | Lynx tags or Element-PAPI opcodes, JS handle lifetime, payload semantics, `<page>` policy, bundle decoding/`StyleInfo` lowering, Lynx UA defaults, view metrics, touch-device policy |
+| `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, and the maintained Lynx CSS extension grammar behind the `lynx` feature | Runtime protocol, document ownership, bundle ingestion, or host policy |
+| Future runtime adapter | Element-PAPI validation and context-owned handles; Lynx node/event payload; `<page>` root policy; view metrics and device construction; UA stylesheet generation; decoded `StyleInfo` lowering and CSS-scope policy | A second DOM, matcher, cascade, layout engine, or direct writes to traversal/computed-style internals |
 
 ## Style lifecycle
 
-1. `lynx_widget::StyleEngine::new(ViewMetrics)` (or `with_page_config`)
-   retains the metrics and `PageConfig`; it owns no Stylist or stylesheet.
-   Page config is never an engine branch.
-2. Every `StyleEngine::new_tree()` constructs a touch-first stylo
-   `Device` — its viewport is the `rpx` basis — and passes it to
-   `w3c_dom::Document::new`. That document immediately owns a fresh private
-   `StyleEngine` (`Stylist`, device, stylesheet set, base URL, and
-   `SharedRwLock`). Creating another tree, even from the same Lynx adapter,
-   creates another complete context; no stylesheet object is shared. The
-   adapter then installs the **UA-origin default sheet** generated from `PageConfig`
-   (`defaultDisplayLinear`, `defaultOverflowVisible`; see
-   `crates/lynx-widget/src/ua.rs`). Neither `lynx-widget` nor callers receive
-   the lock. The resulting `Document<WidgetState>` keeps each widget's
-   Lynx-only identity/event payload on its `Node<WidgetState>`, but the core
-   treats that payload as opaque and read-only. `WidgetTree::create_page`
-   records `<page>` as the Lynx-layer root and attaches that ordinary element
-   beneath the generic DOM document node.
-3. `StyleEngine::load_style_info(&mut tree, &StyleInfo)` ingests a decoded bundle by
-   **direct construction** (`crates/lynx-widget/src/ingest.rs`): one selector
-   parse per rule + per-property value parses into stylo rule objects — no
-   CSS-text re-serialization. Lynx policy applied at ingest: `@import`
-   flattening (Kahn, web-core parity) and cssId scoping via
-   `:where([l-css-id="N"])` guards on the subject compound. The rules mount
-   through the fork's `StylesheetContents::from_rules` +
-   `w3c_dom::Document::append_rules` on that tree's document.
-4. DOM mutations schedule style work as part of the `Document` methods that
-   perform them (`crates/w3c-dom/src/invalidation.rs`): attribute / class /
-   id / pseudo-state changes record a **pre-mutation snapshot on the affected
-   node** for stylo's invalidation sets; structural changes post **restyle
-   hints** scoped by the selector flags stylo recorded during matching;
-   inline-style updates post the style-attribute replacement hint. These
-   scheduling details are private to the core: embedders receive neither dirty
-   queries nor reset APIs. Stylesheet insertion and device mutation are methods
-   on the owning document and schedule its root subtree in the same
-   operation; no generation broadcast or adapter-managed dirty callback exists.
-5. `StyleEngine::flush_styles(&mut tree)` delegates to
-   `Document::flush_styles`, which drives **stylo's own restyle
-   traversal** (`crates/w3c-dom/src/flush.rs`) from `Document::root_element()`, the first element
-   child of the slot-zero document node:
-   reachable pending node snapshots are moved along the dirty spine into the
-   temporary map required by stylo's traversal API, followed by
-   snapshot-driven invalidation, the style sharing cache, bloom filter, and
-   rayon parallelism over wide DOM levels (stylo's global style pool).
-   Computed styles land in each element node's stylo `ElementData`; read them with
-   `WidgetTree::computed` (an `Arc<ComputedValues>` clone — direct Arc reads
-   per `docs/style-assumptions.md` §B.8). The underlying document flush returns
-   a **`FlushSummary`** — the
-   per-node `StyleDamage` the change produced (a diff-based restyle damage
-   class: repaint / stacking-context rebuild / overflow recalc / relayout,
-   cumulative) plus a `traversed` flag, keyed by `NodeId`. Initial styling of
-   a subtree reports **no** damage by design (no old values to diff); a later
-   geometry/`display` change reports the matching damage on the affected
-   nodes. Harvest immediately consumes relayout-class entries into incremental
-   layout invalidation before exposing the summary, so a later layout stays
-   correct even when an independent flush's return value is discarded. The
-   summary is *not* `#[must_use]`, and
-   `Document::flush_styles_with_sink` streams the same damage without allocating the
-   `Vec`. **Damage stays inside the engine layer**: `lynx-widget` is the
-   web-core analogue over `w3c-dom`'s browser-DOM analogue, so
-   `flush_styles` neither forwards nor re-exports the damage vocabulary
-   — style→layout damage flow is `w3c-dom`'s internal seam, not PAPI surface.
-6. **Harvest is the tail of the flush** (the crate-private
-   `Document::harvest_flush`): after the traversal returns it walks the dirty
-   spine from the traversal's *actual* root (`driver::traverse_dom`'s return
-   value — stylo can raise a flush root to its parent when the root's
-   snapshot invalidated siblings; for the document element the raise is
-   structurally impossible — it has no element siblings, and stylo resolves
-   the substitute via `parent_element_or_host()`, `None` for the document
-   element — so the harvest follows the driver's returned root purely by
-   contract, as insurance for a future subtree-flush entry point), reads each
-   visited node's `ElementData::damage`, copies it out, then **clears** stylo's
-   per-node restyle state (hint + damage + flags) and the `dirty_descendants` /
-   snapshot bits. The copied relayout-class damage drives boundary-stopped
-   `Document::invalidate_layout` (plus the parent for a reconstruct), and all
-   copied damage remains exposed through the summary/sink. Clearing damage is
-   not optional — see the invariant below.
-   There is no public whole-document scheduling reset: only a successful flush
-   harvests the state that traversal consumed.
-7. `w3c_dom::Document::resolve_style` remains a read-only standalone match+cascade
-   helper for core-level inspection. It does not write a node's computed style
-   or participate in traversal scheduling, and `lynx-widget` does not expose a
-   widget-specific wrapper. Computed values stored on nodes are written only by
-   the normal style traversal and read through `WidgetTree::computed`.
+1. The embedder constructs a Stylo `Device` and passes it to
+   `Document::new` (or `Document::with_url_data`). Device construction is
+   deliberately outside the generic DOM because viewport, pointer, color,
+   font-metric, and `rpx` policy belong to the runtime environment.
+2. The document creates its private stylist, stylesheet set, base URL, and
+   lock. Callers may add CSS text through document methods or append rule
+   objects constructed for that same document context.
+3. DOM mutation methods record snapshots/restyle hints internally.
+   Selector-visible data lives in the real node fields and attribute map.
+4. `Document::flush_styles` drives Stylo traversal from the document element:
+   snapshot invalidation, style sharing, bloom filtering, and parallel
+   traversal all run in place.
+5. Flush harvest copies each visited element's `StyleDamage`, consumes
+   relayout-class damage into containment-bounded layout-cache invalidation,
+   and then clears Stylo's damage/restyle state. This clearing prevents old
+   damage from triggering later no-op traversals.
+6. `Document::resolve_style` remains a read-only standalone match/cascade
+   helper. It does not write node styles or participate in traversal
+   scheduling.
+7. `Document::layout` flushes styles before invoking the concrete
+   `neutron-star` host. Computed values are lent directly from each node's
+   Stylo `ElementData`, without an adapter-side style copy.
+
+## Runtime integration gap
+
+There is currently no crate that exposes Lynx Element-PAPI or connects
+`bobcat-engine::view::LynxView` to a `Document`. Consequently:
+
+- `.web.bundle` `StyleInfo` decoding exists, but no runtime layer lowers and
+  mounts those decoded rules into `w3c-dom`;
+- Lynx page defaults (`display: linear`, border-box, hidden overflow, and
+  page-config variants) are not installed as a UA stylesheet;
+- view metrics, touch-first device construction, and viewport-relative `rpx`
+  updates have no runtime owner;
+- Lynx element identity, event registrations, untrusted-handle validation,
+  detached-subtree lifetime, and CSS-scope ingestion have no public adapter.
+
+These are explicit future-integration tasks, not responsibilities to absorb
+into `w3c-dom`, `bobcat-engine`, or `neutron-star`.
 
 ## Invariants
 
-- `Document::new(device)` constructs and owns a fresh style engine/context.
-  A `Document` cannot be constructed around an existing context, and the
-  internal engine cannot be extracted, so different documents cannot share
-  stylesheets.
-- `SharedRwLock` is an implementation detail of `w3c-dom`; embedders do not
-  construct, pass, or read it.
-- Standard CSS behavior belongs in `w3c-dom`. Lynx-only extensions and
-  environment policy belong in `lynx-widget` (or the maintained stylo fork
-  when they are first-class CSS grammar/value extensions — the fork's
-  `lynx_properties.txt` + `lynx` feature gates are the source of truth for
-  which properties/values the Lynx grammar supports).
-- Device mutations go through `Document::update_device` or `set_viewport`,
-  ensuring media-dependent cascade data is refreshed and that document is
-  scheduled immediately. Thus
-  `rpx`/`vw`/`vh` lengths re-resolve and media-dependent rules re-match without
-  an adapter-managed dirty operation.
-- Snapshot-before-mutate is **internal** to the `Document` setters. Selector
-  matching sees only actual DOM fields; an opaque `Node<T>` payload cannot add
-  or override attributes. The core exposes no mutable-payload accessor through
-  which an embedder could bypass that rule.
-- Node state stylo touches through `&self` during a traversal is atomic; the
-  `ElementData` slot is single-owner under stylo's traversal discipline
-  (`SAFETY` notes in `w3c-dom`'s `traits`/`flush`). Concurrent parallel
-  flushes are serialized process-wide (stylo's global pool keeps
-  per-traversal state in worker TLS). This discipline is what upcoming
-  parallel style resolving relies on — do not add non-atomic `&self`
-  mutability to `Node`.
-- **Clear damage on harvest.** stylo never clears restyle damage for a normal
-  restyle, and in servo builds `element_needs_traversal`
-  (`vendor/stylo/style/traversal.rs:226-228`) returns `true` for any element
-  whose `ElementData` still carries non-empty damage. Without the harvest's
-  clear pass, every previously-restyled node would be re-traversed on every
-  later flush forever. The regression guard: an incremental flush reports
-  non-empty damage; an immediate second flush reports an empty summary with
-  `traversed == false`.
+- Every `Document` owns one complete, private style context.
+- Snapshot-before-mutate remains internal to document setters.
+- Selector matching reads only real DOM state, never opaque payload fields.
+- A successful flush harvests and clears all traversal state it consumed.
+- Relayout damage is converted to layout invalidation before a flush summary
+  is returned or discarded.
+- Standard CSS behavior belongs in `w3c-dom`; Lynx-only runtime policy belongs
+  above it or in the maintained Stylo fork when it is grammar/value behavior.
+- No JS-facing code may expose raw `NodeId` values without a context and
+  lifetime layer.
 
-## Performance posture (see `docs/style-assumptions.md`)
+## Validation
 
-- Ingestion: direct construction, §B.5. Parallel traversal from day 1, §B.6.
-- Incremental restyles ride stylo invalidation sets, §B.7 — a class flip on
-  one element restyles only affected elements (~3µs per logical operation on
-  a 1.1k-widget tree, vs ~1.1ms for the initial full flush). The Divan benches
-  batch short operations into millisecond-scale samples and expose the batch
-  size through an item counter, so this per-operation figure is derived from
-  throughput rather than a flaky microsecond sample.
-- Damage harvest is a spine walk over already-dirty nodes, so it costs
-  nothing on clean subtrees. Clearing damage on harvest also makes a repeat
-  flush a **true no-op** (the scheduling token short-circuits, no traversal
-  runs) — `noop_flush` measures exactly that floor.
-- Benchmarks: `cargo bench -p lynx-widget` (`benches/style.rs`,
-  CodSpeed-tracked) — ingestion, initial flush (sequential + parallel),
-  incremental class flip (relayout) / **class flip repaint-only** (two
-  color-only fixture rules, the layout-skippable fast path) / inline style,
-  no-op flush floor; each incremental scenario
-  `black_box`es its `FlushSummary` so the harvest cost is measured — plus
-  `cargo bench -p w3c-dom` (`benches/css.rs`) at the engine level, including
-  the core's read-only standalone resolve baseline. No
-  native-C++-Lynx comparison harness yet (§E.18 is the bar; harness is
-  follow-up work).
+- Core tests: `cargo test -p w3c-dom`
+- Core benchmark: `cargo bench -p w3c-dom --bench css`
+- Workspace checks: `cargo fmt --check`, `cargo clippy --all-targets`, and
+  `cargo test --workspace`

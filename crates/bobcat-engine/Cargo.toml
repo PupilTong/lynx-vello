@@ -8,8 +8,6 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-lynx-widget = { workspace = true }
-
 bytes = { workspace = true }
 http = { workspace = true }
 thiserror = { workspace = true }

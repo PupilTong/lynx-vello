@@ -7,7 +7,7 @@ use bobcat_engine::resource::{
     ResourceRequest, ResourceResponse, ResourceStream, RetryAdvice,
 };
 use bobcat_engine::script::{ScriptEngine, ScriptError, ScriptFuture, ScriptValue};
-use bobcat_engine::view::{LynxView, ViewMetrics};
+use bobcat_engine::view::LynxView;
 
 #[derive(Debug)]
 struct NullResourceFetcher;
@@ -128,13 +128,9 @@ impl ScriptEngine for EchoScriptEngine {
     }
 }
 
-fn metrics() -> ViewMetrics {
-    ViewMetrics::new(390.0, 844.0, 3.0)
-}
-
 #[test]
 fn traits_compose_into_owned_and_shared_views() {
-    let mut owned = LynxView::new(NullResourceFetcher, EchoScriptEngine, metrics());
+    let mut owned = LynxView::new(NullResourceFetcher, EchoScriptEngine);
     let evaluated = owned.script_engine_mut().evaluate("globalThis");
     assert!(matches!(
         evaluated,
@@ -150,22 +146,14 @@ fn traits_compose_into_owned_and_shared_views() {
     let mut owned_engine = owned_parts.script_engine;
     let import = owned_engine.import_value("app.js", "default");
     drop(import);
-    let mut widget_api = owned_parts.widget_api;
-    widget_api.set_viewport(430.0, 932.0);
-    widget_api.set_device_pixel_ratio(2.0);
-    widget_api.flush_styles();
 
     let shared_fetcher: Arc<dyn ResourceFetcher> = Arc::new(NullResourceFetcher);
-    let shared_view = LynxView::from_shared_resource_fetcher(
-        Arc::clone(&shared_fetcher),
-        EchoScriptEngine,
-        metrics(),
-    );
+    let shared_view =
+        LynxView::from_shared_resource_fetcher(Arc::clone(&shared_fetcher), EchoScriptEngine);
     let returned = shared_view.into_parts();
 
     assert!(Arc::ptr_eq(&shared_fetcher, &returned.resource_fetcher));
     assert_eq!(Arc::strong_count(&shared_fetcher), 2);
-    assert_eq!(returned.widget_api.tree().widget_by_unique_id(1), None);
 
     let mut returned_engine = returned.script_engine;
     let called = returned_engine.call(

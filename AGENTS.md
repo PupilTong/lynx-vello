@@ -21,7 +21,7 @@ The from-scratch layout engine (successor to the C++ engine's `starlight`) is
 flexbox, Grid, and Starlight `display: relative` and `display: linear`
 algorithms are implemented as first-class peers. Its concrete document/stylo
 host lives in `crates/w3c-dom`'s `layout` module
-(`Document::layout`, results on each `Node`); the Lynx-widget
+(`Document::layout`, results on each `Node`); the Lynx-specific runtime
 policy layer remains pending, while W3C text nodes already use the concrete
 Parley path. See
 `docs/layout-architecture.md` for its design and
@@ -121,23 +121,22 @@ useful signal for currently-compatible versions of those libraries.
   `resource` module owns the protocol-only, host-injected, object-safe Tokio
   `ResourceFetcher` contract; `script` owns the ShadowRealm-inspired isolated
   `ScriptEngine` protocol; and `view` owns `LynxView<R, E>`, coupling one
-  engine instance with one private `lynx-widget` StyleEngine/WidgetTree pair.
+  engine instance with one resource-fetcher handle.
   The resource module must not decode images/fonts/templates, upload render
   resources, or own cache/retry policy; its protocol remains independent of
-  decoder/widget/style/layout/render layers even though the enclosing engine
-  crate composes `lynx-widget` at the view layer. It must remain independent
-  of concrete JavaScript engines, including QuickJS.
+  decoder/DOM/style/layout/render layers. The crate has no DOM adapter and
+  must remain independent of concrete JavaScript engines, including QuickJS.
 - `crates/quickjs-rust-bridge` — owner-thread-bound safe Rust wrapper around
   the pinned `vendor/quickjs` submodule. It owns the QuickJS C build and the
   narrow unsafe FFI shim, realm/value lifetime and affinity checks, exact
   ECMAScript string conversion, exception sanitization, and pending-job pump.
-  It must remain independent of Bobcat, Lynx widgets, resources, and runtime
+  It must remain independent of Bobcat, the DOM, resources, and runtime
   policy.
 - `crates/bobcat-quickjs` — narrow integration layer depending on both
   `bobcat-engine` and the otherwise Bobcat-independent `quickjs-rust-bridge`.
   Its public API is limited to an opaque QuickJS-backed `LynxView`, its default
-  construction factory, an opaque initialization error, and resource/widget
-  host access through that view. Runtime configuration, default constants,
+  construction factory, an opaque initialization error, and resource-host
+  access through that view. Runtime configuration, default constants,
   explicit-config construction, the `bobcat-engine::script` adapter types,
   and all realm/value handles, interrupt controls, and source-evaluation entry
   points remain crate-private implementation details. Lynx host globals and
@@ -208,7 +207,7 @@ useful signal for currently-compatible versions of those libraries.
   parent. Relayout damage on an element evicts its direct text children's
   measurement caches and retained artifacts because text nodes have no Stylo
   damage record of their own. Parley is unconditional and there is no
-  arbitrary payload callback. It must not contain Lynx widget vocabulary or
+  arbitrary payload callback. It must not contain Lynx runtime-element vocabulary or
   Lynx device/unit policy —
   Lynx computed defaults (border-box, `overflow: hidden`, `display: linear`
   on every element, …) stay embedder cascade policy (UA sheet). Relies on
@@ -217,22 +216,6 @@ useful signal for currently-compatible versions of those libraries.
   in the fork's lynx grammar; fork PR #9 (squash-merged into `lynx`) added
   `content-visibility` / `contain-intrinsic-size` under the `lynx` feature,
   pref-gated for stock servo builds.
-- `crates/lynx-widget` — Lynx Element-PAPI and style adapter over `w3c-dom`.
-  `WidgetTree` instantiates `Document<WidgetState>` and validates the document
-  boundary: untrusted PAPI input becomes `WidgetError`s before it reaches the
-  crash-on-misuse DOM core. `WidgetState` remains the opaque payload on each
-  `Node<WidgetState>`; widget identity and events live there, and the event
-  list owns its own interior synchronization rather than mutating w3c-dom
-  tree/style state. CSS scope and dataset values are real DOM attributes. The
-  crate also owns the `WidgetHandle` ownership layer — the
-  PAPI traffics exclusively in canonical, context-owned handles; a live
-  handle retains its node, and detached subtrees are reclaimed automatically
-  once their last handle drops (the native stand-in for the browser GC; no
-  public disposal API). Also owns Lynx view metrics, touch-first device
-  policy, and the viewport-relative `rpx` integration. Replaced-content
-  natural sizing remains below this layer and is not an Element-PAPI method.
-  Standard CSS parsing,
-  matching, cascade, and lock ownership remain in `w3c-dom`.
 - `crates/neutron-star` — the Flexbox, Grid, and
   Starlight Relative and Linear engine: trait-based host⇄engine integration
   with static dispatch only (no `dyn`), a stylo-style `LayoutNode: Copy`
@@ -260,16 +243,18 @@ useful signal for currently-compatible versions of those libraries.
   containment-bounded, damage-driven cache-invalidation host workflow
   (single-axis / container queries out of scope). Read
   `docs/layout-architecture.md` before touching it. It must not depend on
-  other workspace crates or own host tree/style storage, DOM/widget types,
+  other workspace crates or own host tree/style storage, DOM/runtime types,
   resolved device-unit policy, or paint order.
 - Remaining runtime-layout integration — the `LayoutNode` handle, display
   dispatch, fixed/hoisted positioned pass, per-node cache storage, and the
   automatic style-damage→`Document::invalidate_layout` wiring (boundary-stopped,
-  engine-internal — not a widget-layer concern) now live in `w3c-dom`
-  (see above). Still L3 work: `lynx-widget`-level policy (`rpx`-aware
-  view metrics, sticky lowering), component-specific staggered layout, and
-  Lynx-specific text attribute/raw-text/truncation policy. Generic W3C text
-  style, document context, and artifact storage already live in `w3c-dom`.
+  engine-internal — not a runtime-adapter concern) now live in `w3c-dom`
+  (see above). Still L3 work in a future runtime adapter: Element-PAPI
+  validation and handle lifetime, `rpx`-aware view/device policy, decoded
+  `StyleInfo` ingestion and Lynx UA defaults, sticky lowering,
+  component-specific staggered layout, and Lynx-specific text
+  attribute/raw-text/truncation policy. Generic W3C text style, document
+  context, and artifact storage already live in `w3c-dom`.
 - *(planned, not yet scaffolded)* render / runtime crates — see
   `docs/tracking/` for the behavior surface each will need to cover before
   scaffolding begins, and `.claude/agents/` for the subsystem-scoped agent

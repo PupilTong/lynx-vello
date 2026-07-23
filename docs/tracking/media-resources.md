@@ -37,8 +37,8 @@ Key architectural facts (native): request lifecycle is driven by a dirty-flag di
 lynx-vello now has the lower layout primitive for that handoff: replaced
 content carries an internal `NaturalSize`, and changing it invalidates the
 node-to-root layout-cache path. The future image fetch/decode/cache subsystem
-must integrate below the generic Widget/PAPI layer; `WidgetTree` deliberately
-exposes no natural-size mutation API. The metadata must not be encoded as
+must integrate below the future Element-PAPI layer; the generic public DOM API
+deliberately exposes no natural-size mutation. The metadata must not be encoded as
 `contain-*`/`contain-intrinsic-size`, because natural replaced size is content
 data rather than CSS size containment.
 

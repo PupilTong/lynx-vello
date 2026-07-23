@@ -32,7 +32,6 @@ jobs:
           -p bobcat-engine
           -p bobcat-quickjs
           -p lynx-template-decoder
-          -p lynx-widget
           -p quickjs-rust-bridge
           -p w3c-dom
           -p neutron-star

@@ -95,7 +95,6 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "http",
- "lynx-widget",
  "thiserror",
  "tokio",
  "tokio-util",
@@ -928,22 +927,6 @@ dependencies = [
  "rkyv",
  "serde_json",
  "thiserror",
-]
-
-[[package]]
-name = "lynx-widget"
-version = "0.1.0"
-dependencies = [
- "app_units",
- "codspeed-divan-compat",
- "euclid",
- "lynx-template-decoder",
- "rustc-hash",
- "smallvec",
- "stylo",
- "stylo_traits",
- "thiserror",
- "w3c-dom",
 ]
 
 [[package]]

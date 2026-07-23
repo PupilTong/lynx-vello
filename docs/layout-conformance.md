@@ -44,7 +44,7 @@ numbers, source-file contents, and test counts are not correctness oracles.
 The Flex and Grid results only confirm the implemented layout-core surface.
 They do not cover CSS parsing, cascade, anonymous box construction, paint,
 fragmentation, Grid named areas or named lines, or Grid subgrid. A complete W3C
-conformance claim would require the concrete Widget/stylo adapter and the
+conformance claim would require the future Lynx runtime/stylo adapter and the
 applicable Web Platform Tests in addition to these engine tests.
 
 Linear and Relative are Lynx-only formatting contexts, so W3C conformance does
