@@ -6,7 +6,7 @@ use divan::counter::ItemsCount;
 use neutron_star::geometry::Size;
 use w3c_dom::NodeId;
 
-use crate::support::LayoutFixture;
+use crate::support::{LayoutFixture, LeafContent};
 
 fn grid_fixture(width: f32, height: f32, extra: &str) -> LayoutFixture {
     let style = format!("display:grid; width:{width}px; height:{height}px; {extra}");
@@ -36,7 +36,7 @@ fn sparse_auto_fixture(item_count: usize) -> LayoutFixture {
     fixture.prepare()
 }
 
-fn dense_holes_fixture(item_count: usize) -> LayoutFixture {
+fn dense_holes_fixture(item_count: usize, content: LeafContent) -> LayoutFixture {
     let count = item_count.max(1);
     let rows = count.div_ceil(24);
     let mut fixture = grid_fixture(
@@ -51,11 +51,13 @@ fn dense_holes_fixture(item_count: usize) -> LayoutFixture {
             1 | 2 => 2,
             _ => 1,
         };
-        fixture.leaf(
+        fixture.leaf_with_content(
             root,
             &format!("grid-column:span {span}; width:auto; height:10px"),
             Size::new(span as f32 * 8.0, 10.0),
             None,
+            content,
+            index,
         );
     }
     fixture.prepare()
@@ -76,7 +78,7 @@ fn fixed_fr_fixture() -> LayoutFixture {
     fixture.prepare()
 }
 
-fn intrinsic_spans_fixture() -> LayoutFixture {
+fn intrinsic_spans_fixture(content: LeafContent) -> LayoutFixture {
     const ITEMS: usize = 768;
     let mut fixture = grid_fixture(
         1024.0,
@@ -87,17 +89,19 @@ fn intrinsic_spans_fixture() -> LayoutFixture {
     for index in 0..ITEMS {
         let span = 1 + index % 8;
         let width = 12.0 + (index % 29) as f32;
-        fixture.leaf(
+        fixture.leaf_with_content(
             root,
             &format!("grid-column:span {span}; width:auto; height:auto"),
             Size::new(width, 8.0 + (index % 5) as f32),
             None,
+            content,
+            index,
         );
     }
     fixture.prepare()
 }
 
-fn unique_intrinsic_spans_fixture(track_count: usize) -> LayoutFixture {
+fn unique_intrinsic_spans_fixture(track_count: usize, content: LeafContent) -> LayoutFixture {
     let tracks = track_count.max(1);
     let template = format!(
         "grid-template-columns:repeat({tracks}, minmax(min-content, 1fr)); grid-auto-rows:12px"
@@ -105,24 +109,26 @@ fn unique_intrinsic_spans_fixture(track_count: usize) -> LayoutFixture {
     let mut fixture = grid_fixture(tracks as f32 * 8.0, tracks as f32 * 12.0, &template);
     let root = fixture.root();
     for span in 1..=tracks {
-        fixture.leaf(
+        fixture.leaf_with_content(
             root,
             &format!("grid-column:span {span}; width:auto; height:auto"),
             Size::new(span as f32 + 8.0, 10.0),
             None,
+            content,
+            span,
         );
     }
     fixture.prepare()
 }
 
-fn flex_freeze_threshold_fixture(track_count: usize) -> LayoutFixture {
+fn flex_freeze_threshold_fixture(track_count: usize, content: LeafContent) -> LayoutFixture {
     let tracks = track_count.max(1);
     let template =
         format!("grid-template-columns:repeat({tracks}, minmax(1px, 1fr)); grid-auto-rows:10px");
     let mut fixture = grid_fixture(tracks as f32 * 12.0, 20.0, &template);
     let root = fixture.root();
     for index in 0..tracks {
-        fixture.leaf(
+        fixture.leaf_with_content(
             root,
             &format!(
                 "min-width:{}px; max-width:{}px; width:auto; height:10px",
@@ -131,12 +137,14 @@ fn flex_freeze_threshold_fixture(track_count: usize) -> LayoutFixture {
             ),
             Size::new(4.0 + (index % 13) as f32, 10.0),
             None,
+            content,
+            index,
         );
     }
     fixture.prepare()
 }
 
-fn nested_fixture() -> LayoutFixture {
+fn nested_fixture(content: LeafContent) -> LayoutFixture {
     const CONTAINERS: usize = 32;
     const ITEMS: usize = 32;
     let mut fixture = grid_fixture(
@@ -152,11 +160,13 @@ fn nested_fixture() -> LayoutFixture {
         );
         for item_index in 0..ITEMS {
             let span = 1 + (container_index + item_index) % 3;
-            fixture.leaf(
+            fixture.leaf_with_content(
                 container,
                 &format!("grid-column:span {span}; width:auto; height:auto"),
                 Size::new(3.0 + (item_index % 7) as f32, 3.0),
                 None,
+                content,
+                container_index * ITEMS + item_index,
             );
         }
     }
@@ -268,7 +278,14 @@ fn sparse_auto_placement_cold(bencher: divan::Bencher<'_, '_>, item_count: usize
 #[divan::bench(args = [256, 1_024])]
 fn dense_hole_backfill_cold(bencher: divan::Bencher<'_, '_>, item_count: usize) {
     bench_cold(bencher, dense_batch_size(item_count), || {
-        dense_holes_fixture(item_count)
+        dense_holes_fixture(item_count, LeafContent::Synthetic)
+    });
+}
+
+#[divan::bench(args = [256, 1_024])]
+fn dense_hole_backfill_with_text_cold(bencher: divan::Bencher<'_, '_>, item_count: usize) {
+    bench_cold(bencher, 1, || {
+        dense_holes_fixture(item_count, LeafContent::Text)
     });
 }
 
@@ -279,33 +296,65 @@ fn fixed_and_fractional_tracks_cold(bencher: divan::Bencher<'_, '_>) {
 
 #[divan::bench]
 fn intrinsic_spanning_items_cold(bencher: divan::Bencher<'_, '_>) {
-    bench_cold(bencher, INTRINSIC_SPANS_BATCH, intrinsic_spans_fixture);
+    bench_cold(bencher, INTRINSIC_SPANS_BATCH, || {
+        intrinsic_spans_fixture(LeafContent::Synthetic)
+    });
+}
+
+#[divan::bench]
+fn intrinsic_spanning_items_with_text_cold(bencher: divan::Bencher<'_, '_>) {
+    bench_cold(bencher, 1, || intrinsic_spans_fixture(LeafContent::Text));
 }
 
 #[divan::bench(args = [32, 128, 512])]
 fn unique_intrinsic_span_buckets_cold(bencher: divan::Bencher<'_, '_>, track_count: usize) {
     bench_cold(bencher, unique_span_batch_size(track_count), || {
-        unique_intrinsic_spans_fixture(track_count)
+        unique_intrinsic_spans_fixture(track_count, LeafContent::Synthetic)
+    });
+}
+
+#[divan::bench(args = [32, 128, 512])]
+fn unique_intrinsic_span_buckets_with_text_cold(
+    bencher: divan::Bencher<'_, '_>,
+    track_count: usize,
+) {
+    bench_cold(bencher, 1, || {
+        unique_intrinsic_spans_fixture(track_count, LeafContent::Text)
     });
 }
 
 #[divan::bench(args = [32, 256, 1_024])]
 fn flexible_track_freeze_thresholds_cold(bencher: divan::Bencher<'_, '_>, track_count: usize) {
     bench_cold(bencher, flex_freeze_batch_size(track_count), || {
-        flex_freeze_threshold_fixture(track_count)
+        flex_freeze_threshold_fixture(track_count, LeafContent::Synthetic)
+    });
+}
+
+#[divan::bench(args = [32, 256, 1_024])]
+fn flexible_track_freeze_thresholds_with_text_cold(
+    bencher: divan::Bencher<'_, '_>,
+    track_count: usize,
+) {
+    bench_cold(bencher, 1, || {
+        flex_freeze_threshold_fixture(track_count, LeafContent::Text)
     });
 }
 
 #[divan::bench]
 fn nested_grid_cold(bencher: divan::Bencher<'_, '_>) {
-    bench_cold(bencher, 1, nested_fixture);
+    bench_cold(bencher, 1, || nested_fixture(LeafContent::Synthetic));
+}
+
+#[divan::bench]
+fn nested_grid_with_text_cold(bencher: divan::Bencher<'_, '_>) {
+    bench_cold(bencher, 1, || nested_fixture(LeafContent::Text));
 }
 
 #[divan::bench]
 fn nested_grid_warm_descendants(bencher: divan::Bencher<'_, '_>) {
     bencher
         .with_inputs(|| {
-            let mut fixture = nested_fixture();
+            let mut fixture = nested_fixture(LeafContent::Synthetic);
             let _ = fixture.run();
             fixture.invalidate_root();
             fixture
@@ -323,7 +372,7 @@ fn nested_grid_warm_descendants(bencher: divan::Bencher<'_, '_>) {
 fn nested_grid_warm_root_cache_hit(bencher: divan::Bencher<'_, '_>) {
     bencher
         .with_inputs(|| {
-            let mut fixture = nested_fixture();
+            let mut fixture = nested_fixture(LeafContent::Synthetic);
             let _ = fixture.run();
             fixture
         })

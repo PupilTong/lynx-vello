@@ -4,7 +4,7 @@
 
 use neutron_star::geometry::Size;
 
-use crate::support::LayoutFixture;
+use crate::support::{LayoutFixture, LeafContent};
 
 #[derive(Clone, Copy)]
 pub(super) struct Scenario {
@@ -38,17 +38,37 @@ pub(super) const SCENARIOS: &[Scenario] = &[
     scenario!("flex_at_most_root", build_flex_at_most_root),
     scenario!("at_most_owner_matrix", build_at_most_owner_matrix),
     scenario!(
+        "at_most_owner_matrix_with_text",
+        build_at_most_owner_matrix_with_text
+    ),
+    scenario!(
         "owner_direction_inheritance",
         build_owner_direction_inheritance
+    ),
+    scenario!(
+        "owner_direction_inheritance_with_text",
+        build_owner_direction_inheritance_with_text
     ),
     scenario!(
         "flex_axis_alignment_matrix",
         build_flex_axis_alignment_matrix
     ),
+    scenario!(
+        "flex_axis_alignment_matrix_with_text",
+        build_flex_axis_alignment_matrix_with_text
+    ),
     scenario!("flex_distribution_matrix", build_flex_distribution_matrix),
+    scenario!(
+        "flex_distribution_matrix_with_text",
+        build_flex_distribution_matrix_with_text
+    ),
     scenario!(
         "flex_wrap_alignment_matrix",
         build_flex_wrap_alignment_matrix
+    ),
+    scenario!(
+        "flex_wrap_alignment_matrix_with_text",
+        build_flex_wrap_alignment_matrix_with_text
     ),
     scenario!("flex_baseline_measured", build_flex_baseline_measured),
     scenario!(
@@ -134,7 +154,7 @@ enum MatrixKind {
     Wrap,
 }
 
-fn build_matrix(nodes: usize, kind: MatrixKind) -> BenchCase {
+fn build_matrix(nodes: usize, kind: MatrixKind, content: LeafContent) -> BenchCase {
     let groups = nodes.max(4).div_ceil(4);
     let height = groups as f32 * 66.0;
     let mut fixture = flex_fixture(
@@ -196,11 +216,13 @@ fn build_matrix(nodes: usize, kind: MatrixKind) -> BenchCase {
                 1 + child_index,
                 align[(index + child_index) % align.len()]
             );
-            fixture.leaf(
+            fixture.leaf_with_content(
                 container,
                 &style,
                 Size::new(width, height),
                 Some(height - 2.0),
+                content,
+                index * 3 + child_index,
             );
         }
     }
@@ -208,23 +230,43 @@ fn build_matrix(nodes: usize, kind: MatrixKind) -> BenchCase {
 }
 
 fn build_at_most_owner_matrix(nodes: usize) -> BenchCase {
-    build_matrix(nodes, MatrixKind::AtMost)
+    build_matrix(nodes, MatrixKind::AtMost, LeafContent::Synthetic)
+}
+
+fn build_at_most_owner_matrix_with_text(nodes: usize) -> BenchCase {
+    build_matrix(nodes, MatrixKind::AtMost, LeafContent::Text)
 }
 
 fn build_owner_direction_inheritance(nodes: usize) -> BenchCase {
-    build_matrix(nodes, MatrixKind::Direction)
+    build_matrix(nodes, MatrixKind::Direction, LeafContent::Synthetic)
+}
+
+fn build_owner_direction_inheritance_with_text(nodes: usize) -> BenchCase {
+    build_matrix(nodes, MatrixKind::Direction, LeafContent::Text)
 }
 
 fn build_flex_axis_alignment_matrix(nodes: usize) -> BenchCase {
-    build_matrix(nodes, MatrixKind::Axis)
+    build_matrix(nodes, MatrixKind::Axis, LeafContent::Synthetic)
+}
+
+fn build_flex_axis_alignment_matrix_with_text(nodes: usize) -> BenchCase {
+    build_matrix(nodes, MatrixKind::Axis, LeafContent::Text)
 }
 
 fn build_flex_distribution_matrix(nodes: usize) -> BenchCase {
-    build_matrix(nodes, MatrixKind::Distribution)
+    build_matrix(nodes, MatrixKind::Distribution, LeafContent::Synthetic)
+}
+
+fn build_flex_distribution_matrix_with_text(nodes: usize) -> BenchCase {
+    build_matrix(nodes, MatrixKind::Distribution, LeafContent::Text)
 }
 
 fn build_flex_wrap_alignment_matrix(nodes: usize) -> BenchCase {
-    build_matrix(nodes, MatrixKind::Wrap)
+    build_matrix(nodes, MatrixKind::Wrap, LeafContent::Synthetic)
+}
+
+fn build_flex_wrap_alignment_matrix_with_text(nodes: usize) -> BenchCase {
+    build_matrix(nodes, MatrixKind::Wrap, LeafContent::Text)
 }
 
 fn build_flex_baseline_measured(nodes: usize) -> BenchCase {

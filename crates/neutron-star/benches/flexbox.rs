@@ -58,10 +58,30 @@ flex_bench!(flex_grow_row, "flex_grow_row");
 flex_bench!(flex_wrap_gaps, "flex_wrap_gaps");
 flex_bench!(flex_at_most_root, "flex_at_most_root");
 flex_bench!(at_most_owner_matrix, "at_most_owner_matrix");
+flex_bench!(
+    at_most_owner_matrix_with_text,
+    "at_most_owner_matrix_with_text"
+);
 flex_bench!(owner_direction_inheritance, "owner_direction_inheritance");
+flex_bench!(
+    owner_direction_inheritance_with_text,
+    "owner_direction_inheritance_with_text"
+);
 flex_bench!(flex_axis_alignment_matrix, "flex_axis_alignment_matrix");
+flex_bench!(
+    flex_axis_alignment_matrix_with_text,
+    "flex_axis_alignment_matrix_with_text"
+);
 flex_bench!(flex_distribution_matrix, "flex_distribution_matrix");
+flex_bench!(
+    flex_distribution_matrix_with_text,
+    "flex_distribution_matrix_with_text"
+);
 flex_bench!(flex_wrap_alignment_matrix, "flex_wrap_alignment_matrix");
+flex_bench!(
+    flex_wrap_alignment_matrix_with_text,
+    "flex_wrap_alignment_matrix_with_text"
+);
 flex_bench!(flex_baseline_measured, "flex_baseline_measured");
 flex_bench!(baseline_propagation_matrix, "baseline_propagation_matrix");
 flex_bench!(measured_callback_matrix, "measured_callback_matrix");

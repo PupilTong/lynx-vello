@@ -668,7 +668,15 @@ the painting — layout's job is to never be the frame's bottleneck.
   percentage-dependent or newly double-anchored items remeasure. The Linear
   suite covers fixed stacks,
   weighted distribution and freeze paths, ordering, gravity matrices,
-  measurement/stretch, and mixed hidden/absolute children. Equivalent-tree
+  measurement/stretch, and mixed hidden/absolute children. Each algorithm
+  suite also has five text-bearing clones of its complex workloads (20 total)
+  that enter through the same production document host and invoke the Parley
+  measurer during box layout. The clones cover Flex owner/direction/alignment/
+  distribution/wrapping matrices; Grid dense placement, intrinsic spans, flex
+  track freezing, and nesting; Linear weighted freezing, positioned/hidden
+  children, percentage intrinsic sizing, and cross gravity; and Relative
+  wrap-width refinement, dependency chains/cycles, duplicate ids, and nesting.
+  Equivalent-tree
   Taffy/Yoga and other cross-engine differential baselines remain future
   additions — not to copy those engines' designs, but to keep
   "high-performance" falsifiable.

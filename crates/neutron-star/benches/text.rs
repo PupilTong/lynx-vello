@@ -13,9 +13,8 @@ use stylo::values::computed::Display;
 use stylo::values::computed::font::{
     FamilyName, FontFamily, FontFamilyList, FontFamilyNameSyntax, SingleFontFamily,
 };
-use support::LayoutFixture;
+use support::{AHEM, LayoutFixture};
 
-const AHEM: &[u8] = include_bytes!("../tests/fixtures/Ahem.ttf");
 const LABEL: &[(&str, f32)] = &[("Settings", 16.0)];
 const SENTENCE: &[(&str, f32)] = &[("The quick brown fox jumps over the lazy dog.", 16.0)];
 const PARAGRAPH: &[(&str, f32)] = &[(

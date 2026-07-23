@@ -15,11 +15,15 @@ fn main() {
 }
 
 fn scenario_batch_size(name: &str) -> usize {
-    match name {
-        "linear_cross_gravity_matrix"
-        | "linear_gravity_matrix"
-        | "linear_layout_gravity_matrix" => 3,
-        _ => 24,
+    if name.ends_with("_with_text") {
+        1
+    } else {
+        match name {
+            "linear_cross_gravity_matrix"
+            | "linear_gravity_matrix"
+            | "linear_layout_gravity_matrix" => 3,
+            _ => 24,
+        }
     }
 }
 
