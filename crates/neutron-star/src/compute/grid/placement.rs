@@ -46,11 +46,10 @@ impl TrackSpan {
     }
 }
 
-/// The numeric placement styles needed for one grid item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(super) struct PlacementInput {
-    pub(super) column: Line<GridPlacement>,
-    pub(super) row: Line<GridPlacement>,
+/// Projects the numeric placement styles needed for one grid item.
+pub(super) trait PlacementInput {
+    fn column(&self) -> Line<GridPlacement>;
+    fn row(&self) -> Line<GridPlacement>;
 }
 
 /// A resolved two-dimensional grid area.
@@ -137,8 +136,8 @@ pub(super) fn resolve_axis_placement(
 }
 
 #[allow(clippy::too_many_lines)]
-pub(super) fn place_items(
-    inputs: &[PlacementInput],
+pub(super) fn place_items<I: PlacementInput>(
+    inputs: &[I],
     explicit_columns: usize,
     explicit_rows: usize,
     flow: GridAutoFlow,
@@ -154,8 +153,8 @@ pub(super) fn place_items(
 
     let mut items = Vec::with_capacity(inputs.len());
     for input in inputs {
-        let column = resolve_axis_placement(input.column, explicit_columns);
-        let row = resolve_axis_placement(input.row, explicit_rows);
+        let column = resolve_axis_placement(input.column(), explicit_columns);
+        let row = resolve_axis_placement(input.row(), explicit_rows);
         items.push(if row_flow {
             LogicalPlacement {
                 primary: row,
@@ -973,18 +972,19 @@ fn last_set_bit(words: &[u64], start: usize, end: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use GridPlacement::{Auto as A, Line as L, Span as S};
+
     use super::*;
 
-    fn auto() -> GridPlacement {
-        GridPlacement::Auto
+    const fn tracks(start: i32, end: i32) -> TrackSpan {
+        TrackSpan { start, end }
     }
 
-    fn line(value: i32) -> GridPlacement {
-        GridPlacement::Line(value)
-    }
-
-    fn span(value: i32) -> GridPlacement {
-        GridPlacement::Span(value)
+    const fn area(column_start: i32, column_end: i32, row_start: i32, row_end: i32) -> GridArea {
+        GridArea {
+            column: tracks(column_start, column_end),
+            row: tracks(row_start, row_end),
+        }
     }
 
     fn stylo_line(line_num: i32, is_span: bool) -> GridLine {
@@ -994,19 +994,33 @@ mod tests {
         line
     }
 
+    #[derive(Clone, Copy)]
+    struct TestPlacementInput {
+        column: Line<GridPlacement>,
+        row: Line<GridPlacement>,
+    }
+
+    impl PlacementInput for TestPlacementInput {
+        fn column(&self) -> Line<GridPlacement> {
+            self.column
+        }
+
+        fn row(&self) -> Line<GridPlacement> {
+            self.row
+        }
+    }
+
     #[test]
     fn stylo_grid_lines_decode_to_placements() {
-        assert_eq!(grid_placement(&GridLine::auto()), GridPlacement::Auto);
-        assert_eq!(
-            grid_placement(&stylo_line(2, false)),
-            GridPlacement::Line(2)
-        );
-        assert_eq!(
-            grid_placement(&stylo_line(-3, false)),
-            GridPlacement::Line(-3)
-        );
-        assert_eq!(grid_placement(&stylo_line(3, true)), GridPlacement::Span(3));
-        assert_eq!(grid_placement(&stylo_line(0, true)), GridPlacement::Span(1));
+        for (line, expected) in [
+            (GridLine::auto(), A),
+            (stylo_line(2, false), L(2)),
+            (stylo_line(-3, false), L(-3)),
+            (stylo_line(3, true), S(3)),
+            (stylo_line(0, true), S(1)),
+        ] {
+            assert_eq!(grid_placement(&line), expected);
+        }
     }
 
     fn input(
@@ -1014,8 +1028,8 @@ mod tests {
         column_end: GridPlacement,
         row_start: GridPlacement,
         row_end: GridPlacement,
-    ) -> PlacementInput {
-        PlacementInput {
+    ) -> TestPlacementInput {
+        TestPlacementInput {
             column: Line::new(column_start, column_end),
             row: Line::new(row_start, row_end),
         }
@@ -1023,107 +1037,64 @@ mod tests {
 
     #[test]
     fn resolves_lines_spans_and_conflicts() {
-        assert_eq!(
-            resolve_axis_placement(Line::new(line(1), line(-1)), 4),
-            AxisPlacement::Definite(TrackSpan { start: 0, end: 4 })
-        );
-        assert_eq!(
-            resolve_axis_placement(Line::new(line(3), line(1)), 4),
-            AxisPlacement::Definite(TrackSpan { start: 0, end: 2 })
-        );
-        assert_eq!(
-            resolve_axis_placement(Line::new(line(2), line(2)), 4),
-            AxisPlacement::Definite(TrackSpan { start: 1, end: 2 })
-        );
-        assert_eq!(
-            resolve_axis_placement(Line::new(line(2), span(3)), 4),
-            AxisPlacement::Definite(TrackSpan { start: 1, end: 4 })
-        );
-        assert_eq!(
-            resolve_axis_placement(Line::new(span(2), line(4)), 4),
-            AxisPlacement::Definite(TrackSpan { start: 1, end: 3 })
-        );
-        assert_eq!(
-            resolve_axis_placement(Line::new(span(2), span(5)), 4),
-            AxisPlacement::Indefinite { span: 2 }
-        );
+        for (start, end, expected) in [
+            (L(1), L(-1), AxisPlacement::Definite(tracks(0, 4))),
+            (L(3), L(1), AxisPlacement::Definite(tracks(0, 2))),
+            (L(2), L(2), AxisPlacement::Definite(tracks(1, 2))),
+            (L(2), S(3), AxisPlacement::Definite(tracks(1, 4))),
+            (S(2), L(4), AxisPlacement::Definite(tracks(1, 3))),
+            (S(2), S(5), AxisPlacement::Indefinite { span: 2 }),
+        ] {
+            assert_eq!(resolve_axis_placement(Line::new(start, end), 4), expected);
+        }
     }
 
     #[test]
     fn sparse_keeps_holes_while_dense_backfills() {
         let inputs = [
-            input(auto(), span(2), auto(), auto()),
-            input(auto(), span(2), auto(), auto()),
-            input(auto(), auto(), auto(), auto()),
+            input(A, S(2), A, A),
+            input(A, S(2), A, A),
+            input(A, A, A, A),
         ];
         let sparse = place_items(&inputs, 3, 0, GridAutoFlow::ROW);
         let dense = place_items(&inputs, 3, 0, GridAutoFlow::ROW | GridAutoFlow::DENSE);
 
-        assert_eq!(
-            sparse.areas[2],
-            GridArea {
-                column: TrackSpan { start: 2, end: 3 },
-                row: TrackSpan { start: 1, end: 2 },
-            }
-        );
-        assert_eq!(
-            dense.areas[2],
-            GridArea {
-                column: TrackSpan { start: 2, end: 3 },
-                row: TrackSpan { start: 0, end: 1 },
-            }
-        );
+        assert_eq!(sparse.areas[2], area(2, 3, 1, 2));
+        assert_eq!(dense.areas[2], area(2, 3, 0, 1));
     }
 
     #[test]
     fn row_and_column_flow_swap_the_search_axes() {
-        let inputs = [
-            input(auto(), auto(), auto(), auto()),
-            input(auto(), auto(), auto(), auto()),
-        ];
+        let inputs = [input(A, A, A, A), input(A, A, A, A)];
         let rows = place_items(&inputs, 2, 2, GridAutoFlow::ROW);
         let columns = place_items(&inputs, 2, 2, GridAutoFlow::COLUMN);
-        assert_eq!(rows.areas[0].column, TrackSpan { start: 0, end: 1 });
-        assert_eq!(rows.areas[1].column, TrackSpan { start: 1, end: 2 });
-        assert_eq!(rows.areas[1].row, TrackSpan { start: 0, end: 1 });
-        assert_eq!(columns.areas[0].row, TrackSpan { start: 0, end: 1 });
-        assert_eq!(columns.areas[1].row, TrackSpan { start: 1, end: 2 });
-        assert_eq!(columns.areas[1].column, TrackSpan { start: 0, end: 1 });
+        assert_eq!(rows.areas[0].column, tracks(0, 1));
+        assert_eq!(rows.areas[1].column, tracks(1, 2));
+        assert_eq!(rows.areas[1].row, tracks(0, 1));
+        assert_eq!(columns.areas[0].row, tracks(0, 1));
+        assert_eq!(columns.areas[1].row, tracks(1, 2));
+        assert_eq!(columns.areas[1].column, tracks(0, 1));
     }
 
     #[test]
     fn leading_implicit_tracks_participate_in_auto_placement() {
-        let inputs = [
-            input(line(-5), line(-4), line(1), line(2)),
-            input(auto(), auto(), auto(), auto()),
-        ];
+        let inputs = [input(L(-5), L(-4), L(1), L(2)), input(A, A, A, A)];
         let result = place_items(&inputs, 2, 1, GridAutoFlow::ROW);
-        assert_eq!(result.column_range, TrackSpan { start: -2, end: 2 });
-        assert_eq!(result.areas[0].column, TrackSpan { start: -2, end: -1 });
-        assert_eq!(result.areas[1].column, TrackSpan { start: -1, end: 0 });
+        assert_eq!(result.column_range, tracks(-2, 2));
+        assert_eq!(result.areas[0].column, tracks(-2, -1));
+        assert_eq!(result.areas[1].column, tracks(-1, 0));
         assert_eq!(result.occupied_columns, [true, true, false, false]);
     }
 
     #[test]
     fn automatic_spans_cover_both_axes() {
-        let result = place_items(
-            &[input(auto(), span(2), auto(), span(2))],
-            3,
-            2,
-            GridAutoFlow::ROW,
-        );
-        assert_eq!(
-            result.areas[0],
-            GridArea {
-                column: TrackSpan { start: 0, end: 2 },
-                row: TrackSpan { start: 0, end: 2 },
-            }
-        );
+        let result = place_items(&[input(A, S(2), A, S(2))], 3, 2, GridAutoFlow::ROW);
+        assert_eq!(result.areas[0], area(0, 2, 0, 2));
     }
 
     #[test]
     fn explicit_items_may_overlap() {
-        let placed = input(line(1), line(3), line(1), line(2));
+        let placed = input(L(1), L(3), L(1), L(2));
         let result = place_items(&[placed, placed], 2, 1, GridAutoFlow::ROW);
         assert_eq!(result.areas[0], result.areas[1]);
         assert_eq!(result.occupied_columns, [true, true]);
@@ -1132,44 +1103,27 @@ mod tests {
 
     #[test]
     fn clamps_areas_to_supported_grid_lines() {
-        assert_eq!(
-            resolve_axis_placement(Line::new(line(1_000_000), auto()), 1),
-            AxisPlacement::Definite(TrackSpan {
-                start: 9_999,
-                end: 10_000,
-            })
-        );
-        assert_eq!(
-            resolve_axis_placement(Line::new(line(-1_000_000), auto()), 1),
-            AxisPlacement::Definite(TrackSpan {
-                start: -10_000,
-                end: -9_999,
-            })
-        );
-        assert_eq!(
-            resolve_axis_placement(Line::new(line(1), span(i32::MAX)), 1),
-            AxisPlacement::Definite(TrackSpan {
-                start: 0,
-                end: 10_000,
-            })
-        );
+        for (start, end, expected) in [
+            (L(1_000_000), A, tracks(9_999, 10_000)),
+            (L(-1_000_000), A, tracks(-10_000, -9_999)),
+            (L(1), S(i32::MAX), tracks(0, 10_000)),
+        ] {
+            assert_eq!(
+                resolve_axis_placement(Line::new(start, end), 1),
+                AxisPlacement::Definite(expected)
+            );
+        }
 
         let result = place_items(
             &[
-                input(auto(), span(i32::MAX), line(1), line(2)),
-                input(line(-10_001), line(-10_000), auto(), auto()),
+                input(A, S(i32::MAX), L(1), L(2)),
+                input(L(-10_001), L(-10_000), A, A),
             ],
             0,
             1,
             GridAutoFlow::ROW,
         );
-        assert_eq!(
-            result.areas[0].column,
-            TrackSpan {
-                start: 0,
-                end: 10_000,
-            }
-        );
+        assert_eq!(result.areas[0].column, tracks(0, 10_000));
     }
 
     #[test]
@@ -1204,41 +1158,26 @@ mod tests {
 
     #[test]
     fn oversized_occupancy_uses_sparse_merged_intervals() {
-        let mut occupancy = Occupancy::new(
-            TrackSpan { start: 0, end: 500 },
-            TrackSpan {
-                start: -10_000,
-                end: 10_000,
-            },
-        );
+        let mut occupancy = Occupancy::new(tracks(0, 500), tracks(-10_000, 10_000));
         assert!(matches!(occupancy.storage, OccupancyStorage::Sparse(_)));
 
         occupancy.occupy(LogicalArea {
-            primary: TrackSpan { start: 7, end: 9 },
-            cross: TrackSpan {
-                start: -20,
-                end: 30,
-            },
+            primary: tracks(7, 9),
+            cross: tracks(-20, 30),
         });
         occupancy.occupy(LogicalArea {
-            primary: TrackSpan { start: 7, end: 8 },
-            cross: TrackSpan { start: 30, end: 45 },
+            primary: tracks(7, 8),
+            cross: tracks(30, 45),
         });
 
         assert_eq!(
-            occupancy.last_cross_collision(TrackSpan { start: 7, end: 8 }, -100, 100,),
+            occupancy.last_cross_collision(tracks(7, 8), -100, 100),
             Some(44)
         );
         assert_eq!(
-            occupancy.last_primary_collision(
-                TrackSpan { start: 0, end: 20 },
-                TrackSpan { start: 0, end: 1 },
-            ),
+            occupancy.last_primary_collision(tracks(0, 20), tracks(0, 1)),
             Some(8)
         );
-        assert_eq!(
-            occupancy.find_cross(TrackSpan { start: 7, end: 9 }, -20, 10, 100),
-            Some(45)
-        );
+        assert_eq!(occupancy.find_cross(tracks(7, 9), -20, 10, 100), Some(45));
     }
 }

@@ -160,7 +160,7 @@ impl LayoutOutput {
 }
 
 /// The durable, host-stored layout of one node.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, PartialEq, Default)]
 #[non_exhaustive]
 pub struct Layout {
     pub order: u32,

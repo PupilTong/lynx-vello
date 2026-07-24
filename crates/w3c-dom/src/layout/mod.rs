@@ -5,51 +5,20 @@ mod style;
 
 use std::sync::LazyLock;
 
-use neutron_star::cache::Cache;
 #[cfg(feature = "layout-test-utils")]
 use neutron_star::compute::LeafMetrics;
 use neutron_star::compute::NaturalSize;
 pub use neutron_star::geometry::{Edges, Point, Size};
 use neutron_star::invalidate::is_relayout_boundary;
 use neutron_star::style::CoreStyle;
+use neutron_star::text::TextContext;
 pub use neutron_star::tree::Layout;
 use stylo::properties::ComputedValues;
 use stylo::servo_arc::Arc;
 
 pub use self::style::StyleView;
-use crate::document::Document;
+use crate::document::{Document, NodeLayoutState};
 use crate::flush::Parallelism;
-
-/// One node's intermediate layout state, stored in the document's layout
-/// secondary arena under the node's `NodeId`.
-pub(crate) struct LayoutData {
-    pub(crate) measure_cache: Cache,
-    pub(crate) static_position: Point<f32>,
-}
-
-impl Default for LayoutData {
-    fn default() -> Self {
-        Self {
-            measure_cache: Cache::new(),
-            static_position: Point::ZERO,
-        }
-    }
-}
-
-impl LayoutData {
-    pub(crate) fn clear_measurement_cache(&mut self) {
-        self.measure_cache.clear();
-    }
-}
-
-/// Durable layout outputs kept in the primary node arena. Painting consumes
-/// `rounded`; incremental layout and positioned-coordinate conversion consume
-/// `unrounded` so snapped values are never fed back into layout.
-#[derive(Default)]
-pub(crate) struct LayoutResults {
-    pub(crate) unrounded: Layout,
-    pub(crate) rounded: Layout,
-}
 
 pub(crate) static ANONYMOUS_STYLE: LazyLock<Arc<ComputedValues>> = LazyLock::new(|| {
     use stylo::properties::style_structs::Font;
@@ -120,51 +89,85 @@ impl<T> Document<T> {
     }
 
     pub fn register_fonts(&mut self, bytes: &[u8]) -> usize {
-        let registered = self
-            .root_node()
-            .text_context()
-            .borrow_mut()
-            .register_fonts(bytes);
+        let context = self
+            .layout_state_mut()
+            .text_context
+            .get_or_insert_with(|| Box::new(TextContext::new()));
+        let registered = context.register_fonts(bytes);
         if registered != 0 {
             self.invalidate_layout_all();
         }
         registered
     }
 
+    #[must_use]
+    pub fn rounded_layout(&self, id: crate::NodeId) -> Option<&Layout> {
+        self.layout_state()
+            .nodes
+            .get(id)
+            .map(|state| state.slot.rounded())
+    }
+
+    #[must_use]
+    pub fn unrounded_layout(&self, id: crate::NodeId) -> Option<&Layout> {
+        self.layout_state()
+            .nodes
+            .get(id)
+            .map(|state| state.slot.unrounded())
+    }
+
+    #[must_use]
+    pub fn layout_cache_is_empty(&self, id: crate::NodeId) -> Option<bool> {
+        self.layout_state()
+            .nodes
+            .get(id)
+            .map(|state| state.slot.layout_cache_is_empty())
+    }
+
     pub fn invalidate_layout(&mut self, id: crate::NodeId) {
         let (boundary, reached_root) = {
-            let tree = self.tree();
+            let (tree, state, parked) = self.layout_parts();
             let start = tree
+                .nodes
                 .get(id)
                 .expect("vacant NodeId passed to Document::invalidate_layout");
-            start.layout_data().borrow_mut().clear_measurement_cache();
-            start.invalidate_text_artifacts();
+            state.clear_layout_cache(id);
 
             let mut boundary = None;
             let mut reached_root = true;
-            let mut current = start.parent();
-            while let Some(node) = current {
+            let mut current = start.parent_id();
+            while let Some(node_id) = current {
+                let node = tree
+                    .nodes
+                    .get(node_id)
+                    .expect("internal tree link must resolve to a live node");
                 let style_view = node.is_element().then(|| StyleView::of(node));
                 if style_view.as_ref().is_some_and(CoreStyle::skips_contents) {
                     reached_root = false;
                     break;
                 }
                 let is_boundary = style_view.as_ref().is_some_and(is_relayout_boundary);
-                if is_boundary && self.is_relayout_root_parked(node.id()) {
+                if is_boundary && parked.contains(&node_id) {
                     reached_root = false;
                     break;
                 }
                 let boundary_input = is_boundary
-                    .then(|| node.layout_data().borrow().measure_cache.committed_input())
+                    .then(|| {
+                        state
+                            .nodes
+                            .get(node_id)
+                            .expect("live node must have layout-arena state")
+                            .slot
+                            .committed_input()
+                    })
                     .flatten();
-                node.layout_data().borrow_mut().clear_measurement_cache();
-                node.invalidate_text_artifacts();
+                state.clear_layout_cache(node_id);
                 if let Some(input) = boundary_input {
-                    boundary = Some((node.id(), input));
+                    boundary = Some((node_id, input));
                     reached_root = false;
                     break;
                 }
-                current = node.parent();
+                current = node.parent_id();
             }
             (boundary, reached_root)
         };
@@ -175,11 +178,11 @@ impl<T> Document<T> {
     }
 
     pub fn invalidate_layout_all(&mut self) {
-        for (_, data) in self.layout_data_mut() {
-            data.get_mut().clear_measurement_cache();
-        }
-        for (_, node) in self.tree_mut().iter_mut() {
-            node.invalidate_text_artifacts();
+        for (_, NodeLayoutState { slot, text }) in self.layout_data_mut() {
+            slot.clear_layout_cache();
+            if let Some(artifacts) = text.as_deref_mut() {
+                artifacts.invalidate();
+            }
         }
         self.clear_relayout_roots();
         self.mark_layout_dirty(true);
@@ -189,10 +192,47 @@ impl<T> Document<T> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use neutron_star::tree::{LayoutInput, LayoutOutput};
+    use std::mem::size_of;
+
+    use neutron_star::text::TextLayoutStore;
+    use neutron_star::tree::{LayoutInput, LayoutOutput, LayoutSlot};
 
     use super::*;
     use crate::{DOCUMENT_NODE_ID, StylesheetOrigin};
+
+    #[test]
+    fn layout_state_size_probe() {
+        // 64-bit baseline before the static tree/state split. Keep these
+        // documented constants independent of the removed AtomicRefCell
+        // implementation and dependency.
+        const PRE_SPLIT_NODE_SIZE: usize = 368;
+        const PRE_SPLIT_ATOMIC_LAYOUT_DATA_SIZE: usize = 456;
+        const PRE_SPLIT_ATOMIC_LAYOUT_RESULTS_SIZE: usize = 160;
+        let current = (
+            size_of::<crate::Node<()>>(),
+            size_of::<LayoutSlot>(),
+            size_of::<NodeLayoutState>(),
+            size_of::<TextLayoutStore>(),
+        );
+        eprintln!(
+            "current: node={} layout_slot={} node_layout_state={} text_store={}; \
+             pre-static-split baseline: node={} atomic_layout_data={} \
+             atomic_layout_results={}",
+            current.0,
+            current.1,
+            current.2,
+            current.3,
+            PRE_SPLIT_NODE_SIZE,
+            PRE_SPLIT_ATOMIC_LAYOUT_DATA_SIZE,
+            PRE_SPLIT_ATOMIC_LAYOUT_RESULTS_SIZE,
+        );
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(
+            current,
+            (if cfg!(debug_assertions) { 208 } else { 200 }, 648, 656, 16,),
+            "Node, LayoutSlot, NodeLayoutState, and TextLayoutStore sizes changed",
+        );
+    }
 
     #[test]
     fn internal_natural_size_update_invalidates_the_dirty_spine() {
@@ -205,12 +245,12 @@ mod tests {
         let input = LayoutInput::default();
         for id in [DOCUMENT_NODE_ID, root, image] {
             document
-                .get(id)
-                .unwrap()
-                .layout_data()
-                .borrow_mut()
-                .measure_cache
-                .store(input, LayoutOutput::default());
+                .layout_state_mut()
+                .nodes
+                .get_mut(id)
+                .expect("live node has aligned layout state")
+                .slot
+                .store_cached_layout(input, LayoutOutput::default());
         }
 
         let natural_size = NaturalSize::from_size(Size::new(40.0, 20.0));
@@ -218,15 +258,7 @@ mod tests {
 
         assert_eq!(document.get(image).unwrap().natural_size(), natural_size);
         for id in [DOCUMENT_NODE_ID, root, image] {
-            assert!(
-                document
-                    .get(id)
-                    .unwrap()
-                    .layout_data()
-                    .borrow()
-                    .measure_cache
-                    .is_empty()
-            );
+            assert_eq!(document.layout_cache_is_empty(id), Some(true));
         }
     }
 

@@ -17,9 +17,9 @@ rustc-hash = { workspace = true }
 slab = { workspace = true }
 smallvec = { workspace = true }
 
-# Layout integration: the `layout` module implements neutron-star's handle
-# protocol (`LayoutNode` on a Copy handle, stylo-vocabulary style views)
-# directly over `Document<T>`. Replaced leaves consume node-owned
+# Layout integration: the `layout` module implements neutron-star's statically
+# split `LayoutTree` protocol over immutable tree/style arenas and a separate
+# mutable layout/text arena. Replaced leaves consume node-owned
 # `NaturalSize`; text nodes always use neutron-star's concrete Parley path;
 # there is no embedder measurement hook.
 neutron-star = { workspace = true }
@@ -36,7 +36,6 @@ dom = { workspace = true }
 stylo_traits = { workspace = true }
 selectors = { workspace = true }
 app_units = { workspace = true }
-atomic_refcell = { workspace = true }
 cssparser = { workspace = true }
 euclid = { workspace = true }
 url = { workspace = true }

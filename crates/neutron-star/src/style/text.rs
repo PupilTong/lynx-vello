@@ -1,64 +1,72 @@
 //! Text measurement style protocol.
 
 use stylo::computed_values::{text_wrap_mode, white_space_collapse};
+use stylo::properties::ComputedValues;
 use stylo::values::computed::{
     FontFamily, FontFeatureSettings, FontStyle, FontVariationSettings, FontWeight, LetterSpacing,
     LineHeight, TextAlign, TextIndent, WordBreak,
 };
 
-use crate::style::CoreStyle;
+use crate::style::{CoreStyle, initial_values};
 
-pub trait TextContainerStyle: CoreStyle {
-    fn text_align(&self) -> TextAlign {
-        TextAlign::Start
-    }
-
-    fn text_wrap_mode(&self) -> text_wrap_mode::T {
-        text_wrap_mode::T::Wrap
-    }
-
-    fn white_space_collapse(&self) -> white_space_collapse::T {
-        white_space_collapse::T::Collapse
-    }
-
-    fn word_break(&self) -> WordBreak {
-        WordBreak::Normal
-    }
-
-    fn text_indent(&self) -> TextIndent {
-        TextIndent::zero()
+style_protocol! {
+    pub trait TextContainerStyle: CoreStyle {
+        defaults(style) {
+            text_align -> TextAlign =
+                style.inherited_values().get_inherited_text().clone_text_align(),
+            text_wrap_mode -> text_wrap_mode::T =
+                style.inherited_values().get_inherited_text().clone_text_wrap_mode(),
+            white_space_collapse -> white_space_collapse::T =
+                style.inherited_values().get_inherited_text().clone_white_space_collapse(),
+            word_break -> WordBreak =
+                style.inherited_values().get_inherited_text().clone_word_break(),
+            text_indent -> TextIndent =
+                style.inherited_values().get_inherited_text().clone_text_indent(),
+        }
     }
 }
 
-pub trait TextRunStyle: Sized {
-    fn font_family(&self) -> FontFamily;
-
-    fn font_size(&self) -> f32 {
-        16.0
-    }
-
-    fn font_weight(&self) -> FontWeight {
-        FontWeight::NORMAL
-    }
-
-    fn font_style(&self) -> FontStyle {
-        FontStyle::NORMAL
-    }
-
-    fn letter_spacing(&self) -> LetterSpacing {
-        LetterSpacing::normal()
-    }
-
-    fn line_height(&self) -> LineHeight {
-        LineHeight::normal()
-    }
-
-    fn font_feature_settings(&self) -> FontFeatureSettings {
-        FontFeatureSettings::normal()
-    }
-
-    fn font_variation_settings(&self) -> FontVariationSettings {
-        FontVariationSettings::normal()
+style_protocol! {
+    pub trait TextRunStyle: Sized {
+        defaults(style) {
+            computed_text_values -> Option<&ComputedValues> = None,
+            font_family -> FontFamily = style
+                .computed_text_values()
+                .map_or_else(
+                    || initial_values().get_font().clone_font_family(),
+                    |values| values.get_font().clone_font_family(),
+                ),
+            font_family_ref -> Option<&FontFamily> = style
+                .computed_text_values()
+                .map(|values| &values.get_font().font_family),
+            font_size -> f32 = style.computed_text_values().map_or(16.0, |values| {
+                values.get_font().clone_font_size().computed_size().px()
+            }),
+            font_weight -> FontWeight = style
+                .computed_text_values()
+                .map_or(FontWeight::NORMAL, |values| values.get_font().clone_font_weight()),
+            font_style -> FontStyle = style
+                .computed_text_values()
+                .map_or(FontStyle::NORMAL, |values| values.get_font().clone_font_style()),
+            letter_spacing -> LetterSpacing = style.computed_text_values().map_or_else(
+                LetterSpacing::normal,
+                |values| values.get_inherited_text().clone_letter_spacing(),
+            ),
+            line_height -> LineHeight = style.computed_text_values().map_or_else(
+                LineHeight::normal,
+                |values| values.get_font().clone_line_height(),
+            ),
+            font_feature_settings -> FontFeatureSettings =
+                style.computed_text_values().map_or_else(
+                    FontFeatureSettings::normal,
+                    |values| values.get_font().clone_font_feature_settings(),
+                ),
+            font_variation_settings -> FontVariationSettings =
+                style.computed_text_values().map_or_else(
+                    FontVariationSettings::normal,
+                    |values| values.get_font().clone_font_variation_settings(),
+                ),
+        }
     }
 }
 
@@ -79,62 +87,6 @@ impl<R: TextRunStyle> Clone for TextRun<'_, R> {
 impl<R: TextRunStyle> Copy for TextRun<'_, R> {}
 
 pub type TextBrush = ();
-
-impl<S: TextContainerStyle> TextContainerStyle for &S {
-    fn text_align(&self) -> TextAlign {
-        (**self).text_align()
-    }
-
-    fn text_wrap_mode(&self) -> text_wrap_mode::T {
-        (**self).text_wrap_mode()
-    }
-
-    fn white_space_collapse(&self) -> white_space_collapse::T {
-        (**self).white_space_collapse()
-    }
-
-    fn word_break(&self) -> WordBreak {
-        (**self).word_break()
-    }
-
-    fn text_indent(&self) -> TextIndent {
-        (**self).text_indent()
-    }
-}
-
-impl<S: TextRunStyle> TextRunStyle for &S {
-    fn font_family(&self) -> FontFamily {
-        (**self).font_family()
-    }
-
-    fn font_size(&self) -> f32 {
-        (**self).font_size()
-    }
-
-    fn font_weight(&self) -> FontWeight {
-        (**self).font_weight()
-    }
-
-    fn font_style(&self) -> FontStyle {
-        (**self).font_style()
-    }
-
-    fn letter_spacing(&self) -> LetterSpacing {
-        (**self).letter_spacing()
-    }
-
-    fn line_height(&self) -> LineHeight {
-        (**self).line_height()
-    }
-
-    fn font_feature_settings(&self) -> FontFeatureSettings {
-        (**self).font_feature_settings()
-    }
-
-    fn font_variation_settings(&self) -> FontVariationSettings {
-        (**self).font_variation_settings()
-    }
-}
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -198,6 +150,7 @@ mod tests {
             TextRunStyle::font_family(&view).families.list.first(),
             Some(SingleFontFamily::Generic(GenericFontFamily::SansSerif))
         ));
+        assert!(TextRunStyle::font_family_ref(&view).is_none());
         assert_eq!(
             TextContainerStyle::text_wrap_mode(&view),
             text_wrap_mode::T::Wrap

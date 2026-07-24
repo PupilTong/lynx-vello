@@ -170,14 +170,7 @@ impl StyleEngine {
             QuirksMode::NoQuirks,
             AllowImportRules::Yes,
         );
-        let document_sheet = DocumentStyleSheet(Arc::new(sheet));
-
-        {
-            let guard = self.lock.read();
-            self.stylist.append_stylesheet(document_sheet, &guard);
-            let guards = StylesheetGuards::same(&guard);
-            self.stylist.flush(&guards);
-        }
+        self.install_stylesheet(sheet);
     }
 
     pub(crate) fn append_rules(&mut self, rules: Vec<CssRule>, origin: Origin) {
@@ -201,14 +194,14 @@ impl StyleEngine {
             media: Arc::new(self.lock.wrap(MediaList::empty())),
             disabled: AtomicBool::new(false),
         };
-        let document_sheet = DocumentStyleSheet(Arc::new(sheet));
+        self.install_stylesheet(sheet);
+    }
 
-        {
-            let guard = self.lock.read();
-            self.stylist.append_stylesheet(document_sheet, &guard);
-            let guards = StylesheetGuards::same(&guard);
-            self.stylist.flush(&guards);
-        }
+    fn install_stylesheet(&mut self, sheet: Stylesheet) {
+        let guard = self.lock.read();
+        self.stylist
+            .append_stylesheet(DocumentStyleSheet(Arc::new(sheet)), &guard);
+        self.stylist.flush(&StylesheetGuards::same(&guard));
     }
 
     #[must_use]
@@ -337,17 +330,7 @@ impl StyleEngine {
     ) -> Arc<stylo::shared_lock::Locked<MediaList>> {
         let mut input = ParserInput::new(media_query);
         let mut parser = Parser::new(&mut input);
-        let mut context = ParserContext::new(
-            Origin::Author,
-            &self.url_data,
-            Some(CssRuleType::Media),
-            ParsingMode::DEFAULT,
-            QuirksMode::NoQuirks,
-            std::borrow::Cow::default(),
-            None,
-            None,
-            AttrTaint::default(),
-        );
+        let mut context = self.parser_context(CssRuleType::Media);
         let media = MediaList::parse(&mut context, &mut parser);
         Arc::new(self.lock.wrap(media))
     }
@@ -451,35 +434,29 @@ impl<T> Document<T> {
     }
 
     pub fn update_device(&mut self, update: impl FnOnce(&mut Device)) {
-        self.style_engine_mut().update_device(update);
-        self.schedule_full_restyle();
+        self.change_style_context(|engine| engine.update_device(update));
     }
 
     pub fn set_viewport(&mut self, width: f32, height: f32) {
-        self.style_engine_mut().set_viewport(width, height);
-        self.schedule_full_restyle();
+        self.change_style_context(|engine| engine.set_viewport(width, height));
     }
 
     pub fn set_device_pixel_ratio(&mut self, device_pixel_ratio: f32) {
-        self.style_engine_mut()
-            .set_device_pixel_ratio(device_pixel_ratio);
-        self.schedule_full_restyle();
+        self.change_style_context(|engine| engine.set_device_pixel_ratio(device_pixel_ratio));
     }
 
     pub fn add_stylesheet(&mut self, css: &str, origin: Origin) {
-        self.style_engine_mut().add_stylesheet(css, origin);
-        self.schedule_full_restyle();
+        self.change_style_context(|engine| engine.add_stylesheet(css, origin));
     }
 
     pub fn add_stylesheet_with_media(&mut self, css: &str, origin: Origin, media_query: &str) {
-        self.style_engine_mut()
-            .add_stylesheet_with_media(css, origin, media_query);
-        self.schedule_full_restyle();
+        self.change_style_context(|engine| {
+            engine.add_stylesheet_with_media(css, origin, media_query);
+        });
     }
 
     pub fn append_rules(&mut self, rules: Vec<CssRule>, origin: Origin) {
-        self.style_engine_mut().append_rules(rules, origin);
-        self.schedule_full_restyle();
+        self.change_style_context(|engine| engine.append_rules(rules, origin));
     }
 
     #[must_use]
@@ -527,7 +504,8 @@ impl<T> Document<T> {
         self.style_engine().resolve_style(node, parent_style)
     }
 
-    fn schedule_full_restyle(&mut self) {
+    fn change_style_context(&mut self, change: impl FnOnce(&mut StyleEngine)) {
+        change(self.style_engine_mut());
         if let Some(root) = self.root_element().map(Node::id) {
             self.mark_subtree_dirty(root);
         }

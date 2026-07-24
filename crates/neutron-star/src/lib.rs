@@ -14,13 +14,9 @@ pub mod tree;
 pub mod prelude {
     pub use crate::compute::{LeafMeasureInput, LeafMetrics, NaturalSize};
     pub use crate::geometry::{Edges, Line, Point, Size};
-    pub use crate::style::{
-        CoreStyle, FlexContainerStyle, FlexItemStyle, GridContainerStyle, GridItemStyle,
-        LinearContainerStyle, LinearItemStyle, RelativeContainerStyle, RelativeItemStyle,
-        TextContainerStyle, TextRunStyle,
-    };
+    pub use crate::style::{CoreStyle, TextContainerStyle, TextRunStyle};
     pub use crate::tree::{
-        AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
-        SizingMode,
+        AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutSlot, LayoutTree,
+        RequestedAxis, SizingMode,
     };
 }

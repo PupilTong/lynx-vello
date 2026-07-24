@@ -7,7 +7,7 @@ use stylo::computed_values::{
     box_sizing, direction, relative_center, relative_layout_once, visibility,
 };
 use stylo::values::computed::lynx_layout::RelativeReference;
-use stylo::values::computed::{Display, PositionProperty};
+use stylo::values::computed::{Display, MaxSize, PositionProperty, Size as StyleSize};
 use support::*;
 
 fn width_bounded_by_available(
@@ -43,24 +43,86 @@ fn relative_leaf_style(width: f32, height: f32, relative_id: i32) -> TestStyle {
     }
 }
 
+fn relative_leaf_with(
+    tree: &mut TestTree,
+    width: f32,
+    height: f32,
+    relative_id: i32,
+    update: impl FnOnce(&mut TestStyle),
+) -> TestId {
+    let mut style = relative_leaf_style(width, height, relative_id);
+    update(&mut style);
+    tree.push_leaf(style, Size::new(width, height), None)
+}
+
 fn relative_leaf(tree: &mut TestTree, width: f32, height: f32, relative_id: i32) -> TestId {
+    relative_leaf_with(tree, width, height, relative_id, |_| {})
+}
+
+fn centered_leaf(
+    tree: &mut TestTree,
+    width: f32,
+    height: f32,
+    relative_center: relative_center::T,
+) -> TestId {
     tree.push_leaf(
-        relative_leaf_style(width, height, relative_id),
+        TestStyle {
+            size: Size::new(size_px(width), size_px(height)),
+            relative_center,
+            ..TestStyle::default()
+        },
         Size::new(width, height),
         None,
     )
+}
+
+fn max_content_layout(tree: &TestTree, root: TestId) -> LayoutOutput {
+    perform_layout(tree, root, Size::NONE, Size::MAX_CONTENT)
+}
+
+fn measured_intrinsic_width(style: TestStyle) -> f32 {
+    let mut tree = TestTree::default();
+    let item = tree.push_measured_leaf(style, intrinsic_width_bounded_by_available);
+    let root = relative_container(&mut tree, TestStyle::default(), &[item]);
+    definite_layout(&tree, root, 300.0, 100.0);
+    tree.layout(item).size.width
+}
+
+fn assert_case_close(case: &str, actual: f32, expected: f32) {
+    let error = (actual - expected).abs();
+    assert!(
+        error <= 0.01,
+        "{case}: expected {expected}, got {actual} (absolute error {error})"
+    );
+}
+
+fn width_constraints(preferred: StyleSize, minimum: StyleSize, maximum: MaxSize) -> TestStyle {
+    TestStyle {
+        size: Size::new(preferred, size_auto()),
+        min_size: Size::new(minimum, size_auto()),
+        max_size: Size::new(maximum, max_none()),
+        ..TestStyle::default()
+    }
+}
+
+fn preferred_width(width: StyleSize) -> TestStyle {
+    width_constraints(width, size_auto(), max_none())
+}
+
+fn maximum_width(width: MaxSize) -> TestStyle {
+    width_constraints(size_auto(), size_auto(), width)
 }
 
 fn dependency_cycle_fixture(
     layout_once: relative_layout_once::T,
 ) -> (TestTree, TestId, TestId, TestId) {
     let mut tree = TestTree::default();
-    let mut a_style = relative_leaf_style(10.0, 10.0, 1);
-    a_style.relative_adjacent.right = id(2);
-    let a = tree.push_leaf(a_style, Size::new(10.0, 10.0), None);
-    let mut b_style = relative_leaf_style(10.0, 10.0, 2);
-    b_style.relative_adjacent.bottom = id(1);
-    let b = tree.push_leaf(b_style, Size::new(10.0, 10.0), None);
+    let a = relative_leaf_with(&mut tree, 10.0, 10.0, 1, |s| {
+        s.relative_adjacent.right = id(2);
+    });
+    let b = relative_leaf_with(&mut tree, 10.0, 10.0, 2, |s| {
+        s.relative_adjacent.bottom = id(1);
+    });
     let root = relative_container(
         &mut tree,
         TestStyle {
@@ -75,20 +137,18 @@ fn dependency_cycle_fixture(
 #[test]
 fn parent_alignment_and_sibling_adjacency_use_physical_margin_edges() {
     let mut tree = TestTree::default();
-    let mut anchor_style = relative_leaf_style(10.0, 10.0, 1);
-    anchor_style.relative_align.left = RELATIVE_PARENT;
-    anchor_style.relative_align.top = RELATIVE_PARENT;
-    let anchor = tree.push_leaf(anchor_style, Size::new(10.0, 10.0), None);
-
-    let mut follower_style = relative_leaf_style(15.0, 20.0, 2);
-    follower_style.relative_adjacent.right = id(1);
-    follower_style.relative_adjacent.bottom = id(1);
-    let follower = tree.push_leaf(follower_style, Size::new(15.0, 20.0), None);
-
-    let mut trailing_style = relative_leaf_style(10.0, 10.0, 3);
-    trailing_style.relative_align.right = RELATIVE_PARENT;
-    trailing_style.relative_align.bottom = RELATIVE_PARENT;
-    let trailing = tree.push_leaf(trailing_style, Size::new(10.0, 10.0), None);
+    let anchor = relative_leaf_with(&mut tree, 10.0, 10.0, 1, |s| {
+        s.relative_align.left = RELATIVE_PARENT;
+        s.relative_align.top = RELATIVE_PARENT;
+    });
+    let follower = relative_leaf_with(&mut tree, 15.0, 20.0, 2, |s| {
+        s.relative_adjacent.right = id(1);
+        s.relative_adjacent.bottom = id(1);
+    });
+    let trailing = relative_leaf_with(&mut tree, 10.0, 10.0, 3, |s| {
+        s.relative_align.right = RELATIVE_PARENT;
+        s.relative_align.bottom = RELATIVE_PARENT;
+    });
     let root = relative_container(
         &mut tree,
         TestStyle::default(),
@@ -105,14 +165,13 @@ fn parent_alignment_and_sibling_adjacency_use_physical_margin_edges() {
 #[test]
 fn alignment_precedes_adjacency_for_the_same_side() {
     let mut tree = TestTree::default();
-    let mut anchor_style = relative_leaf_style(10.0, 10.0, 1);
-    anchor_style.relative_align.right = RELATIVE_PARENT;
-    let anchor = tree.push_leaf(anchor_style, Size::new(10.0, 10.0), None);
-
-    let mut child_style = relative_leaf_style(10.0, 10.0, 2);
-    child_style.relative_align.left = RELATIVE_PARENT;
-    child_style.relative_adjacent.right = id(1);
-    let child = tree.push_leaf(child_style, Size::new(10.0, 10.0), None);
+    let anchor = relative_leaf_with(&mut tree, 10.0, 10.0, 1, |s| {
+        s.relative_align.right = RELATIVE_PARENT;
+    });
+    let child = relative_leaf_with(&mut tree, 10.0, 10.0, 2, |s| {
+        s.relative_align.left = RELATIVE_PARENT;
+        s.relative_adjacent.right = id(1);
+    });
     let root = relative_container(&mut tree, TestStyle::default(), &[anchor, child]);
 
     definite_layout(&tree, root, 100.0, 20.0);
@@ -122,13 +181,12 @@ fn alignment_precedes_adjacency_for_the_same_side() {
 #[test]
 fn both_sides_refine_child_size_after_dependencies_are_positioned() {
     let mut tree = TestTree::default();
-    let mut left_style = relative_leaf_style(10.0, 10.0, 1);
-    left_style.relative_align.left = RELATIVE_PARENT;
-    let left = tree.push_leaf(left_style, Size::new(10.0, 10.0), None);
-
-    let mut right_style = relative_leaf_style(10.0, 10.0, 2);
-    right_style.relative_align.right = RELATIVE_PARENT;
-    let right = tree.push_leaf(right_style, Size::new(10.0, 10.0), None);
+    let left = relative_leaf_with(&mut tree, 10.0, 10.0, 1, |s| {
+        s.relative_align.left = RELATIVE_PARENT;
+    });
+    let right = relative_leaf_with(&mut tree, 10.0, 10.0, 2, |s| {
+        s.relative_align.right = RELATIVE_PARENT;
+    });
 
     let mut middle_style = TestStyle {
         relative_id: id(3),
@@ -172,12 +230,12 @@ fn parent_double_alignment_subtracts_used_margins() {
 fn duplicate_ids_resolve_to_the_last_ordered_relative_item() {
     let mut tree = TestTree::default();
     let first = relative_leaf(&mut tree, 10.0, 10.0, 7);
-    let mut last_style = relative_leaf_style(10.0, 10.0, 7);
-    last_style.relative_align.right = RELATIVE_PARENT;
-    let last = tree.push_leaf(last_style, Size::new(10.0, 10.0), None);
-    let mut follower_style = relative_leaf_style(10.0, 10.0, 8);
-    follower_style.relative_adjacent.right = id(7);
-    let follower = tree.push_leaf(follower_style, Size::new(10.0, 10.0), None);
+    let last = relative_leaf_with(&mut tree, 10.0, 10.0, 7, |s| {
+        s.relative_align.right = RELATIVE_PARENT;
+    });
+    let follower = relative_leaf_with(&mut tree, 10.0, 10.0, 8, |s| {
+        s.relative_adjacent.right = id(7);
+    });
     let root = relative_container(&mut tree, TestStyle::default(), &[first, last, follower]);
 
     definite_layout(&tree, root, 100.0, 20.0);
@@ -190,17 +248,15 @@ fn duplicate_ids_resolve_to_the_last_ordered_relative_item() {
 #[test]
 fn order_sorting_is_stable_and_controls_id_lookup() {
     let mut tree = TestTree::default();
-    let mut later_style = relative_leaf_style(10.0, 10.0, 7);
-    later_style.order = 2;
-    let later = tree.push_leaf(later_style, Size::new(10.0, 10.0), None);
-    let mut earlier_style = relative_leaf_style(10.0, 10.0, 7);
-    earlier_style.order = 1;
-    earlier_style.relative_align.right = RELATIVE_PARENT;
-    let earlier = tree.push_leaf(earlier_style, Size::new(10.0, 10.0), None);
-    let mut follower_style = relative_leaf_style(10.0, 10.0, 8);
-    follower_style.order = 3;
-    follower_style.relative_adjacent.right = id(7);
-    let follower = tree.push_leaf(follower_style, Size::new(10.0, 10.0), None);
+    let later = relative_leaf_with(&mut tree, 10.0, 10.0, 7, |s| s.order = 2);
+    let earlier = relative_leaf_with(&mut tree, 10.0, 10.0, 7, |s| {
+        s.order = 1;
+        s.relative_align.right = RELATIVE_PARENT;
+    });
+    let follower = relative_leaf_with(&mut tree, 10.0, 10.0, 8, |s| {
+        s.order = 3;
+        s.relative_adjacent.right = id(7);
+    });
     let root = relative_container(&mut tree, TestStyle::default(), &[later, earlier, follower]);
 
     definite_layout(&tree, root, 100.0, 20.0);
@@ -214,12 +270,12 @@ fn order_sorting_is_stable_and_controls_id_lookup() {
 #[test]
 fn parent_id_zero_is_reserved_and_never_identifies_an_item() {
     let mut tree = TestTree::default();
-    let mut zero_style = relative_leaf_style(10.0, 10.0, 0);
-    zero_style.relative_align.left = RELATIVE_PARENT;
-    let zero = tree.push_leaf(zero_style, Size::new(10.0, 10.0), None);
-    let mut follower_style = relative_leaf_style(10.0, 10.0, 2);
-    follower_style.relative_adjacent.right = RELATIVE_PARENT;
-    let follower = tree.push_leaf(follower_style, Size::new(10.0, 10.0), None);
+    let zero = relative_leaf_with(&mut tree, 10.0, 10.0, 0, |s| {
+        s.relative_align.left = RELATIVE_PARENT;
+    });
+    let follower = relative_leaf_with(&mut tree, 10.0, 10.0, 2, |s| {
+        s.relative_adjacent.right = RELATIVE_PARENT;
+    });
     let root = relative_container(&mut tree, TestStyle::default(), &[zero, follower]);
 
     definite_layout(&tree, root, 100.0, 20.0);
@@ -231,10 +287,10 @@ fn parent_id_zero_is_reserved_and_never_identifies_an_item() {
 #[test]
 fn missing_reference_falls_back_to_the_other_property_or_default_bounds() {
     let mut tree = TestTree::default();
-    let mut style = relative_leaf_style(10.0, 10.0, 1);
-    style.relative_align.left = id(999);
-    style.relative_adjacent.right = RELATIVE_PARENT;
-    let fallback = tree.push_leaf(style, Size::new(10.0, 10.0), None);
+    let fallback = relative_leaf_with(&mut tree, 10.0, 10.0, 1, |s| {
+        s.relative_align.left = id(999);
+        s.relative_adjacent.right = RELATIVE_PARENT;
+    });
     let root = relative_container(&mut tree, TestStyle::default(), &[fallback]);
 
     definite_layout(&tree, root, 100.0, 20.0);
@@ -244,24 +300,8 @@ fn missing_reference_falls_back_to_the_other_property_or_default_bounds() {
 #[test]
 fn unconstrained_centering_is_axis_selective() {
     let mut tree = TestTree::default();
-    let horizontal = tree.push_leaf(
-        TestStyle {
-            size: Size::new(size_px(20.0), size_px(10.0)),
-            relative_center: relative_center::T::Horizontal,
-            ..TestStyle::default()
-        },
-        Size::new(20.0, 10.0),
-        None,
-    );
-    let both = tree.push_leaf(
-        TestStyle {
-            size: Size::new(size_px(10.0), size_px(20.0)),
-            relative_center: relative_center::T::Both,
-            ..TestStyle::default()
-        },
-        Size::new(10.0, 20.0),
-        None,
-    );
+    let horizontal = centered_leaf(&mut tree, 20.0, 10.0, relative_center::T::Horizontal);
+    let both = centered_leaf(&mut tree, 10.0, 20.0, relative_center::T::Both);
     let root = relative_container(&mut tree, TestStyle::default(), &[horizontal, both]);
 
     definite_layout(&tree, root, 100.0, 80.0);
@@ -292,18 +332,10 @@ mod dependency_order {
     #[test]
     fn one_pass_processes_all_initial_roots_before_newly_ready_dependents() {
         let mut tree = TestTree::default();
-        let mut dependent_style = relative_leaf_style(10.0, 10.0, 1);
-        dependent_style.relative_adjacent.right = id(2);
-        let dependent = tree.push_leaf(dependent_style, Size::new(10.0, 10.0), None);
-        let centered_root = tree.push_leaf(
-            TestStyle {
-                size: Size::new(size_px(10.0), size_px(10.0)),
-                relative_center: relative_center::T::Horizontal,
-                ..TestStyle::default()
-            },
-            Size::new(10.0, 10.0),
-            None,
-        );
+        let dependent = relative_leaf_with(&mut tree, 10.0, 10.0, 1, |s| {
+            s.relative_adjacent.right = id(2);
+        });
+        let centered_root = centered_leaf(&mut tree, 10.0, 10.0, relative_center::T::Horizontal);
         let anchor = relative_leaf(&mut tree, 20.0, 10.0, 2);
         let root = relative_container(
             &mut tree,
@@ -314,12 +346,7 @@ mod dependency_order {
             &[dependent, centered_root, anchor],
         );
 
-        let output = perform_layout(
-            &tree,
-            root,
-            Size::NONE,
-            Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
-        );
+        let output = max_content_layout(&tree, root);
 
         assert_size(output.size, Size::new(30.0, 10.0));
         assert_point(tree.layout(centered_root).location, Point::new(-5.0, 0.0));
@@ -331,12 +358,12 @@ mod dependency_order {
 #[test]
 fn self_cycles_and_duplicate_dependency_fields_terminate_deterministically() {
     let mut tree = TestTree::default();
-    let mut style = relative_leaf_style(10.0, 10.0, 1);
-    style.relative_align.left = id(1);
-    style.relative_adjacent.right = id(1);
-    style.relative_align.top = id(1);
-    style.relative_adjacent.bottom = id(1);
-    let child = tree.push_leaf(style, Size::new(10.0, 10.0), None);
+    let child = relative_leaf_with(&mut tree, 10.0, 10.0, 1, |s| {
+        s.relative_align.left = id(1);
+        s.relative_adjacent.right = id(1);
+        s.relative_align.top = id(1);
+        s.relative_adjacent.bottom = id(1);
+    });
     let root = relative_container(&mut tree, TestStyle::default(), &[child]);
 
     definite_layout(&tree, root, 100.0, 100.0);
@@ -347,9 +374,9 @@ fn self_cycles_and_duplicate_dependency_fields_terminate_deterministically() {
 fn wrap_content_uses_dependency_extent_and_container_surrounds() {
     let mut tree = TestTree::default();
     let anchor = relative_leaf(&mut tree, 10.0, 12.0, 1);
-    let mut follower_style = relative_leaf_style(15.0, 8.0, 2);
-    follower_style.relative_adjacent.right = id(1);
-    let follower = tree.push_leaf(follower_style, Size::new(15.0, 8.0), None);
+    let follower = relative_leaf_with(&mut tree, 15.0, 8.0, 2, |s| {
+        s.relative_adjacent.right = id(1);
+    });
     let root = relative_container(
         &mut tree,
         TestStyle {
@@ -360,12 +387,7 @@ fn wrap_content_uses_dependency_extent_and_container_surrounds() {
         &[follower, anchor],
     );
 
-    let output = perform_layout(
-        &tree,
-        root,
-        Size::NONE,
-        Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
-    );
+    let output = max_content_layout(&tree, root);
 
     assert_size(output.size, Size::new(39.0, 26.0));
     assert_point(tree.layout(anchor).location, Point::new(7.0, 7.0));
@@ -377,25 +399,17 @@ fn padding_and_border_translate_every_relative_position_from_the_content_origin(
     let mut tree = TestTree::default();
     let anchor = relative_leaf(&mut tree, 20.0, 10.0, 10);
 
-    let mut parent_end_style = relative_leaf_style(10.0, 8.0, 11);
-    parent_end_style.relative_align.right = RELATIVE_PARENT;
-    parent_end_style.relative_align.bottom = RELATIVE_PARENT;
-    let parent_end = tree.push_leaf(parent_end_style, Size::new(10.0, 8.0), None);
+    let parent_end = relative_leaf_with(&mut tree, 10.0, 8.0, 11, |s| {
+        s.relative_align.right = RELATIVE_PARENT;
+        s.relative_align.bottom = RELATIVE_PARENT;
+    });
 
-    let centered = tree.push_leaf(
-        TestStyle {
-            size: Size::new(size_px(20.0), size_px(10.0)),
-            relative_center: relative_center::T::Both,
-            ..TestStyle::default()
-        },
-        Size::new(20.0, 10.0),
-        None,
-    );
+    let centered = centered_leaf(&mut tree, 20.0, 10.0, relative_center::T::Both);
 
-    let mut sibling_after_style = relative_leaf_style(6.0, 4.0, 12);
-    sibling_after_style.relative_adjacent.right = id(10);
-    sibling_after_style.relative_adjacent.bottom = id(10);
-    let sibling_after = tree.push_leaf(sibling_after_style, Size::new(6.0, 4.0), None);
+    let sibling_after = relative_leaf_with(&mut tree, 6.0, 4.0, 12, |s| {
+        s.relative_adjacent.right = id(10);
+        s.relative_adjacent.bottom = id(10);
+    });
 
     let root = relative_container(
         &mut tree,
@@ -418,12 +432,7 @@ fn padding_and_border_translate_every_relative_position_from_the_content_origin(
         &[anchor, parent_end, centered, sibling_after],
     );
 
-    let output = perform_layout(
-        &tree,
-        root,
-        Size::NONE,
-        Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
-    );
+    let output = max_content_layout(&tree, root);
 
     assert_size(output.size, Size::new(113.0, 106.0));
     assert_point(tree.layout(anchor).location, Point::new(5.0, 9.0));
@@ -453,16 +462,16 @@ fn wrap_width_refresh_reuses_basis_independent_fixed_measurement() {
     );
 
     assert_size(output.size, Size::new(12.0, 10.0));
-    assert_eq!(tree.child_layout_calls.get(), 3);
+    assert_eq!(tree.child_layout_calls.get(), 2);
 }
 
 #[test]
 fn wrap_width_refresh_remeasures_fixed_item_when_double_anchors_tighten() {
     let mut tree = TestTree::default();
-    let mut child_style = relative_leaf_style(12.0, 10.0, 1);
-    child_style.relative_align.left = RELATIVE_PARENT;
-    child_style.relative_align.right = RELATIVE_PARENT;
-    let child = tree.push_leaf(child_style, Size::new(12.0, 10.0), None);
+    let child = relative_leaf_with(&mut tree, 12.0, 10.0, 1, |s| {
+        s.relative_align.left = RELATIVE_PARENT;
+        s.relative_align.right = RELATIVE_PARENT;
+    });
     let root = relative_container(
         &mut tree,
         TestStyle {
@@ -473,12 +482,7 @@ fn wrap_width_refresh_remeasures_fixed_item_when_double_anchors_tighten() {
         &[child],
     );
 
-    let output = perform_layout(
-        &tree,
-        root,
-        Size::NONE,
-        Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
-    );
+    let output = max_content_layout(&tree, root);
 
     assert_size(output.size, Size::new(100.0, 10.0));
     assert_close(tree.layout(child).size.width, 100.0);
@@ -505,12 +509,7 @@ fn fixed_nested_item_reuse_preserves_grandchild_percentage_basis() {
     );
     let root = relative_container(&mut tree, TestStyle::default(), &[inner]);
 
-    let output = perform_layout(
-        &tree,
-        root,
-        Size::NONE,
-        Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
-    );
+    let output = max_content_layout(&tree, root);
 
     assert_size(output.size, Size::new(40.0, 20.0));
     assert_size(tree.layout(inner).size, Size::new(40.0, 20.0));
@@ -520,9 +519,9 @@ fn fixed_nested_item_reuse_preserves_grandchild_percentage_basis() {
 #[test]
 fn final_min_size_reanchors_parent_edges_in_two_pass_mode() {
     let mut tree = TestTree::default();
-    let mut child_style = relative_leaf_style(10.0, 10.0, 1);
-    child_style.relative_align.right = RELATIVE_PARENT;
-    let child = tree.push_leaf(child_style, Size::new(10.0, 10.0), None);
+    let child = relative_leaf_with(&mut tree, 10.0, 10.0, 1, |s| {
+        s.relative_align.right = RELATIVE_PARENT;
+    });
     let root = relative_container(
         &mut tree,
         TestStyle {
@@ -533,12 +532,7 @@ fn final_min_size_reanchors_parent_edges_in_two_pass_mode() {
         &[child],
     );
 
-    let output = perform_layout(
-        &tree,
-        root,
-        Size::NONE,
-        Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
-    );
+    let output = max_content_layout(&tree, root);
 
     assert_size(output.size, Size::new(100.0, 20.0));
     assert_close(tree.layout(child).location.x, 90.0);
@@ -547,16 +541,16 @@ fn final_min_size_reanchors_parent_edges_in_two_pass_mode() {
 #[test]
 fn contradictory_double_anchors_collapse_the_item_at_start() {
     let mut tree = TestTree::default();
-    let mut left_style = relative_leaf_style(10.0, 10.0, 1);
-    left_style.relative_align.left = RELATIVE_PARENT;
-    let left = tree.push_leaf(left_style, Size::new(10.0, 10.0), None);
-    let mut right_style = relative_leaf_style(10.0, 10.0, 2);
-    right_style.relative_align.right = RELATIVE_PARENT;
-    let right = tree.push_leaf(right_style, Size::new(10.0, 10.0), None);
-    let mut child_style = relative_leaf_style(20.0, 10.0, 3);
-    child_style.relative_adjacent.right = id(2);
-    child_style.relative_adjacent.left = id(1);
-    let child = tree.push_leaf(child_style, Size::new(20.0, 10.0), None);
+    let left = relative_leaf_with(&mut tree, 10.0, 10.0, 1, |s| {
+        s.relative_align.left = RELATIVE_PARENT;
+    });
+    let right = relative_leaf_with(&mut tree, 10.0, 10.0, 2, |s| {
+        s.relative_align.right = RELATIVE_PARENT;
+    });
+    let child = relative_leaf_with(&mut tree, 20.0, 10.0, 3, |s| {
+        s.relative_adjacent.right = id(2);
+        s.relative_adjacent.left = id(1);
+    });
     let root = relative_container(&mut tree, TestStyle::default(), &[child, left, right]);
 
     definite_layout(&tree, root, 100.0, 20.0);
@@ -568,12 +562,12 @@ fn contradictory_double_anchors_collapse_the_item_at_start() {
 #[test]
 fn relative_position_insets_are_visual_only_for_sibling_dependencies() {
     let mut tree = TestTree::default();
-    let mut anchor_style = relative_leaf_style(10.0, 10.0, 1);
-    anchor_style.inset.left = inset_px(20.0);
-    let anchor = tree.push_leaf(anchor_style, Size::new(10.0, 10.0), None);
-    let mut follower_style = relative_leaf_style(10.0, 10.0, 2);
-    follower_style.relative_adjacent.right = id(1);
-    let follower = tree.push_leaf(follower_style, Size::new(10.0, 10.0), None);
+    let anchor = relative_leaf_with(&mut tree, 10.0, 10.0, 1, |s| {
+        s.inset.left = inset_px(20.0);
+    });
+    let follower = relative_leaf_with(&mut tree, 10.0, 10.0, 2, |s| {
+        s.relative_adjacent.right = id(1);
+    });
     let root = relative_container(&mut tree, TestStyle::default(), &[follower, anchor]);
 
     definite_layout(&tree, root, 100.0, 20.0);
@@ -585,13 +579,13 @@ fn relative_position_insets_are_visual_only_for_sibling_dependencies() {
 #[test]
 fn hidden_visibility_items_remain_in_the_constraint_graph() {
     let mut tree = TestTree::default();
-    let mut hidden_style = relative_leaf_style(10.0, 10.0, 1);
-    hidden_style.visibility = visibility::T::Hidden;
-    let hidden = tree.push_leaf(hidden_style, Size::new(10.0, 10.0), None);
-    let mut follower_style = relative_leaf_style(10.0, 10.0, 2);
-    follower_style.visibility = visibility::T::Hidden;
-    follower_style.relative_adjacent.right = id(1);
-    let follower = tree.push_leaf(follower_style, Size::new(10.0, 10.0), None);
+    let hidden = relative_leaf_with(&mut tree, 10.0, 10.0, 1, |s| {
+        s.visibility = visibility::T::Hidden;
+    });
+    let follower = relative_leaf_with(&mut tree, 10.0, 10.0, 2, |s| {
+        s.visibility = visibility::T::Hidden;
+        s.relative_adjacent.right = id(1);
+    });
     let root = relative_container(&mut tree, TestStyle::default(), &[follower, hidden]);
 
     definite_layout(&tree, root, 100.0, 20.0);
@@ -604,24 +598,18 @@ fn hidden_visibility_items_remain_in_the_constraint_graph() {
 #[test]
 fn display_none_is_zeroed_and_excluded_from_relative_ids() {
     let mut tree = TestTree::default();
-    let mut hidden_style = relative_leaf_style(80.0, 50.0, 1);
-    hidden_style.display = Display::None;
-    let hidden = tree.push_leaf(hidden_style, Size::new(80.0, 50.0), None);
-    let hidden_slots = tree.session_node(hidden);
-    let mut hidden_layout = hidden_slots.layout.borrow().clone();
+    let hidden = relative_leaf_with(&mut tree, 80.0, 50.0, 1, |s| {
+        s.display = Display::None;
+    });
+    let mut hidden_layout = tree.layout(hidden);
     hidden_layout.size = Size::new(80.0, 50.0);
-    *hidden_slots.layout.borrow_mut() = hidden_layout;
-    let mut child_style = relative_leaf_style(10.0, 10.0, 2);
-    child_style.relative_adjacent.right = id(1);
-    let child = tree.push_leaf(child_style, Size::new(10.0, 10.0), None);
+    tree.set_layout_for_testing(hidden, hidden_layout);
+    let child = relative_leaf_with(&mut tree, 10.0, 10.0, 2, |s| {
+        s.relative_adjacent.right = id(1);
+    });
     let root = relative_container(&mut tree, TestStyle::default(), &[hidden, child]);
 
-    let output = perform_layout(
-        &tree,
-        root,
-        Size::NONE,
-        Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
-    );
+    let output = max_content_layout(&tree, root);
 
     assert_size(output.size, Size::new(10.0, 10.0));
     assert_eq!(tree.layout(hidden), Layout::with_order(0));
@@ -631,9 +619,9 @@ fn display_none_is_zeroed_and_excluded_from_relative_ids() {
 #[test]
 fn absolute_children_use_padding_box_and_do_not_affect_wrap_content() {
     let mut tree = TestTree::default();
-    let mut absolute_style = relative_leaf_style(30.0, 20.0, 1);
-    absolute_style.position = PositionProperty::Absolute;
-    let absolute = tree.push_leaf(absolute_style, Size::new(30.0, 20.0), None);
+    let absolute = relative_leaf_with(&mut tree, 30.0, 20.0, 1, |s| {
+        s.position = PositionProperty::Absolute;
+    });
     let root = relative_container(
         &mut tree,
         TestStyle {
@@ -644,12 +632,7 @@ fn absolute_children_use_padding_box_and_do_not_affect_wrap_content() {
         &[absolute],
     );
 
-    let output = perform_layout(
-        &tree,
-        root,
-        Size::NONE,
-        Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
-    );
+    let output = max_content_layout(&tree, root);
 
     assert_size(output.size, Size::new(14.0, 14.0));
     assert_point(tree.layout(absolute).location, Point::new(2.0, 2.0));
@@ -681,9 +664,9 @@ fn absolute_and_in_flow_children_share_contiguous_paint_order() {
 #[test]
 fn hoisted_children_record_padding_box_static_position_only() {
     let mut tree = TestTree::default();
-    let mut fixed_style = relative_leaf_style(10.0, 10.0, 1);
-    fixed_style.position = PositionProperty::Fixed;
-    let fixed = tree.push_leaf(fixed_style, Size::new(10.0, 10.0), None);
+    let fixed = relative_leaf_with(&mut tree, 10.0, 10.0, 1, |s| {
+        s.position = PositionProperty::Fixed;
+    });
     let root = relative_container(
         &mut tree,
         TestStyle {
@@ -703,12 +686,20 @@ fn measure_goal_has_no_durable_geometry_side_effects_or_baseline() {
     let mut tree = TestTree::default();
     let child = relative_leaf(&mut tree, 10.0, 10.0, 1);
     let root = relative_container(&mut tree, TestStyle::default(), &[child]);
+    let sentinel = || {
+        let mut layout = Layout::default();
+        layout.location = Point::new(123.0, 456.0);
+        layout.size = Size::new(7.0, 8.0);
+        layout
+    };
+    tree.set_layout_for_testing(child, sentinel());
+    tree.set_layout_for_testing(root, sentinel());
     let output = tree.compute_layout(
         root,
         LayoutInput::measure(
             Size::NONE,
             Size::NONE,
-            Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
+            Size::MAX_CONTENT,
             RequestedAxis::Both,
         ),
     );
@@ -716,7 +707,8 @@ fn measure_goal_has_no_durable_geometry_side_effects_or_baseline() {
     assert_size(output.size, Size::new(10.0, 10.0));
     assert_eq!(output.first_baselines, Point::NONE);
     assert_eq!(tree.layout_writes.get(), 0);
-    assert_eq!(tree.layout(child), Layout::default());
+    assert_eq!(tree.layout(child), sentinel());
+    assert_eq!(tree.layout(root), sentinel());
 }
 
 #[test]
@@ -726,12 +718,7 @@ fn nested_relative_containers_propagate_intrinsic_child_size() {
     let inner = relative_container(&mut tree, TestStyle::default(), &[leaf]);
     let outer = relative_container(&mut tree, TestStyle::default(), &[inner]);
 
-    let output = perform_layout(
-        &tree,
-        outer,
-        Size::NONE,
-        Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
-    );
+    let output = max_content_layout(&tree, outer);
 
     assert_size(output.size, Size::new(12.0, 8.0));
     assert_size(tree.layout(inner).size, Size::new(12.0, 8.0));
@@ -741,20 +728,18 @@ fn nested_relative_containers_propagate_intrinsic_child_size() {
 #[test]
 fn sibling_same_side_alignment_and_before_adjacency_use_the_referenced_edges() {
     let mut tree = TestTree::default();
-    let mut anchor_style = relative_leaf_style(10.0, 10.0, 1);
-    anchor_style.relative_align.right = RELATIVE_PARENT;
-    anchor_style.relative_align.bottom = RELATIVE_PARENT;
-    let anchor = tree.push_leaf(anchor_style, Size::new(10.0, 10.0), None);
-
-    let mut aligned_style = relative_leaf_style(10.0, 10.0, 2);
-    aligned_style.relative_align.left = id(1);
-    aligned_style.relative_align.top = id(1);
-    let aligned = tree.push_leaf(aligned_style, Size::new(10.0, 10.0), None);
-
-    let mut before_style = relative_leaf_style(10.0, 10.0, 3);
-    before_style.relative_adjacent.left = id(1);
-    before_style.relative_adjacent.top = id(1);
-    let before = tree.push_leaf(before_style, Size::new(10.0, 10.0), None);
+    let anchor = relative_leaf_with(&mut tree, 10.0, 10.0, 1, |s| {
+        s.relative_align.right = RELATIVE_PARENT;
+        s.relative_align.bottom = RELATIVE_PARENT;
+    });
+    let aligned = relative_leaf_with(&mut tree, 10.0, 10.0, 2, |s| {
+        s.relative_align.left = id(1);
+        s.relative_align.top = id(1);
+    });
+    let before = relative_leaf_with(&mut tree, 10.0, 10.0, 3, |s| {
+        s.relative_adjacent.left = id(1);
+        s.relative_adjacent.top = id(1);
+    });
     let root = relative_container(&mut tree, TestStyle::default(), &[aligned, before, anchor]);
 
     definite_layout(&tree, root, 100.0, 100.0);
@@ -766,12 +751,12 @@ fn sibling_same_side_alignment_and_before_adjacency_use_the_referenced_edges() {
 #[test]
 fn sibling_edges_stretch_an_auto_sized_item_after_subtracting_margins() {
     let mut tree = TestTree::default();
-    let mut left_style = relative_leaf_style(20.0, 10.0, 40);
-    left_style.relative_align.left = RELATIVE_PARENT;
-    let left = tree.push_leaf(left_style, Size::new(20.0, 10.0), None);
-    let mut right_style = relative_leaf_style(20.0, 10.0, 41);
-    right_style.relative_align.right = RELATIVE_PARENT;
-    let right = tree.push_leaf(right_style, Size::new(20.0, 10.0), None);
+    let left = relative_leaf_with(&mut tree, 20.0, 10.0, 40, |s| {
+        s.relative_align.left = RELATIVE_PARENT;
+    });
+    let right = relative_leaf_with(&mut tree, 20.0, 10.0, 41, |s| {
+        s.relative_align.right = RELATIVE_PARENT;
+    });
     let mut middle_style = TestStyle {
         margin: Edges {
             left: margin_px(5.0),
@@ -819,9 +804,9 @@ fn a_single_start_constraint_reduces_leaf_available_space() {
 #[test]
 fn a_single_end_constraint_preserves_margins_in_leaf_available_space() {
     let mut tree = TestTree::default();
-    let mut anchor_style = relative_leaf_style(20.0, 10.0, 20);
-    anchor_style.relative_align.right = RELATIVE_PARENT;
-    let anchor = tree.push_leaf(anchor_style, Size::new(20.0, 10.0), None);
+    let anchor = relative_leaf_with(&mut tree, 20.0, 10.0, 20, |s| {
+        s.relative_align.right = RELATIVE_PARENT;
+    });
     let mut follower_style = TestStyle {
         margin: Edges {
             left: margin_px(3.0),
@@ -903,9 +888,9 @@ fn a_start_constraint_reduces_the_fit_content_limit_before_measurement() {
 #[test]
 fn an_end_constraint_overrides_the_fit_content_limit_before_measurement() {
     let mut tree = TestTree::default();
-    let mut anchor_style = relative_leaf_style(20.0, 10.0, 40);
-    anchor_style.relative_align.right = RELATIVE_PARENT;
-    let anchor = tree.push_leaf(anchor_style, Size::new(20.0, 10.0), None);
+    let anchor = relative_leaf_with(&mut tree, 20.0, 10.0, 40, |s| {
+        s.relative_align.right = RELATIVE_PARENT;
+    });
     let mut follower_style = TestStyle {
         size: Size::new(size_fit_content_px(50.0), size_px(10.0)),
         ..TestStyle::default()
@@ -990,7 +975,7 @@ fn edges_use_available_width_while_child_percent_sizes_require_definiteness() {
     assert_close(output.size.width, 52.0);
     assert_close(tree.layout(child).margin.left, 5.2);
     assert_close(tree.layout(child).size.width, 26.0);
-    assert_eq!(tree.child_layout_calls.get(), 4);
+    assert_eq!(tree.child_layout_calls.get(), 3);
 }
 
 #[test]
@@ -1015,9 +1000,9 @@ fn aspect_ratio_and_box_sizing_are_shared_with_other_layout_algorithms() {
 #[test]
 fn one_pass_keeps_wrap_fallback_positions_after_a_minimum_expands_the_parent() {
     let mut tree = TestTree::default();
-    let mut child_style = relative_leaf_style(10.0, 10.0, 1);
-    child_style.relative_align.right = RELATIVE_PARENT;
-    let child = tree.push_leaf(child_style, Size::new(10.0, 10.0), None);
+    let child = relative_leaf_with(&mut tree, 10.0, 10.0, 1, |s| {
+        s.relative_align.right = RELATIVE_PARENT;
+    });
     let root = relative_container(
         &mut tree,
         TestStyle {
@@ -1028,12 +1013,7 @@ fn one_pass_keeps_wrap_fallback_positions_after_a_minimum_expands_the_parent() {
         &[child],
     );
 
-    let output = perform_layout(
-        &tree,
-        root,
-        Size::NONE,
-        Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
-    );
+    let output = max_content_layout(&tree, root);
 
     assert_size(output.size, Size::new(100.0, 20.0));
     assert_close(tree.layout(child).location.x, -10.0);
@@ -1125,92 +1105,62 @@ fn intrinsic_max_width_remeasures_width_sensitive_height() {
 
 #[test]
 fn intrinsic_keyword_widths_resolve_on_relative_children() {
-    use stylo::values::computed::{MaxSize, Size as StyleSize};
-
-    let width_of = |style: TestStyle| -> f32 {
-        let mut tree = TestTree::default();
-        let item = tree.push_measured_leaf(style, intrinsic_width_bounded_by_available);
-        let root = relative_container(&mut tree, TestStyle::default(), &[item]);
-        definite_layout(&tree, root, 300.0, 100.0);
-        tree.layout(item).size.width
-    };
-
-    assert_close(
-        width_of(TestStyle {
-            size: Size::new(size_min_content(), size_auto()),
-            ..TestStyle::default()
-        }),
-        20.0,
-    );
-    assert_close(
-        width_of(TestStyle {
-            size: Size::new(size_max_content(), size_auto()),
-            ..TestStyle::default()
-        }),
-        200.0,
-    );
-    assert_close(
-        width_of(TestStyle {
-            size: Size::new(size_fit_content_px(150.0), size_auto()),
-            ..TestStyle::default()
-        }),
-        150.0,
-    );
-    assert_close(
-        width_of(TestStyle {
-            size: Size::new(size_fit_content_pct(0.5), size_auto()),
-            ..TestStyle::default()
-        }),
-        150.0,
-    );
-    assert_close(
-        width_of(TestStyle {
-            size: Size::new(size_fit_content_px(150.0), size_auto()),
-            box_sizing: box_sizing::T::BorderBox,
-            padding: Edges::uniform(npx(10.0)),
-            ..TestStyle::default()
-        }),
-        150.0,
-    );
-    for keyword in [StyleSize::FitContent, StyleSize::Stretch] {
-        assert_close(
-            width_of(TestStyle {
-                size: Size::new(keyword, size_auto()),
-                ..TestStyle::default()
-            }),
+    for (case, style, expected) in [
+        (
+            "min-content size",
+            preferred_width(size_min_content()),
+            20.0,
+        ),
+        (
+            "max-content size",
+            preferred_width(size_max_content()),
             200.0,
-        );
+        ),
+        (
+            "fit-content length",
+            preferred_width(size_fit_content_px(150.0)),
+            150.0,
+        ),
+        (
+            "fit-content percentage",
+            preferred_width(size_fit_content_pct(0.5)),
+            150.0,
+        ),
+        (
+            "border-box fit-content",
+            TestStyle {
+                size: Size::new(size_fit_content_px(150.0), size_auto()),
+                box_sizing: box_sizing::T::BorderBox,
+                padding: Edges::uniform(npx(10.0)),
+                ..TestStyle::default()
+            },
+            150.0,
+        ),
+        (
+            "fit-content keyword",
+            preferred_width(StyleSize::FitContent),
+            200.0,
+        ),
+        (
+            "stretch keyword",
+            preferred_width(StyleSize::Stretch),
+            200.0,
+        ),
+        ("max max-content", maximum_width(max_max_content()), 200.0),
+        ("max min-content", maximum_width(max_min_content()), 20.0),
+        (
+            "max fit-content",
+            maximum_width(max_fit_content_px(150.0)),
+            150.0,
+        ),
+        (
+            "quantitative width survives max stretch",
+            width_constraints(size_px(250.0), size_auto(), MaxSize::Stretch),
+            250.0,
+        ),
+    ] {
+        assert_case_close(case, measured_intrinsic_width(style), expected);
     }
-
-    assert_close(
-        width_of(TestStyle {
-            max_size: Size::new(max_max_content(), max_none()),
-            ..TestStyle::default()
-        }),
-        200.0,
-    );
-    assert_close(
-        width_of(TestStyle {
-            max_size: Size::new(max_min_content(), max_none()),
-            ..TestStyle::default()
-        }),
-        20.0,
-    );
-    assert_close(
-        width_of(TestStyle {
-            max_size: Size::new(max_fit_content_px(150.0), max_none()),
-            ..TestStyle::default()
-        }),
-        150.0,
-    );
-    assert_close(
-        width_of(TestStyle {
-            size: Size::new(size_px(250.0), size_auto()),
-            max_size: Size::new(MaxSize::Stretch, max_none()),
-            ..TestStyle::default()
-        }),
-        250.0,
-    );
 }
 
 #[test]
@@ -1243,38 +1193,25 @@ fn intrinsic_minimums_and_heights_probe_their_axes() {
 
 #[test]
 fn definite_preferred_sizes_clamp_by_resolved_min_max_bounds() {
-    let width_of = |style: TestStyle| -> f32 {
-        let mut tree = TestTree::default();
-        let item = tree.push_measured_leaf(style, intrinsic_width_bounded_by_available);
-        let root = relative_container(&mut tree, TestStyle::default(), &[item]);
-        definite_layout(&tree, root, 300.0, 100.0);
-        tree.layout(item).size.width
-    };
-
-    assert_close(
-        width_of(TestStyle {
-            size: Size::new(size_px(250.0), size_auto()),
-            max_size: Size::new(max_max_content(), max_none()),
-            ..TestStyle::default()
-        }),
-        200.0,
-    );
-    assert_close(
-        width_of(TestStyle {
-            size: Size::new(size_px(250.0), size_auto()),
-            max_size: Size::new(max_px(180.0), max_none()),
-            ..TestStyle::default()
-        }),
-        180.0,
-    );
-    assert_close(
-        width_of(TestStyle {
-            size: Size::new(size_px(50.0), size_auto()),
-            min_size: Size::new(size_max_content(), size_auto()),
-            ..TestStyle::default()
-        }),
-        200.0,
-    );
+    for (case, style, expected) in [
+        (
+            "max-content maximum",
+            width_constraints(size_px(250.0), size_auto(), max_max_content()),
+            200.0,
+        ),
+        (
+            "fixed maximum",
+            width_constraints(size_px(250.0), size_auto(), max_px(180.0)),
+            180.0,
+        ),
+        (
+            "max-content minimum",
+            width_constraints(size_px(50.0), size_max_content(), max_none()),
+            200.0,
+        ),
+    ] {
+        assert_case_close(case, measured_intrinsic_width(style), expected);
+    }
 
     let mut tree = TestTree::default();
     let wrapped = tree.push_measured_leaf(
@@ -1387,18 +1324,18 @@ fn relative_insets_follow_direction_and_skip_static_children() {
 #[test]
 fn same_axis_adjacency_cycles_fall_back_to_document_order() {
     let mut tree = TestTree::default();
-    let mut a_style = relative_leaf_style(10.0, 10.0, 1);
-    a_style.relative_adjacent.right = id(2);
-    let a = tree.push_leaf(a_style, Size::new(10.0, 10.0), None);
-    let mut b_style = relative_leaf_style(10.0, 10.0, 2);
-    b_style.relative_adjacent.right = id(1);
-    let b = tree.push_leaf(b_style, Size::new(10.0, 10.0), None);
-    let mut c_style = relative_leaf_style(10.0, 10.0, 3);
-    c_style.relative_adjacent.right = id(4);
-    let c = tree.push_leaf(c_style, Size::new(10.0, 10.0), None);
-    let mut d_style = relative_leaf_style(10.0, 10.0, 4);
-    d_style.relative_adjacent.right = id(3);
-    let d = tree.push_leaf(d_style, Size::new(10.0, 10.0), None);
+    let a = relative_leaf_with(&mut tree, 10.0, 10.0, 1, |s| {
+        s.relative_adjacent.right = id(2);
+    });
+    let b = relative_leaf_with(&mut tree, 10.0, 10.0, 2, |s| {
+        s.relative_adjacent.right = id(1);
+    });
+    let c = relative_leaf_with(&mut tree, 10.0, 10.0, 3, |s| {
+        s.relative_adjacent.right = id(4);
+    });
+    let d = relative_leaf_with(&mut tree, 10.0, 10.0, 4, |s| {
+        s.relative_adjacent.right = id(3);
+    });
     let root = relative_container(&mut tree, TestStyle::default(), &[a, b, c, d]);
 
     definite_layout(&tree, root, 100.0, 50.0);
@@ -1412,9 +1349,9 @@ fn same_axis_adjacency_cycles_fall_back_to_document_order() {
 #[test]
 fn parent_sentinel_in_adjacency_channel_uses_the_parent_edge() {
     let mut tree = TestTree::default();
-    let mut style = relative_leaf_style(10.0, 10.0, 1);
-    style.relative_adjacent.right = RELATIVE_PARENT;
-    let item = tree.push_leaf(style, Size::new(10.0, 10.0), None);
+    let item = relative_leaf_with(&mut tree, 10.0, 10.0, 1, |s| {
+        s.relative_adjacent.right = RELATIVE_PARENT;
+    });
     let root = relative_container(&mut tree, TestStyle::default(), &[item]);
 
     definite_layout(&tree, root, 100.0, 50.0);

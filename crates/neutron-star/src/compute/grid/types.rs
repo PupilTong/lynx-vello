@@ -1,120 +1,13 @@
 //! Transient, algorithm-private Grid state.
 
-use stylo::computed_values::{box_sizing, direction};
-use stylo::values::computed::{
-    LengthPercentage, MaxSize as StyleMaxSize, Overflow, PositionProperty, Size as StyleSize,
-    TrackBreadth, TrackSize,
-};
+use stylo::computed_values::direction;
+use stylo::values::computed::{LengthPercentage, PositionProperty, TrackBreadth, TrackSize};
 use stylo::values::specified::align::AlignFlags;
 
 use super::placement::GridArea;
-use crate::compute::util::ItemKey;
+pub(super) use crate::compute::util::Axis;
+use crate::compute::util::{ItemGeometry, ItemKey};
 use crate::geometry::{Edges, Point, Size};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Axis {
-    Horizontal,
-    Vertical,
-}
-
-impl Axis {
-    pub(super) const ALL: [Self; 2] = [Self::Horizontal, Self::Vertical];
-
-    #[inline]
-    pub(super) const fn other(self) -> Self {
-        match self {
-            Self::Horizontal => Self::Vertical,
-            Self::Vertical => Self::Horizontal,
-        }
-    }
-
-    #[inline]
-    pub(super) fn size<T>(self, size: Size<T>) -> T {
-        match self {
-            Self::Horizontal => size.width,
-            Self::Vertical => size.height,
-        }
-    }
-
-    #[inline]
-    pub(super) fn set_size<T>(self, size: &mut Size<T>, value: T) {
-        match self {
-            Self::Horizontal => size.width = value,
-            Self::Vertical => size.height = value,
-        }
-    }
-
-    #[inline]
-    pub(super) fn start<T: Copy>(self, edges: Edges<T>) -> T {
-        match self {
-            Self::Horizontal => edges.left,
-            Self::Vertical => edges.top,
-        }
-    }
-
-    #[inline]
-    pub(super) fn end<T: Copy>(self, edges: Edges<T>) -> T {
-        match self {
-            Self::Horizontal => edges.right,
-            Self::Vertical => edges.bottom,
-        }
-    }
-
-    #[inline]
-    pub(super) fn sum(self, edges: Edges<f32>) -> f32 {
-        self.start(edges) + self.end(edges)
-    }
-
-    #[inline]
-    pub(super) fn size_ref<T>(self, size: &Size<T>) -> &T {
-        match self {
-            Self::Horizontal => &size.width,
-            Self::Vertical => &size.height,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(super) enum IntrinsicSize {
-    MinContent,
-    MaxContent,
-    FitContent(LengthPercentage),
-    None,
-}
-
-impl IntrinsicSize {
-    pub(super) fn from_size(value: &StyleSize) -> Self {
-        match value {
-            StyleSize::MinContent => Self::MinContent,
-            StyleSize::MaxContent => Self::MaxContent,
-            StyleSize::FitContentFunction(limit) => Self::FitContent(limit.0.clone()),
-            StyleSize::Auto
-            | StyleSize::LengthPercentage(_)
-            | StyleSize::FitContent
-            | StyleSize::Stretch
-            | StyleSize::WebkitFillAvailable => Self::None,
-            StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-                unreachable!("anchor positioning is pref-disabled under lynx")
-            }
-        }
-    }
-
-    pub(super) fn from_max_size(value: &StyleMaxSize) -> Self {
-        match value {
-            StyleMaxSize::MinContent => Self::MinContent,
-            StyleMaxSize::MaxContent => Self::MaxContent,
-            StyleMaxSize::FitContentFunction(limit) => Self::FitContent(limit.0.clone()),
-            StyleMaxSize::None
-            | StyleMaxSize::LengthPercentage(_)
-            | StyleMaxSize::FitContent
-            | StyleMaxSize::Stretch
-            | StyleMaxSize::WebkitFillAvailable => Self::None,
-            StyleMaxSize::AnchorSizeFunction(_) | StyleMaxSize::AnchorContainingCalcFunction(_) => {
-                unreachable!("anchor positioning is pref-disabled under lynx")
-            }
-        }
-    }
-}
 
 /// The normalized `minmax()` halves of one track sizing function.
 #[derive(Debug, Clone, PartialEq)]
@@ -171,27 +64,15 @@ impl Default for TrackSizingFunction {
 /// reruns required by Grid sizing.
 #[derive(Debug, Clone)]
 pub(super) struct GridItem<N> {
+    pub(super) geometry: ItemGeometry,
     pub(super) key: ItemKey<N>,
     pub(super) area: GridArea,
     pub(super) position: PositionProperty,
     pub(super) align_self: AlignFlags,
     pub(super) justify_self: AlignFlags,
     pub(super) direction: direction::T,
-    pub(super) aspect_ratio: Option<f32>,
-    pub(super) box_sizing: box_sizing::T,
-    pub(super) overflow: Point<Overflow>,
     pub(super) preferred_behaves_auto_or_depends: Size<bool>,
     pub(super) minimum_is_auto: Size<bool>,
-    pub(super) intrinsic_preferred: Size<IntrinsicSize>,
-    pub(super) intrinsic_min: Size<IntrinsicSize>,
-    pub(super) intrinsic_max: Size<IntrinsicSize>,
-    pub(super) preferred_size: Size<Option<f32>>,
-    pub(super) min_size: Size<Option<f32>>,
-    pub(super) max_size: Size<Option<f32>>,
-    pub(super) margin: Edges<f32>,
-    pub(super) margin_auto: Edges<bool>,
-    pub(super) padding: Edges<f32>,
-    pub(super) border: Edges<f32>,
     pub(super) inset: Edges<Option<f32>>,
     pub(super) raw_min_content: Size<Option<f32>>,
     pub(super) raw_max_content: Size<Option<f32>>,
@@ -201,6 +82,7 @@ pub(super) struct GridItem<N> {
     pub(super) measured_baselines: Point<Option<f32>>,
     pub(super) baseline_shim: f32,
 }
+crate::compute::util::impl_item_geometry!(GridItem);
 
 impl<N> GridItem<N> {
     #[inline]
@@ -390,5 +272,21 @@ impl TrackSet {
         let previous = coordinate.min(end_coordinate) - 1;
         let track = &self.tracks[self.index_of(previous)];
         track.position + track.base
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod size_tests {
+    use super::GridItem;
+    use crate::compute::util::{EdgeMask, IntrinsicTags, ItemGeometry};
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn item_geometry_and_grid_scratch_stay_compact() {
+        assert!(core::mem::size_of::<EdgeMask>() <= 1);
+        assert!(core::mem::size_of::<IntrinsicTags>() <= 2);
+        assert!(core::mem::size_of::<ItemGeometry>() <= 116);
+        assert!(core::mem::size_of::<GridItem<usize>>() <= 288);
     }
 }

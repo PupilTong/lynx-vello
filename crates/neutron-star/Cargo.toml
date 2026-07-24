@@ -16,6 +16,7 @@ layout-test-utils = []
 
 [dependencies]
 parley = { workspace = true }
+smallvec = { workspace = true }
 stylo = { workspace = true }
 
 [dev-dependencies]

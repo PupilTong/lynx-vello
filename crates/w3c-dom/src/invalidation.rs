@@ -1,11 +1,12 @@
 //! Matching-relevant mutation, with its style invalidation baked in.
 
-use std::sync::atomic::Ordering;
+use std::collections::hash_map::Entry;
 
 use selectors::matching::ElementSelectorFlags;
 use stylo::LocalName;
 use stylo::attr::{AttrIdentifier, AttrValue};
 use stylo::context::QuirksMode;
+use stylo::dom::OpaqueNode;
 use stylo::invalidation::element::restyle_hints::RestyleHint;
 use stylo::properties::declaration_block::{parse_one_declaration_into, parse_style_attribute};
 use stylo::properties::{
@@ -18,7 +19,7 @@ use stylo_atoms::Atom;
 use stylo_traits::ParsingMode;
 
 use crate::document::{DOCUMENT_NODE_ID, Document, NodeId};
-use crate::node::{Node, SNAPSHOT_PRESENT};
+use crate::node::Node;
 
 const STRUCTURE_SENSITIVE: ElementSelectorFlags = ElementSelectorFlags::HAS_SLOW_SELECTOR
     .union(ElementSelectorFlags::HAS_SLOW_SELECTOR_LATER_SIBLINGS)
@@ -50,10 +51,8 @@ impl<T> Document<T> {
         node
     }
 
-    pub(crate) fn add_restyle_hint(&mut self, id: NodeId, hint: RestyleHint) {
-        if let Some(wrapper) = self.tree_mut().get_mut(id).and_then(Node::stylo_data_mut) {
-            wrapper.borrow_mut().hint.insert(hint);
-        }
+    fn add_restyle_hint(&mut self, id: NodeId, hint: RestyleHint) {
+        insert_restyle_hint(self.live_node_mut(id), hint);
     }
 
     pub(crate) fn mark_ancestors_dirty_descendants(&mut self, id: NodeId) {
@@ -73,7 +72,6 @@ impl<T> Document<T> {
     }
 
     fn mark_mutated(&mut self, id: NodeId) {
-        self.live(id);
         self.mark_ancestors_dirty_descendants(id);
     }
 
@@ -153,15 +151,10 @@ impl<T> Document<T> {
 
 impl<T> Document<T> {
     pub fn set_classes(&mut self, id: NodeId, classes: &str) {
-        self.live_element(id);
         self.note_class_attribute_change(id);
-        let node = self
-            .tree_mut()
-            .get_mut(id)
-            .expect("stale NodeId passed to Document::set_classes");
+        let node = self.live_node_mut(id);
         node.classes = classes.split_whitespace().map(Atom::from).collect();
-        node.attrs
-            .insert(LocalName::from("class"), classes.to_owned());
+        node.set_attr_local_name(LocalName::from("class"), classes.to_owned());
     }
 
     pub fn add_class(&mut self, id: NodeId, class: &str) {
@@ -170,18 +163,9 @@ impl<T> Document<T> {
             return;
         }
         self.note_class_attribute_change(id);
-        let node = self
-            .tree_mut()
-            .get_mut(id)
-            .expect("stale NodeId passed to Document::add_class");
+        let node = self.live_node_mut(id);
         node.classes.push(class);
-        let class_value = node
-            .classes
-            .iter()
-            .map(AsRef::<str>::as_ref)
-            .collect::<Vec<_>>()
-            .join(" ");
-        node.attrs.insert(LocalName::from("class"), class_value);
+        sync_class_attribute(node);
     }
 
     pub fn remove_class(&mut self, id: NodeId, class: &str) {
@@ -190,34 +174,21 @@ impl<T> Document<T> {
             return;
         }
         self.note_class_attribute_change(id);
-        let node = self
-            .tree_mut()
-            .get_mut(id)
-            .expect("stale NodeId passed to Document::remove_class");
+        let node = self.live_node_mut(id);
         node.classes.retain(|existing| *existing != class);
-        let class_value = node
-            .classes
-            .iter()
-            .map(AsRef::<str>::as_ref)
-            .collect::<Vec<_>>()
-            .join(" ");
-        node.attrs.insert(LocalName::from("class"), class_value);
+        sync_class_attribute(node);
     }
 
     pub fn set_id_attribute(&mut self, id: NodeId, value: Option<&str>) {
-        self.live_element(id);
         self.note_id_attribute_change(id);
-        let node = self
-            .tree_mut()
-            .get_mut(id)
-            .expect("stale NodeId passed to Document::set_id_attribute");
+        let node = self.live_node_mut(id);
         node.id_attribute = value.map(Atom::from);
         match value {
             Some(value) => {
-                node.attrs.insert(LocalName::from("id"), value.to_owned());
+                node.set_attr_local_name(LocalName::from("id"), value.to_owned());
             }
             None => {
-                node.attrs.remove(&LocalName::from("id"));
+                node.remove_attr_local_name(&LocalName::from("id"));
             }
         }
     }
@@ -229,14 +200,10 @@ impl<T> Document<T> {
             "style" => return self.set_inline_style(id, value),
             _ => {}
         }
-        self.live_element(id);
         let name = LocalName::from(name);
         self.note_attribute_change(id, &name);
-        self.tree_mut()
-            .get_mut(id)
-            .expect("stale NodeId passed to Document::set_attribute")
-            .attrs
-            .insert(name, value.to_owned());
+        self.live_node_mut(id)
+            .set_attr_local_name(name, value.to_owned());
     }
 
     pub fn remove_attribute(&mut self, id: NodeId, name: &str) {
@@ -247,34 +214,25 @@ impl<T> Document<T> {
             "id" => return self.set_id_attribute(id, None),
             "class" => {
                 self.note_class_attribute_change(id);
-                let node = self
-                    .tree_mut()
-                    .get_mut(id)
-                    .expect("stale NodeId passed to Document::remove_attribute");
+                let node = self.live_node_mut(id);
                 node.classes.clear();
-                node.attrs.remove(&LocalName::from("class"));
+                node.remove_attr_local_name(&LocalName::from("class"));
                 return;
             }
             "style" => {
-                self.note_attribute_change(id, &LocalName::from("style"));
-                let node = self
-                    .tree_mut()
-                    .get_mut(id)
-                    .expect("stale NodeId passed to Document::remove_attribute");
+                let name = LocalName::from("style");
+                self.note_attribute_change(id, &name);
+                let node = self.live_node_mut(id);
                 node.inline_block = None;
-                node.attrs.remove(&LocalName::from("style"));
-                self.note_inline_style_change(id);
+                node.remove_attr_local_name(&name);
+                insert_restyle_hint(node, RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
                 return;
             }
             _ => {}
         }
         let name = LocalName::from(name);
         self.note_attribute_change(id, &name);
-        self.tree_mut()
-            .get_mut(id)
-            .expect("stale NodeId passed to Document::remove_attribute")
-            .attrs
-            .remove(&name);
+        self.live_node_mut(id).remove_attr_local_name(&name);
     }
 
     pub fn add_element_state(&mut self, id: NodeId, flags: dom::ElementState) {
@@ -286,14 +244,9 @@ impl<T> Document<T> {
     }
 
     fn update_element_state(&mut self, id: NodeId, flags: dom::ElementState, enabled: bool) {
-        self.live_element(id);
         self.ensure_snapshot(id);
         self.mark_mutated(id);
-        self.tree_mut()
-            .get_mut(id)
-            .expect("stale NodeId passed to Document::update_element_state")
-            .element_state
-            .set(flags, enabled);
+        self.live_node_mut(id).element_state.set(flags, enabled);
     }
 
     pub fn set_element_text_content(&mut self, id: NodeId, text: Option<String>) {
@@ -318,10 +271,7 @@ impl<T> Document<T> {
         } else {
             text
         };
-        self.tree_mut()
-            .get_mut(id)
-            .expect("stale NodeId passed to Document::set_element_text_content")
-            .set_literal_text(text);
+        self.live_node_mut(id).set_literal_text(text);
         if let Some(element) = affected_element
             && watches_empty
             && was_empty != self.live_element(element).is_empty_element()
@@ -341,8 +291,8 @@ impl<T> Document<T> {
     }
 
     pub fn set_inline_style(&mut self, id: NodeId, css: &str) {
-        self.live_element(id);
-        self.note_attribute_change(id, &LocalName::from("style"));
+        let name = LocalName::from("style");
+        self.note_attribute_change(id, &name);
         let block = if css.is_empty() {
             None
         } else {
@@ -354,15 +304,12 @@ impl<T> Document<T> {
                 QuirksMode::NoQuirks,
                 CssRuleType::Style,
             );
-            Some(Arc::new(document.document_lock().wrap(parsed)))
+            Some(Arc::new(self.style_engine().shared_lock().wrap(parsed)))
         };
-        let node = self
-            .tree_mut()
-            .get_mut(id)
-            .expect("stale NodeId passed to Document::set_inline_style");
+        let node = self.live_node_mut(id);
         node.inline_block = block;
-        node.attrs.insert(LocalName::from("style"), css.to_owned());
-        self.note_inline_style_change(id);
+        node.set_attr_local_name(name, css.to_owned());
+        insert_restyle_hint(node, RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
     }
 
     pub fn add_inline_style(&mut self, id: NodeId, name: &str, value: &str) {
@@ -391,13 +338,13 @@ impl<T> Document<T> {
 
         let mut block = match &self.live(id).inline_block {
             Some(existing) => {
-                let guard = document.document_lock().read();
+                let guard = self.style_engine().shared_lock().read();
                 existing.read_with(&guard).clone()
             }
             None => PropertyDeclarationBlock::new(),
         };
         block.extend(source.drain(), Importance::Normal);
-        let wrapped = Arc::new(document.document_lock().wrap(block));
+        let wrapped = Arc::new(self.style_engine().shared_lock().wrap(block));
 
         let mut css = self
             .live(id)
@@ -415,29 +362,22 @@ impl<T> Document<T> {
         css.push_str(value);
         css.push(';');
 
-        self.note_attribute_change(id, &LocalName::from("style"));
-        let node = self
-            .tree_mut()
-            .get_mut(id)
-            .expect("stale NodeId passed to Document::add_inline_style");
+        let name = LocalName::from("style");
+        self.note_attribute_change(id, &name);
+        let node = self.live_node_mut(id);
         node.inline_block = Some(wrapped);
-        node.attrs.insert(LocalName::from("style"), css);
-        self.note_inline_style_change(id);
+        node.set_attr_local_name(name, css);
+        insert_restyle_hint(node, RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
     }
 
     #[must_use]
     pub fn inline_style_declaration_count(&self, id: NodeId) -> usize {
         self.live_element(id);
-        let document = self.root_node();
         let Some(block) = &self.live(id).inline_block else {
             return 0;
         };
-        let guard = document.document_lock().read();
+        let guard = self.style_engine().shared_lock().read();
         block.read_with(&guard).declarations().len()
-    }
-
-    fn note_inline_style_change(&mut self, id: NodeId) {
-        self.add_restyle_hint(id, RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
     }
 
     fn note_class_attribute_change(&mut self, id: NodeId) {
@@ -467,30 +407,39 @@ impl<T> Document<T> {
     }
 
     fn ensure_snapshot(&mut self, id: NodeId) -> Option<&mut Snapshot> {
-        let node = self.live(id);
-        if !node.has_style_data() {
+        if !self.live_element(id).has_style_data() {
             return None;
         }
-        if self
-            .styling_data(id)
-            .expect("live node must have styling-arena state")
-            .snapshot
-            .is_none()
-        {
-            let snapshot = build_snapshot(node);
-            let styling = self
-                .styling_data_mut(id)
-                .expect("live node disappeared while recording its snapshot");
-            styling.snapshot = Some(Box::new(snapshot));
-            styling
-                .snapshot_flags
-                .fetch_or(SNAPSHOT_PRESENT, Ordering::Relaxed);
+        let opaque = OpaqueNode(id);
+        let (nodes, pending_snapshots) = self.snapshot_storage();
+        match pending_snapshots.entry(opaque) {
+            Entry::Occupied(entry) => Some(entry.into_mut()),
+            Entry::Vacant(entry) => {
+                let node = nodes
+                    .get(id)
+                    .expect("live node disappeared while recording its snapshot");
+                let snapshot = entry.insert(build_snapshot(node));
+                node.set_snapshot_present();
+                Some(snapshot)
+            }
         }
-        self.styling_data_mut(id)
-            .expect("live node disappeared while refining its snapshot")
-            .snapshot
-            .as_deref_mut()
     }
+}
+
+fn insert_restyle_hint<T>(node: &mut Node<T>, hint: RestyleHint) {
+    if let Some(wrapper) = node.stylo_data_mut() {
+        wrapper.borrow_mut().hint.insert(hint);
+    }
+}
+
+fn sync_class_attribute<T>(node: &mut Node<T>) {
+    let value = node
+        .classes
+        .iter()
+        .map(AsRef::<str>::as_ref)
+        .collect::<Vec<_>>()
+        .join(" ");
+    node.set_attr_local_name(LocalName::from("class"), value);
 }
 
 fn push_changed_attr(snapshot: &mut Snapshot, name: &LocalName) {

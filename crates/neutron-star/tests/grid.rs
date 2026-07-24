@@ -2,592 +2,87 @@
 
 mod support;
 
-use std::cell::{Cell, RefCell};
-use std::fmt;
-
-use neutron_star::compute::{
-    compute_absolute_layout, compute_cached_layout, compute_flexbox_layout, compute_grid_layout,
-    compute_leaf_layout_with_measurement_for_testing, hide_subtree,
-};
+use neutron_star::compute::compute_absolute_layout;
 use neutron_star::prelude::*;
-use stylo::computed_values::{box_sizing, direction, flex_direction, flex_wrap};
-use stylo::values::computed::length::NonNegativeLengthPercentageOrNormal;
+use stylo::computed_values::direction;
 use stylo::values::computed::{
-    AspectRatio, Au, BorderSideWidth, ContentDistribution, Display, FlexBasis, GridAutoFlow,
-    GridLine, GridTemplateComponent, ImplicitGridTracks, Inset, Integer, ItemPlacement,
-    JustifyItems as ComputedJustifyItems, Length, LengthPercentage, Margin, MaxSize,
-    NonNegativeLengthPercentage, NonNegativeNumber, Overflow, Percentage, PositionProperty, Ratio,
-    SelfAlignment, Size as StyleSize, TrackBreadth, TrackList, TrackSize,
+    AspectRatio, ContentDistribution, Display, FlexBasis, GridAutoFlow, GridLine,
+    GridTemplateComponent, Integer, ItemPlacement, JustifyItems as ComputedJustifyItems,
+    LengthPercentage, Margin, MaxSize, Overflow, PositionProperty, Ratio, SelfAlignment,
+    Size as StyleSize, TrackBreadth, TrackSize,
 };
 use stylo::values::generics::NonNegative;
-use stylo::values::generics::grid::{
-    Flex, ImplicitGridTracks as GenericImplicitGridTracks, RepeatCount, TrackListValue, TrackRepeat,
-};
+use stylo::values::generics::grid::{Flex, RepeatCount, TrackListValue};
 use stylo::values::generics::position::PreferredRatio;
 use stylo::values::specified::align::{AlignFlags, JustifyItems as SpecifiedJustifyItems};
+use support::{
+    TestId, TestMeasure, TestStyle, assert_close, assert_point, assert_size, border_px,
+    breadth_px as fixed_breadth, definite_layout, gap_pct, gap_px, grid_line as line,
+    grid_span as span, inset_px, justify_items, margin_px, max_px, npx as nn_px, px as lp,
+    size_pct, size_px, snapshot_layout, track_auto as auto_track, track_fr as fr,
+    track_max_content as max_content_track, track_minmax as minmax, track_pct as percent,
+    track_px as px, track_repeat as repeat,
+};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TestDisplay {
-    Flex,
-    Grid,
-    Leaf,
-}
-
-#[derive(Debug, Clone)]
-struct TestStyle {
-    display: Display,
-    position: PositionProperty,
-    inset: Edges<Inset>,
-    size: Size<StyleSize>,
-    min_size: Size<StyleSize>,
-    max_size: Size<MaxSize>,
-    aspect_ratio: AspectRatio,
-    margin: Edges<Margin>,
-    padding: Edges<NonNegativeLengthPercentage>,
-    border: Edges<BorderSideWidth>,
-    overflow: Point<Overflow>,
-    box_sizing: box_sizing::T,
-    direction: direction::T,
-    template_rows: GridTemplateComponent,
-    template_columns: GridTemplateComponent,
-    auto_rows: ImplicitGridTracks,
-    auto_columns: ImplicitGridTracks,
-    auto_flow: GridAutoFlow,
-    gap: Size<NonNegativeLengthPercentageOrNormal>,
-    align_content: ContentDistribution,
-    justify_content: ContentDistribution,
-    align_items: ItemPlacement,
-    justify_items: ComputedJustifyItems,
-    grid_row: Line<GridLine>,
-    grid_column: Line<GridLine>,
-    align_self: SelfAlignment,
-    justify_self: SelfAlignment,
-    flex_basis: FlexBasis,
-    flex_grow: NonNegativeNumber,
-    flex_shrink: NonNegativeNumber,
-    order: i32,
-}
-
-impl Default for TestStyle {
-    fn default() -> Self {
-        Self {
-            display: Display::Grid,
-            position: PositionProperty::Relative,
-            inset: Edges::uniform(Inset::auto()),
-            size: Size::new(StyleSize::Auto, StyleSize::Auto),
-            min_size: Size::new(StyleSize::Auto, StyleSize::Auto),
-            max_size: Size::new(MaxSize::none(), MaxSize::none()),
-            aspect_ratio: AspectRatio::auto(),
-            margin: Edges::uniform(margin_px(0.0)),
-            padding: Edges::uniform(nn_px(0.0)),
-            border: Edges::uniform(BorderSideWidth(Au(0))),
-            overflow: Point::new(Overflow::Visible, Overflow::Visible),
-            box_sizing: box_sizing::T::ContentBox,
-            direction: direction::T::Ltr,
-            template_rows: GridTemplateComponent::None,
-            template_columns: GridTemplateComponent::None,
-            auto_rows: ImplicitGridTracks::default(),
-            auto_columns: ImplicitGridTracks::default(),
-            auto_flow: GridAutoFlow::ROW,
-            gap: Size::new(
-                NonNegativeLengthPercentageOrNormal::Normal,
-                NonNegativeLengthPercentageOrNormal::Normal,
-            ),
-            align_content: ContentDistribution::normal(),
-            justify_content: ContentDistribution::normal(),
-            align_items: ItemPlacement::normal(),
-            justify_items: ComputedJustifyItems {
-                specified: SpecifiedJustifyItems::legacy(),
-                computed: SpecifiedJustifyItems::normal(),
-            },
-            grid_row: Line::new(GridLine::auto(), GridLine::auto()),
-            grid_column: Line::new(GridLine::auto(), GridLine::auto()),
-            align_self: SelfAlignment::auto(),
-            justify_self: SelfAlignment::auto(),
-            flex_basis: FlexBasis::auto(),
-            flex_grow: NonNegative(0.0),
-            flex_shrink: NonNegative(1.0),
-            order: 0,
-        }
-    }
-}
-
-impl CoreStyle for TestStyle {
-    fn display(&self) -> Display {
-        self.display
-    }
-
-    fn position(&self) -> PositionProperty {
-        self.position
-    }
-
-    fn inset(&self) -> Edges<&Inset> {
-        self.inset.as_ref()
-    }
-
-    fn size(&self) -> Size<&StyleSize> {
-        self.size.as_ref()
-    }
-
-    fn min_size(&self) -> Size<&StyleSize> {
-        self.min_size.as_ref()
-    }
-
-    fn max_size(&self) -> Size<&MaxSize> {
-        self.max_size.as_ref()
-    }
-
-    fn aspect_ratio(&self) -> AspectRatio {
-        self.aspect_ratio
-    }
-
-    fn margin(&self) -> Edges<&Margin> {
-        self.margin.as_ref()
-    }
-
-    fn padding(&self) -> Edges<&NonNegativeLengthPercentage> {
-        self.padding.as_ref()
-    }
-
-    fn border(&self) -> Edges<BorderSideWidth> {
-        self.border.clone()
-    }
-
-    fn overflow(&self) -> Point<Overflow> {
-        self.overflow
-    }
-
-    fn box_sizing(&self) -> box_sizing::T {
-        self.box_sizing
-    }
-
-    fn direction(&self) -> direction::T {
-        self.direction
-    }
-}
-
-impl GridContainerStyle for TestStyle {
-    fn grid_template_rows(&self) -> &GridTemplateComponent {
-        &self.template_rows
-    }
-
-    fn grid_template_columns(&self) -> &GridTemplateComponent {
-        &self.template_columns
-    }
-
-    fn grid_auto_rows(&self) -> &ImplicitGridTracks {
-        &self.auto_rows
-    }
-
-    fn grid_auto_columns(&self) -> &ImplicitGridTracks {
-        &self.auto_columns
-    }
-
-    fn grid_auto_flow(&self) -> GridAutoFlow {
-        self.auto_flow
-    }
-
-    fn gap(&self) -> Size<&NonNegativeLengthPercentageOrNormal> {
-        self.gap.as_ref()
-    }
-
-    fn align_content(&self) -> ContentDistribution {
-        self.align_content
-    }
-
-    fn justify_content(&self) -> ContentDistribution {
-        self.justify_content
-    }
-
-    fn align_items(&self) -> ItemPlacement {
-        self.align_items
-    }
-
-    fn justify_items(&self) -> ComputedJustifyItems {
-        self.justify_items
-    }
-}
-
-impl GridItemStyle for TestStyle {
-    fn grid_row_start(&self) -> &GridLine {
-        &self.grid_row.start
-    }
-
-    fn grid_row_end(&self) -> &GridLine {
-        &self.grid_row.end
-    }
-
-    fn grid_column_start(&self) -> &GridLine {
-        &self.grid_column.start
-    }
-
-    fn grid_column_end(&self) -> &GridLine {
-        &self.grid_column.end
-    }
-
-    fn align_self(&self) -> SelfAlignment {
-        self.align_self
-    }
-
-    fn justify_self(&self) -> SelfAlignment {
-        self.justify_self
-    }
-
-    fn order(&self) -> i32 {
-        self.order
-    }
-}
-
-impl FlexContainerStyle for TestStyle {
-    fn flex_direction(&self) -> flex_direction::T {
-        flex_direction::T::Row
-    }
-
-    fn flex_wrap(&self) -> flex_wrap::T {
-        flex_wrap::T::Nowrap
-    }
-
-    fn gap(&self) -> Size<&NonNegativeLengthPercentageOrNormal> {
-        self.gap.as_ref()
-    }
-
-    fn align_content(&self) -> ContentDistribution {
-        self.align_content
-    }
-
-    fn align_items(&self) -> ItemPlacement {
-        self.align_items
-    }
-
-    fn justify_content(&self) -> ContentDistribution {
-        self.justify_content
-    }
-}
-
-impl FlexItemStyle for TestStyle {
-    fn flex_basis(&self) -> &FlexBasis {
-        &self.flex_basis
-    }
-
-    fn flex_grow(&self) -> NonNegativeNumber {
-        self.flex_grow
-    }
-
-    fn flex_shrink(&self) -> NonNegativeNumber {
-        self.flex_shrink
-    }
-
-    fn align_self(&self) -> SelfAlignment {
-        self.align_self
-    }
-
-    fn order(&self) -> i32 {
-        self.order
-    }
-}
-
-type TestId = usize;
-
-#[derive(Debug, Clone)]
-struct TestSourceNode {
-    display: TestDisplay,
-    style: TestStyle,
-    children: Vec<TestId>,
-    min_content_size: Size<f32>,
-    max_content_size: Size<f32>,
-    first_baseline: Option<f32>,
-}
-
-/// Per-node mutable layout slots and instrumentation, written through
-/// [`TestRef`] handles. Layout is single-threaded, so `Cell`/`RefCell`
-/// interior mutability is the whole synchronization story.
 #[derive(Debug, Default)]
-struct TestSessionNode {
-    layout: RefCell<Layout>,
-    final_layout: RefCell<Layout>,
-    last_input: Cell<Option<LayoutInput>>,
-    static_position: Cell<Option<Point<f32>>>,
-    layout_writes: Cell<usize>,
-    static_position_writes: Cell<usize>,
-    measure_calls: Cell<usize>,
+struct TestTree(support::TestTree);
+
+impl core::ops::Deref for TestTree {
+    type Target = support::TestTree;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
-/// The one host tree: immutable node data plus interior-mutable session
-/// slots and instrumentation. The session slots live in a parallel `Vec`
-/// (not inline in `TestSourceNode`), keeping the immutable data as compact
-/// as the pre-handle host's source storage.
-#[derive(Debug, Default)]
-struct TestTree {
-    nodes: Vec<TestSourceNode>,
-    session: Vec<TestSessionNode>,
-    layout_writes: Cell<usize>,
-    leaf_measure_calls: Cell<usize>,
+impl core::ops::DerefMut for TestTree {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 
 impl TestTree {
-    fn node(&self, id: TestId) -> TestRef<'_> {
-        TestRef {
-            tree: self,
-            index: id,
-        }
-    }
-
     fn push_leaf(
         &mut self,
         style: TestStyle,
         min_content_size: Size<f32>,
         max_content_size: Size<f32>,
     ) -> TestId {
-        self.push(TestSourceNode {
-            display: TestDisplay::Leaf,
-            style,
-            children: Vec::new(),
-            min_content_size,
-            max_content_size,
-            first_baseline: None,
-        })
+        self.0
+            .push_intrinsic_leaf(style, min_content_size, max_content_size)
     }
 
-    fn push_grid(&mut self, style: TestStyle, children: Vec<TestId>) -> TestId {
-        self.push(TestSourceNode {
-            display: TestDisplay::Grid,
-            style,
-            children,
-            min_content_size: Size::ZERO,
-            max_content_size: Size::ZERO,
-            first_baseline: None,
-        })
+    fn set_first_baseline(&mut self, id: TestId, value: f32) {
+        let TestMeasure::Intrinsic { first_baseline, .. } = &mut self.0.source_node_mut(id).measure
+        else {
+            panic!("baseline fixture must use intrinsic measurement");
+        };
+        *first_baseline = Some(value);
     }
 
-    fn push_flex(&mut self, style: TestStyle, children: Vec<TestId>) -> TestId {
-        self.push(TestSourceNode {
-            display: TestDisplay::Flex,
-            style,
-            children,
-            min_content_size: Size::ZERO,
-            max_content_size: Size::ZERO,
-            first_baseline: None,
-        })
+    fn measure_call_count(&self, id: TestId) -> usize {
+        self.0.measure_inputs(id).len()
     }
 
-    fn push(&mut self, node: TestSourceNode) -> TestId {
-        debug_assert_eq!(self.nodes.len(), self.session.len());
-        let id = self.nodes.len();
-        self.nodes.push(node);
-        self.session.push(TestSessionNode::default());
-        id
-    }
-
-    fn source_node_mut(&mut self, id: TestId) -> &mut TestSourceNode {
-        &mut self.nodes[id]
-    }
-
-    fn session_node(&self, id: TestId) -> &TestSessionNode {
-        &self.session[id]
-    }
-
-    fn layout(&self, id: TestId) -> Layout {
-        self.session_node(id).layout.borrow().clone()
-    }
-
-    fn compute_layout(&self, id: TestId, input: LayoutInput) -> LayoutOutput {
-        self.node(id).compute_layout(input)
+    fn install_layout_sentinel(&self, id: TestId) -> Layout {
+        let mut sentinel = Layout::default();
+        sentinel.location = Point::new(1_234.0, 5_678.0);
+        sentinel.size = Size::new(9_876.0, 5_432.0);
+        self.0
+            .set_layout_for_testing(id, snapshot_layout(&sentinel));
+        sentinel
     }
 }
 
-/// The `Copy` node handle: a borrow of the tree plus a node index.
-#[derive(Clone, Copy)]
-struct TestRef<'t> {
-    tree: &'t TestTree,
-    index: TestId,
-}
-
-impl fmt::Debug for TestRef<'_> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_tuple("TestRef").field(&self.index).finish()
+fn grid_default() -> TestStyle {
+    TestStyle {
+        display: Display::Grid,
+        justify_items: ComputedJustifyItems {
+            specified: SpecifiedJustifyItems::legacy(),
+            computed: SpecifiedJustifyItems::normal(),
+        },
+        ..support::TestStyle::default()
     }
-}
-
-impl<'t> TestRef<'t> {
-    fn source(self) -> &'t TestSourceNode {
-        &self.tree.nodes[self.index]
-    }
-
-    fn slots(self) -> &'t TestSessionNode {
-        &self.tree.session[self.index]
-    }
-}
-
-struct TestChildren<'t> {
-    tree: &'t TestTree,
-    ids: std::slice::Iter<'t, TestId>,
-}
-
-impl<'t> Iterator for TestChildren<'t> {
-    type Item = TestRef<'t>;
-
-    fn next(&mut self) -> Option<TestRef<'t>> {
-        let index = *self.ids.next()?;
-        Some(TestRef {
-            tree: self.tree,
-            index,
-        })
-    }
-}
-
-impl<'t> LayoutNode for TestRef<'t> {
-    type Style = &'t TestStyle;
-    type ChildIter = TestChildren<'t>;
-
-    fn children(self) -> TestChildren<'t> {
-        TestChildren {
-            tree: self.tree,
-            ids: self.source().children.iter(),
-        }
-    }
-
-    fn child_count(self) -> usize {
-        self.source().children.len()
-    }
-
-    fn style(self) -> &'t TestStyle {
-        &self.source().style
-    }
-
-    fn compute_layout(self, input: LayoutInput) -> LayoutOutput {
-        self.slots().last_input.set(Some(input));
-        let tree = self.tree;
-        let node = self.source();
-        let display = node.display;
-
-        if node.style.display.is_none() {
-            hide_subtree(self);
-            return LayoutOutput::HIDDEN;
-        }
-
-        compute_cached_layout(self, input, |handle, input| match display {
-            TestDisplay::Flex => compute_flexbox_layout(handle, input),
-            TestDisplay::Grid => compute_grid_layout(handle, input),
-            TestDisplay::Leaf => {
-                let style = &node.style;
-                let min_content_size = node.min_content_size;
-                let max_content_size = node.max_content_size;
-                let first_baseline = node.first_baseline;
-                let slots = handle.slots();
-                compute_leaf_layout_with_measurement_for_testing(
-                    input,
-                    style,
-                    None,
-                    |measure_input| {
-                        tree.leaf_measure_calls
-                            .set(tree.leaf_measure_calls.get() + 1);
-                        slots.measure_calls.set(slots.measure_calls.get() + 1);
-                        let intrinsic = Size::new(
-                            if measure_input.available_space.width == AvailableSpace::MinContent {
-                                min_content_size.width
-                            } else {
-                                max_content_size.width
-                            },
-                            if measure_input.available_space.height == AvailableSpace::MinContent {
-                                min_content_size.height
-                            } else {
-                                max_content_size.height
-                            },
-                        );
-                        LeafMetrics::new(Size::new(
-                            measure_input
-                                .known_dimensions
-                                .width
-                                .unwrap_or(intrinsic.width),
-                            measure_input
-                                .known_dimensions
-                                .height
-                                .unwrap_or(intrinsic.height),
-                        ))
-                        .with_first_baselines(Point::new(None, first_baseline))
-                    },
-                )
-            }
-        })
-    }
-
-    fn set_unrounded_layout(self, layout: Layout) {
-        self.tree
-            .layout_writes
-            .set(self.tree.layout_writes.get() + 1);
-        let slots = self.slots();
-        slots.layout_writes.set(slots.layout_writes.get() + 1);
-        *slots.layout.borrow_mut() = layout;
-    }
-
-    fn with_unrounded_layout<R>(self, read: impl FnOnce(&Layout) -> R) -> R {
-        let layout = self.slots().layout.borrow();
-        read(&layout)
-    }
-
-    fn set_rounded_layout(self, layout: Layout) {
-        *self.slots().final_layout.borrow_mut() = layout;
-    }
-
-    fn set_static_position(self, static_position: Point<f32>) {
-        let slots = self.slots();
-        slots
-            .static_position_writes
-            .set(slots.static_position_writes.get() + 1);
-        slots.static_position.set(Some(static_position));
-    }
-
-    fn cached_layout(self, _input: LayoutInput) -> Option<LayoutOutput> {
-        None
-    }
-
-    fn store_cached_layout(self, _input: LayoutInput, _output: LayoutOutput) {}
-
-    fn clear_layout_cache(self) {}
-}
-
-fn lp(value: f32) -> LengthPercentage {
-    LengthPercentage::new_length(Length::new(value))
-}
-
-fn lp_pct(fraction: f32) -> LengthPercentage {
-    LengthPercentage::new_percent(Percentage(fraction))
-}
-
-fn nn_px(value: f32) -> NonNegativeLengthPercentage {
-    NonNegative(lp(value))
-}
-
-fn gap_px(value: f32) -> NonNegativeLengthPercentageOrNormal {
-    NonNegativeLengthPercentageOrNormal::LengthPercentage(NonNegative(lp(value)))
-}
-
-fn gap_pct(fraction: f32) -> NonNegativeLengthPercentageOrNormal {
-    NonNegativeLengthPercentageOrNormal::LengthPercentage(NonNegative(lp_pct(fraction)))
-}
-
-fn size_px(value: f32) -> StyleSize {
-    StyleSize::LengthPercentage(NonNegative(lp(value)))
-}
-
-fn size_pct(fraction: f32) -> StyleSize {
-    StyleSize::LengthPercentage(NonNegative(lp_pct(fraction)))
-}
-
-fn max_px(value: f32) -> MaxSize {
-    MaxSize::LengthPercentage(NonNegative(lp(value)))
-}
-
-fn margin_px(value: f32) -> Margin {
-    Margin::LengthPercentage(lp(value))
-}
-
-fn inset_px(value: f32) -> Inset {
-    Inset::LengthPercentage(lp(value))
-}
-
-fn border_px(value: i32) -> BorderSideWidth {
-    BorderSideWidth(Au::from_px(value))
 }
 
 fn ratio(width: f32, height: f32) -> AspectRatio {
@@ -597,54 +92,8 @@ fn ratio(width: f32, height: f32) -> AspectRatio {
     }
 }
 
-fn justify_items(flags: AlignFlags) -> ComputedJustifyItems {
-    ComputedJustifyItems {
-        specified: SpecifiedJustifyItems(ItemPlacement(flags)),
-        computed: SpecifiedJustifyItems(ItemPlacement(flags)),
-    }
-}
-
-fn fixed_breadth(value: f32) -> TrackBreadth {
-    TrackBreadth::Breadth(lp(value))
-}
-
-fn px(value: f32) -> TrackSize {
-    TrackSize::Breadth(fixed_breadth(value))
-}
-
-fn fr(value: f32) -> TrackSize {
-    TrackSize::Breadth(TrackBreadth::Flex(Flex(value)))
-}
-
-fn percent(fraction: f32) -> TrackSize {
-    TrackSize::Breadth(TrackBreadth::Breadth(lp_pct(fraction)))
-}
-
-fn auto_track() -> TrackSize {
-    TrackSize::Breadth(TrackBreadth::Auto)
-}
-
-fn minmax(min: TrackBreadth, max: TrackBreadth) -> TrackSize {
-    TrackSize::Minmax(min, max)
-}
-
-fn max_content_track() -> TrackSize {
-    minmax(TrackBreadth::MaxContent, TrackBreadth::MaxContent)
-}
-
 fn fit_content_track(limit: f32) -> TrackSize {
     TrackSize::FitContent(fixed_breadth(limit))
-}
-
-fn repeat(
-    count: RepeatCount<Integer>,
-    sizes: Vec<TrackSize>,
-) -> TrackListValue<LengthPercentage, Integer> {
-    TrackListValue::TrackRepeat(TrackRepeat {
-        count,
-        line_names: vec![stylo::OwnedSlice::default(); sizes.len() + 1].into(),
-        track_sizes: sizes.into(),
-    })
 }
 
 fn track_list(values: Vec<TrackListValue<LengthPercentage, Integer>>) -> GridTemplateComponent {
@@ -658,42 +107,32 @@ fn track_list(values: Vec<TrackListValue<LengthPercentage, Integer>>) -> GridTem
             )
         })
         .unwrap_or(usize::MAX);
-    GridTemplateComponent::TrackList(Box::new(TrackList {
-        auto_repeat_index,
-        line_names: vec![stylo::OwnedSlice::default(); values.len() + 1].into(),
-        values: values.into(),
-    }))
+    support::template_values(values, auto_repeat_index)
 }
 
 fn tracks(sizes: &[TrackSize]) -> GridTemplateComponent {
     if sizes.is_empty() {
-        return GridTemplateComponent::None;
+        return support::template_none();
     }
-    track_list(
-        sizes
-            .iter()
-            .cloned()
-            .map(TrackListValue::TrackSize)
-            .collect(),
-    )
+    support::track_list(sizes.to_vec())
 }
 
-fn implicit(sizes: &[TrackSize]) -> ImplicitGridTracks {
-    GenericImplicitGridTracks(sizes.to_vec().into())
+fn implicit(sizes: &[TrackSize]) -> stylo::values::computed::ImplicitGridTracks {
+    support::implicit_tracks(sizes.to_vec())
 }
 
 fn grid_style(columns: &[TrackSize], rows: &[TrackSize]) -> TestStyle {
     TestStyle {
         template_columns: tracks(columns),
         template_rows: tracks(rows),
-        ..TestStyle::default()
+        ..grid_default()
     }
 }
 
 fn fixed_leaf_style(width: f32, height: f32) -> TestStyle {
     TestStyle {
         size: Size::new(size_px(width), size_px(height)),
-        ..TestStyle::default()
+        ..grid_default()
     }
 }
 
@@ -710,38 +149,11 @@ fn intrinsic_leaf(
     min_content_size: Size<f32>,
     max_content_size: Size<f32>,
 ) -> TestId {
-    tree.push_leaf(TestStyle::default(), min_content_size, max_content_size)
-}
-
-fn line(number: i32) -> GridLine {
-    let mut line = GridLine::auto();
-    line.line_num = number;
-    line
-}
-
-fn span(count: i32) -> GridLine {
-    let mut line = GridLine::auto();
-    line.is_span = true;
-    line.line_num = count;
-    line
+    tree.push_leaf(grid_default(), min_content_size, max_content_size)
 }
 
 fn placement(start: GridLine, end: GridLine) -> Line<GridLine> {
     Line::new(start, end)
-}
-
-fn definite_layout(tree: &TestTree, root: TestId, width: f32, height: f32) -> LayoutOutput {
-    tree.compute_layout(
-        root,
-        LayoutInput::commit(
-            Size::new(Some(width), Some(height)),
-            Size::new(Some(width), Some(height)),
-            Size::new(
-                AvailableSpace::Definite(width),
-                AvailableSpace::Definite(height),
-            ),
-        ),
-    )
 }
 
 fn intrinsic_layout(tree: &TestTree, root: TestId) -> LayoutOutput {
@@ -749,24 +161,6 @@ fn intrinsic_layout(tree: &TestTree, root: TestId) -> LayoutOutput {
         root,
         LayoutInput::commit(Size::NONE, Size::NONE, Size::MAX_CONTENT),
     )
-}
-
-fn assert_close(actual: f32, expected: f32) {
-    let error = (actual - expected).abs();
-    assert!(
-        error <= 0.01,
-        "expected {expected}, got {actual} (absolute error {error})"
-    );
-}
-
-fn assert_point(actual: Point<f32>, expected: Point<f32>) {
-    assert_close(actual.x, expected.x);
-    assert_close(actual.y, expected.y);
-}
-
-fn assert_size(actual: Size<f32>, expected: Size<f32>) {
-    assert_close(actual.width, expected.width);
-    assert_close(actual.height, expected.height);
 }
 
 #[test]
@@ -814,7 +208,7 @@ fn cyclic_percentage_track_resolves_after_intrinsic_container_sizing() {
     let mut tree = TestTree::default();
     let child_style = TestStyle {
         min_size: Size::new(size_px(0.0), size_px(0.0)),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let child = tree.push_leaf(child_style, Size::new(40.0, 10.0), Size::new(100.0, 10.0));
     let root = tree.push_grid(grid_style(&[percent(0.5)], &[px(20.0)]), vec![child]);
@@ -855,7 +249,7 @@ fn minmax_and_fit_content_stop_at_their_growth_limits() {
     let mut fit_tree = TestTree::default();
     let intrinsic_style = TestStyle {
         grid_column: placement(line(1), line(2)),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let intrinsic = fit_tree.push_leaf(
         intrinsic_style,
@@ -903,7 +297,7 @@ fn positive_negative_lines_and_spans_resolve_against_the_explicit_grid() {
     let spanning_style = TestStyle {
         grid_column: placement(line(2), span(2)),
         grid_row: placement(line(1), span(2)),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let spanning = tree.push_leaf(spanning_style, Size::ZERO, Size::ZERO);
 
@@ -928,13 +322,13 @@ fn reversed_lines_are_swapped_and_equal_lines_fall_back_to_one_track() {
     let reversed_style = TestStyle {
         grid_column: placement(line(3), line(1)),
         grid_row: placement(line(1), line(2)),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let reversed = tree.push_leaf(reversed_style, Size::ZERO, Size::ZERO);
     let equal_style = TestStyle {
         grid_column: placement(line(2), line(2)),
         grid_row: placement(line(1), line(2)),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let equal = tree.push_leaf(equal_style, Size::ZERO, Size::ZERO);
     let root = tree.push_grid(
@@ -1141,7 +535,7 @@ fn auto_fit_spanning_area_crosses_one_coincident_gutter() {
         inset: Edges::uniform(inset_px(0.0)),
         grid_column: placement(line(1), line(4)),
         grid_row: placement(line(1), line(2)),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let spanning = tree.push_leaf(spanning_style, Size::ZERO, Size::ZERO);
     let mut style = grid_style(&[], &[px(20.0)]);
@@ -1188,7 +582,7 @@ fn max_content_track_uses_the_largest_single_track_contribution() {
         grid_column: placement(line(1), line(2)),
         justify_self: SelfAlignment(AlignFlags::START),
         align_self: SelfAlignment(AlignFlags::START),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let intrinsic = tree.push_leaf(
         intrinsic_style,
@@ -1207,7 +601,7 @@ fn max_content_track_uses_the_largest_single_track_contribution() {
 
     assert_close(tree.layout(marker).location.x, 70.0);
     assert_size(tree.layout(intrinsic).size, Size::new(70.0, 10.0));
-    assert!((2..=6).contains(&tree.session_node(intrinsic).measure_calls.get()));
+    assert!((2..=6).contains(&tree.measure_call_count(intrinsic)));
 }
 
 #[test]
@@ -1242,7 +636,7 @@ fn spanning_intrinsic_contribution_is_distributed_across_tracks() {
     let spanning_style = TestStyle {
         grid_column: placement(line(1), line(3)),
         grid_row: placement(line(1), line(2)),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let spanning = tree.push_leaf(
         spanning_style,
@@ -1266,7 +660,7 @@ fn spanning_intrinsic_contribution_is_distributed_across_tracks() {
 
     assert_size(tree.layout(spanning).size, Size::new(100.0, 20.0));
     assert_close(tree.layout(marker).location.x, 50.0);
-    assert!((2..=8).contains(&tree.session_node(spanning).measure_calls.get()));
+    assert!((2..=8).contains(&tree.measure_call_count(spanning)));
 }
 
 #[test]
@@ -1311,9 +705,9 @@ fn self_alignment_positions_a_fixed_item_inside_its_area() {
 fn baseline_group_aligns_items_and_sets_the_container_first_baseline() {
     let mut tree = TestTree::default();
     let first = fixed_leaf(&mut tree, 20.0, 20.0);
-    tree.source_node_mut(first).first_baseline = Some(15.0);
+    tree.set_first_baseline(first, 15.0);
     let second = fixed_leaf(&mut tree, 20.0, 30.0);
-    tree.source_node_mut(second).first_baseline = Some(10.0);
+    tree.set_first_baseline(second, 10.0);
     let mut style = grid_style(&[px(50.0), px(50.0)], &[px(40.0)]);
     style.align_items = ItemPlacement(AlignFlags::BASELINE);
     style.justify_items = justify_items(AlignFlags::START);
@@ -1332,12 +726,12 @@ fn baseline_group_aligns_items_and_sets_the_container_first_baseline() {
 fn block_axis_auto_margin_excludes_an_item_from_baseline_sharing() {
     let mut tree = TestTree::default();
     let first = fixed_leaf(&mut tree, 20.0, 20.0);
-    tree.source_node_mut(first).first_baseline = Some(15.0);
+    tree.set_first_baseline(first, 15.0);
 
     let mut second_style = fixed_leaf_style(20.0, 10.0);
     second_style.margin.top = Margin::Auto;
     let second = tree.push_leaf(second_style, Size::new(20.0, 10.0), Size::new(20.0, 10.0));
-    tree.source_node_mut(second).first_baseline = Some(5.0);
+    tree.set_first_baseline(second, 5.0);
 
     let mut style = grid_style(&[px(50.0), px(50.0)], &[px(40.0)]);
     style.align_items = ItemPlacement(AlignFlags::BASELINE);
@@ -1355,7 +749,7 @@ fn container_baseline_comes_from_first_nonempty_row_with_synthesis() {
     let mut tree = TestTree::default();
     let first = fixed_leaf(&mut tree, 10.0, 10.0);
     let second = fixed_leaf(&mut tree, 10.0, 10.0);
-    tree.source_node_mut(second).first_baseline = Some(5.0);
+    tree.set_first_baseline(second, 5.0);
     let mut style = grid_style(&[px(20.0)], &[px(20.0), px(20.0)]);
     style.align_items = ItemPlacement(AlignFlags::START);
     style.justify_items = justify_items(AlignFlags::START);
@@ -1378,7 +772,7 @@ fn container_baseline_uses_grid_order_within_the_first_nonempty_row() {
         Size::new(8.0, 10.0),
         Size::new(8.0, 10.0),
     );
-    tree.source_node_mut(second_column).first_baseline = Some(12.0);
+    tree.set_first_baseline(second_column, 12.0);
 
     let mut first_column_style = fixed_leaf_style(8.0, 10.0);
     first_column_style.grid_column = placement(line(1), line(2));
@@ -1388,7 +782,7 @@ fn container_baseline_uses_grid_order_within_the_first_nonempty_row() {
         Size::new(8.0, 10.0),
         Size::new(8.0, 10.0),
     );
-    tree.source_node_mut(first_column).first_baseline = Some(5.0);
+    tree.set_first_baseline(first_column, 5.0);
 
     let mut style = grid_style(&[px(20.0), px(20.0)], &[px(20.0)]);
     style.align_items = ItemPlacement(AlignFlags::START);
@@ -1573,8 +967,8 @@ fn measure_goal_probes_intrinsics_without_durable_writes() {
     let mut sentinel = Layout::default();
     sentinel.location = Point::new(123.0, 456.0);
     sentinel.size = Size::new(7.0, 8.0);
-    *tree.session_node(child).layout.borrow_mut() = sentinel.clone();
-    *tree.session_node(root).layout.borrow_mut() = sentinel.clone();
+    tree.set_layout_for_testing(child, snapshot_layout(&sentinel));
+    tree.set_layout_for_testing(root, snapshot_layout(&sentinel));
 
     let output = tree.compute_layout(
         root,
@@ -1593,7 +987,7 @@ fn measure_goal_probes_intrinsics_without_durable_writes() {
     assert_eq!(tree.layout_writes.get(), 0);
     assert_eq!(tree.layout(child), sentinel);
     assert_eq!(tree.layout(root), sentinel);
-    assert!((1..=6).contains(&tree.session_node(child).measure_calls.get()));
+    assert!((1..=6).contains(&tree.measure_call_count(child)));
 }
 
 #[test]
@@ -1603,10 +997,9 @@ fn hidden_and_out_of_flow_children_do_not_occupy_grid_cells() {
     let mut hidden_style = fixed_leaf_style(1_000.0, 1_000.0);
     hidden_style.display = Display::None;
     let hidden = tree.push_leaf(hidden_style, Size::ZERO, Size::new(1_000.0, 1_000.0));
-    let hidden_slots = tree.session_node(hidden);
-    let mut hidden_sentinel = hidden_slots.layout.borrow().clone();
+    let mut hidden_sentinel = tree.layout(hidden);
     hidden_sentinel.size = Size::new(999.0, 999.0);
-    *hidden_slots.layout.borrow_mut() = hidden_sentinel;
+    tree.set_layout_for_testing(hidden, hidden_sentinel);
 
     let mut absolute_style = fixed_leaf_style(20.0, 10.0);
     absolute_style.position = PositionProperty::Absolute;
@@ -1617,6 +1010,7 @@ fn hidden_and_out_of_flow_children_do_not_occupy_grid_cells() {
     let mut hoisted_style = fixed_leaf_style(20.0, 10.0);
     hoisted_style.position = PositionProperty::Fixed;
     let hoisted = tree.push_leaf(hoisted_style, Size::new(20.0, 10.0), Size::new(20.0, 10.0));
+    let hoisted_sentinel = tree.install_layout_sentinel(hoisted);
     let second = fixed_leaf(&mut tree, 10.0, 10.0);
     let mut style = grid_style(&[px(50.0), px(50.0)], &[px(20.0)]);
     style.justify_items = justify_items(AlignFlags::START);
@@ -1628,10 +1022,11 @@ fn hidden_and_out_of_flow_children_do_not_occupy_grid_cells() {
     assert_close(tree.layout(first).location.x, 0.0);
     assert_close(tree.layout(second).location.x, 50.0);
     assert_eq!(tree.layout(hidden).size, Size::ZERO);
-    assert_eq!(tree.session_node(hidden).measure_calls.get(), 0);
+    assert_eq!(tree.measure_call_count(hidden), 0);
     assert_point(tree.layout(absolute).location, Point::new(7.0, 9.0));
-    assert_eq!(tree.session_node(hoisted).layout_writes.get(), 0);
-    assert_eq!(tree.session_node(hoisted).static_position_writes.get(), 1);
+    assert_eq!(tree.layout(hoisted), hoisted_sentinel);
+    assert_eq!(tree.static_position_writes.get(), 1);
+    assert!(tree.static_position(hoisted).is_some());
 }
 
 #[test]
@@ -1647,7 +1042,7 @@ fn direct_absolute_child_uses_its_definite_grid_area_as_containing_block() {
         },
         grid_column: placement(line(2), line(3)),
         grid_row: placement(line(2), line(3)),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let child = tree.push_leaf(child_style, Size::ZERO, Size::ZERO);
     let mut style = grid_style(&[px(50.0), px(70.0)], &[px(30.0), px(40.0)]);
@@ -1686,11 +1081,11 @@ fn absolute_auto_grid_lines_use_the_container_padding_edges() {
     let child_style = TestStyle {
         position: PositionProperty::Absolute,
         inset: Edges::uniform(inset_px(0.0)),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let child = tree.push_leaf(child_style, Size::ZERO, Size::ZERO);
     let mut style = grid_style(&[], &[]);
-    style.border = Edges::uniform(border_px(2));
+    style.border = Edges::uniform(border_px(2.0));
     style.padding = Edges {
         left: nn_px(10.0),
         right: nn_px(20.0),
@@ -1749,8 +1144,15 @@ fn baseline_static_fallback_uses_self_start_and_safe_container_start() {
         Some(Point::new(80.0, 0.0))
     );
     let static_position = tree.session_node(rtl).static_position.get().unwrap();
-    let positioned =
-        compute_absolute_layout(tree.node(rtl), Size::new(100.0, 50.0), static_position);
+    let positioned = tree.with_layout_state(true, |tree, state| {
+        compute_absolute_layout(
+            tree,
+            state,
+            tree.node(rtl),
+            Size::new(100.0, 50.0),
+            static_position,
+        )
+    });
     assert_point(positioned.location, Point::new(80.0, 0.0));
 }
 
@@ -1764,19 +1166,27 @@ fn hoisted_absolute_records_grid_aware_static_position_for_positioned_pass() {
     child_style.margin.left = margin_px(5.0);
     child_style.margin.top = margin_px(3.0);
     let child = tree.push_leaf(child_style, Size::new(20.0, 10.0), Size::new(20.0, 10.0));
+    let sentinel = tree.install_layout_sentinel(child);
     let root = tree.push_grid(grid_style(&[], &[]), vec![child]);
 
     definite_layout(&tree, root, 100.0, 50.0);
 
-    assert_eq!(tree.session_node(child).layout_writes.get(), 0);
+    assert_eq!(tree.layout(child), sentinel);
     assert_eq!(
         tree.session_node(child).static_position.get(),
         Some(Point::new(37.5, 37.0))
     );
 
     let static_position = tree.session_node(child).static_position.get().unwrap();
-    let positioned =
-        compute_absolute_layout(tree.node(child), Size::new(100.0, 50.0), static_position);
+    let positioned = tree.with_layout_state(true, |tree, state| {
+        compute_absolute_layout(
+            tree,
+            state,
+            tree.node(child),
+            Size::new(100.0, 50.0),
+            static_position,
+        )
+    });
     assert_point(positioned.location, Point::new(42.5, 40.0));
     assert_size(positioned.size, Size::new(20.0, 10.0));
 }
@@ -1790,15 +1200,16 @@ fn hoisted_static_position_ignores_placement_and_measures_auto_content() {
         grid_row: placement(line(1), line(2)),
         justify_self: SelfAlignment(AlignFlags::CENTER),
         align_self: SelfAlignment(AlignFlags::END),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let child = tree.push_leaf(child_style, Size::new(20.0, 10.0), Size::new(20.0, 10.0));
+    let sentinel = tree.install_layout_sentinel(child);
     let root = tree.push_grid(grid_style(&[px(30.0), px(70.0)], &[px(50.0)]), vec![child]);
 
     definite_layout(&tree, root, 100.0, 50.0);
 
-    assert!(tree.session_node(child).measure_calls.get() > 0);
-    assert_eq!(tree.session_node(child).layout_writes.get(), 0);
+    assert!(tree.measure_call_count(child) > 0);
+    assert_eq!(tree.layout(child), sentinel);
     assert_eq!(
         tree.session_node(child).static_position.get(),
         Some(Point::new(40.0, 40.0))
@@ -1832,7 +1243,7 @@ fn a_flex_item_uses_its_grid_area_for_space_distribution() {
         TestStyle {
             align_items: ItemPlacement(AlignFlags::START),
             justify_content: ContentDistribution::new(AlignFlags::SPACE_BETWEEN),
-            ..TestStyle::default()
+            ..grid_default()
         },
         vec![first, second],
     );
@@ -1848,6 +1259,7 @@ fn a_flex_item_uses_its_grid_area_for_space_distribution() {
 #[test]
 fn flex_known_but_indefinite_grid_size_does_not_seed_initial_auto_repeat() {
     let mut tree = TestTree::default();
+    tree.enable_cache();
     let first = fixed_leaf(&mut tree, 20.0, 10.0);
     let second = fixed_leaf(&mut tree, 20.0, 10.0);
 
@@ -1864,14 +1276,14 @@ fn flex_known_but_indefinite_grid_size_does_not_seed_initial_auto_repeat() {
         TestStyle {
             size: Size::new(StyleSize::Auto, size_px(20.0)),
             align_items: ItemPlacement(AlignFlags::START),
-            ..TestStyle::default()
+            ..grid_default()
         },
         vec![inner],
     );
 
     let output = intrinsic_layout(&tree, root);
 
-    let grid_input = tree.session_node(inner).last_input.get().unwrap();
+    let grid_input = tree.committed_input(inner).unwrap();
     assert_close(grid_input.known_dimensions.width.unwrap(), 20.0);
     assert!(!grid_input.definite_dimensions.width);
     assert_close(output.size.width, 20.0);
@@ -1902,7 +1314,7 @@ fn intrinsic_probe_count_stays_linear_in_item_count() {
     assert!(tree.leaf_measure_calls.get() >= ITEM_COUNT);
     assert!(tree.leaf_measure_calls.get() <= ITEM_COUNT * MAX_PROBES_PER_ITEM);
     for child in children {
-        assert!((1..=MAX_PROBES_PER_ITEM).contains(&tree.session_node(child).measure_calls.get()));
+        assert!((1..=MAX_PROBES_PER_ITEM).contains(&tree.measure_call_count(child)));
     }
 }
 
@@ -1944,7 +1356,7 @@ fn spanning_fixed_maximum_limit_includes_the_interior_gap() {
     let item_style = TestStyle {
         grid_column: placement(line(1), line(3)),
         grid_row: placement(line(1), line(2)),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let item = tree.push_leaf(item_style, Size::new(200.0, 10.0), Size::new(200.0, 10.0));
     let bounded = minmax(TrackBreadth::Auto, fixed_breadth(50.0));
@@ -1965,7 +1377,7 @@ fn max_content_spanning_contribution_is_limited_by_fixed_max_tracks() {
         grid_column: placement(line(1), line(3)),
         grid_row: placement(line(1), line(2)),
         min_size: Size::new(size_px(0.0), size_px(0.0)),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let item = tree.push_leaf(item_style, Size::new(200.0, 10.0), Size::new(300.0, 10.0));
     let bounded = minmax(TrackBreadth::Auto, fixed_breadth(50.0));
@@ -1985,7 +1397,7 @@ fn multitrack_auto_minimum_contributes_to_intrinsic_track_sizes() {
     let item_style = TestStyle {
         grid_column: placement(line(1), line(3)),
         grid_row: placement(line(1), line(2)),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let item = tree.push_leaf(item_style, Size::new(200.0, 10.0), Size::new(200.0, 10.0));
     let root = tree.push_grid(
@@ -2034,13 +1446,13 @@ fn baseline_shims_expand_an_intrinsic_row_before_following_rows_are_positioned()
     first_style.grid_column = placement(line(1), line(2));
     first_style.grid_row = placement(line(1), line(2));
     let first = tree.push_leaf(first_style, Size::new(20.0, 20.0), Size::new(20.0, 20.0));
-    tree.source_node_mut(first).first_baseline = Some(15.0);
+    tree.set_first_baseline(first, 15.0);
 
     let mut second_style = fixed_leaf_style(20.0, 20.0);
     second_style.grid_column = placement(line(2), line(3));
     second_style.grid_row = placement(line(1), line(2));
     let second = tree.push_leaf(second_style, Size::new(20.0, 20.0), Size::new(20.0, 20.0));
-    tree.source_node_mut(second).first_baseline = Some(5.0);
+    tree.set_first_baseline(second, 5.0);
 
     let mut marker_style = fixed_leaf_style(10.0, 10.0);
     marker_style.grid_column = placement(line(1), line(2));
@@ -2181,7 +1593,7 @@ fn spanning_scroll_item_uses_limited_min_content_under_intrinsic_constraint() {
         grid_column: placement(line(1), line(3)),
         grid_row: placement(line(1), line(2)),
         overflow: Point::new(Overflow::Hidden, Overflow::Visible),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let item = tree.push_leaf(item_style, Size::new(200.0, 10.0), Size::new(200.0, 10.0));
     let root = tree.push_grid(
@@ -2202,7 +1614,7 @@ fn spanning_growth_only_expands_tracks_marked_infinitely_growable() {
         grid_row: placement(line(1), line(2)),
         min_size: Size::new(size_px(0.0), size_px(0.0)),
         justify_self: SelfAlignment(AlignFlags::START),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let first = tree.push_leaf(first_style, Size::new(10.0, 10.0), Size::new(10.0, 10.0));
 
@@ -2211,7 +1623,7 @@ fn spanning_growth_only_expands_tracks_marked_infinitely_growable() {
         grid_row: placement(line(1), line(2)),
         min_size: Size::new(size_px(0.0), size_px(0.0)),
         justify_self: SelfAlignment(AlignFlags::START),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let spanning = tree.push_leaf(
         spanning_style,
@@ -2247,14 +1659,14 @@ fn single_track_intrinsic_base_floors_its_growth_limit_before_spanning_growth() 
     let first_style = TestStyle {
         grid_column: placement(line(1), line(2)),
         grid_row: placement(line(1), line(2)),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let first = tree.push_leaf(first_style, Size::new(100.0, 10.0), Size::new(100.0, 10.0));
     let spanning_style = TestStyle {
         grid_column: placement(line(1), line(3)),
         grid_row: placement(line(1), line(2)),
         min_size: Size::new(size_px(0.0), size_px(0.0)),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let spanning = tree.push_leaf(spanning_style, Size::new(0.0, 10.0), Size::new(150.0, 10.0));
     let first_track = minmax(TrackBreadth::MinContent, fixed_breadth(50.0));
@@ -2276,7 +1688,7 @@ fn spanning_base_uses_non_affected_track_before_exceeding_growth_limit() {
         grid_column: placement(line(1), line(3)),
         grid_row: placement(line(1), line(2)),
         justify_self: SelfAlignment(AlignFlags::START),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let spanning = tree.push_leaf(
         spanning_style,
@@ -2311,7 +1723,7 @@ fn normal_item_alignment_preserves_a_preferred_aspect_ratio() {
     let mut tree = TestTree::default();
     let child_style = TestStyle {
         aspect_ratio: ratio(2.0, 1.0),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let child = tree.push_leaf(child_style, Size::new(20.0, 10.0), Size::new(20.0, 10.0));
     let root = tree.push_grid(grid_style(&[px(100.0)], &[px(100.0)]), vec![child]);
@@ -2334,7 +1746,7 @@ fn absolute_auto_line_uses_padding_edge_of_overflowing_scrollable_area() {
         },
         grid_column: placement(line(1), GridLine::auto()),
         grid_row: placement(line(1), line(2)),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let child = tree.push_leaf(child_style, Size::ZERO, Size::ZERO);
     let root = tree.push_grid(grid_style(&[px(200.0)], &[px(20.0)]), vec![child]);
@@ -2353,7 +1765,7 @@ fn cross_axis_rerun_uses_effective_content_alignment_gaps() {
         min_size: Size::new(size_px(0.0), size_px(0.0)),
         justify_self: SelfAlignment(AlignFlags::START),
         align_self: SelfAlignment(AlignFlags::STRETCH),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let child = tree.push_leaf(child_style, Size::ZERO, Size::ZERO);
 
@@ -2453,7 +1865,7 @@ fn cross_size_dependent_ratio_item_forces_one_column_feedback_rerun() {
     let square_style = TestStyle {
         aspect_ratio: ratio(1.0, 1.0),
         align_self: SelfAlignment(AlignFlags::STRETCH),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let square = tree.push_leaf(square_style, Size::new(10.0, 10.0), Size::new(10.0, 10.0));
     let style = grid_style(&[auto_track(), auto_track()], &[]);
@@ -2475,7 +1887,7 @@ fn container_baseline_prefers_first_row_synthesis_over_later_baseline_group() {
     bottom_style.align_self = SelfAlignment(AlignFlags::BASELINE);
     bottom_style.grid_row = placement(line(2), line(3));
     let bottom = tree.push_leaf(bottom_style, Size::new(20.0, 10.0), Size::new(20.0, 10.0));
-    tree.source_node_mut(bottom).first_baseline = Some(6.0);
+    tree.set_first_baseline(bottom, 6.0);
     let mut style = grid_style(&[px(50.0)], &[px(30.0), px(30.0)]);
     style.align_items = ItemPlacement(AlignFlags::START);
     style.justify_items = justify_items(AlignFlags::START);
@@ -2726,7 +2138,7 @@ fn absolute_defensive_placements_fall_back_to_padding_edges() {
         position: PositionProperty::Absolute,
         inset: Edges::uniform(inset_px(0.0)),
         grid_column: placement(GridLine::auto(), line(0)),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let zero_end = tree.push_leaf(zero_end_style, Size::ZERO, Size::ZERO);
 
@@ -2734,7 +2146,7 @@ fn absolute_defensive_placements_fall_back_to_padding_edges() {
         position: PositionProperty::Absolute,
         inset: Edges::uniform(inset_px(0.0)),
         grid_column: placement(span(1), span(1)),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let span_span = tree.push_leaf(span_span_style, Size::ZERO, Size::ZERO);
 
@@ -2742,7 +2154,7 @@ fn absolute_defensive_placements_fall_back_to_padding_edges() {
         position: PositionProperty::Absolute,
         inset: Edges::uniform(inset_px(0.0)),
         grid_column: placement(span(1), line(2)),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let span_line = tree.push_leaf(span_line_style, Size::ZERO, Size::ZERO);
 
@@ -2874,12 +2286,12 @@ fn equal_span_groups_distribute_min_contributions_together() {
     let mut tree = TestTree::default();
     let narrow_style = TestStyle {
         grid_column: placement(line(1), line(3)),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let narrow = tree.push_leaf(narrow_style, Size::new(60.0, 10.0), Size::new(60.0, 10.0));
     let wide_style = TestStyle {
         grid_column: placement(line(1), line(3)),
-        ..TestStyle::default()
+        ..grid_default()
     };
     let wide = tree.push_leaf(wide_style, Size::new(80.0, 10.0), Size::new(80.0, 10.0));
     let mut style = grid_style(&[auto_track(), auto_track()], &[]);
