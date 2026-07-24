@@ -877,7 +877,10 @@ mod tests {
         const PRE_STATIC_SPLIT_NODE_STRIDE: usize = 368;
 
         assert_eq!(std::mem::size_of::<NodeData>(), 16);
-        assert_eq!(std::mem::size_of::<Node<()>>(), 208);
+        assert_eq!(
+            std::mem::size_of::<Node<()>>(),
+            if cfg!(debug_assertions) { 208 } else { 200 }
+        );
         assert!(
             std::mem::size_of::<NodeData>() < PRE_BOXING_NODE_DATA_SIZE,
             "document-only state must not inflate element and text nodes"

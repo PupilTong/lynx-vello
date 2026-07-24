@@ -1018,13 +1018,12 @@ pub(super) struct TestSourceNode {
     pub(super) measure: TestMeasure,
 }
 
-/// Legacy inspection mirrors retained for terse assertions in the integration
-/// cases. The engine itself writes the separate [`TestState`] through
-/// [`LayoutTree`]; committed top-level calls synchronize these mirrors.
+/// Per-node observations that are not represented by durable layout state.
+///
+/// Geometry assertions read [`TestState`] directly; these records retain only
+/// optional write presence and measurement traces used by integration tests.
 #[derive(Debug, Default)]
 pub(super) struct TestSessionNode {
-    pub(super) layout: RefCell<Layout>,
-    pub(super) final_layout: RefCell<Layout>,
     pub(super) static_position: Cell<Option<Point<f32>>>,
     pub(super) output: Cell<LayoutOutput>,
     pub(super) measure_inputs: RefCell<Vec<LeafMeasureInput>>,
@@ -1127,6 +1126,19 @@ impl LayoutTree for TestTree {
         &mut state.slots[node.index]
     }
 
+    fn set_unrounded_layout(&self, state: &mut TestState, node: TestRef, layout: Layout) {
+        self.layout_writes
+            .set(self.layout_writes.get().saturating_add(1));
+        state.slots[node.index].set_unrounded(layout);
+    }
+
+    fn set_static_position(&self, state: &mut TestState, node: TestRef, position: Point<f32>) {
+        self.static_position_writes
+            .set(self.static_position_writes.get().saturating_add(1));
+        self.session[node.index].static_position.set(Some(position));
+        state.slots[node.index].set_static_position(position);
+    }
+
     fn compute_layout(
         &self,
         state: &mut TestState,
@@ -1206,16 +1218,8 @@ impl TestTree {
     }
 
     pub(super) fn compute_layout(&self, id: TestId, input: LayoutInput) -> LayoutOutput {
-        let commits_layout = input.goal == LayoutGoal::Commit;
-        let output = {
-            let mut state = self.state.borrow_mut();
-            self.synchronize_inspection_mirrors_into_state(&mut state);
-            LayoutTree::compute_layout(self, &mut state, self.node(id), input)
-        };
-        if commits_layout {
-            self.synchronize_committed_state();
-        }
-        output
+        let mut state = self.state.borrow_mut();
+        LayoutTree::compute_layout(self, &mut state, self.node(id), input)
     }
 
     pub(super) fn compute_root_layout(&self, id: TestId, available_space: Size<AvailableSpace>) {
@@ -1225,59 +1229,16 @@ impl TestTree {
     }
 
     pub(super) fn clear_layout_cache(&self, id: TestId) {
-        self.with_layout_state(false, |tree, state| {
-            LayoutTree::clear_layout_cache(tree, state, tree.node(id));
-        });
+        let mut state = self.state.borrow_mut();
+        LayoutTree::clear_layout_cache(self, &mut state, self.node(id));
     }
 
     pub(super) fn with_layout_state<R>(
         &self,
-        commits_layout: bool,
+        _commits_layout: bool,
         run: impl FnOnce(&Self, &mut TestState) -> R,
     ) -> R {
-        let result = {
-            let mut state = self.state.borrow_mut();
-            self.synchronize_inspection_mirrors_into_state(&mut state);
-            run(self, &mut state)
-        };
-        if commits_layout {
-            self.synchronize_committed_state();
-        }
-        result
-    }
-
-    fn synchronize_inspection_mirrors_into_state(&self, state: &mut TestState) {
-        for (index, session) in self.session.iter().enumerate() {
-            state.slots[index].set_unrounded(snapshot_layout(&session.layout.borrow()));
-            state.slots[index].set_rounded(snapshot_layout(&session.final_layout.borrow()));
-            if let Some(static_position) = session.static_position.get() {
-                state.slots[index].set_static_position(static_position);
-            }
-        }
-    }
-
-    fn synchronize_committed_state(&self) {
-        let state = self.state.borrow();
-        for (index, slot) in state.slots.iter().enumerate() {
-            let session = &self.session[index];
-            *session.layout.borrow_mut() = snapshot_layout(slot.unrounded());
-            *session.final_layout.borrow_mut() = snapshot_layout(slot.rounded());
-            if self.nodes[index].style.position == PositionProperty::Fixed {
-                session.static_position.set(Some(slot.static_position()));
-            }
-        }
-        self.layout_writes
-            .set(self.layout_writes.get().saturating_add(self.nodes.len()));
-        let static_writes = self
-            .nodes
-            .iter()
-            .filter(|node| node.style.position == PositionProperty::Fixed)
-            .count();
-        self.static_position_writes.set(
-            self.static_position_writes
-                .get()
-                .saturating_add(static_writes),
-        );
+        run(self, &mut self.state.borrow_mut())
     }
 
     pub(super) fn enable_cache(&mut self) {
@@ -1406,6 +1367,10 @@ impl TestTree {
 
     pub(super) fn committed_input(&self, id: TestId) -> Option<LayoutInput> {
         self.state.borrow().slots.get(id)?.committed_input()
+    }
+
+    pub(super) fn set_layout_for_testing(&self, id: TestId, layout: Layout) {
+        self.state.borrow_mut().slots[id].set_unrounded(layout);
     }
 
     pub(super) fn session_node(&self, id: TestId) -> &TestSessionNode {

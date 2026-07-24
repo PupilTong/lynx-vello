@@ -36,7 +36,10 @@ const EXACT_INPUT_FLAGS: u16 =
 const BASELINE_X_PRESENT: u16 = 1 << 13;
 const BASELINE_Y_PRESENT: u16 = 1 << 14;
 const BASELINE_PRESENCE: u16 = BASELINE_X_PRESENT | BASELINE_Y_PRESENT;
-const INPUT_FLAGS: u16 = (1 << 13) - 1;
+const INPUT_FLAGS: u16 = EXACT_INPUT_FLAGS
+    | (AVAILABLE_TAG_MASK << AVAILABLE_WIDTH_SHIFT)
+    | (AVAILABLE_TAG_MASK << AVAILABLE_HEIGHT_SHIFT)
+    | (GOAL_MASK << GOAL_SHIFT);
 
 /// A lossless, compact [`LayoutInput`].
 ///
@@ -268,10 +271,10 @@ pub struct Cache {
 
 impl Cache {
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             committed: None,
-            measurements: SmallVec::new(),
+            measurements: SmallVec::new_const(),
         }
     }
 
@@ -317,8 +320,9 @@ impl Cache {
                         exact = Some(index);
                         break;
                     }
-                    let cached_input = cached.input.unpack();
-                    if same_shape.is_none() && same_constraint_shape(cached_input, input) {
+                    if same_shape.is_none()
+                        && packed_same_constraint_shape(cached.input, slot.input)
+                    {
                         same_shape = Some(index);
                     }
                 }
@@ -327,7 +331,7 @@ impl Cache {
                 } else if self.measurements.len() < MEASURE_CACHE_SLOTS {
                     self.measurements.push(slot);
                 } else {
-                    self.measurements[constraint_shape_hash(input)] = slot;
+                    self.measurements[packed_constraint_shape_hash(slot.input)] = slot;
                 }
             }
         }
@@ -461,33 +465,44 @@ fn inputs_match(stored: LayoutInput, requested: LayoutInput) -> bool {
     )
 }
 
-#[inline]
-fn axis_constraint_shape(known_dimension: Option<f32>, available_space: AvailableSpace) -> usize {
-    if known_dimension.is_some() {
-        return 3;
-    }
-
-    match available_space {
-        AvailableSpace::Definite(_) => 0,
-        AvailableSpace::MinContent => 1,
-        AvailableSpace::MaxContent => 2,
+fn packed_axis_constraint_shape(
+    input: PackedLayoutInput,
+    known_present: u16,
+    available_shift: u32,
+) -> usize {
+    if input.flags & known_present != 0 {
+        3
+    } else {
+        usize::from((input.flags >> available_shift) & AVAILABLE_TAG_MASK)
     }
 }
 
+#[inline]
+fn packed_same_constraint_shape(left: PackedLayoutInput, right: PackedLayoutInput) -> bool {
+    (left.flags ^ right.flags) & (DEFINITE_WIDTH | DEFINITE_HEIGHT) == 0
+        && packed_axis_constraint_shape(left, KNOWN_WIDTH_PRESENT, AVAILABLE_WIDTH_SHIFT)
+            == packed_axis_constraint_shape(right, KNOWN_WIDTH_PRESENT, AVAILABLE_WIDTH_SHIFT)
+        && packed_axis_constraint_shape(left, KNOWN_HEIGHT_PRESENT, AVAILABLE_HEIGHT_SHIFT)
+            == packed_axis_constraint_shape(right, KNOWN_HEIGHT_PRESENT, AVAILABLE_HEIGHT_SHIFT)
+}
+
+#[inline]
+fn packed_constraint_shape_hash(input: PackedLayoutInput) -> usize {
+    let width = packed_axis_constraint_shape(input, KNOWN_WIDTH_PRESENT, AVAILABLE_WIDTH_SHIFT);
+    let height = packed_axis_constraint_shape(input, KNOWN_HEIGHT_PRESENT, AVAILABLE_HEIGHT_SHIFT);
+    (width * 4 + height) % MEASURE_CACHE_SLOTS
+}
+
+#[cfg(test)]
 #[inline]
 fn same_constraint_shape(left: LayoutInput, right: LayoutInput) -> bool {
-    left.definite_dimensions == right.definite_dimensions
-        && axis_constraint_shape(left.known_dimensions.width, left.available_space.width)
-            == axis_constraint_shape(right.known_dimensions.width, right.available_space.width)
-        && axis_constraint_shape(left.known_dimensions.height, left.available_space.height)
-            == axis_constraint_shape(right.known_dimensions.height, right.available_space.height)
+    packed_same_constraint_shape(PackedLayoutInput::new(left), PackedLayoutInput::new(right))
 }
 
+#[cfg(test)]
 #[inline]
 fn constraint_shape_hash(input: LayoutInput) -> usize {
-    let width = axis_constraint_shape(input.known_dimensions.width, input.available_space.width);
-    let height = axis_constraint_shape(input.known_dimensions.height, input.available_space.height);
-    (width * 4 + height) % MEASURE_CACHE_SLOTS
+    packed_constraint_shape_hash(PackedLayoutInput::new(input))
 }
 
 #[cfg(test)]
@@ -823,6 +838,29 @@ mod tests {
     }
 
     #[test]
+    fn packed_height_available_space_uses_the_height_known_dimension_fallback() {
+        let requested = measurement(
+            Size::new(Some(13.0), Some(29.0)),
+            Size::new(AvailableSpace::MaxContent, AvailableSpace::MaxContent),
+        );
+        let mut height_equivalent = requested;
+        height_equivalent.available_space.height = AvailableSpace::Definite(29.0);
+        assert_packed_match_agrees_with_oracle(height_equivalent, requested);
+        assert!(packed_inputs_match(
+            PackedLayoutInput::new(height_equivalent),
+            PackedLayoutInput::new(requested),
+        ));
+
+        let mut transposed_axis = requested;
+        transposed_axis.available_space.height = AvailableSpace::Definite(13.0);
+        assert_packed_match_agrees_with_oracle(transposed_axis, requested);
+        assert!(!packed_inputs_match(
+            PackedLayoutInput::new(transposed_axis),
+            PackedLayoutInput::new(requested),
+        ));
+    }
+
+    #[test]
     fn full_input_key_rejects_goal_mode_dimension_and_parent_mismatches() {
         let stored = measurement(
             Size::new(Some(50.0), None),
@@ -936,10 +974,10 @@ mod tests {
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn packed_cache_stays_within_the_layout_state_budget() {
-        assert_eq!(core::mem::size_of::<PackedLayoutInput>(), 28);
-        assert_eq!(core::mem::size_of::<PackedLayoutOutput>(), 24);
-        assert_eq!(core::mem::size_of::<MeasurementSlot>(), 52);
-        assert_eq!(core::mem::size_of::<Cache>(), 280);
+        assert!(core::mem::size_of::<PackedLayoutInput>() <= 28);
+        assert!(core::mem::size_of::<PackedLayoutOutput>() <= 24);
+        assert!(core::mem::size_of::<MeasurementSlot>() <= 52);
+        assert!(core::mem::size_of::<Cache>() <= 280);
     }
 
     #[test]

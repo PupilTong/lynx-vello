@@ -1363,6 +1363,15 @@ fn real_cache_does_not_let_linear_measurement_satisfy_commit() {
     );
     let root = tree.push_linear(TestStyle::default(), vec![measured, hoisted]);
     tree.enable_cache();
+    let sentinel = || {
+        let mut layout = Layout::default();
+        layout.location = Point::new(123.0, 456.0);
+        layout.size = Size::new(7.0, 8.0);
+        layout
+    };
+    tree.set_layout_for_testing(measured, sentinel());
+    tree.set_layout_for_testing(hoisted, sentinel());
+    tree.set_layout_for_testing(root, sentinel());
 
     let output = measure_layout(
         &tree,
@@ -1373,6 +1382,9 @@ fn real_cache_does_not_let_linear_measurement_satisfy_commit() {
     assert!(output.size.width.is_finite() && output.size.height.is_finite());
     assert_eq!(tree.layout_writes.get(), 0);
     assert_eq!(tree.static_position_writes.get(), 0);
+    assert_eq!(tree.layout(measured), sentinel());
+    assert_eq!(tree.layout(hoisted), sentinel());
+    assert_eq!(tree.layout(root), sentinel());
     assert!(
         tree.measure_inputs(measured)
             .iter()

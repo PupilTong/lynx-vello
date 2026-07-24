@@ -68,7 +68,8 @@ impl TestTree {
         let mut sentinel = Layout::default();
         sentinel.location = Point::new(1_234.0, 5_678.0);
         sentinel.size = Size::new(9_876.0, 5_432.0);
-        *self.0.session_node(id).layout.borrow_mut() = snapshot_layout(&sentinel);
+        self.0
+            .set_layout_for_testing(id, snapshot_layout(&sentinel));
         sentinel
     }
 }
@@ -966,8 +967,8 @@ fn measure_goal_probes_intrinsics_without_durable_writes() {
     let mut sentinel = Layout::default();
     sentinel.location = Point::new(123.0, 456.0);
     sentinel.size = Size::new(7.0, 8.0);
-    *tree.session_node(child).layout.borrow_mut() = snapshot_layout(&sentinel);
-    *tree.session_node(root).layout.borrow_mut() = snapshot_layout(&sentinel);
+    tree.set_layout_for_testing(child, snapshot_layout(&sentinel));
+    tree.set_layout_for_testing(root, snapshot_layout(&sentinel));
 
     let output = tree.compute_layout(
         root,
@@ -996,10 +997,9 @@ fn hidden_and_out_of_flow_children_do_not_occupy_grid_cells() {
     let mut hidden_style = fixed_leaf_style(1_000.0, 1_000.0);
     hidden_style.display = Display::None;
     let hidden = tree.push_leaf(hidden_style, Size::ZERO, Size::new(1_000.0, 1_000.0));
-    let hidden_slots = tree.session_node(hidden);
-    let mut hidden_sentinel = snapshot_layout(&hidden_slots.layout.borrow());
+    let mut hidden_sentinel = tree.layout(hidden);
     hidden_sentinel.size = Size::new(999.0, 999.0);
-    *hidden_slots.layout.borrow_mut() = hidden_sentinel;
+    tree.set_layout_for_testing(hidden, hidden_sentinel);
 
     let mut absolute_style = fixed_leaf_style(20.0, 10.0);
     absolute_style.position = PositionProperty::Absolute;

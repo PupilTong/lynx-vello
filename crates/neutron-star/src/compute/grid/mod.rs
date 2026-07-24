@@ -685,7 +685,7 @@ where
                 item.overflow,
             );
             if goal == LayoutGoal::Commit {
-                tree.layout_mut(state, item.key.node).set_unrounded(layout);
+                tree.set_unrounded_layout(state, item.key.node, layout);
             }
             continue;
         }
@@ -789,7 +789,7 @@ where
             item.overflow,
         );
         if goal == LayoutGoal::Commit {
-            tree.layout_mut(state, item.node).set_unrounded(item.layout);
+            tree.set_unrounded_layout(state, item.node, item.layout);
         }
     }
     (content_size, Point::new(None, first_baseline))
@@ -1057,14 +1057,17 @@ where
                     layout.content_size,
                     tree.style(key.node).overflow(),
                 );
-                tree.layout_mut(state, key.node).set_unrounded(layout);
+                tree.set_unrounded_layout(state, key.node, layout);
             }
             PositionProperty::Fixed => {
-                tree.layout_mut(state, key.node)
-                    .set_static_position(Point::new(
+                tree.set_static_position(
+                    state,
+                    key.node,
+                    Point::new(
                         content_origin.x + content_static_offset.x,
                         content_origin.y + content_static_offset.y,
-                    ));
+                    ),
+                );
             }
             PositionProperty::Static | PositionProperty::Relative | PositionProperty::Sticky => {}
         }
@@ -1344,10 +1347,11 @@ where
     if commits_layout {
         for (document_index, child) in hidden.expect("commit keeps hidden grid items") {
             hide_subtree(tree, state, child);
-            tree.layout_mut(state, child)
-                .set_unrounded(Layout::with_order(
-                    u32::try_from(document_index).unwrap_or(u32::MAX),
-                ));
+            tree.set_unrounded_layout(
+                state,
+                child,
+                Layout::with_order(u32::try_from(document_index).unwrap_or(u32::MAX)),
+            );
         }
         let absolute_content_size = layout_absolute_items(
             tree,

@@ -550,9 +550,9 @@ fn measure_goal_does_not_write_durable_layouts() {
     let mut sentinel = Layout::default();
     sentinel.location = Point::new(123.0, 456.0);
     sentinel.size = Size::new(7.0, 8.0);
-    *tree.session_node(first).layout.borrow_mut() = snapshot_layout(&sentinel);
-    *tree.session_node(second).layout.borrow_mut() = snapshot_layout(&sentinel);
-    *tree.session_node(root).layout.borrow_mut() = snapshot_layout(&sentinel);
+    tree.set_layout_for_testing(first, snapshot_layout(&sentinel));
+    tree.set_layout_for_testing(second, snapshot_layout(&sentinel));
+    tree.set_layout_for_testing(root, snapshot_layout(&sentinel));
 
     let output = tree.compute_layout(
         root,

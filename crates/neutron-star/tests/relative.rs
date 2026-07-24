@@ -601,10 +601,9 @@ fn display_none_is_zeroed_and_excluded_from_relative_ids() {
     let hidden = relative_leaf_with(&mut tree, 80.0, 50.0, 1, |s| {
         s.display = Display::None;
     });
-    let hidden_slots = tree.session_node(hidden);
-    let mut hidden_layout = snapshot_layout(&hidden_slots.layout.borrow());
+    let mut hidden_layout = tree.layout(hidden);
     hidden_layout.size = Size::new(80.0, 50.0);
-    *hidden_slots.layout.borrow_mut() = hidden_layout;
+    tree.set_layout_for_testing(hidden, hidden_layout);
     let child = relative_leaf_with(&mut tree, 10.0, 10.0, 2, |s| {
         s.relative_adjacent.right = id(1);
     });
@@ -687,6 +686,14 @@ fn measure_goal_has_no_durable_geometry_side_effects_or_baseline() {
     let mut tree = TestTree::default();
     let child = relative_leaf(&mut tree, 10.0, 10.0, 1);
     let root = relative_container(&mut tree, TestStyle::default(), &[child]);
+    let sentinel = || {
+        let mut layout = Layout::default();
+        layout.location = Point::new(123.0, 456.0);
+        layout.size = Size::new(7.0, 8.0);
+        layout
+    };
+    tree.set_layout_for_testing(child, sentinel());
+    tree.set_layout_for_testing(root, sentinel());
     let output = tree.compute_layout(
         root,
         LayoutInput::measure(
@@ -700,7 +707,8 @@ fn measure_goal_has_no_durable_geometry_side_effects_or_baseline() {
     assert_size(output.size, Size::new(10.0, 10.0));
     assert_eq!(output.first_baselines, Point::NONE);
     assert_eq!(tree.layout_writes.get(), 0);
-    assert_eq!(tree.layout(child), Layout::default());
+    assert_eq!(tree.layout(child), sentinel());
+    assert_eq!(tree.layout(root), sentinel());
 }
 
 #[test]

@@ -1205,7 +1205,7 @@ where
         layout.border = item.border;
         layout.padding = item.padding;
         layout.margin = item.margin;
-        tree.layout_mut(state, item.key.node).set_unrounded(layout);
+        tree.set_unrounded_layout(state, item.key.node, layout);
 
         accumulate_scrollable_overflow(
             &mut scrollable_size,
@@ -1254,11 +1254,10 @@ where
                     layout.content_size,
                     style.overflow(),
                 );
-                tree.layout_mut(state, pending.node).set_unrounded(layout);
+                tree.set_unrounded_layout(state, pending.node, layout);
             }
             PositionProperty::Fixed => {
-                tree.layout_mut(state, pending.node)
-                    .set_static_position(Point::new(border.left, border.top));
+                tree.set_static_position(state, pending.node, Point::new(border.left, border.top));
             }
             PositionProperty::Static | PositionProperty::Relative | PositionProperty::Sticky => {}
         }
@@ -1462,10 +1461,11 @@ where
     );
     for (document_index, child) in hidden {
         super::hide_subtree(tree, state, child);
-        tree.layout_mut(state, child)
-            .set_unrounded(Layout::with_order(
-                u32::try_from(document_index).unwrap_or(u32::MAX),
-            ));
+        tree.set_unrounded_layout(
+            state,
+            child,
+            Layout::with_order(u32::try_from(document_index).unwrap_or(u32::MAX)),
+        );
     }
     scrollable_size = scrollable_size.zip_map(
         commit_out_of_flow(tree, state, &absolute_items, outer_size, border),

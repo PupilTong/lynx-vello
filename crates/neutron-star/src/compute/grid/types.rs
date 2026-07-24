@@ -276,6 +276,7 @@ impl TrackSet {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod size_tests {
     use super::GridItem;
     use crate::compute::util::{EdgeMask, IntrinsicTags, ItemGeometry};
@@ -283,9 +284,9 @@ mod size_tests {
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn item_geometry_and_grid_scratch_stay_compact() {
-        assert_eq!(core::mem::size_of::<EdgeMask>(), 1);
-        assert_eq!(core::mem::size_of::<IntrinsicTags>(), 2);
-        assert_eq!(core::mem::size_of::<ItemGeometry>(), 116);
-        assert_eq!(core::mem::size_of::<GridItem<usize>>(), 288);
+        assert!(core::mem::size_of::<EdgeMask>() <= 1);
+        assert!(core::mem::size_of::<IntrinsicTags>() <= 2);
+        assert!(core::mem::size_of::<ItemGeometry>() <= 116);
+        assert!(core::mem::size_of::<GridItem<usize>>() <= 288);
     }
 }

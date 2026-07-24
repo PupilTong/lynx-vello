@@ -114,6 +114,15 @@ lowers `relative-inline-start-of`, `relative-inline-end-of`,
 corresponding left or right property using the computed writing direction.
 The algorithm consumes only the resulting physical side references.
 
+Starlight resolves a logical and physical declaration that map to the same
+side by last-applied-wins: style application remaps both property IDs into one
+physical slot. The current stylo fork instead exposes the four logical
+variants as independent longhands, so their cross-property cascade order is
+already lost when this bridge runs. The bridge therefore uses the physical
+value unless it is the sentinel; the item's own direction and LTR/RTL mapping
+still match Starlight. This temporary tie-break deviation is unavoidable
+until those fork properties become a real `logical = true` group.
+
 Initial values in this section document the current Rust trait surface,
 which follows the stylo fork's computed initial values. If another Starlight
 bridge materializes different compatibility

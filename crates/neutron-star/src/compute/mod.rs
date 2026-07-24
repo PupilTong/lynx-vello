@@ -59,8 +59,7 @@ pub fn compute_root_layout<T: LayoutTree>(
     let border = resolve_border(&style.border());
 
     if hidden {
-        tree.layout_mut(state, root)
-            .set_unrounded(Layout::default());
+        tree.set_unrounded_layout(state, root, Layout::default());
         return;
     }
 
@@ -71,7 +70,7 @@ pub fn compute_root_layout<T: LayoutTree>(
     layout.border = border;
     layout.padding = padding;
     layout.margin = margin;
-    tree.layout_mut(state, root).set_unrounded(layout);
+    tree.set_unrounded_layout(state, root, layout);
 }
 
 fn resolve_root_margins(
@@ -146,8 +145,7 @@ where
 
 pub fn hide_subtree<T: LayoutTree>(tree: &T, state: &mut T::State, node: T::NodeId) {
     tree.clear_layout_cache(state, node);
-    tree.layout_mut(state, node)
-        .set_unrounded(Layout::with_order(0));
+    tree.set_unrounded_layout(state, node, Layout::with_order(0));
 
     for child in tree.children(node) {
         hide_subtree(tree, state, child);

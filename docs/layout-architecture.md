@@ -95,7 +95,7 @@ Text behavior is inventoried in
 | --- | --- | --- |
 | `neutron-star` | Implemented Flex, Grid, Relative, and Linear algorithms; one unified source-backed `CoreStyle` protocol speaking stylo computed values (including the `relative-*` and `linear-*` longhands); the text style/run protocol; closed natural-size and Parley leaf paths, hidden-subtree cleanup, positioned layout, rounding; shared private arithmetic; geometry and layout IO; cache semantics | Node/style/content storage, display dispatch, arbitrary host content/measurers, DOM/runtime types, an engine-side style value vocabulary (it re-exports stylo's), resolved device-unit policy (`rpx`, etc.), stacking/paint order |
 | `neutron-star::text` (unconditional) | Parley context/font registration, whitespace processing, shaping, line breaking, intrinsic and height-for-width measurement, baselines, and retained `TextLayout` artifact types | Text truncation and ellipsis, inline boxes, paint styling, runtime/attribute lowering, resource fetching, or host cache and per-node slot storage |
-| `w3c-dom::layout` (implemented) | `LayoutTree` on immutable `TreeArenas<T>`, plain `NodeId`s, and separately borrowed mutable `DocumentLayoutState` (one protocol; no view/session/store wrapper layers); post-flush style views lending the `ComputedValues` pointer published from Stylo's still-owning primary `Arc` under the exclusive `Document` phase boundary (no `ElementData` borrow check, `Arc` bump, copy, or translation; public computed-style queries remain guarded); logical `relative-*-inline-*` lowering; the W3C fixed/absolute containing-block rule expressed through `position()`; anonymous box geometry plus inherited parent font/text values for text nodes; display dispatch (flex/grid/linear/relative, `display: none` hiding, `content-visibility: hidden` skipped-contents routing before the cache, natural-size leaf, concrete Parley text); lazily boxed shared `TextContext` and per-text-node `TextLayoutStore` in layout state; a NodeId-aligned `LayoutSlot` containing cache, static position, unrounded layout, and rounded layout; `Document` query methods for stored results; automatic dirty-path invalidation when content changes; the positioned pass as a fresh pre-order tree walk each pass (cache-proof for hoisted nodes whose parents answer from cache, pruned at skipped-contents subtrees so a hoisted descendant cannot be revived, and the engine's effective-`order`-0 paint rule for out-of-flow children); device-pixel rounding without a whole-`Layout` clone; the effective-containment fold on the style view (feeding both the relayout-boundary predicate and the content-visibility-aware fixed/absolute containing-block predicate); **automatic style-damage consumption** (every harvest boundary-stops `Document::invalidate_layout` per relayout-damaged node before returning/streaming damage; it also evicts direct text children's measurement caches and retained artifacts because those children read inherited style from the damaged element but have no Stylo damage record of their own; `Document::layout` re-runs each parked `contain: strict`/skipped boundary in place before the root pass, merging the re-run's scrollable `content_size` back into the boundary's stored layout); and the `Document::invalidate_layout` API embedders still call for mutations the style system cannot see | A second layout algorithm, generic content-measurement callbacks, engine-side style copies, layout/text runtime borrow wrappers, Lynx runtime-element vocabulary or device-unit policy (`rpx`), Lynx computed defaults (cascade/UA-sheet policy), text shaping algorithms |
+| `w3c-dom::layout` (implemented) | `LayoutTree` on immutable `TreeArenas<T>`, plain `NodeId`s, and separately borrowed mutable `DocumentLayoutState` (one protocol; no view/session/store wrapper layers); post-flush style views lending the `ComputedValues` pointer published from Stylo's still-owning primary `Arc` under the exclusive `Document` phase boundary (no `ElementData` borrow check, `Arc` bump, copy, or translation; public computed-style queries remain guarded); logical `relative-*-inline-*` lowering; the W3C fixed/absolute containing-block rule expressed through `position()`; anonymous box geometry plus inherited parent font/text values for text nodes; display dispatch (flex/grid/linear/relative, `display: none` hiding, `content-visibility: hidden` skipped-contents routing before the cache, natural-size leaf, concrete Parley text); lazily boxed shared `TextContext` and per-text-node `TextLayoutStore` in layout state; a NodeId-aligned `LayoutSlot` containing cache, static position, unrounded layout, and rounded layout; `Document` query methods for stored results; automatic dirty-path invalidation when content changes; one fused preorder positioned-and-rounding traversal whose pre-node hook keeps hoisted placement cache-proof, prunes positioning at skipped-contents subtrees so a hoisted descendant cannot be revived, and applies the engine's effective-`order`-0 paint rule for out-of-flow children; device-pixel rounding without a whole-`Layout` clone; the effective-containment fold on the style view (feeding both the relayout-boundary predicate and the content-visibility-aware fixed/absolute containing-block predicate); **automatic style-damage consumption** (every harvest boundary-stops `Document::invalidate_layout` per relayout-damaged node before returning/streaming damage; it also evicts direct text children's measurement caches and retained artifacts because those children read inherited style from the damaged element but have no Stylo damage record of their own; `Document::layout` re-runs each parked `contain: strict`/skipped boundary in place before the root pass, merging the re-run's scrollable `content_size` back into the boundary's stored layout); and the `Document::invalidate_layout` API embedders still call for mutations the style system cannot see | A second layout algorithm, generic content-measurement callbacks, engine-side style copies, layout/text runtime borrow wrappers, Lynx runtime-element vocabulary or device-unit policy (`rpx`), Lynx computed defaults (cascade/UA-sheet policy), text shaping algorithms |
 | Future runtime integration | Lynx view metrics and `rpx` policy; Lynx-specific text attributes, element-backed raw text and truncation; `staggered` integration; sticky lowering | A second Flex/Grid/Relative/Linear/text-measurement implementation, arbitrary host content, engine-side copies of styles, the style-damage→layout wiring (now engine-internal in `w3c-dom`) |
 
 The engine/host seam keeps the engine storage-free even though its
@@ -557,7 +557,15 @@ the painting — layout's job is to never be the frame's bottleneck.
   engine-side copy. The next exclusive traversal may replace the owning Arc,
   but cannot begin until layout has released its `&mut Document`. The
   `AtomicPtr` occupies the element variant's existing word; the 64-bit
-  structural size guard keeps `Node<()>` at 208 bytes.
+  structural size guard keeps `Node<()>` at no more than 208 bytes (208 in
+  debug builds, 200 in release builds because the fork's borrow-checking
+  wrapper is debug-only).
+  Grid intrinsic sizing may recursively probe an item, then re-fetches that
+  item's style from this same published generation instead of cloning the
+  style payload into its scratch record. A host that changes styles during a
+  layout pass violates the immutable-style phase contract; if the refreshed
+  value disagrees with the captured intrinsic variant, the Grid pass
+  deliberately fails fast.
 - **Shared setup, flat hot scratch.** Flex, Grid, Relative, and Linear reuse
   the same
   inline, statically-dispatched ordering and box-resolution helpers. Their
@@ -611,21 +619,21 @@ the painting — layout's job is to never be the frame's bottleneck.
   deduplicated through an `O(1)` `FxHashSet` companion to the parked list, so a
   batch that parks `B` independent boundaries (a dirty leaf per contained row of
   a virtualized list) stays `O(B)`, not `O(B²)`.
-- **The positioned + rounding tail is scoped to what changed, not the whole
-  tree.** The parked-boundary re-runs and the root pass are cache-incremental,
-  but the positioned pass (hoisted out-of-flow anchoring) and device-pixel
-  rounding are plain tree walks. `Document::layout` scopes them: when nothing has
-  been invalidated since the last pass and the viewport/scale are unchanged it
-  **skips the whole pass** (an idle frame is `O(1)`, not an `O(N)` re-walk); when
-  every pending change is confined to parked containment boundaries it re-runs
-  those two walks **only over each outermost parked boundary's subtree**
-  (`compute::round_layout_subtree` re-snaps a subtree from its parent's
-  accumulated unrounded origin, byte-identically to a full re-round), leaving
-  every clean subtree's stored geometry untouched; only a change that reached the
-  document root or a viewport/scale move falls back to the whole-tree walk. This
-  is what keeps a single contained mutation `O(boundary subtree)` end-to-end,
-  closing the gap where containment shrank the core compute but the frame still
-  paid an `O(N)` positioned + rounding tail.
+- **The fused positioned + rounding tail is scoped to what changed, not the
+  whole tree.** The parked-boundary re-runs and the root pass are
+  cache-incremental, while hoisted out-of-flow anchoring and device-pixel
+  rounding share one `round_layout_subtree_with` traversal. Its `pre_position`
+  hook runs before each node is rounded, so positioning observes unrounded
+  geometry without requiring a separate walk. `Document::layout` scopes that
+  traversal: when nothing has been invalidated since the last pass and the
+  viewport/scale are unchanged it **skips the whole pass** (an idle frame is
+  `O(1)`, not an `O(N)` re-walk); when every pending change is confined to
+  parked containment boundaries it runs the fused traversal **only over each
+  outermost parked boundary's subtree**, re-snapping from the parent's
+  accumulated unrounded origin byte-identically to a full re-round and leaving
+  clean subtrees untouched. Only a change that reached the document root or a
+  viewport/scale move falls back to a whole-tree traversal. This keeps a single
+  contained mutation `O(boundary subtree)` end-to-end.
 - **Allocation strategy (current).** Algorithms use bounded transient `Vec`
   scratch. Relative deduplicates each item's at-most-eight dependencies in a
   fixed inline `u32` array, bypasses graph construction entirely when no

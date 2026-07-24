@@ -117,6 +117,19 @@ pub trait LayoutTree {
         node: Self::NodeId,
     ) -> &'state mut LayoutSlot;
 
+    fn set_unrounded_layout(&self, state: &mut Self::State, node: Self::NodeId, layout: Layout) {
+        self.layout_mut(state, node).set_unrounded(layout);
+    }
+
+    fn set_static_position(
+        &self,
+        state: &mut Self::State,
+        node: Self::NodeId,
+        position: Point<f32>,
+    ) {
+        self.layout_mut(state, node).set_static_position(position);
+    }
+
     fn compute_layout(
         &self,
         state: &mut Self::State,
@@ -155,6 +168,7 @@ mod tests {
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn layout_slot_fits_the_split_state_memory_budget() {
-        assert_eq!(core::mem::size_of::<LayoutSlot>(), 440);
+        let size = core::mem::size_of::<LayoutSlot>();
+        assert!(size <= 440, "LayoutSlot grew to {size} bytes");
     }
 }

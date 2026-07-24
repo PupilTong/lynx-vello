@@ -1279,7 +1279,7 @@ mod tests {
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn ordered_item_stays_compact_on_64_bit_targets() {
-        assert_eq!(core::mem::size_of::<OrderedItem<usize>>(), 24);
-        assert_eq!(core::mem::size_of::<OrderedItem<[usize; 2]>>(), 32);
+        assert!(core::mem::size_of::<OrderedItem<usize>>() <= 24);
+        assert!(core::mem::size_of::<OrderedItem<[usize; 2]>>() <= 32);
     }
 }

@@ -47,6 +47,17 @@ consequential choice about whether to follow the spec or the quirk.
   `LinearLayout`/`RelativeLayout`-derived) with no CSS equivalent at all;
   not a spec violation, just extensions to implement faithfully as their
   own algorithms (not flex polyfills, unlike how `web-core` does it).
+- **Relative logical/physical precedence (temporary implementation
+  deviation)** — Starlight remaps logical relative-property IDs to a physical
+  slot during style application, so a logical and physical declaration that
+  target the same side are last-applied-wins. The stylo fork currently models
+  the four logical variants as independent longhands, which discards that
+  cross-property source order before `neutron-star` lowers them. The current
+  bridge consequently uses physical-wins-unless-sentinel. Direction comes
+  from the item itself and the LTR/RTL mapping is otherwise exact. Exact
+  bucket-2 parity requires changing the fork declarations into a true
+  `logical = true` group; until then this tie-break is an explicitly recorded
+  limitation, not a desired semantic.
 - **`position: fixed` containing block** — in every mode Lynx supports, a
   fixed element's containing block is unconditionally the single page-root
   element (reached via render-tree reparenting in the legacy path, or a

@@ -75,7 +75,7 @@ where
             max_size,
             padding_border_size,
         );
-        return LayoutOutput::new(size, size);
+        return LayoutOutput::new(size, size.zip_map(padding_border_size, f32::max));
     }
 
     let measure_known_dimensions = Size::new(
@@ -945,6 +945,24 @@ mod tests {
         });
 
         assert_eq!(output.size, Size::new(40.0, 20.0));
+    }
+
+    #[test]
+    fn fully_known_replaced_leaf_preserves_the_padding_border_content_floor() {
+        let style = BoxStyle::new(Size::new(StyleSize::auto(), StyleSize::auto()))
+            .with_padding_and_border_box(10.0);
+        let input = LayoutInput::commit(
+            Size::new(Some(4.0), Some(4.0)),
+            Size::NONE,
+            Size::MAX_CONTENT,
+        );
+
+        let output = compute_leaf_layout_with_measurement(input, &style, None, false, |_input| {
+            panic!("a fully known replaced leaf must not measure content")
+        });
+
+        assert_eq!(output.size, Size::new(4.0, 4.0));
+        assert_eq!(output.content_size, Size::new(20.0, 20.0));
     }
 
     #[test]

@@ -367,6 +367,11 @@ pub(super) fn resolve_item_intrinsic_dimensions<T>(
             cross_tracks,
         )
     });
+    // Grid deliberately re-borrows the style after recursive intrinsic
+    // probes instead of cloning it into every item. LayoutTree's immutable
+    // topology/style contract makes the intrinsic tags captured earlier in
+    // this pass stable; a host that changes the style mid-pass violates that
+    // contract, and the variant checks below intentionally fail fast.
     let style = tree.style(item.key.node);
     let size = axis.size(style.size());
     let min_size = axis.size(style.min_size());
@@ -738,6 +743,7 @@ pub(super) struct IntrinsicSizingScratch {
     non_flexible: Vec<usize>,
     crosses_flexible: Vec<usize>,
     distribution: DistributionScratch,
+    track_distribution: Vec<(usize, f32)>,
 }
 
 impl IntrinsicSizingScratch {
@@ -749,6 +755,7 @@ impl IntrinsicSizingScratch {
         self.distribution.touched.clear();
         self.distribution.affected.clear();
         self.distribution.non_affected.clear();
+        self.track_distribution.clear();
     }
 }
 
@@ -1077,6 +1084,7 @@ fn resolve_intrinsic_sizes<T>(
         non_flexible,
         crosses_flexible,
         distribution,
+        ..
     } = scratch;
     for item in items.iter_mut().filter(|item| item.span(axis) == 1) {
         let span = span_for(item, axis);
@@ -1406,7 +1414,11 @@ fn resolve_intrinsic_sizes<T>(
     }
 }
 
-fn maximize_tracks(tracks: &mut TrackSet, available: AvailableSpace) {
+fn maximize_tracks(
+    tracks: &mut TrackSet,
+    available: AvailableSpace,
+    scratch: &mut Vec<(usize, f32)>,
+) {
     let AvailableSpace::Definite(space) = available else {
         if matches!(available, AvailableSpace::MaxContent) {
             for track in &mut tracks.tracks {
@@ -1421,26 +1433,28 @@ fn maximize_tracks(tracks: &mut TrackSet, available: AvailableSpace) {
     if remaining <= 0.0 {
         return;
     }
-    let mut active = tracks
-        .tracks
-        .iter()
-        .enumerate()
-        .filter(|(_, track)| !track.collapsed && !track.is_flexible())
-        .map(|(index, track)| (index, (track.growth_limit - track.base).max(0.0)))
-        .filter(|&(_, capacity)| capacity > 0.0)
-        .collect::<Vec<_>>();
-    active.sort_unstable_by(|left, right| left.1.total_cmp(&right.1));
+    scratch.clear();
+    scratch.extend(
+        tracks
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, track)| !track.collapsed && !track.is_flexible())
+            .map(|(index, track)| (index, (track.growth_limit - track.base).max(0.0)))
+            .filter(|&(_, capacity)| capacity > 0.0),
+    );
+    scratch.sort_unstable_by(|left, right| left.1.total_cmp(&right.1));
     let mut cursor = 0;
-    while cursor < active.len() {
-        let count = active.len() - cursor;
+    while cursor < scratch.len() {
+        let count = scratch.len() - cursor;
         let share = remaining / count as f32;
-        let capacity = active[cursor].1;
+        let capacity = scratch[cursor].1;
         if capacity <= share {
-            tracks.tracks[active[cursor].0].base += capacity;
+            tracks.tracks[scratch[cursor].0].base += capacity;
             remaining -= capacity;
             cursor += 1;
         } else {
-            for &(index, _) in &active[cursor..] {
+            for &(index, _) in &scratch[cursor..] {
                 tracks.tracks[index].base += share;
             }
             return;
@@ -1499,6 +1513,7 @@ fn expand_flexible_tracks<T>(
     items: &mut [GridItem<T::NodeId>],
     inner_size: crate::geometry::Size<Option<f32>>,
     available: AvailableSpace,
+    scratch: &mut Vec<(usize, f32)>,
 ) where
     T: LayoutTree,
 {
@@ -1515,9 +1530,8 @@ fn expand_flexible_tracks<T>(
         _ => None,
     };
     let mut flex_fraction = 0.0_f32;
-    let mut scratch = Vec::<(usize, f32)>::new();
     if let Some(space) = definite_space {
-        flex_fraction = find_fr_size(tracks, 0..tracks.tracks.len(), space, &mut scratch);
+        flex_fraction = find_fr_size(tracks, 0..tracks.tracks.len(), space, scratch);
     } else {
         for track in &tracks.tracks {
             if track.is_flexible() {
@@ -1545,8 +1559,7 @@ fn expand_flexible_tracks<T>(
                 cross_tracks,
                 inner_size,
             );
-            flex_fraction =
-                flex_fraction.max(find_fr_size(tracks, range, contribution, &mut scratch));
+            flex_fraction = flex_fraction.max(find_fr_size(tracks, range, contribution, scratch));
         }
     }
     for track in &mut tracks.tracks {
@@ -1605,7 +1618,7 @@ pub(super) fn size_tracks<T>(
         .iter()
         .all(|track| !track.intrinsic_min && !track.intrinsic_max && !track.is_flexible())
     {
-        maximize_tracks(tracks, available);
+        maximize_tracks(tracks, available, &mut scratch.track_distribution);
         tracks.rebuild_positions();
         return;
     }
@@ -1624,7 +1637,7 @@ pub(super) fn size_tracks<T>(
         available,
         scratch,
     );
-    maximize_tracks(tracks, available);
+    maximize_tracks(tracks, available, &mut scratch.track_distribution);
     expand_flexible_tracks(
         tree,
         state,
@@ -1634,6 +1647,7 @@ pub(super) fn size_tracks<T>(
         items,
         inner_size,
         available,
+        &mut scratch.track_distribution,
     );
     stretch_auto_tracks(tracks, available, alignment);
     tracks.rebuild_positions();
@@ -2301,7 +2315,7 @@ mod tests {
     #[test]
     fn growth_maximization_fr_freezing_and_auto_stretch_cover_limit_edges() {
         let mut tracks = track_set(vec![test_track(0.0, 100.0), test_track(0.0, 100.0)]);
-        maximize_tracks(&mut tracks, AvailableSpace::Definite(10.0));
+        maximize_tracks(&mut tracks, AvailableSpace::Definite(10.0), &mut Vec::new());
         assert_eq!(tracks.tracks[0].base, 5.0);
         assert_eq!(tracks.tracks[1].base, 5.0);
 
@@ -2365,6 +2379,7 @@ mod tests {
             &mut items,
             Size::NONE,
             AvailableSpace::MaxContent,
+            &mut Vec::new(),
         );
         assert_eq!(tracks.tracks[0].base, 10.0);
         assert_eq!(tracks.tracks[1].base, 80.0);

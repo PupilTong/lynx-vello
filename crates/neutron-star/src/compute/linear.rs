@@ -1119,7 +1119,7 @@ where
         layout.border = item.border;
         layout.padding = item.padding;
         layout.margin = item.margin;
-        tree.layout_mut(state, item.key.node).set_unrounded(layout);
+        tree.set_unrounded_layout(state, item.key.node, layout);
 
         accumulate_scrollable_overflow(
             &mut content_size,
@@ -1158,8 +1158,7 @@ where
 
     for key in hidden_items {
         hide_subtree(tree, state, key.node);
-        tree.layout_mut(state, key.node)
-            .set_unrounded(Layout::with_order(key.layout_order));
+        tree.set_unrounded_layout(state, key.node, Layout::with_order(key.layout_order));
     }
     for item in absolute_items {
         let AbsoluteItem {
@@ -1215,7 +1214,7 @@ where
                     layout.content_size,
                     tree.style(child).overflow(),
                 );
-                tree.layout_mut(state, child).set_unrounded(layout);
+                tree.set_unrounded_layout(state, child, layout);
             }
             PositionProperty::Fixed => {
                 let measured = match (static_axes.width, static_axes.height) {
@@ -1242,8 +1241,7 @@ where
                     gravity,
                     main_gravity,
                 );
-                tree.layout_mut(state, child)
-                    .set_static_position(static_position);
+                tree.set_static_position(state, child, static_position);
             }
             _ => unreachable!(),
         }

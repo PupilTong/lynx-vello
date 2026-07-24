@@ -399,7 +399,7 @@ fn skipped_contents_measure_probe_does_not_hide_children() {
     let container = flex_container(&mut tree, skipped_style(60.0, 40.0), &[child]);
     let mut stale = tree.layout(child);
     stale.size = Size::new(7.0, 7.0);
-    *tree.session_node(child).layout.borrow_mut() = stale;
+    tree.set_layout_for_testing(child, stale);
 
     let output = measure(&tree, container, Size::MAX_CONTENT);
     assert_size(output.size, Size::new(60.0, 40.0));

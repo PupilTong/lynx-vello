@@ -318,6 +318,16 @@ where
     }
 
     fn probe(&mut self, slot: usize, available_main: AvailableSpace) -> f32 {
+        let expected = match slot {
+            0 => AvailableSpace::MinContent,
+            1 => AvailableSpace::MaxContent,
+            2 => self.axes.main.size(self.available_space),
+            _ => unreachable!("the main-axis probe cache has exactly three slots"),
+        };
+        debug_assert_eq!(
+            available_main, expected,
+            "a main-axis probe slot must not be reused for another constraint"
+        );
         let bit = 1_u8 << slot;
         if self.measured & bit != 0 {
             return self.values[slot];
@@ -855,6 +865,11 @@ fn resolve_flexible_lengths<N>(
     debug_assert!(false, "flex freeze loop exceeded the item-count bound");
 }
 
+#[inline]
+fn is_first_baseline_candidate<N>(item: &FlexItem<N>, axes: Axes) -> bool {
+    axes.main == Axis::Vertical || item.align_self == AlignFlags::BASELINE
+}
+
 #[allow(clippy::too_many_arguments)]
 fn determine_hypothetical_cross_sizes<T>(
     tree: &T,
@@ -872,7 +887,7 @@ fn determine_hypothetical_cross_sizes<T>(
         let line_items = &items[line.start..line.end];
         line_items
             .iter()
-            .position(|item| axes.main == Axis::Vertical || item.align_self == AlignFlags::BASELINE)
+            .position(|item| is_first_baseline_candidate(item, axes))
             .map(|offset| line.start + offset)
             .or_else(|| (!line_items.is_empty()).then_some(line.start))
     });
@@ -1288,7 +1303,7 @@ fn first_container_baseline<N>(
     let line = *lines.first()?;
     let first = items[line.start..line.end]
         .iter()
-        .find(|item| axes.main == Axis::Vertical || item.align_self == AlignFlags::BASELINE)
+        .find(|item| is_first_baseline_candidate(item, axes))
         .or_else(|| items[line.start..line.end].first())?;
     let location = item_border_box_location(first, line, axes, inner_size, content_origin);
     Some(
@@ -1348,7 +1363,7 @@ where
             layout.border = item.border;
             layout.padding = item.padding;
             layout.margin = item.margin;
-            tree.layout_mut(state, item.key.node).set_unrounded(layout);
+            tree.set_unrounded_layout(state, item.key.node, layout);
 
             accumulate_scrollable_overflow(
                 &mut content_size,
@@ -1504,11 +1519,10 @@ where
                     layout.content_size,
                     item.overflow,
                 );
-                tree.layout_mut(state, key.node).set_unrounded(layout);
+                tree.set_unrounded_layout(state, key.node, layout);
             }
             PositionProperty::Fixed => {
-                tree.layout_mut(state, key.node)
-                    .set_static_position(static_position);
+                tree.set_static_position(state, key.node, static_position);
             }
             PositionProperty::Static | PositionProperty::Relative | PositionProperty::Sticky => {}
         }
@@ -1853,10 +1867,11 @@ where
     );
     for (document_index, child) in hidden {
         super::hide_subtree(tree, state, child);
-        tree.layout_mut(state, child)
-            .set_unrounded(Layout::with_order(
-                u32::try_from(document_index).unwrap_or(u32::MAX),
-            ));
+        tree.set_unrounded_layout(
+            state,
+            child,
+            Layout::with_order(u32::try_from(document_index).unwrap_or(u32::MAX)),
+        );
     }
     let absolute_content_size = perform_absolute_children(
         tree,
