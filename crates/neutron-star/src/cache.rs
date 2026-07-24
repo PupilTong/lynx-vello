@@ -8,7 +8,7 @@ use crate::tree::{
 };
 
 pub const MEASURE_CACHE_SLOTS: usize = 8;
-const INLINE_MEASURE_CACHE_SLOTS: usize = 4;
+const INLINE_MEASURE_CACHE_SLOTS: usize = MEASURE_CACHE_SLOTS;
 
 const KNOWN_WIDTH_PRESENT: u16 = 1 << 0;
 const KNOWN_HEIGHT_PRESENT: u16 = 1 << 1;
@@ -259,10 +259,11 @@ impl MeasurementSlot {
     }
 }
 
-/// A bounded per-node layout cache with four common measurement shapes inline.
+/// A bounded, allocation-free per-node layout cache.
 ///
-/// The fifth through eighth distinct shapes use one uncommon allocation.
-/// The cap and replacement policy are unchanged.
+/// All eight measurement shapes are stored inline. The fixed cap avoids a
+/// per-node heap allocation when an algorithm probes more than four distinct
+/// constraint shapes.
 #[derive(Debug, PartialEq, Default)]
 pub struct Cache {
     committed: Option<MeasurementSlot>,
@@ -339,11 +340,7 @@ impl Cache {
 
     pub fn clear(&mut self) {
         self.committed = None;
-        if self.measurements.spilled() {
-            self.measurements = SmallVec::new();
-        } else {
-            self.measurements.clear();
-        }
+        self.measurements.clear();
     }
 }
 
@@ -883,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn four_measurement_shapes_stay_inline_and_round_trip() {
+    fn all_measurement_shapes_stay_inline_and_round_trip() {
         let inputs = [
             measurement(Size::NONE, Size::MIN_CONTENT),
             measurement(Size::NONE, Size::MAX_CONTENT),
@@ -895,23 +892,34 @@ mod tests {
                 Size::NONE,
                 Size::new(AvailableSpace::MaxContent, AvailableSpace::Definite(44.0)),
             ),
+            measurement(
+                Size::NONE,
+                Size::new(AvailableSpace::MinContent, AvailableSpace::MaxContent),
+            ),
+            measurement(
+                Size::NONE,
+                Size::new(AvailableSpace::MinContent, AvailableSpace::Definite(55.0)),
+            ),
+            measurement(
+                Size::NONE,
+                Size::new(AvailableSpace::MaxContent, AvailableSpace::MinContent),
+            ),
+            measurement(
+                Size::NONE,
+                Size::new(AvailableSpace::Definite(77.0), AvailableSpace::MaxContent),
+            ),
         ];
         let mut cache = Cache::new();
-        for (value, input) in [0.0, 1.0, 2.0, 3.0].into_iter().zip(inputs) {
+        for (value, input) in [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+            .into_iter()
+            .zip(inputs)
+        {
             let output = LayoutOutput::new(Size::new(value, 10.0), Size::new(20.0, value));
             cache.store(input, output);
             assert_eq!(cache.get(input), Some(output));
         }
         assert_eq!(cache.measurements.len(), INLINE_MEASURE_CACHE_SLOTS);
         assert!(!cache.measurements.spilled());
-
-        let fifth = measurement(
-            Size::NONE,
-            Size::new(AvailableSpace::MinContent, AvailableSpace::MaxContent),
-        );
-        cache.store(fifth, LayoutOutput::new(Size::ZERO, Size::ZERO));
-        assert_eq!(cache.measurements.len(), INLINE_MEASURE_CACHE_SLOTS + 1);
-        assert!(cache.measurements.spilled());
     }
 
     #[test]
@@ -959,7 +967,7 @@ mod tests {
             cache.store(input, LayoutOutput::new(Size::ZERO, Size::ZERO));
         }
         assert_eq!(cache.measurements.len(), MEASURE_CACHE_SLOTS);
-        assert!(cache.measurements.spilled());
+        assert!(!cache.measurements.spilled());
 
         let replacement = inputs[MEASURE_CACHE_SLOTS];
         let target = constraint_shape_hash(replacement);
@@ -977,33 +985,35 @@ mod tests {
         assert!(core::mem::size_of::<PackedLayoutInput>() <= 28);
         assert!(core::mem::size_of::<PackedLayoutOutput>() <= 24);
         assert!(core::mem::size_of::<MeasurementSlot>() <= 52);
-        assert!(core::mem::size_of::<Cache>() <= 280);
+        assert!(core::mem::size_of::<Cache>() <= 488);
     }
 
     #[test]
-    fn clear_releases_an_uncommon_spill() {
+    fn clear_preserves_allocation_free_inline_storage() {
         let mut cache = Cache::new();
         let shapes = [
             AvailableSpace::MinContent,
             AvailableSpace::MaxContent,
             AvailableSpace::Definite(1.0),
         ];
-        'shapes: for width in shapes {
+        for width in shapes {
             for height in shapes {
                 cache.store(
                     measurement(Size::NONE, Size::new(width, height)),
                     LayoutOutput::new(Size::ZERO, Size::ZERO),
                 );
-                if cache.measurements.len() > INLINE_MEASURE_CACHE_SLOTS {
-                    break 'shapes;
+                if cache.measurements.len() == INLINE_MEASURE_CACHE_SLOTS {
+                    break;
                 }
             }
         }
-        assert!(cache.measurements.spilled());
+        assert_eq!(cache.measurements.len(), INLINE_MEASURE_CACHE_SLOTS);
+        assert!(!cache.measurements.spilled());
 
         cache.clear();
 
         assert!(cache.is_empty());
         assert!(!cache.measurements.spilled());
+        assert_eq!(cache.measurements.capacity(), INLINE_MEASURE_CACHE_SLOTS);
     }
 }

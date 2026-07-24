@@ -585,8 +585,8 @@ the painting — layout's job is to never be the frame's bottleneck.
   nested containers go super-linear (the classic exponential blowup). The
   protocol bakes the fix in: `compute_cached_layout` around every
   generated-box dispatch, per-node slots (`cache::Cache`, embeddable, with
-  four common measurement slots inline and an uncommon spill capped at
-  `MEASURE_CACHE_SLOTS = 8`, plus one layout slot). Shape-aware replacement is
+  all `MEASURE_CACHE_SLOTS = 8` bounded measurement slots inline and therefore
+  allocation-free, plus one layout slot). Shape-aware replacement is
   implemented; probe-trace validation and tuning remain L4 work. The key is
   the **complete
   `LayoutInput`** — `goal` distinguishes side-effect-free measurements

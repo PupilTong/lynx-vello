@@ -169,6 +169,6 @@ mod tests {
     #[test]
     fn layout_slot_fits_the_split_state_memory_budget() {
         let size = core::mem::size_of::<LayoutSlot>();
-        assert!(size <= 440, "LayoutSlot grew to {size} bytes");
+        assert!(size <= 648, "LayoutSlot grew to {size} bytes");
     }
 }
