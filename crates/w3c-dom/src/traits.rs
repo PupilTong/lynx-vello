@@ -294,6 +294,7 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
             );
             self.styling_data().slot_guard.begin_write()
         };
+        self.set_layout_style_pointer(std::ptr::null_mut());
         unsafe {
             *self.stylo_data.get() = None;
         }
@@ -321,11 +322,17 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
     fn mutate_data(&self) -> Option<ElementDataMut<'_>> {
         #[cfg(debug_assertions)]
         let _access = self.styling_data().slot_guard.begin_read();
-        unsafe {
+        #[expect(unsafe_code, reason = "Stylo owns the ElementData access contract")]
+        let data = unsafe {
             (*self.stylo_data.get())
                 .as_ref()
                 .map(ElementDataWrapper::borrow_mut)
+        }?;
+        if !self.in_flush() {
+            self.mark_layout_style_stale();
+            self.set_layout_styles_ready(false);
         }
+        Some(data)
     }
 
     fn skip_item_display_fixup(&self) -> bool {

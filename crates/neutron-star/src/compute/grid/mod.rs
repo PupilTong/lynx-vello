@@ -35,7 +35,7 @@ use crate::geometry::{Edges, Line, Point, Size};
 use crate::style::containment::size_containment;
 use crate::style::{Contain, CoreStyle, Overflow};
 use crate::tree::{
-    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
+    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis,
     SizingMode,
 };
 
@@ -89,11 +89,15 @@ impl<N> PendingLayoutItem<N> for PendingItem<N> {
     }
 }
 
-fn classify_item<N>(node: N, document_index: usize) -> Option<PendingItem<N>>
+fn classify_item<T>(
+    tree: &T,
+    node: T::NodeId,
+    document_index: usize,
+) -> Option<PendingItem<T::NodeId>>
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
-    let style = node.style();
+    let style = tree.style(node);
     if style.display().is_none() {
         return None;
     }
@@ -121,16 +125,17 @@ where
     })
 }
 
-fn resolve_grid_item<N>(
-    key: ItemKey<N>,
+fn resolve_grid_item<T>(
+    tree: &T,
+    key: ItemKey<T::NodeId>,
     area: GridArea,
     percentage_basis: Size<Option<f32>>,
     defaults: ItemDefaults,
-) -> GridItem<N>
+) -> GridItem<T::NodeId>
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
-    let style = key.node.style();
+    let style = tree.style(key.node);
     let raw_size = style.size();
     let raw_min_size = style.min_size();
     let geometry = resolve_item_geometry(&style, percentage_basis);
@@ -189,16 +194,17 @@ where
     }
 }
 
-fn expand_explicit_tracks<N>(
-    node: N,
+fn expand_explicit_tracks<T>(
+    tree: &T,
+    node: T::NodeId,
     repeat_max_basis: Size<Option<f32>>,
     repeat_min_basis: Size<Option<f32>>,
     gap: Size<f32>,
 ) -> (ExpandedTemplate, ExpandedTemplate)
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
-    let style = node.style();
+    let style = tree.style(node);
     let columns = expand_template(
         style.grid_template_columns(),
         repeat_max_basis.width,
@@ -215,12 +221,14 @@ where
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn run_track_sizing<N>(
+fn run_track_sizing<T>(
+    tree: &T,
+    state: &mut T::State,
     columns: &mut TrackSet,
     rows: &mut TrackSet,
     column_specs: &[tracks::AxisTrackSpec],
     row_specs: &[tracks::AxisTrackSpec],
-    items: &mut [GridItem<N>],
+    items: &mut [GridItem<T::NodeId>],
     inner_basis: Size<Option<f32>>,
     available: Size<AvailableSpace>,
     gap: Size<f32>,
@@ -228,10 +236,10 @@ fn run_track_sizing<N>(
     align_content: AlignFlags,
     scratch: &mut IntrinsicSizingScratch,
 ) where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     for item in items.iter_mut() {
-        refresh_item_basis(item, Size::NONE);
+        refresh_item_basis(tree, item, Size::NONE);
         item.clear_contribution_cache(Axis::Horizontal);
         item.clear_contribution_cache(Axis::Vertical);
     }
@@ -261,6 +269,8 @@ fn run_track_sizing<N>(
     };
     initialize_tracks(columns, column_specs, inner_basis.width, gap.width);
     size_tracks(
+        tree,
+        state,
         Axis::Horizontal,
         columns,
         Some(initial_column_cross_tracks),
@@ -292,6 +302,8 @@ fn run_track_sizing<N>(
                 (affects_intrinsic_column && item.preferred_behaves_auto_or_depends.width).then(
                     || {
                         probe_raw_min_content(
+                            tree,
+                            state,
                             item,
                             Axis::Horizontal,
                             Some(initial_column_cross_tracks),
@@ -303,12 +315,14 @@ fn run_track_sizing<N>(
     }
     for item in items.iter_mut() {
         let width = columns.area_size(item.area.column.start, item.area.column.end);
-        refresh_item_basis(item, Size::new(Some(width), None));
+        refresh_item_basis(tree, item, Size::new(Some(width), None));
         item.clear_contribution_cache(Axis::Vertical);
     }
     let mut row_basis = inner_basis;
     row_basis.width = row_basis.width.or(Some(columns.used_size()));
     size_tracks(
+        tree,
+        state,
         Axis::Vertical,
         rows,
         Some(CrossAxisTracks::resolved(columns)),
@@ -332,6 +346,8 @@ fn run_track_sizing<N>(
             };
             item.clear_contribution_cache(Axis::Horizontal);
             let after = probe_raw_min_content(
+                tree,
+                state,
                 item,
                 Axis::Horizontal,
                 Some(CrossAxisTracks::resolved(rows)),
@@ -345,13 +361,15 @@ fn run_track_sizing<N>(
         for item in items.iter_mut() {
             let width = columns.area_size(item.area.column.start, item.area.column.end);
             let height = rows.area_size(item.area.row.start, item.area.row.end);
-            refresh_item_basis(item, Size::new(Some(width), Some(height)));
+            refresh_item_basis(tree, item, Size::new(Some(width), Some(height)));
         }
         for item in items.iter_mut() {
             item.clear_contribution_cache(Axis::Horizontal);
         }
         initialize_tracks(columns, column_specs, inner_basis.width, gap.width);
         size_tracks(
+            tree,
+            state,
             Axis::Horizontal,
             columns,
             Some(CrossAxisTracks::resolved(rows)),
@@ -369,13 +387,15 @@ fn run_track_sizing<N>(
         for item in items.iter_mut() {
             let width = columns.area_size(item.area.column.start, item.area.column.end);
             let height = rows.area_size(item.area.row.start, item.area.row.end);
-            refresh_item_basis(item, Size::new(Some(width), Some(height)));
+            refresh_item_basis(tree, item, Size::new(Some(width), Some(height)));
             item.clear_contribution_cache(Axis::Vertical);
         }
         initialize_tracks(rows, row_specs, inner_basis.height, gap.height);
         let mut final_row_basis = inner_basis;
         final_row_basis.width = final_row_basis.width.or(Some(columns.used_size()));
         size_tracks(
+            tree,
+            state,
             Axis::Vertical,
             rows,
             Some(CrossAxisTracks::resolved(columns)),
@@ -426,11 +446,14 @@ struct PendingBaselineItem<N> {
     overflow: Point<Overflow>,
 }
 
-fn refresh_item_basis<N>(item: &mut GridItem<N>, percentage_basis: Size<Option<f32>>)
-where
-    N: LayoutNode,
+fn refresh_item_basis<T>(
+    tree: &T,
+    item: &mut GridItem<T::NodeId>,
+    percentage_basis: Size<Option<f32>>,
+) where
+    T: LayoutTree,
 {
-    let style = item.key.node.style();
+    let style = tree.style(item.key.node);
     item.geometry = resolve_item_geometry(&style, percentage_basis);
     item.inset = resolve_insets(style.inset(), percentage_basis);
 }
@@ -459,8 +482,10 @@ fn physical_area<N>(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn layout_in_flow_items<N>(
-    items: &mut [GridItem<N>],
+fn layout_in_flow_items<T>(
+    tree: &T,
+    state: &mut T::State,
+    items: &mut [GridItem<T::NodeId>],
     columns: &TrackSet,
     rows: &TrackSet,
     inner_size: Size<f32>,
@@ -470,7 +495,7 @@ fn layout_in_flow_items<N>(
     rtl: bool,
 ) -> (Size<f32>, Point<Option<f32>>)
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     let baseline_item_count = items
         .iter()
@@ -488,18 +513,23 @@ where
     for item in items {
         let (area_offset, area_size) = physical_area(item, columns, rows, inner_size, rtl);
         refresh_item_basis(
+            tree,
             item,
             Size::new(Some(area_size.width), Some(area_size.height)),
         );
         item.clear_contribution_cache(Axis::Horizontal);
         item.clear_contribution_cache(Axis::Vertical);
         resolve_item_intrinsic_dimensions(
+            tree,
+            state,
             item,
             Axis::Horizontal,
             Some(CrossAxisTracks::resolved(rows)),
             Size::new(Some(area_size.width), Some(area_size.height)),
         );
         resolve_item_intrinsic_dimensions(
+            tree,
+            state,
             item,
             Axis::Vertical,
             Some(CrossAxisTracks::resolved(columns)),
@@ -572,7 +602,7 @@ where
                 LayoutInput::measure(known, parent_size, available, requested)
             }
         };
-        let output = item.key.node.compute_layout(input);
+        let output = tree.compute_layout(state, item.key.node, input);
 
         let mut margin = item.margin;
         for axis in Axis::ALL {
@@ -655,7 +685,7 @@ where
                 item.overflow,
             );
             if goal == LayoutGoal::Commit {
-                item.key.node.set_unrounded_layout(layout);
+                tree.layout_mut(state, item.key.node).set_unrounded(layout);
             }
             continue;
         }
@@ -759,7 +789,7 @@ where
             item.overflow,
         );
         if goal == LayoutGoal::Commit {
-            item.node.set_unrounded_layout(item.layout);
+            tree.layout_mut(state, item.node).set_unrounded(item.layout);
         }
     }
     (content_size, Point::new(None, first_baseline))
@@ -854,13 +884,15 @@ fn absolute_axis_area(
     (physical_start, size)
 }
 
-fn absolute_static_offset<N>(
-    item: &GridItem<N>,
+fn absolute_static_offset<T>(
+    tree: &T,
+    state: &mut T::State,
+    item: &GridItem<T::NodeId>,
     containing_size: Size<f32>,
     rtl: bool,
 ) -> Point<f32>
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     let basis = Size::new(Some(containing_size.width), Some(containing_size.height));
     let axis_available = |dimension: IntrinsicTag, available: f32| match dimension {
@@ -878,12 +910,16 @@ where
             containing_size.height,
         ),
     );
-    let output = item.key.node.compute_layout(LayoutInput::measure(
-        item.preferred_size,
-        basis,
-        intrinsic_available,
-        RequestedAxis::Both,
-    ));
+    let output = tree.compute_layout(
+        state,
+        item.key.node,
+        LayoutInput::measure(
+            item.preferred_size,
+            basis,
+            intrinsic_available,
+            RequestedAxis::Both,
+        ),
+    );
     let item_floor = box_inset_size(item.padding, item.border);
     let used_size = Size::new(
         clamp_axis(
@@ -936,8 +972,10 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn layout_absolute_items<N>(
-    items: &[PendingItem<N>],
+fn layout_absolute_items<T>(
+    tree: &T,
+    state: &mut T::State,
+    items: &[PendingItem<T::NodeId>],
     columns: &TrackSet,
     rows: &TrackSet,
     explicit_columns: usize,
@@ -950,7 +988,7 @@ fn layout_absolute_items<N>(
     defaults: ItemDefaults,
 ) -> Size<f32>
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     let mut content_size = outer_size;
     let padding_box_origin = Point::new(border.left, border.top);
@@ -964,19 +1002,20 @@ where
     for pending in items {
         let key = pending.key();
         let inset_auto = {
-            let style = key.node.style();
+            let style = tree.style(key.node);
             style.inset().map(Inset::is_auto)
         };
         let needs_static_measurement =
             (inset_auto.left && inset_auto.right) || (inset_auto.top && inset_auto.bottom);
         let content_static_offset = if needs_static_measurement {
             let item = resolve_grid_item(
+                tree,
                 pending.key(),
                 GridArea::default(),
                 Size::new(Some(inner_size.width), Some(inner_size.height)),
                 defaults,
             );
-            absolute_static_offset(&item, inner_size, rtl)
+            absolute_static_offset(tree, state, &item, inner_size, rtl)
         } else {
             Point::ZERO
         };
@@ -1006,7 +1045,8 @@ where
                     padding.left + content_static_offset.x - x,
                     padding.top + content_static_offset.y - y,
                 );
-                let mut layout = compute_absolute_layout(key.node, containing_size, static_offset);
+                let mut layout =
+                    compute_absolute_layout(tree, state, key.node, containing_size, static_offset);
                 layout.location.x += origin.x;
                 layout.location.y += origin.y;
                 layout.order = key.layout_order;
@@ -1015,15 +1055,16 @@ where
                     layout.location,
                     layout.size,
                     layout.content_size,
-                    key.node.style().overflow(),
+                    tree.style(key.node).overflow(),
                 );
-                key.node.set_unrounded_layout(layout);
+                tree.layout_mut(state, key.node).set_unrounded(layout);
             }
             PositionProperty::Fixed => {
-                key.node.set_static_position(Point::new(
-                    content_origin.x + content_static_offset.x,
-                    content_origin.y + content_static_offset.y,
-                ));
+                tree.layout_mut(state, key.node)
+                    .set_static_position(Point::new(
+                        content_origin.x + content_static_offset.x,
+                        content_origin.y + content_static_offset.y,
+                    ));
             }
             PositionProperty::Static | PositionProperty::Relative | PositionProperty::Sticky => {}
         }
@@ -1032,11 +1073,16 @@ where
 }
 
 #[allow(clippy::too_many_lines)]
-pub fn compute_grid_layout<N>(node: N, input: LayoutInput) -> LayoutOutput
+pub fn compute_grid_layout<T>(
+    tree: &T,
+    state: &mut T::State,
+    node: T::NodeId,
+    input: LayoutInput,
+) -> LayoutOutput
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
-    let style = node.style();
+    let style = tree.style(node);
     let size_containment = size_containment(&style);
     let layout_contained = style.containment().contains(Contain::LAYOUT);
     let gap_value = style.gap();
@@ -1124,17 +1170,22 @@ where
         repeat_max_basis.height.or(repeat_min_basis.height),
     );
     let repeat_count_gap = resolve_gap(gap_value, repeat_count_basis);
-    let (explicit_columns, explicit_rows) =
-        expand_explicit_tracks(node, repeat_max_basis, repeat_min_basis, repeat_count_gap);
+    let (explicit_columns, explicit_rows) = expand_explicit_tracks(
+        tree,
+        node,
+        repeat_max_basis,
+        repeat_min_basis,
+        repeat_count_gap,
+    );
 
     let commits_layout = input.goal == LayoutGoal::Commit;
-    let children = node.children();
+    let children = tree.children(node);
     let (lower, upper) = children.size_hint();
     let mut in_flow = Vec::with_capacity(upper.unwrap_or(lower));
     let mut absolute = commits_layout.then(Vec::new);
     let mut hidden = commits_layout.then(Vec::new);
     for (document_index, child) in children.enumerate() {
-        let Some(child_style) = classify_item(child, document_index) else {
+        let Some(child_style) = classify_item(tree, child, document_index) else {
             if let Some(hidden) = &mut hidden {
                 hidden.push((document_index, child));
             }
@@ -1169,7 +1220,7 @@ where
     let needs_auto_rows = placement.row_range.start < 0
         || placement.row_range.end > i32::try_from(explicit_rows.tracks.len()).unwrap_or(i32::MAX);
     let (auto_columns, auto_rows) = {
-        let container = node.style();
+        let container = tree.style(node);
         let auto_columns = if needs_auto_columns {
             container
                 .grid_auto_columns()
@@ -1209,13 +1260,15 @@ where
     let mut items = in_flow
         .into_iter()
         .zip(placement.areas)
-        .map(|(item, area)| resolve_grid_item(item.key(), area, Size::NONE, item_defaults))
+        .map(|(item, area)| resolve_grid_item(tree, item.key(), area, Size::NONE, item_defaults))
         .collect::<Vec<_>>();
 
     let mut columns = TrackSet::default();
     let mut rows = TrackSet::default();
     let mut intrinsic_scratch = IntrinsicSizingScratch::default();
     run_track_sizing(
+        tree,
+        state,
         &mut columns,
         &mut rows,
         &column_specs,
@@ -1251,6 +1304,8 @@ where
         || final_gap != initial_gap;
     if needs_definite_rerun {
         run_track_sizing(
+            tree,
+            state,
             &mut columns,
             &mut rows,
             &column_specs,
@@ -1275,6 +1330,8 @@ where
         metrics.border.top + metrics.padding.top,
     );
     let (mut content_size, baselines) = layout_in_flow_items(
+        tree,
+        state,
         &mut items,
         &columns,
         &rows,
@@ -1286,12 +1343,15 @@ where
     );
     if commits_layout {
         for (document_index, child) in hidden.expect("commit keeps hidden grid items") {
-            hide_subtree(child);
-            child.set_unrounded_layout(Layout::with_order(
-                u32::try_from(document_index).unwrap_or(u32::MAX),
-            ));
+            hide_subtree(tree, state, child);
+            tree.layout_mut(state, child)
+                .set_unrounded(Layout::with_order(
+                    u32::try_from(document_index).unwrap_or(u32::MAX),
+                ));
         }
         let absolute_content_size = layout_absolute_items(
+            tree,
+            state,
             &absolute.expect("commit keeps out-of-flow grid items"),
             &columns,
             &rows,

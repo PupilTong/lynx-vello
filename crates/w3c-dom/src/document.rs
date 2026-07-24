@@ -1,14 +1,13 @@
-//! The [`Document`] — one fixed-address set of NodeId-keyed arenas containing
-//! the DOM tree and its phase-specific state.
+//! The [`Document`] — one NodeId-aligned arena set: a fixed-address DOM/style
+//! tree beside independently mutable layout/text state.
 
 use std::fmt;
-#[cfg(debug_assertions)]
 use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
 
-use atomic_refcell::AtomicRefCell;
 use neutron_star::geometry::Size;
-use neutron_star::tree::LayoutInput;
+use neutron_star::text::{TextContext, TextLayoutStore};
+use neutron_star::tree::{LayoutInput, LayoutSlot};
 use rustc_hash::FxHashSet;
 use slab::Slab;
 use stylo::LocalName;
@@ -19,7 +18,6 @@ use stylo::stylesheets::UrlExtraData;
 
 use crate::damage::StyleDamage;
 use crate::engine::StyleEngine;
-use crate::layout::LayoutData;
 use crate::node::{Node, StylingData};
 
 pub type NodeId = usize;
@@ -50,39 +48,31 @@ pub(crate) fn slab_get_for_live_node<V>(slab: &Slab<V>, id: NodeId) -> &V {
 /// The fixed-address, document-owned arena set. `nodes` selects each `NodeId`;
 /// the other slabs insert/remove in exactly the same order and assert that
 /// their own free lists return that same key.
-pub(crate) struct DocumentArenas<T> {
+pub(crate) struct TreeArenas<T> {
     pub(crate) nodes: Slab<Node<T>>,
     pub(crate) payloads: Slab<PayloadSlot<T>>,
     pub(crate) styling: Slab<StylingData>,
-    pub(crate) layout: Slab<AtomicRefCell<LayoutData>>,
 }
 
-impl<T> DocumentArenas<T> {
+impl<T> TreeArenas<T> {
     fn new() -> Self {
         Self {
             nodes: Slab::with_capacity(INITIAL_NODE_CAPACITY),
             payloads: Slab::with_capacity(INITIAL_NODE_CAPACITY),
             styling: Slab::with_capacity(INITIAL_NODE_CAPACITY),
-            layout: Slab::with_capacity(INITIAL_NODE_CAPACITY),
         }
     }
 
     #[expect(
         clippy::inline_always,
-        reason = "keep the four synchronized slab inserts in the node-allocation hot path"
+        reason = "keep the synchronized slab inserts in the node-allocation hot path"
     )]
     #[inline(always)]
     fn insert_side_state(&mut self, id: NodeId, payload: PayloadSlot<T>) {
         assert_eq!(self.payloads.vacant_key(), id);
         assert_eq!(self.styling.vacant_key(), id);
-        assert_eq!(self.layout.vacant_key(), id);
         assert_eq!(self.payloads.insert(payload), id);
         assert_eq!(self.styling.insert(StylingData::default()), id);
-        assert_eq!(
-            self.layout
-                .insert(AtomicRefCell::new(LayoutData::default())),
-            id
-        );
     }
 
     fn remove_side_state(&mut self, id: NodeId) -> PayloadSlot<T> {
@@ -93,10 +83,66 @@ impl<T> DocumentArenas<T> {
         self.styling
             .try_remove(id)
             .expect("removed node must have styling-arena state");
-        self.layout
+        payload
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct NodeLayoutState {
+    pub(crate) slot: LayoutSlot,
+    pub(crate) text: Option<Box<TextLayoutStore>>,
+}
+
+pub(crate) struct DocumentLayoutState {
+    pub(crate) nodes: Slab<NodeLayoutState>,
+    pub(crate) text_context: Option<Box<TextContext>>,
+}
+
+impl DocumentLayoutState {
+    fn new() -> Self {
+        Self {
+            nodes: Slab::with_capacity(INITIAL_NODE_CAPACITY),
+            text_context: None,
+        }
+    }
+
+    fn insert(&mut self, id: NodeId) {
+        assert_eq!(self.nodes.vacant_key(), id);
+        assert_eq!(self.nodes.insert(NodeLayoutState::default()), id);
+    }
+
+    fn remove(&mut self, id: NodeId) {
+        self.nodes
             .try_remove(id)
             .expect("removed node must have layout-arena state");
-        payload
+    }
+
+    pub(crate) fn text_parts(&mut self, id: NodeId) -> (&mut TextContext, &mut TextLayoutStore) {
+        let Self {
+            nodes,
+            text_context,
+        } = self;
+        let context = text_context
+            .get_or_insert_with(|| Box::new(TextContext::new()))
+            .as_mut();
+        let artifacts = nodes
+            .get_mut(id)
+            .expect("live node must have layout-arena state")
+            .text
+            .get_or_insert_with(|| Box::new(TextLayoutStore::default()))
+            .as_mut();
+        (context, artifacts)
+    }
+
+    pub(crate) fn clear_layout_cache(&mut self, id: NodeId) {
+        let node = self
+            .nodes
+            .get_mut(id)
+            .expect("live node must have layout-arena state");
+        node.slot.clear_layout_cache();
+        if let Some(artifacts) = node.text.as_deref_mut() {
+            artifacts.invalidate();
+        }
     }
 }
 
@@ -115,7 +161,8 @@ pub(crate) struct PendingRelayout {
 /// zero.
 pub struct Document<T> {
     style_engine: StyleEngine,
-    arenas: Box<DocumentArenas<T>>,
+    tree: Box<TreeArenas<T>>,
+    layout: DocumentLayoutState,
     /// Pre-mutation state exists only while invalidation is pending. Keeping
     /// the payloads here leaves one byte-sized lifecycle flag, rather than a
     /// nullable snapshot pointer, in every live node's styling slot.
@@ -132,7 +179,7 @@ impl<T: fmt::Debug> fmt::Debug for Document<T> {
         f.debug_struct("Document")
             .field("root_element", &self.root_element().map(Node::id))
             .field("style_engine", &self.style_engine)
-            .field("nodes", &self.arenas.nodes)
+            .field("nodes", &self.tree.nodes)
             .finish_non_exhaustive()
     }
 }
@@ -148,19 +195,20 @@ impl<T> Document<T> {
         let style_engine = StyleEngine::with_url_data(device, url_data);
         let lock = style_engine.lock();
         let url_data = style_engine.url_data();
-        let mut arenas = Box::new(DocumentArenas::new());
-        let owner = std::ptr::from_mut::<DocumentArenas<T>>(arenas.as_mut());
-        let root = arenas
-            .nodes
-            .insert(Node::new_document(owner, lock, url_data));
+        let mut tree = Box::new(TreeArenas::new());
+        let owner = std::ptr::from_mut::<TreeArenas<T>>(tree.as_mut());
+        let root = tree.nodes.insert(Node::new_document(owner, lock, url_data));
         assert_eq!(
             root, DOCUMENT_NODE_ID,
             "the DOM document node must occupy slab slot zero"
         );
-        arenas.insert_side_state(root, PayloadSlot::Document);
+        tree.insert_side_state(root, PayloadSlot::Document);
+        let mut layout = DocumentLayoutState::new();
+        layout.insert(root);
         Self {
             style_engine,
-            arenas,
+            tree,
+            layout,
             pending_snapshots: SnapshotMap::new(),
             relayout_roots: Vec::new(),
             relayout_root_ids: FxHashSet::default(),
@@ -190,10 +238,6 @@ impl<T> Document<T> {
         &self.relayout_roots
     }
 
-    pub(crate) fn is_relayout_root_parked(&self, id: NodeId) -> bool {
-        self.relayout_root_ids.contains(&id)
-    }
-
     pub(crate) fn clear_relayout_roots(&mut self) {
         self.relayout_roots.clear();
         self.relayout_root_ids.clear();
@@ -219,33 +263,47 @@ impl<T> Document<T> {
     }
 
     pub(crate) fn tree(&self) -> &Slab<Node<T>> {
-        &self.arenas.nodes
+        &self.tree.nodes
     }
 
     pub(crate) fn tree_mut(&mut self) -> &mut Slab<Node<T>> {
-        &mut self.arenas.nodes
+        &mut self.tree.nodes
     }
 
     pub(crate) fn live_node_mut(&mut self, id: NodeId) -> &mut Node<T> {
-        self.arenas
+        self.tree
             .nodes
             .get_mut(id)
             .expect("stale NodeId passed to a Document mutation method")
     }
 
+    pub(crate) fn layout_state(&self) -> &DocumentLayoutState {
+        &self.layout
+    }
+
+    pub(crate) fn layout_state_mut(&mut self) -> &mut DocumentLayoutState {
+        &mut self.layout
+    }
+
+    pub(crate) fn layout_parts(
+        &mut self,
+    ) -> (&TreeArenas<T>, &mut DocumentLayoutState, &FxHashSet<NodeId>) {
+        (&self.tree, &mut self.layout, &self.relayout_root_ids)
+    }
+
     pub(crate) fn layout_data_mut(
         &mut self,
-    ) -> impl Iterator<Item = (NodeId, &mut AtomicRefCell<LayoutData>)> {
-        self.arenas.layout.iter_mut()
+    ) -> impl Iterator<Item = (NodeId, &mut NodeLayoutState)> {
+        self.layout.nodes.iter_mut()
     }
 
     pub(crate) fn snapshot_storage(&mut self) -> (&Slab<Node<T>>, &mut SnapshotMap) {
-        (&self.arenas.nodes, &mut self.pending_snapshots)
+        (&self.tree.nodes, &mut self.pending_snapshots)
     }
 
     #[must_use]
     pub fn root_node(&self) -> &Node<T> {
-        self.arenas
+        self.tree
             .nodes
             .get(DOCUMENT_NODE_ID)
             .expect("the document node is never removed")
@@ -256,7 +314,6 @@ impl<T> Document<T> {
         self.root_node().children().find(|node| node.is_element())
     }
 
-    #[cfg(debug_assertions)]
     pub(crate) fn begin_flush_phase(&self) -> FlushPhaseToken {
         use std::sync::atomic::Ordering;
 
@@ -283,14 +340,14 @@ impl<T> Document<T> {
     fn allocate_node(
         &mut self,
         payload: T,
-        make: impl FnOnce(*mut DocumentArenas<T>, NodeId) -> Node<T>,
+        make: impl FnOnce(*mut TreeArenas<T>, NodeId) -> Node<T>,
     ) -> NodeId {
-        let owner = std::ptr::from_mut::<DocumentArenas<T>>(self.arenas.as_mut());
-        let entry = self.arenas.nodes.vacant_entry();
+        let owner = std::ptr::from_mut::<TreeArenas<T>>(self.tree.as_mut());
+        let entry = self.tree.nodes.vacant_entry();
         let id = entry.key();
         entry.insert(make(owner, id));
-        self.arenas
-            .insert_side_state(id, PayloadSlot::Node(payload));
+        self.tree.insert_side_state(id, PayloadSlot::Node(payload));
+        self.layout.insert(id);
         id
     }
 
@@ -320,12 +377,12 @@ impl<T> Document<T> {
 
     #[must_use]
     pub fn get(&self, id: NodeId) -> Option<&Node<T>> {
-        self.arenas.nodes.get(id)
+        self.tree.nodes.get(id)
     }
 
     #[must_use]
     pub fn contains_node(&self, id: NodeId) -> bool {
-        self.arenas.nodes.contains(id)
+        self.tree.nodes.contains(id)
     }
 
     #[must_use]
@@ -431,7 +488,7 @@ impl<T> Document<T> {
 
         let removed_index = {
             let parent_node = self
-                .arenas
+                .tree
                 .nodes
                 .get_mut(parent)
                 .expect("internal tree link must resolve to a live node");
@@ -460,7 +517,7 @@ impl<T> Document<T> {
         let mut stack = vec![id];
         while let Some(current) = stack.pop() {
             let node = self
-                .arenas
+                .tree
                 .nodes
                 .get(current)
                 .expect("subtree links always resolve while removing");
@@ -475,18 +532,19 @@ impl<T> Document<T> {
             );
             {
                 let node = self
-                    .arenas
+                    .tree
                     .nodes
                     .try_remove(current)
                     .expect("subtree links always resolve while removing");
                 stack.extend_from_slice(&node.children);
             }
-            match self.arenas.remove_side_state(current) {
+            self.layout.remove(current);
+            match self.tree.remove_side_state(current) {
                 PayloadSlot::Node(payload) => removed.push(payload),
                 PayloadSlot::Document => unreachable!("the document node cannot be removed"),
             }
         }
-        let nodes = &self.arenas.nodes;
+        let nodes = &self.tree.nodes;
         self.relayout_roots
             .retain(|pending| nodes.contains(pending.node_id));
         self.relayout_root_ids
@@ -498,7 +556,7 @@ impl<T> Document<T> {
         #[cfg(debug_assertions)]
         for opaque in self.pending_snapshots.keys() {
             let node = self
-                .arenas
+                .tree
                 .nodes
                 .get(opaque.0)
                 .expect("queued snapshot must belong to a live node");
@@ -518,8 +576,26 @@ impl<T> Document<T> {
         mut snapshots: SnapshotMap,
         sink: &mut dyn FnMut(NodeId, StyleDamage),
     ) {
+        self.retain_unhandled_snapshots(&mut snapshots);
+        debug_assert!(
+            self.pending_snapshots.is_empty(),
+            "Document mutation cannot enqueue snapshots during an exclusive style flush"
+        );
+        self.pending_snapshots = snapshots;
+
+        // Every pointer affected by the completed traversal was published by
+        // its preorder callback before the driver returned. If traversal
+        // unwound, this point is never reached and layout access keeps
+        // panicking instead of dereferencing a stale pointer.
+        self.root_node().set_layout_styles_ready(true);
+
+        let mut stack = vec![root];
+        self.harvest_style_damage(&mut stack, sink);
+    }
+
+    fn retain_unhandled_snapshots(&self, snapshots: &mut SnapshotMap) {
         snapshots.retain(|opaque, _| {
-            let node = self.arenas.nodes.get(opaque.0);
+            let node = self.tree.nodes.get(opaque.0);
             debug_assert!(node.is_some(), "queued snapshot outlived its node");
             let Some(node) = node else {
                 return false;
@@ -537,32 +613,29 @@ impl<T> Document<T> {
                 true
             }
         });
-        debug_assert!(
-            self.pending_snapshots.is_empty(),
-            "Document mutation cannot enqueue snapshots during an exclusive style flush"
-        );
-        self.pending_snapshots = snapshots;
+    }
 
-        let mut stack = vec![root];
+    fn harvest_style_damage(
+        &mut self,
+        stack: &mut Vec<NodeId>,
+        sink: &mut dyn FnMut(NodeId, StyleDamage),
+    ) {
         while let Some(current) = stack.pop() {
             let harvested = {
-                let arenas = &mut *self.arenas;
-                let Some(node) = arenas.nodes.get_mut(current) else {
+                let tree = &mut *self.tree;
+                let Some(node) = tree.nodes.get_mut(current) else {
                     continue;
                 };
-                let styling = arenas
+                let styling = tree
                     .styling
                     .get_mut(current)
                     .expect("live node must have styling-arena state");
-                let mut harvested = None;
-                if let Some(wrapper) = node.stylo_data_mut() {
+                let harvested = node.stylo_data_mut().and_then(|wrapper| {
                     let mut data = wrapper.borrow_mut();
                     let damage = data.damage;
                     data.clear_restyle_state();
-                    if !damage.is_empty() {
-                        harvested = Some(StyleDamage::from(damage));
-                    }
-                }
+                    (!damage.is_empty()).then(|| StyleDamage::from(damage))
+                });
                 let descend = styling.dirty_descendants.load(Ordering::Relaxed);
                 styling.dirty_descendants.store(false, Ordering::Relaxed);
                 if descend {
@@ -573,12 +646,17 @@ impl<T> Document<T> {
             let Some(damage) = harvested else {
                 continue;
             };
-
             if damage.needs_relayout() {
-                if let Some(element) = self.get(current) {
-                    for child in element.children().filter(|child| child.is_text_node()) {
-                        child.layout_data().borrow_mut().clear_measurement_cache();
-                        child.invalidate_text_artifacts();
+                if let Some(element) = self.tree.nodes.get(current) {
+                    for &child_id in &element.children {
+                        if self
+                            .tree
+                            .nodes
+                            .get(child_id)
+                            .is_some_and(Node::is_text_node)
+                        {
+                            self.layout.clear_layout_cache(child_id);
+                        }
                     }
                 }
                 self.invalidate_layout(current);
@@ -594,13 +672,12 @@ impl<T> Document<T> {
     }
 }
 
-/// Debug-only RAII marker for the style-flush phase.
-#[cfg(debug_assertions)]
+/// RAII marker distinguishing Stylo's own mutation phase from safe external
+/// `TElement::mutate_data` access.
 pub(crate) struct FlushPhaseToken {
     flag: NonNull<std::sync::atomic::AtomicBool>,
 }
 
-#[cfg(debug_assertions)]
 impl Drop for FlushPhaseToken {
     fn drop(&mut self) {
         use std::sync::atomic::Ordering;
@@ -675,31 +752,31 @@ pub(crate) mod tests {
         let mut document: Document<u32> = Document::new(device());
         let id = document.create_element("view", 7);
 
-        assert!(document.arenas.nodes.contains(id));
+        assert!(document.tree.nodes.contains(id));
         assert!(matches!(
-            document.arenas.payloads.get(id),
+            document.tree.payloads.get(id),
             Some(PayloadSlot::Node(7))
         ));
-        assert!(document.arenas.styling.get(id).is_some());
-        assert!(document.arenas.layout.get(id).is_some());
+        assert!(document.tree.styling.get(id).is_some());
+        assert!(document.layout.nodes.get(id).is_some());
 
         assert_eq!(document.remove_subtree(id), vec![7]);
-        assert!(!document.arenas.nodes.contains(id));
-        assert!(document.arenas.payloads.get(id).is_none());
-        assert!(document.arenas.styling.get(id).is_none());
-        assert!(document.arenas.layout.get(id).is_none());
-        assert_eq!(document.arenas.nodes.vacant_key(), id);
-        assert_eq!(document.arenas.payloads.vacant_key(), id);
-        assert_eq!(document.arenas.styling.vacant_key(), id);
-        assert_eq!(document.arenas.layout.vacant_key(), id);
+        assert!(!document.tree.nodes.contains(id));
+        assert!(document.tree.payloads.get(id).is_none());
+        assert!(document.tree.styling.get(id).is_none());
+        assert!(document.layout.nodes.get(id).is_none());
+        assert_eq!(document.tree.nodes.vacant_key(), id);
+        assert_eq!(document.tree.payloads.vacant_key(), id);
+        assert_eq!(document.tree.styling.vacant_key(), id);
+        assert_eq!(document.layout.nodes.vacant_key(), id);
 
         let reused = document.create_text_node("replacement", 11);
         assert_eq!(reused, id, "the primary slab should reuse its vacant ID");
         assert_eq!(document.get(reused).unwrap().payload(), &11);
-        assert!(document.get(reused).unwrap().layout_cache_is_empty());
+        assert_eq!(document.layout_cache_is_empty(reused), Some(true));
         assert_eq!(
             document
-                .arenas
+                .tree
                 .styling
                 .get(reused)
                 .unwrap()
@@ -723,7 +800,7 @@ pub(crate) mod tests {
     fn root_element_panics_on_a_dangling_document_child() {
         let mut document: Document<()> = Document::new(device());
         document
-            .arenas
+            .tree
             .nodes
             .get_mut(DOCUMENT_NODE_ID)
             .expect("the document node is present")
@@ -742,18 +819,18 @@ pub(crate) mod tests {
         document.append_child(a, b);
 
         document.record_relayout_root(b, LayoutInput::default());
-        assert!(document.is_relayout_root_parked(b));
+        assert!(document.relayout_root_ids.contains(&b));
 
         assert_eq!(document.remove_subtree(b).len(), 1);
         assert!(
-            !document.is_relayout_root_parked(b),
+            !document.relayout_root_ids.contains(&b),
             "the removed id must not remain in the parked set",
         );
 
         let reused = document.create_element("view", ());
         assert_eq!(reused, b, "the freed slab slot is reused");
         assert!(
-            !document.is_relayout_root_parked(reused),
+            !document.relayout_root_ids.contains(&reused),
             "a reused slab id must not inherit stale parked state",
         );
     }

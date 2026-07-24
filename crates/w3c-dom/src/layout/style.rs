@@ -1,12 +1,10 @@
-//! Guarded computed-style views lending Stylo [`ComputedValues`] directly to
-//! neutron-star.
-
-use std::ops::Deref;
+//! Post-flush computed-style views lending Stylo [`ComputedValues`] directly
+//! to neutron-star without cloning its `Arc` or re-entering Stylo's runtime
+//! borrow checker.
 
 use neutron_star::style::{
     Contain, CoreStyle, Display, PositionProperty, TextContainerStyle, TextRunStyle,
 };
-use stylo::data::ElementDataRef;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::motion::OffsetPath;
 use stylo::values::specified::box_::{DisplayInside, DisplayOutside, WillChangeBits};
@@ -120,33 +118,11 @@ pub(crate) fn resolve_position<T>(node: &Node<T>, style: &ComputedValues) -> Pos
     }
 }
 
-/// Keeps a node's Stylo element-data read guard alive while layout borrows its
-/// primary computed values. No [`Arc`](stylo::servo_arc::Arc) is cloned.
-enum NodeStyleGuard<'dom> {
-    Computed(ElementDataRef<'dom>),
-    Anonymous,
-}
-
-impl Deref for NodeStyleGuard<'_> {
-    type Target = ComputedValues;
-
-    fn deref(&self) -> &Self::Target {
-        match self {
-            Self::Computed(data) => data
-                .styles
-                .primary
-                .as_ref()
-                .expect("computed-style borrow was validated at construction"),
-            Self::Anonymous => &super::ANONYMOUS_STYLE,
-        }
-    }
-}
-
 /// The element style view neutron-star reads: a node handle for the
-/// parent-dependent position lowering plus its guarded computed values.
+/// parent-dependent position lowering plus its post-flush computed values.
 pub struct StyleView<'dom, T> {
     node: &'dom Node<T>,
-    style: NodeStyleGuard<'dom>,
+    style: &'dom ComputedValues,
 }
 
 impl<T> std::fmt::Debug for StyleView<'_, T> {
@@ -162,19 +138,19 @@ impl<'dom, T> StyleView<'dom, T> {
     pub(crate) fn try_of(node: &'dom Node<T>) -> Option<Self> {
         Some(Self {
             node,
-            style: NodeStyleGuard::Computed(node.borrow_computed_style()?),
+            style: node.layout_computed_style()?,
         })
     }
 
     pub(crate) fn of(node: &'dom Node<T>) -> Self {
         Self::try_of(node).unwrap_or(Self {
             node,
-            style: NodeStyleGuard::Anonymous,
+            style: &super::ANONYMOUS_STYLE,
         })
     }
 
     pub(crate) fn values(&self) -> &ComputedValues {
-        &self.style
+        self.style
     }
 }
 
@@ -188,10 +164,10 @@ impl<T> CoreStyle for StyleView<'_, T> {
     }
 }
 
-/// Text-only view: static anonymous-box geometry plus one guarded borrow of
-/// its parent's inherited paragraph/run values.
+/// Text-only view: static anonymous-box geometry plus its parent's post-flush
+/// inherited paragraph/run values.
 pub(crate) struct TextStyleView<'dom> {
-    text_style: NodeStyleGuard<'dom>,
+    text_style: &'dom ComputedValues,
 }
 
 impl std::fmt::Debug for TextStyleView<'_> {
@@ -206,13 +182,13 @@ impl<'dom> TextStyleView<'dom> {
         Self {
             text_style: node
                 .parent()
-                .and_then(Node::borrow_computed_style)
-                .map_or(NodeStyleGuard::Anonymous, NodeStyleGuard::Computed),
+                .and_then(Node::layout_computed_style)
+                .unwrap_or(&super::ANONYMOUS_STYLE),
         }
     }
 
     fn text_values(&self) -> &ComputedValues {
-        &self.text_style
+        self.text_style
     }
 }
 
@@ -242,9 +218,9 @@ mod tests {
     use super::{StyleView, TextStyleView};
 
     #[test]
-    fn guarded_style_views_stay_within_their_expected_footprint() {
+    fn post_flush_style_views_stay_within_their_expected_footprint() {
         let word = size_of::<usize>();
-        assert_eq!(size_of::<StyleView<'static, ()>>(), 4 * word);
-        assert_eq!(size_of::<TextStyleView<'static>>(), 3 * word);
+        assert_eq!(size_of::<StyleView<'static, ()>>(), 2 * word);
+        assert_eq!(size_of::<TextStyleView<'static>>(), word);
     }
 }

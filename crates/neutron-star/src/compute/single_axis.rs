@@ -3,7 +3,7 @@
 use super::util::Axis;
 use crate::geometry::{Edges, Size};
 use crate::tree::{
-    AvailableSpace, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis, SizingMode,
+    AvailableSpace, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis, SizingMode,
 };
 
 /// Physical main/cross mapping derived by each algorithm frontend.
@@ -64,8 +64,10 @@ pub(super) fn flow_to_physical(
 /// Builds and performs one child measurement without changing the algorithm's
 /// requested axis, sizing mode, or definiteness contract.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn measure_child<N: LayoutNode>(
-    node: N,
+pub(super) fn measure_child<T: LayoutTree>(
+    tree: &T,
+    state: &mut T::State,
+    node: T::NodeId,
     known_dimensions: Size<Option<f32>>,
     definite_dimensions: Size<bool>,
     parent_size: Size<Option<f32>>,
@@ -81,5 +83,5 @@ pub(super) fn measure_child<N: LayoutNode>(
     );
     input.definite_dimensions = definite_dimensions;
     input.sizing_mode = sizing_mode;
-    node.compute_layout(input)
+    tree.compute_layout(state, node, input)
 }

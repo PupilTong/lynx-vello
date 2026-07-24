@@ -602,7 +602,7 @@ fn display_none_is_zeroed_and_excluded_from_relative_ids() {
         s.display = Display::None;
     });
     let hidden_slots = tree.session_node(hidden);
-    let mut hidden_layout = hidden_slots.layout.borrow().clone();
+    let mut hidden_layout = snapshot_layout(&hidden_slots.layout.borrow());
     hidden_layout.size = Size::new(80.0, 50.0);
     *hidden_slots.layout.borrow_mut() = hidden_layout;
     let child = relative_leaf_with(&mut tree, 10.0, 10.0, 2, |s| {

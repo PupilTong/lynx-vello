@@ -16,7 +16,7 @@ pub mod prelude {
     pub use crate::geometry::{Edges, Line, Point, Size};
     pub use crate::style::{CoreStyle, TextContainerStyle, TextRunStyle};
     pub use crate::tree::{
-        AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
-        SizingMode,
+        AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutSlot, LayoutTree,
+        RequestedAxis, SizingMode,
     };
 }

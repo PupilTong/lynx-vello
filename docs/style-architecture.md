@@ -15,14 +15,16 @@ standards core.
 
 ## The w3c-dom core: one tree, Document-mediated mutation
 
-- **One tree, four aligned arenas.** `Document<T>` owns one fixed-address
-  arena set. Its primary `Slab<Node<T>>` selects every `NodeId`: slot zero is
-  the real `NodeData::Document`, and later slots are element/text nodes. Three
-  secondary `Slab`s store opaque payload, Stylo traversal/invalidation state,
-  and layout measurement/out-of-flow state under the same IDs. Every side
-  insertion asserts that it received the primary slab's key; removal clears
-  all four entries before an ID can be reused. Computed styles and durable
-  rounded/unrounded layouts remain on the primary nodes.
+- **One tree, four aligned arenas.** `Document<T>` owns a fixed-address boxed
+  `TreeArenas<T>` whose primary `Slab<Node<T>>` selects every `NodeId`: slot
+  zero is the real `NodeData::Document`, and later slots are element/text
+  nodes. Its payload and Stylo traversal/invalidation slabs share those IDs.
+  A separate inline `DocumentLayoutState` owns the fourth, layout/text-state
+  slab; nodes point only to the fixed tree arenas, so moving the document does
+  not invalidate a layout-state address. Every side insertion asserts that it
+  received the primary slab's key, and removal clears all four entries before
+  an ID can be reused. Computed styles remain in Stylo-owned node data;
+  durable rounded/unrounded layouts live in each state-owned `LayoutSlot`.
 - **Each document owns its style context.** `Document::new` constructs a
   private style engine containing the `Stylist`, device, stylesheet set,
   cascade pipeline, base URL, and `SharedRwLock`. Documents cannot share or

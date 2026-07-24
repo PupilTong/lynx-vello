@@ -15,7 +15,7 @@ use crate::geometry::{Edges, Line, Point, Size};
 use crate::style::containment::size_containment;
 use crate::style::{CoreStyle, RELATIVE_REFERENCE_NONE, RELATIVE_REFERENCE_PARENT};
 use crate::tree::{
-    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
+    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis,
     SizingMode,
 };
 
@@ -153,16 +153,17 @@ impl<N> RelativeItem<N> {
     }
 }
 
-fn resolve_item<N>(
-    key: ItemKey<N>,
+fn resolve_item<T>(
+    tree: &T,
+    key: ItemKey<T::NodeId>,
     size_percentage_basis: Size<Option<f32>>,
     edge_inline_basis: Option<f32>,
     lookup: &IdLookup,
-) -> RelativeItem<N>
+) -> RelativeItem<T::NodeId>
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
-    let style = key.node.style();
+    let style = tree.style(key.node);
     let geometry =
         resolve_item_geometry_with_bases(&style, size_percentage_basis, edge_inline_basis);
     RelativeItem {
@@ -197,13 +198,13 @@ struct IdLookup {
 }
 
 impl IdLookup {
-    fn new<N>(items: &[OrderedItem<N>]) -> Self
+    fn new<T>(tree: &T, items: &[OrderedItem<T::NodeId>]) -> Self
     where
-        N: LayoutNode,
+        T: LayoutTree,
     {
         let mut entries = Vec::new();
         for (index, item) in items.iter().enumerate() {
-            let relative_id = item.node.style().relative_id();
+            let relative_id = tree.style(item.node).relative_id();
             if reference_is_item(relative_id) {
                 if entries.is_empty() {
                     entries.reserve(items.len());
@@ -275,10 +276,7 @@ impl Dependencies {
 }
 
 #[inline]
-fn has_axis_dependencies<N>(item: &RelativeItem<N>, axis: Axis) -> bool
-where
-    N: LayoutNode,
-{
+fn has_axis_dependencies<N>(item: &RelativeItem<N>, axis: Axis) -> bool {
     let references = [
         axis.start(item.align),
         axis.end(item.align),
@@ -290,10 +288,7 @@ where
         .any(|reference| reference.item_index_u32().is_some())
 }
 
-fn add_axis_dependencies<N>(item: &RelativeItem<N>, axis: Axis, dependencies: &mut Dependencies)
-where
-    N: LayoutNode,
-{
+fn add_axis_dependencies<N>(item: &RelativeItem<N>, axis: Axis, dependencies: &mut Dependencies) {
     let align_start = axis.start(item.align);
     let align_end = axis.end(item.align);
     let after = axis.end(item.adjacent);
@@ -305,10 +300,7 @@ where
     }
 }
 
-fn dependency_order<N>(items: &[RelativeItem<N>], scope: DependencyScope) -> Vec<usize>
-where
-    N: LayoutNode,
-{
+fn dependency_order<N>(items: &[RelativeItem<N>], scope: DependencyScope) -> Vec<usize> {
     let count = items.len();
     let has_dependencies = items.iter().any(|item| match scope {
         DependencyScope::Horizontal => has_axis_dependencies(item, Axis::Horizontal),
@@ -422,10 +414,7 @@ fn reference_position<N>(
     parent_size: Size<Option<f32>>,
     items: &[RelativeItem<N>],
     allow_item_references: bool,
-) -> Option<f32>
-where
-    N: LayoutNode,
-{
+) -> Option<f32> {
     if reference.is_parent() {
         return axis
             .size(parent_size)
@@ -450,10 +439,7 @@ fn axis_constraints<N>(
     parent_size: Size<Option<f32>>,
     items: &[RelativeItem<N>],
     allow_item_references: bool,
-) -> Line<Option<f32>>
-where
-    N: LayoutNode,
-{
+) -> Line<Option<f32>> {
     let align_start = axis.start(item.align);
     let align_end = axis.end(item.align);
     let after = axis.end(item.adjacent);
@@ -494,10 +480,7 @@ fn all_constraints<N>(
     parent_size: Size<Option<f32>>,
     items: &[RelativeItem<N>],
     allow_item_references: bool,
-) -> Size<Line<Option<f32>>>
-where
-    N: LayoutNode,
-{
+) -> Size<Line<Option<f32>>> {
     Size::new(
         axis_constraints(
             item,
@@ -565,35 +548,39 @@ fn fit_content_available(
     }
 }
 
-fn intrinsic_probe<N>(
-    item: &RelativeItem<N>,
+fn intrinsic_probe<T>(
+    tree: &T,
+    state: &mut T::State,
+    item: &RelativeItem<T::NodeId>,
     axis: Axis,
     intrinsic_space: AvailableSpace,
     parent_size: Size<Option<f32>>,
     available_content: Size<AvailableSpace>,
 ) -> f32
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     let mut available = available_content;
     axis.set_size(&mut available, intrinsic_space);
     let mut input = LayoutInput::measure(Size::NONE, parent_size, available, axis.requested());
     input.sizing_mode = SizingMode::IgnoreSizeStyles;
-    axis.size(item.key.node.compute_layout(input).size)
+    axis.size(tree.compute_layout(state, item.key.node, input).size)
 }
 
-fn prepare_intrinsic_sizes<N>(
-    item: &mut RelativeItem<N>,
+fn prepare_intrinsic_sizes<T>(
+    tree: &T,
+    state: &mut T::State,
+    item: &mut RelativeItem<T::NodeId>,
     parent_size: Size<Option<f32>>,
     available_content: Size<AvailableSpace>,
 ) where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     if item.intrinsic_sizes_ready {
         return;
     }
 
-    let style = item.key.node.style();
+    let style = tree.style(item.key.node);
     let full_raw_size = style.size();
     let full_raw_min = style.min_size();
     let full_raw_max = style.max_size();
@@ -609,6 +596,8 @@ fn prepare_intrinsic_sizes<N>(
 
         let min_content = needs_min.then(|| {
             intrinsic_probe(
+                tree,
+                state,
                 item,
                 axis,
                 AvailableSpace::MinContent,
@@ -618,6 +607,8 @@ fn prepare_intrinsic_sizes<N>(
         });
         let max_content = needs_max.then(|| {
             intrinsic_probe(
+                tree,
+                state,
                 item,
                 axis,
                 AvailableSpace::MaxContent,
@@ -691,20 +682,21 @@ fn clamped_item_axis<N>(item: &RelativeItem<N>, axis: Axis, value: f32, floor: S
     )
 }
 
-fn measurement_input<N>(
-    item: &RelativeItem<N>,
+fn measurement_input<T>(
+    tree: &T,
+    item: &RelativeItem<T::NodeId>,
     constraints: Size<Line<Option<f32>>>,
     parent_size: Size<Option<f32>>,
     available_content: Size<AvailableSpace>,
 ) -> LayoutInput
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     let mut known_dimensions = Size::NONE;
     let mut constraint_definite = Size::new(false, false);
     let mut available_space = available_content;
     let floor = item.box_floor();
-    let style = item.key.node.style();
+    let style = tree.style(item.key.node);
     let full_raw_size = style.size();
 
     for axis in Axis::ALL {
@@ -795,9 +787,13 @@ where
     input
 }
 
-fn measure_item<N>(item: &mut RelativeItem<N>, input: LayoutInput)
-where
-    N: LayoutNode,
+fn measure_item<T>(
+    tree: &T,
+    state: &mut T::State,
+    item: &mut RelativeItem<T::NodeId>,
+    input: LayoutInput,
+) where
+    T: LayoutTree,
 {
     if let Some(previous) = item.last_measure {
         if previous == input {
@@ -825,7 +821,7 @@ where
         );
         return;
     }
-    let mut output = item.key.node.compute_layout(input);
+    let mut output = tree.compute_layout(state, item.key.node, input);
     let floor = item.box_floor();
     if input.known_dimensions.width.is_none() {
         let clamped_width = clamp_axis(
@@ -844,7 +840,7 @@ where
                 refined.known_dimensions.height = None;
                 refined.available_space.height = input.available_space.height;
             }
-            output = item.key.node.compute_layout(refined);
+            output = tree.compute_layout(state, item.key.node, refined);
             output.size.width = clamped_width;
         }
     }
@@ -871,10 +867,7 @@ fn position_from_constraints<N>(
     axis: Axis,
     constraints: Line<Option<f32>>,
     bounds: Bounds,
-) -> Line<f32>
-where
-    N: LayoutNode,
-{
+) -> Line<f32> {
     let outer_size = item.outer_size(axis);
     match (constraints.start, constraints.end) {
         (Some(start), Some(end)) => Line::new(start, end.max(start)),
@@ -900,10 +893,7 @@ fn position_axis<N>(
     order: &[usize],
     axis: Axis,
     parent_size: Size<Option<f32>>,
-) -> Bounds
-where
-    N: LayoutNode,
-{
+) -> Bounds {
     let mut bounds = Bounds::new(axis.size(parent_size));
     for ordinal in 0..items.len() {
         let index = order.get(ordinal).copied().unwrap_or(ordinal);
@@ -915,30 +905,46 @@ where
     bounds
 }
 
-fn measure_all<N>(
-    items: &mut [RelativeItem<N>],
+fn measure_all<T>(
+    tree: &T,
+    state: &mut T::State,
+    items: &mut [RelativeItem<T::NodeId>],
     parent_size: Size<Option<f32>>,
     available_content: Size<AvailableSpace>,
     allow_item_references: bool,
 ) where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     for index in 0..items.len() {
-        prepare_intrinsic_sizes(&mut items[index], parent_size, available_content);
+        prepare_intrinsic_sizes(
+            tree,
+            state,
+            &mut items[index],
+            parent_size,
+            available_content,
+        );
         let constraints = all_constraints(&items[index], parent_size, items, allow_item_references);
-        let input = measurement_input(&items[index], constraints, parent_size, available_content);
-        measure_item(&mut items[index], input);
+        let input = measurement_input(
+            tree,
+            &items[index],
+            constraints,
+            parent_size,
+            available_content,
+        );
+        measure_item(tree, state, &mut items[index], input);
     }
 }
 
-fn one_pass_layout<N>(
-    items: &mut [RelativeItem<N>],
+fn one_pass_layout<T>(
+    tree: &T,
+    state: &mut T::State,
+    items: &mut [RelativeItem<T::NodeId>],
     order: &[usize],
     parent_size: Size<Option<f32>>,
     available_content: Size<AvailableSpace>,
 ) -> Size<Bounds>
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     let mut bounds = Size::new(
         Bounds::new(parent_size.width),
@@ -946,10 +952,22 @@ where
     );
     for ordinal in 0..items.len() {
         let index = order.get(ordinal).copied().unwrap_or(ordinal);
-        prepare_intrinsic_sizes(&mut items[index], parent_size, available_content);
+        prepare_intrinsic_sizes(
+            tree,
+            state,
+            &mut items[index],
+            parent_size,
+            available_content,
+        );
         let constraints = all_constraints(&items[index], parent_size, items, true);
-        let input = measurement_input(&items[index], constraints, parent_size, available_content);
-        measure_item(&mut items[index], input);
+        let input = measurement_input(
+            tree,
+            &items[index],
+            constraints,
+            parent_size,
+            available_content,
+        );
+        measure_item(tree, state, &mut items[index], input);
 
         for axis in Axis::ALL {
             let axis_constraints = axis.size(constraints);
@@ -965,13 +983,14 @@ where
     bounds
 }
 
-fn refresh_item_bases<N>(
-    items: &mut [RelativeItem<N>],
+fn refresh_item_bases<T>(
+    tree: &T,
+    items: &mut [RelativeItem<T::NodeId>],
     size_percentage_basis: Size<Option<f32>>,
     edge_inline_basis: Option<f32>,
     lookup: &IdLookup,
 ) where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     for item in items {
         let positions = item.positions;
@@ -980,8 +999,13 @@ fn refresh_item_bases<N>(
         let intrinsic_preferred_size = item.intrinsic_preferred_size;
         let intrinsic_sizes_ready = item.intrinsic_sizes_ready;
         let size_is_definite = item.size_is_definite;
-        let mut refreshed =
-            resolve_item(item.key, size_percentage_basis, edge_inline_basis, lookup);
+        let mut refreshed = resolve_item(
+            tree,
+            item.key,
+            size_percentage_basis,
+            edge_inline_basis,
+            lookup,
+        );
         let reuse_fixed_measurement = item.fixed_measurement_matches(&refreshed);
         refreshed.positions = positions;
         refreshed.output = output;
@@ -1018,8 +1042,10 @@ fn final_outer_axis(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn two_pass_layout<N>(
-    items: &mut [RelativeItem<N>],
+fn two_pass_layout<T>(
+    tree: &T,
+    state: &mut T::State,
+    items: &mut [RelativeItem<T::NodeId>],
     horizontal_order: &[usize],
     vertical_order: &[usize],
     initial_parent_size: Size<Option<f32>>,
@@ -1033,9 +1059,16 @@ fn two_pass_layout<N>(
     size_containment: Option<Size<Option<f32>>>,
 ) -> Size<f32>
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
-    measure_all(items, initial_parent_size, available_content, false);
+    measure_all(
+        tree,
+        state,
+        items,
+        initial_parent_size,
+        available_content,
+        false,
+    );
     let _ = position_axis(
         items,
         horizontal_order,
@@ -1044,7 +1077,14 @@ where
     );
     let _ = position_axis(items, vertical_order, Axis::Vertical, initial_parent_size);
 
-    measure_all(items, initial_parent_size, available_content, true);
+    measure_all(
+        tree,
+        state,
+        items,
+        initial_parent_size,
+        available_content,
+        true,
+    );
     let horizontal_bounds = position_axis(
         items,
         horizontal_order,
@@ -1070,14 +1110,27 @@ where
         resolved_parent_size.width = Some(content_width);
         available_content.width = AvailableSpace::Definite(content_width);
 
-        refresh_item_bases(items, resolved_parent_size, Some(content_width), lookup);
+        refresh_item_bases(
+            tree,
+            items,
+            resolved_parent_size,
+            Some(content_width),
+            lookup,
+        );
         let _ = position_axis(
             items,
             horizontal_order,
             Axis::Horizontal,
             resolved_parent_size,
         );
-        measure_all(items, resolved_parent_size, available_content, true);
+        measure_all(
+            tree,
+            state,
+            items,
+            resolved_parent_size,
+            available_content,
+            true,
+        );
         let _ = position_axis(
             items,
             horizontal_order,
@@ -1111,14 +1164,16 @@ where
     Size::new(outer_width, outer_height)
 }
 
-fn commit_in_flow<N>(
-    items: &mut [RelativeItem<N>],
+fn commit_in_flow<T>(
+    tree: &T,
+    state: &mut T::State,
+    items: &mut [RelativeItem<T::NodeId>],
     content_size: Size<f32>,
     content_origin: Point<f32>,
     container_size: Size<f32>,
 ) -> Size<f32>
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     let parent_size = content_size.map(Some);
     let available = content_size.map(AvailableSpace::Definite);
@@ -1128,7 +1183,7 @@ where
         let mut input = LayoutInput::commit(item.output.size.map(Some), parent_size, available);
         input.definite_dimensions = item.size_is_definite;
         input.sizing_mode = SizingMode::IgnoreSizeStyles;
-        let output = item.key.node.compute_layout(input);
+        let output = tree.compute_layout(state, item.key.node, input);
         item.output = output;
 
         let offset = if item.position == PositionProperty::Relative {
@@ -1150,7 +1205,7 @@ where
         layout.border = item.border;
         layout.padding = item.padding;
         layout.margin = item.margin;
-        item.key.node.set_unrounded_layout(layout);
+        tree.layout_mut(state, item.key.node).set_unrounded(layout);
 
         accumulate_scrollable_overflow(
             &mut scrollable_size,
@@ -1163,13 +1218,15 @@ where
     scrollable_size
 }
 
-fn commit_out_of_flow<N>(
-    items: &[OrderedItem<N>],
+fn commit_out_of_flow<T>(
+    tree: &T,
+    state: &mut T::State,
+    items: &[OrderedItem<T::NodeId>],
     container_size: Size<f32>,
     border: Edges<f32>,
 ) -> Size<f32>
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     let padding_box_size = Size::new(
         (container_size.width - border.horizontal_sum()).max(0.0),
@@ -1177,11 +1234,16 @@ where
     );
     let mut scrollable_size = container_size;
     for pending in items {
-        let style = pending.node.style();
+        let style = tree.style(pending.node);
         match style.position() {
             PositionProperty::Absolute => {
-                let mut layout =
-                    compute_absolute_layout(pending.node, padding_box_size, Point::ZERO);
+                let mut layout = compute_absolute_layout(
+                    tree,
+                    state,
+                    pending.node,
+                    padding_box_size,
+                    Point::ZERO,
+                );
                 layout.order = pending.layout_order;
                 layout.location.x += border.left;
                 layout.location.y += border.top;
@@ -1192,11 +1254,10 @@ where
                     layout.content_size,
                     style.overflow(),
                 );
-                pending.node.set_unrounded_layout(layout);
+                tree.layout_mut(state, pending.node).set_unrounded(layout);
             }
             PositionProperty::Fixed => {
-                pending
-                    .node
+                tree.layout_mut(state, pending.node)
                     .set_static_position(Point::new(border.left, border.top));
             }
             PositionProperty::Static | PositionProperty::Relative | PositionProperty::Sticky => {}
@@ -1206,11 +1267,16 @@ where
 }
 
 #[allow(clippy::too_many_lines)]
-pub fn compute_relative_layout<N>(node: N, input: LayoutInput) -> LayoutOutput
+pub fn compute_relative_layout<T>(
+    tree: &T,
+    state: &mut T::State,
+    node: T::NodeId,
+    input: LayoutInput,
+) -> LayoutOutput
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
-    let style = node.style();
+    let style = tree.style(node);
     let size_containment = size_containment(&style);
     let layout_once = style.relative_layout_once() == relative_layout_once::T::True;
     let ResolvedContainerBox {
@@ -1276,13 +1342,13 @@ where
     let edge_inline_basis = available_content.width.definite_value();
 
     let commits_layout = input.goal == LayoutGoal::Commit;
-    let children = node.children();
+    let children = tree.children(node);
     let (lower, upper) = children.size_hint();
     let mut generated = Vec::with_capacity(upper.unwrap_or(lower));
     let mut absolute_items = Vec::new();
     let mut hidden = Vec::new();
     for (document_index, child) in children.enumerate() {
-        let child_style = child.style();
+        let child_style = tree.style(child);
         if child_style.display().is_none() {
             if commits_layout {
                 hidden.push((document_index, child));
@@ -1313,15 +1379,30 @@ where
         generated.sort_unstable_by_key(|item| (item.css_order, item.document_index));
     }
 
-    let lookup = IdLookup::new(&generated);
+    let lookup = IdLookup::new(tree, &generated);
     let mut items = generated
         .into_iter()
-        .map(|item| resolve_item(item.key(), initial_parent_size, edge_inline_basis, &lookup))
+        .map(|item| {
+            resolve_item(
+                tree,
+                item.key(),
+                initial_parent_size,
+                edge_inline_basis,
+                &lookup,
+            )
+        })
         .collect::<Vec<_>>();
 
     let outer_size = if layout_once {
         let order = dependency_order(&items, DependencyScope::Combined);
-        let bounds = one_pass_layout(&mut items, &order, initial_parent_size, available_content);
+        let bounds = one_pass_layout(
+            tree,
+            state,
+            &mut items,
+            &order,
+            initial_parent_size,
+            available_content,
+        );
         Size::new(
             final_outer_axis(
                 initial_outer.width,
@@ -1346,6 +1427,8 @@ where
         let horizontal_order = dependency_order(&items, DependencyScope::Horizontal);
         let vertical_order = dependency_order(&items, DependencyScope::Vertical);
         two_pass_layout(
+            tree,
+            state,
             &mut items,
             &horizontal_order,
             &vertical_order,
@@ -1369,15 +1452,23 @@ where
     }
 
     let content_origin = Point::new(border.left + padding.left, border.top + padding.top);
-    let mut scrollable_size = commit_in_flow(&mut items, content_size, content_origin, outer_size);
+    let mut scrollable_size = commit_in_flow(
+        tree,
+        state,
+        &mut items,
+        content_size,
+        content_origin,
+        outer_size,
+    );
     for (document_index, child) in hidden {
-        super::hide_subtree(child);
-        child.set_unrounded_layout(Layout::with_order(
-            u32::try_from(document_index).unwrap_or(u32::MAX),
-        ));
+        super::hide_subtree(tree, state, child);
+        tree.layout_mut(state, child)
+            .set_unrounded(Layout::with_order(
+                u32::try_from(document_index).unwrap_or(u32::MAX),
+            ));
     }
     scrollable_size = scrollable_size.zip_map(
-        commit_out_of_flow(&absolute_items, outer_size, border),
+        commit_out_of_flow(tree, state, &absolute_items, outer_size, border),
         f32::max,
     );
 
@@ -1388,7 +1479,7 @@ where
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use core::cell::{Cell, RefCell};
+    use core::cell::Cell;
 
     use stylo::values::computed::{
         Contain, ContainIntrinsicSize, Display, Length, LengthPercentage, Size as StyleSize,
@@ -1478,7 +1569,6 @@ mod tests {
         child_measure_calls: Cell<usize>,
         child_commit_calls: Cell<usize>,
         committed_artifact: Cell<bool>,
-        child_layout: RefCell<Layout>,
     }
 
     impl TestState {
@@ -1490,91 +1580,76 @@ mod tests {
                 child_measure_calls: Cell::new(0),
                 child_commit_calls: Cell::new(0),
                 committed_artifact: Cell::new(false),
-                child_layout: RefCell::new(Layout::default()),
             }
         }
 
-        fn root(&self) -> TestRef<'_> {
-            TestRef {
-                state: self,
-                kind: TestKind::Root,
-            }
+        const fn root() -> TestKind {
+            TestKind::Root
         }
     }
 
-    #[derive(Clone, Copy)]
-    struct TestRef<'a> {
-        state: &'a TestState,
-        kind: TestKind,
-    }
+    impl LayoutTree for TestState {
+        type NodeId = TestKind;
+        type State = [crate::tree::LayoutSlot; 2];
+        type Style<'tree>
+            = &'tree TestStyle
+        where
+            Self: 'tree;
+        type ChildIter<'tree>
+            = core::option::IntoIter<Self::NodeId>
+        where
+            Self: 'tree;
 
-    impl core::fmt::Debug for TestRef<'_> {
-        fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            formatter.debug_tuple("TestRef").field(&self.kind).finish()
-        }
-    }
-
-    impl<'a> LayoutNode for TestRef<'a> {
-        type Style = &'a TestStyle;
-        type ChildIter = core::option::IntoIter<Self>;
-
-        fn children(self) -> Self::ChildIter {
-            self.state
-                .children_calls
-                .set(self.state.children_calls.get() + 1);
-            (self.kind == TestKind::Root)
-                .then_some(Self {
-                    state: self.state,
-                    kind: TestKind::Child,
-                })
+        fn children(&self, node: Self::NodeId) -> Self::ChildIter<'_> {
+            self.children_calls.set(self.children_calls.get() + 1);
+            (node == TestKind::Root)
+                .then_some(TestKind::Child)
                 .into_iter()
         }
 
-        fn style(self) -> Self::Style {
-            match self.kind {
-                TestKind::Root => &self.state.root_style,
-                TestKind::Child => &self.state.child_style,
+        fn style(&self, node: Self::NodeId) -> Self::Style<'_> {
+            match node {
+                TestKind::Root => &self.root_style,
+                TestKind::Child => &self.child_style,
             }
         }
 
-        fn compute_layout(self, input: LayoutInput) -> LayoutOutput {
-            assert_eq!(self.kind, TestKind::Child);
+        fn layout<'state>(
+            &self,
+            state: &'state Self::State,
+            node: Self::NodeId,
+        ) -> &'state crate::tree::LayoutSlot {
+            &state[node as usize]
+        }
+
+        fn layout_mut<'state>(
+            &self,
+            state: &'state mut Self::State,
+            node: Self::NodeId,
+        ) -> &'state mut crate::tree::LayoutSlot {
+            &mut state[node as usize]
+        }
+
+        fn compute_layout(
+            &self,
+            _state: &mut Self::State,
+            node: Self::NodeId,
+            input: LayoutInput,
+        ) -> LayoutOutput {
+            assert_eq!(node, TestKind::Child);
             match input.goal {
                 LayoutGoal::Measure(_) => self
-                    .state
                     .child_measure_calls
-                    .set(self.state.child_measure_calls.get() + 1),
+                    .set(self.child_measure_calls.get() + 1),
                 LayoutGoal::Commit => {
-                    self.state
-                        .child_commit_calls
-                        .set(self.state.child_commit_calls.get() + 1);
-                    self.state.committed_artifact.set(true);
+                    self.child_commit_calls
+                        .set(self.child_commit_calls.get() + 1);
+                    self.committed_artifact.set(true);
                 }
             }
             let size = input.known_dimensions.unwrap_or(Size::new(200.0, 100.0));
             LayoutOutput::new(size, size)
         }
-
-        fn set_unrounded_layout(self, layout: Layout) {
-            assert_eq!(self.kind, TestKind::Child);
-            *self.state.child_layout.borrow_mut() = layout;
-        }
-
-        fn with_unrounded_layout<R>(self, read: impl FnOnce(&Layout) -> R) -> R {
-            read(&self.state.child_layout.borrow())
-        }
-
-        fn set_rounded_layout(self, _layout: Layout) {}
-
-        fn set_static_position(self, _static_position: Point<f32>) {}
-
-        fn cached_layout(self, _input: LayoutInput) -> Option<LayoutOutput> {
-            None
-        }
-
-        fn store_cached_layout(self, _input: LayoutInput, _output: LayoutOutput) {}
-
-        fn clear_layout_cache(self) {}
     }
 
     fn measure_input(known_dimensions: Size<Option<f32>>) -> LayoutInput {
@@ -1588,10 +1663,13 @@ mod tests {
 
     #[test]
     fn content_independent_measure_skips_the_entire_child_tree() {
-        let state = TestState::new(TestStyle::auto(), TestStyle::fixed(20.0, 10.0));
+        let tree = TestState::new(TestStyle::auto(), TestStyle::fixed(20.0, 10.0));
+        let mut state = Default::default();
 
         let output = compute_relative_layout(
-            state.root(),
+            &tree,
+            &mut state,
+            TestState::root(),
             measure_input(Size::new(Some(120.0), Some(80.0))),
         );
 
@@ -1599,39 +1677,53 @@ mod tests {
             output,
             LayoutOutput::new(Size::new(120.0, 80.0), Size::new(120.0, 80.0))
         );
-        assert_eq!(state.children_calls.get(), 0);
-        assert_eq!(state.child_measure_calls.get(), 0);
-        assert_eq!(state.child_commit_calls.get(), 0);
+        assert_eq!(tree.children_calls.get(), 0);
+        assert_eq!(tree.child_measure_calls.get(), 0);
+        assert_eq!(tree.child_commit_calls.get(), 0);
     }
 
     #[test]
     fn size_contained_measure_skips_children_with_indefinite_outer_size() {
-        let state = TestState::new(
+        let tree = TestState::new(
             TestStyle::size_contained(Some(42.0), None),
             TestStyle::fixed(20.0, 10.0),
         );
+        let mut state = Default::default();
 
-        let output = compute_relative_layout(state.root(), measure_input(Size::NONE));
+        let output = compute_relative_layout(
+            &tree,
+            &mut state,
+            TestState::root(),
+            measure_input(Size::NONE),
+        );
 
         assert_eq!(
             output,
             LayoutOutput::new(Size::new(42.0, 0.0), Size::new(42.0, 0.0))
         );
-        assert_eq!(state.children_calls.get(), 0);
-        assert_eq!(state.child_measure_calls.get(), 0);
+        assert_eq!(tree.children_calls.get(), 0);
+        assert_eq!(tree.child_measure_calls.get(), 0);
     }
 
     #[test]
     fn fully_known_item_skips_measure_but_still_commits_its_artifact() {
-        let state = TestState::new(TestStyle::auto(), TestStyle::fixed(20.0, 10.0));
+        let tree = TestState::new(TestStyle::auto(), TestStyle::fixed(20.0, 10.0));
+        let mut state = Default::default();
 
-        let measured = compute_relative_layout(state.root(), measure_input(Size::NONE));
+        let measured = compute_relative_layout(
+            &tree,
+            &mut state,
+            TestState::root(),
+            measure_input(Size::NONE),
+        );
         assert_eq!(measured.size, Size::new(20.0, 10.0));
-        assert_eq!(state.child_measure_calls.get(), 0);
-        assert_eq!(state.child_commit_calls.get(), 0);
+        assert_eq!(tree.child_measure_calls.get(), 0);
+        assert_eq!(tree.child_commit_calls.get(), 0);
 
         let committed = compute_relative_layout(
-            state.root(),
+            &tree,
+            &mut state,
+            TestState::root(),
             LayoutInput::commit(
                 Size::new(Some(100.0), Some(50.0)),
                 Size::NONE,
@@ -1642,10 +1734,13 @@ mod tests {
             ),
         );
         assert_eq!(committed.size, Size::new(100.0, 50.0));
-        assert_eq!(state.child_measure_calls.get(), 0);
-        assert_eq!(state.child_commit_calls.get(), 1);
-        assert!(state.committed_artifact.get());
-        assert_eq!(state.child_layout.borrow().size, Size::new(20.0, 10.0));
+        assert_eq!(tree.child_measure_calls.get(), 0);
+        assert_eq!(tree.child_commit_calls.get(), 1);
+        assert!(tree.committed_artifact.get());
+        assert_eq!(
+            state[TestKind::Child as usize].unrounded().size,
+            Size::new(20.0, 10.0)
+        );
     }
 
     #[test]

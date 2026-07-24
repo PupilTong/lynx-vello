@@ -604,8 +604,6 @@ fn finalize_size(
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::float_cmp)]
 mod tests {
-    use core::cell::RefCell;
-
     use stylo::values::computed::{
         AspectRatio, Display, Length, LengthPercentage, MaxSize, NonNegativeLengthPercentage,
         Size as StyleSize,
@@ -615,9 +613,8 @@ mod tests {
     use stylo::values::generics::ratio::Ratio;
 
     use super::*;
-    use crate::cache::Cache;
     use crate::compute::compute_cached_layout;
-    use crate::tree::{Layout, LayoutNode};
+    use crate::tree::{LayoutSlot, LayoutTree};
 
     #[derive(Default)]
     struct EmptyStyle;
@@ -659,99 +656,87 @@ mod tests {
         }
     }
 
-    /// A one-leaf test host: the box cache and the retained shaping
-    /// artifacts live in host-owned interior-mutable slots reached through a
-    /// `Copy` node handle.
     #[derive(Default)]
     struct LeafHostState {
-        box_cache: RefCell<Cache>,
-        artifacts: RefCell<ArtifactCache>,
+        layout: LayoutSlot,
+        artifacts: ArtifactCache,
     }
 
     impl LeafHostState {
-        fn invalidate_content(&self) {
-            self.box_cache.borrow_mut().clear();
-            let mut artifacts = self.artifacts.borrow_mut();
-            artifacts.committed = None;
-            artifacts.probe = None;
+        fn invalidate_content(&mut self) {
+            self.layout.clear_layout_cache();
+            self.artifacts.committed = None;
+            self.artifacts.probe = None;
         }
     }
 
-    #[derive(Clone, Copy)]
-    struct LeafRef<'t> {
-        host: &'t LeafHostState,
-    }
+    #[derive(Debug, Default)]
+    struct LeafTree;
 
-    impl core::fmt::Debug for LeafRef<'_> {
-        fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            formatter.write_str("LeafRef")
-        }
-    }
+    impl LayoutTree for LeafTree {
+        type NodeId = ();
+        type State = LeafHostState;
+        type Style<'tree> = &'static EmptyStyle;
+        type ChildIter<'tree> = core::iter::Empty<()>;
 
-    impl LayoutNode for LeafRef<'_> {
-        type Style = &'static EmptyStyle;
-        type ChildIter = core::iter::Empty<Self>;
-
-        fn children(self) -> Self::ChildIter {
+        fn children(&self, _node: ()) -> Self::ChildIter<'_> {
             core::iter::empty()
         }
 
-        fn style(self) -> Self::Style {
+        fn style(&self, _node: ()) -> Self::Style<'_> {
             &EmptyStyle
         }
 
-        fn compute_layout(self, _input: LayoutInput) -> LayoutOutput {
+        fn layout<'state>(&self, state: &'state Self::State, _node: ()) -> &'state LayoutSlot {
+            &state.layout
+        }
+
+        fn layout_mut<'state>(
+            &self,
+            state: &'state mut Self::State,
+            _node: (),
+        ) -> &'state mut LayoutSlot {
+            &mut state.layout
+        }
+
+        fn compute_layout(
+            &self,
+            _state: &mut Self::State,
+            _node: (),
+            _input: LayoutInput,
+        ) -> LayoutOutput {
             unreachable!("leaf tests drive compute_cached_layout directly")
         }
 
-        fn set_unrounded_layout(self, _layout: Layout) {
-            unreachable!("leaf tests store no durable geometry")
-        }
-
-        fn with_unrounded_layout<R>(self, _read: impl FnOnce(&Layout) -> R) -> R {
-            unreachable!("leaf tests store no durable geometry")
-        }
-
-        fn set_rounded_layout(self, _layout: Layout) {
-            unreachable!("leaf tests store no durable geometry")
-        }
-
-        fn set_static_position(self, _static_position: Point<f32>) {
-            unreachable!("leaf tests store no durable geometry")
-        }
-
-        fn cached_layout(self, input: LayoutInput) -> Option<LayoutOutput> {
-            self.host.box_cache.borrow().get(input)
-        }
-
-        fn store_cached_layout(self, input: LayoutInput, output: LayoutOutput) {
-            self.host.box_cache.borrow_mut().store(input, output);
-        }
-
-        fn clear_layout_cache(self) {
-            self.host.invalidate_content();
+        fn clear_layout_cache(&self, state: &mut Self::State, _node: ()) {
+            state.invalidate_content();
         }
     }
 
     #[test]
     fn committed_artifact_survives_probes_and_box_cache_hits() {
-        let host = LeafHostState::default();
-        let node = LeafRef { host: &host };
+        let tree = LeafTree;
+        let mut state = LeafHostState::default();
         let commit_input = LayoutInput::commit(Size::NONE, Size::NONE, Size::MAX_CONTENT);
 
-        let committed = compute_cached_layout(node, commit_input, |node, input| {
-            let mut artifacts = node.host.artifacts.borrow_mut();
-            let mut measurer = CachingMeasurer {
-                artifacts: &mut artifacts,
-            };
-            compute_leaf_layout_with_measurement(input, &EmptyStyle, None, true, |input| {
-                measurer.measure(input)
-            })
-        });
-        assert_eq!(host.artifacts.borrow().shape_calls, 1);
+        let committed = compute_cached_layout(
+            &tree,
+            &mut state,
+            (),
+            commit_input,
+            |_tree, state, (), input| {
+                let mut measurer = CachingMeasurer {
+                    artifacts: &mut state.artifacts,
+                };
+                compute_leaf_layout_with_measurement(input, &EmptyStyle, None, true, |input| {
+                    measurer.measure(input)
+                })
+            },
+        );
+        assert_eq!(state.artifacts.shape_calls, 1);
         assert_eq!(
-            host.artifacts
-                .borrow()
+            state
+                .artifacts
                 .committed
                 .as_ref()
                 .expect("commit must retain a paint artifact")
@@ -766,19 +751,18 @@ mod tests {
             RequestedAxis::Both,
         );
         let probe = {
-            let mut artifacts = host.artifacts.borrow_mut();
             let mut probe_measurer = CachingMeasurer {
-                artifacts: &mut artifacts,
+                artifacts: &mut state.artifacts,
             };
             compute_leaf_layout_with_measurement(probe_input, &EmptyStyle, None, true, |input| {
                 probe_measurer.measure(input)
             })
         };
         assert_eq!(probe.size, committed.size);
-        assert_eq!(host.artifacts.borrow().shape_calls, 2);
+        assert_eq!(state.artifacts.shape_calls, 2);
         assert_eq!(
-            host.artifacts
-                .borrow()
+            state
+                .artifacts
                 .committed
                 .as_ref()
                 .expect("probe must not evict the committed artifact")
@@ -786,8 +770,8 @@ mod tests {
             [b'C']
         );
         assert_eq!(
-            host.artifacts
-                .borrow()
+            state
+                .artifacts
                 .probe
                 .as_ref()
                 .expect("probe artifact must use its own slot")
@@ -795,17 +779,21 @@ mod tests {
             [b'P']
         );
 
-        let cached = compute_cached_layout(node, commit_input, |_node, _input| {
-            panic!("committed cache hit must skip shaping")
-        });
+        let cached = compute_cached_layout(
+            &tree,
+            &mut state,
+            (),
+            commit_input,
+            |_tree, _state, (), _input| panic!("committed cache hit must skip shaping"),
+        );
         assert_eq!(cached, committed);
-        assert_eq!(host.artifacts.borrow().shape_calls, 2);
-        assert!(host.artifacts.borrow().committed.is_some());
+        assert_eq!(state.artifacts.shape_calls, 2);
+        assert!(state.artifacts.committed.is_some());
 
-        host.invalidate_content();
-        assert!(host.box_cache.borrow().is_empty());
-        assert!(host.artifacts.borrow().committed.is_none());
-        assert!(host.artifacts.borrow().probe.is_none());
+        state.invalidate_content();
+        assert!(state.layout.layout_cache_is_empty());
+        assert!(state.artifacts.committed.is_none());
+        assert!(state.artifacts.probe.is_none());
     }
 
     #[test]
@@ -1086,20 +1074,21 @@ mod tests {
 
     #[test]
     fn clear_layout_cache_capability_invalidates_box_and_retained_artifacts_together() {
-        let host = LeafHostState::default();
-        host.artifacts.borrow_mut().committed = Some(RetainedArtifact {
+        let tree = LeafTree;
+        let mut state = LeafHostState::default();
+        state.artifacts.committed = Some(RetainedArtifact {
             metrics: LeafMetrics::new(Size::new(1.0, 1.0)),
             paint_data: vec![b'C'],
         });
-        host.artifacts.borrow_mut().probe = Some(RetainedArtifact {
+        state.artifacts.probe = Some(RetainedArtifact {
             metrics: LeafMetrics::new(Size::new(1.0, 1.0)),
             paint_data: vec![b'P'],
         });
 
-        LayoutNode::clear_layout_cache(LeafRef { host: &host });
+        tree.clear_layout_cache(&mut state, ());
 
-        assert!(host.box_cache.borrow().is_empty());
-        assert!(host.artifacts.borrow().committed.is_none());
-        assert!(host.artifacts.borrow().probe.is_none());
+        assert!(state.layout.layout_cache_is_empty());
+        assert!(state.artifacts.committed.is_none());
+        assert!(state.artifacts.probe.is_none());
     }
 }

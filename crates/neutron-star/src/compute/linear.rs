@@ -26,7 +26,7 @@ use crate::geometry::{Edges, Point, Size};
 use crate::style::containment::size_containment;
 use crate::style::{Contain, CoreStyle};
 use crate::tree::{
-    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
+    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis,
     SizingMode,
 };
 
@@ -275,10 +275,7 @@ fn resolve_item<N>(
     align_items: ItemPlacement,
     axes: LinearAxes,
     nudges: bool,
-) -> LinearItem<N>
-where
-    N: LayoutNode,
-{
+) -> LinearItem<N> {
     let weight = style.linear_weight().0;
     debug_assert!(
         weight.is_finite() && weight >= 0.0,
@@ -327,14 +324,16 @@ fn refresh_item_edges<N>(
     }
 }
 
-fn intrinsic_measurement<N>(
-    item: &LinearItem<N>,
+fn intrinsic_measurement<T>(
+    tree: &T,
+    state: &mut T::State,
+    item: &LinearItem<T::NodeId>,
     percentage_basis: Size<Option<f32>>,
     requested: Size<bool>,
     target_available: AvailableSpace,
 ) -> LayoutOutput
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     let inset = box_inset_size(item.padding, item.border);
     let resolved_known = Size::new(
@@ -383,6 +382,8 @@ where
         (false, false) => unreachable!("an intrinsic probe must request at least one axis"),
     };
     measure_child(
+        tree,
+        state,
         item.key.node,
         known,
         definite,
@@ -394,14 +395,18 @@ where
 }
 
 #[allow(clippy::too_many_lines)]
-fn resolve_intrinsic_sizes<N>(item: &mut LinearItem<N>, percentage_basis: Size<Option<f32>>)
-where
-    N: LayoutNode,
+fn resolve_intrinsic_sizes<T>(
+    tree: &T,
+    state: &mut T::State,
+    item: &mut LinearItem<T::NodeId>,
+    percentage_basis: Size<Option<f32>>,
+) where
+    T: LayoutTree,
 {
     if !item.intrinsic.has_intrinsic() {
         return;
     }
-    let style = item.key.node.style();
+    let style = tree.style(item.key.node);
     let size = style.size();
     let min_size = style.min_size();
     let max_size = style.max_size();
@@ -414,12 +419,28 @@ where
         item.intrinsic.needs_max_content(Axis::Vertical),
     );
     let min_content = if need_min.width || need_min.height {
-        intrinsic_measurement(item, percentage_basis, need_min, AvailableSpace::MinContent).size
+        intrinsic_measurement(
+            tree,
+            state,
+            item,
+            percentage_basis,
+            need_min,
+            AvailableSpace::MinContent,
+        )
+        .size
     } else {
         Size::ZERO
     };
     let max_content = if need_max.width || need_max.height {
-        intrinsic_measurement(item, percentage_basis, need_max, AvailableSpace::MaxContent).size
+        intrinsic_measurement(
+            tree,
+            state,
+            item,
+            percentage_basis,
+            need_max,
+            AvailableSpace::MaxContent,
+        )
+        .size
     } else {
         Size::ZERO
     };
@@ -465,10 +486,7 @@ where
 }
 
 #[inline]
-fn ratio_cross_size<N>(item: &LinearItem<N>, axes: LinearAxes, forced_main: f32) -> Option<f32>
-where
-    N: LayoutNode,
-{
+fn ratio_cross_size<N>(item: &LinearItem<N>, axes: LinearAxes, forced_main: f32) -> Option<f32> {
     let ratio = item.aspect_ratio?;
     if !ratio.is_finite() || ratio <= 0.0 || !axes.cross.size(item.size_is_auto) {
         return None;
@@ -537,8 +555,10 @@ fn apply_border_box_ratio(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn measure_item<N>(
-    item: &mut LinearItem<N>,
+fn measure_item<T>(
+    tree: &T,
+    state: &mut T::State,
+    item: &mut LinearItem<T::NodeId>,
     axes: LinearAxes,
     percentage_basis: Size<Option<f32>>,
     constraint_inner_size: Size<Option<f32>>,
@@ -546,7 +566,7 @@ fn measure_item<N>(
     forced_main: Option<f32>,
     needs_probe_baseline: bool,
 ) where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     let inset = box_inset_size(item.padding, item.border);
     let main_floor = axes.main.size(inset);
@@ -647,6 +667,8 @@ fn measure_item<N>(
         ),
     );
     let output = measure_child(
+        tree,
+        state,
         item.key.node,
         known,
         known_definite,
@@ -675,18 +697,12 @@ fn measure_item<N>(
 }
 
 #[inline]
-fn outer_main<N>(item: &LinearItem<N>, axes: LinearAxes) -> f32
-where
-    N: LayoutNode,
-{
+fn outer_main<N>(item: &LinearItem<N>, axes: LinearAxes) -> f32 {
     item.main_size + axes.main.sum(item.margin)
 }
 
 #[inline]
-fn outer_cross<N>(item: &LinearItem<N>, axes: LinearAxes) -> f32
-where
-    N: LayoutNode,
-{
+fn outer_cross<N>(item: &LinearItem<N>, axes: LinearAxes) -> f32 {
     item.cross_size + axes.cross.sum(item.margin)
 }
 
@@ -695,9 +711,7 @@ fn distribute_weighted_items<N>(
     axes: LinearAxes,
     inner_main: f32,
     weight_sum_override: f32,
-) where
-    N: LayoutNode,
-{
+) {
     let mut total_weight = 0.0_f32;
     let mut fixed_outer = 0.0_f32;
     let mut weighted_margins = 0.0_f32;
@@ -794,8 +808,10 @@ fn distribute_weighted_items<N>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn size_items<N>(
-    items: &mut [LinearItem<N>],
+fn size_items<T>(
+    tree: &T,
+    state: &mut T::State,
+    items: &mut [LinearItem<T::NodeId>],
     axes: LinearAxes,
     percentage_basis: Size<Option<f32>>,
     constraint_inner_size: Size<Option<f32>>,
@@ -803,13 +819,15 @@ fn size_items<N>(
     weight_sum: f32,
     needs_probe_baseline: bool,
 ) where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     let constrained_main = axes.main.size(constraint_inner_size);
     for item in items.iter_mut() {
-        resolve_intrinsic_sizes(item, percentage_basis);
+        resolve_intrinsic_sizes(tree, state, item, percentage_basis);
         if !(constrained_main.is_some() && item.weight > 0.0) {
             measure_item(
+                tree,
+                state,
                 item,
                 axes,
                 percentage_basis,
@@ -826,6 +844,8 @@ fn size_items<N>(
         for item in items.iter_mut().filter(|item| item.weight > 0.0) {
             let resolved_main = item.main_size;
             measure_item(
+                tree,
+                state,
                 item,
                 axes,
                 percentage_basis,
@@ -839,10 +859,7 @@ fn size_items<N>(
 }
 
 #[inline]
-fn natural_content_size<N>(items: &[LinearItem<N>], axes: LinearAxes) -> (Size<f32>, f32)
-where
-    N: LayoutNode,
-{
+fn natural_content_size<N>(items: &[LinearItem<N>], axes: LinearAxes) -> (Size<f32>, f32) {
     let (main, cross) = items.iter().fold((0.0_f32, 0.0_f32), |acc, item| {
         (
             acc.0 + outer_main(item, axes),
@@ -914,9 +931,7 @@ fn position_items<N>(
     inner_size: Size<f32>,
     main_gravity: AlignFlags,
     used_main: f32,
-) where
-    N: LayoutNode,
-{
+) {
     let free_main = axes.main.size(inner_size) - used_main;
     let (leading, between) = main_axis_distribution(main_gravity, free_main, items.len());
 
@@ -1023,10 +1038,7 @@ fn item_location<N>(
     axes: LinearAxes,
     inner_size: Size<f32>,
     content_origin: Point<f32>,
-) -> Point<f32>
-where
-    N: LayoutNode,
-{
+) -> Point<f32> {
     let main = flow_to_physical(
         item.main_position,
         item.main_size,
@@ -1050,10 +1062,7 @@ fn container_baseline<N>(
     axes: LinearAxes,
     inner_size: Size<f32>,
     content_origin: Point<f32>,
-) -> Option<f32>
-where
-    N: LayoutNode,
-{
+) -> Option<f32> {
     if axes.main == Axis::Horizontal {
         items
             .iter()
@@ -1070,15 +1079,17 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn commit_in_flow<N>(
-    items: &mut [LinearItem<N>],
+fn commit_in_flow<T>(
+    tree: &T,
+    state: &mut T::State,
+    items: &mut [LinearItem<T::NodeId>],
     axes: LinearAxes,
     inner_size: Size<f32>,
     outer_size: Size<f32>,
     content_origin: Point<f32>,
 ) -> Size<f32>
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     let parent_size = inner_size.map(Some);
     let mut content_size = outer_size;
@@ -1093,7 +1104,7 @@ where
         input.definite_dimensions = axes
             .main
             .pack(item.main_size_is_definite, item.cross_size_is_definite);
-        let output = item.key.node.compute_layout(input);
+        let output = tree.compute_layout(state, item.key.node, input);
         item.baseline = output.first_baselines.y;
 
         let offset = item.relative_offset;
@@ -1108,7 +1119,7 @@ where
         layout.border = item.border;
         layout.padding = item.padding;
         layout.margin = item.margin;
-        item.key.node.set_unrounded_layout(layout);
+        tree.layout_mut(state, item.key.node).set_unrounded(layout);
 
         accumulate_scrollable_overflow(
             &mut content_size,
@@ -1122,10 +1133,12 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn commit_non_in_flow_children<N>(
-    hidden_items: &[LayoutItemKey<N>],
-    absolute_items: &[AbsoluteItem<N>],
-    in_flow_items: &[LinearItem<N>],
+fn commit_non_in_flow_children<T>(
+    tree: &T,
+    state: &mut T::State,
+    hidden_items: &[LayoutItemKey<T::NodeId>],
+    absolute_items: &[AbsoluteItem<T::NodeId>],
+    in_flow_items: &[LinearItem<T::NodeId>],
     axes: LinearAxes,
     outer_size: Size<f32>,
     border: Edges<f32>,
@@ -1133,7 +1146,7 @@ fn commit_non_in_flow_children<N>(
     mut content_size: Size<f32>,
 ) -> Size<f32>
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     let padding_box_size = Size::new(
         (outer_size.width - border.horizontal_sum()).max(0.0),
@@ -1144,9 +1157,9 @@ where
     let mut in_flow_before = 0usize;
 
     for key in hidden_items {
-        hide_subtree(key.node);
-        key.node
-            .set_unrounded_layout(Layout::with_order(key.layout_order));
+        hide_subtree(tree, state, key.node);
+        tree.layout_mut(state, key.node)
+            .set_unrounded(Layout::with_order(key.layout_order));
     }
     for item in absolute_items {
         let AbsoluteItem {
@@ -1172,6 +1185,8 @@ where
         match position {
             PositionProperty::Absolute => {
                 let mut layout = compute_absolute_layout_with_static_position(
+                    tree,
+                    state,
                     child,
                     padding_box_size,
                     |size, margin| {
@@ -1198,14 +1213,16 @@ where
                     layout.location,
                     layout.size,
                     layout.content_size,
-                    child.style().overflow(),
+                    tree.style(child).overflow(),
                 );
-                child.set_unrounded_layout(layout);
+                tree.layout_mut(state, child).set_unrounded(layout);
             }
             PositionProperty::Fixed => {
                 let measured = match (static_axes.width, static_axes.height) {
                     (false, false) => Layout::default(),
                     (width, height) => measure_absolute_layout(
+                        tree,
+                        state,
                         child,
                         padding_box_size,
                         match (width, height) {
@@ -1225,7 +1242,8 @@ where
                     gravity,
                     main_gravity,
                 );
-                child.set_static_position(static_position);
+                tree.layout_mut(state, child)
+                    .set_static_position(static_position);
             }
             _ => unreachable!(),
         }
@@ -1234,11 +1252,16 @@ where
 }
 
 #[allow(clippy::too_many_lines)]
-pub fn compute_linear_layout<N>(node: N, input: LayoutInput) -> LayoutOutput
+pub fn compute_linear_layout<T>(
+    tree: &T,
+    state: &mut T::State,
+    node: T::NodeId,
+    input: LayoutInput,
+) -> LayoutOutput
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
-    let style = node.style();
+    let style = tree.style(node);
     let size_containment = size_containment(&style);
     let layout_contained = style.containment().contains(Contain::LAYOUT);
     let axes = linear_axes(style.linear_direction(), style.direction());
@@ -1343,7 +1366,7 @@ where
     );
     let mut percentage_basis = definite_inner_size;
 
-    let children = node.children();
+    let children = tree.children(node);
     let (lower, upper) = children.size_hint();
     let mut items = Vec::with_capacity(upper.unwrap_or(lower));
     let mut absolute_items = Vec::new();
@@ -1352,7 +1375,7 @@ where
     let mut has_box_basis_dependency = false;
     let mut has_relative_basis_dependency = false;
     for (document_index, child) in children.enumerate() {
-        let child_style = child.style();
+        let child_style = tree.style(child);
         let position = child_style.position();
         let is_absolute = matches!(
             position,
@@ -1429,6 +1452,8 @@ where
     }
 
     size_items(
+        tree,
+        state,
         &mut items,
         axes,
         percentage_basis,
@@ -1472,7 +1497,7 @@ where
             if !item.flags.needs_box_refresh() {
                 continue;
             }
-            let item_style = item.key.node.style();
+            let item_style = tree.style(item.key.node);
             refresh_item_edges(item_style, item, percentage_basis);
         }
     }
@@ -1495,13 +1520,15 @@ where
             if !item.flags.needs_relative_offset_refresh() {
                 continue;
             }
-            let item_style = item.key.node.style();
+            let item_style = tree.style(item.key.node);
             let inset = resolve_insets(item_style.inset(), final_percentage_basis);
             item.relative_offset = relative_offset(inset, item_style.direction());
         }
     }
 
     let mut content_size = commit_in_flow(
+        tree,
+        state,
         &mut items,
         axes,
         final_inner_size,
@@ -1510,6 +1537,8 @@ where
     );
     if !absolute_items.is_empty() || !hidden_items.is_empty() {
         content_size = commit_non_in_flow_children(
+            tree,
+            state,
             &hidden_items,
             &absolute_items,
             &items,

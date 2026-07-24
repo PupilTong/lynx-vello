@@ -11,7 +11,7 @@ use crate::geometry::{Edges, Point, Size};
 /// Declares a source-backed style protocol and its zero-cost reference view.
 ///
 /// The full forwarding implementation matters: cascade-less hosts commonly
-/// return `&Style` from [`LayoutNode::style`](crate::tree::LayoutNode::style),
+/// return `&Style` from [`LayoutTree::style`](crate::tree::LayoutTree::style),
 /// and forwarding only the computed-value source would discard any accessor
 /// overrides on the underlying style.
 macro_rules! style_protocol {

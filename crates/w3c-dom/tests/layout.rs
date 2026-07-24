@@ -13,13 +13,47 @@ use w3c_dom::layout::Layout;
 
 const AHEM: &[u8] = include_bytes!("../../neutron-star/tests/fixtures/Ahem.ttf");
 
-/// [`Doc`] plus layout helpers (results are read straight off the nodes).
+/// [`Doc`] plus helpers for document-owned layout results.
 struct Harness {
     doc: Doc,
 }
 
+#[derive(Debug, PartialEq)]
+struct LayoutSnapshot {
+    order: u32,
+    geometry: [f32; 18],
+}
+
+impl LayoutSnapshot {
+    fn of(layout: &Layout) -> Self {
+        Self {
+            order: layout.order,
+            geometry: [
+                layout.location.x,
+                layout.location.y,
+                layout.size.width,
+                layout.size.height,
+                layout.content_size.width,
+                layout.content_size.height,
+                layout.border.left,
+                layout.border.right,
+                layout.border.top,
+                layout.border.bottom,
+                layout.padding.left,
+                layout.padding.right,
+                layout.padding.top,
+                layout.padding.bottom,
+                layout.margin.left,
+                layout.margin.right,
+                layout.margin.top,
+                layout.margin.bottom,
+            ],
+        }
+    }
+}
+
 fn dom_rect(dom: &w3c_dom::Document<()>, id: NodeId) -> (f32, f32, f32, f32) {
-    let layout = dom.get(id).expect("node id is live").rounded_layout();
+    let layout = dom.rounded_layout(id).expect("node id is live");
     (
         layout.location.x,
         layout.location.y,
@@ -45,17 +79,14 @@ impl Harness {
         self.doc.dom.layout();
     }
 
-    fn layout_of(&self, id: NodeId) -> Layout {
-        self.doc
-            .dom
-            .get(id)
-            .expect("node id is live")
-            .rounded_layout()
-            .clone()
+    fn layout_of(&self, id: NodeId) -> &Layout {
+        self.doc.dom.rounded_layout(id).expect("node id is live")
     }
 
-    fn layouts_of(&self, ids: &[NodeId]) -> Vec<Layout> {
-        ids.iter().map(|&id| self.layout_of(id)).collect()
+    fn layouts_of(&self, ids: &[NodeId]) -> Vec<LayoutSnapshot> {
+        ids.iter()
+            .map(|&id| LayoutSnapshot::of(self.layout_of(id)))
+            .collect()
     }
 
     fn rect(&self, id: NodeId) -> (f32, f32, f32, f32) {
@@ -71,9 +102,8 @@ impl Harness {
     fn node_cache_empty(&self, id: NodeId) -> bool {
         self.doc
             .dom
-            .get(id)
+            .layout_cache_is_empty(id)
             .expect("node id is live")
-            .layout_cache_is_empty()
     }
 }
 
@@ -655,8 +685,15 @@ fn rounding_snaps_to_the_device_pixel_grid() {
     h.layout();
 
     assert_eq!(h.layout_of(a).size.width, 20.5);
-    let a_node = h.doc.dom.get(a).unwrap();
-    assert_eq!(a_node.unrounded_layout().size.width, 20.25);
+    assert_eq!(
+        h.doc
+            .dom
+            .unrounded_layout(a)
+            .expect("node id is live")
+            .size
+            .width,
+        20.25
+    );
     assert_eq!(h.layout_of(b).location.x, 20.5);
 }
 
@@ -817,8 +854,8 @@ fn color_only_change_relayouts_nothing() {
 
     dom.layout();
     assert_eq!(dom_rect(&dom, text), (0.0, 0.0, 80.0, 16.0));
-    assert!(!dom.get(text).unwrap().layout_cache_is_empty());
-    assert!(!dom.get(root).unwrap().layout_cache_is_empty());
+    assert_eq!(dom.layout_cache_is_empty(text), Some(false));
+    assert_eq!(dom.layout_cache_is_empty(root), Some(false));
 
     dom.set_inline_style(root, "color: rgb(0, 0, 255)");
     let summary = dom.flush_styles();
@@ -832,11 +869,13 @@ fn color_only_change_relayouts_nothing() {
         "a color-only change produces no relayout damage",
     );
     assert!(
-        !dom.get(text).unwrap().layout_cache_is_empty(),
+        !dom.layout_cache_is_empty(text)
+            .expect("text node remains live"),
         "the Parley leaf keeps its measurement cache after the flush",
     );
     assert!(
-        !dom.get(root).unwrap().layout_cache_is_empty(),
+        !dom.layout_cache_is_empty(root)
+            .expect("root node remains live"),
         "the leaf's ancestor keeps its measurement cache after the flush",
     );
 
@@ -1213,14 +1252,15 @@ fn content_visibility_hidden_skips_descendant_layout_and_measurement() {
     dom.layout();
 
     let rect = |dom: &w3c_dom::Document<()>, id: NodeId| {
-        let l = dom.get(id).expect("live").rounded_layout();
+        let l = dom.rounded_layout(id).expect("live");
         (l.location.x, l.location.y, l.size.width, l.size.height)
     };
     assert_eq!(rect(&dom, container), (0.0, 0.0, 60.0, 80.0));
     assert_eq!(rect(&dom, text), (0.0, 0.0, 0.0, 0.0));
     assert_eq!(rect(&dom, fixed), (0.0, 0.0, 0.0, 0.0));
     assert!(
-        dom.get(text).unwrap().layout_cache_is_empty(),
+        dom.layout_cache_is_empty(text)
+            .expect("text node remains live"),
         "a skipped text leaf never populates its measurement cache",
     );
     dom.set_inline_style(container, "");
@@ -1231,7 +1271,8 @@ fn content_visibility_hidden_skips_descendant_layout_and_measurement() {
         "revealing the container lays its text back out",
     );
     assert!(
-        !dom.get(text).unwrap().layout_cache_is_empty(),
+        !dom.layout_cache_is_empty(text)
+            .expect("text node remains live"),
         "the revealed text leaf now has a Parley measurement",
     );
 }
@@ -1273,9 +1314,8 @@ fn contained_boundary_relayout_refreshes_scrollable_content_size() {
         harness
             .doc
             .dom
-            .get(id)
+            .rounded_layout(id)
             .expect("live")
-            .rounded_layout()
             .content_size
             .height
     };
@@ -1288,13 +1328,7 @@ fn contained_boundary_relayout_refreshes_scrollable_content_size() {
     assert_eq!(h.rect(scroll), (0.0, 0.0, 80.0, 80.0));
     assert_eq!(content_height(&h, scroll), 120.0);
     assert_eq!(
-        h.doc
-            .dom
-            .get(child)
-            .expect("live")
-            .unrounded_layout()
-            .size
-            .height,
+        h.doc.dom.unrounded_layout(child).expect("live").size.height,
         120.0,
         "the boundary interior actually re-laid-out",
     );
@@ -1314,22 +1348,15 @@ fn layout_contained_visible_boundary_excludes_descendant_scrollable_overflow() {
     h.layout();
 
     assert_eq!(
-        h.doc
-            .dom
-            .get(child)
-            .expect("live")
-            .unrounded_layout()
-            .size
-            .height,
+        h.doc.dom.unrounded_layout(child).expect("live").size.height,
         120.0,
         "the descendant is laid out (only its overflow is ink-only)",
     );
     assert_eq!(
         h.doc
             .dom
-            .get(scroll)
+            .rounded_layout(scroll)
             .expect("live")
-            .rounded_layout()
             .content_size
             .height,
         80.0,
@@ -1355,9 +1382,8 @@ fn boundary_scrollable_overflow_is_consistent_across_incremental_and_cold_layout
         harness
             .doc
             .dom
-            .get(id)
+            .rounded_layout(id)
             .expect("live")
-            .rounded_layout()
             .content_size
             .height
     };

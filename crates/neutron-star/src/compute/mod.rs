@@ -1,5 +1,4 @@
-//! Protocol machinery entry points — free generic functions over
-//! [`LayoutNode`] handles.
+//! Protocol machinery entry points over a statically split tree and state.
 mod flexbox;
 mod grid;
 mod leaf;
@@ -30,18 +29,23 @@ use crate::invalidate::is_relayout_boundary;
 use crate::style::CoreStyle;
 use crate::style::containment::contain_intrinsic_length;
 use crate::tree::{
-    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
+    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis,
 };
 
-pub fn compute_root_layout<N: LayoutNode>(root: N, available_space: Size<AvailableSpace>) {
+pub fn compute_root_layout<T: LayoutTree>(
+    tree: &T,
+    state: &mut T::State,
+    root: T::NodeId,
+    available_space: Size<AvailableSpace>,
+) {
     let parent_size = available_space.definite_values();
-    let output = root.compute_layout(LayoutInput::commit(
-        Size::NONE,
-        parent_size,
-        available_space,
-    ));
+    let output = tree.compute_layout(
+        state,
+        root,
+        LayoutInput::commit(Size::NONE, parent_size, available_space),
+    );
 
-    let style = root.style();
+    let style = tree.style(root);
     let margin_value = style.margin();
     let optional_margin = resolve_margins(margin_value, parent_size.width);
     let hidden = style.display().is_none();
@@ -55,7 +59,8 @@ pub fn compute_root_layout<N: LayoutNode>(root: N, available_space: Size<Availab
     let border = resolve_border(&style.border());
 
     if hidden {
-        root.set_unrounded_layout(Layout::default());
+        tree.layout_mut(state, root)
+            .set_unrounded(Layout::default());
         return;
     }
 
@@ -66,7 +71,7 @@ pub fn compute_root_layout<N: LayoutNode>(root: N, available_space: Size<Availab
     layout.border = border;
     layout.padding = padding;
     layout.margin = margin;
-    root.set_unrounded_layout(layout);
+    tree.layout_mut(state, root).set_unrounded(layout);
 }
 
 fn resolve_root_margins(
@@ -102,46 +107,60 @@ fn resolve_root_margins(
     margin
 }
 
-pub fn compute_boundary_relayout<N: LayoutNode>(node: N, input: LayoutInput) -> LayoutOutput {
+pub fn compute_boundary_relayout<T: LayoutTree>(
+    tree: &T,
+    state: &mut T::State,
+    node: T::NodeId,
+    input: LayoutInput,
+) -> LayoutOutput {
     debug_assert!(
-        is_relayout_boundary(&node.style()),
+        is_relayout_boundary(&tree.style(node)),
         "compute_boundary_relayout requires a relayout boundary \
          (contain: strict, or a skipped content-visibility box)"
     );
     let mut input = input;
     input.goal = LayoutGoal::Commit;
-    node.compute_layout(input)
+    tree.compute_layout(state, node, input)
 }
 
-pub fn compute_cached_layout<N, ComputeFn>(
-    node: N,
+pub fn compute_cached_layout<T, ComputeFn>(
+    tree: &T,
+    state: &mut T::State,
+    node: T::NodeId,
     input: LayoutInput,
     compute_uncached: ComputeFn,
 ) -> LayoutOutput
 where
-    N: LayoutNode,
-    ComputeFn: FnOnce(N, LayoutInput) -> LayoutOutput,
+    T: LayoutTree,
+    ComputeFn: FnOnce(&T, &mut T::State, T::NodeId, LayoutInput) -> LayoutOutput,
 {
-    if let Some(output) = node.cached_layout(input) {
+    if let Some(output) = tree.layout(state, node).cached_layout(input) {
         return output;
     }
 
-    let output = compute_uncached(node, input);
-    node.store_cached_layout(input, output);
+    let output = compute_uncached(tree, state, node, input);
+    tree.layout_mut(state, node)
+        .store_cached_layout(input, output);
     output
 }
 
-pub fn hide_subtree<N: LayoutNode>(node: N) {
-    node.clear_layout_cache();
-    node.set_unrounded_layout(Layout::with_order(0));
+pub fn hide_subtree<T: LayoutTree>(tree: &T, state: &mut T::State, node: T::NodeId) {
+    tree.clear_layout_cache(state, node);
+    tree.layout_mut(state, node)
+        .set_unrounded(Layout::with_order(0));
 
-    for child in node.children() {
-        hide_subtree(child);
+    for child in tree.children(node) {
+        hide_subtree(tree, state, child);
     }
 }
 
-pub fn compute_skipped_contents_layout<N: LayoutNode>(node: N, input: LayoutInput) -> LayoutOutput {
-    let style = node.style();
+pub fn compute_skipped_contents_layout<T: LayoutTree>(
+    tree: &T,
+    state: &mut T::State,
+    node: T::NodeId,
+    input: LayoutInput,
+) -> LayoutOutput {
+    let style = tree.style(node);
     let metrics = resolve_container_box(&style, input);
     let intrinsic = Size::new(
         contain_intrinsic_length(&style.contain_intrinsic_width()),
@@ -167,8 +186,8 @@ pub fn compute_skipped_contents_layout<N: LayoutNode>(node: N, input: LayoutInpu
     );
 
     if input.goal == LayoutGoal::Commit {
-        for child in node.children() {
-            hide_subtree(child);
+        for child in tree.children(node) {
+            hide_subtree(tree, state, child);
         }
     }
 
@@ -176,12 +195,16 @@ pub fn compute_skipped_contents_layout<N: LayoutNode>(node: N, input: LayoutInpu
 }
 
 #[must_use = "the returned layout is in containing-block space; the host must convert and store it"]
-pub fn compute_absolute_layout<N: LayoutNode>(
-    node: N,
+pub fn compute_absolute_layout<T: LayoutTree>(
+    tree: &T,
+    state: &mut T::State,
+    node: T::NodeId,
     containing_block: Size<f32>,
     static_position: Point<f32>,
 ) -> Layout {
     absolute_layout(
+        tree,
+        state,
         node,
         containing_block,
         move |_, _| static_position,
@@ -189,25 +212,38 @@ pub fn compute_absolute_layout<N: LayoutNode>(
     )
 }
 
-pub(super) fn compute_absolute_layout_with_static_position<N, StaticPosition>(
-    node: N,
+pub(super) fn compute_absolute_layout_with_static_position<T, StaticPosition>(
+    tree: &T,
+    state: &mut T::State,
+    node: T::NodeId,
     containing_block: Size<f32>,
     static_position: StaticPosition,
 ) -> Layout
 where
-    N: LayoutNode,
+    T: LayoutTree,
     StaticPosition: FnOnce(Size<f32>, Edges<f32>) -> Point<f32>,
 {
-    absolute_layout(node, containing_block, static_position, LayoutGoal::Commit)
+    absolute_layout(
+        tree,
+        state,
+        node,
+        containing_block,
+        static_position,
+        LayoutGoal::Commit,
+    )
 }
 
 #[must_use]
-pub(super) fn measure_absolute_layout<N: LayoutNode>(
-    node: N,
+pub(super) fn measure_absolute_layout<T: LayoutTree>(
+    tree: &T,
+    state: &mut T::State,
+    node: T::NodeId,
     containing_block: Size<f32>,
     requested_axis: RequestedAxis,
 ) -> Layout {
     absolute_layout(
+        tree,
+        state,
         node,
         containing_block,
         |_, _| Point::ZERO,
@@ -215,14 +251,16 @@ pub(super) fn measure_absolute_layout<N: LayoutNode>(
     )
 }
 
-fn absolute_layout<N, StaticPosition>(
-    node: N,
+fn absolute_layout<T, StaticPosition>(
+    tree: &T,
+    state: &mut T::State,
+    node: T::NodeId,
     containing_block: Size<f32>,
     static_position: StaticPosition,
     goal: LayoutGoal,
 ) -> Layout
 where
-    N: LayoutNode,
+    T: LayoutTree,
     StaticPosition: FnOnce(Size<f32>, Edges<f32>) -> Point<f32>,
 {
     debug_assert!(
@@ -233,7 +271,7 @@ where
         "containing-block sizes must be finite and non-negative"
     );
     let parent_size = Size::new(Some(containing_block.width), Some(containing_block.height));
-    let resolved_style = resolve_absolute_style(node, parent_size);
+    let resolved_style = resolve_absolute_style(tree, node, parent_size);
     let ResolvedAbsoluteStyle {
         insets,
         optional_margin,
@@ -271,7 +309,7 @@ where
             requested_axis,
         ),
     };
-    let output = node.compute_layout(child_input);
+    let output = tree.compute_layout(state, node, child_input);
 
     let margin = resolve_absolute_margins(
         optional_margin,
@@ -370,11 +408,12 @@ fn absolute_known_dimensions(
     )
 }
 
-fn resolve_absolute_style<N: LayoutNode>(
-    node: N,
+fn resolve_absolute_style<T: LayoutTree>(
+    tree: &T,
+    node: T::NodeId,
     parent_size: Size<Option<f32>>,
 ) -> ResolvedAbsoluteStyle {
-    let style = node.style();
+    let style = tree.style(node);
     let padding = resolve_padding(style.padding(), parent_size.width);
     let border = resolve_border(&style.border());
     let padding_border_size = Size::new(
@@ -438,23 +477,31 @@ fn absolute_preferred_available(value: &StyleSize, basis: Option<f32>) -> Option
     }
 }
 
-pub fn round_layout<N: LayoutNode>(root: N, scale: f32) {
-    round_layout_subtree(root, scale, Point::ZERO);
+pub fn round_layout<T: LayoutTree>(tree: &T, state: &mut T::State, root: T::NodeId, scale: f32) {
+    round_layout_subtree(tree, state, root, scale, Point::ZERO);
 }
 
-pub fn round_layout_subtree<N: LayoutNode>(node: N, scale: f32, parent_position: Point<f32>) {
-    round_layout_subtree_with(node, scale, parent_position, |_| false);
+pub fn round_layout_subtree<T: LayoutTree>(
+    tree: &T,
+    state: &mut T::State,
+    node: T::NodeId,
+    scale: f32,
+    parent_position: Point<f32>,
+) {
+    round_layout_subtree_with(tree, state, node, scale, parent_position, |_, _, _| false);
 }
 
 /// Rounds a subtree after a statically dispatched preorder hook.
 /// Returning `false` prunes only later hook calls; rounding still visits descendants.
 /// The hook runs before the current unrounded layout is cloned.
 #[doc(hidden)]
-pub fn round_layout_subtree_with<N: LayoutNode>(
-    node: N,
+pub fn round_layout_subtree_with<T: LayoutTree>(
+    tree: &T,
+    state: &mut T::State,
+    node: T::NodeId,
     scale: f32,
     parent_position: Point<f32>,
-    mut pre_node: impl FnMut(N) -> bool,
+    mut pre_node: impl FnMut(&T, &mut T::State, T::NodeId) -> bool,
 ) {
     debug_assert!(
         scale.is_finite() && scale > 0.0,
@@ -464,7 +511,15 @@ pub fn round_layout_subtree_with<N: LayoutNode>(
         parent_position.x.is_finite() && parent_position.y.is_finite(),
         "accumulated parent position must be finite"
     );
-    round_layout_inner(node, scale, parent_position, &mut pre_node, true);
+    round_layout_inner(
+        tree,
+        state,
+        node,
+        scale,
+        parent_position,
+        &mut pre_node,
+        true,
+    );
 }
 
 #[inline]
@@ -560,24 +615,15 @@ struct AbsoluteAxis {
     prefer_end: bool,
 }
 
-fn round_layout_inner<N: LayoutNode>(
-    node: N,
+fn rounded_layout(
+    source: &Layout,
     scale: f32,
     parent_position: Point<f32>,
-    pre_node: &mut impl FnMut(N) -> bool,
-    visit_pre_node: bool,
-) {
-    let visit_pre_node = visit_pre_node && pre_node(node);
-    let unrounded = node.clone_unrounded_layout();
+) -> (Layout, Point<f32>) {
     let position = Point::new(
-        parent_position.x + unrounded.location.x,
-        parent_position.y + unrounded.location.y,
+        parent_position.x + source.location.x,
+        parent_position.y + source.location.y,
     );
-    let source_size = unrounded.size;
-    let source_content_size = unrounded.content_size;
-    let source_border = unrounded.border;
-    let source_padding = unrounded.padding;
-    let source_margin = unrounded.margin;
     let mut snap = |value: f32| {
         #[cfg(test)]
         tests::ROUND_SNAP_CALLS.with(|calls| calls.set(calls.get() + 1));
@@ -591,38 +637,38 @@ fn round_layout_inner<N: LayoutNode>(
     let snapped_parent_position = parent_position.map(&mut snap);
     let snapped_position = position.map(&mut snap);
     let snapped_box_end = snap_point!(
-        position.x + source_size.width,
-        position.y + source_size.height
+        position.x + source.size.width,
+        position.y + source.size.height
     );
     let snapped_content_end = snap_point!(
-        position.x + source_content_size.width,
-        position.y + source_content_size.height
+        position.x + source.content_size.width,
+        position.y + source.content_size.height
     );
     let snapped_border_start = snap_point!(
-        position.x + source_border.left,
-        position.y + source_border.top
+        position.x + source.border.left,
+        position.y + source.border.top
     );
     let snapped_border_end = snap_point!(
-        position.x + source_size.width - source_border.right,
-        position.y + source_size.height - source_border.bottom
+        position.x + source.size.width - source.border.right,
+        position.y + source.size.height - source.border.bottom
     );
     let snapped_padding_start = snap_point!(
-        position.x + source_border.left + source_padding.left,
-        position.y + source_border.top + source_padding.top
+        position.x + source.border.left + source.padding.left,
+        position.y + source.border.top + source.padding.top
     );
     let snapped_padding_end = snap_point!(
-        position.x + source_size.width - source_border.right - source_padding.right,
-        position.y + source_size.height - source_border.bottom - source_padding.bottom
+        position.x + source.size.width - source.border.right - source.padding.right,
+        position.y + source.size.height - source.border.bottom - source.padding.bottom
     );
     let snapped_margin_start = snap_point!(
-        position.x - source_margin.left,
-        position.y - source_margin.top
+        position.x - source.margin.left,
+        position.y - source.margin.top
     );
     let snapped_margin_end = snap_point!(
-        position.x + source_size.width + source_margin.right,
-        position.y + source_size.height + source_margin.bottom
+        position.x + source.size.width + source.margin.right,
+        position.y + source.size.height + source.margin.bottom
     );
-    let mut rounded = unrounded;
+    let mut rounded = Layout::with_order(source.order);
     rounded.location = Point::new(
         snapped_position.x - snapped_parent_position.x,
         snapped_position.y - snapped_parent_position.y,
@@ -648,10 +694,33 @@ fn round_layout_inner<N: LayoutNode>(
     rounded.margin.top = snapped_position.y - snapped_margin_start.y;
     rounded.margin.bottom = snapped_margin_end.y - snapped_box_end.y;
 
-    node.set_rounded_layout(rounded);
+    (rounded, position)
+}
 
-    for child in node.children() {
-        round_layout_inner(child, scale, position, pre_node, visit_pre_node);
+fn round_layout_inner<T: LayoutTree>(
+    tree: &T,
+    state: &mut T::State,
+    node: T::NodeId,
+    scale: f32,
+    parent_position: Point<f32>,
+    pre_node: &mut impl FnMut(&T, &mut T::State, T::NodeId) -> bool,
+    visit_pre_node: bool,
+) {
+    let visit_pre_node = visit_pre_node && pre_node(tree, state, node);
+    let (rounded, position) =
+        rounded_layout(tree.layout(state, node).unrounded(), scale, parent_position);
+    tree.layout_mut(state, node).set_rounded(rounded);
+
+    for child in tree.children(node) {
+        round_layout_inner(
+            tree,
+            state,
+            child,
+            scale,
+            position,
+            pre_node,
+            visit_pre_node,
+        );
     }
 }
 
@@ -695,57 +764,45 @@ mod tests {
         }
     }
 
-    struct RoundingHost {
-        unrounded: Layout,
-        rounded: Cell<Option<Layout>>,
-    }
+    struct RoundingTree;
 
-    #[derive(Clone, Copy)]
-    struct RoundingRef<'a>(&'a RoundingHost);
+    impl LayoutTree for RoundingTree {
+        type NodeId = ();
+        type State = crate::tree::LayoutSlot;
+        type Style<'tree> = &'static RoundingStyle;
+        type ChildIter<'tree> = core::iter::Empty<()>;
 
-    impl core::fmt::Debug for RoundingRef<'_> {
-        fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            formatter.write_str("RoundingRef")
-        }
-    }
-
-    macro_rules! unused_rounding_methods {
-        ($($name:ident($($argument:ident: $type:ty),*) $(-> $result:ty)?;)+) => {
-            $(
-                fn $name(self, $($argument: $type),*) $(-> $result)? {
-                    unreachable!("rounding only reads and stores durable layouts")
-                }
-            )+
-        };
-    }
-
-    impl LayoutNode for RoundingRef<'_> {
-        type Style = &'static RoundingStyle;
-        type ChildIter = core::iter::Empty<Self>;
-
-        fn children(self) -> Self::ChildIter {
+        fn children(&self, (): ()) -> Self::ChildIter<'_> {
             core::iter::empty()
         }
 
-        fn style(self) -> Self::Style {
+        fn style(&self, (): ()) -> Self::Style<'_> {
             &RoundingStyle
         }
 
-        fn with_unrounded_layout<R>(self, read: impl FnOnce(&Layout) -> R) -> R {
-            read(&self.0.unrounded)
+        fn layout<'state>(
+            &self,
+            state: &'state Self::State,
+            (): (),
+        ) -> &'state crate::tree::LayoutSlot {
+            state
         }
 
-        fn set_rounded_layout(self, layout: Layout) {
-            self.0.rounded.set(Some(layout));
+        fn layout_mut<'state>(
+            &self,
+            state: &'state mut Self::State,
+            (): (),
+        ) -> &'state mut crate::tree::LayoutSlot {
+            state
         }
 
-        unused_rounding_methods! {
-            compute_layout(_input: LayoutInput) -> LayoutOutput;
-            set_unrounded_layout(_layout: Layout);
-            set_static_position(_position: Point<f32>);
-            cached_layout(_input: LayoutInput) -> Option<LayoutOutput>;
-            store_cached_layout(_input: LayoutInput, _output: LayoutOutput);
-            clear_layout_cache();
+        fn compute_layout(
+            &self,
+            _state: &mut Self::State,
+            (): (),
+            _input: LayoutInput,
+        ) -> LayoutOutput {
+            unreachable!("rounding does not compute box layouts")
         }
     }
 
@@ -771,14 +828,13 @@ mod tests {
             padding: edges(3.199_999_8, 0.800_000_2, 2.4, 1.599_999_4),
             margin: edges(4.0, -0.800_000_2, 1.600_000_1, 3.200_000_8),
         };
-        let host = RoundingHost {
-            unrounded,
-            rounded: Cell::new(None),
-        };
+        let tree = RoundingTree;
+        let mut state = crate::tree::LayoutSlot::default();
+        state.set_unrounded(unrounded);
 
         ROUND_SNAP_CALLS.set(0);
-        round_layout_subtree(RoundingRef(&host), scale, parent_position);
-        let actual = host.rounded.take().expect("one durable rounded result");
+        round_layout_subtree(&tree, &mut state, (), scale, parent_position);
+        let actual = state.rounded();
 
         assert_eq!(ROUND_SNAP_CALLS.get(), 20);
         assert_eq!(actual.order, expected.order);

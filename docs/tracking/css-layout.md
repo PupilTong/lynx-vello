@@ -107,20 +107,22 @@ The project's own `default_layout_style.h` already encodes a "Lynx default vs W3
 
 **Implementation status:** `crates/neutron-star` implements this formatting
 context as the generic `compute_linear_layout` peer algorithm. The single
-`CoreStyle` source-backed protocol (read through the `LayoutNode` handle)
-lends its Linear values directly from the same guarded Stylo
-`ComputedValues` as Flex, Grid, and Relative. The style surface follows the
+`CoreStyle` source-backed protocol (read through `LayoutTree::style(NodeId)`)
+lends its Linear values directly from the same post-flush Stylo
+`ComputedValues` as Flex, Grid, and Relative, without an `ElementData` borrow
+check or `Arc` bump. The style surface follows the
 stylo fork's grammar: the
 deprecated gravity longhands and `linear-orientation` do not exist there
 (see `deviations.md`), so orientation is `linear-direction` and the gravity
 channels ride the standard `justify-content`/`align-items`/`align-self`
 values, with the legacy `fill-*` gravities mapping to `stretch`. Linear uses
-the same layout IO, cached handle recursion, private box-model machinery, leaf
+the same layout IO, cached tree/state recursion, private box-model machinery, leaf
 dispatch, absolute-position helper, and hidden-subtree cleanup; it does not
 translate linear into Flex. The concrete `w3c-dom` adapter now implements
-`LayoutNode` directly on the document tree, including the fixed-position pass
-and unconditional Parley measurement for W3C text nodes with document/per-node
-retained state. Future L3 work is dirty/cache invalidation wiring, host
+`LayoutTree` on its immutable `TreeArenas`, pairing plain `NodeId`s with a
+separately borrowed mutable `DocumentLayoutState`. That state owns the
+fixed-position/layout slots and lazily boxed Parley context/per-node retained
+artifacts without layout/text runtime borrow checks. Future L3 work is host
 lowering of legacy spellings, and Lynx-specific text attributes,
 element-backed raw text, and truncation policy; no separate integration crate
 has been established.

@@ -25,7 +25,7 @@ use crate::geometry::{Edges, Point, Size};
 use crate::style::containment::size_containment;
 use crate::style::{Contain, CoreStyle};
 use crate::tree::{
-    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
+    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis,
     SizingMode,
 };
 
@@ -215,17 +215,18 @@ fn resolve_flex_basis(value: &FlexBasis, basis: Option<f32>) -> Option<f32> {
     }
 }
 
-fn resolve_item<N>(
-    key: ItemKey<N>,
+fn resolve_item<T>(
+    tree: &T,
+    key: ItemKey<T::NodeId>,
     container_inner_size: Size<Option<f32>>,
     axes: Axes,
     rtl: bool,
     default_alignment: AlignFlags,
-) -> FlexItem<N>
+) -> FlexItem<T::NodeId>
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
-    let style = key.node.style();
+    let style = tree.style(key.node);
     let flex_grow = style.flex_grow().0;
     let flex_shrink = style.flex_shrink().0;
     debug_assert!(
@@ -275,8 +276,13 @@ where
 /// Intrinsic text measurement is intentionally still performed whenever its
 /// result participates in sizing; this only avoids probes whose result has no
 /// consumer in the current branch of the flex algorithm.
-struct MainAxisProbes<N> {
-    node: N,
+struct MainAxisProbes<'tree, 'state, T>
+where
+    T: LayoutTree,
+{
+    tree: &'tree T,
+    state: &'state mut T::State,
+    node: T::NodeId,
     axes: Axes,
     known_dimensions: Size<Option<f32>>,
     definite_dimensions: Size<bool>,
@@ -286,17 +292,19 @@ struct MainAxisProbes<N> {
     measured: u8,
 }
 
-impl<N> MainAxisProbes<N>
+impl<T> MainAxisProbes<'_, '_, T>
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
-    fn measure(&self, available_main: AvailableSpace) -> f32 {
+    fn measure(&mut self, available_main: AvailableSpace) -> f32 {
         let available_space = self
             .axes
             .main
             .pack(available_main, self.axes.cross.size(self.available_space));
         self.axes.main.size(
             measure_child(
+                self.tree,
+                self.state,
                 self.node,
                 self.known_dimensions,
                 self.definite_dimensions,
@@ -367,8 +375,10 @@ where
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn determine_flex_base_sizes<N>(
-    items: &mut [FlexItem<N>],
+fn determine_flex_base_sizes<T>(
+    tree: &T,
+    state: &mut T::State,
+    items: &mut [FlexItem<T::NodeId>],
     axes: Axes,
     container_inner_size: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
@@ -376,7 +386,7 @@ fn determine_flex_base_sizes<N>(
     container_main_is_definite: bool,
     needs_intrinsic_main_contributions: bool,
 ) where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     let container_main = axes.main.size(container_inner_size);
     let available_main = axes.main.size(available_space);
@@ -387,7 +397,7 @@ fn determine_flex_base_sizes<N>(
 
     for item in items {
         let node = item.key.node;
-        let style = node.style();
+        let style = tree.style(node);
         let raw_size = style.size();
         let raw_min_size = style.min_size();
         let raw_max_size = style.max_size();
@@ -405,6 +415,8 @@ fn determine_flex_base_sizes<N>(
 
         let contribution_parent_size = axes.main.pack(None, axes.cross.size(container_inner_size));
         let mut probes = MainAxisProbes {
+            tree,
+            state: &mut *state,
             node,
             axes,
             known_dimensions: known,
@@ -843,15 +855,18 @@ fn resolve_flexible_lengths<N>(
     debug_assert!(false, "flex freeze loop exceeded the item-count bound");
 }
 
-fn determine_hypothetical_cross_sizes<N>(
-    items: &mut [FlexItem<N>],
+#[allow(clippy::too_many_arguments)]
+fn determine_hypothetical_cross_sizes<T>(
+    tree: &T,
+    state: &mut T::State,
+    items: &mut [FlexItem<T::NodeId>],
     lines: &[FlexLine],
     axes: Axes,
     wrap: flex_wrap::T,
     container_inner_size: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
 ) where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     let exported_baseline_item = lines.first().and_then(|line| {
         let line_items = &items[line.start..line.end];
@@ -927,6 +942,8 @@ fn determine_hypothetical_cross_sizes<N>(
                 axes.cross.size(available_space),
             );
             let output = measure_child(
+                tree,
+                state,
                 item.key.node,
                 known,
                 known_is_definite,
@@ -1284,8 +1301,10 @@ fn first_container_baseline<N>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn perform_in_flow_layout<N>(
-    items: &mut [FlexItem<N>],
+fn perform_in_flow_layout<T>(
+    tree: &T,
+    state: &mut T::State,
+    items: &mut [FlexItem<T::NodeId>],
     lines: &[FlexLine],
     axes: Axes,
     inner_size: Size<f32>,
@@ -1293,7 +1312,7 @@ fn perform_in_flow_layout<N>(
     container_size: Size<f32>,
 ) -> (Size<f32>, Option<f32>)
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     let parent_size = inner_size.map(Some);
     let mut content_size = container_size;
@@ -1310,7 +1329,7 @@ where
             axes.main
                 .set_size(&mut input.definite_dimensions, item.main_size_is_definite);
             input.sizing_mode = SizingMode::IgnoreSizeStyles;
-            let output = item.key.node.compute_layout(input);
+            let output = tree.compute_layout(state, item.key.node, input);
 
             let offset = if item.position == PositionProperty::Relative {
                 relative_offset(item.inset, item.direction)
@@ -1329,7 +1348,7 @@ where
             layout.border = item.border;
             layout.padding = item.padding;
             layout.margin = item.margin;
-            item.key.node.set_unrounded_layout(layout);
+            tree.layout_mut(state, item.key.node).set_unrounded(layout);
 
             accumulate_scrollable_overflow(
                 &mut content_size,
@@ -1403,8 +1422,10 @@ fn static_position_for_absolute<N>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn perform_absolute_children<N>(
-    absolute_items: &[OrderedItem<N>],
+fn perform_absolute_children<T>(
+    tree: &T,
+    state: &mut T::State,
+    absolute_items: &[OrderedItem<T::NodeId>],
     axes: Axes,
     rtl: bool,
     inner_size: Size<f32>,
@@ -1415,7 +1436,7 @@ fn perform_absolute_children<N>(
     default_alignment: AlignFlags,
 ) -> Size<f32>
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     let content_origin = Point::new(border.left + padding.left, border.top + padding.top);
     let parent_size = inner_size.map(Some);
@@ -1427,11 +1448,13 @@ where
 
     for pending in absolute_items {
         let key = pending.key();
-        let style = key.node.style();
-        let mut item = resolve_item(key, parent_size, axes, rtl, default_alignment);
+        let style = tree.style(key.node);
+        let mut item = resolve_item(tree, key, parent_size, axes, rtl, default_alignment);
         let mut known = item.preferred_size;
         let available = inner_size.map(AvailableSpace::Definite);
         let output = measure_child(
+            tree,
+            state,
             key.node,
             known,
             item.preferred_definite,
@@ -1464,8 +1487,13 @@ where
                     static_position.x - border.left,
                     static_position.y - border.top,
                 );
-                let mut layout =
-                    compute_absolute_layout(key.node, padding_box_size, static_in_padding_space);
+                let mut layout = compute_absolute_layout(
+                    tree,
+                    state,
+                    key.node,
+                    padding_box_size,
+                    static_in_padding_space,
+                );
                 layout.order = key.layout_order;
                 layout.location.x += border.left;
                 layout.location.y += border.top;
@@ -1476,10 +1504,11 @@ where
                     layout.content_size,
                     item.overflow,
                 );
-                key.node.set_unrounded_layout(layout);
+                tree.layout_mut(state, key.node).set_unrounded(layout);
             }
             PositionProperty::Fixed => {
-                key.node.set_static_position(static_position);
+                tree.layout_mut(state, key.node)
+                    .set_static_position(static_position);
             }
             PositionProperty::Static | PositionProperty::Relative | PositionProperty::Sticky => {}
         }
@@ -1493,12 +1522,16 @@ struct CollectedFlexItems<N> {
     hidden: SmallVec<[(usize, N); 1]>,
 }
 
-fn collect_flex_items<N>(node: N, goal: LayoutGoal) -> CollectedFlexItems<N>
+fn collect_flex_items<T>(
+    tree: &T,
+    node: T::NodeId,
+    goal: LayoutGoal,
+) -> CollectedFlexItems<T::NodeId>
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     let commits_layout = goal == LayoutGoal::Commit;
-    let children = node.children();
+    let children = tree.children(node);
     let (lower, upper) = children.size_hint();
     let child_capacity = match upper {
         Some(exact) if exact == lower => exact,
@@ -1509,7 +1542,7 @@ where
     let mut hidden = SmallVec::new();
 
     for (document_index, child) in children.enumerate() {
-        let child_style = child.style();
+        let child_style = tree.style(child);
         if child_style.display().is_none() {
             if commits_layout {
                 hidden.push((document_index, child));
@@ -1552,11 +1585,16 @@ where
 }
 
 #[allow(clippy::too_many_lines)]
-pub fn compute_flexbox_layout<N>(node: N, input: LayoutInput) -> LayoutOutput
+pub fn compute_flexbox_layout<T>(
+    tree: &T,
+    state: &mut T::State,
+    node: T::NodeId,
+    input: LayoutInput,
+) -> LayoutOutput
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
-    let style = node.style();
+    let style = tree.style(node);
     let size_containment = size_containment(&style);
     let layout_contained = style.containment().contains(Contain::LAYOUT);
     let flex_wrap = style.flex_wrap();
@@ -1596,7 +1634,7 @@ where
         generated,
         absolute_items,
         hidden,
-    } = collect_flex_items(node, input.goal);
+    } = collect_flex_items(tree, node, input.goal);
     let mut items = generated
         .into_iter()
         .map(|item| {
@@ -1607,10 +1645,12 @@ where
             if !outer_definite.height {
                 percentage_basis.height = None;
             }
-            resolve_item(item.key(), percentage_basis, axes, rtl, align_items)
+            resolve_item(tree, item.key(), percentage_basis, axes, rtl, align_items)
         })
         .collect::<Vec<_>>();
     determine_flex_base_sizes(
+        tree,
+        state,
         &mut items,
         axes,
         inner_size,
@@ -1664,6 +1704,8 @@ where
     }
 
     determine_hypothetical_cross_sizes(
+        tree,
+        state,
         &mut items,
         &lines,
         axes,
@@ -1715,13 +1757,15 @@ where
         main_gap = axes.main.size(gap);
         for item in &mut items {
             let key = item.key;
-            *item = resolve_item(key, inner_size, axes, rtl, align_items);
+            *item = resolve_item(tree, key, inner_size, axes, rtl, align_items);
         }
         let final_available_space = Size::new(
             AvailableSpace::Definite(inner_size.width.unwrap_or(0.0)),
             AvailableSpace::Definite(inner_size.height.unwrap_or(0.0)),
         );
         determine_flex_base_sizes(
+            tree,
+            state,
             &mut items,
             axes,
             inner_size,
@@ -1745,6 +1789,8 @@ where
             resolve_flexible_lengths(&mut items, line, inner_main, main_gap, axes);
         }
         determine_hypothetical_cross_sizes(
+            tree,
+            state,
             &mut items,
             &lines,
             axes,
@@ -1796,6 +1842,8 @@ where
     }
 
     let (mut content_size, first_baseline) = perform_in_flow_layout(
+        tree,
+        state,
         &mut items,
         &lines,
         axes,
@@ -1804,12 +1852,15 @@ where
         outer_size,
     );
     for (document_index, child) in hidden {
-        super::hide_subtree(child);
-        child.set_unrounded_layout(Layout::with_order(
-            u32::try_from(document_index).unwrap_or(u32::MAX),
-        ));
+        super::hide_subtree(tree, state, child);
+        tree.layout_mut(state, child)
+            .set_unrounded(Layout::with_order(
+                u32::try_from(document_index).unwrap_or(u32::MAX),
+            ));
     }
     let absolute_content_size = perform_absolute_children(
+        tree,
+        state,
         &absolute_items,
         axes,
         rtl,
@@ -1840,6 +1891,7 @@ mod tests {
     use stylo::values::computed::{Display, Overflow};
 
     use super::*;
+    use crate::tree::LayoutSlot;
 
     #[derive(Debug)]
     struct TestStyle(Display, PositionProperty, i32);
@@ -1876,19 +1928,54 @@ mod tests {
     #[derive(Debug, Clone, Copy)]
     struct TestRef(usize);
 
-    impl LayoutNode for TestRef {
-        type Style = &'static TestStyle;
-        type ChildIter = core::array::IntoIter<Self, 4>;
+    #[derive(Debug, Default)]
+    struct TestTree;
 
-        fn children(self) -> Self::ChildIter {
-            [Self(1), Self(2), Self(3), Self(4)].into_iter()
+    #[derive(Debug)]
+    struct TestState {
+        layouts: [LayoutSlot; 5],
+    }
+
+    impl Default for TestState {
+        fn default() -> Self {
+            Self {
+                layouts: core::array::from_fn(|_| LayoutSlot::default()),
+            }
+        }
+    }
+
+    impl LayoutTree for TestTree {
+        type NodeId = TestRef;
+        type State = TestState;
+        type Style<'tree> = &'static TestStyle;
+        type ChildIter<'tree> = core::array::IntoIter<TestRef, 4>;
+
+        fn children(&self, _node: TestRef) -> Self::ChildIter<'_> {
+            [TestRef(1), TestRef(2), TestRef(3), TestRef(4)].into_iter()
         }
 
-        fn style(self) -> &'static TestStyle {
-            &TEST_STYLES[self.0]
+        fn style(&self, node: TestRef) -> &'static TestStyle {
+            &TEST_STYLES[node.0]
         }
 
-        fn compute_layout(self, input: LayoutInput) -> LayoutOutput {
+        fn layout<'state>(&self, state: &'state Self::State, node: TestRef) -> &'state LayoutSlot {
+            &state.layouts[node.0]
+        }
+
+        fn layout_mut<'state>(
+            &self,
+            state: &'state mut Self::State,
+            node: TestRef,
+        ) -> &'state mut LayoutSlot {
+            &mut state.layouts[node.0]
+        }
+
+        fn compute_layout(
+            &self,
+            _state: &mut Self::State,
+            _node: TestRef,
+            input: LayoutInput,
+        ) -> LayoutOutput {
             TEST_MEASURE_CALLS.with(|calls| calls.set(calls.get() + 1));
             let width = match input.available_space.width {
                 AvailableSpace::MinContent => 11.0,
@@ -1903,30 +1990,6 @@ mod tests {
             LayoutOutput::new(Size::new(width, height), Size::ZERO)
                 .with_first_baselines(Point::new(None, baseline))
         }
-
-        fn set_unrounded_layout(self, _layout: Layout) {
-            unreachable!("line-math tests never store layouts")
-        }
-
-        fn with_unrounded_layout<R>(self, _read: impl FnOnce(&Layout) -> R) -> R {
-            unreachable!("line-math tests never read layouts")
-        }
-
-        fn set_rounded_layout(self, _layout: Layout) {
-            unreachable!("line-math tests never round layouts")
-        }
-
-        fn set_static_position(self, _static_position: Point<f32>) {
-            unreachable!("line-math tests never hoist items")
-        }
-
-        fn cached_layout(self, _input: LayoutInput) -> Option<LayoutOutput> {
-            None
-        }
-
-        fn store_cached_layout(self, _input: LayoutInput, _output: LayoutOutput) {}
-
-        fn clear_layout_cache(self) {}
     }
 
     fn item(main: f32, cross: f32) -> FlexItem<TestRef> {
@@ -1998,8 +2061,14 @@ mod tests {
         items.into_iter().next().unwrap()
     }
 
-    fn probes(available_main: AvailableSpace) -> MainAxisProbes<TestRef> {
+    fn probes<'tree, 'state>(
+        tree: &'tree TestTree,
+        state: &'state mut TestState,
+        available_main: AvailableSpace,
+    ) -> MainAxisProbes<'tree, 'state, TestTree> {
         MainAxisProbes {
+            tree,
+            state,
             node: TestRef(0),
             axes: row_axes(flex_wrap::T::Nowrap),
             known_dimensions: Size::NONE,
@@ -2018,7 +2087,11 @@ mod tests {
     }
 
     fn measure_cross(items: &mut [FlexItem<TestRef>], wrap: flex_wrap::T, cross: f32) {
+        let tree = TestTree;
+        let mut state = TestState::default();
         determine_hypothetical_cross_sizes(
+            &tree,
+            &mut state,
             items,
             &[test_line(items.len(), 0.0)],
             row_axes(wrap),
@@ -2054,7 +2127,9 @@ mod tests {
 
     #[test]
     fn measure_collection_keeps_only_ordered_in_flow_items() {
-        let measured = collect_flex_items(TestRef(0), LayoutGoal::Measure(RequestedAxis::Both));
+        let tree = TestTree;
+        let measured =
+            collect_flex_items(&tree, TestRef(0), LayoutGoal::Measure(RequestedAxis::Both));
         assert!(measured.generated.iter().map(|item| item.node.0).eq([4, 1]));
         assert!(measured.generated.iter().all(|item| item.layout_order == 0));
         assert!(measured.absolute_items.is_empty());
@@ -2068,7 +2143,7 @@ mod tests {
             (1, 1)
         );
 
-        let committed = collect_flex_items(TestRef(0), LayoutGoal::Commit);
+        let committed = collect_flex_items(&tree, TestRef(0), LayoutGoal::Commit);
         assert!(
             committed
                 .generated
@@ -2105,8 +2180,10 @@ mod tests {
 
     #[test]
     fn main_axis_probes_are_lazy_memoized_and_reuse_max_content() {
+        let tree = TestTree;
+        let mut state = TestState::default();
         TEST_MEASURE_CALLS.set(0);
-        let mut definite = probes(AvailableSpace::Definite(37.0));
+        let mut definite = probes(&tree, &mut state, AvailableSpace::Definite(37.0));
         assert_eq!(TEST_MEASURE_CALLS.get(), 0);
         assert_eq!(definite.min_content(), 11.0);
         assert_eq!(definite.min_content(), 11.0);
@@ -2119,7 +2196,7 @@ mod tests {
         assert_eq!(TEST_MEASURE_CALLS.get(), 3);
 
         TEST_MEASURE_CALLS.set(0);
-        let mut intrinsic = probes(AvailableSpace::MinContent);
+        let mut intrinsic = probes(&tree, &mut state, AvailableSpace::MinContent);
         assert_eq!(intrinsic.available_content(), 23.0);
         assert_eq!(intrinsic.available_content(), 23.0);
         assert_eq!(TEST_MEASURE_CALLS.get(), 1);
@@ -2130,9 +2207,13 @@ mod tests {
         let axes = row_axes(flex_wrap::T::Nowrap);
         let mut items = [item(0.0, 0.0)];
         items[0].min_size.width = Some(0.0);
+        let tree = TestTree;
+        let mut state = TestState::default();
 
         TEST_MEASURE_CALLS.set(0);
         determine_flex_base_sizes(
+            &tree,
+            &mut state,
             &mut items,
             axes,
             Size::new(Some(100.0), Some(20.0)),

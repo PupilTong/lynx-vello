@@ -550,9 +550,9 @@ fn measure_goal_does_not_write_durable_layouts() {
     let mut sentinel = Layout::default();
     sentinel.location = Point::new(123.0, 456.0);
     sentinel.size = Size::new(7.0, 8.0);
-    *tree.session_node(first).layout.borrow_mut() = sentinel.clone();
-    *tree.session_node(second).layout.borrow_mut() = sentinel.clone();
-    *tree.session_node(root).layout.borrow_mut() = sentinel.clone();
+    *tree.session_node(first).layout.borrow_mut() = snapshot_layout(&sentinel);
+    *tree.session_node(second).layout.borrow_mut() = snapshot_layout(&sentinel);
+    *tree.session_node(root).layout.borrow_mut() = snapshot_layout(&sentinel);
 
     let output = tree.compute_layout(
         root,
@@ -1039,7 +1039,15 @@ fn absolute_aspect_ratio_uses_vertical_inset_stretch_when_horizontal_is_auto() {
         None,
     );
 
-    let layout = compute_absolute_layout(tree.node(child), Size::new(100.0, 100.0), Point::ZERO);
+    let layout = tree.with_layout_state(true, |tree, state| {
+        compute_absolute_layout(
+            tree,
+            state,
+            tree.node(child),
+            Size::new(100.0, 100.0),
+            Point::ZERO,
+        )
+    });
     assert_size(layout.size, Size::new(160.0, 80.0));
     assert_point(layout.location, Point::new(0.0, 10.0));
 }

@@ -54,12 +54,11 @@ servo_arc = { path = "vendor/stylo/servo_arc" }
 
 # Third-party
 #
-# `app_units`, `atomic_refcell`, `euclid`, and `url` are pinned to the same
+# `app_units`, `euclid`, and `url` are pinned to the same
 # major/minor the vendored stylo fork depends on (`vendor/stylo/style/Cargo.toml`)
 # so Cargo unifies them to a single version and the stylo trait signatures line
 # up type-for-type (no duplicate `euclid`/`app_units` in the graph).
 app_units = "0.7"
-atomic_refcell = "0.1"
 bytecheck = "0.6"
 bytes = "1"
 cc = "1"

@@ -21,7 +21,7 @@ The from-scratch layout engine (successor to the C++ engine's `starlight`) is
 flexbox, Grid, and Starlight `display: relative` and `display: linear`
 algorithms are implemented as first-class peers. Its concrete document/stylo
 host lives in `crates/w3c-dom`'s `layout` module
-(`Document::layout`, results on each `Node`); the Lynx-specific runtime
+(`Document::layout`, results queried by `NodeId` from the document); the Lynx-specific runtime
 policy layer remains pending, while W3C text nodes already use the concrete
 Parley path. See
 `docs/layout-architecture.md` for its design and
@@ -143,18 +143,19 @@ useful signal for currently-compatible versions of those libraries.
   the future preloaded module graph belong here rather than in the generic
   QuickJS bridge or engine-neutral protocol.
 - `crates/w3c-dom` — generic W3C-DOM-subset document tree and
-  standards-oriented CSS computation core. Owns one fixed-address boxed arena
-  set of four `Slab`s: a primary `Slab<Node<T>>` (slot zero is the real DOM
-  Document node and carries its node-visible style context; later slots are
-  element/text nodes), plus NodeId-aligned payload, Stylo
-  traversal/invalidation, and layout measurement-cache/out-of-flow slabs. The
+  standards-oriented CSS computation core. Owns a fixed-address boxed
+  `TreeArenas<T>` containing three `Slab`s: a primary `Slab<Node<T>>` (slot
+  zero is the real DOM Document node and carries its node-visible style
+  context; later slots are element/text nodes), plus NodeId-aligned payload
+  and Stylo traversal/invalidation slabs. A separate inline
+  `DocumentLayoutState` owns the fourth, NodeId-aligned layout slab. The
   primary slab selects each raw-`usize` ID; every side slab allocates/removes
   in lockstep and asserts it received that same key (the payload slab reserves
   a payload-less sentinel at document slot zero). Node removal drops all four
   entries before the ID can be reused (ONE TREE policy: nodes are created and
-  mutated only through `Document` methods). Computed styles and
-  durable rounded/unrounded layout results remain in the primary Node arena.
-  Every node points directly back to the fixed arena set, and the
+  mutated only through `Document` methods). Computed styles remain with the
+  primary nodes; layout/text state does not.
+  Every node points directly back only to `TreeArenas`, and the
   same plain one-word `&Node` implements Stylo's document/node/element traits
   according to its `NodeData` (styling runs in place, no mirror tree),
   inline-style parsing, and a private per-document `StyleEngine` containing
@@ -179,11 +180,22 @@ useful signal for currently-compatible versions of those libraries.
   bits).
   Its `layout` module is the concrete `neutron-star` host:
   `Document::layout` flushes styles then lays out with
-  `LayoutNode` implemented **directly on `&Node<T>`** (the same one-word
-  handle as the stylo traits — no wrapper, no adapter objects) — style views
-  are fetched when the engine asks and borrow the node's Stylo `ElementData`
-  guard, lending `ComputedValues` fields straight to the engine with no
-  `Arc` refcount bump or translation layer; display dispatch routes
+  the single `LayoutTree` trait implemented on `TreeArenas<T>`. Plain
+  `NodeId`s identify nodes, and every engine entry receives `&TreeArenas`
+  alongside a separate `&mut DocumentLayoutState`; there is no
+  `LayoutTreeView`, session, or store adapter. At the exclusive style-flush
+  boundary, each element's preorder callback first marks its layout style
+  stale, then publishes a pointer into the primary `Arc<ComputedValues>`
+  still owned by Stylo's `ElementData` only after recalculation succeeds;
+  layout views
+  lend that post-flush value with no `ElementData` borrow check, `Arc` bump,
+  copy, or translation layer. A document-level phase flag distinguishes
+  Stylo's own mutations from safe out-of-band mutable access, which also
+  marks that element stale; a failed traversal therefore remains fail-closed
+  even after an unrelated retry. The pointer stays valid until the next
+  exclusive traversal, which cannot overlap layout. Public computed-style
+  access still uses Stylo's guarded borrow. Layout and text state use ordinary
+  exclusive Rust borrows with no runtime borrow checking. Display dispatch routes
   flex/grid/linear/relative with `display: none` hiding and a leaf
   fallback, text nodes through concrete Parley measurement, and the
   positioned pass implements the W3C `position: fixed`
@@ -191,20 +203,22 @@ useful signal for currently-compatible versions of those libraries.
   content reads a closed `NaturalSize` value stored in lazily allocated
   node content; its internal update path automatically invalidates the
   affected cache path. Mutually exclusive literal text, natural size, and
-  retained text artifacts reuse the node's single nullable content pointer.
-  Durable rounded and unrounded layout results live **on each `Node`** (read
-  via `Node::rounded_layout`); measurement cache and
-  static-position state live in the document's layout secondary arena behind
-  `AtomicRefCell<LayoutData>`. Style-driven relayout is automatic (every style
+  test-only leaf metadata reuse the node's single nullable content pointer.
+  Each `DocumentLayoutState` entry owns one `LayoutSlot` containing the
+  measurement cache, static position, and durable rounded/unrounded results;
+  `Document::{rounded_layout, unrounded_layout, layout_cache_is_empty}` are the
+  query surface. `Layout` is non-`Clone`; rounding reads its `Copy` fields and
+  constructs the rounded record without duplicating the whole value.
+  Style-driven relayout is automatic (every style
   flush consumes harvested `StyleDamage` into boundary-stopped invalidation);
   `Document::invalidate_layout` remains the
   embedder API for the mutations styles cannot see (content/child-list changes
   with identical computed styles). The internal natural-size update path
   performs that invalidation itself.
-  The document node lazily creates and then owns the shared Parley
-  `TextContext`; text nodes lazily retain probe/commit artifacts in that
-  same content record and read inherited font/text values from their
-  parent. Relayout damage on an element evicts its direct text children's
+  `DocumentLayoutState` lazily boxes the shared Parley `TextContext`; each
+  text node's layout-state entry lazily boxes its probe/commit
+  `TextLayoutStore` and reads inherited font/text values from its parent.
+  Relayout damage on an element evicts its direct text children's
   measurement caches and retained artifacts because text nodes have no Stylo
   damage record of their own. Parley is unconditional and there is no
   arbitrary payload callback. It must not contain Lynx runtime-element vocabulary or
@@ -218,10 +232,11 @@ useful signal for currently-compatible versions of those libraries.
   pref-gated for stock servo builds.
 - `crates/neutron-star` — the Flexbox, Grid, and
   Starlight Relative and Linear engine: trait-based host⇄engine integration
-  with static dispatch only (no `dyn`), a stylo-style `LayoutNode: Copy`
-  node-handle protocol (immutable topology/styles for the flush; per-node
-  layout/cache slots are host-owned interior-mutable state written through
-  the handle), style traits that speak the stylo fork's computed-value
+  with static dispatch only (no `dyn`), one `LayoutTree` protocol with a
+  `Copy + Debug` `NodeId`, immutable topology/styles for the flush, and a
+  separately borrowed mutable host state containing per-node `LayoutSlot`s.
+  The split permits recursive mutation without copying style/layout records
+  and without `RefCell`/`AtomicRefCell` checks. Style traits speak the stylo fork's computed-value
   vocabulary directly (requires the `stylo` workspace dep + python3 for its
   build script; the old zero-dependency/standalone pillar is retired), and
   host-side display dispatch. Leaf content is deliberately closed: replaced
@@ -245,7 +260,7 @@ useful signal for currently-compatible versions of those libraries.
   `docs/layout-architecture.md` before touching it. It must not depend on
   other workspace crates or own host tree/style storage, DOM/runtime types,
   resolved device-unit policy, or paint order.
-- Remaining runtime-layout integration — the `LayoutNode` handle, display
+- Remaining runtime-layout integration — the `LayoutTree` host, display
   dispatch, fixed/hoisted positioned pass, per-node cache storage, and the
   automatic style-damage→`Document::invalidate_layout` wiring (boundary-stopped,
   engine-internal — not a runtime-adapter concern) now live in `w3c-dom`

@@ -5,7 +5,6 @@
 use std::cell::{Cell, RefCell};
 use std::fmt;
 
-use neutron_star::cache::Cache;
 use neutron_star::compute::{
     LeafMeasureInput, LeafMetrics, compute_cached_layout, compute_flexbox_layout,
     compute_grid_layout, compute_leaf_layout_with_measurement_for_testing, compute_linear_layout,
@@ -1019,9 +1018,9 @@ pub(super) struct TestSourceNode {
     pub(super) measure: TestMeasure,
 }
 
-/// Per-node mutable layout slots, written through [`TestRef`] handles.
-/// Layout is single-threaded, so `Cell`/`RefCell` interior mutability is the
-/// whole synchronization story.
+/// Legacy inspection mirrors retained for terse assertions in the integration
+/// cases. The engine itself writes the separate [`TestState`] through
+/// [`LayoutTree`]; committed top-level calls synchronize these mirrors.
 #[derive(Debug, Default)]
 pub(super) struct TestSessionNode {
     pub(super) layout: RefCell<Layout>,
@@ -1032,15 +1031,23 @@ pub(super) struct TestSessionNode {
     pub(super) measure_calls: RefCell<Vec<TestMeasureCall>>,
 }
 
-/// The one host tree: immutable node data plus interior-mutable session
-/// slots and instrumentation. The session slots deliberately live in a
-/// parallel `Vec` (not inline in `TestSourceNode`) so bench fixtures keep
-/// the same memory layout the pre-handle host had.
+#[derive(Debug, Default)]
+pub(super) struct TestState {
+    slots: Vec<LayoutSlot>,
+    cache_enabled: bool,
+}
+
+/// Immutable source tree plus a separately borrowed layout state.
+///
+/// The outer `RefCell` is only a convenience for the existing test-case
+/// façade (`perform_layout(&tree, ...)`). Recursive engine calls receive a
+/// plain `&mut TestState`; individual layout slots no longer use interior
+/// mutability.
 #[derive(Debug)]
 pub(super) struct TestTree {
     pub(super) nodes: Vec<TestSourceNode>,
     pub(super) session: Vec<TestSessionNode>,
-    caches: Option<Vec<RefCell<Cache>>>,
+    state: RefCell<TestState>,
     pub(super) child_layout_calls: Cell<usize>,
     pub(super) layout_writes: Cell<usize>,
     pub(super) static_position_writes: Cell<usize>,
@@ -1053,7 +1060,7 @@ impl Default for TestTree {
         Self {
             nodes: Vec::new(),
             session: Vec::new(),
-            caches: None,
+            state: RefCell::new(TestState::default()),
             child_layout_calls: Cell::new(0),
             layout_writes: Cell::new(0),
             static_position_writes: Cell::new(0),
@@ -1063,174 +1070,218 @@ impl Default for TestTree {
     }
 }
 
-/// The `Copy` node handle: a borrow of the tree plus a node index.
+/// The `Copy` node id used by the protocol.
 #[derive(Clone, Copy)]
-pub(super) struct TestRef<'t> {
-    tree: &'t TestTree,
+pub(super) struct TestRef {
     index: TestId,
 }
 
-impl fmt::Debug for TestRef<'_> {
+impl fmt::Debug for TestRef {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_tuple("TestRef").field(&self.index).finish()
     }
 }
 
-impl<'t> TestRef<'t> {
-    fn source(self) -> &'t TestSourceNode {
-        &self.tree.nodes[self.index]
-    }
-
-    fn slots(self) -> &'t TestSessionNode {
-        &self.tree.session[self.index]
-    }
-}
-
 pub(super) struct TestChildren<'t> {
-    tree: &'t TestTree,
     ids: std::slice::Iter<'t, TestId>,
 }
 
-impl<'t> Iterator for TestChildren<'t> {
-    type Item = TestRef<'t>;
+impl Iterator for TestChildren<'_> {
+    type Item = TestRef;
 
-    fn next(&mut self) -> Option<TestRef<'t>> {
+    fn next(&mut self) -> Option<TestRef> {
         let index = *self.ids.next()?;
-        Some(TestRef {
-            tree: self.tree,
-            index,
-        })
+        Some(TestRef { index })
     }
 }
 
-impl<'t> LayoutNode for TestRef<'t> {
-    type Style = &'t TestStyle;
-    type ChildIter = TestChildren<'t>;
+impl LayoutTree for TestTree {
+    type NodeId = TestRef;
+    type State = TestState;
+    type Style<'tree> = &'tree TestStyle;
+    type ChildIter<'tree> = TestChildren<'tree>;
 
-    fn children(self) -> TestChildren<'t> {
+    fn children(&self, node: TestRef) -> TestChildren<'_> {
         TestChildren {
-            tree: self.tree,
-            ids: self.source().children.iter(),
+            ids: self.nodes[node.index].children.iter(),
         }
     }
 
-    fn child_count(self) -> usize {
-        self.source().children.len()
+    fn child_count(&self, node: TestRef) -> usize {
+        self.nodes[node.index].children.len()
     }
 
-    fn style(self) -> &'t TestStyle {
-        &self.source().style
+    fn style(&self, node: TestRef) -> &TestStyle {
+        &self.nodes[node.index].style
     }
 
-    fn compute_layout(self, input: LayoutInput) -> LayoutOutput {
-        let tree = self.tree;
-        tree.child_layout_calls
-            .set(tree.child_layout_calls.get() + 1);
-        let node = self.source();
-        let display = node.display;
+    fn layout<'state>(&self, state: &'state TestState, node: TestRef) -> &'state LayoutSlot {
+        &state.slots[node.index]
+    }
 
-        if node.style.display.is_none() {
-            hide_subtree(self);
+    fn layout_mut<'state>(
+        &self,
+        state: &'state mut TestState,
+        node: TestRef,
+    ) -> &'state mut LayoutSlot {
+        &mut state.slots[node.index]
+    }
+
+    fn compute_layout(
+        &self,
+        state: &mut TestState,
+        node: TestRef,
+        input: LayoutInput,
+    ) -> LayoutOutput {
+        self.child_layout_calls
+            .set(self.child_layout_calls.get() + 1);
+        let source = &self.nodes[node.index];
+        let display = source.display;
+
+        if source.style.display.is_none() {
+            hide_subtree(self, state, node);
             return LayoutOutput::HIDDEN;
         }
 
-        if node.style.skips_contents {
-            let output = compute_skipped_contents_layout(self, input);
-            self.slots().output.set(output);
+        if source.style.skips_contents {
+            let output = compute_skipped_contents_layout(self, state, node, input);
+            self.session[node.index].output.set(output);
             return output;
         }
 
-        let output = compute_cached_layout(self, input, |handle, input| match display {
-            TestDisplay::Flex => compute_flexbox_layout(handle, input),
-            TestDisplay::Grid => compute_grid_layout(handle, input),
-            TestDisplay::Linear => compute_linear_layout(handle, input),
-            TestDisplay::Relative => compute_relative_layout(handle, input),
-            TestDisplay::Leaf => {
-                let style = &node.style;
-                let measure = node.measure;
-                let slots = handle.slots();
-                compute_leaf_layout_with_measurement_for_testing(
-                    input,
-                    style,
-                    None,
-                    |measure_input| {
-                        tree.leaf_measure_calls
-                            .set(tree.leaf_measure_calls.get() + 1);
-                        if tree.record_measure_inputs.get() {
-                            slots.measure_inputs.borrow_mut().push(measure_input);
-                        }
-                        let (metrics, call) = measure.measure(measure_input);
-                        if let Some(call) = call {
-                            slots.measure_calls.borrow_mut().push(call);
-                        }
-                        metrics
-                    },
-                )
-            }
-        });
-        self.slots().output.set(output);
+        let compute_uncached =
+            |tree: &Self, state: &mut TestState, node: TestRef, input| match display {
+                TestDisplay::Flex => compute_flexbox_layout(tree, state, node, input),
+                TestDisplay::Grid => compute_grid_layout(tree, state, node, input),
+                TestDisplay::Linear => compute_linear_layout(tree, state, node, input),
+                TestDisplay::Relative => compute_relative_layout(tree, state, node, input),
+                TestDisplay::Leaf => {
+                    let style = &source.style;
+                    let measure = source.measure;
+                    let session = &tree.session[node.index];
+                    compute_leaf_layout_with_measurement_for_testing(
+                        input,
+                        style,
+                        None,
+                        |measure_input| {
+                            tree.leaf_measure_calls
+                                .set(tree.leaf_measure_calls.get() + 1);
+                            if tree.record_measure_inputs.get() {
+                                session.measure_inputs.borrow_mut().push(measure_input);
+                            }
+                            let (metrics, call) = measure.measure(measure_input);
+                            if let Some(call) = call {
+                                session.measure_calls.borrow_mut().push(call);
+                            }
+                            metrics
+                        },
+                    )
+                }
+            };
+        let output = if state.cache_enabled {
+            compute_cached_layout(self, state, node, input, compute_uncached)
+        } else {
+            compute_uncached(self, state, node, input)
+        };
+        self.session[node.index].output.set(output);
         output
-    }
-
-    fn set_unrounded_layout(self, layout: Layout) {
-        self.tree
-            .layout_writes
-            .set(self.tree.layout_writes.get() + 1);
-        *self.slots().layout.borrow_mut() = layout;
-    }
-
-    fn with_unrounded_layout<R>(self, read: impl FnOnce(&Layout) -> R) -> R {
-        let layout = self.slots().layout.borrow();
-        read(&layout)
-    }
-
-    fn set_rounded_layout(self, layout: Layout) {
-        *self.slots().final_layout.borrow_mut() = layout;
-    }
-
-    fn set_static_position(self, static_position: Point<f32>) {
-        self.tree
-            .static_position_writes
-            .set(self.tree.static_position_writes.get() + 1);
-        self.slots().static_position.set(Some(static_position));
-    }
-
-    fn cached_layout(self, input: LayoutInput) -> Option<LayoutOutput> {
-        self.tree.caches.as_ref()?[self.index].borrow().get(input)
-    }
-
-    fn store_cached_layout(self, input: LayoutInput, output: LayoutOutput) {
-        if let Some(caches) = &self.tree.caches {
-            caches[self.index].borrow_mut().store(input, output);
-        }
-    }
-
-    fn clear_layout_cache(self) {
-        if let Some(caches) = &self.tree.caches {
-            caches[self.index].borrow_mut().clear();
-        }
     }
 }
 
+pub(super) fn snapshot_layout(layout: &Layout) -> Layout {
+    let mut snapshot = Layout::with_order(layout.order);
+    snapshot.location = layout.location;
+    snapshot.size = layout.size;
+    snapshot.content_size = layout.content_size;
+    snapshot.border = layout.border;
+    snapshot.padding = layout.padding;
+    snapshot.margin = layout.margin;
+    snapshot
+}
+
 impl TestTree {
-    pub(super) fn node(&self, id: TestId) -> TestRef<'_> {
-        TestRef {
-            tree: self,
-            index: id,
-        }
+    pub(super) fn node(&self, id: TestId) -> TestRef {
+        debug_assert!(id < self.nodes.len());
+        TestRef { index: id }
     }
 
     pub(super) fn compute_layout(&self, id: TestId, input: LayoutInput) -> LayoutOutput {
-        self.node(id).compute_layout(input)
+        let commits_layout = input.goal == LayoutGoal::Commit;
+        let output = {
+            let mut state = self.state.borrow_mut();
+            self.synchronize_inspection_mirrors_into_state(&mut state);
+            LayoutTree::compute_layout(self, &mut state, self.node(id), input)
+        };
+        if commits_layout {
+            self.synchronize_committed_state();
+        }
+        output
+    }
+
+    pub(super) fn compute_root_layout(&self, id: TestId, available_space: Size<AvailableSpace>) {
+        self.with_layout_state(true, |tree, state| {
+            neutron_star::compute::compute_root_layout(tree, state, tree.node(id), available_space);
+        });
+    }
+
+    pub(super) fn clear_layout_cache(&self, id: TestId) {
+        self.with_layout_state(false, |tree, state| {
+            LayoutTree::clear_layout_cache(tree, state, tree.node(id));
+        });
+    }
+
+    pub(super) fn with_layout_state<R>(
+        &self,
+        commits_layout: bool,
+        run: impl FnOnce(&Self, &mut TestState) -> R,
+    ) -> R {
+        let result = {
+            let mut state = self.state.borrow_mut();
+            self.synchronize_inspection_mirrors_into_state(&mut state);
+            run(self, &mut state)
+        };
+        if commits_layout {
+            self.synchronize_committed_state();
+        }
+        result
+    }
+
+    fn synchronize_inspection_mirrors_into_state(&self, state: &mut TestState) {
+        for (index, session) in self.session.iter().enumerate() {
+            state.slots[index].set_unrounded(snapshot_layout(&session.layout.borrow()));
+            state.slots[index].set_rounded(snapshot_layout(&session.final_layout.borrow()));
+            if let Some(static_position) = session.static_position.get() {
+                state.slots[index].set_static_position(static_position);
+            }
+        }
+    }
+
+    fn synchronize_committed_state(&self) {
+        let state = self.state.borrow();
+        for (index, slot) in state.slots.iter().enumerate() {
+            let session = &self.session[index];
+            *session.layout.borrow_mut() = snapshot_layout(slot.unrounded());
+            *session.final_layout.borrow_mut() = snapshot_layout(slot.rounded());
+            if self.nodes[index].style.position == PositionProperty::Fixed {
+                session.static_position.set(Some(slot.static_position()));
+            }
+        }
+        self.layout_writes
+            .set(self.layout_writes.get().saturating_add(self.nodes.len()));
+        let static_writes = self
+            .nodes
+            .iter()
+            .filter(|node| node.style.position == PositionProperty::Fixed)
+            .count();
+        self.static_position_writes.set(
+            self.static_position_writes
+                .get()
+                .saturating_add(static_writes),
+        );
     }
 
     pub(super) fn enable_cache(&mut self) {
-        self.caches = Some(
-            self.nodes
-                .iter()
-                .map(|_| RefCell::new(Cache::new()))
-                .collect(),
-        );
+        self.state.get_mut().cache_enabled = true;
     }
 
     pub(super) fn push_leaf(
@@ -1345,9 +1396,7 @@ impl TestTree {
         let id = self.nodes.len();
         self.nodes.push(node);
         self.session.push(TestSessionNode::default());
-        if let Some(caches) = &mut self.caches {
-            caches.push(RefCell::new(Cache::new()));
-        }
+        self.state.get_mut().slots.push(LayoutSlot::default());
         id
     }
 
@@ -1356,7 +1405,7 @@ impl TestTree {
     }
 
     pub(super) fn committed_input(&self, id: TestId) -> Option<LayoutInput> {
-        self.caches.as_ref()?[id].borrow().committed_input()
+        self.state.borrow().slots.get(id)?.committed_input()
     }
 
     pub(super) fn session_node(&self, id: TestId) -> &TestSessionNode {
@@ -1364,11 +1413,11 @@ impl TestTree {
     }
 
     pub(super) fn layout(&self, id: TestId) -> Layout {
-        self.session_node(id).layout.borrow().clone()
+        snapshot_layout(self.state.borrow().slots[id].unrounded())
     }
 
     pub(super) fn final_layout(&self, id: TestId) -> Layout {
-        self.session_node(id).final_layout.borrow().clone()
+        snapshot_layout(self.state.borrow().slots[id].rounded())
     }
 
     pub(super) fn static_position(&self, id: TestId) -> Option<Point<f32>> {

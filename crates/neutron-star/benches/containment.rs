@@ -122,7 +122,7 @@ impl Fixture {
 
     fn warm(self) -> Self {
         let available = self.available();
-        compute_root_layout(self.tree.node(self.root), available);
+        self.tree.compute_root_layout(self.root, available);
         self
     }
 
@@ -139,37 +139,45 @@ impl Fixture {
                 .committed_input(b)
                 .expect("warmed boundary committed")
         });
-        let re_root = invalidate_for_relayout(
-            self.tree.node(self.dirty_leaf),
-            self.ancestors.iter().map(|&id| self.tree.node(id)),
-        );
+        let re_root = self.tree.with_layout_state(false, |tree, state| {
+            invalidate_for_relayout(
+                tree,
+                state,
+                self.tree.node(self.dirty_leaf),
+                self.ancestors.iter().map(|&id| self.tree.node(id)),
+            )
+        });
         if let Some(input) = committed {
-            compute_boundary_relayout(re_root, input)
+            self.tree.with_layout_state(true, |tree, state| {
+                compute_boundary_relayout(tree, state, re_root, input)
+            })
         } else {
             let available = self.available();
-            compute_root_layout(re_root, available);
+            self.tree.with_layout_state(true, |tree, state| {
+                compute_root_layout(tree, state, re_root, available);
+            });
             self.tree.layout(self.root).into_output()
         }
     }
 
     fn run_whole_path(&mut self) -> LayoutOutput {
         self.dirty_the_leaf();
-        self.tree.node(self.dirty_leaf).clear_layout_cache();
+        self.tree.clear_layout_cache(self.dirty_leaf);
         for &ancestor in &self.ancestors {
-            self.tree.node(ancestor).clear_layout_cache();
+            self.tree.clear_layout_cache(ancestor);
         }
         let available = self.available();
-        compute_root_layout(self.tree.node(self.root), available);
+        self.tree.compute_root_layout(self.root, available);
         self.tree.layout(self.root).into_output()
     }
 
     fn run_cold(&mut self) -> LayoutOutput {
         self.dirty_the_leaf();
         for id in 0..self.tree.nodes.len() {
-            self.tree.node(id).clear_layout_cache();
+            self.tree.clear_layout_cache(id);
         }
         let available = self.available();
-        compute_root_layout(self.tree.node(self.root), available);
+        self.tree.compute_root_layout(self.root, available);
         self.tree.layout(self.root).into_output()
     }
 }

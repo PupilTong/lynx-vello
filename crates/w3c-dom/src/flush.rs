@@ -83,6 +83,7 @@ impl<'a, T: Sync> DomTraversal<&'a Node<T>> for RecalcStyle<'a> {
             .as_element()
             .expect("style traversal only schedules element nodes");
         let mut data = unsafe { element.ensure_data() };
+        element.mark_layout_style_stale();
         recalc_style_at(
             self,
             traversal_data,
@@ -91,6 +92,14 @@ impl<'a, T: Sync> DomTraversal<&'a Node<T>> for RecalcStyle<'a> {
             &mut data,
             note_child,
         );
+        let layout_style = data
+            .styles
+            .primary
+            .as_deref()
+            .map_or(std::ptr::null_mut(), |style| {
+                std::ptr::from_ref(style).cast_mut()
+            });
+        element.set_layout_style_pointer(layout_style);
     }
 
     fn process_postorder(&self, _: &mut StyleContext<&'a Node<T>>, _: &'a Node<T>) {
@@ -135,8 +144,8 @@ impl<T: Sync> Document<T> {
             return FlushStatus::Skipped;
         }
         let root = root.id();
+        self.root_node().set_layout_styles_ready(false);
         let snapshots = self.take_snapshot_map();
-        #[cfg(debug_assertions)]
         let phase = self.begin_flush_phase();
         let (harvest_root, traversed) = {
             let root_ref = self
@@ -179,7 +188,6 @@ impl<T: Sync> Document<T> {
             };
             (harvest_root, should_traverse)
         };
-        #[cfg(debug_assertions)]
         drop(phase);
         self.harvest_flush(harvest_root, snapshots, sink);
         if traversed {

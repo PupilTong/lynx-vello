@@ -1,9 +1,9 @@
 //! Protocol conformance: a minimal but *complete* host implementing the
-//! neutron-star node protocol, proving [`LayoutNode`] is implementable over
+//! neutron-star tree protocol, proving [`LayoutTree`] is implementable over
 //! plain storage with zero `dyn`, zero allocation at the boundary, and zero
 //! engine-side state.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::fmt;
 
 use neutron_star::cache::Cache;
@@ -197,192 +197,172 @@ struct MockSourceNode {
     children: Vec<usize>,
 }
 
-/// Per-node layout slots, written through [`MockRef`] handles. Layout is
-/// single-threaded, so `Cell`/`RefCell` interior mutability is the whole
-/// synchronization story — the protocol has no `&mut`.
 #[derive(Debug, Default)]
-struct MockSessionNode {
-    unrounded: RefCell<Layout>,
-    finalized: RefCell<Layout>,
-    static_position: Cell<Point<f32>>,
-    cache: RefCell<Cache>,
+struct MockState {
+    slots: Vec<LayoutSlot>,
+    invalidated: Vec<usize>,
 }
 
-/// The one host tree: immutable node data plus parallel interior-mutable
-/// session slots. Builders mutate it (`&mut self`); layout only ever sees
-/// `&MockTree` through [`MockRef`] handles and writes through the slots.
+/// Immutable source tree. A separate [`MockState`] owns all mutable layout
+/// slots for an epoch.
 #[derive(Debug, Default)]
 struct MockTree {
     nodes: Vec<MockSourceNode>,
-    session: Vec<MockSessionNode>,
-    invalidated: RefCell<Vec<usize>>,
 }
 
 impl MockTree {
     fn push(&mut self, style: MockStyle, children: Vec<usize>) -> usize {
-        debug_assert_eq!(self.nodes.len(), self.session.len());
         let id = self.nodes.len();
         self.nodes.push(MockSourceNode { style, children });
-        self.session.push(MockSessionNode::default());
         id
     }
 
-    fn node(&self, id: usize) -> MockRef<'_> {
-        MockRef {
-            tree: self,
-            index: id,
+    fn node(&self, id: usize) -> MockRef {
+        debug_assert!(id < self.nodes.len());
+        MockRef { index: id }
+    }
+
+    fn new_state(&self) -> MockState {
+        MockState {
+            slots: (0..self.nodes.len())
+                .map(|_| LayoutSlot::default())
+                .collect(),
+            invalidated: Vec::new(),
         }
     }
 
-    fn compute_layout(&self, id: usize, input: LayoutInput) -> LayoutOutput {
-        self.node(id).compute_layout(input)
+    fn compute_layout(&self, state: &mut MockState, id: usize, input: LayoutInput) -> LayoutOutput {
+        LayoutTree::compute_layout(self, state, self.node(id), input)
     }
 
-    fn session_node(&self, id: usize) -> &MockSessionNode {
-        &self.session[id]
+    fn unrounded_layout<'state>(&self, state: &'state MockState, id: usize) -> &'state Layout {
+        debug_assert!(id < self.nodes.len());
+        state.slots[id].unrounded()
     }
 
-    fn unrounded_layout(&self, id: usize) -> Layout {
-        self.session_node(id).unrounded.borrow().clone()
-    }
-
-    fn final_layout(&self, id: usize) -> Layout {
-        self.session_node(id).finalized.borrow().clone()
+    fn final_layout<'state>(&self, state: &'state MockState, id: usize) -> &'state Layout {
+        debug_assert!(id < self.nodes.len());
+        state.slots[id].rounded()
     }
 }
 
-/// The `Copy` node handle: a borrow of the tree plus a node index.
+/// The `Copy` node id.
 #[derive(Clone, Copy)]
-struct MockRef<'t> {
-    tree: &'t MockTree,
+struct MockRef {
     index: usize,
 }
 
-impl fmt::Debug for MockRef<'_> {
+impl fmt::Debug for MockRef {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_tuple("MockRef").field(&self.index).finish()
     }
 }
 
-impl<'t> MockRef<'t> {
-    fn source(self) -> &'t MockSourceNode {
-        &self.tree.nodes[self.index]
-    }
-
-    fn slots(self) -> &'t MockSessionNode {
-        &self.tree.session[self.index]
-    }
-}
-
 struct MockChildren<'t> {
-    tree: &'t MockTree,
     ids: std::slice::Iter<'t, usize>,
 }
 
-impl<'t> Iterator for MockChildren<'t> {
-    type Item = MockRef<'t>;
+impl Iterator for MockChildren<'_> {
+    type Item = MockRef;
 
-    fn next(&mut self) -> Option<MockRef<'t>> {
+    fn next(&mut self) -> Option<MockRef> {
         let index = *self.ids.next()?;
-        Some(MockRef {
-            tree: self.tree,
-            index,
-        })
+        Some(MockRef { index })
     }
 }
 
-impl<'t> LayoutNode for MockRef<'t> {
-    type Style = &'t MockStyle;
-    type ChildIter = MockChildren<'t>;
+impl LayoutTree for MockTree {
+    type NodeId = MockRef;
+    type State = MockState;
+    type Style<'tree> = &'tree MockStyle;
+    type ChildIter<'tree> = MockChildren<'tree>;
 
-    fn children(self) -> MockChildren<'t> {
+    fn children(&self, node: MockRef) -> MockChildren<'_> {
         MockChildren {
-            tree: self.tree,
-            ids: self.source().children.iter(),
+            ids: self.nodes[node.index].children.iter(),
         }
     }
 
-    fn child_count(self) -> usize {
-        self.source().children.len()
+    fn style(&self, node: MockRef) -> &MockStyle {
+        &self.nodes[node.index].style
     }
 
-    fn style(self) -> &'t MockStyle {
-        &self.source().style
+    fn layout<'state>(&self, state: &'state MockState, node: MockRef) -> &'state LayoutSlot {
+        &state.slots[node.index]
     }
 
-    fn compute_layout(self, input: LayoutInput) -> LayoutOutput {
-        let style = self.style();
+    fn layout_mut<'state>(
+        &self,
+        state: &'state mut MockState,
+        node: MockRef,
+    ) -> &'state mut LayoutSlot {
+        &mut state.slots[node.index]
+    }
+
+    fn compute_layout(
+        &self,
+        state: &mut MockState,
+        node: MockRef,
+        input: LayoutInput,
+    ) -> LayoutOutput {
+        let style = self.style(node);
         if style.display().is_none() {
-            hide_subtree(self);
+            hide_subtree(self, state, node);
             return LayoutOutput::HIDDEN;
         }
 
         if style.skips_contents() {
-            return compute_skipped_contents_layout(self, input);
+            return compute_skipped_contents_layout(self, state, node, input);
         }
 
-        compute_cached_layout(self, input, |handle, input| match handle.style().display {
-            MockDisplay::Hidden => unreachable!("handled before the cache boundary"),
-            MockDisplay::Flex => compute_flexbox_layout(handle, input),
-            MockDisplay::Leaf => {
-                LayoutOutput::new(input.known_dimensions.unwrap_or(Size::ZERO), Size::ZERO)
-            }
-        })
+        let display = style.display;
+        compute_cached_layout(
+            self,
+            state,
+            node,
+            input,
+            |tree, state, node, input| match display {
+                MockDisplay::Hidden => unreachable!("handled before the cache boundary"),
+                MockDisplay::Flex => compute_flexbox_layout(tree, state, node, input),
+                MockDisplay::Leaf => {
+                    LayoutOutput::new(input.known_dimensions.unwrap_or(Size::ZERO), Size::ZERO)
+                }
+            },
+        )
     }
 
-    fn set_unrounded_layout(self, layout: Layout) {
-        *self.slots().unrounded.borrow_mut() = layout;
-    }
-
-    fn with_unrounded_layout<R>(self, read: impl FnOnce(&Layout) -> R) -> R {
-        let layout = self.slots().unrounded.borrow();
-        read(&layout)
-    }
-
-    fn set_rounded_layout(self, layout: Layout) {
-        *self.slots().finalized.borrow_mut() = layout;
-    }
-
-    fn set_static_position(self, static_position: Point<f32>) {
-        self.slots().static_position.set(static_position);
-    }
-
-    fn cached_layout(self, input: LayoutInput) -> Option<LayoutOutput> {
-        self.slots().cache.borrow().get(input)
-    }
-
-    fn store_cached_layout(self, input: LayoutInput, output: LayoutOutput) {
-        self.slots().cache.borrow_mut().store(input, output);
-    }
-
-    fn clear_layout_cache(self) {
-        self.slots().cache.borrow_mut().clear();
-        self.tree.invalidated.borrow_mut().push(self.index);
+    fn clear_layout_cache(&self, state: &mut MockState, node: MockRef) {
+        state.slots[node.index].clear_layout_cache();
+        state.invalidated.push(node.index);
     }
 }
 
-fn leaf_tree() -> (MockTree, usize) {
+fn leaf_tree() -> (MockTree, MockState, usize) {
     let mut tree = MockTree::default();
     let a = tree.push(MockStyle::default(), vec![]);
     let b = tree.push(MockStyle::default(), vec![]);
     let root = tree.push(MockStyle::default(), vec![a, b]);
-    (tree, root)
+    let state = tree.new_state();
+    (tree, state, root)
 }
 
 #[test]
 fn traversal_over_host_storage() {
-    let (tree, root) = leaf_tree();
+    let (tree, _state, root) = leaf_tree();
     let root_handle = tree.node(root);
-    assert_eq!(root_handle.child_count(), 2);
-    assert_eq!(root_handle.children().count(), 2);
-    let ids: Vec<usize> = root_handle.children().map(|child| child.index).collect();
+    assert_eq!(tree.child_count(root_handle), 2);
+    assert_eq!(tree.children(root_handle).count(), 2);
+    let ids: Vec<usize> = tree
+        .children(root_handle)
+        .map(|child| child.index)
+        .collect();
     assert_eq!(ids, tree.nodes[root].children);
 }
 
 #[test]
 fn style_views_serve_initial_defaults() {
     let style = MockStyle::default();
-    let view: <MockRef<'_> as LayoutNode>::Style = &style;
+    let view: <MockTree as LayoutTree>::Style<'_> = &style;
     assert_eq!(view.position(), PositionProperty::Static);
     assert_eq!(view.visibility(), visibility::T::Visible);
     assert!(matches!(view.size().width, StyleSize::Auto));
@@ -452,7 +432,8 @@ fn grid_track_view_remains_live_across_recursive_session_layout() {
         vec![child],
     );
 
-    let style = tree.node(root).style();
+    let mut state = tree.new_state();
+    let style = tree.style(tree.node(root));
     let GridTemplateComponent::TrackList(tracks) = style.grid_template_columns() else {
         panic!("expected a track list");
     };
@@ -464,6 +445,7 @@ fn grid_track_view_remains_live_across_recursive_session_layout() {
     }
 
     let output = tree.compute_layout(
+        &mut state,
         child,
         LayoutInput::commit(
             Size::new(Some(25.0), Some(10.0)),
@@ -482,27 +464,31 @@ fn grid_track_view_remains_live_across_recursive_session_layout() {
 
 #[test]
 fn leaf_dispatch_round_trips_layout_io() {
-    let (tree, root) = leaf_tree();
-    let child = tree.node(root).children().next().unwrap();
+    let (tree, mut state, root) = leaf_tree();
+    let child = tree.children(tree.node(root)).next().unwrap();
     let input = LayoutInput::commit(Size::new(Some(40.0), None), Size::NONE, Size::MAX_CONTENT);
-    let output = child.compute_layout(input);
+    let output = LayoutTree::compute_layout(&tree, &mut state, child, input);
     assert_eq!(output.size, Size::new(40.0, 0.0));
 
     let mut layout = Layout::with_order(0);
     layout.size = output.size;
-    child.set_unrounded_layout(layout);
+    tree.layout_mut(&mut state, child).set_unrounded(layout);
     assert_eq!(
-        child.with_unrounded_layout(|layout| layout.size),
+        tree.layout(&state, child).unrounded().size,
         Size::new(40.0, 0.0)
     );
 }
 
 #[test]
 fn static_position_round_trips_through_the_tree() {
-    let (tree, root) = leaf_tree();
-    let child = tree.node(root).children().nth(1).unwrap();
-    child.set_static_position(Point::new(12.5, 7.0));
-    assert_eq!(child.slots().static_position.get(), Point::new(12.5, 7.0));
+    let (tree, mut state, root) = leaf_tree();
+    let child = tree.children(tree.node(root)).nth(1).unwrap();
+    tree.layout_mut(&mut state, child)
+        .set_static_position(Point::new(12.5, 7.0));
+    assert_eq!(
+        tree.layout(&state, child).static_position(),
+        Point::new(12.5, 7.0)
+    );
 }
 
 #[test]
@@ -516,16 +502,18 @@ fn embeddable_cache_lifecycle() {
 
 #[test]
 fn compute_root_layout_stores_the_root_box() {
-    let (tree, root) = leaf_tree();
+    let (tree, mut state, root) = leaf_tree();
     compute_root_layout(
+        &tree,
+        &mut state,
         tree.node(root),
         Size::new(
             AvailableSpace::Definite(100.0),
             AvailableSpace::Definite(80.0),
         ),
     );
-    assert_eq!(tree.unrounded_layout(root).location, Point::ZERO);
-    assert_eq!(tree.unrounded_layout(root).size, Size::ZERO);
+    assert_eq!(tree.unrounded_layout(&state, root).location, Point::ZERO);
+    assert_eq!(tree.unrounded_layout(&state, root).size, Size::ZERO);
 }
 
 #[test]
@@ -539,16 +527,19 @@ fn compute_root_layout_resolves_horizontal_auto_margins() {
         },
         vec![],
     );
+    let mut state = tree.new_state();
     compute_root_layout(
+        &tree,
+        &mut state,
         tree.node(root),
         Size::new(
             AvailableSpace::Definite(100.0),
             AvailableSpace::Definite(20.0),
         ),
     );
-    assert_eq!(tree.unrounded_layout(root).margin.left, 50.0);
-    assert_eq!(tree.unrounded_layout(root).margin.right, 50.0);
-    assert_eq!(tree.unrounded_layout(root).location.x, 50.0);
+    assert_eq!(tree.unrounded_layout(&state, root).margin.left, 50.0);
+    assert_eq!(tree.unrounded_layout(&state, root).margin.right, 50.0);
+    assert_eq!(tree.unrounded_layout(&state, root).location.x, 50.0);
 }
 
 #[test]
@@ -562,19 +553,22 @@ fn compute_root_layout_preserves_a_hidden_zero_box() {
         },
         vec![],
     );
+    let mut state = tree.new_state();
     compute_root_layout(
+        &tree,
+        &mut state,
         tree.node(root),
         Size::new(
             AvailableSpace::Definite(100.0),
             AvailableSpace::Definite(20.0),
         ),
     );
-    assert_eq!(tree.unrounded_layout(root), Layout::default());
+    assert_eq!(tree.unrounded_layout(&state, root), &Layout::default());
 }
 
 #[test]
 fn explicit_hidden_cleanup_clears_stale_geometry() {
-    let (mut tree, root) = leaf_tree();
+    let (mut tree, _state, root) = leaf_tree();
     let hidden = tree.push(
         MockStyle {
             display: MockDisplay::Hidden,
@@ -582,18 +576,19 @@ fn explicit_hidden_cleanup_clears_stale_geometry() {
         },
         vec![root],
     );
-    let mut stale = tree.session_node(hidden).unrounded.borrow().clone();
-    stale.size = Size::new(50.0, 20.0);
-    *tree.session_node(hidden).unrounded.borrow_mut() = stale;
-    let mut stale = tree.session_node(root).unrounded.borrow().clone();
-    stale.size = Size::new(40.0, 10.0);
-    *tree.session_node(root).unrounded.borrow_mut() = stale;
+    let mut state = tree.new_state();
+    let mut hidden_layout = Layout::default();
+    hidden_layout.size = Size::new(50.0, 20.0);
+    state.slots[hidden].set_unrounded(hidden_layout);
+    let mut root_layout = Layout::default();
+    root_layout.size = Size::new(40.0, 10.0);
+    state.slots[root].set_unrounded(root_layout);
 
-    hide_subtree(tree.node(hidden));
-    assert_eq!(tree.unrounded_layout(hidden), Layout::default());
-    assert_eq!(tree.unrounded_layout(root), Layout::default());
-    assert!(tree.invalidated.borrow().contains(&hidden));
-    assert!(tree.invalidated.borrow().contains(&root));
+    hide_subtree(&tree, &mut state, tree.node(hidden));
+    assert_eq!(tree.unrounded_layout(&state, hidden), &Layout::default());
+    assert_eq!(tree.unrounded_layout(&state, root), &Layout::default());
+    assert!(state.invalidated.contains(&hidden));
+    assert!(state.invalidated.contains(&root));
 }
 
 #[test]
@@ -648,55 +643,73 @@ fn calc_padding_resolves_through_stylo_style_values() {
 
 #[test]
 fn compute_cached_layout_runs_an_uncached_dispatch() {
-    let (tree, root) = leaf_tree();
+    let (tree, mut state, root) = leaf_tree();
     let calls = Cell::new(0);
-    let output = compute_cached_layout(tree.node(root), LayoutInput::default(), |node, input| {
-        calls.set(calls.get() + 1);
-        node.compute_layout(input)
-    });
+    let output = compute_cached_layout(
+        &tree,
+        &mut state,
+        tree.node(root),
+        LayoutInput::default(),
+        |tree, state, node, input| {
+            calls.set(calls.get() + 1);
+            LayoutTree::compute_layout(tree, state, node, input)
+        },
+    );
     assert_eq!(calls.get(), 1);
     assert_eq!(output, LayoutOutput::HIDDEN);
 }
 
 #[test]
 fn compute_absolute_layout_uses_the_static_position() {
-    let (tree, root) = leaf_tree();
-    let hoisted = tree.node(root).children().next().unwrap();
-    let layout = compute_absolute_layout(hoisted, Size::new(800.0, 600.0), Point::new(12.5, 7.0));
+    let (tree, mut state, root) = leaf_tree();
+    let hoisted = tree.children(tree.node(root)).next().unwrap();
+    let layout = compute_absolute_layout(
+        &tree,
+        &mut state,
+        hoisted,
+        Size::new(800.0, 600.0),
+        Point::new(12.5, 7.0),
+    );
     assert_eq!(layout.location, Point::new(12.5, 7.0));
     assert_eq!(layout.size, Size::ZERO);
 }
 
 #[test]
 fn round_layout_snaps_on_the_device_pixel_grid() {
-    let (tree, root) = leaf_tree();
+    let (tree, mut state, root) = leaf_tree();
     let child = tree.nodes[root].children[0];
     let mut root_layout = Layout::default();
     root_layout.location = Point::new(0.24, 0.24);
     root_layout.size = Size::new(10.26, 10.26);
-    *tree.session_node(root).unrounded.borrow_mut() = root_layout;
+    state.slots[root].set_unrounded(root_layout);
     let mut child_layout = Layout::default();
     child_layout.location = Point::new(0.26, 0.26);
     child_layout.size = Size::new(4.74, 4.74);
-    *tree.session_node(child).unrounded.borrow_mut() = child_layout;
+    state.slots[child].set_unrounded(child_layout);
 
-    round_layout(tree.node(root), 2.0);
-    assert_eq!(tree.final_layout(root).location, Point::ZERO);
-    assert_eq!(tree.final_layout(root).size, Size::new(10.5, 10.5));
-    assert_eq!(tree.final_layout(child).location, Point::new(0.5, 0.5));
-    assert_eq!(tree.final_layout(child).size, Size::new(4.5, 4.5));
+    round_layout(&tree, &mut state, tree.node(root), 2.0);
+    assert_eq!(tree.final_layout(&state, root).location, Point::ZERO);
+    assert_eq!(tree.final_layout(&state, root).size, Size::new(10.5, 10.5));
+    assert_eq!(
+        tree.final_layout(&state, child).location,
+        Point::new(0.5, 0.5)
+    );
+    assert_eq!(tree.final_layout(&state, child).size, Size::new(4.5, 4.5));
 }
 
 #[test]
 fn round_layout_uses_css_positive_infinity_tie_breaking() {
-    let (tree, root) = leaf_tree();
+    let (tree, mut state, root) = leaf_tree();
     let mut root_layout = Layout::default();
     root_layout.location = Point::new(-0.75, 0.75);
-    *tree.session_node(root).unrounded.borrow_mut() = root_layout;
+    state.slots[root].set_unrounded(root_layout);
 
-    round_layout(tree.node(root), 2.0);
+    round_layout(&tree, &mut state, tree.node(root), 2.0);
 
-    assert_eq!(tree.final_layout(root).location, Point::new(-0.5, 1.0));
+    assert_eq!(
+        tree.final_layout(&state, root).location,
+        Point::new(-0.5, 1.0)
+    );
 }
 
 #[test]
@@ -722,103 +735,11 @@ fn embeddable_cache_round_trips_a_complete_key() {
     assert_eq!(cache.get(same_geometry_but_indefinite), None);
 }
 
-/// A minimal host that does not override `child_count`: the protocol
-/// default must count through the `children()` iterator.
-#[derive(Clone, Copy)]
-struct CountingRef<'t> {
-    tree: &'t MockTree,
-    index: usize,
-}
-
-impl fmt::Debug for CountingRef<'_> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_tuple("CountingRef")
-            .field(&self.index)
-            .finish()
-    }
-}
-
-struct CountingChildren<'t> {
-    tree: &'t MockTree,
-    ids: std::slice::Iter<'t, usize>,
-}
-
-impl<'t> Iterator for CountingChildren<'t> {
-    type Item = CountingRef<'t>;
-
-    fn next(&mut self) -> Option<CountingRef<'t>> {
-        let index = *self.ids.next()?;
-        Some(CountingRef {
-            tree: self.tree,
-            index,
-        })
-    }
-}
-
-impl<'t> LayoutNode for CountingRef<'t> {
-    type Style = &'t MockStyle;
-    type ChildIter = CountingChildren<'t>;
-
-    fn children(self) -> CountingChildren<'t> {
-        CountingChildren {
-            tree: self.tree,
-            ids: self.tree.nodes[self.index].children.iter(),
-        }
-    }
-
-    fn style(self) -> &'t MockStyle {
-        &self.tree.nodes[self.index].style
-    }
-
-    fn compute_layout(self, input: LayoutInput) -> LayoutOutput {
-        LayoutOutput::new(input.known_dimensions.unwrap_or(Size::ZERO), Size::ZERO)
-    }
-
-    fn set_unrounded_layout(self, layout: Layout) {
-        *self.tree.session[self.index].unrounded.borrow_mut() = layout;
-    }
-
-    fn with_unrounded_layout<R>(self, read: impl FnOnce(&Layout) -> R) -> R {
-        let layout = self.tree.session[self.index].unrounded.borrow();
-        read(&layout)
-    }
-
-    fn set_rounded_layout(self, layout: Layout) {
-        *self.tree.session[self.index].finalized.borrow_mut() = layout;
-    }
-
-    fn set_static_position(self, static_position: Point<f32>) {
-        self.tree.session[self.index]
-            .static_position
-            .set(static_position);
-    }
-
-    fn cached_layout(self, _input: LayoutInput) -> Option<LayoutOutput> {
-        None
-    }
-
-    fn store_cached_layout(self, _input: LayoutInput, _output: LayoutOutput) {}
-
-    fn clear_layout_cache(self) {}
-}
-
 #[test]
 fn default_child_count_counts_the_children_iterator() {
-    let (tree, root) = leaf_tree();
-    let handle = CountingRef {
-        tree: &tree,
-        index: root,
-    };
-    assert_eq!(handle.child_count(), 2);
-    assert_eq!(
-        CountingRef {
-            tree: &tree,
-            index: tree.nodes[root].children[0],
-        }
-        .child_count(),
-        0
-    );
+    let (tree, _state, root) = leaf_tree();
+    assert_eq!(tree.child_count(tree.node(root)), 2);
+    assert_eq!(tree.child_count(tree.node(tree.nodes[root].children[0])), 0);
 }
 
 fn size_px(value: f32) -> StyleSize {
@@ -861,24 +782,27 @@ fn invalidate_for_relayout_stops_at_the_nearest_boundary() {
     let leaf = tree.push(MockStyle::default(), vec![]);
     let boundary = tree.push(contained_style(Contain::STRICT), vec![leaf]);
     let root = tree.push(MockStyle::default(), vec![boundary]);
+    let mut state = tree.new_state();
 
     for node in [leaf, boundary, root] {
-        tree.session_node(node).cache.borrow_mut().store(
+        state.slots[node].store_cached_layout(
             LayoutInput::default(),
             LayoutOutput::new(Size::new(1.0, 1.0), Size::ZERO),
         );
     }
 
     let re_root = invalidate_for_relayout(
+        &tree,
+        &mut state,
         tree.node(leaf),
         [tree.node(boundary), tree.node(root)].into_iter(),
     );
 
     assert_eq!(re_root.index, boundary);
-    assert_eq!(*tree.invalidated.borrow(), vec![leaf, boundary]);
-    assert!(tree.session_node(leaf).cache.borrow().is_empty());
-    assert!(tree.session_node(boundary).cache.borrow().is_empty());
-    assert!(!tree.session_node(root).cache.borrow().is_empty());
+    assert_eq!(state.invalidated, vec![leaf, boundary]);
+    assert!(state.slots[leaf].layout_cache_is_empty());
+    assert!(state.slots[boundary].layout_cache_is_empty());
+    assert!(!state.slots[root].layout_cache_is_empty());
 }
 
 #[test]
@@ -887,28 +811,32 @@ fn invalidate_for_relayout_walks_to_root_without_a_boundary() {
     let leaf = tree.push(MockStyle::default(), vec![]);
     let mid = tree.push(contained_style(Contain::CONTENT), vec![leaf]);
     let root = tree.push(MockStyle::default(), vec![mid]);
+    let mut state = tree.new_state();
 
     let re_root = invalidate_for_relayout(
+        &tree,
+        &mut state,
         tree.node(leaf),
         [tree.node(mid), tree.node(root)].into_iter(),
     );
 
     assert_eq!(re_root.index, root);
-    assert_eq!(*tree.invalidated.borrow(), vec![leaf, mid, root]);
+    assert_eq!(state.invalidated, vec![leaf, mid, root]);
 }
 
 #[test]
 fn invalidate_for_relayout_returns_the_node_when_it_is_the_root() {
     let mut tree = MockTree::default();
     let lone = tree.push(MockStyle::default(), vec![]);
+    let mut state = tree.new_state();
 
-    let re_root = invalidate_for_relayout(tree.node(lone), std::iter::empty());
+    let re_root = invalidate_for_relayout(&tree, &mut state, tree.node(lone), std::iter::empty());
 
     assert_eq!(re_root.index, lone);
-    assert_eq!(*tree.invalidated.borrow(), vec![lone]);
+    assert_eq!(state.invalidated, vec![lone]);
 }
 
-fn stretched_boundary_tree() -> (MockTree, usize, usize, usize) {
+fn stretched_boundary_tree() -> (MockTree, MockState, usize, usize, usize) {
     let mut tree = MockTree::default();
     let interior = tree.push(
         MockStyle {
@@ -936,53 +864,63 @@ fn stretched_boundary_tree() -> (MockTree, usize, usize, usize) {
         },
         vec![boundary],
     );
+    let mut state = tree.new_state();
 
     tree.compute_layout(
+        &mut state,
         parent,
         LayoutInput::commit(Size::NONE, Size::NONE, Size::MAX_CONTENT),
     );
-    (tree, parent, boundary, interior)
+    (tree, state, parent, boundary, interior)
 }
 
 #[test]
 fn compute_boundary_relayout_preserves_the_parent_imposed_size_and_updates_the_interior() {
-    let (mut tree, parent, boundary, interior) = stretched_boundary_tree();
+    let (mut tree, mut state, parent, boundary, interior) = stretched_boundary_tree();
 
-    let boundary_layout = tree.unrounded_layout(boundary);
-    assert_eq!(boundary_layout.size, Size::new(50.0, 200.0));
-    assert_eq!(tree.unrounded_layout(interior).size, Size::new(40.0, 200.0));
+    let boundary_location = tree.unrounded_layout(&state, boundary).location;
+    let boundary_size = tree.unrounded_layout(&state, boundary).size;
+    assert_eq!(boundary_size, Size::new(50.0, 200.0));
+    assert_eq!(
+        tree.unrounded_layout(&state, interior).size,
+        Size::new(40.0, 200.0)
+    );
 
-    let committed = tree
-        .session_node(boundary)
-        .cache
-        .borrow()
+    let committed = state.slots[boundary]
         .committed_input()
         .expect("the boundary has a committed layout");
 
     tree.nodes[interior].style.size.width = size_px(20.0);
 
     let re_root = invalidate_for_relayout(
+        &tree,
+        &mut state,
         tree.node(interior),
         [tree.node(boundary), tree.node(parent)].into_iter(),
     );
     assert_eq!(re_root.index, boundary);
 
-    let output = compute_boundary_relayout(tree.node(boundary), committed);
+    let output = compute_boundary_relayout(&tree, &mut state, tree.node(boundary), committed);
 
     assert_eq!(output.size, Size::new(50.0, 200.0));
-    let after = tree.unrounded_layout(boundary);
-    assert_eq!(after.location, boundary_layout.location);
-    assert_eq!(after.size, boundary_layout.size);
-    assert_eq!(tree.unrounded_layout(interior).size, Size::new(20.0, 200.0));
+    let after = tree.unrounded_layout(&state, boundary);
+    assert_eq!(after.location, boundary_location);
+    assert_eq!(after.size, boundary_size);
+    assert_eq!(
+        tree.unrounded_layout(&state, interior).size,
+        Size::new(20.0, 200.0)
+    );
 }
 
 #[test]
 fn compute_root_layout_would_resize_a_stretched_boundary_regression_contrast() {
-    let (tree, _parent, boundary, _interior) = stretched_boundary_tree();
-    let stretched = tree.unrounded_layout(boundary).size;
+    let (tree, mut state, _parent, boundary, _interior) = stretched_boundary_tree();
+    let stretched = tree.unrounded_layout(&state, boundary).size;
     assert_eq!(stretched, Size::new(50.0, 200.0));
 
     compute_root_layout(
+        &tree,
+        &mut state,
         tree.node(boundary),
         Size::new(
             AvailableSpace::Definite(300.0),
@@ -990,7 +928,7 @@ fn compute_root_layout_would_resize_a_stretched_boundary_regression_contrast() {
         ),
     );
 
-    let self_determined = tree.unrounded_layout(boundary).size;
+    let self_determined = tree.unrounded_layout(&state, boundary).size;
     assert_eq!(self_determined, Size::new(50.0, 30.0));
     assert_ne!(self_determined, stretched);
 }
@@ -1009,11 +947,13 @@ fn skipped_contents_dispatch_sizes_from_intrinsic_and_hides_descendants() {
         },
         vec![child],
     );
-    let mut stale = tree.session_node(child).unrounded.borrow().clone();
-    stale.size = Size::new(99.0, 99.0);
-    *tree.session_node(child).unrounded.borrow_mut() = stale;
+    let mut state = tree.new_state();
+    let mut child_layout = Layout::default();
+    child_layout.size = Size::new(99.0, 99.0);
+    state.slots[child].set_unrounded(child_layout);
 
     let output = tree.compute_layout(
+        &mut state,
         skipped,
         LayoutInput::commit(
             Size::NONE,
@@ -1027,6 +967,6 @@ fn skipped_contents_dispatch_sizes_from_intrinsic_and_hides_descendants() {
 
     assert_eq!(output.size, Size::new(40.0, 24.0));
     assert_eq!(output.first_baselines, Point::NONE);
-    assert_eq!(tree.unrounded_layout(child), Layout::default());
-    assert!(tree.invalidated.borrow().contains(&child));
+    assert_eq!(tree.unrounded_layout(&state, child), &Layout::default());
+    assert!(state.invalidated.contains(&child));
 }

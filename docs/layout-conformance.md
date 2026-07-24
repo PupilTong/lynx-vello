@@ -33,8 +33,9 @@ Normative and source references:
 | Linear | orientation and direction; gravity precedence; weight sums, exhausted space, min/max freezing, and redistribution; order and visibility; intrinsic and constrained measurement; baseline synthesis; auto margins; absolute and hoisted static positions; nested algorithm dispatch | Starlight `DetermineItemSize`, `LayoutWeightedChildren`, `AlignInFlowItems`, `CrossAxisAlignment`, and `SetContainerBaseline` |
 | Relative | parent and sibling alignment/adjacency; missing and duplicate ids; deterministic dependency ordering and cycle fallback; one-pass and two-pass measurement; one-sided and double-sided measurement constraints; wrap/minmax feedback; visibility; absolute and hoisted static positions | Starlight `ComputeConstraints`, `GetPositionConstraints`, `Sort`, `LayoutItems`, and `PositionItems` |
 
-The integration suites use the same `LayoutNode` handle and
-leaf-measurement protocol as a real host. Every retained case asserts an exact
+The integration suites use the same `LayoutTree` protocol as a real host:
+plain node IDs over an immutable tree/style view and a separately borrowed
+plain mutable layout/text state. Every retained case asserts an exact
 observable result such as geometry, used margins, baseline, layout order,
 static position, measurement input, or cache traffic. Determinism, finite
 numbers, source-file contents, and test counts are not correctness oracles.

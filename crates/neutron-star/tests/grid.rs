@@ -19,7 +19,7 @@ use support::{
     TestId, TestMeasure, TestStyle, assert_close, assert_point, assert_size, border_px,
     breadth_px as fixed_breadth, definite_layout, gap_pct, gap_px, grid_line as line,
     grid_span as span, inset_px, justify_items, margin_px, max_px, npx as nn_px, px as lp,
-    size_pct, size_px, track_auto as auto_track, track_fr as fr,
+    size_pct, size_px, snapshot_layout, track_auto as auto_track, track_fr as fr,
     track_max_content as max_content_track, track_minmax as minmax, track_pct as percent,
     track_px as px, track_repeat as repeat,
 };
@@ -68,7 +68,7 @@ impl TestTree {
         let mut sentinel = Layout::default();
         sentinel.location = Point::new(1_234.0, 5_678.0);
         sentinel.size = Size::new(9_876.0, 5_432.0);
-        *self.0.session_node(id).layout.borrow_mut() = sentinel.clone();
+        *self.0.session_node(id).layout.borrow_mut() = snapshot_layout(&sentinel);
         sentinel
     }
 }
@@ -966,8 +966,8 @@ fn measure_goal_probes_intrinsics_without_durable_writes() {
     let mut sentinel = Layout::default();
     sentinel.location = Point::new(123.0, 456.0);
     sentinel.size = Size::new(7.0, 8.0);
-    *tree.session_node(child).layout.borrow_mut() = sentinel.clone();
-    *tree.session_node(root).layout.borrow_mut() = sentinel.clone();
+    *tree.session_node(child).layout.borrow_mut() = snapshot_layout(&sentinel);
+    *tree.session_node(root).layout.borrow_mut() = snapshot_layout(&sentinel);
 
     let output = tree.compute_layout(
         root,
@@ -997,7 +997,7 @@ fn hidden_and_out_of_flow_children_do_not_occupy_grid_cells() {
     hidden_style.display = Display::None;
     let hidden = tree.push_leaf(hidden_style, Size::ZERO, Size::new(1_000.0, 1_000.0));
     let hidden_slots = tree.session_node(hidden);
-    let mut hidden_sentinel = hidden_slots.layout.borrow().clone();
+    let mut hidden_sentinel = snapshot_layout(&hidden_slots.layout.borrow());
     hidden_sentinel.size = Size::new(999.0, 999.0);
     *hidden_slots.layout.borrow_mut() = hidden_sentinel;
 
@@ -1144,8 +1144,15 @@ fn baseline_static_fallback_uses_self_start_and_safe_container_start() {
         Some(Point::new(80.0, 0.0))
     );
     let static_position = tree.session_node(rtl).static_position.get().unwrap();
-    let positioned =
-        compute_absolute_layout(tree.node(rtl), Size::new(100.0, 50.0), static_position);
+    let positioned = tree.with_layout_state(true, |tree, state| {
+        compute_absolute_layout(
+            tree,
+            state,
+            tree.node(rtl),
+            Size::new(100.0, 50.0),
+            static_position,
+        )
+    });
     assert_point(positioned.location, Point::new(80.0, 0.0));
 }
 
@@ -1171,8 +1178,15 @@ fn hoisted_absolute_records_grid_aware_static_position_for_positioned_pass() {
     );
 
     let static_position = tree.session_node(child).static_position.get().unwrap();
-    let positioned =
-        compute_absolute_layout(tree.node(child), Size::new(100.0, 50.0), static_position);
+    let positioned = tree.with_layout_state(true, |tree, state| {
+        compute_absolute_layout(
+            tree,
+            state,
+            tree.node(child),
+            Size::new(100.0, 50.0),
+            static_position,
+        )
+    });
     assert_point(positioned.location, Point::new(42.5, 40.0));
     assert_size(positioned.size, Size::new(20.0, 10.0));
 }

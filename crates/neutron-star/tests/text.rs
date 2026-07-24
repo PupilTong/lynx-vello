@@ -1,16 +1,13 @@
 //! Parley text measurement conformance and host-integration tests.
 
-use std::cell::{Cell, RefCell};
-
-use neutron_star::cache::Cache;
 use neutron_star::compute::{
     LeafMeasureInput, compute_cached_layout, compute_flexbox_layout, compute_root_layout,
 };
-use neutron_star::geometry::{Edges, Point, Size};
+use neutron_star::geometry::{Edges, Size};
 use neutron_star::style::{CoreStyle, TextContainerStyle, TextRun, TextRunStyle};
 use neutron_star::text::{TextContext, TextLayoutStore, TextMeasurer};
 use neutron_star::tree::{
-    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
+    AvailableSpace, LayoutGoal, LayoutInput, LayoutOutput, LayoutSlot, LayoutTree, RequestedAxis,
 };
 use parley::layout::BreakReason;
 use stylo::Atom;
@@ -772,157 +769,130 @@ struct SourceNode {
     children: Vec<usize>,
 }
 
-/// Per-node interior-mutable session slots, written through [`HostRef`]
-/// handles.
-#[derive(Debug, Default)]
-struct SessionNode {
-    cache: RefCell<Cache>,
-    layout: RefCell<Layout>,
-    artifacts: RefCell<TextLayoutStore>,
-    static_position: Cell<Point<f32>>,
+#[derive(Debug)]
+struct HostState {
+    slots: Vec<LayoutSlot>,
+    artifacts: Vec<TextLayoutStore>,
+    text: TextContext,
+    leaf_measure_calls: usize,
 }
 
-/// The one host tree: immutable source nodes plus parallel session slots,
-/// a tree-level [`TextContext`], and instrumentation counters.
+/// Immutable source tree. Layout slots, retained text artifacts, and the
+/// shared text context live in the separately borrowed [`HostState`].
 #[derive(Debug)]
 struct HostTree {
     nodes: Vec<SourceNode>,
-    session: Vec<SessionNode>,
-    text: RefCell<TextContext>,
-    leaf_measure_calls: Cell<usize>,
 }
 
 impl HostTree {
-    fn new(nodes: Vec<SourceNode>) -> Self {
-        let session = nodes.iter().map(|_| SessionNode::default()).collect();
-        Self {
-            nodes,
-            session,
-            text: RefCell::new(text_context()),
-            leaf_measure_calls: Cell::new(0),
-        }
+    fn new(nodes: Vec<SourceNode>) -> (Self, HostState) {
+        let state = HostState {
+            slots: nodes.iter().map(|_| LayoutSlot::default()).collect(),
+            artifacts: nodes.iter().map(|_| TextLayoutStore::default()).collect(),
+            text: text_context(),
+            leaf_measure_calls: 0,
+        };
+        (Self { nodes }, state)
     }
 
-    fn node(&self, index: usize) -> HostRef<'_> {
-        HostRef { tree: self, index }
-    }
-
-    fn session_node(&self, index: usize) -> &SessionNode {
-        &self.session[index]
+    fn node(&self, index: usize) -> HostRef {
+        debug_assert!(index < self.nodes.len());
+        HostRef(index)
     }
 }
 
-/// The `Copy` node handle: a borrow of the tree plus a node index.
+/// The `Copy` node id.
 #[derive(Clone, Copy)]
-struct HostRef<'t> {
-    tree: &'t HostTree,
-    index: usize,
-}
+struct HostRef(usize);
 
-impl core::fmt::Debug for HostRef<'_> {
+impl core::fmt::Debug for HostRef {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter.debug_tuple("HostRef").field(&self.index).finish()
-    }
-}
-
-impl<'t> HostRef<'t> {
-    fn source(self) -> &'t SourceNode {
-        &self.tree.nodes[self.index]
-    }
-
-    fn slots(self) -> &'t SessionNode {
-        &self.tree.session[self.index]
+        formatter.debug_tuple("HostRef").field(&self.0).finish()
     }
 }
 
 struct HostChildren<'t> {
-    tree: &'t HostTree,
     ids: core::slice::Iter<'t, usize>,
 }
 
-impl<'t> Iterator for HostChildren<'t> {
-    type Item = HostRef<'t>;
+impl Iterator for HostChildren<'_> {
+    type Item = HostRef;
 
-    fn next(&mut self) -> Option<HostRef<'t>> {
+    fn next(&mut self) -> Option<HostRef> {
         let index = *self.ids.next()?;
-        Some(HostRef {
-            tree: self.tree,
-            index,
-        })
+        Some(HostRef(index))
     }
 }
 
-impl<'t> LayoutNode for HostRef<'t> {
-    type Style = &'t HostStyle;
-    type ChildIter = HostChildren<'t>;
+impl LayoutTree for HostTree {
+    type NodeId = HostRef;
+    type State = HostState;
+    type Style<'tree> = &'tree HostStyle;
+    type ChildIter<'tree> = HostChildren<'tree>;
 
-    fn children(self) -> HostChildren<'t> {
+    fn children(&self, node: HostRef) -> HostChildren<'_> {
         HostChildren {
-            tree: self.tree,
-            ids: self.source().children.iter(),
+            ids: self.nodes[node.0].children.iter(),
         }
     }
 
-    fn child_count(self) -> usize {
-        self.source().children.len()
+    fn child_count(&self, node: HostRef) -> usize {
+        self.nodes[node.0].children.len()
     }
 
-    fn style(self) -> &'t HostStyle {
-        &self.source().style
+    fn style(&self, node: HostRef) -> &HostStyle {
+        &self.nodes[node.0].style
     }
 
-    fn compute_layout(self, input: LayoutInput) -> LayoutOutput {
-        let node = self.source();
-        let display = node.display;
-        compute_cached_layout(self, input, |handle, input| match display {
-            HostDisplay::Flex => compute_flexbox_layout(handle, input),
-            HostDisplay::Text => {
-                let tree = handle.tree;
-                tree.leaf_measure_calls
-                    .set(tree.leaf_measure_calls.get() + 1);
-                let run = [TextRun {
-                    text: node.text,
-                    style: &node.run_style,
-                    preserve_newlines: false,
-                }];
-                let mut text = tree.text.borrow_mut();
-                let mut artifacts = handle.slots().artifacts.borrow_mut();
-                let mut measurer =
-                    TextMeasurer::new(&mut text, &mut artifacts, &node.style, run.into_iter());
-                measurer.compute_layout(input)
-            }
-        })
+    fn layout<'state>(&self, state: &'state HostState, node: HostRef) -> &'state LayoutSlot {
+        &state.slots[node.0]
     }
 
-    fn set_unrounded_layout(self, layout: Layout) {
-        *self.slots().layout.borrow_mut() = layout;
+    fn layout_mut<'state>(
+        &self,
+        state: &'state mut HostState,
+        node: HostRef,
+    ) -> &'state mut LayoutSlot {
+        &mut state.slots[node.0]
     }
 
-    fn with_unrounded_layout<R>(self, read: impl FnOnce(&Layout) -> R) -> R {
-        let layout = self.slots().layout.borrow();
-        read(&layout)
+    fn compute_layout(
+        &self,
+        state: &mut HostState,
+        node: HostRef,
+        input: LayoutInput,
+    ) -> LayoutOutput {
+        let source = &self.nodes[node.0];
+        let display = source.display;
+        compute_cached_layout(
+            self,
+            state,
+            node,
+            input,
+            |tree, state, node, input| match display {
+                HostDisplay::Flex => compute_flexbox_layout(tree, state, node, input),
+                HostDisplay::Text => {
+                    state.leaf_measure_calls += 1;
+                    let run = [TextRun {
+                        text: source.text,
+                        style: &source.run_style,
+                        preserve_newlines: false,
+                    }];
+                    let mut measurer = TextMeasurer::new(
+                        &mut state.text,
+                        &mut state.artifacts[node.0],
+                        &source.style,
+                        run.into_iter(),
+                    );
+                    measurer.compute_layout(input)
+                }
+            },
+        )
     }
 
-    fn set_rounded_layout(self, _layout: Layout) {
-        unreachable!("host test never rounds layouts")
-    }
-
-    fn set_static_position(self, static_position: Point<f32>) {
-        self.slots().static_position.set(static_position);
-    }
-
-    fn cached_layout(self, input: LayoutInput) -> Option<LayoutOutput> {
-        self.slots().cache.borrow().get(input)
-    }
-
-    fn store_cached_layout(self, input: LayoutInput, output: LayoutOutput) {
-        self.slots().cache.borrow_mut().store(input, output);
-    }
-
-    fn clear_layout_cache(self) {
-        let slots = self.slots();
-        slots.cache.borrow_mut().clear();
-        slots.artifacts.borrow_mut().invalidate();
+    fn clear_layout_cache(&self, state: &mut HostState, node: HostRef) {
+        state.slots[node.0].clear_layout_cache();
+        state.artifacts[node.0].invalidate();
     }
 }
 
@@ -931,7 +901,7 @@ fn flex_baseline_integration_reuses_artifacts_and_jointly_invalidates_caches() {
     let root = 0;
     let small = 1;
     let large = 2;
-    let tree = HostTree::new(vec![
+    let (tree, mut state) = HostTree::new(vec![
         SourceNode {
             display: HostDisplay::Flex,
             style: HostStyle {
@@ -958,52 +928,34 @@ fn flex_baseline_integration_reuses_artifacts_and_jointly_invalidates_caches() {
         },
     ]);
 
-    compute_root_layout(tree.node(root), Size::MAX_CONTENT);
+    compute_root_layout(&tree, &mut state, tree.node(root), Size::MAX_CONTENT);
 
-    let small_state = tree.session_node(small);
-    let large_state = tree.session_node(large);
-    let small_baseline = small_state.layout.borrow().location.y
-        + small_state
-            .artifacts
-            .borrow()
+    let small_baseline = state.slots[small].unrounded().location.y
+        + state.artifacts[small]
             .committed()
             .expect("small committed text")
             .first_baseline()
             .expect("small baseline");
-    let large_baseline = large_state.layout.borrow().location.y
-        + large_state
-            .artifacts
-            .borrow()
+    let large_baseline = state.slots[large].unrounded().location.y
+        + state.artifacts[large]
             .committed()
             .expect("large committed text")
             .first_baseline()
             .expect("large baseline");
     assert_close(small_baseline, large_baseline);
-    assert!(small_state.artifacts.borrow().probe().is_none());
-    assert!(large_state.artifacts.borrow().probe().is_none());
+    assert!(state.artifacts[small].probe().is_none());
+    assert!(state.artifacts[large].probe().is_none());
 
-    let calls_after_first_layout = tree.leaf_measure_calls.get();
+    let calls_after_first_layout = state.leaf_measure_calls;
     assert!(calls_after_first_layout >= 4);
-    compute_root_layout(tree.node(root), Size::MAX_CONTENT);
-    assert_eq!(tree.leaf_measure_calls.get(), calls_after_first_layout);
+    compute_root_layout(&tree, &mut state, tree.node(root), Size::MAX_CONTENT);
+    assert_eq!(state.leaf_measure_calls, calls_after_first_layout);
 
-    tree.node(small).clear_layout_cache();
-    assert!(tree.session_node(small).cache.borrow().is_empty());
-    assert!(
-        tree.session_node(small)
-            .artifacts
-            .borrow()
-            .probe()
-            .is_none()
-    );
-    assert!(
-        tree.session_node(small)
-            .artifacts
-            .borrow()
-            .committed()
-            .is_none()
-    );
-    tree.node(root).clear_layout_cache();
-    compute_root_layout(tree.node(root), Size::MAX_CONTENT);
-    assert!(tree.leaf_measure_calls.get() > calls_after_first_layout);
+    tree.clear_layout_cache(&mut state, tree.node(small));
+    assert!(state.slots[small].layout_cache_is_empty());
+    assert!(state.artifacts[small].probe().is_none());
+    assert!(state.artifacts[small].committed().is_none());
+    tree.clear_layout_cache(&mut state, tree.node(root));
+    compute_root_layout(&tree, &mut state, tree.node(root), Size::MAX_CONTENT);
+    assert!(state.leaf_measure_calls > calls_after_first_layout);
 }

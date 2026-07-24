@@ -10,7 +10,7 @@ use super::super::util::{clamp, resolve_intrinsic, resolve_length_percentage};
 use super::tracks::AxisTrackSpec;
 use super::types::{Axis, GridItem, Track, TrackSet, TrackSizingFunction};
 use crate::style::CoreStyle;
-use crate::tree::{AvailableSpace, LayoutInput, LayoutNode, SizingMode};
+use crate::tree::{AvailableSpace, LayoutInput, LayoutTree, SizingMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContributionKind {
@@ -225,14 +225,16 @@ fn cross_area_size<N>(
     Some((size - margin_sum(item, cross)).max(0.0))
 }
 
-fn raw_content_size<N>(
-    item: &mut GridItem<N>,
+fn raw_content_size<T>(
+    tree: &T,
+    state: &mut T::State,
+    item: &mut GridItem<T::NodeId>,
     axis: Axis,
     kind: ContributionKind,
     cross_tracks: Option<CrossAxisTracks<'_>>,
 ) -> f32
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     let cached = match kind {
         ContributionKind::Minimum | ContributionKind::MinContent => axis.size(item.raw_min_content),
@@ -270,7 +272,7 @@ where
     };
     let mut input = LayoutInput::measure(known, parent_size, available, axis.requested());
     input.sizing_mode = SizingMode::IgnoreSizeStyles;
-    let output = item.key.node.compute_layout(input);
+    let output = tree.compute_layout(state, item.key.node, input);
     let size = output.size;
     if axis == Axis::Vertical && item.align_self == AlignFlags::BASELINE {
         item.measured_baselines.y = Some(output.first_baselines.y.unwrap_or(size.height));
@@ -309,24 +311,35 @@ where
     measured
 }
 
-pub(super) fn probe_raw_min_content<N>(
-    item: &mut GridItem<N>,
+pub(super) fn probe_raw_min_content<T>(
+    tree: &T,
+    state: &mut T::State,
+    item: &mut GridItem<T::NodeId>,
     axis: Axis,
     cross_tracks: Option<CrossAxisTracks<'_>>,
 ) -> f32
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
-    raw_content_size(item, axis, ContributionKind::MinContent, cross_tracks)
+    raw_content_size(
+        tree,
+        state,
+        item,
+        axis,
+        ContributionKind::MinContent,
+        cross_tracks,
+    )
 }
 
-pub(super) fn resolve_item_intrinsic_dimensions<N>(
-    item: &mut GridItem<N>,
+pub(super) fn resolve_item_intrinsic_dimensions<T>(
+    tree: &T,
+    state: &mut T::State,
+    item: &mut GridItem<T::NodeId>,
     axis: Axis,
     cross_tracks: Option<CrossAxisTracks<'_>>,
     inner_size: crate::geometry::Size<Option<f32>>,
 ) where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     let needs_min_content = item.intrinsic.needs_min_content(axis);
     let needs_max_content = item.intrinsic.needs_max_content(axis);
@@ -334,11 +347,27 @@ pub(super) fn resolve_item_intrinsic_dimensions<N>(
         return;
     }
 
-    let min_content = needs_min_content
-        .then(|| raw_content_size(item, axis, ContributionKind::MinContent, cross_tracks));
-    let max_content = needs_max_content
-        .then(|| raw_content_size(item, axis, ContributionKind::MaxContent, cross_tracks));
-    let style = item.key.node.style();
+    let min_content = needs_min_content.then(|| {
+        raw_content_size(
+            tree,
+            state,
+            item,
+            axis,
+            ContributionKind::MinContent,
+            cross_tracks,
+        )
+    });
+    let max_content = needs_max_content.then(|| {
+        raw_content_size(
+            tree,
+            state,
+            item,
+            axis,
+            ContributionKind::MaxContent,
+            cross_tracks,
+        )
+    });
+    let style = tree.style(item.key.node);
     let size = axis.size(style.size());
     let min_size = axis.size(style.min_size());
     let max_size = axis.size(style.max_size());
@@ -385,8 +414,10 @@ pub(super) fn resolve_item_intrinsic_dimensions<N>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn measure_contribution<N>(
-    item: &mut GridItem<N>,
+fn measure_contribution<T>(
+    tree: &T,
+    state: &mut T::State,
+    item: &mut GridItem<T::NodeId>,
     axis: Axis,
     kind: ContributionKind,
     tracks: &TrackSet,
@@ -394,7 +425,7 @@ fn measure_contribution<N>(
     inner_size: crate::geometry::Size<Option<f32>>,
 ) -> f32
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     let cached = match kind {
         ContributionKind::Minimum => axis.size(item.minimum_contribution),
@@ -433,15 +464,21 @@ where
                             .iter()
                             .any(Track::is_flexible));
                 if automatic_min_applies {
-                    let raw_outer =
-                        raw_content_size(item, axis, ContributionKind::MinContent, cross_tracks)
-                            + margin_sum(item, axis);
+                    let raw_outer = raw_content_size(
+                        tree,
+                        state,
+                        item,
+                        axis,
+                        ContributionKind::MinContent,
+                        cross_tracks,
+                    ) + margin_sum(item, axis);
                     let suggestion = preferred.map_or(raw_outer, |size| raw_outer.min(size));
                     fixed_max_span_limit(axis, tracks, indexes, inner_size)
                         .map_or(suggestion, |limit| suggestion.min(limit))
                 } else if !preferred_behaves_auto_or_depends {
                     preferred.unwrap_or_else(|| {
-                        raw_content_size(item, axis, kind, cross_tracks) + margin_sum(item, axis)
+                        raw_content_size(tree, state, item, axis, kind, cross_tracks)
+                            + margin_sum(item, axis)
                     })
                 } else {
                     axis.sum(item.padding) + axis.sum(item.border) + margin_sum(item, axis)
@@ -450,10 +487,12 @@ where
         }
         ContributionKind::MinContent | ContributionKind::MaxContent => {
             if preferred_behaves_auto_or_depends {
-                raw_content_size(item, axis, kind, cross_tracks) + margin_sum(item, axis)
+                raw_content_size(tree, state, item, axis, kind, cross_tracks)
+                    + margin_sum(item, axis)
             } else {
                 preferred.unwrap_or_else(|| {
-                    raw_content_size(item, axis, kind, cross_tracks) + margin_sum(item, axis)
+                    raw_content_size(tree, state, item, axis, kind, cross_tracks)
+                        + margin_sum(item, axis)
                 })
             }
         }
@@ -514,8 +553,10 @@ fn fixed_max_span_limit(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn measure_limited_contribution<N>(
-    item: &mut GridItem<N>,
+fn measure_limited_contribution<T>(
+    tree: &T,
+    state: &mut T::State,
+    item: &mut GridItem<T::NodeId>,
     axis: Axis,
     kind: ContributionKind,
     tracks: &TrackSet,
@@ -523,13 +564,22 @@ fn measure_limited_contribution<N>(
     inner_size: crate::geometry::Size<Option<f32>>,
 ) -> f32
 where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     debug_assert!(matches!(
         kind,
         ContributionKind::MinContent | ContributionKind::MaxContent
     ));
-    let contribution = measure_contribution(item, axis, kind, tracks, cross_tracks, inner_size);
+    let contribution = measure_contribution(
+        tree,
+        state,
+        item,
+        axis,
+        kind,
+        tracks,
+        cross_tracks,
+        inner_size,
+    );
     let span = span_for(item, axis);
     let range = tracks.span_indices(span.start, span.end);
     let fixed_limit = fixed_max_span_limit(axis, tracks, range.clone(), inner_size).or_else(|| {
@@ -541,6 +591,8 @@ where
         return contribution;
     };
     let minimum = measure_contribution(
+        tree,
+        state,
         item,
         axis,
         ContributionKind::Minimum,
@@ -551,13 +603,15 @@ where
     contribution.min(limit).max(minimum)
 }
 
-fn prepare_baseline_shims<N>(
+fn prepare_baseline_shims<T>(
+    tree: &T,
+    state: &mut T::State,
     axis: Axis,
     tracks: &TrackSet,
     cross_tracks: Option<CrossAxisTracks<'_>>,
-    items: &mut [GridItem<N>],
+    items: &mut [GridItem<T::NodeId>],
 ) where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     if axis != Axis::Vertical {
         return;
@@ -597,7 +651,14 @@ fn prepare_baseline_shims<N>(
             let mut maximum_ascent = None::<f32>;
             for &(_, item_index) in group {
                 let item = &mut items[item_index];
-                let _ = raw_content_size(item, axis, ContributionKind::MinContent, cross_tracks);
+                let _ = raw_content_size(
+                    tree,
+                    state,
+                    item,
+                    axis,
+                    ContributionKind::MinContent,
+                    cross_tracks,
+                );
                 if let Some(baseline) = item.measured_baselines.y {
                     let ascent = item.margin.top + baseline;
                     maximum_ascent =
@@ -874,11 +935,13 @@ fn apply_planned_growth(tracks: &mut TrackSet, planned: &mut [f32], touched: &mu
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_spanning_base_phase<N, P>(
+fn run_spanning_base_phase<T, P>(
+    tree: &T,
+    state: &mut T::State,
     axis: Axis,
     tracks: &mut TrackSet,
     cross_tracks: Option<CrossAxisTracks<'_>>,
-    items: &mut [GridItem<N>],
+    items: &mut [GridItem<T::NodeId>],
     item_indices: &[usize],
     inner_size: crate::geometry::Size<Option<f32>>,
     kind: ContributionKind,
@@ -887,7 +950,7 @@ fn run_spanning_base_phase<N, P>(
     eligible: P,
     scratch: &mut DistributionScratch,
 ) where
-    N: LayoutNode,
+    T: LayoutTree,
     P: Fn(&Track) -> bool + Copy,
 {
     for &item_index in item_indices {
@@ -901,6 +964,8 @@ fn run_spanning_base_phase<N, P>(
         }
         let contribution = if limited {
             measure_limited_contribution(
+                tree,
+                state,
                 &mut items[item_index],
                 axis,
                 kind,
@@ -910,6 +975,8 @@ fn run_spanning_base_phase<N, P>(
             )
         } else {
             measure_contribution(
+                tree,
+                state,
                 &mut items[item_index],
                 axis,
                 kind,
@@ -937,18 +1004,20 @@ fn run_spanning_base_phase<N, P>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_spanning_growth_phase<N, P>(
+fn run_spanning_growth_phase<T, P>(
+    tree: &T,
+    state: &mut T::State,
     axis: Axis,
     tracks: &mut TrackSet,
     cross_tracks: Option<CrossAxisTracks<'_>>,
-    items: &mut [GridItem<N>],
+    items: &mut [GridItem<T::NodeId>],
     item_indices: &[usize],
     inner_size: crate::geometry::Size<Option<f32>>,
     kind: ContributionKind,
     eligible: P,
     scratch: &mut DistributionScratch,
 ) where
-    N: LayoutNode,
+    T: LayoutTree,
     P: Fn(&Track) -> bool + Copy,
 {
     for &item_index in item_indices {
@@ -961,6 +1030,8 @@ fn run_spanning_growth_phase<N, P>(
             continue;
         }
         let contribution = measure_contribution(
+            tree,
+            state,
             &mut items[item_index],
             axis,
             kind,
@@ -988,16 +1059,18 @@ fn run_spanning_growth_phase<N, P>(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn resolve_intrinsic_sizes<N>(
+fn resolve_intrinsic_sizes<T>(
+    tree: &T,
+    state: &mut T::State,
     axis: Axis,
     tracks: &mut TrackSet,
     cross_tracks: Option<CrossAxisTracks<'_>>,
-    items: &mut [GridItem<N>],
+    items: &mut [GridItem<T::NodeId>],
     inner_size: crate::geometry::Size<Option<f32>>,
     available: AvailableSpace,
     scratch: &mut IntrinsicSizingScratch,
 ) where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     let IntrinsicSizingScratch {
         single_growth_limits,
@@ -1020,6 +1093,8 @@ fn resolve_intrinsic_sizes<N>(
         let base = match &track.sizing.min {
             TrackBreadth::Breadth(_) => track.base,
             TrackBreadth::MinContent => measure_contribution(
+                tree,
+                state,
                 item,
                 axis,
                 ContributionKind::MinContent,
@@ -1028,6 +1103,8 @@ fn resolve_intrinsic_sizes<N>(
                 inner_size,
             ),
             TrackBreadth::MaxContent => measure_contribution(
+                tree,
+                state,
                 item,
                 axis,
                 ContributionKind::MaxContent,
@@ -1039,6 +1116,8 @@ fn resolve_intrinsic_sizes<N>(
                 if available == AvailableSpace::MinContent =>
             {
                 measure_limited_contribution(
+                    tree,
+                    state,
                     item,
                     axis,
                     ContributionKind::MinContent,
@@ -1051,6 +1130,8 @@ fn resolve_intrinsic_sizes<N>(
                 if available == AvailableSpace::MaxContent =>
             {
                 measure_limited_contribution(
+                    tree,
+                    state,
                     item,
                     axis,
                     ContributionKind::MaxContent,
@@ -1060,6 +1141,8 @@ fn resolve_intrinsic_sizes<N>(
                 )
             }
             TrackBreadth::Auto | TrackBreadth::Flex(_) => measure_contribution(
+                tree,
+                state,
                 item,
                 axis,
                 ContributionKind::Minimum,
@@ -1071,8 +1154,16 @@ fn resolve_intrinsic_sizes<N>(
         tracks.tracks[index].base = tracks.tracks[index].base.max(base);
 
         if let Some(kind) = max_kind {
-            let contribution =
-                measure_contribution(item, axis, kind, tracks, cross_tracks, inner_size);
+            let contribution = measure_contribution(
+                tree,
+                state,
+                item,
+                axis,
+                kind,
+                tracks,
+                cross_tracks,
+                inner_size,
+            );
             let limit = contribution
                 .max(tracks.tracks[index].base)
                 .min(tracks.tracks[index].fit_content_limit);
@@ -1141,6 +1232,8 @@ fn resolve_intrinsic_sizes<N>(
         }
         let group = &non_flexible[start..end];
         run_spanning_base_phase(
+            tree,
+            state,
             axis,
             tracks,
             cross_tracks,
@@ -1154,6 +1247,8 @@ fn resolve_intrinsic_sizes<N>(
             distribution,
         );
         run_spanning_base_phase(
+            tree,
+            state,
             axis,
             tracks,
             cross_tracks,
@@ -1173,6 +1268,8 @@ fn resolve_intrinsic_sizes<N>(
         );
         if available == AvailableSpace::MaxContent {
             run_spanning_base_phase(
+                tree,
+                state,
                 axis,
                 tracks,
                 cross_tracks,
@@ -1192,6 +1289,8 @@ fn resolve_intrinsic_sizes<N>(
             );
         }
         run_spanning_base_phase(
+            tree,
+            state,
             axis,
             tracks,
             cross_tracks,
@@ -1205,6 +1304,8 @@ fn resolve_intrinsic_sizes<N>(
             distribution,
         );
         run_spanning_growth_phase(
+            tree,
+            state,
             axis,
             tracks,
             cross_tracks,
@@ -1216,6 +1317,8 @@ fn resolve_intrinsic_sizes<N>(
             distribution,
         );
         run_spanning_growth_phase(
+            tree,
+            state,
             axis,
             tracks,
             cross_tracks,
@@ -1255,6 +1358,8 @@ fn resolve_intrinsic_sizes<N>(
                 spanning_minimum_kind
             };
         run_spanning_base_phase(
+            tree,
+            state,
             axis,
             tracks,
             cross_tracks,
@@ -1268,6 +1373,8 @@ fn resolve_intrinsic_sizes<N>(
             distribution,
         );
         run_spanning_base_phase(
+            tree,
+            state,
             axis,
             tracks,
             cross_tracks,
@@ -1383,15 +1490,17 @@ fn find_fr_size(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn expand_flexible_tracks<N>(
+fn expand_flexible_tracks<T>(
+    tree: &T,
+    state: &mut T::State,
     axis: Axis,
     tracks: &mut TrackSet,
     cross_tracks: Option<CrossAxisTracks<'_>>,
-    items: &mut [GridItem<N>],
+    items: &mut [GridItem<T::NodeId>],
     inner_size: crate::geometry::Size<Option<f32>>,
     available: AvailableSpace,
 ) where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     if !tracks.tracks.iter().any(Track::is_flexible) {
         return;
@@ -1427,6 +1536,8 @@ fn expand_flexible_tracks<N>(
                 continue;
             }
             let contribution = measure_contribution(
+                tree,
+                state,
                 item,
                 axis,
                 ContributionKind::MaxContent,
@@ -1471,17 +1582,19 @@ fn stretch_auto_tracks(tracks: &mut TrackSet, available: AvailableSpace, alignme
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn size_tracks<N>(
+pub(super) fn size_tracks<T>(
+    tree: &T,
+    state: &mut T::State,
     axis: Axis,
     tracks: &mut TrackSet,
     cross_tracks: Option<CrossAxisTracks<'_>>,
-    items: &mut [GridItem<N>],
+    items: &mut [GridItem<T::NodeId>],
     inner_size: crate::geometry::Size<Option<f32>>,
     available: AvailableSpace,
     alignment: AlignFlags,
     scratch: &mut IntrinsicSizingScratch,
 ) where
-    N: LayoutNode,
+    T: LayoutTree,
 {
     scratch.reset();
     if tracks.tracks.is_empty() {
@@ -1497,10 +1610,12 @@ pub(super) fn size_tracks<N>(
         return;
     }
     for item in items.iter_mut() {
-        resolve_item_intrinsic_dimensions(item, axis, cross_tracks, inner_size);
+        resolve_item_intrinsic_dimensions(tree, state, item, axis, cross_tracks, inner_size);
     }
-    prepare_baseline_shims(axis, tracks, cross_tracks, items);
+    prepare_baseline_shims(tree, state, axis, tracks, cross_tracks, items);
     resolve_intrinsic_sizes(
+        tree,
+        state,
         axis,
         tracks,
         cross_tracks,
@@ -1510,7 +1625,16 @@ pub(super) fn size_tracks<N>(
         scratch,
     );
     maximize_tracks(tracks, available);
-    expand_flexible_tracks(axis, tracks, cross_tracks, items, inner_size, available);
+    expand_flexible_tracks(
+        tree,
+        state,
+        axis,
+        tracks,
+        cross_tracks,
+        items,
+        inner_size,
+        available,
+    );
     stretch_auto_tracks(tracks, available, alignment);
     tracks.rebuild_positions();
 }
@@ -1534,6 +1658,7 @@ impl<N> ItemOverflowAxis for GridItem<N> {
 #[allow(clippy::float_cmp)]
 mod tests {
     use core::cell::RefCell;
+    use core::marker::PhantomData;
 
     use stylo::Zero;
     use stylo::computed_values::direction;
@@ -1549,7 +1674,7 @@ mod tests {
     use crate::compute::grid::placement::{GridArea, TrackSpan};
     use crate::geometry::{Point, Size};
     use crate::style::CoreStyle;
-    use crate::tree::{Layout, LayoutInput, LayoutOutput};
+    use crate::tree::{LayoutInput, LayoutOutput, LayoutSlot, LayoutTree};
 
     fn lp_px(value: f32) -> LengthPercentage {
         LengthPercentage::new_length(Length::new(value))
@@ -1610,8 +1735,8 @@ mod tests {
         }
     }
 
-    /// Minimal handle-based test host: one shared style, no children, canned
-    /// min-/max-content measurements, and an interior-mutable call log.
+    /// Minimal tree/state test fixture with no children, canned intrinsic
+    /// measurements, and an interior-mutable call log.
     #[derive(Debug)]
     struct TestTree {
         style: TestStyle,
@@ -1638,33 +1763,65 @@ mod tests {
         tree: &'t TestTree,
     }
 
-    impl<'t> LayoutNode for TestRef<'t> {
-        type Style = &'t TestStyle;
-        type ChildIter = core::iter::Empty<Self>;
+    #[derive(Debug, Default)]
+    struct TestHost<'t>(PhantomData<&'t TestTree>);
 
-        fn children(self) -> Self::ChildIter {
+    impl<'t> LayoutTree for TestHost<'t> {
+        type NodeId = TestRef<'t>;
+        type State = LayoutSlot;
+        type Style<'tree>
+            = &'t TestStyle
+        where
+            Self: 'tree;
+        type ChildIter<'tree>
+            = core::iter::Empty<Self::NodeId>
+        where
+            Self: 'tree;
+
+        fn children(&self, _node: Self::NodeId) -> Self::ChildIter<'_> {
             core::iter::empty()
         }
 
-        fn child_count(self) -> usize {
+        fn child_count(&self, _node: Self::NodeId) -> usize {
             0
         }
 
-        fn style(self) -> &'t TestStyle {
-            &self.tree.style
+        fn style(&self, node: Self::NodeId) -> Self::Style<'_> {
+            &node.tree.style
         }
 
-        fn compute_layout(self, input: LayoutInput) -> LayoutOutput {
-            self.tree.calls.borrow_mut().push(input);
+        fn layout<'state>(
+            &self,
+            state: &'state Self::State,
+            _node: Self::NodeId,
+        ) -> &'state LayoutSlot {
+            state
+        }
+
+        fn layout_mut<'state>(
+            &self,
+            state: &'state mut Self::State,
+            _node: Self::NodeId,
+        ) -> &'state mut LayoutSlot {
+            state
+        }
+
+        fn compute_layout(
+            &self,
+            _state: &mut Self::State,
+            node: Self::NodeId,
+            input: LayoutInput,
+        ) -> LayoutOutput {
+            node.tree.calls.borrow_mut().push(input);
             let measured = Size::new(
                 match input.available_space.width {
-                    AvailableSpace::MinContent => self.tree.min_content.width,
-                    AvailableSpace::MaxContent => self.tree.max_content.width,
+                    AvailableSpace::MinContent => node.tree.min_content.width,
+                    AvailableSpace::MaxContent => node.tree.max_content.width,
                     AvailableSpace::Definite(value) => value,
                 },
                 match input.available_space.height {
-                    AvailableSpace::MinContent => self.tree.min_content.height,
-                    AvailableSpace::MaxContent => self.tree.max_content.height,
+                    AvailableSpace::MinContent => node.tree.min_content.height,
+                    AvailableSpace::MaxContent => node.tree.max_content.height,
                     AvailableSpace::Definite(value) => value,
                 },
             );
@@ -1673,30 +1830,12 @@ mod tests {
                 input.known_dimensions.height.unwrap_or(measured.height),
             );
             LayoutOutput::new(size, size)
-                .with_first_baselines(Point::new(None, self.tree.first_baseline))
+                .with_first_baselines(Point::new(None, node.tree.first_baseline))
         }
-
-        fn set_unrounded_layout(self, _layout: Layout) {}
-
-        fn with_unrounded_layout<R>(self, read: impl FnOnce(&Layout) -> R) -> R {
-            read(&Layout::default())
-        }
-
-        fn set_rounded_layout(self, _layout: Layout) {}
-
-        fn set_static_position(self, _static_position: Point<f32>) {}
-
-        fn cached_layout(self, _input: LayoutInput) -> Option<LayoutOutput> {
-            None
-        }
-
-        fn store_cached_layout(self, _input: LayoutInput, _output: LayoutOutput) {}
-
-        fn clear_layout_cache(self) {}
     }
 
     fn test_item(node: TestRef<'_>, column_start: i32, column_end: i32) -> GridItem<TestRef<'_>> {
-        let style = node.style();
+        let style = &node.tree.style;
         GridItem {
             geometry: crate::compute::util::resolve_item_geometry(style, Size::NONE),
             key: crate::compute::util::ItemKey {
@@ -1795,6 +1934,8 @@ mod tests {
 
     #[test]
     fn intrinsic_keywords_resolve_each_raw_dimension_form() {
+        let host = TestHost::default();
+        let mut state = LayoutSlot::default();
         let tree = TestTree {
             style: TestStyle {
                 size: Size::new(StyleSize::MinContent, StyleSize::Auto),
@@ -1809,6 +1950,8 @@ mod tests {
         };
         let mut item = test_item(TestRef { tree: &tree }, 0, 1);
         resolve_item_intrinsic_dimensions(
+            &host,
+            &mut state,
             &mut item,
             Axis::Horizontal,
             None,
@@ -1827,7 +1970,14 @@ mod tests {
             ..TestTree::default()
         };
         let mut item = test_item(TestRef { tree: &tree }, 0, 1);
-        resolve_item_intrinsic_dimensions(&mut item, Axis::Horizontal, None, Size::NONE);
+        resolve_item_intrinsic_dimensions(
+            &host,
+            &mut state,
+            &mut item,
+            Axis::Horizontal,
+            None,
+            Size::NONE,
+        );
         assert_eq!(item.preferred_size.width, None);
         assert_eq!(item.min_size.width, Some(20.0));
         assert_eq!(item.max_size.width, None);
@@ -1841,13 +1991,22 @@ mod tests {
             ..TestTree::default()
         };
         let mut item = test_item(TestRef { tree: &tree }, 0, 1);
-        resolve_item_intrinsic_dimensions(&mut item, Axis::Horizontal, None, Size::NONE);
+        resolve_item_intrinsic_dimensions(
+            &host,
+            &mut state,
+            &mut item,
+            Axis::Horizontal,
+            None,
+            Size::NONE,
+        );
         assert_eq!(item.preferred_size.width, Some(80.0));
         assert_eq!(tree.calls.borrow().len(), 1);
     }
 
     #[test]
     fn keyword_sizes_behave_as_auto() {
+        let host = TestHost::default();
+        let mut state = LayoutSlot::default();
         let tree = TestTree {
             style: TestStyle {
                 size: Size::new(StyleSize::Stretch, StyleSize::WebkitFillAvailable),
@@ -1857,7 +2016,14 @@ mod tests {
             ..TestTree::default()
         };
         let mut item = test_item(TestRef { tree: &tree }, 0, 1);
-        resolve_item_intrinsic_dimensions(&mut item, Axis::Horizontal, None, Size::NONE);
+        resolve_item_intrinsic_dimensions(
+            &host,
+            &mut state,
+            &mut item,
+            Axis::Horizontal,
+            None,
+            Size::NONE,
+        );
         assert_eq!(item.preferred_size.width, None);
         assert_eq!(item.min_size.width, None);
         assert!(tree.calls.borrow().is_empty());
@@ -1865,6 +2031,8 @@ mod tests {
 
     #[test]
     fn vertical_border_box_ratio_and_synthesized_baseline_affect_raw_content() {
+        let host = TestHost::default();
+        let mut state = LayoutSlot::default();
         let tree = TestTree::default();
         let mut item = test_item(TestRef { tree: &tree }, 0, 1);
         item.preferred_size.width = Some(40.0);
@@ -1873,6 +2041,8 @@ mod tests {
         item.align_self = AlignFlags::BASELINE;
 
         let measured = raw_content_size(
+            &host,
+            &mut state,
             &mut item,
             Axis::Vertical,
             ContributionKind::MinContent,
@@ -1884,6 +2054,8 @@ mod tests {
 
     #[test]
     fn baseline_shims_skip_groups_that_cannot_affect_track_sizing() {
+        let host = TestHost::default();
+        let mut state = LayoutSlot::default();
         let singleton_tree = TestTree {
             first_baseline: Some(4.0),
             ..TestTree::default()
@@ -1899,6 +2071,8 @@ mod tests {
         let mut intrinsic_track = test_track(0.0, f32::INFINITY);
         intrinsic_track.intrinsic_min = true;
         prepare_baseline_shims(
+            &host,
+            &mut state,
             Axis::Vertical,
             &track_set(vec![intrinsic_track]),
             None,
@@ -1923,6 +2097,8 @@ mod tests {
             item.align_self = AlignFlags::BASELINE;
         }
         prepare_baseline_shims(
+            &host,
+            &mut state,
             Axis::Vertical,
             &track_set(vec![test_track(10.0, 10.0)]),
             None,
@@ -1935,6 +2111,8 @@ mod tests {
 
     #[test]
     fn baseline_shims_probe_every_item_in_an_active_group() {
+        let host = TestHost::default();
+        let mut state = LayoutSlot::default();
         let tall_tree = TestTree {
             first_baseline: Some(12.0),
             ..TestTree::default()
@@ -1956,6 +2134,8 @@ mod tests {
         intrinsic_track.intrinsic_min = true;
 
         prepare_baseline_shims(
+            &host,
+            &mut state,
             Axis::Vertical,
             &track_set(vec![fixed_track, intrinsic_track]),
             None,
@@ -1970,6 +2150,8 @@ mod tests {
 
     #[test]
     fn max_content_auto_track_skips_unconsumed_min_content_probe() {
+        let host = TestHost::default();
+        let mut state = LayoutSlot::default();
         let tree = TestTree::default();
         let mut items = vec![test_item(TestRef { tree: &tree }, 0, 1)];
         let mut track = test_track(0.0, f32::INFINITY);
@@ -1979,6 +2161,8 @@ mod tests {
         let mut tracks = track_set(vec![track]);
 
         size_tracks(
+            &host,
+            &mut state,
             Axis::Horizontal,
             &mut tracks,
             None,
@@ -1998,12 +2182,16 @@ mod tests {
 
     #[test]
     fn non_auto_contribution_without_a_preferred_size_falls_back_to_content() {
+        let host = TestHost::default();
+        let mut state = LayoutSlot::default();
         let tree = TestTree::default();
         let mut item = test_item(TestRef { tree: &tree }, 0, 1);
         item.preferred_behaves_auto_or_depends.width = false;
         let tracks = track_set(vec![test_track(0.0, f32::INFINITY)]);
 
         let minimum = measure_contribution(
+            &host,
+            &mut state,
             &mut item,
             Axis::Horizontal,
             ContributionKind::Minimum,
@@ -2012,6 +2200,8 @@ mod tests {
             Size::NONE,
         );
         let maximum = measure_contribution(
+            &host,
+            &mut state,
             &mut item,
             Axis::Horizontal,
             ContributionKind::MaxContent,
@@ -2142,6 +2332,8 @@ mod tests {
 
     #[test]
     fn indefinite_fr_sizing_considers_only_items_crossing_flexible_tracks() {
+        let host = TestHost::default();
+        let mut state = LayoutSlot::default();
         let tree = TestTree::default();
         let node = TestRef { tree: &tree };
         let fixed = test_track(10.0, 10.0);
@@ -2165,6 +2357,8 @@ mod tests {
         let mut items = vec![test_item(node, 0, 1), test_item(node, 1, 2)];
 
         expand_flexible_tracks(
+            &host,
+            &mut state,
             Axis::Horizontal,
             &mut tracks,
             None,

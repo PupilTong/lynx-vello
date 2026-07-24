@@ -210,11 +210,18 @@ impl LayoutFixture {
     }
 
     pub(super) fn node_layout(&self, node: NodeId) -> Layout {
-        self.document
-            .get(node)
-            .expect("benchmark node remains live")
-            .rounded_layout()
-            .clone()
+        let layout = self
+            .document
+            .rounded_layout(node)
+            .expect("benchmark node remains live");
+        let mut snapshot = Layout::with_order(layout.order);
+        snapshot.location = layout.location;
+        snapshot.size = layout.size;
+        snapshot.content_size = layout.content_size;
+        snapshot.border = layout.border;
+        snapshot.padding = layout.padding;
+        snapshot.margin = layout.margin;
+        snapshot
     }
 
     pub(super) fn invalidate(&mut self, node: NodeId) {
