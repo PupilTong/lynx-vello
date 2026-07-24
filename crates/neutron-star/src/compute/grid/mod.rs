@@ -14,26 +14,26 @@ use placement::{
     resolve_axis_placement,
 };
 use sizing::{
-    CrossAxisTracks, initialize_tracks, probe_raw_min_content, resolve_item_intrinsic_dimensions,
-    size_tracks,
+    CrossAxisTracks, IntrinsicSizingScratch, initialize_tracks, probe_raw_min_content,
+    resolve_item_intrinsic_dimensions, size_tracks,
 };
 use stylo::computed_values::direction;
 use stylo::values::computed::{Inset, PositionProperty, Size as StyleSize};
 use stylo::values::specified::align::AlignFlags;
 use tracks::{ExpandedTemplate, MAX_MATERIALIZED_TRACKS, build_axis_tracks, expand_template};
-use types::{Axis, GridItem, IntrinsicSize, TrackSet, TrackSizingFunction};
+use types::{Axis, GridItem, TrackSet, TrackSizingFunction};
 
 use super::util::{
-    ItemKey, OrderedItem, PendingLayoutItem, ResolvedContainerBox, ResolvedItemBox,
+    IntrinsicTag, ItemKey, OrderedItem, PendingLayoutItem, ResolvedContainerBox,
     accumulate_scrollable_overflow, apply_aspect_ratio, box_inset_size, clamp, clamp_axis,
     normalize_content_alignment, normalize_item_alignment, own_scrollable_overflow,
-    preferred_size_definiteness, resolve_container_box, resolve_gap, resolve_item_box,
-    sort_and_assign_layout_order, used_aspect_ratio,
+    resolve_container_box, resolve_gap, resolve_insets, resolve_item_geometry,
+    sort_and_assign_layout_order,
 };
 use super::{compute_absolute_layout, hide_subtree};
 use crate::geometry::{Edges, Line, Point, Size};
 use crate::style::containment::size_containment;
-use crate::style::{Contain, CoreStyle, GridContainerStyle, GridItemStyle, Overflow};
+use crate::style::{Contain, CoreStyle, Overflow};
 use crate::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
     SizingMode,
@@ -65,6 +65,18 @@ impl<N: Copy> PendingItem<N> {
     }
 }
 
+impl<N> PlacementInput for PendingItem<N> {
+    #[inline]
+    fn column(&self) -> Line<GridPlacement> {
+        self.column
+    }
+
+    #[inline]
+    fn row(&self) -> Line<GridPlacement> {
+        self.row
+    }
+}
+
 impl<N> PendingLayoutItem<N> for PendingItem<N> {
     #[inline]
     fn ordered(&self) -> &OrderedItem<N> {
@@ -80,7 +92,6 @@ impl<N> PendingLayoutItem<N> for PendingItem<N> {
 fn classify_item<N>(node: N, document_index: usize) -> Option<PendingItem<N>>
 where
     N: LayoutNode,
-    N::Style: GridContainerStyle + GridItemStyle,
 {
     let style = node.style();
     if style.display().is_none() {
@@ -95,11 +106,7 @@ where
         ordered: OrderedItem {
             node,
             document_index,
-            css_order: if in_flow {
-                GridItemStyle::order(&style)
-            } else {
-                0
-            },
+            css_order: if in_flow { style.order() } else { 0 },
             layout_order: 0,
         },
         position,
@@ -122,25 +129,11 @@ fn resolve_grid_item<N>(
 ) -> GridItem<N>
 where
     N: LayoutNode,
-    N::Style: GridContainerStyle + GridItemStyle,
 {
     let style = key.node.style();
-    let ResolvedItemBox {
-        raw_size,
-        raw_min_size,
-        raw_max_size,
-        aspect_ratio,
-        box_sizing,
-        overflow,
-        preferred_size,
-        min_size,
-        max_size,
-        margin,
-        margin_auto,
-        padding,
-        border,
-        inset,
-    } = resolve_item_box(&style, percentage_basis);
+    let raw_size = style.size();
+    let raw_min_size = style.min_size();
+    let geometry = resolve_item_geometry(&style, percentage_basis);
     let behaves_auto_or_depends = |value: &StyleSize| match value {
         StyleSize::Auto
         | StyleSize::FitContent
@@ -162,12 +155,13 @@ where
         )
     };
     GridItem {
+        geometry,
         key,
         area,
         position: style.position(),
         align_self: normalize_item_alignment(style.align_self().0, false, defaults.rtl)
             .unwrap_or_else(|| {
-                if defaults.align_items_normal && aspect_ratio.is_some() {
+                if defaults.align_items_normal && geometry.aspect_ratio.is_some() {
                     AlignFlags::START
                 } else {
                     defaults.align_items
@@ -176,9 +170,6 @@ where
         justify_self: normalize_item_alignment(style.justify_self().0, true, defaults.rtl)
             .unwrap_or(defaults.justify_items),
         direction: style.direction(),
-        aspect_ratio,
-        box_sizing,
-        overflow,
         preferred_behaves_auto_or_depends: Size::new(
             behaves_auto_or_depends(raw_size.width),
             behaves_auto_or_depends(raw_size.height),
@@ -187,26 +178,7 @@ where
             minimum_behaves_auto(raw_min_size.width),
             minimum_behaves_auto(raw_min_size.height),
         ),
-        intrinsic_preferred: Size::new(
-            IntrinsicSize::from_size(raw_size.width),
-            IntrinsicSize::from_size(raw_size.height),
-        ),
-        intrinsic_min: Size::new(
-            IntrinsicSize::from_size(raw_min_size.width),
-            IntrinsicSize::from_size(raw_min_size.height),
-        ),
-        intrinsic_max: Size::new(
-            IntrinsicSize::from_max_size(raw_max_size.width),
-            IntrinsicSize::from_max_size(raw_max_size.height),
-        ),
-        preferred_size,
-        min_size,
-        max_size,
-        margin,
-        margin_auto,
-        padding,
-        border,
-        inset,
+        inset: resolve_insets(style.inset(), percentage_basis),
         raw_min_content: Size::NONE,
         raw_max_content: Size::NONE,
         minimum_contribution: Size::NONE,
@@ -225,7 +197,6 @@ fn expand_explicit_tracks<N>(
 ) -> (ExpandedTemplate, ExpandedTemplate)
 where
     N: LayoutNode,
-    N::Style: GridContainerStyle + GridItemStyle,
 {
     let style = node.style();
     let columns = expand_template(
@@ -255,9 +226,9 @@ fn run_track_sizing<N>(
     gap: Size<f32>,
     justify_content: AlignFlags,
     align_content: AlignFlags,
+    scratch: &mut IntrinsicSizingScratch,
 ) where
     N: LayoutNode,
-    N::Style: GridContainerStyle + GridItemStyle,
 {
     for item in items.iter_mut() {
         refresh_item_basis(item, Size::NONE);
@@ -299,6 +270,7 @@ fn run_track_sizing<N>(
             .width
             .map_or(available.width, AvailableSpace::Definite),
         justify_content,
+        scratch,
     );
     if let Some(width) = inner_basis.width {
         align_tracks(columns, width, justify_content);
@@ -346,6 +318,7 @@ fn run_track_sizing<N>(
             .height
             .map_or(available.height, AvailableSpace::Definite),
         align_content,
+        scratch,
     );
     if let Some(height) = inner_basis.height {
         align_tracks(rows, height, align_content);
@@ -388,6 +361,7 @@ fn run_track_sizing<N>(
                 .width
                 .map_or(available.width, AvailableSpace::Definite),
             justify_content,
+            scratch,
         );
         if let Some(width) = inner_basis.width {
             align_tracks(columns, width, justify_content);
@@ -411,6 +385,7 @@ fn run_track_sizing<N>(
                 .height
                 .map_or(available.height, AvailableSpace::Definite),
             align_content,
+            scratch,
         );
         if let Some(height) = inner_basis.height {
             align_tracks(rows, height, align_content);
@@ -454,28 +429,10 @@ struct PendingBaselineItem<N> {
 fn refresh_item_basis<N>(item: &mut GridItem<N>, percentage_basis: Size<Option<f32>>)
 where
     N: LayoutNode,
-    N::Style: GridContainerStyle + GridItemStyle,
 {
     let style = item.key.node.style();
-    let ResolvedItemBox {
-        preferred_size,
-        min_size,
-        max_size,
-        margin,
-        margin_auto,
-        padding,
-        border,
-        inset,
-        ..
-    } = resolve_item_box(&style, percentage_basis);
-    item.preferred_size = preferred_size;
-    item.min_size = min_size;
-    item.max_size = max_size;
-    item.margin = margin;
-    item.margin_auto = margin_auto;
-    item.padding = padding;
-    item.border = border;
-    item.inset = inset;
+    item.geometry = resolve_item_geometry(&style, percentage_basis);
+    item.inset = resolve_insets(style.inset(), percentage_basis);
 }
 
 fn physical_area<N>(
@@ -514,14 +471,13 @@ fn layout_in_flow_items<N>(
 ) -> (Size<f32>, Point<Option<f32>>)
 where
     N: LayoutNode,
-    N::Style: GridContainerStyle + GridItemStyle,
 {
     let baseline_item_count = items
         .iter()
         .filter(|item| {
             item.align_self == AlignFlags::BASELINE
-                && !item.margin_auto.top
-                && !item.margin_auto.bottom
+                && !item.margin_auto.start(Axis::Vertical)
+                && !item.margin_auto.end(Axis::Vertical)
         })
         .count();
     let needs_baseline_pass = baseline_item_count != 0;
@@ -551,8 +507,8 @@ where
         );
         let mut known = item.preferred_size;
         let resolved_preferred = item.preferred_size;
-        let intrinsic_width = !matches!(item.intrinsic_preferred.width, IntrinsicSize::None);
-        let intrinsic_height = !matches!(item.intrinsic_preferred.height, IntrinsicSize::None);
+        let intrinsic_width = item.intrinsic.preferred(Axis::Horizontal).is_intrinsic();
+        let intrinsic_height = item.intrinsic.preferred(Axis::Vertical).is_intrinsic();
         if intrinsic_width {
             known.width = None;
         }
@@ -562,13 +518,13 @@ where
         let horizontal_stretch = item.justify_self == AlignFlags::STRETCH
             && known.width.is_none()
             && !intrinsic_width
-            && !item.margin_auto.left
-            && !item.margin_auto.right;
+            && !item.margin_auto.start(Axis::Horizontal)
+            && !item.margin_auto.end(Axis::Horizontal);
         let vertical_stretch = item.align_self == AlignFlags::STRETCH
             && known.height.is_none()
             && !intrinsic_height
-            && !item.margin_auto.top
-            && !item.margin_auto.bottom;
+            && !item.margin_auto.start(Axis::Vertical)
+            && !item.margin_auto.end(Axis::Vertical);
         if horizontal_stretch {
             known.width = Some((area_size.width - item.margin.horizontal_sum()).max(0.0));
         }
@@ -584,25 +540,25 @@ where
             .map(|value| clamp(value, item.min_size.height, item.max_size.height));
 
         let available = Size::new(
-            match item.intrinsic_preferred.width {
-                IntrinsicSize::MinContent => AvailableSpace::MinContent,
-                IntrinsicSize::MaxContent => AvailableSpace::MaxContent,
-                IntrinsicSize::FitContent(_) => resolved_preferred
+            match item.intrinsic.preferred(Axis::Horizontal) {
+                IntrinsicTag::MinContent => AvailableSpace::MinContent,
+                IntrinsicTag::MaxContent => AvailableSpace::MaxContent,
+                IntrinsicTag::FitContent => resolved_preferred
                     .width
                     .map_or(AvailableSpace::MaxContent, AvailableSpace::Definite),
-                IntrinsicSize::None => known.width.map_or(AvailableSpace::MaxContent, |_| {
+                IntrinsicTag::None => known.width.map_or(AvailableSpace::MaxContent, |_| {
                     AvailableSpace::Definite(
                         (area_size.width - item.margin.horizontal_sum()).max(0.0),
                     )
                 }),
             },
-            match item.intrinsic_preferred.height {
-                IntrinsicSize::MinContent => AvailableSpace::MinContent,
-                IntrinsicSize::MaxContent => AvailableSpace::MaxContent,
-                IntrinsicSize::FitContent(_) => resolved_preferred
+            match item.intrinsic.preferred(Axis::Vertical) {
+                IntrinsicTag::MinContent => AvailableSpace::MinContent,
+                IntrinsicTag::MaxContent => AvailableSpace::MaxContent,
+                IntrinsicTag::FitContent => resolved_preferred
                     .height
                     .map_or(AvailableSpace::MaxContent, AvailableSpace::Definite),
-                IntrinsicSize::None => known.height.map_or(AvailableSpace::MaxContent, |_| {
+                IntrinsicTag::None => known.height.map_or(AvailableSpace::MaxContent, |_| {
                     AvailableSpace::Definite(
                         (area_size.height - item.margin.vertical_sum()).max(0.0),
                     )
@@ -622,8 +578,8 @@ where
         for axis in Axis::ALL {
             let area = axis.size(area_size);
             let child = axis.size(output.size);
-            let auto_start = axis.start(item.margin_auto);
-            let auto_end = axis.end(item.margin_auto);
+            let auto_start = item.margin_auto.start(axis);
+            let auto_end = item.margin_auto.end(axis);
             let fixed_start = axis.start(margin);
             let fixed_end = axis.end(margin);
             let auto_count = usize::from(auto_start) + usize::from(auto_end);
@@ -678,8 +634,8 @@ where
             .or_else(|| (item.align_self == AlignFlags::BASELINE).then_some(output.size.height));
         item.measured_baselines = Point::new(output.first_baselines.x, item_baseline);
         let participates_in_baseline = item.align_self == AlignFlags::BASELINE
-            && !item.margin_auto.top
-            && !item.margin_auto.bottom;
+            && !item.margin_auto.start(Axis::Vertical)
+            && !item.margin_auto.end(Axis::Vertical);
         if !participates_in_baseline {
             let candidate = (
                 item.area.row.start,
@@ -708,8 +664,8 @@ where
             area_row: item.area.row.start,
             area_column: item.area.column.start,
             align_baseline: item.align_self == AlignFlags::BASELINE
-                && !item.margin_auto.top
-                && !item.margin_auto.bottom,
+                && !item.margin_auto.start(Axis::Vertical)
+                && !item.margin_auto.end(Axis::Vertical),
             area_top: content_origin.y + area_offset.y,
             layout,
             baseline: item_baseline,
@@ -905,17 +861,22 @@ fn absolute_static_offset<N>(
 ) -> Point<f32>
 where
     N: LayoutNode,
-    N::Style: GridContainerStyle + GridItemStyle,
 {
     let basis = Size::new(Some(containing_size.width), Some(containing_size.height));
-    let axis_available = |dimension: &IntrinsicSize, available: f32| match dimension {
-        IntrinsicSize::MinContent => AvailableSpace::MinContent,
-        IntrinsicSize::MaxContent => AvailableSpace::MaxContent,
-        IntrinsicSize::FitContent(_) | IntrinsicSize::None => AvailableSpace::Definite(available),
+    let axis_available = |dimension: IntrinsicTag, available: f32| match dimension {
+        IntrinsicTag::MinContent => AvailableSpace::MinContent,
+        IntrinsicTag::MaxContent => AvailableSpace::MaxContent,
+        IntrinsicTag::FitContent | IntrinsicTag::None => AvailableSpace::Definite(available),
     };
     let intrinsic_available = Size::new(
-        axis_available(&item.intrinsic_preferred.width, containing_size.width),
-        axis_available(&item.intrinsic_preferred.height, containing_size.height),
+        axis_available(
+            item.intrinsic.preferred(Axis::Horizontal),
+            containing_size.width,
+        ),
+        axis_available(
+            item.intrinsic.preferred(Axis::Vertical),
+            containing_size.height,
+        ),
     );
     let output = item.key.node.compute_layout(LayoutInput::measure(
         item.preferred_size,
@@ -944,8 +905,8 @@ where
     );
     let auto_margin_offset = |axis: Axis| {
         let available = axis.size(containing_size) - axis.size(used_size);
-        let start_auto = axis.start(item.margin_auto);
-        let end_auto = axis.end(item.margin_auto);
+        let start_auto = item.margin_auto.start(axis);
+        let end_auto = item.margin_auto.end(axis);
         let fixed_start = axis.start(item.margin);
         let fixed_end = axis.end(item.margin);
         let count = usize::from(start_auto) + usize::from(end_auto);
@@ -990,7 +951,6 @@ fn layout_absolute_items<N>(
 ) -> Size<f32>
 where
     N: LayoutNode,
-    N::Style: GridContainerStyle + GridItemStyle,
 {
     let mut content_size = outer_size;
     let padding_box_origin = Point::new(border.left, border.top);
@@ -1075,7 +1035,6 @@ where
 pub fn compute_grid_layout<N>(node: N, input: LayoutInput) -> LayoutOutput
 where
     N: LayoutNode,
-    N::Style: GridContainerStyle + GridItemStyle,
 {
     let style = node.style();
     let size_containment = size_containment(&style);
@@ -1097,20 +1056,12 @@ where
         rtl,
     };
     let raw_preferred = style.size();
-    let style_definite = if input.sizing_mode == SizingMode::IgnoreSizeStyles {
-        Size::new(false, false)
-    } else {
-        preferred_size_definiteness(
-            raw_preferred,
-            input.parent_size,
-            used_aspect_ratio(style.aspect_ratio()),
-        )
-    };
+    let mut metrics = resolve_container_box(&style, input);
+    let style_definite = metrics.preferred_definite;
     let outer_definite = Size::new(
         input.definite_dimensions.width || style_definite.width,
         input.definite_dimensions.height || style_definite.height,
     );
-    let mut metrics = resolve_container_box(&style, input);
     if input.sizing_mode != SizingMode::IgnoreSizeStyles {
         let preferred = raw_preferred;
         if metrics.inner.width.is_none() {
@@ -1176,40 +1127,42 @@ where
     let (explicit_columns, explicit_rows) =
         expand_explicit_tracks(node, repeat_max_basis, repeat_min_basis, repeat_count_gap);
 
-    let child_count = node.child_count();
-    let mut in_flow = Vec::with_capacity(child_count);
-    let mut absolute = Vec::new();
-    let mut hidden = Vec::new();
-    for (document_index, child) in node.children().enumerate() {
+    let commits_layout = input.goal == LayoutGoal::Commit;
+    let children = node.children();
+    let (lower, upper) = children.size_hint();
+    let mut in_flow = Vec::with_capacity(upper.unwrap_or(lower));
+    let mut absolute = commits_layout.then(Vec::new);
+    let mut hidden = commits_layout.then(Vec::new);
+    for (document_index, child) in children.enumerate() {
         let Some(child_style) = classify_item(child, document_index) else {
-            hidden.push((document_index, child));
+            if let Some(hidden) = &mut hidden {
+                hidden.push((document_index, child));
+            }
             continue;
         };
         if matches!(
             child_style.position,
             PositionProperty::Absolute | PositionProperty::Fixed
         ) {
-            absolute.push(child_style);
+            if let Some(absolute) = &mut absolute {
+                absolute.push(child_style);
+            }
         } else {
             in_flow.push(child_style);
         }
     }
-    sort_and_assign_layout_order(&mut in_flow, &mut absolute);
+    if let Some(absolute) = &mut absolute {
+        sort_and_assign_layout_order(&mut in_flow, absolute);
+    } else if in_flow.iter().any(|item| item.ordered.css_order != 0) {
+        in_flow.sort_unstable_by_key(|item| (item.ordered.css_order, item.ordered.document_index));
+    }
 
-    let placement_inputs = in_flow
-        .iter()
-        .map(|item| PlacementInput {
-            column: item.column,
-            row: item.row,
-        })
-        .collect::<Vec<_>>();
     let placement = place_items(
-        &placement_inputs,
+        &in_flow,
         explicit_columns.tracks.len(),
         explicit_rows.tracks.len(),
         auto_flow,
     );
-    drop(placement_inputs);
     let needs_auto_columns = placement.column_range.start < 0
         || placement.column_range.end
             > i32::try_from(explicit_columns.tracks.len()).unwrap_or(i32::MAX);
@@ -1261,6 +1214,7 @@ where
 
     let mut columns = TrackSet::default();
     let mut rows = TrackSet::default();
+    let mut intrinsic_scratch = IntrinsicSizingScratch::default();
     run_track_sizing(
         &mut columns,
         &mut rows,
@@ -1272,6 +1226,7 @@ where
         initial_gap,
         justify_content,
         align_content,
+        &mut intrinsic_scratch,
     );
     let provisional_track_size = Size::new(columns.used_size(), rows.used_size());
     let container_track_size = match size_containment {
@@ -1309,6 +1264,7 @@ where
             final_gap,
             justify_content,
             align_content,
+            &mut intrinsic_scratch,
         );
     }
     align_tracks(&mut columns, final_inner.width, justify_content);
@@ -1328,15 +1284,15 @@ where
         input.goal,
         rtl,
     );
-    if input.goal == LayoutGoal::Commit {
-        for (document_index, child) in hidden {
+    if commits_layout {
+        for (document_index, child) in hidden.expect("commit keeps hidden grid items") {
             hide_subtree(child);
             child.set_unrounded_layout(Layout::with_order(
                 u32::try_from(document_index).unwrap_or(u32::MAX),
             ));
         }
         let absolute_content_size = layout_absolute_items(
-            &absolute,
+            &absolute.expect("commit keeps out-of-flow grid items"),
             &columns,
             &rows,
             explicit_columns.tracks.len(),
@@ -1399,6 +1355,9 @@ mod tests {
     #[test]
     fn container_floors_are_resolved() {
         let metrics = ResolvedContainerBox {
+            preferred_definite: Size::new(false, false),
+            aspect_ratio: None,
+            box_sizing: stylo::computed_values::box_sizing::T::ContentBox,
             padding: Edges::ZERO,
             border: Edges::ZERO,
             box_inset: Size::new(4.0, 6.0),

@@ -14,7 +14,7 @@ use parley::{
 };
 use stylo::Zero;
 use stylo::computed_values::{direction, text_wrap_mode};
-use stylo::values::computed::font::{GenericFontFamily, SingleFontFamily};
+use stylo::values::computed::font::{FontFamily, GenericFontFamily, SingleFontFamily};
 use stylo::values::computed::{FontStyle, Length, LineHeight, TextAlign, WordBreak};
 
 use super::content::normalize_runs;
@@ -59,7 +59,7 @@ where
 
     pub fn compute_layout(&mut self, input: LayoutInput) -> LayoutOutput {
         let container_style = self.container_style;
-        compute_leaf_layout_with_measurement(input, container_style, None, |measure_input| {
+        compute_leaf_layout_with_measurement(input, container_style, None, true, |measure_input| {
             self.measure(measure_input).metrics()
         })
     }
@@ -81,8 +81,16 @@ where
         builder.reserve(content.ranges.len(), content.ranges.len());
 
         for range in &content.ranges {
+            let owned_family;
+            let family = if let Some(family) = range.style.font_family_ref() {
+                family
+            } else {
+                owned_family = range.style.font_family();
+                &owned_family
+            };
             let style = translate_run_style(
                 range.style,
+                family,
                 word_break,
                 self.container_style.text_wrap_mode(),
             );
@@ -108,7 +116,7 @@ where
             LayoutGoal::Measure(_) => self.artifacts.committed.clone(),
             LayoutGoal::Commit => self.artifacts.probe.take(),
         };
-        let artifact = reusable.unwrap_or_else(|| self.shape());
+        let artifact = reusable.unwrap_or_else(|| Box::new(self.shape()));
         match goal {
             LayoutGoal::Measure(_) => self.artifacts.probe = Some(artifact),
             LayoutGoal::Commit => self.artifacts.committed = Some(artifact),
@@ -154,12 +162,12 @@ where
             LayoutGoal::Measure(_) => self
                 .artifacts
                 .probe
-                .as_mut()
+                .as_deref_mut()
                 .expect("a probe artifact was installed"),
             LayoutGoal::Commit => self
                 .artifacts
                 .committed
-                .as_mut()
+                .as_deref_mut()
                 .expect("a committed artifact was installed"),
         };
         let max_advance = line_break_width(input, artifact);
@@ -210,14 +218,14 @@ fn alignment(value: TextAlign, direction: direction::T) -> Alignment {
     }
 }
 
-fn translate_run_style(
+fn translate_run_style<'family>(
     style: &impl TextRunStyle,
+    family: &'family FontFamily,
     word_break: WordBreak,
     wrap_mode: text_wrap_mode::T,
-) -> ParleyTextStyle<'static, 'static, crate::style::TextBrush> {
-    let families = translate_font_family_list(style);
-    let features = style
-        .font_feature_settings()
+) -> ParleyTextStyle<'family, 'static, crate::style::TextBrush> {
+    let feature_settings = style.font_feature_settings();
+    let features = feature_settings
         .0
         .iter()
         .map(|setting| {
@@ -227,8 +235,8 @@ fn translate_run_style(
             )
         })
         .collect::<Vec<_>>();
-    let variations = style
-        .font_variation_settings()
+    let variation_settings = style.font_variation_settings();
+    let variations = variation_settings
         .0
         .iter()
         .map(|setting| {
@@ -238,7 +246,7 @@ fn translate_run_style(
 
     let font_style = style.font_style();
     ParleyTextStyle {
-        font_family: ParleyFontFamily::List(Cow::Owned(families)),
+        font_family: translate_font_family_list(family),
         font_size: style.font_size(),
         font_style: if font_style == FontStyle::NORMAL {
             ParleyFontStyle::Normal
@@ -248,8 +256,16 @@ fn translate_run_style(
             ParleyFontStyle::Oblique(Some(font_style.oblique_degrees()))
         },
         font_weight: ParleyFontWeight::new(style.font_weight().value()),
-        font_variations: FontVariations::List(Cow::Owned(variations)),
-        font_features: FontFeatures::List(Cow::Owned(features)),
+        font_variations: if variations.is_empty() {
+            FontVariations::empty()
+        } else {
+            FontVariations::List(Cow::Owned(variations))
+        },
+        font_features: if features.is_empty() {
+            FontFeatures::empty()
+        } else {
+            FontFeatures::List(Cow::Owned(features))
+        },
         line_height: match style.line_height() {
             LineHeight::Normal => ParleyLineHeight::MetricsRelative(1.0),
             LineHeight::Number(factor) => ParleyLineHeight::FontSizeRelative(factor.0),
@@ -270,27 +286,28 @@ fn translate_run_style(
     }
 }
 
-fn translate_font_family_list(style: &impl TextRunStyle) -> Vec<ParleyFontFamilyName<'static>> {
-    let family = style.font_family();
-    let mut families = family
-        .families
-        .list
-        .iter()
-        .map(|single| match single {
-            SingleFontFamily::FamilyName(name) => {
-                ParleyFontFamilyName::Named(Cow::Owned(name.name.to_string()))
-            }
-            SingleFontFamily::Generic(generic) => {
-                ParleyFontFamilyName::Generic(translate_generic_family(*generic))
-            }
-        })
-        .collect::<Vec<_>>();
+fn translate_font_family_list(family: &FontFamily) -> ParleyFontFamily<'_> {
+    let families = &family.families.list;
     if families.is_empty() {
-        families.push(ParleyFontFamilyName::Generic(
-            ParleyGenericFamily::SansSerif,
-        ));
+        return ParleyGenericFamily::SansSerif.into();
     }
-    families
+    if families.len() == 1 {
+        return translate_font_family_name(&families[0]).into();
+    }
+    ParleyFontFamily::List(Cow::Owned(
+        families.iter().map(translate_font_family_name).collect(),
+    ))
+}
+
+fn translate_font_family_name(single: &SingleFontFamily) -> ParleyFontFamilyName<'_> {
+    match single {
+        SingleFontFamily::FamilyName(name) => {
+            ParleyFontFamilyName::Named(Cow::Borrowed(name.name.as_ref()))
+        }
+        SingleFontFamily::Generic(generic) => {
+            ParleyFontFamilyName::Generic(translate_generic_family(*generic))
+        }
+    }
 }
 
 const fn translate_generic_family(value: GenericFontFamily) -> ParleyGenericFamily {
@@ -402,6 +419,14 @@ mod tests {
         }
     }
 
+    fn measure_input(width: AvailableSpace, goal: LayoutGoal) -> LeafMeasureInput {
+        LeafMeasureInput::new(
+            Size::NONE,
+            Size::new(width, AvailableSpace::MaxContent),
+            goal,
+        )
+    }
+
     #[test]
     fn one_shaped_layout_is_rebroken_for_probe_and_commit_constraints() {
         let mut context = TextContext::without_system_fonts();
@@ -418,31 +443,35 @@ mod tests {
         let mut artifacts = TextLayoutStore::default();
         let mut measurer =
             TextMeasurer::new(&mut context, &mut artifacts, &container, runs.into_iter());
-        let probe = LeafMeasureInput::new(
-            Size::NONE,
-            Size::new(AvailableSpace::Definite(80.0), AvailableSpace::MaxContent),
+        let probe = measure_input(
+            AvailableSpace::Definite(80.0),
             LayoutGoal::Measure(RequestedAxis::Both),
         );
 
         assert_eq!(measurer.measure(probe).size(), Size::new(80.0, 32.0));
         assert_eq!(measurer.context.shape_count(), 1);
-        let narrower = LeafMeasureInput::new(
-            Size::NONE,
-            Size::new(AvailableSpace::Definite(48.0), AvailableSpace::MaxContent),
+        let narrower = measure_input(
+            AvailableSpace::Definite(48.0),
             LayoutGoal::Measure(RequestedAxis::Both),
         );
         assert_eq!(measurer.measure(narrower).size(), Size::new(48.0, 64.0));
         assert_eq!(measurer.context.shape_count(), 1);
-
-        let commit = LeafMeasureInput::new(
-            Size::NONE,
-            Size::new(AvailableSpace::Definite(80.0), AvailableSpace::MaxContent),
-            LayoutGoal::Commit,
+        let probe_address = core::ptr::from_ref(
+            measurer
+                .artifacts
+                .probe()
+                .expect("the measured artifact remains a probe"),
         );
+
+        let commit = measure_input(AvailableSpace::Definite(80.0), LayoutGoal::Commit);
         assert_eq!(measurer.measure(commit).layout().line_count(), 2);
         assert_eq!(measurer.context.shape_count(), 1);
         assert!(measurer.artifacts.probe().is_none());
-        assert!(measurer.artifacts.committed().is_some());
+        let committed = measurer
+            .artifacts
+            .committed()
+            .expect("the probe was promoted to committed");
+        assert!(core::ptr::eq(probe_address, core::ptr::from_ref(committed)));
 
         assert_eq!(measurer.measure(narrower).size(), Size::new(48.0, 64.0));
         assert_eq!(measurer.context.shape_count(), 1);
@@ -452,46 +481,34 @@ mod tests {
 
     #[test]
     fn constraint_and_alignment_mappings_cover_protocol_values() {
-        let input = LeafMeasureInput::new(
-            Size::NONE,
-            Size::new(AvailableSpace::MinContent, AvailableSpace::MaxContent),
-            LayoutGoal::Commit,
-        );
+        let input = measure_input(AvailableSpace::MinContent, LayoutGoal::Commit);
         let empty = TextLayout::shaped(parley::Layout::default(), false);
         assert_eq!(line_break_width(input, &empty), Some(0.0));
-        assert_eq!(
-            alignment(TextAlign::Start, direction::T::Rtl),
-            Alignment::Right
-        );
-        assert_eq!(
-            alignment(TextAlign::End, direction::T::Rtl),
-            Alignment::Left
-        );
-        assert_eq!(
-            alignment(TextAlign::Center, direction::T::Ltr),
-            Alignment::Center
-        );
-        assert_eq!(
-            alignment(TextAlign::Left, direction::T::Rtl),
-            Alignment::Left
-        );
-        assert_eq!(
-            alignment(TextAlign::Right, direction::T::Ltr),
-            Alignment::Right
-        );
+        for (value, direction, expected) in [
+            (TextAlign::Start, direction::T::Rtl, Alignment::Right),
+            (TextAlign::End, direction::T::Rtl, Alignment::Left),
+            (TextAlign::Center, direction::T::Ltr, Alignment::Center),
+            (TextAlign::Left, direction::T::Rtl, Alignment::Left),
+            (TextAlign::Right, direction::T::Ltr, Alignment::Right),
+        ] {
+            assert_eq!(alignment(value, direction), expected);
+        }
     }
 
     struct EmptyRunStyle {
         font_style: FontStyle,
         line_height: LineHeight,
         weight: FontWeight,
+        generic: Option<GenericFontFamily>,
     }
 
     impl TextRunStyle for EmptyRunStyle {
         fn font_family(&self) -> FontFamily {
             FontFamily {
                 families: FontFamilyList {
-                    list: stylo::ArcSlice::from_iter(std::iter::empty()),
+                    list: stylo::ArcSlice::from_iter(
+                        self.generic.map(SingleFontFamily::Generic).into_iter(),
+                    ),
                 },
                 is_system_font: false,
                 is_initial: false,
@@ -532,9 +549,15 @@ mod tests {
             font_style: FontStyle::ITALIC,
             line_height: LineHeight::Length(NonNegativeLength::new(24.0)),
             weight: FontWeight::from_float(900.0),
+            generic: None,
         };
-        let translated =
-            translate_run_style(&empty, WordBreak::BreakAll, text_wrap_mode::T::Nowrap);
+        let family = empty.font_family();
+        let translated = translate_run_style(
+            &empty,
+            &family,
+            WordBreak::BreakAll,
+            text_wrap_mode::T::Nowrap,
+        );
         assert_eq!(translated.font_style, ParleyFontStyle::Italic);
         assert_eq!(translated.line_height, ParleyLineHeight::Absolute(24.0));
         assert_eq!(translated.word_break, ParleyWordBreak::BreakAll);
@@ -542,15 +565,20 @@ mod tests {
         assert_eq!(translated.overflow_wrap, ParleyOverflowWrap::BreakWord);
         assert!(matches!(
             translated.font_family,
-            ParleyFontFamily::List(ref list) if !list.is_empty()
+            ParleyFontFamily::Single(ParleyFontFamilyName::Generic(
+                ParleyGenericFamily::SansSerif
+            ))
         ));
 
         let spaced = EmptyRunStyle {
             font_style: FontStyle::NORMAL,
             line_height: LineHeight::Number(NonNegative(1.5)),
             weight: FontWeight::NORMAL,
+            generic: None,
         };
-        let translated = translate_run_style(&spaced, WordBreak::Normal, text_wrap_mode::T::Wrap);
+        let family = spaced.font_family();
+        let translated =
+            translate_run_style(&spaced, &family, WordBreak::Normal, text_wrap_mode::T::Wrap);
         assert_eq!(translated.font_style, ParleyFontStyle::Normal);
         assert_eq!(
             translated.line_height,
@@ -565,39 +593,35 @@ mod tests {
             font_style: FontStyle::oblique(20.0),
             line_height: LineHeight::Normal,
             weight: FontWeight::NORMAL,
+            generic: None,
         };
-        let translated = translate_run_style(&oblique, WordBreak::KeepAll, text_wrap_mode::T::Wrap);
+        let family = oblique.font_family();
+        let translated = translate_run_style(
+            &oblique,
+            &family,
+            WordBreak::KeepAll,
+            text_wrap_mode::T::Wrap,
+        );
         assert_eq!(translated.font_style, ParleyFontStyle::Oblique(Some(20.0)));
         assert_eq!(translated.word_break, ParleyWordBreak::KeepAll);
     }
 
-    struct GenericRunStyle;
-
-    impl TextRunStyle for GenericRunStyle {
-        fn font_family(&self) -> FontFamily {
-            FontFamily {
-                families: FontFamilyList {
-                    list: stylo::ArcSlice::from_iter(std::iter::once(SingleFontFamily::Generic(
-                        GenericFontFamily::Monospace,
-                    ))),
-                },
-                is_system_font: false,
-                is_initial: false,
-            }
-        }
-    }
-
     #[test]
     fn generic_families_translate_without_the_empty_list_fallback() {
-        let translated =
-            translate_run_style(&GenericRunStyle, WordBreak::Normal, text_wrap_mode::T::Wrap);
-        let ParleyFontFamily::List(list) = translated.font_family else {
-            panic!("family translation always produces a list");
+        let style = EmptyRunStyle {
+            font_style: FontStyle::NORMAL,
+            line_height: LineHeight::Normal,
+            weight: FontWeight::NORMAL,
+            generic: Some(GenericFontFamily::Monospace),
         };
-        assert_eq!(list.len(), 1);
+        let family = style.font_family();
+        let translated =
+            translate_run_style(&style, &family, WordBreak::Normal, text_wrap_mode::T::Wrap);
         assert!(matches!(
-            list[0],
-            ParleyFontFamilyName::Generic(ParleyGenericFamily::Monospace)
+            translated.font_family,
+            ParleyFontFamily::Single(ParleyFontFamilyName::Generic(
+                ParleyGenericFamily::Monospace
+            ))
         ));
     }
 

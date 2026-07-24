@@ -7,9 +7,7 @@ use neutron_star::compute::{
     LeafMeasureInput, compute_cached_layout, compute_flexbox_layout, compute_root_layout,
 };
 use neutron_star::geometry::{Edges, Point, Size};
-use neutron_star::style::{
-    CoreStyle, FlexContainerStyle, FlexItemStyle, TextContainerStyle, TextRun, TextRunStyle,
-};
+use neutron_star::style::{CoreStyle, TextContainerStyle, TextRun, TextRunStyle};
 use neutron_star::text::{TextContext, TextLayoutStore, TextMeasurer};
 use neutron_star::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
@@ -220,197 +218,232 @@ struct Observation {
     line_count: usize,
 }
 
-fn request(width: AvailableSpace, goal: LayoutGoal) -> LeafMeasureInput {
-    LeafMeasureInput::new(
-        Size::NONE,
-        Size::new(width, AvailableSpace::MaxContent),
-        goal,
-    )
+struct TextFixture {
+    context: TextContext,
+    artifacts: TextLayoutStore,
 }
 
-fn observe(
-    context: &mut TextContext,
-    artifacts: &mut TextLayoutStore,
-    container: &ContainerStyle,
-    runs: &[TextRun<'_, RunStyle>],
-    input: LeafMeasureInput,
-) -> Observation {
-    let mut measurer = TextMeasurer::new(context, artifacts, container, runs.iter().copied());
-    let measurement = measurer.measure(input);
-    Observation {
-        size: measurement.size(),
-        baseline: measurement.first_baselines().y,
-        line_count: measurement.layout().line_count(),
+impl TextFixture {
+    fn new() -> Self {
+        let context = text_context();
+        Self {
+            context,
+            artifacts: TextLayoutStore::default(),
+        }
     }
+
+    fn observe(
+        &mut self,
+        container: &ContainerStyle,
+        runs: &[TextRun<'_, RunStyle>],
+        input: LeafMeasureInput,
+    ) -> Observation {
+        let mut measurer = TextMeasurer::new(
+            &mut self.context,
+            &mut self.artifacts,
+            container,
+            runs.iter().copied(),
+        );
+        let measurement = measurer.measure(input);
+        Observation {
+            size: measurement.size(),
+            baseline: measurement.first_baselines().y,
+            line_count: measurement.layout().line_count(),
+        }
+    }
+
+    fn observe_text(
+        &mut self,
+        container: &ContainerStyle,
+        style: &RunStyle,
+        text: &str,
+        preserve_newlines: bool,
+        input: LeafMeasureInput,
+    ) -> Observation {
+        self.observe(
+            container,
+            &[TextRun {
+                text,
+                style,
+                preserve_newlines,
+            }],
+            input,
+        )
+    }
+
+    fn commit(
+        &mut self,
+        container: &ContainerStyle,
+        style: &RunStyle,
+        text: &str,
+        width: AvailableSpace,
+    ) -> Observation {
+        self.observe_text(
+            container,
+            style,
+            text,
+            false,
+            request(width, LayoutGoal::Commit),
+        )
+    }
+
+    fn intrinsic(
+        &mut self,
+        container: &ContainerStyle,
+        style: &RunStyle,
+        text: &str,
+        width: AvailableSpace,
+    ) -> Observation {
+        self.observe_text(
+            container,
+            style,
+            text,
+            false,
+            request(width, LayoutGoal::Measure(RequestedAxis::Horizontal)),
+        )
+    }
+
+    fn first_break(
+        &mut self,
+        container: &mut ContainerStyle,
+        style: &RunStyle,
+        text: &str,
+        word_break: WordBreak,
+        case: &str,
+    ) -> BreakReason {
+        container.word_break = word_break;
+        self.artifacts.invalidate();
+        self.commit(container, style, text, AvailableSpace::Definite(32.0));
+        self.artifacts
+            .committed()
+            .unwrap_or_else(|| panic!("{case}: missing commit"))
+            .parley_layout()
+            .get(0)
+            .unwrap_or_else(|| panic!("{case}: missing first line"))
+            .break_reason()
+    }
+}
+
+fn request(width: AvailableSpace, goal: LayoutGoal) -> LeafMeasureInput {
+    let available_space = Size::new(width, AvailableSpace::MaxContent);
+    LeafMeasureInput::new(Size::NONE, available_space, goal)
+}
+
+fn committed_line_offset(artifacts: &TextLayoutStore, line: usize, case: &str) -> f32 {
+    artifacts
+        .committed()
+        .expect("committed text layout")
+        .parley_layout()
+        .get(line)
+        .unwrap_or_else(|| panic!("{case}: missing line {line}"))
+        .metrics()
+        .offset
 }
 
 #[test]
 fn exact_ahem_geometry_covers_empty_whitespace_single_word_and_wrapping() {
     let style = RunStyle::ahem(16.0);
     let container = ContainerStyle::default();
-    let mut context = text_context();
-    let mut artifacts = TextLayoutStore::default();
+    let mut fixture = TextFixture::new();
 
-    let empty = [TextRun {
-        text: "",
-        style: &style,
-        preserve_newlines: false,
-    }];
-    let measured = observe(
-        &mut context,
-        &mut artifacts,
-        &container,
-        &empty,
-        request(AvailableSpace::MaxContent, LayoutGoal::Commit),
-    );
-    assert_size(measured.size, Size::ZERO);
-    assert_eq!(measured.line_count, 0);
-    assert_eq!(measured.baseline, None);
-
-    artifacts.invalidate();
-    let whitespace = [TextRun {
-        text: " \t \r\n ",
-        style: &style,
-        preserve_newlines: false,
-    }];
-    let measured = observe(
-        &mut context,
-        &mut artifacts,
-        &container,
-        &whitespace,
-        request(AvailableSpace::MaxContent, LayoutGoal::Commit),
-    );
-    assert_size(measured.size, Size::ZERO);
-    assert_eq!(measured.line_count, 0);
-    assert_eq!(measured.baseline, None);
-
-    artifacts.invalidate();
-    let word = [TextRun {
-        text: "abcdefghij",
-        style: &style,
-        preserve_newlines: false,
-    }];
-    let unconstrained = observe(
-        &mut context,
-        &mut artifacts,
-        &container,
-        &word,
-        request(AvailableSpace::MaxContent, LayoutGoal::Commit),
-    );
-    assert_size(unconstrained.size, Size::new(160.0, 16.0));
-    assert_eq!(unconstrained.line_count, 1);
-    assert_close(unconstrained.baseline.expect("text has a baseline"), 12.8);
-
-    let wrapped = observe(
-        &mut context,
-        &mut artifacts,
-        &container,
-        &word,
-        request(
-            AvailableSpace::Definite(80.0),
-            LayoutGoal::Measure(RequestedAxis::Both),
+    for (index, (case, text, size, lines, baseline)) in [
+        ("empty", "", Size::ZERO, 0, None),
+        ("collapsible whitespace", " \t \r\n ", Size::ZERO, 0, None),
+        (
+            "single word",
+            "abcdefghij",
+            Size::new(160.0, 16.0),
+            1,
+            Some(12.8),
         ),
-    );
-    assert_size(wrapped.size, Size::new(80.0, 32.0));
-    assert_eq!(wrapped.line_count, 2);
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if index > 0 {
+            fixture.artifacts.invalidate();
+        }
+        let measured = fixture.commit(&container, &style, text, AvailableSpace::MaxContent);
+        assert_size(measured.size, size);
+        assert_eq!(measured.line_count, lines, "{case}: line count");
+        match baseline {
+            Some(expected) => assert_close(measured.baseline.expect("baseline"), expected),
+            None => assert_eq!(measured.baseline, None, "{case}: baseline"),
+        }
+    }
 
-    let narrow = observe(
-        &mut context,
-        &mut artifacts,
-        &container,
-        &word,
-        request(
-            AvailableSpace::Definite(48.0),
+    for (case, width, size, lines) in [
+        ("wrapped at 80px", 80.0, Size::new(80.0, 32.0), 2),
+        ("wrapped at 48px", 48.0, Size::new(48.0, 64.0), 4),
+    ] {
+        let input = request(
+            AvailableSpace::Definite(width),
             LayoutGoal::Measure(RequestedAxis::Both),
-        ),
-    );
-    assert_size(narrow.size, Size::new(48.0, 64.0));
-    assert_eq!(narrow.line_count, 4);
+        );
+        let measured = fixture.observe_text(&container, &style, "abcdefghij", false, input);
+        assert_size(measured.size, size);
+        assert_eq!(measured.line_count, lines, "{case}: line count");
+    }
 }
 
 #[test]
 fn intrinsic_width_and_nowrap_rebreak_retained_shape() {
     let style = RunStyle::ahem(16.0);
-    let run = [TextRun {
-        text: "abc defgh",
-        style: &style,
-        preserve_newlines: false,
-    }];
-    let mut context = text_context();
-    let mut artifacts = TextLayoutStore::default();
+    let mut fixture = TextFixture::new();
     let mut container = ContainerStyle::default();
 
-    let maximum = observe(
-        &mut context,
-        &mut artifacts,
-        &container,
-        &run,
-        request(AvailableSpace::MaxContent, LayoutGoal::Commit),
-    );
+    let maximum = fixture.commit(&container, &style, "abc defgh", AvailableSpace::MaxContent);
     assert_size(maximum.size, Size::new(144.0, 16.0));
     assert_eq!(
-        artifacts.committed().expect("committed").max_advance(),
+        fixture
+            .artifacts
+            .committed()
+            .expect("committed")
+            .max_advance(),
         None
     );
 
-    let minimum = observe(
-        &mut context,
-        &mut artifacts,
-        &container,
-        &run,
-        request(
-            AvailableSpace::MinContent,
-            LayoutGoal::Measure(RequestedAxis::Horizontal),
-        ),
-    );
+    let minimum = fixture.intrinsic(&container, &style, "abc defgh", AvailableSpace::MinContent);
     assert_size(minimum.size, Size::new(80.0, 32.0));
     assert_eq!(minimum.line_count, 2);
-    assert_eq!(artifacts.probe().expect("probe").max_advance(), Some(80.0));
-    let committed = artifacts.committed().expect("committed survives probe");
+    assert_eq!(
+        fixture.artifacts.probe().expect("probe").max_advance(),
+        Some(80.0)
+    );
+    let committed = fixture
+        .artifacts
+        .committed()
+        .expect("committed survives probe");
     assert_eq!(committed.max_advance(), None);
     assert_eq!(committed.line_count(), 1);
 
     container.word_break = WordBreak::BreakAll;
-    artifacts.invalidate();
-    let break_all = observe(
-        &mut context,
-        &mut artifacts,
-        &container,
-        &run,
-        request(
-            AvailableSpace::MinContent,
-            LayoutGoal::Measure(RequestedAxis::Horizontal),
-        ),
-    );
+    fixture.artifacts.invalidate();
+    let break_all = fixture.intrinsic(&container, &style, "abc defgh", AvailableSpace::MinContent);
     assert_size(break_all.size, Size::new(16.0, 128.0));
     assert_eq!(break_all.line_count, 8);
     assert_eq!(
-        artifacts.probe().expect("break-all probe").max_advance(),
+        fixture
+            .artifacts
+            .probe()
+            .expect("break-all probe")
+            .max_advance(),
         Some(16.0)
     );
 
     container.wrap = text_wrap_mode::T::Nowrap;
-    artifacts.invalidate();
-    let nowrap_intrinsic = observe(
-        &mut context,
-        &mut artifacts,
-        &container,
-        &run,
-        request(
-            AvailableSpace::MinContent,
-            LayoutGoal::Measure(RequestedAxis::Horizontal),
-        ),
-    );
+    fixture.artifacts.invalidate();
+    let nowrap_intrinsic =
+        fixture.intrinsic(&container, &style, "abc defgh", AvailableSpace::MinContent);
     assert_size(nowrap_intrinsic.size, Size::new(144.0, 16.0));
     assert_eq!(nowrap_intrinsic.line_count, 1);
 
-    artifacts.invalidate();
-    let nowrap = observe(
-        &mut context,
-        &mut artifacts,
+    fixture.artifacts.invalidate();
+    let nowrap = fixture.commit(
         &container,
-        &run,
-        request(AvailableSpace::Definite(32.0), LayoutGoal::Commit),
+        &style,
+        "abc defgh",
+        AvailableSpace::Definite(32.0),
     );
     assert_size(nowrap.size, Size::new(144.0, 16.0));
     assert_eq!(nowrap.line_count, 1);
@@ -424,69 +457,29 @@ fn auto_sized_alignment_uses_the_measured_text_width() {
         wrap: text_wrap_mode::T::Nowrap,
         ..ContainerStyle::default()
     };
-    let run = [TextRun {
-        text: "ab",
-        style: &style,
-        preserve_newlines: false,
-    }];
-    let mut context = text_context();
-    let mut artifacts = TextLayoutStore::default();
-
-    let measured = observe(
-        &mut context,
-        &mut artifacts,
-        &container,
-        &run,
-        request(AvailableSpace::Definite(80.0), LayoutGoal::Commit),
-    );
+    let mut fixture = TextFixture::new();
+    let measured = fixture.commit(&container, &style, "ab", AvailableSpace::Definite(80.0));
 
     assert_size(measured.size, Size::new(32.0, 16.0));
     assert_eq!(measured.line_count, 1);
-    let committed = artifacts.committed().expect("auto-sized nowrap commit");
+    let committed = fixture
+        .artifacts
+        .committed()
+        .expect("auto-sized nowrap commit");
     assert_eq!(committed.max_advance(), Some(32.0));
-    assert_close(
-        committed
-            .parley_layout()
-            .get(0)
-            .expect("nowrap line")
-            .metrics()
-            .offset,
-        0.0,
-    );
+    assert_close(committed_line_offset(&fixture.artifacts, 0, "nowrap"), 0.0);
 
     container.wrap = text_wrap_mode::T::Wrap;
-    artifacts.invalidate();
-    let wrapped_run = [TextRun {
-        text: "abc de",
-        style: &style,
-        preserve_newlines: false,
-    }];
-    let wrapped = observe(
-        &mut context,
-        &mut artifacts,
-        &container,
-        &wrapped_run,
-        request(AvailableSpace::Definite(80.0), LayoutGoal::Commit),
-    );
+    fixture.artifacts.invalidate();
+    let wrapped = fixture.commit(&container, &style, "abc de", AvailableSpace::Definite(80.0));
     assert_size(wrapped.size, Size::new(48.0, 32.0));
     assert_eq!(wrapped.line_count, 2);
-    let wrapped = artifacts.committed().expect("auto-sized wrapped commit");
     assert_close(
-        wrapped
-            .parley_layout()
-            .get(0)
-            .expect("first line")
-            .metrics()
-            .offset,
+        committed_line_offset(&fixture.artifacts, 0, "wrapped first"),
         0.0,
     );
     assert_close(
-        wrapped
-            .parley_layout()
-            .get(1)
-            .expect("second line")
-            .metrics()
-            .offset,
+        committed_line_offset(&fixture.artifacts, 1, "wrapped second"),
         16.0,
     );
 }
@@ -499,31 +492,19 @@ fn known_inline_size_aligns_without_changing_content_metrics() {
         wrap: text_wrap_mode::T::Nowrap,
         ..ContainerStyle::default()
     };
-    let run = [TextRun {
-        text: "ab",
-        style: &style,
-        preserve_newlines: false,
-    }];
-    let mut context = text_context();
-    let mut artifacts = TextLayoutStore::default();
+    let mut fixture = TextFixture::new();
     let input = LeafMeasureInput::new(
         Size::new(Some(80.0), None),
         Size::new(AvailableSpace::Definite(80.0), AvailableSpace::MaxContent),
         LayoutGoal::Commit,
     );
-
-    let measured = observe(&mut context, &mut artifacts, &container, &run, input);
+    let measured = fixture.observe_text(&container, &style, "ab", false, input);
 
     assert_size(measured.size, Size::new(32.0, 16.0));
-    let committed = artifacts.committed().expect("known-width commit");
+    let committed = fixture.artifacts.committed().expect("known-width commit");
     assert_eq!(committed.max_advance(), Some(80.0));
     assert_close(
-        committed
-            .parley_layout()
-            .get(0)
-            .expect("known-width line")
-            .metrics()
-            .offset,
+        committed_line_offset(&fixture.artifacts, 0, "known width"),
         48.0,
     );
 }
@@ -531,97 +512,62 @@ fn known_inline_size_aligns_without_changing_content_metrics() {
 #[test]
 fn word_break_modes_change_regular_break_opportunities() {
     let style = RunStyle::ahem(16.0);
-    let run = [TextRun {
-        text: "abc defgh",
-        style: &style,
-        preserve_newlines: false,
-    }];
-    let mut context = text_context();
-    let mut artifacts = TextLayoutStore::default();
+    let mut fixture = TextFixture::new();
     let mut container = ContainerStyle::default();
 
-    for word_break in [WordBreak::BreakAll, WordBreak::KeepAll] {
-        container.word_break = word_break;
-        artifacts.invalidate();
-        let measured = observe(
-            &mut context,
-            &mut artifacts,
-            &container,
-            &run,
-            request(AvailableSpace::Definite(32.0), LayoutGoal::Commit),
-        );
-        assert!(measured.line_count > 1);
-        assert!(measured.size.width <= 32.0 + EPSILON);
-    }
-
-    let latin = [TextRun {
-        text: "abcdefgh",
-        style: &style,
-        preserve_newlines: false,
-    }];
-    for (word_break, expected_break) in [
-        (WordBreak::Normal, BreakReason::Emergency),
-        (WordBreak::BreakAll, BreakReason::Regular),
+    for (case, word_break) in [
+        ("break-all spaced Latin", WordBreak::BreakAll),
+        ("keep-all spaced Latin", WordBreak::KeepAll),
     ] {
         container.word_break = word_break;
-        artifacts.invalidate();
-        observe(
-            &mut context,
-            &mut artifacts,
+        fixture.artifacts.invalidate();
+        let measured = fixture.commit(
             &container,
-            &latin,
-            request(AvailableSpace::Definite(32.0), LayoutGoal::Commit),
+            &style,
+            "abc defgh",
+            AvailableSpace::Definite(32.0),
         );
-        let first_break = artifacts
-            .committed()
-            .expect("latin line breaks")
-            .parley_layout()
-            .get(0)
-            .expect("latin first line")
-            .break_reason();
-        assert_eq!(first_break, expected_break);
+        assert!(measured.line_count > 1, "{case}: line count");
+        assert!(measured.size.width <= 32.0 + EPSILON, "{case}: inline size");
     }
 
-    let cjk = [TextRun {
-        text: "你好世界",
-        style: &style,
-        preserve_newlines: false,
-    }];
-    for (word_break, expected_break) in [
-        (WordBreak::Normal, BreakReason::Regular),
-        (WordBreak::KeepAll, BreakReason::Emergency),
+    for (case, text, word_break, expected_break) in [
+        (
+            "normal unspaced Latin",
+            "abcdefgh",
+            WordBreak::Normal,
+            BreakReason::Emergency,
+        ),
+        (
+            "break-all unspaced Latin",
+            "abcdefgh",
+            WordBreak::BreakAll,
+            BreakReason::Regular,
+        ),
+        (
+            "normal CJK",
+            "你好世界",
+            WordBreak::Normal,
+            BreakReason::Regular,
+        ),
+        (
+            "keep-all CJK",
+            "你好世界",
+            WordBreak::KeepAll,
+            BreakReason::Emergency,
+        ),
     ] {
-        container.word_break = word_break;
-        artifacts.invalidate();
-        observe(
-            &mut context,
-            &mut artifacts,
-            &container,
-            &cjk,
-            request(AvailableSpace::Definite(32.0), LayoutGoal::Commit),
+        assert_eq!(
+            fixture.first_break(&mut container, &style, text, word_break, case),
+            expected_break,
+            "{case}"
         );
-        let first_break = artifacts
-            .committed()
-            .expect("CJK line breaks")
-            .parley_layout()
-            .get(0)
-            .expect("CJK first line")
-            .break_reason();
-        assert_eq!(first_break, expected_break);
     }
 
     container.word_break = WordBreak::KeepAll;
-    artifacts.invalidate();
-    let keep_all_intrinsic = observe(
-        &mut context,
-        &mut artifacts,
-        &container,
-        &cjk,
-        request(
-            AvailableSpace::MinContent,
-            LayoutGoal::Measure(RequestedAxis::Horizontal),
-        ),
-    );
+    fixture.artifacts.invalidate();
+    let keep_all_intrinsic =
+        fixture.intrinsic(&container, &style, "你好世界", AvailableSpace::MinContent);
     assert_size(keep_all_intrinsic.size, Size::new(64.0, 16.0));
     assert_eq!(keep_all_intrinsic.line_count, 1);
 }
@@ -647,58 +593,36 @@ fn run_spacing_line_height_and_mixed_sizes_affect_exact_geometry() {
         .into(),
     );
     let container = ContainerStyle::default();
-    let mut context = text_context();
-    let mut artifacts = TextLayoutStore::default();
-    let run = [TextRun {
-        text: "abc",
-        style: &spaced,
-        preserve_newlines: false,
-    }];
-    let measured = observe(
-        &mut context,
-        &mut artifacts,
-        &container,
-        &run,
-        request(AvailableSpace::MaxContent, LayoutGoal::Commit),
-    );
+    let mut fixture = TextFixture::new();
+    let measured = fixture.commit(&container, &spaced, "abc", AvailableSpace::MaxContent);
     assert_close(measured.size.width, 54.0);
 
-    let mut factor = RunStyle::ahem(16.0);
-    factor.line_height = LineHeight::Number(NonNegativeNumber::from(2.0));
-    artifacts.invalidate();
-    let factor_run = [TextRun {
-        text: "abc",
-        style: &factor,
-        preserve_newlines: false,
-    }];
-    let measured = observe(
-        &mut context,
-        &mut artifacts,
-        &container,
-        &factor_run,
-        request(AvailableSpace::MaxContent, LayoutGoal::Commit),
-    );
-    assert_close(measured.size.height, 32.0);
-
-    factor.line_height = LineHeight::Length(NonNegativeLength::new(24.0));
-    artifacts.invalidate();
-    let factor_run = [TextRun {
-        text: "abc",
-        style: &factor,
-        preserve_newlines: false,
-    }];
-    let measured = observe(
-        &mut context,
-        &mut artifacts,
-        &container,
-        &factor_run,
-        request(AvailableSpace::MaxContent, LayoutGoal::Commit),
-    );
-    assert_close(measured.size.height, 24.0);
+    for (case, line_height, expected_height) in [
+        (
+            "numeric line height",
+            LineHeight::Number(NonNegativeNumber::from(2.0)),
+            32.0,
+        ),
+        (
+            "absolute line height",
+            LineHeight::Length(NonNegativeLength::new(24.0)),
+            24.0,
+        ),
+    ] {
+        let mut style = RunStyle::ahem(16.0);
+        style.line_height = line_height;
+        fixture.artifacts.invalidate();
+        let measured = fixture.commit(&container, &style, "abc", AvailableSpace::MaxContent);
+        assert!(
+            (measured.size.height - expected_height).abs() <= EPSILON,
+            "{case}: expected {expected_height}, got {}",
+            measured.size.height
+        );
+    }
 
     let small = RunStyle::ahem(16.0);
     let large = RunStyle::ahem(32.0);
-    artifacts.invalidate();
+    fixture.artifacts.invalidate();
     let mixed = [
         TextRun {
             text: "aa",
@@ -711,9 +635,7 @@ fn run_spacing_line_height_and_mixed_sizes_affect_exact_geometry() {
             preserve_newlines: false,
         },
     ];
-    let measured = observe(
-        &mut context,
-        &mut artifacts,
+    let measured = fixture.observe(
         &container,
         &mixed,
         request(AvailableSpace::MaxContent, LayoutGoal::Commit),
@@ -728,97 +650,49 @@ fn indent_newline_preservation_alignment_and_rtl_are_exported() {
         indent: indent_px(16.0),
         ..ContainerStyle::default()
     };
-    let mut context = text_context();
-    let mut artifacts = TextLayoutStore::default();
-    let text = [TextRun {
-        text: "abcdefghij",
-        style: &style,
-        preserve_newlines: false,
-    }];
-    let measured = observe(
-        &mut context,
-        &mut artifacts,
+    let mut fixture = TextFixture::new();
+    let measured = fixture.commit(
         &container,
-        &text,
-        request(AvailableSpace::Definite(80.0), LayoutGoal::Commit),
+        &style,
+        "abcdefghij",
+        AvailableSpace::Definite(80.0),
     );
     assert_eq!(measured.line_count, 3);
-    let committed = artifacts.committed().expect("committed indent layout");
     assert_close(
-        committed
-            .parley_layout()
-            .get(0)
-            .expect("first line")
-            .metrics()
-            .offset,
+        committed_line_offset(&fixture.artifacts, 0, "indented first"),
         16.0,
     );
     assert_close(
-        committed
-            .parley_layout()
-            .get(1)
-            .expect("second line")
-            .metrics()
-            .offset,
+        committed_line_offset(&fixture.artifacts, 1, "indented second"),
         0.0,
     );
 
     container.indent = TextIndent::zero();
-    artifacts.invalidate();
-    let collapsed = [TextRun {
-        text: "ab\ncd",
-        style: &style,
-        preserve_newlines: false,
-    }];
-    let collapsed = observe(
-        &mut context,
-        &mut artifacts,
-        &container,
-        &collapsed,
-        request(AvailableSpace::MaxContent, LayoutGoal::Commit),
-    );
-    assert_size(collapsed.size, Size::new(80.0, 16.0));
-
-    artifacts.invalidate();
-    let preserved = [TextRun {
-        text: "ab\ncd",
-        style: &style,
-        preserve_newlines: true,
-    }];
-    let preserved = observe(
-        &mut context,
-        &mut artifacts,
-        &container,
-        &preserved,
-        request(AvailableSpace::MaxContent, LayoutGoal::Commit),
-    );
-    assert_size(preserved.size, Size::new(32.0, 32.0));
-    assert_eq!(preserved.line_count, 2);
+    for (case, preserve_newlines, expected_size, expected_lines) in [
+        ("collapsed newline", false, Size::new(80.0, 16.0), None),
+        ("preserved newline", true, Size::new(32.0, 32.0), Some(2)),
+    ] {
+        fixture.artifacts.invalidate();
+        let measured = fixture.observe_text(
+            &container,
+            &style,
+            "ab\ncd",
+            preserve_newlines,
+            request(AvailableSpace::MaxContent, LayoutGoal::Commit),
+        );
+        assert_size(measured.size, expected_size);
+        if let Some(expected_lines) = expected_lines {
+            assert_eq!(measured.line_count, expected_lines, "{case}: line count");
+        }
+    }
 
     container.direction = direction::T::Rtl;
     container.align = TextAlign::Start;
-    artifacts.invalidate();
-    let rtl = [TextRun {
-        text: "אבגד",
-        style: &style,
-        preserve_newlines: false,
-    }];
-    let rtl = observe(
-        &mut context,
-        &mut artifacts,
-        &container,
-        &rtl,
-        request(AvailableSpace::Definite(80.0), LayoutGoal::Commit),
-    );
+    fixture.artifacts.invalidate();
+    let rtl = fixture.commit(&container, &style, "אבגד", AvailableSpace::Definite(80.0));
     assert_size(rtl.size, Size::new(64.0, 16.0));
     assert_eq!(rtl.line_count, 1);
-    let line = artifacts
-        .committed()
-        .expect("rtl commit")
-        .parley_layout()
-        .get(0)
-        .expect("rtl line");
-    assert_close(line.metrics().offset, 0.0);
+    assert_close(committed_line_offset(&fixture.artifacts, 0, "RTL"), 0.0);
 }
 
 #[test]
@@ -881,16 +755,13 @@ impl CoreStyle for HostStyle {
     fn display(&self) -> Display {
         self.display
     }
-}
 
-impl FlexItemStyle for HostStyle {}
-impl TextContainerStyle for HostStyle {}
-
-impl FlexContainerStyle for HostStyle {
     fn align_items(&self) -> ItemPlacement {
         self.align_items
     }
 }
+
+impl TextContainerStyle for HostStyle {}
 
 #[derive(Debug, Clone)]
 struct SourceNode {

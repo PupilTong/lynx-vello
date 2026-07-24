@@ -1,8 +1,11 @@
 //! The engine-provided per-node measurement cache.
 
+use smallvec::SmallVec;
+
 use crate::tree::{AvailableSpace, LayoutGoal, LayoutInput, LayoutOutput, RequestedAxis};
 
 pub const MEASURE_CACHE_SLOTS: usize = 8;
+const INLINE_MEASURE_CACHE_SLOTS: usize = 4;
 
 /// One cached input→output pair (the full [`LayoutInput`] is the key).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -11,25 +14,28 @@ struct CacheSlot {
     output: LayoutOutput,
 }
 
-/// A fixed-size, allocation-free per-node layout cache.
+/// A bounded per-node layout cache with the common measurement set inline.
+///
+/// Uncommon nodes that retain more than four measurement shapes spill to one
+/// allocation, while every cache remains capped at [`MEASURE_CACHE_SLOTS`].
 #[derive(Debug, PartialEq, Default)]
 pub struct Cache {
     committed_layout: Option<CacheSlot>,
-    measurements: [Option<CacheSlot>; MEASURE_CACHE_SLOTS],
+    measurements: SmallVec<[CacheSlot; INLINE_MEASURE_CACHE_SLOTS]>,
 }
 
 impl Cache {
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             committed_layout: None,
-            measurements: [None; MEASURE_CACHE_SLOTS],
+            measurements: SmallVec::new(),
         }
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.committed_layout.is_none() && self.measurements.iter().all(Option::is_none)
+        self.committed_layout.is_none() && self.measurements.is_empty()
     }
 
     #[must_use]
@@ -54,7 +60,6 @@ impl Cache {
 
         self.measurements
             .iter()
-            .flatten()
             .find(|slot| inputs_match(slot.input, input))
             .map(|slot| slot.output)
     }
@@ -64,24 +69,35 @@ impl Cache {
         match input.goal {
             LayoutGoal::Commit => self.committed_layout = Some(slot),
             LayoutGoal::Measure(_) => {
-                let target = self
-                    .measurements
-                    .iter()
-                    .position(|cached| cached.is_some_and(|cached| cached.input == input))
-                    .or_else(|| {
-                        self.measurements.iter().position(|cached| {
-                            cached.is_some_and(|cached| same_constraint_shape(cached.input, input))
-                        })
-                    })
-                    .or_else(|| self.measurements.iter().position(Option::is_none))
-                    .unwrap_or_else(|| constraint_shape_hash(input));
-                self.measurements[target] = Some(slot);
+                let mut exact = None;
+                let mut same_shape = None;
+                for (index, cached) in self.measurements.iter().enumerate() {
+                    if cached.input == input {
+                        exact = Some(index);
+                        break;
+                    }
+                    if same_shape.is_none() && same_constraint_shape(cached.input, input) {
+                        same_shape = Some(index);
+                    }
+                }
+                if let Some(target) = exact.or(same_shape) {
+                    self.measurements[target] = slot;
+                } else if self.measurements.len() < MEASURE_CACHE_SLOTS {
+                    self.measurements.push(slot);
+                } else {
+                    self.measurements[constraint_shape_hash(input)] = slot;
+                }
             }
         }
     }
 
     pub fn clear(&mut self) {
-        *self = Self::new();
+        self.committed_layout = None;
+        if self.measurements.spilled() {
+            self.measurements = SmallVec::new();
+        } else {
+            self.measurements.clear();
+        }
     }
 }
 
@@ -305,9 +321,44 @@ mod tests {
             replacement,
             LayoutOutput::new(Size::new(99.0, 0.0), Size::new(99.0, 0.0)),
         );
-        assert_eq!(
-            cache.measurements[target].map(|slot| slot.input),
-            Some(replacement)
+        assert_eq!(cache.measurements[target].input, replacement);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn common_cache_state_stays_compact() {
+        let fixed_array_size =
+            (MEASURE_CACHE_SLOTS + 1) * core::mem::size_of::<Option<CacheSlot>>();
+        assert!(
+            core::mem::size_of::<Cache>() * 5 < fixed_array_size * 3,
+            "four inline measurements should use less than 60% of nine fixed optional slots"
         );
+    }
+
+    #[test]
+    fn clear_releases_an_uncommon_spill() {
+        let mut cache = Cache::new();
+        let shapes = [
+            AvailableSpace::MinContent,
+            AvailableSpace::MaxContent,
+            AvailableSpace::Definite(1.0),
+        ];
+        'shapes: for width in shapes {
+            for height in shapes {
+                cache.store(
+                    measurement(Size::NONE, Size::new(width, height)),
+                    LayoutOutput::new(Size::ZERO, Size::ZERO),
+                );
+                if cache.measurements.len() > INLINE_MEASURE_CACHE_SLOTS {
+                    break 'shapes;
+                }
+            }
+        }
+        assert!(cache.measurements.spilled());
+
+        cache.clear();
+
+        assert!(cache.is_empty());
+        assert!(!cache.measurements.spilled());
     }
 }

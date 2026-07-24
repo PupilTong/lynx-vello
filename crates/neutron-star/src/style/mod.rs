@@ -1,17 +1,53 @@
-//! The style protocol: how the engine reads computed style.
+//! The unified computed-style protocol: how every layout algorithm reads style.
+
+use std::sync::LazyLock;
+
+use stylo::properties::ComputedValues;
+use stylo::properties::style_structs::Font;
+use stylo::servo_arc::Arc;
+
+use crate::geometry::{Edges, Point, Size};
+
+/// Declares a source-backed style protocol and its zero-cost reference view.
+///
+/// The full forwarding implementation matters: cascade-less hosts commonly
+/// return `&Style` from [`LayoutNode::style`](crate::tree::LayoutNode::style),
+/// and forwarding only the computed-value source would discard any accessor
+/// overrides on the underlying style.
+macro_rules! style_protocol {
+    (
+        pub trait $trait:ident: $super:path {
+            defaults($receiver:ident) {
+                $($method:ident -> $return:ty = $value:expr),* $(,)?
+            }
+        }
+    ) => {
+        pub trait $trait: $super {
+            $(
+                #[inline]
+                fn $method(&self) -> $return {
+                    let $receiver = self;
+                    let _ = $receiver;
+                    $value
+                }
+            )*
+        }
+
+        impl<S: $trait> $trait for &S {
+            $(
+                #[inline]
+                fn $method(&self) -> $return {
+                    <S as $trait>::$method(*self)
+                }
+            )*
+        }
+    };
+}
 
 pub mod containment;
-pub mod flex;
-pub mod grid;
-pub mod linear;
-pub mod relative;
 pub mod text;
 
 pub use containment::effective_containment;
-pub use flex::{FlexContainerStyle, FlexItemStyle};
-pub use grid::{GridContainerStyle, GridItemStyle};
-pub use linear::{LinearContainerStyle, LinearItemStyle};
-pub use relative::{RelativeContainerStyle, RelativeItemStyle};
 pub use stylo::computed_values::{
     box_sizing, direction, flex_direction, flex_wrap, linear_direction, relative_center,
     relative_layout_once, text_wrap_mode, visibility, white_space_collapse,
@@ -29,187 +65,248 @@ pub use stylo::values::computed::{
 pub use stylo::values::specified::align::AlignFlags;
 pub use text::{TextBrush, TextContainerStyle, TextRun, TextRunStyle};
 
-use crate::geometry::{Edges, Point, Size};
+pub const RELATIVE_REFERENCE_NONE: RelativeReference = -1;
+pub const RELATIVE_REFERENCE_PARENT: RelativeReference = 0;
 
-pub(in crate::style) mod defaults {
-    use std::sync::LazyLock;
+static INITIAL_VALUES: LazyLock<Arc<ComputedValues>> =
+    LazyLock::new(|| ComputedValues::initial_values_with_font_override(Font::initial_values()));
 
-    use stylo::Zero;
-
-    use super::{Inset, Margin, MaxSize, NonNegativeLengthPercentage, StyleSize};
-
-    pub(in crate::style) static INSET_AUTO: LazyLock<Inset> = LazyLock::new(Inset::auto);
-    pub(in crate::style) static SIZE_AUTO: LazyLock<StyleSize> = LazyLock::new(StyleSize::auto);
-    pub(in crate::style) static MAX_SIZE_NONE: LazyLock<MaxSize> = LazyLock::new(MaxSize::none);
-    pub(in crate::style) static MARGIN_ZERO: LazyLock<Margin> = LazyLock::new(Margin::zero);
-    pub(in crate::style) static PADDING_ZERO: LazyLock<NonNegativeLengthPercentage> =
-        LazyLock::new(NonNegativeLengthPercentage::zero);
+#[inline]
+pub(in crate::style) fn initial_values() -> &'static ComputedValues {
+    &INITIAL_VALUES
 }
 
-pub trait CoreStyle: Sized {
-    fn display(&self) -> Display;
-
-    fn visibility(&self) -> visibility::T {
-        visibility::T::Visible
-    }
-
-    fn position(&self) -> PositionProperty {
-        PositionProperty::Static
-    }
-
-    fn inset(&self) -> Edges<&Inset> {
-        Edges::uniform(&*defaults::INSET_AUTO)
-    }
-
-    fn size(&self) -> Size<&StyleSize> {
-        Size::new(&*defaults::SIZE_AUTO, &*defaults::SIZE_AUTO)
-    }
-
-    fn min_size(&self) -> Size<&StyleSize> {
-        Size::new(&*defaults::SIZE_AUTO, &*defaults::SIZE_AUTO)
-    }
-
-    fn max_size(&self) -> Size<&MaxSize> {
-        Size::new(&*defaults::MAX_SIZE_NONE, &*defaults::MAX_SIZE_NONE)
-    }
-
-    fn aspect_ratio(&self) -> AspectRatio {
-        AspectRatio::auto()
-    }
-
-    fn margin(&self) -> Edges<&Margin> {
-        Edges::uniform(&*defaults::MARGIN_ZERO)
-    }
-
-    fn padding(&self) -> Edges<&NonNegativeLengthPercentage> {
-        Edges::uniform(&*defaults::PADDING_ZERO)
-    }
-
-    fn border(&self) -> Edges<BorderSideWidth> {
-        Edges::uniform(BorderSideWidth(Au(0)))
-    }
-
-    fn overflow(&self) -> Point<Overflow> {
-        Point::new(Overflow::Visible, Overflow::Visible)
-    }
-
-    fn box_sizing(&self) -> box_sizing::T {
-        box_sizing::T::ContentBox
-    }
-
-    fn direction(&self) -> direction::T {
-        direction::T::Ltr
-    }
-
-    fn containment(&self) -> Contain {
-        Contain::empty()
-    }
-
-    fn contain_intrinsic_width(&self) -> ContainIntrinsicSize {
-        ContainIntrinsicSize::None
-    }
-
-    fn contain_intrinsic_height(&self) -> ContainIntrinsicSize {
-        ContainIntrinsicSize::None
-    }
-
-    fn skips_contents(&self) -> bool {
-        false
+#[inline]
+fn lower_relative_logical(physical: RelativeReference, logical: RelativeReference) -> i32 {
+    if physical == RELATIVE_REFERENCE_NONE {
+        logical
+    } else {
+        physical
     }
 }
 
-impl<S: CoreStyle> CoreStyle for &S {
-    fn display(&self) -> Display {
-        (**self).display()
-    }
+// One borrowed view of all box-layout computed values. A Stylo-backed host
+// only supplies `computed_values` and genuinely host-dependent lowering such
+// as `position`; cascade-less hosts can still override individual accessors.
+style_protocol! {
+    pub trait CoreStyle: Sized {
+        defaults(style) {
+            computed_values -> &ComputedValues = initial_values(),
+            inherited_values -> &ComputedValues = style.computed_values(),
 
-    fn visibility(&self) -> visibility::T {
-        (**self).visibility()
-    }
+            display -> Display = style.computed_values().clone_display(),
+            visibility -> visibility::T = style.computed_values().clone_visibility(),
+            position -> PositionProperty = style.computed_values().clone_position(),
+            inset -> Edges<&Inset> = {
+                let position = style.computed_values().get_position();
+                Edges {
+                    left: &position.left,
+                    right: &position.right,
+                    top: &position.top,
+                    bottom: &position.bottom,
+                }
+            },
+            size -> Size<&StyleSize> = {
+                let position = style.computed_values().get_position();
+                Size::new(&position.width, &position.height)
+            },
+            min_size -> Size<&StyleSize> = {
+                let position = style.computed_values().get_position();
+                Size::new(&position.min_width, &position.min_height)
+            },
+            max_size -> Size<&MaxSize> = {
+                let position = style.computed_values().get_position();
+                Size::new(&position.max_width, &position.max_height)
+            },
+            aspect_ratio -> AspectRatio = style.computed_values().clone_aspect_ratio(),
+            margin -> Edges<&Margin> = {
+                let margin = style.computed_values().get_margin();
+                Edges {
+                    left: &margin.margin_left,
+                    right: &margin.margin_right,
+                    top: &margin.margin_top,
+                    bottom: &margin.margin_bottom,
+                }
+            },
+            padding -> Edges<&NonNegativeLengthPercentage> = {
+                let padding = style.computed_values().get_padding();
+                Edges {
+                    left: &padding.padding_left,
+                    right: &padding.padding_right,
+                    top: &padding.padding_top,
+                    bottom: &padding.padding_bottom,
+                }
+            },
+            border -> Edges<BorderSideWidth> = {
+                let border = style.computed_values().get_border();
+                let used = |width: Au, border_style: stylo::values::specified::BorderStyle| {
+                    BorderSideWidth(if border_style.none_or_hidden() { Au(0) } else { width })
+                };
+                Edges {
+                    left: used(border.border_left_width.0, border.border_left_style),
+                    right: used(border.border_right_width.0, border.border_right_style),
+                    top: used(border.border_top_width.0, border.border_top_style),
+                    bottom: used(border.border_bottom_width.0, border.border_bottom_style),
+                }
+            },
+            overflow -> Point<Overflow> = Point::new(
+                style.computed_values().clone_overflow_x(),
+                style.computed_values().clone_overflow_y(),
+            ),
+            box_sizing -> box_sizing::T = style.computed_values().clone_box_sizing(),
+            direction -> direction::T = style.inherited_values().clone_direction(),
+            containment -> Contain = effective_containment(
+                style.computed_values().clone_contain(),
+                style.computed_values().clone_content_visibility(),
+                style.skips_contents(),
+            ),
+            contain_intrinsic_width -> ContainIntrinsicSize =
+                style.computed_values().clone_contain_intrinsic_width(),
+            contain_intrinsic_height -> ContainIntrinsicSize =
+                style.computed_values().clone_contain_intrinsic_height(),
+            skips_contents -> bool =
+                style.computed_values().clone_content_visibility() == ContentVisibility::Hidden,
 
-    fn position(&self) -> PositionProperty {
-        (**self).position()
-    }
+            flex_direction -> flex_direction::T =
+                style.computed_values().clone_flex_direction(),
+            flex_wrap -> flex_wrap::T = style.computed_values().clone_flex_wrap(),
+            gap -> Size<&NonNegativeLengthPercentageOrNormal> = {
+                let position = style.computed_values().get_position();
+                Size::new(&position.column_gap, &position.row_gap)
+            },
+            align_content -> ContentDistribution =
+                style.computed_values().get_position().align_content,
+            align_items -> ItemPlacement =
+                style.computed_values().get_position().align_items,
+            justify_content -> ContentDistribution =
+                style.computed_values().get_position().justify_content,
 
-    fn inset(&self) -> Edges<&Inset> {
-        (**self).inset()
-    }
+            flex_basis -> &FlexBasis = &style.computed_values().get_position().flex_basis,
+            flex_grow -> NonNegativeNumber =
+                style.computed_values().get_position().flex_grow,
+            flex_shrink -> NonNegativeNumber =
+                style.computed_values().get_position().flex_shrink,
+            align_self -> SelfAlignment =
+                style.computed_values().get_position().align_self,
+            order -> i32 = style.computed_values().get_position().order,
 
-    fn size(&self) -> Size<&StyleSize> {
-        (**self).size()
-    }
+            grid_template_rows -> &GridTemplateComponent =
+                &style.computed_values().get_position().grid_template_rows,
+            grid_template_columns -> &GridTemplateComponent =
+                &style.computed_values().get_position().grid_template_columns,
+            grid_auto_rows -> &ImplicitGridTracks =
+                &style.computed_values().get_position().grid_auto_rows,
+            grid_auto_columns -> &ImplicitGridTracks =
+                &style.computed_values().get_position().grid_auto_columns,
+            grid_auto_flow -> GridAutoFlow =
+                style.computed_values().get_position().grid_auto_flow,
+            justify_items -> JustifyItems =
+                style.computed_values().get_position().justify_items,
+            grid_row_start -> &GridLine =
+                &style.computed_values().get_position().grid_row_start,
+            grid_row_end -> &GridLine =
+                &style.computed_values().get_position().grid_row_end,
+            grid_column_start -> &GridLine =
+                &style.computed_values().get_position().grid_column_start,
+            grid_column_end -> &GridLine =
+                &style.computed_values().get_position().grid_column_end,
+            justify_self -> SelfAlignment =
+                style.computed_values().get_position().justify_self,
 
-    fn min_size(&self) -> Size<&StyleSize> {
-        (**self).min_size()
-    }
+            linear_direction -> linear_direction::T =
+                style.computed_values().clone_linear_direction(),
+            linear_weight_sum -> NonNegativeNumber =
+                style.computed_values().clone_linear_weight_sum(),
+            linear_weight -> NonNegativeNumber =
+                style.computed_values().clone_linear_weight(),
 
-    fn max_size(&self) -> Size<&MaxSize> {
-        (**self).max_size()
-    }
-
-    fn aspect_ratio(&self) -> AspectRatio {
-        (**self).aspect_ratio()
-    }
-
-    fn margin(&self) -> Edges<&Margin> {
-        (**self).margin()
-    }
-
-    fn padding(&self) -> Edges<&NonNegativeLengthPercentage> {
-        (**self).padding()
-    }
-
-    fn border(&self) -> Edges<BorderSideWidth> {
-        (**self).border()
-    }
-
-    fn overflow(&self) -> Point<Overflow> {
-        (**self).overflow()
-    }
-
-    fn box_sizing(&self) -> box_sizing::T {
-        (**self).box_sizing()
-    }
-
-    fn direction(&self) -> direction::T {
-        (**self).direction()
-    }
-
-    fn containment(&self) -> Contain {
-        (**self).containment()
-    }
-
-    fn contain_intrinsic_width(&self) -> ContainIntrinsicSize {
-        (**self).contain_intrinsic_width()
-    }
-
-    fn contain_intrinsic_height(&self) -> ContainIntrinsicSize {
-        (**self).contain_intrinsic_height()
-    }
-
-    fn skips_contents(&self) -> bool {
-        (**self).skips_contents()
+            relative_layout_once -> relative_layout_once::T =
+                style.computed_values().clone_relative_layout_once(),
+            relative_id -> RelativeReference =
+                style.computed_values().clone_relative_id(),
+            relative_align -> Edges<RelativeAlign> = {
+                let values = style.computed_values();
+                let (inline_start, inline_end) = (
+                    values.clone_relative_align_inline_start(),
+                    values.clone_relative_align_inline_end(),
+                );
+                let (logical_left, logical_right) =
+                    if values.clone_direction() == direction::T::Ltr {
+                        (inline_start, inline_end)
+                    } else {
+                        (inline_end, inline_start)
+                    };
+                Edges {
+                    left: lower_relative_logical(
+                        values.clone_relative_align_left(),
+                        logical_left,
+                    ),
+                    right: lower_relative_logical(
+                        values.clone_relative_align_right(),
+                        logical_right,
+                    ),
+                    top: values.clone_relative_align_top(),
+                    bottom: values.clone_relative_align_bottom(),
+                }
+            },
+            relative_adjacent -> Edges<RelativeReference> = {
+                let values = style.computed_values();
+                let (inline_start, inline_end) = (
+                    values.clone_relative_inline_start_of(),
+                    values.clone_relative_inline_end_of(),
+                );
+                let (logical_left, logical_right) =
+                    if values.clone_direction() == direction::T::Ltr {
+                        (inline_start, inline_end)
+                    } else {
+                        (inline_end, inline_start)
+                    };
+                Edges {
+                    left: lower_relative_logical(values.clone_relative_left_of(), logical_left),
+                    right: lower_relative_logical(
+                        values.clone_relative_right_of(),
+                        logical_right,
+                    ),
+                    top: values.clone_relative_top_of(),
+                    bottom: values.clone_relative_bottom_of(),
+                }
+            },
+            relative_center -> relative_center::T =
+                style.computed_values().clone_relative_center(),
+        }
     }
 }
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    #![allow(clippy::float_cmp)]
+
     use stylo::Zero;
+    use stylo::values::specified::align::AlignFlags;
 
     use super::*;
 
     #[derive(Debug)]
     struct Defaults;
 
-    impl CoreStyle for Defaults {
+    impl CoreStyle for Defaults {}
+
+    #[derive(Debug)]
+    struct Overrides;
+
+    impl CoreStyle for Overrides {
         fn display(&self) -> Display {
             Display::Flex
+        }
+
+        fn order(&self) -> i32 {
+            7
         }
     }
 
     #[test]
-    fn core_style_defaults_are_fork_initial_values() {
+    fn defaults_are_the_fork_initial_values() {
         let style = Defaults;
 
         assert!(!style.display().is_none());
@@ -246,25 +343,61 @@ mod tests {
         assert_eq!(style.contain_intrinsic_height(), ContainIntrinsicSize::None);
         assert!(!style.skips_contents());
 
+        assert_eq!(style.flex_direction(), flex_direction::T::Row);
+        assert_eq!(style.flex_wrap(), flex_wrap::T::Nowrap);
+        assert!(matches!(
+            style.gap().width,
+            NonNegativeLengthPercentageOrNormal::Normal
+        ));
+        assert_eq!(style.align_content(), ContentDistribution::normal());
+        assert_eq!(style.align_items(), ItemPlacement::normal());
+        assert_eq!(style.justify_content(), ContentDistribution::normal());
+        assert_eq!(style.flex_basis(), &FlexBasis::auto());
+        assert_eq!(style.flex_grow().0, 0.0);
+        assert_eq!(style.flex_shrink().0, 1.0);
+        assert_eq!(style.align_self(), SelfAlignment::auto());
+        assert_eq!(style.order(), 0);
+
+        assert!(matches!(
+            style.grid_template_rows(),
+            GridTemplateComponent::None
+        ));
+        assert!(style.grid_auto_rows().0.is_empty());
+        assert_eq!(style.grid_auto_flow(), GridAutoFlow::ROW);
+        assert_eq!(
+            style.justify_items().computed.0.0.value(),
+            AlignFlags::NORMAL
+        );
+        assert!(style.grid_row_start().is_auto());
+        assert_eq!(style.justify_self(), SelfAlignment::auto());
+
+        assert_eq!(style.linear_direction(), linear_direction::T::Column);
+        assert_eq!(style.linear_weight_sum().0, 0.0);
+        assert_eq!(style.linear_weight().0, 0.0);
+        assert_eq!(style.relative_layout_once(), relative_layout_once::T::True);
+        assert_eq!(style.relative_id(), RELATIVE_REFERENCE_NONE);
+        assert_eq!(
+            style.relative_align(),
+            Edges::uniform(RELATIVE_REFERENCE_NONE)
+        );
+        assert_eq!(
+            style.relative_adjacent(),
+            Edges::uniform(RELATIVE_REFERENCE_NONE)
+        );
+        assert_eq!(style.relative_center(), relative_center::T::None);
+    }
+
+    #[test]
+    fn reference_views_preserve_accessor_overrides() {
+        let style = Overrides;
         let view = &style;
-        assert_eq!(view.containment(), Contain::empty());
-        assert_eq!(view.contain_intrinsic_width(), ContainIntrinsicSize::None);
-        assert_eq!(view.contain_intrinsic_height(), ContainIntrinsicSize::None);
-        assert!(!view.skips_contents());
+        assert_eq!(view.display(), Display::Flex);
+        assert_eq!(view.order(), 7);
     }
 
     #[test]
     fn overflow_scroll_containers_follow_stylo_is_scrollable() {
         assert!(!Overflow::Visible.is_scrollable());
         assert!(Overflow::Hidden.is_scrollable());
-    }
-
-    #[test]
-    fn reference_views_forward_core_accessors() {
-        let style = Defaults;
-        let view = &style;
-        assert_eq!(CoreStyle::visibility(&view), visibility::T::Visible);
-        assert_eq!(CoreStyle::position(&view), PositionProperty::Static);
-        assert!(!CoreStyle::display(&view).is_none());
     }
 }

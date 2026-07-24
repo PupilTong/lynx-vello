@@ -25,6 +25,7 @@ use crate::node::{Node, StylingData};
 pub type NodeId = usize;
 
 pub const DOCUMENT_NODE_ID: NodeId = 0;
+const INITIAL_NODE_CAPACITY: usize = 8;
 
 pub(crate) enum PayloadSlot<T> {
     Document,
@@ -59,11 +60,43 @@ pub(crate) struct DocumentArenas<T> {
 impl<T> DocumentArenas<T> {
     fn new() -> Self {
         Self {
-            nodes: Slab::new(),
-            payloads: Slab::new(),
-            styling: Slab::new(),
-            layout: Slab::new(),
+            nodes: Slab::with_capacity(INITIAL_NODE_CAPACITY),
+            payloads: Slab::with_capacity(INITIAL_NODE_CAPACITY),
+            styling: Slab::with_capacity(INITIAL_NODE_CAPACITY),
+            layout: Slab::with_capacity(INITIAL_NODE_CAPACITY),
         }
+    }
+
+    #[expect(
+        clippy::inline_always,
+        reason = "keep the four synchronized slab inserts in the node-allocation hot path"
+    )]
+    #[inline(always)]
+    fn insert_side_state(&mut self, id: NodeId, payload: PayloadSlot<T>) {
+        assert_eq!(self.payloads.vacant_key(), id);
+        assert_eq!(self.styling.vacant_key(), id);
+        assert_eq!(self.layout.vacant_key(), id);
+        assert_eq!(self.payloads.insert(payload), id);
+        assert_eq!(self.styling.insert(StylingData::default()), id);
+        assert_eq!(
+            self.layout
+                .insert(AtomicRefCell::new(LayoutData::default())),
+            id
+        );
+    }
+
+    fn remove_side_state(&mut self, id: NodeId) -> PayloadSlot<T> {
+        let payload = self
+            .payloads
+            .try_remove(id)
+            .expect("removed element/text node must have payload-arena state");
+        self.styling
+            .try_remove(id)
+            .expect("removed node must have styling-arena state");
+        self.layout
+            .try_remove(id)
+            .expect("removed node must have layout-arena state");
+        payload
     }
 }
 
@@ -83,6 +116,10 @@ pub(crate) struct PendingRelayout {
 pub struct Document<T> {
     style_engine: StyleEngine,
     arenas: Box<DocumentArenas<T>>,
+    /// Pre-mutation state exists only while invalidation is pending. Keeping
+    /// the payloads here leaves one byte-sized lifecycle flag, rather than a
+    /// nullable snapshot pointer, in every live node's styling slot.
+    pending_snapshots: SnapshotMap,
     relayout_roots: Vec<PendingRelayout>,
     relayout_root_ids: FxHashSet<NodeId>,
     layout_dirty: bool,
@@ -120,17 +157,11 @@ impl<T> Document<T> {
             root, DOCUMENT_NODE_ID,
             "the DOM document node must occupy slab slot zero"
         );
-        assert_eq!(arenas.payloads.insert(PayloadSlot::Document), root);
-        assert_eq!(arenas.styling.insert(StylingData::default()), root);
-        assert_eq!(
-            arenas
-                .layout
-                .insert(AtomicRefCell::new(LayoutData::default())),
-            root
-        );
+        arenas.insert_side_state(root, PayloadSlot::Document);
         Self {
             style_engine,
             arenas,
+            pending_snapshots: SnapshotMap::new(),
             relayout_roots: Vec::new(),
             relayout_root_ids: FxHashSet::default(),
             layout_dirty: false,
@@ -195,18 +226,21 @@ impl<T> Document<T> {
         &mut self.arenas.nodes
     }
 
+    pub(crate) fn live_node_mut(&mut self, id: NodeId) -> &mut Node<T> {
+        self.arenas
+            .nodes
+            .get_mut(id)
+            .expect("stale NodeId passed to a Document mutation method")
+    }
+
     pub(crate) fn layout_data_mut(
         &mut self,
     ) -> impl Iterator<Item = (NodeId, &mut AtomicRefCell<LayoutData>)> {
         self.arenas.layout.iter_mut()
     }
 
-    pub(crate) fn styling_data(&self, id: NodeId) -> Option<&StylingData> {
-        self.arenas.styling.get(id)
-    }
-
-    pub(crate) fn styling_data_mut(&mut self, id: NodeId) -> Option<&mut StylingData> {
-        self.arenas.styling.get_mut(id)
+    pub(crate) fn snapshot_storage(&mut self) -> (&Slab<Node<T>>, &mut SnapshotMap) {
+        (&self.arenas.nodes, &mut self.pending_snapshots)
     }
 
     #[must_use]
@@ -254,18 +288,9 @@ impl<T> Document<T> {
         let owner = std::ptr::from_mut::<DocumentArenas<T>>(self.arenas.as_mut());
         let entry = self.arenas.nodes.vacant_entry();
         let id = entry.key();
-        assert_eq!(self.arenas.payloads.vacant_key(), id);
-        assert_eq!(self.arenas.styling.vacant_key(), id);
-        assert_eq!(self.arenas.layout.vacant_key(), id);
         entry.insert(make(owner, id));
-        assert_eq!(self.arenas.payloads.insert(PayloadSlot::Node(payload)), id);
-        assert_eq!(self.arenas.styling.insert(StylingData::default()), id);
-        assert_eq!(
-            self.arenas
-                .layout
-                .insert(AtomicRefCell::new(LayoutData::default())),
-            id
-        );
+        self.arenas
+            .insert_side_state(id, PayloadSlot::Node(payload));
         id
     }
 
@@ -287,18 +312,10 @@ impl<T> Document<T> {
         );
 
         self.detach(child);
-        self.arenas
-            .nodes
-            .get_mut(DOCUMENT_NODE_ID)
-            .expect("the document node is never removed")
-            .children
-            .push(child);
-        self.arenas
-            .nodes
-            .get_mut(child)
-            .expect("the attached child was validated as live")
-            .parent = Some(DOCUMENT_NODE_ID);
+        self.live_node_mut(DOCUMENT_NODE_ID).children.push(child);
+        self.live_node_mut(child).parent = Some(DOCUMENT_NODE_ID);
         self.mark_subtree_dirty(child);
+        self.invalidate_layout(child);
     }
 
     #[must_use]
@@ -381,20 +398,12 @@ impl<T> Document<T> {
                 .expect("insert_before reference must be a child of parent"),
         };
 
-        self.arenas
-            .nodes
-            .get_mut(parent)
-            .expect("stale NodeId passed to Document::insert_before")
-            .children
-            .insert(index, child);
-        self.arenas
-            .nodes
-            .get_mut(child)
-            .expect("stale NodeId passed to Document::insert_before")
-            .parent = Some(parent);
+        self.live_node_mut(parent).children.insert(index, child);
+        self.live_node_mut(child).parent = Some(parent);
 
         self.note_moved_subtree(child);
         self.note_child_list_change(parent, index);
+        self.invalidate_layout(child);
     }
 
     pub fn append_child(&mut self, parent: NodeId, child: NodeId) {
@@ -414,6 +423,12 @@ impl<T> Document<T> {
             return;
         };
 
+        // Invalidate while the old link is still intact so the walk covers
+        // the old parent's dirty spine and observes its containment boundary.
+        // A subsequent insertion invalidates again after attaching, covering
+        // the new parent's spine as well.
+        self.invalidate_layout(child);
+
         let removed_index = {
             let parent_node = self
                 .arenas
@@ -428,11 +443,7 @@ impl<T> Document<T> {
             parent_node.children.remove(index);
             index
         };
-        self.arenas
-            .nodes
-            .get_mut(child)
-            .expect("stale NodeId passed to Document::detach")
-            .parent = None;
+        self.live_node_mut(child).parent = None;
 
         if parent != DOCUMENT_NODE_ID {
             self.note_child_list_change(parent, removed_index);
@@ -448,6 +459,20 @@ impl<T> Document<T> {
         let mut removed = Vec::new();
         let mut stack = vec![id];
         while let Some(current) = stack.pop() {
+            let node = self
+                .arenas
+                .nodes
+                .get(current)
+                .expect("subtree links always resolve while removing");
+            let removed_snapshot = self
+                .pending_snapshots
+                .remove(&OpaqueNode(current))
+                .is_some();
+            debug_assert_eq!(
+                removed_snapshot,
+                node.snapshot_present(),
+                "the document snapshot queue and node lifecycle flag diverged during removal"
+            );
             {
                 let node = self
                     .arenas
@@ -456,20 +481,7 @@ impl<T> Document<T> {
                     .expect("subtree links always resolve while removing");
                 stack.extend_from_slice(&node.children);
             }
-            let payload = self
-                .arenas
-                .payloads
-                .try_remove(current)
-                .expect("removed element/text node must have payload-arena state");
-            self.arenas
-                .styling
-                .try_remove(current)
-                .expect("removed node must have styling-arena state");
-            self.arenas
-                .layout
-                .try_remove(current)
-                .expect("removed node must have layout-arena state");
-            match payload {
+            match self.arenas.remove_side_state(current) {
                 PayloadSlot::Node(payload) => removed.push(payload),
                 PayloadSlot::Document => unreachable!("the document node cannot be removed"),
             }
@@ -482,44 +494,54 @@ impl<T> Document<T> {
         removed
     }
 
-    pub(crate) fn take_snapshot_map(&mut self, root: NodeId) -> SnapshotMap {
-        let mut snapshots = SnapshotMap::new();
-        let mut stack = vec![root];
-        while let Some(id) = stack.pop() {
-            let Some(node) = self.arenas.nodes.get(id) else {
-                continue;
-            };
-            let styling = self
+    pub(crate) fn take_snapshot_map(&mut self) -> SnapshotMap {
+        #[cfg(debug_assertions)]
+        for opaque in self.pending_snapshots.keys() {
+            let node = self
                 .arenas
-                .styling
-                .get_mut(id)
-                .expect("live node must have styling-arena state");
+                .nodes
+                .get(opaque.0)
+                .expect("queued snapshot must belong to a live node");
+            debug_assert!(node.is_element(), "only elements can own Stylo snapshots");
             debug_assert_eq!(
-                styling.snapshot.is_some(),
-                styling.snapshot_flags.load(Ordering::Relaxed) & crate::node::SNAPSHOT_PRESENT != 0,
-                "snapshot slot and lifecycle flag diverged before flush"
+                node.snapshot_flags(),
+                crate::node::SNAPSHOT_PRESENT,
+                "queued snapshots must be present and unhandled before a flush"
             );
-            if let Some(snapshot) = styling.snapshot.take() {
-                snapshots.insert(OpaqueNode(node.id()), *snapshot);
-            }
-            if styling.dirty_descendants.load(Ordering::Relaxed) {
-                stack.extend_from_slice(&node.children);
-            }
         }
-        snapshots
+        std::mem::replace(&mut self.pending_snapshots, SnapshotMap::new())
     }
 
     pub(crate) fn harvest_flush(
         &mut self,
         root: NodeId,
-        snapshots: &SnapshotMap,
+        mut snapshots: SnapshotMap,
         sink: &mut dyn FnMut(NodeId, StyleDamage),
     ) {
-        for opaque in snapshots.keys() {
-            if let Some(styling) = self.arenas.styling.get(opaque.0) {
-                styling.snapshot_flags.store(0, Ordering::Relaxed);
+        snapshots.retain(|opaque, _| {
+            let node = self.arenas.nodes.get(opaque.0);
+            debug_assert!(node.is_some(), "queued snapshot outlived its node");
+            let Some(node) = node else {
+                return false;
+            };
+            let flags = node.snapshot_flags();
+            debug_assert_ne!(
+                flags & crate::node::SNAPSHOT_PRESENT,
+                0,
+                "snapshot queue entry lost its present flag during traversal"
+            );
+            if flags & crate::node::SNAPSHOT_HANDLED != 0 {
+                node.clear_snapshot_flags();
+                false
+            } else {
+                true
             }
-        }
+        });
+        debug_assert!(
+            self.pending_snapshots.is_empty(),
+            "Document mutation cannot enqueue snapshots during an exclusive style flush"
+        );
+        self.pending_snapshots = snapshots;
 
         let mut stack = vec![root];
         while let Some(current) = stack.pop() {
@@ -543,7 +565,6 @@ impl<T> Document<T> {
                 }
                 let descend = styling.dirty_descendants.load(Ordering::Relaxed);
                 styling.dirty_descendants.store(false, Ordering::Relaxed);
-                styling.snapshot_flags.store(0, Ordering::Relaxed);
                 if descend {
                     stack.extend_from_slice(&node.children);
                 }
@@ -642,6 +663,13 @@ pub(crate) mod tests {
         )
     }
 
+    fn snapshot_flags<T>(document: &Document<T>, id: NodeId) -> u8 {
+        document
+            .get(id)
+            .expect("test node is live")
+            .snapshot_flags()
+    }
+
     #[test]
     fn slabs_follow_primary_node_lifetime_and_id_reuse() {
         let mut document: Document<u32> = Document::new(device());
@@ -669,13 +697,17 @@ pub(crate) mod tests {
         assert_eq!(reused, id, "the primary slab should reuse its vacant ID");
         assert_eq!(document.get(reused).unwrap().payload(), &11);
         assert!(document.get(reused).unwrap().layout_cache_is_empty());
-        assert!(
+        assert_eq!(
             document
                 .arenas
                 .styling
                 .get(reused)
-                .is_some_and(|state| state.snapshot.is_none())
+                .unwrap()
+                .snapshot_flags
+                .load(Ordering::Relaxed),
+            0
         );
+        assert!(document.pending_snapshots.is_empty());
     }
 
     #[test]
@@ -723,6 +755,96 @@ pub(crate) mod tests {
         assert!(
             !document.is_relayout_root_parked(reused),
             "a reused slab id must not inherit stale parked state",
+        );
+    }
+
+    #[test]
+    fn detached_snapshot_survives_an_unrelated_connected_flush() {
+        let mut document: Document<()> = Document::new(device());
+        document.add_stylesheet(".hot { color: red; }", crate::StylesheetOrigin::Author);
+        let root = document.create_element("page", ());
+        let connected = document.create_element("view", ());
+        let detached = document.create_element("view", ());
+        document.append_child(root, connected);
+        document.append_child(root, detached);
+        document.append_document_element(root);
+        document.flush_styles();
+
+        document.detach(detached);
+        document.flush_styles();
+        document.set_classes(detached, "hot");
+        document.set_classes(connected, "hot");
+        assert_eq!(document.pending_snapshots.len(), 2);
+
+        document.flush_styles();
+
+        assert!(
+            document
+                .pending_snapshots
+                .contains_key(&OpaqueNode(detached)),
+            "a snapshot outside the traversed document tree must stay pending"
+        );
+        assert!(
+            !document
+                .pending_snapshots
+                .contains_key(&OpaqueNode(connected)),
+            "the handled connected snapshot must be retired"
+        );
+        assert_eq!(
+            snapshot_flags(&document, detached),
+            crate::node::SNAPSHOT_PRESENT
+        );
+        assert_eq!(snapshot_flags(&document, connected), 0);
+
+        document.append_child(root, detached);
+        document.flush_styles();
+        assert!(document.pending_snapshots.is_empty());
+        assert_eq!(snapshot_flags(&document, detached), 0);
+    }
+
+    #[test]
+    fn snapshot_queue_coalesces_and_subtree_removal_purges_reusable_ids() {
+        let mut document: Document<()> = Document::new(device());
+        let root = document.create_element("page", ());
+        let removed = document.create_element("view", ());
+        let descendant = document.create_element("view", ());
+        document.append_child(removed, descendant);
+        document.append_child(root, removed);
+        document.append_document_element(root);
+        document.flush_styles();
+
+        document.set_classes(removed, "hot");
+        document.set_id_attribute(removed, Some("target"));
+        assert_eq!(
+            document.pending_snapshots.len(),
+            1,
+            "multiple pre-flush mutations must refine one snapshot"
+        );
+        let snapshot = document
+            .pending_snapshots
+            .iter()
+            .find_map(|(opaque, snapshot)| (opaque.0 == removed).then_some(snapshot))
+            .unwrap();
+        assert!(snapshot.class_changed);
+        assert!(snapshot.id_changed);
+
+        document.set_classes(descendant, "nested");
+        assert_eq!(document.pending_snapshots.len(), 2);
+        assert_eq!(document.remove_subtree(removed).len(), 2);
+        assert!(
+            document.pending_snapshots.is_empty(),
+            "removing a subtree must purge every queued snapshot"
+        );
+
+        let reused = document.create_element("replacement", ());
+        assert!(
+            [removed, descendant].contains(&reused),
+            "the primary slab should reuse an ID from the removed subtree"
+        );
+        assert_eq!(
+            snapshot_flags(&document, reused),
+            0,
+            "a reused ID must not inherit snapshot lifecycle flags"
         );
     }
 }

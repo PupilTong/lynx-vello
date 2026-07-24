@@ -898,6 +898,102 @@ fn uncontained_interior_change_clears_the_ancestor_caches() {
 }
 
 #[test]
+fn warm_cache_append_invalidates_the_new_parent_spine() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 200px; height: 40px; align-items: flex-start; }
+         view { width: 40px; height: 20px; }",
+    );
+    let root = h.doc.root;
+    let first = h.doc.el(root, "view");
+    h.layout();
+    assert!(!h.node_cache_empty(root));
+
+    let appended = h.doc.dom.create_element("view", ());
+    h.doc.dom.append_child(root, appended);
+    assert!(h.node_cache_empty(root), "the new parent spine is cleared");
+    assert!(
+        h.node_cache_empty(appended),
+        "the newly attached subtree starts cold"
+    );
+
+    h.layout();
+    assert_eq!(h.rect(first).0, 0.0);
+    assert_eq!(h.rect(appended).0, 40.0);
+}
+
+#[test]
+fn warm_cache_detach_invalidates_the_old_parent_spine() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 200px; height: 40px; align-items: flex-start; }
+         view { width: 40px; height: 20px; }",
+    );
+    let root = h.doc.root;
+    let first = h.doc.el(root, "view");
+    let second = h.doc.el(root, "view");
+    h.layout();
+    assert_eq!(h.rect(second).0, 40.0);
+
+    h.doc.dom.detach(first);
+    assert!(h.node_cache_empty(root), "the old parent spine is cleared");
+    assert!(h.node_cache_empty(first), "the detached subtree is cold");
+
+    h.layout();
+    assert_eq!(h.rect(second).0, 0.0);
+}
+
+#[test]
+fn warm_cache_same_parent_reorder_invalidates_layout_order() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 200px; height: 40px; align-items: flex-start; }
+         .a { width: 30px; height: 20px; }
+         .b { width: 40px; height: 20px; }
+         .c { width: 50px; height: 20px; }",
+    );
+    let root = h.doc.root;
+    let a = h.doc.el(root, ".a");
+    let b = h.doc.el(root, ".b");
+    let c = h.doc.el(root, ".c");
+    h.layout();
+    assert_eq!((h.rect(a).0, h.rect(b).0, h.rect(c).0), (0.0, 30.0, 70.0));
+
+    h.doc.dom.insert_before(root, c, Some(a));
+    assert!(h.node_cache_empty(root), "the reordered parent is cleared");
+    assert!(h.node_cache_empty(c), "the moved subtree is cold");
+
+    h.layout();
+    assert_eq!((h.rect(c).0, h.rect(a).0, h.rect(b).0), (0.0, 50.0, 80.0));
+}
+
+#[test]
+fn warm_cache_cross_parent_move_invalidates_both_parent_spines() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 240px; height: 50px; align-items: flex-start; }
+         .parent { display: flex; width: 100px; height: 40px; }
+         .item { width: 30px; height: 20px; }",
+    );
+    let root = h.doc.root;
+    let old_parent = h.doc.el(root, ".parent");
+    let new_parent = h.doc.el(root, ".parent");
+    let moved = h.doc.el(old_parent, ".item");
+    let old_tail = h.doc.el(old_parent, ".item");
+    let new_head = h.doc.el(new_parent, ".item");
+    h.layout();
+    assert_eq!(h.rect(old_tail).0, 30.0);
+    assert_eq!(h.rect(new_head).0, 0.0);
+
+    h.doc.dom.append_child(new_parent, moved);
+    assert!(h.node_cache_empty(old_parent), "the old spine is cleared");
+    assert!(h.node_cache_empty(new_parent), "the new spine is cleared");
+    assert!(h.node_cache_empty(root), "the shared ancestor is cleared");
+    assert!(h.node_cache_empty(moved), "the moved subtree is cold");
+
+    h.layout();
+    assert_eq!(h.rect(old_tail).0, 0.0);
+    assert_eq!(h.rect(new_head).0, 0.0);
+    assert_eq!(h.rect(moved).0, 30.0);
+}
+
+#[test]
 fn contained_interior_relayouts_automatically() {
     let mut h = Harness::new(
         "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }

@@ -229,7 +229,7 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
     where
         F: FnMut(&LocalName),
     {
-        for name in self.attrs.keys() {
+        for (name, _) in &self.attrs {
             callback(name);
         }
     }

@@ -548,9 +548,7 @@ impl CoreStyle for TestStyle {
     fn skips_contents(&self) -> bool {
         self.skips_contents
     }
-}
 
-impl LinearContainerStyle for TestStyle {
     fn linear_direction(&self) -> linear_direction::T {
         self.linear_direction
     }
@@ -566,9 +564,7 @@ impl LinearContainerStyle for TestStyle {
     fn align_items(&self) -> ItemPlacement {
         self.align_items
     }
-}
 
-impl LinearItemStyle for TestStyle {
     fn linear_weight(&self) -> NonNegativeNumber {
         self.linear_weight
     }
@@ -580,9 +576,7 @@ impl LinearItemStyle for TestStyle {
     fn order(&self) -> i32 {
         self.order
     }
-}
 
-impl FlexContainerStyle for TestStyle {
     fn flex_direction(&self) -> flex_direction::T {
         self.flex_direction
     }
@@ -599,16 +593,6 @@ impl FlexContainerStyle for TestStyle {
         self.align_content
     }
 
-    fn align_items(&self) -> ItemPlacement {
-        self.align_items
-    }
-
-    fn justify_content(&self) -> ContentDistribution {
-        self.justify_content
-    }
-}
-
-impl FlexItemStyle for TestStyle {
     fn flex_basis(&self) -> &FlexBasis {
         &self.flex_basis
     }
@@ -621,16 +605,6 @@ impl FlexItemStyle for TestStyle {
         self.flex_shrink
     }
 
-    fn align_self(&self) -> SelfAlignment {
-        self.align_self
-    }
-
-    fn order(&self) -> i32 {
-        self.order
-    }
-}
-
-impl GridContainerStyle for TestStyle {
     fn grid_template_rows(&self) -> &GridTemplateComponent {
         &self.template_rows
     }
@@ -651,28 +625,10 @@ impl GridContainerStyle for TestStyle {
         self.auto_flow
     }
 
-    fn gap(&self) -> Size<&NonNegativeLengthPercentageOrNormal> {
-        self.gap.as_ref()
-    }
-
-    fn align_content(&self) -> ContentDistribution {
-        self.align_content
-    }
-
-    fn justify_content(&self) -> ContentDistribution {
-        self.justify_content
-    }
-
-    fn align_items(&self) -> ItemPlacement {
-        self.align_items
-    }
-
     fn justify_items(&self) -> JustifyItems {
         self.justify_items
     }
-}
 
-impl GridItemStyle for TestStyle {
     fn grid_row_start(&self) -> &GridLine {
         &self.grid_row.start
     }
@@ -689,26 +645,14 @@ impl GridItemStyle for TestStyle {
         &self.grid_column.end
     }
 
-    fn align_self(&self) -> SelfAlignment {
-        self.align_self
-    }
-
     fn justify_self(&self) -> SelfAlignment {
         self.justify_self
     }
 
-    fn order(&self) -> i32 {
-        self.order
-    }
-}
-
-impl RelativeContainerStyle for TestStyle {
     fn relative_layout_once(&self) -> relative_layout_once::T {
         self.relative_layout_once
     }
-}
 
-impl RelativeItemStyle for TestStyle {
     fn relative_id(&self) -> RelativeReference {
         self.relative_id
     }
@@ -723,10 +667,6 @@ impl RelativeItemStyle for TestStyle {
 
     fn relative_center(&self) -> relative_center::T {
         self.relative_center
-    }
-
-    fn order(&self) -> i32 {
-        self.order
     }
 }
 

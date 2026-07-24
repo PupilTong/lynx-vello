@@ -5,6 +5,7 @@ mod grid;
 mod leaf;
 mod linear;
 mod relative;
+mod single_axis;
 mod util;
 
 pub use flexbox::compute_flexbox_layout;
@@ -22,7 +23,7 @@ use stylo::values::computed::{Margin, Size as StyleSize};
 use self::util::{
     apply_box_sizing, auto_edges_to_zero, clamp, clamp_axis, resolve_border, resolve_container_box,
     resolve_insets, resolve_length_percentage, resolve_margins, resolve_max_sizes, resolve_padding,
-    resolve_size, used_aspect_ratio,
+    resolve_size, style_size_behaves_auto, used_aspect_ratio,
 };
 use crate::geometry::{Edges, Point, Size};
 use crate::invalidate::is_relayout_boundary;
@@ -369,23 +370,6 @@ fn absolute_known_dimensions(
     )
 }
 
-#[inline]
-fn style_size_behaves_auto(value: &StyleSize) -> bool {
-    match value {
-        StyleSize::Auto
-        | StyleSize::FitContent
-        | StyleSize::Stretch
-        | StyleSize::WebkitFillAvailable => true,
-        StyleSize::LengthPercentage(_)
-        | StyleSize::MinContent
-        | StyleSize::MaxContent
-        | StyleSize::FitContentFunction(_) => false,
-        StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor sizing is pref-dead under the lynx feature")
-        }
-    }
-}
-
 fn resolve_absolute_style<N: LayoutNode>(
     node: N,
     parent_size: Size<Option<f32>>,
@@ -459,6 +443,19 @@ pub fn round_layout<N: LayoutNode>(root: N, scale: f32) {
 }
 
 pub fn round_layout_subtree<N: LayoutNode>(node: N, scale: f32, parent_position: Point<f32>) {
+    round_layout_subtree_with(node, scale, parent_position, |_| false);
+}
+
+/// Rounds a subtree after a statically dispatched preorder hook.
+/// Returning `false` prunes only later hook calls; rounding still visits descendants.
+/// The hook runs before the current unrounded layout is cloned.
+#[doc(hidden)]
+pub fn round_layout_subtree_with<N: LayoutNode>(
+    node: N,
+    scale: f32,
+    parent_position: Point<f32>,
+    mut pre_node: impl FnMut(N) -> bool,
+) {
     debug_assert!(
         scale.is_finite() && scale > 0.0,
         "scale must be positive and finite"
@@ -467,7 +464,7 @@ pub fn round_layout_subtree<N: LayoutNode>(node: N, scale: f32, parent_position:
         parent_position.x.is_finite() && parent_position.y.is_finite(),
         "accumulated parent position must be finite"
     );
-    round_layout_inner(node, scale, parent_position);
+    round_layout_inner(node, scale, parent_position, &mut pre_node, true);
 }
 
 #[inline]
@@ -563,7 +560,14 @@ struct AbsoluteAxis {
     prefer_end: bool,
 }
 
-fn round_layout_inner<N: LayoutNode>(node: N, scale: f32, parent_position: Point<f32>) {
+fn round_layout_inner<N: LayoutNode>(
+    node: N,
+    scale: f32,
+    parent_position: Point<f32>,
+    pre_node: &mut impl FnMut(N) -> bool,
+    visit_pre_node: bool,
+) {
+    let visit_pre_node = visit_pre_node && pre_node(node);
     let unrounded = node.clone_unrounded_layout();
     let position = Point::new(
         parent_position.x + unrounded.location.x,
@@ -574,45 +578,80 @@ fn round_layout_inner<N: LayoutNode>(node: N, scale: f32, parent_position: Point
     let source_border = unrounded.border;
     let source_padding = unrounded.padding;
     let source_margin = unrounded.margin;
-    let snap = |value: f32| css_round_to_integer(value * scale) / scale;
+    let mut snap = |value: f32| {
+        #[cfg(test)]
+        tests::ROUND_SNAP_CALLS.with(|calls| calls.set(calls.get() + 1));
+        css_round_to_integer(value * scale) / scale
+    };
+    macro_rules! snap_point {
+        ($x:expr, $y:expr) => {
+            Point::new($x, $y).map(&mut snap)
+        };
+    }
+    let snapped_parent_position = parent_position.map(&mut snap);
+    let snapped_position = position.map(&mut snap);
+    let snapped_box_end = snap_point!(
+        position.x + source_size.width,
+        position.y + source_size.height
+    );
+    let snapped_content_end = snap_point!(
+        position.x + source_content_size.width,
+        position.y + source_content_size.height
+    );
+    let snapped_border_start = snap_point!(
+        position.x + source_border.left,
+        position.y + source_border.top
+    );
+    let snapped_border_end = snap_point!(
+        position.x + source_size.width - source_border.right,
+        position.y + source_size.height - source_border.bottom
+    );
+    let snapped_padding_start = snap_point!(
+        position.x + source_border.left + source_padding.left,
+        position.y + source_border.top + source_padding.top
+    );
+    let snapped_padding_end = snap_point!(
+        position.x + source_size.width - source_border.right - source_padding.right,
+        position.y + source_size.height - source_border.bottom - source_padding.bottom
+    );
+    let snapped_margin_start = snap_point!(
+        position.x - source_margin.left,
+        position.y - source_margin.top
+    );
+    let snapped_margin_end = snap_point!(
+        position.x + source_size.width + source_margin.right,
+        position.y + source_size.height + source_margin.bottom
+    );
     let mut rounded = unrounded;
     rounded.location = Point::new(
-        snap(position.x) - snap(parent_position.x),
-        snap(position.y) - snap(parent_position.y),
+        snapped_position.x - snapped_parent_position.x,
+        snapped_position.y - snapped_parent_position.y,
     );
     rounded.size = Size::new(
-        snap(position.x + source_size.width) - snap(position.x),
-        snap(position.y + source_size.height) - snap(position.y),
+        snapped_box_end.x - snapped_position.x,
+        snapped_box_end.y - snapped_position.y,
     );
     rounded.content_size = Size::new(
-        snap(position.x + source_content_size.width) - snap(position.x),
-        snap(position.y + source_content_size.height) - snap(position.y),
+        snapped_content_end.x - snapped_position.x,
+        snapped_content_end.y - snapped_position.y,
     );
-    rounded.border.left = snap(position.x + source_border.left) - snap(position.x);
-    rounded.border.right = snap(position.x + source_size.width)
-        - snap(position.x + source_size.width - source_border.right);
-    rounded.border.top = snap(position.y + source_border.top) - snap(position.y);
-    rounded.border.bottom = snap(position.y + source_size.height)
-        - snap(position.y + source_size.height - source_border.bottom);
-    rounded.padding.left = snap(position.x + source_border.left + source_padding.left)
-        - snap(position.x + source_border.left);
-    rounded.padding.right = snap(position.x + source_size.width - source_border.right)
-        - snap(position.x + source_size.width - source_border.right - source_padding.right);
-    rounded.padding.top = snap(position.y + source_border.top + source_padding.top)
-        - snap(position.y + source_border.top);
-    rounded.padding.bottom = snap(position.y + source_size.height - source_border.bottom)
-        - snap(position.y + source_size.height - source_border.bottom - source_padding.bottom);
-    rounded.margin.left = snap(position.x) - snap(position.x - source_margin.left);
-    rounded.margin.right = snap(position.x + source_size.width + source_margin.right)
-        - snap(position.x + source_size.width);
-    rounded.margin.top = snap(position.y) - snap(position.y - source_margin.top);
-    rounded.margin.bottom = snap(position.y + source_size.height + source_margin.bottom)
-        - snap(position.y + source_size.height);
+    rounded.border.left = snapped_border_start.x - snapped_position.x;
+    rounded.border.right = snapped_box_end.x - snapped_border_end.x;
+    rounded.border.top = snapped_border_start.y - snapped_position.y;
+    rounded.border.bottom = snapped_box_end.y - snapped_border_end.y;
+    rounded.padding.left = snapped_padding_start.x - snapped_border_start.x;
+    rounded.padding.right = snapped_border_end.x - snapped_padding_end.x;
+    rounded.padding.top = snapped_padding_start.y - snapped_border_start.y;
+    rounded.padding.bottom = snapped_border_end.y - snapped_padding_end.y;
+    rounded.margin.left = snapped_position.x - snapped_margin_start.x;
+    rounded.margin.right = snapped_margin_end.x - snapped_box_end.x;
+    rounded.margin.top = snapped_position.y - snapped_margin_start.y;
+    rounded.margin.bottom = snapped_margin_end.y - snapped_box_end.y;
 
     node.set_rounded_layout(rounded);
 
     for child in node.children() {
-        round_layout_inner(child, scale, position);
+        round_layout_inner(child, scale, position, pre_node, visit_pre_node);
     }
 }
 
@@ -620,71 +659,158 @@ fn round_layout_inner<N: LayoutNode>(node: N, scale: f32, parent_position: Point
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::float_cmp)]
 mod tests {
+    use core::cell::Cell;
+
+    use stylo::values::computed::Display;
+
     use super::*;
+
+    std::thread_local! {
+        pub(super) static ROUND_SNAP_CALLS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn edges<T>(left: T, right: T, top: T, bottom: T) -> Edges<T> {
+        Edges {
+            left,
+            right,
+            top,
+            bottom,
+        }
+    }
+
+    macro_rules! assert_cases {
+        ($function:ident; $(
+            $name:literal: ($($argument:expr),+ $(,)?) => $expected:expr;
+        )+) => {
+            $(assert_eq!($function($($argument),+), $expected, "{}", $name);)+
+        };
+    }
+
+    #[derive(Debug)]
+    struct RoundingStyle;
+
+    impl CoreStyle for RoundingStyle {
+        fn display(&self) -> Display {
+            Display::Flex
+        }
+    }
+
+    struct RoundingHost {
+        unrounded: Layout,
+        rounded: Cell<Option<Layout>>,
+    }
+
+    #[derive(Clone, Copy)]
+    struct RoundingRef<'a>(&'a RoundingHost);
+
+    impl core::fmt::Debug for RoundingRef<'_> {
+        fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            formatter.write_str("RoundingRef")
+        }
+    }
+
+    macro_rules! unused_rounding_methods {
+        ($($name:ident($($argument:ident: $type:ty),*) $(-> $result:ty)?;)+) => {
+            $(
+                fn $name(self, $($argument: $type),*) $(-> $result)? {
+                    unreachable!("rounding only reads and stores durable layouts")
+                }
+            )+
+        };
+    }
+
+    impl LayoutNode for RoundingRef<'_> {
+        type Style = &'static RoundingStyle;
+        type ChildIter = core::iter::Empty<Self>;
+
+        fn children(self) -> Self::ChildIter {
+            core::iter::empty()
+        }
+
+        fn style(self) -> Self::Style {
+            &RoundingStyle
+        }
+
+        fn with_unrounded_layout<R>(self, read: impl FnOnce(&Layout) -> R) -> R {
+            read(&self.0.unrounded)
+        }
+
+        fn set_rounded_layout(self, layout: Layout) {
+            self.0.rounded.set(Some(layout));
+        }
+
+        unused_rounding_methods! {
+            compute_layout(_input: LayoutInput) -> LayoutOutput;
+            set_unrounded_layout(_layout: Layout);
+            set_static_position(_position: Point<f32>);
+            cached_layout(_input: LayoutInput) -> Option<LayoutOutput>;
+            store_cached_layout(_input: LayoutInput, _output: LayoutOutput);
+            clear_layout_cache();
+        }
+    }
+
+    #[test]
+    fn rounding_reuses_twenty_unique_snaps_without_changing_bits() {
+        let unrounded = Layout {
+            order: 17,
+            location: Point::new(0.37, -0.42),
+            size: Size::new(20.18, 13.73),
+            content_size: Size::new(24.91, 15.09),
+            border: edges(1.13, 2.27, 0.77, 1.91),
+            padding: edges(3.08, 0.66, 2.42, 1.36),
+            margin: edges(4.17, -0.83, 1.27, 3.44),
+        };
+        let scale = 1.25;
+        let parent_position = Point::new(-7.31, 5.19);
+        let expected = Layout {
+            order: 17,
+            location: Point::ZERO,
+            size: Size::new(20.8, 13.599_999),
+            content_size: Size::new(24.8, 15.2),
+            border: edges(1.599_999_9, 2.400_000_6, 0.799_999_7, 1.600_000_4),
+            padding: edges(3.199_999_8, 0.800_000_2, 2.4, 1.599_999_4),
+            margin: edges(4.0, -0.800_000_2, 1.600_000_1, 3.200_000_8),
+        };
+        let host = RoundingHost {
+            unrounded,
+            rounded: Cell::new(None),
+        };
+
+        ROUND_SNAP_CALLS.set(0);
+        round_layout_subtree(RoundingRef(&host), scale, parent_position);
+        let actual = host.rounded.take().expect("one durable rounded result");
+
+        assert_eq!(ROUND_SNAP_CALLS.get(), 20);
+        assert_eq!(actual.order, expected.order);
+        macro_rules! assert_field_bits {
+            ($($field:ident),+ $(,)?) => {
+                $(assert_eq!(
+                    actual.$field.map(f32::to_bits),
+                    expected.$field.map(f32::to_bits),
+                    stringify!($field),
+                );)+
+            };
+        }
+        assert_field_bits!(location, size, content_size, border, padding, margin);
+    }
 
     #[test]
     fn root_auto_margins_cover_indefinite_fixed_single_and_double_auto_cases() {
-        let fixed = Edges {
-            left: Some(3.0),
-            right: Some(7.0),
-            top: Some(2.0),
-            bottom: Some(4.0),
-        };
-        assert_eq!(
-            resolve_root_margins(
-                fixed,
-                Edges::uniform(false),
-                AvailableSpace::MaxContent,
-                40.0,
-            ),
-            Edges {
-                left: 3.0,
-                right: 7.0,
-                top: 2.0,
-                bottom: 4.0,
-            }
-        );
-        assert_eq!(
-            resolve_root_margins(
-                fixed,
-                Edges::uniform(false),
-                AvailableSpace::Definite(100.0),
-                40.0,
-            )
-            .left,
-            3.0
-        );
-
-        let both = resolve_root_margins(
-            Edges::uniform(None),
-            Edges {
-                left: true,
-                right: true,
-                top: false,
-                bottom: false,
-            },
-            AvailableSpace::Definite(100.0),
-            40.0,
-        );
-        assert_eq!((both.left, both.right), (30.0, 30.0));
-
-        let one = resolve_root_margins(
-            Edges {
-                left: Some(5.0),
-                right: None,
-                top: None,
-                bottom: None,
-            },
-            Edges {
-                left: false,
-                right: true,
-                top: false,
-                bottom: false,
-            },
-            AvailableSpace::Definite(100.0),
-            40.0,
-        );
-        assert_eq!((one.left, one.right), (5.0, 55.0));
+        let fixed = edges(Some(3.0), Some(7.0), Some(2.0), Some(4.0));
+        let expected_fixed = edges(3.0, 7.0, 2.0, 4.0);
+        let definite = AvailableSpace::Definite(100.0);
+        assert_cases! { resolve_root_margins;
+            "fixed indefinite":
+                (fixed, Edges::uniform(false), AvailableSpace::MaxContent, 40.0) => expected_fixed;
+            "fixed definite":
+                (fixed, Edges::uniform(false), definite, 40.0) => expected_fixed;
+            "both horizontal auto":
+                (Edges::uniform(None), edges(true, true, false, false), definite, 40.0)
+                => edges(30.0, 30.0, 0.0, 0.0);
+            "right auto":
+                (edges(Some(5.0), None, None, None), edges(false, true, false, false),
+                 definite, 40.0) => edges(5.0, 55.0, 0.0, 0.0);
+        }
     }
 
     fn absolute_style() -> ResolvedAbsoluteStyle {
@@ -706,81 +832,48 @@ mod tests {
     #[test]
     fn absolute_known_dimensions_clamp_stretch_and_defer_ratio_height() {
         let style = absolute_style();
-        assert_eq!(
-            absolute_known_dimensions(&style, Size::new(100.0, 80.0), Edges::uniform(5.0),),
-            Size::new(Some(90.0), Some(60.0))
-        );
-
         let mut ratio = style;
         ratio.aspect_ratio = Some(2.0);
-        assert_eq!(
-            absolute_known_dimensions(&ratio, Size::new(100.0, 80.0), Edges::uniform(5.0),),
-            Size::new(Some(90.0), None)
-        );
-
         let mut vertical_only = style;
         vertical_only.auto_size.width = false;
-        assert_eq!(
-            absolute_known_dimensions(&vertical_only, Size::new(100.0, 30.0), Edges::uniform(20.0),),
-            Size::new(None, Some(10.0))
-        );
+        assert_cases! { absolute_known_dimensions;
+            "stretch clamp":
+                (&style, Size::new(100.0, 80.0), Edges::uniform(5.0))
+                => Size::new(Some(90.0), Some(60.0));
+            "ratio defers height":
+                (&ratio, Size::new(100.0, 80.0), Edges::uniform(5.0))
+                => Size::new(Some(90.0), None);
+            "vertical only clamps minimum":
+                (&vertical_only, Size::new(100.0, 30.0), Edges::uniform(20.0))
+                => Size::new(None, Some(10.0));
+        }
     }
 
     #[test]
     fn absolute_auto_margins_cover_positive_negative_and_one_sided_equations() {
+        use direction::T::{Ltr, Rtl};
+
         let insets = Edges::uniform(Some(0.0));
-        let centered = resolve_absolute_margins(
-            Edges::uniform(None),
-            insets,
-            Size::new(100.0, 80.0),
-            Size::new(60.0, 40.0),
-            direction::T::Ltr,
-        );
-        assert_eq!(centered, Edges::uniform(20.0));
-
-        let ltr_overflow = resolve_absolute_margins(
-            Edges::uniform(None),
-            insets,
-            Size::new(40.0, 80.0),
-            Size::new(60.0, 40.0),
-            direction::T::Ltr,
-        );
-        assert_eq!((ltr_overflow.left, ltr_overflow.right), (0.0, -20.0));
-        let rtl_overflow = resolve_absolute_margins(
-            Edges::uniform(None),
-            insets,
-            Size::new(40.0, 80.0),
-            Size::new(60.0, 40.0),
-            direction::T::Rtl,
-        );
-        assert_eq!((rtl_overflow.left, rtl_overflow.right), (-20.0, 0.0));
-
-        let start_auto = resolve_absolute_margins(
-            Edges {
-                left: None,
-                right: Some(3.0),
-                top: None,
-                bottom: Some(4.0),
-            },
-            insets,
-            Size::new(100.0, 80.0),
-            Size::new(60.0, 40.0),
-            direction::T::Ltr,
-        );
-        assert_eq!((start_auto.left, start_auto.top), (37.0, 36.0));
-        let end_auto = resolve_absolute_margins(
-            Edges {
-                left: Some(2.0),
-                right: None,
-                top: Some(5.0),
-                bottom: None,
-            },
-            insets,
-            Size::new(100.0, 80.0),
-            Size::new(60.0, 40.0),
-            direction::T::Ltr,
-        );
-        assert_eq!((end_auto.right, end_auto.bottom), (38.0, 35.0));
+        let all_auto = Edges::uniform(None);
+        let normal = Size::new(100.0, 80.0);
+        let overflow = Size::new(40.0, 80.0);
+        let box_size = Size::new(60.0, 40.0);
+        assert_cases! { resolve_absolute_margins;
+            "centered":
+                (all_auto, insets, normal, box_size, Ltr) => Edges::uniform(20.0);
+            "ltr overflow":
+                (all_auto, insets, overflow, box_size, Ltr)
+                => edges(0.0, -20.0, 20.0, 20.0);
+            "rtl overflow":
+                (all_auto, insets, overflow, box_size, Rtl)
+                => edges(-20.0, 0.0, 20.0, 20.0);
+            "start edges auto":
+                (edges(None, Some(3.0), None, Some(4.0)), insets, normal, box_size, Ltr)
+                => edges(37.0, 3.0, 36.0, 4.0);
+            "end edges auto":
+                (edges(Some(2.0), None, Some(5.0), None), insets, normal, box_size, Ltr)
+                => edges(2.0, 38.0, 5.0, 35.0);
+        }
     }
 
     #[test]
@@ -795,29 +888,18 @@ mod tests {
             static_position: 11.0,
             prefer_end: false,
         };
-        assert_eq!(absolute_axis_location(base), 14.0);
-        assert_eq!(
-            absolute_axis_location(AbsoluteAxis {
-                start_inset: Some(7.0),
-                ..base
-            }),
-            10.0
-        );
-        assert_eq!(
-            absolute_axis_location(AbsoluteAxis {
-                end_inset: Some(9.0),
-                ..base
-            }),
-            67.0
-        );
-        assert_eq!(
-            absolute_axis_location(AbsoluteAxis {
-                start_inset: Some(7.0),
-                end_inset: Some(9.0),
-                prefer_end: true,
-                ..base
-            }),
-            67.0
-        );
+        let mut start = base;
+        start.start_inset = Some(7.0);
+        let mut end = base;
+        end.end_inset = Some(9.0);
+        let mut prefer_end = start;
+        prefer_end.end_inset = Some(9.0);
+        prefer_end.prefer_end = true;
+        assert_cases! { absolute_axis_location;
+            "static position": (base) => 14.0;
+            "start inset": (start) => 10.0;
+            "end inset": (end) => 67.0;
+            "prefer end with both insets": (prefer_end) => 67.0;
+        }
     }
 }

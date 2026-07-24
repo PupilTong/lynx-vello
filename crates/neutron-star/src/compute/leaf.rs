@@ -22,6 +22,7 @@ pub fn compute_leaf_layout<Style: CoreStyle>(
         input,
         style,
         natural_size.aspect_ratio(),
+        false,
         |measure_input| natural_size.measure(measure_input),
     )
 }
@@ -31,6 +32,7 @@ pub(crate) fn compute_leaf_layout_with_measurement<Style, Measure>(
     input: LayoutInput,
     style: &Style,
     natural_aspect_ratio: Option<f32>,
+    requires_known_measurement: bool,
     mut measure: Measure,
 ) -> LayoutOutput
 where
@@ -60,7 +62,9 @@ where
         padding_border_size,
     );
 
-    if measurement_axis.is_some_and(|axis| axis != RequestedAxis::Both)
+    let contained_intrinsic = crate::style::containment::size_containment(style);
+    if (measurement_axis.is_some_and(|axis| axis != RequestedAxis::Both)
+        || (!requires_known_measurement && contained_intrinsic.is_none()))
         && node_size.width.is_some()
         && node_size.height.is_some()
     {
@@ -101,7 +105,7 @@ where
         ),
     );
 
-    let measurement = if let Some(intrinsic) = crate::style::containment::size_containment(style) {
+    let measurement = if let Some(intrinsic) = contained_intrinsic {
         LeafMetrics {
             size: Size::new(
                 intrinsic.width.unwrap_or(0.0),
@@ -173,7 +177,7 @@ where
     Style: CoreStyle,
     Measure: FnMut(LeafMeasureInput) -> LeafMetrics,
 {
-    compute_leaf_layout_with_measurement(input, style, natural_aspect_ratio, measure)
+    compute_leaf_layout_with_measurement(input, style, natural_aspect_ratio, true, measure)
 }
 
 /// Content-box constraints consumed by neutron-star's closed leaf engines.
@@ -243,53 +247,9 @@ impl NaturalSize {
     fn measure(self, input: LeafMeasureInput) -> LeafMetrics {
         let natural = self.dimensions();
         let ratio = self.aspect_ratio();
-        let size = match input.known_dimensions {
-            Size {
-                width: Some(width),
-                height: Some(height),
-            } => Size::new(width, height),
-            Size {
-                width: Some(width),
-                height: None,
-            } => Size::new(
-                width,
-                ratio
-                    .map(|ratio| width / ratio)
-                    .or(natural.height)
-                    .unwrap_or(0.0),
-            ),
-            Size {
-                width: None,
-                height: Some(height),
-            } => Size::new(
-                ratio
-                    .map(|ratio| height * ratio)
-                    .or(natural.width)
-                    .unwrap_or(0.0),
-                height,
-            ),
-            Size {
-                width: None,
-                height: None,
-            } => match natural {
-                Size {
-                    width: Some(width),
-                    height: Some(height),
-                } => Size::new(width, height),
-                Size {
-                    width: Some(width),
-                    height: None,
-                } => Size::new(width, ratio.map_or(0.0, |ratio| width / ratio)),
-                Size {
-                    width: None,
-                    height: Some(height),
-                } => Size::new(ratio.map_or(0.0, |ratio| height * ratio), height),
-                Size {
-                    width: None,
-                    height: None,
-                } => Size::ZERO,
-            },
-        };
+        let size = apply_aspect_ratio(input.known_dimensions, ratio)
+            .or(apply_aspect_ratio(natural, ratio))
+            .unwrap_or(Size::ZERO);
         LeafMetrics::new(size)
     }
 }
@@ -784,7 +744,7 @@ mod tests {
             let mut measurer = CachingMeasurer {
                 artifacts: &mut artifacts,
             };
-            compute_leaf_layout_with_measurement(input, &EmptyStyle, None, |input| {
+            compute_leaf_layout_with_measurement(input, &EmptyStyle, None, true, |input| {
                 measurer.measure(input)
             })
         });
@@ -810,7 +770,7 @@ mod tests {
             let mut probe_measurer = CachingMeasurer {
                 artifacts: &mut artifacts,
             };
-            compute_leaf_layout_with_measurement(probe_input, &EmptyStyle, None, |input| {
+            compute_leaf_layout_with_measurement(probe_input, &EmptyStyle, None, true, |input| {
                 probe_measurer.measure(input)
             })
         };
@@ -866,6 +826,17 @@ mod tests {
         assert_eq!(
             ratio_only.measure(LeafMeasureInput::default()).size,
             Size::new(40.0, 20.0)
+        );
+        let natural_height = NaturalSize::new(Size::new(None, Some(11.0)), None);
+        assert_eq!(
+            natural_height
+                .measure(LeafMeasureInput::new(
+                    Size::new(Some(22.0), None),
+                    Size::MAX_CONTENT,
+                    LayoutGoal::Commit,
+                ))
+                .size,
+            Size::new(22.0, 11.0)
         );
         let invalid = NaturalSize::new(Size::new(Some(f32::NAN), Some(-1.0)), Some(0.0));
         assert_eq!(
@@ -981,7 +952,7 @@ mod tests {
             RequestedAxis::Horizontal,
         );
 
-        let output = compute_leaf_layout_with_measurement(input, &style, None, |_input| {
+        let output = compute_leaf_layout_with_measurement(input, &style, None, true, |_input| {
             panic!("a fully resolved single-axis probe must not measure content")
         });
 

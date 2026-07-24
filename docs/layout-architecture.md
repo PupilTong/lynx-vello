@@ -88,7 +88,7 @@ Text behavior is inventoried in
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| `neutron-star` | Implemented Flex, Grid, Relative, and Linear algorithms; their style-view protocols speaking stylo computed values (including the `relative-*` and `linear-*` longhands); the text style/run protocol; closed natural-size and Parley leaf paths, hidden-subtree cleanup, positioned layout, rounding; shared private arithmetic; geometry and layout IO; cache semantics | Node/style/content storage, display dispatch, arbitrary host content/measurers, DOM/runtime types, an engine-side style value vocabulary (it re-exports stylo's), resolved device-unit policy (`rpx`, etc.), stacking/paint order |
+| `neutron-star` | Implemented Flex, Grid, Relative, and Linear algorithms; one unified source-backed `CoreStyle` protocol speaking stylo computed values (including the `relative-*` and `linear-*` longhands); the text style/run protocol; closed natural-size and Parley leaf paths, hidden-subtree cleanup, positioned layout, rounding; shared private arithmetic; geometry and layout IO; cache semantics | Node/style/content storage, display dispatch, arbitrary host content/measurers, DOM/runtime types, an engine-side style value vocabulary (it re-exports stylo's), resolved device-unit policy (`rpx`, etc.), stacking/paint order |
 | `neutron-star::text` (unconditional) | Parley context/font registration, whitespace processing, shaping, line breaking, intrinsic and height-for-width measurement, baselines, and retained `TextLayout` artifact types | Text truncation and ellipsis, inline boxes, paint styling, runtime/attribute lowering, resource fetching, or host cache and per-node slot storage |
 | `w3c-dom::layout` (implemented) | `LayoutNode` implemented directly on `&Node<T>` (the stylo-trait handle; no wrapper, no adapter objects); style views fetched on engine request by borrowing the node's Stylo `ElementData` guard (no `Arc<ComputedValues>` refcount bump) and lending `ComputedValues` fields (logical `relative-*-inline-*` lowering; the W3C fixed/absolute containing-block rule expressed through the protocol's `position()` scheme; anonymous box geometry plus inherited parent font/text values for text nodes); display dispatch (flex/grid/linear/relative, `display: none` hiding, `content-visibility: hidden` skipped-contents routing before the cache, natural-size leaf, concrete Parley text); document-owned `TextContext`; mutually exclusive internal `NaturalSize`/literal-text/retained-artifact state in the node's one nullable content slot; durable unrounded + rounded layouts on the primary `Node`, with measurement cache and persistent static position in an `AtomicRefCell<LayoutData>` in the document's NodeId-indexed layout secondary slab; automatic dirty-path invalidation when content changes; the positioned pass as a fresh pre-order tree walk each pass (cache-proof for hoisted nodes whose parents answer from cache, pruned at skipped-contents subtrees so a hoisted descendant cannot be revived, and the engine's effective-`order`-0 paint rule for out-of-flow children); device-pixel rounding; the effective-containment fold on the style view (feeding both the relayout-boundary predicate and the content-visibility-aware fixed/absolute containing-block predicate); **automatic style-damage consumption** (every harvest boundary-stops `Document::invalidate_layout` per relayout-damaged node before returning/streaming damage; it also evicts direct text children's measurement caches and retained artifacts because those children read inherited style from the damaged element but have no Stylo damage record of their own; `Document::layout` re-runs each parked `contain: strict`/skipped boundary in place before the root pass, merging the re-run's scrollable `content_size` back into the boundary's stored layout); and the `Document::invalidate_layout` API embedders still call for mutations the style system cannot see | A second layout algorithm, generic content-measurement callbacks, engine-side style copies, Lynx runtime-element vocabulary or device-unit policy (`rpx`), Lynx computed defaults (cascade/UA-sheet policy), text shaping algorithms |
 | Future runtime integration | Lynx view metrics and `rpx` policy; Lynx-specific text attributes, element-backed raw text and truncation; `staggered` integration; sticky lowering | A second Flex/Grid/Relative/Linear/text-measurement implementation, arbitrary host content, engine-side copies of styles, the style-damage→layout wiring (now engine-internal in `w3c-dom`) |
@@ -118,18 +118,17 @@ directly on `&'a Node<T>`):
 | Item | Provides | Consumed by |
 | --- | --- | --- |
 | `LayoutNode: Copy + Debug` | child iteration (`children`/`child_count`), the borrowed `Style` view, **`compute_layout` (the host display/algorithm dispatch point)**, unrounded/rounded layout and static-position writes, and per-node cache slots (all three cache methods required — a caching host cannot accidentally omit `clear_layout_cache`; uncached hosts no-op all three) | everything |
-| `CoreStyle` | the box-universal style view every algorithm reads | all algorithms |
-| `FlexContainerStyle`/`FlexItemStyle` | flex views (bounds on `N::Style`) | the L1 flexbox algorithm |
-| `GridContainerStyle`/`GridItemStyle` | grid views, including borrowed `&GridTemplateComponent`/`&ImplicitGridTracks` track-list accessors | the L2 grid algorithm |
-| `RelativeContainerStyle`/`RelativeItemStyle` | relative views | the Starlight Relative L1 algorithm |
-| `LinearContainerStyle`/`LinearItemStyle` | Starlight Linear views | the Linear algorithm |
+| `CoreStyle` | one `computed_values()` source plus defaulted box, Flex, Grid, Relative, and Linear accessors; sequence and geometry values remain borrowed | all box algorithms |
 | `TextContainerStyle: CoreStyle` | paragraph-level alignment, whitespace, word-break, and indent values | the Parley `TextMeasurer` |
-| `TextRunStyle` | run-level font, spacing, line-height, family, feature, and variation views | the Parley `TextMeasurer` |
+| `TextRunStyle` | run-level font, spacing, line-height, family, feature, and variation views; a Stylo host can expose one borrowed `computed_text_values()` source | the Parley `TextMeasurer` |
 
-One `Style` associated type serves every algorithm: hosts implement the
-container/item style traits once, on one view type, and each entry point
-narrows `N::Style` with the bounds it actually needs. Everything the engine
-reads through a handle is immutable for the flush; everything it writes goes
+One `Style: CoreStyle` associated type serves every box algorithm. A
+Stylo-backed host supplies its guarded `ComputedValues` through
+`computed_values()` and overrides only genuinely host-dependent lowering
+(currently `position()` in `w3c-dom`); `CoreStyle`'s defaults lend all other
+box/Flex/Grid/Relative/Linear fields directly from that source. Cascade-less
+hosts can instead override individual accessors. Everything the engine reads
+through a handle is immutable for the flush; everything it writes goes
 through the handle into host-owned **interior-mutable per-node slots**.
 
 Entry points (`neutron_star::compute`) are free generic functions — there is
@@ -148,16 +147,16 @@ Their public entry points use the same fixed shape:
 
 ```rust
 pub fn compute_flexbox_layout<N>(node: N, input: LayoutInput) -> LayoutOutput
-where N: LayoutNode, N::Style: FlexContainerStyle + FlexItemStyle;
+where N: LayoutNode;
 
 pub fn compute_grid_layout<N>(node: N, input: LayoutInput) -> LayoutOutput
-where N: LayoutNode, N::Style: GridContainerStyle + GridItemStyle;
+where N: LayoutNode;
 
 pub fn compute_relative_layout<N>(node: N, input: LayoutInput) -> LayoutOutput
-where N: LayoutNode, N::Style: RelativeContainerStyle + RelativeItemStyle;
+where N: LayoutNode;
 
 pub fn compute_linear_layout<N>(node: N, input: LayoutInput) -> LayoutOutput
-where N: LayoutNode, N::Style: LinearContainerStyle + LinearItemStyle;
+where N: LayoutNode;
 ```
 
 All four signatures are public; hosts select them in their display dispatch.
@@ -250,29 +249,31 @@ staged, invalidate the affected box and measurement caches, and start a new
 epoch. Virtualized components therefore realize their visible topology
 before layout or explicitly restart after realization.
 
-**Style is read through views, in stylo's computed vocabulary.** Style traits
-(`CoreStyle` + container/item traits per box algorithm,
-`TextContainerStyle`, and the standalone `TextRunStyle`) hand out **stylo
-computed values** per accessor call — the same `Display`,
+**Style is read through views, in stylo's computed vocabulary.** The unified
+box trait (`CoreStyle`), `TextContainerStyle`, and the standalone
+`TextRunStyle` hand out **stylo computed values** per accessor call — the same
+`Display`,
 `LengthPercentage`, `Margin`, `AlignFlags`-based alignment wrappers, grid
 track lists, and keyword enums the stylo cascade produces, re-exported from
 `neutron_star::style`. There are no engine-owned style value enums and no
-materialized engine-side style structs: a stylo-backed host implements the
-accessors as direct field reads of its `ComputedValues`, and a cascade-less
-host (tests, benches) constructs the same stylo values by hand. Small `Copy`
-values (keyword enums, alignment flags, `Au` border widths, numbers) are
-returned owned; the `LengthPercentage`-family geometry properties — inset,
-size, min/max size, margin, padding, flex-basis, gap, grid-line placements —
-are returned **borrowed** as per-field references inside the geometry
-wrappers (`Edges<&Margin>`, `Size<&StyleSize>`, `&FlexBasis`), and sequence
-values — grid track lists (`&GridTemplateComponent`, `&ImplicitGridTracks`)
-— are returned borrowed whole, so no read ever clones a `calc()` tree or
-bumps a refcount. Per-field reference wrappers are lendable from any host
-storage (a `ComputedValues` host keeps the four margin edges as separate
-fields); a host that synthesizes style values per call must materialize them
-in per-node storage once per style change and lend from there. Text-run
-accessors (font families, features, variations) stay owned — they run once
-per (re)shape, amortized by the measurement cache. Defaulted trait methods return the **fork's initial values**:
+materialized engine-side style structs: a stylo-backed host lends one
+`ComputedValues` through `CoreStyle::computed_values()`, whose default methods
+perform direct field reads; a cascade-less host (tests, benches) can override
+individual methods with hand-built stylo values. Small `Copy` values (keyword
+enums, alignment flags, `Au` border widths, numbers) are returned owned; the
+`LengthPercentage`-family geometry properties — inset, size, min/max size,
+margin, padding, flex-basis, gap, grid-line placements — are returned
+**borrowed** as per-field references inside the geometry wrappers
+(`Edges<&Margin>`, `Size<&StyleSize>`, `&FlexBasis`), and sequence values —
+grid track lists (`&GridTemplateComponent`, `&ImplicitGridTracks`) — are
+returned borrowed whole, so no read ever clones a `calc()` tree or bumps a
+refcount. Per-field reference wrappers are lendable from any host storage (a
+`ComputedValues` host keeps the four margin edges as separate fields); a host
+that synthesizes style values per call must materialize them in per-node
+storage once per style change and lend from there. A source-backed
+`TextRunStyle` similarly lends its computed font family through
+`font_family_ref`; owned accessors remain available to hand-built run styles.
+Defaulted trait methods return the **fork's initial values**:
 the CSS initial value except where Lynx documents otherwise
 (`relative-layout-once: true` — the Lynx computed default *is* the fork
 initial, so the trait default needs no adapter override). Alignment `normal`
@@ -535,7 +536,12 @@ the painting — layout's job is to never be the frame's bottleneck.
   locality does not weaken lifecycle ownership.
 - **Layout style views do not bump computed-style refcounts.** A `StyleView`
   holds Stylo's element-data read guard and lends its existing
-  `Arc<ComputedValues>` target instead of cloning the Arc. Same-machine
+  `Arc<ComputedValues>` target instead of cloning the Arc. Its unified
+  `CoreStyle` implementation supplies only that source and the node-dependent
+  position lowering; all other algorithm accessors borrow through the trait's
+  defaults. `TextStyleView` keeps only the parent's guarded inherited-style
+  source plus static anonymous-box geometry, reducing its footprint from
+  seven machine words to three. Same-machine
   three-run CodSpeed A/B medians (100 samples per run) improved fixed/fractional
   cold Grid by 11.4% (8.163 → 7.229 ms), nested cold by 13.7% (3.950 → 3.408
   ms), nested dirty by 13.5% (4.603 → 3.983 ms), warm descendants by 6.4%
@@ -563,11 +569,11 @@ the painting — layout's job is to never be the frame's bottleneck.
   uncached,
   nested containers go super-linear (the classic exponential blowup). The
   protocol bakes the fix in: `compute_cached_layout` around every
-  generated-box dispatch, per-node slots
-  (`cache::Cache`, embeddable, fixed-size, allocation-free —
-  `MEASURE_CACHE_SLOTS = 8` measurement slots + 1 layout slot). Shape-aware
-  replacement is implemented; probe-trace validation and tuning remain L4
-  work. The key is the **complete
+  generated-box dispatch, per-node slots (`cache::Cache`, embeddable, with
+  four measurement slots inline and an uncommon spill capped at
+  `MEASURE_CACHE_SLOTS = 8`, plus one layout slot). Shape-aware replacement is
+  implemented; probe-trace validation and tuning remain L4 work. The key is
+  the **complete
   `LayoutInput`** — `goal` distinguishes side-effect-free measurements
   (including their requested axes) from geometry commits, `sizing_mode`
   controls whether content-size probes ignore the node's own

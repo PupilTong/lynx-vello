@@ -6,125 +6,67 @@ use core::cmp::Ordering;
 
 use stylo::computed_values::{box_sizing, direction, linear_direction};
 use stylo::values::computed::{
-    AspectRatio, ContentDistribution, Inset, ItemPlacement, LengthPercentage, Margin, MaxSize,
-    PositionProperty, SelfAlignment, Size as StyleSize,
+    ContentDistribution, Inset, ItemPlacement, LengthPercentage, Margin, PositionProperty,
+    SelfAlignment,
 };
-use stylo::values::generics::position::PreferredRatio;
 use stylo::values::specified::align::AlignFlags;
 
+use super::single_axis::{
+    FlowAxes as LinearAxes, flow_end, flow_start, flow_to_physical, measure_child, set_flow_end,
+    set_flow_start,
+};
 use super::util::{
-    ResolvedContainerBox, ResolvedItemBox, accumulate_scrollable_overflow, apply_aspect_ratio,
-    auto_edges_to_zero, clamp_axis, own_scrollable_overflow, resolve_container_box, resolve_insets,
-    resolve_item_box, resolve_length_percentage, resolve_margins, resolve_padding,
+    Axis, EdgeMask, ItemGeometry, ItemKey as LayoutItemKey, OrderedItem, ResolvedContainerBox,
+    accumulate_scrollable_overflow, apply_aspect_ratio, auto_edges_to_zero, box_inset_size,
+    clamp_axis, own_scrollable_overflow, relative_offset, resolve_container_box, resolve_insets,
+    resolve_intrinsic, resolve_item_geometry, resolve_margins, resolve_padding,
 };
 use super::{compute_absolute_layout_with_static_position, hide_subtree, measure_absolute_layout};
 use crate::geometry::{Edges, Point, Size};
 use crate::style::containment::size_containment;
-use crate::style::{Contain, CoreStyle, LinearContainerStyle, LinearItemStyle, Overflow};
+use crate::style::{Contain, CoreStyle};
 use crate::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutNode, LayoutOutput, RequestedAxis,
     SizingMode,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Axis {
-    Horizontal,
-    Vertical,
-}
-
-impl Axis {
-    #[inline]
-    fn size<T: Copy>(self, size: Size<T>) -> T {
-        match self {
-            Self::Horizontal => size.width,
-            Self::Vertical => size.height,
-        }
-    }
-
-    #[inline]
-    fn set_size<T>(self, size: &mut Size<T>, value: T) {
-        match self {
-            Self::Horizontal => size.width = value,
-            Self::Vertical => size.height = value,
-        }
-    }
-
-    #[inline]
-    fn point<T: Copy>(self, point: Point<T>) -> T {
-        match self {
-            Self::Horizontal => point.x,
-            Self::Vertical => point.y,
-        }
-    }
-
-    #[inline]
-    fn set_point<T>(self, point: &mut Point<T>, value: T) {
-        match self {
-            Self::Horizontal => point.x = value,
-            Self::Vertical => point.y = value,
-        }
-    }
-}
-
 /// Main/cross mapping. Scratch coordinates remain flow-relative and are
 /// converted to physical coordinates only when geometry is exported.
-#[derive(Debug, Clone, Copy)]
-struct LinearAxes {
-    main: Axis,
-    cross: Axis,
-    main_reverse: bool,
-    cross_reverse: bool,
-}
-
-impl LinearAxes {
-    #[inline]
-    fn new(linear_direction: linear_direction::T, inline_direction: direction::T) -> Self {
-        let horizontal = matches!(
-            linear_direction,
-            linear_direction::T::Row | linear_direction::T::RowReverse
-        );
-        let reverse = matches!(
-            linear_direction,
-            linear_direction::T::RowReverse | linear_direction::T::ColumnReverse
-        );
-        let rtl = inline_direction == direction::T::Rtl;
-        Self {
-            main: if horizontal {
-                Axis::Horizontal
-            } else {
-                Axis::Vertical
-            },
-            cross: if horizontal {
-                Axis::Vertical
-            } else {
-                Axis::Horizontal
-            },
-            main_reverse: reverse ^ (horizontal && rtl),
-            cross_reverse: !horizontal && rtl,
-        }
+fn linear_axes(
+    linear_direction: linear_direction::T,
+    inline_direction: direction::T,
+) -> LinearAxes {
+    let horizontal = matches!(
+        linear_direction,
+        linear_direction::T::Row | linear_direction::T::RowReverse
+    );
+    let reverse = matches!(
+        linear_direction,
+        linear_direction::T::RowReverse | linear_direction::T::ColumnReverse
+    );
+    let rtl = inline_direction == direction::T::Rtl;
+    let main = if horizontal {
+        Axis::Horizontal
+    } else {
+        Axis::Vertical
+    };
+    let main_base_reverse = horizontal && rtl;
+    let cross_base_reverse = !horizontal && rtl;
+    LinearAxes {
+        main,
+        cross: main.other(),
+        main_reverse: reverse ^ main_base_reverse,
+        cross_reverse: cross_base_reverse,
+        base: (),
     }
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ItemKey<N> {
-    node: N,
-    document_index: usize,
-    css_order: i32,
-    layout_order: u32,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum NonFlowItem<N> {
-    Hidden {
-        node: N,
-        document_index: usize,
-    },
-    Absolute {
-        key: ItemKey<N>,
-        position: PositionProperty,
-        gravity: AlignFlags,
-        static_axes: Size<bool>,
-    },
+struct AbsoluteItem<N> {
+    key: OrderedItem<N>,
+    position: PositionProperty,
+    gravity: AlignFlags,
+    static_axes: Size<bool>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -173,36 +115,17 @@ impl LinearItemFlags {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct LinearItemSeed<N> {
-    key: ItemKey<N>,
-    flags: LinearItemFlags,
-}
-
 /// One allocation-friendly scratch record per in-flow item. Raw style stays
 /// behind the node handle — immutable for the layout epoch — and is
 /// re-fetched only for intrinsic probes or a cyclic percentage re-resolution.
 #[derive(Debug)]
 #[allow(clippy::struct_excessive_bools)]
 struct LinearItem<N> {
-    key: ItemKey<N>,
+    geometry: ItemGeometry,
+    key: OrderedItem<N>,
     gravity: AlignFlags,
     weight: f32,
-    size_is_auto: Size<bool>,
-    size_is_intrinsic: Size<bool>,
-    has_intrinsic_size: bool,
-    preferred_size: Size<Option<f32>>,
-    preferred_size_is_definite: Size<bool>,
-    min_size: Size<Option<f32>>,
-    max_size: Size<Option<f32>>,
-    margin: Edges<f32>,
-    margin_auto: Edges<bool>,
-    padding: Edges<f32>,
-    border: Edges<f32>,
-    overflow: Point<Overflow>,
     relative_offset: Point<f32>,
-    box_sizing: box_sizing::T,
-    aspect_ratio: Option<f32>,
     main_size: f32,
     cross_size: f32,
     main_position: f32,
@@ -213,82 +136,7 @@ struct LinearItem<N> {
     violation: f32,
     flags: LinearItemFlags,
 }
-
-#[inline]
-fn size_from_axes<T: Copy>(axes: LinearAxes, main: T, cross: T) -> Size<T> {
-    match axes.main {
-        Axis::Horizontal => Size::new(main, cross),
-        Axis::Vertical => Size::new(cross, main),
-    }
-}
-
-#[inline]
-fn physical_start<T: Copy>(edges: Edges<T>, axis: Axis) -> T {
-    match axis {
-        Axis::Horizontal => edges.left,
-        Axis::Vertical => edges.top,
-    }
-}
-
-#[inline]
-fn physical_end<T: Copy>(edges: Edges<T>, axis: Axis) -> T {
-    match axis {
-        Axis::Horizontal => edges.right,
-        Axis::Vertical => edges.bottom,
-    }
-}
-
-#[inline]
-fn axis_sum(edges: Edges<f32>, axis: Axis) -> f32 {
-    physical_start(edges, axis) + physical_end(edges, axis)
-}
-
-#[inline]
-fn flow_start<T: Copy>(edges: Edges<T>, axis: Axis, reverse: bool) -> T {
-    if reverse {
-        physical_end(edges, axis)
-    } else {
-        physical_start(edges, axis)
-    }
-}
-
-#[inline]
-fn flow_end<T: Copy>(edges: Edges<T>, axis: Axis, reverse: bool) -> T {
-    if reverse {
-        physical_start(edges, axis)
-    } else {
-        physical_end(edges, axis)
-    }
-}
-
-#[inline]
-fn set_flow_start(edges: &mut Edges<f32>, axis: Axis, reverse: bool, value: f32) {
-    match (axis, reverse) {
-        (Axis::Horizontal, false) => edges.left = value,
-        (Axis::Horizontal, true) => edges.right = value,
-        (Axis::Vertical, false) => edges.top = value,
-        (Axis::Vertical, true) => edges.bottom = value,
-    }
-}
-
-#[inline]
-fn set_flow_end(edges: &mut Edges<f32>, axis: Axis, reverse: bool, value: f32) {
-    match (axis, reverse) {
-        (Axis::Horizontal, false) => edges.right = value,
-        (Axis::Horizontal, true) => edges.left = value,
-        (Axis::Vertical, false) => edges.bottom = value,
-        (Axis::Vertical, true) => edges.top = value,
-    }
-}
-
-#[inline]
-fn flow_to_physical(flow: f32, box_size: f32, container_size: f32, reverse: bool) -> f32 {
-    if reverse {
-        container_size - flow - box_size
-    } else {
-        flow
-    }
-}
+super::util::impl_item_geometry!(LinearItem);
 
 fn map_cross_flags(flags: AlignFlags, axes: LinearAxes) -> AlignFlags {
     if flags == AlignFlags::STRETCH || flags == AlignFlags::CENTER {
@@ -378,97 +226,8 @@ fn inset_depends_on_basis(value: &Inset) -> bool {
 }
 
 #[inline]
-fn relative_offset(inset: Edges<Option<f32>>, direction: direction::T) -> Point<f32> {
-    let x = match (inset.left, inset.right) {
-        (Some(_), Some(right)) if direction == direction::T::Rtl => -right,
-        (Some(left), _) => left,
-        (None, Some(right)) => -right,
-        (None, None) => 0.0,
-    };
-    let y = inset.top.unwrap_or_else(|| -inset.bottom.unwrap_or(0.0));
-    Point::new(x, y)
-}
-
-#[inline]
-fn padding_border_size(padding: Edges<f32>, border: Edges<f32>) -> Size<f32> {
-    Size::new(
-        padding.horizontal_sum() + border.horizontal_sum(),
-        padding.vertical_sum() + border.vertical_sum(),
-    )
-}
-
-#[inline]
-fn used_aspect_ratio(value: AspectRatio) -> Option<f32> {
-    match value.ratio {
-        PreferredRatio::None => None,
-        PreferredRatio::Ratio(ratio) => (!ratio.is_degenerate()).then(|| ratio.0.0 / ratio.1.0),
-    }
-}
-
-#[inline]
-fn style_size_is_auto(value: &StyleSize) -> bool {
-    match value {
-        StyleSize::Auto
-        | StyleSize::FitContent
-        | StyleSize::Stretch
-        | StyleSize::WebkitFillAvailable => true,
-        StyleSize::LengthPercentage(_)
-        | StyleSize::MaxContent
-        | StyleSize::MinContent
-        | StyleSize::FitContentFunction(_) => false,
-        StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor sizing is pref-dead under the lynx feature")
-        }
-    }
-}
-
-#[inline]
-fn style_size_is_intrinsic(value: &StyleSize) -> bool {
-    matches!(
-        value,
-        StyleSize::MinContent | StyleSize::MaxContent | StyleSize::FitContentFunction(_)
-    )
-}
-
-#[inline]
-fn max_size_is_intrinsic(value: &MaxSize) -> bool {
-    matches!(
-        value,
-        MaxSize::MinContent | MaxSize::MaxContent | MaxSize::FitContentFunction(_)
-    )
-}
-
-#[inline]
-fn style_size_axis_is_definite(value: &StyleSize, parent_basis: Option<f32>) -> bool {
-    match value {
-        StyleSize::LengthPercentage(lp) => !lp_depends_on_basis(&lp.0) || parent_basis.is_some(),
-        _ => false,
-    }
-}
-
-#[inline]
-fn size_definiteness(
-    size: Size<&StyleSize>,
-    parent_size: Size<Option<f32>>,
-    aspect_ratio: Option<f32>,
-) -> Size<bool> {
-    let mut definite = Size::new(
-        style_size_axis_is_definite(size.width, parent_size.width),
-        style_size_axis_is_definite(size.height, parent_size.height),
-    );
-    if aspect_ratio.is_some() {
-        if definite.width {
-            definite.height = true;
-        } else if definite.height {
-            definite.width = true;
-        }
-    }
-    definite
-}
-
-#[inline]
 fn initial_item_flags(
-    style: &impl LinearItemStyle,
+    style: &impl CoreStyle,
     inline_basis: Option<f32>,
     nudges: bool,
 ) -> LinearItemFlags {
@@ -509,8 +268,9 @@ fn initial_item_flags(
 }
 
 fn resolve_item<N>(
-    style: impl LinearItemStyle,
-    seed: LinearItemSeed<N>,
+    style: impl CoreStyle,
+    key: OrderedItem<N>,
+    flags: LinearItemFlags,
     percentage_basis: Size<Option<f32>>,
     align_items: ItemPlacement,
     axes: LinearAxes,
@@ -518,7 +278,6 @@ fn resolve_item<N>(
 ) -> LinearItem<N>
 where
     N: LayoutNode,
-    N::Style: LinearContainerStyle + LinearItemStyle,
 {
     let weight = style.linear_weight().0;
     debug_assert!(
@@ -527,59 +286,18 @@ where
     );
     let direction = style.direction();
     let gravity = computed_cross_gravity(style.align_self(), align_items, axes);
-    let ResolvedItemBox {
-        raw_size,
-        raw_min_size,
-        raw_max_size,
-        aspect_ratio,
-        box_sizing,
-        preferred_size,
-        min_size,
-        max_size,
-        margin,
-        margin_auto,
-        padding,
-        border,
-        inset,
-        overflow,
-        ..
-    } = resolve_item_box(&style, percentage_basis);
+    let geometry = resolve_item_geometry(&style, percentage_basis);
     let relative_offset = if nudges {
-        relative_offset(inset, direction)
+        relative_offset(resolve_insets(style.inset(), percentage_basis), direction)
     } else {
         Point::ZERO
     };
-
     LinearItem {
-        key: seed.key,
+        geometry,
+        key,
         gravity,
         weight,
-        size_is_auto: Size::new(
-            style_size_is_auto(raw_size.width),
-            style_size_is_auto(raw_size.height),
-        ),
-        size_is_intrinsic: Size::new(
-            style_size_is_intrinsic(raw_size.width),
-            style_size_is_intrinsic(raw_size.height),
-        ),
-        has_intrinsic_size: style_size_is_intrinsic(raw_size.width)
-            || style_size_is_intrinsic(raw_size.height)
-            || style_size_is_intrinsic(raw_min_size.width)
-            || style_size_is_intrinsic(raw_min_size.height)
-            || max_size_is_intrinsic(raw_max_size.width)
-            || max_size_is_intrinsic(raw_max_size.height),
-        preferred_size,
-        preferred_size_is_definite: size_definiteness(raw_size, percentage_basis, aspect_ratio),
-        min_size,
-        max_size,
-        margin,
-        margin_auto,
-        padding,
-        border,
-        overflow,
         relative_offset,
-        box_sizing,
-        aspect_ratio,
         main_size: 0.0,
         cross_size: 0.0,
         main_position: 0.0,
@@ -588,13 +306,13 @@ where
         main_size_is_definite: false,
         cross_size_is_definite: false,
         violation: 0.0,
-        flags: seed.flags,
+        flags,
     }
 }
 
 #[inline]
 fn refresh_item_edges<N>(
-    style: impl LinearItemStyle,
+    style: impl CoreStyle,
     item: &mut LinearItem<N>,
     percentage_basis: Size<Option<f32>>,
 ) {
@@ -605,61 +323,8 @@ fn refresh_item_edges<N>(
         let margin_value = style.margin();
         let optional_margin = resolve_margins(margin_value, percentage_basis.width);
         item.margin = auto_edges_to_zero(optional_margin);
-        item.margin_auto = margin_value.map(Margin::is_auto);
+        item.margin_auto = EdgeMask::from_margins(margin_value);
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn child_measurement<N>(
-    node: N,
-    known_dimensions: Size<Option<f32>>,
-    definite_dimensions: Size<bool>,
-    parent_size: Size<Option<f32>>,
-    available_space: Size<AvailableSpace>,
-    sizing_mode: SizingMode,
-    requested_axis: RequestedAxis,
-) -> LayoutOutput
-where
-    N: LayoutNode,
-    N::Style: LinearContainerStyle + LinearItemStyle,
-{
-    let mut input = LayoutInput::measure(
-        known_dimensions,
-        parent_size,
-        available_space,
-        requested_axis,
-    );
-    input.definite_dimensions = definite_dimensions;
-    input.sizing_mode = sizing_mode;
-    node.compute_layout(input)
-}
-
-#[inline]
-fn needs_min_content(size: &StyleSize, min_size: &StyleSize, max_size: &MaxSize) -> bool {
-    matches!(
-        size,
-        StyleSize::MinContent | StyleSize::FitContentFunction(_)
-    ) || matches!(
-        min_size,
-        StyleSize::MinContent | StyleSize::FitContentFunction(_)
-    ) || matches!(
-        max_size,
-        MaxSize::MinContent | MaxSize::FitContentFunction(_)
-    )
-}
-
-#[inline]
-fn needs_max_content(size: &StyleSize, min_size: &StyleSize, max_size: &MaxSize) -> bool {
-    matches!(
-        size,
-        StyleSize::MaxContent | StyleSize::FitContentFunction(_)
-    ) || matches!(
-        min_size,
-        StyleSize::MaxContent | StyleSize::FitContentFunction(_)
-    ) || matches!(
-        max_size,
-        MaxSize::MaxContent | MaxSize::FitContentFunction(_)
-    )
 }
 
 fn intrinsic_measurement<N>(
@@ -670,9 +335,8 @@ fn intrinsic_measurement<N>(
 ) -> LayoutOutput
 where
     N: LayoutNode,
-    N::Style: LinearContainerStyle + LinearItemStyle,
 {
-    let inset = padding_border_size(item.padding, item.border);
+    let inset = box_inset_size(item.padding, item.border);
     let resolved_known = Size::new(
         item.preferred_size
             .width
@@ -693,8 +357,8 @@ where
             .flatten(),
     );
     let definite = Size::new(
-        !requested.width && item.preferred_size_is_definite.width && known.width.is_some(),
-        !requested.height && item.preferred_size_is_definite.height && known.height.is_some(),
+        !requested.width && item.preferred_definite.width && known.width.is_some(),
+        !requested.height && item.preferred_definite.height && known.height.is_some(),
     );
     let available = Size::new(
         if requested.width {
@@ -718,7 +382,7 @@ where
         (true, true) => RequestedAxis::Both,
         (false, false) => unreachable!("an intrinsic probe must request at least one axis"),
     };
-    child_measurement(
+    measure_child(
         item.key.node,
         known,
         definite,
@@ -729,85 +393,12 @@ where
     )
 }
 
-#[inline]
-fn fit_content_axis_value(
-    limit: &LengthPercentage,
-    minimum: f32,
-    maximum: f32,
-    basis: Option<f32>,
-    inset: f32,
-    box_sizing: box_sizing::T,
-) -> f32 {
-    let mut limit = resolve_length_percentage(limit, basis).unwrap_or(maximum);
-    if box_sizing == box_sizing::T::ContentBox {
-        limit += inset;
-    }
-    maximum.min(limit.max(minimum))
-}
-
-#[inline]
-#[allow(clippy::too_many_arguments)]
-fn intrinsic_axis_value(
-    value: &StyleSize,
-    quantitative: Option<f32>,
-    minimum: f32,
-    maximum: f32,
-    basis: Option<f32>,
-    inset: f32,
-    box_sizing: box_sizing::T,
-) -> Option<f32> {
-    match value {
-        StyleSize::MinContent => Some(minimum),
-        StyleSize::MaxContent => Some(maximum),
-        StyleSize::FitContentFunction(limit) => Some(fit_content_axis_value(
-            &limit.0, minimum, maximum, basis, inset, box_sizing,
-        )),
-        StyleSize::Auto
-        | StyleSize::LengthPercentage(_)
-        | StyleSize::FitContent
-        | StyleSize::Stretch
-        | StyleSize::WebkitFillAvailable => quantitative,
-        StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor sizing is pref-dead under the lynx feature")
-        }
-    }
-}
-
-#[inline]
-#[allow(clippy::too_many_arguments)]
-fn intrinsic_max_axis_value(
-    value: &MaxSize,
-    quantitative: Option<f32>,
-    minimum: f32,
-    maximum: f32,
-    basis: Option<f32>,
-    inset: f32,
-    box_sizing: box_sizing::T,
-) -> Option<f32> {
-    match value {
-        MaxSize::MinContent => Some(minimum),
-        MaxSize::MaxContent => Some(maximum),
-        MaxSize::FitContentFunction(limit) => Some(fit_content_axis_value(
-            &limit.0, minimum, maximum, basis, inset, box_sizing,
-        )),
-        MaxSize::None
-        | MaxSize::LengthPercentage(_)
-        | MaxSize::FitContent
-        | MaxSize::Stretch
-        | MaxSize::WebkitFillAvailable => quantitative,
-        MaxSize::AnchorSizeFunction(_) | MaxSize::AnchorContainingCalcFunction(_) => {
-            unreachable!("anchor sizing is pref-dead under the lynx feature")
-        }
-    }
-}
-
 #[allow(clippy::too_many_lines)]
 fn resolve_intrinsic_sizes<N>(item: &mut LinearItem<N>, percentage_basis: Size<Option<f32>>)
 where
     N: LayoutNode,
-    N::Style: LinearContainerStyle + LinearItemStyle,
 {
-    if !item.has_intrinsic_size {
+    if !item.intrinsic.has_intrinsic() {
         return;
     }
     let style = item.key.node.style();
@@ -815,12 +406,12 @@ where
     let min_size = style.min_size();
     let max_size = style.max_size();
     let need_min = Size::new(
-        needs_min_content(size.width, min_size.width, max_size.width),
-        needs_min_content(size.height, min_size.height, max_size.height),
+        item.intrinsic.needs_min_content(Axis::Horizontal),
+        item.intrinsic.needs_min_content(Axis::Vertical),
     );
     let need_max = Size::new(
-        needs_max_content(size.width, min_size.width, max_size.width),
-        needs_max_content(size.height, min_size.height, max_size.height),
+        item.intrinsic.needs_max_content(Axis::Horizontal),
+        item.intrinsic.needs_max_content(Axis::Vertical),
     );
     let min_content = if need_min.width || need_min.height {
         intrinsic_measurement(item, percentage_basis, need_min, AvailableSpace::MinContent).size
@@ -832,68 +423,44 @@ where
     } else {
         Size::ZERO
     };
-    let inset = padding_border_size(item.padding, item.border);
+    let inset = box_inset_size(item.padding, item.border);
 
-    item.preferred_size = Size::new(
-        intrinsic_axis_value(
-            size.width,
-            item.preferred_size.width,
-            min_content.width,
-            max_content.width,
-            percentage_basis.width,
-            inset.width,
-            item.box_sizing,
-        ),
-        intrinsic_axis_value(
-            size.height,
-            item.preferred_size.height,
-            min_content.height,
-            max_content.height,
-            percentage_basis.height,
-            inset.height,
-            item.box_sizing,
-        ),
-    );
-    item.min_size = Size::new(
-        intrinsic_axis_value(
-            min_size.width,
-            item.min_size.width,
-            min_content.width,
-            max_content.width,
-            percentage_basis.width,
-            inset.width,
-            item.box_sizing,
-        ),
-        intrinsic_axis_value(
-            min_size.height,
-            item.min_size.height,
-            min_content.height,
-            max_content.height,
-            percentage_basis.height,
-            inset.height,
-            item.box_sizing,
-        ),
-    );
-    item.max_size = Size::new(
-        intrinsic_max_axis_value(
-            max_size.width,
-            item.max_size.width,
-            min_content.width,
-            max_content.width,
-            percentage_basis.width,
-            inset.width,
-            item.box_sizing,
-        ),
-        intrinsic_max_axis_value(
-            max_size.height,
-            item.max_size.height,
-            min_content.height,
-            max_content.height,
-            percentage_basis.height,
-            inset.height,
-            item.box_sizing,
-        ),
-    );
+    macro_rules! resolve_axis {
+        ($field:ident, $axis:expr) => {
+            item.preferred_size.$field = resolve_intrinsic(
+                item.intrinsic.preferred($axis),
+                size.$field,
+                item.preferred_size.$field,
+                Some(min_content.$field),
+                Some(max_content.$field),
+                percentage_basis.$field,
+                inset.$field,
+                item.box_sizing,
+            );
+            item.min_size.$field = resolve_intrinsic(
+                item.intrinsic.minimum($axis),
+                min_size.$field,
+                item.min_size.$field,
+                Some(min_content.$field),
+                Some(max_content.$field),
+                percentage_basis.$field,
+                inset.$field,
+                item.box_sizing,
+            );
+            item.max_size.$field = resolve_intrinsic(
+                item.intrinsic.maximum($axis),
+                max_size.$field,
+                item.max_size.$field,
+                Some(min_content.$field),
+                Some(max_content.$field),
+                percentage_basis.$field,
+                inset.$field,
+                item.box_sizing,
+            );
+        };
+    }
+    resolve_axis!(width, Axis::Horizontal);
+    resolve_axis!(height, Axis::Vertical);
     item.preferred_size = apply_aspect_ratio(item.preferred_size, item.aspect_ratio);
 }
 
@@ -901,13 +468,12 @@ where
 fn ratio_cross_size<N>(item: &LinearItem<N>, axes: LinearAxes, forced_main: f32) -> Option<f32>
 where
     N: LayoutNode,
-    N::Style: LinearContainerStyle + LinearItemStyle,
 {
     let ratio = item.aspect_ratio?;
     if !ratio.is_finite() || ratio <= 0.0 || !axes.cross.size(item.size_is_auto) {
         return None;
     }
-    let inset = padding_border_size(item.padding, item.border);
+    let inset = box_inset_size(item.padding, item.border);
     let sizing_main = if item.box_sizing == box_sizing::T::ContentBox {
         (forced_main - axes.main.size(inset)).max(0.0)
     } else {
@@ -978,15 +544,15 @@ fn measure_item<N>(
     constraint_inner_size: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
     forced_main: Option<f32>,
+    needs_probe_baseline: bool,
 ) where
     N: LayoutNode,
-    N::Style: LinearContainerStyle + LinearItemStyle,
 {
-    let inset = padding_border_size(item.padding, item.border);
+    let inset = box_inset_size(item.padding, item.border);
     let main_floor = axes.main.size(inset);
     let cross_floor = axes.cross.size(inset);
     let mut known = item.preferred_size;
-    let mut known_definite = item.preferred_size_is_definite;
+    let mut known_definite = item.preferred_definite;
 
     if let Some(main) = forced_main {
         axes.main.set_size(&mut known, Some(main));
@@ -1036,11 +602,10 @@ fn measure_item<N>(
         && (item.gravity == AlignFlags::STRETCH
             || (item.gravity == AlignFlags::NORMAL
                 && axes.cross.size(item.size_is_auto)
-                && !axes.cross.size(item.size_is_intrinsic)
+                && !item.intrinsic.preferred(axes.cross).is_intrinsic()
                 && !ratio_fixed_cross));
     if should_stretch {
-        let stretched =
-            (cross_constraint.unwrap_or(0.0) - axis_sum(item.margin, axes.cross)).max(0.0);
+        let stretched = (cross_constraint.unwrap_or(0.0) - axes.cross.sum(item.margin)).max(0.0);
         axes.cross.set_size(
             &mut known,
             Some(clamp_axis(
@@ -1053,12 +618,21 @@ fn measure_item<N>(
         axes.cross.set_size(&mut known_definite, true);
     }
 
+    if !needs_probe_baseline && known.width.is_some() && known.height.is_some() {
+        let size = known.unwrap_or(Size::ZERO);
+        item.main_size = axes.main.size(size);
+        item.cross_size = axes.cross.size(size);
+        item.baseline = None;
+        item.main_size_is_definite = forced_main.is_some() || axes.main.size(known_definite);
+        item.cross_size_is_definite = axes.cross.size(known_definite);
+        return;
+    }
+
     let intrinsic_main_available = match axes.main.size(available_space) {
         AvailableSpace::MinContent => AvailableSpace::MinContent,
         AvailableSpace::Definite(_) | AvailableSpace::MaxContent => AvailableSpace::MaxContent,
     };
-    let child_available = size_from_axes(
-        axes,
+    let child_available = axes.main.pack(
         axes.main
             .size(known)
             .map_or(intrinsic_main_available, AvailableSpace::Definite),
@@ -1072,7 +646,7 @@ fn measure_item<N>(
             AvailableSpace::Definite,
         ),
     );
-    let output = child_measurement(
+    let output = measure_child(
         item.key.node,
         known,
         known_definite,
@@ -1104,18 +678,16 @@ fn measure_item<N>(
 fn outer_main<N>(item: &LinearItem<N>, axes: LinearAxes) -> f32
 where
     N: LayoutNode,
-    N::Style: LinearContainerStyle + LinearItemStyle,
 {
-    item.main_size + axis_sum(item.margin, axes.main)
+    item.main_size + axes.main.sum(item.margin)
 }
 
 #[inline]
 fn outer_cross<N>(item: &LinearItem<N>, axes: LinearAxes) -> f32
 where
     N: LayoutNode,
-    N::Style: LinearContainerStyle + LinearItemStyle,
 {
-    item.cross_size + axis_sum(item.margin, axes.cross)
+    item.cross_size + axes.cross.sum(item.margin)
 }
 
 fn distribute_weighted_items<N>(
@@ -1125,7 +697,6 @@ fn distribute_weighted_items<N>(
     weight_sum_override: f32,
 ) where
     N: LayoutNode,
-    N::Style: LinearContainerStyle + LinearItemStyle,
 {
     let mut total_weight = 0.0_f32;
     let mut fixed_outer = 0.0_f32;
@@ -1134,7 +705,7 @@ fn distribute_weighted_items<N>(
     for item in &mut *items {
         if item.weight > 0.0 {
             total_weight += item.weight;
-            weighted_margins += axis_sum(item.margin, axes.main);
+            weighted_margins += axes.main.sum(item.margin);
             weighted_count = weighted_count.saturating_add(1);
             item.main_size = 0.0;
             item.flags.set_frozen(false);
@@ -1176,9 +747,7 @@ fn distribute_weighted_items<N>(
             } else {
                 0.0
             };
-            let floor = axes
-                .main
-                .size(padding_border_size(item.padding, item.border));
+            let floor = axes.main.size(box_inset_size(item.padding, item.border));
             let clamped = clamp_axis(
                 tentative,
                 axes.main.size(item.min_size),
@@ -1232,9 +801,9 @@ fn size_items<N>(
     constraint_inner_size: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
     weight_sum: f32,
+    needs_probe_baseline: bool,
 ) where
     N: LayoutNode,
-    N::Style: LinearContainerStyle + LinearItemStyle,
 {
     let constrained_main = axes.main.size(constraint_inner_size);
     for item in items.iter_mut() {
@@ -1247,6 +816,7 @@ fn size_items<N>(
                 constraint_inner_size,
                 available_space,
                 None,
+                needs_probe_baseline,
             );
         }
     }
@@ -1262,6 +832,7 @@ fn size_items<N>(
                 constraint_inner_size,
                 available_space,
                 Some(resolved_main),
+                needs_probe_baseline,
             );
         }
     }
@@ -1271,7 +842,6 @@ fn size_items<N>(
 fn natural_content_size<N>(items: &[LinearItem<N>], axes: LinearAxes) -> (Size<f32>, f32)
 where
     N: LayoutNode,
-    N::Style: LinearContainerStyle + LinearItemStyle,
 {
     let (main, cross) = items.iter().fold((0.0_f32, 0.0_f32), |acc, item| {
         (
@@ -1279,7 +849,35 @@ where
             acc.1.max(outer_cross(item, axes)),
         )
     });
-    (size_from_axes(axes, main, cross), main)
+    (axes.main.pack(main, cross), main)
+}
+
+#[inline]
+fn completed_outer_size(
+    outer: Size<Option<f32>>,
+    natural: Size<f32>,
+    inset: Size<f32>,
+    min: Size<Option<f32>>,
+    max: Size<Option<f32>>,
+) -> Size<f32> {
+    Size::new(
+        outer.width.unwrap_or_else(|| {
+            clamp_axis(
+                natural.width + inset.width,
+                min.width,
+                max.width,
+                inset.width,
+            )
+        }),
+        outer.height.unwrap_or_else(|| {
+            clamp_axis(
+                natural.height + inset.height,
+                min.height,
+                max.height,
+                inset.height,
+            )
+        }),
+    )
 }
 
 #[inline]
@@ -1318,7 +916,6 @@ fn position_items<N>(
     used_main: f32,
 ) where
     N: LayoutNode,
-    N::Style: LinearContainerStyle + LinearItemStyle,
 {
     let free_main = axes.main.size(inner_size) - used_main;
     let (leading, between) = main_axis_distribution(main_gravity, free_main, items.len());
@@ -1333,10 +930,10 @@ fn position_items<N>(
             cursor += between;
         }
 
-        let start_auto = flow_start(item.margin_auto, axes.cross, axes.cross_reverse);
-        let end_auto = flow_end(item.margin_auto, axes.cross, axes.cross_reverse);
+        let start_auto = item.margin_auto.flow_start(axes.cross, axes.cross_reverse);
+        let end_auto = item.margin_auto.flow_end(axes.cross, axes.cross_reverse);
         let free_cross =
-            axes.cross.size(inner_size) - item.cross_size - axis_sum(item.margin, axes.cross);
+            axes.cross.size(inner_size) - item.cross_size - axes.cross.sum(item.margin);
         if start_auto || end_auto {
             if free_cross > 0.0 {
                 match (start_auto, end_auto) {
@@ -1394,12 +991,12 @@ fn absolute_static_position(
     main_gravity: AlignFlags,
 ) -> Point<f32> {
     let main_size = axes.main.size(size);
-    let free_main = axes.main.size(containing_size) - main_size - axis_sum(margin, axes.main);
+    let free_main = axes.main.size(containing_size) - main_size - axes.main.sum(margin);
     let (leading, _) = main_axis_distribution(main_gravity, free_main, 1);
     let main_position = leading + flow_start(margin, axes.main, axes.main_reverse);
 
     let cross_size = axes.cross.size(size);
-    let free_cross = axes.cross.size(containing_size) - cross_size - axis_sum(margin, axes.cross);
+    let free_cross = axes.cross.size(containing_size) - cross_size - axes.cross.sum(margin);
     let cross_position = cross_alignment_offset(gravity, free_cross)
         + flow_start(margin, axes.cross, axes.cross_reverse);
 
@@ -1429,7 +1026,6 @@ fn item_location<N>(
 ) -> Point<f32>
 where
     N: LayoutNode,
-    N::Style: LinearContainerStyle + LinearItemStyle,
 {
     let main = flow_to_physical(
         item.main_position,
@@ -1457,7 +1053,6 @@ fn container_baseline<N>(
 ) -> Option<f32>
 where
     N: LayoutNode,
-    N::Style: LinearContainerStyle + LinearItemStyle,
 {
     if axes.main == Axis::Horizontal {
         items
@@ -1484,23 +1079,20 @@ fn commit_in_flow<N>(
 ) -> Size<f32>
 where
     N: LayoutNode,
-    N::Style: LinearContainerStyle + LinearItemStyle,
 {
     let parent_size = inner_size.map(Some);
     let mut content_size = outer_size;
     for item in items {
-        let target_size = size_from_axes(axes, item.main_size, item.cross_size);
+        let target_size = axes.main.pack(item.main_size, item.cross_size);
         let mut input = LayoutInput::commit(
             target_size.map(Some),
             parent_size,
             target_size.map(AvailableSpace::Definite),
         );
         input.sizing_mode = SizingMode::IgnoreSizeStyles;
-        input.definite_dimensions = size_from_axes(
-            axes,
-            item.main_size_is_definite,
-            item.cross_size_is_definite,
-        );
+        input.definite_dimensions = axes
+            .main
+            .pack(item.main_size_is_definite, item.cross_size_is_definite);
         let output = item.key.node.compute_layout(input);
         item.baseline = output.first_baselines.y;
 
@@ -1529,28 +1121,10 @@ where
     content_size
 }
 
-#[inline]
-fn measure_absolute_static_box<N>(
-    node: N,
-    containing_block: Size<f32>,
-    static_axes: Size<bool>,
-) -> Layout
-where
-    N: LayoutNode,
-    N::Style: LinearContainerStyle + LinearItemStyle,
-{
-    let requested_axis = match (static_axes.width, static_axes.height) {
-        (false, false) => return Layout::default(),
-        (true, false) => RequestedAxis::Horizontal,
-        (false, true) => RequestedAxis::Vertical,
-        (true, true) => RequestedAxis::Both,
-    };
-    measure_absolute_layout(node, containing_block, requested_axis)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn commit_non_in_flow_children<N>(
-    non_flow_items: &[NonFlowItem<N>],
+    hidden_items: &[LayoutItemKey<N>],
+    absolute_items: &[AbsoluteItem<N>],
     in_flow_items: &[LinearItem<N>],
     axes: LinearAxes,
     outer_size: Size<f32>,
@@ -1560,7 +1134,6 @@ fn commit_non_in_flow_children<N>(
 ) -> Size<f32>
 where
     N: LayoutNode,
-    N::Style: LinearContainerStyle + LinearItemStyle,
 {
     let padding_box_size = Size::new(
         (outer_size.width - border.horizontal_sum()).max(0.0),
@@ -1570,25 +1143,18 @@ where
     let mut absolute_before = 0usize;
     let mut in_flow_before = 0usize;
 
-    for non_flow in non_flow_items {
-        let (key, position, gravity, static_axes) = match *non_flow {
-            NonFlowItem::Hidden {
-                node,
-                document_index,
-            } => {
-                hide_subtree(node);
-                node.set_unrounded_layout(Layout::with_order(
-                    u32::try_from(document_index).unwrap_or(u32::MAX),
-                ));
-                continue;
-            }
-            NonFlowItem::Absolute {
-                key,
-                position,
-                gravity,
-                static_axes,
-            } => (key, position, gravity, static_axes),
-        };
+    for key in hidden_items {
+        hide_subtree(key.node);
+        key.node
+            .set_unrounded_layout(Layout::with_order(key.layout_order));
+    }
+    for item in absolute_items {
+        let AbsoluteItem {
+            key,
+            position,
+            gravity,
+            static_axes,
+        } = *item;
         let child = key.node;
         let document_index = key.document_index;
         while in_flow_before < in_flow_items.len()
@@ -1637,7 +1203,19 @@ where
                 child.set_unrounded_layout(layout);
             }
             PositionProperty::Fixed => {
-                let measured = measure_absolute_static_box(child, padding_box_size, static_axes);
+                let measured = match (static_axes.width, static_axes.height) {
+                    (false, false) => Layout::default(),
+                    (width, height) => measure_absolute_layout(
+                        child,
+                        padding_box_size,
+                        match (width, height) {
+                            (true, false) => RequestedAxis::Horizontal,
+                            (false, true) => RequestedAxis::Vertical,
+                            (true, true) => RequestedAxis::Both,
+                            (false, false) => unreachable!(),
+                        },
+                    ),
+                };
                 let static_position = absolute_static_position(
                     axes,
                     padding_box_size,
@@ -1659,12 +1237,11 @@ where
 pub fn compute_linear_layout<N>(node: N, input: LayoutInput) -> LayoutOutput
 where
     N: LayoutNode,
-    N::Style: LinearContainerStyle + LinearItemStyle,
 {
     let style = node.style();
     let size_containment = size_containment(&style);
     let layout_contained = style.containment().contains(Contain::LAYOUT);
-    let axes = LinearAxes::new(style.linear_direction(), style.direction());
+    let axes = linear_axes(style.linear_direction(), style.direction());
     let align_items = style.align_items();
     let main_gravity = computed_main_gravity(style.justify_content(), axes);
     let commits_layout = input.goal == LayoutGoal::Commit;
@@ -1673,14 +1250,10 @@ where
         weight_sum.is_finite() && weight_sum >= 0.0,
         "linear-weight-sum must be finite and non-negative"
     );
-    let container_aspect_ratio = used_aspect_ratio(style.aspect_ratio());
-    let container_box_sizing = style.box_sizing();
-    let style_definite = if input.sizing_mode == SizingMode::IgnoreSizeStyles {
-        Size::new(false, false)
-    } else {
-        size_definiteness(style.size(), input.parent_size, container_aspect_ratio)
-    };
     let ResolvedContainerBox {
+        preferred_definite: style_definite,
+        aspect_ratio: container_aspect_ratio,
+        box_sizing: container_box_sizing,
         padding,
         border,
         box_inset: container_inset,
@@ -1730,6 +1303,21 @@ where
             ));
         }
     }
+    if !commits_layout
+        && layout_contained
+        && (size_containment.is_some()
+            || (outer_size.width.is_some() && outer_size.height.is_some()))
+    {
+        let natural = size_containment.map_or(Size::ZERO, |intrinsic| {
+            Size::new(
+                intrinsic.width.unwrap_or(0.0),
+                intrinsic.height.unwrap_or(0.0),
+            )
+        });
+        let final_outer_size =
+            completed_outer_size(outer_size, natural, container_inset, min_size, max_size);
+        return LayoutOutput::new(final_outer_size, final_outer_size);
+    }
     let inner_size = Size::new(
         outer_size
             .width
@@ -1755,14 +1343,15 @@ where
     );
     let mut percentage_basis = definite_inner_size;
 
-    let child_count = node.child_count();
-    let mut items = Vec::with_capacity(child_count);
-    let mut non_flow_items = Vec::new();
+    let children = node.children();
+    let (lower, upper) = children.size_hint();
+    let mut items = Vec::with_capacity(upper.unwrap_or(lower));
+    let mut absolute_items = Vec::new();
+    let mut hidden_items = Vec::new();
     let mut has_nonzero_order = false;
     let mut has_box_basis_dependency = false;
     let mut has_relative_basis_dependency = false;
-    let mut absolute_count = 0usize;
-    for (document_index, child) in node.children().enumerate() {
+    for (document_index, child) in children.enumerate() {
         let child_style = child.style();
         let position = child_style.position();
         let is_absolute = matches!(
@@ -1771,9 +1360,9 @@ where
         );
         if child_style.display().is_none() {
             if commits_layout {
-                non_flow_items.push(NonFlowItem::Hidden {
+                hidden_items.push(LayoutItemKey {
                     node: child,
-                    document_index,
+                    layout_order: u32::try_from(document_index).unwrap_or(u32::MAX),
                 });
             }
             continue;
@@ -1781,8 +1370,8 @@ where
         if is_absolute {
             if commits_layout {
                 let inset = child_style.inset();
-                non_flow_items.push(NonFlowItem::Absolute {
-                    key: ItemKey {
+                absolute_items.push(AbsoluteItem {
+                    key: OrderedItem {
                         node: child,
                         document_index,
                         css_order: 0,
@@ -1795,7 +1384,6 @@ where
                         inset.top.is_auto() && inset.bottom.is_auto(),
                     ),
                 });
-                absolute_count = absolute_count.saturating_add(1);
             }
             continue;
         }
@@ -1805,19 +1393,17 @@ where
         let flags = initial_item_flags(&child_style, percentage_basis.width, nudges);
         let item = resolve_item(
             child_style,
-            LinearItemSeed {
-                key: ItemKey {
-                    node: child,
-                    document_index,
-                    css_order,
-                    layout_order: if commits_layout {
-                        u32::try_from(absolute_count).unwrap_or(u32::MAX)
-                    } else {
-                        0
-                    },
+            OrderedItem {
+                node: child,
+                document_index,
+                css_order,
+                layout_order: if commits_layout {
+                    u32::try_from(absolute_items.len()).unwrap_or(u32::MAX)
+                } else {
+                    0
                 },
-                flags,
             },
+            flags,
             percentage_basis,
             align_items,
             axes,
@@ -1828,19 +1414,14 @@ where
         items.push(item);
     }
     if has_nonzero_order {
-        items.sort_unstable_by(
-            |left, right| match left.key.css_order.cmp(&right.key.css_order) {
-                Ordering::Equal => left.key.document_index.cmp(&right.key.document_index),
-                ordering => ordering,
-            },
-        );
+        items.sort_unstable_by_key(|item| (item.key.css_order, item.key.document_index));
     }
     if commits_layout {
         for (in_flow_order, item) in items.iter_mut().enumerate() {
             let absolute_before = match item.key.css_order.cmp(&0) {
                 Ordering::Less => 0,
                 Ordering::Equal => usize::try_from(item.key.layout_order).unwrap_or(usize::MAX),
-                Ordering::Greater => absolute_count,
+                Ordering::Greater => absolute_items.len(),
             };
             item.key.layout_order =
                 u32::try_from(in_flow_order.saturating_add(absolute_before)).unwrap_or(u32::MAX);
@@ -1854,6 +1435,7 @@ where
         inner_size,
         inner_available_space,
         weight_sum,
+        !commits_layout && !layout_contained,
     );
     let (natural, used_main) = natural_content_size(&items, axes);
     let container_natural = match size_containment {
@@ -1863,23 +1445,13 @@ where
         ),
         None => natural,
     };
-    if outer_size.width.is_none() {
-        outer_size.width = Some(clamp_axis(
-            container_natural.width + container_inset.width,
-            min_size.width,
-            max_size.width,
-            container_inset.width,
-        ));
-    }
-    if outer_size.height.is_none() {
-        outer_size.height = Some(clamp_axis(
-            container_natural.height + container_inset.height,
-            min_size.height,
-            max_size.height,
-            container_inset.height,
-        ));
-    }
-    let final_outer_size = outer_size.unwrap_or(Size::ZERO);
+    let final_outer_size = completed_outer_size(
+        outer_size,
+        container_natural,
+        container_inset,
+        min_size,
+        max_size,
+    );
     let final_inner_size = Size::new(
         (final_outer_size.width - container_inset.width).max(0.0),
         (final_outer_size.height - container_inset.height).max(0.0),
@@ -1936,9 +1508,10 @@ where
         final_outer_size,
         content_origin,
     );
-    if !non_flow_items.is_empty() {
+    if !absolute_items.is_empty() || !hidden_items.is_empty() {
         content_size = commit_non_in_flow_children(
-            &non_flow_items,
+            &hidden_items,
+            &absolute_items,
             &items,
             axes,
             final_outer_size,
@@ -1963,7 +1536,9 @@ mod tests {
     use style_traits::values::specified::AllowedNumericType;
     use stylo::Zero;
     use stylo::values::computed::length_percentage::{CalcNode, ComputedLeaf};
-    use stylo::values::computed::{Display, Length, NonNegativeLengthPercentage, Percentage};
+    use stylo::values::computed::{
+        Display, Length, MaxSize, NonNegativeLengthPercentage, Percentage, Size as StyleSize,
+    };
     use stylo::values::generics::NonNegative;
 
     use super::*;
@@ -2033,8 +1608,6 @@ mod tests {
             self.padding.as_ref()
         }
     }
-
-    impl LinearItemStyle for DependencyStyle {}
 
     #[test]
     fn linear_item_scratch_stays_cache_conscious() {
@@ -2203,10 +1776,10 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn gravity_re_keying_matches_the_legacy_mappings() {
-        let ltr_column = LinearAxes::new(linear_direction::T::Column, direction::T::Ltr);
-        let rtl_column = LinearAxes::new(linear_direction::T::Column, direction::T::Rtl);
-        let ltr_row = LinearAxes::new(linear_direction::T::Row, direction::T::Ltr);
-        let ltr_row_reverse = LinearAxes::new(linear_direction::T::RowReverse, direction::T::Ltr);
+        let ltr_column = linear_axes(linear_direction::T::Column, direction::T::Ltr);
+        let rtl_column = linear_axes(linear_direction::T::Column, direction::T::Rtl);
+        let ltr_row = linear_axes(linear_direction::T::Row, direction::T::Ltr);
+        let ltr_row_reverse = linear_axes(linear_direction::T::RowReverse, direction::T::Ltr);
 
         assert_eq!(
             computed_main_gravity(ContentDistribution::normal(), ltr_column),

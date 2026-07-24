@@ -12,92 +12,144 @@ use stylo::values::specified::align::AlignFlags;
 
 use crate::geometry::{Edges, Point, Size};
 use crate::style::{Contain, CoreStyle};
-use crate::tree::{AvailableSpace, LayoutInput, SizingMode};
+use crate::tree::{AvailableSpace, LayoutInput, RequestedAxis, SizingMode};
 
+/// Physical-axis projection shared by formatting algorithms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Axis {
+    Horizontal,
+    Vertical,
+}
+
+macro_rules! axis_projection {
+    ($get:ident, $set:ident, $type:ident, $horizontal:ident, $vertical:ident) => {
+        #[inline]
+        pub(super) fn $get<T>(self, value: $type<T>) -> T {
+            match self {
+                Self::Horizontal => value.$horizontal,
+                Self::Vertical => value.$vertical,
+            }
+        }
+
+        #[inline]
+        pub(super) fn $set<T>(self, value: &mut $type<T>, component: T) {
+            match self {
+                Self::Horizontal => value.$horizontal = component,
+                Self::Vertical => value.$vertical = component,
+            }
+        }
+    };
+}
+
+impl Axis {
+    pub(super) const ALL: [Self; 2] = [Self::Horizontal, Self::Vertical];
+
+    #[inline]
+    pub(super) const fn other(self) -> Self {
+        match self {
+            Self::Horizontal => Self::Vertical,
+            Self::Vertical => Self::Horizontal,
+        }
+    }
+
+    axis_projection!(size, set_size, Size, width, height);
+    axis_projection!(point, set_point, Point, x, y);
+    axis_projection!(start, set_start, Edges, left, top);
+    axis_projection!(end, set_end, Edges, right, bottom);
+
+    #[inline]
+    pub(super) fn sum(self, edges: Edges<f32>) -> f32 {
+        self.start(edges) + self.end(edges)
+    }
+
+    #[inline]
+    pub(super) fn pack<T>(self, along: T, across: T) -> Size<T> {
+        match self {
+            Self::Horizontal => Size::new(along, across),
+            Self::Vertical => Size::new(across, along),
+        }
+    }
+
+    #[inline]
+    pub(super) const fn requested(self) -> RequestedAxis {
+        match self {
+            Self::Horizontal => RequestedAxis::Horizontal,
+            Self::Vertical => RequestedAxis::Vertical,
+        }
+    }
+}
+
+#[inline]
+fn normalize_alignment<const CONTENT: bool>(
+    flags: AlignFlags,
+    inline_axis: bool,
+    rtl: bool,
+) -> Option<AlignFlags> {
+    let value = flags.value();
+    if value == AlignFlags::AUTO || value == AlignFlags::NORMAL {
+        return None;
+    }
+    if !CONTENT && value == AlignFlags::LAST_BASELINE {
+        return Some(AlignFlags::END);
+    }
+    let common = matches!(
+        value,
+        AlignFlags::START
+            | AlignFlags::END
+            | AlignFlags::FLEX_START
+            | AlignFlags::FLEX_END
+            | AlignFlags::CENTER
+            | AlignFlags::STRETCH
+    );
+    let contextual = if CONTENT {
+        matches!(
+            value,
+            AlignFlags::SPACE_BETWEEN | AlignFlags::SPACE_AROUND | AlignFlags::SPACE_EVENLY
+        )
+    } else {
+        value == AlignFlags::BASELINE
+    };
+    if common || contextual {
+        return Some(value);
+    }
+    match value {
+        AlignFlags::LEFT if inline_axis && rtl => Some(AlignFlags::END),
+        AlignFlags::RIGHT if inline_axis && !rtl => Some(AlignFlags::END),
+        AlignFlags::LEFT | AlignFlags::RIGHT if inline_axis => Some(AlignFlags::START),
+        _ => Some(AlignFlags::START),
+    }
+}
+
+#[inline]
 pub(super) fn normalize_item_alignment(
     flags: AlignFlags,
     inline_axis: bool,
     rtl: bool,
 ) -> Option<AlignFlags> {
-    let value = flags.value();
-    if value == AlignFlags::AUTO || value == AlignFlags::NORMAL {
-        None
-    } else if value == AlignFlags::LAST_BASELINE {
-        Some(AlignFlags::END)
-    } else if value == AlignFlags::START
-        || value == AlignFlags::END
-        || value == AlignFlags::FLEX_START
-        || value == AlignFlags::FLEX_END
-        || value == AlignFlags::CENTER
-        || value == AlignFlags::BASELINE
-        || value == AlignFlags::STRETCH
-    {
-        Some(value)
-    } else if value == AlignFlags::LEFT && inline_axis {
-        Some(if rtl {
-            AlignFlags::END
-        } else {
-            AlignFlags::START
-        })
-    } else if value == AlignFlags::RIGHT && inline_axis {
-        Some(if rtl {
-            AlignFlags::START
-        } else {
-            AlignFlags::END
-        })
-    } else {
-        Some(AlignFlags::START)
-    }
+    normalize_alignment::<false>(flags, inline_axis, rtl)
 }
 
+#[inline]
 pub(super) fn normalize_content_alignment(
     flags: AlignFlags,
     inline_axis: bool,
     rtl: bool,
 ) -> Option<AlignFlags> {
-    let value = flags.value();
-    if value == AlignFlags::AUTO || value == AlignFlags::NORMAL {
-        None
-    } else if value == AlignFlags::START
-        || value == AlignFlags::END
-        || value == AlignFlags::FLEX_START
-        || value == AlignFlags::FLEX_END
-        || value == AlignFlags::CENTER
-        || value == AlignFlags::STRETCH
-        || value == AlignFlags::SPACE_BETWEEN
-        || value == AlignFlags::SPACE_AROUND
-        || value == AlignFlags::SPACE_EVENLY
-    {
-        Some(value)
-    } else if value == AlignFlags::LEFT && inline_axis {
-        Some(if rtl {
-            AlignFlags::END
-        } else {
-            AlignFlags::START
-        })
-    } else if value == AlignFlags::RIGHT && inline_axis {
-        Some(if rtl {
-            AlignFlags::START
-        } else {
-            AlignFlags::END
-        })
-    } else {
-        Some(AlignFlags::START)
-    }
+    normalize_alignment::<true>(flags, inline_axis, rtl)
 }
 
-/// Node handle and order-modified paint index shared by formatting
-/// algorithm scratch.
+/// Node handle and order-modified paint index retained by resolved item
+/// scratch.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ItemKey<N> {
     pub(super) node: N,
     pub(super) layout_order: u32,
 }
 
-/// Algorithm-neutral ordering data collected before formatting-context item
-/// classification. The field order intentionally packs this to 24 bytes on
-/// 64-bit targets with a one-word handle (32 with a two-word handle); each
-/// algorithm keeps one record per generated child.
+/// Source-order and paint-order metadata collected for every generated child.
+///
+/// The field order intentionally packs this to 24 bytes on 64-bit targets
+/// with a one-word handle (32 with a two-word handle).
 #[derive(Debug, Clone, Copy)]
 pub(super) struct OrderedItem<N> {
     pub(super) node: N,
@@ -116,6 +168,7 @@ impl<N: Copy> OrderedItem<N> {
     }
 }
 
+/// Access to ordering metadata embedded in algorithm-specific item scratch.
 pub(super) trait PendingLayoutItem<N> {
     fn ordered(&self) -> &OrderedItem<N>;
     fn ordered_mut(&mut self) -> &mut OrderedItem<N>;
@@ -133,78 +186,319 @@ impl<N> PendingLayoutItem<N> for OrderedItem<N> {
     }
 }
 
-pub(super) fn sort_and_assign_layout_order<N, Item: PendingLayoutItem<N>>(
-    in_flow: &mut [Item],
-    absolute: &mut [Item],
-) {
+pub(super) fn sort_and_assign_layout_order<N, InFlow, OutOfFlow>(
+    in_flow: &mut [InFlow],
+    out_of_flow: &mut [OutOfFlow],
+) where
+    InFlow: PendingLayoutItem<N>,
+    OutOfFlow: PendingLayoutItem<N>,
+{
     let has_modified_order = in_flow.iter().any(|item| item.ordered().css_order != 0);
     if has_modified_order {
         in_flow.sort_unstable_by_key(|item| {
             let ordered = item.ordered();
             (ordered.css_order, ordered.document_index)
         });
-        let mut paint_keys = Vec::with_capacity(in_flow.len() + absolute.len());
-        paint_keys.extend(in_flow.iter().enumerate().map(|(index, item)| {
+
+        let mut out_of_flow_before = 0;
+        for (in_flow_order, item) in in_flow.iter_mut().enumerate() {
             let ordered = item.ordered();
-            (ordered.css_order, ordered.document_index, false, index)
-        }));
-        paint_keys.extend(
-            absolute
-                .iter()
-                .enumerate()
-                .map(|(index, item)| (0, item.ordered().document_index, true, index)),
-        );
-        paint_keys.sort_unstable_by_key(|&(order, document, _, _)| (order, document));
-        for (layout_order, &(_, _, is_absolute, index)) in paint_keys.iter().enumerate() {
-            let layout_order = u32::try_from(layout_order).unwrap_or(u32::MAX);
-            if is_absolute {
-                absolute[index].ordered_mut().layout_order = layout_order;
-            } else {
-                in_flow[index].ordered_mut().layout_order = layout_order;
+            let count = match ordered.css_order.cmp(&0) {
+                core::cmp::Ordering::Less => 0,
+                core::cmp::Ordering::Greater => out_of_flow.len(),
+                core::cmp::Ordering::Equal => {
+                    while out_of_flow_before < out_of_flow.len()
+                        && out_of_flow[out_of_flow_before].ordered().document_index
+                            < ordered.document_index
+                    {
+                        out_of_flow_before += 1;
+                    }
+                    out_of_flow_before
+                }
+            };
+            item.ordered_mut().layout_order =
+                u32::try_from(in_flow_order.saturating_add(count)).unwrap_or(u32::MAX);
+        }
+
+        let mut in_flow_before = 0;
+        for (out_of_flow_order, item) in out_of_flow.iter_mut().enumerate() {
+            let document_index = item.ordered().document_index;
+            while in_flow_before < in_flow.len() {
+                let ordered = in_flow[in_flow_before].ordered();
+                if (ordered.css_order, ordered.document_index) >= (0, document_index) {
+                    break;
+                }
+                in_flow_before += 1;
             }
+            item.ordered_mut().layout_order =
+                u32::try_from(in_flow_before.saturating_add(out_of_flow_order)).unwrap_or(u32::MAX);
         }
         return;
     }
 
-    let (mut in_flow_index, mut absolute_index, mut layout_order) = (0, 0, 0_u32);
-    while in_flow_index < in_flow.len() || absolute_index < absolute.len() {
-        let take_in_flow = absolute_index == absolute.len()
+    let (mut in_flow_index, mut out_of_flow_index, mut layout_order) = (0, 0, 0_u32);
+    while in_flow_index < in_flow.len() || out_of_flow_index < out_of_flow.len() {
+        let take_in_flow = out_of_flow_index == out_of_flow.len()
             || (in_flow_index < in_flow.len()
                 && in_flow[in_flow_index].ordered().document_index
-                    < absolute[absolute_index].ordered().document_index);
+                    < out_of_flow[out_of_flow_index].ordered().document_index);
         if take_in_flow {
             in_flow[in_flow_index].ordered_mut().layout_order = layout_order;
             in_flow_index += 1;
         } else {
-            absolute[absolute_index].ordered_mut().layout_order = layout_order;
-            absolute_index += 1;
+            out_of_flow[out_of_flow_index].ordered_mut().layout_order = layout_order;
+            out_of_flow_index += 1;
         }
         layout_order = layout_order.saturating_add(1);
     }
 }
 
-/// Box classification inputs and resolved values common to layout items.
+/// Compact auto-edge mask retained with resolved item geometry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(transparent)]
+pub(super) struct EdgeMask(u8);
+
+impl EdgeMask {
+    #[inline]
+    pub(super) fn from_margins(value: Edges<&Margin>) -> Self {
+        Self(
+            u8::from(value.left.is_auto())
+                | u8::from(value.right.is_auto()) << 1
+                | u8::from(value.top.is_auto()) << 2
+                | u8::from(value.bottom.is_auto()) << 3,
+        )
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(super) const fn from_edges(value: Edges<bool>) -> Self {
+        Self(
+            value.left as u8
+                | (value.right as u8) << 1
+                | (value.top as u8) << 2
+                | (value.bottom as u8) << 3,
+        )
+    }
+
+    #[inline]
+    pub(super) const fn start(self, axis: Axis) -> bool {
+        self.0 & (1 << Self::axis_shift(axis)) != 0
+    }
+
+    #[inline]
+    pub(super) const fn end(self, axis: Axis) -> bool {
+        self.0 & (2 << Self::axis_shift(axis)) != 0
+    }
+
+    #[inline]
+    pub(super) const fn flow_start(self, axis: Axis, reverse: bool) -> bool {
+        self.edge(axis, reverse)
+    }
+
+    #[inline]
+    pub(super) const fn flow_end(self, axis: Axis, reverse: bool) -> bool {
+        self.edge(axis, !reverse)
+    }
+
+    const fn axis_shift(axis: Axis) -> u8 {
+        match axis {
+            Axis::Horizontal => 0,
+            Axis::Vertical => 2,
+        }
+    }
+
+    const fn edge(self, axis: Axis, end: bool) -> bool {
+        self.0 & ((1 + end as u8) << Self::axis_shift(axis)) != 0
+    }
+}
+
+/// Intrinsic keyword occupying one two-bit slot in [`IntrinsicTags`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub(super) enum IntrinsicTag {
+    None,
+    MinContent,
+    MaxContent,
+    FitContent,
+}
+
+impl IntrinsicTag {
+    #[inline]
+    fn from_style_size(value: &StyleSize) -> Self {
+        if matches!(value, StyleSize::MinContent) {
+            Self::MinContent
+        } else if matches!(value, StyleSize::MaxContent) {
+            Self::MaxContent
+        } else if matches!(value, StyleSize::FitContentFunction(_)) {
+            Self::FitContent
+        } else {
+            debug_assert!(!matches!(
+                value,
+                StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_)
+            ));
+            Self::None
+        }
+    }
+
+    #[inline]
+    fn from_max_size(value: &MaxSize) -> Self {
+        if matches!(value, MaxSize::MinContent) {
+            Self::MinContent
+        } else if matches!(value, MaxSize::MaxContent) {
+            Self::MaxContent
+        } else if matches!(value, MaxSize::FitContentFunction(_)) {
+            Self::FitContent
+        } else {
+            debug_assert!(!matches!(
+                value,
+                MaxSize::AnchorSizeFunction(_) | MaxSize::AnchorContainingCalcFunction(_)
+            ));
+            Self::None
+        }
+    }
+
+    #[inline]
+    pub(super) const fn is_intrinsic(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
+/// Six intrinsic keyword classifications packed into twelve bits.
+///
+/// Fit-content payloads remain in host-owned computed style and are
+/// re-borrowed only by the algorithm pass that consumes them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(transparent)]
+pub(super) struct IntrinsicTags(u16);
+
+impl IntrinsicTags {
+    #[inline]
+    pub(super) fn new(
+        size: Size<&StyleSize>,
+        min_size: Size<&StyleSize>,
+        max_size: Size<&MaxSize>,
+    ) -> Self {
+        Self(
+            Self::pair(
+                IntrinsicTag::from_style_size(size.width),
+                IntrinsicTag::from_style_size(size.height),
+            ) | Self::pair(
+                IntrinsicTag::from_style_size(min_size.width),
+                IntrinsicTag::from_style_size(min_size.height),
+            ) << 4
+                | Self::pair(
+                    IntrinsicTag::from_max_size(max_size.width),
+                    IntrinsicTag::from_max_size(max_size.height),
+                ) << 8,
+        )
+    }
+
+    #[inline]
+    pub(super) const fn preferred(self, axis: Axis) -> IntrinsicTag {
+        self.at(axis, 0)
+    }
+
+    #[inline]
+    pub(super) const fn minimum(self, axis: Axis) -> IntrinsicTag {
+        self.at(axis, 4)
+    }
+
+    #[inline]
+    pub(super) const fn maximum(self, axis: Axis) -> IntrinsicTag {
+        self.at(axis, 8)
+    }
+
+    const fn at(self, axis: Axis, offset: u32) -> IntrinsicTag {
+        match (self.0 >> (Self::axis_shift(axis) + offset)) & 0b11 {
+            0 => IntrinsicTag::None,
+            1 => IntrinsicTag::MinContent,
+            2 => IntrinsicTag::MaxContent,
+            3 => IntrinsicTag::FitContent,
+            _ => unreachable!(),
+        }
+    }
+
+    #[inline]
+    pub(super) const fn has_intrinsic(self) -> bool {
+        self.0 != 0
+    }
+
+    #[inline]
+    pub(super) const fn needs_min_content(self, axis: Axis) -> bool {
+        self.0 & (0x111 << Self::axis_shift(axis)) != 0
+    }
+
+    #[inline]
+    pub(super) const fn needs_max_content(self, axis: Axis) -> bool {
+        self.0 & (0x222 << Self::axis_shift(axis)) != 0
+    }
+
+    const fn pair(width: IntrinsicTag, height: IntrinsicTag) -> u16 {
+        width as u16 | (height as u16) << 2
+    }
+
+    const fn axis_shift(axis: Axis) -> u32 {
+        match axis {
+            Axis::Horizontal => 0,
+            Axis::Vertical => 2,
+        }
+    }
+}
+
+/// Owned used geometry embedded directly in every algorithm's item record.
+///
+/// No raw Stylo value or fit-content payload crosses the resolver boundary.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct ResolvedItemBox<'a> {
-    pub(super) raw_size: Size<&'a StyleSize>,
-    pub(super) raw_min_size: Size<&'a StyleSize>,
-    pub(super) raw_max_size: Size<&'a MaxSize>,
-    pub(super) aspect_ratio: Option<f32>,
-    pub(super) box_sizing: box_sizing::T,
-    pub(super) overflow: Point<Overflow>,
+pub(super) struct ItemGeometry {
     pub(super) preferred_size: Size<Option<f32>>,
     pub(super) min_size: Size<Option<f32>>,
     pub(super) max_size: Size<Option<f32>>,
     pub(super) margin: Edges<f32>,
-    pub(super) margin_auto: Edges<bool>,
     pub(super) padding: Edges<f32>,
     pub(super) border: Edges<f32>,
-    pub(super) inset: Edges<Option<f32>>,
+    pub(super) aspect_ratio: Option<f32>,
+    pub(super) intrinsic: IntrinsicTags,
+    pub(super) preferred_definite: Size<bool>,
+    pub(super) size_is_auto: Size<bool>,
+    pub(super) overflow: Point<Overflow>,
+    pub(super) box_sizing: box_sizing::T,
+    pub(super) margin_auto: EdgeMask,
 }
+
+impl ItemGeometry {
+    #[inline]
+    pub(super) fn box_floor(&self) -> Size<f32> {
+        box_inset_size(self.padding, self.border)
+    }
+}
+
+macro_rules! impl_item_geometry {
+    ($item:ident) => {
+        impl<N> core::ops::Deref for $item<N> {
+            type Target = ItemGeometry;
+
+            #[inline]
+            fn deref(&self) -> &Self::Target {
+                &self.geometry
+            }
+        }
+
+        impl<N> core::ops::DerefMut for $item<N> {
+            #[inline]
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                &mut self.geometry
+            }
+        }
+    };
+}
+pub(super) use impl_item_geometry;
 
 /// Algorithm-neutral resolved container box and sizing constraints.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ResolvedContainerBox {
+    pub(super) preferred_definite: Size<bool>,
+    pub(super) aspect_ratio: Option<f32>,
+    pub(super) box_sizing: box_sizing::T,
     pub(super) padding: Edges<f32>,
     pub(super) border: Edges<f32>,
     pub(super) box_inset: Size<f32>,
@@ -298,10 +592,7 @@ pub(super) fn resolve_max_size(value: &MaxSize, basis: Option<f32>) -> Option<f3
 
 #[inline]
 pub(super) fn resolve_size(value: Size<&StyleSize>, basis: Size<Option<f32>>) -> Size<Option<f32>> {
-    Size::new(
-        resolve_style_size(value.width, basis.width),
-        resolve_style_size(value.height, basis.height),
-    )
+    value.zip_map(basis, resolve_style_size)
 }
 
 #[inline]
@@ -309,10 +600,7 @@ pub(super) fn resolve_max_sizes(
     value: Size<&MaxSize>,
     basis: Size<Option<f32>>,
 ) -> Size<Option<f32>> {
-    Size::new(
-        resolve_max_size(value.width, basis.width),
-        resolve_max_size(value.height, basis.height),
-    )
+    value.zip_map(basis, resolve_max_size)
 }
 
 #[inline]
@@ -320,12 +608,7 @@ pub(super) fn resolve_padding(
     value: Edges<&NonNegativeLengthPercentage>,
     inline_basis: Option<f32>,
 ) -> Edges<f32> {
-    Edges {
-        left: resolve_padding_edge(value.left, inline_basis),
-        right: resolve_padding_edge(value.right, inline_basis),
-        top: resolve_padding_edge(value.top, inline_basis),
-        bottom: resolve_padding_edge(value.bottom, inline_basis),
-    }
+    value.map(|edge| resolve_padding_edge(edge, inline_basis))
 }
 
 #[inline]
@@ -337,12 +620,9 @@ fn resolve_padding_edge(value: &NonNegativeLengthPercentage, inline_basis: Optio
 
 #[inline]
 pub(super) fn resolve_border(value: &Edges<BorderSideWidth>) -> Edges<f32> {
-    Edges {
-        left: checked(value.left.0.to_f32_px()).max(0.0),
-        right: checked(value.right.0.to_f32_px()).max(0.0),
-        top: checked(value.top.0.to_f32_px()).max(0.0),
-        bottom: checked(value.bottom.0.to_f32_px()).max(0.0),
-    }
+    value
+        .as_ref()
+        .map(|edge| checked(edge.0.to_f32_px()).max(0.0))
 }
 
 #[inline]
@@ -350,12 +630,7 @@ pub(super) fn resolve_margins(
     value: Edges<&Margin>,
     inline_basis: Option<f32>,
 ) -> Edges<Option<f32>> {
-    Edges {
-        left: resolve_margin(value.left, inline_basis),
-        right: resolve_margin(value.right, inline_basis),
-        top: resolve_margin(value.top, inline_basis),
-        bottom: resolve_margin(value.bottom, inline_basis),
-    }
+    value.map(|edge| resolve_margin(edge, inline_basis))
 }
 
 #[inline]
@@ -431,19 +706,96 @@ pub(super) fn used_aspect_ratio(value: AspectRatio) -> Option<f32> {
 }
 
 #[inline]
-fn style_size_is_definite(value: &StyleSize, parent_basis: Option<f32>) -> bool {
+pub(super) fn style_size_behaves_auto(value: &StyleSize) -> bool {
     match value {
-        StyleSize::LengthPercentage(lp) => !lp.0.has_percentage() || parent_basis.is_some(),
-        StyleSize::Auto
-        | StyleSize::MinContent
-        | StyleSize::MaxContent
-        | StyleSize::FitContent
-        | StyleSize::Stretch
-        | StyleSize::WebkitFillAvailable
-        | StyleSize::FitContentFunction(_) => false,
         StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
             unreachable!("anchor sizing is pref-dead under the lynx feature")
         }
+        _ => matches!(
+            value,
+            StyleSize::Auto
+                | StyleSize::FitContent
+                | StyleSize::Stretch
+                | StyleSize::WebkitFillAvailable
+        ),
+    }
+}
+
+#[inline]
+fn fit_content_size(
+    limit: &LengthPercentage,
+    min_content: Option<f32>,
+    max_content: Option<f32>,
+    basis: Option<f32>,
+    inset: f32,
+    box_sizing: box_sizing::T,
+) -> f32 {
+    let min_content = min_content.unwrap_or(0.0);
+    let max_content = max_content.unwrap_or(min_content);
+    let mut limit = resolve_length_percentage(limit, basis).unwrap_or(max_content);
+    if box_sizing == box_sizing::T::ContentBox {
+        limit += inset;
+    }
+    max_content.min(limit.max(min_content))
+}
+
+pub(super) trait IntrinsicValue {
+    fn fit_content_limit(&self) -> &LengthPercentage;
+}
+
+impl IntrinsicValue for StyleSize {
+    fn fit_content_limit(&self) -> &LengthPercentage {
+        let Self::FitContentFunction(limit) = self else {
+            unreachable!("only the fit-content tag requests its payload")
+        };
+        &limit.0
+    }
+}
+
+impl IntrinsicValue for MaxSize {
+    fn fit_content_limit(&self) -> &LengthPercentage {
+        let Self::FitContentFunction(limit) = self else {
+            unreachable!("only the fit-content tag requests its payload")
+        };
+        &limit.0
+    }
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn resolve_intrinsic(
+    tag: IntrinsicTag,
+    value: &impl IntrinsicValue,
+    quantitative: Option<f32>,
+    min_content: Option<f32>,
+    max_content: Option<f32>,
+    basis: Option<f32>,
+    inset: f32,
+    box_sizing: box_sizing::T,
+) -> Option<f32> {
+    match tag {
+        IntrinsicTag::None => quantitative,
+        IntrinsicTag::MinContent => min_content,
+        IntrinsicTag::MaxContent => max_content,
+        IntrinsicTag::FitContent => Some(fit_content_size(
+            value.fit_content_limit(),
+            min_content,
+            max_content,
+            basis,
+            inset,
+            box_sizing,
+        )),
+    }
+}
+
+#[inline]
+fn style_size_is_definite(value: &StyleSize, parent_basis: Option<f32>) -> bool {
+    match value {
+        StyleSize::LengthPercentage(lp) => !lp.0.has_percentage() || parent_basis.is_some(),
+        StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_) => {
+            unreachable!("anchor sizing is pref-dead under the lynx feature")
+        }
+        _ => false,
     }
 }
 
@@ -453,10 +805,7 @@ pub(super) fn preferred_size_definiteness(
     parent_size: Size<Option<f32>>,
     aspect_ratio: Option<f32>,
 ) -> Size<bool> {
-    let mut definite = Size::new(
-        style_size_is_definite(size.width, parent_size.width),
-        style_size_is_definite(size.height, parent_size.height),
-    );
+    let mut definite = size.zip_map(parent_size, style_size_is_definite);
     if aspect_ratio.is_some() {
         if definite.width {
             definite.height = true;
@@ -560,10 +909,7 @@ pub(super) fn resolve_gap(
     value: Size<&NonNegativeLengthPercentageOrNormal>,
     basis: Size<Option<f32>>,
 ) -> Size<f32> {
-    Size::new(
-        resolve_gap_axis(value.width, basis.width),
-        resolve_gap_axis(value.height, basis.height),
-    )
+    value.zip_map(basis, resolve_gap_axis)
 }
 
 #[inline(always)]
@@ -571,11 +917,11 @@ pub(super) fn resolve_gap(
     clippy::inline_always,
     reason = "avoids a large resolver result and copy chain in release LLVM IR"
 )]
-pub(super) fn resolve_item_box(
+pub(super) fn resolve_item_geometry(
     style: &impl CoreStyle,
     percentage_basis: Size<Option<f32>>,
-) -> ResolvedItemBox<'_> {
-    resolve_item_box_with_bases(style, percentage_basis, percentage_basis.width)
+) -> ItemGeometry {
+    resolve_item_geometry_with_bases(style, percentage_basis, percentage_basis.width)
 }
 
 #[inline(always)]
@@ -583,11 +929,11 @@ pub(super) fn resolve_item_box(
     clippy::inline_always,
     reason = "avoids a large resolver result and copy chain in release LLVM IR"
 )]
-pub(super) fn resolve_item_box_with_bases(
+pub(super) fn resolve_item_geometry_with_bases(
     style: &impl CoreStyle,
     size_percentage_basis: Size<Option<f32>>,
     edge_inline_basis: Option<f32>,
-) -> ResolvedItemBox<'_> {
+) -> ItemGeometry {
     let raw_size = style.size();
     let raw_min_size = style.min_size();
     let raw_max_size = style.max_size();
@@ -596,7 +942,6 @@ pub(super) fn resolve_item_box_with_bases(
     let overflow = style.overflow();
     let padding_value = style.padding();
     let border_value = style.border();
-    let inset_value = style.inset();
     let padding = resolve_padding(padding_value, edge_inline_basis);
     let border = resolve_border(&border_value);
     let box_inset = box_inset_size(padding, border);
@@ -624,21 +969,27 @@ pub(super) fn resolve_item_box_with_bases(
     let margin_value = style.margin();
     let optional_margin = resolve_margins(margin_value, edge_inline_basis);
 
-    ResolvedItemBox {
-        raw_size,
-        raw_min_size,
-        raw_max_size,
-        aspect_ratio,
-        box_sizing,
-        overflow,
+    ItemGeometry {
         preferred_size,
         min_size,
         max_size,
         margin: auto_edges_to_zero(optional_margin),
-        margin_auto: margin_value.map(Margin::is_auto),
         padding,
         border,
-        inset: resolve_insets(inset_value, size_percentage_basis),
+        aspect_ratio,
+        intrinsic: IntrinsicTags::new(raw_size, raw_min_size, raw_max_size),
+        preferred_definite: preferred_size_definiteness(
+            raw_size,
+            size_percentage_basis,
+            aspect_ratio,
+        ),
+        size_is_auto: Size::new(
+            style_size_behaves_auto(raw_size.width),
+            style_size_behaves_auto(raw_size.height),
+        ),
+        overflow,
+        box_sizing,
+        margin_auto: EdgeMask::from_margins(margin_value),
     }
 }
 
@@ -647,6 +998,14 @@ pub(super) fn resolve_container_box(
     style: &impl CoreStyle,
     input: LayoutInput,
 ) -> ResolvedContainerBox {
+    let raw_size = style.size();
+    let aspect_ratio = used_aspect_ratio(style.aspect_ratio());
+    let box_sizing = style.box_sizing();
+    let preferred_definite = if input.sizing_mode == SizingMode::IgnoreSizeStyles {
+        Size::new(false, false)
+    } else {
+        preferred_size_definiteness(raw_size, input.parent_size, aspect_ratio)
+    };
     let padding = resolve_padding(style.padding(), input.parent_size.width);
     let border = resolve_border(&style.border());
     let box_inset = box_inset_size(padding, border);
@@ -654,11 +1013,9 @@ pub(super) fn resolve_container_box(
     let (preferred, min, max) = if input.sizing_mode == SizingMode::IgnoreSizeStyles {
         (Size::NONE, Size::NONE, Size::NONE)
     } else {
-        let aspect_ratio = used_aspect_ratio(style.aspect_ratio());
-        let box_sizing = style.box_sizing();
         (
             resolve_quantitative_sizes(
-                style.size(),
+                raw_size,
                 input.parent_size,
                 aspect_ratio,
                 box_sizing,
@@ -717,6 +1074,9 @@ pub(super) fn resolve_container_box(
     );
 
     ResolvedContainerBox {
+        preferred_definite,
+        aspect_ratio,
+        box_sizing,
         padding,
         border,
         box_inset,
@@ -777,6 +1137,16 @@ mod tests {
     use stylo::values::generics::NonNegative;
 
     use super::*;
+
+    macro_rules! assert_alignment_cases {
+        ($normalize:ident; $(
+            $name:literal: $flags:expr, $horizontal:literal, $rtl:literal => $expected:expr;
+        )+) => {
+            $(assert_eq!(
+                $normalize($flags, $horizontal, $rtl), $expected, "{}", $name
+            );)+
+        };
+    }
 
     #[test]
     fn percentage_and_calc_values_resolve_only_with_a_definite_basis() {
@@ -852,107 +1222,58 @@ mod tests {
 
     #[test]
     fn margin_inset_and_gap_arms_cover_auto_and_normal() {
+        let length = |px| LengthPercentage::new_length(Length::new(px));
+        let percent = |fraction| LengthPercentage::new_percent(Percentage(fraction));
+
         assert_eq!(resolve_margin(&Margin::Auto, Some(10.0)), None);
         assert_eq!(
-            resolve_margin(
-                &Margin::LengthPercentage(LengthPercentage::new_length(Length::new(3.0))),
-                None,
-            ),
+            resolve_margin(&Margin::LengthPercentage(length(3.0)), None),
             Some(3.0)
         );
         assert_eq!(resolve_inset(&Inset::Auto, Some(10.0)), None);
         assert_eq!(
-            resolve_inset(
-                &Inset::LengthPercentage(LengthPercentage::new_percent(Percentage(0.1))),
-                Some(50.0),
-            ),
+            resolve_inset(&Inset::LengthPercentage(percent(0.1)), Some(50.0)),
             Some(5.0)
         );
         assert_eq!(
             resolve_gap_axis(&NonNegativeLengthPercentageOrNormal::Normal, Some(10.0)),
             0.0
         );
-        assert_eq!(
-            resolve_gap_axis(
-                &NonNegativeLengthPercentageOrNormal::LengthPercentage(NonNegative(
-                    LengthPercentage::new_percent(Percentage(0.5)),
-                )),
-                Some(10.0),
-            ),
-            5.0
-        );
+        let percent_gap =
+            NonNegativeLengthPercentageOrNormal::LengthPercentage(NonNegative(percent(0.5)));
+        assert_eq!(resolve_gap_axis(&percent_gap, Some(10.0)), 5.0);
     }
 
     #[test]
     fn item_align_flags_normalize_with_physical_and_fallback_handling() {
-        assert_eq!(
-            normalize_item_alignment(AlignFlags::AUTO, true, false),
-            None
-        );
-        assert_eq!(
-            normalize_item_alignment(AlignFlags::NORMAL, false, false),
-            None
-        );
-        assert_eq!(
-            normalize_item_alignment(AlignFlags::SAFE | AlignFlags::CENTER, false, false),
-            Some(AlignFlags::CENTER)
-        );
-        assert_eq!(
-            normalize_item_alignment(AlignFlags::LAST_BASELINE, false, false),
-            Some(AlignFlags::END)
-        );
-        assert_eq!(
-            normalize_item_alignment(AlignFlags::LEFT, true, false),
-            Some(AlignFlags::START)
-        );
-        assert_eq!(
-            normalize_item_alignment(AlignFlags::LEFT, true, true),
-            Some(AlignFlags::END)
-        );
-        assert_eq!(
-            normalize_item_alignment(AlignFlags::RIGHT, true, true),
-            Some(AlignFlags::START)
-        );
-        assert_eq!(
-            normalize_item_alignment(AlignFlags::RIGHT, false, false),
-            Some(AlignFlags::START)
-        );
-        assert_eq!(
-            normalize_item_alignment(AlignFlags::SELF_START, true, false),
-            Some(AlignFlags::START)
-        );
-        assert_eq!(
-            normalize_item_alignment(AlignFlags::SELF_END, false, false),
-            Some(AlignFlags::START)
-        );
+        use AlignFlags as A;
+
+        assert_alignment_cases! { normalize_item_alignment;
+            "auto": A::AUTO, true, false => None;
+            "normal": A::NORMAL, false, false => None;
+            "safe center": A::SAFE | A::CENTER, false, false => Some(A::CENTER);
+            "last baseline fallback": A::LAST_BASELINE, false, false => Some(A::END);
+            "physical left ltr": A::LEFT, true, false => Some(A::START);
+            "physical left rtl": A::LEFT, true, true => Some(A::END);
+            "physical right rtl": A::RIGHT, true, true => Some(A::START);
+            "physical right vertical": A::RIGHT, false, false => Some(A::START);
+            "self start": A::SELF_START, true, false => Some(A::START);
+            "self end": A::SELF_END, false, false => Some(A::START);
+        }
     }
 
     #[test]
     fn content_align_flags_normalize_with_physical_and_fallback_handling() {
-        assert_eq!(
-            normalize_content_alignment(AlignFlags::NORMAL, false, false),
-            None
-        );
-        assert_eq!(
-            normalize_content_alignment(AlignFlags::AUTO, true, false),
-            None
-        );
-        assert_eq!(
-            normalize_content_alignment(AlignFlags::SPACE_BETWEEN, true, false),
-            Some(AlignFlags::SPACE_BETWEEN)
-        );
-        assert_eq!(
-            normalize_content_alignment(AlignFlags::RIGHT, true, false),
-            Some(AlignFlags::END)
-        );
-        assert_eq!(
-            normalize_content_alignment(AlignFlags::RIGHT, false, false),
-            Some(AlignFlags::START)
-        );
-        assert_eq!(
-            normalize_content_alignment(AlignFlags::BASELINE, false, false),
-            Some(AlignFlags::START)
-        );
+        use AlignFlags as A;
+
+        assert_alignment_cases! { normalize_content_alignment;
+            "normal": A::NORMAL, false, false => None;
+            "auto": A::AUTO, true, false => None;
+            "space between": A::SPACE_BETWEEN, true, false => Some(A::SPACE_BETWEEN);
+            "physical right ltr": A::RIGHT, true, false => Some(A::END);
+            "physical right vertical": A::RIGHT, false, false => Some(A::START);
+            "baseline fallback": A::BASELINE, false, false => Some(A::START);
+        }
     }
 
     #[cfg(target_pointer_width = "64")]

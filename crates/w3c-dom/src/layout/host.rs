@@ -7,7 +7,7 @@ use neutron_star::compute::{
     compute_absolute_layout, compute_boundary_relayout, compute_cached_layout,
     compute_flexbox_layout, compute_grid_layout, compute_leaf_layout, compute_linear_layout,
     compute_relative_layout, compute_root_layout, compute_skipped_contents_layout, hide_subtree,
-    round_layout, round_layout_subtree,
+    round_layout_subtree_with as round_with,
 };
 use neutron_star::geometry::{Point, Size};
 use neutron_star::invalidate::is_relayout_boundary;
@@ -169,8 +169,8 @@ pub(super) fn run_layout<T>(document: &Document<T>, viewport: Size<f32>, scale: 
         ),
     );
     if full {
-        position_hoisted_subtree(root, viewport);
-        round_layout(root, scale);
+        let position = |node| pre_position(node, viewport);
+        round_with(root, scale, Point::ZERO, position);
     } else {
         position_and_round_parked_boundaries(document, &parked, viewport, scale);
     }
@@ -215,74 +215,52 @@ fn position_and_round_parked_boundaries<T>(
         if has_parked_ancestor(document, node) {
             continue;
         }
-        position_hoisted_subtree(node, viewport);
         let parent_origin = node
             .parent()
             .map_or(Point::ZERO, accumulated_unrounded_origin);
-        round_layout_subtree(node, scale, parent_origin);
+        let position = |node| pre_position(node, viewport);
+        round_with(node, scale, parent_origin, position);
     }
 }
 
 fn has_parked_ancestor<T>(document: &Document<T>, node: &Node<T>) -> bool {
-    let mut current = node.parent();
-    while let Some(ancestor) = current {
-        if document.is_relayout_root_parked(ancestor.id()) {
-            return true;
-        }
-        current = ancestor.parent();
-    }
-    false
+    std::iter::successors(node.parent(), |node| node.parent())
+        .any(|ancestor| document.is_relayout_root_parked(ancestor.id()))
 }
 
 fn accumulated_unrounded_origin<T>(node: &Node<T>) -> Point<f32> {
-    let mut origin = Point::ZERO;
-    let mut current = Some(node);
-    while let Some(step) = current {
-        let location = step.layout_results.borrow().unrounded.location;
-        origin.x += location.x;
-        origin.y += location.y;
-        current = step.parent();
-    }
-    origin
+    std::iter::successors(Some(node), |node| node.parent()).fold(Point::ZERO, |origin, node| {
+        let location = node.layout_results.borrow().unrounded.location;
+        Point::new(origin.x + location.x, origin.y + location.y)
+    })
 }
 
 fn boundary_depth<T>(document: &Document<T>, id: crate::NodeId) -> usize {
-    let mut depth = 0;
-    let mut current = document.get(id).and_then(Node::parent);
-    while let Some(node) = current {
-        depth += 1;
-        current = node.parent();
-    }
-    depth
+    let parent = document.get(id).and_then(Node::parent);
+    std::iter::successors(parent, |node| node.parent()).count()
 }
 
-fn position_hoisted_subtree<T>(node: &Node<T>, viewport: Size<f32>) {
+fn pre_position<T>(node: &Node<T>, viewport: Size<f32>) -> bool {
     let Some(style) = StyleView::try_of(node) else {
-        return;
+        return false;
     };
     let display = display_mode(style.display());
     if display == DisplayMode::None {
-        return;
+        return false;
     }
     if node.parent().is_some_and(Node::is_element)
         && resolve_position(node, style.values()) == PositionProperty::Fixed
     {
-        position_hoisted(node, viewport);
+        let fixed = style.values().clone_position() == PositionProperty::Fixed;
+        position_hoisted(node, viewport, fixed);
     }
-    if display == DisplayMode::Leaf || skips_contents(style.values()) {
-        return;
-    }
-    for child in Node::children(node) {
-        position_hoisted_subtree(child, viewport);
-    }
+    display != DisplayMode::Leaf && !skips_contents(style.values())
 }
 
-fn position_hoisted<T>(node: &Node<T>, viewport: Size<f32>) {
+fn position_hoisted<T>(node: &Node<T>, viewport: Size<f32>, fixed: bool) {
     let Some(parent) = node.parent() else {
         return;
     };
-    let fixed = StyleView::try_of(node)
-        .is_some_and(|style| style.values().clone_position() == PositionProperty::Fixed);
 
     let mut containing = None;
     let mut ancestor = node.parent();

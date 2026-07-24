@@ -24,21 +24,28 @@ pub(super) fn normalize_runs<'a, R, Runs>(
 ) -> ShapingContent<'a, R>
 where
     R: TextRunStyle + 'a,
-    Runs: Iterator<Item = TextRun<'a, R>>,
+    Runs: Iterator<Item = TextRun<'a, R>> + Clone,
 {
-    let mut content = ShapingContent {
-        text: String::new(),
-        ranges: Vec::new(),
-    };
-
-    if matches!(
+    let preserves_spaces = matches!(
         collapse,
         white_space_collapse::T::Preserve | white_space_collapse::T::BreakSpaces
-    ) {
+    );
+    let (text_capacity, range_capacity) = if preserves_spaces {
+        runs.clone().fold((0, 0), |(text_bytes, run_count), run| {
+            (text_bytes + run.text.len(), run_count + 1)
+        })
+    } else {
+        let (lower, upper) = runs.size_hint();
+        (0, upper.unwrap_or(lower))
+    };
+    let mut content = ShapingContent {
+        text: String::with_capacity(text_capacity),
+        ranges: Vec::with_capacity(range_capacity),
+    };
+
+    if preserves_spaces {
         for run in runs {
-            for character in run.text.chars() {
-                content.push(character, run.style);
-            }
+            content.push_str(run.text, run.style);
         }
         return content;
     }
@@ -159,7 +166,20 @@ impl<'a, R: TextRunStyle> ShapingContent<'a, R> {
     fn push(&mut self, character: char, style: &'a R) {
         let start = self.text.len();
         self.text.push(character);
+        self.record_append(start, style);
+    }
+
+    fn push_str(&mut self, text: &str, style: &'a R) {
+        let start = self.text.len();
+        self.text.push_str(text);
+        self.record_append(start, style);
+    }
+
+    fn record_append(&mut self, start: usize, style: &'a R) {
         let end = self.text.len();
+        if start == end {
+            return;
+        }
         if let Some(last) = self.ranges.last_mut()
             && core::ptr::eq(last.style, style)
         {
@@ -195,7 +215,7 @@ mod tests {
     use super::*;
 
     #[derive(Debug)]
-    struct RunStyle;
+    struct RunStyle(u8);
 
     impl TextRunStyle for RunStyle {
         fn font_family(&self) -> FontFamily {
@@ -209,21 +229,34 @@ mod tests {
         }
     }
 
+    fn run<'a>(
+        style: &'a RunStyle,
+        text: &'a str,
+        preserve_newlines: bool,
+    ) -> TextRun<'a, RunStyle> {
+        TextRun {
+            text,
+            style,
+            preserve_newlines,
+        }
+    }
+
+    fn normalize_one<'a>(
+        style: &'a RunStyle,
+        text: &'a str,
+        preserve_newlines: bool,
+        collapse: white_space_collapse::T,
+    ) -> ShapingContent<'a, RunStyle> {
+        normalize_runs([run(style, text, preserve_newlines)].into_iter(), collapse)
+    }
+
     #[test]
     fn collapses_css_whitespace_across_run_boundaries() {
-        let first = RunStyle;
-        let second = RunStyle;
+        let first = RunStyle(1);
+        let second = RunStyle(2);
         let runs = [
-            TextRun {
-                text: "a \t\r\n",
-                style: &first,
-                preserve_newlines: false,
-            },
-            TextRun {
-                text: "  b\u{a0}c",
-                style: &second,
-                preserve_newlines: false,
-            },
+            run(&first, "a \t\r\n", false),
+            run(&second, "  b\u{a0}c", false),
         ];
 
         let content = normalize_runs(runs.into_iter(), white_space_collapse::T::Collapse);
@@ -236,14 +269,13 @@ mod tests {
 
     #[test]
     fn raw_text_preserves_breaks_and_removes_adjacent_spaces() {
-        let style = RunStyle;
-        let runs = [TextRun {
-            text: "one \r\n \t two\x0Cthree",
-            style: &style,
-            preserve_newlines: true,
-        }];
-
-        let content = normalize_runs(runs.into_iter(), white_space_collapse::T::Collapse);
+        let style = RunStyle(1);
+        let content = normalize_one(
+            &style,
+            "one \r\n \t two\x0Cthree",
+            true,
+            white_space_collapse::T::Collapse,
+        );
 
         assert_eq!(content.text, "one\ntwo\x0Cthree");
         assert_eq!(content.ranges[0].bytes, 0..13);
@@ -251,87 +283,42 @@ mod tests {
 
     #[test]
     fn normalizes_cross_run_crlf_and_chromium_segment_breaks() {
-        let first = RunStyle;
-        let second = RunStyle;
+        let first = RunStyle(1);
+        let second = RunStyle(2);
         let raw = normalize_runs(
-            [
-                TextRun {
-                    text: "a\r",
-                    style: &first,
-                    preserve_newlines: true,
-                },
-                TextRun {
-                    text: "\nb",
-                    style: &second,
-                    preserve_newlines: true,
-                },
-            ]
-            .into_iter(),
+            [run(&first, "a\r", true), run(&second, "\nb", true)].into_iter(),
             white_space_collapse::T::Collapse,
         );
         assert_eq!(raw.text, "a\nb");
 
-        let controls = normalize_runs(
-            [TextRun {
-                text: "a\rb\x0Cc",
-                style: &first,
-                preserve_newlines: true,
-            }]
-            .into_iter(),
-            white_space_collapse::T::Collapse,
-        );
-        assert_eq!(controls.text, "a b\x0Cc");
-
-        let chinese = normalize_runs(
-            [TextRun {
-                text: "你\n好",
-                style: &first,
-                preserve_newlines: false,
-            }]
-            .into_iter(),
-            white_space_collapse::T::Collapse,
-        );
-        assert_eq!(chinese.text, "你好");
-
-        let korean = normalize_runs(
-            [TextRun {
-                text: "안\n녕",
-                style: &first,
-                preserve_newlines: false,
-            }]
-            .into_iter(),
-            white_space_collapse::T::Collapse,
-        );
-        assert_eq!(korean.text, "안 녕");
-
-        let zero_width_space = normalize_runs(
-            [TextRun {
-                text: "a\n\u{200B}b",
-                style: &first,
-                preserve_newlines: false,
-            }]
-            .into_iter(),
-            white_space_collapse::T::Collapse,
-        );
-        assert_eq!(zero_width_space.text, "a\u{200B}b");
+        for (source, preserve_newlines, expected) in [
+            ("a\rb\x0Cc", true, "a b\x0Cc"),
+            ("你\n好", false, "你好"),
+            ("안\n녕", false, "안 녕"),
+            ("a\n\u{200B}b", false, "a\u{200B}b"),
+        ] {
+            assert_eq!(
+                normalize_one(
+                    &first,
+                    source,
+                    preserve_newlines,
+                    white_space_collapse::T::Collapse
+                )
+                .text,
+                expected,
+                "for source {source:?}"
+            );
+        }
     }
 
     #[test]
     fn preserve_modes_pass_text_through_unmodified() {
-        let style = RunStyle;
+        let style = RunStyle(1);
         for collapse in [
             white_space_collapse::T::Preserve,
             white_space_collapse::T::BreakSpaces,
         ] {
-            let content = normalize_runs(
-                [TextRun {
-                    text: "a  \t b\n c",
-                    style: &style,
-                    preserve_newlines: false,
-                }]
-                .into_iter(),
-                collapse,
-            );
+            let content = normalize_one(&style, "a  \t b\n c", false, collapse);
             assert_eq!(content.text, "a  \t b\n c");
             assert_eq!(content.ranges.len(), 1);
             assert_eq!(content.ranges[0].bytes, 0..9);
@@ -339,24 +326,58 @@ mod tests {
     }
 
     #[test]
+    fn preserve_modes_merge_only_adjacent_pointer_identical_ranges() {
+        let first = RunStyle(1);
+        let second = RunStyle(2);
+        for collapse in [
+            white_space_collapse::T::Preserve,
+            white_space_collapse::T::BreakSpaces,
+        ] {
+            let content = normalize_runs(
+                [
+                    run(&first, "", false),
+                    run(&first, "é", false),
+                    run(&second, "", false),
+                    run(&first, "你\n", false),
+                    run(&second, " \t", false),
+                    run(&second, "🙂", false),
+                    run(&first, "", false),
+                    run(&first, "x", false),
+                ]
+                .into_iter(),
+                collapse,
+            );
+
+            assert_eq!(content.text, "é你\n \t🙂x");
+            assert_eq!(
+                content
+                    .ranges
+                    .iter()
+                    .map(|range| (range.bytes.clone(), range.style.0))
+                    .collect::<Vec<_>>(),
+                [(0..6, 1), (6..12, 2), (12..13, 1)]
+            );
+
+            let empty = normalize_runs(
+                [run(&first, "", false), run(&second, "", false)].into_iter(),
+                collapse,
+            );
+            assert!(empty.text.is_empty());
+            assert!(empty.ranges.is_empty());
+        }
+    }
+
+    #[test]
     fn trailing_collapsible_whitespace_keeps_one_space() {
-        let style = RunStyle;
-        let content = normalize_runs(
-            [TextRun {
-                text: "a b \t ",
-                style: &style,
-                preserve_newlines: false,
-            }]
-            .into_iter(),
-            white_space_collapse::T::Collapse,
-        );
+        let style = RunStyle(1);
+        let content = normalize_one(&style, "a b \t ", false, white_space_collapse::T::Collapse);
         assert_eq!(content.text, "a b ");
         assert_eq!(content.ranges[0].bytes, 0..4);
     }
 
     #[test]
     fn segment_break_removal_covers_supplementary_east_asian_blocks() {
-        let style = RunStyle;
+        let style = RunStyle(1);
         for (source, expected) in [
             ("\u{F900}\n\u{F900}", "\u{F900}\u{F900}"),
             ("\u{FE10}\n\u{FE10}", "\u{FE10}\u{FE10}"),
@@ -368,22 +389,14 @@ mod tests {
             ("\u{1F200}\n\u{1F200}", "\u{1F200}\u{1F200}"),
             ("\u{20000}\n\u{20000}", "\u{20000}\u{20000}"),
         ] {
-            let content = normalize_runs(
-                [TextRun {
-                    text: source,
-                    style: &style,
-                    preserve_newlines: false,
-                }]
-                .into_iter(),
-                white_space_collapse::T::Collapse,
-            );
+            let content = normalize_one(&style, source, false, white_space_collapse::T::Collapse);
             assert_eq!(content.text, expected, "for source {source:?}");
         }
     }
 
     #[test]
     fn remove_trailing_space_shrinks_and_drops_emptied_ranges() {
-        let style = RunStyle;
+        let style = RunStyle(1);
         let mut content = ShapingContent::<'_, RunStyle> {
             text: String::new(),
             ranges: Vec::new(),
@@ -410,22 +423,10 @@ mod tests {
 
     #[test]
     fn fully_collapsible_and_empty_inputs_produce_no_shaping_ranges() {
-        let first = RunStyle;
-        let second = RunStyle;
+        let first = RunStyle(1);
+        let second = RunStyle(2);
         let whitespace = normalize_runs(
-            [
-                TextRun {
-                    text: " \t\r",
-                    style: &first,
-                    preserve_newlines: false,
-                },
-                TextRun {
-                    text: "\n ",
-                    style: &second,
-                    preserve_newlines: false,
-                },
-            ]
-            .into_iter(),
+            [run(&first, " \t\r", false), run(&second, "\n ", false)].into_iter(),
             white_space_collapse::T::Collapse,
         );
         let no_runs = normalize_runs(

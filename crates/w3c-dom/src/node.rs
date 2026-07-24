@@ -14,14 +14,12 @@ use neutron_star::compute::LeafMetrics;
 use neutron_star::compute::NaturalSize;
 use neutron_star::text::{TextContext, TextLayoutStore};
 use neutron_star::tree::Layout;
-use rustc_hash::FxHashMap;
 use selectors::matching::ElementSelectorFlags;
 use slab::Slab;
 use smallvec::SmallVec;
 use stylo::LocalName;
 use stylo::data::{ElementDataRef, ElementDataWrapper};
 use stylo::properties::{ComputedValues, PropertyDeclarationBlock};
-use stylo::selector_parser::Snapshot;
 use stylo::servo_arc::Arc;
 use stylo::shared_lock::{Locked, SharedRwLock};
 use stylo::stylesheets::UrlExtraData;
@@ -209,22 +207,25 @@ pub enum NodeType {
     Text,
 }
 
-pub(crate) enum NodeData {
-    Document {
-        lock: StdArc<SharedRwLock>,
-        url_data: UrlExtraData,
-        text_context: Box<OnceLock<AtomicRefCell<TextContext>>>,
-        #[cfg(debug_assertions)]
-        in_flush: AtomicBool,
-    },
+struct DocumentNodeData {
+    lock: StdArc<SharedRwLock>,
+    url_data: UrlExtraData,
+    text_context: OnceLock<AtomicRefCell<TextContext>>,
+    #[cfg(debug_assertions)]
+    in_flush: AtomicBool,
+}
+
+enum NodeData {
+    Document(Box<DocumentNodeData>),
     Element,
     Text,
 }
 
 /// Stylo's per-node traversal and invalidation bookkeeping, stored in the
 /// document's styling secondary arena under the owning node's [`NodeId`].
+/// Snapshot payloads are sparse, document-owned state; only their atomic
+/// traversal lifecycle flags remain here.
 pub(crate) struct StylingData {
-    pub(crate) snapshot: Option<Box<Snapshot>>,
     pub(crate) selector_flags: AtomicUsize,
     pub(crate) dirty_descendants: AtomicBool,
     pub(crate) snapshot_flags: AtomicU8,
@@ -236,7 +237,6 @@ pub(crate) struct StylingData {
 impl Default for StylingData {
     fn default() -> Self {
         Self {
-            snapshot: None,
             selector_flags: AtomicUsize::new(0),
             dirty_descendants: AtomicBool::new(false),
             snapshot_flags: AtomicU8::new(0),
@@ -276,9 +276,9 @@ pub struct Node<T> {
     pub(crate) parent: Option<NodeId>,
     pub(crate) children: Vec<NodeId>,
     pub(crate) local_name: Option<LocalName>,
-    pub(crate) classes: SmallVec<[Atom; 4]>,
+    pub(crate) classes: SmallVec<[Atom; 2]>,
     pub(crate) id_attribute: Option<Atom>,
-    pub(crate) attrs: FxHashMap<LocalName, String>,
+    pub(crate) attrs: Vec<(LocalName, String)>,
     pub(crate) element_state: ElementState,
 
     pub(crate) inline_block: Option<Arc<Locked<PropertyDeclarationBlock>>>,
@@ -299,13 +299,13 @@ impl<T> Node<T> {
         Self::new(
             owner,
             DOCUMENT_NODE_ID,
-            NodeData::Document {
+            NodeData::Document(Box::new(DocumentNodeData {
                 lock,
                 url_data,
-                text_context: Box::default(),
+                text_context: OnceLock::new(),
                 #[cfg(debug_assertions)]
                 in_flush: AtomicBool::new(false),
-            },
+            })),
             None,
             None,
         )
@@ -340,7 +340,7 @@ impl<T> Node<T> {
             local_name,
             classes: SmallVec::new(),
             id_attribute: None,
-            attrs: FxHashMap::default(),
+            attrs: Vec::new(),
             element_state: ElementState::empty(),
             inline_block: None,
             stylo_data: UnsafeCell::new(None),
@@ -376,35 +376,35 @@ impl<T> Node<T> {
             .expect("the document node is never removed")
     }
 
+    fn document_data(&self) -> &DocumentNodeData {
+        let node = if self.is_document() {
+            self
+        } else {
+            self.owner_document()
+        };
+        let NodeData::Document(document) = &node.data else {
+            unreachable!("slot zero must contain the document node")
+        };
+        document
+    }
+
     pub(crate) fn document_lock(&self) -> &StdArc<SharedRwLock> {
-        match &self.owner_document().data {
-            NodeData::Document { lock, .. } => lock,
-            _ => unreachable!("slot zero must contain the document node"),
-        }
+        &self.document_data().lock
     }
 
     pub(crate) fn document_url_data(&self) -> &UrlExtraData {
-        match &self.owner_document().data {
-            NodeData::Document { url_data, .. } => url_data,
-            _ => unreachable!("slot zero must contain the document node"),
-        }
+        &self.document_data().url_data
     }
 
     pub(crate) fn text_context(&self) -> &AtomicRefCell<TextContext> {
-        match &self.owner_document().data {
-            NodeData::Document { text_context, .. } => {
-                text_context.get_or_init(|| AtomicRefCell::new(TextContext::new()))
-            }
-            _ => unreachable!("slot zero must contain the document node"),
-        }
+        self.document_data()
+            .text_context
+            .get_or_init(|| AtomicRefCell::new(TextContext::new()))
     }
 
     #[cfg(debug_assertions)]
     pub(crate) fn flush_flag(&self) -> &AtomicBool {
-        match &self.owner_document().data {
-            NodeData::Document { in_flush, .. } => in_flush,
-            _ => unreachable!("slot zero must contain the document node"),
-        }
+        &self.document_data().in_flush
     }
 
     #[cfg(debug_assertions)]
@@ -420,7 +420,7 @@ impl<T> Node<T> {
     #[must_use]
     pub fn node_type(&self) -> NodeType {
         match &self.data {
-            NodeData::Document { .. } => NodeType::Document,
+            NodeData::Document(_) => NodeType::Document,
             NodeData::Element => NodeType::Element,
             NodeData::Text => NodeType::Text,
         }
@@ -428,7 +428,7 @@ impl<T> Node<T> {
 
     #[must_use]
     pub fn is_document(&self) -> bool {
-        matches!(&self.data, NodeData::Document { .. })
+        matches!(&self.data, NodeData::Document(_))
     }
 
     #[must_use]
@@ -484,7 +484,31 @@ impl<T> Node<T> {
     }
 
     pub(crate) fn attr_local_name(&self, name: &LocalName) -> Option<&str> {
-        self.attrs.get(name).map(String::as_str)
+        self.attrs
+            .iter()
+            .find_map(|(candidate, value)| (candidate == name).then_some(value.as_str()))
+    }
+
+    pub(crate) fn set_attr_local_name(&mut self, name: LocalName, value: String) {
+        if let Some((_, current)) = self
+            .attrs
+            .iter_mut()
+            .find(|(candidate, _)| *candidate == name)
+        {
+            *current = value;
+        } else {
+            self.attrs.push((name, value));
+        }
+    }
+
+    pub(crate) fn remove_attr_local_name(&mut self, name: &LocalName) {
+        if let Some(index) = self
+            .attrs
+            .iter()
+            .position(|(candidate, _)| candidate == name)
+        {
+            self.attrs.remove(index);
+        }
     }
 
     pub fn attributes(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
@@ -517,7 +541,7 @@ impl<T> Node<T> {
                     }
                 }
             }
-            NodeData::Document { .. } => panic!("the document node has no payload"),
+            NodeData::Document(_) => panic!("the document node has no payload"),
         }
     }
 
@@ -525,6 +549,21 @@ impl<T> Node<T> {
         #[expect(unsafe_code, reason = "UnsafeCell discriminant read outside any flush")]
         unsafe {
             (*self.stylo_data.get()).is_some()
+        }
+    }
+
+    pub(crate) fn needs_style_flush(&self) -> bool {
+        let styling = self.styling_data();
+        if styling.dirty_descendants.load(Ordering::Relaxed)
+            || styling.snapshot_flags.load(Ordering::Relaxed) & SNAPSHOT_PRESENT != 0
+        {
+            return true;
+        }
+        #[expect(unsafe_code, reason = "ElementData is only read outside a style flush")]
+        unsafe {
+            (*self.stylo_data.get())
+                .as_ref()
+                .is_none_or(|data| !data.borrow().hint.is_empty())
         }
     }
 
@@ -627,17 +666,33 @@ impl<T> Node<T> {
     }
 
     pub(crate) fn snapshot_present(&self) -> bool {
-        self.styling_data().snapshot_flags.load(Ordering::Relaxed) & SNAPSHOT_PRESENT != 0
+        self.snapshot_flags() & SNAPSHOT_PRESENT != 0
     }
 
     pub(crate) fn snapshot_handled(&self) -> bool {
-        self.styling_data().snapshot_flags.load(Ordering::Relaxed) & SNAPSHOT_HANDLED != 0
+        self.snapshot_flags() & SNAPSHOT_HANDLED != 0
+    }
+
+    pub(crate) fn snapshot_flags(&self) -> u8 {
+        self.styling_data().snapshot_flags.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_snapshot_present(&self) {
+        self.styling_data()
+            .snapshot_flags
+            .fetch_or(SNAPSHOT_PRESENT, Ordering::Relaxed);
     }
 
     pub(crate) fn set_snapshot_handled(&self) {
         self.styling_data()
             .snapshot_flags
             .fetch_or(SNAPSHOT_HANDLED, Ordering::Relaxed);
+    }
+
+    pub(crate) fn clear_snapshot_flags(&self) {
+        self.styling_data()
+            .snapshot_flags
+            .store(0, Ordering::Relaxed);
     }
 
     pub(crate) fn stylo_data_mut(&mut self) -> Option<&mut ElementDataWrapper> {
@@ -783,7 +838,14 @@ impl<'a, T> Iterator for ChildrenIter<'a, T> {
                 .expect("internal tree links always resolve"),
         )
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.children.len() - self.index;
+        (remaining, Some(remaining))
+    }
 }
+
+impl<T> ExactSizeIterator for ChildrenIter<'_, T> {}
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -791,17 +853,56 @@ mod tests {
     use super::*;
     use crate::Document;
 
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn document_only_state_stays_out_of_the_primary_node_stride() {
+        const PRE_BOXING_NODE_DATA_SIZE: usize = 32;
+        const PRE_BOXING_NODE_STRIDE: usize = 408;
+
+        assert_eq!(std::mem::size_of::<NodeData>(), 16);
+        assert_eq!(std::mem::size_of::<Node<()>>(), 368);
+        assert!(
+            std::mem::size_of::<NodeData>() < PRE_BOXING_NODE_DATA_SIZE,
+            "document-only state must not inflate element and text nodes"
+        );
+        assert!(
+            std::mem::size_of::<Node<()>>() < PRE_BOXING_NODE_STRIDE,
+            "boxing document-only state must reduce the primary arena stride"
+        );
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn styling_data_has_no_per_node_snapshot_pointer() {
+        #[allow(dead_code)]
+        struct PreviousStylingData {
+            snapshot: Option<Box<stylo::selector_parser::Snapshot>>,
+            selector_flags: AtomicUsize,
+            dirty_descendants: AtomicBool,
+            snapshot_flags: AtomicU8,
+            children_to_process: AtomicIsize,
+            #[cfg(debug_assertions)]
+            slot_guard: slot_guard::SlotGuard,
+        }
+
+        let before = if cfg!(debug_assertions) { 48 } else { 32 };
+        let after = if cfg!(debug_assertions) { 40 } else { 24 };
+        assert_eq!(std::mem::size_of::<PreviousStylingData>(), before);
+        assert_eq!(std::mem::size_of::<StylingData>(), after);
+        assert_eq!(before - after, std::mem::size_of::<usize>());
+    }
+
     #[test]
     fn document_text_context_is_lazy_and_reused() {
         let document = Document::<()>::new(crate::document::tests::device());
         let root = document.root_node();
-        let NodeData::Document { text_context, .. } = &root.data else {
+        let NodeData::Document(document) = &root.data else {
             unreachable!("slot zero is the document node")
         };
 
-        assert!(text_context.get().is_none());
+        assert!(document.text_context.get().is_none());
         let first = root.text_context();
-        assert!(text_context.get().is_some());
+        assert!(document.text_context.get().is_some());
         assert!(std::ptr::eq(first, root.text_context()));
     }
 

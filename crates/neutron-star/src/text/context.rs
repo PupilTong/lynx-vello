@@ -1,11 +1,18 @@
 //! Reusable Parley font and layout contexts.
 
 use core::fmt;
+use std::sync::OnceLock;
 
 use parley::fontique::{Blob, Collection, CollectionOptions, SourceCache};
 use parley::{FontContext, LayoutContext};
 
 use crate::style::TextBrush;
+
+fn system_font_template() -> &'static FontContext {
+    static TEMPLATE: OnceLock<FontContext> = OnceLock::new();
+
+    TEMPLATE.get_or_init(FontContext::new)
+}
 
 /// Reusable resources for text shaping and layout.
 pub struct TextContext {
@@ -19,7 +26,9 @@ impl TextContext {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            font: FontContext::new(),
+            // The discovered system-font backend is immutable and shared;
+            // mutable source and layout caches remain local to this context.
+            font: system_font_template().clone(),
             layout: LayoutContext::new(),
             #[cfg(test)]
             shape_count: 0,
@@ -103,5 +112,16 @@ mod tests {
         let context = TextContext::default();
         assert_eq!(context.shape_count(), 0);
         assert!(format!("{context:?}").starts_with("TextContext"));
+    }
+
+    #[test]
+    fn default_contexts_isolate_registered_fonts() {
+        let mut context = TextContext::new();
+        let mut sibling = TextContext::new();
+        let sibling_before = sibling.font.collection.family_id("Ahem");
+
+        assert_eq!(context.register_fonts(AHEM), 1);
+        assert!(context.font.collection.family_id("Ahem").is_some());
+        assert_eq!(sibling.font.collection.family_id("Ahem"), sibling_before);
     }
 }

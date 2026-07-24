@@ -106,10 +106,11 @@ The project's own `default_layout_style.h` already encodes a "Lynx default vs W3
 `display:linear` ports Android's `LinearLayout` model. Main axis is chosen by `linear-orientation`/`linear-direction` (two overlapping properties — `linear-orientation` is the legacy/deprecated one per its own compat data `"deprecated": true`; `linear-direction` id 189 is the current one, both accepting `vertical|horizontal|vertical-reverse|horizontal-reverse` and the newer CSS-flex-like aliases `row|row-reverse|column|column-reverse`). Children are laid out sequentially along that axis; cross-axis placement per-child uses `linear-layout-gravity` (child-side, ~`align-self`); container-side distribution along main axis uses `linear-gravity` (~`justify-content` + more absolute anchor keywords `top/bottom/left/right`); container-side cross-axis alignment for all children uses `linear-cross-gravity` (~`align-items`, but with only `start/end/center/stretch/none`, no space-distribution values). Extra space distribution along the main axis, beyond gravity, uses an Android-style weight system: `linear-weight` (per-child, like `flex-grow` but simpler — no shrink/basis split) divided over `linear-weight-sum` (explicit container-declared total, unlike flex's implicit sum-of-flex-grow).
 
 **Implementation status:** `crates/neutron-star` implements this formatting
-context as the generic `compute_linear_layout` peer algorithm plus the
-`LinearContainerStyle` and `LinearItemStyle` style protocols (read through
-the `LayoutNode` handle), alongside its Flex, Grid, and Relative protocols
-and algorithms. The style surface follows the stylo fork's grammar: the
+context as the generic `compute_linear_layout` peer algorithm. The single
+`CoreStyle` source-backed protocol (read through the `LayoutNode` handle)
+lends its Linear values directly from the same guarded Stylo
+`ComputedValues` as Flex, Grid, and Relative. The style surface follows the
+stylo fork's grammar: the
 deprecated gravity longhands and `linear-orientation` do not exist there
 (see `deviations.md`), so orientation is `linear-direction` and the gravity
 channels ride the standard `justify-content`/`align-items`/`align-self`

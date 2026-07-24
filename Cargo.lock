@@ -968,6 +968,7 @@ dependencies = [
  "codspeed-divan-compat",
  "euclid",
  "parley",
+ "smallvec",
  "stylo",
  "stylo_traits",
  "w3c-dom",

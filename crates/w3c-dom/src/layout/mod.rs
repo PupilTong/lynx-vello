@@ -20,8 +20,7 @@ pub use self::style::StyleView;
 use crate::document::Document;
 use crate::flush::Parallelism;
 
-/// One node's intermediate layout state, stored in the document's layout
-/// secondary arena under the node's `NodeId`.
+/// One node's cache and positioned-layout state.
 pub(crate) struct LayoutData {
     pub(crate) measure_cache: Cache,
     pub(crate) static_position: Point<f32>,

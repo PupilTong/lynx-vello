@@ -128,10 +128,14 @@ impl<T: Sync> Document<T> {
         parallelism: Parallelism,
         sink: &mut dyn FnMut(NodeId, StyleDamage),
     ) -> FlushStatus {
-        let Some(root) = self.root_element().map(Node::id) else {
+        let Some(root) = self.root_element() else {
             return FlushStatus::Skipped;
         };
-        let snapshots = self.take_snapshot_map(root);
+        if !root.needs_style_flush() {
+            return FlushStatus::Skipped;
+        }
+        let root = root.id();
+        let snapshots = self.take_snapshot_map();
         #[cfg(debug_assertions)]
         let phase = self.begin_flush_phase();
         let (harvest_root, traversed) = {
@@ -177,7 +181,7 @@ impl<T: Sync> Document<T> {
         };
         #[cfg(debug_assertions)]
         drop(phase);
-        self.harvest_flush(harvest_root, &snapshots, sink);
+        self.harvest_flush(harvest_root, snapshots, sink);
         if traversed {
             FlushStatus::Traversed
         } else {

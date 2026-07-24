@@ -159,22 +159,11 @@ impl CoreStyle for MockStyle {
     fn skips_contents(&self) -> bool {
         self.skips_contents
     }
-}
 
-impl FlexContainerStyle for MockStyle {}
-
-impl FlexItemStyle for MockStyle {
     fn flex_grow(&self) -> NonNegativeNumber {
         self.flex_grow
     }
-}
 
-impl RelativeContainerStyle for MockStyle {}
-impl RelativeItemStyle for MockStyle {}
-impl LinearContainerStyle for MockStyle {}
-impl LinearItemStyle for MockStyle {}
-
-impl GridContainerStyle for MockStyle {
     fn grid_template_rows(&self) -> &GridTemplateComponent {
         const NONE: &GridTemplateComponent = &GridTemplateComponent::None;
         NONE
@@ -191,9 +180,7 @@ impl GridContainerStyle for MockStyle {
     fn grid_auto_columns(&self) -> &ImplicitGridTracks {
         &self.implicit_tracks
     }
-}
 
-impl GridItemStyle for MockStyle {
     fn grid_column_start(&self) -> &GridLine {
         &self.grid_column.start
     }
@@ -399,20 +386,14 @@ fn style_views_serve_initial_defaults() {
     assert_eq!(view.position(), PositionProperty::Static);
     assert_eq!(view.visibility(), visibility::T::Visible);
     assert!(matches!(view.size().width, StyleSize::Auto));
-    assert_eq!(FlexItemStyle::order(&view), 0);
-    assert_eq!(
-        RelativeContainerStyle::relative_layout_once(&view),
-        relative_layout_once::T::True
-    );
-    assert_eq!(RelativeItemStyle::relative_id(&view), -1);
-    assert_eq!(
-        RelativeItemStyle::relative_center(&view),
-        relative_center::T::None
-    );
-    assert_eq!(GridItemStyle::grid_column_start(&view), &GridLine::auto());
-    assert_eq!(GridItemStyle::grid_column_end(&view), &GridLine::auto());
-    assert_eq!(GridItemStyle::grid_row_start(&view), &GridLine::auto());
-    assert_eq!(GridItemStyle::grid_row_end(&view), &GridLine::auto());
+    assert_eq!(view.order(), 0);
+    assert_eq!(view.relative_layout_once(), relative_layout_once::T::True);
+    assert_eq!(view.relative_id(), -1);
+    assert_eq!(view.relative_center(), relative_center::T::None);
+    assert_eq!(view.grid_column_start(), &GridLine::auto());
+    assert_eq!(view.grid_column_end(), &GridLine::auto());
+    assert_eq!(view.grid_row_start(), &GridLine::auto());
+    assert_eq!(view.grid_row_end(), &GridLine::auto());
 }
 
 #[test]
@@ -435,7 +416,7 @@ fn grid_template_borrow_serves_stylo_track_lists() {
         ..MockStyle::default()
     };
 
-    let template = GridContainerStyle::grid_template_columns(&style);
+    let template = style.grid_template_columns();
     let GridTemplateComponent::TrackList(list) = template else {
         panic!("expected a track list, got {template:?}");
     };
@@ -453,10 +434,10 @@ fn grid_template_borrow_serves_stylo_track_lists() {
         other @ TrackListValue::TrackSize(_) => panic!("expected a repetition, got {other:?}"),
     }
     assert!(matches!(
-        GridContainerStyle::grid_template_rows(&style),
+        style.grid_template_rows(),
         GridTemplateComponent::None
     ));
-    assert!(GridContainerStyle::grid_auto_rows(&style).0.is_empty());
+    assert!(style.grid_auto_rows().0.is_empty());
 }
 
 #[test]

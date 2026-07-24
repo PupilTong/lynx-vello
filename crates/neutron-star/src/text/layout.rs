@@ -10,8 +10,6 @@ use crate::style::TextBrush;
 #[derive(Debug, Clone)]
 pub struct TextLayout {
     parley_layout: Layout<TextBrush>,
-    metrics: LeafMetrics,
-    line_count: usize,
     max_advance: Option<f32>,
     min_content_width: f32,
     has_text: bool,
@@ -22,8 +20,6 @@ impl TextLayout {
         let min_content_width = parley_layout.calculate_content_widths().min;
         Self {
             parley_layout,
-            metrics: LeafMetrics::default(),
-            line_count: 0,
             max_advance: None,
             min_content_width,
             has_text,
@@ -35,7 +31,6 @@ impl TextLayout {
             .set_text_indent(text_indent, IndentOptions::default());
         self.parley_layout.break_all_lines(max_advance);
         self.max_advance = max_advance;
-        self.refresh_metrics();
     }
 
     pub(super) const fn min_content_width(&self) -> f32 {
@@ -45,25 +40,6 @@ impl TextLayout {
     pub(super) fn align(&mut self, alignment: Alignment) {
         self.parley_layout
             .align(alignment, AlignmentOptions::default());
-        self.refresh_metrics();
-    }
-
-    fn refresh_metrics(&mut self) {
-        let baseline = self
-            .has_text
-            .then(|| self.parley_layout.get(0))
-            .flatten()
-            .map(|line| line.metrics().baseline);
-        self.metrics = LeafMetrics::new(Size::new(
-            self.parley_layout.width(),
-            self.parley_layout.height(),
-        ))
-        .with_first_baselines(Point::new(None, baseline));
-        self.line_count = if self.has_text {
-            self.parley_layout.len()
-        } else {
-            0
-        };
     }
 
     #[must_use]
@@ -72,18 +48,25 @@ impl TextLayout {
     }
 
     #[must_use]
-    pub const fn size(&self) -> Size<f32> {
-        self.metrics.size
+    pub fn size(&self) -> Size<f32> {
+        Size::new(self.parley_layout.width(), self.parley_layout.height())
     }
 
     #[must_use]
-    pub const fn first_baseline(&self) -> Option<f32> {
-        self.metrics.first_baselines.y
+    pub fn first_baseline(&self) -> Option<f32> {
+        self.has_text
+            .then(|| self.parley_layout.get(0))
+            .flatten()
+            .map(|line| line.metrics().baseline)
     }
 
     #[must_use]
-    pub const fn line_count(&self) -> usize {
-        self.line_count
+    pub fn line_count(&self) -> usize {
+        if self.has_text {
+            self.parley_layout.len()
+        } else {
+            0
+        }
     }
 
     #[must_use]
@@ -109,36 +92,36 @@ impl<'a> TextMeasurement<'a> {
     }
 
     #[must_use]
-    pub const fn size(self) -> Size<f32> {
+    pub fn size(self) -> Size<f32> {
         self.layout.size()
     }
 
     #[must_use]
-    pub const fn first_baselines(self) -> Point<Option<f32>> {
-        self.layout.metrics.first_baselines
+    pub fn first_baselines(self) -> Point<Option<f32>> {
+        Point::new(None, self.layout.first_baseline())
     }
 
-    pub(super) const fn metrics(self) -> LeafMetrics {
-        self.layout.metrics
+    pub(super) fn metrics(self) -> LeafMetrics {
+        LeafMetrics::new(self.size()).with_first_baselines(self.first_baselines())
     }
 }
 
 /// Per-node retained artifacts for transient probes and durable layout.
 #[derive(Debug, Default)]
 pub struct TextLayoutStore {
-    pub(super) probe: Option<TextLayout>,
-    pub(super) committed: Option<TextLayout>,
+    pub(super) probe: Option<Box<TextLayout>>,
+    pub(super) committed: Option<Box<TextLayout>>,
 }
 
 impl TextLayoutStore {
     #[must_use]
-    pub const fn probe(&self) -> Option<&TextLayout> {
-        self.probe.as_ref()
+    pub fn probe(&self) -> Option<&TextLayout> {
+        self.probe.as_deref()
     }
 
     #[must_use]
-    pub const fn committed(&self) -> Option<&TextLayout> {
-        self.committed.as_ref()
+    pub fn committed(&self) -> Option<&TextLayout> {
+        self.committed.as_deref()
     }
 
     pub fn invalidate(&mut self) {
@@ -172,8 +155,8 @@ mod tests {
     #[test]
     fn artifact_invalidation_clears_both_lifetimes() {
         let mut slots = TextLayoutStore {
-            probe: Some(empty_artifact()),
-            committed: Some(empty_artifact()),
+            probe: Some(Box::new(empty_artifact())),
+            committed: Some(Box::new(empty_artifact())),
         };
         assert!(slots.probe().is_some());
         assert!(slots.committed().is_some());
@@ -182,5 +165,18 @@ mod tests {
 
         assert!(slots.probe().is_none());
         assert!(slots.committed().is_none());
+    }
+
+    #[test]
+    fn artifact_slots_are_pointer_sized() {
+        assert_eq!(
+            size_of::<TextLayoutStore>(),
+            2 * size_of::<*const TextLayout>()
+        );
+        assert!(size_of::<TextLayoutStore>() < size_of::<TextLayout>());
+        assert!(
+            size_of::<TextLayout>() <= size_of::<Layout<TextBrush>>() + 2 * size_of::<usize>(),
+            "retained text should add only intrinsic-width, break-width, and lifecycle metadata"
+        );
     }
 }
