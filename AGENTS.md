@@ -201,7 +201,7 @@ useful signal for currently-compatible versions of those libraries.
   positioned pass implements the W3C `position: fixed`
   containing-block rule via the protocol's scheme override.
   `display: contents` elements generate no box: the engine's
-  `box_children` splices them out of every item collection, and the host
+  `flattened_children` splices them out of every item collection, and the host
   denies them containing-block, containment, skipped-contents, and hoisting
   status and zeroes their `LayoutSlot` in the positioned pass (the document
   element is exempt — Stylo blockifies it). Replaced leaf
@@ -244,7 +244,7 @@ useful signal for currently-compatible versions of those libraries.
   and without `RefCell`/`AtomicRefCell` checks. Style traits speak the stylo fork's computed-value
   vocabulary directly (requires the `stylo` workspace dep + python3 for its
   build script; the old zero-dependency/standalone pillar is retired), and
-  host-side display dispatch; `LayoutTree::box_children` is the box-tree
+  host-side display dispatch; `LayoutTree::flattened_children` is the box-tree
   view every algorithm collects items through, flattening `display: contents`
   subtrees. Leaf content is deliberately closed: replaced
   content uses the `NaturalSize` value path, while text uses the crate's

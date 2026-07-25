@@ -155,26 +155,38 @@ style_protocol! {
             ),
             box_sizing -> box_sizing::T = style.computed_values().clone_box_sizing(),
             direction -> direction::T = style.inherited_values().clone_direction(),
-            // Containment and content-visibility have no effect on an element
-            // that generates no box at all: there is no principal box to
-            // contain, and `display: contents` children keep generating their
-            // own boxes regardless (CSS Contain 2 §1.1, CSS Display 3 §3.3).
-            containment -> Contain = if style.display().is_contents() {
-                Contain::empty()
-            } else {
-                effective_containment(
-                    style.computed_values().clone_contain(),
-                    style.computed_values().clone_content_visibility(),
-                    style.skips_contents(),
-                )
+            containment -> Contain = {
+                let box_style = style.computed_values().get_box();
+                if box_style.contain.is_empty()
+                    && box_style.content_visibility == ContentVisibility::Visible
+                {
+                    // Nothing authored and nothing to fold: the overwhelmingly
+                    // common node, answered without asking how it is displayed.
+                    Contain::empty()
+                } else if style.display().is_contents() {
+                    // Containment and content-visibility have no effect on an
+                    // element that generates no box at all: there is no
+                    // principal box to contain, and its children keep
+                    // generating their own boxes regardless (CSS Contain 2
+                    // §1.1, CSS Display 3 §3.3).
+                    Contain::empty()
+                } else {
+                    effective_containment(
+                        box_style.contain,
+                        box_style.content_visibility,
+                        style.skips_contents(),
+                    )
+                }
             },
             contain_intrinsic_width -> ContainIntrinsicSize =
                 style.computed_values().clone_contain_intrinsic_width(),
             contain_intrinsic_height -> ContainIntrinsicSize =
                 style.computed_values().clone_contain_intrinsic_height(),
-            skips_contents -> bool = !style.display().is_contents()
-                && style.computed_values().clone_content_visibility()
-                    == ContentVisibility::Hidden,
+            // An element generating no box has no contents to skip — asked
+            // second, so the common node never pays for the question.
+            skips_contents -> bool =
+                style.computed_values().clone_content_visibility() == ContentVisibility::Hidden
+                    && !style.display().is_contents(),
 
             flex_direction -> flex_direction::T =
                 style.computed_values().clone_flex_direction(),

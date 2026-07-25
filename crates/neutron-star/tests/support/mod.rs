@@ -1353,7 +1353,7 @@ impl TestTree {
     }
 
     /// A `display: contents` element: it generates no box, so it carries no
-    /// container role — `box_children` splices its children into its parent's
+    /// container role — `flattened_children` splices its children into its parent's
     /// formatting context and it is never laid out itself.
     pub(super) fn push_contents(&mut self, children: Vec<TestId>) -> TestId {
         self.push(TestSourceNode {

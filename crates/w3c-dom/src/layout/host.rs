@@ -85,15 +85,6 @@ impl<T> LayoutTree for TreeArenas<T> {
                 hide_subtree(self, state, node);
                 return LayoutOutput::HIDDEN;
             }
-            if display == DisplayMode::Contents {
-                // Unreachable: `box_children` splices box-less elements out of
-                // every item collection, the positioned pass never hoists one,
-                // and Stylo blockifies `display: contents` on the document
-                // element. Report the no-box geometry rather than panicking,
-                // and leave the descendants to their real box ancestor.
-                debug_assert!(false, "a display: contents element has no box to lay out");
-                return LayoutOutput::HIDDEN;
-            }
             if view.skips_contents() {
                 return compute_skipped_contents_layout(self, state, node, input);
             }
@@ -102,8 +93,13 @@ impl<T> LayoutTree for TreeArenas<T> {
 
         compute_cached_layout(self, state, node, input, move |tree, state, node, input| {
             match display {
+                // `None` is hidden and returned above. `Contents` generates no
+                // box at all and nothing routes one here: `flattened_children`
+                // splices it out of every item collection, the positioned pass
+                // never hoists it, `is_relayout_boundary` is false for it, and
+                // Stylo blockifies it on the document element.
                 DisplayMode::None | DisplayMode::Contents => {
-                    unreachable!("box-less nodes never reach the cache wrapper")
+                    unreachable!("a box-less element has no box to lay out")
                 }
                 DisplayMode::Flex => compute_flexbox_layout(tree, state, node, input),
                 DisplayMode::Grid => compute_grid_layout(tree, state, node, input),
@@ -387,14 +383,14 @@ fn position_hoisted<T: Sync>(
 
 fn sibling_paint_order<T>(tree: &TreeArenas<T>, parent_id: NodeId, target: NodeId) -> u32 {
     let Some(target_index) = tree
-        .box_children(parent_id)
+        .flattened_children(parent_id)
         .position(|(id, _)| id == target)
     else {
         return 0;
     };
     let target_key = (0_i32, target_index);
     let mut rank = 0u32;
-    for (index, (child_id, _)) in tree.box_children(parent_id).enumerate() {
+    for (index, (child_id, _)) in tree.flattened_children(parent_id).enumerate() {
         let child = slab_get_for_live_node(&tree.nodes, child_id);
         let Some(order) = sibling_effective_paint_order(child) else {
             continue;

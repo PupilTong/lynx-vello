@@ -767,7 +767,7 @@ fn hidden_style() -> MockStyle {
 }
 
 #[test]
-fn box_children_splices_display_contents_subtrees_in_source_order() {
+fn flattened_children_splices_display_contents_subtrees_in_source_order() {
     // root: [ first, wrapper[ nested[ inner ], hidden ], last ]
     let mut tree = MockTree::default();
     let first = tree.push(MockStyle::default(), vec![]);
@@ -779,16 +779,16 @@ fn box_children_splices_display_contents_subtrees_in_source_order() {
     let root = tree.push(MockStyle::default(), vec![first, wrapper, last]);
 
     let ids = |node: usize| -> Vec<usize> {
-        tree.box_children(tree.node(node))
+        tree.flattened_children(tree.node(node))
             .map(|(child, _)| child.index)
             .collect()
     };
 
     // Each yielded child arrives with the style the walk read to classify it.
     let (yielded, style) = tree
-        .box_children(tree.node(root))
+        .flattened_children(tree.node(root))
         .next()
-        .expect("the root has box children");
+        .expect("the root has children");
     assert_eq!(yielded.index, first);
     assert!(std::ptr::eq(style, tree.style(tree.node(first))));
 
@@ -810,23 +810,40 @@ fn box_children_splices_display_contents_subtrees_in_source_order() {
 }
 
 #[test]
-fn box_children_size_hint_stays_a_usable_lower_bound() {
+fn flattened_children_size_hint_never_bounds_a_walk_it_cannot_predict() {
     let mut tree = MockTree::default();
-    let inner = tree.push(MockStyle::default(), vec![]);
-    let wrapper = tree.push(contents_style(), vec![inner, inner]);
     let plain = tree.push(MockStyle::default(), vec![]);
-    let flattened = tree.push(MockStyle::default(), vec![wrapper, plain]);
+    let expanding = tree.push(contents_style(), vec![plain, plain]);
+    let empty = tree.push(contents_style(), vec![]);
     let direct = tree.push(MockStyle::default(), vec![plain, plain]);
+    let grows = tree.push(MockStyle::default(), vec![expanding, plain]);
+    // The case that makes any source-derived lower bound wrong: one child,
+    // box-less and childless, so the walk yields nothing at all.
+    let shrinks = tree.push(MockStyle::default(), vec![empty]);
 
-    // Without a box-less child the hint is exact; with one it under-counts
-    // rather than over-counts, so item buffers only ever grow.
-    assert_eq!(tree.box_children(tree.node(direct)).size_hint(), (2, None));
-    assert_eq!(tree.box_children(tree.node(direct)).count(), 2);
+    // A `display: contents` child can add items or remove them, so the walk
+    // is bounded from neither side and `size_hint` promises nothing.
+    for node in [direct, grows, shrinks] {
+        assert_eq!(
+            tree.flattened_children(tree.node(node)).size_hint(),
+            (0, None)
+        );
+    }
+    assert_eq!(tree.flattened_children(tree.node(direct)).count(), 2);
+    assert_eq!(tree.flattened_children(tree.node(grows)).count(), 3);
+    assert_eq!(tree.flattened_children(tree.node(shrinks)).count(), 0);
+
+    // Pre-allocation uses the separate estimate instead, which is exact for
+    // the common node and only an estimate once a box-less child appears.
     assert_eq!(
-        tree.box_children(tree.node(flattened)).size_hint(),
-        (2, None)
+        tree.flattened_children(tree.node(direct)).capacity_hint(),
+        2
     );
-    assert_eq!(tree.box_children(tree.node(flattened)).count(), 3);
+    assert_eq!(tree.flattened_children(tree.node(grows)).capacity_hint(), 2);
+    assert_eq!(
+        tree.flattened_children(tree.node(shrinks)).capacity_hint(),
+        1
+    );
 }
 
 fn size_px(value: f32) -> StyleSize {

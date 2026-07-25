@@ -1181,9 +1181,8 @@ where
     );
 
     let commits_layout = input.goal == LayoutGoal::Commit;
-    let children = tree.box_children(node);
-    let (lower, upper) = children.size_hint();
-    let mut in_flow = Vec::with_capacity(upper.unwrap_or(lower));
+    let children = tree.flattened_children(node);
+    let mut in_flow = Vec::with_capacity(children.capacity_hint());
     let mut absolute = commits_layout.then(Vec::new);
     let mut hidden = commits_layout.then(Vec::new);
     for (document_index, (child, style)) in children.enumerate() {

@@ -106,7 +106,7 @@ pub trait LayoutTree {
     ///
     /// Cleanup and traversal read this: hiding a subtree and the rounding
     /// walk must reach every descendant. Algorithms collecting the items of
-    /// a formatting context read [`box_children`](LayoutTree::box_children)
+    /// a formatting context read [`flattened_children`](LayoutTree::flattened_children)
     /// instead.
     fn children(&self, node: Self::NodeId) -> Self::ChildIter<'_>;
 
@@ -114,8 +114,8 @@ pub trait LayoutTree {
         self.children(node).count()
     }
 
-    /// The children that generate a box in this node's formatting context,
-    /// each paired with the style the walk already had to read.
+    /// [`children`] with every `display: contents` subtree flattened in
+    /// place, each child paired with the style the walk already had to read.
     ///
     /// A `display: contents` element generates no box of its own while its
     /// children keep generating theirs, in the *nearest box ancestor's*
@@ -128,14 +128,19 @@ pub trait LayoutTree {
     /// Deciding that takes each child's `display`, which item collection needs
     /// anyway, so the style is handed back rather than looked up twice.
     ///
+    /// This is the *box-tree topology*, not the set of boxes: `display: none`
+    /// children are still yielded, because clearing their stale geometry
+    /// belongs to the algorithm that collects them. Callers classify each
+    /// child from the style they get back.
+    ///
     /// Provided; a host must not override it.
     ///
     /// [`children`]: LayoutTree::children
-    fn box_children(&self, node: Self::NodeId) -> BoxChildren<'_, Self>
+    fn flattened_children(&self, node: Self::NodeId) -> FlattenedChildren<'_, Self>
     where
         Self: Sized,
     {
-        BoxChildren {
+        FlattenedChildren {
             tree: self,
             level: self.children(node),
             outer: SmallVec::new(),
@@ -177,29 +182,43 @@ pub trait LayoutTree {
     }
 }
 
-/// The box-generating children of one node — see
-/// [`LayoutTree::box_children`].
+/// One node's children with `display: contents` subtrees flattened in — see
+/// [`LayoutTree::flattened_children`].
 ///
 /// `outer` suspends the child iterators of the levels a `display: contents`
 /// element was spliced into, so nesting resumes them in order. It stays
 /// empty, and the iterator stays a plain pass-through, for the overwhelmingly
 /// common node whose children all generate boxes.
-pub struct BoxChildren<'tree, T: LayoutTree> {
+pub struct FlattenedChildren<'tree, T: LayoutTree> {
     tree: &'tree T,
     level: T::ChildIter<'tree>,
     outer: SmallVec<[T::ChildIter<'tree>; 2]>,
 }
 
-impl<T: LayoutTree> core::fmt::Debug for BoxChildren<'_, T> {
+impl<T: LayoutTree> core::fmt::Debug for FlattenedChildren<'_, T> {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
-            .debug_struct("BoxChildren")
+            .debug_struct("FlattenedChildren")
             .field("suspended_levels", &self.outer.len())
             .finish_non_exhaustive()
     }
 }
 
-impl<'tree, T: LayoutTree> Iterator for BoxChildren<'tree, T> {
+impl<T: LayoutTree> FlattenedChildren<'_, T> {
+    /// How many items to reserve for — the children left at the current
+    /// level, which is exact until a `display: contents` child is reached.
+    ///
+    /// Deliberately **not** [`Iterator::size_hint`]: an empty box-less child
+    /// makes this an over-estimate, which is fine for `Vec::with_capacity`
+    /// but would break the bound that trait promises.
+    #[must_use]
+    #[inline]
+    pub fn capacity_hint(&self) -> usize {
+        self.level.size_hint().0
+    }
+}
+
+impl<'tree, T: LayoutTree> Iterator for FlattenedChildren<'tree, T> {
     type Item = (T::NodeId, T::Style<'tree>);
 
     #[inline]
@@ -218,12 +237,14 @@ impl<'tree, T: LayoutTree> Iterator for BoxChildren<'tree, T> {
         }
     }
 
-    /// Only a lower bound: each `display: contents` child contributes its own
-    /// children instead of itself, so the exact count needs the walk itself.
-    /// Callers size their item buffers from it.
+    /// Unknown in both directions. A `display: contents` child contributes
+    /// its own children instead of itself, so the remaining source children
+    /// bound the result from neither side — an empty box-less child alone
+    /// makes the walk yield fewer items than the level holds. Use
+    /// [`capacity_hint`](Self::capacity_hint) to size buffers.
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.level.size_hint().0, None)
+        (0, None)
     }
 }
 

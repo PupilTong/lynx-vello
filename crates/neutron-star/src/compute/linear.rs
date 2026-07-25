@@ -1364,9 +1364,8 @@ where
     );
     let mut percentage_basis = definite_inner_size;
 
-    let children = tree.box_children(node);
-    let (lower, upper) = children.size_hint();
-    let mut items = Vec::with_capacity(upper.unwrap_or(lower));
+    let children = tree.flattened_children(node);
+    let mut items = Vec::with_capacity(children.capacity_hint());
     let mut absolute_items = Vec::new();
     let mut hidden_items = Vec::new();
     let mut has_nonzero_order = false;
