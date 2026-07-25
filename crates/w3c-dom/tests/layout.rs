@@ -348,6 +348,180 @@ fn display_none_zeroes_the_subtree_and_layout_recovers_after_invalidation() {
 }
 
 #[test]
+fn display_contents_lifts_children_into_the_containers_formatting_context() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 300px; height: 40px; }
+         view { flex-grow: 1; }
+         .wrapper { display: contents; }",
+    );
+    let root = h.doc.root;
+    let first = h.doc.el(root, "view");
+    let wrapper = h.doc.el(root, ".wrapper");
+    let lifted = h.doc.el(wrapper, "view");
+    let nested_wrapper = h.doc.el(wrapper, ".wrapper");
+    let nested = h.doc.el(nested_wrapper, "view");
+    h.layout();
+
+    // Three flex items in source order, sharing the container's width — the
+    // wrappers add no box and no formatting context of their own.
+    assert_eq!(h.rect(first), (0.0, 0.0, 100.0, 40.0));
+    assert_eq!(h.rect(lifted), (100.0, 0.0, 100.0, 40.0));
+    assert_eq!(h.rect(nested), (200.0, 0.0, 100.0, 40.0));
+
+    // A box-less element has no box to report.
+    assert_eq!(h.rect(wrapper), (0.0, 0.0, 0.0, 0.0));
+    assert_eq!(h.rect(nested_wrapper), (0.0, 0.0, 0.0, 0.0));
+}
+
+#[test]
+fn display_contents_works_across_every_container_algorithm() {
+    // Grid placement, linear weights, and relative id anchoring all resolve
+    // over the flattened item list, not the source child list.
+    let mut h = Harness::new(
+        "page { display: flex; width: 300px; height: 300px; }
+         .wrapper { display: contents; }
+         .grid { display: grid; grid-template-columns: 40px 60px; width: 100px; height: 20px; }
+         .linear { display: linear; linear-direction: row; linear-weight-sum: 2;
+                   width: 100px; height: 20px; }
+         .weighted { linear-weight: 1; }
+         .relative { display: relative; width: 100px; height: 20px; }
+         .anchor { relative-id: 1; width: 30px; height: 20px; }
+         .after { relative-right-of: 1; width: 20px; height: 20px; }",
+    );
+    let root = h.doc.root;
+
+    let grid = h.doc.el(root, ".grid");
+    let grid_wrapper = h.doc.el(grid, ".wrapper");
+    let first_cell = h.doc.el(grid_wrapper, "view");
+    let second_cell = h.doc.el(grid_wrapper, "view");
+
+    let linear = h.doc.el(root, ".linear");
+    let linear_wrapper = h.doc.el(linear, ".wrapper");
+    let first_weighted = h.doc.el(linear_wrapper, ".weighted");
+    let second_weighted = h.doc.el(linear_wrapper, ".weighted");
+
+    let relative = h.doc.el(root, ".relative");
+    let relative_wrapper = h.doc.el(relative, ".wrapper");
+    let anchor = h.doc.el(relative_wrapper, ".anchor");
+    let after = h.doc.el(relative_wrapper, ".after");
+
+    h.layout();
+
+    assert_eq!(h.rect(first_cell).0, 0.0);
+    assert_eq!(h.rect(first_cell).2, 40.0);
+    assert_eq!(h.rect(second_cell).0, 40.0);
+    assert_eq!(h.rect(second_cell).2, 60.0);
+
+    assert_eq!(h.rect(first_weighted).0, 0.0);
+    assert_eq!(h.rect(first_weighted).2, 50.0);
+    assert_eq!(h.rect(second_weighted).0, 50.0);
+
+    assert_eq!(h.rect(anchor).0, 0.0);
+    assert_eq!(h.rect(after).0, 30.0);
+}
+
+#[test]
+fn display_contents_inherits_to_its_children_without_boxing_them() {
+    let mut dom = w3c_dom::Document::new(common::device(800.0, 600.0));
+    dom.add_stylesheet(
+        "page { display: flex; width: 200px; height: 100px; align-items: flex-start;
+                font-family: Ahem; font-size: 16px; }
+         .wrapper { display: contents; font-size: 8px; }",
+        w3c_dom::StylesheetOrigin::Author,
+    );
+    assert_eq!(dom.register_fonts(AHEM), 1);
+    let root = dom.create_element("page", ());
+    dom.append_document_element(root);
+    let wrapper = dom.create_element("view", ());
+    dom.add_class(wrapper, "wrapper");
+    dom.append_child(root, wrapper);
+    let text = dom.create_text_node("hello", ());
+    dom.append_child(wrapper, text);
+    dom.layout();
+
+    // The text is an item of `page`, but inherits through its box-less DOM
+    // parent: five Ahem glyphs at the wrapper's 8px, not the container's 16px.
+    assert_eq!(dom_rect(&dom, text), (0.0, 0.0, 40.0, 8.0));
+    assert_eq!(dom_rect(&dom, wrapper), (0.0, 0.0, 0.0, 0.0));
+}
+
+#[test]
+fn display_contents_cannot_contain_position_or_paint_its_descendants() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 300px; height: 100px; }
+         .wrapper { display: contents; position: fixed; left: 90px; top: 80px;
+                    transform: translateX(5px); contain: strict;
+                    content-visibility: hidden; }
+         .abs { position: absolute; left: 10px; top: 20px; width: 30px; height: 40px; }
+         .plain { width: 30px; }",
+    );
+    let root = h.doc.root;
+    let plain = h.doc.el(root, ".plain");
+    let wrapper = h.doc.el(root, ".wrapper");
+    let absolute = h.doc.el(wrapper, ".abs");
+    h.layout();
+
+    // None of `position`, `transform`, `contain`, or `content-visibility`
+    // applies to an element that generates no box, so the wrapper is neither
+    // hoisted nor a containing block, and its subtree is neither skipped nor
+    // contained: the absolute child resolves against `page`, which is static
+    // and therefore hands it to the viewport.
+    assert_eq!(h.rect(wrapper), (0.0, 0.0, 0.0, 0.0));
+    assert_eq!(h.rect(absolute), (10.0, 20.0, 30.0, 40.0));
+    // Its paint rank comes from the flattened item list it was collected in —
+    // behind `.plain`, which precedes it there — not from the one-child source
+    // list of the box-less element it happens to sit under.
+    assert_eq!(h.layout_of(plain).order, 0);
+    assert_eq!(h.layout_of(absolute).order, 1);
+}
+
+#[test]
+fn display_contents_flip_relayouts_the_container_and_clears_the_stale_box() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 300px; height: 40px; }
+         view { flex-grow: 1; }
+         .wrapper { display: flex; }",
+    );
+    let root = h.doc.root;
+    let wrapper = h.doc.el(root, ".wrapper");
+    let lifted = h.doc.el(wrapper, "view");
+    let sibling = h.doc.el(root, "view");
+    h.layout();
+    assert_eq!(h.rect(wrapper).2, 150.0);
+    assert_eq!(h.rect(lifted).2, 150.0);
+
+    h.doc.set_inline(wrapper, "display: contents");
+    h.layout();
+
+    // Its child is now the container's own item, and the box it used to
+    // generate is gone rather than left behind at its last geometry.
+    assert_eq!(h.rect(wrapper), (0.0, 0.0, 0.0, 0.0));
+    assert_eq!(h.rect(lifted), (0.0, 0.0, 150.0, 40.0));
+    assert_eq!(h.rect(sibling), (150.0, 0.0, 150.0, 40.0));
+
+    h.doc.set_inline(wrapper, "");
+    h.layout();
+    assert_eq!(h.rect(wrapper).2, 150.0);
+    assert_eq!(h.rect(lifted).2, 150.0);
+}
+
+#[test]
+fn display_contents_on_the_document_element_blockifies() {
+    // CSS Display 3 §2.7: `display: contents` computes to a block-level box on
+    // the root element, which this engine lays out through the leaf fallback.
+    let mut h = Harness::new(
+        "page { display: contents; width: 120px; height: 30px; }
+         view { width: 20px; height: 10px; }",
+    );
+    let root = h.doc.root;
+    let child = h.doc.el(root, "view");
+    h.layout();
+
+    assert_eq!(h.rect(root), (0.0, 0.0, 120.0, 30.0));
+    assert_eq!(h.rect(child), (0.0, 0.0, 0.0, 0.0));
+}
+
+#[test]
 fn absolute_child_resolves_against_its_positioned_parent() {
     let mut h = Harness::new(
         "page { display: flex; width: 200px; height: 100px; }

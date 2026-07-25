@@ -1341,13 +1341,12 @@ where
     let edge_inline_basis = available_content.width.definite_value();
 
     let commits_layout = input.goal == LayoutGoal::Commit;
-    let children = tree.children(node);
+    let children = tree.box_children(node);
     let (lower, upper) = children.size_hint();
     let mut generated = Vec::with_capacity(upper.unwrap_or(lower));
     let mut absolute_items = Vec::new();
     let mut hidden = Vec::new();
-    for (document_index, child) in children.enumerate() {
-        let child_style = tree.style(child);
+    for (document_index, (child, child_style)) in children.enumerate() {
         if child_style.display().is_none() {
             if commits_layout {
                 hidden.push((document_index, child));

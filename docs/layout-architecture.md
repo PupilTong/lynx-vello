@@ -93,9 +93,9 @@ Text behavior is inventoried in
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| `neutron-star` | Implemented Flex, Grid, Relative, and Linear algorithms; one unified source-backed `CoreStyle` protocol speaking stylo computed values (including the `relative-*` and `linear-*` longhands); the text style/run protocol; closed natural-size and Parley leaf paths, hidden-subtree cleanup, positioned layout, rounding; shared private arithmetic; geometry and layout IO; cache semantics | Node/style/content storage, display dispatch, arbitrary host content/measurers, DOM/runtime types, an engine-side style value vocabulary (it re-exports stylo's), resolved device-unit policy (`rpx`, etc.), stacking/paint order |
+| `neutron-star` | Implemented Flex, Grid, Relative, and Linear algorithms; one unified source-backed `CoreStyle` protocol speaking stylo computed values (including the `relative-*` and `linear-*` longhands); the text style/run protocol; closed natural-size and Parley leaf paths, box-generation rules (`display: none` hiding and `display: contents` box-tree flattening through `box_children`), hidden-subtree cleanup, positioned layout, rounding; shared private arithmetic; geometry and layout IO; cache semantics | Node/style/content storage, display dispatch, arbitrary host content/measurers, DOM/runtime types, an engine-side style value vocabulary (it re-exports stylo's), resolved device-unit policy (`rpx`, etc.), stacking/paint order |
 | `neutron-star::text` (unconditional) | Parley context/font registration, whitespace processing, shaping, line breaking, intrinsic and height-for-width measurement, baselines, and retained `TextLayout` artifact types | Text truncation and ellipsis, inline boxes, paint styling, runtime/attribute lowering, resource fetching, or host cache and per-node slot storage |
-| `w3c-dom::layout` (implemented) | `LayoutTree` on immutable `TreeArenas<T>`, plain `NodeId`s, and separately borrowed mutable `DocumentLayoutState` (one protocol; no view/session/store wrapper layers); post-flush style views lending the `ComputedValues` pointer published from Stylo's still-owning primary `Arc` under the exclusive `Document` phase boundary (no `ElementData` borrow check, `Arc` bump, copy, or translation; public computed-style queries remain guarded); logical `relative-*-inline-*` lowering; the W3C fixed/absolute containing-block rule expressed through `position()`; anonymous box geometry plus inherited parent font/text values for text nodes; display dispatch (flex/grid/linear/relative, `display: none` hiding, `content-visibility: hidden` skipped-contents routing before the cache, natural-size leaf, concrete Parley text); lazily boxed shared `TextContext` and per-text-node `TextLayoutStore` in layout state; a NodeId-aligned `LayoutSlot` containing cache, static position, unrounded layout, and rounded layout; `Document` query methods for stored results; automatic dirty-path invalidation when content changes; one fused preorder positioned-and-rounding traversal whose pre-node hook keeps hoisted placement cache-proof, prunes positioning at skipped-contents subtrees so a hoisted descendant cannot be revived, and applies the engine's effective-`order`-0 paint rule for out-of-flow children; device-pixel rounding without a whole-`Layout` clone; the effective-containment fold on the style view (feeding both the relayout-boundary predicate and the content-visibility-aware fixed/absolute containing-block predicate); **automatic style-damage consumption** (every harvest boundary-stops `Document::invalidate_layout` per relayout-damaged node before returning/streaming damage; it also evicts direct text children's measurement caches and retained artifacts because those children read inherited style from the damaged element but have no Stylo damage record of their own; `Document::layout` re-runs each parked `contain: strict`/skipped boundary in place before the root pass, merging the re-run's scrollable `content_size` back into the boundary's stored layout); and the `Document::invalidate_layout` API embedders still call for mutations the style system cannot see | A second layout algorithm, generic content-measurement callbacks, engine-side style copies, layout/text runtime borrow wrappers, Lynx runtime-element vocabulary or device-unit policy (`rpx`), Lynx computed defaults (cascade/UA-sheet policy), text shaping algorithms |
+| `w3c-dom::layout` (implemented) | `LayoutTree` on immutable `TreeArenas<T>`, plain `NodeId`s, and separately borrowed mutable `DocumentLayoutState` (one protocol; no view/session/store wrapper layers); post-flush style views lending the `ComputedValues` pointer published from Stylo's still-owning primary `Arc` under the exclusive `Document` phase boundary (no `ElementData` borrow check, `Arc` bump, copy, or translation; public computed-style queries remain guarded); logical `relative-*-inline-*` lowering; the W3C fixed/absolute containing-block rule expressed through `position()`; anonymous box geometry plus inherited parent font/text values for text nodes; display dispatch (flex/grid/linear/relative, `display: none` hiding, `display: contents` box-less handling — never a containing block, never contained, never skipped, never hoisted, and zeroed by the positioned pass — `content-visibility: hidden` skipped-contents routing before the cache, natural-size leaf, concrete Parley text); lazily boxed shared `TextContext` and per-text-node `TextLayoutStore` in layout state; a NodeId-aligned `LayoutSlot` containing cache, static position, unrounded layout, and rounded layout; `Document` query methods for stored results; automatic dirty-path invalidation when content changes; one fused preorder positioned-and-rounding traversal whose pre-node hook keeps hoisted placement cache-proof, prunes positioning at skipped-contents subtrees so a hoisted descendant cannot be revived, and applies the engine's effective-`order`-0 paint rule for out-of-flow children; device-pixel rounding without a whole-`Layout` clone; the effective-containment fold on the style view (feeding both the relayout-boundary predicate and the content-visibility-aware fixed/absolute containing-block predicate); **automatic style-damage consumption** (every harvest boundary-stops `Document::invalidate_layout` per relayout-damaged node before returning/streaming damage; it also evicts direct text children's measurement caches and retained artifacts because those children read inherited style from the damaged element but have no Stylo damage record of their own; `Document::layout` re-runs each parked `contain: strict`/skipped boundary in place before the root pass, merging the re-run's scrollable `content_size` back into the boundary's stored layout); and the `Document::invalidate_layout` API embedders still call for mutations the style system cannot see | A second layout algorithm, generic content-measurement callbacks, engine-side style copies, layout/text runtime borrow wrappers, Lynx runtime-element vocabulary or device-unit policy (`rpx`), Lynx computed defaults (cascade/UA-sheet policy), text shaping algorithms |
 | Future runtime integration | Lynx view metrics and `rpx` policy; Lynx-specific text attributes, element-backed raw text and truncation; `staggered` integration; sticky lowering | A second Flex/Grid/Relative/Linear/text-measurement implementation, arbitrary host content, engine-side copies of styles, the style-damage→layout wiring (now engine-internal in `w3c-dom`) |
 
 The engine/host seam keeps the engine storage-free even though its
@@ -122,7 +122,7 @@ the independent state:
 
 | Item | Provides | Consumed by |
 | --- | --- | --- |
-| `LayoutTree` | associated `NodeId`, mutable `State`, borrowed `Style<'tree>`, and `ChildIter<'tree>`; topology/style reads; **`compute_layout(&self, &mut State, NodeId, input)`** as the host display/algorithm dispatch point; immutable/mutable access to each state-owned `LayoutSlot`; required cache clearing | everything |
+| `LayoutTree` | associated `NodeId`, mutable `State`, borrowed `Style<'tree>`, and `ChildIter<'tree>`; topology/style reads — `children` (source children) and the provided `box_children` (box-generating children, `display: contents` spliced away, each paired with the style the walk read); **`compute_layout(&self, &mut State, NodeId, input)`** as the host display/algorithm dispatch point; immutable/mutable access to each state-owned `LayoutSlot`; required cache clearing | everything |
 | `LayoutSlot` | one node's measurement cache, committed input, static position, unrounded layout, and rounded layout | shared cache/position/rounding machinery and host queries |
 | `CoreStyle` | one `computed_values()` source plus defaulted box, Flex, Grid, Relative, and Linear accessors; sequence and geometry values remain borrowed | all box algorithms |
 | `TextContainerStyle: CoreStyle` | paragraph-level alignment, whitespace, word-break, and indent values | the Parley `TextMeasurer` |
@@ -207,8 +207,10 @@ once:
    `neutron-star`, against the same tree/state protocol. The `<list>`
    component's staggered-grid remains a future host peer. The engine owns
    **no display enum of its own** — `CoreStyle::display` returns stylo's
-   `Display`, the engine consumes it only through `is_none`, and which
-   *algorithm* a generated box uses stays the host's dispatch decision.
+   `Display`, the engine consumes it only through `is_none` and
+   `is_contents` (the two *box-generation* answers, which item collection
+   cannot outsource), and which *algorithm* a generated box uses stays the
+   host's dispatch decision.
 2. **Uniform caching.** Every generated-box path through dispatch shares one
    cache policy, so mixed-algorithm trees memoize correctly. Future
    host-provided modes can use the same wrapper. Hidden cleanup deliberately
@@ -478,6 +480,40 @@ and bypasses the cache boundary** (mirroring `hide_subtree`): caching a skipped
 result and later serving it on a hit would leave a re-populated child subtree
 un-hidden; sizing a contentless box is cheap and re-hiding per pass is far
 cheaper than laying the subtree out.
+
+**Box-less elements** (`display: contents`): the element generates no box
+while its children keep generating theirs, in the nearest box ancestor's
+formatting context ([CSS Display 3
+§3.3](https://drafts.csswg.org/css-display/#valdef-display-contents)). This is
+a **box-tree**, not a dispatch, question, so it is answered where the box tree
+is read rather than in `compute_layout`, along exactly two lines:
+
+- **Item collection reads `LayoutTree::box_children`**, which splices each
+  such element's own children into the sequence, recursively, in its place.
+  All four algorithms collect through it, so the flattened list is what
+  `order`, document order, grid placement, `relative-id` lookup, linear
+  weights, and out-of-flow paint ranking all see. `children` keeps meaning
+  *source* children — hidden-subtree cleanup and the rounding walk must still
+  reach every descendant — and the iterator hands back the style it read to
+  classify each child, so item collection reads each child's style once, as
+  before. `display: none` children are still yielded: hiding their stale
+  geometry belongs to the algorithm that collected them.
+- **Nothing about the element applies to layout.** It cannot be a containing
+  block (`establishes_{fixed,absolute}_containing_block` return false whatever
+  `position`/`transform`/`will-change` say), cannot be contained or skipped
+  (`CoreStyle::containment` is empty and `skips_contents` false, so
+  `is_relayout_boundary` is false and host ancestor walks pass straight
+  through), and is never hoisted. Its own `LayoutSlot` is zeroed by the
+  positioned pass's pre-node hook, which makes it a transparent zero-offset
+  pass-through for the rounding walk and for
+  `accumulated_unrounded_origin`, and reports an empty box to
+  `Document::{rounded,unrounded}_layout` — matching CSSOM, where an element
+  generating no fragments has no client rects.
+
+`compute_layout` is therefore unreachable for one: the document element
+blockifies in Stylo (`Display::equivalent_block_display`), and no other path
+reaches a box-less node. Inheritance is unaffected — it follows the DOM tree,
+so a text child still reads its box-less parent's font/text values.
 
 **The relayout-boundary theorem.** A box is a **relayout boundary** iff its
 effective containment includes **both** `LAYOUT` **and** `SIZE` (i.e.

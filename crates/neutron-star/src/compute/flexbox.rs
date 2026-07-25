@@ -1545,7 +1545,7 @@ where
     T: LayoutTree,
 {
     let commits_layout = goal == LayoutGoal::Commit;
-    let children = tree.children(node);
+    let children = tree.box_children(node);
     let (lower, upper) = children.size_hint();
     let child_capacity = match upper {
         Some(exact) if exact == lower => exact,
@@ -1555,8 +1555,7 @@ where
     let mut absolute_items = SmallVec::new();
     let mut hidden = SmallVec::new();
 
-    for (document_index, child) in children.enumerate() {
-        let child_style = tree.style(child);
+    for (document_index, (child, child_style)) in children.enumerate() {
         if child_style.display().is_none() {
             if commits_layout {
                 hidden.push((document_index, child));

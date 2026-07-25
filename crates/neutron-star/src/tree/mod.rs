@@ -5,6 +5,7 @@ mod io;
 pub use io::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, RequestedAxis, SizingMode,
 };
+use smallvec::SmallVec;
 
 use crate::cache::Cache;
 use crate::geometry::Point;
@@ -101,10 +102,44 @@ pub trait LayoutTree {
     where
         Self: 'tree;
 
+    /// The node's **source** children, box-generating or not.
+    ///
+    /// Cleanup and traversal read this: hiding a subtree and the rounding
+    /// walk must reach every descendant. Algorithms collecting the items of
+    /// a formatting context read [`box_children`](LayoutTree::box_children)
+    /// instead.
     fn children(&self, node: Self::NodeId) -> Self::ChildIter<'_>;
 
     fn child_count(&self, node: Self::NodeId) -> usize {
         self.children(node).count()
+    }
+
+    /// The children that generate a box in this node's formatting context,
+    /// each paired with the style the walk already had to read.
+    ///
+    /// A `display: contents` element generates no box of its own while its
+    /// children keep generating theirs, in the *nearest box ancestor's*
+    /// formatting context ([CSS Display 3
+    /// §3.3](https://drafts.csswg.org/css-display/#valdef-display-contents)),
+    /// so this iterator splices such an element's own children into the
+    /// sequence in its place, recursively, and never yields it. With no
+    /// `display: contents` child it yields exactly [`children`] in order.
+    ///
+    /// Deciding that takes each child's `display`, which item collection needs
+    /// anyway, so the style is handed back rather than looked up twice.
+    ///
+    /// Provided; a host must not override it.
+    ///
+    /// [`children`]: LayoutTree::children
+    fn box_children(&self, node: Self::NodeId) -> BoxChildren<'_, Self>
+    where
+        Self: Sized,
+    {
+        BoxChildren {
+            tree: self,
+            level: self.children(node),
+            outer: SmallVec::new(),
+        }
     }
 
     fn style(&self, node: Self::NodeId) -> Self::Style<'_>;
@@ -139,6 +174,56 @@ pub trait LayoutTree {
 
     fn clear_layout_cache(&self, state: &mut Self::State, node: Self::NodeId) {
         self.layout_mut(state, node).clear_layout_cache();
+    }
+}
+
+/// The box-generating children of one node — see
+/// [`LayoutTree::box_children`].
+///
+/// `outer` suspends the child iterators of the levels a `display: contents`
+/// element was spliced into, so nesting resumes them in order. It stays
+/// empty, and the iterator stays a plain pass-through, for the overwhelmingly
+/// common node whose children all generate boxes.
+pub struct BoxChildren<'tree, T: LayoutTree> {
+    tree: &'tree T,
+    level: T::ChildIter<'tree>,
+    outer: SmallVec<[T::ChildIter<'tree>; 2]>,
+}
+
+impl<T: LayoutTree> core::fmt::Debug for BoxChildren<'_, T> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("BoxChildren")
+            .field("suspended_levels", &self.outer.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'tree, T: LayoutTree> Iterator for BoxChildren<'tree, T> {
+    type Item = (T::NodeId, T::Style<'tree>);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let Some(child) = self.level.next() else {
+                self.level = self.outer.pop()?;
+                continue;
+            };
+            let style = self.tree.style(child);
+            if !style.display().is_contents() {
+                return Some((child, style));
+            }
+            let inner = self.tree.children(child);
+            self.outer.push(core::mem::replace(&mut self.level, inner));
+        }
+    }
+
+    /// Only a lower bound: each `display: contents` child contributes its own
+    /// children instead of itself, so the exact count needs the walk itself.
+    /// Callers size their item buffers from it.
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.level.size_hint().0, None)
     }
 }
 

@@ -15,6 +15,9 @@ use crate::node::Node;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DisplayMode {
     None,
+    /// Generates no box; the children generate theirs in the nearest box
+    /// ancestor's formatting context instead.
+    Contents,
     Flex,
     Grid,
     Linear,
@@ -23,12 +26,11 @@ pub(crate) enum DisplayMode {
 }
 
 pub(crate) fn display_mode(display: Display) -> DisplayMode {
+    if display.is_contents() {
+        return DisplayMode::Contents;
+    }
     if display.outside() == DisplayOutside::None {
-        return if display.inside() == DisplayInside::Contents {
-            DisplayMode::Leaf
-        } else {
-            DisplayMode::None
-        };
+        return DisplayMode::None;
     }
     match display.inside() {
         DisplayInside::None => DisplayMode::None,
@@ -44,14 +46,25 @@ fn is_root_element<T>(node: &Node<T>) -> bool {
     node.parent().is_none_or(Node::is_document)
 }
 
+/// Whether the element generates no principal box, so nothing about it can be
+/// laid out, contained, positioned, or made a containing block. The document
+/// element is exempt: Stylo blockifies `display: contents` there
+/// (`Display::equivalent_block_display`).
+pub(crate) fn generates_no_box(style: &ComputedValues) -> bool {
+    style.clone_display().is_contents()
+}
+
 pub(crate) fn skips_contents(style: &ComputedValues) -> bool {
-    style.clone_content_visibility() == ContentVisibility::Hidden
+    !generates_no_box(style) && style.clone_content_visibility() == ContentVisibility::Hidden
 }
 
 pub(crate) fn establishes_fixed_containing_block<T>(
     node: &Node<T>,
     style: &ComputedValues,
 ) -> bool {
+    if generates_no_box(style) {
+        return false;
+    }
     let box_style = style.get_box();
     !box_style.transform.0.is_empty()
         || !matches!(
@@ -76,6 +89,9 @@ pub(crate) fn establishes_absolute_containing_block<T>(
     node: &Node<T>,
     style: &ComputedValues,
 ) -> bool {
+    if generates_no_box(style) {
+        return false;
+    }
     style.clone_position() != PositionProperty::Static
         || style
             .get_box()
@@ -85,9 +101,22 @@ pub(crate) fn establishes_absolute_containing_block<T>(
         || establishes_fixed_containing_block(node, style)
 }
 
+/// The ancestor whose formatting context lays this node out: its DOM parent,
+/// or the nearest ancestor generating a box when box-less elements intervene.
+pub(crate) fn box_parent<T>(node: &Node<T>) -> Option<&Node<T>> {
+    let mut current = node.parent()?;
+    loop {
+        let style = StyleView::try_of(current)?;
+        if !generates_no_box(style.values()) {
+            return Some(current);
+        }
+        current = current.parent()?;
+    }
+}
+
 pub(crate) fn resolve_position<T>(node: &Node<T>, style: &ComputedValues) -> PositionProperty {
     let parent_establishes = |fixed: bool| {
-        node.parent().is_some_and(|parent| {
+        box_parent(node).is_some_and(|parent| {
             StyleView::try_of(parent).is_some_and(|parent_style| {
                 if fixed {
                     establishes_fixed_containing_block(parent, parent_style.values())

@@ -1352,6 +1352,25 @@ impl TestTree {
         })
     }
 
+    /// A `display: contents` element: it generates no box, so it carries no
+    /// container role — `box_children` splices its children into its parent's
+    /// formatting context and it is never laid out itself.
+    pub(super) fn push_contents(&mut self, children: Vec<TestId>) -> TestId {
+        self.push(TestSourceNode {
+            display: TestDisplay::Leaf,
+            style: TestStyle {
+                display: Display::Contents,
+                ..TestStyle::default()
+            },
+            children,
+            measure: TestMeasure::Intrinsic {
+                min_content_size: Size::ZERO,
+                max_content_size: Size::ZERO,
+                first_baseline: None,
+            },
+        })
+    }
+
     pub(super) fn push(&mut self, node: TestSourceNode) -> TestId {
         debug_assert_eq!(self.nodes.len(), self.session.len());
         let id = self.nodes.len();

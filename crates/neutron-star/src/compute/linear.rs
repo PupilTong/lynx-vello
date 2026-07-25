@@ -1364,7 +1364,7 @@ where
     );
     let mut percentage_basis = definite_inner_size;
 
-    let children = tree.children(node);
+    let children = tree.box_children(node);
     let (lower, upper) = children.size_hint();
     let mut items = Vec::with_capacity(upper.unwrap_or(lower));
     let mut absolute_items = Vec::new();
@@ -1372,8 +1372,7 @@ where
     let mut has_nonzero_order = false;
     let mut has_box_basis_dependency = false;
     let mut has_relative_basis_dependency = false;
-    for (document_index, child) in children.enumerate() {
-        let child_style = tree.style(child);
+    for (document_index, (child, child_style)) in children.enumerate() {
         let position = child_style.position();
         let is_absolute = matches!(
             position,

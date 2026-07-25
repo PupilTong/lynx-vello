@@ -90,14 +90,13 @@ impl<N> PendingLayoutItem<N> for PendingItem<N> {
 }
 
 fn classify_item<T>(
-    tree: &T,
     node: T::NodeId,
+    style: &T::Style<'_>,
     document_index: usize,
 ) -> Option<PendingItem<T::NodeId>>
 where
     T: LayoutTree,
 {
-    let style = tree.style(node);
     if style.display().is_none() {
         return None;
     }
@@ -1182,13 +1181,13 @@ where
     );
 
     let commits_layout = input.goal == LayoutGoal::Commit;
-    let children = tree.children(node);
+    let children = tree.box_children(node);
     let (lower, upper) = children.size_hint();
     let mut in_flow = Vec::with_capacity(upper.unwrap_or(lower));
     let mut absolute = commits_layout.then(Vec::new);
     let mut hidden = commits_layout.then(Vec::new);
-    for (document_index, child) in children.enumerate() {
-        let Some(child_style) = classify_item(tree, child, document_index) else {
+    for (document_index, (child, style)) in children.enumerate() {
+        let Some(child_style) = classify_item::<T>(child, &style, document_index) else {
             if let Some(hidden) = &mut hidden {
                 hidden.push((document_index, child));
             }
