@@ -93,6 +93,7 @@ pub struct LayoutInput {
 }
 
 impl LayoutInput {
+    #[inline]
     #[must_use]
     pub fn commit(
         known_dimensions: Size<Option<f32>>,
@@ -109,6 +110,7 @@ impl LayoutInput {
         }
     }
 
+    #[inline]
     #[must_use]
     pub fn measure(
         known_dimensions: Size<Option<f32>>,

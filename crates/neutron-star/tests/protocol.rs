@@ -238,12 +238,12 @@ impl MockTree {
 
     fn unrounded_layout<'state>(&self, state: &'state MockState, id: usize) -> &'state Layout {
         debug_assert!(id < self.nodes.len());
-        state.slots[id].unrounded()
+        &state.slots[id].unrounded
     }
 
     fn final_layout<'state>(&self, state: &'state MockState, id: usize) -> &'state Layout {
         debug_assert!(id < self.nodes.len());
-        state.slots[id].rounded()
+        &state.slots[id].rounded
     }
 }
 
@@ -482,9 +482,9 @@ fn leaf_dispatch_round_trips_layout_io() {
 
     let mut layout = Layout::with_order(0);
     layout.size = output.size;
-    tree.layout_mut(&mut state, child).set_unrounded(layout);
+    tree.layout_mut(&mut state, child).unrounded = layout;
     assert_eq!(
-        tree.layout(&state, child).unrounded().size,
+        tree.layout(&state, child).unrounded.size,
         Size::new(40.0, 0.0)
     );
 }
@@ -493,10 +493,9 @@ fn leaf_dispatch_round_trips_layout_io() {
 fn static_position_round_trips_through_the_tree() {
     let (tree, mut state, root) = leaf_tree();
     let child = tree.children(tree.node(root)).nth(1).unwrap();
-    tree.layout_mut(&mut state, child)
-        .set_static_position(Point::new(12.5, 7.0));
+    tree.layout_mut(&mut state, child).static_position = Point::new(12.5, 7.0);
     assert_eq!(
-        tree.layout(&state, child).static_position(),
+        tree.layout(&state, child).static_position,
         Point::new(12.5, 7.0)
     );
 }
@@ -507,7 +506,7 @@ fn embeddable_cache_lifecycle() {
     assert!(cache.is_empty());
     cache.clear();
     assert!(cache.is_empty());
-    assert_eq!(cache, Cache::default());
+    assert!(Cache::default().is_empty());
 }
 
 #[test]
@@ -589,10 +588,10 @@ fn explicit_hidden_cleanup_clears_stale_geometry() {
     let mut state = tree.new_state();
     let mut hidden_layout = Layout::default();
     hidden_layout.size = Size::new(50.0, 20.0);
-    state.slots[hidden].set_unrounded(hidden_layout);
+    state.slots[hidden].unrounded = hidden_layout;
     let mut root_layout = Layout::default();
     root_layout.size = Size::new(40.0, 10.0);
-    state.slots[root].set_unrounded(root_layout);
+    state.slots[root].unrounded = root_layout;
 
     hide_subtree(&tree, &mut state, tree.node(hidden));
     assert_eq!(tree.unrounded_layout(&state, hidden), &Layout::default());
@@ -691,11 +690,11 @@ fn round_layout_snaps_on_the_device_pixel_grid() {
     let mut root_layout = Layout::default();
     root_layout.location = Point::new(0.24, 0.24);
     root_layout.size = Size::new(10.26, 10.26);
-    state.slots[root].set_unrounded(root_layout);
+    state.slots[root].unrounded = root_layout;
     let mut child_layout = Layout::default();
     child_layout.location = Point::new(0.26, 0.26);
     child_layout.size = Size::new(4.74, 4.74);
-    state.slots[child].set_unrounded(child_layout);
+    state.slots[child].unrounded = child_layout;
 
     round_layout(&tree, &mut state, tree.node(root), 2.0);
     assert_eq!(tree.final_layout(&state, root).location, Point::ZERO);
@@ -712,7 +711,7 @@ fn round_layout_uses_css_positive_infinity_tie_breaking() {
     let (tree, mut state, root) = leaf_tree();
     let mut root_layout = Layout::default();
     root_layout.location = Point::new(-0.75, 0.75);
-    state.slots[root].set_unrounded(root_layout);
+    state.slots[root].unrounded = root_layout;
 
     round_layout(&tree, &mut state, tree.node(root), 2.0);
 
@@ -1056,7 +1055,7 @@ fn skipped_contents_dispatch_sizes_from_intrinsic_and_hides_descendants() {
     let mut state = tree.new_state();
     let mut child_layout = Layout::default();
     child_layout.size = Size::new(99.0, 99.0);
-    state.slots[child].set_unrounded(child_layout);
+    state.slots[child].unrounded = child_layout;
 
     let output = tree.compute_layout(
         &mut state,

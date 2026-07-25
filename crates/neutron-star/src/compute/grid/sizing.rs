@@ -460,7 +460,7 @@ where
                 let span = span_for(item, axis);
                 let indexes = tracks.span_indices(span.start, span.end);
                 let automatic_min_applies = axis.size(item.minimum_is_auto)
-                    && !item.overflow_point(axis).is_scrollable()
+                    && !axis.point(item.overflow).is_scrollable()
                     && tracks.tracks[indexes.clone()].iter().any(|track| {
                         matches!(track.sizing.min, TrackBreadth::Auto | TrackBreadth::Flex(_))
                     })
@@ -1210,15 +1210,7 @@ fn resolve_intrinsic_sizes<T>(
     }
     non_flexible.sort_unstable_by_key(|&index| items[index].span(axis));
     if non_flexible.is_empty() && crosses_flexible.is_empty() {
-        for track in &mut tracks.tracks {
-            if !track.growth_limit.is_finite() {
-                track.growth_limit = track
-                    .base
-                    .max(0.0)
-                    .min(track.fit_content_limit)
-                    .max(track.base);
-            }
-        }
+        finalize_growth_limits(&mut tracks.tracks);
         return;
     }
     distribution.planned.resize(tracks.tracks.len(), 0.0);
@@ -1403,7 +1395,12 @@ fn resolve_intrinsic_sizes<T>(
         );
     }
 
-    for track in &mut tracks.tracks {
+    finalize_growth_limits(&mut tracks.tracks);
+}
+
+/// Clamps still-infinite growth limits down to each track's base size.
+fn finalize_growth_limits(tracks: &mut [Track]) {
+    for track in tracks {
         if !track.growth_limit.is_finite() {
             track.growth_limit = track
                 .base
@@ -1651,20 +1648,6 @@ pub(super) fn size_tracks<T>(
     );
     stretch_auto_tracks(tracks, available, alignment);
     tracks.rebuild_positions();
-}
-
-trait ItemOverflowAxis {
-    fn overflow_point(&self, axis: Axis) -> stylo::values::computed::Overflow;
-}
-
-impl<N> ItemOverflowAxis for GridItem<N> {
-    #[inline]
-    fn overflow_point(&self, axis: Axis) -> stylo::values::computed::Overflow {
-        match axis {
-            Axis::Horizontal => self.overflow.x,
-            Axis::Vertical => self.overflow.y,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -2385,6 +2368,6 @@ mod tests {
         assert_eq!(tracks.tracks[1].base, 80.0);
         assert_eq!(tracks.tracks[2].base, 20.0);
         assert_eq!(tree.calls.borrow().len(), 1);
-        assert_eq!(items[0].overflow_point(Axis::Vertical), Overflow::Visible);
+        assert_eq!(Axis::Vertical.point(items[0].overflow), Overflow::Visible);
     }
 }

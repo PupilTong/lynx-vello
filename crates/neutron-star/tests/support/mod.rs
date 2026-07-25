@@ -1129,14 +1129,14 @@ impl LayoutTree for TestTree {
     fn set_unrounded_layout(&self, state: &mut TestState, node: TestRef, layout: Layout) {
         self.layout_writes
             .set(self.layout_writes.get().saturating_add(1));
-        state.slots[node.index].set_unrounded(layout);
+        state.slots[node.index].unrounded = layout;
     }
 
     fn set_static_position(&self, state: &mut TestState, node: TestRef, position: Point<f32>) {
         self.static_position_writes
             .set(self.static_position_writes.get().saturating_add(1));
         self.session[node.index].static_position.set(Some(position));
-        state.slots[node.index].set_static_position(position);
+        state.slots[node.index].static_position = position;
     }
 
     fn compute_layout(
@@ -1389,7 +1389,7 @@ impl TestTree {
     }
 
     pub(super) fn set_layout_for_testing(&self, id: TestId, layout: Layout) {
-        self.state.borrow_mut().slots[id].set_unrounded(layout);
+        self.state.borrow_mut().slots[id].unrounded = layout;
     }
 
     pub(super) fn session_node(&self, id: TestId) -> &TestSessionNode {
@@ -1397,11 +1397,11 @@ impl TestTree {
     }
 
     pub(super) fn layout(&self, id: TestId) -> Layout {
-        snapshot_layout(self.state.borrow().slots[id].unrounded())
+        snapshot_layout(&self.state.borrow().slots[id].unrounded)
     }
 
     pub(super) fn final_layout(&self, id: TestId) -> Layout {
-        snapshot_layout(self.state.borrow().slots[id].rounded())
+        snapshot_layout(&self.state.borrow().slots[id].rounded)
     }
 
     pub(super) fn static_position(&self, id: TestId) -> Option<Point<f32>> {

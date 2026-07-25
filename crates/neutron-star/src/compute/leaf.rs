@@ -312,11 +312,7 @@ fn apply_measured_aspect_ratio(
     let Some((ratio, sizing_box)) = aspect_ratio.components() else {
         return size;
     };
-    if !originally_indefinite.width
-        || !originally_indefinite.height
-        || !ratio.is_finite()
-        || ratio <= 0.0
-    {
+    if !originally_indefinite.width || !originally_indefinite.height || !ratio.is_finite() {
         return size;
     }
 

@@ -930,13 +930,13 @@ fn flex_baseline_integration_reuses_artifacts_and_jointly_invalidates_caches() {
 
     compute_root_layout(&tree, &mut state, tree.node(root), Size::MAX_CONTENT);
 
-    let small_baseline = state.slots[small].unrounded().location.y
+    let small_baseline = state.slots[small].unrounded.location.y
         + state.artifacts[small]
             .committed()
             .expect("small committed text")
             .first_baseline()
             .expect("small baseline");
-    let large_baseline = state.slots[large].unrounded().location.y
+    let large_baseline = state.slots[large].unrounded.location.y
         + state.artifacts[large]
             .committed()
             .expect("large committed text")

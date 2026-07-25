@@ -220,6 +220,41 @@ where
     (columns, rows)
 }
 
+/// Runs one §12.3 track-sizing pass for one axis, then §12.4-aligns the
+/// tracks when that axis's inner size is definite.
+#[allow(clippy::too_many_arguments)]
+fn size_and_align_axis<T>(
+    tree: &T,
+    state: &mut T::State,
+    axis: Axis,
+    tracks: &mut TrackSet,
+    cross_tracks: CrossAxisTracks<'_>,
+    items: &mut [GridItem<T::NodeId>],
+    basis: Size<Option<f32>>,
+    inner_axis_size: Option<f32>,
+    available: AvailableSpace,
+    content_alignment: AlignFlags,
+    scratch: &mut IntrinsicSizingScratch,
+) where
+    T: LayoutTree,
+{
+    size_tracks(
+        tree,
+        state,
+        axis,
+        tracks,
+        Some(cross_tracks),
+        items,
+        basis,
+        inner_axis_size.map_or(available, AvailableSpace::Definite),
+        content_alignment,
+        scratch,
+    );
+    if let Some(size) = inner_axis_size {
+        align_tracks(tracks, size, content_alignment);
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn run_track_sizing<T>(
     tree: &T,
@@ -268,23 +303,19 @@ fn run_track_sizing<T>(
         distributed_gap,
     };
     initialize_tracks(columns, column_specs, inner_basis.width, gap.width);
-    size_tracks(
+    size_and_align_axis(
         tree,
         state,
         Axis::Horizontal,
         columns,
-        Some(initial_column_cross_tracks),
+        initial_column_cross_tracks,
         items,
         inner_basis,
-        inner_basis
-            .width
-            .map_or(available.width, AvailableSpace::Definite),
+        inner_basis.width,
+        available.width,
         justify_content,
         scratch,
     );
-    if let Some(width) = inner_basis.width {
-        align_tracks(columns, width, justify_content);
-    }
 
     let needs_column_feedback = columns
         .tracks
@@ -320,23 +351,19 @@ fn run_track_sizing<T>(
     }
     let mut row_basis = inner_basis;
     row_basis.width = row_basis.width.or(Some(columns.used_size()));
-    size_tracks(
+    size_and_align_axis(
         tree,
         state,
         Axis::Vertical,
         rows,
-        Some(CrossAxisTracks::resolved(columns)),
+        CrossAxisTracks::resolved(columns),
         items,
         row_basis,
-        inner_basis
-            .height
-            .map_or(available.height, AvailableSpace::Definite),
+        inner_basis.height,
+        available.height,
         align_content,
         scratch,
     );
-    if let Some(height) = inner_basis.height {
-        align_tracks(rows, height, align_content);
-    }
 
     let mut column_feedback_changed = false;
     if needs_column_feedback {
@@ -367,23 +394,19 @@ fn run_track_sizing<T>(
             item.clear_contribution_cache(Axis::Horizontal);
         }
         initialize_tracks(columns, column_specs, inner_basis.width, gap.width);
-        size_tracks(
+        size_and_align_axis(
             tree,
             state,
             Axis::Horizontal,
             columns,
-            Some(CrossAxisTracks::resolved(rows)),
+            CrossAxisTracks::resolved(rows),
             items,
             inner_basis,
-            inner_basis
-                .width
-                .map_or(available.width, AvailableSpace::Definite),
+            inner_basis.width,
+            available.width,
             justify_content,
             scratch,
         );
-        if let Some(width) = inner_basis.width {
-            align_tracks(columns, width, justify_content);
-        }
         for item in items.iter_mut() {
             let width = columns.area_size(item.area.column.start, item.area.column.end);
             let height = rows.area_size(item.area.row.start, item.area.row.end);
@@ -393,23 +416,19 @@ fn run_track_sizing<T>(
         initialize_tracks(rows, row_specs, inner_basis.height, gap.height);
         let mut final_row_basis = inner_basis;
         final_row_basis.width = final_row_basis.width.or(Some(columns.used_size()));
-        size_tracks(
+        size_and_align_axis(
             tree,
             state,
             Axis::Vertical,
             rows,
-            Some(CrossAxisTracks::resolved(columns)),
+            CrossAxisTracks::resolved(columns),
             items,
             final_row_basis,
-            inner_basis
-                .height
-                .map_or(available.height, AvailableSpace::Definite),
+            inner_basis.height,
+            available.height,
             align_content,
             scratch,
         );
-        if let Some(height) = inner_basis.height {
-            align_tracks(rows, height, align_content);
-        }
     }
 }
 
@@ -439,7 +458,6 @@ struct PendingBaselineItem<N> {
     node: N,
     area_row: i32,
     area_column: i32,
-    align_baseline: bool,
     area_top: f32,
     layout: Layout,
     baseline: Option<f32>,
@@ -616,16 +634,10 @@ where
             if auto_count > 0 {
                 let share = ((area - child - fixed_start - fixed_end).max(0.0)) / auto_count as f32;
                 if auto_start {
-                    match axis {
-                        Axis::Horizontal => margin.left = share,
-                        Axis::Vertical => margin.top = share,
-                    }
+                    axis.set_start(&mut margin, share);
                 }
                 if auto_end {
-                    match axis {
-                        Axis::Horizontal => margin.right = share,
-                        Axis::Vertical => margin.bottom = share,
-                    }
+                    axis.set_end(&mut margin, share);
                 }
             }
         }
@@ -693,9 +705,6 @@ where
             node: item.key.node,
             area_row: item.area.row.start,
             area_column: item.area.column.start,
-            align_baseline: item.align_self == AlignFlags::BASELINE
-                && !item.margin_auto.start(Axis::Vertical)
-                && !item.margin_auto.end(Axis::Vertical),
             area_top: content_origin.y + area_offset.y,
             layout,
             baseline: item_baseline,
@@ -711,7 +720,7 @@ where
     }
 
     let mut baseline_candidates = Vec::<(i32, f32)>::new();
-    for item in pending.iter().filter(|item| item.align_baseline) {
+    for item in &pending {
         let Some(baseline) = item.baseline else {
             continue;
         };
@@ -729,7 +738,7 @@ where
         }
         baseline_groups.push((row, ascent));
     }
-    for item in pending.iter_mut().filter(|item| item.align_baseline) {
+    for item in &mut pending {
         if let (Some(baseline), Ok(index)) = (
             item.baseline,
             baseline_groups.binary_search_by_key(&item.area_row, |&(row, _)| row),
@@ -748,7 +757,7 @@ where
     let first_baseline = first_row.and_then(|first_row| {
         pending
             .iter()
-            .find(|item| item.area_row == first_row && item.align_baseline)
+            .find(|item| item.area_row == first_row)
             .and_then(|item| {
                 item.baseline
                     .map(|baseline| item.layout.location.y + baseline)
@@ -799,26 +808,10 @@ fn absolute_axis_lines(
     placement: Line<GridPlacement>,
     explicit_tracks: usize,
 ) -> (Option<i32>, Option<i32>) {
-    if matches!(placement.start, GridPlacement::Line(_))
-        && matches!(placement.end, GridPlacement::Line(_))
-    {
-        let start = match resolve_axis_placement(
-            Line::new(placement.start, GridPlacement::Span(1)),
-            explicit_tracks,
-        ) {
-            AxisPlacement::Definite(span) => Some(span.start),
-            AxisPlacement::Indefinite { .. } => None,
-        };
-        let end = match resolve_axis_placement(
-            Line::new(GridPlacement::Span(1), placement.end),
-            explicit_tracks,
-        ) {
-            AxisPlacement::Definite(span) => Some(span.end),
-            AxisPlacement::Indefinite { .. } => None,
-        };
-        return (start, end);
-    }
-    if !matches!(placement.start, GridPlacement::Auto)
+    let both_line = matches!(placement.start, GridPlacement::Line(_))
+        && matches!(placement.end, GridPlacement::Line(_));
+    if !both_line
+        && !matches!(placement.start, GridPlacement::Auto)
         && !matches!(placement.end, GridPlacement::Auto)
     {
         return match resolve_axis_placement(placement, explicit_tracks) {
@@ -827,26 +820,19 @@ fn absolute_axis_lines(
         };
     }
 
-    let start = match placement.start {
-        GridPlacement::Line(_) => match resolve_axis_placement(
-            Line::new(placement.start, GridPlacement::Span(1)),
-            explicit_tracks,
-        ) {
-            AxisPlacement::Definite(span) => Some(span.start),
-            AxisPlacement::Indefinite { .. } => None,
-        },
-        GridPlacement::Auto | GridPlacement::Span(_) => None,
+    let resolve_edge = |line: Line<GridPlacement>, end: bool| match resolve_axis_placement(
+        line,
+        explicit_tracks,
+    ) {
+        AxisPlacement::Definite(span) => Some(if end { span.end } else { span.start }),
+        AxisPlacement::Indefinite { .. } => None,
     };
-    let end = match placement.end {
-        GridPlacement::Line(_) => match resolve_axis_placement(
-            Line::new(GridPlacement::Span(1), placement.end),
-            explicit_tracks,
-        ) {
-            AxisPlacement::Definite(span) => Some(span.end),
-            AxisPlacement::Indefinite { .. } => None,
-        },
-        GridPlacement::Auto | GridPlacement::Span(_) => None,
-    };
+    let start = matches!(placement.start, GridPlacement::Line(_))
+        .then(|| resolve_edge(Line::new(placement.start, GridPlacement::Span(1)), false))
+        .flatten();
+    let end = matches!(placement.end, GridPlacement::Line(_))
+        .then(|| resolve_edge(Line::new(GridPlacement::Span(1), placement.end), true))
+        .flatten();
     (start, end)
 }
 
@@ -1104,7 +1090,7 @@ where
             .unwrap_or(AlignFlags::STRETCH),
         rtl,
     };
-    let raw_preferred = style.size();
+    let preferred = style.size();
     let mut metrics = resolve_container_box(&style, input);
     let style_definite = metrics.preferred_definite;
     let outer_definite = Size::new(
@@ -1112,7 +1098,6 @@ where
         input.definite_dimensions.height || style_definite.height,
     );
     if input.sizing_mode != SizingMode::IgnoreSizeStyles {
-        let preferred = raw_preferred;
         if metrics.inner.width.is_none() {
             metrics.available_inner.width = match preferred.width {
                 StyleSize::MinContent => AvailableSpace::MinContent,

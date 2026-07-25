@@ -16,9 +16,9 @@ use super::single_axis::{
 };
 use super::util::{
     Axis, ItemGeometry, ItemKey, OrderedItem, ResolvedContainerBox, accumulate_scrollable_overflow,
-    box_inset_size, clamp_axis, normalize_content_alignment, normalize_item_alignment,
-    own_scrollable_overflow, relative_offset, resolve_container_box, resolve_gap, resolve_gap_axis,
-    resolve_insets, resolve_item_geometry, resolve_length_percentage, resolve_style_size,
+    clamp_axis, normalize_content_alignment, normalize_item_alignment, own_scrollable_overflow,
+    relative_offset, resolve_container_box, resolve_gap, resolve_gap_axis, resolve_insets,
+    resolve_item_geometry, resolve_length_percentage, resolve_style_size,
     sort_and_assign_layout_order, style_size_behaves_auto,
 };
 use crate::geometry::{Edges, Point, Size};
@@ -318,16 +318,19 @@ where
     }
 
     fn probe(&mut self, slot: usize, available_main: AvailableSpace) -> f32 {
-        let expected = match slot {
-            0 => AvailableSpace::MinContent,
-            1 => AvailableSpace::MaxContent,
-            2 => self.axes.main.size(self.available_space),
-            _ => unreachable!("the main-axis probe cache has exactly three slots"),
-        };
-        debug_assert_eq!(
-            available_main, expected,
-            "a main-axis probe slot must not be reused for another constraint"
-        );
+        #[cfg(debug_assertions)]
+        {
+            let expected = match slot {
+                0 => AvailableSpace::MinContent,
+                1 => AvailableSpace::MaxContent,
+                2 => self.axes.main.size(self.available_space),
+                _ => unreachable!("the main-axis probe cache has exactly three slots"),
+            };
+            debug_assert_eq!(
+                available_main, expected,
+                "a main-axis probe slot must not be reused for another constraint"
+            );
+        }
         let bit = 1_u8 << slot;
         if self.measured & bit != 0 {
             return self.values[slot];
@@ -412,7 +415,7 @@ fn determine_flex_base_sizes<T>(
         let raw_min_size = style.min_size();
         let raw_max_size = style.max_size();
         let raw_flex_basis = style.flex_basis();
-        let inset_size = box_inset_size(item.padding, item.border);
+        let inset_size = item.box_floor();
         let main_floor = axes.main.size(inset_size);
         let cross_preferred = axes.cross.size(item.preferred_size);
         let mut known = Size::NONE;
@@ -692,26 +695,16 @@ fn determine_auto_main_size<N>(
     min_outer: Option<f32>,
     max_outer: Option<f32>,
 ) -> f32 {
-    let content = match available_main {
-        AvailableSpace::MaxContent => lines
-            .iter()
-            .copied()
-            .map(|line| line_content_contribution(items, line, gap, true))
-            .max_by(f32::total_cmp)
-            .unwrap_or(0.0),
-        AvailableSpace::MinContent => lines
-            .iter()
-            .copied()
-            .map(|line| line_content_contribution(items, line, gap, false))
-            .max_by(f32::total_cmp)
-            .unwrap_or(0.0),
-        AvailableSpace::Definite(_) => lines
-            .iter()
-            .copied()
-            .map(|line| line_intrinsic_main(items, line, gap, axes))
-            .max_by(f32::total_cmp)
-            .unwrap_or(0.0),
-    };
+    let content = lines
+        .iter()
+        .copied()
+        .map(|line| match available_main {
+            AvailableSpace::MaxContent => line_content_contribution(items, line, gap, true),
+            AvailableSpace::MinContent => line_content_contribution(items, line, gap, false),
+            AvailableSpace::Definite(_) => line_intrinsic_main(items, line, gap, axes),
+        })
+        .max_by(f32::total_cmp)
+        .unwrap_or(0.0);
     clamp_axis(content + inset_main, min_outer, max_outer, inset_main)
 }
 
@@ -736,6 +729,7 @@ fn resolve_flexible_lengths<N>(
     let growing = hypothetical_sum < inner_main_size;
     let initial_delta = inner_main_size - hypothetical_sum;
 
+    let mut initial_used_items = 0.0;
     for item in line_items.iter_mut() {
         item.frozen = false;
         item.violation = 0.0;
@@ -754,21 +748,11 @@ fn resolve_flexible_lengths<N>(
             item.target_main = item.hypothetical_main;
             item.frozen = true;
         }
+        // Frozen items contribute their just-set hypothetical size and
+        // unfrozen ones their flex basis, so `target_main` covers both.
+        initial_used_items += item.target_main + axes.main.sum(item.margin);
     }
-
-    let initial_used = total_gap
-        + line_items
-            .iter()
-            .map(|item| {
-                let main = if item.frozen {
-                    item.target_main
-                } else {
-                    item.flex_basis
-                };
-                main + axes.main.sum(item.margin)
-            })
-            .sum::<f32>();
-    let initial_free_space = inner_main_size - initial_used;
+    let initial_free_space = inner_main_size - (total_gap + initial_used_items);
 
     for _ in 0..=line_items.len() {
         if line_items.iter().all(|item| item.frozen) {
@@ -828,7 +812,7 @@ fn resolve_flexible_lengths<N>(
 
         let mut total_violation = 0.0;
         for item in line_items.iter_mut().filter(|item| !item.frozen) {
-            let floor = axes.main.size(box_inset_size(item.padding, item.border));
+            let floor = axes.main.size(item.box_floor());
             let unclamped = item.target_main;
             item.target_main = clamp_axis(
                 unclamped,
@@ -898,7 +882,7 @@ fn determine_hypothetical_cross_sizes<T>(
     for line in lines {
         for (offset, item) in items[line.start..line.end].iter_mut().enumerate() {
             let item_index = line.start + offset;
-            let inset_size = box_inset_size(item.padding, item.border);
+            let inset_size = item.box_floor();
             let cross_floor = axes.cross.size(inset_size);
             let min_cross = axes.cross.size(item.min_size);
             let max_cross = axes.cross.size(item.max_size);
@@ -1074,7 +1058,7 @@ fn stretch_lines(
 fn determine_used_cross_sizes<N>(items: &mut [FlexItem<N>], lines: &[FlexLine], axes: Axes) {
     for line in lines {
         for item in &mut items[line.start..line.end] {
-            let inset_size = box_inset_size(item.padding, item.border);
+            let inset_size = item.box_floor();
             let cross_floor = axes.cross.size(inset_size);
             let should_stretch = item.align_self == AlignFlags::STRETCH
                 && axes.cross.size(item.size_is_auto)
@@ -1132,12 +1116,14 @@ fn distribute_main_axis<N>(
             }
             (0.0, 0.0)
         } else {
-            for item in line_items.iter_mut() {
-                if item.margin_auto.flow_start(axes.main, axes.main_reverse) {
-                    set_flow_start(&mut item.margin, axes.main, axes.main_reverse, 0.0);
-                }
-                if item.margin_auto.flow_end(axes.main, axes.main_reverse) {
-                    set_flow_end(&mut item.margin, axes.main, axes.main_reverse, 0.0);
+            if auto_count > 0 {
+                for item in line_items.iter_mut() {
+                    if item.margin_auto.flow_start(axes.main, axes.main_reverse) {
+                        set_flow_start(&mut item.margin, axes.main, axes.main_reverse, 0.0);
+                    }
+                    if item.margin_auto.flow_end(axes.main, axes.main_reverse) {
+                        set_flow_end(&mut item.margin, axes.main, axes.main_reverse, 0.0);
+                    }
                 }
             }
             alignment_distribution(
@@ -1478,7 +1464,7 @@ where
             SizingMode::ApplySizeStyles,
             RequestedAxis::Both,
         );
-        let inset_size = box_inset_size(item.padding, item.border);
+        let inset_size = item.box_floor();
         known.width = Some(clamp_axis(
             output.size.width,
             item.min_size.width,
@@ -1643,18 +1629,15 @@ where
         absolute_items,
         hidden,
     } = collect_flex_items(tree, node, input.goal);
+    let percentage_basis = inner_size.zip_map(
+        outer_definite,
+        |size, definite| {
+            if definite { size } else { None }
+        },
+    );
     let mut items = generated
         .into_iter()
-        .map(|item| {
-            let mut percentage_basis = inner_size;
-            if !outer_definite.width {
-                percentage_basis.width = None;
-            }
-            if !outer_definite.height {
-                percentage_basis.height = None;
-            }
-            resolve_item(tree, item.key(), percentage_basis, axes, rtl, align_items)
-        })
+        .map(|item| resolve_item(tree, item.key(), percentage_basis, axes, rtl, align_items))
         .collect::<Vec<_>>();
     determine_flex_base_sizes(
         tree,
@@ -1677,16 +1660,19 @@ where
     );
     let mut lines = collect_flex_lines(&items, flex_wrap, line_available_main, main_gap, axes);
 
+    let contained_outer = |axis: Axis, inset: f32| {
+        size_containment.map(|intrinsic| {
+            clamp_axis(
+                axis.size(intrinsic).unwrap_or(0.0) + inset,
+                axis.size(min_size),
+                axis.size(max_size),
+                inset,
+            )
+        })
+    };
     let inset_main = axes.main.size(container_inset_size);
     if axes.main.size(outer_size).is_none() {
-        let outer_main = if let Some(intrinsic) = size_containment {
-            clamp_axis(
-                axes.main.size(intrinsic).unwrap_or(0.0) + inset_main,
-                axes.main.size(min_size),
-                axes.main.size(max_size),
-                inset_main,
-            )
-        } else {
+        let outer_main = contained_outer(axes.main, inset_main).unwrap_or_else(|| {
             determine_auto_main_size(
                 &items,
                 &lines,
@@ -1697,7 +1683,7 @@ where
                 axes.main.size(min_size),
                 axes.main.size(max_size),
             )
-        };
+        });
         axes.main.set_size(&mut outer_size, Some(outer_main));
         axes.main
             .set_size(&mut inner_size, Some((outer_main - inset_main).max(0.0)));
@@ -1732,14 +1718,7 @@ where
     let cross_was_definite = axes.cross.size(outer_size).is_some();
     let inset_cross = axes.cross.size(container_inset_size);
     if !cross_was_definite {
-        let outer_cross = if let Some(intrinsic) = size_containment {
-            clamp_axis(
-                axes.cross.size(intrinsic).unwrap_or(0.0) + inset_cross,
-                axes.cross.size(min_size),
-                axes.cross.size(max_size),
-                inset_cross,
-            )
-        } else {
+        let outer_cross = contained_outer(axes.cross, inset_cross).unwrap_or_else(|| {
             determine_auto_cross_size(
                 &lines,
                 axes.cross.size(gap),
@@ -1749,7 +1728,7 @@ where
                 axes,
                 axes.cross.size(inner_available_space),
             )
-        };
+        });
         axes.cross.set_size(&mut outer_size, Some(outer_cross));
         axes.cross
             .set_size(&mut inner_size, Some((outer_cross - inset_cross).max(0.0)));
@@ -1860,12 +1839,8 @@ where
         outer_size,
     );
     for (document_index, child) in hidden {
-        super::hide_subtree(tree, state, child);
-        tree.set_unrounded_layout(
-            state,
-            child,
-            Layout::with_order(u32::try_from(document_index).unwrap_or(u32::MAX)),
-        );
+        let order = u32::try_from(document_index).unwrap_or(u32::MAX);
+        super::hide_child_at_order(tree, state, child, order);
     }
     let absolute_content_size = perform_absolute_children(
         tree,

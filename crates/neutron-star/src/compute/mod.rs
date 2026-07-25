@@ -152,6 +152,17 @@ pub fn hide_subtree<T: LayoutTree>(tree: &T, state: &mut T::State, node: T::Node
     }
 }
 
+/// Hides a `display: none` child's subtree while keeping its paint-order slot.
+pub(super) fn hide_child_at_order<T: LayoutTree>(
+    tree: &T,
+    state: &mut T::State,
+    node: T::NodeId,
+    order: u32,
+) {
+    hide_subtree(tree, state, node);
+    tree.set_unrounded_layout(state, node, Layout::with_order(order));
+}
+
 pub fn compute_skipped_contents_layout<T: LayoutTree>(
     tree: &T,
     state: &mut T::State,
@@ -200,13 +211,12 @@ pub fn compute_absolute_layout<T: LayoutTree>(
     containing_block: Size<f32>,
     static_position: Point<f32>,
 ) -> Layout {
-    absolute_layout(
+    compute_absolute_layout_with_static_position(
         tree,
         state,
         node,
         containing_block,
         move |_, _| static_position,
-        LayoutGoal::Commit,
     )
 }
 
@@ -378,10 +388,8 @@ fn absolute_known_dimensions(
 ) -> Size<Option<f32>> {
     let horizontal_stretch =
         style.auto_size.width && style.insets.left.is_some() && style.insets.right.is_some();
-    let ratio_dependent_height = style.aspect_ratio.is_some()
-        && horizontal_stretch
-        && style.auto_size.width
-        && style.auto_size.height;
+    let ratio_dependent_height =
+        style.aspect_ratio.is_some() && horizontal_stretch && style.auto_size.height;
     Size::new(
         horizontal_stretch.then_some(
             clamp(
@@ -706,8 +714,8 @@ fn round_layout_inner<T: LayoutTree>(
 ) {
     let visit_pre_node = visit_pre_node && pre_node(tree, state, node);
     let (rounded, position) =
-        rounded_layout(tree.layout(state, node).unrounded(), scale, parent_position);
-    tree.layout_mut(state, node).set_rounded(rounded);
+        rounded_layout(&tree.layout(state, node).unrounded, scale, parent_position);
+    tree.layout_mut(state, node).rounded = rounded;
 
     for child in tree.children(node) {
         round_layout_inner(
@@ -828,11 +836,11 @@ mod tests {
         };
         let tree = RoundingTree;
         let mut state = crate::tree::LayoutSlot::default();
-        state.set_unrounded(unrounded);
+        state.unrounded = unrounded;
 
         ROUND_SNAP_CALLS.set(0);
         round_layout_subtree(&tree, &mut state, (), scale, parent_position);
-        let actual = state.rounded();
+        let actual = &state.rounded;
 
         assert_eq!(ROUND_SNAP_CALLS.get(), 20);
         assert_eq!(actual.order, expected.order);

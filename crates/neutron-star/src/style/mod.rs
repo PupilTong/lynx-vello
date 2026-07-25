@@ -47,7 +47,7 @@ macro_rules! style_protocol {
 pub mod containment;
 pub mod text;
 
-pub use containment::effective_containment;
+use containment::effective_containment;
 pub use stylo::computed_values::{
     box_sizing, direction, flex_direction, flex_wrap, linear_direction, relative_center,
     relative_layout_once, text_wrap_mode, visibility, white_space_collapse,

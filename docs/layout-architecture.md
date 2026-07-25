@@ -368,7 +368,7 @@ definite-inset visual nudge):
   impossible in Lynx — lowers them to the same hoisted handling). The
   parent's algorithm computes the node's flex/grid-aware static position
   and records it via
-  `tree.layout_mut(state, node).set_static_position(...)`, but does not size
+  `tree.set_static_position(state, node, ...)`, but does not size
   or place it. After in-flow layout the host runs the **positioned pass**:
   it resolves the CB node (for Lynx `fixed`: the viewport root, or the
   nearest transformed/filtered/`will-change` ancestor per the W3C rule the
@@ -772,8 +772,8 @@ the engine we're succeeding.
    then sized/placed against the container's padding box from their insets
    (auto insets anchor to the static position); hoisted
    `PositionProperty::Fixed` children only get the static position recorded
-   via `LayoutSlot::set_static_position` — the host's positioned pass finishes them.
-9. **Finalize** — per-child `LayoutSlot::set_unrounded` (only for
+   via the `LayoutSlot::static_position` field — the host's positioned pass finishes them.
+9. **Finalize** — per-child `LayoutSlot::unrounded` writes (only for
    `LayoutGoal::Commit`), container border-box size, `content_size`
    accumulation, container baseline.
 
@@ -855,7 +855,7 @@ dispatches to it.
    inline axis.
 5. **Item layout & finalize** — final child layout at known area sizes,
    first-baseline sharing, direct abs-pos children against a resolved grid
-   area, `LayoutSlot::set_unrounded`, container size, and `content_size`.
+   area, `LayoutSlot::unrounded` writes, container size, and `content_size`.
 
 Last-baseline alignment, subgrid, named lines/areas, fragmentation, and
 masonry/`staggered-grid` stay out of scope. The last is a Lynx
