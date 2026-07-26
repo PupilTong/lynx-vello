@@ -780,17 +780,19 @@ fn flattened_children_splices_display_contents_subtrees_in_source_order() {
 
     let ids = |node: usize| -> Vec<usize> {
         tree.flattened_children(tree.node(node))
-            .map(|(child, _)| child.index)
+            .map(|(child, ..)| child.index)
             .collect()
     };
 
-    // Each yielded child arrives with the style the walk read to classify it.
-    let (yielded, style) = tree
+    // Each yielded child arrives with the style and `display` the walk read
+    // to classify it, so no caller looks either up a second time.
+    let (yielded, style, display) = tree
         .flattened_children(tree.node(root))
         .next()
         .expect("the root has children");
     assert_eq!(yielded.index, first);
     assert!(std::ptr::eq(style, tree.style(tree.node(first))));
+    assert_eq!(display, tree.style(tree.node(first)).display());
 
     // The box-less wrapper and the box-less element nested inside it are both
     // replaced by their own children, in place; a `display: none` child still

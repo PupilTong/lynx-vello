@@ -484,7 +484,7 @@ cheaper than laying the subtree out.
 **Box-less elements** (`display: contents`): the element generates no box
 while its children keep generating theirs, in the nearest box ancestor's
 formatting context ([CSS Display 3
-§3.3](https://drafts.csswg.org/css-display/#valdef-display-contents)). This is
+§2.5](https://drafts.csswg.org/css-display/#valdef-display-contents)). This is
 a **box-tree**, not a dispatch, question, so it is answered where the box tree
 is read rather than in `compute_layout`, along exactly two lines:
 
@@ -511,8 +511,8 @@ is read rather than in `compute_layout`, along exactly two lines:
   generating no fragments has no client rects.
 
 `compute_layout` is therefore unreachable for one: the document element
-blockifies in Stylo (`Display::equivalent_block_display`), and no other path
-reaches a box-less node. Inheritance is unaffected — it follows the DOM tree,
+blockifies in Stylo (`Display::equivalent_block_display`, CSS Display 3
+§2.8), and no other path reaches a box-less node. Inheritance is unaffected — it follows the DOM tree,
 so a text child still reads its box-less parent's font/text values.
 
 **The relayout-boundary theorem.** A box is a **relayout boundary** iff its

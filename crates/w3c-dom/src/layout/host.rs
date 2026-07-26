@@ -384,13 +384,13 @@ fn position_hoisted<T: Sync>(
 fn sibling_paint_order<T>(tree: &TreeArenas<T>, parent_id: NodeId, target: NodeId) -> u32 {
     let Some(target_index) = tree
         .flattened_children(parent_id)
-        .position(|(id, _)| id == target)
+        .position(|(id, ..)| id == target)
     else {
         return 0;
     };
     let target_key = (0_i32, target_index);
     let mut rank = 0u32;
-    for (index, (child_id, _)) in tree.flattened_children(parent_id).enumerate() {
+    for (index, (child_id, ..)) in tree.flattened_children(parent_id).enumerate() {
         let child = slab_get_for_live_node(&tree.nodes, child_id);
         let Some(order) = sibling_effective_paint_order(child) else {
             continue;

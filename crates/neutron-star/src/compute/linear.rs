@@ -1371,13 +1371,13 @@ where
     let mut has_nonzero_order = false;
     let mut has_box_basis_dependency = false;
     let mut has_relative_basis_dependency = false;
-    for (document_index, (child, child_style)) in children.enumerate() {
+    for (document_index, (child, child_style, display)) in children.enumerate() {
         let position = child_style.position();
         let is_absolute = matches!(
             position,
             PositionProperty::Absolute | PositionProperty::Fixed
         );
-        if child_style.display().is_none() {
+        if display.is_none() {
             if commits_layout {
                 hidden_items.push(LayoutItemKey {
                     node: child,

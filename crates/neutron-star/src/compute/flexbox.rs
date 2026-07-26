@@ -1550,8 +1550,8 @@ where
     let mut absolute_items = SmallVec::new();
     let mut hidden = SmallVec::new();
 
-    for (document_index, (child, child_style)) in children.enumerate() {
-        if child_style.display().is_none() {
+    for (document_index, (child, child_style, display)) in children.enumerate() {
+        if display.is_none() {
             if commits_layout {
                 hidden.push((document_index, child));
             }

@@ -168,7 +168,7 @@ style_protocol! {
                     // element that generates no box at all: there is no
                     // principal box to contain, and its children keep
                     // generating their own boxes regardless (CSS Contain 2
-                    // §1.1, CSS Display 3 §3.3).
+                    // §1.1, CSS Display 3 §2.5).
                     Contain::empty()
                 } else {
                     effective_containment(

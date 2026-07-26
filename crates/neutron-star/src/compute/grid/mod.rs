@@ -33,7 +33,7 @@ use super::util::{
 use super::{compute_absolute_layout, hide_subtree};
 use crate::geometry::{Edges, Line, Point, Size};
 use crate::style::containment::size_containment;
-use crate::style::{Contain, CoreStyle, Overflow};
+use crate::style::{Contain, CoreStyle, Display, Overflow};
 use crate::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis,
     SizingMode,
@@ -92,12 +92,13 @@ impl<N> PendingLayoutItem<N> for PendingItem<N> {
 fn classify_item<T>(
     node: T::NodeId,
     style: &T::Style<'_>,
+    display: Display,
     document_index: usize,
 ) -> Option<PendingItem<T::NodeId>>
 where
     T: LayoutTree,
 {
-    if style.display().is_none() {
+    if display.is_none() {
         return None;
     }
     let position = style.position();
@@ -1185,8 +1186,8 @@ where
     let mut in_flow = Vec::with_capacity(children.capacity_hint());
     let mut absolute = commits_layout.then(Vec::new);
     let mut hidden = commits_layout.then(Vec::new);
-    for (document_index, (child, style)) in children.enumerate() {
-        let Some(child_style) = classify_item::<T>(child, &style, document_index) else {
+    for (document_index, (child, style, display)) in children.enumerate() {
+        let Some(child_style) = classify_item::<T>(child, &style, display, document_index) else {
             if let Some(hidden) = &mut hidden {
                 hidden.push((document_index, child));
             }

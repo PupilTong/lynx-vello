@@ -9,7 +9,7 @@ use smallvec::SmallVec;
 
 use crate::cache::Cache;
 use crate::geometry::Point;
-use crate::style::CoreStyle;
+use crate::style::{CoreStyle, Display};
 
 /// Engine-owned values stored once per live node in host-owned storage.
 ///
@@ -115,18 +115,20 @@ pub trait LayoutTree {
     }
 
     /// [`children`] with every `display: contents` subtree flattened in
-    /// place, each child paired with the style the walk already had to read.
+    /// place, each child paired with the style and `display` the walk already
+    /// had to read.
     ///
     /// A `display: contents` element generates no box of its own while its
     /// children keep generating theirs, in the *nearest box ancestor's*
     /// formatting context ([CSS Display 3
-    /// §3.3](https://drafts.csswg.org/css-display/#valdef-display-contents)),
+    /// §2.5](https://drafts.csswg.org/css-display/#valdef-display-contents)),
     /// so this iterator splices such an element's own children into the
     /// sequence in its place, recursively, and never yields it. With no
     /// `display: contents` child it yields exactly [`children`] in order.
     ///
     /// Deciding that takes each child's `display`, which item collection needs
-    /// anyway, so the style is handed back rather than looked up twice.
+    /// anyway to spot `display: none`, so both it and the style are handed
+    /// back rather than looked up again per child.
     ///
     /// This is the *box-tree topology*, not the set of boxes: `display: none`
     /// children are still yielded, because clearing their stale geometry
@@ -205,10 +207,11 @@ impl<T: LayoutTree> core::fmt::Debug for FlattenedChildren<'_, T> {
 }
 
 impl<T: LayoutTree> FlattenedChildren<'_, T> {
-    /// How many items to reserve for — the children left at the current
-    /// level, which is exact until a `display: contents` child is reached.
+    /// How many items to reserve for: the lower-bound estimate the current
+    /// source level reports, which a `display: contents` child can push the
+    /// real count either side of.
     ///
-    /// Deliberately **not** [`Iterator::size_hint`]: an empty box-less child
+    /// Deliberately **not** [`Iterator::size_hint`] — an empty box-less child
     /// makes this an over-estimate, which is fine for `Vec::with_capacity`
     /// but would break the bound that trait promises.
     #[must_use]
@@ -219,7 +222,10 @@ impl<T: LayoutTree> FlattenedChildren<'_, T> {
 }
 
 impl<'tree, T: LayoutTree> Iterator for FlattenedChildren<'tree, T> {
-    type Item = (T::NodeId, T::Style<'tree>);
+    /// The child, its style, and its `display` — read once here, since the
+    /// walk needs it to answer `contents` and the caller needs it to answer
+    /// `none`.
+    type Item = (T::NodeId, T::Style<'tree>, Display);
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
@@ -229,8 +235,9 @@ impl<'tree, T: LayoutTree> Iterator for FlattenedChildren<'tree, T> {
                 continue;
             };
             let style = self.tree.style(child);
-            if !style.display().is_contents() {
-                return Some((child, style));
+            let display = style.display();
+            if !display.is_contents() {
+                return Some((child, style, display));
             }
             let inner = self.tree.children(child);
             self.outer.push(core::mem::replace(&mut self.level, inner));

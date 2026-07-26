@@ -507,8 +507,9 @@ fn display_contents_flip_relayouts_the_container_and_clears_the_stale_box() {
 
 #[test]
 fn display_contents_on_the_document_element_blockifies() {
-    // CSS Display 3 §2.7: `display: contents` computes to a block-level box on
-    // the root element, which this engine lays out through the leaf fallback.
+    // CSS Display 3 §2.8 (the root element's principal box): `display:
+    // contents` blockifies there, which this engine lays out through the leaf
+    // fallback.
     let mut h = Harness::new(
         "page { display: contents; width: 120px; height: 30px; }
          view { width: 20px; height: 10px; }",
