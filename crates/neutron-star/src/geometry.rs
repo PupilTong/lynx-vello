@@ -86,6 +86,7 @@ impl Size<Option<f32>> {
         height: None,
     };
 
+    #[inline]
     #[must_use]
     pub fn unwrap_or(self, fallback: Size<f32>) -> Size<f32> {
         Size {
@@ -94,6 +95,7 @@ impl Size<Option<f32>> {
         }
     }
 
+    #[inline]
     #[must_use]
     pub fn or(self, fallback: Self) -> Self {
         Size {
@@ -156,11 +158,13 @@ impl Edges<f32> {
         bottom: 0.0,
     };
 
+    #[inline]
     #[must_use]
     pub fn horizontal_sum(&self) -> f32 {
         self.left + self.right
     }
 
+    #[inline]
     #[must_use]
     pub fn vertical_sum(&self) -> f32 {
         self.top + self.bottom

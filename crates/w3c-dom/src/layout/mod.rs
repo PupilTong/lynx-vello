@@ -105,7 +105,7 @@ impl<T> Document<T> {
         self.layout_state()
             .nodes
             .get(id)
-            .map(|state| state.slot.rounded())
+            .map(|state| &state.slot.rounded)
     }
 
     #[must_use]
@@ -113,7 +113,7 @@ impl<T> Document<T> {
         self.layout_state()
             .nodes
             .get(id)
-            .map(|state| state.slot.unrounded())
+            .map(|state| &state.slot.unrounded)
     }
 
     #[must_use]
@@ -125,6 +125,10 @@ impl<T> Document<T> {
     }
 
     pub fn invalidate_layout(&mut self, id: crate::NodeId) {
+        assert!(
+            self.root_node().layout_styles_ready(),
+            "computed styles are unavailable because the preceding style traversal did not complete"
+        );
         let (boundary, reached_root) = {
             let (tree, state, parked) = self.layout_parts();
             let start = tree

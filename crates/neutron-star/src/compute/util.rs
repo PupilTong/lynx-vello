@@ -282,12 +282,12 @@ impl EdgeMask {
 
     #[inline]
     pub(super) const fn start(self, axis: Axis) -> bool {
-        self.0 & (1 << Self::axis_shift(axis)) != 0
+        self.edge(axis, false)
     }
 
     #[inline]
     pub(super) const fn end(self, axis: Axis) -> bool {
-        self.0 & (2 << Self::axis_shift(axis)) != 0
+        self.edge(axis, true)
     }
 
     #[inline]
@@ -322,40 +322,27 @@ pub(super) enum IntrinsicTag {
     FitContent,
 }
 
-impl IntrinsicTag {
-    #[inline]
-    fn from_style_size(value: &StyleSize) -> Self {
-        if matches!(value, StyleSize::MinContent) {
-            Self::MinContent
-        } else if matches!(value, StyleSize::MaxContent) {
-            Self::MaxContent
-        } else if matches!(value, StyleSize::FitContentFunction(_)) {
-            Self::FitContent
-        } else {
-            debug_assert!(!matches!(
-                value,
-                StyleSize::AnchorSizeFunction(_) | StyleSize::AnchorContainingCalcFunction(_)
-            ));
-            Self::None
+macro_rules! intrinsic_tag_from {
+    ($name:ident, $type:ident) => {
+        #[inline]
+        fn $name(value: &$type) -> Self {
+            match value {
+                $type::MinContent => Self::MinContent,
+                $type::MaxContent => Self::MaxContent,
+                $type::FitContentFunction(_) => Self::FitContent,
+                $type::AnchorSizeFunction(_) | $type::AnchorContainingCalcFunction(_) => {
+                    debug_assert!(false, "anchor sizing is pref-dead under the lynx feature");
+                    Self::None
+                }
+                _ => Self::None,
+            }
         }
-    }
+    };
+}
 
-    #[inline]
-    fn from_max_size(value: &MaxSize) -> Self {
-        if matches!(value, MaxSize::MinContent) {
-            Self::MinContent
-        } else if matches!(value, MaxSize::MaxContent) {
-            Self::MaxContent
-        } else if matches!(value, MaxSize::FitContentFunction(_)) {
-            Self::FitContent
-        } else {
-            debug_assert!(!matches!(
-                value,
-                MaxSize::AnchorSizeFunction(_) | MaxSize::AnchorContainingCalcFunction(_)
-            ));
-            Self::None
-        }
-    }
+impl IntrinsicTag {
+    intrinsic_tag_from!(from_style_size, StyleSize);
+    intrinsic_tag_from!(from_max_size, MaxSize);
 
     #[inline]
     pub(super) const fn is_intrinsic(self) -> bool {
@@ -653,7 +640,7 @@ pub(super) fn resolve_insets(value: Edges<&Inset>, basis: Size<Option<f32>>) -> 
 }
 
 #[inline]
-pub(super) fn add_optional_sizes(value: Size<Option<f32>>, amount: Size<f32>) -> Size<Option<f32>> {
+fn add_optional_sizes(value: Size<Option<f32>>, amount: Size<f32>) -> Size<Option<f32>> {
     Size::new(
         value.width.map(|value| value + amount.width),
         value.height.map(|value| value + amount.height),
@@ -685,10 +672,6 @@ pub(super) fn apply_aspect_ratio(
         ratio.is_finite() && ratio > 0.0,
         "aspect-ratio must be positive and finite"
     );
-    if !ratio.is_finite() || ratio <= 0.0 {
-        return value;
-    }
-
     match (value.width, value.height) {
         (Some(width), None) => value.height = Some(width / ratio),
         (None, Some(height)) => value.width = Some(height * ratio),
@@ -799,13 +782,9 @@ fn style_size_is_definite(value: &StyleSize, parent_basis: Option<f32>) -> bool 
     }
 }
 
+/// With an aspect ratio, one definite axis makes the other definite too.
 #[inline]
-pub(super) fn preferred_size_definiteness(
-    size: Size<&StyleSize>,
-    parent_size: Size<Option<f32>>,
-    aspect_ratio: Option<f32>,
-) -> Size<bool> {
-    let mut definite = size.zip_map(parent_size, style_size_is_definite);
+pub(super) fn mirror_ratio_definiteness(definite: &mut Size<bool>, aspect_ratio: Option<f32>) {
     if aspect_ratio.is_some() {
         if definite.width {
             definite.height = true;
@@ -813,6 +792,16 @@ pub(super) fn preferred_size_definiteness(
             definite.width = true;
         }
     }
+}
+
+#[inline]
+pub(super) fn preferred_size_definiteness(
+    size: Size<&StyleSize>,
+    parent_size: Size<Option<f32>>,
+    aspect_ratio: Option<f32>,
+) -> Size<bool> {
+    let mut definite = size.zip_map(parent_size, style_size_is_definite);
+    mirror_ratio_definiteness(&mut definite, aspect_ratio);
     definite
 }
 

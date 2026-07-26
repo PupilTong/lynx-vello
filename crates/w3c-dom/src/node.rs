@@ -259,12 +259,6 @@ enum NodeContent {
     Test(LeafMetrics),
 }
 
-impl NodeContent {
-    fn text(value: String) -> Self {
-        Self::Text(value)
-    }
-}
-
 /// A single node in a [`Document`](crate::Document) tree.
 pub struct Node<T> {
     owner: AtomicPtr<TreeArenas<T>>,
@@ -346,7 +340,7 @@ impl<T> Node<T> {
             element_state: ElementState::empty(),
             inline_block: None,
             stylo_data: UnsafeCell::new(None),
-            content: text.map(|value| Box::new(NodeContent::text(value))),
+            content: text.map(|value| Box::new(NodeContent::Text(value))),
         }
     }
 
@@ -398,7 +392,7 @@ impl<T> Node<T> {
             .store(ready, Ordering::Release);
     }
 
-    fn layout_styles_ready(&self) -> bool {
+    pub(crate) fn layout_styles_ready(&self) -> bool {
         self.document_data()
             .layout_styles_ready
             .load(Ordering::Acquire)
@@ -605,11 +599,12 @@ impl<T> Node<T> {
 
     /// Borrow the post-flush computed style without re-entering Stylo's
     /// runtime borrow checker or incrementing the style `Arc`.
+    ///
+    /// The document-wide readiness gate ([`Self::layout_styles_ready`]) is
+    /// asserted once at every layout/invalidation pass entry rather than per
+    /// node here; the per-element stale-pointer check below stays as the
+    /// precise fail-closed mechanism.
     pub(crate) fn layout_computed_style(&self) -> Option<&ComputedValues> {
-        assert!(
-            self.layout_styles_ready(),
-            "computed styles are unavailable because the preceding style traversal did not complete"
-        );
         let NodeData::Element(pointer) = &self.data else {
             return None;
         };
@@ -658,7 +653,7 @@ impl<T> Node<T> {
     }
 
     pub(crate) fn set_literal_text(&mut self, text: Option<String>) {
-        self.content = text.map(|value| Box::new(NodeContent::text(value)));
+        self.content = text.map(|value| Box::new(NodeContent::Text(value)));
     }
 
     pub(crate) fn selector_flags(&self) -> ElementSelectorFlags {

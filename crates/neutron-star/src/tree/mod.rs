@@ -16,50 +16,17 @@ use crate::style::{CoreStyle, Display};
 /// The host chooses the arena or other container. Layout receives the tree
 /// through a shared borrow and the state through a separate exclusive borrow,
 /// so these slots need no interior mutability or runtime borrow tracking.
+/// The geometry fields are plain data; only the measurement cache keeps an
+/// invariant-guarding API.
 #[derive(Debug, Default)]
 pub struct LayoutSlot {
     cache: Cache,
-    static_position: Point<f32>,
-    unrounded: Layout,
-    rounded: Layout,
+    pub static_position: Point<f32>,
+    pub unrounded: Layout,
+    pub rounded: Layout,
 }
 
 impl LayoutSlot {
-    #[must_use]
-    pub const fn unrounded(&self) -> &Layout {
-        &self.unrounded
-    }
-
-    pub const fn unrounded_mut(&mut self) -> &mut Layout {
-        &mut self.unrounded
-    }
-
-    pub fn set_unrounded(&mut self, layout: Layout) {
-        self.unrounded = layout;
-    }
-
-    #[must_use]
-    pub const fn rounded(&self) -> &Layout {
-        &self.rounded
-    }
-
-    pub const fn rounded_mut(&mut self) -> &mut Layout {
-        &mut self.rounded
-    }
-
-    pub fn set_rounded(&mut self, layout: Layout) {
-        self.rounded = layout;
-    }
-
-    #[must_use]
-    pub const fn static_position(&self) -> Point<f32> {
-        self.static_position
-    }
-
-    pub const fn set_static_position(&mut self, static_position: Point<f32>) {
-        self.static_position = static_position;
-    }
-
     #[must_use]
     pub fn cached_layout(&self, input: LayoutInput) -> Option<LayoutOutput> {
         self.cache.get(input)
@@ -160,7 +127,7 @@ pub trait LayoutTree {
     ) -> &'state mut LayoutSlot;
 
     fn set_unrounded_layout(&self, state: &mut Self::State, node: Self::NodeId, layout: Layout) {
-        self.layout_mut(state, node).set_unrounded(layout);
+        self.layout_mut(state, node).unrounded = layout;
     }
 
     fn set_static_position(
@@ -169,7 +136,7 @@ pub trait LayoutTree {
         node: Self::NodeId,
         position: Point<f32>,
     ) {
-        self.layout_mut(state, node).set_static_position(position);
+        self.layout_mut(state, node).static_position = position;
     }
 
     fn compute_layout(
@@ -273,8 +240,8 @@ mod tests {
 
         slot.store_cached_layout(input, output);
 
-        assert_eq!(slot.unrounded().size, Size::ZERO);
-        assert_eq!(slot.unrounded().content_size, Size::ZERO);
+        assert_eq!(slot.unrounded.size, Size::ZERO);
+        assert_eq!(slot.unrounded.content_size, Size::ZERO);
         assert_eq!(slot.cached_layout(input), Some(output));
     }
 

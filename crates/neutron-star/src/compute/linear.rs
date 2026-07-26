@@ -2,8 +2,6 @@
 
 #![allow(clippy::cast_precision_loss)]
 
-use core::cmp::Ordering;
-
 use stylo::computed_values::{box_sizing, direction, linear_direction};
 use stylo::values::computed::{
     ContentDistribution, Inset, ItemPlacement, LengthPercentage, Margin, PositionProperty,
@@ -16,12 +14,13 @@ use super::single_axis::{
     set_flow_start,
 };
 use super::util::{
-    Axis, EdgeMask, ItemGeometry, ItemKey as LayoutItemKey, OrderedItem, ResolvedContainerBox,
-    accumulate_scrollable_overflow, apply_aspect_ratio, auto_edges_to_zero, box_inset_size,
-    clamp_axis, own_scrollable_overflow, relative_offset, resolve_container_box, resolve_insets,
-    resolve_intrinsic, resolve_item_geometry, resolve_margins, resolve_padding,
+    Axis, EdgeMask, ItemGeometry, ItemKey as LayoutItemKey, OrderedItem, PendingLayoutItem,
+    ResolvedContainerBox, accumulate_scrollable_overflow, apply_aspect_ratio, auto_edges_to_zero,
+    clamp_axis, mirror_ratio_definiteness, own_scrollable_overflow, relative_offset,
+    resolve_container_box, resolve_insets, resolve_intrinsic, resolve_item_geometry,
+    resolve_margins, resolve_padding, sort_and_assign_layout_order,
 };
-use super::{compute_absolute_layout_with_static_position, hide_subtree, measure_absolute_layout};
+use super::{compute_absolute_layout_with_static_position, measure_absolute_layout};
 use crate::geometry::{Edges, Point, Size};
 use crate::style::containment::size_containment;
 use crate::style::{Contain, CoreStyle};
@@ -69,6 +68,18 @@ struct AbsoluteItem<N> {
     static_axes: Size<bool>,
 }
 
+impl<N> PendingLayoutItem<N> for AbsoluteItem<N> {
+    #[inline]
+    fn ordered(&self) -> &OrderedItem<N> {
+        &self.key
+    }
+
+    #[inline]
+    fn ordered_mut(&mut self) -> &mut OrderedItem<N> {
+        &mut self.key
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 #[repr(transparent)]
 struct LinearItemFlags(u8);
@@ -106,12 +117,13 @@ impl LinearItemFlags {
     }
 
     #[inline]
-    fn set_frozen(&mut self, frozen: bool) {
-        if frozen {
-            self.0 |= Self::FROZEN;
-        } else {
-            self.0 &= !Self::FROZEN;
-        }
+    const fn freeze(&mut self) {
+        self.0 |= Self::FROZEN;
+    }
+
+    #[inline]
+    const fn unfreeze(&mut self) {
+        self.0 &= !Self::FROZEN;
     }
 }
 
@@ -137,6 +149,18 @@ struct LinearItem<N> {
     flags: LinearItemFlags,
 }
 super::util::impl_item_geometry!(LinearItem);
+
+impl<N> PendingLayoutItem<N> for LinearItem<N> {
+    #[inline]
+    fn ordered(&self) -> &OrderedItem<N> {
+        &self.key
+    }
+
+    #[inline]
+    fn ordered_mut(&mut self) -> &mut OrderedItem<N> {
+        &mut self.key
+    }
+}
 
 fn map_cross_flags(flags: AlignFlags, axes: LinearAxes) -> AlignFlags {
     if flags == AlignFlags::STRETCH || flags == AlignFlags::CENTER {
@@ -335,7 +359,7 @@ fn intrinsic_measurement<T>(
 where
     T: LayoutTree,
 {
-    let inset = box_inset_size(item.padding, item.border);
+    let inset = item.box_floor();
     let resolved_known = Size::new(
         item.preferred_size
             .width
@@ -444,7 +468,7 @@ fn resolve_intrinsic_sizes<T>(
     } else {
         Size::ZERO
     };
-    let inset = box_inset_size(item.padding, item.border);
+    let inset = item.box_floor();
 
     macro_rules! resolve_axis {
         ($field:ident, $axis:expr) => {
@@ -485,28 +509,55 @@ fn resolve_intrinsic_sizes<T>(
     item.preferred_size = apply_aspect_ratio(item.preferred_size, item.aspect_ratio);
 }
 
+/// Projects a known border- or content-box length through an aspect ratio:
+/// strip the source axis's inset when sizing is content-box, scale, then
+/// re-add the target axis's inset.
+#[inline]
+fn ratio_project(
+    known: f32,
+    ratio: f32,
+    divide: bool,
+    box_sizing: box_sizing::T,
+    known_inset: f32,
+    projected_inset: f32,
+) -> f32 {
+    debug_assert!(
+        ratio.is_finite() && ratio > 0.0,
+        "aspect-ratio must be positive and finite"
+    );
+    let content_box = box_sizing == box_sizing::T::ContentBox;
+    let sizing = if content_box {
+        (known - known_inset).max(0.0)
+    } else {
+        known
+    };
+    let projected = if divide {
+        sizing / ratio
+    } else {
+        sizing * ratio
+    };
+    if content_box {
+        projected + projected_inset
+    } else {
+        projected
+    }
+}
+
 #[inline]
 fn ratio_cross_size<N>(item: &LinearItem<N>, axes: LinearAxes, forced_main: f32) -> Option<f32> {
     let ratio = item.aspect_ratio?;
-    if !ratio.is_finite() || ratio <= 0.0 || !axes.cross.size(item.size_is_auto) {
+    if !axes.cross.size(item.size_is_auto) {
         return None;
     }
-    let inset = box_inset_size(item.padding, item.border);
-    let sizing_main = if item.box_sizing == box_sizing::T::ContentBox {
-        (forced_main - axes.main.size(inset)).max(0.0)
-    } else {
-        forced_main
-    };
-    let sizing_cross = if axes.main == Axis::Horizontal {
-        sizing_main / ratio
-    } else {
-        sizing_main * ratio
-    };
-    Some(if item.box_sizing == box_sizing::T::ContentBox {
-        sizing_cross + axes.cross.size(inset)
-    } else {
-        sizing_cross
-    })
+    let inset = item.box_floor();
+    Some(ratio_project(
+        forced_main,
+        ratio,
+        axes.main == Axis::Horizontal,
+        item.box_sizing,
+        axes.main.size(inset),
+        axes.cross.size(inset),
+    ))
 }
 
 #[inline]
@@ -519,35 +570,26 @@ fn apply_border_box_ratio(
     let Some(ratio) = aspect_ratio else {
         return size;
     };
-    if !ratio.is_finite() || ratio <= 0.0 {
-        return size;
-    }
     match (size.width, size.height) {
         (Some(width), None) => {
-            let sizing_width = if box_sizing == box_sizing::T::ContentBox {
-                (width - inset.width).max(0.0)
-            } else {
-                width
-            };
-            let sizing_height = sizing_width / ratio;
-            size.height = Some(if box_sizing == box_sizing::T::ContentBox {
-                sizing_height + inset.height
-            } else {
-                sizing_height
-            });
+            size.height = Some(ratio_project(
+                width,
+                ratio,
+                true,
+                box_sizing,
+                inset.width,
+                inset.height,
+            ));
         }
         (None, Some(height)) => {
-            let sizing_height = if box_sizing == box_sizing::T::ContentBox {
-                (height - inset.height).max(0.0)
-            } else {
-                height
-            };
-            let sizing_width = sizing_height * ratio;
-            size.width = Some(if box_sizing == box_sizing::T::ContentBox {
-                sizing_width + inset.width
-            } else {
-                sizing_width
-            });
+            size.width = Some(ratio_project(
+                height,
+                ratio,
+                false,
+                box_sizing,
+                inset.height,
+                inset.width,
+            ));
         }
         _ => {}
     }
@@ -568,7 +610,7 @@ fn measure_item<T>(
 ) where
     T: LayoutTree,
 {
-    let inset = box_inset_size(item.padding, item.border);
+    let inset = item.box_floor();
     let main_floor = axes.main.size(inset);
     let cross_floor = axes.cross.size(inset);
     let mut known = item.preferred_size;
@@ -591,22 +633,22 @@ fn measure_item<T>(
         }
     }
 
-    if let Some(value) = axes.main.size(known) {
+    if let Some(main) = axes.main.size(known) {
         axes.main.set_size(
             &mut known,
             Some(clamp_axis(
-                value,
+                main,
                 axes.main.size(item.min_size),
                 axes.main.size(item.max_size),
                 main_floor,
             )),
         );
     }
-    if let Some(value) = axes.cross.size(known) {
+    if let Some(cross) = axes.cross.size(known) {
         axes.cross.set_size(
             &mut known,
             Some(clamp_axis(
-                value,
+                cross,
                 axes.cross.size(item.min_size),
                 axes.cross.size(item.max_size),
                 cross_floor,
@@ -722,7 +764,7 @@ fn distribute_weighted_items<N>(
             weighted_margins += axes.main.sum(item.margin);
             weighted_count = weighted_count.saturating_add(1);
             item.main_size = 0.0;
-            item.flags.set_frozen(false);
+            item.flags.unfreeze();
             item.violation = 0.0;
         } else {
             fixed_outer += outer_main(item, axes);
@@ -761,7 +803,7 @@ fn distribute_weighted_items<N>(
             } else {
                 0.0
             };
-            let floor = axes.main.size(box_inset_size(item.padding, item.border));
+            let floor = axes.main.size(item.box_floor());
             let clamped = clamp_axis(
                 tentative,
                 axes.main.size(item.min_size),
@@ -790,7 +832,7 @@ fn distribute_weighted_items<N>(
                 item.violation < 0.0
             };
             if violating {
-                item.flags.set_frozen(true);
+                item.flags.freeze();
                 active_weight -= item.weight;
                 frozen_size += item.main_size;
                 froze_any = true;
@@ -1138,7 +1180,6 @@ fn commit_non_in_flow_children<T>(
     state: &mut T::State,
     hidden_items: &[LayoutItemKey<T::NodeId>],
     absolute_items: &[AbsoluteItem<T::NodeId>],
-    in_flow_items: &[LinearItem<T::NodeId>],
     axes: LinearAxes,
     outer_size: Size<f32>,
     border: Edges<f32>,
@@ -1153,12 +1194,9 @@ where
         (outer_size.height - border.vertical_sum()).max(0.0),
     );
     let padding_box_origin = Point::new(border.left, border.top);
-    let mut absolute_before = 0usize;
-    let mut in_flow_before = 0usize;
 
     for key in hidden_items {
-        hide_subtree(tree, state, key.node);
-        tree.set_unrounded_layout(state, key.node, Layout::with_order(key.layout_order));
+        super::hide_child_at_order(tree, state, key.node, key.layout_order);
     }
     for item in absolute_items {
         let AbsoluteItem {
@@ -1168,18 +1206,7 @@ where
             static_axes,
         } = *item;
         let child = key.node;
-        let document_index = key.document_index;
-        while in_flow_before < in_flow_items.len()
-            && (
-                in_flow_items[in_flow_before].key.css_order,
-                in_flow_items[in_flow_before].key.document_index,
-            ) < (0, document_index)
-        {
-            in_flow_before = in_flow_before.saturating_add(1);
-        }
-        let layout_order =
-            u32::try_from(in_flow_before.saturating_add(absolute_before)).unwrap_or(u32::MAX);
-        absolute_before = absolute_before.saturating_add(1);
+        let layout_order = key.layout_order;
 
         match position {
             PositionProperty::Absolute => {
@@ -1288,13 +1315,7 @@ where
         input.definite_dimensions.width || style_definite.width,
         input.definite_dimensions.height || style_definite.height,
     );
-    if container_aspect_ratio.is_some() {
-        if outer_definite.width {
-            outer_definite.height = true;
-        } else if outer_definite.height {
-            outer_definite.width = true;
-        }
-    }
+    mirror_ratio_definiteness(&mut outer_definite, container_aspect_ratio);
     if input.sizing_mode != SizingMode::IgnoreSizeStyles {
         let before_ratio = outer_size;
         outer_size = apply_border_box_ratio(
@@ -1416,11 +1437,7 @@ where
                 node: child,
                 document_index,
                 css_order,
-                layout_order: if commits_layout {
-                    u32::try_from(absolute_items.len()).unwrap_or(u32::MAX)
-                } else {
-                    0
-                },
+                layout_order: 0,
             },
             flags,
             percentage_basis,
@@ -1432,19 +1449,10 @@ where
         has_relative_basis_dependency |= item.flags.needs_relative_offset_refresh();
         items.push(item);
     }
-    if has_nonzero_order {
-        items.sort_unstable_by_key(|item| (item.key.css_order, item.key.document_index));
-    }
     if commits_layout {
-        for (in_flow_order, item) in items.iter_mut().enumerate() {
-            let absolute_before = match item.key.css_order.cmp(&0) {
-                Ordering::Less => 0,
-                Ordering::Equal => usize::try_from(item.key.layout_order).unwrap_or(usize::MAX),
-                Ordering::Greater => absolute_items.len(),
-            };
-            item.key.layout_order =
-                u32::try_from(in_flow_order.saturating_add(absolute_before)).unwrap_or(u32::MAX);
-        }
+        sort_and_assign_layout_order(&mut items, &mut absolute_items);
+    } else if has_nonzero_order {
+        items.sort_unstable_by_key(|item| (item.key.css_order, item.key.document_index));
     }
 
     size_items(
@@ -1537,7 +1545,6 @@ where
             state,
             &hidden_items,
             &absolute_items,
-            &items,
             axes,
             final_outer_size,
             border,

@@ -8,7 +8,6 @@ use crate::tree::{
 };
 
 pub const MEASURE_CACHE_SLOTS: usize = 8;
-const INLINE_MEASURE_CACHE_SLOTS: usize = MEASURE_CACHE_SLOTS;
 
 const KNOWN_WIDTH_PRESENT: u16 = 1 << 0;
 const KNOWN_HEIGHT_PRESENT: u16 = 1 << 1;
@@ -267,7 +266,7 @@ impl MeasurementSlot {
 #[derive(Debug, PartialEq, Default)]
 pub struct Cache {
     committed: Option<MeasurementSlot>,
-    measurements: SmallVec<[MeasurementSlot; INLINE_MEASURE_CACHE_SLOTS]>,
+    measurements: SmallVec<[MeasurementSlot; MEASURE_CACHE_SLOTS]>,
 }
 
 impl Cache {
@@ -918,7 +917,7 @@ mod tests {
             cache.store(input, output);
             assert_eq!(cache.get(input), Some(output));
         }
-        assert_eq!(cache.measurements.len(), INLINE_MEASURE_CACHE_SLOTS);
+        assert_eq!(cache.measurements.len(), MEASURE_CACHE_SLOTS);
         assert!(!cache.measurements.spilled());
     }
 
@@ -1002,18 +1001,18 @@ mod tests {
                     measurement(Size::NONE, Size::new(width, height)),
                     LayoutOutput::new(Size::ZERO, Size::ZERO),
                 );
-                if cache.measurements.len() == INLINE_MEASURE_CACHE_SLOTS {
+                if cache.measurements.len() == MEASURE_CACHE_SLOTS {
                     break;
                 }
             }
         }
-        assert_eq!(cache.measurements.len(), INLINE_MEASURE_CACHE_SLOTS);
+        assert_eq!(cache.measurements.len(), MEASURE_CACHE_SLOTS);
         assert!(!cache.measurements.spilled());
 
         cache.clear();
 
         assert!(cache.is_empty());
         assert!(!cache.measurements.spilled());
-        assert_eq!(cache.measurements.capacity(), INLINE_MEASURE_CACHE_SLOTS);
+        assert_eq!(cache.measurements.capacity(), MEASURE_CACHE_SLOTS);
     }
 }

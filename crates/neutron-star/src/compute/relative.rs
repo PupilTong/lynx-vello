@@ -102,12 +102,6 @@ impl ResolvedReference {
             None
         }
     }
-
-    #[inline]
-    fn item_index(self) -> Option<usize> {
-        self.item_index_u32()
-            .map(|index| usize::try_from(index).expect("relative item index does not fit usize"))
-    }
 }
 
 #[derive(Debug)]
@@ -423,8 +417,8 @@ fn reference_position<N>(
     if !allow_item_references {
         return None;
     }
-    reference.item_index().map(|index| {
-        let position = axis.size(items[index].positions);
+    reference.item_index_u32().map(|index| {
+        let position = axis.size(items[index as usize].positions);
         if target_end {
             position.end
         } else {
@@ -905,6 +899,40 @@ fn position_axis<N>(
     bounds
 }
 
+/// Runs the shared prepare→constrain→measure sequence for one item and
+/// returns the constraints it was measured under.
+#[inline]
+fn measure_one<T>(
+    tree: &T,
+    state: &mut T::State,
+    items: &mut [RelativeItem<T::NodeId>],
+    index: usize,
+    parent_size: Size<Option<f32>>,
+    available_content: Size<AvailableSpace>,
+    allow_item_references: bool,
+) -> Size<Line<Option<f32>>>
+where
+    T: LayoutTree,
+{
+    prepare_intrinsic_sizes(
+        tree,
+        state,
+        &mut items[index],
+        parent_size,
+        available_content,
+    );
+    let constraints = all_constraints(&items[index], parent_size, items, allow_item_references);
+    let input = measurement_input(
+        tree,
+        &items[index],
+        constraints,
+        parent_size,
+        available_content,
+    );
+    measure_item(tree, state, &mut items[index], input);
+    constraints
+}
+
 fn measure_all<T>(
     tree: &T,
     state: &mut T::State,
@@ -916,22 +944,15 @@ fn measure_all<T>(
     T: LayoutTree,
 {
     for index in 0..items.len() {
-        prepare_intrinsic_sizes(
+        measure_one(
             tree,
             state,
-            &mut items[index],
+            items,
+            index,
             parent_size,
             available_content,
+            allow_item_references,
         );
-        let constraints = all_constraints(&items[index], parent_size, items, allow_item_references);
-        let input = measurement_input(
-            tree,
-            &items[index],
-            constraints,
-            parent_size,
-            available_content,
-        );
-        measure_item(tree, state, &mut items[index], input);
     }
 }
 
@@ -952,22 +973,15 @@ where
     );
     for ordinal in 0..items.len() {
         let index = order.get(ordinal).copied().unwrap_or(ordinal);
-        prepare_intrinsic_sizes(
+        let constraints = measure_one(
             tree,
             state,
-            &mut items[index],
+            items,
+            index,
             parent_size,
             available_content,
+            true,
         );
-        let constraints = all_constraints(&items[index], parent_size, items, true);
-        let input = measurement_input(
-            tree,
-            &items[index],
-            constraints,
-            parent_size,
-            available_content,
-        );
-        measure_item(tree, state, &mut items[index], input);
 
         for axis in Axis::ALL {
             let axis_constraints = axis.size(constraints);
@@ -993,12 +1007,6 @@ fn refresh_item_bases<T>(
     T: LayoutTree,
 {
     for item in items {
-        let positions = item.positions;
-        let output = item.output;
-        let last_measure = item.last_measure;
-        let intrinsic_preferred_size = item.intrinsic_preferred_size;
-        let intrinsic_sizes_ready = item.intrinsic_sizes_ready;
-        let size_is_definite = item.size_is_definite;
         let mut refreshed = resolve_item(
             tree,
             item.key,
@@ -1006,14 +1014,13 @@ fn refresh_item_bases<T>(
             edge_inline_basis,
             lookup,
         );
-        let reuse_fixed_measurement = item.fixed_measurement_matches(&refreshed);
-        refreshed.positions = positions;
-        refreshed.output = output;
-        if reuse_fixed_measurement {
-            refreshed.intrinsic_preferred_size = intrinsic_preferred_size;
-            refreshed.intrinsic_sizes_ready = intrinsic_sizes_ready;
-            refreshed.last_measure = last_measure;
-            refreshed.size_is_definite = size_is_definite;
+        refreshed.positions = item.positions;
+        refreshed.output = item.output;
+        if item.fixed_measurement_matches(&refreshed) {
+            refreshed.intrinsic_preferred_size = item.intrinsic_preferred_size;
+            refreshed.intrinsic_sizes_ready = item.intrinsic_sizes_ready;
+            refreshed.last_measure = item.last_measure;
+            refreshed.size_is_definite = item.size_is_definite;
             refreshed.reuse_fixed_measurement = true;
         }
         *item = refreshed;
@@ -1458,12 +1465,8 @@ where
         outer_size,
     );
     for (document_index, child) in hidden {
-        super::hide_subtree(tree, state, child);
-        tree.set_unrounded_layout(
-            state,
-            child,
-            Layout::with_order(u32::try_from(document_index).unwrap_or(u32::MAX)),
-        );
+        let order = u32::try_from(document_index).unwrap_or(u32::MAX);
+        super::hide_child_at_order(tree, state, child, order);
     }
     scrollable_size = scrollable_size.zip_map(
         commit_out_of_flow(tree, state, &absolute_items, outer_size, border),
@@ -1736,7 +1739,7 @@ mod tests {
         assert_eq!(tree.child_commit_calls.get(), 1);
         assert!(tree.committed_artifact.get());
         assert_eq!(
-            state[TestKind::Child as usize].unrounded().size,
+            state[TestKind::Child as usize].unrounded.size,
             Size::new(20.0, 10.0)
         );
     }

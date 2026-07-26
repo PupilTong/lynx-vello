@@ -156,6 +156,10 @@ pub(super) fn run_layout<T: Sync>(
     scale: f32,
     full: bool,
 ) {
+    assert!(
+        document.root_node().layout_styles_ready(),
+        "computed styles are unavailable because the preceding style traversal did not complete"
+    );
     let Some(root) = document.root_element().map(Node::id) else {
         return;
     };
@@ -167,7 +171,7 @@ pub(super) fn run_layout<T: Sync>(
             && is_relayout_boundary(&StyleView::of(node))
         {
             let output = compute_boundary_relayout(tree, state, id, input);
-            tree.layout_mut(state, id).unrounded_mut().content_size = output.content_size;
+            tree.layout_mut(state, id).unrounded.content_size = output.content_size;
         }
     }
     compute_root_layout(
@@ -261,7 +265,7 @@ fn accumulated_unrounded_origin<T>(
     let mut origin = Point::ZERO;
     let mut current = Some(node);
     while let Some(id) = current {
-        let location = tree.layout(state, id).unrounded().location;
+        let location = tree.layout(state, id).unrounded.location;
         origin = Point::new(origin.x + location.x, origin.y + location.y);
         current = slab_get_for_live_node(&tree.nodes, id).parent_id();
     }
@@ -298,8 +302,7 @@ fn pre_position<T: Sync>(
         // for the rounding walk and reports an empty box to queries. Its
         // children are real boxes of an ancestor's formatting context, so
         // they still need the hook.
-        tree.layout_mut(state, node_id)
-            .set_unrounded(Layout::default());
+        tree.layout_mut(state, node_id).unrounded = Layout::default();
         return true;
     }
     if node
@@ -348,7 +351,7 @@ fn position_hoisted<T: Sync>(
     let (containing_origin, containing_size) = match containing {
         Some(block) => {
             let origin = accumulated_unrounded_origin(tree, state, block);
-            let layout = tree.layout(state, block).unrounded();
+            let layout = &tree.layout(state, block).unrounded;
             (
                 Point::new(origin.x + layout.border.left, origin.y + layout.border.top),
                 Size::new(
@@ -361,7 +364,7 @@ fn position_hoisted<T: Sync>(
     };
 
     let parent_origin = accumulated_unrounded_origin(tree, state, parent_id);
-    let static_position = tree.layout(state, node_id).static_position();
+    let static_position = tree.layout(state, node_id).static_position;
     let static_in_cb = Point::new(
         parent_origin.x + static_position.x - containing_origin.x,
         parent_origin.y + static_position.y - containing_origin.y,
@@ -378,7 +381,7 @@ fn position_hoisted<T: Sync>(
     // in — not the source child list, when box-less elements intervene.
     let ordering_parent = box_parent(node).map_or(parent_id, Node::id);
     layout.order = sibling_paint_order(tree, ordering_parent, node_id);
-    tree.layout_mut(state, node_id).set_unrounded(layout);
+    tree.layout_mut(state, node_id).unrounded = layout;
 }
 
 fn sibling_paint_order<T>(tree: &TreeArenas<T>, parent_id: NodeId, target: NodeId) -> u32 {

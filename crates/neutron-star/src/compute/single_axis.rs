@@ -63,6 +63,7 @@ pub(super) fn flow_to_physical(
 
 /// Builds and performs one child measurement without changing the algorithm's
 /// requested axis, sizing mode, or definiteness contract.
+#[inline]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn measure_child<T: LayoutTree>(
     tree: &T,

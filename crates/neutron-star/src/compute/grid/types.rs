@@ -167,14 +167,10 @@ impl TrackSet {
     }
 
     pub(super) fn rebuild_positions(&mut self) {
-        self.rebuild_positions_with_spacing(0.0, 0.0);
+        self.rebuild_aligned_positions(0.0, 0.0);
     }
 
     pub(super) fn rebuild_aligned_positions(&mut self, offset: f32, distributed_gap: f32) {
-        self.rebuild_positions_with_spacing(offset, distributed_gap);
-    }
-
-    fn rebuild_positions_with_spacing(&mut self, offset: f32, distributed_gap: f32) {
         let mut cursor = offset;
         let mut previous_visible = false;
         let mut saw_collapsed = false;
