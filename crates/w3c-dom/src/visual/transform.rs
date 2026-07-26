@@ -61,12 +61,18 @@ pub(crate) fn flatten(mut matrix: Transform3D<f32>) -> Transform3D<f32> {
 /// A stacking-context root's flattened matrix mapping its border-box-local
 /// coordinates into its parent stacking context's space.
 ///
-/// Composition per css-transforms-1 §"Transform Rendering" and
-/// css-transforms-2 §6, spelled in `.then` order (first applied first):
-/// `T(−origin) → transform list → scale → rotate → translate → T(origin)
-///  → T(offset in parent) → parent perspective`.
+/// Composition per css-transforms-1 §"Transform Rendering",
+/// css-transforms-2 §6, and motion-1 §1.1 (the offset transform layers
+/// after the individual transform properties and before `transform`),
+/// spelled in `.then` order (first applied first):
+/// `T(−origin) → transform list → offset (rotate, then translate) → scale
+///  → rotate → translate → T(origin) → T(offset in parent) → parent
+///  perspective`.
 /// Percentages (translate functions, transform-origin) resolve against the
-/// border box.
+/// border box. The motion-path anchor is always `transform-origin`
+/// (`offset-anchor` is not compiled), so inside this conjugation the offset
+/// translation is `position − origin` and the rotation pivots about the
+/// anchor.
 pub(crate) fn stacking_context_matrix(
     style: &ComputedValues,
     border_box: Size2D<f32>,
@@ -98,8 +104,22 @@ pub(crate) fn stacking_context_matrix(
         .px();
     let origin_z = origin.depth.px();
 
+    let offset = super::motion::offset_sample(style, border_box).map_or_else(
+        Transform3D::identity,
+        |sample| {
+            Transform3D::rotation(0.0, 0.0, 1.0, euclid::Angle::radians(sample.angle)).then(
+                &Transform3D::translation(
+                    sample.position.x - origin_x,
+                    sample.position.y - origin_y,
+                    0.0,
+                ),
+            )
+        },
+    );
+
     let mut matrix = Transform3D::translation(-origin_x, -origin_y, -origin_z)
         .then(&list)
+        .then(&offset)
         .then(&individual_scale(&box_style.scale))
         .then(&individual_rotate(&box_style.rotate))
         .then(&individual_translate(&box_style.translate, border_box))

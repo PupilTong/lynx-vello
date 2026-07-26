@@ -53,6 +53,7 @@ pub(crate) fn build<T>(document: &Document<T>) -> PaintOrder {
         items: Vec::new(),
         clips: Vec::new(),
     };
+    let epoch = document.node_removal_epoch();
     if let Some(root) = document.root_element()
         && let Some(style) = StyleView::try_of(root)
         && display_mode(style.display()) != DisplayMode::None
@@ -70,6 +71,7 @@ pub(crate) fn build<T>(document: &Document<T>) -> PaintOrder {
     PaintOrder {
         items: builder.items,
         clips: builder.clips,
+        epoch,
     }
 }
 
@@ -98,17 +100,19 @@ struct ItemRecord {
 struct Member {
     level: i32,
     seq: u32,
-    node: NodeId,
-    offset: Point2D<f32>,
-    clips: ClipContexts,
     payload: MemberPayload,
 }
 
 enum MemberPayload {
     /// A real stacking context: recursed atomically at emission.
-    Context,
+    Context {
+        node: NodeId,
+        offset: Point2D<f32>,
+        clips: ClipContexts,
+    },
     /// A pseudo-stacking context: its own item plus its in-flow content,
-    /// already collected.
+    /// already collected (pseudo boxes always sit at stack level 0; their
+    /// own record leads the stream).
     Pseudo { stream: Vec<ItemRecord> },
 }
 
@@ -261,10 +265,11 @@ impl<'doc, T> Builder<'doc, T> {
                 members.push(Member {
                     level: stacking::stack_level(style, z_applies),
                     seq: next(seq),
-                    node: child,
-                    offset: child_offset,
-                    clips: member_clip_contexts(position, ctx),
-                    payload: MemberPayload::Context,
+                    payload: MemberPayload::Context {
+                        node: child,
+                        offset: child_offset,
+                        clips: member_clip_contexts(position, ctx),
+                    },
                 });
                 continue;
             }
@@ -310,9 +315,6 @@ impl<'doc, T> Builder<'doc, T> {
                 members.push(Member {
                     level: 0,
                     seq: member_seq,
-                    node: child,
-                    offset: child_offset,
-                    clips: captured,
                     payload: MemberPayload::Pseudo {
                         stream: pseudo_stream,
                     },
@@ -355,8 +357,12 @@ impl<'doc, T> Builder<'doc, T> {
         world: &Transform3D<f32>,
     ) {
         match member.payload {
-            MemberPayload::Context => {
-                let node = self.node(member.node);
+            MemberPayload::Context {
+                node: member_node,
+                offset,
+                clips,
+            } => {
+                let node = self.node(member_node);
                 let style = StyleView::try_of(node)
                     .expect("stacking members keep their style for the whole build");
                 // The perspective property applies to direct box-tree
@@ -366,14 +372,7 @@ impl<'doc, T> Builder<'doc, T> {
                 let perspective = (box_parent(node).map(Node::id) == Some(context_root))
                     .then_some(context_perspective)
                     .flatten();
-                self.build_stacking_context(
-                    member.node,
-                    &style,
-                    member.offset,
-                    world,
-                    perspective,
-                    member.clips,
-                );
+                self.build_stacking_context(member_node, &style, offset, world, perspective, clips);
             }
             MemberPayload::Pseudo { stream } => {
                 for record in stream {

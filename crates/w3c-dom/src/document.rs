@@ -169,6 +169,7 @@ pub struct Document<T> {
     pending_snapshots: SnapshotMap,
     relayout_roots: Vec<PendingRelayout>,
     relayout_root_ids: FxHashSet<NodeId>,
+    node_removal_epoch: u64,
     layout_dirty: bool,
     layout_root_dirty: bool,
     last_layout_inputs: Option<(Size<f32>, f32)>,
@@ -212,6 +213,7 @@ impl<T> Document<T> {
             pending_snapshots: SnapshotMap::new(),
             relayout_roots: Vec::new(),
             relayout_root_ids: FxHashSet::default(),
+            node_removal_epoch: 0,
             layout_dirty: false,
             layout_root_dirty: false,
             last_layout_inputs: None,
@@ -295,6 +297,14 @@ impl<T> Document<T> {
     /// read-only passes (the `visual` module's paint-order build).
     pub(crate) fn visual_parts(&self) -> (&TreeArenas<T>, &DocumentLayoutState) {
         (&self.tree, &self.layout)
+    }
+
+    /// Monotone count of [`Self::remove_subtree`] calls. A freed `NodeId`
+    /// can be recycled by a later creation, so a retained [`crate::visual::PaintOrder`]
+    /// is only valid for hit testing while this value is unchanged.
+    #[must_use]
+    pub fn node_removal_epoch(&self) -> u64 {
+        self.node_removal_epoch
     }
 
     pub(crate) fn layout_data_mut(
@@ -519,6 +529,10 @@ impl<T> Document<T> {
             "Document::remove_subtree cannot remove the document node"
         );
         self.detach(id);
+        // Freed ids may be recycled by later creations: any retained
+        // structure indexing nodes by id (a built `PaintOrder`) is stale
+        // from here on.
+        self.node_removal_epoch += 1;
         let mut removed = Vec::new();
         let mut stack = vec![id];
         while let Some(current) = stack.pop() {

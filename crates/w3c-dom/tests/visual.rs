@@ -543,7 +543,7 @@ fn empty_document_paints_nothing() {
     let mut doc: w3c_dom::Document<()> = w3c_dom::Document::new(common::device(800.0, 600.0));
     let paint = doc.paint_order();
     assert!(paint.items().is_empty());
-    assert_eq!(paint.hit_test(Point2D::new(10.0, 10.0)), None);
+    assert_eq!(paint.hit_test(&doc, Point2D::new(10.0, 10.0)), None);
 }
 
 #[test]
@@ -1116,4 +1116,281 @@ fn contents_order_interleave_paints_and_survives_hidden_siblings() {
         vec![root, leading, inner_first, second, inner_last]
     );
     let _ = hidden;
+}
+
+#[test]
+#[should_panic(expected = "stale PaintOrder")]
+fn stale_frames_fail_fast_after_node_removal() {
+    // Slab NodeIds recycle: a frame built before a removal must not answer
+    // hits with old geometry that can alias a recycled id.
+    let mut h = Harness::new(&format!("{PAGE} {}", abs_box("")));
+    let root = h.root();
+    let removed = h.el(root, "view.box");
+    let stale_frame = h.paint();
+    h.doc.dom.remove_subtree(removed);
+    let recycled = h.el(root, "view.box");
+    let _ = recycled;
+    let _ = stale_frame.hit_test(&h.doc.dom, Point2D::new(50.0, 50.0));
+}
+
+#[test]
+fn frames_stay_queryable_while_no_nodes_are_removed() {
+    let mut h = Harness::new(&format!("{PAGE} {}", abs_box("")));
+    let root = h.root();
+    let target = h.el(root, "view.box");
+    let frame = h.paint();
+    assert_eq!(
+        frame.hit_test(&h.doc.dom, Point2D::new(50.0, 50.0)),
+        Some(target)
+    );
+    // Fresh queries after a removal + recycle resolve the new node.
+    h.doc.dom.remove_subtree(target);
+    let recycled = h.el(root, "view.box");
+    assert_eq!(h.hit(50.0, 50.0), Some(recycled));
+}
+
+#[test]
+fn offset_path_translates_the_anchor_along_the_path() {
+    // The element's anchor (transform-origin, offset-anchor is not
+    // compiled) rides the path: every local point shifts by P − origin.
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(
+            r#".mover { offset-path: path("M 0 0 L 100 0"); offset-distance: 100%; offset-rotate: 0deg; }"#
+        )
+    ));
+    let root = h.root();
+    let mover = h.el(root, "view.box.mover");
+    let paint = h.paint();
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == mover)
+        .unwrap();
+    let mapped = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    // P = (100, 0), origin = (50, 50) ⇒ shift (50, −50).
+    assert!((mapped.x - 50.0).abs() < 1e-3 && (mapped.y - -50.0).abs() < 1e-3);
+    assert_eq!(h.hit(100.0, 25.0), Some(mover));
+    assert_eq!(h.hit(25.0, 75.0), Some(root));
+}
+
+#[test]
+fn offset_rotate_auto_follows_the_path_direction() {
+    // A downward path segment has direction 90° (y-down): the box rotates
+    // about its anchor while the anchor sits at the path midpoint (0, 50).
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(r#".mover { offset-path: path("M 0 0 L 0 100"); offset-distance: 50%; }"#)
+    ));
+    let root = h.root();
+    let mover = h.el(root, "view.box.mover");
+    let paint = h.paint();
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == mover)
+        .unwrap();
+    let corner = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    assert!((corner.x - 50.0).abs() < 1e-3 && corner.y.abs() < 1e-3);
+    let far = item
+        .transform
+        .transform_point2d(Point2D::new(100.0, 0.0))
+        .unwrap();
+    assert!((far.x - 50.0).abs() < 1e-3 && (far.y - 100.0).abs() < 1e-3);
+    let _ = root;
+}
+
+#[test]
+fn offset_rotate_fixed_angles_ignore_the_path_direction() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(
+            r#".mover { offset-path: path("M 0 0 L 100 0"); offset-distance: 0; offset-rotate: 90deg; }"#
+        )
+    ));
+    let root = h.root();
+    let mover = h.el(root, "view.box.mover");
+    let paint = h.paint();
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == mover)
+        .unwrap();
+    // Fixed 90° about the anchor at the path start (0, 0): local (0,0) →
+    // rotate (−50,−50) → (50,−50), shift (−50,−50), origin back ⇒ (50, −50).
+    let mapped = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    assert!(
+        (mapped.x - 50.0).abs() < 1e-3 && (mapped.y - -50.0).abs() < 1e-3,
+        "mapped = ({}, {})",
+        mapped.x,
+        mapped.y,
+    );
+    let _ = root;
+}
+
+#[test]
+fn offset_rotate_reverse_is_not_in_the_lynx_grammar() {
+    // The fork restricts offset-rotate to `auto | <angle 0..=360>` (Lynx's
+    // own surface): `reverse` fails to parse, the declaration drops, and
+    // the initial `auto 0deg` follows the path direction. The computed-value
+    // handling in visual::motion folds `auto <angle>` generally, so this
+    // pin flips loudly if the grammar ever grows.
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(
+            r#".mover { offset-path: path("M 0 0 L 0 100"); offset-distance: 50%; offset-rotate: reverse; }"#
+        )
+    ));
+    let root = h.root();
+    let mover = h.el(root, "view.box.mover");
+    let paint = h.paint();
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == mover)
+        .unwrap();
+    let mapped = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    assert!(
+        (mapped.x - 50.0).abs() < 1e-3 && mapped.y.abs() < 1e-3,
+        "mapped = ({}, {})",
+        mapped.x,
+        mapped.y,
+    );
+    let _ = root;
+}
+
+#[test]
+fn closed_paths_wrap_and_open_paths_clamp_the_offset_distance() {
+    let mut h = Harness::new(&format!(
+        r#"{PAGE} {}
+         .wrap {{ offset-path: path("M 0 0 L 100 0 L 100 100 L 0 100 Z");
+                  offset-distance: 550px; offset-rotate: 0deg; }}
+         .clamp {{ offset-path: path("M 0 0 L 100 0"); offset-distance: 250px;
+                   offset-rotate: 0deg; }}"#,
+        abs_box("")
+    ));
+    let root = h.root();
+    let wrapping = h.el(root, "view.box.wrap");
+    let clamped = h.el(root, "view.box.clamp");
+    let paint = h.paint();
+    // 550 mod 400 = 150: 100 along the top edge + 50 down ⇒ P = (100, 50).
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == wrapping)
+        .unwrap();
+    let mapped = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    assert!((mapped.x - 50.0).abs() < 1e-3 && mapped.y.abs() < 1e-3);
+    // The open path clamps 250px to its 100px length ⇒ P = (100, 0).
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == clamped)
+        .unwrap();
+    let mapped = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    assert!((mapped.x - 50.0).abs() < 1e-3 && (mapped.y - -50.0).abs() < 1e-3);
+}
+
+#[test]
+fn circle_paths_start_rightmost_and_run_clockwise() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(".mover { offset-path: circle(50px); offset-distance: 25%; offset-rotate: 0deg; }")
+    ));
+    let root = h.root();
+    let mover = h.el(root, "view.box.mover");
+    let paint = h.paint();
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == mover)
+        .unwrap();
+    // Center (50, 50), start (100, 50), a quarter turn clockwise (y-down)
+    // lands at the bottom: P = (50, 100) ⇒ shift (0, 50).
+    let mapped = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    assert!(mapped.x.abs() < 0.5 && (mapped.y - 50.0).abs() < 0.5);
+    let _ = root;
+}
+
+#[test]
+fn inset_paths_start_at_the_top_edge_and_run_clockwise() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}
+         .start {{ offset-path: inset(10px); offset-distance: 0; offset-rotate: 0deg; }}
+         .quarter {{ offset-path: inset(10px); offset-distance: 25%; offset-rotate: 0deg; }}",
+        abs_box("")
+    ));
+    let root = h.root();
+    let start = h.el(root, "view.box.start");
+    let quarter = h.el(root, "view.box.quarter");
+    let paint = h.paint();
+    // inset(10px) on a 100×100 box: an 80×80 rect at (10, 10), perimeter 320.
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == start)
+        .unwrap();
+    let mapped = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    assert!((mapped.x - -40.0).abs() < 1e-3 && (mapped.y - -40.0).abs() < 1e-3);
+    // 25% = 80px = the full top edge ⇒ the top-right corner (90, 10).
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == quarter)
+        .unwrap();
+    let mapped = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    assert!((mapped.x - 40.0).abs() < 1e-3 && (mapped.y - -40.0).abs() < 1e-3);
+}
+
+#[test]
+fn svg_arc_commands_flatten_within_tolerance() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(
+            r#".mover { offset-path: path("M 0 50 A 50 50 0 0 1 100 50"); offset-distance: 50%; offset-rotate: 0deg; }"#
+        )
+    ));
+    let root = h.root();
+    let mover = h.el(root, "view.box.mover");
+    let paint = h.paint();
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.node == mover)
+        .unwrap();
+    // A clockwise semicircle from (0, 50) to (100, 50): the midpoint is the
+    // top of the arc, P = (50, 0) ⇒ shift (0, −50).
+    let mapped = item
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    assert!(mapped.x.abs() < 0.5 && (mapped.y - -50.0).abs() < 0.5);
+    let _ = root;
 }

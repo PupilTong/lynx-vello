@@ -39,10 +39,18 @@ pub(crate) fn resolve_corner_radii(style: &ComputedValues, size: Size2D<f32>) ->
         bottom_right: resolve(&border.border_bottom_right_radius),
         bottom_left: resolve(&border.border_bottom_left_radius),
     };
-    if radii.is_zero() {
-        return radii;
-    }
+    normalize_corner_radii(&mut radii, size);
+    radii
+}
 
+/// The css-backgrounds §5.5 overlap normalization, shared with the
+/// `inset()` motion-path contour: one scale factor, the minimum of
+/// `edge / (r₁ + r₂)` over the four edges, applied to every radius when
+/// below 1.
+pub(crate) fn normalize_corner_radii(radii: &mut CornerRadii, size: Size2D<f32>) {
+    if radii.is_zero() {
+        return;
+    }
     let mut factor = 1.0_f32;
     let mut consider = |edge: f32, r1: f32, r2: f32| {
         let sum = r1 + r2;
@@ -73,7 +81,6 @@ pub(crate) fn resolve_corner_radii(style: &ComputedValues, size: Size2D<f32>) ->
             corner.height *= factor;
         }
     }
-    radii
 }
 
 /// Insets outer radii by the border widths to the padding-edge radii used

@@ -4,6 +4,7 @@ use euclid::default::{Point2D, Rect};
 
 use super::{PaintItemKind, PaintOrder, geometry};
 use crate::NodeId;
+use crate::document::Document;
 
 impl PaintOrder {
     /// The topmost element whose rounded border box contains `point`
@@ -14,8 +15,21 @@ impl PaintOrder {
     /// world matrix; a singular matrix means the element is not rendered
     /// (css-transforms-1) and never hit, and a point projecting behind the
     /// eye (w ≤ 0 under perspective) misses likewise.
+    ///
+    /// # Panics
+    ///
+    /// Panics when nodes were removed from `document` after this frame was
+    /// built: freed ids may have been recycled, so the frame's geometry can
+    /// no longer name nodes truthfully. Rebuild via
+    /// [`Document::paint_order`].
     #[must_use]
-    pub fn hit_test(&self, point: Point2D<f32>) -> Option<NodeId> {
+    pub fn hit_test<T>(&self, document: &Document<T>, point: Point2D<f32>) -> Option<NodeId> {
+        assert_eq!(
+            self.epoch,
+            document.node_removal_epoch(),
+            "stale PaintOrder: nodes were removed after this frame was built; \
+             rebuild it with Document::paint_order",
+        );
         self.items.iter().rev().find_map(|item| {
             if !item.hit_testable {
                 return None;
