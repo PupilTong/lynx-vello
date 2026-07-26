@@ -155,17 +155,38 @@ style_protocol! {
             ),
             box_sizing -> box_sizing::T = style.computed_values().clone_box_sizing(),
             direction -> direction::T = style.inherited_values().clone_direction(),
-            containment -> Contain = effective_containment(
-                style.computed_values().clone_contain(),
-                style.computed_values().clone_content_visibility(),
-                style.skips_contents(),
-            ),
+            containment -> Contain = {
+                let box_style = style.computed_values().get_box();
+                if box_style.contain.is_empty()
+                    && box_style.content_visibility == ContentVisibility::Visible
+                {
+                    // Nothing authored and nothing to fold: the overwhelmingly
+                    // common node, answered without asking how it is displayed.
+                    Contain::empty()
+                } else if style.display().is_contents() {
+                    // Containment and content-visibility have no effect on an
+                    // element that generates no box at all: there is no
+                    // principal box to contain, and its children keep
+                    // generating their own boxes regardless (CSS Contain 2
+                    // §1.1, CSS Display 3 §2.5).
+                    Contain::empty()
+                } else {
+                    effective_containment(
+                        box_style.contain,
+                        box_style.content_visibility,
+                        style.skips_contents(),
+                    )
+                }
+            },
             contain_intrinsic_width -> ContainIntrinsicSize =
                 style.computed_values().clone_contain_intrinsic_width(),
             contain_intrinsic_height -> ContainIntrinsicSize =
                 style.computed_values().clone_contain_intrinsic_height(),
+            // An element generating no box has no contents to skip — asked
+            // second, so the common node never pays for the question.
             skips_contents -> bool =
-                style.computed_values().clone_content_visibility() == ContentVisibility::Hidden,
+                style.computed_values().clone_content_visibility() == ContentVisibility::Hidden
+                    && !style.display().is_contents(),
 
             flex_direction -> flex_direction::T =
                 style.computed_values().clone_flex_direction(),
@@ -399,5 +420,51 @@ mod tests {
     fn overflow_scroll_containers_follow_stylo_is_scrollable() {
         assert!(!Overflow::Visible.is_scrollable());
         assert!(Overflow::Hidden.is_scrollable());
+    }
+
+    #[derive(Debug)]
+    struct BoxLess {
+        display: Display,
+    }
+
+    impl CoreStyle for BoxLess {
+        fn display(&self) -> Display {
+            self.display
+        }
+
+        fn computed_values(&self) -> &ComputedValues {
+            // `contain: strict` plus `content-visibility: hidden`, i.e. every
+            // containment bit a box could possibly claim.
+            static CONTAINED: LazyLock<Arc<ComputedValues>> = LazyLock::new(|| {
+                let mut values = ComputedValues::clone(initial_values());
+                let box_style = values.mutate_box();
+                box_style.contain = Contain::STRICT;
+                box_style.content_visibility = ContentVisibility::Hidden;
+                Arc::new(values)
+            });
+            &CONTAINED
+        }
+    }
+
+    #[test]
+    fn an_element_generating_no_box_claims_no_containment() {
+        let contained = BoxLess {
+            display: Display::Flex,
+        };
+        assert!(
+            contained
+                .containment()
+                .contains(Contain::SIZE | Contain::LAYOUT)
+        );
+        assert!(contained.skips_contents());
+
+        // `display: contents` generates no principal box, so there is nothing
+        // to contain and nothing whose contents could be skipped — which keeps
+        // it out of `is_relayout_boundary` and every host ancestor walk.
+        let box_less = BoxLess {
+            display: Display::Contents,
+        };
+        assert_eq!(box_less.containment(), Contain::empty());
+        assert!(!box_less.skips_contents());
     }
 }

@@ -199,7 +199,12 @@ useful signal for currently-compatible versions of those libraries.
   flex/grid/linear/relative with `display: none` hiding and a leaf
   fallback, text nodes through concrete Parley measurement, and the
   positioned pass implements the W3C `position: fixed`
-  containing-block rule via the protocol's scheme override. Replaced leaf
+  containing-block rule via the protocol's scheme override.
+  `display: contents` elements generate no box: the engine's
+  `flattened_children` splices them out of every item collection, and the host
+  denies them containing-block, containment, skipped-contents, and hoisting
+  status and zeroes their `LayoutSlot` in the positioned pass (the document
+  element is exempt — Stylo blockifies it). Replaced leaf
   content reads a closed `NaturalSize` value stored in lazily allocated
   node content; its internal update path automatically invalidates the
   affected cache path. Mutually exclusive literal text, natural size, and
@@ -239,7 +244,9 @@ useful signal for currently-compatible versions of those libraries.
   and without `RefCell`/`AtomicRefCell` checks. Style traits speak the stylo fork's computed-value
   vocabulary directly (requires the `stylo` workspace dep + python3 for its
   build script; the old zero-dependency/standalone pillar is retired), and
-  host-side display dispatch. Leaf content is deliberately closed: replaced
+  host-side display dispatch; `LayoutTree::flattened_children` is the box-tree
+  view every algorithm collects items through, flattening `display: contents`
+  subtrees. Leaf content is deliberately closed: replaced
   content uses the `NaturalSize` value path, while text uses the crate's
   concrete Parley `TextMeasurer::compute_layout` path; arbitrary host
   measurers are not supported. **Flexbox, Grid, Relative, and Linear

@@ -1545,19 +1545,13 @@ where
     T: LayoutTree,
 {
     let commits_layout = goal == LayoutGoal::Commit;
-    let children = tree.children(node);
-    let (lower, upper) = children.size_hint();
-    let child_capacity = match upper {
-        Some(exact) if exact == lower => exact,
-        _ => lower,
-    };
-    let mut generated = Vec::with_capacity(child_capacity);
+    let children = tree.flattened_children(node);
+    let mut generated = Vec::with_capacity(children.capacity_hint());
     let mut absolute_items = SmallVec::new();
     let mut hidden = SmallVec::new();
 
-    for (document_index, child) in children.enumerate() {
-        let child_style = tree.style(child);
-        if child_style.display().is_none() {
+    for (document_index, (child, child_style, display)) in children.enumerate() {
+        if display.is_none() {
             if commits_layout {
                 hidden.push((document_index, child));
             }

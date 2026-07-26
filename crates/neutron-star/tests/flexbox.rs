@@ -542,6 +542,68 @@ fn hidden_and_out_of_flow_children_do_not_participate_in_flexing() {
 }
 
 #[test]
+fn display_contents_children_flex_as_items_of_the_box_ancestor() {
+    let mut tree = TestTree::default();
+    let grow = || TestStyle {
+        flex_grow: nn(1.0),
+        ..fixed_leaf_style(50.0, 20.0)
+    };
+    let first = tree.push_leaf(grow(), Size::new(50.0, 20.0), None);
+    let lifted = tree.push_leaf(grow(), Size::new(50.0, 20.0), None);
+    let nested = tree.push_leaf(grow(), Size::new(50.0, 20.0), None);
+    let inner_wrapper = tree.push_contents(vec![nested]);
+    let wrapper = tree.push_contents(vec![lifted, inner_wrapper]);
+    let root = flex_container(&mut tree, TestStyle::default(), &[first, wrapper]);
+
+    definite_layout(&tree, root, 300.0, 20.0);
+
+    // All three leaves are items of `root` in source order, so they share its
+    // 150px of free space three ways — the wrappers are not items and impose
+    // no formatting context of their own.
+    for (item, x) in [(first, 0.0), (lifted, 100.0), (nested, 200.0)] {
+        assert_close(tree.layout(item).size.width, 100.0);
+        assert_close(tree.layout(item).location.x, x);
+    }
+    for box_less in [wrapper, inner_wrapper] {
+        assert_eq!(tree.layout(box_less), Layout::default());
+    }
+}
+
+#[test]
+fn display_contents_items_keep_their_own_order_and_hidden_handling() {
+    let mut tree = TestTree::default();
+    let last = tree.push_leaf(
+        TestStyle {
+            order: 1,
+            ..fixed_leaf_style(20.0, 10.0)
+        },
+        Size::new(20.0, 10.0),
+        None,
+    );
+    let hidden = tree.push_leaf(
+        TestStyle {
+            display: Display::None,
+            ..fixed_leaf_style(1_000.0, 10.0)
+        },
+        Size::new(1_000.0, 10.0),
+        None,
+    );
+    let wrapper = tree.push_contents(vec![last, hidden]);
+    let first = fixed_leaf(&mut tree, 20.0, 10.0);
+    let root = flex_container(&mut tree, TestStyle::default(), &[wrapper, first]);
+
+    definite_layout(&tree, root, 100.0, 10.0);
+
+    // `order` is the lifted item's own, ranked against the flattened item
+    // list, and a `display: none` child of a box-less element is still hidden
+    // by the container that collected it — keeping the paint slot its index in
+    // that same flattened list.
+    assert_close(tree.layout(first).location.x, 0.0);
+    assert_close(tree.layout(last).location.x, 20.0);
+    assert_eq!(tree.layout(hidden), Layout::with_order(1));
+}
+
+#[test]
 fn measure_goal_does_not_write_durable_layouts() {
     let mut tree = TestTree::default();
     let first = fixed_leaf(&mut tree, 40.0, 10.0);

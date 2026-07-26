@@ -5,10 +5,11 @@ mod io;
 pub use io::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, RequestedAxis, SizingMode,
 };
+use smallvec::SmallVec;
 
 use crate::cache::Cache;
 use crate::geometry::Point;
-use crate::style::CoreStyle;
+use crate::style::{CoreStyle, Display};
 
 /// Engine-owned values stored once per live node in host-owned storage.
 ///
@@ -101,10 +102,51 @@ pub trait LayoutTree {
     where
         Self: 'tree;
 
+    /// The node's **source** children, box-generating or not.
+    ///
+    /// Cleanup and traversal read this: hiding a subtree and the rounding
+    /// walk must reach every descendant. Algorithms collecting the items of
+    /// a formatting context read [`flattened_children`](LayoutTree::flattened_children)
+    /// instead.
     fn children(&self, node: Self::NodeId) -> Self::ChildIter<'_>;
 
     fn child_count(&self, node: Self::NodeId) -> usize {
         self.children(node).count()
+    }
+
+    /// [`children`] with every `display: contents` subtree flattened in
+    /// place, each child paired with the style and `display` the walk already
+    /// had to read.
+    ///
+    /// A `display: contents` element generates no box of its own while its
+    /// children keep generating theirs, in the *nearest box ancestor's*
+    /// formatting context ([CSS Display 3
+    /// §2.5](https://drafts.csswg.org/css-display/#valdef-display-contents)),
+    /// so this iterator splices such an element's own children into the
+    /// sequence in its place, recursively, and never yields it. With no
+    /// `display: contents` child it yields exactly [`children`] in order.
+    ///
+    /// Deciding that takes each child's `display`, which item collection needs
+    /// anyway to spot `display: none`, so both it and the style are handed
+    /// back rather than looked up again per child.
+    ///
+    /// This is the *box-tree topology*, not the set of boxes: `display: none`
+    /// children are still yielded, because clearing their stale geometry
+    /// belongs to the algorithm that collects them. Callers classify each
+    /// child from the style they get back.
+    ///
+    /// Provided; a host must not override it.
+    ///
+    /// [`children`]: LayoutTree::children
+    fn flattened_children(&self, node: Self::NodeId) -> FlattenedChildren<'_, Self>
+    where
+        Self: Sized,
+    {
+        FlattenedChildren {
+            tree: self,
+            level: self.children(node),
+            outer: SmallVec::new(),
+        }
     }
 
     fn style(&self, node: Self::NodeId) -> Self::Style<'_>;
@@ -139,6 +181,77 @@ pub trait LayoutTree {
 
     fn clear_layout_cache(&self, state: &mut Self::State, node: Self::NodeId) {
         self.layout_mut(state, node).clear_layout_cache();
+    }
+}
+
+/// One node's children with `display: contents` subtrees flattened in — see
+/// [`LayoutTree::flattened_children`].
+///
+/// `outer` suspends the child iterators of the levels a `display: contents`
+/// element was spliced into, so nesting resumes them in order. It stays
+/// empty, and the iterator stays a plain pass-through, for the overwhelmingly
+/// common node whose children all generate boxes.
+pub struct FlattenedChildren<'tree, T: LayoutTree> {
+    tree: &'tree T,
+    level: T::ChildIter<'tree>,
+    outer: SmallVec<[T::ChildIter<'tree>; 2]>,
+}
+
+impl<T: LayoutTree> core::fmt::Debug for FlattenedChildren<'_, T> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("FlattenedChildren")
+            .field("suspended_levels", &self.outer.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T: LayoutTree> FlattenedChildren<'_, T> {
+    /// How many items to reserve for: the lower-bound estimate the current
+    /// source level reports, which a `display: contents` child can push the
+    /// real count either side of.
+    ///
+    /// Deliberately **not** [`Iterator::size_hint`] — an empty box-less child
+    /// makes this an over-estimate, which is fine for `Vec::with_capacity`
+    /// but would break the bound that trait promises.
+    #[must_use]
+    #[inline]
+    pub fn capacity_hint(&self) -> usize {
+        self.level.size_hint().0
+    }
+}
+
+impl<'tree, T: LayoutTree> Iterator for FlattenedChildren<'tree, T> {
+    /// The child, its style, and its `display` — read once here, since the
+    /// walk needs it to answer `contents` and the caller needs it to answer
+    /// `none`.
+    type Item = (T::NodeId, T::Style<'tree>, Display);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let Some(child) = self.level.next() else {
+                self.level = self.outer.pop()?;
+                continue;
+            };
+            let style = self.tree.style(child);
+            let display = style.display();
+            if !display.is_contents() {
+                return Some((child, style, display));
+            }
+            let inner = self.tree.children(child);
+            self.outer.push(core::mem::replace(&mut self.level, inner));
+        }
+    }
+
+    /// Unknown in both directions. A `display: contents` child contributes
+    /// its own children instead of itself, so the remaining source children
+    /// bound the result from neither side — an empty box-less child alone
+    /// makes the walk yield fewer items than the level holds. Use
+    /// [`capacity_hint`](Self::capacity_hint) to size buffers.
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, None)
     }
 }
 

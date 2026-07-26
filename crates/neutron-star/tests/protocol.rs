@@ -77,6 +77,7 @@ enum MockDisplay {
     Leaf,
     Flex,
     Hidden,
+    Contents,
 }
 
 #[derive(Debug, Clone)]
@@ -125,10 +126,10 @@ impl Default for MockStyle {
 
 impl CoreStyle for MockStyle {
     fn display(&self) -> Display {
-        if self.display == MockDisplay::Hidden {
-            Display::None
-        } else {
-            Display::Flex
+        match self.display {
+            MockDisplay::Hidden => Display::None,
+            MockDisplay::Contents => Display::Contents,
+            MockDisplay::Leaf | MockDisplay::Flex => Display::Flex,
         }
     }
 
@@ -269,6 +270,12 @@ impl Iterator for MockChildren<'_> {
         let index = *self.ids.next()?;
         Some(MockRef { index })
     }
+
+    /// Exact, like the slice iterator a real host returns: item collection
+    /// sizes its buffers from this.
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.ids.size_hint()
+    }
 }
 
 impl LayoutTree for MockTree {
@@ -323,6 +330,9 @@ impl LayoutTree for MockTree {
             input,
             |tree, state, node, input| match display {
                 MockDisplay::Hidden => unreachable!("handled before the cache boundary"),
+                MockDisplay::Contents => {
+                    unreachable!("box-less elements are spliced out of every item collection")
+                }
                 MockDisplay::Flex => compute_flexbox_layout(tree, state, node, input),
                 MockDisplay::Leaf => {
                     LayoutOutput::new(input.known_dimensions.unwrap_or(Size::ZERO), Size::ZERO)
@@ -740,6 +750,102 @@ fn default_child_count_counts_the_children_iterator() {
     let (tree, _state, root) = leaf_tree();
     assert_eq!(tree.child_count(tree.node(root)), 2);
     assert_eq!(tree.child_count(tree.node(tree.nodes[root].children[0])), 0);
+}
+
+fn contents_style() -> MockStyle {
+    MockStyle {
+        display: MockDisplay::Contents,
+        ..MockStyle::default()
+    }
+}
+
+fn hidden_style() -> MockStyle {
+    MockStyle {
+        display: MockDisplay::Hidden,
+        ..MockStyle::default()
+    }
+}
+
+#[test]
+fn flattened_children_splices_display_contents_subtrees_in_source_order() {
+    // root: [ first, wrapper[ nested[ inner ], hidden ], last ]
+    let mut tree = MockTree::default();
+    let first = tree.push(MockStyle::default(), vec![]);
+    let inner = tree.push(MockStyle::default(), vec![]);
+    let nested = tree.push(contents_style(), vec![inner]);
+    let hidden = tree.push(hidden_style(), vec![]);
+    let wrapper = tree.push(contents_style(), vec![nested, hidden]);
+    let last = tree.push(MockStyle::default(), vec![]);
+    let root = tree.push(MockStyle::default(), vec![first, wrapper, last]);
+
+    let ids = |node: usize| -> Vec<usize> {
+        tree.flattened_children(tree.node(node))
+            .map(|(child, ..)| child.index)
+            .collect()
+    };
+
+    // Each yielded child arrives with the style and `display` the walk read
+    // to classify it, so no caller looks either up a second time.
+    let (yielded, style, display) = tree
+        .flattened_children(tree.node(root))
+        .next()
+        .expect("the root has children");
+    assert_eq!(yielded.index, first);
+    assert!(std::ptr::eq(style, tree.style(tree.node(first))));
+    assert_eq!(display, tree.style(tree.node(first)).display());
+
+    // The box-less wrapper and the box-less element nested inside it are both
+    // replaced by their own children, in place; a `display: none` child still
+    // appears, because its parent algorithm owns hiding its stale geometry.
+    assert_eq!(ids(root), vec![first, inner, hidden, last]);
+    assert_eq!(ids(wrapper), vec![inner, hidden]);
+    assert_eq!(ids(first), Vec::<usize>::new());
+
+    // Source children stay untouched: cleanup and the rounding walk need to
+    // reach every descendant, box-generating or not.
+    let source: Vec<usize> = tree
+        .children(tree.node(root))
+        .map(|child| child.index)
+        .collect();
+    assert_eq!(source, vec![first, wrapper, last]);
+    assert_eq!(tree.child_count(tree.node(root)), 3);
+}
+
+#[test]
+fn flattened_children_size_hint_never_bounds_a_walk_it_cannot_predict() {
+    let mut tree = MockTree::default();
+    let plain = tree.push(MockStyle::default(), vec![]);
+    let expanding = tree.push(contents_style(), vec![plain, plain]);
+    let empty = tree.push(contents_style(), vec![]);
+    let direct = tree.push(MockStyle::default(), vec![plain, plain]);
+    let grows = tree.push(MockStyle::default(), vec![expanding, plain]);
+    // The case that makes any source-derived lower bound wrong: one child,
+    // box-less and childless, so the walk yields nothing at all.
+    let shrinks = tree.push(MockStyle::default(), vec![empty]);
+
+    // A `display: contents` child can add items or remove them, so the walk
+    // is bounded from neither side and `size_hint` promises nothing.
+    for node in [direct, grows, shrinks] {
+        assert_eq!(
+            tree.flattened_children(tree.node(node)).size_hint(),
+            (0, None)
+        );
+    }
+    assert_eq!(tree.flattened_children(tree.node(direct)).count(), 2);
+    assert_eq!(tree.flattened_children(tree.node(grows)).count(), 3);
+    assert_eq!(tree.flattened_children(tree.node(shrinks)).count(), 0);
+
+    // Pre-allocation uses the separate estimate instead, which is exact for
+    // the common node and only an estimate once a box-less child appears.
+    assert_eq!(
+        tree.flattened_children(tree.node(direct)).capacity_hint(),
+        2
+    );
+    assert_eq!(tree.flattened_children(tree.node(grows)).capacity_hint(), 2);
+    assert_eq!(
+        tree.flattened_children(tree.node(shrinks)).capacity_hint(),
+        1
+    );
 }
 
 fn size_px(value: f32) -> StyleSize {

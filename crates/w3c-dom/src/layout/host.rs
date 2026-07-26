@@ -14,13 +14,14 @@ use neutron_star::invalidate::is_relayout_boundary;
 use neutron_star::style::{CoreStyle, PositionProperty, TextRun};
 use neutron_star::text::TextMeasurer;
 use neutron_star::tree::{
-    AvailableSpace, LayoutGoal, LayoutInput, LayoutOutput, LayoutSlot, LayoutTree,
+    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutSlot, LayoutTree,
 };
 use rustc_hash::FxHashSet;
 
 use super::style::{
-    DisplayMode, StyleView, TextStyleView, display_mode, establishes_absolute_containing_block,
-    establishes_fixed_containing_block, resolve_position, skips_contents,
+    DisplayMode, StyleView, TextStyleView, box_parent, display_mode,
+    establishes_absolute_containing_block, establishes_fixed_containing_block, resolve_position,
+    skips_contents,
 };
 use crate::document::{Document, DocumentLayoutState, NodeId, TreeArenas, slab_get_for_live_node};
 use crate::node::Node;
@@ -92,7 +93,14 @@ impl<T> LayoutTree for TreeArenas<T> {
 
         compute_cached_layout(self, state, node, input, move |tree, state, node, input| {
             match display {
-                DisplayMode::None => unreachable!("hidden nodes never reach the cache wrapper"),
+                // `None` is hidden and returned above. `Contents` generates no
+                // box at all and nothing routes one here: `flattened_children`
+                // splices it out of every item collection, the positioned pass
+                // never hoists it, `is_relayout_boundary` is false for it, and
+                // Stylo blockifies it on the document element.
+                DisplayMode::None | DisplayMode::Contents => {
+                    unreachable!("a box-less element has no box to lay out")
+                }
                 DisplayMode::Flex => compute_flexbox_layout(tree, state, node, input),
                 DisplayMode::Grid => compute_grid_layout(tree, state, node, input),
                 DisplayMode::Linear => compute_linear_layout(tree, state, node, input),
@@ -284,6 +292,16 @@ fn pre_position<T: Sync>(
     if display == DisplayMode::None {
         return false;
     }
+    if display == DisplayMode::Contents {
+        // No box: drop any geometry left from when this element still
+        // generated one, so it stays a transparent zero-offset pass-through
+        // for the rounding walk and reports an empty box to queries. Its
+        // children are real boxes of an ancestor's formatting context, so
+        // they still need the hook.
+        tree.layout_mut(state, node_id)
+            .set_unrounded(Layout::default());
+        return true;
+    }
     if node
         .parent_id()
         .and_then(|id| tree.nodes.get(id))
@@ -355,18 +373,24 @@ fn position_hoisted<T: Sync>(
         containing_origin.x + layout.location.x - parent_origin.x,
         containing_origin.y + layout.location.y - parent_origin.y,
     );
-    layout.order = sibling_paint_order(tree, parent_id, node_id);
+    // Rank against the box siblings the engine ordered this node among, which
+    // is the flattened item list of the formatting context it was collected
+    // in — not the source child list, when box-less elements intervene.
+    let ordering_parent = box_parent(node).map_or(parent_id, Node::id);
+    layout.order = sibling_paint_order(tree, ordering_parent, node_id);
     tree.layout_mut(state, node_id).set_unrounded(layout);
 }
 
 fn sibling_paint_order<T>(tree: &TreeArenas<T>, parent_id: NodeId, target: NodeId) -> u32 {
-    let parent = slab_get_for_live_node(&tree.nodes, parent_id);
-    let Some(target_index) = parent.child_ids().iter().position(|&id| id == target) else {
+    let Some(target_index) = tree
+        .flattened_children(parent_id)
+        .position(|(id, ..)| id == target)
+    else {
         return 0;
     };
     let target_key = (0_i32, target_index);
     let mut rank = 0u32;
-    for (index, &child_id) in parent.child_ids().iter().enumerate() {
+    for (index, (child_id, ..)) in tree.flattened_children(parent_id).enumerate() {
         let child = slab_get_for_live_node(&tree.nodes, child_id);
         let Some(order) = sibling_effective_paint_order(child) else {
             continue;
