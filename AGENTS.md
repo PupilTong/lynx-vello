@@ -220,6 +220,22 @@ useful signal for currently-compatible versions of those libraries.
   embedder API for the mutations styles cannot see (content/child-list changes
   with identical computed styles). The internal natural-size update path
   performs that invalidation itself.
+  Its `visual` module owns the post-layout visual order:
+  the full W3C stacking-context predicate, CSS2 Appendix E paint order
+  (`Document::paint_order` → a flat back-to-front `PaintOrder` of items with
+  viewport-space transform matrices and overflow/`contain: paint` clip
+  chains that honor containing-block escape), transform resolution
+  (transform + transform-origin + parent perspective, always flattened —
+  the fork has no authorable `preserve-3d`), and reverse-paint-order hit
+  testing (`Document::hit_test`/`PaintOrder::hit_test`, honoring
+  `visibility`, `pointer-events`, border-radius, and inverse-matrix point
+  mapping). It walks the same flattened box-tree the layout host feeds the
+  engine, so `display: contents` dissolves identically in paint and hit
+  order. The future render crate consumes `PaintOrder`; Lynx-specific
+  hit-test policy (hit-slop, `user-interaction-enabled`, event-through)
+  belongs to the future runtime-policy layer, never here. No retained
+  visual cache exists yet; `StyleDamage`'s stacking class is the
+  designated hook.
   `DocumentLayoutState` lazily boxes the shared Parley `TextContext`; each
   text node's layout-state entry lazily boxes its probe/commit
   `TextLayoutStore` and reads inherited font/text values from its parent.

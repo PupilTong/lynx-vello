@@ -17,6 +17,10 @@ use stylo::properties::ComputedValues;
 use stylo::servo_arc::Arc;
 
 pub use self::style::StyleView;
+pub(crate) use self::style::{
+    DisplayMode, box_parent, display_mode, establishes_absolute_containing_block,
+    establishes_fixed_containing_block, skips_contents,
+};
 use crate::document::{Document, NodeLayoutState};
 use crate::flush::Parallelism;
 
