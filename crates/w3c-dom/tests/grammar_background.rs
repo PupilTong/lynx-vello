@@ -62,11 +62,9 @@ fn background_clip_grammar() {
         ),
         "border-box, padding-box, content-box"
     );
-    assert!(!parses("background-clip", "text"));
 }
 
 #[test]
-#[ignore = "engine-gap: background-clip:text not implemented in the servo build (Lynx clips text backgrounds)"]
 fn background_clip_text() {
     assert_eq!(computed("background-clip: text", "background-clip"), "text");
     assert_eq!(

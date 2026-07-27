@@ -69,13 +69,53 @@ fn per_side_border_shorthands() {
 }
 
 #[test]
-fn outline_is_absent() {
+fn outline_shorthand_expansion() {
+    // Ported per `outline_is_absent`'s old canary contract now that the
+    // fork's lynx grammar seeds the outline rows (Lynx Core:
+    // lynx/core/style/outline_data.h reuses the border style enum).
     for property in ["outline", "outline-width", "outline-style", "outline-color"] {
-        assert!(
-            !property_is_supported(property),
-            "`{property}` grew grammar support — port the outline rows"
+        assert!(property_is_supported(property), "`{property}`");
+    }
+    // Lynx outlines are flush rings — no offset in the surface.
+    assert!(!property_is_supported("outline-offset"));
+
+    let mut doc = Doc::new();
+    let el = doc.el(doc.root, "view");
+    doc.set_inline(el, "outline: 4px dashed red");
+    doc.flush();
+    assert_eq!(doc.value(el, "outline-width"), "4px");
+    assert_eq!(doc.value(el, "outline-style"), "dashed");
+    assert_eq!(doc.value(el, "outline-color"), "rgb(255, 0, 0)");
+
+    doc.set_inline(el, "outline: solid");
+    doc.flush();
+    assert_eq!(doc.value(el, "outline-style"), "solid");
+    assert_eq!(
+        doc.value(el, "outline-width"),
+        "3px",
+        "initial width is medium = 3px once a style exists"
+    );
+}
+
+#[test]
+fn outline_style_keywords() {
+    // The same BorderStyleType enum as borders, minus `hidden`, plus
+    // css-ui-4 `auto` (border_handler.cc reuses the enum; OutlineStyle
+    // rejects `hidden` per spec).
+    for style in [
+        "auto", "none", "dotted", "dashed", "solid", "double", "groove", "ridge", "inset", "outset",
+    ] {
+        assert_eq!(
+            specified("outline-style", style).as_deref(),
+            Some(style),
+            "`{style}`"
         );
     }
+    assert!(!parses("outline-style", "hidden"));
+    // Zeroed used width when the style stays none: computed width keyword
+    // still resolves (medium = 3px) — the renderer's `resolved_outline`
+    // owns the "no style, no paint" rule.
+    assert_eq!(computed("outline-width: thick", "outline-width"), "5px");
 }
 
 #[test]

@@ -22,14 +22,27 @@ impl PaintOrder {
     /// built: freed ids may have been recycled, so the frame's geometry can
     /// no longer name nodes truthfully. Rebuild via
     /// [`Document::paint_order`].
-    #[must_use]
-    pub fn hit_test<T>(&self, document: &Document<T>, point: Point2D<f32>) -> Option<NodeId> {
+    /// Asserts this frame still truthfully names `document`'s nodes: freed
+    /// ids can be recycled by later creations, so any consumer resolving the
+    /// frame's `NodeId`s against live document state (hit testing, painting)
+    /// must check this after structural mutations.
+    ///
+    /// # Panics
+    ///
+    /// Panics when nodes were removed from `document` after this frame was
+    /// built; rebuild via [`Document::paint_order`].
+    pub fn assert_fresh<T>(&self, document: &Document<T>) {
         assert_eq!(
             self.epoch,
             document.node_removal_epoch(),
             "stale PaintOrder: nodes were removed after this frame was built; \
              rebuild it with Document::paint_order",
         );
+    }
+
+    #[must_use]
+    pub fn hit_test<T>(&self, document: &Document<T>, point: Point2D<f32>) -> Option<NodeId> {
+        self.assert_fresh(document);
         self.items.iter().rev().find_map(|item| {
             if !item.hit_testable {
                 return None;

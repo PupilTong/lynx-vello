@@ -231,7 +231,13 @@ useful signal for currently-compatible versions of those libraries.
   `visibility`, `pointer-events`, border-radius, and inverse-matrix point
   mapping). It walks the same flattened box-tree the layout host feeds the
   engine, so `display: contents` dissolves identically in paint and hit
-  order. The future render crate consumes `PaintOrder`; Lynx-specific
+  order. Group-effect stacking contexts (`opacity`, `filter`,
+  `clip-path`, `mask`, plus the storage-only blend/isolation triggers)
+  additionally surface as `RenderLayer` entries — preorder, parent-linked,
+  each with the establishing element, its world transform/size, and the
+  contiguous item range the group encloses — which is exactly what
+  `crates/pulsar` composites; group effects still do not affect hit
+  testing (recorded limit). Lynx-specific
   hit-test policy (hit-slop, `user-interaction-enabled`, event-through)
   belongs to the future runtime-policy layer, never here. No retained
   visual cache exists yet; `StyleDamage`'s stacking class is the
@@ -250,7 +256,12 @@ useful signal for currently-compatible versions of those libraries.
   canonical `lynx` branch, tip `7ed1b07ec`): `contain` was already seeded
   in the fork's lynx grammar; fork PR #9 (squash-merged into `lynx`) added
   `content-visibility` / `contain-intrinsic-size` under the `lynx` feature,
-  pref-gated for stock servo builds.
+  pref-gated for stock servo builds. In flight: feature branch
+  `claude/lynx-outline` (two commits on `7ed1b07ec`) un-gates
+  `background-clip: text` from gecko the same way and seeds the
+  `outline-*` rows (`outline-offset` deliberately omitted — Lynx outlines
+  are flush rings) — fork PR pending; the worktree submodule sits on its
+  tip.
 - `crates/neutron-star` — the Flexbox, Grid, and
   Starlight Relative and Linear engine: trait-based host⇄engine integration
   with static dispatch only (no `dyn`), one `LayoutTree` protocol with a
@@ -293,10 +304,43 @@ useful signal for currently-compatible versions of those libraries.
   component-specific staggered layout, and Lynx-specific text
   attribute/raw-text/truncation policy. Generic W3C text style, document
   context, and artifact storage already live in `w3c-dom`.
-- *(planned, not yet scaffolded)* render / runtime crates — see
-  `docs/tracking/` for the behavior surface each will need to cover before
-  scaffolding begins, and `.claude/agents/` for the subsystem-scoped agent
-  personas already set up for this work.
+- `crates/pulsar` — the vello-backed paint engine (`neutron-star` lays out,
+  `pulsar` emits light). `Painter::paint(&Document, &PaintOrder, &ImageStore,
+  &PaintOptions) -> &vello::Scene` walks the flat back-to-front item list:
+  item clip chains diff against vello clip layers (restarting inside every
+  group scope, which preserves containing-block clip escape under grouping
+  and upholds the crate-wide vello #1198 invariant: a blend layer's
+  *immediate* parent is always a real isolating layer, never a clip layer —
+  fragment painters needing a blend under an item clip interpose their own
+  `SrcOver` layer), `RenderLayer` group
+  scopes push effect layers (opacity/blend alpha over content bounds from a
+  single-sweep prepass that also folds child-layer bounds into parents,
+  `clip-path` as a full layer, `mask-image` as a
+  mask-then-`SrcIn` sandwich, color filters as blend-composite
+  approximations at scope close), and per-fragment painters draw outset
+  shadows → background color/gradient/image layers → inset shadows →
+  replaced content → borders → outline, plus text runs from the retained
+  Parley layouts (one shared `linebender_resource_handle` makes parley's
+  `FontData` feed `Scene::draw_glyphs` directly). `gpu::Headless` owns the
+  wgpu render-to-texture + readback path and fails soft (`NoAdapter`) so
+  tests skip GPU-less machines. Style access is `Document::paint_style`
+  (post-flush borrow, no `Arc` bump); geometry is the rounded layouts.
+  Coordinates: CSS px everywhere, device-pixel-ratio applied once as the
+  root scale in `PaintOptions`. wgpu/peniko/kurbo are consumed exclusively
+  through vello's version-matched re-exports (never direct deps). Recorded
+  v1 limits live in `crates/pulsar/src/lib.rs` docs (`filter: blur()`
+  ignored, color filters approximate, perspective items painted with a
+  three-corner affine fit, `background-clip: text`/`border-area` and
+  gradient-valued `color` unpainted, un-blurred `text-shadow`, outline
+  painted with its element rather than Appendix E step 10, single
+  `mask-image` layer). No retained scene yet — the frame rebuilds from a
+  reused `Painter`; `StyleDamage`'s repaint class is the designated hook.
+  It must not read Lynx runtime vocabulary (hit-slop, components) and never
+  bypasses `PaintOrder` for its own tree walk.
+- *(planned, not yet scaffolded)* runtime crates — see `docs/tracking/` for
+  the behavior surface each will need to cover before scaffolding begins,
+  and `.claude/agents/` for the subsystem-scoped agent personas already set
+  up for this work.
 
 See `docs/style-architecture.md` for the current style-layer dependency and
 ownership rules, and `docs/layout-architecture.md` for the layout-layer

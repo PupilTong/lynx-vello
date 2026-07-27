@@ -1394,3 +1394,145 @@ fn svg_arc_commands_flatten_within_tolerance() {
     assert!(mapped.x.abs() < 0.5 && (mapped.y - -50.0).abs() < 0.5);
     let _ = root;
 }
+
+// ---------------------------------------------------------------------------
+// Render layers (group-effect compositing boundaries)
+
+/// Index of `node`'s element-box item in the flat item list.
+fn item_index(paint: &PaintOrder, node: NodeId) -> usize {
+    paint
+        .items()
+        .iter()
+        .position(|item| item.node == node && item.kind == PaintItemKind::ElementBox)
+        .expect("node must have an element-box item")
+}
+
+#[test]
+fn group_effect_contexts_get_render_layers() {
+    for trigger in [
+        "opacity: 0.5;",
+        "filter: grayscale(1);",
+        "clip-path: circle(40px);",
+    ] {
+        let mut h = Harness::new(&format!(
+            "{PAGE} {}",
+            abs_box(&format!(".fade {{ {trigger} }} .over {{ z-index: 1; }}"))
+        ));
+        let root = h.root();
+        let fade = h.el(root, "view.box.fade");
+        let inner = h.el(fade, "view.box");
+        let over = h.el(root, "view.box.over");
+        let paint = h.paint();
+
+        let layers = paint.layers();
+        assert_eq!(layers.len(), 1, "trigger `{trigger}` must form one layer");
+        let layer = &layers[0];
+        assert_eq!(layer.node, fade);
+        assert_eq!(layer.parent, None);
+        // The group encloses exactly the context root and its descendants.
+        assert_eq!(layer.items.start, item_index(&paint, fade));
+        assert!(layer.items.contains(&item_index(&paint, inner)));
+        assert!(!layer.items.contains(&item_index(&paint, over)));
+        assert_eq!(layer.items.end, layer.items.start + 2);
+    }
+}
+
+#[test]
+fn plain_stacking_contexts_get_no_layer() {
+    // z-index and transform form stacking contexts but need no group
+    // compositing.
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(".ctx { z-index: 3; transform: translate(5px, 0px); }")
+    ));
+    let root = h.root();
+    let ctx = h.el(root, "view.box.ctx");
+    let _inner = h.el(ctx, "view.box");
+    assert!(h.paint().layers().is_empty());
+}
+
+#[test]
+fn nested_group_effects_nest_layers() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(".outer { filter: grayscale(1); } .inner { opacity: 0.5; }")
+    ));
+    let root = h.root();
+    let outer = h.el(root, "view.box.outer");
+    let inner = h.el(outer, "view.box.inner");
+    let paint = h.paint();
+
+    let layers = paint.layers();
+    assert_eq!(layers.len(), 2);
+    assert_eq!(layers[0].node, outer);
+    assert_eq!(layers[0].parent, None);
+    assert_eq!(layers[1].node, inner);
+    assert_eq!(layers[1].parent, Some(0));
+    // Preorder with nested ranges.
+    assert!(layers[0].items.start <= layers[1].items.start);
+    assert!(layers[1].items.end <= layers[0].items.end);
+    assert_eq!(layers[1].items.start, item_index(&paint, inner));
+}
+
+#[test]
+fn hidden_group_root_still_layers_visible_content() {
+    // visibility: hidden suppresses the root's own item, not the group: the
+    // visible child still paints inside the layer, whose transform/size stay
+    // those of the establishing element.
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(
+            ".fade { opacity: 0.5; visibility: hidden; left: 20px; top: 10px; }
+             .shown { visibility: visible; }"
+        )
+    ));
+    let root = h.root();
+    let fade = h.el(root, "view.box.fade");
+    let shown = h.el(fade, "view.box.shown");
+    let paint = h.paint();
+
+    assert!(paint.items().iter().all(|item| item.node != fade));
+    let layers = paint.layers();
+    assert_eq!(layers.len(), 1);
+    let layer = &layers[0];
+    assert_eq!(layer.node, fade);
+    assert_eq!(layer.items.clone().count(), 1);
+    assert_eq!(layer.items.start, item_index(&paint, shown));
+    assert_eq!(layer.size.width, 100.0);
+    assert_eq!(layer.size.height, 100.0);
+    let origin = layer
+        .transform
+        .transform_point2d(Point2D::new(0.0, 0.0))
+        .unwrap();
+    assert_eq!((origin.x, origin.y), (20.0, 10.0));
+}
+
+#[test]
+fn empty_groups_are_dropped() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(".fade { opacity: 0.5; visibility: hidden; }")
+    ));
+    let root = h.root();
+    let fade = h.el(root, "view.box.fade");
+    let _hidden_child = h.el(fade, "view.box");
+    assert!(h.paint().layers().is_empty());
+}
+
+#[test]
+fn leaf_group_contexts_close_their_layer() {
+    // The Leaf/skipped-contents early return must still seal the layer.
+    let mut h = Harness::new(&format!(
+        "{PAGE} {}",
+        abs_box(".fade { opacity: 0.5; } .fade > * { display: none; }")
+    ));
+    let root = h.root();
+    let fade = h.el(root, "view.box.fade");
+    let over = h.el(root, "view.box.over");
+    let paint = h.paint();
+    let layers = paint.layers();
+    assert_eq!(layers.len(), 1);
+    assert_eq!(layers[0].items.clone().count(), 1);
+    assert_eq!(layers[0].items.start, item_index(&paint, fade));
+    assert!(!layers[0].items.contains(&item_index(&paint, over)));
+}
