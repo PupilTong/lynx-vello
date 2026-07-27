@@ -42,6 +42,10 @@
 //! - `mask-*` honors the full geometry longhands but paints the first `mask-image` layer only
 //!   (`mask-composite` ignored; `mask-mode: luminance` treated as alpha via the `SrcIn` sandwich).
 
+// The coverage run compiles with `--cfg coverage_nightly` and the test
+// modules opt out via `#[coverage(off)]`, which needs this experimental
+// feature (same pattern as every other workspace crate).
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 // The paint modules convert f32 CSS px into f64 kurbo geometry pervasively;
 // truncation/precision lints would drown the real signal.
 #![allow(clippy::cast_possible_truncation, clippy::cast_lossless)]
