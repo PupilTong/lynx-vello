@@ -253,15 +253,13 @@ useful signal for currently-compatible versions of those libraries.
   Lynx computed defaults (border-box, `overflow: hidden`, `display: linear`
   on every element, …) stay embedder cascade policy (UA sheet). Relies on
   the vendored stylo fork (`vendor/stylo`, tracking the
-  canonical `lynx` branch, tip `7ed1b07ec`): `contain` was already seeded
+  canonical `lynx` branch, tip `8fb7de31a`): `contain` was already seeded
   in the fork's lynx grammar; fork PR #9 (squash-merged into `lynx`) added
   `content-visibility` / `contain-intrinsic-size` under the `lynx` feature,
-  pref-gated for stock servo builds. In flight: feature branch
-  `claude/lynx-outline` (two commits on `7ed1b07ec`) un-gates
-  `background-clip: text` from gecko the same way and seeds the
-  `outline-*` rows (`outline-offset` deliberately omitted — Lynx outlines
-  are flush rings) — fork PR pending; the worktree submodule sits on its
-  tip.
+  pref-gated for stock servo builds; fork PR #10 (squash-merged into
+  `lynx`) un-gated `background-clip: text` from gecko the same way and
+  seeded the `outline-*` rows (`outline-offset` deliberately omitted —
+  Lynx outlines are flush rings).
 - `crates/neutron-star` — the Flexbox, Grid, and
   Starlight Relative and Linear engine: trait-based host⇄engine integration
   with static dispatch only (no `dyn`), one `LayoutTree` protocol with a

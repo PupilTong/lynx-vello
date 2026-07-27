@@ -107,8 +107,8 @@ text (glyph runs, decorations, text-stroke, unblurred text-shadow), and the
 group effects (`opacity`, color `filter` approximations, `clip-path`,
 single-layer `mask`) via `w3c-dom`'s `RenderLayer` arena. Recorded v1
 limits live in `crates/pulsar/src/lib.rs`. Both fork-grammar gaps found
-while implementing are now fixed on the fork feature branch
-`claude/lynx-outline` (two commits on the `lynx` tip — fork PR pending):
+while implementing are fixed on the fork's `lynx` branch (PR #10,
+squash-merged as `8fb7de31a`):
 `background-clip: text` un-gated from gecko (pref-gated for stock servo;
 pulsar paints it via glyph-silhouette `SrcIn` sandwiches,
 GPU-pixel-tested with Ahem) and the `outline`/`outline-color`/
