@@ -4,11 +4,11 @@
 mod support;
 
 use divan::counter::ItemsCount;
-use neutron_star::compute::LeafMeasureInput;
-use neutron_star::geometry::Size;
-use neutron_star::style::{CoreStyle, TextContainerStyle, TextRun, TextRunStyle};
-use neutron_star::text::{TextContext, TextLayoutStore, TextMeasurer};
-use neutron_star::tree::{AvailableSpace, LayoutGoal};
+use hughie::compute::LeafMeasureInput;
+use hughie::geometry::Size;
+use hughie::style::{CoreStyle, TextContainerStyle, TextRun, TextRunStyle};
+use hughie::text::{TextContext, TextLayoutStore, TextMeasurer};
+use hughie::tree::{AvailableSpace, LayoutGoal};
 use stylo::values::computed::Display;
 use stylo::values::computed::font::{
     FamilyName, FontFamily, FontFamilyList, FontFamilyNameSyntax, SingleFontFamily,

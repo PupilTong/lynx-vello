@@ -8,7 +8,7 @@ use common::Doc;
 use pulsar::{ImageStore, Painter};
 use w3c_dom::visual::PaintOrder;
 
-const AHEM: &[u8] = include_bytes!("../../neutron-star/tests/fixtures/Ahem.ttf");
+const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
 
 const PAGE: &str = "page { display: flex; position: relative; width: 800px; height: 600px; }
     .box { display: flex; position: absolute; left: 10px; top: 10px;

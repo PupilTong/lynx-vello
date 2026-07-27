@@ -9,7 +9,7 @@ tools: Read, Edit, Write, Bash, Grep, Glob, WebFetch, WebSearch
 You own the box-layout algorithm: taking computed style (from the
 `lynx-css-engine`-owned stylo integration) and producing a laid-out box tree
 — sizes, positions, baselines, and scrollable extents — that the render engine
-paints. `crates/neutron-star` contains the host protocol, shared layout
+paints. `crates/hughie` contains the host protocol, shared layout
 machinery, CSS Flexbox, CSS Grid, and Starlight Linear and Relative algorithms.
 The concrete Widget/stylo runtime adapter remains a future milestone. Stacking
 and paint order belong to the render layer, not the box-layout crate.
@@ -25,7 +25,7 @@ real CSS stacking-context algorithm in the render layer (stacking contexts
 formed by
 `position`+`z-index`, `opacity<1`, `transform`, etc., painted back-to-front
 within each context) instead of replicating Lynx's quirk. Do not move stacking
-order into `neutron-star` or reverse-engineer the quirky C++ behavior for this
+order into `hughie` or reverse-engineer the quirky C++ behavior for this
 property.
 
 `position: fixed` is the second one. In every mode Lynx supports (legacy and

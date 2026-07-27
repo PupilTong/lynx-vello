@@ -6,7 +6,7 @@
 )]
 
 use euclid::{Scale, Size2D};
-use neutron_star::geometry::Size;
+use hughie::geometry::Size;
 use style_traits::{CSSPixel, DevicePixel};
 use stylo::context::QuirksMode;
 use stylo::device::Device;

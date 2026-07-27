@@ -28,8 +28,8 @@
 //! containing-block chain.
 
 use euclid::default::{Point2D, Rect, Size2D, Transform3D};
-use neutron_star::style::{Contain, CoreStyle, Overflow, PositionProperty, visibility};
-use neutron_star::tree::{Layout, LayoutTree};
+use hughie::style::{Contain, CoreStyle, Overflow, PositionProperty, visibility};
+use hughie::tree::{Layout, LayoutTree};
 use stylo::properties::ComputedValues;
 use stylo::values::computed::PointerEvents;
 

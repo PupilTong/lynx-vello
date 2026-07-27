@@ -1,16 +1,16 @@
-//! Shared styling-engine-free host for neutron-star integration tests and benchmarks.
+//! Shared styling-engine-free host for hughie integration tests and benchmarks.
 
 #![allow(dead_code)]
 
 use std::cell::{Cell, RefCell};
 use std::fmt;
 
-use neutron_star::compute::{
+use hughie::compute::{
     LeafMeasureInput, LeafMetrics, compute_cached_layout, compute_flexbox_layout,
     compute_grid_layout, compute_leaf_layout_with_measurement_for_testing, compute_linear_layout,
     compute_relative_layout, compute_skipped_contents_layout, hide_subtree,
 };
-use neutron_star::prelude::*;
+use hughie::prelude::*;
 use style_traits::values::specified::AllowedNumericType;
 use stylo::computed_values::{
     box_sizing, direction, flex_direction, flex_wrap, linear_direction, relative_center,
@@ -1224,7 +1224,7 @@ impl TestTree {
 
     pub(super) fn compute_root_layout(&self, id: TestId, available_space: Size<AvailableSpace>) {
         self.with_layout_state(true, |tree, state| {
-            neutron_star::compute::compute_root_layout(tree, state, tree.node(id), available_space);
+            hughie::compute::compute_root_layout(tree, state, tree.node(id), available_space);
         });
     }
 

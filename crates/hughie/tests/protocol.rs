@@ -1,19 +1,19 @@
 //! Protocol conformance: a minimal but *complete* host implementing the
-//! neutron-star tree protocol, proving [`LayoutTree`] is implementable over
+//! hughie tree protocol, proving [`LayoutTree`] is implementable over
 //! plain storage with zero `dyn`, zero allocation at the boundary, and zero
 //! engine-side state.
 
 use std::cell::Cell;
 use std::fmt;
 
-use neutron_star::cache::Cache;
-use neutron_star::compute::{
+use hughie::cache::Cache;
+use hughie::compute::{
     compute_absolute_layout, compute_boundary_relayout, compute_cached_layout,
     compute_flexbox_layout, compute_leaf_layout, compute_root_layout,
     compute_skipped_contents_layout, hide_subtree, round_layout,
 };
-use neutron_star::invalidate::{invalidate_for_relayout, is_relayout_boundary};
-use neutron_star::prelude::*;
+use hughie::invalidate::{invalidate_for_relayout, is_relayout_boundary};
+use hughie::prelude::*;
 use style_traits::values::specified::AllowedNumericType;
 use stylo::Zero;
 use stylo::computed_values::{relative_center, relative_layout_once, visibility};

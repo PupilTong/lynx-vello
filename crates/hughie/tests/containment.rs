@@ -4,8 +4,8 @@
 
 mod support;
 
-use neutron_star::prelude::*;
-use neutron_star::style::{Contain, Overflow};
+use hughie::prelude::*;
+use hughie::style::{Contain, Overflow};
 use stylo::computed_values::relative_layout_once;
 use support::*;
 

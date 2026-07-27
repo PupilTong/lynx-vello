@@ -97,7 +97,7 @@ the semantics are stylo's.** Everything below refines that sentence.
    lifecycle and thread-safety invariants.
 
 8. **Style→layout handoff: direct `Arc<ComputedValues>` reads + change
-   flags.** neutron-star / render consume stylo's computed values in place;
+   flags.** hughie / render consume stylo's computed values in place;
    dirty/invalidation flags (stylo change hints) decide what re-runs.
    Flattening into per-node PODs is *not* assumed — it happens only if
    profiling later proves the pointer-chasing costs.
@@ -217,7 +217,7 @@ the semantics are stylo's.** Everything below refines that sentence.
     fork-side parse/compute/damage coverage. Ingestion applies no property allowlist, so the fork build is
     the only gate. On top of that grammar, this repo adds the consuming
     machinery: `w3c-dom`'s `effective_containment` fold and
-    `StyleDamage`/`FlushSummary` damage harvest, and `neutron-star`'s
+    `StyleDamage`/`FlushSummary` damage harvest, and `hughie`'s
     size/layout containment, skipped contents, and relayout-boundary
     invalidation. Motivation: `<list>` virtualization (see
     [tracking/components.md](tracking/components.md)) — off-screen / recycled

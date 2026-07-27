@@ -3,7 +3,7 @@
 #![allow(clippy::cast_precision_loss)]
 
 use divan::counter::ItemsCount;
-use neutron_star::geometry::Size;
+use hughie::geometry::Size;
 use w3c_dom::NodeId;
 
 use crate::support::{LayoutFixture, LeafContent};

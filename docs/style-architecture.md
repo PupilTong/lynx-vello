@@ -63,7 +63,7 @@ standards core.
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| `w3c-dom` | `Document<T>` and its aligned arenas; DOM topology and attributes; private style context; invalidation-carrying mutation; inline parsing; matching, cascade, media evaluation, computed values; `StyleDamage`/`FlushSummary`; the concrete `neutron-star` host and layout-cache invalidation | Lynx tags or Element-PAPI opcodes, JS handle lifetime, payload semantics, `<page>` policy, bundle decoding/`StyleInfo` lowering, Lynx UA defaults, view metrics, touch-device policy |
+| `w3c-dom` | `Document<T>` and its aligned arenas; DOM topology and attributes; private style context; invalidation-carrying mutation; inline parsing; matching, cascade, media evaluation, computed values; `StyleDamage`/`FlushSummary`; the concrete `hughie` host and layout-cache invalidation | Lynx tags or Element-PAPI opcodes, JS handle lifetime, payload semantics, `<page>` policy, bundle decoding/`StyleInfo` lowering, Lynx UA defaults, view metrics, touch-device policy |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, and the maintained Lynx CSS extension grammar behind the `lynx` feature | Runtime protocol, document ownership, bundle ingestion, or host policy |
 | Future runtime adapter | Element-PAPI validation and context-owned handles; Lynx node/event payload; `<page>` root policy; view metrics and device construction; UA stylesheet generation; decoded `StyleInfo` lowering and CSS-scope policy | A second DOM, matcher, cascade, layout engine, or direct writes to traversal/computed-style internals |
 
@@ -89,7 +89,7 @@ standards core.
    helper. It does not write node styles or participate in traversal
    scheduling.
 7. `Document::layout` flushes styles before invoking the concrete
-   `neutron-star` host. Computed values are lent directly from each node's
+   `hughie` host. Computed values are lent directly from each node's
    Stylo `ElementData`, without an adapter-side style copy.
 
 ## Runtime integration gap
@@ -107,7 +107,7 @@ There is currently no crate that exposes Lynx Element-PAPI or connects
   detached-subtree lifetime, and CSS-scope ingestion have no public adapter.
 
 These are explicit future-integration tasks, not responsibilities to absorb
-into `w3c-dom`, `bobcat-engine`, or `neutron-star`.
+into `w3c-dom`, `bobcat-engine`, or `hughie`.
 
 ## Invariants
 

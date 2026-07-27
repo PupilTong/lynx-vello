@@ -1,6 +1,6 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
-//! **neutron-star** — a trait-first, statically-dispatched Flexbox, Grid, and
+//! **hughie** — a trait-first, statically-dispatched Flexbox, Grid, and
 //! Starlight Linear/Relative engine for host-owned trees.
 
 pub mod cache;

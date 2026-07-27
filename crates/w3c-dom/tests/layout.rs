@@ -1,4 +1,4 @@
-//! Behavior tests for the `w3c_dom::layout` integration: the neutron-star
+//! Behavior tests for the `w3c_dom::layout` integration: the hughie
 //! host protocol implemented over `Document<T>` + stylo computed styles.
 
 #![allow(clippy::float_cmp)]
@@ -11,7 +11,7 @@ use stylo::queries::values::PrefersColorScheme;
 use w3c_dom::NodeId;
 use w3c_dom::layout::Layout;
 
-const AHEM: &[u8] = include_bytes!("../../neutron-star/tests/fixtures/Ahem.ttf");
+const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
 
 /// [`Doc`] plus helpers for document-owned layout results.
 struct Harness {

@@ -2,8 +2,8 @@
 
 mod support;
 
-use neutron_star::compute::{compute_absolute_layout, compute_leaf_layout};
-use neutron_star::prelude::*;
+use hughie::compute::{compute_absolute_layout, compute_leaf_layout};
+use hughie::prelude::*;
 use stylo::computed_values::{box_sizing, direction, flex_direction, flex_wrap};
 use stylo::values::computed::{Display, MaxSize, Overflow, PositionProperty};
 use stylo::values::specified::align::AlignFlags;

@@ -2,8 +2,8 @@
 
 mod support;
 
-use neutron_star::compute::compute_absolute_layout;
-use neutron_star::prelude::*;
+use hughie::compute::compute_absolute_layout;
+use hughie::prelude::*;
 use stylo::computed_values::direction;
 use stylo::values::computed::{
     AspectRatio, ContentDistribution, Display, FlexBasis, GridAutoFlow, GridLine,
@@ -1899,7 +1899,7 @@ fn container_baseline_prefers_first_row_synthesis_over_later_baseline_group() {
     assert_close(tree.layout(bottom).location.y, 30.0);
 }
 
-fn wrapping_leaf(input: neutron_star::compute::LeafMeasureInput) -> LeafMetrics {
+fn wrapping_leaf(input: hughie::compute::LeafMeasureInput) -> LeafMetrics {
     let width = input
         .known_dimensions
         .width
@@ -2368,7 +2368,7 @@ fn min_content_maximums_and_hostile_repeat_counts_stay_bounded() {
 
 #[test]
 fn intrinsic_keyword_heights_resolve_against_content() {
-    fn column_leaf(input: neutron_star::compute::LeafMeasureInput) -> LeafMetrics {
+    fn column_leaf(input: hughie::compute::LeafMeasureInput) -> LeafMetrics {
         let height = input
             .known_dimensions
             .height

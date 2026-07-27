@@ -1,12 +1,12 @@
 //! Parley text measurement conformance and host-integration tests.
 
-use neutron_star::compute::{
+use hughie::compute::{
     LeafMeasureInput, compute_cached_layout, compute_flexbox_layout, compute_root_layout,
 };
-use neutron_star::geometry::{Edges, Size};
-use neutron_star::style::{CoreStyle, TextContainerStyle, TextRun, TextRunStyle};
-use neutron_star::text::{TextContext, TextLayoutStore, TextMeasurer};
-use neutron_star::tree::{
+use hughie::geometry::{Edges, Size};
+use hughie::style::{CoreStyle, TextContainerStyle, TextRun, TextRunStyle};
+use hughie::text::{TextContext, TextLayoutStore, TextMeasurer};
+use hughie::tree::{
     AvailableSpace, LayoutGoal, LayoutInput, LayoutOutput, LayoutSlot, LayoutTree, RequestedAxis,
 };
 use parley::layout::BreakReason;

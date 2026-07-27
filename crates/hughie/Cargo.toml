@@ -1,5 +1,5 @@
 [package]
-name = "neutron-star"
+name = "hughie"
 description = "Statically-dispatched CSS Flex/Grid and Starlight Linear/Relative layout for host-owned trees"
 version.workspace = true
 edition.workspace = true
