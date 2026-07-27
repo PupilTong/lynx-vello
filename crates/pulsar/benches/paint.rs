@@ -2,8 +2,7 @@
 //! CPU-side only (no GPU dispatch), CodSpeed-compatible.
 
 use euclid::{Scale, Size2D};
-use pulsar::vello::kurbo::Size;
-use pulsar::{ImageStore, PaintOptions, Painter};
+use pulsar::{ImageStore, Painter};
 use stylo::context::QuirksMode;
 use stylo::device::Device;
 use stylo::device::servo::FontMetricsProvider;
@@ -100,18 +99,9 @@ fn scene_build(bencher: divan::Bencher<'_, '_>, cards: usize) {
     let mut dom = card_page(cards);
     let frame = dom.paint_order();
     let images = ImageStore::new();
-    let options = PaintOptions {
-        scale: 2.0,
-        viewport: Size::new(800.0, 600.0),
-    };
     let mut painter = Painter::new();
     bencher.bench_local(|| {
-        divan::black_box(painter.paint(
-            divan::black_box(&dom),
-            divan::black_box(&frame),
-            &images,
-            &options,
-        ));
+        divan::black_box(painter.paint(divan::black_box(&dom), divan::black_box(&frame), &images));
     });
 }
 
@@ -119,13 +109,9 @@ fn scene_build(bencher: divan::Bencher<'_, '_>, cards: usize) {
 fn paint_order_and_scene(bencher: divan::Bencher<'_, '_>, cards: usize) {
     let mut dom = card_page(cards);
     let images = ImageStore::new();
-    let options = PaintOptions {
-        scale: 2.0,
-        viewport: Size::new(800.0, 600.0),
-    };
     let mut painter = Painter::new();
     bencher.bench_local(|| {
         let frame = dom.paint_order();
-        divan::black_box(painter.paint(&dom, &frame, &images, &options));
+        divan::black_box(painter.paint(&dom, &frame, &images));
     });
 }

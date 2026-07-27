@@ -40,7 +40,7 @@ use w3c_dom::visual::{ClipNode, PaintItem, PaintItemKind, PaintOrder, RenderLaye
 
 use crate::paint::{BoxFragment, PathScratch, background, border, filters, mask, shadow, text};
 use crate::shape::{BoxShape, with_shape};
-use crate::{ImageStore, PaintOptions, convert};
+use crate::{ImageStore, convert};
 
 /// Reused per-frame buffers.
 #[derive(Debug, Default)]
@@ -55,6 +55,8 @@ pub(crate) struct Scratch {
     layer_bounds: Vec<Rect>,
     /// Prepass open-layer stack.
     open_layers: Vec<usize>,
+    /// Prepass per-layer bounds accumulator (`None` = nothing yet).
+    bounds_acc: Vec<Option<Rect>>,
     /// Reused path buffers for the border/shadow painters.
     paths: PathScratch,
 }
@@ -76,7 +78,6 @@ pub(crate) fn walk<T>(
     document: &Document<T>,
     frame: &PaintOrder,
     images: &ImageStore,
-    options: &PaintOptions,
 ) {
     // Fail closed on any visual staleness: painting resolves the frame's
     // geometry snapshot against live styles/layouts/text, so both recycled
@@ -87,9 +88,11 @@ pub(crate) fn walk<T>(
     scratch.clip_stack.clear();
     scratch.chain.clear();
     scratch.scopes.clear();
-    compute_layer_bounds(scratch, document, frame, options);
+    compute_layer_bounds(scratch, document, frame);
 
-    let scale = Affine::scale(options.scale);
+    // Single-sourced from the document's device: the same scale that
+    // rounded the layouts becomes the one CSS px -> device px transform.
+    let scale = Affine::scale(f64::from(document.device().device_pixel_ratio().get()));
     let items = frame.items();
     let layers = frame.layers();
     let mut next_open = 0_usize;
@@ -413,12 +416,7 @@ fn pop_clips_to(scene: &mut Scene, scratch: &mut Scratch, len: usize) {
 /// no item), and clamped to the viewport at close. Corners map through the
 /// same affine fit [`paint_item`] draws with, so what is painted is what is
 /// bounded — over-approximation costs tiles, never pixels.
-fn compute_layer_bounds<T>(
-    scratch: &mut Scratch,
-    document: &Document<T>,
-    frame: &PaintOrder,
-    options: &PaintOptions,
-) {
+fn compute_layer_bounds<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrder) {
     let layers = frame.layers();
     let items = frame.items();
     scratch.layer_bounds.clear();
@@ -427,20 +425,29 @@ fn compute_layer_bounds<T>(
         return;
     }
     scratch.layer_bounds.resize(layers.len(), Rect::ZERO);
-    let viewport = Rect::new(0.0, 0.0, options.viewport.width, options.viewport.height);
-    let mut accumulated: Vec<Option<Rect>> = vec![None; layers.len()];
+    let device_viewport = document.device().viewport_size();
+    let viewport = Rect::new(
+        0.0,
+        0.0,
+        f64::from(device_viewport.width),
+        f64::from(device_viewport.height),
+    );
+    scratch.bounds_acc.clear();
+    scratch.bounds_acc.resize(layers.len(), None);
     let mut next_open = 0_usize;
 
-    let close = |scratch: &mut Scratch, accumulated: &mut Vec<Option<Rect>>| {
+    let close = |scratch: &mut Scratch| {
         let closed = scratch
             .open_layers
             .pop()
             .expect("close is only called with an open layer");
         scratch.layer_bounds[closed] =
-            accumulated[closed].map_or(Rect::ZERO, |rect| rect.intersect(viewport));
-        if let (Some(bounds), Some(&parent)) = (accumulated[closed], scratch.open_layers.last()) {
-            accumulated[parent] =
-                Some(accumulated[parent].map_or(bounds, |united| united.union(bounds)));
+            scratch.bounds_acc[closed].map_or(Rect::ZERO, |rect| rect.intersect(viewport));
+        if let (Some(bounds), Some(&parent)) =
+            (scratch.bounds_acc[closed], scratch.open_layers.last())
+        {
+            scratch.bounds_acc[parent] =
+                Some(scratch.bounds_acc[parent].map_or(bounds, |united| united.union(bounds)));
         }
     };
 
@@ -450,10 +457,10 @@ fn compute_layer_bounds<T>(
             .last()
             .is_some_and(|&top| layers[top].items.end == index)
         {
-            close(scratch, &mut accumulated);
+            close(scratch);
         }
         while next_open < layers.len() && layers[next_open].items.start == index {
-            accumulated[next_open] = layer_root_rect(&layers[next_open]);
+            scratch.bounds_acc[next_open] = layer_root_rect(&layers[next_open]);
             scratch.open_layers.push(next_open);
             next_open += 1;
         }
@@ -475,11 +482,12 @@ fn compute_layer_bounds<T>(
             }
         };
         if let Some(rect) = item_viewport_rect(item, extent) {
-            accumulated[top] = Some(accumulated[top].map_or(rect, |united| united.union(rect)));
+            scratch.bounds_acc[top] =
+                Some(scratch.bounds_acc[top].map_or(rect, |united| united.union(rect)));
         }
     }
     while !scratch.open_layers.is_empty() {
-        close(scratch, &mut accumulated);
+        close(scratch);
     }
 }
 

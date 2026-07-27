@@ -10,9 +10,12 @@
 //! management plus headless render-to-texture with readback for tests and
 //! embedders without a surface.
 //!
-//! Coordinate model: `PaintOrder` speaks viewport CSS px; the device pixel
-//! ratio in [`PaintOptions::scale`] is applied once as a root transform, so
-//! every painter works in CSS px. Fragment geometry (border/padding/content
+//! Coordinate model: `PaintOrder` speaks viewport CSS px; the document
+//! device's pixel ratio — the same value that drove layout rounding — is
+//! applied once as a root transform, so every painter works in CSS px.
+//! Viewport and scale are read from [`w3c_dom::Document::device`] rather
+//! than passed in, so they can never disagree with the layout they
+//! produced. Fragment geometry (border/padding/content
 //! boxes) comes from the document's rounded layouts; per-item style access
 //! uses [`w3c_dom::Document::paint_style`], the post-flush borrow that
 //! neither re-enters Stylo's borrow checker nor bumps a style `Arc`.
@@ -43,7 +46,7 @@
 // truncation/precision lints would drown the real signal.
 #![allow(clippy::cast_possible_truncation, clippy::cast_lossless)]
 
-use vello::{Scene, kurbo};
+use vello::Scene;
 use w3c_dom::Document;
 use w3c_dom::visual::PaintOrder;
 
@@ -58,15 +61,6 @@ pub use images::ImageStore;
 /// Embedders configure wgpu/peniko/kurbo exclusively through this re-export
 /// (one shared copy, version-matched to vello).
 pub use vello;
-
-/// Frame-level options for [`Painter::paint`].
-#[derive(Debug, Clone, Copy)]
-pub struct PaintOptions {
-    /// Device pixel ratio: the single CSS px → device px root scale.
-    pub scale: f64,
-    /// Viewport size in CSS px; group-effect layer bounds are clamped to it.
-    pub viewport: kurbo::Size,
-}
 
 /// Reusable scene builder. Holding one `Painter` across frames reuses the
 /// scene and scratch allocations; [`Self::paint`] rebuilds the scene from
@@ -108,17 +102,9 @@ impl Painter {
         document: &Document<T>,
         frame: &PaintOrder,
         images: &ImageStore,
-        options: &PaintOptions,
     ) -> &Scene {
         self.scene.reset();
-        walker::walk(
-            &mut self.scene,
-            &mut self.scratch,
-            document,
-            frame,
-            images,
-            options,
-        );
+        walker::walk(&mut self.scene, &mut self.scratch, document, frame, images);
         &self.scene
     }
 

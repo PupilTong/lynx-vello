@@ -7,21 +7,6 @@ use crate::NodeId;
 use crate::document::Document;
 
 impl PaintOrder {
-    /// The topmost element whose rounded border box contains `point`
-    /// (viewport CSS px), honoring transforms, clip chains, `visibility`,
-    /// and `pointer-events`. Text-run hits resolve to the parent element.
-    ///
-    /// Transformed candidates map the point through the inverse of their
-    /// world matrix; a singular matrix means the element is not rendered
-    /// (css-transforms-1) and never hit, and a point projecting behind the
-    /// eye (w ≤ 0 under perspective) misses likewise.
-    ///
-    /// # Panics
-    ///
-    /// Panics when nodes were removed from `document` after this frame was
-    /// built: freed ids may have been recycled, so the frame's geometry can
-    /// no longer name nodes truthfully. Rebuild via
-    /// [`Document::paint_order`].
     /// Asserts this frame still truthfully names `document`'s nodes: freed
     /// ids can be recycled by later creations, so any consumer resolving the
     /// frame's `NodeId`s against live document state (hit testing, painting)
@@ -61,6 +46,20 @@ impl PaintOrder {
         );
     }
 
+    /// The topmost element whose rounded border box contains `point`
+    /// (viewport CSS px), honoring transforms, clip chains, `visibility`,
+    /// and `pointer-events`. Text-run hits resolve to the parent element.
+    ///
+    /// Transformed candidates map the point through the inverse of their
+    /// world matrix; a singular matrix means the element is not rendered
+    /// (css-transforms-1) and never hit, and a point projecting behind the
+    /// eye (w ≤ 0 under perspective) misses likewise.
+    ///
+    /// # Panics
+    ///
+    /// Panics per [`Self::assert_fresh`] (node removals only — the
+    /// geometry snapshot is self-contained, so non-structural mutations
+    /// keep the frame queryable).
     #[must_use]
     pub fn hit_test<T>(&self, document: &Document<T>, point: Point2D<f32>) -> Option<NodeId> {
         self.assert_fresh(document);

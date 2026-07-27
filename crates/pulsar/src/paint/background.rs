@@ -5,9 +5,9 @@
 //! Spec sketch (docs/tracking/css-visual.md is the authority for the fork's
 //! grammar surface):
 //! - Paint `background-color` first (bottom), clipped to the used `background-clip` box shape
-//!   (`border-box`/`padding-box`/`content-box`; Lynx's `border-area` is a recorded v1 limit — skip
-//!   the layer. The fork's `lynx` build has no computed `text` variant at all — it is gecko-gated
-//!   upstream — so `background-clip: text` cannot currently reach the renderer).
+//!   (`border-box`/`padding-box`/`content-box`; `text` clips through the glyph-silhouette `SrcIn`
+//!   sandwich in [`text_clip_sandwich`]; Lynx's `border-area` is a recorded v1 limit — skip the
+//!   layer. The authoritative support/limit matrix lives in the crate docs, `lib.rs`).
 //! - Then image layers **last-specified first** (CSS lists the first layer topmost): for each
 //!   non-`None` layer resolve origin box (`background-origin`), positioning area, `background-size`
 //!   (`auto`/`cover`/`contain`/lengths), `background-position`, and `background-repeat` per axis.

@@ -323,15 +323,12 @@ useful signal for currently-compatible versions of those libraries.
   wgpu render-to-texture + readback path and fails soft (`NoAdapter`) so
   tests skip GPU-less machines. Style access is `Document::paint_style`
   (post-flush borrow, no `Arc` bump); geometry is the rounded layouts.
-  Coordinates: CSS px everywhere, device-pixel-ratio applied once as the
-  root scale in `PaintOptions`. wgpu/peniko/kurbo are consumed exclusively
-  through vello's version-matched re-exports (never direct deps). Recorded
-  v1 limits live in `crates/pulsar/src/lib.rs` docs (`filter: blur()`
-  ignored, color filters approximate, perspective items painted with a
-  three-corner affine fit, `background-clip: text`/`border-area` and
-  gradient-valued `color` unpainted, un-blurred `text-shadow`, outline
-  painted with its element rather than Appendix E step 10, single
-  `mask-image` layer). No retained scene yet — the frame rebuilds from a
+  Coordinates: CSS px everywhere, with viewport and device-pixel-ratio
+  read from the document's own `Device` (single-sourced with layout —
+  never passed in separately). wgpu/peniko/kurbo are consumed exclusively
+  through vello's version-matched re-exports (never direct deps). The
+  **authoritative** recorded-limits matrix is `crates/pulsar/src/lib.rs`'s
+  crate docs — other docs reference it rather than restating it. No retained scene yet — the frame rebuilds from a
   reused `Painter`; `StyleDamage`'s repaint class is the designated hook.
   It must not read Lynx runtime vocabulary (hit-slop, components) and never
   bypasses `PaintOrder` for its own tree walk.

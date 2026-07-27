@@ -5,8 +5,7 @@
 mod common;
 
 use common::Doc;
-use pulsar::vello::kurbo::Size;
-use pulsar::{ImageStore, PaintOptions, Painter};
+use pulsar::{ImageStore, Painter};
 use w3c_dom::visual::PaintOrder;
 
 const AHEM: &[u8] = include_bytes!("../../neutron-star/tests/fixtures/Ahem.ttf");
@@ -37,13 +36,7 @@ impl Harness {
     /// Paints and returns `(draw ops, clip/layer pairs, open layers)`.
     fn stats(&mut self) -> (usize, u32, u32) {
         let frame = self.doc.dom.paint_order();
-        let options = PaintOptions {
-            scale: 1.0,
-            viewport: Size::new(800.0, 600.0),
-        };
-        let scene = self
-            .painter
-            .paint(&self.doc.dom, &frame, &self.images, &options);
+        let scene = self.painter.paint(&self.doc.dom, &frame, &self.images);
         let encoding = scene.encoding();
         (
             encoding.draw_tags.len(),
@@ -259,11 +252,7 @@ fn painting_a_frame_built_before_a_style_mutation_panics() {
     let frame = h.doc.dom.paint_order();
     h.doc.dom.set_inline_style(el, "display: none");
     h.doc.dom.layout();
-    let options = PaintOptions {
-        scale: 1.0,
-        viewport: Size::new(800.0, 600.0),
-    };
-    let _ = h.painter.paint(&h.doc.dom, &frame, &h.images, &options);
+    let _ = h.painter.paint(&h.doc.dom, &frame, &h.images);
 }
 
 #[test]

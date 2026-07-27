@@ -6,9 +6,8 @@ mod common;
 
 use common::Doc;
 use pulsar::gpu::{GpuError, Headless};
-use pulsar::vello::kurbo::Size;
 use pulsar::vello::peniko::Color;
-use pulsar::{ImageStore, PaintOptions, Painter};
+use pulsar::{ImageStore, Painter};
 
 const AHEM: &[u8] = include_bytes!("../../neutron-star/tests/fixtures/Ahem.ttf");
 
@@ -54,11 +53,7 @@ fn background_clip_text_clips_to_glyph_ink() {
 
     let frame = doc.dom.paint_order();
     let mut painter = Painter::new();
-    let options = PaintOptions {
-        scale: 1.0,
-        viewport: Size::new(200.0, 100.0),
-    };
-    let scene = painter.paint(&doc.dom, &frame, &ImageStore::new(), &options);
+    let scene = painter.paint(&doc.dom, &frame, &ImageStore::new());
     let pixels = gpu
         .render(scene, 200, 100, Color::WHITE)
         .expect("headless render");
@@ -101,11 +96,7 @@ fn plain_background_covers_the_box() {
 
     let frame = doc.dom.paint_order();
     let mut painter = Painter::new();
-    let options = PaintOptions {
-        scale: 1.0,
-        viewport: Size::new(200.0, 100.0),
-    };
-    let scene = painter.paint(&doc.dom, &frame, &ImageStore::new(), &options);
+    let scene = painter.paint(&doc.dom, &frame, &ImageStore::new());
     let pixels = gpu
         .render(scene, 200, 100, Color::WHITE)
         .expect("headless render");
@@ -133,11 +124,7 @@ fn outline_rings_the_border_box() {
 
     let frame = doc.dom.paint_order();
     let mut painter = Painter::new();
-    let options = PaintOptions {
-        scale: 1.0,
-        viewport: Size::new(200.0, 100.0),
-    };
-    let scene = painter.paint(&doc.dom, &frame, &ImageStore::new(), &options);
+    let scene = painter.paint(&doc.dom, &frame, &ImageStore::new());
     let pixels = gpu
         .render(scene, 200, 100, Color::WHITE)
         .expect("headless render");
