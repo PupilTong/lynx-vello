@@ -142,8 +142,13 @@ useful signal for currently-compatible versions of those libraries.
   that restores it on the unwinding path too), so a panicking callback becomes
   a JS exception rather than an unwind into C and leaves its slot usable, and
   a re-entrant invocation would be refused rather than alias the `FnMut` if a
-  future boundary made one reachable. Host closures must not capture a `Value`
-  from their own realm — that cycle leaks the realm. The crate must remain
+  future boundary made one reachable. A closure's lifetime follows its JS
+  function object rather than the realm: each function owns a companion object
+  whose finalizer releases the handler slot, so discarding a function drops the
+  closure and recycles the slot (without this, a realm registering a handler
+  per element per update — events, worklets — would accumulate every closure it
+  ever made). Because that drop can run inside the collector, host closures
+  must not capture a `Value` from their own realm. The crate must remain
   independent of Bobcat, the DOM, resources, and runtime policy — it knows
   nothing about Lynx.
 - `crates/bobcat-quickjs` — narrow integration layer depending on

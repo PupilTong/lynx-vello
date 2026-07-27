@@ -19,6 +19,11 @@ pub(crate) type HostDispatch = unsafe extern "C" fn(
     result: *mut *mut QjsValue,
 ) -> c_int;
 
+/// Called from the garbage collector when a host function becomes
+/// unreachable, so its Rust closure can be dropped. Runs during collection —
+/// it must not re-enter JavaScript.
+pub(crate) type HostRelease = unsafe extern "C" fn(opaque: *mut c_void, index: u32);
+
 #[repr(C)]
 pub(crate) struct QjsRuntime {
     _private: [u8; 0],
@@ -39,6 +44,7 @@ unsafe extern "C" {
     pub(crate) fn qjs_runtime_free(runtime: *mut QjsRuntime);
     pub(crate) fn qjs_context_new(runtime: *mut QjsRuntime) -> *mut JSContext;
     pub(crate) fn qjs_context_free(context: *mut JSContext);
+    pub(crate) fn qjs_runtime_run_gc(runtime: *mut QjsRuntime);
     pub(crate) fn qjs_runtime_set_memory_limit(runtime: *mut QjsRuntime, limit: usize);
     pub(crate) fn qjs_runtime_set_max_stack_size(runtime: *mut QjsRuntime, size: usize);
     pub(crate) fn qjs_runtime_set_interrupt_handler(
@@ -118,6 +124,7 @@ unsafe extern "C" {
     pub(crate) fn qjs_runtime_set_host_dispatch(
         runtime: *mut QjsRuntime,
         dispatch: Option<HostDispatch>,
+        release: Option<HostRelease>,
         opaque: *mut c_void,
     );
     pub(crate) fn qjs_new_host_function(

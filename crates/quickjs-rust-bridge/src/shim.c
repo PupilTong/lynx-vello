@@ -35,6 +35,11 @@ typedef int QjsInterruptCallback(void *opaque);
 typedef int QjsHostDispatch(void *opaque, uint32_t index, size_t argument_count,
                             QjsValue *const *arguments, QjsValue **result);
 
+/* Invoked from the garbage collector when a host function becomes
+ * unreachable, so the callee can drop the Rust closure behind `index`. It runs
+ * during collection and must not re-enter JavaScript. */
+typedef void QjsHostRelease(void *opaque, uint32_t index);
+
 typedef struct QjsRuntime {
     JSRuntime *raw;
     JSContext *context;
@@ -44,8 +49,39 @@ typedef struct QjsRuntime {
     QjsInterruptCallback *interrupt_callback;
     void *interrupt_opaque;
     QjsHostDispatch *host_dispatch;
+    QjsHostRelease *host_release;
     void *host_opaque;
 } QjsRuntime;
+
+/* One per host function, owned by a JS object whose only job is to be
+ * collected at the same moment the function is: that is what gives the Rust
+ * closure a lifetime instead of pinning it to the realm. */
+typedef struct QjsHostOwner {
+    QjsRuntime *runtime;
+    uint32_t index;
+} QjsHostOwner;
+
+/* Allocated once per process; JS_NewClassID is mutex-guarded, so sharing the
+ * static across realms on different threads is safe. */
+static JSClassID qjs_host_owner_class_id;
+
+static void qjs_host_owner_finalizer(JSRuntime *raw, JSValue value) {
+    QjsHostOwner *owner = JS_GetOpaque(value, qjs_host_owner_class_id);
+
+    (void)raw;
+    if (owner == NULL) {
+        return;
+    }
+    if (owner->runtime->host_release != NULL) {
+        owner->runtime->host_release(owner->runtime->host_opaque, owner->index);
+    }
+    free(owner);
+}
+
+static const JSClassDef qjs_host_owner_class = {
+    "QjsHostFunctionOwner",
+    .finalizer = qjs_host_owner_finalizer,
+};
 
 enum QjsValueKind {
     QJS_KIND_UNDEFINED = 0,
@@ -162,6 +198,9 @@ QjsRuntime *qjs_runtime_new(void) {
         JS_SetHostPromiseRejectionTracker(runtime->raw,
                                           qjs_promise_rejection_tracker,
                                           runtime);
+        JS_NewClassID(&qjs_host_owner_class_id);
+        JS_NewClass(runtime->raw, qjs_host_owner_class_id,
+                    &qjs_host_owner_class);
     } else {
         free(runtime);
         return NULL;
@@ -200,6 +239,10 @@ JSContext *qjs_context_new(QjsRuntime *runtime) {
 
 void qjs_context_free(JSContext *context) {
     JS_FreeContext(context);
+}
+
+void qjs_runtime_run_gc(QjsRuntime *runtime) {
+    JS_RunGC(runtime->raw);
 }
 
 void qjs_runtime_set_memory_limit(QjsRuntime *runtime, size_t limit) {
@@ -445,8 +488,10 @@ void qjs_throw_error(JSContext *context, const char *message) {
 }
 
 void qjs_runtime_set_host_dispatch(QjsRuntime *runtime,
-                                   QjsHostDispatch *dispatch, void *opaque) {
+                                   QjsHostDispatch *dispatch,
+                                   QjsHostRelease *release, void *opaque) {
     runtime->host_dispatch = dispatch;
+    runtime->host_release = release;
     runtime->host_opaque = opaque;
 }
 
@@ -454,6 +499,7 @@ static JSValue qjs_host_trampoline(JSContext *context, JSValueConst this_value,
                                    int argc, JSValueConst *argv, int magic,
                                    JSValue *func_data) {
     QjsRuntime *runtime = JS_GetContextOpaque(context);
+    QjsHostOwner *owner;
     QjsValue **arguments = NULL;
     QjsValue *result = NULL;
     uint32_t index;
@@ -466,9 +512,11 @@ static JSValue qjs_host_trampoline(JSContext *context, JSValueConst this_value,
     if (runtime == NULL || runtime->host_dispatch == NULL) {
         return JS_ThrowInternalError(context, "no host dispatch is installed");
     }
-    if (JS_ToUint32(context, &index, func_data[0]) < 0) {
-        return JS_EXCEPTION;
+    owner = JS_GetOpaque(func_data[0], qjs_host_owner_class_id);
+    if (owner == NULL) {
+        return JS_ThrowInternalError(context, "this host function was released");
     }
+    index = owner->index;
 
     /* argv is borrowed for the duration of the call; the boxes handed to the
      * dispatch own duplicates so a host callback can outlive neither. */
@@ -515,11 +563,39 @@ static JSValue qjs_host_trampoline(JSContext *context, JSValueConst this_value,
 
 QjsValue *qjs_new_host_function(JSContext *context, const char *name,
                                 int length, uint32_t index) {
-    JSValue data = JS_NewUint32(context, index);
-    JSValue function = JS_NewCFunctionData(context, qjs_host_trampoline, length,
-                                           0, 1, &data);
+    QjsRuntime *runtime = JS_GetContextOpaque(context);
+    QjsHostOwner *owner;
+    JSValue data;
+    JSValue function;
     JSValue function_name;
 
+    if (runtime == NULL) {
+        JS_ThrowInternalError(context, "no host dispatch is installed");
+        return NULL;
+    }
+
+    /* The owner object carries the slot index and, when collected, tells the
+     * host to drop the closure. Handing it to JS_NewCFunctionData as the
+     * function's data makes the two die together. */
+    owner = malloc(sizeof(*owner));
+    if (owner == NULL) {
+        JS_ThrowOutOfMemory(context);
+        return NULL;
+    }
+    owner->runtime = runtime;
+    owner->index = index;
+
+    data = JS_NewObjectClass(context, (int)qjs_host_owner_class_id);
+    if (JS_IsException(data)) {
+        free(owner);
+        return NULL;
+    }
+    JS_SetOpaque(data, owner);
+
+    function = JS_NewCFunctionData(context, qjs_host_trampoline, length,
+                                   0, 1, &data);
+    /* From here on the owner is reachable only through JS, so every failure
+     * path below releases the slot through the finalizer rather than by hand. */
     JS_FreeValue(context, data);
     if (JS_IsException(function)) {
         return NULL;

@@ -475,6 +475,16 @@ mod implementation {
         unsafe { ffi::qjs_throw_error(context, message.as_ptr()) };
     }
 
+    /// Fired by the garbage collector once a host function is unreachable.
+    ///
+    /// Runs during collection, so it must not touch JavaScript — it only drops
+    /// a Rust closure, which by the crate's contract holds no [`Value`].
+    unsafe extern "C" fn host_release(opaque: *mut c_void, index: u32) {
+        let table = unsafe { &*opaque.cast::<HostTable>() };
+        // A closure's `Drop` panicking during GC would unwind into C.
+        let _ = catch_unwind(AssertUnwindSafe(|| table.release(index)));
+    }
+
     unsafe extern "C" fn host_dispatch(
         opaque: *mut c_void,
         index: u32,
@@ -613,9 +623,17 @@ mod implementation {
     /// aliasing the `FnMut`. Today's boundary carries primitives only, so a
     /// callback cannot call back into the realm at all and that path is
     /// unreachable; the guard is here for a boundary that can.
+    ///
+    /// Slots are released by the garbage collector, not by the realm: each
+    /// host function's JS object owns a companion object whose finalizer calls
+    /// [`release`](HostTable::release). A released index goes on `free_slots`
+    /// so a realm that registers and discards functions for a long time — an
+    /// event handler per element per update, say — reuses storage instead of
+    /// growing.
     struct HostTable {
         context: Cell<*mut ffi::JSContext>,
         handlers: RefCell<Vec<Option<HostHandler>>>,
+        free_slots: RefCell<Vec<u32>>,
     }
 
     impl HostTable {
@@ -623,10 +641,15 @@ mod implementation {
             Self {
                 context: Cell::new(ptr::null_mut()),
                 handlers: RefCell::new(Vec::new()),
+                free_slots: RefCell::new(Vec::new()),
             }
         }
 
         fn insert(&self, handler: HostHandler) -> Result<u32, Error> {
+            if let Some(index) = self.free_slots.borrow_mut().pop() {
+                self.handlers.borrow_mut()[index as usize] = Some(handler);
+                return Ok(index);
+            }
             let mut handlers = self.handlers.borrow_mut();
             let index = u32::try_from(handlers.len()).map_err(|_| {
                 Error::bridge(
@@ -639,10 +662,29 @@ mod implementation {
             Ok(index)
         }
 
-        fn remove(&self, index: u32) {
-            if let Some(slot) = self.handlers.borrow_mut().get_mut(index as usize) {
-                *slot = None;
-            }
+        /// Drops the handler at `index` and returns its slot to the free list.
+        ///
+        /// Idempotent: a slot that is already empty is left alone and *not*
+        /// pushed to the free list again, because a construction failure can
+        /// race the finalizer that releases the same index, and a duplicated
+        /// free slot would hand two live functions the same handler.
+        fn release(&self, index: u32) {
+            let Ok(mut handlers) = self.handlers.try_borrow_mut() else {
+                // A collection landed while the table was borrowed. The slot
+                // stays live; it is released when the realm drops.
+                return;
+            };
+            let Some(slot) = handlers.get_mut(index as usize) else {
+                return;
+            };
+            let Some(handler) = slot.take() else {
+                return;
+            };
+            // Drop the closure with no borrow held, so its own `Drop` is free
+            // to touch the table.
+            drop(handlers);
+            drop(handler);
+            self.free_slots.borrow_mut().push(index);
         }
     }
 
@@ -661,12 +703,19 @@ mod implementation {
                     None,
                     ptr::null_mut(),
                 );
-                ffi::qjs_runtime_set_host_dispatch(self.runtime.as_ptr(), None, ptr::null_mut());
                 self.interrupt.shared.active.store(0, Ordering::Release);
+                // No host call can construct values from here on.
                 self.hosts.context.set(ptr::null_mut());
-                self.hosts.handlers.borrow_mut().clear();
+                // Freeing the context and runtime collects every remaining
+                // object, firing the finalizers that release host-function
+                // slots — so the dispatch stays registered and the table stays
+                // reachable across both calls. It is: `hosts` is an `Rc` field
+                // dropped only after this body returns.
                 ffi::qjs_context_free(self.context.as_ptr());
                 ffi::qjs_runtime_free(self.runtime.as_ptr());
+                // Anything the collector could not reach — a function still
+                // rooted at teardown — drops here.
+                self.hosts.handlers.borrow_mut().clear();
             }
         }
     }
@@ -738,6 +787,7 @@ mod implementation {
                 ffi::qjs_runtime_set_host_dispatch(
                     runtime.as_ptr(),
                     Some(host_dispatch),
+                    Some(host_release),
                     Rc::as_ptr(&hosts).cast_mut().cast(),
                 );
                 Ok(Self {
@@ -756,6 +806,15 @@ mod implementation {
             InterruptHandle {
                 shared: Arc::clone(&self.inner.interrupt.shared),
             }
+        }
+
+        /// Runs a full garbage collection.
+        ///
+        /// Embedders can call this under memory pressure; it is also what makes
+        /// the collection of unreachable host functions observable in tests,
+        /// since `QuickJS` otherwise collects on its own allocation schedule.
+        pub fn run_gc(&mut self) {
+            unsafe { ffi::qjs_runtime_run_gc(self.inner.runtime.as_ptr()) };
         }
 
         /// This realm's global object.
@@ -807,8 +866,17 @@ mod implementation {
         /// A panicking handler becomes a thrown `Error` rather than an unwind
         /// into C, and leaves its slot usable.
         ///
-        /// A handler that captures a [`Value`] from this realm keeps the realm
-        /// alive forever (the `Value` roots it); capture host state instead.
+        /// The handler's lifetime follows the returned function object, not
+        /// this realm: once JavaScript can no longer reach the function, the
+        /// closure is dropped and its slot reused. That matters for a
+        /// long-lived realm that registers handlers continuously — an event
+        /// handler per element per update — which would otherwise accumulate
+        /// every closure it ever made.
+        ///
+        /// Because the drop can happen inside the garbage collector, a handler
+        /// must not capture a [`Value`] from this realm: releasing one during
+        /// collection is unsound, and the `Value` would root the realm into a
+        /// cycle besides. Capture host state instead.
         ///
         /// `arity` is the reported `Function.prototype.length`; JavaScript may
         /// still call with any number of arguments.
@@ -824,7 +892,9 @@ mod implementation {
             match self.value_or_exception(raw, context, ErrorPhase::ConstructValue) {
                 Ok(value) => Ok(value),
                 Err(error) => {
-                    self.inner.hosts.remove(index);
+                    // The owner object may already have been finalized, which
+                    // released the slot; `release` is idempotent.
+                    self.inner.hosts.release(index);
                     Err(error)
                 }
             }

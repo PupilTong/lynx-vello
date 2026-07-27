@@ -240,3 +240,135 @@ fn a_name_that_cannot_be_allocated_fails_construction_cleanly() {
     let units = value.to_utf16().unwrap();
     assert_eq!(String::from_utf16(&units).unwrap(), "string");
 }
+
+/// A host function's Rust closure must die with the JS function object, not
+/// with the realm.
+///
+/// The closure lives in a realm-owned table, so nothing about dropping the
+/// returned `Value` frees it on its own. A companion object handed to the
+/// function as its data carries the slot index and, when the collector reaches
+/// it, releases the slot — which is the only thing tying the two lifetimes
+/// together. A long-lived realm that registers a handler per element per
+/// update (events, worklets) depends on this.
+mod release {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use quickjs_rust_bridge::{EvalOptions, EvalSource, HostFunctionError, HostValue, Realm};
+
+    /// Counts its own drops, so a retained closure is observable.
+    struct Tracked(Rc<Cell<u32>>);
+
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    fn tracking(
+        drops: &Rc<Cell<u32>>,
+    ) -> impl FnMut(&[HostValue]) -> Result<HostValue, HostFunctionError> + use<> {
+        let tracked = Tracked(Rc::clone(drops));
+        move |_| {
+            let _ = &tracked;
+            Ok(HostValue::Undefined)
+        }
+    }
+
+    /// QuickJS is refcounted, and its GC only breaks cycles, so a function
+    /// nothing references is finalized the moment the last reference goes —
+    /// no collection needed.
+    #[test]
+    fn dropping_an_uninstalled_function_releases_its_closure() {
+        let drops = Rc::new(Cell::new(0));
+        let mut realm = Realm::new().unwrap();
+
+        let function = realm.function("gone", 0, tracking(&drops)).unwrap();
+        assert_eq!(drops.get(), 0, "still referenced");
+        drop(function);
+        assert_eq!(drops.get(), 1, "the last reference is gone");
+
+        realm.run_gc();
+        assert_eq!(drops.get(), 1, "and collection does not double-release");
+    }
+
+    #[test]
+    fn replacing_an_installed_global_releases_the_old_closure() {
+        let drops = Rc::new(Cell::new(0));
+        let mut realm = Realm::new().unwrap();
+
+        realm
+            .define_global_function("handler", 0, tracking(&drops))
+            .unwrap();
+        realm
+            .evaluate(
+                EvalSource::new("globalThis.handler = 1;"),
+                EvalOptions::default(),
+            )
+            .unwrap();
+        // Refcounting alone covers this; the collection is belt and braces
+        // for a handler that ended up in a cycle.
+        realm.run_gc();
+        assert_eq!(drops.get(), 1, "the replaced handler must release");
+    }
+
+    #[test]
+    fn a_reachable_function_is_not_released() {
+        let drops = Rc::new(Cell::new(0));
+        let mut realm = Realm::new().unwrap();
+
+        realm
+            .define_global_function("kept", 0, tracking(&drops))
+            .unwrap();
+        realm.run_gc();
+        assert_eq!(drops.get(), 0, "a live global must survive collection");
+
+        // And it still works.
+        realm
+            .evaluate(EvalSource::new("kept()"), EvalOptions::default())
+            .expect("a surviving function stays callable");
+    }
+
+    /// Released slots are reused, so churning handlers does not grow the table
+    /// without bound.
+    #[test]
+    fn released_slots_are_reused_rather_than_accumulating() {
+        let drops = Rc::new(Cell::new(0));
+        let mut realm = Realm::new().unwrap();
+
+        // A realm that registers and discards far more handlers than it ever
+        // holds at once.
+        for _ in 0..1000 {
+            let function = realm.function("churn", 0, tracking(&drops)).unwrap();
+            drop(function);
+            realm.run_gc();
+        }
+        assert_eq!(drops.get(), 1000, "every discarded closure must release");
+
+        // Reuse must not corrupt dispatch: a function taking a recycled slot
+        // still calls its own closure.
+        realm
+            .define_global_function("final", 1, |arguments| {
+                Ok(arguments.first().cloned().unwrap_or(HostValue::Null))
+            })
+            .unwrap();
+        let value = realm
+            .evaluate(EvalSource::new("final(7)"), EvalOptions::default())
+            .unwrap();
+        assert_eq!(value.as_number(), Some(7.0));
+    }
+
+    /// Realm teardown still releases whatever the collector never reached.
+    #[test]
+    fn realm_teardown_releases_still_rooted_closures() {
+        let drops = Rc::new(Cell::new(0));
+        let mut realm = Realm::new().unwrap();
+        realm
+            .define_global_function("rooted", 0, tracking(&drops))
+            .unwrap();
+        assert_eq!(drops.get(), 0);
+
+        drop(realm);
+        assert_eq!(drops.get(), 1, "teardown must release the remainder");
+    }
+}
