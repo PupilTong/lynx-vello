@@ -1,7 +1,7 @@
 //! Rounded-rect geometry: border-radius resolution and containment.
 
 use euclid::default::{Point2D, Rect, Size2D};
-use neutron_star::geometry::Edges;
+use hughie::geometry::Edges;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::CSSPixelLength;
 use stylo::values::computed::border::BorderCornerRadius;

@@ -2,18 +2,18 @@
 //! tree/style arenas and mutable layout/text state.
 
 #[cfg(feature = "layout-test-utils")]
-use neutron_star::compute::compute_leaf_layout_with_measurement_for_testing;
-use neutron_star::compute::{
+use hughie::compute::compute_leaf_layout_with_measurement_for_testing;
+use hughie::compute::{
     compute_absolute_layout, compute_boundary_relayout, compute_cached_layout,
     compute_flexbox_layout, compute_grid_layout, compute_leaf_layout, compute_linear_layout,
     compute_relative_layout, compute_root_layout, compute_skipped_contents_layout, hide_subtree,
     round_layout_subtree_with as round_with,
 };
-use neutron_star::geometry::{Point, Size};
-use neutron_star::invalidate::is_relayout_boundary;
-use neutron_star::style::{CoreStyle, PositionProperty, TextRun};
-use neutron_star::text::TextMeasurer;
-use neutron_star::tree::{
+use hughie::geometry::{Point, Size};
+use hughie::invalidate::is_relayout_boundary;
+use hughie::style::{CoreStyle, PositionProperty, TextRun};
+use hughie::text::TextMeasurer;
+use hughie::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutSlot, LayoutTree,
 };
 use rustc_hash::FxHashSet;

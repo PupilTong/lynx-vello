@@ -1,4 +1,4 @@
-//! Box layout over the document tree — the concrete [`neutron_star`] host.
+//! Box layout over the document tree — the concrete [`hughie`] host.
 
 mod host;
 mod style;
@@ -6,14 +6,14 @@ mod style;
 use std::sync::LazyLock;
 
 #[cfg(feature = "layout-test-utils")]
-use neutron_star::compute::LeafMetrics;
-use neutron_star::compute::NaturalSize;
-pub use neutron_star::geometry::{Edges, Point, Size};
-use neutron_star::invalidate::is_relayout_boundary;
-use neutron_star::style::CoreStyle;
-use neutron_star::text::TextContext;
-pub use neutron_star::text::TextLayout;
-pub use neutron_star::tree::Layout;
+use hughie::compute::LeafMetrics;
+use hughie::compute::NaturalSize;
+pub use hughie::geometry::{Edges, Point, Size};
+use hughie::invalidate::is_relayout_boundary;
+use hughie::style::CoreStyle;
+use hughie::text::TextContext;
+pub use hughie::text::TextLayout;
+pub use hughie::tree::Layout;
 use stylo::properties::ComputedValues;
 use stylo::servo_arc::Arc;
 
@@ -237,8 +237,8 @@ impl<T> Document<T> {
 mod tests {
     use std::mem::size_of;
 
-    use neutron_star::text::TextLayoutStore;
-    use neutron_star::tree::{LayoutInput, LayoutOutput, LayoutSlot};
+    use hughie::text::TextLayoutStore;
+    use hughie::tree::{LayoutInput, LayoutOutput, LayoutSlot};
 
     use super::*;
     use crate::{DOCUMENT_NODE_ID, StylesheetOrigin};

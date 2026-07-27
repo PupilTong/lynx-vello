@@ -1,8 +1,8 @@
 //! Post-flush computed-style views lending Stylo [`ComputedValues`] directly
-//! to neutron-star without cloning its `Arc` or re-entering Stylo's runtime
+//! to hughie without cloning its `Arc` or re-entering Stylo's runtime
 //! borrow checker.
 
-use neutron_star::style::{
+use hughie::style::{
     Contain, CoreStyle, Display, PositionProperty, TextContainerStyle, TextRunStyle,
 };
 use stylo::properties::ComputedValues;
@@ -147,7 +147,7 @@ pub(crate) fn resolve_position<T>(node: &Node<T>, style: &ComputedValues) -> Pos
     }
 }
 
-/// The element style view neutron-star reads: a node handle for the
+/// The element style view hughie reads: a node handle for the
 /// parent-dependent position lowering plus its post-flush computed values.
 pub struct StyleView<'dom, T> {
     node: &'dom Node<T>,

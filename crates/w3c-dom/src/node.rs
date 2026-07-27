@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicPtr, AtomicU8, AtomicUsiz
 
 use dom::ElementState;
 #[cfg(feature = "layout-test-utils")]
-use neutron_star::compute::LeafMetrics;
-use neutron_star::compute::NaturalSize;
+use hughie::compute::LeafMetrics;
+use hughie::compute::NaturalSize;
 use selectors::matching::ElementSelectorFlags;
 use slab::Slab;
 use smallvec::SmallVec;

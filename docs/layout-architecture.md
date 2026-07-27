@@ -1,6 +1,6 @@
-# Layout architecture — `neutron-star`
+# Layout architecture — `hughie`
 
-`crates/neutron-star` is lynx-vello's box-layout engine: the from-scratch
+`crates/hughie` is lynx-vello's box-layout engine: the from-scratch
 successor to the Lynx C++ engine's `starlight`
 (`lynx/core/renderer/starlight/`). It implements CSS **flexbox**, CSS **Grid**,
 and Lynx's Starlight **Relative** and **Linear** layouts as first-class peer
@@ -15,7 +15,7 @@ impossible by construction, not by convention. Parley is unconditional:
 decoded natural size and concrete Parley text are the only leaf-content paths.
 
 Status: **Flexbox, Grid, Relative, Linear, and text measurement implemented** —
-`neutron-star`'s protocol, generic machinery, cache, leaf and positioned
+`hughie`'s protocol, generic machinery, cache, leaf and positioned
 sizing, rounding, CSS Flexbox Level 1, numeric CSS Grid Level 2, Starlight
 Relative Layout Level 1, Starlight Linear algorithms, and the
 Parley text measurement core are implemented and conformance-tested against
@@ -82,7 +82,7 @@ Text behavior is inventoried in
 ```text
         lynx-vello host stack                           engine
 ┌──────────────────────────────────┐     ┌─────────────────────────────────┐
-│ w3c-dom                         │     │ neutron-star                    │
+│ w3c-dom                         │     │ hughie                    │
 │ immutable TreeArenas + styles    │     │ one LayoutTree protocol         │
 │ mutable DocumentLayoutState      │────▶│ flex / grid / relative / linear │
 │ boxed text context/artifacts     │     │ concrete Parley measurement     │
@@ -93,14 +93,14 @@ Text behavior is inventoried in
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| `neutron-star` | Implemented Flex, Grid, Relative, and Linear algorithms; one unified source-backed `CoreStyle` protocol speaking stylo computed values (including the `relative-*` and `linear-*` longhands); the text style/run protocol; closed natural-size and Parley leaf paths, box-generation rules (`display: none` hiding and `display: contents` box-tree flattening through `flattened_children`), hidden-subtree cleanup, positioned layout, rounding; shared private arithmetic; geometry and layout IO; cache semantics | Node/style/content storage, display dispatch, arbitrary host content/measurers, DOM/runtime types, an engine-side style value vocabulary (it re-exports stylo's), resolved device-unit policy (`rpx`, etc.), stacking/paint order |
-| `neutron-star::text` (unconditional) | Parley context/font registration, whitespace processing, shaping, line breaking, intrinsic and height-for-width measurement, baselines, and retained `TextLayout` artifact types | Text truncation and ellipsis, inline boxes, paint styling, runtime/attribute lowering, resource fetching, or host cache and per-node slot storage |
+| `hughie` | Implemented Flex, Grid, Relative, and Linear algorithms; one unified source-backed `CoreStyle` protocol speaking stylo computed values (including the `relative-*` and `linear-*` longhands); the text style/run protocol; closed natural-size and Parley leaf paths, box-generation rules (`display: none` hiding and `display: contents` box-tree flattening through `flattened_children`), hidden-subtree cleanup, positioned layout, rounding; shared private arithmetic; geometry and layout IO; cache semantics | Node/style/content storage, display dispatch, arbitrary host content/measurers, DOM/runtime types, an engine-side style value vocabulary (it re-exports stylo's), resolved device-unit policy (`rpx`, etc.), stacking/paint order |
+| `hughie::text` (unconditional) | Parley context/font registration, whitespace processing, shaping, line breaking, intrinsic and height-for-width measurement, baselines, and retained `TextLayout` artifact types | Text truncation and ellipsis, inline boxes, paint styling, runtime/attribute lowering, resource fetching, or host cache and per-node slot storage |
 | `w3c-dom::layout` (implemented) | `LayoutTree` on immutable `TreeArenas<T>`, plain `NodeId`s, and separately borrowed mutable `DocumentLayoutState` (one protocol; no view/session/store wrapper layers); post-flush style views lending the `ComputedValues` pointer published from Stylo's still-owning primary `Arc` under the exclusive `Document` phase boundary (no `ElementData` borrow check, `Arc` bump, copy, or translation; public computed-style queries remain guarded); logical `relative-*-inline-*` lowering; the W3C fixed/absolute containing-block rule expressed through `position()`; anonymous box geometry plus inherited parent font/text values for text nodes; display dispatch (flex/grid/linear/relative, `display: none` hiding, `display: contents` box-less handling — never a containing block, never contained, never skipped, never hoisted, and zeroed by the positioned pass — `content-visibility: hidden` skipped-contents routing before the cache, natural-size leaf, concrete Parley text); lazily boxed shared `TextContext` and per-text-node `TextLayoutStore` in layout state; a NodeId-aligned `LayoutSlot` containing cache, static position, unrounded layout, and rounded layout; `Document` query methods for stored results; automatic dirty-path invalidation when content changes; one fused preorder positioned-and-rounding traversal whose pre-node hook keeps hoisted placement cache-proof, prunes positioning at skipped-contents subtrees so a hoisted descendant cannot be revived, and applies the engine's effective-`order`-0 paint rule for out-of-flow children; device-pixel rounding without a whole-`Layout` clone; the effective-containment fold on the style view (feeding both the relayout-boundary predicate and the content-visibility-aware fixed/absolute containing-block predicate); **automatic style-damage consumption** (every harvest boundary-stops `Document::invalidate_layout` per relayout-damaged node before returning/streaming damage; it also evicts direct text children's measurement caches and retained artifacts because those children read inherited style from the damaged element but have no Stylo damage record of their own; `Document::layout` re-runs each parked `contain: strict`/skipped boundary in place before the root pass, merging the re-run's scrollable `content_size` back into the boundary's stored layout); and the `Document::invalidate_layout` API embedders still call for mutations the style system cannot see | A second layout algorithm, generic content-measurement callbacks, engine-side style copies, layout/text runtime borrow wrappers, Lynx runtime-element vocabulary or device-unit policy (`rpx`), Lynx computed defaults (cascade/UA-sheet policy), text shaping algorithms |
 | Future runtime integration | Lynx view metrics and `rpx` policy; Lynx-specific text attributes, element-backed raw text and truncation; `staggered` integration; sticky lowering | A second Flex/Grid/Relative/Linear/text-measurement implementation, arbitrary host content, engine-side copies of styles, the style-damage→layout wiring (now engine-internal in `w3c-dom`) |
 
 The engine/host seam keeps the engine storage-free even though its
 vocabulary is stylo's: the Lynx-specific values and algorithms for Relative
-and Linear live in `neutron-star`, but the crate owns no host storage — its
+and Linear live in `hughie`, but the crate owns no host storage — its
 style accessors return the same computed values the stylo cascade produces,
 so a stylo-backed host serves style views with no translation layer. Both
 are first-class peers rather than translations into Flex or Grid. The
@@ -113,8 +113,8 @@ to mutable layout state through a tree backpointer.
 
 ## The protocol in one page
 
-One tree trait (`neutron_star::tree::LayoutTree`) plus style-view traits
-(`neutron_star::style`). The host gives each entry point three values:
+One tree trait (`hughie::tree::LayoutTree`) plus style-view traits
+(`hughie::style`). The host gives each entry point three values:
 `&tree`, `&mut state`, and a `Copy + Debug` node ID. `LayoutTree` uses GATs
 for a borrowed `Style<'tree>` and `ChildIter<'tree>`, so topology and
 style data stay tied to the immutable tree borrow while recursion mutates only
@@ -139,7 +139,7 @@ through `&mut State` into host-owned `LayoutSlot`s. The seam deliberately
 stops there: there is no `LayoutTreeView`, `LayoutSession`, or `LayoutStore`
 abstraction.
 
-Entry points (`neutron_star::compute`) are free generic functions — there is
+Entry points (`hughie::compute`) are free generic functions — there is
 no engine object, so unused entry points never monomorphize into the host.
 Implemented machinery: `compute_root_layout`, `compute_leaf_layout`
 (closed `NaturalSize` replaced-content path), explicit hidden-subtree cleanup via
@@ -194,7 +194,7 @@ styles through `&tree`, then calls
 first handles a non-generated box (`display: none`, i.e. stylo
 `Display::is_none`) by calling `hide_subtree` and
 returning `LayoutOutput::HIDDEN`; this explicit cleanup precedes and bypasses
-the cache. For a generated box, the host routes to a neutron-star container
+the cache. For a generated box, the host routes to a hughie container
 algorithm, the natural-size leaf path, the concrete Parley text path, or a
 future additional container algorithm, wrapping that
 routing in `compute_cached_layout`. This decision buys three properties at
@@ -204,7 +204,7 @@ once:
    non-CSS `display: relative` (id-anchored sibling constraint solving) and
    `display: linear` (Android `LinearLayout` semantics:
    `linear-direction`/`linear-weight`/…) are implemented peers in
-   `neutron-star`, against the same tree/state protocol. The `<list>`
+   `hughie`, against the same tree/state protocol. The `<list>`
    component's staggered-grid remains a future host peer. The engine owns
    **no display enum of its own** — `CoreStyle::display` returns stylo's
    `Display`, the engine consumes it only through `is_none` and
@@ -274,7 +274,7 @@ box trait (`CoreStyle`), `TextContainerStyle`, and the standalone
 `Display`,
 `LengthPercentage`, `Margin`, `AlignFlags`-based alignment wrappers, grid
 track lists, and keyword enums the stylo cascade produces, re-exported from
-`neutron_star::style`. There are no engine-owned style value enums and no
+`hughie::style`. There are no engine-owned style value enums and no
 materialized engine-side style structs: a stylo-backed host lends one
 `ComputedValues` through `CoreStyle::computed_values()`, whose default methods
 perform direct field reads; a cascade-less host (tests, benches) can override
@@ -788,13 +788,13 @@ The automatic minimum size (§4.5, `min-size: auto`) resolves inside steps
 2/4, honoring stylo's `Overflow::is_scrollable`.
 
 **Linear** — Starlight linear layout, as a first-class single-axis pipeline in
-`crates/neutron-star`:
+`crates/hughie`:
 
 1. **Setup** — resolve the container box and axes, classify hidden,
    out-of-flow, and in-flow children, and stably apply non-zero `order`.
 2. **Item sizing** — resolve each item's box model, preferred/min/max sizes,
    aspect ratio, intrinsic constraints, effective cross gravity, and auto
-   margins through neutron-star's shared private box arithmetic.
+   margins through hughie's shared private box arithmetic.
 3. **Weight distribution** — when the incoming main-axis constraint has a
    decided size, distribute remaining space among positive `linear-weight`
    items using the explicit positive `linear-weight-sum` denominator when
@@ -829,7 +829,7 @@ The automatic minimum size (§4.5, `min-size: auto`) resolves inside steps
 8. **Measure-only path** — return sizes and baselines without durable child
    writes, retaining the same `LayoutInput`/cache semantics as flexbox.
 
-Like Flex and Grid, this is a generic neutron-star algorithm over
+Like Flex and Grid, this is a generic hughie algorithm over
 `LayoutTree`, a separately borrowed mutable state, and NodeIds, with Linear
 style-view bounds speaking stylo computed values; the concrete `w3c-dom` host
 dispatches to it.
@@ -918,7 +918,7 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
   `tests/linear.rs` covers orientation and gravity, weight/sum/freeze, order
   and visibility, intrinsic/minmax sizing, measurement, baselines, auto
   margins, absolute/hoisted behavior, and Flex/Grid composition.
-  CI enforces at least 95% line coverage for `neutron-star`
+  CI enforces at least 95% line coverage for `hughie`
   production source while excluding test and benchmark source from the
   metric.
 - **Behavior/performance hardening:** each algorithm has an engine-native
@@ -934,7 +934,7 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
   static-position export and the common `compute_absolute_layout` completion
   pass. CSS Fixed root lowering, Sticky/list/component metadata, and anonymous
   text-item generation remain host/integration responsibilities and are not
-  neutron-star behavior contracts.
+  hughie behavior contracts.
 - **Remaining Lynx integration:** runtime-level view/device policy,
   component-specific staggered layout, sticky lowering, and mixed-runtime
   parity remain future work; the integration layer's final module or crate
@@ -963,7 +963,7 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
   unconditional Parley text measurement core, and CSS-containment machinery
   (size/layout containment, `content-visibility` skipped contents, the
   relayout-boundary predicate, and `invalidate_for_relayout`) are complete in
-  `neutron-star`; `w3c-dom` produces per-node `StyleDamage`/`FlushSummary` and
+  `hughie`; `w3c-dom` produces per-node `StyleDamage`/`FlushSummary` and
   the `effective_containment` fold as its style-to-layout seam (kept internal —
   no runtime adapter forwards or re-exports it), and its `layout` module
   now **closes** the damage→layout loop: every style harvest consumes
@@ -992,7 +992,7 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
   intrinsic keywords.
 - Whether Lynx's legacy `grid-*-span` properties need adapter-side lowering
   beyond `span N` placement (tracking doc says they're superseded aliases).
-- Crate name availability on crates.io (`neutron-star`) — moot while the
+- Crate name availability on crates.io (`hughie`) — moot while the
   crate depends on the vendored stylo fork (not publishable as-is); recheck
   only if a publishable stylo dependency ever materializes. The protocol
   doesn't depend on the name.

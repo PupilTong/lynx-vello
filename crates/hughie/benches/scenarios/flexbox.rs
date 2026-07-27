@@ -2,7 +2,7 @@
 
 #![allow(clippy::cast_precision_loss)]
 
-use neutron_star::geometry::Size;
+use hughie::geometry::Size;
 
 use crate::support::{LayoutFixture, LeafContent};
 

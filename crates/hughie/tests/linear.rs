@@ -1,8 +1,8 @@
 #[path = "support/mod.rs"]
 mod support;
 
-use neutron_star::compute::{LeafMeasureInput, LeafMetrics};
-use neutron_star::prelude::*;
+use hughie::compute::{LeafMeasureInput, LeafMetrics};
+use hughie::prelude::*;
 use stylo::computed_values::{box_sizing, direction, linear_direction, visibility};
 use stylo::values::computed::{
     Contain, ContentDistribution, Display, MaxSize, PositionProperty, Size as StyleSize,

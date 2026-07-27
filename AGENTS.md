@@ -17,7 +17,7 @@ cross-platform engine built on:
 - **[parley](https://github.com/linebender/parley)** — text layout & shaping
 
 The from-scratch layout engine (successor to the C++ engine's `starlight`) is
-`crates/neutron-star` — its host protocol, shared layout machinery, and CSS
+`crates/hughie` — its host protocol, shared layout machinery, and CSS
 flexbox, Grid, and Starlight `display: relative` and `display: linear`
 algorithms are implemented as first-class peers. Its concrete document/stylo
 host lives in `crates/w3c-dom`'s `layout` module
@@ -178,7 +178,7 @@ useful signal for currently-compatible versions of those libraries.
   also owns the
   `effective_containment` fold (`contain` + `content-visibility` → effect
   bits).
-  Its `layout` module is the concrete `neutron-star` host:
+  Its `layout` module is the concrete `hughie` host:
   `Document::layout` flushes styles then lays out with
   the single `LayoutTree` trait implemented on `TreeArenas<T>`. Plain
   `NodeId`s identify nodes, and every engine entry receives `&TreeArenas`
@@ -260,7 +260,7 @@ useful signal for currently-compatible versions of those libraries.
   `lynx`) un-gated `background-clip: text` from gecko the same way and
   seeded the `outline-*` rows (`outline-offset` deliberately omitted —
   Lynx outlines are flush rings).
-- `crates/neutron-star` — the Flexbox, Grid, and
+- `crates/hughie` — the Flexbox, Grid, and
   Starlight Relative and Linear engine: trait-based host⇄engine integration
   with static dispatch only (no `dyn`), one `LayoutTree` protocol with a
   `Copy + Debug` `NodeId`, immutable topology/styles for the flush, and a
@@ -302,7 +302,7 @@ useful signal for currently-compatible versions of those libraries.
   component-specific staggered layout, and Lynx-specific text
   attribute/raw-text/truncation policy. Generic W3C text style, document
   context, and artifact storage already live in `w3c-dom`.
-- `crates/pulsar` — the vello-backed paint engine (`neutron-star` lays out,
+- `crates/pulsar` — the vello-backed paint engine (`hughie` lays out,
   `pulsar` emits light). `Painter::paint(&Document, &PaintOrder, &ImageStore,
   &PaintOptions) -> &vello::Scene` walks the flat back-to-front item list:
   item clip chains diff against vello clip layers (restarting inside every

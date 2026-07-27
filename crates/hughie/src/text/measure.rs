@@ -1,4 +1,4 @@
-//! Parley-backed implementation of neutron-star's fixed text-content path.
+//! Parley-backed implementation of hughie's fixed text-content path.
 
 use core::fmt;
 use std::borrow::Cow;

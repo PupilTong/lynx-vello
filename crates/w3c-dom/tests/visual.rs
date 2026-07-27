@@ -9,7 +9,7 @@ use common::Doc;
 use w3c_dom::NodeId;
 use w3c_dom::visual::{PaintItemKind, PaintOrder, Point2D};
 
-const AHEM: &[u8] = include_bytes!("../../neutron-star/tests/fixtures/Ahem.ttf");
+const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
 
 struct Harness {
     doc: Doc,

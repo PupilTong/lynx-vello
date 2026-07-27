@@ -52,7 +52,7 @@ consequential choice about whether to follow the spec or the quirk.
   slot during style application, so a logical and physical declaration that
   target the same side are last-applied-wins. The stylo fork currently models
   the four logical variants as independent longhands, which discards that
-  cross-property source order before `neutron-star` lowers them. The current
+  cross-property source order before `hughie` lowers them. The current
   bridge consequently uses physical-wins-unless-sentinel. Direction comes
   from the item itself and the LTR/RTL mapping is otherwise exact. Exact
   bucket-2 parity requires changing the fork declarations into a true
@@ -105,7 +105,7 @@ consequential choice about whether to follow the spec or the quirk.
   `Layout` expose no base-direction override. Internally, text analysis always
   invokes bidi resolution with an automatic/first-strong base level, even
   though the lower-level `parlance` crate defines a `BaseDirection` value.
-  Consequently, the `neutron-star` text adapter can resolve physical
+  Consequently, the `hughie` text adapter can resolve physical
   `text-align: start`/`end` from `CoreStyle::direction()`, but cannot yet force
   UAX #9 paragraph ordering for neutral or opposite-strong text inside an
   explicitly LTR/RTL container. Injecting bidi controls would corrupt source

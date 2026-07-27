@@ -34,7 +34,7 @@ jobs:
           -p lynx-template-decoder
           -p quickjs-rust-bridge
           -p w3c-dom
-          -p neutron-star
+          -p hughie
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
@@ -54,15 +54,15 @@ jobs:
           cargo llvm-cov --workspace --lcov --output-path lcov.info \
             --ignore-filename-regex '(^|/)vendor(/|$)'
 
-      # Keep neutron-star's production source above the agreed line-coverage
+      # Keep hughie's production source above the agreed line-coverage
       # floor. Integration tests are executed, but test/benchmark source is
       # excluded from the metric. Clear the preceding workspace run's profiles
       # first so dependency and vendor coverage cannot leak into this package-
       # scoped report.
-      - name: Neutron-star 95% coverage gate
+      - name: Hughie 95% coverage gate
         run: |
           cargo llvm-cov clean --workspace
-          cargo llvm-cov -p neutron-star --locked --summary-only \
+          cargo llvm-cov -p hughie --locked --summary-only \
             --ignore-filename-regex '(^|/)(tests|benches|vendor)(/|$)' \
             --fail-under-lines 95
 

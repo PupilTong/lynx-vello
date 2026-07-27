@@ -1,4 +1,4 @@
-# neutron-star
+# hughie
 
 A trait-first, statically-dispatched CSS **flexbox**, CSS **Grid**, and
 Starlight **Linear**/**relative-layout** engine for host-owned trees. Built as
@@ -39,7 +39,7 @@ resolves it itself. There are deliberately no `LayoutTreeView`,
 Recursion flows *through the host*: the engine calls
 `tree.compute_layout(state, child, input)`, and the host's impl dispatches each
 child to the right algorithm. Flex, Grid, and Lynx's non-CSS Linear and
-Relative modes are all first-class neutron-star entry points; a host can
+Relative modes are all first-class hughie entry points; a host can
 still add other container algorithms through the same dispatch seam.
 Leaf content is closed rather than extensible: replaced content enters as a
 `NaturalSize`, and the concrete Parley path accepts host-owned
@@ -84,12 +84,12 @@ and its host behavior configuration-dependent.
 
 The style-view side can lend an immutable epoch's computed values directly.
 The `NodeId + immutable tree + separate mutable state` recursion is informed
-by [Taffy]'s `LayoutPartialTree` design, while keeping neutron-star's single
+by [Taffy]'s `LayoutPartialTree` design, while keeping hughie's single
 minimal trait and host-owned display dispatch. The implemented Flex and Grid
 algorithms follow the CSS specs directly (Flexbox Level 1, Grid Level 2,
 Sizing Level 3), Linear behavior follows Starlight, Relative follows its
 standalone Starlight implementation contract, and the performance posture is
-informed by `starlight` and [Yoga]. neutron-star shares no code with any of
+informed by `starlight` and [Yoga]. hughie shares no code with any of
 them.
 
 [Taffy]: https://github.com/DioxusLabs/taffy

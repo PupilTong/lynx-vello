@@ -1,6 +1,6 @@
 # Layout conformance evidence
 
-This document records what neutron-star's executable tests establish. It is a
+This document records what hughie's executable tests establish. It is a
 coverage map, not a claim that the crate implements every feature in the
 referenced specifications.
 
@@ -10,7 +10,7 @@ referenced specifications.
   Recommendation Draft dated 14 October 2025.
 - Grid follows the W3C CSS Grid Layout Module Level 2, Candidate
   Recommendation Draft dated 26 March 2025, limited to the numeric track and
-  placement surface implemented by neutron-star.
+  placement surface implemented by hughie.
 - Linear and Relative follow the non-deprecated Starlight algorithms in
   `lynx-family/lynx` commit
   `e286cd11dda7cc8111d64c2a58d8625bce2bed73`, audited on 14 July 2026.

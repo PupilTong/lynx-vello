@@ -180,7 +180,7 @@ where
     compute_leaf_layout_with_measurement(input, style, natural_aspect_ratio, true, measure)
 }
 
-/// Content-box constraints consumed by neutron-star's closed leaf engines.
+/// Content-box constraints consumed by hughie's closed leaf engines.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct LeafMeasureInput {
@@ -272,7 +272,7 @@ fn ratio_from_dimensions(width: f32, height: f32) -> Option<f32> {
     sanitize_ratio((height > 0.0).then_some(width / height))
 }
 
-/// Metrics produced by neutron-star's concrete content engines.
+/// Metrics produced by hughie's concrete content engines.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct LeafMetrics {

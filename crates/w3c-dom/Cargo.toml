@@ -8,21 +8,21 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-# Keeps synthetic content metrics available to neutron-star's production-host
+# Keeps synthetic content metrics available to hughie's production-host
 # tests and benchmarks; the callback seam is absent from normal builds.
-layout-test-utils = ["neutron-star/layout-test-utils"]
+layout-test-utils = ["hughie/layout-test-utils"]
 
 [dependencies]
 rustc-hash = { workspace = true }
 slab = { workspace = true }
 smallvec = { workspace = true }
 
-# Layout integration: the `layout` module implements neutron-star's statically
+# Layout integration: the `layout` module implements hughie's statically
 # split `LayoutTree` protocol over immutable tree/style arenas and a separate
 # mutable layout/text arena. Replaced leaves consume node-owned
-# `NaturalSize`; text nodes always use neutron-star's concrete Parley path;
+# `NaturalSize`; text nodes always use hughie's concrete Parley path;
 # there is no embedder measurement hook.
-neutron-star = { workspace = true }
+hughie = { workspace = true }
 
 # stylo integration: element `Node`s own stylo's interior-mutable per-element state
 # (ElementData/selector flags) and the `traits` module implements stylo's

@@ -9,7 +9,7 @@ use pulsar::gpu::{GpuError, Headless};
 use pulsar::vello::peniko::Color;
 use pulsar::{ImageStore, Painter};
 
-const AHEM: &[u8] = include_bytes!("../../neutron-star/tests/fixtures/Ahem.ttf");
+const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
 
 fn headless_or_skip() -> Option<Headless> {
     match Headless::new() {

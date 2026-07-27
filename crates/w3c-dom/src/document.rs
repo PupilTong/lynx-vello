@@ -5,9 +5,9 @@ use std::fmt;
 use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
 
-use neutron_star::geometry::Size;
-use neutron_star::text::{TextContext, TextLayoutStore};
-use neutron_star::tree::{LayoutInput, LayoutSlot};
+use hughie::geometry::Size;
+use hughie::text::{TextContext, TextLayoutStore};
+use hughie::tree::{LayoutInput, LayoutSlot};
 use rustc_hash::FxHashSet;
 use slab::Slab;
 use stylo::LocalName;

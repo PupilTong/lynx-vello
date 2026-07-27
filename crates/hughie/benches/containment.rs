@@ -4,9 +4,9 @@
 #[path = "../tests/support/mod.rs"]
 mod support;
 
-use neutron_star::compute::{compute_boundary_relayout, compute_root_layout};
-use neutron_star::invalidate::invalidate_for_relayout;
-use neutron_star::prelude::*;
+use hughie::compute::{compute_boundary_relayout, compute_root_layout};
+use hughie::invalidate::invalidate_for_relayout;
+use hughie::prelude::*;
 use stylo::computed_values::flex_direction;
 use stylo::values::computed::Contain;
 use support::{TestId, TestStyle, TestTree, basis_px, contain_intrinsic_px, size_px};

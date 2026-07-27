@@ -10,7 +10,7 @@
 //! they are unreachable from author CSS today and therefore untestable
 //! through the cascade.
 
-use neutron_star::style::{Contain, PositionProperty};
+use hughie::style::{Contain, PositionProperty};
 use stylo::properties::ComputedValues;
 use stylo::values::computed::Image;
 use stylo::values::computed::motion::OffsetPath;

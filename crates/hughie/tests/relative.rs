@@ -2,7 +2,7 @@
 
 mod support;
 
-use neutron_star::prelude::*;
+use hughie::prelude::*;
 use stylo::computed_values::{
     box_sizing, direction, relative_center, relative_layout_once, visibility,
 };
@@ -11,24 +11,24 @@ use stylo::values::computed::{Display, MaxSize, PositionProperty, Size as StyleS
 use support::*;
 
 fn width_bounded_by_available(
-    input: neutron_star::compute::LeafMeasureInput,
-) -> neutron_star::compute::LeafMetrics {
+    input: hughie::compute::LeafMeasureInput,
+) -> hughie::compute::LeafMetrics {
     let width = match input.available_space.width {
         AvailableSpace::Definite(width) => width.min(200.0),
         AvailableSpace::MinContent | AvailableSpace::MaxContent => 200.0,
     };
-    neutron_star::compute::LeafMetrics::new(Size::new(width, 10.0))
+    hughie::compute::LeafMetrics::new(Size::new(width, 10.0))
 }
 
 fn intrinsic_width_bounded_by_available(
-    input: neutron_star::compute::LeafMeasureInput,
-) -> neutron_star::compute::LeafMetrics {
+    input: hughie::compute::LeafMeasureInput,
+) -> hughie::compute::LeafMetrics {
     let width = match input.available_space.width {
         AvailableSpace::Definite(width) => width.min(200.0),
         AvailableSpace::MinContent => 20.0,
         AvailableSpace::MaxContent => 200.0,
     };
-    neutron_star::compute::LeafMetrics::new(Size::new(width, 10.0))
+    hughie::compute::LeafMetrics::new(Size::new(width, 10.0))
 }
 
 fn id(value: i32) -> RelativeReference {
@@ -1073,8 +1073,8 @@ fn double_anchor_proposal_applies_child_max_size_before_measurement() {
 }
 
 fn width_sensitive_intrinsic_max(
-    input: neutron_star::compute::LeafMeasureInput,
-) -> neutron_star::compute::LeafMetrics {
+    input: hughie::compute::LeafMeasureInput,
+) -> hughie::compute::LeafMetrics {
     let width = input.known_dimensions.width.unwrap_or_else(|| {
         if input.available_space.width == AvailableSpace::MinContent {
             20.0
@@ -1083,7 +1083,7 @@ fn width_sensitive_intrinsic_max(
         }
     });
     let height = if width <= 20.0 { 50.0 } else { 10.0 };
-    neutron_star::compute::LeafMetrics::new(Size::new(width, height))
+    hughie::compute::LeafMetrics::new(Size::new(width, height))
 }
 
 #[test]
