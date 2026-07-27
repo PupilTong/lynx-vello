@@ -1,6 +1,7 @@
 //! Scene-build benchmarks: `Document` → `PaintOrder` → `vello::Scene`,
 //! CPU-side only (no GPU dispatch), CodSpeed-compatible.
 
+use dom::{Document, StylesheetOrigin};
 use euclid::{Scale, Size2D};
 use pulsar::{ImageStore, Painter};
 use stylo::context::QuirksMode;
@@ -16,7 +17,6 @@ use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_traits::{CSSPixel, DevicePixel};
-use w3c_dom::{Document, StylesheetOrigin};
 
 fn main() {
     divan::main();

@@ -1,4 +1,4 @@
-//! Flex benchmarks through w3c-dom's production host.
+//! Flex benchmarks through dom's production host.
 
 #[path = "scenarios/flexbox.rs"]
 mod scenarios;

@@ -1,10 +1,10 @@
-//! CSS Grid workloads driven through w3c-dom's production layout host.
+//! CSS Grid workloads driven through dom's production layout host.
 
 #![allow(clippy::cast_precision_loss)]
 
 use divan::counter::ItemsCount;
+use dom::NodeId;
 use hughie::geometry::Size;
-use w3c_dom::NodeId;
 
 use crate::support::{LayoutFixture, LeafContent};
 
@@ -210,7 +210,7 @@ impl DirtyNestedFixture {
         Self { fixture, dirty }
     }
 
-    fn run(&mut self) -> w3c_dom::layout::Layout {
+    fn run(&mut self) -> dom::layout::Layout {
         self.fixture.invalidate(self.dirty);
         self.fixture.run()
     }

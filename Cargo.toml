@@ -23,9 +23,11 @@ lynx-template-decoder = { path = "crates/lynx-template-decoder" }
 # choose between decoded `NaturalSize` and the concrete text engine, never an
 # optional arbitrary-content measurement seam.
 hughie = { path = "crates/hughie" }
+flashbulb = { path = "crates/flashbulb" }
+lynx-element = { path = "crates/lynx-element" }
 pulsar = { path = "crates/pulsar" }
 quickjs-rust-bridge = { path = "crates/quickjs-rust-bridge" }
-w3c-dom = { path = "crates/w3c-dom" }
+dom = { path = "crates/dom" }
 
 # The Lynx-patched stylo fork (git submodule; see AGENTS.md dependency
 # policy). The `lynx` branch carries the Lynx patch series (viewport-relative
@@ -37,12 +39,13 @@ w3c-dom = { path = "crates/w3c-dom" }
 # properties and keyword values Lynx does not support (so, e.g., `float`,
 # `writing-mode` or `overflow: clip` stop parsing). `lynx` implies `servo`.
 #
-# The vendored servo package named `stylo_dom` is aliased `dom` — the same
-# rename `vendor/stylo/style`'s own Cargo.toml uses. Only `crates/w3c-dom`
-# (which re-exports its `ElementState`) depends on it directly.
+# The vendored servo package `stylo_dom` keeps its own name here. Upstream
+# `vendor/stylo/style`'s Cargo.toml aliases it to `dom`, but that name is
+# taken in this workspace by `crates/dom`, so we do not mirror the rename.
+# Only `crates/dom` (which re-exports its `ElementState`) depends on it.
 stylo = { path = "vendor/stylo/style", package = "stylo", features = ["lynx"] }
 stylo_atoms = { path = "vendor/stylo/stylo_atoms" }
-dom = { path = "vendor/stylo/stylo_dom", package = "stylo_dom" }
+stylo_dom = { path = "vendor/stylo/stylo_dom" }
 stylo_traits = { path = "vendor/stylo/style_traits", package = "stylo_traits" }
 style_traits = { path = "vendor/stylo/style_traits", package = "stylo_traits" }
 selectors = { path = "vendor/stylo/selectors" }
@@ -84,7 +87,7 @@ slab = "0.4"
 # `union` is enabled explicitly so every cargo invocation agrees: vello's
 # dependency graph turns it on anyway, and per-invocation feature
 # unification would otherwise make `SmallVec` (and thus `Node`/`LayoutSlot`)
-# sizes differ between `-p w3c-dom` and workspace builds — the size probes
+# sizes differ between `-p dom` and workspace builds — the size probes
 # pin the unified layout.
 smallvec = { version = "1", features = ["const_new", "union"] }
 thiserror = "2"

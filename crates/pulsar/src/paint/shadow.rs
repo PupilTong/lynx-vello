@@ -29,12 +29,12 @@
 //!
 //! `currentcolor` defaults resolve via [`convert::resolve_color`].
 
+use dom::visual::{CornerRadii, Size2D};
 use stylo::properties::ComputedValues;
 use stylo::values::computed::effects::BoxShadow;
 use vello::Scene;
 use vello::kurbo::Rect;
 use vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
-use w3c_dom::visual::{CornerRadii, Size2D};
 
 use crate::convert;
 use crate::paint::{BoxFragment, PathScratch};

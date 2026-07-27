@@ -9,10 +9,10 @@ pub(crate) mod mask;
 pub(crate) mod shadow;
 pub(crate) mod text;
 
+use dom::NodeId;
+use dom::layout::{Edges, Layout, TextLayout};
+use dom::visual::CornerRadii;
 use vello::kurbo::{Affine, BezPath, Rect, Vec2};
-use w3c_dom::NodeId;
-use w3c_dom::layout::{Edges, Layout, TextLayout};
-use w3c_dom::visual::CornerRadii;
 
 use crate::shape::ReferenceBoxes;
 
@@ -63,7 +63,7 @@ impl BoxFragment {
     pub(crate) fn new(
         node: NodeId,
         transform: Affine,
-        size: w3c_dom::visual::Size2D<f32>,
+        size: dom::visual::Size2D<f32>,
         radii: CornerRadii,
         layout: &Layout,
     ) -> Self {

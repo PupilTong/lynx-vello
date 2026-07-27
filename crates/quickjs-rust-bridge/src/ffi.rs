@@ -6,6 +6,19 @@ use std::ffi::{c_char, c_double, c_int, c_void};
 
 pub(crate) type InterruptCallback = unsafe extern "C" fn(opaque: *mut c_void) -> c_int;
 
+/// Called by `shim.c` once per invocation of a host function.
+///
+/// `arguments` are borrowed for the duration of the call; `*result`, when the
+/// return value is `0`, is transferred to the shim. Any other return value
+/// means an exception was already thrown on the realm's context.
+pub(crate) type HostDispatch = unsafe extern "C" fn(
+    opaque: *mut c_void,
+    index: u32,
+    argument_count: usize,
+    arguments: *const *mut QjsValue,
+    result: *mut *mut QjsValue,
+) -> c_int;
+
 #[repr(C)]
 pub(crate) struct QjsRuntime {
     _private: [u8; 0],
@@ -93,5 +106,24 @@ unsafe extern "C" {
         context: *mut JSContext,
         value: *const QjsValue,
         name: *const c_char,
+    ) -> *mut QjsValue;
+    pub(crate) fn qjs_set_property(
+        context: *mut JSContext,
+        target: *const QjsValue,
+        name: *const c_char,
+        value: *const QjsValue,
+    ) -> c_int;
+    pub(crate) fn qjs_global_object(context: *mut JSContext) -> *mut QjsValue;
+    pub(crate) fn qjs_throw_error(context: *mut JSContext, message: *const c_char);
+    pub(crate) fn qjs_runtime_set_host_dispatch(
+        runtime: *mut QjsRuntime,
+        dispatch: Option<HostDispatch>,
+        opaque: *mut c_void,
+    );
+    pub(crate) fn qjs_new_host_function(
+        context: *mut JSContext,
+        name: *const c_char,
+        length: c_int,
+        index: u32,
     ) -> *mut QjsValue;
 }

@@ -15,9 +15,19 @@ DOM system and CSS system design (wiring stylo onto a custom DOM, stacking
 context, event dispatch/hit-testing). It's cited in the files below where
 relevant; see `AGENTS.md` for its full scope.
 
-Nothing in this repo implements any of this yet; every file here is pure
-research/spec, not a status tracker of finished work. Once implementation
-starts, each item should gain an explicit done/in-progress marker in its row.
+These files are primarily research/spec rather than a status tracker: most of
+what they describe is still unimplemented, and rows carry an explicit
+done/in-progress marker only where implementation has landed. The CSS/layout
+and visual files have the most such markers; the runtime ones have the fewest.
+
+The runtime work that has landed so far, none of which these files were
+written to track: `crates/lynx-element` owns the Lynx element layer (unique-id
+handles, `<page>` policy, the UA cascade defaults), and
+`crates/bobcat-quickjs`'s `mainthread` module runs a `.web.bundle`'s
+main-thread script against it with four of web-core's 61 Element PAPI members
+installed — `__CreatePage`, `__CreateView`, `__AppendElement`,
+`__FlushElementTree`. `js-runtime.md` still declines to enumerate the Element
+PAPI; the authoritative list of what exists is `lynx-element`'s crate docs.
 
 ## Column conventions
 

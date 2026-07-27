@@ -17,14 +17,14 @@
 //!   grow by the outline width (sharp corners stay sharp).
 //! - Zero-size boxes, zero-width sides, and fully transparent colors skip cleanly.
 
+use dom::layout::Edges;
+use dom::visual::{CornerRadii, Size2D};
 use smallvec::SmallVec;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{BorderStyle, OutlineStyle};
 use vello::Scene;
 use vello::kurbo::{BezPath, Cap, Rect, Stroke};
 use vello::peniko::{Color, Fill};
-use w3c_dom::layout::Edges;
-use w3c_dom::visual::{CornerRadii, Size2D};
 
 use crate::convert::resolve_color;
 use crate::paint::{BoxFragment, PathScratch};

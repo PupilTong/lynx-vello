@@ -28,6 +28,13 @@ typedef struct QjsUnhandledRejection {
 
 typedef int QjsInterruptCallback(void *opaque);
 
+/* Invoked while JavaScript is on the stack, once per call of a host function
+ * created by `qjs_new_host_function`. `arguments` stay owned by the shim and
+ * are freed on return; `*result` is transferred to the shim on success (0).
+ * A non-zero return means the callee already threw on `runtime->context`. */
+typedef int QjsHostDispatch(void *opaque, uint32_t index, size_t argument_count,
+                            QjsValue *const *arguments, QjsValue **result);
+
 typedef struct QjsRuntime {
     JSRuntime *raw;
     JSContext *context;
@@ -36,6 +43,8 @@ typedef struct QjsRuntime {
     int rejection_tracker_oom;
     QjsInterruptCallback *interrupt_callback;
     void *interrupt_opaque;
+    QjsHostDispatch *host_dispatch;
+    void *host_opaque;
 } QjsRuntime;
 
 enum QjsValueKind {
@@ -74,6 +83,15 @@ static QjsValue *qjs_box(JSContext *ctx, JSValue value) {
     }
     boxed->value = value;
     return boxed;
+}
+
+/* Takes the JSValue out of a box the caller owns and releases the box shell
+ * without releasing the value. */
+static JSValue qjs_unbox(QjsValue *boxed) {
+    JSValue value = boxed->value;
+
+    free(boxed);
+    return value;
 }
 
 static void qjs_promise_rejection_tracker(JSContext *context,
@@ -172,6 +190,11 @@ void qjs_runtime_free(QjsRuntime *runtime) {
 JSContext *qjs_context_new(QjsRuntime *runtime) {
     assert(runtime->context == NULL);
     runtime->context = JS_NewContext(runtime->raw);
+    if (runtime->context != NULL) {
+        /* The host-function trampoline only receives a JSContext, so the
+         * owning QjsRuntime has to be reachable from it. */
+        JS_SetContextOpaque(runtime->context, runtime);
+    }
     return runtime->context;
 }
 
@@ -403,4 +426,121 @@ void qjs_discard_exception(JSContext *context) {
 QjsValue *qjs_get_property(JSContext *context, const QjsValue *value,
                            const char *name) {
     return qjs_box(context, JS_GetPropertyStr(context, value->value, name));
+}
+
+int qjs_set_property(JSContext *context, const QjsValue *target,
+                     const char *name, const QjsValue *value) {
+    /* JS_SetPropertyStr consumes the value, so hand it a duplicate and leave
+     * the caller's box owning what it came in with. */
+    return JS_SetPropertyStr(context, target->value, name,
+                             JS_DupValue(context, value->value));
+}
+
+QjsValue *qjs_global_object(JSContext *context) {
+    return qjs_box(context, JS_GetGlobalObject(context));
+}
+
+void qjs_throw_error(JSContext *context, const char *message) {
+    JS_ThrowInternalError(context, "%s", message);
+}
+
+void qjs_runtime_set_host_dispatch(QjsRuntime *runtime,
+                                   QjsHostDispatch *dispatch, void *opaque) {
+    runtime->host_dispatch = dispatch;
+    runtime->host_opaque = opaque;
+}
+
+static JSValue qjs_host_trampoline(JSContext *context, JSValueConst this_value,
+                                   int argc, JSValueConst *argv, int magic,
+                                   JSValue *func_data) {
+    QjsRuntime *runtime = JS_GetContextOpaque(context);
+    QjsValue **arguments = NULL;
+    QjsValue *result = NULL;
+    uint32_t index;
+    int status;
+    int failed = 0;
+    int count;
+
+    (void)this_value;
+    (void)magic;
+    if (runtime == NULL || runtime->host_dispatch == NULL) {
+        return JS_ThrowInternalError(context, "no host dispatch is installed");
+    }
+    if (JS_ToUint32(context, &index, func_data[0]) < 0) {
+        return JS_EXCEPTION;
+    }
+
+    /* argv is borrowed for the duration of the call; the boxes handed to the
+     * dispatch own duplicates so a host callback can outlive neither. */
+    if (argc > 0) {
+        arguments = malloc((size_t)argc * sizeof(*arguments));
+        if (arguments == NULL) {
+            JS_ThrowOutOfMemory(context);
+            return JS_EXCEPTION;
+        }
+        for (count = 0; count < argc; ++count) {
+            arguments[count] = qjs_box(context, JS_DupValue(context, argv[count]));
+            if (arguments[count] == NULL) {
+                failed = 1;
+                break;
+            }
+        }
+        if (failed) {
+            while (count-- > 0) {
+                qjs_value_free(context, arguments[count]);
+            }
+            free(arguments);
+            return JS_EXCEPTION;
+        }
+    }
+
+    status = runtime->host_dispatch(runtime->host_opaque, index,
+                                    (size_t)argc, arguments, &result);
+
+    for (count = 0; count < argc; ++count) {
+        qjs_value_free(context, arguments[count]);
+    }
+    free(arguments);
+
+    if (status != 0) {
+        /* The dispatch threw through qjs_throw_error before returning. */
+        qjs_value_free(context, result);
+        return JS_EXCEPTION;
+    }
+    if (result == NULL) {
+        return JS_UNDEFINED;
+    }
+    return qjs_unbox(result);
+}
+
+QjsValue *qjs_new_host_function(JSContext *context, const char *name,
+                                int length, uint32_t index) {
+    JSValue data = JS_NewUint32(context, index);
+    JSValue function = JS_NewCFunctionData(context, qjs_host_trampoline, length,
+                                           0, 1, &data);
+    JSValue function_name;
+
+    JS_FreeValue(context, data);
+    if (JS_IsException(function)) {
+        return NULL;
+    }
+
+    /* `name` is non-writable on function objects, so define rather than set.
+     * JS_NewCFunctionData already installed a valid empty name, so this is a
+     * redefine — and JS_DefinePropertyValue does NOT check its value for the
+     * exception sentinel before storing it. Handing it a failed allocation
+     * would overwrite a good name with the sentinel, leaving an object whose
+     * `.name` has no type and a pending exception that surfaces later at an
+     * unrelated call. Fail the whole construction instead. */
+    function_name = JS_NewString(context, name);
+    if (JS_IsException(function_name)) {
+        JS_FreeValue(context, function);
+        return NULL;
+    }
+    if (JS_DefinePropertyValueStr(context, function, "name", function_name,
+                                  JS_PROP_CONFIGURABLE) < 0) {
+        JS_FreeValue(context, function);
+        return NULL;
+    }
+    return qjs_box(context, function);
 }

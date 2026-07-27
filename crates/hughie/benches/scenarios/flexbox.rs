@@ -1,4 +1,4 @@
-//! Flex workloads driven through w3c-dom's production layout host.
+//! Flex workloads driven through dom's production layout host.
 
 #![allow(clippy::cast_precision_loss)]
 

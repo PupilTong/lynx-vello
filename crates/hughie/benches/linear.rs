@@ -1,4 +1,4 @@
-//! Linear layout benchmarks through w3c-dom's production host.
+//! Linear layout benchmarks through dom's production host.
 
 #[path = "scenarios/linear.rs"]
 mod scenarios;

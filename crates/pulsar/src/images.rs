@@ -10,9 +10,9 @@
 //! paint-side pixels arrive independently, so a frame between the two just
 //! skips the image, matching the browser's not-yet-loaded state.
 
+use dom::NodeId;
 use rustc_hash::FxHashMap;
 use vello::peniko::ImageData;
-use w3c_dom::NodeId;
 
 /// Frame-independent image registry, keyed by CSS url and by replaced node.
 #[derive(Debug, Default)]

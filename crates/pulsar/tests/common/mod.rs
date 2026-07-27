@@ -1,9 +1,10 @@
 //! Minimal document harness for scene tests — a trimmed copy of
-//! `w3c-dom`'s test harness (test modules cannot be imported across
+//! `dom`'s test harness (test modules cannot be imported across
 //! crates).
 
 #![allow(dead_code)]
 
+use dom::{Document, NodeId, StylesheetOrigin};
 use euclid::{Scale, Size2D};
 use stylo::context::QuirksMode;
 use stylo::device::Device;
@@ -18,7 +19,6 @@ use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_traits::{CSSPixel, DevicePixel};
-use w3c_dom::{Document, NodeId, StylesheetOrigin};
 
 #[derive(Debug)]
 struct TestFontMetricsProvider;

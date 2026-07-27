@@ -20,7 +20,7 @@ The from-scratch layout engine (successor to the C++ engine's `starlight`) is
 `crates/hughie` — its host protocol, shared layout machinery, and CSS
 flexbox, Grid, and Starlight `display: relative` and `display: linear`
 algorithms are implemented as first-class peers. Its concrete document/stylo
-host lives in `crates/w3c-dom`'s `layout` module
+host lives in `crates/dom`'s `layout` module
 (`Document::layout`, results queried by `NodeId` from the document); the Lynx-specific runtime
 policy layer remains pending, while W3C text nodes already use the concrete
 Parley path. See
@@ -130,19 +130,67 @@ useful signal for currently-compatible versions of those libraries.
   the pinned `vendor/quickjs` submodule. It owns the QuickJS C build and the
   narrow unsafe FFI shim, realm/value lifetime and affinity checks, exact
   ECMAScript string conversion, exception sanitization, and pending-job pump.
-  It must remain independent of Bobcat, the DOM, resources, and runtime
-  policy.
-- `crates/bobcat-quickjs` — narrow integration layer depending on both
-  `bobcat-engine` and the otherwise Bobcat-independent `quickjs-rust-bridge`.
-  Its public API is limited to an opaque QuickJS-backed `LynxView`, its default
-  construction factory, an opaque initialization error, and resource-host
-  access through that view. Runtime configuration, default constants,
-  explicit-config construction, the `bobcat-engine::script` adapter types,
-  and all realm/value handles, interrupt controls, and source-evaluation entry
-  points remain crate-private implementation details. Lynx host globals and
-  the future preloaded module graph belong here rather than in the generic
-  QuickJS bridge or engine-neutral protocol.
-- `crates/w3c-dom` — generic W3C-DOM-subset document tree and
+  It also owns the **host-function seam**: `Realm::function` /
+  `define_global_function` back a JS callable with a Rust `FnMut`, dispatched
+  through one C trampoline (`JS_NewCFunctionData` + a realm-owned callback
+  table reached via the context opaque). Host callbacks speak `HostValue`, a
+  primitives-only boundary (undefined/null/bool/number/string) — objects,
+  arrays, functions, symbols, and ill-formed UTF-16 strings are rejected on
+  the way in rather than lossily converted — which also means a callback
+  cannot call back into its own realm, so host functions are strictly
+  leaf calls today. A slot is vacated for the duration of its call (a guard
+  that restores it on the unwinding path too), so a panicking callback becomes
+  a JS exception rather than an unwind into C and leaves its slot usable, and
+  a re-entrant invocation would be refused rather than alias the `FnMut` if a
+  future boundary made one reachable. Host closures must not capture a `Value`
+  from their own realm — that cycle leaks the realm. The crate must remain
+  independent of Bobcat, the DOM, resources, and runtime policy — it knows
+  nothing about Lynx.
+- `crates/bobcat-quickjs` — narrow integration layer depending on
+  `bobcat-engine`, the otherwise Bobcat-independent `quickjs-rust-bridge`, and
+  `lynx-element`. Two public surfaces: the opaque QuickJS-backed `LynxView`
+  (its default construction factory, an opaque initialization error, and
+  resource-host access through that view), and `mainthread` — the Lynx host
+  globals. `MainThreadRuntime` is the realm a `.web.bundle`'s `lepusCode.root`
+  runs in: it installs the Element PAPI over one `lynx-element::ElementTree`
+  *before* evaluation (web-core installs its globals from `onPageConfigReady`,
+  which the bundle's section order guarantees precedes `LepusCode`), evaluates
+  the chunk inside web-core's own wrapper
+  (`(function(){ "use strict"; const navigator=void 0,postMessage=void 0,window=void 0; … })()`),
+  and then runs web-core's post-evaluation sequence: `processData` →
+  `renderPage` → `__FlushElementTree`. Four of web-core's 61 PAPI members are
+  installed (`__CreatePage`, `__CreateView`, `__AppendElement`,
+  `__FlushElementTree`); a bundle reaching for any other one gets a
+  `ReferenceError` naming it, which is the intended failure mode. Element
+  handles cross as unique-id numbers, matching web-core's SSR target and the
+  primitives-only script boundary. Runtime configuration, default constants,
+  explicit-config construction, the `bobcat-engine::script` adapter types, and
+  all realm/value handles, interrupt controls, and raw source-evaluation entry
+  points remain crate-private. The future preloaded module graph belongs here
+  too, not in the generic QuickJS bridge or engine-neutral protocol.
+- `crates/lynx-element` — the Lynx runtime element layer, i.e. the crate the
+  layering diagrams drew as the dashed "future Lynx runtime adapter" box. It
+  owns exactly what `dom` is forbidden to know: Lynx tag names, Element-PAPI
+  opcodes, the unique-id handle space, `<page>` root policy, view metrics and
+  stylo `Device` construction, and the Lynx UA cascade defaults
+  (`display: linear`, `box-sizing: border-box`, `overflow: hidden`, under the
+  `defaultDisplayLinear` / `defaultOverflowVisible` page-config switches).
+  `ElementTree` is a `Document<ElementData>` plus a dense, never-recycled
+  handle table starting at 1 (slot 0 is web-core's "no element" sentinel);
+  every fallible PAPI entry returns `PapiError` instead of panicking, because
+  the main-thread script is untrusted input and the DOM core is
+  crash-on-misuse — including a `MAX_TREE_DEPTH` cap, because `dom`'s
+  recursive layout/paint/hit-test walks overflow the stack and abort the
+  *process* somewhere past ~300 levels on a 2 MiB thread, and script must not
+  be able to reach that. (A guard, not a fix; the fix is iterative traversal
+  in `dom`/`hughie`.) `flush_element_tree` is the single commit boundary: it
+  attaches the page on the first call and then runs style + layout. Recorded
+  limits (see the crate docs, which are authoritative): handles are ids rather
+  than element objects; `parentComponentUniqueID` is recorded but not honored
+  (there is no `__SetCSSId`); no `rpx`/`ppx` view-unit policy; the UA sheet
+  covers only the three documented Lynx computed defaults. It must not absorb
+  DOM/CSS core behavior, and nothing below it may depend on it.
+- `crates/dom` — generic W3C-DOM-subset document tree and
   standards-oriented CSS computation core. Owns a fixed-address boxed
   `TreeArenas<T>` containing three `Slab`s: a primary `Slab<Node<T>>` (slot
   zero is the real DOM Document node and carries its node-visible style
@@ -295,16 +343,16 @@ useful signal for currently-compatible versions of those libraries.
 - Remaining runtime-layout integration — the `LayoutTree` host, display
   dispatch, fixed/hoisted positioned pass, per-node cache storage, and the
   automatic style-damage→`Document::invalidate_layout` wiring (boundary-stopped,
-  engine-internal — not a runtime-adapter concern) now live in `w3c-dom`
+  engine-internal — not a runtime-adapter concern) now live in `dom`
   (see above). Still L3 work in a future runtime adapter: Element-PAPI
   validation and handle lifetime, `rpx`-aware view/device policy, decoded
   `StyleInfo` ingestion and Lynx UA defaults, sticky lowering,
   component-specific staggered layout, and Lynx-specific text
   attribute/raw-text/truncation policy. Generic W3C text style, document
-  context, and artifact storage already live in `w3c-dom`.
+  context, and artifact storage already live in `dom`.
 - `crates/pulsar` — the vello-backed paint engine (`hughie` lays out,
-  `pulsar` emits light). `Painter::paint(&Document, &PaintOrder, &ImageStore,
-  &PaintOptions) -> &vello::Scene` walks the flat back-to-front item list:
+  `pulsar` emits light). `Painter::paint(&Document, &PaintOrder, &ImageStore)
+  -> &vello::Scene` walks the flat back-to-front item list:
   item clip chains diff against vello clip layers (restarting inside every
   group scope, which preserves containing-block clip escape under grouping
   and upholds the crate-wide vello #1198 invariant: a blend layer's
@@ -332,10 +380,36 @@ useful signal for currently-compatible versions of those libraries.
   reused `Painter`; `StyleDamage`'s repaint class is the designated hook.
   It must not read Lynx runtime vocabulary (hit-slop, components) and never
   bypasses `PaintOrder` for its own tree walk.
-- *(planned, not yet scaffolded)* runtime crates — see `docs/tracking/` for
-  the behavior surface each will need to cover before scaffolding begins,
-  and `.claude/agents/` for the subsystem-scoped agent personas already set
-  up for this work.
+- `crates/flashbulb` — screenshot testing infrastructure, and the only crate
+  here that exists for the test suite rather than the product (`publish =
+  false`, dev-dependency everywhere). It owns RGBA `Image` + PNG codec, a
+  port of the `pixelmatch` algorithm Playwright compares screenshots with
+  (squared-YIQ per-pixel distance against `35215 * threshold²`, anti-aliasing
+  detection, `max_diff_pixels`/`max_diff_pixel_ratio` budgets), and
+  `Screenshots`, the golden store: path resolution from a name-segment list,
+  `FLASHBULB_UPDATE_SNAPSHOTS=1` to accept, and `-expected`/`-actual`/`-diff`
+  PNGs written to a git-ignored `tests/artifacts/` on failure. A newly
+  *created* golden fails its own run so an unreviewed baseline cannot pass;
+  an explicitly *accepted* one does not. The optional `render` feature adds
+  `capture_document` (`dom` → `pulsar` → headless GPU) over the whole painted
+  frame, `viewport * device_pixel_ratio` device pixels — `pulsar` scales the
+  scene up by that ratio, so anything smaller is a crop. Playwright instead
+  downsamples to CSS pixels; the two coincide at a ratio of 1, which is what
+  lynx-stack pins for determinism and what every viewport here uses.
+  `headless_or_skip` announces a missing GPU adapter on the process's real
+  stderr (libtest discards a *passing* test's captured output, so `eprintln!`
+  would be invisible exactly when it matters); `FLASHBULB_REQUIRE_GPU=1` turns
+  that skip into a failure. `pulsar` dev-depends on it *with* the
+  `render` feature — a dev-dependency cycle Cargo permits; the library graph
+  stays acyclic. Goldens are not platform-suffixed: cross-platform
+  rasterizer noise is absorbed by tolerance, not by per-platform baselines.
+- *(planned, not yet scaffolded)* the remaining runtime crates — see
+  `docs/tracking/` for the behavior surface each will need to cover before
+  scaffolding begins, and `.claude/agents/` for the subsystem-scoped agent
+  personas already set up for this work. `crates/lynx-element` and
+  `crates/bobcat-quickjs`'s `mainthread` module are the first pieces of this
+  layer to land; the background thread, `StyleInfo` ingestion, the event
+  model, and the other 57 Element PAPI members are still ahead.
 
 See `docs/style-architecture.md` for the current style-layer dependency and
 ownership rules, and `docs/layout-architecture.md` for the layout-layer
@@ -399,6 +473,22 @@ this section is the only place the absolute paths are spelled out.
 Integration tests decode real fixtures vendored from lynx-stack under
 `crates/lynx-template-decoder/tests/fixtures/` (Apache-2.0 build artifacts).
 `cargo test` must pass on the pinned nightly toolchain.
+
+**Screenshot tests** live in `crates/*/tests/screenshots.rs` with committed
+goldens in `crates/*/tests/screenshots/`, driven by `crates/flashbulb`. They
+need a GPU adapter; without one they print `SKIP <test>` and pass, so a green
+run on a GPU-less machine has not exercised them. To accept a new rendering,
+look at the image first, then:
+
+```sh
+FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p <crate> --test screenshots
+```
+
+A golden that does not exist yet is written *and fails its run* — review it
+and re-run. Failures write `-expected`/`-actual`/`-diff` PNGs to the
+git-ignored `crates/<crate>/tests/artifacts/`; the panic message names all
+three plus the exact differing-pixel count. Never accept a golden you have not
+looked at: a blank or all-white image compares happily against itself forever.
 
 ## Working with Codex
 

@@ -1,4 +1,9 @@
 //! QuickJS-backed runtime composition for [`bobcat_engine`].
+//!
+//! [`mainthread`] adds the Lynx side: a realm carrying the Element PAPI, and
+//! main-thread (MTS) script execution over it.
+
+pub mod mainthread;
 
 use std::fmt;
 use std::num::NonZeroUsize;
@@ -452,6 +457,8 @@ pub fn new_quickjs_view<R: ResourceFetcher>(
         inner: LynxView::new(resource_fetcher, script_engine),
     })
 }
+
+pub use crate::mainthread::{MainThreadError, MainThreadRuntime};
 
 #[cfg(test)]
 mod tests;
