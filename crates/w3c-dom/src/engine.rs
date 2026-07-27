@@ -505,6 +505,7 @@ impl<T> Document<T> {
     }
 
     fn change_style_context(&mut self, change: impl FnOnce(&mut StyleEngine)) {
+        self.note_visual_mutation();
         change(self.style_engine_mut());
         if let Some(root) = self.root_element().map(Node::id) {
             self.mark_subtree_dirty(root);

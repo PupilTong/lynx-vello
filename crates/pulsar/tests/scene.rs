@@ -219,3 +219,99 @@ fn outlines_paint_outside_the_border_box() {
         "width without style must not paint"
     );
 }
+
+#[test]
+fn transparent_border_sides_reject_the_uniform_fast_path() {
+    // `border: 10px solid transparent` + one red side: the red side must
+    // NOT fill the whole ring (the transparent sides own ring area that
+    // stays unpainted), so painting must take the per-side path — visible
+    // as its miter-quad clip layers.
+    let uniform = ".bg { border: 10px solid red; }";
+    let mut h = Harness::new(uniform);
+    let root = h.doc.root;
+    h.doc.el(root, "box bg");
+    let (_, clips_uniform, open) = h.stats();
+    assert_eq!(open, 0);
+
+    let mixed = ".bg { border: 10px solid transparent; border-top-color: red; }";
+    let mut h2 = Harness::new(mixed);
+    let root2 = h2.doc.root;
+    h2.doc.el(root2, "box bg");
+    let (_, clips_mixed, open2) = h2.stats();
+    assert_eq!(open2, 0);
+    assert!(
+        clips_mixed > clips_uniform,
+        "a transparent positive-width side must force the per-side path \
+         ({clips_mixed} vs {clips_uniform})"
+    );
+}
+
+#[test]
+#[should_panic(expected = "visually stale PaintOrder")]
+fn painting_a_frame_built_before_a_style_mutation_panics() {
+    // Reviewer scenario: change `display`/style after building the frame,
+    // even with a completed re-layout — the old frame's geometry mixed
+    // with live styles is incoherent (a display:none element would paint
+    // at its former size).
+    let mut h = Harness::new(".bg { background-color: teal; }");
+    let root = h.doc.root;
+    let el = h.doc.el(root, "box bg");
+    let frame = h.doc.dom.paint_order();
+    h.doc.dom.set_inline_style(el, "display: none");
+    h.doc.dom.layout();
+    let options = PaintOptions {
+        scale: 1.0,
+        viewport: Size::new(800.0, 600.0),
+    };
+    let _ = h.painter.paint(&h.doc.dom, &frame, &h.images, &options);
+}
+
+#[test]
+fn text_decorations_propagate_through_nested_boxes() {
+    // css-text-decor-3 §2: text-decoration-line is not inherited — it
+    // propagates from ancestor decorating boxes to in-flow descendant
+    // text. The text's immediate parent here has no decoration of its own.
+    let css = ".u { text-decoration-line: underline; }
+        .inner { display: flex; }
+        .text { display: flex; width: 200px; height: 50px;
+                font-family: Ahem; font-size: 20px; color: black; }";
+    let mut plain = Harness::new(css);
+    plain.doc.dom.register_fonts(AHEM);
+    let root = plain.doc.root;
+    let outer = plain.doc.el(root, "box text");
+    let inner = plain.doc.el(outer, "inner");
+    plain.doc.text(inner, "Hi");
+    let (draws_plain, _, _) = plain.stats();
+
+    let mut decorated = Harness::new(css);
+    decorated.doc.dom.register_fonts(AHEM);
+    let root2 = decorated.doc.root;
+    let outer2 = decorated.doc.el(root2, "box text u");
+    let inner2 = decorated.doc.el(outer2, "inner");
+    decorated.doc.text(inner2, "Hi");
+    let (draws_decorated, _, open) = decorated.stats();
+    assert_eq!(open, 0);
+    assert!(
+        draws_decorated > draws_plain,
+        "an ancestor underline must reach nested text \
+         ({draws_decorated} vs {draws_plain})"
+    );
+
+    // But not INTO an absolutely positioned descendant (spec exception).
+    let abs_css = ".u { text-decoration-line: underline; }
+        .inner { display: flex; position: absolute; left: 0; top: 0;
+                 width: 200px; height: 50px; }
+        .text { display: flex; width: 200px; height: 50px;
+                font-family: Ahem; font-size: 20px; color: black; }";
+    let mut escaped = Harness::new(abs_css);
+    escaped.doc.dom.register_fonts(AHEM);
+    let root3 = escaped.doc.root;
+    let outer3 = escaped.doc.el(root3, "box text u");
+    let inner3 = escaped.doc.el(outer3, "inner");
+    escaped.doc.text(inner3, "Hi");
+    let (draws_escaped, _, _) = escaped.stats();
+    assert_eq!(
+        draws_escaped, draws_plain,
+        "decorations must not propagate into out-of-flow boxes"
+    );
+}

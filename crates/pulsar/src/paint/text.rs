@@ -25,6 +25,7 @@
 //!   which is also the Parley layout origin); `transform` already includes the device scale.
 
 use parley::{GlyphRun, Layout, PositionedLayoutItem};
+use smallvec::SmallVec;
 use stylo::computed_values::text_decoration_style::T as TextDecorationStyle;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::TextDecorationLine;
@@ -42,9 +43,9 @@ pub(crate) fn paint(
     style: &ComputedValues,
     layout: &TextLayout,
     transform: Affine,
+    decorations: &[Decorations],
 ) {
     let layout = layout.parley_layout();
-    let decorations = decorations(style);
 
     // text-shadow passes go under everything else, last-specified first so
     // the first-specified shadow paints on top (css-text-decor-3 §4). Only
@@ -57,14 +58,11 @@ pub(crate) fn paint(
             f64::from(shadow.horizontal.px()),
             f64::from(shadow.vertical.px()),
         ));
-        paint_pass(
-            scene,
-            layout,
-            transform * offset,
-            color,
-            None,
-            decorations.map(|deco| Decorations { color, ..deco }),
-        );
+        let shadowed: SmallVec<[Decorations; 2]> = decorations
+            .iter()
+            .map(|deco| Decorations { color, ..*deco })
+            .collect();
+        paint_pass(scene, layout, transform * offset, color, None, &shadowed);
     }
 
     // The element's used `color`. Lynx's gradient-valued `color` (text-
@@ -80,6 +78,44 @@ pub(crate) fn paint(
         text_stroke(style),
         decorations,
     );
+}
+
+/// The decorations that apply to text under `element` — css-text-decor-3
+/// §2: `text-decoration-line` is **not inherited**; each ancestor box with
+/// a decoration is a *decorating box* whose lines propagate to all in-flow
+/// descendant text, drawn with the originating box's own style and color.
+/// Collected nearest-first by walking the DOM ancestors; propagation from
+/// ancestors stops at an out-of-flow (absolutely positioned) box, which per
+/// spec does not receive them — that box's own decorations still apply.
+/// Boxless (`display: contents`) ancestors are treated as decorating boxes,
+/// matching browser rendering of decorated `display: contents` spans.
+pub(crate) fn propagated_decorations<T>(
+    document: &w3c_dom::Document<T>,
+    element: w3c_dom::NodeId,
+) -> SmallVec<[Decorations; 2]> {
+    use stylo::computed_values::position::T as Position;
+    let mut out = SmallVec::new();
+    let mut current = Some(element);
+    while let Some(id) = current {
+        let Some(node) = document.get(id) else { break };
+        if !node.is_element() {
+            break;
+        }
+        let Some(style) = document.paint_style(id) else {
+            break;
+        };
+        if let Some(deco) = decorations(style) {
+            out.push(deco);
+        }
+        if matches!(
+            style.get_box().position,
+            Position::Absolute | Position::Fixed
+        ) {
+            break;
+        }
+        current = node.parent_id();
+    }
+    out
 }
 
 /// How far outside the text box this style's text can paint: the largest
@@ -98,9 +134,9 @@ pub(crate) fn extent(style: &ComputedValues) -> f64 {
     shadow_reach + stroke_reach
 }
 
-/// The element's decoration paint, or `None` when nothing is decorated.
+/// One decorating box's paint: which lines it draws, in its style/color.
 #[derive(Clone, Copy, Debug)]
-struct Decorations {
+pub(crate) struct Decorations {
     underline: bool,
     line_through: bool,
     style: TextDecorationStyle,
@@ -160,7 +196,7 @@ pub(crate) fn paint_silhouette(scene: &mut Scene, layout: &TextLayout, transform
         transform,
         Color::BLACK,
         None,
-        None,
+        &[],
     );
 }
 
@@ -170,7 +206,7 @@ fn paint_pass(
     transform: Affine,
     fill: Color,
     stroke: Option<(f64, Color)>,
-    decorations: Option<Decorations>,
+    decorations: &[Decorations],
 ) {
     for line in layout.lines() {
         for item in line.items() {
@@ -182,9 +218,7 @@ fn paint_pass(
             let x = f64::from(glyph_run.offset());
             let width = f64::from(glyph_run.advance());
 
-            if let Some(deco) = decorations
-                && deco.underline
-            {
+            for deco in decorations.iter().rev().filter(|deco| deco.underline) {
                 let band = band(
                     x,
                     width,
@@ -214,9 +248,7 @@ fn paint_pass(
                 );
             }
 
-            if let Some(deco) = decorations
-                && deco.line_through
-            {
+            for deco in decorations.iter().rev().filter(|deco| deco.line_through) {
                 let band = band(
                     x,
                     width,

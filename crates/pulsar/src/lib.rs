@@ -97,10 +97,11 @@ impl Painter {
     ///
     /// # Panics
     ///
-    /// Panics when nodes were removed from `document` after `frame` was
-    /// built (freed ids may have been recycled —
-    /// `PaintOrder::assert_fresh`, the same fail-closed rule hit testing
-    /// applies), and when a completed style traversal is missing
+    /// Panics when the document saw **any** visual-affecting mutation after
+    /// `frame` was built (`PaintOrder::assert_visually_fresh` — stricter
+    /// than hit testing's removal-only rule, because painting resolves the
+    /// frame's geometry snapshot against live styles/layouts/text), and
+    /// when a completed style traversal is missing
     /// ([`Document::paint_style`]'s readiness gate).
     pub fn paint<T>(
         &mut self,

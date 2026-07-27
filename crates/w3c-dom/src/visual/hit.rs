@@ -40,6 +40,27 @@ impl PaintOrder {
         );
     }
 
+    /// The stricter freshness painting needs: no visual-affecting mutation
+    /// of any kind since the frame was built. Painting resolves the frame's
+    /// geometry snapshot against **live** styles, layouts, and text — after
+    /// a style/structure/layout mutation the mix is incoherent (a
+    /// `display: none` element could paint at its former size), even though
+    /// the self-contained geometry snapshot remains safe for hit testing.
+    ///
+    /// # Panics
+    ///
+    /// Panics when [`Document::visual_epoch`] (or the removal epoch) moved
+    /// after this frame was built; rebuild via [`Document::paint_order`].
+    pub fn assert_visually_fresh<T>(&self, document: &Document<T>) {
+        self.assert_fresh(document);
+        assert_eq!(
+            self.visual_epoch,
+            document.visual_epoch(),
+            "visually stale PaintOrder: the document mutated after this frame was built; \
+             rebuild it with Document::paint_order before painting",
+        );
+    }
+
     #[must_use]
     pub fn hit_test<T>(&self, document: &Document<T>, point: Point2D<f32>) -> Option<NodeId> {
         self.assert_fresh(document);

@@ -12,7 +12,11 @@
 //! A frame is pinned to the document's node-removal epoch: after any
 //! `remove_subtree` a freed id can be recycled by a later creation, so
 //! querying a stale frame panics (let-it-crash) rather than returning a
-//! recycled node for old geometry.
+//! recycled node for old geometry. Painting is pinned harder — to
+//! [`Document::visual_epoch`] via [`PaintOrder::assert_visually_fresh`] —
+//! because it resolves the frame against live styles/layouts/text, which
+//! any visual mutation desynchronizes; hit testing's snapshot is
+//! self-contained and tolerates non-structural mutations.
 //!
 //! Invariants this module relies on (verified against the layout host):
 //! - `Layout.location` is border-box-relative to the **box parent**'s border box for every box —
@@ -83,6 +87,8 @@ pub struct PaintOrder {
     pub(crate) layers: Vec<RenderLayer>,
     /// [`Document::node_removal_epoch`] at build time.
     pub(crate) epoch: u64,
+    /// [`Document::visual_epoch`] at build time.
+    pub(crate) visual_epoch: u64,
 }
 
 impl PaintOrder {
@@ -162,6 +168,11 @@ pub struct RenderLayer {
     pub transform: Transform3D<f32>,
     /// Rounded border-box size of the establishing element.
     pub size: Size2D<f32>,
+    /// The establishing element's resolved, overlap-normalized border
+    /// radii — carried here (not scavenged from the root's item) so
+    /// `clip-path`/`mask` geometry keeps its rounding even when the root
+    /// box paints no item (`visibility: hidden`).
+    pub radii: CornerRadii,
     /// Half-open range of [`PaintOrder::items`] the group encloses.
     /// Stacking contexts paint atomically, so the range is contiguous and
     /// nested layers' ranges nest; empty groups are dropped at build time,

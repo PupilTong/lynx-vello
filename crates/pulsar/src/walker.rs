@@ -53,8 +53,6 @@ pub(crate) struct Scratch {
     scopes: Vec<Scope>,
     /// Per-layer content bounds in viewport CSS px (prepass).
     layer_bounds: Vec<Rect>,
-    /// Per-layer root border radii (prepass; clip-path geometry boxes).
-    layer_radii: Vec<w3c_dom::visual::CornerRadii>,
     /// Prepass open-layer stack.
     open_layers: Vec<usize>,
     /// Reused path buffers for the border/shadow painters.
@@ -80,9 +78,12 @@ pub(crate) fn walk<T>(
     images: &ImageStore,
     options: &PaintOptions,
 ) {
-    // Fail closed on recycled NodeIds: painting resolves the frame's ids
-    // against live styles/layouts/text, exactly like hit testing does.
-    frame.assert_fresh(document);
+    // Fail closed on any visual staleness: painting resolves the frame's
+    // geometry snapshot against live styles/layouts/text, so both recycled
+    // NodeIds (like hit testing) and post-build mutations of any kind
+    // (which hit testing tolerates — its snapshot is self-contained) make
+    // the mix incoherent.
+    frame.assert_visually_fresh(document);
     scratch.clip_stack.clear();
     scratch.chain.clear();
     scratch.scopes.clear();
@@ -150,7 +151,7 @@ fn open_scope<T>(
             layer.node,
             scale * local.unwrap_or_default(),
             layer.size,
-            scratch.layer_radii[layer_index],
+            layer.radii,
             layout,
         )
     });
@@ -272,7 +273,11 @@ fn paint_item<T>(
             let Some(layout) = document.text_layout(item.node) else {
                 return;
             };
-            text::paint(scene, style, layout, transform);
+            // Decorations propagate from ancestor decorating boxes
+            // (css-text-decor-3 §2), not through inheritance — collect the
+            // chain, each entry in its originating box's style/color.
+            let decorations = text::propagated_decorations(document, element);
+            text::paint(scene, style, layout, transform, &decorations);
         }
     }
 }
@@ -395,8 +400,8 @@ fn pop_clips_to(scene: &mut Scene, scratch: &mut Scratch, len: usize) {
     }
 }
 
-/// Per-layer conservative content bounds in viewport CSS px, plus the layer
-/// roots' own border radii, in one sweep over the items (mirroring
+/// Per-layer conservative content bounds in viewport CSS px, in one sweep
+/// over the items (mirroring
 /// [`walk`]'s open/close logic, so each item is measured exactly once no
 /// matter how deeply layers nest; a closing layer's bounds fold into its
 /// parent's).
@@ -417,15 +422,11 @@ fn compute_layer_bounds<T>(
     let layers = frame.layers();
     let items = frame.items();
     scratch.layer_bounds.clear();
-    scratch.layer_radii.clear();
     scratch.open_layers.clear();
     if layers.is_empty() {
         return;
     }
     scratch.layer_bounds.resize(layers.len(), Rect::ZERO);
-    scratch
-        .layer_radii
-        .resize(layers.len(), w3c_dom::visual::CornerRadii::ZERO);
     let viewport = Rect::new(0.0, 0.0, options.viewport.width, options.viewport.height);
     let mut accumulated: Vec<Option<Rect>> = vec![None; layers.len()];
     let mut next_open = 0_usize;
@@ -452,13 +453,7 @@ fn compute_layer_bounds<T>(
             close(scratch, &mut accumulated);
         }
         while next_open < layers.len() && layers[next_open].items.start == index {
-            let layer = &layers[next_open];
-            accumulated[next_open] = layer_root_rect(layer);
-            // The root's own item, when visible, is the first of its range —
-            // its radii feed clip-path geometry-box shapes.
-            if item.node == layer.node && item.kind == PaintItemKind::ElementBox {
-                scratch.layer_radii[next_open] = item.radii;
-            }
+            accumulated[next_open] = layer_root_rect(&layers[next_open]);
             scratch.open_layers.push(next_open);
             next_open += 1;
         }

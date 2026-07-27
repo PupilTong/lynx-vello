@@ -170,6 +170,12 @@ pub struct Document<T> {
     relayout_roots: Vec<PendingRelayout>,
     relayout_root_ids: FxHashSet<NodeId>,
     node_removal_epoch: u64,
+    /// Monotone count of visual-affecting mutations (style/attribute/
+    /// structure/stylesheet/device/layout invalidation), bumped at the
+    /// internal invalidation funnels. A retained [`crate::visual::PaintOrder`]
+    /// snapshots it: painting a frame built before a later mutation would
+    /// mix stale geometry with live styles, so the paint path fails fast.
+    visual_epoch: u64,
     layout_dirty: bool,
     layout_root_dirty: bool,
     last_layout_inputs: Option<(Size<f32>, f32)>,
@@ -214,6 +220,7 @@ impl<T> Document<T> {
             relayout_roots: Vec::new(),
             relayout_root_ids: FxHashSet::default(),
             node_removal_epoch: 0,
+            visual_epoch: 0,
             layout_dirty: false,
             layout_root_dirty: false,
             last_layout_inputs: None,
@@ -260,6 +267,7 @@ impl<T> Document<T> {
     }
 
     pub(crate) fn mark_layout_dirty(&mut self, reached_root: bool) {
+        self.note_visual_mutation();
         self.layout_dirty = true;
         self.layout_root_dirty |= reached_root;
     }
@@ -305,6 +313,25 @@ impl<T> Document<T> {
     #[must_use]
     pub fn node_removal_epoch(&self) -> u64 {
         self.node_removal_epoch
+    }
+
+    /// Monotone count of visual-affecting mutations. A retained
+    /// [`crate::visual::PaintOrder`] is only valid for painting while this
+    /// value is unchanged (hit testing needs only
+    /// [`Self::node_removal_epoch`] — its geometry snapshot is
+    /// self-contained).
+    #[must_use]
+    pub fn visual_epoch(&self) -> u64 {
+        self.visual_epoch
+    }
+
+    /// Records a visual-affecting mutation. Called from the internal
+    /// invalidation funnels every mutating public API drains through:
+    /// snapshot creation (attributes/classes/element state), inline-style
+    /// application, child-list changes, stylesheet/device changes, and
+    /// layout-dirty marking.
+    pub(crate) fn note_visual_mutation(&mut self) {
+        self.visual_epoch += 1;
     }
 
     pub(crate) fn layout_data_mut(
@@ -533,6 +560,7 @@ impl<T> Document<T> {
         // structure indexing nodes by id (a built `PaintOrder`) is stale
         // from here on.
         self.node_removal_epoch += 1;
+        self.note_visual_mutation();
         let mut removed = Vec::new();
         let mut stack = vec![id];
         while let Some(current) = stack.pop() {

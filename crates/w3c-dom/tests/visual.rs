@@ -1482,7 +1482,8 @@ fn hidden_group_root_still_layers_visible_content() {
     let mut h = Harness::new(&format!(
         "{PAGE} {}",
         abs_box(
-            ".fade { opacity: 0.5; visibility: hidden; left: 20px; top: 10px; }
+            ".fade { opacity: 0.5; visibility: hidden; left: 20px; top: 10px;
+                     border-radius: 8px; }
              .shown { visibility: visible; }"
         )
     ));
@@ -1500,6 +1501,10 @@ fn hidden_group_root_still_layers_visible_content() {
     assert_eq!(layer.items.start, item_index(&paint, shown));
     assert_eq!(layer.size.width, 100.0);
     assert_eq!(layer.size.height, 100.0);
+    // The layer carries the establishing element's radii even though its
+    // own box paints no item — clip-path/mask geometry must stay rounded.
+    assert_eq!(layer.radii.top_left.width, 8.0);
+    assert_eq!(layer.radii.bottom_right.height, 8.0);
     let origin = layer
         .transform
         .transform_point2d(Point2D::new(0.0, 0.0))

@@ -71,8 +71,23 @@ pub(crate) fn paint(
     // Fast path: every painting side is `solid` in one color (the
     // ubiquitous case) — one even-odd ring fill, no clip layers.
     // Zero-width sides contribute no ring area, so leaving them out of the
-    // uniformity check is sound.
-    if let Some(color) = uniform_solid_color(&sides) {
+    // uniformity check is sound — but the whole ring is filled, so every
+    // positive-width side must actually be in the painting set: a
+    // positive-width side that dropped out (fully transparent color) owns
+    // ring area that must stay unpainted, which only the per-side path
+    // honors.
+    let positive_width_sides = [
+        fragment.border_widths.top,
+        fragment.border_widths.right,
+        fragment.border_widths.bottom,
+        fragment.border_widths.left,
+    ]
+    .iter()
+    .filter(|&&width| width > 0.0)
+    .count();
+    if sides.len() == positive_width_sides
+        && let Some(color) = uniform_solid_color(&sides)
+    {
         ring_path_into(&mut paths.ring, &outer, &inner);
         scene.fill(Fill::EvenOdd, fragment.transform, color, None, &paths.ring);
         return;

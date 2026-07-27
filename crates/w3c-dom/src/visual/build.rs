@@ -56,6 +56,7 @@ pub(crate) fn build<T>(document: &Document<T>) -> PaintOrder {
         current_layer: None,
     };
     let epoch = document.node_removal_epoch();
+    let visual_epoch = document.visual_epoch();
     if let Some(root) = document.root_element()
         && let Some(style) = StyleView::try_of(root)
         && display_mode(style.display()) != DisplayMode::None
@@ -75,6 +76,7 @@ pub(crate) fn build<T>(document: &Document<T>) -> PaintOrder {
         clips: builder.clips,
         layers: builder.layers,
         epoch,
+        visual_epoch,
     }
 }
 
@@ -225,6 +227,7 @@ impl<'doc, T> Builder<'doc, T> {
             node,
             transform: *world,
             size,
+            radii: resolve_corner_radii(values, size),
             items: start..start,
         });
         let index = self.layers.len() - 1;
