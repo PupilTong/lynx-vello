@@ -19,6 +19,9 @@ w3c-dom.workspace = true
 
 [dev-dependencies]
 divan.workspace = true
+html5ever.workspace = true
+markup5ever_rcdom.workspace = true
+png.workspace = true
 stylo_traits.workspace = true
 
 [[bench]]
