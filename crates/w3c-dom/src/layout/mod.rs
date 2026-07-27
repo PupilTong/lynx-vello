@@ -12,6 +12,7 @@ pub use neutron_star::geometry::{Edges, Point, Size};
 use neutron_star::invalidate::is_relayout_boundary;
 use neutron_star::style::CoreStyle;
 use neutron_star::text::TextContext;
+pub use neutron_star::text::TextLayout;
 pub use neutron_star::tree::Layout;
 use stylo::properties::ComputedValues;
 use stylo::servo_arc::Arc;
@@ -118,6 +119,40 @@ impl<T> Document<T> {
             .nodes
             .get(id)
             .map(|state| &state.slot.unrounded)
+    }
+
+    /// The committed (post-layout) retained Parley layout for a text node —
+    /// the shaped, line-broken, aligned paragraph the renderer paints glyph
+    /// runs from. `None` for non-text nodes and for text the layout pass has
+    /// not committed (e.g. inside `display: none` or skipped subtrees).
+    #[must_use]
+    pub fn text_layout(&self, id: crate::NodeId) -> Option<&TextLayout> {
+        self.layout_state()
+            .nodes
+            .get(id)?
+            .text
+            .as_deref()?
+            .committed()
+    }
+
+    /// Post-flush computed-style borrow for paint-time consumers, mirroring
+    /// the layout host's own access path: no Stylo runtime borrow check, no
+    /// `Arc` bump. `None` for non-elements and for elements the completed
+    /// traversal left unstyled (`display: none` descendants).
+    ///
+    /// # Panics
+    ///
+    /// Panics if styles are not ready (the preceding style traversal did not
+    /// complete, or the document mutated since) — call after
+    /// [`Document::layout`] or [`Document::paint_order`] within the same
+    /// borrow of the document.
+    #[must_use]
+    pub fn paint_style(&self, id: crate::NodeId) -> Option<&ComputedValues> {
+        assert!(
+            self.root_node().layout_styles_ready(),
+            "computed styles are unavailable because the preceding style traversal did not complete"
+        );
+        self.get(id)?.layout_computed_style()
     }
 
     #[must_use]
@@ -234,10 +269,13 @@ mod tests {
             PRE_SPLIT_ATOMIC_LAYOUT_DATA_SIZE,
             PRE_SPLIT_ATOMIC_LAYOUT_RESULTS_SIZE,
         );
+        // Sizes assume the workspace-wide `smallvec/union` layout (see the
+        // root Cargo.toml note) — vello's graph enables it regardless, and
+        // pinning it keeps every cargo invocation agreeing on these numbers.
         #[cfg(target_pointer_width = "64")]
         assert_eq!(
             current,
-            (if cfg!(debug_assertions) { 208 } else { 200 }, 648, 656, 16,),
+            (if cfg!(debug_assertions) { 200 } else { 192 }, 640, 648, 16,),
             "Node, LayoutSlot, NodeLayoutState, and TextLayoutStore sizes changed",
         );
     }

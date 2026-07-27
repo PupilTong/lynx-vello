@@ -1,0 +1,29 @@
+[package]
+name = "pulsar"
+description = "vello-backed paint engine: turns w3c-dom paint orders into GPU scenes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+euclid.workspace = true
+parley.workspace = true
+pollster.workspace = true
+rustc-hash.workspace = true
+smallvec.workspace = true
+stylo.workspace = true
+vello.workspace = true
+w3c-dom.workspace = true
+
+[dev-dependencies]
+divan.workspace = true
+stylo_traits.workspace = true
+
+[[bench]]
+name = "paint"
+harness = false
+
+[lints]
+workspace = true

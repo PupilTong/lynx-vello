@@ -12,7 +12,11 @@
 //! A frame is pinned to the document's node-removal epoch: after any
 //! `remove_subtree` a freed id can be recycled by a later creation, so
 //! querying a stale frame panics (let-it-crash) rather than returning a
-//! recycled node for old geometry.
+//! recycled node for old geometry. Painting is pinned harder — to
+//! [`Document::visual_epoch`] via [`PaintOrder::assert_visually_fresh`] —
+//! because it resolves the frame against live styles/layouts/text, which
+//! any visual mutation desynchronizes; hit testing's snapshot is
+//! self-contained and tolerates non-structural mutations.
 //!
 //! Invariants this module relies on (verified against the layout host):
 //! - `Layout.location` is border-box-relative to the **box parent**'s border box for every box —
@@ -32,9 +36,10 @@
 //!   hit-targets that parent — the singular text-hit rule, matching Chrome's `elementFromPoint`.
 //!
 //! Deliberate v1 limits (see docs/tracking/css-layout.md for status):
-//! - `clip-path` and `mask` trigger stacking contexts but do not yet clip or mask painting/hit
-//!   areas (render-layer follow-up); `backdrop-filter` is not compiled in the fork at all, so its
-//!   stacking-context trigger is structurally deferred.
+//! - Group effects (`opacity`, `filter`, `clip-path`, `mask`) surface as [`RenderLayer`] boundaries
+//!   for the render crate to composite; they still do not affect hit testing (a `clip-path` that
+//!   clips painting away does not clip the hit region yet). `backdrop-filter` is not compiled in
+//!   the fork at all, so its stacking-context trigger is structurally deferred.
 //! - Motion paths (motion-1) are composed into the matrix between the individual transforms and the
 //!   transform list: `path()`, `circle()`, `ellipse()`, and `inset()` — the shapes the fork parses,
 //!   with the coord box fixed to the border box. The anchor is always `transform-origin`
@@ -79,8 +84,11 @@ use crate::document::Document;
 pub struct PaintOrder {
     pub(crate) items: Vec<PaintItem>,
     pub(crate) clips: Vec<ClipNode>,
+    pub(crate) layers: Vec<RenderLayer>,
     /// [`Document::node_removal_epoch`] at build time.
     pub(crate) epoch: u64,
+    /// [`Document::visual_epoch`] at build time.
+    pub(crate) visual_epoch: u64,
 }
 
 impl PaintOrder {
@@ -94,6 +102,13 @@ impl PaintOrder {
     #[must_use]
     pub fn clips(&self) -> &[ClipNode] {
         &self.clips
+    }
+
+    /// Render layers, in preorder (a layer precedes every layer nested in
+    /// it, and its [`RenderLayer::items`] range contains theirs).
+    #[must_use]
+    pub fn layers(&self) -> &[RenderLayer] {
+        &self.layers
     }
 }
 
@@ -124,6 +139,45 @@ pub struct PaintItem {
     pub radii: CornerRadii,
     /// `visibility: visible` and `pointer-events` other than `none`.
     pub hit_testable: bool,
+}
+
+/// A stacking context whose subtree composites as a group — `opacity` below
+/// one, `filter`, `clip-path`, `mask`, and the storage-only blend/isolation
+/// triggers once a grammar rebase makes them authorable. The renderer must
+/// paint the enclosed items into an offscreen group and apply the effects on
+/// composite; contexts without group effects (plain `z-index`, transforms)
+/// deliberately get no layer.
+///
+/// Effect *parameters* are not duplicated here: the establishing element's
+/// computed style (via [`Document::paint_style`]) is the single source the
+/// renderer resolves `opacity`/`filter`/`clip-path`/`mask` values from, with
+/// `clip-path` and `mask` geometry resolved against [`Self::size`].
+///
+/// Group effects still do not affect [`PaintOrder::hit_test`] (a `clip-path`
+/// that clips painting away does not yet clip the hit region — recorded v1
+/// limit).
+#[derive(Debug, Clone)]
+pub struct RenderLayer {
+    /// Next-outer render layer, an index into [`PaintOrder::layers`].
+    pub parent: Option<usize>,
+    /// The establishing element.
+    pub node: NodeId,
+    /// Layer-local (border-box) coordinates → viewport CSS px. Present even
+    /// when the establishing box itself paints no item (`visibility:
+    /// hidden` root with visible descendants).
+    pub transform: Transform3D<f32>,
+    /// Rounded border-box size of the establishing element.
+    pub size: Size2D<f32>,
+    /// The establishing element's resolved, overlap-normalized border
+    /// radii — carried here (not scavenged from the root's item) so
+    /// `clip-path`/`mask` geometry keeps its rounding even when the root
+    /// box paints no item (`visibility: hidden`).
+    pub radii: CornerRadii,
+    /// Half-open range of [`PaintOrder::items`] the group encloses.
+    /// Stacking contexts paint atomically, so the range is contiguous and
+    /// nested layers' ranges nest; empty groups are dropped at build time,
+    /// so the range is never empty.
+    pub items: std::ops::Range<usize>,
 }
 
 /// One overflow/`contain: paint` clip: a rounded padding-box rect in the

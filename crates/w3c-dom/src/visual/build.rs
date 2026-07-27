@@ -35,7 +35,7 @@ use stylo::values::computed::PointerEvents;
 
 use super::geometry::{inner_radii, resolve_corner_radii};
 use super::transform::{ParentPerspective, stacking_context_matrix};
-use super::{ClipNode, CornerRadii, PaintItem, PaintItemKind, PaintOrder, stacking};
+use super::{ClipNode, CornerRadii, PaintItem, PaintItemKind, PaintOrder, RenderLayer, stacking};
 use crate::NodeId;
 use crate::contain::effective_containment;
 use crate::document::{Document, DocumentLayoutState, TreeArenas, slab_get_for_live_node};
@@ -52,8 +52,11 @@ pub(crate) fn build<T>(document: &Document<T>) -> PaintOrder {
         state,
         items: Vec::new(),
         clips: Vec::new(),
+        layers: Vec::new(),
+        current_layer: None,
     };
     let epoch = document.node_removal_epoch();
+    let visual_epoch = document.visual_epoch();
     if let Some(root) = document.root_element()
         && let Some(style) = StyleView::try_of(root)
         && display_mode(style.display()) != DisplayMode::None
@@ -71,7 +74,9 @@ pub(crate) fn build<T>(document: &Document<T>) -> PaintOrder {
     PaintOrder {
         items: builder.items,
         clips: builder.clips,
+        layers: builder.layers,
         epoch,
+        visual_epoch,
     }
 }
 
@@ -121,6 +126,10 @@ struct Builder<'doc, T> {
     state: &'doc DocumentLayoutState,
     items: Vec<PaintItem>,
     clips: Vec<ClipNode>,
+    layers: Vec<RenderLayer>,
+    /// Innermost open render layer during the walk (contexts recurse, so a
+    /// plain save/restore around each context body maintains it).
+    current_layer: Option<usize>,
 }
 
 impl<'doc, T> Builder<'doc, T> {
@@ -129,7 +138,7 @@ impl<'doc, T> Builder<'doc, T> {
     }
 
     fn rounded(&self, id: NodeId) -> &'doc Layout {
-        slab_get_for_live_node(&self.state.nodes, id).slot.rounded()
+        &slab_get_for_live_node(&self.state.nodes, id).slot.rounded
     }
 
     fn build_stacking_context(
@@ -148,6 +157,7 @@ impl<'doc, T> Builder<'doc, T> {
         };
         let world = stacking_context_matrix(values, size, offset_in_parent, parent_perspective)
             .then(parent_world);
+        let layer = self.open_layer(root, values, &world, size);
 
         let (visible, hit_testable) = item_flags(values);
         if visible {
@@ -164,6 +174,7 @@ impl<'doc, T> Builder<'doc, T> {
 
         let mode = display_mode(style.display());
         if mode == DisplayMode::Leaf || skips_contents(values) {
+            self.close_layer(layer);
             return;
         }
         let ctx = self.enter_element(root, values, &world, seed);
@@ -193,6 +204,49 @@ impl<'doc, T> Builder<'doc, T> {
         }
         for member in zero_and_above {
             self.emit_member(member, root, child_perspective, &world);
+        }
+        self.close_layer(layer);
+    }
+
+    /// Opens a render layer for a stacking-context root that needs group
+    /// compositing; call before its own item is pushed so the range covers
+    /// it. Returns the opened index for the matching [`Self::close_layer`].
+    fn open_layer(
+        &mut self,
+        node: NodeId,
+        values: &ComputedValues,
+        world: &Transform3D<f32>,
+        size: Size2D<f32>,
+    ) -> Option<usize> {
+        if !stacking::needs_group_rendering(values) {
+            return None;
+        }
+        let start = self.items.len();
+        self.layers.push(RenderLayer {
+            parent: self.current_layer,
+            node,
+            transform: *world,
+            size,
+            radii: resolve_corner_radii(values, size),
+            items: start..start,
+        });
+        let index = self.layers.len() - 1;
+        self.current_layer = Some(index);
+        Some(index)
+    }
+
+    /// Seals an opened layer's item range at context exit, dropping empty
+    /// groups (an empty group cannot contain surviving inner layers — their
+    /// item ranges would be inside its own — so popping is safe).
+    fn close_layer(&mut self, opened: Option<usize>) {
+        let Some(index) = opened else { return };
+        self.current_layer = self.layers[index].parent;
+        let end = self.items.len();
+        if end == self.layers[index].items.start {
+            debug_assert_eq!(index, self.layers.len() - 1);
+            self.layers.pop();
+        } else {
+            self.layers[index].items.end = end;
         }
     }
 

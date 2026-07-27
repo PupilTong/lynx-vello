@@ -97,6 +97,27 @@ Lynx's paint/visual CSS surface is implemented in `lynx/core/renderer/css/parser
 
 ---
 
+## Implementation status (2026-07-27)
+
+The `vello`-backed renderer for this surface is live: `crates/pulsar` paints
+backgrounds (color, multi-layer images/gradients incl. conic and — beyond
+Lynx parity, since stylo's shared grammar parses them — repeating
+gradients), borders (all styles, per-corner elliptical radii), box-shadows,
+text (glyph runs, decorations, text-stroke, unblurred text-shadow), and the
+group effects (`opacity`, color `filter` approximations, `clip-path`,
+single-layer `mask`) via `w3c-dom`'s `RenderLayer` arena. Recorded v1
+limits live in `crates/pulsar/src/lib.rs`. Both fork-grammar gaps found
+while implementing are fixed on the fork's `lynx` branch (PR #10,
+squash-merged as `8fb7de31a`):
+`background-clip: text` un-gated from gecko (pref-gated for stock servo;
+pulsar paints it via glyph-silhouette `SrcIn` sandwiches,
+GPU-pixel-tested with Ahem) and the `outline`/`outline-color`/
+`outline-style`/`outline-width` rows seeded (`outline-offset` deliberately
+omitted — Lynx outlines are flush rings; pulsar's ring painting is live
+and GPU-pixel-tested). Fork facts
+that correct rows above: `text-decoration-color` IS compiled;
+`text-decoration-line: overline` is compiled out under `lynx`.
+
 ## Also see
 
 Scope note: this is the spec for what the `stylo`-backed style engine must resolve and what the `vello`-backed renderer must paint — see `.claude/agents/lynx-css-engine.md` and `.claude/agents/lynx-render-engine.md`.

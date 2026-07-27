@@ -86,6 +86,32 @@ pub(crate) fn establishes_stacking_context(style: &ComputedValues, z_applies: bo
     effective_containment(style, skips_contents(style)).intersects(Contain::LAYOUT | Contain::PAINT)
 }
 
+/// Whether an element that establishes a stacking context also needs its
+/// subtree composited as a render-layer group: `opacity` below one
+/// (css-color-3 §3.2 group rendering), `filter` (filter-effects-1),
+/// `clip-path`/`mask` (css-masking-1), and the storage-only
+/// `mix-blend-mode`/`isolation` triggers (compositing-1), read now so they
+/// go live on a grammar rebase. Every trigger here is also a
+/// stacking-context trigger, so groups are always whole contexts.
+pub(crate) fn needs_group_rendering(style: &ComputedValues) -> bool {
+    use stylo::computed_values::isolation::T as Isolation;
+    use stylo::computed_values::mix_blend_mode::T as MixBlendMode;
+    use stylo::values::computed::basic_shape::ClipPath;
+
+    let effects = style.get_effects();
+    effects.opacity < 1.0
+        || !effects.filter.0.is_empty()
+        || effects.mix_blend_mode != MixBlendMode::Normal
+        || style.get_svg().clip_path != ClipPath::None
+        || style.get_box().isolation == Isolation::Isolate
+        || style
+            .get_svg()
+            .mask_image
+            .0
+            .iter()
+            .any(|image| !matches!(image, Image::None))
+}
+
 /// The stack level a member sorts by within its parent stacking context:
 /// the z-index integer where z-index applies, otherwise 0 (`auto` counts
 /// as 0 for ordering; whether it also forms a context is the predicate's

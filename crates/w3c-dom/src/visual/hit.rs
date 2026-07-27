@@ -7,6 +7,45 @@ use crate::NodeId;
 use crate::document::Document;
 
 impl PaintOrder {
+    /// Asserts this frame still truthfully names `document`'s nodes: freed
+    /// ids can be recycled by later creations, so any consumer resolving the
+    /// frame's `NodeId`s against live document state (hit testing, painting)
+    /// must check this after structural mutations.
+    ///
+    /// # Panics
+    ///
+    /// Panics when nodes were removed from `document` after this frame was
+    /// built; rebuild via [`Document::paint_order`].
+    pub fn assert_fresh<T>(&self, document: &Document<T>) {
+        assert_eq!(
+            self.epoch,
+            document.node_removal_epoch(),
+            "stale PaintOrder: nodes were removed after this frame was built; \
+             rebuild it with Document::paint_order",
+        );
+    }
+
+    /// The stricter freshness painting needs: no visual-affecting mutation
+    /// of any kind since the frame was built. Painting resolves the frame's
+    /// geometry snapshot against **live** styles, layouts, and text — after
+    /// a style/structure/layout mutation the mix is incoherent (a
+    /// `display: none` element could paint at its former size), even though
+    /// the self-contained geometry snapshot remains safe for hit testing.
+    ///
+    /// # Panics
+    ///
+    /// Panics when [`Document::visual_epoch`] (or the removal epoch) moved
+    /// after this frame was built; rebuild via [`Document::paint_order`].
+    pub fn assert_visually_fresh<T>(&self, document: &Document<T>) {
+        self.assert_fresh(document);
+        assert_eq!(
+            self.visual_epoch,
+            document.visual_epoch(),
+            "visually stale PaintOrder: the document mutated after this frame was built; \
+             rebuild it with Document::paint_order before painting",
+        );
+    }
+
     /// The topmost element whose rounded border box contains `point`
     /// (viewport CSS px), honoring transforms, clip chains, `visibility`,
     /// and `pointer-events`. Text-run hits resolve to the parent element.
@@ -18,18 +57,12 @@ impl PaintOrder {
     ///
     /// # Panics
     ///
-    /// Panics when nodes were removed from `document` after this frame was
-    /// built: freed ids may have been recycled, so the frame's geometry can
-    /// no longer name nodes truthfully. Rebuild via
-    /// [`Document::paint_order`].
+    /// Panics per [`Self::assert_fresh`] (node removals only — the
+    /// geometry snapshot is self-contained, so non-structural mutations
+    /// keep the frame queryable).
     #[must_use]
     pub fn hit_test<T>(&self, document: &Document<T>, point: Point2D<f32>) -> Option<NodeId> {
-        assert_eq!(
-            self.epoch,
-            document.node_removal_epoch(),
-            "stale PaintOrder: nodes were removed after this frame was built; \
-             rebuild it with Document::paint_order",
-        );
+        self.assert_fresh(document);
         self.items.iter().rev().find_map(|item| {
             if !item.hit_testable {
                 return None;

@@ -84,6 +84,7 @@ impl<T> Document<T> {
     }
 
     pub(crate) fn note_child_list_change(&mut self, parent: NodeId, index: usize) {
+        self.note_visual_mutation();
         let parent_node = self.live_element(parent);
         let flags = parent_node.selector_flags();
         if flags.intersects(STRUCTURE_SENSITIVE) {
@@ -314,6 +315,7 @@ impl<T> Document<T> {
         block: Option<Arc<Locked<PropertyDeclarationBlock>>>,
         css: Option<String>,
     ) {
+        self.note_visual_mutation();
         self.note_attribute_change(id, &STYLE);
         let node = self.live_node_mut(id);
         node.inline_block = block;
@@ -414,6 +416,7 @@ impl<T> Document<T> {
     }
 
     fn ensure_snapshot(&mut self, id: NodeId) -> Option<&mut Snapshot> {
+        self.note_visual_mutation();
         if !self.live_element(id).has_style_data() {
             return None;
         }
