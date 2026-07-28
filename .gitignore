@@ -5,6 +5,8 @@
 # flashbulb writes -expected/-actual/-diff PNGs here when a screenshot test
 # fails; the reviewed goldens live in tests/screenshots and are committed.
 crates/*/tests/artifacts/
+/.playwright-cli/
+/output/
 
 # Editors / OS
 .DS_Store

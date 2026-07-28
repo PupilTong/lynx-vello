@@ -97,16 +97,19 @@ Lynx's paint/visual CSS surface is implemented in `lynx/core/renderer/css/parser
 
 ---
 
-## Implementation status (2026-07-27)
+## Implementation status (2026-07-28)
 
 The `vello`-backed renderer for this surface is live: `crates/pulsar` paints
-backgrounds (color, multi-layer images/gradients incl. conic and — beyond
-Lynx parity, since stylo's shared grammar parses them — repeating
-gradients), borders (all styles, per-corner elliptical radii), box-shadows,
-text (glyph runs, decorations, text-stroke, unblurred text-shadow), and the
-group effects (`opacity`, color `filter` approximations, `clip-path`,
-single-layer `mask`) via `dom`'s `RenderLayer` arena. Recorded v1
-limits live in `crates/pulsar/src/lib.rs`. Both fork-grammar gaps found
+backgrounds (color, multi-layer linear/radial/conic gradients), borders (all
+styles, per-corner elliptical radii), box-shadows, text (glyph runs,
+decorations, text-stroke, unblurred text-shadow), and the group effects
+(`opacity`, color `filter` approximations, `clip-path`, single-layer `mask`)
+via `dom`'s `RenderLayer` arena. Repeating-gradient painting machinery exists,
+but the Stylo `lynx` grammar currently rejects the standard repeating
+functions, so authors cannot reach it; this is tracked as
+`stylo-lynx-repeating-gradient-grammar-scope` in
+`docs/css-paint-screenshot-matrix.md`. Recorded v1 limits live in
+`crates/pulsar/src/lib.rs`. Both fork-grammar gaps found
 while implementing are fixed on the fork's `lynx` branch (PR #10,
 squash-merged as `8fb7de31a`):
 `background-clip: text` un-gated from gecko (pref-gated for stock servo;
