@@ -280,7 +280,10 @@ fn paint_item<T>(
             // (css-text-decor-3 §2), not through inheritance — collect the
             // chain, each entry in its originating box's style/color.
             let decorations = text::propagated_decorations(document, element);
-            let gradient_box = color_gradient_box(document, item, element);
+            // Only a gradient-valued `color` needs a positioning area; solid
+            // text — nearly all of it — must not pay for the lookups.
+            let gradient_box = text::needs_gradient_box(style)
+                .then(|| color_gradient_box(document, item, element));
             text::paint(scene, style, layout, transform, &decorations, gradient_box);
         }
     }
