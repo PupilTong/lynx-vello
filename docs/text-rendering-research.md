@@ -66,9 +66,16 @@ vello's path-tag/path-data streams. Eviction is age-based:
 
 Two consequences worth naming:
 
-- **`font_size_bits` is exact.** An animated or fractional font size misses on
-  every frame. So does a device-pixel-ratio change. The cache is built for
-  static UI text at fixed sizes.
+- **`font_size_bits` is an exact `f32` comparison, not a quantization.** That is
+  less of a hazard than it first looks. A *fractional* size is still a perfectly
+  stable `f32`, so 13.5px hits every frame exactly as 16px does; what misses is a
+  size whose **value changes**, and a `font-size` transition or animation mints a
+  fresh key per frame and re-walks the outline for every glyph on screen.
+  Device pixel ratio does not enter the key at all under our configuration:
+  `resolve_patches` folds a uniform scale into `font_size` only when hinting is
+  on, and we pass `hint(false)`, so the DPR stays in the run transform. Turning
+  hinting on would pull it into the key, and a DPR change would then invalidate
+  every entry.
 - **What it saves is `skrifa`'s outline walk**, i.e. tens of nanoseconds per
   distinct glyph per size. It saves nothing per *instance*.
 
@@ -175,12 +182,13 @@ Honest assessment: **there is almost nothing to win.**
   saves the encode, which is 18 ns/glyph. It does not touch the resolve or the
   GPU pipeline, because the resolver re-patches every glyph run in the appended
   encoding anyway. Not worth the retained-scene invalidation machinery.
-- Keeping font sizes on exact, stable `f32` values keeps the outline cache hot.
-  Worth doing as a general discipline — it is free — but it only protects a
+- Animating `font-size` re-keys the outline cache every frame; snapping such an
+  animation to a few discrete sizes keeps it hot. A static fractional size needs
+  no such care — it is already a stable key. Either way this only protects a
   cost that is already small.
-- `hint(false)` is already correct for our arbitrary transforms; turning
-  hinting on would force the uniform-scale-only path in `resolve_patches` and
-  buy nothing on a hidpi target.
+- `hint(false)` is already correct for our arbitrary transforms; turning hinting
+  on would force the uniform-scale-only path in `resolve_patches`, buy nothing on
+  a hidpi target, and make the cache key DPR-dependent for good measure.
 - Culling off-screen text before encoding is real but is a `dom`/paint-order
   concern, not a text concern.
 
