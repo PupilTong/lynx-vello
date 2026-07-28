@@ -6,17 +6,46 @@ use std::ffi::{c_char, c_double, c_int, c_void};
 
 pub(crate) type InterruptCallback = unsafe extern "C" fn(opaque: *mut c_void) -> c_int;
 
+/// How a host-call argument or result is tagged. Must match `QjsHostArgKind`
+/// in `shim.c`.
+pub(crate) const HOST_ARG_UNDEFINED: i32 = 0;
+pub(crate) const HOST_ARG_NULL: i32 = 1;
+pub(crate) const HOST_ARG_BOOLEAN: i32 = 2;
+pub(crate) const HOST_ARG_NUMBER: i32 = 3;
+pub(crate) const HOST_ARG_STRING: i32 = 4;
+
+/// One host-call argument, described in place rather than boxed.
+///
+/// `text` is CESU-8 owned by `QuickJS`, valid only for the duration of the
+/// call. Must match `QjsHostArg` in `shim.c`.
+#[repr(C)]
+pub(crate) struct QjsHostArg {
+    pub(crate) kind: i32,
+    pub(crate) number: c_double,
+    pub(crate) text: *const u8,
+    pub(crate) text_len: usize,
+}
+
+/// The host-call return value. `text` is UTF-16 owned by us, and must stay
+/// valid until the dispatch returns. Must match `QjsHostResult` in `shim.c`.
+#[repr(C)]
+pub(crate) struct QjsHostResult {
+    pub(crate) kind: i32,
+    pub(crate) number: c_double,
+    pub(crate) text: *const u16,
+    pub(crate) text_len: usize,
+}
+
 /// Called by `shim.c` once per invocation of a host function.
 ///
-/// `arguments` are borrowed for the duration of the call; `*result`, when the
-/// return value is `0`, is transferred to the shim. Any other return value
+/// `arguments` are borrowed for the duration of the call. A non-zero return
 /// means an exception was already thrown on the realm's context.
 pub(crate) type HostDispatch = unsafe extern "C" fn(
     opaque: *mut c_void,
     handler: *mut c_void,
     argument_count: usize,
-    arguments: *const *mut QjsValue,
-    result: *mut *mut QjsValue,
+    arguments: *const QjsHostArg,
+    result: *mut QjsHostResult,
 ) -> c_int;
 
 /// Called from the garbage collector when a host function becomes unreachable,

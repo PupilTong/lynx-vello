@@ -18,7 +18,13 @@ mod implementation {
     use std::time::{Duration, Instant};
     use std::{fmt, mem};
 
+    use smallvec::SmallVec;
+
     use super::ffi;
+
+    /// Arguments up to this many are read without allocating. Matches
+    /// `QJS_HOST_INLINE_ARGS` in `shim.c`.
+    const HOST_INLINE_ARGS: usize = 8;
 
     const JS_EVAL_TYPE_GLOBAL: i32 = 0;
     const JS_EVAL_TYPE_MODULE: i32 = 1;
@@ -372,48 +378,37 @@ mod implementation {
         })
     }
 
+    /// Reads the flattened argument array.
+    ///
+    /// `SmallVec` because the boundary is a hot path — every Element PAPI
+    /// member takes at most three arguments, so the common call allocates
+    /// nothing at all.
     fn read_host_arguments(
-        context: *mut ffi::JSContext,
         count: usize,
-        arguments: *const *mut ffi::QjsValue,
-    ) -> Result<Vec<HostValue>, HostFunctionError> {
+        arguments: *const ffi::QjsHostArg,
+    ) -> Result<SmallVec<[HostValue; HOST_INLINE_ARGS]>, HostFunctionError> {
         if count == 0 || arguments.is_null() {
-            return Ok(Vec::new());
+            return Ok(SmallVec::new());
         }
-        let raws = unsafe { std::slice::from_raw_parts(arguments, count) };
-        raws.iter()
-            .map(|&raw| read_host_argument(context, raw))
-            .collect()
+        let raw = unsafe { std::slice::from_raw_parts(arguments, count) };
+        raw.iter().map(read_host_argument).collect()
     }
 
-    fn read_host_argument(
-        context: *mut ffi::JSContext,
-        raw: *mut ffi::QjsValue,
-    ) -> Result<HostValue, HostFunctionError> {
-        match unsafe { ffi::qjs_value_kind(context, raw) } {
-            0 => Ok(HostValue::Undefined),
-            1 => Ok(HostValue::Null),
-            2 => {
-                let mut value = 0;
-                let status = unsafe { ffi::qjs_value_get_boolean(context, raw, &raw mut value) };
-                if status == 0 {
-                    Ok(HostValue::Boolean(value != 0))
-                } else {
-                    Err(HostFunctionError::new("could not read a Boolean argument"))
+    fn read_host_argument(argument: &ffi::QjsHostArg) -> Result<HostValue, HostFunctionError> {
+        match argument.kind {
+            ffi::HOST_ARG_UNDEFINED => Ok(HostValue::Undefined),
+            ffi::HOST_ARG_NULL => Ok(HostValue::Null),
+            ffi::HOST_ARG_BOOLEAN => Ok(HostValue::Boolean(argument.number != 0.0)),
+            ffi::HOST_ARG_NUMBER => Ok(HostValue::Number(argument.number)),
+            ffi::HOST_ARG_STRING => {
+                let bytes = unsafe { std::slice::from_raw_parts(argument.text, argument.text_len) };
+                // CESU-8 differs from UTF-8 only for characters outside the
+                // BMP, so the overwhelmingly common case decodes with no
+                // intermediate UTF-16 buffer at all.
+                if let Ok(text) = std::str::from_utf8(bytes) {
+                    return Ok(HostValue::String(text.to_owned()));
                 }
-            }
-            3 => {
-                let mut value = 0.0;
-                let status = unsafe { ffi::qjs_value_get_number(context, raw, &raw mut value) };
-                if status == 0 {
-                    Ok(HostValue::Number(value))
-                } else {
-                    Err(HostFunctionError::new("could not read a Number argument"))
-                }
-            }
-            5 => {
-                let units = raw_to_utf16(context, raw)
-                    .map_err(|error| HostFunctionError::new(error.message))?;
+                let units = decode_cesu8(bytes).map_err(HostFunctionError::new)?;
                 String::from_utf16(&units)
                     .map(HostValue::String)
                     .map_err(|_| {
@@ -425,21 +420,6 @@ mod implementation {
             _ => Err(HostFunctionError::new(
                 "host functions accept undefined, null, Boolean, Number, and String arguments only",
             )),
-        }
-    }
-
-    fn host_value_to_raw(context: *mut ffi::JSContext, value: &HostValue) -> *mut ffi::QjsValue {
-        unsafe {
-            match value {
-                HostValue::Undefined => ffi::qjs_new_undefined(context),
-                HostValue::Null => ffi::qjs_new_null(context),
-                HostValue::Boolean(value) => ffi::qjs_new_boolean(context, i32::from(*value)),
-                HostValue::Number(value) => ffi::qjs_new_number(context, *value),
-                HostValue::String(value) => {
-                    let units: Vec<u16> = value.encode_utf16().collect();
-                    ffi::qjs_new_string_utf16(context, units.as_ptr(), units.len())
-                }
-            }
         }
     }
 
@@ -471,21 +451,21 @@ mod implementation {
         opaque: *mut c_void,
         handler: *mut c_void,
         argument_count: usize,
-        arguments: *const *mut ffi::QjsValue,
-        result: *mut *mut ffi::QjsValue,
+        arguments: *const ffi::QjsHostArg,
+        result: *mut ffi::QjsHostResult,
     ) -> i32 {
         let table = unsafe { &*opaque.cast::<HostTable>() };
-        // Live for the whole call: JavaScript holds the function, which owns
-        // this allocation, and the finalizer cannot run mid-call.
-        let slot = unsafe { &*handler.cast::<HostSlot>() };
         let context = table.context.get();
         if context.is_null() {
             // The realm is being torn down; there is nothing left to throw on.
             return 1;
         }
+        // Live for the whole call: JavaScript holds the function, which owns
+        // this allocation, and the finalizer cannot run mid-call.
+        let slot = unsafe { &*handler.cast::<HostSlot>() };
 
         let called = catch_unwind(AssertUnwindSafe(|| {
-            let values = read_host_arguments(context, argument_count, arguments)?;
+            let values = read_host_arguments(argument_count, arguments)?;
             let Ok(mut handler) = slot.handler.try_borrow_mut() else {
                 return Err(HostFunctionError::new(
                     "this host function cannot be called while it is already running",
@@ -506,12 +486,7 @@ mod implementation {
             }
         };
 
-        let raw = host_value_to_raw(context, &returned);
-        if raw.is_null() {
-            // The constructor left its own exception pending.
-            return 1;
-        }
-        unsafe { *result = raw };
+        table.write_result(&returned, unsafe { &mut *result });
         0
     }
 
@@ -534,6 +509,11 @@ mod implementation {
     }
 
     /// A primitive crossing the host-function boundary.
+    ///
+    /// Arguments reach a handler without any per-argument allocation: the shim
+    /// flattens `argv` into a stack array of tags and values, and the reader
+    /// below collects them into a `SmallVec`. Only a string argument allocates,
+    /// and only to own its decoded text.
     ///
     /// Host functions speak primitives only: objects, arrays, functions, and
     /// symbols are rejected on the way in with [`ErrorKind::TypeMismatch`]
@@ -613,6 +593,11 @@ mod implementation {
         /// Closures whose function has been collected but which have not yet
         /// been dropped.
         pending_release: RefCell<Vec<*mut HostSlot>>,
+        /// Scratch for a string return value. The shim reads it immediately
+        /// after the dispatch returns, before any other call can run, so one
+        /// buffer reused across calls is enough — and keeps the common case
+        /// (returning a number) free of allocation entirely.
+        return_text: RefCell<Vec<u16>>,
     }
 
     impl HostTable {
@@ -620,6 +605,37 @@ mod implementation {
             Self {
                 context: Cell::new(ptr::null_mut()),
                 pending_release: RefCell::new(Vec::new()),
+                return_text: RefCell::new(Vec::new()),
+            }
+        }
+
+        /// Describes `value` for the shim, without boxing a `JSValue`.
+        ///
+        /// A string return borrows `return_text`; the shim reads it before any
+        /// other call can run.
+        fn write_result(&self, value: &HostValue, out: &mut ffi::QjsHostResult) {
+            out.text = ptr::null();
+            out.text_len = 0;
+            out.number = 0.0;
+            match value {
+                HostValue::Undefined => out.kind = ffi::HOST_ARG_UNDEFINED,
+                HostValue::Null => out.kind = ffi::HOST_ARG_NULL,
+                HostValue::Boolean(value) => {
+                    out.kind = ffi::HOST_ARG_BOOLEAN;
+                    out.number = if *value { 1.0 } else { 0.0 };
+                }
+                HostValue::Number(value) => {
+                    out.kind = ffi::HOST_ARG_NUMBER;
+                    out.number = *value;
+                }
+                HostValue::String(value) => {
+                    let mut scratch = self.return_text.borrow_mut();
+                    scratch.clear();
+                    scratch.extend(value.encode_utf16());
+                    out.kind = ffi::HOST_ARG_STRING;
+                    out.text = scratch.as_ptr();
+                    out.text_len = scratch.len();
+                }
             }
         }
 

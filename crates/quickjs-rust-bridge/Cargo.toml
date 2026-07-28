@@ -9,6 +9,18 @@ rust-version.workspace = true
 publish = false
 links = "quickjs"
 
+[dependencies]
+# The host-call boundary reads its arguments into a stack buffer: every Element
+# PAPI member takes at most three, so the hot path allocates nothing.
+smallvec = { workspace = true }
+
+[dev-dependencies]
+divan = { workspace = true }
+
+[[bench]]
+name = "host_calls"
+harness = false
+
 [build-dependencies]
 cc = { workspace = true }
 
