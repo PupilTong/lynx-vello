@@ -54,7 +54,9 @@ the text-only view separate leaves the box-algorithm style view at two words.
 Literal text and natural-size metadata reuse the node's existing nullable
 content pointer, while retained Parley artifacts stay phase-local in layout
 state. Updating replaced metadata automatically invalidates the affected cache
-path; it is not exposed through the public DOM or any Element PAPI.
+path. It is public on `Document` (`set_natural_size`/`natural_size`) because
+the decoder that produces it is a separate crate, but it is not exposed
+through any Element PAPI.
 Text truncation, inline boxes, element-backed raw text, and
 Lynx-specific text attribute policy are not implemented yet. Crate
 rustdoc is the API reference; this document is the rationale, performance
@@ -319,12 +321,14 @@ without a basis (a documented behavior delta of the vocabulary swap).
 content currently means images and enters `compute_leaf_layout` as a Copy
 `NaturalSize`: independently optional natural dimensions plus a natural
 width/height ratio. Before image metadata is decoded the value is
-`NaturalSize::NONE`; the future media/runtime integration below the
-Element-PAPI boundary owns installing decoded metadata through a
-crate-private `dom` path and invalidating the node-to-root box-cache path.
-That placement is deliberate: decoded intrinsic metadata is W3C replaced-
-content state, while fetch/decode transport remains outside the generic DOM
-API. The public DOM does not expose a natural-size mutation API. This internal state does **not**
+`NaturalSize::NONE`; `crates/image` decodes the metadata and installs it
+through `Document::set_natural_size`, which invalidates the node-to-root
+box-cache path. That split is deliberate: decoded intrinsic metadata is W3C
+replaced-content state and belongs on the document, while fetch/decode
+transport stays outside the generic DOM API entirely — `crates/image` depends
+on neither `dom` nor `pulsar`, and `dom` learns nothing about `<img>` or any
+other tag. Setting an equal value is a structural no-op, which is why there is
+no aspect-ratio epsilon here unlike native Lynx. This state does **not**
 mutate `contain-*` or `contain-intrinsic-size`: natural replaced size is
 content metadata, whereas CSS size containment changes which intrinsic
 contributions layout is allowed to inspect.

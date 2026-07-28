@@ -1,0 +1,58 @@
+[package]
+name = "image"
+description = "Format sniffing, capability-probed platform/software image decoding, and the async fetch→decode→cache loader for lynx-vello's replaced content"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+# Reaching `peniko::ImageData` through vello's version-matched re-export is the
+# only sanctioned path to peniko (a direct dep is forbidden — see AGENTS.md), and
+# the conversion has to live where the decoded bytes and their blob identity
+# live. vello is built here without wgpu; a workspace build unifies it with
+# `pulsar`'s GPU-enabled copy at no cost.
+default = ["vello"]
+vello = ["dep:vello"]
+
+[dependencies]
+bobcat-engine = { workspace = true }
+bytes = { workspace = true }
+data-url = { workspace = true }
+fast_image_resize = { workspace = true }
+# `bobcat-engine`'s resource protocol speaks `http::HeaderMap` in every request
+# type and does not re-export it, so the loader must name the crate itself.
+http = { workspace = true }
+image-webp = { workspace = true }
+png = { workspace = true }
+rustc-hash = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+url = { workspace = true }
+vello = { workspace = true, optional = true }
+zune-jpeg = { workspace = true }
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+objc2-core-foundation = { workspace = true }
+objc2-core-graphics = { workspace = true }
+objc2-image-io = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+libc = { workspace = true }
+ndk-sys = { workspace = true }
+
+[dev-dependencies]
+# PNG fixtures are generated in-process with `png`'s encoder (already a normal
+# dependency for its decoder), rather than committed. Deliberately *not*
+# `flashbulb`, whose `render` feature depends on `pulsar` — that would put an
+# `image →(dev) flashbulb →(normal) pulsar` edge in the graph and drag wgpu into
+# this crate's dev build under workspace feature unification.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

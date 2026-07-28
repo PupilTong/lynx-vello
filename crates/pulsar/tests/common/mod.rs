@@ -67,7 +67,15 @@ pub struct Doc {
 impl Doc {
     #[must_use]
     pub fn with_css(css: &str) -> Self {
-        let mut dom = Document::new(device(800.0, 600.0));
+        Self::with_css_sized(css, 800.0, 600.0)
+    }
+
+    /// [`Self::with_css`] at an explicit viewport. `capture_document` sizes the
+    /// frame from the document's own device, so a screenshot case that wants a
+    /// specific canvas has to say so here.
+    #[must_use]
+    pub fn with_css_sized(css: &str, width: f32, height: f32) -> Self {
+        let mut dom = Document::new(device(width, height));
         let root = dom.create_element("page", ());
         dom.append_document_element(root);
         dom.add_stylesheet(css, StylesheetOrigin::Author);
@@ -75,7 +83,13 @@ impl Doc {
     }
 
     pub fn el(&mut self, parent: NodeId, class: &str) -> NodeId {
-        let id = self.dom.create_element("view", ());
+        self.el_tag(parent, "view", class)
+    }
+
+    /// [`Self::el`] with an explicit tag, for cases where the tag is the point
+    /// — a replaced `img`, say, whose UA rules the case's own CSS supplies.
+    pub fn el_tag(&mut self, parent: NodeId, tag: &str, class: &str) -> NodeId {
+        let id = self.dom.create_element(tag, ());
         for name in class.split_whitespace() {
             self.dom.add_class(id, name);
         }

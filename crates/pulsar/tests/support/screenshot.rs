@@ -9,7 +9,7 @@
 #![allow(dead_code)]
 
 use flashbulb::vello::peniko::Color;
-use flashbulb::{Image, capture_document, headless_or_skip};
+use flashbulb::{Image, ImageStore, capture_document, headless_or_skip};
 
 use crate::html;
 
@@ -27,7 +27,26 @@ pub fn capture(test: &str, fragment: &str, width: f32, height: f32) -> Option<Im
         "the vendored Roboto fixture must register exactly one face"
     );
     Some(
-        capture_document(&mut gpu, &mut doc.dom, Color::WHITE).expect("headless screenshot render"),
+        capture_document(&mut gpu, &mut doc.dom, Color::WHITE, &ImageStore::new())
+            .expect("headless screenshot render"),
+    )
+}
+
+/// [`capture`] for a document the caller has already built, with its replaced
+/// content registered.
+///
+/// The fragment path above cannot serve this: an `<img>` case has to publish
+/// natural sizes and decoded pixels itself, which is not expressible as inline
+/// HTML.
+pub fn capture_document_with_images<T: Sync>(
+    test: &str,
+    document: &mut dom::Document<T>,
+    images: &ImageStore,
+) -> Option<Image> {
+    let mut gpu = headless_or_skip(test)?;
+    Some(
+        capture_document(&mut gpu, document, Color::WHITE, images)
+            .expect("headless screenshot render"),
     )
 }
 

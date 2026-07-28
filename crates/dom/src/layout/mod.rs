@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 
 #[cfg(feature = "layout-test-utils")]
 use hughie::compute::LeafMetrics;
-use hughie::compute::NaturalSize;
+pub use hughie::compute::NaturalSize;
 pub use hughie::geometry::{Edges, Point, Size};
 use hughie::invalidate::is_relayout_boundary;
 use hughie::style::CoreStyle;
@@ -50,11 +50,34 @@ impl<T: Sync> Document<T> {
 }
 
 impl<T> Document<T> {
-    #[allow(
-        dead_code,
-        reason = "owned by the future internal replaced-content loader"
-    )]
-    pub(crate) fn set_natural_size(&mut self, id: crate::NodeId, natural_size: NaturalSize) {
+    /// Installs decoded intrinsic dimensions for a replaced element, and
+    /// invalidates the node-to-root box-cache path when the value changes.
+    ///
+    /// This is the W3C replaced-content seam. An element whose computed
+    /// `display` is flow-inside and which carries a non-[`NaturalSize::NONE`]
+    /// natural size *is* a replaced leaf — the DOM core learns nothing about
+    /// `<img>`, and tag policy stays in the embedder's UA stylesheet. It is
+    /// public because the decoder that produces these dimensions
+    /// (`crates/image`) is a separate crate that must not be handed the whole
+    /// document core to reach one setter.
+    ///
+    /// Setting an equal value is a structural no-op: nothing is invalidated, so
+    /// a loader that re-publishes an unchanged size after a re-fetch costs
+    /// nothing. That exactness is why there is no aspect-ratio epsilon here,
+    /// unlike native Lynx — it compared a measured box against a bitmap ratio,
+    /// where this compares the value against itself.
+    ///
+    /// Natural size shares the node's single nullable content slot with literal
+    /// text, so `set_element_text_content` on a node carrying a natural size
+    /// destroys it, and vice versa.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a vacant or non-element `NodeId`, and — through
+    /// [`Document::invalidate_layout`] — when a style traversal has been started
+    /// and did not complete. Call it between flushes, the same precondition
+    /// [`Document::paint_style`] documents.
+    pub fn set_natural_size(&mut self, id: crate::NodeId, natural_size: NaturalSize) {
         let changed = {
             let node = self
                 .tree_mut()
@@ -69,6 +92,20 @@ impl<T> Document<T> {
         if changed {
             self.invalidate_layout(id);
         }
+    }
+
+    /// The intrinsic dimensions and ratio a replaced element currently lays out
+    /// with, in CSS px. [`NaturalSize::NONE`] for non-elements, vacant ids, and
+    /// elements that are not replaced.
+    ///
+    /// Paint needs this separately from the decoded pixels: with decode-time
+    /// downsampling, a decoded image's width and height are device-scaled decode
+    /// dimensions, while `object-fit: none` / `scale-down` and the concrete
+    /// object size are defined against the **natural** size.
+    #[must_use]
+    pub fn natural_size(&self, id: crate::NodeId) -> NaturalSize {
+        self.get(id)
+            .map_or(NaturalSize::NONE, crate::Node::natural_size)
     }
 
     #[cfg(feature = "layout-test-utils")]

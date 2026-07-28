@@ -265,7 +265,13 @@ fn paint_item<T>(
             // element's content (css-backgrounds-3 §7.4.1) — replaced pixels
             // cover them, the browser-observable order.
             shadow::paint_inset(scene, &mut scratch.paths, style, &fragment);
-            background::paint_replaced_content(scene, &fragment, images);
+            background::paint_replaced_content(
+                scene,
+                style,
+                &fragment,
+                images,
+                document.natural_size(item.node),
+            );
             border::paint(scene, &mut scratch.paths, style, &fragment);
             border::paint_outline(scene, &mut scratch.paths, style, &fragment);
         }

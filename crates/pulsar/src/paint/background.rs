@@ -25,7 +25,9 @@
 
 use std::f64::consts::{FRAC_PI_2, PI, SQRT_2, TAU};
 
+use dom::layout::NaturalSize;
 use stylo::computed_values::background_origin::single_value::T as BackgroundOrigin;
+use stylo::computed_values::object_fit::T as ObjectFit;
 use stylo::properties::ComputedValues;
 use stylo::url::ComputedUrl;
 use stylo::values::computed::image::EndingShape;
@@ -205,13 +207,25 @@ fn text_clip_sandwich(
     scene.pop_layer();
 }
 
-/// Paints a replaced element's content image (registered by node id)
-/// stretched over the content box — object-fit policy stays with the future
-/// runtime layer.
+/// Paints a replaced element's content image (registered by node id) at the
+/// concrete object size `object-fit` resolves (css-images-3 §5.5), placed by
+/// `object-position` (§5.6) inside the content box and always clipped to it.
+///
+/// The concrete object size comes from the element's **natural** size in CSS px,
+/// never from the decoded pixel dimensions. Decode-time downsampling makes those
+/// device-scaled: `fill` is immune, but `contain`/`cover`/`none`/`scale-down`
+/// would all resolve against the wrong number. The decoded dimensions drive only
+/// the brush transform, which maps decode-pixel space onto the destination rect.
+///
+/// The source is never cropped — `object-fit` only ever changes the destination
+/// geometry — so the sampler keeps `Extend::Pad` on both axes, which is also
+/// what clamps bilinear half-texel overshoot at the destination edge.
 pub(crate) fn paint_replaced_content(
     scene: &mut Scene,
+    style: &ComputedValues,
     fragment: &BoxFragment,
     images: &ImageStore,
+    natural: NaturalSize,
 ) {
     let Some(image) = images.node(fragment.node) else {
         return;
@@ -223,28 +237,126 @@ pub(crate) fn paint_replaced_content(
     if content.width() <= 0.0 || content.height() <= 0.0 {
         return;
     }
-    // The fill shape is the content box with the content-box radii, so the
-    // pixels are clipped whenever the border radii intrude into it.
+
+    let position = &style.get_position();
+    let (object_width, object_height) = concrete_object_size(natural, content);
+    let (draw_width, draw_height) =
+        fitted_size(position.object_fit, object_width, object_height, content);
+    if draw_width <= 0.0 || draw_height <= 0.0 {
+        return;
+    }
+    let destination = Rect::from_origin_size(
+        (
+            content.x0
+                + position_offset(
+                    &position.object_position.horizontal,
+                    content.width(),
+                    draw_width,
+                ),
+            content.y0
+                + position_offset(
+                    &position.object_position.vertical,
+                    content.height(),
+                    draw_height,
+                ),
+        ),
+        (draw_width, draw_height),
+    );
+
+    // The clip is the content box with the content-box radii, so the pixels are
+    // clipped both by border radii intruding into it and by any `object-fit`
+    // that overflows (`cover`, and `none` on an oversized image).
     let shape = level_shape(fragment, BoxLevel::Content);
-    let brush_transform = Affine::translate((content.x0, content.y0))
+    let brush_transform = Affine::translate((destination.x0, destination.y0))
         * Affine::scale_non_uniform(
-            content.width() / f64::from(image.width),
-            content.height() / f64::from(image.height),
+            destination.width() / f64::from(image.width),
+            destination.height() / f64::from(image.height),
         );
-    // recorded v1 limit: this painter has no style access by design, so
-    // `image-rendering` cannot select nearest sampling here; the default
-    // Medium (bilinear) quality is used.
     let brush = BrushRef::Image(ImageBrush {
         image,
-        sampler: ImageSampler::default(),
+        sampler: ImageSampler::default().with_quality(image_quality(style)),
     });
-    with_shape!(&shape, |s| scene.fill(
-        Fill::NonZero,
+    fill_area(
+        scene,
         fragment.transform,
+        &shape,
+        destination,
         brush,
         Some(brush_transform),
-        s
-    ));
+    );
+}
+
+/// The object's size before `object-fit` scaling (css-images-3 §5.3.1, reduced
+/// to the replaced-content case): natural dimensions where known, otherwise
+/// derived from the natural ratio against the content box, otherwise the content
+/// box itself (the spec's "default object size").
+///
+/// A zero or absent axis falls through to the content box rather than
+/// propagating: `NaturalSize` sanitises to *non-negative* finite values, so zero
+/// is a legal natural dimension, and dividing by it in [`fitted_size`] would
+/// produce a NaN that no `<= 0.0` guard downstream can catch.
+fn concrete_object_size(natural: NaturalSize, content: Rect) -> (f64, f64) {
+    let dimensions = natural.dimensions();
+    let width = dimensions.width.map(f64::from).filter(|value| *value > 0.0);
+    let height = dimensions
+        .height
+        .map(f64::from)
+        .filter(|value| *value > 0.0);
+    let ratio = natural
+        .aspect_ratio()
+        .map(f64::from)
+        .filter(|value| *value > 0.0 && value.is_finite());
+
+    match (width, height, ratio) {
+        (Some(width), Some(height), _) => (width, height),
+        // One axis plus a ratio determines the other.
+        (Some(width), None, Some(ratio)) => (width, width / ratio),
+        (None, Some(height), Some(ratio)) => (height * ratio, height),
+        // Ratio only: the largest box with that ratio that fits the content box,
+        // which is what "contain against the default object size" resolves to.
+        (None, None, Some(ratio)) => {
+            let by_width = (content.width(), content.width() / ratio);
+            if by_width.1 <= content.height() {
+                by_width
+            } else {
+                (content.height() * ratio, content.height())
+            }
+        }
+        // Nothing usable: the default object size is the content box.
+        (Some(width), None, None) => (width, content.height()),
+        (None, Some(height), None) => (content.width(), height),
+        (None, None, None) => (content.width(), content.height()),
+    }
+}
+
+/// Applies `object-fit` to the concrete object size against the content box.
+///
+/// Total by construction rather than by precondition: `paint_replaced_content`
+/// does reject an empty content box before calling, but [`concrete_object_size`]
+/// falls back *to* that box, so an empty box is the one input that can still
+/// hand this function a zero axis. Returning early beats an assertion the
+/// function cannot itself guarantee — and beats dividing by zero into a NaN that
+/// would reach `Affine::scale_non_uniform`.
+fn fitted_size(fit: ObjectFit, width: f64, height: f64, content: Rect) -> (f64, f64) {
+    let (available_width, available_height) = (content.width(), content.height());
+    if width <= 0.0 || height <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let uniform = |scale: f64| (width * scale, height * scale);
+    match fit {
+        ObjectFit::Fill => (available_width, available_height),
+        ObjectFit::Contain => uniform((available_width / width).min(available_height / height)),
+        ObjectFit::Cover => uniform((available_width / width).max(available_height / height)),
+        ObjectFit::None => (width, height),
+        // "as if `none` or `contain` were specified, whichever would result in a
+        // smaller concrete object size" — both preserve the same ratio, so
+        // comparing scale factors is equivalent to comparing sizes.
+        ObjectFit::ScaleDown => uniform(
+            (available_width / width)
+                .min(available_height / height)
+                .min(1.0),
+        ),
+    }
 }
 
 /// One fully specified image layer (background or mask), ready to resolve
@@ -1612,5 +1724,167 @@ mod tests {
         assert_eq!(stops[1].1, blue);
         assert_close(stops[2].0, 1.5);
         assert_eq!(stops[2].1, red);
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod object_fit_tests {
+    use dom::layout::{NaturalSize, Size as LayoutSize};
+    use stylo::computed_values::object_fit::T as ObjectFit;
+    use vello::kurbo::Rect;
+
+    use super::{concrete_object_size, fitted_size};
+
+    /// A 200x100 content box — deliberately not square, so a transform that
+    /// silently swaps the axes cannot pass.
+    fn content() -> Rect {
+        Rect::new(0.0, 0.0, 200.0, 100.0)
+    }
+
+    fn natural(width: f32, height: f32) -> NaturalSize {
+        NaturalSize::from_size(LayoutSize::new(width, height))
+    }
+
+    fn assert_close(actual: (f64, f64), expected: (f64, f64)) {
+        assert!(
+            (actual.0 - expected.0).abs() < 1e-6 && (actual.1 - expected.1).abs() < 1e-6,
+            "expected {expected:?}, got {actual:?}"
+        );
+    }
+
+    #[test]
+    fn fill_stretches_to_the_content_box_ignoring_the_ratio() {
+        let (width, height) = concrete_object_size(natural(40.0, 20.0), content());
+        assert_close(
+            fitted_size(ObjectFit::Fill, width, height, content()),
+            (200.0, 100.0),
+        );
+    }
+
+    #[test]
+    fn contain_fits_inside_and_cover_fills_past_the_box() {
+        // 40x20 (ratio 2) into 200x100 (ratio 2): both scale by 5 and agree.
+        let (width, height) = concrete_object_size(natural(40.0, 20.0), content());
+        assert_close(
+            fitted_size(ObjectFit::Contain, width, height, content()),
+            (200.0, 100.0),
+        );
+
+        // 40x40 (ratio 1) into 200x100: contain is bounded by height (x2.5),
+        // cover by width (x5) and overflows vertically.
+        let (width, height) = concrete_object_size(natural(40.0, 40.0), content());
+        assert_close(
+            fitted_size(ObjectFit::Contain, width, height, content()),
+            (100.0, 100.0),
+        );
+        assert_close(
+            fitted_size(ObjectFit::Cover, width, height, content()),
+            (200.0, 200.0),
+        );
+    }
+
+    #[test]
+    fn none_keeps_the_natural_size_whether_it_overflows_or_not() {
+        let (width, height) = concrete_object_size(natural(40.0, 20.0), content());
+        assert_close(
+            fitted_size(ObjectFit::None, width, height, content()),
+            (40.0, 20.0),
+        );
+
+        let (width, height) = concrete_object_size(natural(400.0, 800.0), content());
+        assert_close(
+            fitted_size(ObjectFit::None, width, height, content()),
+            (400.0, 800.0),
+        );
+    }
+
+    #[test]
+    fn scale_down_is_none_when_small_and_contain_when_large() {
+        // Smaller than the box: identical to `none`, never upscaled.
+        let (width, height) = concrete_object_size(natural(40.0, 20.0), content());
+        assert_close(
+            fitted_size(ObjectFit::ScaleDown, width, height, content()),
+            fitted_size(ObjectFit::None, width, height, content()),
+        );
+
+        // Larger than the box: identical to `contain`.
+        let (width, height) = concrete_object_size(natural(400.0, 800.0), content());
+        assert_close(
+            fitted_size(ObjectFit::ScaleDown, width, height, content()),
+            fitted_size(ObjectFit::Contain, width, height, content()),
+        );
+        assert_close(
+            fitted_size(ObjectFit::ScaleDown, width, height, content()),
+            (50.0, 100.0),
+        );
+    }
+
+    #[test]
+    fn a_ratio_without_dimensions_resolves_against_the_content_box() {
+        // Ratio 4 (wider than the box's 2): bounded by width.
+        let ratio_only = NaturalSize::new(LayoutSize::new(None, None), Some(4.0));
+        assert_close(concrete_object_size(ratio_only, content()), (200.0, 50.0));
+
+        // Ratio 1 (narrower than the box's 2): bounded by height.
+        let square = NaturalSize::new(LayoutSize::new(None, None), Some(1.0));
+        assert_close(concrete_object_size(square, content()), (100.0, 100.0));
+    }
+
+    #[test]
+    fn one_axis_plus_a_ratio_determines_the_other() {
+        let width_and_ratio = NaturalSize::new(LayoutSize::new(Some(80.0), None), Some(2.0));
+        assert_close(
+            concrete_object_size(width_and_ratio, content()),
+            (80.0, 40.0),
+        );
+
+        let height_and_ratio = NaturalSize::new(LayoutSize::new(None, Some(30.0)), Some(3.0));
+        assert_close(
+            concrete_object_size(height_and_ratio, content()),
+            (90.0, 30.0),
+        );
+    }
+
+    #[test]
+    fn a_zero_or_absent_natural_axis_falls_back_to_the_content_box() {
+        // `NaturalSize` sanitises to non-negative, so zero is a legal value and
+        // would divide to infinity in `fitted_size` — the NaN this guards
+        // against reaches `Affine::scale_non_uniform` and poisons the scene.
+        for degenerate in [
+            NaturalSize::NONE,
+            natural(0.0, 0.0),
+            natural(0.0, 50.0),
+            natural(50.0, 0.0),
+        ] {
+            let (width, height) = concrete_object_size(degenerate, content());
+            assert!(
+                width > 0.0 && height > 0.0,
+                "{degenerate:?} must not yield a non-positive object size"
+            );
+            for fit in [
+                ObjectFit::Fill,
+                ObjectFit::Contain,
+                ObjectFit::Cover,
+                ObjectFit::None,
+                ObjectFit::ScaleDown,
+            ] {
+                let (drawn_width, drawn_height) = fitted_size(fit, width, height, content());
+                assert!(
+                    drawn_width.is_finite() && drawn_height.is_finite(),
+                    "{fit:?} on {degenerate:?} produced {drawn_width}x{drawn_height}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_zero_area_content_box_never_produces_a_nan() {
+        let empty = Rect::new(0.0, 0.0, 0.0, 0.0);
+        let (width, height) = concrete_object_size(NaturalSize::NONE, empty);
+        for fit in [ObjectFit::Contain, ObjectFit::Cover, ObjectFit::ScaleDown] {
+            let (drawn_width, drawn_height) = fitted_size(fit, width, height, empty);
+            assert!(drawn_width.is_finite() && drawn_height.is_finite());
+        }
     }
 }
