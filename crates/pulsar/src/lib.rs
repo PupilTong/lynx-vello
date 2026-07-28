@@ -29,10 +29,12 @@
 //!   `contrast(f > 1)` are inexpressible with flat blends and skipped.
 //! - Perspective-projected items are painted with the affine map agreeing with the true projection
 //!   at three border-box corners (vello transforms are affine); hit testing in `dom` stays exact.
-//! - Lynx's `background-clip: border-area` skips its layer, and gradient-valued `color`
-//!   (text-gradient sugar) paints the fork's parallel solid color. `background-clip: text` clips
-//!   via glyph-silhouette `SrcIn` sandwiches over the element's descendant text; the silhouette is
+//! - Lynx's `background-clip: border-area` skips its layer. `background-clip: text` clips via
+//!   glyph-silhouette `SrcIn` sandwiches over the element's descendant text; the silhouette is
 //!   glyph ink only (decorations excluded) and ignores descendant `transform`s.
+//! - Gradient-valued `color` (Lynx's text-gradient sugar) fills the glyph ink with a gradient brush
+//!   anchored to the styled element's padding box. Decorations stay solid: `currentcolor` resolves
+//!   through the fork's parallel solid color (opaque black), as it does in Lynx's own style engine.
 //! - `text-shadow` paints offset and color but not blur; `overline` is compiled out of the fork's
 //!   `text-decoration-line`.
 //! - `outline` paints a flush ring with its element (the fork's lynx grammar deliberately has no

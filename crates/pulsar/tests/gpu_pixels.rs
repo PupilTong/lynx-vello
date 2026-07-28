@@ -108,6 +108,65 @@ fn plain_background_covers_the_box() {
     );
 }
 
+/// Lynx's gradient-valued `color` fills glyph ink with a real ramp, anchored
+/// to the element's **padding** box.
+///
+/// This is the assertion the screenshot goldens cannot make: the anchor is a
+/// choice about a denominator and an origin, and getting it wrong shifts every
+/// color by a few percent — well inside golden tolerance, but wrong. Ahem's
+/// glyphs are solid em squares, so the ramp can be read straight off a known
+/// pixel.
+///
+/// Geometry: a 120px-wide box with a 20px left border, so the padding box runs
+/// x 20..120 — 100px of ramp. Ahem at 20px puts "HH" squares at x 20..40 and
+/// 40..60, so the sampled centers sit 10% and 30% along a `#ff0000 → #0000ff`
+/// ramp. Both stops are opaque, so premultiplied-sRGB interpolation is just
+/// `red = 255 * (1 - t)`: 230 and 179. Anchoring to the *border* box instead
+/// would stretch the ramp over 120px from x=0 and read 191 and 149, which the
+/// asserted windows exclude.
+#[test]
+fn gradient_color_fills_glyph_ink_from_the_padding_box() {
+    let Some(mut gpu) = headless_or_skip() else {
+        return;
+    };
+    let css = "page { display: flex; position: relative; width: 200px; height: 100px; }
+        .text { display: flex; position: absolute; left: 0px; top: 10px;
+                width: 120px; height: 50px; box-sizing: border-box;
+                border-left: 20px solid black;
+                font-family: Ahem; font-size: 20px;
+                color: linear-gradient(90deg, #ff0000, #0000ff); }";
+    let mut doc = Doc::with_css(css);
+    doc.dom.register_fonts(AHEM);
+    let root = doc.root;
+    let holder = doc.el(root, "text");
+    doc.text(holder, "HH");
+
+    let frame = doc.dom.paint_order();
+    let mut painter = Painter::new();
+    let scene = painter.paint(&doc.dom, &frame, &ImageStore::new());
+    let pixels = gpu
+        .render(scene, 200, 100, Color::WHITE)
+        .expect("headless render");
+
+    // Ink y: the 20px line box starts at the element's top (y = 10), so the
+    // em square spans y 10..30; sample its middle.
+    let first = pixel(&pixels, 200, 30, 20);
+    assert!(
+        (215..=245).contains(&first[0]) && first[2] < 45,
+        "first glyph must sit ~10% along the ramp ({first:?})"
+    );
+    let second = pixel(&pixels, 200, 50, 20);
+    assert!(
+        (164..=194).contains(&second[0]) && second[2] > 60,
+        "second glyph must sit ~30% along the ramp ({second:?})"
+    );
+    // The ramp has to actually advance between the two squares.
+    assert!(
+        first[0] > second[0] + 30,
+        "red must fall across the ramp ({first:?} then {second:?})"
+    );
+}
+
 /// `outline: solid` paints a flush ring outside the border box.
 #[test]
 fn outline_rings_the_border_box() {
