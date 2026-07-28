@@ -103,7 +103,9 @@ pub struct ImageLoader {
     /// — would key on the pre-resolution specifier while [`Self::load`] keys on
     /// the resolved one, and every probe would miss.
     resolved: Mutex<FxHashMap<Arc<str>, Arc<str>>>,
-    permits: Semaphore,
+    /// `Arc` so a permit can be owned by the blocking decode task itself; see
+    /// the acquisition site in `load`.
+    permits: Arc<Semaphore>,
     sequence: AtomicU64,
     config: LoaderConfig,
     transport: ResourceCapability,
@@ -170,7 +172,7 @@ impl ImageLoader {
             decodes: Mutex::new(DecodeCache::with_budget(config.decode_cache_bytes)),
             headers: Mutex::new(HeaderCache::with_capacity(config.header_cache_entries)),
             resolved: Mutex::new(FxHashMap::default()),
-            permits: Semaphore::new(config.max_concurrent_decodes.max(1)),
+            permits: Arc::new(Semaphore::new(config.max_concurrent_decodes.max(1))),
             sequence: AtomicU64::new(0),
             config,
             transport,
@@ -248,21 +250,36 @@ impl ImageLoader {
             target_size: target,
             ..self.config.decode
         };
-        let permit = self
-            .permits
-            .acquire()
+        // Waiting for a permit is itself cancellable: a queue of images whose
+        // nodes are being recycled faster than they decode should shrink, not
+        // sit blocked on a semaphore it no longer needs.
+        let Some(permit) = cancel
+            .run_until_cancelled(Arc::clone(&self.permits).acquire_owned())
             .await
-            .map_err(|_| ImageError::Cancelled)?;
-        let decode = tokio::task::spawn_blocking(move || decode_bytes(&registry, &bytes, &request));
+        else {
+            return Err(ImageError::Cancelled);
+        };
+        let permit = permit.map_err(|_| ImageError::Cancelled)?;
 
-        // `spawn_blocking` work is genuinely uncancellable once started, so the
-        // token cannot abort it. Returning promptly and discarding the result is
-        // the honest behaviour: the decode drains against a bounded permit pool
-        // rather than being left to publish pixels for a torn-down node.
+        // The permit moves *into* the blocking closure, so it is released when
+        // the decode actually ends rather than when this future stops waiting
+        // for it. `spawn_blocking` work is uncancellable once started, so
+        // dropping the handle below leaves the decode running; releasing the
+        // permit there instead would let a stream of cancelled loads run
+        // unboundedly many concurrent decodes and starve tokio's blocking pool
+        // — precisely under the churn the bound exists for.
+        let decode = tokio::task::spawn_blocking(move || {
+            let decoded = decode_bytes(&registry, &bytes, &request);
+            drop(permit);
+            decoded
+        });
+
+        // Returning promptly and discarding the result is the honest behaviour:
+        // the decode drains against the bounded pool rather than being left to
+        // publish pixels for a torn-down node.
         let Some(joined) = cancel.run_until_cancelled(decode).await else {
             return Err(ImageError::Cancelled);
         };
-        drop(permit);
         let response = joined.map_err(|error| ImageError::decode_join(&error))??;
         if cancel.is_cancelled() {
             return Err(ImageError::Cancelled);
@@ -439,11 +456,13 @@ impl ImageLoader {
         if cancel.is_cancelled() {
             return Err(ImageError::Cancelled);
         }
+        let limit = self.config.max_encoded_bytes;
         if data_url::is_data_url(&resolved.url) {
-            return data_url::decode(&resolved.url);
+            // Held to the same ceiling as every transport branch — the payload
+            // is attacker-supplied on this path just as much as on the others.
+            return data_url::decode(&resolved.url, limit);
         }
 
-        let limit = self.config.max_encoded_bytes;
         let request = self.resource_request(resolved, cancel.clone());
         let read = async {
             match self.transport {

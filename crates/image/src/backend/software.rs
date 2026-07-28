@@ -130,6 +130,28 @@ fn probe_png(bytes: &[u8]) -> Result<ImageHeader, ImageError> {
 
 fn decode_png(bytes: &[u8]) -> Result<RawDecode, ImageError> {
     let mut reader = png_reader(bytes)?;
+    let canvas = {
+        let info = reader.info();
+        (info.width, info.height)
+    };
+
+    // APNG's default image is only animation frame 0 when an `fcTL` precedes
+    // `IDAT`. When `acTL` comes after it, the default image is a *fallback* for
+    // non-APNG decoders and is not part of the animation at all — returning it
+    // would quietly break this crate's documented "decode frame 0" policy and,
+    // for the common "transparent fallback" authoring pattern, hand back an
+    // empty image. `Info::frame_control` is `Some` after `read_info` exactly
+    // when the default image is frame 0, which is precisely the test needed.
+    let default_image_is_frame_zero = reader.info().frame_control.is_some();
+    let separate_fallback =
+        reader.info().animation_control.is_some() && !default_image_is_frame_zero;
+    if separate_fallback {
+        // Skip the fallback and advance to the real first animation frame.
+        reader
+            .next_frame_info()
+            .map_err(|error| ImageError::decode(ImageFormat::Png, error.to_string()))?;
+    }
+
     let size = reader
         .output_buffer_size()
         .ok_or_else(|| ImageError::decode(ImageFormat::Png, "output buffer size overflows"))?;
@@ -141,8 +163,58 @@ fn decode_png(bytes: &[u8]) -> Result<RawDecode, ImageError> {
 
     let (color_type, _) = reader.output_color_type();
     let rgba = expand_to_rgba(&buffer, color_type, info.width, info.height)?;
+
+    // An animation frame may be a sub-rectangle of the canvas, so it has to be
+    // composited at its offset rather than returned as if it were the whole
+    // image. Frame 0 alone needs no blend-mode handling: the canvas starts
+    // fully transparent, and `Over` onto transparent black is `Source`, so both
+    // APNG blend ops agree here. Later frames would need real dispose/blend
+    // state, which static-only v1 does not keep.
+    if separate_fallback {
+        let frame = reader.info().frame_control.ok_or_else(|| {
+            ImageError::decode(ImageFormat::Png, "animation frame carries no fcTL")
+        })?;
+        let composited = composite_onto_canvas(
+            &rgba,
+            (info.width, info.height),
+            canvas,
+            (frame.x_offset, frame.y_offset),
+        )?;
+        return Ok((composited, canvas, AlphaType::Straight));
+    }
+
     // PNG alpha is stored straight, and `png` never premultiplies.
     Ok((rgba, (info.width, info.height), AlphaType::Straight))
+}
+
+/// Places an RGBA8 sub-rectangle onto a transparent canvas at `offset`.
+fn composite_onto_canvas(
+    frame: &[u8],
+    frame_size: (u32, u32),
+    canvas: (u32, u32),
+    offset: (u32, u32),
+) -> Result<Vec<u8>, ImageError> {
+    let (frame_width, frame_height) = frame_size;
+    let (canvas_width, canvas_height) = canvas;
+    if offset.0 + frame_width > canvas_width || offset.1 + frame_height > canvas_height {
+        return Err(ImageError::decode(
+            ImageFormat::Png,
+            format!(
+                "animation frame {frame_width}x{frame_height} at ({}, {}) escapes the \
+                 {canvas_width}x{canvas_height} canvas",
+                offset.0, offset.1
+            ),
+        ));
+    }
+    let stride = canvas_width as usize * 4;
+    let mut out = vec![0u8; stride * canvas_height as usize];
+    for row in 0..frame_height as usize {
+        let from = row * frame_width as usize * 4;
+        let to = (row + offset.1 as usize) * stride + offset.0 as usize * 4;
+        let width = frame_width as usize * 4;
+        out[to..to + width].copy_from_slice(&frame[from..from + width]);
+    }
+    Ok(out)
 }
 
 /// Normalises `png`'s four possible 8-bit output layouts to RGBA8.

@@ -91,12 +91,47 @@ pub fn is_complete(format: ImageFormat, bytes: &[u8]) -> bool {
     }
 }
 
-/// A PNG is complete once the terminating zero-length `IEND` chunk is present.
-/// Scanning for the literal is enough: `IEND` carries no payload, so the
-/// sequence cannot occur inside compressed data as a *chunk type* — and a false
-/// positive costs only a decoder error rather than a silent bad image.
+/// A PNG is complete once a well-formed, zero-length `IEND` chunk — **including
+/// its four CRC bytes** — has been reached by walking the chunk chain.
+///
+/// Scanning for the literal `IEND` is not enough, and both failure directions
+/// are real. A file truncated immediately after the `IEND` type but before its
+/// mandatory CRC contains the bytes yet is not complete; and `IEND` is four
+/// unremarkable ASCII bytes that can occur inside any other chunk's compressed
+/// payload, so a scan can also report complete far too early. Walking
+/// length-prefixed chunks costs one pass over the headers, touches no payload,
+/// and answers exactly the question asked.
 fn has_png_iend(bytes: &[u8]) -> bool {
-    bytes.len() > PNG_MAGIC.len() && find_subslice(bytes, b"IEND").is_some()
+    // Every chunk is: 4-byte big-endian payload length, 4-byte type, payload,
+    // 4-byte CRC.
+    let mut cursor = PNG_MAGIC.len();
+    loop {
+        let Some(header) = bytes.get(cursor..cursor + 8) else {
+            return false;
+        };
+        let length = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+        let kind = &header[4..8];
+        // The spec caps a chunk length at 2^31 - 1; anything larger is
+        // corruption rather than a chunk we have not seen yet.
+        if length > i32::MAX as u32 {
+            return false;
+        }
+        let Some(end) = (cursor + 8)
+            .checked_add(length as usize)
+            .and_then(|payload_end| payload_end.checked_add(4))
+        else {
+            return false;
+        };
+        if end > bytes.len() {
+            return false;
+        }
+        if kind == b"IEND" {
+            // `IEND` is defined to carry no payload; a non-empty one means the
+            // chain is not the one the spec describes.
+            return length == 0;
+        }
+        cursor = end;
+    }
 }
 
 /// RIFF declares its payload length at bytes 4..8, little-endian, counting
@@ -124,10 +159,17 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 mod tests {
     use super::{ImageFormat, is_complete, sniff};
 
+    /// A minimal but structurally valid chunk chain: one 13-byte `IHDR`, then
+    /// the zero-length `IEND` with its CRC.
     fn png_bytes() -> Vec<u8> {
         let mut bytes = super::PNG_MAGIC.to_vec();
-        bytes.extend_from_slice(b"\0\0\0\0IHDR");
-        bytes.extend_from_slice(b"\0\0\0\0IEND\xAE\x42\x60\x82");
+        bytes.extend_from_slice(&13u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&[0u8; 13]);
+        bytes.extend_from_slice(&[0u8; 4]);
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(b"IEND");
+        bytes.extend_from_slice(&[0xAE, 0x42, 0x60, 0x82]);
         bytes
     }
 
@@ -188,6 +230,53 @@ mod tests {
         assert!(is_complete(ImageFormat::WebP, &webp_bytes(b"VP8 data")));
         let short = webp_bytes(b"VP8 data");
         assert!(!is_complete(ImageFormat::WebP, &short[..short.len() - 3]));
+    }
+
+    #[test]
+    fn png_completeness_walks_chunks_rather_than_scanning_for_iend() {
+        let complete = png_bytes();
+        assert!(is_complete(ImageFormat::Png, &complete));
+
+        // Cut immediately after the `IEND` *type*, before its mandatory CRC.
+        // The literal is present; the chunk is not.
+        let no_crc = &complete[..complete.len() - 4];
+        assert!(
+            !is_complete(ImageFormat::Png, no_crc),
+            "the IEND literal without its CRC is not a complete chunk"
+        );
+        // One CRC byte short is still short.
+        assert!(!is_complete(
+            ImageFormat::Png,
+            &complete[..complete.len() - 1]
+        ));
+
+        // `IEND` occurring inside another chunk's payload must not be mistaken
+        // for the terminator — this is the false-positive direction.
+        let mut decoy = super::PNG_MAGIC.to_vec();
+        decoy.extend_from_slice(&8u32.to_be_bytes());
+        decoy.extend_from_slice(b"IDAT");
+        decoy.extend_from_slice(b"xxIENDyy");
+        decoy.extend_from_slice(&[0u8; 4]);
+        assert!(
+            !is_complete(ImageFormat::Png, &decoy),
+            "IEND inside a payload is data, not a terminator"
+        );
+
+        // A truthful chain that happens to contain the decoy still terminates.
+        let mut both = decoy.clone();
+        both.extend_from_slice(&0u32.to_be_bytes());
+        both.extend_from_slice(b"IEND");
+        both.extend_from_slice(&[0xAE, 0x42, 0x60, 0x82]);
+        assert!(is_complete(ImageFormat::Png, &both));
+    }
+
+    #[test]
+    fn png_completeness_rejects_a_nonsense_chunk_length() {
+        let mut absurd = super::PNG_MAGIC.to_vec();
+        absurd.extend_from_slice(&u32::MAX.to_be_bytes());
+        absurd.extend_from_slice(b"IDAT");
+        absurd.extend_from_slice(&[0u8; 8]);
+        assert!(!is_complete(ImageFormat::Png, &absurd));
     }
 
     #[test]

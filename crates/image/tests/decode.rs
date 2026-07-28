@@ -292,3 +292,40 @@ fn every_registered_backend_agrees_on_every_fixture() {
         Err(ImageError::Truncated { .. })
     ));
 }
+
+#[test]
+fn an_apng_decodes_animation_frame_zero_not_its_fallback_image() {
+    // This file's default image carries no preceding `fcTL`, so per the APNG
+    // spec it is a fallback for non-APNG decoders and is NOT part of the
+    // animation. `Reader::next_frame` hands that fallback back first, so a
+    // decoder that simply takes it returns the transparent placeholder instead
+    // of the red frame 0 — silently violating the documented frame-0 policy.
+    let response = decode_bytes(
+        &software(),
+        &fixture("apng-fallback.png"),
+        &DecodeRequest::default(),
+    )
+    .expect("decode APNG");
+
+    assert!(response.header.animated, "acTL present means animated");
+    assert_eq!(
+        (response.image.width(), response.image.height()),
+        (4, 4),
+        "the frame is composited onto the full canvas"
+    );
+
+    let pixels = response.image.pixels();
+    assert_eq!(
+        &pixels[0..4],
+        &[255, 0, 0, 255],
+        "expected animation frame 0 (opaque red), got the transparent fallback"
+    );
+    assert!(
+        pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|px| *px == [255, 0, 0, 255]),
+        "every pixel of frame 0 covers the canvas"
+    );
+}

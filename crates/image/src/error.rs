@@ -59,6 +59,11 @@ pub enum ImageError {
         limit: Arc<str>,
     },
 
+    /// Encoded bytes past the loader's `max_encoded_bytes` budget, refused
+    /// before the whole body was buffered.
+    #[error("encoded image exceeds the {limit}-byte budget")]
+    EncodedTooLarge { limit: u64 },
+
     /// A `data:` URL whose payload could not be parsed.
     #[error("malformed data: URL: {0}")]
     MalformedDataUrl(Arc<str>),
