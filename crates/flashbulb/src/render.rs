@@ -8,6 +8,7 @@
 use std::fmt;
 
 use dom::Document;
+use dom::visual::PaintOrder;
 use pulsar::gpu::{GpuError, Headless};
 use pulsar::vello::peniko::Color;
 use pulsar::{ImageStore, Painter};
@@ -119,8 +120,35 @@ pub fn capture_document_sized<T: Sync>(
     height: u32,
 ) -> Result<Image, CaptureError> {
     let frame = document.paint_order();
+    capture_frame_sized(gpu, document, &frame, background, width, height)
+}
+
+/// Captures an already-built frame.
+///
+/// This is the entry point for a caller that cannot hand out `&mut Document` —
+/// `lynx_element::ElementTree`, whose invariants the DOM does not know about,
+/// exposes `paint_order()` and `document()` rather than the document itself.
+pub fn capture_frame<T>(
+    gpu: &mut Headless,
+    document: &Document<T>,
+    frame: &PaintOrder,
+    background: Color,
+) -> Result<Image, CaptureError> {
+    let (width, height) = frame_size(document);
+    capture_frame_sized(gpu, document, frame, background, width, height)
+}
+
+/// [`capture_frame`] at an explicit pixel size.
+pub fn capture_frame_sized<T>(
+    gpu: &mut Headless,
+    document: &Document<T>,
+    frame: &PaintOrder,
+    background: Color,
+    width: u32,
+    height: u32,
+) -> Result<Image, CaptureError> {
     let mut painter = Painter::new();
-    let scene = painter.paint(document, &frame, &ImageStore::new());
+    let scene = painter.paint(document, frame, &ImageStore::new());
     let pixels = gpu
         .render(scene, width, height, background)
         .map_err(CaptureError::Gpu)?;

@@ -49,7 +49,7 @@ use std::cell::{Ref, RefCell, RefMut};
 use std::fmt;
 use std::rc::Rc;
 
-use bobcat_engine::script::{ScriptError, ScriptErrorPhase};
+use bobcat_engine::script::ScriptError;
 use lynx_element::{ElementId, ElementTree, PageConfig, PapiError, Viewport};
 use quickjs_rust_bridge::{self as quickjs, HostFunctionError, HostValue};
 
@@ -84,22 +84,16 @@ const BOOT_SEQUENCE: &str = r#"(function () {
 })()"#;
 
 /// Why running a main-thread script failed.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct MainThreadError {
     message: String,
     location: Option<String>,
 }
 
 impl MainThreadError {
-    fn from_script(phase: &str, error: &quickjs::Error) -> Self {
-        let name = error.name.as_deref().unwrap_or_default();
-        let message = if name.is_empty() {
-            format!("{phase}: {}", error.message)
-        } else {
-            format!("{phase}: {name}: {}", error.message)
-        };
+    fn from_engine(phase: &str, error: &ScriptError) -> Self {
         Self {
-            message,
+            message: format!("{phase}: {}", error.message),
             location: error.location.as_ref().map(|location| {
                 let source = location.source.as_deref().unwrap_or("<unknown>");
                 match (location.line, location.column) {
@@ -108,13 +102,6 @@ impl MainThreadError {
                     _ => source.to_owned(),
                 }
             }),
-        }
-    }
-
-    fn from_checkpoint(phase: &str, error: &ScriptError) -> Self {
-        Self {
-            message: format!("{phase}: {}", error.message),
-            location: None,
         }
     }
 }
@@ -195,28 +182,22 @@ impl MainThreadRuntime {
         self.render_page()
     }
 
+    /// Evaluates through the engine's own checkpoint state machine.
+    ///
+    /// web-core's MTS realm is a browser realm, where promise jobs queued
+    /// during evaluation run before control reaches the host again — so the
+    /// microtask drain is not optional. Going through `evaluate_raw` rather
+    /// than driving the realm directly is what keeps this wrapper's job
+    /// ordering identical to the crate's `ScriptEngine` impl, including
+    /// resuming a checkpoint that previously hit the per-call job limit.
     fn evaluate(&mut self, source: &str, name: &str, phase: &str) -> Result<(), MainThreadError> {
-        let evaluated = self.engine.realm.evaluate(
-            quickjs::EvalSource {
+        self.engine
+            .evaluate_raw(quickjs::EvalSource {
                 name: Some(name),
                 ..quickjs::EvalSource::new(source)
-            },
-            quickjs::EvalOptions::default(),
-        );
-        // Drain the microtask queue before returning. web-core's MTS realm is a
-        // browser realm, where promise jobs queued during evaluation run before
-        // control reaches the host again; without this a bundle's
-        // `Promise.resolve().then(…)` — or any `await` — would simply never
-        // run. This is the same checkpoint `QuickJsScriptEngine` performs after
-        // every operation, and like it, an evaluation error wins over a
-        // checkpoint error.
-        let drained = self.engine.checkpoint(ScriptErrorPhase::Evaluate);
-        match evaluated {
-            Ok(_) => drained
-                .map(|_| ())
-                .map_err(|error| MainThreadError::from_checkpoint(phase, &error)),
-            Err(error) => Err(MainThreadError::from_script(phase, &error)),
-        }
+            })
+            .map(|_| ())
+            .map_err(|error| MainThreadError::from_engine(phase, &error))
     }
 }
 
@@ -236,7 +217,7 @@ fn install_element_papi(
         let component_css_id = i32_argument("__CreatePage", arguments, 1)?;
         let id = tree
             .borrow_mut()
-            .create_page(&component_id, component_css_id);
+            .create_page(component_id, component_css_id);
         Ok(handle(id))
     })?;
 
@@ -340,14 +321,16 @@ fn i32_argument(
     }
 }
 
-fn string_argument(
+/// Borrows a string argument. The slice outlives the call, so there is no
+/// reason to copy here — `create_page` makes the one copy it needs.
+fn string_argument<'a>(
     function: &str,
-    arguments: &[HostValue],
+    arguments: &'a [HostValue],
     index: usize,
-) -> Result<String, HostFunctionError> {
+) -> Result<&'a str, HostFunctionError> {
     match argument(arguments, index) {
-        HostValue::String(value) => Ok(value.clone()),
-        HostValue::Undefined | HostValue::Null => Ok(String::new()),
+        HostValue::String(value) => Ok(value),
+        HostValue::Undefined | HostValue::Null => Ok(""),
         _ => Err(HostFunctionError::new(format!(
             "{function} expects a string for argument {index}"
         ))),

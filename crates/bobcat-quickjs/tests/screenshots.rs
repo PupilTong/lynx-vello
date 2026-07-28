@@ -12,7 +12,7 @@
 
 use bobcat_quickjs::MainThreadRuntime;
 use flashbulb::vello::peniko::Color;
-use flashbulb::{Screenshots, capture_document, headless_or_skip};
+use flashbulb::{Screenshots, capture_frame, headless_or_skip};
 use lynx_element::{PageConfig, Viewport};
 
 /// lynx-stack's Playwright Chromium project emulates a Pixel 5, whose CSS
@@ -84,7 +84,8 @@ fn a_main_thread_script_renders_its_element_tree() {
 
     let image = {
         let mut elements = runtime.elements_mut();
-        capture_document(&mut gpu, elements.document_mut(), Color::WHITE).expect("capture")
+        let frame = elements.paint_order();
+        capture_frame(&mut gpu, elements.document(), &frame, Color::WHITE).expect("capture")
     };
 
     assert_eq!(image.width(), 393);
@@ -136,7 +137,8 @@ fn render_overflow(config: PageConfig, test: &str, golden: &str) {
 
     let image = {
         let mut elements = runtime.elements_mut();
-        capture_document(&mut gpu, elements.document_mut(), Color::WHITE).expect("capture")
+        let frame = elements.paint_order();
+        capture_frame(&mut gpu, elements.document(), &frame, Color::WHITE).expect("capture")
     };
     screenshots().assert_matches(&[golden], &image);
 }

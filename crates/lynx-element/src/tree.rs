@@ -173,10 +173,27 @@ impl ElementTree {
         &self.document
     }
 
-    /// The underlying document, for the embedder work this crate does not own
-    /// yet — mounting decoded `StyleInfo` rules, registering fonts, painting.
-    pub const fn document_mut(&mut self) -> &mut Document<ElementData> {
-        &mut self.document
+    /// The paint order for the current tree, laying it out first.
+    ///
+    /// This is the mutable operation a renderer needs. There is deliberately no
+    /// `document_mut`: handing out `&mut Document` would let a caller remove or
+    /// move nodes behind this layer's back, desynchronising the handle table,
+    /// the page state, and the height cache — and the DOM core is
+    /// crash-on-misuse, so the next PAPI call would panic rather than return
+    /// [`PapiError`].
+    pub fn paint_order(&mut self) -> dom::visual::PaintOrder {
+        self.document.paint_order()
+    }
+
+    /// Resizes the viewport, restyling and relaying out on the next flush.
+    pub fn set_viewport(&mut self, width: f32, height: f32) {
+        self.document.set_viewport(width, height);
+    }
+
+    /// Registers font data for text measurement, returning how many faces were
+    /// added.
+    pub fn register_fonts(&mut self, bytes: &[u8]) -> usize {
+        self.document.register_fonts(bytes)
     }
 
     #[must_use]
@@ -254,6 +271,57 @@ impl ElementTree {
             current = self
                 .document
                 .get(slot.node)
+                .and_then(dom::Node::parent_id)
+                .and_then(|parent| self.handle_of(parent));
+        }
+    }
+
+    /// An element's true height, from its children's recorded heights.
+    fn height_from_children(&self, node: NodeId) -> u32 {
+        let Some(element) = self.document.get(node) else {
+            return 0;
+        };
+        element
+            .child_ids()
+            .iter()
+            .filter_map(|&child| self.handle_of(child))
+            .filter_map(|handle| self.slot(handle))
+            .map(|slot| slot.height.saturating_add(1))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Recomputes heights up the chain a subtree was just taken from.
+    ///
+    /// [`raise_heights`](Self::raise_heights) only ever grows a height, which
+    /// is right for an append but leaves the *old* ancestors claiming a subtree
+    /// they no longer have. Left stale, a node that is now a genuine leaf keeps
+    /// its old height and gets refused as [`PapiError::TooDeep`] the next time
+    /// something tries to append it somewhere deep.
+    ///
+    /// Stops at the first ancestor whose height is unchanged: nothing above it
+    /// can have changed either.
+    fn lower_heights(&mut self, from: ElementId) {
+        let mut current = Some(from);
+        for _ in 0..=MAX_TREE_DEPTH {
+            let Some(id) = current else {
+                return;
+            };
+            let Some(node) = self.node_id(id) else {
+                return;
+            };
+            let height = self.height_from_children(node);
+            let Some(mut slot) = self.slot(id) else {
+                return;
+            };
+            if slot.height == height {
+                return;
+            }
+            slot.height = height;
+            self.nodes[id.get() as usize] = Some(slot);
+            current = self
+                .document
+                .get(node)
                 .and_then(dom::Node::parent_id)
                 .and_then(|parent| self.handle_of(parent));
         }
@@ -344,8 +412,21 @@ impl ElementTree {
             });
         }
 
+        // `append_child` detaches first, so the chain the child is leaving has
+        // to give its height back.
+        let previous_parent = self
+            .document
+            .get(child_node)
+            .and_then(dom::Node::parent_id)
+            .and_then(|node| self.handle_of(node));
+
         self.document.append_child(parent_node, child_node);
         self.raise_heights(parent, child_height + 1);
+        if let Some(previous) = previous_parent
+            && previous != parent
+        {
+            self.lower_heights(previous);
+        }
         Ok(child)
     }
 
@@ -726,6 +807,48 @@ mod tests {
 
     /// Height bookkeeping must not make a legal wide tree fail: thousands of
     /// siblings are fine, only depth is bounded.
+    /// A node that has given its subtree away is a leaf again, and the guard
+    /// must see that. The height cache only ever grew before, so a genuine leaf
+    /// kept claiming its old depth and was refused as `TooDeep`.
+    #[test]
+    fn giving_a_subtree_away_lowers_the_recorded_height() {
+        let mut tree = tree();
+        let page = tree.create_page("card", 0);
+
+        // A deep anchor, so a stale height would push the check over the limit.
+        let mut anchor = page;
+        for _ in 0..55 {
+            let view = tree.create_view(0).unwrap();
+            anchor = tree.append_element(anchor, view).unwrap();
+        }
+
+        // A detached chain 205 levels tall, rooted at `holder`.
+        let holder = tree.create_view(0).unwrap();
+        let mut tip = holder;
+        for _ in 0..205 {
+            let view = tree.create_view(0).unwrap();
+            tip = tree.append_element(tip, view).unwrap();
+        }
+
+        // Move everything below `holder` elsewhere; `holder` is a leaf now.
+        let holder_node = tree.node_id(holder).unwrap();
+        let child_node = tree.document().get(holder_node).unwrap().child_ids()[0];
+        let child = tree.document().get(child_node).unwrap().payload().unique_id;
+        let parking = tree.create_view(0).unwrap();
+        tree.append_element(parking, child).unwrap();
+        assert!(
+            tree.document()
+                .get(holder_node)
+                .unwrap()
+                .child_ids()
+                .is_empty()
+        );
+
+        // 55 + 1 + 0 fits easily; 55 + 1 + 205 would not.
+        tree.append_element(anchor, holder)
+            .expect("a leaf must not be refused for a subtree it no longer has");
+    }
+
     #[test]
     fn a_wide_tree_is_not_affected_by_the_depth_guard() {
         let mut tree = tree();

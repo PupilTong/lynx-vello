@@ -275,9 +275,10 @@ mod release {
         }
     }
 
-    /// QuickJS is refcounted, and its GC only breaks cycles, so a function
-    /// nothing references is finalized the moment the last reference goes —
-    /// no collection needed.
+    /// `QuickJS` is refcounted, so a function nothing references is finalized the
+    /// moment the last reference goes. The *closure* drop is then deferred to
+    /// the next realm operation, because doing it in the finalizer would risk
+    /// re-entering `QuickJS` from inside its own collector.
     #[test]
     fn dropping_an_uninstalled_function_releases_its_closure() {
         let drops = Rc::new(Cell::new(0));
@@ -286,10 +287,47 @@ mod release {
         let function = realm.function("gone", 0, tracking(&drops)).unwrap();
         assert_eq!(drops.get(), 0, "still referenced");
         drop(function);
-        assert_eq!(drops.get(), 1, "the last reference is gone");
+        assert_eq!(drops.get(), 0, "finalized, but the drop is deferred");
+
+        // Any realm operation reclaims; `run_gc` is simply the cheapest.
+        realm.run_gc();
+        assert_eq!(drops.get(), 1, "reclaimed at the next operation");
 
         realm.run_gc();
-        assert_eq!(drops.get(), 1, "and collection does not double-release");
+        assert_eq!(drops.get(), 1, "and not released twice");
+    }
+
+    /// A handler that owns a `Value` from its own realm is safe — the drop
+    /// happens outside the collector — but the resulting reference cycle keeps
+    /// the realm alive until the function itself becomes unreachable.
+    #[test]
+    fn a_handler_owning_a_value_is_released_without_re_entering_the_collector() {
+        let drops = Rc::new(Cell::new(0));
+        let mut realm = Realm::new().unwrap();
+
+        let rooted = realm
+            .evaluate(EvalSource::new("({})"), EvalOptions::default())
+            .unwrap();
+        let tracked = Tracked(Rc::clone(&drops));
+        let function = realm
+            .function("owns_a_value", 0, move |_| {
+                let _ = &tracked;
+                // Captured from this very realm: the hazard the deferral exists
+                // for, since dropping it calls JS_FreeValue.
+                let _ = &rooted;
+                Ok(HostValue::Undefined)
+            })
+            .unwrap();
+
+        drop(function);
+        realm.run_gc();
+        assert_eq!(drops.get(), 1, "released outside the collector");
+
+        // The realm survived the JS_FreeValue that drop performed.
+        let value = realm
+            .evaluate(EvalSource::new("1 + 1"), EvalOptions::default())
+            .expect("the realm is still healthy");
+        assert_eq!(value.as_number(), Some(2.0));
     }
 
     #[test]

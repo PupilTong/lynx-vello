@@ -153,7 +153,9 @@ pub fn compare(expected: &Image, actual: &Image, options: CompareOptions) -> Com
 
     let width = expected.width();
     let height = expected.height();
-    let mut diff = Image::transparent(width, height);
+    // The dimensions came from an existing image, so they are known to fit.
+    let mut diff =
+        Image::transparent(width, height).expect("the diff matches an already-allocated image");
     let mut diff_pixels = 0;
     let mut anti_aliased_pixels = 0;
     let max_delta = MAX_YIQ_DELTA * options.threshold * options.threshold;

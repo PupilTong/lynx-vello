@@ -141,16 +141,21 @@ useful signal for currently-compatible versions of those libraries.
   leaf calls today. A slot is vacated for the duration of its call (a guard
   that restores it on the unwinding path too), so a panicking callback becomes
   a JS exception rather than an unwind into C and leaves its slot usable, and
-  a re-entrant invocation would be refused rather than alias the `FnMut` if a
-  future boundary made one reachable. A closure's lifetime follows its JS
-  function object rather than the realm: each function owns a companion object
-  whose finalizer releases the handler slot, so discarding a function drops the
-  closure and recycles the slot (without this, a realm registering a handler
-  per element per update — events, worklets — would accumulate every closure it
-  ever made). Because that drop can run inside the collector, host closures
-  must not capture a `Value` from their own realm. The crate must remain
-  independent of Bobcat, the DOM, resources, and runtime policy — it knows
-  nothing about Lynx.
+  a re-entrant invocation is refused rather than aliasing the `FnMut` (the
+  closure lives behind a `RefCell`, so that guard is structural). A closure's
+  lifetime follows its JS function object rather than the realm: the closure
+  sits at its own stable heap address, which a companion JS object holds and
+  the collector hands back through a finalizer — so nothing is indexed,
+  recycled, or aliasable by a stale reference, and discarding a function drops
+  its closure. Without this a realm registering a handler per element per
+  update (events, worklets) would accumulate every closure it ever made.
+  The finalizer only *records* the address; the drop happens at the next
+  `&mut Realm` entry point, because a handler may own a `Value` whose `Drop`
+  calls `JS_FreeValue` and re-entering QuickJS from inside its own GC is
+  unsound. Capturing a same-realm `Value` is therefore safe, but forms a
+  reference cycle that leaks the realm unless the function is collected first.
+  The crate must remain independent of Bobcat, the DOM, resources, and runtime
+  policy — it knows nothing about Lynx.
 - `crates/bobcat-quickjs` — narrow integration layer depending on
   `bobcat-engine`, the otherwise Bobcat-independent `quickjs-rust-bridge`, and
   `lynx-element`. Two public surfaces: the opaque QuickJS-backed `LynxView`
@@ -184,7 +189,12 @@ useful signal for currently-compatible versions of those libraries.
   handle table starting at 1 (slot 0 is web-core's "no element" sentinel);
   every fallible PAPI entry returns `PapiError` instead of panicking, because
   the main-thread script is untrusted input and the DOM core is
-  crash-on-misuse — including a `MAX_TREE_DEPTH` cap, because `dom`'s
+  crash-on-misuse. `ElementTree` never lends out `&mut Document`: a caller that
+  removed or moved nodes directly would desynchronise the handle table, the
+  page state, and the height cache, and the next PAPI call would panic in the
+  DOM instead of returning `PapiError`. The mutable surface is the narrow set
+  the layers above actually need (`paint_order`, `add_author_stylesheet`,
+  `set_viewport`, `register_fonts`). Validation includes a `MAX_TREE_DEPTH` cap, because `dom`'s
   recursive layout/paint/hit-test walks overflow the stack and abort the
   *process* somewhere past ~300 levels on a 2 MiB thread, and script must not
   be able to reach that. (A guard, not a fix; the fix is iterative traversal

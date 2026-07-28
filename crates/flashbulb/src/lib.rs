@@ -79,5 +79,6 @@ pub use crate::golden::{
 pub use crate::image::{Image, ImageError};
 #[cfg(feature = "render")]
 pub use crate::render::{
-    CaptureError, capture_document, capture_document_sized, frame_size, headless_or_skip,
+    CaptureError, capture_document, capture_document_sized, capture_frame, capture_frame_sized,
+    frame_size, headless_or_skip,
 };

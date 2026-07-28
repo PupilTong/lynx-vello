@@ -15,7 +15,7 @@ use crate::image::{Image, ImageError};
 pub const UPDATE_ENV: &str = "FLASHBULB_UPDATE_SNAPSHOTS";
 
 /// A directory of golden PNGs plus the tolerances they are compared with.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Screenshots {
     goldens: PathBuf,
     artifacts: PathBuf,
@@ -195,7 +195,7 @@ impl Screenshots {
 }
 
 /// Where the three failure PNGs were written.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Artifacts {
     pub expected: PathBuf,
     pub actual: PathBuf,

@@ -9,7 +9,6 @@ mod ffi;
 mod implementation {
     use std::cell::{Cell, RefCell};
     use std::ffi::{CString, c_void};
-    use std::fmt;
     use std::num::TryFromIntError;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::ptr::{self, NonNull};
@@ -17,6 +16,7 @@ mod implementation {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, Instant};
+    use std::{fmt, mem};
 
     use super::ffi;
 
@@ -372,28 +372,6 @@ mod implementation {
         })
     }
 
-    /// Lends a handler out of its slot for one call and puts it back, so an
-    /// unwinding callback cannot leave the table permanently poisoned.
-    struct HostSlotGuard<'table> {
-        table: &'table HostTable,
-        index: u32,
-        handler: Option<HostHandler>,
-    }
-
-    impl Drop for HostSlotGuard<'_> {
-        fn drop(&mut self) {
-            if let Some(handler) = self.handler.take()
-                && let Some(slot) = self
-                    .table
-                    .handlers
-                    .borrow_mut()
-                    .get_mut(self.index as usize)
-            {
-                *slot = Some(handler);
-            }
-        }
-    }
-
     fn read_host_arguments(
         context: *mut ffi::JSContext,
         count: usize,
@@ -477,22 +455,29 @@ mod implementation {
 
     /// Fired by the garbage collector once a host function is unreachable.
     ///
-    /// Runs during collection, so it must not touch JavaScript — it only drops
-    /// a Rust closure, which by the crate's contract holds no [`Value`].
-    unsafe extern "C" fn host_release(opaque: *mut c_void, index: u32) {
+    /// Records the slot and returns. The closure is dropped later, by
+    /// [`HostTable::reclaim`], because a handler may own a [`Value`] whose
+    /// `Drop` calls `JS_FreeValue` — re-entering `QuickJS` from inside its own
+    /// collector.
+    unsafe extern "C" fn host_release(opaque: *mut c_void, handler: *mut c_void) {
         let table = unsafe { &*opaque.cast::<HostTable>() };
-        // A closure's `Drop` panicking during GC would unwind into C.
-        let _ = catch_unwind(AssertUnwindSafe(|| table.release(index)));
+        // An allocation failure panicking here would unwind into C.
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            table.note_released(handler.cast::<HostSlot>());
+        }));
     }
 
     unsafe extern "C" fn host_dispatch(
         opaque: *mut c_void,
-        index: u32,
+        handler: *mut c_void,
         argument_count: usize,
         arguments: *const *mut ffi::QjsValue,
         result: *mut *mut ffi::QjsValue,
     ) -> i32 {
         let table = unsafe { &*opaque.cast::<HostTable>() };
+        // Live for the whole call: JavaScript holds the function, which owns
+        // this allocation, and the finalizer cannot run mid-call.
+        let slot = unsafe { &*handler.cast::<HostSlot>() };
         let context = table.context.get();
         if context.is_null() {
             // The realm is being torn down; there is nothing left to throw on.
@@ -501,25 +486,11 @@ mod implementation {
 
         let called = catch_unwind(AssertUnwindSafe(|| {
             let values = read_host_arguments(context, argument_count, arguments)?;
-            let handler = table
-                .handlers
-                .borrow_mut()
-                .get_mut(index as usize)
-                .and_then(Option::take);
-            let Some(handler) = handler else {
+            let Ok(mut handler) = slot.handler.try_borrow_mut() else {
                 return Err(HostFunctionError::new(
                     "this host function cannot be called while it is already running",
                 ));
             };
-            let mut guard = HostSlotGuard {
-                table,
-                index,
-                handler: Some(handler),
-            };
-            let handler = guard
-                .handler
-                .as_mut()
-                .expect("the guard was just given a handler");
             handler(&values)
         }));
 
@@ -616,75 +587,76 @@ mod implementation {
 
     type HostHandler = Box<dyn FnMut(&[HostValue]) -> Result<HostValue, HostFunctionError>>;
 
-    /// The realm's registered host callbacks, reachable from the C trampoline.
+    /// One host closure, at a stable heap address handed to JavaScript.
     ///
-    /// A slot is `take`n for the duration of its call, so a callback that
-    /// re-enters itself through JavaScript would be refused rather than
-    /// aliasing the `FnMut`. Today's boundary carries primitives only, so a
-    /// callback cannot call back into the realm at all and that path is
-    /// unreachable; the guard is here for a boundary that can.
+    /// The `RefCell` is the re-entrancy guard: a callback reached again while
+    /// it is already running is refused rather than aliasing the `FnMut`.
+    struct HostSlot {
+        handler: RefCell<HostHandler>,
+    }
+
+    /// The realm's side of host-function lifetime.
     ///
-    /// Slots are released by the garbage collector, not by the realm: each
-    /// host function's JS object owns a companion object whose finalizer calls
-    /// [`release`](HostTable::release). A released index goes on `free_slots`
-    /// so a realm that registers and discards functions for a long time — an
-    /// event handler per element per update, say — reuses storage instead of
-    /// growing.
+    /// There is no table of handlers: each closure lives at its own address,
+    /// which is what JavaScript holds (through the companion object created in
+    /// `qjs_new_host_function`) and what the collector hands back. Nothing is
+    /// indexed, so nothing can be reallocated, recycled, or aliased by a stale
+    /// reference.
+    ///
+    /// The finalizer runs *inside* collection, where calling back into `QuickJS`
+    /// is unsound — and dropping a handler can do exactly that, since a closure
+    /// may own a [`Value`] whose `Drop` calls `JS_FreeValue`. So the finalizer
+    /// only records the address; [`reclaim`](HostTable::reclaim) does the drop
+    /// at a point where no collection is in progress.
     struct HostTable {
         context: Cell<*mut ffi::JSContext>,
-        handlers: RefCell<Vec<Option<HostHandler>>>,
-        free_slots: RefCell<Vec<u32>>,
+        /// Closures whose function has been collected but which have not yet
+        /// been dropped.
+        pending_release: RefCell<Vec<*mut HostSlot>>,
     }
 
     impl HostTable {
         fn new() -> Self {
             Self {
                 context: Cell::new(ptr::null_mut()),
-                handlers: RefCell::new(Vec::new()),
-                free_slots: RefCell::new(Vec::new()),
+                pending_release: RefCell::new(Vec::new()),
             }
         }
 
-        fn insert(&self, handler: HostHandler) -> Result<u32, Error> {
-            if let Some(index) = self.free_slots.borrow_mut().pop() {
-                self.handlers.borrow_mut()[index as usize] = Some(handler);
-                return Ok(index);
-            }
-            let mut handlers = self.handlers.borrow_mut();
-            let index = u32::try_from(handlers.len()).map_err(|_| {
-                Error::bridge(
-                    ErrorKind::InvalidInput,
-                    ErrorPhase::ConstructValue,
-                    "this realm cannot hold any more host functions",
-                )
-            })?;
-            handlers.push(Some(handler));
-            Ok(index)
-        }
-
-        /// Drops the handler at `index` and returns its slot to the free list.
+        /// Records that the closure at `slot` is unreachable from JavaScript.
         ///
-        /// Idempotent: a slot that is already empty is left alone and *not*
-        /// pushed to the free list again, because a construction failure can
-        /// race the finalizer that releases the same index, and a duplicated
-        /// free slot would hand two live functions the same handler.
-        fn release(&self, index: u32) {
-            let Ok(mut handlers) = self.handlers.try_borrow_mut() else {
-                // A collection landed while the table was borrowed. The slot
-                // stays live; it is released when the realm drops.
-                return;
-            };
-            let Some(slot) = handlers.get_mut(index as usize) else {
-                return;
-            };
-            let Some(handler) = slot.take() else {
-                return;
-            };
-            // Drop the closure with no borrow held, so its own `Drop` is free
-            // to touch the table.
-            drop(handlers);
-            drop(handler);
-            self.free_slots.borrow_mut().push(index);
+        /// Called from a GC finalizer, so it does no more than append.
+        fn note_released(&self, slot: *mut HostSlot) {
+            if let Ok(mut pending) = self.pending_release.try_borrow_mut() {
+                pending.push(slot);
+            }
+            // A failed borrow means `reclaim` is already draining and will make
+            // another pass, so the address is not lost.
+        }
+
+        /// Drops every collected closure.
+        ///
+        /// Must run with no collection in progress — i.e. from a `&mut Realm`
+        /// entry point. A handler's own `Drop` can free JS values and thereby
+        /// collect further functions, so this repeats until nothing new
+        /// arrives.
+        fn reclaim(&self) {
+            loop {
+                let batch = {
+                    let Ok(mut pending) = self.pending_release.try_borrow_mut() else {
+                        return;
+                    };
+                    if pending.is_empty() {
+                        return;
+                    }
+                    mem::take(&mut *pending)
+                };
+                for slot in batch {
+                    // The finalizer hands back an address JavaScript will never
+                    // mention again, so this is the unique owner.
+                    drop(unsafe { Box::from_raw(slot) });
+                }
+            }
         }
     }
 
@@ -692,7 +664,9 @@ mod implementation {
         runtime: NonNull<ffi::QjsRuntime>,
         context: NonNull<ffi::JSContext>,
         interrupt: Rc<InterruptState>,
-        hosts: Rc<HostTable>,
+        // Boxed, not `Rc`d: nothing clones it, and only its address needs to be
+        // stable for the C trampoline's opaque.
+        hosts: Box<HostTable>,
     }
 
     impl Drop for RealmInner {
@@ -713,9 +687,9 @@ mod implementation {
                 // dropped only after this body returns.
                 ffi::qjs_context_free(self.context.as_ptr());
                 ffi::qjs_runtime_free(self.runtime.as_ptr());
-                // Anything the collector could not reach — a function still
-                // rooted at teardown — drops here.
-                self.hosts.handlers.borrow_mut().clear();
+                // Freeing the runtime finalized everything still rooted, so
+                // the pending list now holds every remaining closure.
+                self.hosts.reclaim();
             }
         }
     }
@@ -782,13 +756,13 @@ mod implementation {
                     Some(interrupt_callback),
                     Rc::as_ptr(&interrupt).cast_mut().cast(),
                 );
-                let hosts = Rc::new(HostTable::new());
+                let hosts = Box::new(HostTable::new());
                 hosts.context.set(context.as_ptr());
                 ffi::qjs_runtime_set_host_dispatch(
                     runtime.as_ptr(),
                     Some(host_dispatch),
                     Some(host_release),
-                    Rc::as_ptr(&hosts).cast_mut().cast(),
+                    (&raw const *hosts).cast_mut().cast(),
                 );
                 Ok(Self {
                     inner: Rc::new(RealmInner {
@@ -808,6 +782,16 @@ mod implementation {
             }
         }
 
+        /// Drops the closures of any host functions JavaScript has collected
+        /// since the last call.
+        ///
+        /// Every `&mut self` entry point starts here: holding `&mut Realm`
+        /// proves no host call is in flight and no collection is running, which
+        /// is what makes it safe to drop a closure that may own a [`Value`].
+        fn reclaim(&mut self) {
+            self.inner.hosts.reclaim();
+        }
+
         /// Runs a full garbage collection.
         ///
         /// Embedders can call this under memory pressure; it is also what makes
@@ -815,6 +799,7 @@ mod implementation {
         /// since `QuickJS` otherwise collects on its own allocation schedule.
         pub fn run_gc(&mut self) {
             unsafe { ffi::qjs_runtime_run_gc(self.inner.runtime.as_ptr()) };
+            self.reclaim();
         }
 
         /// This realm's global object.
@@ -836,6 +821,7 @@ mod implementation {
             name: &str,
             value: &Value,
         ) -> Result<(), Error> {
+            self.reclaim();
             self.ensure_affinity(target, ErrorPhase::ConstructValue)?;
             self.ensure_affinity(value, ErrorPhase::ConstructValue)?;
             let name = property_name(name)?;
@@ -868,15 +854,18 @@ mod implementation {
         ///
         /// The handler's lifetime follows the returned function object, not
         /// this realm: once JavaScript can no longer reach the function, the
-        /// closure is dropped and its slot reused. That matters for a
-        /// long-lived realm that registers handlers continuously — an event
-        /// handler per element per update — which would otherwise accumulate
-        /// every closure it ever made.
+        /// closure is dropped at the next realm operation (or at teardown).
+        /// That matters for a long-lived realm registering handlers
+        /// continuously — an event handler per element per update — which would
+        /// otherwise accumulate every closure it ever made.
         ///
-        /// Because the drop can happen inside the garbage collector, a handler
-        /// must not capture a [`Value`] from this realm: releasing one during
-        /// collection is unsound, and the `Value` would root the realm into a
-        /// cycle besides. Capture host state instead.
+        /// The drop is deliberately deferred rather than done in the collector:
+        /// a handler may own a [`Value`], whose `Drop` calls `JS_FreeValue`, and
+        /// re-entering `QuickJS` from inside its own GC is unsound. Capturing a
+        /// `Value` from this realm is therefore safe but creates a reference
+        /// cycle — `Value` → realm → handler → `Value` — that leaks the realm
+        /// unless the function becomes unreachable first. Capture host state
+        /// instead.
         ///
         /// `arity` is the reported `Function.prototype.length`; JavaScript may
         /// still call with any number of arguments.
@@ -884,17 +873,23 @@ mod implementation {
         where
             F: FnMut(&[HostValue]) -> Result<HostValue, HostFunctionError> + 'static,
         {
+            self.reclaim();
             let name = property_name(name)?;
             let arity = i32::try_from(arity).map_err(int_conversion_error)?;
-            let index = self.inner.hosts.insert(Box::new(handler))?;
+            // The closure moves to its own allocation, whose address is what
+            // JavaScript holds from here on.
+            let slot = Box::into_raw(Box::new(HostSlot {
+                handler: RefCell::new(Box::new(handler)),
+            }));
             let context = self.inner.context.as_ptr();
-            let raw = unsafe { ffi::qjs_new_host_function(context, name.as_ptr(), arity, index) };
+            let raw =
+                unsafe { ffi::qjs_new_host_function(context, name.as_ptr(), arity, slot.cast()) };
             match self.value_or_exception(raw, context, ErrorPhase::ConstructValue) {
                 Ok(value) => Ok(value),
                 Err(error) => {
-                    // The owner object may already have been finalized, which
-                    // released the slot; `release` is idempotent.
-                    self.inner.hosts.release(index);
+                    // The shim transfers ownership only on success, so the
+                    // closure is still ours to drop.
+                    drop(unsafe { Box::from_raw(slot) });
                     Err(error)
                 }
             }
@@ -1002,6 +997,7 @@ mod implementation {
             source: EvalSource<'_>,
             options: EvalOptions,
         ) -> Result<Value, Error> {
+            self.reclaim();
             if options.source_type == SourceType::Module && options.top_level_await {
                 return Err(Error::bridge(
                     ErrorKind::InvalidInput,
@@ -1092,6 +1088,7 @@ mod implementation {
             this_value: Option<&Value>,
             arguments: &[Value],
         ) -> Result<Value, Error> {
+            self.reclaim();
             self.ensure_affinity(callable, ErrorPhase::Call)?;
             if callable.kind() != ValueKind::Function {
                 return Err(Error::bridge(
@@ -1133,6 +1130,7 @@ mod implementation {
         }
 
         pub fn try_execute_pending_job(&mut self) -> Result<bool, Error> {
+            self.reclaim();
             let guard = self.inner.interrupt.begin();
             let result = self.try_execute_pending_job_inner();
             guard.finish(result, ErrorPhase::PendingJob)
@@ -1160,6 +1158,7 @@ mod implementation {
         }
 
         pub fn drain_pending_jobs(&mut self) -> Result<usize, Error> {
+            self.reclaim();
             let guard = self.inner.interrupt.begin();
             let result = (|| {
                 let mut executed = 0usize;
@@ -1172,6 +1171,7 @@ mod implementation {
         }
 
         pub fn drain_pending_jobs_up_to(&mut self, budget: usize) -> Result<JobDrain, Error> {
+            self.reclaim();
             let guard = self.inner.interrupt.begin();
             let result = (|| {
                 let mut executed = 0usize;
@@ -2190,34 +2190,6 @@ mod implementation {
             panic::set_hook(previous);
             let error = error.expect_err("the panic should surface as an exception");
             assert!(error.message.contains("panicked"), "{error:?}");
-        }
-
-        /// A callback cannot re-enter the realm through the public API today —
-        /// the boundary carries primitives, not callables — so the guard is
-        /// exercised white-box by emptying the slot the way an in-flight call
-        /// does. It is defense in depth for a boundary that can call back.
-        #[test]
-        fn a_re_entrant_host_call_is_refused_instead_of_aliasing_the_closure() {
-            let mut realm = Realm::new().unwrap();
-            realm
-                .define_global_function("identity", 1, |arguments| Ok(arguments[0].clone()))
-                .unwrap();
-            assert_eq!(number(&mut realm, "identity(7)"), Some(7.0));
-
-            // Simulate the slot being lent out to an in-flight call.
-            let borrowed = realm.inner.hosts.handlers.borrow_mut()[0]
-                .take()
-                .expect("the handler was registered at index 0");
-
-            let error = realm
-                .evaluate(EvalSource::new("identity(1)"), EvalOptions::default())
-                .expect_err("a call while the slot is lent out");
-            assert!(error.message.contains("already running"), "{error:?}");
-
-            // Returning it — what HostSlotGuard does on both the normal and the
-            // unwinding path — leaves the function usable rather than poisoned.
-            realm.inner.hosts.handlers.borrow_mut()[0] = Some(borrowed);
-            assert_eq!(number(&mut realm, "identity(9)"), Some(9.0));
         }
 
         #[test]

@@ -32,13 +32,14 @@ typedef int QjsInterruptCallback(void *opaque);
  * created by `qjs_new_host_function`. `arguments` stay owned by the shim and
  * are freed on return; `*result` is transferred to the shim on success (0).
  * A non-zero return means the callee already threw on `runtime->context`. */
-typedef int QjsHostDispatch(void *opaque, uint32_t index, size_t argument_count,
+typedef int QjsHostDispatch(void *opaque, void *handler, size_t argument_count,
                             QjsValue *const *arguments, QjsValue **result);
 
-/* Invoked from the garbage collector when a host function becomes
- * unreachable, so the callee can drop the Rust closure behind `index`. It runs
- * during collection and must not re-enter JavaScript. */
-typedef void QjsHostRelease(void *opaque, uint32_t index);
+/* Invoked from the garbage collector when a host function becomes unreachable,
+ * handing back the same `handler` address the function was created with. It
+ * runs during collection, so the callee must only *record* the address — not
+ * drop anything that could re-enter JavaScript. */
+typedef void QjsHostRelease(void *opaque, void *handler);
 
 typedef struct QjsRuntime {
     JSRuntime *raw;
@@ -55,10 +56,15 @@ typedef struct QjsRuntime {
 
 /* One per host function, owned by a JS object whose only job is to be
  * collected at the same moment the function is: that is what gives the Rust
- * closure a lifetime instead of pinning it to the realm. */
+ * closure a lifetime instead of pinning it to the realm.
+ *
+ * `handler` is the closure's own stable address, not an index into a table —
+ * so there is nothing to reallocate, no free list, and no way for a stale
+ * reference to alias a different closure. NULL means the host still owns it,
+ * which is how a failed construction tells the finalizer to stand down. */
 typedef struct QjsHostOwner {
     QjsRuntime *runtime;
-    uint32_t index;
+    void *handler;
 } QjsHostOwner;
 
 /* Allocated once per process; JS_NewClassID is mutex-guarded, so sharing the
@@ -72,8 +78,9 @@ static void qjs_host_owner_finalizer(JSRuntime *raw, JSValue value) {
     if (owner == NULL) {
         return;
     }
-    if (owner->runtime->host_release != NULL) {
-        owner->runtime->host_release(owner->runtime->host_opaque, owner->index);
+    if (owner->handler != NULL && owner->runtime->host_release != NULL) {
+        owner->runtime->host_release(owner->runtime->host_opaque,
+                                     owner->handler);
     }
     free(owner);
 }
@@ -502,7 +509,7 @@ static JSValue qjs_host_trampoline(JSContext *context, JSValueConst this_value,
     QjsHostOwner *owner;
     QjsValue **arguments = NULL;
     QjsValue *result = NULL;
-    uint32_t index;
+    void *handler;
     int status;
     int failed = 0;
     int count;
@@ -513,10 +520,10 @@ static JSValue qjs_host_trampoline(JSContext *context, JSValueConst this_value,
         return JS_ThrowInternalError(context, "no host dispatch is installed");
     }
     owner = JS_GetOpaque(func_data[0], qjs_host_owner_class_id);
-    if (owner == NULL) {
+    if (owner == NULL || owner->handler == NULL) {
         return JS_ThrowInternalError(context, "this host function was released");
     }
-    index = owner->index;
+    handler = owner->handler;
 
     /* argv is borrowed for the duration of the call; the boxes handed to the
      * dispatch own duplicates so a host callback can outlive neither. */
@@ -542,7 +549,7 @@ static JSValue qjs_host_trampoline(JSContext *context, JSValueConst this_value,
         }
     }
 
-    status = runtime->host_dispatch(runtime->host_opaque, index,
+    status = runtime->host_dispatch(runtime->host_opaque, handler,
                                     (size_t)argc, arguments, &result);
 
     for (count = 0; count < argc; ++count) {
@@ -561,8 +568,11 @@ static JSValue qjs_host_trampoline(JSContext *context, JSValueConst this_value,
     return qjs_unbox(result);
 }
 
+/* Ownership contract: `handler` transfers to JavaScript only when this returns
+ * non-NULL. On every failure path the owner's handler pointer is cleared first,
+ * so the finalizer stands down and the caller still owns the closure. */
 QjsValue *qjs_new_host_function(JSContext *context, const char *name,
-                                int length, uint32_t index) {
+                                int length, void *handler) {
     QjsRuntime *runtime = JS_GetContextOpaque(context);
     QjsHostOwner *owner;
     JSValue data;
@@ -574,16 +584,16 @@ QjsValue *qjs_new_host_function(JSContext *context, const char *name,
         return NULL;
     }
 
-    /* The owner object carries the slot index and, when collected, tells the
-     * host to drop the closure. Handing it to JS_NewCFunctionData as the
-     * function's data makes the two die together. */
+    /* The owner object carries the closure's address and, when collected,
+     * tells the host it may be dropped. Handing it to JS_NewCFunctionData as
+     * the function's data makes the two die together. */
     owner = malloc(sizeof(*owner));
     if (owner == NULL) {
         JS_ThrowOutOfMemory(context);
         return NULL;
     }
     owner->runtime = runtime;
-    owner->index = index;
+    owner->handler = handler;
 
     data = JS_NewObjectClass(context, (int)qjs_host_owner_class_id);
     if (JS_IsException(data)) {
@@ -594,12 +604,12 @@ QjsValue *qjs_new_host_function(JSContext *context, const char *name,
 
     function = JS_NewCFunctionData(context, qjs_host_trampoline, length,
                                    0, 1, &data);
-    /* From here on the owner is reachable only through JS, so every failure
-     * path below releases the slot through the finalizer rather than by hand. */
-    JS_FreeValue(context, data);
     if (JS_IsException(function)) {
+        owner->handler = NULL;
+        JS_FreeValue(context, data);
         return NULL;
     }
+    JS_FreeValue(context, data);
 
     /* `name` is non-writable on function objects, so define rather than set.
      * JS_NewCFunctionData already installed a valid empty name, so this is a
@@ -610,11 +620,13 @@ QjsValue *qjs_new_host_function(JSContext *context, const char *name,
      * unrelated call. Fail the whole construction instead. */
     function_name = JS_NewString(context, name);
     if (JS_IsException(function_name)) {
+        owner->handler = NULL;
         JS_FreeValue(context, function);
         return NULL;
     }
     if (JS_DefinePropertyValueStr(context, function, "name", function_name,
                                   JS_PROP_CONFIGURABLE) < 0) {
+        owner->handler = NULL;
         JS_FreeValue(context, function);
         return NULL;
     }

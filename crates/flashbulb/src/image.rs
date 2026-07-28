@@ -4,7 +4,10 @@ use std::fmt;
 use std::path::Path;
 
 /// A tightly packed, row-major RGBA8 image.
-#[derive(Clone, PartialEq, Eq)]
+///
+/// Deliberately not `Clone`: copying a full-frame pixel buffer is never
+/// incidental, and nothing here needs it.
+#[derive(PartialEq, Eq)]
 pub struct Image {
     width: u32,
     height: u32,
@@ -27,6 +30,8 @@ impl fmt::Debug for Image {
 pub enum ImageError {
     /// The pixel buffer is not `width * height * 4` bytes.
     Size { width: u32, height: u32, len: usize },
+    /// `width * height * 4` does not fit in a `usize` on this target.
+    Dimensions { width: u32, height: u32 },
     /// The PNG is not the 8-bit RGBA form this crate writes.
     Format(String),
     /// The PNG codec failed.
@@ -48,6 +53,10 @@ impl fmt::Display for ImageError {
                             .unwrap_or(usize::MAX)
                             .saturating_mul(4)
                     )
+            ),
+            Self::Dimensions { width, height } => write!(
+                formatter,
+                "a {width}\u{d7}{height} RGBA image does not fit in memory on this target"
             ),
             Self::Format(detail) => write!(formatter, "unsupported PNG: {detail}"),
             Self::Codec(detail) => write!(formatter, "PNG codec failed: {detail}"),
@@ -74,7 +83,8 @@ impl From<std::io::Error> for ImageError {
 impl Image {
     /// Wraps a tightly packed RGBA8 buffer.
     pub fn from_rgba8(width: u32, height: u32, pixels: Vec<u8>) -> Result<Self, ImageError> {
-        let expected = Self::byte_len(width, height);
+        let expected =
+            Self::byte_len(width, height).ok_or(ImageError::Dimensions { width, height })?;
         if pixels.len() == expected {
             Ok(Self {
                 width,
@@ -91,13 +101,13 @@ impl Image {
     }
 
     /// A fully transparent image, for diff output.
-    #[must_use]
-    pub fn transparent(width: u32, height: u32) -> Self {
-        Self {
+    pub fn transparent(width: u32, height: u32) -> Result<Self, ImageError> {
+        let len = Self::byte_len(width, height).ok_or(ImageError::Dimensions { width, height })?;
+        Ok(Self {
             width,
             height,
-            pixels: vec![0; Self::byte_len(width, height)],
-        }
+            pixels: vec![0; len],
+        })
     }
 
     #[must_use]
@@ -151,7 +161,12 @@ impl Image {
                 info.bit_depth
             )));
         }
-        let mut pixels = vec![0; reader.output_buffer_size().unwrap_or(0)];
+        let Some(buffer_size) = reader.output_buffer_size() else {
+            return Err(ImageError::Format(
+                "the PNG does not declare a usable buffer size".to_owned(),
+            ));
+        };
+        let mut pixels = vec![0; buffer_size];
         let frame = reader
             .next_frame(&mut pixels)
             .map_err(|error| ImageError::Codec(error.to_string()))?;
@@ -187,8 +202,14 @@ impl Image {
         Ok(())
     }
 
-    const fn byte_len(width: u32, height: u32) -> usize {
-        (width as usize) * (height as usize) * 4
+    /// Checked, because `width` and `height` are untrusted: on a 32-bit target
+    /// the product wraps, and a wrapped zero would accept an empty buffer as a
+    /// gigantic image.
+    const fn byte_len(width: u32, height: u32) -> Option<usize> {
+        match (width as usize).checked_mul(height as usize) {
+            Some(pixels) => pixels.checked_mul(4),
+            None => None,
+        }
     }
 }
 
@@ -213,8 +234,15 @@ mod tests {
     }
 
     #[test]
+    fn oversized_dimensions_are_an_error_not_a_panic() {
+        let error = Image::from_rgba8(u32::MAX, u32::MAX, Vec::new()).unwrap_err();
+        assert!(matches!(error, ImageError::Dimensions { .. }));
+        assert!(Image::transparent(u32::MAX, u32::MAX).is_err());
+    }
+
+    #[test]
     fn transparent_images_are_zeroed_and_sized() {
-        let image = Image::transparent(4, 5);
+        let image = Image::transparent(4, 5).unwrap();
         assert_eq!(image.pixel_count(), 20);
         assert_eq!(image.pixels().len(), 80);
         assert!(image.pixels().iter().all(|&byte| byte == 0));
