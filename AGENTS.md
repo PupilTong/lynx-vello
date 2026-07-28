@@ -476,6 +476,12 @@ this section is the only place the absolute paths are spelled out.
 - `docs/agent-prompts.md` — copy-pasteable task-kickoff prompts for recurring
   work (adding a CSS property, porting a built-in component, auditing a JS API
   for parity, etc.), usable from either Claude Code or Codex.
+- `docs/text-rendering-research.md` — **read before proposing any text-painting
+  performance work.** Why vello 0.9 has no glyph atlas and cannot get one, what
+  a text-heavy frame actually costs here (measured), where the ecosystem's
+  answer lives (`glifo` via `vello_hybrid`), and why `glyphon` and a
+  hand-rolled atlas are both ruled out. Conclusion is *don't switch renderers
+  yet* — so the useful contribution is evidence, not a port.
 
 ## Toolchain
 
