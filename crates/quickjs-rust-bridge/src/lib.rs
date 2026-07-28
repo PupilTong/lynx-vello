@@ -7,9 +7,8 @@ mod ffi;
     reason = "this private implementation module contains the audited QuickJS FFI call sites"
 )]
 mod implementation {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::ffi::{CString, c_void};
-    use std::fmt;
     use std::num::TryFromIntError;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::ptr::{self, NonNull};
@@ -17,8 +16,15 @@ mod implementation {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, Instant};
+    use std::{fmt, mem};
+
+    use smallvec::SmallVec;
 
     use super::ffi;
+
+    /// Arguments up to this many are read without allocating. Matches
+    /// `QJS_HOST_INLINE_ARGS` in `shim.c`.
+    const HOST_INLINE_ARGS: usize = 8;
 
     const JS_EVAL_TYPE_GLOBAL: i32 = 0;
     const JS_EVAL_TYPE_MODULE: i32 = 1;
@@ -336,6 +342,154 @@ mod implementation {
         }
     }
 
+    /// Converts a string value `QuickJS` owns into UTF-16 code units, without
+    /// taking ownership of the box — the host-function boundary reads
+    /// borrowed arguments this way, and [`Value`] reads its own.
+    fn raw_to_utf16(
+        context: *mut ffi::JSContext,
+        raw: *mut ffi::QjsValue,
+    ) -> Result<Vec<u16>, Error> {
+        let mut bytes = ptr::null();
+        let mut length = 0usize;
+        let status =
+            unsafe { ffi::qjs_value_to_cesu8(context, raw, &raw mut bytes, &raw mut length) };
+        if status != 0 || bytes.is_null() {
+            unsafe { ffi::qjs_discard_exception(context) };
+            return Err(Error::bridge(
+                ErrorKind::Engine,
+                ErrorPhase::ConvertValue,
+                "QuickJS could not convert the value to CESU-8",
+            ));
+        }
+        let encoded = unsafe { std::slice::from_raw_parts(bytes, length) };
+        let decoded = decode_cesu8(encoded);
+        unsafe { ffi::qjs_cesu8_free(context, bytes) };
+        decoded
+            .map_err(|message| Error::bridge(ErrorKind::Engine, ErrorPhase::ConvertValue, message))
+    }
+
+    fn property_name(name: &str) -> Result<CString, Error> {
+        CString::new(name).map_err(|_| {
+            Error::bridge(
+                ErrorKind::InvalidInput,
+                ErrorPhase::ConstructValue,
+                "property name contains a NUL byte",
+            )
+        })
+    }
+
+    /// Reads the flattened argument array.
+    ///
+    /// `SmallVec` because the boundary is a hot path — every Element PAPI
+    /// member takes at most three arguments, so the common call allocates
+    /// nothing at all.
+    fn read_host_arguments(
+        count: usize,
+        arguments: *const ffi::QjsHostArg,
+    ) -> Result<SmallVec<[HostValue; HOST_INLINE_ARGS]>, HostFunctionError> {
+        if count == 0 || arguments.is_null() {
+            return Ok(SmallVec::new());
+        }
+        let raw = unsafe { std::slice::from_raw_parts(arguments, count) };
+        raw.iter().map(read_host_argument).collect()
+    }
+
+    fn read_host_argument(argument: &ffi::QjsHostArg) -> Result<HostValue, HostFunctionError> {
+        match argument.kind {
+            ffi::HOST_ARG_UNDEFINED => Ok(HostValue::Undefined),
+            ffi::HOST_ARG_NULL => Ok(HostValue::Null),
+            ffi::HOST_ARG_BOOLEAN => Ok(HostValue::Boolean(argument.number != 0.0)),
+            ffi::HOST_ARG_NUMBER => Ok(HostValue::Number(argument.number)),
+            ffi::HOST_ARG_STRING => {
+                let bytes = unsafe { std::slice::from_raw_parts(argument.text, argument.text_len) };
+                // CESU-8 differs from UTF-8 only for characters outside the
+                // BMP, so the overwhelmingly common case decodes with no
+                // intermediate UTF-16 buffer at all.
+                if let Ok(text) = std::str::from_utf8(bytes) {
+                    return Ok(HostValue::String(text.to_owned()));
+                }
+                let units = decode_cesu8(bytes).map_err(HostFunctionError::new)?;
+                String::from_utf16(&units)
+                    .map(HostValue::String)
+                    .map_err(|_| {
+                        HostFunctionError::new(
+                            "an ill-formed UTF-16 string cannot cross the host-function boundary",
+                        )
+                    })
+            }
+            _ => Err(HostFunctionError::new(
+                "host functions accept undefined, null, Boolean, Number, and String arguments only",
+            )),
+        }
+    }
+
+    fn throw_host_error(context: *mut ffi::JSContext, message: &str) {
+        // A NUL byte would truncate the message, so drop those bytes rather
+        // than lose the rest of the diagnostic.
+        let sanitized: String = message.chars().filter(|&byte| byte != '\0').collect();
+        let Ok(message) = CString::new(sanitized) else {
+            return;
+        };
+        unsafe { ffi::qjs_throw_error(context, message.as_ptr()) };
+    }
+
+    /// Fired by the garbage collector once a host function is unreachable.
+    ///
+    /// Records the slot and returns. The closure is dropped later, by
+    /// [`HostTable::reclaim`], because a handler may own a [`Value`] whose
+    /// `Drop` calls `JS_FreeValue` — re-entering `QuickJS` from inside its own
+    /// collector.
+    unsafe extern "C" fn host_release(opaque: *mut c_void, handler: *mut c_void) {
+        let table = unsafe { &*opaque.cast::<HostTable>() };
+        // An allocation failure panicking here would unwind into C.
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            table.note_released(handler.cast::<HostSlot>());
+        }));
+    }
+
+    unsafe extern "C" fn host_dispatch(
+        opaque: *mut c_void,
+        handler: *mut c_void,
+        argument_count: usize,
+        arguments: *const ffi::QjsHostArg,
+        result: *mut ffi::QjsHostResult,
+    ) -> i32 {
+        let table = unsafe { &*opaque.cast::<HostTable>() };
+        let context = table.context.get();
+        if context.is_null() {
+            // The realm is being torn down; there is nothing left to throw on.
+            return 1;
+        }
+        // Live for the whole call: JavaScript holds the function, which owns
+        // this allocation, and the finalizer cannot run mid-call.
+        let slot = unsafe { &*handler.cast::<HostSlot>() };
+
+        let called = catch_unwind(AssertUnwindSafe(|| {
+            let values = read_host_arguments(argument_count, arguments)?;
+            let Ok(mut handler) = slot.handler.try_borrow_mut() else {
+                return Err(HostFunctionError::new(
+                    "this host function cannot be called while it is already running",
+                ));
+            };
+            handler(&values)
+        }));
+
+        let returned = match called {
+            Ok(Ok(value)) => value,
+            Ok(Err(error)) => {
+                throw_host_error(context, &error.message);
+                return 1;
+            }
+            Err(_) => {
+                throw_host_error(context, "the host function panicked");
+                return 1;
+            }
+        };
+
+        table.write_result(&returned, unsafe { &mut *result });
+        0
+    }
+
     fn interrupt_error(reason: InterruptReason, phase: ErrorPhase) -> Error {
         match reason {
             InterruptReason::HostRequest => Error::bridge(
@@ -354,10 +508,181 @@ mod implementation {
         }
     }
 
+    /// A primitive crossing the host-function boundary.
+    ///
+    /// Arguments reach a handler without any per-argument allocation: the shim
+    /// flattens `argv` into a stack array of tags and values, and the reader
+    /// below collects them into a `SmallVec`. Only a string argument allocates,
+    /// and only to own its decoded text.
+    ///
+    /// Host functions speak primitives only: objects, arrays, functions, and
+    /// symbols are rejected on the way in with [`ErrorKind::TypeMismatch`]
+    /// rather than handed to the callback. Strings arrive already validated as
+    /// well-formed UTF-16, so a lone surrogate is a rejected argument, not a
+    /// lossy conversion.
+    #[derive(Clone, Debug, PartialEq)]
+    #[non_exhaustive]
+    pub enum HostValue {
+        Undefined,
+        Null,
+        Boolean(bool),
+        Number(f64),
+        String(String),
+    }
+
+    /// The message of the JavaScript `Error` a failing host function throws.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct HostFunctionError {
+        pub message: String,
+    }
+
+    impl HostFunctionError {
+        #[must_use]
+        pub fn new(message: impl Into<String>) -> Self {
+            Self {
+                message: message.into(),
+            }
+        }
+    }
+
+    impl From<&str> for HostFunctionError {
+        fn from(message: &str) -> Self {
+            Self::new(message)
+        }
+    }
+
+    impl From<String> for HostFunctionError {
+        fn from(message: String) -> Self {
+            Self::new(message)
+        }
+    }
+
+    impl fmt::Display for HostFunctionError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str(&self.message)
+        }
+    }
+
+    impl std::error::Error for HostFunctionError {}
+
+    type HostHandler = Box<dyn FnMut(&[HostValue]) -> Result<HostValue, HostFunctionError>>;
+
+    /// One host closure, at a stable heap address handed to JavaScript.
+    ///
+    /// The `RefCell` is the re-entrancy guard: a callback reached again while
+    /// it is already running is refused rather than aliasing the `FnMut`.
+    struct HostSlot {
+        handler: RefCell<HostHandler>,
+    }
+
+    /// The realm's side of host-function lifetime.
+    ///
+    /// There is no table of handlers: each closure lives at its own address,
+    /// which is what JavaScript holds (through the companion object created in
+    /// `qjs_new_host_function`) and what the collector hands back. Nothing is
+    /// indexed, so nothing can be reallocated, recycled, or aliased by a stale
+    /// reference.
+    ///
+    /// The finalizer runs *inside* collection, where calling back into `QuickJS`
+    /// is unsound — and dropping a handler can do exactly that, since a closure
+    /// may own a [`Value`] whose `Drop` calls `JS_FreeValue`. So the finalizer
+    /// only records the address; [`reclaim`](HostTable::reclaim) does the drop
+    /// at a point where no collection is in progress.
+    struct HostTable {
+        context: Cell<*mut ffi::JSContext>,
+        /// Closures whose function has been collected but which have not yet
+        /// been dropped.
+        pending_release: RefCell<Vec<*mut HostSlot>>,
+        /// Scratch for a string return value. The shim reads it immediately
+        /// after the dispatch returns, before any other call can run, so one
+        /// buffer reused across calls is enough — and keeps the common case
+        /// (returning a number) free of allocation entirely.
+        return_text: RefCell<Vec<u16>>,
+    }
+
+    impl HostTable {
+        fn new() -> Self {
+            Self {
+                context: Cell::new(ptr::null_mut()),
+                pending_release: RefCell::new(Vec::new()),
+                return_text: RefCell::new(Vec::new()),
+            }
+        }
+
+        /// Describes `value` for the shim, without boxing a `JSValue`.
+        ///
+        /// A string return borrows `return_text`; the shim reads it before any
+        /// other call can run.
+        fn write_result(&self, value: &HostValue, out: &mut ffi::QjsHostResult) {
+            out.text = ptr::null();
+            out.text_len = 0;
+            out.number = 0.0;
+            match value {
+                HostValue::Undefined => out.kind = ffi::HOST_ARG_UNDEFINED,
+                HostValue::Null => out.kind = ffi::HOST_ARG_NULL,
+                HostValue::Boolean(value) => {
+                    out.kind = ffi::HOST_ARG_BOOLEAN;
+                    out.number = if *value { 1.0 } else { 0.0 };
+                }
+                HostValue::Number(value) => {
+                    out.kind = ffi::HOST_ARG_NUMBER;
+                    out.number = *value;
+                }
+                HostValue::String(value) => {
+                    let mut scratch = self.return_text.borrow_mut();
+                    scratch.clear();
+                    scratch.extend(value.encode_utf16());
+                    out.kind = ffi::HOST_ARG_STRING;
+                    out.text = scratch.as_ptr();
+                    out.text_len = scratch.len();
+                }
+            }
+        }
+
+        /// Records that the closure at `slot` is unreachable from JavaScript.
+        ///
+        /// Called from a GC finalizer, so it does no more than append.
+        fn note_released(&self, slot: *mut HostSlot) {
+            if let Ok(mut pending) = self.pending_release.try_borrow_mut() {
+                pending.push(slot);
+            }
+            // A failed borrow means `reclaim` is already draining and will make
+            // another pass, so the address is not lost.
+        }
+
+        /// Drops every collected closure.
+        ///
+        /// Must run with no collection in progress — i.e. from a `&mut Realm`
+        /// entry point. A handler's own `Drop` can free JS values and thereby
+        /// collect further functions, so this repeats until nothing new
+        /// arrives.
+        fn reclaim(&self) {
+            loop {
+                let batch = {
+                    let Ok(mut pending) = self.pending_release.try_borrow_mut() else {
+                        return;
+                    };
+                    if pending.is_empty() {
+                        return;
+                    }
+                    mem::take(&mut *pending)
+                };
+                for slot in batch {
+                    // The finalizer hands back an address JavaScript will never
+                    // mention again, so this is the unique owner.
+                    drop(unsafe { Box::from_raw(slot) });
+                }
+            }
+        }
+    }
+
     struct RealmInner {
         runtime: NonNull<ffi::QjsRuntime>,
         context: NonNull<ffi::JSContext>,
         interrupt: Rc<InterruptState>,
+        // Boxed, not `Rc`d: nothing clones it, and only its address needs to be
+        // stable for the C trampoline's opaque.
+        hosts: Box<HostTable>,
     }
 
     impl Drop for RealmInner {
@@ -369,8 +694,18 @@ mod implementation {
                     ptr::null_mut(),
                 );
                 self.interrupt.shared.active.store(0, Ordering::Release);
+                // No host call can construct values from here on.
+                self.hosts.context.set(ptr::null_mut());
+                // Freeing the context and runtime collects every remaining
+                // object, firing the finalizers that release host-function
+                // slots — so the dispatch stays registered and the table stays
+                // reachable across both calls. It is: `hosts` is an `Rc` field
+                // dropped only after this body returns.
                 ffi::qjs_context_free(self.context.as_ptr());
                 ffi::qjs_runtime_free(self.runtime.as_ptr());
+                // Freeing the runtime finalized everything still rooted, so
+                // the pending list now holds every remaining closure.
+                self.hosts.reclaim();
             }
         }
     }
@@ -437,11 +772,20 @@ mod implementation {
                     Some(interrupt_callback),
                     Rc::as_ptr(&interrupt).cast_mut().cast(),
                 );
+                let hosts = Box::new(HostTable::new());
+                hosts.context.set(context.as_ptr());
+                ffi::qjs_runtime_set_host_dispatch(
+                    runtime.as_ptr(),
+                    Some(host_dispatch),
+                    Some(host_release),
+                    (&raw const *hosts).cast_mut().cast(),
+                );
                 Ok(Self {
                     inner: Rc::new(RealmInner {
                         runtime,
                         context,
                         interrupt,
+                        hosts,
                     }),
                 })
             }
@@ -452,6 +796,135 @@ mod implementation {
             InterruptHandle {
                 shared: Arc::clone(&self.inner.interrupt.shared),
             }
+        }
+
+        /// Drops the closures of any host functions JavaScript has collected
+        /// since the last call.
+        ///
+        /// Every `&mut self` entry point starts here: holding `&mut Realm`
+        /// proves no host call is in flight and no collection is running, which
+        /// is what makes it safe to drop a closure that may own a [`Value`].
+        fn reclaim(&mut self) {
+            self.inner.hosts.reclaim();
+        }
+
+        /// Runs a full garbage collection.
+        ///
+        /// Embedders can call this under memory pressure; it is also what makes
+        /// the collection of unreachable host functions observable in tests,
+        /// since `QuickJS` otherwise collects on its own allocation schedule.
+        pub fn run_gc(&mut self) {
+            unsafe { ffi::qjs_runtime_run_gc(self.inner.runtime.as_ptr()) };
+            self.reclaim();
+        }
+
+        /// This realm's global object.
+        pub fn global_object(&self) -> Result<Value, Error> {
+            self.construct(ErrorPhase::ConstructValue, |context| unsafe {
+                ffi::qjs_global_object(context)
+            })
+        }
+
+        /// Sets `target[name] = value`, replacing any existing own property.
+        ///
+        /// This can run arbitrary JavaScript — a `Proxy` `set` trap or an
+        /// accessor on the prototype chain — so it executes under the same
+        /// interrupt and execution-timeout guard as [`Realm::evaluate`] and
+        /// [`Realm::call`] rather than as a plain value operation.
+        pub fn set_property(
+            &mut self,
+            target: &Value,
+            name: &str,
+            value: &Value,
+        ) -> Result<(), Error> {
+            self.reclaim();
+            self.ensure_affinity(target, ErrorPhase::ConstructValue)?;
+            self.ensure_affinity(value, ErrorPhase::ConstructValue)?;
+            let name = property_name(name)?;
+            let context = self.inner.context.as_ptr();
+            let guard = self.inner.interrupt.begin();
+            let status = unsafe {
+                ffi::qjs_set_property(
+                    context,
+                    target.inner.raw.as_ptr(),
+                    name.as_ptr(),
+                    value.inner.raw.as_ptr(),
+                )
+            };
+            let result = if status < 0 {
+                Err(self.capture_exception(context, ErrorPhase::ConstructValue))
+            } else {
+                Ok(())
+            };
+            guard.finish(result, ErrorPhase::ConstructValue)
+        }
+
+        /// Creates a callable backed by `handler`.
+        ///
+        /// `handler` runs with JavaScript on the stack. It cannot call back
+        /// into this realm — [`HostValue`] carries primitives, not callables —
+        /// and the slot it occupies is vacated for the duration of the call, so
+        /// a re-entrant invocation would throw rather than alias the `FnMut`.
+        /// A panicking handler becomes a thrown `Error` rather than an unwind
+        /// into C, and leaves its slot usable.
+        ///
+        /// The handler's lifetime follows the returned function object, not
+        /// this realm: once JavaScript can no longer reach the function, the
+        /// closure is dropped at the next realm operation (or at teardown).
+        /// That matters for a long-lived realm registering handlers
+        /// continuously — an event handler per element per update — which would
+        /// otherwise accumulate every closure it ever made.
+        ///
+        /// The drop is deliberately deferred rather than done in the collector:
+        /// a handler may own a [`Value`], whose `Drop` calls `JS_FreeValue`, and
+        /// re-entering `QuickJS` from inside its own GC is unsound. Capturing a
+        /// `Value` from this realm is therefore safe but creates a reference
+        /// cycle — `Value` → realm → handler → `Value` — that leaks the realm
+        /// unless the function becomes unreachable first. Capture host state
+        /// instead.
+        ///
+        /// `arity` is the reported `Function.prototype.length`; JavaScript may
+        /// still call with any number of arguments.
+        pub fn function<F>(&mut self, name: &str, arity: u32, handler: F) -> Result<Value, Error>
+        where
+            F: FnMut(&[HostValue]) -> Result<HostValue, HostFunctionError> + 'static,
+        {
+            self.reclaim();
+            let name = property_name(name)?;
+            let arity = i32::try_from(arity).map_err(int_conversion_error)?;
+            // The closure moves to its own allocation, whose address is what
+            // JavaScript holds from here on.
+            let slot = Box::into_raw(Box::new(HostSlot {
+                handler: RefCell::new(Box::new(handler)),
+            }));
+            let context = self.inner.context.as_ptr();
+            let raw =
+                unsafe { ffi::qjs_new_host_function(context, name.as_ptr(), arity, slot.cast()) };
+            match self.value_or_exception(raw, context, ErrorPhase::ConstructValue) {
+                Ok(value) => Ok(value),
+                Err(error) => {
+                    // The shim transfers ownership only on success, so the
+                    // closure is still ours to drop.
+                    drop(unsafe { Box::from_raw(slot) });
+                    Err(error)
+                }
+            }
+        }
+
+        /// Defines `name` on the global object as a callable backed by
+        /// `handler` — [`Realm::function`] plus [`Realm::set_property`].
+        pub fn define_global_function<F>(
+            &mut self,
+            name: &str,
+            arity: u32,
+            handler: F,
+        ) -> Result<(), Error>
+        where
+            F: FnMut(&[HostValue]) -> Result<HostValue, HostFunctionError> + 'static,
+        {
+            let function = self.function(name, arity, handler)?;
+            let global = self.global_object()?;
+            self.set_property(&global, name, &function)
         }
 
         pub fn undefined(&self) -> Result<Value, Error> {
@@ -540,6 +1013,7 @@ mod implementation {
             source: EvalSource<'_>,
             options: EvalOptions,
         ) -> Result<Value, Error> {
+            self.reclaim();
             if options.source_type == SourceType::Module && options.top_level_await {
                 return Err(Error::bridge(
                     ErrorKind::InvalidInput,
@@ -630,6 +1104,7 @@ mod implementation {
             this_value: Option<&Value>,
             arguments: &[Value],
         ) -> Result<Value, Error> {
+            self.reclaim();
             self.ensure_affinity(callable, ErrorPhase::Call)?;
             if callable.kind() != ValueKind::Function {
                 return Err(Error::bridge(
@@ -671,6 +1146,7 @@ mod implementation {
         }
 
         pub fn try_execute_pending_job(&mut self) -> Result<bool, Error> {
+            self.reclaim();
             let guard = self.inner.interrupt.begin();
             let result = self.try_execute_pending_job_inner();
             guard.finish(result, ErrorPhase::PendingJob)
@@ -698,6 +1174,7 @@ mod implementation {
         }
 
         pub fn drain_pending_jobs(&mut self) -> Result<usize, Error> {
+            self.reclaim();
             let guard = self.inner.interrupt.begin();
             let result = (|| {
                 let mut executed = 0usize;
@@ -710,6 +1187,7 @@ mod implementation {
         }
 
         pub fn drain_pending_jobs_up_to(&mut self, budget: usize) -> Result<JobDrain, Error> {
+            self.reclaim();
             let guard = self.inner.interrupt.begin();
             let result = (|| {
                 let mut executed = 0usize;
@@ -910,31 +1388,7 @@ mod implementation {
         }
 
         fn to_utf16_coerced(&self) -> Result<Vec<u16>, Error> {
-            let context = self.inner.owner.context.as_ptr();
-            let mut bytes = ptr::null();
-            let mut length = 0usize;
-            let status = unsafe {
-                ffi::qjs_value_to_cesu8(
-                    context,
-                    self.inner.raw.as_ptr(),
-                    &raw mut bytes,
-                    &raw mut length,
-                )
-            };
-            if status != 0 || bytes.is_null() {
-                unsafe { ffi::qjs_discard_exception(context) };
-                return Err(Error::bridge(
-                    ErrorKind::Engine,
-                    ErrorPhase::ConvertValue,
-                    "QuickJS could not convert the value to CESU-8",
-                ));
-            }
-            let encoded = unsafe { std::slice::from_raw_parts(bytes, length) };
-            let decoded = decode_cesu8(encoded);
-            unsafe { ffi::qjs_cesu8_free(context, bytes) };
-            decoded.map_err(|message| {
-                Error::bridge(ErrorKind::Engine, ErrorPhase::ConvertValue, message)
-            })
+            raw_to_utf16(self.inner.owner.context.as_ptr(), self.inner.raw.as_ptr())
         }
 
         fn property_string(&self, name: &str) -> Option<String> {
@@ -1630,10 +2084,237 @@ mod implementation {
             assert!(realm.drain_pending_jobs().unwrap() > 0);
             assert!(!realm.has_pending_jobs());
         }
+
+        fn number(realm: &mut Realm, source: &str) -> Option<f64> {
+            realm
+                .evaluate(EvalSource::new(source), EvalOptions::default())
+                .expect("evaluation should succeed")
+                .as_number()
+        }
+
+        #[test]
+        fn a_host_function_is_callable_from_javascript() {
+            let mut realm = Realm::new().unwrap();
+            realm
+                .define_global_function("double", 1, |arguments| {
+                    let HostValue::Number(value) = arguments[0] else {
+                        return Err(HostFunctionError::new("expected a number"));
+                    };
+                    Ok(HostValue::Number(value * 2.0))
+                })
+                .unwrap();
+            assert_eq!(number(&mut realm, "double(21)"), Some(42.0));
+        }
+
+        #[test]
+        fn a_host_function_keeps_state_across_calls() {
+            let mut realm = Realm::new().unwrap();
+            let mut calls = 0.0;
+            realm
+                .define_global_function("tick", 0, move |_| {
+                    calls += 1.0;
+                    Ok(HostValue::Number(calls))
+                })
+                .unwrap();
+            assert_eq!(number(&mut realm, "tick(); tick(); tick()"), Some(3.0));
+        }
+
+        #[test]
+        fn every_primitive_crosses_the_host_boundary() {
+            let mut realm = Realm::new().unwrap();
+            realm
+                .define_global_function("describe", 1, |arguments| {
+                    Ok(HostValue::String(match &arguments[0] {
+                        HostValue::Undefined => "undefined".to_owned(),
+                        HostValue::Null => "null".to_owned(),
+                        HostValue::Boolean(value) => format!("boolean:{value}"),
+                        HostValue::Number(value) => format!("number:{value}"),
+                        HostValue::String(value) => format!("string:{value}"),
+                    }))
+                })
+                .unwrap();
+            for (call, expected) in [
+                ("describe(undefined)", "undefined"),
+                ("describe(null)", "null"),
+                ("describe(true)", "boolean:true"),
+                ("describe(1.5)", "number:1.5"),
+                ("describe('hi')", "string:hi"),
+            ] {
+                let value = realm
+                    .evaluate(EvalSource::new(call), EvalOptions::default())
+                    .unwrap();
+                let units = value.to_utf16().unwrap();
+                assert_eq!(String::from_utf16(&units).unwrap(), expected, "{call}");
+            }
+        }
+
+        #[test]
+        fn a_missing_argument_arrives_as_undefined() {
+            let mut realm = Realm::new().unwrap();
+            realm
+                .define_global_function("arity", 2, |arguments| {
+                    #[allow(clippy::cast_precision_loss, reason = "an argument count is tiny")]
+                    Ok(HostValue::Number(arguments.len() as f64))
+                })
+                .unwrap();
+            assert_eq!(number(&mut realm, "arity()"), Some(0.0));
+            assert_eq!(number(&mut realm, "arity(1, 2, 3)"), Some(3.0));
+        }
+
+        #[test]
+        fn a_non_primitive_argument_is_rejected_rather_than_coerced() {
+            let mut realm = Realm::new().unwrap();
+            realm
+                .define_global_function("take", 1, |_| Ok(HostValue::Undefined))
+                .unwrap();
+            let error = realm
+                .evaluate(EvalSource::new("take({})"), EvalOptions::default())
+                .expect_err("an object argument");
+            assert!(
+                error.message.contains("undefined, null, Boolean"),
+                "{error:?}"
+            );
+        }
+
+        #[test]
+        fn a_host_error_becomes_a_catchable_javascript_exception() {
+            let mut realm = Realm::new().unwrap();
+            realm
+                .define_global_function("boom", 0, |_| {
+                    Err(HostFunctionError::new("the host said no"))
+                })
+                .unwrap();
+            let value = realm
+                .evaluate(
+                    EvalSource::new("(() => { try { boom(); return 'unreachable'; } catch (error) { return error.message; } })()"),
+                    EvalOptions::default(),
+                )
+                .unwrap();
+            let units = value.to_utf16().unwrap();
+            assert_eq!(String::from_utf16(&units).unwrap(), "the host said no");
+        }
+
+        #[test]
+        fn a_panicking_host_function_becomes_an_exception_not_an_unwind() {
+            let mut realm = Realm::new().unwrap();
+            realm
+                .define_global_function("explode", 0, |_| panic!("host bug"))
+                .unwrap();
+            let previous = panic::take_hook();
+            panic::set_hook(Box::new(|_| {}));
+            let error = realm.evaluate(EvalSource::new("explode()"), EvalOptions::default());
+            panic::set_hook(previous);
+            let error = error.expect_err("the panic should surface as an exception");
+            assert!(error.message.contains("panicked"), "{error:?}");
+        }
+
+        #[test]
+        fn a_panicking_host_function_does_not_poison_its_slot() {
+            let mut realm = Realm::new().unwrap();
+            let mut calls = 0.0;
+            realm
+                .define_global_function("flaky", 1, move |arguments| {
+                    calls += 1.0;
+                    if matches!(arguments[0], HostValue::Boolean(true)) {
+                        panic!("host bug");
+                    }
+                    Ok(HostValue::Number(calls))
+                })
+                .unwrap();
+
+            let previous = panic::take_hook();
+            panic::set_hook(Box::new(|_| {}));
+            let error = realm.evaluate(EvalSource::new("flaky(true)"), EvalOptions::default());
+            panic::set_hook(previous);
+            assert!(error.is_err());
+
+            // The unwind ran HostSlotGuard's Drop, so the handler is back — and
+            // its captured state survived the panic.
+            assert_eq!(number(&mut realm, "flaky(false)"), Some(2.0));
+        }
+
+        #[test]
+        fn global_object_and_set_property_round_trip() {
+            let mut realm = Realm::new().unwrap();
+            let global = realm.global_object().unwrap();
+            assert_eq!(global.kind(), ValueKind::Object);
+            let value = realm.number(11.0).unwrap();
+            realm.set_property(&global, "answer", &value).unwrap();
+            assert_eq!(number(&mut realm, "answer"), Some(11.0));
+        }
+
+        #[test]
+        fn set_property_rejects_a_value_from_another_realm() {
+            let mut realm = Realm::new().unwrap();
+            let other = Realm::new().unwrap();
+            let global = realm.global_object().unwrap();
+            let foreign = other.number(1.0).unwrap();
+            let error = realm
+                .set_property(&global, "x", &foreign)
+                .expect_err("cross-realm value");
+            assert_eq!(error.kind, ErrorKind::WrongRealm);
+        }
+
+        #[test]
+        fn a_host_function_can_be_installed_on_an_ordinary_object() {
+            let mut realm = Realm::new().unwrap();
+            let namespace = realm
+                .evaluate(
+                    EvalSource::new("globalThis.lynx = {}; globalThis.lynx"),
+                    EvalOptions::default(),
+                )
+                .unwrap();
+            let function = realm
+                .function("version", 0, |_| Ok(HostValue::Number(3.2)))
+                .unwrap();
+            realm
+                .set_property(&namespace, "version", &function)
+                .unwrap();
+            assert_eq!(number(&mut realm, "lynx.version()"), Some(3.2));
+        }
+
+        #[test]
+        fn a_host_function_reports_its_name_and_arity() {
+            let mut realm = Realm::new().unwrap();
+            realm
+                .define_global_function("named", 2, |_| Ok(HostValue::Undefined))
+                .unwrap();
+            assert_eq!(number(&mut realm, "named.length"), Some(2.0));
+            let value = realm
+                .evaluate(EvalSource::new("named.name"), EvalOptions::default())
+                .unwrap();
+            let units = value.to_utf16().unwrap();
+            assert_eq!(String::from_utf16(&units).unwrap(), "named");
+        }
+
+        #[test]
+        fn an_ill_formed_utf16_argument_is_rejected_at_the_boundary() {
+            let mut realm = Realm::new().unwrap();
+            realm
+                .define_global_function("take", 1, |_| Ok(HostValue::Undefined))
+                .unwrap();
+            let error = realm
+                .evaluate(
+                    // A lone high surrogate has no UTF-8 encoding.
+                    EvalSource::new("take('\\uD800')"),
+                    EvalOptions::default(),
+                )
+                .expect_err("a lone surrogate");
+            assert!(error.message.contains("ill-formed UTF-16"), "{error:?}");
+        }
+
+        #[test]
+        fn a_property_name_with_a_nul_byte_is_rejected() {
+            let mut realm = Realm::new().unwrap();
+            let error = realm
+                .function("bad\0name", 0, |_| Ok(HostValue::Undefined))
+                .expect_err("a NUL in the name");
+            assert_eq!(error.kind, ErrorKind::InvalidInput);
+        }
     }
 }
 
 pub use implementation::{
-    Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, InterruptHandle, JobDrain, Realm,
-    RealmOptions, SourceLocation, SourceType, Value, ValueKind,
+    Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, HostFunctionError, HostValue,
+    InterruptHandle, JobDrain, Realm, RealmOptions, SourceLocation, SourceType, Value, ValueKind,
 };

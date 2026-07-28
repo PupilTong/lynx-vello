@@ -160,6 +160,10 @@ name = "bobcat-quickjs"
 version = "0.1.0"
 dependencies = [
  "bobcat-engine",
+ "dom",
+ "flashbulb",
+ "lynx-element",
+ "lynx-template-decoder",
  "quickjs-rust-bridge",
 ]
 
@@ -542,6 +546,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "dom"
+version = "0.1.0"
+dependencies = [
+ "app_units",
+ "codspeed-divan-compat",
+ "cssparser",
+ "euclid",
+ "hughie",
+ "rustc-hash 2.1.3",
+ "selectors",
+ "slab",
+ "smallvec",
+ "stylo",
+ "stylo_atoms",
+ "stylo_dom",
+ "stylo_traits",
+ "url",
+]
+
+[[package]]
 name = "dtoa"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -617,6 +641,15 @@ name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+
+[[package]]
+name = "flashbulb"
+version = "0.1.0"
+dependencies = [
+ "dom",
+ "png",
+ "pulsar",
+]
 
 [[package]]
 name = "flate2"
@@ -951,12 +984,12 @@ name = "hughie"
 version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
+ "dom",
  "euclid",
  "parley",
  "smallvec",
  "stylo",
  "stylo_traits",
- "w3c-dom",
 ]
 
 [[package]]
@@ -1267,6 +1300,16 @@ name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
+
+[[package]]
+name = "lynx-element"
+version = "0.1.0"
+dependencies = [
+ "dom",
+ "euclid",
+ "stylo",
+ "stylo_traits",
+]
 
 [[package]]
 name = "lynx-template-decoder"
@@ -1778,18 +1821,18 @@ name = "pulsar"
 version = "0.1.0"
 dependencies = [
  "codspeed-divan-compat",
+ "dom",
  "euclid",
+ "flashbulb",
  "html5ever",
  "markup5ever_rcdom",
  "parley",
- "png",
  "pollster",
  "rustc-hash 2.1.3",
  "smallvec",
  "stylo",
  "stylo_traits",
  "vello",
- "w3c-dom",
 ]
 
 [[package]]
@@ -1797,6 +1840,8 @@ name = "quickjs-rust-bridge"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "codspeed-divan-compat",
+ "smallvec",
 ]
 
 [[package]]
@@ -2725,26 +2770,6 @@ name = "void"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
-
-[[package]]
-name = "w3c-dom"
-version = "0.1.0"
-dependencies = [
- "app_units",
- "codspeed-divan-compat",
- "cssparser",
- "euclid",
- "hughie",
- "rustc-hash 2.1.3",
- "selectors",
- "slab",
- "smallvec",
- "stylo",
- "stylo_atoms",
- "stylo_dom",
- "stylo_traits",
- "url",
-]
 
 [[package]]
 name = "walkdir"

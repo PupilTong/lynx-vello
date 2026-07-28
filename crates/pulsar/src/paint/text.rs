@@ -24,6 +24,7 @@
 //! - The whole painter works in the text item's local space (origin at the text box's top-left,
 //!   which is also the Parley layout origin); `transform` already includes the device scale.
 
+use dom::layout::TextLayout;
 use parley::{GlyphRun, Layout, PositionedLayoutItem};
 use smallvec::SmallVec;
 use stylo::computed_values::text_decoration_style::T as TextDecorationStyle;
@@ -32,7 +33,6 @@ use stylo::values::computed::TextDecorationLine;
 use vello::kurbo::{Affine, BezPath, Diagonal2, Line, Rect, Stroke};
 use vello::peniko::{Color, Fill, StyleRef};
 use vello::{FontEmbolden, Scene};
-use w3c_dom::layout::TextLayout;
 
 use crate::convert;
 
@@ -90,8 +90,8 @@ pub(crate) fn paint(
 /// Boxless (`display: contents`) ancestors are treated as decorating boxes,
 /// matching browser rendering of decorated `display: contents` spans.
 pub(crate) fn propagated_decorations<T>(
-    document: &w3c_dom::Document<T>,
-    element: w3c_dom::NodeId,
+    document: &dom::Document<T>,
+    element: dom::NodeId,
 ) -> SmallVec<[Decorations; 2]> {
     use stylo::computed_values::position::T as Position;
     let mut out = SmallVec::new();

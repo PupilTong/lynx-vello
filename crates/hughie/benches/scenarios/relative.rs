@@ -1,4 +1,4 @@
-//! Starlight Relative workloads through w3c-dom's production layout host.
+//! Starlight Relative workloads through dom's production layout host.
 
 #![allow(clippy::cast_precision_loss)]
 

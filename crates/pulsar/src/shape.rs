@@ -1,6 +1,8 @@
 //! Box geometry: rounded-rect shapes with per-corner elliptical radii, ring
 //! (border/outline) paths, and `clip-path` basic-shape resolution.
 
+use dom::layout::Edges;
+use dom::visual::{CornerRadii, Size2D};
 use stylo::properties::ComputedValues;
 use stylo::values::computed::basic_shape::{BasicShape, InsetRect};
 use stylo::values::computed::{Length, LengthPercentage};
@@ -11,8 +13,6 @@ use stylo::values::generics::position::PositionOrAuto;
 use stylo::values::specified::svg_path::{PathCommand, SVGPathData, SVGPathPosition};
 use vello::kurbo::{BezPath, Point, Rect, RoundedRect, RoundedRectRadii, Shape};
 use vello::peniko::Fill;
-use w3c_dom::layout::Edges;
-use w3c_dom::visual::{CornerRadii, Size2D};
 
 /// Cubic-Bézier circle approximation constant.
 const KAPPA: f64 = 0.552_284_749_830_793_4;
@@ -89,7 +89,7 @@ pub(crate) use with_shape;
 
 /// A rounded rect with per-corner elliptical radii as a closed clockwise
 /// (y-down) path. `radii` must already be overlap-normalized (the
-/// `w3c-dom` visual build guarantees this for item and clip radii).
+/// `dom` visual build guarantees this for item and clip radii).
 pub(crate) fn rounded_rect_path(rect: Rect, radii: &CornerRadii) -> BezPath {
     let (x0, y0, x1, y1) = (rect.x0, rect.y0, rect.x1, rect.y1);
     let tl = radii.top_left;
@@ -474,7 +474,7 @@ fn resolve(length: &LengthPercentage, basis: f64) -> f64 {
 }
 
 /// An SVG `path()` as a kurbo path. Normalization reduces the command set
-/// to absolute M/L/C/A/Z (the same contract `w3c-dom`'s motion-path build
+/// to absolute M/L/C/A/Z (the same contract `dom`'s motion-path build
 /// relies on); arcs convert through kurbo's endpoint-parameterized arcs.
 fn svg_path(data: &SVGPathData) -> BezPath {
     let normalized = data.normalize(/* reduce = */ true);

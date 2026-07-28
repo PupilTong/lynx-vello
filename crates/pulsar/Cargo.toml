@@ -1,6 +1,6 @@
 [package]
 name = "pulsar"
-description = "vello-backed paint engine: turns w3c-dom paint orders into GPU scenes"
+description = "vello-backed paint engine: turns `dom` paint orders into GPU scenes"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,13 +15,17 @@ rustc-hash.workspace = true
 smallvec.workspace = true
 stylo.workspace = true
 vello.workspace = true
-w3c-dom.workspace = true
+dom.workspace = true
 
 [dev-dependencies]
 divan.workspace = true
+# Dev-only reverse edge: `flashbulb`'s `render` feature depends on this crate,
+# so the screenshot test drives the shared harness rather than reimplementing
+# capture and golden comparison. Cargo permits a dev-dependency cycle; the
+# library graph stays acyclic.
+flashbulb = { workspace = true, features = ["render"] }
 html5ever.workspace = true
 markup5ever_rcdom.workspace = true
-png.workspace = true
 stylo_traits.workspace = true
 
 [[bench]]

@@ -1,4 +1,4 @@
-//! Starlight Relative benchmarks through w3c-dom's production host.
+//! Starlight Relative benchmarks through dom's production host.
 
 #[path = "scenarios/relative.rs"]
 mod scenarios;

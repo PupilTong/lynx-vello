@@ -28,6 +28,54 @@ typedef struct QjsUnhandledRejection {
 
 typedef int QjsInterruptCallback(void *opaque);
 
+/* How a host-call argument or result is tagged. Deliberately narrow: the
+ * boundary carries primitives, and anything else is refused rather than
+ * coerced. Mirrored by `HostArgKind` in ffi.rs. */
+enum QjsHostArgKind {
+    QJS_ARG_UNDEFINED = 0,
+    QJS_ARG_NULL = 1,
+    QJS_ARG_BOOLEAN = 2,
+    QJS_ARG_NUMBER = 3,
+    QJS_ARG_STRING = 4,
+    QJS_ARG_UNSUPPORTED = 5,
+};
+
+/* One argument, flattened.
+ *
+ * Arguments are only ever read, and only during the synchronous call, so they
+ * are described in place rather than duplicated into per-argument heap boxes:
+ * `argv` stays valid for the whole call and the values it holds are already
+ * rooted by the caller. `text` is CESU-8 owned by QuickJS and freed by the
+ * trampoline once the callee returns. */
+typedef struct QjsHostArg {
+    int32_t kind;
+    double number;          /* Boolean: 0 or 1. Number: the value. */
+    const uint8_t *text;    /* String only. */
+    size_t text_len;
+} QjsHostArg;
+
+/* The return value, described the same way so the callee never allocates a
+ * boxed JSValue. `text` is UTF-16 owned by the callee and must stay valid
+ * until the dispatch returns, which is when the trampoline reads it. */
+typedef struct QjsHostResult {
+    int32_t kind;
+    double number;
+    const uint16_t *text;
+    size_t text_len;
+} QjsHostResult;
+
+/* Invoked while JavaScript is on the stack, once per call of a host function
+ * created by `qjs_new_host_function`. A non-zero return means the callee
+ * already threw on `runtime->context`. */
+typedef int QjsHostDispatch(void *opaque, void *handler, size_t argument_count,
+                            const QjsHostArg *arguments, QjsHostResult *result);
+
+/* Invoked from the garbage collector when a host function becomes unreachable,
+ * handing back the same `handler` address the function was created with. It
+ * runs during collection, so the callee must only *record* the address — not
+ * drop anything that could re-enter JavaScript. */
+typedef void QjsHostRelease(void *opaque, void *handler);
+
 typedef struct QjsRuntime {
     JSRuntime *raw;
     JSContext *context;
@@ -36,7 +84,46 @@ typedef struct QjsRuntime {
     int rejection_tracker_oom;
     QjsInterruptCallback *interrupt_callback;
     void *interrupt_opaque;
+    QjsHostDispatch *host_dispatch;
+    QjsHostRelease *host_release;
+    void *host_opaque;
 } QjsRuntime;
+
+/* One per host function, owned by a JS object whose only job is to be
+ * collected at the same moment the function is: that is what gives the Rust
+ * closure a lifetime instead of pinning it to the realm.
+ *
+ * `handler` is the closure's own stable address, not an index into a table —
+ * so there is nothing to reallocate, no free list, and no way for a stale
+ * reference to alias a different closure. NULL means the host still owns it,
+ * which is how a failed construction tells the finalizer to stand down. */
+typedef struct QjsHostOwner {
+    QjsRuntime *runtime;
+    void *handler;
+} QjsHostOwner;
+
+/* Allocated once per process; JS_NewClassID is mutex-guarded, so sharing the
+ * static across realms on different threads is safe. */
+static JSClassID qjs_host_owner_class_id;
+
+static void qjs_host_owner_finalizer(JSRuntime *raw, JSValue value) {
+    QjsHostOwner *owner = JS_GetOpaque(value, qjs_host_owner_class_id);
+
+    (void)raw;
+    if (owner == NULL) {
+        return;
+    }
+    if (owner->handler != NULL && owner->runtime->host_release != NULL) {
+        owner->runtime->host_release(owner->runtime->host_opaque,
+                                     owner->handler);
+    }
+    free(owner);
+}
+
+static const JSClassDef qjs_host_owner_class = {
+    "QjsHostFunctionOwner",
+    .finalizer = qjs_host_owner_finalizer,
+};
 
 enum QjsValueKind {
     QJS_KIND_UNDEFINED = 0,
@@ -144,6 +231,9 @@ QjsRuntime *qjs_runtime_new(void) {
         JS_SetHostPromiseRejectionTracker(runtime->raw,
                                           qjs_promise_rejection_tracker,
                                           runtime);
+        JS_NewClassID(&qjs_host_owner_class_id);
+        JS_NewClass(runtime->raw, qjs_host_owner_class_id,
+                    &qjs_host_owner_class);
     } else {
         free(runtime);
         return NULL;
@@ -172,11 +262,20 @@ void qjs_runtime_free(QjsRuntime *runtime) {
 JSContext *qjs_context_new(QjsRuntime *runtime) {
     assert(runtime->context == NULL);
     runtime->context = JS_NewContext(runtime->raw);
+    if (runtime->context != NULL) {
+        /* The host-function trampoline only receives a JSContext, so the
+         * owning QjsRuntime has to be reachable from it. */
+        JS_SetContextOpaque(runtime->context, runtime);
+    }
     return runtime->context;
 }
 
 void qjs_context_free(JSContext *context) {
     JS_FreeContext(context);
+}
+
+void qjs_runtime_run_gc(QjsRuntime *runtime) {
+    JS_RunGC(runtime->raw);
 }
 
 void qjs_runtime_set_memory_limit(QjsRuntime *runtime, size_t limit) {
@@ -221,8 +320,10 @@ QjsValue *qjs_new_big_uint64(JSContext *context, uint64_t value) {
     return qjs_box(context, JS_NewBigUint64(context, value));
 }
 
-QjsValue *qjs_new_string_utf16(JSContext *context, const uint16_t *units,
-                               size_t length) {
+/* Builds a JS string from UTF-16, exactly — including lone surrogates, which
+ * is why it round-trips through a JSON escape rather than through UTF-8. */
+static JSValue qjs_string_from_utf16(JSContext *context, const uint16_t *units,
+                                     size_t length) {
     static const char hex[] = "0123456789abcdef";
     char *json;
     JSValue parsed;
@@ -230,13 +331,11 @@ QjsValue *qjs_new_string_utf16(JSContext *context, const uint16_t *units,
     size_t offset = 0;
 
     if (length > (SIZE_MAX - 3) / 6) {
-        JS_ThrowOutOfMemory(context);
-        return NULL;
+        return JS_ThrowOutOfMemory(context);
     }
     json = malloc(length * 6 + 3);
     if (json == NULL) {
-        JS_ThrowOutOfMemory(context);
-        return NULL;
+        return JS_ThrowOutOfMemory(context);
     }
     json[offset++] = '"';
     for (index = 0; index < length; ++index) {
@@ -252,7 +351,12 @@ QjsValue *qjs_new_string_utf16(JSContext *context, const uint16_t *units,
     json[offset] = '\0';
     parsed = JS_ParseJSON(context, json, offset, "<host string>");
     free(json);
-    return qjs_box(context, parsed);
+    return parsed;
+}
+
+QjsValue *qjs_new_string_utf16(JSContext *context, const uint16_t *units,
+                               size_t length) {
+    return qjs_box(context, qjs_string_from_utf16(context, units, length));
 }
 
 void qjs_value_free(JSContext *context, QjsValue *value) {
@@ -403,4 +507,213 @@ void qjs_discard_exception(JSContext *context) {
 QjsValue *qjs_get_property(JSContext *context, const QjsValue *value,
                            const char *name) {
     return qjs_box(context, JS_GetPropertyStr(context, value->value, name));
+}
+
+int qjs_set_property(JSContext *context, const QjsValue *target,
+                     const char *name, const QjsValue *value) {
+    /* JS_SetPropertyStr consumes the value, so hand it a duplicate and leave
+     * the caller's box owning what it came in with. */
+    return JS_SetPropertyStr(context, target->value, name,
+                             JS_DupValue(context, value->value));
+}
+
+QjsValue *qjs_global_object(JSContext *context) {
+    return qjs_box(context, JS_GetGlobalObject(context));
+}
+
+void qjs_throw_error(JSContext *context, const char *message) {
+    JS_ThrowInternalError(context, "%s", message);
+}
+
+void qjs_runtime_set_host_dispatch(QjsRuntime *runtime,
+                                   QjsHostDispatch *dispatch,
+                                   QjsHostRelease *release, void *opaque) {
+    runtime->host_dispatch = dispatch;
+    runtime->host_release = release;
+    runtime->host_opaque = opaque;
+}
+
+/* Arguments up to this many are described on the stack; a call with more
+ * falls back to one allocation for the whole array. Every Element PAPI member
+ * takes at most three. */
+#define QJS_HOST_INLINE_ARGS 8
+
+static void qjs_host_describe(JSContext *context, JSValueConst value,
+                              QjsHostArg *slot) {
+    slot->text = NULL;
+    slot->text_len = 0;
+    slot->number = 0.0;
+
+    if (JS_IsUndefined(value)) {
+        slot->kind = QJS_ARG_UNDEFINED;
+    } else if (JS_IsNull(value)) {
+        slot->kind = QJS_ARG_NULL;
+    } else if (JS_IsBool(value)) {
+        slot->kind = QJS_ARG_BOOLEAN;
+        slot->number = JS_ToBool(context, value) ? 1.0 : 0.0;
+    } else if (JS_IsNumber(value)) {
+        double number;
+        if (JS_ToFloat64(context, &number, value) < 0) {
+            slot->kind = QJS_ARG_UNSUPPORTED;
+            return;
+        }
+        slot->kind = QJS_ARG_NUMBER;
+        slot->number = number;
+    } else if (JS_IsString(value)) {
+        size_t length;
+        const char *text = JS_ToCStringLen2(context, &length, value, 1);
+        if (text == NULL) {
+            slot->kind = QJS_ARG_UNSUPPORTED;
+            return;
+        }
+        slot->kind = QJS_ARG_STRING;
+        slot->text = (const uint8_t *)text;
+        slot->text_len = length;
+    } else {
+        slot->kind = QJS_ARG_UNSUPPORTED;
+    }
+}
+
+static JSValue qjs_host_build(JSContext *context, const QjsHostResult *result) {
+    switch (result->kind) {
+    case QJS_ARG_UNDEFINED:
+        return JS_UNDEFINED;
+    case QJS_ARG_NULL:
+        return JS_NULL;
+    case QJS_ARG_BOOLEAN:
+        return JS_NewBool(context, result->number != 0.0);
+    case QJS_ARG_NUMBER:
+        return JS_NewFloat64(context, result->number);
+    case QJS_ARG_STRING:
+        return qjs_string_from_utf16(context, result->text, result->text_len);
+    default:
+        return JS_ThrowInternalError(context, "invalid host return value");
+    }
+}
+
+static JSValue qjs_host_trampoline(JSContext *context, JSValueConst this_value,
+                                   int argc, JSValueConst *argv, int magic,
+                                   JSValue *func_data) {
+    QjsRuntime *runtime = JS_GetContextOpaque(context);
+    QjsHostArg inline_arguments[QJS_HOST_INLINE_ARGS];
+    QjsHostArg *arguments = inline_arguments;
+    QjsHostOwner *owner;
+    QjsHostResult result;
+    JSValue returned;
+    void *handler;
+    int status;
+    int count;
+
+    (void)this_value;
+    (void)magic;
+    if (runtime == NULL || runtime->host_dispatch == NULL) {
+        return JS_ThrowInternalError(context, "no host dispatch is installed");
+    }
+    owner = JS_GetOpaque(func_data[0], qjs_host_owner_class_id);
+    if (owner == NULL || owner->handler == NULL) {
+        return JS_ThrowInternalError(context, "this host function was released");
+    }
+    handler = owner->handler;
+
+    if (argc > QJS_HOST_INLINE_ARGS) {
+        if ((size_t)argc > SIZE_MAX / sizeof(*arguments)) {
+            return JS_ThrowRangeError(context, "too many call arguments");
+        }
+        arguments = malloc((size_t)argc * sizeof(*arguments));
+        if (arguments == NULL) {
+            JS_ThrowOutOfMemory(context);
+            return JS_EXCEPTION;
+        }
+    }
+    for (count = 0; count < argc; ++count) {
+        qjs_host_describe(context, argv[count], &arguments[count]);
+    }
+
+    result.kind = QJS_ARG_UNDEFINED;
+    result.number = 0.0;
+    result.text = NULL;
+    result.text_len = 0;
+    status = runtime->host_dispatch(runtime->host_opaque, handler,
+                                    (size_t)argc, arguments, &result);
+
+    for (count = 0; count < argc; ++count) {
+        if (arguments[count].kind == QJS_ARG_STRING) {
+            JS_FreeCString(context, (const char *)arguments[count].text);
+        }
+    }
+    if (arguments != inline_arguments) {
+        free(arguments);
+    }
+
+    if (status != 0) {
+        /* The dispatch threw through qjs_throw_error before returning. */
+        return JS_EXCEPTION;
+    }
+    returned = qjs_host_build(context, &result);
+    return returned;
+}
+
+/* Ownership contract: `handler` transfers to JavaScript only when this returns
+ * non-NULL. On every failure path the owner's handler pointer is cleared first,
+ * so the finalizer stands down and the caller still owns the closure. */
+QjsValue *qjs_new_host_function(JSContext *context, const char *name,
+                                int length, void *handler) {
+    QjsRuntime *runtime = JS_GetContextOpaque(context);
+    QjsHostOwner *owner;
+    JSValue data;
+    JSValue function;
+    JSValue function_name;
+
+    if (runtime == NULL) {
+        JS_ThrowInternalError(context, "no host dispatch is installed");
+        return NULL;
+    }
+
+    /* The owner object carries the closure's address and, when collected,
+     * tells the host it may be dropped. Handing it to JS_NewCFunctionData as
+     * the function's data makes the two die together. */
+    owner = malloc(sizeof(*owner));
+    if (owner == NULL) {
+        JS_ThrowOutOfMemory(context);
+        return NULL;
+    }
+    owner->runtime = runtime;
+    owner->handler = handler;
+
+    data = JS_NewObjectClass(context, (int)qjs_host_owner_class_id);
+    if (JS_IsException(data)) {
+        free(owner);
+        return NULL;
+    }
+    JS_SetOpaque(data, owner);
+
+    function = JS_NewCFunctionData(context, qjs_host_trampoline, length,
+                                   0, 1, &data);
+    if (JS_IsException(function)) {
+        owner->handler = NULL;
+        JS_FreeValue(context, data);
+        return NULL;
+    }
+    JS_FreeValue(context, data);
+
+    /* `name` is non-writable on function objects, so define rather than set.
+     * JS_NewCFunctionData already installed a valid empty name, so this is a
+     * redefine — and JS_DefinePropertyValue does NOT check its value for the
+     * exception sentinel before storing it. Handing it a failed allocation
+     * would overwrite a good name with the sentinel, leaving an object whose
+     * `.name` has no type and a pending exception that surfaces later at an
+     * unrelated call. Fail the whole construction instead. */
+    function_name = JS_NewString(context, name);
+    if (JS_IsException(function_name)) {
+        owner->handler = NULL;
+        JS_FreeValue(context, function);
+        return NULL;
+    }
+    if (JS_DefinePropertyValueStr(context, function, "name", function_name,
+                                  JS_PROP_CONFIGURABLE) < 0) {
+        owner->handler = NULL;
+        JS_FreeValue(context, function);
+        return NULL;
+    }
+    return qjs_box(context, function);
 }

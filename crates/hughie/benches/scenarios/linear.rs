@@ -1,4 +1,4 @@
-//! `display: linear` workloads driven through w3c-dom's production host.
+//! `display: linear` workloads driven through dom's production host.
 
 #![allow(clippy::cast_precision_loss)]
 

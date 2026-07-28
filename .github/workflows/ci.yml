@@ -31,9 +31,12 @@ jobs:
           cargo fmt --check
           -p bobcat-engine
           -p bobcat-quickjs
+          -p flashbulb
+          -p lynx-element
           -p lynx-template-decoder
+          -p pulsar
           -p quickjs-rust-bridge
-          -p w3c-dom
+          -p dom
           -p hughie
 
       - name: Clippy

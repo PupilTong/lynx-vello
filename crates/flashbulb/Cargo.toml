@@ -1,0 +1,28 @@
+[package]
+name = "flashbulb"
+description = "Screenshot testing infrastructure: RGBA images, Playwright-compatible pixel comparison, and golden-file management"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+# The comparison half — images, pixelmatch, goldens — has no renderer and no
+# GPU. Any crate can dev-depend on it.
+default = []
+# Adds the capture half: lay out and paint a `dom` document through `pulsar`
+# onto a headless GPU surface. Kept behind a feature so a crate that already
+# has pixels (or that `pulsar` itself dev-depends on) does not pull the
+# renderer back in.
+render = ["dep:dom", "dep:pulsar"]
+
+[dependencies]
+png = { workspace = true }
+
+dom = { workspace = true, optional = true }
+pulsar = { workspace = true, optional = true }
+
+[lints]
+workspace = true

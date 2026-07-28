@@ -1,4 +1,4 @@
-//! CSS Grid benchmarks through w3c-dom's production host.
+//! CSS Grid benchmarks through dom's production host.
 
 #[path = "scenarios/grid.rs"]
 mod scenarios;

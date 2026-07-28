@@ -231,7 +231,7 @@ impl CachedCase {
         Self { fixture }
     }
 
-    fn hit(&mut self) -> w3c_dom::layout::Layout {
+    fn hit(&mut self) -> dom::layout::Layout {
         self.fixture.run()
     }
 }

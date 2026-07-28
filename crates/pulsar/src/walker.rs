@@ -2,7 +2,7 @@
 //!
 //! Three stack disciplines interleave on vello's single layer stack:
 //!
-//! 1. **Item clip chains** ([`w3c_dom::visual::ClipNode`]) — pushed lazily
+//! 1. **Item clip chains** ([`dom::visual::ClipNode`]) — pushed lazily
 //!    per item by diffing the item's chain against what is on the stack,
 //!    so runs of items sharing clips pay nothing. Chains restart inside
 //!    every group scope: an item's full chain is (re-)pushed inside its
@@ -17,7 +17,7 @@
 //!    parent's buffer, so a blend directly inside one reads pixels outside
 //!    the clip. Fragment painters that need a blend under an item clip
 //!    (inset shadows) interpose their own full `SrcOver` layer first.
-//! 2. **Group scopes** ([`w3c_dom::visual::RenderLayer`]) — a stacking context with group effects
+//! 2. **Group scopes** ([`dom::visual::RenderLayer`]) — a stacking context with group effects
 //!    pushes, outermost to innermost: the effect layer (blend mode + `opacity` alpha, clipped to
 //!    the group's prepass-computed content bounds), a `clip-path` layer (a full `push_layer`, not a
 //!    clip layer, per the #1198 rule above), and for `mask-image` the alpha-mask sandwich — mask
@@ -32,11 +32,11 @@
 //!    is a recorded v1 limit); per text run: the retained Parley layout under the parent element's
 //!    style.
 
+use dom::Document;
+use dom::visual::{ClipNode, PaintItem, PaintItemKind, PaintOrder, RenderLayer};
 use vello::Scene;
 use vello::kurbo::{Affine, Point, Rect};
 use vello::peniko::{BlendMode, Compose, Fill, Mix};
-use w3c_dom::Document;
-use w3c_dom::visual::{ClipNode, PaintItem, PaintItemKind, PaintOrder, RenderLayer};
 
 use crate::paint::{BoxFragment, PathScratch, background, border, filters, mask, shadow, text};
 use crate::shape::{BoxShape, with_shape};
@@ -296,7 +296,7 @@ fn paint_item<T>(
 /// skipped via its parent's style.
 fn collect_text_clip<T>(
     document: &Document<T>,
-    element: w3c_dom::NodeId,
+    element: dom::NodeId,
 ) -> crate::paint::TextClip<'_> {
     let mut clip = crate::paint::TextClip::default();
     collect_text_clip_under(document, element, vello::kurbo::Vec2::ZERO, &mut clip);
@@ -305,7 +305,7 @@ fn collect_text_clip<T>(
 
 fn collect_text_clip_under<'doc, T>(
     document: &'doc Document<T>,
-    node: w3c_dom::NodeId,
+    node: dom::NodeId,
     offset: vello::kurbo::Vec2,
     clip: &mut crate::paint::TextClip<'doc>,
 ) {
@@ -376,7 +376,7 @@ fn sync_clips(
 }
 
 fn push_clip(scene: &mut Scene, clip: &ClipNode, scale: Affine) {
-    let size = w3c_dom::visual::Size2D::new(clip.rect.size.width, clip.rect.size.height);
+    let size = dom::visual::Size2D::new(clip.rect.size.width, clip.rect.size.height);
     let Some(local) = convert::item_affine(&clip.transform, size) else {
         // Singular clip space: nothing inside it can render.
         scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &Rect::ZERO);

@@ -5,8 +5,8 @@
 mod common;
 
 use common::Doc;
+use dom::visual::PaintOrder;
 use pulsar::{ImageStore, Painter};
-use w3c_dom::visual::PaintOrder;
 
 const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
 

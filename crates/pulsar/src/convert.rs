@@ -1,10 +1,10 @@
-//! Type bridges: euclid (w3c-dom visual) → kurbo, stylo colors → peniko.
+//! Type bridges: euclid (dom visual) → kurbo, stylo colors → peniko.
 
+use dom::visual::{Size2D, Transform3D};
 use stylo::color::{AbsoluteColor, ColorSpace};
 use stylo::properties::ComputedValues;
 use vello::kurbo::Affine;
 use vello::peniko::Color;
-use w3c_dom::visual::{Size2D, Transform3D};
 
 /// The affine paint transform for an item matrix, or `None` when the matrix
 /// does not render (singular / degenerate — css-transforms-1 §6).
@@ -15,7 +15,7 @@ use w3c_dom::visual::{Size2D, Transform3D};
 /// the affine map that agrees with the true projection at three border-box
 /// corners — (0,0), (w,0), (0,h) — exact everywhere when the matrix is
 /// affine, and exact at those corners otherwise (recorded v1 limit; hit
-/// testing in `w3c-dom` keeps the exact projective inverse).
+/// testing in `dom` keeps the exact projective inverse).
 pub(crate) fn item_affine(transform: &Transform3D<f32>, size: Size2D<f32>) -> Option<Affine> {
     if !transform.is_invertible() {
         return None;

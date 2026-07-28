@@ -1,9 +1,9 @@
-//! Test-only `<div>` fragment → `w3c-dom` adapter.
+//! Test-only `<div>` fragment → `dom` adapter.
 
+use dom::{Document, NodeId};
 use html5ever::tendril::TendrilSink;
 use html5ever::{ParseOpts, QualName, local_name, ns, parse_fragment};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
-use w3c_dom::{Document, NodeId};
 
 use crate::common::{Doc, device};
 

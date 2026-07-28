@@ -105,7 +105,7 @@ Lynx parity, since stylo's shared grammar parses them — repeating
 gradients), borders (all styles, per-corner elliptical radii), box-shadows,
 text (glyph runs, decorations, text-stroke, unblurred text-shadow), and the
 group effects (`opacity`, color `filter` approximations, `clip-path`,
-single-layer `mask`) via `w3c-dom`'s `RenderLayer` arena. Recorded v1
+single-layer `mask`) via `dom`'s `RenderLayer` arena. Recorded v1
 limits live in `crates/pulsar/src/lib.rs`. Both fork-grammar gaps found
 while implementing are fixed on the fork's `lynx` branch (PR #10,
 squash-merged as `8fb7de31a`):

@@ -5,6 +5,8 @@
     reason = "each benchmark target compiles this shared fixture with a different method subset"
 )]
 
+use dom::layout::Layout;
+use dom::{Document, Node, NodeId};
 use euclid::{Scale, Size2D};
 use hughie::geometry::Size;
 use style_traits::{CSSPixel, DevicePixel};
@@ -20,8 +22,6 @@ use stylo::servo::media_features::PointerCapabilities;
 use stylo::values::computed::font::GenericFontFamily;
 use stylo::values::computed::{CSSPixelLength, Display, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
-use w3c_dom::layout::Layout;
-use w3c_dom::{Document, Node, NodeId};
 
 const TEXT_SAMPLES: &[&str] = &[
     "Settings",
@@ -81,7 +81,7 @@ fn device(viewport: Size<f32>) -> Device {
     )
 }
 
-/// A styled w3c-dom document ready for a cold production layout pass.
+/// A styled dom document ready for a cold production layout pass.
 #[derive(Debug)]
 pub(super) struct LayoutFixture {
     document: Document<()>,
@@ -195,7 +195,7 @@ impl LayoutFixture {
             .clone_display();
         assert_eq!(
             display, self.expected_display,
-            "the benchmark root's display declaration must reach w3c-dom"
+            "the benchmark root's display declaration must reach dom"
         );
         self
     }

@@ -14,7 +14,7 @@ the semantics are stylo's.** Everything below refines that sentence.
 
 ## Settled before this session (not re-decided)
 
-- stylo is the cascade engine, layered `future runtime adapter → w3c-dom →
+- stylo is the cascade engine, layered `future runtime adapter → dom →
   vendor/stylo` (fork with the `lynx` feature; Lynx-only properties and
   `rpx`/`ppx`/`sp` units are first-class grammar in the fork, no side-channel
   tricks). The runtime-adapter layer is not currently implemented.
@@ -88,7 +88,7 @@ the semantics are stylo's.** Everything below refines that sentence.
 
    *§6/§7 required a DOM redesign, and it shipped together with the styling
    system* (not as a retrofit onto the earlier single-threaded-flush
-   `w3c-dom`): flushes now drive stylo's own `driver::traverse_dom`;
+   `dom`): flushes now drive stylo's own `driver::traverse_dom`;
    every piece of element state stylo mutates through `&self` became
    atomic; the one non-atomic slot (`ElementData`) is single-owner under
    stylo's one-worker-per-element traversal discipline; and mutations
@@ -175,7 +175,7 @@ the semantics are stylo's.** Everything below refines that sentence.
 16. **cssId scoping is a runtime-adapter concern.** The feature exists for
     pageConfig `enableRemoveCSSScope = false` (that is the exact
     `.web.bundle` key; this doc previously shortened it to
-    "removeCSSScope"); `w3c-dom` stays scope-unaware. Mechanism: the
+    "removeCSSScope"); `dom` stays scope-unaware. Mechanism: the
     runtime adapter synthesizes `:where([l-css-id="N"])` guards onto
     selectors at ingest — string-parity with web-core's decoder output,
     trivially differential-testable, zero specificity perturbation. (With
@@ -216,7 +216,7 @@ the semantics are stylo's.** Everything below refines that sentence.
     longhands) under the `lynx` feature — pref-gated for stock servo — with
     fork-side parse/compute/damage coverage. Ingestion applies no property allowlist, so the fork build is
     the only gate. On top of that grammar, this repo adds the consuming
-    machinery: `w3c-dom`'s `effective_containment` fold and
+    machinery: `dom`'s `effective_containment` fold and
     `StyleDamage`/`FlushSummary` damage harvest, and `hughie`'s
     size/layout containment, skipped contents, and relayout-boundary
     invalidation. Motivation: `<list>` virtualization (see
@@ -237,7 +237,7 @@ the semantics are stylo's.** Everything below refines that sentence.
       strict-like containment).
     - **Paint containment: layout + visual order.** `contain: paint`'s IFC / containing-block
       effects are computed and exposed by layout; since 2026-07-23 its stacking context and
-      paint/hit-area clipping are implemented by `w3c-dom`'s `visual` module (paint order + hit
+      paint/hit-area clipping are implemented by `dom`'s `visual` module (paint order + hit
       testing). Actual pixel output still awaits the render crate.
     - **Style containment is N/A.** `contain: style` parses and feeds the `content` / `strict`
       composite math, but the engine has no counters, quotes, or `content` property, so it has no

@@ -1,0 +1,26 @@
+[package]
+name = "lynx-element"
+description = "Lynx runtime element layer: Element PAPI handles, the page root, and Lynx UA cascade defaults over the generic `dom` core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+# The generic W3C DOM/CSS core this layer drives. The dependency is one-way by
+# charter: Lynx tags, Element-PAPI opcodes, handle lifetime, `<page>` policy,
+# and Lynx UA defaults live here and never leak downward (AGENTS.md, and the
+# ownership tables in docs/style-architecture.md and docs/layout-architecture.md).
+dom = { workspace = true }
+
+# Device construction is this layer's job ("view metrics and device
+# construction" in the runtime-adapter row of docs/style-architecture.md), so
+# the stylo `Device` and its font-metrics provider are built here.
+euclid = { workspace = true }
+stylo = { workspace = true }
+stylo_traits = { workspace = true }
+
+[lints]
+workspace = true
