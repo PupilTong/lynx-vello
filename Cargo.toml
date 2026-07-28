@@ -25,9 +25,10 @@ lynx-template-decoder = { path = "crates/lynx-template-decoder" }
 hughie = { path = "crates/hughie" }
 flashbulb = { path = "crates/flashbulb" }
 # Format sniffing, capability-probed platform/software decode backends, and the
-# async fetch→decode→cache loader for replaced content. The package is named
-# `image`; the crates.io crate of that name is pulled in renamed as `image_rs`
-# (the same collision this workspace already resolves for `stylo_dom`).
+# async fetch→decode→cache loader for replaced content. The package owns the
+# name `image` outright: the crates.io crate of that name is deliberately NOT a
+# dependency (its three constituent decoders are taken directly instead), so
+# `cargo check/test/clippy -p image` is unambiguous.
 image = { path = "crates/image" }
 lynx-element = { path = "crates/lynx-element" }
 pulsar = { path = "crates/pulsar" }

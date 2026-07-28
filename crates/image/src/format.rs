@@ -84,9 +84,7 @@ pub fn sniff(bytes: &[u8]) -> Option<ImageFormat> {
 pub fn is_complete(format: ImageFormat, bytes: &[u8]) -> bool {
     match format {
         ImageFormat::Png => has_png_iend(bytes),
-        // EOI. Trailing garbage after it is tolerated: cameras and stripping
-        // tools routinely leave padding, and every decoder stops at the marker.
-        ImageFormat::Jpeg => find_subslice(bytes, &[0xFF, 0xD9]).is_some(),
+        ImageFormat::Jpeg => has_jpeg_eoi(bytes),
         ImageFormat::WebP => webp_payload_present(bytes),
     }
 }
@@ -134,6 +132,94 @@ fn has_png_iend(bytes: &[u8]) -> bool {
     }
 }
 
+/// Whether a terminal `EOI` marker is reachable by walking the JPEG marker
+/// chain.
+///
+/// Searching for a bare `FF D9` is wrong: those two bytes occur freely inside
+/// an `APP` segment's payload (an embedded EXIF thumbnail is itself a JPEG, so
+/// it carries its own `EOI`) and inside entropy-coded scan data. A file whose
+/// only `FF D9` sits in a metadata payload would be called complete while its
+/// image data is still missing.
+///
+/// So: length-prefixed segments are skipped by their declared size, and scan
+/// data is walked byte-stuffing-aware — inside a scan, `FF 00` is a literal
+/// `FF` and `FF D0..=FF D7` are restart markers, neither of which ends the
+/// stream. Trailing bytes after a genuine `EOI` are tolerated, because cameras
+/// and stripping tools routinely leave padding and every decoder stops there.
+fn has_jpeg_eoi(bytes: &[u8]) -> bool {
+    // Past SOI.
+    let mut cursor = 2usize;
+    loop {
+        // Markers may be preceded by any number of `FF` fill bytes.
+        while bytes.get(cursor) == Some(&0xFF) && bytes.get(cursor + 1) == Some(&0xFF) {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&0xFF) {
+            return false;
+        }
+        let Some(&marker) = bytes.get(cursor + 1) else {
+            return false;
+        };
+        match marker {
+            // EOI: the stream is terminated.
+            0xD9 => return true,
+            // Standalone markers, no payload: TEM and RST0..=RST7.
+            0x01 | 0xD0..=0xD7 => cursor += 2,
+            // SOS: a length-prefixed header followed by entropy-coded data that
+            // is not length-prefixed at all, so it has to be scanned.
+            0xDA => {
+                let Some(length) = segment_length(bytes, cursor) else {
+                    return false;
+                };
+                cursor += 2 + length;
+                let Some(next) = scan_to_next_marker(bytes, cursor) else {
+                    return false;
+                };
+                cursor = next;
+            }
+            // Everything else is length-prefixed; skip its payload wholesale so
+            // an embedded thumbnail's own `EOI` is never mistaken for ours.
+            _ => {
+                let Some(length) = segment_length(bytes, cursor) else {
+                    return false;
+                };
+                cursor += 2 + length;
+            }
+        }
+    }
+}
+
+/// The declared length of the segment whose marker starts at `at`, or `None`
+/// when it is absent, degenerate, or runs past the buffer.
+fn segment_length(bytes: &[u8], at: usize) -> Option<usize> {
+    let field = bytes.get(at + 2..at + 4)?;
+    let length = usize::from(u16::from_be_bytes([field[0], field[1]]));
+    // The length counts itself, so anything under 2 is malformed.
+    if length < 2 || at + 2 + length > bytes.len() {
+        return None;
+    }
+    Some(length)
+}
+
+/// Walks entropy-coded data to the next real marker, honouring byte stuffing.
+fn scan_to_next_marker(bytes: &[u8], from: usize) -> Option<usize> {
+    let mut cursor = from;
+    loop {
+        // Find the next `FF`.
+        cursor += bytes.get(cursor..)?.iter().position(|byte| *byte == 0xFF)?;
+        let &next = bytes.get(cursor + 1)?;
+        match next {
+            // Fill byte: re-examine from the second `FF`.
+            0xFF => cursor += 1,
+            // A stuffed literal `FF` (`FF 00`), or a restart marker: both are
+            // two bytes that belong to the scan and do not end it.
+            0x00 | 0xD0..=0xD7 => cursor += 2,
+            // Any other marker ends the entropy-coded segment.
+            _ => return Some(cursor),
+        }
+    }
+}
+
 /// RIFF declares its payload length at bytes 4..8, little-endian, counting
 /// everything after that field. The buffer must hold all of it.
 fn webp_payload_present(bytes: &[u8]) -> bool {
@@ -143,15 +229,6 @@ fn webp_payload_present(bytes: &[u8]) -> bool {
     let declared = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
     // A zero-length or absurd declaration is framing we cannot trust.
     declared >= 4 && u64::from(declared) + 8 <= bytes.len() as u64
-}
-
-fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return None;
-    }
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
 }
 
 #[cfg(test)]
@@ -225,7 +302,11 @@ mod tests {
         assert!(!is_complete(ImageFormat::Png, truncated));
 
         assert!(is_complete(ImageFormat::Jpeg, &[0xFF, 0xD8, 0xFF, 0xD9]));
-        assert!(!is_complete(ImageFormat::Jpeg, &[0xFF, 0xD8, 0xFF, 0xE0]));
+        // APP0 with a declared length but no terminator.
+        assert!(!is_complete(
+            ImageFormat::Jpeg,
+            &[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x02]
+        ));
 
         assert!(is_complete(ImageFormat::WebP, &webp_bytes(b"VP8 data")));
         let short = webp_bytes(b"VP8 data");
@@ -268,6 +349,57 @@ mod tests {
         both.extend_from_slice(b"IEND");
         both.extend_from_slice(&[0xAE, 0x42, 0x60, 0x82]);
         assert!(is_complete(ImageFormat::Png, &both));
+    }
+
+    /// `SOI`, one segment, then whatever the caller appends.
+    fn jpeg_with_segment(marker: u8, payload: &[u8], tail: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![0xFF, 0xD8, 0xFF, marker];
+        #[allow(clippy::cast_possible_truncation)]
+        let length = (payload.len() + 2) as u16;
+        bytes.extend_from_slice(&length.to_be_bytes());
+        bytes.extend_from_slice(payload);
+        bytes.extend_from_slice(tail);
+        bytes
+    }
+
+    #[test]
+    fn jpeg_completeness_skips_segment_payloads_rather_than_scanning_them() {
+        // An `FF D9` inside an APP1 payload is metadata — an embedded EXIF
+        // thumbnail is itself a JPEG and carries its own EOI — not this
+        // stream's terminator.
+        let decoy = jpeg_with_segment(0xE1, &[0xFF, 0xD9], &[]);
+        assert!(
+            !is_complete(ImageFormat::Jpeg, &decoy),
+            "EOI inside an APP payload is not the stream's terminator"
+        );
+
+        // The same file with a real terminator appended is complete.
+        let terminated = jpeg_with_segment(0xE1, &[0xFF, 0xD9], &[0xFF, 0xD9]);
+        assert!(is_complete(ImageFormat::Jpeg, &terminated));
+    }
+
+    #[test]
+    fn jpeg_completeness_walks_scan_data_byte_stuffing_aware() {
+        // Inside a scan, `FF 00` is a literal 0xFF and `FF D0..D7` are restart
+        // markers; neither ends the stream.
+        let scan = jpeg_with_segment(
+            0xDA,
+            &[0x01],
+            &[0x12, 0xFF, 0x00, 0x34, 0xFF, 0xD0, 0x56, 0xFF, 0xD9],
+        );
+        assert!(is_complete(ImageFormat::Jpeg, &scan));
+
+        // Truncated mid-scan: the stuffed bytes are present but no EOI is.
+        let unterminated = jpeg_with_segment(0xDA, &[0x01], &[0x12, 0xFF, 0x00, 0x34]);
+        assert!(!is_complete(ImageFormat::Jpeg, &unterminated));
+    }
+
+    #[test]
+    fn jpeg_completeness_rejects_a_segment_running_past_the_buffer() {
+        let mut lying = vec![0xFF, 0xD8, 0xFF, 0xE0];
+        lying.extend_from_slice(&9000u16.to_be_bytes());
+        lying.extend_from_slice(&[0u8; 4]);
+        assert!(!is_complete(ImageFormat::Jpeg, &lying));
     }
 
     #[test]

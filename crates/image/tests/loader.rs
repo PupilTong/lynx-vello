@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 fn loader(double: Arc<FetcherDouble>) -> ImageLoader {
     ImageLoader::with_registry(
         double,
-        LoaderConfig::default(),
+        LoaderConfig::new(0),
         BackendRegistry::software_only(),
     )
     .expect("the double advertises a usable transport")
@@ -69,7 +69,7 @@ async fn a_fetcher_with_no_usable_transport_is_refused_at_construction() {
     );
     let error = ImageLoader::with_registry(
         double,
-        LoaderConfig::default(),
+        LoaderConfig::new(0),
         BackendRegistry::software_only(),
     )
     .expect_err("no transport this crate can read bytes through");
@@ -327,4 +327,89 @@ fn base64(bytes: &[u8]) -> String {
         });
     }
     out
+}
+
+#[tokio::test]
+async fn an_oversized_body_is_refused_rather_than_truncated() {
+    // A host that ignores `max_bytes` — or a stream with no length at all —
+    // must not slip through by having a decodable prefix. Truncating at the
+    // limit would load this image successfully.
+    let mut oversized = checker_png(4);
+    let real_len = oversized.len();
+    oversized.extend_from_slice(&vec![0u8; 4096]);
+
+    for capability in [
+        ResourceCapability::BufferedResource,
+        ResourceCapability::ResourceStream,
+        ResourceCapability::ResourcePath,
+    ] {
+        let double =
+            Arc::new(FetcherDouble::new(oversized.clone()).with_capabilities(vec![capability]));
+        let loader = ImageLoader::with_registry(
+            double,
+            LoaderConfig::new(0).with_max_encoded_bytes(real_len as u64),
+            BackendRegistry::software_only(),
+        )
+        .expect("usable transport");
+
+        let error = loader
+            .load("big.png", None, CancellationToken::new())
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{capability:?} accepted a body past the budget"));
+        assert!(
+            matches!(error, ImageError::EncodedTooLarge { .. }),
+            "{capability:?}: expected EncodedTooLarge, got {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_decode_cache_hit_does_not_need_the_header_cache() {
+    // With a one-entry header cache, loading A then B evicts A's header. A's
+    // pixels are still resident, so re-loading A must hit the decode cache
+    // rather than re-fetching: a hit that needed both caches made the smaller
+    // one silently govern the larger.
+    let double = Arc::new(FetcherDouble::new(checker_png(4)));
+    let loader = ImageLoader::with_registry(
+        Arc::clone(&double) as Arc<dyn bobcat_engine::resource::ResourceFetcher>,
+        LoaderConfig::new(0).with_header_cache_entries(1),
+        BackendRegistry::software_only(),
+    )
+    .expect("usable transport");
+
+    let cancel = CancellationToken::new();
+    loader.load("a.png", None, cancel.clone()).await.expect("a");
+    loader.load("b.png", None, cancel.clone()).await.expect("b");
+    let again = loader.load("a.png", None, cancel).await.expect("a again");
+
+    assert_eq!(again.backend, "cache", "A's pixels were still resident");
+    assert_eq!(
+        double.fetch_count(),
+        2,
+        "re-loading A must not refetch just because its header was evicted"
+    );
+}
+
+#[tokio::test]
+async fn a_cancelled_token_unsticks_a_hung_resolve() {
+    // `resolve_locator` is arbitrary embedder code. Awaiting it bare left the
+    // whole load uncancellable up to that point.
+    let double = Arc::new(FetcherDouble::new(checker_png(4)).with_hung_resolve());
+    let loader = loader(double);
+
+    let cancel = CancellationToken::new();
+    let token = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        token.cancel();
+    });
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_millis(2000),
+        loader.load("stuck.png", None, cancel),
+    )
+    .await
+    .expect("cancellation must return well inside the timeout");
+    assert!(matches!(outcome, Err(ImageError::Cancelled)));
 }

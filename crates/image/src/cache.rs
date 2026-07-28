@@ -11,8 +11,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use crate::decode::{ImageHeader, PixelSize};
-use crate::pixels::DecodedImage;
+use crate::decode::{DecodeResponse, ImageHeader, PixelSize};
 
 /// What one decode-cache entry is keyed on.
 ///
@@ -45,6 +44,89 @@ impl CacheKey {
     }
 }
 
+/// What one resolved specifier maps to, keyed by the target it was resolved
+/// *for*.
+///
+/// The target belongs in the key because resolution is target-sensitive by
+/// contract: the host receives `ImageHints::target_size_px` and is entitled to
+/// answer with a different URL or cache key per size. Keying on the specifier
+/// alone would let a 4x4 variant's mapping be overwritten by an 8x8 one, after
+/// which the sync probe for the 4x4 entry silently misses.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ResolvedKey {
+    specifier: Arc<str>,
+    target: Option<PixelSize>,
+}
+
+impl ResolvedKey {
+    #[must_use]
+    pub(crate) fn new(specifier: impl Into<Arc<str>>, target: Option<PixelSize>) -> Self {
+        Self {
+            specifier: specifier.into(),
+            target,
+        }
+    }
+}
+
+/// Bounded specifier→source memory for the sync probes.
+///
+/// Bounded because a view driving dynamic URLs (cache-busting query strings,
+/// signed links) would otherwise grow this map for the life of the process —
+/// every other piece of loader state has a ceiling, and this one was the
+/// exception.
+#[derive(Debug)]
+pub(crate) struct ResolvedMap {
+    entries: FxHashMap<ResolvedKey, (Arc<str>, u64)>,
+    recency: BTreeMap<u64, ResolvedKey>,
+    clock: u64,
+    capacity: usize,
+}
+
+impl ResolvedMap {
+    #[must_use]
+    pub(crate) fn with_capacity(entries: usize) -> Self {
+        Self {
+            entries: FxHashMap::default(),
+            recency: BTreeMap::new(),
+            clock: 0,
+            capacity: entries.max(1),
+        }
+    }
+
+    pub(crate) fn get(&mut self, key: &ResolvedKey) -> Option<Arc<str>> {
+        self.clock += 1;
+        let tick = self.clock;
+        let (source, stored) = self.entries.get_mut(key)?;
+        let source = Arc::clone(source);
+        let previous = std::mem::replace(stored, tick);
+        let moved = self.recency.remove(&previous)?;
+        self.recency.insert(tick, moved);
+        Some(source)
+    }
+
+    pub(crate) fn insert(&mut self, key: ResolvedKey, source: Arc<str>) {
+        if let Some((_, tick)) = self.entries.remove(&key) {
+            self.recency.remove(&tick);
+        }
+        while self.entries.len() >= self.capacity {
+            let Some((&tick, _)) = self.recency.iter().next() else {
+                break;
+            };
+            if let Some(evicted) = self.recency.remove(&tick) {
+                self.entries.remove(&evicted);
+            }
+        }
+        self.clock += 1;
+        self.recency.insert(self.clock, key.clone());
+        self.entries.insert(key, (source, self.clock));
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.recency.clear();
+    }
+}
+
 /// An exact LRU bounded by **total decoded bytes**, not entry count.
 ///
 /// Entry count is the wrong bound here: a 16x16 icon and a 4000x3000 photo are
@@ -69,7 +151,7 @@ pub struct DecodeCache {
 
 #[derive(Debug)]
 struct Entry {
-    image: DecodedImage,
+    response: DecodeResponse,
     tick: u64,
 }
 
@@ -85,15 +167,23 @@ impl DecodeCache {
         }
     }
 
-    /// Fetches and marks recently used. The returned image shares its buffer
-    /// with the cached one, so this is a handle clone rather than a copy.
-    pub fn get(&mut self, key: &CacheKey) -> Option<DecodedImage> {
+    /// Fetches and marks recently used. The returned response shares its pixel
+    /// buffer with the cached one, so this is a handle clone rather than a copy.
+    ///
+    /// A cached entry carries its own [`ImageHeader`], so serving a hit needs
+    /// exactly one lookup in one cache. Deriving the header from a second,
+    /// separately-bounded cache made a hit depend on both surviving eviction:
+    /// past the header cache's capacity, images whose pixels were still resident
+    /// were silently re-fetched and re-decoded.
+    pub fn get(&mut self, key: &CacheKey) -> Option<DecodeResponse> {
         let tick = self.next_tick();
         let entry = self.entries.get_mut(key)?;
         self.recency.remove(&entry.tick);
         entry.tick = tick;
         self.recency.insert(tick, key.clone());
-        Some(entry.image.clone())
+        let mut response = entry.response.clone();
+        response.backend = "cache";
+        Some(response)
     }
 
     /// Inserts, evicting least-recently-used entries until the budget holds.
@@ -101,8 +191,8 @@ impl DecodeCache {
     /// An image larger than the entire budget is **not** inserted, and evicts
     /// nothing: admitting it would flush every useful entry to store something
     /// that cannot be kept anyway.
-    pub fn insert(&mut self, key: CacheKey, image: DecodedImage) {
-        let size = image.byte_len() as u64;
+    pub fn insert(&mut self, key: CacheKey, response: DecodeResponse) {
+        let size = response.image.byte_len() as u64;
         if size > self.budget {
             return;
         }
@@ -114,15 +204,15 @@ impl DecodeCache {
         }
         let tick = self.next_tick();
         self.recency.insert(tick, key.clone());
-        self.entries.insert(key, Entry { image, tick });
+        self.entries.insert(key, Entry { response, tick });
         self.bytes += size;
     }
 
-    pub fn remove(&mut self, key: &CacheKey) -> Option<DecodedImage> {
+    pub fn remove(&mut self, key: &CacheKey) -> Option<DecodeResponse> {
         let entry = self.entries.remove(key)?;
         self.recency.remove(&entry.tick);
-        self.bytes -= entry.image.byte_len() as u64;
-        Some(entry.image)
+        self.bytes -= entry.response.image.byte_len() as u64;
+        Some(entry.response)
     }
 
     pub fn clear(&mut self) {
@@ -159,7 +249,7 @@ impl DecodeCache {
             return false;
         };
         if let Some(entry) = self.entries.remove(&key) {
-            self.bytes -= entry.image.byte_len() as u64;
+            self.bytes -= entry.response.image.byte_len() as u64;
         }
         true
     }
@@ -245,21 +335,38 @@ impl HeaderCache {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::sync::Arc;
+
     use super::{CacheKey, DecodeCache, HeaderCache};
-    use crate::decode::{ImageHeader, PixelSize};
+    use crate::decode::{DecodeResponse, ImageHeader, PixelSize};
     use crate::format::ImageFormat;
     use crate::pixels::{AlphaType, DecodedImage};
+    use crate::registry::Acceleration;
 
-    /// `side * side * 4` bytes.
-    fn image(side: u32) -> DecodedImage {
-        DecodedImage::from_rgba8(
+    /// A response whose pixels are `side * side * 4` bytes.
+    fn image(side: u32) -> DecodeResponse {
+        let image = DecodedImage::from_rgba8(
             side,
             side,
             AlphaType::Straight,
             vec![0u8; (side * side * 4) as usize],
             ImageFormat::Png,
         )
-        .expect("well-formed buffer")
+        .expect("well-formed buffer");
+        DecodeResponse {
+            image,
+            header: ImageHeader {
+                format: ImageFormat::Png,
+                natural_size: PixelSize {
+                    width: side,
+                    height: side,
+                },
+                has_alpha: true,
+                animated: false,
+            },
+            acceleration: Acceleration::Software,
+            backend: "software",
+        }
     }
 
     fn key(source: &str) -> CacheKey {
@@ -352,9 +459,62 @@ mod tests {
         cache.insert(large.clone(), image(8));
 
         assert_eq!(cache.len(), 2, "two decodes of one URL coexist");
-        assert_eq!(cache.get(&small).expect("small").width(), 4);
-        assert_eq!(cache.get(&large).expect("large").width(), 8);
+        assert_eq!(cache.get(&small).expect("small").image.width(), 4);
+        assert_eq!(cache.get(&large).expect("large").image.width(), 8);
         assert_eq!(small.source(), large.source());
+    }
+
+    #[test]
+    fn a_cached_entry_carries_its_own_header() {
+        // The whole point of storing the response: a hit must not depend on a
+        // second, separately-bounded cache still holding the header.
+        let mut cache = DecodeCache::with_budget(1 << 20);
+        cache.insert(key("a"), image(4));
+        let hit = cache.get(&key("a")).expect("hit");
+        assert_eq!(hit.header.natural_size.width, 4);
+        assert_eq!(
+            hit.backend, "cache",
+            "provenance reports where it came from"
+        );
+    }
+
+    #[test]
+    fn the_resolution_map_keys_on_the_target_and_is_bounded() {
+        use super::{ResolvedKey, ResolvedMap};
+
+        let mut map = ResolvedMap::with_capacity(4);
+        let small = ResolvedKey::new(
+            "icon.png",
+            Some(PixelSize {
+                width: 4,
+                height: 4,
+            }),
+        );
+        let large = ResolvedKey::new(
+            "icon.png",
+            Some(PixelSize {
+                width: 8,
+                height: 8,
+            }),
+        );
+        map.insert(small.clone(), Arc::from("cdn/4x"));
+        map.insert(large.clone(), Arc::from("cdn/8x"));
+
+        // Resolution is target-sensitive by contract, so one specifier can hold
+        // two distinct mappings and neither may clobber the other.
+        assert_eq!(map.get(&small).as_deref(), Some("cdn/4x"));
+        assert_eq!(map.get(&large).as_deref(), Some("cdn/8x"));
+
+        // And it evicts rather than growing forever on dynamic URLs.
+        let mut bounded = ResolvedMap::with_capacity(2);
+        for index in 0..5 {
+            bounded.insert(ResolvedKey::new(format!("u{index}"), None), Arc::from("s"));
+        }
+        assert!(
+            bounded.get(&ResolvedKey::new("u0", None)).is_none(),
+            "the oldest mapping is evicted rather than retained forever"
+        );
+        assert!(bounded.get(&ResolvedKey::new("u4", None)).is_some());
     }
 
     #[test]

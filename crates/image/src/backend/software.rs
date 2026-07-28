@@ -162,7 +162,7 @@ fn decode_png(bytes: &[u8]) -> Result<RawDecode, ImageError> {
     buffer.truncate(info.buffer_size());
 
     let (color_type, _) = reader.output_color_type();
-    let rgba = expand_to_rgba(&buffer, color_type, info.width, info.height)?;
+    let rgba = expand_to_rgba(buffer, color_type, info.width, info.height)?;
 
     // An animation frame may be a sub-rectangle of the canvas, so it has to be
     // composited at its offset rather than returned as if it were the whole
@@ -218,8 +218,12 @@ fn composite_onto_canvas(
 }
 
 /// Normalises `png`'s four possible 8-bit output layouts to RGBA8.
+///
+/// Takes the buffer by value so the already-RGBA case — by far the most common
+/// — is a truncation rather than a full copy of the image. At the 8192x8192
+/// ceiling that copy was a quarter of a gigabyte of pure waste.
 fn expand_to_rgba(
-    buffer: &[u8],
+    mut buffer: Vec<u8>,
     color_type: png::ColorType,
     width: u32,
     height: u32,
@@ -239,7 +243,8 @@ fn expand_to_rgba(
         ));
     }
     if color_type == png::ColorType::Rgba {
-        return Ok(buffer[..pixels * 4].to_vec());
+        buffer.truncate(pixels * 4);
+        return Ok(buffer);
     }
 
     let mut rgba = Vec::with_capacity(pixels * 4);

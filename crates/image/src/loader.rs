@@ -15,13 +15,13 @@ use bobcat_engine::resource::{
     ResourceFetcher, ResourceHints, ResourceKind, ResourceLocator, ResourcePriority,
     ResourceRequest,
 };
-use rustc_hash::FxHashMap;
+use bytes::Bytes;
 use tokio::io::AsyncReadExt;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::cache::{CacheKey, DecodeCache, HeaderCache};
+use crate::cache::{CacheKey, DecodeCache, HeaderCache, ResolvedKey, ResolvedMap};
 use crate::decode::{DecodeRequest, DecodeResponse, ImageHeader, PixelSize};
 use crate::error::ImageError;
 use crate::pixels::DecodedImage;
@@ -44,9 +44,14 @@ pub struct LoaderConfig {
     /// `res:///name → res:///id` is not a URL join at all, so the pre-join
     /// specifier has to reach the host intact.
     pub base_url: Option<Url>,
-    /// The [`RequestId`] namespace this loader owns. The protocol delegates
-    /// namespace allocation to the parties sharing a fetcher; the loader owns
-    /// its own sequence within it.
+    /// The [`RequestId`] namespace this loader owns.
+    ///
+    /// The protocol requires a `RequestId` to be unique within one fetcher and
+    /// delegates namespace allocation to the parties sharing it, so this has no
+    /// safe default: two loaders over one fetcher that both defaulted to `0`
+    /// would each issue `{namespace: 0, sequence: 0}` as their first request and
+    /// break that uniqueness. [`LoaderConfig::new`] therefore takes it, and the
+    /// view or engine that owns the fetcher is what assigns it.
     pub request_namespace: u64,
     /// Applies to every transport, not just the buffered one — a hostile or
     /// broken host must not be able to OOM the process through the stream or
@@ -57,13 +62,86 @@ pub struct LoaderConfig {
     /// In-flight decode cap. Bounded because a `spawn_blocking` decode cannot be
     /// aborted, so unbounded fan-out would let cancelled work starve the pool.
     pub max_concurrent_decodes: usize,
+    /// In-flight *load* cap, acquired before the fetch and held until the decode
+    /// ends.
+    ///
+    /// The decode permit alone does not bound memory: it is taken *after* the
+    /// bytes are already in hand, so a hundred concurrent loads could each hold
+    /// up to `max_encoded_bytes` while queueing for one of four decode slots.
+    /// This is the bound that makes worst-case encoded residency
+    /// `max_concurrent_loads * max_encoded_bytes` instead of unbounded.
+    pub max_concurrent_loads: usize,
     pub decode: DecodeRequest,
     pub device_scale: Option<f32>,
     pub priority: ResourcePriority,
 }
 
-impl Default for LoaderConfig {
-    fn default() -> Self {
+impl LoaderConfig {
+    /// A configuration for the loader owning `request_namespace`.
+    ///
+    /// There is no `Default`: the namespace is not defaultable (see the field's
+    /// own documentation), so it has to be supplied here.
+    #[must_use]
+    pub fn new(request_namespace: u64) -> Self {
+        Self {
+            request_namespace,
+            ..Self::with_namespace_zero()
+        }
+    }
+
+    /// Sets the encoded-byte ceiling every transport is held to.
+    ///
+    /// Builders rather than struct-update syntax: this type is
+    /// `#[non_exhaustive]`, so `..LoaderConfig::new(0)` is a hard error outside
+    /// this crate.
+    #[must_use]
+    pub const fn with_max_encoded_bytes(mut self, max_encoded_bytes: u64) -> Self {
+        self.max_encoded_bytes = max_encoded_bytes;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_decode_cache_bytes(mut self, decode_cache_bytes: u64) -> Self {
+        self.decode_cache_bytes = decode_cache_bytes;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_header_cache_entries(mut self, header_cache_entries: usize) -> Self {
+        self.header_cache_entries = header_cache_entries;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_max_concurrent_decodes(mut self, max_concurrent_decodes: usize) -> Self {
+        self.max_concurrent_decodes = max_concurrent_decodes;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_max_concurrent_loads(mut self, max_concurrent_loads: usize) -> Self {
+        self.max_concurrent_loads = max_concurrent_loads;
+        self
+    }
+
+    #[must_use]
+    pub fn with_base_url(mut self, base_url: Option<Url>) -> Self {
+        self.base_url = base_url;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_decode(mut self, decode: DecodeRequest) -> Self {
+        self.decode = decode;
+        self
+    }
+
+    /// The single-loader configuration, namespace `0`.
+    ///
+    /// Correct only when exactly one loader shares the fetcher; anything else
+    /// must use [`Self::new`].
+    #[must_use]
+    fn with_namespace_zero() -> Self {
         Self {
             base_url: None,
             request_namespace: 0,
@@ -71,6 +149,7 @@ impl Default for LoaderConfig {
             decode_cache_bytes: 96 << 20,
             header_cache_entries: 512,
             max_concurrent_decodes: 4,
+            max_concurrent_loads: 8,
             decode: DecodeRequest::default(),
             device_scale: None,
             priority: ResourcePriority::Normal,
@@ -91,21 +170,41 @@ pub enum ImagePrefetchTarget {
     Decoded { target: Option<PixelSize> },
 }
 
+/// The loader's mutable state, behind **one** lock.
+///
+/// Three independent mutexes let a concurrent `load` and `clear_caches`
+/// interleave into states no single operation can produce: pixels committed
+/// with the header and mapping already cleared (an entry nothing can ever look
+/// up again), or two racing loads combining one's header with the other's
+/// pixels. Every commit and every clear touches all three, so they are one
+/// critical section. It is held only across in-memory map updates — never
+/// across a fetch, a decode, or any `.await`.
+#[derive(Debug)]
+struct LoaderState {
+    decodes: DecodeCache,
+    headers: HeaderCache,
+    /// (specifier, target) → cache source, populated on every successful
+    /// resolve. Without it, [`ImageLoader::cached`] — which must not await, so
+    /// cannot resolve — would key on the pre-resolution specifier while
+    /// [`ImageLoader::load`] keys on the resolved one, and every probe would
+    /// miss.
+    resolved: ResolvedMap,
+}
+
 /// Fetches, decodes and caches images for one view.
 pub struct ImageLoader {
     fetcher: Arc<dyn ResourceFetcher>,
-    registry: BackendRegistry,
-    decodes: Mutex<DecodeCache>,
-    headers: Mutex<HeaderCache>,
-    /// Specifier → cache source, populated on every successful resolve.
-    ///
-    /// Without this, [`Self::cached`] — which must not await, so cannot resolve
-    /// — would key on the pre-resolution specifier while [`Self::load`] keys on
-    /// the resolved one, and every probe would miss.
-    resolved: Mutex<FxHashMap<Arc<str>, Arc<str>>>,
+    /// Shared rather than cloned per cache miss: cloning reallocated the backend
+    /// `Vec` and bumped every `Arc` inside it on a path that runs once per
+    /// image.
+    registry: Arc<BackendRegistry>,
+    state: Mutex<LoaderState>,
     /// `Arc` so a permit can be owned by the blocking decode task itself; see
     /// the acquisition site in `load`.
-    permits: Arc<Semaphore>,
+    decode_permits: Arc<Semaphore>,
+    /// Taken before the fetch and released with the decode, so encoded buffers
+    /// waiting for a decode slot are bounded too.
+    load_permits: Arc<Semaphore>,
     sequence: AtomicU64,
     config: LoaderConfig,
     transport: ResourceCapability,
@@ -168,11 +267,14 @@ impl ImageLoader {
 
         Ok(Self {
             fetcher,
-            registry,
-            decodes: Mutex::new(DecodeCache::with_budget(config.decode_cache_bytes)),
-            headers: Mutex::new(HeaderCache::with_capacity(config.header_cache_entries)),
-            resolved: Mutex::new(FxHashMap::default()),
-            permits: Arc::new(Semaphore::new(config.max_concurrent_decodes.max(1))),
+            registry: Arc::new(registry),
+            state: Mutex::new(LoaderState {
+                decodes: DecodeCache::with_budget(config.decode_cache_bytes),
+                headers: HeaderCache::with_capacity(config.header_cache_entries),
+                resolved: ResolvedMap::with_capacity(config.header_cache_entries),
+            }),
+            decode_permits: Arc::new(Semaphore::new(config.max_concurrent_decodes.max(1))),
+            load_permits: Arc::new(Semaphore::new(config.max_concurrent_loads.max(1))),
             sequence: AtomicU64::new(0),
             config,
             transport,
@@ -186,7 +288,7 @@ impl ImageLoader {
     }
 
     #[must_use]
-    pub const fn registry(&self) -> &BackendRegistry {
+    pub fn registry(&self) -> &BackendRegistry {
         &self.registry
     }
 
@@ -207,15 +309,18 @@ impl ImageLoader {
         let resolved = self.resolve(specifier, None, cancel.clone()).await?;
         let source = cache_source(&resolved);
 
-        if let Some(header) = self.headers.lock().expect("header cache").get(&source) {
+        if let Some(header) = self.lock().headers.get(&source) {
             return Ok(header);
         }
-        let bytes = self.read_bytes(&resolved, cancel).await?;
+        let Some(_permit) = self.acquire(&self.load_permits, &cancel).await? else {
+            return Err(ImageError::Cancelled);
+        };
+        let bytes = self.read_bytes(&resolved, cancel.clone()).await?;
         let header = probe_bytes(&self.registry, &bytes)?;
-        self.headers
-            .lock()
-            .expect("header cache")
-            .insert(Arc::clone(&source), header);
+        if cancel.is_cancelled() {
+            return Err(ImageError::Cancelled);
+        }
+        self.lock().headers.insert(Arc::clone(&source), header);
         Ok(header)
     }
 
@@ -239,13 +344,19 @@ impl ImageLoader {
         // still required — the key is the *resolved* source, so two specifiers a
         // host rewrites onto one resource share one entry — but everything past
         // this point is what the cache exists to avoid.
-        if let Some(hit) = self.cache_hit(&key, &source) {
+        if let Some(hit) = self.lock().decodes.get(&key) {
             return Ok(hit);
         }
 
+        // Taken *before* the fetch, so the encoded buffer this load is about to
+        // hold counts against a bound. Held until the decode ends.
+        let Some(load_permit) = self.acquire(&self.load_permits, &cancel).await? else {
+            return Err(ImageError::Cancelled);
+        };
+
         let bytes = self.read_bytes(&resolved, cancel.clone()).await?;
 
-        let registry = self.registry.clone();
+        let registry = Arc::clone(&self.registry);
         let request = DecodeRequest {
             target_size: target,
             ..self.config.decode
@@ -253,13 +364,9 @@ impl ImageLoader {
         // Waiting for a permit is itself cancellable: a queue of images whose
         // nodes are being recycled faster than they decode should shrink, not
         // sit blocked on a semaphore it no longer needs.
-        let Some(permit) = cancel
-            .run_until_cancelled(Arc::clone(&self.permits).acquire_owned())
-            .await
-        else {
+        let Some(permit) = self.acquire(&self.decode_permits, &cancel).await? else {
             return Err(ImageError::Cancelled);
         };
-        let permit = permit.map_err(|_| ImageError::Cancelled)?;
 
         // The permit moves *into* the blocking closure, so it is released when
         // the decode actually ends rather than when this future stops waiting
@@ -271,6 +378,7 @@ impl ImageLoader {
         let decode = tokio::task::spawn_blocking(move || {
             let decoded = decode_bytes(&registry, &bytes, &request);
             drop(permit);
+            drop(load_permit);
             decoded
         });
 
@@ -281,18 +389,22 @@ impl ImageLoader {
             return Err(ImageError::Cancelled);
         };
         let response = joined.map_err(|error| ImageError::decode_join(&error))??;
+
+        // Re-checked here, not only before the decode: cancellation can land
+        // while the blocking task is finishing, and publishing pixels for a node
+        // that has since been torn down is the exact outcome the token was asked
+        // to prevent.
         if cancel.is_cancelled() {
             return Err(ImageError::Cancelled);
         }
 
-        self.headers
-            .lock()
-            .expect("header cache")
-            .insert(Arc::clone(&source), response.header);
-        self.decodes
-            .lock()
-            .expect("decode cache")
-            .insert(key, response.image.clone());
+        // One critical section for the whole commit, so no observer can see the
+        // pixels without the header that describes them.
+        {
+            let mut state = self.lock();
+            state.headers.insert(Arc::clone(&source), response.header);
+            state.decodes.insert(key, response.clone());
+        }
         Ok(response)
     }
 
@@ -304,11 +416,12 @@ impl ImageLoader {
     /// resolving is asynchronous.
     #[must_use]
     pub fn cached(&self, specifier: &str, target: Option<PixelSize>) -> Option<DecodedImage> {
-        let source = self.known_source(specifier)?;
-        self.decodes
-            .lock()
-            .expect("decode cache")
+        let mut state = self.lock();
+        let source = state.resolved.get(&ResolvedKey::new(specifier, target))?;
+        state
+            .decodes
             .get(&CacheKey::new(source, target))
+            .map(|response| response.image)
     }
 
     /// Non-blocking natural-size probe. Same resolution caveat as
@@ -318,8 +431,9 @@ impl ImageLoader {
     /// commit that creates the node, so the first frame lays out final.
     #[must_use]
     pub fn cached_header(&self, specifier: &str) -> Option<ImageHeader> {
-        let source = self.known_source(specifier)?;
-        self.headers.lock().expect("header cache").get(&source)
+        let mut state = self.lock();
+        let source = state.resolved.get(&ResolvedKey::new(specifier, None))?;
+        state.headers.get(&source)
     }
 
     /// Warms a cache ahead of render.
@@ -356,38 +470,36 @@ impl ImageLoader {
         }
     }
 
+    /// Drops every cached pixel, header and resolution, atomically.
     pub fn clear_caches(&self) {
-        self.decodes.lock().expect("decode cache").clear();
-        self.headers.lock().expect("header cache").clear();
-        self.resolved.lock().expect("resolution map").clear();
+        let mut state = self.lock();
+        state.decodes.clear();
+        state.headers.clear();
+        state.resolved.clear();
     }
 
     // ------------------------------------------------------------- internals
 
-    /// A complete cached answer, or `None`.
-    ///
-    /// Both halves are required: the pixels alone cannot rebuild a
-    /// [`DecodeResponse`], because `header.natural_size` is the *source* size
-    /// that `object-fit` resolves against and a downsampled entry no longer
-    /// carries it. The header cache is much larger than the decode cache, so in
-    /// practice the pixels are what expires first.
-    fn cache_hit(&self, key: &CacheKey, source: &str) -> Option<DecodeResponse> {
-        let image = self.decodes.lock().expect("decode cache").get(key)?;
-        let header = self.headers.lock().expect("header cache").get(source)?;
-        Some(DecodeResponse {
-            image,
-            header,
-            acceleration: self.registry.effective_tier(header.format),
-            backend: "cache",
-        })
+    fn lock(&self) -> std::sync::MutexGuard<'_, LoaderState> {
+        self.state.lock().expect("loader state")
     }
 
-    fn known_source(&self, specifier: &str) -> Option<Arc<str>> {
-        self.resolved
-            .lock()
-            .expect("resolution map")
-            .get(specifier)
-            .cloned()
+    /// Acquires a permit, giving up promptly if the caller cancels first.
+    ///
+    /// `Ok(None)` means cancelled; `Err` means the semaphore closed.
+    async fn acquire(
+        &self,
+        semaphore: &Arc<Semaphore>,
+        cancel: &CancellationToken,
+    ) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, ImageError> {
+        match cancel
+            .run_until_cancelled(Arc::clone(semaphore).acquire_owned())
+            .await
+        {
+            Some(Ok(permit)) => Ok(Some(permit)),
+            Some(Err(_)) => Err(ImageError::Cancelled),
+            None => Ok(None),
+        }
     }
 
     fn next_context(&self, cancel: CancellationToken) -> RequestContext {
@@ -410,7 +522,7 @@ impl ImageLoader {
         cancel: CancellationToken,
     ) -> Result<ResolvedLocator, ImageError> {
         let request = ResolveRequest {
-            context: self.next_context(cancel),
+            context: self.next_context(cancel.clone()),
             resource: ResourceDescriptor {
                 locator: ResourceLocator {
                     specifier: Arc::from(specifier),
@@ -426,11 +538,20 @@ impl ImageLoader {
             },
             percent_decode: true,
         };
-        let resolved = self.fetcher.resolve_locator(request).await?;
-        self.resolved
-            .lock()
-            .expect("resolution map")
-            .insert(Arc::from(specifier), cache_source(&resolved));
+        // The host's resolver is arbitrary embedder code that may block on a
+        // network round trip or a lock. Awaiting it bare made the whole load
+        // uncancellable up to that point: a cancelled token could not unstick a
+        // hung `resolve_locator`, so `load` would sit past any caller timeout.
+        let Some(resolved) = cancel
+            .run_until_cancelled(self.fetcher.resolve_locator(request))
+            .await
+        else {
+            return Err(ImageError::Cancelled);
+        };
+        let resolved = resolved?;
+        self.lock()
+            .resolved
+            .insert(ResolvedKey::new(specifier, target), cache_source(&resolved));
         Ok(resolved)
     }
 
@@ -452,7 +573,7 @@ impl ImageLoader {
         &self,
         resolved: &ResolvedLocator,
         cancel: CancellationToken,
-    ) -> Result<Vec<u8>, ImageError> {
+    ) -> Result<Bytes, ImageError> {
         if cancel.is_cancelled() {
             return Err(ImageError::Cancelled);
         }
@@ -460,7 +581,7 @@ impl ImageLoader {
         if data_url::is_data_url(&resolved.url) {
             // Held to the same ceiling as every transport branch — the payload
             // is attacker-supplied on this path just as much as on the others.
-            return data_url::decode(&resolved.url, limit);
+            return data_url::decode(&resolved.url, limit).map(Bytes::from);
         }
 
         let request = self.resource_request(resolved, cancel.clone());
@@ -474,22 +595,38 @@ impl ImageLoader {
                             max_bytes: limit,
                         })
                         .await?;
-                    Ok(response.bytes.to_vec())
+                    // `max_bytes` is a request to the host, not a guarantee from
+                    // it: a buggy or hostile fetcher can return more, and
+                    // trusting it made the budget advisory on this branch.
+                    // `Bytes` is handed straight through — the previous
+                    // `to_vec` copied up to the whole budget for nothing.
+                    if response.bytes.len() as u64 > limit {
+                        return Err(ImageError::EncodedTooLarge { limit });
+                    }
+                    Ok(response.bytes)
                 }
                 ResourceCapability::ResourceStream => {
                     let stream = self.fetcher.open_resource(request).await?;
                     let mut bytes = Vec::new();
-                    // The same ceiling the buffered branch gets: `take` stops at
-                    // the limit rather than letting a host stream forever.
+                    // Read one byte PAST the ceiling so an overrun is *detected*
+                    // rather than silently truncated. `take(limit)` cuts the
+                    // stream at the limit, which for an oversized body whose
+                    // prefix happens to be a complete image decodes and loads
+                    // successfully — the budget would be enforced only by
+                    // accident of framing.
+                    let overrun = limit.saturating_add(1);
                     stream
                         .reader
-                        .take(limit)
+                        .take(overrun)
                         .read_to_end(&mut bytes)
                         .await
                         .map_err(|error| {
                             ImageError::transport("reading resource stream", &error)
                         })?;
-                    Ok(bytes)
+                    if bytes.len() as u64 > limit {
+                        return Err(ImageError::EncodedTooLarge { limit });
+                    }
+                    Ok(Bytes::from(bytes))
                 }
                 ResourceCapability::ResourcePath => {
                     let resource = self.fetcher.fetch_resource_path(request).await?;
@@ -498,6 +635,7 @@ impl ImageLoader {
                     tokio::task::spawn_blocking(move || read_capped(&resource.path, limit))
                         .await
                         .map_err(|error| ImageError::decode_join(&error))?
+                        .map(Bytes::from)
                 }
                 other => unreachable!("constructor rejected unusable transports, got {other:?}"),
             }
@@ -525,13 +663,13 @@ fn read_capped(path: &std::path::Path, limit: u64) -> Result<Vec<u8>, ImageError
     let metadata = std::fs::metadata(path)
         .map_err(|error| ImageError::transport("stat resource path", &error))?;
     if metadata.len() > limit {
-        return Err(ImageError::transport(
-            "resource path",
-            &std::io::Error::other(format!(
-                "{} bytes exceeds the {limit}-byte encoded-image budget",
-                metadata.len()
-            )),
-        ));
+        return Err(ImageError::EncodedTooLarge { limit });
     }
-    std::fs::read(path).map_err(|error| ImageError::transport("read resource path", &error))
+    let bytes =
+        std::fs::read(path).map_err(|error| ImageError::transport("read resource path", &error))?;
+    // The file can grow between the stat and the read.
+    if bytes.len() as u64 > limit {
+        return Err(ImageError::EncodedTooLarge { limit });
+    }
+    Ok(bytes)
 }

@@ -630,12 +630,35 @@ impl<T> Node<T> {
         }
     }
 
-    pub(crate) fn set_natural_size(&mut self, natural_size: NaturalSize) -> bool {
-        if self.natural_size() == natural_size {
+    /// Whether this node generates a replaced box.
+    ///
+    /// Independent of whether a natural size has arrived: an `<img>` is a
+    /// replaced element from the moment it exists, and its intrinsic dimensions
+    /// show up one network round trip later. Conflating the two made an image
+    /// stop being replaced whenever its size was unknown — which is exactly the
+    /// pre-decode state — so layout would route it back into its parent's
+    /// formatting context for the first frame and then move it out again.
+    pub(crate) fn is_replaced(&self) -> bool {
+        matches!(self.content.as_deref(), Some(NodeContent::Replaced(_)))
+    }
+
+    /// Marks this node replaced, keeping any natural size it already carries.
+    pub(crate) fn mark_replaced(&mut self) -> bool {
+        if self.is_replaced() {
             return false;
         }
-        self.content = (natural_size != NaturalSize::NONE)
-            .then(|| Box::new(NodeContent::Replaced(natural_size)));
+        self.content = Some(Box::new(NodeContent::Replaced(NaturalSize::NONE)));
+        true
+    }
+
+    /// Installs intrinsic dimensions, and makes the node replaced if it is not
+    /// already. [`NaturalSize::NONE`] clears the dimensions but keeps replaced
+    /// status — use `set_element_text_content` to make a node non-replaced.
+    pub(crate) fn set_natural_size(&mut self, natural_size: NaturalSize) -> bool {
+        if self.natural_size() == natural_size && self.is_replaced() {
+            return false;
+        }
+        self.content = Some(Box::new(NodeContent::Replaced(natural_size)));
         true
     }
 

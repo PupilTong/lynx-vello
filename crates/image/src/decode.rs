@@ -47,13 +47,21 @@ pub struct DecodeRequest {
     /// this is always honoured — but only the platform backends avoid paying
     /// peak full-size memory to do it.
     pub target_size: Option<PixelSize>,
-    /// Hard per-axis rejection cap, defaulting to vello's 8192-px shared atlas
-    /// bound. A rejection rather than a clamp: an image the atlas cannot
-    /// allocate is silently not rendered, and a loud error beats a blank box.
+    /// Hard per-axis cap on the **output**, defaulting to vello's 8192-px shared
+    /// atlas bound.
+    ///
+    /// Checked against the size the decode will actually produce, not the
+    /// source: the two limits guard different things. This one exists because
+    /// the atlas cannot allocate a larger texture, and a downsampled decode
+    /// never asks it to — rejecting a 64x1 source that was being decoded to 8x1
+    /// would refuse an image the renderer handles perfectly well.
     pub max_dimension: u32,
-    /// Hard `width * height` cap, checked against the header probe before any
-    /// decoder is constructed. This, not the decoder crates' own limits, is the
-    /// real decode-bomb guard.
+    /// Hard `width * height` cap on the **source**, checked against the header
+    /// probe before any decoder is constructed.
+    ///
+    /// This is the decode-bomb guard, and it belongs on the source because the
+    /// bomb is the decompression itself: a downsample target does not make a
+    /// 50000x50000 input cheap to decode.
     pub max_pixels: u64,
 }
 
@@ -91,26 +99,29 @@ impl DecodeRequest {
         self
     }
 
-    /// Rejects a header that would breach either cap, before anything is
-    /// allocated.
+    /// Rejects a header whose source or output would breach its cap, before
+    /// anything is allocated.
     ///
     /// # Errors
     ///
     /// [`ImageError::TooLarge`] naming which cap was breached.
     pub fn check(&self, header: &ImageHeader) -> Result<(), ImageError> {
         let PixelSize { width, height } = header.natural_size;
-        if width > self.max_dimension || height > self.max_dimension {
-            return Err(ImageError::too_large(
-                width,
-                height,
-                format!("max_dimension = {}", self.max_dimension),
-            ));
-        }
+        // Decode-bomb guard: the source is what gets decompressed.
         if u64::from(width) * u64::from(height) > self.max_pixels {
             return Err(ImageError::too_large(
                 width,
                 height,
                 format!("max_pixels = {}", self.max_pixels),
+            ));
+        }
+        // Atlas guard: what the renderer is asked to hold.
+        let output = self.effective_size(header.natural_size);
+        if output.width > self.max_dimension || output.height > self.max_dimension {
+            return Err(ImageError::too_large(
+                output.width,
+                output.height,
+                format!("max_dimension = {}", self.max_dimension),
             ));
         }
         Ok(())
@@ -210,14 +221,48 @@ mod tests {
             .expect_err("past max_dimension");
         assert!(format!("{error}").contains("max_dimension"));
 
-        let narrow = DecodeRequest {
-            max_pixels: 1000,
-            ..DecodeRequest::default()
-        };
-        let error = narrow
+        let error = DecodeRequest::default()
+            .with_max_pixels(1000)
             .check(&header(100, 100))
             .expect_err("past max_pixels");
         assert!(format!("{error}").contains("max_pixels"));
+    }
+
+    #[test]
+    fn the_axis_cap_applies_to_the_output_and_the_pixel_cap_to_the_source() {
+        // A source larger than the axis cap is fine when it is being decoded
+        // down below it: `max_dimension` guards what the atlas must hold, and a
+        // downsampled decode never asks the atlas for the source size.
+        let downsampled = DecodeRequest::default()
+            .with_max_dimension(8)
+            .with_target(Some(PixelSize {
+                width: 8,
+                height: 1,
+            }));
+        assert!(
+            downsampled.check(&header(64, 1)).is_ok(),
+            "a 64x1 source decoded to 8x1 fits an 8px atlas bound"
+        );
+        // Without the downsample it is genuinely too wide.
+        assert!(
+            DecodeRequest::default()
+                .with_max_dimension(8)
+                .check(&header(64, 1))
+                .is_err()
+        );
+
+        // The pixel cap is not escapable by asking for a small target: the bomb
+        // is the decompression, which happens at source resolution.
+        let bomb = DecodeRequest::default()
+            .with_max_pixels(100)
+            .with_target(Some(PixelSize {
+                width: 2,
+                height: 2,
+            }));
+        assert!(
+            bomb.check(&header(5000, 5000)).is_err(),
+            "a downsample target must not defuse the decode-bomb guard"
+        );
     }
 
     #[test]

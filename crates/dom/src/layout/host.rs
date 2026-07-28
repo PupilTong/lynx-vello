@@ -4,7 +4,7 @@
 #[cfg(feature = "layout-test-utils")]
 use hughie::compute::compute_leaf_layout_with_measurement_for_testing;
 use hughie::compute::{
-    NaturalSize, compute_absolute_layout, compute_boundary_relayout, compute_cached_layout,
+    compute_absolute_layout, compute_boundary_relayout, compute_cached_layout,
     compute_flexbox_layout, compute_grid_layout, compute_leaf_layout, compute_linear_layout,
     compute_relative_layout, compute_root_layout, compute_skipped_contents_layout, hide_subtree,
     round_layout_subtree_with as round_with,
@@ -97,10 +97,15 @@ impl<T> LayoutTree for TreeArenas<T> {
             // `display: linear` on *every* element, so without this an `<img>`
             // would land in the linear algorithm, ignore its natural size, and
             // lay out at 0x0 with the decode silently wasted.
-            if node_ref.natural_size() == NaturalSize::NONE {
-                display
-            } else {
+            //
+            // Keyed on replaced *identity*, not on whether a natural size has
+            // arrived: an image is replaced before its header lands, and a node
+            // that changed formatting context between frames would relayout its
+            // whole subtree for nothing.
+            if node_ref.is_replaced() {
                 DisplayMode::Leaf
+            } else {
+                display
             }
         };
 

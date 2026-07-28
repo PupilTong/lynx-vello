@@ -73,6 +73,9 @@ pub struct FetcherDouble {
     /// host rewrite without a real network.
     pub resolve_to: Mutex<Option<String>>,
     pub cache_key: Option<String>,
+    /// Makes `resolve_locator` never complete, standing in for embedder code
+    /// blocked on a network round trip or a lock.
+    pub hang_resolve: bool,
     pub resolves: AtomicUsize,
     pub fetches: AtomicUsize,
     pub prefetches: AtomicUsize,
@@ -87,6 +90,7 @@ impl FetcherDouble {
             capabilities: vec![ResourceCapability::BufferedResource],
             resolve_to: Mutex::new(None),
             cache_key: None,
+            hang_resolve: false,
             resolves: AtomicUsize::new(0),
             fetches: AtomicUsize::new(0),
             prefetches: AtomicUsize::new(0),
@@ -103,6 +107,12 @@ impl FetcherDouble {
     #[must_use]
     pub fn resolving_to(self, url: &str) -> Self {
         *self.resolve_to.lock().expect("resolve override") = Some(url.to_owned());
+        self
+    }
+
+    #[must_use]
+    pub fn with_hung_resolve(mut self) -> Self {
+        self.hang_resolve = true;
         self
     }
 
@@ -155,7 +165,11 @@ impl ResourceFetcher for FetcherDouble {
         self.resolves.fetch_add(1, Ordering::Relaxed);
         let override_url = self.resolve_to.lock().expect("resolve override").clone();
         let cache_key = self.cache_key.clone();
+        let hang = self.hang_resolve;
         Box::pin(async move {
+            if hang {
+                std::future::pending::<()>().await;
+            }
             let text = override_url.unwrap_or_else(|| {
                 format!(
                     "https://example.test/{}",

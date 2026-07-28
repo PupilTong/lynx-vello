@@ -52,7 +52,7 @@ ndk-sys = { workspace = true }
 # `flashbulb`, whose `render` feature depends on `pulsar` — that would put an
 # `image →(dev) flashbulb →(normal) pulsar` edge in the graph and drag wgpu into
 # this crate's dev build under workspace feature unification.
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [lints]
 workspace = true

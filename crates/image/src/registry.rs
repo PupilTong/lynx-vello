@@ -7,7 +7,9 @@
 //! `AImageDecoder` exists only from Android API 30 — so none of them can be
 //! settled by a `#[cfg]` at compile time.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
+use std::sync::OnceLock;
 
 use crate::backend::software::SoftwareDecoder;
 use crate::decode::Decoder;
@@ -259,6 +261,10 @@ fn route(backends: &[Arc<dyn Decoder>], format: ImageFormat) -> usize {
 }
 
 /// Process-wide memoised platform probe, shared by every registry.
+///
+/// Only the backends whose probe result is `Copy` reach for this; Android hands
+/// out a `&'static` table instead, so on that target nothing calls it.
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
 pub(crate) fn probe_once<T: Copy>(cell: &'static OnceLock<T>, probe: impl FnOnce() -> T) -> T {
     *cell.get_or_init(probe)
 }

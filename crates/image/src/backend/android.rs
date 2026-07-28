@@ -72,7 +72,7 @@ use crate::decode::{DecodeRequest, DecodeResponse, Decoder, ImageHeader, PixelSi
 use crate::error::ImageError;
 use crate::format::ImageFormat;
 use crate::pixels::{AlphaType, DecodedImage};
-use crate::registry::{Acceleration, Capabilities, probe_once};
+use crate::registry::{Acceleration, Capabilities};
 
 /// Reported in [`DecodeResponse::backend`].
 const NAME: &str = "android-ndk";
@@ -85,7 +85,7 @@ const NAME: &str = "android-ndk";
 pub struct NdkDecoder {
     /// Resolved once per process and copied in here, so no decode pays for the
     /// `OnceLock` read or the `dlsym` table walk.
-    api: Api,
+    api: &'static Api,
     capabilities: Capabilities,
 }
 
@@ -122,7 +122,7 @@ impl NdkDecoder {
 /// checks the MIME type the platform reports against the container this crate
 /// sniffed, so a device that somehow lacks a codec produces a loud
 /// [`ImageError::Decode`] rather than wrong pixels.
-fn claimed(_api: Api) -> Capabilities {
+fn claimed(_api: &Api) -> Capabilities {
     Capabilities::none()
         .with(ImageFormat::Png, Acceleration::PlatformSoftware)
         .with(ImageFormat::Jpeg, Acceleration::PlatformSoftware)
@@ -207,13 +207,17 @@ impl Decoder for NdkDecoder {
 /// than a comment. It also means an early `?` still deletes the decoder.
 #[derive(Debug)]
 struct Handle<'bytes> {
-    api: Api,
+    api: &'static Api,
     raw: *mut AImageDecoder,
     encoded: PhantomData<&'bytes [u8]>,
 }
 
 impl<'bytes> Handle<'bytes> {
-    fn open(api: Api, format: ImageFormat, bytes: &'bytes [u8]) -> Result<Self, ImageError> {
+    fn open(
+        api: &'static Api,
+        format: ImageFormat,
+        bytes: &'bytes [u8],
+    ) -> Result<Self, ImageError> {
         let mut raw: *mut AImageDecoder = ptr::null_mut();
         // SAFETY: `bytes` is a live slice that outlives the returned `Handle`
         // (its lifetime is captured), which is precisely what
@@ -565,10 +569,10 @@ type DecodeImageFn = unsafe extern "C" fn(*mut AImageDecoder, *mut c_void, usize
 
 /// Every `AImageDecoder` entry point this backend calls, resolved once.
 ///
-/// `Copy` and pointer-sized-times-N, so it is memoised through
-/// [`probe_once`] and then copied into the decoder rather than reached through
-/// a lock on every call. Function pointers are `Send + Sync`, which is what
-/// makes [`NdkDecoder`] satisfy [`Decoder`]'s bounds.
+/// Memoised in a `OnceLock` and handed out as `&'static`, never copied: the
+/// table is a dozen pointers, and every decode and every handle would otherwise
+/// carry its own duplicate of it. Function pointers are `Send + Sync`, which is
+/// what makes [`NdkDecoder`] satisfy [`Decoder`]'s bounds.
 #[derive(Clone, Copy, Debug)]
 struct Api {
     create_from_buffer: CreateFromBufferFn,
@@ -586,9 +590,9 @@ struct Api {
 }
 
 /// The memoised probe. Runs at most once per process.
-fn api() -> Option<Api> {
+fn api() -> Option<&'static Api> {
     static API: OnceLock<Option<Api>> = OnceLock::new();
-    probe_once(&API, load)
+    API.get_or_init(load).as_ref()
 }
 
 /// `dlopen` the graphics library and resolve the whole table, all-or-nothing.
