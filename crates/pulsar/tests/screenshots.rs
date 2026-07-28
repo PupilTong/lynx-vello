@@ -1,17 +1,18 @@
-//! Golden screenshot comparison over the full test pipeline:
-//! inline-styled `<div>` fragment → `dom` → `pulsar` → headless GPU.
+//! Golden screenshot comparison for **box rendering** — backgrounds, borders,
+//! radii and nested flex geometry — over the full test pipeline:
+//! inline-styled fragment → `dom` → `pulsar` → headless GPU.
 //!
-//! Capture, comparison, and golden management belong to `flashbulb`; this file
-//! only supplies the document. The reference PNG is committed under
-//! `tests/screenshots`. Refresh it with:
+//! Text rendering has its own binary, `tests/text_screenshots.rs`; both write
+//! into the same crate-level `tests/screenshots` golden tree. Capture,
+//! comparison and golden management belong to `flashbulb` — these files only
+//! supply the documents. Refresh with:
 //! `FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p pulsar --test screenshots`.
 
 mod common;
 #[path = "support/html.rs"]
 mod html;
-
-use flashbulb::vello::peniko::Color;
-use flashbulb::{capture_document, headless_or_skip};
+#[path = "support/screenshot.rs"]
+mod screenshot;
 
 // lynx-stack's Playwright Chromium project uses the Pixel 5 viewport, and its
 // tracked viewport screenshots are 393 × 727 CSS pixels.
@@ -38,13 +39,13 @@ const FRAGMENT: &str = r#"
 
 #[test]
 fn inline_style_fragment_matches_reference() {
-    let Some(mut gpu) = headless_or_skip("inline_style_fragment_matches_reference") else {
+    let Some(actual) = screenshot::capture(
+        "inline_style_fragment_matches_reference",
+        FRAGMENT,
+        SCREEN_WIDTH,
+        SCREEN_HEIGHT,
+    ) else {
         return;
     };
-    let mut doc = html::parse(FRAGMENT, SCREEN_WIDTH, SCREEN_HEIGHT);
-    let actual =
-        capture_document(&mut gpu, &mut doc.dom, Color::WHITE).expect("headless screenshot render");
-
-    flashbulb::screenshots_in(env!("CARGO_MANIFEST_DIR"))
-        .assert_matches(&["inline-style"], &actual);
+    screenshot::assert_golden(&["inline-style"], &actual);
 }

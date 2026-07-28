@@ -476,6 +476,12 @@ this section is the only place the absolute paths are spelled out.
 - `docs/agent-prompts.md` — copy-pasteable task-kickoff prompts for recurring
   work (adding a CSS property, porting a built-in component, auditing a JS API
   for parity, etc.), usable from either Claude Code or Codex.
+- `docs/text-rendering-research.md` — **read before proposing any text-painting
+  performance work.** Why vello 0.9 has no glyph atlas and cannot get one, what
+  a text-heavy frame actually costs here (measured), where the ecosystem's
+  answer lives (`glifo` via `vello_hybrid`), and why `glyphon` and a
+  hand-rolled atlas are both ruled out. Conclusion is *don't switch renderers
+  yet* — so the useful contribution is evidence, not a port.
 
 ## Toolchain
 
@@ -489,14 +495,18 @@ Integration tests decode real fixtures vendored from lynx-stack under
 `crates/lynx-template-decoder/tests/fixtures/` (Apache-2.0 build artifacts).
 `cargo test` must pass on the pinned nightly toolchain.
 
-**Screenshot tests** live in `crates/*/tests/screenshots.rs` with committed
-goldens in `crates/*/tests/screenshots/`, driven by `crates/flashbulb`. They
-need a GPU adapter; without one they print `SKIP <test>` and pass, so a green
-run on a GPU-less machine has not exercised them. To accept a new rendering,
-look at the image first, then:
+**Screenshot tests** live in `crates/*/tests/screenshots.rs` — plus per-topic
+siblings (`pulsar` also has `text_screenshots.rs`) sharing one capture harness
+in `tests/support/screenshot.rs` — with committed goldens in
+`crates/*/tests/screenshots/`, driven by `crates/flashbulb`. The golden store
+is per *crate*, so every screenshot binary in a crate writes into the same
+tree. They need a GPU adapter; without one they print `SKIP <test>` and pass,
+so a green run on a GPU-less machine has not exercised them. To accept a new
+rendering, look at the image first, then (dropping `--test` to catch every
+screenshot binary in the crate):
 
 ```sh
-FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p <crate> --test screenshots
+FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p <crate>
 ```
 
 A golden that does not exist yet is written *and fails its run* — review it

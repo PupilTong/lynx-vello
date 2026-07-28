@@ -280,9 +280,58 @@ fn paint_item<T>(
             // (css-text-decor-3 §2), not through inheritance — collect the
             // chain, each entry in its originating box's style/color.
             let decorations = text::propagated_decorations(document, element);
-            text::paint(scene, style, layout, transform, &decorations);
+            // Only a gradient-valued `color` needs a positioning area; solid
+            // text — nearly all of it — must not pay for the lookups.
+            let gradient_box = text::needs_gradient_box(style)
+                .then(|| color_gradient_box(document, item, element));
+            text::paint(scene, style, layout, transform, &decorations, gradient_box);
         }
     }
+}
+
+/// The positioning area for a gradient-valued `color` (Lynx's text-gradient
+/// sugar), in the text run's local space.
+///
+/// The gradient has to be anchored to the styled *element*, not to the run:
+/// the same gradient authored as `background-image` would resolve against the
+/// element's padding box (`background-origin: padding-box` is the initial
+/// value), and anchoring per run would restart the ramp on every line of a
+/// wrapped paragraph.
+///
+/// `PaintItemKind::TextRun`'s `element` is the text's DOM parent, and the
+/// run's `Layout.location` is relative to that same box, so the padding-box
+/// origin in run-local space is `border_origin - location`. When the parent
+/// is box-less (`display: contents`, whose layout slot the host zeroes) the
+/// element carries no box to anchor to, and the run's own box stands in.
+fn color_gradient_box<T>(document: &Document<T>, item: &PaintItem, element: dom::NodeId) -> Rect {
+    let own_box = Rect::new(
+        0.0,
+        0.0,
+        f64::from(item.size.width),
+        f64::from(item.size.height),
+    );
+    let (Some(element_layout), Some(run_layout)) = (
+        document.rounded_layout(element),
+        document.rounded_layout(item.node),
+    ) else {
+        return own_box;
+    };
+    let size = element_layout.size;
+    let border = element_layout.border;
+    let padding_box = Rect::new(
+        f64::from(border.left),
+        f64::from(border.top),
+        f64::from((size.width - border.right).max(border.left)),
+        f64::from((size.height - border.bottom).max(border.top)),
+    );
+    if padding_box.width() <= 0.0 || padding_box.height() <= 0.0 {
+        return own_box;
+    }
+    padding_box
+        - vello::kurbo::Vec2::new(
+            f64::from(run_layout.location.x),
+            f64::from(run_layout.location.y),
+        )
 }
 
 /// Collects the committed text layouts under `element` for its

@@ -29,21 +29,114 @@ use parley::{GlyphRun, Layout, PositionedLayoutItem};
 use smallvec::SmallVec;
 use stylo::computed_values::text_decoration_style::T as TextDecorationStyle;
 use stylo::properties::ComputedValues;
-use stylo::values::computed::TextDecorationLine;
+use stylo::values::computed::{ColorPropertyValue, TextDecorationLine};
 use vello::kurbo::{Affine, BezPath, Diagonal2, Line, Rect, Stroke};
-use vello::peniko::{Color, Fill, StyleRef};
+use vello::peniko::{self, BrushRef, Color, Fill, StyleRef};
 use vello::{FontEmbolden, Scene};
 
 use crate::convert;
+use crate::paint::background::{GradientBrush, gradient_brush};
+
+/// What the glyph ink is filled with.
+///
+/// Lynx extends `color` from `<color>` to `<color> | <gradient>` (its text-
+/// gradient sugar), and the fork's computed `ColorPropertyValue` preserves
+/// the gradient rather than collapsing it — see
+/// `ComputedValues::clone_color_value`. A gradient becomes a peniko gradient
+/// brush on the glyph run itself, which is what the platform text renderers
+/// do; it is deliberately *not* routed through a `background-clip: text`
+/// sandwich, so it composes with a real `background-image` on the same
+/// element instead of fighting it for the clip.
+enum TextFill {
+    Solid(Color),
+    Gradient {
+        gradient: peniko::Gradient,
+        /// Maps gradient space onto the run's local space, so the ramp is
+        /// anchored to the element's box rather than restarting per run.
+        brush_transform: Affine,
+    },
+}
+
+impl TextFill {
+    fn brush(&self) -> BrushRef<'_> {
+        match self {
+            Self::Solid(color) => BrushRef::Solid(*color),
+            Self::Gradient { gradient, .. } => BrushRef::Gradient(gradient),
+        }
+    }
+
+    const fn brush_transform(&self) -> Option<Affine> {
+        match self {
+            Self::Solid(_) => None,
+            Self::Gradient {
+                brush_transform, ..
+            } => Some(*brush_transform),
+        }
+    }
+}
+
+/// Whether the used `color` is a gradient, so the walker knows to compute the
+/// positioning area before painting — the same shape as
+/// [`background::needs_text_clip`](super::background::needs_text_clip).
+///
+/// Solid `color` is the overwhelmingly common case and must not pay for this
+/// feature: without the predicate every text run in the frame would do two
+/// layout-arena lookups and a `Rect` fold for a box nothing reads.
+pub(crate) fn needs_gradient_box(style: &ComputedValues) -> bool {
+    matches!(
+        style.get_inherited_text().color,
+        ColorPropertyValue::Gradient(..)
+    )
+}
+
+/// Resolves the element's used `color` into a glyph brush.
+///
+/// `gradient_box` is the gradient positioning area in the run's local space —
+/// the styled element's padding box, matching where the same gradient would
+/// land as a `background-image` (`background-origin: padding-box` is the
+/// initial value). `None` (a solid `color`, so the walker computed nothing) or
+/// a degenerate box both fall back to the fork's parallel solid color.
+///
+/// The gradient is **borrowed** out of the style, never cloned:
+/// `ComputedValues::clone_color_value` hands back an owned
+/// `ColorPropertyValue`, whose `Gradient` arm is a `Box<Gradient>` over an
+/// `OwnedSlice` of stops — and `OwnedSlice::clone` is `to_vec`. Going through
+/// it would allocate and copy every stop of every gradient text run on every
+/// frame, for a value `gradient_brush` only reads.
+fn text_fill(style: &ComputedValues, gradient_box: Option<Rect>) -> TextFill {
+    let solid = || TextFill::Solid(convert::current_color(style));
+    let (Some(gradient_box), ColorPropertyValue::Gradient(gradient)) =
+        (gradient_box, &style.get_inherited_text().color)
+    else {
+        return solid();
+    };
+    let tile = gradient_box.size();
+    if tile.width <= 0.0 || tile.height <= 0.0 {
+        return solid();
+    }
+    match gradient_brush(style, gradient.as_ref(), tile) {
+        Some(GradientBrush::Gradient { gradient, local }) => TextFill::Gradient {
+            gradient,
+            brush_transform: Affine::translate(gradient_box.origin().to_vec2()) * local,
+        },
+        // A single-stop or degenerate ramp resolves to a flat color.
+        Some(GradientBrush::Solid(color)) => TextFill::Solid(color),
+        // No color stops: the gradient paints nothing at all.
+        None => TextFill::Solid(Color::TRANSPARENT),
+    }
+}
 
 /// Paints one text item's committed layout with the styled parent element's
-/// paint properties.
+/// paint properties. `gradient_box` is the positioning area for a
+/// gradient-valued `color` (see [`text_fill`]), which the walker supplies only
+/// when [`needs_gradient_box`] says so — `None` for every solid-colored run.
 pub(crate) fn paint(
     scene: &mut Scene,
     style: &ComputedValues,
     layout: &TextLayout,
     transform: Affine,
     decorations: &[Decorations],
+    gradient_box: Option<Rect>,
 ) {
     let layout = layout.parley_layout();
 
@@ -51,7 +144,9 @@ pub(crate) fn paint(
     // the first-specified shadow paints on top (css-text-decor-3 §4). Only
     // the offset and color paint; blur is not painted — recorded v1 limit.
     // The shadow silhouette includes the decorations (the spec shadows "the
-    // text and all its decorations") but not the text-stroke pass.
+    // text and all its decorations") but not the text-stroke pass. A shadow
+    // is a flat color even under a gradient `color`: it silhouettes the text
+    // rather than restating its paint.
     for shadow in style.get_inherited_text().text_shadow.0.iter().rev() {
         let color = convert::resolve_color(style, &shadow.color);
         let offset = Affine::translate((
@@ -62,19 +157,28 @@ pub(crate) fn paint(
             .iter()
             .map(|deco| Decorations { color, ..*deco })
             .collect();
-        paint_pass(scene, layout, transform * offset, color, None, &shadowed);
+        paint_pass(
+            scene,
+            layout,
+            transform * offset,
+            &TextFill::Solid(color),
+            None,
+            &shadowed,
+        );
     }
 
-    // The element's used `color`. Lynx's gradient-valued `color` (text-
-    // gradient sugar) is not painted as a gradient: `clone_color()` collapses
-    // a gradient to the fork's parallel solid color, so the text paints that
-    // currentcolor fallback instead — recorded v1 limit.
-    let fill = convert::current_color(style);
+    // Decorations are not part of this: `text-decoration-color`'s initial
+    // `currentcolor` resolves through `clone_color()`, which reports the
+    // fork's parallel solid color (opaque black) for a gradient — the same
+    // value Lynx's own style engine keeps. So a gradient fills the glyph ink
+    // only, and an underline under gradient text is black unless the author
+    // names a decoration color.
+    let fill = text_fill(style, gradient_box);
     paint_pass(
         scene,
         layout,
         transform,
-        fill,
+        &fill,
         text_stroke(style),
         decorations,
     );
@@ -194,7 +298,7 @@ pub(crate) fn paint_silhouette(scene: &mut Scene, layout: &TextLayout, transform
         scene,
         layout.parley_layout(),
         transform,
-        Color::BLACK,
+        &TextFill::Solid(Color::BLACK),
         None,
         &[],
     );
@@ -204,7 +308,7 @@ fn paint_pass(
     scene: &mut Scene,
     layout: &Layout<()>,
     transform: Affine,
-    fill: Color,
+    fill: &TextFill,
     stroke: Option<(f64, Color)>,
     decorations: &[Decorations],
 ) {
@@ -244,7 +348,7 @@ fn paint_pass(
                     &glyph_run,
                     transform,
                     (&stroke_style).into(),
-                    stroke_color,
+                    &TextFill::Solid(stroke_color),
                 );
             }
 
@@ -275,7 +379,7 @@ fn draw_glyph_run(
     glyph_run: &GlyphRun<'_, ()>,
     transform: Affine,
     style: StyleRef<'_>,
-    color: Color,
+    fill: &TextFill,
 ) {
     let run = glyph_run.run();
     let synthesis = run.synthesis();
@@ -303,7 +407,10 @@ fn draw_glyph_run(
         // passes straight through.
         .normalized_coords(run.normalized_coords())
         .hint(false)
-        .brush(color)
+        .brush(fill.brush())
+        // Applied after `transform`, so a gradient brush stays anchored to
+        // the element's box across every run and line. Ignored for solids.
+        .brush_transform(fill.brush_transform())
         .draw(
             style,
             glyph_run.positioned_glyphs().map(|glyph| vello::Glyph {

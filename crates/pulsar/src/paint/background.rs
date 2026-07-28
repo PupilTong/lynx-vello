@@ -668,12 +668,13 @@ fn tile_span(origin: f64, step: f64, lo: f64, hi: f64, repeat: bool) -> (f64, f6
 }
 
 // ---- CSS gradient → peniko resolution (shared with mask.rs through
-// `paint_pattern_layer`). ----
+// `paint_pattern_layer`, and with text.rs for Lynx's gradient-valued
+// `color`). ----
 
 /// A resolved gradient: a peniko brush in tile-local space plus a
 /// brush-space adjustment (elliptical radial squash) composed after the
 /// per-tile translation, or a solid color for degenerate cases.
-enum GradientBrush {
+pub(crate) enum GradientBrush {
     Gradient {
         gradient: peniko::Gradient,
         local: Affine,
@@ -687,7 +688,7 @@ enum GradientBrush {
 /// `color_interpolation_method` is ignored: peniko interpolates
 /// premultiplied sRGB, the CSS default for legacy color syntax — other
 /// interpolation spaces are a recorded v1 limit.
-fn gradient_brush(
+pub(crate) fn gradient_brush(
     style: &ComputedValues,
     gradient: &Gradient,
     tile: Size,
