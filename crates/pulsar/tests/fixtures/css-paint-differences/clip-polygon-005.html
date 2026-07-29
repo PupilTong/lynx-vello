@@ -16,6 +16,9 @@ html, body {
   overflow: hidden;
   background: #fff;
 }
+body > div:first-of-type {
+  isolation: isolate;
+}
 </style>
 <!-- source: wpt/css/css-masking/clip-path/ -->
 <div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:14px;top:14px;width:100px;height:100px;background:linear-gradient(135deg,#f43f5e,#06b6d4);clip-path:polygon(0 0,100% 0,50% 50%,100% 100%,0 100%)"></div></div>

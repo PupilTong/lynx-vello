@@ -69,7 +69,6 @@ class DifferenceKind(Enum):
     RASTER_OR_SAMPLING = "w3c-correct-raster-or-sampling"
     UA_CHOICE = "w3c-correct-ua-choice"
     W3C_GAP = "w3c-gap"
-    ROOT_ROLE_ORACLE = "root-role-oracle-mismatch"
     NON_W3C_COMPATIBILITY = "non-w3c-compatibility"
 
 
@@ -1261,8 +1260,6 @@ def classify_difference(name: str, issue: str) -> DifferenceKind:
         return DifferenceKind.UA_CHOICE
     if issue in W3C_GAP_ISSUES:
         return DifferenceKind.W3C_GAP
-    if issue == "css-atlas-negative-z-root-role-mismatch":
-        return DifferenceKind.ROOT_ROLE_ORACLE
     if issue == "pulsar-text-stroke-join-geometry":
         return DifferenceKind.NON_W3C_COMPATIBILITY
     raise SystemExit(f"{name}: unclassified CSS-paint difference issue {issue!r}")
@@ -1294,7 +1291,6 @@ def load_differences(cases: Iterable[Case]) -> dict[str, Difference]:
         DifferenceKind.RASTER_OR_SAMPLING: 84,
         DifferenceKind.UA_CHOICE: 61,
         DifferenceKind.W3C_GAP: 170,
-        DifferenceKind.ROOT_ROLE_ORACLE: 22,
         DifferenceKind.NON_W3C_COMPATIBILITY: 19,
     }
     if counts != expected:
@@ -1316,7 +1312,6 @@ def rust_difference_kind(kind: DifferenceKind) -> str:
         DifferenceKind.RASTER_OR_SAMPLING: "DifferenceKind::RasterOrSampling",
         DifferenceKind.UA_CHOICE: "DifferenceKind::UaChoice",
         DifferenceKind.W3C_GAP: "DifferenceKind::W3cGap",
-        DifferenceKind.ROOT_ROLE_ORACLE: "DifferenceKind::RootRoleOracle",
         DifferenceKind.NON_W3C_COMPATIBILITY: "DifferenceKind::NonW3cCompatibility",
     }[kind]
 
@@ -1387,11 +1382,15 @@ def write_rust(cases: list[Case], differences: dict[str, Difference]) -> None:
 
 
 def iframe_document(case: Case) -> str:
+    # Native imports the stage as the document element, so it is the initial
+    # stacking-context root. Isolate the browser stage to test the same
+    # descendant paint-order semantics without changing the shared fragment.
     return (
         "<!doctype html><meta charset=utf-8><style>"
         "@font-face{font-family:Ahem;src:url('/crates/hughie/tests/fixtures/Ahem.ttf')"
         " format('truetype')}html,body{margin:0;width:128px;height:128px;"
-        "overflow:hidden;background:#fff}</style>"
+        "overflow:hidden;background:#fff}"
+        "body>div:first-of-type{isolation:isolate}</style>"
         f"{case.fragment}<script>"
         "document.fonts.ready.then(()=>document.fonts.load('16px Ahem','X')).then(faces=>{"
         "if(faces.length!==1||!document.fonts.check('16px Ahem','X'))"
@@ -1425,6 +1424,9 @@ def difference_fixture_document(case: Case, difference: Difference) -> str:
         "  height: 128px;\n"
         "  overflow: hidden;\n"
         "  background: #fff;\n"
+        "}\n"
+        "body > div:first-of-type {\n"
+        "  isolation: isolate;\n"
         "}\n"
         "</style>\n"
         f"<!-- source: {html.escape(case.source)} -->\n"
@@ -1554,13 +1556,13 @@ def validate_assets(cases: list[Case], differences: dict[str, Difference]) -> No
     skipped_names = difference_names - native_snapshots
     if (
         len(all_names) != 1_000
-        or len(browser_matches) != 644
+        or len(browser_matches) != 666
         or len(native_snapshots) != 145
-        or len(skipped_names) != 211
+        or len(skipped_names) != 189
     ):
         raise SystemExit(
-            "CSS-paint inventory must contain 1000 total / 644 browser matches / "
-            "145 native snapshots / 211 skipped"
+            "CSS-paint inventory must contain 1000 total / 666 browser matches / "
+            "145 native snapshots / 189 skipped"
         )
     if browser_matches & difference_names or native_snapshots & skipped_names:
         raise SystemExit("CSS-paint expectation sets overlap")

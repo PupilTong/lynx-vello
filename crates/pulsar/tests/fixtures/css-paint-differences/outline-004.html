@@ -16,6 +16,9 @@ html, body {
   overflow: hidden;
   background: #fff;
 }
+body > div:first-of-type {
+  isolation: isolate;
+}
 </style>
 <!-- source: wpt/css/CSS2/ui/outline/ -->
 <div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#dcfce7;"><div style="display:flex;position:absolute;left:28px;top:28px;width:72px;height:72px;background:#3b82f6;border-radius:12px;outline:3px dotted #e11d48"></div></div>

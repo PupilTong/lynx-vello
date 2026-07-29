@@ -16,6 +16,9 @@ html, body {
   overflow: hidden;
   background: #fff;
 }
+body > div:first-of-type {
+  isolation: isolate;
+}
 </style>
 <!-- source: wpt/css/css-text/white-space/ -->
 <div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:10px;top:8px;width:108px;height:112px;flex-direction:column;font-family:Ahem;font-size:14px;line-height:18px;color:#0f172a;background:#dcfce7;overflow:hidden;white-space:normal;word-break:normal">XXXX XX XXXX XX</div></div>

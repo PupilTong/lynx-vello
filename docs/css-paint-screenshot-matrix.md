@@ -20,7 +20,7 @@ that the face loaded. Each browser shard contains 25 isolated 128×128 iframes.
 In full-audit mode, the native side likewise paints 25 independent
 `dom::Document`s and appends their scenes into isolated cells before one GPU
 readback. A normal run preserves the original index/slot topology but does not
-build the 211 ignored cases. A permanent pixel test checks a non-zero
+build the 189 ignored cases. A permanent pixel test checks a non-zero
 translated cell against a standalone render byte-for-byte and verifies that
 outset effects do not leak into either adjacent cell.
 
@@ -28,9 +28,9 @@ The ordinary suite has three explicit expectation states:
 
 | State | Cases | Checked reference |
 | --- | ---: | --- |
-| `BrowserMatch` | 644 | Chromium PNG under `tests/screenshots/css-paint/` |
+| `BrowserMatch` | 666 | Chromium PNG under `tests/screenshots/css-paint/` |
 | `NativeSnapshot` | 145 | Pulsar/Parley PNG under `tests/screenshots/css-paint-native/` |
-| `Skip` | 211 | No PNG and `#[ignore]`; retained for full browser audit |
+| `Skip` | 189 | No PNG and `#[ignore]`; retained for full browser audit |
 
 The 145 native snapshots are all audited W3C-correct Chromium differences:
 84 rasterization or boundary/subpixel-sampling cases plus 61 cases where CSS
@@ -40,12 +40,12 @@ must remain stable even though it is not required to match Chromium. The full
 browser audit still compares every one of these cases to Chromium so a parity
 change cannot silently alter its standards disposition.
 
-Every one of the 356 Chromium differences has a standalone HTML fixture under
+Every one of the 334 Chromium differences has a standalone HTML fixture under
 `crates/pulsar/tests/fixtures/css-paint-differences/` and a row in
 `crates/pulsar/tests/css-paint-differences.tsv`. Thus “difference” is not
 synonymous with “ignored”: the registry is the union of 145 active native
-snapshots and 211 skips. The asset inventory requires exact basename equality
-for the 644 browser PNGs, 145 native PNGs, and 356 difference fixtures.
+snapshots and 189 skips. The asset inventory requires exact basename equality
+for the 666 browser PNGs, 145 native PNGs, and 334 difference fixtures.
 
 `FLASHBULB_UPDATE_SNAPSHOTS` is rejected by the entire atlas suite. Browser
 references can only come from the Playwright split workflow. Native references
@@ -133,17 +133,17 @@ These WPT subsets overlap and must not be summed.
 | Backgrounds and gradients | 120 | 36 | 84 |
 | Borders | 100 | 48 | 52 |
 | Shadows and outlines | 80 | 69 | 11 |
-| Paint/stacking order | 100 | 78 | 22 |
+| Paint/stacking order | 100 | 100 | 0 |
 | Overflow and paint containment | 80 | 75 | 5 |
 | Transforms | 100 | 100 | 0 |
 | Filters and opacity | 80 | 70 | 10 |
 | Clip paths | 80 | 47 | 33 |
 | Masks | 100 | 46 | 54 |
 | Text | 160 | 75 | 85 |
-| **Total** | **1,000** | **644** | **356** |
+| **Total** | **1,000** | **666** | **334** |
 
 “Pixelmatch-exact” means zero non-antialiased pixels beyond the Playwright
-threshold. The 356 mismatches are not one undifferentiated bug count:
+threshold. The 334 mismatches are not one undifferentiated bug count:
 
 | Classification | Cases | Meaning |
 | --- | ---: | --- |
@@ -151,9 +151,8 @@ threshold. The 356 mismatches are not one undifferentiated bug count:
 | W3C-correct — permitted UA choice | 61 | CSS deliberately leaves the observed geometry, pattern, color, or `auto` metric to the UA. |
 | **W3C-correct subtotal** | **145** | These are Chromium-parity differences, not standards defects. |
 | Definite W3C gap | 170 | A standard grammar or required behavior is missing or implemented incorrectly. |
-| Atlas root-role/oracle mismatch | 22 | The browser and native fixtures assign a different structural role to the outer div, so the comparison cannot judge the negative-z behavior. |
 | Non-W3C compatibility | 19 | `text-stroke` is a WebKit/Lynx compatibility surface, not a W3C CSS property. |
-| **Audited mismatch total** | **356** | Exactly the difference registry: 145 native snapshots plus 211 skips. |
+| **Audited mismatch total** | **334** | Exactly the difference registry: 145 native snapshots plus 189 skips. |
 
 The 84 raster/sample cases are 8 hard-stop boundary samples, 48 general
 edge-coverage cases, and 28 ordinary text subpixel cases. The 61 UA-choice
@@ -163,8 +162,13 @@ and the five `line-through` cases using
 `line-through` mismatches with an explicit `3px` thickness are part of the 170
 definite W3C gaps.
 
-Strong control results include 100/100 transform cases, 60/60 overflow and
-nested-overflow cases, 20/20 opacity groups, 20/20 clip ellipses, 10/10
+The browser stage div explicitly uses `isolation: isolate`, matching the native
+document element's initial stacking-context role. With that oracle alignment,
+all 22 negative-z probes now match Chromium exactly, and the complete
+paint/stacking-order family is 100/100 exact.
+
+Other strong control results include 100/100 transform cases, 60/60 overflow
+and nested-overflow cases, 20/20 opacity groups, 20/20 clip ellipses, 10/10
 `clip-path: path()`, and 50/50 outset/inset shadow cases.
 
 ## Audited difference inventory
@@ -178,7 +182,6 @@ nested-overflow cases, 20/20 opacity groups, 20/20 clip ellipses, 10/10
 | `css-double-border-rounded-corners` | W3C-correct: UA choice | 16 | Pulsar's one-third line allocation and rounded-corner interpolation differ from Chrome, but CSS does not fully determine the line split or rounded style transition. |
 | `css-outline-nonsolid-styles` | W3C gap | 6 | `double`, `groove`, and `ridge` outlines collapse to a solid ring even though CSS UI gives outline styles the corresponding border-style meanings. |
 | `vello-chromium-edge-coverage` | W3C-correct: raster/sample | 48 | Circle, mask, hard-edge gradient, and one shadow boundaries differ by small coverage sets. The atlas-isolation control is byte-identical, so the atlas is not the cause. |
-| `css-atlas-negative-z-root-role-mismatch` | Oracle mismatch | 22 | `paint-order-000..007`, `060..065`, and `080..087`: browser HTML places the outer stage div under `body`, while the native importer makes that same div the document element and therefore the initial stacking-context root. Chrome can paint a root-level negative descendant behind the ordinary stage background while native correctly paints it above the document-element background. These cases do not establish an Appendix E implementation bug. |
 | `css-position-static-grammar` | W3C gap | 5 | The Lynx `position` parser omits standard `static`. A rejected later declaration leaves an earlier absolute declaration active and moves the containment probe. |
 | `css-filter-brightness-over-one-approximation` | W3C gap | 1 | `brightness(2)` uses a screen-blend approximation rather than the specified filter transfer function. |
 | `css-filter-blur-offscreen-pass` | W3C gap | 9 | `filter: blur()` is ignored because the required offscreen texture pass is not implemented. |
@@ -200,7 +203,7 @@ The authoritative difference mapping is the two-column
 `crates/pulsar/tests/css-paint-differences.tsv` (`case-name`, `issue`). The
 name-based classifier refuses an unclassified mismatch, a duplicate row or
 name, index/name drift, a missing case, or a mapped case that now matches. It
-also asserts the five disposition totals (84, 61, 170, 22, and 19), so the
+also asserts the four disposition totals (84, 61, 170, and 19), so the
 145-case W3C-correct subtotal cannot change accidentally. The generator maps
 all 145 W3C-correct rows (84 raster/sample plus 61 UA-choice) to
 `NativeSnapshot`; every other registry row maps to `Skip`.
@@ -225,7 +228,7 @@ node crates/pulsar/tests/support/capture_css_paint_references.mjs \
 ```
 
 Inspect the atlases, then split them into the committed browser-reference
-directory. The default split writes only the 644 `BrowserMatch` tiles; it never
+directory. The default split writes only the 666 `BrowserMatch` tiles; it never
 writes either the native-reference directory or any other difference:
 
 ```sh
@@ -253,8 +256,9 @@ python3 crates/pulsar/tests/support/generate_css_paint_cases.py \
   --prune-reference-assets --validate-assets
 ```
 
-The checked regression suite compares 789 cases: 644 to Chromium and 145 to
-native snapshots. Cargo reports 211 cases as ignored, and the native atlas
+The checked regression suite compares 811 screenshot cases: 666 to Chromium
+and 145 to native snapshots. With the inventory test, Cargo reports 812 passed
+and 189 ignored; the native atlas
 builder does not render those skipped cases in a normal run:
 
 ```sh
@@ -290,7 +294,7 @@ explicitly, then rerun it.
 
 After classification, first regenerate Rust and HTML metadata, then update the
 native W3C-correct set and split the browser matches. Finally validate the
-644/145/211 asset partition:
+666/145/189 asset partition:
 
 ```sh
 python3 crates/pulsar/tests/support/generate_css_paint_cases.py

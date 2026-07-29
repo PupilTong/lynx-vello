@@ -5,7 +5,7 @@
 # W3C-correct raster/sample and UA-choice rows use committed native
 # snapshots; all other rows are ignored. Browser-match rows are absent.
 # Dispositions: 84 raster/sample, 61 UA choice, 170 W3C gap,
-# 22 root-role/oracle mismatch, 19 non-W3C compatibility.
+# 19 non-W3C compatibility.
 background-linear-000	css-gradient-multi-position-stops
 background-linear-001	css-gradient-hard-stop-boundary-sampling
 background-linear-002	css-gradient-multi-position-stops
@@ -153,28 +153,6 @@ outline-008	css-outline-nonsolid-styles
 outline-009	css-outline-nonsolid-styles
 outline-010	css-outline-nonsolid-styles
 outline-011	css-outline-nonsolid-styles
-paint-order-000	css-atlas-negative-z-root-role-mismatch
-paint-order-001	css-atlas-negative-z-root-role-mismatch
-paint-order-002	css-atlas-negative-z-root-role-mismatch
-paint-order-003	css-atlas-negative-z-root-role-mismatch
-paint-order-004	css-atlas-negative-z-root-role-mismatch
-paint-order-005	css-atlas-negative-z-root-role-mismatch
-paint-order-006	css-atlas-negative-z-root-role-mismatch
-paint-order-007	css-atlas-negative-z-root-role-mismatch
-paint-order-060	css-atlas-negative-z-root-role-mismatch
-paint-order-061	css-atlas-negative-z-root-role-mismatch
-paint-order-062	css-atlas-negative-z-root-role-mismatch
-paint-order-063	css-atlas-negative-z-root-role-mismatch
-paint-order-064	css-atlas-negative-z-root-role-mismatch
-paint-order-065	css-atlas-negative-z-root-role-mismatch
-paint-order-080	css-atlas-negative-z-root-role-mismatch
-paint-order-081	css-atlas-negative-z-root-role-mismatch
-paint-order-082	css-atlas-negative-z-root-role-mismatch
-paint-order-083	css-atlas-negative-z-root-role-mismatch
-paint-order-084	css-atlas-negative-z-root-role-mismatch
-paint-order-085	css-atlas-negative-z-root-role-mismatch
-paint-order-086	css-atlas-negative-z-root-role-mismatch
-paint-order-087	css-atlas-negative-z-root-role-mismatch
 contain-paint-000	css-position-static-grammar
 contain-paint-004	css-position-static-grammar
 contain-paint-008	css-position-static-grammar

@@ -16,6 +16,9 @@ html, body {
   overflow: hidden;
   background: #fff;
 }
+body > div:first-of-type {
+  isolation: isolate;
+}
 </style>
 <!-- source: wpt/css/css-borders/border-radius/ -->
 <div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e0f2fe;"><div style="display:flex;position:absolute;left:14px;top:18px;width:100px;height:92px;box-sizing:border-box;background:#f59e0b;border-width:8px;border-style:double;border-color:#7c3aed;border-radius:12px 28px"></div></div>

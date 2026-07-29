@@ -16,6 +16,9 @@ html, body {
   overflow: hidden;
   background: #fff;
 }
+body > div:first-of-type {
+  isolation: isolate;
+}
 </style>
 <!-- source: wpt/css/css-backgrounds/background-clip/ -->
 <div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:8px;top:22px;width:112px;height:82px;flex-direction:column;font-family:Ahem;font-size:26px;line-height:36px;color:transparent;background-image:radial-gradient(circle at 30% 40%,#22c55e 0%,#22c55e 30%,#2563eb 70%,#2563eb 100%);background-clip:text;letter-spacing:3px;">XXXX</div></div>

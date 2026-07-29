@@ -1,9 +1,9 @@
 //! Browser-referenced, pure-`<div>` CSS paint screenshot tests.
 //!
-//! The matrix retains all 1,000 independent 128×128 probes.  The 644 probes
+//! The matrix retains all 1,000 independent 128×128 probes.  The 666 probes
 //! that pixelmatch Chromium own browser references.  Another 145 W3C-correct
 //! cases exercise rasterization/sampling differences or CSS-permitted UA
-//! choices against native Pulsar/Parley snapshots.  The other 211 audited
+//! choices against native Pulsar/Parley snapshots.  The other 189 audited
 //! differences remain ignored fixtures.  Up to twenty-five active documents
 //! share one isolated 640×640 Vello atlas readback; a full audit compares all
 //! 1,000 against temporary Chromium references.
@@ -48,8 +48,6 @@ enum DifferenceKind {
     UaChoice,
     /// A real standards parser, layout, or paint gap.
     W3cGap,
-    /// The browser/native fixtures assign the outer element different root roles.
-    RootRoleOracle,
     /// Compatibility work for a property outside the W3C CSS surface.
     NonW3cCompatibility,
 }
@@ -60,7 +58,6 @@ impl DifferenceKind {
             Self::RasterOrSampling => "w3c-correct-raster-or-sampling",
             Self::UaChoice => "w3c-correct-ua-choice",
             Self::W3cGap => "w3c-gap",
-            Self::RootRoleOracle => "root-role-oracle-mismatch",
             Self::NonW3cCompatibility => "non-w3c-compatibility",
         }
     }
@@ -566,7 +563,6 @@ fn css_paint_asset_inventory() {
     let mut raster_or_sampling = 0;
     let mut ua_choices = 0;
     let mut gaps = 0;
-    let mut root_oracles = 0;
     let mut non_w3c = 0;
     for case in &generated::CASES {
         match case.expectation {
@@ -621,22 +617,21 @@ fn css_paint_asset_inventory() {
                 DifferenceKind::RasterOrSampling => raster_or_sampling += 1,
                 DifferenceKind::UaChoice => ua_choices += 1,
                 DifferenceKind::W3cGap => gaps += 1,
-                DifferenceKind::RootRoleOracle => root_oracles += 1,
                 DifferenceKind::NonW3cCompatibility => non_w3c += 1,
             }
         }
     }
 
     assert_eq!(generated::CASES.len(), CASE_COUNT);
-    assert_eq!(browser_matches.len(), 644);
+    assert_eq!(browser_matches.len(), 666);
     assert_eq!(native_snapshots.len(), 145);
-    assert_eq!(skipped.len(), 211);
+    assert_eq!(skipped.len(), 189);
     assert!(browser_matches.is_disjoint(&native_snapshots));
     assert!(browser_matches.is_disjoint(&skipped));
     assert!(native_snapshots.is_disjoint(&skipped));
     assert_eq!(
-        (raster_or_sampling, ua_choices, gaps, root_oracles, non_w3c),
-        (84, 61, 170, 22, 19)
+        (raster_or_sampling, ua_choices, gaps, non_w3c),
+        (84, 61, 170, 19)
     );
     assert_eq!(
         read_difference_registry(&difference_registry),

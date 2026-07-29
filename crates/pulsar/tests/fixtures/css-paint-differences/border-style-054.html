@@ -16,6 +16,9 @@ html, body {
   overflow: hidden;
   background: #fff;
 }
+body > div:first-of-type {
+  isolation: isolate;
+}
 </style>
 <!-- source: wpt/css/css-borders/ -->
 <div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#fef2f2;"><div style="display:flex;position:absolute;left:18px;top:22px;width:92px;height:84px;box-sizing:border-box;background:#22c55e;border:2px outset #2563eb"></div></div>

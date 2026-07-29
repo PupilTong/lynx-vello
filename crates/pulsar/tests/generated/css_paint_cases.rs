@@ -2105,56 +2105,56 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"paint-order",
         source: r"wpt/css/CSS2/zindex/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:20px;top:20px;width:72px;height:72px;background:#ef4444;z-index:-2"></div><div style="display:flex;position:absolute;left:42px;top:42px;width:68px;height:68px;background:#22c55e;z-index:-1"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RootRoleOracle, issue: r"css-atlas-negative-z-root-role-mismatch" },
+        expectation: Expectation::BrowserMatch,
     },
     CssPaintCase {
         name: r"paint-order-001",
         category: r"paint-order",
         source: r"wpt/css/CSS2/zindex/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:42px;top:42px;width:68px;height:68px;background:#22c55e;z-index:-1"></div><div style="display:flex;position:absolute;left:20px;top:20px;width:72px;height:72px;background:#ef4444;z-index:-2"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RootRoleOracle, issue: r"css-atlas-negative-z-root-role-mismatch" },
+        expectation: Expectation::BrowserMatch,
     },
     CssPaintCase {
         name: r"paint-order-002",
         category: r"paint-order",
         source: r"wpt/css/CSS2/zindex/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:20px;top:20px;width:72px;height:72px;background:#ef4444;z-index:-1"></div><div style="display:flex;position:absolute;left:42px;top:42px;width:68px;height:68px;background:#22c55e;z-index:-2"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RootRoleOracle, issue: r"css-atlas-negative-z-root-role-mismatch" },
+        expectation: Expectation::BrowserMatch,
     },
     CssPaintCase {
         name: r"paint-order-003",
         category: r"paint-order",
         source: r"wpt/css/CSS2/zindex/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:42px;top:42px;width:68px;height:68px;background:#22c55e;z-index:-2"></div><div style="display:flex;position:absolute;left:20px;top:20px;width:72px;height:72px;background:#ef4444;z-index:-1"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RootRoleOracle, issue: r"css-atlas-negative-z-root-role-mismatch" },
+        expectation: Expectation::BrowserMatch,
     },
     CssPaintCase {
         name: r"paint-order-004",
         category: r"paint-order",
         source: r"wpt/css/CSS2/zindex/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:20px;top:20px;width:72px;height:72px;background:#ef4444;z-index:-1"></div><div style="display:flex;position:absolute;left:42px;top:42px;width:68px;height:68px;background:#22c55e;z-index:0"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RootRoleOracle, issue: r"css-atlas-negative-z-root-role-mismatch" },
+        expectation: Expectation::BrowserMatch,
     },
     CssPaintCase {
         name: r"paint-order-005",
         category: r"paint-order",
         source: r"wpt/css/CSS2/zindex/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:42px;top:42px;width:68px;height:68px;background:#22c55e;z-index:0"></div><div style="display:flex;position:absolute;left:20px;top:20px;width:72px;height:72px;background:#ef4444;z-index:-1"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RootRoleOracle, issue: r"css-atlas-negative-z-root-role-mismatch" },
+        expectation: Expectation::BrowserMatch,
     },
     CssPaintCase {
         name: r"paint-order-006",
         category: r"paint-order",
         source: r"wpt/css/CSS2/zindex/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:20px;top:20px;width:72px;height:72px;background:#ef4444;z-index:0"></div><div style="display:flex;position:absolute;left:42px;top:42px;width:68px;height:68px;background:#22c55e;z-index:-1"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RootRoleOracle, issue: r"css-atlas-negative-z-root-role-mismatch" },
+        expectation: Expectation::BrowserMatch,
     },
     CssPaintCase {
         name: r"paint-order-007",
         category: r"paint-order",
         source: r"wpt/css/CSS2/zindex/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:42px;top:42px;width:68px;height:68px;background:#22c55e;z-index:-1"></div><div style="display:flex;position:absolute;left:20px;top:20px;width:72px;height:72px;background:#ef4444;z-index:0"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RootRoleOracle, issue: r"css-atlas-negative-z-root-role-mismatch" },
+        expectation: Expectation::BrowserMatch,
     },
     CssPaintCase {
         name: r"paint-order-008",
@@ -2525,42 +2525,42 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"paint-order",
         source: r"wpt/css/CSS2/zindex/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:#3b82f6;z-index:-2"><div style="display:flex;position:absolute;left:28px;top:28px;width:70px;height:70px;background:#ef4444;z-index:-1"></div></div><div style="display:flex;position:absolute;left:44px;top:44px;width:64px;height:64px;background:#22c55e;z-index:0"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RootRoleOracle, issue: r"css-atlas-negative-z-root-role-mismatch" },
+        expectation: Expectation::BrowserMatch,
     },
     CssPaintCase {
         name: r"paint-order-061",
         category: r"paint-order",
         source: r"wpt/css/CSS2/zindex/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:44px;top:44px;width:64px;height:64px;background:#22c55e;z-index:0"></div><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:#3b82f6;z-index:-2"><div style="display:flex;position:absolute;left:28px;top:28px;width:70px;height:70px;background:#ef4444;z-index:-1"></div></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RootRoleOracle, issue: r"css-atlas-negative-z-root-role-mismatch" },
+        expectation: Expectation::BrowserMatch,
     },
     CssPaintCase {
         name: r"paint-order-062",
         category: r"paint-order",
         source: r"wpt/css/CSS2/zindex/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:#3b82f6;z-index:-1"><div style="display:flex;position:absolute;left:28px;top:28px;width:70px;height:70px;background:#ef4444;z-index:-2"></div></div><div style="display:flex;position:absolute;left:44px;top:44px;width:64px;height:64px;background:#22c55e;z-index:0"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RootRoleOracle, issue: r"css-atlas-negative-z-root-role-mismatch" },
+        expectation: Expectation::BrowserMatch,
     },
     CssPaintCase {
         name: r"paint-order-063",
         category: r"paint-order",
         source: r"wpt/css/CSS2/zindex/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:44px;top:44px;width:64px;height:64px;background:#22c55e;z-index:0"></div><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:#3b82f6;z-index:-1"><div style="display:flex;position:absolute;left:28px;top:28px;width:70px;height:70px;background:#ef4444;z-index:-2"></div></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RootRoleOracle, issue: r"css-atlas-negative-z-root-role-mismatch" },
+        expectation: Expectation::BrowserMatch,
     },
     CssPaintCase {
         name: r"paint-order-064",
         category: r"paint-order",
         source: r"wpt/css/CSS2/zindex/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:#3b82f6;z-index:-1"><div style="display:flex;position:absolute;left:28px;top:28px;width:70px;height:70px;background:#ef4444;z-index:0"></div></div><div style="display:flex;position:absolute;left:44px;top:44px;width:64px;height:64px;background:#22c55e;z-index:0"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RootRoleOracle, issue: r"css-atlas-negative-z-root-role-mismatch" },
+        expectation: Expectation::BrowserMatch,
     },
     CssPaintCase {
         name: r"paint-order-065",
         category: r"paint-order",
         source: r"wpt/css/CSS2/zindex/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:44px;top:44px;width:64px;height:64px;background:#22c55e;z-index:0"></div><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:#3b82f6;z-index:-1"><div style="display:flex;position:absolute;left:28px;top:28px;width:70px;height:70px;background:#ef4444;z-index:0"></div></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RootRoleOracle, issue: r"css-atlas-negative-z-root-role-mismatch" },
+        expectation: Expectation::BrowserMatch,
     },
     CssPaintCase {
         name: r"paint-order-066",
@@ -2665,56 +2665,56 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"paint-order",
         source: r"wpt/css/CSS2/zindex/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:10px;top:10px;width:106px;height:106px;opacity:.85;z-index:-2"><div style="display:flex;position:absolute;left:20px;top:20px;width:72px;height:72px;background:#ef4444;z-index:-2"></div><div style="display:flex;position:absolute;left:42px;top:42px;width:68px;height:68px;background:#22c55e;z-index:-1"></div></div><div style="display:flex;position:absolute;left:36px;top:36px;width:76px;height:76px;background:#f59e0b;z-index:-1"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RootRoleOracle, issue: r"css-atlas-negative-z-root-role-mismatch" },
+        expectation: Expectation::BrowserMatch,
     },
     CssPaintCase {
         name: r"paint-order-081",
         category: r"paint-order",
         source: r"wpt/css/CSS2/zindex/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:36px;top:36px;width:76px;height:76px;background:#f59e0b;z-index:-1"></div><div style="display:flex;position:absolute;left:10px;top:10px;width:106px;height:106px;opacity:.85;z-index:-2"><div style="display:flex;position:absolute;left:20px;top:20px;width:72px;height:72px;background:#ef4444;z-index:-2"></div><div style="display:flex;position:absolute;left:42px;top:42px;width:68px;height:68px;background:#22c55e;z-index:-1"></div></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RootRoleOracle, issue: r"css-atlas-negative-z-root-role-mismatch" },
+        expectation: Expectation::BrowserMatch,
     },
     CssPaintCase {
         name: r"paint-order-082",
         category: r"paint-order",
         source: r"wpt/css/CSS2/zindex/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:10px;top:10px;width:106px;height:106px;opacity:.85;z-index:-1"><div style="display:flex;position:absolute;left:20px;top:20px;width:72px;height:72px;background:#ef4444;z-index:-1"></div><div style="display:flex;position:absolute;left:42px;top:42px;width:68px;height:68px;background:#22c55e;z-index:-2"></div></div><div style="display:flex;position:absolute;left:36px;top:36px;width:76px;height:76px;background:#f59e0b;z-index:-2"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RootRoleOracle, issue: r"css-atlas-negative-z-root-role-mismatch" },
+        expectation: Expectation::BrowserMatch,
     },
     CssPaintCase {
         name: r"paint-order-083",
         category: r"paint-order",
         source: r"wpt/css/CSS2/zindex/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:36px;top:36px;width:76px;height:76px;background:#f59e0b;z-index:-2"></div><div style="display:flex;position:absolute;left:10px;top:10px;width:106px;height:106px;opacity:.85;z-index:-1"><div style="display:flex;position:absolute;left:20px;top:20px;width:72px;height:72px;background:#ef4444;z-index:-1"></div><div style="display:flex;position:absolute;left:42px;top:42px;width:68px;height:68px;background:#22c55e;z-index:-2"></div></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RootRoleOracle, issue: r"css-atlas-negative-z-root-role-mismatch" },
+        expectation: Expectation::BrowserMatch,
     },
     CssPaintCase {
         name: r"paint-order-084",
         category: r"paint-order",
         source: r"wpt/css/CSS2/zindex/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:10px;top:10px;width:106px;height:106px;opacity:.85;z-index:-1"><div style="display:flex;position:absolute;left:20px;top:20px;width:72px;height:72px;background:#ef4444;z-index:-1"></div><div style="display:flex;position:absolute;left:42px;top:42px;width:68px;height:68px;background:#22c55e;z-index:0"></div></div><div style="display:flex;position:absolute;left:36px;top:36px;width:76px;height:76px;background:#f59e0b;z-index:0"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RootRoleOracle, issue: r"css-atlas-negative-z-root-role-mismatch" },
+        expectation: Expectation::BrowserMatch,
     },
     CssPaintCase {
         name: r"paint-order-085",
         category: r"paint-order",
         source: r"wpt/css/CSS2/zindex/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:36px;top:36px;width:76px;height:76px;background:#f59e0b;z-index:0"></div><div style="display:flex;position:absolute;left:10px;top:10px;width:106px;height:106px;opacity:.85;z-index:-1"><div style="display:flex;position:absolute;left:20px;top:20px;width:72px;height:72px;background:#ef4444;z-index:-1"></div><div style="display:flex;position:absolute;left:42px;top:42px;width:68px;height:68px;background:#22c55e;z-index:0"></div></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RootRoleOracle, issue: r"css-atlas-negative-z-root-role-mismatch" },
+        expectation: Expectation::BrowserMatch,
     },
     CssPaintCase {
         name: r"paint-order-086",
         category: r"paint-order",
         source: r"wpt/css/CSS2/zindex/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:10px;top:10px;width:106px;height:106px;opacity:.85;z-index:0"><div style="display:flex;position:absolute;left:20px;top:20px;width:72px;height:72px;background:#ef4444;z-index:0"></div><div style="display:flex;position:absolute;left:42px;top:42px;width:68px;height:68px;background:#22c55e;z-index:-1"></div></div><div style="display:flex;position:absolute;left:36px;top:36px;width:76px;height:76px;background:#f59e0b;z-index:-1"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RootRoleOracle, issue: r"css-atlas-negative-z-root-role-mismatch" },
+        expectation: Expectation::BrowserMatch,
     },
     CssPaintCase {
         name: r"paint-order-087",
         category: r"paint-order",
         source: r"wpt/css/CSS2/zindex/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:36px;top:36px;width:76px;height:76px;background:#f59e0b;z-index:-1"></div><div style="display:flex;position:absolute;left:10px;top:10px;width:106px;height:106px;opacity:.85;z-index:0"><div style="display:flex;position:absolute;left:20px;top:20px;width:72px;height:72px;background:#ef4444;z-index:0"></div><div style="display:flex;position:absolute;left:42px;top:42px;width:68px;height:68px;background:#22c55e;z-index:-1"></div></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RootRoleOracle, issue: r"css-atlas-negative-z-root-role-mismatch" },
+        expectation: Expectation::BrowserMatch,
     },
     CssPaintCase {
         name: r"paint-order-088",
@@ -7157,6 +7157,14 @@ css_paint_case_tests! {
         297 => css_outline_017;
         298 => css_outline_018;
         299 => css_outline_019;
+        300 => css_paint_order_000;
+        301 => css_paint_order_001;
+        302 => css_paint_order_002;
+        303 => css_paint_order_003;
+        304 => css_paint_order_004;
+        305 => css_paint_order_005;
+        306 => css_paint_order_006;
+        307 => css_paint_order_007;
         308 => css_paint_order_008;
         309 => css_paint_order_009;
         310 => css_paint_order_010;
@@ -7209,6 +7217,12 @@ css_paint_case_tests! {
         357 => css_paint_order_057;
         358 => css_paint_order_058;
         359 => css_paint_order_059;
+        360 => css_paint_order_060;
+        361 => css_paint_order_061;
+        362 => css_paint_order_062;
+        363 => css_paint_order_063;
+        364 => css_paint_order_064;
+        365 => css_paint_order_065;
         366 => css_paint_order_066;
         367 => css_paint_order_067;
         368 => css_paint_order_068;
@@ -7223,6 +7237,14 @@ css_paint_case_tests! {
         377 => css_paint_order_077;
         378 => css_paint_order_078;
         379 => css_paint_order_079;
+        380 => css_paint_order_080;
+        381 => css_paint_order_081;
+        382 => css_paint_order_082;
+        383 => css_paint_order_083;
+        384 => css_paint_order_084;
+        385 => css_paint_order_085;
+        386 => css_paint_order_086;
+        387 => css_paint_order_087;
         388 => css_paint_order_088;
         389 => css_paint_order_089;
         390 => css_paint_order_090;
@@ -7879,28 +7901,6 @@ css_paint_case_tests! {
         289 => css_outline_009, r"w3c-gap: css-outline-nonsolid-styles";
         290 => css_outline_010, r"w3c-gap: css-outline-nonsolid-styles";
         291 => css_outline_011, r"w3c-gap: css-outline-nonsolid-styles";
-        300 => css_paint_order_000, r"root-role-oracle-mismatch: css-atlas-negative-z-root-role-mismatch";
-        301 => css_paint_order_001, r"root-role-oracle-mismatch: css-atlas-negative-z-root-role-mismatch";
-        302 => css_paint_order_002, r"root-role-oracle-mismatch: css-atlas-negative-z-root-role-mismatch";
-        303 => css_paint_order_003, r"root-role-oracle-mismatch: css-atlas-negative-z-root-role-mismatch";
-        304 => css_paint_order_004, r"root-role-oracle-mismatch: css-atlas-negative-z-root-role-mismatch";
-        305 => css_paint_order_005, r"root-role-oracle-mismatch: css-atlas-negative-z-root-role-mismatch";
-        306 => css_paint_order_006, r"root-role-oracle-mismatch: css-atlas-negative-z-root-role-mismatch";
-        307 => css_paint_order_007, r"root-role-oracle-mismatch: css-atlas-negative-z-root-role-mismatch";
-        360 => css_paint_order_060, r"root-role-oracle-mismatch: css-atlas-negative-z-root-role-mismatch";
-        361 => css_paint_order_061, r"root-role-oracle-mismatch: css-atlas-negative-z-root-role-mismatch";
-        362 => css_paint_order_062, r"root-role-oracle-mismatch: css-atlas-negative-z-root-role-mismatch";
-        363 => css_paint_order_063, r"root-role-oracle-mismatch: css-atlas-negative-z-root-role-mismatch";
-        364 => css_paint_order_064, r"root-role-oracle-mismatch: css-atlas-negative-z-root-role-mismatch";
-        365 => css_paint_order_065, r"root-role-oracle-mismatch: css-atlas-negative-z-root-role-mismatch";
-        380 => css_paint_order_080, r"root-role-oracle-mismatch: css-atlas-negative-z-root-role-mismatch";
-        381 => css_paint_order_081, r"root-role-oracle-mismatch: css-atlas-negative-z-root-role-mismatch";
-        382 => css_paint_order_082, r"root-role-oracle-mismatch: css-atlas-negative-z-root-role-mismatch";
-        383 => css_paint_order_083, r"root-role-oracle-mismatch: css-atlas-negative-z-root-role-mismatch";
-        384 => css_paint_order_084, r"root-role-oracle-mismatch: css-atlas-negative-z-root-role-mismatch";
-        385 => css_paint_order_085, r"root-role-oracle-mismatch: css-atlas-negative-z-root-role-mismatch";
-        386 => css_paint_order_086, r"root-role-oracle-mismatch: css-atlas-negative-z-root-role-mismatch";
-        387 => css_paint_order_087, r"root-role-oracle-mismatch: css-atlas-negative-z-root-role-mismatch";
         440 => css_contain_paint_000, r"w3c-gap: css-position-static-grammar";
         444 => css_contain_paint_004, r"w3c-gap: css-position-static-grammar";
         448 => css_contain_paint_008, r"w3c-gap: css-position-static-grammar";

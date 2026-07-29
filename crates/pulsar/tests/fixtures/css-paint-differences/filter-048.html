@@ -16,6 +16,9 @@ html, body {
   overflow: hidden;
   background: #fff;
 }
+body > div:first-of-type {
+  isolation: isolate;
+}
 </style>
 <!-- source: wpt/css/filter-effects/ -->
 <div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#f8fafc;"><div style="display:flex;position:absolute;left:20px;top:22px;width:88px;height:84px;background:linear-gradient(45deg,#ef4444 0%,#22c55e 50%,#2563eb 100%);filter:blur(12px)"></div></div>

@@ -16,6 +16,9 @@ html, body {
   overflow: hidden;
   background: #fff;
 }
+body > div:first-of-type {
+  isolation: isolate;
+}
 </style>
 <!-- source: wpt/css/css-backgrounds/gradients/ -->
 <div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#cbd5e1;"><div style="display:flex;position:absolute;left:12px;top:16px;width:104px;height:96px;background:#dc2626 linear-gradient(225deg,#111827 0%,#111827 45%,#f8fafc 45%,#f8fafc 55%,#111827 55%)"></div></div>

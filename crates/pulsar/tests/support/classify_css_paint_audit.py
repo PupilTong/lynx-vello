@@ -38,14 +38,12 @@ CASE_COUNT = 1_000
 W3C_CORRECT_RASTER_OR_SAMPLING = "w3c-correct-raster-or-sampling"
 W3C_CORRECT_UA_CHOICE = "w3c-correct-ua-choice"
 W3C_GAP = "w3c-gap"
-ROOT_ROLE_ORACLE_MISMATCH = "root-role-oracle-mismatch"
 NON_W3C_COMPATIBILITY = "non-w3c-compatibility"
 
 EXPECTED_DISPOSITION_COUNTS = {
     W3C_CORRECT_RASTER_OR_SAMPLING: 84,
     W3C_CORRECT_UA_CHOICE: 61,
     W3C_GAP: 170,
-    ROOT_ROLE_ORACLE_MISMATCH: 22,
     NON_W3C_COMPATIBILITY: 19,
 }
 
@@ -100,11 +98,6 @@ ISSUES: dict[str, set[str]] = {
         | cases("mask-boxes", range(10))
         | cases("text-background-clip", (4, 7))
     ),
-    "css-atlas-negative-z-root-role-mismatch": (
-        cases("paint-order", range(8))
-        | cases("paint-order", range(60, 66))
-        | cases("paint-order", range(80, 88))
-    ),
     "css-position-static-grammar": cases("contain-paint", range(0, 20, 4)),
     "css-filter-brightness-over-one-approximation": {"filter-017"},
     "css-filter-blur-offscreen-pass": cases("filter", range(41, 50)),
@@ -152,7 +145,6 @@ ISSUE_DISPOSITIONS = {
     "css-double-border-rounded-corners": W3C_CORRECT_UA_CHOICE,
     "css-outline-nonsolid-styles": W3C_GAP,
     "vello-chromium-edge-coverage": W3C_CORRECT_RASTER_OR_SAMPLING,
-    "css-atlas-negative-z-root-role-mismatch": ROOT_ROLE_ORACLE_MISMATCH,
     "css-position-static-grammar": W3C_GAP,
     "css-filter-brightness-over-one-approximation": W3C_GAP,
     "css-filter-blur-offscreen-pass": W3C_GAP,
@@ -263,7 +255,7 @@ def classify(audit: Path, output: Path) -> None:
         "# W3C-correct raster/sample and UA-choice rows use committed native",
         "# snapshots; all other rows are ignored. Browser-match rows are absent.",
         "# Dispositions: 84 raster/sample, 61 UA choice, 170 W3C gap,",
-        "# 22 root-role/oracle mismatch, 19 non-W3C compatibility.",
+        "# 19 non-W3C compatibility.",
     ]
     counts: Counter[str] = Counter()
     for index in range(CASE_COUNT):
