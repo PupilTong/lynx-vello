@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Generate the 1,000-case pure-div CSS paint screenshot matrix.
 
-The generated Rust is consumed by ``tests/css_atlas.rs``. Chromium matches
-own browser PNGs, permitted UA choices own native Pulsar/Parley snapshots, and
-the remaining audited differences are ``#[ignore]``. Every difference retains
-a standalone HTML reproduction.
+The generated Rust is consumed by ``tests/css_atlas.rs``. Chromium matches own
+browser PNGs, W3C-correct raster/sampling differences and permitted UA choices
+own native Pulsar/Parley snapshots, and the remaining audited differences are
+``#[ignore]``. Every difference retains a standalone HTML reproduction.
 
 The optional HTML output contains forty 5x5 browser atlases; every cell is an
 isolated 128x128 iframe.
@@ -78,6 +78,11 @@ class Difference:
     issue: str
     kind: DifferenceKind
 
+
+NATIVE_SNAPSHOT_KINDS = {
+    DifferenceKind.RASTER_OR_SAMPLING,
+    DifferenceKind.UA_CHOICE,
+}
 
 RASTER_OR_SAMPLING_ISSUES = {
     "css-gradient-hard-stop-boundary-sampling",
@@ -1325,7 +1330,7 @@ def write_rust(cases: list[Case], differences: dict[str, Difference]) -> None:
         difference = differences.get(case.name)
         if difference is None:
             expected = "Expectation::BrowserMatch"
-        elif difference.kind is DifferenceKind.UA_CHOICE:
+        elif difference.kind in NATIVE_SNAPSHOT_KINDS:
             expected = (
                 "Expectation::NativeSnapshot { "
                 f"kind: {rust_difference_kind(difference.kind)}, "
@@ -1363,7 +1368,7 @@ def write_rust(cases: list[Case], differences: dict[str, Difference]) -> None:
     lines.append("    native_snapshots {")
     for index, case in enumerate(cases):
         difference = differences.get(case.name)
-        if difference is None or difference.kind is not DifferenceKind.UA_CHOICE:
+        if difference is None or difference.kind not in NATIVE_SNAPSHOT_KINDS:
             continue
         identifier = "css_native_" + case.name.replace("-", "_")
         lines.append(f"        {index} => {identifier};")
@@ -1371,7 +1376,7 @@ def write_rust(cases: list[Case], differences: dict[str, Difference]) -> None:
     lines.append("    skips {")
     for index, case in enumerate(cases):
         difference = differences.get(case.name)
-        if difference is None or difference.kind is DifferenceKind.UA_CHOICE:
+        if difference is None or difference.kind in NATIVE_SNAPSHOT_KINDS:
             continue
         identifier = "css_" + case.name.replace("-", "_")
         reason = f"{difference.kind.value}: {difference.issue}"
@@ -1520,7 +1525,7 @@ def prune_reference_assets(
     native_snapshots = {
         name
         for name, difference in differences.items()
-        if difference.kind is DifferenceKind.UA_CHOICE
+        if difference.kind in NATIVE_SNAPSHOT_KINDS
     }
     for stale in BROWSER_GOLDENS.glob("*.png"):
         if stale.stem not in browser_matches:
@@ -1544,18 +1549,18 @@ def validate_assets(cases: list[Case], differences: dict[str, Difference]) -> No
     native_snapshots = {
         name
         for name, difference in differences.items()
-        if difference.kind is DifferenceKind.UA_CHOICE
+        if difference.kind in NATIVE_SNAPSHOT_KINDS
     }
     skipped_names = difference_names - native_snapshots
     if (
         len(all_names) != 1_000
         or len(browser_matches) != 644
-        or len(native_snapshots) != 61
-        or len(skipped_names) != 295
+        or len(native_snapshots) != 145
+        or len(skipped_names) != 211
     ):
         raise SystemExit(
             "CSS-paint inventory must contain 1000 total / 644 browser matches / "
-            "61 native snapshots / 295 skipped"
+            "145 native snapshots / 211 skipped"
         )
     if browser_matches & difference_names or native_snapshots & skipped_names:
         raise SystemExit("CSS-paint expectation sets overlap")
@@ -1638,7 +1643,7 @@ def main() -> None:
     if args.validate_assets:
         validate_assets(cases, differences)
     native_count = sum(
-        difference.kind is DifferenceKind.UA_CHOICE
+        difference.kind in NATIVE_SNAPSHOT_KINDS
         for difference in differences.values()
     )
     print(

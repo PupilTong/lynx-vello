@@ -1,11 +1,12 @@
 //! Browser-referenced, pure-`<div>` CSS paint screenshot tests.
 //!
 //! The matrix retains all 1,000 independent 128×128 probes.  The 644 probes
-//! that pixelmatch Chromium own browser references.  Another 61 cases exercise
-//! CSS-permitted UA choices against native Pulsar/Parley snapshots.  The other
-//! 295 audited differences remain ignored fixtures.  Up to twenty-five active
-//! documents share one isolated 640×640 Vello atlas readback; a full audit
-//! compares all 1,000 against temporary Chromium references.
+//! that pixelmatch Chromium own browser references.  Another 145 W3C-correct
+//! cases exercise rasterization/sampling differences or CSS-permitted UA
+//! choices against native Pulsar/Parley snapshots.  The other 211 audited
+//! differences remain ignored fixtures.  Up to twenty-five active documents
+//! share one isolated 640×640 Vello atlas readback; a full audit compares all
+//! 1,000 against temporary Chromium references.
 
 #[path = "common/mod.rs"]
 mod common;
@@ -62,6 +63,10 @@ impl DifferenceKind {
             Self::RootRoleOracle => "root-role-oracle-mismatch",
             Self::NonW3cCompatibility => "non-w3c-compatibility",
         }
+    }
+
+    const fn uses_native_snapshot(self) -> bool {
+        matches!(self, Self::RasterOrSampling | Self::UaChoice)
     }
 }
 
@@ -573,10 +578,10 @@ fn css_paint_asset_inventory() {
                 );
             }
             Expectation::NativeSnapshot { kind, .. } => {
-                assert_eq!(
-                    kind,
-                    DifferenceKind::UaChoice,
-                    "{}: only permitted UA choices may own native snapshots",
+                assert!(
+                    kind.uses_native_snapshot(),
+                    "{}: only W3C-correct raster/sampling differences or permitted UA choices may \
+                     own native snapshots",
                     case.name
                 );
                 assert!(
@@ -586,10 +591,10 @@ fn css_paint_asset_inventory() {
                 );
             }
             Expectation::Skip { kind, .. } => {
-                assert_ne!(
-                    kind,
-                    DifferenceKind::UaChoice,
-                    "{}: permitted UA choices must be active native snapshots",
+                assert!(
+                    !kind.uses_native_snapshot(),
+                    "{}: W3C-correct raster/sampling differences and permitted UA choices must be \
+                     active native snapshots",
                     case.name
                 );
                 assert!(
@@ -624,8 +629,8 @@ fn css_paint_asset_inventory() {
 
     assert_eq!(generated::CASES.len(), CASE_COUNT);
     assert_eq!(browser_matches.len(), 644);
-    assert_eq!(native_snapshots.len(), 61);
-    assert_eq!(skipped.len(), 295);
+    assert_eq!(native_snapshots.len(), 145);
+    assert_eq!(skipped.len(), 211);
     assert!(browser_matches.is_disjoint(&native_snapshots));
     assert!(browser_matches.is_disjoint(&skipped));
     assert!(native_snapshots.is_disjoint(&skipped));

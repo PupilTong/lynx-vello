@@ -2,8 +2,8 @@
 # Audited CSS-paint differences and their standards disposition.
 # Browser references: Chromium 150.0.7871.187, 128x128 CSS px, DPR 1.
 # Columns: case-name<TAB>issue.
-# UA-choice rows use committed native snapshots; all other rows are
-# ignored. Browser-match rows are absent from this registry.
+# W3C-correct raster/sample and UA-choice rows use committed native
+# snapshots; all other rows are ignored. Browser-match rows are absent.
 # Dispositions: 84 raster/sample, 61 UA choice, 170 W3C gap,
 # 22 root-role/oracle mismatch, 19 non-W3C compatibility.
 background-linear-000	css-gradient-multi-position-stops

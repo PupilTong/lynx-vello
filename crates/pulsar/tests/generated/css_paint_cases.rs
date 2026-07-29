@@ -152,7 +152,7 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"background",
         source: r"wpt/css/css-backgrounds/gradients/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#cbd5e1;"><div style="display:flex;position:absolute;left:12px;top:16px;width:104px;height:96px;background:#dc2626 linear-gradient(0deg,#111827 0%,#111827 45%,#f8fafc 45%,#f8fafc 55%,#111827 55%)"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-gradient-hard-stop-boundary-sampling" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-gradient-hard-stop-boundary-sampling" },
     },
     CssPaintCase {
         name: r"background-linear-002",
@@ -187,7 +187,7 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"background",
         source: r"wpt/css/css-backgrounds/gradients/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#cbd5e1;"><div style="display:flex;position:absolute;left:12px;top:16px;width:104px;height:96px;background:#dc2626 linear-gradient(45deg,#111827 0%,#111827 45%,#f8fafc 45%,#f8fafc 55%,#111827 55%)"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-gradient-hard-stop-boundary-sampling" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-gradient-hard-stop-boundary-sampling" },
     },
     CssPaintCase {
         name: r"background-linear-007",
@@ -222,7 +222,7 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"background",
         source: r"wpt/css/css-backgrounds/gradients/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#cbd5e1;"><div style="display:flex;position:absolute;left:12px;top:16px;width:104px;height:96px;background:#dc2626 linear-gradient(90deg,#111827 0%,#111827 45%,#f8fafc 45%,#f8fafc 55%,#111827 55%)"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-gradient-hard-stop-boundary-sampling" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-gradient-hard-stop-boundary-sampling" },
     },
     CssPaintCase {
         name: r"background-linear-012",
@@ -257,7 +257,7 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"background",
         source: r"wpt/css/css-backgrounds/gradients/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#cbd5e1;"><div style="display:flex;position:absolute;left:12px;top:16px;width:104px;height:96px;background:#dc2626 linear-gradient(135deg,#111827 0%,#111827 45%,#f8fafc 45%,#f8fafc 55%,#111827 55%)"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-gradient-hard-stop-boundary-sampling" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-gradient-hard-stop-boundary-sampling" },
     },
     CssPaintCase {
         name: r"background-linear-017",
@@ -292,7 +292,7 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"background",
         source: r"wpt/css/css-backgrounds/gradients/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#cbd5e1;"><div style="display:flex;position:absolute;left:12px;top:16px;width:104px;height:96px;background:#dc2626 linear-gradient(180deg,#111827 0%,#111827 45%,#f8fafc 45%,#f8fafc 55%,#111827 55%)"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-gradient-hard-stop-boundary-sampling" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-gradient-hard-stop-boundary-sampling" },
     },
     CssPaintCase {
         name: r"background-linear-022",
@@ -327,7 +327,7 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"background",
         source: r"wpt/css/css-backgrounds/gradients/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#cbd5e1;"><div style="display:flex;position:absolute;left:12px;top:16px;width:104px;height:96px;background:#dc2626 linear-gradient(225deg,#111827 0%,#111827 45%,#f8fafc 45%,#f8fafc 55%,#111827 55%)"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-gradient-hard-stop-boundary-sampling" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-gradient-hard-stop-boundary-sampling" },
     },
     CssPaintCase {
         name: r"background-linear-027",
@@ -362,7 +362,7 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"background",
         source: r"wpt/css/css-backgrounds/gradients/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#cbd5e1;"><div style="display:flex;position:absolute;left:12px;top:16px;width:104px;height:96px;background:#dc2626 linear-gradient(270deg,#111827 0%,#111827 45%,#f8fafc 45%,#f8fafc 55%,#111827 55%)"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-gradient-hard-stop-boundary-sampling" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-gradient-hard-stop-boundary-sampling" },
     },
     CssPaintCase {
         name: r"background-linear-032",
@@ -397,7 +397,7 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"background",
         source: r"wpt/css/css-backgrounds/gradients/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#cbd5e1;"><div style="display:flex;position:absolute;left:12px;top:16px;width:104px;height:96px;background:#dc2626 linear-gradient(315deg,#111827 0%,#111827 45%,#f8fafc 45%,#f8fafc 55%,#111827 55%)"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-gradient-hard-stop-boundary-sampling" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-gradient-hard-stop-boundary-sampling" },
     },
     CssPaintCase {
         name: r"background-linear-037",
@@ -1944,7 +1944,7 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"shadow-outline",
         source: r"wpt/css/css-backgrounds/box-shadow/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:28px;top:30px;width:72px;height:68px;background:#f59e0b;box-shadow:5px 5px 0 #7c3aed,-8px 8px 1px rgba(6,182,212,.8),0 -7px 2px rgba(239,68,68,.7)"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"shadow-multiple-008",
@@ -4765,7 +4765,7 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"clip-path",
         source: r"wpt/css/css-masking/clip-path/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:conic-gradient(#ef4444,#22c55e,#3b82f6,#ef4444);clip-path:circle(10px at center)"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"clip-circle-001",
@@ -4793,7 +4793,7 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"clip-path",
         source: r"wpt/css/css-masking/clip-path/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:conic-gradient(#ef4444,#22c55e,#3b82f6,#ef4444);clip-path:circle(25% at center)"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"clip-circle-005",
@@ -4821,35 +4821,35 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"clip-path",
         source: r"wpt/css/css-masking/clip-path/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:conic-gradient(#ef4444,#22c55e,#3b82f6,#ef4444);clip-path:circle(40% at center)"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"clip-circle-009",
         category: r"clip-path",
         source: r"wpt/css/css-masking/clip-path/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:conic-gradient(#ef4444,#22c55e,#3b82f6,#ef4444);clip-path:circle(40% at 25% 25%)"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"clip-circle-010",
         category: r"clip-path",
         source: r"wpt/css/css-masking/clip-path/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:conic-gradient(#ef4444,#22c55e,#3b82f6,#ef4444);clip-path:circle(40% at 75% 25%)"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"clip-circle-011",
         category: r"clip-path",
         source: r"wpt/css/css-masking/clip-path/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:conic-gradient(#ef4444,#22c55e,#3b82f6,#ef4444);clip-path:circle(40% at 25% 75%)"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"clip-circle-012",
         category: r"clip-path",
         source: r"wpt/css/css-masking/clip-path/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:conic-gradient(#ef4444,#22c55e,#3b82f6,#ef4444);clip-path:circle(closest-side at center)"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"clip-circle-013",
@@ -4877,28 +4877,28 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"clip-path",
         source: r"wpt/css/css-masking/clip-path/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:conic-gradient(#ef4444,#22c55e,#3b82f6,#ef4444);clip-path:circle(farthest-side at center)"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"clip-circle-017",
         category: r"clip-path",
         source: r"wpt/css/css-masking/clip-path/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:conic-gradient(#ef4444,#22c55e,#3b82f6,#ef4444);clip-path:circle(farthest-side at 25% 25%)"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"clip-circle-018",
         category: r"clip-path",
         source: r"wpt/css/css-masking/clip-path/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:conic-gradient(#ef4444,#22c55e,#3b82f6,#ef4444);clip-path:circle(farthest-side at 75% 25%)"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"clip-circle-019",
         category: r"clip-path",
         source: r"wpt/css/css-masking/clip-path/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:conic-gradient(#ef4444,#22c55e,#3b82f6,#ef4444);clip-path:circle(farthest-side at 25% 75%)"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"clip-ellipse-000",
@@ -5185,14 +5185,14 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"mask",
         source: r"wpt/css/css-masking/mask-image/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#fef2f2;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:linear-gradient(135deg,#ef4444,#22c55e,#2563eb);mask-image:linear-gradient(0deg,transparent 0%,transparent 25%,black 25%,black 100%);mask-repeat:no-repeat;mask-size:100% 100%"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-linear-001",
         category: r"mask",
         source: r"wpt/css/css-masking/mask-image/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#fef2f2;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:linear-gradient(135deg,#ef4444,#22c55e,#2563eb);mask-image:linear-gradient(0deg,transparent 0%,transparent 25%,black 25%,black 100%);mask-repeat:repeat;mask-size:36px 28px"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-linear-002",
@@ -5227,14 +5227,14 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"mask",
         source: r"wpt/css/css-masking/mask-image/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#fef2f2;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:linear-gradient(135deg,#ef4444,#22c55e,#2563eb);mask-image:linear-gradient(0deg,black 0%,black 20%,transparent 20%,transparent 40%,black 40%,black 60%,transparent 60%,transparent 80%,black 80%,black 100%);mask-repeat:no-repeat;mask-size:100% 100%"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-linear-007",
         category: r"mask",
         source: r"wpt/css/css-masking/mask-image/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#fef2f2;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:linear-gradient(135deg,#ef4444,#22c55e,#2563eb);mask-image:linear-gradient(0deg,black 0%,black 20%,transparent 20%,transparent 40%,black 40%,black 60%,transparent 60%,transparent 80%,black 80%,black 100%);mask-repeat:repeat;mask-size:36px 28px"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-linear-008",
@@ -5339,14 +5339,14 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"mask",
         source: r"wpt/css/css-masking/mask-image/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#fef2f2;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:linear-gradient(135deg,#ef4444,#22c55e,#2563eb);mask-image:linear-gradient(90deg,black 0%,black 20%,transparent 20%,transparent 40%,black 40%,black 60%,transparent 60%,transparent 80%,black 80%,black 100%);mask-repeat:no-repeat;mask-size:100% 100%"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-linear-023",
         category: r"mask",
         source: r"wpt/css/css-masking/mask-image/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#fef2f2;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:linear-gradient(135deg,#ef4444,#22c55e,#2563eb);mask-image:linear-gradient(90deg,black 0%,black 20%,transparent 20%,transparent 40%,black 40%,black 60%,transparent 60%,transparent 80%,black 80%,black 100%);mask-repeat:repeat;mask-size:36px 28px"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-linear-024",
@@ -5395,14 +5395,14 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"mask",
         source: r"wpt/css/css-masking/mask-image/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#fef2f2;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:linear-gradient(135deg,#ef4444,#22c55e,#2563eb);mask-image:linear-gradient(135deg,black 0%,black 20%,transparent 20%,transparent 40%,black 40%,black 60%,transparent 60%,transparent 80%,black 80%,black 100%);mask-repeat:no-repeat;mask-size:100% 100%"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-linear-031",
         category: r"mask",
         source: r"wpt/css/css-masking/mask-image/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#fef2f2;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:linear-gradient(135deg,#ef4444,#22c55e,#2563eb);mask-image:linear-gradient(135deg,black 0%,black 20%,transparent 20%,transparent 40%,black 40%,black 60%,transparent 60%,transparent 80%,black 80%,black 100%);mask-repeat:repeat;mask-size:36px 28px"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-linear-032",
@@ -5451,21 +5451,21 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"mask",
         source: r"wpt/css/css-masking/mask-image/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#fef2f2;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:linear-gradient(135deg,#ef4444,#22c55e,#2563eb);mask-image:linear-gradient(180deg,black 0%,black 20%,transparent 20%,transparent 40%,black 40%,black 60%,transparent 60%,transparent 80%,black 80%,black 100%);mask-repeat:no-repeat;mask-size:100% 100%"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-linear-039",
         category: r"mask",
         source: r"wpt/css/css-masking/mask-image/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#fef2f2;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:linear-gradient(135deg,#ef4444,#22c55e,#2563eb);mask-image:linear-gradient(180deg,black 0%,black 20%,transparent 20%,transparent 40%,black 40%,black 60%,transparent 60%,transparent 80%,black 80%,black 100%);mask-repeat:repeat;mask-size:36px 28px"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-radial-000",
         category: r"mask",
         source: r"wpt/css/css-masking/mask-image/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:conic-gradient(#ef4444,#22c55e,#2563eb,#ef4444);mask-image:radial-gradient(circle closest-side at center,black 0%,black 45%,transparent 55%,transparent 100%);mask-repeat:no-repeat"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-radial-001",
@@ -5500,28 +5500,28 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"mask",
         source: r"wpt/css/css-masking/mask-image/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:conic-gradient(#ef4444,#22c55e,#2563eb,#ef4444);mask-image:radial-gradient(circle farthest-side at center,black 0%,black 45%,transparent 55%,transparent 100%);mask-repeat:no-repeat"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-radial-006",
         category: r"mask",
         source: r"wpt/css/css-masking/mask-image/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:conic-gradient(#ef4444,#22c55e,#2563eb,#ef4444);mask-image:radial-gradient(circle farthest-side at 25% 25%,black 0%,black 45%,transparent 55%,transparent 100%);mask-repeat:no-repeat"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-radial-007",
         category: r"mask",
         source: r"wpt/css/css-masking/mask-image/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:conic-gradient(#ef4444,#22c55e,#2563eb,#ef4444);mask-image:radial-gradient(circle farthest-side at 75% 30%,black 0%,black 45%,transparent 55%,transparent 100%);mask-repeat:no-repeat"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-radial-008",
         category: r"mask",
         source: r"wpt/css/css-masking/mask-image/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:conic-gradient(#ef4444,#22c55e,#2563eb,#ef4444);mask-image:radial-gradient(circle farthest-side at 30% 75%,black 0%,black 45%,transparent 55%,transparent 100%);mask-repeat:no-repeat"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-radial-009",
@@ -5535,7 +5535,7 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"mask",
         source: r"wpt/css/css-masking/mask-image/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:conic-gradient(#ef4444,#22c55e,#2563eb,#ef4444);mask-image:radial-gradient(ellipse closest-side at center,black 0%,black 45%,transparent 55%,transparent 100%);mask-repeat:no-repeat"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-radial-011",
@@ -5570,35 +5570,35 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"mask",
         source: r"wpt/css/css-masking/mask-image/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:conic-gradient(#ef4444,#22c55e,#2563eb,#ef4444);mask-image:radial-gradient(ellipse farthest-corner at center,black 0%,black 45%,transparent 55%,transparent 100%);mask-repeat:no-repeat"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-radial-016",
         category: r"mask",
         source: r"wpt/css/css-masking/mask-image/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:conic-gradient(#ef4444,#22c55e,#2563eb,#ef4444);mask-image:radial-gradient(ellipse farthest-corner at 25% 25%,black 0%,black 45%,transparent 55%,transparent 100%);mask-repeat:no-repeat"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-radial-017",
         category: r"mask",
         source: r"wpt/css/css-masking/mask-image/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:conic-gradient(#ef4444,#22c55e,#2563eb,#ef4444);mask-image:radial-gradient(ellipse farthest-corner at 75% 30%,black 0%,black 45%,transparent 55%,transparent 100%);mask-repeat:no-repeat"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-radial-018",
         category: r"mask",
         source: r"wpt/css/css-masking/mask-image/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:conic-gradient(#ef4444,#22c55e,#2563eb,#ef4444);mask-image:radial-gradient(ellipse farthest-corner at 30% 75%,black 0%,black 45%,transparent 55%,transparent 100%);mask-repeat:no-repeat"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-radial-019",
         category: r"mask",
         source: r"wpt/css/css-masking/mask-image/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:conic-gradient(#ef4444,#22c55e,#2563eb,#ef4444);mask-image:radial-gradient(ellipse farthest-corner at right bottom,black 0%,black 45%,transparent 55%,transparent 100%);mask-repeat:no-repeat"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-position-000",
@@ -5619,7 +5619,7 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"mask",
         source: r"wpt/css/css-masking/mask-position/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#fee2e2;"><div style="display:flex;position:absolute;left:10px;top:10px;width:108px;height:108px;padding:12px;border:8px solid #7c3aed;box-sizing:border-box;background:#22c55e;mask-image:linear-gradient(90deg,black 0%,black 50%,transparent 50%,transparent 100%);mask-size:54px 42px;mask-repeat:no-repeat;mask-position:right top;mask-origin:border-box;mask-clip:border-box"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-position-003",
@@ -5633,7 +5633,7 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"mask",
         source: r"wpt/css/css-masking/mask-position/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#fee2e2;"><div style="display:flex;position:absolute;left:10px;top:10px;width:108px;height:108px;padding:12px;border:8px solid #7c3aed;box-sizing:border-box;background:#22c55e;mask-image:linear-gradient(90deg,black 0%,black 50%,transparent 50%,transparent 100%);mask-size:54px 42px;mask-repeat:no-repeat;mask-position:center;mask-origin:border-box;mask-clip:border-box"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-position-005",
@@ -5668,77 +5668,77 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"mask",
         source: r"wpt/css/css-masking/mask-position/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#fee2e2;"><div style="display:flex;position:absolute;left:10px;top:10px;width:108px;height:108px;padding:12px;border:8px solid #7c3aed;box-sizing:border-box;background:#22c55e;mask-image:linear-gradient(90deg,black 0%,black 50%,transparent 50%,transparent 100%);mask-size:54px 42px;mask-repeat:no-repeat;mask-position:30% 70%;mask-origin:border-box;mask-clip:border-box"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-boxes-000",
         category: r"mask",
         source: r"wpt/css/css-masking/mask-origin/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#dcfce7;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;padding:14px;border:8px solid #2563eb;box-sizing:border-box;background:#f59e0b;mask-image:linear-gradient(135deg,black 0%,black 58%,transparent 58%,transparent 100%);mask-origin:border-box;mask-clip:border-box;mask-repeat:no-repeat;"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-boxes-001",
         category: r"mask",
         source: r"wpt/css/css-masking/mask-origin/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#dcfce7;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;padding:14px;border:8px solid #2563eb;box-sizing:border-box;background:#f59e0b;mask-image:linear-gradient(135deg,black 0%,black 58%,transparent 58%,transparent 100%);mask-origin:border-box;mask-clip:padding-box;mask-repeat:no-repeat;"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-boxes-002",
         category: r"mask",
         source: r"wpt/css/css-masking/mask-origin/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#dcfce7;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;padding:14px;border:8px solid #2563eb;box-sizing:border-box;background:#f59e0b;mask-image:linear-gradient(135deg,black 0%,black 58%,transparent 58%,transparent 100%);mask-origin:border-box;mask-clip:content-box;mask-repeat:no-repeat;"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-boxes-003",
         category: r"mask",
         source: r"wpt/css/css-masking/mask-origin/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#dcfce7;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;padding:14px;border:8px solid #2563eb;box-sizing:border-box;background:#f59e0b;mask-image:linear-gradient(135deg,black 0%,black 58%,transparent 58%,transparent 100%);mask-origin:padding-box;mask-clip:border-box;mask-repeat:no-repeat;"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-boxes-004",
         category: r"mask",
         source: r"wpt/css/css-masking/mask-origin/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#dcfce7;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;padding:14px;border:8px solid #2563eb;box-sizing:border-box;background:#f59e0b;mask-image:linear-gradient(135deg,black 0%,black 58%,transparent 58%,transparent 100%);mask-origin:padding-box;mask-clip:padding-box;mask-repeat:no-repeat;"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-boxes-005",
         category: r"mask",
         source: r"wpt/css/css-masking/mask-origin/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#dcfce7;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;padding:14px;border:8px solid #2563eb;box-sizing:border-box;background:#f59e0b;mask-image:linear-gradient(135deg,black 0%,black 58%,transparent 58%,transparent 100%);mask-origin:padding-box;mask-clip:content-box;mask-repeat:no-repeat;"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-boxes-006",
         category: r"mask",
         source: r"wpt/css/css-masking/mask-origin/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#dcfce7;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;padding:14px;border:8px solid #2563eb;box-sizing:border-box;background:#f59e0b;mask-image:linear-gradient(135deg,black 0%,black 58%,transparent 58%,transparent 100%);mask-origin:content-box;mask-clip:border-box;mask-repeat:no-repeat;"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-boxes-007",
         category: r"mask",
         source: r"wpt/css/css-masking/mask-origin/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#dcfce7;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;padding:14px;border:8px solid #2563eb;box-sizing:border-box;background:#f59e0b;mask-image:linear-gradient(135deg,black 0%,black 58%,transparent 58%,transparent 100%);mask-origin:content-box;mask-clip:padding-box;mask-repeat:no-repeat;"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-boxes-008",
         category: r"mask",
         source: r"wpt/css/css-masking/mask-origin/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#dcfce7;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;padding:14px;border:8px solid #2563eb;box-sizing:border-box;background:#f59e0b;mask-image:linear-gradient(135deg,black 0%,black 58%,transparent 58%,transparent 100%);mask-origin:content-box;mask-clip:content-box;mask-repeat:no-repeat;"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-boxes-009",
         category: r"mask",
         source: r"wpt/css/css-masking/mask-origin/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#dcfce7;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;padding:14px;border:8px solid #2563eb;box-sizing:border-box;background:#f59e0b;mask-image:linear-gradient(135deg,black 0%,black 58%,transparent 58%,transparent 100%);mask-origin:border-box;mask-clip:border-box;mask-repeat:no-repeat;mask-position:center;mask-size:72px 72px;"></div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"mask-multiple-000",
@@ -5927,14 +5927,14 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"text",
         source: r"wpt/css/css-fonts/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:8px;top:12px;width:112px;height:104px;flex-direction:column;font-family:Ahem;overflow:hidden;background:#dbeafe;font-size:14px;line-height:1.25;color:#0f172a">XXXX XX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-size-color-007",
         category: r"text",
         source: r"wpt/css/css-fonts/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:8px;top:12px;width:112px;height:104px;flex-direction:column;font-family:Ahem;overflow:hidden;background:#dbeafe;font-size:14px;line-height:1.25;color:#e11d48">XXXX XX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-size-color-008",
@@ -5955,28 +5955,28 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"text",
         source: r"wpt/css/css-fonts/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:8px;top:12px;width:112px;height:104px;flex-direction:column;font-family:Ahem;overflow:hidden;background:#dbeafe;font-size:18px;line-height:1.25;color:#0f172a">XXXX XX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-size-color-011",
         category: r"text",
         source: r"wpt/css/css-fonts/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:8px;top:12px;width:112px;height:104px;flex-direction:column;font-family:Ahem;overflow:hidden;background:#dbeafe;font-size:18px;line-height:1.25;color:#e11d48">XXXX XX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-size-color-012",
         category: r"text",
         source: r"wpt/css/css-fonts/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:8px;top:12px;width:112px;height:104px;flex-direction:column;font-family:Ahem;overflow:hidden;background:#dbeafe;font-size:20px;line-height:1.25;color:#0f172a">XXXX XX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-size-color-013",
         category: r"text",
         source: r"wpt/css/css-fonts/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:8px;top:12px;width:112px;height:104px;flex-direction:column;font-family:Ahem;overflow:hidden;background:#dbeafe;font-size:20px;line-height:1.25;color:#e11d48">XXXX XX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-size-color-014",
@@ -5997,14 +5997,14 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"text",
         source: r"wpt/css/css-fonts/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:8px;top:12px;width:112px;height:104px;flex-direction:column;font-family:Ahem;overflow:hidden;background:#dbeafe;font-size:28px;line-height:1.25;color:#0f172a">XXXX XX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-size-color-017",
         category: r"text",
         source: r"wpt/css/css-fonts/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:8px;top:12px;width:112px;height:104px;flex-direction:column;font-family:Ahem;overflow:hidden;background:#dbeafe;font-size:28px;line-height:1.25;color:#e11d48">XXXX XX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-size-color-018",
@@ -6039,14 +6039,14 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"text",
         source: r"wpt/css/css-text/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:8px;top:8px;width:112px;height:112px;flex-direction:column;font-family:Ahem;color:#1d4ed8;background:#fef2f2;font-size:20px;line-height:1.25;letter-spacing:-2px">XXXX XXXX XXXX XXXX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-metrics-003",
         category: r"text",
         source: r"wpt/css/css-text/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:8px;top:8px;width:112px;height:112px;flex-direction:column;font-family:Ahem;color:#1d4ed8;background:#fef2f2;font-size:24px;line-height:1.5;letter-spacing:-2px">XXXX XXXX XXXX XXXX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-metrics-004",
@@ -6753,7 +6753,7 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"text",
         source: r"wpt/css/css-backgrounds/background-clip/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:8px;top:22px;width:112px;height:82px;flex-direction:column;font-family:Ahem;font-size:26px;line-height:36px;color:transparent;background-image:linear-gradient(45deg,#7c3aed 0%,#7c3aed 50%,#f59e0b 50%,#f59e0b 100%);background-clip:text;">XXXX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"text-background-clip-005",
@@ -6774,7 +6774,7 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"text",
         source: r"wpt/css/css-backgrounds/background-clip/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e2e8f0;"><div style="display:flex;position:absolute;left:8px;top:22px;width:112px;height:82px;flex-direction:column;font-family:Ahem;font-size:26px;line-height:36px;color:transparent;background-image:linear-gradient(45deg,#7c3aed 0%,#7c3aed 50%,#f59e0b 50%,#f59e0b 100%);background-clip:text;transform:rotate(-8deg);">XXXX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"vello-chromium-edge-coverage" },
     },
     CssPaintCase {
         name: r"text-background-clip-008",
@@ -6872,63 +6872,63 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"text",
         source: r"wpt/css/css-text/white-space/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:10px;top:8px;width:56px;height:112px;flex-direction:column;font-family:Ahem;font-size:14px;line-height:18px;color:#0f172a;background:#dcfce7;overflow:hidden;white-space:normal;word-break:normal">XXXX XX XXXX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-wrap-002",
         category: r"text",
         source: r"wpt/css/css-text/white-space/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:10px;top:8px;width:72px;height:112px;flex-direction:column;font-family:Ahem;font-size:14px;line-height:18px;color:#0f172a;background:#dcfce7;overflow:hidden;white-space:normal;word-break:normal">XXXX XX XXXX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-wrap-003",
         category: r"text",
         source: r"wpt/css/css-text/white-space/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:10px;top:8px;width:88px;height:112px;flex-direction:column;font-family:Ahem;font-size:14px;line-height:18px;color:#0f172a;background:#dcfce7;overflow:hidden;white-space:normal;word-break:normal">XXXX XX XXXX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-wrap-004",
         category: r"text",
         source: r"wpt/css/css-text/white-space/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:10px;top:8px;width:108px;height:112px;flex-direction:column;font-family:Ahem;font-size:14px;line-height:18px;color:#0f172a;background:#dcfce7;overflow:hidden;white-space:normal;word-break:normal">XXXX XX XXXX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-wrap-005",
         category: r"text",
         source: r"wpt/css/css-text/white-space/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:10px;top:8px;width:42px;height:112px;flex-direction:column;font-family:Ahem;font-size:14px;line-height:18px;color:#0f172a;background:#dcfce7;overflow:hidden;white-space:normal;word-break:break-all">XXXX XX XXXX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-wrap-006",
         category: r"text",
         source: r"wpt/css/css-text/white-space/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:10px;top:8px;width:56px;height:112px;flex-direction:column;font-family:Ahem;font-size:14px;line-height:18px;color:#0f172a;background:#dcfce7;overflow:hidden;white-space:normal;word-break:break-all">XXXX XX XXXX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-wrap-007",
         category: r"text",
         source: r"wpt/css/css-text/white-space/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:10px;top:8px;width:72px;height:112px;flex-direction:column;font-family:Ahem;font-size:14px;line-height:18px;color:#0f172a;background:#dcfce7;overflow:hidden;white-space:normal;word-break:break-all">XXXX XX XXXX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-wrap-008",
         category: r"text",
         source: r"wpt/css/css-text/white-space/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:10px;top:8px;width:88px;height:112px;flex-direction:column;font-family:Ahem;font-size:14px;line-height:18px;color:#0f172a;background:#dcfce7;overflow:hidden;white-space:normal;word-break:break-all">XXXX XX XXXX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-wrap-009",
         category: r"text",
         source: r"wpt/css/css-text/white-space/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:10px;top:8px;width:108px;height:112px;flex-direction:column;font-family:Ahem;font-size:14px;line-height:18px;color:#0f172a;background:#dcfce7;overflow:hidden;white-space:normal;word-break:break-all">XXXX XX XXXX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-wrap-010",
@@ -6942,63 +6942,63 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"text",
         source: r"wpt/css/css-text/white-space/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:10px;top:8px;width:56px;height:112px;flex-direction:column;font-family:Ahem;font-size:14px;line-height:18px;color:#0f172a;background:#dcfce7;overflow:hidden;white-space:normal;word-break:keep-all">XXXX XX XXXX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-wrap-012",
         category: r"text",
         source: r"wpt/css/css-text/white-space/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:10px;top:8px;width:72px;height:112px;flex-direction:column;font-family:Ahem;font-size:14px;line-height:18px;color:#0f172a;background:#dcfce7;overflow:hidden;white-space:normal;word-break:keep-all">XXXX XX XXXX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-wrap-013",
         category: r"text",
         source: r"wpt/css/css-text/white-space/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:10px;top:8px;width:88px;height:112px;flex-direction:column;font-family:Ahem;font-size:14px;line-height:18px;color:#0f172a;background:#dcfce7;overflow:hidden;white-space:normal;word-break:keep-all">XXXX XX XXXX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-wrap-014",
         category: r"text",
         source: r"wpt/css/css-text/white-space/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:10px;top:8px;width:108px;height:112px;flex-direction:column;font-family:Ahem;font-size:14px;line-height:18px;color:#0f172a;background:#dcfce7;overflow:hidden;white-space:normal;word-break:keep-all">XXXX XX XXXX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-wrap-015",
         category: r"text",
         source: r"wpt/css/css-text/white-space/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:10px;top:8px;width:42px;height:112px;flex-direction:column;font-family:Ahem;font-size:14px;line-height:18px;color:#0f172a;background:#dcfce7;overflow:hidden;white-space:nowrap;word-break:normal">XXXX XX XXXX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-wrap-016",
         category: r"text",
         source: r"wpt/css/css-text/white-space/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:10px;top:8px;width:56px;height:112px;flex-direction:column;font-family:Ahem;font-size:14px;line-height:18px;color:#0f172a;background:#dcfce7;overflow:hidden;white-space:nowrap;word-break:normal">XXXX XX XXXX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-wrap-017",
         category: r"text",
         source: r"wpt/css/css-text/white-space/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:10px;top:8px;width:72px;height:112px;flex-direction:column;font-family:Ahem;font-size:14px;line-height:18px;color:#0f172a;background:#dcfce7;overflow:hidden;white-space:nowrap;word-break:normal">XXXX XX XXXX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-wrap-018",
         category: r"text",
         source: r"wpt/css/css-text/white-space/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:10px;top:8px;width:88px;height:112px;flex-direction:column;font-family:Ahem;font-size:14px;line-height:18px;color:#0f172a;background:#dcfce7;overflow:hidden;white-space:nowrap;word-break:normal">XXXX XX XXXX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
     CssPaintCase {
         name: r"text-wrap-019",
         category: r"text",
         source: r"wpt/css/css-text/white-space/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:10px;top:8px;width:108px;height:112px;flex-direction:column;font-family:Ahem;font-size:14px;line-height:18px;color:#0f172a;background:#dcfce7;overflow:hidden;white-space:nowrap;word-break:normal">XXXX XX XXXX XX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
+        expectation: Expectation::NativeSnapshot { kind: DifferenceKind::RasterOrSampling, issue: r"css-text-subpixel-rasterization" },
     },
 ];
 
@@ -7650,6 +7650,14 @@ css_paint_case_tests! {
         975 => css_text_background_clip_015;
     }
     native_snapshots {
+        21 => css_native_background_linear_001;
+        26 => css_native_background_linear_006;
+        31 => css_native_background_linear_011;
+        36 => css_native_background_linear_016;
+        41 => css_native_background_linear_021;
+        46 => css_native_background_linear_026;
+        51 => css_native_background_linear_031;
+        56 => css_native_background_linear_036;
         138 => css_native_border_style_018;
         139 => css_native_border_style_019;
         140 => css_native_border_style_020;
@@ -7702,40 +7710,108 @@ css_paint_case_tests! {
         215 => css_native_border_radius_035;
         218 => css_native_border_radius_038;
         219 => css_native_border_radius_039;
+        277 => css_native_shadow_multiple_007;
         282 => css_native_outline_002;
         283 => css_native_outline_003;
         284 => css_native_outline_004;
         285 => css_native_outline_005;
+        680 => css_native_clip_circle_000;
+        684 => css_native_clip_circle_004;
+        688 => css_native_clip_circle_008;
+        689 => css_native_clip_circle_009;
+        690 => css_native_clip_circle_010;
+        691 => css_native_clip_circle_011;
+        692 => css_native_clip_circle_012;
+        696 => css_native_clip_circle_016;
+        697 => css_native_clip_circle_017;
+        698 => css_native_clip_circle_018;
+        699 => css_native_clip_circle_019;
+        740 => css_native_mask_linear_000;
+        741 => css_native_mask_linear_001;
+        746 => css_native_mask_linear_006;
+        747 => css_native_mask_linear_007;
+        762 => css_native_mask_linear_022;
+        763 => css_native_mask_linear_023;
+        770 => css_native_mask_linear_030;
+        771 => css_native_mask_linear_031;
+        778 => css_native_mask_linear_038;
+        779 => css_native_mask_linear_039;
+        780 => css_native_mask_radial_000;
+        785 => css_native_mask_radial_005;
+        786 => css_native_mask_radial_006;
+        787 => css_native_mask_radial_007;
+        788 => css_native_mask_radial_008;
+        790 => css_native_mask_radial_010;
+        795 => css_native_mask_radial_015;
+        796 => css_native_mask_radial_016;
+        797 => css_native_mask_radial_017;
+        798 => css_native_mask_radial_018;
+        799 => css_native_mask_radial_019;
+        802 => css_native_mask_position_002;
+        804 => css_native_mask_position_004;
+        809 => css_native_mask_position_009;
+        810 => css_native_mask_boxes_000;
+        811 => css_native_mask_boxes_001;
+        812 => css_native_mask_boxes_002;
+        813 => css_native_mask_boxes_003;
+        814 => css_native_mask_boxes_004;
+        815 => css_native_mask_boxes_005;
+        816 => css_native_mask_boxes_006;
+        817 => css_native_mask_boxes_007;
+        818 => css_native_mask_boxes_008;
+        819 => css_native_mask_boxes_009;
+        846 => css_native_text_size_color_006;
+        847 => css_native_text_size_color_007;
+        850 => css_native_text_size_color_010;
+        851 => css_native_text_size_color_011;
+        852 => css_native_text_size_color_012;
+        853 => css_native_text_size_color_013;
+        856 => css_native_text_size_color_016;
+        857 => css_native_text_size_color_017;
+        862 => css_native_text_metrics_002;
+        863 => css_native_text_metrics_003;
         902 => css_native_text_decoration_002;
         906 => css_native_text_decoration_006;
         910 => css_native_text_decoration_010;
         914 => css_native_text_decoration_014;
         918 => css_native_text_decoration_018;
+        964 => css_native_text_background_clip_004;
+        967 => css_native_text_background_clip_007;
+        981 => css_native_text_wrap_001;
+        982 => css_native_text_wrap_002;
+        983 => css_native_text_wrap_003;
+        984 => css_native_text_wrap_004;
+        985 => css_native_text_wrap_005;
+        986 => css_native_text_wrap_006;
+        987 => css_native_text_wrap_007;
+        988 => css_native_text_wrap_008;
+        989 => css_native_text_wrap_009;
+        991 => css_native_text_wrap_011;
+        992 => css_native_text_wrap_012;
+        993 => css_native_text_wrap_013;
+        994 => css_native_text_wrap_014;
+        995 => css_native_text_wrap_015;
+        996 => css_native_text_wrap_016;
+        997 => css_native_text_wrap_017;
+        998 => css_native_text_wrap_018;
+        999 => css_native_text_wrap_019;
     }
     skips {
         20 => css_background_linear_000, r"w3c-gap: css-gradient-multi-position-stops";
-        21 => css_background_linear_001, r"w3c-correct-raster-or-sampling: css-gradient-hard-stop-boundary-sampling";
         22 => css_background_linear_002, r"w3c-gap: css-gradient-multi-position-stops";
         25 => css_background_linear_005, r"w3c-gap: css-gradient-multi-position-stops";
-        26 => css_background_linear_006, r"w3c-correct-raster-or-sampling: css-gradient-hard-stop-boundary-sampling";
         27 => css_background_linear_007, r"w3c-gap: css-gradient-multi-position-stops";
         30 => css_background_linear_010, r"w3c-gap: css-gradient-multi-position-stops";
-        31 => css_background_linear_011, r"w3c-correct-raster-or-sampling: css-gradient-hard-stop-boundary-sampling";
         32 => css_background_linear_012, r"w3c-gap: css-gradient-multi-position-stops";
         35 => css_background_linear_015, r"w3c-gap: css-gradient-multi-position-stops";
-        36 => css_background_linear_016, r"w3c-correct-raster-or-sampling: css-gradient-hard-stop-boundary-sampling";
         37 => css_background_linear_017, r"w3c-gap: css-gradient-multi-position-stops";
         40 => css_background_linear_020, r"w3c-gap: css-gradient-multi-position-stops";
-        41 => css_background_linear_021, r"w3c-correct-raster-or-sampling: css-gradient-hard-stop-boundary-sampling";
         42 => css_background_linear_022, r"w3c-gap: css-gradient-multi-position-stops";
         45 => css_background_linear_025, r"w3c-gap: css-gradient-multi-position-stops";
-        46 => css_background_linear_026, r"w3c-correct-raster-or-sampling: css-gradient-hard-stop-boundary-sampling";
         47 => css_background_linear_027, r"w3c-gap: css-gradient-multi-position-stops";
         50 => css_background_linear_030, r"w3c-gap: css-gradient-multi-position-stops";
-        51 => css_background_linear_031, r"w3c-correct-raster-or-sampling: css-gradient-hard-stop-boundary-sampling";
         52 => css_background_linear_032, r"w3c-gap: css-gradient-multi-position-stops";
         55 => css_background_linear_035, r"w3c-gap: css-gradient-multi-position-stops";
-        56 => css_background_linear_036, r"w3c-correct-raster-or-sampling: css-gradient-hard-stop-boundary-sampling";
         57 => css_background_linear_037, r"w3c-gap: css-gradient-multi-position-stops";
         60 => css_background_radial_000, r"w3c-gap: css-gradient-multi-position-stops";
         61 => css_background_radial_001, r"w3c-gap: css-gradient-multi-position-stops";
@@ -7797,7 +7873,6 @@ css_paint_case_tests! {
         117 => css_background_conic_027, r"w3c-gap: css-gradient-multi-position-stops";
         118 => css_background_conic_028, r"w3c-gap: css-gradient-multi-position-stops";
         119 => css_background_conic_029, r"w3c-gap: css-gradient-multi-position-stops";
-        277 => css_shadow_multiple_007, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
         286 => css_outline_006, r"w3c-gap: css-outline-nonsolid-styles";
         287 => css_outline_007, r"w3c-gap: css-outline-nonsolid-styles";
         288 => css_outline_008, r"w3c-gap: css-outline-nonsolid-styles";
@@ -7853,17 +7928,6 @@ css_paint_case_tests! {
         676 => css_clip_inset_016, r"w3c-gap: pulsar-clip-inset-radius-percent-reference-box";
         677 => css_clip_inset_017, r"w3c-gap: stylo-lynx-clip-path-geometry-box-grammar";
         679 => css_clip_inset_019, r"w3c-gap: stylo-lynx-clip-path-geometry-box-grammar";
-        680 => css_clip_circle_000, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        684 => css_clip_circle_004, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        688 => css_clip_circle_008, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        689 => css_clip_circle_009, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        690 => css_clip_circle_010, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        691 => css_clip_circle_011, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        692 => css_clip_circle_012, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        696 => css_clip_circle_016, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        697 => css_clip_circle_017, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        698 => css_clip_circle_018, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        699 => css_clip_circle_019, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
         730 => css_clip_polygon_000, r"w3c-gap: stylo-lynx-clip-polygon-grammar";
         731 => css_clip_polygon_001, r"w3c-gap: stylo-lynx-clip-polygon-grammar";
         732 => css_clip_polygon_002, r"w3c-gap: stylo-lynx-clip-polygon-grammar";
@@ -7874,40 +7938,6 @@ css_paint_case_tests! {
         737 => css_clip_polygon_007, r"w3c-gap: stylo-lynx-clip-polygon-grammar";
         738 => css_clip_polygon_008, r"w3c-gap: stylo-lynx-clip-polygon-grammar";
         739 => css_clip_polygon_009, r"w3c-gap: stylo-lynx-clip-polygon-grammar";
-        740 => css_mask_linear_000, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        741 => css_mask_linear_001, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        746 => css_mask_linear_006, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        747 => css_mask_linear_007, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        762 => css_mask_linear_022, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        763 => css_mask_linear_023, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        770 => css_mask_linear_030, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        771 => css_mask_linear_031, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        778 => css_mask_linear_038, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        779 => css_mask_linear_039, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        780 => css_mask_radial_000, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        785 => css_mask_radial_005, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        786 => css_mask_radial_006, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        787 => css_mask_radial_007, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        788 => css_mask_radial_008, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        790 => css_mask_radial_010, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        795 => css_mask_radial_015, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        796 => css_mask_radial_016, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        797 => css_mask_radial_017, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        798 => css_mask_radial_018, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        799 => css_mask_radial_019, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        802 => css_mask_position_002, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        804 => css_mask_position_004, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        809 => css_mask_position_009, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        810 => css_mask_boxes_000, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        811 => css_mask_boxes_001, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        812 => css_mask_boxes_002, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        813 => css_mask_boxes_003, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        814 => css_mask_boxes_004, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        815 => css_mask_boxes_005, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        816 => css_mask_boxes_006, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        817 => css_mask_boxes_007, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        818 => css_mask_boxes_008, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
-        819 => css_mask_boxes_009, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
         820 => css_mask_multiple_000, r"w3c-gap: pulsar-mask-multiple-layer-composite";
         821 => css_mask_multiple_001, r"w3c-gap: pulsar-mask-multiple-layer-composite";
         822 => css_mask_multiple_002, r"w3c-gap: pulsar-mask-multiple-layer-composite";
@@ -7928,18 +7958,8 @@ css_paint_case_tests! {
         837 => css_mask_multiple_017, r"w3c-gap: pulsar-mask-multiple-layer-composite";
         838 => css_mask_multiple_018, r"w3c-gap: pulsar-mask-multiple-layer-composite";
         839 => css_mask_multiple_019, r"w3c-gap: pulsar-mask-multiple-layer-composite";
-        846 => css_text_size_color_006, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
-        847 => css_text_size_color_007, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
-        850 => css_text_size_color_010, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
-        851 => css_text_size_color_011, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
-        852 => css_text_size_color_012, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
-        853 => css_text_size_color_013, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
-        856 => css_text_size_color_016, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
-        857 => css_text_size_color_017, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
         858 => css_text_size_color_018, r"w3c-gap: text-overflow-wrap-break-word-policy";
         859 => css_text_size_color_019, r"w3c-gap: text-overflow-wrap-break-word-policy";
-        862 => css_text_metrics_002, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
-        863 => css_text_metrics_003, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
         903 => css_text_decoration_003, r"w3c-gap: stylo-lynx-text-decoration-thickness-grammar";
         907 => css_text_decoration_007, r"w3c-gap: stylo-lynx-text-decoration-thickness-grammar";
         911 => css_text_decoration_011, r"w3c-gap: stylo-lynx-text-decoration-thickness-grammar";
@@ -7979,9 +7999,7 @@ css_paint_case_tests! {
         958 => css_text_stroke_018, r"non-w3c-compatibility: pulsar-text-stroke-join-geometry";
         959 => css_text_stroke_019, r"non-w3c-compatibility: pulsar-text-stroke-join-geometry";
         962 => css_text_background_clip_002, r"w3c-gap: text-overflow-wrap-break-word-policy";
-        964 => css_text_background_clip_004, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
         966 => css_text_background_clip_006, r"w3c-gap: text-overflow-wrap-break-word-policy";
-        967 => css_text_background_clip_007, r"w3c-correct-raster-or-sampling: vello-chromium-edge-coverage";
         970 => css_text_background_clip_010, r"w3c-gap: text-overflow-wrap-break-word-policy";
         974 => css_text_background_clip_014, r"w3c-gap: text-overflow-wrap-break-word-policy";
         976 => css_text_background_clip_016, r"w3c-gap: stylo-lynx-repeating-gradient-grammar-scope";
@@ -7989,24 +8007,6 @@ css_paint_case_tests! {
         978 => css_text_background_clip_018, r"w3c-gap: stylo-lynx-repeating-gradient-grammar-scope";
         979 => css_text_background_clip_019, r"w3c-gap: stylo-lynx-repeating-gradient-grammar-scope";
         980 => css_text_wrap_000, r"w3c-gap: text-overflow-wrap-break-word-policy";
-        981 => css_text_wrap_001, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
-        982 => css_text_wrap_002, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
-        983 => css_text_wrap_003, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
-        984 => css_text_wrap_004, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
-        985 => css_text_wrap_005, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
-        986 => css_text_wrap_006, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
-        987 => css_text_wrap_007, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
-        988 => css_text_wrap_008, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
-        989 => css_text_wrap_009, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
         990 => css_text_wrap_010, r"w3c-gap: text-overflow-wrap-break-word-policy";
-        991 => css_text_wrap_011, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
-        992 => css_text_wrap_012, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
-        993 => css_text_wrap_013, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
-        994 => css_text_wrap_014, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
-        995 => css_text_wrap_015, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
-        996 => css_text_wrap_016, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
-        997 => css_text_wrap_017, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
-        998 => css_text_wrap_018, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
-        999 => css_text_wrap_019, r"w3c-correct-raster-or-sampling: css-text-subpixel-rasterization";
     }
 }

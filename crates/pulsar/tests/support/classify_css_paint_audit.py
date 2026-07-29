@@ -15,9 +15,10 @@ The audit uses a temporary all-case Chromium reference directory:
 This classifier is deliberately strict. Every one of the 1,000 cases must be
 present exactly once, every mismatch must have one issue, and no matching case
 may still be assigned to an issue. Normal regressions compare permitted UA
-choices with native snapshots and skip the other differences. Audit mode
-executes all 1,000 cases against Chromium, so reclassification is the explicit
-path for removing a fixed case from the difference registry.
+choices and W3C-correct raster/sampling differences with native snapshots, and
+skip the other differences. Audit mode executes all 1,000 cases against
+Chromium, so reclassification is the explicit path for removing a fixed case
+from the difference registry.
 """
 
 from __future__ import annotations
@@ -259,8 +260,8 @@ def classify(audit: Path, output: Path) -> None:
         "# Audited CSS-paint differences and their standards disposition.",
         "# Browser references: Chromium 150.0.7871.187, 128x128 CSS px, DPR 1.",
         "# Columns: case-name<TAB>issue.",
-        "# UA-choice rows use committed native snapshots; all other rows are",
-        "# ignored. Browser-match rows are absent from this registry.",
+        "# W3C-correct raster/sample and UA-choice rows use committed native",
+        "# snapshots; all other rows are ignored. Browser-match rows are absent.",
         "# Dispositions: 84 raster/sample, 61 UA choice, 170 W3C gap,",
         "# 22 root-role/oracle mismatch, 19 non-W3C compatibility.",
     ]

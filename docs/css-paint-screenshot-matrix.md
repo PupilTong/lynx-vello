@@ -20,7 +20,7 @@ that the face loaded. Each browser shard contains 25 isolated 128×128 iframes.
 In full-audit mode, the native side likewise paints 25 independent
 `dom::Document`s and appends their scenes into isolated cells before one GPU
 readback. A normal run preserves the original index/slot topology but does not
-build the 295 ignored cases. A permanent pixel test checks a non-zero
+build the 211 ignored cases. A permanent pixel test checks a non-zero
 translated cell against a standalone render byte-for-byte and verifies that
 outset effects do not leak into either adjacent cell.
 
@@ -29,22 +29,23 @@ The ordinary suite has three explicit expectation states:
 | State | Cases | Checked reference |
 | --- | ---: | --- |
 | `BrowserMatch` | 644 | Chromium PNG under `tests/screenshots/css-paint/` |
-| `NativeSnapshot` | 61 | Pulsar/Parley PNG under `tests/screenshots/css-paint-native/` |
-| `Skip` | 295 | No PNG and `#[ignore]`; retained for full browser audit |
+| `NativeSnapshot` | 145 | Pulsar/Parley PNG under `tests/screenshots/css-paint-native/` |
+| `Skip` | 211 | No PNG and `#[ignore]`; retained for full browser audit |
 
-The 61 native snapshots are the audited cases where CSS permits different UA
-geometry, pattern, color, or `auto` metrics. They are active regressions: their
-current standards-conforming Pulsar/Parley result must remain stable even
-though it is not required to match Chromium. The 84 rasterization/sampling
-differences remain skips because a machine-independent native baseline would
-turn backend coverage noise into product behavior.
+The 145 native snapshots are all audited W3C-correct Chromium differences:
+84 rasterization or boundary/subpixel-sampling cases plus 61 cases where CSS
+permits different UA geometry, pattern, color, or `auto` metrics. They are
+active regressions: their current standards-conforming Pulsar/Parley result
+must remain stable even though it is not required to match Chromium. The full
+browser audit still compares every one of these cases to Chromium so a parity
+change cannot silently alter its standards disposition.
 
 Every one of the 356 Chromium differences has a standalone HTML fixture under
 `crates/pulsar/tests/fixtures/css-paint-differences/` and a row in
 `crates/pulsar/tests/css-paint-differences.tsv`. Thus “difference” is not
-synonymous with “ignored”: the registry is the union of 61 active native
-snapshots and 295 skips. The asset inventory requires exact basename equality
-for the 644 browser PNGs, 61 native PNGs, and 356 difference fixtures.
+synonymous with “ignored”: the registry is the union of 145 active native
+snapshots and 211 skips. The asset inventory requires exact basename equality
+for the 644 browser PNGs, 145 native PNGs, and 356 difference fixtures.
 
 `FLASHBULB_UPDATE_SNAPSHOTS` is rejected by the entire atlas suite. Browser
 references can only come from the Playwright split workflow. Native references
@@ -152,7 +153,7 @@ threshold. The 356 mismatches are not one undifferentiated bug count:
 | Definite W3C gap | 170 | A standard grammar or required behavior is missing or implemented incorrectly. |
 | Atlas root-role/oracle mismatch | 22 | The browser and native fixtures assign a different structural role to the outer div, so the comparison cannot judge the negative-z behavior. |
 | Non-W3C compatibility | 19 | `text-stroke` is a WebKit/Lynx compatibility surface, not a W3C CSS property. |
-| **Audited mismatch total** | **356** | Exactly the difference registry: 61 native snapshots plus 295 skips. |
+| **Audited mismatch total** | **356** | Exactly the difference registry: 145 native snapshots plus 211 skips. |
 
 The 84 raster/sample cases are 8 hard-stop boundary samples, 48 general
 edge-coverage cases, and 28 ordinary text subpixel cases. The 61 UA-choice
@@ -201,8 +202,8 @@ name-based classifier refuses an unclassified mismatch, a duplicate row or
 name, index/name drift, a missing case, or a mapped case that now matches. It
 also asserts the five disposition totals (84, 61, 170, 22, and 19), so the
 145-case W3C-correct subtotal cannot change accidentally. The generator maps
-only the 61 UA-choice rows to `NativeSnapshot`; every other registry row maps
-to `Skip`.
+all 145 W3C-correct rows (84 raster/sample plus 61 UA-choice) to
+`NativeSnapshot`; every other registry row maps to `Skip`.
 
 ## Regeneration and audit
 
@@ -232,8 +233,9 @@ python3 crates/pulsar/tests/support/generate_css_paint_cases.py \
   --split-atlases output/playwright/css-paint/atlases
 ```
 
-To intentionally accept the current Pulsar/Parley behavior for the 61
-UA-choice cases, run only the generated `css_native_` tests on a real GPU:
+To intentionally accept the current Pulsar/Parley behavior for all 145
+W3C-correct Chromium differences, run only the generated `css_native_` tests
+on a real GPU:
 
 ```sh
 CSS_PAINT_UPDATE_NATIVE=1 \
@@ -251,8 +253,8 @@ python3 crates/pulsar/tests/support/generate_css_paint_cases.py \
   --prune-reference-assets --validate-assets
 ```
 
-The checked regression suite compares 705 cases: 644 to Chromium and 61 to
-native snapshots. Cargo reports 295 cases as ignored, and the native atlas
+The checked regression suite compares 789 cases: 644 to Chromium and 145 to
+native snapshots. Cargo reports 211 cases as ignored, and the native atlas
 builder does not render those skipped cases in a normal run:
 
 ```sh
@@ -287,8 +289,8 @@ total changes, the classifier stops before replacing
 explicitly, then rerun it.
 
 After classification, first regenerate Rust and HTML metadata, then update the
-native UA-choice set and split the browser matches. Finally validate the
-644/61/295 asset partition:
+native W3C-correct set and split the browser matches. Finally validate the
+644/145/211 asset partition:
 
 ```sh
 python3 crates/pulsar/tests/support/generate_css_paint_cases.py
