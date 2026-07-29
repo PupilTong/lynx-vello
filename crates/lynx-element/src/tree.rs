@@ -190,6 +190,15 @@ impl ElementTree {
         self.document.set_viewport(width, height);
     }
 
+    /// Changes the number of device pixels per CSS pixel.
+    ///
+    /// Window embedders call this when a view moves between displays with
+    /// different scale factors. Keeping it on this narrow surface avoids
+    /// exposing the mutable [`Document`] and its tree-mutation methods.
+    pub fn set_device_pixel_ratio(&mut self, device_pixel_ratio: f32) {
+        self.document.set_device_pixel_ratio(device_pixel_ratio);
+    }
+
     /// Registers font data for text measurement, returning how many faces were
     /// added.
     pub fn register_fonts(&mut self, bytes: &[u8]) -> usize {
@@ -481,6 +490,13 @@ mod tests {
 
     fn tree() -> ElementTree {
         ElementTree::new(Viewport::new(393.0, 727.0), PageConfig::default())
+    }
+
+    #[test]
+    fn a_window_embedder_can_update_the_device_pixel_ratio() {
+        let mut tree = tree();
+        tree.set_device_pixel_ratio(2.0);
+        assert!((tree.document().device().device_pixel_ratio().get() - 2.0).abs() < f32::EPSILON);
     }
 
     #[test]
