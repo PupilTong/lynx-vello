@@ -1090,14 +1090,27 @@ pub(super) fn accumulate_scrollable_overflow(
     child_content_size: Size<f32>,
     child_overflow: Point<Overflow>,
 ) {
-    let reach = if is_scroll_container(child_overflow) {
-        child_size
-    } else {
-        Size::new(
-            child_size.width.max(child_content_size.width),
-            child_size.height.max(child_content_size.height),
-        )
+    // A child's own overflow only reaches into this box's scrollable area on
+    // an axis the child lets it escape on (css-overflow-3 §2.2): a scroll
+    // container reaches exactly its border box, and so does a `clip` box,
+    // which is not a scroll container but still stops its content dead.
+    // Asked per axis because `clip` on one axis with `visible` on the other is
+    // a legal pair the style adjuster does not fold.
+    let escapes = |overflow: Overflow, size: f32, content: f32| {
+        if overflow == Overflow::Visible {
+            size.max(content)
+        } else {
+            size
+        }
     };
+    let reach = Size::new(
+        escapes(child_overflow.x, child_size.width, child_content_size.width),
+        escapes(
+            child_overflow.y,
+            child_size.height,
+            child_content_size.height,
+        ),
+    );
     content_size.width = content_size.width.max(location.x + reach.width);
     content_size.height = content_size.height.max(location.y + reach.height);
 }

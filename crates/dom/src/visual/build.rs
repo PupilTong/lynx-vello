@@ -44,6 +44,7 @@ use crate::layout::{
     establishes_fixed_containing_block, skips_contents,
 };
 use crate::node::Node;
+use crate::scroll::ScrollAxes;
 use crate::{NodeId, scroll};
 
 pub(crate) fn build<T>(document: &Document<T>) -> PaintOrder {
@@ -497,19 +498,30 @@ impl<'doc, T> Builder<'doc, T> {
         ctx: ClipContexts,
     ) -> ClipContexts {
         let mut inner = ctx;
-        if is_clipping(style) {
+        let clipped = clipped_axes(style);
+        if clipped.x || clipped.y {
             let (rect, radii) = {
                 let layout = self.rounded(node);
-                let rect = Rect::new(
+                let padding_box = Rect::new(
                     Point2D::new(layout.border.left, layout.border.top),
                     Size2D::new(
                         (layout.size.width - layout.border.horizontal_sum()).max(0.0),
                         (layout.size.height - layout.border.vertical_sum()).max(0.0),
                     ),
                 );
-                let outer =
-                    resolve_corner_radii(style, Size2D::new(layout.size.width, layout.size.height));
-                (rect, inner_radii(outer, &layout.border))
+                let rect = unclipped_axes_unbounded(padding_box, clipped);
+                // Only a box clipped on both axes has clipped *corners*; a
+                // one-axis clip is an infinite strip, which has none.
+                let radii = if clipped.x && clipped.y {
+                    let outer = resolve_corner_radii(
+                        style,
+                        Size2D::new(layout.size.width, layout.size.height),
+                    );
+                    inner_radii(outer, &layout.border)
+                } else {
+                    CornerRadii::ZERO
+                };
+                (rect, radii)
             };
             self.clips.push(ClipNode {
                 parent: inner.current.clip,
@@ -615,10 +627,38 @@ fn member_clip_contexts(position: PositionProperty, ctx: ClipContexts) -> ClipCo
     }
 }
 
-fn is_clipping(style: &ComputedValues) -> bool {
-    !matches!(style.clone_overflow_x(), Overflow::Visible)
-        || !matches!(style.clone_overflow_y(), Overflow::Visible)
-        || effective_containment(style, skips_contents(style)).intersects(Contain::PAINT)
+/// Which axes an element clips its content on. `contain: paint` clips both;
+/// otherwise it is per axis, because `overflow: clip` on one axis with
+/// `visible` on the other is a legal pair the style adjuster does not fold
+/// (both are non-scrollable, so it sees nothing to reconcile).
+fn clipped_axes(style: &ComputedValues) -> ScrollAxes {
+    if effective_containment(style, skips_contents(style)).intersects(Contain::PAINT) {
+        return ScrollAxes::BOTH;
+    }
+    ScrollAxes {
+        x: !matches!(style.clone_overflow_x(), Overflow::Visible),
+        y: !matches!(style.clone_overflow_y(), Overflow::Visible),
+    }
+}
+
+/// Widens `rect` to unbounded along every axis that is not clipped, so a
+/// one-axis clip is the infinite strip it should be rather than a box.
+///
+/// The bound is finite because the clip is a real rect that gets transformed,
+/// hit-tested, and rasterized; it is far enough out that no layout this engine
+/// can produce reaches it, and small enough to stay exact in `f32`.
+fn unclipped_axes_unbounded(rect: Rect<f32>, clipped: ScrollAxes) -> Rect<f32> {
+    const UNBOUNDED: f32 = 1.0e7;
+    let mut rect = rect;
+    if !clipped.x {
+        rect.origin.x = -UNBOUNDED;
+        rect.size.width = 2.0 * UNBOUNDED;
+    }
+    if !clipped.y {
+        rect.origin.y = -UNBOUNDED;
+        rect.size.height = 2.0 * UNBOUNDED;
+    }
+    rect
 }
 
 fn item_flags(style: &ComputedValues) -> (bool, bool) {

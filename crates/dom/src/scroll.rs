@@ -6,11 +6,16 @@
 //! overflow the layout engine accumulated ([`hughie::tree::Layout::content_size`]).
 //! The difference between the two is how far the box can scroll.
 //!
-//! `hidden` is a scroll container but is **not user-scrollable**: it clips, and
-//! it scrolls only when something asks it to programmatically. Only `scroll`
-//! and `auto` respond to gestures. That distinction carries real weight in this
-//! engine, because Lynx's UA cascade puts `overflow: hidden` on *every*
-//! element — conflating the two would make every box drag-scrollable.
+//! The fork's keyword set is `visible | hidden | scroll | clip` — no `auto` —
+//! and the three non-`visible` values are three different things:
+//!
+//! - `scroll` is a scroll container the user can drag and wheel.
+//! - `hidden` is a scroll container that is **not user-scrollable**: it clips, and it moves only
+//!   when something asks it to programmatically. That distinction carries real weight here, because
+//!   Lynx's UA cascade puts `overflow: hidden` on *every* element — conflating the two would make
+//!   every box drag-scrollable.
+//! - `clip` is not a scroll container at all: it clips and stops, with no scrolling area and no
+//!   offset, and its content does not reach into an ancestor's scrolling area either.
 //!
 //! Offsets are stored per node in the layout arena and clamped against live
 //! geometry on every read, so a relayout that shrinks the scrolling area, or a
@@ -42,12 +47,12 @@ use crate::document::Document;
 use crate::layout::box_parent;
 use crate::node::Node;
 
-/// Which axes of a box the user may scroll directly.
+/// A per-axis pair of flags — which axes the user may scroll, which axes clip.
 ///
-/// Post-cascade the two axes always agree on *whether* they are scrollable —
-/// the style adjuster pairs them (css-overflow-3 §3) — but not on *how*:
-/// `overflow-x: hidden; overflow-y: scroll` survives the adjuster and is
-/// user-scrollable vertically only.
+/// The style adjuster only reconciles axes that disagree about being
+/// *scrollable* (css-overflow-3 §3), so plenty of mixed pairs survive it:
+/// `overflow-x: hidden; overflow-y: scroll` is user-scrollable vertically
+/// only, and `overflow-x: clip; overflow-y: visible` clips horizontally only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ScrollAxes {
     pub x: bool,
@@ -101,8 +106,9 @@ pub fn is_scroll_container(style: &ComputedValues) -> bool {
     style.clone_overflow_x().is_scrollable() || style.clone_overflow_y().is_scrollable()
 }
 
-/// The axes this computed style lets the user scroll: `scroll` and `auto`,
-/// never `hidden` (css-overflow-3 §3).
+/// The axes this computed style lets the user scroll: `scroll` only — never
+/// `hidden`, which scrolls programmatically, and never `clip`, which does not
+/// scroll at all (css-overflow-3 §3).
 #[must_use]
 pub fn user_scrollable_axes(style: &ComputedValues) -> ScrollAxes {
     ScrollAxes {

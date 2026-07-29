@@ -58,9 +58,10 @@
 //!   instead of suppressing them; childless replaced elements already match the spec outcome.
 //! - Hit regions are half-open at a box's trailing (right/bottom) edges, matching browser event
 //!   targeting; clip containment stays inclusive.
-//! - Mixed overflow axes cannot occur post-cascade in this build (the style adjuster pairs them,
-//!   and the fork ships no `overflow: clip`, whose whole point is being non-scrollable on one axis
-//!   while the other scrolls), so clipping is all-or-nothing per element on the padding box.
+//! - Clipping is resolved per axis, because `overflow: clip` on one axis with `visible` on the
+//!   other is a pair the style adjuster leaves alone (it only reconciles axes that disagree about
+//!   being *scrollable*, and neither of those is). A one-axis clip is an infinite strip, so it
+//!   carries no corner radii; every other combination clips the padding box as before.
 //! - `transform-style: preserve-3d`, `backface-visibility`, and `perspective-origin` are not
 //!   authorable (the latter two are not even compiled) — everything flattens and perspective
 //!   projects about the border-box center.

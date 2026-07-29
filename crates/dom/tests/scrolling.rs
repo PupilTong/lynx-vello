@@ -246,6 +246,78 @@ fn overflow_hidden_clips_without_answering_a_gesture() {
 }
 
 #[test]
+fn overflow_clip_is_not_a_scroll_container_at_all() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .clipper { display: flex; flex-direction: column; overflow: clip;
+                    width: 100px; height: 100px; }
+         .row { flex-shrink: 0; width: 100px; height: 100px; }",
+    );
+    let root = h.root();
+    let clipper = h.el(root, "view.clipper");
+    let rows: Vec<NodeId> = (0..3).map(|_| h.el(clipper, "view.row")).collect();
+    h.doc.dom.layout();
+
+    assert!(!h.doc.dom.is_scroll_container(clipper));
+    assert_eq!(h.doc.dom.scroll_box(clipper), None);
+    // Unlike `hidden`, not even a programmatic scroll moves it.
+    assert_eq!(
+        h.doc.dom.scroll_to(clipper, Vector2D::new(0.0, 60.0)),
+        Vector2D::zero(),
+    );
+    assert_eq!(h.origin(rows[1]), Point2D::new(0.0, 100.0));
+
+    // It still clips: row 1 starts exactly at the 100px bottom edge.
+    assert_eq!(h.hit(50.0, 50.0), Some(rows[0]));
+    assert_eq!(h.hit(50.0, 150.0), Some(root));
+}
+
+#[test]
+fn a_clip_box_does_not_leak_its_overflow_into_an_ancestor_scroller() {
+    // The scroller's own child is 100px tall and clips 300px of content. Its
+    // scrolling area must stop at the child's border box, not reach through it.
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     width: 100px; height: 100px; }
+         .clipper { display: flex; flex-direction: column; overflow: clip;
+                    flex-shrink: 0; width: 100px; height: 100px; }
+         .row { flex-shrink: 0; width: 100px; height: 300px; }",
+    );
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    let clipper = h.el(scroller, "view.clipper");
+    h.el(clipper, "view.row");
+    h.doc.dom.layout();
+
+    let scroll_box = h.doc.dom.scroll_box(scroller).expect("scroller scrolls");
+    assert_eq!(scroll_box.max_offset(), Vector2D::zero());
+}
+
+#[test]
+fn clip_on_one_axis_leaves_the_other_unbounded() {
+    // `clip` + `visible` is the one pair the style adjuster leaves mixed: it
+    // reconciles axes that disagree about being *scrollable*, and neither of
+    // these is. So this box clips horizontally and overflows vertically.
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .strip { display: flex; overflow-x: clip; width: 100px; height: 100px; }
+         .wide { flex-shrink: 0; width: 300px; height: 300px; }",
+    );
+    let root = h.root();
+    let strip = h.el(root, "view.strip");
+    let wide = h.el(strip, "view.wide");
+    h.doc.dom.layout();
+
+    assert!(!h.doc.dom.is_scroll_container(strip));
+    // Inside the 100px width: hit. Past it: clipped away.
+    assert_eq!(h.hit(50.0, 50.0), Some(wide));
+    assert_eq!(h.hit(150.0, 50.0), Some(root));
+    // Below the 100px height: still there, because that axis never clipped.
+    assert_eq!(h.hit(50.0, 250.0), Some(wide));
+}
+
+#[test]
 fn a_host_gesture_drives_paint_and_hit_testing_end_to_end() {
     let mut h = Harness::new(SCROLLER);
     let root = h.root();

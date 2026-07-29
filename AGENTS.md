@@ -334,14 +334,18 @@ useful signal for currently-compatible versions of those libraries.
   shrinking relayout or a restyle out of scroll-container-hood needs no
   invalidation hook), `scroll_to`/`scroll_by` (which returns the
   **unconsumed remainder**, the primitive chaining is built from), and
-  `scroll_chain`. Only `overflow: scroll`/`auto` are user-scrollable;
-  `overflow: hidden` is a scroll container that moves only programmatically,
-  which is load-bearing here because the Lynx UA cascade puts `hidden` on
-  every element. `visual` bakes the offsets into the frame — a scroll
-  container's contents are translated as they are collected, with
-  containing-block-keyed escape sharing the clip chain's own struct, so
-  painting and hit testing see scrolled geometry and `pulsar` needs no
-  knowledge of scrolling at all.
+  `scroll_chain`. Only `overflow: scroll` is user-scrollable; `hidden` is a
+  scroll container that moves only programmatically (load-bearing here,
+  because the Lynx UA cascade puts `hidden` on every element) and `clip` is
+  not a scroll container at all — it clips, has no offset, and its content
+  does not reach into an ancestor's scrolling area either (`hughie`'s
+  `accumulate_scrollable_overflow` asks per axis). `visual` bakes the offsets
+  into the frame — a scroll container's contents are translated as they are
+  collected, with containing-block-keyed escape sharing the clip chain's own
+  struct, so painting and hit testing see scrolled geometry and `pulsar` needs
+  no knowledge of scrolling at all. Clipping is likewise per axis, because
+  `clip` on one axis with `visible` on the other is a pair the style adjuster
+  leaves mixed; a one-axis clip is an infinite strip and carries no radii.
   Its `input` module is the host seam: `InputEvent` is plain `Copy` data
   (pointer + wheel, viewport CSS px) that a canvas, a native window, or a
   test literal all produce equally, and `Document::handle_input(&PaintOrder,
@@ -378,14 +382,19 @@ useful signal for currently-compatible versions of those libraries.
   `longhands.toml` and compiled out only by absence from the allowlist —
   replaced content needs them for the css-images-3 concrete-object-size
   rules; and fork PR #12 (branch `claude/lynx-overflow-scroll`, **open**)
-  un-gates `overflow: scroll | auto` and adds
+  un-gates `overflow: scroll | clip` and adds
   `Overflow::is_user_scrollable`. The native engine's grammar really is
-  `visible | hidden`, but the **web** bundle this stack consumes scrolls with
-  real `overflow: scroll` (`web-elements`' own `scroll-view.css` authors it),
-  so no bundle could express a scrollable box at all; `auto` is inseparable
-  because the css-overflow-3 axis-pairing adjuster maps `visible` through
-  `to_scrollable()`, which folded to `hidden` and silently lost the
-  scrolling. `clip` stays gated.
+  `visible | hidden`, but the **web** bundle this stack consumes uses the
+  other two directly (`web-elements`' own `scroll-view.css` authors
+  `overflow-y: scroll` and `overflow-x: clip`), so no bundle could express a
+  scrollable box at all. **`auto` stays out** (user decision, 2026-07-29):
+  this engine paints no scrollbars, so `auto` would be indistinguishable from
+  `scroll` everywhere except `to_scrollable()`, where it is the value a
+  `visible` axis pairs into — that now pairs into `hidden`, a recorded
+  deviation (an axis that genuinely overflows is clipped rather than
+  draggable). The three non-`visible` values stay genuinely distinct:
+  `scroll` is user-scrollable, `hidden` is a scroll container that moves only
+  programmatically, `clip` is not a scroll container at all.
 - `crates/hughie` — the Flexbox, Grid, and
   Starlight Relative and Linear engine: trait-based host⇄engine integration
   with static dispatch only (no `dyn`), one `LayoutTree` protocol with a
