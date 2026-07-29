@@ -33,7 +33,15 @@ consequential choice about whether to follow the spec or the quirk.
 - **`overflow`/`overflow-x`/`overflow-y` default** — Lynx defaults to
   `hidden`; CSS defaults to `visible`. **Decision: match Lynx's default**,
   not CSS's — this is a values/defaults divergence, not an algorithm one,
-  and ReactLynx apps assume clipping-by-default.
+  and ReactLynx apps assume clipping-by-default. The *keyword set* went the
+  other way (2026-07-29): Lynx's native grammar is `visible | hidden`, but
+  the fork now ships `scroll` and `auto` too, because the web bundle this
+  stack consumes scrolls with real `overflow: scroll` — `web-elements`'
+  `scroll-view.css` authors `overflow-y: scroll` — so the trimmed set made a
+  scrollable box inexpressible. Only `scroll`/`auto` respond to gestures;
+  `hidden` stays a clip that scrolls only programmatically, which is what
+  keeps the `hidden`-on-every-element UA default from making the whole page
+  drag-scrollable.
 - **`box-sizing` default** — Lynx defaults to `border-box`; CSS defaults to
   `content-box`. **Decision: match Lynx's default**, same reasoning as
   `overflow` above.

@@ -295,7 +295,18 @@ impl<T> Document<T> {
     }
 
     pub fn invalidate_layout_all(&mut self) {
-        for (_, NodeLayoutState { slot, text }) in self.layout_data_mut() {
+        // `scroll_offset` is deliberately untouched: scroll position survives
+        // relayout (it re-clamps itself against the new geometry on read), so
+        // an invalidation must not reset every scroller to the top.
+        for (
+            _,
+            NodeLayoutState {
+                slot,
+                text,
+                scroll_offset: _,
+            },
+        ) in self.layout_data_mut()
+        {
             slot.clear_layout_cache();
             if let Some(artifacts) = text.as_deref_mut() {
                 artifacts.invalidate();
@@ -346,10 +357,14 @@ mod tests {
         // Sizes assume the workspace-wide `smallvec/union` layout (see the
         // root Cargo.toml note) — vello's graph enables it regardless, and
         // pinning it keeps every cargo invocation agreeing on these numbers.
+        // `NodeLayoutState` went 648 → 656 when the CSSOM-View scroll offset
+        // joined it: eight dense bytes per node rather than a sparse side table,
+        // paid on a 640-byte neighbour, in exchange for lockstep allocation with
+        // the layout the offset is clamped against.
         #[cfg(target_pointer_width = "64")]
         assert_eq!(
             current,
-            (if cfg!(debug_assertions) { 200 } else { 192 }, 640, 648, 16,),
+            (if cfg!(debug_assertions) { 200 } else { 192 }, 640, 656, 16,),
             "Node, LayoutSlot, NodeLayoutState, and TextLayoutStore sizes changed",
         );
     }

@@ -328,6 +328,32 @@ useful signal for currently-compatible versions of those libraries.
   belongs to the future runtime-policy layer, never here. No retained
   visual cache exists yet; `StyleDamage`'s stacking class is the
   designated hook.
+  Its `scroll` module owns CSSOM-View scrolling — scrollport/scrolling-area
+  geometry off the layout engine's accumulated `content_size`, a per-node
+  offset in the layout arena that re-clamps itself on every read (so a
+  shrinking relayout or a restyle out of scroll-container-hood needs no
+  invalidation hook), `scroll_to`/`scroll_by` (which returns the
+  **unconsumed remainder**, the primitive chaining is built from), and
+  `scroll_chain`. Only `overflow: scroll`/`auto` are user-scrollable;
+  `overflow: hidden` is a scroll container that moves only programmatically,
+  which is load-bearing here because the Lynx UA cascade puts `hidden` on
+  every element. `visual` bakes the offsets into the frame — a scroll
+  container's contents are translated as they are collected, with
+  containing-block-keyed escape sharing the clip chain's own struct, so
+  painting and hit testing see scrolled geometry and `pulsar` needs no
+  knowledge of scrolling at all.
+  Its `input` module is the host seam: `InputEvent` is plain `Copy` data
+  (pointer + wheel, viewport CSS px) that a canvas, a native window, or a
+  test literal all produce equally, and `Document::handle_input(&PaintOrder,
+  InputEvent)` routes it and performs the UA default action, reporting both
+  in an `InputResponse`. Dispatch to listeners is *not* here — this crate has
+  no `EventTarget` — so `InputEvent::default_prevented` is the
+  `preventDefault()` seam a runtime layer hands back after its own
+  capture/bubble walk or gesture arbitration; a runtime wanting different
+  scroll physics (Lynx `parent-first` nesting, rubber-band, fling) prevents
+  the default and drives `scroll_by`/`scroll_chain` itself. The drag
+  recognizer is deliberately minimal (touch/pen only, one slop threshold,
+  boundary chaining, no momentum — this crate owns no clock).
   `DocumentLayoutState` lazily boxes the shared Parley `TextContext`; each
   text node's layout-state entry lazily boxes its probe/commit
   `TextLayoutStore` and reads inherited font/text values from its parent.
@@ -339,7 +365,9 @@ useful signal for currently-compatible versions of those libraries.
   Lynx computed defaults (border-box, `overflow: hidden`, `display: linear`
   on every element, …) stay embedder cascade policy (UA sheet). Relies on
   the vendored stylo fork (`vendor/stylo`, tracking the
-  canonical `lynx` branch, tip `ab6db93be`): `contain` was already seeded
+  canonical `lynx` branch, gitlink `a1e8db9a6` — **fork PR #12, open, not yet
+  merged**; re-pin to the squashed `lynx` tip once it lands): `contain` was
+  already seeded
   in the fork's lynx grammar; fork PR #9 (squash-merged into `lynx`) added
   `content-visibility` / `contain-intrinsic-size` under the `lynx` feature,
   pref-gated for stock servo builds; fork PR #10 (squash-merged into
@@ -349,7 +377,15 @@ useful signal for currently-compatible versions of those libraries.
   seeded `object-fit` / `object-position`, which were already ungated in
   `longhands.toml` and compiled out only by absence from the allowlist —
   replaced content needs them for the css-images-3 concrete-object-size
-  rules.
+  rules; and fork PR #12 (branch `claude/lynx-overflow-scroll`, **open**)
+  un-gates `overflow: scroll | auto` and adds
+  `Overflow::is_user_scrollable`. The native engine's grammar really is
+  `visible | hidden`, but the **web** bundle this stack consumes scrolls with
+  real `overflow: scroll` (`web-elements`' own `scroll-view.css` authors it),
+  so no bundle could express a scrollable box at all; `auto` is inseparable
+  because the css-overflow-3 axis-pairing adjuster maps `visible` through
+  `to_scrollable()`, which folded to `hidden` and silently lost the
+  scrolling. `clip` stays gated.
 - `crates/hughie` — the Flexbox, Grid, and
   Starlight Relative and Linear engine: trait-based host⇄engine integration
   with static dispatch only (no `dyn`), one `LayoutTree` protocol with a
@@ -543,6 +579,11 @@ this section is the only place the absolute paths are spelled out.
 - Nightly Rust (`rust-toolchain.toml`), edition 2024, resolver 3, workspace lints.
 - `cargo fmt` (nightly rustfmt options in `rustfmt.toml`), `cargo clippy`,
   `cargo test`, `cargo bench` (CodSpeed-compatible `divan` benches).
+- **`cargo fmt --all` reaches into `vendor/stylo`** even though the fork is
+  excluded from the workspace, and the fork carries pre-existing upstream
+  rustfmt drift, so it "fixes" files nobody touched. Check
+  `git -C vendor/stylo status` afterwards and revert anything outside your own
+  change, or the next fork commit ships unrelated reformatting.
 
 ## Testing
 

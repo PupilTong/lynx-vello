@@ -7,9 +7,11 @@ mod damage;
 mod document;
 mod engine;
 mod flush;
+pub mod input;
 mod invalidation;
 pub mod layout;
 mod node;
+pub mod scroll;
 mod traits;
 pub mod visual;
 

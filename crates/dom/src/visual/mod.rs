@@ -18,6 +18,13 @@
 //! any visual mutation desynchronizes; hit testing's snapshot is
 //! self-contained and tolerates non-structural mutations.
 //!
+//! Scroll offsets ([`crate::scroll`]) are baked into the frame rather than
+//! surfaced beside it: a scroll container's contents are translated as they
+//! are collected, so painting and hit testing both see scrolled geometry with
+//! no knowledge of scrolling at all, and the render crate needs none either.
+//! The price is that scrolling invalidates the frame like any other visual
+//! mutation — which it must anyway, since scrolled content has to repaint.
+//!
 //! Invariants this module relies on (verified against the layout host):
 //! - `Layout.location` is border-box-relative to the **box parent**'s border box for every box —
 //!   the container whose formatting context laid the box out, which is the DOM parent except across
@@ -51,9 +58,9 @@
 //!   instead of suppressing them; childless replaced elements already match the spec outcome.
 //! - Hit regions are half-open at a box's trailing (right/bottom) edges, matching browser event
 //!   targeting; clip containment stays inclusive.
-//! - Mixed overflow axes cannot occur post-cascade in this build (the style adjuster pairs them and
-//!   the lynx `Overflow` is `Visible | Hidden`), so clipping is all-or-nothing per element on the
-//!   padding box.
+//! - Mixed overflow axes cannot occur post-cascade in this build (the style adjuster pairs them,
+//!   and the fork ships no `overflow: clip`, whose whole point is being non-scrollable on one axis
+//!   while the other scrolls), so clipping is all-or-nothing per element on the padding box.
 //! - `transform-style: preserve-3d`, `backface-visibility`, and `perspective-origin` are not
 //!   authorable (the latter two are not even compiled) — everything flattens and perspective
 //!   projects about the border-box center.
@@ -110,6 +117,16 @@ impl PaintOrder {
     pub fn layers(&self) -> &[RenderLayer] {
         &self.layers
     }
+}
+
+/// Where a hit landed inside the item it hit, from
+/// [`PaintOrder::hit_test_local`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LocalHit {
+    /// Index into [`PaintOrder::items`].
+    pub item: usize,
+    /// The point in that item's border-box space.
+    pub position: Point2D<f32>,
 }
 
 /// What one paint item draws.
