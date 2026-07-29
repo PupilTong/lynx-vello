@@ -272,6 +272,10 @@ useful signal for currently-compatible versions of those libraries.
   node content; its internal update path automatically invalidates the
   affected cache path. Mutually exclusive literal text, natural size, and
   test-only leaf metadata reuse the node's single nullable content pointer.
+  `Document::set_natural_size`/`natural_size` are the public replaced-content
+  seam (public because the decoder, `crates/image`, is a separate crate);
+  setting an equal value is a structural no-op, and the DOM core still knows
+  no tag names.
   Each `DocumentLayoutState` entry owns one `LayoutSlot` containing the
   measurement cache, static position, and durable rounded/unrounded results;
   `Document::{rounded_layout, unrounded_layout, layout_cache_is_empty}` are the
@@ -316,13 +320,17 @@ useful signal for currently-compatible versions of those libraries.
   Lynx computed defaults (border-box, `overflow: hidden`, `display: linear`
   on every element, …) stay embedder cascade policy (UA sheet). Relies on
   the vendored stylo fork (`vendor/stylo`, tracking the
-  canonical `lynx` branch, tip `8fb7de31a`): `contain` was already seeded
+  canonical `lynx` branch, tip `ab6db93be`): `contain` was already seeded
   in the fork's lynx grammar; fork PR #9 (squash-merged into `lynx`) added
   `content-visibility` / `contain-intrinsic-size` under the `lynx` feature,
   pref-gated for stock servo builds; fork PR #10 (squash-merged into
   `lynx`) un-gated `background-clip: text` from gecko the same way and
   seeded the `outline-*` rows (`outline-offset` deliberately omitted —
-  Lynx outlines are flush rings).
+  Lynx outlines are flush rings); fork PR #11 (squash-merged into `lynx`)
+  seeded `object-fit` / `object-position`, which were already ungated in
+  `longhands.toml` and compiled out only by absence from the allowlist —
+  replaced content needs them for the css-images-3 concrete-object-size
+  rules.
 - `crates/hughie` — the Flexbox, Grid, and
   Starlight Relative and Linear engine: trait-based host⇄engine integration
   with static dispatch only (no `dyn`), one `LayoutTree` protocol with a
@@ -395,6 +403,31 @@ useful signal for currently-compatible versions of those libraries.
   reused `Painter`; `StyleDamage`'s repaint class is the designated hook.
   It must not read Lynx runtime vocabulary (hit-slop, components) and never
   bypasses `PaintOrder` for its own tree walk.
+- `crates/image` — the replaced-content pipeline below the DOM: container
+  sniffing from magic bytes, header-only intrinsic-size probing, decode to
+  RGBA8, and the async fetch→decode→cache loader over `bobcat-engine`'s
+  `ResourceFetcher`. PNG/JPEG/WebP, **static only**. One always-compiled
+  pure-Rust backend (`png` + `zune-jpeg` + `image-webp` taken directly rather
+  than through the `image` facade — the facade would collide with this
+  package's own name and make `cargo check -p image` ambiguous forever) plus at
+  most one platform backend chosen by a **runtime** probe: Apple ImageIO,
+  Windows WIC, Android NDK `AImageDecoder`. That probe is genuinely runtime —
+  ImageIO gained WebP in macOS 11/iOS 14, WIC's WebP codec is a Store
+  extension, `AImageDecoder` is API 30+. `Acceleration` reports codec
+  *provenance* (`Software` / `PlatformSoftware`), never a claim about silicon:
+  no still-image API on any of the three platforms exposes an acceleration
+  query or reaches a decode ASIC, so `DedicatedHardware` is reserved and
+  unreported. Routing may disagree with the ladder — on Apple, PNG stays on the
+  software backend because ImageIO just delegates to bundled libpng. It depends
+  on **neither `dom` nor `pulsar`**: it returns an `ImageHeader` and a
+  `DecodedImage`, and installing those on a node and in an `ImageStore` is the
+  caller's job. `DecodedImage::to_image_data` reaches `peniko` through vello's
+  re-export behind the default `vello` feature, so the crate can be
+  cross-checked for Windows/Android without building wgpu. The **authoritative**
+  recorded-limits list is `crates/image/src/lib.rs`'s crate docs. The Lynx
+  `<image>` element surface (`mode`, `placeholder` racing, `cap-insets`,
+  `blur-radius`, `load`/`error` events) belongs above this crate and is not
+  implemented; nothing here is exposed to `lynx-element`.
 - `crates/flashbulb` — screenshot testing infrastructure, and the only crate
   here that exists for the test suite rather than the product (`publish =
   false`, dev-dependency everywhere). It owns RGBA `Image` + PNG codec, a
@@ -410,7 +443,10 @@ useful signal for currently-compatible versions of those libraries.
   frame, `viewport * device_pixel_ratio` device pixels — `pulsar` scales the
   scene up by that ratio, so anything smaller is a crop. Playwright instead
   downsamples to CSS pixels; the two coincide at a ratio of 1, which is what
-  lynx-stack pins for determinism and what every viewport here uses.
+  lynx-stack pins for determinism and what every viewport here uses. Every
+  capture entry point takes an `&ImageStore` explicitly rather than defaulting
+  to an empty one: a capture that silently paints no replaced content is
+  exactly the blank-but-passing golden this crate exists to prevent.
   `headless_or_skip` announces a missing GPU adapter on the process's real
   stderr (libtest discards a *passing* test's captured output, so `eprintln!`
   would be invisible exactly when it matters); `FLASHBULB_REQUIRE_GPU=1` turns

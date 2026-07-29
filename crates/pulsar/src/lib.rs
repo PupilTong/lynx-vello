@@ -42,6 +42,14 @@
 //!   the whole stacking context instead.
 //! - `mask-*` honors the full geometry longhands but paints the first `mask-image` layer only
 //!   (`mask-composite` ignored; `mask-mode: luminance` treated as alpha via the `SrcIn` sandwich).
+//! - Replaced content honors `object-fit`, `object-position` and `image-rendering`, and derives its
+//!   concrete object size from the element's natural size rather than the decoded pixel dimensions,
+//!   so decode-time downsampling cannot skew it. `image-rendering` never selects vello's bicubic
+//!   sampler: the fork's grammar has only `auto`, `crisp-edges` and `pixelated`, which map to
+//!   bilinear and nearest.
+//! - The fork's grammar has no `image-orientation`, so the CSS initial value `from-image` cannot be
+//!   authored away: EXIF orientation is applied by the decoder (`crates/image`), and the natural
+//!   size a replaced box lays out at is already the oriented one.
 
 // The coverage run compiles with `--cfg coverage_nightly` and the test
 // modules opt out via `#[coverage(off)]`, which needs this experimental

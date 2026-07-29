@@ -102,13 +102,20 @@ pub fn frame_size<T>(document: &Document<T>) -> (u32, u32) {
 }
 
 /// Lays out, paints, and reads back `document`'s whole frame.
+///
+/// `images` is threaded all the way to the painter rather than defaulted,
+/// because a capture that silently paints no replaced content is exactly the
+/// kind of blank-but-passing golden this crate exists to prevent. Pass
+/// `&ImageStore::new()` when the case genuinely has no images — at the call
+/// site, where it is visible.
 pub fn capture_document<T: Sync>(
     gpu: &mut Headless,
     document: &mut Document<T>,
     background: Color,
+    images: &ImageStore,
 ) -> Result<Image, CaptureError> {
     let (width, height) = frame_size(document);
-    capture_document_sized(gpu, document, background, width, height)
+    capture_document_sized(gpu, document, background, images, width, height)
 }
 
 /// [`capture_document`] at an explicit pixel size.
@@ -116,11 +123,12 @@ pub fn capture_document_sized<T: Sync>(
     gpu: &mut Headless,
     document: &mut Document<T>,
     background: Color,
+    images: &ImageStore,
     width: u32,
     height: u32,
 ) -> Result<Image, CaptureError> {
     let frame = document.paint_order();
-    capture_frame_sized(gpu, document, &frame, background, width, height)
+    capture_frame_sized(gpu, document, &frame, background, images, width, height)
 }
 
 /// Captures an already-built frame.
@@ -133,9 +141,10 @@ pub fn capture_frame<T>(
     document: &Document<T>,
     frame: &PaintOrder,
     background: Color,
+    images: &ImageStore,
 ) -> Result<Image, CaptureError> {
     let (width, height) = frame_size(document);
-    capture_frame_sized(gpu, document, frame, background, width, height)
+    capture_frame_sized(gpu, document, frame, background, images, width, height)
 }
 
 /// [`capture_frame`] at an explicit pixel size.
@@ -144,11 +153,12 @@ pub fn capture_frame_sized<T>(
     document: &Document<T>,
     frame: &PaintOrder,
     background: Color,
+    images: &ImageStore,
     width: u32,
     height: u32,
 ) -> Result<Image, CaptureError> {
     let mut painter = Painter::new();
-    let scene = painter.paint(document, frame, &ImageStore::new());
+    let scene = painter.paint(document, frame, images);
     let pixels = gpu
         .render(scene, width, height, background)
         .map_err(CaptureError::Gpu)?;

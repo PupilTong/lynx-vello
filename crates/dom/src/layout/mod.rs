@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 
 #[cfg(feature = "layout-test-utils")]
 use hughie::compute::LeafMetrics;
-use hughie::compute::NaturalSize;
+pub use hughie::compute::NaturalSize;
 pub use hughie::geometry::{Edges, Point, Size};
 use hughie::invalidate::is_relayout_boundary;
 use hughie::style::CoreStyle;
@@ -50,11 +50,35 @@ impl<T: Sync> Document<T> {
 }
 
 impl<T> Document<T> {
-    #[allow(
-        dead_code,
-        reason = "owned by the future internal replaced-content loader"
-    )]
-    pub(crate) fn set_natural_size(&mut self, id: crate::NodeId, natural_size: NaturalSize) {
+    /// Installs decoded intrinsic dimensions for a replaced element, and
+    /// invalidates the node-to-root box-cache path when the value changes.
+    ///
+    /// This is the W3C replaced-content seam, and it also marks the node
+    /// replaced if it is not already — see [`Document::mark_replaced`] for the
+    /// identity half, which a caller should set at element-creation time rather
+    /// than waiting for a decode. The DOM core learns nothing about `<img>`;
+    /// tag policy stays in the embedder's UA stylesheet. It is public because
+    /// the decoder that produces these dimensions (`crates/image`) is a separate
+    /// crate that must not be handed the whole document core to reach one
+    /// setter.
+    ///
+    /// Setting an equal value is a structural no-op: nothing is invalidated, so
+    /// a loader that re-publishes an unchanged size after a re-fetch costs
+    /// nothing. That exactness is why there is no aspect-ratio epsilon here,
+    /// unlike native Lynx — it compared a measured box against a bitmap ratio,
+    /// where this compares the value against itself.
+    ///
+    /// Natural size shares the node's single nullable content slot with literal
+    /// text, so `set_element_text_content` on a node carrying a natural size
+    /// destroys it, and vice versa.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a vacant or non-element `NodeId`, and — through
+    /// [`Document::invalidate_layout`] — when a style traversal has been started
+    /// and did not complete. Call it between flushes, the same precondition
+    /// [`Document::paint_style`] documents.
+    pub fn set_natural_size(&mut self, id: crate::NodeId, natural_size: NaturalSize) {
         let changed = {
             let node = self
                 .tree_mut()
@@ -69,6 +93,56 @@ impl<T> Document<T> {
         if changed {
             self.invalidate_layout(id);
         }
+    }
+
+    /// Marks an element as generating a replaced box, before any intrinsic
+    /// dimensions are known.
+    ///
+    /// An `<img>` is replaced from the moment it exists; its natural size
+    /// arrives a network round trip later. Calling this at element-creation
+    /// time means the very first layout already treats it as a replaced leaf,
+    /// so the box does not change formatting context — and relayout its whole
+    /// subtree — when the header lands.
+    ///
+    /// # Panics
+    ///
+    /// As [`Document::set_natural_size`].
+    pub fn mark_replaced(&mut self, id: crate::NodeId) {
+        let changed = {
+            let node = self
+                .tree_mut()
+                .get_mut(id)
+                .expect("vacant NodeId passed to Document::mark_replaced");
+            assert!(
+                node.is_element(),
+                "non-element NodeId passed to Document::mark_replaced"
+            );
+            node.mark_replaced()
+        };
+        if changed {
+            self.invalidate_layout(id);
+        }
+    }
+
+    /// Whether this node generates a replaced box, independent of whether its
+    /// intrinsic dimensions have arrived.
+    #[must_use]
+    pub fn is_replaced(&self, id: crate::NodeId) -> bool {
+        self.get(id).is_some_and(crate::Node::is_replaced)
+    }
+
+    /// The intrinsic dimensions and ratio a replaced element currently lays out
+    /// with, in CSS px. [`NaturalSize::NONE`] for non-elements, vacant ids, and
+    /// elements that are not replaced.
+    ///
+    /// Paint needs this separately from the decoded pixels: with decode-time
+    /// downsampling, a decoded image's width and height are device-scaled decode
+    /// dimensions, while `object-fit: none` / `scale-down` and the concrete
+    /// object size are defined against the **natural** size.
+    #[must_use]
+    pub fn natural_size(&self, id: crate::NodeId) -> NaturalSize {
+        self.get(id)
+            .map_or(NaturalSize::NONE, crate::Node::natural_size)
     }
 
     #[cfg(feature = "layout-test-utils")]

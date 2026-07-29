@@ -1,7 +1,8 @@
 //! Decoded raster images the paint engine draws.
 //!
-//! Decoding stays outside this crate (`bobcat-engine`'s resource protocol
-//! delivers bytes; the embedder decodes). Painters look images up by the two
+//! Decoding stays outside this crate: `bobcat-engine`'s resource protocol
+//! delivers bytes and `crates/image` turns them into `peniko::ImageData`
+//! (`DecodedImage::to_image_data`). Painters look images up by the two
 //! key spaces CSS produces: a `url(…)` string for `background-image` /
 //! `mask-image` layers, and a `NodeId` for a replaced element's content
 //! (the node whose layout used a decoded `NaturalSize`).

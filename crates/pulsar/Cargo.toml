@@ -14,7 +14,10 @@ pollster.workspace = true
 rustc-hash.workspace = true
 smallvec.workspace = true
 stylo.workspace = true
-vello.workspace = true
+# The workspace entry turns vello's defaults off so `crates/image` can reach
+# `peniko` without wgpu; the paint engine is the crate that actually renders, so
+# it opts the GPU back in here.
+vello = { workspace = true, features = ["wgpu", "wgpu_default"] }
 dom.workspace = true
 
 [dev-dependencies]
@@ -25,6 +28,11 @@ divan.workspace = true
 # library graph stays acyclic.
 flashbulb = { workspace = true, features = ["render"] }
 html5ever.workspace = true
+# The replaced-content tests drive the real decode pipeline rather than
+# hand-rolling a `peniko::ImageData`, so `object-fit` is exercised against
+# genuinely decoded pixels. Dev-only: the paint engine itself never decodes.
+image.workspace = true
+png.workspace = true
 markup5ever_rcdom.workspace = true
 stylo_traits.workspace = true
 

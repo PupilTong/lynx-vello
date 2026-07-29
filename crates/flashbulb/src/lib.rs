@@ -9,12 +9,13 @@
 //! # #[cfg(feature = "render")]
 //! # fn example(document: &mut dom::Document<()>) {
 //! use flashbulb::vello::peniko::Color;
-//! use flashbulb::{Screenshots, capture_document, headless_or_skip};
+//! use flashbulb::{ImageStore, Screenshots, capture_document, headless_or_skip};
 //!
 //! let Some(mut gpu) = headless_or_skip("my_test") else {
 //!     return;
 //! };
-//! let image = capture_document(&mut gpu, document, Color::WHITE).expect("capture");
+//! let images = ImageStore::new();
+//! let image = capture_document(&mut gpu, document, Color::WHITE, &images).expect("capture");
 //! Screenshots::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/screenshots"))
 //!     .assert_matches(&["my-case", "index"], &image);
 //! # }
@@ -68,9 +69,10 @@ mod image;
 mod render;
 
 /// Re-exported so capture callers name colors through the same `peniko` the
-/// renderer was built against, never a second copy of it.
+/// renderer was built against, never a second copy of it, and can name the
+/// image store the capture functions take without dev-depending on `pulsar`.
 #[cfg(feature = "render")]
-pub use pulsar::vello;
+pub use pulsar::{ImageStore, vello};
 
 pub use crate::compare::{CompareOptions, Comparison, compare};
 pub use crate::golden::{

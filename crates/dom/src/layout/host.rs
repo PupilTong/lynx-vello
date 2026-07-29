@@ -88,7 +88,25 @@ impl<T> LayoutTree for TreeArenas<T> {
             if view.skips_contents() {
                 return compute_skipped_contents_layout(self, state, node, input);
             }
-            display
+            // A replaced element has no inner formatting context: its box is
+            // filled by external content, so the *inner* display type is simply
+            // not applicable to it (css-display-3 §2.3 — `display` on a replaced
+            // element sets its outer role only). Routing it to `Leaf` regardless
+            // is therefore the W3C-correct behaviour, and it is load-bearing
+            // rather than pedantic here: the Lynx UA cascade sets
+            // `display: linear` on *every* element, so without this an `<img>`
+            // would land in the linear algorithm, ignore its natural size, and
+            // lay out at 0x0 with the decode silently wasted.
+            //
+            // Keyed on replaced *identity*, not on whether a natural size has
+            // arrived: an image is replaced before its header lands, and a node
+            // that changed formatting context between frames would relayout its
+            // whole subtree for nothing.
+            if node_ref.is_replaced() {
+                DisplayMode::Leaf
+            } else {
+                display
+            }
         };
 
         compute_cached_layout(self, state, node, input, move |tree, state, node, input| {

@@ -24,6 +24,12 @@ lynx-template-decoder = { path = "crates/lynx-template-decoder" }
 # optional arbitrary-content measurement seam.
 hughie = { path = "crates/hughie" }
 flashbulb = { path = "crates/flashbulb" }
+# Format sniffing, capability-probed platform/software decode backends, and the
+# async fetch→decode→cache loader for replaced content. The package owns the
+# name `image` outright: the crates.io crate of that name is deliberately NOT a
+# dependency (its three constituent decoders are taken directly instead), so
+# `cargo check/test/clippy -p image` is unambiguous.
+image = { path = "crates/image" }
 lynx-element = { path = "crates/lynx-element" }
 pulsar = { path = "crates/pulsar" }
 quickjs-rust-bridge = { path = "crates/quickjs-rust-bridge" }
@@ -71,6 +77,27 @@ divan = { package = "codspeed-divan-compat", version = "5" }
 euclid = "0.22"
 html5ever = "0.39"
 http = "1"
+# Software decode, one crate per format rather than the `image` facade.
+#
+# These are exactly the three decoders `image` 0.25 delegates to, taken directly.
+# The facade was rejected for two reasons: a workspace member named `image` plus
+# a crates.io `image` in the same graph makes `cargo check/test/clippy -p image`
+# permanently ambiguous (`cargo fmt -p image`, which only sees members, stays
+# unambiguous — so the two would need *different* spellings of the same package);
+# and the facade pulls `moxcms`/`pxfm` in non-optionally for colour management we
+# do not perform, while its own PNG/WebP memory limits are documented as not
+# wired through. Going direct also lets each backend emit RGBA8 without the
+# facade's intermediate conversion.
+#
+# `png` is already pinned above for `flashbulb`, so PNG costs no extra crate.
+zune-jpeg = "0.5.15"
+image-webp = "0.2.4"
+# Post-decode resampling: no software decoder here scales during decode, and
+# naive resampling halos transparent edges — `ResizeOptions::use_alpha` does the
+# alpha-correct thing.
+fast_image_resize = "6.1"
+# WHATWG `data:` URL parsing (servo/rust-url, same family as the pinned `url`).
+data-url = "0.3"
 markup5ever_rcdom = "0.39"
 parley = { version = "0.11", default-features = false, features = [
     "std",
@@ -91,15 +118,75 @@ slab = "0.4"
 # pin the unified layout.
 smallvec = { version = "1", features = ["const_new", "union"] }
 thiserror = "2"
-tokio = "1"
+# `crates/image` needs `rt` (`spawn_blocking` lives behind `cfg_rt!`), `sync`
+# (the decode-concurrency semaphore) and `io-util` (the `open_resource`
+# fallback's `read_to_end`). Declared here rather than per-crate so
+# `cargo check -p bobcat-engine` and `cargo check --workspace` compile the same
+# tokio — the same per-invocation feature-unification hazard the `smallvec`
+# entry below records.
+tokio = { version = "1", features = ["io-util", "rt", "sync"] }
 tokio-util = "0.7"
 url = "2"
+
+# Platform image-decode backends for `crates/image`. Each is consumed only from
+# a `[target.'cfg(…)'.dependencies]` block, so a build for one OS never resolves
+# the other two.
+#
+# Apple ImageIO (macOS/iOS). The objc2 family is already in the graph via
+# parley/fontique and wgpu-hal's raw-window-metal, so this unifies exactly;
+# `default-features = false` keeps the Objective-C runtime, `block2` and
+# `dispatch2` out. Each crate carries its own `#[link(kind = "framework")]`, so
+# there is no build script and no linker flag.
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "CFArray",
+    "CFCGTypes",
+    "CFData",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+    "std",
+] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+    "CGBitmapContext",
+    "CGColorSpace",
+    "CGContext",
+    "CGImage",
+    "std",
+] }
+objc2-image-io = { version = "0.3.2", default-features = false, features = [
+    "CGImageProperties",
+    "CGImageSource",
+    "objc2-core-graphics",
+    "std",
+] }
+# Windows Imaging Component. `windows-sys` is not a candidate: it ships no COM
+# interfaces and has no `Win32_Graphics_Imaging` feature at all. `Win32_System_Com`
+# is mandatory — `IWICStream`, `CreateDecoderFromStream` and
+# `CreateComponentEnumerator` are all gated on it.
+windows = { version = "0.62.2", features = [
+    "Win32_Graphics_Imaging",
+    "Win32_System_Com",
+] }
+# Android `AImageDecoder`. Raw `ndk-sys`, not the safe `ndk` crate: `ndk` 0.9 has
+# no ImageDecoder wrapper of any kind. It supplies types and the
+# `ANDROID_IMAGE_DECODER_*` constants only — every function is reached through
+# `dlsym`, which is also the API-30 capability probe.
+ndk-sys = { version = "0.6.0", features = ["bitmap"] }
+# `dlopen`/`dlsym`/`RTLD_NOW` for that probe. Android-only consumer.
+libc = "0.2"
 # GPU vector renderer. `vello` re-exports its pinned, version-matched `wgpu`,
 # `peniko`, and `kurbo`; `crates/pulsar` consumes all three through those
 # re-exports so the graph can never hold two skewed copies. parley 0.11 and
 # vello 0.9 share one `linebender_resource_handle`, so parley's `FontData`
 # feeds `Scene::draw_glyphs` directly.
-vello = "0.9"
+#
+# `default-features = false` drops vello's `wgpu`/`wgpu_default` defaults here so
+# `crates/image` — which needs only the unconditional `pub use peniko`, not a GPU
+# — can cross-check for Windows and Android without building wgpu. `pulsar` opts
+# the GPU back in explicitly. The default must be off at the *workspace* entry: a
+# member's own `default-features = false` against an unqualified workspace entry
+# is ignored with a warning.
+vello = { version = "0.9", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "warn"

@@ -34,11 +34,18 @@ Key architectural facts (native): request lifecycle is driven by a dirty-flag di
 
 `auto-size` triggers a genuine **post-decode relayout**: `AutoSizeImage.measure()` (`lynx/platform/android/.../image/AutoSizeImage.java`) returns the *previous/placeholder* measured size until the real bitmap dimensions are known, then `justSizeIfNeeded()` calls `markDirty()`/relayout once decode completes and the intrinsic aspect ratio differs meaningfully (>0.05) from the current box — i.e. native Lynx has the same "layout jank on late-arriving intrinsic size" behavior as an `<img>` without explicit `width`/`height`, and a bitmap-size cache (`ILynxViewRuntimeCacheManager.setBitmapSizeCache`) is used to avoid the jank on repeat mounts of the same URL. web-platform sidesteps this entirely by keeping `auto-size` a pure-CSS affair (`x-image.css:55-81`: `display:contents` + `width/height: inherit`/`max-width/max-height:100%` on the inner `<img>`), relying on the browser's native intrinsic-size layout — no JS remeasurement needed.
 
-lynx-vello now has the lower layout primitive for that handoff: replaced
-content carries an internal `NaturalSize`, and changing it invalidates the
-node-to-root layout-cache path. The future image fetch/decode/cache subsystem
-must integrate below the future Element-PAPI layer; the generic public DOM API
-deliberately exposes no natural-size mutation. The metadata must not be encoded as
+lynx-vello has both halves of that handoff now. Replaced content carries a
+`NaturalSize` that `Document::set_natural_size` installs, invalidating the
+node-to-root layout-cache path; and `crates/image` owns fetch, capability-probed
+decode, and the bounded decode/header caches, depending on neither `dom` nor
+`pulsar` so the decoder never reaches the DOM. `HeaderCache` is this project's
+equivalent of native's bitmap-size cache: a second mount of a known URL can
+publish its natural size in the commit that creates the node, so the first frame
+lays out final. The Lynx `<image>` element surface — `mode`, `placeholder`, the
+src/placeholder race, `cap-insets`, `blur-radius`, the `load`/`error` events —
+remains above this layer and unimplemented; what exists today is the W3C `<img>`
+path: natural size into layout, `object-fit`/`object-position`/`image-rendering`
+at paint. The metadata must not be encoded as
 `contain-*`/`contain-intrinsic-size`, because natural replaced size is content
 data rather than CSS size containment.
 
