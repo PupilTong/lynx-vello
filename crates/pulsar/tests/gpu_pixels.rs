@@ -6,10 +6,16 @@ mod common;
 
 use common::Doc;
 use pulsar::gpu::{GpuError, Headless};
-use pulsar::vello::peniko::Color;
+use pulsar::vello::Scene;
+use pulsar::vello::kurbo::{Affine, Rect};
+use pulsar::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
 use pulsar::{ImageStore, Painter};
 
 const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
+const ISOLATION_ATLAS_WIDTH: u32 = 384;
+const ISOLATION_ATLAS_HEIGHT: u32 = 192;
+const ISOLATION_CELL_X: u32 = 128;
+const ISOLATION_CELL_Y: u32 = 32;
 
 fn headless_or_skip() -> Option<Headless> {
     match Headless::new() {
@@ -203,4 +209,92 @@ fn outline_rings_the_border_box() {
     // Outside the ring: base white.
     let outside = pixel(&pixels, 200, 10, 45);
     assert_eq!(outside, [255, 255, 255, 255]);
+}
+
+/// Appending a separately painted document into an isolated atlas cell must
+/// preserve nested blend layers exactly. The CSS screenshot matrix relies on
+/// this for opacity, filters, masks, clips, and shadows.
+#[test]
+fn isolated_atlas_cell_matches_standalone_group_effects() {
+    let Some(mut gpu) = headless_or_skip() else {
+        return;
+    };
+    let css = "page { display: flex; position: relative; width: 128px; height: 128px; }
+        .effect { display: flex; position: absolute; left: 14px; top: 14px;
+                  width: 100px; height: 100px;
+                  background: linear-gradient(135deg, red, lime, blue);
+                  box-shadow: 10px 8px 6px rgb(124 58 237 / 80%);
+                  opacity: .72; filter: brightness(.7);
+                  clip-path: inset(3px round 8px);
+                  mask-image: linear-gradient(0deg, black 0%, transparent 100%);
+                  mask-repeat: no-repeat; }";
+    let mut doc = Doc::with_css(css);
+    let root = doc.root;
+    doc.el(root, "effect");
+
+    let frame = doc.dom.paint_order();
+    let mut painter = Painter::new();
+    let scene = painter.paint(&doc.dom, &frame, &ImageStore::new());
+    let standalone = gpu
+        .render(scene, 128, 128, Color::WHITE)
+        .expect("standalone headless render");
+
+    let cell_x = f64::from(ISOLATION_CELL_X);
+    let cell_y = f64::from(ISOLATION_CELL_Y);
+    let left_neighbor = Rect::new(0.0, cell_y, cell_x, cell_y + 128.0);
+    let cell = Rect::new(cell_x, cell_y, cell_x + 128.0, cell_y + 128.0);
+    let right_neighbor = Rect::new(cell_x + 128.0, cell_y, 384.0, cell_y + 128.0);
+    let mut atlas = Scene::new();
+    atlas.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        Color::from_rgb8(8, 145, 178),
+        None,
+        &left_neighbor,
+    );
+    atlas.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        Color::from_rgb8(219, 39, 119),
+        None,
+        &right_neighbor,
+    );
+    atlas.push_layer(
+        Fill::NonZero,
+        BlendMode::new(Mix::Normal, Compose::SrcOver),
+        1.0,
+        Affine::IDENTITY,
+        &cell,
+    );
+    atlas.fill(Fill::NonZero, Affine::IDENTITY, Color::WHITE, None, &cell);
+    atlas.append(scene, Some(Affine::translate((cell_x, cell_y))));
+    atlas.pop_layer();
+    let appended = gpu
+        .render(
+            &atlas,
+            ISOLATION_ATLAS_WIDTH,
+            ISOLATION_ATLAS_HEIGHT,
+            Color::WHITE,
+        )
+        .expect("atlas headless render");
+
+    let mut cropped = Vec::with_capacity(standalone.len());
+    for row in ISOLATION_CELL_Y..ISOLATION_CELL_Y + 128 {
+        let start = ((row * ISOLATION_ATLAS_WIDTH + ISOLATION_CELL_X) * 4) as usize;
+        cropped.extend_from_slice(&appended[start..start + 128 * 4]);
+    }
+    assert_eq!(
+        standalone, cropped,
+        "translated atlas cell changed its scene"
+    );
+    assert_eq!(
+        pixel(&appended, ISOLATION_ATLAS_WIDTH, 120, 96),
+        [8, 145, 178, 255],
+        "outset effects leaked into the left neighbor"
+    );
+    assert_eq!(
+        pixel(&appended, ISOLATION_ATLAS_WIDTH, 264, 96),
+        [219, 39, 119, 255],
+        "outset effects leaked into the right neighbor"
+    );
 }

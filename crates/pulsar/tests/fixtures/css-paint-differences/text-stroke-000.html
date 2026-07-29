@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="css-paint-case" content="text-stroke-000">
+<meta name="css-paint-difference-kind" content="non-w3c-compatibility">
+<meta name="css-paint-issue" content="pulsar-text-stroke-join-geometry">
+<title>text-stroke-000</title>
+<style>
+@font-face {
+  font-family: Ahem;
+  src: url('/crates/hughie/tests/fixtures/Ahem.ttf') format('truetype');
+}
+html, body {
+  margin: 0;
+  width: 128px;
+  height: 128px;
+  overflow: hidden;
+  background: #fff;
+}
+body > div:first-of-type {
+  isolation: isolate;
+}
+</style>
+<!-- source: wpt/css/css-text-decor/ -->
+<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e0f2fe;"><div style="display:flex;position:absolute;left:8px;top:24px;width:112px;height:78px;flex-direction:column;font-family:Ahem;font-size:28px;line-height:36px;color:#f8fafc;-webkit-text-stroke:1px #be123c;text-stroke:1px #be123c">XXXX</div></div>

@@ -496,14 +496,16 @@ Integration tests decode real fixtures vendored from lynx-stack under
 `cargo test` must pass on the pinned nightly toolchain.
 
 **Screenshot tests** live in `crates/*/tests/screenshots.rs` — plus per-topic
-siblings (`pulsar` also has `text_screenshots.rs`) sharing one capture harness
-in `tests/support/screenshot.rs` — with committed goldens in
-`crates/*/tests/screenshots/`, driven by `crates/flashbulb`. The golden store
-is per *crate*, so every screenshot binary in a crate writes into the same
-tree. They need a GPU adapter; without one they print `SKIP <test>` and pass,
-so a green run on a GPU-less machine has not exercised them. To accept a new
-rendering, look at the image first, then (dropping `--test` to catch every
-screenshot binary in the crate):
+siblings (`pulsar` also has `text_screenshots.rs` and `css_atlas.rs`) — with
+committed goldens in `crates/*/tests/screenshots/`, driven by
+`crates/flashbulb`. The ordinary screenshot suites share one capture harness
+in `tests/support/screenshot.rs`; the browser-referenced CSS atlas owns the
+separate workflow documented below. The golden store is per *crate*, so every
+screenshot binary in a crate writes into the same tree. They need a GPU
+adapter; without one they print `SKIP <test>` and pass, so a green run on a
+GPU-less machine has not exercised them. To accept a new rendering in the
+ordinary suites, look at the image first, then (dropping `--test` to catch
+every ordinary screenshot binary in the crate):
 
 ```sh
 FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p <crate>
@@ -514,6 +516,18 @@ and re-run. Failures write `-expected`/`-actual`/`-diff` PNGs to the
 git-ignored `crates/<crate>/tests/artifacts/`; the panic message names all
 three plus the exact differing-pixel count. Never accept a golden you have not
 looked at: a blank or all-white image compares happily against itself forever.
+Browser-owned suites can reject `FLASHBULB_UPDATE_SNAPSHOTS`; follow their
+checked capture and audit workflow instead. The CSS paint atlas has two
+explicit reference owners: 666 Chromium matches remain browser-owned, while
+145 W3C-correct differences (84 rasterization/sampling cases plus 61
+standards-permitted UA choices) use native Pulsar/Parley snapshots in a
+separate directory. Native atlas references may be updated only with the
+filtered `CSS_PAINT_UPDATE_NATIVE=1 ... css_native_` workflow, which cannot
+overwrite browser references; the other 189 cases remain ignored. The browser
+stage uses `isolation: isolate` to match the native document element's
+stacking-context role, so all 22 negative-z probes are Chromium-owned exact
+matches. The CSS paint matrix records the exact capture, update, and
+full-browser-audit workflow in `docs/css-paint-screenshot-matrix.md`.
 
 ## Working with Codex
 

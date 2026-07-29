@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="css-paint-case" content="mask-linear-031">
+<meta name="css-paint-difference-kind" content="w3c-correct-raster-or-sampling">
+<meta name="css-paint-issue" content="vello-chromium-edge-coverage">
+<title>mask-linear-031</title>
+<style>
+@font-face {
+  font-family: Ahem;
+  src: url('/crates/hughie/tests/fixtures/Ahem.ttf') format('truetype');
+}
+html, body {
+  margin: 0;
+  width: 128px;
+  height: 128px;
+  overflow: hidden;
+  background: #fff;
+}
+body > div:first-of-type {
+  isolation: isolate;
+}
+</style>
+<!-- source: wpt/css/css-masking/mask-image/ -->
+<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#fef2f2;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:linear-gradient(135deg,#ef4444,#22c55e,#2563eb);mask-image:linear-gradient(135deg,black 0%,black 20%,transparent 20%,transparent 40%,black 40%,black 60%,transparent 60%,transparent 80%,black 80%,black 100%);mask-repeat:repeat;mask-size:36px 28px"></div></div>

@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="css-paint-case" content="background-radial-004">
+<meta name="css-paint-difference-kind" content="w3c-gap">
+<meta name="css-paint-issue" content="css-gradient-multi-position-stops">
+<title>background-radial-004</title>
+<style>
+@font-face {
+  font-family: Ahem;
+  src: url('/crates/hughie/tests/fixtures/Ahem.ttf') format('truetype');
+}
+html, body {
+  margin: 0;
+  width: 128px;
+  height: 128px;
+  overflow: hidden;
+  background: #fff;
+}
+body > div:first-of-type {
+  isolation: isolate;
+}
+</style>
+<!-- source: wpt/css/css-backgrounds/gradients/ -->
+<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;background:#dc2626 radial-gradient(ellipse farthest-side at center,#22c55e 0 35%,#2563eb 36% 70%,#ef4444 71%)"></div></div>

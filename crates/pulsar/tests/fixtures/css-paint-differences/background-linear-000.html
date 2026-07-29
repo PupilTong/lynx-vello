@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="css-paint-case" content="background-linear-000">
+<meta name="css-paint-difference-kind" content="w3c-gap">
+<meta name="css-paint-issue" content="css-gradient-multi-position-stops">
+<title>background-linear-000</title>
+<style>
+@font-face {
+  font-family: Ahem;
+  src: url('/crates/hughie/tests/fixtures/Ahem.ttf') format('truetype');
+}
+html, body {
+  margin: 0;
+  width: 128px;
+  height: 128px;
+  overflow: hidden;
+  background: #fff;
+}
+body > div:first-of-type {
+  isolation: isolate;
+}
+</style>
+<!-- source: wpt/css/css-backgrounds/gradients/ -->
+<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#cbd5e1;"><div style="display:flex;position:absolute;left:12px;top:16px;width:104px;height:96px;background:#dc2626 linear-gradient(0deg,#ef4444 0 25%,#22c55e 25% 50%,#3b82f6 50% 75%,#f59e0b 75%)"></div></div>

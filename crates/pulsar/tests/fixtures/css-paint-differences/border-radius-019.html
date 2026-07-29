@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="css-paint-case" content="border-radius-019">
+<meta name="css-paint-difference-kind" content="w3c-correct-ua-choice">
+<meta name="css-paint-issue" content="css-double-border-rounded-corners">
+<title>border-radius-019</title>
+<style>
+@font-face {
+  font-family: Ahem;
+  src: url('/crates/hughie/tests/fixtures/Ahem.ttf') format('truetype');
+}
+html, body {
+  margin: 0;
+  width: 128px;
+  height: 128px;
+  overflow: hidden;
+  background: #fff;
+}
+body > div:first-of-type {
+  isolation: isolate;
+}
+</style>
+<!-- source: wpt/css/css-borders/border-radius/ -->
+<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#e0f2fe;"><div style="display:flex;position:absolute;left:14px;top:18px;width:100px;height:92px;box-sizing:border-box;background:#f59e0b;border-width:8px;border-style:double;border-color:#0891b2;border-radius:12px 28px"></div></div>

@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="css-paint-case" content="border-style-050">
+<meta name="css-paint-difference-kind" content="w3c-correct-ua-choice">
+<meta name="css-paint-issue" content="css-border-3d-light-face-color">
+<title>border-style-050</title>
+<style>
+@font-face {
+  font-family: Ahem;
+  src: url('/crates/hughie/tests/fixtures/Ahem.ttf') format('truetype');
+}
+html, body {
+  margin: 0;
+  width: 128px;
+  height: 128px;
+  overflow: hidden;
+  background: #fff;
+}
+body > div:first-of-type {
+  isolation: isolate;
+}
+</style>
+<!-- source: wpt/css/css-borders/ -->
+<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#fef2f2;"><div style="display:flex;position:absolute;left:18px;top:22px;width:92px;height:84px;box-sizing:border-box;background:#22c55e;border:6px inset #2563eb"></div></div>
