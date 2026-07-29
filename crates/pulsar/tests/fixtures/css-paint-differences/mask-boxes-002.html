@@ -1,0 +1,21 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="css-paint-case" content="mask-boxes-002">
+<meta name="css-paint-difference-kind" content="w3c-correct-raster-or-sampling">
+<meta name="css-paint-issue" content="vello-chromium-edge-coverage">
+<title>mask-boxes-002</title>
+<style>
+@font-face {
+  font-family: Ahem;
+  src: url('/crates/hughie/tests/fixtures/Ahem.ttf') format('truetype');
+}
+html, body {
+  margin: 0;
+  width: 128px;
+  height: 128px;
+  overflow: hidden;
+  background: #fff;
+}
+</style>
+<!-- source: wpt/css/css-masking/mask-origin/ -->
+<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#dcfce7;"><div style="display:flex;position:absolute;left:12px;top:12px;width:104px;height:104px;padding:14px;border:8px solid #2563eb;box-sizing:border-box;background:#f59e0b;mask-image:linear-gradient(135deg,black 0%,black 58%,transparent 58%,transparent 100%);mask-origin:border-box;mask-clip:content-box;mask-repeat:no-repeat;"></div></div>

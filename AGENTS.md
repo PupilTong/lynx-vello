@@ -517,8 +517,14 @@ git-ignored `crates/<crate>/tests/artifacts/`; the panic message names all
 three plus the exact differing-pixel count. Never accept a golden you have not
 looked at: a blank or all-white image compares happily against itself forever.
 Browser-owned suites can reject `FLASHBULB_UPDATE_SNAPSHOTS`; follow their
-checked capture and audit workflow instead. The CSS paint matrix records that
-workflow in `docs/css-paint-screenshot-matrix.md`.
+checked capture and audit workflow instead. The CSS paint atlas has two
+explicit reference owners: 644 Chromium matches remain browser-owned, while 61
+standards-permitted UA choices use native Pulsar/Parley snapshots in a separate
+directory. Native atlas references may be updated only with the filtered
+`CSS_PAINT_UPDATE_NATIVE=1 ... css_native_` workflow, which cannot overwrite
+browser references; the other 295 cases remain ignored. The CSS paint matrix
+records the exact capture, update, and full-browser-audit workflow in
+`docs/css-paint-screenshot-matrix.md`.
 
 ## Working with Codex
 

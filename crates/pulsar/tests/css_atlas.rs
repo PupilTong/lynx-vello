@@ -1,11 +1,11 @@
 //! Browser-referenced, pure-`<div>` CSS paint screenshot tests.
 //!
 //! The matrix retains all 1,000 independent 128×128 probes.  The 644 probes
-//! that pixelmatch Chromium exactly are active regressions and own committed
-//! reference PNGs.  The other 356 probes are explicit ignored fixtures: their
-//! source and audited issue remain reviewable, but a test never passes merely
-//! because a known difference still differs.  Up to twenty-five active
-//! documents share one isolated 640×640 Vello atlas readback.
+//! that pixelmatch Chromium own browser references.  Another 61 cases exercise
+//! CSS-permitted UA choices against native Pulsar/Parley snapshots.  The other
+//! 295 audited differences remain ignored fixtures.  Up to twenty-five active
+//! documents share one isolated 640×640 Vello atlas readback; a full audit
+//! compares all 1,000 against temporary Chromium references.
 
 #[path = "common/mod.rs"]
 mod common;
@@ -37,11 +37,14 @@ const ATLAS_SIZE: u32 = CELL_SIZE * 5;
 const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
 const AUDIT_ENV: &str = "CSS_PAINT_AUDIT";
 const REFERENCE_DIR_ENV: &str = "CSS_PAINT_REFERENCE_DIR";
+const UPDATE_NATIVE_ENV: &str = "CSS_PAINT_UPDATE_NATIVE";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SkipKind {
-    /// W3C-correct output whose Chromium difference is an allowed UA or raster choice.
-    ConformingDifference,
+enum DifferenceKind {
+    /// W3C-correct output with a rasterization or boundary-sampling difference.
+    RasterOrSampling,
+    /// W3C-correct output for behavior the specification leaves to the UA.
+    UaChoice,
     /// A real standards parser, layout, or paint gap.
     W3cGap,
     /// The browser/native fixtures assign the outer element different root roles.
@@ -50,12 +53,13 @@ enum SkipKind {
     NonW3cCompatibility,
 }
 
-impl SkipKind {
+impl DifferenceKind {
     const fn as_str(self) -> &'static str {
         match self {
-            Self::ConformingDifference => "conforming-difference",
+            Self::RasterOrSampling => "w3c-correct-raster-or-sampling",
+            Self::UaChoice => "w3c-correct-ua-choice",
             Self::W3cGap => "w3c-gap",
-            Self::RootRoleOracle => "root-role-oracle",
+            Self::RootRoleOracle => "root-role-oracle-mismatch",
             Self::NonW3cCompatibility => "non-w3c-compatibility",
         }
     }
@@ -63,8 +67,26 @@ impl SkipKind {
 
 #[derive(Clone, Copy, Debug)]
 enum Expectation {
-    Match,
-    Skip { kind: SkipKind, issue: &'static str },
+    BrowserMatch,
+    NativeSnapshot {
+        kind: DifferenceKind,
+        issue: &'static str,
+    },
+    Skip {
+        kind: DifferenceKind,
+        issue: &'static str,
+    },
+}
+
+impl Expectation {
+    const fn difference(self) -> Option<(DifferenceKind, &'static str)> {
+        match self {
+            Self::BrowserMatch => None,
+            Self::NativeSnapshot { kind, issue } | Self::Skip { kind, issue } => {
+                Some((kind, issue))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -78,8 +100,11 @@ struct CssPaintCase {
 
 macro_rules! css_paint_case_tests {
     (
-        matches {
-            $( $match_index:literal => $match_test:ident; )*
+        browser_matches {
+            $( $browser_index:literal => $browser_test:ident; )*
+        }
+        native_snapshots {
+            $( $native_index:literal => $native_test:ident; )*
         }
         skips {
             $( $skip_index:literal => $skip_test:ident, $reason:literal; )*
@@ -87,8 +112,14 @@ macro_rules! css_paint_case_tests {
     ) => {
         $(
             #[test]
-            fn $match_test() {
-                crate::run_match_case($match_index);
+            fn $browser_test() {
+                crate::run_browser_match_case($browser_index);
+            }
+        )*
+        $(
+            #[test]
+            fn $native_test() {
+                crate::run_native_snapshot_case($native_index);
             }
         )*
         $(
@@ -102,7 +133,7 @@ macro_rules! css_paint_case_tests {
 }
 
 mod generated {
-    use super::{CssPaintCase, Expectation, SkipKind};
+    use super::{CssPaintCase, DifferenceKind, Expectation};
 
     include!("generated/css_paint_cases.rs");
 }
@@ -126,17 +157,35 @@ static SHARDS: [OnceLock<ShardOutcome>; SHARD_COUNT] = [const { OnceLock::new() 
 static AUDIT_WRITE: Mutex<()> = Mutex::new(());
 static AUDIT_TARGET: OnceLock<PathBuf> = OnceLock::new();
 
-fn run_match_case(index: usize) {
+fn run_browser_match_case(index: usize) {
+    assert_flashbulb_update_disabled();
     let case = &generated::CASES[index];
     assert!(
-        matches!(case.expectation, Expectation::Match),
-        "{}: generated active test is not classified as a match",
+        matches!(case.expectation, Expectation::BrowserMatch),
+        "{}: generated browser test is not classified as a browser match",
+        case.name
+    );
+    assert!(
+        !native_update_enabled(),
+        "{UPDATE_NATIVE_ENV}=1 only accepts tests filtered by `css_native_`; \
+         browser references are never writable from Rust"
+    );
+    compare_case(index);
+}
+
+fn run_native_snapshot_case(index: usize) {
+    assert_flashbulb_update_disabled();
+    let case = &generated::CASES[index];
+    assert!(
+        matches!(case.expectation, Expectation::NativeSnapshot { .. }),
+        "{}: generated native test is not classified as a native snapshot",
         case.name
     );
     compare_case(index);
 }
 
 fn run_skipped_case(index: usize) {
+    assert_flashbulb_update_disabled();
     let case = &generated::CASES[index];
     assert!(
         matches!(case.expectation, Expectation::Skip { .. }),
@@ -165,6 +214,12 @@ fn run_skipped_case(index: usize) {
 
 fn compare_case(index: usize) {
     let case = &generated::CASES[index];
+    let audit = std::env::var_os(AUDIT_ENV);
+    let update_native = native_update_enabled();
+    assert!(
+        audit.is_none() || !update_native,
+        "{AUDIT_ENV} and {UPDATE_NATIVE_ENV}=1 are mutually exclusive"
+    );
     let shard = index / CASES_PER_SHARD;
     let slot = index % CASES_PER_SHARD;
     let actual_atlas = match SHARDS[shard].get_or_init(|| render_shard(shard)) {
@@ -174,10 +229,18 @@ fn compare_case(index: usize) {
     };
     let actual = crop_cell(actual_atlas, slot);
 
-    let golden = reference_path(case.name);
+    if audit.is_none()
+        && update_native
+        && matches!(case.expectation, Expectation::NativeSnapshot { .. })
+    {
+        update_native_reference(case.name, &actual);
+        return;
+    }
+
+    let (golden, reference_owner) = reference_path(case);
     assert!(
         golden.exists(),
-        "{}: missing browser golden {}; run the CSS paint reference generator",
+        "{}: missing {reference_owner} golden {}",
         case.name,
         golden.display()
     );
@@ -186,7 +249,7 @@ fn compare_case(index: usize) {
     assert_eq!(
         (expected.width(), expected.height()),
         (CELL_SIZE, CELL_SIZE),
-        "{}: browser golden must be {CELL_SIZE}×{CELL_SIZE}",
+        "{}: {reference_owner} golden must be {CELL_SIZE}×{CELL_SIZE}",
         case.name
     );
     let comparison = compare(&expected, &actual, CompareOptions::default());
@@ -201,7 +264,7 @@ fn compare_case(index: usize) {
     }
     let artifacts = write_artifacts(case.name, &expected, &actual, &comparison.diff);
     panic!(
-        "{} [{}] differs from Chromium: {} of {} pixels ({:.4}%), \
+        "{} [{}] differs from {reference_owner}: {} of {} pixels ({:.4}%), \
          {} anti-aliased pixels ignored; source {}\n{}",
         case.name,
         case.category,
@@ -214,27 +277,100 @@ fn compare_case(index: usize) {
     );
 }
 
-fn reference_path(name: &str) -> PathBuf {
-    if let Some(directory) = std::env::var_os(REFERENCE_DIR_ENV) {
-        return PathBuf::from(directory).join(format!("{name}.png"));
-    }
+fn reference_path(case: &CssPaintCase) -> (PathBuf, &'static str) {
     let screenshots = screenshots_in(env!("CARGO_MANIFEST_DIR"));
     assert!(
         !screenshots.is_updating(),
-        "{name}: browser-owned CSS atlas goldens must never be updated from \
-         lynx-vello; regenerate them with Playwright"
+        "CSS atlas references reject FLASHBULB_UPDATE_SNAPSHOTS; browser \
+         references come from Playwright and native references require \
+         {UPDATE_NATIVE_ENV}=1"
     );
-    screenshots.path(&["css-paint", name])
+
+    if std::env::var_os(AUDIT_ENV).is_some() {
+        let directory = std::env::var_os(REFERENCE_DIR_ENV).unwrap_or_else(|| {
+            panic!(
+                "{REFERENCE_DIR_ENV} must point at temporary all-case Chromium \
+                 references during a CSS-paint audit"
+            )
+        });
+        return (
+            PathBuf::from(directory).join(format!("{}.png", case.name)),
+            "temporary Chromium audit",
+        );
+    }
+
+    assert!(
+        std::env::var_os(REFERENCE_DIR_ENV).is_none(),
+        "{REFERENCE_DIR_ENV} is only valid together with {AUDIT_ENV}"
+    );
+    match case.expectation {
+        Expectation::BrowserMatch => (screenshots.path(&["css-paint", case.name]), "Chromium"),
+        Expectation::NativeSnapshot { .. } => (
+            screenshots.path(&["css-paint-native", case.name]),
+            "native Pulsar/Parley",
+        ),
+        Expectation::Skip { .. } => {
+            panic!("{}: skipped cases need CSS-paint audit mode", case.name)
+        }
+    }
+}
+
+fn update_native_reference(name: &str, actual: &Image) {
+    assert!(
+        std::env::var_os(AUDIT_ENV).is_none() && std::env::var_os(REFERENCE_DIR_ENV).is_none(),
+        "{UPDATE_NATIVE_ENV}=1 cannot update references during an audit"
+    );
+    let screenshots = screenshots_in(env!("CARGO_MANIFEST_DIR"));
+    assert!(
+        !screenshots.is_updating(),
+        "{UPDATE_NATIVE_ENV}=1 must not be combined with FLASHBULB_UPDATE_SNAPSHOTS"
+    );
+    let path = screenshots.path(&["css-paint-native", name]);
+    let parent = path
+        .parent()
+        .expect("a native CSS-paint snapshot has a parent directory");
+    std::fs::create_dir_all(parent)
+        .unwrap_or_else(|error| panic!("cannot create {}: {error}", parent.display()));
+    actual
+        .write_png(&path)
+        .unwrap_or_else(|error| panic!("cannot update {}: {error}", path.display()));
+    eprintln!("updated native CSS-paint snapshot {}", path.display());
+}
+
+fn native_update_enabled() -> bool {
+    match std::env::var(UPDATE_NATIVE_ENV) {
+        Ok(value) => {
+            assert_eq!(
+                value, "1",
+                "{UPDATE_NATIVE_ENV} must be unset or exactly `1`"
+            );
+            true
+        }
+        Err(std::env::VarError::NotPresent) => false,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("{UPDATE_NATIVE_ENV} must contain Unicode `1`")
+        }
+    }
+}
+
+fn assert_flashbulb_update_disabled() {
+    assert!(
+        !screenshots_in(env!("CARGO_MANIFEST_DIR")).is_updating(),
+        "CSS atlas references reject FLASHBULB_UPDATE_SNAPSHOTS; browser \
+         references come from Playwright and native references require \
+         {UPDATE_NATIVE_ENV}=1"
+    );
 }
 
 fn init_gpu() -> GpuAvailability {
     match Headless::new() {
         Ok(gpu) => GpuAvailability::Ready(Box::new(Mutex::new(gpu))),
         Err(GpuError::NoAdapter)
-            if std::env::var("FLASHBULB_REQUIRE_GPU").as_deref() == Ok("1") =>
+            if std::env::var("FLASHBULB_REQUIRE_GPU").as_deref() == Ok("1")
+                || native_update_enabled() =>
         {
             GpuAvailability::Failed(Arc::from(
-                "no usable GPU adapter, and FLASHBULB_REQUIRE_GPU=1",
+                "no usable GPU adapter while GPU-backed CSS-paint output is required",
             ))
         }
         Err(GpuError::NoAdapter) => {
@@ -411,82 +547,151 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 
 #[test]
 fn css_paint_asset_inventory() {
+    assert_inventory_mode();
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let golden_directory = manifest.join("tests/screenshots/css-paint");
-    let fixture_directory = manifest.join("tests/fixtures/css-paint-skipped");
-    let skip_registry = manifest.join("tests/css-paint-skips.tsv");
+    let browser_golden_directory = manifest.join("tests/screenshots/css-paint");
+    let native_golden_directory = manifest.join("tests/screenshots/css-paint-native");
+    let fixture_directory = manifest.join("tests/fixtures/css-paint-differences");
+    let difference_registry = manifest.join("tests/css-paint-differences.tsv");
 
-    let mut active = BTreeSet::new();
+    let mut browser_matches = BTreeSet::new();
+    let mut native_snapshots = BTreeSet::new();
     let mut skipped = BTreeSet::new();
-    let mut expected_skip_registry = BTreeMap::new();
-    let mut conforming = 0;
+    let mut expected_difference_registry = BTreeMap::new();
+    let mut raster_or_sampling = 0;
+    let mut ua_choices = 0;
     let mut gaps = 0;
     let mut root_oracles = 0;
     let mut non_w3c = 0;
     for case in &generated::CASES {
         match case.expectation {
-            Expectation::Match => {
+            Expectation::BrowserMatch => {
                 assert!(
-                    active.insert(case.name.to_owned()),
+                    browser_matches.insert(case.name.to_owned()),
                     "duplicate case {}",
                     case.name
                 );
             }
-            Expectation::Skip { kind, issue } => {
-                assert!(!issue.is_empty(), "{}: skipped issue is empty", case.name);
+            Expectation::NativeSnapshot { kind, .. } => {
+                assert_eq!(
+                    kind,
+                    DifferenceKind::UaChoice,
+                    "{}: only permitted UA choices may own native snapshots",
+                    case.name
+                );
+                assert!(
+                    native_snapshots.insert(case.name.to_owned()),
+                    "duplicate case {}",
+                    case.name
+                );
+            }
+            Expectation::Skip { kind, .. } => {
+                assert_ne!(
+                    kind,
+                    DifferenceKind::UaChoice,
+                    "{}: permitted UA choices must be active native snapshots",
+                    case.name
+                );
                 assert!(
                     skipped.insert(case.name.to_owned()),
                     "duplicate case {}",
                     case.name
                 );
-                assert_eq!(
-                    expected_skip_registry.insert(case.name.to_owned(), issue),
-                    None,
-                    "duplicate skip-registry case {}",
-                    case.name
-                );
-                match kind {
-                    SkipKind::ConformingDifference => conforming += 1,
-                    SkipKind::W3cGap => gaps += 1,
-                    SkipKind::RootRoleOracle => root_oracles += 1,
-                    SkipKind::NonW3cCompatibility => non_w3c += 1,
-                }
+            }
+        }
+
+        if let Some((kind, issue)) = case.expectation.difference() {
+            assert!(
+                !issue.is_empty(),
+                "{}: difference issue is empty",
+                case.name
+            );
+            assert_eq!(
+                expected_difference_registry.insert(case.name.to_owned(), issue),
+                None,
+                "duplicate difference-registry case {}",
+                case.name
+            );
+            match kind {
+                DifferenceKind::RasterOrSampling => raster_or_sampling += 1,
+                DifferenceKind::UaChoice => ua_choices += 1,
+                DifferenceKind::W3cGap => gaps += 1,
+                DifferenceKind::RootRoleOracle => root_oracles += 1,
+                DifferenceKind::NonW3cCompatibility => non_w3c += 1,
             }
         }
     }
 
     assert_eq!(generated::CASES.len(), CASE_COUNT);
-    assert_eq!(active.len(), 644);
-    assert_eq!(skipped.len(), 356);
-    assert!(active.is_disjoint(&skipped));
+    assert_eq!(browser_matches.len(), 644);
+    assert_eq!(native_snapshots.len(), 61);
+    assert_eq!(skipped.len(), 295);
+    assert!(browser_matches.is_disjoint(&native_snapshots));
+    assert!(browser_matches.is_disjoint(&skipped));
+    assert!(native_snapshots.is_disjoint(&skipped));
     assert_eq!(
-        (conforming, gaps, root_oracles, non_w3c),
-        (145, 170, 22, 19)
+        (raster_or_sampling, ua_choices, gaps, root_oracles, non_w3c),
+        (84, 61, 170, 22, 19)
     );
     assert_eq!(
-        read_skip_registry(&skip_registry),
-        expected_skip_registry,
-        "checked skip registry must match generated case metadata"
-    );
-
-    let golden_names = asset_basenames(&golden_directory, "png");
-    assert_eq!(
-        golden_names, active,
-        "committed browser PNG basenames must equal the active-case set"
-    );
-    let fixture_names = asset_basenames(&fixture_directory, "html");
-    assert_eq!(
-        fixture_names, skipped,
-        "committed skipped-fixture basenames must equal the ignored-case set"
+        read_difference_registry(&difference_registry),
+        expected_difference_registry,
+        "checked difference registry must match generated case metadata"
     );
 
-    validate_skipped_fixtures(&fixture_directory);
+    validate_asset_basenames(
+        &browser_golden_directory,
+        &native_golden_directory,
+        &fixture_directory,
+        &browser_matches,
+        &native_snapshots,
+        &skipped,
+    );
+    validate_difference_fixtures(&fixture_directory);
 }
 
-fn validate_skipped_fixtures(fixture_directory: &Path) {
+fn assert_inventory_mode() {
+    assert_flashbulb_update_disabled();
+    assert!(
+        !native_update_enabled(),
+        "{UPDATE_NATIVE_ENV}=1 must use the `css_native_` test filter; run \
+         the ordinary suite afterward to validate the completed inventory"
+    );
+}
+
+fn validate_asset_basenames(
+    browser_golden_directory: &Path,
+    native_golden_directory: &Path,
+    fixture_directory: &Path,
+    browser_matches: &BTreeSet<String>,
+    native_snapshots: &BTreeSet<String>,
+    skipped: &BTreeSet<String>,
+) {
+    let browser_golden_names = asset_basenames(browser_golden_directory, "png");
+    assert_eq!(
+        &browser_golden_names, browser_matches,
+        "committed browser PNG basenames must equal the BrowserMatch set"
+    );
+    let native_golden_names = asset_basenames(native_golden_directory, "png");
+    assert_eq!(
+        &native_golden_names, native_snapshots,
+        "committed native PNG basenames must equal the NativeSnapshot set"
+    );
+    let fixture_names = asset_basenames(fixture_directory, "html");
+    let difference_names = native_snapshots
+        .union(skipped)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        fixture_names, difference_names,
+        "committed difference-fixture basenames must equal the difference registry"
+    );
+}
+
+fn validate_difference_fixtures(fixture_directory: &Path) {
     for case in generated::CASES
         .iter()
-        .filter(|case| matches!(case.expectation, Expectation::Skip { .. }))
+        .filter(|case| case.expectation.difference().is_some())
     {
         let fixture = fixture_directory.join(format!("{}.html", case.name));
         let source = std::fs::read_to_string(&fixture)
@@ -497,16 +702,17 @@ fn validate_skipped_fixtures(fixture_directory: &Path) {
             "{}: fixture does not contain its case marker",
             case.name
         );
-        let Expectation::Skip { kind, issue } = case.expectation else {
-            unreachable!("the iterator retains only skipped cases");
-        };
+        let (kind, issue) = case
+            .expectation
+            .difference()
+            .expect("the iterator retains only difference cases");
         let kind_marker = format!(
-            r#"<meta name="css-paint-skip-kind" content="{}">"#,
+            r#"<meta name="css-paint-difference-kind" content="{}">"#,
             kind.as_str()
         );
         assert!(
             source.contains(&kind_marker),
-            "{}: fixture does not contain its skip-kind marker",
+            "{}: fixture does not contain its difference-kind marker",
             case.name
         );
         let issue_marker = format!(r#"<meta name="css-paint-issue" content="{issue}">"#);
@@ -523,7 +729,7 @@ fn validate_skipped_fixtures(fixture_directory: &Path) {
     }
 }
 
-fn read_skip_registry(path: &Path) -> BTreeMap<String, &'static str> {
+fn read_difference_registry(path: &Path) -> BTreeMap<String, &'static str> {
     let source = std::fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
     let mut result = BTreeMap::new();
@@ -548,13 +754,10 @@ fn read_skip_registry(path: &Path) -> BTreeMap<String, &'static str> {
         let generated_issue = generated::CASES
             .iter()
             .find(|case| case.name == name)
-            .and_then(|case| match case.expectation {
-                Expectation::Skip { issue, .. } => Some(issue),
-                Expectation::Match => None,
-            })
+            .and_then(|case| case.expectation.difference().map(|(_, issue)| issue))
             .unwrap_or_else(|| {
                 panic!(
-                    "{}:{}: unknown or active case {name}",
+                    "{}:{}: unknown or browser-match case {name}",
                     path.display(),
                     line_index + 1
                 )

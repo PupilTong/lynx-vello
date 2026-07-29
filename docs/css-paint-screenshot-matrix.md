@@ -9,9 +9,9 @@ known differences found by the first complete audit.
 The matrix contains exactly 1,000 named Rust tests and 1,000 unique fragments.
 Every case is an independent 128×128 document containing only `<div>` elements;
 the 160 text cases add plain text nodes inside those divs. The generator asserts
-name and fragment uniqueness, and the test importer rejects every other
-element. Structural divs explicitly use flex layout because flow/block layout
-is not yet implemented by Hughie.
+name and fragment uniqueness and rejects any generated fragment containing an
+element other than `div`. Structural divs explicitly use flex layout because
+flow/block layout is not yet implemented by Hughie.
 
 The references were captured from Chrome 150.0.7871.187 through Playwright at
 DPR 1, in sRGB, with a fixed 640×640 viewport. Text cases use the same vendored
@@ -20,29 +20,44 @@ that the face loaded. Each browser shard contains 25 isolated 128×128 iframes.
 In full-audit mode, the native side likewise paints 25 independent
 `dom::Document`s and appends their scenes into isolated cells before one GPU
 readback. A normal run preserves the original index/slot topology but does not
-build ignored cases. A permanent pixel test checks a non-zero translated cell
-against a standalone render byte-for-byte and verifies that outset effects do
-not leak into either adjacent cell.
+build the 295 ignored cases. A permanent pixel test checks a non-zero
+translated cell against a standalone render byte-for-byte and verifies that
+outset effects do not leak into either adjacent cell.
 
-The committed PNGs are browser-owned: `FLASHBULB_UPDATE_SNAPSHOTS` is rejected
-by this suite. Comparison uses Flashbulb's Playwright/pixelmatch-compatible
-defaults: YIQ threshold 0.2, anti-alias detection enabled, and a zero
-non-antialiased-pixel budget.
+The ordinary suite has three explicit expectation states:
 
-Only the 644 pixelmatch-exact references are committed and active in the
-ordinary regression run. Each of the 356 audited mismatches instead has a
-committed standalone HTML fixture under
-`crates/pulsar/tests/fixtures/css-paint-skipped/`;
-the generated Rust test retains the same fragment but is explicitly ignored
-with its issue ID, and no PNG is checked in for it. The asset inventory test
-requires the PNG basenames to equal the active set and the HTML fixture
-basenames to equal the skip set exactly.
+| State | Cases | Checked reference |
+| --- | ---: | --- |
+| `BrowserMatch` | 644 | Chromium PNG under `tests/screenshots/css-paint/` |
+| `NativeSnapshot` | 61 | Pulsar/Parley PNG under `tests/screenshots/css-paint-native/` |
+| `Skip` | 295 | No PNG and `#[ignore]`; retained for full browser audit |
 
-Issue cases are skips, not permissive xfails: they perform no ordinary pixel
+The 61 native snapshots are the audited cases where CSS permits different UA
+geometry, pattern, color, or `auto` metrics. They are active regressions: their
+current standards-conforming Pulsar/Parley result must remain stable even
+though it is not required to match Chromium. The 84 rasterization/sampling
+differences remain skips because a machine-independent native baseline would
+turn backend coverage noise into product behavior.
+
+Every one of the 356 Chromium differences has a standalone HTML fixture under
+`crates/pulsar/tests/fixtures/css-paint-differences/` and a row in
+`crates/pulsar/tests/css-paint-differences.tsv`. Thus “difference” is not
+synonymous with “ignored”: the registry is the union of 61 active native
+snapshots and 295 skips. The asset inventory requires exact basename equality
+for the 644 browser PNGs, 61 native PNGs, and 356 difference fixtures.
+
+`FLASHBULB_UPDATE_SNAPSHOTS` is rejected by the entire atlas suite. Browser
+references can only come from the Playwright split workflow. Native references
+can only be written through the filtered `CSS_PAINT_UPDATE_NATIVE=1` workflow
+below, which cannot write the browser directory. Comparison in both active
+states uses Flashbulb's Playwright/pixelmatch-compatible defaults: YIQ threshold
+0.2, anti-alias detection enabled, and a zero non-antialiased-pixel budget.
+
+Skipped cases are not permissive xfails: they perform no ordinary pixel
 comparison and are not indirectly rendered merely because an active neighbor
 shares their atlas shard. Re-auditing is a separate, explicit workflow that
 temporarily captures all 1,000 browser references, includes ignored tests, and
-rebuilds the two-column case-to-issue skip registry.
+rebuilds the two-column case-to-issue difference registry.
 
 The generated cases cite the WPT area that informed each family. They are
 small, deterministic probes adapted to the current pure-div DOM/layout surface,
@@ -137,7 +152,7 @@ threshold. The 356 mismatches are not one undifferentiated bug count:
 | Definite W3C gap | 170 | A standard grammar or required behavior is missing or implemented incorrectly. |
 | Atlas root-role/oracle mismatch | 22 | The browser and native fixtures assign a different structural role to the outer div, so the comparison cannot judge the negative-z behavior. |
 | Non-W3C compatibility | 19 | `text-stroke` is a WebKit/Lynx compatibility surface, not a W3C CSS property. |
-| **Audited mismatch total** | **356** | Exactly the ignored case registry. |
+| **Audited mismatch total** | **356** | Exactly the difference registry: 61 native snapshots plus 295 skips. |
 
 The 84 raster/sample cases are 8 hard-stop boundary samples, 48 general
 edge-coverage cases, and 28 ordinary text subpixel cases. The 61 UA-choice
@@ -151,7 +166,7 @@ Strong control results include 100/100 transform cases, 60/60 overflow and
 nested-overflow cases, 20/20 opacity groups, 20/20 clip ellipses, 10/10
 `clip-path: path()`, and 50/50 outset/inset shadow cases.
 
-## Audited mismatch and skip inventory
+## Audited difference inventory
 
 | Issue | Class | Cases | Finding and implementation evidence |
 | --- | --- | ---: | --- |
@@ -180,12 +195,14 @@ nested-overflow cases, 20/20 opacity groups, 20/20 clip ellipses, 10/10
 | `pulsar-text-stroke-join-geometry` | Non-W3C compatibility | 19 | Every `text-stroke-000..019` case except matching control `006`: `text-stroke`/`-webkit-text-stroke` is a WebKit/Lynx extension, not a W3C CSS property. Kurbo's default join differs from Chromium's glyph-stroke join and unhinted Vello coverage contributes remaining pixels. |
 | `css-text-subpixel-rasterization` | W3C-correct: raster/sample | 28 | Ordinary Ahem glyph/baseline coverage differs at subpixel edges with Vello glyph hinting disabled. The text is present and standards behavior is not missing. |
 
-The authoritative skip mapping is the two-column
-`crates/pulsar/tests/css-paint-skips.tsv` (`case-name`, `issue`). The
+The authoritative difference mapping is the two-column
+`crates/pulsar/tests/css-paint-differences.tsv` (`case-name`, `issue`). The
 name-based classifier refuses an unclassified mismatch, a duplicate row or
 name, index/name drift, a missing case, or a mapped case that now matches. It
 also asserts the five disposition totals (84, 61, 170, 22, and 19), so the
-145-case W3C-correct subtotal cannot change accidentally.
+145-case W3C-correct subtotal cannot change accidentally. The generator maps
+only the 61 UA-choice rows to `NativeSnapshot`; every other registry row maps
+to `Skip`.
 
 ## Regeneration and audit
 
@@ -206,36 +223,54 @@ node crates/pulsar/tests/support/capture_css_paint_references.mjs \
   http://127.0.0.1:8765 output/playwright/css-paint/atlases
 ```
 
-Inspect the atlases, then split them into the committed reference directory.
-The default split writes only the 644 active pixelmatch-exact tiles and removes
-goldens for every case in `css-paint-skips.tsv`:
+Inspect the atlases, then split them into the committed browser-reference
+directory. The default split writes only the 644 `BrowserMatch` tiles; it never
+writes either the native-reference directory or any other difference:
 
 ```sh
 python3 crates/pulsar/tests/support/generate_css_paint_cases.py \
   --split-atlases output/playwright/css-paint/atlases
-python3 crates/pulsar/tests/support/generate_css_paint_cases.py \
-  --prune-skipped-goldens --validate-assets
 ```
 
-Run the checked regression suite. It executes and compares 644 cases; Cargo
-reports the 356 issue cases as ignored, and the native atlas builder does not
-render those cases in a normal run:
+To intentionally accept the current Pulsar/Parley behavior for the 61
+UA-choice cases, run only the generated `css_native_` tests on a real GPU:
+
+```sh
+CSS_PAINT_UPDATE_NATIVE=1 \
+  FLASHBULB_REQUIRE_GPU=1 \
+  cargo test -p pulsar --test css_atlas css_native_
+```
+
+This command is deliberately incompatible with audit mode and with
+`FLASHBULB_UPDATE_SNAPSHOTS`. The test-name filter also excludes the inventory
+test, preventing it from racing the parallel snapshot writes. Inspect all
+updated PNGs, then validate the complete asset partition:
+
+```sh
+python3 crates/pulsar/tests/support/generate_css_paint_cases.py \
+  --prune-reference-assets --validate-assets
+```
+
+The checked regression suite compares 705 cases: 644 to Chromium and 61 to
+native snapshots. Cargo reports 295 cases as ignored, and the native atlas
+builder does not render those skipped cases in a normal run:
 
 ```sh
 FLASHBULB_REQUIRE_GPU=1 cargo test -p pulsar --test css_atlas
 ```
 
 To re-audit after renderer changes, reuse the 40 captured atlases but split all
-1,000 references into a fresh temporary directory. `--include-skipped` is
-deliberately legal only with `--reference-output`, so a full audit cannot
-accidentally add issue PNGs to the committed directory:
+1,000 Chromium references into a fresh temporary directory.
+`--include-differences` is deliberately legal only with
+`--reference-output` outside `tests/screenshots`, so a full audit cannot
+overwrite either committed browser or native PNGs:
 
 ```sh
 CSS_PAINT_AUDIT_REFS="$(mktemp -d)"
 python3 crates/pulsar/tests/support/generate_css_paint_cases.py \
   --split-atlases output/playwright/css-paint/atlases \
   --reference-output "$CSS_PAINT_AUDIT_REFS" \
-  --include-skipped
+  --include-differences
 CSS_PAINT_AUDIT=/tmp/css-paint-audit.tsv \
   CSS_PAINT_REFERENCE_DIR="$CSS_PAINT_AUDIT_REFS" \
   FLASHBULB_REQUIRE_GPU=1 \
@@ -244,20 +279,26 @@ python3 crates/pulsar/tests/support/classify_css_paint_audit.py \
   /tmp/css-paint-audit.tsv
 ```
 
-Audit mode renders all 1,000 cases and requires a complete 1,000-row TSV. If a
-mapped case now matches, a new mismatch appears, or any disposition total
-changes, the classifier stops before replacing `css-paint-skips.tsv`; review
-the mapping and its standards disposition explicitly, then rerun it.
+Audit mode routes all three states—including `NativeSnapshot`—to the temporary
+Chromium references, renders all 1,000 cases, and requires a complete 1,000-row
+TSV. If a mapped case now matches, a new mismatch appears, or any disposition
+total changes, the classifier stops before replacing
+`css-paint-differences.tsv`; review the mapping and its standards disposition
+explicitly, then rerun it.
 
-After classification, regenerate the Rust fixtures and the committed active
-references against the newly classified skip set, then validate the 644/356
-asset partition:
+After classification, first regenerate Rust and HTML metadata, then update the
+native UA-choice set and split the browser matches. Finally validate the
+644/61/295 asset partition:
 
 ```sh
+python3 crates/pulsar/tests/support/generate_css_paint_cases.py
+CSS_PAINT_UPDATE_NATIVE=1 \
+  FLASHBULB_REQUIRE_GPU=1 \
+  cargo test -p pulsar --test css_atlas css_native_
 python3 crates/pulsar/tests/support/generate_css_paint_cases.py \
   --split-atlases output/playwright/css-paint/atlases
 python3 crates/pulsar/tests/support/generate_css_paint_cases.py \
-  --prune-skipped-goldens --validate-assets
+  --prune-reference-assets --validate-assets
 ```
 
 The temporary directory named by `CSS_PAINT_AUDIT_REFS` is disposable after

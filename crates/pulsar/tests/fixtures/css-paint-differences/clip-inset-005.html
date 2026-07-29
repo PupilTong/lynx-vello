@@ -1,0 +1,21 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="css-paint-case" content="clip-inset-005">
+<meta name="css-paint-difference-kind" content="w3c-gap">
+<meta name="css-paint-issue" content="stylo-lynx-clip-path-geometry-box-grammar">
+<title>clip-inset-005</title>
+<style>
+@font-face {
+  font-family: Ahem;
+  src: url('/crates/hughie/tests/fixtures/Ahem.ttf') format('truetype');
+}
+html, body {
+  margin: 0;
+  width: 128px;
+  height: 128px;
+  overflow: hidden;
+  background: #fff;
+}
+</style>
+<!-- source: wpt/css/css-masking/clip-path/ -->
+<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;background:#fef2f2;"><div style="display:flex;position:absolute;left:14px;top:14px;width:100px;height:100px;padding:12px;border:6px solid #1d4ed8;box-sizing:border-box;background:linear-gradient(135deg,#ef4444 0%,#22c55e 100%);clip-path:inset(12px 20px) content-box"></div></div>

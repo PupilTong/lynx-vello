@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Generate the 1,000-case pure-div CSS paint screenshot matrix.
 
-The generated Rust is consumed by ``tests/css_atlas.rs``.  Exactly matching
-cases are active and own committed Chromium PNGs.  Audited differences are
-``#[ignore]`` fixtures with standalone HTML reproductions and no committed
-PNGs; no test passes merely because a known difference still differs.
+The generated Rust is consumed by ``tests/css_atlas.rs``. Chromium matches
+own browser PNGs, permitted UA choices own native Pulsar/Parley snapshots, and
+the remaining audited differences are ``#[ignore]``. Every difference retains
+a standalone HTML reproduction.
 
 The optional HTML output contains forty 5x5 browser atlases; every cell is an
 isolated 128x128 iframe.
@@ -24,7 +24,7 @@ For a full audit, split all references into a disposable directory:
 
     python3 crates/pulsar/tests/support/generate_css_paint_cases.py \
       --split-atlases output/playwright/css-paint/atlases \
-      --reference-output /tmp/css-paint-references --include-skipped
+      --reference-output /tmp/css-paint-references --include-differences
 
 The split step uses Pillow only as a maintainer tool.  The Rust test suite
 decodes committed PNGs through ``flashbulb`` and has no Python dependency.
@@ -44,9 +44,10 @@ from typing import Iterable
 
 ROOT = Path(__file__).resolve().parents[4]
 GENERATED = ROOT / "crates/pulsar/tests/generated/css_paint_cases.rs"
-GOLDENS = ROOT / "crates/pulsar/tests/screenshots/css-paint"
-SKIP_FIXTURES = ROOT / "crates/pulsar/tests/fixtures/css-paint-skipped"
-SKIPS = ROOT / "crates/pulsar/tests/css-paint-skips.tsv"
+BROWSER_GOLDENS = ROOT / "crates/pulsar/tests/screenshots/css-paint"
+NATIVE_GOLDENS = ROOT / "crates/pulsar/tests/screenshots/css-paint-native"
+DIFFERENCE_FIXTURES = ROOT / "crates/pulsar/tests/fixtures/css-paint-differences"
+DIFFERENCES = ROOT / "crates/pulsar/tests/css-paint-differences.tsv"
 
 CASE_COUNT = 1_000
 CELL_SIZE = 128
@@ -64,26 +65,30 @@ class Case:
     fragment: str
 
 
-class SkipKind(Enum):
-    CONFORMING_DIFFERENCE = "conforming-difference"
+class DifferenceKind(Enum):
+    RASTER_OR_SAMPLING = "w3c-correct-raster-or-sampling"
+    UA_CHOICE = "w3c-correct-ua-choice"
     W3C_GAP = "w3c-gap"
-    ROOT_ROLE_ORACLE = "root-role-oracle"
+    ROOT_ROLE_ORACLE = "root-role-oracle-mismatch"
     NON_W3C_COMPATIBILITY = "non-w3c-compatibility"
 
 
 @dataclass(frozen=True)
-class Skip:
+class Difference:
     issue: str
-    kind: SkipKind
+    kind: DifferenceKind
 
 
-CONFORMING_DIFFERENCE_ISSUES = {
+RASTER_OR_SAMPLING_ISSUES = {
     "css-gradient-hard-stop-boundary-sampling",
+    "vello-chromium-edge-coverage",
+    "css-text-subpixel-rasterization",
+}
+
+UA_CHOICE_ISSUES = {
     "css-border-dash-dot-pattern",
     "css-border-3d-light-face-color",
     "css-double-border-rounded-corners",
-    "vello-chromium-edge-coverage",
-    "css-text-subpixel-rasterization",
     "css-text-decoration-auto-thickness-ua-choice",
 }
 
@@ -1244,24 +1249,26 @@ def all_cases() -> list[Case]:
     return cases
 
 
-def classify_skip(name: str, issue: str) -> SkipKind:
-    if issue in CONFORMING_DIFFERENCE_ISSUES:
-        return SkipKind.CONFORMING_DIFFERENCE
+def classify_difference(name: str, issue: str) -> DifferenceKind:
+    if issue in RASTER_OR_SAMPLING_ISSUES:
+        return DifferenceKind.RASTER_OR_SAMPLING
+    if issue in UA_CHOICE_ISSUES:
+        return DifferenceKind.UA_CHOICE
     if issue in W3C_GAP_ISSUES:
-        return SkipKind.W3C_GAP
+        return DifferenceKind.W3C_GAP
     if issue == "css-atlas-negative-z-root-role-mismatch":
-        return SkipKind.ROOT_ROLE_ORACLE
+        return DifferenceKind.ROOT_ROLE_ORACLE
     if issue == "pulsar-text-stroke-join-geometry":
-        return SkipKind.NON_W3C_COMPATIBILITY
-    raise SystemExit(f"{name}: unclassified CSS-paint skip issue {issue!r}")
+        return DifferenceKind.NON_W3C_COMPATIBILITY
+    raise SystemExit(f"{name}: unclassified CSS-paint difference issue {issue!r}")
 
 
-def load_skips(cases: Iterable[Case]) -> dict[str, Skip]:
+def load_differences(cases: Iterable[Case]) -> dict[str, Difference]:
     valid = {case.name for case in cases}
-    if not SKIPS.exists():
-        raise SystemExit(f"missing checked skip registry {SKIPS}")
-    result: dict[str, Skip] = {}
-    for line_number, raw in enumerate(SKIPS.read_text().splitlines(), 1):
+    if not DIFFERENCES.exists():
+        raise SystemExit(f"missing checked difference registry {DIFFERENCES}")
+    result: dict[str, Difference] = {}
+    for line_number, raw in enumerate(DIFFERENCES.read_text().splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
@@ -1269,23 +1276,26 @@ def load_skips(cases: Iterable[Case]) -> dict[str, Skip]:
             name, issue = line.split("\t")
         except ValueError as error:
             raise SystemExit(
-                f"{SKIPS}:{line_number}: expected <case> TAB <issue>"
+                f"{DIFFERENCES}:{line_number}: expected <case> TAB <issue>"
             ) from error
         if name not in valid:
-            raise SystemExit(f"{SKIPS}:{line_number}: unknown case {name!r}")
+            raise SystemExit(f"{DIFFERENCES}:{line_number}: unknown case {name!r}")
         if name in result:
-            raise SystemExit(f"{SKIPS}:{line_number}: duplicate case {name!r}")
-        result[name] = Skip(issue, classify_skip(name, issue))
+            raise SystemExit(f"{DIFFERENCES}:{line_number}: duplicate case {name!r}")
+        result[name] = Difference(issue, classify_difference(name, issue))
 
-    counts = Counter(skip.kind for skip in result.values())
+    counts = Counter(difference.kind for difference in result.values())
     expected = {
-        SkipKind.CONFORMING_DIFFERENCE: 145,
-        SkipKind.W3C_GAP: 170,
-        SkipKind.ROOT_ROLE_ORACLE: 22,
-        SkipKind.NON_W3C_COMPATIBILITY: 19,
+        DifferenceKind.RASTER_OR_SAMPLING: 84,
+        DifferenceKind.UA_CHOICE: 61,
+        DifferenceKind.W3C_GAP: 170,
+        DifferenceKind.ROOT_ROLE_ORACLE: 22,
+        DifferenceKind.NON_W3C_COMPATIBILITY: 19,
     }
     if counts != expected:
-        raise SystemExit(f"{SKIPS}: skip classification counts {counts}, expected {expected}")
+        raise SystemExit(
+            f"{DIFFERENCES}: difference classification counts {counts}, expected {expected}"
+        )
     return result
 
 
@@ -1296,32 +1306,39 @@ def rust_string(value: str) -> str:
     return f'r{hashes}"{value}"{hashes}'
 
 
-def rust_skip_kind(kind: SkipKind) -> str:
+def rust_difference_kind(kind: DifferenceKind) -> str:
     return {
-        SkipKind.CONFORMING_DIFFERENCE: "SkipKind::ConformingDifference",
-        SkipKind.W3C_GAP: "SkipKind::W3cGap",
-        SkipKind.ROOT_ROLE_ORACLE: "SkipKind::RootRoleOracle",
-        SkipKind.NON_W3C_COMPATIBILITY: "SkipKind::NonW3cCompatibility",
+        DifferenceKind.RASTER_OR_SAMPLING: "DifferenceKind::RasterOrSampling",
+        DifferenceKind.UA_CHOICE: "DifferenceKind::UaChoice",
+        DifferenceKind.W3C_GAP: "DifferenceKind::W3cGap",
+        DifferenceKind.ROOT_ROLE_ORACLE: "DifferenceKind::RootRoleOracle",
+        DifferenceKind.NON_W3C_COMPATIBILITY: "DifferenceKind::NonW3cCompatibility",
     }[kind]
 
 
-def write_rust(cases: list[Case], skips: dict[str, Skip]) -> None:
+def write_rust(cases: list[Case], differences: dict[str, Difference]) -> None:
     lines = [
         "// @generated by support/generate_css_paint_cases.py; do not edit.",
         f"pub(super) static CASES: [CssPaintCase; {CASE_COUNT}] = [",
     ]
     for case in cases:
-        skip = skips.get(case.name)
-        expected = (
-            "Expectation::Match"
-            if skip is None
-            else (
-                "Expectation::Skip { "
-                f"kind: {rust_skip_kind(skip.kind)}, "
-                f"issue: {rust_string(skip.issue)} "
+        difference = differences.get(case.name)
+        if difference is None:
+            expected = "Expectation::BrowserMatch"
+        elif difference.kind is DifferenceKind.UA_CHOICE:
+            expected = (
+                "Expectation::NativeSnapshot { "
+                f"kind: {rust_difference_kind(difference.kind)}, "
+                f"issue: {rust_string(difference.issue)} "
                 "}"
             )
-        )
+        else:
+            expected = (
+                "Expectation::Skip { "
+                f"kind: {rust_difference_kind(difference.kind)}, "
+                f"issue: {rust_string(difference.issue)} "
+                "}"
+            )
         lines.extend(
             [
                 "    CssPaintCase {",
@@ -1336,20 +1353,28 @@ def write_rust(cases: list[Case], skips: dict[str, Skip]) -> None:
     lines.append("];")
     lines.append("")
     lines.append("css_paint_case_tests! {")
-    lines.append("    matches {")
+    lines.append("    browser_matches {")
     for index, case in enumerate(cases):
-        if case.name in skips:
+        if case.name in differences:
             continue
         identifier = "css_" + case.name.replace("-", "_")
         lines.append(f"        {index} => {identifier};")
     lines.append("    }")
+    lines.append("    native_snapshots {")
+    for index, case in enumerate(cases):
+        difference = differences.get(case.name)
+        if difference is None or difference.kind is not DifferenceKind.UA_CHOICE:
+            continue
+        identifier = "css_native_" + case.name.replace("-", "_")
+        lines.append(f"        {index} => {identifier};")
+    lines.append("    }")
     lines.append("    skips {")
     for index, case in enumerate(cases):
-        skip = skips.get(case.name)
-        if skip is None:
+        difference = differences.get(case.name)
+        if difference is None or difference.kind is DifferenceKind.UA_CHOICE:
             continue
         identifier = "css_" + case.name.replace("-", "_")
-        reason = f"{skip.kind.value}: {skip.issue}"
+        reason = f"{difference.kind.value}: {difference.issue}"
         lines.append(f"        {index} => {identifier}, {rust_string(reason)};")
     lines.extend(["    }", "}", ""])
     GENERATED.parent.mkdir(parents=True, exist_ok=True)
@@ -1376,13 +1401,13 @@ def iframe_document(case: Case) -> str:
     )
 
 
-def skipped_fixture_document(case: Case, skip: Skip) -> str:
+def difference_fixture_document(case: Case, difference: Difference) -> str:
     return (
         "<!doctype html>\n"
         "<meta charset=\"utf-8\">\n"
         f'<meta name="css-paint-case" content="{html.escape(case.name, quote=True)}">\n'
-        f'<meta name="css-paint-skip-kind" content="{skip.kind.value}">\n'
-        f'<meta name="css-paint-issue" content="{html.escape(skip.issue, quote=True)}">\n'
+        f'<meta name="css-paint-difference-kind" content="{difference.kind.value}">\n'
+        f'<meta name="css-paint-issue" content="{html.escape(difference.issue, quote=True)}">\n'
         f"<title>{html.escape(case.name)}</title>\n"
         "<style>\n"
         "@font-face {\n"
@@ -1402,18 +1427,20 @@ def skipped_fixture_document(case: Case, skip: Skip) -> str:
     )
 
 
-def write_skipped_fixtures(cases: list[Case], skips: dict[str, Skip]) -> None:
-    SKIP_FIXTURES.mkdir(parents=True, exist_ok=True)
-    expected = set(skips)
-    for stale in SKIP_FIXTURES.glob("*.html"):
+def write_difference_fixtures(
+    cases: list[Case], differences: dict[str, Difference]
+) -> None:
+    DIFFERENCE_FIXTURES.mkdir(parents=True, exist_ok=True)
+    expected = set(differences)
+    for stale in DIFFERENCE_FIXTURES.glob("*.html"):
         if stale.stem not in expected:
             stale.unlink()
     for case in cases:
-        skip = skips.get(case.name)
-        if skip is None:
+        difference = differences.get(case.name)
+        if difference is None:
             continue
-        (SKIP_FIXTURES / f"{case.name}.html").write_text(
-            skipped_fixture_document(case, skip)
+        (DIFFERENCE_FIXTURES / f"{case.name}.html").write_text(
+            difference_fixture_document(case, difference)
         )
 
 
@@ -1454,10 +1481,10 @@ def write_html(cases: list[Case], output: Path) -> None:
 
 def split_atlases(
     cases: list[Case],
-    skips: dict[str, Skip],
+    differences: dict[str, Difference],
     atlas_dir: Path,
     output: Path,
-    include_skipped: bool,
+    include_differences: bool,
 ) -> None:
     try:
         from PIL import Image
@@ -1471,7 +1498,7 @@ def split_atlases(
             raise SystemExit(f"{path}: expected 640x640, got {image.size}")
         for slot in range(CASES_PER_SHARD):
             case = cases[shard * CASES_PER_SHARD + slot]
-            if case.name in skips and not include_skipped:
+            if case.name in differences and not include_differences:
                 continue
             x = (slot % GRID) * CELL_SIZE
             y = (slot // GRID) * CELL_SIZE
@@ -1486,11 +1513,22 @@ def split_atlases(
             tile.save(output / f"{case.name}.png", optimize=True)
 
 
-def prune_non_active_goldens(cases: list[Case], skips: dict[str, Skip]) -> None:
-    active = {case.name for case in cases if case.name not in skips}
-    for stale in GOLDENS.glob("*.png"):
-        if stale.stem not in active:
+def prune_reference_assets(
+    cases: list[Case], differences: dict[str, Difference]
+) -> None:
+    browser_matches = {case.name for case in cases if case.name not in differences}
+    native_snapshots = {
+        name
+        for name, difference in differences.items()
+        if difference.kind is DifferenceKind.UA_CHOICE
+    }
+    for stale in BROWSER_GOLDENS.glob("*.png"):
+        if stale.stem not in browser_matches:
             stale.unlink()
+    if NATIVE_GOLDENS.is_dir():
+        for stale in NATIVE_GOLDENS.glob("*.png"):
+            if stale.stem not in native_snapshots:
+                stale.unlink()
 
 
 def asset_basenames(directory: Path, suffix: str) -> set[str]:
@@ -1499,30 +1537,49 @@ def asset_basenames(directory: Path, suffix: str) -> set[str]:
     return {path.stem for path in directory.iterdir() if path.suffix == suffix}
 
 
-def validate_assets(cases: list[Case], skips: dict[str, Skip]) -> None:
+def validate_assets(cases: list[Case], differences: dict[str, Difference]) -> None:
     all_names = {case.name for case in cases}
-    skipped_names = set(skips)
-    active_names = all_names - skipped_names
-    if len(all_names) != 1_000 or len(active_names) != 644 or len(skipped_names) != 356:
+    difference_names = set(differences)
+    browser_matches = all_names - difference_names
+    native_snapshots = {
+        name
+        for name, difference in differences.items()
+        if difference.kind is DifferenceKind.UA_CHOICE
+    }
+    skipped_names = difference_names - native_snapshots
+    if (
+        len(all_names) != 1_000
+        or len(browser_matches) != 644
+        or len(native_snapshots) != 61
+        or len(skipped_names) != 295
+    ):
         raise SystemExit(
-            "CSS-paint inventory must contain 1000 total / 644 active / 356 skipped"
+            "CSS-paint inventory must contain 1000 total / 644 browser matches / "
+            "61 native snapshots / 295 skipped"
         )
-    if active_names & skipped_names:
-        raise SystemExit("active and skipped CSS-paint case sets overlap")
+    if browser_matches & difference_names or native_snapshots & skipped_names:
+        raise SystemExit("CSS-paint expectation sets overlap")
 
-    golden_names = asset_basenames(GOLDENS, ".png")
-    if golden_names != active_names:
+    browser_golden_names = asset_basenames(BROWSER_GOLDENS, ".png")
+    if browser_golden_names != browser_matches:
         raise SystemExit(
-            "committed PNG basename mismatch: "
-            f"missing={sorted(active_names - golden_names)}, "
-            f"extra={sorted(golden_names - active_names)}"
+            "committed browser PNG basename mismatch: "
+            f"missing={sorted(browser_matches - browser_golden_names)}, "
+            f"extra={sorted(browser_golden_names - browser_matches)}"
         )
-    fixture_names = asset_basenames(SKIP_FIXTURES, ".html")
-    if fixture_names != skipped_names:
+    native_golden_names = asset_basenames(NATIVE_GOLDENS, ".png")
+    if native_golden_names != native_snapshots:
         raise SystemExit(
-            "skipped HTML basename mismatch: "
-            f"missing={sorted(skipped_names - fixture_names)}, "
-            f"extra={sorted(fixture_names - skipped_names)}"
+            "committed native PNG basename mismatch: "
+            f"missing={sorted(native_snapshots - native_golden_names)}, "
+            f"extra={sorted(native_golden_names - native_snapshots)}"
+        )
+    fixture_names = asset_basenames(DIFFERENCE_FIXTURES, ".html")
+    if fixture_names != difference_names:
+        raise SystemExit(
+            "difference HTML basename mismatch: "
+            f"missing={sorted(difference_names - fixture_names)}, "
+            f"extra={sorted(fixture_names - difference_names)}"
         )
 
 
@@ -1533,52 +1590,61 @@ def main() -> None:
     parser.add_argument(
         "--reference-output",
         type=Path,
-        default=GOLDENS,
-        help="per-case PNG destination (defaults to the committed active references)",
+        default=BROWSER_GOLDENS,
+        help="per-case PNG destination (defaults to committed Chromium matches)",
     )
     parser.add_argument(
-        "--include-skipped",
+        "--include-differences",
         action="store_true",
         help="split all 1000 references; requires a non-committed reference output",
     )
-    parser.add_argument("--prune-skipped-goldens", action="store_true")
+    parser.add_argument("--prune-reference-assets", action="store_true")
     parser.add_argument("--validate-assets", action="store_true")
     args = parser.parse_args()
     cases = all_cases()
-    skips = load_skips(cases)
-    write_rust(cases, skips)
-    write_skipped_fixtures(cases, skips)
-    if args.include_skipped and args.split_atlases is None:
-        parser.error("--include-skipped requires --split-atlases")
+    differences = load_differences(cases)
+    write_rust(cases, differences)
+    write_difference_fixtures(cases, differences)
+    if args.include_differences and args.split_atlases is None:
+        parser.error("--include-differences requires --split-atlases")
     reference_output = args.reference_output.resolve()
-    committed_goldens = GOLDENS.resolve()
-    if args.include_skipped and (
-        reference_output == committed_goldens
-        or committed_goldens in reference_output.parents
+    browser_goldens = BROWSER_GOLDENS.resolve()
+    screenshot_root = browser_goldens.parent
+    if reference_output != browser_goldens and (
+        reference_output == screenshot_root or screenshot_root in reference_output.parents
     ):
         parser.error(
-            "--include-skipped requires --reference-output outside the committed golden tree"
+            "--reference-output inside tests/screenshots is reserved for committed references"
+        )
+    if args.include_differences and reference_output == browser_goldens:
+        parser.error(
+            "--include-differences requires --reference-output outside the committed "
+            "screenshot tree"
         )
     if args.html_output is not None:
         write_html(cases, args.html_output)
     if args.split_atlases is not None:
         split_atlases(
             cases,
-            skips,
+            differences,
             args.split_atlases,
             args.reference_output,
-            args.include_skipped,
+            args.include_differences,
         )
-        if reference_output == committed_goldens:
-            prune_non_active_goldens(cases, skips)
-            validate_assets(cases, skips)
-    if args.prune_skipped_goldens:
-        prune_non_active_goldens(cases, skips)
+        if reference_output == browser_goldens:
+            prune_reference_assets(cases, differences)
+    if args.prune_reference_assets:
+        prune_reference_assets(cases, differences)
     if args.validate_assets:
-        validate_assets(cases, skips)
+        validate_assets(cases, differences)
+    native_count = sum(
+        difference.kind is DifferenceKind.UA_CHOICE
+        for difference in differences.values()
+    )
     print(
-        f"generated {len(cases)} cases ({len(cases) - len(skips)} active, "
-        f"{len(skips)} skipped), {SHARD_COUNT} shards"
+        f"generated {len(cases)} cases ({len(cases) - len(differences)} browser "
+        f"matches, {native_count} native snapshots, "
+        f"{len(differences) - native_count} skipped), {SHARD_COUNT} shards"
     )
 
 
