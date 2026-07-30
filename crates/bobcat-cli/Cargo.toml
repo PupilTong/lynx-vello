@@ -1,0 +1,33 @@
+[package]
+name = "bobcat-cli"
+description = "Native command-line runner and renderer for Bobcat web bundles"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "bobcat"
+path = "src/main.rs"
+
+[dependencies]
+bobcat-quickjs = { workspace = true }
+lynx-element = { workspace = true }
+lynx-template-decoder = { workspace = true }
+png = { workspace = true }
+pollster = { workspace = true }
+pulsar = { workspace = true }
+thiserror = { workspace = true }
+url = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+winit = { workspace = true }
+
+[dev-dependencies]
+# The e2e test's GPU-or-skip probe and PNG verification.
+flashbulb = { workspace = true, features = ["render"] }
+
+[lints]
+workspace = true

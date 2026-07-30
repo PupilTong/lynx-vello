@@ -178,6 +178,25 @@ useful signal for currently-compatible versions of those libraries.
   all realm/value handles, interrupt controls, and raw source-evaluation entry
   points remain crate-private. The future preloaded module graph belongs here
   too, not in the generic QuickJS bridge or engine-neutral protocol.
+- `crates/bobcat-cli` — the native `bobcat` process shell over
+  `bobcat-quickjs`. `bobcat -i file:///…` decodes and boots one web bundle;
+  other URL schemes remain rejected at the boundary. One reusable
+  `FramePipeline` owns the runtime, `pulsar::Painter`, scene, and image store,
+  so the macOS headed backend and cross-platform headless backend share
+  script/layout/paint logic rather than maintaining parallel render paths.
+  Headed mode uses a native winit window with display-backed vsync and tracks
+  both logical viewport size and device-pixel ratio. Headless mode uses a
+  configurable synthetic vsync rate, skips catch-up bursts after slow frames,
+  and retains its Vello renderer, render texture, and staging buffer across
+  frames. Both modes expose a GDB-like stdin command prompt (`continue`,
+  `pause`, `frame`, `screenshot`, `help`, `quit`; headless also supports
+  `set/show vsync`). Screenshots are captured only through that live prompt;
+  there is no one-shot startup flag. PNG readback happens only on a screenshot.
+  It must not
+  duplicate runtime, DOM, layout, or painting policy: missing MTS/PAPI support
+  remains a precise `bobcat-quickjs` error, and non-empty decoded `StyleInfo`
+  currently produces an explicit author-styles-omitted warning rather than silent
+  claimed compatibility.
 - `crates/lynx-element` — the Lynx runtime element layer, i.e. the crate the
   layering diagrams drew as the dashed "future Lynx runtime adapter" box. It
   owns exactly what `dom` is forbidden to know: Lynx tag names, Element-PAPI
