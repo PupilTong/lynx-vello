@@ -1,4 +1,6 @@
 use bobcat_quickjs::MainThreadRuntime;
+#[cfg(target_os = "macos")]
+use dom::input::{InputEvent, InputResponse};
 use lynx_element::{PageConfig, Viewport};
 use pulsar::vello::Scene;
 use pulsar::{ImageStore, Painter};
@@ -175,6 +177,21 @@ impl FramePipeline {
             size: self.frame_size,
             changed,
         }
+    }
+
+    /// Routes one host input event and performs the UA default action it
+    /// resolves to.
+    ///
+    /// Hit testing needs a frame, so this builds one — which is also the frame
+    /// this event *should* be measured against: the user aimed at what is
+    /// currently painted. When nothing has changed since the last paint the
+    /// build is the only cost, because `prepare_frame` will then find a matching
+    /// epoch and skip the GPU entirely.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn handle_input(&mut self, event: InputEvent) -> InputResponse {
+        let mut elements = self.runtime.elements_mut();
+        let frame = elements.paint_order();
+        elements.handle_input(&frame, event)
     }
 
     /// Whether the document has visual changes the painted scene does not

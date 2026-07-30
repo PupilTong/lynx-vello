@@ -194,6 +194,7 @@ name = "bobcat-cli"
 version = "0.1.0"
 dependencies = [
  "bobcat-quickjs",
+ "dom",
  "flashbulb",
  "lynx-element",
  "lynx-template-decoder",

@@ -20,14 +20,15 @@
 //! index)` at every level, so tree-order tiebreaks are order-modified
 //! document order over exactly the sibling space the engine ranked.
 //!
-//! Clip state is tracked as three chains: the current one plus the chains as
-//! seen from the nearest absolute- and fixed-containing-block ancestors.
-//! A member keyed by **computed** position swaps the appropriate chain in as
-//! its own — that is precisely the containing-block clip-escape rule
-//! (CSS2 §11.1.1): boxes are only clipped by ancestors in their
-//! containing-block chain.
+//! Clip and scroll state is tracked as three [`FlowContext`]s: the current one
+//! plus the two as seen from the nearest absolute- and fixed-containing-block
+//! ancestors. A member keyed by **computed** position swaps the appropriate one
+//! in as its own — that is precisely the containing-block escape rule
+//! (CSS2 §11.1.1): boxes are only clipped by, and only scroll with, ancestors
+//! in their containing-block chain. Both escapes are the same rule, which is
+//! why one struct carries both.
 
-use euclid::default::{Point2D, Rect, Size2D, Transform3D};
+use euclid::default::{Point2D, Rect, Size2D, Transform3D, Vector2D};
 use hughie::style::{Contain, CoreStyle, Overflow, PositionProperty, visibility};
 use hughie::tree::{Layout, LayoutTree};
 use stylo::properties::ComputedValues;
@@ -36,7 +37,6 @@ use stylo::values::computed::PointerEvents;
 use super::geometry::{inner_radii, resolve_corner_radii};
 use super::transform::{ParentPerspective, stacking_context_matrix};
 use super::{ClipNode, CornerRadii, PaintItem, PaintItemKind, PaintOrder, RenderLayer, stacking};
-use crate::NodeId;
 use crate::contain::effective_containment;
 use crate::document::{Document, DocumentLayoutState, TreeArenas, slab_get_for_live_node};
 use crate::layout::{
@@ -44,12 +44,16 @@ use crate::layout::{
     establishes_fixed_containing_block, skips_contents,
 };
 use crate::node::Node;
+use crate::scroll::ScrollAxes;
+use crate::{NodeId, scroll};
 
 pub(crate) fn build<T>(document: &Document<T>) -> PaintOrder {
+    let scale = document.device().device_pixel_ratio().get();
     let (tree, state) = document.visual_parts();
     let mut builder = Builder {
         tree,
         state,
+        scale,
         items: Vec::new(),
         clips: Vec::new(),
         layers: Vec::new(),
@@ -80,14 +84,29 @@ pub(crate) fn build<T>(document: &Document<T>) -> PaintOrder {
     }
 }
 
-/// The clip chains visible at one point of the walk: the in-flow chain plus
-/// the chains captured at the nearest absolute-/fixed-containing-block
-/// ancestors (what an escaping positioned descendant swaps in).
+/// What a box inherits from its containing-block chain: the innermost clip,
+/// and the translation the scroll containers along that chain have applied to
+/// their contents.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct FlowContext {
+    clip: Option<usize>,
+    /// Sum of `-scroll_offset` over the scroll containers crossed so far,
+    /// already folded into the walk's running offset. Only *differences*
+    /// between two of these are ever used, and every property that could put a
+    /// non-translation between a capture and its use (transform, perspective,
+    /// filter, containment) also establishes a containing block, so the
+    /// difference is always a pure CSS-px translation.
+    scroll: Vector2D<f32>,
+}
+
+/// The flow contexts visible at one point of the walk: the in-flow one plus
+/// those captured at the nearest absolute-/fixed-containing-block ancestors
+/// (what an escaping positioned descendant swaps in).
 #[derive(Debug, Clone, Copy, Default)]
 struct ClipContexts {
-    current: Option<usize>,
-    absolute: Option<usize>,
-    fixed: Option<usize>,
+    current: FlowContext,
+    absolute: FlowContext,
+    fixed: FlowContext,
 }
 
 /// A finished paint item minus its final matrix: `offset` is the border-box
@@ -124,6 +143,11 @@ enum MemberPayload {
 struct Builder<'doc, T> {
     tree: &'doc TreeArenas<T>,
     state: &'doc DocumentLayoutState,
+    /// Device pixel ratio, used only to snap scroll translations. Layout
+    /// rounds every location to whole device pixels, and scrolled content has
+    /// to keep that promise or a scrolled box would rasterize off the pixel
+    /// grid its unscrolled twin sits on.
+    scale: f32,
     items: Vec<PaintItem>,
     clips: Vec<ClipNode>,
     layers: Vec<RenderLayer>,
@@ -139,6 +163,21 @@ impl<'doc, T> Builder<'doc, T> {
 
     fn rounded(&self, id: NodeId) -> &'doc Layout {
         &slab_get_for_live_node(&self.state.nodes, id).slot.rounded
+    }
+
+    /// The translation this element applies to its own contents, snapped to
+    /// the device pixel grid. Zero for everything that is not a scrolled
+    /// scroll container.
+    fn scroll_translation(&self, id: NodeId, style: &ComputedValues) -> Vector2D<f32> {
+        let state = slab_get_for_live_node(&self.state.nodes, id);
+        let Some(scroll_box) = scroll::resolve(style, &state.slot.rounded, state.scroll_offset)
+        else {
+            return Vector2D::zero();
+        };
+        Vector2D::new(
+            -(scroll_box.offset.x * self.scale).round() / self.scale,
+            -(scroll_box.offset.y * self.scale).round() / self.scale,
+        )
     }
 
     fn build_stacking_context(
@@ -165,7 +204,7 @@ impl<'doc, T> Builder<'doc, T> {
                 node: root,
                 kind: PaintItemKind::ElementBox,
                 transform: world,
-                clip: seed.current,
+                clip: seed.current.clip,
                 size,
                 radii: resolve_corner_radii(values, size),
                 hit_testable,
@@ -184,7 +223,9 @@ impl<'doc, T> Builder<'doc, T> {
         let mut seq = 0_u32;
         self.collect(
             root,
-            Point2D::zero(),
+            // The context's own box did not move; its contents start one
+            // scroll translation into its local space.
+            (ctx.current.scroll - seed.current.scroll).to_point(),
             matches!(mode, DisplayMode::Flex | DisplayMode::Grid),
             ctx,
             &world,
@@ -302,7 +343,7 @@ impl<'doc, T> Builder<'doc, T> {
                 "flattened_children never yields a box-less element",
             );
             let style = view.values();
-            let (child_offset, size) = {
+            let (mut child_offset, size) = {
                 let layout = self.rounded(child);
                 (
                     Point2D::new(
@@ -313,6 +354,13 @@ impl<'doc, T> Builder<'doc, T> {
                 )
             };
             let position = style.clone_position();
+            // `node_offset` carries every scroll translation on the DOM path
+            // down to here. A positioned box anchored above one of those
+            // scrollers never moved with it, so rebasing onto the flow context
+            // its containing block sees also undoes the translations in
+            // between. Static boxes take the same code path with a zero delta.
+            let captured = member_clip_contexts(position, ctx);
+            child_offset += captured.current.scroll - ctx.current.scroll;
             let z_applies = stacking::z_index_applies(position, node_is_item_container);
 
             if stacking::establishes_stacking_context(style, z_applies) {
@@ -322,7 +370,7 @@ impl<'doc, T> Builder<'doc, T> {
                     payload: MemberPayload::Context {
                         node: child,
                         offset: child_offset,
-                        clips: member_clip_contexts(position, ctx),
+                        clips: captured,
                     },
                 });
                 continue;
@@ -335,7 +383,6 @@ impl<'doc, T> Builder<'doc, T> {
             if position != PositionProperty::Static {
                 // Pseudo-stacking context (computed `relative` or `absolute`
                 // here — `fixed` and `sticky` always form real contexts).
-                let captured = member_clip_contexts(position, ctx);
                 let member_seq = next(seq);
                 let mut pseudo_stream = Vec::new();
                 if visible {
@@ -344,7 +391,7 @@ impl<'doc, T> Builder<'doc, T> {
                         style,
                         child_offset,
                         size,
-                        captured.current,
+                        captured.current.clip,
                         hit_testable,
                     ));
                 }
@@ -357,7 +404,7 @@ impl<'doc, T> Builder<'doc, T> {
                     );
                     self.collect(
                         child,
-                        child_offset,
+                        child_offset + (inner.current.scroll - captured.current.scroll),
                         is_item_container,
                         inner,
                         world,
@@ -383,7 +430,7 @@ impl<'doc, T> Builder<'doc, T> {
                     style,
                     child_offset,
                     size,
-                    ctx.current,
+                    ctx.current.clip,
                     hit_testable,
                 ));
             }
@@ -391,7 +438,7 @@ impl<'doc, T> Builder<'doc, T> {
                 let inner = self.enter_element(child, style, &translated(world, child_offset), ctx);
                 self.collect(
                     child,
-                    child_offset,
+                    child_offset + (inner.current.scroll - ctx.current.scroll),
                     is_item_container,
                     inner,
                     world,
@@ -436,8 +483,13 @@ impl<'doc, T> Builder<'doc, T> {
         }
     }
 
-    /// Applies an element's own clip and containing-block captures to the
-    /// contexts its children see.
+    /// Applies an element's own clip, scroll translation, and containing-block
+    /// captures to the contexts its children see.
+    ///
+    /// `transform` anchors the element's border box *unscrolled*: a scroll
+    /// container's own box, and therefore its own clip, stay put while its
+    /// contents move. The captures come last, so a scroll container that is
+    /// also a containing block does scroll the positioned descendants it owns.
     fn enter_element(
         &mut self,
         node: NodeId,
@@ -446,29 +498,41 @@ impl<'doc, T> Builder<'doc, T> {
         ctx: ClipContexts,
     ) -> ClipContexts {
         let mut inner = ctx;
-        if is_clipping(style) {
+        let clipped = clipped_axes(style);
+        if clipped.x || clipped.y {
             let (rect, radii) = {
                 let layout = self.rounded(node);
-                let rect = Rect::new(
+                let padding_box = Rect::new(
                     Point2D::new(layout.border.left, layout.border.top),
                     Size2D::new(
                         (layout.size.width - layout.border.horizontal_sum()).max(0.0),
                         (layout.size.height - layout.border.vertical_sum()).max(0.0),
                     ),
                 );
-                let outer =
-                    resolve_corner_radii(style, Size2D::new(layout.size.width, layout.size.height));
-                (rect, inner_radii(outer, &layout.border))
+                let rect = unclipped_axes_unbounded(padding_box, clipped);
+                // Only a box clipped on both axes has clipped *corners*; a
+                // one-axis clip is an infinite strip, which has none.
+                let radii = if clipped.x && clipped.y {
+                    let outer = resolve_corner_radii(
+                        style,
+                        Size2D::new(layout.size.width, layout.size.height),
+                    );
+                    inner_radii(outer, &layout.border)
+                } else {
+                    CornerRadii::ZERO
+                };
+                (rect, radii)
             };
             self.clips.push(ClipNode {
-                parent: inner.current,
+                parent: inner.current.clip,
                 node,
                 transform: *transform,
                 rect,
                 radii,
             });
-            inner.current = Some(self.clips.len() - 1);
+            inner.current.clip = Some(self.clips.len() - 1);
         }
+        inner.current.scroll += self.scroll_translation(node, style);
         let node_ref = self.node(node);
         if establishes_absolute_containing_block(node_ref, style) {
             inner.absolute = inner.current;
@@ -506,7 +570,7 @@ impl<'doc, T> Builder<'doc, T> {
                 node_offset.x + layout.location.x,
                 node_offset.y + layout.location.y,
             ),
-            clip: ctx.current,
+            clip: ctx.current.clip,
             size: Size2D::new(layout.size.width, layout.size.height),
             radii: CornerRadii::ZERO,
             hit_testable,
@@ -545,10 +609,10 @@ fn element_record(
     }
 }
 
-/// The clip contexts a member adopts, keyed by **computed** position: an
-/// absolute box is clipped as seen from its absolute containing block, a
-/// fixed box from its fixed one; relative and sticky boxes stay in the
-/// normal flow of clips.
+/// The flow context a member adopts, keyed by **computed** position: an
+/// absolute box is clipped and scrolled as seen from its absolute containing
+/// block, a fixed box from its fixed one; relative and sticky boxes stay in
+/// the normal flow.
 fn member_clip_contexts(position: PositionProperty, ctx: ClipContexts) -> ClipContexts {
     match position {
         PositionProperty::Absolute => ClipContexts {
@@ -563,10 +627,38 @@ fn member_clip_contexts(position: PositionProperty, ctx: ClipContexts) -> ClipCo
     }
 }
 
-fn is_clipping(style: &ComputedValues) -> bool {
-    !matches!(style.clone_overflow_x(), Overflow::Visible)
-        || !matches!(style.clone_overflow_y(), Overflow::Visible)
-        || effective_containment(style, skips_contents(style)).intersects(Contain::PAINT)
+/// Which axes an element clips its content on. `contain: paint` clips both;
+/// otherwise it is per axis, because `overflow: clip` on one axis with
+/// `visible` on the other is a legal pair the style adjuster does not fold
+/// (both are non-scrollable, so it sees nothing to reconcile).
+fn clipped_axes(style: &ComputedValues) -> ScrollAxes {
+    if effective_containment(style, skips_contents(style)).intersects(Contain::PAINT) {
+        return ScrollAxes::BOTH;
+    }
+    ScrollAxes {
+        x: !matches!(style.clone_overflow_x(), Overflow::Visible),
+        y: !matches!(style.clone_overflow_y(), Overflow::Visible),
+    }
+}
+
+/// Widens `rect` to unbounded along every axis that is not clipped, so a
+/// one-axis clip is the infinite strip it should be rather than a box.
+///
+/// The bound is finite because the clip is a real rect that gets transformed,
+/// hit-tested, and rasterized; it is far enough out that no layout this engine
+/// can produce reaches it, and small enough to stay exact in `f32`.
+fn unclipped_axes_unbounded(rect: Rect<f32>, clipped: ScrollAxes) -> Rect<f32> {
+    const UNBOUNDED: f32 = 1.0e7;
+    let mut rect = rect;
+    if !clipped.x {
+        rect.origin.x = -UNBOUNDED;
+        rect.size.width = 2.0 * UNBOUNDED;
+    }
+    if !clipped.y {
+        rect.origin.y = -UNBOUNDED;
+        rect.size.height = 2.0 * UNBOUNDED;
+    }
+    rect
 }
 
 fn item_flags(style: &ComputedValues) -> (bool, bool) {
