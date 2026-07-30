@@ -75,7 +75,11 @@ mod motion;
 mod stacking;
 mod transform;
 
-pub use euclid::default::{Point2D, Rect, Size2D, Transform3D};
+// The crate's whole geometry vocabulary, re-exported so an embedder can name
+// every type that appears in a public signature here — `Vector2D` included:
+// scroll offsets and deltas are displacements, not positions, and they surface
+// on `Document::scroll_by`, `ScrollBox`, and `DefaultAction::Scroll`.
+pub use euclid::default::{Point2D, Rect, Size2D, Transform3D, Vector2D};
 
 use crate::NodeId;
 use crate::document::Document;

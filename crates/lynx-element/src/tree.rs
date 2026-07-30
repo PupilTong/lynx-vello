@@ -185,6 +185,28 @@ impl ElementTree {
         self.document.paint_order()
     }
 
+    /// Feeds one host input event in, hit-testing it against `frame` and
+    /// performing whatever UA default action it resolves to — today, scrolling
+    /// an `overflow: scroll` box.
+    ///
+    /// This belongs on the narrow mutable surface for the same reason
+    /// [`Self::set_viewport`] does: input cannot desynchronise the handle
+    /// table. All it can reach is scroll offsets and per-pointer gesture
+    /// state — no element is created, moved, or retired — so lending it out
+    /// costs none of the invariants [`Self::paint_order`] protects.
+    ///
+    /// Dispatching the returned target through Lynx's own event model
+    /// (`bindEvent`/`catchEvent` phases, the gesture arena, `hit-slop`) is the
+    /// runtime layer's job, not this one's; it prevents the default action and
+    /// takes over when it wants different behavior.
+    pub fn handle_input(
+        &mut self,
+        frame: &dom::visual::PaintOrder,
+        event: dom::input::InputEvent,
+    ) -> dom::input::InputResponse {
+        self.document.handle_input(frame, event)
+    }
+
     /// Resizes the viewport, restyling and relaying out on the next flush.
     pub fn set_viewport(&mut self, width: f32, height: f32) {
         self.document.set_viewport(width, height);
