@@ -42,6 +42,14 @@ consequential choice about whether to follow the spec or the quirk.
   stays a clip that scrolls only programmatically, which is what keeps the
   `hidden`-on-every-element UA default from making the whole page
   drag-scrollable, and `clip` is not a scroll container at all.
+- **`position: sticky` does not stick (2026-07-30)** — it parses in the
+  fork's grammar and Lynx itself implements scroll-container-relative
+  stickiness, but lynx-vello's paint build treats a sticky box as normal flow,
+  so it scrolls away with its container. **Not a decision — an unimplemented
+  gap**, recorded because interactive scrolling made it observable: before that
+  landed, sticky and `relative` were indistinguishable. What is missing is the
+  css-position-3 §6.3 offset clamp against the scrollport; the box already
+  sits in the right flow and scrolls with the right ancestor.
 - **`overflow: auto` omitted** — CSS has it; this engine does not.
   **Decision (user, 2026-07-29): leave it out.** Nothing here paints
   scrollbars, so `auto` ("scrollbars only when needed") would behave exactly

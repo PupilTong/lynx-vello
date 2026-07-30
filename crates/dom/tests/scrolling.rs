@@ -156,6 +156,53 @@ fn a_positioned_box_scrolls_only_with_its_own_containing_block() {
 }
 
 #[test]
+fn a_wheel_over_a_pinned_box_does_not_scroll_what_it_is_pinned_above() {
+    // The other half of the containing-block rule. `pinned` is a DOM child of
+    // the scroller but anchored on the page, so it does not move when the
+    // scroller scrolls — and a wheel over it must not scroll the scroller
+    // either, or content would slide behind a box that visibly stays put.
+    let mut h = Harness::new(
+        "page { display: flex; position: relative; width: 800px; height: 600px; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     width: 100px; height: 100px; }
+         .row { flex-shrink: 0; width: 100px; height: 100px; }
+         .pinned { display: flex; position: absolute; left: 0; top: 0;
+                   width: 60px; height: 60px; }",
+    );
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    let rows: Vec<NodeId> = (0..3).map(|_| h.el(scroller, "view.row")).collect();
+    let pinned = h.el(scroller, "view.pinned");
+    h.doc.dom.layout();
+
+    let frame = h.paint();
+    let over_pinned = h.doc.dom.handle_input(
+        &frame,
+        InputEvent::wheel(Point2D::new(30.0, 30.0), (0.0, 80.0)),
+    );
+    assert_eq!(over_pinned.target, Some(pinned));
+    assert_eq!(over_pinned.default_action, DefaultAction::None);
+    assert_eq!(h.doc.dom.scroll_offset(scroller), Vector2D::zero());
+
+    // Just outside the pinned box, over the scroller's own content, the same
+    // wheel does scroll — so this is the containing-block chain at work, not a
+    // dead input path.
+    let frame = h.paint();
+    let over_content = h.doc.dom.handle_input(
+        &frame,
+        InputEvent::wheel(Point2D::new(80.0, 80.0), (0.0, 80.0)),
+    );
+    assert_eq!(over_content.target, Some(rows[0]));
+    assert_eq!(
+        over_content.default_action,
+        DefaultAction::Scroll {
+            node: scroller,
+            delta: Vector2D::new(0.0, 80.0),
+        },
+    );
+}
+
+#[test]
 fn a_fixed_box_never_scrolls_with_an_ancestor_scroller() {
     let mut h = Harness::new(&format!(
         "{SCROLLER}

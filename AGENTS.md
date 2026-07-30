@@ -334,7 +334,11 @@ useful signal for currently-compatible versions of those libraries.
   shrinking relayout or a restyle out of scroll-container-hood needs no
   invalidation hook), `scroll_to`/`scroll_by` (which returns the
   **unconsumed remainder**, the primitive chaining is built from), and
-  `scroll_chain`. Only `overflow: scroll` is user-scrollable; `hidden` is a
+  `scroll_chain`. Both the "which box scrolls" walk and the chaining advance
+  follow the **containing-block** chain, not DOM ancestry, so they agree with
+  what `visual` actually moves: a wheel over an `absolute` box anchored above a
+  scroller scrolls nothing, rather than sliding content behind a box that
+  visibly stays put. Only `overflow: scroll` is user-scrollable; `hidden` is a
   scroll container that moves only programmatically (load-bearing here,
   because the Lynx UA cascade puts `hidden` on every element) and `clip` is
   not a scroll container at all — it clips, has no offset, and its content

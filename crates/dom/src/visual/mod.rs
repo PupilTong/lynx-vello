@@ -62,6 +62,10 @@
 //!   other is a pair the style adjuster leaves alone (it only reconciles axes that disagree about
 //!   being *scrollable*, and neither of those is). A one-axis clip is an infinite strip, so it
 //!   carries no corner radii; every other combination clips the padding box as before.
+//! - `position: sticky` establishes a stacking context and paints as normal flow, but does not
+//!   stick: no offset is clamped against the scrollport (css-position-3 §6.3), so a sticky box
+//!   scrolls away with its container. Recorded in `crate::scroll`'s limits and
+//!   `docs/tracking/deviations.md`.
 //! - `transform-style: preserve-3d`, `backface-visibility`, and `perspective-origin` are not
 //!   authorable (the latter two are not even compiled) — everything flattens and perspective
 //!   projects about the border-box center.

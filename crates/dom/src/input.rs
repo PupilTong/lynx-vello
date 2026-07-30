@@ -247,6 +247,18 @@ impl InputEvent {
         self.default_prevented = prevented;
         self
     }
+
+    /// Whether every coordinate this event carries is a real number.
+    /// [`Document::handle_input`] drops events that fail this.
+    #[must_use]
+    pub fn is_finite(&self) -> bool {
+        let position = self.position.x.is_finite() && self.position.y.is_finite();
+        let payload = match self.kind {
+            InputKind::Pointer { .. } => true,
+            InputKind::Wheel { delta, .. } => delta.x.is_finite() && delta.y.is_finite(),
+        };
+        position && payload
+    }
 }
 
 /// The UA behavior the document performed for an event on its own.
@@ -327,12 +339,28 @@ impl<T: Sync> Document<T> {
     /// input is sampled against the frame the user is looking at. Scrolling
     /// mutates the document, so rebuild the frame before painting again.
     ///
+    /// A non-finite position or delta is dropped entirely — no routing, no
+    /// state change. This is the untrusted boundary, and NaN here is
+    /// load-bearing garbage rather than a harmless miss: it would poison a
+    /// latched drag's origin, so every later move of that gesture computes a
+    /// NaN delta too. The `debug_assert` makes a host adapter that produces
+    /// one loud in development rather than mysteriously inert.
+    ///
     /// # Panics
     ///
     /// Panics per [`PaintOrder::assert_fresh`] if nodes were removed since
     /// `frame` was built, and per [`Document::paint_style`] if a style
-    /// traversal was left incomplete.
+    /// traversal was left incomplete. In debug builds, also on a non-finite
+    /// position or wheel delta.
     pub fn handle_input(&mut self, frame: &PaintOrder, event: InputEvent) -> InputResponse {
+        if !event.is_finite() {
+            debug_assert!(false, "host input events must be finite, got {event:?}");
+            return InputResponse {
+                target: None,
+                local: None,
+                default_action: DefaultAction::None,
+            };
+        }
         let hit = frame.hit_test_local(self, event.position);
         let mut response = InputResponse {
             target: hit.map(|(node, _)| node),

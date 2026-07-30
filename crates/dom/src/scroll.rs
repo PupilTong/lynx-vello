@@ -38,13 +38,22 @@
 //! - `scroll-behavior`, scroll snapping, `overscroll-behavior`, and rubber-band overscroll are
 //!   absent: scrolling is instantaneous and clamps hard at the boundary, and chaining always
 //!   chains.
+//! - **`position: sticky` does not stick.** It parses in the fork's grammar, but the paint build
+//!   treats it as normal flow, so a sticky box scrolls away with its container instead of pinning
+//!   to the scrollport. Before scrolling existed that was indistinguishable from `relative`; now it
+//!   is observable, which is why it is written down here rather than left implied. Its scroll
+//!   parent is deliberately its box parent (sticky *is* in flow — that part is right); what is
+//!   missing is the offset clamp against the scrollport that css-position-3 §6.3 defines.
 
 use euclid::default::{Size2D, Vector2D};
+use hughie::style::PositionProperty;
 use stylo::properties::ComputedValues;
 
 use crate::NodeId;
 use crate::document::Document;
-use crate::layout::box_parent;
+use crate::layout::{
+    box_parent, establishes_absolute_containing_block, establishes_fixed_containing_block,
+};
 use crate::node::Node;
 
 /// A per-axis pair of flags — which axes the user may scroll, which axes clip.
@@ -117,8 +126,24 @@ pub fn user_scrollable_axes(style: &ComputedValues) -> ScrollAxes {
     }
 }
 
+/// Clamps one axis into `0..=max`, mapping a non-finite request to `0.0`
+/// rather than storing it.
+///
+/// `f32::clamp` *propagates* NaN, and this crate re-clamps a stored offset on
+/// every read — so one NaN reaching the store would survive every later clamp
+/// and poison the box permanently. Since the offset arrives from an untrusted
+/// host through [`crate::input`], the arithmetic has to be closed under
+/// garbage, not merely well-behaved on good input.
+fn clamp_axis(value: f32, max: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, max)
+    } else {
+        0.0
+    }
+}
+
 fn clamp_to(offset: Vector2D<f32>, max: Vector2D<f32>) -> Vector2D<f32> {
-    Vector2D::new(offset.x.clamp(0.0, max.x), offset.y.clamp(0.0, max.y))
+    Vector2D::new(clamp_axis(offset.x, max.x), clamp_axis(offset.y, max.y))
 }
 
 /// The whole scroll model of one box, from its computed style, its committed
@@ -213,10 +238,20 @@ impl<T> Document<T> {
     /// [`crate::visual::PaintOrder`] afterwards, but expect no style or layout
     /// work.
     ///
+    /// A non-finite component is clamped to `0.0` rather than stored: this
+    /// crate re-clamps on read, so a stored NaN would never wash out. The
+    /// `debug_assert` makes a host adapter that produces one loud in
+    /// development instead of quietly parking the box at the top.
+    ///
     /// # Panics
     ///
-    /// As [`Document::paint_style`], when styles are not ready.
+    /// As [`Document::paint_style`], when styles are not ready. In debug
+    /// builds, also on a non-finite `offset`.
     pub fn scroll_to(&mut self, id: NodeId, offset: Vector2D<f32>) -> Vector2D<f32> {
+        debug_assert!(
+            offset.x.is_finite() && offset.y.is_finite(),
+            "scroll offsets must be finite, got {offset:?}"
+        );
         let Some(scroll_box) = self.scroll_box(id) else {
             return Vector2D::zero();
         };
@@ -250,9 +285,63 @@ impl<T> Document<T> {
         scroll_box.offset + delta - applied
     }
 
+    /// The next box up whose scrolling this one moves with: its **containing
+    /// block**, not its DOM parent.
+    ///
+    /// This is the rule the paint build applies (CSS2 §11.1.1, and
+    /// [`crate::visual`]'s `FlowContext` escape), keyed on computed position
+    /// exactly as that is: a box is only clipped by, and only scrolls with,
+    /// ancestors in its containing-block chain. Walking DOM ancestry here
+    /// instead would let a wheel over an absolute box anchored *above* a
+    /// scroller scroll that scroller — moving content behind a box that
+    /// visibly does not move, which is precisely the mismatch the paint side
+    /// avoids.
+    ///
+    /// A `fixed` box, or an `absolute` box with no positioned ancestor, is
+    /// anchored to the viewport, which is not a scrollable box here — so the
+    /// chain ends rather than falling back to the DOM parent.
+    fn scroll_parent(&self, id: NodeId) -> Option<NodeId> {
+        let node = self.get(id)?;
+        if !node.is_element() {
+            // A text leaf sits in its styled parent's flow, box or not.
+            return node.parent_id();
+        }
+        let style = node.layout_computed_style()?;
+        match style.clone_position() {
+            PositionProperty::Absolute => Self::containing_block(node, false),
+            PositionProperty::Fixed => Self::containing_block(node, true),
+            // Static, relative and sticky boxes stay in their box parent's
+            // flow, so they scroll with it.
+            PositionProperty::Static | PositionProperty::Relative | PositionProperty::Sticky => {
+                box_parent(node).map(Node::id)
+            }
+        }
+    }
+
+    /// The nearest ancestor establishing this box's absolute (or fixed)
+    /// containing block — the same predicates `visual` captures its escape
+    /// contexts with.
+    fn containing_block(node: &Node<T>, fixed: bool) -> Option<NodeId> {
+        let mut current = box_parent(node);
+        while let Some(ancestor) = current {
+            let style = ancestor.layout_computed_style()?;
+            let establishes = if fixed {
+                establishes_fixed_containing_block(ancestor, style)
+            } else {
+                establishes_absolute_containing_block(ancestor, style)
+            };
+            if establishes {
+                return Some(ancestor.id());
+            }
+            current = box_parent(ancestor);
+        }
+        None
+    }
+
     /// The nearest box at or above `id` that the user may scroll along at
-    /// least one of `axes`, walking the box tree (`display: contents` levels
-    /// generate no box and cannot scroll).
+    /// least one of `axes`, walking the containing-block chain
+    /// ([`Self::scroll_parent`]) so the answer agrees with what actually moves
+    /// on screen.
     ///
     /// A box that is user-scrollable but already pinned at both boundaries
     /// still qualifies: whether it *can absorb a particular delta* is
@@ -264,29 +353,26 @@ impl<T> Document<T> {
     /// As [`Document::paint_style`], when styles are not ready.
     #[must_use]
     pub fn nearest_user_scrollable(&self, id: NodeId, axes: ScrollAxes) -> Option<NodeId> {
-        let mut current = self.get(id);
-        while let Some(node) = current {
-            if node.is_element()
+        let mut current = Some(id);
+        while let Some(node_id) = current {
+            if let Some(node) = self.get(node_id)
+                && node.is_element()
                 && let Some(style) = node.layout_computed_style()
             {
                 let scrollable = user_scrollable_axes(style);
                 if (scrollable.x && axes.x) || (scrollable.y && axes.y) {
-                    return Some(node.id());
+                    return Some(node_id);
                 }
             }
-            current = if node.is_element() {
-                box_parent(node)
-            } else {
-                // A text leaf's own parent is its styled element, box or not.
-                node.parent()
-            };
+            current = self.scroll_parent(node_id);
         }
         None
     }
 
     /// Applies `delta` at `from`, chaining whatever the innermost scroller
-    /// cannot absorb outward through its box-tree ancestors, and returns the
-    /// innermost box that consumed anything together with the total consumed.
+    /// cannot absorb outward along the same containing-block chain, and
+    /// returns the innermost box that consumed anything together with the
+    /// total consumed.
     ///
     /// This is the CSS default (`overscroll-behavior: auto`): a scroller at its
     /// boundary hands the rest to its parent. The node reported is the
@@ -328,7 +414,7 @@ impl<T> Document<T> {
             if remaining == Vector2D::zero() {
                 break;
             }
-            next = self.get(scroller).and_then(Node::parent_id);
+            next = self.scroll_parent(scroller);
         }
 
         innermost.map(|node| (node, consumed))
@@ -483,6 +569,90 @@ mod tests {
         let pinned_at = document.scroll_offset(outer);
         assert_eq!(document.scroll_chain(inner, Vector2D::new(0.0, 50.0)), None);
         assert_eq!(document.scroll_offset(outer), pinned_at);
+    }
+
+    #[test]
+    fn the_chain_follows_containing_blocks_not_dom_ancestry() {
+        // `pinned` is a DOM child of the scroller but anchored on the page, so
+        // the paint build already refuses to scroll it. The input walk has to
+        // agree: a wheel over it must not scroll the box it sits inside, or
+        // content would slide behind a box that visibly does not move.
+        let mut document: Document<()> = Document::new(device());
+        document.add_stylesheet(
+            "page { display: flex; position: relative; width: 800px; height: 600px; }
+             .scroller { display: flex; flex-direction: column; overflow: scroll;
+                         width: 100px; height: 100px; }
+             .row { flex-shrink: 0; width: 100px; height: 100px; }
+             .pinned { display: flex; position: absolute; left: 0; top: 0;
+                       width: 50px; height: 50px; }",
+            StylesheetOrigin::Author,
+        );
+        let root = document.create_element("page", ());
+        document.append_document_element(root);
+        let scroller = document.create_element("view", ());
+        document.add_class(scroller, "scroller");
+        document.append_child(root, scroller);
+        for _ in 0..3 {
+            let row = document.create_element("view", ());
+            document.add_class(row, "row");
+            document.append_child(scroller, row);
+        }
+        let pinned = document.create_element("view", ());
+        document.add_class(pinned, "pinned");
+        document.append_child(scroller, pinned);
+        document.layout();
+
+        assert_eq!(
+            document.nearest_user_scrollable(pinned, ScrollAxes::BOTH),
+            None,
+            "an absolute box anchored on the page has no scroller in its chain",
+        );
+        assert_eq!(
+            document.scroll_chain(pinned, Vector2D::new(0.0, 50.0)),
+            None,
+        );
+        assert_eq!(document.scroll_offset(scroller), Vector2D::zero());
+
+        // A static child of the same scroller still scrolls it, so this is the
+        // containing-block rule and not a blanket refusal.
+        let row = *document
+            .get(scroller)
+            .and_then(|node| node.child_ids().first())
+            .expect("the scroller has rows");
+        assert_eq!(
+            document.nearest_user_scrollable(row, ScrollAxes::BOTH),
+            Some(scroller),
+        );
+
+        // Making the scroller itself the containing block reconnects the
+        // absolute box to it, matching what the paint build then does.
+        document.add_stylesheet(
+            ".scroller { position: relative; }",
+            StylesheetOrigin::Author,
+        );
+        document.layout();
+        assert_eq!(
+            document.nearest_user_scrollable(pinned, ScrollAxes::BOTH),
+            Some(scroller),
+        );
+    }
+
+    #[test]
+    fn a_non_finite_offset_cannot_poison_the_stored_scroll_position() {
+        let (mut document, _outer, inner) = nested_scrollers();
+        document.scroll_to(inner, Vector2D::new(0.0, 100.0));
+
+        // `f32::clamp` propagates NaN and this crate re-clamps on read, so a
+        // stored NaN would never wash out. Release builds absorb it; debug
+        // builds assert, so this only exercises the arithmetic.
+        assert_eq!(
+            clamp_to(
+                Vector2D::new(f32::NAN, f32::INFINITY),
+                Vector2D::new(200.0, 300.0)
+            ),
+            Vector2D::zero(),
+        );
+        assert!(document.scroll_offset(inner).y.is_finite());
     }
 
     #[test]
