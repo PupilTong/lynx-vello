@@ -78,6 +78,52 @@ fn create_view_returns_a_handle_append_element_accepts() {
 }
 
 #[test]
+fn drop_element_retires_a_detached_element_and_does_not_reuse_its_id() {
+    let mut runtime = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              __CreatePage('card', 0);
+              const dropped = __CreateView(0);
+              __DropElement(dropped);
+              __DropElement(dropped);
+              __CreateView(0);
+            };
+            ",
+        )
+        .expect("main-thread script");
+
+    let elements = runtime.elements();
+    assert!(elements.node_id(2).is_none());
+    assert!(elements.node_id(3).is_some());
+}
+
+#[test]
+fn drop_element_retires_an_attached_subtree() {
+    let mut runtime = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const parent = __CreateView(0);
+              const child = __CreateView(0);
+              __AppendElement(page, parent);
+              __AppendElement(parent, child);
+              __DropElement(parent);
+            };
+            ",
+        )
+        .expect("main-thread script");
+
+    let elements = runtime.elements();
+    assert!(elements.node_id(2).is_none());
+    assert!(elements.node_id(3).is_none());
+    assert!(page_child_tags(&elements).is_empty());
+}
+
+#[test]
 fn create_page_is_idempotent_across_calls() {
     let mut runtime = runtime();
     runtime

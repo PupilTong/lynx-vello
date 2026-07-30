@@ -1,71 +1,13 @@
 //! The element tree and its Element PAPI operations.
 
 use std::fmt;
-use std::num::NonZeroU32;
 
 use dom::{Document, NodeId, StylesheetOrigin};
 
+use crate::arena::{ElementArena, ElementId, LynxElement};
 use crate::device::Viewport;
 use crate::ua::{PageConfig, ua_stylesheet};
 use crate::{PAGE_TAG, VIEW_TAG};
-
-/// A Lynx element handle: the unique id the Element PAPI hands to and takes
-/// from the main-thread script.
-///
-/// Ids are dense and start at 1 — web-core's `unique_id_to_element_map` is
-/// seeded with one `None` so that index 0 can mean "no element" — and are
-/// never recycled, unlike the `dom` `NodeId` they resolve to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ElementId(NonZeroU32);
-
-impl ElementId {
-    /// The raw unique id, as the script sees it.
-    #[must_use]
-    pub const fn get(self) -> u32 {
-        self.0.get()
-    }
-
-    /// Reads a handle back from the script boundary.
-    ///
-    /// Returns `None` for `0`, the sentinel the PAPI uses for "no element" —
-    /// callers that accept that sentinel must handle it before calling here.
-    #[must_use]
-    pub const fn from_raw(raw: u32) -> Option<Self> {
-        match NonZeroU32::new(raw) {
-            Some(id) => Some(Self(id)),
-            None => None,
-        }
-    }
-}
-
-impl fmt::Display for ElementId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "#{}", self.0)
-    }
-}
-
-/// The Lynx payload every element carries in the DOM core's opaque slot.
-///
-/// The core neither reads nor derives selector state from it — it is this
-/// layer's own bookkeeping, which is exactly the contract
-/// `docs/style-architecture.md` sets for the generic payload `T`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(
-    clippy::struct_field_names,
-    reason = "each field is named after the Element PAPI argument it records, and those names \
-              all end in `id`; renaming them would break the correspondence"
-)]
-pub struct ElementData {
-    /// The handle the script holds for this element.
-    pub unique_id: ElementId,
-    /// The `parentComponentUniqueID` argument the element was created with;
-    /// `0` means "no parent component". Recorded, not yet honored (there is no
-    /// `__SetCSSId` to inherit a CSS fragment id into).
-    pub parent_component_unique_id: u32,
-    /// The `componentCSSID` a page was created with; `0` for non-page
-    /// elements. Recorded for the same reason.
-    pub component_css_id: i32,
-}
 
 /// Why an Element PAPI call was rejected.
 ///
@@ -77,7 +19,7 @@ pub struct ElementData {
 #[non_exhaustive]
 pub enum PapiError {
     /// A handle that never named a live element.
-    UnknownElement(u32),
+    UnknownElement(ElementId),
     /// Appending `child` under `parent` would put a node inside its own
     /// subtree.
     WouldCycle { parent: ElementId, child: ElementId },
@@ -96,7 +38,7 @@ impl fmt::Display for PapiError {
             }
             Self::WouldCycle { parent, child } => write!(
                 formatter,
-                "appending {child} under {parent} would form a cycle"
+                "appending #{child} under #{parent} would form a cycle"
             ),
             Self::CannotReparentPage => {
                 formatter.write_str("the page element cannot be given a parent")
@@ -125,23 +67,14 @@ impl std::error::Error for PapiError {}
 /// `hughie`, after which the limit can rise or go away.
 pub const MAX_TREE_DEPTH: u32 = 256;
 
-/// What the handle table stores per live element.
-#[derive(Clone, Copy, Debug)]
-struct Slot {
-    node: NodeId,
-    /// Levels of descendants below this element; a leaf is `0`. Maintained on
-    /// append so the depth guard costs no tree walk.
-    height: u32,
-}
-
-/// One Lynx element tree: a `dom` document plus the unique-id handle space and
-/// page policy the Element PAPI speaks in.
+/// One Lynx element tree: a `dom` document, an independent runtime-element
+/// arena, and the page policy the Element PAPI speaks in.
 #[derive(Debug)]
 pub struct ElementTree {
-    document: Document<ElementData>,
-    /// Handle table indexed by unique id. Slot 0 is the reserved "no element"
-    /// sentinel; a retired element's slot becomes `None` and is never reused.
-    nodes: Vec<Option<Slot>>,
+    /// The DOM payload is only the key back into `elements`; all Lynx runtime
+    /// state stays in the context-owned arena.
+    document: Document<i32>,
+    elements: ElementArena,
     page: Option<ElementId>,
     /// `__CreatePage`'s `componentID` — a string name web-core keeps in a side
     /// table rather than on the element, so it never reaches selectors.
@@ -159,7 +92,7 @@ impl ElementTree {
         document.add_stylesheet(&ua_stylesheet(config), StylesheetOrigin::UserAgent);
         Self {
             document,
-            nodes: vec![None],
+            elements: ElementArena::new(),
             page: None,
             page_component_id: String::new(),
             page_attached: false,
@@ -169,7 +102,7 @@ impl ElementTree {
 
     /// The underlying document, for style/layout/paint queries.
     #[must_use]
-    pub const fn document(&self) -> &Document<ElementData> {
+    pub const fn document(&self) -> &Document<i32> {
         &self.document
     }
 
@@ -177,7 +110,7 @@ impl ElementTree {
     ///
     /// This is the mutable operation a renderer needs. There is deliberately no
     /// `document_mut`: handing out `&mut Document` would let a caller remove or
-    /// move nodes behind this layer's back, desynchronising the handle table,
+    /// move nodes behind this layer's back, desynchronising the element arena,
     /// the page state, and the height cache — and the DOM core is
     /// crash-on-misuse, so the next PAPI call would panic rather than return
     /// [`PapiError`].
@@ -243,11 +176,26 @@ impl ElementTree {
     /// The DOM node a handle names, or `None` if the handle is not live.
     #[must_use]
     pub fn node_id(&self, id: ElementId) -> Option<NodeId> {
-        self.slot(id).map(|slot| slot.node)
+        self.element(id).map(LynxElement::node_id)
     }
 
-    fn slot(&self, id: ElementId) -> Option<Slot> {
-        self.nodes.get(id.get() as usize).copied().flatten()
+    /// The live runtime element stored at `id`.
+    #[must_use]
+    pub fn element(&self, id: ElementId) -> Option<&LynxElement> {
+        self.elements.get(id)
+    }
+
+    /// The `parentComponentUniqueID` recorded when `id` was created.
+    #[must_use]
+    pub fn parent_component_unique_id(&self, id: ElementId) -> Option<ElementId> {
+        self.element(id)
+            .map(LynxElement::parent_component_unique_id)
+    }
+
+    /// The `componentCSSID` recorded when `id` was created.
+    #[must_use]
+    pub fn component_css_id(&self, id: ElementId) -> Option<i32> {
+        self.element(id).map(LynxElement::component_css_id)
     }
 
     /// This element's distance from the root of the tree it currently sits in,
@@ -274,14 +222,19 @@ impl ElementTree {
         let mut required = height;
         let mut steps = 0;
         while let Some(id) = current {
-            let Some(mut slot) = self.slot(id) else {
+            let Some((node_id, old_height)) = self
+                .element(id)
+                .map(|element| (element.node_id(), element.height))
+            else {
                 return;
             };
-            if slot.height >= required {
+            if old_height >= required {
                 return;
             }
-            slot.height = required;
-            self.nodes[id.get() as usize] = Some(slot);
+            self.elements
+                .get_mut(id)
+                .expect("a live element must remain in its arena")
+                .height = required;
             required += 1;
             steps += 1;
             if steps > MAX_TREE_DEPTH {
@@ -289,7 +242,7 @@ impl ElementTree {
             }
             current = self
                 .document
-                .get(slot.node)
+                .get(node_id)
                 .and_then(dom::Node::parent_id)
                 .and_then(|parent| self.handle_of(parent));
         }
@@ -304,8 +257,8 @@ impl ElementTree {
             .child_ids()
             .iter()
             .filter_map(|&child| self.handle_of(child))
-            .filter_map(|handle| self.slot(handle))
-            .map(|slot| slot.height.saturating_add(1))
+            .filter_map(|handle| self.element(handle))
+            .map(|element| element.height.saturating_add(1))
             .max()
             .unwrap_or(0)
     }
@@ -330,14 +283,16 @@ impl ElementTree {
                 return;
             };
             let height = self.height_from_children(node);
-            let Some(mut slot) = self.slot(id) else {
+            let Some(old_height) = self.element(id).map(|element| element.height) else {
                 return;
             };
-            if slot.height == height {
+            if old_height == height {
                 return;
             }
-            slot.height = height;
-            self.nodes[id.get() as usize] = Some(slot);
+            self.elements
+                .get_mut(id)
+                .expect("a live element must remain in its arena")
+                .height = height;
             current = self
                 .document
                 .get(node)
@@ -346,12 +301,15 @@ impl ElementTree {
         }
     }
 
-    /// The handle a DOM node belongs to, read back from its opaque payload.
+    /// The handle a DOM node belongs to, resolved through its payload id.
     fn handle_of(&self, node: NodeId) -> Option<ElementId> {
-        self.document
+        let unique_id = *self
+            .document
             .get(node)
-            .filter(|node| node.is_element())
-            .map(|node| node.payload().unique_id)
+            .filter(|node| node.is_element())?
+            .payload();
+        let element = self.elements.get(unique_id)?;
+        (element.node_id() == node).then_some(unique_id)
     }
 
     /// Mounts author CSS — the seam a decoded `.web.bundle` `StyleInfo`
@@ -373,8 +331,8 @@ impl ElementTree {
         // `componentID` is a *string* name, not the numeric unique id, and
         // web-core keeps it out of the DOM — `create_element_common` files it
         // in a side table. Recording it here rather than as an attribute keeps
-        // it invisible to selector matching, which is what the DOM core's
-        // opaque-payload contract requires of this layer.
+        // it invisible to selector matching; the DOM payload remains only the
+        // context-owned unique id.
         component_id.clone_into(&mut self.page_component_id);
         self.page = Some(id);
         id
@@ -384,10 +342,11 @@ impl ElementTree {
     ///
     /// Creates a detached `view` element. `parent_component_unique_id` is `0`
     /// for "no parent component"; any other value must name a live element.
-    pub fn create_view(&mut self, parent_component_unique_id: u32) -> Result<ElementId, PapiError> {
-        if let Some(parent_component) = ElementId::from_raw(parent_component_unique_id)
-            && self.node_id(parent_component).is_none()
-        {
+    pub fn create_view(
+        &mut self,
+        parent_component_unique_id: ElementId,
+    ) -> Result<ElementId, PapiError> {
+        if parent_component_unique_id != 0 && self.node_id(parent_component_unique_id).is_none() {
             return Err(PapiError::UnknownElement(parent_component_unique_id));
         }
         Ok(self.insert(VIEW_TAG, parent_component_unique_id, 0))
@@ -407,10 +366,10 @@ impl ElementTree {
     ) -> Result<ElementId, PapiError> {
         let parent_node = self
             .node_id(parent)
-            .ok_or(PapiError::UnknownElement(parent.get()))?;
+            .ok_or(PapiError::UnknownElement(parent))?;
         let child_node = self
             .node_id(child)
-            .ok_or(PapiError::UnknownElement(child.get()))?;
+            .ok_or(PapiError::UnknownElement(child))?;
         if self.page == Some(child) {
             return Err(PapiError::CannotReparentPage);
         }
@@ -423,7 +382,7 @@ impl ElementTree {
         // untrusted input. `height` makes this exact for grafted subtrees too —
         // joining two 200-level chains is caught, not just growing one leaf at
         // a time.
-        let child_height = self.slot(child).map_or(0, |slot| slot.height);
+        let child_height = self.element(child).map_or(0, |element| element.height);
         let depth = self.depth_of(parent_node) + 1 + child_height;
         if depth > MAX_TREE_DEPTH {
             return Err(PapiError::TooDeep {
@@ -447,6 +406,41 @@ impl ElementTree {
             self.lower_heights(previous);
         }
         Ok(child)
+    }
+
+    /// `__DropElement(id)`.
+    ///
+    /// The DOM subtree and every corresponding `LynxElement` are dropped
+    /// together. Their `Vec` entries remain as permanent `None` tombstones, so
+    /// no later creation can reuse any of their unique ids.
+    pub fn drop_element(&mut self, id: ElementId) -> bool {
+        let Some(node) = self.node_id(id) else {
+            return false;
+        };
+        let previous_parent = self
+            .document
+            .get(node)
+            .and_then(dom::Node::parent_id)
+            .and_then(|parent| self.handle_of(parent));
+
+        let retired_ids = self.document.remove_subtree(node);
+        for unique_id in retired_ids {
+            let retired = self.elements.retire(unique_id);
+            debug_assert!(
+                retired.is_some(),
+                "a removed DOM node must have a live Lynx element"
+            );
+        }
+
+        if self.page == Some(id) {
+            self.page = None;
+            self.page_component_id.clear();
+            self.page_attached = false;
+        }
+        if let Some(parent) = previous_parent {
+            self.lower_heights(parent);
+        }
+        true
     }
 
     /// `__FlushElementTree()` — the single commit boundary.
@@ -473,22 +467,17 @@ impl ElementTree {
     fn insert(
         &mut self,
         tag: &str,
-        parent_component_unique_id: u32,
+        parent_component_unique_id: ElementId,
         component_css_id: i32,
     ) -> ElementId {
-        let raw = u32::try_from(self.nodes.len())
-            .expect("a Lynx element tree cannot hold more than u32::MAX elements");
-        let unique_id = ElementId(NonZeroU32::new(raw).expect("slot 0 is the reserved sentinel"));
-        let node = self.document.create_element(
-            tag,
-            ElementData {
-                unique_id,
-                parent_component_unique_id,
-                component_css_id,
-            },
-        );
-        self.nodes.push(Some(Slot { node, height: 0 }));
-        unique_id
+        let unique_id = self.elements.reserve();
+        let node = self.document.create_element(tag, unique_id);
+        self.elements.insert(
+            unique_id,
+            node,
+            parent_component_unique_id,
+            component_css_id,
+        )
     }
 }
 
@@ -522,9 +511,46 @@ mod tests {
         let page = tree.create_page("page", 0);
         let first = tree.create_view(0).unwrap();
         let second = tree.create_view(0).unwrap();
-        assert_eq!(page.get(), 1);
-        assert_eq!(first.get(), 2);
-        assert_eq!(second.get(), 3);
+        assert_eq!(page, 1);
+        assert_eq!(first, 2);
+        assert_eq!(second, 3);
+    }
+
+    #[test]
+    fn releasing_an_element_leaves_a_permanent_empty_arena_slot() {
+        let mut tree = tree();
+        let first = tree.create_view(0).unwrap();
+        let first_node = tree.node_id(first).unwrap();
+        let first_unique_id = *tree.document().get(first_node).unwrap().payload();
+
+        assert!(tree.drop_element(first));
+        assert!(tree.node_id(first).is_none());
+
+        let second = tree.create_view(0).unwrap();
+        let second_node = tree.node_id(second).unwrap();
+        let second_unique_id = *tree.document().get(second_node).unwrap().payload();
+
+        assert_eq!(tree.elements.len(), 3);
+        assert_eq!(first_unique_id, 1);
+        assert_eq!(second_unique_id, 2);
+        assert_eq!(second, first + 1);
+        assert!(tree.node_id(first).is_none());
+    }
+
+    #[test]
+    fn releasing_a_subtree_retires_every_lynx_element_in_it() {
+        let mut tree = tree();
+        let parent = tree.create_view(0).unwrap();
+        let child = tree.create_view(0).unwrap();
+        tree.append_element(parent, child).unwrap();
+
+        assert!(tree.drop_element(parent));
+        assert!(tree.node_id(parent).is_none());
+        assert!(tree.node_id(child).is_none());
+        assert_eq!(tree.elements.len(), 3);
+
+        let next = tree.create_view(0).unwrap();
+        assert_eq!(next, 3);
     }
 
     #[test]
@@ -536,6 +562,7 @@ mod tests {
         assert_eq!(tree.page(), Some(first));
         // The second call's arguments are ignored, like web-core's.
         assert_eq!(tree.page_component_id(), "page");
+        assert_eq!(tree.component_css_id(first), Some(0));
     }
 
     #[test]
@@ -553,8 +580,8 @@ mod tests {
 
     #[test]
     fn zero_is_the_no_element_sentinel() {
-        assert!(ElementId::from_raw(0).is_none());
         let mut tree = tree();
+        assert!(tree.element(0).is_none());
         assert!(tree.create_view(0).is_ok());
     }
 
@@ -614,7 +641,7 @@ mod tests {
     fn append_element_rejects_unknown_handles() {
         let mut tree = tree();
         let page = tree.create_page("page", 0);
-        let ghost = ElementId::from_raw(99).unwrap();
+        let ghost: ElementId = 99;
         assert_eq!(
             tree.append_element(page, ghost).unwrap_err(),
             PapiError::UnknownElement(99)
@@ -866,7 +893,7 @@ mod tests {
         // Move everything below `holder` elsewhere; `holder` is a leaf now.
         let holder_node = tree.node_id(holder).unwrap();
         let child_node = tree.document().get(holder_node).unwrap().child_ids()[0];
-        let child = tree.document().get(child_node).unwrap().payload().unique_id;
+        let child = tree.handle_of(child_node).unwrap();
         let parking = tree.create_view(0).unwrap();
         tree.append_element(parking, child).unwrap();
         assert!(
@@ -894,13 +921,22 @@ mod tests {
     }
 
     #[test]
-    fn the_payload_carries_the_handle_back_from_a_node() {
+    fn the_document_payload_is_the_i32_unique_id() {
+        fn assert_document_type(_: &dom::Document<i32>) {}
+
         let mut tree = tree();
-        let page = tree.create_page("page", 0);
-        let view = tree.create_view(page.get()).unwrap();
+        assert_document_type(tree.document());
+        let page = tree.create_page("page", 17);
+        let view = tree.create_view(page).unwrap();
         let node = tree.node_id(view).unwrap();
-        let data = *tree.document().get(node).unwrap().payload();
-        assert_eq!(data.unique_id, view);
-        assert_eq!(data.parent_component_unique_id, page.get());
+        let payload_unique_id = *tree.document().get(node).unwrap().payload();
+        let element = tree.elements.get(payload_unique_id).unwrap();
+
+        assert_eq!(element.unique_id(), view);
+        assert_eq!(element.node_id(), node);
+        assert_eq!(element.node(tree.document()).map(dom::Node::id), Some(node));
+        assert_eq!(tree.parent_component_unique_id(view), Some(page));
+        assert_eq!(tree.component_css_id(page), Some(17));
+        assert_eq!(payload_unique_id, view);
     }
 }

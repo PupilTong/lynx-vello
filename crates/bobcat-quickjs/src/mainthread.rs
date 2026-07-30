@@ -31,13 +31,13 @@
 //!
 //! # Recorded limits
 //!
-//! - **Four of the 61 Element PAPI members are installed** — `__CreatePage`, `__CreateView`,
-//!   `__AppendElement`, `__FlushElementTree` (see `lynx-element`'s crate docs). A bundle that
-//!   reaches for anything else gets a `ReferenceError` naming the missing global, which is the
-//!   intended failure: a silently wrong render would be worse.
-//! - **Element handles cross the boundary as unique-id numbers**, not element objects, because the
-//!   script boundary carries primitives only. web-core's SSR target uses the same identity; its CSR
-//!   target passes DOM nodes.
+//! - **Five Element PAPI members are installed** — `__CreatePage`, `__CreateView`,
+//!   `__AppendElement`, `__DropElement`, `__FlushElementTree` (see `lynx-element`'s crate docs). A
+//!   bundle that reaches for anything else gets a `ReferenceError` naming the missing global, which
+//!   is the intended failure: a silently wrong render would be worse.
+//! - **Element handles cross as `i32` unique-id numbers.** `__DropElement` explicitly retires the
+//!   corresponding `lynx-element` arena entry; this layer does not add an object wrapper or GC
+//!   policy around those ids.
 //! - **The non-element main-thread globals are absent** (`lynx`, `SystemInfo`, `__globalProps`,
 //!   `_ReportError`, `__OnLifecycleEvent`, `__LoadLepusChunk`, `_I18nResourceTranslation`,
 //!   `_AddEventListener`, `__QueryComponent`).
@@ -218,23 +218,22 @@ fn install_element_papi(
         let id = tree
             .borrow_mut()
             .create_page(component_id, component_css_id);
-        Ok(handle(id))
+        Ok(unique_id_value(id))
     })?;
 
     // `__CreateView(parentComponentUniqueID)` — returns the new view's unique
     // id. The argument is `0` when there is no parent component.
     let tree = Rc::clone(elements);
     realm.define_global_function("__CreateView", 1, move |arguments| {
-        let parent_component = u32_argument("__CreateView", arguments, 0)?;
+        let parent_component = non_negative_i32_argument("__CreateView", arguments, 0)?;
         let id = tree
             .borrow_mut()
             .create_view(parent_component)
             .map_err(papi_error)?;
-        Ok(handle(id))
+        Ok(unique_id_value(id))
     })?;
 
-    // `__AppendElement(parent, child)` — returns the child, as both of Lynx's
-    // real implementations do.
+    // `__AppendElement(parent, child)` — returns the child unique id.
     let tree = Rc::clone(elements);
     realm.define_global_function("__AppendElement", 2, move |arguments| {
         let parent = element_argument("__AppendElement", arguments, 0)?;
@@ -243,7 +242,16 @@ fn install_element_papi(
             .borrow_mut()
             .append_element(parent, child)
             .map_err(papi_error)?;
-        Ok(handle(appended))
+        Ok(unique_id_value(appended))
+    })?;
+
+    // `__DropElement(element)` — removes the DOM subtree and leaves permanent
+    // `None` tombstones in the Lynx element arena. Repeated drops are no-ops.
+    let tree = Rc::clone(elements);
+    realm.define_global_function("__DropElement", 1, move |arguments| {
+        let id = element_argument("__DropElement", arguments, 0)?;
+        tree.borrow_mut().drop_element(id);
+        Ok(HostValue::Undefined)
     })?;
 
     // `__FlushElementTree()` — the single commit boundary. web-core ignores
@@ -257,9 +265,9 @@ fn install_element_papi(
     Ok(())
 }
 
-/// An element handle, as the script sees it.
-fn handle(id: ElementId) -> HostValue {
-    HostValue::Number(f64::from(id.get()))
+/// A unique id crossing the primitives-only native host boundary.
+fn unique_id_value(id: ElementId) -> HostValue {
+    HostValue::Number(f64::from(id))
 }
 
 fn papi_error(error: PapiError) -> HostFunctionError {
@@ -272,17 +280,17 @@ fn argument(arguments: &[HostValue], index: usize) -> &HostValue {
 
 /// Reads an argument that must be a non-negative integer, the way every
 /// numeric PAPI argument is specified.
-fn u32_argument(
+fn non_negative_i32_argument(
     function: &str,
     arguments: &[HostValue],
     index: usize,
-) -> Result<u32, HostFunctionError> {
+) -> Result<i32, HostFunctionError> {
     let HostValue::Number(value) = *argument(arguments, index) else {
         return Err(HostFunctionError::new(format!(
             "{function} expects a number for argument {index}"
         )));
     };
-    if !value.is_finite() || value.fract() != 0.0 || value < 0.0 || value > f64::from(u32::MAX) {
+    if !value.is_finite() || value.fract() != 0.0 || value < 0.0 || value > f64::from(i32::MAX) {
         return Err(HostFunctionError::new(format!(
             "{function} expects a non-negative integer for argument {index}, got {value}"
         )));
@@ -292,7 +300,7 @@ fn u32_argument(
         clippy::cast_sign_loss,
         reason = "the range and integrality checks above make this exact"
     )]
-    Ok(value as u32)
+    Ok(value as i32)
 }
 
 fn i32_argument(
@@ -344,8 +352,8 @@ fn element_argument(
     arguments: &[HostValue],
     index: usize,
 ) -> Result<ElementId, HostFunctionError> {
-    let raw = u32_argument(function, arguments, index)?;
-    ElementId::from_raw(raw).ok_or_else(|| {
+    let id = non_negative_i32_argument(function, arguments, index)?;
+    (id != 0).then_some(id).ok_or_else(|| {
         HostFunctionError::new(format!(
             "{function} expects an element handle for argument {index}, got the null handle 0"
         ))
