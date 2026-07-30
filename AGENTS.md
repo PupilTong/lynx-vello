@@ -369,9 +369,7 @@ useful signal for currently-compatible versions of those libraries.
   Lynx computed defaults (border-box, `overflow: hidden`, `display: linear`
   on every element, …) stay embedder cascade policy (UA sheet). Relies on
   the vendored stylo fork (`vendor/stylo`, tracking the
-  canonical `lynx` branch, gitlink `a1e8db9a6` — **fork PR #12, open, not yet
-  merged**; re-pin to the squashed `lynx` tip once it lands): `contain` was
-  already seeded
+  canonical `lynx` branch, tip `019d1fb50`): `contain` was already seeded
   in the fork's lynx grammar; fork PR #9 (squash-merged into `lynx`) added
   `content-visibility` / `contain-intrinsic-size` under the `lynx` feature,
   pref-gated for stock servo builds; fork PR #10 (squash-merged into
@@ -381,8 +379,8 @@ useful signal for currently-compatible versions of those libraries.
   seeded `object-fit` / `object-position`, which were already ungated in
   `longhands.toml` and compiled out only by absence from the allowlist —
   replaced content needs them for the css-images-3 concrete-object-size
-  rules; and fork PR #12 (branch `claude/lynx-overflow-scroll`, **open**)
-  un-gates `overflow: scroll | clip` and adds
+  rules; and fork PR #12 (squash-merged into `lynx`)
+  un-gated `overflow: scroll | clip` and added
   `Overflow::is_user_scrollable`. The native engine's grammar really is
   `visible | hidden`, but the **web** bundle this stack consumes uses the
   other two directly (`web-elements`' own `scroll-view.css` authors
