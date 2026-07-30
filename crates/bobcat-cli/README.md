@@ -8,8 +8,8 @@ as a `file:///` URL and renders it through `bobcat-quickjs` â†’ `lynx-element` â
 # Native macOS window
 bobcat -i file:///absolute/path/to/card.web.bundle
 
-# Paced headless session
-bobcat -i file:///absolute/path/to/card.web.bundle --headless --vsync 60
+# Paced headless session (optionally at a HiDPI scale)
+bobcat -i file:///absolute/path/to/card.web.bundle --headless --vsync 60 --dpr 2
 ```
 
 Both modes expose a small debugger-style prompt. Screenshots are captured from
@@ -30,10 +30,12 @@ Continuing at 60 Hz.
 Run `bobcat --help` for all startup options and enter `help` at the prompt for
 all runtime commands.
 
-Headed mode is macOS-only today. Headless rendering is platform-neutral and
-uses whatever GPU adapter Vello/wgpu can acquire. Only screenshots synchronize
-the CPU for RGBA readback; normal frames reuse the scene, Vello renderer, GPU
-target, and scratch allocations.
+Headed mode is macOS-only today; it derives the device-pixel ratio from the
+window, while headless mode takes it from `--dpr` (default 1). Only
+screenshots read pixels back to the CPU; normal frames reuse the scene, Vello
+renderer, GPU target, and scratch allocations, skip the GPU entirely while
+the document is unchanged, and wait for each submitted frame so a clock that
+outpaces the GPU cannot pile up work.
 
 Current `bobcat-quickjs` limits still apply. In particular, most real
 ReactLynx bundles currently stop at an unimplemented main-thread global before

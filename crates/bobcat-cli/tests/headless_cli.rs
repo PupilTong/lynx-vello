@@ -2,20 +2,16 @@ use std::io::Write;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use pulsar::gpu::{GpuError, Headless};
-
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn a_file_bundle_supports_debugger_style_screenshots() {
-    match Headless::new() {
-        Ok(gpu) => drop(gpu),
-        Err(GpuError::NoAdapter) => {
-            eprintln!("SKIP a_file_bundle_can_be_captured_to_png: no usable GPU adapter");
-            return;
-        }
-        Err(error) => panic!("GPU initialization failed: {error}"),
-    }
+    let Some(gpu) =
+        flashbulb::headless_or_skip("a_file_bundle_supports_debugger_style_screenshots")
+    else {
+        return;
+    };
+    drop(gpu);
 
     let root = std::env::temp_dir().join(format!(
         "bobcat-cli-e2e-{}-{}",
@@ -73,11 +69,8 @@ fn a_file_bundle_supports_debugger_style_screenshots() {
             "missing `{expected}` in:\n{stdout}"
         );
     }
-    let decoder = png::Decoder::new(std::io::BufReader::new(
-        std::fs::File::open(&screenshot_path).unwrap(),
-    ));
-    let reader = decoder.read_info().unwrap();
-    assert_eq!((reader.info().width, reader.info().height), (32, 24));
+    let image = flashbulb::Image::read_png(&screenshot_path).unwrap();
+    assert_eq!((image.width(), image.height()), (32, 24));
 
     std::fs::remove_dir_all(root).unwrap();
 }

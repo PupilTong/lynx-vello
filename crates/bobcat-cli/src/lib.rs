@@ -28,6 +28,7 @@ Options:
       --headless        render without opening a window
       --vsync FPS       headless frame-clock rate, 1..1000 (default: 60)
       --viewport WxH    initial CSS-pixel viewport (default: 393x727)
+      --dpr RATIO       headless device-pixel ratio (default: 1)
   -h, --help            show this help
   -V, --version         show the version
 

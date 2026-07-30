@@ -85,7 +85,7 @@ impl Program {
             images: ImageStore::new(),
             viewport,
             frame_size,
-            scene_dirty: true,
+            painted_epoch: None,
         })
     }
 }
@@ -99,6 +99,10 @@ pub(crate) struct FrameSize {
 pub(crate) struct PreparedFrame<'a> {
     pub(crate) scene: &'a Scene,
     pub(crate) size: FrameSize,
+    /// Whether this call repainted the scene: `false` means the scene is
+    /// byte-identical to the previously prepared frame, so a host that
+    /// already submitted that frame may skip the GPU entirely.
+    pub(crate) changed: bool,
 }
 
 pub(crate) struct FramePipeline {
@@ -107,7 +111,10 @@ pub(crate) struct FramePipeline {
     images: ImageStore,
     viewport: Viewport,
     frame_size: FrameSize,
-    scene_dirty: bool,
+    /// The document's `visual_epoch` the painted scene reflects; `None`
+    /// until the first paint (and after a resize, which must repaint
+    /// unconditionally).
+    painted_epoch: Option<u64>,
 }
 
 impl std::fmt::Debug for FramePipeline {
@@ -116,7 +123,7 @@ impl std::fmt::Debug for FramePipeline {
             .debug_struct("FramePipeline")
             .field("viewport", &self.viewport)
             .field("frame_size", &self.frame_size)
-            .field("scene_dirty", &self.scene_dirty)
+            .field("painted_epoch", &self.painted_epoch)
             .finish_non_exhaustive()
     }
 }
@@ -148,22 +155,33 @@ impl FramePipeline {
         }
         self.viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
         self.frame_size = next_size;
-        self.scene_dirty = true;
+        self.painted_epoch = None;
         Ok(())
     }
 
     pub(crate) fn prepare_frame(&mut self) -> PreparedFrame<'_> {
-        if self.scene_dirty {
-            let mut elements = self.runtime.elements_mut();
+        let mut elements = self.runtime.elements_mut();
+        let changed = self.painted_epoch != Some(elements.document().visual_epoch());
+        if changed {
             let frame = elements.paint_order();
             self.painter
                 .paint(elements.document(), &frame, &self.images);
-            self.scene_dirty = false;
+            // Read the epoch after the flush so any bookkeeping done inside
+            // `paint_order` is folded into the painted state.
+            self.painted_epoch = Some(elements.document().visual_epoch());
         }
         PreparedFrame {
             scene: self.painter.scene(),
             size: self.frame_size,
+            changed,
         }
+    }
+
+    /// Whether the document has visual changes the painted scene does not
+    /// reflect yet.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn needs_frame(&self) -> bool {
+        self.painted_epoch != Some(self.runtime.elements().document().visual_epoch())
     }
 }
 

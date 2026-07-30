@@ -2,7 +2,7 @@ use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use pulsar::gpu::Headless;
+use pulsar::gpu::{read_texture, render_params, renderer_options};
 use pulsar::vello;
 use pulsar::vello::peniko::Color;
 use pulsar::vello::util::{RenderContext, RenderSurface};
@@ -16,7 +16,7 @@ use crate::CliError;
 use crate::args::Options;
 use crate::command::{COMMAND_HELP, Command, Console};
 use crate::page::{FramePipeline, FrameSize, Program};
-use crate::screenshot::write_png;
+use crate::screenshot::save_screenshot;
 
 #[derive(Debug)]
 enum UserEvent {
@@ -51,7 +51,6 @@ struct MacApplication {
     initial_height: f32,
     pipeline: Option<FramePipeline>,
     graphics: Option<WindowGraphics>,
-    capture_gpu: Option<Headless>,
     window: Option<Arc<Window>>,
     console: Console,
     pending_screenshots: Vec<PathBuf>,
@@ -82,7 +81,6 @@ impl MacApplication {
             initial_height: options.viewport_height,
             pipeline: None,
             graphics: None,
-            capture_gpu: None,
             window: None,
             console,
             pending_screenshots: Vec::new(),
@@ -165,28 +163,19 @@ impl MacApplication {
         if self.pending_screenshots.is_empty() {
             return Ok(());
         }
-        let capture_gpu = match &mut self.capture_gpu {
-            Some(gpu) => gpu,
-            None => self
-                .capture_gpu
-                .insert(Headless::new().map_err(CliError::Gpu)?),
-        };
-        let pixels = capture_gpu
-            .render(
-                frame.scene,
-                frame.size.width,
-                frame.size.height,
-                Color::WHITE,
-            )
-            .map_err(CliError::Gpu)?;
-        for path in mem::take(&mut self.pending_screenshots) {
-            write_png(&path, frame.size.width, frame.size.height, &pixels).map_err(|source| {
-                CliError::Screenshot {
-                    path: path.clone(),
-                    source,
+        // A screenshot failure must not tear down the session: report it at
+        // the prompt like any other bad command, and let one bad path leave
+        // the other queued captures unharmed.
+        let paths = mem::take(&mut self.pending_screenshots);
+        match graphics.capture_frame(frame.size) {
+            Ok(pixels) => {
+                for path in paths {
+                    if let Err(error) = save_screenshot(&path, frame.size, &pixels) {
+                        eprintln!("bobcat: {error}");
+                    }
                 }
-            })?;
-            println!("Saved screenshot to {}.", path.display());
+            }
+            Err(error) => eprintln!("bobcat: screenshot capture failed: {error}"),
         }
         Ok(())
     }
@@ -290,7 +279,16 @@ impl ApplicationHandler<UserEvent> for MacApplication {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if self.running && !self.occluded {
+        // Re-request only while the document has something new to paint: a
+        // static scene must not turn `ControlFlow::Wait` into a permanent
+        // full-refresh render loop.
+        if self.running
+            && !self.occluded
+            && self
+                .pipeline
+                .as_ref()
+                .is_some_and(FramePipeline::needs_frame)
+        {
             self.request_redraw();
         }
     }
@@ -300,6 +298,18 @@ struct WindowGraphics {
     context: RenderContext,
     surface: RenderSurface<'static>,
     renderer: vello::Renderer,
+    capture: Option<CaptureTarget>,
+}
+
+/// A `COPY_SRC` twin of the surface's render target, on the same device, so
+/// screenshots read back exactly what the window pipeline rendered instead of
+/// re-rendering on a second GPU stack.
+struct CaptureTarget {
+    width: u32,
+    height: u32,
+    texture: vello::wgpu::Texture,
+    view: vello::wgpu::TextureView,
+    blitter: vello::wgpu::util::TextureBlitter,
 }
 
 impl std::fmt::Debug for WindowGraphics {
@@ -322,18 +332,13 @@ impl WindowGraphics {
         ))
         .map_err(|error| CliError::Render(error.to_string()))?;
         let handle = &context.devices[surface.dev_id];
-        let renderer = vello::Renderer::new(
-            &handle.device,
-            vello::RendererOptions {
-                antialiasing_support: vello::AaSupport::area_only(),
-                ..vello::RendererOptions::default()
-            },
-        )
-        .map_err(|error| CliError::Render(error.to_string()))?;
+        let renderer = vello::Renderer::new(&handle.device, renderer_options())
+            .map_err(|error| CliError::Render(error.to_string()))?;
         Ok(Self {
             context,
             surface,
             renderer,
+            capture: None,
         })
     }
 
@@ -361,6 +366,7 @@ impl WindowGraphics {
             context,
             surface,
             renderer,
+            ..
         } = self;
         let (surface_texture, reconfigure_after) = match surface.surface.get_current_texture() {
             vello::wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
@@ -389,12 +395,7 @@ impl WindowGraphics {
                 &handle.queue,
                 scene,
                 &surface.target_view,
-                &vello::RenderParams {
-                    base_color: Color::WHITE,
-                    width: size.width,
-                    height: size.height,
-                    antialiasing_method: vello::AaConfig::Area,
-                },
+                &render_params(Color::WHITE, size.width, size.height),
             )
             .map_err(|error| CliError::Render(error.to_string()))?;
         let output_view = surface_texture
@@ -419,6 +420,72 @@ impl WindowGraphics {
             context.configure_surface(surface);
         }
         Ok(())
+    }
+
+    /// Reads back the frame most recently rendered into the surface's target
+    /// texture, on the window's own device, as tightly-packed RGBA8 pixels.
+    fn capture_frame(&mut self, size: FrameSize) -> Result<Vec<u8>, CliError> {
+        let handle = &self.context.devices[self.surface.dev_id];
+        if !self
+            .capture
+            .as_ref()
+            .is_some_and(|capture| capture.width == size.width && capture.height == size.height)
+        {
+            let texture = handle
+                .device
+                .create_texture(&vello::wgpu::TextureDescriptor {
+                    label: Some("bobcat capture target"),
+                    size: vello::wgpu::Extent3d {
+                        width: size.width,
+                        height: size.height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: vello::wgpu::TextureDimension::D2,
+                    format: vello::wgpu::TextureFormat::Rgba8Unorm,
+                    usage: vello::wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | vello::wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                });
+            let view = texture.create_view(&vello::wgpu::TextureViewDescriptor::default());
+            let blitter = vello::wgpu::util::TextureBlitter::new(
+                &handle.device,
+                vello::wgpu::TextureFormat::Rgba8Unorm,
+            );
+            self.capture = Some(CaptureTarget {
+                width: size.width,
+                height: size.height,
+                texture,
+                view,
+                blitter,
+            });
+        }
+        let capture = self
+            .capture
+            .as_ref()
+            .expect("the capture target was just ensured");
+        let mut encoder =
+            handle
+                .device
+                .create_command_encoder(&vello::wgpu::CommandEncoderDescriptor {
+                    label: Some("bobcat capture blit"),
+                });
+        capture.blitter.copy(
+            &handle.device,
+            &mut encoder,
+            &self.surface.target_view,
+            &capture.view,
+        );
+        handle.queue.submit([encoder.finish()]);
+        read_texture(
+            &handle.device,
+            &handle.queue,
+            &capture.texture,
+            size.width,
+            size.height,
+        )
+        .map_err(CliError::Gpu)
     }
 }
 

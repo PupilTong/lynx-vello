@@ -195,7 +195,17 @@ impl ElementTree {
     /// Window embedders call this when a view moves between displays with
     /// different scale factors. Keeping it on this narrow surface avoids
     /// exposing the mutable [`Document`] and its tree-mutation methods.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a non-finite or non-positive ratio: nothing downstream
+    /// validates it, and a stored `0.0` or `NaN` scale silently corrupts
+    /// every later cascade, layout, and paint.
     pub fn set_device_pixel_ratio(&mut self, device_pixel_ratio: f32) {
+        assert!(
+            device_pixel_ratio.is_finite() && device_pixel_ratio > 0.0,
+            "device pixel ratio must be finite and positive, got {device_pixel_ratio}"
+        );
         self.document.set_device_pixel_ratio(device_pixel_ratio);
     }
 
@@ -497,6 +507,13 @@ mod tests {
         let mut tree = tree();
         tree.set_device_pixel_ratio(2.0);
         assert!((tree.document().device().device_pixel_ratio().get() - 2.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    #[should_panic(expected = "device pixel ratio must be finite and positive")]
+    fn a_non_positive_device_pixel_ratio_panics() {
+        let mut tree = tree();
+        tree.set_device_pixel_ratio(0.0);
     }
 
     #[test]

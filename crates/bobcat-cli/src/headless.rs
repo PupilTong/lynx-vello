@@ -10,13 +10,17 @@ use crate::CliError;
 use crate::args::Options;
 use crate::command::{COMMAND_HELP, Command, Console};
 use crate::page::{FramePipeline, Program};
-use crate::screenshot::write_png;
+use crate::screenshot::save_screenshot;
 
 pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
-    let mut pipeline = program.boot(options.viewport_width, options.viewport_height, 1.0)?;
+    let mut pipeline = program.boot(
+        options.viewport_width,
+        options.viewport_height,
+        options.device_pixel_ratio,
+    )?;
     let mut gpu = Headless::new().map_err(CliError::Gpu)?;
 
-    render_frame(&mut pipeline, &mut gpu)?;
+    render_frame(&mut pipeline, &mut gpu, true)?;
     let (sender, receiver) = mpsc::channel();
     let console =
         Console::start(move |command| sender.send(command).is_ok()).map_err(CliError::Console)?;
@@ -33,7 +37,7 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
             match receiver.recv_timeout(clock.time_until_tick()) {
                 Ok(command) => Some(command),
                 Err(RecvTimeoutError::Timeout) => {
-                    render_frame(&mut pipeline, &mut gpu)?;
+                    render_frame(&mut pipeline, &mut gpu, false)?;
                     clock.advance();
                     None
                 }
@@ -60,12 +64,16 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
                 println!("Frame clock paused.");
             }
             Command::Frame => {
-                render_frame(&mut pipeline, &mut gpu)?;
+                render_frame(&mut pipeline, &mut gpu, true)?;
                 clock.restart();
                 println!("Rendered one frame.");
             }
             Command::Screenshot(path) => {
-                capture(&mut pipeline, &mut gpu, &path)?;
+                // A screenshot failure must not tear down the session: report
+                // it at the prompt like any other bad command and keep going.
+                if let Err(error) = capture(&mut pipeline, &mut gpu, &path) {
+                    eprintln!("bobcat: {error}");
+                }
                 clock.restart();
             }
             Command::SetVsync(rate) => {
@@ -83,35 +91,45 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
     }
 }
 
-fn render_frame(pipeline: &mut FramePipeline, gpu: &mut Headless) -> Result<(), CliError> {
+fn render_frame(
+    pipeline: &mut FramePipeline,
+    gpu: &mut Headless,
+    force: bool,
+) -> Result<(), CliError> {
     let frame = pipeline.prepare_frame();
+    if !frame.changed && !force {
+        // The retained target already holds this exact frame; re-submitting
+        // it would burn a full GPU pass per tick on a static scene.
+        return Ok(());
+    }
     gpu.render_frame(
         frame.scene,
         frame.size.width,
         frame.size.height,
         Color::WHITE,
     )
-    .map_err(CliError::Gpu)
+    .map_err(CliError::Gpu)?;
+    // Keep at most one frame in flight: nothing else in this loop
+    // synchronizes with the GPU, so a clock that outpaces it would otherwise
+    // pile up submissions without bound.
+    gpu.wait_idle().map_err(CliError::Gpu)
 }
 
 fn capture(pipeline: &mut FramePipeline, gpu: &mut Headless, path: &Path) -> Result<(), CliError> {
     let frame = pipeline.prepare_frame();
-    let pixels = gpu
-        .render(
+    if frame.changed {
+        gpu.render_frame(
             frame.scene,
             frame.size.width,
             frame.size.height,
             Color::WHITE,
         )
         .map_err(CliError::Gpu)?;
-    write_png(path, frame.size.width, frame.size.height, &pixels).map_err(|source| {
-        CliError::Screenshot {
-            path: path.to_owned(),
-            source,
-        }
-    })?;
-    println!("Saved screenshot to {}.", path.display());
-    Ok(())
+    }
+    // The retained target holds the current frame; read it back rather than
+    // re-rendering a scene that has not changed.
+    let pixels = gpu.read_pixels().map_err(CliError::Gpu)?;
+    save_screenshot(path, frame.size, &pixels)
 }
 
 #[derive(Clone, Copy, Debug)]
