@@ -10,7 +10,7 @@ env:
 
 jobs:
   ci:
-    name: fmt + clippy + test + coverage + bench (macOS)
+    name: fmt + clippy + test + coverage (macOS)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,11 +57,10 @@ jobs:
           cargo check -p image --target aarch64-pc-windows-msvc --all-targets
           cargo check -p image --target aarch64-linux-android --all-targets
 
-      - name: Install cargo-llvm-cov and cargo-codspeed 5
+      - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
         with:
-          # Keep cargo-codspeed's major aligned with codspeed-divan-compat.
-          tool: cargo-llvm-cov,cargo-codspeed@5
+          tool: cargo-llvm-cov
 
       # Runs the test suite under coverage instrumentation (replaces a plain
       # `cargo test` run for lib/integration tests). The vendored stylo fork
@@ -112,6 +111,27 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
           fail_ci_if_error: true
+
+  walltime-benchmarks:
+    name: bench (CodSpeed walltime, macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # vendor/stylo (the Lynx-patched stylo fork) is a submodule.
+          submodules: recursive
+
+      # Installs the nightly toolchain + components pinned in rust-toolchain.toml.
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-codspeed 5
+        uses: taiki-e/install-action@v2
+        with:
+          # Keep cargo-codspeed's major aligned with codspeed-divan-compat.
+          tool: cargo-codspeed@5
 
       # CodSpeed on macOS aarch64: the valgrind-based simulation instrument is
       # Linux-only (the runner bails with "Unsupported system" on anything but

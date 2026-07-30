@@ -68,8 +68,8 @@ UA defaults without moving those concerns into the standards core. Decoded
 | --- | --- | --- |
 | `dom` | `Document<T>` and its aligned arenas; DOM topology and attributes; private style context; invalidation-carrying mutation; inline parsing; matching, cascade, media evaluation, computed values; `StyleDamage`/`FlushSummary`; the concrete `hughie` host and layout-cache invalidation | Lynx tags or Element-PAPI opcodes, JS handle lifetime, payload semantics, `<page>` policy, bundle decoding/`StyleInfo` lowering, Lynx UA defaults, view metrics, touch-device policy |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, and the maintained Lynx CSS extension grammar behind the `lynx` feature | Runtime protocol, document ownership, bundle ingestion, or host policy |
-| `lynx-element` (the runtime adapter) | Element-PAPI validation and context-owned handles; Lynx node payload; `<page>` root policy; view metrics and device construction; UA stylesheet generation | A second DOM, matcher, cascade, layout engine, or direct writes to traversal/computed-style internals |
-| Still unowned | Lynx event payload; decoded `StyleInfo` lowering and CSS-scope policy; `rpx` view units; the remaining 57 Element PAPI members | — |
+| `lynx-element` (the runtime adapter) | Element-PAPI validation; an independent context-owned `Vec<Option<LynxElement>>` with monotone, never-reused `i32` unique ids, a permanent null slot at index 0, and permanent retirement tombstones; that same unique id carried by each DOM node; `<page>` root policy; view metrics and device construction; UA stylesheet generation | A second DOM, matcher, cascade, layout engine, or direct writes to traversal/computed-style internals |
+| Still unowned | Lynx event payload; decoded `StyleInfo` lowering and CSS-scope policy; `rpx` view units; the remaining 56 Element PAPI members | — |
 
 ## Style lifecycle
 
@@ -108,10 +108,14 @@ script against it. What that covers, and what it does not:
   installed as a UA stylesheet, under the `defaultDisplayLinear` and
   `defaultOverflowVisible` page-config switches;
 - view metrics and touch-first device construction (`Viewport::device`);
-- Lynx element identity (a dense, never-recycled unique-id handle space) and
-  untrusted-handle validation on every PAPI entry point;
-- four Element PAPI members — `__CreatePage`, `__CreateView`,
-  `__AppendElement`, `__FlushElementTree` — and web-core's boot sequence.
+- Lynx element identity (a monotone `i32` unique id used directly as its
+  permanent arena index), `Document<i32>` payloads that point back to
+  `LynxElement`, and untrusted-handle validation on every PAPI entry point;
+- direct `i32` JavaScript handles and explicit `__DropElement` retirement of
+  DOM subtrees into permanent `None` arena tombstones;
+- five Element PAPI members — `__CreatePage`, `__CreateView`,
+  `__AppendElement`, `__DropElement`, `__FlushElementTree` — and web-core's
+  boot sequence.
 
 **Still open**
 
@@ -119,8 +123,8 @@ script against it. What that covers, and what it does not:
   mounts those decoded rules; the seam is
   `ElementTree::add_author_stylesheet`;
 - viewport-relative `rpx`/`ppx` units have no owner;
-- event registrations, detached-subtree lifetime, CSS-scope (`__SetCSSId`)
-  ingestion, and the remaining 57 PAPI members have no adapter;
+- event registrations, CSS-scope (`__SetCSSId`) ingestion, and the remaining
+  56 PAPI members have no adapter;
 - `bobcat-engine::view::LynxView` is still not connected to a `Document` —
   `MainThreadRuntime` owns its element tree directly.
 

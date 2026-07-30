@@ -24,10 +24,11 @@ The runtime work that has landed so far, none of which these files were
 written to track: `crates/lynx-element` owns the Lynx element layer (unique-id
 handles, `<page>` policy, the UA cascade defaults), and
 `crates/bobcat-quickjs`'s `mainthread` module runs a `.web.bundle`'s
-main-thread script against it with four of web-core's 61 Element PAPI members
+main-thread script against it with five of web-core's 61 Element PAPI members
 installed — `__CreatePage`, `__CreateView`, `__AppendElement`,
-`__FlushElementTree`. `js-runtime.md` still declines to enumerate the Element
-PAPI; the authoritative list of what exists is `lynx-element`'s crate docs.
+`__DropElement`, `__FlushElementTree`. `js-runtime.md` still declines to
+enumerate the Element PAPI; the authoritative list of what exists is
+`lynx-element`'s crate docs.
 
 ## Column conventions
 

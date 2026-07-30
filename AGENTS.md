@@ -168,16 +168,17 @@ useful signal for currently-compatible versions of those libraries.
   the chunk inside web-core's own wrapper
   (`(function(){ "use strict"; const navigator=void 0,postMessage=void 0,window=void 0; … })()`),
   and then runs web-core's post-evaluation sequence: `processData` →
-  `renderPage` → `__FlushElementTree`. Four of web-core's 61 PAPI members are
+  `renderPage` → `__FlushElementTree`. Five of web-core's 61 PAPI members are
   installed (`__CreatePage`, `__CreateView`, `__AppendElement`,
-  `__FlushElementTree`); a bundle reaching for any other one gets a
-  `ReferenceError` naming it, which is the intended failure mode. Element
-  handles cross as unique-id numbers, matching web-core's SSR target and the
-  primitives-only script boundary. Runtime configuration, default constants,
-  explicit-config construction, the `bobcat-engine::script` adapter types, and
-  all realm/value handles, interrupt controls, and raw source-evaluation entry
-  points remain crate-private. The future preloaded module graph belongs here
-  too, not in the generic QuickJS bridge or engine-neutral protocol.
+  `__DropElement`, `__FlushElementTree`); a bundle reaching for any other one
+  gets a `ReferenceError` naming it, which is the intended failure mode.
+  Element handles cross the primitives-only boundary directly as `i32` unique
+  ids; `__DropElement` explicitly retires their DOM subtree and arena entries.
+  Runtime configuration, default constants, explicit-config construction, the
+  `bobcat-engine::script` adapter types, and all realm/value handles, interrupt
+  controls, and raw source-evaluation entry points remain crate-private. The
+  future preloaded module graph belongs here too, not in the generic QuickJS
+  bridge or engine-neutral protocol.
 - `crates/bobcat-cli` — the native `bobcat` process shell over
   `bobcat-quickjs`. `bobcat -i file:///…` decodes and boots one web bundle;
   other URL schemes remain rejected at the boundary. One reusable
@@ -204,12 +205,19 @@ useful signal for currently-compatible versions of those libraries.
   stylo `Device` construction, and the Lynx UA cascade defaults
   (`display: linear`, `box-sizing: border-box`, `overflow: hidden`, under the
   `defaultDisplayLinear` / `defaultOverflowVisible` page-config switches).
-  `ElementTree` is a `Document<ElementData>` plus a dense, never-recycled
-  handle table starting at 1 (slot 0 is web-core's "no element" sentinel);
+  `ElementTree` owns a `Document<i32>` plus an independent
+  `Vec<Option<LynxElement>>` arena. The DOM payload is only the permanent
+  `i32` unique id, which is also the direct arena index; each `LynxElement`
+  owns that id, its stable DOM `NodeId` association, component creation
+  fields, and height cache. The arena permanently reserves slot 0 as web-core's
+  "no element" sentinel, so live unique ids start at 1. `__DropElement` removes
+  the selected DOM subtree and takes the corresponding arena entries, leaving
+  permanent `None` tombstones; unique ids are never recycled, although `dom`
+  may reuse its private `NodeId` slots;
   every fallible PAPI entry returns `PapiError` instead of panicking, because
   the main-thread script is untrusted input and the DOM core is
   crash-on-misuse. `ElementTree` never lends out `&mut Document`: a caller that
-  removed or moved nodes directly would desynchronise the handle table, the
+  removed or moved nodes directly would desynchronise the element arena, the
   page state, and the height cache, and the next PAPI call would panic in the
   DOM instead of returning `PapiError`. The mutable surface is the narrow set
   the layers above actually need (`paint_order`, `add_author_stylesheet`,
@@ -526,7 +534,7 @@ useful signal for currently-compatible versions of those libraries.
   personas already set up for this work. `crates/lynx-element` and
   `crates/bobcat-quickjs`'s `mainthread` module are the first pieces of this
   layer to land; the background thread, `StyleInfo` ingestion, the event
-  model, and the other 57 Element PAPI members are still ahead.
+  model, and the other 56 Element PAPI members are still ahead.
 
 See `docs/style-architecture.md` for the current style-layer dependency and
 ownership rules, and `docs/layout-architecture.md` for the layout-layer
