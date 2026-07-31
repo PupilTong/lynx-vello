@@ -10,19 +10,19 @@
     "preview": "rsbuild dev"
   },
   "dependencies": {
-    "@lynx-js/react": "0.123.0"
+    "@lynx-js/react": "catalog:"
   },
   "devDependencies": {
-    "@lynx-js/external-bundle-rsbuild-plugin": "0.4.0",
-    "@lynx-js/lynx-bundle-rslib-config": "0.6.0",
-    "@lynx-js/lynx-core": "0.1.4",
-    "@lynx-js/preact-devtools": "5.0.1-20260716151326-abdb87c",
-    "@lynx-js/react-rsbuild-plugin": "0.18.0",
-    "@lynx-js/react-umd": "0.123.0",
-    "@lynx-js/rspeedy": "0.16.0",
-    "@lynx-js/types": "4.0.0",
-    "@lynx-js/web-core": "0.22.2",
-    "@lynx-js/web-elements": "0.12.6",
+    "@lynx-js/external-bundle-rsbuild-plugin": "catalog:",
+    "@lynx-js/lynx-bundle-rslib-config": "catalog:",
+    "@lynx-js/lynx-core": "catalog:",
+    "@lynx-js/preact-devtools": "catalog:",
+    "@lynx-js/react-rsbuild-plugin": "catalog:",
+    "@lynx-js/react-umd": "catalog:",
+    "@lynx-js/rspeedy": "catalog:",
+    "@lynx-js/types": "catalog:",
+    "@lynx-js/web-core": "catalog:",
+    "@lynx-js/web-elements": "catalog:",
     "@rsbuild/core": "2.1.4",
     "@types/react": "18.3.28",
     "cross-env": "^10.1.0"
