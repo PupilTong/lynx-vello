@@ -168,16 +168,36 @@ useful signal for currently-compatible versions of those libraries.
   the chunk inside web-core's own wrapper
   (`(function(){ "use strict"; const navigator=void 0,postMessage=void 0,window=void 0; … })()`),
   and then runs web-core's post-evaluation sequence: `processData` →
-  `renderPage` → `__FlushElementTree`. Four of web-core's 61 PAPI members are
+  `renderPage` → `__FlushElementTree`. Five of web-core's 61 PAPI members are
   installed (`__CreatePage`, `__CreateView`, `__AppendElement`,
-  `__FlushElementTree`); a bundle reaching for any other one gets a
-  `ReferenceError` naming it, which is the intended failure mode. Element
-  handles cross as unique-id numbers, matching web-core's SSR target and the
-  primitives-only script boundary. Runtime configuration, default constants,
-  explicit-config construction, the `bobcat-engine::script` adapter types, and
-  all realm/value handles, interrupt controls, and raw source-evaluation entry
-  points remain crate-private. The future preloaded module graph belongs here
-  too, not in the generic QuickJS bridge or engine-neutral protocol.
+  `__DropElement`, `__FlushElementTree`); a bundle reaching for any other one
+  gets a `ReferenceError` naming it, which is the intended failure mode.
+  Element handles cross the primitives-only boundary directly as `i32` unique
+  ids; `__DropElement` explicitly retires their DOM subtree and arena entries.
+  Runtime configuration, default constants, explicit-config construction, the
+  `bobcat-engine::script` adapter types, and all realm/value handles, interrupt
+  controls, and raw source-evaluation entry points remain crate-private. The
+  future preloaded module graph belongs here too, not in the generic QuickJS
+  bridge or engine-neutral protocol.
+- `crates/bobcat-cli` — the native `bobcat` process shell over
+  `bobcat-quickjs`. `bobcat -i file:///…` decodes and boots one web bundle;
+  other URL schemes remain rejected at the boundary. One reusable
+  `FramePipeline` owns the runtime, `pulsar::Painter`, scene, and image store,
+  so the macOS headed backend and cross-platform headless backend share
+  script/layout/paint logic rather than maintaining parallel render paths.
+  Headed mode uses a native winit window with display-backed vsync and tracks
+  both logical viewport size and device-pixel ratio. Headless mode uses a
+  configurable synthetic vsync rate, skips catch-up bursts after slow frames,
+  and retains its Vello renderer, render texture, and staging buffer across
+  frames. Both modes expose a GDB-like stdin command prompt (`continue`,
+  `pause`, `frame`, `screenshot`, `help`, `quit`; headless also supports
+  `set/show vsync`). Screenshots are captured only through that live prompt;
+  there is no one-shot startup flag. PNG readback happens only on a screenshot.
+  It must not
+  duplicate runtime, DOM, layout, or painting policy: missing MTS/PAPI support
+  remains a precise `bobcat-quickjs` error, and non-empty decoded `StyleInfo`
+  currently produces an explicit author-styles-omitted warning rather than silent
+  claimed compatibility.
 - `crates/lynx-element` — the Lynx runtime element layer, i.e. the crate the
   layering diagrams drew as the dashed "future Lynx runtime adapter" box. It
   owns exactly what `dom` is forbidden to know: Lynx tag names, Element-PAPI
@@ -185,12 +205,19 @@ useful signal for currently-compatible versions of those libraries.
   stylo `Device` construction, and the Lynx UA cascade defaults
   (`display: linear`, `box-sizing: border-box`, `overflow: hidden`, under the
   `defaultDisplayLinear` / `defaultOverflowVisible` page-config switches).
-  `ElementTree` is a `Document<ElementData>` plus a dense, never-recycled
-  handle table starting at 1 (slot 0 is web-core's "no element" sentinel);
+  `ElementTree` owns a `Document<i32>` plus an independent
+  `Vec<Option<LynxElement>>` arena. The DOM payload is only the permanent
+  `i32` unique id, which is also the direct arena index; each `LynxElement`
+  owns that id, its stable DOM `NodeId` association, component creation
+  fields, and height cache. The arena permanently reserves slot 0 as web-core's
+  "no element" sentinel, so live unique ids start at 1. `__DropElement` removes
+  the selected DOM subtree and takes the corresponding arena entries, leaving
+  permanent `None` tombstones; unique ids are never recycled, although `dom`
+  may reuse its private `NodeId` slots;
   every fallible PAPI entry returns `PapiError` instead of panicking, because
   the main-thread script is untrusted input and the DOM core is
   crash-on-misuse. `ElementTree` never lends out `&mut Document`: a caller that
-  removed or moved nodes directly would desynchronise the handle table, the
+  removed or moved nodes directly would desynchronise the element arena, the
   page state, and the height cache, and the next PAPI call would panic in the
   DOM instead of returning `PapiError`. The mutable surface is the narrow set
   the layers above actually need (`paint_order`, `add_author_stylesheet`,
@@ -309,6 +336,40 @@ useful signal for currently-compatible versions of those libraries.
   belongs to the future runtime-policy layer, never here. No retained
   visual cache exists yet; `StyleDamage`'s stacking class is the
   designated hook.
+  Its `scroll` module owns CSSOM-View scrolling — scrollport/scrolling-area
+  geometry off the layout engine's accumulated `content_size`, a per-node
+  offset in the layout arena that re-clamps itself on every read (so a
+  shrinking relayout or a restyle out of scroll-container-hood needs no
+  invalidation hook), `scroll_to`/`scroll_by` (which returns the
+  **unconsumed remainder**, the primitive chaining is built from), and
+  `scroll_chain`. Both the "which box scrolls" walk and the chaining advance
+  follow the **containing-block** chain, not DOM ancestry, so they agree with
+  what `visual` actually moves: a wheel over an `absolute` box anchored above a
+  scroller scrolls nothing, rather than sliding content behind a box that
+  visibly stays put. Only `overflow: scroll` is user-scrollable; `hidden` is a
+  scroll container that moves only programmatically (load-bearing here,
+  because the Lynx UA cascade puts `hidden` on every element) and `clip` is
+  not a scroll container at all — it clips, has no offset, and its content
+  does not reach into an ancestor's scrolling area either (`hughie`'s
+  `accumulate_scrollable_overflow` asks per axis). `visual` bakes the offsets
+  into the frame — a scroll container's contents are translated as they are
+  collected, with containing-block-keyed escape sharing the clip chain's own
+  struct, so painting and hit testing see scrolled geometry and `pulsar` needs
+  no knowledge of scrolling at all. Clipping is likewise per axis, because
+  `clip` on one axis with `visible` on the other is a pair the style adjuster
+  leaves mixed; a one-axis clip is an infinite strip and carries no radii.
+  Its `input` module is the host seam: `InputEvent` is plain `Copy` data
+  (pointer + wheel, viewport CSS px) that a canvas, a native window, or a
+  test literal all produce equally, and `Document::handle_input(&PaintOrder,
+  InputEvent)` routes it and performs the UA default action, reporting both
+  in an `InputResponse`. Dispatch to listeners is *not* here — this crate has
+  no `EventTarget` — so `InputEvent::default_prevented` is the
+  `preventDefault()` seam a runtime layer hands back after its own
+  capture/bubble walk or gesture arbitration; a runtime wanting different
+  scroll physics (Lynx `parent-first` nesting, rubber-band, fling) prevents
+  the default and drives `scroll_by`/`scroll_chain` itself. The drag
+  recognizer is deliberately minimal (touch/pen only, one slop threshold,
+  boundary chaining, no momentum — this crate owns no clock).
   `DocumentLayoutState` lazily boxes the shared Parley `TextContext`; each
   text node's layout-state entry lazily boxes its probe/commit
   `TextLayoutStore` and reads inherited font/text values from its parent.
@@ -320,7 +381,7 @@ useful signal for currently-compatible versions of those libraries.
   Lynx computed defaults (border-box, `overflow: hidden`, `display: linear`
   on every element, …) stay embedder cascade policy (UA sheet). Relies on
   the vendored stylo fork (`vendor/stylo`, tracking the
-  canonical `lynx` branch, tip `ab6db93be`): `contain` was already seeded
+  canonical `lynx` branch, tip `019d1fb50`): `contain` was already seeded
   in the fork's lynx grammar; fork PR #9 (squash-merged into `lynx`) added
   `content-visibility` / `contain-intrinsic-size` under the `lynx` feature,
   pref-gated for stock servo builds; fork PR #10 (squash-merged into
@@ -330,7 +391,20 @@ useful signal for currently-compatible versions of those libraries.
   seeded `object-fit` / `object-position`, which were already ungated in
   `longhands.toml` and compiled out only by absence from the allowlist —
   replaced content needs them for the css-images-3 concrete-object-size
-  rules.
+  rules; and fork PR #12 (squash-merged into `lynx`)
+  un-gated `overflow: scroll | clip` and added
+  `Overflow::is_user_scrollable`. The native engine's grammar really is
+  `visible | hidden`, but the **web** bundle this stack consumes uses the
+  other two directly (`web-elements`' own `scroll-view.css` authors
+  `overflow-y: scroll` and `overflow-x: clip`), so no bundle could express a
+  scrollable box at all. **`auto` stays out** (user decision, 2026-07-29):
+  this engine paints no scrollbars, so `auto` would be indistinguishable from
+  `scroll` everywhere except `to_scrollable()`, where it is the value a
+  `visible` axis pairs into — that now pairs into `hidden`, a recorded
+  deviation (an axis that genuinely overflows is clipped rather than
+  draggable). The three non-`visible` values stay genuinely distinct:
+  `scroll` is user-scrollable, `hidden` is a scroll container that moves only
+  programmatically, `clip` is not a scroll container at all.
 - `crates/hughie` — the Flexbox, Grid, and
   Starlight Relative and Linear engine: trait-based host⇄engine integration
   with static dispatch only (no `dyn`), one `LayoutTree` protocol with a
@@ -460,7 +534,7 @@ useful signal for currently-compatible versions of those libraries.
   personas already set up for this work. `crates/lynx-element` and
   `crates/bobcat-quickjs`'s `mainthread` module are the first pieces of this
   layer to land; the background thread, `StyleInfo` ingestion, the event
-  model, and the other 57 Element PAPI members are still ahead.
+  model, and the other 56 Element PAPI members are still ahead.
 
 See `docs/style-architecture.md` for the current style-layer dependency and
 ownership rules, and `docs/layout-architecture.md` for the layout-layer
@@ -524,6 +598,11 @@ this section is the only place the absolute paths are spelled out.
 - Nightly Rust (`rust-toolchain.toml`), edition 2024, resolver 3, workspace lints.
 - `cargo fmt` (nightly rustfmt options in `rustfmt.toml`), `cargo clippy`,
   `cargo test`, `cargo bench` (CodSpeed-compatible `divan` benches).
+- **`cargo fmt --all` reaches into `vendor/stylo`** even though the fork is
+  excluded from the workspace, and the fork carries pre-existing upstream
+  rustfmt drift, so it "fixes" files nobody touched. Check
+  `git -C vendor/stylo status` afterwards and revert anything outside your own
+  change, or the next fork commit ships unrelated reformatting.
 
 ## Testing
 

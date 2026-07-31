@@ -91,6 +91,14 @@ impl<T> TreeArenas<T> {
 pub(crate) struct NodeLayoutState {
     pub(crate) slot: LayoutSlot,
     pub(crate) text: Option<Box<TextLayoutStore>>,
+    /// This node's CSSOM-View scroll position, if it is a scroll container.
+    /// Stored raw and clamped against live geometry on every read, so a
+    /// relayout that shrinks the scrollable area — or a restyle that stops the
+    /// box being a scroll container at all — corrects the observable offset
+    /// with no invalidation hook of its own. It rides the layout arena rather
+    /// than a side table so it is allocated and dropped in lockstep with the
+    /// layout it is clamped against.
+    pub(crate) scroll_offset: euclid::default::Vector2D<f32>,
 }
 
 pub(crate) struct DocumentLayoutState {
@@ -179,6 +187,11 @@ pub struct Document<T> {
     layout_dirty: bool,
     layout_root_dirty: bool,
     last_layout_inputs: Option<(Size<f32>, f32)>,
+    /// Gestures currently latched to a pointer. Document-level rather than
+    /// per-node, and deliberately not the embedder's to hold: a one-call
+    /// [`Document::handle_input`] is what makes a headless harness a list of
+    /// event literals.
+    input: crate::input::InputState,
 }
 
 impl<T: fmt::Debug> fmt::Debug for Document<T> {
@@ -224,7 +237,12 @@ impl<T> Document<T> {
             layout_dirty: false,
             layout_root_dirty: false,
             last_layout_inputs: None,
+            input: crate::input::InputState::default(),
         }
+    }
+
+    pub(crate) fn input_state_mut(&mut self) -> &mut crate::input::InputState {
+        &mut self.input
     }
 
     pub(crate) const fn style_engine(&self) -> &StyleEngine {

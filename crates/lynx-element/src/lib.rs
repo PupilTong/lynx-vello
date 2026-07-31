@@ -15,7 +15,7 @@
 //! # Element PAPI scope
 //!
 //! web-core's main-thread global object carries 61 `__`-prefixed Element PAPI
-//! members. This crate implements the four that make a tree exist, mutate, and
+//! members. This crate implements the five that make a tree exist, mutate, retire, and
 //! become visible:
 //!
 //! | PAPI | Method |
@@ -23,6 +23,7 @@
 //! | `__CreatePage(componentID, componentCSSID)` | [`ElementTree::create_page`] |
 //! | `__CreateView(parentComponentUniqueID)` | [`ElementTree::create_view`] |
 //! | `__AppendElement(parent, child)` | [`ElementTree::append_element`] |
+//! | `__DropElement(element)` | [`ElementTree::drop_element`] |
 //! | `__FlushElementTree()` | [`ElementTree::flush_element_tree`] |
 //!
 //! Everything else — attributes, classes, inline styles, `__SetCSSId`, events,
@@ -33,15 +34,15 @@
 //!
 //! # Recorded limits
 //!
-//! - **Handles are unique ids, not element objects.** web-core's CSR target returns a live
-//!   `HTMLElement` from `__CreateView` and stamps a symbol-keyed unique id on it; its SSR target
-//!   returns a plain `{ [uniqueIdSymbol]: id }` record. We follow the SSR shape: an [`ElementId`]
-//!   *is* the handle, matching how the native engine identifies elements (`__GetElementUniqueID`)
-//!   and what the script boundary in `bobcat-quickjs` can carry. A `ReactLynx` bundle that passes
-//!   element objects around would need an object-carrying script boundary first.
-//! - **Unique ids are never recycled.** web-core allocates dense indices from 1 (its map is seeded
-//!   with one `None` at index 0); so do we, and a removed element's id stays retired. `dom`'s
-//!   `NodeId` *is* reusable, which is exactly why this layer keeps its own handle space.
+//! - **The runtime identity and JavaScript handle are the same unique id.** [`ElementTree`] speaks
+//!   [`ElementId`] internally, matching the native engine's identity (`__GetElementUniqueID`), and
+//!   `bobcat-quickjs` carries it directly over its primitives-only boundary.
+//! - **Unique ids and arena slots are never recycled.** The context owns a
+//!   `Vec<Option<LynxElement>>` whose slot zero is the permanent null sentinel. [`ElementId`] is
+//!   simply `i32`, and every positive id is also its direct arena index. `__DropElement` retires a
+//!   subtree through [`ElementTree::drop_element`], which takes each value and leaves a permanent
+//!   `None` tombstone. `Document<i32>` stores that same unique id. `dom` may reuse its private
+//!   `NodeId` slots, but no stale script identity can ever name a later element.
 //! - **`parentComponentUniqueID` is recorded, not honored.** web-core uses it only to inherit the
 //!   parent component's CSS fragment id (`l-css-id`). Without `__SetCSSId` there is no CSS-scope
 //!   machinery to inherit into, so the argument is validated and stored on the element and
@@ -52,12 +53,14 @@
 //! - **No `rpx`/`ppx` view-unit policy yet.** The device is built from CSS pixels and a
 //!   device-pixel ratio only.
 
+mod arena;
 mod device;
 mod tree;
 mod ua;
 
+pub use crate::arena::{ElementId, LynxElement};
 pub use crate::device::{LynxFontMetricsProvider, Viewport};
-pub use crate::tree::{ElementId, ElementTree, MAX_TREE_DEPTH, PapiError};
+pub use crate::tree::{ElementTree, MAX_TREE_DEPTH, PapiError};
 pub use crate::ua::{PageConfig, ua_stylesheet};
 
 /// The Lynx tag name of the page root element.

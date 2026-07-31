@@ -33,7 +33,33 @@ consequential choice about whether to follow the spec or the quirk.
 - **`overflow`/`overflow-x`/`overflow-y` default** — Lynx defaults to
   `hidden`; CSS defaults to `visible`. **Decision: match Lynx's default**,
   not CSS's — this is a values/defaults divergence, not an algorithm one,
-  and ReactLynx apps assume clipping-by-default.
+  and ReactLynx apps assume clipping-by-default. The *keyword set* went the
+  other way (2026-07-29): Lynx's native grammar is `visible | hidden`, but
+  the fork now ships `scroll` and `clip` too, because the web bundle this
+  stack consumes uses both — `web-elements`' `scroll-view.css` authors
+  `overflow-y: scroll` and `overflow-x: clip` — so the trimmed set made a
+  scrollable box inexpressible. Only `scroll` responds to gestures; `hidden`
+  stays a clip that scrolls only programmatically, which is what keeps the
+  `hidden`-on-every-element UA default from making the whole page
+  drag-scrollable, and `clip` is not a scroll container at all.
+- **`position: sticky` does not stick (2026-07-30)** — it parses in the
+  fork's grammar and Lynx itself implements scroll-container-relative
+  stickiness, but lynx-vello's paint build treats a sticky box as normal flow,
+  so it scrolls away with its container. **Not a decision — an unimplemented
+  gap**, recorded because interactive scrolling made it observable: before that
+  landed, sticky and `relative` were indistinguishable. What is missing is the
+  css-position-3 §6.3 offset clamp against the scrollport; the box already
+  sits in the right flow and scrolls with the right ancestor.
+- **`overflow: auto` omitted** — CSS has it; this engine does not.
+  **Decision (user, 2026-07-29): leave it out.** Nothing here paints
+  scrollbars, so `auto` ("scrollbars only when needed") would behave exactly
+  like `scroll` everywhere except one place: css-overflow-3 §3 pairs a
+  `visible` axis against a scrollable one by computing the `visible` one to
+  `auto`. Without `auto`, stylo's `to_scrollable()` pairs it into `hidden`
+  instead. **Consequence to know:** given `overflow-x: visible; overflow-y:
+  scroll`, a horizontal overflow that a browser would let the user drag is
+  clipped here instead. The vertical scrolling authors actually wanted is
+  unaffected, and no axis becomes spuriously draggable.
 - **`box-sizing` default** — Lynx defaults to `border-box`; CSS defaults to
   `content-box`. **Decision: match Lynx's default**, same reasoning as
   `overflow` above.

@@ -2,7 +2,7 @@
 
 use euclid::default::{Point2D, Rect};
 
-use super::{PaintItemKind, PaintOrder, geometry};
+use super::{LocalHit, PaintItemKind, PaintOrder, geometry};
 use crate::NodeId;
 use crate::document::Document;
 
@@ -62,31 +62,63 @@ impl PaintOrder {
     /// keep the frame queryable).
     #[must_use]
     pub fn hit_test<T>(&self, document: &Document<T>, point: Point2D<f32>) -> Option<NodeId> {
+        self.hit_test_local(document, point).map(|(node, _)| node)
+    }
+
+    /// [`Self::hit_test`], plus where the point landed inside the item that
+    /// was hit — what an event's `offsetX`/`offsetY` is built from.
+    ///
+    /// The returned node is the resolved *target*; the returned point belongs
+    /// to the item named by [`LocalHit::item`]. For a text-run hit those differ
+    /// (the target is the styled parent element, the point is in the run's own
+    /// box), which is why the item index comes along.
+    ///
+    /// # Panics
+    ///
+    /// Panics per [`Self::assert_fresh`].
+    #[must_use]
+    pub fn hit_test_local<T>(
+        &self,
+        document: &Document<T>,
+        point: Point2D<f32>,
+    ) -> Option<(NodeId, LocalHit)> {
         self.assert_fresh(document);
-        self.items.iter().rev().find_map(|item| {
-            if !item.hit_testable {
-                return None;
-            }
-            let local = item.transform.inverse()?.transform_point2d(point)?;
-            // A box's hit region is half-open at its trailing edges (browser
-            // event targeting: elementFromPoint at the far right/bottom edge
-            // misses the box); leading edges and interior shared edges are
-            // resolved by reverse paint order. Clip testing below stays
-            // inclusive — clip regions are geometric, not targets.
-            if local.x >= item.size.width || local.y >= item.size.height {
-                return None;
-            }
-            if !geometry::rounded_rect_contains(Rect::from_size(item.size), &item.radii, local) {
-                return None;
-            }
-            if !self.point_passes_clips(item.clip, point) {
-                return None;
-            }
-            Some(match item.kind {
-                PaintItemKind::ElementBox => item.node,
-                PaintItemKind::TextRun { element } => element,
+        self.items
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, item)| {
+                if !item.hit_testable {
+                    return None;
+                }
+                let local = item.transform.inverse()?.transform_point2d(point)?;
+                // A box's hit region is half-open at its trailing edges (browser
+                // event targeting: elementFromPoint at the far right/bottom edge
+                // misses the box); leading edges and interior shared edges are
+                // resolved by reverse paint order. Clip testing below stays
+                // inclusive — clip regions are geometric, not targets.
+                if local.x >= item.size.width || local.y >= item.size.height {
+                    return None;
+                }
+                if !geometry::rounded_rect_contains(Rect::from_size(item.size), &item.radii, local)
+                {
+                    return None;
+                }
+                if !self.point_passes_clips(item.clip, point) {
+                    return None;
+                }
+                let node = match item.kind {
+                    PaintItemKind::ElementBox => item.node,
+                    PaintItemKind::TextRun { element } => element,
+                };
+                Some((
+                    node,
+                    LocalHit {
+                        item: index,
+                        position: local,
+                    },
+                ))
             })
-        })
     }
 
     /// Whether `point` (viewport space) falls inside every clip on the
