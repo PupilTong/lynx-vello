@@ -80,6 +80,41 @@ pub struct FetcherDouble {
     pub fetches: AtomicUsize,
     pub prefetches: AtomicUsize,
     pub cancels: AtomicUsize,
+    /// Where [`ResourceFetcher::fetch_resource_path`] materializes its bytes —
+    /// a directory this double alone owns. See [`fixture_dir`].
+    fixtures: PathBuf,
+}
+
+/// A fixture directory no other double can write into.
+///
+/// The path used to be derived from the [`RequestId`] alone, and every loader in
+/// the suite allocates that id from a namespace of `0` and a sequence of `0`, so
+/// *every* double's path-transport fetch landed on one file. Two `#[tokio::test]`s
+/// share a process and run in parallel, which made the file genuinely contended:
+/// `std::fs::write` truncates before it writes, so a reader could stat a
+/// zero-length file mid-write and decode nothing — flaking the oversized-body
+/// test roughly one run in three, since a zero-length body sniffs as
+/// `UnknownFormat` rather than tripping the byte budget.
+///
+/// The process id is in the name as well as the counter because `cargo test`
+/// runs one binary per test target and two concurrent runs share a `TMPDIR`.
+fn fixture_dir() -> PathBuf {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    std::env::temp_dir().join(format!(
+        "lynx-vello-image-fixture-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+impl Drop for FetcherDouble {
+    /// Fixture bytes outlived the process before this: each run left another
+    /// `lynx-vello-image-fixture-*` behind in `TMPDIR`.
+    fn drop(&mut self) {
+        // Never created when no test drove the path transport, which is the
+        // common case — hence the ignored error rather than a check.
+        let _ = std::fs::remove_dir_all(&self.fixtures);
+    }
 }
 
 impl FetcherDouble {
@@ -95,6 +130,7 @@ impl FetcherDouble {
             fetches: AtomicUsize::new(0),
             prefetches: AtomicUsize::new(0),
             cancels: AtomicUsize::new(0),
+            fixtures: fixture_dir(),
         }
     }
 
@@ -227,19 +263,23 @@ impl ResourceFetcher for FetcherDouble {
         let id = request.context.id;
         let resource = request.resource;
         Box::pin(async move {
-            let path = std::env::temp_dir().join(format!(
-                "lynx-vello-image-fixture-{}-{}.bin",
-                id.namespace, id.sequence
-            ));
-            std::fs::write(&path, &self.bytes).map_err(|error| ResourceError {
-                request_id: Some(id),
-                kind: ResourceErrorKind::Io,
-                phase: ResourceErrorPhase::MaterializePath,
-                locator: None,
-                status: None,
-                message: error.to_string().into(),
-                retry: RetryAdvice::Never,
-            })?;
+            // Named for the request inside a directory named for the double, so
+            // two requests from one double stay distinct and two doubles never
+            // meet at all.
+            let path = self
+                .fixtures
+                .join(format!("{}-{}.bin", id.namespace, id.sequence));
+            std::fs::create_dir_all(&self.fixtures)
+                .and_then(|()| std::fs::write(&path, &self.bytes))
+                .map_err(|error| ResourceError {
+                    request_id: Some(id),
+                    kind: ResourceErrorKind::Io,
+                    phase: ResourceErrorPhase::MaterializePath,
+                    locator: None,
+                    status: None,
+                    message: error.to_string().into(),
+                    retry: RetryAdvice::Never,
+                })?;
             Ok(ResourcePath {
                 metadata: self.metadata(resource, id),
                 path,
