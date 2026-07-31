@@ -1,0 +1,46 @@
+packages:
+  - examples/*
+  - packages/*
+
+# Match the portable defaults used by lynx-stack.
+enablePrePostScripts: false
+engineStrict: true
+hoistWorkspacePackages: true
+ignorePatchFailures: false
+optimisticRepeatInstall: true
+publicHoistPattern: []
+resolutionMode: "lowest-direct"
+strictPeerDependencies: true
+
+# Delay newly published third-party packages for three days. First-party Lynx
+# packages are trusted and may be consumed immediately for compatibility work.
+minimumReleaseAge: 4320
+minimumReleaseAgeExclude:
+  - "@lynx-js/*"
+  - "@rspack/*"
+  - "@rsbuild/*"
+  - "@rstest/*"
+minimumReleaseAgeStrict: false
+
+catalogs:
+  rspack:
+    "@rspack/core": "2.1.4"
+
+# Dependencies with install scripts must be explicitly allowed as they are
+# introduced to the workspace.
+strictDepBuilds: true
+
+allowBuilds:
+  "@parcel/watcher": false
+  "@swc/core": false
+  core-js: false
+  esbuild: true
+  sharp: true
+  unrs-resolver: false
+
+# Keep the Rsbuild/Rspack graph on the same release pair as lynx-stack.
+overrides:
+  "@rspack/core": "catalog:rspack"
+  "@rsbuild/core>@rspack/core": "catalog:rspack"
+  "@rsdoctor/rspack-plugin>@rspack/core": "catalog:rspack"
+  "@rsdoctor/types>@rspack/core": "catalog:rspack"

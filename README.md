@@ -1,6 +1,6 @@
 # lynx-vello
 
-Rust monorepo exploring a native [Lynx](https://lynxjs.org) rendering stack.
+Rust and pnpm monorepo exploring a native [Lynx](https://lynxjs.org) rendering stack.
 
 ## Workspace layout
 
@@ -25,6 +25,11 @@ against it — four of web-core's 61 Element PAPI members are wired up so far
 (`__CreatePage`, `__CreateView`, `__AppendElement`, `__FlushElementTree`);
 `StyleInfo` ingestion, attributes, classes, and events are not.
 
+The repository root is also a pnpm workspace. JavaScript and TypeScript
+libraries belong under `packages/*`; runnable integrations and fixtures live
+under [`examples/*`](examples/README.md), following the top-level organization
+used by `lynx-stack`.
+
 ## Toolchain
 
 The workspace pins the **2026-07-01 nightly** toolchain via [`rust-toolchain.toml`](rust-toolchain.toml)
@@ -38,6 +43,14 @@ cargo test
 cargo fmt
 cargo clippy
 cargo bench          # divan benchmarks (CodSpeed-compatible)
+```
+
+The pnpm workspace follows `lynx-stack`'s toolchain range: Node.js 24 is
+recommended (Node.js 22 is also supported), and the exact pnpm release is
+pinned through Corepack in [`package.json`](package.json). Initialize it with:
+
+```sh
+corepack pnpm install --frozen-lockfile
 ```
 
 ## CI

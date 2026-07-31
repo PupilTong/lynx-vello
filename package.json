@@ -1,0 +1,27 @@
+{
+  "name": "lynx-vello",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A native Lynx web-bundle runtime built with Rust, Stylo, Vello, and Parley.",
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "build:examples": "pnpm --recursive --filter './examples/*' --if-present run build",
+    "test:examples": "pnpm --recursive --filter './examples/*' --if-present run test",
+    "test:examples:type": "pnpm --recursive --filter './examples/*' --if-present run test:type"
+  },
+  "devDependencies": {
+    "@rslib/core": "0.23.2",
+    "@rspack/core": "catalog:rspack",
+    "@tsconfig/node22": "^22.0.5",
+    "@tsconfig/strictest": "^2.0.8",
+    "@types/node": "^24.10.13",
+    "tslib": "2.8.1",
+    "typescript": "5.9.3",
+    "vitest": "^3.2.4"
+  },
+  "packageManager": "pnpm@11.16.0+sha512.b767e9a98fc87aec0f42daefcd0e84941c2cdb45d73c4e1e68860fb2bdfdbe032ab592105479e5e05c237f740c8a5ffdbbb52385797ddc2296745a1bbb883e8d",
+  "engines": {
+    "node": "^22 || ^24"
+  }
+}
