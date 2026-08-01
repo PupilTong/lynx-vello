@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
-use bobcat_engine::resource::{
+use bobcat_core::resource::{
     BufferedResourceRequest, HttpRequest, HttpResponse, PrefetchReceipt, PrefetchRequest,
     RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
     ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceFuture, ResourcePath,
     ResourceRequest, ResourceResponse, ResourceStream, RetryAdvice,
 };
-use bobcat_engine::script::{ScriptEngine, ScriptError, ScriptFuture, ScriptValue};
-use bobcat_engine::view::LynxView;
+use bobcat_core::script::{ScriptEngine, ScriptError, ScriptValue};
+use bobcat_core::view::LynxView;
 
 #[derive(Debug)]
 struct NullResourceFetcher;
@@ -98,6 +98,8 @@ struct EchoScriptEngine;
 impl ScriptEngine for EchoScriptEngine {
     type Callable = EchoCallable;
     type Symbol = EchoSymbol;
+    type ImportFuture<'a> =
+        std::future::Ready<Result<ScriptValue<Self::Callable, Self::Symbol>, ScriptError>>;
 
     fn evaluate(
         &mut self,
@@ -110,12 +112,10 @@ impl ScriptEngine for EchoScriptEngine {
         &'a mut self,
         specifier: &'a str,
         export_name: &'a str,
-    ) -> ScriptFuture<'a, Self::Callable, Self::Symbol> {
-        Box::pin(async move {
-            Ok(ScriptValue::String(Arc::from(format!(
-                "{specifier}#{export_name}"
-            ))))
-        })
+    ) -> Self::ImportFuture<'a> {
+        std::future::ready(Ok(ScriptValue::String(Arc::from(format!(
+            "{specifier}#{export_name}"
+        )))))
     }
 
     fn call(

@@ -180,7 +180,7 @@ pub(crate) fn resolve(
     Some(scroll_box)
 }
 
-impl<T> Document<T> {
+impl<T, R> Document<T, R> {
     /// Whether this node is a scroll container — a box whose computed
     /// `overflow` is scrollable on either axis. `overflow: hidden` qualifies;
     /// it just is not user-scrollable.

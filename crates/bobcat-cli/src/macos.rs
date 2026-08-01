@@ -2,12 +2,12 @@ use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dom::input::{DeltaMode, InputEvent, PointerKind, PointerPhase};
-use dom::visual::Point2D;
-use pulsar::gpu::{read_texture, render_params, renderer_options};
-use pulsar::vello;
-use pulsar::vello::peniko::Color;
-use pulsar::vello::util::{RenderContext, RenderSurface};
+use lynx_element::dom::input::{DeltaMode, InputEvent, PointerKind, PointerPhase};
+use lynx_element::dom::visual::Point2D;
+use lynx_element::pulsar::gpu::{read_texture, render_params, renderer_options};
+use lynx_element::pulsar::vello;
+use lynx_element::pulsar::vello::peniko::Color;
+use lynx_element::pulsar::vello::util::{RenderContext, RenderSurface};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent};
@@ -172,7 +172,9 @@ impl MacApplication {
             .as_ref()
             .expect("redraw events arrive only after initialization");
         let frame = pipeline.prepare_frame();
-        graphics.render(window, frame.scene, frame.size)?;
+        let scene = frame.scene();
+        graphics.render(window, &scene, frame.size)?;
+        drop(scene);
 
         if self.pending_screenshots.is_empty() {
             return Ok(());

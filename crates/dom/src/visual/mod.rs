@@ -3,8 +3,8 @@
 //!
 //! [`Document::paint_order`] flushes styles and layout, then builds a
 //! [`PaintOrder`]: a flat item list in back-to-front paint order, each item
-//! carrying its viewport-space transform and innermost clip. The future
-//! render crate paints the items in list order (back to front); event
+//! carrying its viewport-space transform and innermost clip. A
+//! [`DocumentRenderer`] paints the items in list order (back to front); event
 //! dispatch consumes [`PaintOrder::hit_test`], which walks the same list in
 //! reverse (topmost first). Hit-test consumers should hold one `PaintOrder`
 //! per frame and query it repeatedly rather than calling
@@ -83,10 +83,29 @@ mod transform;
 // every type that appears in a public signature here — `Vector2D` included:
 // scroll offsets and deltas are displacements, not positions, and they surface
 // on `Document::scroll_by`, `ScrollBox`, and `DefaultAction::Scroll`.
+use std::cell::Ref;
+
 pub use euclid::default::{Point2D, Rect, Size2D, Transform3D, Vector2D};
 
 use crate::NodeId;
 use crate::document::Document;
+
+/// A statically selected renderer owned by a [`Document`].
+///
+/// The GAT lets each renderer choose whether its output is borrowed, guarded,
+/// or owned without forcing a trait object or allocation on the document.
+pub trait DocumentRenderer<T>: Sized {
+    type Output<'a>
+    where
+        Self: 'a,
+        T: 'a;
+
+    fn render(&mut self, document: &Document<T, Self>, frame: &PaintOrder);
+
+    fn output<'a>(renderer: Ref<'a, Self>) -> Self::Output<'a>
+    where
+        T: 'a;
+}
 
 /// The document's current frame in paint order: `items[0]` paints first
 /// (bottom), `items[len - 1]` paints last (top).
@@ -246,7 +265,7 @@ impl CornerRadii {
     }
 }
 
-impl<T: Sync> Document<T> {
+impl<T: Sync, R> Document<T, R> {
     /// Flushes styles and layout, then builds the frame's paint order.
     pub fn paint_order(&mut self) -> PaintOrder {
         self.layout();
@@ -258,5 +277,18 @@ impl<T: Sync> Document<T> {
     pub fn hit_test(&mut self, point: Point2D<f32>) -> Option<NodeId> {
         let frame = self.paint_order();
         frame.hit_test(self, point)
+    }
+}
+
+impl<T: Sync, R: DocumentRenderer<T>> Document<T, R> {
+    /// Lays out and renders the current document through its injected renderer.
+    pub fn render(&mut self) {
+        let frame = self.paint_order();
+        self.renderer.borrow_mut().render(self, &frame);
+    }
+
+    /// The output retained by the injected renderer after [`Self::render`].
+    pub fn render_output(&self) -> R::Output<'_> {
+        R::output(self.renderer())
     }
 }

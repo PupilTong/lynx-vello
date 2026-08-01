@@ -1,3 +1,5 @@
+#![cfg(feature = "quickjs")]
+
 //! Golden screenshot comparison over the whole runtime pipeline:
 //! main-thread script → Element PAPI → `lynx-element` → `dom` → `pulsar` →
 //! headless GPU.
@@ -8,12 +10,12 @@
 //! to a committed golden with `pixelmatch` tolerances.
 //!
 //! Refresh the goldens with:
-//! `FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p bobcat-quickjs --test screenshots`.
+//! `FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p lynx-element --test screenshots`.
 
-use bobcat_quickjs::MainThreadRuntime;
 use flashbulb::vello::peniko::Color;
-use flashbulb::{ImageStore, Screenshots, capture_frame, headless_or_skip};
-use lynx_element::{PageConfig, Viewport};
+use flashbulb::{Image, Screenshots, headless_or_skip};
+use lynx_element::pulsar::gpu::Headless;
+use lynx_element::{ElementTree, MainThreadRuntime, PageConfig, Viewport};
 
 /// lynx-stack's Playwright Chromium project emulates a Pixel 5, whose CSS
 /// viewport is 393 × 727; `toHaveScreenshot` captures in CSS pixels, so their
@@ -69,14 +71,23 @@ fn screenshots() -> Screenshots {
     flashbulb::screenshots_in(env!("CARGO_MANIFEST_DIR"))
 }
 
+fn capture_elements(gpu: &mut Headless, elements: &mut ElementTree) -> Image {
+    elements.render();
+    let scene = elements.scene();
+    let pixels = gpu
+        .render(&scene, 393, 727, Color::WHITE)
+        .expect("render scene");
+    Image::from_rgba8(393, 727, pixels).expect("capture")
+}
+
 #[test]
 fn a_main_thread_script_renders_its_element_tree() {
     let Some(mut gpu) = headless_or_skip("a_main_thread_script_renders_its_element_tree") else {
         return;
     };
 
-    let mut runtime =
-        MainThreadRuntime::new(VIEWPORT, PageConfig::default()).expect("QuickJS realm");
+    let mut runtime = MainThreadRuntime::new(ElementTree::new(VIEWPORT, PageConfig::default()))
+        .expect("QuickJS realm");
     runtime.elements_mut().add_author_stylesheet(STYLE);
     runtime
         .run_main_thread_script(MAIN_THREAD_SCRIPT)
@@ -84,15 +95,7 @@ fn a_main_thread_script_renders_its_element_tree() {
 
     let image = {
         let mut elements = runtime.elements_mut();
-        let frame = elements.paint_order();
-        capture_frame(
-            &mut gpu,
-            elements.document(),
-            &frame,
-            Color::WHITE,
-            &ImageStore::new(),
-        )
-        .expect("capture")
+        capture_elements(&mut gpu, &mut elements)
     };
 
     assert_eq!(image.width(), 393);
@@ -136,7 +139,8 @@ fn render_overflow(config: PageConfig, test: &str, golden: &str) {
     let Some(mut gpu) = headless_or_skip(test) else {
         return;
     };
-    let mut runtime = MainThreadRuntime::new(VIEWPORT, config).expect("QuickJS realm");
+    let mut runtime =
+        MainThreadRuntime::new(ElementTree::new(VIEWPORT, config)).expect("QuickJS realm");
     runtime.elements_mut().add_author_stylesheet(OVERFLOW_STYLE);
     runtime
         .run_main_thread_script(OVERFLOW_SCRIPT)
@@ -144,15 +148,7 @@ fn render_overflow(config: PageConfig, test: &str, golden: &str) {
 
     let image = {
         let mut elements = runtime.elements_mut();
-        let frame = elements.paint_order();
-        capture_frame(
-            &mut gpu,
-            elements.document(),
-            &frame,
-            Color::WHITE,
-            &ImageStore::new(),
-        )
-        .expect("capture")
+        capture_elements(&mut gpu, &mut elements)
     };
     screenshots().assert_matches(&[golden], &image);
 }

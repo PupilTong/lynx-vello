@@ -1,4 +1,4 @@
-//! Host-injected resource acquisition contracts for bobcat-engine.
+//! Host-injected resource acquisition contracts for Bobcat.
 
 use std::fmt;
 use std::future::Future;

@@ -115,7 +115,7 @@ impl<'a, T: Sync> DomTraversal<&'a Node<T>> for RecalcStyle<'a> {
     }
 }
 
-impl<T: Sync> Document<T> {
+impl<T: Sync, R> Document<T, R> {
     pub fn flush_styles(&mut self) -> FlushSummary {
         self.flush_styles_with_parallelism(Parallelism::Auto)
     }
@@ -132,11 +132,14 @@ impl<T: Sync> Document<T> {
         FlushSummary { damage, status }
     }
 
-    pub fn flush_styles_with_damage_sink(
+    pub fn flush_styles_with_damage_sink<F>(
         &mut self,
         parallelism: Parallelism,
-        sink: &mut dyn FnMut(NodeId, StyleDamage),
-    ) -> FlushStatus {
+        sink: &mut F,
+    ) -> FlushStatus
+    where
+        F: FnMut(NodeId, StyleDamage),
+    {
         let Some(root) = self.root_element() else {
             return FlushStatus::Skipped;
         };

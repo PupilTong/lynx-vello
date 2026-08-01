@@ -72,10 +72,10 @@ struct Scope {
     filtered: bool,
 }
 
-pub(crate) fn walk<T>(
+pub(crate) fn walk<T, R>(
     scene: &mut Scene,
     scratch: &mut Scratch,
-    document: &Document<T>,
+    document: &Document<T, R>,
     frame: &PaintOrder,
     images: &ImageStore,
 ) {
@@ -120,10 +120,10 @@ pub(crate) fn walk<T>(
 /// Opens one group scope: effect layer, optional clip-path layer, optional
 /// mask sandwich. In-scope item clips pop first so no blend layer ever
 /// nests inside a clip layer.
-fn open_scope<T>(
+fn open_scope<T, R>(
     scene: &mut Scene,
     scratch: &mut Scratch,
-    document: &Document<T>,
+    document: &Document<T, R>,
     frame: &PaintOrder,
     layer_index: usize,
     images: &ImageStore,
@@ -207,10 +207,10 @@ fn open_scope<T>(
     });
 }
 
-fn close_scope<T>(
+fn close_scope<T, R>(
     scene: &mut Scene,
     scratch: &mut Scratch,
-    document: &Document<T>,
+    document: &Document<T, R>,
     frame: &PaintOrder,
     scale: Affine,
 ) {
@@ -230,10 +230,10 @@ fn close_scope<T>(
     }
 }
 
-fn paint_item<T>(
+fn paint_item<T, R>(
     scene: &mut Scene,
     scratch: &mut Scratch,
-    document: &Document<T>,
+    document: &Document<T, R>,
     frame: &PaintOrder,
     item: &PaintItem,
     images: &ImageStore,
@@ -309,7 +309,11 @@ fn paint_item<T>(
 /// origin in run-local space is `border_origin - location`. When the parent
 /// is box-less (`display: contents`, whose layout slot the host zeroes) the
 /// element carries no box to anchor to, and the run's own box stands in.
-fn color_gradient_box<T>(document: &Document<T>, item: &PaintItem, element: dom::NodeId) -> Rect {
+fn color_gradient_box<T, R>(
+    document: &Document<T, R>,
+    item: &PaintItem,
+    element: dom::NodeId,
+) -> Rect {
     let own_box = Rect::new(
         0.0,
         0.0,
@@ -349,8 +353,8 @@ fn color_gradient_box<T>(document: &Document<T>, item: &PaintItem, element: dom:
 /// layout. Recorded v1 limits: descendant `transform`s are ignored (the
 /// silhouette uses layout positions only) and `visibility: hidden` text is
 /// skipped via its parent's style.
-fn collect_text_clip<T>(
-    document: &Document<T>,
+fn collect_text_clip<T, R>(
+    document: &Document<T, R>,
     element: dom::NodeId,
 ) -> crate::paint::TextClip<'_> {
     let mut clip = crate::paint::TextClip::default();
@@ -358,8 +362,8 @@ fn collect_text_clip<T>(
     clip
 }
 
-fn collect_text_clip_under<'doc, T>(
-    document: &'doc Document<T>,
+fn collect_text_clip_under<'doc, T, R>(
+    document: &'doc Document<T, R>,
     node: dom::NodeId,
     offset: vello::kurbo::Vec2,
     clip: &mut crate::paint::TextClip<'doc>,
@@ -471,7 +475,11 @@ fn pop_clips_to(scene: &mut Scene, scratch: &mut Scratch, len: usize) {
 /// no item), and clamped to the viewport at close. Corners map through the
 /// same affine fit [`paint_item`] draws with, so what is painted is what is
 /// bounded — over-approximation costs tiles, never pixels.
-fn compute_layer_bounds<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrder) {
+fn compute_layer_bounds<T, R>(
+    scratch: &mut Scratch,
+    document: &Document<T, R>,
+    frame: &PaintOrder,
+) {
     let layers = frame.layers();
     let items = frame.items();
     scratch.layer_bounds.clear();

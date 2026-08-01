@@ -1,6 +1,8 @@
 //! Context-owned Lynx element storage.
 
-use dom::{Document, Node, NodeId};
+use bobcat_core::document::Document;
+use bobcat_core::dom::{Node, NodeId};
+pub use bobcat_core::element::ElementId;
 
 /// A Lynx element handle: the unique id the Element PAPI hands to and takes
 /// from the main-thread script.
@@ -8,8 +10,6 @@ use dom::{Document, Node, NodeId};
 /// Ids start at 1 and advance with the arena's high-water mark. Retiring an
 /// element leaves its arena entry empty forever, so an id can never name a
 /// later element.
-pub type ElementId = i32;
-
 fn arena_index(id: ElementId) -> Option<usize> {
     let index = usize::try_from(id).ok()?;
     (index != 0).then_some(index)
@@ -17,52 +17,50 @@ fn arena_index(id: ElementId) -> Option<usize> {
 
 /// One Lynx runtime element.
 ///
-/// The actual [`Node<i32>`] allocation remains owned by [`Document<i32>`]:
+/// The actual [`Node<ElementId>`] allocation remains owned by
+/// [`Document<ElementId>`]:
 /// `dom` stores nodes in a reallocating slab, so retaining a node reference or
 /// pointer here would be unsound. `LynxElement` owns the stable association via
 /// [`NodeId`] and resolves the node against its document when needed.
 #[derive(Debug)]
 pub struct LynxElement {
-    unique_id: ElementId,
-    node_id: NodeId,
+    id: ElementId,
+    node: NodeId,
     /// The `parentComponentUniqueID` creation argument. Recorded but not yet
     /// honored because CSS-scope support has not landed.
-    parent_component_unique_id: ElementId,
+    parent_component: ElementId,
     /// The `componentCSSID` supplied when a page is created.
-    component_css_id: i32,
-    /// Levels of descendants below this element; a leaf is `0`. Maintained on
-    /// append so the depth guard costs no tree walk.
-    pub(crate) height: u32,
+    component_css: i32,
 }
 
 impl LynxElement {
     #[must_use]
     pub const fn unique_id(&self) -> ElementId {
-        self.unique_id
+        self.id
     }
 
     #[must_use]
     pub const fn node_id(&self) -> NodeId {
-        self.node_id
+        self.node
     }
 
     /// Resolves the DOM node this runtime element owns the association with.
     #[must_use]
     pub fn node<'document>(
         &self,
-        document: &'document Document<i32>,
-    ) -> Option<&'document Node<i32>> {
-        document.get(self.node_id)
+        document: &'document Document<ElementId>,
+    ) -> Option<&'document Node<ElementId>> {
+        document.get(self.node)
     }
 
     #[must_use]
     pub const fn parent_component_unique_id(&self) -> ElementId {
-        self.parent_component_unique_id
+        self.parent_component
     }
 
     #[must_use]
     pub const fn component_css_id(&self) -> i32 {
-        self.component_css_id
+        self.component_css
     }
 }
 
@@ -86,8 +84,8 @@ impl ElementArena {
 
     /// Computes the identity of the next append without consuming it.
     pub(crate) fn reserve(&self) -> ElementId {
-        i32::try_from(self.entries.len())
-            .expect("a Lynx element arena exhausted its positive i32 unique ids")
+        u32::try_from(self.entries.len())
+            .expect("a Lynx element arena exhausted its u32 unique ids")
     }
 
     pub(crate) fn insert(
@@ -104,30 +102,23 @@ impl ElementArena {
             "the permanent-index element arena only appends"
         );
         self.entries.push(Some(LynxElement {
-            unique_id,
-            node_id,
-            parent_component_unique_id,
-            component_css_id,
-            height: 0,
+            id: unique_id,
+            node: node_id,
+            parent_component: parent_component_unique_id,
+            component_css: component_css_id,
         }));
         unique_id
     }
 
     pub(crate) fn get(&self, id: ElementId) -> Option<&LynxElement> {
         let element = self.entries.get(arena_index(id)?)?.as_ref()?;
-        debug_assert_eq!(element.unique_id, id);
-        Some(element)
-    }
-
-    pub(crate) fn get_mut(&mut self, id: ElementId) -> Option<&mut LynxElement> {
-        let element = self.entries.get_mut(arena_index(id)?)?.as_mut()?;
-        debug_assert_eq!(element.unique_id, id);
+        debug_assert_eq!(element.id, id);
         Some(element)
     }
 
     pub(crate) fn retire(&mut self, id: ElementId) -> Option<LynxElement> {
         let element = self.entries.get_mut(arena_index(id)?)?.take()?;
-        debug_assert_eq!(element.unique_id, id);
+        debug_assert_eq!(element.id, id);
         Some(element)
     }
 

@@ -85,7 +85,7 @@ pub fn headless_or_skip(test: &str) -> Option<Headless> {
 /// Firefox project overrides `deviceScaleFactor: 1`. Every viewport in this
 /// repo uses 1.0 for the same reason.
 #[must_use]
-pub fn frame_size<T>(document: &Document<T>) -> (u32, u32) {
+pub fn frame_size<T, R>(document: &Document<T, R>) -> (u32, u32) {
     let viewport = document.device().viewport_size();
     let ratio = document.device().device_pixel_ratio().get();
     #[allow(
@@ -108,9 +108,9 @@ pub fn frame_size<T>(document: &Document<T>) -> (u32, u32) {
 /// kind of blank-but-passing golden this crate exists to prevent. Pass
 /// `&ImageStore::new()` when the case genuinely has no images — at the call
 /// site, where it is visible.
-pub fn capture_document<T: Sync>(
+pub fn capture_document<T: Sync, R>(
     gpu: &mut Headless,
-    document: &mut Document<T>,
+    document: &mut Document<T, R>,
     background: Color,
     images: &ImageStore,
 ) -> Result<Image, CaptureError> {
@@ -119,9 +119,9 @@ pub fn capture_document<T: Sync>(
 }
 
 /// [`capture_document`] at an explicit pixel size.
-pub fn capture_document_sized<T: Sync>(
+pub fn capture_document_sized<T: Sync, R>(
     gpu: &mut Headless,
-    document: &mut Document<T>,
+    document: &mut Document<T, R>,
     background: Color,
     images: &ImageStore,
     width: u32,
@@ -133,12 +133,12 @@ pub fn capture_document_sized<T: Sync>(
 
 /// Captures an already-built frame.
 ///
-/// This is the entry point for a caller that cannot hand out `&mut Document` —
-/// `lynx_element::ElementTree`, whose invariants the DOM does not know about,
-/// exposes `paint_order()` and `document()` rather than the document itself.
-pub fn capture_frame<T>(
+/// This is the lower-level entry point for a caller that already owns a fresh
+/// paint-order snapshot. Runtime adapters can instead retain their renderer's
+/// output without exposing that snapshot across their API boundary.
+pub fn capture_frame<T, R>(
     gpu: &mut Headless,
-    document: &Document<T>,
+    document: &Document<T, R>,
     frame: &PaintOrder,
     background: Color,
     images: &ImageStore,
@@ -148,9 +148,9 @@ pub fn capture_frame<T>(
 }
 
 /// [`capture_frame`] at an explicit pixel size.
-pub fn capture_frame_sized<T>(
+pub fn capture_frame_sized<T, R>(
     gpu: &mut Headless,
-    document: &Document<T>,
+    document: &Document<T, R>,
     frame: &PaintOrder,
     background: Color,
     images: &ImageStore,

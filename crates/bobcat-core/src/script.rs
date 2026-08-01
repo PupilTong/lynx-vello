@@ -2,13 +2,9 @@
 
 use std::fmt;
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use thiserror::Error;
-
-pub type ScriptFuture<'a, C, S> =
-    Pin<Box<dyn Future<Output = Result<ScriptValue<C, S>, ScriptError>> + 'a>>;
 
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -23,10 +19,19 @@ pub enum ScriptValue<C, S> {
     Callable(C),
 }
 
+/// An isolated JavaScript engine supplied to Bobcat.
+///
+/// The import future is a GAT so each engine selects a concrete future type;
+/// callers do not need a boxed future or `dyn ScriptEngine`.
 pub trait ScriptEngine {
     type Callable: fmt::Debug;
 
     type Symbol: fmt::Debug;
+
+    type ImportFuture<'a>: Future<Output = Result<ScriptValue<Self::Callable, Self::Symbol>, ScriptError>>
+        + 'a
+    where
+        Self: 'a;
 
     fn evaluate(
         &mut self,
@@ -37,7 +42,7 @@ pub trait ScriptEngine {
         &'a mut self,
         specifier: &'a str,
         export_name: &'a str,
-    ) -> ScriptFuture<'a, Self::Callable, Self::Symbol>;
+    ) -> Self::ImportFuture<'a>;
 
     fn call(
         &mut self,
@@ -91,16 +96,4 @@ pub struct ScriptSourceLocation {
     pub source: Option<Arc<str>>,
     pub line: Option<u32>,
     pub column: Option<u32>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::ScriptEngine;
-
-    fn accepts_object_safe_trait(_: Option<&mut dyn ScriptEngine<Callable = (), Symbol = ()>>) {}
-
-    #[test]
-    fn script_engine_is_object_safe() {
-        accepts_object_safe_trait(None);
-    }
 }

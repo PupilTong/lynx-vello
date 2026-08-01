@@ -13,16 +13,10 @@ name = "bobcat"
 path = "src/main.rs"
 
 [dependencies]
-bobcat-quickjs = { workspace = true }
-# The input vocabulary the window adapter translates winit events into, and the
-# viewport-CSS-px point type hit testing speaks. `lynx-element::handle_input`
-# takes these by name, so a windowed embedder needs them directly.
-dom = { workspace = true }
 lynx-element = { workspace = true }
 lynx-template-decoder = { workspace = true }
 png = { workspace = true }
 pollster = { workspace = true }
-pulsar = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
 

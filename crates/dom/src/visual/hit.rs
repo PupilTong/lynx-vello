@@ -16,7 +16,7 @@ impl PaintOrder {
     ///
     /// Panics when nodes were removed from `document` after this frame was
     /// built; rebuild via [`Document::paint_order`].
-    pub fn assert_fresh<T>(&self, document: &Document<T>) {
+    pub fn assert_fresh<T, R>(&self, document: &Document<T, R>) {
         assert_eq!(
             self.epoch,
             document.node_removal_epoch(),
@@ -36,7 +36,7 @@ impl PaintOrder {
     ///
     /// Panics when [`Document::visual_epoch`] (or the removal epoch) moved
     /// after this frame was built; rebuild via [`Document::paint_order`].
-    pub fn assert_visually_fresh<T>(&self, document: &Document<T>) {
+    pub fn assert_visually_fresh<T, R>(&self, document: &Document<T, R>) {
         self.assert_fresh(document);
         assert_eq!(
             self.visual_epoch,
@@ -61,7 +61,7 @@ impl PaintOrder {
     /// geometry snapshot is self-contained, so non-structural mutations
     /// keep the frame queryable).
     #[must_use]
-    pub fn hit_test<T>(&self, document: &Document<T>, point: Point2D<f32>) -> Option<NodeId> {
+    pub fn hit_test<T, R>(&self, document: &Document<T, R>, point: Point2D<f32>) -> Option<NodeId> {
         self.hit_test_local(document, point).map(|(node, _)| node)
     }
 
@@ -77,9 +77,9 @@ impl PaintOrder {
     ///
     /// Panics per [`Self::assert_fresh`].
     #[must_use]
-    pub fn hit_test_local<T>(
+    pub fn hit_test_local<T, R>(
         &self,
-        document: &Document<T>,
+        document: &Document<T, R>,
         point: Point2D<f32>,
     ) -> Option<(NodeId, LocalHit)> {
         self.assert_fresh(document);

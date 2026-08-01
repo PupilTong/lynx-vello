@@ -6,12 +6,11 @@ Rust and pnpm monorepo exploring a native [Lynx](https://lynxjs.org) rendering s
 
 | Crate | Purpose |
 | --- | --- |
-| [`crates/bobcat-engine`](crates/bobcat-engine) | Engine-neutral runtime protocol and composition crate. Independent `resource`, ShadowRealm-inspired `script`, and per-instance `view` modules define host injection and isolated `LynxView<R, E>` ownership without depending on a concrete JavaScript engine or DOM adapter. |
-| [`crates/bobcat-quickjs`](crates/bobcat-quickjs) | Opaque QuickJS-backed `LynxView` integration over `bobcat-engine` and the Bobcat-independent `quickjs-rust-bridge`, plus the Lynx host globals: `MainThreadRuntime` installs the Element PAPI and runs a `.web.bundle`'s main-thread (MTS) script. Runtime configuration, default constants, explicit-config construction, script adapters, realm/value handles, interrupts, and raw source evaluation stay internal. |
-| [`crates/bobcat-cli`](crates/bobcat-cli) | The `bobcat` executable: loads local `file:///` web bundles through `bobcat-quickjs`, drives one shared layout/paint scene pipeline into either a macOS window or a paced headless GPU target, and exposes debugger-style frame/screenshot commands. |
+| [`crates/bobcat-core`](crates/bobcat-core) | Native runtime core combining the engine-neutral resource/script/view protocols with the rendered `Document<T, Pulsar>` specialization. External JavaScript engines implement the GAT-based `ScriptEngine`; the default `quickjs` feature adds the internal QuickJS adapter and main-thread host globals. |
+| [`crates/bobcat-cli`](crates/bobcat-cli) | The `bobcat` executable: loads local `file:///` web bundles through `lynx-element`, submits the document-retained Pulsar scene to either a macOS window or a paced headless GPU target, and exposes debugger-style frame/screenshot commands. |
 | [`crates/lynx-template-decoder`](crates/lynx-template-decoder) | Native Rust decoder for the Lynx **web** binary template (`.web.bundle`), a port of `@lynx-js/web-core`'s `decodeTemplate` incl. the rkyv `StyleInfo` model. |
-| [`crates/dom`](crates/dom) | Generic W3C-DOM-subset `Document<T>`/`Node<T>` tree and standards-oriented stylo cascade/invalidation core. |
-| [`crates/lynx-element`](crates/lynx-element) | The Lynx runtime element layer over `dom`: Element PAPI handles and the unique-id space, `<page>` root policy, view/device construction, and the Lynx UA cascade defaults. |
+| [`crates/dom`](crates/dom) | Generic W3C-DOM-subset `Document<T, R = ()>`/`Node<T>` tree and standards-oriented stylo cascade/invalidation core. `R` is a statically injected renderer selected through a GAT contract. |
+| [`crates/lynx-element`](crates/lynx-element) | The Lynx runtime element layer over `bobcat-core`: Element PAPI handles and the unique-id space, `<page>` root policy, view/device construction, Lynx UA defaults, and the narrow render/scene surface. |
 | [`crates/hughie`](crates/hughie) | Statically-dispatched box-layout engine speaking the stylo fork's computed-value vocabulary: CSS Flexbox, numeric CSS Grid Level 2, Starlight `display: linear` and `display: relative`, and shared leaf/cache/positioned/rounding machinery are implemented. |
 | [`crates/pulsar`](crates/pulsar) | The vello-backed paint engine: turns a `dom` paint order into a GPU scene, plus a headless render-to-texture path. |
 | [`crates/quickjs-rust-bridge`](crates/quickjs-rust-bridge) | Owner-thread-bound Rust wrapper around the pinned QuickJS C submodule, including exact values, sanitized exceptions, pending jobs, and Rust-closure-backed host functions; it is independent of Bobcat and runtime policy. |
@@ -21,10 +20,14 @@ Rust and pnpm monorepo exploring a native [Lynx](https://lynxjs.org) rendering s
 algorithms over host-owned topology, styles, layout state, and caches.
 `dom` is the concrete Stylo-backed host, including display dispatch,
 dirty/cache wiring, the positioned pass, and text measurement. `lynx-element`
-is the runtime adapter above it, and `bobcat-quickjs` runs main-thread scripts
-against it — four of web-core's 61 Element PAPI members are wired up so far
-(`__CreatePage`, `__CreateView`, `__AppendElement`, `__FlushElementTree`);
+is the runtime adapter above `bobcat-core`, and the core's optional QuickJS
+feature runs main-thread scripts against it — five of web-core's 61 Element
+PAPI members are wired up so far (`__CreatePage`, `__CreateView`,
+`__AppendElement`, `__DropElement`, `__FlushElementTree`);
 `StyleInfo` ingestion, attributes, classes, and events are not.
+
+See [`docs/runtime-architecture.md`](docs/runtime-architecture.md) for the
+dependency graph, feature boundary, renderer GAT, and frame walkthrough.
 
 The repository root is also a pnpm workspace. JavaScript and TypeScript
 libraries belong under `packages/*`; runnable integrations and fixtures live

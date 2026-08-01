@@ -47,7 +47,7 @@ use crate::node::Node;
 use crate::scroll::ScrollAxes;
 use crate::{NodeId, scroll};
 
-pub(crate) fn build<T>(document: &Document<T>) -> PaintOrder {
+pub(crate) fn build<T, R>(document: &Document<T, R>) -> PaintOrder {
     let scale = document.device().device_pixel_ratio().get();
     let (tree, state) = document.visual_parts();
     let mut builder = Builder {

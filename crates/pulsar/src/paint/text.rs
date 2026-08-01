@@ -193,8 +193,8 @@ pub(crate) fn paint(
 /// spec does not receive them — that box's own decorations still apply.
 /// Boxless (`display: contents`) ancestors are treated as decorating boxes,
 /// matching browser rendering of decorated `display: contents` spans.
-pub(crate) fn propagated_decorations<T>(
-    document: &dom::Document<T>,
+pub(crate) fn propagated_decorations<T, R>(
+    document: &dom::Document<T, R>,
     element: dom::NodeId,
 ) -> SmallVec<[Decorations; 2]> {
     use stylo::computed_values::position::T as Position;

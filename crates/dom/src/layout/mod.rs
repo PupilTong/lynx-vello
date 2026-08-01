@@ -30,7 +30,7 @@ pub(crate) static ANONYMOUS_STYLE: LazyLock<Arc<ComputedValues>> = LazyLock::new
     ComputedValues::initial_values_with_font_override(Font::initial_values())
 });
 
-impl<T: Sync> Document<T> {
+impl<T: Sync, R> Document<T, R> {
     pub fn layout(&mut self) {
         self.flush_styles_with_damage_sink(Parallelism::Auto, &mut |_, _| {});
 
@@ -49,7 +49,7 @@ impl<T: Sync> Document<T> {
     }
 }
 
-impl<T> Document<T> {
+impl<T, R> Document<T, R> {
     /// Installs decoded intrinsic dimensions for a replaced element, and
     /// invalidates the node-to-root box-cache path when the value changes.
     ///

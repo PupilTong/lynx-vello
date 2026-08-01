@@ -1,15 +1,23 @@
 [package]
-name = "bobcat-engine"
-description = "Native Lynx runtime engine for lynx-vello"
+name = "bobcat-core"
+description = "Native Lynx runtime core with injectable script engines and rendering"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+publish = false
+
+[features]
+default = ["quickjs"]
+quickjs = ["dep:quickjs-rust-bridge"]
 
 [dependencies]
 bytes = { workspace = true }
+dom = { workspace = true }
 http = { workspace = true }
+pulsar = { workspace = true }
+quickjs-rust-bridge = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

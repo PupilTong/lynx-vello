@@ -15,6 +15,7 @@ pub mod scroll;
 mod traits;
 pub mod visual;
 
+pub use stylo::device::Device;
 pub use stylo_dom::ElementState;
 
 pub use crate::contain::{Contain, ContentVisibility, effective_containment};

@@ -3,8 +3,8 @@ use std::path::Path;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use pulsar::gpu::Headless;
-use pulsar::vello::peniko::Color;
+use lynx_element::pulsar::gpu::Headless;
+use lynx_element::pulsar::vello::peniko::Color;
 
 use crate::CliError;
 use crate::args::Options;
@@ -102,13 +102,9 @@ fn render_frame(
         // it would burn a full GPU pass per tick on a static scene.
         return Ok(());
     }
-    gpu.render_frame(
-        frame.scene,
-        frame.size.width,
-        frame.size.height,
-        Color::WHITE,
-    )
-    .map_err(CliError::Gpu)?;
+    let scene = frame.scene();
+    gpu.render_frame(&scene, frame.size.width, frame.size.height, Color::WHITE)
+        .map_err(CliError::Gpu)?;
     // Keep at most one frame in flight: nothing else in this loop
     // synchronizes with the GPU, so a clock that outpaces it would otherwise
     // pile up submissions without bound.
@@ -118,13 +114,9 @@ fn render_frame(
 fn capture(pipeline: &mut FramePipeline, gpu: &mut Headless, path: &Path) -> Result<(), CliError> {
     let frame = pipeline.prepare_frame();
     if frame.changed {
-        gpu.render_frame(
-            frame.scene,
-            frame.size.width,
-            frame.size.height,
-            Color::WHITE,
-        )
-        .map_err(CliError::Gpu)?;
+        let scene = frame.scene();
+        gpu.render_frame(&scene, frame.size.width, frame.size.height, Color::WHITE)
+            .map_err(CliError::Gpu)?;
     }
     // The retained target holds the current frame; read it back rather than
     // re-rendering a scene that has not changed.

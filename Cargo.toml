@@ -16,8 +16,7 @@ rust-version = "1.95"
 
 [workspace.dependencies]
 # Intra-workspace crates
-bobcat-engine = { path = "crates/bobcat-engine" }
-bobcat-quickjs = { path = "crates/bobcat-quickjs" }
+bobcat-core = { path = "crates/bobcat-core", default-features = false }
 lynx-template-decoder = { path = "crates/lynx-template-decoder" }
 # Parley is part of hughie's closed leaf model in every build: hosts
 # choose between decoded `NaturalSize` and the concrete text engine, never an
@@ -59,8 +58,9 @@ servo_arc = { path = "vendor/stylo/servo_arc" }
 
 # The embedded JavaScript engine is pinned as a git submodule rather than a
 # Cargo package. `quickjs-rust-bridge` compiles the C core directly and keeps
-# all ABI-sensitive `JSValue` handling behind a C shim. `bobcat-quickjs` owns
-# the higher-level Bobcat adapter and runtime composition policy.
+# all ABI-sensitive `JSValue` handling behind a C shim. `bobcat-core`'s
+# default `quickjs` feature owns the higher-level adapter and runtime
+# composition policy; disabling it leaves the static engine traits.
 
 # Third-party
 #
@@ -121,7 +121,7 @@ thiserror = "2"
 # `crates/image` needs `rt` (`spawn_blocking` lives behind `cfg_rt!`), `sync`
 # (the decode-concurrency semaphore) and `io-util` (the `open_resource`
 # fallback's `read_to_end`). Declared here rather than per-crate so
-# `cargo check -p bobcat-engine` and `cargo check --workspace` compile the same
+# `cargo check -p bobcat-core` and `cargo check --workspace` compile the same
 # tokio — the same per-invocation feature-unification hazard the `smallvec`
 # entry below records.
 tokio = { version = "1", features = ["io-util", "rt", "sync"] }

@@ -2,9 +2,8 @@
 //!
 //! The CLI owns process concerns — argument parsing, local `file:///` input,
 //! frame scheduling, the debugger-like command prompt, PNG output, and the
-//! macOS window. Bundle execution remains in [`bobcat_quickjs`], and both
-//! headed and headless backends consume the same reusable
-//! [`pulsar::Painter`] scene pipeline.
+//! macOS window. Bundle execution and the rendered document are exposed by
+//! [`lynx_element`]; headed and headless backends consume the same scene.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -58,17 +57,17 @@ pub enum CliError {
     #[error("web bundle `{0}` has no `lepusCode.root` entry")]
     MissingRoot(String),
     #[error("could not initialize the main-thread runtime: {0}")]
-    RuntimeInitialization(#[source] bobcat_quickjs::QuickJsInitializationError),
+    RuntimeInitialization(#[source] lynx_element::QuickJsInitializationError),
     #[error("could not run web bundle `{input}`: {source}")]
     Runtime {
         input: String,
         #[source]
-        source: bobcat_quickjs::MainThreadError,
+        source: lynx_element::MainThreadError,
     },
     #[error("invalid viewport: {0}")]
     Viewport(String),
     #[error("{0}")]
-    Gpu(#[source] pulsar::gpu::GpuError),
+    Gpu(#[source] lynx_element::pulsar::gpu::GpuError),
     #[error("could not start the command console: {0}")]
     Console(#[source] std::io::Error),
     #[error("could not write screenshot `{path}`: {source}")]

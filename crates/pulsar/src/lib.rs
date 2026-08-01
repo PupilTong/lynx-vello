@@ -9,6 +9,10 @@
 //! retained Parley glyphs. [`gpu`] owns the wgpu side: device/queue
 //! management plus headless render-to-texture with readback for tests and
 //! embedders without a surface.
+//! [`Pulsar`] is the retained integration used by Bobcat documents: it owns a
+//! reusable painter and image store, implements
+//! [`dom::visual::DocumentRenderer`], and lends its latest scene through that
+//! trait's GAT output without cloning or dynamic renderer dispatch.
 //!
 //! Coordinate model: `PaintOrder` speaks viewport CSS px; the document
 //! device's pixel ratio — the same value that drove layout rounding — is
@@ -59,8 +63,10 @@
 // truncation/precision lints would drown the real signal.
 #![allow(clippy::cast_possible_truncation, clippy::cast_lossless)]
 
+use std::cell::Ref;
+
 use dom::Document;
-use dom::visual::PaintOrder;
+use dom::visual::{DocumentRenderer, PaintOrder};
 use vello::Scene;
 
 mod convert;
@@ -110,9 +116,9 @@ impl Painter {
     /// frame's geometry snapshot against live styles/layouts/text), and
     /// when a completed style traversal is missing
     /// ([`Document::paint_style`]'s readiness gate).
-    pub fn paint<T>(
+    pub fn paint<T, R>(
         &mut self,
-        document: &Document<T>,
+        document: &Document<T, R>,
         frame: &PaintOrder,
         images: &ImageStore,
     ) -> &Scene {
@@ -125,5 +131,51 @@ impl Painter {
     #[must_use]
     pub fn scene(&self) -> &Scene {
         &self.scene
+    }
+}
+
+/// The renderer injected into a runtime [`Document`].
+///
+/// It retains both scene-building allocations and decoded image registrations
+/// with the document instead of making each embedder assemble a parallel
+/// frame pipeline.
+#[derive(Debug, Default)]
+pub struct Pulsar {
+    painter: Painter,
+    images: ImageStore,
+}
+
+impl Pulsar {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub const fn images(&self) -> &ImageStore {
+        &self.images
+    }
+
+    pub const fn images_mut(&mut self) -> &mut ImageStore {
+        &mut self.images
+    }
+}
+
+impl<T> DocumentRenderer<T> for Pulsar {
+    type Output<'a>
+        = Ref<'a, Scene>
+    where
+        Self: 'a,
+        T: 'a;
+
+    fn render(&mut self, document: &Document<T, Self>, frame: &PaintOrder) {
+        self.painter.paint(document, frame, &self.images);
+    }
+
+    fn output<'a>(renderer: Ref<'a, Self>) -> Self::Output<'a>
+    where
+        T: 'a,
+    {
+        Ref::map(renderer, |renderer| renderer.painter.scene())
     }
 }

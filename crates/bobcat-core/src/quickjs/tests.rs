@@ -6,19 +6,19 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 use std::{panic, thread};
 
-use bobcat_engine::resource::{
-    BufferedResourceRequest, HttpRequest, HttpResponse, PrefetchReceipt, PrefetchRequest,
-    RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
-    ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceFuture, ResourcePath,
-    ResourceRequest, ResourceResponse, ResourceStream, RetryAdvice,
-};
-use bobcat_engine::script::{ScriptEngine, ScriptErrorKind, ScriptErrorPhase, ScriptValue};
 use quickjs_rust_bridge::EvalSource;
 
 use super::{
     DEFAULT_EXECUTION_TIMEOUT, QuickJsCallable, QuickJsConfig, QuickJsScriptEngine, QuickJsSymbol,
     new_quickjs_view,
 };
+use crate::resource::{
+    BufferedResourceRequest, HttpRequest, HttpResponse, PrefetchReceipt, PrefetchRequest,
+    RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
+    ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceFuture, ResourcePath,
+    ResourceRequest, ResourceResponse, ResourceStream, RetryAdvice,
+};
+use crate::script::{ScriptEngine, ScriptErrorKind, ScriptErrorPhase, ScriptValue};
 
 type Value = ScriptValue<QuickJsCallable, QuickJsSymbol>;
 

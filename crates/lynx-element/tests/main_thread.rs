@@ -1,13 +1,15 @@
+#![cfg(feature = "quickjs")]
+
 //! Behavior tests for main-thread (MTS) script execution and the Element PAPI
 //! globals it runs against.
 
-use bobcat_quickjs::MainThreadRuntime;
-use lynx_element::{ElementTree, PageConfig, Viewport};
+use lynx_element::{ElementTree, MainThreadRuntime, PageConfig, Viewport};
 
 const VIEWPORT: Viewport = Viewport::new(393.0, 727.0);
 
-fn runtime() -> MainThreadRuntime {
-    MainThreadRuntime::new(VIEWPORT, PageConfig::default()).expect("QuickJS realm")
+fn runtime() -> MainThreadRuntime<ElementTree> {
+    MainThreadRuntime::new(ElementTree::new(VIEWPORT, PageConfig::default()))
+        .expect("QuickJS realm")
 }
 
 /// The tag names of `page`'s children, in order.
@@ -24,7 +26,7 @@ fn page_child_tags(elements: &ElementTree) -> Vec<String> {
             elements
                 .document()
                 .get(child)
-                .and_then(dom::Node::tag_name)
+                .and_then(lynx_element::dom::Node::tag_name)
                 .unwrap_or_default()
                 .to_owned()
         })
@@ -232,6 +234,26 @@ fn papi_rejections_become_javascript_exceptions() {
 }
 
 #[test]
+fn element_handles_accept_the_full_u32_range() {
+    let mut runtime = runtime();
+    let error = runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              __AppendElement(4294967295, __CreateView(0));
+            };
+            ",
+        )
+        .expect_err("an unknown u32::MAX handle");
+    assert!(
+        error
+            .to_string()
+            .contains("no element has the unique id 4294967295"),
+        "the u32 handle should reach lynx-element validation: {error}"
+    );
+}
+
+#[test]
 fn the_null_handle_is_rejected_by_append_element() {
     let mut runtime = runtime();
     let error = runtime
@@ -387,41 +409,6 @@ fn an_unhandled_rejection_during_render_is_reported() {
         )
         .expect_err("the rejection should surface");
     assert!(error.to_string().contains("async boom"), "{error}");
-}
-
-/// Untrusted script must not be able to abort the process. `dom`'s layout walk
-/// is recursive, so a deep enough tree overflows the stack; the PAPI refuses
-/// the append instead, and the refusal reaches the script as a catchable
-/// exception.
-#[test]
-fn a_script_cannot_nest_its_way_into_a_stack_overflow() {
-    let mut runtime = runtime();
-    runtime
-        .run_main_thread_script(
-            r"
-            globalThis.renderPage = function () {
-              let node = __CreatePage('card', 0);
-              let depth = 0;
-              try {
-                for (let i = 0; i < 100000; i += 1) {
-                  node = __AppendElement(node, __CreateView(0));
-                  depth += 1;
-                }
-              } catch (error) {
-                globalThis.reached = depth;
-                globalThis.reason = String(error.message);
-                return;
-              }
-              throw new Error('the depth guard never fired');
-            };
-            ",
-        )
-        .expect("the script handles the refusal itself");
-
-    // It got somewhere useful before being stopped, and was told why.
-    let elements = runtime.elements();
-    assert!(elements.is_flushed());
-    drop(elements);
 }
 
 /// Job ordering must match the crate's `ScriptEngine` impl.

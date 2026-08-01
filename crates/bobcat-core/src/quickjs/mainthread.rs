@@ -35,8 +35,8 @@
 //!   `__AppendElement`, `__DropElement`, `__FlushElementTree` (see `lynx-element`'s crate docs). A
 //!   bundle that reaches for anything else gets a `ReferenceError` naming the missing global, which
 //!   is the intended failure: a silently wrong render would be worse.
-//! - **Element handles cross as `i32` unique-id numbers.** `__DropElement` explicitly retires the
-//!   corresponding `lynx-element` arena entry; this layer does not add an object wrapper or GC
+//! - **Element handles cross as `u32` unique-id numbers.** `__DropElement` asks the selected
+//!   [`ElementPapi`] host to retire the handle; this layer does not add an object wrapper or GC
 //!   policy around those ids.
 //! - **The non-element main-thread globals are absent** (`lynx`, `SystemInfo`, `__globalProps`,
 //!   `_ReportError`, `__OnLifecycleEvent`, `__LoadLepusChunk`, `_I18nResourceTranslation`,
@@ -49,11 +49,11 @@ use std::cell::{Ref, RefCell, RefMut};
 use std::fmt;
 use std::rc::Rc;
 
-use bobcat_engine::script::ScriptError;
-use lynx_element::{ElementId, ElementTree, PageConfig, PapiError, Viewport};
 use quickjs_rust_bridge::{self as quickjs, HostFunctionError, HostValue};
 
-use crate::{QuickJsInitializationError, QuickJsScriptEngine};
+use super::{QuickJsInitializationError, QuickJsScriptEngine};
+use crate::element::{ElementId, ElementPapi};
+use crate::script::ScriptError;
 
 /// The source name `QuickJS` reports for the main-thread bundle.
 const MAIN_THREAD_SOURCE_NAME: &str = "main-thread.js";
@@ -119,12 +119,12 @@ impl fmt::Display for MainThreadError {
 impl std::error::Error for MainThreadError {}
 
 /// One `QuickJS` realm carrying the Lynx Element PAPI over one element tree.
-pub struct MainThreadRuntime {
+pub struct MainThreadRuntime<H: ElementPapi> {
     engine: QuickJsScriptEngine,
-    elements: Rc<RefCell<ElementTree>>,
+    elements: Rc<RefCell<H>>,
 }
 
-impl fmt::Debug for MainThreadRuntime {
+impl<H: ElementPapi> fmt::Debug for MainThreadRuntime<H> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("MainThreadRuntime")
@@ -132,12 +132,12 @@ impl fmt::Debug for MainThreadRuntime {
     }
 }
 
-impl MainThreadRuntime {
-    /// Creates a realm for a `viewport`-sized Lynx view and installs the
-    /// Element PAPI, before any script has run.
-    pub fn new(viewport: Viewport, config: PageConfig) -> Result<Self, QuickJsInitializationError> {
+impl<H: ElementPapi> MainThreadRuntime<H> {
+    /// Creates a realm over `elements` and installs the Element PAPI before
+    /// any script has run.
+    pub fn new(elements: H) -> Result<Self, QuickJsInitializationError> {
         let mut engine = QuickJsScriptEngine::new()?;
-        let elements = Rc::new(RefCell::new(ElementTree::new(viewport, config)));
+        let elements = Rc::new(RefCell::new(elements));
         install_element_papi(&mut engine.realm, &elements)
             .map_err(QuickJsInitializationError::from_quickjs)?;
         Ok(Self { engine, elements })
@@ -145,14 +145,14 @@ impl MainThreadRuntime {
 
     /// The element tree the PAPI mutates — the document to lay out and paint.
     #[must_use]
-    pub fn elements(&self) -> Ref<'_, ElementTree> {
+    pub fn elements(&self) -> Ref<'_, H> {
         self.elements.borrow()
     }
 
     /// The element tree, mutably, for the ingestion this crate does not own
     /// yet (decoded `StyleInfo`, fonts).
     #[must_use]
-    pub fn elements_mut(&mut self) -> RefMut<'_, ElementTree> {
+    pub fn elements_mut(&mut self) -> RefMut<'_, H> {
         self.elements.borrow_mut()
     }
 
@@ -205,9 +205,9 @@ impl MainThreadRuntime {
 ///
 /// web-core does the equivalent with one `Object.assign` of a closure literal;
 /// each closure here captures the same shared tree.
-fn install_element_papi(
+fn install_element_papi<H: ElementPapi>(
     realm: &mut quickjs::Realm,
-    elements: &Rc<RefCell<ElementTree>>,
+    elements: &Rc<RefCell<H>>,
 ) -> Result<(), quickjs::Error> {
     // `__CreatePage(componentID, componentCSSID)` — idempotent; returns the
     // page's unique id.
@@ -225,7 +225,7 @@ fn install_element_papi(
     // id. The argument is `0` when there is no parent component.
     let tree = Rc::clone(elements);
     realm.define_global_function("__CreateView", 1, move |arguments| {
-        let parent_component = non_negative_i32_argument("__CreateView", arguments, 0)?;
+        let parent_component = u32_argument("__CreateView", arguments, 0)?;
         let id = tree
             .borrow_mut()
             .create_view(parent_component)
@@ -245,8 +245,8 @@ fn install_element_papi(
         Ok(unique_id_value(appended))
     })?;
 
-    // `__DropElement(element)` — removes the DOM subtree and leaves permanent
-    // `None` tombstones in the Lynx element arena. Repeated drops are no-ops.
+    // `__DropElement(element)` — delegates handle retirement to the selected
+    // host. Repeated drops are host-defined no-ops in `ElementTree`.
     let tree = Rc::clone(elements);
     realm.define_global_function("__DropElement", 1, move |arguments| {
         let id = element_argument("__DropElement", arguments, 0)?;
@@ -270,7 +270,7 @@ fn unique_id_value(id: ElementId) -> HostValue {
     HostValue::Number(f64::from(id))
 }
 
-fn papi_error(error: PapiError) -> HostFunctionError {
+fn papi_error(error: impl fmt::Display) -> HostFunctionError {
     HostFunctionError::new(error.to_string())
 }
 
@@ -278,21 +278,21 @@ fn argument(arguments: &[HostValue], index: usize) -> &HostValue {
     arguments.get(index).unwrap_or(&HostValue::Undefined)
 }
 
-/// Reads an argument that must be a non-negative integer, the way every
-/// numeric PAPI argument is specified.
-fn non_negative_i32_argument(
+/// Reads an argument that must be an unsigned 32-bit integer, the way element
+/// ids are represented by the runtime.
+fn u32_argument(
     function: &str,
     arguments: &[HostValue],
     index: usize,
-) -> Result<i32, HostFunctionError> {
+) -> Result<u32, HostFunctionError> {
     let HostValue::Number(value) = *argument(arguments, index) else {
         return Err(HostFunctionError::new(format!(
             "{function} expects a number for argument {index}"
         )));
     };
-    if !value.is_finite() || value.fract() != 0.0 || value < 0.0 || value > f64::from(i32::MAX) {
+    if !value.is_finite() || value.fract() != 0.0 || value < 0.0 || value > f64::from(u32::MAX) {
         return Err(HostFunctionError::new(format!(
-            "{function} expects a non-negative integer for argument {index}, got {value}"
+            "{function} expects an unsigned 32-bit integer for argument {index}, got {value}"
         )));
     }
     #[allow(
@@ -300,7 +300,7 @@ fn non_negative_i32_argument(
         clippy::cast_sign_loss,
         reason = "the range and integrality checks above make this exact"
     )]
-    Ok(value as i32)
+    Ok(value as u32)
 }
 
 fn i32_argument(
@@ -352,7 +352,7 @@ fn element_argument(
     arguments: &[HostValue],
     index: usize,
 ) -> Result<ElementId, HostFunctionError> {
-    let id = non_negative_i32_argument(function, arguments, index)?;
+    let id = u32_argument(function, arguments, index)?;
     (id != 0).then_some(id).ok_or_else(|| {
         HostFunctionError::new(format!(
             "{function} expects an element handle for argument {index}, got the null handle 0"

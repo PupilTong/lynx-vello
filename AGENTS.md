@@ -117,15 +117,32 @@ useful signal for currently-compatible versions of those libraries.
 - `crates/lynx-template-decoder` — decodes `.web.bundle` (magic `SDRA WROF`):
   manifest, rkyv `StyleInfo`, Lepus/JS code, custom sections. Scope: binary
   template parsing only, no JS runtime, no CSS engine (yet).
-- `crates/bobcat-engine` — native runtime integration crate. Its independent
-  `resource` module owns the protocol-only, host-injected, object-safe Tokio
-  `ResourceFetcher` contract; `script` owns the ShadowRealm-inspired isolated
-  `ScriptEngine` protocol; and `view` owns `LynxView<R, E>`, coupling one
-  engine instance with one resource-fetcher handle.
+- `crates/bobcat-core` — unified native runtime core. Its always-compiled surface owns
+  the protocol-only, host-injected `ResourceFetcher`, the
+  ShadowRealm-inspired `ScriptEngine` protocol, the static `ElementPapi` host
+  contract, and `LynxView<R, E>`. `ScriptEngine::ImportFuture<'a>` is a GAT so
+  external engines return their own future type and remain statically
+  dispatched. The default `quickjs` feature adds the internal QuickJS adapter,
+  opaque QuickJS-backed view factory, and `MainThreadRuntime<H: ElementPapi>`;
+  `default-features = false` excludes QuickJS while preserving all external
+  injection contracts. Workspace dependencies disable defaults explicitly;
+  only an upper layer that wants the built-in engine enables `quickjs`.
+  The core depends on `dom` and `pulsar` and owns the rendered specialization
+  `bobcat_core::document::Document<T> = dom::Document<T, pulsar::Pulsar>`;
+  its constructor injects Pulsar at document creation. `MainThreadRuntime`
+  installs the Element PAPI before evaluation, evaluates a `.web.bundle`'s
+  `lepusCode.root` inside web-core's wrapper, then runs `processData` →
+  `renderPage` → `__FlushElementTree`. Five of web-core's 61 PAPI members are
+  installed (`__CreatePage`, `__CreateView`, `__AppendElement`,
+  `__DropElement`, `__FlushElementTree`); unsupported globals remain precise
+  `ReferenceError`s. Handles cross the primitives-only boundary as `u32` ids.
+  The generic host contract is the dependency inversion: core must never
+  depend on `lynx-element` or know Lynx tag/root/UA policy.
   The resource module must not decode images/fonts/templates, upload render
-  resources, or own cache/retry policy; its protocol remains independent of
-  decoder/DOM/style/layout/render layers. The crate has no DOM adapter and
-  must remain independent of concrete JavaScript engines, including QuickJS.
+  resources, or own cache/retry policy. Runtime configuration, raw realm/value
+  handles, interrupts, and source-evaluation entry points remain private. The
+  future preloaded module graph belongs in the feature-gated core adapter, not
+  in `quickjs-rust-bridge` or the engine-neutral traits.
 - `crates/quickjs-rust-bridge` — owner-thread-bound safe Rust wrapper around
   the pinned `vendor/quickjs` submodule. It owns the QuickJS C build and the
   narrow unsafe FFI shim, realm/value lifetime and affinity checks, exact
@@ -156,35 +173,14 @@ useful signal for currently-compatible versions of those libraries.
   reference cycle that leaks the realm unless the function is collected first.
   The crate must remain independent of Bobcat, the DOM, resources, and runtime
   policy — it knows nothing about Lynx.
-- `crates/bobcat-quickjs` — narrow integration layer depending on
-  `bobcat-engine`, the otherwise Bobcat-independent `quickjs-rust-bridge`, and
-  `lynx-element`. Two public surfaces: the opaque QuickJS-backed `LynxView`
-  (its default construction factory, an opaque initialization error, and
-  resource-host access through that view), and `mainthread` — the Lynx host
-  globals. `MainThreadRuntime` is the realm a `.web.bundle`'s `lepusCode.root`
-  runs in: it installs the Element PAPI over one `lynx-element::ElementTree`
-  *before* evaluation (web-core installs its globals from `onPageConfigReady`,
-  which the bundle's section order guarantees precedes `LepusCode`), evaluates
-  the chunk inside web-core's own wrapper
-  (`(function(){ "use strict"; const navigator=void 0,postMessage=void 0,window=void 0; … })()`),
-  and then runs web-core's post-evaluation sequence: `processData` →
-  `renderPage` → `__FlushElementTree`. Five of web-core's 61 PAPI members are
-  installed (`__CreatePage`, `__CreateView`, `__AppendElement`,
-  `__DropElement`, `__FlushElementTree`); a bundle reaching for any other one
-  gets a `ReferenceError` naming it, which is the intended failure mode.
-  Element handles cross the primitives-only boundary directly as `i32` unique
-  ids; `__DropElement` explicitly retires their DOM subtree and arena entries.
-  Runtime configuration, default constants, explicit-config construction, the
-  `bobcat-engine::script` adapter types, and all realm/value handles, interrupt
-  controls, and raw source-evaluation entry points remain crate-private. The
-  future preloaded module graph belongs here too, not in the generic QuickJS
-  bridge or engine-neutral protocol.
 - `crates/bobcat-cli` — the native `bobcat` process shell over
-  `bobcat-quickjs`. `bobcat -i file:///…` decodes and boots one web bundle;
-  other URL schemes remain rejected at the boundary. One reusable
-  `FramePipeline` owns the runtime, `pulsar::Painter`, scene, and image store,
-  so the macOS headed backend and cross-platform headless backend share
-  script/layout/paint logic rather than maintaining parallel render paths.
+  `lynx-element`; it has no direct runtime-core, DOM, or Pulsar dependency.
+  `bobcat -i file:///…` decodes and boots one web bundle; other URL schemes
+  remain rejected at the boundary. One reusable `FramePipeline` owns the
+  QuickJS-backed element runtime and borrows the scene retained by its
+  document-injected Pulsar renderer, so the macOS headed backend and
+  cross-platform headless backend share script/layout/paint logic rather than
+  maintaining parallel render paths.
   Headed mode uses a native winit window with display-backed vsync and tracks
   both logical viewport size and device-pixel ratio. Headless mode uses a
   configurable synthetic vsync rate, skips catch-up bursts after slow frames,
@@ -195,7 +191,7 @@ useful signal for currently-compatible versions of those libraries.
   there is no one-shot startup flag. PNG readback happens only on a screenshot.
   It must not
   duplicate runtime, DOM, layout, or painting policy: missing MTS/PAPI support
-  remains a precise `bobcat-quickjs` error, and non-empty decoded `StyleInfo`
+  remains a precise `bobcat-core` QuickJS error, and non-empty decoded `StyleInfo`
   currently produces an explicit author-styles-omitted warning rather than silent
   claimed compatibility.
 - `crates/lynx-element` — the Lynx runtime element layer, i.e. the crate the
@@ -205,11 +201,12 @@ useful signal for currently-compatible versions of those libraries.
   stylo `Device` construction, and the Lynx UA cascade defaults
   (`display: linear`, `box-sizing: border-box`, `overflow: hidden`, under the
   `defaultDisplayLinear` / `defaultOverflowVisible` page-config switches).
-  `ElementTree` owns a `Document<i32>` plus an independent
+  `ElementTree` owns a `bobcat_core::document::Document<ElementId>` (the
+  `dom::Document<ElementId, pulsar::Pulsar>` specialization) plus an independent
   `Vec<Option<LynxElement>>` arena. The DOM payload is only the permanent
-  `i32` unique id, which is also the direct arena index; each `LynxElement`
+  `u32` unique id, which is also the direct arena index; each `LynxElement`
   owns that id, its stable DOM `NodeId` association, component creation
-  fields, and height cache. The arena permanently reserves slot 0 as web-core's
+  fields. The arena permanently reserves slot 0 as web-core's
   "no element" sentinel, so live unique ids start at 1. `__DropElement` removes
   the selected DOM subtree and takes the corresponding arena entries, leaving
   permanent `None` tombstones; unique ids are never recycled, although `dom`
@@ -218,14 +215,14 @@ useful signal for currently-compatible versions of those libraries.
   the main-thread script is untrusted input and the DOM core is
   crash-on-misuse. `ElementTree` never lends out `&mut Document`: a caller that
   removed or moved nodes directly would desynchronise the element arena, the
-  page state, and the height cache, and the next PAPI call would panic in the
-  DOM instead of returning `PapiError`. The mutable surface is the narrow set
-  the layers above actually need (`paint_order`, `add_author_stylesheet`,
-  `set_viewport`, `register_fonts`). Validation includes a `MAX_TREE_DEPTH` cap, because `dom`'s
-  recursive layout/paint/hit-test walks overflow the stack and abort the
-  *process* somewhere past ~300 levels on a 2 MiB thread, and script must not
-  be able to reach that. (A guard, not a fix; the fix is iterative traversal
-  in `dom`/`hughie`.) `flush_element_tree` is the single commit boundary: it
+  page state, and the next PAPI call would panic in the DOM instead of returning
+  `PapiError`. The mutable surface is the narrow set the layers above actually
+  need (`render`, `images_mut`, `add_author_stylesheet`, `set_viewport`,
+  `register_fonts`). `scene` returns the retained renderer output as a guarded
+  borrow; no public `paint_order` exists on `ElementTree`, and input builds its
+  temporary hit-test frame internally. It does not impose a runtime tree-depth
+  cap; recursive traversal hardening belongs in `dom`/`hughie`.
+  `flush_element_tree` is the single commit boundary: it
   attaches the page on the first call and then runs style + layout. Recorded
   limits (see the crate docs, which are authoritative): handles are ids rather
   than element objects; `parentComponentUniqueID` is recorded but not honored
@@ -245,6 +242,13 @@ useful signal for currently-compatible versions of those libraries.
   entries before the ID can be reused (ONE TREE policy: nodes are created and
   mutated only through `Document` methods). Computed styles remain with the
   primary nodes; layout/text state does not.
+  `Document<T, R = ()>` also owns one statically selected renderer `R`,
+  installed by `with_renderer`; ordinary DOM-only documents keep the `()`
+  default. `visual::DocumentRenderer<T>` uses a GAT output so a renderer can
+  return a borrowed/guarded retained result without cloning or a renderer
+  trait object. `Document::render` privately builds `PaintOrder`, invokes the
+  renderer, and `render_output` lends its retained output. The DOM owns this
+  injection mechanism but no concrete renderer dependency.
   Every node points directly back only to `TreeArenas`, and the
   same plain one-word `&Node` implements Stylo's document/node/element traits
   according to its `NodeData` (styling runs in place, no mirror tree),
@@ -441,15 +445,18 @@ useful signal for currently-compatible versions of those libraries.
   dispatch, fixed/hoisted positioned pass, per-node cache storage, and the
   automatic style-damage→`Document::invalidate_layout` wiring (boundary-stopped,
   engine-internal — not a runtime-adapter concern) now live in `dom`
-  (see above). Still L3 work in a future runtime adapter: Element-PAPI
-  validation and handle lifetime, `rpx`-aware view/device policy, decoded
-  `StyleInfo` ingestion and Lynx UA defaults, sticky lowering,
+  (see above). Still L3 work in the runtime adapter: the remaining Element-PAPI
+  surface, `rpx`-aware view/device policy, decoded `StyleInfo` ingestion,
+  sticky lowering,
   component-specific staggered layout, and Lynx-specific text
   attribute/raw-text/truncation policy. Generic W3C text style, document
   context, and artifact storage already live in `dom`.
 - `crates/pulsar` — the vello-backed paint engine (`hughie` lays out,
-  `pulsar` emits light). `Painter::paint(&Document, &PaintOrder, &ImageStore)
-  -> &vello::Scene` walks the flat back-to-front item list:
+  `pulsar` emits light). `Pulsar` owns a reusable `Painter` + `ImageStore` and
+  implements `dom::visual::DocumentRenderer<T>`; its GAT output is a guarded
+  borrow of the retained `vello::Scene`. The lower-level
+  `Painter::paint(&Document, &PaintOrder, &ImageStore) -> &vello::Scene` walks
+  the flat back-to-front item list:
   item clip chains diff against vello clip layers (restarting inside every
   group scope, which preserves containing-block clip escape under grouping
   and upholds the crate-wide vello #1198 invariant: a blend layer's
@@ -473,13 +480,14 @@ useful signal for currently-compatible versions of those libraries.
   never passed in separately). wgpu/peniko/kurbo are consumed exclusively
   through vello's version-matched re-exports (never direct deps). The
   **authoritative** recorded-limits matrix is `crates/pulsar/src/lib.rs`'s
-  crate docs — other docs reference it rather than restating it. No retained scene yet — the frame rebuilds from a
-  reused `Painter`; `StyleDamage`'s repaint class is the designated hook.
+  crate docs — other docs reference it rather than restating it. Pulsar retains
+  the latest scene but still rebuilds it from a reused `Painter`; there is no
+  incremental scene yet, and `StyleDamage`'s repaint class is the designated hook.
   It must not read Lynx runtime vocabulary (hit-slop, components) and never
   bypasses `PaintOrder` for its own tree walk.
 - `crates/image` — the replaced-content pipeline below the DOM: container
   sniffing from magic bytes, header-only intrinsic-size probing, decode to
-  RGBA8, and the async fetch→decode→cache loader over `bobcat-engine`'s
+  RGBA8, and the async fetch→decode→cache loader over `bobcat-core`'s
   `ResourceFetcher`. PNG/JPEG/WebP, **static only**. One always-compiled
   pure-Rust backend (`png` + `zune-jpeg` + `image-webp` taken directly rather
   than through the `image` facade — the facade would collide with this
@@ -532,13 +540,14 @@ useful signal for currently-compatible versions of those libraries.
   `docs/tracking/` for the behavior surface each will need to cover before
   scaffolding begins, and `.claude/agents/` for the subsystem-scoped agent
   personas already set up for this work. `crates/lynx-element` and
-  `crates/bobcat-quickjs`'s `mainthread` module are the first pieces of this
+  `crates/bobcat-core`'s feature-gated `quickjs::mainthread` module are the first pieces of this
   layer to land; the background thread, `StyleInfo` ingestion, the event
   model, and the other 56 Element PAPI members are still ahead.
 
-See `docs/style-architecture.md` for the current style-layer dependency and
-ownership rules, and `docs/layout-architecture.md` for the layout-layer
-equivalent.
+See `docs/runtime-architecture.md` for the runtime dependency graph, feature
+boundary, renderer injection, and frame walkthrough;
+`docs/style-architecture.md` and `docs/layout-architecture.md` contain the
+style/layout ownership rules.
 
 ## Reference repos (local checkouts, read-only — do not edit)
 

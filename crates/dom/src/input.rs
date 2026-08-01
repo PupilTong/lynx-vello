@@ -331,7 +331,7 @@ impl InputState {
     }
 }
 
-impl<T: Sync> Document<T> {
+impl<T: Sync, R> Document<T, R> {
     /// Routes one host input event against `frame` and performs whatever UA
     /// default action it resolves to.
     ///

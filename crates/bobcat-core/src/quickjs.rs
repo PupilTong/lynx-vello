@@ -1,4 +1,4 @@
-//! QuickJS-backed runtime composition for [`bobcat_engine`].
+//! Default QuickJS-backed runtime composition for Bobcat.
 //!
 //! [`mainthread`] adds the Lynx side: a realm carrying the Element PAPI, and
 //! main-thread (MTS) script execution over it.
@@ -10,13 +10,13 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bobcat_engine::resource::ResourceFetcher;
-use bobcat_engine::script::{
-    ScriptEngine, ScriptError, ScriptErrorKind, ScriptErrorPhase, ScriptFuture,
-    ScriptSourceLocation, ScriptValue,
-};
-use bobcat_engine::view::LynxView;
 use quickjs_rust_bridge as quickjs;
+
+use crate::resource::ResourceFetcher;
+use crate::script::{
+    ScriptEngine, ScriptError, ScriptErrorKind, ScriptErrorPhase, ScriptSourceLocation, ScriptValue,
+};
+use crate::view::LynxView;
 
 const DEFAULT_MAX_JOBS_PER_CHECKPOINT: NonZeroUsize =
     NonZeroUsize::new(1_024).expect("the default job limit is non-zero");
@@ -220,6 +220,8 @@ impl fmt::Debug for QuickJsScriptEngine {
 impl ScriptEngine for QuickJsScriptEngine {
     type Callable = QuickJsCallable;
     type Symbol = QuickJsSymbol;
+    type ImportFuture<'a> =
+        std::future::Ready<Result<ScriptValue<Self::Callable, Self::Symbol>, ScriptError>>;
 
     fn evaluate(
         &mut self,
@@ -232,14 +234,12 @@ impl ScriptEngine for QuickJsScriptEngine {
         &'a mut self,
         _specifier: &'a str,
         _export_name: &'a str,
-    ) -> ScriptFuture<'a, Self::Callable, Self::Symbol> {
-        Box::pin(async {
-            Err(script_error(
-                ScriptErrorKind::ModuleLoad,
-                ScriptErrorPhase::ImportValue,
-                "QuickJS module loading is not configured",
-            ))
-        })
+    ) -> Self::ImportFuture<'a> {
+        std::future::ready(Err(script_error(
+            ScriptErrorKind::ModuleLoad,
+            ScriptErrorPhase::ImportValue,
+            "QuickJS module loading is not configured",
+        )))
     }
 
     fn call(
@@ -330,13 +330,6 @@ impl QuickJsScriptEngine {
             ScriptValue::String(value) => self.realm.string(value),
             ScriptValue::Symbol(value) => return Ok(value.0.clone()),
             ScriptValue::Callable(value) => return Ok(value.0.clone()),
-            _ => {
-                return Err(script_error(
-                    ScriptErrorKind::InvalidBoundaryValue,
-                    phase,
-                    "this script boundary value is not supported by QuickJS",
-                ));
-            }
         };
         result.map_err(|error| map_quickjs_error(error, phase))
     }
@@ -473,7 +466,7 @@ pub fn new_quickjs_view<R: ResourceFetcher>(
     })
 }
 
-pub use crate::mainthread::{MainThreadError, MainThreadRuntime};
+pub use self::mainthread::{MainThreadError, MainThreadRuntime};
 
 #[cfg(test)]
 mod tests;

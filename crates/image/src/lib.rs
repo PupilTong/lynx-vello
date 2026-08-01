@@ -76,7 +76,7 @@
 //!     runner exists for this workspace yet. Both degrade to the software backend rather than
 //!     failing, because the capability probe has to succeed before either is used.
 //!
-//! [`ResourceFetcher`]: bobcat_engine::resource::ResourceFetcher
+//! [`ResourceFetcher`]: bobcat_core::resource::ResourceFetcher
 
 // The coverage run compiles with `--cfg coverage_nightly` and the test modules
 // opt out via `#[coverage(off)]`, which needs this experimental feature (same

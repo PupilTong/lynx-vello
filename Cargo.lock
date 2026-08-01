@@ -193,41 +193,29 @@ dependencies = [
 name = "bobcat-cli"
 version = "0.1.0"
 dependencies = [
- "bobcat-quickjs",
- "dom",
  "flashbulb",
  "lynx-element",
  "lynx-template-decoder",
  "png",
  "pollster",
- "pulsar",
  "thiserror 2.0.18",
  "url",
  "winit",
 ]
 
 [[package]]
-name = "bobcat-engine"
+name = "bobcat-core"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "dom",
  "http",
+ "pulsar",
+ "quickjs-rust-bridge",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "url",
-]
-
-[[package]]
-name = "bobcat-quickjs"
-version = "0.1.0"
-dependencies = [
- "bobcat-engine",
- "dom",
- "flashbulb",
- "lynx-element",
- "lynx-template-decoder",
- "quickjs-rust-bridge",
 ]
 
 [[package]]
@@ -1358,7 +1346,7 @@ dependencies = [
 name = "image"
 version = "0.1.0"
 dependencies = [
- "bobcat-engine",
+ "bobcat-core",
  "bytes",
  "data-url",
  "fast_image_resize",
@@ -1606,8 +1594,10 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 name = "lynx-element"
 version = "0.1.0"
 dependencies = [
- "dom",
+ "bobcat-core",
  "euclid",
+ "flashbulb",
+ "lynx-template-decoder",
  "stylo",
  "stylo_traits",
 ]

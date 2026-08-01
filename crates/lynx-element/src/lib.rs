@@ -8,8 +8,8 @@
 //! Lynx UA cascade defaults.
 //!
 //! ```text
-//! bobcat-quickjs (MTS globals)  ──▶  lynx-element  ──▶  dom  ──▶  vendor/stylo
-//!   __CreateView, __AppendElement    handles + UA sheet   DOM + CSS core
+//! bobcat-cli  ──▶  lynx-element  ──▶  bobcat-core  ──▶  dom / pulsar
+//!                  handles + UA       runtime + render     generic cores
 //! ```
 //!
 //! # Element PAPI scope
@@ -36,13 +36,16 @@
 //!
 //! - **The runtime identity and JavaScript handle are the same unique id.** [`ElementTree`] speaks
 //!   [`ElementId`] internally, matching the native engine's identity (`__GetElementUniqueID`), and
-//!   `bobcat-quickjs` carries it directly over its primitives-only boundary.
+//!   `bobcat-core`'s optional `QuickJS` runtime carries it directly over its primitives-only
+//!   boundary.
 //! - **Unique ids and arena slots are never recycled.** The context owns a
 //!   `Vec<Option<LynxElement>>` whose slot zero is the permanent null sentinel. [`ElementId`] is
-//!   simply `i32`, and every positive id is also its direct arena index. `__DropElement` retires a
+//!   simply `u32`, and every positive id is also its direct arena index. `__DropElement` retires a
 //!   subtree through [`ElementTree::drop_element`], which takes each value and leaves a permanent
-//!   `None` tombstone. `Document<i32>` stores that same unique id. `dom` may reuse its private
-//!   `NodeId` slots, but no stale script identity can ever name a later element.
+//!   `None` tombstone. `Document<ElementId>` stores that same unique id. `dom` may reuse its
+//!   private `NodeId` slots, but no stale script identity can ever name a later element.
+//! - **There is no runtime tree-depth cap in this layer.** `ElementTree` keeps no depth-specific
+//!   state or traversal helpers; hardening recursive walks belongs in `dom` and `hughie`.
 //! - **`parentComponentUniqueID` is recorded, not honored.** web-core uses it only to inherit the
 //!   parent component's CSS fragment id (`l-css-id`). Without `__SetCSSId` there is no CSS-scope
 //!   machinery to inherit into, so the argument is validated and stored on the element and
@@ -58,9 +61,13 @@ mod device;
 mod tree;
 mod ua;
 
+#[cfg(feature = "quickjs")]
+pub use bobcat_core::quickjs::{MainThreadError, MainThreadRuntime, QuickJsInitializationError};
+pub use bobcat_core::{dom, pulsar};
+
 pub use crate::arena::{ElementId, LynxElement};
 pub use crate::device::{LynxFontMetricsProvider, Viewport};
-pub use crate::tree::{ElementTree, MAX_TREE_DEPTH, PapiError};
+pub use crate::tree::{ElementTree, PapiError};
 pub use crate::ua::{PageConfig, ua_stylesheet};
 
 /// The Lynx tag name of the page root element.

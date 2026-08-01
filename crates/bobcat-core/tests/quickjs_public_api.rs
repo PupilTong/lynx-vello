@@ -1,8 +1,10 @@
+#![cfg(feature = "quickjs")]
+
 use std::error::Error;
 use std::sync::Arc;
 
-use bobcat_engine::resource::ResourceFetcher;
-use bobcat_quickjs::{QuickJsInitializationError, QuickJsLynxView, new_quickjs_view};
+use bobcat_core::quickjs::{QuickJsInitializationError, QuickJsLynxView, new_quickjs_view};
+use bobcat_core::resource::ResourceFetcher;
 
 #[allow(dead_code)]
 fn public_view_contract<R: ResourceFetcher>(view: &mut QuickJsLynxView<R>) {
