@@ -47,9 +47,7 @@ fn text_specimen() {
   <div style="display: flex; font-size: 20px; color: #dc2626">Colored fill (#dc2626)</div>
 </div>
 "#;
-    let Some(actual) = screenshot::capture("text_specimen", FRAGMENT, 420.0, 300.0) else {
-        return;
-    };
+    let actual = screenshot::capture("text_specimen", FRAGMENT, 420.0, 300.0);
     assert_text_golden("specimen", &actual);
 }
 
@@ -86,9 +84,7 @@ fn text_decorations() {
   </div>
 </div>
 "#;
-    let Some(actual) = screenshot::capture("text_decorations", FRAGMENT, 460.0, 430.0) else {
-        return;
-    };
+    let actual = screenshot::capture("text_decorations", FRAGMENT, 460.0, 430.0);
     assert_text_golden("decorations", &actual);
 }
 
@@ -123,9 +119,7 @@ fn text_shadow_and_stroke() {
   <div style="display: flex; text-decoration: underline; text-shadow: 4px 4px 0px #fca5a5">Shadow takes the underline</div>
 </div>
 "#;
-    let Some(actual) = screenshot::capture("text_shadow_and_stroke", FRAGMENT, 460.0, 330.0) else {
-        return;
-    };
+    let actual = screenshot::capture("text_shadow_and_stroke", FRAGMENT, 460.0, 330.0);
     assert_text_golden("shadow-and-stroke", &actual);
 }
 
@@ -156,9 +150,7 @@ fn text_paragraph() {
   <div style="display: flex; width: 380px; text-indent: 28px; background-color: #f3f4f6">Indented first line, then the rest of the paragraph wraps back to the left edge of the box.</div>
 </div>
 "#;
-    let Some(actual) = screenshot::capture("text_paragraph", FRAGMENT, 420.0, 420.0) else {
-        return;
-    };
+    let actual = screenshot::capture("text_paragraph", FRAGMENT, 420.0, 420.0);
     assert_text_golden("paragraph", &actual);
 }
 
@@ -197,9 +189,7 @@ fn text_color_gradient() {
   <div style="display: flex; font-size: 26px; text-decoration: underline; color: linear-gradient(90deg, #f59e0b, #ef4444)">Underline stays solid</div>
 </div>
 "#;
-    let Some(actual) = screenshot::capture("text_color_gradient", FRAGMENT, 440.0, 400.0) else {
-        return;
-    };
+    let actual = screenshot::capture("text_color_gradient", FRAGMENT, 440.0, 400.0);
     assert_text_golden("color-gradient", &actual);
 }
 
@@ -236,14 +226,12 @@ fn text_color_gradient_over_background() {
   <div style="display: flex; background-clip: text; background-color: #111827; color: linear-gradient(90deg, #fbbf24, #a855f7)">Clip plus gradient</div>
 </div>
 "#;
-    let Some(actual) = screenshot::capture(
+    let actual = screenshot::capture(
         "text_color_gradient_over_background",
         FRAGMENT,
         460.0,
         400.0,
-    ) else {
-        return;
-    };
+    );
     assert_text_golden("color-gradient-over-background", &actual);
 }
 
@@ -269,8 +257,6 @@ fn text_background_clip() {
   <div style="display: flex; color: transparent; text-decoration: underline #111827; background-clip: text; background-image: linear-gradient(90deg, #f59e0b, #ef4444)">Bare underline</div>
 </div>
 "#;
-    let Some(actual) = screenshot::capture("text_background_clip", FRAGMENT, 440.0, 260.0) else {
-        return;
-    };
+    let actual = screenshot::capture("text_background_clip", FRAGMENT, 440.0, 260.0);
     assert_text_golden("background-clip", &actual);
 }

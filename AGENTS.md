@@ -472,8 +472,9 @@ useful signal for currently-compatible versions of those libraries.
   replaced content → borders → outline, plus text runs from the retained
   Parley layouts (one shared `linebender_resource_handle` makes parley's
   `FontData` feed `Scene::draw_glyphs` directly). `gpu::Headless` owns the
-  wgpu render-to-texture + readback path and fails soft (`NoAdapter`) so
-  tests skip GPU-less machines. Style access is `Document::paint_style`
+  wgpu render-to-texture + readback path and reports `NoAdapter` to product
+  callers; every GPU-backed test treats that error as a hard failure,
+  including in CI. Style access is `Document::paint_style`
   (post-flush borrow, no `Arc` bump); geometry is the rounded layouts.
   Coordinates: CSS px everywhere, with viewport and device-pixel-ratio
   read from the document's own `Device` (single-sourced with layout —
@@ -525,14 +526,15 @@ useful signal for currently-compatible versions of those libraries.
   frame, `viewport * device_pixel_ratio` device pixels — `pulsar` scales the
   scene up by that ratio, so anything smaller is a crop. Playwright instead
   downsamples to CSS pixels; the two coincide at a ratio of 1, which is what
-  lynx-stack pins for determinism and what every viewport here uses. Every
-  capture entry point takes an `&ImageStore` explicitly rather than defaulting
-  to an empty one: a capture that silently paints no replaced content is
-  exactly the blank-but-passing golden this crate exists to prevent.
-  `headless_or_skip` announces a missing GPU adapter on the process's real
-  stderr (libtest discards a *passing* test's captured output, so `eprintln!`
-  would be invisible exactly when it matters); `FLASHBULB_REQUIRE_GPU=1` turns
-  that skip into a failure. `pulsar` dev-depends on it *with* the
+  lynx-stack pins for determinism and what every viewport here uses.
+  Document/frame capture takes an `&ImageStore` explicitly rather than
+  defaulting to an empty one; retained-scene capture instead consumes the
+  scene already built from the renderer-owned store and has a raster-image
+  golden guarding that ownership path. A capture that silently paints no
+  replaced content is exactly the blank-but-passing golden this crate exists
+  to prevent. `headless` requires a usable GPU adapter and panics when one is
+  unavailable, so local and CI test runs obey the same mandatory-GPU policy.
+  `pulsar` dev-depends on it *with* the
   `render` feature — a dev-dependency cycle Cargo permits; the library graph
   stays acyclic. Goldens are not platform-suffixed: cross-platform
   rasterizer noise is absorbed by tolerance, not by per-platform baselines.
@@ -625,11 +627,11 @@ committed goldens in `crates/*/tests/screenshots/`, driven by
 `crates/flashbulb`. The ordinary screenshot suites share one capture harness
 in `tests/support/screenshot.rs`; the browser-referenced CSS atlas owns the
 separate workflow documented below. The golden store is per *crate*, so every
-screenshot binary in a crate writes into the same tree. They need a GPU
-adapter; without one they print `SKIP <test>` and pass, so a green run on a
-GPU-less machine has not exercised them. To accept a new rendering in the
-ordinary suites, look at the image first, then (dropping `--test` to catch
-every ordinary screenshot binary in the crate):
+screenshot binary in a crate writes into the same tree. They require a GPU
+adapter; without one the test run fails, including in CI, so a green run always
+means the pixels were rendered and compared. To accept a new rendering in the
+ordinary suites, look at the image first, then (dropping `--test` to catch every
+ordinary screenshot binary in the crate):
 
 ```sh
 FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p <crate>

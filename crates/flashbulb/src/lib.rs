@@ -9,11 +9,9 @@
 //! # #[cfg(feature = "render")]
 //! # fn example(document: &mut dom::Document<()>) {
 //! use flashbulb::vello::peniko::Color;
-//! use flashbulb::{ImageStore, Screenshots, capture_document, headless_or_skip};
+//! use flashbulb::{ImageStore, Screenshots, capture_document, headless};
 //!
-//! let Some(mut gpu) = headless_or_skip("my_test") else {
-//!     return;
-//! };
+//! let mut gpu = headless("my_test");
 //! let images = ImageStore::new();
 //! let image = capture_document(&mut gpu, document, Color::WHITE, &images).expect("capture");
 //! Screenshots::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/screenshots"))
@@ -51,16 +49,13 @@
 //! # Features
 //!
 //! - default: [`Image`], [`compare`], [`Screenshots`] — pixels in, verdict out, no renderer.
-//! - `render`: adds [`capture_document`] and [`headless_or_skip`], which pull in `dom` and
-//!   `pulsar`.
+//! - `render`: adds [`capture_document`] and [`headless`], which pull in `dom` and `pulsar`.
 //!
 //! # Captures need a GPU
 //!
-//! [`headless_or_skip`] returns `None` on a machine with no usable adapter and
-//! writes `SKIP <test>` straight to the process's stderr, because libtest
-//! discards a passing test's captured output. A green run on such a machine
-//! has not compared anything; set `FLASHBULB_REQUIRE_GPU=1` where a missing
-//! adapter should fail instead.
+//! [`headless`] requires a usable adapter. A missing adapter fails the test,
+//! including in CI, so a green screenshot suite always means pixels were
+//! rendered and compared.
 
 mod compare;
 mod golden;
@@ -82,5 +77,5 @@ pub use crate::image::{Image, ImageError};
 #[cfg(feature = "render")]
 pub use crate::render::{
     CaptureError, capture_document, capture_document_sized, capture_frame, capture_frame_sized,
-    capture_scene, capture_scene_sized, frame_size, headless_or_skip,
+    capture_scene, capture_scene_sized, frame_size, headless,
 };

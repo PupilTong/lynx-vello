@@ -242,7 +242,6 @@ on a real GPU:
 
 ```sh
 CSS_PAINT_UPDATE_NATIVE=1 \
-  FLASHBULB_REQUIRE_GPU=1 \
   cargo test -p pulsar --test css_atlas css_native_
 ```
 
@@ -262,7 +261,7 @@ and 189 ignored; the native atlas
 builder does not render those skipped cases in a normal run:
 
 ```sh
-FLASHBULB_REQUIRE_GPU=1 cargo test -p pulsar --test css_atlas
+cargo test -p pulsar --test css_atlas
 ```
 
 To re-audit after renderer changes, reuse the 40 captured atlases but split all
@@ -279,7 +278,6 @@ python3 crates/pulsar/tests/support/generate_css_paint_cases.py \
   --include-differences
 CSS_PAINT_AUDIT=/tmp/css-paint-audit.tsv \
   CSS_PAINT_REFERENCE_DIR="$CSS_PAINT_AUDIT_REFS" \
-  FLASHBULB_REQUIRE_GPU=1 \
   cargo test -p pulsar --test css_atlas -- --include-ignored
 python3 crates/pulsar/tests/support/classify_css_paint_audit.py \
   /tmp/css-paint-audit.tsv
@@ -299,7 +297,6 @@ native W3C-correct set and split the browser matches. Finally validate the
 ```sh
 python3 crates/pulsar/tests/support/generate_css_paint_cases.py
 CSS_PAINT_UPDATE_NATIVE=1 \
-  FLASHBULB_REQUIRE_GPU=1 \
   cargo test -p pulsar --test css_atlas css_native_
 python3 crates/pulsar/tests/support/generate_css_paint_cases.py \
   --split-atlases output/playwright/css-paint/atlases

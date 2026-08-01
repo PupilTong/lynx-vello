@@ -1,11 +1,11 @@
 //! End-to-end pixel tests: `Document` → `PaintOrder` → `Scene` → GPU →
 //! readback. Ahem glyphs are solid em squares, so glyph coverage is
-//! pixel-assertable. Skips silently on machines without a GPU adapter.
+//! pixel-assertable. A usable GPU adapter is mandatory.
 
 mod common;
 
 use common::Doc;
-use pulsar::gpu::{GpuError, Headless};
+use flashbulb::headless;
 use pulsar::vello::Scene;
 use pulsar::vello::kurbo::{Affine, Rect};
 use pulsar::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
@@ -17,17 +17,6 @@ const ISOLATION_ATLAS_HEIGHT: u32 = 192;
 const ISOLATION_CELL_X: u32 = 128;
 const ISOLATION_CELL_Y: u32 = 32;
 
-fn headless_or_skip() -> Option<Headless> {
-    match Headless::new() {
-        Ok(headless) => Some(headless),
-        Err(GpuError::NoAdapter) => {
-            eprintln!("skipping GPU pixel test: no usable adapter");
-            None
-        }
-        Err(error) => panic!("GPU init failed: {error}"),
-    }
-}
-
 fn pixel(pixels: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
     let index = ((y * width + x) * 4) as usize;
     pixels[index..index + 4].try_into().unwrap()
@@ -38,9 +27,7 @@ fn pixel(pixels: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
 /// words or the un-inked box area.
 #[test]
 fn background_clip_text_clips_to_glyph_ink() {
-    let Some(mut gpu) = headless_or_skip() else {
-        return;
-    };
+    let mut gpu = headless("background_clip_text_clips_to_glyph_ink");
     // Box at (10, 10); Ahem at 20px: "HH HH" → glyph squares x 10..50 and
     // 70..110, space x 50..70; ink y 10..30 (0.8em ascent + 0.2em descent
     // spans the whole line box at the top of the 50px-tall element).
@@ -86,9 +73,7 @@ fn background_clip_text_clips_to_glyph_ink() {
 /// the sanity contrast for the assertions above.
 #[test]
 fn plain_background_covers_the_box() {
-    let Some(mut gpu) = headless_or_skip() else {
-        return;
-    };
+    let mut gpu = headless("plain_background_covers_the_box");
     let css = "page { display: flex; position: relative; width: 200px; height: 100px; }
         .text { display: flex; position: absolute; left: 10px; top: 10px;
                 width: 180px; height: 50px;
@@ -132,9 +117,7 @@ fn plain_background_covers_the_box() {
 /// asserted windows exclude.
 #[test]
 fn gradient_color_fills_glyph_ink_from_the_padding_box() {
-    let Some(mut gpu) = headless_or_skip() else {
-        return;
-    };
+    let mut gpu = headless("gradient_color_fills_glyph_ink_from_the_padding_box");
     let css = "page { display: flex; position: relative; width: 200px; height: 100px; }
         .text { display: flex; position: absolute; left: 0px; top: 10px;
                 width: 120px; height: 50px; box-sizing: border-box;
@@ -176,9 +159,7 @@ fn gradient_color_fills_glyph_ink_from_the_padding_box() {
 /// `outline: solid` paints a flush ring outside the border box.
 #[test]
 fn outline_rings_the_border_box() {
-    let Some(mut gpu) = headless_or_skip() else {
-        return;
-    };
+    let mut gpu = headless("outline_rings_the_border_box");
     let css = "page { display: flex; position: relative; width: 200px; height: 100px; }
         .out { display: flex; position: absolute; left: 20px; top: 20px;
                width: 100px; height: 50px;
@@ -216,9 +197,7 @@ fn outline_rings_the_border_box() {
 /// this for opacity, filters, masks, clips, and shadows.
 #[test]
 fn isolated_atlas_cell_matches_standalone_group_effects() {
-    let Some(mut gpu) = headless_or_skip() else {
-        return;
-    };
+    let mut gpu = headless("isolated_atlas_cell_matches_standalone_group_effects");
     let css = "page { display: flex; position: relative; width: 128px; height: 128px; }
         .effect { display: flex; position: absolute; left: 14px; top: 14px;
                   width: 100px; height: 100px;

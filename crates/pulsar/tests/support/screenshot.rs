@@ -9,27 +9,24 @@
 #![allow(dead_code)]
 
 use flashbulb::vello::peniko::Color;
-use flashbulb::{Image, ImageStore, capture_document, headless_or_skip};
+use flashbulb::{Image, ImageStore, capture_document, headless};
 
 use crate::html;
 
 /// The vendored text fixture; see `crates/hughie/tests/fixtures/README.md`.
 pub const ROBOTO: &[u8] = include_bytes!("../../../hughie/tests/fixtures/Roboto-Regular.ttf");
 
-/// Renders `fragment` at `width` × `height` CSS pixels over white, or `None`
-/// when this machine has no GPU adapter (which `headless_or_skip` announces).
-pub fn capture(test: &str, fragment: &str, width: f32, height: f32) -> Option<Image> {
-    let mut gpu = headless_or_skip(test)?;
+/// Renders `fragment` at `width` × `height` CSS pixels over white.
+pub fn capture(test: &str, fragment: &str, width: f32, height: f32) -> Image {
+    let mut gpu = headless(test);
     let mut doc = html::parse(fragment, width, height);
     assert_eq!(
         doc.dom.register_fonts(ROBOTO),
         1,
         "the vendored Roboto fixture must register exactly one face"
     );
-    Some(
-        capture_document(&mut gpu, &mut doc.dom, Color::WHITE, &ImageStore::new())
-            .expect("headless screenshot render"),
-    )
+    capture_document(&mut gpu, &mut doc.dom, Color::WHITE, &ImageStore::new())
+        .expect("headless screenshot render")
 }
 
 /// [`capture`] for a document the caller has already built, with its replaced
@@ -42,12 +39,9 @@ pub fn capture_document_with_images<T: Sync>(
     test: &str,
     document: &mut dom::Document<T>,
     images: &ImageStore,
-) -> Option<Image> {
-    let mut gpu = headless_or_skip(test)?;
-    Some(
-        capture_document(&mut gpu, document, Color::WHITE, images)
-            .expect("headless screenshot render"),
-    )
+) -> Image {
+    let mut gpu = headless(test);
+    capture_document(&mut gpu, document, Color::WHITE, images).expect("headless screenshot render")
 }
 
 /// Compares against the golden at `name`, or accepts it under

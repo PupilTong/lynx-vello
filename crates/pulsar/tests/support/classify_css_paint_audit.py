@@ -9,7 +9,6 @@ The audit uses a temporary all-case Chromium reference directory:
       --include-differences
     CSS_PAINT_REFERENCE_DIR=/tmp/css-paint-references \
       CSS_PAINT_AUDIT=/tmp/css-paint.tsv \
-      FLASHBULB_REQUIRE_GPU=1 \
       cargo test -p pulsar --test css_atlas -- --include-ignored
 
 This classifier is deliberately strict. Every one of the 1,000 cases must be

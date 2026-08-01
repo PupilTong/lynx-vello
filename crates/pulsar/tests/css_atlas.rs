@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use flashbulb::{CompareOptions, Image, compare, screenshots_in};
-use pulsar::gpu::{GpuError, Headless};
+use pulsar::gpu::Headless;
 use pulsar::vello::Scene;
 use pulsar::vello::kurbo::{Affine, Rect};
 use pulsar::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
@@ -143,14 +143,12 @@ mod generated {
 #[derive(Debug)]
 enum GpuAvailability {
     Ready(Box<Mutex<Headless>>),
-    Missing,
     Failed(Arc<str>),
 }
 
 #[derive(Debug)]
 enum ShardOutcome {
     Ready(Image),
-    SkippedNoGpu,
     Failed(Arc<str>),
 }
 
@@ -226,7 +224,6 @@ fn compare_case(index: usize) {
     let slot = index % CASES_PER_SHARD;
     let actual_atlas = match SHARDS[shard].get_or_init(|| render_shard(shard)) {
         ShardOutcome::Ready(image) => image,
-        ShardOutcome::SkippedNoGpu => return,
         ShardOutcome::Failed(error) => panic!("{}: shard {shard:02} failed: {error}", case.name),
     };
     let actual = crop_cell(actual_atlas, slot);
@@ -367,26 +364,14 @@ fn assert_flashbulb_update_disabled() {
 fn init_gpu() -> GpuAvailability {
     match Headless::new() {
         Ok(gpu) => GpuAvailability::Ready(Box::new(Mutex::new(gpu))),
-        Err(GpuError::NoAdapter)
-            if std::env::var("FLASHBULB_REQUIRE_GPU").as_deref() == Ok("1")
-                || native_update_enabled() =>
-        {
-            GpuAvailability::Failed(Arc::from(
-                "no usable GPU adapter while GPU-backed CSS-paint output is required",
-            ))
-        }
-        Err(GpuError::NoAdapter) => {
-            let _ = std::io::stderr()
-                .write_all(b"SKIP css_atlas: no usable GPU adapter on this machine\n");
-            GpuAvailability::Missing
-        }
-        Err(error) => GpuAvailability::Failed(Arc::from(error.to_string())),
+        Err(error) => GpuAvailability::Failed(Arc::from(format!(
+            "mandatory GPU initialization failed: {error}"
+        ))),
     }
 }
 
 fn render_shard(shard: usize) -> ShardOutcome {
     match GPU.get_or_init(init_gpu) {
-        GpuAvailability::Missing => ShardOutcome::SkippedNoGpu,
         GpuAvailability::Failed(error) => ShardOutcome::Failed(Arc::clone(error)),
         GpuAvailability::Ready(gpu) => {
             let mut gpu = gpu

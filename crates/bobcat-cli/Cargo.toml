@@ -24,7 +24,7 @@ url = { workspace = true }
 winit = { workspace = true }
 
 [dev-dependencies]
-# The e2e test's GPU-or-skip probe and PNG verification.
+# The e2e test's mandatory GPU probe and PNG verification.
 flashbulb = { workspace = true, features = ["render"] }
 
 [lints]

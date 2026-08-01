@@ -41,14 +41,12 @@ const FRAGMENT: &str = r#"
 
 #[test]
 fn inline_style_fragment_matches_reference() {
-    let Some(actual) = screenshot::capture(
+    let actual = screenshot::capture(
         "inline_style_fragment_matches_reference",
         FRAGMENT,
         SCREEN_WIDTH,
         SCREEN_HEIGHT,
-    ) else {
-        return;
-    };
+    );
     screenshot::assert_golden(&["inline-style"], &actual);
 }
 
@@ -127,13 +125,11 @@ fn object_fit_matrix_matches_reference() {
         images.insert_node(node, image_data(*width, *height, rgba.clone()));
     }
 
-    let Some(actual) = screenshot::capture_document_with_images(
+    let actual = screenshot::capture_document_with_images(
         "object_fit_matrix_matches_reference",
         &mut doc.dom,
         &images,
-    ) else {
-        return;
-    };
+    );
     screenshot::assert_golden(&["replaced-object-fit"], &actual);
 }
 

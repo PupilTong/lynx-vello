@@ -37,37 +37,14 @@ impl fmt::Display for CaptureError {
 
 impl std::error::Error for CaptureError {}
 
-/// A headless renderer, or a reason there is none.
+/// Creates the mandatory headless renderer for a GPU-backed test.
 ///
-/// Machines without a usable GPU adapter (CI containers, remote shells) cannot
-/// run capture tests at all. Those tests then pass without having compared
-/// anything, so this announces the skip on the process's real stderr.
-///
-/// The write deliberately bypasses `eprintln!`: libtest captures the print
-/// macros per test and *discards* the capture for a test that passes, so a
-/// skip notice printed that way would be invisible without `--nocapture` —
-/// exactly the runs where it matters most. Writing to the inherited file
-/// descriptor reaches the terminal and the CI log either way.
-///
-/// Set `FLASHBULB_REQUIRE_GPU=1` to turn a missing adapter into a failure
-/// instead, for CI that is supposed to have one.
+/// A missing adapter is a test-environment failure, including in CI. Capture
+/// tests must never report success without rendering and comparing pixels.
 #[must_use]
-pub fn headless_or_skip(test: &str) -> Option<Headless> {
-    match Headless::new() {
-        Ok(gpu) => Some(gpu),
-        Err(GpuError::NoAdapter) => {
-            assert!(
-                std::env::var("FLASHBULB_REQUIRE_GPU").as_deref() != Ok("1"),
-                "{test}: no usable GPU adapter, and FLASHBULB_REQUIRE_GPU=1"
-            );
-            let _ = std::io::Write::write_all(
-                &mut std::io::stderr(),
-                format!("SKIP {test}: no usable GPU adapter on this machine\n").as_bytes(),
-            );
-            None
-        }
-        Err(error) => panic!("{test}: GPU initialization failed: {error}"),
-    }
+#[track_caller]
+pub fn headless(test: &str) -> Headless {
+    Headless::new().unwrap_or_else(|error| panic!("{test}: GPU initialization failed: {error}"))
 }
 
 /// The device-pixel extent of a document's frame — the size a full-frame

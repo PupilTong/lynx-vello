@@ -13,7 +13,7 @@
 //! `FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p lynx-element --test screenshots`.
 
 use flashbulb::vello::peniko::{Blob, Color, ImageAlphaType, ImageData, ImageFormat};
-use flashbulb::{Image, Screenshots, capture_scene, headless_or_skip};
+use flashbulb::{Image, Screenshots, capture_scene, headless};
 use lynx_element::pulsar::gpu::Headless;
 use lynx_element::{ElementTree, MainThreadRuntime, PageConfig, Viewport};
 
@@ -79,9 +79,7 @@ fn capture_elements(gpu: &mut Headless, elements: &mut ElementTree) -> Image {
 
 #[test]
 fn a_main_thread_script_renders_its_element_tree() {
-    let Some(mut gpu) = headless_or_skip("a_main_thread_script_renders_its_element_tree") else {
-        return;
-    };
+    let mut gpu = headless("a_main_thread_script_renders_its_element_tree");
 
     let mut runtime = MainThreadRuntime::new(ElementTree::new(VIEWPORT, PageConfig::default()))
         .expect("QuickJS realm");
@@ -133,9 +131,7 @@ globalThis.renderPage = function renderPage() {
 ";
 
 fn render_overflow(config: PageConfig, test: &str, golden: &str) {
-    let Some(mut gpu) = headless_or_skip(test) else {
-        return;
-    };
+    let mut gpu = headless(test);
     let mut runtime =
         MainThreadRuntime::new(ElementTree::new(VIEWPORT, config)).expect("QuickJS realm");
     runtime.elements_mut().add_author_stylesheet(OVERFLOW_STYLE);
@@ -231,9 +227,7 @@ fn checker_image() -> ImageData {
 /// and only the white fallback background remains.
 #[test]
 fn retained_pulsar_image_store_reaches_the_scene() {
-    let Some(mut gpu) = headless_or_skip("retained_pulsar_image_store_reaches_the_scene") else {
-        return;
-    };
+    let mut gpu = headless("retained_pulsar_image_store_reaches_the_scene");
 
     let mut runtime = MainThreadRuntime::new(ElementTree::new(VIEWPORT, PageConfig::default()))
         .expect("QuickJS realm");
