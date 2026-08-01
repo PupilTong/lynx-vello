@@ -82,5 +82,5 @@ pub use crate::image::{Image, ImageError};
 #[cfg(feature = "render")]
 pub use crate::render::{
     CaptureError, capture_document, capture_document_sized, capture_frame, capture_frame_sized,
-    frame_size, headless_or_skip,
+    capture_scene, capture_scene_sized, frame_size, headless_or_skip,
 };

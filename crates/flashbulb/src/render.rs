@@ -10,6 +10,7 @@ use std::fmt;
 use dom::Document;
 use dom::visual::PaintOrder;
 use pulsar::gpu::{GpuError, Headless};
+use pulsar::vello::Scene;
 use pulsar::vello::peniko::Color;
 use pulsar::{ImageStore, Painter};
 
@@ -159,6 +160,33 @@ pub fn capture_frame_sized<T, R>(
 ) -> Result<Image, CaptureError> {
     let mut painter = Painter::new();
     let scene = painter.paint(document, frame, images);
+    capture_scene_sized(gpu, scene, background, width, height)
+}
+
+/// Captures a scene retained by an injected document renderer.
+///
+/// The renderer has already consumed its image registry while building the
+/// scene, so this entry point deliberately accepts the finished scene rather
+/// than a second, potentially divergent [`ImageStore`]. Runtime adapters use
+/// this after their own render boundary without exposing a [`PaintOrder`].
+pub fn capture_scene<T, R>(
+    gpu: &mut Headless,
+    document: &Document<T, R>,
+    scene: &Scene,
+    background: Color,
+) -> Result<Image, CaptureError> {
+    let (width, height) = frame_size(document);
+    capture_scene_sized(gpu, scene, background, width, height)
+}
+
+/// [`capture_scene`] at an explicit pixel size.
+pub fn capture_scene_sized(
+    gpu: &mut Headless,
+    scene: &Scene,
+    background: Color,
+    width: u32,
+    height: u32,
+) -> Result<Image, CaptureError> {
     let pixels = gpu
         .render(scene, width, height, background)
         .map_err(CaptureError::Gpu)?;

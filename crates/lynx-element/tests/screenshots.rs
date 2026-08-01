@@ -12,8 +12,8 @@
 //! Refresh the goldens with:
 //! `FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p lynx-element --test screenshots`.
 
-use flashbulb::vello::peniko::Color;
-use flashbulb::{Image, Screenshots, headless_or_skip};
+use flashbulb::vello::peniko::{Blob, Color, ImageAlphaType, ImageData, ImageFormat};
+use flashbulb::{Image, Screenshots, capture_scene, headless_or_skip};
 use lynx_element::pulsar::gpu::Headless;
 use lynx_element::{ElementTree, MainThreadRuntime, PageConfig, Viewport};
 
@@ -74,10 +74,7 @@ fn screenshots() -> Screenshots {
 fn capture_elements(gpu: &mut Headless, elements: &mut ElementTree) -> Image {
     elements.render();
     let scene = elements.scene();
-    let pixels = gpu
-        .render(&scene, 393, 727, Color::WHITE)
-        .expect("render scene");
-    Image::from_rgba8(393, 727, pixels).expect("capture")
+    capture_scene(gpu, elements.document(), &scene, Color::WHITE).expect("capture")
 }
 
 #[test]
@@ -178,4 +175,80 @@ fn overflow_hidden_clips_a_child_to_its_parent() {
         "overflow_hidden_clips_a_child_to_its_parent",
         "overflow-hidden",
     );
+}
+
+const IMAGE_URL: &str = "https://example.test/retained-checker.png";
+
+const IMAGE_STYLE: &str = r#"
+page {
+  background-color: #e5e7eb;
+  padding: 16px;
+}
+page > view {
+  width: 128px;
+  height: 96px;
+  border: 4px solid #1f2937;
+  background-color: #ffffff;
+  background-image: url("https://example.test/retained-checker.png");
+  background-repeat: no-repeat;
+  background-size: 120px 88px;
+  image-rendering: pixelated;
+}
+"#;
+
+const IMAGE_SCRIPT: &str = r"
+globalThis.renderPage = function renderPage() {
+  const page = __CreatePage('card', 0);
+  __AppendElement(page, __CreateView(0));
+};
+";
+
+fn checker_image() -> ImageData {
+    let mut rgba = Vec::with_capacity(4 * 4 * 4);
+    for y in 0..4 {
+        for x in 0..4 {
+            let pixel = match (x < 2, y < 2) {
+                (true, true) => [239, 68, 68, 255],
+                (false, true) => [34, 197, 94, 255],
+                (true, false) => [37, 99, 235, 255],
+                (false, false) => [250, 204, 21, 255],
+            };
+            rgba.extend_from_slice(&pixel);
+        }
+    }
+    ImageData {
+        data: Blob::from(rgba),
+        format: ImageFormat::Rgba8,
+        alpha_type: ImageAlphaType::Alpha,
+        width: 4,
+        height: 4,
+    }
+}
+
+/// The retained renderer owns the image registry after the architecture
+/// change. This golden fails visibly if `ElementTree::images_mut` and
+/// `Pulsar::render` stop referring to the same store: the checker disappears
+/// and only the white fallback background remains.
+#[test]
+fn retained_pulsar_image_store_reaches_the_scene() {
+    let Some(mut gpu) = headless_or_skip("retained_pulsar_image_store_reaches_the_scene") else {
+        return;
+    };
+
+    let mut runtime = MainThreadRuntime::new(ElementTree::new(VIEWPORT, PageConfig::default()))
+        .expect("QuickJS realm");
+    {
+        let mut elements = runtime.elements_mut();
+        elements.add_author_stylesheet(IMAGE_STYLE);
+        elements.images_mut().insert_url(IMAGE_URL, checker_image());
+    }
+    runtime
+        .run_main_thread_script(IMAGE_SCRIPT)
+        .expect("main-thread script");
+
+    let image = {
+        let mut elements = runtime.elements_mut();
+        capture_elements(&mut gpu, &mut elements)
+    };
+    screenshots().assert_matches(&["retained-image-store"], &image);
 }
