@@ -1,0 +1,33 @@
+{
+  "name": "@lynx-js/example-react-lazy-bundle-standalone",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "pnpm run build:querycomponent && pnpm run build:fetchbundle",
+    "build:consumer": "rspeedy build --config lynx.config.consumer.js",
+    "build:fetchbundle": "cross-env LAZY_BUNDLE_FETCHBUNDLE=1 pnpm run build:querycomponent",
+    "build:producer": "rspeedy build --config lynx.config.producer.js",
+    "build:querycomponent": "pnpm run --parallel \"/^build:(producer|consumer)$/\"",
+    "dev": "node scripts/serve.mjs dev",
+    "dev:consumer": "rspeedy dev --config lynx.config.consumer.js",
+    "dev:fetchbundle": "cross-env LAZY_BUNDLE_FETCHBUNDLE=1 node scripts/serve.mjs dev",
+    "dev:producer": "rspeedy dev --config lynx.config.producer.js",
+    "preview": "node scripts/serve.mjs preview",
+    "preview:consumer": "rspeedy preview --config lynx.config.consumer.js",
+    "preview:fetchbundle": "cross-env LAZY_BUNDLE_FETCHBUNDLE=1 node scripts/serve.mjs preview",
+    "preview:producer": "rspeedy preview --config lynx.config.producer.js"
+  },
+  "dependencies": {
+    "@lynx-js/react": "catalog:"
+  },
+  "devDependencies": {
+    "@lynx-js/preact-devtools": "catalog:",
+    "@lynx-js/qrcode-rsbuild-plugin": "catalog:",
+    "@lynx-js/react-rsbuild-plugin": "catalog:",
+    "@lynx-js/rspeedy": "catalog:",
+    "@lynx-js/types": "catalog:",
+    "@types/react": "18.3.28",
+    "cross-env": "^10.1.0"
+  }
+}

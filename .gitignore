@@ -2,6 +2,17 @@
 /target
 **/*.rs.bk
 
+# Node.js / pnpm
+node_modules/
+.pnpm-store/
+.rspeedy/
+.rslib/
+.turbo/
+dist/
+dist-*/
+coverage/
+*.tsbuildinfo
+
 # flashbulb writes -expected/-actual/-diff PNGs here when a screenshot test
 # fails; the reviewed goldens live in tests/screenshots and are committed.
 crates/*/tests/artifacts/

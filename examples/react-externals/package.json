@@ -1,0 +1,29 @@
+{
+  "name": "@lynx-js/example-react-externals",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "pnpm run build:comp-lib && rspeedy build && cross-env REACTLYNX_ASYNC=true pnpm run build:comp-lib && cross-env REACTLYNX_ASYNC=true rspeedy build",
+    "build:comp-lib": "rslib build --config rslib-comp-lib.config.ts",
+    "build:comp-lib:dev": "cross-env NODE_ENV=development rslib build --config rslib-comp-lib.config.ts",
+    "dev": "pnpm run build:comp-lib && rspeedy dev",
+    "dev:react-async": "cross-env REACTLYNX_ASYNC=true pnpm run build:comp-lib && cross-env REACTLYNX_ASYNC=true rspeedy dev",
+    "preview": "rspeedy preview",
+    "preview:react-async": "cross-env REACTLYNX_ASYNC=true rspeedy preview"
+  },
+  "dependencies": {
+    "@lynx-js/react": "catalog:"
+  },
+  "devDependencies": {
+    "@lynx-js/external-bundle-rsbuild-plugin": "catalog:",
+    "@lynx-js/lynx-bundle-rslib-config": "catalog:",
+    "@lynx-js/preact-devtools": "catalog:",
+    "@lynx-js/qrcode-rsbuild-plugin": "catalog:",
+    "@lynx-js/react-rsbuild-plugin": "catalog:",
+    "@lynx-js/rspeedy": "catalog:",
+    "@lynx-js/types": "catalog:",
+    "@types/react": "18.3.28",
+    "cross-env": "^10.1.0"
+  }
+}

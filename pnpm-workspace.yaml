@@ -1,0 +1,65 @@
+packages:
+  - examples/*
+  - packages/*
+
+# Match the portable defaults used by lynx-stack.
+enablePrePostScripts: false
+engineStrict: true
+hoistWorkspacePackages: true
+ignorePatchFailures: false
+optimisticRepeatInstall: true
+publicHoistPattern: []
+resolutionMode: "lowest-direct"
+strictPeerDependencies: true
+
+# Delay newly published third-party packages for three days. First-party Lynx
+# packages are trusted and may be consumed immediately for compatibility work.
+minimumReleaseAge: 4320
+minimumReleaseAgeExclude:
+  - "@lynx-js/*"
+  - "@rspack/*"
+  - "@rsbuild/*"
+  - "@rstest/*"
+minimumReleaseAgeStrict: false
+
+catalog:
+  "@lynx-js/config-rsbuild-plugin": "0.1.1"
+  "@lynx-js/external-bundle-rsbuild-plugin": "0.4.0"
+  "@lynx-js/gesture-runtime": "2.1.3"
+  "@lynx-js/lynx-bundle-rslib-config": "0.6.0"
+  "@lynx-js/lynx-core": "0.1.4"
+  "@lynx-js/motion": "0.0.3"
+  "@lynx-js/preact-devtools": "5.0.1-20260716151326-abdb87c"
+  "@lynx-js/qrcode-rsbuild-plugin": "0.6.0"
+  "@lynx-js/react": "0.123.0"
+  "@lynx-js/react-rsbuild-plugin": "0.18.0"
+  "@lynx-js/react-umd": "0.123.0"
+  "@lynx-js/rspeedy": "0.16.0"
+  "@lynx-js/tailwind-preset": "0.5.0"
+  "@lynx-js/template-webpack-plugin": "0.13.0"
+  "@lynx-js/types": "4.0.0"
+  "@lynx-js/web-core": "0.22.2"
+  "@lynx-js/web-elements": "0.12.6"
+
+catalogs:
+  rspack:
+    "@rspack/core": "2.1.4"
+
+# Dependencies with install scripts must be explicitly allowed as they are
+# introduced to the workspace.
+strictDepBuilds: true
+
+allowBuilds:
+  "@parcel/watcher": false
+  "@swc/core": false
+  core-js: false
+  esbuild: true
+  sharp: true
+  unrs-resolver: false
+
+# Keep the Rsbuild/Rspack graph on the same release pair as lynx-stack.
+overrides:
+  "@rspack/core": "catalog:rspack"
+  "@rsbuild/core>@rspack/core": "catalog:rspack"
+  "@rsdoctor/rspack-plugin>@rspack/core": "catalog:rspack"
+  "@rsdoctor/types>@rspack/core": "catalog:rspack"

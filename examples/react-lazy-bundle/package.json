@@ -1,0 +1,27 @@
+{
+  "name": "@lynx-js/example-react-lazy-bundle",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "pnpm run build:querycomponent && pnpm run build:fetchbundle",
+    "build:fetchbundle": "cross-env LAZY_BUNDLE_FETCHBUNDLE=1 rspeedy build",
+    "build:querycomponent": "rspeedy build",
+    "dev": "rspeedy dev",
+    "dev:fetchbundle": "cross-env LAZY_BUNDLE_FETCHBUNDLE=1 rspeedy dev",
+    "preview": "rspeedy preview",
+    "preview:fetchbundle": "cross-env LAZY_BUNDLE_FETCHBUNDLE=1 rspeedy preview"
+  },
+  "dependencies": {
+    "@lynx-js/react": "catalog:"
+  },
+  "devDependencies": {
+    "@lynx-js/preact-devtools": "catalog:",
+    "@lynx-js/qrcode-rsbuild-plugin": "catalog:",
+    "@lynx-js/react-rsbuild-plugin": "catalog:",
+    "@lynx-js/rspeedy": "catalog:",
+    "@lynx-js/types": "catalog:",
+    "@types/react": "18.3.28",
+    "cross-env": "^10.1.0"
+  }
+}
