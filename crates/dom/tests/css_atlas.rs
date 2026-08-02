@@ -395,7 +395,7 @@ fn build_and_render(shard: usize, gpu: &mut Headless) -> Result<Image, String> {
                 ));
             }
         }
-        document.dom.render();
+        document.dom.render_if_needed();
         let child = document.dom.scene();
 
         let column = u32::try_from(slot % GRID).expect("an atlas column fits u32");

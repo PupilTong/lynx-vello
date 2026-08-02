@@ -4,8 +4,7 @@
 
 mod common;
 
-use common::{Doc, parses, rgb, specified};
-use dom::property_is_supported;
+use common::{Doc, parses, property_is_supported, rgb, specified};
 
 #[test]
 fn inherited_and_non_inherited_properties() {

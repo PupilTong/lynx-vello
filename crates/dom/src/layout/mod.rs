@@ -8,22 +8,23 @@ use std::sync::LazyLock;
 #[cfg(feature = "layout-test-utils")]
 use hughie::compute::LeafMetrics;
 pub use hughie::compute::NaturalSize;
-pub use hughie::geometry::{Edges, Point, Size};
+pub(crate) use hughie::geometry::Edges;
+#[cfg(feature = "layout-test-utils")]
+use hughie::geometry::Point;
+pub use hughie::geometry::Size;
 use hughie::invalidate::is_relayout_boundary;
 use hughie::style::CoreStyle;
 use hughie::text::TextContext;
-pub use hughie::text::TextLayout;
+pub(crate) use hughie::text::TextLayout;
 pub use hughie::tree::Layout;
 use stylo::properties::ComputedValues;
 use stylo::servo_arc::Arc;
 
-pub use self::style::StyleView;
 pub(crate) use self::style::{
-    DisplayMode, box_parent, display_mode, establishes_absolute_containing_block,
+    DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
     establishes_fixed_containing_block, skips_contents,
 };
 use crate::document::{Document, NodeLayoutState};
-use crate::flush::Parallelism;
 
 pub(crate) static ANONYMOUS_STYLE: LazyLock<Arc<ComputedValues>> = LazyLock::new(|| {
     use stylo::properties::style_structs::Font;
@@ -32,7 +33,7 @@ pub(crate) static ANONYMOUS_STYLE: LazyLock<Arc<ComputedValues>> = LazyLock::new
 
 impl<T: Sync> Document<T> {
     pub fn layout(&mut self) {
-        self.flush_styles_with_damage_sink(Parallelism::Auto, &mut |_, _| {});
+        self.flush_styles_with_damage_sink(&mut |_, _| {});
 
         let viewport_size = self.device().viewport_size();
         let viewport = Size::new(viewport_size.width, viewport_size.height);
@@ -54,13 +55,11 @@ impl<T> Document<T> {
     /// invalidates the node-to-root box-cache path when the value changes.
     ///
     /// This is the W3C replaced-content seam, and it also marks the node
-    /// replaced if it is not already — see [`Document::mark_replaced`] for the
-    /// identity half, which a caller should set at element-creation time rather
-    /// than waiting for a decode. The DOM core learns nothing about `<img>`;
-    /// tag policy stays in the embedder's UA stylesheet. It is public because
-    /// the decoder that produces these dimensions (`crates/image`) is a separate
-    /// crate that must not be handed the whole document core to reach one
-    /// setter.
+    /// replaced if it is not already. The DOM core learns nothing about
+    /// `<img>`; tag policy stays in the embedder's UA stylesheet. It is public
+    /// because the decoder that produces these dimensions (`crates/image`) is
+    /// a separate crate that must not be handed the whole document core to
+    /// reach one setter.
     ///
     /// Setting an equal value is a structural no-op: nothing is invalidated, so
     /// a loader that re-publishes an unchanged size after a re-fetch costs
@@ -69,14 +68,14 @@ impl<T> Document<T> {
     /// where this compares the value against itself.
     ///
     /// Natural size shares the node's single nullable content slot with literal
-    /// text, so `set_element_text_content` on a node carrying a natural size
-    /// destroys it, and vice versa.
+    /// text; changing between those internal content kinds replaces the prior
+    /// value.
     ///
     /// # Panics
     ///
-    /// Panics on a vacant or non-element `NodeId`, and — through
-    /// [`Document::invalidate_layout`] — when a style traversal has been started
-    /// and did not complete. Call it between completed layout passes.
+    /// Panics on a vacant or non-element `NodeId`, or when a style traversal
+    /// has been started and did not complete. Call it between completed layout
+    /// passes.
     pub fn set_natural_size(&mut self, id: crate::NodeId, natural_size: NaturalSize) {
         let changed = {
             let node = self
@@ -94,42 +93,6 @@ impl<T> Document<T> {
         }
     }
 
-    /// Marks an element as generating a replaced box, before any intrinsic
-    /// dimensions are known.
-    ///
-    /// An `<img>` is replaced from the moment it exists; its natural size
-    /// arrives a network round trip later. Calling this at element-creation
-    /// time means the very first layout already treats it as a replaced leaf,
-    /// so the box does not change formatting context — and relayout its whole
-    /// subtree — when the header lands.
-    ///
-    /// # Panics
-    ///
-    /// As [`Document::set_natural_size`].
-    pub fn mark_replaced(&mut self, id: crate::NodeId) {
-        let changed = {
-            let node = self
-                .tree_mut()
-                .get_mut(id)
-                .expect("vacant NodeId passed to Document::mark_replaced");
-            assert!(
-                node.is_element(),
-                "non-element NodeId passed to Document::mark_replaced"
-            );
-            node.mark_replaced()
-        };
-        if changed {
-            self.invalidate_layout(id);
-        }
-    }
-
-    /// Whether this node generates a replaced box, independent of whether its
-    /// intrinsic dimensions have arrived.
-    #[must_use]
-    pub fn is_replaced(&self, id: crate::NodeId) -> bool {
-        self.get(id).is_some_and(crate::Node::is_replaced)
-    }
-
     /// The intrinsic dimensions and ratio a replaced element currently lays out
     /// with, in CSS px. [`NaturalSize::NONE`] for non-elements, vacant ids, and
     /// elements that are not replaced.
@@ -139,7 +102,7 @@ impl<T> Document<T> {
     /// dimensions, while `object-fit: none` / `scale-down` and the concrete
     /// object size are defined against the **natural** size.
     #[must_use]
-    pub fn natural_size(&self, id: crate::NodeId) -> NaturalSize {
+    pub(crate) fn natural_size(&self, id: crate::NodeId) -> NaturalSize {
         self.get(id)
             .map_or(NaturalSize::NONE, crate::Node::natural_size)
     }
@@ -186,14 +149,6 @@ impl<T> Document<T> {
             .map(|state| &state.slot.rounded)
     }
 
-    #[must_use]
-    pub fn unrounded_layout(&self, id: crate::NodeId) -> Option<&Layout> {
-        self.layout_state()
-            .nodes
-            .get(id)
-            .map(|state| &state.slot.unrounded)
-    }
-
     /// The committed (post-layout) retained Parley layout for a text node —
     /// the shaped, line-broken, aligned paragraph the renderer paints glyph
     /// runs from. `None` for non-text nodes and for text the layout pass has
@@ -217,8 +172,8 @@ impl<T> Document<T> {
     ///
     /// Panics if styles are not ready (the preceding style traversal did not
     /// complete, or the document mutated since) — call after
-    /// [`Document::layout`] or [`Document::render`] within the same borrow of
-    /// the document.
+    /// [`Document::layout`] or [`Document::render_if_needed`] within the same
+    /// borrow of the document.
     #[must_use]
     pub(crate) fn paint_style(&self, id: crate::NodeId) -> Option<&ComputedValues> {
         assert!(
@@ -229,14 +184,15 @@ impl<T> Document<T> {
     }
 
     #[must_use]
-    pub fn layout_cache_is_empty(&self, id: crate::NodeId) -> Option<bool> {
+    #[cfg(test)]
+    pub(crate) fn layout_cache_is_empty(&self, id: crate::NodeId) -> Option<bool> {
         self.layout_state()
             .nodes
             .get(id)
             .map(|state| state.slot.layout_cache_is_empty())
     }
 
-    pub fn invalidate_layout(&mut self, id: crate::NodeId) {
+    pub(crate) fn invalidate_layout(&mut self, id: crate::NodeId) {
         assert!(
             self.root_node().layout_styles_ready(),
             "computed styles are unavailable because the preceding style traversal did not complete"
@@ -293,7 +249,7 @@ impl<T> Document<T> {
         }
     }
 
-    pub fn invalidate_layout_all(&mut self) {
+    pub(crate) fn invalidate_layout_all(&mut self) {
         // `scroll_offset` is deliberately untouched: scroll position survives
         // relayout (it re-clamps itself against the new geometry on read), so
         // an invalidation must not reset every scroller to the top.
@@ -314,6 +270,14 @@ impl<T> Document<T> {
         self.clear_relayout_roots();
         self.mark_layout_dirty(true);
     }
+
+    /// Test/benchmark-only cache invalidation hook for protocol fixtures that
+    /// mutate synthetic leaf data outside the production DOM mutation API.
+    #[cfg(feature = "layout-test-utils")]
+    #[doc(hidden)]
+    pub fn invalidate_layout_for_testing(&mut self, id: crate::NodeId) {
+        self.invalidate_layout(id);
+    }
 }
 
 #[cfg(test)]
@@ -325,7 +289,8 @@ mod tests {
     use hughie::tree::{LayoutInput, LayoutOutput, LayoutSlot};
 
     use super::*;
-    use crate::{DOCUMENT_NODE_ID, StylesheetOrigin};
+    use crate::StylesheetOrigin;
+    use crate::document::DOCUMENT_NODE_ID;
 
     #[test]
     fn layout_state_size_probe() {

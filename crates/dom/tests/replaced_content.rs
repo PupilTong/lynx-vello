@@ -79,7 +79,7 @@ impl Harness {
     }
 
     fn stats(&mut self) -> (usize, u32) {
-        self.doc.dom.render();
+        self.doc.dom.render_if_needed();
         let scene = self.doc.dom.scene();
         let encoding = scene.encoding();
         (encoding.draw_tags.len(), encoding.n_open_clips)
@@ -113,49 +113,24 @@ fn the_natural_size_reaches_layout_when_no_size_is_specified() {
 }
 
 #[test]
-fn the_natural_size_round_trips_through_the_document() {
+fn natural_size_updates_change_auto_sized_layout() {
     let mut h = Harness::new("");
-    let node = h.img("box", &checker_png(4));
-    let natural = h.doc.dom.natural_size(node);
-    assert_eq!(
-        natural.dimensions(),
-        Size::new(Some(4.0), Some(4.0)),
-        "paint reads this back to resolve object-fit"
-    );
-}
-
-#[test]
-fn republishing_an_identical_natural_size_does_not_dirty_layout() {
-    // A loader that re-decodes after a cache eviction publishes the same value
-    // again; that has to be free, which is why `set_natural_size` compares
-    // exactly rather than with native Lynx's 5% aspect epsilon.
-    let mut h = Harness::new("box");
-    let node = h.img("box", &checker_png(4));
+    let node = h.img("", &checker_png(4));
     h.doc.dom.layout();
-    assert_eq!(
-        h.doc.dom.layout_cache_is_empty(node),
-        Some(false),
-        "laid out once, so the measurement cache is populated"
-    );
+    let size = |h: &Harness| h.doc.dom.rounded_layout(node).expect("laid out").size;
+    assert_eq!(size(&h), Size::new(4.0, 4.0));
 
     h.doc
         .dom
         .set_natural_size(node, NaturalSize::from_size(Size::new(4.0, 4.0)));
-    assert_eq!(
-        h.doc.dom.layout_cache_is_empty(node),
-        Some(false),
-        "an equal natural size must be a structural no-op"
-    );
+    h.doc.dom.layout();
+    assert_eq!(size(&h), Size::new(4.0, 4.0));
 
-    // A different one must invalidate.
     h.doc
         .dom
         .set_natural_size(node, NaturalSize::from_size(Size::new(9.0, 9.0)));
-    assert_eq!(
-        h.doc.dom.layout_cache_is_empty(node),
-        Some(true),
-        "a changed natural size must invalidate the box cache"
-    );
+    h.doc.dom.layout();
+    assert_eq!(size(&h), Size::new(9.0, 9.0));
 }
 
 #[test]

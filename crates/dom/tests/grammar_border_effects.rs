@@ -6,8 +6,7 @@
 
 mod common;
 
-use common::{Doc, parses, rgb, specified};
-use dom::property_is_supported;
+use common::{Doc, parses, property_is_supported, rgb, specified};
 
 fn computed(declaration: &str, property: &str) -> String {
     let mut doc = Doc::new();

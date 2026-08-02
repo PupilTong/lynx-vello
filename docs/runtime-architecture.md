@@ -66,10 +66,10 @@ Document<T>
         └── pulsar::ImageStore
 ```
 
-`Document::render` performs layout, builds the private CSS visual order, and
-rebuilds the retained scene. The Painter records the private mutation epoch
-represented by that scene; `Document::render_if_needed` and `needs_render`
-therefore schedule reuse without exposing the epoch to a host.
+`Document::render_if_needed` performs layout, builds the private CSS visual
+order, and rebuilds the retained scene only when it is stale. The Painter
+records the private mutation epoch represented by that scene, so it and
+`needs_render` schedule reuse without exposing the epoch to a host.
 `Document::scene` lends a guarded shared borrow of the finished scene, and
 `Document::images_mut` is the narrow resource-update seam that invalidates it
 conservatively. Neither `Painter`, the epoch, nor the private paint order is
@@ -102,8 +102,8 @@ methods. The trusted CLI and render tests opt into
 3. `__FlushElementTree` attaches `<page>` on first use and commits style and
    layout. The CLI-private `FramePipeline` uses its internal document access;
    the document-owned Painter decides whether its retained scene is current.
-4. For a dirty frame, `render_if_needed` calls `Document::render`. DOM
-   flushes/layouts, creates its temporary visual order, and runs its private
+4. For a dirty frame, `render_if_needed` flushes/layouts, creates its
+   temporary visual order, and runs its private
    Painter over live styles, rounded layouts, retained text, and the
    document-owned `ImageStore`.
 5. The Painter resets and rebuilds its retained Vello scene. Headed and

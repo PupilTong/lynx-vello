@@ -25,7 +25,7 @@ euclid = { workspace = true }
 style_traits = { workspace = true }
 # Dev-only reverse edge: benchmarks exercise this crate through the concrete
 # production document host instead of a benchmark-owned LayoutNode.
-dom = { workspace = true, features = ["layout-test-utils"] }
+dom = { workspace = true, features = ["layout-test-utils", "style-test-utils"] }
 
 [[bench]]
 name = "flexbox"

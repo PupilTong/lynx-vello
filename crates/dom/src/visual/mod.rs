@@ -1,7 +1,7 @@
 //! Visual order over the laid-out tree: CSS stacking contexts, Appendix-E
 //! paint order, transform matrices, and hit testing.
 //!
-//! [`Document::render`], [`Document::hit_test`], and
+//! [`Document::render_if_needed`], [`Document::hit_test`], and
 //! [`Document::handle_input`] internally build a
 //! private `PaintOrder`: a flat item list in back-to-front order, each item carrying
 //! its viewport-space transform and innermost clip. The private painter walks
@@ -67,8 +67,8 @@
 //! - `transform-style: preserve-3d`, `backface-visibility`, and `perspective-origin` are not
 //!   authorable (the latter two are not even compiled) — everything flattens and perspective
 //!   projects about the border-box center.
-//! - No retained/incremental structure: `StyleDamage::needs_stacking_context_rebuild` is the
-//!   designated invalidation hook for a future retained mode, but no cache exists today.
+//! - No retained/incremental visual-order structure: internal stacking damage is the designated
+//!   invalidation hook, but no order cache exists today.
 
 mod build;
 mod geometry;
@@ -267,9 +267,16 @@ impl<T: Sync> Document<T> {
     }
 
     /// Lays out and renders the current document through its private painter.
-    pub fn render(&mut self) {
+    fn render(&mut self) {
         let frame = self.build_paint_order();
         self.painter.borrow_mut().paint(self, &frame);
+    }
+
+    /// Forces a paint pass for CPU-side paint benchmarks.
+    #[cfg(feature = "paint-test-utils")]
+    #[doc(hidden)]
+    pub fn render_for_testing(&mut self) {
+        self.render();
     }
 
     /// Renders only when the retained scene no longer represents the current
@@ -291,7 +298,8 @@ impl<T> Document<T> {
         self.painter.borrow().needs_render(self.visual_epoch())
     }
 
-    /// The Vello scene retained by the last [`Self::render`] call.
+    /// The Vello scene retained by the last successful
+    /// [`Self::render_if_needed`] call.
     #[must_use]
     pub fn scene(&self) -> Ref<'_, crate::vello::Scene> {
         Ref::map(self.painter.borrow(), crate::painter::Painter::scene)

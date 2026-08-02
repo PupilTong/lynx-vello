@@ -3,7 +3,7 @@
 mod common;
 
 use common::device;
-use dom::{Document, FlushStatus, NodeId, StylesheetOrigin};
+use dom::{Document, NodeId, StylesheetOrigin};
 use stylo::color::AbsoluteColor;
 
 type TestDocument = Document<()>;
@@ -33,18 +33,8 @@ macro_rules! assert_color {
     };
 }
 
-fn assert_flush(doc: &mut TestDocument, expected: FlushStatus) {
-    assert_eq!(doc.flush_styles().status, expected);
-}
-
-fn assert_clean(doc: &mut TestDocument) {
-    let summary = doc.flush_styles();
-    assert_eq!(summary.status, FlushStatus::Skipped);
-    assert!(!summary.has_damage());
-}
-
 fn assert_restyle_color(doc: &mut TestDocument, id: NodeId, expected: [u8; 3]) {
-    assert_flush(doc, FlushStatus::Traversed);
+    doc.layout();
     assert_eq!(computed_color(doc, id), rgb(expected));
 }
 
@@ -61,12 +51,15 @@ fn standard_cascade_is_embedder_neutral() {
     doc.add_class(parent, "parent");
     doc.add_class(child, "child");
     doc.append_child(parent, child);
+    doc.append_document_element(parent);
+    doc.layout();
 
-    let parent_style = doc.resolve_style(doc.get(parent).unwrap(), None);
+    let parent_style = doc.get(parent).unwrap().computed_style().unwrap();
     assert_eq!(parent_style.clone_color(), rgb(GREEN));
 
     doc.set_inline_style(child, "color: blue");
-    let child_style = doc.resolve_style(doc.get(child).unwrap(), Some(parent_style.as_ref()));
+    doc.layout();
+    let child_style = doc.get(child).unwrap().computed_style().unwrap();
     assert_eq!(
         child_style.clone_color(),
         rgb(BLUE),
@@ -89,7 +82,7 @@ fn id_class_and_style_attributes_are_reflected_dom_state() {
     doc.set_attribute(target, "id", "target");
     doc.set_attribute(target, "class", "hot other");
     doc.set_attribute(target, "style", "width: 10px");
-    doc.flush_styles();
+    doc.layout();
 
     let node = doc.get(target).unwrap();
     assert_eq!(node.id_attribute(), Some("target"));
@@ -98,7 +91,7 @@ fn id_class_and_style_attributes_are_reflected_dom_state() {
     assert_eq!(node.computed_style().unwrap().clone_color(), rgb(RED));
 
     doc.remove_attribute(target, "class");
-    doc.flush_styles();
+    doc.layout();
     let node = doc.get(target).unwrap();
     assert!(!node.has_class("hot"));
     assert_eq!(node.attribute("class"), None);
@@ -114,7 +107,7 @@ fn id_class_and_style_attributes_are_reflected_dom_state() {
             Some(value) => doc.set_attribute(target, name, value),
             None => doc.remove_attribute(target, name),
         }
-        doc.flush_styles();
+        doc.layout();
         assert_eq!(computed_color(&doc, target) == rgb(RED), matches);
     }
 }
@@ -130,7 +123,7 @@ fn style_traversal_skips_text_nodes_and_reaches_element_siblings() {
     doc.append_child(root, span);
     doc.append_document_element(root);
 
-    doc.flush_styles();
+    doc.layout();
 
     assert!(doc.get(root).unwrap().computed_style().is_some());
     assert!(
@@ -156,11 +149,11 @@ fn text_data_changes_invalidate_the_parent_empty_selector() {
     doc.append_child(root, box_element);
     doc.append_document_element(root);
 
-    doc.flush_styles();
+    doc.layout();
     assert_color!(doc, box_element, RED, "an empty text node preserves :empty");
 
     doc.set_text_node_data(text, "hello");
-    doc.flush_styles();
+    doc.layout();
     assert_color!(
         doc,
         box_element,
@@ -169,14 +162,14 @@ fn text_data_changes_invalidate_the_parent_empty_selector() {
     );
 
     doc.set_text_node_data(text, "");
-    doc.flush_styles();
+    doc.layout();
     assert_color!(doc, box_element, RED, "clearing text restores :empty");
 
     doc.detach(text);
-    doc.flush_styles();
+    doc.layout();
     doc.set_text_node_data(text, "reattached");
     doc.append_child(box_element, text);
-    doc.flush_styles();
+    doc.layout();
     assert_color!(
         doc,
         box_element,
@@ -185,7 +178,7 @@ fn text_data_changes_invalidate_the_parent_empty_selector() {
     );
 
     doc.detach(text);
-    doc.flush_styles();
+    doc.layout();
     assert_color!(
         doc,
         box_element,
@@ -216,7 +209,7 @@ fn edge_child_selectors_ignore_interleaved_text_nodes_during_restyle() {
         doc.append_child(root, child);
     }
     doc.append_document_element(root);
-    doc.flush_styles();
+    doc.layout();
 
     assert_color!(doc, first, RED);
     assert_color!(doc, last, GREEN);
@@ -224,7 +217,7 @@ fn edge_child_selectors_ignore_interleaved_text_nodes_during_restyle() {
     let new_first = doc.create_element("view", ());
     doc.add_class(new_first, "item");
     doc.insert_before(root, new_first, Some(first));
-    doc.flush_styles();
+    doc.layout();
     assert_color!(doc, new_first, RED);
     assert_color!(
         doc,
@@ -236,7 +229,7 @@ fn edge_child_selectors_ignore_interleaved_text_nodes_during_restyle() {
     let new_last = doc.create_element("view", ());
     doc.add_class(new_last, "item");
     doc.append_child(root, new_last);
-    doc.flush_styles();
+    doc.layout();
     assert_color!(doc, new_last, GREEN);
     assert_color!(
         doc,
@@ -249,35 +242,39 @@ fn edge_child_selectors_ignore_interleaved_text_nodes_during_restyle() {
 #[test]
 fn media_queries_follow_standard_viewport_updates() {
     let mut doc = document();
-    doc.add_stylesheet_with_media(
-        ".box { color: red; }",
+    doc.add_stylesheet(
+        "@media (min-width: 600px) { .box { color: red; } }",
         StylesheetOrigin::Author,
-        "(min-width: 600px)",
     );
 
+    let root = doc.create_element("page", ());
     let element = doc.create_element("div", ());
     doc.add_class(element, "box");
+    doc.append_child(root, element);
+    doc.append_document_element(root);
+    doc.layout();
 
-    let wide = doc.resolve_style(doc.get(element).unwrap(), None);
+    let wide = doc.get(element).unwrap().computed_style().unwrap();
     assert_eq!(wide.clone_color(), rgb(RED));
 
     doc.set_viewport(400.0, 600.0);
-    let narrow = doc.resolve_style(doc.get(element).unwrap(), None);
+    doc.layout();
+    let narrow = doc.get(element).unwrap().computed_style().unwrap();
     assert_ne!(narrow.clone_color(), wide.clone_color());
 }
 
 #[test]
-fn first_attachment_traverses_and_repeated_clean_flushes_skip() {
+fn first_attachment_computes_style_and_clean_flushes_preserve_it() {
     let mut doc = document();
-    assert_clean(&mut doc);
 
     let root = doc.create_element("page", ());
     doc.append_document_element(root);
-    assert_flush(&mut doc, FlushStatus::Traversed);
-    assert!(doc.get(root).unwrap().computed_style().is_some());
+    doc.layout();
+    let first = computed_color(&doc, root);
 
     for _ in 0..3 {
-        assert_clean(&mut doc);
+        doc.layout();
+        assert_eq!(computed_color(&doc, root), first);
     }
 }
 
@@ -292,30 +289,25 @@ fn dom_stylesheet_and_device_mutations_rearm_clean_style_flushes() {
     doc.append_document_element(root);
 
     assert_restyle_color(&mut doc, target, RED);
-    assert_clean(&mut doc);
 
     doc.set_inline_style(target, "color: rgb(0, 0, 255)");
     assert_restyle_color(&mut doc, target, BLUE);
-    assert_clean(&mut doc);
 
     doc.add_stylesheet(
         ".hot { color: rgb(0, 128, 0) !important; }",
         StylesheetOrigin::Author,
     );
     assert_restyle_color(&mut doc, target, GREEN);
-    assert_clean(&mut doc);
 
-    doc.add_stylesheet_with_media(
-        ".hot { color: rgb(1, 2, 3) !important; }",
+    doc.add_stylesheet(
+        "@media (max-width: 500px) { .hot { color: rgb(1, 2, 3) !important; } }",
         StylesheetOrigin::Author,
-        "(max-width: 500px)",
     );
-    assert_flush(&mut doc, FlushStatus::Traversed);
-    assert_clean(&mut doc);
+    doc.layout();
+    assert_color!(doc, target, GREEN);
 
     doc.set_viewport(400.0, 600.0);
     assert_restyle_color(&mut doc, target, [1, 2, 3]);
-    assert_clean(&mut doc);
 }
 
 #[test]
@@ -326,29 +318,19 @@ fn documents_own_independent_stylesheets() {
 
     let first_probe = first.create_element("view", ());
     first.add_class(first_probe, "probe");
+    let first_root = first.create_element("page", ());
+    first.append_child(first_root, first_probe);
+    first.append_document_element(first_root);
     let second_probe = second.create_element("view", ());
     second.add_class(second_probe, "probe");
+    let second_root = second.create_element("page", ());
+    second.append_child(second_root, second_probe);
+    second.append_document_element(second_root);
+    first.layout();
+    second.layout();
 
-    let first_style = first.resolve_style(first.get(first_probe).unwrap(), None);
-    let second_style = second.resolve_style(second.get(second_probe).unwrap(), None);
+    let first_style = first.get(first_probe).unwrap().computed_style().unwrap();
+    let second_style = second.get(second_probe).unwrap().computed_style().unwrap();
     assert_eq!(first_style.clone_color(), rgb(RED));
     assert_ne!(second_style.clone_color(), first_style.clone_color());
-}
-
-#[test]
-#[should_panic(expected = "CSS rule belongs to another Document")]
-fn prebuilt_rules_cannot_cross_document_contexts() {
-    let first = document();
-    let mut second = document();
-    let rule = first
-        .build_style_rule(
-            ".probe",
-            [dom::CssDeclaration {
-                property: "color",
-                value: "red".into(),
-                important: false,
-            }],
-        )
-        .unwrap();
-    second.append_rules(vec![rule], StylesheetOrigin::Author);
 }

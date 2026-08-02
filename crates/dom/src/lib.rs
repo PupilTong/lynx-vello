@@ -1,4 +1,5 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![warn(unreachable_pub)]
 
 //! `dom` — a generic, stylo-integrated W3C-DOM-subset document tree.
 
@@ -28,16 +29,15 @@ mod visual;
 mod walker;
 
 pub use euclid::default::{Point2D, Size2D, Vector2D};
-pub(crate) use pulsar::vello;
-pub use pulsar::{self, ImageStore};
+pub(crate) use pulsar::{ImageStore, vello};
 pub use stylo::device::Device;
 pub use stylo_dom::ElementState;
 
-pub use crate::contain::{Contain, ContentVisibility, effective_containment};
-pub use crate::damage::{FlushStatus, FlushSummary, StyleDamage, StyleDamageEntry};
-pub use crate::document::{DOCUMENT_NODE_ID, Document, NodeId};
-pub use crate::engine::{
-    ComputedStyle, CssDeclaration, CssRule, StylesheetOrigin, property_is_supported,
+#[cfg(feature = "style-test-utils")]
+#[doc(hidden)]
+pub use crate::damage::{
+    StyleDamageEntryForTesting, StyleDamageForTesting, StyleFlushSummaryForTesting,
 };
-pub use crate::flush::Parallelism;
-pub use crate::node::{ChildrenIter, Node, NodeType};
+pub use crate::document::{Document, NodeId};
+pub use crate::engine::StylesheetOrigin;
+pub use crate::node::Node;

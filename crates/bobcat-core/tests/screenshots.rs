@@ -73,7 +73,7 @@ fn screenshots() -> Screenshots {
 }
 
 fn capture_elements(gpu: &mut Headless, elements: &mut ElementTree) -> Image {
-    elements.document_mut().render();
+    elements.document_mut().render_if_needed();
     let scene = elements.document().scene();
     capture_scene(gpu, elements.document(), &scene, Color::WHITE).expect("capture")
 }

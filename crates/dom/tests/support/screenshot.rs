@@ -14,10 +14,11 @@ use flashbulb::{Image, capture_document, headless};
 use crate::html;
 
 /// The vendored text fixture; see `crates/hughie/tests/fixtures/README.md`.
-pub const ROBOTO: &[u8] = include_bytes!("../../../hughie/tests/fixtures/Roboto-Regular.ttf");
+pub(super) const ROBOTO: &[u8] =
+    include_bytes!("../../../hughie/tests/fixtures/Roboto-Regular.ttf");
 
 /// Renders `fragment` at `width` × `height` CSS pixels over white.
-pub fn capture(test: &str, fragment: &str, width: f32, height: f32) -> Image {
+pub(super) fn capture(test: &str, fragment: &str, width: f32, height: f32) -> Image {
     let mut gpu = headless(test);
     let mut doc = html::parse(fragment, width, height);
     assert_eq!(
@@ -34,7 +35,10 @@ pub fn capture(test: &str, fragment: &str, width: f32, height: f32) -> Image {
 /// The fragment path above cannot serve this: an `<img>` case has to publish
 /// natural sizes and decoded pixels itself, which is not expressible as inline
 /// HTML.
-pub fn capture_prebuilt_document<T: Sync>(test: &str, document: &mut dom::Document<T>) -> Image {
+pub(super) fn capture_prebuilt_document<T: Sync>(
+    test: &str,
+    document: &mut dom::Document<T>,
+) -> Image {
     let mut gpu = headless(test);
     capture_document(&mut gpu, document, Color::WHITE).expect("headless screenshot render")
 }
@@ -42,6 +46,6 @@ pub fn capture_prebuilt_document<T: Sync>(test: &str, document: &mut dom::Docume
 /// Compares against the golden at `name`, or accepts it under
 /// `FLASHBULB_UPDATE_SNAPSHOTS=1`. The store is per *crate*, so every
 /// screenshot binary here shares one `tests/screenshots` tree.
-pub fn assert_golden(name: &[&str], actual: &Image) {
+pub(super) fn assert_golden(name: &[&str], actual: &Image) {
     flashbulb::screenshots_in(env!("CARGO_MANIFEST_DIR")).assert_matches(name, actual);
 }

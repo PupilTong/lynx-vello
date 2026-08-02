@@ -93,10 +93,10 @@ use crate::scroll::ScrollAxes;
 /// A runtime layer arbitrating a scroll against its own tap and long-press
 /// recognizers wants its own threshold — it gets one by preventing the default
 /// action and driving [`Document::scroll_chain`] on its own terms.
-pub const TOUCH_SLOP: f32 = 8.0;
+const TOUCH_SLOP: f32 = 8.0;
 
 /// CSS px one [`DeltaMode::Line`] step scrolls: the conventional UA value.
-pub const WHEEL_LINE_PX: f32 = 40.0;
+const WHEEL_LINE_PX: f32 = 40.0;
 
 /// A pointing device's identity for the life of one interaction. Hosts that
 /// have no notion of pointer ids (a single mouse) can use any constant.
@@ -141,7 +141,7 @@ pub enum DeltaMode {
     /// CSS px. Trackpads and high-resolution wheels report this.
     #[default]
     Pixel,
-    /// Text lines, resolved at [`WHEEL_LINE_PX`] each.
+    /// Text lines, resolved at 40 CSS px each.
     Line,
     /// Scrollport-sized jumps, resolved against the box that ends up scrolling.
     Page,
@@ -239,7 +239,7 @@ impl InputEvent {
     /// Whether every coordinate this event carries is a real number.
     /// [`Document::handle_input`] drops events that fail this.
     #[must_use]
-    pub fn is_finite(&self) -> bool {
+    fn is_finite(&self) -> bool {
         let position = self.position.x.is_finite() && self.position.y.is_finite();
         let payload = match self.kind {
             InputKind::Pointer { .. } => true,

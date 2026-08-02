@@ -15,16 +15,13 @@ use stylo::traversal::{DomTraversal, PerLevelTraversalData, recalc_style_at};
 use stylo::traversal_flags::TraversalFlags;
 use stylo_atoms::Atom;
 
-use crate::damage::{FlushStatus, FlushSummary, StyleDamage, StyleDamageEntry};
+use crate::damage::StyleDamage;
+#[cfg(feature = "style-test-utils")]
+use crate::damage::{
+    StyleDamageEntryForTesting, StyleDamageForTesting, StyleFlushSummaryForTesting,
+};
 use crate::document::{Document, NodeId};
 use crate::node::Node;
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum Parallelism {
-    #[default]
-    Auto,
-    Sequential,
-}
 
 /// The CSS Paint API is unsupported: no speculative painters are registered.
 #[derive(Debug)]
@@ -116,41 +113,36 @@ impl<'a, T: Sync> DomTraversal<&'a Node<T>> for RecalcStyle<'a> {
 }
 
 impl<T: Sync> Document<T> {
-    pub fn flush_styles(&mut self) -> FlushSummary {
-        self.flush_styles_with_parallelism(Parallelism::Auto)
-    }
-
-    pub fn flush_styles_with_parallelism(&mut self, parallelism: Parallelism) -> FlushSummary {
+    /// Forces a standalone style flush for style-engine tests and benchmarks.
+    /// Production callers commit through [`Document::layout`].
+    #[cfg(feature = "style-test-utils")]
+    #[doc(hidden)]
+    pub fn flush_styles_for_testing(&mut self) -> StyleFlushSummaryForTesting {
         let mut damage = Vec::new();
-        let status =
-            self.flush_styles_with_damage_sink(parallelism, &mut |node_id, damage_value| {
-                damage.push(StyleDamageEntry {
-                    node_id,
-                    damage: damage_value,
-                });
+        self.flush_styles_with_damage_sink(&mut |node_id, damage_value| {
+            damage.push(StyleDamageEntryForTesting {
+                node_id,
+                damage: StyleDamageForTesting::new(damage_value),
             });
-        FlushSummary { damage, status }
+        });
+        StyleFlushSummaryForTesting { damage }
     }
 
-    pub fn flush_styles_with_damage_sink<F>(
-        &mut self,
-        parallelism: Parallelism,
-        sink: &mut F,
-    ) -> FlushStatus
+    pub(crate) fn flush_styles_with_damage_sink<F>(&mut self, sink: &mut F)
     where
         F: FnMut(NodeId, StyleDamage),
     {
         let Some(root) = self.root_element() else {
-            return FlushStatus::Skipped;
+            return;
         };
         if !root.needs_style_flush() {
-            return FlushStatus::Skipped;
+            return;
         }
         let root = root.id();
         self.root_node().set_layout_styles_ready(false);
         let snapshots = self.take_snapshot_map();
         let phase = self.begin_flush_phase();
-        let (harvest_root, traversed) = {
+        let harvest_root = {
             let root_ref = self
                 .get(root)
                 .expect("the root element child is kept live or absent");
@@ -172,31 +164,18 @@ impl<T: Sync> Document<T> {
                 &traversal.shared,
             );
             let should_traverse = token.should_traverse();
-            let harvest_root = if should_traverse {
+            if should_traverse {
                 let _thread_state = LayoutThreadStateGuard::enter();
-                match parallelism {
-                    Parallelism::Sequential => {
-                        Node::id(driver::traverse_dom(&traversal, token, None))
-                    }
-                    Parallelism::Auto => {
-                        let _pool_guard = STYLE_POOL_GUARD
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        let pool = STYLE_THREAD_POOL.pool();
-                        Node::id(driver::traverse_dom(&traversal, token, pool.as_ref()))
-                    }
-                }
+                let _pool_guard = STYLE_POOL_GUARD
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let pool = STYLE_THREAD_POOL.pool();
+                Node::id(driver::traverse_dom(&traversal, token, pool.as_ref()))
             } else {
                 root
-            };
-            (harvest_root, should_traverse)
+            }
         };
         drop(phase);
         self.harvest_flush(harvest_root, snapshots, sink);
-        if traversed {
-            FlushStatus::Traversed
-        } else {
-            FlushStatus::Skipped
-        }
     }
 }

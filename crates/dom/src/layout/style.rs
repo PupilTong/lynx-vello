@@ -149,6 +149,10 @@ pub(crate) fn resolve_position<T>(node: &Node<T>, style: &ComputedValues) -> Pos
 
 /// The element style view hughie reads: a node handle for the
 /// parent-dependent position lowering plus its post-flush computed values.
+// This must be syntactically public because Hughie's public `LayoutTree` trait
+// names it as an associated type. The `style` module is private, so it is not
+// part of this crate's nameable API.
+#[allow(unreachable_pub)]
 pub struct StyleView<'dom, T> {
     node: &'dom Node<T>,
     style: &'dom ComputedValues,

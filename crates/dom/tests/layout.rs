@@ -99,11 +99,14 @@ impl Harness {
         )
     }
 
-    fn node_cache_empty(&self, id: NodeId) -> bool {
+    fn force_full_layout_through_viewport_change(&mut self) {
+        let viewport = self.doc.dom.device().viewport_size();
         self.doc
             .dom
-            .layout_cache_is_empty(id)
-            .expect("node id is live")
+            .set_viewport(viewport.width + 1.0, viewport.height);
+        self.layout();
+        self.doc.dom.set_viewport(viewport.width, viewport.height);
+        self.layout();
     }
 }
 
@@ -333,7 +336,6 @@ fn display_none_zeroes_the_subtree_and_layout_recovers_after_invalidation() {
     assert_eq!(h.rect(a).2, 50.0);
 
     h.doc.set_inline(a, "display: none");
-    h.doc.dom.invalidate_layout(a);
     h.layout();
 
     assert_eq!(h.rect(a), (0.0, 0.0, 0.0, 0.0));
@@ -341,7 +343,6 @@ fn display_none_zeroes_the_subtree_and_layout_recovers_after_invalidation() {
     assert_eq!(h.rect(b).2, 100.0);
 
     h.doc.set_inline(a, "");
-    h.doc.dom.invalidate_layout(a);
     h.layout();
     assert_eq!(h.rect(a).2, 50.0);
     assert_eq!(h.rect(b).2, 50.0);
@@ -589,7 +590,6 @@ fn fixed_stays_viewport_anchored_when_its_parent_answers_from_cache() {
     assert_eq!(h.rect(fixed), (-90.0, 20.0, 30.0, 40.0));
 
     h.doc.set_inline(spacer, "width: 150px");
-    h.doc.dom.invalidate_layout(spacer);
     h.layout();
 
     assert_eq!(h.rect(host).0, 150.0);
@@ -748,7 +748,6 @@ fn hoisted_nodes_relayout_across_passes() {
     assert_eq!(h.rect(fixed), (10.0, 20.0, 30.0, 40.0));
 
     h.doc.set_inline(fixed, "left: 50px");
-    h.doc.dom.invalidate_layout(fixed);
     h.layout();
     assert_eq!(h.rect(fixed), (50.0, 20.0, 30.0, 40.0));
 }
@@ -860,15 +859,6 @@ fn rounding_snaps_to_the_device_pixel_grid() {
     h.layout();
 
     assert_eq!(h.layout_of(a).size.width, 20.5);
-    assert_eq!(
-        h.doc
-            .dom
-            .unrounded_layout(a)
-            .expect("node id is live")
-            .size
-            .width,
-        20.25
-    );
     assert_eq!(h.layout_of(b).location.x, 20.5);
 }
 
@@ -886,7 +876,6 @@ fn layout_state_dies_with_its_node() {
     h.doc.dom.remove_subtree(old);
     assert!(h.doc.dom.get(old).is_none());
 
-    h.doc.dom.invalidate_layout(root);
     let new = h.doc.el(root, "view");
     h.layout();
 
@@ -932,30 +921,6 @@ fn style_width_change_relayouts_without_manual_invalidation() {
 }
 
 #[test]
-fn standalone_style_flush_preserves_relayout_for_next_layout() {
-    let mut h = Harness::new("page { display: flex; width: 200px; height: 50px; }");
-    let root = h.doc.root;
-    let child = h.doc.el(root, "view");
-    h.doc.set_inline(child, "width: 40px");
-    h.layout();
-    assert_eq!(h.rect(child).2, 40.0);
-
-    h.doc.set_inline(child, "width: 60px");
-    let summary = h.doc.flush();
-    assert!(
-        summary
-            .damage
-            .iter()
-            .any(|entry| entry.node_id == child && entry.damage.needs_relayout()),
-        "the standalone flush reports RELAYOUT damage for the width change",
-    );
-    drop(summary);
-
-    h.layout();
-    assert_eq!(h.rect(child).2, 60.0);
-}
-
-#[test]
 fn removed_boundary_is_not_replayed_after_its_node_id_is_reused() {
     let mut h = Harness::new("page { display: flex; width: 300px; height: 100px; }");
     let root = h.doc.root;
@@ -981,11 +946,12 @@ fn removed_boundary_is_not_replayed_after_its_node_id_is_reused() {
     );
     h.layout();
 
-    h.doc.set_inline(old_child, "width: 30px; height: 20px");
-    h.doc.flush();
+    h.doc.dom.set_natural_size(
+        old_child,
+        dom::layout::NaturalSize::from_size(dom::layout::Size::new(30.0, 20.0)),
+    );
 
     assert_eq!(h.doc.dom.remove_subtree(old_boundary).len(), 2);
-    h.doc.dom.invalidate_layout(parent);
 
     let first_reused = h.doc.dom.create_element("view", ());
     let second_reused = h.doc.dom.create_element("view", ());
@@ -1003,7 +969,6 @@ fn removed_boundary_is_not_replayed_after_its_node_id_is_reused() {
         "display: flex; contain: strict; width: 80px; height: 40px",
     );
     h.doc.set_inline(reused_child, "width: 10px; height: 10px");
-    h.doc.dom.invalidate_layout(reused_boundary);
 
     h.layout();
     assert_eq!(
@@ -1014,7 +979,7 @@ fn removed_boundary_is_not_replayed_after_its_node_id_is_reused() {
 }
 
 #[test]
-fn color_only_change_relayouts_nothing() {
+fn color_only_change_preserves_text_geometry() {
     let mut dom = dom::Document::new(common::device(800.0, 600.0));
     dom.add_stylesheet(
         "page { display: flex; width: 200px; height: 100px; align-items: flex-start;
@@ -1029,37 +994,22 @@ fn color_only_change_relayouts_nothing() {
 
     dom.layout();
     assert_eq!(dom_rect(&dom, text), (0.0, 0.0, 80.0, 16.0));
-    assert_eq!(dom.layout_cache_is_empty(text), Some(false));
-    assert_eq!(dom.layout_cache_is_empty(root), Some(false));
 
     dom.set_inline_style(root, "color: rgb(0, 0, 255)");
-    let summary = dom.flush_styles();
-    assert_eq!(
-        summary
-            .damage
-            .iter()
-            .filter(|entry| entry.damage.needs_relayout())
-            .count(),
-        0,
-        "a color-only change produces no relayout damage",
-    );
-    assert!(
-        !dom.layout_cache_is_empty(text)
-            .expect("text node remains live"),
-        "the Parley leaf keeps its measurement cache after the flush",
-    );
-    assert!(
-        !dom.layout_cache_is_empty(root)
-            .expect("root node remains live"),
-        "the leaf's ancestor keeps its measurement cache after the flush",
-    );
-
     dom.layout();
     assert_eq!(dom_rect(&dom, text), (0.0, 0.0, 80.0, 16.0));
+    assert_eq!(
+        dom.get(root)
+            .unwrap()
+            .computed_style()
+            .unwrap()
+            .clone_color(),
+        common::rgb(0, 0, 255),
+    );
 }
 
 #[test]
-fn contain_strict_boundary_keeps_ancestor_caches_and_relayouts_interior() {
+fn contain_strict_boundary_relayouts_interior_without_changing_outer_size() {
     let mut h = Harness::new(
         "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }
          .outer { display: flex; contain: strict; width: 80px; height: 80px; }
@@ -1073,14 +1023,6 @@ fn contain_strict_boundary_keeps_ancestor_caches_and_relayouts_interior() {
     assert_eq!(h.rect(inner).2, 30.0);
 
     h.doc.set_inline(inner, "width: 50px; height: 30px");
-    h.doc.flush();
-    assert!(h.node_cache_empty(inner), "the dirty node is cleared");
-    assert!(h.node_cache_empty(outer), "the boundary itself is cleared");
-    assert!(
-        !h.node_cache_empty(root),
-        "the boundary's ancestor keeps its cache",
-    );
-
     h.layout();
     assert_eq!(h.rect(inner).2, 50.0, "the boundary interior re-lays-out");
     assert_eq!(
@@ -1091,28 +1033,7 @@ fn contain_strict_boundary_keeps_ancestor_caches_and_relayouts_interior() {
 }
 
 #[test]
-fn uncontained_interior_change_clears_the_ancestor_caches() {
-    let mut h = Harness::new(
-        "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }
-         .outer { display: flex; width: 80px; height: 80px; }
-         .inner { width: 30px; height: 30px; }",
-    );
-    let root = h.doc.root;
-    let outer = h.doc.el(root, ".outer");
-    let inner = h.doc.el(outer, ".inner");
-    h.layout();
-
-    h.doc.set_inline(inner, "width: 50px; height: 30px");
-    h.doc.flush();
-    assert!(h.node_cache_empty(outer), "the container is cleared");
-    assert!(
-        h.node_cache_empty(root),
-        "the ancestor is cleared — no boundary stops the walk",
-    );
-}
-
-#[test]
-fn warm_cache_append_invalidates_the_new_parent_spine() {
+fn appending_to_a_laid_out_parent_updates_sibling_positions() {
     let mut h = Harness::new(
         "page { display: flex; width: 200px; height: 40px; align-items: flex-start; }
          view { width: 40px; height: 20px; }",
@@ -1120,23 +1041,16 @@ fn warm_cache_append_invalidates_the_new_parent_spine() {
     let root = h.doc.root;
     let first = h.doc.el(root, "view");
     h.layout();
-    assert!(!h.node_cache_empty(root));
 
     let appended = h.doc.dom.create_element("view", ());
     h.doc.dom.append_child(root, appended);
-    assert!(h.node_cache_empty(root), "the new parent spine is cleared");
-    assert!(
-        h.node_cache_empty(appended),
-        "the newly attached subtree starts cold"
-    );
-
     h.layout();
     assert_eq!(h.rect(first).0, 0.0);
     assert_eq!(h.rect(appended).0, 40.0);
 }
 
 #[test]
-fn warm_cache_detach_invalidates_the_old_parent_spine() {
+fn detaching_from_a_laid_out_parent_updates_remaining_positions() {
     let mut h = Harness::new(
         "page { display: flex; width: 200px; height: 40px; align-items: flex-start; }
          view { width: 40px; height: 20px; }",
@@ -1148,15 +1062,12 @@ fn warm_cache_detach_invalidates_the_old_parent_spine() {
     assert_eq!(h.rect(second).0, 40.0);
 
     h.doc.dom.detach(first);
-    assert!(h.node_cache_empty(root), "the old parent spine is cleared");
-    assert!(h.node_cache_empty(first), "the detached subtree is cold");
-
     h.layout();
     assert_eq!(h.rect(second).0, 0.0);
 }
 
 #[test]
-fn warm_cache_same_parent_reorder_invalidates_layout_order() {
+fn same_parent_reorder_updates_layout_order() {
     let mut h = Harness::new(
         "page { display: flex; width: 200px; height: 40px; align-items: flex-start; }
          .a { width: 30px; height: 20px; }
@@ -1171,15 +1082,12 @@ fn warm_cache_same_parent_reorder_invalidates_layout_order() {
     assert_eq!((h.rect(a).0, h.rect(b).0, h.rect(c).0), (0.0, 30.0, 70.0));
 
     h.doc.dom.insert_before(root, c, Some(a));
-    assert!(h.node_cache_empty(root), "the reordered parent is cleared");
-    assert!(h.node_cache_empty(c), "the moved subtree is cold");
-
     h.layout();
     assert_eq!((h.rect(c).0, h.rect(a).0, h.rect(b).0), (0.0, 50.0, 80.0));
 }
 
 #[test]
-fn warm_cache_cross_parent_move_invalidates_both_parent_spines() {
+fn cross_parent_move_updates_both_formatting_contexts() {
     let mut h = Harness::new(
         "page { display: flex; width: 240px; height: 50px; align-items: flex-start; }
          .parent { display: flex; width: 100px; height: 40px; }
@@ -1196,11 +1104,6 @@ fn warm_cache_cross_parent_move_invalidates_both_parent_spines() {
     assert_eq!(h.rect(new_head).0, 0.0);
 
     h.doc.dom.append_child(new_parent, moved);
-    assert!(h.node_cache_empty(old_parent), "the old spine is cleared");
-    assert!(h.node_cache_empty(new_parent), "the new spine is cleared");
-    assert!(h.node_cache_empty(root), "the shared ancestor is cleared");
-    assert!(h.node_cache_empty(moved), "the moved subtree is cold");
-
     h.layout();
     assert_eq!(h.rect(old_tail).0, 0.0);
     assert_eq!(h.rect(new_head).0, 0.0);
@@ -1241,16 +1144,6 @@ fn a_damaged_boundary_still_clears_its_ancestors() {
     assert_eq!(h.rect(boundary).2, 60.0);
 
     h.doc.set_inline(boundary, "width: 90px; height: 60px");
-    h.doc.flush();
-    assert!(
-        h.node_cache_empty(boundary),
-        "the damaged boundary is cleared"
-    );
-    assert!(
-        h.node_cache_empty(root),
-        "its ancestor is cleared: the boundary's own size can change",
-    );
-
     h.layout();
     assert_eq!(h.rect(boundary).2, 90.0, "its own size change takes effect");
 }
@@ -1369,7 +1262,7 @@ fn boundary_own_and_interior_change_in_one_flush() {
 }
 
 #[test]
-fn two_damaged_nodes_under_one_boundary_keep_root_warm() {
+fn two_damaged_nodes_under_one_boundary_both_relayout() {
     let mut h = Harness::new(
         "page { display: flex; width: 200px; height: 100px; align-items: flex-start; }
          .outer { display: flex; contain: strict; width: 80px; height: 80px; }
@@ -1386,15 +1279,6 @@ fn two_damaged_nodes_under_one_boundary_keep_root_warm() {
 
     h.doc.set_inline(a, "width: 30px; height: 20px");
     h.doc.set_inline(b, "width: 20px; height: 30px");
-    h.doc.flush();
-    assert!(h.node_cache_empty(a), "the first damaged node is cleared");
-    assert!(h.node_cache_empty(b), "the second damaged node is cleared");
-    assert!(h.node_cache_empty(outer), "the boundary is cleared");
-    assert!(
-        !h.node_cache_empty(root),
-        "the boundary's ancestor stays warm after both invalidations",
-    );
-
     h.layout();
     assert_eq!(h.rect(a).2, 30.0, "the first interior change applied");
     assert_eq!(h.rect(b).3, 30.0, "the second interior change applied");
@@ -1433,22 +1317,12 @@ fn content_visibility_hidden_skips_descendant_layout_and_measurement() {
     assert_eq!(rect(&dom, container), (0.0, 0.0, 60.0, 80.0));
     assert_eq!(rect(&dom, text), (0.0, 0.0, 0.0, 0.0));
     assert_eq!(rect(&dom, fixed), (0.0, 0.0, 0.0, 0.0));
-    assert!(
-        dom.layout_cache_is_empty(text)
-            .expect("text node remains live"),
-        "a skipped text leaf never populates its measurement cache",
-    );
     dom.set_inline_style(container, "");
     dom.layout();
     assert_eq!(
         rect(&dom, text),
         (0.0, 0.0, 32.0, 16.0),
         "revealing the container lays its text back out",
-    );
-    assert!(
-        !dom.layout_cache_is_empty(text)
-            .expect("text node remains live"),
-        "the revealed text leaf now has a Parley measurement",
     );
 }
 
@@ -1503,7 +1377,7 @@ fn contained_boundary_relayout_refreshes_scrollable_content_size() {
     assert_eq!(h.rect(scroll), (0.0, 0.0, 80.0, 80.0));
     assert_eq!(content_height(&h, scroll), 120.0);
     assert_eq!(
-        h.doc.dom.unrounded_layout(child).expect("live").size.height,
+        h.doc.dom.rounded_layout(child).expect("live").size.height,
         120.0,
         "the boundary interior actually re-laid-out",
     );
@@ -1523,7 +1397,7 @@ fn layout_contained_visible_boundary_excludes_descendant_scrollable_overflow() {
     h.layout();
 
     assert_eq!(
-        h.doc.dom.unrounded_layout(child).expect("live").size.height,
+        h.doc.dom.rounded_layout(child).expect("live").size.height,
         120.0,
         "the descendant is laid out (only its overflow is ink-only)",
     );
@@ -1578,8 +1452,7 @@ fn boundary_scrollable_overflow_is_consistent_across_incremental_and_cold_layout
         "incremental: the boundary is trapped, so the root stays at its border box",
     );
 
-    h.doc.dom.invalidate_layout_all();
-    h.layout();
+    h.force_full_layout_through_viewport_change();
     assert_eq!(
         content_h(&h, boundary),
         120.0,
@@ -1593,7 +1466,7 @@ fn boundary_scrollable_overflow_is_consistent_across_incremental_and_cold_layout
 }
 
 #[test]
-fn mutation_inside_a_skipped_container_keeps_ancestor_caches_warm() {
+fn mutation_inside_a_skipped_container_is_deferred_until_reveal() {
     let mut h = Harness::new(
         "page { display: flex; width: 200px; height: 200px; }
          .hidden { display: flex; content-visibility: hidden;
@@ -1605,24 +1478,16 @@ fn mutation_inside_a_skipped_container_keeps_ancestor_caches_warm() {
     let child = h.doc.el(hidden, ".child");
     h.layout();
 
-    assert!(
-        !h.node_cache_empty(root),
-        "the root cache is warm after the first pass",
-    );
     assert_eq!(h.rect(hidden), (0.0, 0.0, 40.0, 30.0));
 
-    h.doc.dom.invalidate_layout(child);
-    assert!(
-        !h.node_cache_empty(root),
-        "the root cache stays warm past a skipped container",
-    );
-
+    h.doc.set_inline(child, "width: 30px; height: 20px");
     h.layout();
     assert_eq!(h.rect(hidden), (0.0, 0.0, 40.0, 30.0));
+    assert_eq!(h.rect(child), (0.0, 0.0, 0.0, 0.0));
 
     h.doc.set_inline(hidden, "content-visibility: visible");
     h.layout();
-    assert_eq!(h.rect(child), (0.0, 0.0, 20.0, 20.0));
+    assert_eq!(h.rect(child), (0.0, 0.0, 30.0, 20.0));
 }
 
 #[test]
@@ -1676,8 +1541,7 @@ fn incremental_boundary_relayout_matches_a_full_relayout() {
     assert_eq!(h.rect(a).2, 55.0, "the interior actually changed");
     assert_eq!(h.rect(b).0, 55.0, "the sibling shifted with it");
 
-    h.doc.dom.invalidate_layout_all();
-    h.layout();
+    h.force_full_layout_through_viewport_change();
     assert_eq!(incremental, h.layouts_of(&ids), "incremental == full");
 }
 
@@ -1704,8 +1568,7 @@ fn incremental_relayout_matches_full_under_fractional_device_pixels() {
     h.layout();
     let incremental = h.layouts_of(&ids);
 
-    h.doc.dom.invalidate_layout_all();
-    h.layout();
+    h.force_full_layout_through_viewport_change();
     assert_eq!(
         incremental,
         h.layouts_of(&ids),
@@ -1739,8 +1602,7 @@ fn nested_parked_boundaries_incremental_matches_full() {
     assert_eq!(h.rect(x).2, 55.0, "the inner interior changed");
     assert_eq!(h.rect(sib).2, 60.0, "the outer sibling changed");
 
-    h.doc.dom.invalidate_layout_all();
-    h.layout();
+    h.force_full_layout_through_viewport_change();
     assert_eq!(
         incremental,
         h.layouts_of(&ids),
@@ -1773,8 +1635,7 @@ fn incremental_relayout_reanchors_a_hoisted_node_inside_a_boundary() {
     h.layout();
     let incremental = h.layouts_of(&ids);
 
-    h.doc.dom.invalidate_layout_all();
-    h.layout();
+    h.force_full_layout_through_viewport_change();
     assert_eq!(
         incremental,
         h.layouts_of(&ids),
@@ -1864,12 +1725,14 @@ fn a_parked_boundary_that_flips_to_contents_is_dropped_gracefully() {
     let boundary = h.doc.el(root, "view.boundary");
     h.doc.set_inline(boundary, "contain: strict");
     let inner = h.doc.el(boundary, "view.inner");
+    let text = h.doc.dom.create_text_node("a", ());
+    h.doc.dom.append_child(inner, text);
     let after = h.doc.el(root, "view.cell");
     h.layout();
     assert_eq!(h.rect(after).0, 100.0);
 
     // Park the boundary via a content mutation, then flip it to contents.
-    h.doc.dom.invalidate_layout(inner);
+    h.doc.dom.set_text_node_data(text, "bb");
     h.doc
         .set_inline(boundary, "contain: strict; display: contents");
     h.layout();

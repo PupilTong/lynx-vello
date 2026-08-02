@@ -161,7 +161,7 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
     }
 
     fn traversal_children(&self) -> LayoutIterator<Self::TraversalChildrenIterator> {
-        LayoutIterator(Node::children(*self))
+        LayoutIterator(Node::children_iter(*self))
     }
 
     fn is_html_element(&self) -> bool {

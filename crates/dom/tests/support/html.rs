@@ -14,7 +14,7 @@ use crate::paint_common::{Doc, device};
 
 /// Parses one root element and its nested inline-styled children.
 #[must_use]
-pub fn parse(fragment: &str, width: f32, height: f32) -> Doc {
+pub(super) fn parse(fragment: &str, width: f32, height: f32) -> Doc {
     let context = QualName::new(None, ns!(html), local_name!("div"));
     let parsed = parse_fragment(
         RcDom::default(),

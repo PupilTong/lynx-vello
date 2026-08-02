@@ -25,7 +25,7 @@ impl Harness {
 
     /// Paints and returns `(draw ops, clip/layer pairs, open layers)`.
     fn stats(&mut self) -> (usize, u32, u32) {
-        self.doc.dom.render();
+        self.doc.dom.render_if_needed();
         let scene = self.doc.dom.scene();
         let encoding = scene.encoding();
         (
@@ -110,14 +110,18 @@ fn text_runs_encode_glyphs() {
 }
 
 #[test]
-fn documents_reuse_their_private_painter_across_frames() {
+fn clean_frames_keep_the_retained_scene_stable() {
     let mut h = Harness::new(".bg { background-color: teal; opacity: 0.7; overflow: hidden; }");
     let root = h.doc.root;
     let outer = h.doc.el(root, "box bg");
     h.doc.el(outer, "box bg");
     let first = h.stats();
+    assert!(
+        !h.doc.dom.render_if_needed(),
+        "a clean frame must skip painting"
+    );
     let second = h.stats();
-    assert_eq!(first, second, "repainting the same frame must be stable");
+    assert_eq!(first, second, "a clean frame must retain the same scene");
 }
 
 #[test]

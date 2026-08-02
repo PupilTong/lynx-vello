@@ -186,7 +186,7 @@ impl LayoutFixture {
     }
 
     pub(super) fn prepare(mut self) -> Self {
-        self.document.flush_styles();
+        self.document.flush_styles_for_testing();
         let display = self
             .document
             .get(self.root)
@@ -225,10 +225,10 @@ impl LayoutFixture {
     }
 
     pub(super) fn invalidate(&mut self, node: NodeId) {
-        self.document.invalidate_layout(node);
+        self.document.invalidate_layout_for_testing(node);
     }
 
     pub(super) fn invalidate_root(&mut self) {
-        self.document.invalidate_layout(self.root);
+        self.document.invalidate_layout_for_testing(self.root);
     }
 }

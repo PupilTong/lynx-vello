@@ -208,7 +208,7 @@ the semantics are stylo's.** Everything below refines that sentence.
     there is no `CssPropertyId` variant, so the `.web.bundle` wire format
     cannot carry it and no real bundle emits it. It therefore does not fit the
     wire-format subset framing of §A; it is a deliberate, user-directed W3C
-    extension, arriving only via **inline styles** (`add_inline_style`) and
+    extension, arriving only via **inline styles** (`set_inline_style`) and
     any future ingest path. In the vendored stylo fork, `contain` itself was
     already seeded in the lynx grammar (`lynx_properties.txt`); fork PR #9
     (squash-merged into the `lynx` branch) completed the css-contain-2 family
@@ -216,8 +216,8 @@ the semantics are stylo's.** Everything below refines that sentence.
     longhands) under the `lynx` feature — pref-gated for stock servo — with
     fork-side parse/compute/damage coverage. Ingestion applies no property allowlist, so the fork build is
     the only gate. On top of that grammar, this repo adds the consuming
-    machinery: `dom`'s `effective_containment` fold and
-    `StyleDamage`/`FlushSummary` damage harvest, and `hughie`'s
+    machinery: `dom`'s internal `effective_containment` fold and Stylo damage
+    harvest, and `hughie`'s
     size/layout containment, skipped contents, and relayout-boundary
     invalidation. Motivation: `<list>` virtualization (see
     [tracking/components.md](tracking/components.md)) — off-screen / recycled
