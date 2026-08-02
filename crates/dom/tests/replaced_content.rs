@@ -79,7 +79,7 @@ impl Harness {
     }
 
     fn stats(&mut self) -> (usize, u32) {
-        self.doc.dom.render_if_needed();
+        self.doc.dom.render();
         let scene = self.doc.dom.scene();
         let encoding = scene.encoding();
         (encoding.draw_tags.len(), encoding.n_open_clips)

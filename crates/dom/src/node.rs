@@ -831,10 +831,7 @@ impl<T> std::hash::Hash for Node<T> {
 
 /// The children iterator ([`Node::children`]); also what stylo's restyle
 /// traversal walks.
-// This must be syntactically public because Stylo's public `TElement` trait
-// names it as an associated type. The `node` module is private, so it is not
-// part of this crate's nameable API.
-#[allow(unreachable_pub)]
+#[doc(hidden)]
 pub struct ChildrenIter<'a, T> {
     tree: &'a Slab<Node<T>>,
     children: &'a [NodeId],

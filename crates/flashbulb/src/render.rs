@@ -100,7 +100,7 @@ pub fn capture_document_sized<T: Sync>(
     width: u32,
     height: u32,
 ) -> Result<Image, CaptureError> {
-    document.render_if_needed();
+    document.render();
     capture_scene_sized(gpu, &document.scene(), background, width, height)
 }
 

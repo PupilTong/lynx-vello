@@ -172,7 +172,7 @@ impl<T> Document<T> {
     ///
     /// Panics if styles are not ready (the preceding style traversal did not
     /// complete, or the document mutated since) — call after
-    /// [`Document::layout`] or [`Document::render_if_needed`] within the same
+    /// [`Document::layout`] or [`Document::render`] within the same
     /// borrow of the document.
     #[must_use]
     pub(crate) fn paint_style(&self, id: crate::NodeId) -> Option<&ComputedValues> {

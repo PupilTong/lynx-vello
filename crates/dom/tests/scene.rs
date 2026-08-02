@@ -25,7 +25,7 @@ impl Harness {
 
     /// Paints and returns `(draw ops, clip/layer pairs, open layers)`.
     fn stats(&mut self) -> (usize, u32, u32) {
-        self.doc.dom.render_if_needed();
+        self.doc.dom.render();
         let scene = self.doc.dom.scene();
         let encoding = scene.encoding();
         (
@@ -116,10 +116,7 @@ fn clean_frames_keep_the_retained_scene_stable() {
     let outer = h.doc.el(root, "box bg");
     h.doc.el(outer, "box bg");
     let first = h.stats();
-    assert!(
-        !h.doc.dom.render_if_needed(),
-        "a clean frame must skip painting"
-    );
+    assert!(!h.doc.dom.render(), "a clean frame must skip painting");
     let second = h.stats();
     assert_eq!(first, second, "a clean frame must retain the same scene");
 }

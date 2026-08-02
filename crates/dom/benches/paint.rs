@@ -96,9 +96,11 @@ fn card_page(cards: usize) -> Document<()> {
 
 #[divan::bench(args = [24, 120])]
 fn render_document(bencher: divan::Bencher<'_, '_>, cards: usize) {
-    let mut dom = card_page(cards);
-    bencher.bench_local(|| {
-        dom.render_for_testing();
-        divan::black_box(dom.scene().encoding().draw_tags.len());
-    });
+    bencher
+        .with_inputs(|| card_page(cards))
+        .bench_local_values(|mut dom| {
+            divan::black_box(dom.render());
+            divan::black_box(dom.scene().encoding().draw_tags.len());
+            dom
+        });
 }

@@ -43,7 +43,7 @@ fn background_clip_text_clips_to_glyph_ink() {
     let holder = doc.el(root, "text");
     doc.text(holder, "HH HH");
 
-    doc.dom.render_if_needed();
+    doc.dom.render();
     let scene = doc.dom.scene();
     let pixels = gpu
         .render(&scene, 200, 100, Color::WHITE)
@@ -83,7 +83,7 @@ fn plain_background_covers_the_box() {
     let holder = doc.el(root, "text");
     doc.text(holder, "HH HH");
 
-    doc.dom.render_if_needed();
+    doc.dom.render();
     let scene = doc.dom.scene();
     let pixels = gpu
         .render(&scene, 200, 100, Color::WHITE)
@@ -127,7 +127,7 @@ fn gradient_color_fills_glyph_ink_from_the_padding_box() {
     let holder = doc.el(root, "text");
     doc.text(holder, "HH");
 
-    doc.dom.render_if_needed();
+    doc.dom.render();
     let scene = doc.dom.scene();
     let pixels = gpu
         .render(&scene, 200, 100, Color::WHITE)
@@ -164,7 +164,7 @@ fn outline_rings_the_border_box() {
     let root = doc.root;
     doc.el(root, "out");
 
-    doc.dom.render_if_needed();
+    doc.dom.render();
     let scene = doc.dom.scene();
     let pixels = gpu
         .render(&scene, 200, 100, Color::WHITE)
@@ -206,7 +206,7 @@ fn isolated_atlas_cell_matches_standalone_group_effects() {
     let root = doc.root;
     doc.el(root, "effect");
 
-    doc.dom.render_if_needed();
+    doc.dom.render();
     let scene = doc.dom.scene();
     let standalone = gpu
         .render(&scene, 128, 128, Color::WHITE)

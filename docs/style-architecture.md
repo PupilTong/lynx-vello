@@ -98,8 +98,9 @@ still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
    Selector-visible data lives in the real node fields and attribute map.
 4. `Document::layout` first drives Stylo traversal from the document element:
    snapshot invalidation, style sharing, bloom filtering, and parallel
-   traversal all run in place. Standalone flush/damage inspection exists only
-   behind `style-test-utils` for tests and benchmarks.
+   traversal all run in place. Standalone flush/damage inspection is private
+   to crate unit tests; external tests and benchmarks use the production
+   commit path.
 5. The internal harvest reads each visited element's `StyleDamage`, consumes
    relayout-class damage into containment-bounded layout-cache invalidation,
    and then clears Stylo's damage/restyle state. This clearing prevents old
@@ -109,7 +110,7 @@ still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
    Stylo `ElementData`, without an adapter-side style copy.
 7. The CLI-private frame pipeline uses `internal-document-access` to ask the
    document-owned Painter whether its retained scene is current. A dirty
-   document runs `Document::render_if_needed`, builds the private paint order, and
+   document runs `Document::render`, builds the private paint order, and
    retains the resulting Vello scene. The default element/embedder API exposes
    none of this lifecycle.
 

@@ -1,5 +1,5 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
-#![warn(unreachable_pub)]
+#![deny(unreachable_pub)]
 
 //! `dom` — a generic, stylo-integrated W3C-DOM-subset document tree.
 
@@ -33,11 +33,11 @@ pub(crate) use pulsar::{ImageStore, vello};
 pub use stylo::device::Device;
 pub use stylo_dom::ElementState;
 
-#[cfg(feature = "style-test-utils")]
-#[doc(hidden)]
-pub use crate::damage::{
-    StyleDamageEntryForTesting, StyleDamageForTesting, StyleFlushSummaryForTesting,
-};
 pub use crate::document::{Document, NodeId};
 pub use crate::engine::StylesheetOrigin;
+/// Stylo names this iterator in the public `TElement` implementation for
+/// [`Node`]; callers should normally use [`Node::children`] and its opaque
+/// return type.
+#[doc(hidden)]
+pub use crate::node::ChildrenIter;
 pub use crate::node::Node;

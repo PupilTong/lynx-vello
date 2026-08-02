@@ -254,9 +254,9 @@ useful signal for currently-compatible versions of those libraries.
   primary nodes; layout/text state does not.
   `Document<T>` also owns one private concrete `Painter`, including its
   reusable walk scratch, retained `vello::Scene`, and `pulsar::ImageStore`.
-  `render_if_needed` privately builds `PaintOrder` and invokes that painter
+  `render` privately builds `PaintOrder` and invokes that painter
   only for a dirty scene. The Painter records which private visual epoch its
-  scene represents, so `render_if_needed`/`needs_render` own retained-scene scheduling without
+  scene represents, so `render`/`needs_render` own retained-scene scheduling without
   publishing that epoch. `scene` lends a guarded shared borrow, while
   `images_mut` is the narrow resource-update seam and invalidates the scene
   conservatively. There is no renderer type parameter,
@@ -519,7 +519,7 @@ useful signal for currently-compatible versions of those libraries.
   PNGs written to a git-ignored `tests/artifacts/` on failure. A newly
   *created* golden fails its own run so an unreviewed baseline cannot pass;
   an explicitly *accepted* one does not. The optional `render` feature adds
-  `capture_document` (`Document::render_if_needed` → retained scene → Pulsar headless GPU) over the whole painted
+  `capture_document` (`Document::render` → retained scene → Pulsar headless GPU) over the whole painted
   frame, `viewport * device_pixel_ratio` device pixels — `pulsar` scales the
   scene up by that ratio, so anything smaller is a crop. Playwright instead
   downsamples to CSS pixels; the two coincide at a ratio of 1, which is what

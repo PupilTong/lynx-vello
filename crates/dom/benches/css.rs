@@ -1,5 +1,5 @@
-//! CSS-engine benchmarks for `dom`, tracked by `CodSpeed` (walltime
-//! mode on the macOS CI runner).
+//! CSS commit benchmarks for `dom`, tracked by `CodSpeed` (walltime mode on
+//! the macOS CI runner). Commits use the production `Document::layout` path.
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
@@ -144,7 +144,7 @@ fn unflushed() -> (Document<()>, NodeId) {
 
 fn flushed() -> (Document<()>, NodeId) {
     let (mut doc, probe) = unflushed();
-    doc.flush_styles_for_testing();
+    doc.layout();
     (doc, probe)
 }
 
@@ -167,7 +167,7 @@ fn parse_author_sheet_text(bencher: divan::Bencher) {
 }
 
 #[divan::bench]
-fn initial_flush(bencher: divan::Bencher) {
+fn initial_commit(bencher: divan::Bencher) {
     bencher
         .counter(ItemsCount::new(INITIAL_FLUSH_BATCH))
         .with_inputs(|| {
@@ -177,7 +177,7 @@ fn initial_flush(bencher: divan::Bencher) {
         })
         .bench_local_values(|mut states| {
             for (doc, _) in &mut states {
-                black_box(doc.flush_styles_for_testing());
+                doc.layout();
             }
             states
         });
@@ -198,7 +198,7 @@ fn incremental_class_flip(bencher: divan::Bencher) {
                 } else {
                     doc.remove_class(*probe, "c1");
                 }
-                black_box(doc.flush_styles_for_testing());
+                doc.layout();
             }
         });
 }
@@ -219,7 +219,7 @@ fn incremental_inline_style(bencher: divan::Bencher) {
                     "color: rgb(3, 3, 3); width: 20px"
                 };
                 doc.set_inline_style(*probe, black_box(css));
-                black_box(doc.flush_styles_for_testing());
+                doc.layout();
             }
         });
 }
@@ -231,7 +231,7 @@ fn incremental_state_flip(bencher: divan::Bencher) {
         "view:hover { color: rgb(250, 250, 250); }",
         StylesheetOrigin::Author,
     );
-    doc.flush_styles_for_testing();
+    doc.layout();
     let state = RefCell::new(doc);
     let mut on = false;
     bencher
@@ -245,7 +245,7 @@ fn incremental_state_flip(bencher: divan::Bencher) {
                 } else {
                     doc.remove_element_state(probe, ElementState::HOVER);
                 }
-                black_box(doc.flush_styles_for_testing());
+                doc.layout();
             }
         });
 }
@@ -258,7 +258,7 @@ fn incremental_class_flip_repaint_only(bencher: divan::Bencher) {
         StylesheetOrigin::Author,
     );
     doc.add_class(probe, "rp-a");
-    doc.flush_styles_for_testing();
+    doc.layout();
     let state = RefCell::new(doc);
     let mut on = false;
     bencher
@@ -274,20 +274,20 @@ fn incremental_class_flip_repaint_only(bencher: divan::Bencher) {
                     doc.remove_class(probe, "rp-b");
                     doc.add_class(probe, "rp-a");
                 }
-                black_box(doc.flush_styles_for_testing());
+                doc.layout();
             }
         });
 }
 
 #[divan::bench]
-fn noop_flush(bencher: divan::Bencher) {
+fn noop_commit(bencher: divan::Bencher) {
     let state = RefCell::new(flushed());
     bencher
         .counter(ItemsCount::new(NO_OP_BATCH))
         .bench_local(|| {
             for _ in 0..NO_OP_BATCH {
                 let (doc, _) = &mut *state.borrow_mut();
-                black_box(doc.flush_styles_for_testing());
+                doc.layout();
             }
         });
 }
@@ -318,7 +318,7 @@ fn inheritance_deep_chain(bencher: divan::Bencher) {
         })
         .bench_local_values(|mut states| {
             for doc in &mut states {
-                doc.flush_styles_for_testing();
+                doc.layout();
             }
             states
         });
@@ -345,7 +345,7 @@ fn var_chain_cascade(bencher: divan::Bencher) {
         })
         .bench_local_values(|mut states| {
             for (doc, _) in &mut states {
-                doc.flush_styles_for_testing();
+                doc.layout();
             }
             states
         });
@@ -360,7 +360,7 @@ fn media_viewport_flip(bencher: divan::Bencher) {
          }",
         StylesheetOrigin::Author,
     );
-    doc.flush_styles_for_testing();
+    doc.layout();
     let state = RefCell::new(doc);
     let mut wide = true;
     bencher
@@ -370,7 +370,7 @@ fn media_viewport_flip(bencher: divan::Bencher) {
                 let doc = &mut *state.borrow_mut();
                 wide = !wide;
                 doc.set_viewport(if wide { 800.0 } else { 400.0 }, 600.0);
-                doc.flush_styles_for_testing();
+                doc.layout();
             }
         });
 }

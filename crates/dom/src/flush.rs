@@ -16,10 +16,6 @@ use stylo::traversal_flags::TraversalFlags;
 use stylo_atoms::Atom;
 
 use crate::damage::StyleDamage;
-#[cfg(feature = "style-test-utils")]
-use crate::damage::{
-    StyleDamageEntryForTesting, StyleDamageForTesting, StyleFlushSummaryForTesting,
-};
 use crate::document::{Document, NodeId};
 use crate::node::Node;
 
@@ -113,21 +109,6 @@ impl<'a, T: Sync> DomTraversal<&'a Node<T>> for RecalcStyle<'a> {
 }
 
 impl<T: Sync> Document<T> {
-    /// Forces a standalone style flush for style-engine tests and benchmarks.
-    /// Production callers commit through [`Document::layout`].
-    #[cfg(feature = "style-test-utils")]
-    #[doc(hidden)]
-    pub fn flush_styles_for_testing(&mut self) -> StyleFlushSummaryForTesting {
-        let mut damage = Vec::new();
-        self.flush_styles_with_damage_sink(&mut |node_id, damage_value| {
-            damage.push(StyleDamageEntryForTesting {
-                node_id,
-                damage: StyleDamageForTesting::new(damage_value),
-            });
-        });
-        StyleFlushSummaryForTesting { damage }
-    }
-
     pub(crate) fn flush_styles_with_damage_sink<F>(&mut self, sink: &mut F)
     where
         F: FnMut(NodeId, StyleDamage),

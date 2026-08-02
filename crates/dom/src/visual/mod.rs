@@ -1,7 +1,7 @@
 //! Visual order over the laid-out tree: CSS stacking contexts, Appendix-E
 //! paint order, transform matrices, and hit testing.
 //!
-//! [`Document::render_if_needed`], [`Document::hit_test`], and
+//! [`Document::render`], [`Document::hit_test`], and
 //! [`Document::handle_input`] internally build a
 //! private `PaintOrder`: a flat item list in back-to-front order, each item carrying
 //! its viewport-space transform and innermost clip. The private painter walks
@@ -266,26 +266,14 @@ impl<T: Sync> Document<T> {
         frame.hit_test(self, point)
     }
 
-    /// Lays out and renders the current document through its private painter.
-    fn render(&mut self) {
-        let frame = self.build_paint_order();
-        self.painter.borrow_mut().paint(self, &frame);
-    }
-
-    /// Forces a paint pass for CPU-side paint benchmarks.
-    #[cfg(feature = "paint-test-utils")]
-    #[doc(hidden)]
-    pub fn render_for_testing(&mut self) {
-        self.render();
-    }
-
     /// Renders only when the retained scene no longer represents the current
     /// document state. Returns whether a new scene was built.
-    pub fn render_if_needed(&mut self) -> bool {
+    pub fn render(&mut self) -> bool {
         if !self.needs_render() {
             return false;
         }
-        self.render();
+        let frame = self.build_paint_order();
+        self.painter.borrow_mut().paint(self, &frame);
         true
     }
 }
@@ -299,7 +287,7 @@ impl<T> Document<T> {
     }
 
     /// The Vello scene retained by the last successful
-    /// [`Self::render_if_needed`] call.
+    /// [`Self::render`] call.
     #[must_use]
     pub fn scene(&self) -> Ref<'_, crate::vello::Scene> {
         Ref::map(self.painter.borrow(), crate::painter::Painter::scene)

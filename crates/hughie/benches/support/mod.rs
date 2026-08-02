@@ -81,7 +81,7 @@ fn device(viewport: Size<f32>) -> Device {
     )
 }
 
-/// A styled dom document ready for a cold production layout pass.
+/// A dom document ready for a cold production style/layout commit.
 #[derive(Debug)]
 pub(super) struct LayoutFixture {
     document: Document<()>,
@@ -186,7 +186,7 @@ impl LayoutFixture {
     }
 
     pub(super) fn prepare(mut self) -> Self {
-        self.document.flush_styles_for_testing();
+        self.document.layout();
         let display = self
             .document
             .get(self.root)
@@ -197,6 +197,25 @@ impl LayoutFixture {
             display, self.expected_display,
             "the benchmark root's display declaration must reach dom"
         );
+
+        let mut nodes = Vec::with_capacity(self.node_count);
+        nodes.push(self.root);
+        let mut index = 0;
+        while let Some(&node) = nodes.get(index) {
+            let children = self
+                .document
+                .get(node)
+                .expect("benchmark nodes remain live")
+                .children()
+                .map(Node::id)
+                .collect::<Vec<_>>();
+            nodes.extend(children);
+            index += 1;
+        }
+        assert_eq!(nodes.len(), self.node_count);
+        for node in nodes.into_iter().rev() {
+            self.document.invalidate_layout_for_testing(node);
+        }
         self
     }
 

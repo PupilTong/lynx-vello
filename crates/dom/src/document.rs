@@ -822,14 +822,14 @@ pub(crate) mod tests {
         document.append_document_element(root);
 
         assert!(document.needs_render());
-        assert!(document.render_if_needed());
+        assert!(document.render());
         assert!(!document.needs_render());
-        assert!(!document.render_if_needed());
+        assert!(!document.render());
         assert!(!document.scene().encoding().draw_tags.is_empty());
 
         let _ = document.images_mut().remove_url("missing");
         assert!(document.needs_render());
-        assert!(document.render_if_needed());
+        assert!(document.render());
     }
 
     #[test]

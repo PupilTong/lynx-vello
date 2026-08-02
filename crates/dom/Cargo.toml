@@ -11,12 +11,6 @@ rust-version.workspace = true
 # Keeps synthetic content metrics available to hughie's production-host
 # tests and benchmarks; the callback seam is absent from normal builds.
 layout-test-utils = ["hughie/layout-test-utils"]
-# Standalone Stylo flush/damage inspection is useful to tests and benchmarks,
-# but production commits style as part of `Document::layout`.
-style-test-utils = []
-# Repainting an unchanged document is a benchmark operation; production uses
-# retained-scene scheduling through `render_if_needed`.
-paint-test-utils = []
 
 [dependencies]
 rustc-hash = { workspace = true }
@@ -59,17 +53,10 @@ png = { workspace = true }
 [[bench]]
 name = "css"
 harness = false
-required-features = ["style-test-utils"]
 
 [[bench]]
 name = "paint"
 harness = false
-required-features = ["paint-test-utils"]
-
-[[test]]
-name = "damage"
-path = "tests/damage.rs"
-required-features = ["style-test-utils"]
 
 [lints]
 workspace = true
