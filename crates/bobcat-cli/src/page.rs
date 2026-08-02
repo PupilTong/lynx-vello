@@ -1,6 +1,5 @@
 use std::cell::Ref;
 
-#[cfg(target_os = "macos")]
 use bobcat_core::quickjs::MainThreadRuntime;
 #[cfg(target_os = "macos")]
 use dom::input::{InputEvent, InputResponse};
