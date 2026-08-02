@@ -2,12 +2,9 @@ use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use bobcat_core::dom::Point2D;
-use bobcat_core::dom::input::{DeltaMode, InputEvent, PointerKind, PointerPhase};
-use bobcat_core::pulsar::gpu::{read_texture, render_params, renderer_options};
-use bobcat_core::pulsar::vello;
-use bobcat_core::pulsar::vello::peniko::Color;
-use bobcat_core::pulsar::vello::util::{RenderContext, RenderSurface};
+use bobcat_core::renderer::{
+    DeltaMode, InputEvent, Point2D, PointerKind, PointerPhase, WindowRenderer,
+};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent};
@@ -17,7 +14,7 @@ use winit::window::{Window, WindowId};
 use crate::CliError;
 use crate::args::Options;
 use crate::command::{COMMAND_HELP, Command, Console};
-use crate::page::{FramePipeline, FrameSize, Program};
+use crate::page::Program;
 use crate::screenshot::save_screenshot;
 
 #[derive(Debug)]
@@ -39,10 +36,13 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
     let console =
         Console::start(move |command| proxy.send_event(UserEvent::Command(command)).is_ok())
             .map_err(CliError::Console)?;
-    println!("bobcat: macOS window starting; enter `help` for commands");
+    println!(
+        "bobcat: {} window starting; enter `help` for commands",
+        std::env::consts::OS
+    );
     console.prompt();
 
-    let mut application = MacApplication::new(program, options, console);
+    let mut application = HeadedApplication::new(program, options, console);
     event_loop
         .run_app(&mut application)
         .map_err(|error| CliError::Window(error.to_string()))?;
@@ -52,17 +52,14 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
     }
 }
 
-struct MacApplication {
+struct HeadedApplication {
     program: Option<Program>,
     initial_width: f32,
     initial_height: f32,
-    pipeline: Option<FramePipeline>,
-    graphics: Option<WindowGraphics>,
+    renderer: Option<WindowRenderer>,
     window: Option<Arc<Window>>,
     console: Console,
     pending_screenshots: Vec<PathBuf>,
-    running: bool,
-    occluded: bool,
     /// Last known cursor position, in physical window pixels. Mouse events
     /// other than `CursorMoved` do not carry one.
     pointer: Option<PhysicalPosition<f64>>,
@@ -71,33 +68,28 @@ struct MacApplication {
     error: Option<CliError>,
 }
 
-impl std::fmt::Debug for MacApplication {
+impl std::fmt::Debug for HeadedApplication {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("MacApplication")
+            .debug_struct("HeadedApplication")
             .field("initial_width", &self.initial_width)
             .field("initial_height", &self.initial_height)
-            .field("running", &self.running)
-            .field("occluded", &self.occluded)
             .field("pending_screenshots", &self.pending_screenshots.len())
             .field("has_error", &self.error.is_some())
             .finish_non_exhaustive()
     }
 }
 
-impl MacApplication {
+impl HeadedApplication {
     fn new(program: Program, options: &Options, console: Console) -> Self {
         Self {
             program: Some(program),
             initial_width: options.viewport_width,
             initial_height: options.viewport_height,
-            pipeline: None,
-            graphics: None,
+            renderer: None,
             window: None,
             console,
             pending_screenshots: Vec::new(),
-            running: true,
-            occluded: false,
             pointer: None,
             pressed: false,
             error: None,
@@ -119,18 +111,13 @@ impl MacApplication {
                 .create_window(attributes)
                 .map_err(|error| CliError::Window(error.to_string()))?,
         );
-        let physical_size = non_empty_size(window.inner_size());
-        let (css_width, css_height, scale_factor) =
-            viewport_metrics(physical_size, window.scale_factor());
         let program = self
             .program
             .take()
             .expect("the program is consumed by the first window only");
-        let pipeline = program.boot(css_width, css_height, scale_factor)?;
-        let graphics = WindowGraphics::new(Arc::clone(&window), physical_size)?;
+        let renderer = WindowRenderer::new(program.into_render_program(), Arc::clone(&window))?;
 
-        self.pipeline = Some(pipeline);
-        self.graphics = Some(graphics);
+        self.renderer = Some(renderer);
         self.window = Some(window);
         self.request_redraw();
         Ok(())
@@ -140,53 +127,34 @@ impl MacApplication {
         if physical_size.width == 0 || physical_size.height == 0 {
             return Ok(());
         }
-        let window = self
-            .window
-            .as_ref()
-            .expect("resize events arrive only after window creation");
-        let (css_width, css_height, scale_factor) =
-            viewport_metrics(physical_size, window.scale_factor());
-        self.pipeline
+        self.renderer
             .as_mut()
-            .expect("the pipeline is installed with the window")
-            .resize(css_width, css_height, scale_factor)?;
-        self.graphics
-            .as_mut()
-            .expect("graphics are installed with the window")
-            .resize(physical_size);
-        self.request_redraw();
-        Ok(())
+            .expect("the renderer is installed with the window")
+            .resize(physical_size)
+            .map_err(CliError::from)
     }
 
     fn redraw(&mut self) -> Result<(), CliError> {
-        let pipeline = self
-            .pipeline
-            .as_mut()
-            .expect("redraw events arrive only after initialization");
-        let graphics = self
-            .graphics
-            .as_mut()
-            .expect("redraw events arrive only after initialization");
-        let window = self
-            .window
-            .as_ref()
-            .expect("redraw events arrive only after initialization");
-        let frame = pipeline.prepare_frame();
-        let scene = frame.scene();
-        graphics.render(window, &scene, frame.size)?;
-        drop(scene);
-
         if self.pending_screenshots.is_empty() {
-            return Ok(());
+            return self
+                .renderer
+                .as_mut()
+                .expect("redraw events arrive only after initialization")
+                .redraw()
+                .map_err(CliError::from);
         }
         // A screenshot failure must not tear down the session: report it at
         // the prompt like any other bad command, and let one bad path leave
         // the other queued captures unharmed.
         let paths = mem::take(&mut self.pending_screenshots);
-        match graphics.capture_frame(frame.size) {
-            Ok(pixels) => {
+        let renderer = self
+            .renderer
+            .as_mut()
+            .expect("redraw events arrive only after initialization");
+        match renderer.capture() {
+            Ok(frame) => {
                 for path in paths {
-                    if let Err(error) = save_screenshot(&path, frame.size, &pixels) {
+                    if let Err(error) = save_screenshot(&path, frame.size(), frame.pixels()) {
                         eprintln!("bobcat: {error}");
                     }
                 }
@@ -199,12 +167,15 @@ impl MacApplication {
     fn command(&mut self, event_loop: &ActiveEventLoop, command: Command) {
         match command {
             Command::Continue => {
-                self.running = true;
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.resume();
+                }
                 println!("Continuing with display vsync.");
-                self.request_redraw();
             }
             Command::Pause => {
-                self.running = false;
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.pause();
+                }
                 println!("Frame clock paused.");
             }
             Command::Frame => {
@@ -230,7 +201,9 @@ impl MacApplication {
     }
 
     fn request_redraw(&self) {
-        if let Some(window) = &self.window {
+        if let Some(renderer) = &self.renderer {
+            renderer.request_frame();
+        } else if let Some(window) = &self.window {
             window.request_redraw();
         }
     }
@@ -238,13 +211,10 @@ impl MacApplication {
     /// Feeds one already-built input event in and repaints if it moved
     /// anything. `ControlFlow::Wait` means nothing else would ask.
     fn dispatch(&mut self, event: InputEvent) {
-        let Some(pipeline) = self.pipeline.as_mut() else {
+        let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
-        pipeline.handle_input(event);
-        if pipeline.needs_frame() {
-            self.request_redraw();
-        }
+        renderer.handle_input(event);
     }
 
     /// A mouse pointer event at the last known cursor position.
@@ -343,7 +313,7 @@ impl MacApplication {
     }
 }
 
-impl ApplicationHandler<UserEvent> for MacApplication {
+impl ApplicationHandler<UserEvent> for HeadedApplication {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if let Err(error) = self.initialize(event_loop) {
             self.fail(event_loop, error);
@@ -374,9 +344,8 @@ impl ApplicationHandler<UserEvent> for MacApplication {
                 self.resize(size)
             }
             WindowEvent::Occluded(occluded) => {
-                self.occluded = occluded;
-                if !occluded {
-                    self.request_redraw();
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.set_occluded(occluded);
                 }
                 Ok(())
             }
@@ -427,229 +396,8 @@ impl ApplicationHandler<UserEvent> for MacApplication {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        // Re-request only while the document has something new to paint: a
-        // static scene must not turn `ControlFlow::Wait` into a permanent
-        // full-refresh render loop.
-        if self.running
-            && !self.occluded
-            && self
-                .pipeline
-                .as_ref()
-                .is_some_and(FramePipeline::needs_frame)
-        {
-            self.request_redraw();
+        if let Some(renderer) = &self.renderer {
+            renderer.about_to_wait();
         }
     }
-}
-
-struct WindowGraphics {
-    context: RenderContext,
-    surface: RenderSurface<'static>,
-    renderer: vello::Renderer,
-    capture: Option<CaptureTarget>,
-}
-
-/// A `COPY_SRC` twin of the surface's render target, on the same device, so
-/// screenshots read back exactly what the window pipeline rendered instead of
-/// re-rendering on a second GPU stack.
-struct CaptureTarget {
-    width: u32,
-    height: u32,
-    texture: vello::wgpu::Texture,
-    view: vello::wgpu::TextureView,
-    blitter: vello::wgpu::util::TextureBlitter,
-}
-
-impl std::fmt::Debug for WindowGraphics {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("WindowGraphics")
-            .field("surface", &self.surface)
-            .finish_non_exhaustive()
-    }
-}
-
-impl WindowGraphics {
-    fn new(window: Arc<Window>, size: PhysicalSize<u32>) -> Result<Self, CliError> {
-        let mut context = RenderContext::new();
-        let surface = pollster::block_on(context.create_surface(
-            window,
-            size.width,
-            size.height,
-            vello::wgpu::PresentMode::AutoVsync,
-        ))
-        .map_err(|error| CliError::Render(error.to_string()))?;
-        let handle = &context.devices[surface.dev_id];
-        let renderer = vello::Renderer::new(&handle.device, renderer_options())
-            .map_err(|error| CliError::Render(error.to_string()))?;
-        Ok(Self {
-            context,
-            surface,
-            renderer,
-            capture: None,
-        })
-    }
-
-    fn resize(&mut self, size: PhysicalSize<u32>) {
-        if size.width != 0
-            && size.height != 0
-            && (self.surface.config.width != size.width
-                || self.surface.config.height != size.height)
-        {
-            self.context
-                .resize_surface(&mut self.surface, size.width, size.height);
-        }
-    }
-
-    fn render(
-        &mut self,
-        window: &Window,
-        scene: &vello::Scene,
-        size: FrameSize,
-    ) -> Result<(), CliError> {
-        if self.surface.config.width != size.width || self.surface.config.height != size.height {
-            self.resize(PhysicalSize::new(size.width, size.height));
-        }
-        let Self {
-            context,
-            surface,
-            renderer,
-            ..
-        } = self;
-        let (surface_texture, reconfigure_after) = match surface.surface.get_current_texture() {
-            vello::wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
-            vello::wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
-            vello::wgpu::CurrentSurfaceTexture::Timeout
-            | vello::wgpu::CurrentSurfaceTexture::Occluded => return Ok(()),
-            vello::wgpu::CurrentSurfaceTexture::Outdated => {
-                context.configure_surface(surface);
-                return Ok(());
-            }
-            vello::wgpu::CurrentSurfaceTexture::Lost => {
-                return Err(CliError::Render(
-                    "the macOS window surface was lost".to_owned(),
-                ));
-            }
-            vello::wgpu::CurrentSurfaceTexture::Validation => {
-                return Err(CliError::Render(
-                    "surface acquisition raised a wgpu validation error".to_owned(),
-                ));
-            }
-        };
-        let handle = &context.devices[surface.dev_id];
-        renderer
-            .render_to_texture(
-                &handle.device,
-                &handle.queue,
-                scene,
-                &surface.target_view,
-                &render_params(Color::WHITE, size.width, size.height),
-            )
-            .map_err(|error| CliError::Render(error.to_string()))?;
-        let output_view = surface_texture
-            .texture
-            .create_view(&vello::wgpu::TextureViewDescriptor::default());
-        let mut encoder =
-            handle
-                .device
-                .create_command_encoder(&vello::wgpu::CommandEncoderDescriptor {
-                    label: Some("bobcat window blit"),
-                });
-        surface.blitter.copy(
-            &handle.device,
-            &mut encoder,
-            &surface.target_view,
-            &output_view,
-        );
-        handle.queue.submit([encoder.finish()]);
-        window.pre_present_notify();
-        surface_texture.present();
-        if reconfigure_after {
-            context.configure_surface(surface);
-        }
-        Ok(())
-    }
-
-    /// Reads back the frame most recently rendered into the surface's target
-    /// texture, on the window's own device, as tightly-packed RGBA8 pixels.
-    fn capture_frame(&mut self, size: FrameSize) -> Result<Vec<u8>, CliError> {
-        let handle = &self.context.devices[self.surface.dev_id];
-        if !self
-            .capture
-            .as_ref()
-            .is_some_and(|capture| capture.width == size.width && capture.height == size.height)
-        {
-            let texture = handle
-                .device
-                .create_texture(&vello::wgpu::TextureDescriptor {
-                    label: Some("bobcat capture target"),
-                    size: vello::wgpu::Extent3d {
-                        width: size.width,
-                        height: size.height,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: vello::wgpu::TextureDimension::D2,
-                    format: vello::wgpu::TextureFormat::Rgba8Unorm,
-                    usage: vello::wgpu::TextureUsages::RENDER_ATTACHMENT
-                        | vello::wgpu::TextureUsages::COPY_SRC,
-                    view_formats: &[],
-                });
-            let view = texture.create_view(&vello::wgpu::TextureViewDescriptor::default());
-            let blitter = vello::wgpu::util::TextureBlitter::new(
-                &handle.device,
-                vello::wgpu::TextureFormat::Rgba8Unorm,
-            );
-            self.capture = Some(CaptureTarget {
-                width: size.width,
-                height: size.height,
-                texture,
-                view,
-                blitter,
-            });
-        }
-        let capture = self
-            .capture
-            .as_ref()
-            .expect("the capture target was just ensured");
-        let mut encoder =
-            handle
-                .device
-                .create_command_encoder(&vello::wgpu::CommandEncoderDescriptor {
-                    label: Some("bobcat capture blit"),
-                });
-        capture.blitter.copy(
-            &handle.device,
-            &mut encoder,
-            &self.surface.target_view,
-            &capture.view,
-        );
-        handle.queue.submit([encoder.finish()]);
-        read_texture(
-            &handle.device,
-            &handle.queue,
-            &capture.texture,
-            size.width,
-            size.height,
-        )
-        .map_err(CliError::Gpu)
-    }
-}
-
-fn non_empty_size(size: PhysicalSize<u32>) -> PhysicalSize<u32> {
-    PhysicalSize::new(size.width.max(1), size.height.max(1))
-}
-
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "stylo and layout use f32 CSS coordinates; winit's finite display scale and the \
-              16384px target cap are far inside f32's useful range"
-)]
-fn viewport_metrics(size: PhysicalSize<u32>, scale_factor: f64) -> (f32, f32, f32) {
-    (
-        (f64::from(size.width) / scale_factor) as f32,
-        (f64::from(size.height) / scale_factor) as f32,
-        scale_factor as f32,
-    )
 }

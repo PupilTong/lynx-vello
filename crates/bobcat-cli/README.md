@@ -1,13 +1,13 @@
 # bobcat-cli
 
 `bobcat-cli` builds the `bobcat` executable. It accepts a local Lynx web bundle
-as a `file:///` URL and renders it through `bobcat-core/quickjs` →
-`lynx-element` → `dom`/`hughie`; DOM owns the Pulsar-backed scene pipeline
-internally, while core only provides the convenience re-export used by the
-CLI's GPU host.
+as a `file:///` URL and renders it through `bobcat-core::renderer`. The CLI
+feeds lifecycle, input, and native window events into that product façade;
+scene freshness, Vello/wgpu submission, display-vsync selection, and headless
+frame pacing are private engine details.
 
 ```sh
-# Native macOS window
+# Native macOS or Linux window
 bobcat -i file:///absolute/path/to/card.web.bundle
 
 # Paced headless session (optionally at a HiDPI scale)
@@ -32,9 +32,9 @@ Continuing at 60 Hz.
 Run `bobcat --help` for all startup options and enter `help` at the prompt for
 all runtime commands.
 
-Headed mode is macOS-only today; it derives the device-pixel ratio from the
-window, while headless mode takes it from `--dpr` (default 1). Only
-screenshots read pixels back to the CPU; normal frames reuse the scene, Vello
+Headed mode supports macOS and Linux (Wayland and X11) and derives the
+device-pixel ratio from the window, while headless mode takes it from `--dpr`
+(default 1). Only screenshots read pixels back to the CPU; normal frames reuse the scene, Vello
 renderer, GPU target, and scratch allocations, skip the GPU entirely while
 the document is unchanged, and wait for each submitted frame so a clock that
 outpaces the GPU cannot pile up work.

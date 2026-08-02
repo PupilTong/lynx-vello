@@ -2,8 +2,9 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
 
+use bobcat_core::renderer::FrameSize;
+
 use crate::CliError;
-use crate::page::FrameSize;
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -23,7 +24,7 @@ pub enum ScreenshotError {
 
 /// Writes one screenshot and reports it, wrapping failures as
 /// [`CliError::Screenshot`] — the single write-and-report tail both the
-/// headless and macOS hosts share.
+/// headless and native-window hosts share.
 pub(crate) fn save_screenshot(path: &Path, size: FrameSize, pixels: &[u8]) -> Result<(), CliError> {
     write_png(path, size.width, size.height, pixels).map_err(|source| CliError::Screenshot {
         path: path.to_owned(),

@@ -11,6 +11,10 @@ publish = false
 [features]
 default = ["quickjs"]
 quickjs = ["dep:quickjs-rust-bridge"]
+# Product-facing frame scheduling and GPU presentation. This is kept separate
+# from `quickjs` so engine-only and cross-platform protocol builds do not pull
+# in a native window backend.
+renderer = ["quickjs", "dep:pollster", "dep:winit"]
 
 [dependencies]
 bytes = { workspace = true }
@@ -21,6 +25,10 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 url = { workspace = true }
+
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+pollster = { workspace = true, optional = true }
+winit = { workspace = true, optional = true }
 
 [dev-dependencies]
 flashbulb = { workspace = true, features = ["render"] }

@@ -13,14 +13,13 @@ name = "bobcat"
 path = "src/main.rs"
 
 [dependencies]
-bobcat-core = { workspace = true, features = ["quickjs"] }
+bobcat-core = { workspace = true, features = ["quickjs", "renderer"] }
 lynx-template-decoder = { workspace = true }
 png = { workspace = true }
-pollster = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 winit = { workspace = true }
 
 [dev-dependencies]

@@ -6,13 +6,13 @@ Rust and pnpm monorepo exploring a native [Lynx](https://lynxjs.org) rendering s
 
 | Crate | Purpose |
 | --- | --- |
-| [`crates/bobcat-core`](crates/bobcat-core) | Native runtime core combining the engine-neutral resource/script/view protocols with `lynx-element`, which owns the downstream `dom` edge. External JavaScript engines implement the GAT-based `ScriptEngine`; the default `quickjs` feature adds the internal QuickJS adapter and main-thread host globals. |
-| [`crates/bobcat-cli`](crates/bobcat-cli) | The `bobcat` executable: loads local `file:///` web bundles through `bobcat-core/quickjs`, submits the document-retained Vello scene to either a macOS window or a paced headless GPU target, and exposes debugger-style frame/screenshot commands. |
+| [`crates/bobcat-core`](crates/bobcat-core) | Native runtime core combining the engine-neutral resource/script/view protocols with `lynx-element`. External JavaScript engines implement `ScriptEngine`; `quickjs` adds the built-in adapter, while `renderer` adds the product embedder façade that privately owns frame scheduling and GPU presentation. |
+| [`crates/bobcat-cli`](crates/bobcat-cli) | The `bobcat` executable: loads local `file:///` web bundles, drives `bobcat-core::renderer` in a macOS/Linux window or headless session, and exposes debugger-style frame/screenshot commands. It never handles a Vello scene or wgpu submission object. |
 | [`crates/lynx-template-decoder`](crates/lynx-template-decoder) | Native Rust decoder for the Lynx **web** binary template (`.web.bundle`), a port of `@lynx-js/web-core`'s `decodeTemplate` incl. the rkyv `StyleInfo` model. |
 | [`crates/dom`](crates/dom) | Generic W3C-DOM-subset `Document<T>`/`Node<T>` tree, standards-oriented Stylo cascade/layout core, and document-owned private paint pipeline. |
 | [`crates/lynx-element`](crates/lynx-element) | The Lynx runtime element layer: `ElementId = u32`, validated Element PAPI operations and handle space, `ElementTree`, `<page>` root policy, view/device construction, and Lynx UA defaults. |
 | [`crates/hughie`](crates/hughie) | Statically-dispatched box-layout engine speaking the stylo fork's computed-value vocabulary: CSS Flexbox, numeric CSS Grid Level 2, Starlight `display: linear` and `display: relative`, and shared leaf/cache/positioned/rounding machinery are implemented. |
-| [`crates/pulsar`](crates/pulsar) | DOM-independent Vello resources and GPU submission: `ImageStore`, Vello re-exports, and the retained headless render-to-texture backend. |
+| [`crates/pulsar`](crates/pulsar) | Internal DOM-independent Vello resources and GPU submission: `ImageStore`, the Vello version boundary, and render-to-texture/readback primitives consumed behind the product renderer. |
 | [`crates/quickjs-rust-bridge`](crates/quickjs-rust-bridge) | Owner-thread-bound Rust wrapper around the pinned QuickJS C submodule, including exact values, sanitized exceptions, pending jobs, and Rust-closure-backed host functions; it is independent of Bobcat and runtime policy. |
 | [`crates/flashbulb`](crates/flashbulb) | Screenshot testing infrastructure: RGBA images, a `pixelmatch` port matching Playwright's tolerances, and golden-file management. This is to lynx-vello's render tests what Playwright is to lynx-stack's `web-core-e2e` and `web-elements`. |
 
@@ -38,7 +38,7 @@ used by `lynx-stack`.
 
 ## Running Bobcat
 
-The headed runner currently opens a native window on macOS:
+The headed runner opens a native window on macOS or Linux (Wayland and X11):
 
 ```sh
 cargo run -p bobcat-cli --bin bobcat -- \
@@ -56,9 +56,11 @@ cargo run -p bobcat-cli --bin bobcat -- \
 Headed and headless sessions accept commands at the `(bobcat)` prompt:
 `continue`, `pause`, `frame`, `screenshot [PATH]`, `set vsync FPS` (headless),
 `show vsync`, `help`, and `quit`. Screenshots are captured interactively from
-the live renderer; there is no one-shot startup flag. The scene builder, GPU
-renderer, and render/readback allocations are reused across frames; pixel
-readback occurs only for screenshots.
+the live renderer; there is no one-shot startup flag. The renderer façade
+reuses scene, GPU, and readback allocations across frames; pixel readback
+occurs only for screenshots. Display-vsync selection, synthetic headless
+pacing, scene freshness, and GPU submission stay inside
+`bobcat-core::renderer`.
 
 The executable deliberately preserves the runtime's current compatibility
 boundary: a real bundle that reaches an unimplemented main-thread global or

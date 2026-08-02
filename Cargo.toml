@@ -127,10 +127,15 @@ thiserror = "2"
 tokio = { version = "1", features = ["io-util", "rt", "sync"] }
 tokio-util = "0.7"
 url = "2"
-# macOS-only window host for `bobcat-cli`. Platform backends are selected by
-# cfg inside winit; the raw-window-handle 0.6 implementation is what wgpu 29
-# consumes through vello.
-winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
+# macOS/Linux window host for the product renderer. Platform backends are
+# selected by cfg inside winit; raw-window-handle 0.6 is what wgpu 29 consumes
+# through vello. Linux enables both native Wayland and X11/XWayland.
+winit = { version = "0.30.13", default-features = false, features = [
+    "rwh_06",
+    "wayland",
+    "wayland-dlopen",
+    "x11",
+] }
 
 # Platform image-decode backends for `crates/image`. Each is consumed only from
 # a `[target.'cfg(…)'.dependencies]` block, so a build for one OS never resolves

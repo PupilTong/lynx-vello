@@ -129,10 +129,17 @@ useful signal for currently-compatible versions of those libraries.
   `default-features = false` excludes QuickJS while preserving all external
   injection contracts. Workspace dependencies disable defaults explicitly;
   only an upper layer that wants the built-in engine enables `quickjs`.
-  The core depends on `lynx-element` rather than directly on `dom`, and
-  directly re-exports `lynx_element::ElementTree` and the
-  `lynx_element::dom`/`pulsar` convenience paths. It has no document alias
-  module, element-host trait, renderer wrapper, or injection seam.
+  The non-default `renderer` feature implies `quickjs` and adds the
+  **product-facing embedder façade**: `RenderProgram`, `RenderRuntime`,
+  `HeadlessRenderer`, and (on macOS/Linux) `WindowRenderer`. That façade privately owns retained-scene
+  freshness, synthetic/display vsync, Vello/wgpu submission, presentation,
+  and explicit RGBA capture. Its public API must never expose
+  `render_if_needed`, `needs_render`, `vello::Scene`, a wgpu device/queue/
+  surface, or a host-driven GPU submission sequence. The core depends on
+  `lynx-element` rather than directly on `dom`, and its crate root deliberately
+  does **not** re-export `ElementTree`, `dom`, or `pulsar`; lower-layer tests
+  import their owning crates directly. It has no document alias or
+  element-host trait, and rendering is concrete rather than injectable.
   `MainThreadRuntime`
   installs the Element PAPI before evaluation, evaluates a `.web.bundle`'s
   `lepusCode.root` inside web-core's wrapper, then runs `processData` →
@@ -178,19 +185,17 @@ useful signal for currently-compatible versions of those libraries.
   The crate must remain independent of Bobcat, the DOM, resources, and runtime
   policy — it knows nothing about Lynx.
 - `crates/bobcat-cli` — the native `bobcat` process shell over
-  `bobcat-core` with its `quickjs` feature enabled; it has no direct
+  `bobcat-core` with its `quickjs` and `renderer` features enabled; it has no direct
   `lynx-element`, DOM, or Pulsar dependency.
   `bobcat -i file:///…` decodes and boots one web bundle; other URL schemes
-  remain rejected at the boundary. One reusable `FramePipeline` owns the
-  QuickJS-backed element runtime and borrows the scene retained by its
-  document-owned private painter, so the macOS headed backend and
-  cross-platform headless backend share script/layout/paint logic rather than
-  maintaining parallel render paths.
-  Headed mode uses a native winit window with display-backed vsync and tracks
-  both logical viewport size and device-pixel ratio. Headless mode uses a
-  configurable synthetic vsync rate, skips catch-up bursts after slow frames,
-  and retains its Vello renderer, render texture, and staging buffer across
-  frames. Both modes expose a GDB-like stdin command prompt (`continue`,
+  remain rejected at the boundary. It calls only the product renderer façade:
+  there is no CLI `FramePipeline`, scene borrow, Vello/wgpu import, freshness
+  check, GPU target, or submission/readback implementation.
+  Headed mode uses a native winit window on **macOS and Linux** (Wayland and
+  X11 enabled); `WindowRenderer` owns display-backed vsync, the surface, and
+  logical↔physical viewport tracking. `HeadlessRenderer` owns the configurable
+  synthetic-vsync clock, skips catch-up bursts after slow frames, and retains
+  its GPU target and staging buffer. Both modes expose a GDB-like stdin command prompt (`continue`,
   `pause`, `frame`, `screenshot`, `help`, `quit`; headless also supports
   `set/show vsync`). Screenshots are captured only through that live prompt;
   there is no one-shot startup flag. PNG readback happens only on a screenshot.
@@ -224,9 +229,11 @@ useful signal for currently-compatible versions of those libraries.
   crash-on-misuse. `ElementTree` never lends out `&mut Document`: a caller that
   removed or moved nodes directly would desynchronise the element arena, the
   page state, and the next PAPI call would panic in the DOM instead of returning
-  `PapiError`. `render_if_needed`/`needs_render`, the guarded `scene` borrow,
-  and `images_mut` delegate to the document without exposing its private
-  Painter, mutation epoch, or mutable DOM.
+  `PapiError`. The lower composition seam delegates
+  `render_if_needed`/`needs_render`, the guarded `scene` borrow, and
+  `images_mut` to the document without exposing its private Painter, mutation
+  epoch, or mutable DOM. `ElementTree` is not re-exported from the Bobcat crate
+  root; none of those operations belongs to the product embedder façade.
   No public `paint_order` exists on either `ElementTree` or `Document`, and
   input builds its temporary hit-test frame internally. It does not impose a runtime
   tree-depth cap; recursive traversal hardening belongs in `dom`/`hughie`.
@@ -253,9 +260,10 @@ useful signal for currently-compatible versions of those libraries.
   `Document<T>` also owns one private concrete `Painter`, including its
   reusable walk scratch, retained `vello::Scene`, and `pulsar::ImageStore`.
   `Document::render` privately builds `PaintOrder` and invokes that painter.
-  The Painter records which private visual epoch its scene represents, so
-  `render_if_needed`/`needs_render` own retained-scene scheduling without
-  publishing that epoch. `scene` lends a guarded shared borrow, while
+  The Painter records which private visual epoch its scene represents, so the
+  lower composition layer can use `render_if_needed`/`needs_render` for
+  retained-scene scheduling without publishing that epoch. `scene` lends a
+  guarded shared borrow inside that layer, while
   `images_mut` is the narrow resource-update seam and invalidates the scene
   conservatively. There is no renderer type parameter,
   `DocumentRenderer` trait, `with_renderer`, public Painter, public visual
