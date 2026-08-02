@@ -47,6 +47,8 @@ JavaScript adapter:
   and owns display-vsync surface selection, presentation, and readback on
   macOS/Linux. Its public frame value is only `CapturedFrame` (size plus RGBA
   bytes), produced on explicit capture.
+  This feature depends directly on `dom` and `pulsar`; `lynx-element` no longer
+  re-exports either layer.
 
 The default `quickjs` feature adds the internal QuickJS implementation,
 `QuickJsLynxView`, and the concrete `quickjs::MainThreadRuntime`. QuickJS-only
@@ -97,10 +99,10 @@ This ownership removes two invalid states the injected design permitted:
 - callers could retain a paint-order snapshot and combine it with newer live
   styles or layout.
 
-`lynx_element::ElementTree` directly owns `Document<ElementId>` and delegates
-`render`, `needs_render`, and `images_mut` without lending out `&mut Document`.
-It has no scene accessor. The renderer façade keeps those lower-layer details
-out of product code.
+`lynx_element::ElementTree` directly owns `Document<ElementId>`. The internal
+composition layer accesses that document directly; `ElementTree` has no
+render, freshness, scene, or image-store forwarding methods. The renderer
+façade keeps the document and its paint APIs out of product code.
 
 ## Frame walkthrough
 

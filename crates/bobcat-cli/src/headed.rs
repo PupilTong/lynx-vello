@@ -6,7 +6,7 @@ use bobcat_core::renderer::{
     DeltaMode, InputEvent, Point2D, PointerKind, PointerPhase, WindowRenderer,
 };
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
@@ -119,30 +119,10 @@ impl HeadedApplication {
 
         self.renderer = Some(renderer);
         self.window = Some(window);
-        self.request_redraw();
         Ok(())
     }
 
-    fn resize(&mut self, physical_size: PhysicalSize<u32>) -> Result<(), CliError> {
-        if physical_size.width == 0 || physical_size.height == 0 {
-            return Ok(());
-        }
-        self.renderer
-            .as_mut()
-            .expect("the renderer is installed with the window")
-            .resize(physical_size)
-            .map_err(CliError::from)
-    }
-
-    fn redraw(&mut self) -> Result<(), CliError> {
-        if self.pending_screenshots.is_empty() {
-            return self
-                .renderer
-                .as_mut()
-                .expect("redraw events arrive only after initialization")
-                .redraw()
-                .map_err(CliError::from);
-        }
+    fn capture_pending(&mut self) {
         // A screenshot failure must not tear down the session: report it at
         // the prompt like any other bad command, and let one bad path leave
         // the other queued captures unharmed.
@@ -161,7 +141,6 @@ impl HeadedApplication {
             }
             Err(error) => eprintln!("bobcat: screenshot capture failed: {error}"),
         }
-        Ok(())
     }
 
     fn command(&mut self, event_loop: &ActiveEventLoop, command: Command) {
@@ -179,7 +158,9 @@ impl HeadedApplication {
                 println!("Frame clock paused.");
             }
             Command::Frame => {
-                self.request_redraw();
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.render_one_frame();
+                }
                 println!("Rendering one frame.");
             }
             Command::Screenshot(path) => {
@@ -201,9 +182,7 @@ impl HeadedApplication {
     }
 
     fn request_redraw(&self) {
-        if let Some(renderer) = &self.renderer {
-            renderer.request_frame();
-        } else if let Some(window) = &self.window {
+        if let Some(window) = &self.window {
             window.request_redraw();
         }
     }
@@ -329,27 +308,26 @@ impl ApplicationHandler<UserEvent> for HeadedApplication {
         if self.window.as_ref().map(|window| window.id()) != Some(window_id) {
             return;
         }
+        if matches!(&event, WindowEvent::RedrawRequested) && !self.pending_screenshots.is_empty() {
+            self.capture_pending();
+            return;
+        }
+        if let Some(renderer) = self.renderer.as_mut() {
+            match renderer.handle_window_event(&event) {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(error) => {
+                    self.fail(event_loop, error.into());
+                    return;
+                }
+            }
+        }
+
         let result = match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
                 return;
             }
-            WindowEvent::Resized(size) => self.resize(size),
-            WindowEvent::ScaleFactorChanged { .. } => {
-                let size = self
-                    .window
-                    .as_ref()
-                    .expect("the event belongs to the current window")
-                    .inner_size();
-                self.resize(size)
-            }
-            WindowEvent::Occluded(occluded) => {
-                if let Some(renderer) = self.renderer.as_mut() {
-                    renderer.set_occluded(occluded);
-                }
-                Ok(())
-            }
-            WindowEvent::RedrawRequested => self.redraw(),
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer = Some(position);
                 self.pointer_event(PointerPhase::Move);
@@ -392,12 +370,6 @@ impl ApplicationHandler<UserEvent> for HeadedApplication {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::Command(command) => self.command(event_loop, command),
-        }
-    }
-
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(renderer) = &self.renderer {
-            renderer.about_to_wait();
         }
     }
 }

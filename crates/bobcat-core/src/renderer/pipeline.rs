@@ -1,8 +1,8 @@
 use std::cell::Ref;
 
-use lynx_element::dom::input;
-use lynx_element::dom::pulsar::vello::Scene;
+use dom::input;
 use lynx_element::{ElementTree, PageConfig, Viewport};
+use pulsar::vello::Scene;
 
 use super::RenderError;
 use crate::quickjs::MainThreadRuntime;
@@ -166,14 +166,11 @@ impl RenderRuntime {
     }
 
     pub(super) fn prepare_frame(&mut self) -> PreparedFrame<'_> {
-        let changed = {
-            let mut elements = self.runtime.elements_mut();
-            let changed = elements.needs_render();
-            if changed {
-                elements.render();
-            }
-            changed
-        };
+        let changed = self
+            .runtime
+            .elements_mut()
+            .document_mut()
+            .render_if_needed();
         PreparedFrame {
             elements: self.runtime.elements(),
             size: self.frame_size,
@@ -182,7 +179,7 @@ impl RenderRuntime {
     }
 
     pub(super) fn needs_frame(&self) -> bool {
-        self.runtime.elements().needs_render()
+        self.runtime.elements().document().needs_render()
     }
 }
 

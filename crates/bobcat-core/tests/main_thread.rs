@@ -27,7 +27,7 @@ fn page_child_tags(elements: &ElementTree) -> Vec<String> {
             elements
                 .document()
                 .get(child)
-                .and_then(lynx_element::dom::Node::tag_name)
+                .and_then(dom::Node::tag_name)
                 .unwrap_or_default()
                 .to_owned()
         })

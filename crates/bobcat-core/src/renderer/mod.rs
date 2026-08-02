@@ -12,14 +12,12 @@ mod window;
 
 use std::fmt;
 
+pub use dom::Point2D;
+pub use dom::input::{DeltaMode, InputEvent, InputResponse, PointerKind, PointerPhase};
 pub use headless::HeadlessRenderer;
-pub use lynx_element::dom::Point2D;
-pub use lynx_element::dom::input::{
-    DeltaMode, InputEvent, InputResponse, PointerKind, PointerPhase,
-};
-use lynx_element::dom::pulsar::gpu::GpuError;
 pub use lynx_element::{PageConfig, Viewport};
 pub use pipeline::{CapturedFrame, FrameSize, RenderProgram, RenderRuntime};
+use pulsar::gpu::GpuError;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub use window::WindowRenderer;
 

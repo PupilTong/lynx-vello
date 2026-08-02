@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::mpsc;
 
 use bobcat_core::renderer::HeadlessRenderer;
 
@@ -26,24 +26,8 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
     console.prompt();
 
     loop {
-        let command = if renderer.is_running() {
-            match receiver.recv_timeout(renderer.time_until_vsync()) {
-                Ok(command) => Some(command),
-                Err(RecvTimeoutError::Timeout) => {
-                    renderer.on_vsync()?;
-                    None
-                }
-                Err(RecvTimeoutError::Disconnected) => return Ok(()),
-            }
-        } else {
-            match receiver.recv() {
-                Ok(command) => Some(command),
-                Err(_) => return Ok(()),
-            }
-        };
-
-        let Some(command) = command else {
-            continue;
+        let Some(command) = renderer.wait(&receiver)? else {
+            return Ok(());
         };
         match command {
             Command::Continue => {

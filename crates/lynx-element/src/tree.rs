@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use dom::{self, Document, ImageStore, NodeId, StylesheetOrigin};
+use dom::{self, Document, NodeId, StylesheetOrigin};
 
 use crate::arena::{ElementArena, LynxElement};
 use crate::device::Viewport;
@@ -80,28 +80,15 @@ impl ElementTree {
         }
     }
 
-    /// The underlying document, for style/layout/paint queries.
+    /// The underlying document.
     #[must_use]
     pub const fn document(&self) -> &Document<ElementId> {
         &self.document
     }
 
-    /// Renders the current tree.
-    pub fn render(&mut self) {
-        self.document.render();
-    }
-
-    /// Whether the document has visual changes not represented by its
-    /// retained scene yet.
-    #[must_use]
-    pub fn needs_render(&self) -> bool {
-        self.document.needs_render()
-    }
-
-    /// Registers or updates decoded images without exposing DOM topology or
-    /// its private painter.
-    pub fn images_mut(&mut self) -> &mut ImageStore {
-        self.document.images_mut()
+    /// The underlying document, mutably.
+    pub fn document_mut(&mut self) -> &mut Document<ElementId> {
+        &mut self.document
     }
 
     /// Feeds one host input event in, building the private visual frame needed

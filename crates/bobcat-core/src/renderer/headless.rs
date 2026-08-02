@@ -1,8 +1,9 @@
 use std::num::NonZeroU32;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use lynx_element::dom::pulsar::gpu::Headless;
-use lynx_element::dom::pulsar::vello::peniko::Color;
+use pulsar::gpu::Headless;
+use pulsar::vello::peniko::Color;
 
 use super::pipeline::{CapturedFrame, RenderRuntime};
 use super::{InputEvent, InputResponse, RenderError};
@@ -53,11 +54,6 @@ impl HeadlessRenderer {
         self.clock.set_rate(rate);
     }
 
-    #[must_use]
-    pub const fn is_running(&self) -> bool {
-        self.running
-    }
-
     pub fn pause(&mut self) {
         self.running = false;
     }
@@ -67,21 +63,22 @@ impl HeadlessRenderer {
         self.clock.restart();
     }
 
-    /// Time until the engine's next synthetic display opportunity.
-    #[must_use]
-    pub fn time_until_vsync(&self) -> Duration {
-        self.clock.time_until_tick()
-    }
-
-    /// Advances one synthetic-vsync opportunity. Scene freshness and GPU
-    /// submission are resolved internally.
-    pub fn on_vsync(&mut self) -> Result<(), RenderError> {
-        if !self.running {
-            return Ok(());
+    /// Waits for the next host command while advancing the internal frame
+    /// clock. Returns `None` when the sender disconnects.
+    pub fn wait<T>(&mut self, receiver: &Receiver<T>) -> Result<Option<T>, RenderError> {
+        loop {
+            if !self.running {
+                return Ok(receiver.recv().ok());
+            }
+            match receiver.recv_timeout(self.clock.time_until_tick()) {
+                Ok(command) => return Ok(Some(command)),
+                Err(RecvTimeoutError::Disconnected) => return Ok(None),
+                Err(RecvTimeoutError::Timeout) => {
+                    self.render(false)?;
+                    self.clock.advance();
+                }
+            }
         }
-        self.render(false)?;
-        self.clock.advance();
-        Ok(())
     }
 
     /// Produces one frame even while paused and restarts the next deadline.

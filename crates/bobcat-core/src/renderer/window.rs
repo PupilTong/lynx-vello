@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
-use lynx_element::dom::pulsar::gpu::{read_texture, render_params, renderer_options};
-use lynx_element::dom::pulsar::vello;
-use lynx_element::dom::pulsar::vello::peniko::Color;
-use lynx_element::dom::pulsar::vello::util::{RenderContext, RenderSurface};
+use pulsar::gpu::{read_texture, render_params, renderer_options};
+use pulsar::vello;
+use pulsar::vello::peniko::Color;
+use pulsar::vello::util::{RenderContext, RenderSurface};
 use winit::dpi::PhysicalSize;
+use winit::event::WindowEvent;
 use winit::window::Window;
 
 use super::pipeline::{CapturedFrame, FrameSize, RenderProgram, RenderRuntime};
@@ -19,6 +20,7 @@ pub struct WindowRenderer {
     graphics: WindowGraphics,
     running: bool,
     occluded: bool,
+    single_frame_requested: bool,
 }
 
 impl std::fmt::Debug for WindowRenderer {
@@ -48,19 +50,30 @@ impl WindowRenderer {
             graphics,
             running: true,
             occluded: false,
+            single_frame_requested: false,
         };
         renderer.request_frame();
         Ok(renderer)
     }
 
-    #[must_use]
-    pub fn window(&self) -> &Window {
-        &self.window
+    /// Handles renderer-owned native window events. Returns whether the event
+    /// was consumed.
+    pub fn handle_window_event(&mut self, event: &WindowEvent) -> Result<bool, RenderError> {
+        match event {
+            WindowEvent::Resized(size) => self.resize(*size).map(|()| true),
+            WindowEvent::ScaleFactorChanged { .. } => {
+                self.resize(self.window.inner_size()).map(|()| true)
+            }
+            WindowEvent::Occluded(occluded) => {
+                self.set_occluded(*occluded);
+                Ok(true)
+            }
+            WindowEvent::RedrawRequested => self.redraw().map(|()| true),
+            _ => Ok(false),
+        }
     }
 
-    /// Applies a native resize and schedules the resulting frame. Empty sizes
-    /// are ignored while a window is minimized.
-    pub fn resize(&mut self, size: PhysicalSize<u32>) -> Result<(), RenderError> {
+    fn resize(&mut self, size: PhysicalSize<u32>) -> Result<(), RenderError> {
         if size.width == 0 || size.height == 0 {
             return Ok(());
         }
@@ -81,9 +94,11 @@ impl WindowRenderer {
         response
     }
 
-    /// Handles one native redraw opportunity and presents through the private
-    /// display-vsync surface.
-    pub fn redraw(&mut self) -> Result<(), RenderError> {
+    fn redraw(&mut self) -> Result<(), RenderError> {
+        let single_frame = std::mem::take(&mut self.single_frame_requested);
+        if (!self.running || self.occluded) && !single_frame {
+            return Ok(());
+        }
         self.draw(false).map(|_| ())
     }
 
@@ -102,25 +117,21 @@ impl WindowRenderer {
         self.request_frame();
     }
 
-    pub fn set_occluded(&mut self, occluded: bool) {
+    /// Schedules one frame even while rendering is paused.
+    pub fn render_one_frame(&mut self) {
+        self.single_frame_requested = true;
+        self.request_frame();
+    }
+
+    fn set_occluded(&mut self, occluded: bool) {
         self.occluded = occluded;
         if !occluded {
             self.request_frame();
         }
     }
 
-    /// Schedules an explicit frame (for example, a debugger single-step).
-    pub fn request_frame(&self) {
+    fn request_frame(&self) {
         self.window.request_redraw();
-    }
-
-    /// Called before the native event loop sleeps. Future animation and rAF
-    /// mutations can make the retained frame stale without exposing that bit
-    /// to the embedder; this method resolves it and requests display vsync.
-    pub fn about_to_wait(&self) {
-        if self.running && !self.occluded && self.runtime.needs_frame() {
-            self.request_frame();
-        }
     }
 
     fn draw(&mut self, capture: bool) -> Result<Option<CapturedFrame>, RenderError> {

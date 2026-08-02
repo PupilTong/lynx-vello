@@ -64,8 +64,6 @@ mod ua;
 /// A Lynx element's stable unique id and Element-PAPI handle.
 pub type ElementId = u32;
 
-pub use dom;
-
 pub use crate::arena::LynxElement;
 pub use crate::device::Viewport;
 pub use crate::tree::{ElementTree, PapiError};

@@ -226,11 +226,13 @@ name = "bobcat-core"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "dom",
  "flashbulb",
  "http",
  "lynx-element",
  "lynx-template-decoder",
  "pollster",
+ "pulsar",
  "quickjs-rust-bridge",
  "thiserror 2.0.18",
  "tokio",

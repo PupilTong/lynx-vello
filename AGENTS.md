@@ -135,11 +135,10 @@ useful signal for currently-compatible versions of those libraries.
   freshness, synthetic/display vsync, Vello/wgpu submission, presentation,
   and explicit RGBA capture. Its public API must never expose
   `render_if_needed`, `needs_render`, `vello::Scene`, a wgpu device/queue/
-  surface, or a host-driven GPU submission sequence. The core depends on
-  `lynx-element` rather than directly on `dom`, and its crate root deliberately
-  does **not** re-export `ElementTree`, `dom`, or `pulsar`; lower-layer tests
-  import their owning crates directly. It has no document alias or
-  element-host trait, and rendering is concrete rather than injectable.
+  surface, or a host-driven GPU submission sequence. The `renderer` feature
+  depends directly on `dom` and `pulsar`; the crate root does **not** re-export
+  `ElementTree`, `dom`, or `pulsar`. It has no document alias or element-host
+  trait, and rendering is concrete rather than injectable.
   `MainThreadRuntime`
   installs the Element PAPI before evaluation, evaluates a `.web.bundle`'s
   `lepusCode.root` inside web-core's wrapper, then runs `processData` →
@@ -226,14 +225,10 @@ useful signal for currently-compatible versions of those libraries.
   may reuse its private `NodeId` slots;
   every fallible PAPI entry returns `PapiError` instead of panicking, because
   the main-thread script is untrusted input and the DOM core is
-  crash-on-misuse. `ElementTree` never lends out `&mut Document`: a caller that
-  removed or moved nodes directly would desynchronise the element arena, the
-  page state, and the next PAPI call would panic in the DOM instead of returning
-  `PapiError`. The lower composition seam delegates `render`, `needs_render`,
-  and `images_mut` without exposing mutable DOM; retained-scene access stays on
-  the read-only document query surface. `ElementTree` is not re-exported from
-  the Bobcat crate root; none of those operations belongs to the product
-  embedder façade.
+  crash-on-misuse. The internal composition layer accesses the owned
+  `Document` directly through `document`/`document_mut`; `ElementTree` does not
+  forward render, freshness, scene, or image-store APIs. Neither `ElementTree`
+  nor `dom` is re-exported from the Bobcat crate root.
   No public `paint_order` exists on either `ElementTree` or `Document`, and
   input builds its temporary hit-test frame internally. It does not impose a runtime
   tree-depth cap; recursive traversal hardening belongs in `dom`/`hughie`.
