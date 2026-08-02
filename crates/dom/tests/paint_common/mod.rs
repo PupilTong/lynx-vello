@@ -43,7 +43,7 @@ impl FontMetricsProvider for TestFontMetricsProvider {
 }
 
 #[must_use]
-pub fn device(width: f32, height: f32) -> Device {
+pub(super) fn device(width: f32, height: f32) -> Device {
     Device::new(
         MediaType::screen(),
         QuirksMode::NoQuirks,
@@ -59,14 +59,14 @@ pub fn device(width: f32, height: f32) -> Device {
 }
 
 #[derive(Debug)]
-pub struct Doc {
-    pub dom: Document<()>,
-    pub root: NodeId,
+pub(super) struct Doc {
+    pub(super) dom: Document<()>,
+    pub(super) root: NodeId,
 }
 
 impl Doc {
     #[must_use]
-    pub fn with_css(css: &str) -> Self {
+    pub(super) fn with_css(css: &str) -> Self {
         Self::with_css_sized(css, 800.0, 600.0)
     }
 
@@ -74,7 +74,7 @@ impl Doc {
     /// frame from the document's own device, so a screenshot case that wants a
     /// specific canvas has to say so here.
     #[must_use]
-    pub fn with_css_sized(css: &str, width: f32, height: f32) -> Self {
+    pub(super) fn with_css_sized(css: &str, width: f32, height: f32) -> Self {
         let mut dom = Document::new(device(width, height));
         let root = dom.create_element("page", ());
         dom.append_document_element(root);
@@ -82,13 +82,13 @@ impl Doc {
         Self { dom, root }
     }
 
-    pub fn el(&mut self, parent: NodeId, class: &str) -> NodeId {
+    pub(super) fn el(&mut self, parent: NodeId, class: &str) -> NodeId {
         self.el_tag(parent, "view", class)
     }
 
     /// [`Self::el`] with an explicit tag, for cases where the tag is the point
     /// — a replaced `img`, say, whose UA rules the case's own CSS supplies.
-    pub fn el_tag(&mut self, parent: NodeId, tag: &str, class: &str) -> NodeId {
+    pub(super) fn el_tag(&mut self, parent: NodeId, tag: &str, class: &str) -> NodeId {
         let id = self.dom.create_element(tag, ());
         for name in class.split_whitespace() {
             self.dom.add_class(id, name);
@@ -97,7 +97,7 @@ impl Doc {
         id
     }
 
-    pub fn text(&mut self, parent: NodeId, text: &str) -> NodeId {
+    pub(super) fn text(&mut self, parent: NodeId, text: &str) -> NodeId {
         let id = self.dom.create_text_node(text, ());
         self.dom.append_child(parent, id);
         id

@@ -3,7 +3,7 @@
 
 #![allow(dead_code)]
 
-use dom::{Document, FlushSummary, NodeId, StylesheetOrigin};
+use dom::{Document, NodeId, StylesheetOrigin};
 use euclid::{Scale, Size2D};
 use selectors::matching::{
     MatchingContext, MatchingForInvalidation, MatchingMode, NeedsSelectorFlags, SelectorCaches,
@@ -28,17 +28,17 @@ use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_traits::{CSSPixel, DevicePixel};
 
 #[must_use]
-pub fn url_data() -> UrlExtraData {
+pub(crate) fn url_data() -> UrlExtraData {
     UrlExtraData::from(url::Url::parse("about:blank").expect("about:blank is a valid URL"))
 }
 
 #[must_use]
-pub fn device(width: f32, height: f32) -> Device {
+pub(crate) fn device(width: f32, height: f32) -> Device {
     device_with(width, height, 1.0, PrefersColorScheme::Light)
 }
 
 #[must_use]
-pub fn device_with(
+pub(crate) fn device_with(
     width: f32,
     height: f32,
     device_pixel_ratio: f32,
@@ -59,7 +59,7 @@ pub fn device_with(
 }
 
 #[derive(Debug)]
-pub struct TestFontMetricsProvider;
+pub(crate) struct TestFontMetricsProvider;
 
 impl FontMetricsProvider for TestFontMetricsProvider {
     fn query_font_metrics(
@@ -84,41 +84,41 @@ impl FontMetricsProvider for TestFontMetricsProvider {
 /// Every mutation goes through `Document` methods, which carry their own
 /// snapshot/invalidation bookkeeping.
 #[derive(Debug)]
-pub struct Doc {
-    pub dom: Document<()>,
-    pub root: NodeId,
+pub(crate) struct Doc {
+    pub(crate) dom: Document<()>,
+    pub(crate) root: NodeId,
 }
 
 impl Doc {
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::with_device(device(800.0, 600.0))
     }
 
     #[must_use]
-    pub fn with_css(css: &str) -> Self {
+    pub(crate) fn with_css(css: &str) -> Self {
         let mut doc = Self::new();
         doc.add_css(css);
         doc
     }
 
     #[must_use]
-    pub fn with_device(device: Device) -> Self {
+    pub(crate) fn with_device(device: Device) -> Self {
         let mut dom = Document::new(device);
         let root = dom.create_element("page", ());
         dom.append_document_element(root);
         Self { dom, root }
     }
 
-    pub fn add_css(&mut self, css: &str) {
+    pub(crate) fn add_css(&mut self, css: &str) {
         self.dom.add_stylesheet(css, StylesheetOrigin::Author);
     }
 
-    pub fn add_ua_css(&mut self, css: &str) {
+    pub(crate) fn add_ua_css(&mut self, css: &str) {
         self.dom.add_stylesheet(css, StylesheetOrigin::UserAgent);
     }
 
-    pub fn el(&mut self, parent: NodeId, spec: &str) -> NodeId {
+    pub(crate) fn el(&mut self, parent: NodeId, spec: &str) -> NodeId {
         let parsed = NodeSpec::parse(spec);
         let id = self.dom.create_element(&parsed.tag, ());
         if let Some(id_attribute) = parsed.id {
@@ -134,16 +134,16 @@ impl Doc {
         id
     }
 
-    pub fn els(&mut self, parent: NodeId, specs: &[&str]) -> Vec<NodeId> {
+    pub(crate) fn els(&mut self, parent: NodeId, specs: &[&str]) -> Vec<NodeId> {
         specs.iter().map(|spec| self.el(parent, spec)).collect()
     }
 
-    pub fn flush(&mut self) -> FlushSummary {
-        self.dom.flush_styles()
+    pub(crate) fn flush(&mut self) {
+        self.dom.layout();
     }
 
     #[must_use]
-    pub fn style(&self, id: NodeId) -> Arc<ComputedValues> {
+    pub(crate) fn style(&self, id: NodeId) -> Arc<ComputedValues> {
         self.dom
             .get(id)
             .expect("node id is live")
@@ -152,7 +152,7 @@ impl Doc {
     }
 
     #[must_use]
-    pub fn value(&self, id: NodeId, longhand: &str) -> String {
+    pub(crate) fn value(&self, id: NodeId, longhand: &str) -> String {
         let property = PropertyId::parse_enabled_for_all_content(longhand)
             .unwrap_or_else(|()| panic!("unknown property `{longhand}`"));
         let declaration_id = property
@@ -163,12 +163,12 @@ impl Doc {
     }
 
     #[must_use]
-    pub fn color(&self, id: NodeId) -> AbsoluteColor {
+    pub(crate) fn color(&self, id: NodeId) -> AbsoluteColor {
         self.style(id).clone_color()
     }
 
     #[must_use]
-    pub fn matches(&self, id: NodeId, selector: &str) -> bool {
+    pub(crate) fn matches(&self, id: NodeId, selector: &str) -> bool {
         let list = SelectorParser::parse_author_origin_no_namespace(selector, &url_data())
             .unwrap_or_else(|_| panic!("selector `{selector}` must parse"));
         let node = self.dom.get(id).expect("node id is live");
@@ -186,31 +186,31 @@ impl Doc {
     }
 
     #[must_use]
-    pub fn selector_parses(selector: &str) -> bool {
+    pub(crate) fn selector_parses(selector: &str) -> bool {
         SelectorParser::parse_author_origin_no_namespace(selector, &url_data()).is_ok()
     }
 
-    pub fn add_class(&mut self, id: NodeId, class: &str) {
+    pub(crate) fn add_class(&mut self, id: NodeId, class: &str) {
         self.dom.add_class(id, class);
     }
 
-    pub fn remove_class(&mut self, id: NodeId, class: &str) {
+    pub(crate) fn remove_class(&mut self, id: NodeId, class: &str) {
         self.dom.remove_class(id, class);
     }
 
-    pub fn set_id(&mut self, id: NodeId, value: Option<&str>) {
+    pub(crate) fn set_id(&mut self, id: NodeId, value: Option<&str>) {
         self.dom.set_id_attribute(id, value);
     }
 
-    pub fn set_attr(&mut self, id: NodeId, name: &str, value: &str) {
+    pub(crate) fn set_attr(&mut self, id: NodeId, name: &str, value: &str) {
         self.dom.set_attribute(id, name, value);
     }
 
-    pub fn remove_attr(&mut self, id: NodeId, name: &str) {
+    pub(crate) fn remove_attr(&mut self, id: NodeId, name: &str) {
         self.dom.remove_attribute(id, name);
     }
 
-    pub fn set_inline(&mut self, id: NodeId, css: &str) {
+    pub(crate) fn set_inline(&mut self, id: NodeId, css: &str) {
         self.dom.set_inline_style(id, css);
     }
 }
@@ -276,7 +276,7 @@ impl NodeSpec {
 }
 
 #[must_use]
-pub fn specified(property: &str, value: &str) -> Option<String> {
+pub(crate) fn specified(property: &str, value: &str) -> Option<String> {
     let css = format!("{property}: {value}");
     let block = parse_style_attribute(
         &css,
@@ -295,12 +295,20 @@ pub fn specified(property: &str, value: &str) -> Option<String> {
 }
 
 #[must_use]
-pub fn parses(property: &str, value: &str) -> bool {
+pub(crate) fn parses(property: &str, value: &str) -> bool {
     specified(property, value).is_some()
 }
 
 #[must_use]
-pub fn specificity(selector: &str) -> Option<(u32, u32, u32)> {
+pub(crate) fn property_is_supported(name: &str) -> bool {
+    matches!(
+        PropertyId::parse_unchecked(name, None),
+        Ok(PropertyId::NonCustom(_))
+    )
+}
+
+#[must_use]
+pub(crate) fn specificity(selector: &str) -> Option<(u32, u32, u32)> {
     let list = SelectorParser::parse_author_origin_no_namespace(selector, &url_data()).ok()?;
     let selector = list.slice().first()?;
     let packed = selector.specificity();
@@ -312,7 +320,7 @@ pub fn specificity(selector: &str) -> Option<(u32, u32, u32)> {
 }
 
 #[must_use]
-pub fn media_matches_on(
+pub(crate) fn media_matches_on(
     query: &str,
     width: f32,
     height: f32,
@@ -321,24 +329,34 @@ pub fn media_matches_on(
 ) -> bool {
     const PROBE: &str = ".probe { color: rgb(1, 2, 3) }";
     let mut doc: Document<()> = Document::new(device_with(width, height, dpr, scheme));
-    doc.add_stylesheet_with_media(PROBE, StylesheetOrigin::Author, query);
+    let css = if query.trim().is_empty() {
+        PROBE.to_owned()
+    } else {
+        format!("@media {query} {{ {PROBE} }}")
+    };
+    doc.add_stylesheet(&css, StylesheetOrigin::Author);
+    let root = doc.create_element("page", ());
     let probe = doc.create_element("view", ());
     doc.add_class(probe, "probe");
-    let style = doc.resolve_style(doc.get(probe).expect("fresh node"), None);
-    style.clone_color() == rgb(1, 2, 3)
+    doc.append_child(root, probe);
+    doc.append_document_element(root);
+    doc.layout();
+    doc.get(probe)
+        .and_then(dom::Node::computed_style)
+        .is_some_and(|style| style.clone_color() == rgb(1, 2, 3))
 }
 
 #[must_use]
-pub fn media_matches(query: &str) -> bool {
+pub(crate) fn media_matches(query: &str) -> bool {
     media_matches_on(query, 800.0, 600.0, 1.0, PrefersColorScheme::Light)
 }
 
 #[must_use]
-pub fn rgb(r: u8, g: u8, b: u8) -> AbsoluteColor {
+pub(crate) fn rgb(r: u8, g: u8, b: u8) -> AbsoluteColor {
     AbsoluteColor::srgb_legacy(r, g, b, 1.0)
 }
 
 #[must_use]
-pub fn rgba(r: u8, g: u8, b: u8, alpha: f32) -> AbsoluteColor {
+pub(crate) fn rgba(r: u8, g: u8, b: u8, alpha: f32) -> AbsoluteColor {
     AbsoluteColor::srgb_legacy(r, g, b, alpha)
 }

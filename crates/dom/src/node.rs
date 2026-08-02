@@ -202,13 +202,6 @@ fn stale_layout_style_pointer() -> *mut ComputedValues {
         .cast_mut()
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum NodeType {
-    Document,
-    Element,
-    Text,
-}
-
 struct DocumentNodeData {
     lock: StdArc<SharedRwLock>,
     url_data: UrlExtraData,
@@ -412,15 +405,6 @@ impl<T> Node<T> {
     }
 
     #[must_use]
-    pub fn node_type(&self) -> NodeType {
-        match &self.data {
-            NodeData::Document(_) => NodeType::Document,
-            NodeData::Element(_) => NodeType::Element,
-            NodeData::Text => NodeType::Text,
-        }
-    }
-
-    #[must_use]
     pub fn is_document(&self) -> bool {
         matches!(&self.data, NodeData::Document(_))
     }
@@ -446,7 +430,7 @@ impl<T> Node<T> {
     }
 
     #[must_use]
-    pub fn local_name(&self) -> Option<&LocalName> {
+    fn local_name(&self) -> Option<&LocalName> {
         self.local_name.as_ref()
     }
 
@@ -642,15 +626,6 @@ impl<T> Node<T> {
         matches!(self.content.as_deref(), Some(NodeContent::Replaced(_)))
     }
 
-    /// Marks this node replaced, keeping any natural size it already carries.
-    pub(crate) fn mark_replaced(&mut self) -> bool {
-        if self.is_replaced() {
-            return false;
-        }
-        self.content = Some(Box::new(NodeContent::Replaced(NaturalSize::NONE)));
-        true
-    }
-
     /// Installs intrinsic dimensions, and makes the node replaced if it is not
     /// already. [`NaturalSize::NONE`] clears the dimensions but keeps replaced
     /// status — use `set_element_text_content` to make a node non-replaced.
@@ -801,7 +776,11 @@ impl<T> Node<T> {
     }
 
     #[must_use]
-    pub fn children(&self) -> ChildrenIter<'_, T> {
+    pub fn children(&self) -> impl ExactSizeIterator<Item = &Node<T>> {
+        self.children_iter()
+    }
+
+    pub(crate) fn children_iter(&self) -> ChildrenIter<'_, T> {
         ChildrenIter {
             tree: self.tree(),
             children: &self.children,
@@ -814,7 +793,16 @@ impl<T> fmt::Debug for Node<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Node")
             .field("id", &self.id)
-            .field("node_type", &self.node_type())
+            .field(
+                "node_type",
+                &if self.is_document() {
+                    "document"
+                } else if self.is_element() {
+                    "element"
+                } else {
+                    "text"
+                },
+            )
             .field("tag", &self.tag_name())
             .field("text", &self.text())
             .field("classes", &self.classes)
@@ -843,6 +831,7 @@ impl<T> std::hash::Hash for Node<T> {
 
 /// The children iterator ([`Node::children`]); also what stylo's restyle
 /// traversal walks.
+#[doc(hidden)]
 pub struct ChildrenIter<'a, T> {
     tree: &'a Slab<Node<T>>,
     children: &'a [NodeId],
@@ -963,7 +952,7 @@ mod tests {
         let mut document = Document::<()>::new(crate::document::tests::device());
         let root = document.create_element("page", ());
         document.append_document_element(root);
-        document.flush_styles();
+        document.flush_styles_with_damage_sink(&mut |_, _| {});
 
         let node = document.get(root).expect("root remains live");
         assert!(node.layout_computed_style().is_some());
@@ -988,9 +977,9 @@ mod tests {
         document.append_child(root, stale);
         let dirty_sibling = document.create_element("view", ());
         document.append_child(root, dirty_sibling);
-        document.flush_styles();
+        document.flush_styles_with_damage_sink(&mut |_, _| {});
         document.detach(stale);
-        document.flush_styles();
+        document.flush_styles_with_damage_sink(&mut |_, _| {});
 
         {
             let node = document.get(stale).expect("child remains live");
@@ -999,7 +988,7 @@ mod tests {
             data.styles.primary = None;
         }
         document.set_inline_style(dirty_sibling, "width: 1px");
-        document.flush_styles();
+        document.flush_styles_with_damage_sink(&mut |_, _| {});
 
         let stale = document.get(stale).expect("child remains live");
         assert!(

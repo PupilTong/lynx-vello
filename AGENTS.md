@@ -238,7 +238,9 @@ useful signal for currently-compatible versions of those libraries.
   covers only the three documented Lynx computed defaults. It must not absorb
   DOM/CSS core behavior, and nothing below it may depend on it.
 - `crates/dom` — generic W3C-DOM-subset document tree and
-  standards-oriented CSS computation core. Owns a fixed-address boxed
+  standards-oriented CSS computation core. `docs/dom-public-api.md` is the
+  authoritative normal-build versus test-feature API boundary. It owns a
+  fixed-address boxed
   `TreeArenas<T>` containing three `Slab`s: a primary `Slab<Node<T>>` (slot
   zero is the real DOM Document node and carries its node-visible style
   context; later slots are element/text nodes), plus NodeId-aligned payload
@@ -252,9 +254,9 @@ useful signal for currently-compatible versions of those libraries.
   primary nodes; layout/text state does not.
   `Document<T>` also owns one private concrete `Painter`, including its
   reusable walk scratch, retained `vello::Scene`, and `pulsar::ImageStore`.
-  `Document::render` privately builds `PaintOrder` and invokes that painter.
-  The Painter records which private visual epoch its scene represents, so
-  `render_if_needed`/`needs_render` own retained-scene scheduling without
+  `render` privately builds `PaintOrder` and invokes that painter
+  only for a dirty scene. The Painter records which private visual epoch its
+  scene represents, so `render`/`needs_render` own retained-scene scheduling without
   publishing that epoch. `scene` lends a guarded shared borrow, while
   `images_mut` is the narrow resource-update seam and invalidates the scene
   conservatively. There is no renderer type parameter,
@@ -274,14 +276,14 @@ useful signal for currently-compatible versions of those libraries.
   own snapshot/restyle scheduling, while stylesheet and device methods on the
   document schedule its root in the same call — embedders cannot
   set/clear dirty state or write computed styles. Mutation APIs follow a let-it-crash contract
-  (`debug_assert` + panic on stale handles rather than silent no-ops). A
-  flush returns a `FlushSummary` — the per-node `StyleDamage` (repaint /
-  stacking / overflow / relayout classes) the flush harvested from stylo's
-  `ElementData` and then **cleared** (the fix for stylo's
-  never-cleared-damage re-traversal bug). During that same harvest,
+  (`debug_assert` + panic on stale handles rather than silent no-ops). Style
+  flush and its per-node `StyleDamage` (repaint / stacking / overflow /
+  relayout classes) are internal parts of `Document::layout`; harvested
+  damage is then **cleared** (the fix for stylo's never-cleared-damage
+  re-traversal bug). During that same harvest,
   relayout-class damage is consumed immediately into boundary-stopped layout
-  cache invalidation, so discarding the summary cannot lose layout work; it
-  also owns the
+  cache invalidation, so no external damage report is needed to preserve
+  layout work; the module also owns the
   `effective_containment` fold (`contain` + `content-visibility` → effect
   bits).
   Its `layout` module is the concrete `hughie` host:
@@ -315,21 +317,22 @@ useful signal for currently-compatible versions of those libraries.
   node content; its internal update path automatically invalidates the
   affected cache path. Mutually exclusive literal text, natural size, and
   test-only leaf metadata reuse the node's single nullable content pointer.
-  `Document::set_natural_size`/`natural_size` are the public replaced-content
-  seam (public because the decoder, `crates/image`, is a separate crate);
-  setting an equal value is a structural no-op, and the DOM core still knows
-  no tag names.
+  `Document::set_natural_size` is the public replaced-content update seam
+  (public because the decoder, `crates/image`, is a separate crate); the
+  getter stays paint/layout-internal, setting an equal value is a structural
+  no-op, and the DOM core still knows no tag names.
   Each `DocumentLayoutState` entry owns one `LayoutSlot` containing the
   measurement cache, static position, and durable rounded/unrounded results;
-  `Document::{rounded_layout, unrounded_layout, layout_cache_is_empty}` are the
-  query surface. `Layout` is non-`Clone`; rounding reads its `Copy` fields and
-  constructs the rounded record without duplicating the whole value.
+  `Document::rounded_layout` is the public geometry query; unrounded geometry
+  and cache contents stay internal (the cache probe is `#[cfg(test)]`).
+  `Layout` is non-`Clone`; rounding reads its `Copy` fields and constructs the
+  rounded record without duplicating the whole value.
   Style-driven relayout is automatic (every style
   flush consumes harvested `StyleDamage` into boundary-stopped invalidation);
-  `Document::invalidate_layout` remains the
-  embedder API for the mutations styles cannot see (content/child-list changes
-  with identical computed styles). The internal natural-size update path
-  performs that invalidation itself.
+  the internal invalidation funnel for mutations styles cannot see
+  (content/child-list changes with identical computed styles). Public
+  mutation methods perform that invalidation themselves; only the
+  `layout-test-utils` feature exposes an explicit benchmark hook.
   Its `visual` module owns the post-layout visual order:
   the full W3C stacking-context predicate, CSS2 Appendix E paint order
   (a private flat back-to-front `PaintOrder` of items with
@@ -465,7 +468,7 @@ useful signal for currently-compatible versions of those libraries.
   resolved device-unit policy, or paint order.
 - Remaining runtime-layout integration — the `LayoutTree` host, display
   dispatch, fixed/hoisted positioned pass, per-node cache storage, and the
-  automatic style-damage→`Document::invalidate_layout` wiring (boundary-stopped,
+  automatic style-damage→layout-invalidation wiring (boundary-stopped and
   engine-internal — not a runtime-adapter concern) now live in `dom`
   (see above). Still L3 work in the runtime adapter: the remaining Element-PAPI
   surface, `rpx`-aware view/device policy, decoded `StyleInfo` ingestion,
@@ -516,7 +519,7 @@ useful signal for currently-compatible versions of those libraries.
   PNGs written to a git-ignored `tests/artifacts/` on failure. A newly
   *created* golden fails its own run so an unreviewed baseline cannot pass;
   an explicitly *accepted* one does not. The optional `render` feature adds
-  `capture_document` (`Document::render_if_needed` → retained scene → Pulsar headless GPU) over the whole painted
+  `capture_document` (`Document::render` → retained scene → Pulsar headless GPU) over the whole painted
   frame, `viewport * device_pixel_ratio` device pixels — `pulsar` scales the
   scene up by that ratio, so anything smaller is a crop. Playwright instead
   downsamples to CSS pixels; the two coincide at a ratio of 1, which is what

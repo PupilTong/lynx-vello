@@ -25,8 +25,9 @@ contents, the relayout-boundary predicate, and containment-bounded cache
 invalidation (`invalidate_for_relayout`) — its `dom` damage producer,
 containment folding, and the damage→layout seam all ship alongside: every
 style flush consumes harvested relayout-class `StyleDamage` into
-`Document::invalidate_layout` automatically, boundary-stopped, entirely inside
-the engine layer (no runtime adapter participates). Grid excludes subgrid
+the crate-private `Document::invalidate_layout` funnel automatically,
+boundary-stopped, entirely inside the engine layer (no runtime adapter
+participates). Grid excludes subgrid
 and named lines/areas, which are outside the current protocol. The concrete
 document/stylo host is
 implemented in `dom`'s `layout` module (`Document::layout`):
@@ -97,7 +98,7 @@ Text behavior is inventoried in
 | --- | --- | --- |
 | `hughie` | Implemented Flex, Grid, Relative, and Linear algorithms; one unified source-backed `CoreStyle` protocol speaking stylo computed values (including the `relative-*` and `linear-*` longhands); the text style/run protocol; closed natural-size and Parley leaf paths, box-generation rules (`display: none` hiding and `display: contents` box-tree flattening through `flattened_children`), hidden-subtree cleanup, positioned layout, rounding; shared private arithmetic; geometry and layout IO; cache semantics | Node/style/content storage, display dispatch, arbitrary host content/measurers, DOM/runtime types, an engine-side style value vocabulary (it re-exports stylo's), resolved device-unit policy (`rpx`, etc.), stacking/paint order |
 | `hughie::text` (unconditional) | Parley context/font registration, whitespace processing, shaping, line breaking, intrinsic and height-for-width measurement, baselines, and retained `TextLayout` artifact types | Text truncation and ellipsis, inline boxes, paint styling, runtime/attribute lowering, resource fetching, or host cache and per-node slot storage |
-| `dom::layout` (implemented) | `LayoutTree` on immutable `TreeArenas<T>`, plain `NodeId`s, and separately borrowed mutable `DocumentLayoutState` (one protocol; no view/session/store wrapper layers); post-flush style views lending the `ComputedValues` pointer published from Stylo's still-owning primary `Arc` under the exclusive `Document` phase boundary (no `ElementData` borrow check, `Arc` bump, copy, or translation; public computed-style queries remain guarded); logical `relative-*-inline-*` lowering; the W3C fixed/absolute containing-block rule expressed through `position()`; anonymous box geometry plus inherited parent font/text values for text nodes; display dispatch (flex/grid/linear/relative, `display: none` hiding, `display: contents` box-less handling — never a containing block, never contained, never skipped, never hoisted, and zeroed by the positioned pass — `content-visibility: hidden` skipped-contents routing before the cache, natural-size leaf, concrete Parley text); lazily boxed shared `TextContext` and per-text-node `TextLayoutStore` in layout state; a NodeId-aligned `LayoutSlot` containing cache, static position, unrounded layout, and rounded layout; `Document` query methods for stored results; automatic dirty-path invalidation when content changes; one fused preorder positioned-and-rounding traversal whose pre-node hook keeps hoisted placement cache-proof, prunes positioning at skipped-contents subtrees so a hoisted descendant cannot be revived, and applies the engine's effective-`order`-0 paint rule for out-of-flow children; device-pixel rounding without a whole-`Layout` clone; the effective-containment fold on the style view (feeding both the relayout-boundary predicate and the content-visibility-aware fixed/absolute containing-block predicate); **automatic style-damage consumption** (every harvest boundary-stops `Document::invalidate_layout` per relayout-damaged node before returning/streaming damage; it also evicts direct text children's measurement caches and retained artifacts because those children read inherited style from the damaged element but have no Stylo damage record of their own; `Document::layout` re-runs each parked `contain: strict`/skipped boundary in place before the root pass, merging the re-run's scrollable `content_size` back into the boundary's stored layout); and the `Document::invalidate_layout` API embedders still call for mutations the style system cannot see | A second layout algorithm, generic content-measurement callbacks, engine-side style copies, layout/text runtime borrow wrappers, Lynx runtime-element vocabulary or device-unit policy (`rpx`), Lynx computed defaults (cascade/UA-sheet policy), text shaping algorithms |
+| `dom::layout` (implemented) | `LayoutTree` on immutable `TreeArenas<T>`, plain `NodeId`s, and separately borrowed mutable `DocumentLayoutState` (one protocol; no view/session/store wrapper layers); post-flush style views lending the `ComputedValues` pointer published from Stylo's still-owning primary `Arc` under the exclusive `Document` phase boundary (no `ElementData` borrow check, `Arc` bump, copy, or translation; public computed-style queries remain guarded); logical `relative-*-inline-*` lowering; the W3C fixed/absolute containing-block rule expressed through `position()`; anonymous box geometry plus inherited parent font/text values for text nodes; display dispatch (flex/grid/linear/relative, `display: none` hiding, `display: contents` box-less handling — never a containing block, never contained, never skipped, never hoisted, and zeroed by the positioned pass — `content-visibility: hidden` skipped-contents routing before the cache, natural-size leaf, concrete Parley text); lazily boxed shared `TextContext` and per-text-node `TextLayoutStore` in layout state; a NodeId-aligned `LayoutSlot` containing cache, static position, unrounded layout, and rounded layout; public `rounded_layout` queries with unrounded and cache state kept internal; automatic dirty-path invalidation when content changes; one fused preorder positioned-and-rounding traversal whose pre-node hook keeps hoisted placement cache-proof, prunes positioning at skipped-contents subtrees so a hoisted descendant cannot be revived, and applies the engine's effective-`order`-0 paint rule for out-of-flow children; device-pixel rounding without a whole-`Layout` clone; the effective-containment fold on the style view (feeding both the relayout-boundary predicate and the content-visibility-aware fixed/absolute containing-block predicate); **automatic style-damage consumption** (every harvest boundary-stops the internal `Document::invalidate_layout` funnel per relayout-damaged node during commit; it also evicts direct text children's measurement caches and retained artifacts because those children read inherited style from the damaged element but have no Stylo damage record of their own; `Document::layout` re-runs each parked `contain: strict`/skipped boundary in place before the root pass, merging the re-run's scrollable `content_size` back into the boundary's stored layout); and public content/child/style mutations that perform their own invalidation (the explicit hook is `layout-test-utils`-only) | A second layout algorithm, generic content-measurement callbacks, engine-side style copies, layout/text runtime borrow wrappers, Lynx runtime-element vocabulary or device-unit policy (`rpx`), Lynx computed defaults (cascade/UA-sheet policy), text shaping algorithms |
 | Future runtime integration | Lynx view metrics and `rpx` policy; Lynx-specific text attributes, element-backed raw text and truncation; `staggered` integration; sticky lowering | A second Flex/Grid/Relative/Linear/text-measurement implementation, arbitrary host content, engine-side copies of styles, the style-damage→layout wiring (now engine-internal in `dom`) |
 
 The engine/host seam keeps the engine storage-free even though its
@@ -563,8 +564,9 @@ it never reads or weakens cache keys (the key stays the complete
 stacking / overflow-only → no cache work; RELAYOUT → invalidate + re-run;
 reconstruct/`display`/structural mutation → same but start from the mutated
 node's parent) is rustdoc'd on `invalidate` (`crate::invalidate`); it names the
-damage classes conceptually so the engine stays stylo-free. The upstream
-producer of those classes is `dom`'s `StyleDamage`/`FlushSummary`.
+damage classes conceptually so the engine stays stylo-free. Their upstream
+producer is `dom`'s internal Stylo damage harvest; standalone records stay
+inside crate unit tests.
 
 ## Performance architecture
 
@@ -654,10 +656,11 @@ the painting — layout's job is to never be the frame's bottleneck.
   boundary** (`contain: strict` / skipped `content-visibility`), returning
   the recommended re-layout root, so a dirty leaf inside a contained subtree
   never invalidates past the boundary. `dom::layout` now drives this
-  end-to-end: `Document::invalidate_layout` inlines the boundary-stopped
-  ancestor walk (with real parent links, so no re-root return value is needed).
-  Every `dom` style harvest classifies `StyleDamage` into those calls before
-  returning or streaming it, and `Document::layout` re-runs each parked boundary
+  end-to-end: the crate-private `Document::invalidate_layout` funnel inlines
+  the boundary-stopped ancestor walk (with real parent links, so no re-root
+  return value is needed).
+  Every `dom` style harvest classifies internal `StyleDamage` into those calls
+  during `Document::layout`, which re-runs each parked boundary
   via `compute_boundary_relayout` before the root pass. Because it re-runs from
   the document root, a boundary's interior
   is unreachable while the boundary's ancestors stay warm, so the in-place
@@ -967,12 +970,12 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
   unconditional Parley text measurement core, and CSS-containment machinery
   (size/layout containment, `content-visibility` skipped contents, the
   relayout-boundary predicate, and `invalidate_for_relayout`) are complete in
-  `hughie`; `dom` produces per-node `StyleDamage`/`FlushSummary` and
-  the `effective_containment` fold as its style-to-layout seam (kept internal —
+  `hughie`; `dom` internally harvests per-node `StyleDamage` and owns the
+  `effective_containment` fold as its style-to-layout seam (both kept internal —
   no runtime adapter forwards or re-exports it), and its `layout` module
   now **closes** the damage→layout loop: every style harvest consumes
   relayout-class `StyleDamage` through boundary-stopped
-  `Document::invalidate_layout`, and `Document::layout` re-runs each parked
+  crate-private invalidation, and `Document::layout` re-runs each parked
   `contain: strict` boundary via `compute_boundary_relayout` — entirely
   engine-internal, with no runtime adapter involved. The concrete host also
   includes `LayoutTree` on immutable `TreeArenas`, separate

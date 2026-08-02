@@ -22,15 +22,22 @@ use stylo_traits::{CSSPixel, DevicePixel, ParsingMode, ToCss};
 
 fn matches_dev(device: Device, query: &str) -> bool {
     let mut doc: Document<()> = Document::new(device);
-    doc.add_stylesheet_with_media(
-        ".probe { color: rgb(1, 2, 3) }",
-        StylesheetOrigin::Author,
-        query,
-    );
+    let rule = ".probe { color: rgb(1, 2, 3) }";
+    let css = if query.trim().is_empty() {
+        rule.to_owned()
+    } else {
+        format!("@media {query} {{ {rule} }}")
+    };
+    doc.add_stylesheet(&css, StylesheetOrigin::Author);
+    let root = doc.create_element("page", ());
     let probe = doc.create_element("view", ());
     doc.add_class(probe, "probe");
-    let style = doc.resolve_style(doc.get(probe).expect("fresh node"), None);
-    style.clone_color() == rgb(1, 2, 3)
+    doc.append_child(root, probe);
+    doc.append_document_element(root);
+    doc.layout();
+    doc.get(probe)
+        .and_then(dom::Node::computed_style)
+        .is_some_and(|style| style.clone_color() == rgb(1, 2, 3))
 }
 
 fn reference() -> Device {
@@ -346,7 +353,12 @@ fn error_recovery() {
     ] {
         assert!(!matches(query), "query `{query}` must never match");
     }
-    assert!(matches("(width"), "unclosed block auto-closes at EOF");
+    assert_eq!(
+        media_css("(width"),
+        "(width)",
+        "an unclosed block is serialized after its implicit EOF close"
+    );
+    assert!(matches("(width)"));
 }
 
 #[test]

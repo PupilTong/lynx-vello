@@ -9,16 +9,13 @@ use stylo::attr::{AttrIdentifier, AttrValue};
 use stylo::context::QuirksMode;
 use stylo::dom::OpaqueNode;
 use stylo::invalidation::element::restyle_hints::RestyleHint;
-use stylo::properties::declaration_block::{parse_one_declaration_into, parse_style_attribute};
-use stylo::properties::{
-    Importance, PropertyDeclarationBlock, PropertyId, SourcePropertyDeclaration,
-};
+use stylo::properties::PropertyDeclarationBlock;
+use stylo::properties::declaration_block::parse_style_attribute;
 use stylo::selector_parser::Snapshot;
 use stylo::servo_arc::Arc;
 use stylo::shared_lock::Locked;
-use stylo::stylesheets::{CssRuleType, Origin};
+use stylo::stylesheets::CssRuleType;
 use stylo_atoms::Atom;
-use stylo_traits::ParsingMode;
 
 use crate::document::{DOCUMENT_NODE_ID, Document, NodeId};
 use crate::node::Node;
@@ -248,7 +245,7 @@ impl<T> Document<T> {
         self.live_node_mut(id).element_state.set(flags, enabled);
     }
 
-    pub fn set_element_text_content(&mut self, id: NodeId, text: Option<String>) {
+    fn set_element_text_content(&mut self, id: NodeId, text: Option<String>) {
         let node = self.live(id);
         let is_text_node = node.is_text_node();
         let affected_element = if is_text_node {
@@ -324,69 +321,6 @@ impl<T> Document<T> {
             None => node.remove_attr_local_name(&STYLE),
         }
         insert_restyle_hint(node, RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
-    }
-
-    pub fn add_inline_style(&mut self, id: NodeId, name: &str, value: &str) {
-        self.live_element(id);
-        let Ok(property_id) = PropertyId::parse_unchecked(name, None) else {
-            return;
-        };
-
-        let document = self.root_node();
-        let mut source = SourcePropertyDeclaration::default();
-        if parse_one_declaration_into(
-            &mut source,
-            property_id,
-            value,
-            Origin::Author,
-            document.document_url_data(),
-            None,
-            ParsingMode::DEFAULT,
-            QuirksMode::NoQuirks,
-            CssRuleType::Style,
-        )
-        .is_err()
-        {
-            return;
-        }
-
-        let mut block = match &self.live(id).inline_block {
-            Some(existing) => {
-                let guard = self.style_engine().shared_lock().read();
-                existing.read_with(&guard).clone()
-            }
-            None => PropertyDeclarationBlock::new(),
-        };
-        block.extend(source.drain(), Importance::Normal);
-        let wrapped = Arc::new(self.style_engine().shared_lock().wrap(block));
-
-        let mut css = self
-            .live(id)
-            .attribute("style")
-            .unwrap_or_default()
-            .to_owned();
-        if !css.is_empty() && !css.trim_end().ends_with(';') {
-            css.push(';');
-        }
-        if !css.is_empty() {
-            css.push(' ');
-        }
-        css.push_str(name);
-        css.push_str(": ");
-        css.push_str(value);
-        css.push(';');
-
-        self.apply_inline_style_block(id, Some(wrapped), Some(css));
-    }
-
-    #[must_use]
-    pub fn inline_style_declaration_count(&self, id: NodeId) -> usize {
-        self.live_element(id);
-        let Some(block) = &self.live(id).inline_block else {
-            return 0;
-        };
-        let guard = self.style_engine().shared_lock().read();
-        block.read_with(&guard).declarations().len()
     }
 
     fn note_class_attribute_change(&mut self, id: NodeId) {

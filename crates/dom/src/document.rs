@@ -23,7 +23,7 @@ use crate::node::{Node, StylingData};
 
 pub type NodeId = usize;
 
-pub const DOCUMENT_NODE_ID: NodeId = 0;
+pub(crate) const DOCUMENT_NODE_ID: NodeId = 0;
 const INITIAL_NODE_CAPACITY: usize = 8;
 
 pub(crate) enum PayloadSlot<T> {
@@ -209,12 +209,7 @@ impl<T: fmt::Debug> fmt::Debug for Document<T> {
 impl<T> Document<T> {
     #[must_use]
     pub fn new(device: Device) -> Self {
-        Self::with_url_data(device, about_blank_url_data())
-    }
-
-    #[must_use]
-    pub fn with_url_data(device: Device, url_data: UrlExtraData) -> Self {
-        let style_engine = StyleEngine::with_url_data(device, url_data);
+        let style_engine = StyleEngine::new(device, about_blank_url_data());
         let lock = style_engine.lock();
         let url_data = style_engine.url_data();
         let mut tree = Box::new(TreeArenas::new());
@@ -444,7 +439,7 @@ impl<T> Document<T> {
     }
 
     #[must_use]
-    pub fn contains_node(&self, id: NodeId) -> bool {
+    pub(crate) fn contains_node(&self, id: NodeId) -> bool {
         self.tree.nodes.contains(id)
     }
 
@@ -466,7 +461,7 @@ impl<T> Document<T> {
     }
 
     #[must_use]
-    pub fn child_position(&self, parent: NodeId, child: NodeId) -> Option<usize> {
+    pub(crate) fn child_position(&self, parent: NodeId, child: NodeId) -> Option<usize> {
         self.get(parent)?
             .child_ids()
             .iter()
@@ -827,14 +822,14 @@ pub(crate) mod tests {
         document.append_document_element(root);
 
         assert!(document.needs_render());
-        assert!(document.render_if_needed());
+        assert!(document.render());
         assert!(!document.needs_render());
-        assert!(!document.render_if_needed());
+        assert!(!document.render());
         assert!(!document.scene().encoding().draw_tags.is_empty());
 
         let _ = document.images_mut().remove_url("missing");
         assert!(document.needs_render());
-        assert!(document.render_if_needed());
+        assert!(document.render());
     }
 
     #[test]
@@ -935,15 +930,15 @@ pub(crate) mod tests {
         document.append_child(root, connected);
         document.append_child(root, detached);
         document.append_document_element(root);
-        document.flush_styles();
+        document.flush_styles_with_damage_sink(&mut |_, _| {});
 
         document.detach(detached);
-        document.flush_styles();
+        document.flush_styles_with_damage_sink(&mut |_, _| {});
         document.set_classes(detached, "hot");
         document.set_classes(connected, "hot");
         assert_eq!(document.pending_snapshots.len(), 2);
 
-        document.flush_styles();
+        document.flush_styles_with_damage_sink(&mut |_, _| {});
 
         assert!(
             document
@@ -964,7 +959,7 @@ pub(crate) mod tests {
         assert_eq!(snapshot_flags(&document, connected), 0);
 
         document.append_child(root, detached);
-        document.flush_styles();
+        document.flush_styles_with_damage_sink(&mut |_, _| {});
         assert!(document.pending_snapshots.is_empty());
         assert_eq!(snapshot_flags(&document, detached), 0);
     }
@@ -978,7 +973,7 @@ pub(crate) mod tests {
         document.append_child(removed, descendant);
         document.append_child(root, removed);
         document.append_document_element(root);
-        document.flush_styles();
+        document.flush_styles_with_damage_sink(&mut |_, _| {});
 
         document.set_classes(removed, "hot");
         document.set_id_attribute(removed, Some("target"));

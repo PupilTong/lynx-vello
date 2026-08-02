@@ -149,7 +149,7 @@ pub(crate) fn resolve_position<T>(node: &Node<T>, style: &ComputedValues) -> Pos
 
 /// The element style view hughie reads: a node handle for the
 /// parent-dependent position lowering plus its post-flush computed values.
-pub struct StyleView<'dom, T> {
+pub(crate) struct StyleView<'dom, T> {
     node: &'dom Node<T>,
     style: &'dom ComputedValues,
 }

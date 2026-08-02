@@ -8,8 +8,7 @@
 
 mod common;
 
-use common::{Doc, parses, rgb, rgba, specified};
-use dom::property_is_supported;
+use common::{Doc, parses, property_is_supported, rgb, rgba, specified};
 
 #[test]
 fn length_grammar() {

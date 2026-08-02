@@ -1,10 +1,10 @@
 //! CSS containment: effective-containment derivation.
 
 use stylo::properties::ComputedValues;
-pub use stylo::values::computed::{Contain, ContentVisibility};
+pub(crate) use stylo::values::computed::{Contain, ContentVisibility};
 
 #[must_use]
-pub fn effective_containment(style: &ComputedValues, skipped_contents: bool) -> Contain {
+pub(crate) fn effective_containment(style: &ComputedValues, skipped_contents: bool) -> Contain {
     let mut contain = style.clone_contain();
     match style.clone_content_visibility() {
         ContentVisibility::Visible => {}

@@ -161,7 +161,7 @@ impl FramePipeline {
     pub(crate) fn prepare_frame(&mut self) -> PreparedFrame<'_> {
         let changed = {
             let mut elements = self.runtime.elements_mut();
-            elements.document_mut().render_if_needed()
+            elements.document_mut().render()
         };
         PreparedFrame {
             elements: self.runtime.elements(),

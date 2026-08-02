@@ -5,8 +5,7 @@
 
 mod common;
 
-use common::{Doc, device, url_data};
-use dom::{Document, StylesheetOrigin};
+use common::url_data;
 use stylo::context::QuirksMode;
 use stylo::media_queries::MediaList;
 use stylo::properties::font_face::DescriptorId;
@@ -83,25 +82,6 @@ fn keyframe_selectors_normalize_and_reject() {
         vec!["0%, 50%, 100%"],
         "selector lists stay grouped on one keyframe"
     );
-}
-
-#[test]
-fn keyframes_rules_register_and_resolve_by_name() {
-    let mut doc: Document<()> = Document::new(device(800.0, 600.0));
-    let rule = doc
-        .build_keyframes_rule("slide", "from { opacity: 0 } to { opacity: 1 }")
-        .expect("named rule builds");
-    doc.append_rules(vec![rule], StylesheetOrigin::Author);
-    assert!(
-        doc.build_keyframes_rule("", "from { opacity: 0 }")
-            .is_none(),
-        "an empty animation name is invalid"
-    );
-
-    let root = doc.create_element("page", ());
-    let root_ref = doc.get(root).expect("root is live");
-    assert!(doc.has_keyframes_animation("slide", root_ref));
-    assert!(!doc.has_keyframes_animation("missing", root_ref));
 }
 
 #[test]
@@ -287,13 +267,4 @@ fn font_face_src_list_is_forgiving_per_entry() {
         }
         None => panic!("src list with one valid entry must survive"),
     }
-}
-
-#[test]
-fn font_face_rules_register_in_the_stylist() {
-    let mut doc = Doc::new();
-    assert_eq!(doc.dom.font_face_count(), 0);
-    doc.add_css("@font-face { font-family: A; src: url(a.woff2); }");
-    doc.add_css("@font-face { font-family: B; src: url(b.woff2); }");
-    assert_eq!(doc.dom.font_face_count(), 2);
 }

@@ -7,7 +7,7 @@
 
 mod common;
 
-use dom::{DOCUMENT_NODE_ID, Document, Node, NodeId, NodeType};
+use dom::{Document, Node, NodeId};
 
 fn test_document<T>() -> Document<T> {
     Document::new(common::device(800.0, 600.0))
@@ -18,17 +18,17 @@ fn node(doc: &mut Document<()>, tag: &str) -> NodeId {
 }
 
 #[test]
-fn document_is_slot_zero_and_node_ids_are_raw_slab_indices() {
+fn removed_node_ids_may_be_reused_without_confusing_the_root() {
     let mut doc = test_document();
-    assert_eq!(doc.root_node().id(), DOCUMENT_NODE_ID);
-    assert_eq!(doc.root_node().node_type(), NodeType::Document);
+    assert!(doc.root_node().is_document());
+    let document_id = doc.root_node().id();
 
     let a = node(&mut doc, "div");
     assert!(doc.get(a).is_some());
     doc.append_document_element(a);
     assert_eq!(doc.root_element().map(Node::id), Some(a));
     assert_eq!(doc.root_node().first_child().map(Node::id), Some(a));
-    assert_eq!(doc.get(a).unwrap().parent_id(), Some(DOCUMENT_NODE_ID));
+    assert_eq!(doc.get(a).unwrap().parent_id(), Some(document_id));
 
     doc.remove_subtree(a);
     assert!(doc.get(a).is_none());
@@ -56,8 +56,6 @@ fn node_ref_navigation() {
     doc.append_child(container, c);
 
     let cref = doc.get(container).unwrap();
-    let div = stylo::LocalName::from("div");
-    assert_eq!(cref.local_name(), Some(&div));
     assert_eq!(cref.tag_name(), Some("div"));
     assert_eq!(cref.parent().unwrap().id(), root);
     let kids: Vec<_> = cref.children().map(Node::id).collect();
@@ -79,14 +77,12 @@ fn element_and_text_nodes_share_the_document_tree() {
     doc.append_child(parent, text);
 
     let element = doc.get(parent).unwrap();
-    assert_eq!(element.node_type(), NodeType::Element);
     assert!(element.is_element());
     assert!(!element.is_text_node());
     assert_eq!(element.tag_name(), Some("p"));
     assert_eq!(element.text(), None);
 
     let text_node = doc.get(text).unwrap();
-    assert_eq!(text_node.node_type(), NodeType::Text);
     assert!(!text_node.is_element());
     assert!(text_node.is_text_node());
     assert_eq!(text_node.tag_name(), None);
@@ -211,29 +207,55 @@ fn ancestor_and_child_queries() {
     assert!(doc.is_ancestor(root, leaf));
     assert!(doc.is_ancestor(container, leaf));
     assert!(!doc.is_ancestor(leaf, root));
-    assert_eq!(doc.child_position(root, container), Some(0));
-    assert_eq!(doc.child_position(container, leaf), Some(0));
-    assert_eq!(doc.child_position(root, leaf), None);
-    assert_eq!(doc.get(container).unwrap().child_ids().len(), 1);
+    assert_eq!(doc.get(root).unwrap().child_ids(), &[container]);
+    assert_eq!(doc.get(container).unwrap().child_ids(), &[leaf]);
 }
 
 #[test]
-fn inline_style_helpers_parse_merge_and_clear() {
+fn inline_style_setter_parses_replaces_and_clears_observable_style() {
     let mut doc = test_document();
+    let root = node(&mut doc, "page");
     let view = node(&mut doc, "div");
+    doc.append_child(root, view);
+    doc.append_document_element(root);
 
-    doc.add_inline_style(view, "color", "red");
-    doc.add_inline_style(view, "width", "10px");
-    assert_eq!(doc.inline_style_declaration_count(view), 2);
+    doc.set_inline_style(view, "color: red; definitely-not-a-property: 1");
+    doc.layout();
+    assert_eq!(
+        doc.get(view).unwrap().attribute("style"),
+        Some("color: red; definitely-not-a-property: 1")
+    );
+    assert_eq!(
+        doc.get(view)
+            .unwrap()
+            .computed_style()
+            .unwrap()
+            .clone_color(),
+        common::rgb(255, 0, 0),
+    );
 
-    doc.add_inline_style(view, "definitely-not-a-property", "1");
-    assert_eq!(doc.inline_style_declaration_count(view), 2);
-
-    doc.set_inline_style(view, "display:flex");
-    assert_eq!(doc.inline_style_declaration_count(view), 1);
+    doc.set_inline_style(view, "color: blue");
+    doc.layout();
+    assert_eq!(
+        doc.get(view)
+            .unwrap()
+            .computed_style()
+            .unwrap()
+            .clone_color(),
+        common::rgb(0, 0, 255),
+    );
 
     doc.set_inline_style(view, "");
-    assert_eq!(doc.inline_style_declaration_count(view), 0);
+    doc.layout();
+    assert_eq!(doc.get(view).unwrap().attribute("style"), Some(""));
+    assert_ne!(
+        doc.get(view)
+            .unwrap()
+            .computed_style()
+            .unwrap()
+            .clone_color(),
+        common::rgb(0, 0, 255),
+    );
 }
 
 #[test]

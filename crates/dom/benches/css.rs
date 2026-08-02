@@ -1,12 +1,12 @@
-//! CSS-engine benchmarks for `dom`, tracked by `CodSpeed` (walltime
-//! mode on the macOS CI runner).
+//! CSS commit benchmarks for `dom`, tracked by `CodSpeed` (walltime mode on
+//! the macOS CI runner). Commits use the production `Document::layout` path.
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
 
 use divan::black_box;
 use divan::counter::ItemsCount;
-use dom::{Document, ElementState, NodeId, Parallelism, StylesheetOrigin};
+use dom::{Document, ElementState, NodeId, StylesheetOrigin};
 use euclid::{Scale, Size2D};
 use stylo::context::QuirksMode;
 use stylo::device::Device;
@@ -72,7 +72,6 @@ const NO_OP_BATCH: usize = 65_536;
 const INHERITANCE_BATCH: usize = 32;
 const VAR_CHAIN_BATCH: usize = 8;
 const MEDIA_BATCH: usize = 2;
-const RESOLVE_BATCH: usize = 1_024;
 
 fn author_sheet() -> String {
     let mut css = String::with_capacity(64 * 1024);
@@ -145,7 +144,7 @@ fn unflushed() -> (Document<()>, NodeId) {
 
 fn flushed() -> (Document<()>, NodeId) {
     let (mut doc, probe) = unflushed();
-    doc.flush_styles();
+    doc.layout();
     (doc, probe)
 }
 
@@ -168,7 +167,7 @@ fn parse_author_sheet_text(bencher: divan::Bencher) {
 }
 
 #[divan::bench]
-fn initial_flush_sequential(bencher: divan::Bencher) {
+fn initial_commit(bencher: divan::Bencher) {
     bencher
         .counter(ItemsCount::new(INITIAL_FLUSH_BATCH))
         .with_inputs(|| {
@@ -178,24 +177,7 @@ fn initial_flush_sequential(bencher: divan::Bencher) {
         })
         .bench_local_values(|mut states| {
             for (doc, _) in &mut states {
-                black_box(doc.flush_styles_with_parallelism(Parallelism::Sequential));
-            }
-            states
-        });
-}
-
-#[divan::bench]
-fn initial_flush_parallel(bencher: divan::Bencher) {
-    bencher
-        .counter(ItemsCount::new(INITIAL_FLUSH_BATCH))
-        .with_inputs(|| {
-            (0..INITIAL_FLUSH_BATCH)
-                .map(|_| unflushed())
-                .collect::<Vec<_>>()
-        })
-        .bench_local_values(|mut states| {
-            for (doc, _) in &mut states {
-                black_box(doc.flush_styles_with_parallelism(Parallelism::Auto));
+                doc.layout();
             }
             states
         });
@@ -216,7 +198,7 @@ fn incremental_class_flip(bencher: divan::Bencher) {
                 } else {
                     doc.remove_class(*probe, "c1");
                 }
-                black_box(doc.flush_styles());
+                doc.layout();
             }
         });
 }
@@ -237,7 +219,7 @@ fn incremental_inline_style(bencher: divan::Bencher) {
                     "color: rgb(3, 3, 3); width: 20px"
                 };
                 doc.set_inline_style(*probe, black_box(css));
-                black_box(doc.flush_styles());
+                doc.layout();
             }
         });
 }
@@ -249,7 +231,7 @@ fn incremental_state_flip(bencher: divan::Bencher) {
         "view:hover { color: rgb(250, 250, 250); }",
         StylesheetOrigin::Author,
     );
-    doc.flush_styles();
+    doc.layout();
     let state = RefCell::new(doc);
     let mut on = false;
     bencher
@@ -263,7 +245,7 @@ fn incremental_state_flip(bencher: divan::Bencher) {
                 } else {
                     doc.remove_element_state(probe, ElementState::HOVER);
                 }
-                black_box(doc.flush_styles());
+                doc.layout();
             }
         });
 }
@@ -276,7 +258,7 @@ fn incremental_class_flip_repaint_only(bencher: divan::Bencher) {
         StylesheetOrigin::Author,
     );
     doc.add_class(probe, "rp-a");
-    doc.flush_styles();
+    doc.layout();
     let state = RefCell::new(doc);
     let mut on = false;
     bencher
@@ -292,20 +274,20 @@ fn incremental_class_flip_repaint_only(bencher: divan::Bencher) {
                     doc.remove_class(probe, "rp-b");
                     doc.add_class(probe, "rp-a");
                 }
-                black_box(doc.flush_styles());
+                doc.layout();
             }
         });
 }
 
 #[divan::bench]
-fn noop_flush(bencher: divan::Bencher) {
+fn noop_commit(bencher: divan::Bencher) {
     let state = RefCell::new(flushed());
     bencher
         .counter(ItemsCount::new(NO_OP_BATCH))
         .bench_local(|| {
             for _ in 0..NO_OP_BATCH {
                 let (doc, _) = &mut *state.borrow_mut();
-                black_box(doc.flush_styles());
+                doc.layout();
             }
         });
 }
@@ -336,7 +318,7 @@ fn inheritance_deep_chain(bencher: divan::Bencher) {
         })
         .bench_local_values(|mut states| {
             for doc in &mut states {
-                doc.flush_styles();
+                doc.layout();
             }
             states
         });
@@ -363,7 +345,7 @@ fn var_chain_cascade(bencher: divan::Bencher) {
         })
         .bench_local_values(|mut states| {
             for (doc, _) in &mut states {
-                doc.flush_styles();
+                doc.layout();
             }
             states
         });
@@ -372,12 +354,13 @@ fn var_chain_cascade(bencher: divan::Bencher) {
 #[divan::bench]
 fn media_viewport_flip(bencher: divan::Bencher) {
     let (mut doc, _) = unflushed();
-    doc.add_stylesheet_with_media(
-        ".c1 { color: rgb(200, 100, 50); } view { padding-top: 3px; }",
+    doc.add_stylesheet(
+        "@media (min-width: 700px) { \
+             .c1 { color: rgb(200, 100, 50); } view { padding-top: 3px; } \
+         }",
         StylesheetOrigin::Author,
-        "(min-width: 700px)",
     );
-    doc.flush_styles();
+    doc.layout();
     let state = RefCell::new(doc);
     let mut wide = true;
     bencher
@@ -387,22 +370,7 @@ fn media_viewport_flip(bencher: divan::Bencher) {
                 let doc = &mut *state.borrow_mut();
                 wide = !wide;
                 doc.set_viewport(if wide { 800.0 } else { 400.0 }, 600.0);
-                doc.flush_styles();
+                doc.layout();
             }
-        });
-}
-
-#[divan::bench]
-fn resolve_single_element(bencher: divan::Bencher) {
-    let (doc, probe) = unflushed();
-    bencher
-        .counter(ItemsCount::new(RESOLVE_BATCH))
-        .with_inputs(|| Vec::with_capacity(RESOLVE_BATCH))
-        .bench_local_values(|mut styles| {
-            for _ in 0..RESOLVE_BATCH {
-                let node = doc.get(black_box(probe)).expect("probe is live");
-                styles.push(doc.resolve_style(node, None));
-            }
-            styles
         });
 }

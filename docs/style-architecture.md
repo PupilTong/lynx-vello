@@ -20,6 +20,9 @@ supplies QuickJS, but re-exports no DOM/GPU or renderer conveniences.
 `bobcat-cli` is an independent product and directly composes the trusted
 workspace layers. `pulsar` is a DOM-independent resource/GPU layer used by
 `dom` and the CLI.
+
+The audited normal-build surface and every test-feature exception are listed
+in [dom-public-api.md](dom-public-api.md).
 See
 [`runtime-architecture.md`](runtime-architecture.md) for the full dependency,
 feature, and frame-flow walkthrough. Decoded `.web.bundle` style ingestion is
@@ -37,8 +40,7 @@ still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
   received the primary slab's key, and removal clears all four entries before
   an ID can be reused. Computed styles remain in Stylo-owned node data;
   durable rounded/unrounded layouts live in each state-owned `LayoutSlot`.
-- **Each document owns its style context.** Every constructor (`new` and
-  `with_url_data`) constructs a private
+- **Each document owns its style context.** `Document::new` constructs a private
   style engine containing the `Stylist`, device, stylesheet set, cascade
   pipeline, base URL, and `SharedRwLock`. Documents cannot share or exchange
   stylesheets, rule objects, or locks accidentally.
@@ -76,7 +78,7 @@ still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| `dom` | `Document<T>` and its aligned arenas; DOM topology and attributes; private style context; invalidation-carrying mutation; inline parsing; matching, cascade, media evaluation, computed values; `StyleDamage`/`FlushSummary`; the concrete `hughie` host; private visual order, `Painter`, `ImageStore`, and retained Vello scene | Pluggable renderer policy, Lynx tags or Element-PAPI opcodes, JS handle lifetime, payload semantics, `<page>` policy, bundle decoding/`StyleInfo` lowering, Lynx UA defaults, view metrics, GPU surface/window policy |
+| `dom` | `Document<T>` and its aligned arenas; DOM topology and attributes; private style context and damage harvest; invalidation-carrying mutation; inline parsing; matching, cascade, media evaluation, computed values; the concrete `hughie` host; private visual order, `Painter`, `ImageStore`, and retained Vello scene | Pluggable renderer policy, Lynx tags or Element-PAPI opcodes, JS handle lifetime, payload semantics, `<page>` policy, bundle decoding/`StyleInfo` lowering, Lynx UA defaults, view metrics, GPU surface/window policy |
 | `bobcat-core` | Engine-neutral resource/script/view contracts; GAT-based external `ScriptEngine`; optional default QuickJS adapter and MTS host globals | Re-exporting DOM/GPU/render conveniences, an element-host trait, a document wrapper, or ownership of Lynx tag/root/UA policy or CSS/layout/paint algorithms |
 | `pulsar` | Opaque `ImageStore`; Vello version/re-export boundary; headed/headless GPU submission and readback helpers | `Document`, `NodeId`, computed styles, layout, paint order, Lynx runtime vocabulary, or DOM mutation policy |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, and the maintained Lynx CSS extension grammar behind the `lynx` feature | Runtime protocol, document ownership, bundle ingestion, or host policy |
@@ -89,25 +91,24 @@ still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
    `dom::Document<ElementId>` through `Document::new`. Device construction is deliberately outside the
    generic DOM because viewport, pointer, color, font-metric, and `rpx` policy
    belong to the runtime environment.
-2. The document creates its private stylist, stylesheet set, base URL, and
-   lock. Callers may add CSS text through document methods or append rule
-   objects constructed for that same document context.
+2. The document creates its private stylist, stylesheet set, `about:blank`
+   base URL, and lock. Callers add complete CSS text through
+   `Document::add_stylesheet`; rule objects and locks never cross the API.
 3. DOM mutation methods record snapshots/restyle hints internally.
    Selector-visible data lives in the real node fields and attribute map.
-4. `Document::flush_styles` drives Stylo traversal from the document element:
+4. `Document::layout` first drives Stylo traversal from the document element:
    snapshot invalidation, style sharing, bloom filtering, and parallel
-   traversal all run in place.
-5. Flush harvest copies each visited element's `StyleDamage`, consumes
+   traversal all run in place. Standalone flush/damage inspection is private
+   to crate unit tests; external tests and benchmarks use the production
+   commit path.
+5. The internal harvest reads each visited element's `StyleDamage`, consumes
    relayout-class damage into containment-bounded layout-cache invalidation,
    and then clears Stylo's damage/restyle state. This clearing prevents old
    damage from triggering later no-op traversals.
-6. `Document::resolve_style` remains a read-only standalone match/cascade
-   helper. It does not write node styles or participate in traversal
-   scheduling.
-7. `Document::layout` flushes styles before invoking the concrete
+6. `Document::layout` then invokes the concrete
    `hughie` host. Computed values are lent directly from each node's
    Stylo `ElementData`, without an adapter-side style copy.
-8. The CLI-private frame pipeline uses `internal-document-access` to ask the
+7. The CLI-private frame pipeline uses `internal-document-access` to ask the
    document-owned Painter whether its retained scene is current. A dirty
    document runs `Document::render`, builds the private paint order, and
    retains the resulting Vello scene. The default element/embedder API exposes
@@ -158,8 +159,8 @@ policy and `bobcat-core` composition rather than absorbed into `dom` or
 - Snapshot-before-mutate remains internal to document setters.
 - Selector matching reads only real DOM state, never opaque payload fields.
 - A successful flush harvests and clears all traversal state it consumed.
-- Relayout damage is converted to layout invalidation before a flush summary
-  is returned or discarded.
+- Relayout damage is converted to layout invalidation during the internal
+  harvest, before the style commit proceeds.
 - Standard CSS behavior belongs in `dom`; Lynx-only runtime policy belongs
   above it or in the maintained Stylo fork when it is grammar/value behavior.
 - No JS-facing code may expose raw `NodeId` values without a context and

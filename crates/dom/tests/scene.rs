@@ -110,14 +110,15 @@ fn text_runs_encode_glyphs() {
 }
 
 #[test]
-fn documents_reuse_their_private_painter_across_frames() {
+fn clean_frames_keep_the_retained_scene_stable() {
     let mut h = Harness::new(".bg { background-color: teal; opacity: 0.7; overflow: hidden; }");
     let root = h.doc.root;
     let outer = h.doc.el(root, "box bg");
     h.doc.el(outer, "box bg");
     let first = h.stats();
+    assert!(!h.doc.dom.render(), "a clean frame must skip painting");
     let second = h.stats();
-    assert_eq!(first, second, "repainting the same frame must be stable");
+    assert_eq!(first, second, "a clean frame must retain the same scene");
 }
 
 #[test]
