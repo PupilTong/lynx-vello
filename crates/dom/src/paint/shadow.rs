@@ -29,16 +29,16 @@
 //!
 //! `currentcolor` defaults resolve via [`convert::resolve_color`].
 
-use dom::visual::{CornerRadii, Size2D};
 use stylo::properties::ComputedValues;
 use stylo::values::computed::effects::BoxShadow;
-use vello::Scene;
-use vello::kurbo::Rect;
-use vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
 
 use crate::convert;
 use crate::paint::{BoxFragment, PathScratch};
 use crate::shape::{BoxShape, inner_radii, normalize_radii, ring_path_into, with_shape};
+use crate::vello::Scene;
+use crate::vello::kurbo::Rect;
+use crate::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
+use crate::visual::{CornerRadii, Size2D};
 
 /// Paints the outset (drop) shadows; call before the background.
 pub(crate) fn paint_outset(

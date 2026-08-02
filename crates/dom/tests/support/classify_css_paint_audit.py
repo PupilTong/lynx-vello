@@ -3,13 +3,13 @@
 
 The audit uses a temporary all-case Chromium reference directory:
 
-    python3 crates/pulsar/tests/support/generate_css_paint_cases.py \
+    python3 crates/dom/tests/support/generate_css_paint_cases.py \
       --split-atlases output/playwright/css-paint/atlases \
       --reference-output /tmp/css-paint-references \
       --include-differences
     CSS_PAINT_REFERENCE_DIR=/tmp/css-paint-references \
       CSS_PAINT_AUDIT=/tmp/css-paint.tsv \
-      cargo test -p pulsar --test css_atlas -- --include-ignored
+      cargo test -p dom --test css_atlas -- --include-ignored
 
 This classifier is deliberately strict. Every one of the 1,000 cases must be
 present exactly once, every mismatch must have one issue, and no matching case
@@ -31,7 +31,7 @@ from generate_css_paint_cases import all_cases
 
 
 ROOT = Path(__file__).resolve().parents[4]
-DIFFERENCES = ROOT / "crates/pulsar/tests/css-paint-differences.tsv"
+DIFFERENCES = ROOT / "crates/dom/tests/css-paint-differences.tsv"
 CASE_COUNT = 1_000
 
 W3C_CORRECT_RASTER_OR_SAMPLING = "w3c-correct-raster-or-sampling"

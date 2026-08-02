@@ -5,12 +5,11 @@
 //! natural size produces. The pixel-level check is the `replaced-object-fit`
 //! screenshot golden.
 
-mod common;
+mod paint_common;
 
-use common::Doc;
 use dom::layout::{NaturalSize, Size};
 use image::{BackendRegistry, DecodeRequest, decode_bytes};
-use pulsar::{ImageStore, Painter};
+use paint_common::Doc;
 
 const PAGE: &str = "page { display: flex; position: relative; width: 800px; height: 600px; }
     img { display: flex; position: absolute; left: 0; top: 0; }
@@ -45,16 +44,12 @@ fn checker_png(side: u32) -> Vec<u8> {
 
 struct Harness {
     doc: Doc,
-    painter: Painter,
-    images: ImageStore,
 }
 
 impl Harness {
     fn new(css: &str) -> Self {
         Self {
             doc: Doc::with_css(&format!("{PAGE} {css}")),
-            painter: Painter::new(),
-            images: ImageStore::new(),
         }
     }
 
@@ -76,13 +71,16 @@ impl Harness {
             decoded.header.natural_size.height as f32,
         ));
         self.doc.dom.set_natural_size(node, natural);
-        self.images.insert_node(node, decoded.image.to_image_data());
+        self.doc
+            .dom
+            .images_mut()
+            .insert_node(node, decoded.image.to_image_data());
         node
     }
 
     fn stats(&mut self) -> (usize, u32) {
-        let frame = self.doc.dom.paint_order();
-        let scene = self.painter.paint(&self.doc.dom, &frame, &self.images);
+        self.doc.dom.render();
+        let scene = self.doc.dom.scene();
         let encoding = scene.encoding();
         (encoding.draw_tags.len(), encoding.n_open_clips)
     }
@@ -104,7 +102,7 @@ fn the_natural_size_reaches_layout_when_no_size_is_specified() {
     // the document at all.
     let mut h = Harness::new("");
     let node = h.img("", &checker_png(8));
-    h.doc.dom.paint_order();
+    h.doc.dom.layout();
 
     let layout = h.doc.dom.rounded_layout(node).expect("laid out");
     assert_eq!(
@@ -133,7 +131,7 @@ fn republishing_an_identical_natural_size_does_not_dirty_layout() {
     // exactly rather than with native Lynx's 5% aspect epsilon.
     let mut h = Harness::new("box");
     let node = h.img("box", &checker_png(4));
-    h.doc.dom.paint_order();
+    h.doc.dom.layout();
     assert_eq!(
         h.doc.dom.layout_cache_is_empty(node),
         Some(false),

@@ -17,18 +17,18 @@
 //!   grow by the outline width (sharp corners stay sharp).
 //! - Zero-size boxes, zero-width sides, and fully transparent colors skip cleanly.
 
-use dom::layout::Edges;
-use dom::visual::{CornerRadii, Size2D};
 use smallvec::SmallVec;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{BorderStyle, OutlineStyle};
-use vello::Scene;
-use vello::kurbo::{BezPath, Cap, Rect, Stroke};
-use vello::peniko::{Color, Fill};
 
 use crate::convert::resolve_color;
+use crate::layout::Edges;
 use crate::paint::{BoxFragment, PathScratch};
 use crate::shape::{BoxShape, inner_radii, ring_path_into, with_shape};
+use crate::vello::Scene;
+use crate::vello::kurbo::{BezPath, Cap, Rect, Stroke};
+use crate::vello::peniko::{Color, Fill};
+use crate::visual::{CornerRadii, Size2D};
 
 /// A border side.
 #[derive(Debug, Clone, Copy)]
@@ -461,9 +461,8 @@ fn grow_radii(radii: &CornerRadii, by: f32) -> CornerRadii {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use vello::kurbo::{Point, Shape};
-
     use super::*;
+    use crate::vello::kurbo::{Point, Shape};
 
     fn assert_close(actual: f32, expected: f32) {
         assert!((actual - expected).abs() < 1e-5, "{actual} != {expected}");
@@ -548,7 +547,7 @@ mod tests {
             let mut scene = Scene::new();
             scene.stroke(
                 &stroke,
-                vello::kurbo::Affine::IDENTITY,
+                crate::vello::kurbo::Affine::IDENTITY,
                 Color::new([0.0, 0.0, 0.0, 1.0]),
                 None,
                 &rect,
@@ -697,7 +696,7 @@ mod tests {
         let padding_box = Rect::new(9.0, 6.0, 54.0, 37.0);
         let fragment = BoxFragment {
             node: 0,
-            transform: vello::kurbo::Affine::IDENTITY,
+            transform: crate::vello::kurbo::Affine::IDENTITY,
             border_box: Rect::new(0.0, 0.0, 60.0, 40.0),
             padding_box,
             content_box: padding_box,

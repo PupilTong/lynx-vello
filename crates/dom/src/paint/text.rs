@@ -5,7 +5,7 @@
 //! Spec sketch:
 //! - Walk `layout.parley_layout().lines()` → `line.items()` → `PositionedLayoutItem::GlyphRun`; for
 //!   each run: `scene.draw_glyphs(run.font())` with `font_size`, the run's `normalized_coords`
-//!   (parley coord i16s convert to `vello::NormalizedCoord`), `hint(false)` (transforms are
+//!   (parley coord i16s convert to `crate::vello::NormalizedCoord`), `hint(false)` (transforms are
 //!   arbitrary), `brush` = the element's used `color`, glyphs mapped from
 //!   `glyph_run.positioned_glyphs()`.
 //! - Synthesis (fake bold/oblique) from `run.synthesis()`: embolden via
@@ -24,18 +24,18 @@
 //! - The whole painter works in the text item's local space (origin at the text box's top-left,
 //!   which is also the Parley layout origin); `transform` already includes the device scale.
 
-use dom::layout::TextLayout;
 use parley::{GlyphRun, Layout, PositionedLayoutItem};
 use smallvec::SmallVec;
 use stylo::computed_values::text_decoration_style::T as TextDecorationStyle;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{ColorPropertyValue, TextDecorationLine};
-use vello::kurbo::{Affine, BezPath, Diagonal2, Line, Rect, Stroke};
-use vello::peniko::{self, BrushRef, Color, Fill, StyleRef};
-use vello::{FontEmbolden, Scene};
 
 use crate::convert;
+use crate::layout::TextLayout;
 use crate::paint::background::{GradientBrush, gradient_brush};
+use crate::vello::kurbo::{Affine, BezPath, Diagonal2, Line, Rect, Stroke};
+use crate::vello::peniko::{self, BrushRef, Color, Fill, StyleRef};
+use crate::vello::{FontEmbolden, Scene};
 
 /// What the glyph ink is filled with.
 ///
@@ -193,9 +193,9 @@ pub(crate) fn paint(
 /// spec does not receive them — that box's own decorations still apply.
 /// Boxless (`display: contents`) ancestors are treated as decorating boxes,
 /// matching browser rendering of decorated `display: contents` spans.
-pub(crate) fn propagated_decorations<T, R>(
-    document: &dom::Document<T, R>,
-    element: dom::NodeId,
+pub(crate) fn propagated_decorations<T>(
+    document: &crate::Document<T>,
+    element: crate::NodeId,
 ) -> SmallVec<[Decorations; 2]> {
     use stylo::computed_values::position::T as Position;
     let mut out = SmallVec::new();
@@ -403,7 +403,7 @@ fn draw_glyph_run(
         .glyph_transform(glyph_transform)
         .font_embolden(embolden)
         // parley and vello both use bare `i16` F2DOT14 coords
-        // (`vello::NormalizedCoord` is an `i16` alias), so the run's slice
+        // (`crate::vello::NormalizedCoord` is an `i16` alias), so the run's slice
         // passes straight through.
         .normalized_coords(run.normalized_coords())
         .hint(false)
@@ -413,11 +413,13 @@ fn draw_glyph_run(
         .brush_transform(fill.brush_transform())
         .draw(
             style,
-            glyph_run.positioned_glyphs().map(|glyph| vello::Glyph {
-                id: glyph.id,
-                x: glyph.x,
-                y: glyph.y,
-            }),
+            glyph_run
+                .positioned_glyphs()
+                .map(|glyph| crate::vello::Glyph {
+                    id: glyph.id,
+                    x: glyph.x,
+                    y: glyph.y,
+                }),
         );
 }
 
@@ -565,9 +567,8 @@ fn wavy_path(band: &DecorationBand) -> BezPath {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use vello::kurbo::{CubicBez, ParamCurve, PathEl, Point};
-
     use super::*;
+    use crate::vello::kurbo::{CubicBez, ParamCurve, PathEl, Point};
 
     fn assert_near(actual: f64, expected: f64) {
         assert!((actual - expected).abs() < 1e-9, "{actual} != {expected}");

@@ -34,9 +34,10 @@
 //! naturally.
 
 use stylo::properties::ComputedValues;
-use vello::Scene;
-use vello::kurbo::{Affine, Rect};
-use vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
+
+use crate::vello::Scene;
+use crate::vello::kurbo::{Affine, Rect};
+use crate::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
 
 /// A computed filter function (fork grammar: `blur() grayscale()
 /// brightness() contrast() saturate()` chains).

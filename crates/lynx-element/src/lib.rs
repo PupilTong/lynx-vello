@@ -8,9 +8,8 @@
 //! Lynx UA cascade defaults.
 //!
 //! ```text
-//! bobcat-cli  ──▶  bobcat-core  ──▶  lynx-element  ──▶  dom
-//!                      │               handles + UA
-//!                      └────────────▶  pulsar
+//! bobcat-cli  ──▶  bobcat-core  ──▶  lynx-element  ──▶  dom  ──▶  pulsar
+//!                                      handles + UA       resources/GPU
 //! ```
 //!
 //! # Element PAPI scope

@@ -221,13 +221,13 @@ fn checker_image() -> ImageData {
     }
 }
 
-/// The retained renderer owns the image registry after the architecture
-/// change. This golden fails visibly if `ElementTree::images_mut` and
-/// `Pulsar::render` stop referring to the same store: the checker disappears
-/// and only the white fallback background remains.
+/// The document owns the image registry beside its private painter. This
+/// golden fails visibly if `ElementTree::images_mut` and `Document::render`
+/// stop referring to the same store: the checker disappears and only the
+/// white fallback background remains.
 #[test]
-fn retained_pulsar_image_store_reaches_the_scene() {
-    let mut gpu = headless("retained_pulsar_image_store_reaches_the_scene");
+fn document_image_store_reaches_the_private_painter() {
+    let mut gpu = headless("document_image_store_reaches_the_private_painter");
 
     let mut runtime = MainThreadRuntime::new(ElementTree::new(VIEWPORT, PageConfig::default()))
         .expect("QuickJS realm");

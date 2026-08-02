@@ -8,10 +8,10 @@
 //! share one isolated 640×640 Vello atlas readback; a full audit compares all
 //! 1,000 against temporary Chromium references.
 
-#[path = "common/mod.rs"]
-mod common;
 #[path = "support/html.rs"]
 mod html;
+#[path = "paint_common/mod.rs"]
+mod paint_common;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -25,7 +25,6 @@ use pulsar::gpu::Headless;
 use pulsar::vello::Scene;
 use pulsar::vello::kurbo::{Affine, Rect};
 use pulsar::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
-use pulsar::{ImageStore, Painter};
 
 const CASE_COUNT: usize = 1_000;
 const CELL_SIZE: u32 = 128;
@@ -389,8 +388,6 @@ fn render_shard(shard: usize) -> ShardOutcome {
 
 fn build_and_render(shard: usize, gpu: &mut Headless) -> Result<Image, String> {
     let mut atlas = Scene::new();
-    let mut painter = Painter::new();
-    let images = ImageStore::new();
     let first = shard * CASES_PER_SHARD;
     let include_skipped = std::env::var_os(AUDIT_ENV).is_some();
 
@@ -411,8 +408,8 @@ fn build_and_render(shard: usize, gpu: &mut Headless) -> Result<Image, String> {
                 ));
             }
         }
-        let frame = document.dom.paint_order();
-        let child = painter.paint(&document.dom, &frame, &images);
+        document.dom.render();
+        let child = document.dom.scene();
 
         let column = u32::try_from(slot % GRID).expect("an atlas column fits u32");
         let row = u32::try_from(slot / GRID).expect("an atlas row fits u32");
@@ -427,7 +424,7 @@ fn build_and_render(shard: usize, gpu: &mut Headless) -> Result<Image, String> {
             &cell,
         );
         atlas.fill(Fill::NonZero, Affine::IDENTITY, Color::WHITE, None, &cell);
-        atlas.append(child, Some(Affine::translate((x, y))));
+        atlas.append(&child, Some(Affine::translate((x, y))));
         atlas.pop_layer();
     }
 

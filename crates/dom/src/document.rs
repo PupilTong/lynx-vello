@@ -1,7 +1,7 @@
 //! The [`Document`] — one NodeId-aligned arena set: a fixed-address DOM/style
 //! tree beside independently mutable layout/text state.
 
-use std::cell::{Ref, RefCell};
+use std::cell::RefCell;
 use std::fmt;
 use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
@@ -168,11 +168,11 @@ pub(crate) struct PendingRelayout {
 
 /// One DOM tree, including its actual document node at primary-arena slot
 /// zero.
-pub struct Document<T, R = ()> {
+pub struct Document<T> {
     style_engine: StyleEngine,
     tree: Box<TreeArenas<T>>,
     layout: DocumentLayoutState,
-    pub(crate) renderer: RefCell<R>,
+    pub(crate) painter: RefCell<crate::painter::Painter>,
     /// Pre-mutation state exists only while invalidation is pending. Keeping
     /// the payloads here leaves one byte-sized lifecycle flag, rather than a
     /// nullable snapshot pointer, in every live node's styling slot.
@@ -182,9 +182,9 @@ pub struct Document<T, R = ()> {
     node_removal_epoch: u64,
     /// Monotone count of visual-affecting mutations (style/attribute/
     /// structure/stylesheet/device/layout invalidation), bumped at the
-    /// internal invalidation funnels. A retained [`crate::visual::PaintOrder`]
-    /// snapshots it: painting a frame built before a later mutation would
-    /// mix stale geometry with live styles, so the paint path fails fast.
+    /// internal invalidation funnels. The private visual frame snapshots it:
+    /// painting a frame built before a later mutation would mix stale geometry
+    /// with live styles, so the paint path fails fast.
     visual_epoch: u64,
     layout_dirty: bool,
     layout_root_dirty: bool,
@@ -196,7 +196,7 @@ pub struct Document<T, R = ()> {
     input: crate::input::InputState,
 }
 
-impl<T: fmt::Debug, R> fmt::Debug for Document<T, R> {
+impl<T: fmt::Debug> fmt::Debug for Document<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Document")
             .field("root_element", &self.root_element().map(Node::id))
@@ -214,21 +214,6 @@ impl<T> Document<T> {
 
     #[must_use]
     pub fn with_url_data(device: Device, url_data: UrlExtraData) -> Self {
-        Self::with_url_data_and_renderer(device, url_data, ())
-    }
-}
-
-impl<T, R> Document<T, R> {
-    /// Creates a document with a statically selected renderer owned by the
-    /// document for its full lifetime.
-    #[must_use]
-    pub fn with_renderer(device: Device, renderer: R) -> Self {
-        Self::with_url_data_and_renderer(device, about_blank_url_data(), renderer)
-    }
-
-    /// [`Self::with_renderer`] with explicit base-URL data.
-    #[must_use]
-    pub fn with_url_data_and_renderer(device: Device, url_data: UrlExtraData, renderer: R) -> Self {
         let style_engine = StyleEngine::with_url_data(device, url_data);
         let lock = style_engine.lock();
         let url_data = style_engine.url_data();
@@ -246,7 +231,7 @@ impl<T, R> Document<T, R> {
             style_engine,
             tree,
             layout,
-            renderer: RefCell::new(renderer),
+            painter: RefCell::new(crate::painter::Painter::default()),
             pending_snapshots: SnapshotMap::new(),
             relayout_roots: Vec::new(),
             relayout_root_ids: FxHashSet::default(),
@@ -257,23 +242,6 @@ impl<T, R> Document<T, R> {
             last_layout_inputs: None,
             input: crate::input::InputState::default(),
         }
-    }
-
-    /// Borrows the statically selected renderer owned by this document.
-    #[must_use]
-    pub fn renderer(&self) -> Ref<'_, R> {
-        self.renderer.borrow()
-    }
-
-    /// Mutably accesses the renderer while the whole document is exclusively
-    /// borrowed, for renderer-owned resources such as decoded images.
-    ///
-    /// Access conservatively advances [`Self::visual_epoch`]: the document
-    /// cannot inspect `R` to tell whether the mutation changes its output, and
-    /// retaining an old scene after a resource update would be incorrect.
-    pub fn renderer_mut(&mut self) -> &mut R {
-        self.note_visual_mutation();
-        self.renderer.get_mut()
     }
 
     pub(crate) fn input_state_mut(&mut self) -> &mut crate::input::InputState {
@@ -361,16 +329,15 @@ impl<T, R> Document<T, R> {
     }
 
     /// Monotone count of [`Self::remove_subtree`] calls. A freed `NodeId`
-    /// can be recycled by a later creation, so a retained [`crate::visual::PaintOrder`]
-    /// is only valid for hit testing while this value is unchanged.
+    /// can be recycled by a later creation, so a private visual frame is only
+    /// valid for hit testing while this value is unchanged.
     #[must_use]
     pub fn node_removal_epoch(&self) -> u64 {
         self.node_removal_epoch
     }
 
-    /// Monotone count of visual-affecting mutations. A retained
-    /// [`crate::visual::PaintOrder`] is only valid for painting while this
-    /// value is unchanged (hit testing needs only
+    /// Monotone count of visual-affecting mutations. A private visual frame is
+    /// only valid for painting while this value is unchanged (hit testing needs only
     /// [`Self::node_removal_epoch`] — its geometry snapshot is
     /// self-contained).
     #[must_use]
@@ -382,8 +349,7 @@ impl<T, R> Document<T, R> {
     /// invalidation funnels every mutating public API drains through:
     /// snapshot creation (attributes/classes/element state), inline-style
     /// application, child-list changes, stylesheet/device changes, and
-    /// layout-dirty marking, plus exclusive access to renderer-owned
-    /// resources.
+    /// layout-dirty marking, plus exclusive access to paint resources.
     pub(crate) fn note_visual_mutation(&mut self) {
         self.visual_epoch += 1;
     }
@@ -850,41 +816,23 @@ pub(crate) mod tests {
             .snapshot_flags()
     }
 
-    #[derive(Debug, Default)]
-    struct ItemCountRenderer(usize);
-
-    impl<T> crate::visual::DocumentRenderer<T> for ItemCountRenderer {
-        type Output<'a>
-            = Ref<'a, usize>
-        where
-            Self: 'a,
-            T: 'a;
-
-        fn render(&mut self, _document: &Document<T, Self>, frame: &crate::visual::PaintOrder) {
-            self.0 = frame.items().len();
-        }
-
-        fn output<'a>(renderer: Ref<'a, Self>) -> Self::Output<'a>
-        where
-            T: 'a,
-        {
-            Ref::map(renderer, |renderer| &renderer.0)
-        }
-    }
-
     #[test]
-    fn a_statically_injected_renderer_retains_its_gat_output() {
-        let mut document = Document::<(), _>::with_renderer(device(), ItemCountRenderer::default());
+    fn the_document_owns_render_resources_and_retains_its_scene() {
+        let mut document = Document::new(device());
+        document.add_stylesheet(
+            "page { width: 10px; height: 10px; background-color: red; }",
+            crate::StylesheetOrigin::Author,
+        );
         let root = document.create_element("page", ());
         document.append_document_element(root);
         let epoch = document.visual_epoch();
 
-        document.renderer_mut().0 = usize::MAX;
+        let _ = document.images_mut().remove_url("missing");
         assert_eq!(document.visual_epoch(), epoch + 1);
 
         document.render();
 
-        assert_eq!(*document.render_output(), 1);
+        assert!(!document.scene().encoding().draw_tags.is_empty());
     }
 
     #[test]

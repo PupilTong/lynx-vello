@@ -35,7 +35,7 @@ static CLASS: LazyLock<LocalName> = LazyLock::new(|| LocalName::from("class"));
 static ID: LazyLock<LocalName> = LazyLock::new(|| LocalName::from("id"));
 static STYLE: LazyLock<LocalName> = LazyLock::new(|| LocalName::from("style"));
 
-impl<T, R> Document<T, R> {
+impl<T> Document<T> {
     pub(crate) fn mark_subtree_dirty(&mut self, id: NodeId) {
         let node = self.live_element(id);
         if !node.child_ids().is_empty() {
@@ -160,7 +160,7 @@ impl<T, R> Document<T, R> {
     }
 }
 
-impl<T, R> Document<T, R> {
+impl<T> Document<T> {
     pub fn set_classes(&mut self, id: NodeId, classes: &str) {
         self.note_class_attribute_change(id);
         let node = self.live_node_mut(id);

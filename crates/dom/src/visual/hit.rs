@@ -15,13 +15,13 @@ impl PaintOrder {
     /// # Panics
     ///
     /// Panics when nodes were removed from `document` after this frame was
-    /// built; rebuild via [`Document::paint_order`].
-    pub fn assert_fresh<T, R>(&self, document: &Document<T, R>) {
+    /// built; the DOM's next visual operation rebuilds it.
+    pub(crate) fn assert_fresh<T>(&self, document: &Document<T>) {
         assert_eq!(
             self.epoch,
             document.node_removal_epoch(),
             "stale PaintOrder: nodes were removed after this frame was built; \
-             rebuild it with Document::paint_order",
+             rebuild it through the document visual pipeline",
         );
     }
 
@@ -35,14 +35,14 @@ impl PaintOrder {
     /// # Panics
     ///
     /// Panics when [`Document::visual_epoch`] (or the removal epoch) moved
-    /// after this frame was built; rebuild via [`Document::paint_order`].
-    pub fn assert_visually_fresh<T, R>(&self, document: &Document<T, R>) {
+    /// after this frame was built; the DOM's next visual operation rebuilds it.
+    pub(crate) fn assert_visually_fresh<T>(&self, document: &Document<T>) {
         self.assert_fresh(document);
         assert_eq!(
             self.visual_epoch,
             document.visual_epoch(),
             "visually stale PaintOrder: the document mutated after this frame was built; \
-             rebuild it with Document::paint_order before painting",
+             rebuild it through the document visual pipeline before painting",
         );
     }
 
@@ -61,7 +61,11 @@ impl PaintOrder {
     /// geometry snapshot is self-contained, so non-structural mutations
     /// keep the frame queryable).
     #[must_use]
-    pub fn hit_test<T, R>(&self, document: &Document<T, R>, point: Point2D<f32>) -> Option<NodeId> {
+    pub(crate) fn hit_test<T>(
+        &self,
+        document: &Document<T>,
+        point: Point2D<f32>,
+    ) -> Option<NodeId> {
         self.hit_test_local(document, point).map(|(node, _)| node)
     }
 
@@ -77,9 +81,9 @@ impl PaintOrder {
     ///
     /// Panics per [`Self::assert_fresh`].
     #[must_use]
-    pub fn hit_test_local<T, R>(
+    pub(crate) fn hit_test_local<T>(
         &self,
-        document: &Document<T, R>,
+        document: &Document<T>,
         point: Point2D<f32>,
     ) -> Option<(NodeId, LocalHit)> {
         self.assert_fresh(document);

@@ -1,8 +1,10 @@
 //! The element tree and its Element PAPI operations.
 
+use std::cell::Ref;
 use std::fmt;
 
-use dom::{self, Document, NodeId, StylesheetOrigin};
+use dom::pulsar::vello::Scene;
+use dom::{self, Document, ImageStore, NodeId, StylesheetOrigin};
 
 use crate::arena::{ElementArena, LynxElement};
 use crate::device::Viewport;
@@ -51,10 +53,10 @@ impl std::error::Error for PapiError {}
 /// One Lynx element tree: a `dom` document, an independent runtime-element
 /// arena, and the page policy the Element PAPI speaks in.
 #[derive(Debug)]
-pub struct ElementTree<R = ()> {
+pub struct ElementTree {
     /// The DOM payload is only the key back into `elements`; all Lynx runtime
     /// state stays in the context-owned arena.
-    document: Document<ElementId, R>,
+    document: Document<ElementId>,
     elements: ElementArena,
     page: Option<ElementId>,
     /// `__CreatePage`'s `componentID` — a string name web-core keeps in a side
@@ -66,20 +68,10 @@ pub struct ElementTree<R = ()> {
 
 impl ElementTree {
     /// Creates an empty tree for `viewport` with `config`'s UA cascade
-    /// installed and no renderer. No page exists until `__CreatePage`.
+    /// installed. No page exists until `__CreatePage`.
     #[must_use]
     pub fn new(viewport: Viewport, config: PageConfig) -> Self {
-        Self::with_renderer(viewport, config, ())
-    }
-}
-
-impl<R> ElementTree<R> {
-    /// Creates an empty tree and statically injects `renderer` into its DOM
-    /// document. Runtime composition crates select the concrete renderer;
-    /// this Lynx policy layer stays renderer-agnostic.
-    #[must_use]
-    pub fn with_renderer(viewport: Viewport, config: PageConfig, renderer: R) -> Self {
-        let mut document = Document::with_renderer(viewport.device(), renderer);
+        let mut document = Document::new(viewport.device());
         document.add_stylesheet(&ua_stylesheet(config), StylesheetOrigin::UserAgent);
         Self {
             document,
@@ -93,20 +85,31 @@ impl<R> ElementTree<R> {
 
     /// The underlying document, for style/layout/paint queries.
     #[must_use]
-    pub const fn document(&self) -> &Document<ElementId, R> {
+    pub const fn document(&self) -> &Document<ElementId> {
         &self.document
     }
 
-    /// Borrows the statically injected renderer.
-    #[must_use]
-    pub fn renderer(&self) -> std::cell::Ref<'_, R> {
-        self.document.renderer()
+    /// Lays out and renders through the document's private paint pipeline.
+    pub fn render(&mut self) {
+        self.document.render();
     }
 
-    /// Mutably accesses renderer-owned resources without exposing mutable DOM
-    /// topology. The DOM advances its visual epoch conservatively.
-    pub fn renderer_mut(&mut self) -> &mut R {
-        self.document.renderer_mut()
+    /// The Vello scene retained by the last [`Self::render`] call.
+    #[must_use]
+    pub fn scene(&self) -> Ref<'_, Scene> {
+        self.document.scene()
+    }
+
+    /// Decoded images registered with the document's paint pipeline.
+    #[must_use]
+    pub fn images(&self) -> Ref<'_, ImageStore> {
+        self.document.images()
+    }
+
+    /// Registers or updates decoded images without exposing DOM topology or
+    /// its private painter.
+    pub fn images_mut(&mut self) -> &mut ImageStore {
+        self.document.images_mut()
     }
 
     /// Feeds one host input event in, building the private visual frame needed
@@ -124,8 +127,7 @@ impl<R> ElementTree<R> {
     /// runtime layer's job, not this one's; it prevents the default action and
     /// takes over when it wants different behavior.
     pub fn handle_input(&mut self, event: dom::input::InputEvent) -> dom::input::InputResponse {
-        let frame = self.document.paint_order();
-        self.document.handle_input(&frame, event)
+        self.document.handle_input(event)
     }
 
     /// Resizes the viewport, restyling and relaying out on the next flush.
@@ -341,27 +343,7 @@ impl<R> ElementTree<R> {
     }
 }
 
-impl<R> ElementTree<R>
-where
-    R: dom::visual::DocumentRenderer<ElementId>,
-{
-    /// Lays out and paints through the statically injected renderer.
-    ///
-    /// There is deliberately no `document_mut`: handing out `&mut Document`
-    /// would let a caller remove or move nodes behind this layer's back,
-    /// desynchronising the element arena and page state.
-    pub fn render(&mut self) {
-        self.document.render();
-    }
-
-    /// Returns the concrete renderer's retained GAT output.
-    #[must_use]
-    pub fn render_output(&self) -> R::Output<'_> {
-        self.document.render_output()
-    }
-}
-
-impl<R: 'static> ElementPapi for ElementTree<R> {
+impl ElementPapi for ElementTree {
     type Error = PapiError;
 
     fn create_page(&mut self, component_id: &str, component_css_id: i32) -> ElementId {

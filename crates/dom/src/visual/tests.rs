@@ -3,13 +3,12 @@
 
 #![allow(clippy::float_cmp)]
 
-mod common;
-
-use common::Doc;
 use dom::NodeId;
 use dom::visual::{PaintItemKind, PaintOrder, Point2D};
 
-const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
+use crate::test_common::{self as common, Doc};
+
+const AHEM: &[u8] = include_bytes!("../../../hughie/tests/fixtures/Ahem.ttf");
 
 struct Harness {
     doc: Doc,
@@ -31,7 +30,7 @@ impl Harness {
     }
 
     fn paint(&mut self) -> PaintOrder {
-        self.doc.dom.paint_order()
+        self.doc.dom.build_paint_order()
     }
 
     /// Node ids of the element-box items, in paint order.
@@ -541,7 +540,7 @@ fn hit_outside_all_content_is_none() {
 #[test]
 fn empty_document_paints_nothing() {
     let mut doc: dom::Document<()> = dom::Document::new(common::device(800.0, 600.0));
-    let paint = doc.paint_order();
+    let paint = doc.build_paint_order();
     assert!(paint.items().is_empty());
     assert_eq!(paint.hit_test(&doc, Point2D::new(10.0, 10.0)), None);
 }

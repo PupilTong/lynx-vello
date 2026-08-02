@@ -12,17 +12,17 @@ isolated 128x128 iframe.
 Reference images are intentionally browser-owned.  Generate the atlas PNGs
 with Playwright CLI, inspect them, then split them into per-case goldens:
 
-    python3 crates/pulsar/tests/support/generate_css_paint_cases.py \
+    python3 crates/dom/tests/support/generate_css_paint_cases.py \
       --html-output output/playwright/css-paint
     python3 -m http.server 8765 --bind 127.0.0.1
-    node crates/pulsar/tests/support/capture_css_paint_references.mjs \
+    node crates/dom/tests/support/capture_css_paint_references.mjs \
       http://127.0.0.1:8765 output/playwright/css-paint/atlases
-    python3 crates/pulsar/tests/support/generate_css_paint_cases.py \
+    python3 crates/dom/tests/support/generate_css_paint_cases.py \
       --split-atlases output/playwright/css-paint/atlases
 
 For a full audit, split all references into a disposable directory:
 
-    python3 crates/pulsar/tests/support/generate_css_paint_cases.py \
+    python3 crates/dom/tests/support/generate_css_paint_cases.py \
       --split-atlases output/playwright/css-paint/atlases \
       --reference-output /tmp/css-paint-references --include-differences
 
@@ -43,11 +43,11 @@ from typing import Iterable
 
 
 ROOT = Path(__file__).resolve().parents[4]
-GENERATED = ROOT / "crates/pulsar/tests/generated/css_paint_cases.rs"
-BROWSER_GOLDENS = ROOT / "crates/pulsar/tests/screenshots/css-paint"
-NATIVE_GOLDENS = ROOT / "crates/pulsar/tests/screenshots/css-paint-native"
-DIFFERENCE_FIXTURES = ROOT / "crates/pulsar/tests/fixtures/css-paint-differences"
-DIFFERENCES = ROOT / "crates/pulsar/tests/css-paint-differences.tsv"
+GENERATED = ROOT / "crates/dom/tests/generated/css_paint_cases.rs"
+BROWSER_GOLDENS = ROOT / "crates/dom/tests/screenshots/css-paint"
+NATIVE_GOLDENS = ROOT / "crates/dom/tests/screenshots/css-paint-native"
+DIFFERENCE_FIXTURES = ROOT / "crates/dom/tests/fixtures/css-paint-differences"
+DIFFERENCES = ROOT / "crates/dom/tests/css-paint-differences.tsv"
 
 CASE_COUNT = 1_000
 CELL_SIZE = 128

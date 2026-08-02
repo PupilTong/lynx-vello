@@ -106,7 +106,7 @@ pub(crate) struct PreparedFrame<'a> {
 }
 
 impl PreparedFrame<'_> {
-    /// The scene retained by the document's injected Pulsar renderer.
+    /// The scene retained by the document's private painter.
     pub(crate) fn scene(&self) -> Ref<'_, Scene> {
         self.elements.scene()
     }

@@ -1,12 +1,10 @@
-//! Structural scene tests: `Document` → `PaintOrder` → `vello::Scene`,
-//! asserting on the scene's encoding (draw counts, layer balance) without
+//! Structural scene tests for `Document`'s private paint pipeline, asserting
+//! on the retained scene's encoding (draw counts, layer balance) without
 //! touching a GPU.
 
-mod common;
+mod paint_common;
 
-use common::Doc;
-use dom::visual::PaintOrder;
-use pulsar::{ImageStore, Painter};
+use paint_common::Doc;
 
 const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
 
@@ -16,27 +14,19 @@ const PAGE: &str = "page { display: flex; position: relative; width: 800px; heig
 
 struct Harness {
     doc: Doc,
-    painter: Painter,
-    images: ImageStore,
 }
 
 impl Harness {
     fn new(css: &str) -> Self {
         Self {
             doc: Doc::with_css(&format!("{PAGE} {css}")),
-            painter: Painter::new(),
-            images: ImageStore::new(),
         }
-    }
-
-    fn frame(&mut self) -> PaintOrder {
-        self.doc.dom.paint_order()
     }
 
     /// Paints and returns `(draw ops, clip/layer pairs, open layers)`.
     fn stats(&mut self) -> (usize, u32, u32) {
-        let frame = self.doc.dom.paint_order();
-        let scene = self.painter.paint(&self.doc.dom, &frame, &self.images);
+        self.doc.dom.render();
+        let scene = self.doc.dom.scene();
         let encoding = scene.encoding();
         (
             encoding.draw_tags.len(),
@@ -120,7 +110,7 @@ fn text_runs_encode_glyphs() {
 }
 
 #[test]
-fn frames_can_be_repainted_with_a_reused_painter() {
+fn documents_reuse_their_private_painter_across_frames() {
     let mut h = Harness::new(".bg { background-color: teal; opacity: 0.7; overflow: hidden; }");
     let root = h.doc.root;
     let outer = h.doc.el(root, "box bg");
@@ -141,8 +131,6 @@ fn hidden_group_roots_still_composite_children() {
     let root = h.doc.root;
     let ghost = h.doc.el(root, "box ghost");
     h.doc.el(ghost, "box shown");
-    let frame = h.frame();
-    assert_eq!(frame.layers().len(), 1);
     let (draws, clips, open) = h.stats();
     assert_eq!(open, 0);
     assert!(draws > 0);
@@ -237,22 +225,6 @@ fn transparent_border_sides_reject_the_uniform_fast_path() {
         "a transparent positive-width side must force the per-side path \
          ({clips_mixed} vs {clips_uniform})"
     );
-}
-
-#[test]
-#[should_panic(expected = "visually stale PaintOrder")]
-fn painting_a_frame_built_before_a_style_mutation_panics() {
-    // Reviewer scenario: change `display`/style after building the frame,
-    // even with a completed re-layout — the old frame's geometry mixed
-    // with live styles is incoherent (a display:none element would paint
-    // at its former size).
-    let mut h = Harness::new(".bg { background-color: teal; }");
-    let root = h.doc.root;
-    let el = h.doc.el(root, "box bg");
-    let frame = h.doc.dom.paint_order();
-    h.doc.dom.set_inline_style(el, "display: none");
-    h.doc.dom.layout();
-    let _ = h.painter.paint(&h.doc.dom, &frame, &h.images);
 }
 
 #[test]

@@ -2,7 +2,7 @@
 //! hand, render it headless, and check pixels from the readback. A usable GPU
 //! adapter is mandatory, including in CI.
 
-use flashbulb::headless;
+use pulsar::gpu::Headless;
 use pulsar::vello;
 use pulsar::vello::kurbo::{Affine, Rect};
 use pulsar::vello::peniko::{Color, Fill};
@@ -12,6 +12,11 @@ use pulsar::vello::peniko::{Color, Fill};
 fn pixel(pixels: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
     let offset = (y * width + x) * 4;
     pixels[offset..offset + 4].try_into().unwrap()
+}
+
+#[track_caller]
+fn headless(test: &str) -> Headless {
+    Headless::new().unwrap_or_else(|error| panic!("{test}: GPU initialization failed: {error}"))
 }
 
 #[test]

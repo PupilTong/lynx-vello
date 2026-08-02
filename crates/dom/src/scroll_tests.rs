@@ -3,14 +3,13 @@
 
 #![allow(clippy::float_cmp)]
 
-mod common;
-
-use common::{Doc, device_with};
 use dom::NodeId;
 use dom::input::{DefaultAction, InputEvent, PointerKind, PointerPhase};
 use dom::visual::{PaintItemKind, PaintOrder, Point2D};
 use euclid::default::Vector2D;
 use stylo::queries::values::PrefersColorScheme;
+
+use crate::test_common::{Doc, device_with};
 
 struct Harness {
     doc: Doc,
@@ -32,7 +31,7 @@ impl Harness {
     }
 
     fn paint(&mut self) -> PaintOrder {
-        self.doc.dom.paint_order()
+        self.doc.dom.build_paint_order()
     }
 
     /// The viewport-space border-box origin of a node's element item.
@@ -175,11 +174,10 @@ fn a_wheel_over_a_pinned_box_does_not_scroll_what_it_is_pinned_above() {
     let pinned = h.el(scroller, "view.pinned");
     h.doc.dom.layout();
 
-    let frame = h.paint();
-    let over_pinned = h.doc.dom.handle_input(
-        &frame,
-        InputEvent::wheel(Point2D::new(30.0, 30.0), (0.0, 80.0)),
-    );
+    let over_pinned = h
+        .doc
+        .dom
+        .handle_input(InputEvent::wheel(Point2D::new(30.0, 30.0), (0.0, 80.0)));
     assert_eq!(over_pinned.target, Some(pinned));
     assert_eq!(over_pinned.default_action, DefaultAction::None);
     assert_eq!(h.doc.dom.scroll_offset(scroller), Vector2D::zero());
@@ -187,11 +185,10 @@ fn a_wheel_over_a_pinned_box_does_not_scroll_what_it_is_pinned_above() {
     // Just outside the pinned box, over the scroller's own content, the same
     // wheel does scroll — so this is the containing-block chain at work, not a
     // dead input path.
-    let frame = h.paint();
-    let over_content = h.doc.dom.handle_input(
-        &frame,
-        InputEvent::wheel(Point2D::new(80.0, 80.0), (0.0, 80.0)),
-    );
+    let over_content = h
+        .doc
+        .dom
+        .handle_input(InputEvent::wheel(Point2D::new(80.0, 80.0), (0.0, 80.0)));
     assert_eq!(over_content.target, Some(rows[0]));
     assert_eq!(
         over_content.default_action,
@@ -279,11 +276,10 @@ fn overflow_hidden_clips_without_answering_a_gesture() {
     let clipper = h.el(root, "view.clipper");
     let rows: Vec<NodeId> = (0..3).map(|_| h.el(clipper, "view.row")).collect();
 
-    let frame = h.paint();
-    let response = h.doc.dom.handle_input(
-        &frame,
-        InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 60.0)),
-    );
+    let response = h
+        .doc
+        .dom
+        .handle_input(InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 60.0)));
     assert_eq!(response.default_action, DefaultAction::None);
     assert_eq!(h.doc.dom.scroll_offset(clipper), Vector2D::zero());
 
@@ -372,11 +368,12 @@ fn a_host_gesture_drives_paint_and_hit_testing_end_to_end() {
     let rows: Vec<NodeId> = (0..4).map(|_| h.el(scroller, "view.row")).collect();
 
     let drag = |h: &mut Harness, y: f32, phase| {
-        let frame = h.paint();
-        h.doc.dom.handle_input(
-            &frame,
-            InputEvent::pointer(Point2D::new(50.0, y), 7, PointerKind::Touch, phase),
-        )
+        h.doc.dom.handle_input(InputEvent::pointer(
+            Point2D::new(50.0, y),
+            7,
+            PointerKind::Touch,
+            phase,
+        ))
     };
 
     drag(&mut h, 90.0, PointerPhase::Down);
@@ -403,21 +400,15 @@ fn the_response_reports_where_the_event_landed_inside_its_target() {
     let rows: Vec<NodeId> = (0..4).map(|_| h.el(scroller, "view.row")).collect();
     h.scroll_to(scroller, 0.0, 120.0);
 
-    let frame = h.paint();
-    let response = h.doc.dom.handle_input(
-        &frame,
-        InputEvent::pointer(
-            Point2D::new(30.0, 10.0),
-            1,
-            PointerKind::Touch,
-            PointerPhase::Down,
-        ),
-    );
+    let response = h.doc.dom.handle_input(InputEvent::pointer(
+        Point2D::new(30.0, 10.0),
+        1,
+        PointerKind::Touch,
+        PointerPhase::Down,
+    ));
 
     // Row 1 spans y=100..200 unscrolled, so 120 of scroll puts its y=30 under
     // the viewport's y=10.
     assert_eq!(response.target, Some(rows[1]));
-    let local = response.local.expect("a hit reports its local point");
-    assert_eq!(local.position, Point2D::new(30.0, 30.0));
-    assert_eq!(frame.items()[local.item].node, rows[1]);
+    assert_eq!(response.local_position, Some(Point2D::new(30.0, 30.0)));
 }

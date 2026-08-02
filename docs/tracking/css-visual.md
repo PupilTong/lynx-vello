@@ -99,24 +99,24 @@ Lynx's paint/visual CSS surface is implemented in `lynx/core/renderer/css/parser
 
 ## Implementation status (2026-07-28)
 
-The `vello`-backed renderer for this surface is live: `crates/pulsar` paints
+The Vello-backed renderer for this surface is live inside `crates/dom`: its private Painter paints
 backgrounds (color, multi-layer linear/radial/conic gradients), borders (all
 styles, per-corner elliptical radii), box-shadows, text (glyph runs,
 decorations, text-stroke, unblurred text-shadow), and the group effects
 (`opacity`, color `filter` approximations, `clip-path`, single-layer `mask`)
-via `dom`'s `RenderLayer` arena. Repeating-gradient painting machinery exists,
+via the private `RenderLayer` arena. Repeating-gradient painting machinery exists,
 but the Stylo `lynx` grammar currently rejects the standard repeating
 functions, so authors cannot reach it; this is tracked as
 `stylo-lynx-repeating-gradient-grammar-scope` in
 `docs/css-paint-screenshot-matrix.md`. Recorded v1 limits live in
-`crates/pulsar/src/lib.rs`. Both fork-grammar gaps found
+`crates/dom/src/painter.rs`. Both fork-grammar gaps found
 while implementing are fixed on the fork's `lynx` branch (PR #10,
 squash-merged as `8fb7de31a`):
 `background-clip: text` un-gated from gecko (pref-gated for stock servo;
-pulsar paints it via glyph-silhouette `SrcIn` sandwiches,
+the DOM painter handles it via glyph-silhouette `SrcIn` sandwiches,
 GPU-pixel-tested with Ahem) and the `outline`/`outline-color`/
 `outline-style`/`outline-width` rows seeded (`outline-offset` deliberately
-omitted — Lynx outlines are flush rings; pulsar's ring painting is live
+omitted — Lynx outlines are flush rings; DOM's ring painting is live
 and GPU-pixel-tested). Fork facts
 that correct rows above: `text-decoration-color` IS compiled;
 `text-decoration-line: overline` is compiled out under `lynx`.

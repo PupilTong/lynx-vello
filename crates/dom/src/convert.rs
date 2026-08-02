@@ -1,10 +1,17 @@
+#![allow(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    reason = "CSS/style geometry is f32 while Vello/Kurbo geometry is f64"
+)]
+
 //! Type bridges: euclid (dom visual) → kurbo, stylo colors → peniko.
 
-use dom::visual::{Size2D, Transform3D};
 use stylo::color::{AbsoluteColor, ColorSpace};
 use stylo::properties::ComputedValues;
-use vello::kurbo::Affine;
-use vello::peniko::Color;
+
+use crate::vello::kurbo::Affine;
+use crate::vello::peniko::Color;
+use crate::visual::{Size2D, Transform3D};
 
 /// The affine paint transform for an item matrix, or `None` when the matrix
 /// does not render (singular / degenerate — css-transforms-1 §6).
@@ -75,9 +82,8 @@ pub(crate) fn current_color(style: &ComputedValues) -> Color {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use vello::kurbo::Point;
-
     use super::*;
+    use crate::vello::kurbo::Point;
 
     #[test]
     fn affine_matrices_convert_exactly() {

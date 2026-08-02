@@ -427,7 +427,7 @@ impl StyleEngine {
     }
 }
 
-impl<T, R> Document<T, R> {
+impl<T> Document<T> {
     #[must_use]
     pub fn device(&self) -> &Device {
         self.style_engine().device()

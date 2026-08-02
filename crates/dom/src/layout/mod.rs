@@ -30,7 +30,7 @@ pub(crate) static ANONYMOUS_STYLE: LazyLock<Arc<ComputedValues>> = LazyLock::new
     ComputedValues::initial_values_with_font_override(Font::initial_values())
 });
 
-impl<T: Sync, R> Document<T, R> {
+impl<T: Sync> Document<T> {
     pub fn layout(&mut self) {
         self.flush_styles_with_damage_sink(Parallelism::Auto, &mut |_, _| {});
 
@@ -49,7 +49,7 @@ impl<T: Sync, R> Document<T, R> {
     }
 }
 
-impl<T, R> Document<T, R> {
+impl<T> Document<T> {
     /// Installs decoded intrinsic dimensions for a replaced element, and
     /// invalidates the node-to-root box-cache path when the value changes.
     ///
@@ -218,8 +218,8 @@ impl<T, R> Document<T, R> {
     ///
     /// Panics if styles are not ready (the preceding style traversal did not
     /// complete, or the document mutated since) — call after
-    /// [`Document::layout`] or [`Document::paint_order`] within the same
-    /// borrow of the document.
+    /// [`Document::layout`] or [`Document::render`] within the same borrow of
+    /// the document.
     #[must_use]
     pub fn paint_style(&self, id: crate::NodeId) -> Option<&ComputedValues> {
         assert!(

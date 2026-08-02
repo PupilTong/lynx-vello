@@ -1,6 +1,6 @@
 [package]
 name = "pulsar"
-description = "vello-backed paint engine: turns `dom` paint orders into GPU scenes"
+description = "Vello scene resources and GPU backend for the DOM paint pipeline"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,37 +8,11 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-euclid.workspace = true
-parley.workspace = true
 pollster.workspace = true
 rustc-hash.workspace = true
-smallvec.workspace = true
-stylo.workspace = true
 # The workspace entry turns vello's defaults off so `crates/image` can reach
-# `peniko` without wgpu; the paint engine is the crate that actually renders, so
-# it opts the GPU back in here.
+# `peniko` without wgpu; Pulsar owns GPU submission, so it opts the GPU back in.
 vello = { workspace = true, features = ["wgpu", "wgpu_default"] }
-dom.workspace = true
-
-[dev-dependencies]
-divan.workspace = true
-# Dev-only reverse edge: `flashbulb`'s `render` feature depends on this crate,
-# so the screenshot test drives the shared harness rather than reimplementing
-# capture and golden comparison. Cargo permits a dev-dependency cycle; the
-# library graph stays acyclic.
-flashbulb = { workspace = true, features = ["render"] }
-html5ever.workspace = true
-# The replaced-content tests drive the real decode pipeline rather than
-# hand-rolling a `peniko::ImageData`, so `object-fit` is exercised against
-# genuinely decoded pixels. Dev-only: the paint engine itself never decodes.
-image.workspace = true
-png.workspace = true
-markup5ever_rcdom.workspace = true
-stylo_traits.workspace = true
-
-[[bench]]
-name = "paint"
-harness = false
 
 [lints]
 workspace = true

@@ -1,8 +1,14 @@
+#![allow(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    reason = "CSS/style geometry is f32 while Vello/Kurbo geometry is f64"
+)]
+
 //! The scene walker: flat paint-order items → vello layer stack.
 //!
 //! Three stack disciplines interleave on vello's single layer stack:
 //!
-//! 1. **Item clip chains** ([`dom::visual::ClipNode`]) — pushed lazily
+//! 1. **Item clip chains** ([`crate::visual::ClipNode`]) — pushed lazily
 //!    per item by diffing the item's chain against what is on the stack,
 //!    so runs of items sharing clips pay nothing. Chains restart inside
 //!    every group scope: an item's full chain is (re-)pushed inside its
@@ -17,7 +23,7 @@
 //!    parent's buffer, so a blend directly inside one reads pixels outside
 //!    the clip. Fragment painters that need a blend under an item clip
 //!    (inset shadows) interpose their own full `SrcOver` layer first.
-//! 2. **Group scopes** ([`dom::visual::RenderLayer`]) — a stacking context with group effects
+//! 2. **Group scopes** ([`crate::visual::RenderLayer`]) — a stacking context with group effects
 //!    pushes, outermost to innermost: the effect layer (blend mode + `opacity` alpha, clipped to
 //!    the group's prepass-computed content bounds), a `clip-path` layer (a full `push_layer`, not a
 //!    clip layer, per the #1198 rule above), and for `mask-image` the alpha-mask sandwich — mask
@@ -32,15 +38,13 @@
 //!    is a recorded v1 limit); per text run: the retained Parley layout under the parent element's
 //!    style.
 
-use dom::Document;
-use dom::visual::{ClipNode, PaintItem, PaintItemKind, PaintOrder, RenderLayer};
-use vello::Scene;
-use vello::kurbo::{Affine, Point, Rect};
-use vello::peniko::{BlendMode, Compose, Fill, Mix};
-
 use crate::paint::{BoxFragment, PathScratch, background, border, filters, mask, shadow, text};
 use crate::shape::{BoxShape, with_shape};
-use crate::{ImageStore, convert};
+use crate::vello::Scene;
+use crate::vello::kurbo::{Affine, Point, Rect};
+use crate::vello::peniko::{BlendMode, Compose, Fill, Mix};
+use crate::visual::{ClipNode, PaintItem, PaintItemKind, PaintOrder, RenderLayer};
+use crate::{Document, ImageStore, convert};
 
 /// Reused per-frame buffers.
 #[derive(Debug, Default)]
@@ -72,10 +76,10 @@ struct Scope {
     filtered: bool,
 }
 
-pub(crate) fn walk<T, R>(
+pub(crate) fn walk<T>(
     scene: &mut Scene,
     scratch: &mut Scratch,
-    document: &Document<T, R>,
+    document: &Document<T>,
     frame: &PaintOrder,
     images: &ImageStore,
 ) {
@@ -120,10 +124,10 @@ pub(crate) fn walk<T, R>(
 /// Opens one group scope: effect layer, optional clip-path layer, optional
 /// mask sandwich. In-scope item clips pop first so no blend layer ever
 /// nests inside a clip layer.
-fn open_scope<T, R>(
+fn open_scope<T>(
     scene: &mut Scene,
     scratch: &mut Scratch,
-    document: &Document<T, R>,
+    document: &Document<T>,
     frame: &PaintOrder,
     layer_index: usize,
     images: &ImageStore,
@@ -207,10 +211,10 @@ fn open_scope<T, R>(
     });
 }
 
-fn close_scope<T, R>(
+fn close_scope<T>(
     scene: &mut Scene,
     scratch: &mut Scratch,
-    document: &Document<T, R>,
+    document: &Document<T>,
     frame: &PaintOrder,
     scale: Affine,
 ) {
@@ -230,10 +234,10 @@ fn close_scope<T, R>(
     }
 }
 
-fn paint_item<T, R>(
+fn paint_item<T>(
     scene: &mut Scene,
     scratch: &mut Scratch,
-    document: &Document<T, R>,
+    document: &Document<T>,
     frame: &PaintOrder,
     item: &PaintItem,
     images: &ImageStore,
@@ -309,11 +313,7 @@ fn paint_item<T, R>(
 /// origin in run-local space is `border_origin - location`. When the parent
 /// is box-less (`display: contents`, whose layout slot the host zeroes) the
 /// element carries no box to anchor to, and the run's own box stands in.
-fn color_gradient_box<T, R>(
-    document: &Document<T, R>,
-    item: &PaintItem,
-    element: dom::NodeId,
-) -> Rect {
+fn color_gradient_box<T>(document: &Document<T>, item: &PaintItem, element: crate::NodeId) -> Rect {
     let own_box = Rect::new(
         0.0,
         0.0,
@@ -338,7 +338,7 @@ fn color_gradient_box<T, R>(
         return own_box;
     }
     padding_box
-        - vello::kurbo::Vec2::new(
+        - crate::vello::kurbo::Vec2::new(
             f64::from(run_layout.location.x),
             f64::from(run_layout.location.y),
         )
@@ -353,22 +353,27 @@ fn color_gradient_box<T, R>(
 /// layout. Recorded v1 limits: descendant `transform`s are ignored (the
 /// silhouette uses layout positions only) and `visibility: hidden` text is
 /// skipped via its parent's style.
-fn collect_text_clip<T, R>(
-    document: &Document<T, R>,
-    element: dom::NodeId,
+fn collect_text_clip<T>(
+    document: &Document<T>,
+    element: crate::NodeId,
 ) -> crate::paint::TextClip<'_> {
     let mut clip = crate::paint::TextClip::default();
-    collect_text_clip_under(document, element, vello::kurbo::Vec2::ZERO, &mut clip);
+    collect_text_clip_under(
+        document,
+        element,
+        crate::vello::kurbo::Vec2::ZERO,
+        &mut clip,
+    );
     clip
 }
 
-fn collect_text_clip_under<'doc, T, R>(
-    document: &'doc Document<T, R>,
-    node: dom::NodeId,
-    offset: vello::kurbo::Vec2,
+fn collect_text_clip_under<'doc, T>(
+    document: &'doc Document<T>,
+    node: crate::NodeId,
+    offset: crate::vello::kurbo::Vec2,
     clip: &mut crate::paint::TextClip<'doc>,
 ) {
-    use vello::kurbo::Vec2;
+    use crate::vello::kurbo::Vec2;
     let Some(node_ref) = document.get(node) else {
         return;
     };
@@ -435,7 +440,7 @@ fn sync_clips(
 }
 
 fn push_clip(scene: &mut Scene, clip: &ClipNode, scale: Affine) {
-    let size = dom::visual::Size2D::new(clip.rect.size.width, clip.rect.size.height);
+    let size = crate::visual::Size2D::new(clip.rect.size.width, clip.rect.size.height);
     let Some(local) = convert::item_affine(&clip.transform, size) else {
         // Singular clip space: nothing inside it can render.
         scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &Rect::ZERO);
@@ -475,11 +480,7 @@ fn pop_clips_to(scene: &mut Scene, scratch: &mut Scratch, len: usize) {
 /// no item), and clamped to the viewport at close. Corners map through the
 /// same affine fit [`paint_item`] draws with, so what is painted is what is
 /// bounded — over-approximation costs tiles, never pixels.
-fn compute_layer_bounds<T, R>(
-    scratch: &mut Scratch,
-    document: &Document<T, R>,
-    frame: &PaintOrder,
-) {
+fn compute_layer_bounds<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrder) {
     let layers = frame.layers();
     let items = frame.items();
     scratch.layer_bounds.clear();

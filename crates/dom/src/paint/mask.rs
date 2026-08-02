@@ -17,11 +17,11 @@
 use stylo::computed_values::mask_origin::single_value::T as MaskOrigin;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{BackgroundClip, Image};
-use vello::Scene;
 
 use crate::ImageStore;
 use crate::paint::BoxFragment;
 use crate::paint::background::{self, BoxLevel, PatternLayer};
+use crate::vello::Scene;
 
 /// Whether the style has any mask layer to paint (drives the walker's
 /// sandwich).

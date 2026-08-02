@@ -2,14 +2,13 @@
 //! readback. Ahem glyphs are solid em squares, so glyph coverage is
 //! pixel-assertable. A usable GPU adapter is mandatory.
 
-mod common;
+mod paint_common;
 
-use common::Doc;
 use flashbulb::headless;
+use paint_common::Doc;
 use pulsar::vello::Scene;
 use pulsar::vello::kurbo::{Affine, Rect};
 use pulsar::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
-use pulsar::{ImageStore, Painter};
 
 const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
 const ISOLATION_ATLAS_WIDTH: u32 = 384;
@@ -44,11 +43,10 @@ fn background_clip_text_clips_to_glyph_ink() {
     let holder = doc.el(root, "text");
     doc.text(holder, "HH HH");
 
-    let frame = doc.dom.paint_order();
-    let mut painter = Painter::new();
-    let scene = painter.paint(&doc.dom, &frame, &ImageStore::new());
+    doc.dom.render();
+    let scene = doc.dom.scene();
     let pixels = gpu
-        .render(scene, 200, 100, Color::WHITE)
+        .render(&scene, 200, 100, Color::WHITE)
         .expect("headless render");
 
     // Inside the first glyph square: rebeccapurple (#663399).
@@ -85,11 +83,10 @@ fn plain_background_covers_the_box() {
     let holder = doc.el(root, "text");
     doc.text(holder, "HH HH");
 
-    let frame = doc.dom.paint_order();
-    let mut painter = Painter::new();
-    let scene = painter.paint(&doc.dom, &frame, &ImageStore::new());
+    doc.dom.render();
+    let scene = doc.dom.scene();
     let pixels = gpu
-        .render(scene, 200, 100, Color::WHITE)
+        .render(&scene, 200, 100, Color::WHITE)
         .expect("headless render");
 
     let gap = pixel(&pixels, 200, 60, 40);
@@ -130,11 +127,10 @@ fn gradient_color_fills_glyph_ink_from_the_padding_box() {
     let holder = doc.el(root, "text");
     doc.text(holder, "HH");
 
-    let frame = doc.dom.paint_order();
-    let mut painter = Painter::new();
-    let scene = painter.paint(&doc.dom, &frame, &ImageStore::new());
+    doc.dom.render();
+    let scene = doc.dom.scene();
     let pixels = gpu
-        .render(scene, 200, 100, Color::WHITE)
+        .render(&scene, 200, 100, Color::WHITE)
         .expect("headless render");
 
     // Ink y: the 20px line box starts at the element's top (y = 10), so the
@@ -168,11 +164,10 @@ fn outline_rings_the_border_box() {
     let root = doc.root;
     doc.el(root, "out");
 
-    let frame = doc.dom.paint_order();
-    let mut painter = Painter::new();
-    let scene = painter.paint(&doc.dom, &frame, &ImageStore::new());
+    doc.dom.render();
+    let scene = doc.dom.scene();
     let pixels = gpu
-        .render(scene, 200, 100, Color::WHITE)
+        .render(&scene, 200, 100, Color::WHITE)
         .expect("headless render");
 
     // Ring band left of the border box: x 15..20 at mid-height.
@@ -211,11 +206,10 @@ fn isolated_atlas_cell_matches_standalone_group_effects() {
     let root = doc.root;
     doc.el(root, "effect");
 
-    let frame = doc.dom.paint_order();
-    let mut painter = Painter::new();
-    let scene = painter.paint(&doc.dom, &frame, &ImageStore::new());
+    doc.dom.render();
+    let scene = doc.dom.scene();
     let standalone = gpu
-        .render(scene, 128, 128, Color::WHITE)
+        .render(&scene, 128, 128, Color::WHITE)
         .expect("standalone headless render");
 
     let cell_x = f64::from(ISOLATION_CELL_X);
@@ -246,7 +240,7 @@ fn isolated_atlas_cell_matches_standalone_group_effects() {
         &cell,
     );
     atlas.fill(Fill::NonZero, Affine::IDENTITY, Color::WHITE, None, &cell);
-    atlas.append(scene, Some(Affine::translate((cell_x, cell_y))));
+    atlas.append(&scene, Some(Affine::translate((cell_x, cell_y))));
     atlas.pop_layer();
     let appended = gpu
         .render(

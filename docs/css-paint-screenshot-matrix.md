@@ -1,7 +1,7 @@
 # CSS paint screenshot matrix
 
 This document records the browser-referenced CSS paint matrix in
-`crates/pulsar/tests/css_atlas.rs`, how its references were produced, and the
+`crates/dom/tests/css_atlas.rs`, how its references were produced, and the
 known differences found by the first complete audit.
 
 ## Scope and oracle
@@ -29,20 +29,20 @@ The ordinary suite has three explicit expectation states:
 | State | Cases | Checked reference |
 | --- | ---: | --- |
 | `BrowserMatch` | 666 | Chromium PNG under `tests/screenshots/css-paint/` |
-| `NativeSnapshot` | 145 | Pulsar/Parley PNG under `tests/screenshots/css-paint-native/` |
+| `NativeSnapshot` | 145 | DOM/Parley PNG under `tests/screenshots/css-paint-native/` |
 | `Skip` | 189 | No PNG and `#[ignore]`; retained for full browser audit |
 
 The 145 native snapshots are all audited W3C-correct Chromium differences:
 84 rasterization or boundary/subpixel-sampling cases plus 61 cases where CSS
 permits different UA geometry, pattern, color, or `auto` metrics. They are
-active regressions: their current standards-conforming Pulsar/Parley result
+active regressions: their current standards-conforming DOM/Parley result
 must remain stable even though it is not required to match Chromium. The full
 browser audit still compares every one of these cases to Chromium so a parity
 change cannot silently alter its standards disposition.
 
 Every one of the 334 Chromium differences has a standalone HTML fixture under
-`crates/pulsar/tests/fixtures/css-paint-differences/` and a row in
-`crates/pulsar/tests/css-paint-differences.tsv`. Thus “difference” is not
+`crates/dom/tests/fixtures/css-paint-differences/` and a row in
+`crates/dom/tests/css-paint-differences.tsv`. Thus “difference” is not
 synonymous with “ignored”: the registry is the union of 145 active native
 snapshots and 189 skips. The asset inventory requires exact basename equality
 for the 666 browser PNGs, 145 native PNGs, and 334 difference fixtures.
@@ -175,23 +175,23 @@ and nested-overflow cases, 20/20 opacity groups, 20/20 clip ellipses, 10/10
 
 | Issue | Class | Cases | Finding and implementation evidence |
 | --- | --- | ---: | --- |
-| `css-gradient-multi-position-stops` | W3C gap | 76 | The Lynx Stylo build compiles out second positions and interpolation hints in `vendor/stylo/style/values/specified/image.rs`; the whole declaration is rejected before Pulsar sees it. |
-| `css-gradient-hard-stop-boundary-sampling` | W3C-correct: raster/sample | 8 | Coincident stops reach the painter, while the boundary scanline selects a different device sample in `crates/pulsar/src/paint/background.rs`. |
-| `css-border-dash-dot-pattern` | W3C-correct: UA choice | 16 | Pulsar uses fixed 2w/1w dashed and 2w dotted periods in `crates/pulsar/src/paint/border.rs`; CSS does not prescribe dash length, spacing, or perimeter phasing. |
-| `css-border-3d-light-face-color` | W3C-correct: UA choice | 24 | `groove`, `ridge`, `inset`, and `outset` use Pulsar's fixed lighten/darken colors. CSS specifies the visual relationship, not a color formula. |
-| `css-double-border-rounded-corners` | W3C-correct: UA choice | 16 | Pulsar's one-third line allocation and rounded-corner interpolation differ from Chrome, but CSS does not fully determine the line split or rounded style transition. |
+| `css-gradient-multi-position-stops` | W3C gap | 76 | The Lynx Stylo build compiles out second positions and interpolation hints in `vendor/stylo/style/values/specified/image.rs`; the whole declaration is rejected before the painter sees it. |
+| `css-gradient-hard-stop-boundary-sampling` | W3C-correct: raster/sample | 8 | Coincident stops reach the painter, while the boundary scanline selects a different device sample in `crates/dom/src/paint/background.rs`. |
+| `css-border-dash-dot-pattern` | W3C-correct: UA choice | 16 | DOM's painter uses fixed 2w/1w dashed and 2w dotted periods in `crates/dom/src/paint/border.rs`; CSS does not prescribe dash length, spacing, or perimeter phasing. |
+| `css-border-3d-light-face-color` | W3C-correct: UA choice | 24 | `groove`, `ridge`, `inset`, and `outset` use the painter's fixed lighten/darken colors. CSS specifies the visual relationship, not a color formula. |
+| `css-double-border-rounded-corners` | W3C-correct: UA choice | 16 | DOM's one-third line allocation and rounded-corner interpolation differ from Chrome, but CSS does not fully determine the line split or rounded style transition. |
 | `css-outline-nonsolid-styles` | W3C gap | 6 | `double`, `groove`, and `ridge` outlines collapse to a solid ring even though CSS UI gives outline styles the corresponding border-style meanings. |
 | `vello-chromium-edge-coverage` | W3C-correct: raster/sample | 48 | Circle, mask, hard-edge gradient, and one shadow boundaries differ by small coverage sets. The atlas-isolation control is byte-identical, so the atlas is not the cause. |
 | `css-position-static-grammar` | W3C gap | 5 | The Lynx `position` parser omits standard `static`. A rejected later declaration leaves an earlier absolute declaration active and moves the containment probe. |
 | `css-filter-brightness-over-one-approximation` | W3C gap | 1 | `brightness(2)` uses a screen-blend approximation rather than the specified filter transfer function. |
 | `css-filter-blur-offscreen-pass` | W3C gap | 9 | `filter: blur()` is ignored because the required offscreen texture pass is not implemented. |
-| `stylo-lynx-clip-path-geometry-box-grammar` | W3C gap | 10 | Pulsar can resolve border/padding/content reference boxes, but the Lynx `clip-path` parser accepts only a basic shape and rejects a trailing geometry-box keyword. |
+| `stylo-lynx-clip-path-geometry-box-grammar` | W3C gap | 10 | DOM's painter can resolve border/padding/content reference boxes, but the Lynx `clip-path` parser accepts only a basic shape and rejects a trailing geometry-box keyword. |
 | `pulsar-clip-inset-radius-percent-reference-box` | W3C gap | 2 | Percent radii in `inset(... round ...)` resolve against the post-inset rectangle; they must use the original reference box before overlap normalization. |
-| `stylo-lynx-clip-polygon-grammar` | W3C gap | 10 | Pulsar has a polygon painter, but `polygon()` is absent from the Lynx allowed-basic-shapes parser set, so it is unreachable. |
+| `stylo-lynx-clip-polygon-grammar` | W3C gap | 10 | DOM has a polygon painter, but `polygon()` is absent from the Lynx allowed-basic-shapes parser set, so it is unreachable. |
 | `pulsar-mask-multiple-layer-composite` | W3C gap | 12 | Only the first non-`none` mask layer paints and `mask-composite` is ignored. |
 | `pulsar-mask-luminance-mode` | W3C gap | 8 | `mask-mode: luminance` is treated as alpha in the current `SrcIn` sandwich. |
 | `text-overflow-wrap-break-word-policy` | W3C gap | 8 | Hughie's Parley translation hard-codes `OverflowWrap::BreakWord` instead of the standard `normal` initial value, changing default wrapping and some `background-clip: text` extents. |
-| `stylo-lynx-repeating-gradient-grammar-scope` | W3C gap | 4 | `repeating-linear-gradient()` and the px stop form used by these probes are rejected by the Lynx grammar. The blank result is not a Pulsar repeat-paint failure, but it remains a missing standard CSS surface under this project's W3C-first policy. |
+| `stylo-lynx-repeating-gradient-grammar-scope` | W3C gap | 4 | `repeating-linear-gradient()` and the px stop form used by these probes are rejected by the Lynx grammar. The blank result is not a repeat-paint failure, but it remains a missing standard CSS surface under this project's W3C-first policy. |
 | `stylo-lynx-text-shadow-list-grammar` | W3C gap | 4 | Lynx Stylo declares `text-shadow` as `single_item`, so standard comma-separated shadow lists never reach the painter. |
 | `pulsar-text-shadow-blur` | W3C gap | 10 | Text-shadow offset and color paint, but the parsed blur radius is ignored. |
 | `css-text-decoration-auto-thickness-ua-choice` | W3C-correct: UA choice | 5 | `text-decoration-{002,006,010,014,018}` use `line-through` with `text-decoration-thickness: auto`; CSS leaves the resulting font/UA metric and exact line geometry to the UA. |
@@ -200,7 +200,7 @@ and nested-overflow cases, 20/20 opacity groups, 20/20 clip ellipses, 10/10
 | `css-text-subpixel-rasterization` | W3C-correct: raster/sample | 28 | Ordinary Ahem glyph/baseline coverage differs at subpixel edges with Vello glyph hinting disabled. The text is present and standards behavior is not missing. |
 
 The authoritative difference mapping is the two-column
-`crates/pulsar/tests/css-paint-differences.tsv` (`case-name`, `issue`). The
+`crates/dom/tests/css-paint-differences.tsv` (`case-name`, `issue`). The
 name-based classifier refuses an unclassified mismatch, a duplicate row or
 name, index/name drift, a missing case, or a mapped case that now matches. It
 also asserts the four disposition totals (84, 61, 170, and 19), so the
@@ -213,7 +213,7 @@ all 145 W3C-correct rows (84 raster/sample plus 61 UA-choice) to
 Generate Rust cases and the browser HTML shards:
 
 ```sh
-python3 crates/pulsar/tests/support/generate_css_paint_cases.py \
+python3 crates/dom/tests/support/generate_css_paint_cases.py \
   --html-output output/playwright/css-paint
 ```
 
@@ -223,7 +223,7 @@ and local Chrome):
 
 ```sh
 python3 -m http.server 8765 --bind 127.0.0.1
-node crates/pulsar/tests/support/capture_css_paint_references.mjs \
+node crates/dom/tests/support/capture_css_paint_references.mjs \
   http://127.0.0.1:8765 output/playwright/css-paint/atlases
 ```
 
@@ -232,17 +232,17 @@ directory. The default split writes only the 666 `BrowserMatch` tiles; it never
 writes either the native-reference directory or any other difference:
 
 ```sh
-python3 crates/pulsar/tests/support/generate_css_paint_cases.py \
+python3 crates/dom/tests/support/generate_css_paint_cases.py \
   --split-atlases output/playwright/css-paint/atlases
 ```
 
-To intentionally accept the current Pulsar/Parley behavior for all 145
+To intentionally accept the current DOM/Parley behavior for all 145
 W3C-correct Chromium differences, run only the generated `css_native_` tests
 on a real GPU:
 
 ```sh
 CSS_PAINT_UPDATE_NATIVE=1 \
-  cargo test -p pulsar --test css_atlas css_native_
+  cargo test -p dom --test css_atlas css_native_
 ```
 
 This command is deliberately incompatible with audit mode and with
@@ -251,7 +251,7 @@ test, preventing it from racing the parallel snapshot writes. Inspect all
 updated PNGs, then validate the complete asset partition:
 
 ```sh
-python3 crates/pulsar/tests/support/generate_css_paint_cases.py \
+python3 crates/dom/tests/support/generate_css_paint_cases.py \
   --prune-reference-assets --validate-assets
 ```
 
@@ -261,7 +261,7 @@ and 189 ignored; the native atlas
 builder does not render those skipped cases in a normal run:
 
 ```sh
-cargo test -p pulsar --test css_atlas
+cargo test -p dom --test css_atlas
 ```
 
 To re-audit after renderer changes, reuse the 40 captured atlases but split all
@@ -272,14 +272,14 @@ overwrite either committed browser or native PNGs:
 
 ```sh
 CSS_PAINT_AUDIT_REFS="$(mktemp -d)"
-python3 crates/pulsar/tests/support/generate_css_paint_cases.py \
+python3 crates/dom/tests/support/generate_css_paint_cases.py \
   --split-atlases output/playwright/css-paint/atlases \
   --reference-output "$CSS_PAINT_AUDIT_REFS" \
   --include-differences
 CSS_PAINT_AUDIT=/tmp/css-paint-audit.tsv \
   CSS_PAINT_REFERENCE_DIR="$CSS_PAINT_AUDIT_REFS" \
-  cargo test -p pulsar --test css_atlas -- --include-ignored
-python3 crates/pulsar/tests/support/classify_css_paint_audit.py \
+  cargo test -p dom --test css_atlas -- --include-ignored
+python3 crates/dom/tests/support/classify_css_paint_audit.py \
   /tmp/css-paint-audit.tsv
 ```
 
@@ -295,12 +295,12 @@ native W3C-correct set and split the browser matches. Finally validate the
 666/145/189 asset partition:
 
 ```sh
-python3 crates/pulsar/tests/support/generate_css_paint_cases.py
+python3 crates/dom/tests/support/generate_css_paint_cases.py
 CSS_PAINT_UPDATE_NATIVE=1 \
-  cargo test -p pulsar --test css_atlas css_native_
-python3 crates/pulsar/tests/support/generate_css_paint_cases.py \
+  cargo test -p dom --test css_atlas css_native_
+python3 crates/dom/tests/support/generate_css_paint_cases.py \
   --split-atlases output/playwright/css-paint/atlases
-python3 crates/pulsar/tests/support/generate_css_paint_cases.py \
+python3 crates/dom/tests/support/generate_css_paint_cases.py \
   --prune-reference-assets --validate-assets
 ```
 

@@ -25,7 +25,6 @@
 
 use std::f64::consts::{FRAC_PI_2, PI, SQRT_2, TAU};
 
-use dom::layout::NaturalSize;
 use stylo::computed_values::background_origin::single_value::T as BackgroundOrigin;
 use stylo::computed_values::object_fit::T as ObjectFit;
 use stylo::properties::ComputedValues;
@@ -42,16 +41,17 @@ use stylo::values::generics::image::{
 use stylo::values::generics::length::LengthPercentageOrAuto;
 use stylo::values::specified::background::BackgroundRepeatKeyword;
 use stylo::values::specified::position::{HorizontalPositionKeyword, VerticalPositionKeyword};
-use vello::Scene;
-use vello::kurbo::{Affine, Point, Rect, Size, Vec2};
-use vello::peniko::{
-    self, BrushRef, Color, Extend, Fill, ImageBrush, ImageData, ImageQuality, ImageSampler,
-};
 
 use crate::ImageStore;
 use crate::convert::resolve_color;
+use crate::layout::NaturalSize;
 use crate::paint::{BoxFragment, TextClip};
 use crate::shape::{BoxShape, inner_radii, with_shape};
+use crate::vello::Scene;
+use crate::vello::kurbo::{Affine, Point, Rect, Size, Vec2};
+use crate::vello::peniko::{
+    self, BrushRef, Color, Extend, Fill, ImageBrush, ImageData, ImageQuality, ImageSampler,
+};
 
 /// Geometry epsilon (item-local CSS px).
 const EPS: f64 = 1e-6;
@@ -1730,11 +1730,11 @@ mod tests {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod object_fit_tests {
-    use dom::layout::{NaturalSize, Size as LayoutSize};
     use stylo::computed_values::object_fit::T as ObjectFit;
-    use vello::kurbo::Rect;
 
     use super::{concrete_object_size, fitted_size};
+    use crate::layout::{NaturalSize, Size as LayoutSize};
+    use crate::vello::kurbo::Rect;
 
     /// A 200x100 content box — deliberately not square, so a transform that
     /// silently swaps the axes cannot pass.

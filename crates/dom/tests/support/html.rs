@@ -10,7 +10,7 @@ use html5ever::tendril::TendrilSink;
 use html5ever::{ParseOpts, QualName, local_name, ns, parse_fragment};
 use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
-use crate::common::{Doc, device};
+use crate::paint_common::{Doc, device};
 
 /// Parses one root element and its nested inline-styled children.
 #[must_use]

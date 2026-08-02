@@ -168,8 +168,8 @@ impl<T> LayoutTree for TreeArenas<T> {
     }
 }
 
-pub(super) fn run_layout<T: Sync, R>(
-    document: &mut Document<T, R>,
+pub(super) fn run_layout<T: Sync>(
+    document: &mut Document<T>,
     viewport: Size<f32>,
     scale: f32,
     full: bool,
@@ -211,7 +211,7 @@ pub(super) fn run_layout<T: Sync, R>(
     }
 }
 
-fn collect_parked_boundaries<T, R>(document: &Document<T, R>) -> Vec<(usize, NodeId, LayoutInput)> {
+fn collect_parked_boundaries<T>(document: &Document<T>) -> Vec<(usize, NodeId, LayoutInput)> {
     let roots = document.relayout_roots();
     if roots.is_empty() {
         return Vec::new();
@@ -290,7 +290,7 @@ fn accumulated_unrounded_origin<T>(
     origin
 }
 
-fn boundary_depth<T, R>(document: &Document<T, R>, id: NodeId) -> usize {
+fn boundary_depth<T>(document: &Document<T>, id: NodeId) -> usize {
     let mut depth = 0;
     let mut current = document.get(id).and_then(Node::parent_id);
     while let Some(id) = current {

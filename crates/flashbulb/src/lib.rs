@@ -9,11 +9,10 @@
 //! # #[cfg(feature = "render")]
 //! # fn example(document: &mut dom::Document<()>) {
 //! use flashbulb::vello::peniko::Color;
-//! use flashbulb::{ImageStore, Screenshots, capture_document, headless};
+//! use flashbulb::{Screenshots, capture_document, headless};
 //!
 //! let mut gpu = headless("my_test");
-//! let images = ImageStore::new();
-//! let image = capture_document(&mut gpu, document, Color::WHITE, &images).expect("capture");
+//! let image = capture_document(&mut gpu, document, Color::WHITE).expect("capture");
 //! Screenshots::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/screenshots"))
 //!     .assert_matches(&["my-case", "index"], &image);
 //! # }
@@ -44,11 +43,12 @@
 //!   baselines. If that stops holding, the fix is a suffix in [`Screenshots::path`], not a tighter
 //!   threshold.
 //! - **No stability loop.** Playwright re-captures until two screenshots agree because a live
-//!   browser animates; a `dom` document rendered by `pulsar` is a pure function of its own state.
+//!   browser animates; a `dom` document's internal paint pipeline is a pure function of its own
+//!   state.
 //!
 //! # Features
 //!
-//! - default: [`Image`], [`compare`], [`Screenshots`] — pixels in, verdict out, no renderer.
+//! - default: [`Image`], [`compare`], [`Screenshots`] — pixels in, verdict out, no render stack.
 //! - `render`: adds [`capture_document`] and [`headless`], which pull in `dom` and `pulsar`.
 //!
 //! # Captures need a GPU
@@ -64,10 +64,9 @@ mod image;
 mod render;
 
 /// Re-exported so capture callers name colors through the same `peniko` the
-/// renderer was built against, never a second copy of it, and can name the
-/// image store the capture functions take without dev-depending on `pulsar`.
+/// render stack was built against, never a second copy of it.
 #[cfg(feature = "render")]
-pub use pulsar::{ImageStore, vello};
+pub use pulsar::vello;
 
 pub use crate::compare::{CompareOptions, Comparison, compare};
 pub use crate::golden::{
@@ -76,6 +75,6 @@ pub use crate::golden::{
 pub use crate::image::{Image, ImageError};
 #[cfg(feature = "render")]
 pub use crate::render::{
-    CaptureError, capture_document, capture_document_sized, capture_frame, capture_frame_sized,
-    capture_scene, capture_scene_sized, frame_size, headless,
+    CaptureError, capture_document, capture_document_sized, capture_scene, capture_scene_sized,
+    frame_size, headless,
 };

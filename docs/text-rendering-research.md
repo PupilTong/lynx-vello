@@ -1,13 +1,14 @@
 # High-performance DOM text rendering on wgpu/vello
 
-Research note, 2026-07-28. Scope: how `crates/pulsar` should paint `dom` text
-nodes at speed, what the wgpu/vello ecosystem offers as of today, and what — if
-anything — we should adopt. Every claim about a crate here was read out of that
-crate's source at the version named, not out of its README.
+Research note, 2026-07-28; paths updated after painting moved into `dom`.
+Scope: how DOM's private painter should paint text nodes at speed, what the
+wgpu/Vello ecosystem offers, and what — if anything — we should adopt. Every
+claim about a crate here was read out of that crate's source at the version
+named, not out of its README.
 
 ## Short answer
 
-Painting glyphs *correctly* is done: `pulsar::paint::text` already drives
+Painting glyphs *correctly* is done: `dom::paint::text` already drives
 `Scene::draw_glyphs` from retained Parley layouts, with synthesis, decorations,
 shadow and stroke passes. Painting them *cheaply* is not, and it cannot be
 fixed inside vello 0.9.
@@ -32,9 +33,9 @@ and revisit `vello_hybrid` once its glyph atlas is on by default and it clears
 beta. The compatibility facts are unusually favourable when that day comes
 (§5.2), so the option stays cheap to hold open.
 
-## 1. What pulsar does today
+## 1. What DOM's painter does today
 
-`crates/pulsar/src/paint/text.rs` walks each committed Parley layout's lines →
+`crates/dom/src/paint/text.rs` walks each committed Parley layout's lines →
 `PositionedLayoutItem::GlyphRun`, and per run calls `Scene::draw_glyphs` with
 the run's font, size, normalized coords, synthesis and brush. Decorations,
 `text-shadow` and `text-stroke` are extra passes over the same silhouette.
@@ -115,7 +116,7 @@ maximally warm — this is steady state, not cold start.
 Read this carefully, because the two halves say opposite things:
 
 - **Scene encoding is a non-issue.** It scales cleanly at ~18–19 ns/glyph and
-  never exceeds 0.04 ms. Nothing on the CPU side of `pulsar` needs optimizing.
+  never exceeds 0.04 ms. Nothing on the CPU side of DOM scene construction needs optimizing.
 - **The GPU side is the whole problem, and it grows faster than the glyph
   count.** Tripling the glyphs multiplied the delta by ~14.6×. Some of that is
   glyph count and some is painted area — longer lines cover more tiles, and
@@ -193,7 +194,7 @@ Honest assessment: **there is almost nothing to win.**
   concern, not a text concern.
 
 The one genuinely useful thing to do inside this option is **add a text
-benchmark** so that any future change has a before. `crates/pulsar/benches/paint.rs`
+benchmark** so that any future change has a before. `crates/dom/benches/paint.rs`
 currently benchmarks a card page with no text at all, and it measures only the
 CPU encode — the half that turned out not to matter.
 
@@ -207,7 +208,7 @@ than one would expect.
 - `vello_hybrid` 0.0.9 (2026-05-30) depends on **wgpu 29.0.3** — byte-identical
   to `vello` 0.9's pin. One adapter, one device, one queue; the two renderers
   can coexist during a migration instead of forcing a big-bang switch.
-- Its `Scene` covers essentially everything `pulsar` uses today:
+- Its `Scene` covers essentially everything DOM's private painter uses today:
   `fill_path`, `stroke_path`, `push_clip_layer`, `push_blend_layer`,
   `push_opacity_layer`, `push_mask_layer`, `push_filter_layer`,
   `fill_blurred_rounded_rect` (our `box-shadow` fast path),
@@ -226,7 +227,7 @@ than one would expect.
 - Beta quality, by the maintainers' own description, and glifo is 0.1.x with
   "in development" on the tin.
 - It is a second renderer to keep conformant. Every golden in
-  `crates/pulsar/tests/screenshots/` is a vello-0.9 rasterization; a switch
+  `crates/dom/tests/screenshots/` is a vello-0.9 rasterization; a switch
   re-baselines all of them, and the screenshot harness deliberately has no
   per-backend golden suffix.
 
@@ -265,7 +266,7 @@ maintained, ~1.08 M downloads.
 
 1. **wgpu skew.** glyphon 0.12 requires `wgpu ^30.0.0`; vello 0.9 pins
    `wgpu 29.0.3`. They cannot share a device, and the workspace policy
-   (`Cargo.toml`) is explicit that pulsar consumes wgpu/peniko/kurbo only
+   (`Cargo.toml`) is explicit that the workspace consumes wgpu/peniko/kurbo only
    through vello's re-exports precisely so the graph can never hold two skewed
    copies.
 2. **Second shaping stack.** glyphon is built on `cosmic-text`, not Parley. We
@@ -324,11 +325,11 @@ neighbouring glyph's pixels bleed in at strip-rasteriser overshoot.
 ## 7. Recommendation
 
 **Landed with this research:** the text screenshot goldens
-(`crates/pulsar/tests/screenshots.rs`, the `text_*` cases), so any renderer or
+(`crates/dom/tests/text_screenshots.rs`), so any renderer or
 atlas change has a reviewable visual before.
 
 **Not done, and the one thing worth doing next:** a **text** case in
-`crates/pulsar/benches/paint.rs` — and more importantly a GPU-side timing
+`crates/dom/benches/paint.rs` — and more importantly a GPU-side timing
 harness, since §2 shows the existing CPU-only bench measures the half that does
 not matter. The §2 table came from a throwaway scaffold that was deleted; it
 should be a committed benchmark before anyone acts on it.
@@ -343,7 +344,8 @@ comes, and pre-emptive refactoring buys nothing.
 the glyph atlas defaulting to *on* in `Scene::glyph_run`, and a 0.1 release or
 an explicit "no longer beta". Both are cheap to check per release.
 
-**Then (the actual fix):** port `pulsar` to `vello_hybrid`, atlas enabled, with
+**Then (the actual fix):** port DOM's scene construction and Pulsar's GPU/Vello
+boundary to `vello_hybrid`, atlas enabled, with
 a deliberately small atlas page (1024×1024, 4 MiB) rather than the 64 MiB
 default. Re-baseline the screenshot goldens as part of that change, not
 silently. The wgpu pin matching today means this can be staged behind a feature

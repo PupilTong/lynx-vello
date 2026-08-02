@@ -6,15 +6,13 @@
 //! into the same crate-level `tests/screenshots` golden tree. Capture,
 //! comparison and golden management belong to `flashbulb` — these files only
 //! supply the documents. Refresh with:
-//! `FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p pulsar --test screenshots`.
+//! `FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p dom --test screenshots`.
 
-mod common;
 #[path = "support/html.rs"]
 mod html;
+mod paint_common;
 #[path = "support/screenshot.rs"]
 mod screenshot;
-
-use flashbulb::ImageStore;
 
 // lynx-stack's Playwright Chromium project uses the Pixel 5 viewport, and its
 // tracked viewport screenshots are 393 × 727 CSS pixels.
@@ -83,9 +81,7 @@ const OBJECT_FIT_CSS: &str = "
 /// golden carries no bilinear filtering noise to absorb with tolerance.
 #[test]
 fn object_fit_matrix_matches_reference() {
-    let mut doc = common::Doc::with_css_sized(OBJECT_FIT_CSS, SCREEN_WIDTH, SCREEN_HEIGHT);
-    let mut images = ImageStore::new();
-
+    let mut doc = paint_common::Doc::with_css_sized(OBJECT_FIT_CSS, SCREEN_WIDTH, SCREEN_HEIGHT);
     // Smaller than the 110x80 box (so `none` and `scale-down` agree), and
     // larger than it (so `scale-down` collapses onto `contain`).
     let small = decode_checker(8, 8);
@@ -122,14 +118,13 @@ fn object_fit_matrix_matches_reference() {
                 *height as f32,
             )),
         );
-        images.insert_node(node, image_data(*width, *height, rgba.clone()));
+        doc.dom
+            .images_mut()
+            .insert_node(node, image_data(*width, *height, rgba.clone()));
     }
 
-    let actual = screenshot::capture_document_with_images(
-        "object_fit_matrix_matches_reference",
-        &mut doc.dom,
-        &images,
-    );
+    let actual =
+        screenshot::capture_prebuilt_document("object_fit_matrix_matches_reference", &mut doc.dom);
     screenshot::assert_golden(&["replaced-object-fit"], &actual);
 }
 

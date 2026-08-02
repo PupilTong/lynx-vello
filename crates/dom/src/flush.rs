@@ -115,7 +115,7 @@ impl<'a, T: Sync> DomTraversal<&'a Node<T>> for RecalcStyle<'a> {
     }
 }
 
-impl<T: Sync, R> Document<T, R> {
+impl<T: Sync> Document<T> {
     pub fn flush_styles(&mut self) -> FlushSummary {
         self.flush_styles_with_parallelism(Parallelism::Auto)
     }

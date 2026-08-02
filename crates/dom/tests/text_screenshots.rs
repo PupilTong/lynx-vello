@@ -1,4 +1,4 @@
-//! Golden screenshots of `pulsar::paint::text`.
+//! Golden screenshots of DOM's private text painter.
 //!
 //! Each case exists to be *looked at* as much as to be diffed: glyph
 //! rasterization quality, synthesis, and how decorations sit against real
@@ -9,11 +9,11 @@
 //!
 //! Every fixture renders **vendored Roboto**, never a host font; see
 //! `support/screenshot.rs` for why that is not optional. Refresh with:
-//! `FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p pulsar --test text_screenshots`.
+//! `FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p dom --test text_screenshots`.
 
-mod common;
 #[path = "support/html.rs"]
 mod html;
+mod paint_common;
 #[path = "support/screenshot.rs"]
 mod screenshot;
 

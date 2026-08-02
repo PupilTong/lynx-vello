@@ -2,16 +2,16 @@
 //!
 //! Decoding stays outside this crate: `bobcat-core`'s resource protocol
 //! delivers bytes and `crates/image` turns them into `peniko::ImageData`
-//! (`DecodedImage::to_image_data`). Painters look images up by the two
+//! (`DecodedImage::to_image_data`). The DOM paint pipeline looks images up by the two
 //! key spaces CSS produces: a `url(…)` string for `background-image` /
-//! `mask-image` layers, and a `NodeId` for a replaced element's content
-//! (the node whose layout used a decoded `NaturalSize`).
+//! `mask-image` layers, and an opaque `usize` owner key for replaced content.
+//! The DOM layer uses its private node id as that key without making this
+//! lower-level registry depend on DOM types.
 //!
 //! Missing entries paint nothing — the layout-side natural size and the
 //! paint-side pixels arrive independently, so a frame between the two just
 //! skips the image, matching the browser's not-yet-loaded state.
 
-use dom::NodeId;
 use rustc_hash::FxHashMap;
 use vello::peniko::ImageData;
 
@@ -19,7 +19,7 @@ use vello::peniko::ImageData;
 #[derive(Debug, Default)]
 pub struct ImageStore {
     by_url: FxHashMap<String, ImageData>,
-    by_node: FxHashMap<NodeId, ImageData>,
+    by_node: FxHashMap<usize, ImageData>,
 }
 
 impl ImageStore {
@@ -36,7 +36,7 @@ impl ImageStore {
 
     /// Registers the decoded content of a replaced element, replacing any
     /// previous entry.
-    pub fn insert_node(&mut self, node: NodeId, image: ImageData) {
+    pub fn insert_node(&mut self, node: usize, image: ImageData) {
         self.by_node.insert(node, image);
     }
 
@@ -44,7 +44,7 @@ impl ImageStore {
         self.by_url.remove(url)
     }
 
-    pub fn remove_node(&mut self, node: NodeId) -> Option<ImageData> {
+    pub fn remove_node(&mut self, node: usize) -> Option<ImageData> {
         self.by_node.remove(&node)
     }
 
@@ -54,7 +54,7 @@ impl ImageStore {
     }
 
     #[must_use]
-    pub fn node(&self, node: NodeId) -> Option<&ImageData> {
+    pub fn node(&self, node: usize) -> Option<&ImageData> {
         self.by_node.get(&node)
     }
 }

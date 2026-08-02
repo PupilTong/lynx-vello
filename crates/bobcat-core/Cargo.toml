@@ -1,6 +1,6 @@
 [package]
 name = "bobcat-core"
-description = "Native Lynx runtime core with injectable script engines and rendering"
+description = "Native Lynx runtime core with injectable script engines"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,10 +14,8 @@ quickjs = ["dep:quickjs-rust-bridge"]
 
 [dependencies]
 bytes = { workspace = true }
-dom = { workspace = true }
 http = { workspace = true }
 lynx-element = { workspace = true }
-pulsar = { workspace = true }
 quickjs-rust-bridge = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

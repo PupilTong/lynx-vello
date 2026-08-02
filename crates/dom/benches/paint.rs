@@ -1,9 +1,9 @@
-//! Scene-build benchmarks: `Document` → `PaintOrder` → `vello::Scene`,
-//! CPU-side only (no GPU dispatch), CodSpeed-compatible.
+//! Document render benchmarks: style/layout/visual-order/private paint →
+//! retained `vello::Scene`, CPU-side only (no GPU dispatch),
+//! CodSpeed-compatible.
 
 use dom::{Document, StylesheetOrigin};
 use euclid::{Scale, Size2D};
-use pulsar::{ImageStore, Painter};
 use stylo::context::QuirksMode;
 use stylo::device::Device;
 use stylo::device::servo::FontMetricsProvider;
@@ -95,23 +95,10 @@ fn card_page(cards: usize) -> Document<()> {
 }
 
 #[divan::bench(args = [24, 120])]
-fn scene_build(bencher: divan::Bencher<'_, '_>, cards: usize) {
+fn render_document(bencher: divan::Bencher<'_, '_>, cards: usize) {
     let mut dom = card_page(cards);
-    let frame = dom.paint_order();
-    let images = ImageStore::new();
-    let mut painter = Painter::new();
     bencher.bench_local(|| {
-        divan::black_box(painter.paint(divan::black_box(&dom), divan::black_box(&frame), &images));
-    });
-}
-
-#[divan::bench(args = [120])]
-fn paint_order_and_scene(bencher: divan::Bencher<'_, '_>, cards: usize) {
-    let mut dom = card_page(cards);
-    let images = ImageStore::new();
-    let mut painter = Painter::new();
-    bencher.bench_local(|| {
-        let frame = dom.paint_order();
-        divan::black_box(painter.paint(&dom, &frame, &images));
+        dom.render();
+        divan::black_box(dom.scene().encoding().draw_tags.len());
     });
 }

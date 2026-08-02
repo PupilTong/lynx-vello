@@ -1,3 +1,9 @@
+#![allow(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    reason = "CSS/style geometry is f32 while Vello/Kurbo geometry is f64"
+)]
+
 //! Per-fragment CSS painters. The walker owns traversal, clipping, and
 //! group compositing; each submodule paints exactly one fragment family
 //! into the scene in the item's local coordinate space.
@@ -9,12 +15,11 @@ pub(crate) mod mask;
 pub(crate) mod shadow;
 pub(crate) mod text;
 
-use dom::NodeId;
-use dom::layout::{Edges, Layout, TextLayout};
-use dom::visual::CornerRadii;
-use vello::kurbo::{Affine, BezPath, Rect, Vec2};
-
+use crate::NodeId;
+use crate::layout::{Edges, Layout, TextLayout};
 use crate::shape::ReferenceBoxes;
+use crate::vello::kurbo::{Affine, BezPath, Rect, Vec2};
+use crate::visual::CornerRadii;
 
 /// Glyph-silhouette source for `background-clip: text`: the element's
 /// descendant text layouts with their offsets from the element's border-box
@@ -63,7 +68,7 @@ impl BoxFragment {
     pub(crate) fn new(
         node: NodeId,
         transform: Affine,
-        size: dom::visual::Size2D<f32>,
+        size: crate::visual::Size2D<f32>,
         radii: CornerRadii,
         layout: &Layout,
     ) -> Self {

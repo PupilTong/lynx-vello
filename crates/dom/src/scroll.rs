@@ -68,6 +68,10 @@ pub struct ScrollAxes {
     pub y: bool,
 }
 
+#[cfg(test)]
+#[path = "scroll_tests.rs"]
+mod behavior_tests;
+
 impl ScrollAxes {
     pub const NONE: Self = Self { x: false, y: false };
     pub const BOTH: Self = Self { x: true, y: true };
@@ -180,7 +184,7 @@ pub(crate) fn resolve(
     Some(scroll_box)
 }
 
-impl<T, R> Document<T, R> {
+impl<T> Document<T> {
     /// Whether this node is a scroll container — a box whose computed
     /// `overflow` is scrollable on either axis. `overflow: hidden` qualifies;
     /// it just is not user-scrollable.

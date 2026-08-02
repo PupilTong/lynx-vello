@@ -120,7 +120,7 @@ useful signal for currently-compatible versions of those libraries.
 - `crates/bobcat-core` — unified native runtime core. Its always-compiled
   surface owns the protocol-only, host-injected `ResourceFetcher`, the
   ShadowRealm-inspired `ScriptEngine` protocol, and `LynxView<R, E>`, and it
-  directly composes `lynx-element` with Pulsar.
+  directly composes `lynx-element`, which owns the dependency edge to `dom`.
   `ScriptEngine::ImportFuture<'a>` is a GAT so external engines return their
   own future type and remain statically dispatched. The default `quickjs`
   feature adds the internal QuickJS adapter,
@@ -128,11 +128,11 @@ useful signal for currently-compatible versions of those libraries.
   `default-features = false` excludes QuickJS while preserving all external
   injection contracts. Workspace dependencies disable defaults explicitly;
   only an upper layer that wants the built-in engine enables `quickjs`.
-  The core depends on `lynx-element`, `dom`, and `pulsar`, re-exports the
-  Lynx-owned `ElementPapi` contract, and owns the rendered specializations
-  `bobcat_core::document::Document<T> = dom::Document<T, pulsar::Pulsar>`
-  and `bobcat_core::document::ElementTree`, whose constructor injects Pulsar
-  into `lynx_element::ElementTree<Pulsar>`. `MainThreadRuntime`
+  The core depends on `lynx-element` rather than directly on `dom`, re-exports
+  both the Lynx-owned `ElementPapi` contract and `lynx_element::dom`, and exposes
+  `bobcat_core::document::Document<T> = dom::Document<T>` plus
+  `lynx_element::ElementTree` directly; it owns no renderer wrapper or
+  injection seam. `MainThreadRuntime`
   installs the Element PAPI before evaluation, evaluates a `.web.bundle`'s
   `lepusCode.root` inside web-core's wrapper, then runs `processData` →
   `renderPage` → `__FlushElementTree`. Five of web-core's 61 PAPI members are
@@ -182,7 +182,7 @@ useful signal for currently-compatible versions of those libraries.
   `bobcat -i file:///…` decodes and boots one web bundle; other URL schemes
   remain rejected at the boundary. One reusable `FramePipeline` owns the
   QuickJS-backed element runtime and borrows the scene retained by its
-  document-injected Pulsar renderer, so the macOS headed backend and
+  document-owned private painter, so the macOS headed backend and
   cross-platform headless backend share script/layout/paint logic rather than
   maintaining parallel render paths.
   Headed mode uses a native winit window with display-backed vsync and tracks
@@ -207,10 +207,9 @@ useful signal for currently-compatible versions of those libraries.
   `defaultDisplayLinear` / `defaultOverflowVisible` page-config switches).
   This crate defines `type ElementId = u32` and the static `ElementPapi`
   contract; `bobcat-core` only re-exports them and `dom` knows neither name.
-  `ElementTree<R = ()>` owns a `dom::Document<ElementId, R>` plus an independent
-  `Vec<Option<LynxElement>>` arena. `with_renderer` is the static composition
-  seam; this crate depends directly on `dom` and never on Bobcat, Pulsar, or a
-  JavaScript engine. The DOM payload is only the permanent
+  `ElementTree` owns a `dom::Document<ElementId>` plus an independent
+  `Vec<Option<LynxElement>>` arena. This crate depends directly on `dom` and
+  never directly on Bobcat, Pulsar, or a JavaScript engine. The DOM payload is only the permanent
   `u32` unique id, which is also the direct arena index; each `LynxElement`
   owns that id, its stable DOM `NodeId` association, component creation
   fields. The arena permanently reserves slot 0 as web-core's
@@ -223,11 +222,10 @@ useful signal for currently-compatible versions of those libraries.
   crash-on-misuse. `ElementTree` never lends out `&mut Document`: a caller that
   removed or moved nodes directly would desynchronise the element arena, the
   page state, and the next PAPI call would panic in the DOM instead of returning
-  `PapiError`. Renderer-independent mutation and query methods stay here;
-  generic `render` invokes the injected renderer and `render_output` returns
-  its GAT output, while Pulsar-specific `scene` and image-store access live on
-  Bobcat's facade. No public `paint_order` exists on `ElementTree`, and input
-  builds its temporary hit-test frame internally. It does not impose a runtime
+  `PapiError`. `render`, guarded `scene`/`images` borrows, and `images_mut`
+  delegate to the document without exposing its private Painter or mutable DOM.
+  No public `paint_order` exists on either `ElementTree` or `Document`, and
+  input builds its temporary hit-test frame internally. It does not impose a runtime
   tree-depth cap; recursive traversal hardening belongs in `dom`/`hughie`.
   `flush_element_tree` is the single commit boundary: it
   attaches the page on the first call and then runs style + layout. Recorded
@@ -249,13 +247,14 @@ useful signal for currently-compatible versions of those libraries.
   entries before the ID can be reused (ONE TREE policy: nodes are created and
   mutated only through `Document` methods). Computed styles remain with the
   primary nodes; layout/text state does not.
-  `Document<T, R = ()>` also owns one statically selected renderer `R`,
-  installed by `with_renderer`; ordinary DOM-only documents keep the `()`
-  default. `visual::DocumentRenderer<T>` uses a GAT output so a renderer can
-  return a borrowed/guarded retained result without cloning or a renderer
-  trait object. `Document::render` privately builds `PaintOrder`, invokes the
-  renderer, and `render_output` lends its retained output. The DOM owns this
-  injection mechanism but no concrete renderer dependency.
+  `Document<T>` also owns one private concrete `Painter`, including its
+  reusable walk scratch, retained `vello::Scene`, and `pulsar::ImageStore`.
+  `Document::render` privately builds `PaintOrder` and invokes that painter;
+  `scene` and `images` lend guarded shared borrows, while `images_mut` is the
+  narrow resource-update seam and advances `visual_epoch`. There is no
+  renderer type parameter, `DocumentRenderer` trait, `with_renderer`, public
+  Painter, or public paint-order constructor. `dom` depends directly on
+  `pulsar`; Pulsar never depends back on DOM.
   Every node points directly back only to `TreeArenas`, and the
   same plain one-word `&Node` implements Stylo's document/node/element traits
   according to its `NodeData` (styling runs in place, no mirror tree),
@@ -327,12 +326,12 @@ useful signal for currently-compatible versions of those libraries.
   performs that invalidation itself.
   Its `visual` module owns the post-layout visual order:
   the full W3C stacking-context predicate, CSS2 Appendix E paint order
-  (`Document::paint_order` → a flat back-to-front `PaintOrder` of items with
+  (a private flat back-to-front `PaintOrder` of items with
   viewport-space transform matrices and overflow/`contain: paint` clip
   chains that honor containing-block escape), transform resolution
   (transform + transform-origin + parent perspective, always flattened —
   the fork has no authorable `preserve-3d`), and reverse-paint-order hit
-  testing (`Document::hit_test`/`PaintOrder::hit_test`, honoring
+  testing (`Document::hit_test` through private `PaintOrder::hit_test`, honoring
   `visibility`, `pointer-events`, border-radius, and inverse-matrix point
   mapping). It walks the same flattened box-tree the layout host feeds the
   engine, so `display: contents` dissolves identically in paint and hit
@@ -340,13 +339,23 @@ useful signal for currently-compatible versions of those libraries.
   `clip-path`, `mask`, plus the storage-only blend/isolation triggers)
   additionally surface as `RenderLayer` entries — preorder, parent-linked,
   each with the establishing element, its world transform/size, and the
-  contiguous item range the group encloses — which is exactly what
-  `crates/pulsar` composites; group effects still do not affect hit
+  contiguous item range the group encloses — which is exactly what the
+  document-owned Painter composites; group effects still do not affect hit
   testing (recorded limit). Lynx-specific
   hit-test policy (hit-slop, `user-interaction-enabled`, event-through)
   belongs to the future runtime-policy layer, never here. No retained
   visual cache exists yet; `StyleDamage`'s stacking class is the
   designated hook.
+  The private `painter`/`walker`/`paint`/`shape` modules turn that order into
+  the retained Vello scene. Item clip chains diff against Vello layers;
+  `RenderLayer` scopes composite opacity, filters, clip paths, and masks; box
+  fragments paint shadows, backgrounds, replaced content, borders, outlines,
+  and retained Parley glyphs. Style access is `Document::paint_style`
+  (post-flush, no `Arc` bump), geometry is the rounded layout, and the
+  document Device supplies viewport/DPR so paint cannot disagree with layout.
+  The authoritative paint limits are recorded in
+  `crates/dom/src/painter.rs`; DOM-aware paint tests and the paint benchmark
+  live under `crates/dom/tests` and `crates/dom/benches`.
   Its `scroll` module owns CSSOM-View scrolling — scrollport/scrolling-area
   geometry off the layout engine's accumulated `content_size`, a per-node
   offset in the layout arena that re-clamps itself on every read (so a
@@ -365,14 +374,14 @@ useful signal for currently-compatible versions of those libraries.
   `accumulate_scrollable_overflow` asks per axis). `visual` bakes the offsets
   into the frame — a scroll container's contents are translated as they are
   collected, with containing-block-keyed escape sharing the clip chain's own
-  struct, so painting and hit testing see scrolled geometry and `pulsar` needs
-  no knowledge of scrolling at all. Clipping is likewise per axis, because
+  struct, so painting and hit testing see scrolled geometry and the lower
+  `pulsar` resource/GPU layer needs no knowledge of scrolling. Clipping is likewise per axis, because
   `clip` on one axis with `visible` on the other is a pair the style adjuster
   leaves mixed; a one-axis clip is an infinite strip and carries no radii.
   Its `input` module is the host seam: `InputEvent` is plain `Copy` data
   (pointer + wheel, viewport CSS px) that a canvas, a native window, or a
-  test literal all produce equally, and `Document::handle_input(&PaintOrder,
-  InputEvent)` routes it and performs the UA default action, reporting both
+  test literal all produce equally, and `Document::handle_input(InputEvent)`
+  builds its private visual frame, routes the event, and performs the UA default action, reporting both
   in an `InputResponse`. Dispatch to listeners is *not* here — this crate has
   no `EventTarget` — so `InputEvent::default_prevented` is the
   `preventDefault()` seam a runtime layer hands back after its own
@@ -458,41 +467,13 @@ useful signal for currently-compatible versions of those libraries.
   component-specific staggered layout, and Lynx-specific text
   attribute/raw-text/truncation policy. Generic W3C text style, document
   context, and artifact storage already live in `dom`.
-- `crates/pulsar` — the vello-backed paint engine (`hughie` lays out,
-  `pulsar` emits light). `Pulsar` owns a reusable `Painter` + `ImageStore` and
-  implements `dom::visual::DocumentRenderer<T>`; its GAT output is a guarded
-  borrow of the retained `vello::Scene`. The lower-level
-  `Painter::paint(&Document, &PaintOrder, &ImageStore) -> &vello::Scene` walks
-  the flat back-to-front item list:
-  item clip chains diff against vello clip layers (restarting inside every
-  group scope, which preserves containing-block clip escape under grouping
-  and upholds the crate-wide vello #1198 invariant: a blend layer's
-  *immediate* parent is always a real isolating layer, never a clip layer —
-  fragment painters needing a blend under an item clip interpose their own
-  `SrcOver` layer), `RenderLayer` group
-  scopes push effect layers (opacity/blend alpha over content bounds from a
-  single-sweep prepass that also folds child-layer bounds into parents,
-  `clip-path` as a full layer, `mask-image` as a
-  mask-then-`SrcIn` sandwich, color filters as blend-composite
-  approximations at scope close), and per-fragment painters draw outset
-  shadows → background color/gradient/image layers → inset shadows →
-  replaced content → borders → outline, plus text runs from the retained
-  Parley layouts (one shared `linebender_resource_handle` makes parley's
-  `FontData` feed `Scene::draw_glyphs` directly). `gpu::Headless` owns the
-  wgpu render-to-texture + readback path and reports `NoAdapter` to product
-  callers; every GPU-backed test treats that error as a hard failure,
-  including in CI. Style access is `Document::paint_style`
-  (post-flush borrow, no `Arc` bump); geometry is the rounded layouts.
-  Coordinates: CSS px everywhere, with viewport and device-pixel-ratio
-  read from the document's own `Device` (single-sourced with layout —
-  never passed in separately). wgpu/peniko/kurbo are consumed exclusively
-  through vello's version-matched re-exports (never direct deps). The
-  **authoritative** recorded-limits matrix is `crates/pulsar/src/lib.rs`'s
-  crate docs — other docs reference it rather than restating it. Pulsar retains
-  the latest scene but still rebuilds it from a reused `Painter`; there is no
-  incremental scene yet, and `StyleDamage`'s repaint class is the designated hook.
-  It must not read Lynx runtime vocabulary (hit-slop, components) and never
-  bypasses `PaintOrder` for its own tree walk.
+- `crates/pulsar` — the DOM-independent Vello resource and GPU layer. It owns
+  `ImageStore`, re-exports the one workspace Vello version, and implements the
+  wgpu render-to-texture/readback backend (`gpu::Headless`) used by product and
+  tests. `Headless::new` reports `NoAdapter`; every GPU-backed test treats that
+  as a hard failure, including in CI. Pulsar must not depend on `dom` or know
+  `Document`, `NodeId`, computed styles, layout, paint order, Lynx vocabulary,
+  or scene traversal. It owns no Painter and performs no CSS painting.
 - `crates/image` — the replaced-content pipeline below the DOM: container
   sniffing from magic bytes, header-only intrinsic-size probing, decode to
   RGBA8, and the async fetch→decode→cache loader over `bobcat-core`'s
@@ -529,21 +510,18 @@ useful signal for currently-compatible versions of those libraries.
   PNGs written to a git-ignored `tests/artifacts/` on failure. A newly
   *created* golden fails its own run so an unreviewed baseline cannot pass;
   an explicitly *accepted* one does not. The optional `render` feature adds
-  `capture_document` (`dom` → `pulsar` → headless GPU) over the whole painted
+  `capture_document` (`Document::render` → retained scene → Pulsar headless GPU) over the whole painted
   frame, `viewport * device_pixel_ratio` device pixels — `pulsar` scales the
   scene up by that ratio, so anything smaller is a crop. Playwright instead
   downsamples to CSS pixels; the two coincide at a ratio of 1, which is what
   lynx-stack pins for determinism and what every viewport here uses.
-  Document/frame capture takes an `&ImageStore` explicitly rather than
-  defaulting to an empty one; retained-scene capture instead consumes the
-  scene already built from the renderer-owned store and has a raster-image
-  golden guarding that ownership path. A capture that silently paints no
-  replaced content is exactly the blank-but-passing golden this crate exists
-  to prevent. `headless` requires a usable GPU adapter and panics when one is
+  Replaced images are registered through `Document::images_mut` before
+  capture. `capture_document` cannot accept or default a second store: it
+  necessarily renders from the document-owned registry, and a raster-image
+  golden guards that ownership path. `headless` requires a usable GPU adapter and panics when one is
   unavailable, so local and CI test runs obey the same mandatory-GPU policy.
-  `pulsar` dev-depends on it *with* the
-  `render` feature — a dev-dependency cycle Cargo permits; the library graph
-  stays acyclic. Goldens are not platform-suffixed: cross-platform
+  DOM-aware screenshot suites live in `dom`; Pulsar retains only direct GPU
+  smoke tests. Goldens are not platform-suffixed: cross-platform
   rasterizer noise is absorbed by tolerance, not by per-platform baselines.
 - *(planned, not yet scaffolded)* the remaining runtime crates — see
   `docs/tracking/` for the behavior surface each will need to cover before
@@ -554,7 +532,7 @@ useful signal for currently-compatible versions of those libraries.
   model, and the other 56 Element PAPI members are still ahead.
 
 See `docs/runtime-architecture.md` for the runtime dependency graph, feature
-boundary, renderer injection, and frame walkthrough;
+boundary, private paint pipeline, and frame walkthrough;
 `docs/style-architecture.md` and `docs/layout-architecture.md` contain the
 style/layout ownership rules.
 
@@ -629,7 +607,7 @@ Integration tests decode real fixtures vendored from lynx-stack under
 `cargo test` must pass on the pinned nightly toolchain.
 
 **Screenshot tests** live in `crates/*/tests/screenshots.rs` — plus per-topic
-siblings (`pulsar` also has `text_screenshots.rs` and `css_atlas.rs`) — with
+siblings (`dom` also has `text_screenshots.rs` and `css_atlas.rs`) — with
 committed goldens in `crates/*/tests/screenshots/`, driven by
 `crates/flashbulb`. The ordinary screenshot suites share one capture harness
 in `tests/support/screenshot.rs`; the browser-referenced CSS atlas owns the
@@ -653,7 +631,7 @@ Browser-owned suites can reject `FLASHBULB_UPDATE_SNAPSHOTS`; follow their
 checked capture and audit workflow instead. The CSS paint atlas has two
 explicit reference owners: 666 Chromium matches remain browser-owned, while
 145 W3C-correct differences (84 rasterization/sampling cases plus 61
-standards-permitted UA choices) use native Pulsar/Parley snapshots in a
+standards-permitted UA choices) use native DOM/Parley snapshots in a
 separate directory. Native atlas references may be updated only with the
 filtered `CSS_PAINT_UPDATE_NATIVE=1 ... css_native_` workflow, which cannot
 overwrite browser references; the other 189 cases remain ignored. The browser

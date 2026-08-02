@@ -46,9 +46,9 @@ impl LynxElement {
 
     /// Resolves the DOM node this runtime element owns the association with.
     #[must_use]
-    pub fn node<'document, R>(
+    pub fn node<'document>(
         &self,
-        document: &'document Document<ElementId, R>,
+        document: &'document Document<ElementId>,
     ) -> Option<&'document Node<ElementId>> {
         document.get(self.node)
     }
