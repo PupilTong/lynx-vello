@@ -223,8 +223,8 @@ fn checker_image() -> ImageData {
 }
 
 /// The document owns the image registry beside its private painter. This
-/// golden fails visibly if the registry and painter diverge: the checker
-/// disappears and only the white fallback background remains.
+/// golden fails visibly if the document's image store and painter diverge:
+/// the checker disappears and only the white fallback background remains.
 #[test]
 fn document_image_store_reaches_the_private_painter() {
     let mut gpu = headless("document_image_store_reaches_the_private_painter");

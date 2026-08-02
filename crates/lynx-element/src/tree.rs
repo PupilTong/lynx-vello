@@ -80,13 +80,17 @@ impl ElementTree {
         }
     }
 
-    /// The underlying document.
+    /// The underlying document for trusted workspace composition and tests.
+    #[cfg(any(test, feature = "internal-document-access"))]
+    #[doc(hidden)]
     #[must_use]
     pub const fn document(&self) -> &Document<ElementId> {
         &self.document
     }
 
-    /// The underlying document, mutably.
+    /// Mutable document access for trusted workspace composition.
+    #[cfg(feature = "internal-document-access")]
+    #[doc(hidden)]
     pub fn document_mut(&mut self) -> &mut Document<ElementId> {
         &mut self.document
     }

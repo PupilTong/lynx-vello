@@ -1,21 +1,22 @@
 //! The wgpu side: adapter/device management and rendering built scenes,
-//! including a headless render-to-texture path with pixel readback. These are
-//! lower-layer engine primitives used by tests and `bobcat_core::renderer`;
-//! product embedders do not drive a render context, surface, device, or queue.
+//! including a headless render-to-texture path with pixel readback (the
+//! test and screenshot surface — embedders with a window drive
+//! `vello::util::RenderContext`/`RenderSurface` themselves through the
+//! [`crate::vello`] re-export).
 //!
 //! Spec sketch (agent: gpu):
 //! - `Headless::new()`: `vello::util::RenderContext::new()`, pick a device via
 //!   `context.device(None)` (pollster-blocked); construct one `vello::Renderer` with area-AA
 //!   support only (the one AA mode pulsar renders with). Return `Err(NoAdapter)` cleanly when the
-//!   platform has no usable adapter — the product façade maps that error, while tests treat it as
-//!   a hard environment failure.
+//!   platform has no usable adapter — embedders can surface that error, while tests treat it as a
+//!   hard environment failure.
 //! - `Headless::render_frame`: render into a retained `Rgba8Unorm` storage texture through
 //!   `Renderer::render_to_texture`, with no CPU synchronization.
 //! - `Headless::read_pixels`: copy the last target into a retained padded readback buffer (256-byte
 //!   row alignment), block on the map (`map_async` + an indefinite device poll), and return
 //!   tightly-packed RGBA8 rows. `Headless::render` composes the two for screenshot callers.
 //! - `Headless::wait_idle` bounds in-flight work for paced frame loops; [`read_texture`] is the
-//!   one-shot readback primitive for an engine-owned device; [`renderer_options`] and
+//!   one-shot readback for embedders that render on their own device; [`renderer_options`] and
 //!   [`render_params`] are the single render policy every pulsar target must construct with.
 
 use std::fmt;
@@ -24,8 +25,7 @@ use std::sync::mpsc;
 use vello::util::RenderContext;
 use vello::wgpu;
 
-/// Lower-layer headless GPU renderer for tests, benchmarks, and the product
-/// renderer composition.
+/// Headless GPU renderer for tests, benchmarks, and windowless embedders.
 pub struct Headless {
     context: RenderContext,
     device_index: usize,
@@ -59,8 +59,7 @@ impl fmt::Debug for Headless {
 #[derive(Debug)]
 pub enum GpuError {
     /// No usable GPU adapter on this machine (for example, forbidden GPU
-    /// access). The product renderer maps this into its opaque backend error;
-    /// GPU-backed tests must fail.
+    /// access). Product callers may report this; GPU-backed tests must fail.
     NoAdapter,
     /// Device/queue creation or rendering failed.
     Render(String),
@@ -78,8 +77,8 @@ impl fmt::Display for GpuError {
 impl std::error::Error for GpuError {}
 
 /// Renderer construction options for pulsar's one render policy: area-only
-/// antialiasing. The private product window renderer uses the same options as
-/// the headless path.
+/// antialiasing. Windowed embedders building their own [`vello::Renderer`]
+/// must construct it with these options to match the headless path.
 #[must_use]
 pub fn renderer_options() -> vello::RendererOptions {
     vello::RendererOptions {
@@ -123,7 +122,7 @@ impl Headless {
     /// Renders `scene` at `width` × `height` device px over `base_color`.
     ///
     /// The render target is retained and reused while its dimensions stay the
-    /// same. This is the continuous-frame path for the internal headless host:
+    /// same. This is the continuous-frame path for windowless embedders:
     /// unlike [`Self::render`], it does not synchronize the CPU with the GPU
     /// for pixel readback.
     pub fn render_frame(
@@ -350,8 +349,9 @@ impl Headless {
 /// pixels through a one-shot staging buffer, blocking until the copy
 /// completes.
 ///
-/// This is the readback half of [`Headless`] for the internal window renderer,
-/// which must capture from its surface device rather than re-render elsewhere.
+/// This is the readback half of [`Headless`] for embedders that render on
+/// their own device (a window surface) and must capture from that same
+/// device rather than re-render elsewhere.
 pub fn read_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
