@@ -1,0 +1,30 @@
+[package]
+name = "bobcat-core"
+description = "Native Lynx runtime core with injectable script engines"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+default = ["quickjs"]
+quickjs = ["dep:quickjs-rust-bridge"]
+
+[dependencies]
+bytes = { workspace = true }
+http = { workspace = true }
+lynx-element = { workspace = true }
+quickjs-rust-bridge = { workspace = true, optional = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+flashbulb = { workspace = true, features = ["render"] }
+lynx-template-decoder = { workspace = true }
+
+[lints]
+workspace = true

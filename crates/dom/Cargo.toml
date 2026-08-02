@@ -1,6 +1,6 @@
 [package]
 name = "dom"
-description = "Generic W3C-DOM-subset document tree and standards-oriented CSS computation core over stylo with opaque node payloads"
+description = "Generic W3C DOM, Stylo/layout core, and document-owned Vello paint pipeline"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,6 +16,8 @@ layout-test-utils = ["hughie/layout-test-utils"]
 rustc-hash = { workspace = true }
 slab = { workspace = true }
 smallvec = { workspace = true }
+pulsar = { workspace = true }
+parley = { workspace = true }
 
 # Layout integration: the `layout` module implements hughie's statically
 # split `LayoutTree` protocol over immutable tree/style arenas and a separate
@@ -42,9 +44,18 @@ url = { workspace = true }
 
 [dev-dependencies]
 divan = { workspace = true }
+flashbulb = { workspace = true, features = ["render"] }
+html5ever = { workspace = true }
+image = { workspace = true }
+markup5ever_rcdom = { workspace = true }
+png = { workspace = true }
 
 [[bench]]
 name = "css"
+harness = false
+
+[[bench]]
+name = "paint"
 harness = false
 
 [lints]

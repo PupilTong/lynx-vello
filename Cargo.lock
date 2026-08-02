@@ -193,41 +193,30 @@ dependencies = [
 name = "bobcat-cli"
 version = "0.1.0"
 dependencies = [
- "bobcat-quickjs",
- "dom",
+ "bobcat-core",
  "flashbulb",
- "lynx-element",
  "lynx-template-decoder",
  "png",
  "pollster",
- "pulsar",
  "thiserror 2.0.18",
  "url",
  "winit",
 ]
 
 [[package]]
-name = "bobcat-engine"
+name = "bobcat-core"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "flashbulb",
  "http",
+ "lynx-element",
+ "lynx-template-decoder",
+ "quickjs-rust-bridge",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "url",
-]
-
-[[package]]
-name = "bobcat-quickjs"
-version = "0.1.0"
-dependencies = [
- "bobcat-engine",
- "dom",
- "flashbulb",
- "lynx-element",
- "lynx-template-decoder",
- "quickjs-rust-bridge",
 ]
 
 [[package]]
@@ -715,7 +704,14 @@ dependencies = [
  "codspeed-divan-compat",
  "cssparser",
  "euclid",
+ "flashbulb",
+ "html5ever",
  "hughie",
+ "image",
+ "markup5ever_rcdom",
+ "parley",
+ "png",
+ "pulsar",
  "rustc-hash 2.1.3",
  "selectors",
  "slab",
@@ -1358,7 +1354,7 @@ dependencies = [
 name = "image"
 version = "0.1.0"
 dependencies = [
- "bobcat-engine",
+ "bobcat-core",
  "bytes",
  "data-url",
  "fast_image_resize",
@@ -2431,20 +2427,8 @@ dependencies = [
 name = "pulsar"
 version = "0.1.0"
 dependencies = [
- "codspeed-divan-compat",
- "dom",
- "euclid",
- "flashbulb",
- "html5ever",
- "image",
- "markup5ever_rcdom",
- "parley",
- "png",
  "pollster",
  "rustc-hash 2.1.3",
- "smallvec",
- "stylo",
- "stylo_traits",
  "vello",
 ]
 

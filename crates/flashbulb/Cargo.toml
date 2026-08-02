@@ -12,10 +12,8 @@ publish = false
 # The comparison half — images, pixelmatch, goldens — has no renderer and no
 # GPU. Any crate can dev-depend on it.
 default = []
-# Adds the capture half: lay out and paint a `dom` document through `pulsar`
-# onto a headless GPU surface. Kept behind a feature so a crate that already
-# has pixels (or that `pulsar` itself dev-depends on) does not pull the
-# renderer back in.
+# Adds the capture half: ask `dom` to render through its private painter and
+# submit the retained scene through `pulsar`'s headless GPU surface.
 render = ["dep:dom", "dep:pulsar"]
 
 [dependencies]

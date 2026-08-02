@@ -17,11 +17,11 @@ default = ["vello"]
 vello = ["dep:vello"]
 
 [dependencies]
-bobcat-engine = { workspace = true }
+bobcat-core = { workspace = true, default-features = false }
 bytes = { workspace = true }
 data-url = { workspace = true }
 fast_image_resize = { workspace = true }
-# `bobcat-engine`'s resource protocol speaks `http::HeaderMap` in every request
+# `bobcat-core`'s resource protocol speaks `http::HeaderMap` in every request
 # type and does not re-export it, so the loader must name the crate itself.
 http = { workspace = true }
 image-webp = { workspace = true }

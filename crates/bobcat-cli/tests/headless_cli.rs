@@ -6,11 +6,7 @@ static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn a_file_bundle_supports_debugger_style_screenshots() {
-    let Some(gpu) =
-        flashbulb::headless_or_skip("a_file_bundle_supports_debugger_style_screenshots")
-    else {
-        return;
-    };
+    let gpu = flashbulb::headless("a_file_bundle_supports_debugger_style_screenshots");
     drop(gpu);
 
     let root = std::env::temp_dir().join(format!(

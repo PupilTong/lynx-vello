@@ -1,6 +1,7 @@
 //! The [`Document`] — one NodeId-aligned arena set: a fixed-address DOM/style
 //! tree beside independently mutable layout/text state.
 
+use std::cell::RefCell;
 use std::fmt;
 use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
@@ -171,6 +172,7 @@ pub struct Document<T> {
     style_engine: StyleEngine,
     tree: Box<TreeArenas<T>>,
     layout: DocumentLayoutState,
+    pub(crate) painter: RefCell<crate::painter::Painter>,
     /// Pre-mutation state exists only while invalidation is pending. Keeping
     /// the payloads here leaves one byte-sized lifecycle flag, rather than a
     /// nullable snapshot pointer, in every live node's styling slot.
@@ -180,9 +182,9 @@ pub struct Document<T> {
     node_removal_epoch: u64,
     /// Monotone count of visual-affecting mutations (style/attribute/
     /// structure/stylesheet/device/layout invalidation), bumped at the
-    /// internal invalidation funnels. A retained [`crate::visual::PaintOrder`]
-    /// snapshots it: painting a frame built before a later mutation would
-    /// mix stale geometry with live styles, so the paint path fails fast.
+    /// internal invalidation funnels. The private visual frame snapshots it:
+    /// painting a frame built before a later mutation would mix stale geometry
+    /// with live styles, so the paint path fails fast.
     visual_epoch: u64,
     layout_dirty: bool,
     layout_root_dirty: bool,
@@ -229,6 +231,7 @@ impl<T> Document<T> {
             style_engine,
             tree,
             layout,
+            painter: RefCell::new(crate::painter::Painter::default()),
             pending_snapshots: SnapshotMap::new(),
             relayout_roots: Vec::new(),
             relayout_root_ids: FxHashSet::default(),
@@ -326,20 +329,19 @@ impl<T> Document<T> {
     }
 
     /// Monotone count of [`Self::remove_subtree`] calls. A freed `NodeId`
-    /// can be recycled by a later creation, so a retained [`crate::visual::PaintOrder`]
-    /// is only valid for hit testing while this value is unchanged.
+    /// can be recycled by a later creation, so a private visual frame is only
+    /// valid for hit testing while this value is unchanged.
     #[must_use]
-    pub fn node_removal_epoch(&self) -> u64 {
+    pub(crate) fn node_removal_epoch(&self) -> u64 {
         self.node_removal_epoch
     }
 
-    /// Monotone count of visual-affecting mutations. A retained
-    /// [`crate::visual::PaintOrder`] is only valid for painting while this
-    /// value is unchanged (hit testing needs only
+    /// Monotone count of visual-affecting mutations. A private visual frame is
+    /// only valid for painting while this value is unchanged (hit testing needs only
     /// [`Self::node_removal_epoch`] — its geometry snapshot is
     /// self-contained).
     #[must_use]
-    pub fn visual_epoch(&self) -> u64 {
+    pub(crate) fn visual_epoch(&self) -> u64 {
         self.visual_epoch
     }
 
@@ -347,7 +349,7 @@ impl<T> Document<T> {
     /// invalidation funnels every mutating public API drains through:
     /// snapshot creation (attributes/classes/element state), inline-style
     /// application, child-list changes, stylesheet/device changes, and
-    /// layout-dirty marking.
+    /// layout-dirty marking, plus exclusive access to paint resources.
     pub(crate) fn note_visual_mutation(&mut self) {
         self.visual_epoch += 1;
     }
@@ -636,12 +638,14 @@ impl<T> Document<T> {
         std::mem::replace(&mut self.pending_snapshots, SnapshotMap::new())
     }
 
-    pub(crate) fn harvest_flush(
+    pub(crate) fn harvest_flush<F>(
         &mut self,
         root: NodeId,
         mut snapshots: SnapshotMap,
-        sink: &mut dyn FnMut(NodeId, StyleDamage),
-    ) {
+        sink: &mut F,
+    ) where
+        F: FnMut(NodeId, StyleDamage),
+    {
         self.retain_unhandled_snapshots(&mut snapshots);
         debug_assert!(
             self.pending_snapshots.is_empty(),
@@ -681,11 +685,10 @@ impl<T> Document<T> {
         });
     }
 
-    fn harvest_style_damage(
-        &mut self,
-        stack: &mut Vec<NodeId>,
-        sink: &mut dyn FnMut(NodeId, StyleDamage),
-    ) {
+    fn harvest_style_damage<F>(&mut self, stack: &mut Vec<NodeId>, sink: &mut F)
+    where
+        F: FnMut(NodeId, StyleDamage),
+    {
         while let Some(current) = stack.pop() {
             let harvested = {
                 let tree = &mut *self.tree;
@@ -811,6 +814,27 @@ pub(crate) mod tests {
             .get(id)
             .expect("test node is live")
             .snapshot_flags()
+    }
+
+    #[test]
+    fn the_document_owns_render_resources_and_schedules_its_scene() {
+        let mut document = Document::new(device());
+        document.add_stylesheet(
+            "page { width: 10px; height: 10px; background-color: red; }",
+            crate::StylesheetOrigin::Author,
+        );
+        let root = document.create_element("page", ());
+        document.append_document_element(root);
+
+        assert!(document.needs_render());
+        assert!(document.render_if_needed());
+        assert!(!document.needs_render());
+        assert!(!document.render_if_needed());
+        assert!(!document.scene().encoding().draw_tags.is_empty());
+
+        let _ = document.images_mut().remove_url("missing");
+        assert!(document.needs_render());
+        assert!(document.render_if_needed());
     }
 
     #[test]

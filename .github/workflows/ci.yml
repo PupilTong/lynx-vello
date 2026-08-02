@@ -29,8 +29,8 @@ jobs:
         # also descends into the separately-versioned vendor/stylo workspace.
         run: >-
           cargo fmt --check
-          -p bobcat-engine
-          -p bobcat-quickjs
+          -p bobcat-core
+          -p bobcat-cli
           -p flashbulb
           -p image
           -p lynx-element

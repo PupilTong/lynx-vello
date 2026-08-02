@@ -4,7 +4,7 @@ mod support;
 
 use std::sync::Arc;
 
-use bobcat_engine::resource::ResourceCapability;
+use bobcat_core::resource::ResourceCapability;
 use image::{
     BackendRegistry, ImageError, ImageLoader, ImagePrefetchTarget, LoaderConfig, PixelSize,
 };
@@ -279,7 +279,7 @@ async fn prefetch_warms_the_decode_cache_or_delegates_to_the_host() {
     delegating
         .prefetch(
             "icon.png",
-            ImagePrefetchTarget::Encoded(bobcat_engine::resource::CacheTarget::Disk),
+            ImagePrefetchTarget::Encoded(bobcat_core::resource::CacheTarget::Disk),
         )
         .await
         .expect("encoded prefetch");
@@ -372,7 +372,7 @@ async fn a_decode_cache_hit_does_not_need_the_header_cache() {
     // one silently govern the larger.
     let double = Arc::new(FetcherDouble::new(checker_png(4)));
     let loader = ImageLoader::with_registry(
-        Arc::clone(&double) as Arc<dyn bobcat_engine::resource::ResourceFetcher>,
+        Arc::clone(&double) as Arc<dyn bobcat_core::resource::ResourceFetcher>,
         LoaderConfig::new(0).with_header_cache_entries(1),
         BackendRegistry::software_only(),
     )

@@ -68,6 +68,10 @@ pub struct ScrollAxes {
     pub y: bool,
 }
 
+#[cfg(test)]
+#[path = "scroll_tests.rs"]
+mod behavior_tests;
+
 impl ScrollAxes {
     pub const NONE: Self = Self { x: false, y: false };
     pub const BOTH: Self = Self { x: true, y: true };
@@ -111,7 +115,7 @@ impl ScrollBox {
 /// Whether this computed style makes a box a scroll container at all —
 /// including `overflow: hidden`, which scrolls only programmatically.
 #[must_use]
-pub fn is_scroll_container(style: &ComputedValues) -> bool {
+fn is_scroll_container(style: &ComputedValues) -> bool {
     style.clone_overflow_x().is_scrollable() || style.clone_overflow_y().is_scrollable()
 }
 
@@ -119,7 +123,7 @@ pub fn is_scroll_container(style: &ComputedValues) -> bool {
 /// `hidden`, which scrolls programmatically, and never `clip`, which does not
 /// scroll at all (css-overflow-3 §3).
 #[must_use]
-pub fn user_scrollable_axes(style: &ComputedValues) -> ScrollAxes {
+fn user_scrollable_axes(style: &ComputedValues) -> ScrollAxes {
     ScrollAxes {
         x: style.clone_overflow_x().is_user_scrollable(),
         y: style.clone_overflow_y().is_user_scrollable(),
@@ -187,7 +191,8 @@ impl<T> Document<T> {
     ///
     /// # Panics
     ///
-    /// As [`Document::paint_style`], when styles are not ready.
+    /// Panics when computed styles are not ready; call [`Document::layout`]
+    /// after mutating the document first.
     #[must_use]
     pub fn is_scroll_container(&self, id: NodeId) -> bool {
         self.paint_style(id).is_some_and(is_scroll_container)
@@ -201,7 +206,8 @@ impl<T> Document<T> {
     ///
     /// # Panics
     ///
-    /// As [`Document::paint_style`], when styles are not ready.
+    /// Panics when computed styles are not ready; call [`Document::layout`]
+    /// after mutating the document first.
     #[must_use]
     pub fn scroll_box(&self, id: NodeId) -> Option<ScrollBox> {
         resolve(
@@ -216,7 +222,8 @@ impl<T> Document<T> {
     ///
     /// # Panics
     ///
-    /// As [`Document::paint_style`], when styles are not ready.
+    /// Panics when computed styles are not ready; call [`Document::layout`]
+    /// after mutating the document first.
     #[must_use]
     pub fn scroll_offset(&self, id: NodeId) -> Vector2D<f32> {
         self.scroll_box(id)
@@ -234,9 +241,8 @@ impl<T> Document<T> {
     /// actually applied.
     ///
     /// Scrolling moves painted content but neither restyles nor relayouts, so
-    /// this invalidates the visual frame only: rebuild the
-    /// [`crate::visual::PaintOrder`] afterwards, but expect no style or layout
-    /// work.
+    /// this invalidates the private visual frame only: the next paint or hit
+    /// test rebuilds it, but performs no style or layout work.
     ///
     /// A non-finite component is clamped to `0.0` rather than stored: this
     /// crate re-clamps on read, so a stored NaN would never wash out. The
@@ -245,8 +251,9 @@ impl<T> Document<T> {
     ///
     /// # Panics
     ///
-    /// As [`Document::paint_style`], when styles are not ready. In debug
-    /// builds, also on a non-finite `offset`.
+    /// Panics when computed styles are not ready; call [`Document::layout`]
+    /// after mutating the document first. In debug builds, also on a non-finite
+    /// `offset`.
     pub fn scroll_to(&mut self, id: NodeId, offset: Vector2D<f32>) -> Vector2D<f32> {
         debug_assert!(
             offset.x.is_finite() && offset.y.is_finite(),
@@ -276,7 +283,8 @@ impl<T> Document<T> {
     ///
     /// # Panics
     ///
-    /// As [`Document::paint_style`], when styles are not ready.
+    /// Panics when computed styles are not ready; call [`Document::layout`]
+    /// after mutating the document first.
     pub fn scroll_by(&mut self, id: NodeId, delta: Vector2D<f32>) -> Vector2D<f32> {
         let Some(scroll_box) = self.scroll_box(id) else {
             return delta;
@@ -289,13 +297,13 @@ impl<T> Document<T> {
     /// block**, not its DOM parent.
     ///
     /// This is the rule the paint build applies (CSS2 §11.1.1, and
-    /// [`crate::visual`]'s `FlowContext` escape), keyed on computed position
-    /// exactly as that is: a box is only clipped by, and only scrolls with,
-    /// ancestors in its containing-block chain. Walking DOM ancestry here
-    /// instead would let a wheel over an absolute box anchored *above* a
-    /// scroller scroll that scroller — moving content behind a box that
-    /// visibly does not move, which is precisely the mismatch the paint side
-    /// avoids.
+    /// the private visual collector's containing-block escape), keyed on
+    /// computed position exactly as that is: a box is only clipped by, and
+    /// only scrolls with, ancestors in its containing-block chain. Walking DOM
+    /// ancestry here instead would let a wheel over an absolute box anchored
+    /// *above* a scroller scroll that scroller — moving content behind a box
+    /// that visibly does not move, which is precisely the mismatch the paint
+    /// side avoids.
     ///
     /// A `fixed` box, or an `absolute` box with no positioned ancestor, is
     /// anchored to the viewport, which is not a scrollable box here — so the
@@ -340,7 +348,7 @@ impl<T> Document<T> {
 
     /// The nearest box at or above `id` that the user may scroll along at
     /// least one of `axes`, walking the containing-block chain
-    /// ([`Self::scroll_parent`]) so the answer agrees with what actually moves
+    /// (`scroll_parent`) so the answer agrees with what actually moves
     /// on screen.
     ///
     /// A box that is user-scrollable but already pinned at both boundaries
@@ -350,7 +358,8 @@ impl<T> Document<T> {
     ///
     /// # Panics
     ///
-    /// As [`Document::paint_style`], when styles are not ready.
+    /// Panics when computed styles are not ready; call [`Document::layout`]
+    /// after mutating the document first.
     #[must_use]
     pub fn nearest_user_scrollable(&self, id: NodeId, axes: ScrollAxes) -> Option<NodeId> {
         let mut current = Some(id);
@@ -381,7 +390,8 @@ impl<T> Document<T> {
     ///
     /// # Panics
     ///
-    /// As [`Document::paint_style`], when styles are not ready.
+    /// Panics when computed styles are not ready; call [`Document::layout`]
+    /// after mutating the document first.
     pub fn scroll_chain(
         &mut self,
         from: NodeId,

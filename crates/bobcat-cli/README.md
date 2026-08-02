@@ -1,8 +1,10 @@
 # bobcat-cli
 
 `bobcat-cli` builds the `bobcat` executable. It accepts a local Lynx web bundle
-as a `file:///` URL and renders it through `bobcat-quickjs` → `lynx-element` →
-`dom`/`hughie` → `pulsar`.
+as a `file:///` URL and renders it through `bobcat-core/quickjs` →
+`lynx-element` → `dom`/`hughie`; DOM owns the Pulsar-backed scene pipeline
+internally, while core only provides the convenience re-export used by the
+CLI's GPU host.
 
 ```sh
 # Native macOS window
@@ -37,7 +39,7 @@ renderer, GPU target, and scratch allocations, skip the GPU entirely while
 the document is unchanged, and wait for each submitted frame so a clock that
 outpaces the GPU cannot pile up work.
 
-Current `bobcat-quickjs` limits still apply. In particular, most real
+Current `bobcat-core` QuickJS limits still apply. In particular, most real
 ReactLynx bundles currently stop at an unimplemented main-thread global before
 rendering, and decoded `StyleInfo` rules are not yet lowered into author CSS.
 The CLI reports the former as an error and the latter as an explicit warning.

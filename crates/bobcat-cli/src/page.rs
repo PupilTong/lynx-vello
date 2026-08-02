@@ -1,9 +1,10 @@
-use bobcat_quickjs::MainThreadRuntime;
+use std::cell::Ref;
+
 #[cfg(target_os = "macos")]
-use dom::input::{InputEvent, InputResponse};
-use lynx_element::{PageConfig, Viewport};
-use pulsar::vello::Scene;
-use pulsar::{ImageStore, Painter};
+use bobcat_core::dom::input::{InputEvent, InputResponse};
+use bobcat_core::pulsar::vello::Scene;
+use bobcat_core::quickjs::MainThreadRuntime;
+use bobcat_core::{ElementTree, PageConfig, Viewport};
 use url::Url;
 
 use crate::CliError;
@@ -64,7 +65,7 @@ impl Program {
     ) -> Result<FramePipeline, CliError> {
         let frame_size = frame_size(width, height, device_pixel_ratio)?;
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
-        let mut runtime = MainThreadRuntime::new(viewport, self.config)
+        let mut runtime = MainThreadRuntime::new(ElementTree::new(viewport, self.config))
             .map_err(CliError::RuntimeInitialization)?;
         runtime
             .run_main_thread_script(&self.source)
@@ -83,11 +84,8 @@ impl Program {
 
         Ok(FramePipeline {
             runtime,
-            painter: Painter::new(),
-            images: ImageStore::new(),
             viewport,
             frame_size,
-            painted_epoch: None,
         })
     }
 }
@@ -99,7 +97,7 @@ pub(crate) struct FrameSize {
 }
 
 pub(crate) struct PreparedFrame<'a> {
-    pub(crate) scene: &'a Scene,
+    elements: Ref<'a, ElementTree>,
     pub(crate) size: FrameSize,
     /// Whether this call repainted the scene: `false` means the scene is
     /// byte-identical to the previously prepared frame, so a host that
@@ -107,16 +105,17 @@ pub(crate) struct PreparedFrame<'a> {
     pub(crate) changed: bool,
 }
 
+impl PreparedFrame<'_> {
+    /// The scene retained by the document's private painter.
+    pub(crate) fn scene(&self) -> Ref<'_, Scene> {
+        self.elements.scene()
+    }
+}
+
 pub(crate) struct FramePipeline {
     runtime: MainThreadRuntime,
-    painter: Painter,
-    images: ImageStore,
     viewport: Viewport,
     frame_size: FrameSize,
-    /// The document's `visual_epoch` the painted scene reflects; `None`
-    /// until the first paint (and after a resize, which must repaint
-    /// unconditionally).
-    painted_epoch: Option<u64>,
 }
 
 impl std::fmt::Debug for FramePipeline {
@@ -125,7 +124,6 @@ impl std::fmt::Debug for FramePipeline {
             .debug_struct("FramePipeline")
             .field("viewport", &self.viewport)
             .field("frame_size", &self.frame_size)
-            .field("painted_epoch", &self.painted_epoch)
             .finish_non_exhaustive()
     }
 }
@@ -157,23 +155,16 @@ impl FramePipeline {
         }
         self.viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
         self.frame_size = next_size;
-        self.painted_epoch = None;
         Ok(())
     }
 
     pub(crate) fn prepare_frame(&mut self) -> PreparedFrame<'_> {
-        let mut elements = self.runtime.elements_mut();
-        let changed = self.painted_epoch != Some(elements.document().visual_epoch());
-        if changed {
-            let frame = elements.paint_order();
-            self.painter
-                .paint(elements.document(), &frame, &self.images);
-            // Read the epoch after the flush so any bookkeeping done inside
-            // `paint_order` is folded into the painted state.
-            self.painted_epoch = Some(elements.document().visual_epoch());
-        }
+        let changed = {
+            let mut elements = self.runtime.elements_mut();
+            elements.render_if_needed()
+        };
         PreparedFrame {
-            scene: self.painter.scene(),
+            elements: self.runtime.elements(),
             size: self.frame_size,
             changed,
         }
@@ -182,23 +173,20 @@ impl FramePipeline {
     /// Routes one host input event and performs the UA default action it
     /// resolves to.
     ///
-    /// Hit testing needs a frame, so this builds one — which is also the frame
-    /// this event *should* be measured against: the user aimed at what is
-    /// currently painted. When nothing has changed since the last paint the
-    /// build is the only cost, because `prepare_frame` will then find a matching
-    /// epoch and skip the GPU entirely.
+    /// The element layer keeps the visual frame private and builds it for hit
+    /// testing. When input changes scrolling, `prepare_frame` observes the new
+    /// visual epoch and refreshes the retained scene.
     #[cfg(target_os = "macos")]
     pub(crate) fn handle_input(&mut self, event: InputEvent) -> InputResponse {
         let mut elements = self.runtime.elements_mut();
-        let frame = elements.paint_order();
-        elements.handle_input(&frame, event)
+        elements.handle_input(event)
     }
 
     /// Whether the document has visual changes the painted scene does not
     /// reflect yet.
     #[cfg(target_os = "macos")]
     pub(crate) fn needs_frame(&self) -> bool {
-        self.painted_epoch != Some(self.runtime.elements().document().visual_epoch())
+        self.runtime.elements().needs_render()
     }
 }
 

@@ -2,7 +2,15 @@
 
 //! `dom` — a generic, stylo-integrated W3C-DOM-subset document tree.
 
+#[cfg(test)]
+extern crate self as dom;
+
+#[cfg(test)]
+#[path = "../tests/common/mod.rs"]
+mod test_common;
+
 mod contain;
+mod convert;
 mod damage;
 mod document;
 mod engine;
@@ -11,10 +19,18 @@ pub mod input;
 mod invalidation;
 pub mod layout;
 mod node;
+mod paint;
+mod painter;
 pub mod scroll;
+mod shape;
 mod traits;
-pub mod visual;
+mod visual;
+mod walker;
 
+pub use euclid::default::{Point2D, Size2D, Vector2D};
+pub(crate) use pulsar::vello;
+pub use pulsar::{self, ImageStore};
+pub use stylo::device::Device;
 pub use stylo_dom::ElementState;
 
 pub use crate::contain::{Contain, ContentVisibility, effective_containment};

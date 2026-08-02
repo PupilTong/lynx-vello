@@ -1,7 +1,7 @@
 //! The async pipeline: specifier → resolve → bytes → decode → cache.
 //!
 //! Sits directly on [`ResourceFetcher`], the host-injected protocol
-//! `bobcat-engine` owns. That crate is forbidden to decode images or own cache
+//! `bobcat-core` owns. That crate is forbidden to decode images or own cache
 //! policy, which is exactly the split this module completes from the other side:
 //! the protocol moves bytes, this moves pixels.
 
@@ -9,7 +9,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use bobcat_engine::resource::{
+use bobcat_core::resource::{
     BufferedResourceRequest, CachePolicy, CacheTarget, ImageHints, PrefetchRequest, RequestContext,
     RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceDescriptor,
     ResourceFetcher, ResourceHints, ResourceKind, ResourceLocator, ResourcePriority,
@@ -214,7 +214,7 @@ impl fmt::Debug for ImageLoader {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         // `ResourceFetcher` has no `Debug` supertrait — it is a host-implemented
         // protocol object — so it is rendered by name, the same way
-        // `bobcat-engine` renders its own reader fields.
+        // `bobcat-core` renders its own reader fields.
         formatter
             .debug_struct("ImageLoader")
             .field("fetcher", &"<dyn ResourceFetcher>")

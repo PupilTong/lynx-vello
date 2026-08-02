@@ -1,19 +1,17 @@
 //! Visual order over the laid-out tree: CSS stacking contexts, Appendix-E
 //! paint order, transform matrices, and hit testing.
 //!
-//! [`Document::paint_order`] flushes styles and layout, then builds a
-//! [`PaintOrder`]: a flat item list in back-to-front paint order, each item
-//! carrying its viewport-space transform and innermost clip. The future
-//! render crate paints the items in list order (back to front); event
-//! dispatch consumes [`PaintOrder::hit_test`], which walks the same list in
-//! reverse (topmost first). Hit-test consumers should hold one `PaintOrder`
-//! per frame and query it repeatedly rather than calling
-//! [`Document::hit_test`] per pointer event — every call rebuilds the world.
+//! [`Document::render`], [`Document::hit_test`], and
+//! [`Document::handle_input`] internally build a
+//! private `PaintOrder`: a flat item list in back-to-front order, each item carrying
+//! its viewport-space transform and innermost clip. The private painter walks
+//! it frontwards; hit testing walks it backwards. Neither the frame nor the
+//! painter crosses the document API boundary.
 //! A frame is pinned to the document's node-removal epoch: after any
 //! `remove_subtree` a freed id can be recycled by a later creation, so
 //! querying a stale frame panics (let-it-crash) rather than returning a
-//! recycled node for old geometry. Painting is pinned harder — to
-//! [`Document::visual_epoch`] via [`PaintOrder::assert_visually_fresh`] —
+//! recycled node for old geometry. Painting is pinned harder — to the
+//! document's private visual-mutation epoch via its freshness assertion —
 //! because it resolves the frame against live styles/layouts/text, which
 //! any visual mutation desynchronizes; hit testing's snapshot is
 //! self-contained and tolerates non-structural mutations.
@@ -21,7 +19,7 @@
 //! Scroll offsets ([`crate::scroll`]) are baked into the frame rather than
 //! surfaced beside it: a scroll container's contents are translated as they
 //! are collected, so painting and hit testing both see scrolled geometry with
-//! no knowledge of scrolling at all, and the render crate needs none either.
+//! no separate scroll state, and the private painter needs none either.
 //! The price is that scrolling invalidates the frame like any other visual
 //! mutation — which it must anyway, since scrolled content has to repaint.
 //!
@@ -43,10 +41,10 @@
 //!   hit-targets that parent — the singular text-hit rule, matching Chrome's `elementFromPoint`.
 //!
 //! Deliberate v1 limits (see docs/tracking/css-layout.md for status):
-//! - Group effects (`opacity`, `filter`, `clip-path`, `mask`) surface as [`RenderLayer`] boundaries
-//!   for the render crate to composite; they still do not affect hit testing (a `clip-path` that
-//!   clips painting away does not clip the hit region yet). `backdrop-filter` is not compiled in
-//!   the fork at all, so its stacking-context trigger is structurally deferred.
+//! - Group effects (`opacity`, `filter`, `clip-path`, `mask`) surface as private `RenderLayer`
+//!   boundaries for the private painter to composite; they still do not affect hit testing (a
+//!   `clip-path` that clips painting away does not clip the hit region yet). `backdrop-filter` is
+//!   not compiled in the fork at all, so its stacking-context trigger is structurally deferred.
 //! - Motion paths (motion-1) are composed into the matrix between the individual transforms and the
 //!   transform list: `path()`, `circle()`, `ellipse()`, and `inset()` — the shapes the fork parses,
 //!   with the coord box fixed to the border box. The anchor is always `transform-origin`
@@ -77,16 +75,16 @@ mod geometry;
 mod hit;
 mod motion;
 mod stacking;
+#[cfg(test)]
+mod tests;
 mod transform;
 
-// The crate's whole geometry vocabulary, re-exported so an embedder can name
-// every type that appears in a public signature here — `Vector2D` included:
-// scroll offsets and deltas are displacements, not positions, and they surface
-// on `Document::scroll_by`, `ScrollBox`, and `DefaultAction::Scroll`.
-pub use euclid::default::{Point2D, Rect, Size2D, Transform3D, Vector2D};
+use std::cell::Ref;
 
-use crate::NodeId;
+use euclid::default::{Point2D, Rect, Size2D, Transform3D};
+
 use crate::document::Document;
+use crate::{ImageStore, NodeId};
 
 /// The document's current frame in paint order: `items[0]` paints first
 /// (bottom), `items[len - 1]` paints last (top).
@@ -97,50 +95,56 @@ use crate::document::Document;
 /// answering with a recycled node — rebuild the frame after structural
 /// mutations.
 #[derive(Debug)]
-pub struct PaintOrder {
-    pub(crate) items: Vec<PaintItem>,
-    pub(crate) clips: Vec<ClipNode>,
-    pub(crate) layers: Vec<RenderLayer>,
+pub(crate) struct PaintOrder {
+    items: Vec<PaintItem>,
+    clips: Vec<ClipNode>,
+    layers: Vec<RenderLayer>,
     /// [`Document::node_removal_epoch`] at build time.
-    pub(crate) epoch: u64,
-    /// [`Document::visual_epoch`] at build time.
-    pub(crate) visual_epoch: u64,
+    epoch: u64,
+    /// The document's private visual-mutation epoch at build time.
+    visual_epoch: u64,
 }
 
 impl PaintOrder {
     /// Back-to-front paint items.
     #[must_use]
-    pub fn items(&self) -> &[PaintItem] {
+    pub(crate) fn items(&self) -> &[PaintItem] {
         &self.items
     }
 
     /// Clip arena referenced by [`PaintItem::clip`] and [`ClipNode::parent`].
     #[must_use]
-    pub fn clips(&self) -> &[ClipNode] {
+    pub(crate) fn clips(&self) -> &[ClipNode] {
         &self.clips
     }
 
     /// Render layers, in preorder (a layer precedes every layer nested in
     /// it, and its [`RenderLayer::items`] range contains theirs).
     #[must_use]
-    pub fn layers(&self) -> &[RenderLayer] {
+    pub(crate) fn layers(&self) -> &[RenderLayer] {
         &self.layers
+    }
+
+    /// The document visual epoch represented by this frame.
+    #[must_use]
+    pub(crate) const fn visual_epoch(&self) -> u64 {
+        self.visual_epoch
     }
 }
 
 /// Where a hit landed inside the item it hit, from
 /// [`PaintOrder::hit_test_local`].
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LocalHit {
+pub(crate) struct LocalHit {
     /// Index into [`PaintOrder::items`].
-    pub item: usize,
+    pub(crate) item: usize,
     /// The point in that item's border-box space.
-    pub position: Point2D<f32>,
+    pub(crate) position: Point2D<f32>,
 }
 
 /// What one paint item draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PaintItemKind {
+pub(crate) enum PaintItemKind {
     /// An element's own box: background, borders, decorations.
     ElementBox,
     /// A text leaf's glyph runs; `element` is the styled parent element hit
@@ -150,90 +154,92 @@ pub enum PaintItemKind {
 
 /// One node's slot in the paint order.
 #[derive(Debug, Clone)]
-pub struct PaintItem {
-    pub node: NodeId,
-    pub kind: PaintItemKind,
+pub(crate) struct PaintItem {
+    pub(crate) node: NodeId,
+    pub(crate) kind: PaintItemKind,
     /// Item-local border-box coordinates → viewport CSS px. Flattened
     /// 2D-projective (z decoupled); a singular matrix means the element is
     /// not rendered (css-transforms-1) and hit testing skips it.
-    pub transform: Transform3D<f32>,
+    pub(crate) transform: Transform3D<f32>,
     /// Innermost applicable clip, an index into [`PaintOrder::clips`].
-    pub clip: Option<usize>,
+    pub(crate) clip: Option<usize>,
     /// Rounded border-box size.
-    pub size: Size2D<f32>,
+    pub(crate) size: Size2D<f32>,
     /// Resolved, overlap-normalized border radii (zero for text runs).
-    pub radii: CornerRadii,
+    pub(crate) radii: CornerRadii,
     /// `visibility: visible` and `pointer-events` other than `none`.
-    pub hit_testable: bool,
+    pub(crate) hit_testable: bool,
 }
 
 /// A stacking context whose subtree composites as a group — `opacity` below
 /// one, `filter`, `clip-path`, `mask`, and the storage-only blend/isolation
-/// triggers once a grammar rebase makes them authorable. The renderer must
+/// triggers once a grammar rebase makes them authorable. The private painter must
 /// paint the enclosed items into an offscreen group and apply the effects on
 /// composite; contexts without group effects (plain `z-index`, transforms)
 /// deliberately get no layer.
 ///
 /// Effect *parameters* are not duplicated here: the establishing element's
 /// computed style (via [`Document::paint_style`]) is the single source the
-/// renderer resolves `opacity`/`filter`/`clip-path`/`mask` values from, with
+/// painter resolves `opacity`/`filter`/`clip-path`/`mask` values from, with
 /// `clip-path` and `mask` geometry resolved against [`Self::size`].
 ///
 /// Group effects still do not affect [`PaintOrder::hit_test`] (a `clip-path`
 /// that clips painting away does not yet clip the hit region — recorded v1
 /// limit).
 #[derive(Debug, Clone)]
-pub struct RenderLayer {
+pub(crate) struct RenderLayer {
     /// Next-outer render layer, an index into [`PaintOrder::layers`].
-    pub parent: Option<usize>,
+    pub(crate) parent: Option<usize>,
     /// The establishing element.
-    pub node: NodeId,
+    pub(crate) node: NodeId,
     /// Layer-local (border-box) coordinates → viewport CSS px. Present even
     /// when the establishing box itself paints no item (`visibility:
     /// hidden` root with visible descendants).
-    pub transform: Transform3D<f32>,
+    pub(crate) transform: Transform3D<f32>,
     /// Rounded border-box size of the establishing element.
-    pub size: Size2D<f32>,
+    pub(crate) size: Size2D<f32>,
     /// The establishing element's resolved, overlap-normalized border
     /// radii — carried here (not scavenged from the root's item) so
     /// `clip-path`/`mask` geometry keeps its rounding even when the root
     /// box paints no item (`visibility: hidden`).
-    pub radii: CornerRadii,
+    pub(crate) radii: CornerRadii,
     /// Half-open range of [`PaintOrder::items`] the group encloses.
     /// Stacking contexts paint atomically, so the range is contiguous and
     /// nested layers' ranges nest; empty groups are dropped at build time,
     /// so the range is never empty.
-    pub items: std::ops::Range<usize>,
+    pub(crate) items: std::ops::Range<usize>,
 }
 
 /// One overflow/`contain: paint` clip: a rounded padding-box rect in the
 /// establishing element's local space.
 #[derive(Debug, Clone)]
-pub struct ClipNode {
+pub(crate) struct ClipNode {
     /// Next-outer clip in this node's containing-block chain.
-    pub parent: Option<usize>,
-    /// The establishing element.
-    pub node: NodeId,
+    pub(crate) parent: Option<usize>,
+    /// The establishing element, retained only for invariant tests; painting
+    /// and hit testing consume the clip's resolved geometry directly.
+    #[cfg(test)]
+    pub(crate) node: NodeId,
     /// Clip-local coordinates → viewport CSS px.
-    pub transform: Transform3D<f32>,
+    pub(crate) transform: Transform3D<f32>,
     /// Padding box in clip-local coordinates.
-    pub rect: Rect<f32>,
+    pub(crate) rect: Rect<f32>,
     /// Inner border radii (outer radii inset by border widths, clamped ≥ 0).
-    pub radii: CornerRadii,
+    pub(crate) radii: CornerRadii,
 }
 
 /// Per-corner elliptical radii, in CSS px: `width` is the horizontal radius,
 /// `height` the vertical.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct CornerRadii {
-    pub top_left: Size2D<f32>,
-    pub top_right: Size2D<f32>,
-    pub bottom_right: Size2D<f32>,
-    pub bottom_left: Size2D<f32>,
+pub(crate) struct CornerRadii {
+    pub(crate) top_left: Size2D<f32>,
+    pub(crate) top_right: Size2D<f32>,
+    pub(crate) bottom_right: Size2D<f32>,
+    pub(crate) bottom_left: Size2D<f32>,
 }
 
 impl CornerRadii {
-    pub const ZERO: Self = Self {
+    pub(crate) const ZERO: Self = Self {
         top_left: Size2D::new(0.0, 0.0),
         top_right: Size2D::new(0.0, 0.0),
         bottom_right: Size2D::new(0.0, 0.0),
@@ -241,22 +247,62 @@ impl CornerRadii {
     };
 
     #[must_use]
-    pub fn is_zero(&self) -> bool {
+    pub(crate) fn is_zero(&self) -> bool {
         *self == Self::ZERO
     }
 }
 
 impl<T: Sync> Document<T> {
-    /// Flushes styles and layout, then builds the frame's paint order.
-    pub fn paint_order(&mut self) -> PaintOrder {
+    /// Flushes styles and layout, then builds the private frame description
+    /// shared by painting, hit testing, and input routing.
+    pub(crate) fn build_paint_order(&mut self) -> PaintOrder {
         self.layout();
         build::build(self)
     }
 
-    /// Convenience for one-off queries: [`Self::paint_order`] plus
-    /// [`PaintOrder::hit_test`]. `point` is in viewport CSS px.
+    /// Returns the topmost hit-testable element at `point` in viewport CSS px.
     pub fn hit_test(&mut self, point: Point2D<f32>) -> Option<NodeId> {
-        let frame = self.paint_order();
+        let frame = self.build_paint_order();
         frame.hit_test(self, point)
+    }
+
+    /// Lays out and renders the current document through its private painter.
+    pub fn render(&mut self) {
+        let frame = self.build_paint_order();
+        self.painter.borrow_mut().paint(self, &frame);
+    }
+
+    /// Renders only when the retained scene no longer represents the current
+    /// document state. Returns whether a new scene was built.
+    pub fn render_if_needed(&mut self) -> bool {
+        if !self.needs_render() {
+            return false;
+        }
+        self.render();
+        true
+    }
+}
+
+impl<T> Document<T> {
+    /// Whether a visual mutation has made the retained scene stale, or no
+    /// scene has been built yet.
+    #[must_use]
+    pub fn needs_render(&self) -> bool {
+        self.painter.borrow().needs_render(self.visual_epoch())
+    }
+
+    /// The Vello scene retained by the last [`Self::render`] call.
+    #[must_use]
+    pub fn scene(&self) -> Ref<'_, crate::vello::Scene> {
+        Ref::map(self.painter.borrow(), crate::painter::Painter::scene)
+    }
+
+    /// Registers or updates decoded images without exposing the painter.
+    ///
+    /// Access conservatively advances the visual epoch so a retained scene is
+    /// never reused after its resource set may have changed.
+    pub fn images_mut(&mut self) -> &mut ImageStore {
+        self.note_visual_mutation();
+        self.painter.get_mut().images_mut()
     }
 }

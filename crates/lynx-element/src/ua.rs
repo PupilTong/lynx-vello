@@ -44,7 +44,7 @@ impl Default for PageConfig {
 /// grammar, which is Lynx's vertical default, so `display: linear` alone
 /// reproduces "linear/vertical on every element".
 #[must_use]
-pub fn ua_stylesheet(config: PageConfig) -> String {
+pub(crate) fn ua_stylesheet(config: PageConfig) -> String {
     let display = if config.default_display_linear {
         "display: linear;"
     } else {

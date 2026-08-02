@@ -4,15 +4,15 @@
 #![allow(dead_code)]
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
-use bobcat_engine::resource::{
+use bobcat_core::resource::{
     BufferedResourceRequest, CacheStatus, HttpRequest, HttpResponse, PrefetchReceipt,
     PrefetchRequest, RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
     ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceFuture, ResourceLocality,
-    ResourceMetadata, ResourcePath, ResourceRequest, ResourceResponse, ResourceSource,
-    ResourceStream, ResourceTiming, RetryAdvice,
+    ResourceMetadata, ResourcePath, ResourcePathLease, ResourceRequest, ResourceResponse,
+    ResourceSource, ResourceStream, ResourceTiming, RetryAdvice,
 };
 use bytes::Bytes;
 use url::Url;
@@ -156,6 +156,17 @@ fn unsupported(phase: ResourceErrorPhase) -> ResourceError {
     }
 }
 
+#[derive(Debug)]
+struct TempPathLease(PathBuf);
+
+impl ResourcePathLease for TempPathLease {}
+
+impl Drop for TempPathLease {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 impl ResourceFetcher for FetcherDouble {
     fn supports_capability(&self, capability: ResourceCapability) -> bool {
         self.capabilities.contains(&capability)
@@ -227,8 +238,11 @@ impl ResourceFetcher for FetcherDouble {
         let id = request.context.id;
         let resource = request.resource;
         Box::pin(async move {
+            // Every test loader starts its protocol sequence at zero. Include
+            // the fetcher identity so parallel tests cannot overwrite one
+            // another's fixture between the metadata and size checks.
             let path = std::env::temp_dir().join(format!(
-                "lynx-vello-image-fixture-{}-{}.bin",
+                "lynx-vello-image-fixture-{self:p}-{}-{}.bin",
                 id.namespace, id.sequence
             ));
             std::fs::write(&path, &self.bytes).map_err(|error| ResourceError {
@@ -240,11 +254,12 @@ impl ResourceFetcher for FetcherDouble {
                 message: error.to_string().into(),
                 retry: RetryAdvice::Never,
             })?;
+            let lease = Arc::new(TempPathLease(path.clone()));
             Ok(ResourcePath {
                 metadata: self.metadata(resource, id),
                 path,
                 fallback_paths: Vec::new(),
-                lease: None,
+                lease: Some(lease),
             })
         })
     }

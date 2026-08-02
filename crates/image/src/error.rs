@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use bobcat_engine::resource::ResourceError;
+use bobcat_core::resource::ResourceError;
 use thiserror::Error;
 
 use crate::format::ImageFormat;
@@ -18,7 +18,7 @@ use crate::format::ImageFormat;
 #[derive(Clone, Debug, Error)]
 #[non_exhaustive]
 pub enum ImageError {
-    /// The host's [`ResourceFetcher`](bobcat_engine::resource::ResourceFetcher)
+    /// The host's [`ResourceFetcher`](bobcat_core::resource::ResourceFetcher)
     /// failed to resolve, open or read the bytes.
     #[error("resource acquisition failed: {0}")]
     Resource(#[from] ResourceError),
@@ -69,8 +69,8 @@ pub enum ImageError {
     MalformedDataUrl(Arc<str>),
 
     /// I/O below the protocol's own error type: draining a
-    /// [`ResourceStream`](bobcat_engine::resource::ResourceStream), or reading a
-    /// [`ResourcePath`](bobcat_engine::resource::ResourcePath) off disk. The
+    /// [`ResourceStream`](bobcat_core::resource::ResourceStream), or reading a
+    /// [`ResourcePath`](bobcat_core::resource::ResourcePath) off disk. The
     /// fetcher succeeded; moving the bytes afterwards did not.
     #[error("{context}: {message}")]
     Transport {

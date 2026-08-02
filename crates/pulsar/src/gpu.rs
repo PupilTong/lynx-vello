@@ -8,7 +8,8 @@
 //! - `Headless::new()`: `vello::util::RenderContext::new()`, pick a device via
 //!   `context.device(None)` (pollster-blocked); construct one `vello::Renderer` with area-AA
 //!   support only (the one AA mode pulsar renders with). Return `Err(NoAdapter)` cleanly when the
-//!   platform has no usable adapter — callers (tests) skip rather than fail.
+//!   platform has no usable adapter — embedders can surface that error, while tests treat it as a
+//!   hard environment failure.
 //! - `Headless::render_frame`: render into a retained `Rgba8Unorm` storage texture through
 //!   `Renderer::render_to_texture`, with no CPU synchronization.
 //! - `Headless::read_pixels`: copy the last target into a retained padded readback buffer (256-byte
@@ -57,8 +58,8 @@ impl fmt::Debug for Headless {
 /// Why a [`Headless`] renderer could not be created or render.
 #[derive(Debug)]
 pub enum GpuError {
-    /// No usable GPU adapter on this machine (headless CI, forbidden GPU
-    /// access): callers should skip GPU work, not fail.
+    /// No usable GPU adapter on this machine (for example, forbidden GPU
+    /// access). Product callers may report this; GPU-backed tests must fail.
     NoAdapter,
     /// Device/queue creation or rendering failed.
     Render(String),

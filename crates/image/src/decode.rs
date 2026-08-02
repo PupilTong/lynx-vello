@@ -6,10 +6,10 @@ use std::fmt;
 /// A two-dimensional physical-pixel size.
 ///
 /// Re-exported from the resource protocol rather than redefined: it is already
-/// the type [`ImageHints::target_size_px`](bobcat_engine::resource::ImageHints)
+/// the type [`ImageHints::target_size_px`](bobcat_core::resource::ImageHints)
 /// carries, so a second identical struct would only force every call site to
 /// convert between them.
-pub use bobcat_engine::resource::PixelSize;
+pub use bobcat_core::resource::PixelSize;
 
 use crate::error::ImageError;
 use crate::format::ImageFormat;

@@ -1,6 +1,6 @@
 [package]
 name = "lynx-element"
-description = "Lynx runtime element layer: Element PAPI handles, the page root, and Lynx UA cascade defaults over the generic `dom` core"
+description = "Lynx runtime element policy and Element PAPI host over dom"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,10 +9,6 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-# The generic W3C DOM/CSS core this layer drives. The dependency is one-way by
-# charter: Lynx tags, Element-PAPI opcodes, handle lifetime, `<page>` policy,
-# and Lynx UA defaults live here and never leak downward (AGENTS.md, and the
-# ownership tables in docs/style-architecture.md and docs/layout-architecture.md).
 dom = { workspace = true }
 
 # Device construction is this layer's job ("view metrics and device

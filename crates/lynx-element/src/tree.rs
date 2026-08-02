@@ -1,13 +1,15 @@
 //! The element tree and its Element PAPI operations.
 
+use std::cell::Ref;
 use std::fmt;
 
-use dom::{Document, NodeId, StylesheetOrigin};
+use dom::pulsar::vello::Scene;
+use dom::{self, Document, ImageStore, NodeId, StylesheetOrigin};
 
-use crate::arena::{ElementArena, ElementId, LynxElement};
+use crate::arena::{ElementArena, LynxElement};
 use crate::device::Viewport;
 use crate::ua::{PageConfig, ua_stylesheet};
-use crate::{PAGE_TAG, VIEW_TAG};
+use crate::{ElementId, PAGE_TAG, VIEW_TAG};
 
 /// Why an Element PAPI call was rejected.
 ///
@@ -26,8 +28,6 @@ pub enum PapiError {
     /// The page element cannot be given a parent — it is the document element
     /// by construction, and `__FlushElementTree` is what attaches it.
     CannotReparentPage,
-    /// The append would nest elements deeper than [`MAX_TREE_DEPTH`].
-    TooDeep { limit: u32 },
 }
 
 impl fmt::Display for PapiError {
@@ -43,29 +43,11 @@ impl fmt::Display for PapiError {
             Self::CannotReparentPage => {
                 formatter.write_str("the page element cannot be given a parent")
             }
-            Self::TooDeep { limit } => write!(
-                formatter,
-                "the element tree cannot nest deeper than {limit} levels"
-            ),
         }
     }
 }
 
 impl std::error::Error for PapiError {}
-
-/// How deep the Element PAPI lets a script nest elements.
-///
-/// `dom`'s layout, paint-order, and hit-test walks are recursive, so a
-/// sufficiently deep tree overflows the thread stack and **aborts the
-/// process** — not something untrusted main-thread script should be able to
-/// do. Measured on a 2 MiB thread (libtest's default, the smallest stack this
-/// code runs on) the wall is between 300 and 350 levels; this limit sits below
-/// that with room to spare, and far above any real UI, which nests tens of
-/// levels rather than hundreds.
-///
-/// This is a guard, not a fix. The fix is iterative traversal in `dom` and
-/// `hughie`, after which the limit can rise or go away.
-pub const MAX_TREE_DEPTH: u32 = 256;
 
 /// One Lynx element tree: a `dom` document, an independent runtime-element
 /// arena, and the page policy the Element PAPI speaks in.
@@ -73,7 +55,7 @@ pub const MAX_TREE_DEPTH: u32 = 256;
 pub struct ElementTree {
     /// The DOM payload is only the key back into `elements`; all Lynx runtime
     /// state stays in the context-owned arena.
-    document: Document<i32>,
+    document: Document<ElementId>,
     elements: ElementArena,
     page: Option<ElementId>,
     /// `__CreatePage`'s `componentID` — a string name web-core keeps in a side
@@ -102,42 +84,51 @@ impl ElementTree {
 
     /// The underlying document, for style/layout/paint queries.
     #[must_use]
-    pub const fn document(&self) -> &Document<i32> {
+    pub const fn document(&self) -> &Document<ElementId> {
         &self.document
     }
 
-    /// The paint order for the current tree, laying it out first.
-    ///
-    /// This is the mutable operation a renderer needs. There is deliberately no
-    /// `document_mut`: handing out `&mut Document` would let a caller remove or
-    /// move nodes behind this layer's back, desynchronising the element arena,
-    /// the page state, and the height cache — and the DOM core is
-    /// crash-on-misuse, so the next PAPI call would panic rather than return
-    /// [`PapiError`].
-    pub fn paint_order(&mut self) -> dom::visual::PaintOrder {
-        self.document.paint_order()
+    /// Renders only when the document-owned retained scene is stale. Returns
+    /// whether a new scene was built.
+    pub fn render_if_needed(&mut self) -> bool {
+        self.document.render_if_needed()
     }
 
-    /// Feeds one host input event in, hit-testing it against `frame` and
-    /// performing whatever UA default action it resolves to — today, scrolling
-    /// an `overflow: scroll` box.
+    /// Whether the document has visual changes not represented by its
+    /// retained scene yet.
+    #[must_use]
+    pub fn needs_render(&self) -> bool {
+        self.document.needs_render()
+    }
+
+    /// The Vello scene retained by the last [`Self::render_if_needed`] call.
+    #[must_use]
+    pub fn scene(&self) -> Ref<'_, Scene> {
+        self.document.scene()
+    }
+
+    /// Registers or updates decoded images without exposing DOM topology or
+    /// its private painter.
+    pub fn images_mut(&mut self) -> &mut ImageStore {
+        self.document.images_mut()
+    }
+
+    /// Feeds one host input event in, building the private visual frame needed
+    /// for hit testing and performing the resolved UA default action — today,
+    /// scrolling an `overflow: scroll` box.
     ///
     /// This belongs on the narrow mutable surface for the same reason
     /// [`Self::set_viewport`] does: input cannot desynchronise the handle
     /// table. All it can reach is scroll offsets and per-pointer gesture
     /// state — no element is created, moved, or retired — so lending it out
-    /// costs none of the invariants [`Self::paint_order`] protects.
+    /// costs none of the tree invariants this layer protects.
     ///
     /// Dispatching the returned target through Lynx's own event model
     /// (`bindEvent`/`catchEvent` phases, the gesture arena, `hit-slop`) is the
     /// runtime layer's job, not this one's; it prevents the default action and
     /// takes over when it wants different behavior.
-    pub fn handle_input(
-        &mut self,
-        frame: &dom::visual::PaintOrder,
-        event: dom::input::InputEvent,
-    ) -> dom::input::InputResponse {
-        self.document.handle_input(frame, event)
+    pub fn handle_input(&mut self, event: dom::input::InputEvent) -> dom::input::InputResponse {
+        self.document.handle_input(event)
     }
 
     /// Resizes the viewport, restyling and relaying out on the next flush.
@@ -207,133 +198,6 @@ impl ElementTree {
         self.elements.get(id)
     }
 
-    /// The `parentComponentUniqueID` recorded when `id` was created.
-    #[must_use]
-    pub fn parent_component_unique_id(&self, id: ElementId) -> Option<ElementId> {
-        self.element(id)
-            .map(LynxElement::parent_component_unique_id)
-    }
-
-    /// The `componentCSSID` recorded when `id` was created.
-    #[must_use]
-    pub fn component_css_id(&self, id: ElementId) -> Option<i32> {
-        self.element(id).map(LynxElement::component_css_id)
-    }
-
-    /// This element's distance from the root of the tree it currently sits in,
-    /// counting at most `MAX_TREE_DEPTH + 1` steps — enough to decide the
-    /// guard without walking an arbitrarily long chain.
-    fn depth_of(&self, node: NodeId) -> u32 {
-        let mut depth = 0;
-        let mut current = node;
-        while let Some(parent) = self.document.get(current).and_then(dom::Node::parent_id) {
-            depth += 1;
-            if depth > MAX_TREE_DEPTH {
-                return depth;
-            }
-            current = parent;
-        }
-        depth
-    }
-
-    /// Republishes `element`'s height to its ancestors after it gained a
-    /// subtree. Stops as soon as an ancestor is already tall enough, and can
-    /// never walk further than the depth limit the guard enforces.
-    fn raise_heights(&mut self, element: ElementId, height: u32) {
-        let mut current = Some(element);
-        let mut required = height;
-        let mut steps = 0;
-        while let Some(id) = current {
-            let Some((node_id, old_height)) = self
-                .element(id)
-                .map(|element| (element.node_id(), element.height))
-            else {
-                return;
-            };
-            if old_height >= required {
-                return;
-            }
-            self.elements
-                .get_mut(id)
-                .expect("a live element must remain in its arena")
-                .height = required;
-            required += 1;
-            steps += 1;
-            if steps > MAX_TREE_DEPTH {
-                return;
-            }
-            current = self
-                .document
-                .get(node_id)
-                .and_then(dom::Node::parent_id)
-                .and_then(|parent| self.handle_of(parent));
-        }
-    }
-
-    /// An element's true height, from its children's recorded heights.
-    fn height_from_children(&self, node: NodeId) -> u32 {
-        let Some(element) = self.document.get(node) else {
-            return 0;
-        };
-        element
-            .child_ids()
-            .iter()
-            .filter_map(|&child| self.handle_of(child))
-            .filter_map(|handle| self.element(handle))
-            .map(|element| element.height.saturating_add(1))
-            .max()
-            .unwrap_or(0)
-    }
-
-    /// Recomputes heights up the chain a subtree was just taken from.
-    ///
-    /// [`raise_heights`](Self::raise_heights) only ever grows a height, which
-    /// is right for an append but leaves the *old* ancestors claiming a subtree
-    /// they no longer have. Left stale, a node that is now a genuine leaf keeps
-    /// its old height and gets refused as [`PapiError::TooDeep`] the next time
-    /// something tries to append it somewhere deep.
-    ///
-    /// Stops at the first ancestor whose height is unchanged: nothing above it
-    /// can have changed either.
-    fn lower_heights(&mut self, from: ElementId) {
-        let mut current = Some(from);
-        for _ in 0..=MAX_TREE_DEPTH {
-            let Some(id) = current else {
-                return;
-            };
-            let Some(node) = self.node_id(id) else {
-                return;
-            };
-            let height = self.height_from_children(node);
-            let Some(old_height) = self.element(id).map(|element| element.height) else {
-                return;
-            };
-            if old_height == height {
-                return;
-            }
-            self.elements
-                .get_mut(id)
-                .expect("a live element must remain in its arena")
-                .height = height;
-            current = self
-                .document
-                .get(node)
-                .and_then(dom::Node::parent_id)
-                .and_then(|parent| self.handle_of(parent));
-        }
-    }
-
-    /// The handle a DOM node belongs to, resolved through its payload id.
-    fn handle_of(&self, node: NodeId) -> Option<ElementId> {
-        let unique_id = *self
-            .document
-            .get(node)
-            .filter(|node| node.is_element())?
-            .payload();
-        let element = self.elements.get(unique_id)?;
-        (element.node_id() == node).then_some(unique_id)
-    }
-
     /// Mounts author CSS — the seam a decoded `.web.bundle` `StyleInfo`
     /// section will lower into once that lowering exists.
     pub fn add_author_stylesheet(&mut self, css: &str) {
@@ -399,34 +263,7 @@ impl ElementTree {
             return Err(PapiError::WouldCycle { parent, child });
         }
 
-        // Reject before mutating: `dom`'s recursive layout walk would abort the
-        // process on a deep enough tree, and the main-thread script is
-        // untrusted input. `height` makes this exact for grafted subtrees too —
-        // joining two 200-level chains is caught, not just growing one leaf at
-        // a time.
-        let child_height = self.element(child).map_or(0, |element| element.height);
-        let depth = self.depth_of(parent_node) + 1 + child_height;
-        if depth > MAX_TREE_DEPTH {
-            return Err(PapiError::TooDeep {
-                limit: MAX_TREE_DEPTH,
-            });
-        }
-
-        // `append_child` detaches first, so the chain the child is leaving has
-        // to give its height back.
-        let previous_parent = self
-            .document
-            .get(child_node)
-            .and_then(dom::Node::parent_id)
-            .and_then(|node| self.handle_of(node));
-
         self.document.append_child(parent_node, child_node);
-        self.raise_heights(parent, child_height + 1);
-        if let Some(previous) = previous_parent
-            && previous != parent
-        {
-            self.lower_heights(previous);
-        }
         Ok(child)
     }
 
@@ -439,12 +276,6 @@ impl ElementTree {
         let Some(node) = self.node_id(id) else {
             return false;
         };
-        let previous_parent = self
-            .document
-            .get(node)
-            .and_then(dom::Node::parent_id)
-            .and_then(|parent| self.handle_of(parent));
-
         let retired_ids = self.document.remove_subtree(node);
         for unique_id in retired_ids {
             let retired = self.elements.retire(unique_id);
@@ -458,9 +289,6 @@ impl ElementTree {
             self.page = None;
             self.page_component_id.clear();
             self.page_attached = false;
-        }
-        if let Some(parent) = previous_parent {
-            self.lower_heights(parent);
         }
         true
     }
@@ -505,7 +333,7 @@ impl ElementTree {
 
 #[cfg(test)]
 mod tests {
-    use super::{ElementId, ElementTree, MAX_TREE_DEPTH, PapiError};
+    use super::{Document, ElementId, ElementTree, LynxElement, PapiError, dom};
     use crate::device::Viewport;
     use crate::ua::PageConfig;
 
@@ -584,7 +412,10 @@ mod tests {
         assert_eq!(tree.page(), Some(first));
         // The second call's arguments are ignored, like web-core's.
         assert_eq!(tree.page_component_id(), "page");
-        assert_eq!(tree.component_css_id(first), Some(0));
+        assert_eq!(
+            tree.element(first).map(LynxElement::component_css_id),
+            Some(0)
+        );
     }
 
     #[test]
@@ -830,109 +661,9 @@ mod tests {
         }
     }
 
-    /// Nesting past the limit is refused rather than allowed to overflow the
-    /// stack during layout. Without the guard this aborts the whole process.
+    /// A wide tree can be built and flushed without special-case bookkeeping.
     #[test]
-    fn nesting_past_the_limit_is_refused_rather_than_aborting() {
-        let mut tree = tree();
-        let page = tree.create_page("card", 0);
-        let mut deepest = page;
-        // `page` is level 0, so MAX_TREE_DEPTH more appends fill the budget.
-        for level in 0..MAX_TREE_DEPTH {
-            let view = tree.create_view(0).unwrap();
-            deepest = tree
-                .append_element(deepest, view)
-                .unwrap_or_else(|error| panic!("level {level} should fit: {error}"));
-        }
-
-        let one_too_many = tree.create_view(0).unwrap();
-        assert_eq!(
-            tree.append_element(deepest, one_too_many).unwrap_err(),
-            PapiError::TooDeep {
-                limit: MAX_TREE_DEPTH
-            }
-        );
-
-        // The refused append changed nothing, and the tree still lays out.
-        assert!(tree.flush_element_tree());
-    }
-
-    /// The guard tracks subtree height, so grafting two deep detached chains
-    /// together is caught — not just growing one a leaf at a time.
-    #[test]
-    fn grafting_two_deep_subtrees_is_refused() {
-        let mut tree = tree();
-        let page = tree.create_page("card", 0);
-
-        let mut chain = |length: u32| {
-            let root = tree.create_view(0).unwrap();
-            let mut tip = root;
-            for _ in 1..length {
-                let view = tree.create_view(0).unwrap();
-                tip = tree.append_element(tip, view).unwrap();
-            }
-            (root, tip)
-        };
-        // Two chains that each fit, but whose combined depth does not.
-        let (first_root, first_tip) = chain(MAX_TREE_DEPTH / 2 + 1);
-        let (second_root, _) = chain(MAX_TREE_DEPTH / 2 + 1);
-
-        // Each chain is legal on its own, and one still fits under the page.
-        tree.append_element(page, first_root).unwrap();
-        assert_eq!(
-            tree.append_element(first_tip, second_root).unwrap_err(),
-            PapiError::TooDeep {
-                limit: MAX_TREE_DEPTH
-            }
-        );
-    }
-
-    /// Height bookkeeping must not make a legal wide tree fail: thousands of
-    /// siblings are fine, only depth is bounded.
-    /// A node that has given its subtree away is a leaf again, and the guard
-    /// must see that. The height cache only ever grew before, so a genuine leaf
-    /// kept claiming its old depth and was refused as `TooDeep`.
-    #[test]
-    fn giving_a_subtree_away_lowers_the_recorded_height() {
-        let mut tree = tree();
-        let page = tree.create_page("card", 0);
-
-        // A deep anchor, so a stale height would push the check over the limit.
-        let mut anchor = page;
-        for _ in 0..55 {
-            let view = tree.create_view(0).unwrap();
-            anchor = tree.append_element(anchor, view).unwrap();
-        }
-
-        // A detached chain 205 levels tall, rooted at `holder`.
-        let holder = tree.create_view(0).unwrap();
-        let mut tip = holder;
-        for _ in 0..205 {
-            let view = tree.create_view(0).unwrap();
-            tip = tree.append_element(tip, view).unwrap();
-        }
-
-        // Move everything below `holder` elsewhere; `holder` is a leaf now.
-        let holder_node = tree.node_id(holder).unwrap();
-        let child_node = tree.document().get(holder_node).unwrap().child_ids()[0];
-        let child = tree.handle_of(child_node).unwrap();
-        let parking = tree.create_view(0).unwrap();
-        tree.append_element(parking, child).unwrap();
-        assert!(
-            tree.document()
-                .get(holder_node)
-                .unwrap()
-                .child_ids()
-                .is_empty()
-        );
-
-        // 55 + 1 + 0 fits easily; 55 + 1 + 205 would not.
-        tree.append_element(anchor, holder)
-            .expect("a leaf must not be refused for a subtree it no longer has");
-    }
-
-    #[test]
-    fn a_wide_tree_is_not_affected_by_the_depth_guard() {
+    fn a_wide_tree_flushes() {
         let mut tree = tree();
         let page = tree.create_page("card", 0);
         for _ in 0..2000 {
@@ -943,8 +674,8 @@ mod tests {
     }
 
     #[test]
-    fn the_document_payload_is_the_i32_unique_id() {
-        fn assert_document_type(_: &dom::Document<i32>) {}
+    fn the_document_payload_is_the_element_id() {
+        fn assert_document_type(_: &Document<ElementId>) {}
 
         let mut tree = tree();
         assert_document_type(tree.document());
@@ -956,9 +687,15 @@ mod tests {
 
         assert_eq!(element.unique_id(), view);
         assert_eq!(element.node_id(), node);
-        assert_eq!(element.node(tree.document()).map(dom::Node::id), Some(node));
-        assert_eq!(tree.parent_component_unique_id(view), Some(page));
-        assert_eq!(tree.component_css_id(page), Some(17));
+        assert_eq!(
+            tree.element(view)
+                .map(LynxElement::parent_component_unique_id),
+            Some(page)
+        );
+        assert_eq!(
+            tree.element(page).map(LynxElement::component_css_id),
+            Some(17)
+        );
         assert_eq!(payload_unique_id, view);
     }
 }

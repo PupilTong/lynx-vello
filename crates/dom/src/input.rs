@@ -14,13 +14,9 @@
 //!
 //! ```
 //! # use dom::input::InputEvent;
-//! # use dom::visual::Point2D;
+//! # use dom::Point2D;
 //! # fn f<T: Sync>(document: &mut dom::Document<T>) {
-//! let frame = document.paint_order();
-//! let response = document.handle_input(
-//!     &frame,
-//!     InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 120.0)),
-//! );
+//! let response = document.handle_input(InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 120.0)));
 //! # let _ = response;
 //! # }
 //! ```
@@ -47,13 +43,12 @@
 //!
 //! ```
 //! # use dom::input::InputEvent;
-//! # use dom::visual::Point2D;
+//! # use dom::Point2D;
 //! # fn f<T: Sync>(document: &mut dom::Document<T>, event: InputEvent, position: Point2D<f32>) {
 //! # fn dispatch_to_script(_: Option<dom::NodeId>) -> bool { false }
-//! let frame = document.paint_order();
-//! let hit = frame.hit_test(document, position);
+//! let hit = document.hit_test(position);
 //! let claimed = dispatch_to_script(hit); // capture/bubble, gesture arena, ...
-//! document.handle_input(&frame, event.with_default_prevented(claimed));
+//! document.handle_input(event.with_default_prevented(claimed));
 //! # }
 //! ```
 //!
@@ -62,18 +57,12 @@
 //! drives [`Document::scroll_by`] and [`Document::scroll_chain`] itself. Those
 //! primitives are the whole point of reporting an unconsumed remainder.
 //!
-//! # Frames, and why input is sampled against the last one
+//! # Visual-frame ownership
 //!
-//! Routing needs a [`PaintOrder`], and building one is a whole-tree walk, so
-//! input is fed against the frame that is already in hand — the one the user
-//! is looking at. That is what a compositor does, and it is what makes the
-//! coordinates honest: the pixel the finger landed on belongs to the frame it
-//! landed on, not to the one the event is about to cause.
-//!
-//! Practically: build a frame, feed it every event that arrived, rebuild,
-//! paint. A frame stays *routable* until nodes are removed
-//! ([`PaintOrder::assert_fresh`]); it stops being *paintable* the moment
-//! anything mutates, scrolling included.
+//! Routing uses the exact stacking, transform, and clip model painting uses,
+//! but that frame is a DOM implementation detail. Each call builds the current
+//! private frame before routing; callers never coordinate or retain a
+//! `PaintOrder` beside the document.
 //!
 //! # Recorded limits
 //!
@@ -94,7 +83,6 @@ use smallvec::SmallVec;
 use crate::NodeId;
 use crate::document::Document;
 use crate::scroll::ScrollAxes;
-use crate::visual::{LocalHit, PaintOrder};
 
 /// How far a touch or pen must travel before the document reads it as a scroll
 /// rather than a stationary press, in CSS px.
@@ -184,7 +172,7 @@ pub enum InputKind {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub struct InputEvent {
-    /// Viewport CSS px — the same space [`PaintOrder::hit_test`] and the
+    /// Viewport CSS px — the same space [`Document::hit_test`] and the
     /// document's own `Device` viewport speak. A host that works in physical
     /// pixels divides by its device pixel ratio first.
     pub position: Point2D<f32>,
@@ -282,13 +270,10 @@ pub struct InputResponse {
     /// `None` outside every box. This is `elementFromPoint`: the layer above
     /// starts its own capture/bubble walk here.
     pub target: Option<NodeId>,
-    /// [`InputEvent::position`] in the hit item's own border-box coordinates,
-    /// and that item's index in [`PaintOrder::items`].
-    ///
-    /// For a text-run hit, `target` is the styled parent element while the
-    /// local point belongs to the run's own box — read `item` when the
-    /// difference matters.
-    pub local: Option<LocalHit>,
+    /// [`InputEvent::position`] in the hit item's own border-box coordinates.
+    /// For a text-run hit, `target` is the styled parent element while this
+    /// point belongs to the run's own box.
+    pub local_position: Option<Point2D<f32>>,
     pub default_action: DefaultAction,
 }
 
@@ -332,12 +317,8 @@ impl InputState {
 }
 
 impl<T: Sync> Document<T> {
-    /// Routes one host input event against `frame` and performs whatever UA
-    /// default action it resolves to.
-    ///
-    /// `frame` is the last built [`PaintOrder`] — see the module docs on why
-    /// input is sampled against the frame the user is looking at. Scrolling
-    /// mutates the document, so rebuild the frame before painting again.
+    /// Builds the document's private visual frame, routes one host input event,
+    /// and performs whatever UA default action it resolves to.
     ///
     /// A non-finite position or delta is dropped entirely — no routing, no
     /// state change. This is the untrusted boundary, and NaN here is
@@ -348,23 +329,23 @@ impl<T: Sync> Document<T> {
     ///
     /// # Panics
     ///
-    /// Panics per [`PaintOrder::assert_fresh`] if nodes were removed since
-    /// `frame` was built, and per [`Document::paint_style`] if a style
-    /// traversal was left incomplete. In debug builds, also on a non-finite
-    /// position or wheel delta.
-    pub fn handle_input(&mut self, frame: &PaintOrder, event: InputEvent) -> InputResponse {
+    /// Panics if computed styles are unavailable because a style traversal was
+    /// left incomplete. In debug builds, also on a non-finite position or
+    /// wheel delta.
+    pub fn handle_input(&mut self, event: InputEvent) -> InputResponse {
         if !event.is_finite() {
             debug_assert!(false, "host input events must be finite, got {event:?}");
             return InputResponse {
                 target: None,
-                local: None,
+                local_position: None,
                 default_action: DefaultAction::None,
             };
         }
+        let frame = self.build_paint_order();
         let hit = frame.hit_test_local(self, event.position);
         let mut response = InputResponse {
             target: hit.map(|(node, _)| node),
-            local: hit.map(|(_, local)| local),
+            local_position: hit.map(|(_, local)| local.position),
             default_action: DefaultAction::None,
         };
         response.default_action = match event.kind {
@@ -534,13 +515,11 @@ mod tests {
         )
     }
 
-    /// Feeds a gesture and returns the last response, rebuilding the frame per
-    /// event exactly as a real frame loop would.
+    /// Feeds a gesture and returns the last response.
     fn gesture(document: &mut Document<()>, events: &[InputEvent]) -> InputResponse {
         let mut last = None;
         for event in events {
-            let frame = document.paint_order();
-            last = Some(document.handle_input(&frame, *event));
+            last = Some(document.handle_input(*event));
         }
         last.expect("a gesture has at least one event")
     }
@@ -604,11 +583,8 @@ mod tests {
         );
         assert_eq!(document.scroll_offset(list), Vector2D::zero());
 
-        let frame = document.paint_order();
-        let response = document.handle_input(
-            &frame,
-            InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 30.0)),
-        );
+        let response =
+            document.handle_input(InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 30.0)));
         assert_eq!(
             response.default_action,
             DefaultAction::Scroll {
@@ -755,19 +731,14 @@ mod tests {
         document.append_document_element(root);
         document.layout();
 
-        let frame = document.paint_order();
-        let response = document.handle_input(
-            &frame,
-            InputEvent::wheel(Point2D::new(10.0, 10.0), (0.0, 50.0)),
-        );
+        let response =
+            document.handle_input(InputEvent::wheel(Point2D::new(10.0, 10.0), (0.0, 50.0)));
         assert_eq!(response.target, Some(root));
         assert_eq!(response.default_action, DefaultAction::None);
 
-        let outside = document.handle_input(
-            &frame,
-            InputEvent::wheel(Point2D::new(10_000.0, 10.0), (0.0, 50.0)),
-        );
+        let outside =
+            document.handle_input(InputEvent::wheel(Point2D::new(10_000.0, 10.0), (0.0, 50.0)));
         assert_eq!(outside.target, None);
-        assert_eq!(outside.local, None);
+        assert_eq!(outside.local_position, None);
     }
 }

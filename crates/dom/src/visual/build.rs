@@ -525,6 +525,7 @@ impl<'doc, T> Builder<'doc, T> {
             };
             self.clips.push(ClipNode {
                 parent: inner.current.clip,
+                #[cfg(test)]
                 node,
                 transform: *transform,
                 rect,
