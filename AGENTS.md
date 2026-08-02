@@ -129,10 +129,9 @@ useful signal for currently-compatible versions of those libraries.
   `default-features = false` excludes QuickJS while preserving all external
   injection contracts. Workspace dependencies disable defaults explicitly;
   only an upper layer that wants the built-in engine enables `quickjs`.
-  The core depends on `lynx-element` rather than directly on `dom`, and
-  directly re-exports `lynx_element::ElementTree` and the
-  `lynx_element::dom`/`pulsar` convenience paths. It has no document alias
-  module, element-host trait, renderer wrapper, or injection seam.
+  The core depends on `lynx-element` rather than directly on `dom`, but does
+  not re-export `ElementTree`, `dom`, Pulsar, or rendering conveniences. It has
+  no document alias, element-host trait, renderer wrapper, or injection seam.
   `MainThreadRuntime`
   installs the Element PAPI before evaluation, evaluates a `.web.bundle`'s
   `lepusCode.root` inside web-core's wrapper, then runs `processData` →
@@ -177,14 +176,15 @@ useful signal for currently-compatible versions of those libraries.
   reference cycle that leaks the realm unless the function is collected first.
   The crate must remain independent of Bobcat, the DOM, resources, and runtime
   policy — it knows nothing about Lynx.
-- `crates/bobcat-cli` — the native `bobcat` process shell over
-  `bobcat-core` with its `quickjs` feature enabled; it has no direct
-  `lynx-element`, DOM, or Pulsar dependency.
+- `crates/bobcat-cli` — the independent native `bobcat` product over
+  `bobcat-core`'s `quickjs` feature. It directly composes the internal
+  `lynx-element`, DOM, and Pulsar crates rather than turning its renderer into
+  a `bobcat-core` embedder API.
   `bobcat -i file:///…` decodes and boots one web bundle; other URL schemes
   remain rejected at the boundary. One reusable `FramePipeline` owns the
   QuickJS-backed element runtime and borrows the scene retained by its
-  document-owned private painter, so the macOS headed backend and
-  cross-platform headless backend share script/layout/paint logic rather than
+  document-owned private painter, so the macOS headed path and cross-platform
+  headless path share script/layout/paint logic rather than
   maintaining parallel render paths.
   Headed mode uses a native winit window with display-backed vsync and tracks
   both logical viewport size and device-pixel ratio. Headless mode uses a
@@ -221,12 +221,12 @@ useful signal for currently-compatible versions of those libraries.
   may reuse its private `NodeId` slots;
   every fallible PAPI entry returns `PapiError` instead of panicking, because
   the main-thread script is untrusted input and the DOM core is
-  crash-on-misuse. `ElementTree` never lends out `&mut Document`: a caller that
-  removed or moved nodes directly would desynchronise the element arena, the
-  page state, and the next PAPI call would panic in the DOM instead of returning
-  `PapiError`. `render_if_needed`/`needs_render`, the guarded `scene` borrow,
-  and `images_mut` delegate to the document without exposing its private
-  Painter, mutation epoch, or mutable DOM.
+  crash-on-misuse. Its default API exposes neither the owned `Document` nor
+  render/freshness/scene/image forwarding methods. The non-default
+  `internal-document-access` feature exists only for trusted workspace
+  composition (`bobcat-cli` and render tests); it must not become an embedder
+  convenience or be used for topology mutations, which would desynchronise the
+  element arena.
   No public `paint_order` exists on either `ElementTree` or `Document`, and
   input builds its temporary hit-test frame internally. It does not impose a runtime
   tree-depth cap; recursive traversal hardening belongs in `dom`/`hughie`.

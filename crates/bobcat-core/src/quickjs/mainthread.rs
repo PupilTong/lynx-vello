@@ -49,11 +49,11 @@ use std::cell::{Ref, RefCell, RefMut};
 use std::fmt;
 use std::rc::Rc;
 
+use lynx_element::{ElementId, ElementTree};
 use quickjs_rust_bridge::{self as quickjs, HostFunctionError, HostValue};
 
 use super::{QuickJsInitializationError, QuickJsScriptEngine};
 use crate::script::ScriptError;
-use crate::{ElementId, ElementTree};
 
 /// The source name `QuickJS` reports for the main-thread bundle.
 const MAIN_THREAD_SOURCE_NAME: &str = "main-thread.js";

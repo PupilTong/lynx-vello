@@ -194,10 +194,13 @@ name = "bobcat-cli"
 version = "0.1.0"
 dependencies = [
  "bobcat-core",
+ "dom",
  "flashbulb",
+ "lynx-element",
  "lynx-template-decoder",
  "png",
  "pollster",
+ "pulsar",
  "thiserror 2.0.18",
  "url",
  "winit",
@@ -208,10 +211,12 @@ name = "bobcat-core"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "dom",
  "flashbulb",
  "http",
  "lynx-element",
  "lynx-template-decoder",
+ "pulsar",
  "quickjs-rust-bridge",
  "thiserror 2.0.18",
  "tokio",

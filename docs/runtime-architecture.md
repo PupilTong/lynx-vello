@@ -9,11 +9,13 @@ The product dependency graph is:
 ```text
 bobcat-cli
   ├── lynx-template-decoder
-  └── bobcat-core  [feature = "quickjs"]
-        ├── lynx-element ───▶ dom ───┬──▶ hughie
-        │                            ├──▶ vendor/stylo
-        │                            └──▶ pulsar ───▶ vello/wgpu
-        └── quickjs-rust-bridge      (only with feature = "quickjs")
+  ├── bobcat-core [feature = "quickjs"] ──▶ quickjs-rust-bridge
+  ├── lynx-element [feature = "internal-document-access"]
+  │     └──▶ dom ───┬──▶ hughie
+  │                 ├──▶ vendor/stylo
+  │                 └──▶ pulsar ───▶ vello/wgpu
+  ├── pulsar
+  └── winit (macOS headed product only)
 ```
 
 `pulsar` is intentionally below and independent of `dom`: it owns the opaque
@@ -34,18 +36,17 @@ JavaScript adapter:
   `pub type ElementId = u32`. There is no element-host trait: the only real
   host is `ElementTree`, so the QuickJS adapter composes it directly.
 - `resource` and `view` provide resource acquisition and generic engine/view
-  composition. The crate root re-exports `ElementTree` and the
-  `lynx_element::dom`/`pulsar` convenience paths directly; there is no Bobcat
-  document wrapper or renderer specialization, and core adds no direct `dom`
-  dependency.
+  composition. The crate root does not re-export `ElementTree`, `dom`, Pulsar,
+  or a renderer specialization. `bobcat-cli` is a separate product, not the
+  implementation of a core embedder façade.
 
 The default `quickjs` feature adds the internal QuickJS implementation,
 `QuickJsLynxView`, and the concrete `quickjs::MainThreadRuntime`. QuickJS-only
 types have this single module path; the crate root does not duplicate their
 exports. Depending on
 `bobcat-core` with `default-features = false` excludes the QuickJS adapter and
-native QuickJS build while retaining the external engine protocols, DOM, and
-element layer. `lynx-element` has no QuickJS feature.
+native QuickJS build while retaining the external engine protocols and element
+dependency. `lynx-element` has no QuickJS feature.
 
 ## Document-owned painting
 
@@ -83,9 +84,10 @@ This ownership removes two invalid states the injected design permitted:
 - callers could retain a paint-order snapshot and combine it with newer live
   styles or layout.
 
-`lynx_element::ElementTree` directly owns `Document<ElementId>` and delegates
-`render_if_needed`, `needs_render`, `scene`, and `images_mut` without lending
-out `&mut Document`. `bobcat-core` adds no wrapper object or alias module.
+`lynx_element::ElementTree` directly owns `Document<ElementId>` but its default
+API exposes neither that document nor render/freshness/scene/image forwarding
+methods. The trusted CLI and render tests opt into
+`internal-document-access`; `bobcat-core` adds no wrapper object or alias.
 
 ## Frame walkthrough
 
@@ -98,8 +100,8 @@ out `&mut Document`. `bobcat-core` adds no wrapper object or alias module.
    Script mutates the validated element layer without seeing `NodeId` or
    mutable DOM access.
 3. `__FlushElementTree` attaches `<page>` on first use and commits style and
-   layout. `FramePipeline` calls `ElementTree::render_if_needed`; the
-   document-owned Painter decides whether its retained scene is current.
+   layout. The CLI-private `FramePipeline` uses its internal document access;
+   the document-owned Painter decides whether its retained scene is current.
 4. For a dirty frame, `render_if_needed` calls `Document::render`. DOM
    flushes/layouts, creates its temporary visual order, and runs its private
    Painter over live styles, rounded layouts, retained text, and the

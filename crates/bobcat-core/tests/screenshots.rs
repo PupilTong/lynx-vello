@@ -12,11 +12,11 @@
 //! Refresh the goldens with:
 //! `FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p bobcat-core --test screenshots`.
 
-use bobcat_core::pulsar::gpu::Headless;
 use bobcat_core::quickjs::MainThreadRuntime;
-use bobcat_core::{ElementTree, PageConfig, Viewport};
 use flashbulb::vello::peniko::{Blob, Color, ImageAlphaType, ImageData, ImageFormat};
 use flashbulb::{Image, Screenshots, capture_scene, headless};
+use lynx_element::{ElementTree, PageConfig, Viewport};
+use pulsar::gpu::Headless;
 
 /// lynx-stack's Playwright Chromium project emulates a Pixel 5, whose CSS
 /// viewport is 393 × 727; `toHaveScreenshot` captures in CSS pixels, so their
@@ -73,8 +73,8 @@ fn screenshots() -> Screenshots {
 }
 
 fn capture_elements(gpu: &mut Headless, elements: &mut ElementTree) -> Image {
-    elements.render_if_needed();
-    let scene = elements.scene();
+    elements.document_mut().render();
+    let scene = elements.document().scene();
     capture_scene(gpu, elements.document(), &scene, Color::WHITE).expect("capture")
 }
 
@@ -223,9 +223,8 @@ fn checker_image() -> ImageData {
 }
 
 /// The document owns the image registry beside its private painter. This
-/// golden fails visibly if `ElementTree::images_mut` and `Document::render`
-/// stop referring to the same store: the checker disappears and only the
-/// white fallback background remains.
+/// golden fails visibly if the document's image store and painter diverge:
+/// the checker disappears and only the white fallback background remains.
 #[test]
 fn document_image_store_reaches_the_private_painter() {
     let mut gpu = headless("document_image_store_reaches_the_private_painter");
@@ -235,7 +234,10 @@ fn document_image_store_reaches_the_private_painter() {
     {
         let mut elements = runtime.elements_mut();
         elements.add_author_stylesheet(IMAGE_STYLE);
-        elements.images_mut().insert_url(IMAGE_URL, checker_image());
+        elements
+            .document_mut()
+            .images_mut()
+            .insert_url(IMAGE_URL, checker_image());
     }
     runtime
         .run_main_thread_script(IMAGE_SCRIPT)

@@ -1,10 +1,10 @@
 use std::cell::Ref;
 
-#[cfg(target_os = "macos")]
-use bobcat_core::dom::input::{InputEvent, InputResponse};
-use bobcat_core::pulsar::vello::Scene;
 use bobcat_core::quickjs::MainThreadRuntime;
-use bobcat_core::{ElementTree, PageConfig, Viewport};
+#[cfg(target_os = "macos")]
+use dom::input::{InputEvent, InputResponse};
+use lynx_element::{ElementTree, PageConfig, Viewport};
+use pulsar::vello::Scene;
 use url::Url;
 
 use crate::CliError;
@@ -108,7 +108,7 @@ pub(crate) struct PreparedFrame<'a> {
 impl PreparedFrame<'_> {
     /// The scene retained by the document's private painter.
     pub(crate) fn scene(&self) -> Ref<'_, Scene> {
-        self.elements.scene()
+        self.elements.document().scene()
     }
 }
 
@@ -161,7 +161,7 @@ impl FramePipeline {
     pub(crate) fn prepare_frame(&mut self) -> PreparedFrame<'_> {
         let changed = {
             let mut elements = self.runtime.elements_mut();
-            elements.render_if_needed()
+            elements.document_mut().render_if_needed()
         };
         PreparedFrame {
             elements: self.runtime.elements(),
@@ -186,7 +186,7 @@ impl FramePipeline {
     /// reflect yet.
     #[cfg(target_os = "macos")]
     pub(crate) fn needs_frame(&self) -> bool {
-        self.runtime.elements().needs_render()
+        self.runtime.elements().document().needs_render()
     }
 }
 

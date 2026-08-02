@@ -8,6 +8,11 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+# Trusted workspace consumers that compose painting directly. This is not part
+# of the default element/PAPI surface.
+internal-document-access = []
+
 [dependencies]
 dom = { workspace = true }
 

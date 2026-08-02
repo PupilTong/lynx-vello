@@ -10,7 +10,7 @@
 //! paragraph of prose that rots.
 
 use bobcat_core::quickjs::MainThreadRuntime;
-use bobcat_core::{ElementTree, PageConfig, Viewport};
+use lynx_element::{ElementTree, PageConfig, Viewport};
 
 const VIEWPORT: Viewport = Viewport::new(393.0, 727.0);
 

@@ -1,10 +1,8 @@
 //! The element tree and its Element PAPI operations.
 
-use std::cell::Ref;
 use std::fmt;
 
-use dom::pulsar::vello::Scene;
-use dom::{self, Document, ImageStore, NodeId, StylesheetOrigin};
+use dom::{self, Document, NodeId, StylesheetOrigin};
 
 use crate::arena::{ElementArena, LynxElement};
 use crate::device::Viewport;
@@ -82,35 +80,19 @@ impl ElementTree {
         }
     }
 
-    /// The underlying document, for style/layout/paint queries.
+    /// The underlying document for trusted workspace composition and tests.
+    #[cfg(any(test, feature = "internal-document-access"))]
+    #[doc(hidden)]
     #[must_use]
     pub const fn document(&self) -> &Document<ElementId> {
         &self.document
     }
 
-    /// Renders only when the document-owned retained scene is stale. Returns
-    /// whether a new scene was built.
-    pub fn render_if_needed(&mut self) -> bool {
-        self.document.render_if_needed()
-    }
-
-    /// Whether the document has visual changes not represented by its
-    /// retained scene yet.
-    #[must_use]
-    pub fn needs_render(&self) -> bool {
-        self.document.needs_render()
-    }
-
-    /// The Vello scene retained by the last [`Self::render_if_needed`] call.
-    #[must_use]
-    pub fn scene(&self) -> Ref<'_, Scene> {
-        self.document.scene()
-    }
-
-    /// Registers or updates decoded images without exposing DOM topology or
-    /// its private painter.
-    pub fn images_mut(&mut self) -> &mut ImageStore {
-        self.document.images_mut()
+    /// Mutable document access for trusted workspace composition.
+    #[cfg(feature = "internal-document-access")]
+    #[doc(hidden)]
+    pub fn document_mut(&mut self) -> &mut Document<ElementId> {
+        &mut self.document
     }
 
     /// Feeds one host input event in, building the private visual frame needed

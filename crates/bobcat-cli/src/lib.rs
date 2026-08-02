@@ -2,8 +2,8 @@
 //!
 //! The CLI owns process concerns — argument parsing, local `file:///` input,
 //! frame scheduling, the debugger-like command prompt, PNG output, and the
-//! macOS window. Bundle execution and the rendered document are exposed by
-//! [`bobcat_core`]; headed and headless backends consume the same scene.
+//! macOS window. It directly composes the internal runtime/document/GPU crates;
+//! headed and headless paths consume the same retained scene.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -67,7 +67,7 @@ pub enum CliError {
     #[error("invalid viewport: {0}")]
     Viewport(String),
     #[error("{0}")]
-    Gpu(#[source] bobcat_core::pulsar::gpu::GpuError),
+    Gpu(#[source] pulsar::gpu::GpuError),
     #[error("could not start the command console: {0}")]
     Console(#[source] std::io::Error),
     #[error("could not write screenshot `{path}`: {source}")]

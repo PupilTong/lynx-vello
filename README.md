@@ -6,8 +6,8 @@ Rust and pnpm monorepo exploring a native [Lynx](https://lynxjs.org) rendering s
 
 | Crate | Purpose |
 | --- | --- |
-| [`crates/bobcat-core`](crates/bobcat-core) | Native runtime core combining the engine-neutral resource/script/view protocols with `lynx-element`, which owns the downstream `dom` edge. External JavaScript engines implement the GAT-based `ScriptEngine`; the default `quickjs` feature adds the internal QuickJS adapter and main-thread host globals. |
-| [`crates/bobcat-cli`](crates/bobcat-cli) | The `bobcat` executable: loads local `file:///` web bundles through `bobcat-core/quickjs`, submits the document-retained Vello scene to either a macOS window or a paced headless GPU target, and exposes debugger-style frame/screenshot commands. |
+| [`crates/bobcat-core`](crates/bobcat-core) | Native runtime core combining engine-neutral resource/script/view protocols with the optional QuickJS adapter and main-thread host globals. It does not expose a renderer façade or re-export DOM/GPU internals. |
+| [`crates/bobcat-cli`](crates/bobcat-cli) | The independent `bobcat` product: loads local `file:///` web bundles, privately composes the runtime with a macOS window or paced headless GPU target, and exposes debugger-style frame/screenshot commands. |
 | [`crates/lynx-template-decoder`](crates/lynx-template-decoder) | Native Rust decoder for the Lynx **web** binary template (`.web.bundle`), a port of `@lynx-js/web-core`'s `decodeTemplate` incl. the rkyv `StyleInfo` model. |
 | [`crates/dom`](crates/dom) | Generic W3C-DOM-subset `Document<T>`/`Node<T>` tree, standards-oriented Stylo cascade/layout core, and document-owned private paint pipeline. |
 | [`crates/lynx-element`](crates/lynx-element) | The Lynx runtime element layer: `ElementId = u32`, validated Element PAPI operations and handle space, `ElementTree`, `<page>` root policy, view/device construction, and Lynx UA defaults. |

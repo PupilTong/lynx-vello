@@ -2,12 +2,12 @@ use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use bobcat_core::dom::Point2D;
-use bobcat_core::dom::input::{DeltaMode, InputEvent, PointerKind, PointerPhase};
-use bobcat_core::pulsar::gpu::{read_texture, render_params, renderer_options};
-use bobcat_core::pulsar::vello;
-use bobcat_core::pulsar::vello::peniko::Color;
-use bobcat_core::pulsar::vello::util::{RenderContext, RenderSurface};
+use dom::Point2D;
+use dom::input::{DeltaMode, InputEvent, PointerKind, PointerPhase};
+use pulsar::gpu::{read_texture, render_params, renderer_options};
+use pulsar::vello;
+use pulsar::vello::peniko::Color;
+use pulsar::vello::util::{RenderContext, RenderSurface};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent};
@@ -516,6 +516,20 @@ impl WindowGraphics {
             renderer,
             ..
         } = self;
+        // Keep the retained target current even when the compositor cannot
+        // provide a surface texture. Screenshots read this target directly.
+        {
+            let handle = &context.devices[surface.dev_id];
+            renderer
+                .render_to_texture(
+                    &handle.device,
+                    &handle.queue,
+                    scene,
+                    &surface.target_view,
+                    &render_params(Color::WHITE, size.width, size.height),
+                )
+                .map_err(|error| CliError::Render(error.to_string()))?;
+        }
         let (surface_texture, reconfigure_after) = match surface.surface.get_current_texture() {
             vello::wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
             vello::wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
@@ -537,15 +551,6 @@ impl WindowGraphics {
             }
         };
         let handle = &context.devices[surface.dev_id];
-        renderer
-            .render_to_texture(
-                &handle.device,
-                &handle.queue,
-                scene,
-                &surface.target_view,
-                &render_params(Color::WHITE, size.width, size.height),
-            )
-            .map_err(|error| CliError::Render(error.to_string()))?;
         let output_view = surface_texture
             .texture
             .create_view(&vello::wgpu::TextureViewDescriptor::default());

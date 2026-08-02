@@ -4,9 +4,9 @@ The repository contains one standards-oriented DOM/CSS core, a rendered
 runtime core, and one Lynx policy layer above them:
 
 ```text
-bobcat-cli ───▶ bobcat-core ───▶ lynx-element ───▶ dom ─┬─▶ vendor/stylo
-                                                       ├─▶ hughie
-                                                       └─▶ pulsar ─▶ vello/wgpu
+bobcat-cli ─┬─▶ bobcat-core ───▶ lynx-element ───▶ dom ─┬─▶ vendor/stylo
+            ├─▶ lynx-element                            ├─▶ hughie
+            └─▶ pulsar ─────────────────────────────────┴─▶ vello/wgpu
 ```
 
 `dom` owns the generic document, styling, invalidation, layout seam, visual
@@ -15,11 +15,11 @@ order, and private paint pipeline.
 landed: it provides Lynx Element-PAPI policy, view/device configuration, and
 UA defaults without moving those concerns into the standards core.
 `lynx-element` owns `ElementTree` over `dom::Document<ElementId>`.
-`bobcat-core` depends only on `lynx-element` for this stack, composes it with
-runtime protocols, and optionally supplies QuickJS; `lynx-element` re-exports
-`dom` so core can preserve its public convenience paths without a second
-dependency edge. Core does not select or inject a renderer. `pulsar` is a
-DOM-independent resource/GPU layer used directly by `dom`.
+`bobcat-core` composes `lynx-element` with runtime protocols and optionally
+supplies QuickJS, but re-exports no DOM/GPU or renderer conveniences.
+`bobcat-cli` is an independent product and directly composes the trusted
+workspace layers. `pulsar` is a DOM-independent resource/GPU layer used by
+`dom` and the CLI.
 See
 [`runtime-architecture.md`](runtime-architecture.md) for the full dependency,
 feature, and frame-flow walkthrough. Decoded `.web.bundle` style ingestion is
@@ -77,10 +77,10 @@ still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
 | Layer | Owns | Must not own |
 | --- | --- | --- |
 | `dom` | `Document<T>` and its aligned arenas; DOM topology and attributes; private style context; invalidation-carrying mutation; inline parsing; matching, cascade, media evaluation, computed values; `StyleDamage`/`FlushSummary`; the concrete `hughie` host; private visual order, `Painter`, `ImageStore`, and retained Vello scene | Pluggable renderer policy, Lynx tags or Element-PAPI opcodes, JS handle lifetime, payload semantics, `<page>` policy, bundle decoding/`StyleInfo` lowering, Lynx UA defaults, view metrics, GPU surface/window policy |
-| `bobcat-core` | Engine-neutral resource/script/view contracts; GAT-based external `ScriptEngine`; direct composition/re-export of `lynx-element::ElementTree`; optional default QuickJS adapter and MTS host globals | An element-host trait, a document wrapper, or ownership of Lynx tag/root/UA policy or CSS/layout/paint algorithms |
+| `bobcat-core` | Engine-neutral resource/script/view contracts; GAT-based external `ScriptEngine`; optional default QuickJS adapter and MTS host globals | Re-exporting DOM/GPU/render conveniences, an element-host trait, a document wrapper, or ownership of Lynx tag/root/UA policy or CSS/layout/paint algorithms |
 | `pulsar` | Opaque `ImageStore`; Vello version/re-export boundary; headed/headless GPU submission and readback helpers | `Document`, `NodeId`, computed styles, layout, paint order, Lynx runtime vocabulary, or DOM mutation policy |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, and the maintained Lynx CSS extension grammar behind the `lynx` feature | Runtime protocol, document ownership, bundle ingestion, or host policy |
-| `lynx-element` (the runtime adapter) | `ElementId = u32`; concrete validated Element-PAPI operations; an independent context-owned `Vec<Option<LynxElement>>` with monotone, never-reused ids, a permanent null slot at index 0, and permanent retirement tombstones; that same unique id carried by each DOM node; `ElementTree`; `<page>` root policy; view metrics and device construction; UA stylesheet generation; narrow render/scene/image delegation | Bobcat, QuickJS, a replaceable element-host trait, a direct Pulsar dependency, a second DOM, matcher, cascade, layout/paint algorithms, public `PaintOrder`, or direct writes to traversal/computed-style internals |
+| `lynx-element` (the runtime adapter) | `ElementId = u32`; concrete validated Element-PAPI operations; an independent context-owned `Vec<Option<LynxElement>>` with monotone, never-reused ids, a permanent null slot at index 0, and permanent retirement tombstones; that same unique id carried by each DOM node; `ElementTree`; `<page>` root policy; view metrics and device construction; UA stylesheet generation | Render/freshness/scene/image forwarding in its default API, Bobcat, QuickJS, a replaceable element-host trait, a direct Pulsar dependency, a second DOM, matcher, cascade, layout/paint algorithms, or public `PaintOrder` |
 | Still unowned | Lynx event payload; decoded `StyleInfo` lowering and CSS-scope policy; `rpx` view units; the remaining 56 Element PAPI members | — |
 
 ## Style lifecycle
@@ -107,11 +107,11 @@ still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
 7. `Document::layout` flushes styles before invoking the concrete
    `hughie` host. Computed values are lent directly from each node's
    Stylo `ElementData`, without an adapter-side style copy.
-8. `ElementTree::render_if_needed` asks the document-owned Painter whether its
-   retained scene is current. A dirty document runs `Document::render`, which
-   builds the private paint order and retains the resulting Vello scene;
-   `ElementTree::scene` delegates the guarded borrow without cloning the scene,
-   exposing Painter, or publishing the internal epoch.
+8. The CLI-private frame pipeline uses `internal-document-access` to ask the
+   document-owned Painter whether its retained scene is current. A dirty
+   document runs `Document::render`, builds the private paint order, and
+   retains the resulting Vello scene. The default element/embedder API exposes
+   none of this lifecycle.
 
 ## Runtime integration status
 
@@ -164,8 +164,8 @@ policy and `bobcat-core` composition rather than absorbed into `dom` or
   above it or in the maintained Stylo fork when it is grammar/value behavior.
 - No JS-facing code may expose raw `NodeId` values without a context and
   lifetime layer.
-- `PaintOrder` and Painter stay inside `dom`; `lynx-element` exposes only
-  guarded scene/image delegation and builds input frames internally.
+- `PaintOrder` and Painter stay inside `dom`; `lynx-element` has no default
+  scene/image/render delegation and builds input frames internally.
 - `pulsar` has no dependency on or vocabulary from `dom`.
 
 ## Validation
