@@ -193,8 +193,8 @@ dependencies = [
 name = "bobcat-cli"
 version = "0.1.0"
 dependencies = [
+ "bobcat-core",
  "flashbulb",
- "lynx-element",
  "lynx-template-decoder",
  "png",
  "pollster",
@@ -209,7 +209,10 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "dom",
+ "flashbulb",
  "http",
+ "lynx-element",
+ "lynx-template-decoder",
  "pulsar",
  "quickjs-rust-bridge",
  "thiserror 2.0.18",
@@ -1594,10 +1597,8 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 name = "lynx-element"
 version = "0.1.0"
 dependencies = [
- "bobcat-core",
+ "dom",
  "euclid",
- "flashbulb",
- "lynx-template-decoder",
  "stylo",
  "stylo_traits",
 ]

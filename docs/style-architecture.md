@@ -4,17 +4,20 @@ The repository contains one standards-oriented DOM/CSS core, a rendered
 runtime core, and one Lynx policy layer above them:
 
 ```text
-bobcat-cli ───▶ lynx-element ───▶ bobcat-core ─┬─▶ dom ───▶ vendor/stylo
-                 Element PAPI +                └─▶ pulsar ─▶ dom
-                 Lynx policy       runtime + injected renderer
+bobcat-cli ───▶ bobcat-core ─┬─▶ lynx-element ─▶ dom ─▶ vendor/stylo
+                             └─▶ pulsar ─────────▶ dom
+                 runtime +       Element PAPI +
+                 composition     Lynx policy
 ```
 
 `dom` owns the generic document, styling, invalidation, and layout seam.
 `lynx-element` is the runtime adapter that was drawn dashed here until it
 landed: it provides Lynx Element-PAPI policy, view/device configuration, and
 UA defaults without moving those concerns into the standards core.
-`bobcat-core` specializes `dom::Document<T, R>` with the statically injected
-`pulsar::Pulsar` renderer and optionally supplies QuickJS. See
+`lynx-element` owns a renderer-generic `ElementTree<R>` over
+`dom::Document<ElementId, R>`. `bobcat-core` specializes it with the
+statically injected `pulsar::Pulsar` renderer and optionally supplies QuickJS.
+See
 [`runtime-architecture.md`](runtime-architecture.md) for the full dependency,
 feature, and frame-flow walkthrough. Decoded `.web.bundle` style ingestion is
 still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
@@ -71,17 +74,18 @@ still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
 | Layer | Owns | Must not own |
 | --- | --- | --- |
 | `dom` | `Document<T, R>` and its aligned arenas; statically owned renderer slot and `DocumentRenderer<T>` GAT; DOM topology and attributes; private style context; invalidation-carrying mutation; inline parsing; matching, cascade, media evaluation, computed values; `StyleDamage`/`FlushSummary`; the concrete `hughie` host and layout-cache invalidation | A concrete renderer, Lynx tags or Element-PAPI opcodes, JS handle lifetime, payload semantics, `<page>` policy, bundle decoding/`StyleInfo` lowering, Lynx UA defaults, view metrics, touch-device policy |
-| `bobcat-core` | Engine-neutral resource/script/view contracts; `ElementPapi`; GAT-based external `ScriptEngine`; `Document<T> = dom::Document<T, Pulsar>` construction; optional default QuickJS adapter and MTS host globals | Lynx tag/root/UA policy, a dependency on `lynx-element`, CSS/layout algorithms |
+| `bobcat-core` | Engine-neutral resource/script/view contracts; GAT-based external `ScriptEngine`; direct composition of `lynx-element::ElementTree<Pulsar>`; re-exported `ElementPapi`; `Document<T> = dom::Document<T, Pulsar>` construction; optional default QuickJS adapter and MTS host globals | Ownership of Lynx tag/root/UA policy, CSS/layout algorithms |
 | `pulsar` | `DocumentRenderer<T>` implementation; retained `Painter`, `ImageStore`, and Vello scene; GPU submission helpers | Lynx runtime vocabulary or DOM mutation policy |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, and the maintained Lynx CSS extension grammar behind the `lynx` feature | Runtime protocol, document ownership, bundle ingestion, or host policy |
-| `lynx-element` (the runtime adapter) | Element-PAPI validation; an independent context-owned `Vec<Option<LynxElement>>` with monotone, never-reused `u32` unique ids, a permanent null slot at index 0, and permanent retirement tombstones; that same unique id carried by each DOM node; `<page>` root policy; view metrics and device construction; UA stylesheet generation; narrow `render`/`scene`/image-store access | A second DOM, matcher, cascade, layout/paint engine, public `PaintOrder`, or direct writes to traversal/computed-style internals |
+| `lynx-element` (the runtime adapter) | `ElementId = u32` and `ElementPapi`; validation; an independent context-owned `Vec<Option<LynxElement>>` with monotone, never-reused ids, a permanent null slot at index 0, and permanent retirement tombstones; that same unique id carried by each DOM node; renderer-generic `ElementTree<R>`; `<page>` root policy; view metrics and device construction; UA stylesheet generation | Bobcat, QuickJS, Pulsar, a second DOM, matcher, cascade, layout/paint engine, public `PaintOrder`, or direct writes to traversal/computed-style internals |
 | Still unowned | Lynx event payload; decoded `StyleInfo` lowering and CSS-scope policy; `rpx` view units; the remaining 56 Element PAPI members | — |
 
 ## Style lifecycle
 
-1. `lynx-element` constructs a Stylo `Device` and passes it to
-   `bobcat_core::document::new`, which creates a
-   `dom::Document<ElementId, Pulsar>`. Plain DOM users can still use
+1. `bobcat-core` passes Pulsar to
+   `lynx_element::ElementTree::with_renderer`. `lynx-element` constructs a
+   Stylo `Device` and creates `dom::Document<ElementId, Pulsar>`. Plain DOM
+   users can still use
    `Document::new` (renderer `()`) or explicitly inject another renderer with
    `Document::with_renderer`. Device construction is deliberately outside the
    generic DOM because viewport, pointer, color, font-metric, and `rpx` policy
@@ -104,17 +108,18 @@ still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
 7. `Document::layout` flushes styles before invoking the concrete
    `hughie` host. Computed values are lent directly from each node's
    Stylo `ElementData`, without an adapter-side style copy.
-8. `ElementTree::render` calls `Document::render`: the document builds the
-   private paint order, invokes its concrete `DocumentRenderer`, and retains
-   the result. The GAT output lets `ElementTree::scene` return a guarded Vello
-   scene borrow without cloning it or using a renderer trait object.
+8. Generic `ElementTree::render` calls `Document::render`: the document builds
+   the private paint order, invokes its concrete `DocumentRenderer`, and
+   retains the result. The GAT output lets the `bobcat-core` facade return a
+   guarded Vello scene borrow without cloning it or using a renderer trait
+   object.
 
 ## Runtime integration status
 
-`lynx-element` now exposes the Lynx Element PAPI over a rendered Bobcat
-document, and `bobcat-core`'s optional `quickjs::mainthread` module runs a
-`.web.bundle`'s main-thread script against it. What that covers, and what it
-does not:
+`lynx-element` exposes the Lynx Element PAPI over a renderer-generic DOM
+document. `bobcat-core` injects Pulsar and its optional `quickjs::mainthread`
+module runs a `.web.bundle`'s main-thread script against that composition.
+What that covers, and what it does not:
 
 **Landed**
 
@@ -144,8 +149,9 @@ does not:
   adapter; it can use the engine-neutral `LynxView<R, E>` composition, but MTS
   Element PAPI boot is currently the `quickjs` feature's implementation.
 
-These remain responsibilities of the layer above, not to absorb into `dom`,
-`bobcat-core`, or `hughie`.
+These remain runtime-layer responsibilities, divided between `lynx-element`
+policy and `bobcat-core` composition rather than absorbed into `dom` or
+`hughie`.
 
 ## Invariants
 
@@ -160,11 +166,13 @@ These remain responsibilities of the layer above, not to absorb into `dom`,
 - No JS-facing code may expose raw `NodeId` values without a context and
   lifetime layer.
 - `PaintOrder` stays inside `dom`/the injected renderer; `lynx-element` exposes
-  only the retained render output and builds input frames internally.
+  only the renderer GAT output and builds input frames internally, while
+  Pulsar-specific scene/image APIs stay in core.
 
 ## Validation
 
 - Core tests: `cargo test -p dom`
+- Element-layer check: `cargo check -p lynx-element`
 - Runtime feature checks: `cargo check -p bobcat-core --no-default-features`
   and `cargo check -p bobcat-core --features quickjs`
 - Core benchmark: `cargo bench -p dom --bench css`

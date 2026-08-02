@@ -3,8 +3,8 @@ use std::path::Path;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use lynx_element::pulsar::gpu::Headless;
-use lynx_element::pulsar::vello::peniko::Color;
+use bobcat_core::pulsar::gpu::Headless;
+use bobcat_core::pulsar::vello::peniko::Color;
 
 use crate::CliError;
 use crate::args::Options;

@@ -1,6 +1,6 @@
 [package]
 name = "lynx-element"
-description = "Lynx runtime element policy and Element PAPI host over bobcat-core"
+description = "Lynx runtime element policy and Element PAPI host over dom"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,12 +8,8 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
-[features]
-default = ["quickjs"]
-quickjs = ["bobcat-core/quickjs"]
-
 [dependencies]
-bobcat-core = { workspace = true, default-features = false }
+dom = { workspace = true }
 
 # Device construction is this layer's job ("view metrics and device
 # construction" in the runtime-adapter row of docs/style-architecture.md), so
@@ -21,10 +17,6 @@ bobcat-core = { workspace = true, default-features = false }
 euclid = { workspace = true }
 stylo = { workspace = true }
 stylo_traits = { workspace = true }
-
-[dev-dependencies]
-flashbulb = { workspace = true, features = ["render"] }
-lynx-template-decoder = { workspace = true }
 
 [lints]
 workspace = true

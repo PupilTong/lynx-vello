@@ -9,7 +9,7 @@
 //! wall is, so the gap is a failing assertion to update rather than a
 //! paragraph of prose that rots.
 
-use lynx_element::{ElementTree, MainThreadRuntime, PageConfig, Viewport};
+use bobcat_core::{ElementTree, MainThreadRuntime, PageConfig, Viewport};
 
 const VIEWPORT: Viewport = Viewport::new(393.0, 727.0);
 

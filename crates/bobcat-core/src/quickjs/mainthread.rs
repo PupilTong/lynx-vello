@@ -52,7 +52,7 @@ use std::rc::Rc;
 use quickjs_rust_bridge::{self as quickjs, HostFunctionError, HostValue};
 
 use super::{QuickJsInitializationError, QuickJsScriptEngine};
-use crate::element::{ElementId, ElementPapi};
+use crate::element::ElementPapi;
 use crate::script::ScriptError;
 
 /// The source name `QuickJS` reports for the main-thread bundle.
@@ -266,7 +266,7 @@ fn install_element_papi<H: ElementPapi>(
 }
 
 /// A unique id crossing the primitives-only native host boundary.
-fn unique_id_value(id: ElementId) -> HostValue {
+fn unique_id_value(id: u32) -> HostValue {
     HostValue::Number(f64::from(id))
 }
 
@@ -351,7 +351,7 @@ fn element_argument(
     function: &str,
     arguments: &[HostValue],
     index: usize,
-) -> Result<ElementId, HostFunctionError> {
+) -> Result<u32, HostFunctionError> {
     let id = u32_argument(function, arguments, index)?;
     (id != 0).then_some(id).ok_or_else(|| {
         HostFunctionError::new(format!(

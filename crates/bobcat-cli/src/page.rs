@@ -1,9 +1,9 @@
 use std::cell::Ref;
 
 #[cfg(target_os = "macos")]
-use lynx_element::dom::input::{InputEvent, InputResponse};
-use lynx_element::pulsar::vello::Scene;
-use lynx_element::{ElementTree, MainThreadRuntime, PageConfig, Viewport};
+use bobcat_core::dom::input::{InputEvent, InputResponse};
+use bobcat_core::pulsar::vello::Scene;
+use bobcat_core::{ElementTree, MainThreadRuntime, PageConfig, Viewport};
 use url::Url;
 
 use crate::CliError;

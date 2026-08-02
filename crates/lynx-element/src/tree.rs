@@ -1,17 +1,14 @@
 //! The element tree and its Element PAPI operations.
 
-use std::cell::Ref;
 use std::fmt;
 
-use bobcat_core::document::Document;
-use bobcat_core::dom::{self, NodeId, StylesheetOrigin};
-use bobcat_core::pulsar::ImageStore;
-use bobcat_core::pulsar::vello::Scene;
+use dom::{self, Document, NodeId, StylesheetOrigin};
 
-use crate::arena::{ElementArena, ElementId, LynxElement};
+use crate::arena::{ElementArena, LynxElement};
 use crate::device::Viewport;
+use crate::papi::ElementPapi;
 use crate::ua::{PageConfig, ua_stylesheet};
-use crate::{PAGE_TAG, VIEW_TAG};
+use crate::{ElementId, PAGE_TAG, VIEW_TAG};
 
 /// Why an Element PAPI call was rejected.
 ///
@@ -54,10 +51,10 @@ impl std::error::Error for PapiError {}
 /// One Lynx element tree: a `dom` document, an independent runtime-element
 /// arena, and the page policy the Element PAPI speaks in.
 #[derive(Debug)]
-pub struct ElementTree {
+pub struct ElementTree<R = ()> {
     /// The DOM payload is only the key back into `elements`; all Lynx runtime
     /// state stays in the context-owned arena.
-    document: Document<ElementId>,
+    document: Document<ElementId, R>,
     elements: ElementArena,
     page: Option<ElementId>,
     /// `__CreatePage`'s `componentID` — a string name web-core keeps in a side
@@ -69,10 +66,20 @@ pub struct ElementTree {
 
 impl ElementTree {
     /// Creates an empty tree for `viewport` with `config`'s UA cascade
-    /// installed. No page exists until `__CreatePage`.
+    /// installed and no renderer. No page exists until `__CreatePage`.
     #[must_use]
     pub fn new(viewport: Viewport, config: PageConfig) -> Self {
-        let mut document = bobcat_core::document::new(viewport.device());
+        Self::with_renderer(viewport, config, ())
+    }
+}
+
+impl<R> ElementTree<R> {
+    /// Creates an empty tree and statically injects `renderer` into its DOM
+    /// document. Runtime composition crates select the concrete renderer;
+    /// this Lynx policy layer stays renderer-agnostic.
+    #[must_use]
+    pub fn with_renderer(viewport: Viewport, config: PageConfig, renderer: R) -> Self {
+        let mut document = Document::with_renderer(viewport.device(), renderer);
         document.add_stylesheet(&ua_stylesheet(config), StylesheetOrigin::UserAgent);
         Self {
             document,
@@ -86,40 +93,20 @@ impl ElementTree {
 
     /// The underlying document, for style/layout/paint queries.
     #[must_use]
-    pub const fn document(&self) -> &Document<ElementId> {
+    pub const fn document(&self) -> &Document<ElementId, R> {
         &self.document
     }
 
-    /// Lays out and paints the current tree through the renderer that
-    /// `bobcat-core` injected into its document.
-    ///
-    /// There is deliberately no `document_mut`: handing out `&mut Document`
-    /// would let a caller remove or move nodes behind this layer's back,
-    /// desynchronising the element arena and page state — and the DOM core is
-    /// crash-on-misuse, so the next PAPI call would panic rather than return
-    /// [`PapiError`].
-    pub fn render(&mut self) {
-        self.document.render();
-    }
-
-    /// The retained scene produced by the last [`Self::render`] call.
+    /// Borrows the statically injected renderer.
     #[must_use]
-    pub fn scene(&self) -> Ref<'_, Scene> {
-        self.document.render_output()
+    pub fn renderer(&self) -> std::cell::Ref<'_, R> {
+        self.document.renderer()
     }
 
-    /// Decoded images registered with the injected renderer.
-    #[must_use]
-    pub fn images(&self) -> Ref<'_, ImageStore> {
-        Ref::map(
-            self.document.renderer(),
-            bobcat_core::pulsar::Pulsar::images,
-        )
-    }
-
-    /// Registers or updates decoded images without exposing DOM mutation.
-    pub fn images_mut(&mut self) -> &mut ImageStore {
-        self.document.renderer_mut().images_mut()
+    /// Mutably accesses renderer-owned resources without exposing mutable DOM
+    /// topology. The DOM advances its visual epoch conservatively.
+    pub fn renderer_mut(&mut self) -> &mut R {
+        self.document.renderer_mut()
     }
 
     /// Feeds one host input event in, building the private visual frame needed
@@ -130,7 +117,7 @@ impl ElementTree {
     /// [`Self::set_viewport`] does: input cannot desynchronise the handle
     /// table. All it can reach is scroll offsets and per-pointer gesture
     /// state — no element is created, moved, or retired — so lending it out
-    /// costs none of the invariants [`Self::render`] protects.
+    /// costs none of the tree invariants this layer protects.
     ///
     /// Dispatching the returned target through Lynx's own event model
     /// (`bindEvent`/`catchEvent` phases, the gesture arena, `hit-slop`) is the
@@ -354,7 +341,27 @@ impl ElementTree {
     }
 }
 
-impl bobcat_core::element::ElementPapi for ElementTree {
+impl<R> ElementTree<R>
+where
+    R: dom::visual::DocumentRenderer<ElementId>,
+{
+    /// Lays out and paints through the statically injected renderer.
+    ///
+    /// There is deliberately no `document_mut`: handing out `&mut Document`
+    /// would let a caller remove or move nodes behind this layer's back,
+    /// desynchronising the element arena and page state.
+    pub fn render(&mut self) {
+        self.document.render();
+    }
+
+    /// Returns the concrete renderer's retained GAT output.
+    #[must_use]
+    pub fn render_output(&self) -> R::Output<'_> {
+        self.document.render_output()
+    }
+}
+
+impl<R: 'static> ElementPapi for ElementTree<R> {
     type Error = PapiError;
 
     fn create_page(&mut self, component_id: &str, component_css_id: i32) -> ElementId {
@@ -397,16 +404,6 @@ mod tests {
         let mut tree = tree();
         tree.set_device_pixel_ratio(2.0);
         assert!((tree.document().device().device_pixel_ratio().get() - 2.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn renderer_resource_access_schedules_a_new_scene() {
-        let mut tree = tree();
-        let epoch = tree.document().visual_epoch();
-
-        let _ = tree.images_mut().remove_url("missing");
-
-        assert_eq!(tree.document().visual_epoch(), epoch + 1);
     }
 
     #[test]

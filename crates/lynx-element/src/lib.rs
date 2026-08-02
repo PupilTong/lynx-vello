@@ -8,8 +8,9 @@
 //! Lynx UA cascade defaults.
 //!
 //! ```text
-//! bobcat-cli  ──▶  lynx-element  ──▶  bobcat-core  ──▶  dom / pulsar
-//!                  handles + UA       runtime + render     generic cores
+//! bobcat-cli  ──▶  bobcat-core  ──▶  lynx-element  ──▶  dom
+//!                      │               handles + UA
+//!                      └────────────▶  pulsar
 //! ```
 //!
 //! # Element PAPI scope
@@ -58,15 +59,18 @@
 
 mod arena;
 mod device;
+mod papi;
 mod tree;
 mod ua;
 
-#[cfg(feature = "quickjs")]
-pub use bobcat_core::quickjs::{MainThreadError, MainThreadRuntime, QuickJsInitializationError};
-pub use bobcat_core::{dom, pulsar};
+/// A Lynx element's stable unique id and Element-PAPI handle.
+pub type ElementId = u32;
 
-pub use crate::arena::{ElementId, LynxElement};
+pub use dom;
+
+pub use crate::arena::LynxElement;
 pub use crate::device::{LynxFontMetricsProvider, Viewport};
+pub use crate::papi::ElementPapi;
 pub use crate::tree::{ElementTree, PapiError};
 pub use crate::ua::{PageConfig, ua_stylesheet};
 

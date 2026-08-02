@@ -1,8 +1,8 @@
 # bobcat-cli
 
 `bobcat-cli` builds the `bobcat` executable. It accepts a local Lynx web bundle
-as a `file:///` URL and renders it through `lynx-element` → `bobcat-core` →
-`dom`/`hughie` + the document-injected `pulsar` renderer.
+as a `file:///` URL and renders it through `bobcat-core/quickjs` →
+`lynx-element` → `dom`/`hughie`, with Pulsar injected by core.
 
 ```sh
 # Native macOS window

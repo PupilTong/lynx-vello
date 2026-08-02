@@ -10,12 +10,12 @@
 //! to a committed golden with `pixelmatch` tolerances.
 //!
 //! Refresh the goldens with:
-//! `FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p lynx-element --test screenshots`.
+//! `FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p bobcat-core --test screenshots`.
 
+use bobcat_core::pulsar::gpu::Headless;
+use bobcat_core::{ElementTree, MainThreadRuntime, PageConfig, Viewport};
 use flashbulb::vello::peniko::{Blob, Color, ImageAlphaType, ImageData, ImageFormat};
 use flashbulb::{Image, Screenshots, capture_scene, headless};
-use lynx_element::pulsar::gpu::Headless;
-use lynx_element::{ElementTree, MainThreadRuntime, PageConfig, Viewport};
 
 /// lynx-stack's Playwright Chromium project emulates a Pixel 5, whose CSS
 /// viewport is 393 × 727; `toHaveScreenshot` captures in CSS pixels, so their

@@ -7,18 +7,17 @@ statically. The current product dependency graph is:
 ```text
 bobcat-cli
   ├── lynx-template-decoder
-  └── lynx-element (default feature: quickjs)
-        ├── bobcat-core
-        │     ├── dom ──────▶ hughie + vendor/stylo
-        │     ├── pulsar ───▶ dom + vello
-        │     └── quickjs-rust-bridge  [feature = "quickjs"]
-        └── stylo             (Lynx Device/UA-policy construction)
+  └── bobcat-core  [feature = "quickjs"]
+        ├── lynx-element ───▶ dom ──────▶ hughie + vendor/stylo
+        │     └── stylo       (Lynx Device/UA-policy construction)
+        ├── pulsar ─────────▶ dom + vello
+        └── quickjs-rust-bridge
 ```
 
-`bobcat-cli` does not depend directly on `bobcat-core`, `dom`, or `pulsar`.
-It gets the public runtime, input, scene, and GPU types through
-`lynx-element`. `lynx-element` depends downward on `bobcat-core`; the core
-never depends back on Lynx tag or element policy.
+`bobcat-cli` depends on the assembled `bobcat-core` API and enables its
+`quickjs` feature. `bobcat-core` directly composes the independent
+`lynx-element` policy crate with Pulsar. `lynx-element` depends directly on
+`dom` and has no dependency or feature edge back to core, Pulsar, or QuickJS.
 
 ## Core feature boundary
 
@@ -30,19 +29,19 @@ engine-neutral:
   `ImportFuture<'a>` is a GAT, so an implementation returns its own concrete
   future type instead of forcing a boxed future or a script-engine trait
   object.
-- `element::ElementPapi` is the statically dispatched host contract used by a
-  JavaScript adapter. `lynx-element::ElementTree` implements it; core therefore
-  needs no upward dependency.
+- `lynx-element::ElementPapi` is the statically dispatched Lynx host contract.
+  Core re-exports it from `element` and uses it in JavaScript adapters; the
+  protocol and `ElementId = u32` remain owned by `lynx-element`.
 - `resource`, `view`, and `document` provide resource acquisition, generic
   engine composition, and the rendered document specialization.
 
 The default `quickjs` feature adds the internal QuickJS implementation,
 `QuickJsLynxView`, and `MainThreadRuntime<H: ElementPapi>`. Depending on
 `bobcat-core` with `default-features = false` excludes both the QuickJS Rust
-adapter and the native QuickJS build while preserving the external traits.
-Workspace dependencies disable defaults explicitly; `lynx-element` opts into
-QuickJS through its own default `quickjs` feature, whereas crates such as
-`image` do not.
+adapter and the native QuickJS build while preserving the external traits and
+rendered element composition. There is no forwarding QuickJS feature on
+`lynx-element`; upper layers such as `bobcat-cli` enable `bobcat-core/quickjs`
+directly, whereas crates such as `image` do not.
 
 ## Renderer injection
 
@@ -71,20 +70,27 @@ the trait with `Output<'a> = Ref<'a, vello::Scene>`. Its implementation owns
 one reusable `Painter` and one `ImageStore`, so those allocations no longer
 need a parallel owner in every embedder.
 
-`bobcat_core::document::Document<T>` specializes the generic type to
-`dom::Document<T, pulsar::Pulsar>`, and `bobcat_core::document::new` injects
-Pulsar at construction. The renderer is retained for exactly the document's
-lifetime. `Document::renderer_mut` is the exclusive resource-update seam;
-accessing it conservatively advances `visual_epoch`, because the generic DOM
-cannot inspect whether a renderer resource changed. `ElementTree` narrows it
-to `images_mut` rather than exposing mutable DOM access.
+`lynx_element::ElementTree<R = ()>` owns
+`dom::Document<ElementId, R>` and provides `with_renderer` for static
+composition. The default `ElementTree` is DOM-only. Bobcat's
+`document::ElementTree` facade injects `pulsar::Pulsar` and retains the
+Pulsar-specific `scene`/image-store surface in core; `lynx-element` never
+imports the renderer. `bobcat_core::document::Document<T>` remains the lower
+level `dom::Document<T, Pulsar>` specialization.
+
+The renderer is retained for exactly the document's lifetime.
+`Document::renderer_mut` is the resource-update seam; accessing it
+conservatively advances `visual_epoch`, because generic DOM cannot inspect
+whether a renderer resource changed. Neither element-tree layer exposes a
+mutable document.
 
 ## Frame walkthrough
 
-1. `ElementTree::new` builds the Lynx `Device`, calls
-   `bobcat_core::document::new`, and installs the Lynx UA stylesheet. The
-   resulting document type is `Document<ElementId, Pulsar>`; each DOM payload
-   is the same permanent `u32` id stored by the element arena.
+1. `bobcat_core::document::ElementTree::new` passes a new Pulsar into
+   `lynx_element::ElementTree::with_renderer`. The element layer builds the
+   Lynx `Device`, constructs `dom::Document<ElementId, Pulsar>`, and installs
+   the Lynx UA stylesheet. `lynx-element` owns `type ElementId = u32`; each DOM
+   payload is the same permanent id stored by the element arena.
 2. With QuickJS enabled, `MainThreadRuntime<ElementTree>` installs the five
    supported Element PAPI host functions through the generic `ElementPapi`
    contract. A script mutates the element tree without seeing `NodeId` or a
@@ -92,12 +98,13 @@ to `images_mut` rather than exposing mutable DOM access.
 3. `__FlushElementTree` attaches the page on first use and commits style and
    layout. `FramePipeline` watches `Document::visual_epoch` to avoid rebuilding
    a static scene.
-4. When a frame is dirty, `ElementTree::render` calls `Document::render`.
+4. When a frame is dirty, the generic `ElementTree::render` calls
+   `Document::render`.
    The document creates its private `PaintOrder` and invokes its concrete
    `Pulsar`; `PaintOrder` never crosses the `lynx-element` API.
-5. Pulsar rebuilds its retained Vello scene. `ElementTree::scene` returns a
-   guarded borrow of that scene through the renderer GAT; headed and headless
-   CLI backends submit the same scene without a clone.
+5. Pulsar rebuilds its retained Vello scene. Bobcat's `ElementTree::scene`
+   returns a guarded borrow of that scene through the renderer GAT; headed and
+   headless CLI backends submit the same scene without a clone.
 6. Input follows the same ownership rule. `ElementTree::handle_input` builds
    the temporary paint order needed for hit testing internally. A scrolling
    default action advances `visual_epoch`, so the next prepared frame refreshes
@@ -117,10 +124,12 @@ or scene traversal.
 ```sh
 cargo check -p bobcat-core --no-default-features
 cargo check -p bobcat-core --features quickjs
-cargo check -p lynx-element --no-default-features
 cargo check -p lynx-element
+cargo check -p bobcat-cli
 cargo check --workspace --all-targets
 ```
 
-The first and third commands are the external-engine build boundary. The
-second and fourth validate the internal QuickJS composition used by the CLI.
+The first command is the external-engine build boundary; the second validates
+the built-in engine. The third verifies the DOM-only element crate cannot
+acquire a runtime or renderer dependency, and the fourth validates the
+product composition used by the CLI.

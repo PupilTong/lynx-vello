@@ -117,27 +117,30 @@ useful signal for currently-compatible versions of those libraries.
 - `crates/lynx-template-decoder` — decodes `.web.bundle` (magic `SDRA WROF`):
   manifest, rkyv `StyleInfo`, Lepus/JS code, custom sections. Scope: binary
   template parsing only, no JS runtime, no CSS engine (yet).
-- `crates/bobcat-core` — unified native runtime core. Its always-compiled surface owns
-  the protocol-only, host-injected `ResourceFetcher`, the
-  ShadowRealm-inspired `ScriptEngine` protocol, the static `ElementPapi` host
-  contract, and `LynxView<R, E>`. `ScriptEngine::ImportFuture<'a>` is a GAT so
-  external engines return their own future type and remain statically
-  dispatched. The default `quickjs` feature adds the internal QuickJS adapter,
+- `crates/bobcat-core` — unified native runtime core. Its always-compiled
+  surface owns the protocol-only, host-injected `ResourceFetcher`, the
+  ShadowRealm-inspired `ScriptEngine` protocol, and `LynxView<R, E>`, and it
+  directly composes `lynx-element` with Pulsar.
+  `ScriptEngine::ImportFuture<'a>` is a GAT so external engines return their
+  own future type and remain statically dispatched. The default `quickjs`
+  feature adds the internal QuickJS adapter,
   opaque QuickJS-backed view factory, and `MainThreadRuntime<H: ElementPapi>`;
   `default-features = false` excludes QuickJS while preserving all external
   injection contracts. Workspace dependencies disable defaults explicitly;
   only an upper layer that wants the built-in engine enables `quickjs`.
-  The core depends on `dom` and `pulsar` and owns the rendered specialization
-  `bobcat_core::document::Document<T> = dom::Document<T, pulsar::Pulsar>`;
-  its constructor injects Pulsar at document creation. `MainThreadRuntime`
+  The core depends on `lynx-element`, `dom`, and `pulsar`, re-exports the
+  Lynx-owned `ElementPapi` contract, and owns the rendered specializations
+  `bobcat_core::document::Document<T> = dom::Document<T, pulsar::Pulsar>`
+  and `bobcat_core::document::ElementTree`, whose constructor injects Pulsar
+  into `lynx_element::ElementTree<Pulsar>`. `MainThreadRuntime`
   installs the Element PAPI before evaluation, evaluates a `.web.bundle`'s
   `lepusCode.root` inside web-core's wrapper, then runs `processData` →
   `renderPage` → `__FlushElementTree`. Five of web-core's 61 PAPI members are
   installed (`__CreatePage`, `__CreateView`, `__AppendElement`,
   `__DropElement`, `__FlushElementTree`); unsupported globals remain precise
   `ReferenceError`s. Handles cross the primitives-only boundary as `u32` ids.
-  The generic host contract is the dependency inversion: core must never
-  depend on `lynx-element` or know Lynx tag/root/UA policy.
+  Core composes but does not own Lynx tag/root/UA policy; that vocabulary and
+  `type ElementId = u32` remain defined by `lynx-element`.
   The resource module must not decode images/fonts/templates, upload render
   resources, or own cache/retry policy. Runtime configuration, raw realm/value
   handles, interrupts, and source-evaluation entry points remain private. The
@@ -174,7 +177,8 @@ useful signal for currently-compatible versions of those libraries.
   The crate must remain independent of Bobcat, the DOM, resources, and runtime
   policy — it knows nothing about Lynx.
 - `crates/bobcat-cli` — the native `bobcat` process shell over
-  `lynx-element`; it has no direct runtime-core, DOM, or Pulsar dependency.
+  `bobcat-core` with its `quickjs` feature enabled; it has no direct
+  `lynx-element`, DOM, or Pulsar dependency.
   `bobcat -i file:///…` decodes and boots one web bundle; other URL schemes
   remain rejected at the boundary. One reusable `FramePipeline` owns the
   QuickJS-backed element runtime and borrows the scene retained by its
@@ -201,9 +205,12 @@ useful signal for currently-compatible versions of those libraries.
   stylo `Device` construction, and the Lynx UA cascade defaults
   (`display: linear`, `box-sizing: border-box`, `overflow: hidden`, under the
   `defaultDisplayLinear` / `defaultOverflowVisible` page-config switches).
-  `ElementTree` owns a `bobcat_core::document::Document<ElementId>` (the
-  `dom::Document<ElementId, pulsar::Pulsar>` specialization) plus an independent
-  `Vec<Option<LynxElement>>` arena. The DOM payload is only the permanent
+  This crate defines `type ElementId = u32` and the static `ElementPapi`
+  contract; `bobcat-core` only re-exports them and `dom` knows neither name.
+  `ElementTree<R = ()>` owns a `dom::Document<ElementId, R>` plus an independent
+  `Vec<Option<LynxElement>>` arena. `with_renderer` is the static composition
+  seam; this crate depends directly on `dom` and never on Bobcat, Pulsar, or a
+  JavaScript engine. The DOM payload is only the permanent
   `u32` unique id, which is also the direct arena index; each `LynxElement`
   owns that id, its stable DOM `NodeId` association, component creation
   fields. The arena permanently reserves slot 0 as web-core's
@@ -216,12 +223,12 @@ useful signal for currently-compatible versions of those libraries.
   crash-on-misuse. `ElementTree` never lends out `&mut Document`: a caller that
   removed or moved nodes directly would desynchronise the element arena, the
   page state, and the next PAPI call would panic in the DOM instead of returning
-  `PapiError`. The mutable surface is the narrow set the layers above actually
-  need (`render`, `images_mut`, `add_author_stylesheet`, `set_viewport`,
-  `register_fonts`). `scene` returns the retained renderer output as a guarded
-  borrow; no public `paint_order` exists on `ElementTree`, and input builds its
-  temporary hit-test frame internally. It does not impose a runtime tree-depth
-  cap; recursive traversal hardening belongs in `dom`/`hughie`.
+  `PapiError`. Renderer-independent mutation and query methods stay here;
+  generic `render` invokes the injected renderer and `render_output` returns
+  its GAT output, while Pulsar-specific `scene` and image-store access live on
+  Bobcat's facade. No public `paint_order` exists on `ElementTree`, and input
+  builds its temporary hit-test frame internally. It does not impose a runtime
+  tree-depth cap; recursive traversal hardening belongs in `dom`/`hughie`.
   `flush_element_tree` is the single commit boundary: it
   attaches the page on the first call and then runs style + layout. Recorded
   limits (see the crate docs, which are authoritative): handles are ids rather

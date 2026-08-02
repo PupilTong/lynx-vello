@@ -1,8 +1,8 @@
 //! Context-owned Lynx element storage.
 
-use bobcat_core::document::Document;
-use bobcat_core::dom::{Node, NodeId};
-pub use bobcat_core::element::ElementId;
+use dom::{Document, Node, NodeId};
+
+use crate::ElementId;
 
 /// A Lynx element handle: the unique id the Element PAPI hands to and takes
 /// from the main-thread script.
@@ -46,9 +46,9 @@ impl LynxElement {
 
     /// Resolves the DOM node this runtime element owns the association with.
     #[must_use]
-    pub fn node<'document>(
+    pub fn node<'document, R>(
         &self,
-        document: &'document Document<ElementId>,
+        document: &'document Document<ElementId, R>,
     ) -> Option<&'document Node<ElementId>> {
         document.get(self.node)
     }

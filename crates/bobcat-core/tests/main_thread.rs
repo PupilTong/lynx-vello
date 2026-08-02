@@ -3,7 +3,7 @@
 //! Behavior tests for main-thread (MTS) script execution and the Element PAPI
 //! globals it runs against.
 
-use lynx_element::{ElementTree, MainThreadRuntime, PageConfig, Viewport};
+use bobcat_core::{ElementTree, MainThreadRuntime, PageConfig, Viewport};
 
 const VIEWPORT: Viewport = Viewport::new(393.0, 727.0);
 
@@ -26,7 +26,7 @@ fn page_child_tags(elements: &ElementTree) -> Vec<String> {
             elements
                 .document()
                 .get(child)
-                .and_then(lynx_element::dom::Node::tag_name)
+                .and_then(bobcat_core::dom::Node::tag_name)
                 .unwrap_or_default()
                 .to_owned()
         })
