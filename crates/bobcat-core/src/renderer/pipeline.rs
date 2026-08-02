@@ -166,7 +166,14 @@ impl RenderRuntime {
     }
 
     pub(super) fn prepare_frame(&mut self) -> PreparedFrame<'_> {
-        let changed = self.runtime.elements_mut().render_if_needed();
+        let changed = {
+            let mut elements = self.runtime.elements_mut();
+            let changed = elements.needs_render();
+            if changed {
+                elements.render();
+            }
+            changed
+        };
         PreparedFrame {
             elements: self.runtime.elements(),
             size: self.frame_size,
@@ -187,7 +194,7 @@ pub(super) struct PreparedFrame<'a> {
 
 impl PreparedFrame<'_> {
     pub(super) fn scene(&self) -> Ref<'_, Scene> {
-        self.elements.scene()
+        self.elements.document().scene()
     }
 }
 

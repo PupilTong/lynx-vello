@@ -98,10 +98,9 @@ This ownership removes two invalid states the injected design permitted:
   styles or layout.
 
 `lynx_element::ElementTree` directly owns `Document<ElementId>` and delegates
-`render_if_needed`, `needs_render`, `scene`, and `images_mut` without lending
-out `&mut Document`. It is an internal runtime-layer API and is no longer
-re-exported at the Bobcat crate root. The renderer façade is the wrapper that
-keeps all four operations and the scene type out of product code.
+`render`, `needs_render`, and `images_mut` without lending out `&mut Document`.
+It has no scene accessor. The renderer façade keeps those lower-layer details
+out of product code.
 
 ## Frame walkthrough
 

@@ -229,11 +229,11 @@ useful signal for currently-compatible versions of those libraries.
   crash-on-misuse. `ElementTree` never lends out `&mut Document`: a caller that
   removed or moved nodes directly would desynchronise the element arena, the
   page state, and the next PAPI call would panic in the DOM instead of returning
-  `PapiError`. The lower composition seam delegates
-  `render_if_needed`/`needs_render`, the guarded `scene` borrow, and
-  `images_mut` to the document without exposing its private Painter, mutation
-  epoch, or mutable DOM. `ElementTree` is not re-exported from the Bobcat crate
-  root; none of those operations belongs to the product embedder façade.
+  `PapiError`. The lower composition seam delegates `render`, `needs_render`,
+  and `images_mut` without exposing mutable DOM; retained-scene access stays on
+  the read-only document query surface. `ElementTree` is not re-exported from
+  the Bobcat crate root; none of those operations belongs to the product
+  embedder façade.
   No public `paint_order` exists on either `ElementTree` or `Document`, and
   input builds its temporary hit-test frame internally. It does not impose a runtime
   tree-depth cap; recursive traversal hardening belongs in `dom`/`hughie`.

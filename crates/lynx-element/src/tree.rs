@@ -1,9 +1,7 @@
 //! The element tree and its Element PAPI operations.
 
-use std::cell::Ref;
 use std::fmt;
 
-use dom::pulsar::vello::Scene;
 use dom::{self, Document, ImageStore, NodeId, StylesheetOrigin};
 
 use crate::arena::{ElementArena, LynxElement};
@@ -88,10 +86,9 @@ impl ElementTree {
         &self.document
     }
 
-    /// Renders only when the document-owned retained scene is stale. Returns
-    /// whether a new scene was built.
-    pub fn render_if_needed(&mut self) -> bool {
-        self.document.render_if_needed()
+    /// Renders the current tree.
+    pub fn render(&mut self) {
+        self.document.render();
     }
 
     /// Whether the document has visual changes not represented by its
@@ -99,12 +96,6 @@ impl ElementTree {
     #[must_use]
     pub fn needs_render(&self) -> bool {
         self.document.needs_render()
-    }
-
-    /// The Vello scene retained by the last [`Self::render_if_needed`] call.
-    #[must_use]
-    pub fn scene(&self) -> Ref<'_, Scene> {
-        self.document.scene()
     }
 
     /// Registers or updates decoded images without exposing DOM topology or
