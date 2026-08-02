@@ -48,6 +48,25 @@ exports. Depending on
 native QuickJS build while retaining the external engine protocols and element
 dependency. `lynx-element` has no QuickJS feature.
 
+### `lynx-element` production surface
+
+The element crate's public API is kept by confirmed workspace production
+callers rather than anticipated future integrations:
+
+| Surface | Production caller |
+| --- | --- |
+| `ElementTree::new`, `Viewport`, `PageConfig` | `bobcat-cli` constructs the runtime view; `bobcat-core` owns the resulting tree |
+| `create_page`, `create_view`, `append_element`, `drop_element`, `flush_element_tree`, `ElementId`, `PapiError` | `bobcat-core::quickjs` implements the five JavaScript PAPI globals |
+| `set_viewport`, `set_device_pixel_ratio`, `handle_input` | `bobcat-cli`'s live frame/window pipeline |
+| `document` / `document_mut` under `internal-document-access` | `bobcat-cli`'s private renderer composition |
+
+There is no production caller for page/config/flush/element getters, font or
+author-stylesheet forwarding, or component/CSS-scope metadata storage, so none
+is part of the surface. Unit-test-only document inspection is compiled only
+under `cfg(test)`; cross-crate runtime/render tests exercise the same explicit
+`internal-document-access` boundary as the CLI and assert resulting DOM,
+style, layout, or pixels.
+
 ## Document-owned painting
 
 The generic document type is simply `dom::Document<T>`. `T` is the opaque
@@ -88,13 +107,18 @@ This ownership removes two invalid states the injected design permitted:
 API exposes neither that document nor render/freshness/scene/image forwarding
 methods. The trusted CLI and render tests opt into
 `internal-document-access`; `bobcat-core` adds no wrapper object or alias.
+Page/config/flush/element inspection and stylesheet/font forwarding are also
+absent from the default API: production callers do not use them, and tests
+observe the resulting DOM, computed styles, layout, or pixels through the
+explicit trusted boundary instead.
 
 ## Frame walkthrough
 
 1. `ElementTree::new` constructs the Lynx `Device`, creates
    `Document<ElementId>`, and installs the Lynx UA stylesheet. The DOM payload
-   is the same permanent `u32` id stored in the element arena; private DOM
-   `NodeId` slots may still be reused.
+   is the permanent `u32` id whose direct arena slot stores its associated
+   `NodeId`; retired slots remain tombstones even though private DOM `NodeId`
+   slots may be reused.
 2. With QuickJS enabled, `quickjs::MainThreadRuntime` owns one `ElementTree`
    and installs its five supported Element PAPI host functions directly.
    Script mutates the validated element layer without seeing `NodeId` or

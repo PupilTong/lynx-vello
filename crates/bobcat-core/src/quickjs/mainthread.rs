@@ -149,8 +149,10 @@ impl MainThreadRuntime {
         self.elements.borrow()
     }
 
-    /// The element tree, mutably, for the ingestion this crate does not own
-    /// yet (decoded `StyleInfo`, fonts).
+    /// The element tree, mutably, for live host operations such as viewport
+    /// updates and input routing. Trusted workspace products may additionally
+    /// enable `lynx-element`'s internal document feature for their private
+    /// frame pipeline.
     #[must_use]
     pub fn elements_mut(&mut self) -> RefMut<'_, ElementTree> {
         self.elements.borrow_mut()
@@ -210,26 +212,23 @@ fn install_element_papi(
     elements: &Rc<RefCell<ElementTree>>,
 ) -> Result<(), quickjs::Error> {
     // `__CreatePage(componentID, componentCSSID)` — idempotent; returns the
-    // page's unique id.
+    // page's unique id. Metadata types remain part of the JS contract, but no
+    // implemented element-layer operation consumes the values yet.
     let tree = Rc::clone(elements);
     realm.define_global_function("__CreatePage", 2, move |arguments| {
-        let component_id = string_argument("__CreatePage", arguments, 0)?;
-        let component_css_id = i32_argument("__CreatePage", arguments, 1)?;
-        let id = tree
-            .borrow_mut()
-            .create_page(component_id, component_css_id);
+        string_argument("__CreatePage", arguments, 0)?;
+        i32_argument("__CreatePage", arguments, 1)?;
+        let id = tree.borrow_mut().create_page();
         Ok(unique_id_value(id))
     })?;
 
     // `__CreateView(parentComponentUniqueID)` — returns the new view's unique
-    // id. The argument is `0` when there is no parent component.
+    // id. CSS-scope inheritance is not implemented, so the validated metadata
+    // value is deliberately not retained.
     let tree = Rc::clone(elements);
     realm.define_global_function("__CreateView", 1, move |arguments| {
-        let parent_component = u32_argument("__CreateView", arguments, 0)?;
-        let id = tree
-            .borrow_mut()
-            .create_view(parent_component)
-            .map_err(papi_error)?;
+        u32_argument("__CreateView", arguments, 0)?;
+        let id = tree.borrow_mut().create_view();
         Ok(unique_id_value(id))
     })?;
 
@@ -329,8 +328,8 @@ fn i32_argument(
     }
 }
 
-/// Borrows a string argument. The slice outlives the call, so there is no
-/// reason to copy here — `create_page` makes the one copy it needs.
+/// Validates and borrows a string argument without allocating. Component
+/// identity is not retained until an implemented operation consumes it.
 fn string_argument<'a>(
     function: &str,
     arguments: &'a [HostValue],

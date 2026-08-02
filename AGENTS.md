@@ -210,11 +210,11 @@ useful signal for currently-compatible versions of those libraries.
   Element-PAPI operations on `ElementTree`; `bobcat-core` composes that type
   directly and `dom` knows neither vocabulary.
   `ElementTree` owns a `dom::Document<ElementId>` plus an independent
-  `Vec<Option<LynxElement>>` arena. This crate depends directly on `dom` and
+  `Vec<Option<NodeId>>` arena. This crate depends directly on `dom` and
   never directly on Bobcat, Pulsar, or a JavaScript engine. The DOM payload is only the permanent
-  `u32` unique id, which is also the direct arena index; each `LynxElement`
-  owns that id, its stable DOM `NodeId` association, component creation
-  fields. The arena permanently reserves slot 0 as web-core's
+  `u32` unique id, which is also the direct arena index; the arena entry is
+  its stable DOM `NodeId` association. There is no public runtime-element
+  record or duplicate stored id. The arena permanently reserves slot 0 as web-core's
   "no element" sentinel, so live unique ids start at 1. `__DropElement` removes
   the selected DOM subtree and takes the corresponding arena entries, leaving
   permanent `None` tombstones; unique ids are never recycled, although `dom`
@@ -222,7 +222,14 @@ useful signal for currently-compatible versions of those libraries.
   every fallible PAPI entry returns `PapiError` instead of panicking, because
   the main-thread script is untrusted input and the DOM core is
   crash-on-misuse. Its default API exposes neither the owned `Document` nor
-  render/freshness/scene/image forwarding methods. The non-default
+  page/config/flush/element inspection, stylesheet/font forwarding, or
+  render/freshness/scene/image forwarding methods. `__CreatePage`'s
+  `componentID`/`componentCSSID` and `__CreateView`'s
+  `parentComponentUniqueID` are type-checked by the QuickJS host but are not
+  accepted or stored by `ElementTree` until an implemented operation consumes
+  component identity or CSS scope. `PageConfig` likewise contains only the
+  two UA-default switches it applies; `enableCSSSelector` remains future
+  `StyleInfo`-ingestion policy rather than placeholder state. The non-default
   `internal-document-access` feature exists only for trusted workspace
   composition (`bobcat-cli` and render tests); it must not become an embedder
   convenience or be used for topology mutations, which would desynchronise the
@@ -233,7 +240,7 @@ useful signal for currently-compatible versions of those libraries.
   `flush_element_tree` is the single commit boundary: it
   attaches the page on the first call and then runs style + layout. Recorded
   limits (see the crate docs, which are authoritative): handles are ids rather
-  than element objects; `parentComponentUniqueID` is recorded but not honored
+  than element objects; component identity/CSS-scope metadata is not retained
   (there is no `__SetCSSId`); no `rpx`/`ppx` view-unit policy; the UA sheet
   covers only the three documented Lynx computed defaults. It must not absorb
   DOM/CSS core behavior, and nothing below it may depend on it.

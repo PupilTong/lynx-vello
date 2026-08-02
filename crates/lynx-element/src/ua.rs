@@ -8,8 +8,8 @@
 /// The page-config switches that change the UA cascade.
 ///
 /// These are read from the decoded `.web.bundle` `Configurations` section —
-/// web-core bakes the same three booleans into its element-API closures in
-/// `onPageConfigReady`, before any main-thread script runs.
+/// web-core bakes the same two UA-default booleans into its element-API
+/// closures in `onPageConfigReady`, before any main-thread script runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PageConfig {
     /// `defaultDisplayLinear` — every element defaults to `display: linear`
@@ -18,22 +18,15 @@ pub struct PageConfig {
     /// `defaultOverflowVisible` — elements default to `overflow: visible`
     /// instead of Lynx's `overflow: hidden`.
     pub default_overflow_visible: bool,
-    /// `enableCSSSelector` — whether author CSS is matched as real selectors.
-    ///
-    /// Recorded as configuration, but nothing reads it yet: this crate has no
-    /// `__SetCSSId`, so there is no per-component CSS-scope path to switch.
-    pub enable_css_selector: bool,
 }
 
 impl Default for PageConfig {
     /// The defaults a `.web.bundle` built by today's toolchain carries:
-    /// `defaultDisplayLinear` and `defaultOverflowVisible` both `"true"`, CSS
-    /// selectors enabled.
+    /// `defaultDisplayLinear` and `defaultOverflowVisible` both `"true"`.
     fn default() -> Self {
         Self {
             default_display_linear: true,
             default_overflow_visible: true,
-            enable_css_selector: true,
         }
     }
 }
@@ -85,7 +78,6 @@ mod tests {
         let sheet = ua_stylesheet(PageConfig {
             default_display_linear: false,
             default_overflow_visible: false,
-            enable_css_selector: true,
         });
         assert!(!sheet.contains("display: linear;"));
         assert!(sheet.contains("overflow: hidden;"));

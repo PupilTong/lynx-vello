@@ -13,6 +13,7 @@
 //! `FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p bobcat-core --test screenshots`.
 
 use bobcat_core::quickjs::MainThreadRuntime;
+use dom::StylesheetOrigin;
 use flashbulb::vello::peniko::{Blob, Color, ImageAlphaType, ImageData, ImageFormat};
 use flashbulb::{Image, Screenshots, capture_scene, headless};
 use lynx_element::{ElementTree, PageConfig, Viewport};
@@ -84,7 +85,10 @@ fn a_main_thread_script_renders_its_element_tree() {
 
     let mut runtime = MainThreadRuntime::new(ElementTree::new(VIEWPORT, PageConfig::default()))
         .expect("QuickJS realm");
-    runtime.elements_mut().add_author_stylesheet(STYLE);
+    runtime
+        .elements_mut()
+        .document_mut()
+        .add_stylesheet(STYLE, StylesheetOrigin::Author);
     runtime
         .run_main_thread_script(MAIN_THREAD_SCRIPT)
         .expect("main-thread script");
@@ -135,7 +139,10 @@ fn render_overflow(config: PageConfig, test: &str, golden: &str) {
     let mut gpu = headless(test);
     let mut runtime =
         MainThreadRuntime::new(ElementTree::new(VIEWPORT, config)).expect("QuickJS realm");
-    runtime.elements_mut().add_author_stylesheet(OVERFLOW_STYLE);
+    runtime
+        .elements_mut()
+        .document_mut()
+        .add_stylesheet(OVERFLOW_STYLE, StylesheetOrigin::Author);
     runtime
         .run_main_thread_script(OVERFLOW_SCRIPT)
         .expect("main-thread script");
@@ -233,7 +240,9 @@ fn document_image_store_reaches_the_private_painter() {
         .expect("QuickJS realm");
     {
         let mut elements = runtime.elements_mut();
-        elements.add_author_stylesheet(IMAGE_STYLE);
+        elements
+            .document_mut()
+            .add_stylesheet(IMAGE_STYLE, StylesheetOrigin::Author);
         elements
             .document_mut()
             .images_mut()

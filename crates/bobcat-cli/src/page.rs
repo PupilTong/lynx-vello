@@ -40,7 +40,6 @@ impl Program {
         let config = PageConfig {
             default_display_linear: template.config_flag("defaultDisplayLinear"),
             default_overflow_visible: template.config_flag("defaultOverflowVisible"),
-            enable_css_selector: template.config_flag("enableCSSSelector"),
         };
         let author_rule_count = template.style_info.as_ref().map_or(0, |style_info| {
             style_info

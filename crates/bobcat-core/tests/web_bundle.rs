@@ -31,7 +31,6 @@ fn page_config(template: &lynx_template_decoder::WebTemplate) -> PageConfig {
     PageConfig {
         default_display_linear: template.config_flag("defaultDisplayLinear"),
         default_overflow_visible: template.config_flag("defaultOverflowVisible"),
-        enable_css_selector: template.config_flag("enableCSSSelector"),
     }
 }
 
@@ -46,11 +45,27 @@ fn the_bundle_page_config_reaches_the_ua_cascade() {
         // Every fixture built by today's toolchain carries these.
         assert!(config.default_display_linear, "{name}");
         assert!(config.default_overflow_visible, "{name}");
-        assert!(config.enable_css_selector, "{name}");
 
-        let runtime =
+        let mut runtime =
             MainThreadRuntime::new(ElementTree::new(VIEWPORT, config)).expect("QuickJS realm");
-        assert_eq!(runtime.elements().config(), config, "{name}");
+        runtime
+            .run_main_thread_script(
+                "globalThis.renderPage = function () { \
+                 __AppendElement(__CreatePage('card', 0), __CreateView(0)); \
+                 };",
+            )
+            .expect("page-config probe");
+
+        let elements = runtime.elements();
+        let document = elements.document();
+        let page = document.root_element().expect("a flushed page");
+        let view = document
+            .get(page.child_ids()[0])
+            .expect("the script-created view");
+        let style = view.computed_style().expect("computed style after flush");
+        assert!(style.clone_display().is_item_container(), "{name}");
+        assert!(!style.clone_overflow_x().is_scrollable(), "{name}");
+        assert!(!style.clone_overflow_y().is_scrollable(), "{name}");
     }
 }
 
@@ -96,7 +111,10 @@ fn a_real_bundle_stops_at_the_missing_lynx_global() {
             message.contains("main-thread.js:"),
             "{name}: the error should carry a source location: {message}"
         );
-        assert!(runtime.elements().page().is_none(), "{name}");
+        assert!(
+            runtime.elements().document().root_element().is_none(),
+            "{name}"
+        );
     }
 }
 
@@ -124,5 +142,5 @@ fn the_boot_sequence_works_on_a_bundle_shaped_script() {
             ",
         )
         .expect("boot");
-    assert!(runtime.elements().is_flushed());
+    assert!(runtime.elements().document().root_element().is_some());
 }

@@ -32,6 +32,22 @@
 //! that exists today; a script that needs more will fail at the missing global,
 //! not silently render wrong.
 //!
+//! # Public boundary
+//!
+//! The default API contains the element handle type, the five concrete PAPI
+//! operations, page/viewport configuration, and the input/viewport methods a
+//! live host calls. It deliberately has no getters for the page, configuration,
+//! DOM node ids, arena entries, or flush state, and no forwarding methods for
+//! stylesheets, fonts, rendering, scenes, or images. Those were either internal
+//! implementation details, test probes, or placeholders without a production
+//! consumer.
+//!
+//! The non-default `internal-document-access` feature exposes the owned
+//! [`dom::Document`] only to trusted workspace composition: `bobcat-cli` uses
+//! it for its private frame pipeline, and cross-crate render tests use the same
+//! real boundary. It is not an embedder convenience and must not be used for
+//! topology mutation, which would desynchronise the handle arena.
+//!
 //! # Recorded limits
 //!
 //! - **The runtime identity and JavaScript handle are the same unique id.** [`ElementTree`] speaks
@@ -39,17 +55,18 @@
 //!   `bobcat-core`'s optional `QuickJS` runtime carries it directly over its primitives-only
 //!   boundary.
 //! - **Unique ids and arena slots are never recycled.** The context owns a
-//!   `Vec<Option<LynxElement>>` whose slot zero is the permanent null sentinel. [`ElementId`] is
+//!   `Vec<Option<dom::NodeId>>` whose slot zero is the permanent null sentinel. [`ElementId`] is
 //!   simply `u32`, and every positive id is also its direct arena index. `__DropElement` retires a
 //!   subtree through [`ElementTree::drop_element`], which takes each value and leaves a permanent
 //!   `None` tombstone. `Document<ElementId>` stores that same unique id. `dom` may reuse its
 //!   private `NodeId` slots, but no stale script identity can ever name a later element.
 //! - **There is no runtime tree-depth cap in this layer.** `ElementTree` keeps no depth-specific
 //!   state or traversal helpers; hardening recursive walks belongs in `dom` and `hughie`.
-//! - **`parentComponentUniqueID` is recorded, not honored.** web-core uses it only to inherit the
-//!   parent component's CSS fragment id (`l-css-id`). Without `__SetCSSId` there is no CSS-scope
-//!   machinery to inherit into, so the argument is validated and stored on the element and
-//!   otherwise unused.
+//! - **Unimplemented component metadata is not retained.** The `QuickJS` host validates the types
+//!   of `componentID`, `componentCSSID`, and `parentComponentUniqueID` at the PAPI boundary, but
+//!   this crate neither accepts nor stores them: no implemented operation consumes component
+//!   identity or CSS scope. Likewise, `enableCSSSelector` belongs to future decoded `StyleInfo`
+//!   ingestion and is not a [`PageConfig`] field until such a consumer exists.
 //! - **The UA sheet covers the three documented Lynx computed defaults** (`display: linear`,
 //!   `box-sizing: border-box`, `overflow: hidden`) under their two page-config switches. Lynx's
 //!   wider default set is not modelled.
@@ -64,7 +81,6 @@ mod ua;
 /// A Lynx element's stable unique id and Element-PAPI handle.
 pub type ElementId = u32;
 
-pub use crate::arena::LynxElement;
 pub use crate::device::Viewport;
 pub use crate::tree::{ElementTree, PapiError};
 pub use crate::ua::PageConfig;

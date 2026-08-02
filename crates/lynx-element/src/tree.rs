@@ -4,7 +4,7 @@ use std::fmt;
 
 use dom::{self, Document, NodeId, StylesheetOrigin};
 
-use crate::arena::{ElementArena, LynxElement};
+use crate::arena::ElementArena;
 use crate::device::Viewport;
 use crate::ua::{PageConfig, ua_stylesheet};
 use crate::{ElementId, PAGE_TAG, VIEW_TAG};
@@ -18,7 +18,7 @@ use crate::{ElementId, PAGE_TAG, VIEW_TAG};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PapiError {
-    /// A handle that never named a live element.
+    /// A handle that does not name a live element.
     UnknownElement(ElementId),
     /// Appending `child` under `parent` would put a node inside its own
     /// subtree.
@@ -56,11 +56,7 @@ pub struct ElementTree {
     document: Document<ElementId>,
     elements: ElementArena,
     page: Option<ElementId>,
-    /// `__CreatePage`'s `componentID` — a string name web-core keeps in a side
-    /// table rather than on the element, so it never reaches selectors.
-    page_component_id: String,
     page_attached: bool,
-    config: PageConfig,
 }
 
 impl ElementTree {
@@ -74,9 +70,7 @@ impl ElementTree {
             document,
             elements: ElementArena::new(),
             page: None,
-            page_component_id: String::new(),
             page_attached: false,
-            config,
         }
     }
 
@@ -137,87 +131,34 @@ impl ElementTree {
         self.document.set_device_pixel_ratio(device_pixel_ratio);
     }
 
-    /// Registers font data for text measurement, returning how many faces were
-    /// added.
-    pub fn register_fonts(&mut self, bytes: &[u8]) -> usize {
-        self.document.register_fonts(bytes)
-    }
-
-    #[must_use]
-    pub const fn config(&self) -> PageConfig {
-        self.config
-    }
-
-    /// The page element, once `__CreatePage` has run.
-    #[must_use]
-    pub const fn page(&self) -> Option<ElementId> {
-        self.page
-    }
-
-    /// The `componentID` the page was created with; empty before
-    /// `__CreatePage`.
-    #[must_use]
-    pub fn page_component_id(&self) -> &str {
-        &self.page_component_id
-    }
-
-    /// Whether the page has been attached to the document — i.e. whether
-    /// `__FlushElementTree` has committed at least once.
-    #[must_use]
-    pub const fn is_flushed(&self) -> bool {
-        self.page_attached
-    }
-
-    /// The DOM node a handle names, or `None` if the handle is not live.
-    #[must_use]
-    pub fn node_id(&self, id: ElementId) -> Option<NodeId> {
-        self.element(id).map(LynxElement::node_id)
-    }
-
-    /// The live runtime element stored at `id`.
-    #[must_use]
-    pub fn element(&self, id: ElementId) -> Option<&LynxElement> {
-        self.elements.get(id)
-    }
-
-    /// Mounts author CSS — the seam a decoded `.web.bundle` `StyleInfo`
-    /// section will lower into once that lowering exists.
-    pub fn add_author_stylesheet(&mut self, css: &str) {
-        self.document.add_stylesheet(css, StylesheetOrigin::Author);
-    }
-
     /// `__CreatePage(componentID, componentCSSID)`.
     ///
     /// Idempotent, like web-core's: a second call returns the page that
-    /// already exists and ignores its arguments. The page is created detached;
-    /// [`Self::flush_element_tree`] is what puts it in the document.
-    pub fn create_page(&mut self, component_id: &str, component_css_id: i32) -> ElementId {
+    /// already exists. The page is created detached; [`Self::flush_element_tree`]
+    /// is what puts it in the document.
+    ///
+    /// The `QuickJS` host validates the PAPI's `componentID` and
+    /// `componentCSSID` arguments before calling this method. They are not
+    /// accepted or stored here because no implemented operation consumes
+    /// component identity or CSS scope yet.
+    pub fn create_page(&mut self) -> ElementId {
         if let Some(page) = self.page {
             return page;
         }
-        let id = self.insert(PAGE_TAG, 0, component_css_id);
-        // `componentID` is a *string* name, not the numeric unique id, and
-        // web-core keeps it out of the DOM — `create_element_common` files it
-        // in a side table. Recording it here rather than as an attribute keeps
-        // it invisible to selector matching; the DOM payload remains only the
-        // context-owned unique id.
-        component_id.clone_into(&mut self.page_component_id);
+        let id = self.insert(PAGE_TAG);
         self.page = Some(id);
         id
     }
 
     /// `__CreateView(parentComponentUniqueID)`.
     ///
-    /// Creates a detached `view` element. `parent_component_unique_id` is `0`
-    /// for "no parent component"; any other value must name a live element.
-    pub fn create_view(
-        &mut self,
-        parent_component_unique_id: ElementId,
-    ) -> Result<ElementId, PapiError> {
-        if parent_component_unique_id != 0 && self.node_id(parent_component_unique_id).is_none() {
-            return Err(PapiError::UnknownElement(parent_component_unique_id));
-        }
-        Ok(self.insert(VIEW_TAG, parent_component_unique_id, 0))
+    /// Creates a detached `view` element.
+    ///
+    /// The `QuickJS` host validates the PAPI's `parentComponentUniqueID`
+    /// argument before calling this method. CSS-scope inheritance is not
+    /// implemented, so the otherwise-unobservable argument is not stored.
+    pub fn create_view(&mut self) -> ElementId {
+        self.insert(VIEW_TAG)
     }
 
     /// `__AppendElement(parent, child)`.
@@ -251,12 +192,12 @@ impl ElementTree {
 
     /// `__DropElement(id)`.
     ///
-    /// The DOM subtree and every corresponding `LynxElement` are dropped
-    /// together. Their `Vec` entries remain as permanent `None` tombstones, so
-    /// no later creation can reuse any of their unique ids.
-    pub fn drop_element(&mut self, id: ElementId) -> bool {
+    /// The DOM subtree and every corresponding handle are dropped together.
+    /// Their arena entries remain as permanent `None` tombstones, so no later
+    /// creation can reuse any of their unique ids.
+    pub fn drop_element(&mut self, id: ElementId) {
         let Some(node) = self.node_id(id) else {
-            return false;
+            return;
         };
         let retired_ids = self.document.remove_subtree(node);
         for unique_id in retired_ids {
@@ -269,10 +210,8 @@ impl ElementTree {
 
         if self.page == Some(id) {
             self.page = None;
-            self.page_component_id.clear();
             self.page_attached = false;
         }
-        true
     }
 
     /// `__FlushElementTree()` — the single commit boundary.
@@ -280,42 +219,38 @@ impl ElementTree {
     /// web-core withholds exactly one thing until the first flush: the page
     /// root is not in the rendered document until then. We do the same, and
     /// then run the style + layout pass that makes every pending mutation
-    /// paint-eligible. Returns `false` when there is no page to commit.
-    pub fn flush_element_tree(&mut self) -> bool {
+    /// paint-eligible. With no page, this is a no-op like web-core's host
+    /// function.
+    pub fn flush_element_tree(&mut self) {
         let Some(page) = self.page else {
-            return false;
+            return;
         };
         let Some(page_node) = self.node_id(page) else {
-            return false;
+            return;
         };
         if !self.page_attached {
             self.document.append_document_element(page_node);
             self.page_attached = true;
         }
         self.document.layout();
-        true
     }
 
-    fn insert(
-        &mut self,
-        tag: &str,
-        parent_component_unique_id: ElementId,
-        component_css_id: i32,
-    ) -> ElementId {
+    fn node_id(&self, id: ElementId) -> Option<NodeId> {
+        let node_id = self.elements.get(id)?;
+        let node = self.document.get(node_id)?;
+        (node.is_element() && *node.payload() == id).then_some(node_id)
+    }
+
+    fn insert(&mut self, tag: &str) -> ElementId {
         let unique_id = self.elements.reserve();
         let node = self.document.create_element(tag, unique_id);
-        self.elements.insert(
-            unique_id,
-            node,
-            parent_component_unique_id,
-            component_css_id,
-        )
+        self.elements.insert(unique_id, node)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Document, ElementId, ElementTree, LynxElement, PapiError, dom};
+    use super::{Document, ElementId, ElementTree, PapiError, dom};
     use crate::device::Viewport;
     use crate::ua::PageConfig;
 
@@ -340,142 +275,120 @@ mod tests {
     #[test]
     fn unique_ids_start_at_one_and_do_not_repeat() {
         let mut tree = tree();
-        let page = tree.create_page("page", 0);
-        let first = tree.create_view(0).unwrap();
-        let second = tree.create_view(0).unwrap();
+        let page = tree.create_page();
+        let first = tree.create_view();
+        let second = tree.create_view();
         assert_eq!(page, 1);
         assert_eq!(first, 2);
         assert_eq!(second, 3);
     }
 
     #[test]
-    fn releasing_an_element_leaves_a_permanent_empty_arena_slot() {
+    fn dropping_an_element_retires_its_handle_without_reusing_the_id() {
         let mut tree = tree();
-        let first = tree.create_view(0).unwrap();
-        let first_node = tree.node_id(first).unwrap();
-        let first_unique_id = *tree.document().get(first_node).unwrap().payload();
+        let page = tree.create_page();
+        let first = tree.create_view();
+        tree.drop_element(first);
+        tree.drop_element(first);
 
-        assert!(tree.drop_element(first));
-        assert!(tree.node_id(first).is_none());
-
-        let second = tree.create_view(0).unwrap();
-        let second_node = tree.node_id(second).unwrap();
-        let second_unique_id = *tree.document().get(second_node).unwrap().payload();
-
-        assert_eq!(tree.elements.len(), 3);
-        assert_eq!(first_unique_id, 1);
-        assert_eq!(second_unique_id, 2);
+        let second = tree.create_view();
         assert_eq!(second, first + 1);
-        assert!(tree.node_id(first).is_none());
+        assert_eq!(
+            tree.append_element(page, first),
+            Err(PapiError::UnknownElement(first))
+        );
+        assert_eq!(tree.append_element(page, second), Ok(second));
     }
 
     #[test]
-    fn releasing_a_subtree_retires_every_lynx_element_in_it() {
+    fn dropping_a_subtree_retires_every_handle_in_it() {
         let mut tree = tree();
-        let parent = tree.create_view(0).unwrap();
-        let child = tree.create_view(0).unwrap();
+        let page = tree.create_page();
+        let parent = tree.create_view();
+        let child = tree.create_view();
+        tree.append_element(page, parent).unwrap();
         tree.append_element(parent, child).unwrap();
 
-        assert!(tree.drop_element(parent));
-        assert!(tree.node_id(parent).is_none());
-        assert!(tree.node_id(child).is_none());
-        assert_eq!(tree.elements.len(), 3);
+        tree.drop_element(parent);
+        assert_eq!(
+            tree.append_element(page, parent),
+            Err(PapiError::UnknownElement(parent))
+        );
+        assert_eq!(
+            tree.append_element(page, child),
+            Err(PapiError::UnknownElement(child))
+        );
 
-        let next = tree.create_view(0).unwrap();
-        assert_eq!(next, 3);
+        let next = tree.create_view();
+        assert_eq!(next, child + 1);
+        tree.flush_element_tree();
+        assert!(
+            tree.document()
+                .root_element()
+                .unwrap()
+                .child_ids()
+                .is_empty()
+        );
     }
 
     #[test]
     fn create_page_is_idempotent() {
         let mut tree = tree();
-        let first = tree.create_page("page", 0);
-        let second = tree.create_page("other", 7);
+        let first = tree.create_page();
+        let second = tree.create_page();
         assert_eq!(first, second);
-        assert_eq!(tree.page(), Some(first));
-        // The second call's arguments are ignored, like web-core's.
-        assert_eq!(tree.page_component_id(), "page");
-        assert_eq!(
-            tree.element(first).map(LynxElement::component_css_id),
-            Some(0)
-        );
-    }
-
-    #[test]
-    fn the_page_component_id_stays_out_of_the_dom() {
-        let mut tree = tree();
-        let page = tree.create_page("card", 0);
-        assert_eq!(tree.page_component_id(), "card");
-
-        // It must not be selector-visible: the DOM core derives matching only
-        // from real DOM state, and an invented attribute would let author CSS
-        // from a bundle see something web-core never exposes.
-        let node = tree.node_id(page).unwrap();
-        assert_eq!(tree.document().get(node).unwrap().attributes().len(), 0);
+        tree.flush_element_tree();
+        assert_eq!(*tree.document().root_element().unwrap().payload(), first);
     }
 
     #[test]
     fn zero_is_the_no_element_sentinel() {
         let mut tree = tree();
-        assert!(tree.element(0).is_none());
-        assert!(tree.create_view(0).is_ok());
-    }
-
-    #[test]
-    fn create_view_rejects_an_unknown_parent_component() {
-        let mut tree = tree();
+        let view = tree.create_view();
         assert_eq!(
-            tree.create_view(9).unwrap_err(),
-            PapiError::UnknownElement(9)
+            tree.append_element(0, view),
+            Err(PapiError::UnknownElement(0))
         );
     }
 
     #[test]
     fn append_element_returns_the_child_and_links_it() {
         let mut tree = tree();
-        let page = tree.create_page("page", 0);
-        let view = tree.create_view(0).unwrap();
+        let page = tree.create_page();
+        let view = tree.create_view();
         assert_eq!(tree.append_element(page, view).unwrap(), view);
+        tree.flush_element_tree();
 
-        let page_node = tree.node_id(page).unwrap();
-        let view_node = tree.node_id(view).unwrap();
-        assert_eq!(
-            tree.document().get(page_node).unwrap().child_ids(),
-            [view_node]
-        );
+        let root = tree.document().root_element().unwrap();
+        let child = tree.document().get(root.child_ids()[0]).unwrap();
+        assert_eq!(*child.payload(), view);
     }
 
     #[test]
     fn append_element_reparents_rather_than_duplicating() {
         let mut tree = tree();
-        let page = tree.create_page("page", 0);
-        let first = tree.create_view(0).unwrap();
-        let second = tree.create_view(0).unwrap();
-        let moved = tree.create_view(0).unwrap();
+        let page = tree.create_page();
+        let first = tree.create_view();
+        let second = tree.create_view();
+        let moved = tree.create_view();
         tree.append_element(page, first).unwrap();
         tree.append_element(page, second).unwrap();
         tree.append_element(first, moved).unwrap();
         tree.append_element(second, moved).unwrap();
+        tree.flush_element_tree();
 
-        let first_node = tree.node_id(first).unwrap();
-        let second_node = tree.node_id(second).unwrap();
-        let moved_node = tree.node_id(moved).unwrap();
-        assert!(
-            tree.document()
-                .get(first_node)
-                .unwrap()
-                .child_ids()
-                .is_empty()
-        );
-        assert_eq!(
-            tree.document().get(second_node).unwrap().child_ids(),
-            [moved_node]
-        );
+        let root = tree.document().root_element().unwrap();
+        let first_node = tree.document().get(root.child_ids()[0]).unwrap();
+        let second_node = tree.document().get(root.child_ids()[1]).unwrap();
+        assert!(first_node.child_ids().is_empty());
+        let moved_node = tree.document().get(second_node.child_ids()[0]).unwrap();
+        assert_eq!(*moved_node.payload(), moved);
     }
 
     #[test]
     fn append_element_rejects_unknown_handles() {
         let mut tree = tree();
-        let page = tree.create_page("page", 0);
+        let page = tree.create_page();
         let ghost: ElementId = 99;
         assert_eq!(
             tree.append_element(page, ghost).unwrap_err(),
@@ -490,9 +403,9 @@ mod tests {
     #[test]
     fn append_element_rejects_cycles() {
         let mut tree = tree();
-        let page = tree.create_page("page", 0);
-        let outer = tree.create_view(0).unwrap();
-        let inner = tree.create_view(0).unwrap();
+        let page = tree.create_page();
+        let outer = tree.create_view();
+        let inner = tree.create_view();
         tree.append_element(page, outer).unwrap();
         tree.append_element(outer, inner).unwrap();
 
@@ -515,8 +428,8 @@ mod tests {
     #[test]
     fn append_element_refuses_to_reparent_the_page() {
         let mut tree = tree();
-        let page = tree.create_page("page", 0);
-        let view = tree.create_view(0).unwrap();
+        let page = tree.create_page();
+        let view = tree.create_view();
         tree.append_element(page, view).unwrap();
         assert_eq!(
             tree.append_element(view, page).unwrap_err(),
@@ -527,20 +440,19 @@ mod tests {
     #[test]
     fn the_page_joins_the_document_only_on_the_first_flush() {
         let mut tree = tree();
-        let page = tree.create_page("page", 0);
-        assert!(!tree.is_flushed());
+        let page = tree.create_page();
         assert!(tree.document().root_element().is_none());
 
-        assert!(tree.flush_element_tree());
-        assert!(tree.is_flushed());
-        let page_node = tree.node_id(page).unwrap();
+        tree.flush_element_tree();
+        let page_node = tree.document().root_element().map(dom::Node::id).unwrap();
         assert_eq!(
             tree.document().root_element().map(dom::Node::id),
             Some(page_node)
         );
+        assert_eq!(*tree.document().get(page_node).unwrap().payload(), page);
 
         // A second flush is a plain re-commit, not a second attach.
-        assert!(tree.flush_element_tree());
+        tree.flush_element_tree();
         assert_eq!(
             tree.document().root_element().map(dom::Node::id),
             Some(page_node)
@@ -550,19 +462,19 @@ mod tests {
     #[test]
     fn flushing_without_a_page_is_a_no_op() {
         let mut tree = tree();
-        assert!(!tree.flush_element_tree());
-        assert!(!tree.is_flushed());
+        tree.flush_element_tree();
+        assert!(tree.document().root_element().is_none());
     }
 
     #[test]
     fn the_ua_sheet_gives_every_element_lynx_defaults() {
         let mut tree = tree();
-        let page = tree.create_page("page", 0);
-        let view = tree.create_view(0).unwrap();
+        let page = tree.create_page();
+        let view = tree.create_view();
         tree.append_element(page, view).unwrap();
         tree.flush_element_tree();
 
-        let view_node = tree.node_id(view).unwrap();
+        let view_node = tree.document().root_element().unwrap().child_ids()[0];
         let style = tree
             .document()
             .get(view_node)
@@ -588,12 +500,12 @@ mod tests {
                 ..PageConfig::default()
             },
         );
-        let page = tree.create_page("page", 0);
-        let view = tree.create_view(0).unwrap();
+        let page = tree.create_page();
+        let view = tree.create_view();
         tree.append_element(page, view).unwrap();
         tree.flush_element_tree();
 
-        let view_node = tree.node_id(view).unwrap();
+        let view_node = tree.document().root_element().unwrap().child_ids()[0];
         let style = tree
             .document()
             .get(view_node)
@@ -626,12 +538,12 @@ mod tests {
                     ..PageConfig::default()
                 },
             );
-            let page = tree.create_page("page", 0);
-            let view = tree.create_view(0).unwrap();
+            let page = tree.create_page();
+            let view = tree.create_view();
             tree.append_element(page, view).unwrap();
             tree.flush_element_tree();
 
-            let view_node = tree.node_id(view).unwrap();
+            let view_node = tree.document().root_element().unwrap().child_ids()[0];
             let style = tree
                 .document()
                 .get(view_node)
@@ -647,12 +559,16 @@ mod tests {
     #[test]
     fn a_wide_tree_flushes() {
         let mut tree = tree();
-        let page = tree.create_page("card", 0);
+        let page = tree.create_page();
         for _ in 0..2000 {
-            let view = tree.create_view(0).unwrap();
+            let view = tree.create_view();
             tree.append_element(page, view).unwrap();
         }
-        assert!(tree.flush_element_tree());
+        tree.flush_element_tree();
+        assert_eq!(
+            tree.document().root_element().unwrap().child_ids().len(),
+            2000
+        );
     }
 
     #[test]
@@ -661,23 +577,14 @@ mod tests {
 
         let mut tree = tree();
         assert_document_type(tree.document());
-        let page = tree.create_page("page", 17);
-        let view = tree.create_view(page).unwrap();
-        let node = tree.node_id(view).unwrap();
-        let payload_unique_id = *tree.document().get(node).unwrap().payload();
-        let element = tree.elements.get(payload_unique_id).unwrap();
+        let page = tree.create_page();
+        let view = tree.create_view();
+        tree.append_element(page, view).unwrap();
+        tree.flush_element_tree();
 
-        assert_eq!(element.unique_id(), view);
-        assert_eq!(element.node_id(), node);
-        assert_eq!(
-            tree.element(view)
-                .map(LynxElement::parent_component_unique_id),
-            Some(page)
-        );
-        assert_eq!(
-            tree.element(page).map(LynxElement::component_css_id),
-            Some(17)
-        );
-        assert_eq!(payload_unique_id, view);
+        let root = tree.document().root_element().unwrap();
+        let child = tree.document().get(root.child_ids()[0]).unwrap();
+        assert_eq!(*root.payload(), page);
+        assert_eq!(*child.payload(), view);
     }
 }

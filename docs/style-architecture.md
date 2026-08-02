@@ -23,7 +23,8 @@ workspace layers. `pulsar` is a DOM-independent resource/GPU layer used by
 See
 [`runtime-architecture.md`](runtime-architecture.md) for the full dependency,
 feature, and frame-flow walkthrough. Decoded `.web.bundle` style ingestion is
-still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
+still unbuilt; `lynx-element` does not publish a placeholder ingestion method
+before that pipeline has a production consumer.
 
 ## The dom core: one tree, Document-mediated mutation
 
@@ -80,7 +81,7 @@ still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
 | `bobcat-core` | Engine-neutral resource/script/view contracts; GAT-based external `ScriptEngine`; optional default QuickJS adapter and MTS host globals | Re-exporting DOM/GPU/render conveniences, an element-host trait, a document wrapper, or ownership of Lynx tag/root/UA policy or CSS/layout/paint algorithms |
 | `pulsar` | Opaque `ImageStore`; Vello version/re-export boundary; headed/headless GPU submission and readback helpers | `Document`, `NodeId`, computed styles, layout, paint order, Lynx runtime vocabulary, or DOM mutation policy |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, and the maintained Lynx CSS extension grammar behind the `lynx` feature | Runtime protocol, document ownership, bundle ingestion, or host policy |
-| `lynx-element` (the runtime adapter) | `ElementId = u32`; concrete validated Element-PAPI operations; an independent context-owned `Vec<Option<LynxElement>>` with monotone, never-reused ids, a permanent null slot at index 0, and permanent retirement tombstones; that same unique id carried by each DOM node; `ElementTree`; `<page>` root policy; view metrics and device construction; UA stylesheet generation | Render/freshness/scene/image forwarding in its default API, Bobcat, QuickJS, a replaceable element-host trait, a direct Pulsar dependency, a second DOM, matcher, cascade, layout/paint algorithms, or public `PaintOrder` |
+| `lynx-element` (the runtime adapter) | `ElementId = u32`; concrete validated Element-PAPI operations; an independent context-owned `Vec<Option<NodeId>>` with monotone, never-reused ids, a permanent null slot at index 0, and permanent retirement tombstones; that same unique id carried by each DOM node; `ElementTree`; `<page>` root policy; view metrics and device construction; UA stylesheet generation | Page/config/flush/element inspection, stylesheet/font/render/freshness/scene/image forwarding in its default API, placeholder component/CSS-scope metadata, Bobcat, QuickJS, a replaceable element-host trait, a direct Pulsar dependency, a second DOM, matcher, cascade, layout/paint algorithms, or public `PaintOrder` |
 | Still unowned | Lynx event payload; decoded `StyleInfo` lowering and CSS-scope policy; `rpx` view units; the remaining 56 Element PAPI members | — |
 
 ## Style lifecycle
@@ -127,8 +128,9 @@ What that covers, and what it does not:
   `defaultOverflowVisible` page-config switches;
 - view metrics and touch-first device construction (`Viewport::device`);
 - Lynx element identity (a monotone `u32` unique id used directly as its
-  permanent arena index), `Document<ElementId>` payloads that point back to
-  `LynxElement`, and untrusted-handle validation on every PAPI entry point;
+  permanent arena index), `Document<ElementId>` payloads paired with a private
+  `Vec<Option<NodeId>>` association, and untrusted-handle validation before
+  crash-on-misuse DOM mutations;
 - direct `u32` JavaScript handles and explicit `__DropElement` retirement of
   DOM subtrees into permanent `None` arena tombstones;
 - five Element PAPI members — `__CreatePage`, `__CreateView`,
@@ -138,8 +140,7 @@ What that covers, and what it does not:
 **Still open**
 
 - `.web.bundle` `StyleInfo` decoding exists, but no runtime layer lowers and
-  mounts those decoded rules; the seam is
-  `ElementTree::add_author_stylesheet`;
+  mounts those decoded rules; no future-only public ingestion seam is reserved;
 - viewport-relative `rpx`/`ppx` units have no owner;
 - event registrations, CSS-scope (`__SetCSSId`) ingestion, and the remaining
   56 PAPI members have no adapter;

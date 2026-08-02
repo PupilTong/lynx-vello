@@ -15,17 +15,14 @@ fn runtime() -> MainThreadRuntime {
 
 /// The tag names of `page`'s children, in order.
 fn page_child_tags(elements: &ElementTree) -> Vec<String> {
-    let page = elements.page().expect("a page");
-    let page_node = elements.node_id(page).expect("a live page");
-    elements
-        .document()
-        .get(page_node)
-        .expect("a live page node")
+    let document = elements.document();
+    document
+        .root_element()
+        .expect("a flushed page")
         .child_ids()
         .iter()
         .map(|&child| {
-            elements
-                .document()
+            document
                 .get(child)
                 .and_then(dom::Node::tag_name)
                 .unwrap_or_default()
@@ -54,7 +51,7 @@ fn a_card_root_builds_its_tree_through_the_papi() {
 
     let elements = runtime.elements();
     assert_eq!(page_child_tags(&elements), ["view", "view"]);
-    assert!(elements.is_flushed());
+    assert!(elements.document().root_element().is_some());
 }
 
 #[test]
@@ -87,19 +84,21 @@ fn drop_element_retires_a_detached_element_and_does_not_reuse_its_id() {
         .run_main_thread_script(
             r"
             globalThis.renderPage = function () {
-              __CreatePage('card', 0);
+              const page = __CreatePage('card', 0);
               const dropped = __CreateView(0);
               __DropElement(dropped);
               __DropElement(dropped);
-              __CreateView(0);
+              const next = __CreateView(0);
+              if (next !== dropped + 1) {
+                throw new Error('retired ids must not be reused');
+              }
+              __AppendElement(page, next);
             };
             ",
         )
         .expect("main-thread script");
 
-    let elements = runtime.elements();
-    assert!(elements.node_id(2).is_none());
-    assert!(elements.node_id(3).is_some());
+    assert_eq!(page_child_tags(&runtime.elements()), ["view"]);
 }
 
 #[test]
@@ -120,10 +119,7 @@ fn drop_element_retires_an_attached_subtree() {
         )
         .expect("main-thread script");
 
-    let elements = runtime.elements();
-    assert!(elements.node_id(2).is_none());
-    assert!(elements.node_id(3).is_none());
-    assert!(page_child_tags(&elements).is_empty());
+    assert!(page_child_tags(&runtime.elements()).is_empty());
 }
 
 #[test]
@@ -142,7 +138,7 @@ fn create_page_is_idempotent_across_calls() {
             ",
         )
         .expect("main-thread script");
-    assert!(runtime.elements().page().is_some());
+    assert!(runtime.elements().document().root_element().is_some());
 }
 
 #[test]
@@ -189,10 +185,9 @@ fn the_page_is_not_in_the_document_until_the_tree_is_flushed() {
         )
         .expect("evaluate");
     // Evaluation alone only defines the entry point.
-    assert!(runtime.elements().page().is_none());
+    assert!(runtime.elements().document().root_element().is_none());
 
     runtime.render_page().expect("render");
-    assert!(runtime.elements().is_flushed());
     assert!(runtime.elements().document().root_element().is_some());
 }
 
@@ -286,6 +281,45 @@ fn non_numeric_handles_are_rejected_rather_than_coerced() {
 }
 
 #[test]
+fn creation_metadata_is_type_checked_at_the_javascript_boundary() {
+    for (source, function) in [
+        (
+            "globalThis.renderPage = function () { __CreatePage(7, 0); };",
+            "__CreatePage",
+        ),
+        (
+            "globalThis.renderPage = function () { __CreatePage('card', 1.5); };",
+            "__CreatePage",
+        ),
+        (
+            "globalThis.renderPage = function () { __CreateView('page'); };",
+            "__CreateView",
+        ),
+    ] {
+        let error = runtime()
+            .run_main_thread_script(source)
+            .expect_err("invalid creation metadata");
+        assert!(error.to_string().contains(function), "{error}");
+    }
+}
+
+#[test]
+fn unconsumed_parent_component_metadata_is_not_treated_as_an_element_handle() {
+    let mut runtime = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              __AppendElement(page, __CreateView(4294967295));
+            };
+            ",
+        )
+        .expect("parent component metadata is not a topology handle");
+    assert_eq!(page_child_tags(&runtime.elements()), ["view"]);
+}
+
+#[test]
 fn a_missing_papi_global_fails_loudly() {
     let mut runtime = runtime();
     let error = runtime
@@ -335,8 +369,11 @@ fn the_ua_cascade_reaches_elements_the_script_created() {
         .expect("main-thread script");
 
     let elements = runtime.elements();
-    let page = elements.page().expect("a page");
-    let page_node = elements.node_id(page).expect("a live page");
+    let page_node = elements
+        .document()
+        .root_element()
+        .map(dom::Node::id)
+        .expect("a flushed page");
     let layout = elements
         .document()
         .rounded_layout(page_node)
@@ -441,7 +478,7 @@ fn a_run_that_exceeds_the_job_limit_finishes_before_the_next_one_starts() {
 
     let elements = runtime.elements();
     assert!(
-        elements.page().is_some(),
+        elements.document().root_element().is_some(),
         "the boot sequence still ran to completion"
     );
 }
