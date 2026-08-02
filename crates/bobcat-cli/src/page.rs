@@ -3,7 +3,8 @@ use std::cell::Ref;
 #[cfg(target_os = "macos")]
 use bobcat_core::dom::input::{InputEvent, InputResponse};
 use bobcat_core::pulsar::vello::Scene;
-use bobcat_core::{ElementTree, MainThreadRuntime, PageConfig, Viewport};
+use bobcat_core::quickjs::MainThreadRuntime;
+use bobcat_core::{ElementTree, PageConfig, Viewport};
 use url::Url;
 
 use crate::CliError;
@@ -112,7 +113,7 @@ impl PreparedFrame<'_> {
 }
 
 pub(crate) struct FramePipeline {
-    runtime: MainThreadRuntime<ElementTree>,
+    runtime: MainThreadRuntime,
     viewport: Viewport,
     frame_size: FrameSize,
 }

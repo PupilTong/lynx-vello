@@ -32,13 +32,13 @@
 use stylo::properties::ComputedValues;
 use stylo::values::computed::effects::BoxShadow;
 
-use crate::convert;
 use crate::paint::{BoxFragment, PathScratch};
 use crate::shape::{BoxShape, inner_radii, normalize_radii, ring_path_into, with_shape};
 use crate::vello::Scene;
 use crate::vello::kurbo::Rect;
 use crate::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
-use crate::visual::{CornerRadii, Size2D};
+use crate::visual::CornerRadii;
+use crate::{Size2D, convert};
 
 /// Paints the outset (drop) shadows; call before the background.
 pub(crate) fn paint_outset(

@@ -440,7 +440,7 @@ fn sync_clips(
 }
 
 fn push_clip(scene: &mut Scene, clip: &ClipNode, scale: Affine) {
-    let size = crate::visual::Size2D::new(clip.rect.size.width, clip.rect.size.height);
+    let size = crate::Size2D::new(clip.rect.size.width, clip.rect.size.height);
     let Some(local) = convert::item_affine(&clip.transform, size) else {
         // Singular clip space: nothing inside it can render.
         scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &Rect::ZERO);

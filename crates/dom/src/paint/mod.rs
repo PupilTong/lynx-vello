@@ -68,7 +68,7 @@ impl BoxFragment {
     pub(crate) fn new(
         node: NodeId,
         transform: Affine,
-        size: crate::visual::Size2D<f32>,
+        size: crate::Size2D<f32>,
         radii: CornerRadii,
         layout: &Layout,
     ) -> Self {

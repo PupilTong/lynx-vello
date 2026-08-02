@@ -16,10 +16,11 @@ use stylo::values::generics::basic_shape::{
 use stylo::values::generics::position::PositionOrAuto;
 use stylo::values::specified::svg_path::{PathCommand, SVGPathData, SVGPathPosition};
 
+use crate::Size2D;
 use crate::layout::Edges;
 use crate::vello::kurbo::{BezPath, Point, Rect, RoundedRect, RoundedRectRadii, Shape};
 use crate::vello::peniko::Fill;
-use crate::visual::{CornerRadii, Size2D};
+use crate::visual::CornerRadii;
 
 /// Cubic-Bézier circle approximation constant.
 const KAPPA: f64 = 0.552_284_749_830_793_4;

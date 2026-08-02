@@ -14,7 +14,7 @@
 //!
 //! ```
 //! # use dom::input::InputEvent;
-//! # use dom::visual::Point2D;
+//! # use dom::Point2D;
 //! # fn f<T: Sync>(document: &mut dom::Document<T>) {
 //! let response = document.handle_input(InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 120.0)));
 //! # let _ = response;
@@ -43,7 +43,7 @@
 //!
 //! ```
 //! # use dom::input::InputEvent;
-//! # use dom::visual::Point2D;
+//! # use dom::Point2D;
 //! # fn f<T: Sync>(document: &mut dom::Document<T>, event: InputEvent, position: Point2D<f32>) {
 //! # fn dispatch_to_script(_: Option<dom::NodeId>) -> bool { false }
 //! let hit = document.hit_test(position);
@@ -329,9 +329,9 @@ impl<T: Sync> Document<T> {
     ///
     /// # Panics
     ///
-    /// Panics per [`Document::paint_style`] if a style traversal was left
-    /// incomplete. In debug builds, also on a non-finite position or wheel
-    /// delta.
+    /// Panics if computed styles are unavailable because a style traversal was
+    /// left incomplete. In debug builds, also on a non-finite position or
+    /// wheel delta.
     pub fn handle_input(&mut self, event: InputEvent) -> InputResponse {
         if !event.is_finite() {
             debug_assert!(false, "host input events must be finite, got {event:?}");

@@ -3,10 +3,9 @@
 
 #![allow(clippy::float_cmp)]
 
-use dom::NodeId;
-use dom::visual::{PaintItemKind, PaintOrder, Point2D};
-
 use crate::test_common::{self as common, Doc};
+use crate::visual::{PaintItemKind, PaintOrder};
+use crate::{NodeId, Point2D};
 
 const AHEM: &[u8] = include_bytes!("../../../hughie/tests/fixtures/Ahem.ttf");
 

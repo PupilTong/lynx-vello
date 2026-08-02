@@ -55,7 +55,7 @@ impl Viewport {
     /// coarse primary pointer with no hover — the `@media (hover)` /
     /// `(pointer)` answers a Lynx app should see.
     #[must_use]
-    pub fn device(self) -> Device {
+    pub(crate) fn device(self) -> Device {
         Device::new(
             MediaType::screen(),
             QuirksMode::NoQuirks,
@@ -83,7 +83,7 @@ impl Viewport {
 /// itself is measured by parley through `hughie`, not by these numbers — only
 /// font-relative *length units* read them.
 #[derive(Debug)]
-pub struct LynxFontMetricsProvider;
+pub(crate) struct LynxFontMetricsProvider;
 
 /// Fallback ratios, relative to the font size, for faces that report no
 /// metrics. These match the CSS-values-4 defaults for `ex` (0.5em) and `ch`

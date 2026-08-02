@@ -6,12 +6,13 @@
 
 //! Type bridges: euclid (dom visual) → kurbo, stylo colors → peniko.
 
+use euclid::default::Transform3D;
 use stylo::color::{AbsoluteColor, ColorSpace};
 use stylo::properties::ComputedValues;
 
+use crate::Size2D;
 use crate::vello::kurbo::Affine;
 use crate::vello::peniko::Color;
-use crate::visual::{Size2D, Transform3D};
 
 /// The affine paint transform for an item matrix, or `None` when the matrix
 /// does not render (singular / degenerate — css-transforms-1 §6).

@@ -58,7 +58,6 @@
 
 mod arena;
 mod device;
-mod papi;
 mod tree;
 mod ua;
 
@@ -68,10 +67,9 @@ pub type ElementId = u32;
 pub use dom;
 
 pub use crate::arena::LynxElement;
-pub use crate::device::{LynxFontMetricsProvider, Viewport};
-pub use crate::papi::ElementPapi;
+pub use crate::device::Viewport;
 pub use crate::tree::{ElementTree, PapiError};
-pub use crate::ua::{PageConfig, ua_stylesheet};
+pub use crate::ua::PageConfig;
 
 /// The Lynx tag name of the page root element.
 ///
@@ -79,11 +77,11 @@ pub use crate::ua::{PageConfig, ua_stylesheet};
 /// semantics treat `page` as the document element (see
 /// `docs/tracking/css-selectors-cascade.md`), and web-core's `__CreatePage`
 /// creates the one element every other element hangs off.
-pub const PAGE_TAG: &str = "page";
+pub(crate) const PAGE_TAG: &str = "page";
 
 /// The Lynx tag name `__CreateView` constructs.
 ///
 /// web-core maps the Lynx tag `view` to the custom element `x-view` because it
 /// renders into an HTML document. There is no HTML here, so the Lynx tag name
 /// is kept verbatim — it is what author CSS from a `.web.bundle` selects on.
-pub const VIEW_TAG: &str = "view";
+pub(crate) const VIEW_TAG: &str = "view";

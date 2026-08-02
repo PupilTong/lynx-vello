@@ -3,11 +3,12 @@
 //! Behavior tests for main-thread (MTS) script execution and the Element PAPI
 //! globals it runs against.
 
-use bobcat_core::{ElementTree, MainThreadRuntime, PageConfig, Viewport};
+use bobcat_core::quickjs::MainThreadRuntime;
+use bobcat_core::{ElementTree, PageConfig, Viewport};
 
 const VIEWPORT: Viewport = Viewport::new(393.0, 727.0);
 
-fn runtime() -> MainThreadRuntime<ElementTree> {
+fn runtime() -> MainThreadRuntime {
     MainThreadRuntime::new(ElementTree::new(VIEWPORT, PageConfig::default()))
         .expect("QuickJS realm")
 }

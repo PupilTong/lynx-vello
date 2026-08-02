@@ -8,7 +8,6 @@ use dom::{self, Document, ImageStore, NodeId, StylesheetOrigin};
 
 use crate::arena::{ElementArena, LynxElement};
 use crate::device::Viewport;
-use crate::papi::ElementPapi;
 use crate::ua::{PageConfig, ua_stylesheet};
 use crate::{ElementId, PAGE_TAG, VIEW_TAG};
 
@@ -199,19 +198,6 @@ impl ElementTree {
         self.elements.get(id)
     }
 
-    /// The `parentComponentUniqueID` recorded when `id` was created.
-    #[must_use]
-    pub fn parent_component_unique_id(&self, id: ElementId) -> Option<ElementId> {
-        self.element(id)
-            .map(LynxElement::parent_component_unique_id)
-    }
-
-    /// The `componentCSSID` recorded when `id` was created.
-    #[must_use]
-    pub fn component_css_id(&self, id: ElementId) -> Option<i32> {
-        self.element(id).map(LynxElement::component_css_id)
-    }
-
     /// Mounts author CSS — the seam a decoded `.web.bundle` `StyleInfo`
     /// section will lower into once that lowering exists.
     pub fn add_author_stylesheet(&mut self, css: &str) {
@@ -345,37 +331,9 @@ impl ElementTree {
     }
 }
 
-impl ElementPapi for ElementTree {
-    type Error = PapiError;
-
-    fn create_page(&mut self, component_id: &str, component_css_id: i32) -> ElementId {
-        Self::create_page(self, component_id, component_css_id)
-    }
-
-    fn create_view(&mut self, parent_component: ElementId) -> Result<ElementId, Self::Error> {
-        Self::create_view(self, parent_component)
-    }
-
-    fn append_element(
-        &mut self,
-        parent: ElementId,
-        child: ElementId,
-    ) -> Result<ElementId, Self::Error> {
-        Self::append_element(self, parent, child)
-    }
-
-    fn drop_element(&mut self, element: ElementId) -> bool {
-        Self::drop_element(self, element)
-    }
-
-    fn flush_element_tree(&mut self) -> bool {
-        Self::flush_element_tree(self)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Document, ElementId, ElementTree, PapiError, dom};
+    use super::{Document, ElementId, ElementTree, LynxElement, PapiError, dom};
     use crate::device::Viewport;
     use crate::ua::PageConfig;
 
@@ -454,7 +412,10 @@ mod tests {
         assert_eq!(tree.page(), Some(first));
         // The second call's arguments are ignored, like web-core's.
         assert_eq!(tree.page_component_id(), "page");
-        assert_eq!(tree.component_css_id(first), Some(0));
+        assert_eq!(
+            tree.element(first).map(LynxElement::component_css_id),
+            Some(0)
+        );
     }
 
     #[test]
@@ -726,9 +687,15 @@ mod tests {
 
         assert_eq!(element.unique_id(), view);
         assert_eq!(element.node_id(), node);
-        assert_eq!(element.node(tree.document()).map(dom::Node::id), Some(node));
-        assert_eq!(tree.parent_component_unique_id(view), Some(page));
-        assert_eq!(tree.component_css_id(page), Some(17));
+        assert_eq!(
+            tree.element(view)
+                .map(LynxElement::parent_component_unique_id),
+            Some(page)
+        );
+        assert_eq!(
+            tree.element(page).map(LynxElement::component_css_id),
+            Some(17)
+        );
         assert_eq!(payload_unique_id, view);
     }
 }

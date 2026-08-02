@@ -79,13 +79,9 @@ mod stacking;
 mod tests;
 mod transform;
 
-// The crate's whole geometry vocabulary, re-exported so an embedder can name
-// every type that appears in a public signature here — `Vector2D` included:
-// scroll offsets and deltas are displacements, not positions, and they surface
-// on `Document::scroll_by`, `ScrollBox`, and `DefaultAction::Scroll`.
 use std::cell::Ref;
 
-pub use euclid::default::{Point2D, Rect, Size2D, Transform3D, Vector2D};
+use euclid::default::{Point2D, Rect, Size2D, Transform3D};
 
 use crate::document::Document;
 use crate::{ImageStore, NodeId};
@@ -100,13 +96,13 @@ use crate::{ImageStore, NodeId};
 /// mutations.
 #[derive(Debug)]
 pub(crate) struct PaintOrder {
-    pub(crate) items: Vec<PaintItem>,
-    pub(crate) clips: Vec<ClipNode>,
-    pub(crate) layers: Vec<RenderLayer>,
+    items: Vec<PaintItem>,
+    clips: Vec<ClipNode>,
+    layers: Vec<RenderLayer>,
     /// [`Document::node_removal_epoch`] at build time.
-    pub(crate) epoch: u64,
+    epoch: u64,
     /// The document's private visual-mutation epoch at build time.
-    pub(crate) visual_epoch: u64,
+    visual_epoch: u64,
 }
 
 impl PaintOrder {
@@ -127,6 +123,12 @@ impl PaintOrder {
     #[must_use]
     pub(crate) fn layers(&self) -> &[RenderLayer] {
         &self.layers
+    }
+
+    /// The document visual epoch represented by this frame.
+    #[must_use]
+    pub(crate) const fn visual_epoch(&self) -> u64 {
+        self.visual_epoch
     }
 }
 

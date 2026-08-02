@@ -30,9 +30,9 @@ JavaScript adapter:
 - `script::ScriptEngine` is the external JavaScript-engine contract. Its
   `ImportFuture<'a>` is a GAT, so implementations return concrete futures
   without boxed `dyn Future` values.
-- `lynx_element::ElementPapi` is the statically dispatched Lynx host contract.
-  The protocol and `pub type ElementId = u32` remain owned by
-  `lynx-element`; core only re-exports them.
+- `lynx-element` owns the concrete validated Element-PAPI operations and
+  `pub type ElementId = u32`. There is no element-host trait: the only real
+  host is `ElementTree`, so the QuickJS adapter composes it directly.
 - `resource` and `view` provide resource acquisition and generic engine/view
   composition. The crate root re-exports `ElementTree` and the
   `lynx_element::dom`/`pulsar` convenience paths directly; there is no Bobcat
@@ -40,7 +40,9 @@ JavaScript adapter:
   dependency.
 
 The default `quickjs` feature adds the internal QuickJS implementation,
-`QuickJsLynxView`, and `MainThreadRuntime<H: ElementPapi>`. Depending on
+`QuickJsLynxView`, and the concrete `quickjs::MainThreadRuntime`. QuickJS-only
+types have this single module path; the crate root does not duplicate their
+exports. Depending on
 `bobcat-core` with `default-features = false` excludes the QuickJS adapter and
 native QuickJS build while retaining the external engine protocols, DOM, and
 element layer. `lynx-element` has no QuickJS feature.
@@ -70,7 +72,9 @@ therefore schedule reuse without exposing the epoch to a host.
 `Document::scene` lends a guarded shared borrow of the finished scene, and
 `Document::images_mut` is the narrow resource-update seam that invalidates it
 conservatively. Neither `Painter`, the epoch, nor the private paint order is
-public.
+public. The old paint-only `paint_style`/`text_layout` reads and the entire
+`visual` module are crate-private; only the generic geometry types used by
+public input/scroll signatures are re-exported from the `dom` crate root.
 
 This ownership removes two invalid states the injected design permitted:
 
@@ -89,9 +93,10 @@ out `&mut Document`. `bobcat-core` adds no wrapper object or alias module.
    `Document<ElementId>`, and installs the Lynx UA stylesheet. The DOM payload
    is the same permanent `u32` id stored in the element arena; private DOM
    `NodeId` slots may still be reused.
-2. With QuickJS enabled, `MainThreadRuntime<ElementTree>` installs the five
-   supported Element PAPI host functions through `ElementPapi`. Script mutates
-   the validated element layer without seeing `NodeId` or mutable DOM access.
+2. With QuickJS enabled, `quickjs::MainThreadRuntime` owns one `ElementTree`
+   and installs its five supported Element PAPI host functions directly.
+   Script mutates the validated element layer without seeing `NodeId` or
+   mutable DOM access.
 3. `__FlushElementTree` attaches `<page>` on first use and commits style and
    layout. `FramePipeline` calls `ElementTree::render_if_needed`; the
    document-owned Painter decides whether its retained scene is current.
@@ -111,12 +116,13 @@ out `&mut Document`. `bobcat-core` adds no wrapper object or alias module.
 
 ## Static dispatch and intentional dynamic boundaries
 
-The JavaScript protocol, Element PAPI host, DOM payload, and Hughie layout host
-use static dispatch. Painting is concrete document behavior, so it needs no
-trait dispatch at all. Dynamic dispatch remains only where heterogeneity is
-the protocol requirement: resource fetcher handles, async byte readers, font
-providers inherited from Stylo, and resource-path leases. Those objects do not
-enter layout or scene traversal.
+The JavaScript protocol and Hughie layout host use static dispatch. The Element
+PAPI host and painting are concrete runtime/document behavior, so neither has
+a trait dispatch boundary. The DOM payload is an ordinary generic parameter.
+Dynamic dispatch remains only where heterogeneity is the protocol requirement:
+resource fetcher handles, async byte readers, font providers inherited from
+Stylo, and resource-path leases. Those objects do not enter layout or scene
+traversal.
 
 ## Validation matrix
 

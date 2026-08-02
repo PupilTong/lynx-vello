@@ -3,13 +3,13 @@
 
 #![allow(clippy::float_cmp)]
 
-use dom::NodeId;
-use dom::input::{DefaultAction, InputEvent, PointerKind, PointerPhase};
-use dom::visual::{PaintItemKind, PaintOrder, Point2D};
 use euclid::default::Vector2D;
 use stylo::queries::values::PrefersColorScheme;
 
+use crate::input::{DefaultAction, InputEvent, PointerKind, PointerPhase};
 use crate::test_common::{Doc, device_with};
+use crate::visual::{PaintItemKind, PaintOrder};
+use crate::{NodeId, Point2D};
 
 struct Harness {
     doc: Doc,

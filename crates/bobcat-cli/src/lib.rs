@@ -57,12 +57,12 @@ pub enum CliError {
     #[error("web bundle `{0}` has no `lepusCode.root` entry")]
     MissingRoot(String),
     #[error("could not initialize the main-thread runtime: {0}")]
-    RuntimeInitialization(#[source] bobcat_core::QuickJsInitializationError),
+    RuntimeInitialization(#[source] bobcat_core::quickjs::QuickJsInitializationError),
     #[error("could not run web bundle `{input}`: {source}")]
     Runtime {
         input: String,
         #[source]
-        source: bobcat_core::MainThreadError,
+        source: bobcat_core::quickjs::MainThreadError,
     },
     #[error("invalid viewport: {0}")]
     Viewport(String),

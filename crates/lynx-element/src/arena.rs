@@ -1,6 +1,6 @@
 //! Context-owned Lynx element storage.
 
-use dom::{Document, Node, NodeId};
+use dom::NodeId;
 
 use crate::ElementId;
 
@@ -17,11 +17,10 @@ fn arena_index(id: ElementId) -> Option<usize> {
 
 /// One Lynx runtime element.
 ///
-/// The actual [`Node<ElementId>`] allocation remains owned by
-/// [`Document<ElementId>`]:
+/// The actual DOM node allocation remains owned by `Document<ElementId>`:
 /// `dom` stores nodes in a reallocating slab, so retaining a node reference or
 /// pointer here would be unsound. `LynxElement` owns the stable association via
-/// [`NodeId`] and resolves the node against its document when needed.
+/// [`NodeId`]; `ElementTree` resolves it against the document when needed.
 #[derive(Debug)]
 pub struct LynxElement {
     id: ElementId,
@@ -42,15 +41,6 @@ impl LynxElement {
     #[must_use]
     pub const fn node_id(&self) -> NodeId {
         self.node
-    }
-
-    /// Resolves the DOM node this runtime element owns the association with.
-    #[must_use]
-    pub fn node<'document>(
-        &self,
-        document: &'document Document<ElementId>,
-    ) -> Option<&'document Node<ElementId>> {
-        document.get(self.node)
     }
 
     #[must_use]

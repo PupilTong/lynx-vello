@@ -2,8 +2,8 @@ use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use bobcat_core::dom::Point2D;
 use bobcat_core::dom::input::{DeltaMode, InputEvent, PointerKind, PointerPhase};
-use bobcat_core::dom::visual::Point2D;
 use bobcat_core::pulsar::gpu::{read_texture, render_params, renderer_options};
 use bobcat_core::pulsar::vello;
 use bobcat_core::pulsar::vello::peniko::Color;

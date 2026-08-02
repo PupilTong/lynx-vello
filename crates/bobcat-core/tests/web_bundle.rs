@@ -9,7 +9,8 @@
 //! wall is, so the gap is a failing assertion to update rather than a
 //! paragraph of prose that rots.
 
-use bobcat_core::{ElementTree, MainThreadRuntime, PageConfig, Viewport};
+use bobcat_core::quickjs::MainThreadRuntime;
+use bobcat_core::{ElementTree, PageConfig, Viewport};
 
 const VIEWPORT: Viewport = Viewport::new(393.0, 727.0);
 

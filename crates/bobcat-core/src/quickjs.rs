@@ -1,9 +1,9 @@
 //! Default QuickJS-backed runtime composition for Bobcat.
 //!
-//! [`mainthread`] adds the Lynx side: a realm carrying the Element PAPI, and
-//! main-thread (MTS) script execution over it.
+//! [`MainThreadRuntime`] adds the Lynx side: a realm carrying the Element PAPI,
+//! and main-thread (MTS) script execution over it.
 
-pub mod mainthread;
+mod mainthread;
 
 use std::fmt;
 use std::num::NonZeroUsize;

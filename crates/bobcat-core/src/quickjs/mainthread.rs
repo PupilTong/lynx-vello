@@ -35,9 +35,9 @@
 //!   `__AppendElement`, `__DropElement`, `__FlushElementTree` (see `lynx-element`'s crate docs). A
 //!   bundle that reaches for anything else gets a `ReferenceError` naming the missing global, which
 //!   is the intended failure: a silently wrong render would be worse.
-//! - **Element handles cross as `u32` unique-id numbers.** `__DropElement` asks the selected
-//!   [`ElementPapi`] host to retire the handle; this layer does not add an object wrapper or GC
-//!   policy around those ids.
+//! - **Element handles cross as `u32` unique-id numbers.** `__DropElement` asks the owned
+//!   [`ElementTree`] to retire the handle; this layer does not add an object wrapper or GC policy
+//!   around those ids.
 //! - **The non-element main-thread globals are absent** (`lynx`, `SystemInfo`, `__globalProps`,
 //!   `_ReportError`, `__OnLifecycleEvent`, `__LoadLepusChunk`, `_I18nResourceTranslation`,
 //!   `_AddEventListener`, `__QueryComponent`).
@@ -53,7 +53,7 @@ use quickjs_rust_bridge::{self as quickjs, HostFunctionError, HostValue};
 
 use super::{QuickJsInitializationError, QuickJsScriptEngine};
 use crate::script::ScriptError;
-use crate::{ElementId, ElementPapi};
+use crate::{ElementId, ElementTree};
 
 /// The source name `QuickJS` reports for the main-thread bundle.
 const MAIN_THREAD_SOURCE_NAME: &str = "main-thread.js";
@@ -119,12 +119,12 @@ impl fmt::Display for MainThreadError {
 impl std::error::Error for MainThreadError {}
 
 /// One `QuickJS` realm carrying the Lynx Element PAPI over one element tree.
-pub struct MainThreadRuntime<H: ElementPapi> {
+pub struct MainThreadRuntime {
     engine: QuickJsScriptEngine,
-    elements: Rc<RefCell<H>>,
+    elements: Rc<RefCell<ElementTree>>,
 }
 
-impl<H: ElementPapi> fmt::Debug for MainThreadRuntime<H> {
+impl fmt::Debug for MainThreadRuntime {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("MainThreadRuntime")
@@ -132,10 +132,10 @@ impl<H: ElementPapi> fmt::Debug for MainThreadRuntime<H> {
     }
 }
 
-impl<H: ElementPapi> MainThreadRuntime<H> {
+impl MainThreadRuntime {
     /// Creates a realm over `elements` and installs the Element PAPI before
     /// any script has run.
-    pub fn new(elements: H) -> Result<Self, QuickJsInitializationError> {
+    pub fn new(elements: ElementTree) -> Result<Self, QuickJsInitializationError> {
         let mut engine = QuickJsScriptEngine::new()?;
         let elements = Rc::new(RefCell::new(elements));
         install_element_papi(&mut engine.realm, &elements)
@@ -145,14 +145,14 @@ impl<H: ElementPapi> MainThreadRuntime<H> {
 
     /// The element tree the PAPI mutates — the document to lay out and paint.
     #[must_use]
-    pub fn elements(&self) -> Ref<'_, H> {
+    pub fn elements(&self) -> Ref<'_, ElementTree> {
         self.elements.borrow()
     }
 
     /// The element tree, mutably, for the ingestion this crate does not own
     /// yet (decoded `StyleInfo`, fonts).
     #[must_use]
-    pub fn elements_mut(&mut self) -> RefMut<'_, H> {
+    pub fn elements_mut(&mut self) -> RefMut<'_, ElementTree> {
         self.elements.borrow_mut()
     }
 
@@ -205,9 +205,9 @@ impl<H: ElementPapi> MainThreadRuntime<H> {
 ///
 /// web-core does the equivalent with one `Object.assign` of a closure literal;
 /// each closure here captures the same shared tree.
-fn install_element_papi<H: ElementPapi>(
+fn install_element_papi(
     realm: &mut quickjs::Realm,
-    elements: &Rc<RefCell<H>>,
+    elements: &Rc<RefCell<ElementTree>>,
 ) -> Result<(), quickjs::Error> {
     // `__CreatePage(componentID, componentCSSID)` — idempotent; returns the
     // page's unique id.

@@ -124,15 +124,16 @@ useful signal for currently-compatible versions of those libraries.
   `ScriptEngine::ImportFuture<'a>` is a GAT so external engines return their
   own future type and remain statically dispatched. The default `quickjs`
   feature adds the internal QuickJS adapter,
-  opaque QuickJS-backed view factory, and `MainThreadRuntime<H: ElementPapi>`;
+  opaque QuickJS-backed view factory, and the concrete
+  `quickjs::MainThreadRuntime`;
   `default-features = false` excludes QuickJS while preserving all external
   injection contracts. Workspace dependencies disable defaults explicitly;
   only an upper layer that wants the built-in engine enables `quickjs`.
   The core depends on `lynx-element` rather than directly on `dom`, and
-  directly re-exports the Lynx-owned `ElementPapi` contract,
-  `lynx_element::ElementTree`, and the `lynx_element::dom`/`pulsar`
-  convenience paths. It has no document alias module, renderer wrapper, or
-  injection seam. `MainThreadRuntime`
+  directly re-exports `lynx_element::ElementTree` and the
+  `lynx_element::dom`/`pulsar` convenience paths. It has no document alias
+  module, element-host trait, renderer wrapper, or injection seam.
+  `MainThreadRuntime`
   installs the Element PAPI before evaluation, evaluates a `.web.bundle`'s
   `lepusCode.root` inside web-core's wrapper, then runs `processData` →
   `renderPage` → `__FlushElementTree`. Five of web-core's 61 PAPI members are
@@ -205,8 +206,9 @@ useful signal for currently-compatible versions of those libraries.
   stylo `Device` construction, and the Lynx UA cascade defaults
   (`display: linear`, `box-sizing: border-box`, `overflow: hidden`, under the
   `defaultDisplayLinear` / `defaultOverflowVisible` page-config switches).
-  This crate defines `type ElementId = u32` and the static `ElementPapi`
-  contract; `bobcat-core` only re-exports them and `dom` knows neither name.
+  This crate defines `type ElementId = u32` and the concrete, validated
+  Element-PAPI operations on `ElementTree`; `bobcat-core` composes that type
+  directly and `dom` knows neither vocabulary.
   `ElementTree` owns a `dom::Document<ElementId>` plus an independent
   `Vec<Option<LynxElement>>` arena. This crate depends directly on `dom` and
   never directly on Bobcat, Pulsar, or a JavaScript engine. The DOM payload is only the permanent
@@ -354,7 +356,7 @@ useful signal for currently-compatible versions of those libraries.
   the retained Vello scene. Item clip chains diff against Vello layers;
   `RenderLayer` scopes composite opacity, filters, clip paths, and masks; box
   fragments paint shadows, backgrounds, replaced content, borders, outlines,
-  and retained Parley glyphs. Style access is `Document::paint_style`
+  and retained Parley glyphs. Internal style access is `Document::paint_style`
   (post-flush, no `Arc` bump), geometry is the rounded layout, and the
   document Device supplies viewport/DPR so paint cannot disagree with layout.
   The authoritative paint limits are recorded in
@@ -531,7 +533,7 @@ useful signal for currently-compatible versions of those libraries.
   `docs/tracking/` for the behavior surface each will need to cover before
   scaffolding begins, and `.claude/agents/` for the subsystem-scoped agent
   personas already set up for this work. `crates/lynx-element` and
-  `crates/bobcat-core`'s feature-gated `quickjs::mainthread` module are the first pieces of this
+  `crates/bobcat-core`'s feature-gated `quickjs` module are the first pieces of this
   layer to land; the background thread, `StyleInfo` ingestion, the event
   model, and the other 56 Element PAPI members are still ahead.
 

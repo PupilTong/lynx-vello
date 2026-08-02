@@ -74,7 +74,7 @@ impl Painter {
         // Publish freshness only after the walk completed. If painting
         // panics, the partial scene must remain stale and be rebuilt on the
         // next attempt.
-        self.scene_epoch = Some(frame.visual_epoch);
+        self.scene_epoch = Some(frame.visual_epoch());
     }
 
     pub(crate) fn needs_render(&self, visual_epoch: u64) -> bool {

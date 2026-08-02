@@ -13,7 +13,8 @@
 //! `FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p bobcat-core --test screenshots`.
 
 use bobcat_core::pulsar::gpu::Headless;
-use bobcat_core::{ElementTree, MainThreadRuntime, PageConfig, Viewport};
+use bobcat_core::quickjs::MainThreadRuntime;
+use bobcat_core::{ElementTree, PageConfig, Viewport};
 use flashbulb::vello::peniko::{Blob, Color, ImageAlphaType, ImageData, ImageFormat};
 use flashbulb::{Image, Screenshots, capture_scene, headless};
 

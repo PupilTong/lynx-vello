@@ -24,9 +24,10 @@ mod painter;
 pub mod scroll;
 mod shape;
 mod traits;
-pub mod visual;
+mod visual;
 mod walker;
 
+pub use euclid::default::{Point2D, Size2D, Vector2D};
 pub(crate) use pulsar::vello;
 pub use pulsar::{self, ImageStore};
 pub use stylo::device::Device;

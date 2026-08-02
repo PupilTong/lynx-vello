@@ -76,8 +76,7 @@ impl<T> Document<T> {
     ///
     /// Panics on a vacant or non-element `NodeId`, and — through
     /// [`Document::invalidate_layout`] — when a style traversal has been started
-    /// and did not complete. Call it between flushes, the same precondition
-    /// [`Document::paint_style`] documents.
+    /// and did not complete. Call it between completed layout passes.
     pub fn set_natural_size(&mut self, id: crate::NodeId, natural_size: NaturalSize) {
         let changed = {
             let node = self
@@ -200,7 +199,7 @@ impl<T> Document<T> {
     /// runs from. `None` for non-text nodes and for text the layout pass has
     /// not committed (e.g. inside `display: none` or skipped subtrees).
     #[must_use]
-    pub fn text_layout(&self, id: crate::NodeId) -> Option<&TextLayout> {
+    pub(crate) fn text_layout(&self, id: crate::NodeId) -> Option<&TextLayout> {
         self.layout_state()
             .nodes
             .get(id)?
@@ -221,7 +220,7 @@ impl<T> Document<T> {
     /// [`Document::layout`] or [`Document::render`] within the same borrow of
     /// the document.
     #[must_use]
-    pub fn paint_style(&self, id: crate::NodeId) -> Option<&ComputedValues> {
+    pub(crate) fn paint_style(&self, id: crate::NodeId) -> Option<&ComputedValues> {
         assert!(
             self.root_node().layout_styles_ready(),
             "computed styles are unavailable because the preceding style traversal did not complete"
