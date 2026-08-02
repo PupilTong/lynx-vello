@@ -128,10 +128,10 @@ useful signal for currently-compatible versions of those libraries.
   `default-features = false` excludes QuickJS while preserving all external
   injection contracts. Workspace dependencies disable defaults explicitly;
   only an upper layer that wants the built-in engine enables `quickjs`.
-  The core depends on `lynx-element` rather than directly on `dom`, re-exports
-  both the Lynx-owned `ElementPapi` contract and `lynx_element::dom`, and exposes
-  `bobcat_core::document::Document<T> = dom::Document<T>` plus
-  `lynx_element::ElementTree` directly; it owns no renderer wrapper or
+  The core depends on `lynx-element` rather than directly on `dom`, and
+  directly re-exports the Lynx-owned `ElementPapi` contract,
+  `lynx_element::ElementTree`, and the `lynx_element::dom`/`pulsar`
+  convenience paths. It has no document alias module, renderer wrapper, or
   injection seam. `MainThreadRuntime`
   installs the Element PAPI before evaluation, evaluates a `.web.bundle`'s
   `lepusCode.root` inside web-core's wrapper, then runs `processData` →
@@ -222,8 +222,9 @@ useful signal for currently-compatible versions of those libraries.
   crash-on-misuse. `ElementTree` never lends out `&mut Document`: a caller that
   removed or moved nodes directly would desynchronise the element arena, the
   page state, and the next PAPI call would panic in the DOM instead of returning
-  `PapiError`. `render`, guarded `scene`/`images` borrows, and `images_mut`
-  delegate to the document without exposing its private Painter or mutable DOM.
+  `PapiError`. `render_if_needed`/`needs_render`, the guarded `scene` borrow,
+  and `images_mut` delegate to the document without exposing its private
+  Painter, mutation epoch, or mutable DOM.
   No public `paint_order` exists on either `ElementTree` or `Document`, and
   input builds its temporary hit-test frame internally. It does not impose a runtime
   tree-depth cap; recursive traversal hardening belongs in `dom`/`hughie`.
@@ -249,11 +250,14 @@ useful signal for currently-compatible versions of those libraries.
   primary nodes; layout/text state does not.
   `Document<T>` also owns one private concrete `Painter`, including its
   reusable walk scratch, retained `vello::Scene`, and `pulsar::ImageStore`.
-  `Document::render` privately builds `PaintOrder` and invokes that painter;
-  `scene` and `images` lend guarded shared borrows, while `images_mut` is the
-  narrow resource-update seam and advances `visual_epoch`. There is no
-  renderer type parameter, `DocumentRenderer` trait, `with_renderer`, public
-  Painter, or public paint-order constructor. `dom` depends directly on
+  `Document::render` privately builds `PaintOrder` and invokes that painter.
+  The Painter records which private visual epoch its scene represents, so
+  `render_if_needed`/`needs_render` own retained-scene scheduling without
+  publishing that epoch. `scene` lends a guarded shared borrow, while
+  `images_mut` is the narrow resource-update seam and invalidates the scene
+  conservatively. There is no renderer type parameter,
+  `DocumentRenderer` trait, `with_renderer`, public Painter, public visual
+  epoch, or public paint-order constructor. `dom` depends directly on
   `pulsar`; Pulsar never depends back on DOM.
   Every node points directly back only to `TreeArenas`, and the
   same plain one-word `&Node` implements Stylo's document/node/element traits
@@ -510,7 +514,7 @@ useful signal for currently-compatible versions of those libraries.
   PNGs written to a git-ignored `tests/artifacts/` on failure. A newly
   *created* golden fails its own run so an unreviewed baseline cannot pass;
   an explicitly *accepted* one does not. The optional `render` feature adds
-  `capture_document` (`Document::render` → retained scene → Pulsar headless GPU) over the whole painted
+  `capture_document` (`Document::render_if_needed` → retained scene → Pulsar headless GPU) over the whole painted
   frame, `viewport * device_pixel_ratio` device pixels — `pulsar` scales the
   scene up by that ratio, so anything smaller is a crop. Playwright instead
   downsamples to CSS pixels; the two coincide at a ratio of 1, which is what

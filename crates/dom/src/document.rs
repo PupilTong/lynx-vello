@@ -332,7 +332,7 @@ impl<T> Document<T> {
     /// can be recycled by a later creation, so a private visual frame is only
     /// valid for hit testing while this value is unchanged.
     #[must_use]
-    pub fn node_removal_epoch(&self) -> u64 {
+    pub(crate) fn node_removal_epoch(&self) -> u64 {
         self.node_removal_epoch
     }
 
@@ -341,7 +341,7 @@ impl<T> Document<T> {
     /// [`Self::node_removal_epoch`] — its geometry snapshot is
     /// self-contained).
     #[must_use]
-    pub fn visual_epoch(&self) -> u64 {
+    pub(crate) fn visual_epoch(&self) -> u64 {
         self.visual_epoch
     }
 
@@ -817,7 +817,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_document_owns_render_resources_and_retains_its_scene() {
+    fn the_document_owns_render_resources_and_schedules_its_scene() {
         let mut document = Document::new(device());
         document.add_stylesheet(
             "page { width: 10px; height: 10px; background-color: red; }",
@@ -825,14 +825,16 @@ pub(crate) mod tests {
         );
         let root = document.create_element("page", ());
         document.append_document_element(root);
-        let epoch = document.visual_epoch();
+
+        assert!(document.needs_render());
+        assert!(document.render_if_needed());
+        assert!(!document.needs_render());
+        assert!(!document.render_if_needed());
+        assert!(!document.scene().encoding().draw_tags.is_empty());
 
         let _ = document.images_mut().remove_url("missing");
-        assert_eq!(document.visual_epoch(), epoch + 1);
-
-        document.render();
-
-        assert!(!document.scene().encoding().draw_tags.is_empty());
+        assert!(document.needs_render());
+        assert!(document.render_if_needed());
     }
 
     #[test]

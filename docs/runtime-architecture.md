@@ -34,9 +34,10 @@ JavaScript adapter:
   The protocol and `pub type ElementId = u32` remain owned by
   `lynx-element`; core only re-exports them.
 - `resource` and `view` provide resource acquisition and generic engine/view
-  composition. `document` re-exports the concrete `Document<T>` through
-  `lynx-element` and re-exports `ElementTree`; it performs no renderer
-  specialization and adds no direct `dom` dependency.
+  composition. The crate root re-exports `ElementTree` and the
+  `lynx_element::dom`/`pulsar` convenience paths directly; there is no Bobcat
+  document wrapper or renderer specialization, and core adds no direct `dom`
+  dependency.
 
 The default `quickjs` feature adds the internal QuickJS implementation,
 `QuickJsLynxView`, and `MainThreadRuntime<H: ElementPapi>`. Depending on
@@ -63,10 +64,13 @@ Document<T>
 ```
 
 `Document::render` performs layout, builds the private CSS visual order, and
-rebuilds the retained scene. `Document::scene` lends a guarded shared borrow of
-that finished scene. `Document::images_mut` is the narrow resource-update seam
-and advances `visual_epoch` conservatively. Neither `Painter` nor the private
-paint order is public.
+rebuilds the retained scene. The Painter records the private mutation epoch
+represented by that scene; `Document::render_if_needed` and `needs_render`
+therefore schedule reuse without exposing the epoch to a host.
+`Document::scene` lends a guarded shared borrow of the finished scene, and
+`Document::images_mut` is the narrow resource-update seam that invalidates it
+conservatively. Neither `Painter`, the epoch, nor the private paint order is
+public.
 
 This ownership removes two invalid states the injected design permitted:
 
@@ -76,9 +80,8 @@ This ownership removes two invalid states the injected design permitted:
   styles or layout.
 
 `lynx_element::ElementTree` directly owns `Document<ElementId>` and delegates
-`render`, `scene`, `images`, and `images_mut` without lending out
-`&mut Document`. `bobcat-core` adds no wrapper object; its document module is a
-type alias/re-export layer.
+`render_if_needed`, `needs_render`, `scene`, and `images_mut` without lending
+out `&mut Document`. `bobcat-core` adds no wrapper object or alias module.
 
 ## Frame walkthrough
 
@@ -90,9 +93,9 @@ type alias/re-export layer.
    supported Element PAPI host functions through `ElementPapi`. Script mutates
    the validated element layer without seeing `NodeId` or mutable DOM access.
 3. `__FlushElementTree` attaches `<page>` on first use and commits style and
-   layout. `FramePipeline` watches `Document::visual_epoch` and skips a static
-   scene.
-4. For a dirty frame, `ElementTree::render` calls `Document::render`. DOM
+   layout. `FramePipeline` calls `ElementTree::render_if_needed`; the
+   document-owned Painter decides whether its retained scene is current.
+4. For a dirty frame, `render_if_needed` calls `Document::render`. DOM
    flushes/layouts, creates its temporary visual order, and runs its private
    Painter over live styles, rounded layouts, retained text, and the
    document-owned `ImageStore`.
@@ -100,8 +103,8 @@ type alias/re-export layer.
    headless CLI backends borrow that same scene and submit it through Pulsar's
    GPU helpers; neither backend duplicates DOM traversal or paint policy.
 6. `Document::handle_input` builds the same private visual model for hit
-   testing and performs the resolved default action. Scrolling advances
-   `visual_epoch`, so the next prepared frame rebuilds the scene.
+   testing and performs the resolved default action. Scrolling invalidates the
+   retained scene, so the next prepared frame rebuilds it.
 7. A screenshot reads back the live scene through the mandatory GPU path.
    There is no no-adapter fallback in local tests or CI, and replaced content
    necessarily comes from the document's own image registry.

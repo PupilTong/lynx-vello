@@ -77,7 +77,7 @@ still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
 | Layer | Owns | Must not own |
 | --- | --- | --- |
 | `dom` | `Document<T>` and its aligned arenas; DOM topology and attributes; private style context; invalidation-carrying mutation; inline parsing; matching, cascade, media evaluation, computed values; `StyleDamage`/`FlushSummary`; the concrete `hughie` host; private visual order, `Painter`, `ImageStore`, and retained Vello scene | Pluggable renderer policy, Lynx tags or Element-PAPI opcodes, JS handle lifetime, payload semantics, `<page>` policy, bundle decoding/`StyleInfo` lowering, Lynx UA defaults, view metrics, GPU surface/window policy |
-| `bobcat-core` | Engine-neutral resource/script/view contracts; GAT-based external `ScriptEngine`; direct composition of `lynx-element::ElementTree`; re-exported `ElementPapi` and `Document<T>`; optional default QuickJS adapter and MTS host globals | Ownership of Lynx tag/root/UA policy, CSS/layout/paint algorithms |
+| `bobcat-core` | Engine-neutral resource/script/view contracts; GAT-based external `ScriptEngine`; direct re-export of `lynx-element::ElementTree` and `ElementPapi`; optional default QuickJS adapter and MTS host globals | A document wrapper; ownership of Lynx tag/root/UA policy or CSS/layout/paint algorithms |
 | `pulsar` | Opaque `ImageStore`; Vello version/re-export boundary; headed/headless GPU submission and readback helpers | `Document`, `NodeId`, computed styles, layout, paint order, Lynx runtime vocabulary, or DOM mutation policy |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, and the maintained Lynx CSS extension grammar behind the `lynx` feature | Runtime protocol, document ownership, bundle ingestion, or host policy |
 | `lynx-element` (the runtime adapter) | `ElementId = u32` and `ElementPapi`; validation; an independent context-owned `Vec<Option<LynxElement>>` with monotone, never-reused ids, a permanent null slot at index 0, and permanent retirement tombstones; that same unique id carried by each DOM node; `ElementTree`; `<page>` root policy; view metrics and device construction; UA stylesheet generation; narrow render/scene/image delegation | Bobcat, QuickJS, a direct Pulsar dependency, a second DOM, matcher, cascade, layout/paint algorithms, public `PaintOrder`, or direct writes to traversal/computed-style internals |
@@ -107,10 +107,11 @@ still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
 7. `Document::layout` flushes styles before invoking the concrete
    `hughie` host. Computed values are lent directly from each node's
    Stylo `ElementData`, without an adapter-side style copy.
-8. `ElementTree::render` calls `Document::render`: the document builds its
-   private paint order, invokes its private concrete Painter, and retains the
-   Vello scene. `ElementTree::scene` delegates the guarded borrow without
-   cloning the scene or exposing Painter.
+8. `ElementTree::render_if_needed` asks the document-owned Painter whether its
+   retained scene is current. A dirty document runs `Document::render`, which
+   builds the private paint order and retains the resulting Vello scene;
+   `ElementTree::scene` delegates the guarded borrow without cloning the scene,
+   exposing Painter, or publishing the internal epoch.
 
 ## Runtime integration status
 

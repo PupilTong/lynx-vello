@@ -238,9 +238,8 @@ impl<T> Document<T> {
     /// actually applied.
     ///
     /// Scrolling moves painted content but neither restyles nor relayouts, so
-    /// this invalidates the visual frame only: rebuild the
-    /// [`crate::visual::PaintOrder`] afterwards, but expect no style or layout
-    /// work.
+    /// this invalidates the private visual frame only: the next paint or hit
+    /// test rebuilds it, but performs no style or layout work.
     ///
     /// A non-finite component is clamped to `0.0` rather than stored: this
     /// crate re-clamps on read, so a stored NaN would never wash out. The
@@ -344,7 +343,7 @@ impl<T> Document<T> {
 
     /// The nearest box at or above `id` that the user may scroll along at
     /// least one of `axes`, walking the containing-block chain
-    /// ([`Self::scroll_parent`]) so the answer agrees with what actually moves
+    /// (`scroll_parent`) so the answer agrees with what actually moves
     /// on screen.
     ///
     /// A box that is user-scrollable but already pinned at both boundaries

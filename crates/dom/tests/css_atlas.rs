@@ -140,18 +140,12 @@ mod generated {
 }
 
 #[derive(Debug)]
-enum GpuAvailability {
-    Ready(Box<Mutex<Headless>>),
-    Failed(Arc<str>),
-}
-
-#[derive(Debug)]
 enum ShardOutcome {
     Ready(Image),
     Failed(Arc<str>),
 }
 
-static GPU: OnceLock<GpuAvailability> = OnceLock::new();
+static GPU: OnceLock<Mutex<Headless>> = OnceLock::new();
 static SHARDS: [OnceLock<ShardOutcome>; SHARD_COUNT] = [const { OnceLock::new() }; SHARD_COUNT];
 static AUDIT_WRITE: Mutex<()> = Mutex::new(());
 static AUDIT_TARGET: OnceLock<PathBuf> = OnceLock::new();
@@ -360,29 +354,22 @@ fn assert_flashbulb_update_disabled() {
     );
 }
 
-fn init_gpu() -> GpuAvailability {
-    match Headless::new() {
-        Ok(gpu) => GpuAvailability::Ready(Box::new(Mutex::new(gpu))),
-        Err(error) => GpuAvailability::Failed(Arc::from(format!(
-            "mandatory GPU initialization failed: {error}"
-        ))),
-    }
+fn init_gpu() -> Mutex<Headless> {
+    let gpu = Headless::new()
+        .unwrap_or_else(|error| panic!("mandatory GPU initialization failed: {error}"));
+    Mutex::new(gpu)
 }
 
 fn render_shard(shard: usize) -> ShardOutcome {
-    match GPU.get_or_init(init_gpu) {
-        GpuAvailability::Failed(error) => ShardOutcome::Failed(Arc::clone(error)),
-        GpuAvailability::Ready(gpu) => {
-            let mut gpu = gpu
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let result = catch_unwind(AssertUnwindSafe(|| build_and_render(shard, &mut gpu)));
-            match result {
-                Ok(Ok(image)) => ShardOutcome::Ready(image),
-                Ok(Err(error)) => ShardOutcome::Failed(Arc::from(error)),
-                Err(payload) => ShardOutcome::Failed(Arc::from(panic_message(payload.as_ref()))),
-            }
-        }
+    let mut gpu = GPU
+        .get_or_init(init_gpu)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let result = catch_unwind(AssertUnwindSafe(|| build_and_render(shard, &mut gpu)));
+    match result {
+        Ok(Ok(image)) => ShardOutcome::Ready(image),
+        Ok(Err(error)) => ShardOutcome::Failed(Arc::from(error)),
+        Err(payload) => ShardOutcome::Failed(Arc::from(panic_message(payload.as_ref()))),
     }
 }
 

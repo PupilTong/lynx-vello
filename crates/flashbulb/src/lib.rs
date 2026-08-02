@@ -26,7 +26,7 @@
 //!   anything a GPU rasterizer guarantees across drivers; and it contradicts the project's own
 //!   compatibility bar, which is behavioral rather than pixel-perfect. See [`compare`].
 //! - **Captures cover the whole painted frame** — `viewport * device_pixel_ratio` device pixels
-//!   (see [`frame_size`]). Playwright captures at `scale: 'css'` instead, downsampling to one image
+//!   (see `frame_size`). Playwright captures at `scale: 'css'` instead, downsampling to one image
 //!   pixel per CSS pixel; we have no resampler, so the two agree exactly at a device pixel ratio of
 //!   1, which is what lynx-stack pins for determinism anyway (`--force-device-scale-factor=1` on
 //!   Chromium, `deviceScaleFactor: 1` on Firefox).
@@ -49,11 +49,11 @@
 //! # Features
 //!
 //! - default: [`Image`], [`compare`], [`Screenshots`] — pixels in, verdict out, no render stack.
-//! - `render`: adds [`capture_document`] and [`headless`], which pull in `dom` and `pulsar`.
+//! - `render`: adds `capture_document` and `headless`, which pull in `dom` and `pulsar`.
 //!
 //! # Captures need a GPU
 //!
-//! [`headless`] requires a usable adapter. A missing adapter fails the test,
+//! `headless` requires a usable adapter. A missing adapter fails the test,
 //! including in CI, so a green screenshot suite always means pixels were
 //! rendered and compared.
 

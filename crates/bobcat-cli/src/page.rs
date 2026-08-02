@@ -85,7 +85,6 @@ impl Program {
             runtime,
             viewport,
             frame_size,
-            painted_epoch: None,
         })
     }
 }
@@ -116,10 +115,6 @@ pub(crate) struct FramePipeline {
     runtime: MainThreadRuntime<ElementTree>,
     viewport: Viewport,
     frame_size: FrameSize,
-    /// The document's `visual_epoch` the painted scene reflects; `None`
-    /// until the first paint (and after a resize, which must repaint
-    /// unconditionally).
-    painted_epoch: Option<u64>,
 }
 
 impl std::fmt::Debug for FramePipeline {
@@ -128,7 +123,6 @@ impl std::fmt::Debug for FramePipeline {
             .debug_struct("FramePipeline")
             .field("viewport", &self.viewport)
             .field("frame_size", &self.frame_size)
-            .field("painted_epoch", &self.painted_epoch)
             .finish_non_exhaustive()
     }
 }
@@ -160,22 +154,14 @@ impl FramePipeline {
         }
         self.viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
         self.frame_size = next_size;
-        self.painted_epoch = None;
         Ok(())
     }
 
     pub(crate) fn prepare_frame(&mut self) -> PreparedFrame<'_> {
-        let changed;
-        {
+        let changed = {
             let mut elements = self.runtime.elements_mut();
-            changed = self.painted_epoch != Some(elements.document().visual_epoch());
-            if changed {
-                elements.render();
-                // Read the epoch after the flush so any bookkeeping done
-                // during rendering is folded into the retained state.
-                self.painted_epoch = Some(elements.document().visual_epoch());
-            }
-        }
+            elements.render_if_needed()
+        };
         PreparedFrame {
             elements: self.runtime.elements(),
             size: self.frame_size,
@@ -199,7 +185,7 @@ impl FramePipeline {
     /// reflect yet.
     #[cfg(target_os = "macos")]
     pub(crate) fn needs_frame(&self) -> bool {
-        self.painted_epoch != Some(self.runtime.elements().document().visual_epoch())
+        self.runtime.elements().needs_render()
     }
 }
 

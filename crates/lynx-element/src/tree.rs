@@ -89,21 +89,23 @@ impl ElementTree {
         &self.document
     }
 
-    /// Lays out and renders through the document's private paint pipeline.
-    pub fn render(&mut self) {
-        self.document.render();
+    /// Renders only when the document-owned retained scene is stale. Returns
+    /// whether a new scene was built.
+    pub fn render_if_needed(&mut self) -> bool {
+        self.document.render_if_needed()
     }
 
-    /// The Vello scene retained by the last [`Self::render`] call.
+    /// Whether the document has visual changes not represented by its
+    /// retained scene yet.
+    #[must_use]
+    pub fn needs_render(&self) -> bool {
+        self.document.needs_render()
+    }
+
+    /// The Vello scene retained by the last [`Self::render_if_needed`] call.
     #[must_use]
     pub fn scene(&self) -> Ref<'_, Scene> {
         self.document.scene()
-    }
-
-    /// Decoded images registered with the document's paint pipeline.
-    #[must_use]
-    pub fn images(&self) -> Ref<'_, ImageStore> {
-        self.document.images()
     }
 
     /// Registers or updates decoded images without exposing DOM topology or

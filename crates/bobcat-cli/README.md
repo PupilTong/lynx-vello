@@ -2,7 +2,9 @@
 
 `bobcat-cli` builds the `bobcat` executable. It accepts a local Lynx web bundle
 as a `file:///` URL and renders it through `bobcat-core/quickjs` →
-`lynx-element` → `dom`/`hughie`, with Pulsar injected by core.
+`lynx-element` → `dom`/`hughie`; DOM owns the Pulsar-backed scene pipeline
+internally, while core only provides the convenience re-export used by the
+CLI's GPU host.
 
 ```sh
 # Native macOS window

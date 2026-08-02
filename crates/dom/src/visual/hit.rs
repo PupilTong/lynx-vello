@@ -34,8 +34,9 @@ impl PaintOrder {
     ///
     /// # Panics
     ///
-    /// Panics when [`Document::visual_epoch`] (or the removal epoch) moved
-    /// after this frame was built; the DOM's next visual operation rebuilds it.
+    /// Panics when the document's private visual-mutation epoch (or the
+    /// removal epoch) moved after this frame was built; the DOM's next visual
+    /// operation rebuilds it.
     pub(crate) fn assert_visually_fresh<T>(&self, document: &Document<T>) {
         self.assert_fresh(document);
         assert_eq!(

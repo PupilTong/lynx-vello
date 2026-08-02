@@ -49,6 +49,9 @@ pub(crate) struct Painter {
     scene: Scene,
     scratch: crate::walker::Scratch,
     images: ImageStore,
+    /// The document visual epoch represented by `scene`. `None` means this
+    /// painter has never completed a frame.
+    scene_epoch: Option<u64>,
 }
 
 impl std::fmt::Debug for Painter {
@@ -59,6 +62,7 @@ impl std::fmt::Debug for Painter {
 
 impl Painter {
     pub(crate) fn paint<T>(&mut self, document: &Document<T>, frame: &PaintOrder) {
+        self.scene_epoch = None;
         self.scene.reset();
         crate::walker::walk(
             &mut self.scene,
@@ -67,14 +71,18 @@ impl Painter {
             frame,
             &self.images,
         );
+        // Publish freshness only after the walk completed. If painting
+        // panics, the partial scene must remain stale and be rebuilt on the
+        // next attempt.
+        self.scene_epoch = Some(frame.visual_epoch);
+    }
+
+    pub(crate) fn needs_render(&self, visual_epoch: u64) -> bool {
+        self.scene_epoch != Some(visual_epoch)
     }
 
     pub(crate) const fn scene(&self) -> &Scene {
         &self.scene
-    }
-
-    pub(crate) const fn images(&self) -> &ImageStore {
-        &self.images
     }
 
     pub(crate) const fn images_mut(&mut self) -> &mut ImageStore {
@@ -84,11 +92,12 @@ impl Painter {
 
 #[cfg(test)]
 mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
     use crate::{Document, StylesheetOrigin};
 
     #[test]
-    #[should_panic(expected = "visually stale PaintOrder")]
-    fn painting_a_frame_built_before_a_style_mutation_panics() {
+    fn a_failed_paint_cannot_leave_a_partial_scene_marked_current() {
         let mut document = Document::new(crate::document::tests::device());
         document.add_stylesheet(
             "page { width: 10px; height: 10px; background-color: teal; }",
@@ -102,6 +111,11 @@ mod tests {
         document.layout();
 
         let mut painter = document.painter.take();
-        painter.paint(&document, &frame);
+        let current_epoch = document.visual_epoch();
+        painter.scene_epoch = Some(current_epoch);
+        let result = catch_unwind(AssertUnwindSafe(|| painter.paint(&document, &frame)));
+
+        assert!(result.is_err(), "the stale frame must fail closed");
+        assert!(painter.needs_render(current_epoch));
     }
 }
