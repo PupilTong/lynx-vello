@@ -156,6 +156,7 @@ impl ElementTree {
 
     /// The `componentID` the page was created with; empty before
     /// `__CreatePage`.
+    #[cfg(test)]
     #[must_use]
     pub fn page_component_id(&self) -> &str {
         &self.page_component_id
@@ -163,6 +164,7 @@ impl ElementTree {
 
     /// Whether the page has been attached to the document — i.e. whether
     /// `__FlushElementTree` has committed at least once.
+    #[cfg(test)]
     #[must_use]
     pub const fn is_flushed(&self) -> bool {
         self.page_attached

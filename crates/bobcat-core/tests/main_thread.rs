@@ -54,7 +54,7 @@ fn a_card_root_builds_its_tree_through_the_papi() {
 
     let elements = runtime.elements();
     assert_eq!(page_child_tags(&elements), ["view", "view"]);
-    assert!(elements.is_flushed());
+    assert!(elements.document().root_element().is_some());
 }
 
 #[test]
@@ -192,7 +192,6 @@ fn the_page_is_not_in_the_document_until_the_tree_is_flushed() {
     assert!(runtime.elements().page().is_none());
 
     runtime.render_page().expect("render");
-    assert!(runtime.elements().is_flushed());
     assert!(runtime.elements().document().root_element().is_some());
 }
 
