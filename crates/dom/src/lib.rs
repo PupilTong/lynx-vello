@@ -24,6 +24,7 @@ mod paint;
 mod painter;
 pub mod scroll;
 mod shape;
+mod stylo_data;
 mod traits;
 mod visual;
 mod walker;

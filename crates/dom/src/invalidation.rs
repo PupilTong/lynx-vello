@@ -371,8 +371,8 @@ impl<T> Document<T> {
 }
 
 fn insert_restyle_hint<T>(node: &mut Node<T>, hint: RestyleHint) {
-    if let Some(wrapper) = node.stylo_data_mut() {
-        wrapper.borrow_mut().hint.insert(hint);
+    if let Some(mut data) = node.stylo_data_mut() {
+        data.hint.insert(hint);
     }
 }
 
