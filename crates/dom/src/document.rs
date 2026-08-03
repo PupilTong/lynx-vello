@@ -694,8 +694,7 @@ impl<T> Document<T> {
                     .styling
                     .get_mut(current)
                     .expect("live node must have styling-arena state");
-                let harvested = node.stylo_data_mut().and_then(|wrapper| {
-                    let mut data = wrapper.borrow_mut();
+                let harvested = node.stylo_data_mut().and_then(|mut data| {
                     let damage = data.damage;
                     data.clear_restyle_state();
                     (!damage.is_empty()).then(|| StyleDamage::from(damage))
