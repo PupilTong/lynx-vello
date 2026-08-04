@@ -2,14 +2,15 @@
 //! to hughie without cloning its `Arc` or re-entering Stylo's runtime
 //! borrow checker.
 
+use hughie::style::containment::effective_containment;
 use hughie::style::{
-    Contain, CoreStyle, Display, PositionProperty, TextContainerStyle, TextRunStyle,
+    Contain, ContentVisibility, CoreStyle, Display, PositionProperty, TextContainerStyle,
+    TextRunStyle,
 };
 use stylo::properties::ComputedValues;
 use stylo::values::computed::motion::OffsetPath;
 use stylo::values::specified::box_::{DisplayInside, DisplayOutside, WillChangeBits};
 
-use crate::contain::{ContentVisibility, effective_containment};
 use crate::node::Node;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,8 +81,12 @@ pub(crate) fn establishes_fixed_containing_block<T>(
             .bits
             .intersects(WillChangeBits::FIXPOS_CB_NON_SVG)
             && !is_root_element(node))
-        || effective_containment(style, skips_contents(style))
-            .intersects(Contain::LAYOUT | Contain::PAINT)
+        || effective_containment(
+            style.clone_contain(),
+            style.clone_content_visibility(),
+            skips_contents(style),
+        )
+        .intersects(Contain::LAYOUT | Contain::PAINT)
         || (!style.get_effects().filter.0.is_empty() && !is_root_element(node))
 }
 
