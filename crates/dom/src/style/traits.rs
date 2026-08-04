@@ -33,7 +33,7 @@ use stylo::{CaseSensitivityExt, LocalName, Namespace};
 use stylo_atoms::Atom;
 use stylo_dom::ElementState;
 
-use crate::node::{ChildrenIter, Node};
+use crate::tree::node::{ChildrenIter, Node};
 
 fn empty_namespace() -> &'static <SelectorImpl as selectors::SelectorImpl>::BorrowedNamespaceUrl {
     static EMPTY: OnceLock<Namespace> = OnceLock::new();

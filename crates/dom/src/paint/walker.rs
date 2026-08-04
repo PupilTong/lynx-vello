@@ -38,13 +38,15 @@
 //!    is a recorded v1 limit); per text run: the retained Parley layout under the parent element's
 //!    style.
 
-use crate::paint::{BoxFragment, PathScratch, background, border, filters, mask, shadow, text};
-use crate::shape::{BoxShape, with_shape};
+use crate::paint::shape::{BoxShape, with_shape};
+use crate::paint::{
+    BoxFragment, PathScratch, background, border, convert, filters, mask, shadow, text,
+};
 use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Point, Rect};
 use crate::vello::peniko::{BlendMode, Compose, Fill, Mix};
 use crate::visual::{ClipNode, PaintItem, PaintItemKind, PaintOrder, RenderLayer};
-use crate::{Document, ImageStore, convert};
+use crate::{Document, ImageStore};
 
 /// Reused per-frame buffers.
 #[derive(Debug, Default)]
@@ -165,7 +167,7 @@ fn open_scope<T>(
 
     if let Some(fragment) = fragment.as_ref()
         && let Some((clip_shape, fill)) =
-            crate::shape::clip_path_shape(style, &fragment.reference_boxes())
+            crate::paint::shape::clip_path_shape(style, &fragment.reference_boxes())
     {
         // A full layer, not a clip layer: the mask sandwich below may push
         // blend layers inside (#1198).

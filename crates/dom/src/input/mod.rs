@@ -81,8 +81,8 @@ use euclid::default::{Point2D, Vector2D};
 use smallvec::SmallVec;
 
 use crate::NodeId;
-use crate::document::Document;
 use crate::scroll::ScrollAxes;
+use crate::tree::document::Document;
 
 /// How far a touch or pen must travel before the document reads it as a scroll
 /// rather than a stationary press, in CSS px.
@@ -474,7 +474,7 @@ impl<T: Sync> Document<T> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::document::tests::device;
+    use crate::tree::document::tests::device;
     use crate::{NodeId, StylesheetOrigin};
 
     /// A 100×100 `overflow: scroll` list inside a 200×200 scrolling page.

@@ -3,7 +3,7 @@
 
 #![allow(dead_code)]
 
-use dom::{Document, NodeId, StylesheetOrigin};
+use dom::{Device, Document, NodeId, StylesheetOrigin, standards_device};
 use euclid::{Scale, Size2D};
 use selectors::matching::{
     MatchingContext, MatchingForInvalidation, MatchingMode, NeedsSelectorFlags, SelectorCaches,
@@ -11,7 +11,6 @@ use selectors::matching::{
 };
 use stylo::color::AbsoluteColor;
 use stylo::context::QuirksMode;
-use stylo::device::Device;
 use stylo::device::servo::FontMetricsProvider;
 use stylo::font_metrics::FontMetrics;
 use stylo::media_queries::MediaType;
@@ -44,9 +43,8 @@ pub(crate) fn device_with(
     device_pixel_ratio: f32,
     scheme: PrefersColorScheme,
 ) -> Device {
-    Device::new(
+    standards_device(
         MediaType::screen(),
-        QuirksMode::NoQuirks,
         Size2D::<f32, CSSPixel>::new(width, height),
         Size2D::<f32, DevicePixel>::new(width * device_pixel_ratio, height * device_pixel_ratio),
         Scale::<f32, CSSPixel, DevicePixel>::new(device_pixel_ratio),

@@ -29,6 +29,7 @@
 //! why one struct carries both.
 
 use euclid::default::{Point2D, Rect, Size2D, Transform3D, Vector2D};
+use hughie::style::containment::effective_containment;
 use hughie::style::{Contain, CoreStyle, Overflow, PositionProperty, visibility};
 use hughie::tree::{Layout, LayoutTree};
 use stylo::properties::ComputedValues;
@@ -37,14 +38,13 @@ use stylo::values::computed::PointerEvents;
 use super::geometry::{inner_radii, resolve_corner_radii};
 use super::transform::{ParentPerspective, stacking_context_matrix};
 use super::{ClipNode, CornerRadii, PaintItem, PaintItemKind, PaintOrder, RenderLayer, stacking};
-use crate::contain::effective_containment;
-use crate::document::{Document, DocumentLayoutState, TreeArenas, slab_get_for_live_node};
 use crate::layout::{
     DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
     establishes_fixed_containing_block, skips_contents,
 };
-use crate::node::Node;
 use crate::scroll::ScrollAxes;
+use crate::tree::document::{Document, DocumentLayoutState, TreeArenas, slab_get_for_live_node};
+use crate::tree::node::Node;
 use crate::{NodeId, scroll};
 
 pub(crate) fn build<T>(document: &Document<T>) -> PaintOrder {
@@ -633,7 +633,13 @@ fn member_clip_contexts(position: PositionProperty, ctx: ClipContexts) -> ClipCo
 /// `visible` on the other is a legal pair the style adjuster does not fold
 /// (both are non-scrollable, so it sees nothing to reconcile).
 fn clipped_axes(style: &ComputedValues) -> ScrollAxes {
-    if effective_containment(style, skips_contents(style)).intersects(Contain::PAINT) {
+    if effective_containment(
+        style.clone_contain(),
+        style.clone_content_visibility(),
+        skips_contents(style),
+    )
+    .intersects(Contain::PAINT)
+    {
         return ScrollAxes::BOTH;
     }
     ScrollAxes {

@@ -8,7 +8,7 @@
 //! budgets, cancellation, and bounded caches for both the pixels and the much
 //! cheaper natural sizes.
 //!
-//! It deliberately depends on **neither `dom` nor `pulsar`**. It returns an
+//! It deliberately does **not** depend on `dom`. It returns an
 //! [`ImageHeader`] and a [`DecodedImage`]; installing the natural size on a node
 //! and the pixels in a paint-side store is the caller's job, and ordering that
 //! against the style flush is the caller's problem. That boundary is what keeps

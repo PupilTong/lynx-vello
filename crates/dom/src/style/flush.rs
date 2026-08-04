@@ -14,9 +14,9 @@ use stylo::traversal::{DomTraversal, PerLevelTraversalData, recalc_style_at};
 use stylo::traversal_flags::TraversalFlags;
 use stylo_atoms::Atom;
 
-use crate::damage::StyleDamage;
-use crate::document::{Document, NodeId};
-use crate::node::Node;
+use crate::style::damage::StyleDamage;
+use crate::tree::document::{Document, NodeId};
+use crate::tree::node::Node;
 
 /// The CSS Paint API is unsupported: no speculative painters are registered.
 #[derive(Debug)]

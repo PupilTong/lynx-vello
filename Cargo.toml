@@ -30,7 +30,6 @@ flashbulb = { path = "crates/flashbulb" }
 # `cargo check/test/clippy -p image` is unambiguous.
 image = { path = "crates/image" }
 lynx-element = { path = "crates/lynx-element" }
-pulsar = { path = "crates/pulsar" }
 quickjs-rust-bridge = { path = "crates/quickjs-rust-bridge" }
 dom = { path = "crates/dom" }
 

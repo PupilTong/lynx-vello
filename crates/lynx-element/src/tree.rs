@@ -329,7 +329,7 @@ mod tests {
     fn a_window_embedder_can_update_the_device_pixel_ratio() {
         let mut tree = tree();
         tree.set_device_pixel_ratio(2.0);
-        assert!((tree.document().device().device_pixel_ratio().get() - 2.0).abs() < f32::EPSILON);
+        assert!((tree.document().device_pixel_ratio() - 2.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -573,11 +573,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             style.clone_box_sizing(),
-            stylo::computed_values::box_sizing::T::BorderBox
+            dom::stylo::computed_values::box_sizing::T::BorderBox
         );
         assert_eq!(
             style.clone_display(),
-            stylo::values::computed::Display::Linear
+            dom::stylo::values::computed::Display::Linear
         );
     }
 
@@ -606,20 +606,20 @@ mod tests {
         // the element is no longer a Lynx linear box.
         assert_ne!(
             style.clone_display(),
-            stylo::values::computed::Display::Linear
+            dom::stylo::values::computed::Display::Linear
         );
         // `box-sizing` is not gated by this switch and still applies.
         assert_eq!(
             style.clone_box_sizing(),
-            stylo::computed_values::box_sizing::T::BorderBox
+            dom::stylo::computed_values::box_sizing::T::BorderBox
         );
     }
 
     #[test]
     fn the_overflow_page_config_switch_reaches_computed_style() {
         for (visible, expected) in [
-            (true, stylo::values::computed::Overflow::Visible),
-            (false, stylo::values::computed::Overflow::Hidden),
+            (true, dom::stylo::values::computed::Overflow::Visible),
+            (false, dom::stylo::values::computed::Overflow::Hidden),
         ] {
             let mut tree = ElementTree::new(
                 Viewport::new(393.0, 727.0),

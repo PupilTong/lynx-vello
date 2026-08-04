@@ -8,8 +8,6 @@ use divan::black_box;
 use divan::counter::ItemsCount;
 use dom::{Document, ElementState, NodeId, StylesheetOrigin};
 use euclid::{Scale, Size2D};
-use stylo::context::QuirksMode;
-use stylo::device::Device;
 use stylo::device::servo::FontMetricsProvider;
 use stylo::font_metrics::FontMetrics;
 use stylo::media_queries::MediaType;
@@ -48,10 +46,9 @@ impl FontMetricsProvider for BenchFontMetricsProvider {
     }
 }
 
-fn device(width: f32, height: f32) -> Device {
-    Device::new(
+fn device(width: f32, height: f32) -> dom::Device {
+    dom::standards_device(
         MediaType::screen(),
-        QuirksMode::NoQuirks,
         Size2D::<f32, CSSPixel>::new(width, height),
         Size2D::<f32, DevicePixel>::new(width, height),
         Scale::<f32, CSSPixel, DevicePixel>::new(1.0),

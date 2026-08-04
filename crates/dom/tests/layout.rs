@@ -8,7 +8,6 @@ mod common;
 use common::{Doc, device_with};
 use dom::NodeId;
 use dom::layout::Layout;
-use stylo::device::Device;
 use stylo::queries::values::PrefersColorScheme;
 
 const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
@@ -69,7 +68,7 @@ impl Harness {
         }
     }
 
-    fn with_device(css: &str, device: Device) -> Self {
+    fn with_device(css: &str, device: dom::Device) -> Self {
         let mut doc = Doc::with_device(device);
         doc.add_css(css);
         Self { doc }
@@ -100,7 +99,7 @@ impl Harness {
     }
 
     fn force_full_layout_through_viewport_change(&mut self) {
-        let viewport = self.doc.dom.device().viewport_size();
+        let viewport = self.doc.dom.viewport_size();
         self.doc
             .dom
             .set_viewport(viewport.width + 1.0, viewport.height);

@@ -6,10 +6,9 @@
 mod common;
 
 use common::{device, device_with, rgb, url_data};
-use dom::{Document, StylesheetOrigin};
+use dom::{Device, Document, StylesheetOrigin, standards_device};
 use stylo::context::QuirksMode;
 use stylo::custom_properties::AttrTaint;
-use stylo::device::Device;
 use stylo::media_queries::{MediaList, MediaType};
 use stylo::parser::ParserContext;
 use stylo::properties::ComputedValues;
@@ -50,9 +49,8 @@ fn matches(query: &str) -> bool {
 
 fn pointer_device(capabilities: PointerCapabilities) -> Device {
     use euclid::{Scale, Size2D};
-    Device::new(
+    standards_device(
         MediaType::screen(),
-        QuirksMode::NoQuirks,
         Size2D::<f32, CSSPixel>::new(375.0, 812.0),
         Size2D::<f32, DevicePixel>::new(375.0, 812.0),
         Scale::<f32, CSSPixel, DevicePixel>::new(1.0),

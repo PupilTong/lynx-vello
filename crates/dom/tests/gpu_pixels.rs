@@ -4,11 +4,11 @@
 
 mod paint_common;
 
+use dom::vello::Scene;
+use dom::vello::kurbo::{Affine, Rect};
+use dom::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
 use flashbulb::headless;
 use paint_common::Doc;
-use pulsar::vello::Scene;
-use pulsar::vello::kurbo::{Affine, Rect};
-use pulsar::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
 
 const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
 const ISOLATION_ATLAS_WIDTH: u32 = 384;

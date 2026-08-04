@@ -14,14 +14,9 @@ publish = false
 internal-document-access = []
 
 [dependencies]
+# The one dependency: this layer reaches stylo/euclid/vello exclusively
+# through `dom`'s vocabulary re-exports (strict linear layering).
 dom = { workspace = true }
-
-# Device construction is this layer's job ("view metrics and device
-# construction" in the runtime-adapter row of docs/style-architecture.md), so
-# the stylo `Device` and its font-metrics provider are built here.
-euclid = { workspace = true }
-stylo = { workspace = true }
-stylo_traits = { workspace = true }
 
 [lints]
 workspace = true

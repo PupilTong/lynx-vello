@@ -49,7 +49,7 @@
 //! # Features
 //!
 //! - default: [`Image`], [`compare`], [`Screenshots`] — pixels in, verdict out, no render stack.
-//! - `render`: adds `capture_document` and `headless`, which pull in `dom` and `pulsar`.
+//! - `render`: adds `capture_document` and `headless`, which pull in `dom`.
 //!
 //! # Captures need a GPU
 //!
@@ -66,7 +66,7 @@ mod render;
 /// Re-exported so capture callers name colors through the same `peniko` the
 /// render stack was built against, never a second copy of it.
 #[cfg(feature = "render")]
-pub use pulsar::vello;
+pub use dom::vello;
 
 pub use crate::compare::{CompareOptions, Comparison, compare};
 pub use crate::golden::{

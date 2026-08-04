@@ -1,16 +1,16 @@
 //! Capturing a laid-out document as an image (feature `render`).
 //!
 //! This is the half that needs the render stack: it asks `dom` to render through its
-//! private paint pipeline, submits the retained scene to `pulsar`'s headless
+//! private paint pipeline, submits the retained scene to `dom`'s headless
 //! wgpu surface, and reads the pixels back. Everything else in the crate works
 //! on pixels that are already in hand.
 
 use std::fmt;
 
 use dom::Document;
-use pulsar::gpu::{GpuError, Headless};
-use pulsar::vello::Scene;
-use pulsar::vello::peniko::Color;
+use dom::render::gpu::{GpuError, Headless};
+use dom::vello::Scene;
+use dom::vello::peniko::Color;
 
 use crate::image::{Image, ImageError};
 
@@ -62,8 +62,8 @@ pub fn headless(test: &str) -> Headless {
 /// repo uses 1.0 for the same reason.
 #[must_use]
 pub fn frame_size<T>(document: &Document<T>) -> (u32, u32) {
-    let viewport = document.device().viewport_size();
-    let ratio = document.device().device_pixel_ratio().get();
+    let viewport = document.viewport_size();
+    let ratio = document.device_pixel_ratio();
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,

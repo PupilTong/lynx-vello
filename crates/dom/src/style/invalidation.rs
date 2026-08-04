@@ -17,8 +17,8 @@ use stylo::shared_lock::Locked;
 use stylo::stylesheets::CssRuleType;
 use stylo_atoms::Atom;
 
-use crate::document::{DOCUMENT_NODE_ID, Document, NodeId};
-use crate::node::Node;
+use crate::tree::document::{DOCUMENT_NODE_ID, Document, NodeId};
+use crate::tree::node::Node;
 
 const STRUCTURE_SENSITIVE: ElementSelectorFlags = ElementSelectorFlags::HAS_SLOW_SELECTOR
     .union(ElementSelectorFlags::HAS_SLOW_SELECTOR_LATER_SIBLINGS)

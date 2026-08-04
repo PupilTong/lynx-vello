@@ -2,12 +2,16 @@
 //!
 //! The protocol modules let hosts inject a [`script::ScriptEngine`] and
 //! [`resource::ResourceFetcher`] through static generic contracts.
-//! The concrete `lynx_element::ElementTree` remains an internal runtime layer;
-//! lower DOM and GPU crates are not re-exported as embedder conveniences.
+//! [`lynx_element`] is re-exported whole as the strict layer chain's door
+//! downward.
 //!
 //! The default `quickjs` feature adds Bobcat's internal `QuickJS` adapter and
 //! main-thread runtime. Disable default features to use only the external
 //! engine contracts without compiling `QuickJS`.
+
+/// The layer below, re-exported whole: the product reaches `ElementTree`,
+/// `dom`, and the render stack exclusively through this door.
+pub use lynx_element;
 
 #[cfg(feature = "quickjs")]
 pub mod quickjs;

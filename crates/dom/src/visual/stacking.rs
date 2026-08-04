@@ -10,13 +10,13 @@
 //! they are unreachable from author CSS today and therefore untestable
 //! through the cascade.
 
+use hughie::style::containment::effective_containment;
 use hughie::style::{Contain, PositionProperty};
 use stylo::properties::ComputedValues;
 use stylo::values::computed::Image;
 use stylo::values::computed::motion::OffsetPath;
 use stylo::values::specified::box_::WillChangeBits;
 
-use crate::contain::effective_containment;
 use crate::layout::skips_contents;
 
 /// Whether `z-index` applies: positioned boxes plus flex/grid items
@@ -83,7 +83,12 @@ pub(crate) fn establishes_stacking_context(style: &ComputedValues, z_applies: bo
     if z_applies && will_change.intersects(WillChangeBits::Z_INDEX) {
         return true;
     }
-    effective_containment(style, skips_contents(style)).intersects(Contain::LAYOUT | Contain::PAINT)
+    effective_containment(
+        style.clone_contain(),
+        style.clone_content_visibility(),
+        skips_contents(style),
+    )
+    .intersects(Contain::LAYOUT | Contain::PAINT)
 }
 
 /// Whether an element that establishes a stacking context also needs its

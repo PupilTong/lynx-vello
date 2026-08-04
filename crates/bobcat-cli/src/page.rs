@@ -1,10 +1,10 @@
 use std::cell::Ref;
 
-use bobcat_core::quickjs::MainThreadRuntime;
 #[cfg(target_os = "macos")]
-use dom::input::{InputEvent, InputResponse};
-use lynx_element::{ElementTree, PageConfig, Viewport};
-use pulsar::vello::Scene;
+use bobcat_core::lynx_element::dom::input::{InputEvent, InputResponse};
+use bobcat_core::lynx_element::dom::vello::Scene;
+use bobcat_core::lynx_element::{ElementTree, PageConfig, Viewport};
+use bobcat_core::quickjs::MainThreadRuntime;
 use url::Url;
 
 use crate::CliError;

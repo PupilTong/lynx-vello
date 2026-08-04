@@ -8,7 +8,7 @@
 //! Lynx UA cascade defaults.
 //!
 //! ```text
-//! bobcat-cli  ──▶  bobcat-core  ──▶  lynx-element  ──▶  dom  ──▶  pulsar
+//! bobcat-cli  ──▶  bobcat-core  ──▶  lynx-element  ──▶  dom
 //!                                      handles + UA       resources/GPU
 //! ```
 //!
@@ -62,6 +62,10 @@ mod tree;
 mod ua;
 
 /// A Lynx element's stable unique id and Element-PAPI handle.
+/// The layer below, re-exported whole: `bobcat-core` and the product reach
+/// the document/render/style stack exclusively through this door.
+pub use dom;
+
 pub type ElementId = u32;
 
 pub use crate::arena::LynxElement;

@@ -43,10 +43,10 @@ use stylo::values::specified::background::BackgroundRepeatKeyword;
 use stylo::values::specified::position::{HorizontalPositionKeyword, VerticalPositionKeyword};
 
 use crate::ImageStore;
-use crate::convert::resolve_color;
 use crate::layout::NaturalSize;
+use crate::paint::convert::resolve_color;
+use crate::paint::shape::{BoxShape, inner_radii, with_shape};
 use crate::paint::{BoxFragment, TextClip};
-use crate::shape::{BoxShape, inner_radii, with_shape};
 use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Point, Rect, Size, Vec2};
 use crate::vello::peniko::{

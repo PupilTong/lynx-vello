@@ -125,8 +125,21 @@ impl StyleEngine {
 
 impl<T> Document<T> {
     #[must_use]
-    pub fn device(&self) -> &Device {
+    pub(crate) fn device(&self) -> &Device {
         self.style_engine().device()
+    }
+
+    /// The viewport in CSS px.
+    #[must_use]
+    pub fn viewport_size(&self) -> crate::Size2D<f32> {
+        let size = self.device().viewport_size();
+        crate::Size2D::new(size.width, size.height)
+    }
+
+    /// CSS-px → device-px scale factor.
+    #[must_use]
+    pub fn device_pixel_ratio(&self) -> f32 {
+        self.device().device_pixel_ratio().get()
     }
 
     pub fn set_viewport(&mut self, width: f32, height: f32) {

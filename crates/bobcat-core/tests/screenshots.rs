@@ -1,7 +1,7 @@
 #![cfg(feature = "quickjs")]
 
 //! Golden screenshot comparison over the whole runtime pipeline:
-//! main-thread script → Element PAPI → `lynx-element` → `dom` → `pulsar` →
+//! main-thread script → Element PAPI → `lynx-element` → `dom` →
 //! headless GPU.
 //!
 //! This is the Rust analogue of lynx-stack's `web-core-e2e` Playwright suite:
@@ -15,8 +15,8 @@
 use bobcat_core::quickjs::MainThreadRuntime;
 use flashbulb::vello::peniko::{Blob, Color, ImageAlphaType, ImageData, ImageFormat};
 use flashbulb::{Image, Screenshots, capture_scene, headless};
+use lynx_element::dom::render::gpu::Headless;
 use lynx_element::{ElementTree, PageConfig, Viewport};
-use pulsar::gpu::Headless;
 
 /// lynx-stack's Playwright Chromium project emulates a Pixel 5, whose CSS
 /// viewport is 393 × 727; `toHaveScreenshot` captures in CSS pixels, so their

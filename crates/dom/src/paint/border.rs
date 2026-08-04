@@ -22,10 +22,10 @@ use stylo::properties::ComputedValues;
 use stylo::values::computed::{BorderStyle, OutlineStyle};
 
 use crate::Size2D;
-use crate::convert::resolve_color;
 use crate::layout::Edges;
+use crate::paint::convert::resolve_color;
+use crate::paint::shape::{BoxShape, inner_radii, ring_path_into, with_shape};
 use crate::paint::{BoxFragment, PathScratch};
-use crate::shape::{BoxShape, inner_radii, ring_path_into, with_shape};
 use crate::vello::Scene;
 use crate::vello::kurbo::{BezPath, Cap, Rect, Stroke};
 use crate::vello::peniko::{Color, Fill};

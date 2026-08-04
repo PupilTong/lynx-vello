@@ -11,14 +11,13 @@ use hughie::tree::{LayoutInput, LayoutSlot};
 use rustc_hash::FxHashSet;
 use slab::Slab;
 use stylo::LocalName;
-use stylo::device::Device;
 use stylo::dom::OpaqueNode;
 use stylo::selector_parser::SnapshotMap;
 use stylo::stylesheets::UrlExtraData;
 
-use crate::damage::StyleDamage;
-use crate::engine::StyleEngine;
-use crate::node::Node;
+use crate::style::damage::StyleDamage;
+use crate::style::engine::StyleEngine;
+use crate::tree::node::Node;
 
 pub type NodeId = usize;
 
@@ -158,7 +157,7 @@ pub struct Document<T> {
     style_engine: StyleEngine,
     tree: Box<TreeArenas<T>>,
     layout: DocumentLayoutState,
-    pub(crate) painter: RefCell<crate::painter::Painter>,
+    pub(crate) painter: RefCell<crate::paint::painter::Painter>,
     /// Pre-mutation state exists only while invalidation is pending. Keeping
     /// the payloads here leaves one byte-sized lifecycle flag, rather than a
     /// nullable snapshot pointer, in every live node's styling slot.
@@ -194,8 +193,8 @@ impl<T: fmt::Debug> fmt::Debug for Document<T> {
 
 impl<T> Document<T> {
     #[must_use]
-    pub fn new(device: Device) -> Self {
-        let style_engine = StyleEngine::new(device, about_blank_url_data());
+    pub fn new(device: crate::style::device::Device) -> Self {
+        let style_engine = StyleEngine::new(device.into_stylo(), about_blank_url_data());
         let lock = style_engine.lock();
         let url_data = style_engine.url_data();
         let mut tree = Box::new(TreeArenas::new());
@@ -212,7 +211,7 @@ impl<T> Document<T> {
             style_engine,
             tree,
             layout,
-            painter: RefCell::new(crate::painter::Painter::default()),
+            painter: RefCell::new(crate::paint::painter::Painter::default()),
             pending_snapshots: SnapshotMap::new(),
             relayout_roots: Vec::new(),
             relayout_root_ids: FxHashSet::default(),
@@ -608,7 +607,7 @@ impl<T> Document<T> {
             debug_assert!(node.is_element(), "only elements can own Stylo snapshots");
             debug_assert_eq!(
                 node.snapshot_flags(),
-                crate::node::SNAPSHOT_PRESENT,
+                crate::tree::node::SNAPSHOT_PRESENT,
                 "queued snapshots must be present and unhandled before a flush"
             );
         }
@@ -643,11 +642,11 @@ impl<T> Document<T> {
             };
             let flags = node.snapshot_flags();
             debug_assert_ne!(
-                flags & crate::node::SNAPSHOT_PRESENT,
+                flags & crate::tree::node::SNAPSHOT_PRESENT,
                 0,
                 "snapshot queue entry lost its present flag during traversal"
             );
-            if flags & crate::node::SNAPSHOT_HANDLED != 0 {
+            if flags & crate::tree::node::SNAPSHOT_HANDLED != 0 {
                 node.clear_snapshot_flags();
                 false
             } else {
@@ -733,7 +732,6 @@ impl Drop for FlushPhaseToken {
 #[cfg(test)]
 pub(crate) mod tests {
     use euclid::{Scale, Size2D};
-    use stylo::context::QuirksMode;
     use stylo::device::servo::FontMetricsProvider;
     use stylo::font_metrics::FontMetrics;
     use stylo::media_queries::MediaType;
@@ -746,6 +744,7 @@ pub(crate) mod tests {
     use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 
     use super::*;
+    use crate::standards_device;
 
     #[derive(Debug)]
     struct NoFonts;
@@ -766,10 +765,9 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn device() -> Device {
-        Device::new(
+    pub(crate) fn device() -> crate::style::device::Device {
+        standards_device(
             MediaType::screen(),
-            QuirksMode::NoQuirks,
             Size2D::new(800.0, 600.0),
             Size2D::new(800.0, 600.0),
             Scale::new(1.0),
@@ -927,7 +925,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             snapshot_flags(&document, detached),
-            crate::node::SNAPSHOT_PRESENT
+            crate::tree::node::SNAPSHOT_PRESENT
         );
         assert_eq!(snapshot_flags(&document, connected), 0);
 
