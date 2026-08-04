@@ -61,8 +61,8 @@ pub(crate) fn build<T>(document: &Document<T>) -> PaintOrder {
     };
     let epoch = document.node_removal_epoch();
     let visual_epoch = document.visual_epoch();
-    if let Some(root) = document.root_element()
-        && let Some(style) = StyleView::try_of(root)
+    let root = document.document_element();
+    if let Some(style) = StyleView::try_of(root)
         && display_mode(style.display()) != DisplayMode::None
     {
         let location = builder.rounded(root.id()).location;

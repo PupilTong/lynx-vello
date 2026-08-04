@@ -96,13 +96,12 @@ mod tests {
 
     #[test]
     fn a_failed_paint_cannot_leave_a_partial_scene_marked_current() {
-        let mut document = Document::new(crate::tree::document::tests::device());
+        let mut document = Document::new(crate::tree::document::tests::device(), "page", ());
         document.add_stylesheet(
             "page { width: 10px; height: 10px; background-color: teal; }",
             StylesheetOrigin::Author,
         );
-        let root = document.create_element("page", ());
-        document.append_document_element(root);
+        let root = document.document_element().id();
         let frame = document.build_paint_order();
 
         document.set_inline_style(root, "display: none");

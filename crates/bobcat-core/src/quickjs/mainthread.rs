@@ -49,7 +49,7 @@ use std::cell::{Ref, RefCell, RefMut};
 use std::fmt;
 use std::rc::Rc;
 
-use lynx_element::{ElementId, ElementTree};
+use lynx_element::{ElementId, ElementTree, PapiError};
 use quickjs_rust_bridge::{self as quickjs, HostFunctionError, HostValue};
 
 use super::{QuickJsInitializationError, QuickJsScriptEngine};
@@ -246,11 +246,15 @@ fn install_element_papi(
     })?;
 
     // `__DropElement(element)` — delegates handle retirement to the selected
-    // host. Repeated drops are host-defined no-ops in `ElementTree`.
+    // host. Repeated drops stay host-defined no-ops (the handle is already
+    // retired); dropping the permanent page element is a precise error.
     let tree = Rc::clone(elements);
     realm.define_global_function("__DropElement", 1, move |arguments| {
         let id = element_argument("__DropElement", arguments, 0)?;
-        tree.borrow_mut().drop_element(id);
+        match tree.borrow_mut().drop_element(id) {
+            Ok(()) | Err(PapiError::UnknownElement(_)) => {}
+            Err(error) => return Err(papi_error(error)),
+        }
         Ok(HostValue::Undefined)
     })?;
 
