@@ -60,7 +60,7 @@ fn device() -> dom::Device {
 /// sprinkling of opacity groups and overflow clips — the shape of a typical
 /// Lynx card list.
 fn card_page(cards: usize) -> Document<()> {
-    let mut dom = Document::new(device());
+    let mut dom = Document::new(device(), "page", ());
     dom.add_stylesheet(
         "page { display: flex; position: relative; width: 800px; height: 600px; }
          .card { display: flex; position: absolute; width: 180px; height: 80px;
@@ -72,8 +72,7 @@ fn card_page(cards: usize) -> Document<()> {
                  background-color: #3366ff; border-radius: 10px; }",
         StylesheetOrigin::Author,
     );
-    let root = dom.create_element("page", ());
-    dom.append_document_element(root);
+    let root = dom.document_element().id();
     for index in 0..cards {
         let card = dom.create_element("view", ());
         dom.add_class(card, "card");

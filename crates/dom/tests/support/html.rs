@@ -46,17 +46,29 @@ pub(super) fn parse(fragment: &str, width: f32, height: f32) -> Doc {
         .collect();
     assert_eq!(roots.len(), 1, "fragment must contain one root element");
 
-    let mut dom = Document::new(device(width, height));
-    let root = import_element(&mut dom, &roots[0]);
-    dom.append_document_element(root);
+    let NodeData::Element { name, .. } = &roots[0].data else {
+        panic!("fragment importer expected an element root");
+    };
+    let mut dom = Document::new(device(width, height), name.local.as_ref(), ());
+    let root = dom.document_element().id();
+    import_onto(&mut dom, root, &roots[0]);
     Doc { dom, root }
 }
 
 fn import_element(dom: &mut Document<()>, source: &Handle) -> NodeId {
-    let NodeData::Element { name, attrs, .. } = &source.data else {
+    let NodeData::Element { name, .. } = &source.data else {
         panic!("fragment importer expected an element");
     };
     let id = dom.create_element(name.local.as_ref(), ());
+    import_onto(dom, id, source);
+    id
+}
+
+/// Applies `source`'s style attribute and imports its children under `id`.
+fn import_onto(dom: &mut Document<()>, id: NodeId, source: &Handle) {
+    let NodeData::Element { attrs, .. } = &source.data else {
+        panic!("fragment importer expected an element");
+    };
     if let Some(attr) = attrs
         .borrow()
         .iter()
@@ -85,5 +97,4 @@ fn import_element(dom: &mut Document<()>, source: &Handle) -> NodeId {
             _ => {}
         }
     }
-    id
 }
