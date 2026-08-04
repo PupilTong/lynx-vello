@@ -733,7 +733,6 @@ impl Drop for FlushPhaseToken {
 #[cfg(test)]
 pub(crate) mod tests {
     use euclid::{Scale, Size2D};
-    use stylo::context::QuirksMode;
     use stylo::device::servo::FontMetricsProvider;
     use stylo::font_metrics::FontMetrics;
     use stylo::media_queries::MediaType;
@@ -746,6 +745,7 @@ pub(crate) mod tests {
     use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 
     use super::*;
+    use crate::standards_device;
 
     #[derive(Debug)]
     struct NoFonts;
@@ -767,9 +767,8 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn device() -> Device {
-        Device::new(
+        standards_device(
             MediaType::screen(),
-            QuirksMode::NoQuirks,
             Size2D::new(800.0, 600.0),
             Size2D::new(800.0, 600.0),
             Scale::new(1.0),

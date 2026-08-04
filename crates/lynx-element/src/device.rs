@@ -6,7 +6,6 @@
 //! embedders or by the DOM core.
 
 use dom::euclid::{Scale, Size2D};
-use dom::stylo::context::QuirksMode;
 use dom::stylo::device::Device;
 use dom::stylo::device::servo::FontMetricsProvider;
 use dom::stylo::font_metrics::FontMetrics;
@@ -56,9 +55,8 @@ impl Viewport {
     /// `(pointer)` answers a Lynx app should see.
     #[must_use]
     pub(crate) fn device(self) -> Device {
-        Device::new(
+        dom::standards_device(
             MediaType::screen(),
-            QuirksMode::NoQuirks,
             Size2D::<f32, CSSPixel>::new(self.width, self.height),
             Size2D::<f32, DevicePixel>::new(
                 self.width * self.device_pixel_ratio,

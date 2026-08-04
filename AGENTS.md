@@ -280,7 +280,10 @@ useful signal for currently-compatible versions of those libraries.
   workspace `vello` version, and embedders configure wgpu/peniko/kurbo
   exclusively through that re-export; the root likewise re-exports `stylo`,
   `euclid`, and `stylo_traits` as the style/geometry vocabulary doors for the
-  layers above (strict linear chain: cli → core → element → dom). `Headless::new` reports `NoAdapter`;
+  layers above (strict linear chain: cli → core → element → dom). Quirks mode
+  is locked to standards mode: selector matching, the `Stylist`, and the root
+  `standards_device` construction seam all hard-wire no-quirks, and no quirks
+  knob exists above this crate. `Headless::new` reports `NoAdapter`;
   every GPU-backed test treats that as a hard failure, including in CI.
   Nothing in `render` knows about nodes, computed styles, layout, or paint
   order. Source layout groups the crate by subsystem: `tree/` (arena set,

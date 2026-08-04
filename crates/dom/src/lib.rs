@@ -31,7 +31,7 @@ pub use vello;
 pub use {euclid, stylo, stylo_traits};
 
 pub use crate::render::images::ImageStore;
-pub use crate::style::engine::StylesheetOrigin;
+pub use crate::style::engine::{StylesheetOrigin, standards_device};
 pub use crate::tree::document::{Document, NodeId};
 /// Stylo names this iterator in the public `TElement` implementation for
 /// [`Node`]; callers should normally use [`Node::children`] and its opaque
