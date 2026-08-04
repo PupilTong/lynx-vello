@@ -16,8 +16,8 @@ use stylo::values::computed::Image;
 use stylo::values::computed::motion::OffsetPath;
 use stylo::values::specified::box_::WillChangeBits;
 
-use crate::contain::effective_containment;
 use crate::layout::skips_contents;
+use crate::style::contain::effective_containment;
 
 /// Whether `z-index` applies: positioned boxes plus flex/grid items
 /// (css-flexbox-1 §4.3, css-grid-1 §10.1). `is_item` is precomputed from the

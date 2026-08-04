@@ -16,8 +16,12 @@ layout-test-utils = ["hughie/layout-test-utils"]
 rustc-hash = { workspace = true }
 slab = { workspace = true }
 smallvec = { workspace = true }
-pulsar = { workspace = true }
 parley = { workspace = true }
+pollster = { workspace = true }
+# The workspace entry turns vello's defaults off so `crates/image` can reach
+# `peniko` without wgpu; this crate owns GPU submission, so it opts the GPU
+# back in.
+vello = { workspace = true, features = ["wgpu", "wgpu_default"] }
 
 # Layout integration: the `layout` module implements hughie's statically
 # split `LayoutTree` protocol over immutable tree/style arenas and a separate

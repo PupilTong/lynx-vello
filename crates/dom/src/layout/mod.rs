@@ -24,7 +24,7 @@ pub(crate) use self::style::{
     DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
     establishes_fixed_containing_block, skips_contents,
 };
-use crate::document::{Document, NodeLayoutState};
+use crate::tree::document::{Document, NodeLayoutState};
 
 pub(crate) static ANONYMOUS_STYLE: LazyLock<Arc<ComputedValues>> = LazyLock::new(|| {
     use stylo::properties::style_structs::Font;
@@ -275,7 +275,7 @@ mod tests {
 
     use super::*;
     use crate::StylesheetOrigin;
-    use crate::document::DOCUMENT_NODE_ID;
+    use crate::tree::document::DOCUMENT_NODE_ID;
 
     #[test]
     fn layout_state_size_probe() {
@@ -323,7 +323,7 @@ mod tests {
 
     #[test]
     fn internal_natural_size_update_invalidates_the_dirty_spine() {
-        let mut document = Document::new(crate::document::tests::device());
+        let mut document = Document::new(crate::tree::document::tests::device());
         let root = document.create_element("page", ());
         document.append_document_element(root);
         let image = document.create_element("image", ());
@@ -351,7 +351,7 @@ mod tests {
 
     #[test]
     fn only_a_root_reaching_invalidation_forces_a_full_pass() {
-        let mut doc: Document<()> = Document::new(crate::document::tests::device());
+        let mut doc: Document<()> = Document::new(crate::tree::document::tests::device());
         doc.add_stylesheet(
             "page { display: flex; width: 300px; height: 100px; }
              .box { display: flex; contain: strict; width: 80px; height: 40px; }

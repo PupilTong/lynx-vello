@@ -1,16 +1,16 @@
 //! Capturing a laid-out document as an image (feature `render`).
 //!
 //! This is the half that needs the render stack: it asks `dom` to render through its
-//! private paint pipeline, submits the retained scene to `pulsar`'s headless
+//! private paint pipeline, submits the retained scene to `dom`'s headless
 //! wgpu surface, and reads the pixels back. Everything else in the crate works
 //! on pixels that are already in hand.
 
 use std::fmt;
 
 use dom::Document;
-use pulsar::gpu::{GpuError, Headless};
-use pulsar::vello::Scene;
-use pulsar::vello::peniko::Color;
+use dom::render::gpu::{GpuError, Headless};
+use dom::vello::Scene;
+use dom::vello::peniko::Color;
 
 use crate::image::{Image, ImageError};
 

@@ -37,14 +37,14 @@ use stylo::values::computed::PointerEvents;
 use super::geometry::{inner_radii, resolve_corner_radii};
 use super::transform::{ParentPerspective, stacking_context_matrix};
 use super::{ClipNode, CornerRadii, PaintItem, PaintItemKind, PaintOrder, RenderLayer, stacking};
-use crate::contain::effective_containment;
-use crate::document::{Document, DocumentLayoutState, TreeArenas, slab_get_for_live_node};
 use crate::layout::{
     DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
     establishes_fixed_containing_block, skips_contents,
 };
-use crate::node::Node;
 use crate::scroll::ScrollAxes;
+use crate::style::contain::effective_containment;
+use crate::tree::document::{Document, DocumentLayoutState, TreeArenas, slab_get_for_live_node};
+use crate::tree::node::Node;
 use crate::{NodeId, scroll};
 
 pub(crate) fn build<T>(document: &Document<T>) -> PaintOrder {

@@ -130,7 +130,7 @@ useful signal for currently-compatible versions of those libraries.
   injection contracts. Workspace dependencies disable defaults explicitly;
   only an upper layer that wants the built-in engine enables `quickjs`.
   The core depends on `lynx-element` rather than directly on `dom`, but does
-  not re-export `ElementTree`, `dom`, Pulsar, or rendering conveniences. It has
+  not re-export `ElementTree`, `dom`, or rendering conveniences. It has
   no document alias, element-host trait, renderer wrapper, or injection seam.
   `MainThreadRuntime`
   installs the Element PAPI before evaluation, evaluates a `.web.bundle`'s
@@ -178,7 +178,7 @@ useful signal for currently-compatible versions of those libraries.
   policy — it knows nothing about Lynx.
 - `crates/bobcat-cli` — the independent native `bobcat` product over
   `bobcat-core`'s `quickjs` feature. It directly composes the internal
-  `lynx-element`, DOM, and Pulsar crates rather than turning its renderer into
+  `lynx-element` and DOM crates rather than turning its renderer into
   a `bobcat-core` embedder API.
   `bobcat -i file:///…` decodes and boots one web bundle; other URL schemes
   remain rejected at the boundary. One reusable `FramePipeline` owns the
@@ -211,7 +211,7 @@ useful signal for currently-compatible versions of those libraries.
   directly and `dom` knows neither vocabulary.
   `ElementTree` owns a `dom::Document<ElementId>` plus an independent
   `Vec<Option<LynxElement>>` arena. This crate depends directly on `dom` and
-  never directly on Bobcat, Pulsar, or a JavaScript engine. The DOM payload is only the permanent
+  never directly on Bobcat or a JavaScript engine. The DOM payload is only the permanent
   `u32` unique id, which is also the direct arena index; each `LynxElement`
   owns that id, its stable DOM `NodeId` association, component creation
   fields. The arena permanently reserves slot 0 as web-core's
@@ -260,7 +260,7 @@ useful signal for currently-compatible versions of those libraries.
   `TElement::ensure_data` contract call — plus the `unsafe fn` signatures
   Stylo's traits mandate (all bodies safe).
   `Document<T>` also owns one private concrete `Painter`, including its
-  reusable walk scratch, retained `vello::Scene`, and `pulsar::ImageStore`.
+  reusable walk scratch, retained `vello::Scene`, and `ImageStore`.
   `render` privately builds `PaintOrder` and invokes that painter
   only for a dirty scene. The Painter records which private visual epoch its
   scene represents, so `render`/`needs_render` own retained-scene scheduling without
@@ -268,8 +268,20 @@ useful signal for currently-compatible versions of those libraries.
   `images_mut` is the narrow resource-update seam and invalidates the scene
   conservatively. There is no renderer type parameter,
   `DocumentRenderer` trait, `with_renderer`, public Painter, public visual
-  epoch, or public paint-order constructor. `dom` depends directly on
-  `pulsar`; Pulsar never depends back on DOM.
+  epoch, or public paint-order constructor. The crate also owns the DOM-free
+  render floor absorbed from the former `pulsar` crate (2026-08-04): the
+  `render` module holds the decoded `ImageStore` (re-exported at the crate
+  root) and the `render::gpu` wgpu render-to-texture/readback backend
+  (`gpu::Headless`, plus the `read_texture`/`renderer_options`/`render_params`
+  seams windowed embedders build against); the crate root re-exports the one
+  workspace `vello` version, and embedders configure wgpu/peniko/kurbo
+  exclusively through that re-export. `Headless::new` reports `NoAdapter`;
+  every GPU-backed test treats that as a hard failure, including in CI.
+  Nothing in `render` knows about nodes, computed styles, layout, or paint
+  order. Source layout groups the crate by subsystem: `tree/` (arena set,
+  `Node`, `Document`), `style/` (engine, Stylo traits, flush, invalidation,
+  damage, containment), `layout/`, `visual/`, `paint/` (painter, walker,
+  fragment painters), `scroll/`, `input/`, and `render/`.
   Every node points directly back only to `TreeArenas`, and the
   same plain one-word `&Node` implements Stylo's document/node/element traits
   according to its `NodeData` (styling runs in place, no mirror tree),
@@ -392,7 +404,7 @@ useful signal for currently-compatible versions of those libraries.
   into the frame — a scroll container's contents are translated as they are
   collected, with containing-block-keyed escape sharing the clip chain's own
   struct, so painting and hit testing see scrolled geometry and the lower
-  `pulsar` resource/GPU layer needs no knowledge of scrolling. Clipping is likewise per axis, because
+  render/GPU floor needs no knowledge of scrolling. Clipping is likewise per axis, because
   `clip` on one axis with `visible` on the other is a pair the style adjuster
   leaves mixed; a one-axis clip is an infinite strip and carries no radii.
   Its `input` module is the host seam: `InputEvent` is plain `Copy` data
@@ -484,13 +496,6 @@ useful signal for currently-compatible versions of those libraries.
   component-specific staggered layout, and Lynx-specific text
   attribute/raw-text/truncation policy. Generic W3C text style, document
   context, and artifact storage already live in `dom`.
-- `crates/pulsar` — the DOM-independent Vello resource and GPU layer. It owns
-  `ImageStore`, re-exports the one workspace Vello version, and implements the
-  wgpu render-to-texture/readback backend (`gpu::Headless`) used by product and
-  tests. `Headless::new` reports `NoAdapter`; every GPU-backed test treats that
-  as a hard failure, including in CI. Pulsar must not depend on `dom` or know
-  `Document`, `NodeId`, computed styles, layout, paint order, Lynx vocabulary,
-  or scene traversal. It owns no Painter and performs no CSS painting.
 - `crates/image` — the replaced-content pipeline below the DOM: container
   sniffing from magic bytes, header-only intrinsic-size probing, decode to
   RGBA8, and the async fetch→decode→cache loader over `bobcat-core`'s
@@ -506,8 +511,8 @@ useful signal for currently-compatible versions of those libraries.
   no still-image API on any of the three platforms exposes an acceleration
   query or reaches a decode ASIC, so `DedicatedHardware` is reserved and
   unreported. Routing may disagree with the ladder — on Apple, PNG stays on the
-  software backend because ImageIO just delegates to bundled libpng. It depends
-  on **neither `dom` nor `pulsar`**: it returns an `ImageHeader` and a
+  software backend because ImageIO just delegates to bundled libpng. It deliberately
+  does **not** depend on `dom`: it returns an `ImageHeader` and a
   `DecodedImage`, and installing those on a node and in an `ImageStore` is the
   caller's job. `DecodedImage::to_image_data` reaches `peniko` through vello's
   re-export behind the default `vello` feature, so the crate can be
@@ -527,8 +532,8 @@ useful signal for currently-compatible versions of those libraries.
   PNGs written to a git-ignored `tests/artifacts/` on failure. A newly
   *created* golden fails its own run so an unreviewed baseline cannot pass;
   an explicitly *accepted* one does not. The optional `render` feature adds
-  `capture_document` (`Document::render` → retained scene → Pulsar headless GPU) over the whole painted
-  frame, `viewport * device_pixel_ratio` device pixels — `pulsar` scales the
+  `capture_document` (`Document::render` → retained scene → `dom`'s headless GPU) over the whole painted
+  frame, `viewport * device_pixel_ratio` device pixels — the render floor scales the
   scene up by that ratio, so anything smaller is a crop. Playwright instead
   downsamples to CSS pixels; the two coincide at a ratio of 1, which is what
   lynx-stack pins for determinism and what every viewport here uses.
@@ -537,7 +542,7 @@ useful signal for currently-compatible versions of those libraries.
   necessarily renders from the document-owned registry, and a raster-image
   golden guards that ownership path. `headless` requires a usable GPU adapter and panics when one is
   unavailable, so local and CI test runs obey the same mandatory-GPU policy.
-  DOM-aware screenshot suites live in `dom`; Pulsar retains only direct GPU
+  DOM-aware screenshot suites live in `dom`, which also keeps the direct GPU
   smoke tests. Goldens are not platform-suffixed: cross-platform
   rasterizer noise is absorbed by tolerance, not by per-platform baselines.
 - *(planned, not yet scaffolded)* the remaining runtime crates — see

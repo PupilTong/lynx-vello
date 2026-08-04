@@ -13,14 +13,13 @@ publish = false
 # GPU. Any crate can dev-depend on it.
 default = []
 # Adds the capture half: ask `dom` to render through its private painter and
-# submit the retained scene through `pulsar`'s headless GPU surface.
-render = ["dep:dom", "dep:pulsar"]
+# submit the retained scene through `dom`'s headless GPU surface.
+render = ["dep:dom"]
 
 [dependencies]
 png = { workspace = true }
 
 dom = { workspace = true, optional = true }
-pulsar = { workspace = true, optional = true }
 
 [lints]
 workspace = true

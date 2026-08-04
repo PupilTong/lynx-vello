@@ -16,9 +16,9 @@ use stylo::dom::OpaqueNode;
 use stylo::selector_parser::SnapshotMap;
 use stylo::stylesheets::UrlExtraData;
 
-use crate::damage::StyleDamage;
-use crate::engine::StyleEngine;
-use crate::node::Node;
+use crate::style::damage::StyleDamage;
+use crate::style::engine::StyleEngine;
+use crate::tree::node::Node;
 
 pub type NodeId = usize;
 
@@ -158,7 +158,7 @@ pub struct Document<T> {
     style_engine: StyleEngine,
     tree: Box<TreeArenas<T>>,
     layout: DocumentLayoutState,
-    pub(crate) painter: RefCell<crate::painter::Painter>,
+    pub(crate) painter: RefCell<crate::paint::painter::Painter>,
     /// Pre-mutation state exists only while invalidation is pending. Keeping
     /// the payloads here leaves one byte-sized lifecycle flag, rather than a
     /// nullable snapshot pointer, in every live node's styling slot.
@@ -212,7 +212,7 @@ impl<T> Document<T> {
             style_engine,
             tree,
             layout,
-            painter: RefCell::new(crate::painter::Painter::default()),
+            painter: RefCell::new(crate::paint::painter::Painter::default()),
             pending_snapshots: SnapshotMap::new(),
             relayout_roots: Vec::new(),
             relayout_root_ids: FxHashSet::default(),
@@ -608,7 +608,7 @@ impl<T> Document<T> {
             debug_assert!(node.is_element(), "only elements can own Stylo snapshots");
             debug_assert_eq!(
                 node.snapshot_flags(),
-                crate::node::SNAPSHOT_PRESENT,
+                crate::tree::node::SNAPSHOT_PRESENT,
                 "queued snapshots must be present and unhandled before a flush"
             );
         }
@@ -643,11 +643,11 @@ impl<T> Document<T> {
             };
             let flags = node.snapshot_flags();
             debug_assert_ne!(
-                flags & crate::node::SNAPSHOT_PRESENT,
+                flags & crate::tree::node::SNAPSHOT_PRESENT,
                 0,
                 "snapshot queue entry lost its present flag during traversal"
             );
-            if flags & crate::node::SNAPSHOT_HANDLED != 0 {
+            if flags & crate::tree::node::SNAPSHOT_HANDLED != 0 {
                 node.clear_snapshot_flags();
                 false
             } else {
@@ -927,7 +927,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             snapshot_flags(&document, detached),
-            crate::node::SNAPSHOT_PRESENT
+            crate::tree::node::SNAPSHOT_PRESENT
         );
         assert_eq!(snapshot_flags(&document, connected), 0);
 

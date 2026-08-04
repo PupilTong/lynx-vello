@@ -20,11 +20,11 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use dom::render::gpu::Headless;
+use dom::vello::Scene;
+use dom::vello::kurbo::{Affine, Rect};
+use dom::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
 use flashbulb::{CompareOptions, Image, compare, screenshots_in};
-use pulsar::gpu::Headless;
-use pulsar::vello::Scene;
-use pulsar::vello::kurbo::{Affine, Rect};
-use pulsar::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
 
 const CASE_COUNT: usize = 1_000;
 const CELL_SIZE: u32 = 128;

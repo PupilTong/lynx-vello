@@ -13,16 +13,16 @@ bobcat-cli
   ├── lynx-element [feature = "internal-document-access"]
   │     └──▶ dom ───┬──▶ hughie
   │                 ├──▶ vendor/stylo
-  │                 └──▶ pulsar ───▶ vello/wgpu
-  ├── pulsar
+  │                 └──▶ vello/wgpu
   └── winit (macOS headed product only)
 ```
 
-`pulsar` is intentionally below and independent of `dom`: it owns the opaque
-image registry, Vello version boundary, and GPU submission/readback backend.
-It knows no `Document`, `NodeId`, computed style, layout, or paint order.
-`dom` owns every DOM-aware paint operation and uses Pulsar's lower-level
-resources directly.
+`dom`'s `render` module is its intentionally DOM-free floor (absorbed from the
+former `pulsar` crate): it owns the opaque image registry, the Vello
+version boundary (the crate-root `dom::vello` re-export), and the GPU
+submission/readback backend. Nothing in it names `Document`, `NodeId`,
+computed styles, layout, or paint order; the document-aware painter above it
+builds scenes, and the floor turns scenes into pixels.
 
 ## Core feature boundary
 
@@ -36,7 +36,7 @@ JavaScript adapter:
   `pub type ElementId = u32`. There is no element-host trait: the only real
   host is `ElementTree`, so the QuickJS adapter composes it directly.
 - `resource` and `view` provide resource acquisition and generic engine/view
-  composition. The crate root does not re-export `ElementTree`, `dom`, Pulsar,
+  composition. The crate root does not re-export `ElementTree`, `dom`,
   or a renderer specialization. `bobcat-cli` is a separate product, not the
   implementation of a core embedder façade.
 
@@ -63,7 +63,7 @@ Document<T>
   └── private Painter
         ├── retained vello::Scene
         ├── reusable walk scratch
-        └── pulsar::ImageStore
+        └── ImageStore
 ```
 
 `Document::render` performs layout, builds the private CSS visual
@@ -107,8 +107,9 @@ methods. The trusted CLI and render tests opt into
    Painter over live styles, rounded layouts, retained text, and the
    document-owned `ImageStore`.
 5. The Painter resets and rebuilds its retained Vello scene. Headed and
-   headless CLI backends borrow that same scene and submit it through Pulsar's
-   GPU helpers; neither backend duplicates DOM traversal or paint policy.
+   headless CLI backends borrow that same scene and submit it through
+   `dom::render::gpu`; neither backend duplicates DOM traversal or paint
+   policy.
 6. `Document::handle_input` builds the same private visual model for hit
    testing and performs the resolved default action. Scrolling invalidates the
    retained scene, so the next prepared frame rebuilds it.
@@ -129,8 +130,6 @@ traversal.
 ## Validation matrix
 
 ```sh
-cargo check -p pulsar
-cargo tree -p pulsar --edges normal --depth 1
 cargo check -p dom --all-targets
 cargo check -p lynx-element
 cargo check -p bobcat-core --no-default-features
@@ -139,7 +138,8 @@ cargo check -p bobcat-cli
 cargo check --workspace --all-targets
 ```
 
-The first two commands verify Pulsar cannot acquire a DOM edge. The DOM target
-check compiles the private painter plus its migrated paint tests and benchmark.
+The DOM target
+check compiles the private painter, the DOM-free `render` floor, and the paint
+tests and benchmark.
 The two core builds validate external-engine and built-in QuickJS boundaries;
 the final commands validate the product composition.

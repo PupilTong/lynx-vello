@@ -8,16 +8,20 @@
 //! group compositing; each submodule paints exactly one fragment family
 //! into the scene in the item's local coordinate space.
 
-pub(crate) mod background;
-pub(crate) mod border;
-pub(crate) mod filters;
-pub(crate) mod mask;
-pub(crate) mod shadow;
-pub(crate) mod text;
+mod background;
+mod border;
+mod convert;
+mod filters;
+mod mask;
+pub(crate) mod painter;
+mod shadow;
+mod shape;
+mod text;
+mod walker;
 
 use crate::NodeId;
 use crate::layout::{Edges, Layout, TextLayout};
-use crate::shape::ReferenceBoxes;
+use crate::paint::shape::ReferenceBoxes;
 use crate::vello::kurbo::{Affine, BezPath, Rect, Vec2};
 use crate::visual::CornerRadii;
 

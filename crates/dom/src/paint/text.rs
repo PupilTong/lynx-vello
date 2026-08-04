@@ -30,9 +30,9 @@ use stylo::computed_values::text_decoration_style::T as TextDecorationStyle;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{ColorPropertyValue, TextDecorationLine};
 
-use crate::convert;
 use crate::layout::TextLayout;
 use crate::paint::background::{GradientBrush, gradient_brush};
+use crate::paint::convert;
 use crate::vello::kurbo::{Affine, BezPath, Diagonal2, Line, Rect, Stroke};
 use crate::vello::peniko::{self, BrushRef, Color, Fill, StyleRef};
 use crate::vello::{FontEmbolden, Scene};

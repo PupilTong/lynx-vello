@@ -137,7 +137,7 @@ impl DecodedImage {
     }
 
     /// The `peniko` view of this image, for
-    /// [`pulsar::ImageStore`](https://docs.rs/pulsar).
+    /// `dom`'s `ImageStore`.
     ///
     /// Cheap — it clones the shared buffer handle, never the pixels.
     #[cfg(feature = "vello")]

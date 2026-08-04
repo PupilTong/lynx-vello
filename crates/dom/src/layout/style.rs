@@ -9,8 +9,8 @@ use stylo::properties::ComputedValues;
 use stylo::values::computed::motion::OffsetPath;
 use stylo::values::specified::box_::{DisplayInside, DisplayOutside, WillChangeBits};
 
-use crate::contain::{ContentVisibility, effective_containment};
-use crate::node::Node;
+use crate::style::contain::{ContentVisibility, effective_containment};
+use crate::tree::node::Node;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DisplayMode {

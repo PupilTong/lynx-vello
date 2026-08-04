@@ -83,7 +83,7 @@ use std::cell::Ref;
 
 use euclid::default::{Point2D, Rect, Size2D, Transform3D};
 
-use crate::document::Document;
+use crate::tree::document::Document;
 use crate::{ImageStore, NodeId};
 
 /// The document's current frame in paint order: `items[0]` paints first
@@ -290,7 +290,7 @@ impl<T> Document<T> {
     /// [`Self::render`] call.
     #[must_use]
     pub fn scene(&self) -> Ref<'_, crate::vello::Scene> {
-        Ref::map(self.painter.borrow(), crate::painter::Painter::scene)
+        Ref::map(self.painter.borrow(), crate::paint::painter::Painter::scene)
     }
 
     /// Registers or updates decoded images without exposing the painter.
