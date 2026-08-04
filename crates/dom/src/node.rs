@@ -1,7 +1,6 @@
 //! [`Node`] — the unit the tree is composed of — and its `&Node` read/
 //! navigation handle.
 
-use std::cell::UnsafeCell;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc as StdArc;
@@ -14,7 +13,7 @@ use selectors::matching::ElementSelectorFlags;
 use slab::Slab;
 use smallvec::SmallVec;
 use stylo::LocalName;
-use stylo::data::{ElementDataRef, ElementDataWrapper};
+use stylo::data::{ElementData, ElementDataRef, ElementDataWrapper};
 use stylo::properties::{ComputedValues, PropertyDeclarationBlock};
 use stylo::servo_arc::Arc;
 use stylo::shared_lock::{Locked, SharedRwLock};
@@ -22,205 +21,30 @@ use stylo::stylesheets::UrlExtraData;
 use stylo_atoms::Atom;
 use stylo_dom::ElementState;
 
-use crate::document::{DOCUMENT_NODE_ID, NodeId, PayloadSlot, TreeArenas, slab_get_for_live_node};
-
-#[cfg(debug_assertions)]
-pub(crate) mod slot_guard {
-    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-
-    fn current_thread_token() -> u64 {
-        use std::cell::Cell;
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        thread_local! {
-            static TOKEN: Cell<u64> = const { Cell::new(0) };
-        }
-        TOKEN.with(|token| {
-            if token.get() == 0 {
-                token.set(NEXT.fetch_add(1, Ordering::Relaxed));
-            }
-            token.get()
-        })
-    }
-
-    const FREE: u32 = 0;
-    const WRITER: u32 = u32::MAX;
-
-    /// Per-node access guard for the `stylo_data` slot: `FREE`, a reader
-    /// count, or `WRITER`; the owning thread of a writer; and a poison flag
-    /// set when a panic unwinds through an active access.
-    pub(crate) struct SlotGuard {
-        state: AtomicU32,
-        owner: AtomicU64,
-        poisoned: AtomicBool,
-    }
-
-    impl SlotGuard {
-        pub(crate) const fn new() -> Self {
-            Self {
-                state: AtomicU32::new(FREE),
-                owner: AtomicU64::new(0),
-                poisoned: AtomicBool::new(false),
-            }
-        }
-
-        fn check_poison(&self) {
-            assert!(
-                !self.poisoned.load(Ordering::Acquire),
-                "stylo_data slot poisoned: a panic unwound through an earlier access; the tree's style state is unspecified — discard or rebuild it (see the flush docs)"
-            );
-        }
-
-        pub(crate) fn begin_write(&self) -> WriteToken<'_> {
-            self.check_poison();
-            let prev = self.state.swap(WRITER, Ordering::AcqRel);
-            if prev != FREE {
-                self.poisoned.store(true, Ordering::Release);
-                panic!(
-                    "stylo_data slot written while {} — stylo's traversal ownership contract (one worker per element) was violated (writer thread {})",
-                    if prev == WRITER {
-                        "another worker holds it for writing".to_owned()
-                    } else {
-                        format!("{prev} reader(s) hold it")
-                    },
-                    self.owner.load(Ordering::Relaxed),
-                );
-            }
-            self.owner.store(current_thread_token(), Ordering::Relaxed);
-            WriteToken { guard: self }
-        }
-
-        pub(crate) fn begin_read(&self) -> ReadToken<'_> {
-            self.check_poison();
-            let prev = self.state.fetch_add(1, Ordering::AcqRel);
-            if prev >= WRITER - 1 {
-                self.poisoned.store(true, Ordering::Release);
-                panic!(
-                    "stylo_data slot read while a writer (thread {}) holds it — stylo's traversal ownership contract was violated",
-                    self.owner.load(Ordering::Relaxed),
-                );
-            }
-            ReadToken { guard: self }
-        }
-    }
-
-    pub(crate) struct WriteToken<'a> {
-        guard: &'a SlotGuard,
-    }
-
-    impl Drop for WriteToken<'_> {
-        fn drop(&mut self) {
-            if std::thread::panicking() {
-                self.guard.poisoned.store(true, Ordering::Release);
-            }
-            self.guard.owner.store(0, Ordering::Relaxed);
-            self.guard.state.store(FREE, Ordering::Release);
-        }
-    }
-
-    pub(crate) struct ReadToken<'a> {
-        guard: &'a SlotGuard,
-    }
-
-    impl Drop for ReadToken<'_> {
-        fn drop(&mut self) {
-            if std::thread::panicking() {
-                self.guard.poisoned.store(true, Ordering::Release);
-            }
-            self.guard.state.fetch_sub(1, Ordering::AcqRel);
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn concurrent_writers_panic_and_poison() {
-            let guard = SlotGuard::new();
-            let _held = guard.begin_write();
-            let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _t = guard.begin_write();
-            }));
-            assert!(second.is_err(), "second writer must panic");
-            assert!(
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let _t = guard.begin_read();
-                }))
-                .is_err(),
-                "post-violation access must report poisoning"
-            );
-        }
-
-        #[test]
-        fn reader_during_writer_panics() {
-            let guard = SlotGuard::new();
-            let _held = guard.begin_write();
-            assert!(
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let _t = guard.begin_read();
-                }))
-                .is_err()
-            );
-        }
-
-        #[test]
-        fn readers_share_and_release() {
-            let guard = SlotGuard::new();
-            {
-                let _a = guard.begin_read();
-                let _b = guard.begin_read();
-            }
-            let _w = guard.begin_write();
-        }
-
-        #[test]
-        fn unwind_through_access_poisons() {
-            let guard = SlotGuard::new();
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _t = guard.begin_read();
-                panic!("mid-access unwind");
-            }));
-            assert!(
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let _t = guard.begin_read();
-                }))
-                .is_err(),
-                "an unwound access must poison the slot"
-            );
-        }
-    }
-}
+use crate::document::{DOCUMENT_NODE_ID, NodeId, PayloadSlot, TreeArenas};
 
 pub(crate) const SNAPSHOT_PRESENT: u8 = 1 << 0;
 pub(crate) const SNAPSHOT_HANDLED: u8 = 1 << 1;
 
-static STALE_STYLE_MARKER: u8 = 0;
-
-fn stale_layout_style_pointer() -> *mut ComputedValues {
-    std::ptr::from_ref(&STALE_STYLE_MARKER)
-        .cast::<ComputedValues>()
-        .cast_mut()
-}
-
 struct DocumentNodeData {
     lock: StdArc<SharedRwLock>,
     url_data: UrlExtraData,
-    layout_styles_ready: AtomicBool,
-    in_flush: AtomicBool,
+    in_flush: StdArc<AtomicBool>,
 }
 
 enum NodeData {
     Document(Box<DocumentNodeData>),
-    /// Stable pointer into the element's Stylo-owned primary
-    /// `Arc<ComputedValues>`, published by each style traversal. A dangling
-    /// sentinel fail-closes elements mutated outside that traversal until
-    /// their own preorder callback publishes a new generation.
-    Element(AtomicPtr<ComputedValues>),
+    /// Layout/paint snapshot of the element's primary
+    /// `Arc<ComputedValues>`, refreshed by the exclusive post-flush damage
+    /// harvest. The `Arc` keeps the pointee alive, so reads are always
+    /// memory-safe; a debug assertion in [`Node::layout_computed_style`]
+    /// verifies the snapshot still matches Stylo's live primary style.
+    Element(Option<Arc<ComputedValues>>),
     Text,
 }
 
-/// Stylo's per-node traversal and invalidation bookkeeping, stored in the
-/// document's styling secondary arena under the owning node's [`NodeId`].
+/// Stylo's per-node traversal and invalidation bookkeeping, stored inline on
+/// the [`Node`] so traversal flag access shares the node's cache lines.
 /// Snapshot payloads are sparse, document-owned state; only their atomic
 /// traversal lifecycle flags remain here.
 pub(crate) struct StylingData {
@@ -228,8 +52,6 @@ pub(crate) struct StylingData {
     pub(crate) dirty_descendants: AtomicBool,
     pub(crate) snapshot_flags: AtomicU8,
     pub(crate) children_to_process: AtomicIsize,
-    #[cfg(debug_assertions)]
-    pub(crate) slot_guard: slot_guard::SlotGuard,
 }
 
 impl Default for StylingData {
@@ -239,8 +61,6 @@ impl Default for StylingData {
             dirty_descendants: AtomicBool::new(false),
             snapshot_flags: AtomicU8::new(0),
             children_to_process: AtomicIsize::new(0),
-            #[cfg(debug_assertions)]
-            slot_guard: slot_guard::SlotGuard::new(),
         }
     }
 }
@@ -269,7 +89,15 @@ pub struct Node<T> {
 
     pub(crate) inline_block: Option<Arc<Locked<PropertyDeclarationBlock>>>,
 
-    pub(crate) stylo_data: UnsafeCell<Option<ElementDataWrapper>>,
+    /// Stylo's per-element style data, unconditionally present so no outer
+    /// cell is needed: interior mutability lives entirely inside the upstream
+    /// [`ElementDataWrapper`] (release-free, debug-checked borrows).
+    /// [`Self::stylo_data_present`] tracks Stylo's has-data protocol, which
+    /// the upstream wrapper does not model.
+    style_data: ElementDataWrapper,
+    stylo_data_present: AtomicBool,
+
+    pub(crate) styling: StylingData,
 
     content: Option<Box<NodeContent>>,
 }
@@ -286,8 +114,7 @@ impl<T> Node<T> {
             NodeData::Document(Box::new(DocumentNodeData {
                 lock,
                 url_data,
-                layout_styles_ready: AtomicBool::new(true),
-                in_flush: AtomicBool::new(false),
+                in_flush: StdArc::new(AtomicBool::new(false)),
             })),
             None,
             None,
@@ -299,13 +126,7 @@ impl<T> Node<T> {
         id: NodeId,
         local_name: LocalName,
     ) -> Self {
-        Self::new(
-            owner,
-            id,
-            NodeData::Element(AtomicPtr::new(std::ptr::null_mut())),
-            Some(local_name),
-            None,
-        )
+        Self::new(owner, id, NodeData::Element(None), Some(local_name), None)
     }
 
     pub(crate) fn new_text(owner: *mut TreeArenas<T>, id: NodeId, text: String) -> Self {
@@ -332,7 +153,9 @@ impl<T> Node<T> {
             attrs: Vec::new(),
             element_state: ElementState::empty(),
             inline_block: None,
-            stylo_data: UnsafeCell::new(None),
+            style_data: ElementDataWrapper::default(),
+            stylo_data_present: AtomicBool::new(false),
+            styling: StylingData::default(),
             content: text.map(|value| Box::new(NodeContent::Text(value))),
         }
     }
@@ -350,7 +173,7 @@ impl<T> Node<T> {
 
     #[inline]
     pub(crate) fn styling_data(&self) -> &StylingData {
-        slab_get_for_live_node(&self.arenas().styling, self.id)
+        &self.styling
     }
 
     pub(crate) fn owner_document(&self) -> &Node<T> {
@@ -379,19 +202,7 @@ impl<T> Node<T> {
         &self.document_data().url_data
     }
 
-    pub(crate) fn set_layout_styles_ready(&self, ready: bool) {
-        self.document_data()
-            .layout_styles_ready
-            .store(ready, Ordering::Release);
-    }
-
-    pub(crate) fn layout_styles_ready(&self) -> bool {
-        self.document_data()
-            .layout_styles_ready
-            .load(Ordering::Acquire)
-    }
-
-    pub(crate) fn flush_flag(&self) -> &AtomicBool {
+    pub(crate) fn flush_flag(&self) -> &StdArc<AtomicBool> {
         &self.document_data().in_flush
     }
 
@@ -512,7 +323,12 @@ impl<T> Node<T> {
     pub fn payload(&self) -> &T {
         match &self.data {
             NodeData::Element(_) | NodeData::Text => {
-                match slab_get_for_live_node(&self.arenas().payloads, self.id) {
+                let slot = self
+                    .arenas()
+                    .payloads
+                    .get(self.id)
+                    .expect("live node must have payload-arena state");
+                match slot {
                     PayloadSlot::Node(payload) => payload,
                     PayloadSlot::Document => {
                         unreachable!("document payload sentinel is only at slot zero")
@@ -524,10 +340,7 @@ impl<T> Node<T> {
     }
 
     pub(crate) fn has_style_data(&self) -> bool {
-        #[expect(unsafe_code, reason = "UnsafeCell discriminant read outside any flush")]
-        unsafe {
-            (*self.stylo_data.get()).is_some()
-        }
+        self.stylo_data_present.load(Ordering::Acquire)
     }
 
     pub(crate) fn needs_style_flush(&self) -> bool {
@@ -537,12 +350,7 @@ impl<T> Node<T> {
         {
             return true;
         }
-        #[expect(unsafe_code, reason = "ElementData is only read outside a style flush")]
-        unsafe {
-            (*self.stylo_data.get())
-                .as_ref()
-                .is_none_or(|data| !data.borrow().hint.is_empty())
-        }
+        !self.has_style_data() || !self.style_data.borrow().hint.is_empty()
     }
 
     #[must_use]
@@ -552,58 +360,67 @@ impl<T> Node<T> {
     }
 
     pub(crate) fn borrow_computed_style(&self) -> Option<ElementDataRef<'_>> {
-        #[expect(unsafe_code, reason = "UnsafeCell read outside any flush")]
-        let slot = unsafe { (*self.stylo_data.get()).as_ref() };
-        let data = slot?.borrow();
+        if !self.has_style_data() {
+            return None;
+        }
+        let data = self.style_data.borrow();
         data.styles.primary.as_ref()?;
         Some(data)
     }
 
-    /// Publish the layout-only pointer after Stylo has finished mutating this
-    /// element's data in its preorder callback.
-    ///
-    /// The pointee is owned by the primary style's `Arc`. A later traversal
-    /// may replace that `Arc`, but `Document` requires exclusive access for
-    /// both traversal and layout, and publishes this pointer before layout can
-    /// observe the new generation.
-    pub(crate) fn set_layout_style_pointer(&self, style: *mut ComputedValues) {
-        let NodeData::Element(pointer) = &self.data else {
-            debug_assert!(style.is_null());
-            return;
-        };
-        pointer.store(style, Ordering::Relaxed);
+    pub(crate) fn style_data_wrapper(&self) -> Option<&ElementDataWrapper> {
+        self.has_style_data().then_some(&self.style_data)
     }
 
-    pub(crate) fn mark_layout_style_stale(&self) {
-        let NodeData::Element(pointer) = &self.data else {
-            return;
+    /// Store the harvested layout-style snapshot, reporting whether the
+    /// snapshot's `Arc` identity changed. The damage harvest keys its descent
+    /// on that change: a freshly (re)styled element is exactly one whose
+    /// snapshot moved, and its children may hold initial styles Stylo's
+    /// dirty-descendants bookkeeping does not cover.
+    pub(crate) fn refresh_layout_style(&mut self, style: Option<Arc<ComputedValues>>) -> bool {
+        let NodeData::Element(snapshot) = &mut self.data else {
+            debug_assert!(style.is_none(), "only elements own computed styles");
+            return false;
         };
-        pointer.store(stale_layout_style_pointer(), Ordering::Relaxed);
+        let changed = match (&*snapshot, &style) {
+            (None, None) => false,
+            (Some(old), Some(new)) => !Arc::ptr_eq(old, new),
+            _ => true,
+        };
+        if changed {
+            *snapshot = style;
+        }
+        changed
     }
 
-    /// Borrow the post-flush computed style without re-entering Stylo's
+    /// Borrow the harvested computed style without re-entering Stylo's
     /// runtime borrow checker or incrementing the style `Arc`.
     ///
-    /// The document-wide readiness gate ([`Self::layout_styles_ready`]) is
-    /// asserted once at every layout/invalidation pass entry rather than per
-    /// node here; the per-element stale-pointer check below stays as the
-    /// precise fail-closed mechanism.
+    /// The snapshot is refreshed by the exclusive post-flush damage harvest
+    /// and its `Arc` keeps the value alive, so this is always memory-safe.
+    /// After a traversal that panicked mid-flush the snapshot can lag the
+    /// live style (the document is unspecified per the let-it-crash policy);
+    /// the debug assertion below reports any divergence.
     pub(crate) fn layout_computed_style(&self) -> Option<&ComputedValues> {
-        let NodeData::Element(pointer) = &self.data else {
+        let NodeData::Element(snapshot) = &self.data else {
             return None;
         };
-        let pointer = pointer.load(Ordering::Relaxed);
-        assert!(
-            !std::ptr::addr_eq(pointer, stale_layout_style_pointer()),
-            "computed style for this element was mutated outside the completed style traversal"
-        );
-        #[expect(
-            unsafe_code,
-            reason = "the pointer is refreshed under Document's exclusive style/layout phase boundary and remains Arc-owned until the next exclusive traversal"
-        )]
-        unsafe {
-            pointer.as_ref()
+        #[cfg(debug_assertions)]
+        {
+            let live = self.borrow_computed_style();
+            let live_primary = live.as_ref().and_then(|data| data.styles.primary.as_ref());
+            let matches = match (snapshot.as_ref(), live_primary) {
+                (None, None) => true,
+                (Some(old), Some(new)) => Arc::ptr_eq(old, new),
+                _ => false,
+            };
+            debug_assert!(
+                matches,
+                "layout-style snapshot diverged from Stylo's live primary style — the damage \
+                 harvest missed this element (invalidation bug) or a traversal did not complete"
+            );
         }
+        snapshot.as_deref()
     }
 
     #[must_use]
@@ -703,7 +520,24 @@ impl<T> Node<T> {
     }
 
     pub(crate) fn stylo_data_mut(&mut self) -> Option<&mut ElementDataWrapper> {
-        self.stylo_data.get_mut().as_mut()
+        if *self.stylo_data_present.get_mut() {
+            Some(&mut self.style_data)
+        } else {
+            None
+        }
+    }
+
+    /// Marks the element's Stylo data present and lends the wrapper for the
+    /// traversal's exclusive per-element write.
+    pub(crate) fn ensure_style_data(&self) -> &ElementDataWrapper {
+        self.stylo_data_present.store(true, Ordering::Release);
+        &self.style_data
+    }
+
+    /// Resets the element's Stylo data to its unstyled state.
+    pub(crate) fn clear_style_data(&self) {
+        *self.style_data.borrow_mut() = ElementData::default();
+        self.stylo_data_present.store(false, Ordering::Release);
     }
 
     pub(crate) fn is_empty_element(&self) -> bool {
@@ -888,7 +722,7 @@ mod tests {
         // Cargo.toml note).
         assert_eq!(
             std::mem::size_of::<Node<()>>(),
-            if cfg!(debug_assertions) { 200 } else { 192 }
+            if cfg!(debug_assertions) { 224 } else { 216 }
         );
         assert!(
             std::mem::size_of::<NodeData>() < PRE_BOXING_NODE_DATA_SIZE,
@@ -912,15 +746,11 @@ mod tests {
             dirty_descendants: AtomicBool,
             snapshot_flags: AtomicU8,
             children_to_process: AtomicIsize,
-            #[cfg(debug_assertions)]
-            slot_guard: slot_guard::SlotGuard,
         }
 
-        let before = if cfg!(debug_assertions) { 48 } else { 32 };
-        let after = if cfg!(debug_assertions) { 40 } else { 24 };
-        assert_eq!(std::mem::size_of::<PreviousStylingData>(), before);
-        assert_eq!(std::mem::size_of::<StylingData>(), after);
-        assert_eq!(before - after, std::mem::size_of::<usize>());
+        assert_eq!(std::mem::size_of::<PreviousStylingData>(), 32);
+        assert_eq!(std::mem::size_of::<StylingData>(), 24);
+        assert_eq!(std::mem::size_of::<usize>(), 32 - 24);
     }
 
     #[test]
@@ -948,28 +778,37 @@ mod tests {
     }
 
     #[test]
-    fn out_of_band_stylo_mutation_fail_closes_layout_style_access() {
+    fn out_of_band_stylo_mutation_keeps_snapshot_readable() {
         let mut document = Document::<()>::new(crate::document::tests::device());
         let root = document.create_element("page", ());
         document.append_document_element(root);
         document.flush_styles_with_damage_sink(&mut |_, _| {});
 
         let node = document.get(root).expect("root remains live");
-        assert!(node.layout_computed_style().is_some());
+        let before = std::ptr::from_ref(node.layout_computed_style().expect("root is styled"));
+        // Hint-level out-of-band access — what invalidation writes between
+        // flushes — does not move the primary style, so the harvested
+        // snapshot stays identical and readable.
         drop(
             <&Node<()> as TElement>::mutate_data(&node).expect("a flushed element owns Stylo data"),
         );
-        assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _ = node.layout_computed_style();
-            }))
-            .is_err(),
-            "safe out-of-band mutable access must make stale layout pointers inaccessible"
+        let after = std::ptr::from_ref(
+            node.layout_computed_style()
+                .expect("the snapshot remains readable"),
+        );
+        assert_eq!(
+            before, after,
+            "hint-level access must leave the snapshot untouched"
         );
     }
 
+    /// An unvisited detached element whose primary style is cleared out of
+    /// band diverges from its harvested snapshot. Release builds keep reading
+    /// the snapshot (stale but `Arc`-owned, so memory-safe); debug builds
+    /// report the divergence at the read site.
+    #[cfg(debug_assertions)]
     #[test]
-    fn connected_flush_cannot_reenable_a_detached_stale_style_pointer() {
+    fn diverged_snapshot_on_unvisited_element_is_reported_in_debug() {
         let mut document = Document::<()>::new(crate::document::tests::device());
         let root = document.create_element("page", ());
         document.append_document_element(root);
@@ -996,7 +835,7 @@ mod tests {
                 let _ = stale.layout_computed_style();
             }))
             .is_err(),
-            "a connected traversal must not make an unvisited detached stale pointer observable"
+            "debug builds must report a snapshot that diverged from the live style"
         );
     }
 

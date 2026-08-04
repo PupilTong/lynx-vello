@@ -174,10 +174,6 @@ pub(super) fn run_layout<T: Sync>(
     scale: f32,
     full: bool,
 ) {
-    assert!(
-        document.root_node().layout_styles_ready(),
-        "computed styles are unavailable because the preceding style traversal did not complete"
-    );
     let Some(root) = document.root_element().map(Node::id) else {
         return;
     };

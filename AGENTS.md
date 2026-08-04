@@ -241,17 +241,24 @@ useful signal for currently-compatible versions of those libraries.
   standards-oriented CSS computation core. `docs/dom-public-api.md` is the
   authoritative normal-build versus test-feature API boundary. It owns a
   fixed-address boxed
-  `TreeArenas<T>` containing three `Slab`s: a primary `Slab<Node<T>>` (slot
+  `TreeArenas<T>` containing two `Slab`s: a primary `Slab<Node<T>>` (slot
   zero is the real DOM Document node and carries its node-visible style
-  context; later slots are element/text nodes), plus NodeId-aligned payload
-  and Stylo traversal/invalidation slabs. A separate inline
-  `DocumentLayoutState` owns the fourth, NodeId-aligned layout slab. The
-  primary slab selects each raw-`usize` ID; every side slab allocates/removes
-  in lockstep and asserts it received that same key (the payload slab reserves
-  a payload-less sentinel at document slot zero). Node removal drops all four
+  context; later slots are element/text nodes) plus a NodeId-aligned payload
+  slab. A separate inline
+  `DocumentLayoutState` owns the NodeId-aligned layout slab. Stylo's
+  per-element style data (the upstream `ElementDataWrapper`, no outer cell)
+  and its traversal/invalidation flags live inline on `Node` (bench-defended
+  2026-08-03: the paired A/B showed no traversal regression and a measurably
+  faster no-op-commit fast path). The
+  primary slab selects each raw-`usize` ID; the side slabs allocate/remove
+  in lockstep and assert they received that same key (the payload slab reserves
+  a payload-less sentinel at document slot zero). Node removal drops all three
   entries before the ID can be reused (ONE TREE policy: nodes are created and
   mutated only through `Document` methods). Computed styles remain with the
-  primary nodes; layout/text state does not.
+  primary nodes; layout/text state does not. The crate's entire `unsafe`
+  surface is two blocks — the arena backpointer deref and the
+  `TElement::ensure_data` contract call — plus the `unsafe fn` signatures
+  Stylo's traits mandate (all bodies safe).
   `Document<T>` also owns one private concrete `Painter`, including its
   reusable walk scratch, retained `vello::Scene`, and `pulsar::ImageStore`.
   `render` privately builds `PaintOrder` and invokes that painter
@@ -291,17 +298,18 @@ useful signal for currently-compatible versions of those libraries.
   the single `LayoutTree` trait implemented on `TreeArenas<T>`. Plain
   `NodeId`s identify nodes, and every engine entry receives `&TreeArenas`
   alongside a separate `&mut DocumentLayoutState`; there is no
-  `LayoutTreeView`, session, or store adapter. At the exclusive style-flush
-  boundary, each element's preorder callback first marks its layout style
-  stale, then publishes a pointer into the primary `Arc<ComputedValues>`
-  still owned by Stylo's `ElementData` only after recalculation succeeds;
-  layout views
-  lend that post-flush value with no `ElementData` borrow check, `Arc` bump,
-  copy, or translation layer. A document-level phase flag distinguishes
-  Stylo's own mutations from safe out-of-band mutable access, which also
-  marks that element stale; a failed traversal therefore remains fail-closed
-  even after an unrelated retry. The pointer stays valid until the next
-  exclusive traversal, which cannot overlap layout. Public computed-style
+  `LayoutTreeView`, session, or store adapter. After each completed
+  traversal, the exclusive damage harvest clones every visited element's
+  primary `Arc<ComputedValues>` into a per-node layout-style snapshot;
+  layout/paint borrow that snapshot with no `ElementData` borrow check or
+  per-read `Arc` bump, and the `Arc` keeps the value alive, so reads are
+  always memory-safe. The harvest descends wherever Stylo's dirty-descendants
+  bits point *or* the element's own snapshot identity changed — the latter
+  covers initially styled and freshly cleared (`display: none`) subtrees,
+  which set no dirty bits. A debug assertion at every snapshot read reports
+  divergence from Stylo's live primary style (an invalidation bug or an
+  incomplete traversal); release builds read the stale-but-owned snapshot
+  instead of crashing. Public computed-style
   access still uses Stylo's guarded borrow. Layout and text state use ordinary
   exclusive Rust borrows with no runtime borrow checking. Display dispatch routes
   flex/grid/linear/relative with `display: none` hiding and a leaf

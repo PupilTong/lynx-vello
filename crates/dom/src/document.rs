@@ -3,8 +3,7 @@
 
 use std::cell::RefCell;
 use std::fmt;
-use std::ptr::NonNull;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use hughie::geometry::Size;
 use hughie::text::{TextContext, TextLayoutStore};
@@ -19,7 +18,7 @@ use stylo::stylesheets::UrlExtraData;
 
 use crate::damage::StyleDamage;
 use crate::engine::StyleEngine;
-use crate::node::{Node, StylingData};
+use crate::node::Node;
 
 pub type NodeId = usize;
 
@@ -31,28 +30,23 @@ pub(crate) enum PayloadSlot<T> {
     Node(T),
 }
 
+/// Fetches NodeId-aligned arena state for a node known to be live.
+///
+/// The bounds/vacancy check stays: a paired A/B against `get_unchecked`
+/// (css + paint benches, 2026-08-03) showed no measurable difference, so the
+/// safe accessor wins by default.
 #[inline]
 pub(crate) fn slab_get_for_live_node<V>(slab: &Slab<V>, id: NodeId) -> &V {
-    debug_assert!(
-        slab.contains(id),
-        "live primary node must have matching arena state"
-    );
-    #[expect(
-        unsafe_code,
-        reason = "elide redundant bounds/vacancy checks for a live-node slot"
-    )]
-    unsafe {
-        slab.get_unchecked(id)
-    }
+    slab.get(id)
+        .expect("live primary node must have matching arena state")
 }
 
 /// The fixed-address, document-owned arena set. `nodes` selects each `NodeId`;
-/// the other slabs insert/remove in exactly the same order and assert that
-/// their own free lists return that same key.
+/// the payload slab inserts/removes in exactly the same order and asserts that
+/// its own free list returns that same key.
 pub(crate) struct TreeArenas<T> {
     pub(crate) nodes: Slab<Node<T>>,
     pub(crate) payloads: Slab<PayloadSlot<T>>,
-    pub(crate) styling: Slab<StylingData>,
 }
 
 impl<T> TreeArenas<T> {
@@ -60,7 +54,6 @@ impl<T> TreeArenas<T> {
         Self {
             nodes: Slab::with_capacity(INITIAL_NODE_CAPACITY),
             payloads: Slab::with_capacity(INITIAL_NODE_CAPACITY),
-            styling: Slab::with_capacity(INITIAL_NODE_CAPACITY),
         }
     }
 
@@ -71,20 +64,13 @@ impl<T> TreeArenas<T> {
     #[inline(always)]
     fn insert_side_state(&mut self, id: NodeId, payload: PayloadSlot<T>) {
         assert_eq!(self.payloads.vacant_key(), id);
-        assert_eq!(self.styling.vacant_key(), id);
         assert_eq!(self.payloads.insert(payload), id);
-        assert_eq!(self.styling.insert(StylingData::default()), id);
     }
 
     fn remove_side_state(&mut self, id: NodeId) -> PayloadSlot<T> {
-        let payload = self
-            .payloads
+        self.payloads
             .try_remove(id)
-            .expect("removed element/text node must have payload-arena state");
-        self.styling
-            .try_remove(id)
-            .expect("removed node must have styling-arena state");
-        payload
+            .expect("removed element/text node must have payload-arena state")
     }
 }
 
@@ -373,14 +359,10 @@ impl<T> Document<T> {
     }
 
     pub(crate) fn begin_flush_phase(&self) -> FlushPhaseToken {
-        use std::sync::atomic::Ordering;
-
-        let flag = self.root_node().flush_flag();
+        let flag = std::sync::Arc::clone(self.root_node().flush_flag());
         let was = flag.swap(true, Ordering::AcqRel);
         assert!(!was, "flush re-entered on a document already being flushed");
-        FlushPhaseToken {
-            flag: NonNull::from(flag),
-        }
+        FlushPhaseToken { flag }
     }
 
     pub fn create_element(&mut self, tag: &str, payload: T) -> NodeId {
@@ -648,12 +630,6 @@ impl<T> Document<T> {
         );
         self.pending_snapshots = snapshots;
 
-        // Every pointer affected by the completed traversal was published by
-        // its preorder callback before the driver returned. If traversal
-        // unwound, this point is never reached and layout access keeps
-        // panicking instead of dereferencing a stale pointer.
-        self.root_node().set_layout_styles_ready(true);
-
         let mut stack = vec![root];
         self.harvest_style_damage(&mut stack, sink);
     }
@@ -686,23 +662,27 @@ impl<T> Document<T> {
     {
         while let Some(current) = stack.pop() {
             let harvested = {
-                let tree = &mut *self.tree;
-                let Some(node) = tree.nodes.get_mut(current) else {
+                let Some(node) = self.tree.nodes.get_mut(current) else {
                     continue;
                 };
-                let styling = tree
-                    .styling
-                    .get_mut(current)
-                    .expect("live node must have styling-arena state");
+                let mut refreshed = None;
                 let harvested = node.stylo_data_mut().and_then(|wrapper| {
                     let mut data = wrapper.borrow_mut();
+                    refreshed.clone_from(&data.styles.primary);
                     let damage = data.damage;
                     data.clear_restyle_state();
                     (!damage.is_empty()).then(|| StyleDamage::from(damage))
                 });
-                let descend = styling.dirty_descendants.load(Ordering::Relaxed);
-                styling.dirty_descendants.store(false, Ordering::Relaxed);
-                if descend {
+                // Descend where Stylo's traversal noted restyled children
+                // (`dirty_descendants`), and also wherever this element's own
+                // primary style changed identity: initial styling below a
+                // freshly styled or freshly cleared element sets no dirty
+                // bits, but it always moves the parent snapshot first, so the
+                // snapshot delta walks exactly the (re)styled region.
+                let style_changed = node.refresh_layout_style(refreshed);
+                let dirty = node.styling.dirty_descendants.get_mut();
+                let descend = std::mem::replace(dirty, false);
+                if descend || style_changed {
                     stack.extend_from_slice(&node.children);
                 }
                 harvested
@@ -736,20 +716,17 @@ impl<T> Document<T> {
     }
 }
 
-/// RAII marker distinguishing Stylo's own mutation phase from safe external
-/// `TElement::mutate_data` access.
+/// RAII marker recording that a Stylo traversal is running, consulted by the
+/// debug assertions guarding `TElement`'s traversal-only entry points. Shares
+/// the document node's flag by `Arc` so it holds no borrow of the document
+/// across the traversal, and clears it even when the traversal unwinds.
 pub(crate) struct FlushPhaseToken {
-    flag: NonNull<std::sync::atomic::AtomicBool>,
+    flag: std::sync::Arc<AtomicBool>,
 }
 
 impl Drop for FlushPhaseToken {
     fn drop(&mut self) {
-        use std::sync::atomic::Ordering;
-
-        #[expect(unsafe_code, reason = "clear the document-node traversal flag")]
-        unsafe {
-            self.flag.as_ref().store(false, Ordering::Release);
-        }
+        self.flag.store(false, Ordering::Release);
     }
 }
 
@@ -842,17 +819,14 @@ pub(crate) mod tests {
             document.tree.payloads.get(id),
             Some(PayloadSlot::Node(7))
         ));
-        assert!(document.tree.styling.get(id).is_some());
         assert!(document.layout.nodes.get(id).is_some());
 
         assert_eq!(document.remove_subtree(id), vec![7]);
         assert!(!document.tree.nodes.contains(id));
         assert!(document.tree.payloads.get(id).is_none());
-        assert!(document.tree.styling.get(id).is_none());
         assert!(document.layout.nodes.get(id).is_none());
         assert_eq!(document.tree.nodes.vacant_key(), id);
         assert_eq!(document.tree.payloads.vacant_key(), id);
-        assert_eq!(document.tree.styling.vacant_key(), id);
         assert_eq!(document.layout.nodes.vacant_key(), id);
 
         let reused = document.create_text_node("replacement", 11);
@@ -861,10 +835,9 @@ pub(crate) mod tests {
         assert_eq!(document.layout_cache_is_empty(reused), Some(true));
         assert_eq!(
             document
-                .tree
-                .styling
                 .get(reused)
                 .unwrap()
+                .styling_data()
                 .snapshot_flags
                 .load(Ordering::Relaxed),
             0
