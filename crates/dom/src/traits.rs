@@ -1,5 +1,12 @@
 //! Stylo DOM traits implemented directly on the one-word `&Node` handle.
-#![allow(unsafe_code)]
+//!
+//! The only `unsafe` here is in the signatures Stylo's `TElement` mandates
+//! (`ensure_data` and friends are declared `unsafe fn` upstream); every
+//! implementation body is safe code.
+#![expect(
+    unsafe_code,
+    reason = "unsafe fn signatures mandated by Stylo's TElement contract; all bodies are safe"
+)]
 
 use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
@@ -272,67 +279,35 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
     }
 
     unsafe fn ensure_data(&self) -> ElementDataMut<'_> {
-        #[cfg(debug_assertions)]
-        let _access = {
-            debug_assert!(
-                self.in_flush(),
-                "TElement::ensure_data called outside a style traversal"
-            );
-            self.styling_data().slot_guard.begin_write()
-        };
-        let slot = unsafe { &mut *self.stylo_data.get() };
-        slot.get_or_insert_with(ElementDataWrapper::default)
-            .borrow_mut()
+        debug_assert!(
+            self.in_flush(),
+            "TElement::ensure_data called outside a style traversal"
+        );
+        self.ensure_style_data().borrow_mut()
     }
 
     unsafe fn clear_data(&self) {
-        #[cfg(debug_assertions)]
-        let _access = {
-            debug_assert!(
-                self.in_flush(),
-                "TElement::clear_data called outside a style traversal"
-            );
-            self.styling_data().slot_guard.begin_write()
-        };
-        self.set_layout_style_pointer(std::ptr::null_mut());
-        unsafe {
-            *self.stylo_data.get() = None;
-        }
+        debug_assert!(
+            self.in_flush(),
+            "TElement::clear_data called outside a style traversal"
+        );
+        self.clear_style_data();
         self.styling_data()
             .selector_flags
             .store(0, Ordering::Relaxed);
     }
 
     fn has_data(&self) -> bool {
-        #[cfg(debug_assertions)]
-        let _access = self.styling_data().slot_guard.begin_read();
-        unsafe { (*self.stylo_data.get()).is_some() }
+        Node::has_style_data(self)
     }
 
     fn borrow_data(&self) -> Option<ElementDataRef<'_>> {
-        #[cfg(debug_assertions)]
-        let _access = self.styling_data().slot_guard.begin_read();
-        unsafe {
-            (*self.stylo_data.get())
-                .as_ref()
-                .map(ElementDataWrapper::borrow)
-        }
+        self.style_data_wrapper().map(ElementDataWrapper::borrow)
     }
 
     fn mutate_data(&self) -> Option<ElementDataMut<'_>> {
-        #[cfg(debug_assertions)]
-        let _access = self.styling_data().slot_guard.begin_read();
-        #[expect(unsafe_code, reason = "Stylo owns the ElementData access contract")]
-        let data = unsafe {
-            (*self.stylo_data.get())
-                .as_ref()
-                .map(ElementDataWrapper::borrow_mut)
-        }?;
-        if !self.in_flush() {
-            self.mark_layout_style_stale();
-            self.set_layout_styles_ready(false);
-        }
-        Some(data)
+        self.style_data_wrapper()
+            .map(ElementDataWrapper::borrow_mut)
     }
 
     fn skip_item_display_fixup(&self) -> bool {

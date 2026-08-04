@@ -73,9 +73,7 @@ impl<T> Document<T> {
     ///
     /// # Panics
     ///
-    /// Panics on a vacant or non-element `NodeId`, or when a style traversal
-    /// has been started and did not complete. Call it between completed layout
-    /// passes.
+    /// Panics on a vacant or non-element `NodeId`.
     pub fn set_natural_size(&mut self, id: crate::NodeId, natural_size: NaturalSize) {
         let changed = {
             let node = self
@@ -166,20 +164,11 @@ impl<T> Document<T> {
     /// Post-flush computed-style borrow for paint-time consumers, mirroring
     /// the layout host's own access path: no Stylo runtime borrow check, no
     /// `Arc` bump. `None` for non-elements and for elements the completed
-    /// traversal left unstyled (`display: none` descendants).
-    ///
-    /// # Panics
-    ///
-    /// Panics if styles are not ready (the preceding style traversal did not
-    /// complete, or the document mutated since) — call after
-    /// [`Document::layout`] or [`Document::render`] within the same
-    /// borrow of the document.
+    /// traversal left unstyled (`display: none` descendants). The returned
+    /// value is the harvested snapshot of the last completed flush; its `Arc`
+    /// keeps it alive, so the borrow is always memory-safe.
     #[must_use]
     pub(crate) fn paint_style(&self, id: crate::NodeId) -> Option<&ComputedValues> {
-        assert!(
-            self.root_node().layout_styles_ready(),
-            "computed styles are unavailable because the preceding style traversal did not complete"
-        );
         self.get(id)?.layout_computed_style()
     }
 
@@ -193,10 +182,6 @@ impl<T> Document<T> {
     }
 
     pub(crate) fn invalidate_layout(&mut self, id: crate::NodeId) {
-        assert!(
-            self.root_node().layout_styles_ready(),
-            "computed styles are unavailable because the preceding style traversal did not complete"
-        );
         let (boundary, reached_root) = {
             let (tree, state, parked) = self.layout_parts();
             let start = tree
@@ -324,11 +309,14 @@ mod tests {
         // `NodeLayoutState` went 648 → 656 when the CSSOM-View scroll offset
         // joined it: eight dense bytes per node rather than a sparse side table,
         // paid on a 640-byte neighbour, in exchange for lockstep allocation with
-        // the layout the offset is clamped against.
+        // the layout the offset is clamped against. `Node` went 192/200 →
+        // 216/224 when the Stylo traversal flags (`StylingData`, 24 bytes)
+        // moved inline from their side slab, trading stride for one fewer
+        // arena lookup on every traversal flag access.
         #[cfg(target_pointer_width = "64")]
         assert_eq!(
             current,
-            (if cfg!(debug_assertions) { 200 } else { 192 }, 640, 656, 16,),
+            (if cfg!(debug_assertions) { 224 } else { 216 }, 640, 656, 16,),
             "Node, LayoutSlot, NodeLayoutState, and TextLayoutStore sizes changed",
         );
     }
