@@ -62,8 +62,8 @@ pub fn headless(test: &str) -> Headless {
 /// repo uses 1.0 for the same reason.
 #[must_use]
 pub fn frame_size<T>(document: &Document<T>) -> (u32, u32) {
-    let viewport = document.device().viewport_size();
-    let ratio = document.device().device_pixel_ratio().get();
+    let viewport = document.viewport_size();
+    let ratio = document.device_pixel_ratio();
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,

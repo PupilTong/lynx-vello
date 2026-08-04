@@ -3,7 +3,7 @@
 
 #![allow(dead_code)]
 
-use dom::{Document, NodeId, StylesheetOrigin, standards_device};
+use dom::{Device, Document, NodeId, StylesheetOrigin, standards_device};
 use euclid::{Scale, Size2D};
 use selectors::matching::{
     MatchingContext, MatchingForInvalidation, MatchingMode, NeedsSelectorFlags, SelectorCaches,
@@ -11,7 +11,6 @@ use selectors::matching::{
 };
 use stylo::color::AbsoluteColor;
 use stylo::context::QuirksMode;
-use stylo::device::Device;
 use stylo::device::servo::FontMetricsProvider;
 use stylo::font_metrics::FontMetrics;
 use stylo::media_queries::MediaType;

@@ -10,8 +10,6 @@ use dom::{Document, Node, NodeId};
 use euclid::{Scale, Size2D};
 use hughie::geometry::Size;
 use style_traits::{CSSPixel, DevicePixel};
-use stylo::context::QuirksMode;
-use stylo::device::Device;
 use stylo::device::servo::FontMetricsProvider;
 use stylo::font_metrics::FontMetrics;
 use stylo::media_queries::MediaType;
@@ -66,10 +64,9 @@ impl FontMetricsProvider for BenchFontMetrics {
     }
 }
 
-fn device(viewport: Size<f32>) -> Device {
-    Device::new(
+fn device(viewport: Size<f32>) -> dom::Device {
+    dom::standards_device(
         MediaType::screen(),
-        QuirksMode::NoQuirks,
         Size2D::<f32, CSSPixel>::new(viewport.width, viewport.height),
         Size2D::<f32, DevicePixel>::new(viewport.width, viewport.height),
         Scale::<f32, CSSPixel, DevicePixel>::new(1.0),

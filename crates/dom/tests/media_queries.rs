@@ -6,10 +6,9 @@
 mod common;
 
 use common::{device, device_with, rgb, url_data};
-use dom::{Document, StylesheetOrigin, standards_device};
+use dom::{Device, Document, StylesheetOrigin, standards_device};
 use stylo::context::QuirksMode;
 use stylo::custom_properties::AttrTaint;
-use stylo::device::Device;
 use stylo::media_queries::{MediaList, MediaType};
 use stylo::parser::ParserContext;
 use stylo::properties::ComputedValues;

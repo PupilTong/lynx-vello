@@ -2,61 +2,16 @@
 
 use std::sync::Arc as StdArc;
 
-use euclid::{Scale, Size2D};
 use stylo::context::QuirksMode;
 use stylo::device::Device;
-use stylo::device::servo::FontMetricsProvider;
-use stylo::media_queries::{MediaList, MediaType};
-use stylo::properties::ComputedValues;
-use stylo::queries::values::PrefersColorScheme;
-use stylo::servo::media_features::PointerCapabilities;
+use stylo::media_queries::MediaList;
 use stylo::servo_arc::Arc;
 use stylo::shared_lock::{SharedRwLock, StylesheetGuards};
 pub use stylo::stylesheets::Origin as StylesheetOrigin;
 use stylo::stylesheets::{AllowImportRules, DocumentStyleSheet, Origin, Stylesheet, UrlExtraData};
 use stylo::stylist::Stylist;
-use stylo_traits::{CSSPixel, DevicePixel};
 
 use crate::{Document, Node};
-
-/// Builds the one [`Device`] shape this document core supports: standards
-/// mode.
-///
-/// Quirks mode is locked to no-quirks — selector matching
-/// (`TDocument::quirks_mode`) and the `Stylist` are already hard-wired to it
-/// inside this crate, so a quirks-mode `Device` would silently diverge the
-/// cascade from matching. The knob therefore does not exist above this seam:
-/// this function mirrors `Device::new` minus that parameter, and layers above
-/// construct devices only through it.
-#[must_use]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "mirrors stylo's Device::new minus the locked quirks knob"
-)]
-pub fn standards_device(
-    media_type: MediaType,
-    viewport_size: Size2D<f32, CSSPixel>,
-    device_size: Size2D<f32, DevicePixel>,
-    device_pixel_ratio: Scale<f32, CSSPixel, DevicePixel>,
-    font_metrics_provider: Box<dyn FontMetricsProvider>,
-    default_values: Arc<ComputedValues>,
-    prefers_color_scheme: PrefersColorScheme,
-    primary_pointer_capabilities: PointerCapabilities,
-    all_pointer_capabilities: PointerCapabilities,
-) -> Device {
-    Device::new(
-        media_type,
-        QuirksMode::NoQuirks,
-        viewport_size,
-        device_size,
-        device_pixel_ratio,
-        font_metrics_provider,
-        default_values,
-        prefers_color_scheme,
-        primary_pointer_capabilities,
-        all_pointer_capabilities,
-    )
-}
 
 /// The private stylo state owned by exactly one [`Document`].
 pub(crate) struct StyleEngine {
@@ -170,8 +125,21 @@ impl StyleEngine {
 
 impl<T> Document<T> {
     #[must_use]
-    pub fn device(&self) -> &Device {
+    pub(crate) fn device(&self) -> &Device {
         self.style_engine().device()
+    }
+
+    /// The viewport in CSS px.
+    #[must_use]
+    pub fn viewport_size(&self) -> crate::Size2D<f32> {
+        let size = self.device().viewport_size();
+        crate::Size2D::new(size.width, size.height)
+    }
+
+    /// CSS-px → device-px scale factor.
+    #[must_use]
+    pub fn device_pixel_ratio(&self) -> f32 {
+        self.device().device_pixel_ratio().get()
     }
 
     pub fn set_viewport(&mut self, width: f32, height: f32) {

@@ -278,12 +278,17 @@ useful signal for currently-compatible versions of those libraries.
   (`gpu::Headless`, plus the `read_texture`/`renderer_options`/`render_params`
   seams windowed embedders build against); the crate root re-exports the one
   workspace `vello` version, and embedders configure wgpu/peniko/kurbo
-  exclusively through that re-export; the root likewise re-exports `stylo`,
-  `euclid`, and `stylo_traits` as the style/geometry vocabulary doors for the
-  layers above (strict linear chain: cli → core → element → dom). Quirks mode
-  is locked to standards mode: selector matching, the `Stylist`, and the root
-  `standards_device` construction seam all hard-wire no-quirks, and no quirks
-  knob exists above this crate. `Headless::new` reports `NoAdapter`;
+  exclusively through that re-export; the root likewise re-exports `stylo` as the CSS
+  vocabulary door for the layers above (strict linear chain: cli → core →
+  element → dom). The embedder-facing `dom::Device` profile exposes exactly
+  the inputs that vary between views — `Device::new(width, height,
+  device_pixel_ratio)` — and locks the rest: screen media type, standards
+  (no-quirks) mode, light color scheme, coarse touch pointers, and
+  CSS-values-4 fallback font metrics. Quirks stays hard-wired in matching,
+  the `Stylist`, and the doc-hidden `standards_device` test seam, so neither
+  the quirks knob nor any stylo device vocabulary exists above this crate;
+  view metrics read back through `Document::{viewport_size,
+  device_pixel_ratio}`. `Headless::new` reports `NoAdapter`;
   every GPU-backed test treats that as a hard failure, including in CI.
   Nothing in `render` knows about nodes, computed styles, layout, or paint
   order. Source layout groups the crate by subsystem: `tree/` (arena set,

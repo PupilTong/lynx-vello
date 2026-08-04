@@ -4,8 +4,6 @@
 
 use dom::{Document, StylesheetOrigin};
 use euclid::{Scale, Size2D};
-use stylo::context::QuirksMode;
-use stylo::device::Device;
 use stylo::device::servo::FontMetricsProvider;
 use stylo::font_metrics::FontMetrics;
 use stylo::media_queries::MediaType;
@@ -44,10 +42,9 @@ impl FontMetricsProvider for BenchFontMetricsProvider {
     }
 }
 
-fn device() -> Device {
-    Device::new(
+fn device() -> dom::Device {
+    dom::standards_device(
         MediaType::screen(),
-        QuirksMode::NoQuirks,
         Size2D::<f32, CSSPixel>::new(800.0, 600.0),
         Size2D::<f32, DevicePixel>::new(800.0, 600.0),
         Scale::<f32, CSSPixel, DevicePixel>::new(1.0),

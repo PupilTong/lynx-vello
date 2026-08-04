@@ -1,23 +1,10 @@
-//! View metrics and stylo [`Device`] construction.
+//! View metrics: the [`Viewport`] a Lynx view renders into.
 //!
-//! `docs/style-architecture.md`'s ownership table assigns "view metrics and
-//! device construction" to the runtime adapter, so the `Device` a
-//! [`crate::ElementTree`] hands to `dom` is built here rather than by
-//! embedders or by the DOM core.
+//! The stylo-facing device profile (touch pointers, light scheme, standards
+//! mode, fallback font metrics) lives in `dom::Device`; this layer only
+//! carries the metrics that vary per view and hands them across.
 
-use dom::euclid::{Scale, Size2D};
-use dom::stylo::device::Device;
-use dom::stylo::device::servo::FontMetricsProvider;
-use dom::stylo::font_metrics::FontMetrics;
-use dom::stylo::media_queries::MediaType;
-use dom::stylo::properties::ComputedValues;
-use dom::stylo::properties::style_structs::Font;
-use dom::stylo::queries::values::PrefersColorScheme;
-use dom::stylo::servo::media_features::PointerCapabilities;
-use dom::stylo::values::computed::font::GenericFontFamily;
-use dom::stylo::values::computed::{CSSPixelLength, Length};
-use dom::stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
-use dom::stylo_traits::{CSSPixel, DevicePixel};
+use dom::Device;
 
 /// The viewport a Lynx view renders into.
 ///
@@ -48,70 +35,9 @@ impl Viewport {
         self
     }
 
-    /// Builds the stylo device this viewport describes.
-    ///
-    /// Lynx targets touch devices, so the pointer media features report a
-    /// coarse primary pointer with no hover — the `@media (hover)` /
-    /// `(pointer)` answers a Lynx app should see.
+    /// Builds the device profile this viewport describes.
     #[must_use]
     pub(crate) fn device(self) -> Device {
-        dom::standards_device(
-            MediaType::screen(),
-            Size2D::<f32, CSSPixel>::new(self.width, self.height),
-            Size2D::<f32, DevicePixel>::new(
-                self.width * self.device_pixel_ratio,
-                self.height * self.device_pixel_ratio,
-            ),
-            Scale::<f32, CSSPixel, DevicePixel>::new(self.device_pixel_ratio),
-            Box::new(LynxFontMetricsProvider),
-            ComputedValues::initial_values_with_font_override(Font::initial_values()),
-            PrefersColorScheme::Light,
-            PointerCapabilities::COARSE,
-            PointerCapabilities::COARSE,
-        )
-    }
-}
-
-/// Font metrics for the CSS font-relative units the cascade resolves before
-/// any text is shaped (`ex`, `ch`, `cap`, `ic`).
-///
-/// Stylo asks for these during cascade, long before parley has picked a face,
-/// so this provider answers with the conventional ratios browsers fall back to
-/// when a face reports no metrics of its own rather than loading a font. Text
-/// itself is measured by parley through `hughie`, not by these numbers — only
-/// font-relative *length units* read them.
-#[derive(Debug)]
-pub(crate) struct LynxFontMetricsProvider;
-
-/// Fallback ratios, relative to the font size, for faces that report no
-/// metrics. These match the CSS-values-4 defaults for `ex` (0.5em) and `ch`
-/// (0.5em), plus the usual 0.8em ascent / 0.2em descent split.
-const X_HEIGHT_RATIO: f32 = 0.5;
-const ZERO_ADVANCE_RATIO: f32 = 0.5;
-const CAP_HEIGHT_RATIO: f32 = 0.7;
-const ASCENT_RATIO: f32 = 0.8;
-
-impl FontMetricsProvider for LynxFontMetricsProvider {
-    fn query_font_metrics(
-        &self,
-        _vertical: bool,
-        _font: &Font,
-        base_size: CSSPixelLength,
-        _flags: QueryFontMetricsFlags,
-    ) -> FontMetrics {
-        let em = base_size.px();
-        FontMetrics {
-            x_height: Some(Length::new(em * X_HEIGHT_RATIO)),
-            zero_advance_measure: Some(Length::new(em * ZERO_ADVANCE_RATIO)),
-            cap_height: Some(Length::new(em * CAP_HEIGHT_RATIO)),
-            ic_width: Some(Length::new(em)),
-            ascent: Length::new(em * ASCENT_RATIO),
-            script_percent_scale_down: None,
-            script_script_percent_scale_down: None,
-        }
-    }
-
-    fn base_size_for_generic(&self, _generic: GenericFontFamily) -> Length {
-        Length::new(FONT_MEDIUM_PX)
+        Device::new(self.width, self.height, self.device_pixel_ratio)
     }
 }

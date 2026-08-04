@@ -11,7 +11,6 @@ use hughie::tree::{LayoutInput, LayoutSlot};
 use rustc_hash::FxHashSet;
 use slab::Slab;
 use stylo::LocalName;
-use stylo::device::Device;
 use stylo::dom::OpaqueNode;
 use stylo::selector_parser::SnapshotMap;
 use stylo::stylesheets::UrlExtraData;
@@ -194,8 +193,8 @@ impl<T: fmt::Debug> fmt::Debug for Document<T> {
 
 impl<T> Document<T> {
     #[must_use]
-    pub fn new(device: Device) -> Self {
-        let style_engine = StyleEngine::new(device, about_blank_url_data());
+    pub fn new(device: crate::style::device::Device) -> Self {
+        let style_engine = StyleEngine::new(device.into_stylo(), about_blank_url_data());
         let lock = style_engine.lock();
         let url_data = style_engine.url_data();
         let mut tree = Box::new(TreeArenas::new());
@@ -766,7 +765,7 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn device() -> Device {
+    pub(crate) fn device() -> crate::style::device::Device {
         standards_device(
             MediaType::screen(),
             Size2D::new(800.0, 600.0),

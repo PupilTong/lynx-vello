@@ -329,7 +329,7 @@ mod tests {
     fn a_window_embedder_can_update_the_device_pixel_ratio() {
         let mut tree = tree();
         tree.set_device_pixel_ratio(2.0);
-        assert!((tree.document().device().device_pixel_ratio().get() - 2.0).abs() < f32::EPSILON);
+        assert!((tree.document().device_pixel_ratio() - 2.0).abs() < f32::EPSILON);
     }
 
     #[test]

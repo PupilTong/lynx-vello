@@ -4,9 +4,8 @@
 
 #![allow(dead_code)]
 
-use dom::{Document, NodeId, StylesheetOrigin, standards_device};
+use dom::{Device, Document, NodeId, StylesheetOrigin, standards_device};
 use euclid::{Scale, Size2D};
-use stylo::device::Device;
 use stylo::device::servo::FontMetricsProvider;
 use stylo::font_metrics::FontMetrics;
 use stylo::media_queries::MediaType;
