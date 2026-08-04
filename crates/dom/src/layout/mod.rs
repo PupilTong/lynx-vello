@@ -323,9 +323,8 @@ mod tests {
 
     #[test]
     fn internal_natural_size_update_invalidates_the_dirty_spine() {
-        let mut document = Document::new(crate::tree::document::tests::device());
-        let root = document.create_element("page", ());
-        document.append_document_element(root);
+        let mut document = Document::new(crate::tree::document::tests::device(), "page", ());
+        let root = document.document_element().id();
         let image = document.create_element("image", ());
         document.append_child(root, image);
 
@@ -351,7 +350,8 @@ mod tests {
 
     #[test]
     fn only_a_root_reaching_invalidation_forces_a_full_pass() {
-        let mut doc: Document<()> = Document::new(crate::tree::document::tests::device());
+        let mut doc: Document<()> =
+            Document::new(crate::tree::document::tests::device(), "page", ());
         doc.add_stylesheet(
             "page { display: flex; width: 300px; height: 100px; }
              .box { display: flex; contain: strict; width: 80px; height: 40px; }
@@ -360,8 +360,7 @@ mod tests {
              .leaf { width: 10px; height: 10px; }",
             StylesheetOrigin::Author,
         );
-        let root = doc.create_element("page", ());
-        doc.append_document_element(root);
+        let root = doc.document_element().id();
 
         let boundary = doc.create_element("view", ());
         doc.add_class(boundary, "box");

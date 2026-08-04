@@ -11,7 +11,7 @@ pub use stylo::stylesheets::Origin as StylesheetOrigin;
 use stylo::stylesheets::{AllowImportRules, DocumentStyleSheet, Origin, Stylesheet, UrlExtraData};
 use stylo::stylist::Stylist;
 
-use crate::{Document, Node};
+use crate::Document;
 
 /// The private stylo state owned by exactly one [`Document`].
 pub(crate) struct StyleEngine {
@@ -157,8 +157,7 @@ impl<T> Document<T> {
     fn change_style_context(&mut self, change: impl FnOnce(&mut StyleEngine)) {
         self.note_visual_mutation();
         change(self.style_engine_mut());
-        if let Some(root) = self.root_element().map(Node::id) {
-            self.mark_subtree_dirty(root);
-        }
+        let root = self.document_element().id();
+        self.mark_subtree_dirty(root);
     }
 }

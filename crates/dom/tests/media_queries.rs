@@ -20,7 +20,7 @@ use stylo::values::computed::{CSSPixelLength, Length};
 use stylo_traits::{CSSPixel, DevicePixel, ParsingMode, ToCss};
 
 fn matches_dev(device: Device, query: &str) -> bool {
-    let mut doc: Document<()> = Document::new(device);
+    let mut doc: Document<()> = Document::new(device, "page", ());
     let rule = ".probe { color: rgb(1, 2, 3) }";
     let css = if query.trim().is_empty() {
         rule.to_owned()
@@ -28,11 +28,10 @@ fn matches_dev(device: Device, query: &str) -> bool {
         format!("@media {query} {{ {rule} }}")
     };
     doc.add_stylesheet(&css, StylesheetOrigin::Author);
-    let root = doc.create_element("page", ());
+    let root = doc.document_element().id();
     let probe = doc.create_element("view", ());
     doc.add_class(probe, "probe");
     doc.append_child(root, probe);
-    doc.append_document_element(root);
     doc.layout();
     doc.get(probe)
         .and_then(dom::Node::computed_style)

@@ -176,9 +176,7 @@ pub(super) fn run_layout<T: Sync>(
     scale: f32,
     full: bool,
 ) {
-    let Some(root) = document.root_element().map(Node::id) else {
-        return;
-    };
+    let root = document.document_element().id();
     let parked = collect_parked_boundaries(document);
     let (tree, state, parked_ids) = document.layout_parts();
     for &(_, id, input) in &parked {

@@ -124,5 +124,13 @@ fn the_boot_sequence_works_on_a_bundle_shaped_script() {
             ",
         )
         .expect("boot");
-    assert!(runtime.elements().document().root_element().is_some());
+    assert!(runtime.elements().page().is_some());
+    assert!(
+        runtime
+            .elements()
+            .document()
+            .document_element()
+            .computed_style()
+            .is_some()
+    );
 }

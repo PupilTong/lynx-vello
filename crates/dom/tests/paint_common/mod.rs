@@ -72,9 +72,8 @@ impl Doc {
     /// specific canvas has to say so here.
     #[must_use]
     pub(super) fn with_css_sized(css: &str, width: f32, height: f32) -> Self {
-        let mut dom = Document::new(device(width, height));
-        let root = dom.create_element("page", ());
-        dom.append_document_element(root);
+        let mut dom = Document::new(device(width, height), "page", ());
+        let root = dom.document_element().id();
         dom.add_stylesheet(css, StylesheetOrigin::Author);
         Self { dom, root }
     }

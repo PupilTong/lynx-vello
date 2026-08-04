@@ -537,11 +537,12 @@ fn hit_outside_all_content_is_none() {
 }
 
 #[test]
-fn empty_document_paints_nothing() {
-    let mut doc: dom::Document<()> = dom::Document::new(common::device(800.0, 600.0));
+fn a_bare_document_paints_only_its_permanent_root() {
+    let mut doc: dom::Document<()> = dom::Document::new(common::device(800.0, 600.0), "page", ());
+    let root = doc.document_element().id();
     let paint = doc.build_paint_order();
-    assert!(paint.items().is_empty());
-    assert_eq!(paint.hit_test(&doc, Point2D::new(10.0, 10.0)), None);
+    let painted: Vec<_> = paint.items().iter().map(|item| item.node).collect();
+    assert_eq!(painted, [root]);
 }
 
 #[test]

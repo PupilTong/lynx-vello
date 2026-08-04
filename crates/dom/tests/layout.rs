@@ -422,7 +422,7 @@ fn display_contents_works_across_every_container_algorithm() {
 
 #[test]
 fn display_contents_inherits_to_its_children_without_boxing_them() {
-    let mut dom = dom::Document::new(common::device(800.0, 600.0));
+    let mut dom = dom::Document::new(common::device(800.0, 600.0), "page", ());
     dom.add_stylesheet(
         "page { display: flex; width: 200px; height: 100px; align-items: flex-start;
                 font-family: Ahem; font-size: 16px; }
@@ -430,8 +430,7 @@ fn display_contents_inherits_to_its_children_without_boxing_them() {
         dom::StylesheetOrigin::Author,
     );
     assert_eq!(dom.register_fonts(AHEM), 1);
-    let root = dom.create_element("page", ());
-    dom.append_document_element(root);
+    let root = dom.document_element().id();
     let wrapper = dom.create_element("view", ());
     dom.add_class(wrapper, "wrapper");
     dom.append_child(root, wrapper);
@@ -769,7 +768,7 @@ fn flow_containers_fall_back_to_leaves_and_zero_their_children() {
 
 #[test]
 fn text_nodes_use_parley_with_their_parents_inherited_style() {
-    let mut dom = dom::Document::new(common::device(800.0, 600.0));
+    let mut dom = dom::Document::new(common::device(800.0, 600.0), "page", ());
     dom.add_stylesheet(
         "page { display: flex; width: 200px; height: 100px; align-items: flex-start;
                 font-family: Ahem; font-size: 16px; }
@@ -777,8 +776,7 @@ fn text_nodes_use_parley_with_their_parents_inherited_style() {
         dom::StylesheetOrigin::Author,
     );
     assert_eq!(dom.register_fonts(AHEM), 1);
-    let root = dom.create_element("page", ());
-    dom.append_document_element(root);
+    let root = dom.document_element().id();
     let sibling = dom.create_element("view", ());
     dom.add_class(sibling, "sibling");
     dom.append_child(root, sibling);
@@ -796,15 +794,14 @@ fn text_nodes_use_parley_with_their_parents_inherited_style() {
 
 #[test]
 fn inherited_text_style_change_remeasures_text_child() {
-    let mut dom = dom::Document::new(common::device(800.0, 600.0));
+    let mut dom = dom::Document::new(common::device(800.0, 600.0), "page", ());
     dom.add_stylesheet(
         "page { display: flex; width: 200px; height: 100px; align-items: flex-start;
                 font-family: Ahem; font-size: 16px; }",
         dom::StylesheetOrigin::Author,
     );
     assert_eq!(dom.register_fonts(AHEM), 1);
-    let root = dom.create_element("page", ());
-    dom.append_document_element(root);
+    let root = dom.document_element().id();
     let text = dom.create_text_node("hello", ());
     dom.append_child(root, text);
 
@@ -819,7 +816,7 @@ fn inherited_text_style_change_remeasures_text_child() {
 
 #[test]
 fn inherited_text_style_change_remeasures_nested_text_child() {
-    let mut dom = dom::Document::new(common::device(800.0, 600.0));
+    let mut dom = dom::Document::new(common::device(800.0, 600.0), "page", ());
     dom.add_stylesheet(
         "page, view { display: flex; width: 200px; height: 100px;
                       align-items: flex-start; }
@@ -827,8 +824,7 @@ fn inherited_text_style_change_remeasures_nested_text_child() {
         dom::StylesheetOrigin::Author,
     );
     assert_eq!(dom.register_fonts(AHEM), 1);
-    let root = dom.create_element("page", ());
-    dom.append_document_element(root);
+    let root = dom.document_element().id();
     let parent = dom.create_element("view", ());
     dom.append_child(root, parent);
     let text = dom.create_text_node("hello", ());
@@ -979,15 +975,14 @@ fn removed_boundary_is_not_replayed_after_its_node_id_is_reused() {
 
 #[test]
 fn color_only_change_preserves_text_geometry() {
-    let mut dom = dom::Document::new(common::device(800.0, 600.0));
+    let mut dom = dom::Document::new(common::device(800.0, 600.0), "page", ());
     dom.add_stylesheet(
         "page { display: flex; width: 200px; height: 100px; align-items: flex-start;
                 font-family: Ahem; font-size: 16px; }",
         dom::StylesheetOrigin::Author,
     );
     assert_eq!(dom.register_fonts(AHEM), 1);
-    let root = dom.create_element("page", ());
-    dom.append_document_element(root);
+    let root = dom.document_element().id();
     let text = dom.create_text_node("hello", ());
     dom.append_child(root, text);
 
@@ -1286,7 +1281,7 @@ fn two_damaged_nodes_under_one_boundary_both_relayout() {
 
 #[test]
 fn content_visibility_hidden_skips_descendant_layout_and_measurement() {
-    let mut dom = dom::Document::new(common::device(800.0, 600.0));
+    let mut dom = dom::Document::new(common::device(800.0, 600.0), "page", ());
     dom.add_stylesheet(
         "page { display: flex; width: 200px; height: 100px; align-items: flex-start;
                 font-family: Ahem; font-size: 16px; }
@@ -1295,8 +1290,7 @@ fn content_visibility_hidden_skips_descendant_layout_and_measurement() {
         dom::StylesheetOrigin::Author,
     );
     assert_eq!(dom.register_fonts(AHEM), 1);
-    let root = dom.create_element("page", ());
-    dom.append_document_element(root);
+    let root = dom.document_element().id();
     let container = dom.create_element("view", ());
     dom.add_class(container, "container");
     dom.set_inline_style(container, "content-visibility: hidden");

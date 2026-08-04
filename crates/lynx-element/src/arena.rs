@@ -52,6 +52,12 @@ impl LynxElement {
     pub const fn component_css_id(&self) -> i32 {
         self.component_css
     }
+
+    /// Binds the `componentCSSID` `__CreatePage` supplies to the pre-created
+    /// page element.
+    pub(crate) fn set_component_css_id(&mut self, component_css_id: i32) {
+        self.component_css = component_css_id;
+    }
 }
 
 /// The Lynx context's permanent-index element arena.
@@ -98,6 +104,12 @@ impl ElementArena {
             component_css: component_css_id,
         }));
         unique_id
+    }
+
+    pub(crate) fn get_mut(&mut self, id: ElementId) -> Option<&mut LynxElement> {
+        let element = self.entries.get_mut(arena_index(id)?)?.as_mut()?;
+        debug_assert_eq!(element.id, id);
+        Some(element)
     }
 
     pub(crate) fn get(&self, id: ElementId) -> Option<&LynxElement> {

@@ -440,7 +440,7 @@ mod tests {
     /// A 100×100 `overflow: scroll` box holding a 300×400 child, nested inside
     /// an outer 200×200 scroller so chaining has somewhere to go.
     fn nested_scrollers() -> (Document<()>, NodeId, NodeId) {
-        let mut document: Document<()> = Document::new(device());
+        let mut document: Document<()> = Document::new(device(), "page", ());
         document.add_stylesheet(
             "page { display: flex; width: 800px; height: 600px; }
              .outer { display: flex; overflow: scroll; width: 200px; height: 200px; }
@@ -449,8 +449,7 @@ mod tests {
              .tall { flex-shrink: 0; width: 100px; height: 1000px; }",
             StylesheetOrigin::Author,
         );
-        let root = document.create_element("page", ());
-        document.append_document_element(root);
+        let root = document.document_element().id();
 
         let outer = document.create_element("view", ());
         document.add_class(outer, "outer");
@@ -484,15 +483,14 @@ mod tests {
 
     #[test]
     fn overflow_hidden_is_a_scroll_container_but_not_user_scrollable() {
-        let mut document: Document<()> = Document::new(device());
+        let mut document: Document<()> = Document::new(device(), "page", ());
         document.add_stylesheet(
             "page { display: flex; width: 800px; height: 600px; }
              .clip { display: flex; overflow: hidden; width: 100px; height: 100px; }
              .content { flex-shrink: 0; width: 300px; height: 400px; }",
             StylesheetOrigin::Author,
         );
-        let root = document.create_element("page", ());
-        document.append_document_element(root);
+        let root = document.document_element().id();
         let clip = document.create_element("view", ());
         document.add_class(clip, "clip");
         document.append_child(root, clip);
@@ -586,7 +584,7 @@ mod tests {
         // the paint build already refuses to scroll it. The input walk has to
         // agree: a wheel over it must not scroll the box it sits inside, or
         // content would slide behind a box that visibly does not move.
-        let mut document: Document<()> = Document::new(device());
+        let mut document: Document<()> = Document::new(device(), "page", ());
         document.add_stylesheet(
             "page { display: flex; position: relative; width: 800px; height: 600px; }
              .scroller { display: flex; flex-direction: column; overflow: scroll;
@@ -596,8 +594,7 @@ mod tests {
                        width: 50px; height: 50px; }",
             StylesheetOrigin::Author,
         );
-        let root = document.create_element("page", ());
-        document.append_document_element(root);
+        let root = document.document_element().id();
         let scroller = document.create_element("view", ());
         document.add_class(scroller, "scroller");
         document.append_child(root, scroller);

@@ -100,10 +100,9 @@ impl LayoutFixture {
                 _ => None,
             })
             .expect("every box benchmark root declares its production display mode");
-        let mut document = Document::new(device(viewport));
-        let root = document.create_element("page", ());
+        let mut document = Document::new(device(viewport), "page", ());
+        let root = document.document_element().id();
         document.set_inline_style(root, root_style);
-        document.append_document_element(root);
         Self {
             document,
             root,

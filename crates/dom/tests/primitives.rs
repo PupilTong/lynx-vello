@@ -9,8 +9,8 @@ mod common;
 
 use dom::{Document, Node, NodeId};
 
-fn test_document<T>() -> Document<T> {
-    Document::new(common::device(800.0, 600.0))
+fn test_document() -> Document<()> {
+    Document::new(common::device(800.0, 600.0), "page", ())
 }
 
 fn node(doc: &mut Document<()>, tag: &str) -> NodeId {
@@ -22,13 +22,13 @@ fn removed_node_ids_may_be_reused_without_confusing_the_root() {
     let mut doc = test_document();
     assert!(doc.root_node().is_document());
     let document_id = doc.root_node().id();
+    let root = doc.document_element().id();
+    assert_eq!(doc.root_node().first_child().map(Node::id), Some(root));
+    assert_eq!(doc.get(root).unwrap().parent_id(), Some(document_id));
 
     let a = node(&mut doc, "div");
-    assert!(doc.get(a).is_some());
-    doc.append_document_element(a);
-    assert_eq!(doc.root_element().map(Node::id), Some(a));
-    assert_eq!(doc.root_node().first_child().map(Node::id), Some(a));
-    assert_eq!(doc.get(a).unwrap().parent_id(), Some(document_id));
+    doc.append_child(root, a);
+    assert_eq!(doc.get(a).unwrap().parent_id(), Some(root));
 
     doc.remove_subtree(a);
     assert!(doc.get(a).is_none());
@@ -39,13 +39,13 @@ fn removed_node_ids_may_be_reused_without_confusing_the_root() {
         doc.get(a).is_some(),
         "the raw index now resolves to its new occupant"
     );
-    assert!(doc.get(b).is_some());
+    assert_eq!(doc.document_element().id(), root);
 }
 
 #[test]
 fn node_ref_navigation() {
     let mut doc = test_document();
-    let root = node(&mut doc, "html");
+    let root = doc.document_element().id();
     let container = node(&mut doc, "div");
     doc.append_child(root, container);
     let a = node(&mut doc, "div");
@@ -164,7 +164,8 @@ fn remove_subtree_frees_detaches_and_returns_payloads() {
     /// A payload carrying an embedder-side id, to observe the harvest.
     #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
     struct Payload(i32);
-    let mut doc: Document<Payload> = test_document();
+    let mut doc: Document<Payload> =
+        Document::new(common::device(800.0, 600.0), "page", Payload(1));
     let container = doc.create_element("div", Payload(10));
     let child = doc.create_element("div", Payload(11));
     doc.append_child(container, child);
@@ -186,19 +187,17 @@ fn remove_subtree_frees_detaches_and_returns_payloads() {
 }
 
 #[test]
-fn remove_subtree_clears_the_root_element() {
+#[should_panic(expected = "cannot remove the permanent document element")]
+fn the_document_element_cannot_be_removed() {
     let mut doc = test_document();
-    let root = node(&mut doc, "page");
-    doc.append_document_element(root);
-    assert_eq!(doc.root_element().map(Node::id), Some(root));
+    let root = doc.document_element().id();
     doc.remove_subtree(root);
-    assert_eq!(doc.root_element().map(Node::id), None);
 }
 
 #[test]
 fn ancestor_and_child_queries() {
     let mut doc = test_document();
-    let root = node(&mut doc, "html");
+    let root = doc.document_element().id();
     let container = node(&mut doc, "div");
     doc.append_child(root, container);
     let leaf = node(&mut doc, "div");
@@ -214,10 +213,9 @@ fn ancestor_and_child_queries() {
 #[test]
 fn inline_style_setter_parses_replaces_and_clears_observable_style() {
     let mut doc = test_document();
-    let root = node(&mut doc, "page");
+    let root = doc.document_element().id();
     let view = node(&mut doc, "div");
     doc.append_child(root, view);
-    doc.append_document_element(root);
 
     doc.set_inline_style(view, "color: red; definitely-not-a-property: 1");
     doc.layout();
@@ -263,11 +261,10 @@ fn root_matching_uses_document_structure() {
     use selectors::Element as _;
 
     let mut doc = test_document();
-    let root = node(&mut doc, "html");
+    let root = doc.document_element().id();
     let child = node(&mut doc, "div");
     let detached = node(&mut doc, "section");
     doc.append_child(root, child);
-    doc.append_document_element(root);
 
     assert!(doc.get(root).unwrap().is_root());
     assert!(!doc.get(child).unwrap().is_root());
@@ -285,9 +282,8 @@ fn stylo_sees_a_distinct_document_node_and_real_owner_document() {
     use stylo::dom::{TDocument as _, TNode as _};
 
     let mut doc = test_document();
-    let root = node(&mut doc, "html");
+    let root = doc.document_element().id();
     let detached = node(&mut doc, "section");
-    doc.append_document_element(root);
 
     let root_node = doc.get(root).unwrap();
     let document_node = root_node.owner_doc();
@@ -325,16 +321,12 @@ fn attributes_come_only_from_the_real_map() {
 }
 
 #[test]
-fn reparenting_the_root_element_detaches_it_from_the_document() {
+#[should_panic(expected = "cannot detach the permanent document element")]
+fn the_document_element_cannot_be_reparented() {
     let mut doc = test_document();
-    let root = node(&mut doc, "page");
-    doc.append_document_element(root);
+    let root = doc.document_element().id();
     let other = node(&mut doc, "view");
     doc.append_child(other, root);
-
-    assert_eq!(doc.root_element().map(Node::id), None);
-    assert_eq!(doc.get(root).unwrap().parent_id(), Some(other));
-    assert!(!doc.is_connected(root));
 }
 
 #[test]
@@ -344,14 +336,6 @@ fn text_nodes_cannot_have_children() {
     let text = doc.create_text_node("parent", ());
     let child = node(&mut doc, "span");
     doc.append_child(text, child);
-}
-
-#[test]
-#[should_panic(expected = "requires a live element")]
-fn text_nodes_cannot_be_the_document_root() {
-    let mut doc = test_document();
-    let text = doc.create_text_node("root", ());
-    doc.append_document_element(text);
 }
 
 #[test]
