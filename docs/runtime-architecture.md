@@ -7,14 +7,18 @@ document subsystem, not an implementation injected by an embedder.
 The product dependency graph is:
 
 ```text
-bobcat-cli
+bobcat-cli ──▶ bobcat-core ──▶ lynx-element ──▶ dom ─┬─▶ hughie
+  │                 │                                  ├─▶ vendor/stylo
+  │                 └──▶ quickjs-rust-bridge           └─▶ vello/wgpu
+  │                     [feature = "quickjs"]
   ├── lynx-template-decoder
-  ├── bobcat-core [feature = "quickjs"] ──▶ quickjs-rust-bridge
-  ├── lynx-element [feature = "internal-document-access"]
-  │     └──▶ dom ───┬──▶ hughie
-  │                 ├──▶ vendor/stylo
-  │                 └──▶ vello/wgpu
   └── winit (macOS headed product only)
+
+Each layer depends only on the layer directly below and re-exports it whole
+(`bobcat_core::lynx_element`, `lynx_element::dom`); `dom` re-exports the
+`vello`, `stylo`, `euclid`, and `stylo_traits` vocabulary crates. The
+`internal-document-access` feature is forwarded down the chain by
+`bobcat-core`.
 ```
 
 `dom`'s `render` module is its intentionally DOM-free floor (absorbed from the

@@ -13,9 +13,9 @@
 //! `FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p bobcat-core --test screenshots`.
 
 use bobcat_core::quickjs::MainThreadRuntime;
-use dom::render::gpu::Headless;
 use flashbulb::vello::peniko::{Blob, Color, ImageAlphaType, ImageData, ImageFormat};
 use flashbulb::{Image, Screenshots, capture_scene, headless};
+use lynx_element::dom::render::gpu::Headless;
 use lynx_element::{ElementTree, PageConfig, Viewport};
 
 /// lynx-stack's Playwright Chromium project emulates a Pixel 5, whose CSS

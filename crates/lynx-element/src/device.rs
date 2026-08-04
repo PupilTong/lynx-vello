@@ -5,20 +5,20 @@
 //! [`crate::ElementTree`] hands to `dom` is built here rather than by
 //! embedders or by the DOM core.
 
-use euclid::{Scale, Size2D};
-use stylo::context::QuirksMode;
-use stylo::device::Device;
-use stylo::device::servo::FontMetricsProvider;
-use stylo::font_metrics::FontMetrics;
-use stylo::media_queries::MediaType;
-use stylo::properties::ComputedValues;
-use stylo::properties::style_structs::Font;
-use stylo::queries::values::PrefersColorScheme;
-use stylo::servo::media_features::PointerCapabilities;
-use stylo::values::computed::font::GenericFontFamily;
-use stylo::values::computed::{CSSPixelLength, Length};
-use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
-use stylo_traits::{CSSPixel, DevicePixel};
+use dom::euclid::{Scale, Size2D};
+use dom::stylo::context::QuirksMode;
+use dom::stylo::device::Device;
+use dom::stylo::device::servo::FontMetricsProvider;
+use dom::stylo::font_metrics::FontMetrics;
+use dom::stylo::media_queries::MediaType;
+use dom::stylo::properties::ComputedValues;
+use dom::stylo::properties::style_structs::Font;
+use dom::stylo::queries::values::PrefersColorScheme;
+use dom::stylo::servo::media_features::PointerCapabilities;
+use dom::stylo::values::computed::font::GenericFontFamily;
+use dom::stylo::values::computed::{CSSPixelLength, Length};
+use dom::stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
+use dom::stylo_traits::{CSSPixel, DevicePixel};
 
 /// The viewport a Lynx view renders into.
 ///

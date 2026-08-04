@@ -2,11 +2,11 @@ use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dom::input::{DeltaMode, InputEvent, PointerKind, PointerPhase};
-use dom::render::gpu::{read_texture, render_params, renderer_options};
-use dom::vello::peniko::Color;
-use dom::vello::util::{RenderContext, RenderSurface};
-use dom::{Point2D, vello};
+use bobcat_core::lynx_element::dom::input::{DeltaMode, InputEvent, PointerKind, PointerPhase};
+use bobcat_core::lynx_element::dom::render::gpu::{read_texture, render_params, renderer_options};
+use bobcat_core::lynx_element::dom::vello::peniko::Color;
+use bobcat_core::lynx_element::dom::vello::util::{RenderContext, RenderSurface};
+use bobcat_core::lynx_element::dom::{Point2D, vello};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent};

@@ -129,9 +129,11 @@ useful signal for currently-compatible versions of those libraries.
   `default-features = false` excludes QuickJS while preserving all external
   injection contracts. Workspace dependencies disable defaults explicitly;
   only an upper layer that wants the built-in engine enables `quickjs`.
-  The core depends on `lynx-element` rather than directly on `dom`, but does
-  not re-export `ElementTree`, `dom`, or rendering conveniences. It has
-  no document alias, element-host trait, renderer wrapper, or injection seam.
+  The core depends on `lynx-element` only (strict linear layering) and
+  re-exports it whole — `bobcat_core::lynx_element` is the product's single
+  door downward, and the `internal-document-access` feature is forwarded
+  through it. The core still adds no document alias, element-host trait,
+  renderer wrapper, or injection seam of its own.
   `MainThreadRuntime`
   installs the Element PAPI before evaluation, evaluates a `.web.bundle`'s
   `lepusCode.root` inside web-core's wrapper, then runs `processData` →
@@ -177,9 +179,9 @@ useful signal for currently-compatible versions of those libraries.
   The crate must remain independent of Bobcat, the DOM, resources, and runtime
   policy — it knows nothing about Lynx.
 - `crates/bobcat-cli` — the independent native `bobcat` product over
-  `bobcat-core`'s `quickjs` feature. It directly composes the internal
-  `lynx-element` and DOM crates rather than turning its renderer into
-  a `bobcat-core` embedder API.
+  `bobcat-core`'s `quickjs` feature. Its only workspace dependencies are
+  `bobcat-core` (the layer chain: `bobcat_core::lynx_element::dom::…` reaches
+  every lower layer) and the sibling `lynx-template-decoder` utility.
   `bobcat -i file:///…` decodes and boots one web bundle; other URL schemes
   remain rejected at the boundary. One reusable `FramePipeline` owns the
   QuickJS-backed element runtime and borrows the scene retained by its
@@ -210,8 +212,9 @@ useful signal for currently-compatible versions of those libraries.
   Element-PAPI operations on `ElementTree`; `bobcat-core` composes that type
   directly and `dom` knows neither vocabulary.
   `ElementTree` owns a `dom::Document<ElementId>` plus an independent
-  `Vec<Option<LynxElement>>` arena. This crate depends directly on `dom` and
-  never directly on Bobcat or a JavaScript engine. The DOM payload is only the permanent
+  `Vec<Option<LynxElement>>` arena. This crate depends on `dom` **only** — stylo/euclid are reached through
+  `dom`'s vocabulary re-exports — and re-exports `dom` whole as the next
+  layer's door; it never depends on Bobcat or a JavaScript engine. The DOM payload is only the permanent
   `u32` unique id, which is also the direct arena index; each `LynxElement`
   owns that id, its stable DOM `NodeId` association, component creation
   fields. The arena permanently reserves slot 0 as web-core's
@@ -275,7 +278,9 @@ useful signal for currently-compatible versions of those libraries.
   (`gpu::Headless`, plus the `read_texture`/`renderer_options`/`render_params`
   seams windowed embedders build against); the crate root re-exports the one
   workspace `vello` version, and embedders configure wgpu/peniko/kurbo
-  exclusively through that re-export. `Headless::new` reports `NoAdapter`;
+  exclusively through that re-export; the root likewise re-exports `stylo`,
+  `euclid`, and `stylo_traits` as the style/geometry vocabulary doors for the
+  layers above (strict linear chain: cli → core → element → dom). `Headless::new` reports `NoAdapter`;
   every GPU-backed test treats that as a hard failure, including in CI.
   Nothing in `render` knows about nodes, computed styles, layout, or paint
   order. Source layout groups the crate by subsystem: `tree/` (arena set,

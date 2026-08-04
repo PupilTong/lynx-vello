@@ -11,6 +11,9 @@ publish = false
 [features]
 default = ["quickjs"]
 quickjs = ["dep:quickjs-rust-bridge"]
+# Forwarded to the element layer for trusted workspace composition
+# (bobcat-cli and render tests); see lynx-element's feature of the same name.
+internal-document-access = ["lynx-element/internal-document-access"]
 
 [dependencies]
 bytes = { workspace = true }
@@ -23,7 +26,6 @@ tokio-util = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
-dom = { workspace = true }
 flashbulb = { workspace = true, features = ["render"] }
 lynx-element = { workspace = true, features = ["internal-document-access"] }
 lynx-template-decoder = { workspace = true }

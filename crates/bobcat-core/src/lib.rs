@@ -10,6 +10,10 @@
 //! engine contracts without compiling `QuickJS`.
 
 #[cfg(feature = "quickjs")]
+/// The layer below, re-exported whole: the product reaches `ElementTree`,
+/// `dom`, and the render stack exclusively through this door.
+pub use lynx_element;
+
 pub mod quickjs;
 pub mod resource;
 pub mod script;

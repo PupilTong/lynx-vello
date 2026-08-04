@@ -194,9 +194,7 @@ name = "bobcat-cli"
 version = "0.1.0"
 dependencies = [
  "bobcat-core",
- "dom",
  "flashbulb",
- "lynx-element",
  "lynx-template-decoder",
  "png",
  "pollster",
@@ -210,7 +208,6 @@ name = "bobcat-core"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "dom",
  "flashbulb",
  "http",
  "lynx-element",
@@ -1606,9 +1603,6 @@ name = "lynx-element"
 version = "0.1.0"
 dependencies = [
  "dom",
- "euclid",
- "stylo",
- "stylo_traits",
 ]
 
 [[package]]

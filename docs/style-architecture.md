@@ -4,8 +4,8 @@ The repository contains one standards-oriented DOM/CSS core, a rendered
 runtime core, and one Lynx policy layer above them:
 
 ```text
-bobcat-cli ─┬─▶ bobcat-core ───▶ lynx-element ───▶ dom ─┬─▶ vendor/stylo
-            └─▶ lynx-element                            ├─▶ hughie
+bobcat-cli ───▶ bobcat-core ───▶ lynx-element ───▶ dom ─┬─▶ vendor/stylo
+                                                        ├─▶ hughie
                                                         └─▶ vello/wgpu
 ```
 
@@ -17,8 +17,8 @@ UA defaults without moving those concerns into the standards core.
 `lynx-element` owns `ElementTree` over `dom::Document<ElementId>`.
 `bobcat-core` composes `lynx-element` with runtime protocols and optionally
 supplies QuickJS, but re-exports no DOM/GPU or renderer conveniences.
-`bobcat-cli` is an independent product and directly composes the trusted
-workspace layers. `dom`'s `render` module is its DOM-free resource/GPU floor,
+`bobcat-cli` is an independent product that reaches every trusted workspace
+layer through `bobcat-core`'s chain re-export. `dom`'s `render` module is its DOM-free resource/GPU floor,
 also used by the CLI through `dom::render::gpu` and the `dom::vello`
 re-export.
 

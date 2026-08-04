@@ -25,6 +25,10 @@ pub use stylo_dom::ElementState;
 /// Embedders configure wgpu/peniko/kurbo exclusively through this re-export,
 /// never a second copy of the render stack.
 pub use vello;
+/// The style/geometry vocabulary doors: layers above reach `stylo`, `euclid`,
+/// and `stylo_traits` exclusively through these re-exports, mirroring
+/// [`vello`] as the render-stack door.
+pub use {euclid, stylo, stylo_traits};
 
 pub use crate::render::images::ImageStore;
 pub use crate::style::engine::StylesheetOrigin;
