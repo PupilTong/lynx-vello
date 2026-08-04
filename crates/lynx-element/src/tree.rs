@@ -15,6 +15,10 @@ use crate::{ElementId, PAGE_TAG, VIEW_TAG};
 /// requires this layer to validate handles before calling the crash-on-misuse
 /// DOM core, so every fallible PAPI entry point returns this instead of
 /// panicking.
+///
+/// [`crate::ElementOpRecorder`] answers PAPI calls with these same errors in
+/// the same precedence order (the mirroring law in `ops.rs`); a change to any
+/// validation below must change the recorder in the same commit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PapiError {
@@ -74,7 +78,7 @@ pub struct ElementTree {
 /// the document, so the first live arena slot is always the page. Ids are
 /// opaque handles to the main-thread script, which receives this one from
 /// `__CreatePage` like any other.
-const PAGE_UNIQUE_ID: ElementId = 1;
+pub(crate) const PAGE_UNIQUE_ID: ElementId = 1;
 
 impl ElementTree {
     /// Creates a tree for `viewport` with `config`'s UA cascade installed.

@@ -38,7 +38,12 @@ JavaScript adapter:
   without boxed `dyn Future` values.
 - `lynx-element` owns the concrete validated Element-PAPI operations and
   `pub type ElementId = u32`. There is no element-host trait: the only real
-  host is `ElementTree`, so the QuickJS adapter composes it directly.
+  host is `ElementTree`. The same five calls also exist as data —
+  `ElementOpRecorder` answers them from a shadow of the tree and records
+  `ElementOp`s, which `ElementTree::apply` replays at the flush boundary
+  under a mirroring law (same ids, same errors, same precedence; asserted at
+  apply). That seam is what lets a shell keep the script and the tree on
+  different threads without sharing either.
 - `resource` and `view` provide resource acquisition and generic engine/view
   composition. The crate root does not re-export `ElementTree`, `dom`,
   or a renderer specialization. `bobcat-cli` is a separate product, not the
@@ -99,13 +104,17 @@ methods. The trusted CLI and render tests opt into
    `Document<ElementId>`, and installs the Lynx UA stylesheet. The DOM payload
    is the same permanent `u32` id stored in the element arena; private DOM
    `NodeId` slots may still be reused.
-2. With QuickJS enabled, `quickjs::MainThreadRuntime` owns one `ElementTree`
-   and installs its five supported Element PAPI host functions directly.
-   Script mutates the validated element layer without seeing `NodeId` or
-   mutable DOM access.
-3. `__FlushElementTree` attaches `<page>` on first use and commits style and
-   layout. The CLI-private `FramePipeline` uses its internal document access;
-   the document-owned Painter decides whether its retained scene is current.
+2. With QuickJS enabled, `quickjs::MainThreadRuntime` owns only the realm.
+   Its five Element PAPI host functions answer from an `ElementOpRecorder`
+   shadow — validation is synchronous at every call, exactly as when the
+   realm mutated a tree directly — without the script side ever holding the
+   tree, seeing `NodeId`, or getting mutable DOM access.
+3. `__FlushElementTree` drains the recorded batch into the commit sink the
+   host injected: `local_commit_sink` applies it to a same-thread tree and
+   commits style and layout (tests, headless), while the windowed shell sends
+   it to the engine thread and blocks until acknowledged. The CLI-private
+   `FramePipeline` owns the tree and uses its internal document access; the
+   document-owned Painter decides whether its retained scene is current.
 4. For a dirty frame, `render` flushes/layouts, creates its
    temporary visual order, and runs its private
    Painter over live styles, rounded layouts, retained text, and the
@@ -120,6 +129,30 @@ methods. The trusted CLI and render tests opt into
 7. A screenshot reads back the live scene through the mandatory GPU path.
    There is no no-adapter fallback in local tests or CI, and replaced content
    necessarily comes from the document's own image registry.
+
+## Thread topology
+
+The engine libraries are synchronous and single-owner; threads are a shell
+concern, and every thread crossing is a plain value. The macOS windowed shell
+runs three:
+
+```text
+script thread                    engine thread (winit loop)        render thread
+QuickJS realm (MTS)              FramePipeline: ElementTree,       WindowGraphics: surface,
+ElementOpRecorder shadow         input, scrolling, commits,        renderer, present, vsync,
+  │ Commit{ops} ──────────────▶  style/layout/paint                screenshots
+  │ ◀────────────── ack           │ FrameJob{Scene clone} ──────▶   (latest-wins mailbox)
+  blocks on flush                 never blocks on either side
+```
+
+The script may wait on the engine (`__FlushElementTree` blocks until the
+commit is acknowledged); the engine never waits on the script or the GPU.
+`vello::Scene` is `Send + Sync` by vello's own static assertion, and recorded
+op batches are plain data, so no tree, document, or GPU object is ever shared
+across threads. Headless mode and every test keep the wall-free composition:
+one thread, `local_commit_sink`, identical semantics — the golden screenshot
+suite pins that the recorded-and-replayed tree paints byte-identically to a
+directly-mutated one.
 
 ## Static dispatch and intentional dynamic boundaries
 

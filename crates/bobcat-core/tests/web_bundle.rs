@@ -9,8 +9,19 @@
 //! wall is, so the gap is a failing assertion to update rather than a
 //! paragraph of prose that rots.
 
-use bobcat_core::quickjs::MainThreadRuntime;
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use bobcat_core::quickjs::{MainThreadRuntime, local_commit_sink};
 use lynx_element::{ElementTree, PageConfig, Viewport};
+
+/// The single-threaded composition: the realm records PAPI writes and every
+/// `__FlushElementTree` applies them to this shared tree on the spot.
+fn shared_tree(config: PageConfig) -> (MainThreadRuntime, Rc<RefCell<ElementTree>>) {
+    let elements = Rc::new(RefCell::new(ElementTree::new(VIEWPORT, config)));
+    let runtime = MainThreadRuntime::new(local_commit_sink(&elements)).expect("QuickJS realm");
+    (runtime, elements)
+}
 
 const VIEWPORT: Viewport = Viewport::new(393.0, 727.0);
 
@@ -48,9 +59,8 @@ fn the_bundle_page_config_reaches_the_ua_cascade() {
         assert!(config.default_overflow_visible, "{name}");
         assert!(config.enable_css_selector, "{name}");
 
-        let runtime =
-            MainThreadRuntime::new(ElementTree::new(VIEWPORT, config)).expect("QuickJS realm");
-        assert_eq!(runtime.elements().config(), config, "{name}");
+        let (_runtime, elements) = shared_tree(config);
+        assert_eq!(elements.borrow().config(), config, "{name}");
     }
 }
 
@@ -79,9 +89,7 @@ fn a_real_bundle_stops_at_the_missing_lynx_global() {
             .get("root")
             .unwrap_or_else(|| panic!("{name} has no lepusCode.root"));
 
-        let mut runtime =
-            MainThreadRuntime::new(ElementTree::new(VIEWPORT, page_config(&template)))
-                .expect("QuickJS realm");
+        let (mut runtime, elements) = shared_tree(page_config(&template));
         let error = runtime
             .evaluate_main_thread_script(root)
             .expect_err("a real ReactLynx bundle needs the main-thread global object");
@@ -96,7 +104,7 @@ fn a_real_bundle_stops_at_the_missing_lynx_global() {
             message.contains("main-thread.js:"),
             "{name}: the error should carry a source location: {message}"
         );
-        assert!(runtime.elements().page().is_none(), "{name}");
+        assert!(elements.borrow().page().is_none(), "{name}");
     }
 }
 
@@ -106,8 +114,7 @@ fn a_real_bundle_stops_at_the_missing_lynx_global() {
 #[test]
 fn the_boot_sequence_works_on_a_bundle_shaped_script() {
     let template = lynx_template_decoder::decode(FIXTURES[0].1).expect("decode");
-    let mut runtime = MainThreadRuntime::new(ElementTree::new(VIEWPORT, page_config(&template)))
-        .expect("QuickJS realm");
+    let (mut runtime, elements) = shared_tree(page_config(&template));
 
     // The shape a real card root has, minus the `lynx` dependency: an
     // `Object.assign(globalThis, …)` of the entry points web-core looks up.
@@ -124,10 +131,10 @@ fn the_boot_sequence_works_on_a_bundle_shaped_script() {
             ",
         )
         .expect("boot");
-    assert!(runtime.elements().page().is_some());
+    assert!(elements.borrow().page().is_some());
     assert!(
-        runtime
-            .elements()
+        elements
+            .borrow()
             .document()
             .document_element()
             .computed_style()

@@ -29,15 +29,25 @@
 //! in for the iframe, host functions installed before evaluation, the same
 //! wrapper, the same post-evaluation sequence.
 //!
+//! # The tree lives with the engine, not the realm
+//!
+//! The realm does not own an [`ElementTree`](lynx_element::ElementTree). The
+//! five PAPI globals answer from an [`ElementOpRecorder`] — a shadow that
+//! validates every call immediately and records the writes — and
+//! `__FlushElementTree` hands the recorded batch to the commit sink the host
+//! injected at construction. The sink is where a shell decides the threading:
+//! [`local_commit_sink`] applies batches synchronously to a tree on this
+//! thread (tests, the headless CLI), while a windowed shell can send them to
+//! the engine thread that owns the tree and block until it acknowledges.
+//!
 //! # Recorded limits
 //!
 //! - **Five Element PAPI members are installed** — `__CreatePage`, `__CreateView`,
 //!   `__AppendElement`, `__DropElement`, `__FlushElementTree` (see `lynx-element`'s crate docs). A
 //!   bundle that reaches for anything else gets a `ReferenceError` naming the missing global, which
 //!   is the intended failure: a silently wrong render would be worse.
-//! - **Element handles cross as `u32` unique-id numbers.** `__DropElement` asks the owned
-//!   [`ElementTree`] to retire the handle; this layer does not add an object wrapper or GC policy
-//!   around those ids.
+//! - **Element handles cross as `u32` unique-id numbers.** `__DropElement` asks the recorder to
+//!   retire the handle; this layer does not add an object wrapper or GC policy around those ids.
 //! - **The non-element main-thread globals are absent** (`lynx`, `SystemInfo`, `__globalProps`,
 //!   `_ReportError`, `__OnLifecycleEvent`, `__LoadLepusChunk`, `_I18nResourceTranslation`,
 //!   `_AddEventListener`, `__QueryComponent`).
@@ -45,11 +55,11 @@
 //!   `renderPage`; there is no second realm here, so `/app-service.js` is never loaded and
 //!   `callLepusMethod` has no caller.
 
-use std::cell::{Ref, RefCell, RefMut};
+use std::cell::RefCell;
 use std::fmt;
 use std::rc::Rc;
 
-use lynx_element::{ElementId, ElementTree, PapiError};
+use lynx_element::{ElementId, ElementOp, ElementOpRecorder, ElementTree, PapiError};
 use quickjs_rust_bridge::{self as quickjs, HostFunctionError, HostValue};
 
 use super::{QuickJsInitializationError, QuickJsScriptEngine};
@@ -118,10 +128,63 @@ impl fmt::Display for MainThreadError {
 
 impl std::error::Error for MainThreadError {}
 
-/// One `QuickJS` realm carrying the Lynx Element PAPI over one element tree.
+/// Why `__FlushElementTree` could not commit the recorded batch.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum CommitError {
+    /// The element tree rejected a recorded op — the recorder's shadow and
+    /// the tree diverged, which is a bug on this side of the boundary, not
+    /// bad script input (the recorder already validated the calls).
+    Rejected(PapiError),
+    /// The side owning the element tree is gone (its thread exited or its
+    /// channel closed), so the batch has nowhere to land.
+    Disconnected,
+}
+
+impl fmt::Display for CommitError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Rejected(error) => {
+                write!(formatter, "the element tree rejected the commit: {error}")
+            }
+            Self::Disconnected => {
+                formatter.write_str("the element tree owner is no longer reachable")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CommitError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Rejected(error) => Some(error),
+            Self::Disconnected => None,
+        }
+    }
+}
+
+/// The single-threaded commit sink: applies every flushed batch to `elements`
+/// on the calling thread, then runs the style + layout commit. This is the
+/// composition tests and the headless CLI run; a windowed shell substitutes a
+/// sink that crosses to its engine thread instead.
+pub fn local_commit_sink(
+    elements: &Rc<RefCell<ElementTree>>,
+) -> impl FnMut(Vec<ElementOp>) -> Result<(), CommitError> + 'static {
+    let elements = Rc::clone(elements);
+    move |ops| {
+        let mut elements = elements.borrow_mut();
+        for op in &ops {
+            elements.apply(op).map_err(CommitError::Rejected)?;
+        }
+        elements.flush_element_tree();
+        Ok(())
+    }
+}
+
+/// One `QuickJS` realm carrying the Lynx Element PAPI over a recorded op
+/// stream. The element tree itself lives with whoever owns the commit sink.
 pub struct MainThreadRuntime {
     engine: QuickJsScriptEngine,
-    elements: Rc<RefCell<ElementTree>>,
 }
 
 impl fmt::Debug for MainThreadRuntime {
@@ -133,27 +196,16 @@ impl fmt::Debug for MainThreadRuntime {
 }
 
 impl MainThreadRuntime {
-    /// Creates a realm over `elements` and installs the Element PAPI before
-    /// any script has run.
-    pub fn new(elements: ElementTree) -> Result<Self, QuickJsInitializationError> {
+    /// Creates a realm whose `__FlushElementTree` commits recorded batches
+    /// through `commit`, and installs the Element PAPI before any script has
+    /// run.
+    pub fn new(
+        commit: impl FnMut(Vec<ElementOp>) -> Result<(), CommitError> + 'static,
+    ) -> Result<Self, QuickJsInitializationError> {
         let mut engine = QuickJsScriptEngine::new()?;
-        let elements = Rc::new(RefCell::new(elements));
-        install_element_papi(&mut engine.realm, &elements)
+        install_element_papi(&mut engine.realm, commit)
             .map_err(QuickJsInitializationError::from_quickjs)?;
-        Ok(Self { engine, elements })
-    }
-
-    /// The element tree the PAPI mutates — the document to lay out and paint.
-    #[must_use]
-    pub fn elements(&self) -> Ref<'_, ElementTree> {
-        self.elements.borrow()
-    }
-
-    /// The element tree, mutably, for the ingestion this crate does not own
-    /// yet (decoded `StyleInfo`, fonts).
-    #[must_use]
-    pub fn elements_mut(&mut self) -> RefMut<'_, ElementTree> {
-        self.elements.borrow_mut()
+        Ok(Self { engine })
     }
 
     /// Evaluates a `.web.bundle`'s `lepusCode.root` in web-core's wrapper.
@@ -204,29 +256,32 @@ impl MainThreadRuntime {
 /// Installs the Element PAPI onto the realm's global object.
 ///
 /// web-core does the equivalent with one `Object.assign` of a closure literal;
-/// each closure here captures the same shared tree.
+/// each closure here captures the same shared recorder. Validation still
+/// happens synchronously at every call — the recorder mirrors the tree's own
+/// checks — so a bad handle throws at the call site exactly as it did when
+/// the realm mutated a tree directly.
 fn install_element_papi(
     realm: &mut quickjs::Realm,
-    elements: &Rc<RefCell<ElementTree>>,
+    mut commit: impl FnMut(Vec<ElementOp>) -> Result<(), CommitError> + 'static,
 ) -> Result<(), quickjs::Error> {
+    let recorder = Rc::new(RefCell::new(ElementOpRecorder::new()));
+
     // `__CreatePage(componentID, componentCSSID)` — idempotent; returns the
     // page's unique id.
-    let tree = Rc::clone(elements);
+    let ops = Rc::clone(&recorder);
     realm.define_global_function("__CreatePage", 2, move |arguments| {
         let component_id = string_argument("__CreatePage", arguments, 0)?;
         let component_css_id = i32_argument("__CreatePage", arguments, 1)?;
-        let id = tree
-            .borrow_mut()
-            .create_page(component_id, component_css_id);
+        let id = ops.borrow_mut().create_page(component_id, component_css_id);
         Ok(unique_id_value(id))
     })?;
 
     // `__CreateView(parentComponentUniqueID)` — returns the new view's unique
     // id. The argument is `0` when there is no parent component.
-    let tree = Rc::clone(elements);
+    let ops = Rc::clone(&recorder);
     realm.define_global_function("__CreateView", 1, move |arguments| {
         let parent_component = u32_argument("__CreateView", arguments, 0)?;
-        let id = tree
+        let id = ops
             .borrow_mut()
             .create_view(parent_component)
             .map_err(papi_error)?;
@@ -234,11 +289,11 @@ fn install_element_papi(
     })?;
 
     // `__AppendElement(parent, child)` — returns the child unique id.
-    let tree = Rc::clone(elements);
+    let ops = Rc::clone(&recorder);
     realm.define_global_function("__AppendElement", 2, move |arguments| {
         let parent = element_argument("__AppendElement", arguments, 0)?;
         let child = element_argument("__AppendElement", arguments, 1)?;
-        let appended = tree
+        let appended = ops
             .borrow_mut()
             .append_element(parent, child)
             .map_err(papi_error)?;
@@ -248,21 +303,26 @@ fn install_element_papi(
     // `__DropElement(element)` — delegates handle retirement to the selected
     // host. Repeated drops stay host-defined no-ops (the handle is already
     // retired); dropping the permanent page element is a precise error.
-    let tree = Rc::clone(elements);
+    let ops = Rc::clone(&recorder);
     realm.define_global_function("__DropElement", 1, move |arguments| {
         let id = element_argument("__DropElement", arguments, 0)?;
-        match tree.borrow_mut().drop_element(id) {
+        match ops.borrow_mut().drop_element(id) {
             Ok(()) | Err(PapiError::UnknownElement(_)) => {}
             Err(error) => return Err(papi_error(error)),
         }
         Ok(HostValue::Undefined)
     })?;
 
-    // `__FlushElementTree()` — the single commit boundary. web-core ignores
-    // its optional sub-tree and options arguments on the web target too.
-    let tree = Rc::clone(elements);
+    // `__FlushElementTree()` — the single commit boundary: the batch recorded
+    // since the last flush crosses to the tree owner here, and the call does
+    // not return until the commit is acknowledged. An empty batch still
+    // commits — a flush is a style + layout pass even with nothing recorded.
+    // web-core ignores the optional sub-tree and options arguments on the web
+    // target too.
+    let ops = Rc::clone(&recorder);
     realm.define_global_function("__FlushElementTree", 0, move |_arguments| {
-        tree.borrow_mut().flush_element_tree();
+        let batch = ops.borrow_mut().take_ops();
+        commit(batch).map_err(papi_error)?;
         Ok(HostValue::Undefined)
     })?;
 
