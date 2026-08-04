@@ -50,11 +50,11 @@ use hughie::style::PositionProperty;
 use stylo::properties::ComputedValues;
 
 use crate::NodeId;
-use crate::document::Document;
 use crate::layout::{
     box_parent, establishes_absolute_containing_block, establishes_fixed_containing_block,
 };
-use crate::node::Node;
+use crate::tree::document::Document;
+use crate::tree::node::Node;
 
 /// A per-axis pair of flags — which axes the user may scroll, which axes clip.
 ///
@@ -69,7 +69,6 @@ pub struct ScrollAxes {
 }
 
 #[cfg(test)]
-#[path = "scroll_tests.rs"]
 mod behavior_tests;
 
 impl ScrollAxes {
@@ -436,7 +435,7 @@ impl<T> Document<T> {
 mod tests {
     use super::*;
     use crate::StylesheetOrigin;
-    use crate::document::tests::device;
+    use crate::tree::document::tests::device;
 
     /// A 100×100 `overflow: scroll` box holding a 300×400 child, nested inside
     /// an outer 200×200 scroller so chaining has somewhere to go.

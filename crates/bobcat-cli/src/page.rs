@@ -3,8 +3,8 @@ use std::cell::Ref;
 use bobcat_core::quickjs::MainThreadRuntime;
 #[cfg(target_os = "macos")]
 use dom::input::{InputEvent, InputResponse};
+use dom::vello::Scene;
 use lynx_element::{ElementTree, PageConfig, Viewport};
-use pulsar::vello::Scene;
 use url::Url;
 
 use crate::CliError;

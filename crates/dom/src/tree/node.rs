@@ -21,7 +21,7 @@ use stylo::stylesheets::UrlExtraData;
 use stylo_atoms::Atom;
 use stylo_dom::ElementState;
 
-use crate::document::{DOCUMENT_NODE_ID, NodeId, PayloadSlot, TreeArenas};
+use crate::tree::document::{DOCUMENT_NODE_ID, NodeId, PayloadSlot, TreeArenas};
 
 pub(crate) const SNAPSHOT_PRESENT: u8 = 1 << 0;
 pub(crate) const SNAPSHOT_HANDLED: u8 = 1 << 1;
@@ -755,7 +755,7 @@ mod tests {
 
     #[test]
     fn document_text_context_is_lazy_and_reused() {
-        let mut document = Document::<()>::new(crate::document::tests::device());
+        let mut document = Document::<()>::new(crate::tree::document::tests::device());
         assert!(document.layout_state().text_context.is_none());
 
         assert_eq!(document.register_fonts(b"not a font"), 0);
@@ -779,7 +779,7 @@ mod tests {
 
     #[test]
     fn out_of_band_stylo_mutation_keeps_snapshot_readable() {
-        let mut document = Document::<()>::new(crate::document::tests::device());
+        let mut document = Document::<()>::new(crate::tree::document::tests::device());
         let root = document.create_element("page", ());
         document.append_document_element(root);
         document.flush_styles_with_damage_sink(&mut |_, _| {});
@@ -809,7 +809,7 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn diverged_snapshot_on_unvisited_element_is_reported_in_debug() {
-        let mut document = Document::<()>::new(crate::document::tests::device());
+        let mut document = Document::<()>::new(crate::tree::document::tests::device());
         let root = document.create_element("page", ());
         document.append_document_element(root);
         let stale = document.create_element("view", ());
@@ -841,7 +841,7 @@ mod tests {
 
     #[test]
     fn node_content_and_text_artifacts_are_lazy() {
-        let mut document = Document::<()>::new(crate::document::tests::device());
+        let mut document = Document::<()>::new(crate::tree::document::tests::device());
         let element = document.create_element("view", ());
         assert!(document.get(element).unwrap().content.is_none());
 

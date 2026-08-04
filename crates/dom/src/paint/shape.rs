@@ -87,9 +87,9 @@ impl BoxShape {
 macro_rules! with_shape {
     ($shape:expr, |$s:ident| $body:expr) => {
         match $shape {
-            $crate::shape::BoxShape::Rect($s) => $body,
-            $crate::shape::BoxShape::Rounded($s) => $body,
-            $crate::shape::BoxShape::Path($s) => $body,
+            $crate::paint::shape::BoxShape::Rect($s) => $body,
+            $crate::paint::shape::BoxShape::Rounded($s) => $body,
+            $crate::paint::shape::BoxShape::Path($s) => $body,
         }
     };
 }

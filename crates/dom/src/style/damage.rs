@@ -47,8 +47,8 @@ impl From<ServoRestyleDamage> for StyleDamage {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::StyleDamage;
-    use crate::document::NodeId;
     use crate::test_common::{Doc, rgb};
+    use crate::tree::document::NodeId;
 
     type DamageSummary = Vec<(NodeId, StyleDamage)>;
 

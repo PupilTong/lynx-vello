@@ -1,11 +1,11 @@
-//! GPU smoke tests for [`pulsar::gpu::Headless`]: build a tiny scene by
+//! GPU smoke tests for [`dom::render::gpu::Headless`]: build a tiny scene by
 //! hand, render it headless, and check pixels from the readback. A usable GPU
 //! adapter is mandatory, including in CI.
 
-use pulsar::gpu::Headless;
-use pulsar::vello;
-use pulsar::vello::kurbo::{Affine, Rect};
-use pulsar::vello::peniko::{Color, Fill};
+use dom::render::gpu::Headless;
+use dom::vello;
+use dom::vello::kurbo::{Affine, Rect};
+use dom::vello::peniko::{Color, Fill};
 
 /// Reads the RGBA pixel at (`x`, `y`) from a tightly-packed row-major
 /// readback of the given width.

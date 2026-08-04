@@ -32,11 +32,9 @@
 //! - The grammar has no `image-orientation`; decoders apply EXIF orientation before publishing
 //!   pixels and natural size.
 
-use pulsar::ImageStore;
-use pulsar::vello::Scene;
-
-use crate::Document;
+use crate::vello::Scene;
 use crate::visual::PaintOrder;
+use crate::{Document, ImageStore};
 
 /// Reusable paint state owned by exactly one [`Document`].
 ///
@@ -47,7 +45,7 @@ use crate::visual::PaintOrder;
 #[derive(Default)]
 pub(crate) struct Painter {
     scene: Scene,
-    scratch: crate::walker::Scratch,
+    scratch: crate::paint::walker::Scratch,
     images: ImageStore,
     /// The document visual epoch represented by `scene`. `None` means this
     /// painter has never completed a frame.
@@ -64,7 +62,7 @@ impl Painter {
     pub(crate) fn paint<T>(&mut self, document: &Document<T>, frame: &PaintOrder) {
         self.scene_epoch = None;
         self.scene.reset();
-        crate::walker::walk(
+        crate::paint::walker::walk(
             &mut self.scene,
             &mut self.scratch,
             document,
@@ -98,7 +96,7 @@ mod tests {
 
     #[test]
     fn a_failed_paint_cannot_leave_a_partial_scene_marked_current() {
-        let mut document = Document::new(crate::document::tests::device());
+        let mut document = Document::new(crate::tree::document::tests::device());
         document.add_stylesheet(
             "page { width: 10px; height: 10px; background-color: teal; }",
             StylesheetOrigin::Author,

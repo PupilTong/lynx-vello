@@ -2,12 +2,11 @@ use std::mem;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dom::Point2D;
 use dom::input::{DeltaMode, InputEvent, PointerKind, PointerPhase};
-use pulsar::gpu::{read_texture, render_params, renderer_options};
-use pulsar::vello;
-use pulsar::vello::peniko::Color;
-use pulsar::vello::util::{RenderContext, RenderSurface};
+use dom::render::gpu::{read_texture, render_params, renderer_options};
+use dom::vello::peniko::Color;
+use dom::vello::util::{RenderContext, RenderSurface};
+use dom::{Point2D, vello};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent};

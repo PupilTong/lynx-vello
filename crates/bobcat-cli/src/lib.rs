@@ -67,7 +67,7 @@ pub enum CliError {
     #[error("invalid viewport: {0}")]
     Viewport(String),
     #[error("{0}")]
-    Gpu(#[source] pulsar::gpu::GpuError),
+    Gpu(#[source] dom::render::gpu::GpuError),
     #[error("could not start the command console: {0}")]
     Console(#[source] std::io::Error),
     #[error("could not write screenshot `{path}`: {source}")]

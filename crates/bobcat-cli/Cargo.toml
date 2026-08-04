@@ -19,7 +19,6 @@ lynx-element = { workspace = true, features = ["internal-document-access"] }
 lynx-template-decoder = { workspace = true }
 png = { workspace = true }
 pollster = { workspace = true }
-pulsar = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
 

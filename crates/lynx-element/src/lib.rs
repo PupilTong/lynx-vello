@@ -8,7 +8,7 @@
 //! Lynx UA cascade defaults.
 //!
 //! ```text
-//! bobcat-cli  ──▶  bobcat-core  ──▶  lynx-element  ──▶  dom  ──▶  pulsar
+//! bobcat-cli  ──▶  bobcat-core  ──▶  lynx-element  ──▶  dom
 //!                                      handles + UA       resources/GPU
 //! ```
 //!

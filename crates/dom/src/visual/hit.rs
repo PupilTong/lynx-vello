@@ -4,7 +4,7 @@ use euclid::default::{Point2D, Rect};
 
 use super::{LocalHit, PaintItemKind, PaintOrder, geometry};
 use crate::NodeId;
-use crate::document::Document;
+use crate::tree::document::Document;
 
 impl PaintOrder {
     /// Asserts this frame still truthfully names `document`'s nodes: freed

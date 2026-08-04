@@ -1,6 +1,6 @@
 //! Golden screenshot comparison for **box rendering** — backgrounds, borders,
 //! radii and nested flex geometry — over the full test pipeline:
-//! inline-styled fragment → `dom` → `pulsar` → headless GPU.
+//! inline-styled fragment → `dom` → headless GPU.
 //!
 //! Text rendering has its own binary, `tests/text_screenshots.rs`; both write
 //! into the same crate-level `tests/screenshots` golden tree. Capture,

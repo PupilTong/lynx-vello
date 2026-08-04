@@ -23,8 +23,10 @@ use super::style::{
     establishes_absolute_containing_block, establishes_fixed_containing_block, resolve_position,
     skips_contents,
 };
-use crate::document::{Document, DocumentLayoutState, NodeId, TreeArenas, slab_get_for_live_node};
-use crate::node::Node;
+use crate::tree::document::{
+    Document, DocumentLayoutState, NodeId, TreeArenas, slab_get_for_live_node,
+};
+use crate::tree::node::Node;
 
 impl<T> LayoutTree for TreeArenas<T> {
     type NodeId = NodeId;
