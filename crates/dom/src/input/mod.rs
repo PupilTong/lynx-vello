@@ -69,6 +69,12 @@
 //! - Two devices are modeled — pointers and wheels. Keyboard, focus, and IME have no consumer in
 //!   this crate yet; [`InputEvent`] and its enums are `#[non_exhaustive]` so they can arrive
 //!   without a break.
+//! - A host may answer gestures itself instead, off this thread entirely, by scrolling a
+//!   [`crate::visual::Frame`] it holds and handing the offsets back through
+//!   [`Document::scroll_to`]. It marks those events [`InputEvent::default_prevented`] so this
+//!   module targets them without scrolling them a second time — including wheels, which are
+//!   forwarded for targeting rather than withheld, so a future `wheel` dispatch to script sees
+//!   them.
 //! - Scroll gestures are drag and wheel only. There is no momentum, no rubber-band overscroll, no
 //!   scrollbar to grab, and no smooth (`scroll-behavior`) animation: this crate owns no clock, and
 //!   a frame pump is the layer above's.
@@ -93,10 +99,10 @@ use crate::tree::document::Document;
 /// A runtime layer arbitrating a scroll against its own tap and long-press
 /// recognizers wants its own threshold — it gets one by preventing the default
 /// action and driving [`Document::scroll_chain`] on its own terms.
-const TOUCH_SLOP: f32 = 8.0;
+pub(crate) const TOUCH_SLOP: f32 = 8.0;
 
 /// CSS px one [`DeltaMode::Line`] step scrolls: the conventional UA value.
-const WHEEL_LINE_PX: f32 = 40.0;
+pub(crate) const WHEEL_LINE_PX: f32 = 40.0;
 
 /// A pointing device's identity for the life of one interaction. Hosts that
 /// have no notion of pointer ids (a single mouse) can use any constant.
@@ -239,7 +245,7 @@ impl InputEvent {
     /// Whether every coordinate this event carries is a real number.
     /// [`Document::handle_input`] drops events that fail this.
     #[must_use]
-    fn is_finite(&self) -> bool {
+    pub(crate) fn is_finite(&self) -> bool {
         let position = self.position.x.is_finite() && self.position.y.is_finite();
         let payload = match self.kind {
             InputKind::Pointer { .. } => true,
@@ -277,23 +283,81 @@ pub struct InputResponse {
     pub default_action: DefaultAction,
 }
 
-/// One pointer's latched scroll gesture.
+/// One pointer's latched scroll gesture, independent of *what* it scrolls.
+///
+/// Two callers share this: [`Document::handle_input`], which resolves the
+/// container against the live document, and
+/// [`FrameScroller`](crate::FrameScroller), which resolves it against a
+/// published frame on whichever thread holds one. Only the slop arithmetic is
+/// common, but it has to be *exactly* common — two thresholds, or two ways of
+/// spending the toll, would make the same drag travel different distances
+/// depending on which side answered it.
 #[derive(Debug, Clone, Copy)]
-struct Drag {
-    pointer: PointerId,
+pub(crate) struct Drag {
+    pub(crate) pointer: PointerId,
     /// The box this gesture scrolls. Resolved once at pointer-down and kept:
     /// re-resolving mid-drag would hand the gesture to whatever slid under the
     /// finger.
-    scroller: NodeId,
+    pub(crate) scroller: NodeId,
     /// [`Document::node_removal_epoch`] when `scroller` was resolved. A freed
     /// id can be recycled, so the drag dies with the epoch rather than
     /// scrolling a stranger.
-    epoch: u64,
+    pub(crate) epoch: u64,
     /// The position movement is measured from — the press point until the slop
     /// threshold falls, then the last consumed position.
     origin: Point2D<f32>,
     /// Whether the slop threshold has been crossed.
     scrolling: bool,
+}
+
+impl Drag {
+    pub(crate) const fn new(
+        pointer: PointerId,
+        scroller: NodeId,
+        epoch: u64,
+        origin: Point2D<f32>,
+    ) -> Self {
+        Self {
+            pointer,
+            scroller,
+            epoch,
+            origin,
+            scrolling: false,
+        }
+    }
+
+    /// Advances the gesture to `position` and returns the movement it should
+    /// scroll by, or `None` while the finger is still inside the slop radius.
+    ///
+    /// The toll is spent exactly once, on the step that crosses it: the
+    /// gesture neither jumps by the whole slop distance nor loses the
+    /// overshoot past it.
+    pub(crate) fn step(&mut self, position: Point2D<f32>) -> Option<Vector2D<f32>> {
+        let travel = position - self.origin;
+        let movement = if self.scrolling {
+            travel
+        } else {
+            let distance = travel.length();
+            if distance <= TOUCH_SLOP {
+                return None;
+            }
+            self.scrolling = true;
+            travel * ((distance - TOUCH_SLOP) / distance)
+        };
+        self.origin = position;
+        Some(movement)
+    }
+
+    /// Rebases onto `position` without scrolling — for a step something else
+    /// claimed, which must not be back-applied on the next one.
+    pub(crate) const fn skip(&mut self, position: Point2D<f32>) {
+        self.origin = position;
+    }
+
+    /// Whether the gesture has crossed slop and is actually scrolling.
+    pub(crate) const fn is_scrolling(&self) -> bool {
+        self.scrolling
+    }
 }
 
 /// Per-document interaction state: the gestures currently latched to a
@@ -383,13 +447,12 @@ impl<T: Sync> Document<T> {
                 let scroller =
                     target.and_then(|node| self.nearest_user_scrollable(node, ScrollAxes::BOTH));
                 if let Some(scroller) = scroller {
-                    self.input_state_mut().drags.push(Drag {
-                        pointer: id,
+                    self.input_state_mut().drags.push(Drag::new(
+                        id,
                         scroller,
                         epoch,
-                        origin: event.position,
-                        scrolling: false,
-                    });
+                        event.position,
+                    ));
                 }
                 DefaultAction::None
             }
@@ -409,22 +472,12 @@ impl<T: Sync> Document<T> {
             return DefaultAction::None;
         };
         if event.default_prevented {
-            // Skip this step without back-applying it later.
-            drag.origin = event.position;
+            drag.skip(event.position);
             return DefaultAction::None;
         }
-        let travel = event.position - drag.origin;
-        let movement = if drag.scrolling {
-            travel
-        } else {
-            let distance = travel.length();
-            if distance <= TOUCH_SLOP {
-                return DefaultAction::None;
-            }
-            drag.scrolling = true;
-            travel * ((distance - TOUCH_SLOP) / distance)
+        let Some(movement) = drag.step(event.position) else {
+            return DefaultAction::None;
         };
-        drag.origin = event.position;
         let scroller = drag.scroller;
 
         // Content follows the finger, so the scroll position moves against it.

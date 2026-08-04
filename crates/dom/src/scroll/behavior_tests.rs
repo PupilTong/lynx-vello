@@ -412,3 +412,620 @@ fn the_response_reports_where_the_event_landed_inside_its_target() {
     assert_eq!(response.target, Some(rows[1]));
     assert_eq!(response.local_position, Some(Point2D::new(30.0, 30.0)));
 }
+
+/// A frame's scroll node index for `id`.
+fn scroll_index(frame: &dom::Frame, id: NodeId) -> usize {
+    frame
+        .scrolls()
+        .iter()
+        .position(|node| node.node == id)
+        .expect("a scroll container gets a scroll node")
+}
+
+/// Where `id`'s element box lands when the frame is painted at `offsets`
+/// rather than at the offsets it was built with.
+fn corrected_origin(frame: &dom::Frame, id: NodeId, offsets: &[Vector2D<f32>]) -> Point2D<f32> {
+    let item = frame
+        .items()
+        .iter()
+        .find(|item| item.node == id && item.kind == PaintItemKind::ElementBox)
+        .expect("node paints an element box");
+    let baked = item
+        .transform
+        .transform_point2d(Point2D::zero())
+        .expect("a paintable item has a non-singular matrix");
+    baked + frame.scroll_correction(item.scroll, offsets)
+}
+
+#[test]
+fn a_renderer_can_scroll_a_frame_the_document_has_not_caught_up_with() {
+    // The property the paint thread rests on: correcting a frame by a scroll
+    // delta puts content exactly where a frame the *document* built at that
+    // offset would have put it. If these ever disagree, scrolling ahead would
+    // drift from what the next published frame shows.
+    let mut h = Harness::new(SCROLLER);
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    let rows: Vec<NodeId> = (0..3).map(|_| h.el(scroller, "view.row")).collect();
+    h.doc.dom.layout();
+
+    let unscrolled = h.doc.dom.frame();
+    let index = scroll_index(&unscrolled, scroller);
+    assert_eq!(unscrolled.scrolls()[index].baked_offset, Vector2D::zero());
+    assert_eq!(
+        unscrolled.scrolls()[index].max_offset,
+        Vector2D::new(0.0, 200.0),
+        "three 100px rows in a 100px scrollport overhang by 200px",
+    );
+    // Routing has to actually find this box, or paint-side scrolling would
+    // silently do nothing at all.
+    assert_eq!(
+        unscrolled.scroll_target(Point2D::new(50.0, 50.0), &[]),
+        Some(index),
+    );
+
+    let mut offsets = vec![Vector2D::zero(); unscrolled.scrolls().len()];
+    offsets[index] = Vector2D::new(0.0, 40.0);
+    let ahead = corrected_origin(&unscrolled, rows[1], &offsets);
+
+    h.scroll_to(scroller, 0.0, 40.0);
+    let baked = h.doc.dom.frame();
+    let settled = corrected_origin(&baked, rows[1], &[]);
+
+    assert_eq!(ahead, settled);
+    assert_eq!(ahead, Point2D::new(0.0, 60.0));
+
+    // The scroller's own box does not move either way.
+    assert_eq!(
+        corrected_origin(&unscrolled, scroller, &offsets),
+        corrected_origin(&baked, scroller, &[]),
+    );
+}
+
+#[test]
+fn corrections_for_nested_scrollers_sum_along_the_chain() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .outer { display: flex; flex-direction: column; overflow: scroll;
+                  width: 200px; height: 200px; }
+         .inner { display: flex; flex-direction: column; overflow: scroll;
+                  flex-shrink: 0; width: 100px; height: 100px; }
+         .row { flex-shrink: 0; width: 100px; height: 300px; }",
+    );
+    let root = h.root();
+    let outer = h.el(root, "view.outer");
+    let inner = h.el(outer, "view.inner");
+    let row = h.el(inner, "view.row");
+    h.el(outer, "view.row");
+    h.doc.dom.layout();
+
+    let frame = h.doc.dom.frame();
+    let (outer_index, inner_index) = (scroll_index(&frame, outer), scroll_index(&frame, inner));
+    assert_eq!(
+        frame.scrolls()[inner_index].parent,
+        Some(outer_index),
+        "the inner scroller chains to the outer one",
+    );
+    let mut offsets = vec![Vector2D::zero(); frame.scrolls().len()];
+    offsets[outer_index] = Vector2D::new(0.0, 25.0);
+    offsets[inner_index] = Vector2D::new(0.0, 70.0);
+
+    h.scroll_to(outer, 0.0, 25.0);
+    h.scroll_to(inner, 0.0, 70.0);
+    let baked = h.doc.dom.frame();
+
+    assert_eq!(
+        corrected_origin(&frame, row, &offsets),
+        corrected_origin(&baked, row, &[]),
+    );
+    assert_eq!(
+        corrected_origin(&frame, row, &offsets),
+        Point2D::new(0.0, -95.0)
+    );
+}
+
+#[test]
+fn a_correction_maps_through_a_scaling_ancestor() {
+    // `offset_to_viewport` is the scroll container's own world linear map, so
+    // a scroller under `transform: scale(2)` moves twice as far on screen as
+    // its offset. Baking and correcting have to agree about that too, or the
+    // frame would jump the moment the document caught up.
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .zoom { display: flex; transform: scale(2); transform-origin: 0 0; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     width: 100px; height: 100px; }
+         .row { flex-shrink: 0; width: 100px; height: 100px; }",
+    );
+    let root = h.root();
+    let zoom = h.el(root, "view.zoom");
+    let scroller = h.el(zoom, "view.scroller");
+    let rows: Vec<NodeId> = (0..3).map(|_| h.el(scroller, "view.row")).collect();
+    h.doc.dom.layout();
+
+    let frame = h.doc.dom.frame();
+    let index = scroll_index(&frame, scroller);
+    assert_eq!(
+        frame.scrolls()[index].to_viewport(Vector2D::new(1.0, 3.0)),
+        Vector2D::new(2.0, 6.0),
+        "the scroller's world linear map doubles an offset delta",
+    );
+    let mut offsets = vec![Vector2D::zero(); frame.scrolls().len()];
+    offsets[index] = Vector2D::new(0.0, 30.0);
+
+    h.scroll_to(scroller, 0.0, 30.0);
+    let baked = h.doc.dom.frame();
+
+    let ahead = corrected_origin(&frame, rows[1], &offsets);
+    assert_eq!(ahead, corrected_origin(&baked, rows[1], &[]));
+    // Row 1 sits 100 CSS px down, scrolled back 30, all doubled on screen.
+    assert_eq!(ahead, Point2D::new(0.0, 140.0));
+}
+
+#[test]
+fn a_scroll_container_own_clip_does_not_move_with_its_contents() {
+    // The scrollport clips; it does not scroll. A clip tagged with its own
+    // scroller would slide away as the content moved, revealing everything
+    // the box is meant to hide.
+    let mut h = Harness::new(SCROLLER);
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    let inner = h.el(scroller, "view.scroller");
+    h.el(inner, "view.row");
+    h.doc.dom.layout();
+
+    let frame = h.doc.dom.frame();
+    let outer_index = scroll_index(&frame, scroller);
+    let outer_clip = frame
+        .clips()
+        .iter()
+        .find(|clip| clip.node == scroller)
+        .expect("a scroll container clips its scrollport");
+    assert_ne!(outer_clip.scroll, Some(outer_index));
+
+    // The nested scroller's clip *does* move with the outer one.
+    let inner_clip = frame
+        .clips()
+        .iter()
+        .find(|clip| clip.node == inner)
+        .expect("the nested scroll container clips too");
+    assert_eq!(inner_clip.scroll, Some(outer_index));
+}
+
+#[test]
+fn scroll_routing_is_exact_under_a_rotated_ancestor() {
+    // A bounding-box test would claim the whole axis-aligned extent of a
+    // rotated scroller, including the four triangles outside it. Routing maps
+    // the point back through the container's own inverse instead, so those
+    // corners miss — which is what the box actually looks like on screen.
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .spin { display: flex; transform: rotate(45deg); transform-origin: 0 0; }
+         .scroller { display: flex; flex-direction: column; overflow: scroll;
+                     width: 100px; height: 100px; }
+         .row { flex-shrink: 0; width: 100px; height: 100px; }",
+    );
+    let root = h.root();
+    let spin = h.el(root, "view.spin");
+    let scroller = h.el(spin, "view.scroller");
+    for _ in 0..3 {
+        h.el(scroller, "view.row");
+    }
+    h.doc.dom.layout();
+    let frame = h.doc.dom.frame();
+    let index = scroll_index(&frame, scroller);
+
+    // Rotated 45° about the origin, the box is a diamond: its own centre
+    // (70.7 down the vertical axis) is inside...
+    assert_eq!(
+        frame.scroll_target(Point2D::new(0.0, 70.0), &[]),
+        Some(index)
+    );
+    // ...while the top-left of its axis-aligned extent is emphatically not.
+    assert_eq!(frame.scroll_target(Point2D::new(-60.0, 5.0), &[]), None);
+    assert_eq!(frame.scroll_target(Point2D::new(60.0, 5.0), &[]), None);
+}
+
+#[test]
+fn routing_follows_a_scroller_its_own_ancestor_has_scrolled() {
+    // The inner scroller's baked position is stale the moment the renderer
+    // scrolls the outer one. Routing rebases the point past the parent
+    // chain's correction, so a gesture lands on the box that is actually
+    // under the finger rather than where the document last drew it.
+    let mut h = Harness::new(
+        "page { display: flex; width: 800px; height: 600px; }
+         .outer { display: flex; flex-direction: column; overflow: scroll;
+                  width: 200px; height: 200px; }
+         .spacer { flex-shrink: 0; width: 200px; height: 100px; }
+         .inner { display: flex; flex-direction: column; overflow: scroll;
+                  flex-shrink: 0; width: 100px; height: 100px; }
+         .row { flex-shrink: 0; width: 100px; height: 300px; }",
+    );
+    let root = h.root();
+    let outer = h.el(root, "view.outer");
+    h.el(outer, "view.spacer");
+    let inner = h.el(outer, "view.inner");
+    h.el(inner, "view.row");
+    h.doc.dom.layout();
+
+    let frame = h.doc.dom.frame();
+    let (outer_index, inner_index) = (scroll_index(&frame, outer), scroll_index(&frame, inner));
+
+    // Unscrolled, the inner box spans y=100..200 and y=50 is only the outer.
+    assert_eq!(
+        frame.scroll_target(Point2D::new(50.0, 150.0), &[]),
+        Some(inner_index)
+    );
+    assert_eq!(
+        frame.scroll_target(Point2D::new(50.0, 50.0), &[]),
+        Some(outer_index)
+    );
+
+    // Scroll the outer by 100 on the renderer's side: the inner box has
+    // ridden up to y=0..100, so y=50 now hits it.
+    let mut offsets = vec![Vector2D::zero(); frame.scrolls().len()];
+    offsets[outer_index] = Vector2D::new(0.0, 100.0);
+    assert_eq!(
+        frame.scroll_target(Point2D::new(50.0, 50.0), &offsets),
+        Some(inner_index),
+    );
+    assert_eq!(
+        frame.scroll_target(Point2D::new(50.0, 150.0), &offsets),
+        Some(outer_index)
+    );
+}
+
+/// The paint-side scroller, driven the way a renderer holding a frame drives
+/// it: adopt a frame, feed it events, read the offsets it paints with.
+mod frame_scroller {
+    use super::{Harness, SCROLLER};
+    use crate::input::{InputEvent, PointerKind, PointerPhase};
+    use crate::scroll::frame_scroller::{FrameScroller, ScrollUpdate};
+    use crate::visual::frame::Frame;
+    use crate::{NodeId, Point2D, Vector2D};
+
+    fn offset_of(scroller: &FrameScroller, frame: &Frame, node: NodeId) -> Vector2D<f32> {
+        let index = frame
+            .scrolls()
+            .iter()
+            .position(|entry| entry.node == node)
+            .expect("the scroller has a scroll node");
+        scroller.offsets_for_testing()[index]
+    }
+
+    fn scrolling_page() -> (Harness, NodeId) {
+        let mut h = Harness::new(SCROLLER);
+        let root = h.root();
+        let scroller = h.el(root, "view.scroller");
+        for _ in 0..3 {
+            h.el(scroller, "view.row");
+        }
+        h.doc.dom.layout();
+        (h, scroller)
+    }
+
+    #[test]
+    fn a_wheel_scrolls_the_box_under_it_and_clamps_at_its_end() {
+        let (mut h, scroller) = scrolling_page();
+        let frame = h.doc.dom.frame();
+        let mut state = FrameScroller::default();
+        state.adopt(&frame, 0);
+
+        let response = state.handle_input(
+            &frame,
+            &InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 60.0)),
+        );
+        assert_eq!(response.scrolled.len(), 1);
+        assert_eq!(response.scrolled[0].node, scroller);
+        assert_eq!(
+            offset_of(&state, &frame, scroller),
+            Vector2D::new(0.0, 60.0)
+        );
+
+        // Past the end of the scrolling area it clamps rather than running on.
+        state.handle_input(
+            &frame,
+            &InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 1_000.0)),
+        );
+        assert_eq!(
+            offset_of(&state, &frame, scroller),
+            Vector2D::new(0.0, 200.0),
+            "three 100px rows in a 100px scrollport overhang by 200px",
+        );
+
+        // A wheel that consumes nothing reports nothing, so the caller does
+        // not repaint an identical scene.
+        let none = state.handle_input(
+            &frame,
+            &InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 10.0)),
+        );
+        assert!(none.scrolled.is_empty());
+    }
+
+    #[test]
+    fn a_wheel_outside_every_scroll_container_scrolls_nothing() {
+        let (mut h, _) = scrolling_page();
+        let frame = h.doc.dom.frame();
+        let mut state = FrameScroller::default();
+        state.adopt(&frame, 0);
+
+        let response = state.handle_input(
+            &frame,
+            &InputEvent::wheel(Point2D::new(300.0, 300.0), (0.0, 60.0)),
+        );
+        assert!(response.scrolled.is_empty());
+    }
+
+    #[test]
+    fn line_deltas_resolve_to_the_pixels_the_document_would_use() {
+        // The recognizer and the units are shared with `Document::handle_input`
+        // precisely so these cannot drift; assert the resolved distance rather
+        // than trusting that.
+        let (mut h, scroller) = scrolling_page();
+        let frame = h.doc.dom.frame();
+        let mut state = FrameScroller::default();
+        state.adopt(&frame, 0);
+        state.handle_input(
+            &frame,
+            &InputEvent::wheel_with_mode(
+                Point2D::new(50.0, 50.0),
+                (0.0, 2.0),
+                crate::input::DeltaMode::Line,
+            ),
+        );
+        let here = offset_of(&state, &frame, scroller);
+
+        let mut document = scrolling_page().0;
+        document.doc.dom.handle_input(InputEvent::wheel_with_mode(
+            Point2D::new(50.0, 50.0),
+            (0.0, 2.0),
+            crate::input::DeltaMode::Line,
+        ));
+        assert_eq!(here, document.doc.dom.scroll_offset(scroller));
+    }
+
+    #[test]
+    fn a_touch_drag_scrolls_after_spending_the_slop_and_stops_on_lift() {
+        let (mut h, scroller) = scrolling_page();
+        let frame = h.doc.dom.frame();
+        let mut state = FrameScroller::default();
+        state.adopt(&frame, 0);
+
+        let down = state.handle_input(
+            &frame,
+            &InputEvent::pointer(
+                Point2D::new(50.0, 90.0),
+                1,
+                PointerKind::Touch,
+                PointerPhase::Down,
+            ),
+        );
+        assert!(down.scrolled.is_empty(), "a press alone scrolls nothing");
+        assert!(
+            !down.owns_gesture,
+            "a press that may yet be a tap must not claim the event",
+        );
+
+        // Inside the slop radius nothing moves and nothing is claimed.
+        let inside = state.handle_input(
+            &frame,
+            &InputEvent::pointer(
+                Point2D::new(50.0, 85.0),
+                1,
+                PointerKind::Touch,
+                PointerPhase::Move,
+            ),
+        );
+        assert!(inside.scrolled.is_empty());
+        assert!(!inside.owns_gesture);
+
+        // Past it the toll is spent once and the overshoot survives: 30px of
+        // travel less the 8px threshold.
+        let crossed = state.handle_input(
+            &frame,
+            &InputEvent::pointer(
+                Point2D::new(50.0, 60.0),
+                1,
+                PointerKind::Touch,
+                PointerPhase::Move,
+            ),
+        );
+        assert_eq!(crossed.scrolled.len(), 1);
+        assert!(
+            crossed.owns_gesture,
+            "a scrolling drag suppresses the default"
+        );
+        assert_eq!(
+            offset_of(&state, &frame, scroller),
+            Vector2D::new(0.0, 30.0 - crate::input::TOUCH_SLOP),
+        );
+
+        // After the lift the gesture is gone.
+        state.handle_input(
+            &frame,
+            &InputEvent::pointer(
+                Point2D::new(50.0, 60.0),
+                1,
+                PointerKind::Touch,
+                PointerPhase::Up,
+            ),
+        );
+        let stray = state.handle_input(
+            &frame,
+            &InputEvent::pointer(
+                Point2D::new(50.0, 10.0),
+                1,
+                PointerKind::Touch,
+                PointerPhase::Move,
+            ),
+        );
+        assert!(stray.scrolled.is_empty());
+        assert!(!stray.owns_gesture);
+    }
+
+    #[test]
+    fn a_mouse_drag_does_not_scroll() {
+        // Matching every browser, and `Document::handle_input`: a mouse
+        // scrolls with its wheel.
+        let (mut h, scroller) = scrolling_page();
+        let frame = h.doc.dom.frame();
+        let mut state = FrameScroller::default();
+        state.adopt(&frame, 0);
+
+        for phase in [PointerPhase::Down, PointerPhase::Move] {
+            let response = state.handle_input(
+                &frame,
+                &InputEvent::pointer(Point2D::new(50.0, 20.0), 1, PointerKind::Mouse, phase),
+            );
+            assert!(response.scrolled.is_empty());
+            assert!(!response.owns_gesture);
+        }
+        assert_eq!(offset_of(&state, &frame, scroller), Vector2D::zero());
+    }
+
+    #[test]
+    fn routing_ignores_a_pointer_events_none_overlay() {
+        // The payoff of routing by hit test rather than by scrollport
+        // rectangle: a bounding-box probe cannot tell that the box under the
+        // cursor is transparent to input, and would answer identically.
+        let mut h = Harness::new(
+            "page { display: flex; position: relative; width: 800px; height: 600px; }
+             .scroller { display: flex; flex-direction: column; overflow: scroll;
+                         width: 100px; height: 100px; }
+             .row { flex-shrink: 0; width: 100px; height: 100px; }
+             .veil { display: flex; position: absolute; left: 0; top: 0;
+                     width: 100px; height: 100px; pointer-events: none; }",
+        );
+        let root = h.root();
+        let scroller = h.el(root, "view.scroller");
+        for _ in 0..3 {
+            h.el(scroller, "view.row");
+        }
+        let veil = h.el(root, "view.veil");
+        h.doc.dom.layout();
+
+        let frame = h.doc.dom.frame();
+        let target = frame.hit_test(Point2D::new(50.0, 50.0), &[]);
+        assert!(target.is_some());
+        assert_ne!(target, Some(veil), "the veil is seen through");
+
+        let mut state = FrameScroller::default();
+        state.adopt(&frame, 0);
+        let response = state.handle_input(
+            &frame,
+            &InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 60.0)),
+        );
+        assert_eq!(response.scrolled.len(), 1, "the veil must not swallow it");
+        assert_eq!(response.scrolled[0].node, scroller);
+    }
+
+    #[test]
+    fn a_wheel_over_a_scroll_containers_own_padding_scrolls_that_container() {
+        // Hit testing resolves the scroller's own box here, and that box is
+        // tagged with the *enclosing* scroll node — a scrollport does not move
+        // with what it clips. Routing considers the hit node itself first, or
+        // a gesture aimed at a scroller's empty margin would scroll past it.
+        let (mut h, scroller) = scrolling_page();
+        let frame = h.doc.dom.frame();
+        let mut state = FrameScroller::default();
+        state.adopt(&frame, 0);
+
+        state.handle_input(
+            &frame,
+            &InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 500.0)),
+        );
+        let response = state.handle_input(
+            &frame,
+            &InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, -40.0)),
+        );
+        assert_eq!(response.scrolled.len(), 1);
+        assert_eq!(response.scrolled[0].node, scroller);
+        assert_eq!(
+            offset_of(&state, &frame, scroller),
+            Vector2D::new(0.0, 160.0)
+        );
+    }
+
+    #[test]
+    fn an_unconfirmed_offset_survives_a_new_frame_and_a_confirmed_one_yields() {
+        let (mut h, scroller) = scrolling_page();
+        let frame = h.doc.dom.frame();
+        let mut state = FrameScroller::default();
+        state.adopt(&frame, 0);
+        let response = state.handle_input(
+            &frame,
+            &InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 60.0)),
+        );
+        let seq = response.scrolled[0].seq;
+
+        // A frame published before the document applied the update must not
+        // snap the view back to where the document still thinks it is.
+        let behind = h.doc.dom.frame();
+        state.adopt(&behind, seq - 1);
+        assert_eq!(
+            offset_of(&state, &behind, scroller),
+            Vector2D::new(0.0, 60.0)
+        );
+
+        // Once applied, the frame is authoritative again — which is what lets
+        // a programmatic scroll, or a post-relayout clamp, reach the screen.
+        h.doc.dom.scroll_to(scroller, Vector2D::new(0.0, 10.0));
+        let settled = h.doc.dom.frame();
+        state.adopt(&settled, seq);
+        assert_eq!(
+            offset_of(&state, &settled, scroller),
+            Vector2D::new(0.0, 10.0)
+        );
+    }
+
+    #[test]
+    fn updates_carry_the_frames_removal_epoch() {
+        // A `NodeId` carries no generation, so an update in flight while the
+        // document removes a node could land on a stranger. The epoch travels
+        // with it, and a pending offset keyed by a possibly-recycled node is
+        // dropped rather than pinned.
+        let (mut h, scroller) = scrolling_page();
+        let frame = h.doc.dom.frame();
+        let epoch = frame.node_removal_epoch();
+        let mut state = FrameScroller::default();
+        state.adopt(&frame, 0);
+
+        let response = state.handle_input(
+            &frame,
+            &InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 60.0)),
+        );
+        let update: ScrollUpdate = response.scrolled[0];
+        assert_eq!(update.epoch, epoch);
+        assert_eq!(update.node, scroller);
+
+        let spare = h.el(h.root(), "view.row");
+        h.doc.dom.remove_subtree(spare);
+        let later = h.doc.dom.frame();
+        assert_ne!(later.node_removal_epoch(), epoch);
+        state.adopt(&later, 0);
+        assert_eq!(
+            offset_of(&state, &later, scroller),
+            Vector2D::zero(),
+            "a possibly-recycled key must not keep steering the offset",
+        );
+    }
+
+    #[test]
+    fn a_page_at_its_baked_offsets_paints_with_no_corrections_at_all() {
+        // Lynx's UA cascade makes almost every element a scroll container, so
+        // the arena is close to one entry per box and the chains are long. A
+        // page nobody has scrolled must not pay to walk them.
+        let (mut h, _) = scrolling_page();
+        let frame = h.doc.dom.frame();
+        let mut state = FrameScroller::default();
+        state.adopt(&frame, 0);
+        assert!(!frame.scrolls().is_empty(), "there is an arena to skip");
+        assert!(state.paint_offsets(&frame).is_empty());
+
+        state.handle_input(
+            &frame,
+            &InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 60.0)),
+        );
+        assert!(!state.paint_offsets(&frame).is_empty());
+    }
+}

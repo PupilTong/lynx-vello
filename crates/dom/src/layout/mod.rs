@@ -147,20 +147,6 @@ impl<T> Document<T> {
             .map(|state| &state.slot.rounded)
     }
 
-    /// The committed (post-layout) retained Parley layout for a text node —
-    /// the shaped, line-broken, aligned paragraph the renderer paints glyph
-    /// runs from. `None` for non-text nodes and for text the layout pass has
-    /// not committed (e.g. inside `display: none` or skipped subtrees).
-    #[must_use]
-    pub(crate) fn text_layout(&self, id: crate::NodeId) -> Option<&TextLayout> {
-        self.layout_state()
-            .nodes
-            .get(id)?
-            .text
-            .as_deref()?
-            .committed()
-    }
-
     /// Post-flush computed-style borrow for paint-time consumers, mirroring
     /// the layout host's own access path: no Stylo runtime borrow check, no
     /// `Arc` bump. `None` for non-elements and for elements the completed

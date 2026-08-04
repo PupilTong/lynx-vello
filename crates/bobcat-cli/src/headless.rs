@@ -13,10 +13,14 @@ use crate::page::{FramePipeline, Program};
 use crate::screenshot::save_screenshot;
 
 pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
-    let mut pipeline = program.boot(
+    // Headless drives its own synthetic clock, so it polls the frame slot at
+    // each tick instead of being woken; the DOM thread needs no nudge.
+    let mut pipeline = FramePipeline::start(
+        program,
         options.viewport_width,
         options.viewport_height,
         options.device_pixel_ratio,
+        || {},
     )?;
     let mut gpu = Headless::new().map_err(CliError::Gpu)?;
 
@@ -91,19 +95,31 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
     }
 }
 
+/// Renders one tick.
+///
+/// `force` means "the current document state, now": it takes the DOM
+/// thread's barrier so the `frame` command and the first frame are
+/// deterministic. An ordinary tick only paints what the DOM thread has
+/// already published, so a slow script or layout pass costs skipped frames
+/// rather than a stalled clock.
 fn render_frame(
     pipeline: &mut FramePipeline,
     gpu: &mut Headless,
     force: bool,
 ) -> Result<(), CliError> {
-    let frame = pipeline.prepare_frame();
+    let frame = if force {
+        pipeline.sync_frame()?
+    } else {
+        pipeline.request_frame();
+        pipeline.prepare_frame()?
+    };
     if !frame.changed && !force {
         // The retained target already holds this exact frame; re-submitting
         // it would burn a full GPU pass per tick on a static scene.
         return Ok(());
     }
-    let scene = frame.scene();
-    gpu.render_frame(&scene, frame.size.width, frame.size.height, Color::WHITE)
+    let scene = frame.scene;
+    gpu.render_frame(scene, frame.size.width, frame.size.height, Color::WHITE)
         .map_err(CliError::Gpu)?;
     // Keep at most one frame in flight: nothing else in this loop
     // synchronizes with the GPU, so a clock that outpaces it would otherwise
@@ -112,10 +128,12 @@ fn render_frame(
 }
 
 fn capture(pipeline: &mut FramePipeline, gpu: &mut Headless, path: &Path) -> Result<(), CliError> {
-    let frame = pipeline.prepare_frame();
+    // A screenshot names the page as it is, so it waits for the DOM thread
+    // rather than capturing whatever frame happens to be in the slot.
+    let frame = pipeline.sync_frame()?;
     if frame.changed {
-        let scene = frame.scene();
-        gpu.render_frame(&scene, frame.size.width, frame.size.height, Color::WHITE)
+        let scene = frame.scene;
+        gpu.render_frame(scene, frame.size.width, frame.size.height, Color::WHITE)
             .map_err(CliError::Gpu)?;
     }
     // The retained target holds the current frame; read it back rather than

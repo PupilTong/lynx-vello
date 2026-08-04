@@ -311,8 +311,14 @@ impl<T> Document<T> {
     /// Monotone count of [`Self::remove_subtree`] calls. A freed `NodeId`
     /// can be recycled by a later creation, so a private visual frame is only
     /// valid for hit testing while this value is unchanged.
+    ///
+    /// Public because it is the id-generation guard an *asynchronous*
+    /// consumer needs. A `NodeId` resolved against a [`Frame`](crate::Frame)
+    /// on another thread and acted on here can name a stranger by the time it
+    /// lands; comparing this against [`Frame::node_removal_epoch`] is what
+    /// makes that detectable rather than silently wrong.
     #[must_use]
-    pub(crate) fn node_removal_epoch(&self) -> u64 {
+    pub fn node_removal_epoch(&self) -> u64 {
         self.node_removal_epoch
     }
 
@@ -320,8 +326,13 @@ impl<T> Document<T> {
     /// only valid for painting while this value is unchanged (hit testing needs only
     /// [`Self::node_removal_epoch`] — its geometry snapshot is
     /// self-contained).
+    ///
+    /// [`Self::needs_render`] answers this for the in-process painter. This
+    /// is the same token for a host that paints elsewhere: it publishes
+    /// [`Frame`](crate::Frame)s and needs to know whether anything has
+    /// changed since the last one without building another to find out.
     #[must_use]
-    pub(crate) fn visual_epoch(&self) -> u64 {
+    pub fn visual_epoch(&self) -> u64 {
         self.visual_epoch
     }
 

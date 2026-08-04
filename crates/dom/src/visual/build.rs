@@ -37,7 +37,9 @@ use stylo::values::computed::PointerEvents;
 
 use super::geometry::{inner_radii, resolve_corner_radii};
 use super::transform::{ParentPerspective, stacking_context_matrix};
-use super::{ClipNode, CornerRadii, PaintItem, PaintItemKind, PaintOrder, RenderLayer, stacking};
+use super::{
+    ClipNode, CornerRadii, PaintItem, PaintItemKind, PaintOrder, RenderLayer, ScrollNode, stacking,
+};
 use crate::layout::{
     DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
     establishes_fixed_containing_block, skips_contents,
@@ -57,6 +59,7 @@ pub(crate) fn build<T>(document: &Document<T>) -> PaintOrder {
         items: Vec::new(),
         clips: Vec::new(),
         layers: Vec::new(),
+        scrolls: Vec::new(),
         current_layer: None,
     };
     let epoch = document.node_removal_epoch();
@@ -79,6 +82,7 @@ pub(crate) fn build<T>(document: &Document<T>) -> PaintOrder {
         items: builder.items,
         clips: builder.clips,
         layers: builder.layers,
+        scrolls: builder.scrolls,
         epoch,
         visual_epoch,
     }
@@ -97,6 +101,10 @@ struct FlowContext {
     /// filter, containment) also establishes a containing block, so the
     /// difference is always a pure CSS-px translation.
     scroll: Vector2D<f32>,
+    /// Innermost scroll container crossed so far, an index into
+    /// `PaintOrder::scrolls`. Escapes with `clip`, and for the same reason:
+    /// a box scrolls with exactly the ancestors that clip it.
+    scroll_node: Option<usize>,
 }
 
 /// The flow contexts visible at one point of the walk: the in-flow one plus
@@ -116,6 +124,7 @@ struct ItemRecord {
     kind: PaintItemKind,
     offset: Point2D<f32>,
     clip: Option<usize>,
+    scroll: Option<usize>,
     size: Size2D<f32>,
     radii: CornerRadii,
     hit_testable: bool,
@@ -151,6 +160,7 @@ struct Builder<'doc, T> {
     items: Vec<PaintItem>,
     clips: Vec<ClipNode>,
     layers: Vec<RenderLayer>,
+    scrolls: Vec<ScrollNode>,
     /// Innermost open render layer during the walk (contexts recurse, so a
     /// plain save/restore around each context body maintains it).
     current_layer: Option<usize>,
@@ -163,6 +173,41 @@ impl<'doc, T> Builder<'doc, T> {
 
     fn rounded(&self, id: NodeId) -> &'doc Layout {
         &slab_get_for_live_node(&self.state.nodes, id).slot.rounded
+    }
+
+    /// Records a scroll container in the frame's scroll arena and points the
+    /// contexts its children see at it.
+    ///
+    /// Every scroll container gets an entry, not only the ones currently
+    /// scrolled: a renderer scrolling ahead of the document needs somewhere
+    /// to put the offset it is about to apply, and `overflow: hidden` boxes
+    /// (which Lynx's UA cascade creates everywhere) are scroll containers
+    /// that simply are not *user*-scrollable.
+    ///
+    /// `transform` is the element's world matrix with its border box at the
+    /// origin, **unscrolled** — so its linear part is exactly the map from an
+    /// offset delta in this container's local space into viewport CSS px.
+    fn enter_scroll_container(
+        &mut self,
+        node: NodeId,
+        style: &ComputedValues,
+        transform: &Transform3D<f32>,
+        inner: &mut ClipContexts,
+    ) {
+        let state = slab_get_for_live_node(&self.state.nodes, node);
+        let Some(scroll_box) = scroll::resolve(style, &state.slot.rounded, state.scroll_offset)
+        else {
+            return;
+        };
+        self.scrolls.push(ScrollNode {
+            parent: inner.current.scroll_node,
+            node,
+            baked_offset: Vector2D::new(scroll_box.offset.x, scroll_box.offset.y),
+            max_offset: scroll_box.max_offset(),
+            user_scrollable: scroll::user_scrollable_axes(style),
+            offset_to_viewport: [transform.m11, transform.m12, transform.m21, transform.m22],
+        });
+        inner.current.scroll_node = Some(self.scrolls.len() - 1);
     }
 
     /// The translation this element applies to its own contents, snapped to
@@ -196,7 +241,7 @@ impl<'doc, T> Builder<'doc, T> {
         };
         let world = stacking_context_matrix(values, size, offset_in_parent, parent_perspective)
             .then(parent_world);
-        let layer = self.open_layer(root, values, &world, size);
+        let layer = self.open_layer(root, values, &world, size, seed.current.scroll_node);
 
         let (visible, hit_testable) = item_flags(values);
         if visible {
@@ -205,6 +250,7 @@ impl<'doc, T> Builder<'doc, T> {
                 kind: PaintItemKind::ElementBox,
                 transform: world,
                 clip: seed.current.clip,
+                scroll: seed.current.scroll_node,
                 size,
                 radii: resolve_corner_radii(values, size),
                 hit_testable,
@@ -258,6 +304,7 @@ impl<'doc, T> Builder<'doc, T> {
         values: &ComputedValues,
         world: &Transform3D<f32>,
         size: Size2D<f32>,
+        scroll: Option<usize>,
     ) -> Option<usize> {
         if !stacking::needs_group_rendering(values) {
             return None;
@@ -270,6 +317,7 @@ impl<'doc, T> Builder<'doc, T> {
             size,
             radii: resolve_corner_radii(values, size),
             items: start..start,
+            scroll,
         });
         let index = self.layers.len() - 1;
         self.current_layer = Some(index);
@@ -391,7 +439,7 @@ impl<'doc, T> Builder<'doc, T> {
                         style,
                         child_offset,
                         size,
-                        captured.current.clip,
+                        captured.current,
                         hit_testable,
                     ));
                 }
@@ -430,7 +478,7 @@ impl<'doc, T> Builder<'doc, T> {
                     style,
                     child_offset,
                     size,
-                    ctx.current.clip,
+                    ctx.current,
                     hit_testable,
                 ));
             }
@@ -530,10 +578,15 @@ impl<'doc, T> Builder<'doc, T> {
                 transform: *transform,
                 rect,
                 radii,
+                // The scrollport does not move with the contents it clips, so
+                // this clip belongs to the *enclosing* scroll node — the one
+                // still in `inner` until the push below.
+                scroll: inner.current.scroll_node,
             });
             inner.current.clip = Some(self.clips.len() - 1);
         }
         inner.current.scroll += self.scroll_translation(node, style);
+        self.enter_scroll_container(node, style, transform, &mut inner);
         let node_ref = self.node(node);
         if establishes_absolute_containing_block(node_ref, style) {
             inner.absolute = inner.current;
@@ -572,6 +625,7 @@ impl<'doc, T> Builder<'doc, T> {
                 node_offset.y + layout.location.y,
             ),
             clip: ctx.current.clip,
+            scroll: ctx.current.scroll_node,
             size: Size2D::new(layout.size.width, layout.size.height),
             radii: CornerRadii::ZERO,
             hit_testable,
@@ -584,6 +638,7 @@ impl<'doc, T> Builder<'doc, T> {
             kind: record.kind,
             transform: translated(world, record.offset),
             clip: record.clip,
+            scroll: record.scroll,
             size: record.size,
             radii: record.radii,
             hit_testable: record.hit_testable,
@@ -596,14 +651,15 @@ fn element_record(
     style: &ComputedValues,
     offset: Point2D<f32>,
     size: Size2D<f32>,
-    clip: Option<usize>,
+    flow: FlowContext,
     hit_testable: bool,
 ) -> ItemRecord {
     ItemRecord {
         node,
         kind: PaintItemKind::ElementBox,
         offset,
-        clip,
+        clip: flow.clip,
+        scroll: flow.scroll_node,
         size,
         radii: resolve_corner_radii(style, size),
         hit_testable,

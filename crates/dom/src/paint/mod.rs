@@ -20,25 +20,11 @@ mod text;
 mod walker;
 
 use crate::NodeId;
-use crate::layout::{Edges, Layout, TextLayout};
+use crate::layout::Edges;
 use crate::paint::shape::ReferenceBoxes;
-use crate::vello::kurbo::{Affine, BezPath, Rect, Vec2};
+use crate::vello::kurbo::{Affine, BezPath, Rect};
 use crate::visual::CornerRadii;
-
-/// Glyph-silhouette source for `background-clip: text`: the element's
-/// descendant text layouts with their offsets from the element's border-box
-/// origin, collected by the walker (which owns the document borrow).
-/// Empty means the clip region is empty — the background paints nothing.
-#[derive(Debug, Default)]
-pub(crate) struct TextClip<'doc> {
-    pub runs: Vec<(Vec2, &'doc TextLayout)>,
-}
-
-impl TextClip<'_> {
-    pub(crate) fn is_empty(&self) -> bool {
-        self.runs.is_empty()
-    }
-}
+use crate::visual::frame::BoxMetrics;
 
 /// Reusable path buffers for the border/shadow painters, owned by the
 /// walker's per-frame scratch. Every path built into a buffer is fully
@@ -74,11 +60,11 @@ impl BoxFragment {
         transform: Affine,
         size: crate::Size2D<f32>,
         radii: CornerRadii,
-        layout: &Layout,
+        metrics: BoxMetrics,
     ) -> Self {
         let border_box = Rect::new(0.0, 0.0, size.width as f64, size.height as f64);
-        let border = layout.border;
-        let padding = layout.padding;
+        let border = metrics.border;
+        let padding = metrics.padding;
         let padding_box = Rect::new(
             border.left as f64,
             border.top as f64,

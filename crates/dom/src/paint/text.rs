@@ -75,20 +75,6 @@ impl TextFill {
     }
 }
 
-/// Whether the used `color` is a gradient, so the walker knows to compute the
-/// positioning area before painting — the same shape as
-/// [`background::needs_text_clip`](super::background::needs_text_clip).
-///
-/// Solid `color` is the overwhelmingly common case and must not pay for this
-/// feature: without the predicate every text run in the frame would do two
-/// layout-arena lookups and a `Rect` fold for a box nothing reads.
-pub(crate) fn needs_gradient_box(style: &ComputedValues) -> bool {
-    matches!(
-        style.get_inherited_text().color,
-        ColorPropertyValue::Gradient(..)
-    )
-}
-
 /// Resolves the element's used `color` into a glyph brush.
 ///
 /// `gradient_box` is the gradient positioning area in the run's local space —
@@ -184,42 +170,19 @@ pub(crate) fn paint(
     );
 }
 
-/// The decorations that apply to text under `element` — css-text-decor-3
-/// §2: `text-decoration-line` is **not inherited**; each ancestor box with
-/// a decoration is a *decorating box* whose lines propagate to all in-flow
-/// descendant text, drawn with the originating box's own style and color.
-/// Collected nearest-first by walking the DOM ancestors; propagation from
-/// ancestors stops at an out-of-flow (absolutely positioned) box, which per
-/// spec does not receive them — that box's own decorations still apply.
-/// Boxless (`display: contents`) ancestors are treated as decorating boxes,
-/// matching browser rendering of decorated `display: contents` spans.
-pub(crate) fn propagated_decorations<T>(
-    document: &crate::Document<T>,
-    element: crate::NodeId,
+/// The decorations a text run paints, from the frame's decorating-box chain.
+///
+/// The css-text-decor-3 §2 *walk* — which ancestors decorate this run and
+/// where propagation stops — belongs to the document, which owns the tree and
+/// resolves it into the frame. What is left here is the paint mapping: each
+/// decorating box contributes one pass in its own style and color.
+pub(crate) fn decorations_of(
+    styles: &[stylo::servo_arc::Arc<ComputedValues>],
 ) -> SmallVec<[Decorations; 2]> {
-    use stylo::computed_values::position::T as Position;
-    let mut out = SmallVec::new();
-    let mut current = Some(element);
-    while let Some(id) = current {
-        let Some(node) = document.get(id) else { break };
-        if !node.is_element() {
-            break;
-        }
-        let Some(style) = document.paint_style(id) else {
-            break;
-        };
-        if let Some(deco) = decorations(style) {
-            out.push(deco);
-        }
-        if matches!(
-            style.get_box().position,
-            Position::Absolute | Position::Fixed
-        ) {
-            break;
-        }
-        current = node.parent_id();
-    }
-    out
+    styles
+        .iter()
+        .filter_map(|style| decorations(style))
+        .collect()
 }
 
 /// How far outside the text box this style's text can paint: the largest

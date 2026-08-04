@@ -2,14 +2,34 @@
 //!
 //! The CLI owns process concerns — argument parsing, local `file:///` input,
 //! frame scheduling, the debugger-like command prompt, PNG output, and the
-//! macOS window. It directly composes the internal runtime/document/GPU crates;
-//! headed and headless paths consume the same retained scene.
+//! macOS window. Bundle execution remains in [`bobcat_quickjs`], and both
+//! headed and headless backends consume the same reusable
+//! [`pulsar::Painter`] scene pipeline.
+//!
+//! # Two threads
+//!
+//! The pipeline is split in two, and the split is the same one browsers
+//! make:
+//!
+//! - The **DOM thread** ([`dom_thread`]) owns the `QuickJS` realm, the element tree, and the
+//!   document: script, the CSS engine, layout, paint order and z-index, and hit testing. It
+//!   publishes self-contained [`Frame`](bobcat_core::lynx_element::dom::Frame) snapshots.
+//! - The **paint thread** ([`page::FramePipeline`]) owns a `dom::FrameRenderer` — the frame, its
+//!   scroll offsets, the scene, and the image store — plus the GPU. It consumes frames, answers
+//!   scroll gestures, and never borrows a document.
+//!
+//! The paint side is the process's *main* thread rather than a spawned one,
+//! because that is where winit's event loop and the window surface have to
+//! live. So it is the DOM that moves off the main thread — which is also the
+//! right way round for latency: a slow script tick or layout pass must not
+//! be able to stall presentation.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
 
 mod args;
 mod command;
+mod dom_thread;
 mod headless;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -80,6 +100,8 @@ pub enum CliError {
     Render(String),
     #[error("could not run the macOS window: {0}")]
     Window(String),
+    #[error("the DOM thread stopped: {0}")]
+    DomThread(String),
     #[error("headed mode is currently supported only on macOS; use `--headless` on this platform")]
     UnsupportedHeadedPlatform,
 }

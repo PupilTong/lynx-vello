@@ -44,14 +44,15 @@ use stylo::values::specified::position::{HorizontalPositionKeyword, VerticalPosi
 
 use crate::ImageStore;
 use crate::layout::NaturalSize;
+use crate::paint::BoxFragment;
 use crate::paint::convert::resolve_color;
 use crate::paint::shape::{BoxShape, inner_radii, with_shape};
-use crate::paint::{BoxFragment, TextClip};
 use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Point, Rect, Size, Vec2};
 use crate::vello::peniko::{
     self, BrushRef, Color, Extend, Fill, ImageBrush, ImageData, ImageQuality, ImageSampler,
 };
+use crate::visual::frame::TextClipRun;
 
 /// Geometry epsilon (item-local CSS px).
 const EPS: f64 = 1e-6;
@@ -62,27 +63,17 @@ const EPS: f64 = 1e-6;
 const MAX_TILES_PER_AXIS: f64 = 4096.0;
 const MAX_TILE_FILLS: f64 = 16384.0;
 
-/// Whether any `background-clip` value on this style is `text`, so the
-/// walker knows to collect the element's glyph silhouettes before painting.
-/// Over-eager when nothing would paint — collection is cheap and rare.
-pub(crate) fn needs_text_clip(style: &ComputedValues) -> bool {
-    style
-        .get_background()
-        .background_clip
-        .0
-        .iter()
-        .any(|clip| matches!(clip, BackgroundClip::Text))
-}
-
 /// Paints the element's background stack (color, then image layers).
-/// `text_clip` is the walker-collected glyph source for
-/// `background-clip: text` layers; `None` when the style has none.
+/// `text_clip` is the frame's glyph source for `background-clip: text`
+/// layers — the document resolved it at build time, because the silhouette
+/// is a descendant walk and this crate has no tree. `None` when the style
+/// has no such layer.
 pub(crate) fn paint(
     scene: &mut Scene,
     style: &ComputedValues,
     fragment: &BoxFragment,
     images: &ImageStore,
-    text_clip: Option<&TextClip<'_>>,
+    text_clip: Option<&[TextClipRun]>,
 ) {
     let background = style.get_background();
     let layers = background.background_image.0.as_slice();
@@ -174,10 +165,10 @@ pub(crate) fn paint(
 fn text_clip_sandwich(
     scene: &mut Scene,
     fragment: &BoxFragment,
-    text_clip: Option<&TextClip<'_>>,
+    text_clip: Option<&[TextClipRun]>,
     f: impl FnOnce(&mut Scene),
 ) {
-    let Some(text_clip) = text_clip.filter(|clip| !clip.is_empty()) else {
+    let Some(text_clip) = text_clip.filter(|runs| !runs.is_empty()) else {
         return;
     };
     let border_shape = level_shape(fragment, BoxLevel::Border);
@@ -188,11 +179,12 @@ fn text_clip_sandwich(
         fragment.transform,
         s,
     ));
-    for (offset, layout) in &text_clip.runs {
+    for run in text_clip {
         crate::paint::text::paint_silhouette(
             scene,
-            layout,
-            fragment.transform * Affine::translate(*offset),
+            &run.layout,
+            fragment.transform
+                * Affine::translate((f64::from(run.offset.x), f64::from(run.offset.y))),
         );
     }
     scene.push_layer(

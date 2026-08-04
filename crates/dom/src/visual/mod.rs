@@ -16,12 +16,17 @@
 //! any visual mutation desynchronizes; hit testing's snapshot is
 //! self-contained and tolerates non-structural mutations.
 //!
-//! Scroll offsets ([`crate::scroll`]) are baked into the frame rather than
-//! surfaced beside it: a scroll container's contents are translated as they
-//! are collected, so painting and hit testing both see scrolled geometry with
-//! no separate scroll state, and the private painter needs none either.
-//! The price is that scrolling invalidates the frame like any other visual
-//! mutation — which it must anyway, since scrolled content has to repaint.
+//! Scroll offsets ([`crate::scroll`]) are baked into the frame: a scroll
+//! container's contents are translated as they are collected, so painting and
+//! hit testing both see scrolled geometry with no arithmetic of their own.
+//!
+//! They are *also* described beside it, as a [`ScrollNode`] arena every item,
+//! clip, and layer is tagged against. Baking alone would mean every scroll
+//! costs a restyle, relayout, and rebuild before a pixel moves; the arena
+//! lets a renderer holding a [`Frame`] move away from the baked position on
+//! its own. See [`ScrollNode`] for the identity that makes the correction
+//! exact. The document stays authoritative: a renderer that scrolls ahead
+//! reports where it landed, and the next frame it publishes bakes that in.
 //!
 //! Invariants this module relies on (verified against the layout host):
 //! - `Layout.location` is border-box-relative to the **box parent**'s border box for every box —
@@ -71,6 +76,7 @@
 //!   invalidation hook, but no order cache exists today.
 
 mod build;
+pub(crate) mod frame;
 mod geometry;
 mod hit;
 mod motion;
@@ -81,7 +87,7 @@ mod transform;
 
 use std::cell::Ref;
 
-use euclid::default::{Point2D, Rect, Size2D, Transform3D};
+use euclid::default::{Point2D, Rect, Size2D, Transform3D, Vector2D};
 
 use crate::tree::document::Document;
 use crate::{ImageStore, NodeId};
@@ -99,6 +105,7 @@ pub(crate) struct PaintOrder {
     items: Vec<PaintItem>,
     clips: Vec<ClipNode>,
     layers: Vec<RenderLayer>,
+    scrolls: Vec<ScrollNode>,
     /// [`Document::node_removal_epoch`] at build time.
     epoch: u64,
     /// The document's private visual-mutation epoch at build time.
@@ -129,6 +136,88 @@ impl PaintOrder {
     #[must_use]
     pub(crate) const fn visual_epoch(&self) -> u64 {
         self.visual_epoch
+    }
+
+    /// Scroll arena referenced by every `scroll` field here, in preorder.
+    #[must_use]
+    pub(crate) fn scrolls(&self) -> &[ScrollNode] {
+        &self.scrolls
+    }
+
+    /// [`Document::node_removal_epoch`] at build time.
+    ///
+    /// `NodeId` is a bare slab index with no generation, so a removal lets a
+    /// later creation reuse it. Anything resolving one of this frame's ids
+    /// against the document *later* — in particular a message crossing a
+    /// thread boundary — must carry this and check it, which is the same rule
+    /// [`Self::assert_fresh`] enforces for a synchronous consumer.
+    #[must_use]
+    pub(crate) const fn node_removal_epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// The viewport-space translation that moves an item tagged with
+    /// `scroll` from the offsets baked into this frame to `offsets`.
+    ///
+    /// `offsets` is indexed by scroll node. Corrections along a chain are
+    /// pure translations, so they sum rather than compose (see
+    /// [`ScrollNode`]); an empty or shorter `offsets` leaves the
+    /// corresponding nodes at their baked position.
+    #[must_use]
+    pub(crate) fn scroll_correction(
+        &self,
+        scroll: Option<usize>,
+        offsets: &[Vector2D<f32>],
+    ) -> Vector2D<f32> {
+        let mut correction = Vector2D::zero();
+        let mut next = scroll;
+        while let Some(index) = next {
+            let node = &self.scrolls[index];
+            if let Some(offset) = offsets.get(index) {
+                correction += node.to_viewport(node.baked_offset - *offset);
+            }
+            next = node.parent;
+        }
+        correction
+    }
+
+    /// The scroll container a gesture at `point` belongs to, as the frame
+    /// stands at `offsets`.
+    ///
+    /// This is [`Self::hit_test_at`] followed by a walk up the hit target's
+    /// scroll chain to the first user-scrollable box — the same resolution
+    /// [`Document::handle_input`] performs, so a renderer routing gestures
+    /// itself and the document routing them give one answer rather than two.
+    /// Probing scrollport rectangles instead would answer gestures aimed at a
+    /// `pointer-events: none` overlay, at a scroller an ancestor has clipped
+    /// away, or at a rounded corner the box does not cover.
+    ///
+    /// The hit node's own container is considered before the hit item's
+    /// scroll tag, because a scroll container's own box carries the
+    /// *enclosing* scroll node — a scrollport does not move with what it
+    /// clips — and a gesture over a scroller's empty padding must scroll it
+    /// rather than its parent.
+    ///
+    /// `overflow: hidden` is skipped: it is a scroll container that moves
+    /// only programmatically, and Lynx's UA cascade puts it on every element,
+    /// so answering gestures with it would make the whole page drag.
+    #[must_use]
+    pub(crate) fn scroll_target(
+        &self,
+        point: Point2D<f32>,
+        offsets: &[Vector2D<f32>],
+    ) -> Option<usize> {
+        let (node, hit) = self.hit_test_at(point, offsets)?;
+        let own = self.scrolls.iter().position(|entry| entry.node == node);
+        let mut next = own.or(self.items[hit.item].scroll);
+        while let Some(index) = next {
+            let entry = &self.scrolls[index];
+            if entry.user_scrollable.x || entry.user_scrollable.y {
+                return Some(index);
+            }
+            next = entry.parent;
+        }
+        None
     }
 }
 
@@ -167,6 +256,9 @@ pub(crate) struct PaintItem {
     pub(crate) size: Size2D<f32>,
     /// Resolved, overlap-normalized border radii (zero for text runs).
     pub(crate) radii: CornerRadii,
+    /// Innermost scroll container this item moves with, an index into
+    /// `PaintOrder::scrolls`.
+    pub(crate) scroll: Option<usize>,
     /// `visibility: visible` and `pointer-events` other than `none`.
     pub(crate) hit_testable: bool,
 }
@@ -208,6 +300,9 @@ pub(crate) struct RenderLayer {
     /// nested layers' ranges nest; empty groups are dropped at build time,
     /// so the range is never empty.
     pub(crate) items: std::ops::Range<usize>,
+    /// Innermost scroll container this layer moves with, as on
+    /// [`PaintItem::scroll`].
+    pub(crate) scroll: Option<usize>,
 }
 
 /// One overflow/`contain: paint` clip: a rounded padding-box rect in the
@@ -226,6 +321,82 @@ pub(crate) struct ClipNode {
     pub(crate) rect: Rect<f32>,
     /// Inner border radii (outer radii inset by border widths, clamped ≥ 0).
     pub(crate) radii: CornerRadii,
+    /// Innermost scroll container this clip moves with. A scroll container's
+    /// *own* clip is the scrollport, which stays put while its contents move,
+    /// so it carries its **parent** scroll node rather than its own.
+    pub(crate) scroll: Option<usize>,
+}
+
+/// One scroll container, as a renderer holding a [`Frame`] sees it.
+///
+/// The frame's matrices are built with [`Self::baked_offset`] already folded
+/// in, so a renderer that does nothing with this arena paints exactly the
+/// scroll position the document had. A renderer that *does* scroll — moving
+/// content without waiting for a restyle and relayout — adjusts each item by
+/// the difference between the offset it wants and the one that was baked:
+///
+/// ```text
+/// correction = Σ over the item's scroll chain  linear(offset - baked)
+/// ```
+///
+/// applied as a viewport-space pre-translation. That works because a scroll
+/// translation enters the world matrix as `W_S · T(-offset) · rest`, and
+/// conjugating a translation by `W_S` yields another pure translation —
+/// `W_S · T(d) · W_S⁻¹ = T(linear(W_S) · d)` — which is exactly
+/// [`Self::to_viewport`]. Being a pure translation, the corrections for
+/// nested scrollers commute, so they sum rather than compose in order.
+///
+/// The identity is exact for an affine `W_S`. Under an ancestor
+/// `perspective` it is the same affine approximation the painter already uses
+/// for perspective items; hit testing against a frame stays exact.
+#[derive(Debug, Clone)]
+pub struct ScrollNode {
+    /// Next-outer scroll node in this node's **containing-block** chain —
+    /// the same escape rule clipping follows, because a box scrolls with
+    /// exactly the ancestors that clip it.
+    pub parent: Option<usize>,
+    /// The scroll container.
+    pub node: NodeId,
+    /// The offset this frame's matrices were built with.
+    pub baked_offset: Vector2D<f32>,
+    /// The largest offset this box can take: scrolling area minus
+    /// scrollport, per axis, never negative.
+    pub max_offset: Vector2D<f32>,
+    /// Which axes the *user* may scroll. `overflow: hidden` is a scroll
+    /// container that moves only programmatically, which matters here
+    /// because Lynx's UA cascade puts `hidden` on every element.
+    pub user_scrollable: crate::scroll::ScrollAxes,
+    /// Row-major linear part of the scroll container's world matrix
+    /// (`[m11, m12, m21, m22]`), with the box **unscrolled**: the map from an
+    /// offset delta in this container's local CSS px into viewport CSS px.
+    ///
+    /// Only the linear part is kept — routing is [`Frame::scroll_target`],
+    /// which hit tests rather than probing scrollports, and Lynx's UA cascade
+    /// makes almost every element a scroll container, so this arena runs
+    /// close to one entry per box.
+    pub offset_to_viewport: [f32; 4],
+}
+
+impl ScrollNode {
+    /// Maps an offset delta in this container's local space into the
+    /// viewport-space translation that realizes it.
+    #[must_use]
+    pub fn to_viewport(&self, delta: Vector2D<f32>) -> Vector2D<f32> {
+        let [m11, m12, m21, m22] = self.offset_to_viewport;
+        Vector2D::new(
+            delta.x.mul_add(m11, delta.y * m21),
+            delta.x.mul_add(m12, delta.y * m22),
+        )
+    }
+
+    /// Clamps `offset` into this container's scrollable range.
+    #[must_use]
+    pub fn clamp(&self, offset: Vector2D<f32>) -> Vector2D<f32> {
+        Vector2D::new(
+            offset.x.clamp(0.0, self.max_offset.x),
+            offset.y.clamp(0.0, self.max_offset.y),
+        )
+    }
 }
 
 /// Per-corner elliptical radii, in CSS px: `width` is the horizontal radius,
@@ -266,14 +437,31 @@ impl<T: Sync> Document<T> {
         frame.hit_test(self, point)
     }
 
+    /// Builds a self-contained [`Frame`] — the paint snapshot a renderer on
+    /// another thread consumes.
+    ///
+    /// [`Self::render`] is the in-process path: the document paints into its
+    /// own retained scene and lends it back. This is the other one, for a
+    /// host that wants painting off this thread entirely. The frame owns
+    /// every style, geometry, and paragraph it needs, so it borrows nothing
+    /// afterwards and cannot go stale.
+    pub fn frame(&mut self) -> frame::Frame {
+        let order = self.build_paint_order();
+        self.resolve_frame(order)
+    }
+
     /// Renders only when the retained scene no longer represents the current
     /// document state. Returns whether a new scene was built.
     pub fn render(&mut self) -> bool {
         if !self.needs_render() {
             return false;
         }
-        let frame = self.build_paint_order();
-        self.painter.borrow_mut().paint(self, &frame);
+        // The frame is the paint input on both paths: in-process here, and
+        // across a thread boundary via [`Self::frame`]. One resolution step
+        // means one painter rather than a document-driven walk beside a
+        // frame-driven one that could drift apart.
+        let frame = self.frame();
+        self.painter.borrow_mut().paint(&frame);
         true
     }
 }

@@ -1,5 +1,7 @@
 //! Retained Parley layouts and probe/commit artifact slots.
 
+use std::sync::Arc;
+
 use parley::{Alignment, AlignmentOptions, IndentOptions, Layout};
 
 use crate::compute::LeafMetrics;
@@ -107,10 +109,16 @@ impl<'a> TextMeasurement<'a> {
 }
 
 /// Per-node retained artifacts for transient probes and durable layout.
+///
+/// The slots are `Arc` rather than `Box` so a paint snapshot can *hold* a
+/// committed paragraph after the host resumes mutating the tree — a renderer
+/// on another thread paints from the `Arc` while the layout pass reshapes
+/// through [`Arc::make_mut`], which copies the paragraph only for the frames
+/// that are genuinely still in flight.
 #[derive(Debug, Default)]
 pub struct TextLayoutStore {
-    pub(super) probe: Option<Box<TextLayout>>,
-    pub(super) committed: Option<Box<TextLayout>>,
+    pub(super) probe: Option<Arc<TextLayout>>,
+    pub(super) committed: Option<Arc<TextLayout>>,
 }
 
 impl TextLayoutStore {
@@ -122,6 +130,13 @@ impl TextLayoutStore {
     #[must_use]
     pub fn committed(&self) -> Option<&TextLayout> {
         self.committed.as_deref()
+    }
+
+    /// The committed paragraph as a shared handle, for a snapshot that must
+    /// outlive this borrow of the store.
+    #[must_use]
+    pub fn committed_shared(&self) -> Option<Arc<TextLayout>> {
+        self.committed.clone()
     }
 
     pub fn invalidate(&mut self) {
@@ -155,8 +170,8 @@ mod tests {
     #[test]
     fn artifact_invalidation_clears_both_lifetimes() {
         let mut slots = TextLayoutStore {
-            probe: Some(Box::new(empty_artifact())),
-            committed: Some(Box::new(empty_artifact())),
+            probe: Some(Arc::new(empty_artifact())),
+            committed: Some(Arc::new(empty_artifact())),
         };
         assert!(slots.probe().is_some());
         assert!(slots.committed().is_some());

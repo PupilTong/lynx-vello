@@ -95,6 +95,19 @@ impl ElementTree {
         &mut self.document
     }
 
+    /// The current tree as a self-contained paint snapshot, laying it out
+    /// first.
+    ///
+    /// This is what a renderer on another thread needs: unlike the
+    /// document's own in-process render path it borrows nothing afterwards,
+    /// so it can be handed across a thread boundary while this tree keeps
+    /// running script. It sits on the narrow mutable surface for the same
+    /// reason [`Self::handle_input`] does — building a frame reaches no
+    /// handle, no element, and no page state.
+    pub fn frame(&mut self) -> dom::Frame {
+        self.document.frame()
+    }
+
     /// Feeds one host input event in, building the private visual frame needed
     /// for hit testing and performing the resolved UA default action — today,
     /// scrolling an `overflow: scroll` box.
@@ -111,6 +124,27 @@ impl ElementTree {
     /// takes over when it wants different behavior.
     pub fn handle_input(&mut self, event: dom::input::InputEvent) -> dom::input::InputResponse {
         self.document.handle_input(event)
+    }
+
+    /// Moves a scroll container to `offset`, returning the offset actually
+    /// applied after clamping against its scrolling area. (The *unconsumed*
+    /// remainder is `scroll_by`'s return; this one is absolute.)
+    ///
+    /// This belongs on the narrow mutable surface for the same reason
+    /// [`Self::handle_input`] does — a scroll offset reaches no handle, no
+    /// element, and no page state. It exists separately from `handle_input`
+    /// because a renderer that scrolls ahead of the document (see
+    /// `dom::FrameRenderer::render_scrolled`) has to hand back the position it
+    /// already painted, so that `scrollTop`, event targeting, and the next
+    /// relayout agree with what the user is looking at. It is an absolute
+    /// `scroll_to` rather than a delta precisely so that a late or repeated
+    /// hand-back lands on the same place instead of scrolling twice.
+    pub fn scroll_to(
+        &mut self,
+        node: dom::NodeId,
+        offset: dom::Vector2D<f32>,
+    ) -> dom::Vector2D<f32> {
+        self.document.scroll_to(node, offset)
     }
 
     /// Resizes the viewport, restyling and relaying out on the next flush.

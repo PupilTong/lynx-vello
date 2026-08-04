@@ -2,6 +2,7 @@
 
 use core::fmt;
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use parley::setting::Tag;
 use parley::{
@@ -116,7 +117,7 @@ where
             LayoutGoal::Measure(_) => self.artifacts.committed.clone(),
             LayoutGoal::Commit => self.artifacts.probe.take(),
         };
-        let artifact = reusable.unwrap_or_else(|| Box::new(self.shape()));
+        let artifact = reusable.unwrap_or_else(|| Arc::new(self.shape()));
         match goal {
             LayoutGoal::Measure(_) => self.artifacts.probe = Some(artifact),
             LayoutGoal::Commit => self.artifacts.committed = Some(artifact),
@@ -158,16 +159,20 @@ where
         );
 
         self.install_artifact_if_needed(input.goal);
+        // `make_mut` copies only while a paint snapshot still holds this
+        // paragraph; the steady state is uniquely owned and reshapes in place.
         let artifact = match input.goal {
             LayoutGoal::Measure(_) => self
                 .artifacts
                 .probe
-                .as_deref_mut()
+                .as_mut()
+                .map(Arc::make_mut)
                 .expect("a probe artifact was installed"),
             LayoutGoal::Commit => self
                 .artifacts
                 .committed
-                .as_deref_mut()
+                .as_mut()
+                .map(Arc::make_mut)
                 .expect("a committed artifact was installed"),
         };
         let max_advance = line_break_width(input, artifact);

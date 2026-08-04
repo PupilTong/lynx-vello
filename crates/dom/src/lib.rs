@@ -31,6 +31,7 @@ pub use stylo_dom::ElementState;
 pub use vello;
 
 pub use crate::render::images::ImageStore;
+pub use crate::scroll::frame_scroller::{FrameInput, ScrollUpdate};
 pub use crate::style::device::Device;
 #[doc(hidden)]
 pub use crate::style::device::standards_device;
@@ -42,3 +43,10 @@ pub use crate::tree::document::{Document, NodeId};
 #[doc(hidden)]
 pub use crate::tree::node::ChildrenIter;
 pub use crate::tree::node::Node;
+pub use crate::visual::ScrollNode;
+/// The paint snapshot a renderer consumes off the document's thread, and the
+/// scroll arena it can move without one. Deliberately opaque: the paint
+/// order, its items, clips, and layers stay crate-internal, as with the
+/// in-process [`Document::render`] path.
+pub use crate::visual::frame::Frame;
+pub use crate::visual::frame::FrameRenderer;

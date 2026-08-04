@@ -28,6 +28,16 @@
 //! it from pointer and wheel events; an embedder, or a runtime layer's
 //! `scrollTo`-style API, drives it directly.
 //!
+//! A renderer may also scroll a frame it already holds, without waiting for
+//! this module at all ([`crate::visual::ScrollNode`], routed by
+//! [`crate::visual::PaintOrder::scroll_target`], which resolves the same
+//! container this module's own input path would) — the offsets it reaches
+//! come back here through [`Document::scroll_to`], which re-clamps them like
+//! any other request. The offsets stored here remain the ones CSSOM-View reads
+//! and layout sees, and a host that scrolls that way sets
+//! [`crate::input::InputEvent::default_prevented`] so this module does not
+//! scroll the same box a second time.
+//!
 //! Deliberate limits:
 //! - Only element boxes scroll. There is no document/viewport scrolling area: the root box is sized
 //!   to the viewport, and page scrolling is a runtime-policy concern the embedder resolves by
@@ -44,6 +54,8 @@
 //!   is observable, which is why it is written down here rather than left implied. Its scroll
 //!   parent is deliberately its box parent (sticky *is* in flow — that part is right); what is
 //!   missing is the offset clamp against the scrollport that css-position-3 §6.3 defines.
+
+pub(crate) mod frame_scroller;
 
 use euclid::default::{Size2D, Vector2D};
 use hughie::style::PositionProperty;
@@ -122,7 +134,7 @@ fn is_scroll_container(style: &ComputedValues) -> bool {
 /// `hidden`, which scrolls programmatically, and never `clip`, which does not
 /// scroll at all (css-overflow-3 §3).
 #[must_use]
-fn user_scrollable_axes(style: &ComputedValues) -> ScrollAxes {
+pub(crate) fn user_scrollable_axes(style: &ComputedValues) -> ScrollAxes {
     ScrollAxes {
         x: style.clone_overflow_x().is_user_scrollable(),
         y: style.clone_overflow_y().is_user_scrollable(),

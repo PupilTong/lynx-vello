@@ -45,8 +45,9 @@ use crate::paint::{
 use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Point, Rect};
 use crate::vello::peniko::{BlendMode, Compose, Fill, Mix};
-use crate::visual::{ClipNode, PaintItem, PaintItemKind, PaintOrder, RenderLayer};
-use crate::{Document, ImageStore};
+use crate::visual::frame::{Frame, ItemContent};
+use crate::visual::{ClipNode, PaintItem, RenderLayer};
+use crate::{ImageStore, Vector2D};
 
 /// Reused per-frame buffers.
 #[derive(Debug, Default)]
@@ -78,27 +79,22 @@ struct Scope {
     filtered: bool,
 }
 
-pub(crate) fn walk<T>(
+pub(crate) fn walk(
     scene: &mut Scene,
     scratch: &mut Scratch,
-    document: &Document<T>,
-    frame: &PaintOrder,
+    frame: &Frame,
     images: &ImageStore,
+    offsets: &[Vector2D<f32>],
 ) {
-    // Fail closed on any visual staleness: painting resolves the frame's
-    // geometry snapshot against live styles/layouts/text, so both recycled
-    // NodeIds (like hit testing) and post-build mutations of any kind
-    // (which hit testing tolerates — its snapshot is self-contained) make
-    // the mix incoherent.
-    frame.assert_visually_fresh(document);
     scratch.clip_stack.clear();
     scratch.chain.clear();
     scratch.scopes.clear();
-    compute_layer_bounds(scratch, document, frame);
+    compute_layer_bounds(scratch, frame, offsets);
 
-    // Single-sourced from the document's device: the same scale that
-    // rounded the layouts becomes the one CSS px -> device px transform.
-    let scale = Affine::scale(f64::from(document.device().device_pixel_ratio().get()));
+    // Single-sourced from the document's device, carried on the frame: the
+    // same scale that rounded these layouts becomes the one CSS px ->
+    // device px transform.
+    let scale = Affine::scale(f64::from(frame.device_pixel_ratio()));
     let items = frame.items();
     let layers = frame.layers();
     let mut next_open = 0_usize;
@@ -109,16 +105,16 @@ pub(crate) fn walk<T>(
             .last()
             .is_some_and(|scope| layers[scope.layer].items.end == index)
         {
-            close_scope(scene, scratch, document, frame, scale);
+            close_scope(scene, scratch, frame, scale);
         }
         while next_open < layers.len() && layers[next_open].items.start == index {
-            open_scope(scene, scratch, document, frame, next_open, images, scale);
+            open_scope(scene, scratch, frame, next_open, images, scale, offsets);
             next_open += 1;
         }
-        paint_item(scene, scratch, document, frame, item, images, scale);
+        paint_item(scene, scratch, frame, index, item, images, scale, offsets);
     }
     while !scratch.scopes.is_empty() {
-        close_scope(scene, scratch, document, frame, scale);
+        close_scope(scene, scratch, frame, scale);
     }
     pop_clips_to(scene, scratch, 0);
 }
@@ -126,21 +122,27 @@ pub(crate) fn walk<T>(
 /// Opens one group scope: effect layer, optional clip-path layer, optional
 /// mask sandwich. In-scope item clips pop first so no blend layer ever
 /// nests inside a clip layer.
-fn open_scope<T>(
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one walker call, all of it per-frame state"
+)]
+fn open_scope(
     scene: &mut Scene,
     scratch: &mut Scratch,
-    document: &Document<T>,
-    frame: &PaintOrder,
+    frame: &Frame,
     layer_index: usize,
     images: &ImageStore,
     scale: Affine,
+    offsets: &[Vector2D<f32>],
 ) {
     let layer = &frame.layers()[layer_index];
+    let paint = frame.layer_paint(layer_index);
     let base = scratch.scopes.last().map_or(0, |scope| scope.base);
     pop_clips_to(scene, scratch, base);
 
-    let style = document
-        .paint_style(layer.node)
+    let style = paint
+        .style
+        .as_deref()
         .expect("a group-effect stacking context keeps its style for the frame");
     let bounds = scratch.layer_bounds[layer_index];
     let effects = style.get_effects();
@@ -154,14 +156,14 @@ fn open_scope<T>(
         &bounds,
     );
 
-    let local = convert::item_affine(&layer.transform, layer.size);
-    let fragment = document.rounded_layout(layer.node).map(|layout| {
+    let local = placed(frame, offsets, &layer.transform, layer.size, layer.scroll);
+    let fragment = paint.metrics.map(|metrics| {
         BoxFragment::new(
             layer.node,
             scale * local.unwrap_or_default(),
             layer.size,
             layer.radii,
-            layout,
+            metrics,
         )
     });
 
@@ -213,60 +215,61 @@ fn open_scope<T>(
     });
 }
 
-fn close_scope<T>(
-    scene: &mut Scene,
-    scratch: &mut Scratch,
-    document: &Document<T>,
-    frame: &PaintOrder,
-    scale: Affine,
-) {
+fn close_scope(scene: &mut Scene, scratch: &mut Scratch, frame: &Frame, scale: Affine) {
     let scope = scratch
         .scopes
         .pop()
         .expect("close_scope is only called with an open scope");
     pop_clips_to(scene, scratch, scope.base);
-    if scope.filtered {
-        let layer = &frame.layers()[scope.layer];
-        if let Some(style) = document.paint_style(layer.node) {
-            filters::apply(scene, style, scratch.layer_bounds[scope.layer], scale);
-        }
+    if scope.filtered
+        && let Some(style) = frame.layer_paint(scope.layer).style.as_deref()
+    {
+        filters::apply(scene, style, scratch.layer_bounds[scope.layer], scale);
     }
     for _ in 0..scope.pushed {
         scene.pop_layer();
     }
 }
 
-fn paint_item<T>(
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one walker call, all of it per-frame state"
+)]
+fn paint_item(
     scene: &mut Scene,
     scratch: &mut Scratch,
-    document: &Document<T>,
-    frame: &PaintOrder,
+    frame: &Frame,
+    index: usize,
     item: &PaintItem,
     images: &ImageStore,
     scale: Affine,
+    offsets: &[Vector2D<f32>],
 ) {
-    let Some(local) = convert::item_affine(&item.transform, item.size) else {
+    let Some(local) = placed(frame, offsets, &item.transform, item.size, item.scroll) else {
         return;
     };
-    sync_clips(scene, scratch, frame, item, scale);
+    let paint = frame.item_paint(index);
+    let Some(style) = paint.style.as_deref() else {
+        return;
+    };
+    sync_clips(scene, scratch, frame, item, scale, offsets);
     let transform = scale * local;
 
-    match item.kind {
-        PaintItemKind::ElementBox => {
-            let Some(style) = document.paint_style(item.node) else {
-                return;
-            };
-            let Some(layout) = document.rounded_layout(item.node) else {
-                return;
-            };
-            let fragment = BoxFragment::new(item.node, transform, item.size, item.radii, layout);
-            // `background-clip: text` clips its layers to the element's
-            // descendant glyph silhouettes; collect them only when the
-            // style asks (rare property, per-item Vec accepted).
-            let text_clip =
-                background::needs_text_clip(style).then(|| collect_text_clip(document, item.node));
+    match &paint.content {
+        ItemContent::Absent => {}
+        ItemContent::Element(element) => {
+            let fragment =
+                BoxFragment::new(item.node, transform, item.size, item.radii, element.metrics);
             shadow::paint_outset(scene, &mut scratch.paths, style, &fragment);
-            background::paint(scene, style, &fragment, images, text_clip.as_ref());
+            // `background-clip: text` clips its layers to the element's
+            // descendant glyph silhouettes, which the frame resolved.
+            background::paint(
+                scene,
+                style,
+                &fragment,
+                images,
+                element.text_clip.as_deref(),
+            );
             // Inner shadows sit immediately above the background, below the
             // element's content (css-backgrounds-3 §7.4.1) — replaced pixels
             // cover them, the browser-observable order.
@@ -276,136 +279,46 @@ fn paint_item<T>(
                 style,
                 &fragment,
                 images,
-                document.natural_size(item.node),
+                element.natural_size,
             );
             border::paint(scene, &mut scratch.paths, style, &fragment);
             border::paint_outline(scene, &mut scratch.paths, style, &fragment);
         }
-        PaintItemKind::TextRun { element } => {
-            let Some(style) = document.paint_style(element) else {
-                return;
-            };
-            let Some(layout) = document.text_layout(item.node) else {
-                return;
-            };
+        ItemContent::Text(run) => {
             // Decorations propagate from ancestor decorating boxes
-            // (css-text-decor-3 §2), not through inheritance — collect the
-            // chain, each entry in its originating box's style/color.
-            let decorations = text::propagated_decorations(document, element);
-            // Only a gradient-valued `color` needs a positioning area; solid
-            // text — nearly all of it — must not pay for the lookups.
-            let gradient_box = text::needs_gradient_box(style)
-                .then(|| color_gradient_box(document, item, element));
-            text::paint(scene, style, layout, transform, &decorations, gradient_box);
-        }
-    }
-}
-
-/// The positioning area for a gradient-valued `color` (Lynx's text-gradient
-/// sugar), in the text run's local space.
-///
-/// The gradient has to be anchored to the styled *element*, not to the run:
-/// the same gradient authored as `background-image` would resolve against the
-/// element's padding box (`background-origin: padding-box` is the initial
-/// value), and anchoring per run would restart the ramp on every line of a
-/// wrapped paragraph.
-///
-/// `PaintItemKind::TextRun`'s `element` is the text's DOM parent, and the
-/// run's `Layout.location` is relative to that same box, so the padding-box
-/// origin in run-local space is `border_origin - location`. When the parent
-/// is box-less (`display: contents`, whose layout slot the host zeroes) the
-/// element carries no box to anchor to, and the run's own box stands in.
-fn color_gradient_box<T>(document: &Document<T>, item: &PaintItem, element: crate::NodeId) -> Rect {
-    let own_box = Rect::new(
-        0.0,
-        0.0,
-        f64::from(item.size.width),
-        f64::from(item.size.height),
-    );
-    let (Some(element_layout), Some(run_layout)) = (
-        document.rounded_layout(element),
-        document.rounded_layout(item.node),
-    ) else {
-        return own_box;
-    };
-    let size = element_layout.size;
-    let border = element_layout.border;
-    let padding_box = Rect::new(
-        f64::from(border.left),
-        f64::from(border.top),
-        f64::from((size.width - border.right).max(border.left)),
-        f64::from((size.height - border.bottom).max(border.top)),
-    );
-    if padding_box.width() <= 0.0 || padding_box.height() <= 0.0 {
-        return own_box;
-    }
-    padding_box
-        - crate::vello::kurbo::Vec2::new(
-            f64::from(run_layout.location.x),
-            f64::from(run_layout.location.y),
-        )
-}
-
-/// Collects the committed text layouts under `element` for its
-/// `background-clip: text` silhouette, with offsets accumulated from the
-/// element's border-box origin. `Layout.location` is box-parent-relative
-/// and the layout host zeroes boxless (`display: contents`) elements'
-/// slots, so unconditional accumulation composes correctly; `display:
-/// none` subtrees contribute nothing because their text never commits a
-/// layout. Recorded v1 limits: descendant `transform`s are ignored (the
-/// silhouette uses layout positions only) and `visibility: hidden` text is
-/// skipped via its parent's style.
-fn collect_text_clip<T>(
-    document: &Document<T>,
-    element: crate::NodeId,
-) -> crate::paint::TextClip<'_> {
-    let mut clip = crate::paint::TextClip::default();
-    collect_text_clip_under(
-        document,
-        element,
-        crate::vello::kurbo::Vec2::ZERO,
-        &mut clip,
-    );
-    clip
-}
-
-fn collect_text_clip_under<'doc, T>(
-    document: &'doc Document<T>,
-    node: crate::NodeId,
-    offset: crate::vello::kurbo::Vec2,
-    clip: &mut crate::paint::TextClip<'doc>,
-) {
-    use crate::vello::kurbo::Vec2;
-    let Some(node_ref) = document.get(node) else {
-        return;
-    };
-    for child in node_ref.children() {
-        if child.is_text_node() {
-            let visible = document.paint_style(node).is_none_or(|style| {
-                matches!(
-                    style.clone_visibility(),
-                    stylo::computed_values::visibility::T::Visible
-                )
-            });
-            if !visible {
-                continue;
-            }
-            if let (Some(layout), Some(text)) = (
-                document.rounded_layout(child.id()),
-                document.text_layout(child.id()),
-            ) {
-                clip.runs.push((
-                    offset + Vec2::new(f64::from(layout.location.x), f64::from(layout.location.y)),
-                    text,
-                ));
-            }
-        } else if child.is_element() {
-            let child_offset = document
-                .rounded_layout(child.id())
-                .map_or(offset, |layout| {
-                    offset + Vec2::new(f64::from(layout.location.x), f64::from(layout.location.y))
-                });
-            collect_text_clip_under(document, child.id(), child_offset, clip);
+            // (css-text-decor-3 §2), not through inheritance; the frame
+            // carries the chain, each entry still in its own style/color.
+            let decorations = text::decorations_of(&run.decorations);
+            // A gradient-valued `color` anchors to the styled element's
+            // padding box. The frame leaves it `None` both for solid text
+            // (which never reads it) and for a parent with no box to anchor
+            // to — in the latter case the run's own box stands in.
+            let gradient_box = run.gradient_box.map_or_else(
+                || {
+                    Rect::new(
+                        0.0,
+                        0.0,
+                        f64::from(item.size.width),
+                        f64::from(item.size.height),
+                    )
+                },
+                |area| {
+                    Rect::new(
+                        f64::from(area.origin.x),
+                        f64::from(area.origin.y),
+                        f64::from(area.origin.x + area.size.width),
+                        f64::from(area.origin.y + area.size.height),
+                    )
+                },
+            );
+            text::paint(
+                scene,
+                style,
+                &run.layout,
+                transform,
+                &decorations,
+                Some(gradient_box),
+            );
         }
     }
 }
@@ -415,9 +328,10 @@ fn collect_text_clip_under<'doc, T>(
 fn sync_clips(
     scene: &mut Scene,
     scratch: &mut Scratch,
-    frame: &PaintOrder,
+    frame: &Frame,
     item: &PaintItem,
     scale: Affine,
+    offsets: &[Vector2D<f32>],
 ) {
     let base = scratch.scopes.last().map_or(0, |scope| scope.base);
     scratch.chain.clear();
@@ -436,14 +350,20 @@ fn sync_clips(
     pop_clips_to(scene, scratch, base + common);
     for position in common..scratch.chain.len() {
         let index = scratch.chain[position];
-        push_clip(scene, &frame.clips()[index], scale);
+        push_clip(scene, frame, &frame.clips()[index], scale, offsets);
         scratch.clip_stack.push(index);
     }
 }
 
-fn push_clip(scene: &mut Scene, clip: &ClipNode, scale: Affine) {
+fn push_clip(
+    scene: &mut Scene,
+    frame: &Frame,
+    clip: &ClipNode,
+    scale: Affine,
+    offsets: &[Vector2D<f32>],
+) {
     let size = crate::Size2D::new(clip.rect.size.width, clip.rect.size.height);
-    let Some(local) = convert::item_affine(&clip.transform, size) else {
+    let Some(local) = placed(frame, offsets, &clip.transform, size, clip.scroll) else {
         // Singular clip space: nothing inside it can render.
         scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &Rect::ZERO);
         return;
@@ -482,7 +402,7 @@ fn pop_clips_to(scene: &mut Scene, scratch: &mut Scratch, len: usize) {
 /// no item), and clamped to the viewport at close. Corners map through the
 /// same affine fit [`paint_item`] draws with, so what is painted is what is
 /// bounded — over-approximation costs tiles, never pixels.
-fn compute_layer_bounds<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrder) {
+fn compute_layer_bounds(scratch: &mut Scratch, frame: &Frame, offsets: &[Vector2D<f32>]) {
     let layers = frame.layers();
     let items = frame.items();
     scratch.layer_bounds.clear();
@@ -491,12 +411,12 @@ fn compute_layer_bounds<T>(scratch: &mut Scratch, document: &Document<T>, frame:
         return;
     }
     scratch.layer_bounds.resize(layers.len(), Rect::ZERO);
-    let device_viewport = document.device().viewport_size();
+    let frame_viewport = frame.viewport();
     let viewport = Rect::new(
         0.0,
         0.0,
-        f64::from(device_viewport.width),
-        f64::from(device_viewport.height),
+        f64::from(frame_viewport.width),
+        f64::from(frame_viewport.height),
     );
     scratch.bounds_acc.clear();
     scratch.bounds_acc.resize(layers.len(), None);
@@ -526,28 +446,29 @@ fn compute_layer_bounds<T>(scratch: &mut Scratch, document: &Document<T>, frame:
             close(scratch);
         }
         while next_open < layers.len() && layers[next_open].items.start == index {
-            scratch.bounds_acc[next_open] = layer_root_rect(&layers[next_open]);
+            scratch.bounds_acc[next_open] = layer_root_rect(frame, offsets, &layers[next_open]);
             scratch.open_layers.push(next_open);
             next_open += 1;
         }
         let Some(&top) = scratch.open_layers.last() else {
             continue;
         };
-        let extent = match item.kind {
-            PaintItemKind::ElementBox => document.paint_style(item.node).map_or(0.0, |style| {
+        let paint = frame.item_paint(index);
+        let extent = match (&paint.content, paint.style.as_deref()) {
+            (ItemContent::Element(_), Some(style)) => {
                 shadow::extent(style).max(border::outline_extent(style))
-            }),
-            PaintItemKind::TextRun { element } => {
-                // Glyph ink overhang (italic slant, negative side bearings,
-                // swashes) scales with font size and is not covered by the
-                // layout box; half an em is a generous conservative pad.
-                document.paint_style(element).map_or(4.0, |style| {
-                    0.5 * f64::from(style.get_font().clone_font_size().computed_size().px())
-                        + text::extent(style)
-                })
             }
+            // Glyph ink overhang (italic slant, negative side bearings,
+            // swashes) scales with font size and is not covered by the
+            // layout box; half an em is a generous conservative pad.
+            (ItemContent::Text(_), Some(style)) => {
+                0.5 * f64::from(style.get_font().clone_font_size().computed_size().px())
+                    + text::extent(style)
+            }
+            (ItemContent::Text(_), None) => 4.0,
+            (ItemContent::Absent, _) | (ItemContent::Element(_), None) => 0.0,
         };
-        if let Some(rect) = item_viewport_rect(item, extent) {
+        if let Some(rect) = item_viewport_rect(frame, offsets, item, extent) {
             scratch.bounds_acc[top] =
                 Some(scratch.bounds_acc[top].map_or(rect, |united| united.union(rect)));
         }
@@ -559,8 +480,8 @@ fn compute_layer_bounds<T>(scratch: &mut Scratch, document: &Document<T>, frame:
 
 /// The viewport-space AABB of a layer root's border box, mapped through the
 /// same affine fit the group's mask/clip-path geometry is painted with.
-fn layer_root_rect(layer: &RenderLayer) -> Option<Rect> {
-    let affine = convert::item_affine(&layer.transform, layer.size)?;
+fn layer_root_rect(frame: &Frame, offsets: &[Vector2D<f32>], layer: &RenderLayer) -> Option<Rect> {
+    let affine = placed(frame, offsets, &layer.transform, layer.size, layer.scroll)?;
     Some(affine_rect(
         affine,
         Rect::new(0.0, 0.0, layer.size.width as f64, layer.size.height as f64),
@@ -572,8 +493,13 @@ fn layer_root_rect(layer: &RenderLayer) -> Option<Rect> {
 /// through the affine fit [`paint_item`] draws with (for projective
 /// matrices the fit's fourth corner can lie outside the true projection's
 /// AABB, so bounding the fit is what keeps painted content unclipped).
-fn item_viewport_rect(item: &PaintItem, extent: f64) -> Option<Rect> {
-    let affine = convert::item_affine(&item.transform, item.size)?;
+fn item_viewport_rect(
+    frame: &Frame,
+    offsets: &[Vector2D<f32>],
+    item: &PaintItem,
+    extent: f64,
+) -> Option<Rect> {
+    let affine = placed(frame, offsets, &item.transform, item.size, item.scroll)?;
     Some(affine_rect(
         affine,
         Rect::new(
@@ -583,6 +509,29 @@ fn item_viewport_rect(item: &PaintItem, extent: f64) -> Option<Rect> {
             item.size.height as f64 + extent,
         ),
     ))
+}
+
+/// The paint transform for one frame element, with the renderer's own scroll
+/// position folded in.
+///
+/// The frame's matrices carry the offsets the document knew; a renderer that
+/// has scrolled past them corrects by a viewport-space pre-translation, which
+/// is exactly what a scroll chain's correction is (see `dom::visual::
+/// ScrollNode`). With `offsets` empty this is `convert::item_affine`
+/// unchanged, so a caller that does not scroll ahead pays one branch.
+fn placed(
+    frame: &Frame,
+    offsets: &[Vector2D<f32>],
+    transform: &euclid::default::Transform3D<f32>,
+    size: crate::Size2D<f32>,
+    scroll: Option<usize>,
+) -> Option<Affine> {
+    let local = convert::item_affine(transform, size)?;
+    if offsets.is_empty() {
+        return Some(local);
+    }
+    let correction = frame.scroll_correction(scroll, offsets);
+    Some(Affine::translate((f64::from(correction.x), f64::from(correction.y))) * local)
 }
 
 /// The AABB of `rect`'s four corners under `affine`.

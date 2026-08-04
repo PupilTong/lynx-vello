@@ -1,6 +1,6 @@
 //! Hit testing: reverse paint order over the built [`PaintOrder`].
 
-use euclid::default::{Point2D, Rect};
+use euclid::default::{Point2D, Rect, Vector2D};
 
 use super::{LocalHit, PaintItemKind, PaintOrder, geometry};
 use crate::NodeId;
@@ -88,6 +88,30 @@ impl PaintOrder {
         point: Point2D<f32>,
     ) -> Option<(NodeId, LocalHit)> {
         self.assert_fresh(document);
+        self.hit_test_at(point, &[])
+    }
+
+    /// [`Self::hit_test_local`] with no document, against the frame as it
+    /// stands at `offsets`.
+    ///
+    /// The body of hit testing never reads the document — it is geometry over
+    /// this snapshot — so the only thing the borrow ever bought was the
+    /// staleness assert. A caller holding a [`Frame`](super::Frame), which
+    /// owns its snapshot and therefore cannot go stale, needs neither, and
+    /// this is what lets hit testing run on a thread that has no document at
+    /// all.
+    ///
+    /// `offsets` is the renderer's own scroll position, indexed by scroll
+    /// node. Items are tested against where they are *drawn*: the point is
+    /// rebased past each candidate's scroll chain, so a hit lands on what the
+    /// user is actually looking at rather than on where the document last
+    /// baked it. Pass `&[]` to test the baked frame.
+    #[must_use]
+    pub(crate) fn hit_test_at(
+        &self,
+        point: Point2D<f32>,
+        offsets: &[Vector2D<f32>],
+    ) -> Option<(NodeId, LocalHit)> {
         self.items
             .iter()
             .enumerate()
@@ -96,7 +120,8 @@ impl PaintOrder {
                 if !item.hit_testable {
                     return None;
                 }
-                let local = item.transform.inverse()?.transform_point2d(point)?;
+                let rebased = point - self.scroll_correction(item.scroll, offsets);
+                let local = item.transform.inverse()?.transform_point2d(rebased)?;
                 // A box's hit region is half-open at its trailing edges (browser
                 // event targeting: elementFromPoint at the far right/bottom edge
                 // misses the box); leading edges and interior shared edges are
@@ -109,7 +134,7 @@ impl PaintOrder {
                 {
                     return None;
                 }
-                if !self.point_passes_clips(item.clip, point) {
+                if !self.point_passes_clips(item.clip, point, offsets) {
                     return None;
                 }
                 let node = match item.kind {
@@ -129,14 +154,21 @@ impl PaintOrder {
     /// Whether `point` (viewport space) falls inside every clip on the
     /// chain. Each clip is tested in its own local space — its transform is
     /// anchored local → viewport, so the original point is mapped through
-    /// each clip's own inverse.
-    fn point_passes_clips(&self, mut clip: Option<usize>, point: Point2D<f32>) -> bool {
+    /// each clip's own inverse, rebased past whatever that clip's own scroll
+    /// chain has moved.
+    fn point_passes_clips(
+        &self,
+        mut clip: Option<usize>,
+        point: Point2D<f32>,
+        offsets: &[Vector2D<f32>],
+    ) -> bool {
         while let Some(index) = clip {
             let node = &self.clips[index];
+            let rebased = point - self.scroll_correction(node.scroll, offsets);
             let Some(local) = node
                 .transform
                 .inverse()
-                .and_then(|inverse| inverse.transform_point2d(point))
+                .and_then(|inverse| inverse.transform_point2d(rebased))
             else {
                 return false;
             };

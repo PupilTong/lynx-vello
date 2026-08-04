@@ -1,13 +1,25 @@
-use std::cell::Ref;
+//! The paint side of the pipeline: bundle loading, and the frame pipeline
+//! the window and headless backends both drive.
+//!
+//! [`FramePipeline`] runs on whichever thread owns the GPU — the process's
+//! main thread in headed mode, because winit's event loop and the surface
+//! belong there. It owns the [`FrameRenderer`], the scene, the image store, and
+//! the render-target size, and it consumes [`Frame`]s from the
+//! [`DomThread`]. It never touches a document.
+//!
+//! [`Program`] is the seam between them: a decoded bundle is plain data, so
+//! it can be moved onto the DOM thread and booted there. The runtime it
+//! becomes never crosses back.
 
-#[cfg(target_os = "macos")]
-use bobcat_core::lynx_element::dom::input::{InputEvent, InputResponse};
+use bobcat_core::lynx_element::dom::FrameRenderer;
+use bobcat_core::lynx_element::dom::input::InputEvent;
 use bobcat_core::lynx_element::dom::vello::Scene;
 use bobcat_core::lynx_element::{ElementTree, PageConfig, Viewport};
 use bobcat_core::quickjs::MainThreadRuntime;
 use url::Url;
 
 use crate::CliError;
+use crate::dom_thread::DomThread;
 
 const MAX_RENDER_DIMENSION: u32 = 16_384;
 
@@ -57,14 +69,12 @@ impl Program {
         })
     }
 
-    pub(crate) fn boot(
-        self,
-        width: f32,
-        height: f32,
-        device_pixel_ratio: f32,
-    ) -> Result<FramePipeline, CliError> {
-        let frame_size = frame_size(width, height, device_pixel_ratio)?;
-        let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
+    /// Creates the runtime and runs the bundle's main-thread script.
+    ///
+    /// This runs **on the DOM thread**: the `QuickJS` realm it creates is bound
+    /// to whichever thread built it, so the decoded program travels and the
+    /// runtime stays put.
+    pub(crate) fn boot(self, viewport: Viewport) -> Result<MainThreadRuntime, CliError> {
         let mut runtime = MainThreadRuntime::new(ElementTree::new(viewport, self.config))
             .map_err(CliError::RuntimeInitialization)?;
         runtime
@@ -81,12 +91,7 @@ impl Program {
                 self.input, self.author_rule_count
             );
         }
-
-        Ok(FramePipeline {
-            runtime,
-            viewport,
-            frame_size,
-        })
+        Ok(runtime)
     }
 }
 
@@ -97,7 +102,7 @@ pub(crate) struct FrameSize {
 }
 
 pub(crate) struct PreparedFrame<'a> {
-    elements: Ref<'a, ElementTree>,
+    pub(crate) scene: &'a Scene,
     pub(crate) size: FrameSize,
     /// Whether this call repainted the scene: `false` means the scene is
     /// byte-identical to the previously prepared frame, so a host that
@@ -105,17 +110,14 @@ pub(crate) struct PreparedFrame<'a> {
     pub(crate) changed: bool,
 }
 
-impl PreparedFrame<'_> {
-    /// The scene retained by the document's private painter.
-    pub(crate) fn scene(&self) -> Ref<'_, Scene> {
-        self.elements.document().scene()
-    }
-}
-
 pub(crate) struct FramePipeline {
-    runtime: MainThreadRuntime,
+    dom: DomThread,
+    renderer: FrameRenderer,
     viewport: Viewport,
     frame_size: FrameSize,
+    /// Whether the painter's scene holds a frame at all. Before the first
+    /// paint, and after a resize, the scene must be rebuilt unconditionally.
+    painted: bool,
 }
 
 impl std::fmt::Debug for FramePipeline {
@@ -124,11 +126,35 @@ impl std::fmt::Debug for FramePipeline {
             .debug_struct("FramePipeline")
             .field("viewport", &self.viewport)
             .field("frame_size", &self.frame_size)
+            .field("painted", &self.painted)
             .finish_non_exhaustive()
     }
 }
 
 impl FramePipeline {
+    /// Starts the DOM thread and paints its first frame.
+    ///
+    /// `wake` is invoked from the DOM thread whenever a frame is published.
+    /// A backend with an event loop uses it to request a redraw; one that
+    /// polls at its own clock passes a no-op.
+    pub(crate) fn start(
+        program: Program,
+        width: f32,
+        height: f32,
+        device_pixel_ratio: f32,
+        wake: impl Fn() + Send + 'static,
+    ) -> Result<Self, CliError> {
+        let frame_size = frame_size(width, height, device_pixel_ratio)?;
+        let dom = DomThread::spawn(program, width, height, device_pixel_ratio, wake)?;
+        Ok(Self {
+            dom,
+            renderer: FrameRenderer::new(),
+            viewport: Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio),
+            frame_size,
+            painted: false,
+        })
+    }
+
     pub(crate) fn resize(
         &mut self,
         width: f32,
@@ -144,49 +170,95 @@ impl FramePipeline {
             return Ok(());
         }
 
-        {
-            let mut elements = self.runtime.elements_mut();
-            if size_changed {
-                elements.set_viewport(width, height);
-            }
-            if scale_changed {
-                elements.set_device_pixel_ratio(device_pixel_ratio);
-            }
-        }
+        // The render target is this side's business and must be right before
+        // the next present; the relayout it implies is the DOM thread's, and
+        // arrives as an ordinary frame.
+        self.dom.resize(width, height, device_pixel_ratio);
         self.viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
         self.frame_size = next_size;
+        self.painted = false;
         Ok(())
     }
 
-    pub(crate) fn prepare_frame(&mut self) -> PreparedFrame<'_> {
-        let changed = {
-            let mut elements = self.runtime.elements_mut();
-            elements.document_mut().render()
+    /// Paints the newest published frame, if one arrived since the last call.
+    ///
+    /// This never blocks on the DOM thread: a frame that is not ready yet
+    /// simply is not painted, and the scene keeps whatever it last held. Use
+    /// [`Self::sync_frame`] where the current document state is required.
+    pub(crate) fn prepare_frame(&mut self) -> Result<PreparedFrame<'_>, CliError> {
+        if let Some(error) = self.dom.fatal() {
+            return Err(error);
+        }
+        let changed = match self.dom.take_frame() {
+            Some(published) => {
+                self.renderer
+                    .adopt(published.frame, published.confirmed_scroll);
+                self.renderer.render();
+                self.painted = true;
+                true
+            }
+            // A resize invalidated the scene but no new frame has landed yet;
+            // report "unchanged" rather than presenting a scene sized for the
+            // old target.
+            None => false,
         };
-        PreparedFrame {
-            elements: self.runtime.elements(),
+        Ok(PreparedFrame {
+            scene: self.renderer.scene(),
             size: self.frame_size,
             changed,
-        }
+        })
     }
 
-    /// Routes one host input event and performs the UA default action it
-    /// resolves to.
+    /// Waits for a frame reflecting the document's current state, then paints
+    /// it.
     ///
-    /// The element layer keeps the visual frame private and builds it for hit
-    /// testing. When input changes scrolling, `prepare_frame` observes the new
-    /// visual epoch and refreshes the retained scene.
-    #[cfg(target_os = "macos")]
-    pub(crate) fn handle_input(&mut self, event: InputEvent) -> InputResponse {
-        let mut elements = self.runtime.elements_mut();
-        elements.handle_input(event)
+    /// The `frame` and `screenshot` console commands mean "what the page
+    /// looks like *now*", so they take the barrier rather than whatever
+    /// happens to be in the slot.
+    pub(crate) fn sync_frame(&mut self) -> Result<PreparedFrame<'_>, CliError> {
+        self.dom.sync()?;
+        let prepared = self.prepare_frame()?;
+        Ok(prepared)
     }
 
-    /// Whether the document has visual changes the painted scene does not
-    /// reflect yet.
-    #[cfg(target_os = "macos")]
+    /// Routes one host input event: scrolls here on the paint thread if the
+    /// gesture resolves to one, then forwards it for targeting.
+    ///
+    /// The frame in hand carries everything hit testing and scrolling need,
+    /// so the pixels move this vsync instead of after a DOM round trip. The
+    /// event still goes to the document — that is where the target is
+    /// resolved — with `default_prevented` set once this side owns the
+    /// gesture, which is the seam `dom::input` documents for a host driving
+    /// its own scroll physics. Returns whether anything scrolled, so a caller
+    /// under `ControlFlow::Wait` knows whether to present.
+    pub(crate) fn handle_input(&mut self, mut event: InputEvent) -> bool {
+        let response = self.renderer.handle_input(&event);
+        let scrolled = !response.scrolled.is_empty();
+        for update in response.scrolled {
+            self.dom.scrolled(update);
+        }
+        if scrolled {
+            self.renderer.render();
+            self.painted = true;
+        }
+        event.default_prevented = response.owns_gesture;
+        self.dom.input(event);
+        scrolled
+    }
+
+    /// Whether a published frame is waiting to be painted.
+    ///
+    /// Deliberately *not* "the scene is out of date". After a resize the
+    /// scene is stale until the DOM thread republishes, but re-presenting it
+    /// meanwhile costs a full GPU pass per vsync and shows the same pixels;
+    /// the frame that resolves it arrives on its own and wakes the loop.
     pub(crate) fn needs_frame(&self) -> bool {
-        self.runtime.elements().document().needs_render()
+        self.dom.has_frame()
+    }
+
+    /// Asks the DOM thread to publish if anything changed, without waiting.
+    pub(crate) fn request_frame(&self) {
+        self.dom.request_frame();
     }
 }
 

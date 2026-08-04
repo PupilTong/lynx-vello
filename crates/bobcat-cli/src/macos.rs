@@ -6,11 +6,11 @@ use bobcat_core::lynx_element::dom::input::{DeltaMode, InputEvent, PointerKind, 
 use bobcat_core::lynx_element::dom::render::gpu::{read_texture, render_params, renderer_options};
 use bobcat_core::lynx_element::dom::vello::peniko::Color;
 use bobcat_core::lynx_element::dom::vello::util::{RenderContext, RenderSurface};
-use bobcat_core::lynx_element::dom::{Point2D, vello};
+use bobcat_core::lynx_element::dom::{Point2D, Vector2D, vello};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
 
 use crate::CliError;
@@ -22,6 +22,11 @@ use crate::screenshot::save_screenshot;
 #[derive(Debug)]
 enum UserEvent {
     Command(Command),
+    /// The DOM thread published a frame. Sent from that thread through the
+    /// event-loop proxy, which is the only way to reach a sleeping winit
+    /// loop from outside it — without this a `ControlFlow::Wait` session
+    /// would sit idle while a frame waited to be painted.
+    FramePublished,
 }
 
 /// The one pointer id every mouse gesture uses. Real touches carry winit's own
@@ -34,14 +39,18 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
         .build()
         .map_err(|error| CliError::Window(error.to_string()))?;
     event_loop.set_control_flow(ControlFlow::Wait);
-    let proxy = event_loop.create_proxy();
-    let console =
-        Console::start(move |command| proxy.send_event(UserEvent::Command(command)).is_ok())
-            .map_err(CliError::Console)?;
+    let console_proxy = event_loop.create_proxy();
+    let console = Console::start(move |command| {
+        console_proxy
+            .send_event(UserEvent::Command(command))
+            .is_ok()
+    })
+    .map_err(CliError::Console)?;
     println!("bobcat: macOS window starting; enter `help` for commands");
     console.prompt();
 
-    let mut application = MacApplication::new(program, options, console);
+    let frame_proxy = event_loop.create_proxy();
+    let mut application = MacApplication::new(program, options, console, frame_proxy);
     event_loop
         .run_app(&mut application)
         .map_err(|error| CliError::Window(error.to_string()))?;
@@ -58,6 +67,8 @@ struct MacApplication {
     pipeline: Option<FramePipeline>,
     graphics: Option<WindowGraphics>,
     window: Option<Arc<Window>>,
+    /// Handed to the DOM thread so a published frame can wake this loop.
+    frame_proxy: Option<EventLoopProxy<UserEvent>>,
     console: Console,
     pending_screenshots: Vec<PathBuf>,
     running: bool,
@@ -85,7 +96,12 @@ impl std::fmt::Debug for MacApplication {
 }
 
 impl MacApplication {
-    fn new(program: Program, options: &Options, console: Console) -> Self {
+    fn new(
+        program: Program,
+        options: &Options,
+        console: Console,
+        frame_proxy: EventLoopProxy<UserEvent>,
+    ) -> Self {
         Self {
             program: Some(program),
             initial_width: options.viewport_width,
@@ -93,6 +109,7 @@ impl MacApplication {
             pipeline: None,
             graphics: None,
             window: None,
+            frame_proxy: Some(frame_proxy),
             console,
             pending_screenshots: Vec::new(),
             running: true,
@@ -125,7 +142,16 @@ impl MacApplication {
             .program
             .take()
             .expect("the program is consumed by the first window only");
-        let pipeline = program.boot(css_width, css_height, scale_factor)?;
+        let frame_proxy = self
+            .frame_proxy
+            .take()
+            .expect("the proxy is consumed by the first window only");
+        let pipeline =
+            FramePipeline::start(program, css_width, css_height, scale_factor, move || {
+                // A closed loop means the window is gone; the DOM thread is
+                // torn down right behind it.
+                let _ = frame_proxy.send_event(UserEvent::FramePublished);
+            })?;
         let graphics = WindowGraphics::new(Arc::clone(&window), physical_size)?;
 
         self.pipeline = Some(pipeline);
@@ -170,10 +196,15 @@ impl MacApplication {
             .window
             .as_ref()
             .expect("redraw events arrive only after initialization");
-        let frame = pipeline.prepare_frame();
-        let scene = frame.scene();
-        graphics.render(window, &scene, frame.size)?;
-        drop(scene);
+        // A pending screenshot names the page as it is, so it waits for the
+        // DOM thread; an ordinary redraw paints whatever has been published
+        // and lets a slow document cost a frame rather than a stall.
+        let frame = if self.pending_screenshots.is_empty() {
+            pipeline.prepare_frame()?
+        } else {
+            pipeline.sync_frame()?
+        };
+        graphics.render(window, frame.scene, frame.size)?;
 
         if self.pending_screenshots.is_empty() {
             return Ok(());
@@ -234,18 +265,6 @@ impl MacApplication {
         }
     }
 
-    /// Feeds one already-built input event in and repaints if it moved
-    /// anything. `ControlFlow::Wait` means nothing else would ask.
-    fn dispatch(&mut self, event: InputEvent) {
-        let Some(pipeline) = self.pipeline.as_mut() else {
-            return;
-        };
-        pipeline.handle_input(event);
-        if pipeline.needs_frame() {
-            self.request_redraw();
-        }
-    }
-
     /// A mouse pointer event at the last known cursor position.
     ///
     /// A left-button drag is reported as a `Pen` rather than a `Mouse`: the DOM
@@ -262,24 +281,54 @@ impl MacApplication {
         let Some(point) = self.css_point(position) else {
             return;
         };
-        self.dispatch(InputEvent::pointer(
-            point,
-            MOUSE_POINTER_ID,
-            PointerKind::Pen,
-            phase,
-        ));
+        self.pointer_dispatch(point, MOUSE_POINTER_ID, PointerKind::Pen, phase);
     }
 
+    /// Drag-scrolls on this thread and forwards the event for targeting.
+    ///
+    /// A scroll that lands here repaints immediately; anything else the event
+    /// causes comes back as a published frame, which wakes the loop on its
+    /// own.
+    /// Feeds one event to the pipeline and repaints if it scrolled.
+    ///
+    /// Anything else the event causes comes back as a published frame, which
+    /// wakes the loop on its own.
+    fn dispatch(&mut self, event: InputEvent) {
+        let scrolled = self
+            .pipeline
+            .as_mut()
+            .is_some_and(|pipeline| pipeline.handle_input(event));
+        if scrolled {
+            self.request_redraw();
+        }
+    }
+
+    fn pointer_dispatch(
+        &mut self,
+        point: Point2D<f32>,
+        pointer: u32,
+        device: PointerKind,
+        phase: PointerPhase,
+    ) {
+        self.dispatch(InputEvent::pointer(point, pointer, device, phase));
+    }
+
+    /// Scrolls on this thread rather than sending the wheel to the DOM.
+    ///
+    /// This is the one interaction the split exists to keep off the round
+    /// trip: the frame already in hand carries everything needed to move its
+    /// content, so the pixels change this vsync instead of after a restyle
+    /// and relayout. Pointer and touch input still go to the DOM thread,
+    /// where hit testing and the gesture recognizer live.
     fn wheel_event(&mut self, delta: MouseScrollDelta) {
         let Some(position) = self.pointer else { return };
         let Some(point) = self.css_point(position) else {
             return;
         };
         // Trackpads and high-resolution wheels report pixels; a notched wheel
-        // reports lines, which is exactly what `DeltaMode::Line` is for.
-        // Both invert: a wheel scrolled away from the user moves the reading
-        // position forward, which is `+deltaY`.
-        let event = match delta {
+        // reports lines. Both invert: a wheel scrolled away from the user
+        // moves the reading position forward, which is `+deltaY`.
+        let (delta, lines) = match delta {
             MouseScrollDelta::PixelDelta(pixels) => {
                 let scale = self
                     .window
@@ -289,16 +338,19 @@ impl MacApplication {
                     clippy::cast_possible_truncation,
                     reason = "wheel deltas are far inside f32 range"
                 )]
-                InputEvent::wheel(
-                    point,
-                    (-(pixels.x / scale) as f32, -(pixels.y / scale) as f32),
+                (
+                    Vector2D::new(-(pixels.x / scale) as f32, -(pixels.y / scale) as f32),
+                    false,
                 )
             }
-            MouseScrollDelta::LineDelta(x, y) => {
-                InputEvent::wheel_with_mode(point, (-x, -y), DeltaMode::Line)
-            }
+            MouseScrollDelta::LineDelta(x, y) => (Vector2D::new(-x, -y), true),
         };
-        self.dispatch(event);
+        let mode = if lines {
+            DeltaMode::Line
+        } else {
+            DeltaMode::Pixel
+        };
+        self.dispatch(InputEvent::wheel_with_mode(point, (delta.x, delta.y), mode));
     }
 
     fn touch_event(&mut self, touch: Touch) {
@@ -316,7 +368,7 @@ impl MacApplication {
             reason = "winit touch ids are per-contact counters"
         )]
         let id = touch.id as u32;
-        self.dispatch(InputEvent::pointer(point, id, PointerKind::Touch, phase));
+        self.pointer_dispatch(point, id, PointerKind::Touch, phase);
     }
 
     /// A physical window position as the viewport CSS-px point the engine
@@ -422,13 +474,19 @@ impl ApplicationHandler<UserEvent> for MacApplication {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::Command(command) => self.command(event_loop, command),
+            UserEvent::FramePublished => {
+                if self.running && !self.occluded {
+                    self.request_redraw();
+                }
+            }
         }
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        // Re-request only while the document has something new to paint: a
+        // Re-request only while a published frame is actually waiting: a
         // static scene must not turn `ControlFlow::Wait` into a permanent
-        // full-refresh render loop.
+        // full-refresh render loop. A frame the DOM thread produces later
+        // wakes this loop through the proxy instead.
         if self.running
             && !self.occluded
             && self
@@ -515,20 +573,6 @@ impl WindowGraphics {
             renderer,
             ..
         } = self;
-        // Keep the retained target current even when the compositor cannot
-        // provide a surface texture. Screenshots read this target directly.
-        {
-            let handle = &context.devices[surface.dev_id];
-            renderer
-                .render_to_texture(
-                    &handle.device,
-                    &handle.queue,
-                    scene,
-                    &surface.target_view,
-                    &render_params(Color::WHITE, size.width, size.height),
-                )
-                .map_err(|error| CliError::Render(error.to_string()))?;
-        }
         let (surface_texture, reconfigure_after) = match surface.surface.get_current_texture() {
             vello::wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
             vello::wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
@@ -550,6 +594,15 @@ impl WindowGraphics {
             }
         };
         let handle = &context.devices[surface.dev_id];
+        renderer
+            .render_to_texture(
+                &handle.device,
+                &handle.queue,
+                scene,
+                &surface.target_view,
+                &render_params(Color::WHITE, size.width, size.height),
+            )
+            .map_err(|error| CliError::Render(error.to_string()))?;
         let output_view = surface_texture
             .texture
             .create_view(&vello::wgpu::TextureViewDescriptor::default());

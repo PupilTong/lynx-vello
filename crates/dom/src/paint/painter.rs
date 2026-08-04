@@ -33,8 +33,8 @@
 //!   pixels and natural size.
 
 use crate::vello::Scene;
-use crate::visual::PaintOrder;
-use crate::{Document, ImageStore};
+use crate::visual::frame::Frame;
+use crate::{ImageStore, Vector2D};
 
 /// Reusable paint state owned by exactly one [`Document`].
 ///
@@ -59,15 +59,33 @@ impl std::fmt::Debug for Painter {
 }
 
 impl Painter {
-    pub(crate) fn paint<T>(&mut self, document: &Document<T>, frame: &PaintOrder) {
+    /// Paints one resolved [`Frame`] at the scroll position it was built
+    /// with.
+    pub(crate) fn paint(&mut self, frame: &Frame) {
+        self.paint_scrolled(frame, &[]);
+    }
+
+    /// [`Self::paint`] with the renderer's own scroll offsets, indexed by the
+    /// frame's scroll arena.
+    ///
+    /// Where an offset differs from a scroll node's baked one, the enclosed
+    /// content is translated to match — so a host can scroll a frame it
+    /// already holds, at its own frame rate, without waiting for the document
+    /// to restyle, relayout, and republish. `&[]` is exactly [`Self::paint`].
+    ///
+    /// The correction is a pure viewport-space translation per scroll chain
+    /// (see [`ScrollNode`](crate::ScrollNode)), exact for affine ancestor
+    /// transforms. It re-runs no layout, so scrolling this way cannot reveal
+    /// content the document has not laid out.
+    pub(crate) fn paint_scrolled(&mut self, frame: &Frame, offsets: &[Vector2D<f32>]) {
         self.scene_epoch = None;
         self.scene.reset();
         crate::paint::walker::walk(
             &mut self.scene,
             &mut self.scratch,
-            document,
             frame,
             &self.images,
+            offsets,
         );
         // Publish freshness only after the walk completed. If painting
         // panics, the partial scene must remain stale and be rebuilt on the
@@ -95,7 +113,12 @@ mod tests {
     use crate::{Document, StylesheetOrigin};
 
     #[test]
-    fn a_failed_paint_cannot_leave_a_partial_scene_marked_current() {
+    fn a_stale_order_fails_closed_before_it_can_reach_the_painter() {
+        // The painter is frame-driven now, and a `Frame` owns its own styles,
+        // geometry, and paragraphs — so it cannot disagree with itself and
+        // there is nothing left to fail closed *at paint time*. The check
+        // moved one step earlier, to the resolution boundary, which is where
+        // a paint order and the live document actually get mixed.
         let mut document = Document::new(crate::tree::document::tests::device());
         document.add_stylesheet(
             "page { width: 10px; height: 10px; background-color: teal; }",
@@ -103,17 +126,17 @@ mod tests {
         );
         let root = document.create_element("page", ());
         document.append_document_element(root);
-        let frame = document.build_paint_order();
+        let order = document.build_paint_order();
 
         document.set_inline_style(root, "display: none");
         document.layout();
 
-        let mut painter = document.painter.take();
         let current_epoch = document.visual_epoch();
-        painter.scene_epoch = Some(current_epoch);
-        let result = catch_unwind(AssertUnwindSafe(|| painter.paint(&document, &frame)));
+        let result = catch_unwind(AssertUnwindSafe(|| document.resolve_frame(order)));
+        assert!(result.is_err(), "the stale order must fail closed");
 
-        assert!(result.is_err(), "the stale frame must fail closed");
-        assert!(painter.needs_render(current_epoch));
+        // And the retained scene is untouched by the attempt: nothing was
+        // painted, so the next render still has work to do.
+        assert!(document.painter.borrow().needs_render(current_epoch));
     }
 }

@@ -183,11 +183,35 @@ useful signal for currently-compatible versions of those libraries.
   `bobcat-core` (the layer chain: `bobcat_core::lynx_element::dom::…` reaches
   every lower layer) and the sibling `lynx-template-decoder` utility.
   `bobcat -i file:///…` decodes and boots one web bundle; other URL schemes
-  remain rejected at the boundary. One reusable `FramePipeline` owns the
-  QuickJS-backed element runtime and borrows the scene retained by its
-  document-owned private painter, so the macOS headed path and cross-platform
-  headless path share script/layout/paint logic rather than
-  maintaining parallel render paths.
+  remain rejected at the boundary. **This is where the pipeline is split into
+  two threads.** A spawned *DOM thread* (`dom_thread`) owns the QuickJS realm,
+  the element tree, and the document — script, CSS, layout, paint order and
+  z-index — and publishes `dom::Frame` snapshots into a latest-wins slot. The
+  *paint thread* is the process's main thread, because winit's event loop and
+  the wgpu surface must live there; its reusable `FramePipeline` owns a
+  `dom::FrameRenderer` — which holds the frame, its scroll offsets, the scene,
+  and the image store together — plus the render target, and both the macOS
+  headed path and the cross-platform headless path drive it. The CLI owns no
+  scroll policy of its own: it forwards events and relays `ScrollUpdate`s. Requests
+  are advisory (`Publish`, answered only if something changed) or a barrier
+  (`Sync`, which the `frame`/`screenshot` console commands and boot take to
+  stay deterministic); a burst is drained before one frame is built, so
+  pointer input costs one layout pass rather than one per event. A panic on
+  the DOM thread is caught, recorded, and surfaced rather than becoming a
+  silent freeze. **Scrolling and hit testing are answered wherever the frame
+  is**, by `dom::FrameRenderer::handle_input` — engine behavior, so it lives
+  in `dom` (`scroll::frame_scroller`), not in the process shell. The frame
+  carries a scroll arena and everything hit testing reads, so wheel and
+  touch/pen drags move pixels this vsync instead of after a DOM round trip.
+  The gesture recognizer is *shared* with `Document::handle_input`, not
+  reimplemented: `input::Drag` is one value spending one slop toll, because
+  two copies would mean the same drag travelling different distances
+  depending on which side answered it. Offsets go back as absolute `scroll_to`s
+  carrying the frame's removal epoch, so a `NodeId` that was recycled in the
+  meantime is dropped rather than scrolling a stranger. Pointer and wheel
+  events are still forwarded for *targeting*, with `default_prevented` set
+  once the paint side owns the gesture — the seam `dom::input` documents for a
+  host driving its own scroll physics — so nothing scrolls twice.
   Headed mode uses a native winit window with display-backed vsync and tracks
   both logical viewport size and device-pixel ratio. Headless mode uses a
   configurable synthetic vsync rate, skips catch-up bursts after slow frames,
@@ -377,7 +401,16 @@ useful signal for currently-compatible versions of those libraries.
   `visibility`, `pointer-events`, border-radius, and inverse-matrix point
   mapping). It walks the same flattened box-tree the layout host feeds the
   engine, so `display: contents` dissolves identically in paint and hit
-  order. Group-effect stacking contexts (`opacity`, `filter`,
+  order. `Document::frame` resolves that private order into a `dom::Frame`:
+  an **opaque**, `Send + Sync` paint snapshot owning every style, box metric,
+  paragraph, and tree-walk result painting needs, so a renderer holding one
+  borrows no document and the frame cannot go stale. It is the paint input on
+  both paths — `Document::render` in process, `dom::FrameRenderer` off the
+  document's thread — so there is one painter rather than two that could
+  drift. The encapsulation is unchanged: the paint order, its items, clips,
+  and layers stay crate-internal either way; what a `Frame` exposes is
+  behavioral (`hit_test`, `scroll_target`, `scrolls`, the epochs). Group-effect
+  stacking contexts (`opacity`, `filter`,
   `clip-path`, `mask`, plus the storage-only blend/isolation triggers)
   additionally surface as `RenderLayer` entries — preorder, parent-linked,
   each with the establishing element, its world transform/size, and the
@@ -417,7 +450,18 @@ useful signal for currently-compatible versions of those libraries.
   into the frame — a scroll container's contents are translated as they are
   collected, with containing-block-keyed escape sharing the clip chain's own
   struct, so painting and hit testing see scrolled geometry and the lower
-  render/GPU floor needs no knowledge of scrolling. Clipping is likewise per axis, because
+  render/GPU floor needs no knowledge of scrolling. It *also* emits a public
+  `ScrollNode` arena (baked offset, max offset, user-scrollable axes,
+  containing-block parent, and the container's world linear map) that every
+  item, clip, and layer is tagged against, so a renderer holding a `Frame` can
+  move away from the baked position without a DOM round trip: the correction
+  is a pure viewport-space translation per chain, exact for affine ancestors
+  and summable across nested scrollers, and offsets reached that way come back
+  through `Document::scroll_to`, which stays authoritative for CSSOM-View and
+  layout. `Frame::scroll_target` routes a gesture by hit testing and then
+  walking the target's scroll chain — the same resolution
+  `Document::handle_input` performs, so there is one answer to "what scrolls
+  here" rather than two. Clipping is likewise per axis, because
   `clip` on one axis with `visible` on the other is a pair the style adjuster
   leaves mixed; a one-axis clip is an infinite strip and carries no radii.
   Its `input` module is the host seam: `InputEvent` is plain `Copy` data
