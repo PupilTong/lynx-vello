@@ -22,6 +22,7 @@ use crate::tree::node::Node;
 pub type NodeId = usize;
 
 pub(crate) const DOCUMENT_NODE_ID: NodeId = 0;
+pub(crate) const DOCUMENT_ELEMENT_NODE_ID: NodeId = 1;
 const INITIAL_NODE_CAPACITY: usize = 8;
 
 pub(crate) enum PayloadSlot<T> {
@@ -184,7 +185,7 @@ pub struct Document<T> {
 impl<T: fmt::Debug> fmt::Debug for Document<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Document")
-            .field("root_element", &self.root_element().map(Node::id))
+            .field("document_element", &self.document_element().id())
             .field("style_engine", &self.style_engine)
             .field("nodes", &self.tree.nodes)
             .finish_non_exhaustive()
@@ -192,8 +193,12 @@ impl<T: fmt::Debug> fmt::Debug for Document<T> {
 }
 
 impl<T> Document<T> {
+    /// Creates a document whose permanent document element already exists:
+    /// `root_tag` / `root_payload` become the element at
+    /// [`Self::document_element`]. The tag is injected rather than known —
+    /// this crate still owns no tag vocabulary.
     #[must_use]
-    pub fn new(device: crate::style::device::Device) -> Self {
+    pub fn new(device: crate::style::device::Device, root_tag: &str, root_payload: T) -> Self {
         let style_engine = StyleEngine::new(device.into_stylo(), about_blank_url_data());
         let lock = style_engine.lock();
         let url_data = style_engine.url_data();
@@ -207,7 +212,7 @@ impl<T> Document<T> {
         tree.insert_side_state(root, PayloadSlot::Document);
         let mut layout = DocumentLayoutState::new();
         layout.insert(root);
-        Self {
+        let mut document = Self {
             style_engine,
             tree,
             layout,
@@ -221,7 +226,17 @@ impl<T> Document<T> {
             layout_root_dirty: false,
             last_layout_inputs: None,
             input: crate::input::InputState::default(),
-        }
+        };
+        let root = document.create_element(root_tag, root_payload);
+        assert_eq!(
+            root, DOCUMENT_ELEMENT_NODE_ID,
+            "the document element must occupy slab slot one"
+        );
+        document.live_node_mut(DOCUMENT_NODE_ID).children.push(root);
+        document.live_node_mut(root).parent = Some(DOCUMENT_NODE_ID);
+        document.mark_subtree_dirty(root);
+        document.invalidate_layout(root);
+        document
     }
 
     pub(crate) fn input_state_mut(&mut self) -> &mut crate::input::InputState {
@@ -352,9 +367,15 @@ impl<T> Document<T> {
             .expect("the document node is never removed")
     }
 
+    /// The document element — the permanent root element created with the
+    /// document itself. The document node's child list is structurally
+    /// immutable after construction: this is its only child, forever.
     #[must_use]
-    pub fn root_element(&self) -> Option<&Node<T>> {
-        self.root_node().children().find(|node| node.is_element())
+    pub fn document_element(&self) -> &Node<T> {
+        self.tree
+            .nodes
+            .get(DOCUMENT_ELEMENT_NODE_ID)
+            .expect("the document element is never removed")
     }
 
     pub(crate) fn begin_flush_phase(&self) -> FlushPhaseToken {
@@ -388,30 +409,6 @@ impl<T> Document<T> {
         self.tree.insert_side_state(id, PayloadSlot::Node(payload));
         self.layout.insert(id);
         id
-    }
-
-    pub fn append_document_element(&mut self, child: NodeId) {
-        assert_ne!(
-            child, DOCUMENT_NODE_ID,
-            "Document::append_document_element cannot append the document to itself"
-        );
-        assert!(
-            self.get(child).is_some_and(Node::is_element),
-            "Document::append_document_element requires a live element"
-        );
-        if self.root_element().map(Node::id) == Some(child) {
-            return;
-        }
-        assert!(
-            self.root_element().is_none(),
-            "Document::append_document_element: a document may have only one element child"
-        );
-
-        self.detach(child);
-        self.live_node_mut(DOCUMENT_NODE_ID).children.push(child);
-        self.live_node_mut(child).parent = Some(DOCUMENT_NODE_ID);
-        self.mark_subtree_dirty(child);
-        self.invalidate_layout(child);
     }
 
     #[must_use]
@@ -511,6 +508,10 @@ impl<T> Document<T> {
             child, DOCUMENT_NODE_ID,
             "Document::detach cannot detach the document node"
         );
+        assert_ne!(
+            child, DOCUMENT_ELEMENT_NODE_ID,
+            "Document::detach cannot detach the permanent document element"
+        );
         let old_parent = self
             .get(child)
             .expect("stale NodeId passed to Document::detach")
@@ -541,15 +542,21 @@ impl<T> Document<T> {
         };
         self.live_node_mut(child).parent = None;
 
-        if parent != DOCUMENT_NODE_ID {
-            self.note_child_list_change(parent, removed_index);
-        }
+        debug_assert_ne!(
+            parent, DOCUMENT_NODE_ID,
+            "only the permanent document element parents to the document node"
+        );
+        self.note_child_list_change(parent, removed_index);
     }
 
     pub fn remove_subtree(&mut self, id: NodeId) -> Vec<T> {
         assert_ne!(
             id, DOCUMENT_NODE_ID,
             "Document::remove_subtree cannot remove the document node"
+        );
+        assert_ne!(
+            id, DOCUMENT_ELEMENT_NODE_ID,
+            "Document::remove_subtree cannot remove the permanent document element"
         );
         self.detach(id);
         // Freed ids may be recycled by later creations: any retained
@@ -788,14 +795,11 @@ pub(crate) mod tests {
 
     #[test]
     fn the_document_owns_render_resources_and_schedules_its_scene() {
-        let mut document = Document::new(device());
+        let mut document = Document::new(device(), "page", ());
         document.add_stylesheet(
             "page { width: 10px; height: 10px; background-color: red; }",
             crate::StylesheetOrigin::Author,
         );
-        let root = document.create_element("page", ());
-        document.append_document_element(root);
-
         assert!(document.needs_render());
         assert!(document.render());
         assert!(!document.needs_render());
@@ -809,7 +813,7 @@ pub(crate) mod tests {
 
     #[test]
     fn slabs_follow_primary_node_lifetime_and_id_reuse() {
-        let mut document: Document<u32> = Document::new(device());
+        let mut document: Document<u32> = Document::new(device(), "page", 1);
         let id = document.create_element("view", 7);
 
         assert!(document.tree.nodes.contains(id));
@@ -852,25 +856,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "internal tree links always resolve")]
-    fn root_element_panics_on_a_dangling_document_child() {
-        let mut document: Document<()> = Document::new(device());
-        document
-            .tree
-            .nodes
-            .get_mut(DOCUMENT_NODE_ID)
-            .expect("the document node is present")
-            .children
-            .push(usize::MAX);
-
-        let _ = document.root_element();
-    }
-
-    #[test]
     fn remove_subtree_prunes_the_parked_id_set_so_a_reused_slot_is_not_stale() {
-        let mut document: Document<()> = Document::new(device());
-        let a = document.create_element("view", ());
-        document.append_document_element(a);
+        let mut document: Document<()> = Document::new(device(), "page", ());
+        let a = document.document_element().id();
         let b = document.create_element("view", ());
         document.append_child(a, b);
 
@@ -893,14 +881,13 @@ pub(crate) mod tests {
 
     #[test]
     fn detached_snapshot_survives_an_unrelated_connected_flush() {
-        let mut document: Document<()> = Document::new(device());
+        let mut document: Document<()> = Document::new(device(), "page", ());
         document.add_stylesheet(".hot { color: red; }", crate::StylesheetOrigin::Author);
-        let root = document.create_element("page", ());
+        let root = document.document_element().id();
         let connected = document.create_element("view", ());
         let detached = document.create_element("view", ());
         document.append_child(root, connected);
         document.append_child(root, detached);
-        document.append_document_element(root);
         document.flush_styles_with_damage_sink(&mut |_, _| {});
 
         document.detach(detached);
@@ -937,13 +924,12 @@ pub(crate) mod tests {
 
     #[test]
     fn snapshot_queue_coalesces_and_subtree_removal_purges_reusable_ids() {
-        let mut document: Document<()> = Document::new(device());
-        let root = document.create_element("page", ());
+        let mut document: Document<()> = Document::new(device(), "page", ());
+        let root = document.document_element().id();
         let removed = document.create_element("view", ());
         let descendant = document.create_element("view", ());
         document.append_child(removed, descendant);
         document.append_child(root, removed);
-        document.append_document_element(root);
         document.flush_styles_with_damage_sink(&mut |_, _| {});
 
         document.set_classes(removed, "hot");

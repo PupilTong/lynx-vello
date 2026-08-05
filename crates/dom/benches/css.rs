@@ -106,14 +106,13 @@ fn author_sheet() -> String {
 }
 
 fn document_with_author_sheet() -> Document<()> {
-    let mut doc = Document::new(device(800.0, 600.0));
+    let mut doc = Document::new(device(800.0, 600.0), "page", ());
     doc.add_stylesheet(&author_sheet(), StylesheetOrigin::Author);
     doc
 }
 
 fn build_tree(doc: &mut Document<()>) -> NodeId {
-    let root = doc.create_element("page", ());
-    doc.append_document_element(root);
+    let root = doc.document_element().id();
     let mut probe = root;
     let mut class = 0usize;
     for row in 0..32 {
@@ -152,7 +151,7 @@ fn parse_author_sheet_text(bencher: divan::Bencher) {
         .counter(ItemsCount::new(PARSE_BATCH))
         .with_inputs(|| {
             (0..PARSE_BATCH)
-                .map(|_| Document::<()>::new(device(800.0, 600.0)))
+                .map(|_| Document::<()>::new(device(800.0, 600.0), "page", ()))
                 .collect::<Vec<_>>()
         })
         .bench_local_values(|mut pairs| {
@@ -296,13 +295,12 @@ fn inheritance_deep_chain(bencher: divan::Bencher) {
         .with_inputs(|| {
             (0..INHERITANCE_BATCH)
                 .map(|_| {
-                    let mut doc: Document<()> = Document::new(device(800.0, 600.0));
+                    let mut doc: Document<()> = Document::new(device(800.0, 600.0), "page", ());
                     doc.add_stylesheet(
                         "page { color: rgb(120, 30, 40); font-size: 18px; }",
                         StylesheetOrigin::Author,
                     );
-                    let root = doc.create_element("page", ());
-                    doc.append_document_element(root);
+                    let root = doc.document_element().id();
                     let mut parent = root;
                     for _ in 0..256 {
                         let child = doc.create_element("view", ());
@@ -333,7 +331,7 @@ fn var_chain_cascade(bencher: divan::Bencher) {
         .with_inputs(|| {
             (0..VAR_CHAIN_BATCH)
                 .map(|_| {
-                    let mut doc = Document::new(device(800.0, 600.0));
+                    let mut doc = Document::new(device(800.0, 600.0), "page", ());
                     doc.add_stylesheet(&css, StylesheetOrigin::Author);
                     let probe = build_tree(&mut doc);
                     (doc, probe)

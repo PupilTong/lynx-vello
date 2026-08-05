@@ -479,7 +479,7 @@ mod tests {
 
     /// A 100×100 `overflow: scroll` list inside a 200×200 scrolling page.
     fn scrolling_page() -> (Document<()>, NodeId, NodeId, NodeId) {
-        let mut document: Document<()> = Document::new(device());
+        let mut document: Document<()> = Document::new(device(), "page", ());
         document.add_stylesheet(
             "page { display: flex; width: 800px; height: 600px; }
              .outer { display: flex; overflow: scroll; width: 200px; height: 200px; }
@@ -488,8 +488,7 @@ mod tests {
              .filler { flex-shrink: 0; width: 100px; height: 1000px; }",
             StylesheetOrigin::Author,
         );
-        let root = document.create_element("page", ());
-        document.append_document_element(root);
+        let root = document.document_element().id();
         let outer = document.create_element("view", ());
         document.add_class(outer, "outer");
         document.append_child(root, outer);
@@ -722,13 +721,12 @@ mod tests {
 
     #[test]
     fn an_event_over_nothing_scrollable_reports_a_target_and_no_action() {
-        let mut document: Document<()> = Document::new(device());
+        let mut document: Document<()> = Document::new(device(), "page", ());
         document.add_stylesheet(
             "page { display: flex; width: 800px; height: 600px; }",
             StylesheetOrigin::Author,
         );
-        let root = document.create_element("page", ());
-        document.append_document_element(root);
+        let root = document.document_element().id();
         document.layout();
 
         let response =

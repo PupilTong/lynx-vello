@@ -15,6 +15,10 @@ use crate::{ElementId, PAGE_TAG, VIEW_TAG};
 /// requires this layer to validate handles before calling the crash-on-misuse
 /// DOM core, so every fallible PAPI entry point returns this instead of
 /// panicking.
+///
+/// [`crate::ElementOpRecorder`] answers PAPI calls with these same errors in
+/// the same precedence order (the mirroring law in `ops.rs`); a change to any
+/// validation below must change the recorder in the same commit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PapiError {
@@ -23,9 +27,13 @@ pub enum PapiError {
     /// Appending `child` under `parent` would put a node inside its own
     /// subtree.
     WouldCycle { parent: ElementId, child: ElementId },
-    /// The page element cannot be given a parent — it is the document element
-    /// by construction, and `__FlushElementTree` is what attaches it.
+    /// The page element cannot be given a parent — it is the permanent
+    /// document element, pre-created with the document.
     CannotReparentPage,
+    /// The page element cannot be dropped — the document element exists for
+    /// the document's whole life (recorded limit: web-core would let a page
+    /// be dropped and re-created, but no bundle does).
+    CannotRemovePage,
 }
 
 impl fmt::Display for PapiError {
@@ -41,6 +49,7 @@ impl fmt::Display for PapiError {
             Self::CannotReparentPage => {
                 formatter.write_str("the page element cannot be given a parent")
             }
+            Self::CannotRemovePage => formatter.write_str("the page element cannot be dropped"),
         }
     }
 }
@@ -55,29 +64,47 @@ pub struct ElementTree {
     /// state stays in the context-owned arena.
     document: Document<ElementId>,
     elements: ElementArena,
-    page: Option<ElementId>,
+    /// Whether `__CreatePage` has run. The page element itself is permanent —
+    /// pre-created with the document — so this only gates the one-time
+    /// binding of the page's component fields.
+    page_created: bool,
     /// `__CreatePage`'s `componentID` — a string name web-core keeps in a side
     /// table rather than on the element, so it never reaches selectors.
     page_component_id: String,
-    page_attached: bool,
     config: PageConfig,
 }
 
+/// The page's permanent unique id: the document element is pre-created with
+/// the document, so the first live arena slot is always the page. Ids are
+/// opaque handles to the main-thread script, which receives this one from
+/// `__CreatePage` like any other.
+pub(crate) const PAGE_UNIQUE_ID: ElementId = 1;
+
 impl ElementTree {
-    /// Creates an empty tree for `viewport` with `config`'s UA cascade
-    /// installed. No page exists until `__CreatePage`.
+    /// Creates a tree for `viewport` with `config`'s UA cascade installed.
+    /// The page element already exists as the document element;
+    /// `__CreatePage` binds its component fields and returns its permanent
+    /// id.
     #[must_use]
     pub fn new(viewport: Viewport, config: PageConfig) -> Self {
-        let mut document = Document::new(viewport.device());
+        let mut document = Document::new(viewport.device(), PAGE_TAG, PAGE_UNIQUE_ID);
         document.add_stylesheet(&ua_stylesheet(config), StylesheetOrigin::UserAgent);
-        Self {
+        let elements = ElementArena::new();
+        assert_eq!(
+            elements.reserve(),
+            PAGE_UNIQUE_ID,
+            "the first live arena slot is reserved for the page"
+        );
+        let mut tree = Self {
             document,
-            elements: ElementArena::new(),
-            page: None,
+            elements,
+            page_created: false,
             page_component_id: String::new(),
-            page_attached: false,
             config,
-        }
+        };
+        let page_node = tree.document.document_element().id();
+        tree.elements.insert(PAGE_UNIQUE_ID, page_node, 0, 0);
+        tree
     }
 
     /// The underlying document for trusted workspace composition and tests.
@@ -148,10 +175,11 @@ impl ElementTree {
         self.config
     }
 
-    /// The page element, once `__CreatePage` has run.
+    /// The page element, once `__CreatePage` has run. The element itself is
+    /// permanent; `None` only means the script has not named it yet.
     #[must_use]
-    pub const fn page(&self) -> Option<ElementId> {
-        self.page
+    pub fn page(&self) -> Option<ElementId> {
+        self.page_created.then_some(PAGE_UNIQUE_ID)
     }
 
     /// The `componentID` the page was created with; empty before
@@ -160,14 +188,6 @@ impl ElementTree {
     #[must_use]
     pub fn page_component_id(&self) -> &str {
         &self.page_component_id
-    }
-
-    /// Whether the page has been attached to the document — i.e. whether
-    /// `__FlushElementTree` has committed at least once.
-    #[cfg(test)]
-    #[must_use]
-    pub const fn is_flushed(&self) -> bool {
-        self.page_attached
     }
 
     /// The DOM node a handle names, or `None` if the handle is not live.
@@ -194,18 +214,20 @@ impl ElementTree {
     /// already exists and ignores its arguments. The page is created detached;
     /// [`Self::flush_element_tree`] is what puts it in the document.
     pub fn create_page(&mut self, component_id: &str, component_css_id: i32) -> ElementId {
-        if let Some(page) = self.page {
-            return page;
+        if !self.page_created {
+            // `componentID` is a *string* name, not the numeric unique id, and
+            // web-core keeps it out of the DOM — `create_element_common` files
+            // it in a side table. Recording it here rather than as an
+            // attribute keeps it invisible to selector matching; the DOM
+            // payload remains only the context-owned unique id.
+            component_id.clone_into(&mut self.page_component_id);
+            self.elements
+                .get_mut(PAGE_UNIQUE_ID)
+                .expect("the page arena entry is permanent")
+                .set_component_css_id(component_css_id);
+            self.page_created = true;
         }
-        let id = self.insert(PAGE_TAG, 0, component_css_id);
-        // `componentID` is a *string* name, not the numeric unique id, and
-        // web-core keeps it out of the DOM — `create_element_common` files it
-        // in a side table. Recording it here rather than as an attribute keeps
-        // it invisible to selector matching; the DOM payload remains only the
-        // context-owned unique id.
-        component_id.clone_into(&mut self.page_component_id);
-        self.page = Some(id);
-        id
+        PAGE_UNIQUE_ID
     }
 
     /// `__CreateView(parentComponentUniqueID)`.
@@ -240,7 +262,7 @@ impl ElementTree {
         let child_node = self
             .node_id(child)
             .ok_or(PapiError::UnknownElement(child))?;
-        if self.page == Some(child) {
+        if child == PAGE_UNIQUE_ID {
             return Err(PapiError::CannotReparentPage);
         }
         if parent == child || self.document.is_ancestor(child_node, parent_node) {
@@ -256,10 +278,11 @@ impl ElementTree {
     /// The DOM subtree and every corresponding `LynxElement` are dropped
     /// together. Their `Vec` entries remain as permanent `None` tombstones, so
     /// no later creation can reuse any of their unique ids.
-    pub fn drop_element(&mut self, id: ElementId) -> bool {
-        let Some(node) = self.node_id(id) else {
-            return false;
-        };
+    pub fn drop_element(&mut self, id: ElementId) -> Result<(), PapiError> {
+        if id == PAGE_UNIQUE_ID {
+            return Err(PapiError::CannotRemovePage);
+        }
+        let node = self.node_id(id).ok_or(PapiError::UnknownElement(id))?;
         let retired_ids = self.document.remove_subtree(node);
         for unique_id in retired_ids {
             let retired = self.elements.retire(unique_id);
@@ -268,34 +291,16 @@ impl ElementTree {
                 "a removed DOM node must have a live Lynx element"
             );
         }
-
-        if self.page == Some(id) {
-            self.page = None;
-            self.page_component_id.clear();
-            self.page_attached = false;
-        }
-        true
+        Ok(())
     }
 
     /// `__FlushElementTree()` — the single commit boundary.
     ///
-    /// web-core withholds exactly one thing until the first flush: the page
-    /// root is not in the rendered document until then. We do the same, and
-    /// then run the style + layout pass that makes every pending mutation
-    /// paint-eligible. Returns `false` when there is no page to commit.
-    pub fn flush_element_tree(&mut self) -> bool {
-        let Some(page) = self.page else {
-            return false;
-        };
-        let Some(page_node) = self.node_id(page) else {
-            return false;
-        };
-        if !self.page_attached {
-            self.document.append_document_element(page_node);
-            self.page_attached = true;
-        }
+    /// The page is permanently attached (it is the document element by
+    /// construction), so a commit is exactly the style + layout pass that
+    /// makes every pending mutation paint-eligible.
+    pub fn flush_element_tree(&mut self) {
         self.document.layout();
-        true
     }
 
     fn insert(
@@ -357,16 +362,16 @@ mod tests {
         let first_node = tree.node_id(first).unwrap();
         let first_unique_id = *tree.document().get(first_node).unwrap().payload();
 
-        assert!(tree.drop_element(first));
+        tree.drop_element(first).unwrap();
         assert!(tree.node_id(first).is_none());
 
         let second = tree.create_view(0).unwrap();
         let second_node = tree.node_id(second).unwrap();
         let second_unique_id = *tree.document().get(second_node).unwrap().payload();
 
-        assert_eq!(tree.elements.len(), 3);
-        assert_eq!(first_unique_id, 1);
-        assert_eq!(second_unique_id, 2);
+        assert_eq!(tree.elements.len(), 4);
+        assert_eq!(first_unique_id, 2);
+        assert_eq!(second_unique_id, 3);
         assert_eq!(second, first + 1);
         assert!(tree.node_id(first).is_none());
     }
@@ -378,13 +383,13 @@ mod tests {
         let child = tree.create_view(0).unwrap();
         tree.append_element(parent, child).unwrap();
 
-        assert!(tree.drop_element(parent));
+        tree.drop_element(parent).unwrap();
         assert!(tree.node_id(parent).is_none());
         assert!(tree.node_id(child).is_none());
-        assert_eq!(tree.elements.len(), 3);
+        assert_eq!(tree.elements.len(), 4);
 
         let next = tree.create_view(0).unwrap();
-        assert_eq!(next, 3);
+        assert_eq!(next, 4);
     }
 
     #[test]
@@ -527,33 +532,33 @@ mod tests {
     }
 
     #[test]
-    fn the_page_joins_the_document_only_on_the_first_flush() {
+    fn the_page_is_the_document_element_from_birth() {
         let mut tree = tree();
+        let document_element = tree.document().document_element().id();
         let page = tree.create_page("page", 0);
-        assert!(!tree.is_flushed());
-        assert!(tree.document().root_element().is_none());
+        assert_eq!(tree.node_id(page), Some(document_element));
 
-        assert!(tree.flush_element_tree());
-        assert!(tree.is_flushed());
-        let page_node = tree.node_id(page).unwrap();
-        assert_eq!(
-            tree.document().root_element().map(dom::Node::id),
-            Some(page_node)
-        );
-
-        // A second flush is a plain re-commit, not a second attach.
-        assert!(tree.flush_element_tree());
-        assert_eq!(
-            tree.document().root_element().map(dom::Node::id),
-            Some(page_node)
-        );
+        // Flushes are plain re-commits; the attachment never changes.
+        tree.flush_element_tree();
+        assert_eq!(tree.document().document_element().id(), document_element);
+        tree.flush_element_tree();
+        assert_eq!(tree.document().document_element().id(), document_element);
     }
 
     #[test]
-    fn flushing_without_a_page_is_a_no_op() {
+    fn flushing_before_create_page_commits_the_permanent_page() {
         let mut tree = tree();
-        assert!(!tree.flush_element_tree());
-        assert!(!tree.is_flushed());
+        assert!(tree.page().is_none());
+        tree.flush_element_tree();
+        // The page is not yet script-visible, but it is real: the commit
+        // styled it.
+        assert!(tree.page().is_none());
+        assert!(
+            tree.document()
+                .document_element()
+                .computed_style()
+                .is_some()
+        );
     }
 
     #[test]
@@ -654,7 +659,7 @@ mod tests {
             let view = tree.create_view(0).unwrap();
             tree.append_element(page, view).unwrap();
         }
-        assert!(tree.flush_element_tree());
+        tree.flush_element_tree();
     }
 
     #[test]

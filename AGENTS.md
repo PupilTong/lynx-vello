@@ -125,7 +125,14 @@ useful signal for currently-compatible versions of those libraries.
   own future type and remain statically dispatched. The default `quickjs`
   feature adds the internal QuickJS adapter,
   opaque QuickJS-backed view factory, and the concrete
-  `quickjs::MainThreadRuntime`;
+  `quickjs::MainThreadRuntime`. That runtime owns only the realm: its five
+  Element-PAPI host functions answer synchronously from `lynx-element`'s
+  `ElementOpRecorder` shadow (call-site validation and returned ids are
+  unchanged), and `__FlushElementTree` drains the recorded batch into the
+  commit sink injected at construction — `quickjs::local_commit_sink` for the
+  single-threaded composition, or a shell's own channel to the thread owning
+  the tree, with the flush blocking until the commit is acknowledged
+  (`quickjs::CommitError` names the two rejection shapes);
   `default-features = false` excludes QuickJS while preserving all external
   injection contracts. Workspace dependencies disable defaults explicitly;
   only an upper layer that wants the built-in engine enables `quickjs`.
@@ -184,12 +191,20 @@ useful signal for currently-compatible versions of those libraries.
   every lower layer) and the sibling `lynx-template-decoder` utility.
   `bobcat -i file:///…` decodes and boots one web bundle; other URL schemes
   remain rejected at the boundary. One reusable `FramePipeline` owns the
-  QuickJS-backed element runtime and borrows the scene retained by its
-  document-owned private painter, so the macOS headed path and cross-platform
-  headless path share script/layout/paint logic rather than
-  maintaining parallel render paths.
-  Headed mode uses a native winit window with display-backed vsync and tracks
-  both logical viewport size and device-pixel ratio. Headless mode uses a
+  `ElementTree` and borrows the scene retained by its document-owned private
+  painter, so the macOS headed path and cross-platform headless path share
+  script/layout/paint logic rather than maintaining parallel render paths;
+  `Program::split` separates it from the `ScriptJob` a shell may run anywhere.
+  Headed mode is a three-thread shell: the winit loop is the engine thread
+  (tree ownership, input, scrolling, commit application, style/layout/paint),
+  the script thread runs the QuickJS realm and blocks each
+  `__FlushElementTree` on the engine's acknowledgment, and the render thread
+  owns the GPU stack behind a latest-wins mailbox of cloned `vello::Scene`s
+  (`Send + Sync` by vello's static assertion), serving vsync, present, and
+  screenshots without ever occupying the engine. Headless mode stays
+  single-threaded through `local_commit_sink` — the wall-free composition
+  tests rely on. Headed mode uses a native winit window with display-backed
+  vsync and tracks both logical viewport size and device-pixel ratio. Headless mode uses a
   configurable synthetic vsync rate, skips catch-up bursts after slow frames,
   and retains its Vello renderer, render texture, and staging buffer across
   frames. Both modes expose a GDB-like stdin command prompt (`continue`,
@@ -210,7 +225,13 @@ useful signal for currently-compatible versions of those libraries.
   `defaultDisplayLinear` / `defaultOverflowVisible` page-config switches).
   This crate defines `type ElementId = u32` and the concrete, validated
   Element-PAPI operations on `ElementTree`; `bobcat-core` composes that type
-  directly and `dom` knows neither vocabulary.
+  directly and `dom` knows neither vocabulary. The same five calls exist as
+  data: `ElementOpRecorder` answers them script-side from a shadow of the
+  tree (same ids — both allocators are monotonic and never recycle — and the
+  same `PapiError`s in the same precedence order; the mirroring law in
+  `ops.rs`), and `ElementTree::apply` replays recorded `ElementOp` batches at
+  the flush boundary, asserting id lockstep. This seam is what lets a shell
+  put the script and the tree on different threads without sharing either.
   `ElementTree` owns a `dom::Document<ElementId>` plus an independent
   `Vec<Option<LynxElement>>` arena. This crate depends on `dom` **only** — stylo/euclid are reached through
   `dom`'s vocabulary re-exports — and re-exports `dom` whole as the next
@@ -233,8 +254,11 @@ useful signal for currently-compatible versions of those libraries.
   No public `paint_order` exists on either `ElementTree` or `Document`, and
   input builds its temporary hit-test frame internally. It does not impose a runtime
   tree-depth cap; recursive traversal hardening belongs in `dom`/`hughie`.
-  `flush_element_tree` is the single commit boundary: it
-  attaches the page on the first call and then runs style + layout. Recorded
+  `flush_element_tree` is the single commit boundary — a plain style +
+  layout pass: the page is the permanent document element, pre-created by
+  `ElementTree::new` with the fixed unique id 1 (ids are opaque handles to
+  script, so `__CreatePage` just binds the component fields and returns it),
+  and `__DropElement` on the page is a `PapiError` (recorded limit). Recorded
   limits (see the crate docs, which are authoritative): handles are ids rather
   than element objects; `parentComponentUniqueID` is recorded but not honored
   (there is no `__SetCSSId`); no `rpx`/`ppx` view-unit policy; the UA sheet
@@ -257,7 +281,13 @@ useful signal for currently-compatible versions of those libraries.
   in lockstep and assert they received that same key (the payload slab reserves
   a payload-less sentinel at document slot zero). Node removal drops all three
   entries before the ID can be reused (ONE TREE policy: nodes are created and
-  mutated only through `Document` methods). Computed styles remain with the
+  mutated only through `Document` methods). The **document element is
+  permanent and pre-created**: `Document::new(device, root_tag, root_payload)`
+  builds it at slot one (tag injected — the core still owns no tag
+  vocabulary), `document_element()` returns it non-optionally, and it can
+  never be detached or removed, so the document node's child list is
+  structurally immutable after construction and no "empty document" code path
+  exists in flush, layout, visual, or paint. Computed styles remain with the
   primary nodes; layout/text state does not. The crate's entire `unsafe`
   surface is two blocks — the arena backpointer deref and the
   `TElement::ensure_data` contract call — plus the `unsafe fn` signatures

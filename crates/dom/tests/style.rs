@@ -13,7 +13,7 @@ const GREEN: [u8; 3] = [0, 128, 0];
 const RED: [u8; 3] = [255, 0, 0];
 
 fn document() -> TestDocument {
-    Document::new(device(800.0, 600.0))
+    Document::new(device(800.0, 600.0), "page", ())
 }
 
 fn rgb([red, green, blue]: [u8; 3]) -> AbsoluteColor {
@@ -46,12 +46,11 @@ fn standard_cascade_is_embedder_neutral() {
         StylesheetOrigin::Author,
     );
 
-    let parent = doc.create_element("section", ());
+    let parent = doc.document_element().id();
     let child = doc.create_element("span", ());
     doc.add_class(parent, "parent");
     doc.add_class(child, "child");
     doc.append_child(parent, child);
-    doc.append_document_element(parent);
     doc.layout();
 
     let parent_style = doc.get(parent).unwrap().computed_style().unwrap();
@@ -74,9 +73,8 @@ fn id_class_and_style_attributes_are_reflected_dom_state() {
         r#"[id="target"][class~="hot"][style] { color: red; }"#,
         StylesheetOrigin::Author,
     );
-    let root = doc.create_element("page", ());
+    let root = doc.document_element().id();
     let target = doc.create_element("view", ());
-    doc.append_document_element(root);
     doc.append_child(root, target);
 
     doc.set_attribute(target, "id", "target");
@@ -116,12 +114,11 @@ fn id_class_and_style_attributes_are_reflected_dom_state() {
 fn style_traversal_skips_text_nodes_and_reaches_element_siblings() {
     let mut doc = document();
     doc.add_stylesheet("span { color: red; }", StylesheetOrigin::Author);
-    let root = doc.create_element("page", ());
+    let root = doc.document_element().id();
     let text = doc.create_text_node("hello", ());
     let span = doc.create_element("span", ());
     doc.append_child(root, text);
     doc.append_child(root, span);
-    doc.append_document_element(root);
 
     doc.layout();
 
@@ -141,13 +138,12 @@ fn text_data_changes_invalidate_the_parent_empty_selector() {
         StylesheetOrigin::Author,
     );
 
-    let root = doc.create_element("page", ());
+    let root = doc.document_element().id();
     let box_element = doc.create_element("view", ());
     let text = doc.create_text_node("", ());
     doc.add_class(box_element, "box");
     doc.append_child(box_element, text);
     doc.append_child(root, box_element);
-    doc.append_document_element(root);
 
     doc.layout();
     assert_color!(doc, box_element, RED, "an empty text node preserves :empty");
@@ -196,7 +192,7 @@ fn edge_child_selectors_ignore_interleaved_text_nodes_during_restyle() {
         StylesheetOrigin::Author,
     );
 
-    let root = doc.create_element("page", ());
+    let root = doc.document_element().id();
     let leading_a = doc.create_text_node("a", ());
     let leading_b = doc.create_text_node("b", ());
     let first = doc.create_element("view", ());
@@ -208,7 +204,6 @@ fn edge_child_selectors_ignore_interleaved_text_nodes_during_restyle() {
     for child in [leading_a, leading_b, first, last, trailing_a, trailing_b] {
         doc.append_child(root, child);
     }
-    doc.append_document_element(root);
     doc.layout();
 
     assert_color!(doc, first, RED);
@@ -247,11 +242,10 @@ fn media_queries_follow_standard_viewport_updates() {
         StylesheetOrigin::Author,
     );
 
-    let root = doc.create_element("page", ());
+    let root = doc.document_element().id();
     let element = doc.create_element("div", ());
     doc.add_class(element, "box");
     doc.append_child(root, element);
-    doc.append_document_element(root);
     doc.layout();
 
     let wide = doc.get(element).unwrap().computed_style().unwrap();
@@ -267,8 +261,7 @@ fn media_queries_follow_standard_viewport_updates() {
 fn first_attachment_computes_style_and_clean_flushes_preserve_it() {
     let mut doc = document();
 
-    let root = doc.create_element("page", ());
-    doc.append_document_element(root);
+    let root = doc.document_element().id();
     doc.layout();
     let first = computed_color(&doc, root);
 
@@ -282,11 +275,10 @@ fn first_attachment_computes_style_and_clean_flushes_preserve_it() {
 fn dom_stylesheet_and_device_mutations_rearm_clean_style_flushes() {
     let mut doc = document();
     doc.add_stylesheet(".hot { color: rgb(255, 0, 0); }", StylesheetOrigin::Author);
-    let root = doc.create_element("page", ());
+    let root = doc.document_element().id();
     let target = doc.create_element("view", ());
     doc.set_classes(target, "hot");
     doc.append_child(root, target);
-    doc.append_document_element(root);
 
     assert_restyle_color(&mut doc, target, RED);
 
@@ -318,14 +310,12 @@ fn documents_own_independent_stylesheets() {
 
     let first_probe = first.create_element("view", ());
     first.add_class(first_probe, "probe");
-    let first_root = first.create_element("page", ());
+    let first_root = first.document_element().id();
     first.append_child(first_root, first_probe);
-    first.append_document_element(first_root);
     let second_probe = second.create_element("view", ());
     second.add_class(second_probe, "probe");
-    let second_root = second.create_element("page", ());
+    let second_root = second.document_element().id();
     second.append_child(second_root, second_probe);
-    second.append_document_element(second_root);
     first.layout();
     second.layout();
 

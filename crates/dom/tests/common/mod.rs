@@ -102,9 +102,8 @@ impl Doc {
 
     #[must_use]
     pub(crate) fn with_device(device: Device) -> Self {
-        let mut dom = Document::new(device);
-        let root = dom.create_element("page", ());
-        dom.append_document_element(root);
+        let dom = Document::new(device, "page", ());
+        let root = dom.document_element().id();
         Self { dom, root }
     }
 
@@ -326,18 +325,17 @@ pub(crate) fn media_matches_on(
     scheme: PrefersColorScheme,
 ) -> bool {
     const PROBE: &str = ".probe { color: rgb(1, 2, 3) }";
-    let mut doc: Document<()> = Document::new(device_with(width, height, dpr, scheme));
+    let mut doc: Document<()> = Document::new(device_with(width, height, dpr, scheme), "page", ());
     let css = if query.trim().is_empty() {
         PROBE.to_owned()
     } else {
         format!("@media {query} {{ {PROBE} }}")
     };
     doc.add_stylesheet(&css, StylesheetOrigin::Author);
-    let root = doc.create_element("page", ());
+    let root = doc.document_element().id();
     let probe = doc.create_element("view", ());
     doc.add_class(probe, "probe");
     doc.append_child(root, probe);
-    doc.append_document_element(root);
     doc.layout();
     doc.get(probe)
         .and_then(dom::Node::computed_style)

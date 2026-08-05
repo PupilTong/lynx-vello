@@ -107,9 +107,7 @@ impl<T: Sync> Document<T> {
     where
         F: FnMut(NodeId, StyleDamage),
     {
-        let Some(root) = self.root_element() else {
-            return;
-        };
+        let root = self.document_element();
         if !root.needs_style_flush() {
             return;
         }
