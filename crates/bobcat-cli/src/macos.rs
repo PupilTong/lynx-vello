@@ -1,16 +1,36 @@
-use std::mem;
-use std::path::PathBuf;
-use std::sync::Arc;
+//! The macOS windowed shell, split across three threads.
+//!
+//! - **The winit thread — this file's event loop — is the engine thread.** It owns the
+//!   [`FramePipeline`] (element tree, style, layout, paint) and everything real-time: input
+//!   routing, scrolling, commit application, and frame preparation. No script ever runs here.
+//! - **The script thread** runs the `QuickJS` main-thread realm. Its only way back is the Element
+//!   PAPI batch it commits at each `__FlushElementTree`, posted as [`UserEvent::Commit`] and
+//!   blocked on until the engine acknowledges — the script may wait on the engine, never the
+//!   reverse.
+//! - **The render thread** owns the GPU stack (surface, renderer). It drains a latest-wins mailbox
+//!   of prepared scenes, rasterizes, presents, and serves screenshots, so vsync waits and GPU
+//!   stalls never occupy the engine thread.
+//!
+//! The element tree is never shared. Every thread crossing is a plain value:
+//! recorded [`ElementOp`] batches inward, cloned [`vello::Scene`]s outward
+//! (`Send + Sync` by vello's own static assertion), acknowledged over
+//! one-shot channels.
 
+use std::path::PathBuf;
+use std::sync::{Arc, mpsc};
+use std::{mem, thread};
+
+use bobcat_core::lynx_element::ElementOp;
 use bobcat_core::lynx_element::dom::input::{DeltaMode, InputEvent, PointerKind, PointerPhase};
 use bobcat_core::lynx_element::dom::render::gpu::{read_texture, render_params, renderer_options};
 use bobcat_core::lynx_element::dom::vello::peniko::Color;
 use bobcat_core::lynx_element::dom::vello::util::{RenderContext, RenderSurface};
 use bobcat_core::lynx_element::dom::{Point2D, vello};
+use bobcat_core::quickjs::CommitError;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
 
 use crate::CliError;
@@ -21,7 +41,26 @@ use crate::screenshot::save_screenshot;
 
 #[derive(Debug)]
 enum UserEvent {
+    /// A console command from the stdin thread.
     Command(Command),
+    /// One `__FlushElementTree` batch from the script thread; `ack` unblocks
+    /// the flush once the engine has applied and committed it.
+    Commit {
+        ops: Vec<ElementOp>,
+        ack: mpsc::Sender<Result<(), CommitError>>,
+    },
+    /// The main-thread script ran to completion (or failed) on its thread.
+    ScriptDone(Result<(), CliError>),
+    /// The render thread died; the session cannot continue.
+    RenderFailed(CliError),
+}
+
+/// One prepared frame crossing to the render thread: the cloned scene, its
+/// physical target size, and any screenshot requests to serve from it.
+struct FrameJob {
+    scene: vello::Scene,
+    size: FrameSize,
+    screenshots: Vec<PathBuf>,
 }
 
 /// The one pointer id every mouse gesture uses. Real touches carry winit's own
@@ -41,7 +80,7 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
     println!("bobcat: macOS window starting; enter `help` for commands");
     console.prompt();
 
-    let mut application = MacApplication::new(program, options, console);
+    let mut application = MacApplication::new(program, options, console, event_loop.create_proxy());
     event_loop
         .run_app(&mut application)
         .map_err(|error| CliError::Window(error.to_string()))?;
@@ -56,8 +95,11 @@ struct MacApplication {
     initial_width: f32,
     initial_height: f32,
     pipeline: Option<FramePipeline>,
-    graphics: Option<WindowGraphics>,
+    /// The mailbox into the render thread.
+    frames: Option<mpsc::Sender<FrameJob>>,
     window: Option<Arc<Window>>,
+    /// The handle the script and render threads post events back through.
+    proxy: EventLoopProxy<UserEvent>,
     console: Console,
     pending_screenshots: Vec<PathBuf>,
     running: bool,
@@ -85,14 +127,20 @@ impl std::fmt::Debug for MacApplication {
 }
 
 impl MacApplication {
-    fn new(program: Program, options: &Options, console: Console) -> Self {
+    fn new(
+        program: Program,
+        options: &Options,
+        console: Console,
+        proxy: EventLoopProxy<UserEvent>,
+    ) -> Self {
         Self {
             program: Some(program),
             initial_width: options.viewport_width,
             initial_height: options.viewport_height,
             pipeline: None,
-            graphics: None,
+            frames: None,
             window: None,
+            proxy,
             console,
             pending_screenshots: Vec::new(),
             running: true,
@@ -125,11 +173,45 @@ impl MacApplication {
             .program
             .take()
             .expect("the program is consumed by the first window only");
-        let pipeline = program.boot(css_width, css_height, scale_factor)?;
+        let (pipeline, script) = program.split(css_width, css_height, scale_factor)?;
+        // The surface is created here on the main thread — the one place
+        // macOS guarantees layer setup works — and the whole GPU stack then
+        // moves to the render thread it lives on.
         let graphics = WindowGraphics::new(Arc::clone(&window), physical_size)?;
 
+        let (frames, frame_jobs) = mpsc::channel();
+        let render_window = Arc::clone(&window);
+        let render_proxy = self.proxy.clone();
+        thread::Builder::new()
+            .name("bobcat-render".to_owned())
+            .spawn(move || render_thread(graphics, &render_window, &frame_jobs, &render_proxy))
+            .map_err(|error| {
+                CliError::Window(format!("could not start the render thread: {error}"))
+            })?;
+
+        // The script boots concurrently: the window is already live, and the
+        // first committed batch triggers the first real frame. Until then the
+        // engine paints the bare page.
+        let script_proxy = self.proxy.clone();
+        thread::Builder::new()
+            .name("bobcat-js".to_owned())
+            .spawn(move || {
+                let commit_proxy = script_proxy.clone();
+                let result = script.run(move |ops| {
+                    let (ack, ack_receiver) = mpsc::channel();
+                    commit_proxy
+                        .send_event(UserEvent::Commit { ops, ack })
+                        .map_err(|_| CommitError::Disconnected)?;
+                    ack_receiver.recv().map_err(|_| CommitError::Disconnected)?
+                });
+                let _ = script_proxy.send_event(UserEvent::ScriptDone(result));
+            })
+            .map_err(|error| {
+                CliError::Window(format!("could not start the script thread: {error}"))
+            })?;
+
         self.pipeline = Some(pipeline);
-        self.graphics = Some(graphics);
+        self.frames = Some(frames);
         self.window = Some(window);
         self.request_redraw();
         Ok(())
@@ -149,50 +231,34 @@ impl MacApplication {
             .as_mut()
             .expect("the pipeline is installed with the window")
             .resize(css_width, css_height, scale_factor)?;
-        self.graphics
-            .as_mut()
-            .expect("graphics are installed with the window")
-            .resize(physical_size);
+        // The surface follows along on the render thread: the next frame job
+        // carries the new target size and `WindowGraphics::render`
+        // reconfigures to match.
         self.request_redraw();
         Ok(())
     }
 
-    fn redraw(&mut self) -> Result<(), CliError> {
+    /// Prepares the current frame on the engine thread and mails it to the
+    /// render thread. Infallible here: render failures come back as
+    /// [`UserEvent::RenderFailed`].
+    fn redraw(&mut self) {
         let pipeline = self
             .pipeline
             .as_mut()
             .expect("redraw events arrive only after initialization");
-        let graphics = self
-            .graphics
-            .as_mut()
-            .expect("redraw events arrive only after initialization");
-        let window = self
-            .window
+        let frames = self
+            .frames
             .as_ref()
             .expect("redraw events arrive only after initialization");
         let frame = pipeline.prepare_frame();
-        let scene = frame.scene();
-        graphics.render(window, &scene, frame.size)?;
-        drop(scene);
-
-        if self.pending_screenshots.is_empty() {
-            return Ok(());
-        }
-        // A screenshot failure must not tear down the session: report it at
-        // the prompt like any other bad command, and let one bad path leave
-        // the other queued captures unharmed.
-        let paths = mem::take(&mut self.pending_screenshots);
-        match graphics.capture_frame(frame.size) {
-            Ok(pixels) => {
-                for path in paths {
-                    if let Err(error) = save_screenshot(&path, frame.size, &pixels) {
-                        eprintln!("bobcat: {error}");
-                    }
-                }
-            }
-            Err(error) => eprintln!("bobcat: screenshot capture failed: {error}"),
-        }
-        Ok(())
+        let job = FrameJob {
+            scene: frame.scene().clone(),
+            size: frame.size,
+            screenshots: mem::take(&mut self.pending_screenshots),
+        };
+        drop(frame);
+        // A closed mailbox means the render thread already posted its failure.
+        let _ = frames.send(job);
     }
 
     fn command(&mut self, event_loop: &ActiveEventLoop, command: Command) {
@@ -379,7 +445,10 @@ impl ApplicationHandler<UserEvent> for MacApplication {
                 }
                 Ok(())
             }
-            WindowEvent::RedrawRequested => self.redraw(),
+            WindowEvent::RedrawRequested => {
+                self.redraw();
+                Ok(())
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer = Some(position);
                 self.pointer_event(PointerPhase::Move);
@@ -422,6 +491,22 @@ impl ApplicationHandler<UserEvent> for MacApplication {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::Command(command) => self.command(event_loop, command),
+            UserEvent::Commit { ops, ack } => {
+                let result = self
+                    .pipeline
+                    .as_mut()
+                    .expect("commits arrive only after initialization spawns the script thread")
+                    .apply_commit(&ops)
+                    .map_err(CommitError::Rejected);
+                // A dead receiver only means the script thread gave up; the
+                // tree has already applied whatever was valid.
+                let _ = ack.send(result);
+                self.request_redraw();
+            }
+            UserEvent::ScriptDone(Ok(())) => {}
+            UserEvent::ScriptDone(Err(error)) | UserEvent::RenderFailed(error) => {
+                self.fail(event_loop, error);
+            }
         }
     }
 
@@ -638,6 +723,48 @@ impl WindowGraphics {
             size.height,
         )
         .map_err(CliError::Gpu)
+    }
+}
+
+/// The render thread's whole life: block on the mailbox, drain it to the
+/// newest frame (carrying screenshot requests forward — they want "the
+/// current frame", and newer is more current), rasterize, present, capture.
+///
+/// Runs until the engine drops its sender (normal shutdown) or rendering
+/// fails, which is posted back as [`UserEvent::RenderFailed`].
+fn render_thread(
+    mut graphics: WindowGraphics,
+    window: &Window,
+    frames: &mpsc::Receiver<FrameJob>,
+    proxy: &EventLoopProxy<UserEvent>,
+) {
+    while let Ok(mut job) = frames.recv() {
+        while let Ok(mut newer) = frames.try_recv() {
+            let mut screenshots = mem::take(&mut job.screenshots);
+            screenshots.append(&mut newer.screenshots);
+            newer.screenshots = screenshots;
+            job = newer;
+        }
+        if let Err(error) = graphics.render(window, &job.scene, job.size) {
+            let _ = proxy.send_event(UserEvent::RenderFailed(error));
+            return;
+        }
+        if job.screenshots.is_empty() {
+            continue;
+        }
+        // A screenshot failure must not tear down the session: report it at
+        // the prompt like any other bad command, and let one bad path leave
+        // the other queued captures unharmed.
+        match graphics.capture_frame(job.size) {
+            Ok(pixels) => {
+                for path in &job.screenshots {
+                    if let Err(error) = save_screenshot(path, job.size, &pixels) {
+                        eprintln!("bobcat: {error}");
+                    }
+                }
+            }
+            Err(error) => eprintln!("bobcat: screenshot capture failed: {error}"),
+        }
     }
 }
 

@@ -466,7 +466,7 @@ pub fn new_quickjs_view<R: ResourceFetcher>(
     })
 }
 
-pub use self::mainthread::{MainThreadError, MainThreadRuntime};
+pub use self::mainthread::{CommitError, MainThreadError, MainThreadRuntime, local_commit_sink};
 
 #[cfg(test)]
 mod tests;
