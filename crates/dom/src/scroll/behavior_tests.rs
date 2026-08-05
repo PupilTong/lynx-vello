@@ -6,7 +6,7 @@
 use euclid::default::Vector2D;
 use stylo::queries::values::PrefersColorScheme;
 
-use crate::input::{DefaultAction, InputEvent, PointerKind, PointerPhase};
+use crate::input::{DefaultAction, InputEvent, InputResponse, PointerKind, PointerPhase};
 use crate::test_common::{Doc, device_with};
 use crate::visual::{PaintItemKind, PaintOrder};
 use crate::{NodeId, Point2D};
@@ -47,8 +47,22 @@ impl Harness {
             .expect("a paintable item has a non-singular matrix")
     }
 
+    /// Renders (the sole frame producer) and reads the topmost element at
+    /// the point from the retained frame, the way a shell-side query would.
     fn hit(&mut self, x: f32, y: f32) -> Option<NodeId> {
-        self.doc.dom.hit_test(Point2D::new(x, y))
+        self.doc.dom.render();
+        self.doc
+            .dom
+            .elements_from_point(Point2D::new(x, y))
+            .first()
+            .copied()
+    }
+
+    /// Routes one event the way a shell does: render first, so the event
+    /// reads the frame the user would be looking at.
+    fn input(&mut self, event: InputEvent) -> InputResponse {
+        self.doc.dom.render();
+        self.doc.dom.handle_input(event)
     }
 
     /// Scroll offsets clamp against the committed layout, so a tree that has
@@ -172,12 +186,8 @@ fn a_wheel_over_a_pinned_box_does_not_scroll_what_it_is_pinned_above() {
     let scroller = h.el(root, "view.scroller");
     let rows: Vec<NodeId> = (0..3).map(|_| h.el(scroller, "view.row")).collect();
     let pinned = h.el(scroller, "view.pinned");
-    h.doc.dom.layout();
 
-    let over_pinned = h
-        .doc
-        .dom
-        .handle_input(InputEvent::wheel(Point2D::new(30.0, 30.0), (0.0, 80.0)));
+    let over_pinned = h.input(InputEvent::wheel(Point2D::new(30.0, 30.0), (0.0, 80.0)));
     assert_eq!(over_pinned.target, Some(pinned));
     assert_eq!(over_pinned.default_action, DefaultAction::None);
     assert_eq!(h.doc.dom.scroll_offset(scroller), Vector2D::zero());
@@ -185,10 +195,7 @@ fn a_wheel_over_a_pinned_box_does_not_scroll_what_it_is_pinned_above() {
     // Just outside the pinned box, over the scroller's own content, the same
     // wheel does scroll — so this is the containing-block chain at work, not a
     // dead input path.
-    let over_content = h
-        .doc
-        .dom
-        .handle_input(InputEvent::wheel(Point2D::new(80.0, 80.0), (0.0, 80.0)));
+    let over_content = h.input(InputEvent::wheel(Point2D::new(80.0, 80.0), (0.0, 80.0)));
     assert_eq!(over_content.target, Some(rows[0]));
     assert_eq!(
         over_content.default_action,
@@ -368,7 +375,7 @@ fn a_host_gesture_drives_paint_and_hit_testing_end_to_end() {
     let rows: Vec<NodeId> = (0..4).map(|_| h.el(scroller, "view.row")).collect();
 
     let drag = |h: &mut Harness, y: f32, phase| {
-        h.doc.dom.handle_input(InputEvent::pointer(
+        h.input(InputEvent::pointer(
             Point2D::new(50.0, y),
             7,
             PointerKind::Touch,
@@ -393,22 +400,21 @@ fn a_host_gesture_drives_paint_and_hit_testing_end_to_end() {
 }
 
 #[test]
-fn the_response_reports_where_the_event_landed_inside_its_target() {
+fn input_targets_through_the_scrolled_frame() {
     let mut h = Harness::new(SCROLLER);
     let root = h.root();
     let scroller = h.el(root, "view.scroller");
     let rows: Vec<NodeId> = (0..4).map(|_| h.el(scroller, "view.row")).collect();
     h.scroll_to(scroller, 0.0, 120.0);
 
-    let response = h.doc.dom.handle_input(InputEvent::pointer(
+    let response = h.input(InputEvent::pointer(
         Point2D::new(30.0, 10.0),
         1,
         PointerKind::Touch,
         PointerPhase::Down,
     ));
 
-    // Row 1 spans y=100..200 unscrolled, so 120 of scroll puts its y=30 under
-    // the viewport's y=10.
+    // Row 1 spans y=100..200 unscrolled, so 120 of scroll puts the
+    // viewport's y=10 inside it.
     assert_eq!(response.target, Some(rows[1]));
-    assert_eq!(response.local_position, Some(Point2D::new(30.0, 30.0)));
 }

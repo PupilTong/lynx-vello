@@ -422,9 +422,10 @@ is how engines drift.
 (Lynx supports it) and `Layout.order` records the resulting sibling
 traversal/paint index. Stacking contexts and `z-index` are implemented
 W3C-correctly over stylo in **`dom`'s `visual` module**
-(`Document::render` / `Document::hit_test`: the full trigger set,
+(`Document::render` builds it — the full trigger set,
 CSS2 Appendix E paint order, transform matrices, overflow clip chains with
-containing-block escape, and reverse-paint-order hit testing) — box layout
+containing-block escape — and `Document::elements_from_point` reads the
+retained result with reverse-paint-order hit testing) — box layout
 neither knows nor cares, and the future render crate consumes the built
 `PaintOrder` rather than recomputing it. The visual pass consumes
 `Layout.order` as its sibling tiebreak, so paint order and layout can never

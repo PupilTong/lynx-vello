@@ -123,9 +123,12 @@ methods. The trusted CLI and render tests opt into
    headless CLI backends borrow that same scene and submit it through
    `dom::render::gpu`; neither backend duplicates DOM traversal or paint
    policy.
-6. `Document::handle_input` builds the same private visual model for hit
-   testing and performs the resolved default action. Scrolling invalidates the
-   retained scene, so the next prepared frame rebuilds it.
+6. `Document::handle_input` and the `elements_from_point*` queries are pure
+   reads of the visual model the last render retained — hit testing never
+   re-runs the pipeline, so events target what the window actually showed.
+   `handle_input` performs the resolved default action; scrolling invalidates
+   the retained scene, so the next prepared frame rebuilds both it and the
+   frame the next event reads.
 7. A screenshot reads back the live scene through the mandatory GPU path.
    There is no no-adapter fallback in local tests or CI, and replaced content
    necessarily comes from the document's own image registry.

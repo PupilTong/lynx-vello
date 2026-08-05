@@ -46,7 +46,7 @@
 //! # use dom::Point2D;
 //! # fn f<T: Sync>(document: &mut dom::Document<T>, event: InputEvent, position: Point2D<f32>) {
 //! # fn dispatch_to_script(_: Option<dom::NodeId>) -> bool { false }
-//! let hit = document.hit_test(position);
+//! let hit = document.elements_from_point(position).first().copied();
 //! let claimed = dispatch_to_script(hit); // capture/bubble, gesture arena, ...
 //! document.handle_input(event.with_default_prevented(claimed));
 //! # }
@@ -60,9 +60,16 @@
 //! # Visual-frame ownership
 //!
 //! Routing uses the exact stacking, transform, and clip model painting uses,
-//! but that frame is a DOM implementation detail. Each call builds the current
-//! private frame before routing; callers never coordinate or retain a
-//! `PaintOrder` beside the document.
+//! by reading the frame the last [`Document::render`] retained — the same
+//! pure read as [`Document::elements_from_point`], never a flush or a
+//! rebuild. Input therefore targets what is on screen: before the first
+//! render nothing is, and after node removals the retained frame fails
+//! closed until the next render, because freed ids recycle and the old frame
+//! could name a stranger — the same rule that kills a latched drag across a
+//! removal. Geometric staleness is allowed and wanted: an event that lands
+//! between a scroll and its repaint hits the content the user was actually
+//! shown. The frame itself stays a DOM implementation detail; callers never
+//! coordinate or retain a `PaintOrder` beside the document.
 //!
 //! # Recorded limits
 //!
@@ -172,9 +179,9 @@ pub enum InputKind {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub struct InputEvent {
-    /// Viewport CSS px — the same space [`Document::hit_test`] and the
-    /// document's own `Device` viewport speak. A host that works in physical
-    /// pixels divides by its device pixel ratio first.
+    /// Viewport CSS px — the same space [`Document::elements_from_point`] and
+    /// the document's own `Device` viewport speak. A host that works in
+    /// physical pixels divides by its device pixel ratio first.
     pub position: Point2D<f32>,
     pub kind: InputKind,
     /// Set when the layer above already claimed this event — a script listener
@@ -266,14 +273,11 @@ pub enum DefaultAction {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub struct InputResponse {
-    /// The topmost hit-testable element under [`InputEvent::position`], or
-    /// `None` outside every box. This is `elementFromPoint`: the layer above
-    /// starts its own capture/bubble walk here.
+    /// The topmost hit-testable element under [`InputEvent::position`] in the
+    /// rendered frame, or `None` outside every box. This is the head of
+    /// [`Document::elements_from_point`]: the layer above starts its own
+    /// capture/bubble walk here.
     pub target: Option<NodeId>,
-    /// [`InputEvent::position`] in the hit item's own border-box coordinates.
-    /// For a text-run hit, `target` is the styled parent element while this
-    /// point belongs to the run's own box.
-    pub local_position: Option<Point2D<f32>>,
     pub default_action: DefaultAction,
 }
 
@@ -317,8 +321,14 @@ impl InputState {
 }
 
 impl<T: Sync> Document<T> {
-    /// Builds the document's private visual frame, routes one host input event,
-    /// and performs whatever UA default action it resolves to.
+    /// Routes one host input event against the rendered frame and performs
+    /// whatever UA default action it resolves to.
+    ///
+    /// Targeting is a pure read of the frame the last [`Document::render`]
+    /// retained (see the module notes on visual-frame ownership): no styles
+    /// are flushed and no frame is rebuilt here. A host that has not rendered
+    /// yet — or has removed nodes since it last did — routes over nothing
+    /// until its next render.
     ///
     /// A non-finite position or delta is dropped entirely — no routing, no
     /// state change. This is the untrusted boundary, and NaN here is
@@ -329,23 +339,17 @@ impl<T: Sync> Document<T> {
     ///
     /// # Panics
     ///
-    /// Panics if computed styles are unavailable because a style traversal was
-    /// left incomplete. In debug builds, also on a non-finite position or
-    /// wheel delta.
+    /// In debug builds, on a non-finite position or wheel delta.
     pub fn handle_input(&mut self, event: InputEvent) -> InputResponse {
         if !event.is_finite() {
             debug_assert!(false, "host input events must be finite, got {event:?}");
             return InputResponse {
                 target: None,
-                local_position: None,
                 default_action: DefaultAction::None,
             };
         }
-        let frame = self.build_paint_order();
-        let hit = frame.hit_test_local(self, event.position);
         let mut response = InputResponse {
-            target: hit.map(|(node, _)| node),
-            local_position: hit.map(|(_, local)| local.position),
+            target: self.rendered_element_at(event.position),
             default_action: DefaultAction::None,
         };
         response.default_action = match event.kind {
@@ -514,10 +518,12 @@ mod tests {
         )
     }
 
-    /// Feeds a gesture and returns the last response.
+    /// Feeds a gesture the way a shell does — every event routes over the
+    /// frame rendered after the one before it — and returns the last response.
     fn gesture(document: &mut Document<()>, events: &[InputEvent]) -> InputResponse {
         let mut last = None;
         for event in events {
+            document.render();
             last = Some(document.handle_input(*event));
         }
         last.expect("a gesture has at least one event")
@@ -727,7 +733,7 @@ mod tests {
             StylesheetOrigin::Author,
         );
         let root = document.document_element().id();
-        document.layout();
+        document.render();
 
         let response =
             document.handle_input(InputEvent::wheel(Point2D::new(10.0, 10.0), (0.0, 50.0)));
@@ -737,6 +743,5 @@ mod tests {
         let outside =
             document.handle_input(InputEvent::wheel(Point2D::new(10_000.0, 10.0), (0.0, 50.0)));
         assert_eq!(outside.target, None);
-        assert_eq!(outside.local_position, None);
     }
 }

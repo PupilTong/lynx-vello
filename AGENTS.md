@@ -403,9 +403,9 @@ useful signal for currently-compatible versions of those libraries.
   chains that honor containing-block escape), transform resolution
   (transform + transform-origin + parent perspective, always flattened —
   the fork has no authorable `preserve-3d`), and reverse-paint-order hit
-  testing (`Document::hit_test` through private `PaintOrder::hit_test`, honoring
-  `visibility`, `pointer-events`, border-radius, and inverse-matrix point
-  mapping). It walks the same flattened box-tree the layout host feeds the
+  testing (`Document::elements_from_point{,s}` and input targeting, pure
+  reads of the frame the last render retained, honoring `visibility`,
+  `pointer-events`, border-radius, and inverse-matrix point mapping). It walks the same flattened box-tree the layout host feeds the
   engine, so `display: contents` dissolves identically in paint and hit
   order. Group-effect stacking contexts (`opacity`, `filter`,
   `clip-path`, `mask`, plus the storage-only blend/isolation triggers)

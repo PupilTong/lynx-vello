@@ -42,8 +42,15 @@ impl Harness {
             .collect()
     }
 
+    /// Renders (the sole frame producer) and reads the topmost element at
+    /// the point from the retained frame.
     fn hit(&mut self, x: f32, y: f32) -> Option<NodeId> {
-        self.doc.dom.hit_test(Point2D::new(x, y))
+        self.doc.dom.render();
+        self.doc
+            .dom
+            .elements_from_point(Point2D::new(x, y))
+            .first()
+            .copied()
     }
 }
 
@@ -528,6 +535,12 @@ fn text_runs_paint_with_their_element_and_hit_as_the_element() {
     assert_eq!(item.kind, PaintItemKind::TextRun { element: label });
     assert!(item.size.width > 0.0 && item.size.height > 0.0);
     assert_eq!(h.hit(10.0, 10.0), Some(label));
+    // The full stack reports each element once, topmost first: the text run
+    // resolves to `label`, whose own box directly beneath it deduplicates.
+    assert_eq!(
+        h.doc.dom.elements_from_point(Point2D::new(10.0, 10.0)),
+        vec![label, root]
+    );
 }
 
 #[test]
@@ -1118,34 +1131,91 @@ fn contents_order_interleave_paints_and_survives_hidden_siblings() {
 }
 
 #[test]
-#[should_panic(expected = "stale PaintOrder")]
-fn stale_frames_fail_fast_after_node_removal() {
-    // Slab NodeIds recycle: a frame built before a removal must not answer
-    // hits with old geometry that can alias a recycled id.
+fn a_removal_fails_hit_queries_closed_until_the_next_render() {
+    // Slab NodeIds recycle: the frame retained before a removal must not
+    // answer hits with old geometry that could alias a recycled id.
     let mut h = Harness::new(&format!("{PAGE} {}", abs_box("")));
     let root = h.root();
     let removed = h.el(root, "view.box");
-    let stale_frame = h.paint();
+    h.doc.dom.render();
     h.doc.dom.remove_subtree(removed);
     let recycled = h.el(root, "view.box");
-    let _ = recycled;
-    let _ = stale_frame.hit_test(&h.doc.dom, Point2D::new(50.0, 50.0));
+    assert_eq!(
+        h.doc.dom.elements_from_point(Point2D::new(50.0, 50.0)),
+        Vec::new()
+    );
+    // The next render republishes; the recycled id answers honestly.
+    h.doc.dom.render();
+    assert_eq!(
+        h.doc.dom.elements_from_point(Point2D::new(50.0, 50.0)),
+        vec![recycled, root]
+    );
 }
 
 #[test]
-fn frames_stay_queryable_while_no_nodes_are_removed() {
+fn hit_queries_read_the_rendered_frame_without_rebuilding_it() {
     let mut h = Harness::new(&format!("{PAGE} {}", abs_box("")));
     let root = h.root();
     let target = h.el(root, "view.box");
-    let frame = h.paint();
+    h.doc.dom.render();
     assert_eq!(
-        frame.hit_test(&h.doc.dom, Point2D::new(50.0, 50.0)),
-        Some(target)
+        h.doc.dom.elements_from_point(Point2D::new(50.0, 50.0)),
+        vec![target, root]
     );
-    // Fresh queries after a removal + recycle resolve the new node.
-    h.doc.dom.remove_subtree(target);
-    let recycled = h.el(root, "view.box");
-    assert_eq!(h.hit(50.0, 50.0), Some(recycled));
+    // A pure read: moving the box without rendering keeps answering for the
+    // frame on screen, not for the unrendered mutation.
+    h.doc.dom.set_inline_style(target, "left: 200px");
+    assert_eq!(
+        h.doc.dom.elements_from_point(Point2D::new(50.0, 50.0)),
+        vec![target, root]
+    );
+    // Rendering republishes: the box left its old spot and reappears at the
+    // new one.
+    h.doc.dom.render();
+    assert_eq!(
+        h.doc.dom.elements_from_point(Point2D::new(50.0, 50.0)),
+        vec![root]
+    );
+    assert_eq!(
+        h.doc.dom.elements_from_point(Point2D::new(250.0, 50.0)),
+        vec![target, root]
+    );
+}
+
+#[test]
+fn a_document_that_never_rendered_answers_hit_queries_with_nothing() {
+    let mut h = Harness::new(&format!("{PAGE} {}", abs_box("")));
+    let root = h.root();
+    let boxed = h.el(root, "view.box");
+    h.doc.dom.layout();
+    let _ = boxed;
+    // Laid out but never rendered: nothing is on screen to hit.
+    assert_eq!(
+        h.doc.dom.elements_from_point(Point2D::new(50.0, 50.0)),
+        Vec::new()
+    );
+}
+
+#[test]
+fn elements_from_points_answers_each_point_from_one_frame() {
+    let mut h = Harness::new(&format!("{PAGE} {}", abs_box("")));
+    let root = h.root();
+    let target = h.el(root, "view.box");
+    h.doc.dom.render();
+    let points = [
+        Point2D::new(50.0, 50.0),
+        Point2D::new(250.0, 50.0),
+        Point2D::new(10_000.0, 50.0),
+    ];
+    let batch = h.doc.dom.elements_from_points(&points);
+    let singles: Vec<_> = points
+        .iter()
+        .map(|point| h.doc.dom.elements_from_point(*point))
+        .collect();
+    assert_eq!(batch, singles);
+    assert_eq!(batch[0], vec![target, root]);
+    assert_eq!(batch[1], vec![root]);
+    assert_eq!(batch[2], Vec::new());
 }
 
 #[test]

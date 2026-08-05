@@ -234,9 +234,10 @@ impl FramePipeline {
     /// Routes one host input event and performs the UA default action it
     /// resolves to.
     ///
-    /// The element layer keeps the visual frame private and builds it for hit
-    /// testing. When input changes scrolling, `prepare_frame` observes the new
-    /// visual epoch and refreshes the retained scene.
+    /// The element layer keeps the visual frame private; routing reads the
+    /// frame retained by the last render, so events target what the window
+    /// showed. When input changes scrolling, `prepare_frame` observes the new
+    /// visual epoch and refreshes the retained scene (and with it the frame).
     #[cfg(target_os = "macos")]
     pub(crate) fn handle_input(&mut self, event: InputEvent) -> InputResponse {
         self.elements.borrow_mut().handle_input(event)
