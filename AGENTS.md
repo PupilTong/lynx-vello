@@ -125,7 +125,14 @@ useful signal for currently-compatible versions of those libraries.
   own future type and remain statically dispatched. The default `quickjs`
   feature adds the internal QuickJS adapter,
   opaque QuickJS-backed view factory, and the concrete
-  `quickjs::MainThreadRuntime`;
+  `quickjs::MainThreadRuntime`. That runtime owns only the realm: its five
+  Element-PAPI host functions answer synchronously from `lynx-element`'s
+  `ElementOpRecorder` shadow (call-site validation and returned ids are
+  unchanged), and `__FlushElementTree` drains the recorded batch into the
+  commit sink injected at construction — `quickjs::local_commit_sink` for the
+  single-threaded composition, or a shell's own channel to the thread owning
+  the tree, with the flush blocking until the commit is acknowledged
+  (`quickjs::CommitError` names the two rejection shapes);
   `default-features = false` excludes QuickJS while preserving all external
   injection contracts. Workspace dependencies disable defaults explicitly;
   only an upper layer that wants the built-in engine enables `quickjs`.
@@ -184,12 +191,20 @@ useful signal for currently-compatible versions of those libraries.
   every lower layer) and the sibling `lynx-template-decoder` utility.
   `bobcat -i file:///…` decodes and boots one web bundle; other URL schemes
   remain rejected at the boundary. One reusable `FramePipeline` owns the
-  QuickJS-backed element runtime and borrows the scene retained by its
-  document-owned private painter, so the macOS headed path and cross-platform
-  headless path share script/layout/paint logic rather than
-  maintaining parallel render paths.
-  Headed mode uses a native winit window with display-backed vsync and tracks
-  both logical viewport size and device-pixel ratio. Headless mode uses a
+  `ElementTree` and borrows the scene retained by its document-owned private
+  painter, so the macOS headed path and cross-platform headless path share
+  script/layout/paint logic rather than maintaining parallel render paths;
+  `Program::split` separates it from the `ScriptJob` a shell may run anywhere.
+  Headed mode is a three-thread shell: the winit loop is the engine thread
+  (tree ownership, input, scrolling, commit application, style/layout/paint),
+  the script thread runs the QuickJS realm and blocks each
+  `__FlushElementTree` on the engine's acknowledgment, and the render thread
+  owns the GPU stack behind a latest-wins mailbox of cloned `vello::Scene`s
+  (`Send + Sync` by vello's static assertion), serving vsync, present, and
+  screenshots without ever occupying the engine. Headless mode stays
+  single-threaded through `local_commit_sink` — the wall-free composition
+  tests rely on. Headed mode uses a native winit window with display-backed
+  vsync and tracks both logical viewport size and device-pixel ratio. Headless mode uses a
   configurable synthetic vsync rate, skips catch-up bursts after slow frames,
   and retains its Vello renderer, render texture, and staging buffer across
   frames. Both modes expose a GDB-like stdin command prompt (`continue`,
@@ -210,7 +225,13 @@ useful signal for currently-compatible versions of those libraries.
   `defaultDisplayLinear` / `defaultOverflowVisible` page-config switches).
   This crate defines `type ElementId = u32` and the concrete, validated
   Element-PAPI operations on `ElementTree`; `bobcat-core` composes that type
-  directly and `dom` knows neither vocabulary.
+  directly and `dom` knows neither vocabulary. The same five calls exist as
+  data: `ElementOpRecorder` answers them script-side from a shadow of the
+  tree (same ids — both allocators are monotonic and never recycle — and the
+  same `PapiError`s in the same precedence order; the mirroring law in
+  `ops.rs`), and `ElementTree::apply` replays recorded `ElementOp` batches at
+  the flush boundary, asserting id lockstep. This seam is what lets a shell
+  put the script and the tree on different threads without sharing either.
   `ElementTree` owns a `dom::Document<ElementId>` plus an independent
   `Vec<Option<LynxElement>>` arena. This crate depends on `dom` **only** — stylo/euclid are reached through
   `dom`'s vocabulary re-exports — and re-exports `dom` whole as the next

@@ -1,10 +1,13 @@
-use std::cell::Ref;
+use std::cell::{Ref, RefCell};
+use std::rc::Rc;
 
+#[cfg(target_os = "macos")]
+use bobcat_core::lynx_element::PapiError;
 #[cfg(target_os = "macos")]
 use bobcat_core::lynx_element::dom::input::{InputEvent, InputResponse};
 use bobcat_core::lynx_element::dom::vello::Scene;
-use bobcat_core::lynx_element::{ElementTree, PageConfig, Viewport};
-use bobcat_core::quickjs::MainThreadRuntime;
+use bobcat_core::lynx_element::{ElementOp, ElementTree, PageConfig, Viewport};
+use bobcat_core::quickjs::{CommitError, MainThreadRuntime, local_commit_sink};
 use url::Url;
 
 use crate::CliError;
@@ -57,22 +60,33 @@ impl Program {
         })
     }
 
+    /// Boots everything on the calling thread — realm, script, tree — and
+    /// returns the pipeline once the whole main-thread boot has committed.
+    /// This is the headless composition; the windowed shell uses
+    /// [`Self::split`] to run the script half on its own thread.
     pub(crate) fn boot(
         self,
         width: f32,
         height: f32,
         device_pixel_ratio: f32,
     ) -> Result<FramePipeline, CliError> {
+        let (pipeline, script) = self.split(width, height, device_pixel_ratio)?;
+        script.run(local_commit_sink(&pipeline.elements))?;
+        Ok(pipeline)
+    }
+
+    /// Splits the program into the engine half — the element tree behind a
+    /// [`FramePipeline`] — and the script half a shell may run anywhere,
+    /// wired back only through its commit sink.
+    pub(crate) fn split(
+        self,
+        width: f32,
+        height: f32,
+        device_pixel_ratio: f32,
+    ) -> Result<(FramePipeline, ScriptJob), CliError> {
         let frame_size = frame_size(width, height, device_pixel_ratio)?;
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
-        let mut runtime = MainThreadRuntime::new(ElementTree::new(viewport, self.config))
-            .map_err(CliError::RuntimeInitialization)?;
-        runtime
-            .run_main_thread_script(&self.source)
-            .map_err(|source| CliError::Runtime {
-                input: self.input.clone(),
-                source,
-            })?;
+        let elements = Rc::new(RefCell::new(ElementTree::new(viewport, self.config)));
 
         if self.author_rule_count != 0 {
             eprintln!(
@@ -82,11 +96,44 @@ impl Program {
             );
         }
 
-        Ok(FramePipeline {
-            runtime,
-            viewport,
-            frame_size,
-        })
+        Ok((
+            FramePipeline {
+                elements,
+                viewport,
+                frame_size,
+            },
+            ScriptJob {
+                input: self.input,
+                source: self.source,
+            },
+        ))
+    }
+}
+
+/// The main-thread script half of a booted program, detached from the element
+/// tree so a shell can run it on a thread of its own choosing.
+#[derive(Debug)]
+pub(crate) struct ScriptJob {
+    input: String,
+    source: String,
+}
+
+impl ScriptJob {
+    /// Builds the realm and runs the whole main-thread boot, committing every
+    /// `__FlushElementTree` batch through `commit`. Blocks the calling thread
+    /// until the script completes.
+    pub(crate) fn run(
+        self,
+        commit: impl FnMut(Vec<ElementOp>) -> Result<(), CommitError> + 'static,
+    ) -> Result<(), CliError> {
+        let mut runtime =
+            MainThreadRuntime::new(commit).map_err(CliError::RuntimeInitialization)?;
+        runtime
+            .run_main_thread_script(&self.source)
+            .map_err(|source| CliError::Runtime {
+                input: self.input,
+                source,
+            })
     }
 }
 
@@ -112,8 +159,11 @@ impl PreparedFrame<'_> {
     }
 }
 
+/// The engine half of a booted program: the element tree, the viewport, and
+/// the frame preparation over them. Whichever thread owns this owns the tree;
+/// script sides reach it only through committed [`ElementOp`] batches.
 pub(crate) struct FramePipeline {
-    runtime: MainThreadRuntime,
+    elements: Rc<RefCell<ElementTree>>,
     viewport: Viewport,
     frame_size: FrameSize,
 }
@@ -145,7 +195,7 @@ impl FramePipeline {
         }
 
         {
-            let mut elements = self.runtime.elements_mut();
+            let mut elements = self.elements.borrow_mut();
             if size_changed {
                 elements.set_viewport(width, height);
             }
@@ -159,15 +209,26 @@ impl FramePipeline {
     }
 
     pub(crate) fn prepare_frame(&mut self) -> PreparedFrame<'_> {
-        let changed = {
-            let mut elements = self.runtime.elements_mut();
-            elements.document_mut().render()
-        };
+        let changed = self.elements.borrow_mut().document_mut().render();
         PreparedFrame {
-            elements: self.runtime.elements(),
+            elements: self.elements.borrow(),
             size: self.frame_size,
             changed,
         }
+    }
+
+    /// Applies one flushed batch from the script thread and runs the style +
+    /// layout commit, exactly as [`local_commit_sink`] would have on a single
+    /// thread. An `Err` means the batch diverged from the recorder's shadow
+    /// and must be rejected rather than half-trusted.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn apply_commit(&mut self, ops: &[ElementOp]) -> Result<(), PapiError> {
+        let mut elements = self.elements.borrow_mut();
+        for op in ops {
+            elements.apply(op)?;
+        }
+        elements.flush_element_tree();
+        Ok(())
     }
 
     /// Routes one host input event and performs the UA default action it
@@ -178,15 +239,14 @@ impl FramePipeline {
     /// visual epoch and refreshes the retained scene.
     #[cfg(target_os = "macos")]
     pub(crate) fn handle_input(&mut self, event: InputEvent) -> InputResponse {
-        let mut elements = self.runtime.elements_mut();
-        elements.handle_input(event)
+        self.elements.borrow_mut().handle_input(event)
     }
 
     /// Whether the document has visual changes the painted scene does not
     /// reflect yet.
     #[cfg(target_os = "macos")]
     pub(crate) fn needs_frame(&self) -> bool {
-        self.runtime.elements().document().needs_render()
+        self.elements.borrow().document().needs_render()
     }
 }
 
@@ -242,5 +302,93 @@ mod tests {
     fn frame_size_rejects_unbounded_targets() {
         let error = frame_size(20_000.0, 100.0, 1.0).unwrap_err();
         assert!(error.to_string().contains("16384"));
+    }
+
+    /// The windowed shell's commit protocol, minus the window: the script runs
+    /// on its own thread, every `__FlushElementTree` batch crosses a channel,
+    /// and the engine side applies it and acknowledges — the exact wiring
+    /// `macos.rs` builds over the winit proxy.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_script_job_commits_across_threads() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        use std::sync::mpsc;
+
+        use bobcat_core::lynx_element::{ElementOp, ElementTree, PageConfig, Viewport};
+        use bobcat_core::quickjs::CommitError;
+
+        use super::{FramePipeline, FrameSize, ScriptJob};
+
+        type Ack = mpsc::Sender<Result<(), CommitError>>;
+
+        let script = ScriptJob {
+            input: "threaded-smoke".to_owned(),
+            source: r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  __AppendElement(page, __CreateView(0));
+                  __FlushElementTree();
+                  __AppendElement(page, __CreateView(0));
+                };
+                "
+            .to_owned(),
+        };
+
+        let (commits, committed) = mpsc::channel::<(Vec<ElementOp>, Ack)>();
+        let script_thread = std::thread::spawn(move || {
+            script.run(move |ops| {
+                let (ack, acknowledged) = mpsc::channel();
+                commits
+                    .send((ops, ack))
+                    .map_err(|_| CommitError::Disconnected)?;
+                acknowledged.recv().map_err(|_| CommitError::Disconnected)?
+            })
+        });
+
+        let viewport = Viewport::new(393.0, 727.0);
+        let mut pipeline = FramePipeline {
+            elements: Rc::new(RefCell::new(ElementTree::new(
+                viewport,
+                PageConfig::default(),
+            ))),
+            viewport,
+            frame_size: FrameSize {
+                width: 393,
+                height: 727,
+            },
+        };
+        // The engine side: drain commits until the script hangs up. The boot
+        // sequence flushes twice — once mid-script, once at its end.
+        let mut batches = 0;
+        while let Ok((ops, ack)) = committed.recv() {
+            let result = pipeline.apply_commit(&ops).map_err(CommitError::Rejected);
+            ack.send(result).expect("the script waits for the ack");
+            batches += 1;
+        }
+        script_thread
+            .join()
+            .expect("the script thread must not panic")
+            .expect("the script must boot");
+
+        assert_eq!(batches, 2, "renderPage flushes once, the boot once more");
+        let elements = pipeline.elements.borrow();
+        let page = elements.page().expect("the page was created");
+        let page_node = elements.node_id(page).expect("a live page");
+        assert_eq!(
+            elements
+                .document()
+                .get(page_node)
+                .unwrap()
+                .child_ids()
+                .len(),
+            2,
+            "both views landed, one per committed batch"
+        );
+        drop(elements);
+        assert!(
+            pipeline.prepare_frame().changed,
+            "the committed tree paints a fresh scene"
+        );
     }
 }
