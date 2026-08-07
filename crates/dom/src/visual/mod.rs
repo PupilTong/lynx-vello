@@ -1,20 +1,24 @@
 //! Visual order over the laid-out tree: CSS stacking contexts, Appendix-E
 //! paint order, transform matrices, and hit testing.
 //!
-//! [`Document::render`], [`Document::hit_test`], and
-//! [`Document::handle_input`] internally build a
-//! private `PaintOrder`: a flat item list in back-to-front order, each item carrying
-//! its viewport-space transform and innermost clip. The private painter walks
-//! it frontwards; hit testing walks it backwards. Neither the frame nor the
-//! painter crosses the document API boundary.
+//! [`Document::render`] builds the private `PaintOrder`: a flat item list in
+//! back-to-front order, each item carrying its viewport-space transform and
+//! innermost clip. The private painter walks it frontwards, then retains it
+//! beside the scene; [`Document::elements_from_point`],
+//! [`Document::elements_from_points`], and [`Document::handle_input`] walk
+//! that retained frame backwards as pure reads — hit testing never re-runs
+//! the pipeline. Neither the frame nor the painter crosses the document API
+//! boundary.
 //! A frame is pinned to the document's node-removal epoch: after any
-//! `remove_subtree` a freed id can be recycled by a later creation, so
-//! querying a stale frame panics (let-it-crash) rather than returning a
-//! recycled node for old geometry. Painting is pinned harder — to the
-//! document's private visual-mutation epoch via its freshness assertion —
-//! because it resolves the frame against live styles/layouts/text, which
-//! any visual mutation desynchronizes; hit testing's snapshot is
-//! self-contained and tolerates non-structural mutations.
+//! `remove_subtree` a freed id can be recycled by a later creation, so the
+//! hit queries fail closed on a stale frame — they answer nothing until the
+//! next render — rather than returning a recycled node for old geometry.
+//! Painting is pinned harder — to the document's private visual-mutation
+//! epoch via its freshness assertion, let-it-crash — because it resolves the
+//! frame against live styles/layouts/text, which any visual mutation
+//! desynchronizes; hit testing's snapshot is self-contained and tolerates
+//! non-structural mutations, which is exactly what lets an event landing
+//! between a scroll and its repaint hit the content the user was shown.
 //!
 //! Scroll offsets ([`crate::scroll`]) are baked into the frame rather than
 //! surfaced beside it: a scroll container's contents are translated as they
@@ -89,11 +93,12 @@ use crate::{ImageStore, NodeId};
 /// The document's current frame in paint order: `items[0]` paints first
 /// (bottom), `items[len - 1]` paints last (top).
 ///
-/// A frame is a snapshot. It stays queryable while the document's node set
-/// is unchanged; once nodes are removed (`Document::remove_subtree`), freed
-/// ids can be recycled and [`Self::hit_test`] fails fast instead of
-/// answering with a recycled node — rebuild the frame after structural
-/// mutations.
+/// A frame is a snapshot. Its geometry is self-contained, so it stays
+/// queryable while the document's node set is unchanged; once nodes are
+/// removed (`Document::remove_subtree`), freed ids can be recycled and the
+/// frame no longer [`names_live_nodes`](Self::names_live_nodes) — painting
+/// fails fast on that, and the document-level hit queries fail closed until
+/// the next render retains a rebuilt frame.
 #[derive(Debug)]
 pub(crate) struct PaintOrder {
     items: Vec<PaintItem>,
@@ -130,16 +135,6 @@ impl PaintOrder {
     pub(crate) const fn visual_epoch(&self) -> u64 {
         self.visual_epoch
     }
-}
-
-/// Where a hit landed inside the item it hit, from
-/// [`PaintOrder::hit_test_local`].
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct LocalHit {
-    /// Index into [`PaintOrder::items`].
-    pub(crate) item: usize,
-    /// The point in that item's border-box space.
-    pub(crate) position: Point2D<f32>,
 }
 
 /// What one paint item draws.
@@ -183,8 +178,8 @@ pub(crate) struct PaintItem {
 /// painter resolves `opacity`/`filter`/`clip-path`/`mask` values from, with
 /// `clip-path` and `mask` geometry resolved against [`Self::size`].
 ///
-/// Group effects still do not affect [`PaintOrder::hit_test`] (a `clip-path`
-/// that clips painting away does not yet clip the hit region — recorded v1
+/// Group effects still do not affect the hit queries (a `clip-path` that
+/// clips painting away does not yet clip the hit region — recorded v1
 /// limit).
 #[derive(Debug, Clone)]
 pub(crate) struct RenderLayer {
@@ -254,16 +249,12 @@ impl CornerRadii {
 
 impl<T: Sync> Document<T> {
     /// Flushes styles and layout, then builds the private frame description
-    /// shared by painting, hit testing, and input routing.
+    /// painting consumes. [`Self::render`] is the sole production caller; the
+    /// copy the painter retains beside the scene is what the read-only hit
+    /// queries and input routing answer from.
     pub(crate) fn build_paint_order(&mut self) -> PaintOrder {
         self.layout();
         build::build(self)
-    }
-
-    /// Returns the topmost hit-testable element at `point` in viewport CSS px.
-    pub fn hit_test(&mut self, point: Point2D<f32>) -> Option<NodeId> {
-        let frame = self.build_paint_order();
-        frame.hit_test(self, point)
     }
 
     /// Renders only when the retained scene no longer represents the current
@@ -273,8 +264,59 @@ impl<T: Sync> Document<T> {
             return false;
         }
         let frame = self.build_paint_order();
-        self.painter.borrow_mut().paint(self, &frame);
+        self.painter.borrow_mut().paint(self, frame);
         true
+    }
+}
+
+impl<T> Document<T> {
+    /// CSSOM-View `elementsFromPoint` over the **rendered** frame: every
+    /// element whose rounded border box contains `point` (viewport CSS px),
+    /// topmost first in paint order, each element once, honoring transforms,
+    /// clip chains, `visibility`, and `pointer-events`. Text-run hits resolve
+    /// to the styled parent element.
+    ///
+    /// This is a pure read of the frame retained by the last [`Self::render`]:
+    /// it never flushes styles or layout and never rebuilds the frame, so it
+    /// answers for what is on screen, not for unrendered mutations. Before
+    /// the first render nothing is on screen and the answer is empty; after
+    /// nodes are removed the retained frame could name recycled ids, so it
+    /// fails closed — empty again — until the next render.
+    #[must_use]
+    pub fn elements_from_point(&self, point: Point2D<f32>) -> Vec<NodeId> {
+        self.with_rendered_frame(|frame| frame.elements_at(point))
+            .unwrap_or_default()
+    }
+
+    /// [`Self::elements_from_point`] for a batch of points answered from one
+    /// frame read; results are index-parallel with `points`. Same pure-read
+    /// contract: with no trustworthy rendered frame every answer is empty.
+    #[must_use]
+    pub fn elements_from_points(&self, points: &[Point2D<f32>]) -> Vec<Vec<NodeId>> {
+        self.with_rendered_frame(|frame| {
+            points
+                .iter()
+                .map(|point| frame.elements_at(*point))
+                .collect()
+        })
+        .unwrap_or_else(|| vec![Vec::new(); points.len()])
+    }
+
+    /// The topmost element at `point` in the rendered frame — input
+    /// targeting's single answer, under the same pure-read contract as
+    /// [`Self::elements_from_point`].
+    pub(crate) fn rendered_element_at(&self, point: Point2D<f32>) -> Option<NodeId> {
+        self.with_rendered_frame(|frame| frame.first_element_at(point))
+            .flatten()
+    }
+
+    /// Lends the retained frame when one exists and it still names live
+    /// nodes. Node removals recycle ids, so a frame from before a removal
+    /// answers no one rather than possibly naming a stranger.
+    fn with_rendered_frame<R>(&self, read: impl FnOnce(&PaintOrder) -> R) -> Option<R> {
+        let painter = self.painter.borrow();
+        let frame = painter.frame()?;
+        frame.names_live_nodes(self).then(|| read(frame))
     }
 }
 

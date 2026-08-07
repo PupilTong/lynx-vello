@@ -50,6 +50,11 @@ pub(crate) struct Painter {
     /// The document visual epoch represented by `scene`. `None` means this
     /// painter has never completed a frame.
     scene_epoch: Option<u64>,
+    /// The frame `scene` was painted from, retained so hit queries can read
+    /// paint order without re-running the visual pipeline. A failed paint
+    /// keeps the previous frame; the removal-epoch gate decides at read time
+    /// whether it may still answer.
+    frame: Option<PaintOrder>,
 }
 
 impl std::fmt::Debug for Painter {
@@ -59,20 +64,27 @@ impl std::fmt::Debug for Painter {
 }
 
 impl Painter {
-    pub(crate) fn paint<T>(&mut self, document: &Document<T>, frame: &PaintOrder) {
+    pub(crate) fn paint<T>(&mut self, document: &Document<T>, frame: PaintOrder) {
         self.scene_epoch = None;
         self.scene.reset();
         crate::paint::walker::walk(
             &mut self.scene,
             &mut self.scratch,
             document,
-            frame,
+            &frame,
             &self.images,
         );
-        // Publish freshness only after the walk completed. If painting
-        // panics, the partial scene must remain stale and be rebuilt on the
-        // next attempt.
+        // Publish freshness — and retain the frame for read-only hit
+        // queries — only after the walk completed. If painting panics, the
+        // partial scene must remain stale and be rebuilt on the next attempt.
         self.scene_epoch = Some(frame.visual_epoch());
+        self.frame = Some(frame);
+    }
+
+    /// The frame the retained scene was painted from, if a paint ever
+    /// completed.
+    pub(crate) const fn frame(&self) -> Option<&PaintOrder> {
+        self.frame.as_ref()
     }
 
     pub(crate) fn needs_render(&self, visual_epoch: u64) -> bool {
@@ -110,7 +122,7 @@ mod tests {
         let mut painter = document.painter.take();
         let current_epoch = document.visual_epoch();
         painter.scene_epoch = Some(current_epoch);
-        let result = catch_unwind(AssertUnwindSafe(|| painter.paint(&document, &frame)));
+        let result = catch_unwind(AssertUnwindSafe(|| painter.paint(&document, frame)));
 
         assert!(result.is_err(), "the stale frame must fail closed");
         assert!(painter.needs_render(current_epoch));
