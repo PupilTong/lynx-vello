@@ -107,19 +107,47 @@ impl ElementTree {
         tree
     }
 
-    /// The underlying document for trusted workspace composition and tests.
-    #[cfg(any(test, feature = "internal-document-access"))]
-    #[doc(hidden)]
+    /// The underlying document, as a read-only observation window.
+    ///
+    /// A shared borrow cannot create, move, or retire an element, so lending
+    /// it costs none of the tree invariants this layer protects: every
+    /// reachable `Document` method is a query, and the arena ↔ node alignment
+    /// stays writable only through the Element PAPI methods below. There is
+    /// deliberately no mutable counterpart — mutation goes through the PAPI,
+    /// and the frame pipeline drives rendering through the narrow methods
+    /// this type forwards itself.
     #[must_use]
     pub const fn document(&self) -> &Document<ElementId> {
         &self.document
     }
 
-    /// Mutable document access for trusted workspace composition.
-    #[cfg(feature = "internal-document-access")]
-    #[doc(hidden)]
-    pub fn document_mut(&mut self) -> &mut Document<ElementId> {
-        &mut self.document
+    /// Renders the document's retained scene if it is stale, returning
+    /// whether a new scene was built.
+    ///
+    /// On the narrow mutable surface by the [`Self::handle_input`] admission
+    /// rule: rendering flushes styles, layout, and paint state but creates,
+    /// moves, and retires no element, so the handle table cannot
+    /// desynchronise.
+    pub fn render(&mut self) -> bool {
+        self.document.render()
+    }
+
+    /// Whether a visual mutation has made the retained scene stale.
+    #[must_use]
+    pub fn needs_render(&self) -> bool {
+        self.document.needs_render()
+    }
+
+    /// The scene retained by the last [`Self::render`].
+    #[must_use]
+    pub fn scene(&self) -> std::cell::Ref<'_, dom::vello::Scene> {
+        self.document.scene()
+    }
+
+    /// Registers or updates decoded images for replaced content and CSS
+    /// image values. Resource state only — no element is touched.
+    pub fn images_mut(&mut self) -> &mut dom::ImageStore {
+        self.document.images_mut()
     }
 
     /// Feeds one host input event in, building the private visual frame needed

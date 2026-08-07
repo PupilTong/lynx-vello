@@ -2,8 +2,9 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
 
+use bobcat_core::engine::FrameSize;
+
 use crate::CliError;
-use crate::page::FrameSize;
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]

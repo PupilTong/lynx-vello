@@ -1,26 +1,40 @@
+//! The headless embedder: a synthetic vsync clock and a command prompt over
+//! the engine's offscreen output.
+//!
+//! The clock is this embedder's substitute for an OS display loop — it
+//! relays ticks; whether a tick becomes GPU work is the engine's decision
+//! (`tick` renders only when the document changed). Screenshots come back as
+//! pixels, and writing the PNG is this side's IO.
+
 use std::num::NonZeroU32;
-use std::path::Path;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use bobcat_core::lynx_element::dom::render::gpu::Headless;
-use bobcat_core::lynx_element::dom::vello::peniko::Color;
+use bobcat_core::engine::Engine;
 
 use crate::CliError;
 use crate::args::Options;
 use crate::command::{COMMAND_HELP, Command, Console};
-use crate::page::{FramePipeline, Program};
+use crate::page::Program;
 use crate::screenshot::save_screenshot;
 
 pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
-    let mut pipeline = program.boot(
+    let mut engine = Engine::new(
+        program.config,
         options.viewport_width,
         options.viewport_height,
         options.device_pixel_ratio,
     )?;
-    let mut gpu = Headless::new().map_err(CliError::Gpu)?;
+    program.warn_about_dropped_author_rules();
+    engine
+        .run_script(&program.source)
+        .map_err(|source| CliError::Script {
+            input: program.input,
+            source,
+        })?;
+    engine.attach_offscreen()?;
 
-    render_frame(&mut pipeline, &mut gpu, true)?;
+    engine.tick(true)?;
     let (sender, receiver) = mpsc::channel();
     let console =
         Console::start(move |command| sender.send(command).is_ok()).map_err(CliError::Console)?;
@@ -37,7 +51,7 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
             match receiver.recv_timeout(clock.time_until_tick()) {
                 Ok(command) => Some(command),
                 Err(RecvTimeoutError::Timeout) => {
-                    render_frame(&mut pipeline, &mut gpu, false)?;
+                    engine.tick(false)?;
                     clock.advance();
                     None
                 }
@@ -64,14 +78,18 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
                 println!("Frame clock paused.");
             }
             Command::Frame => {
-                render_frame(&mut pipeline, &mut gpu, true)?;
+                engine.tick(true)?;
                 clock.restart();
                 println!("Rendered one frame.");
             }
             Command::Screenshot(path) => {
                 // A screenshot failure must not tear down the session: report
                 // it at the prompt like any other bad command and keep going.
-                if let Err(error) = capture(&mut pipeline, &mut gpu, &path) {
+                let result = engine
+                    .capture()
+                    .map_err(CliError::Engine)
+                    .and_then(|shot| save_screenshot(&path, shot.size, &shot.pixels));
+                if let Err(error) = result {
                     eprintln!("bobcat: {error}");
                 }
                 clock.restart();
@@ -89,39 +107,6 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
         }
         console.prompt();
     }
-}
-
-fn render_frame(
-    pipeline: &mut FramePipeline,
-    gpu: &mut Headless,
-    force: bool,
-) -> Result<(), CliError> {
-    let frame = pipeline.prepare_frame();
-    if !frame.changed && !force {
-        // The retained target already holds this exact frame; re-submitting
-        // it would burn a full GPU pass per tick on a static scene.
-        return Ok(());
-    }
-    let scene = frame.scene();
-    gpu.render_frame(&scene, frame.size.width, frame.size.height, Color::WHITE)
-        .map_err(CliError::Gpu)?;
-    // Keep at most one frame in flight: nothing else in this loop
-    // synchronizes with the GPU, so a clock that outpaces it would otherwise
-    // pile up submissions without bound.
-    gpu.wait_idle().map_err(CliError::Gpu)
-}
-
-fn capture(pipeline: &mut FramePipeline, gpu: &mut Headless, path: &Path) -> Result<(), CliError> {
-    let frame = pipeline.prepare_frame();
-    if frame.changed {
-        let scene = frame.scene();
-        gpu.render_frame(&scene, frame.size.width, frame.size.height, Color::WHITE)
-            .map_err(CliError::Gpu)?;
-    }
-    // The retained target holds the current frame; read it back rather than
-    // re-rendering a scene that has not changed.
-    let pixels = gpu.read_pixels().map_err(CliError::Gpu)?;
-    save_screenshot(path, frame.size, &pixels)
 }
 
 #[derive(Clone, Copy, Debug)]

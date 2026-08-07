@@ -13,7 +13,7 @@ name = "bobcat"
 path = "src/main.rs"
 
 [dependencies]
-bobcat-core = { workspace = true, features = ["quickjs", "internal-document-access"] }
+bobcat-core = { workspace = true, features = ["quickjs"] }
 lynx-template-decoder = { workspace = true }
 png = { workspace = true }
 pollster = { workspace = true }

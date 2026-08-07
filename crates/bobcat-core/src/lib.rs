@@ -13,6 +13,7 @@
 /// `dom`, and the render stack exclusively through this door.
 pub use lynx_element;
 
+pub mod engine;
 #[cfg(feature = "quickjs")]
 pub mod quickjs;
 pub mod resource;

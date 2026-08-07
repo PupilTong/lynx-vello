@@ -212,6 +212,7 @@ dependencies = [
  "http",
  "lynx-element",
  "lynx-template-decoder",
+ "pollster",
  "quickjs-rust-bridge",
  "thiserror 2.0.18",
  "tokio",

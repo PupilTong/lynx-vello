@@ -1,32 +1,21 @@
-//! The macOS windowed shell, split across three threads.
+//! The macOS windowed embedder.
 //!
-//! - **The winit thread — this file's event loop — is the engine thread.** It owns the
-//!   [`FramePipeline`] (element tree, style, layout, paint) and everything real-time: input
-//!   routing, scrolling, commit application, and frame preparation. No script ever runs here.
-//! - **The script thread** runs the `QuickJS` main-thread realm. Its only way back is the Element
-//!   PAPI batch it commits at each `__FlushElementTree`, posted as [`UserEvent::Commit`] and
-//!   blocked on until the engine acknowledges — the script may wait on the engine, never the
-//!   reverse.
-//! - **The render thread** owns the GPU stack (surface, renderer). It drains a latest-wins mailbox
-//!   of prepared scenes, rasterizes, presents, and serves screenshots, so vsync waits and GPU
-//!   stalls never occupy the engine thread.
-//!
-//! The element tree is never shared. Every thread crossing is a plain value:
-//! recorded [`ElementOp`] batches inward, cloned [`vello::Scene`]s outward
-//! (`Send + Sync` by vello's own static assertion), acknowledged over
-//! one-shot channels.
+//! This file owns the embedder's share and nothing more: the winit event
+//! loop, the window, device metrics, input translation, the command prompt,
+//! and PNG output. Every handler is a relay into
+//! [`bobcat_core::engine::Engine`] — an OS fact goes in
+//! (`dispatch_input`, `resize`, `notify_redraw`, `pump`), and the engine
+//! decides what the pipeline does with it. The engine owns the script and
+//! render threads; the capabilities it schedules through
+//! (`request_redraw`, `pre_present_notify`, the event-loop wakeup) are
+//! handed over once at attach time.
 
 use std::path::PathBuf;
-use std::sync::{Arc, mpsc};
-use std::{mem, thread};
+use std::sync::Arc;
 
-use bobcat_core::lynx_element::ElementOp;
+use bobcat_core::engine::{Engine, EngineEvent, FrameSize, WindowHooks};
+use bobcat_core::lynx_element::dom::Point2D;
 use bobcat_core::lynx_element::dom::input::{DeltaMode, InputEvent, PointerKind, PointerPhase};
-use bobcat_core::lynx_element::dom::render::gpu::{read_texture, render_params, renderer_options};
-use bobcat_core::lynx_element::dom::vello::peniko::Color;
-use bobcat_core::lynx_element::dom::vello::util::{RenderContext, RenderSurface};
-use bobcat_core::lynx_element::dom::{Point2D, vello};
-use bobcat_core::quickjs::CommitError;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent};
@@ -36,31 +25,16 @@ use winit::window::{Window, WindowId};
 use crate::CliError;
 use crate::args::Options;
 use crate::command::{COMMAND_HELP, Command, Console};
-use crate::page::{FramePipeline, FrameSize, Program};
+use crate::page::Program;
 use crate::screenshot::save_screenshot;
 
 #[derive(Debug)]
 enum UserEvent {
     /// A console command from the stdin thread.
     Command(Command),
-    /// One `__FlushElementTree` batch from the script thread; `ack` unblocks
-    /// the flush once the engine has applied and committed it.
-    Commit {
-        ops: Vec<ElementOp>,
-        ack: mpsc::Sender<Result<(), CommitError>>,
-    },
-    /// The main-thread script ran to completion (or failed) on its thread.
-    ScriptDone(Result<(), CliError>),
-    /// The render thread died; the session cannot continue.
-    RenderFailed(CliError),
-}
-
-/// One prepared frame crossing to the render thread: the cloned scene, its
-/// physical target size, and any screenshot requests to serve from it.
-struct FrameJob {
-    scene: vello::Scene,
-    size: FrameSize,
-    screenshots: Vec<PathBuf>,
+    /// An engine-owned thread has messages waiting; the engine must be
+    /// pumped on this thread.
+    Pump,
 }
 
 /// The one pointer id every mouse gesture uses. Real touches carry winit's own
@@ -92,17 +66,14 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
 
 struct MacApplication {
     program: Option<Program>,
+    input: String,
     initial_width: f32,
     initial_height: f32,
-    pipeline: Option<FramePipeline>,
-    /// The mailbox into the render thread.
-    frames: Option<mpsc::Sender<FrameJob>>,
+    engine: Option<Engine>,
     window: Option<Arc<Window>>,
-    /// The handle the script and render threads post events back through.
+    /// The handle the engine's wakeup capability posts back through.
     proxy: EventLoopProxy<UserEvent>,
     console: Console,
-    pending_screenshots: Vec<PathBuf>,
-    running: bool,
     occluded: bool,
     /// Last known cursor position, in physical window pixels. Mouse events
     /// other than `CursorMoved` do not carry one.
@@ -116,11 +87,10 @@ impl std::fmt::Debug for MacApplication {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("MacApplication")
+            .field("input", &self.input)
             .field("initial_width", &self.initial_width)
             .field("initial_height", &self.initial_height)
-            .field("running", &self.running)
             .field("occluded", &self.occluded)
-            .field("pending_screenshots", &self.pending_screenshots.len())
             .field("has_error", &self.error.is_some())
             .finish_non_exhaustive()
     }
@@ -134,16 +104,14 @@ impl MacApplication {
         proxy: EventLoopProxy<UserEvent>,
     ) -> Self {
         Self {
+            input: program.input.clone(),
             program: Some(program),
             initial_width: options.viewport_width,
             initial_height: options.viewport_height,
-            pipeline: None,
-            frames: None,
+            engine: None,
             window: None,
             proxy,
             console,
-            pending_screenshots: Vec::new(),
-            running: true,
             occluded: false,
             pointer: None,
             pressed: false,
@@ -173,47 +141,41 @@ impl MacApplication {
             .program
             .take()
             .expect("the program is consumed by the first window only");
-        let (pipeline, script) = program.split(css_width, css_height, scale_factor)?;
-        // The surface is created here on the main thread — the one place
-        // macOS guarantees layer setup works — and the whole GPU stack then
-        // moves to the render thread it lives on.
-        let graphics = WindowGraphics::new(Arc::clone(&window), physical_size)?;
+        program.warn_about_dropped_author_rules();
 
-        let (frames, frame_jobs) = mpsc::channel();
-        let render_window = Arc::clone(&window);
-        let render_proxy = self.proxy.clone();
-        thread::Builder::new()
-            .name("bobcat-render".to_owned())
-            .spawn(move || render_thread(graphics, &render_window, &frame_jobs, &render_proxy))
-            .map_err(|error| {
-                CliError::Window(format!("could not start the render thread: {error}"))
-            })?;
+        let mut engine = Engine::new(program.config, css_width, css_height, scale_factor)?;
+        // The engine builds the GPU surface here on the main thread — the one
+        // place macOS guarantees layer setup works — then owns presentation
+        // on its render thread. The three capabilities are the OS mechanisms
+        // it schedules through.
+        let request_window = Arc::clone(&window);
+        let present_window = Arc::clone(&window);
+        let render_wakeup = self.proxy.clone();
+        engine.attach_window(
+            Arc::clone(&window),
+            FrameSize {
+                width: physical_size.width,
+                height: physical_size.height,
+            },
+            WindowHooks {
+                request_frame: Box::new(move || request_window.request_redraw()),
+                pre_present: Box::new(move || present_window.pre_present_notify()),
+                wakeup: Box::new(move || {
+                    let _ = render_wakeup.send_event(UserEvent::Pump);
+                }),
+            },
+        )?;
 
-        // The script boots concurrently: the window is already live, and the
-        // first committed batch triggers the first real frame. Until then the
-        // engine paints the bare page.
-        let script_proxy = self.proxy.clone();
-        thread::Builder::new()
-            .name("bobcat-js".to_owned())
-            .spawn(move || {
-                let commit_proxy = script_proxy.clone();
-                let result = script.run(move |ops| {
-                    let (ack, ack_receiver) = mpsc::channel();
-                    commit_proxy
-                        .send_event(UserEvent::Commit { ops, ack })
-                        .map_err(|_| CommitError::Disconnected)?;
-                    ack_receiver.recv().map_err(|_| CommitError::Disconnected)?
-                });
-                let _ = script_proxy.send_event(UserEvent::ScriptDone(result));
-            })
-            .map_err(|error| {
-                CliError::Window(format!("could not start the script thread: {error}"))
-            })?;
+        // The script boots concurrently on the engine's thread: the window is
+        // already live, and the first committed batch triggers the first real
+        // frame. Until then the engine paints the bare page.
+        let script_wakeup = self.proxy.clone();
+        engine.spawn_script(program.source, move || {
+            let _ = script_wakeup.send_event(UserEvent::Pump);
+        })?;
 
-        self.pipeline = Some(pipeline);
-        self.frames = Some(frames);
+        self.engine = Some(engine);
         self.window = Some(window);
-        self.request_redraw();
         Ok(())
     }
 
@@ -227,59 +189,31 @@ impl MacApplication {
             .expect("resize events arrive only after window creation");
         let (css_width, css_height, scale_factor) =
             viewport_metrics(physical_size, window.scale_factor());
-        self.pipeline
+        self.engine
             .as_mut()
-            .expect("the pipeline is installed with the window")
+            .expect("the engine is installed with the window")
             .resize(css_width, css_height, scale_factor)?;
-        // The surface follows along on the render thread: the next frame job
-        // carries the new target size and `WindowGraphics::render`
-        // reconfigures to match.
-        self.request_redraw();
         Ok(())
-    }
-
-    /// Prepares the current frame on the engine thread and mails it to the
-    /// render thread. Infallible here: render failures come back as
-    /// [`UserEvent::RenderFailed`].
-    fn redraw(&mut self) {
-        let pipeline = self
-            .pipeline
-            .as_mut()
-            .expect("redraw events arrive only after initialization");
-        let frames = self
-            .frames
-            .as_ref()
-            .expect("redraw events arrive only after initialization");
-        let frame = pipeline.prepare_frame();
-        let job = FrameJob {
-            scene: frame.scene().clone(),
-            size: frame.size,
-            screenshots: mem::take(&mut self.pending_screenshots),
-        };
-        drop(frame);
-        // A closed mailbox means the render thread already posted its failure.
-        let _ = frames.send(job);
     }
 
     fn command(&mut self, event_loop: &ActiveEventLoop, command: Command) {
         match command {
             Command::Continue => {
-                self.running = true;
                 println!("Continuing with display vsync.");
-                self.request_redraw();
+                if let Some(engine) = &self.engine {
+                    engine.refresh();
+                }
             }
             Command::Pause => {
-                self.running = false;
-                println!("Frame clock paused.");
+                println!("The window repaints only on new frames; nothing to pause.");
             }
             Command::Frame => {
-                self.request_redraw();
+                if let Some(engine) = &self.engine {
+                    engine.refresh();
+                }
                 println!("Rendering one frame.");
             }
-            Command::Screenshot(path) => {
-                self.pending_screenshots.push(path);
-                self.request_redraw();
-            }
+            Command::Screenshot(path) => self.screenshot(path),
             Command::SetVsync(_) => {
                 eprintln!(
                     "bobcat: `set vsync` controls the synthetic headless clock; headed mode uses \
@@ -294,21 +228,29 @@ impl MacApplication {
         self.console.prompt();
     }
 
-    fn request_redraw(&self) {
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        }
-    }
-
-    /// Feeds one already-built input event in and repaints if it moved
-    /// anything. `ControlFlow::Wait` means nothing else would ask.
-    fn dispatch(&mut self, event: InputEvent) {
-        let Some(pipeline) = self.pipeline.as_mut() else {
+    /// Asks the engine for the current frame's pixels; writing the PNG is
+    /// this embedder's IO, run wherever the engine captured the frame.
+    fn screenshot(&mut self, path: PathBuf) {
+        let Some(engine) = self.engine.as_mut() else {
+            eprintln!("bobcat: no window yet to capture");
             return;
         };
-        pipeline.handle_input(event);
-        if pipeline.needs_frame() {
-            self.request_redraw();
+        engine.request_screenshot(move |result| {
+            // A screenshot failure must not tear down the session: report it
+            // at the prompt like any other bad command.
+            let saved = result
+                .map_err(CliError::Engine)
+                .and_then(|shot| save_screenshot(&path, shot.size, &shot.pixels));
+            if let Err(error) = saved {
+                eprintln!("bobcat: {error}");
+            }
+        });
+    }
+
+    /// Relays one already-translated input event to the engine.
+    fn dispatch(&mut self, event: InputEvent) {
+        if let Some(engine) = self.engine.as_mut() {
+            engine.dispatch_input(event);
         }
     }
 
@@ -440,13 +382,15 @@ impl ApplicationHandler<UserEvent> for MacApplication {
             }
             WindowEvent::Occluded(occluded) => {
                 self.occluded = occluded;
-                if !occluded {
-                    self.request_redraw();
+                if !occluded && let Some(engine) = &self.engine {
+                    engine.refresh();
                 }
                 Ok(())
             }
             WindowEvent::RedrawRequested => {
-                self.redraw();
+                if let Some(engine) = self.engine.as_mut() {
+                    engine.notify_redraw();
+                }
                 Ok(())
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -491,279 +435,25 @@ impl ApplicationHandler<UserEvent> for MacApplication {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::Command(command) => self.command(event_loop, command),
-            UserEvent::Commit { ops, ack } => {
-                let result = self
-                    .pipeline
-                    .as_mut()
-                    .expect("commits arrive only after initialization spawns the script thread")
-                    .apply_commit(&ops)
-                    .map_err(CommitError::Rejected);
-                // A dead receiver only means the script thread gave up; the
-                // tree has already applied whatever was valid.
-                let _ = ack.send(result);
-                self.request_redraw();
-            }
-            UserEvent::ScriptDone(Ok(())) => {}
-            UserEvent::ScriptDone(Err(error)) | UserEvent::RenderFailed(error) => {
-                self.fail(event_loop, error);
-            }
-        }
-    }
-
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        // Re-request only while the document has something new to paint: a
-        // static scene must not turn `ControlFlow::Wait` into a permanent
-        // full-refresh render loop.
-        if self.running
-            && !self.occluded
-            && self
-                .pipeline
-                .as_ref()
-                .is_some_and(FramePipeline::needs_frame)
-        {
-            self.request_redraw();
-        }
-    }
-}
-
-struct WindowGraphics {
-    context: RenderContext,
-    surface: RenderSurface<'static>,
-    renderer: vello::Renderer,
-    capture: Option<CaptureTarget>,
-}
-
-/// A `COPY_SRC` twin of the surface's render target, on the same device, so
-/// screenshots read back exactly what the window pipeline rendered instead of
-/// re-rendering on a second GPU stack.
-struct CaptureTarget {
-    width: u32,
-    height: u32,
-    texture: vello::wgpu::Texture,
-    view: vello::wgpu::TextureView,
-    blitter: vello::wgpu::util::TextureBlitter,
-}
-
-impl std::fmt::Debug for WindowGraphics {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("WindowGraphics")
-            .field("surface", &self.surface)
-            .finish_non_exhaustive()
-    }
-}
-
-impl WindowGraphics {
-    fn new(window: Arc<Window>, size: PhysicalSize<u32>) -> Result<Self, CliError> {
-        let mut context = RenderContext::new();
-        let surface = pollster::block_on(context.create_surface(
-            window,
-            size.width,
-            size.height,
-            vello::wgpu::PresentMode::AutoVsync,
-        ))
-        .map_err(|error| CliError::Render(error.to_string()))?;
-        let handle = &context.devices[surface.dev_id];
-        let renderer = vello::Renderer::new(&handle.device, renderer_options())
-            .map_err(|error| CliError::Render(error.to_string()))?;
-        Ok(Self {
-            context,
-            surface,
-            renderer,
-            capture: None,
-        })
-    }
-
-    fn resize(&mut self, size: PhysicalSize<u32>) {
-        if size.width != 0
-            && size.height != 0
-            && (self.surface.config.width != size.width
-                || self.surface.config.height != size.height)
-        {
-            self.context
-                .resize_surface(&mut self.surface, size.width, size.height);
-        }
-    }
-
-    fn render(
-        &mut self,
-        window: &Window,
-        scene: &vello::Scene,
-        size: FrameSize,
-    ) -> Result<(), CliError> {
-        if self.surface.config.width != size.width || self.surface.config.height != size.height {
-            self.resize(PhysicalSize::new(size.width, size.height));
-        }
-        let Self {
-            context,
-            surface,
-            renderer,
-            ..
-        } = self;
-        // Keep the retained target current even when the compositor cannot
-        // provide a surface texture. Screenshots read this target directly.
-        {
-            let handle = &context.devices[surface.dev_id];
-            renderer
-                .render_to_texture(
-                    &handle.device,
-                    &handle.queue,
-                    scene,
-                    &surface.target_view,
-                    &render_params(Color::WHITE, size.width, size.height),
-                )
-                .map_err(|error| CliError::Render(error.to_string()))?;
-        }
-        let (surface_texture, reconfigure_after) = match surface.surface.get_current_texture() {
-            vello::wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
-            vello::wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
-            vello::wgpu::CurrentSurfaceTexture::Timeout
-            | vello::wgpu::CurrentSurfaceTexture::Occluded => return Ok(()),
-            vello::wgpu::CurrentSurfaceTexture::Outdated => {
-                context.configure_surface(surface);
-                return Ok(());
-            }
-            vello::wgpu::CurrentSurfaceTexture::Lost => {
-                return Err(CliError::Render(
-                    "the macOS window surface was lost".to_owned(),
-                ));
-            }
-            vello::wgpu::CurrentSurfaceTexture::Validation => {
-                return Err(CliError::Render(
-                    "surface acquisition raised a wgpu validation error".to_owned(),
-                ));
-            }
-        };
-        let handle = &context.devices[surface.dev_id];
-        let output_view = surface_texture
-            .texture
-            .create_view(&vello::wgpu::TextureViewDescriptor::default());
-        let mut encoder =
-            handle
-                .device
-                .create_command_encoder(&vello::wgpu::CommandEncoderDescriptor {
-                    label: Some("bobcat window blit"),
-                });
-        surface.blitter.copy(
-            &handle.device,
-            &mut encoder,
-            &surface.target_view,
-            &output_view,
-        );
-        handle.queue.submit([encoder.finish()]);
-        window.pre_present_notify();
-        surface_texture.present();
-        if reconfigure_after {
-            context.configure_surface(surface);
-        }
-        Ok(())
-    }
-
-    /// Reads back the frame most recently rendered into the surface's target
-    /// texture, on the window's own device, as tightly-packed RGBA8 pixels.
-    fn capture_frame(&mut self, size: FrameSize) -> Result<Vec<u8>, CliError> {
-        let handle = &self.context.devices[self.surface.dev_id];
-        if !self
-            .capture
-            .as_ref()
-            .is_some_and(|capture| capture.width == size.width && capture.height == size.height)
-        {
-            let texture = handle
-                .device
-                .create_texture(&vello::wgpu::TextureDescriptor {
-                    label: Some("bobcat capture target"),
-                    size: vello::wgpu::Extent3d {
-                        width: size.width,
-                        height: size.height,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: vello::wgpu::TextureDimension::D2,
-                    format: vello::wgpu::TextureFormat::Rgba8Unorm,
-                    usage: vello::wgpu::TextureUsages::RENDER_ATTACHMENT
-                        | vello::wgpu::TextureUsages::COPY_SRC,
-                    view_formats: &[],
-                });
-            let view = texture.create_view(&vello::wgpu::TextureViewDescriptor::default());
-            let blitter = vello::wgpu::util::TextureBlitter::new(
-                &handle.device,
-                vello::wgpu::TextureFormat::Rgba8Unorm,
-            );
-            self.capture = Some(CaptureTarget {
-                width: size.width,
-                height: size.height,
-                texture,
-                view,
-                blitter,
-            });
-        }
-        let capture = self
-            .capture
-            .as_ref()
-            .expect("the capture target was just ensured");
-        let mut encoder =
-            handle
-                .device
-                .create_command_encoder(&vello::wgpu::CommandEncoderDescriptor {
-                    label: Some("bobcat capture blit"),
-                });
-        capture.blitter.copy(
-            &handle.device,
-            &mut encoder,
-            &self.surface.target_view,
-            &capture.view,
-        );
-        handle.queue.submit([encoder.finish()]);
-        read_texture(
-            &handle.device,
-            &handle.queue,
-            &capture.texture,
-            size.width,
-            size.height,
-        )
-        .map_err(CliError::Gpu)
-    }
-}
-
-/// The render thread's whole life: block on the mailbox, drain it to the
-/// newest frame (carrying screenshot requests forward — they want "the
-/// current frame", and newer is more current), rasterize, present, capture.
-///
-/// Runs until the engine drops its sender (normal shutdown) or rendering
-/// fails, which is posted back as [`UserEvent::RenderFailed`].
-fn render_thread(
-    mut graphics: WindowGraphics,
-    window: &Window,
-    frames: &mpsc::Receiver<FrameJob>,
-    proxy: &EventLoopProxy<UserEvent>,
-) {
-    while let Ok(mut job) = frames.recv() {
-        while let Ok(mut newer) = frames.try_recv() {
-            let mut screenshots = mem::take(&mut job.screenshots);
-            screenshots.append(&mut newer.screenshots);
-            newer.screenshots = screenshots;
-            job = newer;
-        }
-        if let Err(error) = graphics.render(window, &job.scene, job.size) {
-            let _ = proxy.send_event(UserEvent::RenderFailed(error));
-            return;
-        }
-        if job.screenshots.is_empty() {
-            continue;
-        }
-        // A screenshot failure must not tear down the session: report it at
-        // the prompt like any other bad command, and let one bad path leave
-        // the other queued captures unharmed.
-        match graphics.capture_frame(job.size) {
-            Ok(pixels) => {
-                for path in &job.screenshots {
-                    if let Err(error) = save_screenshot(path, job.size, &pixels) {
-                        eprintln!("bobcat: {error}");
+            UserEvent::Pump => {
+                let Some(engine) = self.engine.as_mut() else {
+                    return;
+                };
+                for engine_event in engine.pump() {
+                    match engine_event {
+                        EngineEvent::ScriptFinished(Err(source)) => {
+                            let input = self.input.clone();
+                            self.fail(event_loop, CliError::Script { input, source });
+                        }
+                        EngineEvent::RenderFailed(error) => {
+                            self.fail(event_loop, error.into());
+                        }
+                        // A successfully finished script needs no reaction,
+                        // and future lifecycle events default to none.
+                        _ => {}
                     }
                 }
             }
-            Err(error) => eprintln!("bobcat: screenshot capture failed: {error}"),
         }
     }
 }
