@@ -1,39 +1,33 @@
 //! The engine-owned window presentation stack.
 //!
-//! Created on the embedder's thread (the one place macOS guarantees layer
-//! setup works), then moved whole to the render thread it lives on. The
-//! render thread drains a latest-wins mailbox of prepared scenes,
-//! rasterizes, presents, and serves screenshot captures, so vsync waits and
-//! GPU stalls never occupy the thread the engine runs on.
-
-use std::mem;
-use std::sync::mpsc;
+//! Lives on the embedder's main thread beside its event loop — presentation
+//! and vsync interact with the OS only here. Rendering into the retained
+//! target texture and presenting it are separate steps: the target is
+//! re-rendered only when a new scene was produced, while surface
+//! invalidation and re-exposure re-present the retained target with a blit
+//! alone.
 
 use lynx_element::dom::render::gpu::{read_texture, render_params, renderer_options};
 use lynx_element::dom::vello;
 use lynx_element::dom::vello::peniko::Color;
 use lynx_element::dom::vello::util::{RenderContext, RenderSurface};
 
-use super::{EngineError, FrameSize, Screenshot, ScreenshotSink};
+use super::{EngineError, FrameSize};
 
 /// The draw target an embedder hands over with its window: anything wgpu
 /// can build a surface on (a window handle behind `Arc`, a raw handle
 /// pair, …).
 pub type WindowTarget = vello::wgpu::SurfaceTarget<'static>;
 
-/// One prepared frame crossing to the render thread: the cloned scene, its
-/// physical target size, and any screenshot requests to serve from it.
-pub(super) struct FrameJob {
-    pub(super) scene: vello::Scene,
-    pub(super) size: FrameSize,
-    pub(super) screenshots: Vec<ScreenshotSink>,
-}
-
 pub(super) struct WindowGraphics {
     context: RenderContext,
     surface: RenderSurface<'static>,
     renderer: vello::Renderer,
     capture: Option<CaptureTarget>,
+    /// The frame size the retained target texture currently holds, or
+    /// `None` before the first render (and after a surface resize, which
+    /// replaces the target texture).
+    rendered: Option<FrameSize>,
 }
 
 /// A `COPY_SRC` twin of the surface's render target, on the same device, so
@@ -74,10 +68,23 @@ impl WindowGraphics {
             surface,
             renderer,
             capture: None,
+            rendered: None,
         })
     }
 
-    fn resize(&mut self, size: FrameSize) {
+    /// Whether the retained target already holds a frame at `size`, so a
+    /// re-present can skip scene rendering entirely.
+    pub(super) fn rendered_at(&self, size: FrameSize) -> bool {
+        self.rendered == Some(size)
+    }
+
+    /// Renders `scene` into the retained target texture, reconfiguring the
+    /// surface first if `size` changed.
+    pub(super) fn render_to_target(
+        &mut self,
+        scene: &vello::Scene,
+        size: FrameSize,
+    ) -> Result<(), EngineError> {
         if size.width != 0
             && size.height != 0
             && (self.surface.config.width != size.width
@@ -85,38 +92,29 @@ impl WindowGraphics {
         {
             self.context
                 .resize_surface(&mut self.surface, size.width, size.height);
+            self.rendered = None;
         }
+        let handle = &self.context.devices[self.surface.dev_id];
+        self.renderer
+            .render_to_texture(
+                &handle.device,
+                &handle.queue,
+                scene,
+                &self.surface.target_view,
+                &render_params(Color::WHITE, size.width, size.height),
+            )
+            .map_err(|error| EngineError::Render(error.to_string()))?;
+        self.rendered = Some(size);
+        Ok(())
     }
 
-    fn render(
-        &mut self,
-        scene: &vello::Scene,
-        size: FrameSize,
-        pre_present: &(dyn Fn() + Send),
-    ) -> Result<(), EngineError> {
-        if self.surface.config.width != size.width || self.surface.config.height != size.height {
-            self.resize(size);
-        }
+    /// Presents the retained target: acquires the surface texture, blits,
+    /// notifies the embedder just before presenting, and presents. Called
+    /// outside the tree lock — the vsync wait must not block anyone.
+    pub(super) fn present(&mut self, pre_present: &dyn Fn()) -> Result<(), EngineError> {
         let Self {
-            context,
-            surface,
-            renderer,
-            ..
+            context, surface, ..
         } = self;
-        // Keep the retained target current even when the compositor cannot
-        // provide a surface texture. Screenshots read this target directly.
-        {
-            let handle = &context.devices[surface.dev_id];
-            renderer
-                .render_to_texture(
-                    &handle.device,
-                    &handle.queue,
-                    scene,
-                    &surface.target_view,
-                    &render_params(Color::WHITE, size.width, size.height),
-                )
-                .map_err(|error| EngineError::Render(error.to_string()))?;
-        }
         let (surface_texture, reconfigure_after) = match surface.surface.get_current_texture() {
             vello::wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
             vello::wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
@@ -164,7 +162,7 @@ impl WindowGraphics {
 
     /// Reads back the frame most recently rendered into the surface's target
     /// texture, on the window's own device, as tightly-packed RGBA8 pixels.
-    fn capture_frame(&mut self, size: FrameSize) -> Result<Vec<u8>, EngineError> {
+    pub(super) fn capture_frame(&mut self, size: FrameSize) -> Result<Vec<u8>, EngineError> {
         let handle = &self.context.devices[self.surface.dev_id];
         if !self
             .capture
@@ -226,54 +224,5 @@ impl WindowGraphics {
             size.height,
         )
         .map_err(EngineError::Gpu)
-    }
-}
-
-/// The render thread's whole life: block on the mailbox, drain it to the
-/// newest frame (carrying screenshot requests forward — they want "the
-/// current frame", and newer is more current), rasterize, present, capture.
-///
-/// Runs until the engine drops its sender (normal shutdown) or rendering
-/// fails, which is reported through `fail`.
-pub(super) fn render_thread(
-    mut graphics: WindowGraphics,
-    frames: &mpsc::Receiver<FrameJob>,
-    pre_present: &(dyn Fn() + Send),
-    fail: &dyn Fn(EngineError),
-) {
-    while let Ok(mut job) = frames.recv() {
-        while let Ok(mut newer) = frames.try_recv() {
-            let mut screenshots = mem::take(&mut job.screenshots);
-            screenshots.append(&mut newer.screenshots);
-            newer.screenshots = screenshots;
-            job = newer;
-        }
-        if let Err(error) = graphics.render(&job.scene, job.size, pre_present) {
-            fail(error);
-            return;
-        }
-        if job.screenshots.is_empty() {
-            continue;
-        }
-        // A screenshot failure must not tear down the session: the sinks
-        // report it embedder-side, and one bad capture leaves later frames
-        // unharmed.
-        match graphics.capture_frame(job.size) {
-            Ok(pixels) => {
-                let screenshot = Screenshot {
-                    size: job.size,
-                    pixels,
-                };
-                for deliver in job.screenshots {
-                    deliver(Ok(screenshot.clone()));
-                }
-            }
-            Err(error) => {
-                let message = error.to_string();
-                for deliver in job.screenshots {
-                    deliver(Err(EngineError::Render(message.clone())));
-                }
-            }
-        }
     }
 }

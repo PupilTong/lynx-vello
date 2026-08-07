@@ -9,17 +9,16 @@
 //! wall is, so the gap is a failing assertion to update rather than a
 //! paragraph of prose that rots.
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
-use bobcat_core::quickjs::{MainThreadRuntime, local_commit_sink};
+use bobcat_core::quickjs::MainThreadRuntime;
 use lynx_element::{ElementTree, PageConfig, Viewport};
 
 /// The single-threaded composition: the realm records PAPI writes and every
 /// `__FlushElementTree` applies them to this shared tree on the spot.
-fn shared_tree(config: PageConfig) -> (MainThreadRuntime, Rc<RefCell<ElementTree>>) {
-    let elements = Rc::new(RefCell::new(ElementTree::new(VIEWPORT, config)));
-    let runtime = MainThreadRuntime::new(local_commit_sink(&elements)).expect("QuickJS realm");
+fn shared_tree(config: PageConfig) -> (MainThreadRuntime, Arc<Mutex<ElementTree>>) {
+    let elements = Arc::new(Mutex::new(ElementTree::new(VIEWPORT, config)));
+    let runtime = MainThreadRuntime::new(Arc::clone(&elements), || {}).expect("QuickJS realm");
     (runtime, elements)
 }
 
@@ -60,7 +59,7 @@ fn the_bundle_page_config_reaches_the_ua_cascade() {
         assert!(config.enable_css_selector, "{name}");
 
         let (_runtime, elements) = shared_tree(config);
-        assert_eq!(elements.borrow().config(), config, "{name}");
+        assert_eq!(elements.lock().unwrap().config(), config, "{name}");
     }
 }
 
@@ -104,7 +103,7 @@ fn a_real_bundle_stops_at_the_missing_lynx_global() {
             message.contains("main-thread.js:"),
             "{name}: the error should carry a source location: {message}"
         );
-        assert!(elements.borrow().page().is_none(), "{name}");
+        assert!(elements.lock().unwrap().page().is_none(), "{name}");
     }
 }
 
@@ -131,7 +130,7 @@ fn the_boot_sequence_works_on_a_bundle_shaped_script() {
             ",
         )
         .expect("boot");
-    let elements = elements.borrow();
+    let elements = elements.lock().unwrap();
     assert!(elements.page().is_some());
     assert!(elements.element(2).is_some(), "the appended view is live");
 }

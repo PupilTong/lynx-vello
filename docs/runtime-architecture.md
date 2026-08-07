@@ -36,22 +36,21 @@ JavaScript adapter:
   without boxed `dyn Future` values.
 - `lynx-element` owns the concrete validated Element-PAPI operations and
   `pub type ElementId = u32`. There is no element-host trait: the only real
-  host is `ElementTree`. The same five calls also exist as data —
-  `ElementOpRecorder` answers them from a shadow of the tree and records
-  `ElementOp`s, which `ElementTree::apply` replays at the flush boundary
-  under a mirroring law (same ids, same errors, same precedence; asserted at
-  apply). That seam is what lets a shell keep the script and the tree on
-  different threads without sharing either.
-- `engine` is the embedder boundary: `Engine` owns the element tree, commit
-  application (`apply_batch`, the single point every composition shares),
-  input routing, frame scheduling, and the script and render threads. An
-  embedder provides exactly five things — user input, device metrics, OS
-  initialization, a draw target, and IO primitives — and relays OS facts
-  into the engine (`dispatch_input`, `resize`, `notify_redraw`, `pump`,
-  clock ticks); it never starts or steers the pipeline. The engine schedules
-  through capabilities the embedder hands over at attach time
-  (`request_frame`, `pre_present`, `wakeup`), so thread placement stays
-  invisible in the contract.
+  host is `ElementTree`, and every PAPI call mutates it directly — the
+  tree's own validation is the single source of every `PapiError`.
+  `has_uncommitted_mutations` marks the span between a batch's first
+  mutation and its `flush_element_tree`, which is what lets a frame
+  producer sharing the tree across threads refuse to build from a
+  half-applied batch.
+- `engine` is the embedder boundary: `Engine` shares the element tree with
+  its own Lynx main thread behind one lock, and owns input routing, frame
+  production, presentation, and the script thread. An embedder provides
+  exactly five things — user input, device metrics, OS initialization, a
+  draw target, and IO primitives — and relays OS facts into the engine
+  (`dispatch_input`, `resize`, `notify_redraw`, `pump`, clock ticks); it
+  never starts or steers the pipeline. The engine schedules through
+  capabilities the embedder hands over at attach time (`request_frame`,
+  `pre_present`, `wakeup`).
 - `resource` and `view` provide resource acquisition and generic engine/view
   composition. The crate root does not re-export `ElementTree`, `dom`,
   or a renderer specialization. `bobcat-cli` is one embedder of `engine`,
@@ -119,17 +118,14 @@ touch it: they hold an `Engine` and relay OS facts into it.
    is the same permanent `u32` id stored in the element arena; private DOM
    `NodeId` slots may still be reused.
 2. With QuickJS enabled, `quickjs::MainThreadRuntime` owns only the realm.
-   Its five Element PAPI host functions answer from an `ElementOpRecorder`
-   shadow — validation is synchronous at every call, exactly as when the
-   realm mutated a tree directly — without the script side ever holding the
-   tree, seeing `NodeId`, or getting mutable DOM access.
-3. `__FlushElementTree` drains the recorded batch into the commit sink the
-   engine injected. Every composition lands in the same application point,
-   `engine::apply_batch`: inline for a script the engine runs on its own
-   thread (tests, the headless CLI), and across the engine's message channel
-   — blocking the script until `Engine::pump` acknowledges — for a spawned
-   script thread. The engine owns the tree; the document-owned Painter
-   decides whether its retained scene is current.
+   Its five Element PAPI host functions lock the shared tree for the
+   duration of one call and mutate it directly — the tree validates, so a
+   bad handle throws at the call site — without the script ever seeing
+   `NodeId`.
+3. `__FlushElementTree` is the commit boundary: the style + layout commit
+   runs under the lock, the open batch closes, and the presenting side is
+   asked for a frame. The document-owned Painter decides whether its
+   retained scene is current.
 4. For a dirty frame, `render` flushes/layouts, creates its
    temporary visual order, and runs its private
    Painter over live styles, rounded layouts, retained text, and the
@@ -150,31 +146,32 @@ touch it: they hold an `Engine` and relay OS facts into it.
 
 ## Thread topology
 
-The engine libraries are synchronous and single-owner; threads are an
-`engine` concern, and every thread crossing is a plain value. The windowed
-composition runs three:
+The engine libraries are synchronous; the `engine` module shares the one
+element tree between exactly two threads behind one `Mutex`. The windowed
+composition:
 
 ```text
-script thread (engine-owned)     embedder's event loop thread      render thread (engine-owned)
-QuickJS realm (MTS)              Engine: ElementTree, input,       WindowGraphics: surface,
-ElementOpRecorder shadow         scrolling, commit application,    renderer, present, vsync,
-  │ Commit{ops} + wakeup ─────▶  style/layout/paint                screenshot capture
-  │ ◀────────────── ack           │ FrameJob{Scene clone} ──────▶   (latest-wins mailbox)
-  blocks on flush                 never blocks on either side
+Lynx main thread (engine-owned)          embedder's event loop thread
+QuickJS realm + its event loop           Engine: input routing, scrolling,
+PAPI calls lock + mutate directly        frame production (build + encode),
+flush = style/layout commit under lock,  GPU submission, present — vsync
+then ask for a frame ──────────────────▶ interacts with the OS only here
+                                         (try_lock; never blocks on anyone)
 ```
 
-The engine's logic runs inline on the embedder's event-loop thread inside
-relay calls; the embedder cannot tell (a dedicated engine thread would
-change no signature), and it holds no tree, scene, or GPU object at any
-point. The script may wait on the engine (`__FlushElementTree` blocks until
-`Engine::pump` acknowledges); the engine never waits on the script or the
-GPU. `vello::Scene` is `Send + Sync` by vello's own static assertion, and
-recorded op batches are plain data, so no tree, document, or GPU object is
-ever shared across threads. The offscreen composition keeps the wall-free
-form: one thread, `Engine::run_script`, identical semantics — the golden
-screenshot suite drives it end to end and pins that the
-recorded-and-replayed tree paints byte-identically to a directly-mutated
-one.
+The presenting side acquires the lock only with `try_lock`: a running
+commit makes it re-present the retained target and retry next frame, and
+present's vsync wait always happens outside the lock. The lock is idle
+while the script computes, so a long JavaScript task never stops input
+routing, scrolling, or presentation — scroll target resolution reads the
+retained paint order and writes offsets under the same lock, keeping one
+truth with no reconciliation protocol. A producer never builds while a
+PAPI batch is open (`has_uncommitted_mutations`); it re-presents the last
+committed frame instead. The law: the main thread waits only on its own
+commits; the presenting side never waits on the main thread; the embedder
+loop never blocks. The offscreen composition keeps the wall-free form: one
+thread, `Engine::run_script`, identical semantics — the golden screenshot
+suite drives it end to end.
 
 ## Static dispatch and intentional dynamic boundaries
 

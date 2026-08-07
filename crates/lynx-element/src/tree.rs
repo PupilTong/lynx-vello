@@ -15,10 +15,7 @@ use crate::{ElementId, PAGE_TAG, VIEW_TAG};
 /// requires this layer to validate handles before calling the crash-on-misuse
 /// DOM core, so every fallible PAPI entry point returns this instead of
 /// panicking.
-///
-/// [`crate::ElementOpRecorder`] answers PAPI calls with these same errors in
-/// the same precedence order (the mirroring law in `ops.rs`); a change to any
-/// validation below must change the recorder in the same commit.
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PapiError {
@@ -68,6 +65,13 @@ pub struct ElementTree {
     /// pre-created with the document — so this only gates the one-time
     /// binding of the page's component fields.
     page_created: bool,
+    /// Whether a mutating PAPI call has run since the last
+    /// [`Self::flush_element_tree`]. `__FlushElementTree` is the script's
+    /// commit boundary; a frame producer sharing this tree across threads
+    /// must not build from a half-applied batch (appended elements may not
+    /// be styled yet), so it checks this before producing and falls back to
+    /// its retained frame while a batch is open.
+    uncommitted: bool,
     /// `__CreatePage`'s `componentID` — a string name web-core keeps in a side
     /// table rather than on the element, so it never reaches selectors.
     page_component_id: String,
@@ -99,6 +103,7 @@ impl ElementTree {
             document,
             elements,
             page_created: false,
+            uncommitted: false,
             page_component_id: String::new(),
             config,
         };
@@ -246,6 +251,7 @@ impl ElementTree {
     /// already exists and ignores its arguments. The page is created detached;
     /// [`Self::flush_element_tree`] is what puts it in the document.
     pub fn create_page(&mut self, component_id: &str, component_css_id: i32) -> ElementId {
+        self.uncommitted = true;
         if !self.page_created {
             // `componentID` is a *string* name, not the numeric unique id, and
             // web-core keeps it out of the DOM — `create_element_common` files
@@ -273,6 +279,7 @@ impl ElementTree {
         if parent_component_unique_id != 0 && self.node_id(parent_component_unique_id).is_none() {
             return Err(PapiError::UnknownElement(parent_component_unique_id));
         }
+        self.uncommitted = true;
         Ok(self.insert(VIEW_TAG, parent_component_unique_id, 0))
     }
 
@@ -301,6 +308,7 @@ impl ElementTree {
             return Err(PapiError::WouldCycle { parent, child });
         }
 
+        self.uncommitted = true;
         self.document.append_child(parent_node, child_node);
         Ok(child)
     }
@@ -315,6 +323,7 @@ impl ElementTree {
             return Err(PapiError::CannotRemovePage);
         }
         let node = self.node_id(id).ok_or(PapiError::UnknownElement(id))?;
+        self.uncommitted = true;
         let retired_ids = self.document.remove_subtree(node);
         for unique_id in retired_ids {
             let retired = self.elements.retire(unique_id);
@@ -333,6 +342,15 @@ impl ElementTree {
     /// makes every pending mutation paint-eligible.
     pub fn flush_element_tree(&mut self) {
         self.document.layout();
+        self.uncommitted = false;
+    }
+
+    /// Whether a mutating PAPI call has run since the last
+    /// [`Self::flush_element_tree`] — the commit-boundary gate a shared
+    /// frame producer checks before building.
+    #[must_use]
+    pub const fn has_uncommitted_mutations(&self) -> bool {
+        self.uncommitted
     }
 
     fn insert(

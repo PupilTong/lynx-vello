@@ -3,39 +3,52 @@
 //! An embedder provides exactly five things: user input, device metrics,
 //! OS initialization (its event loop and window), a draw target, and IO
 //! primitives (bundle bytes in, pixels out). It never starts or steers the
-//! internal pipeline: commit application, style, layout, paint, frame
-//! scheduling, and the script and render threads all live inside [`Engine`].
-//! The embedder's event handlers are relays — they hand the engine an OS
-//! fact (`dispatch_input`, `resize`, `notify_redraw`, `pump`) and the engine
-//! decides what the pipeline does with it, requesting frames itself through
-//! the capabilities the embedder handed over at attach time.
+//! internal pipeline. Its event handlers are relays — they hand the engine
+//! an OS fact (`dispatch_input`, `resize`, `notify_redraw`, `pump`) and the
+//! engine decides what the pipeline does with it, requesting frames itself
+//! through the capabilities the embedder handed over at attach time.
 //!
-//! Thread placement is intentionally invisible in this contract. Today the
-//! engine's logic runs inline on whichever thread the embedder calls from
-//! (its OS event loop), while the engine owns a script thread and a render
-//! thread; a dedicated engine thread would change no signature here.
+//! # Two threads, one lock
 //!
-//! The element tree is never shared across threads. Every crossing is a
-//! plain value: recorded [`ElementOp`] batches inward over the message
-//! channel, cloned [`Scene`]s outward to the render thread, acknowledged
-//! over one-shot channels — the script may wait on the engine, never the
-//! reverse.
+//! The element tree is shared behind one `Mutex` between two roles:
+//!
+//! - **The Lynx main thread** (engine-owned, spawned by [`Engine::spawn_script`]): the `QuickJS`
+//!   realm and its event loop. Each Element PAPI call locks the tree for the duration of one call
+//!   and mutates it directly; `__FlushElementTree` runs the style + layout commit under the lock
+//!   and then asks for a frame.
+//! - **The presenting side** (the thread the embedder calls the engine from — its OS event loop):
+//!   input routing, scrolling, frame production (paint-order build + scene encode), GPU submission,
+//!   and present. Everything here acquires the lock with `try_lock` and never blocks: if the main
+//!   thread is mid-commit, the work is retried at the next frame, and the retained target
+//!   re-presents in the meantime.
+//!
+//! The lock is idle while the script computes, which is the point: a long
+//! JavaScript task does not stop the presenting side from scrolling —
+//! target resolution reads the retained paint order, the offset lands in
+//! the shared tree, and the next frame is produced and presented without
+//! the script's cooperation. The presenting side never produces a frame
+//! while a PAPI batch is open
+//! ([`ElementTree::has_uncommitted_mutations`]) — it re-presents the last
+//! committed frame instead, so a half-applied batch is never observable.
+//!
+//! The law: the main thread waits only on its own commits; the presenting
+//! side never waits on the main thread; present's vsync wait happens
+//! outside the lock, so it blocks no one.
 
 mod graphics;
 
-use std::cell::{Ref, RefCell};
+use std::collections::VecDeque;
 use std::fmt;
-use std::rc::Rc;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError, mpsc};
 
 use lynx_element::dom::ImageStore;
 use lynx_element::dom::input::InputEvent;
 use lynx_element::dom::render::gpu::{GpuError, Headless};
 use lynx_element::dom::vello::peniko::Color;
-use lynx_element::{ElementOp, ElementTree, PageConfig, PapiError, Viewport};
+use lynx_element::{ElementTree, PageConfig, Viewport};
 
+use self::graphics::WindowGraphics;
 pub use self::graphics::WindowTarget;
-use self::graphics::{FrameJob, WindowGraphics};
 
 /// The physical pixel size of the render target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,49 +77,6 @@ pub enum EngineError {
     NoDrawTarget,
 }
 
-/// Why a committed Element PAPI batch was not applied.
-#[derive(Debug)]
-#[non_exhaustive]
-pub enum CommitError {
-    /// The engine rejected the batch: it diverged from the script-side
-    /// recorder's shadow and must not be half-trusted.
-    Rejected(PapiError),
-    /// The engine side is gone; no further commit can ever succeed.
-    Disconnected,
-}
-
-impl fmt::Display for CommitError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Rejected(error) => write!(formatter, "the engine rejected the batch: {error}"),
-            Self::Disconnected => write!(formatter, "the engine side is disconnected"),
-        }
-    }
-}
-
-impl std::error::Error for CommitError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Rejected(error) => Some(error),
-            Self::Disconnected => None,
-        }
-    }
-}
-
-/// Applies one flushed Element PAPI batch and runs the style + layout
-/// commit. This is the single commit-application point every composition
-/// shares: the in-process sink, the engine's own message pump, and tests.
-pub(crate) fn apply_batch(
-    elements: &mut ElementTree,
-    ops: &[ElementOp],
-) -> Result<(), CommitError> {
-    for op in ops {
-        elements.apply(op).map_err(CommitError::Rejected)?;
-    }
-    elements.flush_element_tree();
-    Ok(())
-}
-
 /// How a main-thread script run ended in failure.
 #[cfg(feature = "quickjs")]
 #[derive(Debug, thiserror::Error)]
@@ -118,21 +88,11 @@ pub enum ScriptRunError {
     Script(crate::quickjs::MainThreadError),
 }
 
-/// A message crossing into the engine from one of its own threads.
+/// A message crossing from an engine-owned thread.
 enum EngineMessage {
-    /// One `__FlushElementTree` batch; `ack` unblocks the flush once the
-    /// engine has applied and committed it. Only the engine-owned script
-    /// thread constructs this.
-    #[cfg(feature = "quickjs")]
-    Commit {
-        ops: Vec<ElementOp>,
-        ack: mpsc::Sender<Result<(), CommitError>>,
-    },
     /// The main-thread script ran to completion (or failed) on its thread.
     #[cfg(feature = "quickjs")]
     ScriptDone(Result<(), ScriptRunError>),
-    /// The render thread died; the session cannot continue.
-    RenderFailed(EngineError),
 }
 
 /// A lifecycle outcome the embedder must react to, drained by
@@ -143,8 +103,6 @@ pub enum EngineEvent {
     /// The spawned main-thread script finished.
     #[cfg(feature = "quickjs")]
     ScriptFinished(Result<(), ScriptRunError>),
-    /// The render thread failed; the view cannot continue.
-    RenderFailed(EngineError),
 }
 
 /// One captured frame: tightly packed RGBA8 pixels at `size`.
@@ -163,22 +121,17 @@ impl fmt::Debug for Screenshot {
     }
 }
 
-/// Where a screenshot lands once the frame that carries it is captured.
-/// Runs on the engine's render thread in window mode; persisting the pixels
-/// (an IO primitive) is the embedder's half.
-type ScreenshotSink = Box<dyn FnOnce(Result<Screenshot, EngineError>) + Send>;
-
 /// OS capabilities the embedder lends the engine with a window target.
 /// The embedder provides the mechanisms; the engine decides when to invoke
 /// them.
 pub struct WindowHooks {
     /// Asks the OS for a redraw of the window (`Window::request_redraw`).
-    /// Called on the engine's own thread whenever the pipeline has something
-    /// new to show.
-    pub request_frame: Box<dyn Fn()>,
-    /// Called by the render thread immediately before presenting
+    /// `Send + Sync` because the engine's main thread asks for a frame
+    /// after every committed flush.
+    pub request_frame: Box<dyn Fn() + Send + Sync>,
+    /// Called on the presenting side immediately before presenting
     /// (`Window::pre_present_notify`).
-    pub pre_present: Box<dyn Fn() + Send>,
+    pub pre_present: Box<dyn Fn()>,
     /// Posts a wakeup to the embedder's event loop so it calls
     /// [`Engine::pump`]. Called from engine-owned threads.
     pub wakeup: Box<dyn Fn() + Send + Sync>,
@@ -195,29 +148,36 @@ impl fmt::Debug for WindowHooks {
 /// The attached output, if any.
 enum Output {
     None,
-    /// An offscreen GPU target on the calling thread: `tick` renders,
-    /// `capture` reads back. Boxed to keep the idle variants small.
+    /// An offscreen GPU target: `tick` renders, `capture` reads back.
+    /// Boxed to keep the idle variants small.
     Offscreen(Box<Headless>),
-    /// A window: prepared frames cross to the engine-owned render thread
-    /// through a latest-wins mailbox.
+    /// A window: the presentation stack lives here, on the thread the
+    /// embedder calls the engine from.
     Window {
-        frames: mpsc::Sender<FrameJob>,
+        graphics: Box<WindowGraphics>,
+        pre_present: Box<dyn Fn()>,
     },
 }
 
-/// The engine half of a Lynx view: the element tree, commit application,
-/// input routing, frame scheduling, and the script/render threads.
+/// The engine half of a Lynx view: the shared element tree, input routing,
+/// frame production, presentation, and the engine-owned script thread.
 ///
 /// Deliberately `!Send`: it lives on the thread the embedder calls it from.
 pub struct Engine {
-    elements: Rc<RefCell<ElementTree>>,
+    elements: Arc<Mutex<ElementTree>>,
     viewport: Viewport,
     frame_size: FrameSize,
     messages: mpsc::Receiver<EngineMessage>,
+    #[cfg_attr(
+        not(feature = "quickjs"),
+        allow(dead_code, reason = "only engine-owned script threads send messages")
+    )]
     message_sender: mpsc::Sender<EngineMessage>,
     output: Output,
-    request_frame: Option<Box<dyn Fn()>>,
-    pending_screenshots: Vec<ScreenshotSink>,
+    request_frame: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Input deferred by a missed `try_lock`, drained in arrival order at
+    /// the next lock acquisition so gesture sequences stay coherent.
+    pending_input: VecDeque<InputEvent>,
 }
 
 impl fmt::Debug for Engine {
@@ -226,6 +186,7 @@ impl fmt::Debug for Engine {
             .debug_struct("Engine")
             .field("viewport", &self.viewport)
             .field("frame_size", &self.frame_size)
+            .field("pending_input", &self.pending_input.len())
             .finish_non_exhaustive()
     }
 }
@@ -242,63 +203,68 @@ impl Engine {
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
         let (message_sender, messages) = mpsc::channel();
         Ok(Self {
-            elements: Rc::new(RefCell::new(ElementTree::new(viewport, config))),
+            elements: Arc::new(Mutex::new(ElementTree::new(viewport, config))),
             viewport,
             frame_size,
             messages,
             message_sender,
             output: Output::None,
             request_frame: None,
-            pending_screenshots: Vec::new(),
+            pending_input: VecDeque::new(),
         })
     }
 
-    /// A read-only borrow of the element tree, for observation.
+    /// A blocking borrow of the element tree, for observation and setup.
     ///
     /// # Panics
     ///
-    /// Panics if called while the engine itself holds the tree mutably —
-    /// impossible from embedder code, which only ever runs between engine
-    /// calls.
-    #[must_use]
-    pub fn elements(&self) -> Ref<'_, ElementTree> {
-        self.elements.borrow()
-    }
-
-    /// The commit sink for a script running on the engine's own thread:
-    /// every flushed batch applies to the tree on the spot.
-    fn commit_sink(&self) -> impl FnMut(Vec<ElementOp>) -> Result<(), CommitError> + 'static {
-        let elements = Rc::clone(&self.elements);
-        move |ops| apply_batch(&mut elements.borrow_mut(), &ops)
+    /// Panics if the other side crashed while holding the lock.
+    pub fn elements(&self) -> MutexGuard<'_, ElementTree> {
+        lock(&self.elements)
     }
 
     /// Mounts author CSS.
     pub fn add_author_stylesheet(&mut self, css: &str) {
-        self.elements.borrow_mut().add_author_stylesheet(css);
+        lock(&self.elements).add_author_stylesheet(css);
     }
 
     /// Registers font data for text measurement.
     pub fn register_fonts(&mut self, bytes: &[u8]) -> usize {
-        self.elements.borrow_mut().register_fonts(bytes)
+        lock(&self.elements).register_fonts(bytes)
     }
 
     /// Registers or updates decoded images, then keeps the next frame fresh.
     pub fn with_images<R>(&mut self, update: impl FnOnce(&mut ImageStore) -> R) -> R {
-        let result = update(self.elements.borrow_mut().images_mut());
+        let result = update(lock(&self.elements).images_mut());
         self.refresh();
         result
     }
 
-    /// Routes one host input event; the engine schedules a frame itself if
-    /// the default action changed anything on screen.
+    /// Routes one host input event on the presenting side.
+    ///
+    /// Never blocks: if the main thread is mid-commit the event is buffered
+    /// and drained, in order, at the next lock acquisition (the very next
+    /// event or redraw). Scroll target resolution and the offset write
+    /// happen under the lock; a long script task leaves the lock idle, so
+    /// scrolling proceeds without the script's cooperation.
     pub fn dispatch_input(&mut self, event: InputEvent) {
-        let needs_frame = {
-            let mut elements = self.elements.borrow_mut();
-            elements.handle_input(event);
-            elements.needs_render()
-        };
-        if needs_frame {
-            self.refresh();
+        self.pending_input.push_back(event);
+        match self.elements.try_lock() {
+            Ok(mut elements) => {
+                while let Some(event) = self.pending_input.pop_front() {
+                    elements.handle_input(event);
+                }
+                let needs_frame = elements.needs_render();
+                drop(elements);
+                if needs_frame {
+                    self.refresh();
+                }
+            }
+            Err(TryLockError::WouldBlock) => {
+                // A commit is running; it ends with a frame request, whose
+                // redraw drains the buffer.
+            }
+            Err(TryLockError::Poisoned(error)) => poisoned(&error),
         }
     }
 
@@ -318,7 +284,7 @@ impl Engine {
             return Ok(());
         }
         {
-            let mut elements = self.elements.borrow_mut();
+            let mut elements = lock(&self.elements);
             if size_changed {
                 elements.set_viewport(width, height);
             }
@@ -333,53 +299,44 @@ impl Engine {
     }
 
     /// Asks the OS for a frame through the embedder-provided capability.
-    /// Harmless when nothing changed: the redraw dedupes against the
-    /// retained scene.
+    /// Harmless when nothing changed: the redraw re-presents the retained
+    /// target without re-rendering.
     pub fn refresh(&self) {
         if let Some(request_frame) = &self.request_frame {
             request_frame();
         }
     }
 
-    /// Drains engine-thread messages: applies committed batches, and returns
-    /// the lifecycle events the embedder must react to. Called from the
+    /// Drains lifecycle messages from engine-owned threads. Called from the
     /// embedder's event loop whenever the engine's wakeup capability fired.
     pub fn pump(&mut self) -> Vec<EngineEvent> {
+        #[cfg_attr(
+            not(feature = "quickjs"),
+            allow(unused_mut, reason = "no message variant exists to push")
+        )]
         let mut events = Vec::new();
         while let Ok(message) = self.messages.try_recv() {
             match message {
                 #[cfg(feature = "quickjs")]
-                EngineMessage::Commit { ops, ack } => {
-                    let result = apply_batch(&mut self.elements.borrow_mut(), &ops);
-                    // A dead receiver only means the script thread gave up;
-                    // the tree has already applied whatever was valid.
-                    let _ = ack.send(result);
-                    self.refresh();
-                }
-                #[cfg(feature = "quickjs")]
                 EngineMessage::ScriptDone(result) => {
                     events.push(EngineEvent::ScriptFinished(result));
-                }
-                EngineMessage::RenderFailed(error) => {
-                    events.push(EngineEvent::RenderFailed(error));
                 }
             }
         }
         events
     }
 
-    /// Attaches an offscreen GPU target on the calling thread. The headless
-    /// composition: [`Self::tick`] renders, [`Self::capture`] reads back.
+    /// Attaches an offscreen GPU target. The headless composition:
+    /// [`Self::tick`] renders, [`Self::capture`] reads back.
     pub fn attach_offscreen(&mut self) -> Result<(), EngineError> {
         let gpu = Headless::new().map_err(EngineError::Gpu)?;
         self.output = Output::Offscreen(Box::new(gpu));
         Ok(())
     }
 
-    /// Attaches a window draw target and takes over presentation: creates
-    /// the GPU surface on the calling thread (the one place macOS guarantees
-    /// layer setup works), then moves the whole GPU stack to an engine-owned
-    /// render thread behind a latest-wins mailbox.
+    /// Attaches a window draw target: the whole presentation stack is
+    /// created here, on the calling thread, and stays here — presentation
+    /// and vsync interact with the OS only on this thread.
     pub fn attach_window(
         &mut self,
         target: impl Into<WindowTarget>,
@@ -389,47 +346,59 @@ impl Engine {
         let WindowHooks {
             request_frame,
             pre_present,
-            wakeup,
+            wakeup: _,
         } = hooks;
         let graphics = WindowGraphics::new(target.into(), size)?;
-        let (frames, frame_jobs) = mpsc::channel();
-        let sender = self.message_sender.clone();
-        std::thread::Builder::new()
-            .name("bobcat-render".to_owned())
-            .spawn(move || {
-                graphics::render_thread(graphics, &frame_jobs, pre_present.as_ref(), &|error| {
-                    let _ = sender.send(EngineMessage::RenderFailed(error));
-                    wakeup();
-                });
-            })
-            .map_err(|error| EngineError::Thread {
-                name: "render",
-                message: error.to_string(),
-            })?;
-        self.output = Output::Window { frames };
-        self.request_frame = Some(request_frame);
+        self.output = Output::Window {
+            graphics: Box::new(graphics),
+            pre_present,
+        };
+        self.request_frame = Some(Arc::from(request_frame));
         self.refresh();
         Ok(())
     }
 
-    /// Relays the OS's "the window wants a frame" fact: prepares the current
-    /// frame (rendering only if the retained scene is stale) and mails it to
-    /// the render thread, carrying any pending screenshot requests.
-    pub fn notify_redraw(&mut self) {
-        let Output::Window { frames } = &self.output else {
-            return;
+    /// Relays the OS's "the window wants a frame" fact.
+    ///
+    /// Produces a new frame only when there is one to produce: the tree is
+    /// available (`try_lock` — a running commit retries next frame), no
+    /// PAPI batch is open, and the document changed since the retained
+    /// target was rendered. Everything else — re-exposure, a resize with
+    /// unchanged content, a retry — re-presents the retained target with a
+    /// blit alone. The present itself (the vsync wait) runs after the lock
+    /// is released.
+    pub fn notify_redraw(&mut self) -> Result<(), EngineError> {
+        let Output::Window {
+            graphics,
+            pre_present,
+        } = &mut self.output
+        else {
+            return Ok(());
         };
-        let mut elements = self.elements.borrow_mut();
-        elements.render();
-        let job = FrameJob {
-            scene: elements.scene().clone(),
-            size: self.frame_size,
-            screenshots: std::mem::take(&mut self.pending_screenshots),
-        };
-        drop(elements);
-        // A closed mailbox means the render thread already posted its
-        // failure.
-        let _ = frames.send(job);
+        let size = self.frame_size;
+        match self.elements.try_lock() {
+            Ok(mut elements) => {
+                while let Some(event) = self.pending_input.pop_front() {
+                    elements.handle_input(event);
+                }
+                if !elements.has_uncommitted_mutations() {
+                    let produced = elements.render();
+                    if produced || !graphics.rendered_at(size) {
+                        graphics.render_to_target(&elements.scene(), size)?;
+                    }
+                }
+            }
+            Err(TryLockError::WouldBlock) => {
+                // A commit is running; it ends with a frame request. Present
+                // the retained target now so exposure never waits on it.
+            }
+            Err(TryLockError::Poisoned(error)) => poisoned(&error),
+        }
+        // The vsync wait happens here, after the lock is released.
+        if graphics.rendered_at(size) {
+            graphics.present(pre_present.as_ref())?;
+        }
+        Ok(())
     }
 
     /// Renders one frame to the offscreen target if the document changed
@@ -440,7 +409,10 @@ impl Engine {
         let Output::Offscreen(gpu) = &mut self.output else {
             return Err(EngineError::NoDrawTarget);
         };
-        let mut elements = self.elements.borrow_mut();
+        let mut elements = lock(&self.elements);
+        if elements.has_uncommitted_mutations() {
+            return Ok(false);
+        }
         let changed = elements.render();
         if !changed && !force {
             // The retained target already holds this exact frame;
@@ -462,54 +434,54 @@ impl Engine {
         Ok(true)
     }
 
-    /// Captures the current frame from the offscreen target, rendering
-    /// first if the document changed since the last [`Self::tick`].
+    /// Captures the current frame as pixels — synchronously, from whichever
+    /// target is attached. Renders first if the document changed and the
+    /// tree is available; a tree busy mid-commit (window mode) captures the
+    /// retained frame, which is what the window is showing.
     pub fn capture(&mut self) -> Result<Screenshot, EngineError> {
-        let Output::Offscreen(gpu) = &mut self.output else {
-            return Err(EngineError::NoDrawTarget);
-        };
-        let mut elements = self.elements.borrow_mut();
-        if elements.render() {
-            gpu.render_frame(
-                &elements.scene(),
-                self.frame_size.width,
-                self.frame_size.height,
-                Color::WHITE,
-            )
-            .map_err(EngineError::Gpu)?;
-        }
-        // The retained target holds the current frame; read it back rather
-        // than re-rendering a scene that has not changed.
-        let pixels = gpu.read_pixels().map_err(EngineError::Gpu)?;
-        Ok(Screenshot {
-            size: self.frame_size,
-            pixels,
-        })
-    }
-
-    /// Requests one screenshot of the current frame. In window mode the
-    /// pixels are captured on the render thread from the next presented
-    /// frame; offscreen they are captured immediately. `deliver` receives
-    /// the result — persisting it is the embedder's IO.
-    pub fn request_screenshot(
-        &mut self,
-        deliver: impl FnOnce(Result<Screenshot, EngineError>) + Send + 'static,
-    ) {
+        let size = self.frame_size;
         match &mut self.output {
-            Output::Window { .. } => {
-                self.pending_screenshots.push(Box::new(deliver));
-                self.refresh();
+            Output::None => Err(EngineError::NoDrawTarget),
+            Output::Offscreen(gpu) => {
+                let mut elements = lock(&self.elements);
+                if !elements.has_uncommitted_mutations() && elements.render() {
+                    gpu.render_frame(&elements.scene(), size.width, size.height, Color::WHITE)
+                        .map_err(EngineError::Gpu)?;
+                }
+                // The retained target holds the current frame; read it back
+                // rather than re-rendering a scene that has not changed.
+                let pixels = gpu.read_pixels().map_err(EngineError::Gpu)?;
+                Ok(Screenshot { size, pixels })
             }
-            Output::Offscreen(_) => deliver(self.capture()),
-            Output::None => deliver(Err(EngineError::NoDrawTarget)),
+            Output::Window { graphics, .. } => {
+                match self.elements.try_lock() {
+                    Ok(mut elements) => {
+                        if !elements.has_uncommitted_mutations() {
+                            let produced = elements.render();
+                            if produced || !graphics.rendered_at(size) {
+                                graphics.render_to_target(&elements.scene(), size)?;
+                            }
+                        }
+                    }
+                    Err(TryLockError::WouldBlock) => {}
+                    Err(TryLockError::Poisoned(error)) => poisoned(&error),
+                }
+                if !graphics.rendered_at(size) {
+                    return Err(EngineError::Render(
+                        "no frame has been rendered to capture".to_owned(),
+                    ));
+                }
+                let pixels = graphics.capture_frame(size)?;
+                Ok(Screenshot { size, pixels })
+            }
         }
     }
 
-    /// Runs a main-thread script to completion on the calling thread,
-    /// applying every flushed batch as it commits. The headless composition.
+    /// Runs a main-thread script to completion on the calling thread over
+    /// the shared tree. The headless composition.
     #[cfg(feature = "quickjs")]
     pub fn run_script(&mut self, source: &str) -> Result<(), ScriptRunError> {
-        let mut runtime = crate::quickjs::MainThreadRuntime::new(self.commit_sink())
+        let mut runtime = crate::quickjs::MainThreadRuntime::new(Arc::clone(&self.elements), || {})
             .map_err(ScriptRunError::Initialization)?;
         let result = runtime
             .run_main_thread_script(source)
@@ -518,33 +490,27 @@ impl Engine {
         result
     }
 
-    /// Spawns the main-thread script on an engine-owned thread. Every
-    /// `__FlushElementTree` batch crosses the message channel and blocks the
-    /// script until [`Self::pump`] applies and acknowledges it; completion
-    /// arrives as [`EngineEvent::ScriptFinished`]. `wakeup` posts to the
-    /// embedder's event loop so it knows to pump.
+    /// Spawns the Lynx main thread: the `QuickJS` realm running `source`
+    /// over the shared tree. Every committed `__FlushElementTree` asks the
+    /// presenting side for a frame; completion arrives as
+    /// [`EngineEvent::ScriptFinished`] after `wakeup` fires.
     #[cfg(feature = "quickjs")]
     pub fn spawn_script(
         &mut self,
         source: String,
         wakeup: impl Fn() + Send + Sync + 'static,
     ) -> Result<(), EngineError> {
-        use std::sync::Arc;
+        let elements = Arc::clone(&self.elements);
         let sender = self.message_sender.clone();
-        let wakeup = Arc::new(wakeup);
+        let on_flush = self.request_frame.clone();
         std::thread::Builder::new()
-            .name("bobcat-js".to_owned())
+            .name("bobcat-main".to_owned())
             .spawn(move || {
-                let commit_sender = sender.clone();
-                let commit_wakeup = Arc::clone(&wakeup);
                 let result = (|| {
-                    let mut runtime = crate::quickjs::MainThreadRuntime::new(move |ops| {
-                        let (ack, ack_receiver) = mpsc::channel();
-                        commit_sender
-                            .send(EngineMessage::Commit { ops, ack })
-                            .map_err(|_| CommitError::Disconnected)?;
-                        commit_wakeup();
-                        ack_receiver.recv().map_err(|_| CommitError::Disconnected)?
+                    let mut runtime = crate::quickjs::MainThreadRuntime::new(elements, move || {
+                        if let Some(request_frame) = &on_flush {
+                            request_frame();
+                        }
                     })
                     .map_err(ScriptRunError::Initialization)?;
                     runtime
@@ -560,6 +526,17 @@ impl Engine {
             })?;
         Ok(())
     }
+}
+
+/// Blocking lock with the crate's poison policy.
+fn lock(elements: &Mutex<ElementTree>) -> MutexGuard<'_, ElementTree> {
+    elements.lock().unwrap_or_else(|error| poisoned(&error))
+}
+
+/// A poisoned tree lock means the other thread crashed mid-mutation;
+/// nothing can be trusted, so crash loudly (let-it-crash).
+fn poisoned<G>(error: &dyn fmt::Display) -> G {
+    panic!("the element tree lock is poisoned: {error}")
 }
 
 /// Validates CSS viewport metrics and derives the physical target size.
@@ -617,14 +594,12 @@ mod tests {
         assert!(error.to_string().contains("16384"));
     }
 
-    /// The windowed commit protocol, minus the window: the script runs on
-    /// the engine-owned thread, every `__FlushElementTree` batch crosses the
-    /// message channel, and [`super::Engine::pump`] applies and acknowledges
-    /// it — the exact wiring an embedder's event loop drives through its
-    /// wakeup relay.
+    /// The two-thread composition, windowless: the script mutates the
+    /// shared tree from the engine-owned main thread, and the embedder side
+    /// of the loop pumps lifecycle events after each wakeup.
     #[cfg(feature = "quickjs")]
     #[test]
-    fn a_spawned_script_commits_across_threads() {
+    fn a_spawned_script_mutates_the_shared_tree() {
         use std::sync::mpsc;
 
         use lynx_element::PageConfig;
@@ -650,8 +625,6 @@ mod tests {
             )
             .expect("script thread");
 
-        // The embedder side of the loop: block on the wakeup relay, pump,
-        // react to lifecycle events, until the script finishes.
         let finished = loop {
             wakeups.recv().expect("the script thread wakes the loop");
             let done = engine
@@ -659,7 +632,6 @@ mod tests {
                 .into_iter()
                 .map(|event| match event {
                     EngineEvent::ScriptFinished(result) => result,
-                    EngineEvent::RenderFailed(error) => panic!("render failed: {error}"),
                 })
                 .next();
             if let Some(result) = done {
@@ -670,11 +642,11 @@ mod tests {
 
         let elements = engine.elements();
         assert!(elements.page().is_some(), "the page was created");
-        // Ids 2 and 3 are the two views, one per committed batch: their
-        // liveness proves both batches crossed the channel and applied.
-        // Append order and DOM shape are lynx-element's own covered
-        // semantics.
-        assert!(elements.element(2).is_some(), "the first batch landed");
-        assert!(elements.element(3).is_some(), "the second batch landed");
+        assert!(elements.element(2).is_some(), "the first view is live");
+        assert!(elements.element(3).is_some(), "the second view is live");
+        assert!(
+            !elements.has_uncommitted_mutations(),
+            "the boot's final flush closed the batch"
+        );
     }
 }

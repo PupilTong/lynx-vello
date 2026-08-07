@@ -126,27 +126,32 @@ useful signal for currently-compatible versions of those libraries.
   feature adds the internal QuickJS adapter,
   opaque QuickJS-backed view factory, and the concrete
   `quickjs::MainThreadRuntime`. That runtime owns only the realm: its five
-  Element-PAPI host functions answer synchronously from `lynx-element`'s
-  `ElementOpRecorder` shadow (call-site validation and returned ids are
-  unchanged), and `__FlushElementTree` drains the recorded batch into the
-  commit sink injected at construction — `quickjs::local_commit_sink` for the
-  single-threaded composition, or a shell's own channel to the thread owning
-  the tree, with the flush blocking until the commit is acknowledged
-  (`quickjs::CommitError` names the two rejection shapes);
+  Element-PAPI host functions lock the shared `ElementTree` for the duration
+  of one call and mutate it directly (the tree's own validation is the
+  single source of every `PapiError`), and `__FlushElementTree` runs the
+  style + layout commit under the lock, closes the open batch, and notifies
+  the presenter through the callback injected at construction;
   `default-features = false` excludes QuickJS while preserving all external
   injection contracts. Workspace dependencies disable defaults explicitly;
   only an upper layer that wants the built-in engine enables `quickjs`.
   The core depends on `lynx-element` only (strict linear layering) and
   re-exports it whole — `bobcat_core::lynx_element` is the product's single
   door downward. The `engine` module is the embedder boundary:
-  `engine::Engine` owns the element tree, commit application
-  (`engine::apply_batch`, the one application point every composition
-  shares), input routing, frame scheduling, and the engine-owned script and
-  render threads. Embedders provide user input, device metrics, OS
-  initialization, a draw target, and IO primitives, and relay OS facts in
-  (`dispatch_input`/`resize`/`notify_redraw`/`pump`/ticks); they never
-  start or steer the pipeline — the engine schedules through capabilities
-  handed over at attach time (`request_frame`, `pre_present`, `wakeup`).
+  `engine::Engine` shares the element tree with its engine-owned Lynx main
+  thread (the `QuickJS` realm and its event loop) behind one `Mutex`, and
+  runs input routing, scrolling, frame production, and presentation on the
+  thread the embedder calls it from — vsync interacts with the OS only
+  there. The presenting side only ever `try_lock`s (a running commit means
+  re-present the retained target and retry next frame; present's vsync wait
+  happens outside the lock), the lock is idle while the script computes (a
+  long JS task cannot stop scrolling — one truth, no reconciliation
+  protocol), and no frame is produced while a PAPI batch is open
+  (`has_uncommitted_mutations`). Embedders provide user input, device
+  metrics, OS initialization, a draw target, and IO primitives, and relay
+  OS facts in (`dispatch_input`/`resize`/`notify_redraw`/`pump`/ticks);
+  they never start or steer the pipeline — the engine schedules through
+  capabilities handed over at attach time (`request_frame`, `pre_present`,
+  `wakeup`).
   The core still adds no document alias, element-host trait, or injection
   seam of its own.
   `MainThreadRuntime`
@@ -232,13 +237,10 @@ useful signal for currently-compatible versions of those libraries.
   `defaultDisplayLinear` / `defaultOverflowVisible` page-config switches).
   This crate defines `type ElementId = u32` and the concrete, validated
   Element-PAPI operations on `ElementTree`; `bobcat-core` composes that type
-  directly and `dom` knows neither vocabulary. The same five calls exist as
-  data: `ElementOpRecorder` answers them script-side from a shadow of the
-  tree (same ids — both allocators are monotonic and never recycle — and the
-  same `PapiError`s in the same precedence order; the mirroring law in
-  `ops.rs`), and `ElementTree::apply` replays recorded `ElementOp` batches at
-  the flush boundary, asserting id lockstep. This seam is what lets a shell
-  put the script and the tree on different threads without sharing either.
+  directly and `dom` knows neither vocabulary. Every PAPI call mutates the
+  tree directly; `has_uncommitted_mutations` marks the span between a
+  batch's first mutation and its `flush_element_tree` so a frame producer
+  sharing the tree across threads never builds from a half-applied batch.
   `ElementTree` owns a `dom::Document<ElementId>` plus an independent
   `Vec<Option<LynxElement>>` arena. This crate depends on `dom` **only** — stylo/euclid are reached through
   `dom`'s vocabulary re-exports — and re-exports `dom` whole as the next
