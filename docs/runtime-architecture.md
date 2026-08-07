@@ -101,13 +101,16 @@ This ownership removes two invalid states the injected design permitted:
 - callers could retain a paint-order snapshot and combine it with newer live
   styles or layout.
 
-`lynx_element::ElementTree` directly owns `Document<ElementId>`. Its mutable
-surface is the Element PAPI plus the invariant-safe engine-side methods
-(`handle_input`, `set_viewport`, `render`, `needs_render`, `scene`,
-`images_mut` — none creates, moves, or retires an element); `document()` is a
-read-only observation window. `bobcat_core::engine::Engine` is the sole
-production driver of that engine-side surface, and embedders never touch it:
-they hold an `Engine` and relay OS facts into it.
+`lynx_element::ElementTree` directly owns `Document<ElementId>`, and neither
+the document nor `NodeId` appears in its public signatures: external
+observation speaks `ElementId` only (`page`, `element`, `config`), and DOM
+shape is asserted by the layer that owns it — lynx-element's own unit tests,
+through a `cfg(test)`-gated accessor. Its mutable surface is the Element
+PAPI plus the invariant-safe engine-side methods (`handle_input`,
+`set_viewport`, `render`, `needs_render`, `scene`, `images_mut` — none
+creates, moves, or retires an element). `bobcat_core::engine::Engine` is the
+sole production driver of that engine-side surface, and embedders never
+touch it: they hold an `Engine` and relay OS facts into it.
 
 ## Frame walkthrough
 

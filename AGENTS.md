@@ -252,16 +252,22 @@ useful signal for currently-compatible versions of those libraries.
   may reuse its private `NodeId` slots;
   every fallible PAPI entry returns `PapiError` instead of panicking, because
   the main-thread script is untrusted input and the DOM core is
-  crash-on-misuse. `document()` is a read-only observation window (a shared
-  borrow cannot desynchronise the arena), and the mutable surface beyond the
+  crash-on-misuse. The owned document and `NodeId` never appear in this
+  layer's public signatures: `document()` is `cfg(test)`-gated for this
+  crate's own unit tests (DOM shape — append order, tags, committed styles,
+  flushed layout — is this layer's semantics, so this layer's tests assert
+  it), external observation speaks `ElementId` only (`page`, `element`,
+  `config`), and `handle_input` deliberately returns nothing — the future
+  event-dispatch layer gets `ElementId`-vocabulary queries designed for it,
+  not a passthrough of the DOM response. The mutable surface beyond the
   PAPI is the invariant-safe engine-side set — `handle_input`,
   `set_viewport`, `set_device_pixel_ratio`, `register_fonts`,
   `add_author_stylesheet`, `render`, `needs_render`, `scene`, `images_mut` —
   admitted one by one because none creates, moves, or retires an element.
-  There is no mutable document accessor: topology mutations outside the PAPI
-  would desynchronise the element arena. `bobcat_core::engine::Engine` is
-  the production driver of the engine-side set; embedders hold an `Engine`,
-  not an `ElementTree`.
+  There is no document accessor of any kind outside tests: topology
+  mutations outside the PAPI would desynchronise the element arena.
+  `bobcat_core::engine::Engine` is the production driver of the engine-side
+  set; embedders hold an `Engine`, not an `ElementTree`.
   No public `paint_order` exists on either `ElementTree` or `Document`, and
   input builds its temporary hit-test frame internally. It does not impose a runtime
   tree-depth cap; recursive traversal hardening belongs in `dom`/`hughie`.

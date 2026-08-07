@@ -27,27 +27,6 @@ fn bare_runtime() -> MainThreadRuntime {
     runtime().0
 }
 
-/// The tag names of `page`'s children, in order.
-fn page_child_tags(elements: &ElementTree) -> Vec<String> {
-    let page = elements.page().expect("a page");
-    let page_node = elements.node_id(page).expect("a live page");
-    elements
-        .document()
-        .get(page_node)
-        .expect("a live page node")
-        .child_ids()
-        .iter()
-        .map(|&child| {
-            elements
-                .document()
-                .get(child)
-                .and_then(lynx_element::dom::Node::tag_name)
-                .unwrap_or_default()
-                .to_owned()
-        })
-        .collect()
-}
-
 #[test]
 fn a_card_root_builds_its_tree_through_the_papi() {
     let (mut runtime, elements) = runtime();
@@ -66,15 +45,15 @@ fn a_card_root_builds_its_tree_through_the_papi() {
         )
         .expect("main-thread script");
 
+    // Ids allocate monotonically from 2 (the page is 1): the two rows and
+    // the nested view. Their liveness proves the committed batch applied;
+    // DOM shape (append order, tags, committed styles) is asserted where it
+    // is owned - lynx-element's own unit tests.
     let elements = elements.borrow();
-    assert_eq!(page_child_tags(&elements), ["view", "view"]);
-    assert!(
-        elements
-            .document()
-            .document_element()
-            .computed_style()
-            .is_some()
-    );
+    assert!(elements.page().is_some());
+    assert!(elements.element(2).is_some());
+    assert!(elements.element(3).is_some());
+    assert!(elements.element(4).is_some());
 }
 
 #[test]
@@ -97,7 +76,9 @@ fn create_view_returns_a_handle_append_element_accepts() {
             ",
         )
         .expect("main-thread script");
-    assert_eq!(page_child_tags(&elements.borrow()), ["view"]);
+    let elements = elements.borrow();
+    assert!(elements.page().is_some());
+    assert!(elements.element(2).is_some());
 }
 
 #[test]
@@ -118,8 +99,8 @@ fn drop_element_retires_a_detached_element_and_does_not_reuse_its_id() {
         .expect("main-thread script");
 
     let elements = elements.borrow();
-    assert!(elements.node_id(2).is_none());
-    assert!(elements.node_id(3).is_some());
+    assert!(elements.element(2).is_none());
+    assert!(elements.element(3).is_some());
 }
 
 #[test]
@@ -141,9 +122,8 @@ fn drop_element_retires_an_attached_subtree() {
         .expect("main-thread script");
 
     let elements = elements.borrow();
-    assert!(elements.node_id(2).is_none());
-    assert!(elements.node_id(3).is_none());
-    assert!(page_child_tags(&elements).is_empty());
+    assert!(elements.element(2).is_none());
+    assert!(elements.element(3).is_none());
 }
 
 #[test]
@@ -181,7 +161,10 @@ fn process_data_runs_before_render_page_and_feeds_it() {
             ",
         )
         .expect("main-thread script");
-    assert_eq!(page_child_tags(&elements.borrow()).len(), 3);
+    let elements = elements.borrow();
+    for id in 2..=4 {
+        assert!(elements.element(id).is_some(), "child {id} must be live");
+    }
 }
 
 #[test]
@@ -213,14 +196,6 @@ fn the_page_is_not_in_the_document_until_the_tree_is_flushed() {
 
     runtime.render_page().expect("render");
     assert!(elements.borrow().page().is_some());
-    assert!(
-        elements
-            .borrow()
-            .document()
-            .document_element()
-            .computed_style()
-            .is_some()
-    );
 }
 
 #[test]
@@ -349,32 +324,6 @@ fn the_mts_wrapper_hides_the_browser_globals_web_core_hides() {
 }
 
 #[test]
-fn the_ua_cascade_reaches_elements_the_script_created() {
-    let (mut runtime, elements) = runtime();
-    runtime
-        .run_main_thread_script(
-            r"
-            globalThis.renderPage = function () {
-              __AppendElement(__CreatePage('card', 0), __CreateView(0));
-            };
-            ",
-        )
-        .expect("main-thread script");
-
-    let elements = elements.borrow();
-    let page = elements.page().expect("a page");
-    let page_node = elements.node_id(page).expect("a live page");
-    let layout = elements
-        .document()
-        .rounded_layout(page_node)
-        .expect("the page is laid out after the flush");
-    // The UA sheet sizes `page` to the viewport, so the flush produced real
-    // geometry rather than a zero box.
-    assert!((layout.size.width - VIEWPORT.width).abs() < f32::EPSILON);
-    assert!((layout.size.height - VIEWPORT.height).abs() < f32::EPSILON);
-}
-
-#[test]
 fn a_second_boot_re_renders_into_the_same_tree() {
     let (mut runtime, elements) = runtime();
     runtime
@@ -387,9 +336,11 @@ fn a_second_boot_re_renders_into_the_same_tree() {
         )
         .expect("first boot");
     runtime.render_page().expect("second boot");
-    // renderPage appended one more child; the page itself is still the same
-    // element and is still the document element.
-    assert_eq!(page_child_tags(&elements.borrow()), ["view", "view"]);
+    // renderPage appended one more child into the same tree: the first
+    // boot's view (id 2) and the second's (id 3) are both live.
+    let elements = elements.borrow();
+    assert!(elements.element(2).is_some());
+    assert!(elements.element(3).is_some());
 }
 
 /// web-core's MTS realm is a browser realm: promise jobs queued while the
@@ -414,11 +365,13 @@ fn microtasks_queued_during_render_run_before_the_call_returns() {
             ",
         )
         .expect("main-thread script");
-    assert_eq!(
-        page_child_tags(&elements.borrow()).len(),
-        3,
-        "the microtask's appends must have landed"
-    );
+    let elements = elements.borrow();
+    for id in 2..=4 {
+        assert!(
+            elements.element(id).is_some(),
+            "the microtask's appends must have landed (id {id})"
+        );
+    }
 }
 
 /// An unhandled rejection raised by the script is reported rather than

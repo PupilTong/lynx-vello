@@ -128,7 +128,7 @@ impl fmt::Display for MainThreadError {
 
 impl std::error::Error for MainThreadError {}
 
-pub use crate::engine::CommitError;
+use crate::engine::CommitError;
 
 /// The single-threaded commit sink: applies every flushed batch to `elements`
 /// on the calling thread, then runs the style + layout commit. This is the

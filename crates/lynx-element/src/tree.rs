@@ -107,17 +107,17 @@ impl ElementTree {
         tree
     }
 
-    /// The underlying document, as a read-only observation window.
+    /// The underlying document, for this crate's own unit tests only.
     ///
-    /// A shared borrow cannot create, move, or retire an element, so lending
-    /// it costs none of the tree invariants this layer protects: every
-    /// reachable `Document` method is a query, and the arena ↔ node alignment
-    /// stays writable only through the Element PAPI methods below. There is
-    /// deliberately no mutable counterpart — mutation goes through the PAPI,
-    /// and the frame pipeline drives rendering through the narrow methods
-    /// this type forwards itself.
+    /// DOM shape (append order, tags, committed styles) is this layer's
+    /// semantics, so this layer's tests assert it; layers above observe
+    /// through `ElementId`-vocabulary reads (`page`, `element`, `config`)
+    /// and never see the document or `NodeId`. Production code has no
+    /// consumer: mutation goes through the PAPI, and the engine drives
+    /// rendering through the narrow methods this type forwards itself.
+    #[cfg(test)]
     #[must_use]
-    pub const fn document(&self) -> &Document<ElementId> {
+    pub(crate) const fn document(&self) -> &Document<ElementId> {
         &self.document
     }
 
@@ -160,12 +160,14 @@ impl ElementTree {
     /// state — no element is created, moved, or retired — so lending it out
     /// costs none of the tree invariants this layer protects.
     ///
-    /// Dispatching the returned target through Lynx's own event model
-    /// (`bindEvent`/`catchEvent` phases, the gesture arena, `hit-slop`) is the
-    /// runtime layer's job, not this one's; it prevents the default action and
-    /// takes over when it wants different behavior.
-    pub fn handle_input(&mut self, event: dom::input::InputEvent) -> dom::input::InputResponse {
-        self.document.handle_input(event)
+    /// Deliberately returns nothing: the DOM-level response speaks `NodeId`,
+    /// which stays out of this layer's public signatures. Dispatching through
+    /// Lynx's own event model (`bindEvent`/`catchEvent` phases, the gesture
+    /// arena, `hit-slop`) is the runtime layer's job, and when that layer
+    /// arrives it gets `ElementId`-vocabulary queries designed for it — an
+    /// unconsumed passthrough of the raw response is not that design.
+    pub fn handle_input(&mut self, event: dom::input::InputEvent) {
+        self.document.handle_input(event);
     }
 
     /// Resizes the viewport, restyling and relaying out on the next flush.
@@ -219,8 +221,10 @@ impl ElementTree {
     }
 
     /// The DOM node a handle names, or `None` if the handle is not live.
+    /// Crate-internal: `NodeId` stays out of this layer's public signatures;
+    /// external liveness observation is [`Self::element`]`(id).is_some()`.
     #[must_use]
-    pub fn node_id(&self, id: ElementId) -> Option<NodeId> {
+    pub(crate) fn node_id(&self, id: ElementId) -> Option<NodeId> {
         self.element(id).map(LynxElement::node_id)
     }
 
@@ -356,6 +360,22 @@ mod tests {
 
     fn tree() -> ElementTree {
         ElementTree::new(Viewport::new(393.0, 727.0), PageConfig::default())
+    }
+
+    #[test]
+    fn a_flush_lays_the_page_out_to_the_viewport() {
+        let mut tree = tree();
+        let page = tree.create_page("card", 0);
+        tree.flush_element_tree();
+        let page_node = tree.node_id(page).expect("a live page");
+        let layout = tree
+            .document()
+            .rounded_layout(page_node)
+            .expect("the page is laid out after the flush");
+        // The UA sheet sizes `page` to the viewport, so the flush produced
+        // real geometry rather than a zero box.
+        assert!((layout.size.width - 393.0).abs() < f32::EPSILON);
+        assert!((layout.size.height - 727.0).abs() < f32::EPSILON);
     }
 
     #[test]
