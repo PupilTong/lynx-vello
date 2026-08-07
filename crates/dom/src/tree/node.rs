@@ -87,7 +87,7 @@ pub struct Node<T> {
     pub(crate) attrs: Vec<(LocalName, String)>,
     pub(crate) element_state: ElementState,
 
-    pub(crate) inline_block: Option<Arc<Locked<PropertyDeclarationBlock>>>,
+    pub(crate) parsed_inline_style: Option<Arc<Locked<PropertyDeclarationBlock>>>,
 
     /// Stylo's per-element style data, unconditionally present so no outer
     /// cell is needed: interior mutability lives entirely inside the upstream
@@ -152,7 +152,7 @@ impl<T> Node<T> {
             id_attribute: None,
             attrs: Vec::new(),
             element_state: ElementState::empty(),
-            inline_block: None,
+            parsed_inline_style: None,
             style_data: ElementDataWrapper::default(),
             stylo_data_present: AtomicBool::new(false),
             styling: StylingData::default(),
@@ -642,7 +642,10 @@ impl<T> fmt::Debug for Node<T> {
             .field("classes", &self.classes)
             .field("id_attribute", &self.id_attribute)
             .field("element_state", &self.element_state)
-            .field("has_inline_block", &self.inline_block.is_some())
+            .field(
+                "has_parsed_inline_style",
+                &self.parsed_inline_style.is_some(),
+            )
             .field("dirty_descendants", &self.has_dirty_descendants())
             .field("children", &self.children)
             .finish_non_exhaustive()
