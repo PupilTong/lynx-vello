@@ -38,8 +38,10 @@ impl LynxElement {
         self.id
     }
 
+    /// Crate-internal: `NodeId` is `dom` vocabulary and stays out of this
+    /// layer's public signatures — external observers speak `ElementId`.
     #[must_use]
-    pub const fn node_id(&self) -> NodeId {
+    pub(crate) const fn node_id(&self) -> NodeId {
         self.node
     }
 

@@ -131,13 +131,7 @@ fn the_boot_sequence_works_on_a_bundle_shaped_script() {
             ",
         )
         .expect("boot");
-    assert!(elements.borrow().page().is_some());
-    assert!(
-        elements
-            .borrow()
-            .document()
-            .document_element()
-            .computed_style()
-            .is_some()
-    );
+    let elements = elements.borrow();
+    assert!(elements.page().is_some());
+    assert!(elements.element(2).is_some(), "the appended view is live");
 }

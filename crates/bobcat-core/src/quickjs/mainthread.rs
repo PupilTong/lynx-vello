@@ -128,57 +128,17 @@ impl fmt::Display for MainThreadError {
 
 impl std::error::Error for MainThreadError {}
 
-/// Why `__FlushElementTree` could not commit the recorded batch.
-#[derive(Debug)]
-#[non_exhaustive]
-pub enum CommitError {
-    /// The element tree rejected a recorded op — the recorder's shadow and
-    /// the tree diverged, which is a bug on this side of the boundary, not
-    /// bad script input (the recorder already validated the calls).
-    Rejected(PapiError),
-    /// The side owning the element tree is gone (its thread exited or its
-    /// channel closed), so the batch has nowhere to land.
-    Disconnected,
-}
-
-impl fmt::Display for CommitError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Rejected(error) => {
-                write!(formatter, "the element tree rejected the commit: {error}")
-            }
-            Self::Disconnected => {
-                formatter.write_str("the element tree owner is no longer reachable")
-            }
-        }
-    }
-}
-
-impl std::error::Error for CommitError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Rejected(error) => Some(error),
-            Self::Disconnected => None,
-        }
-    }
-}
+use crate::engine::CommitError;
 
 /// The single-threaded commit sink: applies every flushed batch to `elements`
 /// on the calling thread, then runs the style + layout commit. This is the
-/// composition tests and the headless CLI run; a windowed shell substitutes a
-/// sink that crosses to its engine thread instead.
+/// composition tests run; [`crate::engine::Engine`] owns the same application
+/// point behind its own sink and message pump.
 pub fn local_commit_sink(
     elements: &Rc<RefCell<ElementTree>>,
 ) -> impl FnMut(Vec<ElementOp>) -> Result<(), CommitError> + 'static {
     let elements = Rc::clone(elements);
-    move |ops| {
-        let mut elements = elements.borrow_mut();
-        for op in &ops {
-            elements.apply(op).map_err(CommitError::Rejected)?;
-        }
-        elements.flush_element_tree();
-        Ok(())
-    }
+    move |ops| crate::engine::apply_batch(&mut elements.borrow_mut(), &ops)
 }
 
 /// One `QuickJS` realm carrying the Lynx Element PAPI over a recorded op

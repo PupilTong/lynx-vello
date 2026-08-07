@@ -109,11 +109,11 @@ still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
 6. `Document::layout` then invokes the concrete
    `hughie` host. Computed values are lent directly from each node's
    Stylo `ElementData`, without an adapter-side style copy.
-7. The CLI-private frame pipeline uses `internal-document-access` to ask the
-   document-owned Painter whether its retained scene is current. A dirty
-   document runs `Document::render`, builds the private paint order, and
-   retains the resulting Vello scene. The default element/embedder API exposes
-   none of this lifecycle.
+7. `bobcat_core::engine::Engine` asks the document-owned Painter (through
+   `ElementTree`'s narrow engine-side surface) whether its retained scene is
+   current. A dirty document runs `Document::render`, builds the private
+   paint order, and retains the resulting Vello scene. Embedders never drive
+   this lifecycle — they relay OS facts to the engine, which schedules it.
 
 ## Runtime integration status
 

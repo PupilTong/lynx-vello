@@ -12,27 +12,22 @@
 //! Refresh the goldens with:
 //! `FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p bobcat-core --test screenshots`.
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use bobcat_core::engine::Engine;
+use flashbulb::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
+use flashbulb::{Image, Screenshots};
+use lynx_element::PageConfig;
 
-use bobcat_core::quickjs::{MainThreadRuntime, local_commit_sink};
-use flashbulb::vello::peniko::{Blob, Color, ImageAlphaType, ImageData, ImageFormat};
-use flashbulb::{Image, Screenshots, capture_scene, headless};
-use lynx_element::dom::render::gpu::Headless;
-use lynx_element::{ElementTree, PageConfig, Viewport};
-
-/// The single-threaded composition: committed batches land in this shared
-/// tree as each `__FlushElementTree` runs.
-fn shared_tree(config: PageConfig) -> (MainThreadRuntime, Rc<RefCell<ElementTree>>) {
-    let elements = Rc::new(RefCell::new(ElementTree::new(VIEWPORT, config)));
-    let runtime = MainThreadRuntime::new(local_commit_sink(&elements)).expect("QuickJS realm");
-    (runtime, elements)
+/// The embedder composition, offscreen: the engine owns the tree and the
+/// script run; the test provides device metrics and receives pixels.
+fn engine(config: PageConfig) -> Engine {
+    Engine::new(config, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, 1.0).expect("engine")
 }
 
 /// lynx-stack's Playwright Chromium project emulates a Pixel 5, whose CSS
 /// viewport is 393 × 727; `toHaveScreenshot` captures in CSS pixels, so their
 /// tracked goldens are exactly that size.
-const VIEWPORT: Viewport = Viewport::new(393.0, 727.0);
+const VIEWPORT_WIDTH: f32 = 393.0;
+const VIEWPORT_HEIGHT: f32 = 727.0;
 
 /// Styling reaches the tree through an author stylesheet rather than through
 /// the PAPI: `__SetClasses`, `__AddInlineStyle`, and `__SetCSSId` are not
@@ -83,26 +78,26 @@ fn screenshots() -> Screenshots {
     flashbulb::screenshots_in(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn capture_elements(gpu: &mut Headless, elements: &mut ElementTree) -> Image {
-    elements.document_mut().render();
-    let scene = elements.document().scene();
-    capture_scene(gpu, elements.document(), &scene, Color::WHITE).expect("capture")
+/// A missing adapter is a test-environment failure, including in CI: capture
+/// tests must never report success without rendering and comparing pixels.
+#[track_caller]
+fn capture_engine(engine: &mut Engine, test: &str) -> Image {
+    engine
+        .attach_offscreen()
+        .unwrap_or_else(|error| panic!("{test}: GPU initialization failed: {error}"));
+    let shot = engine.capture().expect("capture");
+    Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels).expect("image")
 }
 
 #[test]
 fn a_main_thread_script_renders_its_element_tree() {
-    let mut gpu = headless("a_main_thread_script_renders_its_element_tree");
-
-    let (mut runtime, elements) = shared_tree(PageConfig::default());
-    elements.borrow_mut().add_author_stylesheet(STYLE);
-    runtime
-        .run_main_thread_script(MAIN_THREAD_SCRIPT)
+    let mut engine = engine(PageConfig::default());
+    engine.add_author_stylesheet(STYLE);
+    engine
+        .run_script(MAIN_THREAD_SCRIPT)
         .expect("main-thread script");
 
-    let image = {
-        let mut elements = elements.borrow_mut();
-        capture_elements(&mut gpu, &mut elements)
-    };
+    let image = capture_engine(&mut engine, "a_main_thread_script_renders_its_element_tree");
 
     assert_eq!(image.width(), 393);
     assert_eq!(image.height(), 727);
@@ -142,17 +137,13 @@ globalThis.renderPage = function renderPage() {
 ";
 
 fn render_overflow(config: PageConfig, test: &str, golden: &str) {
-    let mut gpu = headless(test);
-    let (mut runtime, elements) = shared_tree(config);
-    elements.borrow_mut().add_author_stylesheet(OVERFLOW_STYLE);
-    runtime
-        .run_main_thread_script(OVERFLOW_SCRIPT)
+    let mut engine = engine(config);
+    engine.add_author_stylesheet(OVERFLOW_STYLE);
+    engine
+        .run_script(OVERFLOW_SCRIPT)
         .expect("main-thread script");
 
-    let image = {
-        let mut elements = elements.borrow_mut();
-        capture_elements(&mut gpu, &mut elements)
-    };
+    let image = capture_engine(&mut engine, test);
     screenshots().assert_matches(&[golden], &image);
 }
 
@@ -236,24 +227,14 @@ fn checker_image() -> ImageData {
 /// the checker disappears and only the white fallback background remains.
 #[test]
 fn document_image_store_reaches_the_private_painter() {
-    let mut gpu = headless("document_image_store_reaches_the_private_painter");
+    let mut engine = engine(PageConfig::default());
+    engine.add_author_stylesheet(IMAGE_STYLE);
+    engine.with_images(|images| images.insert_url(IMAGE_URL, checker_image()));
+    engine.run_script(IMAGE_SCRIPT).expect("main-thread script");
 
-    let (mut runtime, elements) = shared_tree(PageConfig::default());
-    {
-        let mut elements = elements.borrow_mut();
-        elements.add_author_stylesheet(IMAGE_STYLE);
-        elements
-            .document_mut()
-            .images_mut()
-            .insert_url(IMAGE_URL, checker_image());
-    }
-    runtime
-        .run_main_thread_script(IMAGE_SCRIPT)
-        .expect("main-thread script");
-
-    let image = {
-        let mut elements = elements.borrow_mut();
-        capture_elements(&mut gpu, &mut elements)
-    };
+    let image = capture_engine(
+        &mut engine,
+        "document_image_store_reaches_the_private_painter",
+    );
     screenshots().assert_matches(&["retained-image-store"], &image);
 }

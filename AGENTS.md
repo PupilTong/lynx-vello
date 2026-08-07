@@ -138,9 +138,17 @@ useful signal for currently-compatible versions of those libraries.
   only an upper layer that wants the built-in engine enables `quickjs`.
   The core depends on `lynx-element` only (strict linear layering) and
   re-exports it whole — `bobcat_core::lynx_element` is the product's single
-  door downward, and the `internal-document-access` feature is forwarded
-  through it. The core still adds no document alias, element-host trait,
-  renderer wrapper, or injection seam of its own.
+  door downward. The `engine` module is the embedder boundary:
+  `engine::Engine` owns the element tree, commit application
+  (`engine::apply_batch`, the one application point every composition
+  shares), input routing, frame scheduling, and the engine-owned script and
+  render threads. Embedders provide user input, device metrics, OS
+  initialization, a draw target, and IO primitives, and relay OS facts in
+  (`dispatch_input`/`resize`/`notify_redraw`/`pump`/ticks); they never
+  start or steer the pipeline — the engine schedules through capabilities
+  handed over at attach time (`request_frame`, `pre_present`, `wakeup`).
+  The core still adds no document alias, element-host trait, or injection
+  seam of its own.
   `MainThreadRuntime`
   installs the Element PAPI before evaluation, evaluates a `.web.bundle`'s
   `lepusCode.root` inside web-core's wrapper, then runs `processData` →
@@ -190,20 +198,19 @@ useful signal for currently-compatible versions of those libraries.
   `bobcat-core` (the layer chain: `bobcat_core::lynx_element::dom::…` reaches
   every lower layer) and the sibling `lynx-template-decoder` utility.
   `bobcat -i file:///…` decodes and boots one web bundle; other URL schemes
-  remain rejected at the boundary. One reusable `FramePipeline` owns the
-  `ElementTree` and borrows the scene retained by its document-owned private
-  painter, so the macOS headed path and cross-platform headless path share
-  script/layout/paint logic rather than maintaining parallel render paths;
-  `Program::split` separates it from the `ScriptJob` a shell may run anywhere.
-  Headed mode is a three-thread shell: the winit loop is the engine thread
-  (tree ownership, input, scrolling, commit application, style/layout/paint),
-  the script thread runs the QuickJS realm and blocks each
-  `__FlushElementTree` on the engine's acknowledgment, and the render thread
-  owns the GPU stack behind a latest-wins mailbox of cloned `vello::Scene`s
-  (`Send + Sync` by vello's static assertion), serving vsync, present, and
-  screenshots without ever occupying the engine. Headless mode stays
-  single-threaded through `local_commit_sink` — the wall-free composition
-  tests rely on. Headed mode uses a native winit window with display-backed
+  remain rejected at the boundary. The CLI is an **embedder** of
+  `bobcat_core::engine`: it owns argument parsing, bundle bytes and
+  decoding, the winit window and event loop, device metrics, input
+  translation, the stdin prompt, and PNG writing — and nothing of the
+  pipeline. Every event handler is a relay into the `Engine`
+  (`dispatch_input`, `resize`, `notify_redraw`, `pump`, clock ticks in
+  headless mode); the engine owns the tree, commits, scheduling, and its
+  script and render threads, and calls back only through the capabilities
+  handed over at attach time (`request_redraw`, `pre_present_notify`, the
+  event-loop wakeup). Headed mode attaches the window as the draw target;
+  headless mode attaches the engine's offscreen target and relays synthetic
+  vsync ticks — whether a tick becomes GPU work is the engine's decision.
+  Headed mode uses a native winit window with display-backed
   vsync and tracks both logical viewport size and device-pixel ratio. Headless mode uses a
   configurable synthetic vsync rate, skips catch-up bursts after slow frames,
   and retains its Vello renderer, render texture, and staging buffer across
@@ -245,12 +252,22 @@ useful signal for currently-compatible versions of those libraries.
   may reuse its private `NodeId` slots;
   every fallible PAPI entry returns `PapiError` instead of panicking, because
   the main-thread script is untrusted input and the DOM core is
-  crash-on-misuse. Its default API exposes neither the owned `Document` nor
-  render/freshness/scene/image forwarding methods. The non-default
-  `internal-document-access` feature exists only for trusted workspace
-  composition (`bobcat-cli` and render tests); it must not become an embedder
-  convenience or be used for topology mutations, which would desynchronise the
-  element arena.
+  crash-on-misuse. The owned document and `NodeId` never appear in this
+  layer's public signatures: `document()` is `cfg(test)`-gated for this
+  crate's own unit tests (DOM shape — append order, tags, committed styles,
+  flushed layout — is this layer's semantics, so this layer's tests assert
+  it), external observation speaks `ElementId` only (`page`, `element`,
+  `config`), and `handle_input` deliberately returns nothing — the future
+  event-dispatch layer gets `ElementId`-vocabulary queries designed for it,
+  not a passthrough of the DOM response. The mutable surface beyond the
+  PAPI is the invariant-safe engine-side set — `handle_input`,
+  `set_viewport`, `set_device_pixel_ratio`, `register_fonts`,
+  `add_author_stylesheet`, `render`, `needs_render`, `scene`, `images_mut` —
+  admitted one by one because none creates, moves, or retires an element.
+  There is no document accessor of any kind outside tests: topology
+  mutations outside the PAPI would desynchronise the element arena.
+  `bobcat_core::engine::Engine` is the production driver of the engine-side
+  set; embedders hold an `Engine`, not an `ElementTree`.
   No public `paint_order` exists on either `ElementTree` or `Document`, and
   input builds its temporary hit-test frame internally. It does not impose a runtime
   tree-depth cap; recursive traversal hardening belongs in `dom`/`hughie`.

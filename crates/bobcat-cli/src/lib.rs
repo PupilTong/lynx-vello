@@ -1,9 +1,11 @@
-//! `bobcat` command-line runner.
+//! `bobcat` command-line runner — an embedder of [`bobcat_core::engine`].
 //!
-//! The CLI owns process concerns — argument parsing, local `file:///` input,
-//! frame scheduling, the debugger-like command prompt, PNG output, and the
-//! macOS window. It directly composes the internal runtime/document/GPU crates;
-//! headed and headless paths consume the same retained scene.
+//! The CLI owns exactly the embedder's share: argument parsing, local
+//! `file:///` input bytes, OS initialization (the macOS window and its event
+//! loop, the debugger-like command prompt), device metrics, input relay, the
+//! draw target, and PNG output. The pipeline — tree, commits, style, layout,
+//! paint, frame scheduling, the script and render threads — is the engine's;
+//! every CLI event handler is a relay into it.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -56,18 +58,14 @@ pub enum CliError {
     },
     #[error("web bundle `{0}` has no `lepusCode.root` entry")]
     MissingRoot(String),
-    #[error("could not initialize the main-thread runtime: {0}")]
-    RuntimeInitialization(#[source] bobcat_core::quickjs::QuickJsInitializationError),
     #[error("could not run web bundle `{input}`: {source}")]
-    Runtime {
+    Script {
         input: String,
         #[source]
-        source: bobcat_core::quickjs::MainThreadError,
+        source: bobcat_core::engine::ScriptRunError,
     },
-    #[error("invalid viewport: {0}")]
-    Viewport(String),
-    #[error("{0}")]
-    Gpu(#[source] bobcat_core::lynx_element::dom::render::gpu::GpuError),
+    #[error(transparent)]
+    Engine(#[from] bobcat_core::engine::EngineError),
     #[error("could not start the command console: {0}")]
     Console(#[source] std::io::Error),
     #[error("could not write screenshot `{path}`: {source}")]
@@ -76,8 +74,6 @@ pub enum CliError {
         #[source]
         source: ScreenshotError,
     },
-    #[error("window rendering failed: {0}")]
-    Render(String),
     #[error("could not run the macOS window: {0}")]
     Window(String),
     #[error("headed mode is currently supported only on macOS; use `--headless` on this platform")]
