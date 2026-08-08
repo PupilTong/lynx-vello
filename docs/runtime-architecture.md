@@ -118,14 +118,14 @@ touch it: they hold an `Engine` and relay OS facts into it.
    is the same permanent `u32` id stored in the element arena; private DOM
    `NodeId` slots may still be reused.
 2. With QuickJS enabled, `quickjs::MainThreadRuntime` owns only the realm.
-   Its five Element PAPI host functions lock the shared tree for the
-   duration of one call and mutate it directly — the tree validates, so a
-   bad handle throws at the call site — without the script ever seeing
-   `NodeId`.
+   A batch's first Element PAPI mutation takes the tree out of its hand-off
+   slot; every call after that is a plain `&mut` mutation with no
+   synchronization — the tree validates, so a bad handle throws at the call
+   site — without the script ever seeing `NodeId`.
 3. `__FlushElementTree` is the commit boundary: the style + layout commit
-   runs under the lock, the open batch closes, and the presenting side is
-   asked for a frame. The document-owned Painter decides whether its
-   retained scene is current.
+   runs on the taken tree, the tree goes back in its slot, and the
+   presenting side is asked for a frame. The document-owned Painter decides
+   whether its retained scene is current.
 4. For a dirty frame, `render` flushes/layouts, creates its
    temporary visual order, and runs its private
    Painter over live styles, rounded layouts, retained text, and the
@@ -146,30 +146,32 @@ touch it: they hold an `Engine` and relay OS facts into it.
 
 ## Thread topology
 
-The engine libraries are synchronous; the `engine` module shares the one
-element tree between exactly two threads behind one `Mutex`. The windowed
-composition:
+The engine libraries are synchronous; the `engine` module passes the one
+element tree between exactly two threads through a hand-off slot
+(`SharedTree`) — one holder at any instant. The windowed composition:
 
 ```text
-Lynx main thread (engine-owned)          embedder's event loop thread
-QuickJS realm + its event loop           Engine: input routing, scrolling,
-PAPI calls lock + mutate directly        frame production (build + encode),
-flush = style/layout commit under lock,  GPU submission, present — vsync
-then ask for a frame ──────────────────▶ interacts with the OS only here
-                                         (try_lock; never blocks on anyone)
+Lynx main thread (engine-owned)           embedder's event loop thread
+QuickJS realm + its event loop            Engine: input routing, scrolling,
+batch start = take the tree from slot,    frame production (build + encode),
+PAPI calls = plain &mut, zero locks,      GPU submission, present — vsync
+flush = commit, put back, ask for ──────▶ interacts with the OS only here
+a frame (locks touched 2× per batch)      (non-blocking borrows only)
 ```
 
-The presenting side acquires the lock only with `try_lock`: a running
-commit makes it re-present the retained target and retry next frame, and
-present's vsync wait always happens outside the lock. The lock is idle
-while the script computes, so a long JavaScript task never stops input
-routing, scrolling, or presentation — scroll target resolution reads the
-retained paint order and writes offsets under the same lock, keeping one
-truth with no reconciliation protocol. A producer never builds while a
-PAPI batch is open (`has_uncommitted_mutations`); it re-presents the last
-committed frame instead. The law: the main thread waits only on its own
-commits; the presenting side never waits on the main thread; the embedder
-loop never blocks. The offscreen composition keeps the wall-free form: one
+The presenting side borrows the tree from the slot non-blockingly: an
+empty slot (a batch is open) means re-present the retained target, buffer
+the input, and retry next frame; present's vsync wait always happens
+outside the borrow. The slot is occupied while the script merely computes,
+so a long JavaScript task between batches never stops input routing,
+scrolling, or presentation — scroll target resolution reads the retained
+paint order and writes offsets into the borrowed tree, keeping one truth
+with no reconciliation protocol. A half-applied batch is unobservable by
+construction (the tree is simply absent), and `has_uncommitted_mutations`
+guards the one edge where an abandoned batch comes back uncommitted at
+the end of an evaluation. The law: the main thread waits only on its own
+batch boundaries; the presenting side never waits on the main thread; the
+embedder loop never blocks. The offscreen composition keeps the wall-free form: one
 thread, `Engine::run_script`, identical semantics — the golden screenshot
 suite drives it end to end.
 

@@ -125,28 +125,32 @@ useful signal for currently-compatible versions of those libraries.
   own future type and remain statically dispatched. The default `quickjs`
   feature adds the internal QuickJS adapter,
   opaque QuickJS-backed view factory, and the concrete
-  `quickjs::MainThreadRuntime`. That runtime owns only the realm: its five
-  Element-PAPI host functions lock the shared `ElementTree` for the duration
-  of one call and mutate it directly (the tree's own validation is the
-  single source of every `PapiError`), and `__FlushElementTree` runs the
-  style + layout commit under the lock, closes the open batch, and notifies
-  the presenter through the callback injected at construction;
+  `quickjs::MainThreadRuntime`. That runtime owns only the realm: a
+  batch's first Element-PAPI mutation takes the tree out of its hand-off
+  slot, every call after that is a plain `&mut` mutation with no
+  synchronization (the tree's own validation is the single source of every
+  `PapiError`), and `__FlushElementTree` runs the style + layout commit on
+  the taken tree, puts it back, and notifies the presenter through the
+  callback injected at construction — locks are touched twice per batch,
+  never per call;
   `default-features = false` excludes QuickJS while preserving all external
   injection contracts. Workspace dependencies disable defaults explicitly;
   only an upper layer that wants the built-in engine enables `quickjs`.
   The core depends on `lynx-element` only (strict linear layering) and
   re-exports it whole — `bobcat_core::lynx_element` is the product's single
   door downward. The `engine` module is the embedder boundary:
-  `engine::Engine` shares the element tree with its engine-owned Lynx main
-  thread (the `QuickJS` realm and its event loop) behind one `Mutex`, and
-  runs input routing, scrolling, frame production, and presentation on the
-  thread the embedder calls it from — vsync interacts with the OS only
-  there. The presenting side only ever `try_lock`s (a running commit means
-  re-present the retained target and retry next frame; present's vsync wait
-  happens outside the lock), the lock is idle while the script computes (a
-  long JS task cannot stop scrolling — one truth, no reconciliation
-  protocol), and no frame is produced while a PAPI batch is open
-  (`has_uncommitted_mutations`). Embedders provide user input, device
+  `engine::Engine` passes the element tree to and from its engine-owned
+  Lynx main thread (the `QuickJS` realm and its event loop) through the
+  `SharedTree` hand-off slot — one holder at any instant — and runs input
+  routing, scrolling, frame production, and presentation on the thread the
+  embedder calls it from; vsync interacts with the OS only there. The
+  presenting side borrows the tree non-blockingly (an empty slot = batch
+  open = re-present the retained target, buffer input, retry next frame;
+  present's vsync wait happens outside the borrow), the slot is occupied
+  while the script merely computes (a long JS task between batches cannot
+  stop scrolling — one truth, no reconciliation protocol), a half-applied
+  batch is unobservable by construction, and `has_uncommitted_mutations`
+  guards the abandoned-batch edge. Embedders provide user input, device
   metrics, OS initialization, a draw target, and IO primitives, and relay
   OS facts in (`dispatch_input`/`resize`/`notify_redraw`/`pump`/ticks);
   they never start or steer the pipeline — the engine schedules through

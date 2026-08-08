@@ -8,37 +8,40 @@
 //! engine decides what the pipeline does with it, requesting frames itself
 //! through the capabilities the embedder handed over at attach time.
 //!
-//! # Two threads, one lock
+//! # Two threads, one hand-off slot
 //!
-//! The element tree is shared behind one `Mutex` between two roles:
+//! The element tree has exactly one holder at any instant; [`SharedTree`]
+//! is the slot it changes hands through:
 //!
 //! - **The Lynx main thread** (engine-owned, spawned by [`Engine::spawn_script`]): the `QuickJS`
-//!   realm and its event loop. Each Element PAPI call locks the tree for the duration of one call
-//!   and mutates it directly; `__FlushElementTree` runs the style + layout commit under the lock
-//!   and then asks for a frame.
+//!   realm and its event loop. A batch's first Element PAPI mutation takes the tree out of the
+//!   slot; every call after that is a plain `&mut` mutation with no synchronization at all;
+//!   `__FlushElementTree` runs the style + layout commit on the taken tree, puts it back, and asks
+//!   for a frame. Locks are touched twice per batch, not per call.
 //! - **The presenting side** (the thread the embedder calls the engine from — its OS event loop):
 //!   input routing, scrolling, frame production (paint-order build + scene encode), GPU submission,
-//!   and present. Everything here acquires the lock with `try_lock` and never blocks: if the main
-//!   thread is mid-commit, the work is retried at the next frame, and the retained target
-//!   re-presents in the meantime.
+//!   and present. It borrows the tree from the slot non-blockingly: an empty slot (a batch is open)
+//!   or a busy slot lock means re-present the retained target, buffer the input, and retry next
+//!   frame.
 //!
-//! The lock is idle while the script computes, which is the point: a long
-//! JavaScript task does not stop the presenting side from scrolling —
-//! target resolution reads the retained paint order, the offset lands in
-//! the shared tree, and the next frame is produced and presented without
-//! the script's cooperation. The presenting side never produces a frame
-//! while a PAPI batch is open
-//! ([`ElementTree::has_uncommitted_mutations`]) — it re-presents the last
-//! committed frame instead, so a half-applied batch is never observable.
+//! The slot is occupied while the script merely computes, which is the
+//! point: a long JavaScript task between batches does not stop the
+//! presenting side from scrolling — target resolution reads the retained
+//! paint order, the offset lands in the tree, and the next frame is
+//! produced and presented without the script's cooperation. A half-applied
+//! batch is unobservable by construction (the tree is simply absent), and
+//! [`ElementTree::has_uncommitted_mutations`] guards the one edge where an
+//! abandoned batch comes back uncommitted at the end of an evaluation.
 //!
-//! The law: the main thread waits only on its own commits; the presenting
-//! side never waits on the main thread; present's vsync wait happens
-//! outside the lock, so it blocks no one.
+//! The law: the main thread waits only on its own batch boundaries; the
+//! presenting side never waits on the main thread; present's vsync wait
+//! happens outside any borrow, so it blocks no one.
 
 mod graphics;
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError, mpsc};
 
 use lynx_element::dom::ImageStore;
@@ -145,6 +148,121 @@ impl fmt::Debug for WindowHooks {
     }
 }
 
+/// The hand-off slot for the one element tree.
+///
+/// The tree has exactly one holder at any instant. Between batches it sits
+/// here, and the presenting side borrows it briefly (production, input,
+/// setup, observation). The Lynx main thread takes it at a batch's first
+/// mutation and puts it back at the flush that commits the batch — so PAPI
+/// calls in between are plain `&mut` mutations with no synchronization,
+/// and the presenting side can never observe a half-applied batch.
+#[derive(Clone)]
+pub struct SharedTree {
+    slot: Arc<Mutex<Option<ElementTree>>>,
+}
+
+impl fmt::Debug for SharedTree {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("SharedTree").finish_non_exhaustive()
+    }
+}
+
+impl SharedTree {
+    #[must_use]
+    pub fn new(tree: ElementTree) -> Self {
+        Self {
+            slot: Arc::new(Mutex::new(Some(tree))),
+        }
+    }
+
+    /// Blocking borrow for setup and observation.
+    ///
+    /// # Panics
+    ///
+    /// Panics while a batch is open — setup runs before the script starts,
+    /// observation after it finishes.
+    #[must_use]
+    pub fn tree(&self) -> TreeGuard<'_> {
+        let guard = self.lock();
+        assert!(
+            guard.is_some(),
+            "a PAPI batch is open: the Lynx main thread holds the tree"
+        );
+        TreeGuard(guard)
+    }
+
+    /// Non-blocking borrow for the presenting side. `None` both while the
+    /// main thread holds the tree (a batch is open) and while the slot lock
+    /// itself is momentarily busy — either way: work from the retained
+    /// frame and retry.
+    pub(crate) fn try_tree(&self) -> Option<TreeGuard<'_>> {
+        match self.slot.try_lock() {
+            Ok(guard) if guard.is_some() => Some(TreeGuard(guard)),
+            // An empty slot (a batch is open) and a momentarily busy slot
+            // lock answer the same way: work from the retained frame.
+            Ok(_) | Err(TryLockError::WouldBlock) => None,
+            Err(TryLockError::Poisoned(error)) => {
+                panic!("the tree slot is poisoned: {error}")
+            }
+        }
+    }
+
+    /// Takes the tree out to open a batch. Blocks only for the presenting
+    /// side's brief borrows — the script may wait on the engine.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a batch is already open: there is one main thread.
+    pub(crate) fn take(&self) -> ElementTree {
+        self.lock()
+            .take()
+            .expect("the tree was already taken: only one batch can be open")
+    }
+
+    /// Puts the tree back at a batch boundary.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the slot is occupied: the tree cannot be returned twice.
+    pub(crate) fn put(&self, tree: ElementTree) {
+        let mut guard = self.lock();
+        assert!(
+            guard.is_none(),
+            "the slot is occupied: the tree was returned twice"
+        );
+        *guard = Some(tree);
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Option<ElementTree>> {
+        // A poisoned slot means the other thread crashed mid-borrow;
+        // nothing can be trusted, so crash loudly (let-it-crash).
+        self.slot
+            .lock()
+            .unwrap_or_else(|error| panic!("the tree slot is poisoned: {error}"))
+    }
+}
+
+/// A borrow of the element tree from its slot.
+#[derive(Debug)]
+pub struct TreeGuard<'a>(MutexGuard<'a, Option<ElementTree>>);
+
+impl Deref for TreeGuard<'_> {
+    type Target = ElementTree;
+    fn deref(&self) -> &ElementTree {
+        self.0
+            .as_ref()
+            .expect("a TreeGuard is only built over an occupied slot")
+    }
+}
+
+impl DerefMut for TreeGuard<'_> {
+    fn deref_mut(&mut self) -> &mut ElementTree {
+        self.0
+            .as_mut()
+            .expect("a TreeGuard is only built over an occupied slot")
+    }
+}
+
 /// The attached output, if any.
 enum Output {
     None,
@@ -164,7 +282,7 @@ enum Output {
 ///
 /// Deliberately `!Send`: it lives on the thread the embedder calls it from.
 pub struct Engine {
-    elements: Arc<Mutex<ElementTree>>,
+    elements: SharedTree,
     viewport: Viewport,
     frame_size: FrameSize,
     messages: mpsc::Receiver<EngineMessage>,
@@ -175,9 +293,12 @@ pub struct Engine {
     message_sender: mpsc::Sender<EngineMessage>,
     output: Output,
     request_frame: Option<Arc<dyn Fn() + Send + Sync>>,
-    /// Input deferred by a missed `try_lock`, drained in arrival order at
-    /// the next lock acquisition so gesture sequences stay coherent.
+    /// Input deferred while the tree was away, drained in arrival order at
+    /// the next acquisition so gesture sequences stay coherent.
     pending_input: VecDeque<InputEvent>,
+    /// The latest viewport metrics not yet applied to the tree, for a
+    /// resize that arrived while a batch was open.
+    pending_resize: Option<(f32, f32, f32)>,
 }
 
 impl fmt::Debug for Engine {
@@ -203,7 +324,7 @@ impl Engine {
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
         let (message_sender, messages) = mpsc::channel();
         Ok(Self {
-            elements: Arc::new(Mutex::new(ElementTree::new(viewport, config))),
+            elements: SharedTree::new(ElementTree::new(viewport, config)),
             viewport,
             frame_size,
             messages,
@@ -211,6 +332,7 @@ impl Engine {
             output: Output::None,
             request_frame: None,
             pending_input: VecDeque::new(),
+            pending_resize: None,
         })
     }
 
@@ -218,53 +340,66 @@ impl Engine {
     ///
     /// # Panics
     ///
-    /// Panics if the other side crashed while holding the lock.
-    pub fn elements(&self) -> MutexGuard<'_, ElementTree> {
-        lock(&self.elements)
+    /// Panics while a batch is open — setup runs before the script starts,
+    /// observation after it finishes.
+    #[must_use]
+    pub fn elements(&self) -> TreeGuard<'_> {
+        self.elements.tree()
     }
 
     /// Mounts author CSS.
     pub fn add_author_stylesheet(&mut self, css: &str) {
-        lock(&self.elements).add_author_stylesheet(css);
+        self.elements.tree().add_author_stylesheet(css);
     }
 
     /// Registers font data for text measurement.
     pub fn register_fonts(&mut self, bytes: &[u8]) -> usize {
-        lock(&self.elements).register_fonts(bytes)
+        self.elements.tree().register_fonts(bytes)
     }
 
     /// Registers or updates decoded images, then keeps the next frame fresh.
     pub fn with_images<R>(&mut self, update: impl FnOnce(&mut ImageStore) -> R) -> R {
-        let result = update(lock(&self.elements).images_mut());
+        let result = update(self.elements.tree().images_mut());
         self.refresh();
         result
     }
 
+    /// Applies deferred embedder facts — the latest resize and buffered
+    /// input, in arrival order — at a successful tree acquisition.
+    fn drain_deferred(
+        pending_resize: &mut Option<(f32, f32, f32)>,
+        pending_input: &mut VecDeque<InputEvent>,
+        tree: &mut ElementTree,
+    ) {
+        if let Some((width, height, ratio)) = pending_resize.take() {
+            tree.set_viewport(width, height);
+            tree.set_device_pixel_ratio(ratio);
+        }
+        while let Some(event) = pending_input.pop_front() {
+            tree.handle_input(event);
+        }
+    }
+
     /// Routes one host input event on the presenting side.
     ///
-    /// Never blocks: if the main thread is mid-commit the event is buffered
-    /// and drained, in order, at the next lock acquisition (the very next
-    /// event or redraw). Scroll target resolution and the offset write
-    /// happen under the lock; a long script task leaves the lock idle, so
-    /// scrolling proceeds without the script's cooperation.
+    /// Never blocks: while a batch is open the event is buffered and
+    /// drained, in order, at the next acquisition (the very next event or
+    /// redraw). Scroll target resolution and the offset write happen on the
+    /// borrowed tree; a long script task between batches leaves the tree in
+    /// its slot, so scrolling proceeds without the script's cooperation.
     pub fn dispatch_input(&mut self, event: InputEvent) {
         self.pending_input.push_back(event);
-        match self.elements.try_lock() {
-            Ok(mut elements) => {
-                while let Some(event) = self.pending_input.pop_front() {
-                    elements.handle_input(event);
-                }
-                let needs_frame = elements.needs_render();
-                drop(elements);
-                if needs_frame {
-                    self.refresh();
-                }
+        let needs_frame = match self.elements.try_tree() {
+            Some(mut tree) => {
+                Self::drain_deferred(&mut self.pending_resize, &mut self.pending_input, &mut tree);
+                tree.needs_render()
             }
-            Err(TryLockError::WouldBlock) => {
-                // A commit is running; it ends with a frame request, whose
-                // redraw drains the buffer.
-            }
-            Err(TryLockError::Poisoned(error)) => poisoned(&error),
+            // The batch in progress ends with a frame request, whose redraw
+            // drains the buffer.
+            None => false,
+        };
+        if needs_frame {
+            self.refresh();
         }
     }
 
@@ -283,14 +418,18 @@ impl Engine {
         if !size_changed && !scale_changed {
             return Ok(());
         }
-        {
-            let mut elements = lock(&self.elements);
-            if size_changed {
-                elements.set_viewport(width, height);
+        match self.elements.try_tree() {
+            Some(mut tree) => {
+                if size_changed {
+                    tree.set_viewport(width, height);
+                }
+                if scale_changed {
+                    tree.set_device_pixel_ratio(device_pixel_ratio);
+                }
             }
-            if scale_changed {
-                elements.set_device_pixel_ratio(device_pixel_ratio);
-            }
+            // A batch is open: apply the newest metrics when the tree is
+            // next acquired.
+            None => self.pending_resize = Some((width, height, device_pixel_ratio)),
         }
         self.viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
         self.frame_size = next_size;
@@ -361,12 +500,12 @@ impl Engine {
     /// Relays the OS's "the window wants a frame" fact.
     ///
     /// Produces a new frame only when there is one to produce: the tree is
-    /// available (`try_lock` — a running commit retries next frame), no
-    /// PAPI batch is open, and the document changed since the retained
-    /// target was rendered. Everything else — re-exposure, a resize with
-    /// unchanged content, a retry — re-presents the retained target with a
-    /// blit alone. The present itself (the vsync wait) runs after the lock
-    /// is released.
+    /// in its slot (an open batch retries next frame), the batch that last
+    /// returned it was committed, and the document changed since the
+    /// retained target was rendered. Everything else — re-exposure, a
+    /// resize with unchanged content, a retry — re-presents the retained
+    /// target with a blit alone. The present itself (the vsync wait) runs
+    /// after the borrow ends.
     pub fn notify_redraw(&mut self) -> Result<(), EngineError> {
         let Output::Window {
             graphics,
@@ -376,25 +515,18 @@ impl Engine {
             return Ok(());
         };
         let size = self.frame_size;
-        match self.elements.try_lock() {
-            Ok(mut elements) => {
-                while let Some(event) = self.pending_input.pop_front() {
-                    elements.handle_input(event);
-                }
-                if !elements.has_uncommitted_mutations() {
-                    let produced = elements.render();
-                    if produced || !graphics.rendered_at(size) {
-                        graphics.render_to_target(&elements.scene(), size)?;
-                    }
+        if let Some(mut tree) = self.elements.try_tree() {
+            Self::drain_deferred(&mut self.pending_resize, &mut self.pending_input, &mut tree);
+            if !tree.has_uncommitted_mutations() {
+                let produced = tree.render();
+                if produced || !graphics.rendered_at(size) {
+                    graphics.render_to_target(&tree.scene(), size)?;
                 }
             }
-            Err(TryLockError::WouldBlock) => {
-                // A commit is running; it ends with a frame request. Present
-                // the retained target now so exposure never waits on it.
-            }
-            Err(TryLockError::Poisoned(error)) => poisoned(&error),
         }
-        // The vsync wait happens here, after the lock is released.
+        // The batch in progress, if any, ends with a frame request; present
+        // the retained target now so exposure never waits on it. The vsync
+        // wait happens here, after the borrow ends.
         if graphics.rendered_at(size) {
             graphics.present(pre_present.as_ref())?;
         }
@@ -409,11 +541,15 @@ impl Engine {
         let Output::Offscreen(gpu) = &mut self.output else {
             return Err(EngineError::NoDrawTarget);
         };
-        let mut elements = lock(&self.elements);
-        if elements.has_uncommitted_mutations() {
+        let Some(mut tree) = self.elements.try_tree() else {
+            // A batch is open; its flush asks for a frame anyway.
+            return Ok(false);
+        };
+        Self::drain_deferred(&mut self.pending_resize, &mut self.pending_input, &mut tree);
+        if tree.has_uncommitted_mutations() {
             return Ok(false);
         }
-        let changed = elements.render();
+        let changed = tree.render();
         if !changed && !force {
             // The retained target already holds this exact frame;
             // re-submitting it would burn a full GPU pass per tick on a
@@ -421,7 +557,7 @@ impl Engine {
             return Ok(false);
         }
         gpu.render_frame(
-            &elements.scene(),
+            &tree.scene(),
             self.frame_size.width,
             self.frame_size.height,
             Color::WHITE,
@@ -443,9 +579,11 @@ impl Engine {
         match &mut self.output {
             Output::None => Err(EngineError::NoDrawTarget),
             Output::Offscreen(gpu) => {
-                let mut elements = lock(&self.elements);
-                if !elements.has_uncommitted_mutations() && elements.render() {
-                    gpu.render_frame(&elements.scene(), size.width, size.height, Color::WHITE)
+                if let Some(mut tree) = self.elements.try_tree()
+                    && !tree.has_uncommitted_mutations()
+                    && tree.render()
+                {
+                    gpu.render_frame(&tree.scene(), size.width, size.height, Color::WHITE)
                         .map_err(EngineError::Gpu)?;
                 }
                 // The retained target holds the current frame; read it back
@@ -454,17 +592,13 @@ impl Engine {
                 Ok(Screenshot { size, pixels })
             }
             Output::Window { graphics, .. } => {
-                match self.elements.try_lock() {
-                    Ok(mut elements) => {
-                        if !elements.has_uncommitted_mutations() {
-                            let produced = elements.render();
-                            if produced || !graphics.rendered_at(size) {
-                                graphics.render_to_target(&elements.scene(), size)?;
-                            }
-                        }
+                if let Some(mut tree) = self.elements.try_tree()
+                    && !tree.has_uncommitted_mutations()
+                {
+                    let produced = tree.render();
+                    if produced || !graphics.rendered_at(size) {
+                        graphics.render_to_target(&tree.scene(), size)?;
                     }
-                    Err(TryLockError::WouldBlock) => {}
-                    Err(TryLockError::Poisoned(error)) => poisoned(&error),
                 }
                 if !graphics.rendered_at(size) {
                     return Err(EngineError::Render(
@@ -481,7 +615,7 @@ impl Engine {
     /// the shared tree. The headless composition.
     #[cfg(feature = "quickjs")]
     pub fn run_script(&mut self, source: &str) -> Result<(), ScriptRunError> {
-        let mut runtime = crate::quickjs::MainThreadRuntime::new(Arc::clone(&self.elements), || {})
+        let mut runtime = crate::quickjs::MainThreadRuntime::new(self.elements.clone(), || {})
             .map_err(ScriptRunError::Initialization)?;
         let result = runtime
             .run_main_thread_script(source)
@@ -500,7 +634,7 @@ impl Engine {
         source: String,
         wakeup: impl Fn() + Send + Sync + 'static,
     ) -> Result<(), EngineError> {
-        let elements = Arc::clone(&self.elements);
+        let elements = self.elements.clone();
         let sender = self.message_sender.clone();
         let on_flush = self.request_frame.clone();
         std::thread::Builder::new()
@@ -526,17 +660,6 @@ impl Engine {
             })?;
         Ok(())
     }
-}
-
-/// Blocking lock with the crate's poison policy.
-fn lock(elements: &Mutex<ElementTree>) -> MutexGuard<'_, ElementTree> {
-    elements.lock().unwrap_or_else(|error| poisoned(&error))
-}
-
-/// A poisoned tree lock means the other thread crashed mid-mutation;
-/// nothing can be trusted, so crash loudly (let-it-crash).
-fn poisoned<G>(error: &dyn fmt::Display) -> G {
-    panic!("the element tree lock is poisoned: {error}")
 }
 
 /// Validates CSS viewport metrics and derives the physical target size.
