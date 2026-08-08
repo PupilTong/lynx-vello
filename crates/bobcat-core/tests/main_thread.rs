@@ -3,22 +3,17 @@
 //! Behavior tests for main-thread (MTS) script execution and the Element PAPI
 //! globals it runs against.
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
-use bobcat_core::quickjs::{MainThreadRuntime, local_commit_sink};
+use bobcat_core::engine::SharedTree;
+use bobcat_core::quickjs::MainThreadRuntime;
 use lynx_element::{ElementTree, PageConfig, Viewport};
 
 const VIEWPORT: Viewport = Viewport::new(393.0, 727.0);
 
-/// The single-threaded composition: the realm records PAPI writes, and every
-/// `__FlushElementTree` applies them to this shared tree on the spot.
-fn runtime() -> (MainThreadRuntime, Rc<RefCell<ElementTree>>) {
-    let elements = Rc::new(RefCell::new(ElementTree::new(
-        VIEWPORT,
-        PageConfig::default(),
-    )));
-    let runtime = MainThreadRuntime::new(local_commit_sink(&elements)).expect("QuickJS realm");
+/// The single-threaded composition: the realm takes the tree from this
+/// slot per batch and every `__FlushElementTree` puts it back committed.
+fn runtime() -> (MainThreadRuntime, SharedTree) {
+    let elements = SharedTree::new(ElementTree::new(VIEWPORT, PageConfig::default()));
+    let runtime = MainThreadRuntime::new(elements.clone(), || {}).expect("QuickJS realm");
     (runtime, elements)
 }
 
@@ -49,7 +44,7 @@ fn a_card_root_builds_its_tree_through_the_papi() {
     // the nested view. Their liveness proves the committed batch applied;
     // DOM shape (append order, tags, committed styles) is asserted where it
     // is owned - lynx-element's own unit tests.
-    let elements = elements.borrow();
+    let elements = elements.tree();
     assert!(elements.page().is_some());
     assert!(elements.element(2).is_some());
     assert!(elements.element(3).is_some());
@@ -76,7 +71,7 @@ fn create_view_returns_a_handle_append_element_accepts() {
             ",
         )
         .expect("main-thread script");
-    let elements = elements.borrow();
+    let elements = elements.tree();
     assert!(elements.page().is_some());
     assert!(elements.element(2).is_some());
 }
@@ -98,7 +93,7 @@ fn drop_element_retires_a_detached_element_and_does_not_reuse_its_id() {
         )
         .expect("main-thread script");
 
-    let elements = elements.borrow();
+    let elements = elements.tree();
     assert!(elements.element(2).is_none());
     assert!(elements.element(3).is_some());
 }
@@ -121,7 +116,7 @@ fn drop_element_retires_an_attached_subtree() {
         )
         .expect("main-thread script");
 
-    let elements = elements.borrow();
+    let elements = elements.tree();
     assert!(elements.element(2).is_none());
     assert!(elements.element(3).is_none());
 }
@@ -142,7 +137,7 @@ fn create_page_is_idempotent_across_calls() {
             ",
         )
         .expect("main-thread script");
-    assert!(elements.borrow().page().is_some());
+    assert!(elements.tree().page().is_some());
 }
 
 #[test]
@@ -161,7 +156,7 @@ fn process_data_runs_before_render_page_and_feeds_it() {
             ",
         )
         .expect("main-thread script");
-    let elements = elements.borrow();
+    let elements = elements.tree();
     for id in 2..=4 {
         assert!(elements.element(id).is_some(), "child {id} must be live");
     }
@@ -192,10 +187,10 @@ fn the_page_is_not_in_the_document_until_the_tree_is_flushed() {
         )
         .expect("evaluate");
     // Evaluation alone only defines the entry point.
-    assert!(elements.borrow().page().is_none());
+    assert!(elements.tree().page().is_none());
 
     runtime.render_page().expect("render");
-    assert!(elements.borrow().page().is_some());
+    assert!(elements.tree().page().is_some());
 }
 
 #[test]
@@ -338,7 +333,7 @@ fn a_second_boot_re_renders_into_the_same_tree() {
     runtime.render_page().expect("second boot");
     // renderPage appended one more child into the same tree: the first
     // boot's view (id 2) and the second's (id 3) are both live.
-    let elements = elements.borrow();
+    let elements = elements.tree();
     assert!(elements.element(2).is_some());
     assert!(elements.element(3).is_some());
 }
@@ -365,7 +360,7 @@ fn microtasks_queued_during_render_run_before_the_call_returns() {
             ",
         )
         .expect("main-thread script");
-    let elements = elements.borrow();
+    let elements = elements.tree();
     for id in 2..=4 {
         assert!(
             elements.element(id).is_some(),
@@ -419,7 +414,7 @@ fn a_run_that_exceeds_the_job_limit_finishes_before_the_next_one_starts() {
     let _ = over_budget;
     runtime.render_page().ok();
 
-    let elements = elements.borrow();
+    let elements = elements.tree();
     assert!(
         elements.page().is_some(),
         "the boot sequence still ran to completion"

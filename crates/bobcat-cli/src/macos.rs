@@ -5,12 +5,13 @@
 //! and PNG output. Every handler is a relay into
 //! [`bobcat_core::engine::Engine`] — an OS fact goes in
 //! (`dispatch_input`, `resize`, `notify_redraw`, `pump`), and the engine
-//! decides what the pipeline does with it. The engine owns the script and
-//! render threads; the capabilities it schedules through
-//! (`request_redraw`, `pre_present_notify`, the event-loop wakeup) are
-//! handed over once at attach time.
+//! decides what the pipeline does with it. The engine owns the Lynx main
+//! thread (the script realm) and shares the element tree with it behind
+//! one lock; presentation and vsync stay on this thread. The capabilities
+//! the engine schedules through (`request_redraw`, `pre_present_notify`,
+//! the event-loop wakeup) are handed over once at attach time.
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 
 use bobcat_core::engine::{Engine, EngineEvent, FrameSize, WindowHooks};
@@ -144,10 +145,10 @@ impl MacApplication {
         program.warn_about_dropped_author_rules();
 
         let mut engine = Engine::new(program.config, css_width, css_height, scale_factor)?;
-        // The engine builds the GPU surface here on the main thread — the one
-        // place macOS guarantees layer setup works — then owns presentation
-        // on its render thread. The three capabilities are the OS mechanisms
-        // it schedules through.
+        // The engine builds the GPU surface here and presents from this
+        // thread — vsync interacts with the OS only inside its redraw
+        // relay. The three capabilities are the OS mechanisms it schedules
+        // through.
         let request_window = Arc::clone(&window);
         let present_window = Arc::clone(&window);
         let render_wakeup = self.proxy.clone();
@@ -213,7 +214,7 @@ impl MacApplication {
                 }
                 println!("Rendering one frame.");
             }
-            Command::Screenshot(path) => self.screenshot(path),
+            Command::Screenshot(path) => self.screenshot(&path),
             Command::SetVsync(_) => {
                 eprintln!(
                     "bobcat: `set vsync` controls the synthetic headless clock; headed mode uses \
@@ -229,22 +230,21 @@ impl MacApplication {
     }
 
     /// Asks the engine for the current frame's pixels; writing the PNG is
-    /// this embedder's IO, run wherever the engine captured the frame.
-    fn screenshot(&mut self, path: PathBuf) {
+    /// this embedder's IO.
+    fn screenshot(&mut self, path: &Path) {
         let Some(engine) = self.engine.as_mut() else {
             eprintln!("bobcat: no window yet to capture");
             return;
         };
-        engine.request_screenshot(move |result| {
-            // A screenshot failure must not tear down the session: report it
-            // at the prompt like any other bad command.
-            let saved = result
-                .map_err(CliError::Engine)
-                .and_then(|shot| save_screenshot(&path, shot.size, &shot.pixels));
-            if let Err(error) = saved {
-                eprintln!("bobcat: {error}");
-            }
-        });
+        // A screenshot failure must not tear down the session: report it at
+        // the prompt like any other bad command.
+        let saved = engine
+            .capture()
+            .map_err(CliError::Engine)
+            .and_then(|shot| save_screenshot(path, shot.size, &shot.pixels));
+        if let Err(error) = saved {
+            eprintln!("bobcat: {error}");
+        }
     }
 
     /// Relays one already-translated input event to the engine.
@@ -387,12 +387,10 @@ impl ApplicationHandler<UserEvent> for MacApplication {
                 }
                 Ok(())
             }
-            WindowEvent::RedrawRequested => {
-                if let Some(engine) = self.engine.as_mut() {
-                    engine.notify_redraw();
-                }
-                Ok(())
-            }
+            WindowEvent::RedrawRequested => match self.engine.as_mut() {
+                Some(engine) => engine.notify_redraw().map_err(CliError::Engine),
+                None => Ok(()),
+            },
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer = Some(position);
                 self.pointer_event(PointerPhase::Move);
@@ -439,18 +437,12 @@ impl ApplicationHandler<UserEvent> for MacApplication {
                 let Some(engine) = self.engine.as_mut() else {
                     return;
                 };
+                // A successfully finished script needs no reaction, and
+                // future lifecycle events default to none.
                 for engine_event in engine.pump() {
-                    match engine_event {
-                        EngineEvent::ScriptFinished(Err(source)) => {
-                            let input = self.input.clone();
-                            self.fail(event_loop, CliError::Script { input, source });
-                        }
-                        EngineEvent::RenderFailed(error) => {
-                            self.fail(event_loop, error.into());
-                        }
-                        // A successfully finished script needs no reaction,
-                        // and future lifecycle events default to none.
-                        _ => {}
+                    if let EngineEvent::ScriptFinished(Err(source)) = engine_event {
+                        let input = self.input.clone();
+                        self.fail(event_loop, CliError::Script { input, source });
                     }
                 }
             }

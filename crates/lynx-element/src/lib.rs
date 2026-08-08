@@ -32,12 +32,6 @@
 //! that exists today; a script that needs more will fail at the missing global,
 //! not silently render wrong.
 //!
-//! The same five calls also exist as data: [`ElementOpRecorder`] answers them
-//! script-side from a shadow of the tree and records [`ElementOp`]s, which
-//! [`ElementTree::apply`] replays at the `__FlushElementTree` commit — the
-//! seam that lets a shell keep the script and the tree on different threads
-//! (see `ops.rs` for the mirroring law).
-//!
 //! # Recorded limits
 //!
 //! - **The runtime identity and JavaScript handle are the same unique id.** [`ElementTree`] speaks
@@ -64,7 +58,6 @@
 
 mod arena;
 mod device;
-mod ops;
 mod tree;
 mod ua;
 
@@ -77,7 +70,6 @@ pub type ElementId = u32;
 
 pub use crate::arena::LynxElement;
 pub use crate::device::Viewport;
-pub use crate::ops::{ElementOp, ElementOpRecorder};
 pub use crate::tree::{ElementTree, PapiError};
 pub use crate::ua::PageConfig;
 
