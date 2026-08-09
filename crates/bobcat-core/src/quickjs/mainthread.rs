@@ -50,8 +50,8 @@
 //!   `__AppendElement`, `__DropElement`, `__FlushElementTree` (see `lynx-element`'s crate docs). A
 //!   bundle that reaches for anything else gets a `ReferenceError` naming the missing global, which
 //!   is the intended failure: a silently wrong render would be worse.
-//! - **Element handles cross as `u32` unique-id numbers.** `__DropElement` asks the recorder to
-//!   retire the handle; this layer does not add an object wrapper or GC policy around those ids.
+//! - **Element handles cross as `u32` unique-id numbers.** `__DropElement` asks the tree to retire
+//!   the handle; this layer does not add an object wrapper or GC policy around those ids.
 //! - **The non-element main-thread globals are absent** (`lynx`, `SystemInfo`, `__globalProps`,
 //!   `_ReportError`, `__OnLifecycleEvent`, `__LoadLepusChunk`, `_I18nResourceTranslation`,
 //!   `_AddEventListener`, `__QueryComponent`).
@@ -64,7 +64,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use lynx_element::{ElementId, ElementTree, PapiError};
-use quickjs_rust_bridge::{self as quickjs, HostFunctionError, HostValue};
+use quickjs_rust_bridge::{self as quickjs, HostFunctionError, HostMember, HostModule, HostValue};
 
 use super::{QuickJsInitializationError, QuickJsScriptEngine};
 use crate::script::ScriptError;
@@ -177,11 +177,121 @@ impl TreeHandle {
     }
 }
 
+/// The five Element PAPI members as one [`HostModule`].
+///
+/// The PAPI surface is compile-time-closed, so the realm binds this type
+/// statically: a call from JavaScript reaches the match in
+/// [`HostModule::call`] with no per-call virtual dispatch, and borrows
+/// exactly one `RefCell` — the module's own — on the way.
+struct ElementPapi {
+    tree: TreeHandle,
+    /// Runs after every committed `__FlushElementTree`, once the tree is
+    /// back in its slot — the seam a presenter uses to learn a committed
+    /// frame is available. Boxed type erasure here costs one indirect call
+    /// per commit, not per PAPI call.
+    on_flush: Box<dyn Fn()>,
+}
+
+/// Member indices — the order of [`ElementPapi::MEMBERS`].
+const CREATE_PAGE: usize = 0;
+const CREATE_VIEW: usize = 1;
+const APPEND_ELEMENT: usize = 2;
+const DROP_ELEMENT: usize = 3;
+const FLUSH_ELEMENT_TREE: usize = 4;
+
+impl HostModule for ElementPapi {
+    const MEMBERS: &'static [HostMember] = &[
+        HostMember {
+            name: "__CreatePage",
+            arity: 2,
+        },
+        HostMember {
+            name: "__CreateView",
+            arity: 1,
+        },
+        HostMember {
+            name: "__AppendElement",
+            arity: 2,
+        },
+        HostMember {
+            name: "__DropElement",
+            arity: 1,
+        },
+        HostMember {
+            name: "__FlushElementTree",
+            arity: 0,
+        },
+    ];
+
+    fn call(
+        &mut self,
+        member: usize,
+        arguments: &[HostValue],
+    ) -> Result<HostValue, HostFunctionError> {
+        match member {
+            // `__CreatePage(componentID, componentCSSID)` — idempotent;
+            // returns the page's unique id.
+            CREATE_PAGE => {
+                let component_id = string_argument("__CreatePage", arguments, 0)?;
+                let component_css_id = i32_argument("__CreatePage", arguments, 1)?;
+                let id = self.tree.tree().create_page(component_id, component_css_id);
+                Ok(unique_id_value(id))
+            }
+            // `__CreateView(parentComponentUniqueID)` — returns the new
+            // view's unique id. The argument is `0` when there is no parent
+            // component.
+            CREATE_VIEW => {
+                let parent_component = u32_argument("__CreateView", arguments, 0)?;
+                let id = self
+                    .tree
+                    .tree()
+                    .create_view(parent_component)
+                    .map_err(papi_error)?;
+                Ok(unique_id_value(id))
+            }
+            // `__AppendElement(parent, child)` — returns the child unique id.
+            APPEND_ELEMENT => {
+                let parent = element_argument("__AppendElement", arguments, 0)?;
+                let child = element_argument("__AppendElement", arguments, 1)?;
+                let appended = self
+                    .tree
+                    .tree()
+                    .append_element(parent, child)
+                    .map_err(papi_error)?;
+                Ok(unique_id_value(appended))
+            }
+            // `__DropElement(element)` — repeated drops stay no-ops (the
+            // handle is already retired); dropping the permanent page
+            // element is a precise error.
+            DROP_ELEMENT => {
+                let id = element_argument("__DropElement", arguments, 0)?;
+                match self.tree.tree().drop_element(id) {
+                    Ok(()) | Err(PapiError::UnknownElement(_)) => {}
+                    Err(error) => return Err(papi_error(error)),
+                }
+                Ok(HostValue::Undefined)
+            }
+            // `__FlushElementTree()` — the single commit boundary: the
+            // style + layout commit runs on the taken tree, the tree goes
+            // back in its slot, and the presenter is notified. An empty
+            // batch still commits — a flush is a style + layout pass even
+            // with nothing recorded. web-core ignores the optional sub-tree
+            // and options arguments on the web target too.
+            FLUSH_ELEMENT_TREE => {
+                self.tree.flush();
+                (self.on_flush)();
+                Ok(HostValue::Undefined)
+            }
+            _ => unreachable!("the realm dispatches only member indices it installed"),
+        }
+    }
+}
+
 /// One `QuickJS` realm carrying the Lynx Element PAPI over the tree
 /// hand-off slot.
 pub struct MainThreadRuntime {
     engine: QuickJsScriptEngine,
-    tree: Rc<RefCell<TreeHandle>>,
+    papi: Rc<RefCell<ElementPapi>>,
 }
 
 impl fmt::Debug for MainThreadRuntime {
@@ -203,9 +313,9 @@ impl MainThreadRuntime {
         on_flush: impl Fn() + 'static,
     ) -> Result<Self, QuickJsInitializationError> {
         let mut engine = QuickJsScriptEngine::new()?;
-        let tree = install_element_papi(&mut engine.realm, elements, on_flush)
+        let papi = install_element_papi(&mut engine.realm, elements, on_flush)
             .map_err(QuickJsInitializationError::from_quickjs)?;
-        Ok(Self { engine, tree })
+        Ok(Self { engine, papi })
     }
 
     /// Evaluates a `.web.bundle`'s `lepusCode.root` in web-core's wrapper.
@@ -254,93 +364,30 @@ impl MainThreadRuntime {
         // Whatever the script did — flushed, failed, or abandoned a batch —
         // the tree must be back in its slot when control returns to the
         // host.
-        self.tree.borrow_mut().release();
+        self.papi.borrow_mut().tree.release();
         result
     }
 }
 
 /// Installs the Element PAPI onto the realm's global object, returning the
-/// hand-off handle the runtime releases at every evaluation boundary.
+/// shared module whose tree handle the runtime releases at every evaluation
+/// boundary.
 ///
 /// web-core does the equivalent with one `Object.assign` of a closure
-/// literal; each closure here reaches the batch's taken tree through the
-/// same handle. Validation is the tree's own — a bad handle throws at the
-/// call site.
+/// literal. Validation is the tree's own — a bad handle throws at the call
+/// site.
 fn install_element_papi(
     realm: &mut quickjs::Realm,
     elements: SharedTree,
     on_flush: impl Fn() + 'static,
-) -> Result<Rc<RefCell<TreeHandle>>, quickjs::Error> {
-    let handle = Rc::new(RefCell::new(TreeHandle {
-        slot: elements,
-        taken: None,
-    }));
-
-    // `__CreatePage(componentID, componentCSSID)` — idempotent; returns the
-    // page's unique id.
-    let tree = Rc::clone(&handle);
-    realm.define_global_function("__CreatePage", 2, move |arguments| {
-        let component_id = string_argument("__CreatePage", arguments, 0)?;
-        let component_css_id = i32_argument("__CreatePage", arguments, 1)?;
-        let id = tree
-            .borrow_mut()
-            .tree()
-            .create_page(component_id, component_css_id);
-        Ok(unique_id_value(id))
-    })?;
-
-    // `__CreateView(parentComponentUniqueID)` — returns the new view's unique
-    // id. The argument is `0` when there is no parent component.
-    let tree = Rc::clone(&handle);
-    realm.define_global_function("__CreateView", 1, move |arguments| {
-        let parent_component = u32_argument("__CreateView", arguments, 0)?;
-        let id = tree
-            .borrow_mut()
-            .tree()
-            .create_view(parent_component)
-            .map_err(papi_error)?;
-        Ok(unique_id_value(id))
-    })?;
-
-    // `__AppendElement(parent, child)` — returns the child unique id.
-    let tree = Rc::clone(&handle);
-    realm.define_global_function("__AppendElement", 2, move |arguments| {
-        let parent = element_argument("__AppendElement", arguments, 0)?;
-        let child = element_argument("__AppendElement", arguments, 1)?;
-        let appended = tree
-            .borrow_mut()
-            .tree()
-            .append_element(parent, child)
-            .map_err(papi_error)?;
-        Ok(unique_id_value(appended))
-    })?;
-
-    // `__DropElement(element)` — repeated drops stay no-ops (the handle is
-    // already retired); dropping the permanent page element is a precise
-    // error.
-    let tree = Rc::clone(&handle);
-    realm.define_global_function("__DropElement", 1, move |arguments| {
-        let id = element_argument("__DropElement", arguments, 0)?;
-        match tree.borrow_mut().tree().drop_element(id) {
-            Ok(()) | Err(PapiError::UnknownElement(_)) => {}
-            Err(error) => return Err(papi_error(error)),
-        }
-        Ok(HostValue::Undefined)
-    })?;
-
-    // `__FlushElementTree()` — the single commit boundary: the style + layout
-    // commit runs on the taken tree, the tree goes back in its slot, and the
-    // presenter is notified. An empty batch still commits — a flush is a
-    // style + layout pass even with nothing recorded. web-core ignores the
-    // optional sub-tree and options arguments on the web target too.
-    let tree = Rc::clone(&handle);
-    realm.define_global_function("__FlushElementTree", 0, move |_arguments| {
-        tree.borrow_mut().flush();
-        on_flush();
-        Ok(HostValue::Undefined)
-    })?;
-
-    Ok(handle)
+) -> Result<Rc<RefCell<ElementPapi>>, quickjs::Error> {
+    realm.install_module(ElementPapi {
+        tree: TreeHandle {
+            slot: elements,
+            taken: None,
+        },
+        on_flush: Box::new(on_flush),
+    })
 }
 
 /// A unique id crossing the primitives-only native host boundary.

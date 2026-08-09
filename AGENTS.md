@@ -163,8 +163,11 @@ useful signal for currently-compatible versions of those libraries.
   `lepusCode.root` inside web-core's wrapper, then runs `processData` →
   `renderPage` → `__FlushElementTree`. Five of web-core's 61 PAPI members are
   installed (`__CreatePage`, `__CreateView`, `__AppendElement`,
-  `__DropElement`, `__FlushElementTree`); unsupported globals remain precise
-  `ReferenceError`s. Handles cross the primitives-only boundary as `u32` ids.
+  `__DropElement`, `__FlushElementTree`) — as one `HostModule`
+  (`ElementPapi`) bound statically, so a PAPI call carries no per-call
+  virtual dispatch and borrows one `RefCell`; unsupported globals remain
+  precise `ReferenceError`s. Handles cross the primitives-only boundary as
+  `u32` ids.
   Core composes but does not own Lynx tag/root/UA policy; that vocabulary and
   `type ElementId = u32` remain defined by `lynx-element`.
   The resource module must not decode images/fonts/templates, upload render
@@ -176,25 +179,31 @@ useful signal for currently-compatible versions of those libraries.
   the pinned `vendor/quickjs` submodule. It owns the QuickJS C build and the
   narrow unsafe FFI shim, realm/value lifetime and affinity checks, exact
   ECMAScript string conversion, exception sanitization, and pending-job pump.
-  It also owns the **host-function seam**: `Realm::function` /
-  `define_global_function` back a JS callable with a Rust `FnMut`, dispatched
-  through one C trampoline (`JS_NewCFunctionData` + a realm-owned callback
-  table reached via the context opaque). Host callbacks speak `HostValue`, a
+  It also owns the **host-function seam**, with two registration paths:
+  `Realm::function` / `define_global_function` back a JS callable with a Rust
+  `FnMut`, and `Realm::install_module` binds a `HostModule` — a compile-time
+  -closed member set, the Element PAPI's shape — as one shared value
+  dispatched by member index. Both paths reach Rust through one C trampoline
+  and then one function pointer written into the slot at registration,
+  monomorphized for the concrete handler type: no trait object and no vtable
+  sit on the call path. Host callbacks speak `HostValue`, a
   primitives-only boundary (undefined/null/bool/number/string) — objects,
   arrays, functions, symbols, and ill-formed UTF-16 strings are rejected on
   the way in rather than lossily converted — which also means a callback
   cannot call back into its own realm, so host functions are strictly
-  leaf calls today. A slot is vacated for the duration of its call (a guard
-  that restores it on the unwinding path too), so a panicking callback becomes
+  leaf calls today. A panicking callback becomes
   a JS exception rather than an unwind into C and leaves its slot usable, and
-  a re-entrant invocation is refused rather than aliasing the `FnMut` (the
-  closure lives behind a `RefCell`, so that guard is structural). A closure's
-  lifetime follows its JS function object rather than the realm: the closure
+  a re-entrant invocation is refused rather than aliasing the handler
+  (closure and module alike live behind a `RefCell`, so that guard is
+  structural). A slot's
+  lifetime follows its JS function object rather than the realm: the slot
   sits at its own stable heap address, which a companion JS object holds and
   the collector hands back through a finalizer — so nothing is indexed,
   recycled, or aliasable by a stale reference, and discarding a function drops
-  its closure. Without this a realm registering a handler per element per
-  update (events, worklets) would accumulate every closure it ever made.
+  its closure (module members share the module value through an `Rc`, freed
+  with the last member). Without this a realm registering a handler per
+  element per update (events, worklets) would accumulate every closure it
+  ever made.
   The finalizer only *records* the address; the drop happens at the next
   `&mut Realm` entry point, because a handler may own a `Value` whose `Drop`
   calls `JS_FreeValue` and re-entering QuickJS from inside its own GC is
