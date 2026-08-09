@@ -12,16 +12,17 @@ use lynx_element::dom::vello;
 use lynx_element::dom::vello::peniko::Color;
 use lynx_element::dom::vello::util::{RenderContext, RenderSurface};
 
-use super::{EngineError, FrameSize};
+use super::{EngineError, FrameSize, Window};
 
-/// The draw target an embedder hands over with its window: anything wgpu
-/// can build a surface on (a window handle behind `Arc`, a raw handle
-/// pair, …).
-pub type WindowTarget = vello::wgpu::SurfaceTarget<'static>;
+/// The draw target an embedder lends with its window: anything wgpu can
+/// build a surface on (a borrow of the window, a window handle behind
+/// `Arc`, a raw handle pair, …), valid for as long as the engine borrows
+/// the window it came from.
+pub type WindowTarget<'window> = vello::wgpu::SurfaceTarget<'window>;
 
-pub(super) struct WindowGraphics {
+pub(super) struct WindowGraphics<'window> {
     context: RenderContext,
-    surface: RenderSurface<'static>,
+    surface: RenderSurface<'window>,
     renderer: vello::Renderer,
     capture: Option<CaptureTarget>,
     /// The frame size the retained target texture currently holds, or
@@ -41,7 +42,7 @@ struct CaptureTarget {
     blitter: vello::wgpu::util::TextureBlitter,
 }
 
-impl std::fmt::Debug for WindowGraphics {
+impl std::fmt::Debug for WindowGraphics<'_> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("WindowGraphics")
@@ -50,8 +51,11 @@ impl std::fmt::Debug for WindowGraphics {
     }
 }
 
-impl WindowGraphics {
-    pub(super) fn new(target: WindowTarget, size: FrameSize) -> Result<Self, EngineError> {
+impl<'window> WindowGraphics<'window> {
+    pub(super) fn new(
+        target: impl Into<WindowTarget<'window>>,
+        size: FrameSize,
+    ) -> Result<Self, EngineError> {
         let mut context = RenderContext::new();
         let surface = pollster::block_on(context.create_surface(
             target,
@@ -109,9 +113,9 @@ impl WindowGraphics {
     }
 
     /// Presents the retained target: acquires the surface texture, blits,
-    /// notifies the embedder just before presenting, and presents. Called
+    /// notifies the window just before presenting, and presents. Called
     /// outside the tree lock — the vsync wait must not block anyone.
-    pub(super) fn present(&mut self, pre_present: &dyn Fn()) -> Result<(), EngineError> {
+    pub(super) fn present<W: Window>(&mut self, window: &W) -> Result<(), EngineError> {
         let Self {
             context, surface, ..
         } = self;
@@ -152,7 +156,7 @@ impl WindowGraphics {
             &output_view,
         );
         handle.queue.submit([encoder.finish()]);
-        pre_present();
+        window.pre_present();
         surface_texture.present();
         if reconfigure_after {
             context.configure_surface(surface);

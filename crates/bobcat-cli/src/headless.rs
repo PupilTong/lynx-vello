@@ -10,7 +10,7 @@ use std::num::NonZeroU32;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use bobcat_core::engine::Engine;
+use bobcat_core::engine::OffscreenEngine;
 
 use crate::CliError;
 use crate::args::Options;
@@ -19,7 +19,7 @@ use crate::page::Program;
 use crate::screenshot::save_screenshot;
 
 pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
-    let mut engine = Engine::new(
+    let mut engine = OffscreenEngine::new(
         program.config,
         options.viewport_width,
         options.viewport_height,

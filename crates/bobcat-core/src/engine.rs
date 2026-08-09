@@ -6,7 +6,7 @@
 //! internal pipeline. Its event handlers are relays — they hand the engine
 //! an OS fact (`dispatch_input`, `resize`, `notify_redraw`, `pump`) and the
 //! engine decides what the pipeline does with it, requesting frames itself
-//! through the capabilities the embedder handed over at attach time.
+//! through the [`Window`] it borrowed at attach time.
 //!
 //! # Two threads, one hand-off slot
 //!
@@ -41,7 +41,9 @@ mod graphics;
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError, mpsc};
 
 use lynx_element::dom::ImageStore;
@@ -124,29 +126,79 @@ impl fmt::Debug for Screenshot {
     }
 }
 
-/// OS capabilities the embedder lends the engine with a window target.
-/// The embedder provides the mechanisms; the engine decides when to invoke
-/// them.
-pub struct WindowHooks {
-    /// Asks the OS for a redraw of the window (`Window::request_redraw`).
-    /// `Send + Sync` because the engine's main thread asks for a frame
-    /// after every committed flush.
-    pub request_frame: Box<dyn Fn() + Send + Sync>,
-    /// Called on the presenting side immediately before presenting
-    /// (`Window::pre_present_notify`).
-    pub pre_present: Box<dyn Fn()>,
-    /// Posts a wakeup to the embedder's event loop so it calls
-    /// [`Engine::pump`]. Called from engine-owned threads.
-    pub wakeup: Box<dyn Fn() + Send + Sync>,
+/// The embedder's window: the draw target it lends, and the OS mechanisms
+/// the engine schedules through. The embedder provides the mechanisms; the
+/// engine decides when to invoke them.
+///
+/// The engine is generic over this trait, so every call here is a direct
+/// one — a window is a type, not a set of boxed closures. The draw target
+/// is a GAT, which is what lets the surface the engine builds borrow the
+/// embedder's window: an embedder lends a borrow of the window it owns
+/// instead of handing over a `'static` refcounted handle.
+pub trait Window {
+    /// What this window lends wgpu to build a surface on — a borrow of the
+    /// window itself, a refcounted handle, a raw handle pair, … — valid for
+    /// as long as the engine borrows the window.
+    type Target<'window>: Into<WindowTarget<'window>>
+    where
+        Self: 'window;
+
+    /// The frame-request handle this window hands out. It is separate from
+    /// the window because engine-owned threads keep one: the Lynx main
+    /// thread asks for a frame after every committed flush.
+    type Frames: FrameRequester;
+
+    /// Lends the draw target for the engine's borrow of this window.
+    fn target(&self) -> Self::Target<'_>;
+
+    /// Hands out one frame-request handle.
+    fn frames(&self) -> Self::Frames;
+
+    /// Called on the presenting side immediately before presenting (winit's
+    /// `Window::pre_present_notify`).
+    fn pre_present(&self);
 }
 
-impl fmt::Debug for WindowHooks {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("WindowHooks")
-            .finish_non_exhaustive()
+/// A window's frame-request capability, held apart from the window itself
+/// because it travels to engine-owned threads.
+pub trait FrameRequester: Send + Sync + 'static {
+    /// Asks the OS for a redraw of the window (winit's
+    /// `Window::request_redraw`).
+    fn request_frame(&self);
+}
+
+/// The window of an engine that has none. Uninhabited: an
+/// [`OffscreenEngine`] cannot reach a window path at all, and no embedder
+/// can construct one.
+#[derive(Debug)]
+pub enum NoWindow {}
+
+impl Window for NoWindow {
+    type Target<'window> = WindowTarget<'window>;
+    type Frames = Self;
+
+    fn target(&self) -> Self::Target<'_> {
+        match *self {}
+    }
+
+    fn frames(&self) -> Self::Frames {
+        match *self {}
+    }
+
+    fn pre_present(&self) {
+        match *self {}
     }
 }
+
+impl FrameRequester for NoWindow {
+    fn request_frame(&self) {
+        match *self {}
+    }
+}
+
+/// The headless composition: an engine that renders to an offscreen target
+/// and never attaches a window.
+pub type OffscreenEngine = Engine<'static, NoWindow>;
 
 /// The hand-off slot for the one element tree.
 ///
@@ -264,24 +316,29 @@ impl DerefMut for TreeGuard<'_> {
 }
 
 /// The attached output, if any.
-enum Output {
+enum Output<'window, W> {
     None,
     /// An offscreen GPU target: `tick` renders, `capture` reads back.
     /// Boxed to keep the idle variants small.
     Offscreen(Box<Headless>),
     /// A window: the presentation stack lives here, on the thread the
-    /// embedder calls the engine from.
+    /// embedder calls the engine from, and its surface borrows the
+    /// embedder's window for exactly as long as it does.
     Window {
-        graphics: Box<WindowGraphics>,
-        pre_present: Box<dyn Fn()>,
+        graphics: Box<WindowGraphics<'window>>,
+        window: &'window W,
     },
 }
 
 /// The engine half of a Lynx view: the shared element tree, input routing,
 /// frame production, presentation, and the engine-owned script thread.
 ///
+/// Generic over the embedder's [`Window`], which it borrows for the life of
+/// the surface built from it; [`OffscreenEngine`] is the composition with no
+/// window at all.
+///
 /// Deliberately `!Send`: it lives on the thread the embedder calls it from.
-pub struct Engine {
+pub struct Engine<'window, W: Window> {
     elements: SharedTree,
     viewport: Viewport,
     frame_size: FrameSize,
@@ -291,17 +348,23 @@ pub struct Engine {
         allow(dead_code, reason = "only engine-owned script threads send messages")
     )]
     message_sender: mpsc::Sender<EngineMessage>,
-    output: Output,
-    request_frame: Option<Arc<dyn Fn() + Send + Sync>>,
+    output: Output<'window, W>,
+    /// The window's frame-request handle, behind `Arc` so the Lynx main
+    /// thread keeps one of its own.
+    frames: Option<Arc<W::Frames>>,
     /// Input deferred while the tree was away, drained in arrival order at
     /// the next acquisition so gesture sequences stay coherent.
     pending_input: VecDeque<InputEvent>,
     /// The latest viewport metrics not yet applied to the tree, for a
     /// resize that arrived while a batch was open.
     pending_resize: Option<(f32, f32, f32)>,
+    /// Presentation and vsync interact with the OS only on the thread the
+    /// embedder calls the engine from, so the engine may not cross threads.
+    /// `Rc` is the marker that says so; nothing is stored.
+    thread_bound: PhantomData<Rc<()>>,
 }
 
-impl fmt::Debug for Engine {
+impl<W: Window> fmt::Debug for Engine<'_, W> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Engine")
@@ -312,7 +375,7 @@ impl fmt::Debug for Engine {
     }
 }
 
-impl Engine {
+impl<'window, W: Window> Engine<'window, W> {
     /// Builds the engine and its element tree at the given CSS viewport.
     pub fn new(
         config: PageConfig,
@@ -330,9 +393,10 @@ impl Engine {
             messages,
             message_sender,
             output: Output::None,
-            request_frame: None,
+            frames: None,
             pending_input: VecDeque::new(),
             pending_resize: None,
+            thread_bound: PhantomData,
         })
     }
 
@@ -437,12 +501,12 @@ impl Engine {
         Ok(())
     }
 
-    /// Asks the OS for a frame through the embedder-provided capability.
+    /// Asks the OS for a frame through the window's frame-request handle.
     /// Harmless when nothing changed: the redraw re-presents the retained
     /// target without re-rendering.
     pub fn refresh(&self) {
-        if let Some(request_frame) = &self.request_frame {
-            request_frame();
+        if let Some(frames) = &self.frames {
+            frames.request_frame();
         }
     }
 
@@ -473,26 +537,22 @@ impl Engine {
         Ok(())
     }
 
-    /// Attaches a window draw target: the whole presentation stack is
-    /// created here, on the calling thread, and stays here — presentation
-    /// and vsync interact with the OS only on this thread.
+    /// Attaches the embedder's window as the draw target: the whole
+    /// presentation stack is created here, on the calling thread, and stays
+    /// here — presentation and vsync interact with the OS only on this
+    /// thread. The surface borrows the window, which therefore outlives the
+    /// engine.
     pub fn attach_window(
         &mut self,
-        target: impl Into<WindowTarget>,
+        window: &'window W,
         size: FrameSize,
-        hooks: WindowHooks,
     ) -> Result<(), EngineError> {
-        let WindowHooks {
-            request_frame,
-            pre_present,
-            wakeup: _,
-        } = hooks;
-        let graphics = WindowGraphics::new(target.into(), size)?;
+        let graphics = WindowGraphics::new(window.target(), size)?;
         self.output = Output::Window {
             graphics: Box::new(graphics),
-            pre_present,
+            window,
         };
-        self.request_frame = Some(Arc::from(request_frame));
+        self.frames = Some(Arc::new(window.frames()));
         self.refresh();
         Ok(())
     }
@@ -507,11 +567,7 @@ impl Engine {
     /// target with a blit alone. The present itself (the vsync wait) runs
     /// after the borrow ends.
     pub fn notify_redraw(&mut self) -> Result<(), EngineError> {
-        let Output::Window {
-            graphics,
-            pre_present,
-        } = &mut self.output
-        else {
+        let Output::Window { graphics, window } = &mut self.output else {
             return Ok(());
         };
         let size = self.frame_size;
@@ -528,7 +584,7 @@ impl Engine {
         // the retained target now so exposure never waits on it. The vsync
         // wait happens here, after the borrow ends.
         if graphics.rendered_at(size) {
-            graphics.present(pre_present.as_ref())?;
+            graphics.present(*window)?;
         }
         Ok(())
     }
@@ -636,14 +692,14 @@ impl Engine {
     ) -> Result<(), EngineError> {
         let elements = self.elements.clone();
         let sender = self.message_sender.clone();
-        let on_flush = self.request_frame.clone();
+        let on_flush = self.frames.clone();
         std::thread::Builder::new()
             .name("bobcat-main".to_owned())
             .spawn(move || {
                 let result = (|| {
                     let mut runtime = crate::quickjs::MainThreadRuntime::new(elements, move || {
-                        if let Some(request_frame) = &on_flush {
-                            request_frame();
+                        if let Some(frames) = &on_flush {
+                            frames.request_frame();
                         }
                     })
                     .map_err(ScriptRunError::Initialization)?;
@@ -727,9 +783,10 @@ mod tests {
 
         use lynx_element::PageConfig;
 
-        use super::{Engine, EngineEvent};
+        use super::{EngineEvent, OffscreenEngine};
 
-        let mut engine = Engine::new(PageConfig::default(), 393.0, 727.0, 1.0).expect("engine");
+        let mut engine =
+            OffscreenEngine::new(PageConfig::default(), 393.0, 727.0, 1.0).expect("engine");
         let (wake_sender, wakeups) = mpsc::channel();
         engine
             .spawn_script(
