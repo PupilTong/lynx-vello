@@ -82,9 +82,11 @@ still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
   of the document's author rules.
 - **Custom elements are behavior, not vocabulary.** `Document::define` binds
   one `dyn CustomElement<T>` handler to one injected local name; the DOM core
-  owns the state machine (`uncustomized`/`undefined`/`precustomized`/`custom`),
-  the upgrade algorithm, the observed-attribute filter, and the reaction queue,
-  and publishes exactly one selector-visible bit, `ElementState::DEFINED`.
+  owns the state machine (`uncustomized`/`constructing`/`custom`), the
+  observed-attribute filter, and the reaction queue. Scope is user-agent
+  components: `define` requires every definition to precede its elements, which
+  removes the standard's upgrade half, so `ElementState::DEFINED` is seeded at
+  creation and never moves.
   Reactions are queued and drained at each public mutation's boundary, so a
   lifecycle callback never observes a half-applied DOM algorithm.
 - **Debug-only contract checks.** Styling side data guards Stylo's

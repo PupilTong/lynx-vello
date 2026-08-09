@@ -148,10 +148,12 @@ impl<T> Node<T> {
         local_name: LocalName,
     ) -> Self {
         let mut node = Self::new(owner, id, NodeData::Element(None), Some(local_name), None);
-        // `:defined` matches the *majority* of elements: the standard's
-        // "uncustomized" state is defined, so `<view>`, `<div>`, and even
-        // `<asdf>` all match it. `Document::create_element` clears the bit for
-        // the minority — a custom element name with no definition yet.
+        // Every element matches `:defined` and nothing ever clears the bit:
+        // the standard's `undefined` state exists only for an element whose
+        // definition has not arrived yet, and this crate requires definitions
+        // to precede their elements (see `tree::custom`'s scope note). Seeding
+        // it here rather than answering the selector from a state field keeps
+        // the matcher a single bitset test.
         node.element_state = ElementState::DEFINED;
         node
     }

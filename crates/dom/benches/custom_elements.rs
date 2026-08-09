@@ -7,7 +7,7 @@
 //! * `_plain` — no definitions at all, so every hook takes its empty-registry branch. This is the
 //!   number that must not move: it is what every existing embedder pays for a feature it never
 //!   uses.
-//! * `_undefined` — a definition exists, but for another tag. The gate is open and the
+//! * `_unmatched` — a definition exists, but for another tag. The gate is open and the
 //!   shadow-including walk runs, and nothing matches. This isolates the walk from the callbacks.
 //! * `_defined` — the tag is defined, so elements upgrade and their callbacks run.
 
@@ -77,8 +77,8 @@ const NO_OP_BATCH: usize = 4_096;
 const PAGE_CSS: &str = "page { display: linear; }
      x-row { display: linear; width: 40px; height: 12px; }";
 
-/// The tag under test. Hyphenated, so it is a custom element name and takes
-/// the `undefined` branch even with no definition — the realistic shape.
+/// The tag under test. Hyphenated because that is the shape a component
+/// library uses, though with no upgrade the name grammar no longer matters.
 const TAG: &str = "x-row";
 
 /// A definition that does the least a definition can do, so the measurement is
@@ -146,7 +146,7 @@ fn create_elements_plain(bencher: divan::Bencher) {
 }
 
 #[divan::bench]
-fn create_elements_undefined(bencher: divan::Bencher) {
+fn create_elements_unmatched(bencher: divan::Bencher) {
     bencher
         .counter(ItemsCount::new(ELEMENTS))
         .bench_local(|| black_box(create_elements(Registry::OtherTag)));
@@ -169,7 +169,7 @@ fn build_page_plain(bencher: divan::Bencher) {
 }
 
 #[divan::bench]
-fn build_page_undefined(bencher: divan::Bencher) {
+fn build_page_unmatched(bencher: divan::Bencher) {
     bencher
         .counter(ItemsCount::new(ROWS))
         .bench_local(|| black_box(build_page(Registry::OtherTag)));

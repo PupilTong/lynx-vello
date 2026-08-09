@@ -21,10 +21,6 @@ fn log() -> Log {
     Arc::new(Mutex::new(Vec::new()))
 }
 
-fn entries(log: &Log) -> Vec<String> {
-    log.lock().expect("the log is never poisoned").clone()
-}
-
 fn take(log: &Log) -> Vec<String> {
     std::mem::take(&mut *log.lock().expect("the log is never poisoned"))
 }
@@ -142,32 +138,6 @@ fn define(doc: &mut Doc, probe: Probe) {
 // --- Definition and upgrade ------------------------------------------------
 
 #[test]
-fn define_upgrades_a_pre_existing_subtree_in_shadow_including_tree_order() {
-    let log = log();
-    let mut doc = Doc::new();
-    let root = doc.root;
-    let outer = doc.el(root, "x-item");
-    let inner = doc.el(outer, "x-item");
-    let sibling = doc.el(root, "x-item");
-    assert!(entries(&log).is_empty(), "no definition, no reactions");
-
-    define(&mut doc, Probe::new("x-item", &log));
-
-    assert_eq!(
-        take(&log),
-        vec![
-            format!("x-item:constructed#{outer}"),
-            format!("x-item:connected#{outer}"),
-            format!("x-item:constructed#{inner}"),
-            format!("x-item:connected#{inner}"),
-            format!("x-item:constructed#{sibling}"),
-            format!("x-item:connected#{sibling}"),
-        ],
-        "tree order, and each element's whole queue drains before the next"
-    );
-}
-
-#[test]
 fn create_element_after_define_constructs_before_returning_the_id() {
     let log = log();
     let mut doc = Doc::new();
@@ -187,28 +157,6 @@ fn create_element_after_define_constructs_before_returning_the_id() {
 }
 
 #[test]
-fn create_element_before_define_leaves_it_undefined_until_define_runs() {
-    let log = log();
-    let mut doc = Doc::new();
-    let root = doc.root;
-    let early = doc.el(root, "x-item");
-    doc.flush();
-    assert!(doc.matches(early, "x-item:not(:defined)"));
-
-    define(&mut doc, Probe::new("x-item", &log));
-    doc.flush();
-
-    assert_eq!(
-        take(&log),
-        vec![
-            format!("x-item:constructed#{early}"),
-            format!("x-item:connected#{early}"),
-        ]
-    );
-    assert!(doc.matches(early, "x-item:defined"));
-}
-
-#[test]
 #[should_panic(expected = "already has a definition")]
 fn redefining_a_local_name_panics() {
     let log = log();
@@ -224,17 +172,67 @@ fn defining_an_empty_local_name_panics() {
     doc.dom.define("", Box::new(Probe::new("x-item", &log())));
 }
 
+/// The definition-before-creation contract. An element created first would
+/// never be constructed — nothing later moves it into a definition — so this
+/// is refused rather than silently accepted.
 #[test]
-fn a_second_upgrade_reaction_for_the_same_element_is_a_no_op() {
+#[should_panic(expected = "already has elements")]
+fn defining_a_tag_that_already_has_elements_panics() {
     let log = log();
     let mut doc = Doc::new();
     let root = doc.root;
-    let element = doc.el(root, "x-item");
+    doc.el(root, "x-item");
     define(&mut doc, Probe::new("x-item", &log));
-    assert_eq!(take(&log).len(), 2);
+}
 
-    // Re-inserting an already-upgraded element must connect it, not construct
-    // it a second time.
+/// The scan covers the arena, not just the document, so an element that is
+/// merely built and not yet inserted counts too.
+#[test]
+#[should_panic(expected = "already has elements")]
+fn defining_a_tag_that_a_detached_element_already_uses_panics() {
+    let log = log();
+    let mut doc = Doc::new();
+    doc.dom.create_element("x-item", ());
+    define(&mut doc, Probe::new("x-item", &log));
+}
+
+/// The document element is the one node that cannot obey the contract — it
+/// exists before any definition can — so defining its tag constructs it
+/// instead of refusing.
+#[test]
+fn defining_the_document_element_tag_constructs_and_connects_it() {
+    let log = log();
+    let mut doc = Doc::new();
+    let root = doc.root;
+
+    define(&mut doc, Probe::new("page", &log));
+
+    assert_eq!(
+        take(&log),
+        vec![
+            format!("page:constructed#{root}"),
+            format!("page:connected#{root}"),
+        ]
+    );
+}
+
+/// Re-inserting an already-constructed element connects it again and never
+/// constructs it twice.
+#[test]
+fn re_inserting_a_constructed_element_never_constructs_it_twice() {
+    let log = log();
+    let mut doc = Doc::new();
+    let root = doc.root;
+    define(&mut doc, Probe::new("x-item", &log));
+    let element = doc.el(root, "x-item");
+    assert_eq!(
+        take(&log),
+        vec![
+            format!("x-item:constructed#{element}"),
+            format!("x-item:connected#{element}"),
+        ]
+    );
+
     doc.dom.append_child(root, element);
 
     assert_eq!(
@@ -246,81 +244,94 @@ fn a_second_upgrade_reaction_for_the_same_element_is_a_no_op() {
     );
 }
 
+/// A definition installed from inside a callback governs the elements created
+/// after it, in the callback's own nested scope.
 #[test]
-fn define_does_not_upgrade_a_detached_subtree_but_insertion_does() {
+fn a_definition_installed_from_a_callback_governs_what_it_then_creates() {
     let log = log();
+    let inner_log = log.clone();
     let mut doc = Doc::new();
-    let detached = doc.dom.create_element("x-item", ());
-    define(&mut doc, Probe::new("x-item", &log));
-    assert!(
-        take(&log).is_empty(),
-        "the sweep walks the document, not the arena"
+    let root = doc.root;
+    let inner_id: Arc<Mutex<Option<NodeId>>> = Arc::new(Mutex::new(None));
+    let recorded = Arc::clone(&inner_id);
+    define(
+        &mut doc,
+        Probe::new("x-outer", &log).on_constructed(Box::new(move |document, element| {
+            document.define("x-inner", Box::new(Probe::new("x-inner", &inner_log)));
+            let inner = document.create_element("x-inner", ());
+            *recorded.lock().unwrap() = Some(inner);
+            document.append_child(element, inner);
+        })),
     );
 
-    let root = doc.root;
-    doc.dom.append_child(root, detached);
+    let outer = doc.el(root, "x-outer");
+    let inner = inner_id.lock().unwrap().expect("the constructor built one");
 
     assert_eq!(
         take(&log),
         vec![
-            format!("x-item:constructed#{detached}"),
-            format!("x-item:connected#{detached}"),
+            // Both constructions happen while the subtree is still detached —
+            // the nested `create_element` drains its own scope — so neither
+            // connects there.
+            format!("x-outer:constructed#{outer}"),
+            format!("x-inner:constructed#{inner}"),
+            // The insertion that follows connects the whole subtree in tree
+            // order.
+            format!("x-outer:connected#{outer}"),
+            format!("x-inner:connected#{inner}"),
+        ]
+    );
+}
+
+/// With no `undefined` state there is nothing for `:defined` to distinguish,
+/// so every element matches it — including a hyphenated tag with no
+/// definition, which a browser would leave unmatched until its script arrived.
+#[test]
+fn every_element_matches_defined_including_undefined_hyphenated_tags() {
+    let log = log();
+    let mut doc = Doc::new();
+    let root = doc.root;
+    let plain = doc.el(root, "view");
+    let hyphenated = doc.el(root, "x-nobody");
+    define(&mut doc, Probe::new("x-item", &log));
+    let defined = doc.el(root, "x-item");
+    doc.flush();
+
+    for element in [plain, hyphenated, defined] {
+        assert!(doc.matches(element, ":defined"));
+        assert!(!doc.matches(element, ":not(:defined)"));
+    }
+}
+
+/// Attributes set after creation still report normally — what disappeared with
+/// upgrade is only the *replay* of attributes an element carried beforehand,
+/// which a definition-before-creation contract makes an empty set.
+#[test]
+fn attributes_set_after_creation_report_normally() {
+    let log = log();
+    let mut doc = Doc::new();
+    let root = doc.root;
+    define(
+        &mut doc,
+        Probe::new("x-item", &log).observing(&["value", "other"]),
+    );
+    let element = doc.el(root, "x-item");
+    let _ = take(&log);
+
+    doc.set_attr(element, "value", "7");
+    doc.set_attr(element, "other", "x");
+    doc.set_attr(element, "unwatched", "-");
+
+    assert_eq!(
+        take(&log),
+        vec![
+            format!("x-item:attr#{element} value: <none> -> 7"),
+            format!("x-item:attr#{element} other: <none> -> x"),
         ]
     );
 }
 
 // --- Attributes ------------------------------------------------------------
-
-#[test]
-fn an_attribute_set_before_definition_is_replayed_by_the_upgrade() {
-    let log = log();
-    let mut doc = Doc::new();
-    let root = doc.root;
-    let element = doc.el(root, "x-item");
-    doc.set_attr(element, "value", "7");
-    doc.set_attr(element, "other", "x");
-    assert!(take(&log).is_empty());
-
-    define(
-        &mut doc,
-        Probe::new("x-item", &log).observing(&["value", "other"]),
-    );
-
-    assert_eq!(
-        take(&log),
-        vec![
-            format!("x-item:constructed#{element}"),
-            format!("x-item:attr#{element} value: <none> -> 7"),
-            format!("x-item:attr#{element} other: <none> -> x"),
-            format!("x-item:connected#{element}"),
-        ],
-        "constructed, then the replay in attribute-list order, then connected"
-    );
-}
-
-#[test]
-fn the_replay_covers_only_observed_attributes_and_uses_attribute_list_order() {
-    let log = log();
-    let mut doc = Doc::new();
-    let root = doc.root;
-    let element = doc.el(root, "x-item");
-    doc.set_attr(element, "b", "2");
-    doc.set_attr(element, "unwatched", "-");
-    doc.set_attr(element, "a", "1");
-
-    define(&mut doc, Probe::new("x-item", &log).observing(&["a", "b"]));
-
-    assert_eq!(
-        take(&log),
-        vec![
-            format!("x-item:constructed#{element}"),
-            format!("x-item:attr#{element} b: <none> -> 2"),
-            format!("x-item:attr#{element} a: <none> -> 1"),
-            format!("x-item:connected#{element}"),
-        ],
-        "the element's attribute order, not the observed list's"
-    );
-}
 
 #[test]
 fn unobserved_attribute_changes_never_reach_the_handler() {
@@ -671,51 +682,6 @@ fn an_unassigned_light_child_is_still_upgraded_and_still_connects() {
 
 // --- `:defined` ------------------------------------------------------------
 
-#[test]
-fn defined_matches_every_ordinary_tag_from_creation() {
-    let mut doc = Doc::new();
-    let root = doc.root;
-    let plain = doc.el(root, "view");
-    let unknown = doc.el(root, "asdf");
-    let reserved = doc.el(root, "font-face");
-    let candidate = doc.el(root, "x-item");
-    doc.flush();
-
-    assert!(doc.matches(plain, ":defined"));
-    assert!(
-        doc.matches(unknown, ":defined"),
-        "an unknown tag is uncustomized, which is defined"
-    );
-    assert!(
-        doc.matches(reserved, ":defined"),
-        "a reserved name is not a custom element name"
-    );
-    assert!(
-        doc.matches(candidate, ":not(:defined)"),
-        "a custom element name with no definition is undefined"
-    );
-}
-
-#[test]
-fn upgrading_flips_defined_and_restyles_without_an_explicit_invalidation() {
-    let log = log();
-    let mut doc =
-        Doc::with_css("x-item:not(:defined) { width: 3px; } x-item:defined { width: 9px; }");
-    let root = doc.root;
-    let element = doc.el(root, "x-item");
-    doc.flush();
-    assert_eq!(doc.value(element, "width"), "3px");
-
-    define(&mut doc, Probe::new("x-item", &log));
-    doc.flush();
-
-    assert_eq!(
-        doc.value(element, "width"),
-        "9px",
-        "the upgrade's state flip restyles through the ordinary funnel"
-    );
-}
-
 // --- Adversarial and re-entrancy -------------------------------------------
 
 #[test]
@@ -958,39 +924,6 @@ fn unbounded_reaction_recursion_panics_instead_of_hanging() {
         })),
     );
     doc.el(root, "x-item");
-}
-
-#[test]
-fn a_definition_added_from_inside_a_callback_upgrades_in_its_own_scope() {
-    let log = log();
-    let inner_log = log.clone();
-    let mut doc = Doc::new();
-    let root = doc.root;
-    let pending: Arc<Mutex<bool>> = Arc::new(Mutex::new(true));
-    let once = Arc::clone(&pending);
-    define(
-        &mut doc,
-        Probe::new("x-outer", &log).on_connected(Box::new(move |document, _| {
-            if !std::mem::replace(&mut *once.lock().unwrap(), false) {
-                return;
-            }
-            document.define("x-inner", Box::new(Probe::new("x-inner", &inner_log)));
-        })),
-    );
-    // Built detached, so `x-inner` is already in the subtree when the outer
-    // element's connected callback defines it.
-    let outer = doc.dom.create_element("x-outer", ());
-    let inner = doc.dom.create_element("x-inner", ());
-    doc.dom.append_child(outer, inner);
-    let _ = take(&log);
-
-    doc.dom.append_child(root, outer);
-
-    let transcript = take(&log);
-    assert!(
-        transcript.contains(&format!("x-inner:constructed#{inner}")),
-        "the nested define upgraded the already-present element: {transcript:?}"
-    );
 }
 
 #[test]

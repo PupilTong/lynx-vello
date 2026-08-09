@@ -16,6 +16,32 @@
 //! that changed it, so nothing else here may leave work for a later "please
 //! resolve" call either.
 //!
+//! # Scope: user-agent components, not script-defined elements
+//!
+//! Definitions here are installed by the layer above — the engine's own
+//! components — not by application script, and that single fact removes the
+//! standard's entire *upgrade* half. Upgrade exists because a script can define
+//! a tag at any moment, so an element may outlive its own definitionlessness; a
+//! definition compiled into the engine always precedes every element with its
+//! tag. [`Document::define`] therefore **requires** that, and panics rather
+//! than accepting a definition that would arrive too late to reach anything.
+//!
+//! What that removes: the `undefined` state and with it every `:defined`
+//! transition, *upgrade an element*, *try to upgrade*, the `define`-time
+//! document sweep, the replay of attributes an element already carried, and the
+//! *valid custom element name* predicate — whose only job was deciding whether
+//! a definitionless element counted as `undefined`.
+//!
+//! What it does **not** remove, and what a reader coming from a browser
+//! implementation will expect to be simpler than it is: the reaction queue and
+//! its drain boundary. Those exist because a lifecycle callback mutates the
+//! tree while its handler lives inside the [`Document`] being mutated, and that
+//! is true of an engine-authored handler exactly as it is of a script one.
+//!
+//! Restoring script-defined elements later is additive: it needs the
+//! `undefined` state, an upgrade reaction, and a sweep in `define`. Neither the
+//! trait nor the dispatch contract has to move.
+//!
 //! # Recorded limits
 //!
 //! - **`adoptedCallback` is unreachable, not unimplemented.** There is no `adoptNode` and no second
@@ -31,20 +57,19 @@
 //! - **Scoped registries are absent.** One registry per [`Document`], which is what *look up a
 //!   custom element registry* returns for every node in a single-document engine.
 //! - **`whenDefined`/`get`/`getName`/`upgrade(root)` are absent.** The first needs promises and an
-//!   event loop this crate does not own; the rest are diagnostics, and eager upgrade at creation
-//!   and insertion leaves `upgrade(root)` with no behavior of its own.
+//!   event loop this crate does not own; the rest are diagnostics, and with no upgrade at all
+//!   `upgrade(root)` has nothing to do.
 //! - **The `failed` state and the construction-stack machinery are absent.** All of it exists to
 //!   police a JavaScript constructor that can throw, skip `super()`, or return a different object.
 //!   [`CustomElement::constructed`] returns `()` on an already-allocated node; a panic is a caller
 //!   bug that leaves the document unspecified, the same contract a panicking style flush already
-//!   has. `Precustomized` is kept, because it is not about failure — it is the window in which the
+//!   has. `Constructing` is kept, because it is not about failure — it is the window in which the
 //!   constructor's own mutations enqueue nothing.
-//! - **`:defined` stays set for the `Precustomized` window** even though the standard says that
-//!   state is not defined. Selector matching cannot run inside a drain
-//!   ([`Document::begin_flush_phase`] asserts it), so the transient is unobservable, and skipping
-//!   it saves a snapshot plus an ancestor-spine walk per upgrade.
-//! - **A handler can forge `:defined`** through the public `add_element_state`. Unenforced, and
-//!   recorded rather than policed.
+//! - **`:defined` matches every element, always.** With no `undefined` state there is nothing for
+//!   it to distinguish, so the bit is seeded at element creation and never moves. The selector is
+//!   still answered rather than ignored, so a stylesheet using it gets the right answer for this
+//!   scope; `:not(:defined)` simply never matches, which is what makes the FOUC idiom a
+//!   script-defined-elements feature.
 //! - **A callback may detach any node, but may not free one its caller is still holding.**
 //!   [`Document::create_element`], [`Document::remove_subtree`], and the constructor call all pin
 //!   the id they will still be naming once the drain returns, and freeing a pinned node panics. Not
@@ -64,9 +89,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use stylo::LocalName;
-use stylo_dom::ElementState;
 
-use crate::tree::document::{DOCUMENT_NODE_ID, Document, NodeId};
+use crate::tree::document::{DOCUMENT_ELEMENT_NODE_ID, Document, NodeId};
 
 /// Nesting limit for reaction scopes. A handler whose callback re-triggers
 /// itself through nested mutations would otherwise overflow the native stack,
@@ -197,35 +221,35 @@ impl DefinitionId {
     }
 }
 
-/// The standard's custom element state, minus `failed`.
+/// Where an element sits in its definition's construction.
 ///
-/// Four values rather than a boolean: `Precustomized` is what suppresses the
-/// reactions a constructor's own mutations would otherwise raise, and it is
-/// what makes the upgrade guard reject a re-entrant upgrade of an element whose
-/// constructor is still running.
+/// The standard's `undefined` and `failed` states have no representative here:
+/// `undefined` exists because a script can define a tag after elements of it
+/// already exist, which this crate's definition-before-creation contract makes
+/// unreachable, and `failed` exists to police a constructor that can throw.
+/// `Constructing` is the standard's `precustomized` under the name that
+/// survives without upgrade, and it earns its place by suppressing the
+/// reactions a constructor's own mutations would otherwise raise back at it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum CustomElementState {
-    /// Every ordinary tag, including unknown hyphen-free ones. **Matches
-    /// `:defined`** — this is the majority state, which is why
-    /// [`Node::new_element`](crate::Node) seeds [`ElementState::DEFINED`].
+    /// Every element whose tag has no definition. The majority state, and
+    /// every element matches `:defined` regardless — see the module's
+    /// recorded limits.
     #[default]
     Uncustomized,
-    /// A custom-element-name candidate with no definition, or one whose upgrade
-    /// reaction has been enqueued and not yet run. Does not match `:defined`.
-    Undefined,
     /// The constructor is on the stack.
-    Precustomized,
-    /// Upgraded. Matches `:defined`, and is the exact gate every lifecycle
-    /// enqueue site tests.
+    Constructing,
+    /// Constructed. The exact gate every lifecycle enqueue site tests.
     Custom,
 }
 
 /// One item of an element's custom element reaction queue. The element is the
 /// map key, so it is not repeated here.
 enum Reaction {
-    /// Carries its definition because an element being upgraded is not yet
-    /// [`CustomElementState::Custom`] and so cannot supply one.
-    Upgrade(DefinitionId),
+    /// The definition's constructor. Queued rather than called from
+    /// [`Document::create_element`] directly, so it obeys the same
+    /// drain-at-the-boundary rule as every other reaction.
+    Constructed,
     Connected,
     Disconnected,
     AttributeChanged {
@@ -372,48 +396,6 @@ impl Drop for ReactionDepthToken {
     }
 }
 
-/// The standard's *valid custom element name*, as the living standard reads it.
-///
-/// Used only to decide whether a **definition-less** element starts
-/// [`CustomElementState::Undefined`] rather than
-/// [`CustomElementState::Uncustomized`] — that is, whether `:not(:defined)` can
-/// ever match it. [`Document::define`] deliberately does not apply it, so an
-/// embedder may register a handler for a hyphen-free tag it owns.
-///
-/// This is the current five-clause predicate, not the retired
-/// `PotentialCustomElementName` production; that grammar rejects names the
-/// standard now accepts. Because the first code point must be an ASCII lower
-/// alpha, the *valid element local name* substrate collapses to a blacklist of
-/// exactly eight code points.
-///
-/// The eight reserved names are the standard's own, not tag vocabulary this
-/// crate constructs — the same ground on which the shadow module owns `<slot>`.
-pub(crate) fn is_valid_custom_element_name(name: &str) -> bool {
-    const RESERVED: [&str; 8] = [
-        "annotation-xml",
-        "color-profile",
-        "font-face",
-        "font-face-src",
-        "font-face-uri",
-        "font-face-format",
-        "font-face-name",
-        "missing-glyph",
-    ];
-    let mut chars = name.chars();
-    if !chars.next().is_some_and(|first| first.is_ascii_lowercase()) {
-        return false;
-    }
-    let mut hyphen = false;
-    for character in chars {
-        match character {
-            '-' => hyphen = true,
-            'A'..='Z' | '\0' | '\t' | '\n' | '\u{000C}' | '\r' | ' ' | '/' | '>' => return false,
-            _ => {}
-        }
-    }
-    hyphen && !RESERVED.contains(&name)
-}
-
 impl<T> Document<T> {
     /// Registers `element` as the behavior of every element whose tag is
     /// `local_name`, then upgrades the ones already in the tree.
@@ -423,13 +405,16 @@ impl<T> Document<T> {
     /// is injected rather than known, the same way [`Document::new`] takes the
     /// document element's tag — this crate still owns no tag vocabulary.
     ///
-    /// Panics on an empty name, and on a name that already has a definition:
-    /// the standard throws `NotSupportedError` for a duplicate, and this core
-    /// is crash-on-misuse.
+    /// **Every definition must be installed before any element with its tag is
+    /// created.** A definition never reaches an element that already exists —
+    /// there is no upgrade here — so violating that would leave the element
+    /// silently unconstructed; it panics instead. The document element is the
+    /// one exception, because `Document::new` creates it before any definition
+    /// can exist: it is constructed here.
     ///
-    /// Every element already in the tree with that name is upgraded before this
-    /// returns, in shadow-including tree order, and every observed attribute it
-    /// already carries is replayed to it.
+    /// Panics on an empty name, on a name that already has a definition (the
+    /// standard throws `NotSupportedError` for a duplicate), and on a name that
+    /// already has elements.
     pub fn define(&mut self, local_name: &str, element: Box<dyn CustomElement<T>>) {
         assert!(
             !local_name.is_empty(),
@@ -462,30 +447,44 @@ impl<T> Document<T> {
             .by_name
             .insert(name.clone(), definition);
 
-        // The candidate list is frozen before any reaction runs, so a
-        // constructor that builds more elements of the same name does not
-        // extend the sweep it is running inside — those are upgraded by their
-        // own creation path instead, and the upgrade guard makes the two paths
-        // converge on exactly one upgrade each.
-        let base = self.begin_reactions();
-        let mut candidates = SmallVec::<[NodeId; 8]>::new();
-        self.collect_shadow_including_inclusive(DOCUMENT_NODE_ID, &mut candidates);
-        for candidate in candidates {
-            let matches = self
-                .get(candidate)
-                .is_some_and(|node| node.local_name.as_ref() == Some(&name));
-            if !matches {
-                continue;
+        // The contract, enforced rather than documented: an element created
+        // before its definition would never be constructed, and nothing later
+        // moves it into one. Scanning the arena rather than the document also
+        // catches a detached element that is about to be inserted. `define` is
+        // a setup-time call, so this is cold; `create_element` pays nothing
+        // for it.
+        let existing = self
+            .tree()
+            .iter()
+            .find(|(id, node)| {
+                *id != DOCUMENT_ELEMENT_NODE_ID && node.local_name.as_ref() == Some(&name)
+            })
+            .map(|(id, _)| id);
+        assert!(
+            existing.is_none(),
+            "Document::define: `{local_name}` already has elements, and a definition never \
+             reaches an element created before it — install every definition before building \
+             the tree"
+        );
+
+        // The document element is the one node that cannot obey that contract:
+        // `Document::new` creates it before any definition can exist. It is a
+        // single known node rather than a general upgrade sweep, so it is
+        // constructed here instead of being refused.
+        let root_matches = self
+            .get(DOCUMENT_ELEMENT_NODE_ID)
+            .is_some_and(|node| node.local_name.as_ref() == Some(&name));
+        if root_matches {
+            let base = self.begin_reactions();
+            {
+                let root = self.live_node_mut(DOCUMENT_ELEMENT_NODE_ID);
+                root.custom_definition = Some(definition);
+                root.custom_state = CustomElementState::Constructing;
             }
-            let upgradable = self.live(candidate).custom_state;
-            if matches!(
-                upgradable,
-                CustomElementState::Uncustomized | CustomElementState::Undefined
-            ) {
-                self.enqueue_reaction(candidate, Reaction::Upgrade(definition));
-            }
+            self.enqueue_reaction(DOCUMENT_ELEMENT_NODE_ID, Reaction::Constructed);
+            self.enqueue_reaction(DOCUMENT_ELEMENT_NODE_ID, Reaction::Connected);
+            self.drain_reactions(base);
         }
-        self.drain_reactions(base);
     }
 
     /// Opens a reaction scope. The returned watermark is the element-queue
@@ -580,7 +579,7 @@ impl<T> Document<T> {
     /// after every call is what makes a nested [`Self::define`] harmless.
     fn invoke(&mut self, element: NodeId, reaction: Reaction) {
         match reaction {
-            Reaction::Upgrade(definition) => self.upgrade_element(element, definition),
+            Reaction::Constructed => self.construct_element(element),
             Reaction::Connected => {
                 let Some(handler) = self.dispatch_target(element) else {
                     return;
@@ -620,138 +619,77 @@ impl<T> Document<T> {
         ))
     }
 
-    /// The standard's *upgrade an element*, minus the steps that police a
-    /// JavaScript constructor.
-    fn upgrade_element(&mut self, element: NodeId, definition: DefinitionId) {
-        // The re-entrancy guard. A second upgrade reaction for the same element
-        // is legal — `define` plus a re-insertion produces one — and this is
-        // what makes it a no-op.
-        let Some(node) = self.get(element) else {
+    /// Runs the definition's constructor for an element that was created with
+    /// its tag already defined.
+    ///
+    /// This is the standard's *upgrade an element* with everything upgrade
+    /// needed stripped out. There is no state guard, because an element
+    /// reaches this exactly once — at creation, from the one site that sets
+    /// `Constructing` — and no attribute replay, because a
+    /// definition-before-creation contract means a brand-new element carries
+    /// no attributes yet.
+    fn construct_element(&mut self, element: NodeId) {
+        let Some(definition) = self.get(element).and_then(|node| node.custom_definition) else {
             return;
         };
-        if !matches!(
-            node.custom_state,
-            CustomElementState::Uncustomized | CustomElementState::Undefined
-        ) {
-            return;
-        }
-        {
-            let node = self.live_node_mut(element);
-            node.custom_definition = Some(definition);
-            node.custom_state = CustomElementState::Precustomized;
-        }
-
-        // Every attribute in the element's ATTRIBUTE-LIST order, filtered by
-        // the observed set — not the observed list's order.
-        let replay: Vec<(LocalName, String)> = {
-            let observed = &self.custom_elements.definitions[definition.index()].observed;
-            self.live(element)
-                .attrs
-                .iter()
-                .filter(|(name, _)| observed.contains(name))
-                .cloned()
-                .collect()
-        };
-        for (name, value) in replay {
-            self.enqueue_reaction(
-                element,
-                Reaction::AttributeChanged {
-                    name,
-                    old: None,
-                    new: Some(value),
-                },
-            );
-        }
-        // Connectedness is sampled before the constructor runs.
-        if self.is_connected(element) {
-            self.enqueue_reaction(element, Reaction::Connected);
-        }
-
-        // Both reactions above are now behind this call in the element's own
-        // queue, so they run after it returns — and, exactly as in the
-        // standard, they do not run inside it: a nested reaction scope started
-        // by the constructor has a watermark above this element's queue entry,
-        // so it cannot dequeue it.
+        debug_assert_eq!(
+            self.live(element).custom_state,
+            CustomElementState::Constructing,
+            "construct_element runs once, on the element the creation path marked"
+        );
         let handler = Arc::clone(&self.custom_elements.definitions[definition.index()].handler);
+        // Pinned across the call: the id is one this element's creator will
+        // still be naming when the drain returns, and slab keys are recycled.
         self.pin_node(element);
         handler.constructed(self, element);
         self.unpin_node(element);
 
-        // Keyed on the state this call wrote, not on `contains_node`: slab
-        // occupancy would also answer `true` for a recycled id, and this would
-        // then stamp `Custom` onto an unrelated node — which `define` would
-        // afterwards refuse to upgrade, forever.
+        // Keyed on the state this path wrote, not on slab occupancy, which
+        // would also answer for a recycled id.
         let still_constructing = self
             .get(element)
-            .is_some_and(|node| node.custom_state == CustomElementState::Precustomized);
+            .is_some_and(|node| node.custom_state == CustomElementState::Constructing);
         if still_constructing {
             self.live_node_mut(element).custom_state = CustomElementState::Custom;
-            self.set_defined(element, true);
         }
     }
 
-    /// The standard's *try to upgrade an element*. Never upgrades inline.
-    fn try_upgrade(&mut self, element: NodeId) {
-        let definition = self
-            .live(element)
-            .local_name
-            .as_ref()
-            .and_then(|name| self.custom_elements.by_name.get(name).copied());
-        if let Some(definition) = definition {
-            self.enqueue_reaction(element, Reaction::Upgrade(definition));
-        }
-    }
-
-    /// Assigns a freshly created element's custom element state and `:defined`
-    /// polarity, and enqueues its upgrade when its tag is already defined.
+    /// Binds a freshly created element to its definition and queues its
+    /// constructor, when its tag is defined.
     ///
-    /// Not gated on an empty registry: an element whose tag is a custom element
-    /// name is `undefined` — and therefore matches `:not(:defined)` — whether
-    /// or not this document has ever defined anything.
+    /// The whole state machine is here: an element is `Custom` if and only if
+    /// its tag had a definition at the moment it was created. Nothing later
+    /// moves an element into a definition, which is what the
+    /// definition-before-creation contract buys.
     pub(crate) fn note_custom_element_created(&mut self, element: NodeId, local_name: &LocalName) {
-        let definition = self.custom_elements.by_name.get(local_name).copied();
-        if definition.is_none() && !is_valid_custom_element_name(local_name.0.as_ref()) {
-            // `Uncustomized`, which is the `Node::new_element` default, and
-            // which is defined.
+        let Some(definition) = self.custom_elements.by_name.get(local_name).copied() else {
             return;
-        }
+        };
         {
             let node = self.live_node_mut(element);
-            node.custom_state = CustomElementState::Undefined;
-            // Written directly rather than through `remove_element_state`: the
-            // node was allocated one statement ago, so it has no snapshot to
-            // take and no ancestors to dirty.
-            node.element_state.remove(ElementState::DEFINED);
+            node.custom_definition = Some(definition);
+            // Not `Custom` yet: the constructor's own attribute writes must
+            // not be reported back to it, and `observes_attribute` gates on
+            // exactly this.
+            node.custom_state = CustomElementState::Constructing;
         }
-        if definition.is_some() {
-            self.try_upgrade(element);
-        }
+        self.enqueue_reaction(element, Reaction::Constructed);
     }
 
-    /// The insertion half of the lifecycle: every element in the inserted
-    /// subtree either upgrades or, if it is already custom, connects.
+    /// The insertion half of the lifecycle: every already-constructed element
+    /// in the inserted subtree connects.
+    ///
+    /// No upgrade arm. An element that is not `Custom` here never will be, so
+    /// insertion has nothing to do for it.
     pub(crate) fn note_custom_elements_inserted(&mut self, root: NodeId, connected: bool) {
-        if self.custom_elements.is_empty() {
+        if self.custom_elements.is_empty() || !connected {
             return;
         }
         let mut inserted = SmallVec::<[NodeId; 8]>::new();
         self.collect_shadow_including_inclusive(root, &mut inserted);
         for element in inserted {
-            match self.live(element).custom_state {
-                // Already upgraded: a plain connected reaction.
-                CustomElementState::Custom => {
-                    if connected {
-                        self.enqueue_reaction(element, Reaction::Connected);
-                    }
-                }
-                // Not yet upgraded: the upgrade enqueues its own connected
-                // reaction, so this must never enqueue both.
-                CustomElementState::Uncustomized | CustomElementState::Undefined => {
-                    if connected {
-                        self.try_upgrade(element);
-                    }
-                }
-                CustomElementState::Precustomized => {}
+            if self.live(element).custom_state == CustomElementState::Custom {
+                self.enqueue_reaction(element, Reaction::Connected);
             }
         }
     }
@@ -774,8 +712,8 @@ impl<T> Document<T> {
 
     /// Whether a mutation of `name` on `element` could reach a handler at all.
     ///
-    /// The gate every attribute setter takes first. Only a `custom` element
-    /// reports — `Precustomized` is deliberately excluded, which is what stops
+    /// The gate every attribute setter takes first. Only a `Custom` element
+    /// reports — `Constructing` is deliberately excluded, which is what stops
     /// a constructor's own attribute writes being reported back to it — and
     /// only an observed name, so an unobserved mutation never reads an old
     /// value and never allocates.
@@ -853,23 +791,6 @@ impl<T> Document<T> {
         self.custom_elements.is_draining()
     }
 
-    /// Flips `:defined` through the ordinary element-state funnel, which
-    /// snapshots and dirties the ancestor spine before writing — the order
-    /// Stylo's state-change invalidation requires.
-    fn set_defined(&mut self, element: NodeId, defined: bool) {
-        let current = self
-            .get(element)
-            .is_some_and(|node| node.element_state().contains(ElementState::DEFINED));
-        if current == defined {
-            return;
-        }
-        if defined {
-            self.add_element_state(element, ElementState::DEFINED);
-        } else {
-            self.remove_element_state(element, ElementState::DEFINED);
-        }
-    }
-
     /// Shadow-including preorder, depth-first: a host, then its whole shadow
     /// tree, then its light children. Pushing the shadow root last makes it pop
     /// first, which is what puts it immediately after its host.
@@ -891,62 +812,5 @@ impl<T> Document<T> {
                 stack.push(shadow_root);
             }
         }
-    }
-}
-
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-mod tests {
-    use super::is_valid_custom_element_name as valid;
-
-    #[test]
-    fn a_custom_element_name_needs_a_hyphen_and_an_ascii_lower_first_code_point() {
-        assert!(valid("x-foo"));
-        assert!(valid("foo-"));
-        assert!(!valid("foo"), "no hyphen");
-        assert!(
-            !valid("-foo"),
-            "first code point is not an ASCII lower alpha"
-        );
-        assert!(!valid("X-foo"), "first code point is uppercase");
-        assert!(!valid("1-foo"));
-        assert!(!valid(""));
-    }
-
-    #[test]
-    fn a_custom_element_name_rejects_uppercase_whitespace_slash_and_gt() {
-        assert!(!valid("x-Foo"));
-        assert!(!valid("x- foo"));
-        assert!(!valid("x-foo/bar"));
-        assert!(!valid("x-foo>bar"));
-        assert!(!valid("x-foo\tbar"));
-        assert!(!valid("x-foo\nbar"));
-    }
-
-    #[test]
-    fn the_eight_reserved_names_are_not_custom_element_names() {
-        for reserved in [
-            "annotation-xml",
-            "color-profile",
-            "font-face",
-            "font-face-src",
-            "font-face-uri",
-            "font-face-format",
-            "font-face-name",
-            "missing-glyph",
-        ] {
-            assert!(!valid(reserved), "`{reserved}` is reserved");
-        }
-        assert!(valid("font-faces"), "only the exact names are reserved");
-    }
-
-    /// The living standard's five-clause rule accepts names the retired
-    /// `PotentialCustomElementName` production rejected — which is what makes
-    /// this a predicate rather than a transcribed grammar.
-    #[test]
-    fn a_custom_element_name_accepts_astral_and_symbol_code_points() {
-        assert!(valid("math-α"));
-        assert!(valid("emotion-😍"));
-        assert!(valid("arrow-→"), "U+2190 is outside the retired grammar");
     }
 }
