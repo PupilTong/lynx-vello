@@ -12,15 +12,15 @@
 //! Refresh the goldens with:
 //! `FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p bobcat-core --test screenshots`.
 
-use bobcat_core::engine::Engine;
+use bobcat_core::engine::OffscreenEngine;
 use flashbulb::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
 use flashbulb::{Image, Screenshots};
 use lynx_element::PageConfig;
 
 /// The embedder composition, offscreen: the engine owns the tree and the
 /// script run; the test provides device metrics and receives pixels.
-fn engine(config: PageConfig) -> Engine {
-    Engine::new(config, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, 1.0).expect("engine")
+fn engine(config: PageConfig) -> OffscreenEngine {
+    OffscreenEngine::new(config, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, 1.0).expect("engine")
 }
 
 /// lynx-stack's Playwright Chromium project emulates a Pixel 5, whose CSS
@@ -81,7 +81,7 @@ fn screenshots() -> Screenshots {
 /// A missing adapter is a test-environment failure, including in CI: capture
 /// tests must never report success without rendering and comparing pixels.
 #[track_caller]
-fn capture_engine(engine: &mut Engine, test: &str) -> Image {
+fn capture_engine(engine: &mut OffscreenEngine, test: &str) -> Image {
     engine
         .attach_offscreen()
         .unwrap_or_else(|error| panic!("{test}: GPU initialization failed: {error}"));

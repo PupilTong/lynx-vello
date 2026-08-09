@@ -48,9 +48,15 @@ JavaScript adapter:
   exactly five things — user input, device metrics, OS initialization, a
   draw target, and IO primitives — and relays OS facts into the engine
   (`dispatch_input`, `resize`, `notify_redraw`, `pump`, clock ticks); it
-  never starts or steers the pipeline. The engine schedules through
-  capabilities the embedder hands over at attach time (`request_frame`,
-  `pre_present`, `wakeup`).
+  never starts or steers the pipeline. The engine schedules through the
+  `engine::Window` it borrows at attach time — one trait carrying the draw
+  target, the detachable `FrameRequester` its Lynx main thread keeps, and
+  `pre_present`. `Engine` is generic over it, so, as with
+  `ScriptEngine::ImportFuture`, the boundary needs no boxed closure and no
+  `dyn` call: `Window::Target<'window>` is a GAT, so the engine's surface
+  borrows the embedder's window rather than demanding a `'static`
+  refcounted handle. `engine::OffscreenEngine` is the windowless
+  composition, over the uninhabited `NoWindow`.
 - `resource` and `view` provide resource acquisition and generic engine/view
   composition. The crate root does not re-export `ElementTree`, `dom`,
   or a renderer specialization. `bobcat-cli` is one embedder of `engine`,

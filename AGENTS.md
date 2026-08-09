@@ -153,9 +153,13 @@ useful signal for currently-compatible versions of those libraries.
   guards the abandoned-batch edge. Embedders provide user input, device
   metrics, OS initialization, a draw target, and IO primitives, and relay
   OS facts in (`dispatch_input`/`resize`/`notify_redraw`/`pump`/ticks);
-  they never start or steer the pipeline — the engine schedules through
-  capabilities handed over at attach time (`request_frame`, `pre_present`,
-  `wakeup`).
+  they never start or steer the pipeline — the engine schedules through the
+  `engine::Window` it borrows at attach time (`target`, `frames`,
+  `pre_present`). `Engine` is generic over that trait, so no capability is a
+  boxed closure or a `dyn` call; the draw target is a GAT, which is what
+  lets the engine's surface borrow the embedder's window instead of
+  requiring a `'static` refcounted handle. `engine::OffscreenEngine` is the
+  windowless composition, over the uninhabited `NoWindow`.
   The core still adds no document alias, element-host trait, or injection
   seam of its own.
   `MainThreadRuntime`
@@ -214,9 +218,10 @@ useful signal for currently-compatible versions of those libraries.
   pipeline. Every event handler is a relay into the `Engine`
   (`dispatch_input`, `resize`, `notify_redraw`, `pump`, clock ticks in
   headless mode); the engine owns the tree, commits, scheduling, and its
-  script and render threads, and calls back only through the capabilities
-  handed over at attach time (`request_redraw`, `pre_present_notify`, the
-  event-loop wakeup). Headed mode attaches the window as the draw target;
+  script and render threads, and calls back only through the `MacWindow` it
+  borrows at attach time (the winit window as the draw target,
+  `request_redraw`, `pre_present_notify`) and the script-completion wakeup
+  `spawn_script` was given. Headed mode attaches the window as the draw target;
   headless mode attaches the engine's offscreen target and relays synthetic
   vsync ticks — whether a tick becomes GPU work is the engine's decision.
   Headed mode uses a native winit window with display-backed

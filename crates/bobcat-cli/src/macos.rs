@@ -7,14 +7,16 @@
 //! (`dispatch_input`, `resize`, `notify_redraw`, `pump`), and the engine
 //! decides what the pipeline does with it. The engine owns the Lynx main
 //! thread (the script realm) and shares the element tree with it behind
-//! one lock; presentation and vsync stay on this thread. The capabilities
-//! the engine schedules through (`request_redraw`, `pre_present_notify`,
-//! the event-loop wakeup) are handed over once at attach time.
+//! one lock; presentation and vsync stay on this thread. [`MacWindow`] is
+//! the window it borrows at attach time: the draw target plus the two OS
+//! mechanisms it schedules through (`request_redraw`, `pre_present_notify`).
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use bobcat_core::engine::{Engine, EngineEvent, FrameSize, WindowHooks};
+use bobcat_core::engine::{
+    Engine, EngineEvent, FrameRequester, FrameSize, Window as EmbedderWindow,
+};
 use bobcat_core::lynx_element::dom::Point2D;
 use bobcat_core::lynx_element::dom::input::{DeltaMode, InputEvent, PointerKind, PointerPhase};
 use winit::application::ApplicationHandler;
@@ -43,6 +45,51 @@ enum UserEvent {
 /// this is deliberately out of that range.
 const MOUSE_POINTER_ID: u32 = u32::MAX;
 
+/// The window this embedder lends the engine: the winit window itself as the
+/// draw target, plus the OS mechanisms the engine schedules through it.
+///
+/// It lives outside the application state, because the engine's surface
+/// borrows it for as long as the engine exists.
+struct MacWindow {
+    /// Behind `Arc` because the frame-request handle the engine hands to its
+    /// Lynx main thread keeps one of its own.
+    os: Arc<Window>,
+}
+
+impl EmbedderWindow for MacWindow {
+    /// The surface borrows the window rather than taking a refcounted
+    /// handle of its own: this embedder owns the window and outlives the
+    /// engine that draws on it.
+    type Target<'window> = &'window Window;
+    type Frames = FrameRequests;
+
+    fn target(&self) -> &Window {
+        &self.os
+    }
+
+    fn frames(&self) -> FrameRequests {
+        FrameRequests {
+            os: Arc::clone(&self.os),
+        }
+    }
+
+    fn pre_present(&self) {
+        self.os.pre_present_notify();
+    }
+}
+
+/// The frame-request handle the engine's Lynx main thread keeps: winit
+/// accepts a redraw request from any thread.
+struct FrameRequests {
+    os: Arc<Window>,
+}
+
+impl FrameRequester for FrameRequests {
+    fn request_frame(&self) {
+        self.os.request_redraw();
+    }
+}
+
 pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
@@ -55,7 +102,16 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
     println!("bobcat: macOS window starting; enter `help` for commands");
     console.prompt();
 
-    let mut application = MacApplication::new(program, options, console, event_loop.create_proxy());
+    // The engine's surface borrows the window, so the window is stored here
+    // rather than in the application state that installs it.
+    let window = OnceLock::new();
+    let mut application = MacApplication::new(
+        program,
+        options,
+        console,
+        event_loop.create_proxy(),
+        &window,
+    );
     event_loop
         .run_app(&mut application)
         .map_err(|error| CliError::Window(error.to_string()))?;
@@ -65,14 +121,16 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
     }
 }
 
-struct MacApplication {
+struct MacApplication<'window> {
     program: Option<Program>,
     input: String,
     initial_width: f32,
     initial_height: f32,
-    engine: Option<Engine>,
-    window: Option<Arc<Window>>,
-    /// The handle the engine's wakeup capability posts back through.
+    engine: Option<Engine<'window, MacWindow>>,
+    /// Where the window is created into, once: storage that outlives this
+    /// handler, so the engine can borrow the window it draws on.
+    window: &'window OnceLock<MacWindow>,
+    /// The handle the engine's script thread posts wakeups back through.
     proxy: EventLoopProxy<UserEvent>,
     console: Console,
     occluded: bool,
@@ -84,7 +142,7 @@ struct MacApplication {
     error: Option<CliError>,
 }
 
-impl std::fmt::Debug for MacApplication {
+impl std::fmt::Debug for MacApplication<'_> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("MacApplication")
@@ -97,12 +155,13 @@ impl std::fmt::Debug for MacApplication {
     }
 }
 
-impl MacApplication {
+impl<'window> MacApplication<'window> {
     fn new(
         program: Program,
         options: &Options,
         console: Console,
         proxy: EventLoopProxy<UserEvent>,
+        window: &'window OnceLock<MacWindow>,
     ) -> Self {
         Self {
             input: program.input.clone(),
@@ -110,7 +169,7 @@ impl MacApplication {
             initial_width: options.viewport_width,
             initial_height: options.viewport_height,
             engine: None,
-            window: None,
+            window,
             proxy,
             console,
             occluded: false,
@@ -120,8 +179,14 @@ impl MacApplication {
         }
     }
 
+    /// The window, once created. Reading it through the slot hands back a
+    /// borrow that outlives `&self` — the lifetime the engine holds.
+    fn window(&self) -> Option<&'window MacWindow> {
+        self.window.get()
+    }
+
     fn initialize(&mut self, event_loop: &ActiveEventLoop) -> Result<(), CliError> {
-        if self.window.is_some() {
+        if self.window().is_some() {
             return Ok(());
         }
         let attributes = Window::default_attributes()
@@ -130,14 +195,15 @@ impl MacApplication {
                 f64::from(self.initial_width),
                 f64::from(self.initial_height),
             ));
-        let window = Arc::new(
+        let os = Arc::new(
             event_loop
                 .create_window(attributes)
                 .map_err(|error| CliError::Window(error.to_string()))?,
         );
-        let physical_size = non_empty_size(window.inner_size());
+        let physical_size = non_empty_size(os.inner_size());
         let (css_width, css_height, scale_factor) =
-            viewport_metrics(physical_size, window.scale_factor());
+            viewport_metrics(physical_size, os.scale_factor());
+        let window = self.window.get_or_init(|| MacWindow { os });
         let program = self
             .program
             .take()
@@ -145,25 +211,14 @@ impl MacApplication {
         program.warn_about_dropped_author_rules();
 
         let mut engine = Engine::new(program.config, css_width, css_height, scale_factor)?;
-        // The engine builds the GPU surface here and presents from this
-        // thread — vsync interacts with the OS only inside its redraw
-        // relay. The three capabilities are the OS mechanisms it schedules
-        // through.
-        let request_window = Arc::clone(&window);
-        let present_window = Arc::clone(&window);
-        let render_wakeup = self.proxy.clone();
+        // The engine builds the GPU surface on this window and presents from
+        // this thread — vsync interacts with the OS only inside its redraw
+        // relay.
         engine.attach_window(
-            Arc::clone(&window),
+            window,
             FrameSize {
                 width: physical_size.width,
                 height: physical_size.height,
-            },
-            WindowHooks {
-                request_frame: Box::new(move || request_window.request_redraw()),
-                pre_present: Box::new(move || present_window.pre_present_notify()),
-                wakeup: Box::new(move || {
-                    let _ = render_wakeup.send_event(UserEvent::Pump);
-                }),
             },
         )?;
 
@@ -176,7 +231,6 @@ impl MacApplication {
         })?;
 
         self.engine = Some(engine);
-        self.window = Some(window);
         Ok(())
     }
 
@@ -185,11 +239,10 @@ impl MacApplication {
             return Ok(());
         }
         let window = self
-            .window
-            .as_ref()
+            .window()
             .expect("resize events arrive only after window creation");
         let (css_width, css_height, scale_factor) =
-            viewport_metrics(physical_size, window.scale_factor());
+            viewport_metrics(physical_size, window.os.scale_factor());
         self.engine
             .as_mut()
             .expect("the engine is installed with the window")
@@ -289,10 +342,7 @@ impl MacApplication {
         // position forward, which is `+deltaY`.
         let event = match delta {
             MouseScrollDelta::PixelDelta(pixels) => {
-                let scale = self
-                    .window
-                    .as_ref()
-                    .map_or(1.0, |window| window.scale_factor());
+                let scale = self.window().map_or(1.0, |window| window.os.scale_factor());
                 #[allow(
                     clippy::cast_possible_truncation,
                     reason = "wheel deltas are far inside f32 range"
@@ -331,7 +381,7 @@ impl MacApplication {
     /// hit-tests with. The window's scale factor is the only conversion: both
     /// spaces share an origin at the window's top-left content corner.
     fn css_point(&self, physical: PhysicalPosition<f64>) -> Option<Point2D<f32>> {
-        let scale = self.window.as_ref()?.scale_factor();
+        let scale = self.window()?.os.scale_factor();
         #[allow(
             clippy::cast_possible_truncation,
             reason = "window coordinates are far inside f32 range"
@@ -350,7 +400,7 @@ impl MacApplication {
     }
 }
 
-impl ApplicationHandler<UserEvent> for MacApplication {
+impl ApplicationHandler<UserEvent> for MacApplication<'_> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if let Err(error) = self.initialize(event_loop) {
             self.fail(event_loop, error);
@@ -363,7 +413,7 @@ impl ApplicationHandler<UserEvent> for MacApplication {
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        if self.window.as_ref().map(|window| window.id()) != Some(window_id) {
+        if self.window().map(|window| window.os.id()) != Some(window_id) {
             return;
         }
         let result = match event {
@@ -374,9 +424,9 @@ impl ApplicationHandler<UserEvent> for MacApplication {
             WindowEvent::Resized(size) => self.resize(size),
             WindowEvent::ScaleFactorChanged { .. } => {
                 let size = self
-                    .window
-                    .as_ref()
+                    .window()
                     .expect("the event belongs to the current window")
+                    .os
                     .inner_size();
                 self.resize(size)
             }
