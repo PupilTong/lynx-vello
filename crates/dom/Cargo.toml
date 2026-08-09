@@ -62,5 +62,12 @@ harness = false
 name = "paint"
 harness = false
 
+# Paired plain-vs-shadow measurements of the flat tree: construction, commit,
+# incremental restyle, slot reassignment, and frame production, plus the
+# many-roots and deep-nesting scale shapes.
+[[bench]]
+name = "shadow"
+harness = false
+
 [lints]
 workspace = true

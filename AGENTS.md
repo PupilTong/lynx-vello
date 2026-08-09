@@ -371,11 +371,21 @@ useful signal for currently-compatible versions of those libraries.
   (`Document::add_shadow_stylesheet`) replaces the document's author rules
   inside that tree; `::slotted()` and `::part()`/`exportparts` work off the
   same data. Slot assignment is eager — every mutation that can change it
-  (host child list, shadow-tree slot set, `slot`/`name` attribute) reassigns
-  the affected tree in the same call, gated on a live-shadow-root counter so a
-  document with none pays one branch. Per-node cost is one
+  (host child list, shadow-tree slot set, `slot`/`name` attribute) resolves the
+  affected tree in the same call, gated on a live-shadow-root counter so a
+  document with none pays one branch — but eager is not the same as
+  recomputing the tree: appending a light child and removing one touch only
+  the slot involved (the shadow root caches its slot list for that, rebuilt
+  only when the slot set changes and debug-checked on every hit), and a full
+  reassignment is reserved for the cases that can re-target more than one node.
+  That split is benchmark-defended, not assumed: with the append path
+  reassigning the whole tree, building a 1024-row host cost 51× the same rows
+  with no shadow root, and 1.4× after
+  (`benches/shadow.rs::build_wide_host_{plain,shadow}`; the whole bench file is
+  paired plain-versus-shadow for exactly this reason). Per-node cost is one
   `Option<Box<ShadowLinks>>` word, allocated only for hosts, slots, and
-  slotted nodes. Recorded limits: `TElement::slotted_nodes` keeps Stylo's
+  slotted nodes; the flat tree costs nothing on a no-op commit and ~1.02× on a
+  frame. Recorded limits: `TElement::slotted_nodes` keeps Stylo's
   empty default (assignment changes dirty the host subtree wholesale instead
   of invalidating `::slotted` per slot), `:host-context()` is absent from the
   vendored selector grammar, and a node that leaves the flat tree keeps its

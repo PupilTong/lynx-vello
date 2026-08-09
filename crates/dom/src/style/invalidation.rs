@@ -87,10 +87,6 @@ impl<T> Document<T> {
 
     pub(crate) fn note_child_list_change(&mut self, parent: NodeId, index: usize) {
         self.note_visual_mutation();
-        // A host's light children, or a shadow tree's slot set, may have just
-        // moved; whichever it was, the affected tree is reassigned before any
-        // consumer can observe the flat tree again.
-        self.note_slot_assignment_under(parent);
         let parent_node = self.live(parent);
         let flags = parent_node.selector_flags();
         if flags.intersects(STRUCTURE_SENSITIVE) {

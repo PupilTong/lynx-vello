@@ -526,8 +526,12 @@ impl<T> Document<T> {
 
         self.live_node_mut(parent).children.insert(index, child);
         self.live_node_mut(child).parent = Some(parent);
+        let appended = index + 1 == self.live_node_mut(parent).children.len();
 
         self.note_moved_subtree(child);
+        // Before anything reads the flat tree — the dirty-descendant walk in
+        // `note_child_list_change` is the first thing that does.
+        self.note_slot_assignment_inserted(parent, child, appended);
         self.note_child_list_change(parent, index);
         self.invalidate_layout(child);
     }
@@ -577,13 +581,8 @@ impl<T> Document<T> {
             parent_node.children.remove(index);
             index
         };
-        {
-            let child = self.live_node_mut(child);
-            child.parent = None;
-            // Reassignment below only visits the host's current children, so
-            // the one leaving is exactly the one it cannot reach.
-            child.clear_assigned_slot();
-        }
+        self.live_node_mut(child).parent = None;
+        self.note_slot_assignment_removed(parent, child);
 
         debug_assert_ne!(
             parent, DOCUMENT_NODE_ID,

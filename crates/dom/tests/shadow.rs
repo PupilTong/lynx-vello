@@ -633,6 +633,226 @@ fn detaching_a_slottable_clears_its_assignment() {
     assert_eq!(harness.doc.dom.assigned_slot(slottable), Some(slot));
 }
 
+// --- Scale -----------------------------------------------------------------
+//
+// These assert the properties that only break once a tree is big: that the
+// incremental append path agrees with a full reassignment, that per-root
+// scoping holds when there are hundreds of roots, and that a deep stack of
+// host/slot boundaries still styles, inherits, and lays out.
+
+/// The component's own stylesheet. A shadow tree's elements are unreachable
+/// from the document sheet, so a component that needs its template laid out
+/// has to ship the rules for it — which is the encapsulation working, not a
+/// harness detail.
+const COMPONENT_CSS: &str = "frame { display: linear; } slot { display: linear; }";
+
+/// One component host: `<host><shadow: <frame><slot></frame>></host>` plus
+/// `rows` light children slotted into it.
+fn component(doc: &mut Doc, parent: NodeId, rows: usize) -> (NodeId, NodeId, Vec<NodeId>) {
+    let host = doc.el(parent, "host");
+    let shadow = doc.dom.attach_shadow(host, ShadowRootMode::Open);
+    doc.dom.add_shadow_stylesheet(shadow, COMPONENT_CSS);
+    let frame = doc.el(shadow, "frame");
+    let slot = doc.el(frame, "slot");
+    let rows = (0..rows).map(|_| doc.el(host, "row")).collect();
+    (host, slot, rows)
+}
+
+const HOSTS: usize = 256;
+const ROWS: usize = 8;
+
+#[test]
+fn a_page_of_many_hosts_slots_and_styles_every_one() {
+    let mut doc = Doc::with_css(
+        "page { display: linear; }
+         host { display: linear; }
+         row { width: 10px; height: 4px; }",
+    );
+    let root = doc.root;
+    let components: Vec<_> = (0..HOSTS)
+        .map(|_| component(&mut doc, root, ROWS))
+        .collect();
+    doc.flush();
+
+    for (host, slot, rows) in &components {
+        assert_eq!(
+            doc.dom.assigned_nodes(*slot),
+            rows.as_slice(),
+            "every host's rows land in its own slot, in order"
+        );
+        assert!(doc.dom.shadow_root(*host).is_some());
+    }
+    // Sampled rather than exhaustive: what scale can break is the assignment
+    // bookkeeping above, not the per-element cascade.
+    for (_, _, rows) in components.iter().step_by(37) {
+        assert_eq!(doc.value(rows[ROWS - 1], "width"), "10px");
+    }
+    let (_, _, last) = components.last().expect("the page has hosts");
+    let bottom = doc
+        .dom
+        .rounded_layout(last[ROWS - 1])
+        .expect("the last row of the last host is laid out");
+    assert_eq!((bottom.size.width, bottom.size.height), (10.0, 4.0));
+}
+
+/// The incremental append path must land on exactly the assignment a full
+/// reassignment would produce. A `name` round-trip on the slot forces the
+/// full path, so the two can be compared directly.
+#[test]
+fn appending_a_long_child_list_agrees_with_a_full_reassignment() {
+    let mut doc = Doc::new();
+    let root = doc.root;
+    let (_, slot, rows) = component(&mut doc, root, 512);
+    doc.flush();
+
+    let incremental = doc.dom.assigned_nodes(slot).to_vec();
+    assert_eq!(incremental, rows, "appends keep the host's child order");
+
+    doc.set_attr(slot, "name", "");
+    doc.remove_attr(slot, "name");
+    doc.flush();
+
+    assert_eq!(
+        doc.dom.assigned_nodes(slot),
+        incremental.as_slice(),
+        "a full reassignment reproduces what the appends built"
+    );
+}
+
+/// The same equivalence for the paths that are not a plain append: inserting
+/// into the middle of a long child list, and removing from the middle of one.
+#[test]
+fn mid_list_insertion_and_removal_keep_slot_order() {
+    let mut doc = Doc::new();
+    let root = doc.root;
+    let (host, slot, mut rows) = component(&mut doc, root, 64);
+    doc.flush();
+
+    let inserted = doc.dom.create_element("row", ());
+    doc.dom.insert_before(host, inserted, Some(rows[32]));
+    rows.insert(32, inserted);
+    assert_eq!(doc.dom.assigned_nodes(slot), rows.as_slice());
+
+    let removed = rows.remove(16);
+    doc.dom.remove_subtree(removed);
+    assert_eq!(doc.dom.assigned_nodes(slot), rows.as_slice());
+
+    doc.flush();
+    assert_eq!(doc.dom.assigned_slot(rows[32]), Some(slot));
+}
+
+/// A slot appended to a shadow tree that already has light children must
+/// claim them, even when there are many — that path is a full reassignment
+/// and has to see the whole child list.
+#[test]
+fn a_late_slot_claims_a_long_existing_child_list() {
+    let mut doc = Doc::new();
+    let root = doc.root;
+    let host = doc.el(root, "host");
+    let shadow = doc.dom.attach_shadow(host, ShadowRootMode::Open);
+    let frame = doc.el(shadow, "frame");
+    let rows: Vec<_> = (0..256).map(|_| doc.el(host, "row")).collect();
+    doc.flush();
+    assert_eq!(doc.dom.assigned_slot(rows[0]), None);
+
+    let slot = doc.el(frame, "slot");
+    doc.flush();
+
+    assert_eq!(doc.dom.assigned_nodes(slot), rows.as_slice());
+    assert!(
+        doc.dom.get(rows[255]).unwrap().computed_style().is_some(),
+        "every row is in the flat tree once a slot claims it"
+    );
+}
+
+#[test]
+fn hundreds_of_scoped_stylesheets_stay_scoped_to_their_own_tree() {
+    let mut doc = Doc::new();
+    let root = doc.root;
+    let components: Vec<_> = (0..HOSTS).map(|_| component(&mut doc, root, 1)).collect();
+    for (index, (host, ..)) in components.iter().enumerate() {
+        let shadow = doc.dom.shadow_root(*host).expect("each host has a root");
+        doc.dom
+            .add_shadow_stylesheet(shadow, &format!("frame {{ width: {}px; }}", index + 1));
+    }
+    doc.flush();
+
+    for (index, (host, ..)) in components.iter().enumerate() {
+        let frame = doc
+            .dom
+            .shadow_root(*host)
+            .and_then(|shadow| doc.dom.get(shadow))
+            .and_then(|shadow| shadow.child_ids().first().copied())
+            .expect("each shadow tree has its frame");
+        assert_eq!(doc.value(frame, "width"), format!("{}px", index + 1));
+    }
+}
+
+#[test]
+fn deeply_nested_components_style_inherit_and_lay_out_through_every_boundary() {
+    const DEPTH: usize = 64;
+    let mut doc = Doc::with_css(
+        "page { display: linear; color: rgb(0, 0, 255); }
+         host { display: linear; }
+         leaf { width: 7px; height: 3px; }",
+    );
+    let mut parent = doc.root;
+    let mut hosts = Vec::with_capacity(DEPTH);
+    for _ in 0..DEPTH {
+        let host = doc.el(parent, "host");
+        let shadow = doc.dom.attach_shadow(host, ShadowRootMode::Open);
+        doc.dom.add_shadow_stylesheet(shadow, COMPONENT_CSS);
+        let frame = doc.el(shadow, "frame");
+        let slot = doc.el(frame, "slot");
+        hosts.push((host, slot));
+        parent = host;
+    }
+    let leaf = doc.el(parent, "leaf");
+    doc.flush();
+
+    for (host, slot) in &hosts {
+        assert_eq!(
+            doc.dom.shadow_host(doc.dom.shadow_root(*host).unwrap()),
+            Some(*host)
+        );
+        assert_eq!(doc.dom.assigned_nodes(*slot).len(), 1);
+    }
+    assert_eq!(
+        doc.value(leaf, "color"),
+        "rgb(0, 0, 255)",
+        "an inherited value crosses 64 host/slot boundaries"
+    );
+    let rect = doc
+        .dom
+        .rounded_layout(leaf)
+        .expect("the innermost leaf is laid out");
+    assert_eq!((rect.size.width, rect.size.height), (7.0, 3.0));
+}
+
+#[test]
+fn removing_a_host_with_a_large_shadow_tree_frees_every_node() {
+    let mut doc = Doc::new();
+    let root = doc.root;
+    let host = doc.el(root, "host");
+    let shadow = doc.dom.attach_shadow(host, ShadowRootMode::Open);
+    let slot = doc.el(shadow, "slot");
+    let shadow_only: Vec<_> = (0..128).map(|_| doc.el(shadow, "decor")).collect();
+    let rows: Vec<_> = (0..128).map(|_| doc.el(host, "row")).collect();
+    doc.flush();
+
+    // host + slot + 128 shadow-only elements + 128 rows carry payloads; the
+    // shadow root itself does not.
+    assert_eq!(doc.dom.remove_subtree(host).len(), 2 + 128 + 128);
+    for id in shadow_only
+        .into_iter()
+        .chain(rows)
+        .chain([shadow, slot, host])
+    {
+        assert!(doc.dom.get(id).is_none(), "node {id} outlived its host");
+    }
+    doc.flush();
+}
+
 #[test]
 fn a_document_with_no_shadow_root_keeps_its_child_list_as_the_flat_tree() {
     let mut doc = Doc::new();
