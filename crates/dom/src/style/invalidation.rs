@@ -19,6 +19,7 @@ use stylo_atoms::Atom;
 
 use crate::tree::document::{DOCUMENT_NODE_ID, Document, NodeId};
 use crate::tree::node::Node;
+use crate::tree::shadow::is_slot_assignment_attribute;
 
 const STRUCTURE_SENSITIVE: ElementSelectorFlags = ElementSelectorFlags::HAS_SLOW_SELECTOR
     .union(ElementSelectorFlags::HAS_SLOW_SELECTOR_LATER_SIBLINGS)
@@ -35,14 +36,14 @@ static STYLE: LazyLock<LocalName> = LazyLock::new(|| LocalName::from("style"));
 impl<T> Document<T> {
     pub(crate) fn mark_subtree_dirty(&mut self, id: NodeId) {
         let node = self.live_element(id);
-        if !node.child_ids().is_empty() {
+        if !node.flat_children().is_empty() {
             node.set_dirty_descendants_bit(true);
         }
         self.add_restyle_hint(id, RestyleHint::restyle_subtree());
         self.mark_ancestors_dirty_descendants(id);
     }
 
-    fn live(&self, id: NodeId) -> &Node<T> {
+    pub(crate) fn live(&self, id: NodeId) -> &Node<T> {
         self.get(id)
             .expect("stale NodeId passed to a Document mutation method")
     }
@@ -60,9 +61,13 @@ impl<T> Document<T> {
         insert_restyle_hint(self.live_node_mut(id), hint);
     }
 
+    /// Sets the dirty-descendants bit along the spine Stylo's traversal will
+    /// descend — the **flat** ancestor chain, since that is what
+    /// `TElement::traversal_children` yields. A shadow tree's spine therefore
+    /// runs out through its host, and a slotted node's out through its slot.
     pub(crate) fn mark_ancestors_dirty_descendants(&mut self, id: NodeId) {
         let tree = self.tree();
-        let mut next = tree.get(id).and_then(Node::parent_id);
+        let mut next = tree.get(id).and_then(Node::flat_parent_id);
         while let Some(pid) = next {
             if pid == DOCUMENT_NODE_ID {
                 break;
@@ -72,7 +77,7 @@ impl<T> Document<T> {
                 break;
             }
             parent.set_dirty_descendants_bit(true);
-            next = parent.parent_id();
+            next = parent.flat_parent_id();
         }
     }
 
@@ -82,7 +87,11 @@ impl<T> Document<T> {
 
     pub(crate) fn note_child_list_change(&mut self, parent: NodeId, index: usize) {
         self.note_visual_mutation();
-        let parent_node = self.live_element(parent);
+        // A host's light children, or a shadow tree's slot set, may have just
+        // moved; whichever it was, the affected tree is reassigned before any
+        // consumer can observe the flat tree again.
+        self.note_slot_assignment_under(parent);
+        let parent_node = self.live(parent);
         let flags = parent_node.selector_flags();
         if flags.intersects(STRUCTURE_SENSITIVE) {
             // Cloned so the child walk can outlive the shared borrow while
@@ -129,7 +138,7 @@ impl<T> Document<T> {
         }
         {
             let node = self.live(parent);
-            if !node.child_ids().is_empty() {
+            if !node.flat_children().is_empty() {
                 node.set_dirty_descendants_bit(true);
             }
         }
@@ -204,10 +213,14 @@ impl<T> Document<T> {
             "style" => return self.set_inline_style(id, value),
             _ => {}
         }
+        let slot_assignment = is_slot_assignment_attribute(name);
         let name = LocalName::from(name);
         self.note_attribute_change(id, &name);
         self.live_node_mut(id)
             .set_attr_local_name(name, value.to_owned());
+        if slot_assignment {
+            self.note_slot_assignment_attribute(id);
+        }
     }
 
     pub fn remove_attribute(&mut self, id: NodeId, name: &str) {
@@ -226,9 +239,13 @@ impl<T> Document<T> {
             "style" => return self.apply_inline_style_block(id, None, None),
             _ => {}
         }
+        let slot_assignment = is_slot_assignment_attribute(name);
         let name = LocalName::from(name);
         self.note_attribute_change(id, &name);
         self.live_node_mut(id).remove_attr_local_name(&name);
+        if slot_assignment {
+            self.note_slot_assignment_attribute(id);
+        }
     }
 
     pub fn add_element_state(&mut self, id: NodeId, flags: stylo_dom::ElementState) {

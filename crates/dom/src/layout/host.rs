@@ -40,15 +40,21 @@ impl<T> LayoutTree for TreeArenas<T> {
     where
         Self: 'tree;
 
+    /// The flat-tree children — a host lays out its shadow tree, and a slot
+    /// lays out the nodes assigned to it. Every other `LayoutTree` walk
+    /// (`flattened_children` included) reads the tree through this one method,
+    /// so the whole engine follows the flat tree from here.
     fn children(&self, node: NodeId) -> Self::ChildIter<'_> {
         slab_get_for_live_node(&self.nodes, node)
-            .child_ids()
+            .flat_children()
             .iter()
             .copied()
     }
 
     fn child_count(&self, node: NodeId) -> usize {
-        slab_get_for_live_node(&self.nodes, node).child_ids().len()
+        slab_get_for_live_node(&self.nodes, node)
+            .flat_children()
+            .len()
     }
 
     fn style(&self, node: NodeId) -> Self::Style<'_> {
@@ -246,7 +252,7 @@ fn position_and_round_parked_boundaries<T: Sync>(
         if has_parked_ancestor(tree, node, parked_ids) {
             continue;
         }
-        let parent_origin = node.parent_id().map_or(Point::ZERO, |parent| {
+        let parent_origin = node.flat_parent_id().map_or(Point::ZERO, |parent| {
             accumulated_unrounded_origin(tree, state, parent)
         });
         let position = |tree: &TreeArenas<T>, state: &mut DocumentLayoutState, node| {
@@ -261,12 +267,12 @@ fn has_parked_ancestor<T>(
     node: &Node<T>,
     parked_ids: &FxHashSet<NodeId>,
 ) -> bool {
-    let mut current = node.parent_id();
+    let mut current = node.flat_parent_id();
     while let Some(id) = current {
         if parked_ids.contains(&id) {
             return true;
         }
-        current = slab_get_for_live_node(&tree.nodes, id).parent_id();
+        current = slab_get_for_live_node(&tree.nodes, id).flat_parent_id();
     }
     false
 }
@@ -281,17 +287,17 @@ fn accumulated_unrounded_origin<T>(
     while let Some(id) = current {
         let location = tree.layout(state, id).unrounded.location;
         origin = Point::new(origin.x + location.x, origin.y + location.y);
-        current = slab_get_for_live_node(&tree.nodes, id).parent_id();
+        current = slab_get_for_live_node(&tree.nodes, id).flat_parent_id();
     }
     origin
 }
 
 fn boundary_depth<T>(document: &Document<T>, id: NodeId) -> usize {
     let mut depth = 0;
-    let mut current = document.get(id).and_then(Node::parent_id);
+    let mut current = document.get(id).and_then(Node::flat_parent_id);
     while let Some(id) = current {
         depth += 1;
-        current = document.get(id).and_then(Node::parent_id);
+        current = document.get(id).and_then(Node::flat_parent_id);
     }
     depth
 }
@@ -320,7 +326,7 @@ fn pre_position<T: Sync>(
         return true;
     }
     if node
-        .parent_id()
+        .flat_parent_id()
         .and_then(|id| tree.nodes.get(id))
         .is_some_and(Node::is_element)
         && resolve_position(node, style.values()) == PositionProperty::Fixed
@@ -339,12 +345,12 @@ fn position_hoisted<T: Sync>(
     fixed: bool,
 ) {
     let node = slab_get_for_live_node(&tree.nodes, node_id);
-    let Some(parent_id) = node.parent_id() else {
+    let Some(parent_id) = node.flat_parent_id() else {
         return;
     };
 
     let mut containing = None;
-    let mut ancestor = node.parent_id();
+    let mut ancestor = node.flat_parent_id();
     while let Some(current_id) = ancestor {
         let current = slab_get_for_live_node(&tree.nodes, current_id);
         let Some(style) = StyleView::try_of(current) else {
@@ -359,7 +365,7 @@ fn position_hoisted<T: Sync>(
             containing = Some(current_id);
             break;
         }
-        ancestor = current.parent_id();
+        ancestor = current.flat_parent_id();
     }
 
     let (containing_origin, containing_size) = match containing {

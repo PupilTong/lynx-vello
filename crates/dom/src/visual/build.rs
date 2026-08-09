@@ -556,7 +556,7 @@ impl<'doc, T> Builder<'doc, T> {
         node_offset: Point2D<f32>,
         ctx: ClipContexts,
     ) -> Option<ItemRecord> {
-        let parent = child.parent()?;
+        let parent = child.flat_parent()?;
         let (visible, hit_testable) = item_flags(StyleView::try_of(parent)?.values());
         if !visible {
             return None;

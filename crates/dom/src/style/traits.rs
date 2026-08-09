@@ -101,7 +101,7 @@ impl<'a, T: Sync> TNode for &'a Node<T> {
     }
 
     fn as_shadow_root(&self) -> Option<Self::ConcreteShadowRoot> {
-        None
+        Node::is_shadow_root(self).then_some(*self)
     }
 
     fn opaque(&self) -> OpaqueNode {
@@ -112,8 +112,11 @@ impl<'a, T: Sync> TNode for &'a Node<T> {
         Node::id(self)
     }
 
+    /// The **flat**-tree parent: what the restyle traversal descends from and
+    /// what inherited properties are inherited through. A shadow tree's
+    /// children traverse from the host, and a slotted node from its slot.
     fn traversal_parent(&self) -> Option<Self::ConcreteElement> {
-        let parent = Node::parent(*self)?;
+        let parent = Node::flat_parent(*self)?;
         parent.is_element().then_some(parent)
     }
 }
@@ -144,18 +147,29 @@ impl<'a, T: Sync> TShadowRoot for &'a Node<T> {
     type ConcreteNode = &'a Node<T>;
 
     fn as_node(&self) -> Self::ConcreteNode {
+        debug_assert!(Node::is_shadow_root(self));
         *self
     }
 
     fn host(&self) -> <Self::ConcreteNode as TNode>::ConcreteElement {
-        unreachable!("dom does not model shadow roots")
+        let host = self
+            .shadow_host_id()
+            .expect("TShadowRoot methods are only called on shadow roots");
+        self.tree()
+            .get(host)
+            .expect("a shadow root never outlives its host")
     }
 
+    /// The scoped `CascadeData` built from this shadow root's own
+    /// stylesheets. Stylo matches an element in a shadow tree against this
+    /// instead of the document's author rules, which is the encapsulation
+    /// half of shadow DOM; `:host`, `::slotted()`, and `::part()` rules also
+    /// come from here.
     fn style_data<'b>(&self) -> Option<&'b CascadeData>
     where
         Self: 'b,
     {
-        None
+        Some(&self.shadow_data()?.styles.data)
     }
 }
 
@@ -167,8 +181,18 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
         *self
     }
 
+    /// The **flat**-tree children: a host's shadow tree, a slot's assigned
+    /// nodes (or its fallback content when nothing is assigned), and the plain
+    /// child list for everything else.
     fn traversal_children(&self) -> LayoutIterator<Self::TraversalChildrenIterator> {
-        LayoutIterator(Node::children_iter(*self))
+        LayoutIterator(Node::flat_children_iter(*self))
+    }
+
+    /// Inherited properties come from the flat-tree parent, not the node-tree
+    /// one (css-scoping-1 §"Inheritance"): a slotted element inherits through
+    /// its slot, and a shadow tree's top-level elements through the host.
+    fn inheritance_parent(&self) -> Option<Self> {
+        TNode::traversal_parent(self)
     }
 
     fn is_html_element(&self) -> bool {
@@ -206,11 +230,11 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
     }
 
     fn has_part_attr(&self) -> bool {
-        false
+        Node::has_part_attr(self)
     }
 
     fn exports_any_part(&self) -> bool {
-        false
+        Node::exports_any_part(self)
     }
 
     fn id(&self) -> Option<&Atom> {
@@ -230,6 +254,29 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
     where
         F: FnMut(&AtomIdent),
     {
+    }
+
+    /// The part names this element exposes to its outer tree. Rule
+    /// *collection* keys `::part()` off this, while matching a `::part()`
+    /// selector goes through [`Element::is_part`].
+    fn each_part<F>(&self, mut callback: F)
+    where
+        F: FnMut(&AtomIdent),
+    {
+        for part in Node::part_names(self) {
+            callback(&AtomIdent::new(Atom::from(part)));
+        }
+    }
+
+    /// The names `name` is re-exported under by this host's `exportparts`,
+    /// which is how a part reaches a tree further out than its own host's.
+    fn each_exported_part<F>(&self, name: &AtomIdent, mut callback: F)
+    where
+        F: FnMut(&AtomIdent),
+    {
+        Node::each_exported_part(self, name.0.as_ref(), |exported| {
+            callback(&AtomIdent::new(Atom::from(exported)));
+        });
     }
 
     fn each_attr_name<F>(&self, mut callback: F)
@@ -331,11 +378,16 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
     }
 
     fn shadow_root(&self) -> Option<&'a Node<T>> {
-        None
+        let root = self.shadow_root_id()?;
+        Some(
+            self.tree()
+                .get(root)
+                .expect("a host's shadow root outlives the host"),
+        )
     }
 
     fn containing_shadow(&self) -> Option<&'a Node<T>> {
-        None
+        Node::containing_shadow_root(*self)
     }
 
     fn lang_attr(&self) -> Option<AttrValue> {
@@ -399,12 +451,16 @@ impl<T: Sync> Element for &Node<T> {
         Node::parent(*self).filter(|parent| Node::is_element(*parent))
     }
 
+    /// Selector matching climbs the **node** tree, so a descendant or child
+    /// combinator simply runs out of parents at a shadow root. Stylo then
+    /// retries against the host as a featureless element, which is what makes
+    /// `:host` — and only `:host` — match from inside the shadow tree.
     fn parent_node_is_shadow_root(&self) -> bool {
-        false
+        Node::parent(*self).is_some_and(Node::is_shadow_root)
     }
 
     fn containing_shadow_host(&self) -> Option<Self> {
-        None
+        Some(TShadowRoot::host(&Node::containing_shadow_root(*self)?))
     }
 
     fn is_pseudo_element(&self) -> bool {
@@ -522,7 +578,16 @@ impl<T: Sync> Element for &Node<T> {
     }
 
     fn is_html_slot_element(&self) -> bool {
-        false
+        Node::is_slot(self)
+    }
+
+    fn assigned_slot(&self) -> Option<Self> {
+        let slot = self.assigned_slot_id()?;
+        Some(
+            self.tree()
+                .get(slot)
+                .expect("an assignment is cleared before its slot is removed"),
+        )
     }
 
     fn has_id(&self, id: &AtomIdent, case_sensitivity: CaseSensitivity) -> bool {
@@ -541,12 +606,12 @@ impl<T: Sync> Element for &Node<T> {
         false
     }
 
-    fn imported_part(&self, _name: &AtomIdent) -> Option<AtomIdent> {
-        None
+    fn imported_part(&self, name: &AtomIdent) -> Option<AtomIdent> {
+        Node::imported_part(self, name.0.as_ref()).map(|inner| AtomIdent::new(Atom::from(inner)))
     }
 
-    fn is_part(&self, _name: &AtomIdent) -> bool {
-        false
+    fn is_part(&self, name: &AtomIdent) -> bool {
+        Node::is_part(self, name.0.as_ref())
     }
 
     fn is_empty(&self) -> bool {

@@ -311,7 +311,7 @@ impl<T> Document<T> {
         let node = self.get(id)?;
         if !node.is_element() {
             // A text leaf sits in its styled parent's flow, box or not.
-            return node.parent_id();
+            return node.flat_parent_id();
         }
         let style = node.layout_computed_style()?;
         match style.clone_position() {

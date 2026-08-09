@@ -68,9 +68,18 @@ still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
   `dom`.
 - **One-word handles, no mirror tree.** Every node points to the fixed arena
   set. The same plain `&Node<T>` implements Stylo's `TNode`, `TElement`,
-  `TDocument`, and shadow-root stub traits according to `NodeData`. Styling
+  `TDocument`, and `TShadowRoot` according to `NodeData`. Styling
   traverses the real document in place; text nodes remain in DOM/layout child
   iteration but are skipped by selector matching and cascade.
+- **Three trees, one arena.** A shadow root is a fourth `NodeData` kind,
+  attached to its host rather than listed among its children. Selector
+  matching climbs the **node** tree, so a combinator simply runs out of
+  parents at a shadow root and Stylo retries against the featureless host
+  (`:host`). Traversal, inheritance, layout, paint, and hit testing read the
+  **flat** tree — hosts replaced by their shadow trees, `<slot>`s by their
+  assigned nodes — through `Node::flat_children`/`flat_parent_id`. Each
+  shadow root owns the scoped `CascadeData` its tree matches against instead
+  of the document's author rules.
 - **Debug-only contract checks.** Styling side data guards Stylo's
   one-worker-per-element discipline and traversal phases in debug builds.
   These checks compile away in release builds.

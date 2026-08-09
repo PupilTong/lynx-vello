@@ -217,7 +217,7 @@ pub(crate) fn propagated_decorations<T>(
         ) {
             break;
         }
-        current = node.parent_id();
+        current = node.flat_parent_id();
     }
     out
 }
