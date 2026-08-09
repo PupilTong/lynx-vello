@@ -4,10 +4,10 @@ use std::fmt;
 
 use dom::{self, Document, NodeId, StylesheetOrigin};
 
-use crate::arena::{ElementArena, LynxElement};
+use crate::arena::{ElementArena, EventBinding, LynxElement};
 use crate::device::Viewport;
 use crate::ua::{PageConfig, ua_stylesheet};
-use crate::{ElementId, PAGE_TAG, VIEW_TAG};
+use crate::{ElementId, IMAGE_TAG, PAGE_TAG, RAW_TEXT_TAG, TEXT_ATTRIBUTE, TEXT_TAG, VIEW_TAG};
 
 /// Why an Element PAPI call was rejected.
 ///
@@ -83,6 +83,15 @@ pub struct ElementTree {
 /// opaque handles to the main-thread script, which receives this one from
 /// `__CreatePage` like any other.
 pub(crate) const PAGE_UNIQUE_ID: ElementId = 1;
+
+/// The DOM payload of a node that is not a Lynx element.
+///
+/// Arena slot zero is web-core's permanent "no element" sentinel, so this
+/// payload resolves to no handle: [`ElementTree::element`] returns `None` for
+/// it and every PAPI argument check rejects it. The runtime-owned text nodes
+/// that materialize the `text` attribute carry it, which is what keeps them
+/// out of the handle space the main-thread script sees.
+pub(crate) const NO_ELEMENT: ElementId = 0;
 
 impl ElementTree {
     /// Creates a tree for `viewport` with `config`'s UA cascade installed.
@@ -276,11 +285,233 @@ impl ElementTree {
         &mut self,
         parent_component_unique_id: ElementId,
     ) -> Result<ElementId, PapiError> {
-        if parent_component_unique_id != 0 && self.node_id(parent_component_unique_id).is_none() {
+        self.create_tagged(VIEW_TAG, parent_component_unique_id)
+    }
+
+    /// `__CreateElement(tagName, parentComponentUniqueID)` — a detached
+    /// element with an arbitrary tag.
+    ///
+    /// web-core maps the Lynx tag to an HTML one because it renders into an
+    /// HTML document; there is no HTML here, so the tag is kept verbatim, as
+    /// it is for every other constructor.
+    pub fn create_element(
+        &mut self,
+        tag: &str,
+        parent_component_unique_id: ElementId,
+    ) -> Result<ElementId, PapiError> {
+        self.create_tagged(tag, parent_component_unique_id)
+    }
+
+    /// `__CreateText(parentComponentUniqueID)` — a detached `text` element.
+    pub fn create_text(
+        &mut self,
+        parent_component_unique_id: ElementId,
+    ) -> Result<ElementId, PapiError> {
+        self.create_tagged(TEXT_TAG, parent_component_unique_id)
+    }
+
+    /// `__CreateImage(parentComponentUniqueID)` — a detached `image` element.
+    pub fn create_image(
+        &mut self,
+        parent_component_unique_id: ElementId,
+    ) -> Result<ElementId, PapiError> {
+        self.create_tagged(IMAGE_TAG, parent_component_unique_id)
+    }
+
+    /// `__CreateRawText(text)` — a detached `raw-text` element carrying `text`
+    /// in its `text` attribute.
+    ///
+    /// web-core's constructor is exactly `createElement('raw-text')` plus
+    /// `setAttribute('text', text)`, and passes no parent component, so
+    /// neither does this.
+    pub fn create_raw_text(&mut self, text: &str) -> ElementId {
+        self.uncommitted = true;
+        let id = self.insert(RAW_TEXT_TAG, 0, 0);
+        self.write_attribute(id, TEXT_ATTRIBUTE, Some(text));
+        id
+    }
+
+    /// The shared body of the tag-specific constructors.
+    fn create_tagged(
+        &mut self,
+        tag: &str,
+        parent_component_unique_id: ElementId,
+    ) -> Result<ElementId, PapiError> {
+        if parent_component_unique_id != NO_ELEMENT
+            && self.node_id(parent_component_unique_id).is_none()
+        {
             return Err(PapiError::UnknownElement(parent_component_unique_id));
         }
         self.uncommitted = true;
-        Ok(self.insert(VIEW_TAG, parent_component_unique_id, 0))
+        Ok(self.insert(tag, parent_component_unique_id, 0))
+    }
+
+    /// `__GetElementUniqueID(element)`.
+    ///
+    /// The handle *is* the unique id here, so this is the liveness check the
+    /// name implies: web-core reads the id web-core itself stamped on the DOM
+    /// object, and a handle that never named an element has none.
+    pub fn element_unique_id(&self, id: ElementId) -> Result<ElementId, PapiError> {
+        self.element(id)
+            .map(LynxElement::unique_id)
+            .ok_or(PapiError::UnknownElement(id))
+    }
+
+    /// `__SetClasses(element, classNames)`.
+    ///
+    /// `None` is web-core's falsy `classname`, which removes the attribute
+    /// rather than setting an empty one.
+    pub fn set_classes(&mut self, id: ElementId, classes: Option<&str>) -> Result<(), PapiError> {
+        let node = self.node_id(id).ok_or(PapiError::UnknownElement(id))?;
+        self.uncommitted = true;
+        match classes {
+            Some(classes) if !classes.is_empty() => self.document.set_classes(node, classes),
+            _ => self.document.remove_attribute(node, "class"),
+        }
+        Ok(())
+    }
+
+    /// `__SetID(element, id)`.
+    ///
+    /// `None` is web-core's falsy `id`, which removes the attribute.
+    pub fn set_id(&mut self, id: ElementId, value: Option<&str>) -> Result<(), PapiError> {
+        let node = self.node_id(id).ok_or(PapiError::UnknownElement(id))?;
+        self.uncommitted = true;
+        match value {
+            Some(value) if !value.is_empty() => self.document.set_id_attribute(node, Some(value)),
+            _ => self.document.set_id_attribute(node, None),
+        }
+        Ok(())
+    }
+
+    /// `__SetAttribute(element, key, value)`.
+    ///
+    /// A `None` value is web-core's nullish case, which removes the attribute.
+    /// Everything else is already a string by the time it crosses the runtime
+    /// boundary, matching web-core's `String(value)` coercion.
+    pub fn set_attribute(
+        &mut self,
+        id: ElementId,
+        name: &str,
+        value: Option<&str>,
+    ) -> Result<(), PapiError> {
+        if self.node_id(id).is_none() {
+            return Err(PapiError::UnknownElement(id));
+        }
+        self.uncommitted = true;
+        self.write_attribute(id, name, value);
+        Ok(())
+    }
+
+    /// `__SetInlineStyles(element, value)`.
+    ///
+    /// The declaration block replaces the previous one whole, which is what
+    /// web-core's `setAttribute('style', …)` does; `None` is its falsy case and
+    /// removes the attribute. The object form is serialized to a declaration
+    /// block before it reaches this layer, because the Element PAPI boundary
+    /// carries primitives only.
+    pub fn set_inline_styles(&mut self, id: ElementId, css: Option<&str>) -> Result<(), PapiError> {
+        let node = self.node_id(id).ok_or(PapiError::UnknownElement(id))?;
+        self.uncommitted = true;
+        match css {
+            Some(css) if !css.is_empty() => self.document.set_inline_style(node, css),
+            _ => self.document.remove_attribute(node, "style"),
+        }
+        Ok(())
+    }
+
+    /// `__SetCSSId(elements, cssId, entryName)`, for one element.
+    ///
+    /// The list form is flattened by the caller: the PAPI boundary carries
+    /// primitives, and web-core's own implementation is a loop over unique ids
+    /// too. `entryName` selects a CSS entry in a multi-entry bundle and is not
+    /// recorded — this layer has one stylesheet set.
+    ///
+    /// Recorded limit: the id is stored, not honored. It scopes author rules to
+    /// the components carrying it, and the runtime mounts every decoded sheet
+    /// globally (which is what `enableRemoveCSSScope` bundles want anyway).
+    pub fn set_css_id(&mut self, id: ElementId, css_id: i32) -> Result<(), PapiError> {
+        self.elements
+            .get_mut(id)
+            .ok_or(PapiError::UnknownElement(id))?
+            .set_component_css_id(css_id);
+        Ok(())
+    }
+
+    /// `__AddEvent(element, eventType, eventName, handler)`.
+    ///
+    /// Records the binding on the element. Lynx and web-core both keep event
+    /// bindings off the attribute set, so this one does not reach selectors
+    /// either.
+    ///
+    /// Recorded limit: nothing dispatches the binding yet — there is no event
+    /// model in this crate, and `handle_input` deliberately reports nothing.
+    pub fn add_event(
+        &mut self,
+        id: ElementId,
+        event_type: &str,
+        name: &str,
+        handler: Option<&str>,
+    ) -> Result<(), PapiError> {
+        self.elements
+            .get_mut(id)
+            .ok_or(PapiError::UnknownElement(id))?
+            .set_event(EventBinding {
+                event_type: event_type.to_owned(),
+                name: name.to_owned(),
+                handler: handler.map(str::to_owned),
+            });
+        Ok(())
+    }
+
+    /// The attribute write shared by `__SetAttribute` and `__CreateRawText`,
+    /// on an already-validated handle.
+    fn write_attribute(&mut self, id: ElementId, name: &str, value: Option<&str>) {
+        let node = self.node_id(id).expect("the handle was validated");
+        if name == TEXT_ATTRIBUTE {
+            self.set_text_content(id, value);
+        }
+        match value {
+            Some(value) => self.document.set_attribute(node, name, value),
+            None => self.document.remove_attribute(node, name),
+        }
+    }
+
+    /// Materializes the `text` attribute as this element's runtime-owned text
+    /// node.
+    ///
+    /// The node is appended, which is web-core's ordering: its `raw-text` and
+    /// `x-text` custom elements both append a `Text` node to their own light
+    /// DOM when the attribute changes. The native engine emits the element's
+    /// own content *before* its children instead, but no compiled bundle can
+    /// tell the two apart — `ReactLynx` hoists a static string to the attribute
+    /// only when it is the element's single child, so an element never carries
+    /// both a `text` attribute and children.
+    fn set_text_content(&mut self, id: ElementId, text: Option<&str>) {
+        let existing = self
+            .element(id)
+            .expect("the handle was validated")
+            .text_node();
+        match (existing, text) {
+            (Some(node), Some(text)) => self.document.set_text_node_data(node, text),
+            (Some(node), None) => {
+                self.document.remove_subtree(node);
+                self.elements
+                    .get_mut(id)
+                    .expect("the handle was validated")
+                    .set_text_node(None);
+            }
+            (None, Some(text)) => {
+                let parent = self.node_id(id).expect("the handle was validated");
+                let node = self.document.create_text_node(text, NO_ELEMENT);
+                self.document.append_child(parent, node);
+                self.elements
+                    .get_mut(id)
+                    .expect("the handle was validated")
+                    .set_text_node(Some(node));
+            }
+            (None, None) => {}
+        }
     }
 
     /// `__AppendElement(parent, child)`.
@@ -326,6 +557,11 @@ impl ElementTree {
         self.uncommitted = true;
         let retired_ids = self.document.remove_subtree(node);
         for unique_id in retired_ids {
+            // Runtime-owned text nodes carry the null unique id: they are DOM
+            // nodes without a Lynx element, and go away with their owner.
+            if unique_id == NO_ELEMENT {
+                continue;
+            }
             let retired = self.elements.retire(unique_id);
             debug_assert!(
                 retired.is_some(),
@@ -752,5 +988,305 @@ mod tests {
             Some(17)
         );
         assert_eq!(payload_unique_id, view);
+    }
+}
+
+#[cfg(test)]
+mod papi_tests {
+    use super::{ElementTree, LynxElement, PapiError};
+    use crate::device::Viewport;
+    use crate::ua::PageConfig;
+
+    fn tree() -> ElementTree {
+        ElementTree::new(Viewport::new(393.0, 727.0), PageConfig::default())
+    }
+
+    /// The tag every constructor writes into the document, so author CSS type
+    /// selectors from a bundle (`text { … }`) match what web-core's decoder
+    /// would have rewritten to `x-text`.
+    #[test]
+    fn each_constructor_uses_its_lynx_tag_name() {
+        let mut tree = tree();
+        let view = tree.create_view(0).unwrap();
+        let text = tree.create_text(0).unwrap();
+        let image = tree.create_image(0).unwrap();
+        let raw_text = tree.create_raw_text("hello");
+        let div = tree.create_element("div", 0).unwrap();
+
+        for (id, tag) in [
+            (view, "view"),
+            (text, "text"),
+            (image, "image"),
+            (raw_text, "raw-text"),
+            (div, "div"),
+        ] {
+            let node = tree.node_id(id).unwrap();
+            assert_eq!(tree.document().get(node).unwrap().tag_name(), Some(tag));
+        }
+    }
+
+    #[test]
+    fn create_raw_text_carries_its_content_in_the_text_attribute() {
+        let mut tree = tree();
+        let raw_text = tree.create_raw_text("Edit");
+        let node = tree.node_id(raw_text).unwrap();
+        assert_eq!(
+            tree.document().get(node).unwrap().attribute("text"),
+            Some("Edit")
+        );
+    }
+
+    /// Lynx keeps text content in an attribute; `dom` measures and paints only
+    /// DOM text nodes. The attribute stays selector-visible and the content
+    /// becomes one runtime-owned child node.
+    #[test]
+    fn the_text_attribute_materializes_one_text_node_child() {
+        let mut tree = tree();
+        let text = tree.create_text(0).unwrap();
+        tree.set_attribute(text, "text", Some("React")).unwrap();
+
+        let node = tree.node_id(text).unwrap();
+        let children = tree.document().get(node).unwrap().child_ids().to_vec();
+        assert_eq!(children.len(), 1);
+        let child = tree.document().get(children[0]).unwrap();
+        assert!(child.is_text_node());
+        assert_eq!(child.text(), Some("React"));
+        // The attribute is still there for selectors.
+        assert_eq!(
+            tree.document().get(node).unwrap().attribute("text"),
+            Some("React")
+        );
+    }
+
+    #[test]
+    fn re_setting_the_text_attribute_updates_the_same_node() {
+        let mut tree = tree();
+        let text = tree.create_raw_text("");
+        tree.set_attribute(text, "text", Some("first")).unwrap();
+        let node = tree.node_id(text).unwrap();
+        let first = tree.document().get(node).unwrap().child_ids().to_vec();
+
+        tree.set_attribute(text, "text", Some("second")).unwrap();
+        let second = tree.document().get(node).unwrap().child_ids().to_vec();
+        assert_eq!(first, second, "the text node is reused, not replaced");
+        assert_eq!(
+            tree.document().get(second[0]).unwrap().text(),
+            Some("second")
+        );
+    }
+
+    #[test]
+    fn clearing_the_text_attribute_removes_the_text_node() {
+        let mut tree = tree();
+        let text = tree.create_text(0).unwrap();
+        tree.set_attribute(text, "text", Some("gone")).unwrap();
+        tree.set_attribute(text, "text", None).unwrap();
+
+        let node = tree.node_id(text).unwrap();
+        assert!(tree.document().get(node).unwrap().child_ids().is_empty());
+        assert_eq!(tree.document().get(node).unwrap().attribute("text"), None);
+        // Setting it again rebuilds the node.
+        tree.set_attribute(text, "text", Some("back")).unwrap();
+        assert_eq!(
+            tree.document().get(node).unwrap().child_ids().len(),
+            1,
+            "the text node comes back"
+        );
+    }
+
+    /// A runtime-owned text node is a DOM node with no Lynx element, so
+    /// dropping its owner must not try to retire a handle for it.
+    #[test]
+    fn dropping_an_element_takes_its_runtime_owned_text_node_with_it() {
+        let mut tree = tree();
+        let page = tree.create_page("card", 0);
+        let text = tree.create_text(0).unwrap();
+        tree.set_attribute(text, "text", Some("content")).unwrap();
+        tree.append_element(page, text).unwrap();
+
+        tree.drop_element(text).unwrap();
+        assert!(tree.node_id(text).is_none());
+        let page_node = tree.node_id(page).unwrap();
+        assert!(
+            tree.document()
+                .get(page_node)
+                .unwrap()
+                .child_ids()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn set_classes_writes_the_class_attribute_and_clears_it() {
+        let mut tree = tree();
+        let view = tree.create_view(0).unwrap();
+        tree.set_classes(view, Some("Banner Logo")).unwrap();
+        let node = tree.node_id(view).unwrap();
+        assert_eq!(
+            tree.document().get(node).unwrap().attribute("class"),
+            Some("Banner Logo")
+        );
+
+        tree.set_classes(view, None).unwrap();
+        assert_eq!(tree.document().get(node).unwrap().attribute("class"), None);
+    }
+
+    #[test]
+    fn set_id_writes_the_id_attribute_and_clears_it() {
+        let mut tree = tree();
+        let view = tree.create_view(0).unwrap();
+        tree.set_id(view, Some("target")).unwrap();
+        let node = tree.node_id(view).unwrap();
+        assert_eq!(
+            tree.document().get(node).unwrap().attribute("id"),
+            Some("target")
+        );
+
+        tree.set_id(view, None).unwrap();
+        assert_eq!(tree.document().get(node).unwrap().attribute("id"), None);
+    }
+
+    #[test]
+    fn inline_styles_replace_the_previous_block_and_reach_computed_style() {
+        let mut tree = tree();
+        let page = tree.create_page("card", 0);
+        let view = tree.create_view(0).unwrap();
+        tree.append_element(page, view).unwrap();
+        tree.set_inline_styles(view, Some("width:10px;height:20px"))
+            .unwrap();
+        tree.flush_element_tree();
+
+        let node = tree.node_id(view).unwrap();
+        let layout = tree.document().rounded_layout(node).expect("laid out");
+        assert!((layout.size.width - 10.0).abs() < f32::EPSILON);
+        assert!((layout.size.height - 20.0).abs() < f32::EPSILON);
+
+        // The whole block is replaced, not merged: the old `height` is gone.
+        tree.set_inline_styles(view, Some("width:30px")).unwrap();
+        tree.flush_element_tree();
+        let layout = tree.document().rounded_layout(node).expect("laid out");
+        assert!((layout.size.width - 30.0).abs() < f32::EPSILON);
+        assert!(layout.size.height < 20.0);
+    }
+
+    #[test]
+    fn clearing_inline_styles_removes_the_style_attribute() {
+        let mut tree = tree();
+        let view = tree.create_view(0).unwrap();
+        tree.set_inline_styles(view, Some("width:10px")).unwrap();
+        tree.set_inline_styles(view, None).unwrap();
+        let node = tree.node_id(view).unwrap();
+        assert_eq!(tree.document().get(node).unwrap().attribute("style"), None);
+    }
+
+    /// Author CSS from a bundle matches the Lynx tag names verbatim — there is
+    /// no HTML document to rewrite them for.
+    #[test]
+    fn author_css_matches_lynx_tag_names_and_the_page_is_the_root() {
+        let mut tree = tree();
+        let page = tree.create_page("card", 0);
+        let text = tree.create_text(0).unwrap();
+        tree.append_element(page, text).unwrap();
+        tree.add_author_stylesheet(":root { --ink: rgb(1, 2, 3); } text { color: var(--ink); }");
+        tree.flush_element_tree();
+
+        let node = tree.node_id(text).unwrap();
+        let style = tree
+            .document()
+            .get(node)
+            .unwrap()
+            .computed_style()
+            .expect("committed style");
+        let color = style
+            .clone_color()
+            .to_color_space(dom::stylo::color::ColorSpace::Srgb);
+        let channel = |component: f32| (component * 255.0).round();
+        assert_eq!(
+            (
+                channel(color.components.0),
+                channel(color.components.1),
+                channel(color.components.2)
+            ),
+            (1.0, 2.0, 3.0),
+            "the custom property inherited from the page and resolved on text"
+        );
+    }
+
+    /// A `<text>` lays its children out rather than swallowing them: web-core
+    /// gives `x-text` a real container display, and the layout engine hides the
+    /// children of anything it treats as a leaf.
+    #[test]
+    fn a_text_element_lays_out_its_raw_text_children() {
+        let mut tree = tree();
+        let page = tree.create_page("card", 0);
+        let text = tree.create_text(0).unwrap();
+        let raw_text = tree.create_raw_text("Edit");
+        tree.append_element(page, text).unwrap();
+        tree.append_element(text, raw_text).unwrap();
+        tree.flush_element_tree();
+
+        let text_node = tree.node_id(text).unwrap();
+        let layout = tree
+            .document()
+            .rounded_layout(text_node)
+            .expect("the text element is laid out");
+        assert!(
+            layout.size.width > 0.0 && layout.size.height > 0.0,
+            "a text element with content must have a box: {layout:?}"
+        );
+    }
+
+    #[test]
+    fn event_bindings_stay_off_the_attribute_set() {
+        let mut tree = tree();
+        let view = tree.create_view(0).unwrap();
+        tree.add_event(view, "bindEvent", "tap", Some("-3:0:"))
+            .unwrap();
+
+        let events = tree.element(view).map(LynxElement::events).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "bindEvent");
+        assert_eq!(events[0].name, "tap");
+        assert_eq!(events[0].handler.as_deref(), Some("-3:0:"));
+
+        // Lynx and web-core both keep bindings out of the attribute set, so
+        // author CSS can never select on them.
+        let node = tree.node_id(view).unwrap();
+        assert_eq!(tree.document().get(node).unwrap().attributes().len(), 0);
+    }
+
+    #[test]
+    fn every_mutating_member_rejects_a_dead_handle() {
+        let mut tree = tree();
+        let ghost = 99;
+        assert_eq!(
+            tree.set_classes(ghost, Some("x")).unwrap_err(),
+            PapiError::UnknownElement(ghost)
+        );
+        assert_eq!(
+            tree.set_attribute(ghost, "text", Some("x")).unwrap_err(),
+            PapiError::UnknownElement(ghost)
+        );
+        assert_eq!(
+            tree.set_inline_styles(ghost, Some("width:1px"))
+                .unwrap_err(),
+            PapiError::UnknownElement(ghost)
+        );
+        assert_eq!(
+            tree.set_id(ghost, Some("x")).unwrap_err(),
+            PapiError::UnknownElement(ghost)
+        );
+        assert_eq!(
+            tree.set_css_id(ghost, 1).unwrap_err(),
+            PapiError::UnknownElement(ghost)
+        );
+        assert_eq!(
+            tree.add_event(ghost, "bindEvent", "tap", None).unwrap_err(),
+            PapiError::UnknownElement(ghost)
+        );
+        assert_eq!(
+            tree.element_unique_id(ghost).unwrap_err(),
+            PapiError::UnknownElement(ghost)
+        );
     }
 }

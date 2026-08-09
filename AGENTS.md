@@ -116,7 +116,18 @@ useful signal for currently-compatible versions of those libraries.
 
 - `crates/lynx-template-decoder` — decodes `.web.bundle` (magic `SDRA WROF`):
   manifest, rkyv `StyleInfo`, Lepus/JS code, custom sections. Scope: binary
-  template parsing only, no JS runtime, no CSS engine (yet).
+  template parsing only, no JS runtime, no CSS engine (yet). It does own the
+  inverse of its own decode: `StyleInfo::to_css` re-serializes the pre-parsed
+  CSS model (selectors already split into simple selectors, declarations
+  already tokenized) back to the text a CSS engine parses, the way
+  `Selector::to_css_string` already did for one selector. Value tokens
+  concatenate with nothing between them, which is exact rather than
+  approximate — the encoder drops whitespace only where the neighbouring
+  tokens re-tokenize unchanged without it, and web-core's own serializer
+  concatenates identically. None of web-core's HTML-target selector rewrites
+  (`:root` → `[part="page"]`, the Lynx→HTML tag map, the `l-css-id` scope
+  guards) are reproduced: this stack keeps Lynx tag names and makes `<page>`
+  the real document element, so `:root` and `text { … }` match directly.
 - `crates/bobcat-core` — unified native runtime core. Its always-compiled
   surface owns the protocol-only, host-injected `ResourceFetcher`, the
   ShadowRealm-inspired `ScriptEngine` protocol, and `LynxView<R, E>`, and it
@@ -165,10 +176,20 @@ useful signal for currently-compatible versions of those libraries.
   `MainThreadRuntime`
   installs the Element PAPI before evaluation, evaluates a `.web.bundle`'s
   `lepusCode.root` inside web-core's wrapper, then runs `processData` →
-  `renderPage` → `__FlushElementTree`. Five of web-core's 61 PAPI members are
-  installed (`__CreatePage`, `__CreateView`, `__AppendElement`,
-  `__DropElement`, `__FlushElementTree`); unsupported globals remain precise
-  `ReferenceError`s. Handles cross the primitives-only boundary as `u32` ids.
+  `renderPage` → `__FlushElementTree`. Sixteen of web-core's 61 PAPI members
+  are installed — the set a compiled ReactLynx bundle issues to build, style,
+  and commit its **first screen** (the table is in `lynx-element`'s crate
+  docs); unsupported globals remain precise `ReferenceError`s. Handles cross
+  the primitives-only boundary as `u32` ids. Because that boundary carries
+  primitives only, a JavaScript **prelude** evaluated in the same realm ahead
+  of the bundle flattens the object-shaped PAPI arguments (`__SetCSSId`'s
+  element list, `__SetInlineStyles`' property map — hyphenating its keys as
+  web-core does — `_ReportError`'s `Error`, `__AddEvent`'s worklet handler)
+  and defines the object globals `lynx` and `SystemInfo`; `__OnLifecycleEvent`
+  is a no-op there, its only consumer being the absent background thread. An
+  error the script *reports* instead of throwing fails `render_page` too:
+  ReactLynx catches a failing first screen, reports it, and removes the
+  children it built, so the alternative is a blank frame with no explanation.
   Core composes but does not own Lynx tag/root/UA policy; that vocabulary and
   `type ElementId = u32` remain defined by `lynx-element`.
   The resource module must not decode images/fonts/templates, upload render
@@ -234,16 +255,33 @@ useful signal for currently-compatible versions of those libraries.
   there is no one-shot startup flag. PNG readback happens only on a screenshot.
   It must not
   duplicate runtime, DOM, layout, or painting policy: missing MTS/PAPI support
-  remains a precise `bobcat-core` QuickJS error, and non-empty decoded `StyleInfo`
-  currently produces an explicit author-styles-omitted warning rather than silent
-  claimed compatibility.
+  remains a precise `bobcat-core` QuickJS error. Author CSS is mounted before
+  the script runs — the decoded `StyleInfo` re-serialized by
+  `lynx_template_decoder::StyleInfo::to_css` and handed to
+  `Engine::add_author_stylesheet` — so the first committed batch already
+  cascades against it.
 - `crates/lynx-element` — the Lynx runtime element layer, i.e. the crate the
   layering diagrams drew as the dashed "future Lynx runtime adapter" box. It
   owns exactly what `dom` is forbidden to know: Lynx tag names, Element-PAPI
   opcodes, the unique-id handle space, `<page>` root policy, view metrics and
-  stylo `Device` construction, and the Lynx UA cascade defaults
-  (`display: linear`, `box-sizing: border-box`, `overflow: hidden`, under the
-  `defaultDisplayLinear` / `defaultOverflowVisible` page-config switches).
+  stylo `Device` construction, and the Lynx UA cascade defaults. Those
+  defaults follow the **web target**, which is the compatibility target:
+  `page`/`view` are the container tags that take `display: linear` and
+  `box-sizing: border-box` under the `defaultDisplayLinear` /
+  `defaultOverflowVisible` page-config switches, while `text` and `image` are
+  row flex containers whatever the switch says (web-elements deliberately
+  keeps both out of its linear-toggle list), `image` additionally takes
+  `contain: strict` so a Lynx image is sized by CSS rather than by a bitmap's
+  natural size, and `raw-text` generates no box of its own — `display: none`,
+  promoted to `display: contents` inside a `text`, which is the web spelling
+  of the native engine's virtual layout node.
+  The **text content model** is this layer's bridge between the two: Lynx
+  carries text in a `text` *attribute on an element* (`__CreateRawText(s)` is
+  `createElement('raw-text')` plus `setAttribute('text', s)`), while `dom`
+  measures and paints text only from DOM text nodes — so writing the
+  attribute keeps it selector-visible *and* materializes one runtime-owned
+  text-node child, which carries the null unique id and therefore stays
+  outside the script's handle space (`__DropElement` skips it).
   This crate defines `type ElementId = u32` and the concrete, validated
   Element-PAPI operations on `ElementTree`; `bobcat-core` composes that type
   directly and `dom` knows neither vocabulary. Every PAPI call mutates the
@@ -621,8 +659,10 @@ useful signal for currently-compatible versions of those libraries.
   scaffolding begins, and `.claude/agents/` for the subsystem-scoped agent
   personas already set up for this work. `crates/lynx-element` and
   `crates/bobcat-core`'s feature-gated `quickjs` module are the first pieces of this
-  layer to land; the background thread, `StyleInfo` ingestion, the event
-  model, and the other 56 Element PAPI members are still ahead.
+  layer to land; the background thread, the event model, the replaced-content
+  (`<image>`) resource pipeline, an inline formatting context for `<text>`,
+  and the 45 Element PAPI members outside the first-screen set are still
+  ahead.
 
 See `docs/runtime-architecture.md` for the runtime dependency graph, feature
 boundary, private paint pipeline, and frame walkthrough;

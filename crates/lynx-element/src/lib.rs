@@ -15,22 +15,47 @@
 //! # Element PAPI scope
 //!
 //! web-core's main-thread global object carries 61 `__`-prefixed Element PAPI
-//! members. This crate implements the five that make a tree exist, mutate, retire, and
-//! become visible:
+//! members. This crate implements the set a compiled `ReactLynx` bundle issues
+//! to build, style, and commit its **first screen** — the sequence
+//! `examples/react`'s bundle actually makes, plus the two members the
+//! `web-core-e2e` fixtures add:
 //!
 //! | PAPI | Method |
 //! | --- | --- |
 //! | `__CreatePage(componentID, componentCSSID)` | [`ElementTree::create_page`] |
+//! | `__CreateElement(tagName, parentComponentUniqueID)` | [`ElementTree::create_element`] |
 //! | `__CreateView(parentComponentUniqueID)` | [`ElementTree::create_view`] |
+//! | `__CreateText(parentComponentUniqueID)` | [`ElementTree::create_text`] |
+//! | `__CreateImage(parentComponentUniqueID)` | [`ElementTree::create_image`] |
+//! | `__CreateRawText(text)` | [`ElementTree::create_raw_text`] |
+//! | `__GetElementUniqueID(element)` | [`ElementTree::element_unique_id`] |
+//! | `__SetClasses(element, classNames)` | [`ElementTree::set_classes`] |
+//! | `__SetID(element, id)` | [`ElementTree::set_id`] |
+//! | `__SetAttribute(element, key, value)` | [`ElementTree::set_attribute`] |
+//! | `__SetInlineStyles(element, value)` | [`ElementTree::set_inline_styles`] |
+//! | `__SetCSSId(elements, cssId, entryName)` | [`ElementTree::set_css_id`] |
+//! | `__AddEvent(element, eventType, eventName, handler)` | [`ElementTree::add_event`] |
 //! | `__AppendElement(parent, child)` | [`ElementTree::append_element`] |
 //! | `__DropElement(element)` | [`ElementTree::drop_element`] |
 //! | `__FlushElementTree()` | [`ElementTree::flush_element_tree`] |
 //!
-//! Everything else — attributes, classes, inline styles, `__SetCSSId`, events,
-//! the other `__Create*` constructors, querying, list callbacks — is not
-//! implemented yet. Calling into this crate is the whole Element PAPI surface
-//! that exists today; a script that needs more will fail at the missing global,
-//! not silently render wrong.
+//! Everything else — the tree-editing members an *update* needs
+//! (`__InsertElementBefore`, `__RemoveElement`, `__ReplaceElement`),
+//! components, lists, querying, animation, and the whole read side — is not
+//! implemented. Calling into this crate is the whole Element PAPI surface that
+//! exists today; a script that needs more fails at the missing global, not
+//! silently rendering wrong.
+//!
+//! # The text content model
+//!
+//! Lynx carries text in an **attribute on an element**: `__CreateRawText(s)` is
+//! `createElement('raw-text')` plus `setAttribute('text', s)`, and a `<text>`
+//! whose single child is a static string is compiled to `<text text="…"/>`
+//! instead. [`dom`], meanwhile, measures and paints text only from DOM text
+//! nodes. This crate bridges the two: writing the `text` attribute keeps it
+//! selector-visible *and* materializes the value as one runtime-owned text-node
+//! child, which carries the null unique id so it stays out of the handle space
+//! the script sees. Clearing the attribute removes that node again.
 //!
 //! # Recorded limits
 //!
@@ -46,15 +71,30 @@
 //!   private `NodeId` slots, but no stale script identity can ever name a later element.
 //! - **There is no runtime tree-depth cap in this layer.** `ElementTree` keeps no depth-specific
 //!   state or traversal helpers; hardening recursive walks belongs in `dom` and `hughie`.
-//! - **`parentComponentUniqueID` is recorded, not honored.** web-core uses it only to inherit the
-//!   parent component's CSS fragment id (`l-css-id`). Without `__SetCSSId` there is no CSS-scope
-//!   machinery to inherit into, so the argument is validated and stored on the element and
-//!   otherwise unused.
-//! - **The UA sheet covers the three documented Lynx computed defaults** (`display: linear`,
-//!   `box-sizing: border-box`, `overflow: hidden`) under their two page-config switches. Lynx's
-//!   wider default set is not modelled.
-//! - **No `rpx`/`ppx` view-unit policy yet.** The device is built from CSS pixels and a
-//!   device-pixel ratio only.
+//! - **`parentComponentUniqueID` and `componentCSSID` are recorded, not honored.** web-core uses
+//!   them to scope author rules to the components carrying a CSS fragment id. Every decoded sheet
+//!   is mounted globally here instead, which is what an `enableRemoveCSSScope` bundle wants and
+//!   wrong for a scoped one. `__SetCSSId`'s `entryName` is dropped outright — this layer has one
+//!   stylesheet set, not a multi-entry one.
+//! - **`__GetElementUniqueID` rejects a dead handle** where web-core returns `-1`. The handle *is*
+//!   the unique id here, so there is nothing to return for one that never named an element.
+//! - **Event bindings are recorded, never dispatched.** `__AddEvent` files the binding on the
+//!   element (off the attribute set, as Lynx and web-core both do) for the future event layer;
+//!   nothing reads it, and a worklet handler — an object at the runtime boundary — is recorded
+//!   without its payload.
+//! - **`<text>` has no inline formatting context.** Lynx flows a text element's `raw-text` and
+//!   nested `<text>` children into one paragraph; here each text node is its own leaf box laid out
+//!   as a flex item, so runs do not wrap together and per-run leading and trailing whitespace is
+//!   trimmed. Merging them needs a per-run paint brush that `dom` does not have yet.
+//! - **`<image>` loads nothing.** The `src` attribute is recorded and the box is sized by CSS (the
+//!   UA `contain: strict` is what keeps a Lynx image from taking a bitmap's natural size), but no
+//!   fetch, decode, or paint of the bitmap exists at any layer above this one.
+//! - **The UA sheet models the web target's tag defaults** for `page`, `view`, `text`, `raw-text`
+//!   and `image` only, under the two page-config switches. `defaultOverflowVisible` is applied to
+//!   the page as well as to views, where web-core relaxes views only. Lynx's wider default set and
+//!   its other built-in tags are not modelled.
+//! - **No `ppx` view-unit policy.** `rpx` needs none — the vendored stylo fork resolves it against
+//!   the device viewport width — but `ppx` has no counterpart in the fork.
 
 mod arena;
 mod device;
@@ -68,7 +108,7 @@ pub use dom;
 
 pub type ElementId = u32;
 
-pub use crate::arena::LynxElement;
+pub use crate::arena::{EventBinding, LynxElement};
 pub use crate::device::Viewport;
 pub use crate::tree::{ElementTree, PapiError};
 pub use crate::ua::PageConfig;
@@ -87,3 +127,26 @@ pub(crate) const PAGE_TAG: &str = "page";
 /// renders into an HTML document. There is no HTML here, so the Lynx tag name
 /// is kept verbatim — it is what author CSS from a `.web.bundle` selects on.
 pub(crate) const VIEW_TAG: &str = "view";
+
+/// The Lynx tag name `__CreateText` constructs (web-core's `x-text`).
+pub(crate) const TEXT_TAG: &str = "text";
+
+/// The Lynx tag name `__CreateRawText` constructs.
+///
+/// web-core creates a real `raw-text` element and puts the string in its `text`
+/// attribute rather than in a DOM text node
+/// (`createElementAPI.ts`'s `__CreateRawText`), so a raw text is an element
+/// here too, and [`TEXT_ATTRIBUTE`] carries its content.
+pub(crate) const RAW_TEXT_TAG: &str = "raw-text";
+
+/// The Lynx tag name `__CreateImage` constructs (web-core's `x-image`).
+pub(crate) const IMAGE_TAG: &str = "image";
+
+/// The attribute Lynx carries text content in.
+///
+/// It is a real attribute on a real element in both Lynx and web-core, not a
+/// child node — `<text text="React"/>` is how `ReactLynx` compiles a static
+/// string child. `dom` measures and paints text only from DOM text nodes, so
+/// [`ElementTree`] materializes the attribute value as one runtime-owned text
+/// node child while keeping the attribute itself selector-visible.
+pub(crate) const TEXT_ATTRIBUTE: &str = "text";

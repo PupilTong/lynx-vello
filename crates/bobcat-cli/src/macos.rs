@@ -208,9 +208,12 @@ impl<'window> MacApplication<'window> {
             .program
             .take()
             .expect("the program is consumed by the first window only");
-        program.warn_about_dropped_author_rules();
-
         let mut engine = Engine::new(program.config, css_width, css_height, scale_factor)?;
+        // Author CSS is mounted before the script runs, so the first committed
+        // batch already cascades against it.
+        if !program.author_css.is_empty() {
+            engine.add_author_stylesheet(&program.author_css);
+        }
         // The engine builds the GPU surface on this window and presents from
         // this thread — vsync interacts with the OS only inside its redraw
         // relay.

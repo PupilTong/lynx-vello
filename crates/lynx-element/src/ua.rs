@@ -40,12 +40,27 @@ impl Default for PageConfig {
 
 /// The UA stylesheet for `config`.
 ///
+/// The compatibility target is web-core, so the tag defaults below are the ones
+/// `web-elements` authors — not the native engine's, which resolves every
+/// element's `display: auto` through the page config and then measures `<text>`
+/// with a platform paragraph function instead of a box algorithm.
+///
 /// `linear-direction` already computes to `column` initially in the fork's
 /// grammar, which is Lynx's vertical default, so `display: linear` alone
-/// reproduces "linear/vertical on every element".
+/// reproduces "linear/vertical on a container".
+///
+/// The `display` values are load-bearing rather than cosmetic: the layout
+/// engine routes everything that is not flex/grid/linear/relative to a leaf,
+/// and a leaf hides its children, so a tag left at the CSS initial
+/// `display: inline` would silently drop its content.
 #[must_use]
 pub(crate) fn ua_stylesheet(config: PageConfig) -> String {
-    let display = if config.default_display_linear {
+    // `defaultDisplayLinear` toggles the *container* elements only. web-core
+    // installs that toggle on a narrower selector list than its box defaults
+    // (`web-elements`' `linear.css`) — `x-text` and `x-image` are deliberately
+    // absent from it and are row flex containers whatever the switch says.
+    // `page` and `view` are the container tags this runtime creates.
+    let container_display = if config.default_display_linear {
         "display: linear;"
     } else {
         ""
@@ -58,9 +73,28 @@ pub(crate) fn ua_stylesheet(config: PageConfig) -> String {
     // `page` is sized to the viewport: it is the containing block every other
     // element resolves percentages against, and the element `position: fixed`
     // anchors to.
+    //
+    // `image` takes `contain: strict`, which is what keeps a Lynx image sized
+    // purely by CSS: unlike a W3C `<img>`, it never takes its bitmap's natural
+    // size unless `auto-size` is set, and size containment is how web-core
+    // spells that.
+    //
+    // `raw-text` generates no box of its own — it is a virtual node the parent
+    // text consumes — so it is `display: none` outside a text and
+    // `display: contents` inside one, which splices its content into the text's
+    // own item list.
     format!(
-        "page, view {{ box-sizing: border-box; {display} {overflow} }}\n\
-         page {{ width: 100%; height: 100%; }}\n"
+        "page, view {{ box-sizing: border-box; {container_display} {overflow} }}\n\
+         page {{ width: 100%; height: 100%; }}\n\
+         text, image {{ display: flex; box-sizing: border-box; position: relative; \
+         border-width: 0; border-style: solid; overflow: clip; \
+         min-width: 0; min-height: 0; }}\n\
+         text {{ align-items: stretch; overflow-wrap: break-word; color: initial; }}\n\
+         text > text {{ color: inherit; }}\n\
+         image {{ contain: strict; object-fit: fill; flex-direction: row; \
+         align-items: center; justify-content: center; }}\n\
+         raw-text {{ display: none; white-space-collapse: preserve-breaks; }}\n\
+         text > raw-text {{ display: contents; }}\n"
     )
 }
 

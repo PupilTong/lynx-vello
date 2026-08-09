@@ -84,7 +84,7 @@ still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
 | `dom::render` (the DOM-free floor) | Opaque `ImageStore`; Vello version/re-export boundary; headed/headless GPU submission and readback helpers | `Document`, `NodeId`, computed styles, layout, paint order, Lynx runtime vocabulary, or DOM mutation policy |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, and the maintained Lynx CSS extension grammar behind the `lynx` feature | Runtime protocol, document ownership, bundle ingestion, or host policy |
 | `lynx-element` (the runtime adapter) | `ElementId = u32`; concrete validated Element-PAPI operations; an independent context-owned `Vec<Option<LynxElement>>` with monotone, never-reused ids, a permanent null slot at index 0, and permanent retirement tombstones; that same unique id carried by each DOM node; `ElementTree`; `<page>` root policy; view metrics (`Viewport`; the stylo device profile is built by `dom::Device`); UA stylesheet generation | Render/freshness/scene/image forwarding in its default API, Bobcat, QuickJS, a replaceable element-host trait, a direct render-floor dependency, a second DOM, matcher, cascade, layout/paint algorithms, or public `PaintOrder` |
-| Still unowned | Lynx event payload; decoded `StyleInfo` lowering and CSS-scope policy; `rpx` view units; the remaining 56 Element PAPI members | — |
+| Still unowned | Lynx event dispatch; CSS-scope (`cssId`) policy; `ppx` view units; the Element PAPI members outside the first-screen set | — |
 
 ## Style lifecycle
 
@@ -133,16 +133,21 @@ What that covers, and what it does not:
   `LynxElement`, and untrusted-handle validation on every PAPI entry point;
 - direct `u32` JavaScript handles and explicit `__DropElement` retirement of
   DOM subtrees into permanent `None` arena tombstones;
-- five Element PAPI members — `__CreatePage`, `__CreateView`,
-  `__AppendElement`, `__DropElement`, `__FlushElementTree` — and web-core's
-  boot sequence.
+- the first-screen Element PAPI set — the members a compiled ReactLynx bundle
+  issues to build, style, and commit its first screen, enumerated in
+  `lynx-element`'s crate docs — and web-core's boot sequence;
+- the Lynx text content model: a `text` attribute materialized as one
+  runtime-owned DOM text node, so `dom` (which measures and paints only text
+  nodes) sees the content Lynx keeps in an attribute.
 
 **Still open**
 
-- `.web.bundle` `StyleInfo` decoding exists, but no runtime layer lowers and
-  mounts those decoded rules; the seam is
-  `ElementTree::add_author_stylesheet`;
-- viewport-relative `rpx`/`ppx` units have no owner;
+- CSS-scope policy: `lynx_template_decoder::StyleInfo::to_css` lowers the
+  decoded rules and `bobcat-cli` mounts them through
+  `ElementTree::add_author_stylesheet`, but every `cssId` lands in one global
+  sheet — correct for an `enableRemoveCSSScope` bundle, wrong for a scoped one;
+- `ppx` units have no owner (`rpx` needs none: the fork resolves it against the
+  device viewport width);
 - event registrations, CSS-scope (`__SetCSSId`) ingestion, and the remaining
   56 PAPI members have no adapter;
 - a generic external `ScriptEngine` does not yet have a host-function

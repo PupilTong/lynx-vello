@@ -15,6 +15,27 @@ fn arena_index(id: ElementId) -> Option<usize> {
     (index != 0).then_some(index)
 }
 
+/// One event binding recorded by `__AddEvent`.
+///
+/// Lynx keeps event bindings on the element itself rather than in the
+/// attribute set, and web-core does the same (its bindings live in the
+/// WASM element context, keyed by unique id, never as DOM attributes) — so
+/// they must not become selector-visible here either.
+///
+/// The handler is the framework's cross-thread identifier string (`ReactLynx`
+/// emits values like `"-3:0:"`). A `None` handler is web-core's "worklet
+/// handler" case, which arrives as an object rather than a string; the
+/// binding is still recorded, without the worklet payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventBinding {
+    /// `bindEvent`, `catchEvent`, `capture-bind`, `capture-catch`.
+    pub event_type: String,
+    /// The Lynx event name, e.g. `tap`.
+    pub name: String,
+    /// The framework's cross-thread handler identifier.
+    pub handler: Option<String>,
+}
+
 /// One Lynx runtime element.
 ///
 /// The actual DOM node allocation remains owned by `Document<ElementId>`:
@@ -30,6 +51,16 @@ pub struct LynxElement {
     parent_component: ElementId,
     /// The `componentCSSID` supplied when a page is created.
     component_css: i32,
+    /// The runtime-owned DOM text node carrying this element's `text`
+    /// attribute value.
+    ///
+    /// Lynx puts a text element's content in an attribute; `dom` measures and
+    /// paints text only from DOM text nodes, so the attribute is materialized
+    /// as one child node this layer owns. It is not a Lynx element: it carries
+    /// the null unique id and is invisible to the Element PAPI.
+    text_node: Option<NodeId>,
+    /// `__AddEvent` bindings, in call order. Nothing dispatches them yet.
+    events: Vec<EventBinding>,
 }
 
 impl LynxElement {
@@ -59,6 +90,34 @@ impl LynxElement {
     /// page element.
     pub(crate) fn set_component_css_id(&mut self, component_css_id: i32) {
         self.component_css = component_css_id;
+    }
+
+    /// The runtime-owned text node materializing this element's `text`
+    /// attribute, once one exists.
+    #[must_use]
+    pub(crate) const fn text_node(&self) -> Option<NodeId> {
+        self.text_node
+    }
+
+    pub(crate) const fn set_text_node(&mut self, node: Option<NodeId>) {
+        self.text_node = node;
+    }
+
+    /// The `__AddEvent` bindings recorded on this element, in call order.
+    #[must_use]
+    pub fn events(&self) -> &[EventBinding] {
+        &self.events
+    }
+
+    /// Records one binding, replacing an existing one for the same
+    /// type-and-name pair the way a re-render's repeated `__AddEvent` does.
+    pub(crate) fn set_event(&mut self, binding: EventBinding) {
+        match self.events.iter_mut().find(|existing| {
+            existing.event_type == binding.event_type && existing.name == binding.name
+        }) {
+            Some(existing) => *existing = binding,
+            None => self.events.push(binding),
+        }
     }
 }
 
@@ -104,6 +163,8 @@ impl ElementArena {
             node: node_id,
             parent_component: parent_component_unique_id,
             component_css: component_css_id,
+            text_node: None,
+            events: Vec::new(),
         }));
         unique_id
     }

@@ -1,6 +1,7 @@
 //! Decoder for the Lynx **web** binary template (`.web.bundle`).
 
 pub mod css_property;
+mod css_text;
 pub mod error;
 mod reader;
 mod sections;

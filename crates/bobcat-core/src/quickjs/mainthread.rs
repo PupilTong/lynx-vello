@@ -44,26 +44,45 @@
 //! uncommitted at the end of the evaluation — the presenter's
 //! `has_uncommitted_mutations` gate keeps that state off the screen.
 //!
+//! # The prelude: object-shaped arguments over a primitives-only boundary
+//!
+//! The `QuickJS` host-function boundary carries primitives only — an object,
+//! array or function passed to one is rejected rather than lossily converted.
+//! Several Element PAPI members take object-shaped arguments anyway, and two of
+//! the main-thread globals *are* objects. A small JavaScript prelude, evaluated
+//! in the same realm before the bundle, closes that gap: it wraps the host
+//! functions that need an argument flattened (`__SetCSSId`'s element list,
+//! `__SetInlineStyles`' property map, `_ReportError`'s `Error`,
+//! `__AddEvent`'s worklet handler) and defines `lynx` and `SystemInfo` in
+//! JavaScript. web-core installs its own globals as closures over the realm's
+//! global object for the same reason; the bundle sees the same names either
+//! way.
+//!
 //! # Recorded limits
 //!
-//! - **Five Element PAPI members are installed** — `__CreatePage`, `__CreateView`,
-//!   `__AppendElement`, `__DropElement`, `__FlushElementTree` (see `lynx-element`'s crate docs). A
-//!   bundle that reaches for anything else gets a `ReferenceError` naming the missing global, which
-//!   is the intended failure: a silently wrong render would be worse.
+//! - **The installed Element PAPI is the first-screen set** (see `lynx-element`'s crate docs for
+//!   the table). A bundle that reaches for anything else gets a `ReferenceError` naming the missing
+//!   global, which is the intended failure: a silently wrong render would be worse.
 //! - **Element handles cross as `u32` unique-id numbers.** `__DropElement` asks the recorder to
 //!   retire the handle; this layer does not add an object wrapper or GC policy around those ids.
-//! - **The non-element main-thread globals are absent** (`lynx`, `SystemInfo`, `__globalProps`,
-//!   `_ReportError`, `__OnLifecycleEvent`, `__LoadLepusChunk`, `_I18nResourceTranslation`,
-//!   `_AddEventListener`, `__QueryComponent`).
+//! - **`lynx` carries `__initData` and `SystemInfo` only.** `performance`, `getJSContext`,
+//!   `getNative`, `queueMicrotask`, `requireModule` and the timer family are absent; a card root
+//!   guards every one of them, and inventing a no-op would claim behavior that does not exist.
+//!   `SystemInfo.lynxSdkVersion` is web-core's own `"3.0"`, and `pixelWidth`/`pixelHeight` are this
+//!   view's physical size — a native embedder has no separate screen to measure.
+//! - **`__OnLifecycleEvent` discards its argument.** Its only consumer is the background thread.
+//! - **The remaining non-element globals are absent** (`__globalProps`, `_SetSourceMapRelease`,
+//!   `__LoadLepusChunk`, `_I18nResourceTranslation`, `_AddEventListener`, `__QueryComponent`).
 //! - **No background thread.** web-core starts the BTS worker between `processData` and
 //!   `renderPage`; there is no second realm here, so `/app-service.js` is never loaded and
 //!   `callLepusMethod` has no caller.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::fmt;
 use std::rc::Rc;
 
-use lynx_element::{ElementId, ElementTree, PapiError};
+use lynx_element::{ElementId, ElementTree, PapiError, Viewport};
 use quickjs_rust_bridge::{self as quickjs, HostFunctionError, HostValue};
 
 use super::{QuickJsInitializationError, QuickJsScriptEngine};
@@ -73,6 +92,8 @@ use crate::script::ScriptError;
 const MAIN_THREAD_SOURCE_NAME: &str = "main-thread.js";
 /// The source name for the boot sequence this module drives.
 const BOOT_SOURCE_NAME: &str = "<lynx boot>";
+/// The source name for the prelude installed ahead of the bundle.
+const PRELUDE_SOURCE_NAME: &str = "<lynx prelude>";
 
 /// The exact wrapper web-core's decode worker builds around every lepus chunk.
 const WRAPPER_PREFIX: &str = "//# allFunctionsCalledOnLoad\n(function(){ \"use strict\"; \
@@ -96,6 +117,112 @@ const BOOT_SEQUENCE: &str = r#"(function () {
   renderPage(data);
   __FlushElementTree();
 })()"#;
+
+/// The realm prelude: the main-thread globals that are not plain primitive
+/// calls.
+///
+/// The host-function boundary carries primitives only — a JavaScript object,
+/// array or function passed to one is rejected rather than lossily converted
+/// (`quickjs_rust_bridge`'s `HostValue`). Several Element PAPI members take
+/// object-shaped arguments anyway, and two main-thread globals *are* objects.
+/// This prelude is where that gap closes: it runs in the same realm before the
+/// bundle, wraps the host functions that need object arguments flattened, and
+/// defines the object globals in JavaScript, which is what web-core does too
+/// (it installs closures over `mtsRealm.globalWindow`).
+///
+/// Each wrapper captures the host function and replaces the global, so the
+/// bundle sees exactly the PAPI names web-core exposes.
+fn prelude_source(viewport: Viewport) -> String {
+    // `systemInfoBase` plus the view metrics, matching web-core's
+    // `createSystemInfo`. Recorded limit: `pixelWidth`/`pixelHeight` are this
+    // view's physical size — a native embedder has no separate screen to
+    // measure, where a browser reads `window.screen`.
+    let pixel_ratio = viewport.device_pixel_ratio;
+    let pixel_width = viewport.width * pixel_ratio;
+    let pixel_height = viewport.height * pixel_ratio;
+    format!(
+        r#"(function () {{
+  "use strict";
+  var global = globalThis;
+
+  var hostSetInlineStyles = global.__SetInlineStyles;
+  global.__SetInlineStyles = function (element, value) {{
+    if (value === null || value === undefined || value === "") {{
+      return hostSetInlineStyles(element, null);
+    }}
+    if (typeof value === "string") {{
+      return hostSetInlineStyles(element, value);
+    }}
+    var css = "";
+    var keys = Object.keys(value);
+    for (var i = 0; i < keys.length; i++) {{
+      var declaration = value[keys[i]];
+      if (declaration === null || declaration === undefined) continue;
+      css += hyphenate(keys[i]) + ":" + declaration + ";";
+    }}
+    return hostSetInlineStyles(element, css);
+  }};
+
+  // Property names in the object form arrive in the JavaScript spelling
+  // (`backgroundColor`); web-core hyphenates them the same way before writing
+  // the style attribute.
+  function hyphenate(name) {{
+    var out = "";
+    for (var i = 0; i < name.length; i++) {{
+      var character = name[i];
+      var lower = character.toLowerCase();
+      if (character !== lower) out += "-";
+      out += lower;
+    }}
+    return out;
+  }}
+
+  var hostSetCSSId = global.__SetCSSId;
+  global.__SetCSSId = function (elements, cssId, entryName) {{
+    var list = Array.isArray(elements) ? elements : [elements];
+    for (var i = 0; i < list.length; i++) {{
+      hostSetCSSId(list[i], cssId === null || cssId === undefined ? 0 : cssId);
+    }}
+  }};
+
+  var hostAddEvent = global.__AddEvent;
+  global.__AddEvent = function (element, eventType, eventName, handler) {{
+    return hostAddEvent(
+      element,
+      eventType,
+      eventName,
+      typeof handler === "string" ? handler : null
+    );
+  }};
+
+  var hostReportError = global._ReportError;
+  global._ReportError = function (error, info) {{
+    // QuickJS puts only the frames in `stack`, so the message has to be taken
+    // from the error itself.
+    var text = String(error);
+    if (error && error.stack) text += "\n" + error.stack;
+    hostReportError(
+      text,
+      info && info.errorCode !== undefined ? String(info.errorCode) : null
+    );
+  }};
+
+  // The background thread is the only consumer of lifecycle events, and there
+  // is none here, so this discards its argument rather than crossing the
+  // boundary with it (recorded limit).
+  global.__OnLifecycleEvent = function () {{}};
+
+  global.SystemInfo = {{
+    platform: "web",
+    lynxSdkVersion: "3.0",
+    pixelRatio: {pixel_ratio},
+    pixelWidth: {pixel_width},
+    pixelHeight: {pixel_height}
+  }};
+  global.lynx = {{ __initData: {{}}, SystemInfo: global.SystemInfo }};
+}})()"#
+    )
+}
 
 /// Why running a main-thread script failed.
 #[derive(Debug)]
@@ -177,11 +304,21 @@ impl TreeHandle {
     }
 }
 
+/// Errors the main-thread script reported through `_ReportError` rather than
+/// throwing.
+///
+/// `ReactLynx`'s render wraps the whole first screen in a `try`/`catch` whose
+/// handler calls `lynx.reportError` and then *removes the rendered children*,
+/// so a reported error during the boot means the first screen did not render.
+/// Collecting them lets that surface as a failure instead of an empty frame.
+type ReportedErrors = Rc<RefCell<Vec<String>>>;
+
 /// One `QuickJS` realm carrying the Lynx Element PAPI over the tree
 /// hand-off slot.
 pub struct MainThreadRuntime {
     engine: QuickJsScriptEngine,
     tree: Rc<RefCell<TreeHandle>>,
+    reported_errors: ReportedErrors,
 }
 
 impl fmt::Debug for MainThreadRuntime {
@@ -200,12 +337,33 @@ impl MainThreadRuntime {
     /// learn a committed frame is available.
     pub fn new(
         elements: SharedTree,
+        viewport: Viewport,
         on_flush: impl Fn() + 'static,
     ) -> Result<Self, QuickJsInitializationError> {
         let mut engine = QuickJsScriptEngine::new()?;
-        let tree = install_element_papi(&mut engine.realm, elements, on_flush)
-            .map_err(QuickJsInitializationError::from_quickjs)?;
-        Ok(Self { engine, tree })
+        let reported_errors = ReportedErrors::default();
+        let tree = install_element_papi(
+            &mut engine.realm,
+            elements,
+            Rc::clone(&reported_errors),
+            on_flush,
+        )
+        .map_err(QuickJsInitializationError::from_quickjs)?;
+        let mut runtime = Self {
+            engine,
+            tree,
+            reported_errors,
+        };
+        // The prelude closes over the host functions installed above, so it runs
+        // after them and before anything else can observe the globals.
+        runtime
+            .evaluate(
+                &prelude_source(viewport),
+                PRELUDE_SOURCE_NAME,
+                "installing the main-thread globals",
+            )
+            .map_err(|error| QuickJsInitializationError::from_message(error.to_string()))?;
+        Ok(runtime)
     }
 
     /// Evaluates a `.web.bundle`'s `lepusCode.root` in web-core's wrapper.
@@ -223,8 +381,22 @@ impl MainThreadRuntime {
 
     /// Runs web-core's post-evaluation sequence: `processData` (when the
     /// bundle defines one), then `renderPage`, then `__FlushElementTree`.
+    ///
+    /// An error the script *reported* rather than threw fails this call too:
+    /// `ReactLynx` catches a failing first render, reports it, and removes the
+    /// children it had built, so the alternative is an empty frame and no
+    /// explanation.
     pub fn render_page(&mut self) -> Result<(), MainThreadError> {
-        self.evaluate(BOOT_SEQUENCE, BOOT_SOURCE_NAME, "rendering the page")
+        self.evaluate(BOOT_SEQUENCE, BOOT_SOURCE_NAME, "rendering the page")?;
+        let reported = std::mem::take(&mut *self.reported_errors.borrow_mut());
+        if reported.is_empty() {
+            Ok(())
+        } else {
+            Err(MainThreadError {
+                message: format!("rendering the page: {}", reported.join("; ")),
+                location: None,
+            })
+        }
     }
 
     /// [`Self::evaluate_main_thread_script`] followed by [`Self::render_page`]
@@ -269,16 +441,36 @@ impl MainThreadRuntime {
 fn install_element_papi(
     realm: &mut quickjs::Realm,
     elements: SharedTree,
+    reported_errors: ReportedErrors,
     on_flush: impl Fn() + 'static,
 ) -> Result<Rc<RefCell<TreeHandle>>, quickjs::Error> {
     let handle = Rc::new(RefCell::new(TreeHandle {
         slot: elements,
         taken: None,
     }));
+    install_constructors(realm, &handle)?;
+    install_property_setters(realm, &handle)?;
+    install_tree_editors(realm, &handle, on_flush)?;
 
+    // `_ReportError(error, info)` — the prelude has already reduced the `Error`
+    // object to its message and stack text.
+    realm.define_global_function("_ReportError", 2, move |arguments| {
+        let message = string_argument("_ReportError", arguments, 0)?;
+        reported_errors.borrow_mut().push(message.to_owned());
+        Ok(HostValue::Undefined)
+    })?;
+
+    Ok(handle)
+}
+
+/// The `__Create*` members: every one returns a fresh unique id.
+fn install_constructors(
+    realm: &mut quickjs::Realm,
+    handle: &Rc<RefCell<TreeHandle>>,
+) -> Result<(), quickjs::Error> {
     // `__CreatePage(componentID, componentCSSID)` — idempotent; returns the
     // page's unique id.
-    let tree = Rc::clone(&handle);
+    let tree = Rc::clone(handle);
     realm.define_global_function("__CreatePage", 2, move |arguments| {
         let component_id = string_argument("__CreatePage", arguments, 0)?;
         let component_css_id = i32_argument("__CreatePage", arguments, 1)?;
@@ -291,7 +483,7 @@ fn install_element_papi(
 
     // `__CreateView(parentComponentUniqueID)` — returns the new view's unique
     // id. The argument is `0` when there is no parent component.
-    let tree = Rc::clone(&handle);
+    let tree = Rc::clone(handle);
     realm.define_global_function("__CreateView", 1, move |arguments| {
         let parent_component = u32_argument("__CreateView", arguments, 0)?;
         let id = tree
@@ -302,8 +494,162 @@ fn install_element_papi(
         Ok(unique_id_value(id))
     })?;
 
+    // `__CreateElement(tagName, parentComponentUniqueID)`.
+    let tree = Rc::clone(handle);
+    realm.define_global_function("__CreateElement", 2, move |arguments| {
+        let tag = string_argument("__CreateElement", arguments, 0)?;
+        let parent_component = u32_argument("__CreateElement", arguments, 1)?;
+        let id = tree
+            .borrow_mut()
+            .tree()
+            .create_element(tag, parent_component)
+            .map_err(papi_error)?;
+        Ok(unique_id_value(id))
+    })?;
+
+    // `__CreateText(parentComponentUniqueID)`.
+    let tree = Rc::clone(handle);
+    realm.define_global_function("__CreateText", 1, move |arguments| {
+        let parent_component = u32_argument("__CreateText", arguments, 0)?;
+        let id = tree
+            .borrow_mut()
+            .tree()
+            .create_text(parent_component)
+            .map_err(papi_error)?;
+        Ok(unique_id_value(id))
+    })?;
+
+    // `__CreateImage(parentComponentUniqueID)`.
+    let tree = Rc::clone(handle);
+    realm.define_global_function("__CreateImage", 1, move |arguments| {
+        let parent_component = u32_argument("__CreateImage", arguments, 0)?;
+        let id = tree
+            .borrow_mut()
+            .tree()
+            .create_image(parent_component)
+            .map_err(papi_error)?;
+        Ok(unique_id_value(id))
+    })?;
+
+    // `__CreateRawText(text)` — takes the text itself, not a parent component.
+    let tree = Rc::clone(handle);
+    realm.define_global_function("__CreateRawText", 1, move |arguments| {
+        let text = string_argument("__CreateRawText", arguments, 0)?;
+        let id = tree.borrow_mut().tree().create_raw_text(text);
+        Ok(unique_id_value(id))
+    })?;
+
+    Ok(())
+}
+
+/// The members that write an element's own selector-visible state, plus the
+/// handle read `__GetElementUniqueID`.
+fn install_property_setters(
+    realm: &mut quickjs::Realm,
+    handle: &Rc<RefCell<TreeHandle>>,
+) -> Result<(), quickjs::Error> {
+    // `__GetElementUniqueID(element)` — the handle is the unique id, so this
+    // is its liveness check.
+    let tree = Rc::clone(handle);
+    realm.define_global_function("__GetElementUniqueID", 1, move |arguments| {
+        let id = element_argument("__GetElementUniqueID", arguments, 0)?;
+        let unique_id = tree
+            .borrow_mut()
+            .tree()
+            .element_unique_id(id)
+            .map_err(papi_error)?;
+        Ok(unique_id_value(unique_id))
+    })?;
+
+    // `__SetClasses(element, classNames)`.
+    let tree = Rc::clone(handle);
+    realm.define_global_function("__SetClasses", 2, move |arguments| {
+        let id = element_argument("__SetClasses", arguments, 0)?;
+        let classes = value_argument("__SetClasses", arguments, 1)?;
+        tree.borrow_mut()
+            .tree()
+            .set_classes(id, classes.as_deref())
+            .map_err(papi_error)?;
+        Ok(HostValue::Undefined)
+    })?;
+
+    // `__SetID(element, id)`.
+    let tree = Rc::clone(handle);
+    realm.define_global_function("__SetID", 2, move |arguments| {
+        let id = element_argument("__SetID", arguments, 0)?;
+        let value = value_argument("__SetID", arguments, 1)?;
+        tree.borrow_mut()
+            .tree()
+            .set_id(id, value.as_deref())
+            .map_err(papi_error)?;
+        Ok(HostValue::Undefined)
+    })?;
+
+    // `__SetAttribute(element, key, value)`.
+    let tree = Rc::clone(handle);
+    realm.define_global_function("__SetAttribute", 3, move |arguments| {
+        let id = element_argument("__SetAttribute", arguments, 0)?;
+        let name = string_argument("__SetAttribute", arguments, 1)?;
+        let value = value_argument("__SetAttribute", arguments, 2)?;
+        tree.borrow_mut()
+            .tree()
+            .set_attribute(id, name, value.as_deref())
+            .map_err(papi_error)?;
+        Ok(HostValue::Undefined)
+    })?;
+
+    // `__SetInlineStyles(element, value)` — the prelude has already flattened
+    // the object form into a declaration block string.
+    let tree = Rc::clone(handle);
+    realm.define_global_function("__SetInlineStyles", 2, move |arguments| {
+        let id = element_argument("__SetInlineStyles", arguments, 0)?;
+        let css = value_argument("__SetInlineStyles", arguments, 1)?;
+        tree.borrow_mut()
+            .tree()
+            .set_inline_styles(id, css.as_deref())
+            .map_err(papi_error)?;
+        Ok(HostValue::Undefined)
+    })?;
+
+    // `__SetCSSId(element, cssId)` — the prelude loops the element list over
+    // this one-element form.
+    let tree = Rc::clone(handle);
+    realm.define_global_function("__SetCSSId", 2, move |arguments| {
+        let id = element_argument("__SetCSSId", arguments, 0)?;
+        let css_id = i32_argument("__SetCSSId", arguments, 1)?;
+        tree.borrow_mut()
+            .tree()
+            .set_css_id(id, css_id)
+            .map_err(papi_error)?;
+        Ok(HostValue::Undefined)
+    })?;
+
+    // `__AddEvent(element, eventType, eventName, handler)` — the prelude has
+    // already reduced a worklet handler object to `null`.
+    let tree = Rc::clone(handle);
+    realm.define_global_function("__AddEvent", 4, move |arguments| {
+        let id = element_argument("__AddEvent", arguments, 0)?;
+        let event_type = string_argument("__AddEvent", arguments, 1)?;
+        let name = string_argument("__AddEvent", arguments, 2)?;
+        let handler = value_argument("__AddEvent", arguments, 3)?;
+        tree.borrow_mut()
+            .tree()
+            .add_event(id, event_type, name, handler.as_deref())
+            .map_err(papi_error)?;
+        Ok(HostValue::Undefined)
+    })?;
+
+    Ok(())
+}
+
+/// The members that change the tree's shape, plus the commit boundary.
+fn install_tree_editors(
+    realm: &mut quickjs::Realm,
+    handle: &Rc<RefCell<TreeHandle>>,
+    on_flush: impl Fn() + 'static,
+) -> Result<(), quickjs::Error> {
     // `__AppendElement(parent, child)` — returns the child unique id.
-    let tree = Rc::clone(&handle);
+    let tree = Rc::clone(handle);
     realm.define_global_function("__AppendElement", 2, move |arguments| {
         let parent = element_argument("__AppendElement", arguments, 0)?;
         let child = element_argument("__AppendElement", arguments, 1)?;
@@ -318,7 +664,7 @@ fn install_element_papi(
     // `__DropElement(element)` — repeated drops stay no-ops (the handle is
     // already retired); dropping the permanent page element is a precise
     // error.
-    let tree = Rc::clone(&handle);
+    let tree = Rc::clone(handle);
     realm.define_global_function("__DropElement", 1, move |arguments| {
         let id = element_argument("__DropElement", arguments, 0)?;
         match tree.borrow_mut().tree().drop_element(id) {
@@ -333,14 +679,14 @@ fn install_element_papi(
     // presenter is notified. An empty batch still commits — a flush is a
     // style + layout pass even with nothing recorded. web-core ignores the
     // optional sub-tree and options arguments on the web target too.
-    let tree = Rc::clone(&handle);
+    let tree = Rc::clone(handle);
     realm.define_global_function("__FlushElementTree", 0, move |_arguments| {
         tree.borrow_mut().flush();
         on_flush();
         Ok(HostValue::Undefined)
     })?;
 
-    Ok(handle)
+    Ok(())
 }
 
 /// A unique id crossing the primitives-only native host boundary.
@@ -404,6 +750,47 @@ fn i32_argument(
         _ => Err(HostFunctionError::new(format!(
             "{function} expects an integer for argument {index}"
         ))),
+    }
+}
+
+/// Reads an argument the way web-core's `String(value)` coercion does, keeping
+/// the nullish case distinct because it removes rather than assigns.
+///
+/// Objects, arrays and functions never reach here: the host boundary rejects
+/// them, and the prelude flattens the PAPI arguments that legitimately carry
+/// one.
+fn value_argument<'a>(
+    function: &str,
+    arguments: &'a [HostValue],
+    index: usize,
+) -> Result<Option<Cow<'a, str>>, HostFunctionError> {
+    match argument(arguments, index) {
+        HostValue::Undefined | HostValue::Null => Ok(None),
+        HostValue::String(value) => Ok(Some(Cow::Borrowed(value.as_str()))),
+        HostValue::Boolean(value) => Ok(Some(Cow::Owned(value.to_string()))),
+        HostValue::Number(value) => Ok(Some(Cow::Owned(number_to_string(*value)))),
+        _ => Err(HostFunctionError::new(format!(
+            "{function} cannot convert argument {index} to a string"
+        ))),
+    }
+}
+
+/// `String(number)` for the values that reach an attribute or a declaration.
+///
+/// `f64::to_string` already prints an integral value without a fractional part,
+/// which is what JavaScript does; the exponent thresholds differ, and no
+/// framework-emitted attribute value reaches them.
+fn number_to_string(value: f64) -> String {
+    if value.is_nan() {
+        "NaN".to_owned()
+    } else if value.is_infinite() {
+        if value.is_sign_negative() {
+            "-Infinity".to_owned()
+        } else {
+            "Infinity".to_owned()
+        }
+    } else {
+        value.to_string()
     }
 }
 

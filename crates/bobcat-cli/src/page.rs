@@ -15,7 +15,9 @@ pub(crate) struct Program {
     pub(crate) input: String,
     pub(crate) source: String,
     pub(crate) config: PageConfig,
-    author_rule_count: usize,
+    /// The decoded `StyleInfo` section re-serialized as author CSS, empty when
+    /// the bundle carried no rules.
+    pub(crate) author_css: String,
 }
 
 impl Program {
@@ -41,29 +43,21 @@ impl Program {
             default_overflow_visible: template.config_flag("defaultOverflowVisible"),
             enable_css_selector: template.config_flag("enableCSSSelector"),
         };
-        let author_rule_count = template.style_info.as_ref().map_or(0, |style_info| {
-            style_info
-                .css_id_to_style_sheet
-                .values()
-                .map(|sheet| sheet.rules.len())
-                .sum()
-        });
+        // The `StyleInfo` section is pre-parsed CSS, not CSS source; the
+        // decoder re-serializes its own model, and the engine's CSS engine
+        // parses the text. Every `cssId` lands in one stylesheet — correct for
+        // the `enableRemoveCSSScope` bundles today's toolchain emits, and the
+        // recorded limit for scoped ones.
+        let author_css = template
+            .style_info
+            .as_ref()
+            .map(lynx_template_decoder::StyleInfo::to_css)
+            .unwrap_or_default();
         Ok(Self {
             input: input.to_string(),
             source,
             config,
-            author_rule_count,
+            author_css,
         })
-    }
-
-    /// Reports decoded author rules the runtime cannot ingest yet.
-    pub(crate) fn warn_about_dropped_author_rules(&self) {
-        if self.author_rule_count != 0 {
-            eprintln!(
-                "bobcat: warning: {} contains {} decoded author rule(s), but StyleInfo ingestion \
-                 is not implemented yet; author styles are omitted",
-                self.input, self.author_rule_count
-            );
-        }
     }
 }

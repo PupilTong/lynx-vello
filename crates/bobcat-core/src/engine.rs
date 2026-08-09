@@ -671,8 +671,9 @@ impl<'window, W: Window> Engine<'window, W> {
     /// the shared tree. The headless composition.
     #[cfg(feature = "quickjs")]
     pub fn run_script(&mut self, source: &str) -> Result<(), ScriptRunError> {
-        let mut runtime = crate::quickjs::MainThreadRuntime::new(self.elements.clone(), || {})
-            .map_err(ScriptRunError::Initialization)?;
+        let mut runtime =
+            crate::quickjs::MainThreadRuntime::new(self.elements.clone(), self.viewport, || {})
+                .map_err(ScriptRunError::Initialization)?;
         let result = runtime
             .run_main_thread_script(source)
             .map_err(ScriptRunError::Script);
@@ -693,16 +694,18 @@ impl<'window, W: Window> Engine<'window, W> {
         let elements = self.elements.clone();
         let sender = self.message_sender.clone();
         let on_flush = self.frames.clone();
+        let viewport = self.viewport;
         std::thread::Builder::new()
             .name("bobcat-main".to_owned())
             .spawn(move || {
                 let result = (|| {
-                    let mut runtime = crate::quickjs::MainThreadRuntime::new(elements, move || {
-                        if let Some(frames) = &on_flush {
-                            frames.request_frame();
-                        }
-                    })
-                    .map_err(ScriptRunError::Initialization)?;
+                    let mut runtime =
+                        crate::quickjs::MainThreadRuntime::new(elements, viewport, move || {
+                            if let Some(frames) = &on_flush {
+                                frames.request_frame();
+                            }
+                        })
+                        .map_err(ScriptRunError::Initialization)?;
                     runtime
                         .run_main_thread_script(&source)
                         .map_err(ScriptRunError::Script)

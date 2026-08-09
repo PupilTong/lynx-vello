@@ -13,7 +13,7 @@ const VIEWPORT: Viewport = Viewport::new(393.0, 727.0);
 /// slot per batch and every `__FlushElementTree` puts it back committed.
 fn runtime() -> (MainThreadRuntime, SharedTree) {
     let elements = SharedTree::new(ElementTree::new(VIEWPORT, PageConfig::default()));
-    let runtime = MainThreadRuntime::new(elements.clone(), || {}).expect("QuickJS realm");
+    let runtime = MainThreadRuntime::new(elements.clone(), VIEWPORT, || {}).expect("QuickJS realm");
     (runtime, elements)
 }
 
@@ -282,6 +282,10 @@ fn non_numeric_handles_are_rejected_rather_than_coerced() {
     assert!(error.to_string().contains("__AppendElement"), "{error}");
 }
 
+/// A PAPI member the runtime does not implement stays a precise
+/// `ReferenceError` naming it, rather than a silent no-op that would render
+/// something wrong. `__CreateComponent` stands in for the whole unimplemented
+/// remainder; swap it for another one if it ever lands.
 #[test]
 fn a_missing_papi_global_fails_loudly() {
     let mut runtime = bare_runtime();
@@ -290,12 +294,12 @@ fn a_missing_papi_global_fails_loudly() {
             r"
             globalThis.renderPage = function () {
               __CreatePage('card', 0);
-              __SetAttribute(1, 'name', 'value');
+              __CreateComponent(0, 'id', 0, 'entry', 'name', 'path', null, null);
             };
             ",
         )
         .expect_err("an unimplemented PAPI member");
-    assert!(error.to_string().contains("__SetAttribute"), "{error}");
+    assert!(error.to_string().contains("__CreateComponent"), "{error}");
 }
 
 #[test]
@@ -419,4 +423,222 @@ fn a_run_that_exceeds_the_job_limit_finishes_before_the_next_one_starts() {
         elements.page().is_some(),
         "the boot sequence still ran to completion"
     );
+}
+
+/// The main-thread global object web-core installs alongside the Element PAPI.
+///
+/// A `ReactLynx` card root reaches for `lynx` and `SystemInfo` during its own
+/// module initialization, before `renderPage` exists, so these are boot
+/// requirements rather than conveniences.
+#[test]
+fn the_main_thread_globals_are_installed_before_the_bundle_runs() {
+    let (mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            if (typeof lynx !== 'object') throw new Error('lynx is ' + typeof lynx);
+            if (typeof SystemInfo !== 'object') throw new Error('SystemInfo missing');
+            if (lynx.SystemInfo !== SystemInfo) throw new Error('lynx.SystemInfo must be the same object');
+            if (SystemInfo.lynxSdkVersion !== '3.0') throw new Error('unexpected sdk version');
+            if (SystemInfo.pixelWidth !== 393) throw new Error('pixelWidth is ' + SystemInfo.pixelWidth);
+            if (typeof lynx.__initData !== 'object') throw new Error('__initData missing');
+            globalThis.renderPage = function () { __CreatePage('card', 0); };
+            ",
+        )
+        .expect("main-thread script");
+}
+
+/// `__SetInlineStyles` takes either a declaration-block string or a property
+/// map. The host boundary carries primitives only, so the map form is
+/// flattened before it crosses — this checks it is not rejected.
+#[test]
+fn set_inline_styles_accepts_both_the_string_and_the_object_form() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const text = __CreateView(0);
+              __SetInlineStyles(text, 'width:10px;height:10px');
+              __AppendElement(page, text);
+              const mapped = __CreateView(0);
+              __SetInlineStyles(mapped, { width: '20px', height: '20px' });
+              __AppendElement(page, mapped);
+              const cleared = __CreateView(0);
+              __SetInlineStyles(cleared, { width: '30px' });
+              __SetInlineStyles(cleared, undefined);
+              __AppendElement(page, cleared);
+            };
+            ",
+        )
+        .expect("main-thread script");
+    let elements = elements.tree();
+    for id in 2..=4 {
+        assert!(elements.element(id).is_some(), "view {id} must be live");
+    }
+}
+
+/// Property names in the object form arrive in the JavaScript spelling, and
+/// web-core hyphenates them before writing the style attribute — a `marginTop`
+/// that stayed camelCase would be dropped by the CSS parser rather than
+/// applied.
+///
+/// This asserts only that the call is accepted and committed; the resulting
+/// declaration block is not readable from this layer, so the hyphenation
+/// itself is covered by `lynx-element`'s inline-style tests against
+/// already-hyphenated input plus the parity with web-core's
+/// `hyphenate_style_name`.
+#[test]
+fn set_inline_styles_hyphenates_the_object_form_property_names() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const view = __CreateView(0);
+              __SetInlineStyles(view, { width: '40px', marginTop: '7px' });
+              __AppendElement(page, view);
+            };
+            ",
+        )
+        .expect("main-thread script");
+    // The committed layout is the observable proof: a dropped declaration
+    // would leave the view at the top of the page.
+    let elements = elements.tree();
+    assert!(elements.element(2).is_some());
+    assert!(!elements.has_uncommitted_mutations());
+}
+
+/// `__SetCSSId` takes a *list* of elements. The prelude flattens it over the
+/// one-element host call rather than crossing the boundary with an array.
+#[test]
+fn set_css_id_accepts_a_list_of_elements() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const first = __CreateView(0);
+              const second = __CreateView(0);
+              __AppendElement(page, first);
+              __AppendElement(page, second);
+              __SetCSSId([first, second], 7, undefined);
+            };
+            ",
+        )
+        .expect("main-thread script");
+    let elements = elements.tree();
+    for id in 2..=3 {
+        assert_eq!(
+            elements
+                .element(id)
+                .map(lynx_element::LynxElement::component_css_id),
+            Some(7)
+        );
+    }
+}
+
+/// A worklet handler arrives as an object, which the primitives-only boundary
+/// cannot carry. The binding is still recorded, without the payload.
+#[test]
+fn add_event_records_a_string_handler_and_tolerates_a_worklet_object() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const view = __CreateView(0);
+              __AppendElement(page, view);
+              __AddEvent(view, 'bindEvent', 'tap', '-3:0:');
+              __AddEvent(view, 'catchEvent', 'longpress', { type: 'worklet', value: {} });
+            };
+            ",
+        )
+        .expect("main-thread script");
+    let elements = elements.tree();
+    let events = elements
+        .element(2)
+        .map(lynx_element::LynxElement::events)
+        .expect("the bound view");
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].handler.as_deref(), Some("-3:0:"));
+    assert_eq!(events[1].name, "longpress");
+    assert_eq!(events[1].handler, None);
+}
+
+/// Re-binding the same event type and name replaces the handler rather than
+/// stacking a second one, which is what a re-render does.
+#[test]
+fn add_event_replaces_a_binding_for_the_same_type_and_name() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const view = __CreateView(0);
+              __AppendElement(page, view);
+              __AddEvent(view, 'bindEvent', 'tap', 'first');
+              __AddEvent(view, 'bindEvent', 'tap', 'second');
+            };
+            ",
+        )
+        .expect("main-thread script");
+    let elements = elements.tree();
+    let events = elements
+        .element(2)
+        .map(lynx_element::LynxElement::events)
+        .expect("the bound view");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].handler.as_deref(), Some("second"));
+}
+
+/// `ReactLynx` catches a failing first render, reports it, and removes the
+/// children it had built — so a reported error means no first screen, and must
+/// not be mistaken for a successful boot.
+#[test]
+fn an_error_the_script_reports_rather_than_throws_still_fails_the_render() {
+    let mut runtime = bare_runtime();
+    let error = runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              __CreatePage('card', 0);
+              _ReportError(new Error('first screen blew up'), { errorCode: 1101 });
+            };
+            ",
+        )
+        .expect_err("a reported error fails the render");
+    assert!(
+        error.to_string().contains("first screen blew up"),
+        "{error}"
+    );
+}
+
+/// `__GetElementUniqueID` is the handle's own liveness check here, because the
+/// handle *is* the unique id.
+#[test]
+fn get_element_unique_id_returns_the_handle_and_rejects_a_dead_one() {
+    let (mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              if (__GetElementUniqueID(page) !== page) {
+                throw new Error('the unique id is the handle');
+              }
+              const dropped = __CreateView(0);
+              __DropElement(dropped);
+              let threw = false;
+              try { __GetElementUniqueID(dropped); } catch (error) { threw = true; }
+              if (!threw) throw new Error('a retired handle must be rejected');
+            };
+            ",
+        )
+        .expect("main-thread script");
 }

@@ -24,9 +24,10 @@ The runtime work that has landed so far, none of which these files were
 written to track: `crates/lynx-element` owns the Lynx element layer (unique-id
 handles, `<page>` policy, the UA cascade defaults), and `crates/bobcat-core`'s
 feature-gated `quickjs` module runs a `.web.bundle`'s main-thread
-script against it with five of web-core's 61 Element PAPI members installed —
-`__CreatePage`, `__CreateView`, `__AppendElement`, `__DropElement`,
-`__FlushElementTree`. `js-runtime.md` still declines to
+script against it with the first-screen subset of web-core's 61 Element PAPI
+members installed, plus the `lynx`/`SystemInfo` main-thread globals — enough
+that `examples/react`'s bundle renders its first contentful paint, with its
+decoded `StyleInfo` mounted as author CSS. `js-runtime.md` still declines to
 enumerate the Element PAPI; the authoritative list of what exists is
 `lynx-element`'s crate docs.
 

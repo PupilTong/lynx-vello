@@ -25,7 +25,9 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
         options.viewport_height,
         options.device_pixel_ratio,
     )?;
-    program.warn_about_dropped_author_rules();
+    if !program.author_css.is_empty() {
+        engine.add_author_stylesheet(&program.author_css);
+    }
     engine
         .run_script(&program.source)
         .map_err(|source| CliError::Script {
