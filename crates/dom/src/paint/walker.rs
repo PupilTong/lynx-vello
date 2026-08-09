@@ -379,7 +379,7 @@ fn collect_text_clip_under<'doc, T>(
     let Some(node_ref) = document.get(node) else {
         return;
     };
-    for child in node_ref.children() {
+    for child in node_ref.flat_children_iter() {
         if child.is_text_node() {
             let visible = document.paint_style(node).is_none_or(|style| {
                 matches!(

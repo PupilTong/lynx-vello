@@ -192,7 +192,7 @@ impl<T> Document<T> {
 
             let mut boundary = None;
             let mut reached_root = true;
-            let mut current = start.parent_id();
+            let mut current = start.flat_parent_id();
             while let Some(node_id) = current {
                 let node = tree
                     .nodes
@@ -224,7 +224,7 @@ impl<T> Document<T> {
                     reached_root = false;
                     break;
                 }
-                current = node.parent_id();
+                current = node.flat_parent_id();
             }
             (boundary, reached_root)
         };
@@ -312,11 +312,15 @@ mod tests {
         // the layout the offset is clamped against. `Node` went 192/200 →
         // 216/224 when the Stylo traversal flags (`StylingData`, 24 bytes)
         // moved inline from their side slab, trading stride for one fewer
-        // arena lookup on every traversal flag access.
+        // arena lookup on every traversal flag access. It went 216/224 →
+        // 224/232 for shadow DOM's one `Option<Box<ShadowLinks>>` word: a host,
+        // a slot, and a slotted node are the only nodes that allocate the
+        // links themselves, so a document with no shadow root pays a word and
+        // a predictable branch rather than three fields it never reads.
         #[cfg(target_pointer_width = "64")]
         assert_eq!(
             current,
-            (if cfg!(debug_assertions) { 224 } else { 216 }, 640, 656, 16,),
+            (if cfg!(debug_assertions) { 232 } else { 224 }, 640, 656, 16,),
             "Node, LayoutSlot, NodeLayoutState, and TextLayoutStore sizes changed",
         );
     }

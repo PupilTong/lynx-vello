@@ -25,8 +25,12 @@ pub(crate) const DOCUMENT_NODE_ID: NodeId = 0;
 pub(crate) const DOCUMENT_ELEMENT_NODE_ID: NodeId = 1;
 const INITIAL_NODE_CAPACITY: usize = 8;
 
+/// The payload-arena entry aligned with each primary node. The two sentinels
+/// keep the slabs in lockstep for the nodes that carry no embedder payload:
+/// the document node at slot zero, and every shadow root.
 pub(crate) enum PayloadSlot<T> {
     Document,
+    ShadowRoot,
     Node(T),
 }
 
@@ -165,6 +169,8 @@ pub struct Document<T> {
     pending_snapshots: SnapshotMap,
     relayout_roots: Vec<PendingRelayout>,
     relayout_root_ids: FxHashSet<NodeId>,
+    /// Live shadow roots. Zero is the gate every flat-tree fixup checks first.
+    shadow_roots: usize,
     node_removal_epoch: u64,
     /// Monotone count of visual-affecting mutations (style/attribute/
     /// structure/stylesheet/device/layout invalidation), bumped at the
@@ -220,6 +226,7 @@ impl<T> Document<T> {
             pending_snapshots: SnapshotMap::new(),
             relayout_roots: Vec::new(),
             relayout_root_ids: FxHashSet::default(),
+            shadow_roots: 0,
             node_removal_epoch: 0,
             visual_epoch: 0,
             layout_dirty: false,
@@ -249,6 +256,13 @@ impl<T> Document<T> {
 
     pub(crate) const fn style_engine_mut(&mut self) -> &mut StyleEngine {
         &mut self.style_engine
+    }
+
+    /// The two disjoint fields a scoped-stylesheet rebuild needs at once: the
+    /// Stylist that owns the author-data cache, and the node arena holding the
+    /// shadow root whose set is being rebuilt.
+    pub(crate) const fn style_and_tree_parts(&mut self) -> (&mut StyleEngine, &mut Slab<Node<T>>) {
+        (&mut self.style_engine, &mut self.tree.nodes)
     }
 
     pub(crate) fn record_relayout_root(&mut self, id: NodeId, committed_input: LayoutInput) {
@@ -387,28 +401,42 @@ impl<T> Document<T> {
 
     pub fn create_element(&mut self, tag: &str, payload: T) -> NodeId {
         let local_name = LocalName::from(tag);
-        self.allocate_node(payload, |owner, id| {
+        self.allocate_node(PayloadSlot::Node(payload), |owner, id| {
             Node::new_element(owner, id, local_name)
         })
     }
 
     pub fn create_text_node(&mut self, text: impl Into<String>, payload: T) -> NodeId {
         let text = text.into();
-        self.allocate_node(payload, |owner, id| Node::new_text(owner, id, text))
+        self.allocate_node(PayloadSlot::Node(payload), |owner, id| {
+            Node::new_text(owner, id, text)
+        })
     }
 
-    fn allocate_node(
+    pub(crate) fn allocate_node(
         &mut self,
-        payload: T,
+        payload: PayloadSlot<T>,
         make: impl FnOnce(*mut TreeArenas<T>, NodeId) -> Node<T>,
     ) -> NodeId {
         let owner = std::ptr::from_mut::<TreeArenas<T>>(self.tree.as_mut());
         let entry = self.tree.nodes.vacant_entry();
         let id = entry.key();
         entry.insert(make(owner, id));
-        self.tree.insert_side_state(id, PayloadSlot::Node(payload));
+        self.tree.insert_side_state(id, payload);
         self.layout.insert(id);
         id
+    }
+
+    /// Whether any shadow root exists yet. Every slot-assignment hook and
+    /// flat-tree fixup is gated on this, so a document that never attaches one
+    /// pays a single predictable branch.
+    #[must_use]
+    pub(crate) fn has_shadow_roots(&self) -> bool {
+        self.shadow_roots != 0
+    }
+
+    pub(crate) fn note_shadow_root_added(&mut self) {
+        self.shadow_roots += 1;
     }
 
     #[must_use]
@@ -462,12 +490,17 @@ impl<T> Document<T> {
         debug_assert!(self.contains_node(parent), "insert_before: stale parent");
         debug_assert!(self.contains_node(child), "insert_before: stale child");
         assert!(
-            self.get(parent).is_some_and(Node::is_element),
-            "insert_before: parent must be a live element"
+            self.get(parent)
+                .is_some_and(|node| node.is_element() || node.is_shadow_root()),
+            "insert_before: parent must be a live element or shadow root"
         );
         assert_ne!(
             child, DOCUMENT_NODE_ID,
             "insert_before: the document node cannot be reparented"
+        );
+        assert!(
+            !self.get(child).is_some_and(Node::is_shadow_root),
+            "insert_before: a shadow root is attached to its host, not inserted"
         );
         debug_assert!(child != parent, "insert_before: child == parent");
         debug_assert!(
@@ -493,8 +526,12 @@ impl<T> Document<T> {
 
         self.live_node_mut(parent).children.insert(index, child);
         self.live_node_mut(child).parent = Some(parent);
+        let appended = index + 1 == self.live_node_mut(parent).children.len();
 
         self.note_moved_subtree(child);
+        // Before anything reads the flat tree — the dirty-descendant walk in
+        // `note_child_list_change` is the first thing that does.
+        self.note_slot_assignment_inserted(parent, child, appended);
         self.note_child_list_change(parent, index);
         self.invalidate_layout(child);
     }
@@ -511,6 +548,10 @@ impl<T> Document<T> {
         assert_ne!(
             child, DOCUMENT_ELEMENT_NODE_ID,
             "Document::detach cannot detach the permanent document element"
+        );
+        assert!(
+            !self.get(child).is_some_and(Node::is_shadow_root),
+            "Document::detach cannot detach a shadow root from its host"
         );
         let old_parent = self
             .get(child)
@@ -541,6 +582,7 @@ impl<T> Document<T> {
             index
         };
         self.live_node_mut(child).parent = None;
+        self.note_slot_assignment_removed(parent, child);
 
         debug_assert_ne!(
             parent, DOCUMENT_NODE_ID,
@@ -557,6 +599,10 @@ impl<T> Document<T> {
         assert_ne!(
             id, DOCUMENT_ELEMENT_NODE_ID,
             "Document::remove_subtree cannot remove the permanent document element"
+        );
+        assert!(
+            !self.get(id).is_some_and(Node::is_shadow_root),
+            "Document::remove_subtree cannot remove a shadow root on its own"
         );
         self.detach(id);
         // Freed ids may be recycled by later creations: any retained
@@ -588,10 +634,20 @@ impl<T> Document<T> {
                     .try_remove(current)
                     .expect("subtree links always resolve while removing");
                 stack.extend_from_slice(&node.children);
+                // A host's shadow tree is not in its child list but dies with
+                // it: `attachShadow()` is irreversible, so the shadow root can
+                // outlive nothing.
+                if let Some(root) = node.shadow_root_id() {
+                    stack.push(root);
+                }
+                if node.is_shadow_root() {
+                    self.shadow_roots -= 1;
+                }
             }
             self.layout.remove(current);
             match self.tree.remove_side_state(current) {
                 PayloadSlot::Node(payload) => removed.push(payload),
+                PayloadSlot::ShadowRoot => {}
                 PayloadSlot::Document => unreachable!("the document node cannot be removed"),
             }
         }
@@ -668,28 +724,39 @@ impl<T> Document<T> {
     {
         while let Some(current) = stack.pop() {
             let harvested = {
-                let Some(node) = self.tree.nodes.get_mut(current) else {
-                    continue;
+                let (harvested, descend) = {
+                    let Some(node) = self.tree.nodes.get_mut(current) else {
+                        continue;
+                    };
+                    let mut refreshed = None;
+                    let harvested = node.stylo_data_mut().and_then(|wrapper| {
+                        let mut data = wrapper.borrow_mut();
+                        refreshed.clone_from(&data.styles.primary);
+                        let damage = data.damage;
+                        data.clear_restyle_state();
+                        (!damage.is_empty()).then(|| StyleDamage::from(damage))
+                    });
+                    // Descend where Stylo's traversal noted restyled children
+                    // (`dirty_descendants`), and also wherever this element's
+                    // own primary style changed identity: initial styling
+                    // below a freshly styled or freshly cleared element sets
+                    // no dirty bits, but it always moves the parent snapshot
+                    // first, so the snapshot delta walks exactly the
+                    // (re)styled region.
+                    let style_changed = node.refresh_layout_style(refreshed);
+                    let dirty = node.styling.dirty_descendants.get_mut();
+                    (harvested, std::mem::replace(dirty, false) || style_changed)
                 };
-                let mut refreshed = None;
-                let harvested = node.stylo_data_mut().and_then(|wrapper| {
-                    let mut data = wrapper.borrow_mut();
-                    refreshed.clone_from(&data.styles.primary);
-                    let damage = data.damage;
-                    data.clear_restyle_state();
-                    (!damage.is_empty()).then(|| StyleDamage::from(damage))
-                });
-                // Descend where Stylo's traversal noted restyled children
-                // (`dirty_descendants`), and also wherever this element's own
-                // primary style changed identity: initial styling below a
-                // freshly styled or freshly cleared element sets no dirty
-                // bits, but it always moves the parent snapshot first, so the
-                // snapshot delta walks exactly the (re)styled region.
-                let style_changed = node.refresh_layout_style(refreshed);
-                let dirty = node.styling.dirty_descendants.get_mut();
-                let descend = std::mem::replace(dirty, false);
-                if descend || style_changed {
-                    stack.extend_from_slice(&node.children);
+                if descend {
+                    // The flat tree, because that is what the traversal just
+                    // styled: a host's harvest continues into its shadow tree,
+                    // and a slot's into the nodes assigned to it.
+                    let node = self
+                        .tree
+                        .nodes
+                        .get(current)
+                        .expect("the node was live one statement ago");
+                    stack.extend_from_slice(node.flat_children());
                 }
                 harvested
             };
@@ -698,7 +765,7 @@ impl<T> Document<T> {
             };
             if damage.needs_relayout() {
                 if let Some(element) = self.tree.nodes.get(current) {
-                    for &child_id in &element.children {
+                    for &child_id in element.flat_children() {
                         if self
                             .tree
                             .nodes

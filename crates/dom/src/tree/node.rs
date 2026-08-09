@@ -22,6 +22,7 @@ use stylo_atoms::Atom;
 use stylo_dom::ElementState;
 
 use crate::tree::document::{DOCUMENT_NODE_ID, NodeId, PayloadSlot, TreeArenas};
+use crate::tree::shadow::{ShadowLinks, ShadowRootData, ShadowRootMode};
 
 pub(crate) const SNAPSHOT_PRESENT: u8 = 1 << 0;
 pub(crate) const SNAPSHOT_HANDLED: u8 = 1 << 1;
@@ -41,6 +42,11 @@ enum NodeData {
     /// verifies the snapshot still matches Stylo's live primary style.
     Element(Option<Arc<ComputedValues>>),
     Text,
+    /// The root of one shadow tree, reached from its host through
+    /// [`Node::shadow_root_id`] rather than the host's child list. Boxed so a
+    /// shadow root's scoped stylesheet set costs elements and text nodes
+    /// nothing.
+    ShadowRoot(Box<ShadowRootData>),
 }
 
 /// Stylo's per-node traversal and invalidation bookkeeping, stored inline on
@@ -89,6 +95,12 @@ pub struct Node<T> {
 
     pub(crate) inline_block: Option<Arc<Locked<PropertyDeclarationBlock>>>,
 
+    /// Shadow-DOM links, allocated only for the nodes that take part in one:
+    /// a host, a slot, or a slotted node. Every other node keeps one `None`
+    /// word, so the flat-tree walks cost a predictable branch instead of a
+    /// wider primary arena stride.
+    pub(crate) shadow: Option<Box<ShadowLinks>>,
+
     /// Stylo's per-element style data, unconditionally present so no outer
     /// cell is needed: interior mutability lives entirely inside the upstream
     /// [`ElementDataWrapper`] (release-free, debug-checked borrows).
@@ -133,6 +145,14 @@ impl<T> Node<T> {
         Self::new(owner, id, NodeData::Text, None, Some(text))
     }
 
+    pub(crate) fn new_shadow_root(
+        owner: *mut TreeArenas<T>,
+        id: NodeId,
+        data: ShadowRootData,
+    ) -> Self {
+        Self::new(owner, id, NodeData::ShadowRoot(Box::new(data)), None, None)
+    }
+
     fn new(
         owner: *mut TreeArenas<T>,
         id: NodeId,
@@ -153,6 +173,7 @@ impl<T> Node<T> {
             attrs: Vec::new(),
             element_state: ElementState::empty(),
             inline_block: None,
+            shadow: None,
             style_data: ElementDataWrapper::default(),
             stylo_data_present: AtomicBool::new(false),
             styling: StylingData::default(),
@@ -228,6 +249,46 @@ impl<T> Node<T> {
     #[must_use]
     pub fn is_text_node(&self) -> bool {
         matches!(&self.data, NodeData::Text)
+    }
+
+    /// Whether this node is the root of a shadow tree. A shadow root is
+    /// neither an element nor a text node: it matches no selector, generates
+    /// no box, and is transparent in the flat tree, where its children hang
+    /// directly off its host.
+    #[must_use]
+    pub fn is_shadow_root(&self) -> bool {
+        matches!(&self.data, NodeData::ShadowRoot(_))
+    }
+
+    /// The element this shadow root is attached to.
+    #[must_use]
+    pub(crate) fn shadow_host_id(&self) -> Option<NodeId> {
+        match &self.data {
+            NodeData::ShadowRoot(shadow) => Some(shadow.host),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn shadow_root_mode(&self) -> Option<ShadowRootMode> {
+        match &self.data {
+            NodeData::ShadowRoot(shadow) => Some(shadow.mode),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn shadow_data(&self) -> Option<&ShadowRootData> {
+        match &self.data {
+            NodeData::ShadowRoot(shadow) => Some(shadow),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn shadow_data_mut(&mut self) -> Option<&mut ShadowRootData> {
+        match &mut self.data {
+            NodeData::ShadowRoot(shadow) => Some(shadow),
+            _ => None,
+        }
     }
 
     #[must_use]
@@ -330,12 +391,13 @@ impl<T> Node<T> {
                     .expect("live node must have payload-arena state");
                 match slot {
                     PayloadSlot::Node(payload) => payload,
-                    PayloadSlot::Document => {
-                        unreachable!("document payload sentinel is only at slot zero")
+                    PayloadSlot::Document | PayloadSlot::ShadowRoot => {
+                        unreachable!("payload-less sentinels belong to non-element nodes")
                     }
                 }
             }
             NodeData::Document(_) => panic!("the document node has no payload"),
+            NodeData::ShadowRoot(_) => panic!("a shadow root has no payload"),
         }
     }
 
@@ -593,6 +655,12 @@ impl<T> Node<T> {
     }
 
     fn sibling_at(&self, offset: isize) -> Option<&Node<T>> {
+        if self.is_shadow_root() {
+            // A shadow root points at its host as its parent so the ancestor
+            // spines stay connected, but it is not one of the host's children
+            // and therefore has no siblings.
+            return None;
+        }
         let tree = self.tree();
         let siblings = &tree
             .get(self.parent?)
@@ -621,6 +689,17 @@ impl<T> Node<T> {
             index: 0,
         }
     }
+
+    /// The flat-tree children — what Stylo traverses, layout lays out, and
+    /// paint walks. Identical to [`Self::children_iter`] until a shadow root
+    /// exists.
+    pub(crate) fn flat_children_iter(&self) -> ChildrenIter<'_, T> {
+        ChildrenIter {
+            tree: self.tree(),
+            children: self.flat_children(),
+            index: 0,
+        }
+    }
 }
 
 impl<T> fmt::Debug for Node<T> {
@@ -633,6 +712,8 @@ impl<T> fmt::Debug for Node<T> {
                     "document"
                 } else if self.is_element() {
                     "element"
+                } else if self.is_shadow_root() {
+                    "shadow-root"
                 } else {
                     "text"
                 },
@@ -717,12 +798,15 @@ mod tests {
         const PRE_BOXING_NODE_STRIDE: usize = 408;
         const PRE_STATIC_SPLIT_NODE_STRIDE: usize = 368;
 
+        // The boxed shadow-root variant is why this is still 16: a shadow
+        // root's host, mode, and scoped stylesheet set live behind one
+        // pointer rather than widening every element and text node.
         assert_eq!(std::mem::size_of::<NodeData>(), 16);
         // Assumes the workspace-wide `smallvec/union` layout (root
         // Cargo.toml note).
         assert_eq!(
             std::mem::size_of::<Node<()>>(),
-            if cfg!(debug_assertions) { 224 } else { 216 }
+            if cfg!(debug_assertions) { 232 } else { 224 }
         );
         assert!(
             std::mem::size_of::<NodeData>() < PRE_BOXING_NODE_DATA_SIZE,

@@ -44,7 +44,7 @@ pub(crate) fn display_mode(display: Display) -> DisplayMode {
 }
 
 fn is_root_element<T>(node: &Node<T>) -> bool {
-    node.parent().is_none_or(Node::is_document)
+    node.flat_parent().is_none_or(Node::is_document)
 }
 
 /// Whether the element generates no principal box, so nothing about it can be
@@ -109,13 +109,13 @@ pub(crate) fn establishes_absolute_containing_block<T>(
 /// The ancestor whose formatting context lays this node out: its DOM parent,
 /// or the nearest ancestor generating a box when box-less elements intervene.
 pub(crate) fn box_parent<T>(node: &Node<T>) -> Option<&Node<T>> {
-    let mut current = node.parent()?;
+    let mut current = node.flat_parent()?;
     loop {
         let style = StyleView::try_of(current)?;
         if !generates_no_box(style.values()) {
             return Some(current);
         }
-        current = current.parent()?;
+        current = current.flat_parent()?;
     }
 }
 
@@ -215,7 +215,7 @@ impl<'dom> TextStyleView<'dom> {
         debug_assert!(node.is_text_node(), "text style requires a text node");
         Self {
             text_style: node
-                .parent()
+                .flat_parent()
                 .and_then(Node::layout_computed_style)
                 .unwrap_or(&super::ANONYMOUS_STYLE),
         }

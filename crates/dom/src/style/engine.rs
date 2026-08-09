@@ -2,16 +2,21 @@
 
 use std::sync::Arc as StdArc;
 
+use stylo::author_styles::AuthorStyles;
 use stylo::context::QuirksMode;
 use stylo::device::Device;
 use stylo::media_queries::MediaList;
 use stylo::servo_arc::Arc;
 use stylo::shared_lock::{SharedRwLock, StylesheetGuards};
 pub use stylo::stylesheets::Origin as StylesheetOrigin;
-use stylo::stylesheets::{AllowImportRules, DocumentStyleSheet, Origin, Stylesheet, UrlExtraData};
+use stylo::stylesheets::{
+    AllowImportRules, CustomMediaMap, DocumentStyleSheet, Origin, Stylesheet, UrlExtraData,
+};
 use stylo::stylist::Stylist;
 
 use crate::Document;
+use crate::tree::document::NodeId;
+use crate::tree::shadow::ShadowRootData;
 
 /// The private stylo state owned by exactly one [`Document`].
 pub(crate) struct StyleEngine {
@@ -87,7 +92,7 @@ impl StyleEngine {
         });
     }
 
-    pub(crate) fn add_stylesheet(&mut self, css: &str, origin: Origin) {
+    fn parse_stylesheet(&self, css: &str, origin: Origin) -> DocumentStyleSheet {
         let media = Arc::new(self.lock.wrap(MediaList::empty()));
         let sheet = Stylesheet::from_str(
             css,
@@ -100,14 +105,33 @@ impl StyleEngine {
             QuirksMode::NoQuirks,
             AllowImportRules::Yes,
         );
-        self.install_stylesheet(sheet);
+        DocumentStyleSheet(Arc::new(sheet))
     }
 
-    fn install_stylesheet(&mut self, sheet: Stylesheet) {
+    pub(crate) fn add_stylesheet(&mut self, css: &str, origin: Origin) {
+        let sheet = self.parse_stylesheet(css, origin);
         let guard = self.lock.read();
-        self.stylist
-            .append_stylesheet(DocumentStyleSheet(Arc::new(sheet)), &guard);
+        self.stylist.append_stylesheet(sheet, &guard);
         self.stylist.flush(&StylesheetGuards::same(&guard));
+    }
+
+    /// Appends one author stylesheet to a shadow root's scoped set and
+    /// rebuilds that set's `CascadeData` — the rule data Stylo matches a
+    /// shadow tree's elements against instead of the document's author rules.
+    pub(crate) fn add_scoped_stylesheet(
+        &mut self,
+        styles: &mut AuthorStyles<DocumentStyleSheet>,
+        css: &str,
+    ) {
+        let sheet = self.parse_stylesheet(css, Origin::Author);
+        let guard = self.lock.read();
+        // No device means the set skips its own invalidation bookkeeping (and
+        // never reads the custom-media map): the caller dirties the host's
+        // whole subtree instead, which is both simpler and a superset.
+        styles
+            .stylesheets
+            .append_stylesheet(None, &CustomMediaMap::default(), sheet, &guard);
+        drop(styles.flush(&mut self.stylist, &guard));
     }
 
     fn refresh_device(&mut self) {
@@ -152,6 +176,42 @@ impl<T> Document<T> {
 
     pub fn add_stylesheet(&mut self, css: &str, origin: Origin) {
         self.change_style_context(|engine| engine.add_stylesheet(css, origin));
+    }
+
+    /// Adds an author stylesheet scoped to one shadow tree.
+    ///
+    /// Its rules match only inside that tree (plus `:host`, `::slotted()`, and
+    /// `::part()`, which reach exactly as far across the boundary as CSS
+    /// Scoping says they do), and the document's own author rules do not
+    /// match inside it. This is the styling half of shadow encapsulation, and
+    /// the reason it is a separate entry point from [`Self::add_stylesheet`].
+    pub fn add_shadow_stylesheet(&mut self, shadow_root: NodeId, css: &str) {
+        let host = self
+            .shadow_host(shadow_root)
+            .expect("Document::add_shadow_stylesheet: not a live shadow root");
+        self.note_visual_mutation();
+        {
+            let (engine, shadow) = self.shadow_style_parts(shadow_root);
+            engine.add_scoped_stylesheet(&mut shadow.styles, css);
+        }
+        // Every element in the tree can gain or lose a rule; the flat-tree
+        // subtree hint under the host is exactly that set.
+        self.mark_subtree_dirty(host);
+    }
+
+    /// Lends the Stylist and one shadow root's state at once — rebuilding
+    /// scoped `CascadeData` needs both, and they are disjoint fields.
+    fn shadow_style_parts(
+        &mut self,
+        shadow_root: NodeId,
+    ) -> (&mut StyleEngine, &mut ShadowRootData) {
+        let (engine, tree) = self.style_and_tree_parts();
+        let shadow = tree
+            .get_mut(shadow_root)
+            .expect("stale NodeId passed to a shadow-root method")
+            .shadow_data_mut()
+            .expect("Document shadow methods take a shadow root");
+        (engine, shadow)
     }
 
     fn change_style_context(&mut self, change: impl FnOnce(&mut StyleEngine)) {

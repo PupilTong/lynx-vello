@@ -350,11 +350,49 @@ useful signal for currently-compatible versions of those libraries.
   every GPU-backed test treats that as a hard failure, including in CI.
   Nothing in `render` knows about nodes, computed styles, layout, or paint
   order. Source layout groups the crate by subsystem: `tree/` (arena set,
-  `Node`, `Document`), `style/` (engine, Stylo traits, flush, invalidation,
-  damage, containment), `layout/`, `visual/`, `paint/` (painter, walker,
-  fragment painters), `scroll/`, `input/`, and `render/`.
+  `Node`, `Document`, shadow roots and the flat tree), `style/` (engine, Stylo
+  traits, flush, invalidation, damage, containment), `layout/`, `visual/`,
+  `paint/` (painter, walker, fragment painters), `scroll/`, `input/`, and
+  `render/`.
+  **Shadow DOM** (W3C, so W3C behavior) adds a fourth `NodeData` kind:
+  `Document::attach_shadow(host, mode)` creates a shadow root attached to its
+  host rather than listed among its children, so a host's child list stays its
+  light children. Three trees then coexist. The **node tree** is what
+  selectors match and what the public `Node` navigation reports; a combinator
+  runs out of parents at a shadow root, and Stylo retries against the
+  featureless host, which is what makes `:host` — and only `:host` — reach
+  across. The **flat tree** (hosts replaced by their shadow trees, `<slot>`s
+  by their assigned nodes, or by the slot's own children as fallback) is what
+  Stylo traverses, what inherited values inherit through, and what layout,
+  paint, and hit testing walk; it is reached exclusively through
+  `Node::flat_children`/`flat_parent_id`, both of which return arena slices so
+  every consumer keeps its `&[NodeId]` iteration. Each shadow root owns an
+  `AuthorStyles<DocumentStyleSheet>` whose scoped `CascadeData`
+  (`Document::add_shadow_stylesheet`) replaces the document's author rules
+  inside that tree; `::slotted()` and `::part()`/`exportparts` work off the
+  same data. Slot assignment is eager — every mutation that can change it
+  (host child list, shadow-tree slot set, `slot`/`name` attribute) resolves the
+  affected tree in the same call, gated on a live-shadow-root counter so a
+  document with none pays one branch — but eager is not the same as
+  recomputing the tree: appending a light child and removing one touch only
+  the slot involved (the shadow root caches its slot list for that, rebuilt
+  only when the slot set changes and debug-checked on every hit), and a full
+  reassignment is reserved for the cases that can re-target more than one node.
+  That split is benchmark-defended, not assumed: with the append path
+  reassigning the whole tree, building a 1024-row host cost 51× the same rows
+  with no shadow root, and 1.4× after
+  (`benches/shadow.rs::build_wide_host_{plain,shadow}`; the whole bench file is
+  paired plain-versus-shadow for exactly this reason). Per-node cost is one
+  `Option<Box<ShadowLinks>>` word, allocated only for hosts, slots, and
+  slotted nodes; the flat tree costs nothing on a no-op commit and ~1.02× on a
+  frame. Recorded limits: `TElement::slotted_nodes` keeps Stylo's
+  empty default (assignment changes dirty the host subtree wholesale instead
+  of invalidating `::slotted` per slot), `:host-context()` is absent from the
+  vendored selector grammar, and a node that leaves the flat tree keeps its
+  last computed style and geometry — the same contract detached subtrees
+  already have, and nothing renders it either way.
   Every node points directly back only to `TreeArenas`, and the
-  same plain one-word `&Node` implements Stylo's document/node/element traits
+  same plain one-word `&Node` implements Stylo's document/node/element/shadow-root traits
   according to its `NodeData` (styling runs in place, no mirror tree),
   inline-style parsing, and a private per-document `StyleEngine` containing
   the `Stylist`, cascade pipeline, device, stylesheet set, and

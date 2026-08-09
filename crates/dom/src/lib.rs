@@ -42,3 +42,4 @@ pub use crate::tree::document::{Document, NodeId};
 #[doc(hidden)]
 pub use crate::tree::node::ChildrenIter;
 pub use crate::tree::node::Node;
+pub use crate::tree::shadow::ShadowRootMode;
