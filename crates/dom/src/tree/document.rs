@@ -17,6 +17,7 @@ use stylo::stylesheets::UrlExtraData;
 
 use crate::style::damage::StyleDamage;
 use crate::style::engine::StyleEngine;
+use crate::tree::custom::CustomElementRegistry;
 use crate::tree::node::Node;
 
 pub type NodeId = usize;
@@ -171,6 +172,10 @@ pub struct Document<T> {
     relayout_root_ids: FxHashSet<NodeId>,
     /// Live shadow roots. Zero is the gate every flat-tree fixup checks first.
     shadow_roots: usize,
+    /// Custom element definitions, the element state machine's backing store,
+    /// and the reaction queue. An empty definition set is the gate every
+    /// lifecycle hook checks first.
+    pub(crate) custom_elements: CustomElementRegistry<T>,
     node_removal_epoch: u64,
     /// Monotone count of visual-affecting mutations (style/attribute/
     /// structure/stylesheet/device/layout invalidation), bumped at the
@@ -227,6 +232,7 @@ impl<T> Document<T> {
             relayout_roots: Vec::new(),
             relayout_root_ids: FxHashSet::default(),
             shadow_roots: 0,
+            custom_elements: CustomElementRegistry::default(),
             node_removal_epoch: 0,
             visual_epoch: 0,
             layout_dirty: false,
@@ -393,6 +399,11 @@ impl<T> Document<T> {
     }
 
     pub(crate) fn begin_flush_phase(&self) -> FlushPhaseToken {
+        assert!(
+            !self.custom_elements_are_draining(),
+            "a custom element lifecycle callback cannot flush styles: the flush asserts single \
+             entry and runs Stylo's parallel traversal"
+        );
         let flag = std::sync::Arc::clone(self.root_node().flush_flag());
         let was = flag.swap(true, Ordering::AcqRel);
         assert!(!was, "flush re-entered on a document already being flushed");
@@ -401,9 +412,20 @@ impl<T> Document<T> {
 
     pub fn create_element(&mut self, tag: &str, payload: T) -> NodeId {
         let local_name = LocalName::from(tag);
-        self.allocate_node(PayloadSlot::Node(payload), |owner, id| {
-            Node::new_element(owner, id, local_name)
-        })
+        let base = self.begin_reactions();
+        let id = self.allocate_node(PayloadSlot::Node(payload), {
+            let local_name = local_name.clone();
+            |owner, id| Node::new_element(owner, id, local_name)
+        });
+        // The standard creates elements with synchronous custom elements, so a
+        // defined tag is constructed before the id is handed back. Pinned
+        // across that drain: the id about to be returned must still name the
+        // element this call made, and slab keys are recycled on free.
+        self.pin_node(id);
+        self.note_custom_element_created(id, &local_name);
+        self.drain_reactions(base);
+        self.unpin_node(id);
+        id
     }
 
     pub fn create_text_node(&mut self, text: impl Into<String>, payload: T) -> NodeId {
@@ -512,7 +534,8 @@ impl<T> Document<T> {
             "insert_before: reference must differ from child"
         );
 
-        self.detach(child);
+        let base = self.begin_reactions();
+        self.detach_inner(child);
         let index = match before {
             None => self
                 .get(parent)
@@ -534,6 +557,11 @@ impl<T> Document<T> {
         self.note_slot_assignment_inserted(parent, child, appended);
         self.note_child_list_change(parent, index);
         self.invalidate_layout(child);
+        // Last, so no lifecycle callback can observe half-updated slot
+        // assignment or a stale dirty spine.
+        let connected = self.is_connected(child);
+        self.note_custom_elements_inserted(child, connected);
+        self.drain_reactions(base);
     }
 
     pub fn append_child(&mut self, parent: NodeId, child: NodeId) {
@@ -541,6 +569,16 @@ impl<T> Document<T> {
     }
 
     pub fn detach(&mut self, child: NodeId) {
+        let base = self.begin_reactions();
+        self.detach_inner(child);
+        self.drain_reactions(base);
+    }
+
+    /// The unlink itself, with its lifecycle reactions enqueued but not
+    /// drained. `insert_before` and `remove_subtree` call this so a move and a
+    /// removal each drain once, at their own boundary, rather than midway
+    /// through.
+    fn detach_inner(&mut self, child: NodeId) {
         assert_ne!(
             child, DOCUMENT_NODE_ID,
             "Document::detach cannot detach the document node"
@@ -560,6 +598,9 @@ impl<T> Document<T> {
         let Some(parent) = old_parent else {
             return;
         };
+        // The old parent's connectedness, sampled while the link is intact:
+        // the removed node's own is already false by the time a reaction runs.
+        let was_connected = self.is_connected(parent);
 
         // Invalidate while the old link is still intact so the walk covers
         // the old parent's dirty spine and observes its containment boundary.
@@ -589,6 +630,7 @@ impl<T> Document<T> {
             "only the permanent document element parents to the document node"
         );
         self.note_child_list_change(parent, removed_index);
+        self.note_custom_elements_removed(child, was_connected);
     }
 
     pub fn remove_subtree(&mut self, id: NodeId) -> Vec<T> {
@@ -604,7 +646,21 @@ impl<T> Document<T> {
             !self.get(id).is_some_and(Node::is_shadow_root),
             "Document::remove_subtree cannot remove a shadow root on its own"
         );
-        self.detach(id);
+        let base = self.begin_reactions();
+        self.detach_inner(id);
+        // Drained here, while the subtree is unlinked but still allocated: it
+        // is the only window in which a `disconnected_callback` can read its
+        // own element, because the arena frees the slots just below. Pinned
+        // across it so a callback cannot free the very subtree being removed
+        // and let a replacement recycle its id.
+        self.pin_node(id);
+        self.drain_reactions(base);
+        self.unpin_node(id);
+        assert!(
+            self.get(id).is_some_and(|node| node.parent_id().is_none()),
+            "Document::remove_subtree: a disconnected callback re-attached the subtree being \
+             removed"
+        );
         // Freed ids may be recycled by later creations: any retained
         // structure indexing nodes by id (a built `PaintOrder`) is stale
         // from here on.
@@ -645,6 +701,9 @@ impl<T> Document<T> {
                 }
             }
             self.layout.remove(current);
+            // A freed id can be recycled by the next creation, so it must not
+            // inherit reactions queued against its previous occupant.
+            self.forget_reactions(current);
             match self.tree.remove_side_state(current) {
                 PayloadSlot::Node(payload) => removed.push(payload),
                 PayloadSlot::ShadowRoot => {}

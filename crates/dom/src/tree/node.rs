@@ -21,6 +21,7 @@ use stylo::stylesheets::UrlExtraData;
 use stylo_atoms::Atom;
 use stylo_dom::ElementState;
 
+use crate::tree::custom::{CustomElementState, DefinitionId};
 use crate::tree::document::{DOCUMENT_NODE_ID, NodeId, PayloadSlot, TreeArenas};
 use crate::tree::shadow::{ShadowLinks, ShadowRootData, ShadowRootMode};
 
@@ -93,6 +94,14 @@ pub struct Node<T> {
     pub(crate) attrs: Vec<(LocalName, String)>,
     pub(crate) element_state: ElementState,
 
+    /// The definition this element was upgraded with, or is being upgraded
+    /// with. `NonZeroU32`-backed so the `Option` is four bytes and lands in the
+    /// primary node's existing tail padding.
+    pub(crate) custom_definition: Option<DefinitionId>,
+    /// This element's position in the custom element state machine. Non-element
+    /// nodes keep the default and are never consulted.
+    pub(crate) custom_state: CustomElementState,
+
     pub(crate) parsed_inline_style: Option<Arc<Locked<PropertyDeclarationBlock>>>,
 
     /// Shadow-DOM links, allocated only for the nodes that take part in one:
@@ -138,7 +147,13 @@ impl<T> Node<T> {
         id: NodeId,
         local_name: LocalName,
     ) -> Self {
-        Self::new(owner, id, NodeData::Element(None), Some(local_name), None)
+        let mut node = Self::new(owner, id, NodeData::Element(None), Some(local_name), None);
+        // `:defined` matches the *majority* of elements: the standard's
+        // "uncustomized" state is defined, so `<view>`, `<div>`, and even
+        // `<asdf>` all match it. `Document::create_element` clears the bit for
+        // the minority — a custom element name with no definition yet.
+        node.element_state = ElementState::DEFINED;
+        node
     }
 
     pub(crate) fn new_text(owner: *mut TreeArenas<T>, id: NodeId, text: String) -> Self {
@@ -172,6 +187,8 @@ impl<T> Node<T> {
             id_attribute: None,
             attrs: Vec::new(),
             element_state: ElementState::empty(),
+            custom_definition: None,
+            custom_state: CustomElementState::default(),
             parsed_inline_style: None,
             shadow: None,
             style_data: ElementDataWrapper::default(),

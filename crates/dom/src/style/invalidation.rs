@@ -164,10 +164,13 @@ impl<T> Document<T> {
 
 impl<T> Document<T> {
     pub fn set_classes(&mut self, id: NodeId, classes: &str) {
+        let base = self.begin_reactions();
+        self.enqueue_attribute_changed(id, &CLASS, Some(classes));
         self.note_class_attribute_change(id);
         let node = self.live_node_mut(id);
         node.classes = classes.split_whitespace().map(Atom::from).collect();
         node.set_attr_local_name(CLASS.clone(), classes.to_owned());
+        self.drain_reactions(base);
     }
 
     pub fn add_class(&mut self, id: NodeId, class: &str) {
@@ -175,10 +178,17 @@ impl<T> Document<T> {
         if self.live_element(id).classes.contains(&class) {
             return;
         }
+        let base = self.begin_reactions();
+        // `class` is re-serialized from the whole list, so the new value is
+        // only knowable after the write; the old one is captured here.
+        let old = self.observed_class_value(id);
         self.note_class_attribute_change(id);
         let node = self.live_node_mut(id);
         node.classes.push(class);
         sync_class_attribute(node);
+        let new = self.observed_class_value(id);
+        self.enqueue_attribute_changed_values(id, &CLASS, old, new);
+        self.drain_reactions(base);
     }
 
     pub fn remove_class(&mut self, id: NodeId, class: &str) {
@@ -186,13 +196,37 @@ impl<T> Document<T> {
         if !self.live_element(id).classes.contains(&class) {
             return;
         }
+        let base = self.begin_reactions();
+        let old = self.observed_class_value(id);
         self.note_class_attribute_change(id);
         let node = self.live_node_mut(id);
         node.classes.retain(|existing| *existing != class);
         sync_class_attribute(node);
+        let new = self.observed_class_value(id);
+        self.enqueue_attribute_changed_values(id, &CLASS, old, new);
+        self.drain_reactions(base);
+    }
+
+    /// The serialized `class` attribute, but only when a handler is watching
+    /// it — `add_class`/`remove_class` read it twice per call, so the gate
+    /// keeps the unobserved path allocation-free.
+    fn observed_class_value(&self, id: NodeId) -> Option<String> {
+        if !self.observes_attribute(id, &CLASS) {
+            return None;
+        }
+        self.live(id).attr_local_name(&CLASS).map(str::to_owned)
     }
 
     pub fn set_id_attribute(&mut self, id: NodeId, value: Option<&str>) {
+        let base = self.begin_reactions();
+        // The standard's "remove an attribute" runs its change steps only when
+        // the attribute is actually there — clearing an `id` that was never
+        // set changes nothing and must report nothing. Setting an *equal*
+        // value does still report, which is why this tests presence rather
+        // than equality.
+        if value.is_some() || self.live(id).attr_local_name(&ID).is_some() {
+            self.enqueue_attribute_changed(id, &ID, value);
+        }
         self.note_id_attribute_change(id);
         let node = self.live_node_mut(id);
         node.id_attribute = value.map(Atom::from);
@@ -200,6 +234,7 @@ impl<T> Document<T> {
             Some(value) => node.set_attr_local_name(ID.clone(), value.to_owned()),
             None => node.remove_attr_local_name(&ID),
         }
+        self.drain_reactions(base);
     }
 
     pub fn set_attribute(&mut self, id: NodeId, name: &str, value: &str) {
@@ -211,12 +246,15 @@ impl<T> Document<T> {
         }
         let slot_assignment = is_slot_assignment_attribute(name);
         let name = LocalName::from(name);
+        let base = self.begin_reactions();
+        self.enqueue_attribute_changed(id, &name, Some(value));
         self.note_attribute_change(id, &name);
         self.live_node_mut(id)
             .set_attr_local_name(name, value.to_owned());
         if slot_assignment {
             self.note_slot_assignment_attribute(id);
         }
+        self.drain_reactions(base);
     }
 
     pub fn remove_attribute(&mut self, id: NodeId, name: &str) {
@@ -226,22 +264,34 @@ impl<T> Document<T> {
         match name {
             "id" => return self.set_id_attribute(id, None),
             "class" => {
+                let base = self.begin_reactions();
+                self.enqueue_attribute_changed(id, &CLASS, None);
                 self.note_class_attribute_change(id);
                 let node = self.live_node_mut(id);
                 node.classes.clear();
                 node.remove_attr_local_name(&CLASS);
+                self.drain_reactions(base);
                 return;
             }
-            "style" => return self.apply_inline_style_block(id, None, None),
+            "style" => {
+                let base = self.begin_reactions();
+                self.enqueue_attribute_changed(id, &STYLE, None);
+                self.apply_inline_style_block(id, None, None);
+                self.drain_reactions(base);
+                return;
+            }
             _ => {}
         }
         let slot_assignment = is_slot_assignment_attribute(name);
         let name = LocalName::from(name);
+        let base = self.begin_reactions();
+        self.enqueue_attribute_changed(id, &name, None);
         self.note_attribute_change(id, &name);
         self.live_node_mut(id).remove_attr_local_name(&name);
         if slot_assignment {
             self.note_slot_assignment_attribute(id);
         }
+        self.drain_reactions(base);
     }
 
     pub fn add_element_state(&mut self, id: NodeId, flags: stylo_dom::ElementState) {
@@ -300,6 +350,8 @@ impl<T> Document<T> {
     }
 
     pub fn set_inline_style(&mut self, id: NodeId, css: &str) {
+        let base = self.begin_reactions();
+        self.enqueue_attribute_changed(id, &STYLE, Some(css));
         let block = if css.is_empty() {
             None
         } else {
@@ -314,6 +366,7 @@ impl<T> Document<T> {
             Some(Arc::new(self.style_engine().shared_lock().wrap(parsed)))
         };
         self.apply_inline_style_block(id, block, Some(css.to_owned()));
+        self.drain_reactions(base);
     }
 
     /// Shared tail of every style-attribute mutation: record the attribute

@@ -61,6 +61,13 @@ harness = false
 name = "paint"
 harness = false
 
+# Paired plain-vs-undefined-vs-defined measurements of the custom-element
+# lifecycle: what a document that never defines anything pays, what the
+# shadow-including walk costs, and what upgrading costs.
+[[bench]]
+name = "custom_elements"
+harness = false
+
 # Paired plain-vs-shadow measurements of the flat tree: construction, commit,
 # incremental restyle, slot reassignment, and frame production, plus the
 # many-roots and deep-nesting scale shapes.

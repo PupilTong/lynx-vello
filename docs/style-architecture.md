@@ -80,6 +80,13 @@ still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
   assigned nodes — through `Node::flat_children`/`flat_parent_id`. Each
   shadow root owns the scoped `CascadeData` its tree matches against instead
   of the document's author rules.
+- **Custom elements are behavior, not vocabulary.** `Document::define` binds
+  one `dyn CustomElement<T>` handler to one injected local name; the DOM core
+  owns the state machine (`uncustomized`/`undefined`/`precustomized`/`custom`),
+  the upgrade algorithm, the observed-attribute filter, and the reaction queue,
+  and publishes exactly one selector-visible bit, `ElementState::DEFINED`.
+  Reactions are queued and drained at each public mutation's boundary, so a
+  lifecycle callback never observes a half-applied DOM algorithm.
 - **Debug-only contract checks.** Styling side data guards Stylo's
   one-worker-per-element discipline and traversal phases in debug builds.
   These checks compile away in release builds.
