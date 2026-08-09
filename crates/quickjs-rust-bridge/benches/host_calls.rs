@@ -11,7 +11,9 @@
 //! (no arguments), `__CreateView` (one number), `__AppendElement` (two numbers
 //! returning one), and `__CreatePage` (a string plus a number).
 
-use quickjs_rust_bridge::{EvalOptions, EvalSource, HostFunctionError, HostValue, Realm, Value};
+use quickjs_rust_bridge::{
+    EvalOptions, EvalSource, HostFunctionError, HostMember, HostModule, HostValue, Realm, Value,
+};
 
 fn main() {
     divan::main();
@@ -95,6 +97,59 @@ fn two_number_arguments(bencher: divan::Bencher) {
                 .expect("install");
         },
         "append(1, 2)",
+    );
+    bencher.bench_local(|| realm.call(&run, Some(&undefined), &[]).expect("run"));
+}
+
+/// The five-member shape the Element PAPI installs, so the module path is
+/// measured with a realistic member match.
+struct PapiShape;
+
+impl HostModule for PapiShape {
+    const MEMBERS: &'static [HostMember] = &[
+        HostMember {
+            name: "m_page",
+            arity: 2,
+        },
+        HostMember {
+            name: "m_create",
+            arity: 1,
+        },
+        HostMember {
+            name: "m_append",
+            arity: 2,
+        },
+        HostMember {
+            name: "m_drop",
+            arity: 1,
+        },
+        HostMember {
+            name: "m_flush",
+            arity: 0,
+        },
+    ];
+
+    fn call(
+        &mut self,
+        member: usize,
+        _arguments: &[HostValue],
+    ) -> Result<HostValue, HostFunctionError> {
+        match member {
+            4 => Ok(HostValue::Undefined),
+            _ => Ok(HostValue::Number(1.0)),
+        }
+    }
+}
+
+/// [`two_number_arguments`] through a module member instead of a closure
+/// slot — the paired comparison between the two registration paths.
+#[divan::bench]
+fn two_number_arguments_module(bencher: divan::Bencher) {
+    let (mut realm, run, undefined) = driver(
+        |realm| {
+            realm.install_module(PapiShape).expect("install");
+        },
+        "m_append(1, 2)",
     );
     bencher.bench_local(|| realm.call(&run, Some(&undefined), &[]).expect("run"));
 }

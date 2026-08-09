@@ -462,16 +462,14 @@ mod implementation {
         }
         // Live for the whole call: JavaScript holds the function, which owns
         // this allocation, and the finalizer cannot run mid-call.
-        let slot = unsafe { &*handler.cast::<HostSlot>() };
+        let slot = handler.cast::<HostSlot>().cast_const();
 
         let called = catch_unwind(AssertUnwindSafe(|| {
             let values = read_host_arguments(argument_count, arguments)?;
-            let Ok(mut handler) = slot.handler.try_borrow_mut() else {
-                return Err(HostFunctionError::new(
-                    "this host function cannot be called while it is already running",
-                ));
-            };
-            handler(&values)
+            // One function-pointer call into code monomorphized for the
+            // slot's concrete layout; the header was written when the slot
+            // was created.
+            unsafe { ((*slot).call)(slot, &values) }
         }));
 
         let returned = match called {
@@ -565,19 +563,123 @@ mod implementation {
 
     impl std::error::Error for HostFunctionError {}
 
-    type HostHandler = Box<dyn FnMut(&[HostValue]) -> Result<HostValue, HostFunctionError>>;
+    /// A named host function and its reported arity — one entry of
+    /// [`HostModule::MEMBERS`].
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct HostMember {
+        /// The property name the function is defined under, which is also its
+        /// `Function.prototype.name`.
+        pub name: &'static str,
+        /// The reported `Function.prototype.length`; JavaScript may still call
+        /// with any number of arguments.
+        pub arity: u32,
+    }
 
-    /// One host closure, at a stable heap address handed to JavaScript.
+    /// A compile-time-closed set of host functions dispatched by member index.
+    ///
+    /// [`Realm::install_module`] monomorphizes the whole dispatch path for the
+    /// implementing type: a call from JavaScript reaches [`Self::call`] through
+    /// one function pointer written at installation, and the member index is a
+    /// plain field read — no trait object, no vtable. This is the registration
+    /// path for a fixed API surface such as the Element PAPI, where every
+    /// element operation is one host call; [`Realm::function`] remains the
+    /// path for handlers whose set is not known at compile time.
+    pub trait HostModule: 'static {
+        /// The functions the module defines. The index into this slice is the
+        /// `member` passed to [`Self::call`].
+        const MEMBERS: &'static [HostMember];
+
+        /// Handles a call to `Self::MEMBERS[member]`.
+        fn call(
+            &mut self,
+            member: usize,
+            arguments: &[HostValue],
+        ) -> Result<HostValue, HostFunctionError>;
+    }
+
+    /// The dispatch header at offset zero of every concrete slot layout.
+    ///
+    /// Both pointers are written once, when the slot is created, and point at
+    /// code monomorphized for the slot's concrete handler type. A host call is
+    /// therefore one function-pointer call into specialized code; there is no
+    /// trait object on the path.
+    #[repr(C)]
+    struct HostSlot {
+        /// Runs the slot's handler. The argument is the address of this
+        /// header, which is also the address of the concrete slot.
+        call: unsafe fn(*const HostSlot, &[HostValue]) -> Result<HostValue, HostFunctionError>,
+        /// Frees the concrete slot. Run by [`HostTable::reclaim`], never by
+        /// the collector itself.
+        drop: unsafe fn(*mut HostSlot),
+    }
+
+    /// A dynamically registered handler ([`Realm::function`]): one closure at
+    /// a stable heap address handed to JavaScript.
     ///
     /// The `RefCell` is the re-entrancy guard: a callback reached again while
     /// it is already running is refused rather than aliasing the `FnMut`.
-    struct HostSlot {
-        handler: RefCell<HostHandler>,
+    #[repr(C)]
+    struct ClosureSlot<F> {
+        header: HostSlot,
+        handler: RefCell<F>,
+    }
+
+    /// One member of an installed [`HostModule`].
+    ///
+    /// Every member of one installation shares the module value through the
+    /// `Rc`; the member index selects the behavior inside `M::call`.
+    #[repr(C)]
+    struct ModuleSlot<M> {
+        header: HostSlot,
+        module: Rc<RefCell<M>>,
+        member: usize,
+    }
+
+    /// Calls a [`ClosureSlot`]'s handler. `slot` must be the header of a live
+    /// `ClosureSlot<F>` — [`host_dispatch`] has that from the shim's contract,
+    /// because the header was written next to this very instantiation.
+    unsafe fn call_closure_slot<F>(
+        slot: *const HostSlot,
+        arguments: &[HostValue],
+    ) -> Result<HostValue, HostFunctionError>
+    where
+        F: FnMut(&[HostValue]) -> Result<HostValue, HostFunctionError>,
+    {
+        let slot = unsafe { &*slot.cast::<ClosureSlot<F>>() };
+        let Ok(mut handler) = slot.handler.try_borrow_mut() else {
+            return Err(HostFunctionError::new(
+                "this host function cannot be called while it is already running",
+            ));
+        };
+        handler(arguments)
+    }
+
+    /// Calls one member of a [`ModuleSlot`]'s module. `slot` must be the
+    /// header of a live `ModuleSlot<M>`.
+    unsafe fn call_module_slot<M: HostModule>(
+        slot: *const HostSlot,
+        arguments: &[HostValue],
+    ) -> Result<HostValue, HostFunctionError> {
+        let slot = unsafe { &*slot.cast::<ModuleSlot<M>>() };
+        let Ok(mut module) = slot.module.try_borrow_mut() else {
+            return Err(HostFunctionError::new(
+                "this host function cannot be called while its module is already running",
+            ));
+        };
+        module.call(slot.member, arguments)
+    }
+
+    /// Frees a slot whose concrete layout is `S`. `slot` must be the header of
+    /// a `Box`-allocated `S` that nothing else references —
+    /// [`HostTable::reclaim`] guarantees that by draining only addresses the
+    /// collector has finalized.
+    unsafe fn drop_slot<S>(slot: *mut HostSlot) {
+        drop(unsafe { Box::from_raw(slot.cast::<S>()) });
     }
 
     /// The realm's side of host-function lifetime.
     ///
-    /// There is no table of handlers: each closure lives at its own address,
+    /// There is no table of handlers: each slot lives at its own address,
     /// which is what JavaScript holds (through the companion object created in
     /// `qjs_new_host_function`) and what the collector hands back. Nothing is
     /// indexed, so nothing can be reallocated, recycled, or aliased by a stale
@@ -650,7 +752,7 @@ mod implementation {
             // another pass, so the address is not lost.
         }
 
-        /// Drops every collected closure.
+        /// Drops every collected slot.
         ///
         /// Must run with no collection in progress — i.e. from a `&mut Realm`
         /// entry point. A handler's own `Drop` can free JS values and thereby
@@ -670,7 +772,7 @@ mod implementation {
                 for slot in batch {
                     // The finalizer hands back an address JavaScript will never
                     // mention again, so this is the unique owner.
-                    drop(unsafe { Box::from_raw(slot) });
+                    unsafe { ((*slot).drop)(slot) };
                 }
             }
         }
@@ -894,8 +996,12 @@ mod implementation {
             let arity = i32::try_from(arity).map_err(int_conversion_error)?;
             // The closure moves to its own allocation, whose address is what
             // JavaScript holds from here on.
-            let slot = Box::into_raw(Box::new(HostSlot {
-                handler: RefCell::new(Box::new(handler)),
+            let slot = Box::into_raw(Box::new(ClosureSlot {
+                header: HostSlot {
+                    call: call_closure_slot::<F>,
+                    drop: drop_slot::<ClosureSlot<F>>,
+                },
+                handler: RefCell::new(handler),
             }));
             let context = self.inner.context.as_ptr();
             let raw =
@@ -925,6 +1031,58 @@ mod implementation {
             let function = self.function(name, arity, handler)?;
             let global = self.global_object()?;
             self.set_property(&global, name, &function)
+        }
+
+        /// Defines every member of `module` on the global object, all sharing
+        /// one module value.
+        ///
+        /// Dispatch is monomorphized for `M` here: no member call goes through
+        /// a trait object. The returned handle is the same shared module the
+        /// member functions call into, so the host can reach module state
+        /// between evaluations; while the host holds a borrow of it, any
+        /// member call fails cleanly rather than alias the module. The one
+        /// `RefCell` also refuses a member reached while another member is
+        /// running — a state JavaScript cannot produce on its own, because a
+        /// host function cannot run script.
+        ///
+        /// Installation is not atomic: on error, members already defined stay
+        /// defined. The module value is dropped once the returned handle is
+        /// gone and JavaScript can no longer reach any member function.
+        pub fn install_module<M: HostModule>(
+            &mut self,
+            module: M,
+        ) -> Result<Rc<RefCell<M>>, Error> {
+            self.reclaim();
+            let module = Rc::new(RefCell::new(module));
+            let global = self.global_object()?;
+            for (member, signature) in M::MEMBERS.iter().enumerate() {
+                let name = property_name(signature.name)?;
+                let arity = i32::try_from(signature.arity).map_err(int_conversion_error)?;
+                let slot = Box::into_raw(Box::new(ModuleSlot {
+                    header: HostSlot {
+                        call: call_module_slot::<M>,
+                        drop: drop_slot::<ModuleSlot<M>>,
+                    },
+                    module: Rc::clone(&module),
+                    member,
+                }));
+                let context = self.inner.context.as_ptr();
+                let raw = unsafe {
+                    ffi::qjs_new_host_function(context, name.as_ptr(), arity, slot.cast())
+                };
+                let function =
+                    match self.value_or_exception(raw, context, ErrorPhase::ConstructValue) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            // The shim transfers ownership only on success, so the
+                            // slot is still ours to drop.
+                            drop(unsafe { Box::from_raw(slot) });
+                            return Err(error);
+                        }
+                    };
+                self.set_property(&global, signature.name, &function)?;
+            }
+            Ok(module)
         }
 
         pub fn undefined(&self) -> Result<Value, Error> {
@@ -2228,8 +2386,8 @@ mod implementation {
             panic::set_hook(previous);
             assert!(error.is_err());
 
-            // The unwind ran HostSlotGuard's Drop, so the handler is back — and
-            // its captured state survived the panic.
+            // The unwind released the `RefCell` borrow, so the handler is
+            // callable again — and its captured state survived the panic.
             assert_eq!(number(&mut realm, "flaky(false)"), Some(2.0));
         }
 
@@ -2311,10 +2469,156 @@ mod implementation {
                 .expect_err("a NUL in the name");
             assert_eq!(error.kind, ErrorKind::InvalidInput);
         }
+
+        /// The module under test: two data members plus one that panics.
+        struct Counter {
+            calls: f64,
+        }
+
+        impl HostModule for Counter {
+            const MEMBERS: &'static [HostMember] = &[
+                HostMember {
+                    name: "bump",
+                    arity: 1,
+                },
+                HostMember {
+                    name: "total",
+                    arity: 0,
+                },
+                HostMember {
+                    name: "boom",
+                    arity: 0,
+                },
+            ];
+
+            fn call(
+                &mut self,
+                member: usize,
+                arguments: &[HostValue],
+            ) -> Result<HostValue, HostFunctionError> {
+                match member {
+                    0 => {
+                        let HostValue::Number(by) = arguments[0] else {
+                            return Err(HostFunctionError::new("bump expects a number"));
+                        };
+                        self.calls += by;
+                        Ok(HostValue::Number(self.calls))
+                    }
+                    1 => Ok(HostValue::Number(self.calls)),
+                    _ => panic!("host bug"),
+                }
+            }
+        }
+
+        #[test]
+        fn a_module_shares_state_between_its_members() {
+            let mut realm = Realm::new().unwrap();
+            realm.install_module(Counter { calls: 0.0 }).unwrap();
+            assert_eq!(number(&mut realm, "bump(2); bump(40); total()"), Some(42.0));
+        }
+
+        #[test]
+        #[allow(
+            clippy::float_cmp,
+            reason = "the counter is only ever assigned exactly-representable integers"
+        )]
+        fn the_host_reaches_module_state_between_evaluations() {
+            let mut realm = Realm::new().unwrap();
+            let counter = realm.install_module(Counter { calls: 0.0 }).unwrap();
+            assert_eq!(number(&mut realm, "bump(21)"), Some(21.0));
+            assert_eq!(counter.borrow().calls, 21.0);
+            counter.borrow_mut().calls = 40.0;
+            assert_eq!(number(&mut realm, "total() + 2"), Some(42.0));
+        }
+
+        #[test]
+        fn a_module_member_reports_its_name_and_arity() {
+            let mut realm = Realm::new().unwrap();
+            realm.install_module(Counter { calls: 0.0 }).unwrap();
+            assert_eq!(number(&mut realm, "bump.length"), Some(1.0));
+            let value = realm
+                .evaluate(EvalSource::new("bump.name"), EvalOptions::default())
+                .unwrap();
+            let units = value.to_utf16().unwrap();
+            assert_eq!(String::from_utf16(&units).unwrap(), "bump");
+        }
+
+        #[test]
+        fn a_panicking_module_member_does_not_poison_the_module() {
+            let mut realm = Realm::new().unwrap();
+            realm.install_module(Counter { calls: 41.0 }).unwrap();
+            let previous = panic::take_hook();
+            panic::set_hook(Box::new(|_| {}));
+            let error = realm.evaluate(EvalSource::new("boom()"), EvalOptions::default());
+            panic::set_hook(previous);
+            let error = error.expect_err("the panic should surface as an exception");
+            assert!(error.message.contains("panicked"), "{error:?}");
+
+            // The unwind released the module borrow, and the state survived.
+            assert_eq!(number(&mut realm, "bump(1)"), Some(42.0));
+        }
+
+        #[test]
+        fn a_host_side_borrow_makes_member_calls_fail_cleanly() {
+            let mut realm = Realm::new().unwrap();
+            let counter = realm.install_module(Counter { calls: 0.0 }).unwrap();
+            let held = counter.borrow_mut();
+            let error = realm
+                .evaluate(EvalSource::new("bump(1)"), EvalOptions::default())
+                .expect_err("a held borrow must refuse the call");
+            assert!(error.message.contains("already running"), "{error:?}");
+            drop(held);
+            assert_eq!(number(&mut realm, "bump(2)"), Some(2.0));
+        }
+
+        #[test]
+        fn a_collected_module_is_dropped_with_its_last_function() {
+            struct DropFlag(Rc<Cell<bool>>);
+            impl Drop for DropFlag {
+                fn drop(&mut self) {
+                    self.0.set(true);
+                }
+            }
+            struct Flagged {
+                _flag: DropFlag,
+            }
+            impl HostModule for Flagged {
+                const MEMBERS: &'static [HostMember] = &[HostMember {
+                    name: "flagged",
+                    arity: 0,
+                }];
+                fn call(
+                    &mut self,
+                    _: usize,
+                    _: &[HostValue],
+                ) -> Result<HostValue, HostFunctionError> {
+                    Ok(HostValue::Undefined)
+                }
+            }
+
+            let dropped = Rc::new(Cell::new(false));
+            let mut realm = Realm::new().unwrap();
+            let module = realm
+                .install_module(Flagged {
+                    _flag: DropFlag(Rc::clone(&dropped)),
+                })
+                .unwrap();
+            drop(module);
+            realm
+                .evaluate(
+                    EvalSource::new("delete globalThis.flagged"),
+                    EvalOptions::default(),
+                )
+                .unwrap();
+            assert!(!dropped.get());
+            realm.run_gc();
+            assert!(dropped.get());
+        }
     }
 }
 
 pub use implementation::{
-    Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, HostFunctionError, HostValue,
-    InterruptHandle, JobDrain, Realm, RealmOptions, SourceLocation, SourceType, Value, ValueKind,
+    Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, HostFunctionError, HostMember,
+    HostModule, HostValue, InterruptHandle, JobDrain, Realm, RealmOptions, SourceLocation,
+    SourceType, Value, ValueKind,
 };
