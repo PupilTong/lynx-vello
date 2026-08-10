@@ -1,7 +1,8 @@
 //! Native Lynx runtime core for lynx-vello.
 //!
-//! The protocol modules let hosts inject a [`script::ScriptEngine`] and
-//! [`resource::ResourceFetcher`] through static generic contracts.
+//! The protocol modules let hosts inject a [`script::ScriptEngine`],
+//! [`resource::ResourceFetcher`], and native [`platform`] services through
+//! static contracts.
 //! [`lynx_element`] is re-exported whole as the strict layer chain's door
 //! downward.
 //!
@@ -25,6 +26,7 @@ pub use lynx_element;
 
 pub mod engine;
 pub mod image;
+pub mod platform;
 #[cfg(feature = "quickjs")]
 pub mod quickjs;
 pub mod resource;
