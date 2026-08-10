@@ -32,7 +32,7 @@ jobs:
           -p bobcat-core
           -p bobcat-cli
           -p flashbulb
-          -p image
+          -p image-decoders
           -p lynx-element
           -p lynx-template-decoder
           -p quickjs-rust-bridge
@@ -42,19 +42,20 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
-      # `crates/image`'s Windows (WIC) and Android (AImageDecoder) backends are
+      # `image-decoders`' Windows (WIC) and Android (AImageDecoder) decoders are
       # `#[cfg]`'d to their own OS, so the runner above never compiles a line of
       # either. Type-checking them from macOS is the only gate they can have
       # until a Windows/Android runner exists: an rlib `cargo check` never
       # invokes a linker, and the Android NDK is a link-time dependency, so
-      # neither needs a platform toolchain. Scoped to `-p image` deliberately —
-      # a workspace-wide cross-check would try to build `quickjs-rust-bridge`'s
+      # neither needs a platform toolchain. Scoped to `-p image-decoders`
+      # deliberately — it pulls `bobcat-core` without its default `quickjs`
+      # feature, and anything wider would try to build `quickjs-rust-bridge`'s
       # C sources and fail.
-      - name: Cross-check the platform image backends
+      - name: Cross-check the platform image decoders
         run: |
           rustup target add aarch64-pc-windows-msvc aarch64-linux-android
-          cargo check -p image --target aarch64-pc-windows-msvc --all-targets
-          cargo check -p image --target aarch64-linux-android --all-targets
+          cargo check -p image-decoders --target aarch64-pc-windows-msvc --all-targets
+          cargo check -p image-decoders --target aarch64-linux-android --all-targets
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2

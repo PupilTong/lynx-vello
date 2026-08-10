@@ -57,21 +57,21 @@ impl Harness {
     /// layout, publish the pixels to paint.
     fn img(&mut self, class: &str, bytes: &[u8]) -> dom::NodeId {
         let decoder = image_decoders::platform_decoder().expect("this platform ships a decoder");
-        let decoded =
+        let response =
             decode_bytes(decoder.as_ref(), bytes, &DecodeRequest::default()).expect("decode");
 
         let root = self.doc.root;
         let node = self.doc.el_tag(root, "img", class);
         #[allow(clippy::cast_precision_loss)]
         let natural = NaturalSize::from_size(Size::new(
-            decoded.header.natural_size.width as f32,
-            decoded.header.natural_size.height as f32,
+            response.header.natural_size.width as f32,
+            response.header.natural_size.height as f32,
         ));
         self.doc.dom.set_natural_size(node, natural);
         self.doc
             .dom
             .images_mut()
-            .insert_node(node, decoded.image.to_image_data());
+            .insert_node(node, response.image.to_image_data());
         node
     }
 
