@@ -37,10 +37,11 @@ Key architectural facts (native): request lifecycle is driven by a dirty-flag di
 lynx-vello has both halves of that handoff now. Replaced content carries a
 `NaturalSize` that `Document::set_natural_size` installs, invalidating the
 node-to-root layout-cache path; and `bobcat_core::image` owns fetch, the injected
-`Decoder` seam (implementations in `crates/image-decoders`: Apple ImageIO,
-Windows WIC, Android `AImageDecoder`, a Linux-only pure-Rust reference — an
-embedder with its own image pipeline, native's Fresco/`imageFetcher` analogue,
-implements the trait instead), and the bounded decode/header caches, depending
+`Decoder` seam (reference implementations in the reference embedder,
+`bobcat-cli`'s `image_decoders` module: Apple ImageIO, Windows WIC, Android
+`AImageDecoder`, a Linux-only pure-Rust reference — an embedder with its own
+image pipeline, native's Fresco/`imageFetcher` analogue, implements the trait
+instead), and the bounded decode/header caches, depending
 on neither `dom` nor `pulsar` so the decoder never reaches the DOM. `HeaderCache` is this project's
 equivalent of native's bitmap-size cache: a second mount of a known URL can
 publish its natural size in the commit that creates the node, so the first frame

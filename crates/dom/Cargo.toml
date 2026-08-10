@@ -50,12 +50,6 @@ url = { workspace = true }
 divan = { workspace = true }
 flashbulb = { workspace = true, features = ["render"] }
 html5ever = { workspace = true }
-# The replaced-content test decodes through the platform decoder and reaches
-# the contract via `image_decoders::contract`, so this lower layer's test never
-# names the engine crate. The dev-dependency cycle (`image-decoders` normally
-# depends on `bobcat-core`, which reaches back down to `dom`) is fine; cargo
-# builds the dev copy against the already-built library.
-image-decoders = { workspace = true }
 markup5ever_rcdom = { workspace = true }
 png = { workspace = true }
 

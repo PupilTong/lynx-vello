@@ -170,10 +170,10 @@ pub struct DecodeResponse {
 /// The decoder the embedder injects — the one point where pixels enter the
 /// engine.
 ///
-/// No implementation ships with the engine. `image-decoders` provides the
-/// sanctioned ones (Apple `ImageIO`, Windows WIC, Android `AImageDecoder`, and
-/// the Linux-only pure-Rust reference), and an embedder with its own image
-/// pipeline may implement this trait instead.
+/// No implementation ships with the engine. The reference embedder
+/// (`bobcat-cli`) carries the reference ones (Apple `ImageIO`, Windows WIC,
+/// Android `AImageDecoder`, and the Linux-only pure-Rust reference), and an
+/// embedder with its own image pipeline implements this trait instead.
 ///
 /// # Contract
 ///

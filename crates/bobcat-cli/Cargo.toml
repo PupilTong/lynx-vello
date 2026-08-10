@@ -14,6 +14,10 @@ path = "src/main.rs"
 
 [dependencies]
 bobcat-core = { workspace = true, features = ["quickjs"] }
+# Post-decode resampling for the reference image decoders: none of them can hit
+# a non-aspect-preserving target during decode, and naive resampling halos
+# transparent edges.
+fast_image_resize = { workspace = true }
 lynx-template-decoder = { workspace = true }
 png = { workspace = true }
 pollster = { workspace = true }
@@ -22,6 +26,26 @@ url = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 winit = { workspace = true }
+
+# The reference `bobcat_core::image::Decoder` implementations live in this
+# embedder (`src/image_decoders/`), one per OS, so the codec dependencies are
+# target-scoped. The Linux reference decoder reuses the unconditional `png`
+# dependency above.
+[target.'cfg(target_os = "linux")'.dependencies]
+image-webp = { workspace = true }
+zune-jpeg = { workspace = true }
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+objc2-core-foundation = { workspace = true }
+objc2-core-graphics = { workspace = true }
+objc2-image-io = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+libc = { workspace = true }
+ndk-sys = { workspace = true }
 
 [dev-dependencies]
 # The e2e test's mandatory GPU probe and PNG verification.

@@ -2,8 +2,8 @@
 //! tier.
 //!
 //! Backend selection is no longer this module's business — the embedder
-//! constructs one [`Decoder`](crate::image::Decoder) (typically
-//! `image-decoders::platform_decoder()`) and injects it. What remains here is
+//! constructs one [`Decoder`](crate::image::Decoder) (the reference embedder's
+//! `image_decoders::platform_decoder()`) and injects it. What remains here is
 //! the vocabulary both sides of that boundary speak.
 
 use crate::image::format::ImageFormat;

@@ -227,8 +227,8 @@ impl fmt::Debug for ImageLoader {
 impl ImageLoader {
     /// Builds a loader over `fetcher`, decoding through the injected `decoder`.
     ///
-    /// There is no default decoder: the embedder chooses one — typically
-    /// `image-decoders::platform_decoder()`, or its own [`Decoder`]
+    /// There is no default decoder: the embedder chooses one — the reference
+    /// embedder's `image_decoders::platform_decoder()`, or its own [`Decoder`]
     /// implementation over an existing image pipeline — and the loader never
     /// second-guesses it.
     ///

@@ -6,14 +6,8 @@ use std::sync::Arc;
 
 use bobcat_core::image::{ImageError, ImageLoader, ImagePrefetchTarget, LoaderConfig, PixelSize};
 use bobcat_core::resource::ResourceCapability;
-use support::{FetcherDouble, checker_png};
+use support::{FetcherDouble, checker_png, decoder};
 use tokio_util::sync::CancellationToken;
-
-/// The decoder this platform actually ships — the same seam an embedder
-/// injects through, so every pipeline test runs against the real thing.
-fn decoder() -> Arc<dyn bobcat_core::image::Decoder> {
-    image_decoders::platform_decoder().expect("this platform ships a decoder")
-}
 
 fn loader(double: Arc<FetcherDouble>) -> ImageLoader {
     ImageLoader::new(double, LoaderConfig::new(0), decoder())

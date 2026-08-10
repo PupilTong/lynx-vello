@@ -50,7 +50,7 @@
 //!
 //! # Orientation
 //!
-//! JPEG orientation is read through [`crate::orientation`]'s own EXIF parser —
+//! JPEG orientation is read through [`crate::image_decoders::orientation`]'s own EXIF parser —
 //! the same bytes-level parser the Linux reference decoder consults — so the
 //! two report identical natural sizes for identical files. HEIC and AVIF store
 //! EXIF inside a `meta` box that parser cannot see, and no reference decoder
@@ -108,8 +108,8 @@ use objc2_image_io::{
     kCGImageSourceCreateThumbnailFromImageAlways, kCGImageSourceThumbnailMaxPixelSize,
 };
 
-use crate::orientation::{self, Orientation};
-use crate::resample;
+use crate::image_decoders::orientation::{self, Orientation};
+use crate::image_decoders::resample;
 
 /// PNG, JPEG, WebP, GIF, HEIC and AVIF through `ImageIO`.
 #[derive(Clone, Copy, Debug, Default)]
@@ -287,7 +287,8 @@ fn read_header(
         // level; v1 decodes frame 0 and reports the rest exists. The container
         // check catches what the count misses: an APNG whose animation has a
         // single frame still carries its `acTL`, but `ImageIO` counts 1.
-        animated: frames > 1 || crate::animation::container_declares_animation(format, bytes),
+        animated: frames > 1
+            || crate::image_decoders::animation::container_declares_animation(format, bytes),
     })
 }
 

@@ -23,12 +23,6 @@ lynx-template-decoder = { path = "crates/lynx-template-decoder" }
 # optional arbitrary-content measurement seam.
 hughie = { path = "crates/hughie" }
 flashbulb = { path = "crates/flashbulb" }
-# The sanctioned `Decoder` implementations for `bobcat_core::image` (the
-# replaced-content decode contract, which lives in the engine crate): Apple
-# ImageIO (six formats, no probe), Windows WIC, Android AImageDecoder, and the
-# Linux-only pure-Rust reference. Re-exports the contract as
-# `image_decoders::contract` for consumers below the engine.
-image-decoders = { path = "crates/image-decoders" }
 lynx-element = { path = "crates/lynx-element" }
 quickjs-rust-bridge = { path = "crates/quickjs-rust-bridge" }
 dom = { path = "crates/dom" }
@@ -79,7 +73,7 @@ http = "1"
 # Software decode, one crate per format rather than the `image` facade.
 #
 # These are exactly the three decoders the crates.io `image` facade delegates
-# to, taken directly for `image-decoders`' Linux-only reference decoder. The
+# to, taken directly for `bobcat-cli`'s Linux-only reference decoder. The
 # facade was rejected: it pulls `moxcms`/`pxfm` in non-optionally for colour
 # management we do not perform, its own PNG/WebP memory limits are documented
 # as not wired through, and going direct lets each codec emit RGBA8 without
@@ -128,7 +122,7 @@ url = "2"
 # consumes through vello.
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 
-# Platform image-decode backends for `crates/image-decoders`. Each is consumed only from
+# Platform image-decode backends for `bobcat-cli`'s reference decoders. Each is consumed only from
 # a `[target.'cfg(…)'.dependencies]` block, so a build for one OS never resolves
 # the other two.
 #
@@ -155,7 +149,7 @@ objc2-core-graphics = { version = "0.3.2", default-features = false, features = 
 ] }
 objc2-image-io = { version = "0.3.2", default-features = false, features = [
     # CGImageDestination powers no product path — it is the in-process fixture
-    # encoder for `image-decoders`' GIF/HEIC/AVIF round-trip tests
+    # encoder for the reference decoders' GIF/HEIC/AVIF round-trip tests
     # (`cfg(test)`-gated), kept on this shared entry because features unify
     # workspace-wide anyway.
     "CGImageDestination",
@@ -186,10 +180,9 @@ libc = "0.2"
 # feeds `Scene::draw_glyphs` directly.
 #
 # `default-features = false` drops vello's `wgpu`/`wgpu_default` defaults here so
-# the decode pipeline (`bobcat_core::image` and `image-decoders`) — which needs
-# only the unconditional `pub use peniko`, not a GPU — can cross-check for
-# Windows and Android without building wgpu; the GPU is opted back in where
-# rendering actually happens. The default must be off at the *workspace* entry: a
+# the decode pipeline (`bobcat_core::image`) — which needs only the
+# unconditional `pub use peniko`, not a GPU — stays buildable without wgpu; the
+# GPU is opted back in where rendering actually happens. The default must be off at the *workspace* entry: a
 # member's own `default-features = false` against an unqualified workspace entry
 # is ignored with a warning.
 vello = { version = "0.9", default-features = false }

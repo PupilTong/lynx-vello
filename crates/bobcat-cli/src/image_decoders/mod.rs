@@ -1,10 +1,12 @@
-//! The sanctioned [`Decoder`] implementations an embedder injects into the
+//! The reference [`Decoder`] implementations this embedder injects into the
 //! engine's image loader.
 //!
-//! The engine owns the contract — [`Decoder`], `DecodeRequest`,
-//! `Capabilities`, in `bobcat_core::image`, re-exported here as [`contract`] —
-//! and ships no codec. This crate is where the codecs live, one implementation
-//! per OS, selected at *compile time* by target:
+//! The engine only *designs* the contract — [`Decoder`], `DecodeRequest`,
+//! `Capabilities`, in `bobcat_core::image` — and ships no codec. Implementing
+//! it is embedder work, which is why these decoders live here rather than in a
+//! shared crate: an embedder with its own image pipeline implements `Decoder`
+//! over that pipeline and never sees this module. One implementation per OS,
+//! selected at *compile time* by target:
 //!
 //! - **Apple** (macOS/iOS): `AppleDecoder`, `ImageIO`. Claims PNG, JPEG, WebP, GIF, HEIC and AVIF
 //!   unconditionally — this workspace assumes an OS recent enough to carry all six codecs, so there
@@ -14,33 +16,23 @@
 //! - **Android**: `NdkDecoder`, the NDK's `AImageDecoder`, reached through `dlopen` because the API
 //!   is 30+ and the workspace minimum is lower.
 //! - **Linux**: `SoftwareDecoder`, the pure-Rust reference (`png` + `zune-jpeg` + `image-webp`).
-//!   Linux has no system still-image decode API, and headless CI runs there; this is the only
-//!   target that compiles it.
+//!   Linux has no system still-image decode API; this is the only target that compiles it.
 //!
-//! An embedder that wants none of these — because it already owns an image
-//! pipeline — implements `Decoder` itself and never links this crate. That is
-//! the seam working as intended, not a workaround.
-
-// The coverage run compiles with `--cfg coverage_nightly` and the test modules
-// opt out via `#[coverage(off)]`, which needs this experimental feature (same
-// pattern as every other workspace crate).
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+//! The Windows and Android modules are carried for the embedder that does not
+//! exist yet: this CLI builds for macOS and Linux, so they compile on no
+//! supported target and no CI gate reaches them — they are reference material,
+//! reviewed when they were written, not live code.
 
 use std::sync::Arc;
 
-/// The decode contract this crate implements, re-exported so a consumer that
-/// only wants "a decoder plus the types to drive it" — a test, a tool, a layer
-/// that must not name the engine crate directly — needs exactly one
-/// dependency.
-pub use bobcat_core::image as contract;
 use bobcat_core::image::Decoder;
 
 mod resample;
 pub(crate) use resample::resample;
 
-// Compiled unconditionally so its tests run wherever the test suite does
-// (Linux CI included), even though only the Apple and Android decoders consult
-// it — hence the dead-code allowance on the other targets.
+// Compiled unconditionally so its tests run wherever the test suite does, even
+// though only the Apple and Android decoders consult it — hence the dead-code
+// allowance on the other targets.
 #[cfg_attr(
     not(any(target_os = "android", target_os = "macos", target_os = "ios")),
     allow(dead_code)
@@ -73,13 +65,13 @@ pub use software::SoftwareDecoder;
 #[cfg(target_os = "windows")]
 pub use windows::WicDecoder;
 
-/// The decoder an embedder on this OS injects, unless it brings its own.
+/// The decoder this embedder injects on the running OS.
 ///
 /// `None` is possible only where a runtime probe can fail: Windows without the
 /// imaging components (Nano Server), Android below API 30. There is no
-/// fallback behind it — the reference decoder is deliberately Linux-only — so
-/// an embedder shipping to those environments either accepts images not
-/// decoding or injects its own [`Decoder`].
+/// fallback behind it — the Linux reference decoder is deliberately compiled
+/// for Linux alone — so on those targets the embedder ships without image
+/// decoding or replaces this module.
 #[must_use]
 pub fn platform_decoder() -> Option<Arc<dyn Decoder>> {
     #[cfg(any(target_os = "macos", target_os = "ios"))]

@@ -30,7 +30,7 @@
 //!
 //! `AImageDecoderHeaderInfo_getWidth`/`getHeight` report the **oriented** size
 //! and `AImageDecoder_decodeImage` writes **oriented** pixels: the platform
-//! applies the EXIF tag itself. [`crate::orientation`] is therefore deliberately
+//! applies the EXIF tag itself. [`crate::image_decoders::orientation`] is therefore deliberately
 //! not used here — applying it again would rotate a photo twice — and this
 //! backend still agrees with the software backend, which reaches the same
 //! result by applying the tag by hand.
@@ -71,7 +71,7 @@ use bobcat_core::image::{
 };
 use ndk_sys::{AImageDecoder, AImageDecoderHeaderInfo, AndroidBitmapFormat};
 
-use crate::resample;
+use crate::image_decoders::resample;
 
 /// Reported in [`DecodeResponse::backend`].
 const NAME: &str = "android-ndk";
@@ -245,7 +245,7 @@ impl<'bytes> Handle<'bytes> {
     /// `bytes` is taken again because one field — `animated` — is read from the
     /// container rather than from the platform — `AImageDecoder_isAnimated`
     /// is API 31 while everything else here is API 30; see
-    /// [`crate::animation::container_declares_animation`].
+    /// [`crate::image_decoders::animation::container_declares_animation`].
     fn header(&self, format: ImageFormat, bytes: &[u8]) -> Result<ImageHeader, ImageError> {
         // SAFETY: `self.raw` is a live decoder. `getHeaderInfo` returns a
         // borrow owned by that decoder, valid until `delete`, and every
@@ -317,7 +317,7 @@ impl<'bytes> Handle<'bytes> {
                 flags & ndk_sys::ANDROID_BITMAP_FLAGS_ALPHA_MASK
                     != ndk_sys::ANDROID_BITMAP_FLAGS_ALPHA_OPAQUE
             }),
-            animated: crate::animation::container_declares_animation(format, bytes),
+            animated: crate::image_decoders::animation::container_declares_animation(format, bytes),
         })
     }
 

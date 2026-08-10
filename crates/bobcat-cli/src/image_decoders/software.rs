@@ -22,8 +22,8 @@ use bobcat_core::image::{
     ImageError, ImageFormat, ImageHeader, PixelSize,
 };
 
-use crate::orientation::{self, Orientation};
-use crate::resample;
+use crate::image_decoders::orientation::{self, Orientation};
+use crate::image_decoders::resample;
 
 /// What each per-format decoder hands back: the RGBA8 buffer, its **stored**
 /// dimensions (pre-orientation), and how it encodes alpha.

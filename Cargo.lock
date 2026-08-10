@@ -194,13 +194,22 @@ name = "bobcat-cli"
 version = "0.1.0"
 dependencies = [
  "bobcat-core",
+ "fast_image_resize",
  "flashbulb",
+ "image-webp",
+ "libc",
  "lynx-template-decoder",
+ "ndk-sys",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-image-io",
  "png",
  "pollster",
  "thiserror 2.0.18",
  "url",
+ "windows",
  "winit",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -211,7 +220,6 @@ dependencies = [
  "data-url",
  "flashbulb",
  "http",
- "image-decoders",
  "lynx-element",
  "lynx-template-decoder",
  "png",
@@ -712,7 +720,6 @@ dependencies = [
  "flashbulb",
  "html5ever",
  "hughie",
- "image-decoders",
  "markup5ever_rcdom",
  "parley",
  "png",
@@ -1353,23 +1360,6 @@ checksum = "cb68373c0d6620ef8105e855e7745e18b0d00d3bdb07fb532e434244cdb9a714"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
-]
-
-[[package]]
-name = "image-decoders"
-version = "0.1.0"
-dependencies = [
- "bobcat-core",
- "fast_image_resize",
- "image-webp",
- "libc",
- "ndk-sys",
- "objc2-core-foundation",
- "objc2-core-graphics",
- "objc2-image-io",
- "png",
- "windows",
- "zune-jpeg",
 ]
 
 [[package]]

@@ -164,10 +164,12 @@ useful signal for currently-compatible versions of those libraries.
   container identification from magic bytes (PNG, JPEG, WebP, GIF, HEIC,
   AVIF), per-container framing/truncation checks, the injected `Decoder`
   trait, and the async fetch→decode→cache `ImageLoader` over the resource
-  protocol. **No codec ships in the engine**: the embedder injects a
-  `Decoder` (normally `image_decoders::platform_decoder()`, or its own
-  implementation over an existing app image pipeline — that seam is the
-  point). A sniffed format the injected decoder does not claim is
+  protocol. **No codec ships in the engine**: the engine only designs the
+  contract, and the embedder injects a `Decoder` (the reference embedder's
+  `image_decoders::platform_decoder()`, or its own implementation over an
+  existing app image pipeline — that seam is the point). The engine's own
+  contract tests inject a PNG decoder double the same way
+  (`tests/support`'s `PngDouble`). A sniffed format the injected decoder does not claim is
   `ImageError::Unsupported`, distinct from `UnknownFormat`. **Static only.**
   `Acceleration` reports codec *provenance* (`Software`/`PlatformSoftware`),
   never a claim about silicon — no still-image API on any supported platform
@@ -228,9 +230,11 @@ useful signal for currently-compatible versions of those libraries.
   The crate must remain independent of Bobcat, the DOM, resources, and runtime
   policy — it knows nothing about Lynx.
 - `crates/bobcat-cli` — the independent native `bobcat` product over
-  `bobcat-core`'s `quickjs` feature. Its only workspace dependencies are
+  `bobcat-core`'s `quickjs` feature. Its workspace dependencies are
   `bobcat-core` (the layer chain: `bobcat_core::lynx_element::dom::…` reaches
-  every lower layer) and the sibling `lynx-template-decoder` utility.
+  every lower layer) and the sibling `lynx-template-decoder` utility; the
+  per-OS codec crates it consumes are target-scoped, for `image_decoders`
+  below.
   `bobcat -i file:///…` decodes and boots one web bundle; other URL schemes
   remain rejected at the boundary. The CLI is an **embedder** of
   `bobcat_core::engine`: it owns argument parsing, bundle bytes and
@@ -245,6 +249,28 @@ useful signal for currently-compatible versions of those libraries.
   `spawn_script` was given. Headed mode attaches the window as the draw target;
   headless mode attaches the engine's offscreen target and relays synthetic
   vsync ticks — whether a tick becomes GPU work is the engine's decision.
+  The `image_decoders` module carries the **reference implementations** of
+  the engine's `bobcat_core::image::Decoder` contract — implementing the
+  decoder is embedder work, so they live in the reference embedder. One per
+  OS at compile time: Apple (macOS/iOS) `ImageIO`, claiming all six
+  identified formats **unconditionally** (the workspace assumes an OS floor
+  above every needed codec — WebP macOS 11/iOS 14, AVIF macOS 13/iOS 16 — so
+  there is no runtime probe; JPEG EXIF orientation from the module's own
+  byte parser, HEIC/AVIF orientation from `kCGImagePropertyOrientation`);
+  Windows WIC (PNG/JPEG inbox, WebP probed — Store extension); Android NDK
+  `AImageDecoder` via `dlopen` (API 30+; the `dlsym` result is the probe);
+  Linux **only**, the pure-Rust reference decoder (`png` + `zune-jpeg` +
+  `image-webp` taken directly rather than through the crates.io `image`
+  facade). On Windows/Android a failed probe leaves `platform_decoder()` =
+  `None` with **no fallback behind it** — and since the CLI's mandatory
+  QuickJS C sources do not cross-compile to those ABIs, the WIC and NDK
+  modules have **no CI type-check gate**: recorded reference material for
+  embedders that do not exist yet, not live code. Decoder-behaviour tests
+  (real JPEG/WebP/EXIF fixtures) live in `tests/image_decoders.rs`; the
+  measured `ImageIO` API comparison that fixed the Apple decoder's choices
+  (thumbnail path, never `ShouldCacheImmediately`, the accepted ~30% PNG
+  cost) is recorded in `apple.rs`'s module docs, and the one-off bench
+  harness that produced it was deliberately not kept.
   Headed mode uses a native winit window with display-backed
   vsync and tracks both logical viewport size and device-pixel ratio. Headless mode uses a
   configurable synthetic vsync rate, skips catch-up bursts after slow frames,
@@ -627,30 +653,6 @@ useful signal for currently-compatible versions of those libraries.
   component-specific staggered layout, and Lynx-specific text
   attribute/raw-text/truncation policy. Generic W3C text style, document
   context, and artifact storage already live in `dom`.
-- `crates/image-decoders` — the sanctioned `Decoder` implementations for the
-  engine's decode contract (`bobcat_core::image`, re-exported here as
-  `image_decoders::contract`), one per OS, selected at **compile time** by
-  target. Apple (macOS/iOS): `ImageIO`, claiming all six identified formats
-  **unconditionally** — the workspace assumes an OS floor above every needed
-  codec (WebP macOS 11/iOS 14, AVIF macOS 13/iOS 16), so the old runtime
-  capability probe is deliberately gone; JPEG EXIF orientation comes from the
-  crate's own byte parser (agreement with the reference decoder), HEIC/AVIF
-  orientation from `kCGImagePropertyOrientation`. Windows: WIC, PNG/JPEG
-  inbox, WebP probed at runtime (Store extension). Android: NDK
-  `AImageDecoder` via `dlopen` (API 30+; the `dlsym` result is the probe).
-  Linux **only**: the pure-Rust reference decoder (`png` + `zune-jpeg` +
-  `image-webp` taken directly rather than through the crates.io `image`
-  facade), claiming PNG/JPEG/WebP — it exists because Linux has no system
-  decode API and headless CI runs there, and it is compiled for no other
-  target. On Windows/Android a failed probe leaves `platform_decoder()` =
-  `None` with **no fallback behind it**; the embedder ships without decoding
-  there or injects its own. Contract tests in
-  `crates/bobcat-core/tests/image_*.rs` run against whatever decoder the
-  compiling platform ships, which is the seam an embedder uses. The measured
-  `ImageIO` API comparison that fixed this decoder's choices (thumbnail path,
-  never `ShouldCacheImmediately`, the accepted ~30% PNG cost) is recorded in
-  `apple.rs`'s module docs; the one-off bench harness that produced it was
-  deliberately not kept.
 - `crates/flashbulb` — screenshot testing infrastructure, and the only crate
   here that exists for the test suite rather than the product (`publish =
   false`, dev-dependency everywhere). It owns RGBA `Image` + PNG codec, a

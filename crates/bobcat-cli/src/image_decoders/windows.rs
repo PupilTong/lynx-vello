@@ -60,8 +60,8 @@ use windows::Win32::System::Com::{
 };
 use windows::core::{Error as ComError, GUID, HRESULT, Interface, Result as ComResult};
 
-use crate::orientation::{self, Orientation};
-use crate::resample;
+use crate::image_decoders::orientation::{self, Orientation};
+use crate::image_decoders::resample;
 
 /// PNG, JPEG and (when the Store extension is installed) `WebP` through the
 /// Windows Imaging Component.
@@ -585,7 +585,7 @@ mod tests {
     };
 
     use super::{CONTAINERS, default_alpha, has_alpha};
-    use crate::orientation::Orientation;
+    use crate::image_decoders::orientation::Orientation;
 
     #[test]
     fn every_claimed_format_maps_to_a_distinct_container_guid() {

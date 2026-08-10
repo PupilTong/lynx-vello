@@ -56,12 +56,127 @@ pub fn checker_png(side: u32) -> Vec<u8> {
     encode_png(side, side, &checker_rgba(side))
 }
 
+/// A minimal PNG-only [`Decoder`], injected into the contract tests exactly
+/// the way an embedder injects a real one.
+///
+/// The engine designs the contract and ships no codec, so its own tests
+/// exercise the seam with this double rather than reaching up into an
+/// embedder's implementations (which would invert the layering in the build
+/// graph). It decodes the RGBA8 fixtures the tests generate, honours the
+/// request caps, and honours a downsample target with a nearest-neighbour
+/// resample — enough to satisfy every obligation the contract states, with
+/// none of the codec surface the real implementations carry.
+#[derive(Debug)]
+pub struct PngDouble;
+
+use bobcat_core::image::{
+    Acceleration, AlphaType, Capabilities, DecodeRequest, DecodeResponse, DecodedImage, Decoder,
+    ImageError, ImageFormat, ImageHeader, PixelSize,
+};
+
+impl Decoder for PngDouble {
+    fn name(&self) -> &'static str {
+        "png-double"
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::none().with(ImageFormat::Png, Acceleration::Software)
+    }
+
+    fn probe(&self, format: ImageFormat, bytes: &[u8]) -> Result<ImageHeader, ImageError> {
+        if format != ImageFormat::Png {
+            return Err(ImageError::Unsupported { format });
+        }
+        let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+        let reader = decoder
+            .read_info()
+            .map_err(|error| ImageError::decode(format, error.to_string()))?;
+        let info = reader.info();
+        Ok(ImageHeader {
+            format,
+            natural_size: PixelSize {
+                width: info.width,
+                height: info.height,
+            },
+            has_alpha: info.color_type.samples() % 2 == 0 || info.trns.is_some(),
+            animated: info.animation_control.is_some(),
+        })
+    }
+
+    fn decode(
+        &self,
+        format: ImageFormat,
+        bytes: &[u8],
+        request: &DecodeRequest,
+    ) -> Result<DecodeResponse, ImageError> {
+        let header = self.probe(format, bytes)?;
+        request.check(&header)?;
+
+        let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+        let mut reader = decoder
+            .read_info()
+            .map_err(|error| ImageError::decode(format, error.to_string()))?;
+        let mut pixels =
+            vec![
+                0u8;
+                reader
+                    .output_buffer_size()
+                    .ok_or_else(|| ImageError::decode(format, "output size overflows"))?
+            ];
+        let frame = reader
+            .next_frame(&mut pixels)
+            .map_err(|error| ImageError::decode(format, error.to_string()))?;
+        pixels.truncate(frame.buffer_size());
+        // The double only ever meets the RGBA8 fixtures this suite generates.
+        if reader.output_color_type().0 != png::ColorType::Rgba {
+            return Err(ImageError::decode(format, "the double decodes RGBA8 only"));
+        }
+
+        let target = request.effective_size(header.natural_size);
+        let pixels = if target == header.natural_size {
+            pixels
+        } else {
+            resample_nearest(
+                &pixels,
+                (frame.width, frame.height),
+                (target.width, target.height),
+            )
+        };
+
+        Ok(DecodeResponse {
+            image: DecodedImage::from_rgba8(
+                target.width,
+                target.height,
+                AlphaType::Straight,
+                pixels,
+                format,
+            )?,
+            header,
+            acceleration: Acceleration::Software,
+            backend: "png-double",
+        })
+    }
+}
+
+/// Nearest-neighbour, which is all a contract double owes: the tests assert
+/// dimensions and caching identity, never resample quality.
+fn resample_nearest(pixels: &[u8], from: (u32, u32), to: (u32, u32)) -> Vec<u8> {
+    let mut out = Vec::with_capacity((to.0 * to.1 * 4) as usize);
+    for y in 0..to.1 {
+        let sy = y * from.1 / to.1;
+        for x in 0..to.0 {
+            let sx = x * from.0 / to.0;
+            let at = ((sy * from.0 + sx) * 4) as usize;
+            out.extend_from_slice(&pixels[at..at + 4]);
+        }
+    }
+    out
+}
+
+/// The injected decoder every contract test uses.
 #[must_use]
-pub fn fixture(name: &str) -> Vec<u8> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
-        .join(name);
-    std::fs::read(&path).unwrap_or_else(|error| panic!("reading {}: {error}", path.display()))
+pub fn decoder() -> Arc<dyn Decoder> {
+    Arc::new(PngDouble)
 }
 
 /// Which transports the double advertises, and what it hands back.

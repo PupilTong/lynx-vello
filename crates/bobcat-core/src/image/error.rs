@@ -94,8 +94,8 @@ pub enum ImageError {
 
 impl ImageError {
     /// A [`Self::Decode`] with `message`. Public because decoder
-    /// implementations live outside this crate (`image-decoders`, or an
-    /// embedder's own) and every one of them needs to construct it.
+    /// implementations live outside this crate (in the embedder) and every
+    /// one of them needs to construct it.
     pub fn decode(format: ImageFormat, message: impl Into<Arc<str>>) -> Self {
         Self::Decode {
             format,

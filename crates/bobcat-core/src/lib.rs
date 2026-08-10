@@ -7,8 +7,8 @@
 //!
 //! [`image`] is the replaced-content decode contract and loader — the engine
 //! owns that pipeline, while the codec itself is a third injected contract
-//! ([`image::Decoder`], implementations in `image-decoders` or the embedder's
-//! own).
+//! ([`image::Decoder`], implemented by the embedder — `bobcat-cli` carries
+//! the reference implementations).
 //!
 //! The default `quickjs` feature adds Bobcat's internal `QuickJS` adapter and
 //! main-thread runtime. Disable default features to use only the external
