@@ -540,9 +540,14 @@ impl<T: Sync> Element for &Node<T> {
         _context: &mut selectors::context::MatchingContext<Self::Impl>,
     ) -> bool {
         match pc {
-            NonTSPseudoClass::Hover | NonTSPseudoClass::Active | NonTSPseudoClass::Focus => {
-                self.element_state.contains(pc.state_flag())
-            }
+            // Named one by one, deliberately: widening this to
+            // `self.element_state.contains(pc.state_flag())` would silently
+            // switch on `:checked`, `:disabled`, `:link`, and every other state
+            // bit the vendored grammar parses but this crate never sets.
+            NonTSPseudoClass::Hover
+            | NonTSPseudoClass::Active
+            | NonTSPseudoClass::Focus
+            | NonTSPseudoClass::Defined => self.element_state.contains(pc.state_flag()),
             _ => false,
         }
     }

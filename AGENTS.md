@@ -438,6 +438,66 @@ useful signal for currently-compatible versions of those libraries.
   vendored selector grammar, and a node that leaves the flat tree keeps its
   last computed style and geometry — the same contract detached subtrees
   already have, and nothing renders it either way.
+  **Custom elements** (W3C, so W3C behavior, within a deliberately narrowed
+  scope) are the other half of the component model.
+  `Document::define(local_name, Box<dyn CustomElement<T>>)` registers one
+  handler per tag — a definition here is per-tag rather than the standard's
+  per-instance constructor, because this crate has no script realm to hold
+  instances in, so every callback names its element by `NodeId` and per-element
+  state belongs to the layer owning `T`. The handler receives `constructed`,
+  `connected_callback`, `disconnected_callback`, and
+  `attribute_changed_callback`, the last filtered by an `observed_attributes`
+  list read once at definition time.
+  **Scope: user-agent components, not script-defined elements.** Definitions
+  come from the engine layer above, never from application script, and
+  `define` *requires* that every definition precede any element with its tag —
+  it panics otherwise, since nothing later moves an element into a definition.
+  That single contract removes the standard's entire upgrade half: no
+  `undefined` state and therefore no `:defined` transition, no *upgrade an
+  element*, no *try to upgrade*, no `define`-time document sweep, no replay of
+  attributes an element already carried, and no *valid custom element name*
+  predicate (whose only job was deciding whether a definitionless element
+  counted as `undefined`). The document element is the one exception, because
+  `Document::new` creates it before any definition can exist, so defining its
+  tag constructs it. Restoring script-defined elements later is additive — an
+  `undefined` state, an upgrade reaction, and a sweep — and moves neither the
+  trait nor the dispatch contract.
+  What the narrowing does **not** remove, and the thing to not assume is
+  simpler than it is: reactions are still **queued, never called inline**, and
+  drained at the end of the public mutation that raised them (the standard's
+  `[CEReactions]` boundary), because a lifecycle callback mutates the tree
+  while its handler lives inside the `Document` being mutated — as true of an
+  engine-authored handler as of a script one. Dispatch clones an
+  `Arc<dyn CustomElement<T>>` out of the registry rather than vacating the
+  slot, which is what lets a callback on `x-row` create another `x-row` (the
+  ordinary list shape) instead of hitting a re-entrancy panic. Scopes are
+  watermarks into one flattened element queue while the per-element reaction
+  queue is shared across them, which reproduces a browser's
+  `A.disc, A.conn, B.disc, B.conn` for a subtree move. Two `Node` fields carry
+  the definition pointer and the `Uncustomized`/`Constructing`/`Custom` state
+  and fit in the existing tail padding (stride unchanged, asserted);
+  `Constructing` earns its byte by suppressing the reactions a constructor's
+  own mutations would otherwise raise back at it. `:defined` is answered but
+  never moves — with no `undefined` state it matches everything, which is why
+  the `:not(:defined)` FOUC idiom is a script-defined-elements feature.
+  Both a nesting depth and a per-scope fixpoint budget bound the drain, and
+  both panic rather than hang. This is the crate's first self-authored `dyn`
+  (the other two are mandated by upstream Stylo signatures), admitted by
+  explicit user ruling because a document holds N behaviors keyed by N tag
+  names discovered at runtime, which a type parameter cannot express; the
+  `Send + Sync` supertrait is what keeps `Document<T>` `Send`. Benchmarked
+  (`benches/custom_elements.rs`, three-way plain/unmatched/defined): a document
+  that defines nothing pays 1.00× on a no-op commit and 1.01× on creation.
+  Further recorded limits: no `adoptedCallback` (no second document exists), no
+  `connectedMoveCallback` (every move is disconnect-then-connect, the
+  standard's own fallback), no customized built-ins/`is`/`extends`, no scoped
+  registries, no `whenDefined`/`get`/`upgrade(root)`, and no `failed` state or
+  construction stack — all of which exists to police a JavaScript constructor
+  that can throw. A callback may detach any node but may not *free* one the
+  mutation that called it is still holding: `create_element`, `remove_subtree`,
+  and the constructor call pin that id and panic if it is freed, because a
+  `NodeId` is a slab key the arena recycles and a replacement would otherwise
+  inherit it while every liveness check passed.
   Every node points directly back only to `TreeArenas`, and the
   same plain one-word `&Node` implements Stylo's document/node/element/shadow-root traits
   according to its `NodeData` (styling runs in place, no mirror tree),
