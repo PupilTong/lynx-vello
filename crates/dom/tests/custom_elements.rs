@@ -452,7 +452,7 @@ fn connected_fires_once_per_insertion_never_doubled_with_the_construction() {
 }
 
 #[test]
-fn inserting_into_a_disconnected_parent_connects_nothing_until_it_connects() {
+fn inserting_into_a_disconnected_parent_raises_nothing_until_it_connects() {
     let log = log();
     let mut doc = Doc::new();
     let root = doc.root;
@@ -900,6 +900,79 @@ fn a_constructor_that_frees_the_element_being_created_panics() {
 /// The same rule, in the shape that used to slip through every liveness
 /// check: free the element *and* create a replacement, so the id is occupied
 /// again by the time the guard looks at it.
+/// The second pin preflight — the one after the drain — is not dead defensive
+/// code. A constructor holds a pin on the element being created; if it removes
+/// a subtree whose `disconnected_callback` then appends that pinned element
+/// into the subtree being removed, only the post-drain pass can see it.
+#[test]
+#[should_panic(expected = "freeing it is not")]
+fn a_node_a_callback_moves_into_the_doomed_subtree_is_still_caught() {
+    let log = log();
+    let doomed: Arc<Mutex<Option<NodeId>>> = Arc::new(Mutex::new(None));
+    let guest: Arc<Mutex<Option<NodeId>>> = Arc::new(Mutex::new(None));
+    let mut doc = Doc::new();
+    let root = doc.root;
+
+    let smuggled = Arc::clone(&guest);
+    define(
+        &mut doc,
+        Probe::new("x-outer", &log).on_disconnected(Box::new(move |document, element| {
+            if let Some(pinned) = *smuggled.lock().unwrap() {
+                document.append_child(element, pinned);
+            }
+        })),
+    );
+    let target = Arc::clone(&doomed);
+    let me = Arc::clone(&guest);
+    define(
+        &mut doc,
+        Probe::new("x-inner", &log).on_constructed(Box::new(move |document, element| {
+            *me.lock().unwrap() = Some(element);
+            if let Some(victim) = *target.lock().unwrap() {
+                document.remove_subtree(victim);
+            }
+        })),
+    );
+
+    let outer = doc.el(root, "x-outer");
+    *doomed.lock().unwrap() = Some(outer);
+    doc.dom.create_element("x-inner", ());
+}
+
+/// The pin protects the node its caller is holding, not the whole subtree from
+/// every other removal: a `disconnected_callback` may remove a descendant of
+/// the subtree being removed. The outer removal then returns only the payloads
+/// it actually freed — the callback took the rest.
+#[test]
+fn a_disconnected_callback_may_remove_a_descendant_of_the_doomed_subtree() {
+    let log = log();
+    let victim: Arc<Mutex<Option<NodeId>>> = Arc::new(Mutex::new(None));
+    let target = Arc::clone(&victim);
+    let mut doc = Doc::new();
+    let root = doc.root;
+    define(
+        &mut doc,
+        Probe::new("x-item", &log).on_disconnected(Box::new(move |document, _| {
+            if let Some(id) = target.lock().unwrap().take() {
+                document.remove_subtree(id);
+            }
+        })),
+    );
+    let outer = doc.el(root, "x-item");
+    let inner = doc.el(outer, "x-item");
+    *victim.lock().unwrap() = Some(inner);
+
+    let payloads = doc.dom.remove_subtree(outer);
+
+    assert_eq!(
+        payloads.len(),
+        1,
+        "the callback took the descendant's payload"
+    );
+    assert!(doc.dom.get(outer).is_none());
+    assert!(doc.dom.get(inner).is_none());
+}
+
 /// The pin guard must fire *before* the arena is touched, not after. A
 /// callback that catches the guard's panic must find the subtree exactly as it
 /// was — otherwise `create_element` hands back an id whose node is gone, which

@@ -546,11 +546,14 @@ impl<T> Document<T> {
             self.custom_elements.reactions.clear();
             self.custom_elements.pinned.clear();
         }
-        // Cleared unconditionally: the leftovers are gone either way, so a
-        // later, unrelated panic must not be excused by this one.
-        self.custom_elements
-            .abandoned
-            .store(false, Ordering::Release);
+        // Cleared whenever set, so a later unrelated panic is not excused by
+        // this one — but read first, because this runs on every mutation and
+        // the flag is almost always already false.
+        if self.custom_elements.abandoned.load(Ordering::Relaxed) {
+            self.custom_elements
+                .abandoned
+                .store(false, Ordering::Release);
+        }
         self.custom_elements.element_queue.len()
     }
 
@@ -559,10 +562,8 @@ impl<T> Document<T> {
         if self.custom_elements.element_queue.len() == base {
             return;
         }
-        let _depth = ReactionDepthToken::enter(
-            &Arc::clone(&self.custom_elements.depth),
-            &Arc::clone(&self.custom_elements.abandoned),
-        );
+        let _depth =
+            ReactionDepthToken::enter(&self.custom_elements.depth, &self.custom_elements.abandoned);
         let mut budget = MAX_REACTIONS_PER_SCOPE;
         let mut cursor = base;
         // The outer loop re-reads `len()`: a callback that enqueues onto an

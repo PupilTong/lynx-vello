@@ -91,7 +91,7 @@ impl CustomElement<()> for Inert {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 enum Registry {
     /// No definitions: every hook takes its empty-registry branch.
     Empty,
@@ -188,12 +188,10 @@ fn attribute_mutation(bencher: divan::Bencher, registry: Registry) {
     let (mut doc, probe) = build_page(registry);
     doc.layout();
     let state = RefCell::new(doc);
-    let mut counter = 0u32;
     bencher
         .counter(ItemsCount::new(ATTRIBUTE_BATCH))
         .bench_local(|| {
             for _ in 0..ATTRIBUTE_BATCH {
-                counter += 1;
                 state
                     .borrow_mut()
                     .set_attribute(probe, "value", black_box("v"));
@@ -204,7 +202,6 @@ fn attribute_mutation(bencher: divan::Bencher, registry: Registry) {
                     .set_attribute(probe, "unwatched", black_box("v"));
             }
         });
-    let _ = counter;
 }
 
 #[divan::bench]
