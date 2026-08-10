@@ -1,16 +1,20 @@
-//! The decoded byte format every backend produces and the paint engine consumes.
+//! The decoded byte format every decoder produces and the paint engine
+//! consumes.
 
-#[cfg(not(feature = "vello"))]
-use std::sync::Arc;
+// The one sanctioned road to peniko: vello re-exports its version-matched copy,
+// dom re-exports vello, lynx-element re-exports dom. A direct peniko dependency
+// is forbidden (see AGENTS.md), and reaching through the chain is what
+// guarantees this Blob is the same type the paint engine's atlas keys on.
+use lynx_element::dom::vello::peniko;
 
-use crate::error::ImageError;
+use crate::image::error::ImageError;
 
 /// How a decoded buffer encodes alpha.
 ///
-/// Carried rather than normalised. The software and WIC paths emit straight
+/// Carried rather than normalised. The reference and WIC paths emit straight
 /// alpha, `ImageIO` and `AImageDecoder` premultiplied; converting on the CPU would
 /// be pure loss, because vello's fine shader premultiplies per texel before
-/// filtering either way. Byte-identical output across backends is therefore not
+/// filtering either way. Byte-identical output across decoders is therefore not
 /// a goal — identical *composited* output is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AlphaType {
@@ -20,24 +24,17 @@ pub enum AlphaType {
     Premultiplied,
 }
 
-/// The pixel buffer, behind whichever shared handle the build has available.
-///
-/// With the `vello` feature on this *is* a `peniko::Blob`, so the identity
-/// `peniko` mints at construction is the identity every
-/// [`DecodedImage::to_image_data`] call hands back. That is what keeps vello's
-/// atlas holding one residency entry for the image instead of re-uploading it
-/// every frame, and making it structural beats leaving it to a convention a
-/// later caller can quietly break.
-#[cfg(feature = "vello")]
-type Buffer = vello::peniko::Blob<u8>;
-#[cfg(not(feature = "vello"))]
-type Buffer = Arc<[u8]>;
-
 /// Decoded RGBA8 pixels plus the metadata needed to interpret them.
 ///
 /// Row-major and tightly packed: stride is exactly `4 * width` with no row
 /// padding, length exactly `4 * width * height`, channel order R, G, B, A in
 /// memory.
+///
+/// The buffer *is* a `peniko::Blob`, so the identity `peniko` mints at
+/// construction is the identity every [`DecodedImage::to_image_data`] call
+/// hands back. That is what keeps vello's atlas holding one residency entry for
+/// the image instead of re-uploading it every frame, and making it structural
+/// beats leaving it to a convention a later caller can quietly break.
 ///
 /// Colour values are the file's own sRGB-encoded bytes. No ICC or CICP
 /// conversion and no gamma conversion is performed, because vello's atlas is
@@ -47,7 +44,7 @@ type Buffer = Arc<[u8]>;
 /// Cloning is cheap: the buffer is shared, not copied.
 #[derive(Clone, Debug)]
 pub struct DecodedImage {
-    data: Buffer,
+    data: peniko::Blob<u8>,
     width: u32,
     height: u32,
     alpha_type: AlphaType,
@@ -59,14 +56,14 @@ impl DecodedImage {
     /// # Errors
     ///
     /// [`ImageError::Decode`] when either axis is zero or `pixels.len()` is not
-    /// exactly `4 * width * height` — a backend that miscounts its own stride
+    /// exactly `4 * width * height` — a decoder that miscounts its own stride
     /// must not reach the atlas.
     pub fn from_rgba8(
         width: u32,
         height: u32,
         alpha_type: AlphaType,
         pixels: Vec<u8>,
-        format: crate::format::ImageFormat,
+        format: crate::image::format::ImageFormat,
     ) -> Result<Self, ImageError> {
         if width == 0 || height == 0 {
             return Err(ImageError::decode(
@@ -87,7 +84,7 @@ impl DecodedImage {
             ));
         }
         Ok(Self {
-            data: buffer_from(pixels),
+            data: peniko::Blob::from(pixels),
             width,
             height,
             alpha_type,
@@ -111,14 +108,7 @@ impl DecodedImage {
 
     #[must_use]
     pub fn pixels(&self) -> &[u8] {
-        #[cfg(feature = "vello")]
-        {
-            self.data.data()
-        }
-        #[cfg(not(feature = "vello"))]
-        {
-            &self.data
-        }
+        self.data.data()
     }
 
     /// Retained bytes, for the decode cache's byte budget.
@@ -130,20 +120,17 @@ impl DecodedImage {
     /// The shared-buffer identity. Stable across [`Clone`] and across repeated
     /// [`Self::to_image_data`] calls, which is the property that stops vello
     /// re-uploading the same image every frame.
-    #[cfg(feature = "vello")]
     #[must_use]
     pub fn id(&self) -> u64 {
         self.data.id()
     }
 
-    /// The `peniko` view of this image, for
-    /// `dom`'s `ImageStore`.
+    /// The `peniko` view of this image, for `dom`'s `ImageStore`.
     ///
     /// Cheap — it clones the shared buffer handle, never the pixels.
-    #[cfg(feature = "vello")]
     #[must_use]
-    pub fn to_image_data(&self) -> vello::peniko::ImageData {
-        use vello::peniko::{ImageAlphaType, ImageData, ImageFormat};
+    pub fn to_image_data(&self) -> peniko::ImageData {
+        use peniko::{ImageAlphaType, ImageData, ImageFormat};
 
         ImageData {
             data: self.data.clone(),
@@ -158,19 +145,12 @@ impl DecodedImage {
     }
 }
 
-fn buffer_from(pixels: Vec<u8>) -> Buffer {
-    #[cfg(feature = "vello")]
-    {
-        vello::peniko::Blob::from(pixels)
-    }
-    #[cfg(not(feature = "vello"))]
-    {
-        Arc::from(pixels)
-    }
-}
-
 /// `4 * width * height`, or `None` on overflow.
-pub(crate) fn expected_byte_len(width: u32, height: u32) -> Option<usize> {
+///
+/// Public because decoder implementations outside this crate size their output
+/// buffers with it before [`DecodedImage::from_rgba8`] re-validates the result.
+#[must_use]
+pub fn expected_byte_len(width: u32, height: u32) -> Option<usize> {
     (width as usize)
         .checked_mul(height as usize)
         .and_then(|area| area.checked_mul(4))
@@ -180,7 +160,7 @@ pub(crate) fn expected_byte_len(width: u32, height: u32) -> Option<usize> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::{AlphaType, DecodedImage};
-    use crate::format::ImageFormat;
+    use crate::image::format::ImageFormat;
 
     fn image(width: u32, height: u32) -> DecodedImage {
         DecodedImage::from_rgba8(
@@ -224,7 +204,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "vello")]
     #[test]
     fn buffer_identity_survives_cloning_and_repeated_conversion() {
         // The anti-re-upload invariant: vello's atlas keys residency on the
@@ -238,10 +217,9 @@ mod tests {
         assert_ne!(image(4, 4).id(), id);
     }
 
-    #[cfg(feature = "vello")]
     #[test]
     fn alpha_type_maps_onto_peniko() {
-        use vello::peniko::{ImageAlphaType, ImageFormat as PenikoFormat};
+        use super::peniko::{ImageAlphaType, ImageFormat as PenikoFormat};
 
         let straight = image(1, 1).to_image_data();
         assert_eq!(straight.alpha_type, ImageAlphaType::Alpha);

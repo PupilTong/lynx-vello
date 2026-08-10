@@ -1,14 +1,17 @@
-//! End-to-end replaced content: real encoded bytes → `crates/image` decode →
-//! natural size into layout → `object-fit` geometry at paint.
+//! End-to-end replaced content: encoded bytes → decoded pixels → natural size
+//! into layout → `object-fit` geometry at paint.
 //!
 //! Structural (no GPU): asserts on the scene encoding and on the layout the
 //! natural size produces. The pixel-level check is the `replaced-object-fit`
-//! screenshot golden.
+//! screenshot golden. Decoding here is the `png` crate driven directly — the
+//! real decode pipeline lives above this layer, in the engine and its
+//! embedder, and this test's subject is replaced-content layout and paint,
+//! not codecs.
 
 mod paint_common;
 
 use dom::layout::{NaturalSize, Size};
-use image::{BackendRegistry, DecodeRequest, decode_bytes};
+use dom::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
 use paint_common::Doc;
 
 const PAGE: &str = "page { display: flex; position: relative; width: 800px; height: 600px; }
@@ -56,25 +59,27 @@ impl Harness {
     /// The whole pipeline for one `<img>`: decode, publish the natural size to
     /// layout, publish the pixels to paint.
     fn img(&mut self, class: &str, bytes: &[u8]) -> dom::NodeId {
-        let decoded = decode_bytes(
-            &BackendRegistry::software_only(),
-            bytes,
-            &DecodeRequest::default(),
-        )
-        .expect("decode");
+        let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+        let mut reader = decoder.read_info().expect("png header");
+        let mut rgba = vec![0u8; reader.output_buffer_size().expect("png size")];
+        let info = reader.next_frame(&mut rgba).expect("png frame");
+        rgba.truncate(info.buffer_size());
 
         let root = self.doc.root;
         let node = self.doc.el_tag(root, "img", class);
         #[allow(clippy::cast_precision_loss)]
-        let natural = NaturalSize::from_size(Size::new(
-            decoded.header.natural_size.width as f32,
-            decoded.header.natural_size.height as f32,
-        ));
+        let natural = NaturalSize::from_size(Size::new(info.width as f32, info.height as f32));
         self.doc.dom.set_natural_size(node, natural);
-        self.doc
-            .dom
-            .images_mut()
-            .insert_node(node, decoded.image.to_image_data());
+        self.doc.dom.images_mut().insert_node(
+            node,
+            ImageData {
+                data: Blob::from(rgba),
+                format: ImageFormat::Rgba8,
+                alpha_type: ImageAlphaType::Alpha,
+                width: info.width,
+                height: info.height,
+            },
+        );
         node
     }
 

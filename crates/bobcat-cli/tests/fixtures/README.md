@@ -1,4 +1,4 @@
-# `crates/image` decode fixtures
+# `bobcat_core::image` decode fixtures
 
 Four tiny files, 1.4 KB total. They exist because this crate has **no JPEG or
 WebP encoder** — it decodes three formats and encodes none — so unlike the PNG
@@ -27,7 +27,7 @@ Requires Python with Pillow (`pip install pillow`). Run from the repo root; then
 from PIL import Image
 import os
 
-out = 'crates/image/tests/fixtures'
+out = 'crates/bobcat-core/tests/fixtures'
 
 def checker(size, alpha_quadrant):
     img = Image.new('RGBA', (size, size))

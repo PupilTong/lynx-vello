@@ -1,28 +1,31 @@
-//! The decode contract: what a caller asks for, what a backend returns, and the
-//! trait every backend implements.
+//! The decode contract: what a caller asks for, what a decoder returns, and the
+//! trait the embedder-injected decoder implements.
 
 use std::fmt;
 
+use crate::image::capability::Acceleration;
+use crate::image::error::ImageError;
+use crate::image::format::ImageFormat;
+use crate::image::pixels::DecodedImage;
 /// A two-dimensional physical-pixel size.
 ///
 /// Re-exported from the resource protocol rather than redefined: it is already
-/// the type [`ImageHints::target_size_px`](bobcat_core::resource::ImageHints)
+/// the type [`ImageHints::target_size_px`](crate::resource::ImageHints)
 /// carries, so a second identical struct would only force every call site to
 /// convert between them.
-pub use bobcat_core::resource::PixelSize;
-
-use crate::error::ImageError;
-use crate::format::ImageFormat;
-use crate::pixels::DecodedImage;
-use crate::registry::Acceleration;
+pub use crate::resource::PixelSize;
 
 /// Intrinsic metadata read from container headers, without decoding pixels.
 ///
 /// This is what layout waits on. Probing is three to four orders of magnitude
 /// cheaper than a full decode, which is the whole reason the natural size and
 /// the pixels arrive on separate schedules.
+///
+/// Not `#[non_exhaustive]`: decoder implementations live *outside* this crate
+/// and construct this by struct literal, which that attribute forbids across a
+/// crate boundary. Adding a field is a breaking change for every injected
+/// decoder — deliberately, since a new header field is new contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct ImageHeader {
     pub format: ImageFormat,
     /// Natural size in image pixels.
@@ -149,31 +152,52 @@ impl DecodeRequest {
 }
 
 /// One decoded image plus how it was produced.
+///
+/// Not `#[non_exhaustive]`, for [`ImageHeader`]'s reason: decoder
+/// implementations outside this crate construct it by struct literal.
 #[derive(Clone, Debug)]
-#[non_exhaustive]
 pub struct DecodeResponse {
     pub image: DecodedImage,
     /// The *source* metadata: `natural_size` is the image's own size, which is
     /// not `image`'s size when a decode-time downsample ran.
     pub header: ImageHeader,
-    /// The tier the backend that actually ran reports for this format.
+    /// The tier the decoder reports for this format.
     pub acceleration: Acceleration,
-    /// Which backend ran, for diagnostics and cache-provenance reporting.
+    /// Which decoder ran, for diagnostics and cache-provenance reporting.
     pub backend: &'static str,
 }
 
-/// One decode backend.
+/// The decoder the embedder injects — the one point where pixels enter the
+/// engine.
 ///
-/// Implementations are stateless and thread-safe. Every platform handle
-/// (`CGImageSource`, `IWICImagingFactory`, `AImageDecoder`) is created, used and
-/// dropped inside a single call, because none of them is `Send` — only the
-/// resulting `Vec<u8>` ever crosses a thread boundary.
+/// No implementation ships with the engine. The reference embedder
+/// (`bobcat-cli`) carries the reference ones (Apple `ImageIO`, Windows WIC,
+/// Android `AImageDecoder`, and the Linux-only pure-Rust reference), and an
+/// embedder with its own image pipeline implements this trait instead.
+///
+/// # Contract
+///
+/// - Implementations are stateless and thread-safe: [`probe`](Self::probe) and
+///   [`decode`](Self::decode) are called concurrently from arbitrary worker threads. Every platform
+///   handle (`CGImageSource`, `IWICImagingFactory`, `AImageDecoder`) must be created, used and
+///   dropped inside a single call, because none of them is `Send` — only plain buffers may cross
+///   threads.
+/// - [`ImageHeader::natural_size`] is reported in **oriented** space: a JPEG whose EXIF tag rotates
+///   it presents its rotated dimensions, and [`decode`](Self::decode) returns pixels in that same
+///   space. Layout consumes the probe, so a decoder that disagrees with its own probe shows up as a
+///   mis-sized box.
+/// - [`decode`](Self::decode) honours [`DecodeRequest`]'s caps and downsample target exactly:
+///   output size is [`DecodeRequest::effective_size`], never an upscale, and a breached cap is
+///   [`ImageError::TooLarge`] *before* pixels are allocated.
+/// - Neither call is invoked for a format [`capabilities`](Self::capabilities) does not claim —
+///   [`decode_bytes`](crate::image::decode_bytes) and the loader refuse those as
+///   [`ImageError::Unsupported`] first.
 pub trait Decoder: fmt::Debug + Send + Sync + 'static {
     /// Stable identifier, reported in [`DecodeResponse::backend`].
     fn name(&self) -> &'static str;
 
-    /// Which formats this backend claims, and at which tier.
-    fn capabilities(&self) -> crate::registry::Capabilities;
+    /// Which formats this decoder claims, and at which tier.
+    fn capabilities(&self) -> crate::image::capability::Capabilities;
 
     /// Parses container headers only. Must not decode pixel data.
     ///
@@ -200,7 +224,7 @@ pub trait Decoder: fmt::Debug + Send + Sync + 'static {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::{DecodeRequest, ImageHeader, PixelSize};
-    use crate::format::ImageFormat;
+    use crate::image::format::ImageFormat;
 
     fn header(width: u32, height: u32) -> ImageHeader {
         ImageHeader {

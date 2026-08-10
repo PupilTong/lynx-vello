@@ -29,7 +29,10 @@ pub(crate) enum Orientation {
 }
 
 impl Orientation {
-    fn from_exif(value: u16) -> Self {
+    /// The transform EXIF value `value` asks for. Public within the crate
+    /// because the Apple decoder maps `kCGImagePropertyOrientation` — the same
+    /// 1..=8 vocabulary — through it.
+    pub(crate) fn from_exif(value: u16) -> Self {
         match value {
             2 => Self::FlipHorizontal,
             3 => Self::Rotate180,

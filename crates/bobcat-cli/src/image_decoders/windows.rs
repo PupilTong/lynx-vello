@@ -33,6 +33,10 @@ use std::marker::PhantomData;
 use std::ptr;
 use std::sync::OnceLock;
 
+use bobcat_core::image::{
+    Acceleration, AlphaType, Capabilities, DecodeRequest, DecodeResponse, DecodedImage, Decoder,
+    ImageError, ImageFormat, ImageHeader, PixelSize, expected_byte_len,
+};
 use windows::Win32::Foundation::{CO_E_NOTINITIALIZED, RPC_E_CHANGED_MODE};
 use windows::Win32::Graphics::Imaging::{
     CLSID_WICImagingFactory, GUID_ContainerFormatJpeg, GUID_ContainerFormatPng,
@@ -56,13 +60,8 @@ use windows::Win32::System::Com::{
 };
 use windows::core::{Error as ComError, GUID, HRESULT, Interface, Result as ComResult};
 
-use crate::backend::resample;
-use crate::decode::{DecodeRequest, DecodeResponse, Decoder, ImageHeader, PixelSize};
-use crate::error::ImageError;
-use crate::format::ImageFormat;
-use crate::orientation::{self, Orientation};
-use crate::pixels::{AlphaType, DecodedImage};
-use crate::registry::{Acceleration, Capabilities, probe_once};
+use crate::image_decoders::orientation::{self, Orientation};
+use crate::image_decoders::resample;
 
 /// PNG, JPEG and (when the Store extension is installed) `WebP` through the
 /// Windows Imaging Component.
@@ -85,17 +84,18 @@ pub struct WicDecoder {
 static PROBE: OnceLock<Capabilities> = OnceLock::new();
 
 impl WicDecoder {
-    /// Probes `WIC` and returns a backend only if it decodes at least one
-    /// format this crate supports.
+    /// Probes `WIC` and returns a decoder only if it decodes at least one
+    /// claimed format.
     ///
     /// `None` is an ordinary outcome, not a failure: the apartment may refuse to
     /// initialise, the factory may not be creatable in a stripped-down
     /// container image, and Windows Nano Server ships without the imaging
-    /// components at all. The software backend covers every format
-    /// unconditionally, so this backend is only ever an upgrade.
+    /// components at all. There is no decoder behind this one — the reference
+    /// decoder is Linux-only — so `None` means the embedder ships without image
+    /// decoding or injects its own.
     #[must_use]
     pub fn detect() -> Option<Self> {
-        let capabilities = probe_once(&PROBE, probe_capabilities);
+        let capabilities = *PROBE.get_or_init(probe_capabilities);
         if capabilities.supported_formats().is_empty() {
             return None;
         }
@@ -184,13 +184,23 @@ impl Decoder for WicDecoder {
 /// when none is registered — which is exactly what a machine without the
 /// `WebP` Store extension reports. Any other failure is treated the same way:
 /// a codec this crate cannot construct is a codec it cannot use.
+/// The container GUID for each claimed format. GIF, HEIC and AVIF are
+/// deliberately absent: WIC does carry a GIF codec, but this decoder is
+/// type-checked and unexecuted (recorded crate limit), and widening its claims
+/// without a runner to verify them would be a promise nobody has tested.
+const CONTAINERS: [(ImageFormat, &GUID); 3] = [
+    (ImageFormat::Png, &GUID_ContainerFormatPng),
+    (ImageFormat::Jpeg, &GUID_ContainerFormatJpeg),
+    (ImageFormat::WebP, &GUID_ContainerFormatWebp),
+];
+
 fn probe_capabilities() -> Capabilities {
     let Ok(factory) = imaging_factory() else {
         return Capabilities::none();
     };
     let mut capabilities = Capabilities::none();
-    for format in [ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::WebP] {
-        if codec_present(&factory, container_guid(format)) {
+    for (format, container) in CONTAINERS {
+        if codec_present(&factory, container) {
             capabilities = capabilities.with(format, Acceleration::PlatformSoftware);
         }
     }
@@ -205,15 +215,6 @@ fn codec_present(factory: &IWICImagingFactory, container: &GUID) -> bool {
     // is dropped immediately; nothing escapes.
     let created = unsafe { factory.CreateDecoder(container, ptr::null()) };
     created.is_ok()
-}
-
-/// The `WIC` container GUID for each format this crate sniffs.
-fn container_guid(format: ImageFormat) -> &'static GUID {
-    match format {
-        ImageFormat::Png => &GUID_ContainerFormatPng,
-        ImageFormat::Jpeg => &GUID_ContainerFormatJpeg,
-        ImageFormat::WebP => &GUID_ContainerFormatWebp,
-    }
 }
 
 // ------------------------------------------------------------- COM apartment
@@ -472,7 +473,7 @@ fn copy_pixels(
     let stride = width
         .checked_mul(4)
         .ok_or_else(|| ImageError::too_large(width, height, "stride overflows u32"))?;
-    let length = crate::pixels::expected_byte_len(width, height).ok_or_else(|| {
+    let length = expected_byte_len(width, height).ok_or_else(|| {
         ImageError::too_large(width, height, "width * height * 4 overflows usize")
     })?;
     let mut buffer = vec![0u8; length];
@@ -577,24 +578,24 @@ fn wic_error(format: ImageFormat, context: &str, error: &ComError) -> ImageError
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use bobcat_core::image::ImageFormat;
     use windows::Win32::Graphics::Imaging::{
-        GUID_ContainerFormatJpeg, GUID_ContainerFormatPng, GUID_ContainerFormatWebp,
         GUID_WICPixelFormat8bppIndexed, GUID_WICPixelFormat24bppBGR, GUID_WICPixelFormat32bppBGRA,
         GUID_WICPixelFormat32bppPRGBA, GUID_WICPixelFormatDontCare,
     };
 
-    use super::{container_guid, default_alpha, has_alpha};
-    use crate::format::ImageFormat;
-    use crate::orientation::Orientation;
+    use super::{CONTAINERS, default_alpha, has_alpha};
+    use crate::image_decoders::orientation::Orientation;
 
     #[test]
-    fn every_supported_format_maps_to_its_container_guid() {
-        assert_eq!(container_guid(ImageFormat::Png), &GUID_ContainerFormatPng);
-        assert_eq!(container_guid(ImageFormat::Jpeg), &GUID_ContainerFormatJpeg);
-        assert_eq!(container_guid(ImageFormat::WebP), &GUID_ContainerFormatWebp);
-        // Distinct GUIDs, so the probe cannot silently claim one codec for
-        // another.
-        assert_ne!(GUID_ContainerFormatPng, GUID_ContainerFormatWebp);
+    fn every_claimed_format_maps_to_a_distinct_container_guid() {
+        for (index, (_, container)) in CONTAINERS.iter().enumerate() {
+            for (_, other) in &CONTAINERS[index + 1..] {
+                // Distinct GUIDs, so the probe cannot silently claim one codec
+                // for another.
+                assert_ne!(*container, *other);
+            }
+        }
     }
 
     #[test]

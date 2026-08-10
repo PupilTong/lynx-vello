@@ -160,8 +160,31 @@ useful signal for currently-compatible versions of those libraries.
   lets the engine's surface borrow the embedder's window instead of
   requiring a `'static` refcounted handle. `engine::OffscreenEngine` is the
   windowless composition, over the uninhabited `NoWindow`.
-  The core still adds no document alias, element-host trait, or injection
-  seam of its own.
+  The `image` module is the replaced-content decode **contract** and pipeline:
+  container identification from magic bytes (PNG, JPEG, WebP, GIF, HEIC,
+  AVIF), per-container framing/truncation checks, the injected `Decoder`
+  trait, and the async fetch→decode→cache `ImageLoader` over the resource
+  protocol. **No codec ships in the engine**: the engine only designs the
+  contract, and the embedder injects a `Decoder` (the reference embedder's
+  `image_decoders::platform_decoder()`, or its own implementation over an
+  existing app image pipeline — that seam is the point). The engine's own
+  contract tests inject a PNG decoder double the same way
+  (`tests/support`'s `PngDouble`). A sniffed format the injected decoder does not claim is
+  `ImageError::Unsupported`, distinct from `UnknownFormat`. **Static only.**
+  `Acceleration` reports codec *provenance* (`Software`/`PlatformSoftware`),
+  never a claim about silicon — no still-image API on any supported platform
+  exposes an acceleration query or reaches a decode ASIC, so
+  `DedicatedHardware` is reserved and unreported. The module never touches
+  `dom` node types: it returns an `ImageHeader` and a `DecodedImage`
+  (`to_image_data` reaches peniko through the `lynx_element::dom::vello`
+  re-export chain), and installing those on a node and in an `ImageStore` is
+  the engine loop's job. The **authoritative** recorded-limits list is
+  `crates/bobcat-core/src/image/mod.rs`'s module docs. The Lynx `<image>`
+  element surface (`mode`, `placeholder` racing, `cap-insets`, `blur-radius`,
+  `load`/`error` events) belongs above this module and is not implemented.
+  Beyond the three injected contracts (script, resource, decode), the core
+  still adds no document alias, element-host trait, or injection seam of its
+  own.
   `MainThreadRuntime`
   installs the Element PAPI before evaluation, evaluates a `.web.bundle`'s
   `lepusCode.root` inside web-core's wrapper, then runs `processData` →
@@ -207,9 +230,11 @@ useful signal for currently-compatible versions of those libraries.
   The crate must remain independent of Bobcat, the DOM, resources, and runtime
   policy — it knows nothing about Lynx.
 - `crates/bobcat-cli` — the independent native `bobcat` product over
-  `bobcat-core`'s `quickjs` feature. Its only workspace dependencies are
+  `bobcat-core`'s `quickjs` feature. Its workspace dependencies are
   `bobcat-core` (the layer chain: `bobcat_core::lynx_element::dom::…` reaches
-  every lower layer) and the sibling `lynx-template-decoder` utility.
+  every lower layer) and the sibling `lynx-template-decoder` utility; the
+  per-OS codec crates it consumes are target-scoped, for `image_decoders`
+  below.
   `bobcat -i file:///…` decodes and boots one web bundle; other URL schemes
   remain rejected at the boundary. The CLI is an **embedder** of
   `bobcat_core::engine`: it owns argument parsing, bundle bytes and
@@ -224,6 +249,28 @@ useful signal for currently-compatible versions of those libraries.
   `spawn_script` was given. Headed mode attaches the window as the draw target;
   headless mode attaches the engine's offscreen target and relays synthetic
   vsync ticks — whether a tick becomes GPU work is the engine's decision.
+  The `image_decoders` module carries the **reference implementations** of
+  the engine's `bobcat_core::image::Decoder` contract — implementing the
+  decoder is embedder work, so they live in the reference embedder. One per
+  OS at compile time: Apple (macOS/iOS) `ImageIO`, claiming all six
+  identified formats **unconditionally** (the workspace assumes an OS floor
+  above every needed codec — WebP macOS 11/iOS 14, AVIF macOS 13/iOS 16 — so
+  there is no runtime probe; JPEG EXIF orientation from the module's own
+  byte parser, HEIC/AVIF orientation from `kCGImagePropertyOrientation`);
+  Windows WIC (PNG/JPEG inbox, WebP probed — Store extension); Android NDK
+  `AImageDecoder` via `dlopen` (API 30+; the `dlsym` result is the probe);
+  Linux **only**, the pure-Rust reference decoder (`png` + `zune-jpeg` +
+  `image-webp` taken directly rather than through the crates.io `image`
+  facade). On Windows/Android a failed probe leaves `platform_decoder()` =
+  `None` with **no fallback behind it** — and since the CLI's mandatory
+  QuickJS C sources do not cross-compile to those ABIs, the WIC and NDK
+  modules have **no CI type-check gate**: recorded reference material for
+  embedders that do not exist yet, not live code. Decoder-behaviour tests
+  (real JPEG/WebP/EXIF fixtures) live in `tests/image_decoders.rs`; the
+  measured `ImageIO` API comparison that fixed the Apple decoder's choices
+  (thumbnail path, never `ShouldCacheImmediately`, the accepted ~30% PNG
+  cost) is recorded in `apple.rs`'s module docs, and the one-off bench
+  harness that produced it was deliberately not kept.
   Headed mode uses a native winit window with display-backed
   vsync and tracks both logical viewport size and device-pixel ratio. Headless mode uses a
   configurable synthetic vsync rate, skips catch-up bursts after slow frames,
@@ -447,7 +494,8 @@ useful signal for currently-compatible versions of those libraries.
   affected cache path. Mutually exclusive literal text, natural size, and
   test-only leaf metadata reuse the node's single nullable content pointer.
   `Document::set_natural_size` is the public replaced-content update seam
-  (public because the decoder, `crates/image`, is a separate crate); the
+  (public because decoding lives above `dom`, in `bobcat_core::image` and the
+  injected decoder); the
   getter stays paint/layout-internal, setting an equal value is a structural
   no-op, and the DOM core still knows no tag names.
   Each `DocumentLayoutState` entry owns one `LayoutSlot` containing the
@@ -605,31 +653,6 @@ useful signal for currently-compatible versions of those libraries.
   component-specific staggered layout, and Lynx-specific text
   attribute/raw-text/truncation policy. Generic W3C text style, document
   context, and artifact storage already live in `dom`.
-- `crates/image` — the replaced-content pipeline below the DOM: container
-  sniffing from magic bytes, header-only intrinsic-size probing, decode to
-  RGBA8, and the async fetch→decode→cache loader over `bobcat-core`'s
-  `ResourceFetcher`. PNG/JPEG/WebP, **static only**. One always-compiled
-  pure-Rust backend (`png` + `zune-jpeg` + `image-webp` taken directly rather
-  than through the `image` facade — the facade would collide with this
-  package's own name and make `cargo check -p image` ambiguous forever) plus at
-  most one platform backend chosen by a **runtime** probe: Apple ImageIO,
-  Windows WIC, Android NDK `AImageDecoder`. That probe is genuinely runtime —
-  ImageIO gained WebP in macOS 11/iOS 14, WIC's WebP codec is a Store
-  extension, `AImageDecoder` is API 30+. `Acceleration` reports codec
-  *provenance* (`Software` / `PlatformSoftware`), never a claim about silicon:
-  no still-image API on any of the three platforms exposes an acceleration
-  query or reaches a decode ASIC, so `DedicatedHardware` is reserved and
-  unreported. Routing may disagree with the ladder — on Apple, PNG stays on the
-  software backend because ImageIO just delegates to bundled libpng. It deliberately
-  does **not** depend on `dom`: it returns an `ImageHeader` and a
-  `DecodedImage`, and installing those on a node and in an `ImageStore` is the
-  caller's job. `DecodedImage::to_image_data` reaches `peniko` through vello's
-  re-export behind the default `vello` feature, so the crate can be
-  cross-checked for Windows/Android without building wgpu. The **authoritative**
-  recorded-limits list is `crates/image/src/lib.rs`'s crate docs. The Lynx
-  `<image>` element surface (`mode`, `placeholder` racing, `cap-insets`,
-  `blur-radius`, `load`/`error` events) belongs above this crate and is not
-  implemented; nothing here is exposed to `lynx-element`.
 - `crates/flashbulb` — screenshot testing infrastructure, and the only crate
   here that exists for the test suite rather than the product (`publish =
   false`, dev-dependency everywhere). It owns RGBA `Image` + PNG codec, a

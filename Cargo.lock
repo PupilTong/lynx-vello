@@ -194,13 +194,22 @@ name = "bobcat-cli"
 version = "0.1.0"
 dependencies = [
  "bobcat-core",
+ "fast_image_resize",
  "flashbulb",
+ "image-webp",
+ "libc",
  "lynx-template-decoder",
+ "ndk-sys",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-image-io",
  "png",
  "pollster",
  "thiserror 2.0.18",
  "url",
+ "windows",
  "winit",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -208,12 +217,15 @@ name = "bobcat-core"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "data-url",
  "flashbulb",
  "http",
  "lynx-element",
  "lynx-template-decoder",
+ "png",
  "pollster",
  "quickjs-rust-bridge",
+ "rustc-hash 2.1.3",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -708,7 +720,6 @@ dependencies = [
  "flashbulb",
  "html5ever",
  "hughie",
- "image",
  "markup5ever_rcdom",
  "parley",
  "png",
@@ -1349,32 +1360,6 @@ checksum = "cb68373c0d6620ef8105e855e7745e18b0d00d3bdb07fb532e434244cdb9a714"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
-]
-
-[[package]]
-name = "image"
-version = "0.1.0"
-dependencies = [
- "bobcat-core",
- "bytes",
- "data-url",
- "fast_image_resize",
- "http",
- "image-webp",
- "libc",
- "ndk-sys",
- "objc2-core-foundation",
- "objc2-core-graphics",
- "objc2-image-io",
- "png",
- "rustc-hash 2.1.3",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "url",
- "vello",
- "windows",
- "zune-jpeg",
 ]
 
 [[package]]

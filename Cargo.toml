@@ -23,12 +23,6 @@ lynx-template-decoder = { path = "crates/lynx-template-decoder" }
 # optional arbitrary-content measurement seam.
 hughie = { path = "crates/hughie" }
 flashbulb = { path = "crates/flashbulb" }
-# Format sniffing, capability-probed platform/software decode backends, and the
-# async fetch→decode→cache loader for replaced content. The package owns the
-# name `image` outright: the crates.io crate of that name is deliberately NOT a
-# dependency (its three constituent decoders are taken directly instead), so
-# `cargo check/test/clippy -p image` is unambiguous.
-image = { path = "crates/image" }
 lynx-element = { path = "crates/lynx-element" }
 quickjs-rust-bridge = { path = "crates/quickjs-rust-bridge" }
 dom = { path = "crates/dom" }
@@ -78,15 +72,12 @@ html5ever = "0.39"
 http = "1"
 # Software decode, one crate per format rather than the `image` facade.
 #
-# These are exactly the three decoders `image` 0.25 delegates to, taken directly.
-# The facade was rejected for two reasons: a workspace member named `image` plus
-# a crates.io `image` in the same graph makes `cargo check/test/clippy -p image`
-# permanently ambiguous (`cargo fmt -p image`, which only sees members, stays
-# unambiguous — so the two would need *different* spellings of the same package);
-# and the facade pulls `moxcms`/`pxfm` in non-optionally for colour management we
-# do not perform, while its own PNG/WebP memory limits are documented as not
-# wired through. Going direct also lets each backend emit RGBA8 without the
-# facade's intermediate conversion.
+# These are exactly the three decoders the crates.io `image` facade delegates
+# to, taken directly for `bobcat-cli`'s Linux-only reference decoder. The
+# facade was rejected: it pulls `moxcms`/`pxfm` in non-optionally for colour
+# management we do not perform, its own PNG/WebP memory limits are documented
+# as not wired through, and going direct lets each codec emit RGBA8 without
+# the facade's intermediate conversion.
 #
 # `png` is already pinned above for `flashbulb`, so PNG costs no extra crate.
 zune-jpeg = "0.5.15"
@@ -117,9 +108,9 @@ slab = "0.4"
 # pin the unified layout.
 smallvec = { version = "1", features = ["const_new", "union"] }
 thiserror = "2"
-# `crates/image` needs `rt` (`spawn_blocking` lives behind `cfg_rt!`), `sync`
-# (the decode-concurrency semaphore) and `io-util` (the `open_resource`
-# fallback's `read_to_end`). Declared here rather than per-crate so
+# `bobcat_core::image`'s loader needs `rt` (`spawn_blocking` lives behind
+# `cfg_rt!`), `sync` (the decode-concurrency semaphore) and `io-util` (the
+# `open_resource` fallback's `read_to_end`). Declared here rather than per-crate so
 # `cargo check -p bobcat-core` and `cargo check --workspace` compile the same
 # tokio — the same per-invocation feature-unification hazard the `smallvec`
 # entry below records.
@@ -131,7 +122,7 @@ url = "2"
 # consumes through vello.
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 
-# Platform image-decode backends for `crates/image`. Each is consumed only from
+# Platform image-decode backends for `bobcat-cli`'s reference decoders. Each is consumed only from
 # a `[target.'cfg(…)'.dependencies]` block, so a build for one OS never resolves
 # the other two.
 #
@@ -157,6 +148,11 @@ objc2-core-graphics = { version = "0.3.2", default-features = false, features = 
     "std",
 ] }
 objc2-image-io = { version = "0.3.2", default-features = false, features = [
+    # CGImageDestination powers no product path — it is the in-process fixture
+    # encoder for the reference decoders' GIF/HEIC/AVIF round-trip tests
+    # (`cfg(test)`-gated), kept on this shared entry because features unify
+    # workspace-wide anyway.
+    "CGImageDestination",
     "CGImageProperties",
     "CGImageSource",
     "objc2-core-graphics",
@@ -184,9 +180,9 @@ libc = "0.2"
 # feeds `Scene::draw_glyphs` directly.
 #
 # `default-features = false` drops vello's `wgpu`/`wgpu_default` defaults here so
-# `crates/image` — which needs only the unconditional `pub use peniko`, not a GPU
-# — can cross-check for Windows and Android without building wgpu. `pulsar` opts
-# the GPU back in explicitly. The default must be off at the *workspace* entry: a
+# the decode pipeline (`bobcat_core::image`) — which needs only the
+# unconditional `pub use peniko`, not a GPU — stays buildable without wgpu; the
+# GPU is opted back in where rendering actually happens. The default must be off at the *workspace* entry: a
 # member's own `default-features = false` against an unqualified workspace entry
 # is ignored with a warning.
 vello = { version = "0.9", default-features = false }
