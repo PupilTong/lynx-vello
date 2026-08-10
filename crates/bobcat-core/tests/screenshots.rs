@@ -29,11 +29,10 @@ fn engine(config: PageConfig) -> OffscreenEngine {
 const VIEWPORT_WIDTH: f32 = 393.0;
 const VIEWPORT_HEIGHT: f32 = 727.0;
 
-/// Styling reaches the tree through an author stylesheet rather than through
-/// the PAPI: `__SetClasses`, `__AddInlineStyle`, and `__SetCSSId` are not
-/// implemented, so every rule below selects on tag and position — which is
-/// also how a decoded `.web.bundle` `StyleInfo` section will address elements
-/// once its lowering exists.
+/// Styling reaches the tree through an author stylesheet that selects on tag
+/// and position — which is how a decoded `.web.bundle` `StyleInfo` section
+/// will address elements once its lowering exists. The PAPI-driven styling
+/// path is covered separately by `papi_classes_and_inline_styles_reach_pixels`.
 const STYLE: &str = r"
 page {
   background-color: #e5e7eb;
@@ -237,4 +236,91 @@ fn document_image_store_reaches_the_private_painter() {
         "document_image_store_reaches_the_private_painter",
     );
     screenshots().assert_matches(&["retained-image-store"], &image);
+}
+
+/// Ahem's glyphs are solid em squares, so a text golden is a stable rectangle
+/// rather than a platform-specific rasterization.
+const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
+
+/// Only the class rules and the font live in the sheet. Everything that picks
+/// which element gets which class, and every geometric value, comes from the
+/// PAPI in `PAPI_STYLING_SCRIPT` — so this golden fails if `__SetClasses`,
+/// `__AddClass`, `__SetInlineStyles`, `__AddInlineStyle`, `__SetID`,
+/// `__SetAttribute`, `__CreateText`, or `__CreateRawText` stops reaching the
+/// cascade.
+const PAPI_STYLING_SHEET: &str = r"
+page { background-color: #e5e7eb; padding: 16px; font-family: Ahem; }
+.row { linear-direction: row; margin-bottom: 16px; }
+.cell { width: 72px; height: 72px; margin-right: 16px; border: 4px solid #1f2937; }
+.warm { background-color: #f59e0b; }
+.cool { background-color: #2563eb; }
+#highlighted { border-color: #dc2626; }
+[data-state='on'] { background-color: #14b8a6; }
+text { font-size: 24px; color: #111827; }
+";
+
+/// Every element, every class, every inline declaration, and the text content
+/// are produced by Element PAPI calls only.
+const PAPI_STYLING_SCRIPT: &str = r"
+globalThis.renderPage = function renderPage() {
+  const page = __CreatePage('card', 0);
+
+  const row = __CreateView(0);
+  __SetClasses(row, 'row');
+  __AppendElement(page, row);
+
+  const warm = __CreateView(0);
+  __SetClasses(warm, 'cell warm');
+  __AppendElement(row, warm);
+
+  const cool = __CreateView(0);
+  __AddClass(cool, 'cell');
+  __AddClass(cool, 'cool');
+  __SetID(cool, 'highlighted');
+  __AppendElement(row, cool);
+
+  // Selected by the attribute rule, then overridden one declaration at a time:
+  // `__SetInlineStyles` writes the whole block and `__AddInlineStyle` layers
+  // over it, so the box ends up 40px wide and rotated.
+  const toggled = __CreateView(0);
+  __SetClasses(toggled, 'cell');
+  __SetAttribute(toggled, 'data-state', 'on');
+  __SetInlineStyles(toggled, 'width:96px;height:40px;');
+  __AddInlineStyle(toggled, 'width', '40px');
+  __AddInlineStyle(toggled, 'transform', 'rotate(15deg)');
+  __AppendElement(row, toggled);
+
+  // A `<text>` whose content is a `raw-text` child, the shape ReactLynx's
+  // transform emits for `<text>abc</text>`.
+  const label = __CreateText(0);
+  const content = __CreateRawText('AB');
+  __AppendElement(label, content);
+  __AppendElement(page, label);
+
+  // The content is the `text` attribute, and rewriting it rewrites the glyphs.
+  // Three characters, not two, so the golden pins the rewrite rather than just
+  // the initial content: Ahem draws every glyph as the same solid em square,
+  // and only the run's width distinguishes 'AB' from its replacement.
+  __SetAttribute(content, 'text', 'CDE');
+};
+";
+
+/// The PAPI styling path end to end: classes, id, an attribute selector,
+/// whole-block and per-declaration inline styles, and `<text>`/`raw-text`
+/// content, all driven from the main-thread script.
+#[test]
+fn papi_classes_and_inline_styles_reach_pixels() {
+    let mut engine = engine(PageConfig::default());
+    assert_eq!(
+        engine.register_fonts(AHEM),
+        1,
+        "the Ahem face must register"
+    );
+    engine.add_author_stylesheet(PAPI_STYLING_SHEET);
+    engine
+        .run_script(PAPI_STYLING_SCRIPT)
+        .expect("main-thread script");
+
+    let image = capture_engine(&mut engine, "papi_classes_and_inline_styles_reach_pixels");
+    screenshots().assert_matches(&["papi-styling"], &image);
 }

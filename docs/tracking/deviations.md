@@ -298,6 +298,82 @@ consequential choice about whether to follow the spec or the quirk.
   These are the systemic AT-model differences to design around, not
   individual prop quirks.
 
+## Element PAPI: native engine ↔ web-core (a different axis)
+
+The rows above compare Lynx to W3C. The Element PAPI needs a second
+comparison, because the *native* engine and *web-core* implement the same
+member names with different semantics, and this repo's compatibility target is
+web-core (`.web.bundle` under `web-core`), so web-core wins every time. Found
+during the 2026-08-10 PAPI subset implementation; citations are
+`lynx/core/...` for native and
+`lynx-stack/packages/web-platform/web-core/ts/...` for web-core.
+
+- **`__DropElement` is ours, and it is load-bearing — but it is not a removal
+  member.** It is absent from web-core's 62-member `ElementPAPIs` interface,
+  from the native engine's 132-slot fiber table, and from every ReactLynx call
+  site (`grep -rn 'DropElement'` over both reference repos returns nothing),
+  and this repo's docs used to miscall it "one of web-core's 61". The absence
+  is not an omission to copy: web-core hands the script real `HTMLElement`
+  objects, so it reclaims an element's engine-side storage from a `WeakRef`
+  sweep once the script drops its last reference
+  (`web-core/src/main_thread/client/main_thread_context.rs:144-157`). This
+  runtime hands out `u32` numbers, which cannot be held weakly, so reclamation
+  has to be *announced*: `__DropElement` is that announcement, driven from a
+  realm-side `FinalizationRegistry` the `__Create*` members register each new
+  handle with. What was wrong was treating it as the removal member. Removal
+  is `__RemoveElement(parent, child)`, whose contract is the opposite — it
+  detaches, and the element stays alive, keeps its state, and is re-insertable
+  (`pureElementPAPIs.ts:81-84`). ReactLynx's reconciler depends on that:
+  reordering children removes and re-inserts the same handles
+  (`react/runtime/src/snapshot/snapshot/snapshot.ts:443,508`). The two are
+  complementary, not alternatives.
+- **`__CreatePage` idempotence.** web-core caches the page and returns it on
+  every later call (`createElementAPI.ts:284`); native
+  `ElementManager::CreateFiberPage` builds a fresh `PageElement` each time
+  (`element_manager.cc:1298`). **Follow web-core.**
+- **`parentComponentUniqueID` is tolerant, not validated.** It names no parent
+  — web-core uses it only to seed the new element's CSS fragment id, and a
+  handle that resolves to nothing silently yields `css_id = 0`
+  (`web-core/src/main_thread/client/main_thread_context.rs:91-99`). That
+  tolerance is load-bearing: `__CreateRawText` passes `-1` deliberately
+  (`createElementAPI.ts:210`), and ReactLynx passes a module-scope `__pageId`
+  that `clearPage()` resets to `0` during teardown
+  (`react/runtime/src/snapshot/snapshot/definition.ts:28-36`), so rejecting a
+  stale value would turn a re-render race into a hard failure instead of an
+  unstyled element.
+- **The dataset is a side table, not the `data-*` attributes.**
+  `__AddDataset` stores the value in the engine's per-element data *and*
+  mirrors it to `data-<key>` — but only when the value is truthy
+  (`createElementAPI.ts:426-437`). A `0`, `''` or `false` therefore stays
+  readable through `__GetDataByKey` while the attribute is removed. Mirroring
+  everything into DOM attributes gets those three values wrong.
+- **`__ReplaceElements` insertion anchor.** Native computes the anchor as the
+  last removed node's next sibling before removing
+  (`renderer_functions.cc:3412-3428`); web-core splices at the *first* old
+  child's position (`pureElementPAPIs.ts:103-108`). They agree only for a
+  contiguous run. Native's `BlockElementTest.ReplaceElements_*` expectations
+  are not a spec for this runtime.
+- **`__SetID` storage key.** Native writes the id under `"idSelector"`
+  (`attribute_holder.h:236`); web-core uses the plain `id` attribute
+  (`pureElementPAPIs.ts:137-141`). Follow web-core.
+- **`__GetAttributes` empty values.** web-core filters falsy values out of the
+  returned map (`pureElementPAPIs.ts:114-121`); native returns them, and pins
+  that in `ApplyTemplateDataAttributePreservesEmptyValue`
+  (`fiber_element_unittest.cc:11624`).
+- **`__CloneElement` reuses the source unique id** on native
+  (`element.cc:177`, `:244`). web-core has no such member; do not port the
+  id-sharing behavior.
+- **The block/if/for virtual-child layer** (`__CreateBlock`, `__CreateIf`,
+  `__CreateFor`, `__UpdateIfNodeIndex`, `__UpdateForChildCount`, native slots
+  075-079) has no web-core counterpart at all. A web-bundle runtime never needs
+  it.
+- **Agreements worth recording:** unique ids are monotonic and never reused on
+  both sides (`element_manager.cc:1733`; web-core's map only nulls slots and
+  never shrinks); `__GetElementUniqueID` answers `-1` for a non-element on both
+  (`renderer_functions.cc:3953`; `pureElementPAPIs.ts:218-220`); and
+  `__ElementIsEqual` is reference identity on both (`renderer_functions.cc:3944`;
+  `pureElementPAPIs.ts:49-52`).
+
 *(Full per-row detail, including ~250 more narrowly-scoped items — mostly
 Lynx-only extension properties/APIs with no W3C equivalent to conflict with —
 lives in the `W3C-compliant?` column of each linked file.)*

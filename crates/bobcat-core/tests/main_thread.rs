@@ -76,8 +76,47 @@ fn create_view_returns_a_handle_append_element_accepts() {
     assert!(elements.element(2).is_some());
 }
 
+/// web-core has no member that destroys an element: `__RemoveElement` is
+/// `parent.removeChild(child)`, and the child stays alive and re-insertable
+/// (`pureElementPAPIs.ts:81-84`). `ReactLynx`'s reconciler depends on it —
+/// reordering children removes and re-inserts the same handles.
 #[test]
-fn drop_element_retires_a_detached_element_and_does_not_reuse_its_id() {
+fn remove_element_detaches_without_retiring_the_handle() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const parent = __CreateView(0);
+              const child = __CreateView(0);
+              __AppendElement(page, parent);
+              __AppendElement(parent, child);
+              __RemoveElement(parent, child);
+              if (__GetParent(child) !== null) {
+                throw new Error('a removed child must be detached');
+              }
+              __AppendElement(parent, child);
+              if (__GetParent(child) !== parent) {
+                throw new Error('a removed child must be re-insertable');
+              }
+            };
+            ",
+        )
+        .expect("main-thread script");
+
+    let elements = elements.tree();
+    assert!(elements.element(2).is_some());
+    assert!(elements.element(3).is_some());
+}
+
+/// `__DropElement` is the other half of the pair: it retires the handle and
+/// takes the storage. web-core has no equivalent because it reclaims from a
+/// `WeakRef` sweep over the `HTMLElement`s it hands out; a `u32` handle cannot
+/// be held weakly, so the script announces the reclamation instead — a
+/// realm-side `FinalizationRegistry` is what will call this.
+#[test]
+fn drop_element_retires_the_handle_and_does_not_reuse_its_id() {
     let (mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
@@ -86,6 +125,8 @@ fn drop_element_retires_a_detached_element_and_does_not_reuse_its_id() {
               __CreatePage('card', 0);
               const dropped = __CreateView(0);
               __DropElement(dropped);
+              // A finalizer runs when the collector chooses, so the same
+              // handle arriving twice is ordinary rather than an error.
               __DropElement(dropped);
               __CreateView(0);
             };
@@ -119,6 +160,50 @@ fn drop_element_retires_an_attached_subtree() {
     let elements = elements.tree();
     assert!(elements.element(2).is_none());
     assert!(elements.element(3).is_none());
+}
+
+/// The page element is the permanent document element, so its handle can never
+/// become garbage and a finalizer for it would be a bug worth surfacing.
+#[test]
+fn drop_element_refuses_the_page() {
+    let mut runtime = bare_runtime();
+    let error = runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              __DropElement(__CreatePage('card', 0));
+            };
+            ",
+        )
+        .expect_err("the page cannot be dropped");
+    assert!(error.to_string().contains("page"), "{error}");
+}
+
+/// Removing a subtree leaves every handle inside it live too.
+#[test]
+fn remove_element_leaves_a_detached_subtree_addressable() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const parent = __CreateView(0);
+              const child = __CreateView(0);
+              __AppendElement(page, parent);
+              __AppendElement(parent, child);
+              __RemoveElement(page, parent);
+              if (__GetParent(child) !== parent) {
+                throw new Error('a detached subtree keeps its internal links');
+              }
+            };
+            ",
+        )
+        .expect("main-thread script");
+
+    let elements = elements.tree();
+    assert!(elements.element(2).is_some());
+    assert!(elements.element(3).is_some());
 }
 
 #[test]
@@ -290,12 +375,37 @@ fn a_missing_papi_global_fails_loudly() {
             r"
             globalThis.renderPage = function () {
               __CreatePage('card', 0);
-              __SetAttribute(1, 'name', 'value');
+              __AddEvent(1, 'bindEvent', 'tap', 'handler');
             };
             ",
         )
         .expect_err("an unimplemented PAPI member");
-    assert!(error.to_string().contains("__SetAttribute"), "{error}");
+    assert!(error.to_string().contains("__AddEvent"), "{error}");
+}
+
+/// The prelude's primitive-shaped builtins are implementation detail: a
+/// bundle must see PAPI member names and nothing else on the global object.
+#[test]
+fn the_prelude_leaves_no_scratch_globals_behind() {
+    let mut runtime = bare_runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              __CreatePage('card', 0);
+              const scratch = [
+                '__SetCSSIdOfElement', '__AddDatasetEntry', '__ClearDataset',
+                '__SetInlineStyleText', '__GetClassText', '__ChildCount', '__ChildAt',
+              ];
+              for (const name of scratch) {
+                if (typeof globalThis[name] !== 'undefined') {
+                  throw new Error('the prelude leaked ' + name);
+                }
+              }
+            };
+            ",
+        )
+        .expect("main-thread script");
 }
 
 #[test]

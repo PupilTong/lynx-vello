@@ -101,6 +101,14 @@ impl QuickJsInitializationError {
             message: Arc::from(error.message),
         }
     }
+
+    /// A setup step that failed inside the realm rather than in the bridge —
+    /// today, the Element PAPI prelude.
+    fn from_message(message: String) -> Self {
+        Self {
+            message: Arc::from(message),
+        }
+    }
 }
 
 impl fmt::Debug for QuickJsInitializationError {

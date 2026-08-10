@@ -93,7 +93,7 @@ still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
 | `dom::render` (the DOM-free floor) | Opaque `ImageStore`; Vello version/re-export boundary; headed/headless GPU submission and readback helpers | `Document`, `NodeId`, computed styles, layout, paint order, Lynx runtime vocabulary, or DOM mutation policy |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, and the maintained Lynx CSS extension grammar behind the `lynx` feature | Runtime protocol, document ownership, bundle ingestion, or host policy |
 | `lynx-element` (the runtime adapter) | `ElementId = u32`; concrete validated Element-PAPI operations; an independent context-owned `Vec<Option<LynxElement>>` with monotone, never-reused ids, a permanent null slot at index 0, and permanent retirement tombstones; that same unique id carried by each DOM node; `ElementTree`; `<page>` root policy; view metrics (`Viewport`; the stylo device profile is built by `dom::Device`); UA stylesheet generation | Render/freshness/scene/image forwarding in its default API, Bobcat, QuickJS, a replaceable element-host trait, a direct render-floor dependency, a second DOM, matcher, cascade, layout/paint algorithms, or public `PaintOrder` |
-| Still unowned | Lynx event payload; decoded `StyleInfo` lowering and CSS-scope policy; `rpx` view units; the remaining 56 Element PAPI members | — |
+| Still unowned | Lynx event payload; decoded `StyleInfo` lowering and CSS-scope policy; `rpx` view units; the Element PAPI members outside the ReactLynx subset (events, lists, worklets, gestures, animation, selector queries, element templates) | — |
 
 ## Style lifecycle
 
@@ -140,11 +140,14 @@ What that covers, and what it does not:
 - Lynx element identity (a monotone `u32` unique id used directly as its
   permanent arena index), `Document<ElementId>` payloads that point back to
   `LynxElement`, and untrusted-handle validation on every PAPI entry point;
-- direct `u32` JavaScript handles and explicit `__DropElement` retirement of
-  DOM subtrees into permanent `None` arena tombstones;
-- five Element PAPI members — `__CreatePage`, `__CreateView`,
-  `__AppendElement`, `__DropElement`, `__FlushElementTree` — and web-core's
-  boot sequence.
+- direct `u32` JavaScript handles over a permanent-index arena with
+  never-recycled ids, with removal (`__RemoveElement`, detach-only, matching
+  web-core) and disposal (`__DropElement`, the reclamation announcement a
+  numeric handle makes necessary) as separate members;
+- the Element PAPI subset a compiled ReactLynx app calls — creation, tree
+  mutation, navigation, attributes, id, classes, inline styles, dataset,
+  CSS-scope and component ids, and the flush (`lynx-element`'s crate docs carry
+  the member table) — and web-core's boot sequence.
 
 **Still open**
 

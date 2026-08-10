@@ -188,10 +188,21 @@ useful signal for currently-compatible versions of those libraries.
   `MainThreadRuntime`
   installs the Element PAPI before evaluation, evaluates a `.web.bundle`'s
   `lepusCode.root` inside web-core's wrapper, then runs `processData` →
-  `renderPage` → `__FlushElementTree`. Five of web-core's 61 PAPI members are
-  installed (`__CreatePage`, `__CreateView`, `__AppendElement`,
-  `__DropElement`, `__FlushElementTree`); unsupported globals remain precise
-  `ReferenceError`s. Handles cross the primitives-only boundary as `u32` ids.
+  `renderPage` → `__FlushElementTree`. The installed PAPI subset is the one a
+  compiled ReactLynx app calls — read off `lynx-stack/packages/react`, both the
+  runtime's own call sites and the calls its SWC transform emits into compiled
+  snapshots — and `lynx-element`'s crate docs carry the authoritative member
+  table plus the families deliberately left out (events, lists, worklets,
+  gestures, animation, selector queries, element templates). Unsupported
+  globals remain precise `ReferenceError`s. Handles cross the primitives-only
+  boundary as `u32` ids. Members whose web-core signature carries an array, a
+  plain object, or an optional trailing record — `__SetCSSId`, `__SetDataset`,
+  `__AddDataset`, `__SetInlineStyles`, `__GetClasses`, `__GetChildren`, and the
+  `info` argument every `__Create*` member accepts — are assembled by a
+  JavaScript prelude evaluated before the bundle, over primitive-shaped host
+  builtins the prelude then deletes from the global object. That is web-core's
+  own shape, where the PAPI members are JavaScript closures over a Rust/WASM
+  context, not a workaround around the boundary.
   Core composes but does not own Lynx tag/root/UA policy; that vocabulary and
   `type ElementId = u32` remain defined by `lynx-element`.
   The resource module must not decode images/fonts/templates, upload render
@@ -304,10 +315,18 @@ useful signal for currently-compatible versions of those libraries.
   `u32` unique id, which is also the direct arena index; each `LynxElement`
   owns that id, its stable DOM `NodeId` association, component creation
   fields. The arena permanently reserves slot 0 as web-core's
-  "no element" sentinel, so live unique ids start at 1. `__DropElement` removes
-  the selected DOM subtree and takes the corresponding arena entries, leaving
-  permanent `None` tombstones; unique ids are never recycled, although `dom`
-  may reuse its private `NodeId` slots;
+  "no element" sentinel, so live unique ids start at 1. Unique ids are never
+  recycled, although `dom` may reuse its private `NodeId` slots. **Removal and
+  disposal are separate members.** `__RemoveElement` is `removeChild`: the
+  detached element stays alive, keeps its attributes/classes/dataset, and is
+  re-insertable — exactly what ReactLynx's reconciler relies on when it
+  reorders children. `__DropElement` retires the handle and takes the storage,
+  leaving permanent `None` tombstones. web-core has no `__DropElement` because
+  it hands out real `HTMLElement`s and reclaims storage from a `WeakRef` sweep
+  once the script drops its last reference; a `u32` handle cannot be held
+  weakly, so here the script announces the reclamation instead — the
+  realm-side `FinalizationRegistry` the `__Create*` members register handles
+  with is what drives it;
   every fallible PAPI entry returns `PapiError` instead of panicking, because
   the main-thread script is untrusted input and the DOM core is
   crash-on-misuse. The owned document and `NodeId` never appear in this
@@ -333,12 +352,23 @@ useful signal for currently-compatible versions of those libraries.
   layout pass: the page is the permanent document element, pre-created by
   `ElementTree::new` with the fixed unique id 1 (ids are opaque handles to
   script, so `__CreatePage` just binds the component fields and returns it),
-  and `__DropElement` on the page is a `PapiError` (recorded limit). Recorded
-  limits (see the crate docs, which are authoritative): handles are ids rather
-  than element objects; `parentComponentUniqueID` is recorded but not honored
-  (there is no `__SetCSSId`); no `rpx`/`ppx` view-unit policy; the UA sheet
-  covers only the three documented Lynx computed defaults. It must not absorb
-  DOM/CSS core behavior, and nothing below it may depend on it.
+  and removing or reparenting the page is a `PapiError`. `__CreatePage` is
+  idempotent, following web-core rather than the native engine, which builds a
+  fresh page element per call. Recorded limits (see the crate docs, which are
+  authoritative): handles are ids rather than element objects;
+  `parentComponentUniqueID` names no parent and is honored only as the CSS
+  fragment id a new element inherits — and, as in web-core, a handle that
+  resolves to nothing yields an unscoped element rather than an error;
+  `__SetCSSId` records that id without any per-fragment stylesheet to scope
+  against; `__AddInlineStyle` takes string property names only, because its
+  numeric form indexes the native engine's CSS property-id table;
+  `__SetInlineStyles` does not rewrite `rpx`/`ppx`/`vw`/`vh` into `calc()`
+  because this engine resolves units in the cascade; no `rpx`/`ppx` view-unit
+  policy; the UA sheet covers the three documented Lynx computed defaults on
+  `*`, plus `raw-text { display: contents }` — a `raw-text` element generates
+  no box in Lynx either, and its `text` attribute is mirrored into a DOM text
+  node so the enclosing `<text>`'s formatting context measures it. It must not
+  absorb DOM/CSS core behavior, and nothing below it may depend on it.
 - `crates/dom` — generic W3C-DOM-subset document tree and
   standards-oriented CSS computation core. `docs/dom-public-api.md` is the
   authoritative normal-build versus test-feature API boundary. It owns a
@@ -683,7 +713,7 @@ useful signal for currently-compatible versions of those libraries.
   personas already set up for this work. `crates/lynx-element` and
   `crates/bobcat-core`'s feature-gated `quickjs` module are the first pieces of this
   layer to land; the background thread, `StyleInfo` ingestion, the event
-  model, and the other 56 Element PAPI members are still ahead.
+  model, lists, worklets, and the rest of the Element PAPI are still ahead.
 
 See `docs/runtime-architecture.md` for the runtime dependency graph, feature
 boundary, private paint pipeline, and frame walkthrough;

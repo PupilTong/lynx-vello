@@ -20,8 +20,9 @@ pub struct PageConfig {
     pub default_overflow_visible: bool,
     /// `enableCSSSelector` — whether author CSS is matched as real selectors.
     ///
-    /// Recorded as configuration, but nothing reads it yet: this crate has no
-    /// `__SetCSSId`, so there is no per-component CSS-scope path to switch.
+    /// Recorded as configuration, but nothing reads it yet: `__SetCSSId`
+    /// records a CSS fragment id without any per-fragment stylesheet to scope
+    /// against, so there is no alternative matching path to switch to.
     pub enable_css_selector: bool,
 }
 
@@ -43,6 +44,17 @@ impl Default for PageConfig {
 /// `linear-direction` already computes to `column` initially in the fork's
 /// grammar, which is Lynx's vertical default, so `display: linear` alone
 /// reproduces "linear/vertical on every element".
+///
+/// The selector really is `*`: the switch's name is `defaultDisplayLinear` and
+/// Lynx applies it to every element, and `__CreateElement` accepts an
+/// arbitrary tag, so a tag list could never be complete.
+///
+/// `raw-text` is the one exception, and it is not a Lynx quirk — a `raw-text`
+/// element generates no box in Lynx either, its content belongs to the
+/// enclosing `<text>`'s formatting context. `display: contents` is the W3C
+/// spelling of exactly that: the element is spliced out of every item
+/// collection while its text child still inherits through it, so the text is
+/// measured as an item of the `<text>` box rather than inside a nested one.
 #[must_use]
 pub(crate) fn ua_stylesheet(config: PageConfig) -> String {
     let display = if config.default_display_linear {
@@ -59,8 +71,9 @@ pub(crate) fn ua_stylesheet(config: PageConfig) -> String {
     // element resolves percentages against, and the element `position: fixed`
     // anchors to.
     format!(
-        "page, view {{ box-sizing: border-box; {display} {overflow} }}\n\
-         page {{ width: 100%; height: 100%; }}\n"
+        "* {{ box-sizing: border-box; {display} {overflow} }}\n\
+         page {{ width: 100%; height: 100%; }}\n\
+         raw-text {{ display: contents; }}\n"
     )
 }
 
