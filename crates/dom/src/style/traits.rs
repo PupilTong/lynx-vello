@@ -208,7 +208,7 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
     }
 
     fn style_attribute(&self) -> Option<ArcBorrow<'_, Locked<PropertyDeclarationBlock>>> {
-        self.inline_block.as_ref().map(Arc::borrow_arc)
+        self.parsed_inline_style.as_ref().map(Arc::borrow_arc)
     }
 
     fn animation_rule(

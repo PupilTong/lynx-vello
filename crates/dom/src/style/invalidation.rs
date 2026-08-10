@@ -328,7 +328,7 @@ impl<T> Document<T> {
         self.note_visual_mutation();
         self.note_attribute_change(id, &STYLE);
         let node = self.live_node_mut(id);
-        node.inline_block = block;
+        node.parsed_inline_style = block;
         match css {
             Some(css) => node.set_attr_local_name(STYLE.clone(), css),
             None => node.remove_attr_local_name(&STYLE),
