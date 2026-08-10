@@ -1,4 +1,4 @@
-//! End-to-end replaced content: real encoded bytes → `crates/image` decode →
+//! End-to-end replaced content: real encoded bytes → the platform decoder →
 //! natural size into layout → `object-fit` geometry at paint.
 //!
 //! Structural (no GPU): asserts on the scene encoding and on the layout the
@@ -8,7 +8,7 @@
 mod paint_common;
 
 use dom::layout::{NaturalSize, Size};
-use image::{BackendRegistry, DecodeRequest, decode_bytes};
+use image_decoders::contract::{DecodeRequest, decode_bytes};
 use paint_common::Doc;
 
 const PAGE: &str = "page { display: flex; position: relative; width: 800px; height: 600px; }
@@ -56,12 +56,9 @@ impl Harness {
     /// The whole pipeline for one `<img>`: decode, publish the natural size to
     /// layout, publish the pixels to paint.
     fn img(&mut self, class: &str, bytes: &[u8]) -> dom::NodeId {
-        let decoded = decode_bytes(
-            &BackendRegistry::software_only(),
-            bytes,
-            &DecodeRequest::default(),
-        )
-        .expect("decode");
+        let decoder = image_decoders::platform_decoder().expect("this platform ships a decoder");
+        let decoded =
+            decode_bytes(decoder.as_ref(), bytes, &DecodeRequest::default()).expect("decode");
 
         let root = self.doc.root;
         let node = self.doc.el_tag(root, "img", class);

@@ -18,7 +18,7 @@ slab = { workspace = true }
 smallvec = { workspace = true }
 parley = { workspace = true }
 pollster = { workspace = true }
-# The workspace entry turns vello's defaults off so `crates/image` can reach
+# The workspace entry turns vello's defaults off so the decode pipeline can reach
 # `peniko` without wgpu; this crate owns GPU submission, so it opts the GPU
 # back in.
 vello = { workspace = true, features = ["wgpu", "wgpu_default"] }
@@ -50,7 +50,12 @@ url = { workspace = true }
 divan = { workspace = true }
 flashbulb = { workspace = true, features = ["render"] }
 html5ever = { workspace = true }
-image = { workspace = true }
+# The replaced-content test decodes through the platform decoder and reaches
+# the contract via `image_decoders::contract`, so this lower layer's test never
+# names the engine crate. The dev-dependency cycle (`image-decoders` normally
+# depends on `bobcat-core`, which reaches back down to `dom`) is fine; cargo
+# builds the dev copy against the already-built library.
+image-decoders = { workspace = true }
 markup5ever_rcdom = { workspace = true }
 png = { workspace = true }
 

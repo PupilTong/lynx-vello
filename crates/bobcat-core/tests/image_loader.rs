@@ -4,20 +4,20 @@ mod support;
 
 use std::sync::Arc;
 
+use bobcat_core::image::{ImageError, ImageLoader, ImagePrefetchTarget, LoaderConfig, PixelSize};
 use bobcat_core::resource::ResourceCapability;
-use image::{
-    BackendRegistry, ImageError, ImageLoader, ImagePrefetchTarget, LoaderConfig, PixelSize,
-};
 use support::{FetcherDouble, checker_png};
 use tokio_util::sync::CancellationToken;
 
+/// The decoder this platform actually ships — the same seam an embedder
+/// injects through, so every pipeline test runs against the real thing.
+fn decoder() -> Arc<dyn bobcat_core::image::Decoder> {
+    image_decoders::platform_decoder().expect("this platform ships a decoder")
+}
+
 fn loader(double: Arc<FetcherDouble>) -> ImageLoader {
-    ImageLoader::with_registry(
-        double,
-        LoaderConfig::new(0),
-        BackendRegistry::software_only(),
-    )
-    .expect("the double advertises a usable transport")
+    ImageLoader::new(double, LoaderConfig::new(0), decoder())
+        .expect("the double advertises a usable transport")
 }
 
 #[tokio::test]
@@ -67,12 +67,8 @@ async fn a_fetcher_with_no_usable_transport_is_refused_at_construction() {
         FetcherDouble::new(Vec::new())
             .with_capabilities(vec![ResourceCapability::Http, ResourceCapability::Prefetch]),
     );
-    let error = ImageLoader::with_registry(
-        double,
-        LoaderConfig::new(0),
-        BackendRegistry::software_only(),
-    )
-    .expect_err("no transport this crate can read bytes through");
+    let error = ImageLoader::new(double, LoaderConfig::new(0), decoder())
+        .expect_err("no transport this crate can read bytes through");
     assert!(matches!(error, ImageError::NoTransport));
 }
 
@@ -345,10 +341,10 @@ async fn an_oversized_body_is_refused_rather_than_truncated() {
     ] {
         let double =
             Arc::new(FetcherDouble::new(oversized.clone()).with_capabilities(vec![capability]));
-        let loader = ImageLoader::with_registry(
+        let loader = ImageLoader::new(
             double,
             LoaderConfig::new(0).with_max_encoded_bytes(real_len as u64),
-            BackendRegistry::software_only(),
+            decoder(),
         )
         .expect("usable transport");
 
@@ -371,10 +367,10 @@ async fn a_decode_cache_hit_does_not_need_the_header_cache() {
     // rather than re-fetching: a hit that needed both caches made the smaller
     // one silently govern the larger.
     let double = Arc::new(FetcherDouble::new(checker_png(4)));
-    let loader = ImageLoader::with_registry(
+    let loader = ImageLoader::new(
         Arc::clone(&double) as Arc<dyn bobcat_core::resource::ResourceFetcher>,
         LoaderConfig::new(0).with_header_cache_entries(1),
-        BackendRegistry::software_only(),
+        decoder(),
     )
     .expect("usable transport");
 

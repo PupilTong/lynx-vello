@@ -1,4 +1,9 @@
-//! The always-available pure-Rust backend.
+//! The Linux-only pure-Rust reference decoder.
+//!
+//! Linux is the one supported OS with no system still-image decode API, and
+//! headless CI runs there — that is this decoder's entire constituency. Every
+//! other target ships its platform decoder alone, so this module is compiled
+//! for `target_os = "linux"` and nowhere else.
 //!
 //! One crate per format rather than the `image` facade: these are the same three
 //! decoders `image` 0.25 delegates to, reached directly so each one's own memory
@@ -8,21 +13,29 @@
 //! Decoding always runs at full resolution here — none of the three exposes a
 //! scaled decode — so a downsample target costs peak full-size memory and a
 //! resampling pass. That is a memory profile difference from the platform
-//! backends, not a behavioural one.
+//! decoders, not a behavioural one.
 
 use std::io::Cursor;
 
-use crate::backend::resample;
-use crate::decode::{DecodeRequest, DecodeResponse, Decoder, ImageHeader, PixelSize};
-use crate::error::ImageError;
-use crate::format::ImageFormat;
+use bobcat_core::image::{
+    Acceleration, AlphaType, Capabilities, DecodeRequest, DecodeResponse, DecodedImage, Decoder,
+    ImageError, ImageFormat, ImageHeader, PixelSize,
+};
+
 use crate::orientation::{self, Orientation};
-use crate::pixels::{AlphaType, DecodedImage};
-use crate::registry::{Acceleration, Capabilities};
+use crate::resample;
 
 /// What each per-format decoder hands back: the RGBA8 buffer, its **stored**
 /// dimensions (pre-orientation), and how it encodes alpha.
 type RawDecode = (Vec<u8>, (u32, u32), AlphaType);
+
+/// The three claimed formats. GIF, HEIC and AVIF are identified by the contract
+/// but deliberately unclaimed here: each would cost another bundled codec, and
+/// the platforms where those formats matter decode them through the system.
+const CAPABILITIES: Capabilities = Capabilities::none()
+    .with(ImageFormat::Png, Acceleration::Software)
+    .with(ImageFormat::Jpeg, Acceleration::Software)
+    .with(ImageFormat::WebP, Acceleration::Software);
 
 /// PNG, JPEG and WebP via `png`, `zune-jpeg` and `image-webp`.
 #[derive(Clone, Copy, Debug, Default)]
@@ -41,7 +54,7 @@ impl Decoder for SoftwareDecoder {
     }
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities::software()
+        CAPABILITIES
     }
 
     fn probe(&self, format: ImageFormat, bytes: &[u8]) -> Result<ImageHeader, ImageError> {
@@ -49,6 +62,9 @@ impl Decoder for SoftwareDecoder {
             ImageFormat::Png => probe_png(bytes),
             ImageFormat::Jpeg => probe_jpeg(bytes),
             ImageFormat::WebP => probe_webp(bytes),
+            // Unreachable through `decode_bytes`/the loader, which gate on
+            // `capabilities` first; a direct caller gets the same refusal.
+            _ => Err(ImageError::Unsupported { format }),
         }
     }
 
@@ -65,6 +81,7 @@ impl Decoder for SoftwareDecoder {
             ImageFormat::Png => decode_png(bytes)?,
             ImageFormat::Jpeg => decode_jpeg(bytes)?,
             ImageFormat::WebP => decode_webp(bytes, request)?,
+            _ => return Err(ImageError::Unsupported { format }),
         };
 
         // Orientation is applied before resampling so the target size is

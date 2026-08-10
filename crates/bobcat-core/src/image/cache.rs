@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use crate::decode::{DecodeResponse, ImageHeader, PixelSize};
+use crate::image::decode::{DecodeResponse, ImageHeader, PixelSize};
 
 /// What one decode-cache entry is keyed on.
 ///
@@ -338,10 +338,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::{CacheKey, DecodeCache, HeaderCache};
-    use crate::decode::{DecodeResponse, ImageHeader, PixelSize};
-    use crate::format::ImageFormat;
-    use crate::pixels::{AlphaType, DecodedImage};
-    use crate::registry::Acceleration;
+    use crate::image::capability::Acceleration;
+    use crate::image::decode::{DecodeResponse, ImageHeader, PixelSize};
+    use crate::image::format::ImageFormat;
+    use crate::image::pixels::{AlphaType, DecodedImage};
 
     /// A response whose pixels are `side * side * 4` bytes.
     fn image(side: u32) -> DecodeResponse {

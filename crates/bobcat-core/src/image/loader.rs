@@ -9,24 +9,24 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use bobcat_core::resource::{
-    BufferedResourceRequest, CachePolicy, CacheTarget, ImageHints, PrefetchRequest, RequestContext,
-    RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceDescriptor,
-    ResourceFetcher, ResourceHints, ResourceKind, ResourceLocator, ResourcePriority,
-    ResourceRequest,
-};
 use bytes::Bytes;
 use tokio::io::AsyncReadExt;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::cache::{CacheKey, DecodeCache, HeaderCache, ResolvedKey, ResolvedMap};
-use crate::decode::{DecodeRequest, DecodeResponse, ImageHeader, PixelSize};
-use crate::error::ImageError;
-use crate::pixels::DecodedImage;
-use crate::registry::{BackendRegistry, Capabilities};
-use crate::{data_url, decode_bytes, probe_bytes};
+use crate::image::cache::{CacheKey, DecodeCache, HeaderCache, ResolvedKey, ResolvedMap};
+use crate::image::capability::Capabilities;
+use crate::image::decode::{DecodeRequest, DecodeResponse, Decoder, ImageHeader, PixelSize};
+use crate::image::error::ImageError;
+use crate::image::pixels::DecodedImage;
+use crate::image::{data_url, decode_bytes, probe_bytes};
+use crate::resource::{
+    BufferedResourceRequest, CachePolicy, CacheTarget, ImageHints, PrefetchRequest, RequestContext,
+    RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceDescriptor,
+    ResourceFetcher, ResourceHints, ResourceKind, ResourceLocator, ResourcePriority,
+    ResourceRequest,
+};
 
 /// Everything a loader is configured with.
 ///
@@ -39,7 +39,7 @@ pub struct LoaderConfig {
     /// The owning template's bundle URL, handed to the fetcher as
     /// [`ResourceLocator::base_url`].
     ///
-    /// **The fetcher performs the join**, not this crate: that is what
+    /// **The fetcher performs the join**, not this module: that is what
     /// `resolve_locator` is for, and a host rewrite like Lynx's
     /// `res:///name → res:///id` is not a URL join at all, so the pre-join
     /// specifier has to reach the host intact.
@@ -166,7 +166,7 @@ impl LoaderConfig {
 pub enum ImagePrefetchTarget {
     /// Delegated to [`ResourceFetcher::prefetch`].
     Encoded(CacheTarget),
-    /// Decoded into this crate's own [`DecodeCache`].
+    /// Decoded into the loader's own [`DecodeCache`].
     Decoded { target: Option<PixelSize> },
 }
 
@@ -194,10 +194,9 @@ struct LoaderState {
 /// Fetches, decodes and caches images for one view.
 pub struct ImageLoader {
     fetcher: Arc<dyn ResourceFetcher>,
-    /// Shared rather than cloned per cache miss: cloning reallocated the backend
-    /// `Vec` and bumped every `Arc` inside it on a path that runs once per
-    /// image.
-    registry: Arc<BackendRegistry>,
+    /// The embedder-injected decoder. Shared because every blocking decode task
+    /// carries its own handle to it.
+    decoder: Arc<dyn Decoder>,
     state: Mutex<LoaderState>,
     /// `Arc` so a permit can be owned by the blocking decode task itself; see
     /// the acquisition site in `load`.
@@ -218,7 +217,7 @@ impl fmt::Debug for ImageLoader {
         formatter
             .debug_struct("ImageLoader")
             .field("fetcher", &"<dyn ResourceFetcher>")
-            .field("registry", &self.registry)
+            .field("decoder", &self.decoder)
             .field("transport", &self.transport)
             .field("config", &self.config)
             .finish_non_exhaustive()
@@ -226,8 +225,12 @@ impl fmt::Debug for ImageLoader {
 }
 
 impl ImageLoader {
-    /// Builds a loader over `fetcher`, using the best backend set this machine
-    /// offers.
+    /// Builds a loader over `fetcher`, decoding through the injected `decoder`.
+    ///
+    /// There is no default decoder: the embedder chooses one — typically
+    /// `image-decoders::platform_decoder()`, or its own [`Decoder`]
+    /// implementation over an existing image pipeline — and the loader never
+    /// second-guesses it.
     ///
     /// # Errors
     ///
@@ -241,20 +244,7 @@ impl ImageLoader {
     pub fn new(
         fetcher: Arc<dyn ResourceFetcher>,
         config: LoaderConfig,
-    ) -> Result<Self, ImageError> {
-        Self::with_registry(fetcher, config, BackendRegistry::detect())
-    }
-
-    /// [`Self::new`] with an explicit backend set, for tests that must not
-    /// depend on what the host machine happens to provide.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::new`].
-    pub fn with_registry(
-        fetcher: Arc<dyn ResourceFetcher>,
-        config: LoaderConfig,
-        registry: BackendRegistry,
+        decoder: Arc<dyn Decoder>,
     ) -> Result<Self, ImageError> {
         let transport = [
             ResourceCapability::BufferedResource,
@@ -267,7 +257,7 @@ impl ImageLoader {
 
         Ok(Self {
             fetcher,
-            registry: Arc::new(registry),
+            decoder,
             state: Mutex::new(LoaderState {
                 decodes: DecodeCache::with_budget(config.decode_cache_bytes),
                 headers: HeaderCache::with_capacity(config.header_cache_entries),
@@ -281,15 +271,10 @@ impl ImageLoader {
         })
     }
 
-    /// The formats decodable on this machine, and at which provenance tier.
+    /// The formats the injected decoder claims, and at which provenance tier.
     #[must_use]
     pub fn capabilities(&self) -> Capabilities {
-        self.registry.capabilities()
-    }
-
-    #[must_use]
-    pub fn registry(&self) -> &BackendRegistry {
-        &self.registry
+        self.decoder.capabilities()
     }
 
     /// Header-only load: resolve, then cache-or-fetch, then probe.
@@ -316,7 +301,7 @@ impl ImageLoader {
             return Err(ImageError::Cancelled);
         };
         let bytes = self.read_bytes(&resolved, cancel.clone()).await?;
-        let header = probe_bytes(&self.registry, &bytes)?;
+        let header = probe_bytes(self.decoder.as_ref(), &bytes)?;
         if cancel.is_cancelled() {
             return Err(ImageError::Cancelled);
         }
@@ -356,7 +341,7 @@ impl ImageLoader {
 
         let bytes = self.read_bytes(&resolved, cancel.clone()).await?;
 
-        let registry = Arc::clone(&self.registry);
+        let decoder = Arc::clone(&self.decoder);
         let request = DecodeRequest {
             target_size: target,
             ..self.config.decode
@@ -376,10 +361,10 @@ impl ImageLoader {
         // unboundedly many concurrent decodes and starve tokio's blocking pool
         // — precisely under the churn the bound exists for.
         let decode = tokio::task::spawn_blocking(move || {
-            let decoded = decode_bytes(&registry, &bytes, &request);
+            let outcome = decode_bytes(decoder.as_ref(), &bytes, &request);
             drop(permit);
             drop(load_permit);
-            decoded
+            outcome
         });
 
         // Returning promptly and discarding the result is the honest behaviour:

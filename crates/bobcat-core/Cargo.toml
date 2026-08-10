@@ -14,10 +14,13 @@ quickjs = ["dep:quickjs-rust-bridge"]
 
 [dependencies]
 bytes = { workspace = true }
+# WHATWG `data:` URL parsing for the image loader's `data:` short-circuit.
+data-url = { workspace = true }
 http = { workspace = true }
 lynx-element = { workspace = true }
 pollster = { workspace = true }
 quickjs-rust-bridge = { workspace = true, optional = true }
+rustc-hash = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
@@ -25,7 +28,16 @@ url = { workspace = true }
 
 [dev-dependencies]
 flashbulb = { workspace = true, features = ["render"] }
+# The image contract tests run against the decoder this platform actually
+# ships — the same seam an embedder injects through. The dev-dependency cycle
+# (`image-decoders` normally depends on this crate) is fine; cargo builds the
+# dev copy against the already-built library.
+image-decoders = { workspace = true }
 lynx-template-decoder = { workspace = true }
+# PNG fixtures are generated in-process with `png`'s encoder rather than
+# committed. Dev-only: the engine ships no codec.
+png = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [lints]
 workspace = true

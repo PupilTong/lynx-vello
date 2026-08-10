@@ -1,7 +1,7 @@
 //! Decoded raster images the paint engine draws.
 //!
 //! Decoding stays outside this crate: `bobcat-core`'s resource protocol
-//! delivers bytes and `crates/image` turns them into `peniko::ImageData`
+//! delivers bytes and the engine's image pipeline turns them into `peniko::ImageData`
 //! (`DecodedImage::to_image_data`). The DOM paint pipeline looks images up by the two
 //! key spaces CSS produces: a `url(…)` string for `background-image` /
 //! `mask-image` layers, and an opaque `usize` owner key for replaced content.

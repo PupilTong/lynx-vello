@@ -57,9 +57,9 @@ impl<T> Document<T> {
     /// This is the W3C replaced-content seam, and it also marks the node
     /// replaced if it is not already. The DOM core learns nothing about
     /// `<img>`; tag policy stays in the embedder's UA stylesheet. It is public
-    /// because the decoder that produces these dimensions (`crates/image`) is
-    /// a separate crate that must not be handed the whole document core to
-    /// reach one setter.
+    /// because the decode pipeline that produces these dimensions lives above,
+    /// in the engine crate, which must not be handed the whole document core
+    /// to reach one setter.
     ///
     /// Setting an equal value is a structural no-op: nothing is invalidated, so
     /// a loader that re-publishes an unchanged size after a re-fetch costs

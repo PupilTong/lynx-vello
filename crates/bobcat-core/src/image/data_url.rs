@@ -12,7 +12,7 @@
 
 use url::Url;
 
-use crate::error::ImageError;
+use crate::image::error::ImageError;
 
 /// Whether this resolved URL should bypass the transport entirely.
 #[must_use]
@@ -82,7 +82,7 @@ mod tests {
     use url::Url;
 
     use super::{decode, is_data_url};
-    use crate::error::ImageError;
+    use crate::image::error::ImageError;
 
     const LIMIT: u64 = 1 << 20;
 
@@ -117,8 +117,8 @@ mod tests {
         .expect("payload decodes regardless of the label");
         assert_eq!(&bytes[..4], &[0x89, b'P', b'N', b'G']);
         assert_eq!(
-            crate::format::sniff(&bytes),
-            Some(crate::format::ImageFormat::Png)
+            crate::image::format::sniff(&bytes),
+            Some(crate::image::format::ImageFormat::Png)
         );
     }
 
