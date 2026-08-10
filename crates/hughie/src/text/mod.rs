@@ -5,6 +5,7 @@ mod context;
 mod layout;
 mod measure;
 
+pub use content::{AtomicInlineBox, InlineItem};
 pub use context::TextContext;
-pub use layout::{TextLayout, TextLayoutStore, TextMeasurement};
-pub use measure::TextMeasurer;
+pub use layout::{PositionedInlineBox, TextLayout, TextLayoutStore, TextMeasurement};
+pub use measure::{InlineMeasurer, TextMeasurer};

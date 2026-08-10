@@ -70,6 +70,12 @@ style_protocol! {
     }
 }
 
+impl TextRunStyle for ComputedValues {
+    fn computed_text_values(&self) -> Option<&ComputedValues> {
+        Some(self)
+    }
+}
+
 /// One borrowed text/style run assembled by the host.
 #[derive(Debug)]
 pub struct TextRun<'a, R: TextRunStyle> {

@@ -630,7 +630,7 @@ fn offset_path_establishes_the_fixed_containing_block() {
 }
 
 #[test]
-fn fixed_descendants_of_the_leaf_fallback_stay_zeroed() {
+fn fixed_descendants_of_flow_remain_out_of_flow() {
     let mut h = Harness::new(
         "page { display: flex; width: 800px; height: 600px; align-items: flex-start; }
          .flow { width: 40px; height: 30px; }
@@ -642,7 +642,7 @@ fn fixed_descendants_of_the_leaf_fallback_stay_zeroed() {
     h.layout();
 
     assert_eq!(h.rect(flow), (0.0, 0.0, 40.0, 30.0));
-    assert_eq!(h.rect(fixed), (0.0, 0.0, 0.0, 0.0));
+    assert_eq!(h.rect(fixed), (10.0, 20.0, 30.0, 40.0));
 }
 
 #[test]
@@ -751,19 +751,150 @@ fn hoisted_nodes_relayout_across_passes() {
 }
 
 #[test]
-fn flow_containers_fall_back_to_leaves_and_zero_their_children() {
+fn inline_layout_modes_are_atomic_flow_items_and_wrap_as_whole_boxes() {
+    for display in [
+        "inline-flex",
+        "inline-grid",
+        "inline-linear",
+        "inline-relative",
+    ] {
+        let mut dom = dom::Document::new(common::device(300.0, 200.0), "page", ());
+        dom.add_stylesheet(
+            &format!(
+                "page {{ display: flex; width: 300px; height: 200px; align-items: flex-start; }}
+                 .flow {{ width: 100px; font-family: Ahem; font-size: 10px;
+                          line-height: 10px; }}
+                 .atom {{ display: {display}; width: 40px; height: 20px; }}
+                 .inside {{ display: flex; width: 10px; height: 5px; }}"
+            ),
+            dom::StylesheetOrigin::Author,
+        );
+        assert_eq!(dom.register_fonts(AHEM), 1);
+        let root = dom.document_element().id();
+        let flow = dom.create_element("view", ());
+        dom.add_class(flow, "flow");
+        dom.append_child(root, flow);
+        let before = dom.create_text_node("aaaaaaa", ());
+        dom.append_child(flow, before);
+        let atom = dom.create_element("view", ());
+        dom.add_class(atom, "atom");
+        dom.append_child(flow, atom);
+        let inside = dom.create_element("view", ());
+        dom.add_class(inside, "inside");
+        dom.append_child(atom, inside);
+        let after = dom.create_text_node("bb", ());
+        dom.append_child(flow, after);
+
+        dom.layout();
+
+        let flow_rect = dom_rect(&dom, flow);
+        let atom_rect = dom_rect(&dom, atom);
+        assert_eq!((flow_rect.0, flow_rect.1, flow_rect.2), (0.0, 0.0, 100.0));
+        assert_eq!((atom_rect.0, atom_rect.2, atom_rect.3), (0.0, 40.0, 20.0));
+        assert!(
+            atom_rect.1 > 0.0,
+            "{display} atom must wrap after the first line"
+        );
+        assert!(
+            flow_rect.3 >= atom_rect.1 + atom_rect.3,
+            "{display} flow height contains the wrapped atom",
+        );
+        assert_eq!(dom_rect(&dom, inside).2, 10.0, "{display} inner width");
+        assert_eq!(dom_rect(&dom, inside).3, 5.0, "{display} inner height");
+        assert_eq!(dom_rect(&dom, before), (0.0, 0.0, 0.0, 0.0));
+        assert_eq!(dom_rect(&dom, after), (0.0, 0.0, 0.0, 0.0));
+    }
+}
+
+#[test]
+fn flow_positions_local_and_hoisted_absolute_children_from_inline_markers() {
+    for positioned_flow in [true, false] {
+        let position = if positioned_flow {
+            "position: relative;"
+        } else {
+            ""
+        };
+        let mut dom = dom::Document::new(common::device(300.0, 200.0), "page", ());
+        dom.add_stylesheet(
+            &format!(
+                "page {{ display: flex; width: 300px; height: 200px; align-items: flex-start; }}
+                 .flow {{ {position} width: 100px; height: 40px; font-family: Ahem;
+                          font-size: 10px; line-height: 10px; }}
+                 .positioned {{ position: absolute; display: flex; width: 10px; height: 10px; }}"
+            ),
+            dom::StylesheetOrigin::Author,
+        );
+        assert_eq!(dom.register_fonts(AHEM), 1);
+        let root = dom.document_element().id();
+        let flow = dom.create_element("view", ());
+        dom.add_class(flow, "flow");
+        dom.append_child(root, flow);
+        let text = dom.create_text_node("aa", ());
+        dom.append_child(flow, text);
+        let positioned = dom.create_element("view", ());
+        dom.add_class(positioned, "positioned");
+        dom.append_child(flow, positioned);
+
+        dom.layout();
+        assert_eq!(dom_rect(&dom, positioned), (20.0, 0.0, 10.0, 10.0));
+
+        dom.set_text_node_data(text, "aaaa");
+        dom.layout();
+        assert_eq!(dom_rect(&dom, positioned), (40.0, 0.0, 10.0, 10.0));
+    }
+}
+
+#[test]
+fn content_visibility_hidden_inline_atom_keeps_its_principal_box() {
+    let mut dom = dom::Document::new(common::device(300.0, 200.0), "page", ());
+    dom.add_stylesheet(
+        "page { display: flex; width: 300px; height: 200px; align-items: flex-start; }
+         .flow { width: 100px; font-family: Ahem; font-size: 10px; line-height: 10px; }
+         .atom { display: inline-flex; width: 40px; height: 20px;
+                 content-visibility: hidden; }
+         .inside { display: flex; width: 80px; height: 30px; }",
+        dom::StylesheetOrigin::Author,
+    );
+    assert_eq!(dom.register_fonts(AHEM), 1);
+    let root = dom.document_element().id();
+    let flow = dom.create_element("view", ());
+    dom.add_class(flow, "flow");
+    dom.append_child(root, flow);
+    let text = dom.create_text_node("aaaaaaa", ());
+    dom.append_child(flow, text);
+    let atom = dom.create_element("view", ());
+    dom.add_class(atom, "atom");
+    dom.append_child(flow, atom);
+    let inside = dom.create_element("view", ());
+    dom.add_class(inside, "inside");
+    dom.append_child(atom, inside);
+
+    dom.layout();
+
+    let atom_rect = dom_rect(&dom, atom);
+    assert_eq!((atom_rect.0, atom_rect.2, atom_rect.3), (0.0, 40.0, 20.0));
+    assert!(atom_rect.1 > 0.0);
+    assert_eq!(dom_rect(&dom, inside), (0.0, 0.0, 0.0, 0.0));
+}
+
+#[test]
+fn overflowing_inline_atom_extends_the_flow_content_size() {
     let mut h = Harness::new(
-        "page { display: flex; width: 100px; height: 100px; align-items: flex-start; }
-         .flow { width: 40px; height: 30px; }
-         .child { width: 999px; height: 999px; }",
+        "page { display: flex; width: 300px; height: 200px; align-items: flex-start; }
+         .flow { width: 50px; }
+         .atom { display: inline-flex; width: 20px; height: 20px; }
+         .inside { display: flex; width: 100px; height: 5px; flex-shrink: 0; }",
     );
     let root = h.doc.root;
     let flow = h.doc.el(root, ".flow");
-    let child = h.doc.el(flow, ".child");
+    let atom = h.doc.el(flow, ".atom");
+    let inside = h.doc.el(atom, ".inside");
+
     h.layout();
 
-    assert_eq!(h.rect(flow), (0.0, 0.0, 40.0, 30.0));
-    assert_eq!(h.rect(child), (0.0, 0.0, 0.0, 0.0));
+    assert_eq!(h.rect(atom), (0.0, 0.0, 20.0, 20.0));
+    assert_eq!(h.rect(inside), (0.0, 0.0, 100.0, 5.0));
+    assert!(h.layout_of(flow).content_size.width >= 100.0);
 }
 
 #[test]

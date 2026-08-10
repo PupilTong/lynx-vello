@@ -544,6 +544,57 @@ fn text_runs_paint_with_their_element_and_hit_as_the_element() {
 }
 
 #[test]
+fn inline_atom_paints_once_and_wins_hits_over_its_paragraph() {
+    let mut h = Harness::new(
+        "page { display: flex; width: 300px; height: 200px; align-items: flex-start; }
+         .flow { width: 100px; height: 50px; overflow: hidden; contain: size;
+                 font-family: Ahem;
+                 font-size: 10px; line-height: 10px; }
+         .atom { display: inline-flex; width: 40px; height: 20px; }
+         .inside { display: flex; width: 10px; height: 5px; }",
+    );
+    h.doc.dom.register_fonts(AHEM);
+    let root = h.root();
+    let flow = h.el(root, "view.flow");
+    let atom = h.el(flow, "view.atom");
+    let inside = h.el(atom, "view.inside");
+    let text = h.doc.dom.create_text_node("bb", ());
+    h.doc.dom.append_child(flow, text);
+
+    let paint = h.paint();
+    assert_eq!(
+        paint
+            .items()
+            .iter()
+            .filter(|item| item.node == atom && item.kind == PaintItemKind::ElementBox)
+            .count(),
+        1,
+    );
+    assert_eq!(
+        paint
+            .items()
+            .iter()
+            .filter(|item| item.node == inside && item.kind == PaintItemKind::ElementBox)
+            .count(),
+        1,
+    );
+    assert!(paint.items().iter().any(|item| {
+        item.node == flow && item.kind == PaintItemKind::TextRun { element: flow }
+    }));
+    assert!(
+        paint.items().iter().all(|item| item.node != text),
+        "source text nodes are painted through the retained flow paragraph",
+    );
+
+    let atom_layout = h.doc.dom.rounded_layout(atom).expect("atom is laid out");
+    assert_eq!(
+        h.hit(atom_layout.location.x + 30.0, atom_layout.location.y + 10.0,),
+        Some(atom),
+    );
+    assert_eq!(h.hit(45.0, 5.0), Some(flow));
+}
+
+#[test]
 fn hit_outside_all_content_is_none() {
     let mut h = Harness::new("page { display: flex; width: 100px; height: 100px; }");
     assert_eq!(h.hit(400.0, 400.0), None);

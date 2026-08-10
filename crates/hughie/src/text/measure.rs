@@ -8,16 +8,18 @@ use parley::{
     Alignment, CHROMIUM_LINE_BREAK_OVERRIDE, FontFamily as ParleyFontFamily,
     FontFamilyName as ParleyFontFamilyName, FontFeature, FontFeatures,
     FontStyle as ParleyFontStyle, FontVariation, FontVariations, FontWeight as ParleyFontWeight,
-    GenericFamily as ParleyGenericFamily, LineHeight as ParleyLineHeight,
-    OverflowWrap as ParleyOverflowWrap, TextStyle as ParleyTextStyle,
-    TextWrapMode as ParleyTextWrapMode, WordBreak as ParleyWordBreak,
+    GenericFamily as ParleyGenericFamily, InlineBox as ParleyInlineBox, InlineBoxKind,
+    LineHeight as ParleyLineHeight, OverflowWrap as ParleyOverflowWrap,
+    TextStyle as ParleyTextStyle, TextWrapMode as ParleyTextWrapMode, WordBreak as ParleyWordBreak,
 };
 use stylo::Zero;
 use stylo::computed_values::{direction, text_wrap_mode};
 use stylo::values::computed::font::{FontFamily, GenericFontFamily, SingleFontFamily};
 use stylo::values::computed::{FontStyle, Length, LineHeight, TextAlign, WordBreak};
 
-use super::content::normalize_runs;
+use super::content::{
+    AtomicInlineBox, InlineItem, ShapingContent, normalize_items, normalize_runs,
+};
 use super::{TextContext, TextLayout, TextLayoutStore, TextMeasurement};
 use crate::compute::{LeafMeasureInput, compute_leaf_layout_with_measurement};
 use crate::style::{TextContainerStyle, TextRun, TextRunStyle};
@@ -69,38 +71,7 @@ where
             self.runs.clone(),
             self.container_style.white_space_collapse(),
         );
-        #[cfg(test)]
-        self.context.record_shape();
-        let (font_context, layout_context) = self.context.font_and_layout_contexts();
-        let mut builder =
-            layout_context.style_run_builder(font_context, content.text.as_str(), 1.0, false);
-        let word_break = self.container_style.word_break();
-        if word_break != WordBreak::BreakAll {
-            builder.set_line_break_override(Some(CHROMIUM_LINE_BREAK_OVERRIDE));
-        }
-        builder.reserve(content.ranges.len(), content.ranges.len());
-
-        for range in &content.ranges {
-            let owned_family;
-            let family = if let Some(family) = range.style.font_family_ref() {
-                family
-            } else {
-                owned_family = range.style.font_family();
-                &owned_family
-            };
-            let style = translate_run_style(
-                range.style,
-                family,
-                word_break,
-                self.container_style.text_wrap_mode(),
-            );
-            let style_index = builder.push_style(style);
-            builder.push_style_run(style_index, range.bytes.clone());
-        }
-
-        let has_text = !content.text.is_empty();
-        let layout = builder.build(content.text.as_str());
-        TextLayout::shaped(layout, has_text)
+        shape_content(self.context, self.container_style, content)
     }
 
     fn install_artifact_if_needed(&mut self, goal: LayoutGoal) {
@@ -121,6 +92,207 @@ where
             LayoutGoal::Measure(_) => self.artifacts.probe = Some(artifact),
             LayoutGoal::Commit => self.artifacts.committed = Some(artifact),
         }
+    }
+}
+
+/// Parley adapter for a source-ordered mixture of text runs and measured
+/// atomic inline boxes.
+pub struct InlineMeasurer<'session, 'source, Container, RunStyle, Items>
+where
+    Container: TextContainerStyle,
+    RunStyle: TextRunStyle + 'source,
+    Items: Iterator<Item = InlineItem<'source, RunStyle>> + Clone,
+{
+    context: &'session mut TextContext,
+    artifacts: &'session mut TextLayoutStore,
+    container_style: &'source Container,
+    items: Items,
+}
+
+impl<'session, 'source, Container, RunStyle, Items>
+    InlineMeasurer<'session, 'source, Container, RunStyle, Items>
+where
+    Container: TextContainerStyle,
+    RunStyle: TextRunStyle + 'source,
+    Items: Iterator<Item = InlineItem<'source, RunStyle>> + Clone,
+{
+    pub fn new(
+        context: &'session mut TextContext,
+        artifacts: &'session mut TextLayoutStore,
+        container_style: &'source Container,
+        items: Items,
+    ) -> Self {
+        Self {
+            context,
+            artifacts,
+            container_style,
+            items,
+        }
+    }
+
+    pub fn compute_layout(&mut self, input: LayoutInput) -> LayoutOutput {
+        let container_style = self.container_style;
+        compute_leaf_layout_with_measurement(input, container_style, None, true, |measure_input| {
+            self.measure(measure_input).metrics()
+        })
+    }
+
+    pub fn measure(&mut self, input: LeafMeasureInput) -> TextMeasurement<'_> {
+        self.install_artifact_if_needed(input.goal);
+        measure_installed_artifact(self.artifacts, self.container_style, input)
+    }
+
+    fn shape(&mut self) -> TextLayout {
+        let content = normalize_items(
+            self.items.clone(),
+            self.container_style.white_space_collapse(),
+        );
+        shape_content(self.context, self.container_style, content)
+    }
+
+    fn install_artifact_if_needed(&mut self, goal: LayoutGoal) {
+        let target_matches = match goal {
+            LayoutGoal::Measure(_) => self
+                .artifacts
+                .probe
+                .as_deref()
+                .is_some_and(|artifact| inline_boxes_match(artifact, self.items.clone())),
+            LayoutGoal::Commit => self
+                .artifacts
+                .committed
+                .as_deref()
+                .is_some_and(|artifact| inline_boxes_match(artifact, self.items.clone())),
+        };
+        if target_matches {
+            return;
+        }
+
+        let reusable = match goal {
+            LayoutGoal::Measure(_) => self
+                .artifacts
+                .committed
+                .as_deref()
+                .filter(|artifact| inline_boxes_match(artifact, self.items.clone()))
+                .map(|artifact| Box::new(artifact.clone())),
+            LayoutGoal::Commit => {
+                if self
+                    .artifacts
+                    .probe
+                    .as_deref()
+                    .is_some_and(|artifact| inline_boxes_match(artifact, self.items.clone()))
+                {
+                    self.artifacts.probe.take()
+                } else {
+                    self.artifacts.probe = None;
+                    None
+                }
+            }
+        };
+        let artifact = reusable.unwrap_or_else(|| Box::new(self.shape()));
+        match goal {
+            LayoutGoal::Measure(_) => self.artifacts.probe = Some(artifact),
+            LayoutGoal::Commit => self.artifacts.committed = Some(artifact),
+        }
+    }
+}
+
+impl<'source, Container, RunStyle, Items> fmt::Debug
+    for InlineMeasurer<'_, 'source, Container, RunStyle, Items>
+where
+    Container: TextContainerStyle,
+    RunStyle: TextRunStyle + 'source,
+    Items: Iterator<Item = InlineItem<'source, RunStyle>> + Clone,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InlineMeasurer")
+            .finish_non_exhaustive()
+    }
+}
+
+fn shape_content<R: TextRunStyle>(
+    context: &mut TextContext,
+    container_style: &impl TextContainerStyle,
+    shaping: ShapingContent<'_, R>,
+) -> TextLayout {
+    #[cfg(test)]
+    context.record_shape();
+    let (font_context, layout_context) = context.font_and_layout_contexts();
+    let mut builder =
+        layout_context.style_run_builder(font_context, shaping.text.as_str(), 1.0, false);
+    let word_break = container_style.word_break();
+    if word_break != WordBreak::BreakAll {
+        builder.set_line_break_override(Some(CHROMIUM_LINE_BREAK_OVERRIDE));
+    }
+    builder.reserve(shaping.ranges.len(), shaping.ranges.len());
+
+    for range in &shaping.ranges {
+        let owned_family;
+        let family = if let Some(family) = range.style.font_family_ref() {
+            family
+        } else {
+            owned_family = range.style.font_family();
+            &owned_family
+        };
+        let style = translate_run_style(
+            range.style,
+            family,
+            word_break,
+            container_style.text_wrap_mode(),
+        );
+        let style_index = builder.push_style(style);
+        builder.push_style_run(style_index, range.bytes.clone());
+    }
+
+    let has_content = !shaping.text.is_empty() || !shaping.boxes.is_empty();
+    let mut atomic_boxes = Vec::with_capacity(shaping.boxes.len());
+    for inline_box in shaping.boxes {
+        let atomic = sanitize_atomic_inline_box(inline_box.inline_box);
+        builder.push_inline_box(ParleyInlineBox {
+            id: atomic.id,
+            kind: InlineBoxKind::InFlow,
+            index: inline_box.index,
+            width: atomic.width,
+            height: atomic.height,
+        });
+        atomic_boxes.push(atomic);
+    }
+    let layout = builder.build(shaping.text.as_str());
+    TextLayout::shaped_with_inline_boxes(layout, has_content, atomic_boxes)
+}
+
+fn inline_boxes_match<'source, RunStyle, Items>(artifact: &TextLayout, items: Items) -> bool
+where
+    RunStyle: TextRunStyle + 'source,
+    Items: Iterator<Item = InlineItem<'source, RunStyle>>,
+{
+    artifact.inline_boxes_match(items.filter_map(|item| match item {
+        InlineItem::Text(_) => None,
+        InlineItem::Atomic(inline_box) => Some(sanitize_atomic_inline_box(inline_box)),
+    }))
+}
+
+fn sanitize_atomic_inline_box(inline_box: AtomicInlineBox) -> AtomicInlineBox {
+    let width = finite_non_negative(inline_box.width);
+    let height = finite_non_negative(inline_box.height);
+    let baseline = if inline_box.baseline.is_finite() {
+        inline_box.baseline.clamp(0.0, height)
+    } else {
+        height
+    };
+    AtomicInlineBox {
+        id: inline_box.id,
+        width,
+        height,
+        baseline,
+    }
+}
+
+fn finite_non_negative(value: f32) -> f32 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
     }
 }
 
@@ -145,44 +317,46 @@ where
     Runs: Iterator<Item = TextRun<'source, RunStyle>> + Clone,
 {
     pub fn measure(&mut self, input: LeafMeasureInput) -> TextMeasurement<'_> {
-        let inline_basis = definite_inline_size(input).unwrap_or(0.0).max(0.0);
-        let indent = self
-            .container_style
-            .text_indent()
-            .length
-            .resolve(Length::new(inline_basis))
-            .px();
-        let alignment = alignment(
-            self.container_style.text_align(),
-            self.container_style.direction(),
-        );
-
         self.install_artifact_if_needed(input.goal);
-        let artifact = match input.goal {
-            LayoutGoal::Measure(_) => self
-                .artifacts
-                .probe
-                .as_deref_mut()
-                .expect("a probe artifact was installed"),
-            LayoutGoal::Commit => self
-                .artifacts
-                .committed
-                .as_deref_mut()
-                .expect("a committed artifact was installed"),
-        };
-        let max_advance = line_break_width(input, artifact);
-        artifact.rebreak(max_advance, indent);
-        if matches!(input.goal, LayoutGoal::Commit) {
-            let measured_width = artifact.size().width;
-            if input.known_dimensions.width.is_none()
-                && max_advance.is_some_and(|limit| limit > measured_width)
-            {
-                artifact.rebreak(Some(measured_width), indent);
-            }
-            artifact.align(alignment);
-        }
-        TextMeasurement::new(artifact)
+        measure_installed_artifact(self.artifacts, self.container_style, input)
     }
+}
+
+fn measure_installed_artifact<'a>(
+    artifacts: &'a mut TextLayoutStore,
+    container_style: &impl TextContainerStyle,
+    input: LeafMeasureInput,
+) -> TextMeasurement<'a> {
+    let inline_basis = definite_inline_size(input).unwrap_or(0.0).max(0.0);
+    let indent = container_style
+        .text_indent()
+        .length
+        .resolve(Length::new(inline_basis))
+        .px();
+    let alignment = alignment(container_style.text_align(), container_style.direction());
+
+    let artifact = match input.goal {
+        LayoutGoal::Measure(_) => artifacts
+            .probe
+            .as_deref_mut()
+            .expect("a probe artifact was installed"),
+        LayoutGoal::Commit => artifacts
+            .committed
+            .as_deref_mut()
+            .expect("a committed artifact was installed"),
+    };
+    let max_advance = line_break_width(input, artifact);
+    artifact.rebreak(max_advance, indent);
+    if matches!(input.goal, LayoutGoal::Commit) {
+        let measured_width = artifact.size().width;
+        if input.known_dimensions.width.is_none()
+            && max_advance.is_some_and(|limit| limit > measured_width)
+        {
+            artifact.rebreak(Some(measured_width), indent);
+        }
+        artifact.align(alignment);
+    }
+    TextMeasurement::new(artifact)
 }
 
 fn definite_inline_size(input: LeafMeasureInput) -> Option<f32> {
@@ -427,6 +601,10 @@ mod tests {
         )
     }
 
+    fn assert_close(actual: f32, expected: f32) {
+        assert!((actual - expected).abs() < 1.0e-5, "{actual} != {expected}");
+    }
+
     #[test]
     fn one_shaped_layout_is_rebroken_for_probe_and_commit_constraints() {
         let mut context = TextContext::without_system_fonts();
@@ -480,9 +658,111 @@ mod tests {
     }
 
     #[test]
+    fn pure_atomic_paragraphs_wrap_and_expose_positions_and_baselines() {
+        let mut context = TextContext::without_system_fonts();
+        let container = ContainerStyle::default();
+        let items = [
+            InlineItem::<RunStyle>::Atomic(AtomicInlineBox::new(1, 40.0, 16.0).with_baseline(6.0)),
+            InlineItem::Atomic(AtomicInlineBox::new(2, 30.0, 20.0).with_baseline(12.0)),
+        ];
+        let mut artifacts = TextLayoutStore::default();
+        let mut measurer =
+            InlineMeasurer::new(&mut context, &mut artifacts, &container, items.into_iter());
+
+        let max_content = measurer.measure(measure_input(
+            AvailableSpace::MaxContent,
+            LayoutGoal::Measure(RequestedAxis::Both),
+        ));
+        assert_close(max_content.size().width, 70.0);
+        assert_eq!(max_content.layout().line_count(), 1);
+
+        let committed = measurer.measure(measure_input(
+            AvailableSpace::Definite(50.0),
+            LayoutGoal::Commit,
+        ));
+        assert_eq!(committed.layout().line_count(), 2);
+        assert!(
+            committed
+                .layout()
+                .first_baseline()
+                .is_some_and(|value| value > 0.0)
+        );
+        let first = committed
+            .layout()
+            .positioned_inline_box(1)
+            .expect("the first atomic box is positioned");
+        let second = committed
+            .layout()
+            .positioned_inline_box(2)
+            .expect("the second atomic box is positioned");
+        assert_eq!(first.size, Size::new(40.0, 16.0));
+        assert_close(first.baseline, 6.0);
+        assert_eq!(second.size, Size::new(30.0, 20.0));
+        assert_close(second.baseline, 12.0);
+        assert!(second.origin.y >= first.origin.y + first.size.height);
+        assert!(committed.size().height >= second.origin.y + second.size.height);
+    }
+
+    #[test]
+    fn changed_atomic_metrics_reshape_retained_intrinsic_widths() {
+        let mut context = TextContext::without_system_fonts();
+        let container = ContainerStyle::default();
+        let mut artifacts = TextLayoutStore::default();
+
+        {
+            let items = [InlineItem::<RunStyle>::Atomic(AtomicInlineBox::new(
+                1, 20.0, 10.0,
+            ))];
+            let mut measurer =
+                InlineMeasurer::new(&mut context, &mut artifacts, &container, items.into_iter());
+            assert_close(
+                measurer
+                    .measure(measure_input(
+                        AvailableSpace::MaxContent,
+                        LayoutGoal::Measure(RequestedAxis::Both),
+                    ))
+                    .size()
+                    .width,
+                20.0,
+            );
+        }
+        assert_eq!(context.shape_count(), 1);
+
+        {
+            let items = [InlineItem::<RunStyle>::Atomic(AtomicInlineBox::new(
+                1, 45.0, 14.0,
+            ))];
+            let mut measurer =
+                InlineMeasurer::new(&mut context, &mut artifacts, &container, items.into_iter());
+            assert_close(
+                measurer
+                    .measure(measure_input(
+                        AvailableSpace::MaxContent,
+                        LayoutGoal::Measure(RequestedAxis::Both),
+                    ))
+                    .size()
+                    .width,
+                45.0,
+            );
+            assert_close(
+                measurer
+                    .measure(measure_input(
+                        AvailableSpace::MaxContent,
+                        LayoutGoal::Commit,
+                    ))
+                    .size()
+                    .width,
+                45.0,
+            );
+        }
+        assert_eq!(context.shape_count(), 2);
+    }
+
+    #[test]
     fn constraint_and_alignment_mappings_cover_protocol_values() {
         let input = measure_input(AvailableSpace::MinContent, LayoutGoal::Commit);
-        let empty = TextLayout::shaped(parley::Layout::default(), false);
+        let empty =
+            TextLayout::shaped_with_inline_boxes(parley::Layout::default(), false, Vec::new());
         assert_eq!(line_break_width(input, &empty), Some(0.0));
         for (value, direction, expected) in [
             (TextAlign::Start, direction::T::Rtl, Alignment::Right),

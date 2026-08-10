@@ -1,6 +1,6 @@
 //! The paint-order builder: CSS2 Appendix E over the laid-out tree,
-//! collapsed for an engine with no floats and no inline-level boxes other
-//! than text leaves.
+//! collapsed for an engine with no floats. Atomic inline boxes remain normal
+//! element items; their paragraph's Parley item is layout-only.
 //!
 //! Per stacking context `E` the emitted order is:
 //! 1. `E`'s own item;
@@ -63,7 +63,7 @@ pub(crate) fn build<T>(document: &Document<T>) -> PaintOrder {
     let visual_epoch = document.visual_epoch();
     let root = document.document_element();
     if let Some(style) = StyleView::try_of(root)
-        && display_mode(style.display()) != DisplayMode::None
+        && !display_mode(style.display()).is_none()
     {
         let location = builder.rounded(root.id()).location;
         builder.build_stacking_context(
@@ -212,7 +212,7 @@ impl<'doc, T> Builder<'doc, T> {
         }
 
         let mode = display_mode(style.display());
-        if mode == DisplayMode::Leaf || skips_contents(values) {
+        if mode.is_leaf() || skips_contents(values) {
             self.close_layer(layer);
             return;
         }
@@ -226,12 +226,13 @@ impl<'doc, T> Builder<'doc, T> {
             // The context's own box did not move; its contents start one
             // scroll translation into its local space.
             (ctx.current.scroll - seed.current.scroll).to_point(),
-            matches!(mode, DisplayMode::Flex | DisplayMode::Grid),
+            mode.is_item_container(),
             ctx,
             &world,
             &mut members,
             &mut stream,
             &mut seq,
+            None,
         );
 
         let child_perspective = ParentPerspective::of(values, size);
@@ -308,7 +309,20 @@ impl<'doc, T> Builder<'doc, T> {
         members: &mut Vec<Member>,
         stream: &mut Vec<ItemRecord>,
         seq: &mut u32,
+        inherited_paragraph: Option<NodeId>,
     ) {
+        let paragraph = if inherited_paragraph.is_none() {
+            self.paragraph_record(node, node_offset, ctx)
+        } else {
+            None
+        };
+        let active_paragraph = paragraph
+            .as_ref()
+            .map_or(inherited_paragraph, |_| Some(node));
+        if let Some(record) = paragraph {
+            stream.push(record);
+        }
+
         let mut children: Vec<(u32, usize, NodeId)> = self
             .tree
             .flattened_children(node)
@@ -320,7 +334,9 @@ impl<'doc, T> Builder<'doc, T> {
         for (_, _, child) in children {
             let child_node = self.node(child);
             if child_node.is_text_node() {
-                if let Some(record) = self.text_record(child_node, node_offset, ctx) {
+                if active_paragraph.is_none()
+                    && let Some(record) = self.text_record(child_node, node_offset, ctx)
+                {
                     stream.push(record);
                 }
                 continue;
@@ -334,7 +350,7 @@ impl<'doc, T> Builder<'doc, T> {
                 continue;
             };
             let mode = display_mode(view.display());
-            if mode == DisplayMode::None {
+            if mode.is_none() {
                 continue;
             }
             debug_assert_ne!(
@@ -376,9 +392,15 @@ impl<'doc, T> Builder<'doc, T> {
                 continue;
             }
 
-            let descend = mode != DisplayMode::Leaf && !skips_contents(style);
+            let descend = !mode.is_leaf() && !skips_contents(style);
             let (visible, hit_testable) = item_flags(style);
-            let is_item_container = matches!(mode, DisplayMode::Flex | DisplayMode::Grid);
+            let is_item_container = mode.is_item_container();
+            let descendant_paragraph =
+                if active_paragraph.is_some() && mode.is_inline() && !mode.is_flow() {
+                    None
+                } else {
+                    active_paragraph
+                };
 
             if position != PositionProperty::Static {
                 // Pseudo-stacking context (computed `relative` or `absolute`
@@ -411,6 +433,7 @@ impl<'doc, T> Builder<'doc, T> {
                         members,
                         &mut pseudo_stream,
                         seq,
+                        descendant_paragraph,
                     );
                 }
                 members.push(Member {
@@ -445,6 +468,7 @@ impl<'doc, T> Builder<'doc, T> {
                     members,
                     stream,
                     seq,
+                    descendant_paragraph,
                 );
             }
         }
@@ -573,6 +597,46 @@ impl<'doc, T> Builder<'doc, T> {
             ),
             clip: ctx.current.clip,
             size: Size2D::new(layout.size.width, layout.size.height),
+            radii: CornerRadii::ZERO,
+            hit_testable,
+        })
+    }
+
+    /// A flow box's retained paragraph. Its Parley coordinates start at the
+    /// content box, while ordinary element layouts are border-box-relative.
+    fn paragraph_record(
+        &self,
+        node: NodeId,
+        node_offset: Point2D<f32>,
+        ctx: ClipContexts,
+    ) -> Option<ItemRecord> {
+        let node_ref = self.node(node);
+        let style = StyleView::try_of(node_ref)?;
+        if !display_mode(style.display()).is_flow() {
+            return None;
+        }
+        let text = slab_get_for_live_node(&self.state.nodes, node)
+            .text
+            .as_deref()?
+            .committed()?;
+        if !text.has_glyphs() {
+            return None;
+        }
+        let (visible, hit_testable) = item_flags(style.values());
+        if !visible {
+            return None;
+        }
+        let layout = self.rounded(node);
+        let size = text.size();
+        Some(ItemRecord {
+            node,
+            kind: PaintItemKind::TextRun { element: node },
+            offset: Point2D::new(
+                node_offset.x + layout.border.left + layout.padding.left,
+                node_offset.y + layout.border.top + layout.padding.top,
+            ),
+            clip: ctx.current.clip,
+            size: Size2D::new(size.width, size.height),
             radii: CornerRadii::ZERO,
             hit_testable,
         })

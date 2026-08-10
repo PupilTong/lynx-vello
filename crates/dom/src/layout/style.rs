@@ -19,11 +19,55 @@ pub(crate) enum DisplayMode {
     /// Generates no box; the children generate theirs in the nearest box
     /// ancestor's formatting context instead.
     Contents,
-    Flex,
-    Grid,
-    Linear,
-    Relative,
+    Flow {
+        inline: bool,
+    },
+    Flex {
+        inline: bool,
+    },
+    Grid {
+        inline: bool,
+    },
+    Linear {
+        inline: bool,
+    },
+    Relative {
+        inline: bool,
+    },
     Leaf,
+}
+
+impl DisplayMode {
+    pub(crate) const fn is_none(self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    pub(crate) const fn is_contents(self) -> bool {
+        matches!(self, Self::Contents)
+    }
+
+    pub(crate) const fn is_leaf(self) -> bool {
+        matches!(self, Self::Leaf)
+    }
+
+    pub(crate) const fn is_inline(self) -> bool {
+        matches!(
+            self,
+            Self::Flow { inline: true }
+                | Self::Flex { inline: true }
+                | Self::Grid { inline: true }
+                | Self::Linear { inline: true }
+                | Self::Relative { inline: true }
+        )
+    }
+
+    pub(crate) const fn is_flow(self) -> bool {
+        matches!(self, Self::Flow { .. })
+    }
+
+    pub(crate) const fn is_item_container(self) -> bool {
+        matches!(self, Self::Flex { .. } | Self::Grid { .. })
+    }
 }
 
 pub(crate) fn display_mode(display: Display) -> DisplayMode {
@@ -33,13 +77,15 @@ pub(crate) fn display_mode(display: Display) -> DisplayMode {
     if display.outside() == DisplayOutside::None {
         return DisplayMode::None;
     }
+    let inline = display.outside() == DisplayOutside::Inline;
     match display.inside() {
         DisplayInside::None => DisplayMode::None,
-        DisplayInside::Flex => DisplayMode::Flex,
-        DisplayInside::Grid => DisplayMode::Grid,
-        DisplayInside::LynxLinear => DisplayMode::Linear,
-        DisplayInside::LynxRelative => DisplayMode::Relative,
-        DisplayInside::Contents | DisplayInside::Flow => DisplayMode::Leaf,
+        DisplayInside::Flex => DisplayMode::Flex { inline },
+        DisplayInside::Grid => DisplayMode::Grid { inline },
+        DisplayInside::LynxLinear => DisplayMode::Linear { inline },
+        DisplayInside::LynxRelative => DisplayMode::Relative { inline },
+        DisplayInside::Flow => DisplayMode::Flow { inline },
+        DisplayInside::Contents => DisplayMode::Contents,
     }
 }
 
@@ -183,7 +229,7 @@ impl<'dom, T> StyleView<'dom, T> {
         })
     }
 
-    pub(crate) fn values(&self) -> &ComputedValues {
+    pub(crate) const fn values(&self) -> &'dom ComputedValues {
         self.style
     }
 }
@@ -197,6 +243,8 @@ impl<T> CoreStyle for StyleView<'_, T> {
         resolve_position(self.node, self.values())
     }
 }
+
+impl<T> TextContainerStyle for StyleView<'_, T> {}
 
 /// Text-only view: static anonymous-box geometry plus its parent's post-flush
 /// inherited paragraph/run values.

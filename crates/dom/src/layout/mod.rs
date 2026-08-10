@@ -147,10 +147,8 @@ impl<T> Document<T> {
             .map(|state| &state.slot.rounded)
     }
 
-    /// The committed (post-layout) retained Parley layout for a text node —
-    /// the shaped, line-broken, aligned paragraph the renderer paints glyph
-    /// runs from. `None` for non-text nodes and for text the layout pass has
-    /// not committed (e.g. inside `display: none` or skipped subtrees).
+    /// The committed retained Parley layout for either a standalone text leaf
+    /// or a flow element that owns a mixed inline paragraph.
     #[must_use]
     pub(crate) fn text_layout(&self, id: crate::NodeId) -> Option<&TextLayout> {
         self.layout_state()

@@ -24,7 +24,7 @@
 //! - The whole painter works in the text item's local space (origin at the text box's top-left,
 //!   which is also the Parley layout origin); `transform` already includes the device scale.
 
-use parley::{GlyphRun, Layout, PositionedLayoutItem};
+use parley::{GlyphRun, PositionedLayoutItem};
 use smallvec::SmallVec;
 use stylo::computed_values::text_decoration_style::T as TextDecorationStyle;
 use stylo::properties::ComputedValues;
@@ -138,8 +138,6 @@ pub(crate) fn paint(
     decorations: &[Decorations],
     gradient_box: Option<Rect>,
 ) {
-    let layout = layout.parley_layout();
-
     // text-shadow passes go under everything else, last-specified first so
     // the first-specified shadow paints on top (css-text-decor-3 §4). Only
     // the offset and color paint; blur is not painted — recorded v1 limit.
@@ -296,7 +294,7 @@ fn text_stroke(style: &ComputedValues) -> Option<(f64, Color)> {
 pub(crate) fn paint_silhouette(scene: &mut Scene, layout: &TextLayout, transform: Affine) {
     paint_pass(
         scene,
-        layout.parley_layout(),
+        layout,
         transform,
         &TextFill::Solid(Color::BLACK),
         None,
@@ -306,13 +304,15 @@ pub(crate) fn paint_silhouette(scene: &mut Scene, layout: &TextLayout, transform
 
 fn paint_pass(
     scene: &mut Scene,
-    layout: &Layout<()>,
+    layout: &TextLayout,
     transform: Affine,
     fill: &TextFill,
     stroke: Option<(f64, Color)>,
     decorations: &[Decorations],
 ) {
-    for line in layout.lines() {
+    for (line_index, line) in layout.parley_layout().lines().enumerate() {
+        let line_transform =
+            transform * Affine::translate((0.0, f64::from(layout.line_block_offset(line_index))));
         for item in line.items() {
             let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
                 continue;
@@ -332,7 +332,7 @@ fn paint_pass(
                 );
                 paint_band(
                     scene,
-                    transform,
+                    line_transform,
                     deco.color,
                     deco.style,
                     DecorationKind::Underline,
@@ -340,13 +340,19 @@ fn paint_pass(
                 );
             }
 
-            draw_glyph_run(scene, &glyph_run, transform, Fill::NonZero.into(), fill);
+            draw_glyph_run(
+                scene,
+                &glyph_run,
+                line_transform,
+                Fill::NonZero.into(),
+                fill,
+            );
             if let Some((stroke_width, stroke_color)) = stroke {
                 let stroke_style = Stroke::new(stroke_width);
                 draw_glyph_run(
                     scene,
                     &glyph_run,
-                    transform,
+                    line_transform,
                     (&stroke_style).into(),
                     &TextFill::Solid(stroke_color),
                 );
@@ -362,7 +368,7 @@ fn paint_pass(
                 );
                 paint_band(
                     scene,
-                    transform,
+                    line_transform,
                     deco.color,
                     deco.style,
                     DecorationKind::LineThrough,

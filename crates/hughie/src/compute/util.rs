@@ -1083,7 +1083,9 @@ pub(super) fn is_scroll_container(overflow: Point<Overflow>) -> bool {
 }
 
 #[inline]
-pub(super) fn accumulate_scrollable_overflow(
+/// Extend a container's scrollable content size with one positioned child,
+/// stopping descendant overflow independently on each clipped axis.
+pub fn accumulate_scrollable_overflow(
     content_size: &mut Size<f32>,
     location: Point<f32>,
     child_size: Size<f32>,
