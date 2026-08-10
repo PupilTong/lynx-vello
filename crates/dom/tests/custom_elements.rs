@@ -137,7 +137,7 @@ fn define(doc: &mut Doc, probe: Probe) {
     doc.dom.define(tag, Box::new(probe));
 }
 
-// --- Definition and upgrade ------------------------------------------------
+// --- Definition and construction --------------------------------------------
 
 #[test]
 fn create_element_after_define_constructs_before_returning_the_id() {
@@ -305,9 +305,10 @@ fn every_element_matches_defined_including_undefined_hyphenated_tags() {
     }
 }
 
-/// Attributes set after creation still report normally — what disappeared with
-/// upgrade is only the *replay* of attributes an element carried beforehand,
-/// which a definition-before-creation contract makes an empty set.
+/// Attributes set after creation report normally. What disappeared with the
+/// upgrade half is only the *replay* of attributes an element carried
+/// beforehand, which the definition-before-creation contract makes an empty
+/// set.
 #[test]
 fn attributes_set_after_creation_report_normally() {
     let log = log();
@@ -433,7 +434,7 @@ fn an_attribute_written_inside_the_constructor_reports_nothing() {
 // --- Connect and disconnect ------------------------------------------------
 
 #[test]
-fn connected_fires_once_per_insertion_never_doubled_with_the_upgrade() {
+fn connected_fires_once_per_insertion_never_doubled_with_the_construction() {
     let log = log();
     let mut doc = Doc::new();
     let root = doc.root;
@@ -451,7 +452,7 @@ fn connected_fires_once_per_insertion_never_doubled_with_the_upgrade() {
 }
 
 #[test]
-fn inserting_into_a_disconnected_parent_upgrades_nothing_until_it_connects() {
+fn inserting_into_a_disconnected_parent_connects_nothing_until_it_connects() {
     let log = log();
     let mut doc = Doc::new();
     let root = doc.root;
@@ -619,7 +620,7 @@ fn a_constructor_that_attaches_a_shadow_root_and_a_stylesheet_renders() {
 }
 
 #[test]
-fn an_element_inside_a_shadow_tree_is_upgraded_and_connected() {
+fn an_element_inside_a_shadow_tree_is_constructed_and_connected() {
     let log = log();
     let mut doc = Doc::new();
     let root = doc.root;
@@ -640,7 +641,7 @@ fn an_element_inside_a_shadow_tree_is_upgraded_and_connected() {
 }
 
 #[test]
-fn an_unassigned_light_child_is_still_upgraded_and_still_connects() {
+fn an_unassigned_light_child_is_still_constructed_and_still_connects() {
     let log = log();
     let mut doc = Doc::new();
     let root = doc.root;
@@ -664,6 +665,29 @@ fn an_unassigned_light_child_is_still_upgraded_and_still_connects() {
         doc.dom.get(orphan).unwrap().computed_style().is_none(),
         "and is still out of the flat tree"
     );
+}
+
+/// `:defined` matching everything is an invariant, not a convention: the
+/// generic element-state API must not be able to clear the bit and make
+/// `:not(:defined)` start matching.
+#[test]
+#[should_panic(expected = "owned by the custom element state machine")]
+fn clearing_defined_through_the_element_state_api_panics() {
+    let mut doc = Doc::new();
+    let root = doc.root;
+    let element = doc.el(root, "view");
+    doc.dom
+        .remove_element_state(element, dom::ElementState::DEFINED);
+}
+
+#[test]
+#[should_panic(expected = "owned by the custom element state machine")]
+fn setting_defined_through_the_element_state_api_panics() {
+    let mut doc = Doc::new();
+    let root = doc.root;
+    let element = doc.el(root, "view");
+    doc.dom
+        .add_element_state(element, dom::ElementState::DEFINED);
 }
 
 /// Every lifecycle test above appends; this is the other insertion path.
@@ -876,6 +900,36 @@ fn a_constructor_that_frees_the_element_being_created_panics() {
 /// The same rule, in the shape that used to slip through every liveness
 /// check: free the element *and* create a replacement, so the id is occupied
 /// again by the time the guard looks at it.
+/// The pin guard must fire *before* the arena is touched, not after. A
+/// callback that catches the guard's panic must find the subtree exactly as it
+/// was — otherwise `create_element` hands back an id whose node is gone, which
+/// is the failure the guard exists to prevent.
+#[test]
+fn a_caught_pin_panic_leaves_the_subtree_intact() {
+    let log = log();
+    let mut doc = Doc::new();
+    let caught = Arc::new(Mutex::new(false));
+    let recorded = Arc::clone(&caught);
+    define(
+        &mut doc,
+        Probe::new("x-item", &log).on_constructed(Box::new(move |document, element| {
+            let hit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                document.remove_subtree(element);
+            }));
+            *recorded.lock().unwrap() = hit.is_err();
+        })),
+    );
+
+    let created = doc.dom.create_element("x-item", ());
+
+    assert!(*caught.lock().unwrap(), "the guard fired");
+    assert!(
+        doc.dom.get(created).is_some(),
+        "and fired before anything was freed, so the id still names its element"
+    );
+    assert_eq!(doc.dom.get(created).unwrap().tag_name(), Some("x-item"));
+}
+
 #[test]
 #[should_panic(expected = "freeing it is not")]
 fn a_constructor_that_frees_and_recycles_its_own_id_panics() {

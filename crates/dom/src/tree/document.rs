@@ -651,6 +651,8 @@ impl<T> Document<T> {
             !self.get(id).is_some_and(Node::is_shadow_root),
             "Document::remove_subtree cannot remove a shadow root on its own"
         );
+        // Before the unlink, so a refusal costs the caller nothing at all.
+        self.assert_subtree_not_pinned(id);
         let base = self.begin_reactions();
         self.detach_inner(id);
         // Drained here, while the subtree is unlinked but still allocated: it
@@ -666,6 +668,9 @@ impl<T> Document<T> {
             "Document::remove_subtree: a disconnected callback re-attached the subtree being \
              removed"
         );
+        // Again, because a callback in the drain above may have moved a
+        // pinned node into this subtree. Still before anything is freed.
+        self.assert_subtree_not_pinned(id);
         // Freed ids may be recycled by later creations: any retained
         // structure indexing nodes by id (a built `PaintOrder`) is stale
         // from here on.

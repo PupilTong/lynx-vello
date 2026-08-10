@@ -94,8 +94,8 @@ pub struct Node<T> {
     pub(crate) attrs: Vec<(LocalName, String)>,
     pub(crate) element_state: ElementState,
 
-    /// The definition this element was upgraded with, or is being upgraded
-    /// with. `NonZeroU32`-backed so the `Option` is four bytes and lands in the
+    /// The definition bound to this element at creation, when its tag had one.
+    /// `NonZeroU32`-backed so the `Option` is four bytes and lands in the
     /// primary node's existing tail padding.
     pub(crate) custom_definition: Option<DefinitionId>,
     /// This element's position in the custom element state machine. Non-element

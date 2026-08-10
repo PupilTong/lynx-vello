@@ -303,6 +303,15 @@ impl<T> Document<T> {
     }
 
     fn update_element_state(&mut self, id: NodeId, flags: stylo_dom::ElementState, enabled: bool) {
+        // `DEFINED` belongs to the custom element state machine, which seeds it
+        // at element creation and never moves it. Letting it through here would
+        // let a caller make `:not(:defined)` match — an invariant this crate
+        // documents and that nothing else can break.
+        assert!(
+            !flags.contains(stylo_dom::ElementState::DEFINED),
+            "Document::{{add,remove}}_element_state: `:defined` is owned by the custom element \
+             state machine and is not settable as element state"
+        );
         self.ensure_snapshot(id);
         self.mark_ancestors_dirty_descendants(id);
         self.live_node_mut(id).element_state.set(flags, enabled);

@@ -202,9 +202,13 @@ pub trait CustomElement<T>: Send + Sync {
     ///
     /// `old` is `None` for an addition, `new` is `None` for a removal, and both
     /// are the values captured when the reaction was enqueued. `class`, `id`,
-    /// and `style` are ordinary attributes here and fire like any other. An
-    /// upgrade replays every observed attribute the element already carries, in
-    /// the element's own attribute-list order, each with `old = None`.
+    /// and `style` are ordinary attributes here and fire like any other.
+    ///
+    /// Only reports for a `Custom` element, so nothing arrives for an
+    /// attribute written by [`Self::constructed`] on its own element, and
+    /// nothing is replayed for attributes an element carried before its
+    /// definition existed — the definition-before-creation contract means
+    /// there are none.
     fn attribute_changed_callback(
         &self,
         document: &mut Document<T>,
@@ -357,6 +361,35 @@ impl<T> Document<T> {
             Some(element),
             "pins are released in the reverse order they were taken"
         );
+    }
+
+    /// Refuses to free any node in `root`'s subtree that an in-flight
+    /// operation is still holding.
+    ///
+    /// A read-only pass, run **before** the arena is touched. Asserting inside
+    /// the destroy loop instead would fire only after `try_remove` had already
+    /// freed slots, so a callback that catches the panic would be left holding
+    /// a half-destroyed subtree and its caller an id whose node is gone —
+    /// which is the exact failure the pin exists to prevent.
+    ///
+    /// Gated on there being any pin at all, so an ordinary removal walks
+    /// nothing: pins exist only while a creation, a removal, or a constructor
+    /// is on the stack.
+    pub(crate) fn assert_subtree_not_pinned(&self, root: NodeId) {
+        if self.custom_elements.pinned.is_empty() {
+            return;
+        }
+        let mut stack = vec![root];
+        while let Some(current) = stack.pop() {
+            let Some(node) = self.get(current) else {
+                continue;
+            };
+            self.assert_not_pinned(current);
+            stack.extend_from_slice(node.child_ids());
+            if let Some(shadow_root) = node.shadow_root_id() {
+                stack.push(shadow_root);
+            }
+        }
     }
 
     fn assert_not_pinned(&self, element: NodeId) {
@@ -537,11 +570,10 @@ impl<T> Document<T> {
         while cursor < self.custom_elements.element_queue.len() {
             let element = self.custom_elements.element_queue[cursor];
             cursor += 1;
-            // A live drain, not iteration over a snapshot. This is the
-            // mechanism that makes upgrade work: the upgrade reaction runs
-            // first, and its own steps append the attribute replay and the
-            // connected reaction to this same element's queue, which this loop
-            // then consumes in the same pass.
+            // A live drain, not iteration over a snapshot: the standard says
+            // "repeat until reactions is empty", and a callback can append to
+            // the queue of the very element being drained. Iterating a
+            // snapshot would silently drop whatever it added.
             loop {
                 let Some(reaction) = self
                     .custom_elements
@@ -790,10 +822,16 @@ impl<T> Document<T> {
     }
 
     /// Drops every queued reaction for a node the arena is about to free, so a
-    /// recycled id cannot inherit them, and refuses to free one an in-flight
-    /// operation is still holding.
+    /// recycled id cannot inherit them.
+    ///
+    /// The pin check is deliberately **not** here: by the time the destroy
+    /// loop reaches this, the slot is already gone. It runs as a preflight
+    /// instead — see [`Self::assert_subtree_not_pinned`].
     pub(crate) fn forget_reactions(&mut self, element: NodeId) {
-        self.assert_not_pinned(element);
+        debug_assert!(
+            !self.custom_elements.pinned.contains(&element),
+            "the pin preflight let a pinned node reach the destroy loop"
+        );
         self.custom_elements.reactions.remove(&element);
     }
 
