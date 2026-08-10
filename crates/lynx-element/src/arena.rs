@@ -16,41 +16,6 @@ fn arena_index(id: ElementId) -> Option<usize> {
     (index != 0).then_some(index)
 }
 
-/// The creation-time fields an element is born with.
-///
-/// Grouped rather than passed positionally because every `__Create*` member
-/// supplies a different subset and a five-argument constructor invites the
-/// silent transposition this type prevents.
-pub(crate) struct ElementSeed {
-    pub(crate) node: NodeId,
-    pub(crate) parent_component: ElementId,
-    pub(crate) css_id: i32,
-    pub(crate) component_css_id: i32,
-    pub(crate) component_id: Option<String>,
-    pub(crate) entry_name: Option<String>,
-    /// The `raw-text` mirror text node — see [`crate::tree::ElementTree::create_raw_text`].
-    pub(crate) text_mirror: Option<NodeId>,
-}
-
-impl ElementSeed {
-    /// The seed of an ordinary element: no component identity of its own,
-    /// inheriting whatever CSS scope its parent component carries.
-    pub(crate) const fn plain(node: NodeId, parent_component: ElementId, css_id: i32) -> Self {
-        Self {
-            node,
-            parent_component,
-            css_id,
-            // Only a component-creating member seeds a scope for its
-            // descendants; an ordinary element hands `0` down whatever its
-            // own scope is.
-            component_css_id: INHERITED_CSS_ID_NONE,
-            component_id: None,
-            entry_name: None,
-            text_mirror: None,
-        }
-    }
-}
-
 /// One Lynx runtime element.
 ///
 /// The actual DOM node allocation remains owned by `Document<ElementId>`:
@@ -173,6 +138,12 @@ impl LynxElement {
         self.component_css_id = component_css_id;
     }
 
+    /// Binds the DOM text node a `raw-text` element mirrors its `text`
+    /// attribute into.
+    pub(crate) fn set_text_mirror(&mut self, mirror: NodeId) {
+        self.text_mirror = Some(mirror);
+    }
+
     /// Records `__SetCSSId`'s `entryName`. Which bundle entry a fragment id
     /// belongs to only matters once scoped stylesheets are mounted, so it is
     /// stored and otherwise unread.
@@ -269,7 +240,19 @@ impl ElementArena {
             .expect("a Lynx element arena exhausted its u32 unique ids")
     }
 
-    pub(crate) fn insert(&mut self, unique_id: ElementId, seed: ElementSeed) -> ElementId {
+    /// Appends the element `unique_id` was reserved for.
+    ///
+    /// Only the four fields every element is born with. Everything else a
+    /// `__Create*` member supplies — a component id, a `raw-text` mirror —
+    /// is written through a setter afterwards, the way `__CreatePage` already
+    /// binds the page's component fields.
+    pub(crate) fn insert(
+        &mut self,
+        unique_id: ElementId,
+        node: NodeId,
+        parent_component: ElementId,
+        css_id: i32,
+    ) -> ElementId {
         let arena_index = arena_index(unique_id).expect("a reserved element unique id is positive");
         assert_eq!(
             arena_index,
@@ -278,16 +261,19 @@ impl ElementArena {
         );
         self.entries.push(Some(LynxElement {
             id: unique_id,
-            node: seed.node,
-            parent_component: seed.parent_component,
-            css_id: seed.css_id,
-            component_css_id: seed.component_css_id,
-            component_id: seed.component_id,
-            entry_name: seed.entry_name,
+            node,
+            parent_component,
+            css_id,
+            // Only a component-creating member seeds a scope for its
+            // descendants; an ordinary element hands `0` down whatever its own
+            // scope is.
+            component_css_id: INHERITED_CSS_ID_NONE,
+            component_id: None,
+            entry_name: None,
             dataset: Vec::new(),
             inline_base: String::new(),
             inline_overrides: Vec::new(),
-            text_mirror: seed.text_mirror,
+            text_mirror: None,
         }));
         unique_id
     }

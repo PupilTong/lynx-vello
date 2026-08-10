@@ -4,7 +4,7 @@ use std::fmt;
 
 use dom::{self, Document, NodeId, StylesheetOrigin};
 
-use crate::arena::{ElementArena, ElementSeed, LynxElement};
+use crate::arena::{ElementArena, LynxElement};
 use crate::device::Viewport;
 use crate::ua::{PageConfig, ua_stylesheet};
 use crate::value::PapiValue;
@@ -129,10 +129,8 @@ impl ElementTree {
             config,
         };
         let page_node = tree.document.document_element().id();
-        tree.elements.insert(
-            PAGE_UNIQUE_ID,
-            ElementSeed::plain(page_node, NO_ELEMENT, INHERITED_CSS_ID_NONE),
-        );
+        tree.elements
+            .insert(PAGE_UNIQUE_ID, page_node, NO_ELEMENT, INHERITED_CSS_ID_NONE);
         tree
     }
 
@@ -365,13 +363,13 @@ impl ElementTree {
             .set_attribute(node, RAW_TEXT_TEXT_ATTRIBUTE, text);
         let mirror = self.document.create_text_node(text, NO_ELEMENT);
         self.document.append_child(node, mirror);
-        self.elements.insert(
-            unique_id,
-            ElementSeed {
-                text_mirror: Some(mirror),
-                ..ElementSeed::plain(node, NO_ELEMENT, INHERITED_CSS_ID_NONE)
-            },
-        )
+        self.elements
+            .insert(unique_id, node, NO_ELEMENT, INHERITED_CSS_ID_NONE);
+        self.elements
+            .get_mut(unique_id)
+            .expect("the element was just inserted")
+            .set_text_mirror(mirror);
+        unique_id
     }
 
     // ------------------------------------------------------------- structure
@@ -993,10 +991,8 @@ impl ElementTree {
         let css_id = self.elements.inherited_css_id(parent_component_unique_id);
         let unique_id = self.elements.reserve();
         let node = self.document.create_element(tag, unique_id);
-        self.elements.insert(
-            unique_id,
-            ElementSeed::plain(node, parent_component_unique_id, css_id),
-        )
+        self.elements
+            .insert(unique_id, node, parent_component_unique_id, css_id)
     }
 
     /// The shared validation and linking path behind `__AppendElement`,
