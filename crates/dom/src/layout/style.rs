@@ -9,7 +9,7 @@ use hughie::style::{
 };
 use stylo::properties::ComputedValues;
 use stylo::values::computed::motion::OffsetPath;
-use stylo::values::specified::box_::WillChangeBits;
+use stylo::values::specified::box_::{DisplayInside, DisplayOutside, WillChangeBits};
 
 use crate::tree::node::Node;
 
@@ -17,28 +17,63 @@ use crate::tree::node::Node;
 pub(crate) enum DisplayMode {
     None,
     Contents,
-    Flex,
-    Grid,
-    Linear,
-    Relative,
+    Flow { inline: bool },
+    Flex { inline: bool },
+    Grid { inline: bool },
+    Linear { inline: bool },
+    Relative { inline: bool },
     Leaf,
 }
 
+impl DisplayMode {
+    pub(crate) const fn is_none(self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    pub(crate) const fn is_contents(self) -> bool {
+        matches!(self, Self::Contents)
+    }
+
+    pub(crate) const fn is_leaf(self) -> bool {
+        matches!(self, Self::Leaf)
+    }
+
+    pub(crate) const fn is_inline(self) -> bool {
+        matches!(
+            self,
+            Self::Flow { inline: true }
+                | Self::Flex { inline: true }
+                | Self::Grid { inline: true }
+                | Self::Linear { inline: true }
+                | Self::Relative { inline: true }
+        )
+    }
+
+    pub(crate) const fn is_flow(self) -> bool {
+        matches!(self, Self::Flow { .. })
+    }
+
+    pub(crate) const fn is_item_container(self) -> bool {
+        matches!(self, Self::Flex { .. } | Self::Grid { .. })
+    }
+}
+
 pub(crate) fn display_mode(display: Display) -> DisplayMode {
-    match display {
-        Display::None => DisplayMode::None,
-        Display::Contents => DisplayMode::Contents,
-        Display::Flex => DisplayMode::Flex,
-        Display::Grid => DisplayMode::Grid,
-        Display::Linear => DisplayMode::Linear,
-        Display::LynxRelative => DisplayMode::Relative,
-        unsupported => panic!(
-            "Bobcat does not support Stylo computed display {unsupported:?} \
-             (raw={:#06x}, outside={:?}, inside={:?})",
-            unsupported.to_u16(),
-            unsupported.outside(),
-            unsupported.inside(),
-        ),
+    if display.is_contents() {
+        return DisplayMode::Contents;
+    }
+    if display.outside() == DisplayOutside::None {
+        return DisplayMode::None;
+    }
+    let inline = display.outside() == DisplayOutside::Inline;
+    match display.inside() {
+        DisplayInside::None => DisplayMode::None,
+        DisplayInside::Flex => DisplayMode::Flex { inline },
+        DisplayInside::Grid => DisplayMode::Grid { inline },
+        DisplayInside::LynxLinear => DisplayMode::Linear { inline },
+        DisplayInside::LynxRelative => DisplayMode::Relative { inline },
+        DisplayInside::Flow => DisplayMode::Flow { inline },
+        DisplayInside::Contents => DisplayMode::Contents,
     }
 }
 
@@ -176,7 +211,7 @@ impl<'dom, T> StyleView<'dom, T> {
         })
     }
 
-    pub(crate) fn values(&self) -> &ComputedValues {
+    pub(crate) const fn values(&self) -> &'dom ComputedValues {
         self.style
     }
 }
@@ -231,6 +266,8 @@ pub(crate) fn shaping_inputs_changed(old: &ComputedValues, new: &ComputedValues)
                 || old_text.text_wrap_mode != new_text.text_wrap_mode
                 || old_text.white_space_collapse != new_text.white_space_collapse))
 }
+
+impl<T> TextContainerStyle for StyleView<'_, T> {}
 
 /// The style of the box that establishes a text node's formatting context.
 ///
@@ -334,21 +371,45 @@ mod tests {
     fn supported_lynx_displays_map_to_layout_modes() {
         assert_eq!(display_mode(Display::None), DisplayMode::None);
         assert_eq!(display_mode(Display::Contents), DisplayMode::Contents);
-        assert_eq!(display_mode(Display::Flex), DisplayMode::Flex);
-        assert_eq!(display_mode(Display::Grid), DisplayMode::Grid);
-        assert_eq!(display_mode(Display::Linear), DisplayMode::Linear);
-        assert_eq!(display_mode(Display::LynxRelative), DisplayMode::Relative);
+        assert_eq!(
+            display_mode(Display::Flex),
+            DisplayMode::Flex { inline: false }
+        );
+        assert_eq!(
+            display_mode(Display::Grid),
+            DisplayMode::Grid { inline: false }
+        );
+        assert_eq!(
+            display_mode(Display::Linear),
+            DisplayMode::Linear { inline: false }
+        );
+        assert_eq!(
+            display_mode(Display::LynxRelative),
+            DisplayMode::Relative { inline: false }
+        );
+        assert_eq!(
+            display_mode(Display::InlineFlex),
+            DisplayMode::Flex { inline: true }
+        );
+        assert_eq!(
+            display_mode(Display::InlineGrid),
+            DisplayMode::Grid { inline: true }
+        );
+        assert_eq!(
+            display_mode(Display::InlineLinear),
+            DisplayMode::Linear { inline: true }
+        );
+        assert_eq!(
+            display_mode(Display::InlineRelative),
+            DisplayMode::Relative { inline: true }
+        );
     }
 
     #[test]
-    #[should_panic(expected = "Bobcat does not support Stylo computed display")]
-    fn unsupported_stylo_display_panics_instead_of_becoming_a_leaf() {
-        // Stylo's root `display: contents` fixup creates its private block-flow
-        // encoding, giving this test a real computed value that Lynx cannot lay out.
-        let unsupported = Display::Contents.equivalent_block_display(true);
-        assert_eq!(unsupported.inside(), DisplayInside::Flow);
-
-        let _ = display_mode(unsupported);
+    fn internal_block_flow_maps_to_the_paragraph_algorithm() {
+        let flow = Display::Contents.equivalent_block_display(true);
+        assert_eq!(flow.inside(), DisplayInside::Flow);
+        assert_eq!(display_mode(flow), DisplayMode::Flow { inline: false });
     }
 
     #[test]

@@ -6,16 +6,82 @@ use stylo::computed_values::white_space_collapse;
 
 use crate::style::{TextRun, TextRunStyle};
 
+/// One already-measured atomic box participating in an inline paragraph.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AtomicInlineBox {
+    /// Host-stable identifier returned with the positioned box.
+    pub id: u64,
+    /// Used inline-axis size of the box.
+    pub width: f32,
+    /// Used block-axis size of the box.
+    pub height: f32,
+    /// First-baseline offset from the top edge. A synthesized baseline uses
+    /// the bottom edge (`baseline == height`).
+    pub baseline: f32,
+}
+
+impl AtomicInlineBox {
+    #[must_use]
+    pub const fn new(id: u64, width: f32, height: f32) -> Self {
+        Self {
+            id,
+            width,
+            height,
+            baseline: height,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_baseline(mut self, baseline: f32) -> Self {
+        self.baseline = baseline;
+        self
+    }
+}
+
+/// One source-order item in an inline paragraph.
+#[derive(Debug)]
+pub enum InlineItem<'a, R: TextRunStyle> {
+    Text(TextRun<'a, R>),
+    Atomic(AtomicInlineBox),
+}
+
+impl<R: TextRunStyle> Clone for InlineItem<'_, R> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<R: TextRunStyle> Copy for InlineItem<'_, R> {}
+
+impl<'a, R: TextRunStyle> From<TextRun<'a, R>> for InlineItem<'a, R> {
+    fn from(run: TextRun<'a, R>) -> Self {
+        Self::Text(run)
+    }
+}
+
+impl<R: TextRunStyle> From<AtomicInlineBox> for InlineItem<'_, R> {
+    fn from(inline_box: AtomicInlineBox) -> Self {
+        Self::Atomic(inline_box)
+    }
+}
+
 /// Whitespace-normalized paragraph content and its non-overlapping run ranges.
 pub(super) struct ShapingContent<'a, R: TextRunStyle> {
     pub(super) text: String,
     pub(super) ranges: Vec<StyledRange<'a, R>>,
+    pub(super) boxes: Vec<ShapingInlineBox>,
 }
 
 /// One contiguous range in normalized UTF-8 text carrying a host run style.
 pub(super) struct StyledRange<'a, R: TextRunStyle> {
     pub(super) bytes: Range<usize>,
     pub(super) style: &'a R,
+}
+
+/// One atomic box and its insertion point in normalized UTF-8 text.
+pub(super) struct ShapingInlineBox {
+    pub(super) inline_box: AtomicInlineBox,
+    pub(super) index: usize,
 }
 
 pub(super) fn normalize_runs<'a, R, Runs>(
@@ -26,26 +92,46 @@ where
     R: TextRunStyle + 'a,
     Runs: Iterator<Item = TextRun<'a, R>> + Clone,
 {
+    normalize_items(runs.map(InlineItem::Text), collapse)
+}
+
+pub(super) fn normalize_items<'a, R, Items>(
+    items: Items,
+    collapse: white_space_collapse::T,
+) -> ShapingContent<'a, R>
+where
+    R: TextRunStyle + 'a,
+    Items: Iterator<Item = InlineItem<'a, R>> + Clone,
+{
     let preserves_spaces = matches!(
         collapse,
         white_space_collapse::T::Preserve | white_space_collapse::T::BreakSpaces
     );
-    let (text_capacity, range_capacity) = if preserves_spaces {
-        runs.clone().fold((0, 0), |(text_bytes, run_count), run| {
-            (text_bytes + run.text.len(), run_count + 1)
-        })
+    let (text_capacity, range_capacity, box_capacity) = if preserves_spaces {
+        items.clone().fold(
+            (0, 0, 0),
+            |(text_bytes, run_count, box_count), item| match item {
+                InlineItem::Text(run) => (text_bytes + run.text.len(), run_count + 1, box_count),
+                InlineItem::Atomic(_) => (text_bytes, run_count, box_count + 1),
+            },
+        )
     } else {
-        let (lower, upper) = runs.size_hint();
-        (0, upper.unwrap_or(lower))
+        let (lower, upper) = items.size_hint();
+        let item_capacity = upper.unwrap_or(lower);
+        (0, item_capacity, item_capacity)
     };
     let mut content = ShapingContent {
         text: String::with_capacity(text_capacity),
         ranges: Vec::with_capacity(range_capacity),
+        boxes: Vec::with_capacity(box_capacity),
     };
 
     if preserves_spaces {
-        for run in runs {
-            content.push_str(run.text, run.style);
+        for item in items {
+            match item {
+                InlineItem::Text(run) => content.push_str(run.text, run.style),
+                InlineItem::Atomic(inline_box) => content.push_inline_box(inline_box),
+            }
         }
         return content;
     }
@@ -54,32 +140,47 @@ where
     let mut pending_whitespace = None;
     let mut after_preserved_break = false;
 
-    for run in runs {
-        let preserve_newlines = run.preserve_newlines || force_preserved_breaks;
-        for character in run.text.chars() {
-            match character {
-                '\n' => queue_segment_break(
-                    &mut content,
-                    &mut pending_whitespace,
-                    &mut after_preserved_break,
-                    run.style,
-                    preserve_newlines,
-                ),
-                ' ' | '\t' | '\r' => {
-                    if !after_preserved_break && pending_whitespace.is_none() {
-                        pending_whitespace = Some(PendingWhitespace::Space(run.style));
+    for item in items {
+        match item {
+            InlineItem::Text(run) => {
+                let preserve_newlines = run.preserve_newlines || force_preserved_breaks;
+                for character in run.text.chars() {
+                    match character {
+                        '\n' => queue_segment_break(
+                            &mut content,
+                            &mut pending_whitespace,
+                            &mut after_preserved_break,
+                            run.style,
+                            preserve_newlines,
+                        ),
+                        ' ' | '\t' | '\r' => {
+                            if !after_preserved_break && pending_whitespace.is_none() {
+                                pending_whitespace = Some(PendingWhitespace::Space(run.style));
+                            }
+                        }
+                        _ => {
+                            flush_pending_whitespace(
+                                &mut content,
+                                &mut pending_whitespace,
+                                character,
+                            );
+                            content.push(character, run.style);
+                            after_preserved_break = false;
+                        }
                     }
                 }
-                _ => {
-                    flush_pending_whitespace(&mut content, &mut pending_whitespace, character);
-                    content.push(character, run.style);
-                    after_preserved_break = false;
+            }
+            InlineItem::Atomic(inline_box) => {
+                if let Some(whitespace) = pending_whitespace.take() {
+                    content.push(' ', whitespace.style());
                 }
+                content.push_inline_box(inline_box);
+                after_preserved_break = false;
             }
         }
     }
 
-    if !content.text.is_empty()
+    if !content.is_empty()
         && let Some(whitespace) = pending_whitespace
     {
         content.push(' ', whitespace.style());
@@ -130,7 +231,7 @@ fn flush_pending_whitespace<'a, R: TextRunStyle>(
         return;
     };
     let remove = matches!(whitespace, PendingWhitespace::SegmentBreak(_))
-        && should_remove_segment_break(content.text.chars().next_back(), next);
+        && should_remove_segment_break(content.previous_text_character(), next);
     if !remove {
         content.push(' ', whitespace.style());
     }
@@ -163,6 +264,22 @@ const fn is_east_asian_without_word_separators(character: char) -> bool {
 }
 
 impl<'a, R: TextRunStyle> ShapingContent<'a, R> {
+    fn is_empty(&self) -> bool {
+        self.text.is_empty() && self.boxes.is_empty()
+    }
+
+    fn previous_text_character(&self) -> Option<char> {
+        if self
+            .boxes
+            .last()
+            .is_some_and(|inline_box| inline_box.index == self.text.len())
+        {
+            None
+        } else {
+            self.text.chars().next_back()
+        }
+    }
+
     fn push(&mut self, character: char, style: &'a R) {
         let start = self.text.len();
         self.text.push(character);
@@ -173,6 +290,13 @@ impl<'a, R: TextRunStyle> ShapingContent<'a, R> {
         let start = self.text.len();
         self.text.push_str(text);
         self.record_append(start, style);
+    }
+
+    fn push_inline_box(&mut self, inline_box: AtomicInlineBox) {
+        self.boxes.push(ShapingInlineBox {
+            inline_box,
+            index: self.text.len(),
+        });
     }
 
     fn record_append(&mut self, start: usize, style: &'a R) {
@@ -400,6 +524,7 @@ mod tests {
         let mut content = ShapingContent::<'_, RunStyle> {
             text: String::new(),
             ranges: Vec::new(),
+            boxes: Vec::new(),
         };
         content.push('a', &style);
         content.push(' ', &style);
@@ -411,6 +536,7 @@ mod tests {
         let mut only_space = ShapingContent::<'_, RunStyle> {
             text: String::new(),
             ranges: Vec::new(),
+            boxes: Vec::new(),
         };
         only_space.push(' ', &style);
         only_space.remove_trailing_space();
@@ -438,5 +564,65 @@ mod tests {
         assert!(whitespace.ranges.is_empty());
         assert!(no_runs.text.is_empty());
         assert!(no_runs.ranges.is_empty());
+    }
+
+    #[test]
+    fn inline_boxes_keep_source_order_at_normalized_text_offsets() {
+        let style = RunStyle(1);
+        let items = [
+            InlineItem::Text(run(&style, "a  ", false)),
+            InlineItem::Atomic(AtomicInlineBox::new(11, 20.0, 10.0)),
+            InlineItem::Atomic(AtomicInlineBox::new(12, 30.0, 12.0)),
+            InlineItem::Text(run(&style, "  b", false)),
+        ];
+
+        let content = normalize_items(items.into_iter(), white_space_collapse::T::Collapse);
+
+        assert_eq!(content.text, "a  b");
+        assert_eq!(content.boxes.len(), 2);
+        assert_eq!(content.boxes[0].inline_box.id, 11);
+        assert_eq!(content.boxes[0].index, 2);
+        assert_eq!(content.boxes[1].inline_box.id, 12);
+        assert_eq!(content.boxes[1].index, 2);
+    }
+
+    #[test]
+    fn atomic_boundaries_stop_segment_break_character_elision() {
+        let style = RunStyle(1);
+        let items = [
+            InlineItem::Text(run(&style, "你", false)),
+            InlineItem::Atomic(AtomicInlineBox::new(1, 10.0, 10.0)),
+            InlineItem::Text(run(&style, "\n好", false)),
+        ];
+
+        let content = normalize_items(items.into_iter(), white_space_collapse::T::Collapse);
+
+        assert_eq!(content.text, "你 好");
+        assert_eq!(content.boxes[0].index, "你".len());
+    }
+
+    #[test]
+    fn pure_atomic_content_survives_normalization() {
+        let style = RunStyle(1);
+        let items = [InlineItem::<RunStyle>::Atomic(AtomicInlineBox::new(
+            7, 40.0, 16.0,
+        ))];
+
+        let content = normalize_items(items.into_iter(), white_space_collapse::T::Collapse);
+
+        assert!(content.text.is_empty());
+        assert!(content.ranges.is_empty());
+        assert_eq!(content.boxes.len(), 1);
+        assert_eq!(content.boxes[0].index, 0);
+
+        let mixed = normalize_items(
+            [
+                InlineItem::Atomic(AtomicInlineBox::new(7, 40.0, 16.0)),
+                InlineItem::Text(run(&style, " ", false)),
+            ]
+            .into_iter(),
+            white_space_collapse::T::Collapse,
+        );
+        assert_eq!(mixed.text, " ");
     }
 }

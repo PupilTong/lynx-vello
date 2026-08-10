@@ -524,6 +524,13 @@ fn color_gradient_box<T>(document: &Document<T>, item: &PaintItem, element: crat
     if padding_box.width() <= 0.0 || padding_box.height() <= 0.0 {
         return own_box;
     }
+    if item.node == element {
+        return padding_box
+            - crate::vello::kurbo::Vec2::new(
+                f64::from(element_layout.border.left + element_layout.padding.left),
+                f64::from(element_layout.border.top + element_layout.padding.top),
+            );
+    }
     padding_box
         - crate::vello::kurbo::Vec2::new(
             f64::from(run_layout.location.x),
@@ -555,6 +562,26 @@ fn collect_text_clip_under<'doc, T>(
     let Some(node_ref) = document.get(node) else {
         return;
     };
+    if node_ref.is_element()
+        && let (Some(layout), Some(text), Some(style)) = (
+            document.rounded_layout(node),
+            document.text_layout(node),
+            document.paint_style(node),
+        )
+        && matches!(
+            style.clone_visibility(),
+            stylo::computed_values::visibility::T::Visible
+        )
+    {
+        clip.runs.push((
+            offset
+                + Vec2::new(
+                    f64::from(layout.border.left + layout.padding.left),
+                    f64::from(layout.border.top + layout.padding.top),
+                ),
+            text,
+        ));
+    }
     for child in node_ref.flat_children_iter() {
         if child.is_text_node() {
             let visible = document.paint_style(node).is_none_or(|style| {

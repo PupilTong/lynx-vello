@@ -1,6 +1,6 @@
 //! The paint-order builder: CSS2 Appendix E over the laid-out tree,
-//! collapsed for an engine with no floats and no inline-level boxes other
-//! than text leaves.
+//! collapsed for an engine with no floats. Atomic inline boxes remain normal
+//! element items; their paragraph's Parley item is layout-only.
 //!
 //! Per stacking context `E` the emitted order is:
 //! 1. `E`'s own item;
@@ -82,7 +82,7 @@ pub(crate) fn build<T>(
     let visual_epoch = document.visual_epoch();
     let root = document.document_element();
     if let Some(style) = StyleView::try_of(root)
-        && display_mode(style.display()) != DisplayMode::None
+        && !display_mode(style.display()).is_none()
     {
         let location = builder.rounded(root.id()).location;
         builder.build_stacking_context(
@@ -195,6 +195,7 @@ struct Cursor<'ctx> {
     node: NodeId,
     offset: Point2D<f32>,
     is_item_container: bool,
+    active_paragraph: Option<NodeId>,
     ctx: &'ctx ClipContexts,
 }
 
@@ -374,7 +375,7 @@ impl<'doc, T> Builder<'doc, T> {
         }
 
         let mode = display_mode(style.display());
-        if mode == DisplayMode::Leaf || skips_contents(values) {
+        if mode.is_leaf() || skips_contents(values) {
             self.close_layer(layer);
             return;
         }
@@ -394,7 +395,8 @@ impl<'doc, T> Builder<'doc, T> {
             Cursor {
                 node: root,
                 offset: seed.current.scroll_delta(ctx.current).to_point(),
-                is_item_container: matches!(mode, DisplayMode::Flex | DisplayMode::Grid),
+                is_item_container: mode.is_item_container(),
+                active_paragraph: None,
                 ctx: &ctx,
             },
             StreamTarget::Context,
@@ -516,6 +518,18 @@ impl<'doc, T> Builder<'doc, T> {
         target: StreamTarget,
         collection: &mut Collection<'_>,
     ) {
+        let paragraph = cursor
+            .active_paragraph
+            .is_none()
+            .then(|| self.paragraph_record(cursor.node, cursor.offset, *cursor.ctx))
+            .flatten();
+        let active_paragraph = paragraph
+            .as_ref()
+            .map_or(cursor.active_paragraph, |_| Some(cursor.node));
+        if let Some(record) = paragraph {
+            self.push_stream(target, record);
+        }
+
         let base = self.rank_children(cursor.node);
         let end = self.scratch.ranked.len();
 
@@ -527,7 +541,15 @@ impl<'doc, T> Builder<'doc, T> {
         while position < end {
             let child_slot = self.scratch.ranked[position].slot;
             position += 1;
-            self.collect_child(child_slot, cursor, target, collection);
+            self.collect_child(
+                child_slot,
+                Cursor {
+                    active_paragraph,
+                    ..cursor
+                },
+                target,
+                collection,
+            );
         }
         self.scratch.ranked.truncate(base);
     }
@@ -592,7 +614,9 @@ impl<'doc, T> Builder<'doc, T> {
         let ctx = *cursor.ctx;
         let child_node = self.tree.at(child_slot);
         if child_node.is_text_node() {
-            if let Some(record) = self.text_record(child_node, cursor.offset, ctx) {
+            if cursor.active_paragraph.is_none()
+                && let Some(record) = self.text_record(child_node, cursor.offset, ctx)
+            {
                 self.push_stream(target, record);
             }
             return;
@@ -603,6 +627,15 @@ impl<'doc, T> Builder<'doc, T> {
         let Some(child) = self.resolve_child(child_node, cursor) else {
             return;
         };
+        // A Flow paragraph consumes its ordinary text/inline participants.
+        // Non-inline in-flow children are outside this milestone and were
+        // hidden by layout, so they must not reappear in paint or hit testing.
+        if cursor.active_paragraph.is_some()
+            && child.position == PositionProperty::Static
+            && !child.mode.is_inline()
+        {
+            return;
+        }
         // A real stacking context paints atomically and out of order, so it is
         // only recorded here; `emit_member` recurses into it once the whole
         // enclosing context has been collected and sorted.
@@ -619,7 +652,7 @@ impl<'doc, T> Builder<'doc, T> {
             });
             return;
         }
-        self.collect_in_context(&child, ctx, target, collection);
+        self.collect_in_context(&child, ctx, cursor.active_paragraph, target, collection);
     }
 
     /// Collects a child that paints inside the enclosing stacking context.
@@ -634,13 +667,22 @@ impl<'doc, T> Builder<'doc, T> {
         &mut self,
         child: &ChildBox<'doc, T>,
         ctx: ClipContexts,
+        active_paragraph: Option<NodeId>,
         target: StreamTarget,
         collection: &mut Collection<'_>,
     ) {
         let style = child.view.values();
         let (visible, hit_testable) = item_flags(style);
-        let descend = child.mode != DisplayMode::Leaf && !skips_contents(style);
-        let is_item_container = matches!(child.mode, DisplayMode::Flex | DisplayMode::Grid);
+        let descend = !child.mode.is_leaf() && !skips_contents(style);
+        let is_item_container = child.mode.is_item_container();
+        let descendant_paragraph = if child.position == PositionProperty::Static
+            && child.mode.is_inline()
+            && child.mode.is_flow()
+        {
+            active_paragraph
+        } else {
+            None
+        };
         // A pseudo-context takes its sequence number before descending, so it
         // sorts where it was *found*, not where it finished; a static box takes
         // none at all, because it is not a member.
@@ -676,6 +718,7 @@ impl<'doc, T> Builder<'doc, T> {
                     node: child.node,
                     offset: child.offset + outer.current.scroll_delta(inner.current),
                     is_item_container,
+                    active_paragraph: descendant_paragraph,
                     ctx: &inner,
                 },
                 target,
@@ -819,6 +862,48 @@ impl<'doc, T> Builder<'doc, T> {
             ),
             clip: ctx.current.clip,
             size: Size2D::new(layout.size.width, layout.size.height),
+            radii: CornerRadii::ZERO,
+            hit_testable,
+        })
+    }
+
+    /// A flow box's retained paragraph. Its Parley coordinates start at the
+    /// content box, while ordinary element layouts are border-box-relative.
+    fn paragraph_record(
+        &self,
+        node: NodeId,
+        node_offset: Point2D<f32>,
+        ctx: ClipContexts,
+    ) -> Option<ItemRecord> {
+        let node_ref = self.node(node);
+        let style = StyleView::try_of(node_ref)?;
+        if !display_mode(style.display()).is_flow() {
+            return None;
+        }
+        let text = self
+            .state
+            .at(self.tree.live_slot(node))
+            .text
+            .as_deref()?
+            .committed()?;
+        if !text.has_glyphs() {
+            return None;
+        }
+        let (visible, hit_testable) = item_flags(style.values());
+        if !visible {
+            return None;
+        }
+        let layout = self.rounded(node);
+        let size = text.size();
+        Some(ItemRecord {
+            node,
+            kind: PaintItemKind::TextRun { element: node },
+            offset: Point2D::new(
+                node_offset.x + layout.border.left + layout.padding.left,
+                node_offset.y + layout.border.top + layout.padding.top,
+            ),
+            clip: ctx.current.clip,
+            size: Size2D::new(size.width, size.height),
             radii: CornerRadii::ZERO,
             hit_testable,
         })

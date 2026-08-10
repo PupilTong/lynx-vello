@@ -2,12 +2,11 @@
 //! which constraint its line-break output currently reflects.
 //!
 //! Shaping is the expensive half of text layout and is invariant under
-//! line-breaking: of the ten vectors Parley's `LayoutData` owns, eight
-//! (styles, inline boxes, fonts, coords, runs, items, clusters, glyphs) are
-//! shaping output, and only `lines`/`line_items` are rebuilt by
-//! [`Layout::break_all_lines`]. A node therefore keeps **one** shaped layout
-//! and re-breaks it in place for whichever constraint is being asked about,
-//! rather than keeping a second, deep-cloned copy for transient probes.
+//! line-breaking: Parley's styles, fonts, runs, clusters, glyphs, and inline
+//! box insertion points survive [`Layout::break_all_lines`]. A node therefore
+//! keeps **one** shaped layout and re-breaks it in place for whichever
+//! constraint is being asked about. Atomic-box geometry is likewise updated in
+//! that retained layout without reshaping the glyph data.
 //!
 //! That makes the retained layout mutable during a pass, so it carries three
 //! pieces of bookkeeping:
@@ -19,17 +18,20 @@
 //!   that hits it neither re-enters Parley nor moves `broken`, which matters because containers
 //!   interleave constraints: a flex item is asked max-content, min-content, its used width, then
 //!   max-content again, and a break-state memo alone re-breaks on every alternation.
-//! - [`TextLayout::committed`] — the constraint *and alignment* the last committed measurement
-//!   left. Everything outside a layout pass (painting, hit testing) reads a committed layout, so a
-//!   probe that moves `broken` away from `committed` owes a [`TextLayout::restore_committed`]
-//!   before the pass ends.
+//! - [`TextLayout::committed`] — the constraint and alignment the last committed measurement left;
+//!   atomic paragraphs also retain its box metrics. Everything outside a layout pass (painting, hit
+//!   testing) reads a committed layout, so a probe that moves away from that state owes a
+//!   [`TextLayout::restore_committed`] before the pass ends.
 //!
 //! Measured over the canonical Lynx label (an auto-sized `text` element in a
 //! definite-width flex row), one pass costs nine line breaks plus one deep
 //! clone with neither memo, four with the break memo, and two with both.
 
-use parley::{Alignment, AlignmentOptions, IndentOptions, Layout};
+use std::collections::HashMap;
 
+use parley::{Alignment, AlignmentOptions, IndentOptions, Layout, PositionedLayoutItem};
+
+use super::AtomicInlineBox;
 use crate::compute::LeafMetrics;
 use crate::geometry::{Point, Size};
 use crate::style::TextBrush;
@@ -84,6 +86,10 @@ struct CommittedState {
 
 /// A shaped paragraph retained across line-breaking constraints and painting.
 #[derive(Debug, Clone)]
+#[allow(
+    clippy::box_collection,
+    reason = "pure-text layouts keep atom-only indexes and line adjustments out of their hot object"
+)]
 pub struct TextLayout {
     parley_layout: Layout<TextBrush>,
     /// The constraint `parley_layout`'s lines currently reflect, or `None`
@@ -100,7 +106,14 @@ pub struct TextLayout {
     /// worth its state if callers can see it working, and this is what the
     /// tests and benchmarks assert on.
     breaks: u32,
-    has_text: bool,
+    has_content: bool,
+    inline_boxes: Option<Box<[AtomicInlineBox]>>,
+    inline_box_lookup: Option<Box<HashMap<u64, AtomicInlineBox>>>,
+    line_adjustments: Option<Box<Vec<LineAdjustment>>>,
+    extra_height: f32,
+    /// The latest committed atom metrics, allocated only for paragraphs that
+    /// actually contain atomic inline boxes.
+    committed_inline_boxes: Option<Box<[AtomicInlineBox]>>,
     /// Debug-only identity of the content and style this layout was shaped
     /// from. Re-checked on every measurement so a missed eviction surfaces as
     /// a panic instead of silently stale text.
@@ -108,13 +121,47 @@ pub struct TextLayout {
     fingerprint: ShapeFingerprint,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct LineAdjustment {
+    block_offset: f32,
+    block_start: f32,
+}
+
 impl TextLayout {
+    #[cfg(test)]
     pub(super) fn shaped(
         parley_layout: Layout<TextBrush>,
-        has_text: bool,
+        has_content: bool,
+        #[cfg(debug_assertions)] fingerprint: ShapeFingerprint,
+    ) -> Self {
+        Self::shaped_with_inline_boxes(
+            parley_layout,
+            has_content,
+            Vec::new(),
+            #[cfg(debug_assertions)]
+            fingerprint,
+        )
+    }
+
+    pub(super) fn shaped_with_inline_boxes(
+        parley_layout: Layout<TextBrush>,
+        has_content: bool,
+        inline_boxes: Vec<AtomicInlineBox>,
         #[cfg(debug_assertions)] fingerprint: ShapeFingerprint,
     ) -> Self {
         let min_content_width = parley_layout.calculate_content_widths().min;
+        let inline_box_lookup = if inline_boxes.is_empty() {
+            None
+        } else {
+            let mut lookup = HashMap::with_capacity(inline_boxes.len());
+            for inline_box in &inline_boxes {
+                assert!(
+                    lookup.insert(inline_box.id, *inline_box).is_none(),
+                    "atomic inline-box identifiers must be unique",
+                );
+            }
+            Some(Box::new(lookup))
+        };
         Self {
             parley_layout,
             broken: None,
@@ -123,7 +170,12 @@ impl TextLayout {
             committed: None,
             min_content_width,
             breaks: 0,
-            has_text,
+            has_content,
+            inline_boxes: (!inline_boxes.is_empty()).then(|| inline_boxes.into_boxed_slice()),
+            inline_box_lookup,
+            line_adjustments: None,
+            extra_height: 0.0,
+            committed_inline_boxes: None,
             #[cfg(debug_assertions)]
             fingerprint,
         }
@@ -143,6 +195,7 @@ impl TextLayout {
         self.parley_layout.break_all_lines(constraint.max_advance());
         self.broken = Some(constraint);
         self.breaks = self.breaks.saturating_add(1);
+        self.resolve_atomic_line_metrics();
         true
     }
 
@@ -197,7 +250,7 @@ impl TextLayout {
 
     fn current_metrics(&self) -> TextMeasurement {
         TextMeasurement {
-            size: Size::new(self.parley_layout.width(), self.parley_layout.height()),
+            size: self.size(),
             first_baseline: self.first_baseline(),
             line_count: u32::try_from(self.line_count()).unwrap_or(u32::MAX),
         }
@@ -205,6 +258,66 @@ impl TextLayout {
 
     pub(super) const fn min_content_width(&self) -> f32 {
         self.min_content_width
+    }
+
+    pub(super) fn inline_box_ids_match(
+        &self,
+        inline_boxes: impl Iterator<Item = AtomicInlineBox>,
+    ) -> bool {
+        self.inline_boxes
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|inline_box| inline_box.id)
+            .eq(inline_boxes.map(|inline_box| inline_box.id))
+    }
+
+    /// Updates only the geometric part of Parley's inline boxes. Their source
+    /// order and insertion points are shaping output and must already match.
+    /// A probe may change these metrics without allocating a second shaped
+    /// layout; the previous committed metrics remain available for restore.
+    pub(super) fn sync_inline_boxes(&mut self, inline_boxes: &[AtomicInlineBox]) -> bool {
+        let current = self.inline_boxes.as_deref().unwrap_or_default();
+        assert!(
+            current
+                .iter()
+                .map(|inline_box| inline_box.id)
+                .eq(inline_boxes.iter().map(|inline_box| inline_box.id)),
+            "atomic inline-box identities must match the retained shape",
+        );
+        if current == inline_boxes {
+            return false;
+        }
+
+        for (parley_box, atomic) in self
+            .parley_layout
+            .inline_boxes_mut()
+            .iter_mut()
+            .zip(inline_boxes)
+        {
+            debug_assert_eq!(parley_box.id, atomic.id);
+            parley_box.width = atomic.width;
+            parley_box.height = atomic.height;
+        }
+        if let Some(lookup) = self.inline_box_lookup.as_deref_mut() {
+            for atomic in inline_boxes {
+                *lookup
+                    .get_mut(&atomic.id)
+                    .expect("the retained atom index contains every inline box") = *atomic;
+            }
+        }
+        if let Some(current) = self.inline_boxes.as_deref_mut() {
+            current.copy_from_slice(inline_boxes);
+        } else {
+            debug_assert!(inline_boxes.is_empty());
+        }
+        self.min_content_width = self.parley_layout.calculate_content_widths().min;
+        self.broken = None;
+        self.measured = [None; MEASURED_BREAKS as usize];
+        self.next_measured = 0;
+        self.line_adjustments = None;
+        self.extra_height = 0.0;
+        true
     }
 
     pub(super) fn align(&mut self, alignment: Alignment) {
@@ -222,14 +335,17 @@ impl TextLayout {
             constraint,
             alignment,
         });
+        self.committed_inline_boxes.clone_from(&self.inline_boxes);
     }
 
     /// Whether the retained layout has drifted off its committed resting state
     /// and owes a [`Self::restore_committed`].
     #[must_use]
     pub fn is_probe_dirty(&self) -> bool {
-        self.committed
-            .is_some_and(|committed| self.broken != Some(committed.constraint))
+        self.committed.is_some_and(|committed| {
+            self.broken != Some(committed.constraint)
+                || self.inline_boxes.as_deref() != self.committed_inline_boxes.as_deref()
+        })
     }
 
     /// Re-breaks and re-aligns to the committed resting state. A no-op when a
@@ -240,7 +356,11 @@ impl TextLayout {
         let Some(committed) = self.committed else {
             return false;
         };
-        if !self.break_to(committed.constraint) {
+        let committed_inline_boxes = self.committed_inline_boxes.take();
+        let restored_atoms = self.inline_boxes.as_deref() != committed_inline_boxes.as_deref()
+            && self.sync_inline_boxes(committed_inline_boxes.as_deref().unwrap_or_default());
+        self.committed_inline_boxes = committed_inline_boxes;
+        if !self.break_to(committed.constraint) && !restored_atoms {
             return false;
         }
         self.align(committed.alignment);
@@ -260,24 +380,89 @@ impl TextLayout {
 
     #[must_use]
     pub fn size(&self) -> Size<f32> {
-        Size::new(self.parley_layout.width(), self.parley_layout.height())
+        Size::new(
+            self.parley_layout.width(),
+            self.parley_layout.height() + self.extra_height,
+        )
     }
 
     #[must_use]
     pub fn first_baseline(&self) -> Option<f32> {
-        self.has_text
+        self.has_content
             .then(|| self.parley_layout.get(0))
             .flatten()
-            .map(|line| line.metrics().baseline)
+            .map(|line| line.metrics().baseline + self.line_block_offset(0))
     }
 
     #[must_use]
     pub fn line_count(&self) -> usize {
-        if self.has_text {
+        if self.has_content {
             self.parley_layout.len()
         } else {
             0
         }
+    }
+
+    /// Whether painting this layout can emit at least one glyph run.
+    #[must_use]
+    pub fn has_glyphs(&self) -> bool {
+        self.parley_layout.lines().any(|line| {
+            line.items()
+                .any(|item| matches!(item, PositionedLayoutItem::GlyphRun(_)))
+        })
+    }
+
+    /// Returns all positioned atomic boxes in source order within their lines.
+    ///
+    /// `origin.y + baseline` equals Parley's line baseline. Parley models an
+    /// inline box as ascent-only, so the retained per-line adjustments expand
+    /// the line when needed and shift subsequent lines consistently;
+    /// [`Self::size`] includes that expansion.
+    pub fn positioned_inline_boxes(&self) -> impl Iterator<Item = PositionedInlineBox> + '_ {
+        let lookup = self.inline_box_lookup.as_deref();
+        let adjustments = self.line_adjustments.as_deref();
+        self.parley_layout
+            .lines()
+            .enumerate()
+            .flat_map(move |(line_index, line)| {
+                let adjustment = adjustments.and_then(|values| values.get(line_index));
+                let block_offset = adjustment.map_or(0.0, |value| value.block_offset);
+                let line_top = adjustment
+                    .map_or_else(|| line.metrics().block_min_coord, |value| value.block_start);
+                line.items().filter_map(move |item| match item {
+                    PositionedLayoutItem::InlineBox(inline_box) => {
+                        let atomic = lookup?.get(&inline_box.id)?;
+                        Some(PositionedInlineBox {
+                            id: inline_box.id,
+                            origin: Point::new(
+                                inline_box.x,
+                                inline_box.y + inline_box.height - atomic.baseline + block_offset,
+                            ),
+                            size: Size::new(atomic.width, atomic.height),
+                            baseline: atomic.baseline,
+                            line_top,
+                        })
+                    }
+                    PositionedLayoutItem::GlyphRun(_) => None,
+                })
+            })
+    }
+
+    /// Extra block-axis translation applied to one Parley line so atomic
+    /// descents cannot overlap the following line.
+    #[must_use]
+    pub fn line_block_offset(&self, line_index: usize) -> f32 {
+        self.line_adjustments
+            .as_deref()
+            .and_then(|adjustments| adjustments.get(line_index))
+            .map_or(0.0, |adjustment| adjustment.block_offset)
+    }
+
+    /// Finds the positioned atomic box with the host-provided identifier.
+    #[must_use]
+    pub fn positioned_inline_box(&self, id: u64) -> Option<PositionedInlineBox> {
+        self.positioned_inline_boxes()
+            .find(|inline_box| inline_box.id == id)
     }
 
     /// The break width the retained lines reflect, or `None` for max-content
@@ -303,6 +488,71 @@ impl TextLayout {
              some eviction path failed to drop it, which would paint stale text"
         );
     }
+
+    fn resolve_atomic_line_metrics(&mut self) {
+        let Some(lookup) = self.inline_box_lookup.as_deref() else {
+            self.line_adjustments = None;
+            self.extra_height = 0.0;
+            return;
+        };
+        let mut adjustments = Vec::with_capacity(self.parley_layout.len());
+        let mut original_line_start = 0.0;
+        let mut adjusted_line_start = 0.0;
+        let mut needs_adjustments = false;
+        for line in self.parley_layout.lines() {
+            let metrics = line.metrics();
+            let mut ascent = 0.0_f32;
+            let mut descent = 0.0_f32;
+            let mut has_atomic = false;
+            for item in line.items() {
+                match item {
+                    PositionedLayoutItem::InlineBox(inline_box) => {
+                        if let Some(atomic) = lookup.get(&inline_box.id) {
+                            ascent = ascent.max(atomic.baseline);
+                            descent = descent.max((atomic.height - atomic.baseline).max(0.0));
+                            has_atomic = true;
+                        }
+                    }
+                    PositionedLayoutItem::GlyphRun(glyph_run) => {
+                        let run = glyph_run.run().metrics();
+                        ascent = ascent.max(run.ascent);
+                        descent = descent.max(run.descent);
+                    }
+                }
+            }
+            let (adjusted_line_height, adjusted_baseline) = if has_atomic {
+                let line_height = metrics.line_height.max(ascent + descent);
+                let leading_above = (line_height - ascent - descent).max(0.0) / 2.0;
+                (line_height, ascent + leading_above)
+            } else {
+                (metrics.line_height, metrics.baseline - original_line_start)
+            };
+            let block_offset = adjusted_line_start + adjusted_baseline - metrics.baseline;
+            needs_adjustments |= block_offset.abs() > 1.0e-5
+                || (adjusted_line_start - metrics.block_min_coord).abs() > 1.0e-5
+                || (adjusted_line_height - metrics.line_height).abs() > 1.0e-5;
+            adjustments.push(LineAdjustment {
+                block_offset,
+                block_start: adjusted_line_start,
+            });
+            original_line_start += metrics.line_height;
+            adjusted_line_start += adjusted_line_height;
+        }
+        self.extra_height = (adjusted_line_start - original_line_start).max(0.0);
+        self.line_adjustments = needs_adjustments.then(|| Box::new(adjustments));
+    }
+}
+
+/// Host-facing position of one laid-out atomic inline box.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PositionedInlineBox {
+    pub id: u64,
+    pub origin: Point<f32>,
+    pub size: Size<f32>,
+    /// Baseline offset from `origin.y` used for default inline alignment.
+    pub baseline: f32,
+    /// Block-start edge of the line containing this box.
+    pub line_top: f32,
 }
 
 /// One constraint's measurement, detached from the layout that produced it.
@@ -587,7 +837,7 @@ mod tests {
         // struct that already owns ten heap vectors.
         let overhead = size_of::<TextLayout>() - size_of::<Layout<TextBrush>>();
         assert!(
-            overhead <= 16 * size_of::<usize>(),
+            overhead <= 24 * size_of::<usize>(),
             "retained text adds {overhead} bytes of break state to Parley's layout"
         );
     }

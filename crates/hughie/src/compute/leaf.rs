@@ -28,7 +28,14 @@ pub fn compute_leaf_layout<Style: CoreStyle>(
 }
 
 #[allow(clippy::too_many_lines)]
-pub(crate) fn compute_leaf_layout_with_measurement<Style, Measure>(
+/// Computes a CSS leaf box around host-provided intrinsic content metrics.
+///
+/// The callback receives content-box constraints after the element's own
+/// sizing, padding, border, and margins have been resolved. It is invoked at
+/// most once. Full size containment suppresses it during measurement; on a
+/// required commit it runs against the final used content box so retained
+/// content can still be laid out without contributing to the principal size.
+pub fn compute_leaf_layout_with_measurement<Style, Measure>(
     input: LayoutInput,
     style: &Style,
     natural_aspect_ratio: Option<f32>,
@@ -151,7 +158,30 @@ where
         padding_border_size,
     );
 
-    let content_size = size.zip_map(measured_border_box, f32::max);
+    let mut content_size = size.zip_map(measured_border_box, f32::max);
+    if contained_intrinsic.is_some()
+        && requires_known_measurement
+        && input.goal == LayoutGoal::Commit
+    {
+        let used_content_size = Size::new(
+            (size.width - padding_border_size.width).max(0.0),
+            (size.height - padding_border_size.height).max(0.0),
+        );
+        let committed_content = measure(LeafMeasureInput::new(
+            used_content_size.map(Some),
+            used_content_size.map(AvailableSpace::Definite),
+            LayoutGoal::Commit,
+        ));
+        debug_assert!(
+            committed_content.size.width.is_finite() && committed_content.size.height.is_finite(),
+            "leaf measurements must be finite"
+        );
+        let committed_border_box = Size::new(
+            committed_content.size.width.max(0.0) + padding_border_size.width,
+            committed_content.size.height.max(0.0) + padding_border_size.height,
+        );
+        content_size = content_size.zip_map(committed_border_box, f32::max);
+    }
     let first_baselines = Point::new(
         measurement
             .first_baselines
@@ -601,8 +631,8 @@ fn finalize_size(
 #[allow(clippy::float_cmp)]
 mod tests {
     use stylo::values::computed::{
-        AspectRatio, Display, Length, LengthPercentage, MaxSize, NonNegativeLengthPercentage,
-        Size as StyleSize,
+        AspectRatio, Contain, ContainIntrinsicSize, Display, Length, LengthPercentage, MaxSize,
+        NonNegativeLengthPercentage, Size as StyleSize,
     };
     use stylo::values::generics::NonNegative;
     use stylo::values::generics::position::PreferredRatio;
@@ -941,6 +971,67 @@ mod tests {
         });
 
         assert_eq!(output.size, Size::new(40.0, 20.0));
+    }
+
+    struct SizeContainedStyle;
+
+    impl CoreStyle for SizeContainedStyle {
+        fn display(&self) -> Display {
+            Display::Flex
+        }
+
+        fn containment(&self) -> Contain {
+            Contain::SIZE
+        }
+
+        fn contain_intrinsic_width(&self) -> ContainIntrinsicSize {
+            ContainIntrinsicSize::Length(NonNegative(Length::new(30.0)))
+        }
+
+        fn contain_intrinsic_height(&self) -> ContainIntrinsicSize {
+            ContainIntrinsicSize::Length(NonNegative(Length::new(20.0)))
+        }
+    }
+
+    #[test]
+    fn size_containment_commits_required_content_at_the_final_used_size() {
+        let input = LayoutInput::commit(
+            Size::NONE,
+            Size::new(Some(200.0), Some(100.0)),
+            Size::new(
+                AvailableSpace::Definite(200.0),
+                AvailableSpace::Definite(100.0),
+            ),
+        );
+        let mut calls = 0;
+        let output = compute_leaf_layout_with_measurement(
+            input,
+            &SizeContainedStyle,
+            None,
+            true,
+            |measure_input| {
+                calls += 1;
+                assert_eq!(
+                    measure_input.known_dimensions,
+                    Size::new(Some(30.0), Some(20.0)),
+                );
+                assert_eq!(
+                    measure_input.available_space,
+                    Size::new(
+                        AvailableSpace::Definite(30.0),
+                        AvailableSpace::Definite(20.0),
+                    ),
+                );
+                assert_eq!(measure_input.goal, LayoutGoal::Commit);
+                LeafMetrics::new(Size::new(90.0, 70.0))
+                    .with_first_baselines(Point::new(None, Some(12.0)))
+            },
+        );
+
+        assert_eq!(calls, 1);
+        assert_eq!(output.size, Size::new(30.0, 20.0));
+        assert_eq!(output.content_size, Size::new(90.0, 70.0));
+        assert_eq!(output.first_baselines, Point::NONE);
     }
 
     #[test]
