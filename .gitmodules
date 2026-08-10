@@ -5,3 +5,11 @@
 [submodule "vendor/quickjs"]
 	path = vendor/quickjs
 	url = https://github.com/PupilTong/quickjs
+[submodule "vendor/vello"]
+	path = vendor/vello
+	url = https://github.com/PupilTong/vello
+	branch = lynx
+[submodule "vendor/wgpu"]
+	path = vendor/wgpu
+	url = https://github.com/PupilTong/wgpu
+	branch = lynx

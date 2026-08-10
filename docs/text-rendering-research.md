@@ -6,6 +6,10 @@ wgpu/Vello ecosystem offers, and what — if anything — we should adopt. Every
 claim about a crate here was read out of that crate's source at the version
 named, not out of its README.
 
+Dependency update, 2026-08-10: this workspace's vendored Vello integration now
+targets WGPU 30. Version-specific observations below remain useful, but the
+WGPU 29 compatibility notes for `vello_hybrid` 0.0.9 are historical.
+
 ## Short answer
 
 Painting glyphs *correctly* is done: `dom::paint::text` already drives
@@ -205,9 +209,11 @@ than one would expect.
 
 **What lines up:**
 
-- `vello_hybrid` 0.0.9 (2026-05-30) depends on **wgpu 29.0.3** — byte-identical
-  to `vello` 0.9's pin. One adapter, one device, one queue; the two renderers
-  can coexist during a migration instead of forcing a big-bang switch.
+- `vello_hybrid` 0.0.9 (2026-05-30) depends on **wgpu 29.0.3**. That matched
+  `vello` 0.9 when this note was written, but no longer matches this
+  workspace's WGPU 30 integration. A migration now needs a WGPU 30-compatible
+  `vello_hybrid` release or the same fork migration before both renderers can
+  share an adapter, device, and queue.
 - Its `Scene` covers essentially everything DOM's private painter uses today:
   `fill_path`, `stroke_path`, `push_clip_layer`, `push_blend_layer`,
   `push_opacity_layer`, `push_mask_layer`, `push_filter_layer`,
@@ -262,18 +268,14 @@ best-known standalone answer: cosmic-text for shaping, `etagere` for atlas
 allocation, `lru` for eviction, a wgpu render pass for the quads. Actively
 maintained, ~1.08 M downloads.
 
-**Rule it out, for two independent reasons:**
+**Rule it out because it introduces a second shaping stack:**
 
-1. **wgpu skew.** glyphon 0.12 requires `wgpu ^30.0.0`; vello 0.9 pins
-   `wgpu 29.0.3`. They cannot share a device, and the workspace policy
-   (`Cargo.toml`) is explicit that the workspace consumes wgpu/peniko/kurbo only
-   through vello's re-exports precisely so the graph can never hold two skewed
-   copies.
-2. **Second shaping stack.** glyphon is built on `cosmic-text`, not Parley. We
-   would be running two font-matching and shaping engines with two different
-   sets of metrics, against a layout engine (`hughie`) whose closed leaf model
-   is explicitly Parley. Text measured by one and painted by the other is a
-   conformance bug generator.
+`glyphon` is built on `cosmic-text`, not Parley. We would be running two
+font-matching and shaping engines with two different sets of metrics, against a
+layout engine (`hughie`) whose closed leaf model is explicitly Parley. Text
+measured by one and painted by the other is a conformance bug generator. Its
+WGPU 30 dependency now aligns with this workspace, so version skew is no longer
+an independent blocker.
 
 Worth knowing about; not worth adopting.
 
@@ -348,8 +350,8 @@ an explicit "no longer beta". Both are cheap to check per release.
 boundary to `vello_hybrid`, atlas enabled, with
 a deliberately small atlas page (1024×1024, 4 MiB) rather than the 64 MiB
 default. Re-baseline the screenshot goldens as part of that change, not
-silently. The wgpu pin matching today means this can be staged behind a feature
-flag with both renderers in the graph.
+silently. Stage it behind a feature flag only after `vello_hybrid` has a WGPU
+30-compatible line that can share this workspace's device and queue.
 
 **Never:** a second shaping stack (5.3), or a hand-rolled atlas (5.4).
 
@@ -360,12 +362,12 @@ Versions and dates as of 2026-07-28, from the crates.io API.
 | Crate | Version | Released | Maintained | Verdict |
 |---|---|---|---|---|
 | `vello` | 0.9.0 | 2026-05-15 | yes (linebender) | in use; no glyph atlas, none planned |
-| `vello_hybrid` | 0.0.9 | 2026-05-30 | yes | **the target**; beta, wgpu 29.0.3 ✓, atlas opt-in |
+| `vello_hybrid` | 0.0.9 | 2026-05-30 | yes | **the target**; beta, atlas opt-in; WGPU 29 line needs updating |
 | `vello_cpu` | 0.0.9 | 2026-05-30 | yes | CPU sibling; same glifo atlas, no GPU |
 | `glifo` | 0.1.1 | 2026-05-30 | yes | the atlas itself; consumed via the renderers |
 | `parley` | 0.11.0 | 2026-06-26 | yes | in use; shaping/layout, unaffected by any of this |
 | `swash` | 0.2.10 | 2026-07-17 | yes | only if hand-rolling (5.4) — don't |
-| `glyphon` | 0.12.0 | 2026-07-09 | yes | rejected: wgpu 30, cosmic-text |
+| `glyphon` | 0.12.0 | 2026-07-09 | yes | rejected: second `cosmic-text` shaping stack |
 | `cosmic-text` | 0.19.0 | 2026-04-22 | yes | rejected with glyphon |
 | `wgpu_glyph`, `glyph_brush` | — | — | stale | superseded; do not consider |
 
