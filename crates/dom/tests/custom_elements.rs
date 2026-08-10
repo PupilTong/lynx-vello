@@ -1,10 +1,12 @@
-//! Custom elements end to end: definition, upgrade, the lifecycle callbacks,
-//! `:defined`, and what happens when a callback mutates the tree it is being
-//! called about.
+//! Custom elements end to end: the definition-before-creation contract, the
+//! lifecycle callbacks, `:defined`, and what happens when a callback mutates
+//! the tree it is being called about.
 //!
 //! The behavior asserted here is the W3C one (HTML §4.13 custom elements plus
-//! the DOM algorithms that raise its reactions), not any one engine's
-//! approximation of it.
+//! the DOM algorithms that raise its reactions) within this crate's narrowed
+//! scope — user-agent components rather than script-defined elements, so the
+//! standard's upgrade half is absent by contract. See `tree::custom`'s module
+//! doc for what that removes.
 
 mod common;
 
@@ -382,22 +384,6 @@ fn class_id_and_style_fire_like_any_other_attribute() {
 }
 
 #[test]
-fn a_class_no_op_enqueues_nothing() {
-    let log = log();
-    let mut doc = Doc::new();
-    let root = doc.root;
-    define(&mut doc, Probe::new("x-item", &log).observing(&["class"]));
-    let element = doc.el(root, "x-item");
-    doc.add_class(element, "one");
-    let _ = take(&log);
-
-    doc.add_class(element, "one");
-    doc.remove_class(element, "absent");
-
-    assert!(take(&log).is_empty());
-}
-
-#[test]
 fn removing_an_attribute_reports_none_as_the_new_value() {
     let log = log();
     let mut doc = Doc::new();
@@ -680,7 +666,91 @@ fn an_unassigned_light_child_is_still_upgraded_and_still_connects() {
     );
 }
 
-// --- `:defined` ------------------------------------------------------------
+/// Every lifecycle test above appends; this is the other insertion path.
+#[test]
+fn insert_before_a_reference_node_delivers_the_same_reactions() {
+    let log = log();
+    let mut doc = Doc::new();
+    let root = doc.root;
+    define(&mut doc, Probe::new("x-item", &log));
+    let anchor = doc.el(root, "x-item");
+    let _ = take(&log);
+
+    let inserted = doc.dom.create_element("x-item", ());
+    assert_eq!(
+        take(&log),
+        vec![format!("x-item:constructed#{inserted}")],
+        "creation constructs but does not connect"
+    );
+
+    doc.dom.insert_before(root, inserted, Some(anchor));
+
+    assert_eq!(take(&log), vec![format!("x-item:connected#{inserted}")]);
+    assert_eq!(
+        doc.dom.get(root).unwrap().child_ids(),
+        &[inserted, anchor],
+        "and it landed in front of the reference node"
+    );
+}
+
+/// A detached element is still `Custom`, so its observed attributes still
+/// report — connectedness gates `connected`/`disconnected`, not attributes.
+#[test]
+fn an_attribute_change_on_a_detached_element_still_reports() {
+    let log = log();
+    let mut doc = Doc::new();
+    define(&mut doc, Probe::new("x-item", &log).observing(&["value"]));
+    let detached = doc.dom.create_element("x-item", ());
+    let _ = take(&log);
+
+    doc.dom.set_attribute(detached, "value", "7");
+
+    assert_eq!(
+        take(&log),
+        vec![format!("x-item:attr#{detached} value: <none> -> 7")]
+    );
+}
+
+/// Writing the value an attribute already has still reports, with
+/// `old == new`. The standard's *set an existing attribute value* runs its
+/// change steps unconditionally; only *remove* is gated on the attribute
+/// being there.
+#[test]
+fn setting_an_attribute_to_its_current_value_still_reports() {
+    let log = log();
+    let mut doc = Doc::new();
+    let root = doc.root;
+    define(&mut doc, Probe::new("x-item", &log).observing(&["value"]));
+    let element = doc.el(root, "x-item");
+    doc.set_attr(element, "value", "7");
+    let _ = take(&log);
+
+    doc.set_attr(element, "value", "7");
+
+    assert_eq!(
+        take(&log),
+        vec![format!("x-item:attr#{element} value: 7 -> 7")]
+    );
+}
+
+/// The counterpart divergence: `add_class` of a token that is already present
+/// early-returns, where `DOMTokenList`'s update steps would re-set the
+/// attribute and fire with `old == new`.
+#[test]
+fn a_no_op_class_mutation_reports_nothing_unlike_dom_token_list() {
+    let log = log();
+    let mut doc = Doc::new();
+    let root = doc.root;
+    define(&mut doc, Probe::new("x-item", &log).observing(&["class"]));
+    let element = doc.el(root, "x-item");
+    doc.dom.add_class(element, "one");
+    let _ = take(&log);
+
+    doc.dom.add_class(element, "one");
+    doc.dom.remove_class(element, "absent");
+
+    assert!(take(&log).is_empty());
+}
 
 // --- Adversarial and re-entrancy -------------------------------------------
 

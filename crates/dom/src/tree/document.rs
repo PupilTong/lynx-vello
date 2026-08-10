@@ -559,7 +559,10 @@ impl<T> Document<T> {
         self.invalidate_layout(child);
         // Last, so no lifecycle callback can observe half-updated slot
         // assignment or a stale dirty spine.
-        let connected = self.is_connected(child);
+        // Gated here rather than inside the hook: `is_connected` walks to the
+        // document node, and a document with no definitions must not pay that
+        // per insertion.
+        let connected = self.has_custom_element_definitions() && self.is_connected(child);
         self.note_custom_elements_inserted(child, connected);
         self.drain_reactions(base);
     }
@@ -600,7 +603,9 @@ impl<T> Document<T> {
         };
         // The old parent's connectedness, sampled while the link is intact:
         // the removed node's own is already false by the time a reaction runs.
-        let was_connected = self.is_connected(parent);
+        // Same gate as the insertion side, and it has to stay *here* — one
+        // statement later the child is unlinked and the answer is gone.
+        let was_connected = self.has_custom_element_definitions() && self.is_connected(parent);
 
         // Invalidate while the old link is still intact so the walk covers
         // the old parent's dirty spine and observes its containment boundary.

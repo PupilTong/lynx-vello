@@ -61,9 +61,9 @@ harness = false
 name = "paint"
 harness = false
 
-# Paired plain-vs-undefined-vs-defined measurements of the custom-element
+# Three-way plain/unmatched/defined measurements of the custom-element
 # lifecycle: what a document that never defines anything pays, what the
-# shadow-including walk costs, and what upgrading costs.
+# shadow-including walk costs, and what constructing and dispatching cost.
 [[bench]]
 name = "custom_elements"
 harness = false

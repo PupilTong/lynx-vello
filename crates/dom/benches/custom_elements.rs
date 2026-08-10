@@ -9,7 +9,7 @@
 //!   uses.
 //! * `_unmatched` — a definition exists, but for another tag. The gate is open and the
 //!   shadow-including walk runs, and nothing matches. This isolates the walk from the callbacks.
-//! * `_defined` — the tag is defined, so elements upgrade and their callbacks run.
+//! * `_defined` — the tag is defined, so elements are constructed and their callbacks run.
 
 use std::cell::RefCell;
 
@@ -113,7 +113,7 @@ fn page(registry: Registry) -> Document<()> {
 }
 
 /// Creation only, never inserted — the hottest path a runtime takes, and the
-/// one that pays for the custom-element-name predicate.
+/// one that pays for the definition lookup and, when it hits, the constructor.
 fn create_elements(registry: Registry) -> Document<()> {
     let mut doc = page(registry);
     for _ in 0..ELEMENTS {

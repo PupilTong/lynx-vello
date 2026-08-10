@@ -70,6 +70,11 @@
 //!   still answered rather than ignored, so a stylesheet using it gets the right answer for this
 //!   scope; `:not(:defined)` simply never matches, which is what makes the FOUC idiom a
 //!   script-defined-elements feature.
+//! - **A no-op `add_class`/`remove_class` reports nothing.** `DOMTokenList`'s update steps re-set
+//!   the attribute even when the token set is unchanged, so a browser fires
+//!   `attributeChangedCallback` with `old == new` for `classList.add` of a token that is already
+//!   there. Both methods early-return here before any reaction is raised, which is the divergence —
+//!   deliberate, and asserted by a test.
 //! - **A callback may detach any node, but may not free one its caller is still holding.**
 //!   [`Document::create_element`], [`Document::remove_subtree`], and the constructor call all pin
 //!   the id they will still be naming once the drain returns, and freeing a pinned node panics. Not
@@ -142,18 +147,23 @@ pub trait CustomElement<T>: Send + Sync {
         Vec::new()
     }
 
-    /// The upgrade reaction — the standard's custom element constructor.
+    /// The standard's custom element constructor.
     ///
-    /// Runs once per element, and runs **before** the replayed
-    /// [`Self::attribute_changed_callback`]s for the attributes the element
-    /// already carried and before [`Self::connected_callback`], because the
-    /// upgrade algorithm enqueues those behind the upgrade reaction rather than
-    /// calling them.
+    /// Runs once per element, from [`Document::create_element`], before that
+    /// call returns its id — so an element is fully built by the time its
+    /// creator can do anything with it. There is no replay of attributes the
+    /// element already carried, because the definition-before-creation
+    /// contract means a brand-new element carries none.
     ///
-    /// The element's state is `precustomized` for the duration, which is not
-    /// `custom`: every mutation performed here fails the "is custom" gate that
-    /// attribute changes test, so a constructor that normalizes its own
-    /// attributes is not reported back to itself.
+    /// The element's state is `Constructing` for the duration, which is not
+    /// `Custom`, and two things follow. Attribute writes performed here raise
+    /// nothing, so a constructor that normalizes its own attributes is not
+    /// reported back to itself. And an element this constructor inserts into
+    /// the connected tree receives **no** [`Self::connected_callback`]:
+    /// insertion enqueues only for a `Custom` element, and nothing re-checks
+    /// at the transition. The standard forbids a constructor from gaining
+    /// children or a parent anyway, so a definition that respects it never
+    /// meets this.
     ///
     /// This is where a component attaches its shadow root. Check
     /// [`Document::shadow_root`] first — `attach_shadow` is crash-on-misuse
@@ -398,7 +408,7 @@ impl Drop for ReactionDepthToken {
 
 impl<T> Document<T> {
     /// Registers `element` as the behavior of every element whose tag is
-    /// `local_name`, then upgrades the ones already in the tree.
+    /// `local_name`, from this point on.
     ///
     /// One handler per name, so a definition is per-tag rather than per
     /// instance; the callbacks identify their element by [`NodeId`]. The name
@@ -789,6 +799,16 @@ impl<T> Document<T> {
 
     pub(crate) fn custom_elements_are_draining(&self) -> bool {
         self.custom_elements.is_draining()
+    }
+
+    /// Whether any definition exists. The gate a caller takes **before**
+    /// computing an argument for a lifecycle hook, not just before calling it:
+    /// `is_connected` walks to the document node, so a definition-free document
+    /// would otherwise pay a depth-proportional walk per structural mutation
+    /// for an answer nothing reads.
+    #[must_use]
+    pub(crate) fn has_custom_element_definitions(&self) -> bool {
+        !self.custom_elements.is_empty()
     }
 
     /// Shadow-including preorder, depth-first: a host, then its whole shadow
