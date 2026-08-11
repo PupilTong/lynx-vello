@@ -56,7 +56,10 @@ JavaScript adapter:
   `dyn` call: `Window::Target<'window>` is a GAT, so the engine's surface
   borrows the embedder's window rather than demanding a `'static`
   refcounted handle. `engine::OffscreenEngine` is the windowless
-  composition, over the uninhabited `NoWindow`.
+  composition, over the uninhabited `NoWindow`. The QuickJS realm is retained
+  for the whole `Engine` lifetime: synchronous mode stores it in the engine,
+  while the spawned owner thread remains alive after boot until engine
+  shutdown.
 - `resource` and `view` provide resource acquisition and generic engine/view
   composition. The crate root does not re-export `ElementTree`, `dom`,
   or a renderer specialization. `bobcat-cli` is one embedder of `engine`,
@@ -123,13 +126,21 @@ touch it: they hold an `Engine` and relay OS facts into it.
    `Document<ElementId>`, and installs the Lynx UA stylesheet. The DOM payload
    is the same permanent `u32` id stored in the element arena; private DOM
    `NodeId` slots may still be reused.
-2. With QuickJS enabled, `quickjs::MainThreadRuntime` owns only the realm.
+2. With QuickJS enabled, `quickjs::MainThreadRuntime` owns the realm for the
+   view lifetime. `__Create*` returns a private-class JS object carrying the
+   internal `ElementId`. QuickJS reachability is element-handle ownership:
+   the class finalizer only queues the id, and a safe batch boundary performs
+   the actual single-element retirement without a separate native lease
+   count. The target is detached first; each direct child remains live as the
+   root of its own detached subtree and is retired only when its own wrapper
+   is dropped or collected. `__RemoveElement` only detaches the requested
+   child and returns that same live wrapper.
    A batch's first Element PAPI mutation takes the tree out of its hand-off
    slot; every call after that is a plain `&mut` mutation with no
    synchronization — the tree validates, so a bad handle throws at the call
    site — without the script ever seeing `NodeId`.
-3. `__FlushElementTree` is the commit boundary: the style + layout commit
-   runs on the taken tree, the tree goes back in its slot, and the
+3. `__FlushElementTree` first drains queued wrapper finalizers, then is the
+   commit boundary: the style + layout commit runs on the taken tree, the tree goes back in its slot, and the
    presenting side is asked for a frame. The document-owned Painter decides
    whether its retained scene is current.
 4. For a dirty frame, `render` flushes/layouts, creates its
@@ -177,9 +188,14 @@ construction (the tree is simply absent), and `has_uncommitted_mutations`
 guards the one edge where an abandoned batch comes back uncommitted at
 the end of an evaluation. The law: the main thread waits only on its own
 batch boundaries; the presenting side never waits on the main thread; the
-embedder loop never blocks. The offscreen composition keeps the wall-free form: one
-thread, `Engine::run_script`, identical semantics — the golden screenshot
-suite drives it end to end.
+embedder loop never blocks. Boot completion does not destroy the realm: the
+spawned main thread waits for engine shutdown, while the offscreen
+`Engine::run_script` stores its owner-thread realm directly. The spawned thread
+runs one tracing collection before entering its long-lived idle state, so an
+unreachable wrapper cycle does not wait until realm teardown; synchronous boot
+does not force a collection. A GC-only retirement auto-commits only when the
+returned tree was clean; it joins but never exposes an earlier abandoned
+batch. The golden screenshot suite drives the latter end to end.
 
 ## Static dispatch and intentional dynamic boundaries
 

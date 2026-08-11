@@ -15,14 +15,16 @@
 //! # Element PAPI scope
 //!
 //! web-core's main-thread global object carries 61 `__`-prefixed Element PAPI
-//! members. This crate implements the five that make a tree exist, mutate, retire, and
-//! become visible:
+//! members. This crate implements six globals that make a tree exist, mutate,
+//! retire, and become visible (five web-core members plus the engine's explicit
+//! lifetime primitive):
 //!
 //! | PAPI | Method |
 //! | --- | --- |
 //! | `__CreatePage(componentID, componentCSSID)` | [`ElementTree::create_page`] |
 //! | `__CreateView(parentComponentUniqueID)` | [`ElementTree::create_view`] |
 //! | `__AppendElement(parent, child)` | [`ElementTree::append_element`] |
+//! | `__RemoveElement(parent, child)` | [`ElementTree::remove_element`] |
 //! | `__DropElement(element)` | [`ElementTree::drop_element`] |
 //! | `__FlushElementTree()` | [`ElementTree::flush_element_tree`] |
 //!
@@ -34,16 +36,22 @@
 //!
 //! # Recorded limits
 //!
-//! - **The runtime identity and JavaScript handle are the same unique id.** [`ElementTree`] speaks
-//!   [`ElementId`] internally, matching the native engine's identity (`__GetElementUniqueID`), and
-//!   `bobcat-core`'s optional `QuickJS` runtime carries it directly over its primitives-only
-//!   boundary.
+//! - **Runtime identity is a unique id; JavaScript owns an opaque wrapper.** [`ElementTree`] speaks
+//!   [`ElementId`] internally, matching the native engine's identity (`__GetElementUniqueID`).
+//!   `bobcat-core`'s optional `QuickJS` adapter wraps each newly created id in a private-class JS
+//!   object whose finalizer retires that element; this engine-neutral crate sees only the id.
+//! - **Remove detaches; Drop retires.** [`ElementTree::remove_element`] preserves the child and its
+//!   whole subtree so the same wrapper can be appended again. [`ElementTree::drop_element`]
+//!   permanently retires the named element and DOM node; its direct light-DOM children each become
+//!   detached live subtrees, preserving their descendants and unique ids. This layer does not
+//!   expose shadow-root creation, so every element it can retire satisfies the DOM core's
+//!   single-node-drop precondition.
 //! - **Unique ids and arena slots are never recycled.** The context owns a
 //!   `Vec<Option<LynxElement>>` whose slot zero is the permanent null sentinel. [`ElementId`] is
-//!   simply `u32`, and every positive id is also its direct arena index. `__DropElement` retires a
-//!   subtree through [`ElementTree::drop_element`], which takes each value and leaves a permanent
-//!   `None` tombstone. `Document<ElementId>` stores that same unique id. `dom` may reuse its
-//!   private `NodeId` slots, but no stale script identity can ever name a later element.
+//!   simply `u32`, and every positive id is also its direct arena index. `__DropElement` retires
+//!   its target through [`ElementTree::drop_element`], which takes that value and leaves a
+//!   permanent `None` tombstone. `Document<ElementId>` stores that same unique id. `dom` may reuse
+//!   its private `NodeId` slots, but no stale script identity can ever name a later element.
 //! - **There is no runtime tree-depth cap in this layer.** `ElementTree` keeps no depth-specific
 //!   state or traversal helpers; hardening recursive walks belongs in `dom` and `hughie`.
 //! - **`parentComponentUniqueID` is recorded, not honored.** web-core uses it only to inherit the

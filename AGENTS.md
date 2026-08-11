@@ -188,10 +188,25 @@ useful signal for currently-compatible versions of those libraries.
   `MainThreadRuntime`
   installs the Element PAPI before evaluation, evaluates a `.web.bundle`'s
   `lepusCode.root` inside web-core's wrapper, then runs `processData` →
-  `renderPage` → `__FlushElementTree`. Five of web-core's 61 PAPI members are
-  installed (`__CreatePage`, `__CreateView`, `__AppendElement`,
-  `__DropElement`, `__FlushElementTree`); unsupported globals remain precise
-  `ReferenceError`s. Handles cross the primitives-only boundary as `u32` ids.
+  `renderPage` → `__FlushElementTree`. Five of web-core's 61 PAPI members plus
+  the engine's explicit lifetime primitive are installed (`__CreatePage`,
+  `__CreateView`, `__AppendElement`, `__RemoveElement`, `__DropElement`,
+  `__FlushElementTree`); unsupported globals remain precise `ReferenceError`s.
+  Each `__Create*` returns a private-class Rust-backed JS object carrying the
+  internal `u32` id. QuickJS reachability owns that handle: its finalizer only
+  queues the id, and the next safe flush/evaluation boundary detaches and
+  retires that element alone. Direct children become detached subtree roots
+  and remain live under their own wrappers; no parallel element lease count
+  exists. `__RemoveElement` only detaches its child and returns the same live
+  wrapper. The page alone has a one-slot wrapper cache because
+  `__CreatePage` is idempotent. `Engine` retains the realm for its whole
+  lifetime; a spawned main thread remains alive after boot until engine
+  shutdown, while `run_script` stores its owner-thread realm inline. The
+  spawned thread runs one tracing collection before entering its long-lived
+  idle state so unreachable wrapper cycles do not wait until view teardown.
+  Synchronous boot does not force a collection. A GC-only retirement commits
+  itself only when the returned tree was clean; it never makes an earlier
+  abandoned, unflushed batch visible.
   Core composes but does not own Lynx tag/root/UA policy; that vocabulary and
   `type ElementId = u32` remain defined by `lynx-element`.
   The resource module must not decode images/fonts/templates, upload render
@@ -207,9 +222,12 @@ useful signal for currently-compatible versions of those libraries.
   `define_global_function` back a JS callable with a Rust `FnMut`, dispatched
   through one C trampoline (`JS_NewCFunctionData` + a realm-owned callback
   table reached via the context opaque). Host callbacks speak `HostValue`, a
-  primitives-only boundary (undefined/null/bool/number/string) — objects,
-  arrays, functions, symbols, and ill-formed UTF-16 strings are rejected on
-  the way in rather than lossily converted — which also means a callback
+  narrow boundary (undefined/null/bool/number/string plus one bridge-owned
+  private-class `HostObject` carrying `u32`) — ordinary objects, arrays,
+  proxies, functions, symbols, and ill-formed UTF-16 strings are rejected on
+  the way in rather than lossily converted. `HostObject` finalizers append
+  payloads to a cloneable Rust-only release queue; they invoke no user code
+  and never re-enter QuickJS. This also means a callback
   cannot call back into its own realm, so host functions are strictly
   leaf calls today. A slot is vacated for the duration of its call (a guard
   that restores it on the unwinding path too), so a panicking callback becomes
@@ -304,10 +322,12 @@ useful signal for currently-compatible versions of those libraries.
   `u32` unique id, which is also the direct arena index; each `LynxElement`
   owns that id, its stable DOM `NodeId` association, component creation
   fields. The arena permanently reserves slot 0 as web-core's
-  "no element" sentinel, so live unique ids start at 1. `__DropElement` removes
-  the selected DOM subtree and takes the corresponding arena entries, leaving
-  permanent `None` tombstones; unique ids are never recycled, although `dom`
-  may reuse its private `NodeId` slots;
+  "no element" sentinel, so live unique ids start at 1. `__RemoveElement`
+  removes only the validated parent-child edge. `__DropElement` detaches and
+  retires only the selected element, leaving each direct child as a live
+  detached subtree; only the selected arena entry becomes a permanent `None`
+  tombstone. Unique ids are never recycled, although `dom` may reuse its
+  private `NodeId` slots;
   every fallible PAPI entry returns `PapiError` instead of panicking, because
   the main-thread script is untrusted input and the DOM core is
   crash-on-misuse. The owned document and `NodeId` never appear in this
@@ -334,8 +354,9 @@ useful signal for currently-compatible versions of those libraries.
   `ElementTree::new` with the fixed unique id 1 (ids are opaque handles to
   script, so `__CreatePage` just binds the component fields and returns it),
   and `__DropElement` on the page is a `PapiError` (recorded limit). Recorded
-  limits (see the crate docs, which are authoritative): handles are ids rather
-  than element objects; `parentComponentUniqueID` is recorded but not honored
+  limits (see the crate docs, which are authoritative): the layer itself
+  speaks internal ids while the optional QuickJS adapter supplies GC-owned
+  element objects; `parentComponentUniqueID` is recorded but not honored
   (there is no `__SetCSSId`); no `rpx`/`ppx` view-unit policy; the UA sheet
   covers only the three documented Lynx computed defaults. It must not absorb
   DOM/CSS core behavior, and nothing below it may depend on it.

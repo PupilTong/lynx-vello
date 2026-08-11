@@ -1,4 +1,15 @@
 //! A small, safe Rust boundary around the repository's pinned `QuickJS` source.
+//!
+//! Host functions exchange JavaScript primitives and one deliberately narrow
+//! object type: [`HostValue::Object`]. Such an object is created only by this
+//! bridge, carries an opaque `u32` payload, and is recognized by its private
+//! `QuickJS` class rather than by properties that JavaScript could forge. Plain
+//! objects, arrays, functions, symbols, and proxies remain rejected.
+//!
+//! `QuickJS` owns each wrapper's reachability. Its class finalizer does not call
+//! application code or re-enter `QuickJS`: it only appends the payload to a
+//! cloneable [`HostObjectReleaseQueue`]. A host function such as a tree flush
+//! can drain that queue while JavaScript is still on the stack.
 
 mod ffi;
 
@@ -404,8 +415,9 @@ mod implementation {
                         )
                     })
             }
+            ffi::HOST_ARG_OBJECT => Ok(HostValue::Object(HostObject::new(argument.payload))),
             _ => Err(HostFunctionError::new(
-                "host functions accept undefined, null, Boolean, Number, and String arguments only",
+                "host functions accept primitives and bridge-owned host objects only",
             )),
         }
     }
@@ -422,6 +434,17 @@ mod implementation {
         let table = unsafe { &*opaque.cast::<HostTable>() };
         let _ = catch_unwind(AssertUnwindSafe(|| {
             table.note_released(handler.cast::<HostSlot>());
+        }));
+    }
+
+    /// Fired by the garbage collector for a bridge-owned host object.
+    ///
+    /// The only observable action is appending the payload to the realm's
+    /// release queue. No application callback runs here.
+    unsafe extern "C" fn host_object_release(opaque: *mut c_void, payload: u32) {
+        let table = unsafe { &*opaque.cast::<HostTable>() };
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            table.host_object_releases.push(payload);
         }));
     }
 
@@ -483,7 +506,98 @@ mod implementation {
         }
     }
 
-    #[derive(Clone, Debug, PartialEq)]
+    /// A Rust-backed object crossing the host-function boundary.
+    ///
+    /// [`HostObject::new`] is used only as a host-function return value. The
+    /// bridge creates a private-class `QuickJS` object around it; JavaScript
+    /// cannot forge an accepted object by copying properties. When that exact
+    /// wrapper is later passed to a host function, its [`HostObject`] appears
+    /// in [`HostValue::Object`].
+    ///
+    /// This type deliberately does not implement `Clone`. A handler receives
+    /// arguments through a borrowed slice, so the wrapper value cannot escape
+    /// the synchronous call or be returned as a second wrapper. Copy
+    /// [`HostObject::payload`] if the host needs durable identity.
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct HostObject {
+        payload: u32,
+    }
+
+    impl HostObject {
+        #[must_use]
+        pub const fn new(payload: u32) -> Self {
+            Self { payload }
+        }
+
+        #[must_use]
+        pub const fn payload(&self) -> u32 {
+            self.payload
+        }
+    }
+
+    /// Payloads with no remaining bridge-owned JS wrapper.
+    ///
+    /// A payload arrives either when a completed wrapper becomes unreachable
+    /// or when allocating that wrapper fails after the host has produced it.
+    ///
+    /// Clones share one owner-thread-bound queue. [`drain`](Self::drain) only
+    /// takes a Rust `Vec<u32>`; it neither enters `QuickJS` nor invokes a user
+    /// callback, so a leaf host function may safely call it while JavaScript is
+    /// on the stack (notably immediately before committing a tree flush).
+    #[derive(Clone)]
+    pub struct HostObjectReleaseQueue {
+        inner: Rc<RefCell<Vec<u32>>>,
+    }
+
+    impl HostObjectReleaseQueue {
+        fn new() -> Self {
+            Self {
+                inner: Rc::new(RefCell::new(Vec::new())),
+            }
+        }
+
+        fn push(&self, payload: u32) {
+            self.inner.borrow_mut().push(payload);
+        }
+
+        #[must_use]
+        pub fn drain(&self) -> Vec<u32> {
+            mem::take(&mut *self.inner.borrow_mut())
+        }
+
+        #[must_use]
+        pub fn is_empty(&self) -> bool {
+            self.inner.borrow().is_empty()
+        }
+
+        #[must_use]
+        pub fn len(&self) -> usize {
+            self.inner.borrow().len()
+        }
+    }
+
+    impl fmt::Debug for HostObjectReleaseQueue {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter
+                .debug_struct("HostObjectReleaseQueue")
+                .field("pending", &self.len())
+                .finish_non_exhaustive()
+        }
+    }
+
+    /// A value crossing the host-function boundary.
+    ///
+    /// Arguments reach a handler without any per-argument allocation: the shim
+    /// flattens `argv` into a stack array of tags and values, and the reader
+    /// below collects them into a `SmallVec`. Only a string argument allocates,
+    /// and only to own its decoded text.
+    ///
+    /// Host functions speak primitives plus [`HostObject`]. Ordinary objects,
+    /// arrays, functions, symbols, and proxies are rejected rather than handed
+    /// to the callback. Strings arrive already
+    /// validated as well-formed UTF-16, so a lone surrogate is a rejected
+    /// argument, not a lossy conversion.
+    #[derive(Debug, PartialEq)]
     #[non_exhaustive]
     pub enum HostValue {
         Undefined,
@@ -491,6 +605,7 @@ mod implementation {
         Boolean(bool),
         Number(f64),
         String(String),
+        Object(HostObject),
     }
 
     /// Error returned by a Rust host function.
@@ -538,6 +653,11 @@ mod implementation {
         context: Cell<*mut ffi::JSContext>,
         pending_release: RefCell<Vec<*mut HostSlot>>,
         return_text: RefCell<Vec<u16>>,
+        /// Receives payloads from the private-class finalizer or a failed
+        /// wrapper construction. It is separate from closure reclamation so a
+        /// host function can drain it during the same JavaScript evaluation
+        /// that left a payload without an owner.
+        host_object_releases: HostObjectReleaseQueue,
     }
 
     impl HostTable {
@@ -546,6 +666,7 @@ mod implementation {
                 context: Cell::new(ptr::null_mut()),
                 pending_release: RefCell::new(Vec::new()),
                 return_text: RefCell::new(Vec::new()),
+                host_object_releases: HostObjectReleaseQueue::new(),
             }
         }
 
@@ -553,6 +674,7 @@ mod implementation {
             out.text = ptr::null();
             out.text_len = 0;
             out.number = 0.0;
+            out.payload = 0;
             match value {
                 HostValue::Undefined => out.kind = ffi::HOST_ARG_UNDEFINED,
                 HostValue::Null => out.kind = ffi::HOST_ARG_NULL,
@@ -571,6 +693,10 @@ mod implementation {
                     out.kind = ffi::HOST_ARG_STRING;
                     out.text = scratch.as_ptr();
                     out.text_len = scratch.len();
+                }
+                HostValue::Object(object) => {
+                    out.kind = ffi::HOST_ARG_OBJECT;
+                    out.payload = object.payload();
                 }
             }
         }
@@ -691,6 +817,7 @@ mod implementation {
                     runtime.as_ptr(),
                     Some(host_dispatch),
                     Some(host_release),
+                    Some(host_object_release),
                     (&raw const *hosts).cast_mut().cast(),
                 );
                 Ok(Self {
@@ -709,6 +836,18 @@ mod implementation {
             InterruptHandle {
                 shared: Arc::clone(&self.inner.interrupt.shared),
             }
+        }
+
+        /// A cloneable view of this realm's host-object release queue.
+        ///
+        /// A host function may capture the clone and drain it without calling
+        /// back into the realm. This is stronger than waiting for `evaluate`
+        /// to return: an object finalized (or whose wrapper allocation failed)
+        /// earlier in one evaluation can be retired before a later host call
+        /// in that same evaluation commits externally visible state.
+        #[must_use]
+        pub fn host_object_release_queue(&self) -> HostObjectReleaseQueue {
+            self.inner.hosts.host_object_releases.clone()
         }
 
         fn reclaim(&mut self) {
@@ -1998,6 +2137,7 @@ mod implementation {
                         HostValue::Boolean(value) => format!("boolean:{value}"),
                         HostValue::Number(value) => format!("number:{value}"),
                         HostValue::String(value) => format!("string:{value}"),
+                        HostValue::Object(_) => "host-object".to_owned(),
                     }))
                 })
                 .unwrap();
@@ -2038,10 +2178,7 @@ mod implementation {
             let error = realm
                 .evaluate(EvalSource::new("take({})"), EvalOptions::default())
                 .expect_err("an object argument");
-            assert!(
-                error.message.contains("undefined, null, Boolean"),
-                "{error:?}"
-            );
+            assert!(error.message.contains("bridge-owned"), "{error:?}");
         }
 
         #[test]
@@ -2177,6 +2314,7 @@ mod implementation {
 }
 
 pub use implementation::{
-    Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, HostFunctionError, HostValue,
-    InterruptHandle, JobDrain, Realm, RealmOptions, SourceLocation, SourceType, Value, ValueKind,
+    Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, HostFunctionError, HostObject,
+    HostObjectReleaseQueue, HostValue, InterruptHandle, JobDrain, Realm, RealmOptions,
+    SourceLocation, SourceType, Value, ValueKind,
 };

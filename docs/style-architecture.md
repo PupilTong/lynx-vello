@@ -149,11 +149,14 @@ What that covers, and what it does not:
 - Lynx element identity (a monotone `u32` unique id used directly as its
   permanent arena index), `Document<ElementId>` payloads that point back to
   `LynxElement`, and untrusted-handle validation on every PAPI entry point;
-- direct `u32` JavaScript handles and explicit `__DropElement` retirement of
-  DOM subtrees into permanent `None` arena tombstones;
-- five Element PAPI members — `__CreatePage`, `__CreateView`,
-  `__AppendElement`, `__DropElement`, `__FlushElementTree` — and web-core's
-  boot sequence.
+- private-class JavaScript element objects carrying the internal `u32` id;
+  explicit `__DropElement` or collection of the JS owner detaches and retires
+  that element alone into a permanent `None` arena tombstone, while its direct
+  children remain live detached subtrees; there is no parallel lease count;
+- six Element PAPI globals — `__CreatePage`, `__CreateView`,
+  `__AppendElement`, `__RemoveElement`, `__DropElement`,
+  `__FlushElementTree` — and web-core's boot sequence. `__RemoveElement`
+  only detaches and returns the same live child wrapper.
 
 **Still open**
 

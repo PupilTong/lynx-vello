@@ -46,12 +46,17 @@
 //!
 //! # Recorded limits
 //!
-//! - **Five Element PAPI members are installed** — `__CreatePage`, `__CreateView`,
-//!   `__AppendElement`, `__DropElement`, `__FlushElementTree` (see `lynx-element`'s crate docs). A
-//!   bundle that reaches for anything else gets a `ReferenceError` naming the missing global, which
-//!   is the intended failure: a silently wrong render would be worse.
-//! - **Element handles cross as `u32` unique-id numbers.** `__DropElement` asks the recorder to
-//!   retire the handle; this layer does not add an object wrapper or GC policy around those ids.
+//! - **Six Element PAPI members are installed** — `__CreatePage`, `__CreateView`,
+//!   `__AppendElement`, `__RemoveElement`, `__DropElement`, `__FlushElementTree` (see
+//!   `lynx-element`'s crate docs). A bundle that reaches for anything else gets a `ReferenceError`
+//!   naming the missing global, which is the intended failure: a silently wrong render would be
+//!   worse.
+//! - **Element handles are opaque Rust-backed JavaScript objects.** Each object carries one
+//!   `ElementId`; its `QuickJS` class finalizer queues that id, and the next safe batch boundary
+//!   retires only that element. Its direct children become detached roots and remain live while
+//!   their own wrappers are reachable. JavaScript reachability is the ownership model — there is no
+//!   parallel native lease count. The permanent page wrapper is the sole cached handle because
+//!   `__CreatePage` is idempotent and must return the same object.
 //! - **The non-element main-thread globals are absent** (`lynx`, `SystemInfo`, `__globalProps`,
 //!   `_ReportError`, `__OnLifecycleEvent`, `__LoadLepusChunk`, `_I18nResourceTranslation`,
 //!   `_AddEventListener`, `__QueryComponent`).
@@ -71,6 +76,9 @@ use crate::script::ScriptError;
 
 const MAIN_THREAD_SOURCE_NAME: &str = "main-thread.js";
 const BOOT_SOURCE_NAME: &str = "<lynx boot>";
+/// Source name for the tiny JavaScript facade that preserves PAPI return-value
+/// identity without exposing the bridge's private native helper names.
+const ELEMENT_OBJECT_API_SOURCE_NAME: &str = "<element object API>";
 
 const WRAPPER_PREFIX: &str = "//# allFunctionsCalledOnLoad\n(function(){ \"use strict\"; \
                               const navigator=void 0,postMessage=void 0,window=void 0; ";
@@ -87,6 +95,36 @@ const BOOT_SEQUENCE: &str = r#"(function () {
   }
   renderPage(data);
   __FlushElementTree();
+})()"#;
+
+/// `__CreatePage` is the one idempotent creator, so one closure slot preserves
+/// its object identity without a general `ElementId -> wrapper` map.
+/// `__AppendElement` and `__RemoveElement` return their exact child argument,
+/// matching `appendChild`/`removeChild`, rather than manufacturing a second
+/// wrapper for the same native element.
+const ELEMENT_OBJECT_API: &str = r#"(function () {
+  "use strict";
+  const createPage = globalThis.__BobcatCreatePage;
+  const appendElement = globalThis.__BobcatAppendElement;
+  const removeElement = globalThis.__BobcatRemoveElement;
+  let page;
+  globalThis.__CreatePage = function __CreatePage(componentID, componentCSSID) {
+    if (page === undefined) {
+      page = createPage(componentID, componentCSSID);
+    }
+    return page;
+  };
+  globalThis.__AppendElement = function __AppendElement(parent, child) {
+    appendElement(parent, child);
+    return child;
+  };
+  globalThis.__RemoveElement = function __RemoveElement(parent, child) {
+    removeElement(parent, child);
+    return child;
+  };
+  delete globalThis.__BobcatCreatePage;
+  delete globalThis.__BobcatAppendElement;
+  delete globalThis.__BobcatRemoveElement;
 })()"#;
 
 /// Why running a main-thread script failed.
@@ -131,30 +169,95 @@ use crate::engine::SharedTree;
 struct TreeHandle {
     slot: SharedTree,
     taken: Option<ElementTree>,
+    /// Whether the tree returned to `slot` carries an abandoned, uncommitted
+    /// batch from an earlier evaluation. A later GC-only mutation must not
+    /// accidentally turn that half-applied batch into a visible commit.
+    returned_tree_uncommitted: bool,
+    /// Payloads queued by the `QuickJS` class finalizer. The finalizer itself
+    /// performs no tree work and invokes no application callback.
+    releases: quickjs::HostObjectReleaseQueue,
 }
 
 impl TreeHandle {
     fn tree(&mut self) -> &mut ElementTree {
         if self.taken.is_none() {
-            self.taken = Some(self.slot.take());
+            let tree = self.slot.take();
+            debug_assert_eq!(
+                tree.has_uncommitted_mutations(),
+                self.returned_tree_uncommitted,
+                "the hand-off metadata must match the returned tree"
+            );
+            self.taken = Some(tree);
         }
         self.taken
             .as_mut()
             .expect("the batch tree was just ensured")
     }
 
+    fn drain_released_elements(&mut self) -> bool {
+        let mut changed = false;
+        for id in self.releases.drain() {
+            // The document element is permanent and its one wrapper is rooted
+            // by the idempotent `__CreatePage` facade until realm teardown.
+            if id == 1 {
+                continue;
+            }
+            match self.tree().drop_element(id) {
+                Ok(()) => changed = true,
+                Err(PapiError::UnknownElement(_)) => {}
+                Err(error) => {
+                    debug_assert!(false, "unexpected GC element release error: {error}");
+                }
+            }
+        }
+        changed
+    }
+
     fn flush(&mut self) {
+        self.drain_released_elements();
         let mut tree = match self.taken.take() {
             Some(tree) => tree,
             None => self.slot.take(),
         };
         tree.flush_element_tree();
+        self.returned_tree_uncommitted = false;
         self.slot.put(tree);
     }
 
     fn release(&mut self) {
         if let Some(tree) = self.taken.take() {
+            self.returned_tree_uncommitted = tree.has_uncommitted_mutations();
             self.slot.put(tree);
+        }
+    }
+
+    /// Finishes one evaluation and reports whether a GC-only batch was
+    /// committed. Releases queued after the script's final explicit flush need
+    /// their own commit; releases joining an already-open, abandoned batch do
+    /// not make that half-applied batch observable.
+    fn finish_evaluation(&mut self) -> bool {
+        let batch_was_open = self.taken.is_some();
+        let earlier_batch_was_abandoned = !batch_was_open && self.returned_tree_uncommitted;
+        let changed = self.drain_released_elements();
+        if changed && !batch_was_open && !earlier_batch_was_abandoned {
+            self.flush();
+            true
+        } else {
+            self.release();
+            false
+        }
+    }
+}
+
+impl Drop for TreeHandle {
+    fn drop(&mut self) {
+        // `Realm` teardown finalizes every remaining wrapper before the host
+        // closures release their last `Rc<TreeHandle>`. Drain those final ids
+        // and always return a taken tree to its hand-off slot.
+        if self.drain_released_elements() {
+            self.flush();
+        } else {
+            self.release();
         }
     }
 }
@@ -163,6 +266,7 @@ impl TreeHandle {
 pub struct MainThreadRuntime {
     engine: QuickJsScriptEngine,
     tree: Rc<RefCell<TreeHandle>>,
+    on_flush: Rc<dyn Fn()>,
 }
 
 impl fmt::Debug for MainThreadRuntime {
@@ -181,9 +285,14 @@ impl MainThreadRuntime {
         on_flush: impl Fn() + 'static,
     ) -> Result<Self, QuickJsInitializationError> {
         let mut engine = QuickJsScriptEngine::new()?;
-        let tree = install_element_papi(&mut engine.realm, elements, on_flush)
+        let on_flush: Rc<dyn Fn()> = Rc::new(on_flush);
+        let tree = install_element_papi(&mut engine.realm, elements, Rc::clone(&on_flush))
             .map_err(QuickJsInitializationError::from_quickjs)?;
-        Ok(Self { engine, tree })
+        Ok(Self {
+            engine,
+            tree,
+            on_flush,
+        })
     }
 
     /// Evaluates a `.web.bundle`'s `lepusCode.root` in web-core's wrapper.
@@ -209,6 +318,17 @@ impl MainThreadRuntime {
         self.render_page()
     }
 
+    /// Runs a full `QuickJS` collection and commits any element releases it
+    /// discovers. This is primarily an embedder memory-pressure seam; ordinary
+    /// acyclic wrappers are finalized by `QuickJS` reference counting without an
+    /// explicit collection.
+    pub fn collect_garbage(&mut self) {
+        self.engine.realm.run_gc();
+        if self.tree.borrow_mut().finish_evaluation() {
+            (self.on_flush)();
+        }
+    }
+
     fn evaluate(&mut self, source: &str, name: &str, phase: &str) -> Result<(), MainThreadError> {
         let result = self
             .engine
@@ -218,7 +338,9 @@ impl MainThreadRuntime {
             })
             .map(|_| ())
             .map_err(|error| MainThreadError::from_engine(phase, &error));
-        self.tree.borrow_mut().release();
+        if self.tree.borrow_mut().finish_evaluation() {
+            (self.on_flush)();
+        }
         result
     }
 }
@@ -226,22 +348,26 @@ impl MainThreadRuntime {
 fn install_element_papi(
     realm: &mut quickjs::Realm,
     elements: SharedTree,
-    on_flush: impl Fn() + 'static,
+    on_flush: Rc<dyn Fn()>,
 ) -> Result<Rc<RefCell<TreeHandle>>, quickjs::Error> {
+    let releases = realm.host_object_release_queue();
+    let returned_tree_uncommitted = elements.tree().has_uncommitted_mutations();
     let handle = Rc::new(RefCell::new(TreeHandle {
         slot: elements,
         taken: None,
+        returned_tree_uncommitted,
+        releases,
     }));
 
     let tree = Rc::clone(&handle);
-    realm.define_global_function("__CreatePage", 2, move |arguments| {
+    realm.define_global_function("__BobcatCreatePage", 2, move |arguments| {
         let component_id = string_argument("__CreatePage", arguments, 0)?;
         let component_css_id = i32_argument("__CreatePage", arguments, 1)?;
         let id = tree
             .borrow_mut()
             .tree()
             .create_page(component_id, component_css_id);
-        Ok(unique_id_value(id))
+        Ok(element_value(id))
     })?;
 
     let tree = Rc::clone(&handle);
@@ -252,19 +378,32 @@ fn install_element_papi(
             .tree()
             .create_view(parent_component)
             .map_err(papi_error)?;
-        Ok(unique_id_value(id))
+        Ok(element_value(id))
     })?;
 
     let tree = Rc::clone(&handle);
-    realm.define_global_function("__AppendElement", 2, move |arguments| {
+    realm.define_global_function("__BobcatAppendElement", 2, move |arguments| {
         let parent = element_argument("__AppendElement", arguments, 0)?;
         let child = element_argument("__AppendElement", arguments, 1)?;
-        let appended = tree
-            .borrow_mut()
+        tree.borrow_mut()
             .tree()
             .append_element(parent, child)
             .map_err(papi_error)?;
-        Ok(unique_id_value(appended))
+        Ok(HostValue::Undefined)
+    })?;
+
+    // The private native half of `__RemoveElement(parent, child)`. It only
+    // detaches the direct child; neither wrapper nor native element is
+    // retired. The JS facade returns the exact child argument.
+    let tree = Rc::clone(&handle);
+    realm.define_global_function("__BobcatRemoveElement", 2, move |arguments| {
+        let parent = element_argument("__RemoveElement", arguments, 0)?;
+        let child = element_argument("__RemoveElement", arguments, 1)?;
+        tree.borrow_mut()
+            .tree()
+            .remove_element(parent, child)
+            .map_err(papi_error)?;
+        Ok(HostValue::Undefined)
     })?;
 
     let tree = Rc::clone(&handle);
@@ -280,15 +419,26 @@ fn install_element_papi(
     let tree = Rc::clone(&handle);
     realm.define_global_function("__FlushElementTree", 0, move |_arguments| {
         tree.borrow_mut().flush();
-        on_flush();
+        (on_flush)();
         Ok(HostValue::Undefined)
     })?;
+
+    // Install the public page/append/remove facades only after their private
+    // native functions exist, then remove the private names from the global
+    // object.
+    realm.evaluate(
+        quickjs::EvalSource {
+            name: Some(ELEMENT_OBJECT_API_SOURCE_NAME),
+            ..quickjs::EvalSource::new(ELEMENT_OBJECT_API)
+        },
+        quickjs::EvalOptions::default(),
+    )?;
 
     Ok(handle)
 }
 
-fn unique_id_value(id: ElementId) -> HostValue {
-    HostValue::Number(f64::from(id))
+fn element_value(id: ElementId) -> HostValue {
+    HostValue::Object(quickjs::HostObject::new(id))
 }
 
 fn papi_error(error: impl fmt::Display) -> HostFunctionError {
@@ -366,10 +516,10 @@ fn element_argument(
     arguments: &[HostValue],
     index: usize,
 ) -> Result<ElementId, HostFunctionError> {
-    let id = u32_argument(function, arguments, index)?;
-    (id != 0).then_some(id).ok_or_else(|| {
-        HostFunctionError::new(format!(
-            "{function} expects an element handle for argument {index}, got the null handle 0"
-        ))
-    })
+    match argument(arguments, index) {
+        HostValue::Object(object) => Ok(object.payload()),
+        _ => Err(HostFunctionError::new(format!(
+            "{function} expects an element object for argument {index}"
+        ))),
+    }
 }

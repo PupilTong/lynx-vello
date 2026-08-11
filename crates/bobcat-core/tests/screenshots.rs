@@ -49,14 +49,18 @@ page > view:nth-child(3) > view:nth-child(1) { background-color: #0f766e; }
 ";
 
 const MAIN_THREAD_SCRIPT: &str = r"
+globalThis.elements = [];
 globalThis.renderPage = function renderPage() {
   const page = __CreatePage('card', 0);
   const rows = [3, 2, 1];
   for (const cells of rows) {
     const row = __CreateView(0);
+    elements.push(row);
     __AppendElement(page, row);
     for (let index = 0; index < cells; index += 1) {
-      __AppendElement(row, __CreateView(0));
+      const cell = __CreateView(0);
+      elements.push(cell);
+      __AppendElement(row, cell);
     }
   }
 };
@@ -110,12 +114,15 @@ page > view > view {
 ";
 
 const OVERFLOW_SCRIPT: &str = r"
+globalThis.elements = [];
 globalThis.renderPage = function renderPage() {
   const page = __CreatePage('card', 0);
   for (let row = 0; row < 2; row += 1) {
     const box = __CreateView(0);
+    const child = __CreateView(0);
+    elements.push(box, child);
     __AppendElement(page, box);
-    __AppendElement(box, __CreateView(0));
+    __AppendElement(box, child);
   }
 };
 ";
@@ -174,7 +181,8 @@ page > view {
 const IMAGE_SCRIPT: &str = r"
 globalThis.renderPage = function renderPage() {
   const page = __CreatePage('card', 0);
-  __AppendElement(page, __CreateView(0));
+  globalThis.imageView = __CreateView(0);
+  __AppendElement(page, imageView);
 };
 ";
 

@@ -5,7 +5,7 @@
 //! The fixtures are the same `ReactLynx` build artifacts
 //! `lynx-template-decoder` decodes, vendored from lynx-stack's `web-core-e2e`
 //! suite. Running their `lepusCode.root` end to end needs far more than the
-//! five Element PAPI members that exist; this test pins *exactly* where the
+//! six Element PAPI globals that exist; this test pins *exactly* where the
 //! wall is, so the gap is a failing assertion to update rather than a
 //! paragraph of prose that rots.
 
@@ -90,10 +90,13 @@ fn the_boot_sequence_works_on_a_bundle_shaped_script() {
     runtime
         .run_main_thread_script(
             r"
+            globalThis.owned = [];
             Object.assign(globalThis, {
               processData: function (data) { return data; },
               renderPage: function () {
-                __AppendElement(__CreatePage('card', 0), __CreateView(0));
+                const child = __CreateView(0);
+                owned.push(child);
+                __AppendElement(__CreatePage('card', 0), child);
               },
               updatePage: function () {},
             });

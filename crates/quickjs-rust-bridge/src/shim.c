@@ -30,14 +30,14 @@ typedef struct QjsUnhandledRejection {
 
 typedef int QjsInterruptCallback(void *opaque);
 
-
 enum QjsHostArgKind {
     QJS_ARG_UNDEFINED = 0,
     QJS_ARG_NULL = 1,
     QJS_ARG_BOOLEAN = 2,
     QJS_ARG_NUMBER = 3,
     QJS_ARG_STRING = 4,
-    QJS_ARG_UNSUPPORTED = 5,
+    QJS_ARG_HOST_OBJECT = 5,
+    QJS_ARG_UNSUPPORTED = 6,
 };
 
 
@@ -46,6 +46,7 @@ typedef struct QjsHostArg {
     double number;
     const uint8_t *text;
     size_t text_len;
+    uint32_t payload;       /* Host object only. */
 } QjsHostArg;
 
 
@@ -54,6 +55,7 @@ typedef struct QjsHostResult {
     double number;
     const uint16_t *text;
     size_t text_len;
+    uint32_t payload;       /* Host object only. */
 } QjsHostResult;
 
 
@@ -62,6 +64,11 @@ typedef int QjsHostDispatch(void *opaque, void *handler, size_t argument_count,
 
 
 typedef void QjsHostRelease(void *opaque, void *handler);
+
+/* Reports one host-object payload either when object construction fails or
+ * from the completed object's finalizer. The callback may enqueue the payload,
+ * but must never enter QuickJS or invoke application code. */
+typedef void QjsHostObjectRelease(void *opaque, uint32_t payload);
 
 typedef struct QjsRuntime {
     JSRuntime *raw;
@@ -73,6 +80,7 @@ typedef struct QjsRuntime {
     void *interrupt_opaque;
     QjsHostDispatch *host_dispatch;
     QjsHostRelease *host_release;
+    QjsHostObjectRelease *host_object_release;
     void *host_opaque;
 } QjsRuntime;
 
@@ -102,6 +110,33 @@ static void qjs_host_owner_finalizer(JSRuntime *raw, JSValue value) {
 static const JSClassDef qjs_host_owner_class = {
     "QjsHostFunctionOwner",
     .finalizer = qjs_host_owner_finalizer,
+};
+
+/* One externally visible, bridge-owned object. */
+typedef struct QjsHostObject {
+    QjsRuntime *runtime;
+    uint32_t payload;
+} QjsHostObject;
+
+static JSClassID qjs_host_object_class_id;
+
+static void qjs_host_object_finalizer(JSRuntime *raw, JSValue value) {
+    QjsHostObject *object = JS_GetOpaque(value, qjs_host_object_class_id);
+
+    (void)raw;
+    if (object == NULL) {
+        return;
+    }
+    if (object->runtime->host_object_release != NULL) {
+        object->runtime->host_object_release(object->runtime->host_opaque,
+                                             object->payload);
+    }
+    free(object);
+}
+
+static const JSClassDef qjs_host_object_class = {
+    "RustHostObject",
+    .finalizer = qjs_host_object_finalizer,
 };
 
 enum QjsValueKind {
@@ -213,6 +248,9 @@ QjsRuntime *qjs_runtime_new(void) {
         JS_NewClassID(&qjs_host_owner_class_id);
         JS_NewClass(runtime->raw, qjs_host_owner_class_id,
                     &qjs_host_owner_class);
+        JS_NewClassID(&qjs_host_object_class_id);
+        JS_NewClass(runtime->raw, qjs_host_object_class_id,
+                    &qjs_host_object_class);
     } else {
         free(runtime);
         return NULL;
@@ -503,9 +541,12 @@ void qjs_throw_error(JSContext *context, const char *message) {
 
 void qjs_runtime_set_host_dispatch(QjsRuntime *runtime,
                                    QjsHostDispatch *dispatch,
-                                   QjsHostRelease *release, void *opaque) {
+                                   QjsHostRelease *release,
+                                   QjsHostObjectRelease *object_release,
+                                   void *opaque) {
     runtime->host_dispatch = dispatch;
     runtime->host_release = release;
+    runtime->host_object_release = object_release;
     runtime->host_opaque = opaque;
 }
 
@@ -517,6 +558,7 @@ static void qjs_host_describe(JSContext *context, JSValueConst value,
     slot->text = NULL;
     slot->text_len = 0;
     slot->number = 0.0;
+    slot->payload = 0;
 
     if (JS_IsUndefined(value)) {
         slot->kind = QJS_ARG_UNDEFINED;
@@ -543,9 +585,46 @@ static void qjs_host_describe(JSContext *context, JSValueConst value,
         slot->kind = QJS_ARG_STRING;
         slot->text = (const uint8_t *)text;
         slot->text_len = length;
+    } else if (JS_IsObject(value)) {
+        QjsHostObject *object = JS_GetOpaque(value, qjs_host_object_class_id);
+        if (object == NULL) {
+            slot->kind = QJS_ARG_UNSUPPORTED;
+            return;
+        }
+        slot->kind = QJS_ARG_HOST_OBJECT;
+        slot->payload = object->payload;
     } else {
         slot->kind = QJS_ARG_UNSUPPORTED;
     }
+}
+
+/* A construction failure reports the payload immediately; a successful object
+ * reports it from the finalizer. Both mean no JavaScript owner remains. */
+static JSValue qjs_new_host_object(JSContext *context, uint32_t payload) {
+    QjsRuntime *runtime = JS_GetContextOpaque(context);
+    QjsHostObject *object;
+    JSValue value;
+
+    if (runtime == NULL || runtime->host_object_release == NULL) {
+        return JS_ThrowInternalError(context,
+                                     "no host-object release queue is installed");
+    }
+    object = malloc(sizeof(*object));
+    if (object == NULL) {
+        runtime->host_object_release(runtime->host_opaque, payload);
+        return JS_ThrowOutOfMemory(context);
+    }
+    object->runtime = runtime;
+    object->payload = payload;
+
+    value = JS_NewObjectClass(context, (int)qjs_host_object_class_id);
+    if (JS_IsException(value)) {
+        runtime->host_object_release(runtime->host_opaque, payload);
+        free(object);
+        return value;
+    }
+    JS_SetOpaque(value, object);
+    return value;
 }
 
 static JSValue qjs_host_build(JSContext *context, const QjsHostResult *result) {
@@ -560,6 +639,8 @@ static JSValue qjs_host_build(JSContext *context, const QjsHostResult *result) {
         return JS_NewFloat64(context, result->number);
     case QJS_ARG_STRING:
         return qjs_string_from_utf16(context, result->text, result->text_len);
+    case QJS_ARG_HOST_OBJECT:
+        return qjs_new_host_object(context, result->payload);
     default:
         return JS_ThrowInternalError(context, "invalid host return value");
     }
@@ -607,6 +688,7 @@ static JSValue qjs_host_trampoline(JSContext *context, JSValueConst this_value,
     result.number = 0.0;
     result.text = NULL;
     result.text_len = 0;
+    result.payload = 0;
     status = runtime->host_dispatch(runtime->host_opaque, handler,
                                     (size_t)argc, arguments, &result);
 

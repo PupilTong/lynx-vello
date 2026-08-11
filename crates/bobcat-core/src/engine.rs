@@ -75,6 +75,9 @@ pub enum EngineError {
     Render(String),
     #[error("could not start the {name} thread: {message}")]
     Thread { name: &'static str, message: String },
+    #[cfg(feature = "quickjs")]
+    #[error("the Lynx main thread has already been started")]
+    MainThreadAlreadyStarted,
     #[error("the engine has no draw target attached")]
     NoDrawTarget,
 }
@@ -87,6 +90,8 @@ pub enum ScriptRunError {
     Initialization(#[source] crate::quickjs::QuickJsInitializationError),
     #[error(transparent)]
     Script(crate::quickjs::MainThreadError),
+    #[error("the Lynx main thread is already running asynchronously")]
+    AlreadyRunning,
 }
 
 enum EngineMessage {
@@ -99,6 +104,38 @@ enum EngineMessage {
 pub enum EngineEvent {
     #[cfg(feature = "quickjs")]
     ScriptFinished(Result<(), ScriptRunError>),
+}
+
+#[cfg(feature = "quickjs")]
+enum MainThread {
+    Inline(crate::quickjs::MainThreadRuntime),
+    #[allow(
+        dead_code,
+        reason = "the guard is stored for its Drop, which shuts down and joins the owner thread"
+    )]
+    Spawned(SpawnedMainThread),
+}
+
+/// Keeps an owner-thread-bound `QuickJS` realm on its engine-owned thread.
+///
+/// Boot completion is a lifecycle event, not the end of the realm: JavaScript
+/// objects remain the owners of native element handles until the view itself
+/// is destroyed. Dropping this guard asks the thread to tear the realm down
+/// and waits until all finalizers have completed.
+#[cfg(feature = "quickjs")]
+struct SpawnedMainThread {
+    shutdown: mpsc::Sender<()>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(feature = "quickjs")]
+impl Drop for SpawnedMainThread {
+    fn drop(&mut self) {
+        let _ = self.shutdown.send(());
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
 }
 
 /// One captured frame: tightly packed RGBA8 pixels at `size`.
@@ -263,6 +300,11 @@ enum Output<'window, W> {
 /// The engine half of a Lynx view: the shared element tree, input routing, frame production,
 /// presentation, and the engine-owned script thread.
 pub struct Engine<'window, W: Window> {
+    /// The JavaScript realm is a view resource, not a boot-call local. Keep it
+    /// before the shared tree so its GC-driven releases run while the engine's
+    /// tree owner is unquestionably still alive.
+    #[cfg(feature = "quickjs")]
+    main_thread: Option<MainThread>,
     elements: SharedTree,
     viewport: Viewport,
     frame_size: FrameSize,
@@ -302,6 +344,8 @@ impl<'window, W: Window> Engine<'window, W> {
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
         let (message_sender, messages) = mpsc::channel();
         Ok(Self {
+            #[cfg(feature = "quickjs")]
+            main_thread: None,
             elements: SharedTree::new(ElementTree::new(viewport, config)),
             viewport,
             frame_size,
@@ -537,11 +581,21 @@ impl<'window, W: Window> Engine<'window, W> {
     /// Runs a main-thread script to completion on the calling thread over the shared tree.
     #[cfg(feature = "quickjs")]
     pub fn run_script(&mut self, source: &str) -> Result<(), ScriptRunError> {
-        let mut runtime = crate::quickjs::MainThreadRuntime::new(self.elements.clone(), || {})
-            .map_err(ScriptRunError::Initialization)?;
-        let result = runtime
-            .run_main_thread_script(source)
-            .map_err(ScriptRunError::Script);
+        if self.main_thread.is_none() {
+            let runtime = crate::quickjs::MainThreadRuntime::new(self.elements.clone(), || {})
+                .map_err(ScriptRunError::Initialization)?;
+            self.main_thread = Some(MainThread::Inline(runtime));
+        }
+        let result = match self
+            .main_thread
+            .as_mut()
+            .expect("the inline main-thread runtime was just ensured")
+        {
+            MainThread::Inline(runtime) => runtime
+                .run_main_thread_script(source)
+                .map_err(ScriptRunError::Script),
+            MainThread::Spawned(_) => Err(ScriptRunError::AlreadyRunning),
+        };
         self.refresh();
         result
     }
@@ -553,30 +607,52 @@ impl<'window, W: Window> Engine<'window, W> {
         source: String,
         wakeup: impl Fn() + Send + Sync + 'static,
     ) -> Result<(), EngineError> {
+        if self.main_thread.is_some() {
+            return Err(EngineError::MainThreadAlreadyStarted);
+        }
         let elements = self.elements.clone();
         let sender = self.message_sender.clone();
         let on_flush = self.frames.clone();
-        std::thread::Builder::new()
+        let (shutdown, wait_for_shutdown) = mpsc::channel();
+        let join = std::thread::Builder::new()
             .name("bobcat-main".to_owned())
             .spawn(move || {
-                let result = (|| {
-                    let mut runtime = crate::quickjs::MainThreadRuntime::new(elements, move || {
-                        if let Some(frames) = &on_flush {
-                            frames.request_frame();
-                        }
-                    })
-                    .map_err(ScriptRunError::Initialization)?;
-                    runtime
-                        .run_main_thread_script(&source)
-                        .map_err(ScriptRunError::Script)
-                })();
+                let runtime = crate::quickjs::MainThreadRuntime::new(elements, move || {
+                    if let Some(frames) = &on_flush {
+                        frames.request_frame();
+                    }
+                })
+                .map_err(ScriptRunError::Initialization);
+                let (result, runtime) = match runtime {
+                    Ok(mut runtime) => {
+                        let result = runtime
+                            .run_main_thread_script(&source)
+                            .map_err(ScriptRunError::Script);
+                        // The thread becomes intentionally idle after boot, so
+                        // this is its one tracing-GC checkpoint for wrapper
+                        // cycles created and abandoned by the boot script.
+                        runtime.collect_garbage();
+                        (result, Some(runtime))
+                    }
+                    Err(error) => (Err(error), None),
+                };
                 let _ = sender.send(EngineMessage::ScriptDone(result));
                 wakeup();
+                if let Some(runtime) = runtime {
+                    // Keep the owner-thread-bound realm, and therefore every
+                    // JS-owned native handle, alive for the view lifetime.
+                    let _ = wait_for_shutdown.recv();
+                    drop(runtime);
+                }
             })
             .map_err(|error| EngineError::Thread {
                 name: "script",
                 message: error.to_string(),
             })?;
+        self.main_thread = Some(MainThread::Spawned(SpawnedMainThread {
+            shutdown,
+            join: Some(join),
+        }));
         Ok(())
     }
 }
@@ -668,11 +744,18 @@ mod tests {
         engine
             .spawn_script(
                 r"
+                globalThis.owned = [];
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
-                  __AppendElement(page, __CreateView(0));
+                  const first = __CreateView(0);
+                  const second = __CreateView(0);
+                  const cyclic = __CreateView(0);
+                  cyclic.self = cyclic;
+                  owned.push(first, second);
+                  __AppendElement(page, first);
                   __FlushElementTree();
-                  __AppendElement(page, __CreateView(0));
+                  __AppendElement(page, second);
+                  __AppendElement(page, cyclic);
                 };
                 "
                 .to_owned(),
@@ -701,6 +784,10 @@ mod tests {
         assert!(elements.page().is_some(), "the page was created");
         assert!(elements.element(2).is_some(), "the first view is live");
         assert!(elements.element(3).is_some(), "the second view is live");
+        assert!(
+            elements.element(4).is_none(),
+            "the idle-after-boot GC retires an unreachable wrapper cycle"
+        );
         assert!(
             !elements.has_uncommitted_mutations(),
             "the boot's final flush closed the batch"

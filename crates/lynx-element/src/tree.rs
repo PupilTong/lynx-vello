@@ -13,6 +13,7 @@ use crate::{ElementId, PAGE_TAG, VIEW_TAG};
 #[non_exhaustive]
 pub enum PapiError {
     UnknownElement(ElementId),
+    NotDirectChild { parent: ElementId, child: ElementId },
     WouldCycle { parent: ElementId, child: ElementId },
     CannotReparentPage,
     CannotRemovePage,
@@ -24,6 +25,12 @@ impl fmt::Display for PapiError {
             Self::UnknownElement(raw) => {
                 write!(formatter, "no element has the unique id {raw}")
             }
+            Self::NotDirectChild { parent, child } => {
+                write!(
+                    formatter,
+                    "element #{child} is not a direct child of #{parent}"
+                )
+            }
             Self::WouldCycle { parent, child } => write!(
                 formatter,
                 "appending #{child} under #{parent} would form a cycle"
@@ -31,7 +38,9 @@ impl fmt::Display for PapiError {
             Self::CannotReparentPage => {
                 formatter.write_str("the page element cannot be given a parent")
             }
-            Self::CannotRemovePage => formatter.write_str("the page element cannot be dropped"),
+            Self::CannotRemovePage => {
+                formatter.write_str("the page element cannot be removed or dropped")
+            }
         }
     }
 }
@@ -214,21 +223,50 @@ impl ElementTree {
         Ok(child)
     }
 
-    /// Drops an element subtree and permanently retires its ids.
+    /// Detaches `child` from its validated direct parent without retiring it.
+    pub fn remove_element(
+        &mut self,
+        parent: ElementId,
+        child: ElementId,
+    ) -> Result<ElementId, PapiError> {
+        let parent_node = self
+            .node_id(parent)
+            .ok_or(PapiError::UnknownElement(parent))?;
+        let child_node = self
+            .node_id(child)
+            .ok_or(PapiError::UnknownElement(child))?;
+        if child == PAGE_UNIQUE_ID {
+            return Err(PapiError::CannotRemovePage);
+        }
+        if self
+            .document
+            .get(child_node)
+            .expect("a live Lynx element must name a live DOM node")
+            .parent_id()
+            != Some(parent_node)
+        {
+            return Err(PapiError::NotDirectChild { parent, child });
+        }
+
+        self.uncommitted = true;
+        self.document.remove_element(child_node);
+        Ok(child)
+    }
+
+    /// Drops one element, preserving its children as detached live subtrees.
     pub fn drop_element(&mut self, id: ElementId) -> Result<(), PapiError> {
         if id == PAGE_UNIQUE_ID {
             return Err(PapiError::CannotRemovePage);
         }
         let node = self.node_id(id).ok_or(PapiError::UnknownElement(id))?;
         self.uncommitted = true;
-        let retired_ids = self.document.drop_subtree(node);
-        for unique_id in retired_ids {
-            let retired = self.elements.retire(unique_id);
-            debug_assert!(
-                retired.is_some(),
-                "a removed DOM node must have a live Lynx element"
-            );
-        }
+        let retired_id = self.document.drop_element(node);
+        debug_assert_eq!(retired_id, id);
+        let retired = self.elements.retire(retired_id);
+        debug_assert!(
+            retired.is_some(),
+            "a removed DOM node must have a live Lynx element"
+        );
         Ok(())
     }
 
@@ -311,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn releasing_an_element_leaves_a_permanent_empty_arena_slot() {
+    fn dropping_an_element_leaves_a_permanent_empty_arena_slot() {
         let mut tree = tree();
         let first = tree.create_view(0).unwrap();
         let first_node = tree.node_id(first).unwrap();
@@ -332,19 +370,57 @@ mod tests {
     }
 
     #[test]
-    fn releasing_a_subtree_retires_every_lynx_element_in_it() {
+    fn dropping_a_parent_preserves_its_children_as_detached_live_subtrees() {
         let mut tree = tree();
+        let page = tree.create_page("page", 0);
         let parent = tree.create_view(0).unwrap();
-        let child = tree.create_view(0).unwrap();
-        tree.append_element(parent, child).unwrap();
+        let first_child = tree.create_view(0).unwrap();
+        let second_child = tree.create_view(0).unwrap();
+        let grandchild = tree.create_view(0).unwrap();
+        tree.append_element(page, parent).unwrap();
+        tree.append_element(parent, first_child).unwrap();
+        tree.append_element(parent, second_child).unwrap();
+        tree.append_element(first_child, grandchild).unwrap();
+
+        let page_node = tree.node_id(page).unwrap();
+        let first_child_node = tree.node_id(first_child).unwrap();
+        let second_child_node = tree.node_id(second_child).unwrap();
+        let grandchild_node = tree.node_id(grandchild).unwrap();
 
         tree.drop_element(parent).unwrap();
+
         assert!(tree.node_id(parent).is_none());
-        assert!(tree.node_id(child).is_none());
-        assert_eq!(tree.elements.len(), 4);
+        assert_eq!(tree.node_id(first_child), Some(first_child_node));
+        assert_eq!(tree.node_id(second_child), Some(second_child_node));
+        assert_eq!(tree.node_id(grandchild), Some(grandchild_node));
+        assert!(
+            tree.document()
+                .get(page_node)
+                .unwrap()
+                .child_ids()
+                .is_empty()
+        );
+        assert_eq!(
+            tree.document().get(first_child_node).unwrap().parent_id(),
+            None
+        );
+        assert_eq!(
+            tree.document().get(second_child_node).unwrap().parent_id(),
+            None
+        );
+        assert_eq!(
+            tree.document().get(first_child_node).unwrap().child_ids(),
+            [grandchild_node]
+        );
+        assert_eq!(
+            tree.document().get(grandchild_node).unwrap().parent_id(),
+            Some(first_child_node)
+        );
+        assert_eq!(tree.elements.len(), 6);
 
         let next = tree.create_view(0).unwrap();
-        assert_eq!(next, 4);
+        assert_eq!(next, 6);
+        assert!(tree.node_id(parent).is_none());
     }
 
     #[test]
@@ -427,6 +503,89 @@ mod tests {
         assert_eq!(
             tree.document().get(second_node).unwrap().child_ids(),
             [moved_node]
+        );
+    }
+
+    #[test]
+    fn remove_element_detaches_a_subtree_that_can_be_appended_again() {
+        let mut tree = tree();
+        let page = tree.create_page("page", 0);
+        let parent = tree.create_view(0).unwrap();
+        let child = tree.create_view(0).unwrap();
+        let grandchild = tree.create_view(0).unwrap();
+        tree.append_element(page, parent).unwrap();
+        tree.append_element(parent, child).unwrap();
+        tree.append_element(child, grandchild).unwrap();
+
+        let parent_node = tree.node_id(parent).unwrap();
+        let child_node = tree.node_id(child).unwrap();
+        let grandchild_node = tree.node_id(grandchild).unwrap();
+        assert_eq!(tree.remove_element(parent, child).unwrap(), child);
+        assert_eq!(tree.document().get(child_node).unwrap().parent_id(), None);
+        assert_eq!(
+            tree.document().get(child_node).unwrap().child_ids(),
+            [grandchild_node]
+        );
+        assert_eq!(
+            tree.document().get(grandchild_node).unwrap().parent_id(),
+            Some(child_node)
+        );
+        assert!(tree.element(child).is_some());
+        assert!(tree.element(grandchild).is_some());
+
+        assert_eq!(tree.append_element(parent, child).unwrap(), child);
+        assert_eq!(
+            tree.document().get(child_node).unwrap().parent_id(),
+            Some(parent_node)
+        );
+    }
+
+    #[test]
+    fn remove_element_requires_live_handles_and_the_exact_direct_parent() {
+        let mut tree = tree();
+        let page = tree.create_page("page", 0);
+        let parent = tree.create_view(0).unwrap();
+        let other = tree.create_view(0).unwrap();
+        let child = tree.create_view(0).unwrap();
+        tree.append_element(page, parent).unwrap();
+        tree.append_element(parent, child).unwrap();
+
+        assert_eq!(
+            tree.remove_element(99, child).unwrap_err(),
+            PapiError::UnknownElement(99)
+        );
+        assert_eq!(
+            tree.remove_element(parent, 99).unwrap_err(),
+            PapiError::UnknownElement(99)
+        );
+        assert_eq!(
+            tree.remove_element(other, child).unwrap_err(),
+            PapiError::NotDirectChild {
+                parent: other,
+                child,
+            }
+        );
+
+        tree.remove_element(parent, child).unwrap();
+        assert_eq!(
+            tree.remove_element(parent, child).unwrap_err(),
+            PapiError::NotDirectChild { parent, child }
+        );
+    }
+
+    #[test]
+    fn the_page_cannot_be_removed_or_dropped() {
+        let mut tree = tree();
+        let page = tree.create_page("page", 0);
+        let view = tree.create_view(0).unwrap();
+
+        assert_eq!(
+            tree.remove_element(view, page).unwrap_err(),
+            PapiError::CannotRemovePage
+        );
+        assert_eq!(
+            tree.drop_element(page).unwrap_err(),
+            PapiError::CannotRemovePage
         );
     }
 

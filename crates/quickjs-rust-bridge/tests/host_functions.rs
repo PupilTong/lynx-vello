@@ -132,8 +132,10 @@ fn a_realm_with_live_host_functions_drops_cleanly() {
     for _ in 0..50 {
         let mut realm = Realm::new().unwrap();
         realm
-            .define_global_function("f", 1, |arguments| {
-                Ok(arguments.first().cloned().unwrap_or(HostValue::Null))
+            .define_global_function("f", 1, |arguments| match arguments.first() {
+                Some(HostValue::String(value)) => Ok(HostValue::String(value.clone())),
+                None => Ok(HostValue::Null),
+                _ => Err(HostFunctionError::new("expected a string")),
             })
             .unwrap();
         let _ = realm.evaluate(EvalSource::new("f('hi')"), EvalOptions::default());
@@ -218,6 +220,145 @@ fn a_name_that_cannot_be_allocated_fails_construction_cleanly() {
         .expect("the realm is still healthy");
     let units = value.to_utf16().unwrap();
     assert_eq!(String::from_utf16(&units).unwrap(), "string");
+}
+
+mod host_objects {
+    use quickjs_rust_bridge::{
+        EvalOptions, EvalSource, HostFunctionError, HostObject, HostValue, Realm,
+    };
+
+    fn install_factory(realm: &mut Realm, payload: u32) {
+        realm
+            .define_global_function("create", 0, move |_| {
+                Ok(HostValue::Object(HostObject::new(payload)))
+            })
+            .unwrap();
+    }
+
+    fn install_payload_reader(realm: &mut Realm) {
+        realm
+            .define_global_function("payload", 1, |arguments| {
+                let Some(HostValue::Object(object)) = arguments.first() else {
+                    return Err(HostFunctionError::new("expected a host object"));
+                };
+                Ok(HostValue::Number(f64::from(object.payload())))
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_bridge_owned_object_round_trips_its_payload() {
+        let mut realm = Realm::new().unwrap();
+        install_factory(&mut realm, 37);
+        install_payload_reader(&mut realm);
+
+        let value = realm
+            .evaluate(
+                EvalSource::new(
+                    "const value = create(); typeof value === 'object' && payload(value) === 37",
+                ),
+                EvalOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(value.as_boolean(), Some(true));
+    }
+
+    #[test]
+    fn ordinary_objects_and_proxies_are_not_host_objects() {
+        let mut realm = Realm::new().unwrap();
+        install_factory(&mut realm, 4);
+        install_payload_reader(&mut realm);
+
+        let value = realm
+            .evaluate(
+                EvalSource::new(
+                    "const real = create(); \
+                     let rejected = 0; \
+                     try { payload({ payload: 4 }); } catch (error) { \
+                       if (String(error).includes('bridge-owned')) rejected++; \
+                     } \
+                     try { payload(new Proxy(real, {})); } catch (error) { \
+                       if (String(error).includes('bridge-owned')) rejected++; \
+                     } \
+                     rejected",
+                ),
+                EvalOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(value.as_number(), Some(2.0));
+    }
+
+    #[test]
+    fn a_leaf_host_function_can_drain_a_finalizer_from_the_same_eval() {
+        let mut realm = Realm::new().unwrap();
+        install_factory(&mut realm, 11);
+        let releases = realm.host_object_release_queue();
+        realm
+            .define_global_function("flush", 0, move |_| {
+                let count = u32::try_from(releases.drain().len()).unwrap();
+                Ok(HostValue::Number(f64::from(count)))
+            })
+            .unwrap();
+
+        let value = realm
+            .evaluate(
+                EvalSource::new("void create(); flush()"),
+                EvalOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(value.as_number(), Some(1.0));
+    }
+
+    #[test]
+    fn a_reachable_object_is_not_released() {
+        let mut realm = Realm::new().unwrap();
+        install_factory(&mut realm, 12);
+        let releases = realm.host_object_release_queue();
+        let for_flush = releases.clone();
+        realm
+            .define_global_function("flush", 0, move |_| {
+                let count = u32::try_from(for_flush.drain().len()).unwrap();
+                Ok(HostValue::Number(f64::from(count)))
+            })
+            .unwrap();
+
+        let kept = realm
+            .evaluate(
+                EvalSource::new("globalThis.kept = create(); flush()"),
+                EvalOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(kept.as_number(), Some(0.0));
+
+        let after_drop = realm
+            .evaluate(
+                EvalSource::new("globalThis.kept = null; flush()"),
+                EvalOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(after_drop.as_number(), Some(1.0));
+        assert!(releases.is_empty());
+    }
+
+    #[test]
+    fn realm_teardown_finalizes_rooted_objects_into_an_external_queue() {
+        let releases = {
+            let mut realm = Realm::new().unwrap();
+            install_factory(&mut realm, 91);
+            let releases = realm.host_object_release_queue();
+            realm
+                .evaluate(
+                    EvalSource::new("globalThis.kept = create(); undefined"),
+                    EvalOptions::default(),
+                )
+                .unwrap();
+            assert!(releases.is_empty());
+            releases
+        };
+
+        assert_eq!(releases.drain(), vec![91]);
+        assert!(releases.is_empty());
+    }
 }
 
 mod release {
@@ -335,8 +476,10 @@ mod release {
         assert_eq!(drops.get(), 1000, "every discarded closure must release");
 
         realm
-            .define_global_function("final", 1, |arguments| {
-                Ok(arguments.first().cloned().unwrap_or(HostValue::Null))
+            .define_global_function("final", 1, |arguments| match arguments.first() {
+                Some(HostValue::Number(value)) => Ok(HostValue::Number(*value)),
+                None => Ok(HostValue::Null),
+                _ => Err(HostFunctionError::new("expected a number")),
             })
             .unwrap();
         let value = realm

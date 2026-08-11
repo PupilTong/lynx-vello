@@ -3,6 +3,9 @@
 //! Behavior tests for main-thread (MTS) script execution and the Element PAPI
 //! globals it runs against.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use bobcat_core::engine::SharedTree;
 use bobcat_core::quickjs::MainThreadRuntime;
 use lynx_element::{ElementTree, PageConfig, Viewport};
@@ -25,13 +28,16 @@ fn a_card_root_builds_its_tree_through_the_papi() {
     runtime
         .run_main_thread_script(
             r"
+            globalThis.owned = [];
             globalThis.renderPage = function () {
               const page = __CreatePage('card', 0);
               const first = __CreateView(0);
               const second = __CreateView(0);
+              const nested = __CreateView(0);
+              owned.push(first, second, nested);
               __AppendElement(page, first);
               __AppendElement(page, second);
-              __AppendElement(first, __CreateView(0));
+              __AppendElement(first, nested);
             };
             ",
         )
@@ -53,13 +59,14 @@ fn create_view_returns_a_handle_append_element_accepts() {
             globalThis.renderPage = function () {
               const page = __CreatePage('card', 0);
               const view = __CreateView(0);
-              if (typeof view !== 'number') {
-                throw new Error('__CreateView must return a number, got ' + typeof view);
+              if (typeof view !== 'object' || view === null) {
+                throw new Error('__CreateView must return an object, got ' + typeof view);
               }
               const appended = __AppendElement(page, view);
               if (appended !== view) {
                 throw new Error('__AppendElement must return the child');
               }
+              globalThis.ownedView = view;
             };
             ",
         )
@@ -70,7 +77,82 @@ fn create_view_returns_a_handle_append_element_accepts() {
 }
 
 #[test]
-fn drop_element_retires_a_detached_element_and_does_not_reuse_its_id() {
+fn remove_element_detaches_and_returns_the_exact_live_child_wrapper() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const parent = __CreateView(0);
+              const child = __CreateView(0);
+              const grandchild = __CreateView(0);
+              globalThis.owned = [parent, child, grandchild];
+              __AppendElement(page, parent);
+              __AppendElement(parent, child);
+              __AppendElement(child, grandchild);
+
+              const removed = __RemoveElement(parent, child);
+              if (removed !== child) {
+                throw new Error('__RemoveElement must return the exact child wrapper');
+              }
+
+              // A removed child remains a live detached subtree and can be
+              // inserted again with the same wrapper.
+              __AppendElement(page, removed);
+            };
+            ",
+        )
+        .expect("main-thread script");
+
+    let elements = elements.tree();
+    assert!(elements.element(2).is_some());
+    assert!(elements.element(3).is_some());
+    assert!(elements.element(4).is_some());
+}
+
+#[test]
+fn remove_element_rejects_a_parent_that_does_not_own_the_child() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const actualParent = __CreateView(0);
+              const wrongParent = __CreateView(0);
+              const child = __CreateView(0);
+              globalThis.owned = [actualParent, wrongParent, child];
+              __AppendElement(page, actualParent);
+              __AppendElement(page, wrongParent);
+              __AppendElement(actualParent, child);
+
+              let rejected = false;
+              try {
+                __RemoveElement(wrongParent, child);
+              } catch (error) {
+                rejected = true;
+              }
+              if (!rejected) {
+                throw new Error('__RemoveElement must reject a mismatched parent');
+              }
+
+              // The failed remove did not mutate the edge.
+              __RemoveElement(actualParent, child);
+              __AppendElement(page, child);
+            };
+            ",
+        )
+        .expect("main-thread script");
+
+    let elements = elements.tree();
+    assert!(elements.element(2).is_some());
+    assert!(elements.element(3).is_some());
+    assert!(elements.element(4).is_some());
+}
+
+#[test]
+fn explicit_drop_is_idempotent_and_its_later_finalizer_is_harmless() {
     let (mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
@@ -80,7 +162,7 @@ fn drop_element_retires_a_detached_element_and_does_not_reuse_its_id() {
               const dropped = __CreateView(0);
               __DropElement(dropped);
               __DropElement(dropped);
-              __CreateView(0);
+              globalThis.kept = __CreateView(0);
             };
             ",
         )
@@ -92,7 +174,7 @@ fn drop_element_retires_a_detached_element_and_does_not_reuse_its_id() {
 }
 
 #[test]
-fn drop_element_retires_an_attached_subtree() {
+fn drop_element_retires_only_the_attached_target_and_preserves_its_child() {
     let (mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
@@ -101,9 +183,13 @@ fn drop_element_retires_an_attached_subtree() {
               const page = __CreatePage('card', 0);
               const parent = __CreateView(0);
               const child = __CreateView(0);
+              globalThis.child = child;
               __AppendElement(page, parent);
               __AppendElement(parent, child);
               __DropElement(parent);
+
+              // Drop detached the child but did not retire it.
+              __AppendElement(page, child);
             };
             ",
         )
@@ -111,7 +197,219 @@ fn drop_element_retires_an_attached_subtree() {
 
     let elements = elements.tree();
     assert!(elements.element(2).is_none());
-    assert!(elements.element(3).is_none());
+    assert!(elements.element(3).is_some());
+}
+
+#[test]
+fn gc_retires_an_attached_element_after_its_last_js_owner_is_released() {
+    let elements = SharedTree::new(ElementTree::new(VIEWPORT, PageConfig::default()));
+    let flushes = Rc::new(Cell::new(0));
+    let observed_flushes = Rc::clone(&flushes);
+    let mut runtime = MainThreadRuntime::new(elements.clone(), move || {
+        observed_flushes.set(observed_flushes.get() + 1);
+    })
+    .expect("QuickJS realm");
+
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const view = __CreateView(0);
+              // Force the cycle collector path rather than relying only on
+              // QuickJS's immediate reference counting.
+              view.self = view;
+              globalThis.ownedView = view;
+              __AppendElement(page, view);
+            };
+            ",
+        )
+        .expect("main-thread script");
+    assert!(elements.tree().element(2).is_some());
+    assert_eq!(flushes.get(), 1, "the boot has one explicit flush");
+
+    runtime
+        .evaluate_main_thread_script("globalThis.ownedView = undefined;")
+        .expect("release the last external owner");
+    assert!(
+        elements.tree().element(2).is_some(),
+        "the self-cycle remains until a tracing collection"
+    );
+
+    runtime.collect_garbage();
+    let elements = elements.tree();
+    assert!(elements.element(2).is_none());
+    assert!(!elements.has_uncommitted_mutations());
+    assert_eq!(
+        flushes.get(),
+        2,
+        "a GC-only removal is committed and presented as its own batch"
+    );
+}
+
+#[test]
+fn a_gc_release_does_not_commit_an_abandoned_batch_from_an_earlier_evaluation() {
+    let elements = SharedTree::new(ElementTree::new(VIEWPORT, PageConfig::default()));
+    let flushes = Rc::new(Cell::new(0));
+    let observed_flushes = Rc::clone(&flushes);
+    let mut runtime = MainThreadRuntime::new(elements.clone(), move || {
+        observed_flushes.set(observed_flushes.get() + 1);
+    })
+    .expect("QuickJS realm");
+
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              globalThis.victim = __CreateView(0);
+              __AppendElement(page, victim);
+            };
+            ",
+        )
+        .expect("initial committed batch");
+    assert_eq!(flushes.get(), 1);
+
+    runtime
+        .evaluate_main_thread_script(
+            r"
+            globalThis.abandoned = __CreateView(0);
+            __AppendElement(__CreatePage('card', 0), abandoned);
+            ",
+        )
+        .expect("leave a batch open without flushing");
+    assert!(elements.tree().has_uncommitted_mutations());
+
+    // Releasing this unrelated wrapper is a native GC mutation, but it must
+    // join the already-dirty tree without presenting the abandoned append.
+    runtime
+        .evaluate_main_thread_script("globalThis.victim = undefined;")
+        .expect("release an earlier wrapper");
+    {
+        let elements = elements.tree();
+        assert!(elements.element(2).is_none());
+        assert!(elements.element(3).is_some());
+        assert!(elements.has_uncommitted_mutations());
+    }
+    assert_eq!(
+        flushes.get(),
+        1,
+        "a GC-only release must not commit an earlier abandoned batch"
+    );
+
+    runtime
+        .evaluate_main_thread_script("__FlushElementTree();")
+        .expect("explicitly commit the abandoned batch");
+    assert!(!elements.tree().has_uncommitted_mutations());
+    assert_eq!(flushes.get(), 2);
+}
+
+#[test]
+fn collecting_each_wrapper_retires_only_its_element_and_detaches_live_children() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              globalThis.parent = __CreateView(0);
+              globalThis.child = __CreateView(0);
+              globalThis.grandchild = __CreateView(0);
+              parent.self = parent;
+              child.self = child;
+              grandchild.self = grandchild;
+              __AppendElement(page, parent);
+              __AppendElement(parent, child);
+              __AppendElement(child, grandchild);
+            };
+            ",
+        )
+        .expect("main-thread script");
+
+    runtime
+        .evaluate_main_thread_script("globalThis.parent = undefined;")
+        .expect("release parent");
+    runtime.collect_garbage();
+    {
+        let elements = elements.tree();
+        assert!(elements.element(2).is_none());
+        assert!(elements.element(3).is_some());
+        assert!(elements.element(4).is_some());
+    }
+
+    // The child's original parent edge is gone, so its surviving wrapper can
+    // attach the whole child subtree elsewhere.
+    runtime
+        .evaluate_main_thread_script(
+            "__AppendElement(__CreatePage('card', 0), globalThis.child); \
+             __FlushElementTree();",
+        )
+        .expect("reattach the detached child");
+
+    runtime
+        .evaluate_main_thread_script("globalThis.child = undefined;")
+        .expect("release child wrapper");
+    runtime.collect_garbage();
+    {
+        let elements = elements.tree();
+        assert!(elements.element(3).is_none());
+        assert!(elements.element(4).is_some());
+    }
+
+    // Dropping the child detached, but did not destroy, its live grandchild.
+    runtime
+        .evaluate_main_thread_script(
+            "__AppendElement(__CreatePage('card', 0), globalThis.grandchild); \
+             __FlushElementTree();",
+        )
+        .expect("reattach the detached grandchild");
+
+    runtime
+        .evaluate_main_thread_script("globalThis.grandchild = undefined;")
+        .expect("release grandchild wrapper");
+    runtime.collect_garbage();
+    assert!(elements.tree().element(4).is_none());
+}
+
+#[test]
+fn an_unowned_inline_child_is_reclaimed_instead_of_being_rooted_by_the_tree() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              __AppendElement(__CreatePage('card', 0), __CreateView(0));
+            };
+            ",
+        )
+        .expect("main-thread script");
+    runtime.collect_garbage();
+    assert!(
+        elements.tree().element(2).is_none(),
+        "native tree membership must not create a hidden JS lease"
+    );
+}
+
+#[test]
+fn realm_teardown_releases_every_remaining_element_wrapper() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              globalThis.owned = __CreateView(0);
+              __AppendElement(page, owned);
+            };
+            ",
+        )
+        .expect("main-thread script");
+    assert!(elements.tree().element(2).is_some());
+
+    drop(runtime);
+    let elements = elements.tree();
+    assert!(elements.element(2).is_none());
+    assert!(!elements.has_uncommitted_mutations());
 }
 
 #[test]
@@ -139,11 +437,14 @@ fn process_data_runs_before_render_page_and_feeds_it() {
     runtime
         .run_main_thread_script(
             r"
+            globalThis.owned = [];
             globalThis.processData = function () { return 3; };
             globalThis.renderPage = function (count) {
               const page = __CreatePage('card', 0);
               for (let index = 0; index < count; index += 1) {
-                __AppendElement(page, __CreateView(0));
+                const child = __CreateView(0);
+                owned.push(child);
+                __AppendElement(page, child);
               }
             };
             ",
@@ -205,26 +506,26 @@ fn a_throwing_render_page_surfaces_the_javascript_error() {
 }
 
 #[test]
-fn papi_rejections_become_javascript_exceptions() {
+fn forged_objects_are_rejected_as_element_handles() {
     let mut runtime = bare_runtime();
     let error = runtime
         .run_main_thread_script(
             r"
             globalThis.renderPage = function () {
               __CreatePage('card', 0);
-              __AppendElement(9999, 8888);
+              __AppendElement({ ElementId: 9999 }, { ElementId: 8888 });
             };
             ",
         )
-        .expect_err("an unknown handle");
+        .expect_err("a forged handle");
     assert!(
-        error.to_string().contains("9999"),
-        "the error should name the bad handle: {error}"
+        error.to_string().contains("bridge-owned host objects"),
+        "the error should reject ordinary JS objects: {error}"
     );
 }
 
 #[test]
-fn element_handles_accept_the_full_u32_range() {
+fn numeric_ids_are_not_element_handles() {
     let mut runtime = bare_runtime();
     let error = runtime
         .run_main_thread_script(
@@ -234,32 +535,30 @@ fn element_handles_accept_the_full_u32_range() {
             };
             ",
         )
-        .expect_err("an unknown u32::MAX handle");
+        .expect_err("a numeric handle");
     assert!(
-        error
-            .to_string()
-            .contains("no element has the unique id 4294967295"),
-        "the u32 handle should reach lynx-element validation: {error}"
+        error.to_string().contains("element object"),
+        "numbers must not cross as element handles: {error}"
     );
 }
 
 #[test]
-fn the_null_handle_is_rejected_by_append_element() {
+fn null_is_rejected_by_append_element() {
     let mut runtime = bare_runtime();
     let error = runtime
         .run_main_thread_script(
             r"
             globalThis.renderPage = function () {
-              __AppendElement(0, __CreateView(0));
+              __AppendElement(null, __CreateView(0));
             };
             ",
         )
-        .expect_err("the null handle");
-    assert!(error.to_string().contains("null handle"), "{error}");
+        .expect_err("a null handle");
+    assert!(error.to_string().contains("element object"), "{error}");
 }
 
 #[test]
-fn non_numeric_handles_are_rejected_rather_than_coerced() {
+fn non_element_values_are_rejected_rather_than_coerced() {
     let mut runtime = bare_runtime();
     let error = runtime
         .run_main_thread_script(
@@ -316,8 +615,11 @@ fn a_second_boot_re_renders_into_the_same_tree() {
     runtime
         .run_main_thread_script(
             r"
+            globalThis.owned = [];
             globalThis.renderPage = function () {
-              __AppendElement(__CreatePage('card', 0), __CreateView(0));
+              const child = __CreateView(0);
+              owned.push(child);
+              __AppendElement(__CreatePage('card', 0), child);
             };
             ",
         )
@@ -334,14 +636,20 @@ fn microtasks_queued_during_render_run_before_the_call_returns() {
     runtime
         .run_main_thread_script(
             r"
+            globalThis.owned = [];
             globalThis.renderPage = function () {
               const page = __CreatePage('card', 0);
               Promise.resolve().then(function () {
-                __AppendElement(page, __CreateView(0));
-                __AppendElement(page, __CreateView(0));
+                const first = __CreateView(0);
+                const second = __CreateView(0);
+                owned.push(first, second);
+                __AppendElement(page, first);
+                __AppendElement(page, second);
                 __FlushElementTree();
               });
-              __AppendElement(page, __CreateView(0));
+              const immediate = __CreateView(0);
+              owned.push(immediate);
+              __AppendElement(page, immediate);
             };
             ",
         )
