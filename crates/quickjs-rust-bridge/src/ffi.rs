@@ -12,6 +12,8 @@ pub(crate) const HOST_ARG_BOOLEAN: i32 = 2;
 pub(crate) const HOST_ARG_NUMBER: i32 = 3;
 pub(crate) const HOST_ARG_STRING: i32 = 4;
 pub(crate) const HOST_ARG_OBJECT: i32 = 5;
+pub(crate) const HOST_RESULT_ARGUMENT: i32 = 7;
+pub(crate) const HOST_RESULT_VALUE: i32 = 8;
 
 #[repr(C)]
 pub(crate) struct QjsHostArg {
@@ -29,6 +31,8 @@ pub(crate) struct QjsHostResult {
     pub(crate) text: *const u16,
     pub(crate) text_len: usize,
     pub(crate) payload: u32,
+    pub(crate) argument_index: usize,
+    pub(crate) value: *mut QjsValue,
 }
 
 pub(crate) type HostDispatch = unsafe extern "C" fn(
@@ -88,7 +92,17 @@ unsafe extern "C" {
         units: *const u16,
         length: usize,
     ) -> *mut QjsValue;
+    pub(crate) fn qjs_new_host_object(context: *mut JSContext, payload: u32) -> *mut QjsValue;
+    pub(crate) fn qjs_value_dup(context: *mut JSContext, value: *const QjsValue) -> *mut QjsValue;
     pub(crate) fn qjs_value_free(context: *mut JSContext, value: *mut QjsValue);
+    pub(crate) fn qjs_weak_value_new(
+        context: *mut JSContext,
+        value: *const QjsValue,
+    ) -> *mut QjsValue;
+    pub(crate) fn qjs_weak_value_upgrade(
+        context: *mut JSContext,
+        weak: *const QjsValue,
+    ) -> *mut QjsValue;
     pub(crate) fn qjs_value_kind(context: *mut JSContext, value: *const QjsValue) -> c_int;
     pub(crate) fn qjs_value_get_boolean(
         context: *mut JSContext,

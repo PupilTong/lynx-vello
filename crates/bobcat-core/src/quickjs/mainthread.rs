@@ -69,17 +69,13 @@ use std::fmt;
 use std::rc::Rc;
 
 use lynx_element::{ElementId, ElementTree, PapiError};
-use quickjs_rust_bridge::{self as quickjs, HostFunctionError, HostValue};
+use quickjs_rust_bridge::{self as quickjs, HostFunctionError, HostFunctionOutput, HostValue};
 
 use super::{QuickJsInitializationError, QuickJsScriptEngine};
 use crate::script::ScriptError;
 
 const MAIN_THREAD_SOURCE_NAME: &str = "main-thread.js";
 const BOOT_SOURCE_NAME: &str = "<lynx boot>";
-/// Source name for the tiny JavaScript facade that preserves PAPI return-value
-/// identity without exposing the bridge's private native helper names.
-const ELEMENT_OBJECT_API_SOURCE_NAME: &str = "<element object API>";
-
 const WRAPPER_PREFIX: &str = "//# allFunctionsCalledOnLoad\n(function(){ \"use strict\"; \
                               const navigator=void 0,postMessage=void 0,window=void 0; ";
 const WRAPPER_SUFFIX: &str = " \n })()\n";
@@ -95,36 +91,6 @@ const BOOT_SEQUENCE: &str = r#"(function () {
   }
   renderPage(data);
   __FlushElementTree();
-})()"#;
-
-/// `__CreatePage` is the one idempotent creator, so one closure slot preserves
-/// its object identity without a general `ElementId -> wrapper` map.
-/// `__AppendElement` and `__RemoveElement` return their exact child argument,
-/// matching `appendChild`/`removeChild`, rather than manufacturing a second
-/// wrapper for the same native element.
-const ELEMENT_OBJECT_API: &str = r#"(function () {
-  "use strict";
-  const createPage = globalThis.__BobcatCreatePage;
-  const appendElement = globalThis.__BobcatAppendElement;
-  const removeElement = globalThis.__BobcatRemoveElement;
-  let page;
-  globalThis.__CreatePage = function __CreatePage(componentID, componentCSSID) {
-    if (page === undefined) {
-      page = createPage(componentID, componentCSSID);
-    }
-    return page;
-  };
-  globalThis.__AppendElement = function __AppendElement(parent, child) {
-    appendElement(parent, child);
-    return child;
-  };
-  globalThis.__RemoveElement = function __RemoveElement(parent, child) {
-    removeElement(parent, child);
-    return child;
-  };
-  delete globalThis.__BobcatCreatePage;
-  delete globalThis.__BobcatAppendElement;
-  delete globalThis.__BobcatRemoveElement;
 })()"#;
 
 /// Why running a main-thread script failed.
@@ -198,7 +164,7 @@ impl TreeHandle {
         let mut changed = false;
         for id in self.releases.drain() {
             // The document element is permanent and its one wrapper is rooted
-            // by the idempotent `__CreatePage` facade until realm teardown.
+            // by `MainThreadRuntime` until realm teardown.
             if id == 1 {
                 continue;
             }
@@ -264,6 +230,9 @@ impl Drop for TreeHandle {
 
 /// One `QuickJS` realm carrying the Lynx Element PAPI over the tree hand-off slot.
 pub struct MainThreadRuntime {
+    // Drop this Rust root before the realm; JS references, if any, remain
+    // ordinary QuickJS roots until the realm itself is torn down.
+    _page_wrapper: Rc<quickjs::Value>,
     engine: QuickJsScriptEngine,
     tree: Rc<RefCell<TreeHandle>>,
     on_flush: Rc<dyn Fn()>,
@@ -286,9 +255,11 @@ impl MainThreadRuntime {
     ) -> Result<Self, QuickJsInitializationError> {
         let mut engine = QuickJsScriptEngine::new()?;
         let on_flush: Rc<dyn Fn()> = Rc::new(on_flush);
-        let tree = install_element_papi(&mut engine.realm, elements, Rc::clone(&on_flush))
-            .map_err(QuickJsInitializationError::from_quickjs)?;
+        let (tree, page_wrapper) =
+            install_element_papi(&mut engine.realm, elements, Rc::clone(&on_flush))
+                .map_err(QuickJsInitializationError::from_quickjs)?;
         Ok(Self {
+            _page_wrapper: page_wrapper,
             engine,
             tree,
             on_flush,
@@ -349,7 +320,7 @@ fn install_element_papi(
     realm: &mut quickjs::Realm,
     elements: SharedTree,
     on_flush: Rc<dyn Fn()>,
-) -> Result<Rc<RefCell<TreeHandle>>, quickjs::Error> {
+) -> Result<(Rc<RefCell<TreeHandle>>, Rc<quickjs::Value>), quickjs::Error> {
     let releases = realm.host_object_release_queue();
     let returned_tree_uncommitted = elements.tree().has_uncommitted_mutations();
     let handle = Rc::new(RefCell::new(TreeHandle {
@@ -359,15 +330,20 @@ fn install_element_papi(
         releases,
     }));
 
+    let page_wrapper = Rc::new(realm.host_object(1)?);
+    let page_for_create = Rc::downgrade(&page_wrapper);
+
     let tree = Rc::clone(&handle);
-    realm.define_global_function("__BobcatCreatePage", 2, move |arguments| {
+    realm.define_global_function_with_output("__CreatePage", 2, move |arguments| {
         let component_id = string_argument("__CreatePage", arguments, 0)?;
         let component_css_id = i32_argument("__CreatePage", arguments, 1)?;
-        let id = tree
-            .borrow_mut()
+        tree.borrow_mut()
             .tree()
             .create_page(component_id, component_css_id);
-        Ok(element_value(id))
+        let page = page_for_create
+            .upgrade()
+            .ok_or_else(|| HostFunctionError::new("the permanent page wrapper was released"))?;
+        Ok(HostFunctionOutput::existing((*page).clone()))
     })?;
 
     let tree = Rc::clone(&handle);
@@ -382,28 +358,28 @@ fn install_element_papi(
     })?;
 
     let tree = Rc::clone(&handle);
-    realm.define_global_function("__BobcatAppendElement", 2, move |arguments| {
+    realm.define_global_function_with_output("__AppendElement", 2, move |arguments| {
         let parent = element_argument("__AppendElement", arguments, 0)?;
         let child = element_argument("__AppendElement", arguments, 1)?;
         tree.borrow_mut()
             .tree()
             .append_element(parent, child)
             .map_err(papi_error)?;
-        Ok(HostValue::Undefined)
+        Ok(HostFunctionOutput::argument(1))
     })?;
 
-    // The private native half of `__RemoveElement(parent, child)`. It only
-    // detaches the direct child; neither wrapper nor native element is
-    // retired. The JS facade returns the exact child argument.
+    // `__RemoveElement(parent, child)` only detaches the direct child; neither
+    // wrapper nor native element is retired. It returns the exact child
+    // argument.
     let tree = Rc::clone(&handle);
-    realm.define_global_function("__BobcatRemoveElement", 2, move |arguments| {
+    realm.define_global_function_with_output("__RemoveElement", 2, move |arguments| {
         let parent = element_argument("__RemoveElement", arguments, 0)?;
         let child = element_argument("__RemoveElement", arguments, 1)?;
         tree.borrow_mut()
             .tree()
             .remove_element(parent, child)
             .map_err(papi_error)?;
-        Ok(HostValue::Undefined)
+        Ok(HostFunctionOutput::argument(1))
     })?;
 
     let tree = Rc::clone(&handle);
@@ -423,18 +399,7 @@ fn install_element_papi(
         Ok(HostValue::Undefined)
     })?;
 
-    // Install the public page/append/remove facades only after their private
-    // native functions exist, then remove the private names from the global
-    // object.
-    realm.evaluate(
-        quickjs::EvalSource {
-            name: Some(ELEMENT_OBJECT_API_SOURCE_NAME),
-            ..quickjs::EvalSource::new(ELEMENT_OBJECT_API)
-        },
-        quickjs::EvalOptions::default(),
-    )?;
-
-    Ok(handle)
+    Ok((handle, page_wrapper))
 }
 
 fn element_value(id: ElementId) -> HostValue {

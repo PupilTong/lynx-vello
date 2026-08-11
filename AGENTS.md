@@ -225,7 +225,12 @@ useful signal for currently-compatible versions of those libraries.
   narrow boundary (undefined/null/bool/number/string plus one bridge-owned
   private-class `HostObject` carrying `u32`) — ordinary objects, arrays,
   proxies, functions, symbols, and ill-formed UTF-16 strings are rejected on
-  the way in rather than lossily converted. `HostObject` finalizers append
+  the way in rather than lossily converted. The explicit
+  `function_with_output` seam may return an accepted argument or an existing
+  same-realm `Value` with its JS identity intact. `Realm::downgrade` creates a
+  real QuickJS `WeakRef`; its `WeakValue::upgrade` uses bridge-captured native
+  intrinsics, so an externally owned cache may upgrade inside a leaf callback
+  without executing application JS. `HostObject` finalizers append
   payloads to a cloneable Rust-only release queue; they invoke no user code
   and never re-enter QuickJS. This also means a callback
   cannot call back into its own realm, so host functions are strictly

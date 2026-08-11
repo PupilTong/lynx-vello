@@ -361,6 +361,163 @@ mod host_objects {
     }
 }
 
+mod weak_values {
+    use quickjs_rust_bridge::{EvalOptions, EvalSource, Realm, ValueKind};
+
+    #[test]
+    fn a_weak_value_tracks_javascript_reachability() {
+        let mut realm = Realm::new().unwrap();
+        let target = realm
+            .evaluate(
+                EvalSource::new("globalThis.kept = ({ answer: 42 })"),
+                EvalOptions::default(),
+            )
+            .unwrap();
+        let weak = realm.downgrade(&target).unwrap();
+        drop(target);
+
+        realm.run_gc();
+        let upgraded = weak
+            .upgrade()
+            .unwrap()
+            .expect("the global JS reference keeps the target alive");
+        assert_eq!(upgraded.kind(), ValueKind::Object);
+        drop(upgraded);
+
+        drop(
+            realm
+                .evaluate(
+                    EvalSource::new("globalThis.kept = undefined"),
+                    EvalOptions::default(),
+                )
+                .unwrap(),
+        );
+        realm.run_gc();
+        assert!(weak.upgrade().unwrap().is_none());
+    }
+
+    #[test]
+    fn weak_handles_do_not_use_mutable_public_weakref_builtins() {
+        let mut realm = Realm::new().unwrap();
+        drop(
+            realm
+                .evaluate(
+                    EvalSource::new(
+                        "const OriginalWeakRef = WeakRef; \
+                         globalThis.WeakRef = function () { throw new Error('replaced'); }; \
+                         OriginalWeakRef.prototype.deref = function () { throw new Error('replaced'); };",
+                    ),
+                    EvalOptions::default(),
+                )
+                .unwrap(),
+        );
+        let target = realm
+            .evaluate(EvalSource::new("({})"), EvalOptions::default())
+            .unwrap();
+        let weak = realm.downgrade(&target).unwrap();
+
+        assert!(weak.upgrade().unwrap().is_some());
+        drop(target);
+        realm.run_gc();
+        assert!(weak.upgrade().unwrap().is_none());
+    }
+}
+
+mod identity_returns {
+    use std::rc::Rc;
+
+    use quickjs_rust_bridge::{
+        EvalOptions, EvalSource, HostFunctionError, HostFunctionOutput, HostObject, HostValue,
+        Realm,
+    };
+
+    #[test]
+    fn a_host_function_can_return_its_exact_argument() {
+        let mut realm = Realm::new().unwrap();
+        realm
+            .define_global_function("create", 0, |_| Ok(HostValue::Object(HostObject::new(7))))
+            .unwrap();
+        realm
+            .define_global_function_with_output("identity", 1, |_| {
+                Ok(HostFunctionOutput::argument(0))
+            })
+            .unwrap();
+
+        let result = realm
+            .evaluate(
+                EvalSource::new("const object = create(); identity(object) === object"),
+                EvalOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(result.as_boolean(), Some(true));
+    }
+
+    #[test]
+    fn a_host_function_can_upgrade_and_return_an_externally_held_weak_value() {
+        let mut realm = super::tight_realm();
+        let existing = realm
+            .evaluate(
+                EvalSource::new("globalThis.existing = ({})"),
+                EvalOptions::default(),
+            )
+            .unwrap();
+        let cached = Rc::new(realm.downgrade(&existing).unwrap());
+        let for_handler = Rc::downgrade(&cached);
+        realm
+            .define_global_function_with_output("getExisting", 0, move |_| {
+                let weak = for_handler
+                    .upgrade()
+                    .ok_or_else(|| HostFunctionError::new("weak cache was released"))?;
+                let value = weak
+                    .upgrade()
+                    .map_err(|error| HostFunctionError::new(error.to_string()))?
+                    .ok_or_else(|| HostFunctionError::new("existing value was collected"))?;
+                Ok(HostFunctionOutput::existing(value))
+            })
+            .unwrap();
+        drop(existing);
+
+        let result = realm
+            .evaluate(
+                EvalSource::new(
+                    "let same = true; \
+                     for (let i = 0; i < 50000; i++) { \
+                       if (getExisting() !== globalThis.existing) same = false; \
+                     } \
+                     same",
+                ),
+                EvalOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(result.as_boolean(), Some(true));
+    }
+
+    #[test]
+    fn returning_a_value_from_another_realm_is_rejected() {
+        let mut realm = Realm::new().unwrap();
+        let mut other = Realm::new().unwrap();
+        let foreign = Rc::new(
+            other
+                .evaluate(EvalSource::new("({})"), EvalOptions::default())
+                .unwrap(),
+        );
+        let for_handler = Rc::downgrade(&foreign);
+        realm
+            .define_global_function_with_output("foreign", 0, move |_| {
+                let value = for_handler
+                    .upgrade()
+                    .ok_or_else(|| HostFunctionError::new("foreign value was released"))?;
+                Ok(HostFunctionOutput::existing((*value).clone()))
+            })
+            .unwrap();
+
+        let error = realm
+            .evaluate(EvalSource::new("foreign()"), EvalOptions::default())
+            .expect_err("a foreign return value must not cross realms");
+        assert!(error.message.contains("different QuickJS realm"), "{error}");
+    }
+}
+
 mod release {
     use std::cell::Cell;
     use std::rc::Rc;
