@@ -192,21 +192,23 @@ useful signal for currently-compatible versions of those libraries.
   the engine's explicit lifetime primitive are installed (`__CreatePage`,
   `__CreateView`, `__AppendElement`, `__RemoveElement`, `__DropElement`,
   `__FlushElementTree`); unsupported globals remain precise `ReferenceError`s.
-  Each `__Create*` returns a private-class Rust-backed JS object carrying the
-  internal `u32` id. QuickJS reachability owns that handle: its finalizer only
-  queues the id, and the next safe flush/evaluation boundary detaches and
-  retires that element alone. Direct children become detached subtree roots
-  and remain live under their own wrappers; no parallel element lease count
+  The Rust host functions are methods on `globalThis.bobcat` and exchange only
+  primitive values, including numeric `ElementId`s. A JavaScript facade uses a
+  `WeakRef` arena to return one canonical live wrapper per id, registers each
+  non-page wrapper with a `FinalizationRegistry` whose cleanup calls
+  `bobcat.drop_element(id)`, and installs the `__`-prefixed compatibility
+  globals on `globalThis`. Dropping or collecting a wrapper detaches and
+  retires that element alone; direct children become detached subtree roots
+  and remain live under their own wrappers. No parallel element lease count
   exists. `__RemoveElement` only detaches its child and returns the same live
-  wrapper. The page alone has a one-slot wrapper cache because
-  `__CreatePage` is idempotent. `Engine` retains the realm for its whole
+  wrapper. `Engine` retains the realm for its whole
   lifetime; a spawned main thread remains alive after boot until engine
   shutdown, while `run_script` stores its owner-thread realm inline. The
-  spawned thread runs one tracing collection before entering its long-lived
-  idle state so unreachable wrapper cycles do not wait until view teardown.
-  Synchronous boot does not force a collection. A GC-only retirement commits
-  itself only when the returned tree was clean; it never makes an earlier
-  abandoned, unflushed batch visible.
+  spawned thread runs one explicit collection checkpoint before entering its
+  long-lived idle state so unreachable wrapper cycles do not wait until view
+  teardown. Synchronous boot does not force a collection. A GC-only retirement
+  commits itself only when the returned tree was clean; it never makes an
+  earlier abandoned, unflushed batch visible.
   Core composes but does not own Lynx tag/root/UA policy; that vocabulary and
   `type ElementId = u32` remain defined by `lynx-element`.
   The resource module must not decode images/fonts/templates, upload render
@@ -222,17 +224,9 @@ useful signal for currently-compatible versions of those libraries.
   `define_global_function` back a JS callable with a Rust `FnMut`, dispatched
   through one C trampoline (`JS_NewCFunctionData` + a realm-owned callback
   table reached via the context opaque). Host callbacks speak `HostValue`, a
-  narrow boundary (undefined/null/bool/number/string plus one bridge-owned
-  private-class `HostObject` carrying `u32`) — ordinary objects, arrays,
-  proxies, functions, symbols, and ill-formed UTF-16 strings are rejected on
-  the way in rather than lossily converted. The explicit
-  `function_with_output` seam may return an accepted argument or an existing
-  same-realm `Value` with its JS identity intact. `Realm::downgrade` creates a
-  real QuickJS `WeakRef`; its `WeakValue::upgrade` uses bridge-captured native
-  intrinsics, so an externally owned cache may upgrade inside a leaf callback
-  without executing application JS. `HostObject` finalizers append
-  payloads to a cloneable Rust-only release queue; they invoke no user code
-  and never re-enter QuickJS. This also means a callback
+  primitives-only boundary (undefined/null/bool/number/string) — objects,
+  arrays, functions, symbols, and ill-formed UTF-16 strings are rejected on
+  the way in rather than lossily converted — which also means a callback
   cannot call back into its own realm, so host functions are strictly
   leaf calls today. A slot is vacated for the duration of its call (a guard
   that restores it on the unwinding path too), so a panicking callback becomes
@@ -360,8 +354,8 @@ useful signal for currently-compatible versions of those libraries.
   script, so `__CreatePage` just binds the component fields and returns it),
   and `__DropElement` on the page is a `PapiError` (recorded limit). Recorded
   limits (see the crate docs, which are authoritative): the layer itself
-  speaks internal ids while the optional QuickJS adapter supplies GC-owned
-  element objects; `parentComponentUniqueID` is recorded but not honored
+  speaks internal ids while the optional QuickJS adapter supplies JS-owned
+  wrappers; `parentComponentUniqueID` is recorded but not honored
   (there is no `__SetCSSId`); no `rpx`/`ppx` view-unit policy; the UA sheet
   covers only the three documented Lynx computed defaults. It must not absorb
   DOM/CSS core behavior, and nothing below it may depend on it.

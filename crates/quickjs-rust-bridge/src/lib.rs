@@ -1,19 +1,4 @@
 //! A small, safe Rust boundary around the repository's pinned `QuickJS` source.
-//!
-//! Host-function arguments exchange JavaScript primitives and one deliberately
-//! narrow object type: [`HostValue::Object`]. Such an object is created only by
-//! this bridge, carries an opaque `u32` payload, and is recognized by its
-//! private `QuickJS` class rather than by properties JavaScript could forge.
-//! Plain objects, arrays, functions, symbols, and proxies remain rejected.
-//! [`HostFunctionOutput`] is the explicit return-only seam for preserving the
-//! identity of an accepted argument or an existing rooted [`Value`].
-//!
-//! `QuickJS` owns each wrapper's reachability. Its class finalizer does not call
-//! application code or re-enter `QuickJS`: it only appends the payload to a
-//! cloneable [`HostObjectReleaseQueue`]. A host function such as a tree flush
-//! can drain that queue while JavaScript is still on the stack. [`WeakValue`]
-//! exposes a real `QuickJS` weak reference for host-side identity caches without
-//! keeping the target alive.
 
 mod ffi;
 
@@ -419,9 +404,8 @@ mod implementation {
                         )
                     })
             }
-            ffi::HOST_ARG_OBJECT => Ok(HostValue::Object(HostObject::new(argument.payload))),
             _ => Err(HostFunctionError::new(
-                "host functions accept primitives and bridge-owned host objects only",
+                "host functions accept undefined, null, Boolean, Number, and String arguments only",
             )),
         }
     }
@@ -438,17 +422,6 @@ mod implementation {
         let table = unsafe { &*opaque.cast::<HostTable>() };
         let _ = catch_unwind(AssertUnwindSafe(|| {
             table.note_released(handler.cast::<HostSlot>());
-        }));
-    }
-
-    /// Fired by the garbage collector for a bridge-owned host object.
-    ///
-    /// The only observable action is appending the payload to the realm's
-    /// release queue. No application callback runs here.
-    unsafe extern "C" fn host_object_release(opaque: *mut c_void, payload: u32) {
-        let table = unsafe { &*opaque.cast::<HostTable>() };
-        let _ = catch_unwind(AssertUnwindSafe(|| {
-            table.host_object_releases.push(payload);
         }));
     }
 
@@ -488,12 +461,8 @@ mod implementation {
             }
         };
 
-        if let Err(error) = table.write_result(&returned, argument_count, unsafe { &mut *result }) {
-            throw_host_error(context, &error.message);
-            1
-        } else {
-            0
-        }
+        table.write_result(&returned, unsafe { &mut *result });
+        0
     }
 
     fn interrupt_error(reason: InterruptReason, phase: ErrorPhase) -> Error {
@@ -514,98 +483,7 @@ mod implementation {
         }
     }
 
-    /// A Rust-backed object crossing the host-function boundary.
-    ///
-    /// [`HostObject::new`] is used only as a host-function return value. The
-    /// bridge creates a private-class `QuickJS` object around it; JavaScript
-    /// cannot forge an accepted object by copying properties. When that exact
-    /// wrapper is later passed to a host function, its [`HostObject`] appears
-    /// in [`HostValue::Object`].
-    ///
-    /// This type deliberately does not implement `Clone`. A handler receives
-    /// arguments through a borrowed slice, so the wrapper value cannot escape
-    /// the synchronous call or be returned as a second wrapper. Copy
-    /// [`HostObject::payload`] if the host needs durable identity.
-    #[derive(Debug, PartialEq, Eq)]
-    pub struct HostObject {
-        payload: u32,
-    }
-
-    impl HostObject {
-        #[must_use]
-        pub const fn new(payload: u32) -> Self {
-            Self { payload }
-        }
-
-        #[must_use]
-        pub const fn payload(&self) -> u32 {
-            self.payload
-        }
-    }
-
-    /// Payloads with no remaining bridge-owned JS wrapper.
-    ///
-    /// A payload arrives either when a completed wrapper becomes unreachable
-    /// or when allocating that wrapper fails after the host has produced it.
-    ///
-    /// Clones share one owner-thread-bound queue. [`drain`](Self::drain) only
-    /// takes a Rust `Vec<u32>`; it neither enters `QuickJS` nor invokes a user
-    /// callback, so a leaf host function may safely call it while JavaScript is
-    /// on the stack (notably immediately before committing a tree flush).
-    #[derive(Clone)]
-    pub struct HostObjectReleaseQueue {
-        inner: Rc<RefCell<Vec<u32>>>,
-    }
-
-    impl HostObjectReleaseQueue {
-        fn new() -> Self {
-            Self {
-                inner: Rc::new(RefCell::new(Vec::new())),
-            }
-        }
-
-        fn push(&self, payload: u32) {
-            self.inner.borrow_mut().push(payload);
-        }
-
-        #[must_use]
-        pub fn drain(&self) -> Vec<u32> {
-            mem::take(&mut *self.inner.borrow_mut())
-        }
-
-        #[must_use]
-        pub fn is_empty(&self) -> bool {
-            self.inner.borrow().is_empty()
-        }
-
-        #[must_use]
-        pub fn len(&self) -> usize {
-            self.inner.borrow().len()
-        }
-    }
-
-    impl fmt::Debug for HostObjectReleaseQueue {
-        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter
-                .debug_struct("HostObjectReleaseQueue")
-                .field("pending", &self.len())
-                .finish_non_exhaustive()
-        }
-    }
-
-    /// A value crossing the host-function boundary.
-    ///
-    /// Arguments reach a handler without any per-argument allocation: the shim
-    /// flattens `argv` into a stack array of tags and values, and the reader
-    /// below collects them into a `SmallVec`. Only a string argument allocates,
-    /// and only to own its decoded text.
-    ///
-    /// Host functions speak primitives plus [`HostObject`]. Ordinary objects,
-    /// arrays, functions, symbols, and proxies are rejected rather than handed
-    /// to the callback. Strings arrive already
-    /// validated as well-formed UTF-16, so a lone surrogate is a rejected
-    /// argument, not a lossy conversion.
-    #[derive(Debug, PartialEq)]
+    #[derive(Clone, Debug, PartialEq)]
     #[non_exhaustive]
     pub enum HostValue {
         Undefined,
@@ -613,42 +491,6 @@ mod implementation {
         Boolean(bool),
         Number(f64),
         String(String),
-        Object(HostObject),
-    }
-
-    /// An identity-preserving host-function return value.
-    ///
-    /// Ordinary host functions return [`HostValue`] and keep the bridge's
-    /// primitives-only contract. The explicit `*_with_output` APIs additionally
-    /// allow a handler to return one of its original accepted arguments or an
-    /// already-rooted same-realm [`Value`] without manufacturing another JS
-    /// object.
-    #[derive(Debug)]
-    #[non_exhaustive]
-    pub enum HostFunctionOutput {
-        HostValue(HostValue),
-        Argument(usize),
-        Existing(Value),
-    }
-
-    impl HostFunctionOutput {
-        /// Returns the exact JavaScript value passed at `index`.
-        #[must_use]
-        pub const fn argument(index: usize) -> Self {
-            Self::Argument(index)
-        }
-
-        /// Returns the exact JavaScript value represented by `value`.
-        #[must_use]
-        pub fn existing(value: Value) -> Self {
-            Self::Existing(value)
-        }
-    }
-
-    impl From<HostValue> for HostFunctionOutput {
-        fn from(value: HostValue) -> Self {
-            Self::HostValue(value)
-        }
     }
 
     /// Error returned by a Rust host function.
@@ -686,8 +528,7 @@ mod implementation {
 
     impl std::error::Error for HostFunctionError {}
 
-    type HostHandler =
-        Box<dyn FnMut(&[HostValue]) -> Result<HostFunctionOutput, HostFunctionError>>;
+    type HostHandler = Box<dyn FnMut(&[HostValue]) -> Result<HostValue, HostFunctionError>>;
 
     struct HostSlot {
         handler: RefCell<HostHandler>,
@@ -697,11 +538,6 @@ mod implementation {
         context: Cell<*mut ffi::JSContext>,
         pending_release: RefCell<Vec<*mut HostSlot>>,
         return_text: RefCell<Vec<u16>>,
-        /// Receives payloads from the private-class finalizer or a failed
-        /// wrapper construction. It is separate from closure reclamation so a
-        /// host function can drain it during the same JavaScript evaluation
-        /// that left a payload without an owner.
-        host_object_releases: HostObjectReleaseQueue,
     }
 
     impl HostTable {
@@ -710,73 +546,33 @@ mod implementation {
                 context: Cell::new(ptr::null_mut()),
                 pending_release: RefCell::new(Vec::new()),
                 return_text: RefCell::new(Vec::new()),
-                host_object_releases: HostObjectReleaseQueue::new(),
             }
         }
 
-        fn write_result(
-            &self,
-            value: &HostFunctionOutput,
-            argument_count: usize,
-            out: &mut ffi::QjsHostResult,
-        ) -> Result<(), HostFunctionError> {
+        fn write_result(&self, value: &HostValue, out: &mut ffi::QjsHostResult) {
             out.text = ptr::null();
             out.text_len = 0;
             out.number = 0.0;
-            out.payload = 0;
-            out.argument_index = 0;
-            out.value = ptr::null_mut();
             match value {
-                HostFunctionOutput::HostValue(value) => match value {
-                    HostValue::Undefined => out.kind = ffi::HOST_ARG_UNDEFINED,
-                    HostValue::Null => out.kind = ffi::HOST_ARG_NULL,
-                    HostValue::Boolean(value) => {
-                        out.kind = ffi::HOST_ARG_BOOLEAN;
-                        out.number = if *value { 1.0 } else { 0.0 };
-                    }
-                    HostValue::Number(value) => {
-                        out.kind = ffi::HOST_ARG_NUMBER;
-                        out.number = *value;
-                    }
-                    HostValue::String(value) => {
-                        let mut scratch = self.return_text.borrow_mut();
-                        scratch.clear();
-                        scratch.extend(value.encode_utf16());
-                        out.kind = ffi::HOST_ARG_STRING;
-                        out.text = scratch.as_ptr();
-                        out.text_len = scratch.len();
-                    }
-                    HostValue::Object(object) => {
-                        out.kind = ffi::HOST_ARG_OBJECT;
-                        out.payload = object.payload();
-                    }
-                },
-                HostFunctionOutput::Argument(index) => {
-                    if *index >= argument_count {
-                        return Err(HostFunctionError::new(format!(
-                            "host return argument {index} is out of range for {argument_count} arguments"
-                        )));
-                    }
-                    out.kind = ffi::HOST_RESULT_ARGUMENT;
-                    out.argument_index = *index;
+                HostValue::Undefined => out.kind = ffi::HOST_ARG_UNDEFINED,
+                HostValue::Null => out.kind = ffi::HOST_ARG_NULL,
+                HostValue::Boolean(value) => {
+                    out.kind = ffi::HOST_ARG_BOOLEAN;
+                    out.number = if *value { 1.0 } else { 0.0 };
                 }
-                HostFunctionOutput::Existing(value) => {
-                    let context = self.context.get();
-                    if context != value.inner.owner.context.as_ptr() {
-                        return Err(HostFunctionError::new(
-                            "host return value belongs to a different QuickJS realm",
-                        ));
-                    }
-                    out.kind = ffi::HOST_RESULT_VALUE;
-                    out.value = unsafe { ffi::qjs_value_dup(context, value.inner.raw.as_ptr()) };
-                    if out.value.is_null() {
-                        return Err(HostFunctionError::new(
-                            "QuickJS could not duplicate the host return value",
-                        ));
-                    }
+                HostValue::Number(value) => {
+                    out.kind = ffi::HOST_ARG_NUMBER;
+                    out.number = *value;
+                }
+                HostValue::String(value) => {
+                    let mut scratch = self.return_text.borrow_mut();
+                    scratch.clear();
+                    scratch.extend(value.encode_utf16());
+                    out.kind = ffi::HOST_ARG_STRING;
+                    out.text = scratch.as_ptr();
+                    out.text_len = scratch.len();
                 }
             }
-            Ok(())
         }
 
         fn note_released(&self, slot: *mut HostSlot) {
@@ -895,7 +691,6 @@ mod implementation {
                     runtime.as_ptr(),
                     Some(host_dispatch),
                     Some(host_release),
-                    Some(host_object_release),
                     (&raw const *hosts).cast_mut().cast(),
                 );
                 Ok(Self {
@@ -914,18 +709,6 @@ mod implementation {
             InterruptHandle {
                 shared: Arc::clone(&self.inner.interrupt.shared),
             }
-        }
-
-        /// A cloneable view of this realm's host-object release queue.
-        ///
-        /// A host function may capture the clone and drain it without calling
-        /// back into the realm. This is stronger than waiting for `evaluate`
-        /// to return: an object finalized (or whose wrapper allocation failed)
-        /// earlier in one evaluation can be retired before a later host call
-        /// in that same evaluation commits externally visible state.
-        #[must_use]
-        pub fn host_object_release_queue(&self) -> HostObjectReleaseQueue {
-            self.inner.hosts.host_object_releases.clone()
         }
 
         fn reclaim(&mut self) {
@@ -978,29 +761,6 @@ mod implementation {
         where
             F: FnMut(&[HostValue]) -> Result<HostValue, HostFunctionError> + 'static,
         {
-            let mut handler = handler;
-            self.function_with_output(name, arity, move |arguments| {
-                handler(arguments).map(HostFunctionOutput::from)
-            })
-        }
-
-        /// Creates a callable whose handler may preserve JavaScript identity in
-        /// its return value.
-        ///
-        /// This is the same leaf callback seam as [`Realm::function`]; the only
-        /// extension is [`HostFunctionOutput`]. Returning an existing [`Value`]
-        /// duplicates its `QuickJS` root for the JavaScript caller. Capturing a
-        /// same-realm `Value` directly in the handler therefore has the same
-        /// reference-cycle caveat documented on [`Realm::function`].
-        pub fn function_with_output<F>(
-            &mut self,
-            name: &str,
-            arity: u32,
-            handler: F,
-        ) -> Result<Value, Error>
-        where
-            F: FnMut(&[HostValue]) -> Result<HostFunctionOutput, HostFunctionError> + 'static,
-        {
             self.reclaim();
             let name = property_name(name)?;
             let arity = i32::try_from(arity).map_err(int_conversion_error)?;
@@ -1030,22 +790,6 @@ mod implementation {
             F: FnMut(&[HostValue]) -> Result<HostValue, HostFunctionError> + 'static,
         {
             let function = self.function(name, arity, handler)?;
-            let global = self.global_object()?;
-            self.set_property(&global, name, &function)
-        }
-
-        /// Defines a global callable backed by an identity-preserving handler —
-        /// [`Realm::function_with_output`] plus [`Realm::set_property`].
-        pub fn define_global_function_with_output<F>(
-            &mut self,
-            name: &str,
-            arity: u32,
-            handler: F,
-        ) -> Result<(), Error>
-        where
-            F: FnMut(&[HostValue]) -> Result<HostFunctionOutput, HostFunctionError> + 'static,
-        {
-            let function = self.function_with_output(name, arity, handler)?;
             let global = self.global_object()?;
             self.set_property(&global, name, &function)
         }
@@ -1129,32 +873,6 @@ mod implementation {
             self.construct(ErrorPhase::ConstructValue, |context| unsafe {
                 ffi::qjs_new_string_utf16(context, units.as_ptr(), units.len())
             })
-        }
-
-        /// Creates the private-class JavaScript wrapper for one host payload.
-        ///
-        /// The returned [`Value`] is a strong root. Once every strong JS/Rust
-        /// reference is gone, the wrapper's finalizer appends `payload` to this
-        /// realm's [`HostObjectReleaseQueue`].
-        pub fn host_object(&mut self, payload: u32) -> Result<Value, Error> {
-            self.reclaim();
-            self.construct(ErrorPhase::ConstructValue, |context| unsafe {
-                ffi::qjs_new_host_object(context, payload)
-            })
-        }
-
-        /// Creates a real `QuickJS` weak reference to `value`.
-        ///
-        /// [`WeakValue`] keeps the realm and its internal `WeakRef` alive, but it
-        /// does not keep `value` alive. Only objects, functions, and weakly
-        /// referenceable symbols are accepted by `QuickJS`.
-        pub fn downgrade(&mut self, value: &Value) -> Result<WeakValue, Error> {
-            self.reclaim();
-            self.ensure_affinity(value, ErrorPhase::ConstructValue)?;
-            let weak = self.construct(ErrorPhase::ConstructValue, |context| unsafe {
-                ffi::qjs_weak_value_new(context, value.inner.raw.as_ptr())
-            })?;
-            Ok(WeakValue { inner: weak })
         }
 
         pub fn evaluate(
@@ -1440,52 +1158,6 @@ mod implementation {
     #[derive(Clone)]
     pub struct Value {
         inner: Rc<ValueInner>,
-    }
-
-    /// A `QuickJS` `WeakRef` that does not keep its target alive.
-    ///
-    /// Unlike [`std::rc::Weak`], this follows JavaScript reachability: JS
-    /// references to the target keep it upgradeable even after every Rust
-    /// [`Value`] root has been dropped. The weak handle itself remains bound to
-    /// its owner realm and upgrades through [`WeakValue::upgrade`].
-    #[derive(Clone)]
-    pub struct WeakValue {
-        inner: Value,
-    }
-
-    impl fmt::Debug for WeakValue {
-        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.debug_struct("WeakValue").finish_non_exhaustive()
-        }
-    }
-
-    impl WeakValue {
-        /// Returns a new strong root while the JavaScript target is live, or
-        /// `None` after it has been collected.
-        ///
-        /// This invokes only the bridge-captured native `WeakRef.prototype.deref`
-        /// and cannot run application JavaScript, so an externally owned weak
-        /// cache may upgrade from inside a leaf host callback. The weak handle
-        /// itself keeps its realm alive; storing it directly in a host closure
-        /// owned by that realm would therefore form a cycle. Keep the cache in
-        /// external Rust state and capture [`std::rc::Weak`] to that state.
-        pub fn upgrade(&self) -> Result<Option<Value>, Error> {
-            let owner = Rc::clone(&self.inner.inner.owner);
-            let context = owner.context.as_ptr();
-            let raw =
-                unsafe { ffi::qjs_weak_value_upgrade(context, self.inner.inner.raw.as_ptr()) };
-            let value = if let Some(raw) = NonNull::new(raw) {
-                Value::from_raw(owner, raw)
-            } else {
-                let realm = Realm { inner: owner };
-                return Err(realm.capture_exception(context, ErrorPhase::ConstructValue));
-            };
-            if value.kind() == ValueKind::Undefined {
-                Ok(None)
-            } else {
-                Ok(Some(value))
-            }
-        }
     }
 
     impl fmt::Debug for Value {
@@ -2326,7 +1998,6 @@ mod implementation {
                         HostValue::Boolean(value) => format!("boolean:{value}"),
                         HostValue::Number(value) => format!("number:{value}"),
                         HostValue::String(value) => format!("string:{value}"),
-                        HostValue::Object(_) => "host-object".to_owned(),
                     }))
                 })
                 .unwrap();
@@ -2367,7 +2038,10 @@ mod implementation {
             let error = realm
                 .evaluate(EvalSource::new("take({})"), EvalOptions::default())
                 .expect_err("an object argument");
-            assert!(error.message.contains("bridge-owned"), "{error:?}");
+            assert!(
+                error.message.contains("undefined, null, Boolean"),
+                "{error:?}"
+            );
         }
 
         #[test]
@@ -2503,7 +2177,6 @@ mod implementation {
 }
 
 pub use implementation::{
-    Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, HostFunctionError, HostFunctionOutput,
-    HostObject, HostObjectReleaseQueue, HostValue, InterruptHandle, JobDrain, Realm, RealmOptions,
-    SourceLocation, SourceType, Value, ValueKind, WeakValue,
+    Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, HostFunctionError, HostValue,
+    InterruptHandle, JobDrain, Realm, RealmOptions, SourceLocation, SourceType, Value, ValueKind,
 };

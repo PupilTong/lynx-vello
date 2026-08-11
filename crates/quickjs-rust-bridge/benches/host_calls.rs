@@ -7,14 +7,11 @@
 //! measurement is dominated by the boundary crossing rather than by compilation
 //! or realm setup.
 //!
-//! The four benchmarked call shapes mirror `__FlushElementTree` (no arguments),
-//! `__CreateView` (one number returning a host object), `__AppendElement` (two
-//! host objects), and `__CreatePage` (a string plus a number returning a host
-//! object).
+//! The shapes mirror the four PAPI members that exist: `__FlushElementTree`
+//! (no arguments), `__CreateView` (one number), `__AppendElement` (two numbers
+//! returning one), and `__CreatePage` (a string plus a number).
 
-use quickjs_rust_bridge::{
-    EvalOptions, EvalSource, HostFunctionError, HostObject, HostValue, Realm, Value,
-};
+use quickjs_rust_bridge::{EvalOptions, EvalSource, HostFunctionError, HostValue, Realm, Value};
 
 fn main() {
     divan::main();
@@ -49,8 +46,8 @@ fn driver(install: impl FnOnce(&mut Realm), call_expression: &str) -> (Realm, Va
     clippy::unnecessary_wraps,
     reason = "the signature is dictated by the host-function boundary"
 )]
-fn object_handler(_: &[HostValue]) -> Result<HostValue, HostFunctionError> {
-    Ok(HostValue::Object(HostObject::new(1)))
+fn number_handler(_: &[HostValue]) -> Result<HostValue, HostFunctionError> {
+    Ok(HostValue::Number(1.0))
 }
 
 #[divan::bench]
@@ -67,41 +64,27 @@ fn no_arguments(bencher: divan::Bencher) {
 }
 
 #[divan::bench]
-fn create_object(bencher: divan::Bencher) {
+fn one_number_argument(bencher: divan::Bencher) {
     let (mut realm, run, undefined) = driver(
         |realm| {
             realm
-                .define_global_function("create", 1, object_handler)
+                .define_global_function("create", 1, number_handler)
                 .expect("install");
         },
-        "(create(0), 1)",
+        "create(0)",
     );
-    let releases = realm.host_object_release_queue();
-    bencher.bench_local(|| {
-        let result = realm.call(&run, Some(&undefined), &[]).expect("run");
-        drop(releases.drain());
-        result
-    });
+    bencher.bench_local(|| realm.call(&run, Some(&undefined), &[]).expect("run"));
 }
 
 #[divan::bench]
-fn two_object_arguments(bencher: divan::Bencher) {
+fn two_number_arguments(bencher: divan::Bencher) {
     let (mut realm, run, undefined) = driver(
         |realm| {
             realm
-                .define_global_function("make", 0, object_handler)
+                .define_global_function("append", 2, number_handler)
                 .expect("install");
-            realm
-                .define_global_function("append", 2, |_| Ok(HostValue::Undefined))
-                .expect("install");
-            realm
-                .evaluate(
-                    EvalSource::new("globalThis.parent = make(); globalThis.child = make();"),
-                    EvalOptions::default(),
-                )
-                .expect("create retained handles");
         },
-        "(append(parent, child), 1)",
+        "append(1, 2)",
     );
     bencher.bench_local(|| realm.call(&run, Some(&undefined), &[]).expect("run"));
 }
@@ -111,17 +94,12 @@ fn string_and_number_arguments(bencher: divan::Bencher) {
     let (mut realm, run, undefined) = driver(
         |realm| {
             realm
-                .define_global_function("page", 2, object_handler)
+                .define_global_function("page", 2, number_handler)
                 .expect("install");
         },
-        "(page('card', 0), 1)",
+        "page('card', 0)",
     );
-    let releases = realm.host_object_release_queue();
-    bencher.bench_local(|| {
-        let result = realm.call(&run, Some(&undefined), &[]).expect("run");
-        drop(releases.drain());
-        result
-    });
+    bencher.bench_local(|| realm.call(&run, Some(&undefined), &[]).expect("run"));
 }
 
 #[divan::bench]

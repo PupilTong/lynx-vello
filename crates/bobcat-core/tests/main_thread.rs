@@ -62,6 +62,9 @@ fn create_view_returns_a_handle_append_element_accepts() {
               if (typeof view !== 'object' || view === null) {
                 throw new Error('__CreateView must return an object, got ' + typeof view);
               }
+              if (view.ElementId !== 2) {
+                throw new Error('the wrapper must expose its ElementId');
+              }
               const appended = __AppendElement(page, view);
               if (appended !== view) {
                 throw new Error('__AppendElement must return the child');
@@ -71,6 +74,35 @@ fn create_view_returns_a_handle_append_element_accepts() {
             ",
         )
         .expect("main-thread script");
+    let elements = elements.tree();
+    assert!(elements.page().is_some());
+    assert!(elements.element(2).is_some());
+}
+
+#[test]
+fn the_numeric_host_api_is_namespaced_under_bobcat() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              if (typeof bobcat !== 'object' || bobcat === null) {
+                throw new Error('the bobcat host namespace is missing');
+              }
+              if (typeof create_view !== 'undefined') {
+                throw new Error('native host methods must not be globals');
+              }
+              const page = bobcat.create_page('card', 0);
+              const view = bobcat.create_view(0);
+              if (typeof page !== 'number' || typeof view !== 'number') {
+                throw new Error('bobcat host methods must exchange numeric ids');
+              }
+              bobcat.append_element(page, view);
+            };
+            ",
+        )
+        .expect("main-thread script");
+
     let elements = elements.tree();
     assert!(elements.page().is_some());
     assert!(elements.element(2).is_some());
@@ -236,7 +268,7 @@ fn gc_retires_an_attached_element_after_its_last_js_owner_is_released() {
         "the self-cycle remains until a tracing collection"
     );
 
-    runtime.collect_garbage();
+    runtime.collect_garbage().expect("garbage collection");
     let elements = elements.tree();
     assert!(elements.element(2).is_none());
     assert!(!elements.has_uncommitted_mutations());
@@ -245,6 +277,45 @@ fn gc_retires_an_attached_element_after_its_last_js_owner_is_released() {
         2,
         "a GC-only removal is committed and presented as its own batch"
     );
+}
+
+#[test]
+fn finalization_registry_coalesces_multiple_drops_into_one_flush() {
+    let elements = SharedTree::new(ElementTree::new(VIEWPORT, PageConfig::default()));
+    let flushes = Rc::new(Cell::new(0));
+    let observed_flushes = Rc::clone(&flushes);
+    let mut runtime = MainThreadRuntime::new(elements.clone(), move || {
+        observed_flushes.set(observed_flushes.get() + 1);
+    })
+    .expect("QuickJS realm");
+
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const first = __CreateView(0);
+              const second = __CreateView(0);
+              first.self = first;
+              second.self = second;
+              globalThis.owned = [first, second];
+              __AppendElement(page, first);
+              __AppendElement(page, second);
+            };
+            ",
+        )
+        .expect("main-thread script");
+    assert_eq!(flushes.get(), 1, "the boot has one explicit flush");
+
+    runtime
+        .evaluate_main_thread_script("globalThis.owned = undefined;")
+        .expect("release both wrappers");
+    runtime.collect_garbage().expect("garbage collection");
+
+    let elements = elements.tree();
+    assert!(elements.element(2).is_none());
+    assert!(elements.element(3).is_none());
+    assert_eq!(flushes.get(), 2, "both GC drops share one commit");
 }
 
 #[test]
@@ -280,11 +351,12 @@ fn a_gc_release_does_not_commit_an_abandoned_batch_from_an_earlier_evaluation() 
         .expect("leave a batch open without flushing");
     assert!(elements.tree().has_uncommitted_mutations());
 
-    // Releasing this unrelated wrapper is a native GC mutation, but it must
-    // join the already-dirty tree without presenting the abandoned append.
+    // Releasing this unrelated wrapper and collecting it must join the
+    // already-dirty tree without presenting the abandoned append.
     runtime
         .evaluate_main_thread_script("globalThis.victim = undefined;")
         .expect("release an earlier wrapper");
+    runtime.collect_garbage().expect("garbage collection");
     {
         let elements = elements.tree();
         assert!(elements.element(2).is_none());
@@ -329,7 +401,7 @@ fn collecting_each_wrapper_retires_only_its_element_and_detaches_live_children()
     runtime
         .evaluate_main_thread_script("globalThis.parent = undefined;")
         .expect("release parent");
-    runtime.collect_garbage();
+    runtime.collect_garbage().expect("garbage collection");
     {
         let elements = elements.tree();
         assert!(elements.element(2).is_none());
@@ -349,7 +421,7 @@ fn collecting_each_wrapper_retires_only_its_element_and_detaches_live_children()
     runtime
         .evaluate_main_thread_script("globalThis.child = undefined;")
         .expect("release child wrapper");
-    runtime.collect_garbage();
+    runtime.collect_garbage().expect("garbage collection");
     {
         let elements = elements.tree();
         assert!(elements.element(3).is_none());
@@ -367,7 +439,7 @@ fn collecting_each_wrapper_retires_only_its_element_and_detaches_live_children()
     runtime
         .evaluate_main_thread_script("globalThis.grandchild = undefined;")
         .expect("release grandchild wrapper");
-    runtime.collect_garbage();
+    runtime.collect_garbage().expect("garbage collection");
     assert!(elements.tree().element(4).is_none());
 }
 
@@ -383,33 +455,11 @@ fn an_unowned_inline_child_is_reclaimed_instead_of_being_rooted_by_the_tree() {
             ",
         )
         .expect("main-thread script");
-    runtime.collect_garbage();
+    runtime.collect_garbage().expect("garbage collection");
     assert!(
         elements.tree().element(2).is_none(),
         "native tree membership must not create a hidden JS lease"
     );
-}
-
-#[test]
-fn realm_teardown_releases_every_remaining_element_wrapper() {
-    let (mut runtime, elements) = runtime();
-    runtime
-        .run_main_thread_script(
-            r"
-            globalThis.renderPage = function () {
-              const page = __CreatePage('card', 0);
-              globalThis.owned = __CreateView(0);
-              __AppendElement(page, owned);
-            };
-            ",
-        )
-        .expect("main-thread script");
-    assert!(elements.tree().element(2).is_some());
-
-    drop(runtime);
-    let elements = elements.tree();
-    assert!(elements.element(2).is_none());
-    assert!(!elements.has_uncommitted_mutations());
 }
 
 #[test]
@@ -519,7 +569,7 @@ fn forged_objects_are_rejected_as_element_handles() {
         )
         .expect_err("a forged handle");
     assert!(
-        error.to_string().contains("bridge-owned host objects"),
+        error.to_string().contains("element wrapper"),
         "the error should reject ordinary JS objects: {error}"
     );
 }
@@ -537,7 +587,7 @@ fn numeric_ids_are_not_element_handles() {
         )
         .expect_err("a numeric handle");
     assert!(
-        error.to_string().contains("element object"),
+        error.to_string().contains("element wrapper"),
         "numbers must not cross as element handles: {error}"
     );
 }
@@ -554,7 +604,7 @@ fn null_is_rejected_by_append_element() {
             ",
         )
         .expect_err("a null handle");
-    assert!(error.to_string().contains("element object"), "{error}");
+    assert!(error.to_string().contains("element wrapper"), "{error}");
 }
 
 #[test]

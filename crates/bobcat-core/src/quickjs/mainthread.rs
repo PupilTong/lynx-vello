@@ -1,6 +1,6 @@
-//! Main-thread (MTS) script execution and the Lynx Element PAPI globals.
+//! Main-thread (MTS) script execution and the Lynx Element PAPI facade.
 //!
-//! This is the crate `AGENTS.md` designates for "Lynx host globals": the
+//! This is the crate `AGENTS.md` designates for the Lynx host API: the
 //! generic `QuickJS` bridge below stays Lynx-unaware, and the element vocabulary
 //! above lives in `lynx-element`. What is assembled here is the realm a
 //! `.web.bundle`'s `lepusCode.root` runs in.
@@ -46,17 +46,13 @@
 //!
 //! # Recorded limits
 //!
-//! - **Six Element PAPI members are installed** — `__CreatePage`, `__CreateView`,
-//!   `__AppendElement`, `__RemoveElement`, `__DropElement`, `__FlushElementTree` (see
-//!   `lynx-element`'s crate docs). A bundle that reaches for anything else gets a `ReferenceError`
-//!   naming the missing global, which is the intended failure: a silently wrong render would be
-//!   worse.
-//! - **Element handles are opaque Rust-backed JavaScript objects.** Each object carries one
-//!   `ElementId`; its `QuickJS` class finalizer queues that id, and the next safe batch boundary
-//!   retires only that element. Its direct children become detached roots and remain live while
-//!   their own wrappers are reachable. JavaScript reachability is the ownership model — there is no
-//!   parallel native lease count. The permanent page wrapper is the sole cached handle because
-//!   `__CreatePage` is idempotent and must return the same object.
+//! - **Six numeric host methods live on `globalThis.bobcat`** — `create_page`, `create_view`,
+//!   `append_element`, `remove_element`, `drop_element`, and `flush_element_tree`. A JavaScript
+//!   facade installs the matching web-core globals before bundle code runs.
+//! - **Element handles are JavaScript-owned wrapper objects.** A weak arena returns the same live
+//!   wrapper for one `ElementId`; a `FinalizationRegistry` calls `bobcat.drop_element(id)` after
+//!   the last wrapper becomes unreachable. Its direct children become detached roots and remain
+//!   live while their own wrappers are reachable. There is no parallel native lease count.
 //! - **The non-element main-thread globals are absent** (`lynx`, `SystemInfo`, `__globalProps`,
 //!   `_ReportError`, `__OnLifecycleEvent`, `__LoadLepusChunk`, `_I18nResourceTranslation`,
 //!   `_AddEventListener`, `__QueryComponent`).
@@ -69,13 +65,14 @@ use std::fmt;
 use std::rc::Rc;
 
 use lynx_element::{ElementId, ElementTree, PapiError};
-use quickjs_rust_bridge::{self as quickjs, HostFunctionError, HostFunctionOutput, HostValue};
+use quickjs_rust_bridge::{self as quickjs, HostFunctionError, HostValue};
 
 use super::{QuickJsInitializationError, QuickJsScriptEngine};
 use crate::script::ScriptError;
 
 const MAIN_THREAD_SOURCE_NAME: &str = "main-thread.js";
 const BOOT_SOURCE_NAME: &str = "<lynx boot>";
+const ELEMENT_WRAPPER_SOURCE_NAME: &str = "<bobcat element wrappers>";
 const WRAPPER_PREFIX: &str = "//# allFunctionsCalledOnLoad\n(function(){ \"use strict\"; \
                               const navigator=void 0,postMessage=void 0,window=void 0; ";
 const WRAPPER_SUFFIX: &str = " \n })()\n";
@@ -91,6 +88,141 @@ const BOOT_SEQUENCE: &str = r#"(function () {
   }
   renderPage(data);
   __FlushElementTree();
+})()"#;
+
+const ELEMENT_WRAPPER_API: &str = r#"(function () {
+  "use strict";
+
+  const native = globalThis.bobcat;
+  const wrappers = [];
+  const elementEntries = new WeakMap();
+  const pendingFinalizers = [];
+  const resolvedPromise = Promise.resolve();
+  const promiseThen = Promise.prototype.then;
+  let finalizerDrainScheduled = false;
+  let batchOpen = false;
+
+  function flush() {
+    try {
+      return native.flush_element_tree();
+    } finally {
+      batchOpen = false;
+    }
+  }
+
+  function drainFinalizers() {
+    finalizerDrainScheduled = false;
+    const queued = pendingFinalizers.splice(0);
+    const batchWasOpen = batchOpen;
+    let dropped = false;
+
+    for (const entry of queued) {
+      // A wrapper for the same id may have been recreated after this cleanup
+      // was queued. That newer live owner supersedes the stale callback.
+      if (wrappers[entry.id] !== entry) {
+        continue;
+      }
+      wrappers[entry.id] = undefined;
+      native.drop_element(entry.id);
+      dropped = true;
+    }
+
+    if (dropped) {
+      batchOpen = true;
+      // Do not make an earlier abandoned application batch visible merely
+      // because a FinalizationRegistry cleanup happened later.
+      if (!batchWasOpen) {
+        flush();
+      }
+    }
+  }
+
+  const finalizer = new FinalizationRegistry(function (entry) {
+    if (wrappers[entry.id] !== entry) {
+      return;
+    }
+    pendingFinalizers.push(entry);
+    if (!finalizerDrainScheduled) {
+      finalizerDrainScheduled = true;
+      promiseThen.call(resolvedPromise, drainFinalizers);
+    }
+  });
+
+  function wrapperFor(id) {
+    const current = wrappers[id];
+    if (current !== undefined) {
+      const wrapper = current.reference.deref();
+      if (wrapper !== undefined) {
+        return wrapper;
+      }
+    }
+
+    const wrapper = {};
+    Object.defineProperty(wrapper, "ElementId", {
+      value: id,
+      enumerable: true,
+    });
+    const entry = { id: id, reference: new WeakRef(wrapper) };
+    wrappers[id] = entry;
+    elementEntries.set(wrapper, entry);
+    // The page is permanent in ElementTree and therefore has no GC drop.
+    if (id !== 1) {
+      finalizer.register(wrapper, entry, wrapper);
+    }
+    return wrapper;
+  }
+
+  function elementEntry(functionName, value, index) {
+    const entry = elementEntries.get(value);
+    if (entry === undefined) {
+      throw new TypeError(
+        functionName + " expects an element wrapper for argument " + index
+      );
+    }
+    return entry;
+  }
+
+  globalThis.__CreatePage = function __CreatePage(componentId, componentCssId) {
+    const id = native.create_page(componentId, componentCssId);
+    batchOpen = true;
+    return wrapperFor(id);
+  };
+
+  globalThis.__CreateView = function __CreateView(parentComponentId) {
+    const id = native.create_view(parentComponentId);
+    batchOpen = true;
+    return wrapperFor(id);
+  };
+
+  globalThis.__AppendElement = function __AppendElement(parent, child) {
+    const parentEntry = elementEntry("__AppendElement", parent, 0);
+    const childEntry = elementEntry("__AppendElement", child, 1);
+    native.append_element(parentEntry.id, childEntry.id);
+    batchOpen = true;
+    return child;
+  };
+
+  globalThis.__RemoveElement = function __RemoveElement(parent, child) {
+    const parentEntry = elementEntry("__RemoveElement", parent, 0);
+    const childEntry = elementEntry("__RemoveElement", child, 1);
+    native.remove_element(parentEntry.id, childEntry.id);
+    batchOpen = true;
+    return child;
+  };
+
+  globalThis.__DropElement = function __DropElement(element) {
+    const entry = elementEntry("__DropElement", element, 0);
+    native.drop_element(entry.id);
+    batchOpen = true;
+    finalizer.unregister(element);
+    if (wrappers[entry.id] === entry) {
+      wrappers[entry.id] = undefined;
+    }
+  };
+
+  globalThis.__FlushElementTree = function __FlushElementTree() {
+    return flush();
+  };
 })()"#;
 
 /// Why running a main-thread script failed.
@@ -135,107 +267,38 @@ use crate::engine::SharedTree;
 struct TreeHandle {
     slot: SharedTree,
     taken: Option<ElementTree>,
-    /// Whether the tree returned to `slot` carries an abandoned, uncommitted
-    /// batch from an earlier evaluation. A later GC-only mutation must not
-    /// accidentally turn that half-applied batch into a visible commit.
-    returned_tree_uncommitted: bool,
-    /// Payloads queued by the `QuickJS` class finalizer. The finalizer itself
-    /// performs no tree work and invokes no application callback.
-    releases: quickjs::HostObjectReleaseQueue,
 }
 
 impl TreeHandle {
     fn tree(&mut self) -> &mut ElementTree {
         if self.taken.is_none() {
-            let tree = self.slot.take();
-            debug_assert_eq!(
-                tree.has_uncommitted_mutations(),
-                self.returned_tree_uncommitted,
-                "the hand-off metadata must match the returned tree"
-            );
-            self.taken = Some(tree);
+            self.taken = Some(self.slot.take());
         }
         self.taken
             .as_mut()
             .expect("the batch tree was just ensured")
     }
 
-    fn drain_released_elements(&mut self) -> bool {
-        let mut changed = false;
-        for id in self.releases.drain() {
-            // The document element is permanent and its one wrapper is rooted
-            // by `MainThreadRuntime` until realm teardown.
-            if id == 1 {
-                continue;
-            }
-            match self.tree().drop_element(id) {
-                Ok(()) => changed = true,
-                Err(PapiError::UnknownElement(_)) => {}
-                Err(error) => {
-                    debug_assert!(false, "unexpected GC element release error: {error}");
-                }
-            }
-        }
-        changed
-    }
-
     fn flush(&mut self) {
-        self.drain_released_elements();
         let mut tree = match self.taken.take() {
             Some(tree) => tree,
             None => self.slot.take(),
         };
         tree.flush_element_tree();
-        self.returned_tree_uncommitted = false;
         self.slot.put(tree);
     }
 
     fn release(&mut self) {
         if let Some(tree) = self.taken.take() {
-            self.returned_tree_uncommitted = tree.has_uncommitted_mutations();
             self.slot.put(tree);
-        }
-    }
-
-    /// Finishes one evaluation and reports whether a GC-only batch was
-    /// committed. Releases queued after the script's final explicit flush need
-    /// their own commit; releases joining an already-open, abandoned batch do
-    /// not make that half-applied batch observable.
-    fn finish_evaluation(&mut self) -> bool {
-        let batch_was_open = self.taken.is_some();
-        let earlier_batch_was_abandoned = !batch_was_open && self.returned_tree_uncommitted;
-        let changed = self.drain_released_elements();
-        if changed && !batch_was_open && !earlier_batch_was_abandoned {
-            self.flush();
-            true
-        } else {
-            self.release();
-            false
-        }
-    }
-}
-
-impl Drop for TreeHandle {
-    fn drop(&mut self) {
-        // `Realm` teardown finalizes every remaining wrapper before the host
-        // closures release their last `Rc<TreeHandle>`. Drain those final ids
-        // and always return a taken tree to its hand-off slot.
-        if self.drain_released_elements() {
-            self.flush();
-        } else {
-            self.release();
         }
     }
 }
 
 /// One `QuickJS` realm carrying the Lynx Element PAPI over the tree hand-off slot.
 pub struct MainThreadRuntime {
-    // Drop this Rust root before the realm; JS references, if any, remain
-    // ordinary QuickJS roots until the realm itself is torn down.
-    _page_wrapper: Rc<quickjs::Value>,
     engine: QuickJsScriptEngine,
     tree: Rc<RefCell<TreeHandle>>,
-    on_flush: Rc<dyn Fn()>,
 }
 
 impl fmt::Debug for MainThreadRuntime {
@@ -254,16 +317,9 @@ impl MainThreadRuntime {
         on_flush: impl Fn() + 'static,
     ) -> Result<Self, QuickJsInitializationError> {
         let mut engine = QuickJsScriptEngine::new()?;
-        let on_flush: Rc<dyn Fn()> = Rc::new(on_flush);
-        let (tree, page_wrapper) =
-            install_element_papi(&mut engine.realm, elements, Rc::clone(&on_flush))
-                .map_err(QuickJsInitializationError::from_quickjs)?;
-        Ok(Self {
-            _page_wrapper: page_wrapper,
-            engine,
-            tree,
-            on_flush,
-        })
+        let tree = install_element_papi(&mut engine.realm, elements, on_flush)
+            .map_err(QuickJsInitializationError::from_quickjs)?;
+        Ok(Self { engine, tree })
     }
 
     /// Evaluates a `.web.bundle`'s `lepusCode.root` in web-core's wrapper.
@@ -289,15 +345,17 @@ impl MainThreadRuntime {
         self.render_page()
     }
 
-    /// Runs a full `QuickJS` collection and commits any element releases it
-    /// discovers. This is primarily an embedder memory-pressure seam; ordinary
-    /// acyclic wrappers are finalized by `QuickJS` reference counting without an
-    /// explicit collection.
-    pub fn collect_garbage(&mut self) {
-        self.engine.realm.run_gc();
-        if self.tree.borrow_mut().finish_evaluation() {
-            (self.on_flush)();
-        }
+    /// Runs enough `QuickJS` collection passes to discover cyclic weak targets,
+    /// then executes the queued `FinalizationRegistry` jobs. This is primarily
+    /// an embedder memory-pressure seam.
+    pub fn collect_garbage(&mut self) -> Result<(), MainThreadError> {
+        let result = self
+            .engine
+            .collect_garbage()
+            .map(|_| ())
+            .map_err(|error| MainThreadError::from_engine("collecting garbage", &error));
+        self.tree.borrow_mut().release();
+        result
     }
 
     fn evaluate(&mut self, source: &str, name: &str, phase: &str) -> Result<(), MainThreadError> {
@@ -309,9 +367,7 @@ impl MainThreadRuntime {
             })
             .map(|_| ())
             .map_err(|error| MainThreadError::from_engine(phase, &error));
-        if self.tree.borrow_mut().finish_evaluation() {
-            (self.on_flush)();
-        }
+        self.tree.borrow_mut().release();
         result
     }
 }
@@ -319,91 +375,105 @@ impl MainThreadRuntime {
 fn install_element_papi(
     realm: &mut quickjs::Realm,
     elements: SharedTree,
-    on_flush: Rc<dyn Fn()>,
-) -> Result<(Rc<RefCell<TreeHandle>>, Rc<quickjs::Value>), quickjs::Error> {
-    let releases = realm.host_object_release_queue();
-    let returned_tree_uncommitted = elements.tree().has_uncommitted_mutations();
+    on_flush: impl Fn() + 'static,
+) -> Result<Rc<RefCell<TreeHandle>>, quickjs::Error> {
     let handle = Rc::new(RefCell::new(TreeHandle {
         slot: elements,
         taken: None,
-        returned_tree_uncommitted,
-        releases,
     }));
 
-    let page_wrapper = Rc::new(realm.host_object(1)?);
-    let page_for_create = Rc::downgrade(&page_wrapper);
+    let bobcat = realm.evaluate(
+        quickjs::EvalSource {
+            name: Some(ELEMENT_WRAPPER_SOURCE_NAME),
+            ..quickjs::EvalSource::new("Object.create(null)")
+        },
+        quickjs::EvalOptions::default(),
+    )?;
 
     let tree = Rc::clone(&handle);
-    realm.define_global_function_with_output("__CreatePage", 2, move |arguments| {
-        let component_id = string_argument("__CreatePage", arguments, 0)?;
-        let component_css_id = i32_argument("__CreatePage", arguments, 1)?;
-        tree.borrow_mut()
+    let function = realm.function("create_page", 2, move |arguments| {
+        let component_id = string_argument("bobcat.create_page", arguments, 0)?;
+        let component_css_id = i32_argument("bobcat.create_page", arguments, 1)?;
+        let id = tree
+            .borrow_mut()
             .tree()
             .create_page(component_id, component_css_id);
-        let page = page_for_create
-            .upgrade()
-            .ok_or_else(|| HostFunctionError::new("the permanent page wrapper was released"))?;
-        Ok(HostFunctionOutput::existing((*page).clone()))
+        Ok(element_id_value(id))
     })?;
+    realm.set_property(&bobcat, "create_page", &function)?;
 
     let tree = Rc::clone(&handle);
-    realm.define_global_function("__CreateView", 1, move |arguments| {
-        let parent_component = u32_argument("__CreateView", arguments, 0)?;
+    let function = realm.function("create_view", 1, move |arguments| {
+        let parent_component = u32_argument("bobcat.create_view", arguments, 0)?;
         let id = tree
             .borrow_mut()
             .tree()
             .create_view(parent_component)
             .map_err(papi_error)?;
-        Ok(element_value(id))
+        Ok(element_id_value(id))
     })?;
+    realm.set_property(&bobcat, "create_view", &function)?;
 
     let tree = Rc::clone(&handle);
-    realm.define_global_function_with_output("__AppendElement", 2, move |arguments| {
-        let parent = element_argument("__AppendElement", arguments, 0)?;
-        let child = element_argument("__AppendElement", arguments, 1)?;
-        tree.borrow_mut()
+    let function = realm.function("append_element", 2, move |arguments| {
+        let parent = element_argument("bobcat.append_element", arguments, 0)?;
+        let child = element_argument("bobcat.append_element", arguments, 1)?;
+        let appended = tree
+            .borrow_mut()
             .tree()
             .append_element(parent, child)
             .map_err(papi_error)?;
-        Ok(HostFunctionOutput::argument(1))
+        Ok(element_id_value(appended))
     })?;
+    realm.set_property(&bobcat, "append_element", &function)?;
 
-    // `__RemoveElement(parent, child)` only detaches the direct child; neither
-    // wrapper nor native element is retired. It returns the exact child
-    // argument.
     let tree = Rc::clone(&handle);
-    realm.define_global_function_with_output("__RemoveElement", 2, move |arguments| {
-        let parent = element_argument("__RemoveElement", arguments, 0)?;
-        let child = element_argument("__RemoveElement", arguments, 1)?;
-        tree.borrow_mut()
+    let function = realm.function("remove_element", 2, move |arguments| {
+        let parent = element_argument("bobcat.remove_element", arguments, 0)?;
+        let child = element_argument("bobcat.remove_element", arguments, 1)?;
+        let removed = tree
+            .borrow_mut()
             .tree()
             .remove_element(parent, child)
             .map_err(papi_error)?;
-        Ok(HostFunctionOutput::argument(1))
+        Ok(element_id_value(removed))
     })?;
+    realm.set_property(&bobcat, "remove_element", &function)?;
 
     let tree = Rc::clone(&handle);
-    realm.define_global_function("__DropElement", 1, move |arguments| {
-        let id = element_argument("__DropElement", arguments, 0)?;
+    let function = realm.function("drop_element", 1, move |arguments| {
+        let id = element_argument("bobcat.drop_element", arguments, 0)?;
         match tree.borrow_mut().tree().drop_element(id) {
             Ok(()) | Err(PapiError::UnknownElement(_)) => {}
             Err(error) => return Err(papi_error(error)),
         }
         Ok(HostValue::Undefined)
     })?;
+    realm.set_property(&bobcat, "drop_element", &function)?;
 
     let tree = Rc::clone(&handle);
-    realm.define_global_function("__FlushElementTree", 0, move |_arguments| {
+    let function = realm.function("flush_element_tree", 0, move |_arguments| {
         tree.borrow_mut().flush();
-        (on_flush)();
+        on_flush();
         Ok(HostValue::Undefined)
     })?;
+    realm.set_property(&bobcat, "flush_element_tree", &function)?;
 
-    Ok((handle, page_wrapper))
+    let global = realm.global_object()?;
+    realm.set_property(&global, "bobcat", &bobcat)?;
+    realm.evaluate(
+        quickjs::EvalSource {
+            name: Some(ELEMENT_WRAPPER_SOURCE_NAME),
+            ..quickjs::EvalSource::new(ELEMENT_WRAPPER_API)
+        },
+        quickjs::EvalOptions::default(),
+    )?;
+
+    Ok(handle)
 }
 
-fn element_value(id: ElementId) -> HostValue {
-    HostValue::Object(quickjs::HostObject::new(id))
+fn element_id_value(id: ElementId) -> HostValue {
+    HostValue::Number(f64::from(id))
 }
 
 fn papi_error(error: impl fmt::Display) -> HostFunctionError {
@@ -481,10 +551,10 @@ fn element_argument(
     arguments: &[HostValue],
     index: usize,
 ) -> Result<ElementId, HostFunctionError> {
-    match argument(arguments, index) {
-        HostValue::Object(object) => Ok(object.payload()),
-        _ => Err(HostFunctionError::new(format!(
-            "{function} expects an element object for argument {index}"
-        ))),
-    }
+    let id = u32_argument(function, arguments, index)?;
+    (id != 0).then_some(id).ok_or_else(|| {
+        HostFunctionError::new(format!(
+            "{function} expects an element id for argument {index}, got the null handle 0"
+        ))
+    })
 }

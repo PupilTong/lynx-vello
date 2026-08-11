@@ -30,16 +30,14 @@ typedef struct QjsUnhandledRejection {
 
 typedef int QjsInterruptCallback(void *opaque);
 
+
 enum QjsHostArgKind {
     QJS_ARG_UNDEFINED = 0,
     QJS_ARG_NULL = 1,
     QJS_ARG_BOOLEAN = 2,
     QJS_ARG_NUMBER = 3,
     QJS_ARG_STRING = 4,
-    QJS_ARG_HOST_OBJECT = 5,
-    QJS_ARG_UNSUPPORTED = 6,
-    QJS_RESULT_ARGUMENT = 7,
-    QJS_RESULT_VALUE = 8,
+    QJS_ARG_UNSUPPORTED = 5,
 };
 
 
@@ -48,17 +46,14 @@ typedef struct QjsHostArg {
     double number;
     const uint8_t *text;
     size_t text_len;
-    uint32_t payload;       /* Host object only. */
 } QjsHostArg;
+
 
 typedef struct QjsHostResult {
     int32_t kind;
     double number;
     const uint16_t *text;
     size_t text_len;
-    uint32_t payload;       /* Host object only. */
-    size_t argument_index;  /* Exact argument return only. */
-    QjsValue *value;        /* Existing rooted value only; ownership transfers. */
 } QjsHostResult;
 
 
@@ -67,11 +62,6 @@ typedef int QjsHostDispatch(void *opaque, void *handler, size_t argument_count,
 
 
 typedef void QjsHostRelease(void *opaque, void *handler);
-
-/* Reports one host-object payload either when object construction fails or
- * from the completed object's finalizer. The callback may enqueue the payload,
- * but must never enter QuickJS or invoke application code. */
-typedef void QjsHostObjectRelease(void *opaque, uint32_t payload);
 
 typedef struct QjsRuntime {
     JSRuntime *raw;
@@ -83,14 +73,10 @@ typedef struct QjsRuntime {
     void *interrupt_opaque;
     QjsHostDispatch *host_dispatch;
     QjsHostRelease *host_release;
-    QjsHostObjectRelease *host_object_release;
     void *host_opaque;
-    JSValue weak_ref_constructor;
-    JSValue weak_ref_new_target;
-    JSValue weak_ref_deref;
 } QjsRuntime;
 
-void qjs_context_free(JSContext *context);
+
 typedef struct QjsHostOwner {
     QjsRuntime *runtime;
     void *handler;
@@ -116,33 +102,6 @@ static void qjs_host_owner_finalizer(JSRuntime *raw, JSValue value) {
 static const JSClassDef qjs_host_owner_class = {
     "QjsHostFunctionOwner",
     .finalizer = qjs_host_owner_finalizer,
-};
-
-/* One externally visible, bridge-owned object. */
-typedef struct QjsHostObject {
-    QjsRuntime *runtime;
-    uint32_t payload;
-} QjsHostObject;
-
-static JSClassID qjs_host_object_class_id;
-
-static void qjs_host_object_finalizer(JSRuntime *raw, JSValue value) {
-    QjsHostObject *object = JS_GetOpaque(value, qjs_host_object_class_id);
-
-    (void)raw;
-    if (object == NULL) {
-        return;
-    }
-    if (object->runtime->host_object_release != NULL) {
-        object->runtime->host_object_release(object->runtime->host_opaque,
-                                             object->payload);
-    }
-    free(object);
-}
-
-static const JSClassDef qjs_host_object_class = {
-    "RustHostObject",
-    .finalizer = qjs_host_object_finalizer,
 };
 
 enum QjsValueKind {
@@ -181,71 +140,6 @@ static QjsValue *qjs_box(JSContext *ctx, JSValue value) {
     }
     boxed->value = value;
     return boxed;
-}
-
-/* This function is never invoked. It is an unreachable constructor object
- * used only as WeakRef's private `new_target`, keeping weak-handle creation
- * independent of mutations to the realm's public WeakRef.prototype. */
-static JSValue qjs_weak_ref_new_target(JSContext *context,
-                                       JSValueConst new_target, int argc,
-                                       JSValueConst *argv) {
-    (void)new_target;
-    (void)argc;
-    (void)argv;
-    return JS_ThrowInternalError(context,
-                                 "the private WeakRef constructor is not callable");
-}
-
-/* Capture the realm's built-in WeakRef operations before application code can
- * replace them. The private new-target and prototype are never exposed to JS,
- * so creating or upgrading a weak handle cannot invoke application code. */
-static int qjs_init_weak_value_api(QjsRuntime *runtime, JSContext *context) {
-    JSValue global = JS_UNDEFINED;
-    JSValue constructor = JS_UNDEFINED;
-    JSValue prototype = JS_UNDEFINED;
-    JSValue deref = JS_UNDEFINED;
-    JSValue new_target = JS_UNDEFINED;
-    JSValue private_prototype = JS_UNDEFINED;
-    int status = -1;
-
-    global = JS_GetGlobalObject(context);
-    if (JS_IsException(global)) goto done;
-    constructor = JS_GetPropertyStr(context, global, "WeakRef");
-    if (JS_IsException(constructor)) goto done;
-    prototype = JS_GetPropertyStr(context, constructor, "prototype");
-    if (JS_IsException(prototype)) goto done;
-    deref = JS_GetPropertyStr(context, prototype, "deref");
-    if (JS_IsException(deref)) goto done;
-    if (!JS_IsConstructor(context, constructor) ||
-        !JS_IsFunction(context, deref)) {
-        JS_ThrowInternalError(context,
-                              "QuickJS WeakRef intrinsics are unavailable");
-        goto done;
-    }
-
-    new_target = JS_NewCFunction2(context, qjs_weak_ref_new_target,
-                                  "", 0, JS_CFUNC_constructor, 0);
-    if (JS_IsException(new_target)) goto done;
-    private_prototype = JS_NewObject(context);
-    if (JS_IsException(private_prototype)) goto done;
-    if (JS_SetConstructor(context, new_target, private_prototype) < 0) goto done;
-
-    runtime->weak_ref_constructor = constructor;
-    constructor = JS_UNDEFINED;
-    runtime->weak_ref_new_target = new_target;
-    new_target = JS_UNDEFINED;
-    runtime->weak_ref_deref = deref;
-    deref = JS_UNDEFINED;
-    status = 0;
-
-done:
-    JS_FreeValue(context, private_prototype);
-    JS_FreeValue(context, new_target);
-    JS_FreeValue(context, deref);
-    JS_FreeValue(context, prototype);
-    JS_FreeValue(context, constructor);
-    JS_FreeValue(context, global);
-    return status;
 }
 
 static void qjs_promise_rejection_tracker(JSContext *context,
@@ -310,9 +204,6 @@ QjsRuntime *qjs_runtime_new(void) {
     if (runtime == NULL) {
         return NULL;
     }
-    runtime->weak_ref_constructor = JS_UNDEFINED;
-    runtime->weak_ref_new_target = JS_UNDEFINED;
-    runtime->weak_ref_deref = JS_UNDEFINED;
     runtime->raw = JS_NewRuntime();
     if (runtime->raw != NULL) {
         JS_SetCanBlock(runtime->raw, 0);
@@ -322,9 +213,6 @@ QjsRuntime *qjs_runtime_new(void) {
         JS_NewClassID(&qjs_host_owner_class_id);
         JS_NewClass(runtime->raw, qjs_host_owner_class_id,
                     &qjs_host_owner_class);
-        JS_NewClassID(&qjs_host_object_class_id);
-        JS_NewClass(runtime->raw, qjs_host_object_class_id,
-                    &qjs_host_object_class);
     } else {
         free(runtime);
         return NULL;
@@ -356,26 +244,11 @@ JSContext *qjs_context_new(QjsRuntime *runtime) {
     if (runtime->context != NULL) {
 
         JS_SetContextOpaque(runtime->context, runtime);
-        if (qjs_init_weak_value_api(runtime, runtime->context) < 0) {
-            qjs_context_free(runtime->context);
-            return NULL;
-        }
     }
     return runtime->context;
 }
 
 void qjs_context_free(JSContext *context) {
-    QjsRuntime *runtime = JS_GetContextOpaque(context);
-
-    if (runtime != NULL) {
-        JS_FreeValue(context, runtime->weak_ref_deref);
-        JS_FreeValue(context, runtime->weak_ref_new_target);
-        JS_FreeValue(context, runtime->weak_ref_constructor);
-        runtime->weak_ref_deref = JS_UNDEFINED;
-        runtime->weak_ref_new_target = JS_UNDEFINED;
-        runtime->weak_ref_constructor = JS_UNDEFINED;
-        runtime->context = NULL;
-    }
     JS_FreeContext(context);
 }
 
@@ -463,41 +336,11 @@ QjsValue *qjs_new_string_utf16(JSContext *context, const uint16_t *units,
     return qjs_box(context, qjs_string_from_utf16(context, units, length));
 }
 
-QjsValue *qjs_value_dup(JSContext *context, const QjsValue *value) {
-    return qjs_box(context, JS_DupValue(context, value->value));
-}
-
 void qjs_value_free(JSContext *context, QjsValue *value) {
     if (value != NULL) {
         JS_FreeValue(context, value->value);
         free(value);
     }
-}
-
-QjsValue *qjs_weak_value_new(JSContext *context, const QjsValue *value) {
-    QjsRuntime *runtime = JS_GetContextOpaque(context);
-    JSValue argument = value->value;
-
-    if (runtime == NULL || JS_IsUndefined(runtime->weak_ref_constructor)) {
-        JS_ThrowInternalError(context, "WeakRef support is not initialized");
-        return NULL;
-    }
-    return qjs_box(context,
-                   JS_CallConstructor2(context, runtime->weak_ref_constructor,
-                                       runtime->weak_ref_new_target, 1,
-                                       &argument));
-}
-
-QjsValue *qjs_weak_value_upgrade(JSContext *context, const QjsValue *weak) {
-    QjsRuntime *runtime = JS_GetContextOpaque(context);
-
-    if (runtime == NULL || JS_IsUndefined(runtime->weak_ref_deref)) {
-        JS_ThrowInternalError(context, "WeakRef support is not initialized");
-        return NULL;
-    }
-    return qjs_box(context,
-                   JS_Call(context, runtime->weak_ref_deref, weak->value,
-                           0, NULL));
 }
 
 int qjs_value_kind(JSContext *context, const QjsValue *value) {
@@ -660,12 +503,9 @@ void qjs_throw_error(JSContext *context, const char *message) {
 
 void qjs_runtime_set_host_dispatch(QjsRuntime *runtime,
                                    QjsHostDispatch *dispatch,
-                                   QjsHostRelease *release,
-                                   QjsHostObjectRelease *object_release,
-                                   void *opaque) {
+                                   QjsHostRelease *release, void *opaque) {
     runtime->host_dispatch = dispatch;
     runtime->host_release = release;
-    runtime->host_object_release = object_release;
     runtime->host_opaque = opaque;
 }
 
@@ -677,7 +517,6 @@ static void qjs_host_describe(JSContext *context, JSValueConst value,
     slot->text = NULL;
     slot->text_len = 0;
     slot->number = 0.0;
-    slot->payload = 0;
 
     if (JS_IsUndefined(value)) {
         slot->kind = QJS_ARG_UNDEFINED;
@@ -704,56 +543,12 @@ static void qjs_host_describe(JSContext *context, JSValueConst value,
         slot->kind = QJS_ARG_STRING;
         slot->text = (const uint8_t *)text;
         slot->text_len = length;
-    } else if (JS_IsObject(value)) {
-        QjsHostObject *object = JS_GetOpaque(value, qjs_host_object_class_id);
-        if (object == NULL) {
-            slot->kind = QJS_ARG_UNSUPPORTED;
-            return;
-        }
-        slot->kind = QJS_ARG_HOST_OBJECT;
-        slot->payload = object->payload;
     } else {
         slot->kind = QJS_ARG_UNSUPPORTED;
     }
 }
 
-/* A construction failure reports the payload immediately; a successful object
- * reports it from the finalizer. Both mean no JavaScript owner remains. */
-static JSValue qjs_host_object_new(JSContext *context, uint32_t payload) {
-    QjsRuntime *runtime = JS_GetContextOpaque(context);
-    QjsHostObject *object;
-    JSValue value;
-
-    if (runtime == NULL || runtime->host_object_release == NULL) {
-        return JS_ThrowInternalError(context,
-                                     "no host-object release queue is installed");
-    }
-    object = malloc(sizeof(*object));
-    if (object == NULL) {
-        runtime->host_object_release(runtime->host_opaque, payload);
-        return JS_ThrowOutOfMemory(context);
-    }
-    object->runtime = runtime;
-    object->payload = payload;
-
-    value = JS_NewObjectClass(context, (int)qjs_host_object_class_id);
-    if (JS_IsException(value)) {
-        runtime->host_object_release(runtime->host_opaque, payload);
-        free(object);
-        return value;
-    }
-    JS_SetOpaque(value, object);
-    return value;
-}
-
-QjsValue *qjs_new_host_object(JSContext *context, uint32_t payload) {
-    return qjs_box(context, qjs_host_object_new(context, payload));
-}
-
-static JSValue qjs_host_build(JSContext *context, const QjsHostResult *result,
-                              int argc, JSValueConst *argv) {
-    JSValue value;
-
+static JSValue qjs_host_build(JSContext *context, const QjsHostResult *result) {
     switch (result->kind) {
     case QJS_ARG_UNDEFINED:
         return JS_UNDEFINED;
@@ -765,22 +560,6 @@ static JSValue qjs_host_build(JSContext *context, const QjsHostResult *result,
         return JS_NewFloat64(context, result->number);
     case QJS_ARG_STRING:
         return qjs_string_from_utf16(context, result->text, result->text_len);
-    case QJS_ARG_HOST_OBJECT:
-        return qjs_host_object_new(context, result->payload);
-    case QJS_RESULT_ARGUMENT:
-        if (result->argument_index >= (size_t)argc) {
-            return JS_ThrowInternalError(context,
-                                         "host return argument is out of range");
-        }
-        return JS_DupValue(context, argv[result->argument_index]);
-    case QJS_RESULT_VALUE:
-        if (result->value == NULL) {
-            return JS_ThrowInternalError(context,
-                                         "host return value is missing");
-        }
-        value = result->value->value;
-        free(result->value);
-        return value;
     default:
         return JS_ThrowInternalError(context, "invalid host return value");
     }
@@ -828,9 +607,6 @@ static JSValue qjs_host_trampoline(JSContext *context, JSValueConst this_value,
     result.number = 0.0;
     result.text = NULL;
     result.text_len = 0;
-    result.payload = 0;
-    result.argument_index = 0;
-    result.value = NULL;
     status = runtime->host_dispatch(runtime->host_opaque, handler,
                                     (size_t)argc, arguments, &result);
 
@@ -844,10 +620,10 @@ static JSValue qjs_host_trampoline(JSContext *context, JSValueConst this_value,
     }
 
     if (status != 0) {
-        qjs_value_free(context, result.value);
+
         return JS_EXCEPTION;
     }
-    returned = qjs_host_build(context, &result, argc, argv);
+    returned = qjs_host_build(context, &result);
     return returned;
 }
 

@@ -11,9 +11,6 @@ pub(crate) const HOST_ARG_NULL: i32 = 1;
 pub(crate) const HOST_ARG_BOOLEAN: i32 = 2;
 pub(crate) const HOST_ARG_NUMBER: i32 = 3;
 pub(crate) const HOST_ARG_STRING: i32 = 4;
-pub(crate) const HOST_ARG_OBJECT: i32 = 5;
-pub(crate) const HOST_RESULT_ARGUMENT: i32 = 7;
-pub(crate) const HOST_RESULT_VALUE: i32 = 8;
 
 #[repr(C)]
 pub(crate) struct QjsHostArg {
@@ -21,7 +18,6 @@ pub(crate) struct QjsHostArg {
     pub(crate) number: c_double,
     pub(crate) text: *const u8,
     pub(crate) text_len: usize,
-    pub(crate) payload: u32,
 }
 
 #[repr(C)]
@@ -30,9 +26,6 @@ pub(crate) struct QjsHostResult {
     pub(crate) number: c_double,
     pub(crate) text: *const u16,
     pub(crate) text_len: usize,
-    pub(crate) payload: u32,
-    pub(crate) argument_index: usize,
-    pub(crate) value: *mut QjsValue,
 }
 
 pub(crate) type HostDispatch = unsafe extern "C" fn(
@@ -44,13 +37,6 @@ pub(crate) type HostDispatch = unsafe extern "C" fn(
 ) -> c_int;
 
 pub(crate) type HostRelease = unsafe extern "C" fn(opaque: *mut c_void, handler: *mut c_void);
-
-/// Called from the garbage collector for a bridge-owned host object.
-///
-/// `payload` is returned if JavaScript-object construction fails or when
-/// `QuickJS` finalizes the completed object. The callback must not enter
-/// `QuickJS` or invoke arbitrary user code.
-pub(crate) type HostObjectRelease = unsafe extern "C" fn(opaque: *mut c_void, payload: u32);
 
 #[repr(C)]
 pub(crate) struct QjsRuntime {
@@ -92,17 +78,7 @@ unsafe extern "C" {
         units: *const u16,
         length: usize,
     ) -> *mut QjsValue;
-    pub(crate) fn qjs_new_host_object(context: *mut JSContext, payload: u32) -> *mut QjsValue;
-    pub(crate) fn qjs_value_dup(context: *mut JSContext, value: *const QjsValue) -> *mut QjsValue;
     pub(crate) fn qjs_value_free(context: *mut JSContext, value: *mut QjsValue);
-    pub(crate) fn qjs_weak_value_new(
-        context: *mut JSContext,
-        value: *const QjsValue,
-    ) -> *mut QjsValue;
-    pub(crate) fn qjs_weak_value_upgrade(
-        context: *mut JSContext,
-        weak: *const QjsValue,
-    ) -> *mut QjsValue;
     pub(crate) fn qjs_value_kind(context: *mut JSContext, value: *const QjsValue) -> c_int;
     pub(crate) fn qjs_value_get_boolean(
         context: *mut JSContext,
@@ -163,7 +139,6 @@ unsafe extern "C" {
         runtime: *mut QjsRuntime,
         dispatch: Option<HostDispatch>,
         release: Option<HostRelease>,
-        object_release: Option<HostObjectRelease>,
         opaque: *mut c_void,
     );
     pub(crate) fn qjs_new_host_function(

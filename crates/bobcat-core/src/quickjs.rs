@@ -193,6 +193,21 @@ impl QuickJsScriptEngine {
         let value = self.evaluate_raw(source)?;
         quickjs_to_script_value(value, ScriptErrorPhase::Evaluate)
     }
+
+    fn collect_garbage(&mut self) -> Result<usize, ScriptError> {
+        self.resume_incomplete_checkpoint(ScriptErrorPhase::Evaluate)?;
+        let mut executed = 0usize;
+        // QuickJS removes weak targets before its cycle pass. A target first
+        // proven unreachable by that cycle pass therefore reaches its
+        // FinalizationRegistry on the following collection.
+        for _ in 0..2 {
+            self.realm.run_gc();
+            // FinalizationRegistry cleanup callbacks are jobs; JS_RunGC does
+            // not execute them itself.
+            executed = executed.saturating_add(self.checkpoint(ScriptErrorPhase::Evaluate)?);
+        }
+        Ok(executed)
+    }
 }
 
 impl fmt::Debug for QuickJsScriptEngine {

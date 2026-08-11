@@ -119,9 +119,9 @@ enum MainThread {
 /// Keeps an owner-thread-bound `QuickJS` realm on its engine-owned thread.
 ///
 /// Boot completion is a lifecycle event, not the end of the realm: JavaScript
-/// objects remain the owners of native element handles until the view itself
-/// is destroyed. Dropping this guard asks the thread to tear the realm down
-/// and waits until all finalizers have completed.
+/// wrappers remain the owners of element ids until the view itself is
+/// destroyed. Dropping this guard asks the thread to tear the realm down and
+/// waits for the owner thread; the engine then drops the whole element tree.
 #[cfg(feature = "quickjs")]
 struct SpawnedMainThread {
     shutdown: mpsc::Sender<()>,
@@ -301,8 +301,8 @@ enum Output<'window, W> {
 /// presentation, and the engine-owned script thread.
 pub struct Engine<'window, W: Window> {
     /// The JavaScript realm is a view resource, not a boot-call local. Keep it
-    /// before the shared tree so its GC-driven releases run while the engine's
-    /// tree owner is unquestionably still alive.
+    /// before the shared tree so JavaScript ownership ends before the engine
+    /// drops the whole tree.
     #[cfg(feature = "quickjs")]
     main_thread: Option<MainThread>,
     elements: SharedTree,
@@ -629,9 +629,10 @@ impl<'window, W: Window> Engine<'window, W> {
                             .run_main_thread_script(&source)
                             .map_err(ScriptRunError::Script);
                         // The thread becomes intentionally idle after boot, so
-                        // this is its one tracing-GC checkpoint for wrapper
-                        // cycles created and abandoned by the boot script.
-                        runtime.collect_garbage();
+                        // explicitly collect and run the FinalizationRegistry
+                        // jobs for wrappers abandoned by the boot script.
+                        let collection = runtime.collect_garbage().map_err(ScriptRunError::Script);
+                        let result = result.and(collection);
                         (result, Some(runtime))
                     }
                     Err(error) => (Err(error), None),
@@ -639,8 +640,8 @@ impl<'window, W: Window> Engine<'window, W> {
                 let _ = sender.send(EngineMessage::ScriptDone(result));
                 wakeup();
                 if let Some(runtime) = runtime {
-                    // Keep the owner-thread-bound realm, and therefore every
-                    // JS-owned native handle, alive for the view lifetime.
+                    // Keep the owner-thread-bound realm and its JS wrapper
+                    // ownership state alive for the view lifetime.
                     let _ = wait_for_shutdown.recv();
                     drop(runtime);
                 }
