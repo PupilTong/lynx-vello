@@ -437,6 +437,13 @@ fn inserting_into_a_disconnected_parent_raises_nothing_until_it_connects() {
 
     doc.dom.append_child(root, holder);
     assert_eq!(take(&log), vec![format!("x-item:connected#{child}")]);
+
+    doc.dom.remove_element(holder);
+    assert_eq!(
+        take(&log),
+        vec![format!("x-item:disconnected#{child}")],
+        "removing an ordinary subtree root still reaches its custom descendant"
+    );
 }
 
 #[test]
@@ -661,6 +668,13 @@ fn an_element_inside_a_shadow_tree_is_constructed_and_connected() {
             format!("x-item:connected#{inside}"),
         ],
         "a shadow tree of a connected host is connected"
+    );
+
+    doc.dom.remove_element(host);
+    assert_eq!(
+        take(&log),
+        vec![format!("x-item:disconnected#{inside}")],
+        "the custom-subtree summary propagates through the shadow root to its host"
     );
 }
 

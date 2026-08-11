@@ -7,8 +7,8 @@
 //! * `_plain` — no definitions at all, so every hook takes its empty-registry branch. This is the
 //!   number that must not move: it is what every existing embedder pays for a feature it never
 //!   uses.
-//! * `_unmatched` — a definition exists, but for another tag. The gate is open and the
-//!   shadow-including walk runs, and nothing matches. This isolates the walk from the callbacks.
+//! * `_unmatched` — a definition exists, but for another tag. This measures the conservative
+//!   custom-subtree summary's negative fast path independently of callback dispatch.
 //! * `_defined` — the tag is defined, so elements are constructed and their callbacks run.
 
 use std::cell::RefCell;
@@ -71,6 +71,7 @@ fn device() -> dom::Device {
 
 const ELEMENTS: usize = 1_024;
 const ROWS: usize = 256;
+const WIDE_SUBTREE_DESCENDANTS: usize = 4_096;
 const ATTRIBUTE_BATCH: usize = 4_096;
 const NO_OP_BATCH: usize = 4_096;
 
@@ -124,6 +125,18 @@ fn build_page(registry: Registry) -> (Document<()>, NodeId) {
         probe = row;
     }
     (doc, probe)
+}
+
+fn wide_subtree(registry: Registry) -> (Document<()>, NodeId) {
+    let mut doc = page(registry);
+    let root = doc.document_element().id();
+    let subtree = doc.create_element("holder", ());
+    doc.append_child(root, subtree);
+    for _ in 0..WIDE_SUBTREE_DESCENDANTS {
+        let child = doc.create_element(TAG, ());
+        doc.append_child(subtree, child);
+    }
+    (doc, subtree)
 }
 
 #[divan::bench]
@@ -245,4 +258,29 @@ fn remove_page_plain(bencher: divan::Bencher) {
 #[divan::bench]
 fn remove_page_defined(bencher: divan::Bencher) {
     remove_page(bencher, Registry::UnderTest);
+}
+
+fn remove_wide_subtree(bencher: divan::Bencher, registry: Registry) {
+    bencher
+        .counter(ItemsCount::new(WIDE_SUBTREE_DESCENDANTS))
+        .with_inputs(|| wide_subtree(registry))
+        .bench_local_values(|(mut doc, subtree)| {
+            doc.remove_element(subtree);
+            doc
+        });
+}
+
+#[divan::bench]
+fn remove_wide_subtree_plain(bencher: divan::Bencher) {
+    remove_wide_subtree(bencher, Registry::Empty);
+}
+
+#[divan::bench]
+fn remove_wide_subtree_unmatched(bencher: divan::Bencher) {
+    remove_wide_subtree(bencher, Registry::OtherTag);
+}
+
+#[divan::bench]
+fn remove_wide_subtree_defined(bencher: divan::Bencher) {
+    remove_wide_subtree(bencher, Registry::UnderTest);
 }

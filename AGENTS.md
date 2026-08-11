@@ -473,9 +473,15 @@ useful signal for currently-compatible versions of those libraries.
   ordinary list shape) instead of hitting a re-entrancy panic. Scopes are
   watermarks into one flattened element queue while the per-element reaction
   queue is shared across them, which reproduces a browser's
-  `A.disc, A.conn, B.disc, B.conn` for a subtree move. Two `Node` fields carry
-  the definition pointer and the `Uncustomized`/`Constructing`/`Custom` state
-  and fit in the existing tail padding (stride unchanged, asserted);
+  `A.disc, A.conn, B.disc, B.conn` for a subtree move. Three `Node` fields carry
+  the definition pointer, the `Uncustomized`/`Constructing`/`Custom` state, and
+  a conservative shadow-including-subtree summary; all fit in the existing
+  tail padding (stride unchanged, asserted). The summary rejects a lifecycle
+  walk at an ordinary subtree root and prunes ordinary branches when a walk is
+  needed; insertion propagates it upward, while removal may leave harmless
+  false positives instead of charging every ordinary mutation for exact
+  descendant counts. Reaction scratch collects only constructed custom
+  elements, so it is proportional to callbacks rather than all nodes visited;
   `Constructing` earns its byte by suppressing the reactions a constructor's
   own mutations would otherwise raise back at it. `:defined` is answered but
   never moves — with no `undefined` state it matches everything, which is why
@@ -487,7 +493,9 @@ useful signal for currently-compatible versions of those libraries.
   names discovered at runtime, which a type parameter cannot express; the
   `Send + Sync` supertrait is what keeps `Document<T>` `Send`. Benchmarked
   (`benches/custom_elements.rs`, three-way plain/unmatched/defined): a document
-  that defines nothing pays 1.00× on a no-op commit and 1.01× on creation.
+  that defines nothing pays 1.00× on a no-op commit and 1.01× on creation; the
+  same suite's 4096-descendant `remove_element` cases defend the
+  unmatched-definition negative fast path and the dense callback path separately.
   Further recorded limits: no `adoptedCallback` (no second document exists), no
   `connectedMoveCallback` (every move is disconnect-then-connect, the
   standard's own fallback), no customized built-ins/`is`/`extends`, no scoped
