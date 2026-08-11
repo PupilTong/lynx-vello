@@ -26,20 +26,12 @@ pub(crate) const DOCUMENT_NODE_ID: NodeId = 0;
 pub(crate) const DOCUMENT_ELEMENT_NODE_ID: NodeId = 1;
 const INITIAL_NODE_CAPACITY: usize = 8;
 
-/// The payload-arena entry aligned with each primary node. The two sentinels
-/// keep the slabs in lockstep for the nodes that carry no embedder payload:
-/// the document node at slot zero, and every shadow root.
 pub(crate) enum PayloadSlot<T> {
     Document,
     ShadowRoot,
     Node(T),
 }
 
-/// Fetches NodeId-aligned arena state for a node known to be live.
-///
-/// The bounds/vacancy check stays: a paired A/B against `get_unchecked`
-/// (css + paint benches, 2026-08-03) showed no measurable difference, so the
-/// safe accessor wins by default.
 #[inline]
 pub(crate) fn slab_get_for_live_node<V>(slab: &Slab<V>, id: NodeId) -> &V {
     slab.get(id)
@@ -83,13 +75,6 @@ impl<T> TreeArenas<T> {
 pub(crate) struct NodeLayoutState {
     pub(crate) slot: LayoutSlot,
     pub(crate) text: Option<Box<TextLayoutStore>>,
-    /// This node's CSSOM-View scroll position, if it is a scroll container.
-    /// Stored raw and clamped against live geometry on every read, so a
-    /// relayout that shrinks the scrollable area — or a restyle that stops the
-    /// box being a scroll container at all — corrects the observable offset
-    /// with no invalidation hook of its own. It rides the layout arena rather
-    /// than a side table so it is allocated and dropped in lockstep with the
-    /// layout it is clamped against.
     pub(crate) scroll_offset: euclid::default::Vector2D<f32>,
 }
 
@@ -164,32 +149,16 @@ pub struct Document<T> {
     tree: Box<TreeArenas<T>>,
     layout: DocumentLayoutState,
     pub(crate) painter: RefCell<crate::paint::painter::Painter>,
-    /// Pre-mutation state exists only while invalidation is pending. Keeping
-    /// the payloads here leaves one byte-sized lifecycle flag, rather than a
-    /// nullable snapshot pointer, in every live node's styling slot.
     pending_snapshots: SnapshotMap,
     relayout_roots: Vec<PendingRelayout>,
     relayout_root_ids: FxHashSet<NodeId>,
-    /// Live shadow roots. Zero is the gate every flat-tree fixup checks first.
     shadow_roots: usize,
-    /// Custom element definitions, the element state machine's backing store,
-    /// and the reaction queue. An empty definition set is the gate every
-    /// lifecycle hook checks first.
     pub(crate) custom_elements: CustomElementRegistry<T>,
     node_removal_epoch: u64,
-    /// Monotone count of visual-affecting mutations (style/attribute/
-    /// structure/stylesheet/device/layout invalidation), bumped at the
-    /// internal invalidation funnels. The private visual frame snapshots it:
-    /// painting a frame built before a later mutation would mix stale geometry
-    /// with live styles, so the paint path fails fast.
     visual_epoch: u64,
     layout_dirty: bool,
     layout_root_dirty: bool,
     last_layout_inputs: Option<(Size<f32>, f32)>,
-    /// Gestures currently latched to a pointer. Document-level rather than
-    /// per-node, and deliberately not the embedder's to hold: a one-call
-    /// [`Document::handle_input`] is what makes a headless harness a list of
-    /// event literals.
     input: crate::input::InputState,
 }
 
@@ -204,10 +173,7 @@ impl<T: fmt::Debug> fmt::Debug for Document<T> {
 }
 
 impl<T> Document<T> {
-    /// Creates a document whose permanent document element already exists:
-    /// `root_tag` / `root_payload` become the element at
-    /// [`Self::document_element`]. The tag is injected rather than known —
-    /// this crate still owns no tag vocabulary.
+    /// Creates a document with a permanent document element.
     #[must_use]
     pub fn new(device: crate::style::device::Device, root_tag: &str, root_payload: T) -> Self {
         let style_engine = StyleEngine::new(device.into_stylo(), about_blank_url_data());
@@ -264,9 +230,6 @@ impl<T> Document<T> {
         &mut self.style_engine
     }
 
-    /// The two disjoint fields a scoped-stylesheet rebuild needs at once: the
-    /// Stylist that owns the author-data cache, and the node arena holding the
-    /// shadow root whose set is being rebuilt.
     pub(crate) const fn style_and_tree_parts(&mut self) -> (&mut StyleEngine, &mut Slab<Node<T>>) {
         (&mut self.style_engine, &mut self.tree.nodes)
     }
@@ -337,34 +300,20 @@ impl<T> Document<T> {
         (&self.tree, &mut self.layout, &self.relayout_root_ids)
     }
 
-    /// The shared-borrow twin of [`Self::layout_parts`] for post-layout
-    /// read-only passes (the `visual` module's paint-order build).
     pub(crate) fn visual_parts(&self) -> (&TreeArenas<T>, &DocumentLayoutState) {
         (&self.tree, &self.layout)
     }
 
-    /// Monotone count of [`Self::remove_subtree`] calls. A freed `NodeId`
-    /// can be recycled by a later creation, so a private visual frame is only
-    /// valid for hit testing while this value is unchanged.
     #[must_use]
     pub(crate) fn node_removal_epoch(&self) -> u64 {
         self.node_removal_epoch
     }
 
-    /// Monotone count of visual-affecting mutations. A private visual frame is
-    /// only valid for painting while this value is unchanged (hit testing needs only
-    /// [`Self::node_removal_epoch`] — its geometry snapshot is
-    /// self-contained).
     #[must_use]
     pub(crate) fn visual_epoch(&self) -> u64 {
         self.visual_epoch
     }
 
-    /// Records a visual-affecting mutation. Called from the internal
-    /// invalidation funnels every mutating public API drains through:
-    /// snapshot creation (attributes/classes/element state), inline-style
-    /// application, child-list changes, stylesheet/device changes, and
-    /// layout-dirty marking, plus exclusive access to paint resources.
     pub(crate) fn note_visual_mutation(&mut self) {
         self.visual_epoch += 1;
     }
@@ -417,10 +366,6 @@ impl<T> Document<T> {
             let local_name = local_name.clone();
             |owner, id| Node::new_element(owner, id, local_name)
         });
-        // The standard creates elements with synchronous custom elements, so a
-        // defined tag is constructed before the id is handed back. Pinned
-        // across that drain: the id about to be returned must still name the
-        // element this call made, and slab keys are recycled on free.
         self.pin_node(id);
         self.note_custom_element_created(id, &local_name);
         self.drain_reactions(base);
@@ -449,9 +394,6 @@ impl<T> Document<T> {
         id
     }
 
-    /// Whether any shadow root exists yet. Every slot-assignment hook and
-    /// flat-tree fixup is gated on this, so a document that never attaches one
-    /// pays a single predictable branch.
     #[must_use]
     pub(crate) fn has_shadow_roots(&self) -> bool {
         self.shadow_roots != 0
@@ -552,16 +494,9 @@ impl<T> Document<T> {
         let appended = index + 1 == self.live_node_mut(parent).children.len();
 
         self.note_moved_subtree(child);
-        // Before anything reads the flat tree — the dirty-descendant walk in
-        // `note_child_list_change` is the first thing that does.
         self.note_slot_assignment_inserted(parent, child, appended);
         self.note_child_list_change(parent, index);
         self.invalidate_layout(child);
-        // Last, so no lifecycle callback can observe half-updated slot
-        // assignment or a stale dirty spine.
-        // Gated here rather than inside the hook: `is_connected` walks to the
-        // document node, and a document with no definitions must not pay that
-        // per insertion.
         let connected = self.has_custom_element_definitions() && self.is_connected(child);
         self.note_custom_elements_inserted(child, connected);
         self.drain_reactions(base);
@@ -577,10 +512,6 @@ impl<T> Document<T> {
         self.drain_reactions(base);
     }
 
-    /// The unlink itself, with its lifecycle reactions enqueued but not
-    /// drained. `insert_before` and `remove_subtree` call this so a move and a
-    /// removal each drain once, at their own boundary, rather than midway
-    /// through.
     fn detach_inner(&mut self, child: NodeId) {
         assert_ne!(
             child, DOCUMENT_NODE_ID,
@@ -601,16 +532,8 @@ impl<T> Document<T> {
         let Some(parent) = old_parent else {
             return;
         };
-        // The old parent's connectedness, sampled while the link is intact:
-        // the removed node's own is already false by the time a reaction runs.
-        // Same gate as the insertion side, and it has to stay *here* — one
-        // statement later the child is unlinked and the answer is gone.
         let was_connected = self.has_custom_element_definitions() && self.is_connected(parent);
 
-        // Invalidate while the old link is still intact so the walk covers
-        // the old parent's dirty spine and observes its containment boundary.
-        // A subsequent insertion invalidates again after attaching, covering
-        // the new parent's spine as well.
         self.invalidate_layout(child);
 
         let removed_index = {
@@ -651,15 +574,9 @@ impl<T> Document<T> {
             !self.get(id).is_some_and(Node::is_shadow_root),
             "Document::remove_subtree cannot remove a shadow root on its own"
         );
-        // Before the unlink, so a refusal costs the caller nothing at all.
         self.assert_subtree_not_pinned(id);
         let base = self.begin_reactions();
         self.detach_inner(id);
-        // Drained here, while the subtree is unlinked but still allocated: it
-        // is the only window in which a `disconnected_callback` can read its
-        // own element, because the arena frees the slots just below. Pinned
-        // across it so a callback cannot free the very subtree being removed
-        // and let a replacement recycle its id.
         self.pin_node(id);
         self.drain_reactions(base);
         self.unpin_node(id);
@@ -668,12 +585,7 @@ impl<T> Document<T> {
             "Document::remove_subtree: a disconnected callback re-attached the subtree being \
              removed"
         );
-        // Again, because a callback in the drain above may have moved a
-        // pinned node into this subtree. Still before anything is freed.
         self.assert_subtree_not_pinned(id);
-        // Freed ids may be recycled by later creations: any retained
-        // structure indexing nodes by id (a built `PaintOrder`) is stale
-        // from here on.
         self.node_removal_epoch += 1;
         self.note_visual_mutation();
         let mut removed = Vec::new();
@@ -700,9 +612,6 @@ impl<T> Document<T> {
                     .try_remove(current)
                     .expect("subtree links always resolve while removing");
                 stack.extend_from_slice(&node.children);
-                // A host's shadow tree is not in its child list but dies with
-                // it: `attachShadow()` is irreversible, so the shadow root can
-                // outlive nothing.
                 if let Some(root) = node.shadow_root_id() {
                     stack.push(root);
                 }
@@ -711,8 +620,6 @@ impl<T> Document<T> {
                 }
             }
             self.layout.remove(current);
-            // A freed id can be recycled by the next creation, so it must not
-            // inherit reactions queued against its previous occupant.
             self.forget_reactions(current);
             match self.tree.remove_side_state(current) {
                 PayloadSlot::Node(payload) => removed.push(payload),
@@ -805,21 +712,11 @@ impl<T> Document<T> {
                         data.clear_restyle_state();
                         (!damage.is_empty()).then(|| StyleDamage::from(damage))
                     });
-                    // Descend where Stylo's traversal noted restyled children
-                    // (`dirty_descendants`), and also wherever this element's
-                    // own primary style changed identity: initial styling
-                    // below a freshly styled or freshly cleared element sets
-                    // no dirty bits, but it always moves the parent snapshot
-                    // first, so the snapshot delta walks exactly the
-                    // (re)styled region.
                     let style_changed = node.refresh_layout_style(refreshed);
                     let dirty = node.styling.dirty_descendants.get_mut();
                     (harvested, std::mem::replace(dirty, false) || style_changed)
                 };
                 if descend {
-                    // The flat tree, because that is what the traversal just
-                    // styled: a host's harvest continues into its shadow tree,
-                    // and a slot's into the nodes assigned to it.
                     let node = self
                         .tree
                         .nodes
@@ -858,10 +755,7 @@ impl<T> Document<T> {
     }
 }
 
-/// RAII marker recording that a Stylo traversal is running, consulted by the
-/// debug assertions guarding `TElement`'s traversal-only entry points. Shares
-/// the document node's flag by `Arc` so it holds no borrow of the document
-/// across the traversal, and clears it even when the traversal unwinds.
+/// Marks the lifetime of a Stylo flush phase.
 pub(crate) struct FlushPhaseToken {
     flag: std::sync::Arc<AtomicBool>,
 }

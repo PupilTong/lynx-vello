@@ -69,21 +69,13 @@ use quickjs_rust_bridge::{self as quickjs, HostFunctionError, HostValue};
 use super::{QuickJsInitializationError, QuickJsScriptEngine};
 use crate::script::ScriptError;
 
-/// The source name `QuickJS` reports for the main-thread bundle.
 const MAIN_THREAD_SOURCE_NAME: &str = "main-thread.js";
-/// The source name for the boot sequence this module drives.
 const BOOT_SOURCE_NAME: &str = "<lynx boot>";
 
-/// The exact wrapper web-core's decode worker builds around every lepus chunk.
 const WRAPPER_PREFIX: &str = "//# allFunctionsCalledOnLoad\n(function(){ \"use strict\"; \
                               const navigator=void 0,postMessage=void 0,window=void 0; ";
 const WRAPPER_SUFFIX: &str = " \n })()\n";
 
-/// web-core's `onMTSScriptsExecuted`, transliterated.
-///
-/// `typeof` is used rather than a bare reference because the wrapper above runs
-/// in strict mode, where reading an undeclared identifier is a `ReferenceError`
-/// — and a bundle is free not to define `processData`.
 const BOOT_SEQUENCE: &str = r#"(function () {
   "use strict";
   var data = undefined;
@@ -134,17 +126,14 @@ impl std::error::Error for MainThreadError {}
 
 use crate::engine::SharedTree;
 
-/// The realm's side of the tree hand-off: taken at a batch's first
-/// mutation, returned at the flush that commits it.
+/// The realm's side of the tree hand-off: taken at a batch's first mutation, returned at the flush
+/// that commits it.
 struct TreeHandle {
     slot: SharedTree,
-    /// The tree while a batch is open on this thread.
     taken: Option<ElementTree>,
 }
 
 impl TreeHandle {
-    /// The tree for one PAPI mutation, opening a batch if none is open.
-    /// Taking blocks only for the presenting side's brief borrows.
     fn tree(&mut self) -> &mut ElementTree {
         if self.taken.is_none() {
             self.taken = Some(self.slot.take());
@@ -154,9 +143,6 @@ impl TreeHandle {
             .expect("the batch tree was just ensured")
     }
 
-    /// The commit boundary: style + layout on the taken tree, then the
-    /// hand-back. A flush with no prior mutation still commits — a flush is
-    /// a style + layout pass even with nothing recorded.
     fn flush(&mut self) {
         let mut tree = match self.taken.take() {
             Some(tree) => tree,
@@ -166,10 +152,6 @@ impl TreeHandle {
         self.slot.put(tree);
     }
 
-    /// Returns the tree unconditionally — the end-of-evaluation backstop
-    /// for a script that opened a batch and never flushed. The returned
-    /// tree still reports uncommitted mutations, which keeps the abandoned
-    /// batch off the screen.
     fn release(&mut self) {
         if let Some(tree) = self.taken.take() {
             self.slot.put(tree);
@@ -177,8 +159,7 @@ impl TreeHandle {
     }
 }
 
-/// One `QuickJS` realm carrying the Lynx Element PAPI over the tree
-/// hand-off slot.
+/// One `QuickJS` realm carrying the Lynx Element PAPI over the tree hand-off slot.
 pub struct MainThreadRuntime {
     engine: QuickJsScriptEngine,
     tree: Rc<RefCell<TreeHandle>>,
@@ -193,11 +174,8 @@ impl fmt::Debug for MainThreadRuntime {
 }
 
 impl MainThreadRuntime {
-    /// Creates a realm whose Element PAPI takes the tree from `elements`
-    /// per batch and mutates it directly, and installs it before any script
-    /// has run. `on_flush` runs after every committed `__FlushElementTree`,
-    /// once the tree is back in its slot — the seam a presenter uses to
-    /// learn a committed frame is available.
+    /// Creates a realm whose Element PAPI takes the tree from `elements` per batch and mutates it
+    /// directly, and installs it before any script has run.
     pub fn new(
         elements: SharedTree,
         on_flush: impl Fn() + 'static,
@@ -209,9 +187,6 @@ impl MainThreadRuntime {
     }
 
     /// Evaluates a `.web.bundle`'s `lepusCode.root` in web-core's wrapper.
-    ///
-    /// A card root works purely by side effect: it assigns its entry points
-    /// onto `globalThis`. Nothing is rendered yet — call [`Self::render_page`].
     pub fn evaluate_main_thread_script(&mut self, source: &str) -> Result<(), MainThreadError> {
         let wrapped = format!("{WRAPPER_PREFIX}{source}{WRAPPER_SUFFIX}");
         self.evaluate(
@@ -221,27 +196,19 @@ impl MainThreadRuntime {
         )
     }
 
-    /// Runs web-core's post-evaluation sequence: `processData` (when the
-    /// bundle defines one), then `renderPage`, then `__FlushElementTree`.
+    /// Runs web-core's post-evaluation sequence: `processData` (when the bundle defines one), then
+    /// `renderPage`, then `__FlushElementTree`.
     pub fn render_page(&mut self) -> Result<(), MainThreadError> {
         self.evaluate(BOOT_SEQUENCE, BOOT_SOURCE_NAME, "rendering the page")
     }
 
-    /// [`Self::evaluate_main_thread_script`] followed by [`Self::render_page`]
-    /// — the whole boot a `.web.bundle` gets today.
+    /// [`Self::evaluate_main_thread_script`] followed by [`Self::render_page`] — the whole boot a
+    /// `.web.bundle` gets today.
     pub fn run_main_thread_script(&mut self, source: &str) -> Result<(), MainThreadError> {
         self.evaluate_main_thread_script(source)?;
         self.render_page()
     }
 
-    /// Evaluates through the engine's own checkpoint state machine.
-    ///
-    /// web-core's MTS realm is a browser realm, where promise jobs queued
-    /// during evaluation run before control reaches the host again — so the
-    /// microtask drain is not optional. Going through `evaluate_raw` rather
-    /// than driving the realm directly is what keeps this wrapper's job
-    /// ordering identical to the crate's `ScriptEngine` impl, including
-    /// resuming a checkpoint that previously hit the per-call job limit.
     fn evaluate(&mut self, source: &str, name: &str, phase: &str) -> Result<(), MainThreadError> {
         let result = self
             .engine
@@ -251,21 +218,11 @@ impl MainThreadRuntime {
             })
             .map(|_| ())
             .map_err(|error| MainThreadError::from_engine(phase, &error));
-        // Whatever the script did — flushed, failed, or abandoned a batch —
-        // the tree must be back in its slot when control returns to the
-        // host.
         self.tree.borrow_mut().release();
         result
     }
 }
 
-/// Installs the Element PAPI onto the realm's global object, returning the
-/// hand-off handle the runtime releases at every evaluation boundary.
-///
-/// web-core does the equivalent with one `Object.assign` of a closure
-/// literal; each closure here reaches the batch's taken tree through the
-/// same handle. Validation is the tree's own — a bad handle throws at the
-/// call site.
 fn install_element_papi(
     realm: &mut quickjs::Realm,
     elements: SharedTree,
@@ -276,8 +233,6 @@ fn install_element_papi(
         taken: None,
     }));
 
-    // `__CreatePage(componentID, componentCSSID)` — idempotent; returns the
-    // page's unique id.
     let tree = Rc::clone(&handle);
     realm.define_global_function("__CreatePage", 2, move |arguments| {
         let component_id = string_argument("__CreatePage", arguments, 0)?;
@@ -289,8 +244,6 @@ fn install_element_papi(
         Ok(unique_id_value(id))
     })?;
 
-    // `__CreateView(parentComponentUniqueID)` — returns the new view's unique
-    // id. The argument is `0` when there is no parent component.
     let tree = Rc::clone(&handle);
     realm.define_global_function("__CreateView", 1, move |arguments| {
         let parent_component = u32_argument("__CreateView", arguments, 0)?;
@@ -302,7 +255,6 @@ fn install_element_papi(
         Ok(unique_id_value(id))
     })?;
 
-    // `__AppendElement(parent, child)` — returns the child unique id.
     let tree = Rc::clone(&handle);
     realm.define_global_function("__AppendElement", 2, move |arguments| {
         let parent = element_argument("__AppendElement", arguments, 0)?;
@@ -315,9 +267,6 @@ fn install_element_papi(
         Ok(unique_id_value(appended))
     })?;
 
-    // `__DropElement(element)` — repeated drops stay no-ops (the handle is
-    // already retired); dropping the permanent page element is a precise
-    // error.
     let tree = Rc::clone(&handle);
     realm.define_global_function("__DropElement", 1, move |arguments| {
         let id = element_argument("__DropElement", arguments, 0)?;
@@ -328,11 +277,6 @@ fn install_element_papi(
         Ok(HostValue::Undefined)
     })?;
 
-    // `__FlushElementTree()` — the single commit boundary: the style + layout
-    // commit runs on the taken tree, the tree goes back in its slot, and the
-    // presenter is notified. An empty batch still commits — a flush is a
-    // style + layout pass even with nothing recorded. web-core ignores the
-    // optional sub-tree and options arguments on the web target too.
     let tree = Rc::clone(&handle);
     realm.define_global_function("__FlushElementTree", 0, move |_arguments| {
         tree.borrow_mut().flush();
@@ -343,7 +287,6 @@ fn install_element_papi(
     Ok(handle)
 }
 
-/// A unique id crossing the primitives-only native host boundary.
 fn unique_id_value(id: ElementId) -> HostValue {
     HostValue::Number(f64::from(id))
 }
@@ -356,8 +299,6 @@ fn argument(arguments: &[HostValue], index: usize) -> &HostValue {
     arguments.get(index).unwrap_or(&HostValue::Undefined)
 }
 
-/// Reads an argument that must be an unsigned 32-bit integer, the way element
-/// ids are represented by the runtime.
 fn u32_argument(
     function: &str,
     arguments: &[HostValue],
@@ -387,7 +328,6 @@ fn i32_argument(
     index: usize,
 ) -> Result<i32, HostFunctionError> {
     match *argument(arguments, index) {
-        // web-core defaults a missing/nullish componentCSSID to 0.
         HostValue::Undefined | HostValue::Null => Ok(0),
         HostValue::Number(value)
             if value.is_finite()
@@ -407,8 +347,6 @@ fn i32_argument(
     }
 }
 
-/// Borrows a string argument. The slice outlives the call, so there is no
-/// reason to copy here — `create_page` makes the one copy it needs.
 fn string_argument<'a>(
     function: &str,
     arguments: &'a [HostValue],
@@ -423,8 +361,6 @@ fn string_argument<'a>(
     }
 }
 
-/// Reads an element-handle argument. `0` is the "no element" sentinel and is
-/// never a valid handle for a PAPI call that must act on an element.
 fn element_argument(
     function: &str,
     arguments: &[HostValue],

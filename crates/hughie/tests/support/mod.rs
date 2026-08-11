@@ -1018,10 +1018,7 @@ pub(super) struct TestSourceNode {
     pub(super) measure: TestMeasure,
 }
 
-/// Per-node observations that are not represented by durable layout state.
-///
-/// Geometry assertions read [`TestState`] directly; these records retain only
-/// optional write presence and measurement traces used by integration tests.
+/// Per-node write presence and measurement traces used by tests.
 #[derive(Debug, Default)]
 pub(super) struct TestSessionNode {
     pub(super) static_position: Cell<Option<Point<f32>>>,
@@ -1036,12 +1033,7 @@ pub(super) struct TestState {
     cache_enabled: bool,
 }
 
-/// Immutable source tree plus a separately borrowed layout state.
-///
-/// The outer `RefCell` is only a convenience for the existing test-case
-/// façade (`perform_layout(&tree, ...)`). Recursive engine calls receive a
-/// plain `&mut TestState`; individual layout slots no longer use interior
-/// mutability.
+/// Immutable test tree with separately borrowed layout state.
 #[derive(Debug)]
 pub(super) struct TestTree {
     pub(super) nodes: Vec<TestSourceNode>,
@@ -1352,9 +1344,7 @@ impl TestTree {
         })
     }
 
-    /// A `display: contents` element: it generates no box, so it carries no
-    /// container role — `flattened_children` splices its children into its parent's
-    /// formatting context and it is never laid out itself.
+    /// Adds a `display: contents` node whose children flatten into its parent.
     pub(super) fn push_contents(&mut self, children: Vec<TestId>) -> TestId {
         self.push(TestSourceNode {
             display: TestDisplay::Leaf,

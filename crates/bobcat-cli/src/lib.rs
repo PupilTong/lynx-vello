@@ -9,9 +9,6 @@
 //! is embedder work too: the reference implementations of the engine's
 //! injected `bobcat_core::image::Decoder` contract.
 
-// The coverage run compiles with `--cfg coverage_nightly` and the test modules
-// opt out via `#[coverage(off)]`, which needs this experimental feature (same
-// pattern as every other workspace crate).
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 use std::ffi::OsString;
@@ -20,8 +17,6 @@ use std::path::PathBuf;
 mod args;
 mod command;
 mod headless;
-// Public rather than private: the decoder integration tests drive the same
-// `platform_decoder()` the engine will be handed at wiring time.
 pub mod image_decoders;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -106,12 +101,12 @@ impl CliError {
     }
 }
 
-/// Parses the process arguments and runs Bobcat.
+/// Runs Bobcat with arguments from the current process.
 pub fn run_from_env() -> Result<(), CliError> {
     run(std::env::args_os().skip(1))
 }
 
-/// Parses `arguments` (excluding the executable name) and runs Bobcat.
+/// Runs Bobcat with an explicit argument sequence.
 pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), CliError> {
     match args::parse(arguments)? {
         args::Invocation::Help => {

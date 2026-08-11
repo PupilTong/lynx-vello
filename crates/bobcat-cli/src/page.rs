@@ -56,7 +56,6 @@ impl Program {
         })
     }
 
-    /// Reports decoded author rules the runtime cannot ingest yet.
     pub(crate) fn warn_about_dropped_author_rules(&self) {
         if self.author_rule_count != 0 {
             eprintln!(

@@ -12,9 +12,6 @@
 //! rare in practice and neither carries the camera-capture orientation this
 //! exists for. That is a recorded v1 limit.
 
-/// The eight EXIF orientation values (tag `0x0112`), as the transform each one
-/// asks for. Values outside 1..=8 are treated as [`Self::Identity`], which is
-/// what every mainstream decoder does with a corrupt tag.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Orientation {
     #[default]
@@ -29,9 +26,6 @@ pub(crate) enum Orientation {
 }
 
 impl Orientation {
-    /// The transform EXIF value `value` asks for. Public within the crate
-    /// because the Apple decoder maps `kCGImagePropertyOrientation` — the same
-    /// 1..=8 vocabulary — through it.
     pub(crate) fn from_exif(value: u16) -> Self {
         match value {
             2 => Self::FlipHorizontal,
@@ -45,7 +39,6 @@ impl Orientation {
         }
     }
 
-    /// Whether the transform exchanges the width and height axes.
     pub(crate) const fn swaps_axes(self) -> bool {
         matches!(
             self,
@@ -53,7 +46,6 @@ impl Orientation {
         )
     }
 
-    /// The oriented size for a stored `width` x `height`.
     pub(crate) const fn apply_to_size(self, width: u32, height: u32) -> (u32, u32) {
         if self.swaps_axes() {
             (height, width)
@@ -62,9 +54,6 @@ impl Orientation {
         }
     }
 
-    /// Rewrites an RGBA8 buffer into oriented order, returning the new
-    /// dimensions. [`Self::Identity`] returns the buffer untouched, so the
-    /// overwhelmingly common case costs one branch and no allocation.
     pub(crate) fn apply(self, pixels: Vec<u8>, width: u32, height: u32) -> (Vec<u8>, u32, u32) {
         if self == Self::Identity {
             return (pixels, width, height);
@@ -75,7 +64,6 @@ impl Orientation {
 
         for y in 0..source_height {
             for x in 0..source_width {
-                // Destination coordinates for the source pixel at (x, y).
                 let (dx, dy) = match self {
                     Self::Identity => (x, y),
                     Self::FlipHorizontal => (source_width - 1 - x, y),
@@ -95,12 +83,6 @@ impl Orientation {
     }
 }
 
-/// Reads the orientation tag out of a JPEG's EXIF APP1 segment.
-///
-/// Walks the marker chain rather than scanning for the `Exif\0\0` literal:
-/// entropy-coded scan data can contain any byte sequence, so a naive search can
-/// match inside compressed pixels. Stops at the first scan (`SOS`), by which
-/// point every metadata segment has been seen.
 pub(crate) fn jpeg_orientation(bytes: &[u8]) -> Orientation {
     let Some(app1) = find_exif_app1(bytes) else {
         return Orientation::Identity;
@@ -109,10 +91,8 @@ pub(crate) fn jpeg_orientation(bytes: &[u8]) -> Orientation {
 }
 
 fn find_exif_app1(bytes: &[u8]) -> Option<&[u8]> {
-    // Past SOI.
     let mut cursor = 2usize;
     loop {
-        // Markers may be preceded by any number of 0xFF fill bytes.
         while bytes.get(cursor) == Some(&0xFF) && bytes.get(cursor + 1) == Some(&0xFF) {
             cursor += 1;
         }
@@ -120,7 +100,6 @@ fn find_exif_app1(bytes: &[u8]) -> Option<&[u8]> {
             return None;
         }
         let marker = *bytes.get(cursor + 1)?;
-        // SOS or EOI: metadata is behind us.
         if marker == 0xDA || marker == 0xD9 {
             return None;
         }
@@ -140,7 +119,6 @@ fn find_exif_app1(bytes: &[u8]) -> Option<&[u8]> {
     }
 }
 
-/// Parses a TIFF header plus IFD0 far enough to read tag `0x0112`.
 fn parse_exif_orientation(tiff: &[u8]) -> Option<Orientation> {
     let little_endian = match tiff.get(0..2)? {
         b"II" => true,
@@ -174,8 +152,6 @@ fn parse_exif_orientation(tiff: &[u8]) -> Option<Orientation> {
     for index in 0..usize::from(count) {
         let entry = ifd0 + 2 + index * 12;
         if read_u16(entry)? == 0x0112 {
-            // A SHORT value sits in the first two bytes of the value field,
-            // in the file's own byte order.
             return Some(Orientation::from_exif(read_u16(entry + 8)?));
         }
     }
@@ -187,7 +163,6 @@ fn parse_exif_orientation(tiff: &[u8]) -> Option<Orientation> {
 mod tests {
     use super::{Orientation, jpeg_orientation};
 
-    /// A minimal JPEG: SOI, an EXIF APP1 carrying one IFD0 entry, then SOS.
     fn jpeg_with_orientation(value: u16, little_endian: bool) -> Vec<u8> {
         let mut tiff = Vec::new();
         tiff.extend_from_slice(if little_endian { b"II" } else { b"MM" });
@@ -206,14 +181,14 @@ mod tests {
             }
         };
         tiff.extend_from_slice(&u16_bytes(42));
-        tiff.extend_from_slice(&u32_bytes(8)); // IFD0 at offset 8
-        tiff.extend_from_slice(&u16_bytes(1)); // one entry
-        tiff.extend_from_slice(&u16_bytes(0x0112)); // tag
-        tiff.extend_from_slice(&u16_bytes(3)); // SHORT
-        tiff.extend_from_slice(&u32_bytes(1)); // count
+        tiff.extend_from_slice(&u32_bytes(8));
+        tiff.extend_from_slice(&u16_bytes(1));
+        tiff.extend_from_slice(&u16_bytes(0x0112));
+        tiff.extend_from_slice(&u16_bytes(3));
+        tiff.extend_from_slice(&u32_bytes(1));
         tiff.extend_from_slice(&u16_bytes(value));
-        tiff.extend_from_slice(&[0, 0]); // value field padding
-        tiff.extend_from_slice(&u32_bytes(0)); // no next IFD
+        tiff.extend_from_slice(&[0, 0]);
+        tiff.extend_from_slice(&u32_bytes(0));
 
         let mut payload = b"Exif\0\0".to_vec();
         payload.extend_from_slice(&tiff);
@@ -256,13 +231,7 @@ mod tests {
 
     #[test]
     fn rotate90_moves_the_top_left_pixel_to_the_top_right() {
-        // 2x1: [A][B] rotated 90° CW becomes 1x2 with A on top... in
-        // destination terms, source (0,0) lands at (height-1-y, x) = (0, 0)
-        // and source (1,0) lands at (0, 1).
-        let pixels = vec![
-            1, 1, 1, 255, // A
-            2, 2, 2, 255, // B
-        ];
+        let pixels = vec![1, 1, 1, 255, 2, 2, 2, 255];
         let (out, width, height) = Orientation::Rotate90.apply(pixels, 2, 1);
         assert_eq!((width, height), (1, 2));
         assert_eq!(&out[0..4], &[1, 1, 1, 255]);

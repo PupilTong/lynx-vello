@@ -22,12 +22,8 @@ use crate::vello::kurbo::{BezPath, Point, Rect, RoundedRect, RoundedRectRadii, S
 use crate::vello::peniko::Fill;
 use crate::visual::CornerRadii;
 
-/// Cubic-Bézier circle approximation constant.
 const KAPPA: f64 = 0.552_284_749_830_793_4;
 
-/// A box outline in the cheapest kurbo form vello can consume: plain rects
-/// and circular-uniform rounded rects hit vello's native shape encodings;
-/// only genuinely elliptical corners pay for a `BezPath`.
 #[derive(Debug, Clone)]
 pub(crate) enum BoxShape {
     Rect(Rect),
@@ -62,8 +58,6 @@ impl BoxShape {
         Self::Path(rounded_rect_path(rect, radii))
     }
 
-    /// The shape as path elements appended to `path` (used to build ring
-    /// paths and merged clip shapes).
     pub(crate) fn append_to(&self, path: &mut BezPath) {
         match self {
             Self::Rect(rect) => path.extend(rect.path_elements(0.1)),
@@ -81,9 +75,6 @@ impl BoxShape {
     }
 }
 
-/// Calls `f` with the shape as `&impl Shape`, preserving vello's cheap
-/// encodings per variant (a closure-based visitor because `kurbo::Shape` is
-/// not dyn-safe).
 macro_rules! with_shape {
     ($shape:expr, |$s:ident| $body:expr) => {
         match $shape {
@@ -95,9 +86,6 @@ macro_rules! with_shape {
 }
 pub(crate) use with_shape;
 
-/// A rounded rect with per-corner elliptical radii as a closed clockwise
-/// (y-down) path. `radii` must already be overlap-normalized (the
-/// `dom` visual build guarantees this for item and clip radii).
 pub(crate) fn rounded_rect_path(rect: Rect, radii: &CornerRadii) -> BezPath {
     let (x0, y0, x1, y1) = (rect.x0, rect.y0, rect.x1, rect.y1);
     let tl = radii.top_left;
@@ -138,8 +126,6 @@ pub(crate) fn rounded_rect_path(rect: Rect, radii: &CornerRadii) -> BezPath {
     path
 }
 
-/// One elliptical corner from `from` to `to` bulging toward the box corner
-/// `apex`, as a kappa cubic.
 fn corner(path: &mut BezPath, from: Point, to: Point, apex: Point) {
     if from == to {
         return;
@@ -149,9 +135,6 @@ fn corner(path: &mut BezPath, from: Point, to: Point, apex: Point) {
     path.curve_to(c1, c2, to);
 }
 
-/// `outer` minus `inner` as one even-odd path (border rings, outline rings,
-/// inset-shadow fields), rebuilt into the caller's reusable buffer — the
-/// hot-path form, so per-frame painting reuses one allocation.
 pub(crate) fn ring_path_into(path: &mut BezPath, outer: &BoxShape, inner: &BoxShape) {
     path.truncate(0);
     outer.append_to(path);
@@ -166,8 +149,6 @@ fn ring_path(outer: &BoxShape, inner: &BoxShape) -> BezPath {
     path
 }
 
-/// Outer radii shrunk by the border widths, clamped at zero — the padding
-/// box's radii (css-backgrounds-3 §5.2).
 pub(crate) fn inner_radii(radii: &CornerRadii, border: &Edges<f32>) -> CornerRadii {
     let inset = |corner: Size2D<f32>, x: f32, y: f32| {
         Size2D::new((corner.width - x).max(0.0), (corner.height - y).max(0.0))
@@ -193,9 +174,6 @@ pub(crate) struct ReferenceBoxes<'a> {
     pub padding_widths: &'a Edges<f32>,
 }
 
-/// The used `clip-path` for an element, resolved to a fillable shape in the
-/// element's local space. `None` means no clipping (`clip-path: none`, and —
-/// recorded v1 limit — `url(…)` references, which need an SVG subsystem).
 pub(crate) fn clip_path_shape(
     style: &ComputedValues,
     boxes: &ReferenceBoxes<'_>,
@@ -213,9 +191,6 @@ pub(crate) fn clip_path_shape(
     }
 }
 
-/// A geometry box keyword as its rounded-rect shape (css-masking-1 §3.4.1:
-/// the box, with its border radii). `margin-box`/SVG boxes fall back to the
-/// border box (margins are not tracked in item-local space — v1 limit).
 fn geometry_box_shape(geometry: ShapeGeometryBox, boxes: &ReferenceBoxes<'_>) -> BoxShape {
     match geometry {
         ShapeGeometryBox::ShapeBox(ShapeBox::PaddingBox) => BoxShape::new(
@@ -241,8 +216,6 @@ fn geometry_box_rect(geometry: ShapeGeometryBox, boxes: &ReferenceBoxes<'_>) -> 
     }
 }
 
-/// A computed `<basic-shape>` resolved against its reference box
-/// (css-shapes-1 §4).
 fn basic_shape(shape: &BasicShape, reference: Rect) -> (BoxShape, Fill) {
     match shape {
         BasicShape::Rect(inset) => (inset_shape(inset, reference), Fill::NonZero),
@@ -260,16 +233,12 @@ fn basic_shape(shape: &BasicShape, reference: Rect) -> (BoxShape, Fill) {
         BasicShape::PathOrShape(GenericPathOrShapeFunction::Path(path)) => {
             let fill = fill_rule(path.fill);
             let mut bez = svg_path(&path.path);
-            // path() coordinates are reference-box-relative.
             bez.apply_affine(crate::vello::kurbo::Affine::translate((
                 reference.x0,
                 reference.y0,
             )));
             (BoxShape::Path(bez), fill)
         }
-        // Unreachable through the fork's grammar today (`polygon()` and
-        // `shape()` are rejected at parse time); polygon is implemented so a
-        // grammar rebase lights it up, shape() falls back to no clipping.
         BasicShape::Polygon(polygon) => {
             let mut bez = BezPath::new();
             let mut coords = polygon.coordinates.iter().map(|coordinate| {
@@ -304,8 +273,6 @@ fn fill_rule(rule: stylo::values::generics::basic_shape::FillRule) -> Fill {
     }
 }
 
-/// `inset(top right bottom left round …)` (css-shapes-1 §4.1.4), radii
-/// overlap-normalized per css-backgrounds-3 §5.5.
 fn inset_shape(inset: &InsetRect, reference: Rect) -> BoxShape {
     let top = resolve(&inset.rect.0, reference.height());
     let right = resolve(&inset.rect.1, reference.width());
@@ -348,8 +315,6 @@ fn inset_shape(inset: &InsetRect, reference: Rect) -> BoxShape {
     BoxShape::new(rect, &radii)
 }
 
-/// css-backgrounds-3 §5.5 overlap normalization: scale all radii by the
-/// smallest ratio that keeps adjacent radii within each edge.
 pub(crate) fn normalize_radii(radii: CornerRadii, width: f32, height: f32) -> CornerRadii {
     let ratio = |edge: f32, a: f32, b: f32| {
         if a + b > edge && a + b > 0.0 {
@@ -388,7 +353,6 @@ pub(crate) fn normalize_radii(radii: CornerRadii, width: f32, height: f32) -> Co
 enum RadiusAxis {
     X,
     Y,
-    /// `circle()`: distances to the closest/farthest side in both axes.
     Both,
 }
 
@@ -401,7 +365,6 @@ fn shape_position(
             reference.x0 + resolve(&position.horizontal, reference.width()),
             reference.y0 + resolve(&position.vertical, reference.height()),
         ),
-        // `auto` is the center (css-shapes-1 §4.1.1).
         PositionOrAuto::Auto => reference.center(),
     }
 }
@@ -426,7 +389,6 @@ fn shape_radius(
             let basis = match axis {
                 RadiusAxis::X => reference.width(),
                 RadiusAxis::Y => reference.height(),
-                // circle() percentage basis: sqrt(w² + h²)/√2 (css-shapes-1).
                 RadiusAxis::Both => {
                     (reference.width().hypot(reference.height())) / std::f64::consts::SQRT_2
                 }
@@ -443,9 +405,6 @@ fn shape_radius(
             RadiusAxis::Y => y_sides[0].max(y_sides[1]),
             RadiusAxis::Both => x_sides[0].max(x_sides[1]).max(y_sides[0]).max(y_sides[1]),
         },
-        // Corner keywords belong to radial gradients, not `circle()`/
-        // `ellipse()` (css-shapes-1 §2.2 grammar) — unreachable here, but
-        // the shared generic carries them: corner distance per axis.
         GenericShapeRadius::ClosestCorner => match axis {
             RadiusAxis::X => x_sides[0].min(x_sides[1]),
             RadiusAxis::Y => y_sides[0].min(y_sides[1]),
@@ -483,11 +442,9 @@ fn resolve(length: &LengthPercentage, basis: f64) -> f64 {
     length.resolve(Length::new(basis as f32)).px() as f64
 }
 
-/// An SVG `path()` as a kurbo path. Normalization reduces the command set
-/// to absolute M/L/C/A/Z (the same contract `dom`'s motion-path build
-/// relies on); arcs convert through kurbo's endpoint-parameterized arcs.
 fn svg_path(data: &SVGPathData) -> BezPath {
-    let normalized = data.normalize(/* reduce = */ true);
+    let reduce_commands = true;
+    let normalized = data.normalize(reduce_commands);
     let mut path = BezPath::new();
     let mut current = Point::ZERO;
     let mut subpath_start = Point::ZERO;
@@ -545,7 +502,6 @@ fn svg_path(data: &SVGPathData) -> BezPath {
                 };
                 match crate::vello::kurbo::Arc::from_svg_arc(&arc) {
                     Some(arc) => path.extend(arc.append_iter(0.1)),
-                    // Degenerate arc: SVG 2 §B.2.4 says draw the line.
                     None => path.line_to(to),
                 }
                 current = to;
@@ -626,9 +582,7 @@ mod tests {
         let bounds = path.bounding_box();
         assert!(rect.contains(bounds.origin()));
         assert!(bounds.x1 <= rect.x1 + 1e-6 && bounds.y1 <= rect.y1 + 1e-6);
-        // Winding at the center must be nonzero (the path is a closed loop).
         assert_ne!(path.winding(rect.center()), 0);
-        // The sharp corner stays sharp.
         assert_eq!(path.winding(Point::new(0.5, 15.5)), 1);
     }
 
@@ -637,7 +591,6 @@ mod tests {
         let outer = BoxShape::new(Rect::new(0.0, 0.0, 10.0, 10.0), &CornerRadii::ZERO);
         let inner = BoxShape::new(Rect::new(2.0, 2.0, 8.0, 8.0), &CornerRadii::ZERO);
         let ring = ring_path(&outer, &inner);
-        // Even-odd: 1 in the ring, 2 in the hole.
         assert_eq!(ring.winding(Point::new(1.0, 5.0)), 1);
         assert_eq!(ring.winding(Point::new(5.0, 5.0)), 2);
     }
@@ -654,7 +607,6 @@ mod tests {
             40.0,
             40.0,
         );
-        // 30 + 30 > 40 ⇒ scale = 40/60.
         assert!((radii.top_left.width - 20.0).abs() < 1e-5);
         assert!((radii.top_left.height - 10.0 * (40.0 / 60.0)).abs() < 1e-5);
     }

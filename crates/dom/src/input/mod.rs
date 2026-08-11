@@ -91,26 +91,12 @@ use crate::NodeId;
 use crate::scroll::ScrollAxes;
 use crate::tree::document::Document;
 
-/// How far a touch or pen must travel before the document reads it as a scroll
-/// rather than a stationary press, in CSS px.
-///
-/// The value native toolkits converge on (Android's `ViewConfiguration` touch
-/// slop, Lynx's own `tapSlop`) is 8 device-independent px, and this is the same
-/// affordance: a threshold below which a shaky finger is still holding still.
-/// A runtime layer arbitrating a scroll against its own tap and long-press
-/// recognizers wants its own threshold — it gets one by preventing the default
-/// action and driving [`Document::scroll_chain`] on its own terms.
 const TOUCH_SLOP: f32 = 8.0;
 
-/// CSS px one [`DeltaMode::Line`] step scrolls: the conventional UA value.
 const WHEEL_LINE_PX: f32 = 40.0;
 
-/// A pointing device's identity for the life of one interaction. Hosts that
-/// have no notion of pointer ids (a single mouse) can use any constant.
 pub type PointerId = u32;
 
-/// What kind of pointing device produced an event. Only touch and pen drag to
-/// scroll; a mouse scrolls with its wheel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum PointerKind {
@@ -120,41 +106,30 @@ pub enum PointerKind {
 }
 
 impl PointerKind {
-    /// Whether dragging this device is a scroll gesture.
     #[must_use]
     const fn drags_to_scroll(self) -> bool {
         matches!(self, Self::Touch | Self::Pen)
     }
 }
 
-/// Where a pointer is in its interaction, mirroring the Pointer Events
-/// lifecycle (`pointerdown`/`pointermove`/`pointerup`/`pointercancel`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum PointerPhase {
     Down,
     Move,
     Up,
-    /// The system took the interaction away — a call arrived, the window lost
-    /// focus, the gesture was claimed elsewhere. Any latched gesture ends
-    /// without completing.
     Cancel,
 }
 
-/// How to read a wheel delta, mirroring `WheelEvent.deltaMode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum DeltaMode {
-    /// CSS px. Trackpads and high-resolution wheels report this.
     #[default]
     Pixel,
-    /// Text lines, resolved at 40 CSS px each.
     Line,
-    /// Scrollport-sized jumps, resolved against the box that ends up scrolling.
     Page,
 }
 
-/// Which device an event came from, and what it did.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum InputKind {
@@ -164,18 +139,12 @@ pub enum InputKind {
         phase: PointerPhase,
     },
     Wheel {
-        /// Positive `y` scrolls the content down (the reading position moves
-        /// toward the end), matching `WheelEvent.deltaY`.
         delta: Vector2D<f32>,
         mode: DeltaMode,
     },
 }
 
-/// One host input event, normalized to the document's own coordinate space.
-///
-/// Construct with [`InputEvent::pointer`] or [`InputEvent::wheel`]; the struct
-/// is `#[non_exhaustive]` so devices and fields can be added without breaking
-/// every host adapter.
+/// A normalized host input event in document coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub struct InputEvent {
@@ -184,14 +153,7 @@ pub struct InputEvent {
     /// physical pixels divides by its device pixel ratio first.
     pub position: Point2D<f32>,
     pub kind: InputKind,
-    /// Set when the layer above already claimed this event — a script listener
-    /// called `preventDefault()`, a gesture recognizer took the touch. The
-    /// document still routes and reports the event, but performs no default
-    /// action for it.
-    ///
-    /// Preventing a `Down` suppresses the whole gesture it would have started;
-    /// preventing a `Move` suppresses only that step, and the drag resumes,
-    /// without back-applying the movement it skipped, on the next one.
+    /// Whether an upper layer already prevented the default action.
     pub default_prevented: bool,
 }
 
@@ -243,8 +205,6 @@ impl InputEvent {
         self
     }
 
-    /// Whether every coordinate this event carries is a real number.
-    /// [`Document::handle_input`] drops events that fail this.
     #[must_use]
     fn is_finite(&self) -> bool {
         let position = self.position.x.is_finite() && self.position.y.is_finite();
@@ -256,16 +216,10 @@ impl InputEvent {
     }
 }
 
-/// The UA behavior the document performed for an event on its own.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum DefaultAction {
-    /// Nothing: the event was prevented, hit nothing scrollable, or every
-    /// scroll container in the chain was already at its boundary.
     None,
-    /// A scroll container moved. `node` is the innermost box that consumed
-    /// anything — the one an event would name — and `delta` is the total the
-    /// chain consumed, which may include an ancestor's share.
     Scroll { node: NodeId, delta: Vector2D<f32> },
 }
 
@@ -273,10 +227,7 @@ pub enum DefaultAction {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub struct InputResponse {
-    /// The topmost hit-testable element under [`InputEvent::position`] in the
-    /// rendered frame, or `None` outside every box. This is the head of
-    /// [`Document::elements_from_point`]: the layer above starts its own
-    /// capture/bubble walk here.
+    /// Topmost hit-testable element at the event position.
     pub target: Option<NodeId>,
     pub default_action: DefaultAction,
 }
@@ -285,18 +236,9 @@ pub struct InputResponse {
 #[derive(Debug, Clone, Copy)]
 struct Drag {
     pointer: PointerId,
-    /// The box this gesture scrolls. Resolved once at pointer-down and kept:
-    /// re-resolving mid-drag would hand the gesture to whatever slid under the
-    /// finger.
     scroller: NodeId,
-    /// [`Document::node_removal_epoch`] when `scroller` was resolved. A freed
-    /// id can be recycled, so the drag dies with the epoch rather than
-    /// scrolling a stranger.
     epoch: u64,
-    /// The position movement is measured from — the press point until the slop
-    /// threshold falls, then the last consumed position.
     origin: Point2D<f32>,
-    /// Whether the slop threshold has been crossed.
     scrolling: bool,
 }
 
@@ -321,25 +263,7 @@ impl InputState {
 }
 
 impl<T: Sync> Document<T> {
-    /// Routes one host input event against the rendered frame and performs
-    /// whatever UA default action it resolves to.
-    ///
-    /// Targeting is a pure read of the frame the last [`Document::render`]
-    /// retained (see the module notes on visual-frame ownership): no styles
-    /// are flushed and no frame is rebuilt here. A host that has not rendered
-    /// yet — or has removed nodes since it last did — routes over nothing
-    /// until its next render.
-    ///
-    /// A non-finite position or delta is dropped entirely — no routing, no
-    /// state change. This is the untrusted boundary, and NaN here is
-    /// load-bearing garbage rather than a harmless miss: it would poison a
-    /// latched drag's origin, so every later move of that gesture computes a
-    /// NaN delta too. The `debug_assert` makes a host adapter that produces
-    /// one loud in development rather than mysteriously inert.
-    ///
-    /// # Panics
-    ///
-    /// In debug builds, on a non-finite position or wheel delta.
+    /// Routes input against the rendered frame and applies default scrolling.
     pub fn handle_input(&mut self, event: InputEvent) -> InputResponse {
         if !event.is_finite() {
             debug_assert!(false, "host input events must be finite, got {event:?}");
@@ -378,8 +302,6 @@ impl<T: Sync> Document<T> {
         let epoch = self.node_removal_epoch();
         match phase {
             PointerPhase::Down => {
-                // A second press with a live id supersedes the first; a
-                // pointer that was never lifted has nothing to finish.
                 self.input_state_mut().end(id);
                 if event.default_prevented || !device.drags_to_scroll() {
                     return DefaultAction::None;
@@ -405,15 +327,11 @@ impl<T: Sync> Document<T> {
         }
     }
 
-    /// Advances a latched drag by the movement since its origin, consuming the
-    /// touch-slop distance the first time the threshold falls so the gesture
-    /// neither jumps by the slop nor loses the overshoot past it.
     fn drag_step(&mut self, event: &InputEvent, id: PointerId, epoch: u64) -> DefaultAction {
         let Some(drag) = self.input_state_mut().find(id, epoch) else {
             return DefaultAction::None;
         };
         if event.default_prevented {
-            // Skip this step without back-applying it later.
             drag.origin = event.position;
             return DefaultAction::None;
         }
@@ -431,7 +349,6 @@ impl<T: Sync> Document<T> {
         drag.origin = event.position;
         let scroller = drag.scroller;
 
-        // Content follows the finger, so the scroll position moves against it.
         match self.scroll_chain(scroller, -movement) {
             Some((node, delta)) => DefaultAction::Scroll { node, delta },
             None => DefaultAction::None,
@@ -455,8 +372,6 @@ impl<T: Sync> Document<T> {
         let pixels = match mode {
             DeltaMode::Pixel => delta,
             DeltaMode::Line => delta * WHEEL_LINE_PX,
-            // Resolved against the box that will actually take the first
-            // bite; anything that chains onward keeps those px.
             DeltaMode::Page => self.scroll_box(scroller).map_or(delta, |scroll_box| {
                 Vector2D::new(
                     delta.x * scroll_box.scrollport.width,
@@ -481,7 +396,6 @@ mod tests {
     use crate::tree::document::tests::device;
     use crate::{NodeId, StylesheetOrigin};
 
-    /// A 100×100 `overflow: scroll` list inside a 200×200 scrolling page.
     fn scrolling_page() -> (Document<()>, NodeId, NodeId, NodeId) {
         let mut document: Document<()> = Document::new(device(), "page", ());
         document.add_stylesheet(
@@ -518,8 +432,6 @@ mod tests {
         )
     }
 
-    /// Feeds a gesture the way a shell does — every event routes over the
-    /// frame rendered after the one before it — and returns the last response.
     fn gesture(document: &mut Document<()>, events: &[InputEvent]) -> InputResponse {
         let mut last = None;
         for event in events {
@@ -537,13 +449,10 @@ mod tests {
             &mut document,
             &[
                 touch((50.0, 90.0), PointerPhase::Down),
-                // 8px of slop is eaten, so 60 of travel becomes 52 of scroll.
                 touch((50.0, 30.0), PointerPhase::Move),
             ],
         );
 
-        // The event targets the topmost box under the finger; the *scroll*
-        // resolved outward from there to the nearest user-scrollable ancestor.
         assert_eq!(response.target, Some(content));
         assert_eq!(
             response.default_action,
@@ -615,7 +524,6 @@ mod tests {
         assert_eq!(document.scroll_offset(list), Vector2D::new(0.0, 40.0));
 
         document.scroll_to(list, Vector2D::zero());
-        // One page is one scrollport: 100px tall here.
         gesture(
             &mut document,
             &[InputEvent::wheel_with_mode(
@@ -630,7 +538,6 @@ mod tests {
     #[test]
     fn a_gesture_stays_latched_to_the_box_it_started_on() {
         let (mut document, outer, list, _content) = scrolling_page();
-        // Park the inner list at its bottom so the drag has to chain.
         document.scroll_to(list, Vector2D::new(0.0, 300.0));
 
         gesture(
@@ -641,9 +548,6 @@ mod tests {
             ],
         );
 
-        // The list is pinned, so its 50px of travel chained to the outer box —
-        // and it chained there even though 50px of scrolling slid a
-        // non-scrolling box under the finger.
         assert_eq!(document.scroll_offset(list), Vector2D::new(0.0, 300.0));
         assert_eq!(document.scroll_offset(outer), Vector2D::new(0.0, 50.0));
     }
@@ -676,8 +580,6 @@ mod tests {
             ],
         );
 
-        // The prevented 30px never scrolled, and the 20px after it paid the
-        // slop toll on its own rather than inheriting a crossed threshold.
         assert_eq!(document.scroll_offset(list), Vector2D::new(0.0, 12.0));
     }
 
@@ -714,7 +616,6 @@ mod tests {
             &mut document,
             &[
                 finger(1, (50.0, 50.0), PointerPhase::Down),
-                // Outside the 100×100 list, inside the 200×200 outer box.
                 finger(2, (150.0, 150.0), PointerPhase::Down),
                 finger(1, (50.0, 22.0), PointerPhase::Move),
                 finger(2, (150.0, 102.0), PointerPhase::Move),

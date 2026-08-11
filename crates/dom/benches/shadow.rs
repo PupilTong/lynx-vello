@@ -67,14 +67,9 @@ fn device() -> dom::Device {
     )
 }
 
-/// A component page: many hosts, each wrapping a handful of slotted rows.
-/// Sized like a long `ReactLynx` list of small components.
 const HOSTS: usize = 128;
 const ROWS_PER_HOST: usize = 8;
-/// One host with a very long child list — the shape that isolates slot
-/// assignment from everything else.
 const WIDE_ROWS: usize = 1_024;
-/// Nested components: a host inside a host inside a host, and so on.
 const NESTING_DEPTH: usize = 48;
 
 const BUILD_BATCH: usize = 4;
@@ -83,10 +78,6 @@ const NO_OP_BATCH: usize = 4_096;
 const INCREMENTAL_BATCH: usize = 512;
 const RENDER_BATCH: usize = 64;
 
-/// Rules the page shares in both halves of every pair. Kept in the document
-/// sheet so the `_plain` half can match the same elements; the `_shadow` half
-/// additionally scopes a copy into each root, which is the honest comparison
-/// (a component that renders nothing without its own stylesheet).
 const PAGE_CSS: &str = "page { display: linear; }
      host { display: linear; width: 400px; }
      frame { display: linear; }
@@ -104,8 +95,6 @@ fn page() -> Document<()> {
     doc
 }
 
-/// One host rendered without shadow DOM: the template elements are ordinary
-/// children, and the rows sit directly under the stand-in for the slot.
 fn plain_host(doc: &mut Document<()>, parent: NodeId, rows: usize) -> NodeId {
     let host = doc.create_element("host", ());
     doc.append_child(parent, host);
@@ -120,9 +109,6 @@ fn plain_host(doc: &mut Document<()>, parent: NodeId, rows: usize) -> NodeId {
     host
 }
 
-/// The same host with a real shadow root: `frame`/`slot` move into the shadow
-/// tree and the rows become the host's light children, distributed by slot
-/// assignment. The flat tree is identical to [`plain_host`]'s.
 fn shadow_host(doc: &mut Document<()>, parent: NodeId, rows: usize) -> NodeId {
     let host = doc.create_element("host", ());
     doc.append_child(parent, host);
@@ -176,9 +162,6 @@ fn shadow_page(hosts: usize, rows: usize) -> (Document<()>, NodeId) {
     (doc, probe)
 }
 
-/// [`shadow_page`] without the per-root stylesheet, so the pair
-/// `build_shadow` / `build_shadow_no_scoped_css` splits the shadow cost into
-/// tree structure versus scoped `CascadeData` rebuilds.
 fn shadow_page_unstyled(hosts: usize, rows: usize) -> (Document<()>, NodeId) {
     let mut doc = page();
     let root = doc.document_element().id();
@@ -206,8 +189,6 @@ fn committed(build: fn(usize, usize) -> (Document<()>, NodeId)) -> (Document<()>
     (doc, probe)
 }
 
-// --- Construction: what a mutation batch costs before any commit ----------
-
 #[divan::bench]
 fn build_plain(bencher: divan::Bencher) {
     bencher
@@ -230,9 +211,6 @@ fn build_shadow(bencher: divan::Bencher) {
         });
 }
 
-/// Same shape as `build_shadow`, minus the scoped stylesheets: the difference
-/// between the two is what per-root `CascadeData` costs, and the difference
-/// from `build_plain` is what the shadow tree itself costs.
 #[divan::bench]
 fn build_shadow_no_scoped_css(bencher: divan::Bencher) {
     bencher
@@ -244,9 +222,6 @@ fn build_shadow_no_scoped_css(bencher: divan::Bencher) {
         });
 }
 
-/// One host, a very long child list. Slot assignment runs once per appended
-/// light child, so this is the bench that would expose it scaling worse than
-/// the appends themselves.
 #[divan::bench]
 fn build_wide_host_plain(bencher: divan::Bencher) {
     bencher
@@ -260,8 +235,6 @@ fn build_wide_host_shadow(bencher: divan::Bencher) {
         .counter(ItemsCount::new(WIDE_ROWS))
         .bench_local(|| black_box(shadow_page(1, WIDE_ROWS)));
 }
-
-// --- Commit: style + layout over the flat tree ----------------------------
 
 #[divan::bench]
 fn initial_commit_plain(bencher: divan::Bencher) {
@@ -297,8 +270,6 @@ fn initial_commit_shadow(bencher: divan::Bencher) {
         });
 }
 
-/// The flat-tree branch on the cheapest possible commit: nothing is dirty, so
-/// what is left is the walk itself.
 #[divan::bench]
 fn noop_commit_plain(bencher: divan::Bencher) {
     let state = RefCell::new(committed(plain_page));
@@ -322,8 +293,6 @@ fn noop_commit_shadow(bencher: divan::Bencher) {
             }
         });
 }
-
-// --- Incremental restyle --------------------------------------------------
 
 fn class_flip(bencher: divan::Bencher, build: fn(usize, usize) -> (Document<()>, NodeId)) {
     let state = RefCell::new(committed(build));
@@ -349,16 +318,11 @@ fn incremental_class_flip_plain(bencher: divan::Bencher) {
     class_flip(bencher, plain_page);
 }
 
-/// The same flip on a slotted row: its dirty spine runs out through the slot
-/// and the host rather than straight up the node tree.
 #[divan::bench]
 fn incremental_class_flip_shadow(bencher: divan::Bencher) {
     class_flip(bencher, shadow_page);
 }
 
-/// Moving a row between two named slots — reassignment plus the restyle it
-/// schedules. There is no `_plain` analogue: this operation only exists
-/// because slots do.
 #[divan::bench]
 fn slot_attribute_flip(bencher: divan::Bencher) {
     let mut doc = page();
@@ -398,11 +362,6 @@ fn slot_attribute_flip(bencher: divan::Bencher) {
         });
 }
 
-// --- Scale ----------------------------------------------------------------
-
-/// Components nested inside components: each level's host is a light child of
-/// the level above, so the flat tree threads host → slot → host all the way
-/// down and every level carries its own scoped stylesheet.
 fn nested_components(depth: usize) -> Document<()> {
     let mut doc = page();
     let mut parent = doc.document_element().id();
@@ -439,8 +398,6 @@ fn deep_nesting_commit(bencher: divan::Bencher) {
         });
 }
 
-/// Installing one scoped stylesheet per root across a page full of them: each
-/// call rebuilds that root's own `CascadeData`.
 #[divan::bench]
 fn scoped_stylesheet_install(bencher: divan::Bencher) {
     bencher
@@ -465,8 +422,6 @@ fn scoped_stylesheet_install(bencher: divan::Bencher) {
         });
 }
 
-// --- Frame production -----------------------------------------------------
-
 fn render(bencher: divan::Bencher, build: fn(usize, usize) -> (Document<()>, NodeId)) {
     let (mut doc, probe) = committed(build);
     doc.render();
@@ -477,8 +432,6 @@ fn render(bencher: divan::Bencher, build: fn(usize, usize) -> (Document<()>, Nod
         .bench_local(|| {
             for _ in 0..RENDER_BATCH {
                 let (doc, probe) = &mut *state.borrow_mut();
-                // Dirty one row so each iteration rebuilds a real frame
-                // instead of hitting the retained-scene fast path.
                 on = !on;
                 if on {
                     doc.add_class(*probe, "hot");

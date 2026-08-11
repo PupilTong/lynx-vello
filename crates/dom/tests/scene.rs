@@ -23,7 +23,6 @@ impl Harness {
         }
     }
 
-    /// Paints and returns `(draw ops, clip/layer pairs, open layers)`.
     fn stats(&mut self) -> (usize, u32, u32) {
         self.doc.dom.render();
         let scene = self.doc.dom.scene();
@@ -123,8 +122,6 @@ fn clean_frames_keep_the_retained_scene_stable() {
 
 #[test]
 fn hidden_group_roots_still_composite_children() {
-    // The layer arena survives into painting: an invisible opacity root with
-    // a visible child still pushes the group.
     let mut h = Harness::new(
         ".ghost { opacity: 0.5; visibility: hidden; }
          .shown { visibility: visible; background-color: teal; }",
@@ -140,9 +137,6 @@ fn hidden_group_roots_still_composite_children() {
 
 #[test]
 fn background_clip_text_sandwiches_the_layer() {
-    // With glyphs present, `background-clip: text` wraps the background in
-    // an isolate + SrcIn sandwich (two extra layers, balanced); without
-    // text children, the clip region is empty and the background vanishes.
     let css = ".text { display: flex; width: 200px; height: 50px;
                         font-family: Ahem; font-size: 20px; color: black;
                         background-color: rebeccapurple; background-clip: text; }";
@@ -190,7 +184,6 @@ fn outlines_paint_outside_the_border_box() {
         "an outline must add draws ({draws_outlined} vs {draws_plain})"
     );
 
-    // outline-style: none paints nothing even with a width.
     let none = ".bg { background-color: teal; outline: 3px red; }";
     let mut h3 = Harness::new(none);
     let root3 = h3.doc.root;
@@ -204,10 +197,6 @@ fn outlines_paint_outside_the_border_box() {
 
 #[test]
 fn transparent_border_sides_reject_the_uniform_fast_path() {
-    // `border: 10px solid transparent` + one red side: the red side must
-    // NOT fill the whole ring (the transparent sides own ring area that
-    // stays unpainted), so painting must take the per-side path — visible
-    // as its miter-quad clip layers.
     let uniform = ".bg { border: 10px solid red; }";
     let mut h = Harness::new(uniform);
     let root = h.doc.root;
@@ -230,9 +219,6 @@ fn transparent_border_sides_reject_the_uniform_fast_path() {
 
 #[test]
 fn text_decorations_propagate_through_nested_boxes() {
-    // css-text-decor-3 §2: text-decoration-line is not inherited — it
-    // propagates from ancestor decorating boxes to in-flow descendant
-    // text. The text's immediate parent here has no decoration of its own.
     let css = ".u { text-decoration-line: underline; }
         .inner { display: flex; }
         .text { display: flex; width: 200px; height: 50px;
@@ -259,7 +245,6 @@ fn text_decorations_propagate_through_nested_boxes() {
          ({draws_decorated} vs {draws_plain})"
     );
 
-    // But not INTO an absolutely positioned descendant (spec exception).
     let abs_css = ".u { text-decoration-line: underline; }
         .inner { display: flex; position: absolute; left: 0; top: 0;
                  width: 200px; height: 50px; }

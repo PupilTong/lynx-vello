@@ -43,23 +43,16 @@ pub(crate) struct OffsetSample {
     pub angle: f32,
 }
 
-/// Samples the style's motion path, if any. Returns `None` for
-/// `offset-path: none` (and for the value shapes the lynx grammar cannot
-/// produce: `ray()`, `url()`, bare coord-box).
 pub(crate) fn offset_sample(
     style: &ComputedValues,
     border_box: Size2D<f32>,
 ) -> Option<OffsetSample> {
     let path = &style.get_box().offset_path;
     let function = match path {
-        // A bare coord-box is not parseable under the lynx grammar (the
-        // coord box is always the border box and a path function is
-        // mandatory); treated as absent rather than guessed at.
         GenericOffsetPath::None | GenericOffsetPath::CoordBox(_) => return None,
         GenericOffsetPath::OffsetPath { path, .. } => &**path,
     };
     let contour = match function {
-        // ray() and url() are gated out of the lynx parser.
         GenericOffsetPathFunction::Ray(_) | GenericOffsetPathFunction::Url(_) => return None,
         GenericOffsetPathFunction::Shape(shape) => contour_of_shape(shape, border_box)?,
     };
@@ -87,7 +80,6 @@ pub(crate) fn offset_sample(
     Some(OffsetSample { position, angle })
 }
 
-/// Maximum deviation between a curve and its flattened polyline, in CSS px.
 const FLATTEN_TOLERANCE: f32 = 0.1;
 
 /// A flattened path: polyline vertices with cumulative arc lengths.
@@ -95,10 +87,7 @@ const FLATTEN_TOLERANCE: f32 = 0.1;
 /// the walk teleports, matching "total length of all sub-paths".
 struct Contour {
     points: Vec<Point2D<f32>>,
-    /// `cumulative[i]` = arc length from the start to `points[i]`.
     cumulative: Vec<f32>,
-    /// Segments the sampler must skip when deriving direction: the
-    /// teleporting jump between subpaths.
     jump_ends: Vec<usize>,
     closed: bool,
 }
@@ -108,17 +97,12 @@ impl Contour {
         self.cumulative.last().copied().unwrap_or(0.0)
     }
 
-    /// Point and direction (radians, +X axis reference, y-down clockwise
-    /// positive) at `distance` along the contour. The direction at a vertex
-    /// is the direction of the following real segment (the SVG direction of
-    /// the start of a segment); past the end it is the last real segment's.
     fn sample(&self, distance: f32) -> (Point2D<f32>, f32) {
         if self.points.len() < 2 {
             let point = self.points.first().copied().unwrap_or(Point2D::origin());
             return (point, 0.0);
         }
         let last = self.points.len() - 1;
-        // First segment whose end reaches the distance.
         let mut segment_end = match self
             .cumulative
             .binary_search_by(|length| length.partial_cmp(&distance).expect("finite arc lengths"))
@@ -126,9 +110,6 @@ impl Contour {
             Ok(exact) => exact.max(1),
             Err(insertion) => insertion.min(last),
         };
-        // A distance landing exactly on a vertex takes the following
-        // segment's direction; zero-length and jump segments never provide
-        // a direction of their own.
         loop {
             let start = self.cumulative[segment_end - 1];
             let end = self.cumulative[segment_end];
@@ -150,9 +131,6 @@ impl Contour {
         }
     }
 
-    /// Direction of segment `end_index` (from `points[end - 1]` to
-    /// `points[end]`), falling back to the nearest earlier real segment for
-    /// degenerate ones.
     fn direction_at(&self, end_index: usize) -> f32 {
         let mut index = end_index;
         loop {
@@ -188,7 +166,6 @@ impl ContourBuilder {
             self.points.push(point);
             self.cumulative.push(0.0);
         } else {
-            // Subpath jump: zero length, never a direction source.
             let length = self.total();
             self.points.push(point);
             self.cumulative.push(length);
@@ -213,8 +190,6 @@ impl ContourBuilder {
         self.points.last().copied().unwrap_or(Point2D::origin())
     }
 
-    /// Adaptively flattens a cubic Bézier by recursive subdivision until the
-    /// control points are within tolerance of the chord.
     fn cubic_to(
         &mut self,
         control1: Point2D<f32>,
@@ -232,7 +207,6 @@ impl ContourBuilder {
             self.line_to(to);
             return;
         }
-        // de Casteljau split at t = 1/2.
         let mid = |a: Point2D<f32>, b: Point2D<f32>| {
             Point2D::new(f32::midpoint(a.x, b.x), f32::midpoint(a.y, b.y))
         };
@@ -246,8 +220,6 @@ impl ContourBuilder {
         self.cubic_to(bcd, cd, to, depth - 1);
     }
 
-    /// SVG elliptical arc (endpoint parameterization, SVG 2 §B.2.4) flattened
-    /// by uniform angle steps within tolerance.
     #[allow(
         clippy::too_many_arguments,
         clippy::cast_possible_truncation,
@@ -274,19 +246,16 @@ impl ContourBuilder {
         }
         let phi = x_rotation_degrees.to_radians();
         let (sin_phi, cos_phi) = phi.sin_cos();
-        // F.6.5.1: midpoint transform.
         let dx = f32::midpoint(from.x, -to.x);
         let dy = f32::midpoint(from.y, -to.y);
         let x1p = cos_phi * dx + sin_phi * dy;
         let y1p = -sin_phi * dx + cos_phi * dy;
-        // F.6.6: radii scale-up when too small.
         let lambda = (x1p / rx).powi(2) + (y1p / ry).powi(2);
         if lambda > 1.0 {
             let scale = lambda.sqrt();
             rx *= scale;
             ry *= scale;
         }
-        // F.6.5.2: center in the prime frame.
         let sign = if large_arc == sweep_clockwise {
             -1.0
         } else {
@@ -297,7 +266,6 @@ impl ContourBuilder {
         let coefficient = sign * (numerator / denominator).max(0.0).sqrt();
         let cxp = coefficient * rx * y1p / ry;
         let cyp = -coefficient * ry * x1p / rx;
-        // F.6.5.3: center and angles.
         let cx = cos_phi * cxp - sin_phi * cyp + f32::midpoint(from.x, to.x);
         let cy = sin_phi * cxp + cos_phi * cyp + f32::midpoint(from.y, to.y);
         let start_angle = (y1p - cyp).atan2(x1p - cxp);
@@ -319,7 +287,6 @@ impl ContourBuilder {
             let y = cy + rx * cos_angle * sin_phi + ry * sin_angle * cos_phi;
             self.line_to(Point2D::new(x, y));
         }
-        // Land exactly on the endpoint despite floating-point drift.
         self.line_to(to);
     }
 
@@ -333,8 +300,6 @@ impl ContourBuilder {
     }
 }
 
-/// Perpendicular distance from `point` to the chord `from`→`to` (chord
-/// length distance when the chord is degenerate).
 fn deviation(from: Point2D<f32>, to: Point2D<f32>, point: Point2D<f32>) -> f32 {
     let chord = to - from;
     let offset = point - from;
@@ -359,8 +324,6 @@ fn contour_of_shape(shape: &BasicShape, border_box: Size2D<f32>) -> Option<Conto
             let ry = resolve_axis_radius(&ellipse.semiaxis_y, center.y, border_box.height);
             Some(contour_of_ellipse(center, rx, ry))
         }
-        // polygon() is not in the fork's allowed shape set today, but its
-        // equivalent path is trivially its vertex loop — keep it live.
         GenericBasicShape::Polygon(polygon) => {
             let mut builder = ContourBuilder::new();
             for (index, coordinate) in polygon.coordinates.iter().enumerate() {
@@ -388,14 +351,14 @@ fn contour_of_shape(shape: &BasicShape, border_box: Size2D<f32>) -> Option<Conto
         }
         GenericBasicShape::PathOrShape(function) => match function {
             GenericPathOrShapeFunction::Path(path) => Some(contour_of_svg_path(&path.path)),
-            // shape() is not parseable in this fork's grammar.
             GenericPathOrShapeFunction::Shape(_) => None,
         },
     }
 }
 
 fn contour_of_svg_path(path: &stylo::values::specified::svg_path::SVGPathData) -> Contour {
-    let normalized = path.normalize(/* reduce = */ true);
+    let reduce_commands = true;
+    let normalized = path.normalize(reduce_commands);
     let mut builder = ContourBuilder::new();
     let mut closed_at_end = false;
     let mut subpath_start = Point2D::origin();
@@ -453,13 +416,9 @@ fn contour_of_svg_path(path: &stylo::values::specified::svg_path::SVGPathData) -
             _ => unreachable!("SVGPathData::normalize(reduce) restricts to M, L, C, A, Z"),
         }
     }
-    // Motion-1: an offset path is a closed loop only if the final command is
-    // a closepath.
     builder.finish(closed_at_end)
 }
 
-/// The equivalent path of `circle()`/`ellipse()` (motion-1 §3): starts at
-/// the rightmost point, proceeds clockwise (y-down), closed.
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -483,9 +442,6 @@ fn contour_of_ellipse(center: Point2D<f32>, rx: f32, ry: f32) -> Contour {
     builder.finish(true)
 }
 
-/// The equivalent path of `inset()` (motion-1 §3): the possibly-rounded
-/// rectangle outline, starting at the left end of the top straight edge,
-/// proceeding clockwise, closed.
 fn contour_of_inset(inset: &InsetRect, border_box: Size2D<f32>) -> Contour {
     let top = inset
         .rect
@@ -544,7 +500,6 @@ fn contour_of_inset(inset: &InsetRect, border_box: Size2D<f32>) -> Contour {
     let max = Point2D::new(origin.x + size.width, origin.y + size.height);
     let mut builder = ContourBuilder::new();
     builder.move_to(Point2D::new(origin.x + radii.top_left.width, origin.y));
-    // Top edge → top-right corner.
     builder.line_to(Point2D::new(max.x - radii.top_right.width, origin.y));
     quarter_arc(
         &mut builder,
@@ -555,7 +510,6 @@ fn contour_of_inset(inset: &InsetRect, border_box: Size2D<f32>) -> Contour {
         radii.top_right,
         -std::f32::consts::FRAC_PI_2,
     );
-    // Right edge → bottom-right corner.
     builder.line_to(Point2D::new(max.x, max.y - radii.bottom_right.height));
     quarter_arc(
         &mut builder,
@@ -566,7 +520,6 @@ fn contour_of_inset(inset: &InsetRect, border_box: Size2D<f32>) -> Contour {
         radii.bottom_right,
         0.0,
     );
-    // Bottom edge → bottom-left corner.
     builder.line_to(Point2D::new(origin.x + radii.bottom_left.width, max.y));
     quarter_arc(
         &mut builder,
@@ -577,7 +530,6 @@ fn contour_of_inset(inset: &InsetRect, border_box: Size2D<f32>) -> Contour {
         radii.bottom_left,
         std::f32::consts::FRAC_PI_2,
     );
-    // Left edge → top-left corner.
     builder.line_to(Point2D::new(origin.x, origin.y + radii.top_left.height));
     quarter_arc(
         &mut builder,
@@ -591,8 +543,6 @@ fn contour_of_inset(inset: &InsetRect, border_box: Size2D<f32>) -> Contour {
     builder.finish(true)
 }
 
-/// A clockwise quarter ellipse from `start_angle` (radians, y-down) around
-/// `center` with the corner's radii.
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -621,9 +571,6 @@ fn quarter_arc(
     }
 }
 
-/// `at <position>` with the css-shapes default (center) when omitted —
-/// `offset-position` is not compiled, so there is no starting-position
-/// override.
 fn resolve_shape_position(
     position: &GenericPositionOrAuto<ShapePosition>,
     border_box: Size2D<f32>,
@@ -645,9 +592,6 @@ fn resolve_shape_position(
     }
 }
 
-/// css-shapes-1 circle radius: percentages against
-/// `sqrt(w² + h²) / sqrt(2)`, `closest-side`/`farthest-side` (and the
-/// corner keywords the type carries) against the reference box edges.
 fn resolve_circle_radius(
     radius: &ShapeRadius,
     center: Point2D<f32>,
@@ -684,8 +628,6 @@ fn resolve_circle_radius(
     }
 }
 
-/// css-shapes-1 ellipse semiaxis: percentages against the axis dimension,
-/// side keywords against the distances along that axis.
 fn resolve_axis_radius(radius: &ShapeRadius, center: f32, axis_extent: f32) -> f32 {
     match radius {
         ShapeRadius::Length(length) => length

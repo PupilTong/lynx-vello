@@ -61,9 +61,6 @@ mod device;
 mod tree;
 mod ua;
 
-/// A Lynx element's stable unique id and Element-PAPI handle.
-/// The layer below, re-exported whole: `bobcat-core` and the product reach
-/// the document/render/style stack exclusively through this door.
 pub use dom;
 
 pub type ElementId = u32;
@@ -73,17 +70,6 @@ pub use crate::device::Viewport;
 pub use crate::tree::{ElementTree, PapiError};
 pub use crate::ua::PageConfig;
 
-/// The Lynx tag name of the page root element.
-///
-/// The generic core stores whatever tag string it is given; Lynx's selector
-/// semantics treat `page` as the document element (see
-/// `docs/tracking/css-selectors-cascade.md`), and web-core's `__CreatePage`
-/// creates the one element every other element hangs off.
 pub(crate) const PAGE_TAG: &str = "page";
 
-/// The Lynx tag name `__CreateView` constructs.
-///
-/// web-core maps the Lynx tag `view` to the custom element `x-view` because it
-/// renders into an HTML document. There is no HTML here, so the Lynx tag name
-/// is kept verbatim — it is what author CSS from a `.web.bundle` selects on.
 pub(crate) const VIEW_TAG: &str = "view";

@@ -14,7 +14,6 @@ use crate::geometry::{Edges, Point, Size};
 use crate::style::{Contain, CoreStyle};
 use crate::tree::{AvailableSpace, LayoutInput, RequestedAxis, SizingMode};
 
-/// Physical-axis projection shared by formatting algorithms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Axis {
     Horizontal,
@@ -146,10 +145,7 @@ pub(super) struct ItemKey<N> {
     pub(super) layout_order: u32,
 }
 
-/// Source-order and paint-order metadata collected for every generated child.
-///
-/// The field order intentionally packs this to 24 bytes on 64-bit targets
-/// with a one-word handle (32 with a two-word handle).
+/// Source-order and paint-order metadata for a generated child.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct OrderedItem<N> {
     pub(super) node: N,
@@ -312,7 +308,6 @@ impl EdgeMask {
     }
 }
 
-/// Intrinsic keyword occupying one two-bit slot in [`IntrinsicTags`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub(super) enum IntrinsicTag {
@@ -351,9 +346,6 @@ impl IntrinsicTag {
 }
 
 /// Six intrinsic keyword classifications packed into twelve bits.
-///
-/// Fit-content payloads remain in host-owned computed style and are
-/// re-borrowed only by the algorithm pass that consumes them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(transparent)]
 pub(super) struct IntrinsicTags(u16);
@@ -432,9 +424,7 @@ impl IntrinsicTags {
     }
 }
 
-/// Owned used geometry embedded directly in every algorithm's item record.
-///
-/// No raw Stylo value or fit-content payload crosses the resolver boundary.
+/// Resolved geometry embedded in an algorithm's item record.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ItemGeometry {
     pub(super) preferred_size: Size<Option<f32>>,
@@ -782,7 +772,6 @@ fn style_size_is_definite(value: &StyleSize, parent_basis: Option<f32>) -> bool 
     }
 }
 
-/// With an aspect ratio, one definite axis makes the other definite too.
 #[inline]
 pub(super) fn mirror_ratio_definiteness(definite: &mut Size<bool>, aspect_ratio: Option<f32>) {
     if aspect_ratio.is_some() {
@@ -1090,13 +1079,7 @@ pub(super) fn accumulate_scrollable_overflow(
     child_content_size: Size<f32>,
     child_overflow: Point<Overflow>,
 ) {
-    // A child's own overflow only reaches into this box's scrollable area on
-    // an axis the child lets it escape on (css-overflow-3 §2.2): a scroll
-    // container reaches exactly its border box, and so does a `clip` box,
-    // which is not a scroll container but still stops its content dead.
-    // Asked per axis because `clip` on one axis with `visible` on the other is
-    // a legal pair the style adjuster does not fold.
-    let escapes = |overflow: Overflow, size: f32, content: f32| {
+    let visible_overflow_reach = |overflow: Overflow, size: f32, content: f32| {
         if overflow == Overflow::Visible {
             size.max(content)
         } else {
@@ -1104,8 +1087,8 @@ pub(super) fn accumulate_scrollable_overflow(
         }
     };
     let reach = Size::new(
-        escapes(child_overflow.x, child_size.width, child_content_size.width),
-        escapes(
+        visible_overflow_reach(child_overflow.x, child_size.width, child_content_size.width),
+        visible_overflow_reach(
             child_overflow.y,
             child_size.height,
             child_content_size.height,

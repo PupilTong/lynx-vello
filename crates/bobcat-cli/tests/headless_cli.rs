@@ -1,3 +1,5 @@
+//! Exercises the interactive headless CLI end to end.
+
 use std::io::Write;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};

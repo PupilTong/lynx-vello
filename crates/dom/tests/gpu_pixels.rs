@@ -21,17 +21,9 @@ fn pixel(pixels: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
     pixels[index..index + 4].try_into().unwrap()
 }
 
-/// `background-clip: text` over Ahem text: the purple background shows
-/// through glyph ink (a solid em square) and not through the space between
-/// words or the un-inked box area.
 #[test]
 fn background_clip_text_clips_to_glyph_ink() {
     let mut gpu = headless("background_clip_text_clips_to_glyph_ink");
-    // Box at (10, 10); Ahem at 20px: "HH HH" → glyph squares x 10..50 and
-    // 70..110, space x 50..70; ink y 10..30 (0.8em ascent + 0.2em descent
-    // spans the whole line box at the top of the 50px-tall element).
-    // `color: transparent` is the authoring pattern: the glyph fill must
-    // not cover the background showing through the clip.
     let css = "page { display: flex; position: relative; width: 200px; height: 100px; }
         .text { display: flex; position: absolute; left: 10px; top: 10px;
                 width: 180px; height: 50px;
@@ -49,16 +41,13 @@ fn background_clip_text_clips_to_glyph_ink() {
         .render(&scene, 200, 100, Color::WHITE)
         .expect("headless render");
 
-    // Inside the first glyph square: rebeccapurple (#663399).
     let ink = pixel(&pixels, 200, 30, 20);
     assert!(
         ink[0] > 80 && ink[0] < 130 && ink[2] > 120,
         "glyph ink must show the background ({ink:?})"
     );
-    // In the inter-word space: the page base color (white).
     let gap = pixel(&pixels, 200, 60, 20);
     assert_eq!(gap, [255, 255, 255, 255], "space must stay unpainted");
-    // Below the line box, still inside the element: unpainted.
     let below = pixel(&pixels, 200, 30, 50);
     assert_eq!(
         below,
@@ -67,8 +56,6 @@ fn background_clip_text_clips_to_glyph_ink() {
     );
 }
 
-/// The same element without `background-clip: text` paints the whole box —
-/// the sanity contrast for the assertions above.
 #[test]
 fn plain_background_covers_the_box() {
     let mut gpu = headless("plain_background_covers_the_box");
@@ -96,22 +83,6 @@ fn plain_background_covers_the_box() {
     );
 }
 
-/// Lynx's gradient-valued `color` fills glyph ink with a real ramp, anchored
-/// to the element's **padding** box.
-///
-/// This is the assertion the screenshot goldens cannot make: the anchor is a
-/// choice about a denominator and an origin, and getting it wrong shifts every
-/// color by a few percent — well inside golden tolerance, but wrong. Ahem's
-/// glyphs are solid em squares, so the ramp can be read straight off a known
-/// pixel.
-///
-/// Geometry: a 120px-wide box with a 20px left border, so the padding box runs
-/// x 20..120 — 100px of ramp. Ahem at 20px puts "HH" squares at x 20..40 and
-/// 40..60, so the sampled centers sit 10% and 30% along a `#ff0000 → #0000ff`
-/// ramp. Both stops are opaque, so premultiplied-sRGB interpolation is just
-/// `red = 255 * (1 - t)`: 230 and 179. Anchoring to the *border* box instead
-/// would stretch the ramp over 120px from x=0 and read 191 and 149, which the
-/// asserted windows exclude.
 #[test]
 fn gradient_color_fills_glyph_ink_from_the_padding_box() {
     let mut gpu = headless("gradient_color_fills_glyph_ink_from_the_padding_box");
@@ -133,8 +104,6 @@ fn gradient_color_fills_glyph_ink_from_the_padding_box() {
         .render(&scene, 200, 100, Color::WHITE)
         .expect("headless render");
 
-    // Ink y: the 20px line box starts at the element's top (y = 10), so the
-    // em square spans y 10..30; sample its middle.
     let first = pixel(&pixels, 200, 30, 20);
     assert!(
         (215..=245).contains(&first[0]) && first[2] < 45,
@@ -145,14 +114,12 @@ fn gradient_color_fills_glyph_ink_from_the_padding_box() {
         (164..=194).contains(&second[0]) && second[2] > 60,
         "second glyph must sit ~30% along the ramp ({second:?})"
     );
-    // The ramp has to actually advance between the two squares.
     assert!(
         first[0] > second[0] + 30,
         "red must fall across the ramp ({first:?} then {second:?})"
     );
 }
 
-/// `outline: solid` paints a flush ring outside the border box.
 #[test]
 fn outline_rings_the_border_box() {
     let mut gpu = headless("outline_rings_the_border_box");
@@ -170,26 +137,20 @@ fn outline_rings_the_border_box() {
         .render(&scene, 200, 100, Color::WHITE)
         .expect("headless render");
 
-    // Ring band left of the border box: x 15..20 at mid-height.
     let ring = pixel(&pixels, 200, 17, 45);
     assert!(
         ring[0] > 200 && ring[1] < 60 && ring[2] < 60,
         "outline ring must be red ({ring:?})"
     );
-    // Inside the box: teal background, not outline.
     let inside = pixel(&pixels, 200, 60, 45);
     assert!(
         inside[0] < 60 && inside[1] > 90 && inside[1] < 160,
         "box interior keeps its teal background ({inside:?})"
     );
-    // Outside the ring: base white.
     let outside = pixel(&pixels, 200, 10, 45);
     assert_eq!(outside, [255, 255, 255, 255]);
 }
 
-/// Appending a separately painted document into an isolated atlas cell must
-/// preserve nested blend layers exactly. The CSS screenshot matrix relies on
-/// this for opacity, filters, masks, clips, and shadows.
 #[test]
 fn isolated_atlas_cell_matches_standalone_group_effects() {
     let mut gpu = headless("isolated_atlas_cell_matches_standalone_group_effects");

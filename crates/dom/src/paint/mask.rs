@@ -23,8 +23,6 @@ use crate::paint::BoxFragment;
 use crate::paint::background::{self, BoxLevel, PatternLayer};
 use crate::vello::Scene;
 
-/// Whether the style has any mask layer to paint (drives the walker's
-/// sandwich).
 pub(crate) fn has_mask(style: &ComputedValues) -> bool {
     style
         .get_svg()
@@ -34,7 +32,6 @@ pub(crate) fn has_mask(style: &ComputedValues) -> bool {
         .any(|image| !matches!(image, Image::None))
 }
 
-/// Paints the mask pattern (the sandwich's backdrop).
 pub(crate) fn paint(
     scene: &mut Scene,
     style: &ComputedValues,
@@ -43,19 +40,12 @@ pub(crate) fn paint(
 ) {
     let svg = style.get_svg();
     let layers = svg.mask_image.0.as_slice();
-    // recorded v1 limit: only the first non-`none` layer paints; the
-    // multi-layer `mask-composite` chain (add/subtract/intersect/exclude)
-    // needs nested compositing the walker's single sandwich cannot express
-    // yet, so `mask-composite` is ignored along with the extra layers.
     let Some(index) = layers
         .iter()
         .position(|image| !matches!(image, Image::None))
     else {
         return;
     };
-    // recorded v1 limit: `mask-mode: luminance` (and luminance sources
-    // under `match-source`) is treated as alpha — the walker composites
-    // the sandwich with `Compose::SrcIn` on alpha only.
     let origin = match *background::cycled(&svg.mask_origin.0, index) {
         MaskOrigin::BorderBox => BoxLevel::Border,
         MaskOrigin::PaddingBox => BoxLevel::Padding,
@@ -64,9 +54,6 @@ pub(crate) fn paint(
     let clip = match *background::cycled(&svg.mask_clip.0, index) {
         BackgroundClip::PaddingBox => BoxLevel::Padding,
         BackgroundClip::ContentBox => BoxLevel::Content,
-        // `text` and `border-area` never parse for `mask-clip` (they are
-        // background-only values in the shared enum's validity); fall back
-        // to the border box if either ever appears.
         BackgroundClip::BorderBox | BackgroundClip::Text | BackgroundClip::BorderArea => {
             BoxLevel::Border
         }

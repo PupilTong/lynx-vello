@@ -15,7 +15,6 @@ use quickjs_rust_bridge::{
     EvalOptions, EvalSource, HostFunctionError, HostValue, Realm, RealmOptions,
 };
 
-/// A realm tight enough that a per-call leak cannot survive the loops below.
 fn tight_realm() -> Realm {
     Realm::with_options(RealmOptions {
         memory_limit: Some(2 * 1024 * 1024),
@@ -111,8 +110,6 @@ fn many_arguments_do_not_leak() {
     assert_eq!(value.as_number(), Some(20000.0 * 8.0));
 }
 
-/// The installed function is rooted by the object it was installed on, not by
-/// the Rust `Value` the caller happened to hold.
 #[test]
 fn a_dropped_function_value_stays_callable_once_installed() {
     let mut realm = Realm::new().unwrap();
@@ -130,8 +127,6 @@ fn a_dropped_function_value_stays_callable_once_installed() {
     assert_eq!(value.as_number(), Some(5.0));
 }
 
-/// Tearing down a realm that still holds host closures must not leak the
-/// runtime or double-free the callback table.
 #[test]
 fn a_realm_with_live_host_functions_drops_cleanly() {
     for _ in 0..50 {
@@ -145,10 +140,6 @@ fn a_realm_with_live_host_functions_drops_cleanly() {
     }
 }
 
-/// `set_property` can run arbitrary JavaScript — a `Proxy` `set` trap, or an
-/// accessor inherited from the prototype chain — so it must execute under the
-/// realm's interrupt guard. Without one, a hostile or buggy trap hangs the
-/// owner thread forever instead of hitting the configured timeout.
 #[test]
 fn set_property_honors_the_execution_timeout() {
     let (sender, receiver) = mpsc::sync_channel(1);
@@ -174,8 +165,6 @@ fn set_property_honors_the_execution_timeout() {
     assert!(errored, "a timed-out trap must report an error");
 }
 
-/// A trap that runs to completion behaves normally — the guard changes when
-/// execution is cut off, not what a successful set does.
 #[test]
 fn set_property_runs_a_proxy_trap_and_reports_refusal() {
     let mut realm = Realm::new().unwrap();
@@ -209,13 +198,6 @@ fn set_property_runs_a_proxy_trap_and_reports_refusal() {
     );
 }
 
-/// A failed allocation while naming the function must fail the whole
-/// construction, not hand back a half-built object.
-///
-/// `JS_DefinePropertyValue` stores its value without checking for the
-/// exception sentinel, so passing it a failed `JS_NewString` would leave a
-/// function whose `.name` has no type and a pending exception that surfaces
-/// later at an unrelated call.
 #[test]
 fn a_name_that_cannot_be_allocated_fails_construction_cleanly() {
     let mut realm = Realm::with_options(RealmOptions {
@@ -224,13 +206,10 @@ fn a_name_that_cannot_be_allocated_fails_construction_cleanly() {
     })
     .unwrap();
 
-    // Far larger than the remaining budget, so the name string cannot be built.
     let huge = "n".repeat(200_000);
     let outcome = realm.function(&huge, 0, |_| Ok(HostValue::Undefined));
     assert!(outcome.is_err(), "an unallocatable name must not succeed");
 
-    // The realm is still usable and reports types correctly — no sentinel was
-    // stored anywhere, and no stale exception is left pending.
     realm
         .define_global_function("ok", 0, |_| Ok(HostValue::Number(1.0)))
         .unwrap();
@@ -241,22 +220,12 @@ fn a_name_that_cannot_be_allocated_fails_construction_cleanly() {
     assert_eq!(String::from_utf16(&units).unwrap(), "string");
 }
 
-/// A host function's Rust closure must die with the JS function object, not
-/// with the realm.
-///
-/// The closure lives in a realm-owned table, so nothing about dropping the
-/// returned `Value` frees it on its own. A companion object handed to the
-/// function as its data carries the slot index and, when the collector reaches
-/// it, releases the slot — which is the only thing tying the two lifetimes
-/// together. A long-lived realm that registers a handler per element per
-/// update (events, worklets) depends on this.
 mod release {
     use std::cell::Cell;
     use std::rc::Rc;
 
     use quickjs_rust_bridge::{EvalOptions, EvalSource, HostFunctionError, HostValue, Realm};
 
-    /// Counts its own drops, so a retained closure is observable.
     struct Tracked(Rc<Cell<u32>>);
 
     impl Drop for Tracked {
@@ -275,10 +244,6 @@ mod release {
         }
     }
 
-    /// `QuickJS` is refcounted, so a function nothing references is finalized the
-    /// moment the last reference goes. The *closure* drop is then deferred to
-    /// the next realm operation, because doing it in the finalizer would risk
-    /// re-entering `QuickJS` from inside its own collector.
     #[test]
     fn dropping_an_uninstalled_function_releases_its_closure() {
         let drops = Rc::new(Cell::new(0));
@@ -289,7 +254,6 @@ mod release {
         drop(function);
         assert_eq!(drops.get(), 0, "finalized, but the drop is deferred");
 
-        // Any realm operation reclaims; `run_gc` is simply the cheapest.
         realm.run_gc();
         assert_eq!(drops.get(), 1, "reclaimed at the next operation");
 
@@ -297,9 +261,6 @@ mod release {
         assert_eq!(drops.get(), 1, "and not released twice");
     }
 
-    /// A handler that owns a `Value` from its own realm is safe — the drop
-    /// happens outside the collector — but the resulting reference cycle keeps
-    /// the realm alive until the function itself becomes unreachable.
     #[test]
     fn a_handler_owning_a_value_is_released_without_re_entering_the_collector() {
         let drops = Rc::new(Cell::new(0));
@@ -312,8 +273,6 @@ mod release {
         let function = realm
             .function("owns_a_value", 0, move |_| {
                 let _ = &tracked;
-                // Captured from this very realm: the hazard the deferral exists
-                // for, since dropping it calls JS_FreeValue.
                 let _ = &rooted;
                 Ok(HostValue::Undefined)
             })
@@ -323,7 +282,6 @@ mod release {
         realm.run_gc();
         assert_eq!(drops.get(), 1, "released outside the collector");
 
-        // The realm survived the JS_FreeValue that drop performed.
         let value = realm
             .evaluate(EvalSource::new("1 + 1"), EvalOptions::default())
             .expect("the realm is still healthy");
@@ -344,8 +302,6 @@ mod release {
                 EvalOptions::default(),
             )
             .unwrap();
-        // Refcounting alone covers this; the collection is belt and braces
-        // for a handler that ended up in a cycle.
         realm.run_gc();
         assert_eq!(drops.get(), 1, "the replaced handler must release");
     }
@@ -361,21 +317,16 @@ mod release {
         realm.run_gc();
         assert_eq!(drops.get(), 0, "a live global must survive collection");
 
-        // And it still works.
         realm
             .evaluate(EvalSource::new("kept()"), EvalOptions::default())
             .expect("a surviving function stays callable");
     }
 
-    /// Released slots are reused, so churning handlers does not grow the table
-    /// without bound.
     #[test]
     fn released_slots_are_reused_rather_than_accumulating() {
         let drops = Rc::new(Cell::new(0));
         let mut realm = Realm::new().unwrap();
 
-        // A realm that registers and discards far more handlers than it ever
-        // holds at once.
         for _ in 0..1000 {
             let function = realm.function("churn", 0, tracking(&drops)).unwrap();
             drop(function);
@@ -383,8 +334,6 @@ mod release {
         }
         assert_eq!(drops.get(), 1000, "every discarded closure must release");
 
-        // Reuse must not corrupt dispatch: a function taking a recycled slot
-        // still calls its own closure.
         realm
             .define_global_function("final", 1, |arguments| {
                 Ok(arguments.first().cloned().unwrap_or(HostValue::Null))
@@ -396,7 +345,6 @@ mod release {
         assert_eq!(value.as_number(), Some(7.0));
     }
 
-    /// Realm teardown still releases whatever the collector never reached.
     #[test]
     fn realm_teardown_releases_still_rooted_closures() {
         let drops = Rc::new(Cell::new(0));

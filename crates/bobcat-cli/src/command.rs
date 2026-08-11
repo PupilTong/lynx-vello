@@ -1,3 +1,5 @@
+//! Interactive console command parsing and input.
+
 use std::io::{BufRead, IsTerminal, Write};
 use std::num::NonZeroU32;
 use std::path::PathBuf;

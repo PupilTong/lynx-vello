@@ -33,33 +33,17 @@ use crate::screenshot::save_screenshot;
 
 #[derive(Debug)]
 enum UserEvent {
-    /// A console command from the stdin thread.
     Command(Command),
-    /// An engine-owned thread has messages waiting; the engine must be
-    /// pumped on this thread.
     Pump,
 }
 
-/// The one pointer id every mouse gesture uses. Real touches carry winit's own
-/// per-contact ids, which cannot collide with this because they start at 0 and
-/// this is deliberately out of that range.
 const MOUSE_POINTER_ID: u32 = u32::MAX;
 
-/// The window this embedder lends the engine: the winit window itself as the
-/// draw target, plus the OS mechanisms the engine schedules through it.
-///
-/// It lives outside the application state, because the engine's surface
-/// borrows it for as long as the engine exists.
 struct MacWindow {
-    /// Behind `Arc` because the frame-request handle the engine hands to its
-    /// Lynx main thread keeps one of its own.
     os: Arc<Window>,
 }
 
 impl EmbedderWindow for MacWindow {
-    /// The surface borrows the window rather than taking a refcounted
-    /// handle of its own: this embedder owns the window and outlives the
-    /// engine that draws on it.
     type Target<'window> = &'window Window;
     type Frames = FrameRequests;
 
@@ -78,8 +62,6 @@ impl EmbedderWindow for MacWindow {
     }
 }
 
-/// The frame-request handle the engine's Lynx main thread keeps: winit
-/// accepts a redraw request from any thread.
 struct FrameRequests {
     os: Arc<Window>,
 }
@@ -102,8 +84,6 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
     println!("bobcat: macOS window starting; enter `help` for commands");
     console.prompt();
 
-    // The engine's surface borrows the window, so the window is stored here
-    // rather than in the application state that installs it.
     let window = OnceLock::new();
     let mut application = MacApplication::new(
         program,
@@ -127,17 +107,11 @@ struct MacApplication<'window> {
     initial_width: f32,
     initial_height: f32,
     engine: Option<Engine<'window, MacWindow>>,
-    /// Where the window is created into, once: storage that outlives this
-    /// handler, so the engine can borrow the window it draws on.
     window: &'window OnceLock<MacWindow>,
-    /// The handle the engine's script thread posts wakeups back through.
     proxy: EventLoopProxy<UserEvent>,
     console: Console,
     occluded: bool,
-    /// Last known cursor position, in physical window pixels. Mouse events
-    /// other than `CursorMoved` do not carry one.
     pointer: Option<PhysicalPosition<f64>>,
-    /// Whether the left button is currently down.
     pressed: bool,
     error: Option<CliError>,
 }
@@ -179,8 +153,6 @@ impl<'window> MacApplication<'window> {
         }
     }
 
-    /// The window, once created. Reading it through the slot hands back a
-    /// borrow that outlives `&self` — the lifetime the engine holds.
     fn window(&self) -> Option<&'window MacWindow> {
         self.window.get()
     }
@@ -211,9 +183,6 @@ impl<'window> MacApplication<'window> {
         program.warn_about_dropped_author_rules();
 
         let mut engine = Engine::new(program.config, css_width, css_height, scale_factor)?;
-        // The engine builds the GPU surface on this window and presents from
-        // this thread — vsync interacts with the OS only inside its redraw
-        // relay.
         engine.attach_window(
             window,
             FrameSize {
@@ -222,9 +191,6 @@ impl<'window> MacApplication<'window> {
             },
         )?;
 
-        // The script boots concurrently on the engine's thread: the window is
-        // already live, and the first committed batch triggers the first real
-        // frame. Until then the engine paints the bare page.
         let script_wakeup = self.proxy.clone();
         engine.spawn_script(program.source, move || {
             let _ = script_wakeup.send_event(UserEvent::Pump);
@@ -282,15 +248,11 @@ impl<'window> MacApplication<'window> {
         self.console.prompt();
     }
 
-    /// Asks the engine for the current frame's pixels; writing the PNG is
-    /// this embedder's IO.
     fn screenshot(&mut self, path: &Path) {
         let Some(engine) = self.engine.as_mut() else {
             eprintln!("bobcat: no window yet to capture");
             return;
         };
-        // A screenshot failure must not tear down the session: report it at
-        // the prompt like any other bad command.
         let saved = engine
             .capture()
             .map_err(CliError::Engine)
@@ -300,23 +262,14 @@ impl<'window> MacApplication<'window> {
         }
     }
 
-    /// Relays one already-translated input event to the engine.
     fn dispatch(&mut self, event: InputEvent) {
         if let Some(engine) = self.engine.as_mut() {
             engine.dispatch_input(event);
         }
     }
 
-    /// A mouse pointer event at the last known cursor position.
-    ///
-    /// A left-button drag is reported as a `Pen` rather than a `Mouse`: the DOM
-    /// deliberately does not drag-scroll for a mouse (browsers do not either —
-    /// a mouse scrolls with its wheel), and on a laptop without a touchscreen a
-    /// click-drag is the only way to try the touch path at all. Wheel and
-    /// trackpad scrolling still arrive as real wheel events below.
     fn pointer_event(&mut self, phase: PointerPhase) {
         let Some(position) = self.pointer else { return };
-        // Moves only matter while a gesture is in flight; hover has no consumer.
         if phase == PointerPhase::Move && !self.pressed {
             return;
         }
@@ -336,10 +289,6 @@ impl<'window> MacApplication<'window> {
         let Some(point) = self.css_point(position) else {
             return;
         };
-        // Trackpads and high-resolution wheels report pixels; a notched wheel
-        // reports lines, which is exactly what `DeltaMode::Line` is for.
-        // Both invert: a wheel scrolled away from the user moves the reading
-        // position forward, which is `+deltaY`.
         let event = match delta {
             MouseScrollDelta::PixelDelta(pixels) => {
                 let scale = self.window().map_or(1.0, |window| window.os.scale_factor());
@@ -377,9 +326,6 @@ impl<'window> MacApplication<'window> {
         self.dispatch(InputEvent::pointer(point, id, PointerKind::Touch, phase));
     }
 
-    /// A physical window position as the viewport CSS-px point the engine
-    /// hit-tests with. The window's scale factor is the only conversion: both
-    /// spaces share an origin at the window's top-left content corner.
     fn css_point(&self, physical: PhysicalPosition<f64>) -> Option<Point2D<f32>> {
         let scale = self.window()?.os.scale_factor();
         #[allow(
@@ -447,8 +393,6 @@ impl ApplicationHandler<UserEvent> for MacApplication<'_> {
                 Ok(())
             }
             WindowEvent::CursorLeft { .. } => {
-                // The button may well come up outside the window; end the
-                // gesture rather than leave it latched forever.
                 self.pointer_event(PointerPhase::Cancel);
                 self.pointer = None;
                 self.pressed = false;
@@ -487,8 +431,6 @@ impl ApplicationHandler<UserEvent> for MacApplication<'_> {
                 let Some(engine) = self.engine.as_mut() else {
                     return;
                 };
-                // A successfully finished script needs no reaction, and
-                // future lifecycle events default to none.
                 for engine_event in engine.pump() {
                     if let EngineEvent::ScriptFinished(Err(source)) = engine_event {
                         let input = self.input.clone();

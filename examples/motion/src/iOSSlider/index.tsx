@@ -15,17 +15,11 @@ import SunPng from './sun.png';
 
 import './styles.css';
 
-/**
- * ==============   Configuration   ================
- */
 const maxPull = 20;
 const maxSquish = 0.92;
 const maxStretch = 1.08;
 
 export default function Comp() {
-  /**
-   * ==============   State   ================
-   */
   const sliderRef = useMainThreadRef<MainThread.Element>(null);
   const progressRef = useMotionValueRef(0.5);
   const sizeRef = useMainThreadRef({ top: 0, bottom: 0 });
@@ -105,7 +99,6 @@ export default function Comp() {
 
   function onTouchEnd(_e: MainThread.TouchEvent) {
     'main thread';
-    // Animate back to bounds if needed
     if (progressRef.current.get() < 0) {
       animate(progressRef.current, 0, {
         type: 'spring',

@@ -40,10 +40,6 @@ impl<T> LayoutTree for TreeArenas<T> {
     where
         Self: 'tree;
 
-    /// The flat-tree children — a host lays out its shadow tree, and a slot
-    /// lays out the nodes assigned to it. Every other `LayoutTree` walk
-    /// (`flattened_children` included) reads the tree through this one method,
-    /// so the whole engine follows the flat tree from here.
     fn children(&self, node: NodeId) -> Self::ChildIter<'_> {
         slab_get_for_live_node(&self.nodes, node)
             .flat_children()
@@ -96,20 +92,6 @@ impl<T> LayoutTree for TreeArenas<T> {
             if view.skips_contents() {
                 return compute_skipped_contents_layout(self, state, node, input);
             }
-            // A replaced element has no inner formatting context: its box is
-            // filled by external content, so the *inner* display type is simply
-            // not applicable to it (css-display-3 §2.3 — `display` on a replaced
-            // element sets its outer role only). Routing it to `Leaf` regardless
-            // is therefore the W3C-correct behaviour, and it is load-bearing
-            // rather than pedantic here: the Lynx UA cascade sets
-            // `display: linear` on *every* element, so without this an `<img>`
-            // would land in the linear algorithm, ignore its natural size, and
-            // lay out at 0x0 with the decode silently wasted.
-            //
-            // Keyed on replaced *identity*, not on whether a natural size has
-            // arrived: an image is replaced before its header lands, and a node
-            // that changed formatting context between frames would relayout its
-            // whole subtree for nothing.
             if node_ref.is_replaced() {
                 DisplayMode::Leaf
             } else {
@@ -119,11 +101,6 @@ impl<T> LayoutTree for TreeArenas<T> {
 
         compute_cached_layout(self, state, node, input, move |tree, state, node, input| {
             match display {
-                // `None` is hidden and returned above. `Contents` generates no
-                // box at all and nothing routes one here: `flattened_children`
-                // splices it out of every item collection, the positioned pass
-                // never hoists it, `is_relayout_boundary` is false for it, and
-                // Stylo blockifies it on the document element.
                 DisplayMode::None | DisplayMode::Contents => {
                     unreachable!("a box-less element has no box to lay out")
                 }
@@ -317,11 +294,6 @@ fn pre_position<T: Sync>(
         return false;
     }
     if display == DisplayMode::Contents {
-        // No box: drop any geometry left from when this element still
-        // generated one, so it stays a transparent zero-offset pass-through
-        // for the rounding walk and reports an empty box to queries. Its
-        // children are real boxes of an ancestor's formatting context, so
-        // they still need the hook.
         tree.layout_mut(state, node_id).unrounded = Layout::default();
         return true;
     }
@@ -396,9 +368,6 @@ fn position_hoisted<T: Sync>(
         containing_origin.x + layout.location.x - parent_origin.x,
         containing_origin.y + layout.location.y - parent_origin.y,
     );
-    // Rank against the box siblings the engine ordered this node among, which
-    // is the flattened item list of the formatting context it was collected
-    // in — not the source child list, when box-less elements intervene.
     let ordering_parent = box_parent(node).map_or(parent_id, Node::id);
     layout.order = sibling_paint_order(tree, ordering_parent, node_id);
     tree.layout_mut(state, node_id).unrounded = layout;

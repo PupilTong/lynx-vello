@@ -34,7 +34,6 @@ impl Harness {
         self.doc.dom.build_paint_order()
     }
 
-    /// The viewport-space border-box origin of a node's element item.
     fn origin(&mut self, id: NodeId) -> Point2D<f32> {
         let frame = self.paint();
         let item = frame
@@ -47,8 +46,6 @@ impl Harness {
             .expect("a paintable item has a non-singular matrix")
     }
 
-    /// Renders (the sole frame producer) and reads the topmost element at
-    /// the point from the retained frame, the way a shell-side query would.
     fn hit(&mut self, x: f32, y: f32) -> Option<NodeId> {
         self.doc.dom.render();
         self.doc
@@ -58,22 +55,17 @@ impl Harness {
             .copied()
     }
 
-    /// Routes one event the way a shell does: render first, so the event
-    /// reads the frame the user would be looking at.
     fn input(&mut self, event: InputEvent) -> InputResponse {
         self.doc.dom.render();
         self.doc.dom.handle_input(event)
     }
 
-    /// Scroll offsets clamp against the committed layout, so a tree that has
-    /// been mutated since the last pass needs one before it can scroll.
     fn scroll_to(&mut self, id: NodeId, x: f32, y: f32) {
         self.doc.dom.layout();
         self.doc.dom.scroll_to(id, Vector2D::new(x, y));
     }
 }
 
-/// A 100×100 scroller at the page origin, stacking 100px rows into a column.
 const SCROLLER: &str = "page { display: flex; width: 800px; height: 600px; }
      .scroller { display: flex; flex-direction: column; overflow: scroll;
                  width: 100px; height: 100px; }
@@ -107,13 +99,10 @@ fn hit_testing_follows_the_scrolled_content_through_the_unmoved_clip() {
     let rows: Vec<NodeId> = (0..4).map(|_| h.el(scroller, "view.row")).collect();
 
     assert_eq!(h.hit(50.0, 50.0), Some(rows[0]));
-    // Row 1 is laid out at y=100..200 but clipped away by the 100px scrollport.
     assert_eq!(h.hit(50.0, 150.0), Some(root));
 
     h.scroll_to(scroller, 0.0, 150.0);
 
-    // Row 1 now spans y=-50..50, and a box's hit region is half-open at its
-    // trailing edge, so 40 lands on it and 50 already belongs to row 2.
     assert_eq!(h.hit(50.0, 40.0), Some(rows[1]));
     assert_eq!(h.hit(50.0, 50.0), Some(rows[2]));
     assert_eq!(
@@ -125,10 +114,6 @@ fn hit_testing_follows_the_scrolled_content_through_the_unmoved_clip() {
 
 #[test]
 fn a_positioned_box_scrolls_only_with_its_own_containing_block() {
-    // Both absolute boxes are DOM children of the scroller. The scroller is
-    // static, so `inside` is anchored on the *page* and must not scroll; give
-    // the scroller `position: relative` and the same box becomes its own and
-    // does.
     let css = format!(
         "{SCROLLER}
          page {{ position: relative; }}
@@ -170,10 +155,6 @@ fn a_positioned_box_scrolls_only_with_its_own_containing_block() {
 
 #[test]
 fn a_wheel_over_a_pinned_box_does_not_scroll_what_it_is_pinned_above() {
-    // The other half of the containing-block rule. `pinned` is a DOM child of
-    // the scroller but anchored on the page, so it does not move when the
-    // scroller scrolls — and a wheel over it must not scroll the scroller
-    // either, or content would slide behind a box that visibly stays put.
     let mut h = Harness::new(
         "page { display: flex; position: relative; width: 800px; height: 600px; }
          .scroller { display: flex; flex-direction: column; overflow: scroll;
@@ -192,9 +173,6 @@ fn a_wheel_over_a_pinned_box_does_not_scroll_what_it_is_pinned_above() {
     assert_eq!(over_pinned.default_action, DefaultAction::None);
     assert_eq!(h.doc.dom.scroll_offset(scroller), Vector2D::zero());
 
-    // Just outside the pinned box, over the scroller's own content, the same
-    // wheel does scroll — so this is the containing-block chain at work, not a
-    // dead input path.
     let over_content = h.input(InputEvent::wheel(Point2D::new(80.0, 80.0), (0.0, 80.0)));
     assert_eq!(over_content.target, Some(rows[0]));
     assert_eq!(
@@ -248,9 +226,6 @@ fn nested_scrollers_compose_their_offsets() {
 
 #[test]
 fn scroll_translations_snap_to_the_device_pixel_grid() {
-    // At a 2× ratio, a half-CSS-pixel offset is a whole device pixel and
-    // survives; a quarter is not and rounds away, so scrolled content keeps
-    // the pixel alignment layout rounding gave unscrolled content.
     let mut doc = Doc::with_device(device_with(800.0, 600.0, 2.0, PrefersColorScheme::Light));
     doc.add_css(SCROLLER);
     let mut h = Harness { doc };
@@ -290,7 +265,6 @@ fn overflow_hidden_clips_without_answering_a_gesture() {
     assert_eq!(response.default_action, DefaultAction::None);
     assert_eq!(h.doc.dom.scroll_offset(clipper), Vector2D::zero());
 
-    // The same box still scrolls when something asks it to directly.
     h.scroll_to(clipper, 0.0, 60.0);
     assert_eq!(h.origin(rows[1]), Point2D::new(0.0, 40.0));
 }
@@ -310,22 +284,18 @@ fn overflow_clip_is_not_a_scroll_container_at_all() {
 
     assert!(!h.doc.dom.is_scroll_container(clipper));
     assert_eq!(h.doc.dom.scroll_box(clipper), None);
-    // Unlike `hidden`, not even a programmatic scroll moves it.
     assert_eq!(
         h.doc.dom.scroll_to(clipper, Vector2D::new(0.0, 60.0)),
         Vector2D::zero(),
     );
     assert_eq!(h.origin(rows[1]), Point2D::new(0.0, 100.0));
 
-    // It still clips: row 1 starts exactly at the 100px bottom edge.
     assert_eq!(h.hit(50.0, 50.0), Some(rows[0]));
     assert_eq!(h.hit(50.0, 150.0), Some(root));
 }
 
 #[test]
 fn a_clip_box_does_not_leak_its_overflow_into_an_ancestor_scroller() {
-    // The scroller's own child is 100px tall and clips 300px of content. Its
-    // scrolling area must stop at the child's border box, not reach through it.
     let mut h = Harness::new(
         "page { display: flex; width: 800px; height: 600px; }
          .scroller { display: flex; flex-direction: column; overflow: scroll;
@@ -346,9 +316,6 @@ fn a_clip_box_does_not_leak_its_overflow_into_an_ancestor_scroller() {
 
 #[test]
 fn clip_on_one_axis_leaves_the_other_unbounded() {
-    // `clip` + `visible` is the one pair the style adjuster leaves mixed: it
-    // reconciles axes that disagree about being *scrollable*, and neither of
-    // these is. So this box clips horizontally and overflows vertically.
     let mut h = Harness::new(
         "page { display: flex; width: 800px; height: 600px; }
          .strip { display: flex; overflow-x: clip; width: 100px; height: 100px; }
@@ -360,10 +327,8 @@ fn clip_on_one_axis_leaves_the_other_unbounded() {
     h.doc.dom.layout();
 
     assert!(!h.doc.dom.is_scroll_container(strip));
-    // Inside the 100px width: hit. Past it: clipped away.
     assert_eq!(h.hit(50.0, 50.0), Some(wide));
     assert_eq!(h.hit(150.0, 50.0), Some(root));
-    // Below the 100px height: still there, because that axis never clipped.
     assert_eq!(h.hit(50.0, 250.0), Some(wide));
 }
 
@@ -387,7 +352,6 @@ fn a_host_gesture_drives_paint_and_hit_testing_end_to_end() {
     let moved = drag(&mut h, 20.0, PointerPhase::Move);
     drag(&mut h, 20.0, PointerPhase::Up);
 
-    // 70px of travel, less the 8px slop toll.
     assert_eq!(
         moved.default_action,
         DefaultAction::Scroll {
@@ -414,7 +378,5 @@ fn input_targets_through_the_scrolled_frame() {
         PointerPhase::Down,
     ));
 
-    // Row 1 spans y=100..200 unscrolled, so 120 of scroll puts the
-    // viewport's y=10 inside it.
     assert_eq!(response.target, Some(rows[1]));
 }

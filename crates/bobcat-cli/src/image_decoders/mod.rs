@@ -30,9 +30,6 @@ use bobcat_core::image::Decoder;
 mod resample;
 pub(crate) use resample::resample;
 
-// Compiled unconditionally so its tests run wherever the test suite does, even
-// though only the Apple and Android decoders consult it — hence the dead-code
-// allowance on the other targets.
 #[cfg_attr(
     not(any(target_os = "android", target_os = "macos", target_os = "ios")),
     allow(dead_code)
@@ -65,13 +62,7 @@ pub use software::SoftwareDecoder;
 #[cfg(target_os = "windows")]
 pub use windows::WicDecoder;
 
-/// The decoder this embedder injects on the running OS.
-///
-/// `None` is possible only where a runtime probe can fail: Windows without the
-/// imaging components (Nano Server), Android below API 30. There is no
-/// fallback behind it — the Linux reference decoder is deliberately compiled
-/// for Linux alone — so on those targets the embedder ships without image
-/// decoding or replaces this module.
+/// Returns the decoder selected for the current target when available.
 #[must_use]
 pub fn platform_decoder() -> Option<Arc<dyn Decoder>> {
     #[cfg(any(target_os = "macos", target_os = "ios"))]

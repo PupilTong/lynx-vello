@@ -63,8 +63,6 @@ mod image;
 #[cfg(feature = "render")]
 mod render;
 
-/// Re-exported so capture callers name colors through the same `peniko` the
-/// render stack was built against, never a second copy of it.
 #[cfg(feature = "render")]
 pub use dom::vello;
 

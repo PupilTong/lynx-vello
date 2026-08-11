@@ -36,24 +36,13 @@ use crate::vello::Scene;
 use crate::visual::PaintOrder;
 use crate::{Document, ImageStore};
 
-/// Reusable paint state owned by exactly one [`Document`].
-///
-/// This is deliberately crate-private: DOM mutation, frame construction,
-/// image lookup, and scene generation are one scheduling boundary. Embedders
-/// can request a render and borrow its result, but cannot drive the painter
-/// against an unrelated or stale document snapshot.
+/// Reusable document-owned scene builder state.
 #[derive(Default)]
 pub(crate) struct Painter {
     scene: Scene,
     scratch: crate::paint::walker::Scratch,
     images: ImageStore,
-    /// The document visual epoch represented by `scene`. `None` means this
-    /// painter has never completed a frame.
     scene_epoch: Option<u64>,
-    /// The frame `scene` was painted from, retained so hit queries can read
-    /// paint order without re-running the visual pipeline. A failed paint
-    /// keeps the previous frame; the removal-epoch gate decides at read time
-    /// whether it may still answer.
     frame: Option<PaintOrder>,
 }
 
@@ -74,15 +63,10 @@ impl Painter {
             &frame,
             &self.images,
         );
-        // Publish freshness — and retain the frame for read-only hit
-        // queries — only after the walk completed. If painting panics, the
-        // partial scene must remain stale and be rebuilt on the next attempt.
         self.scene_epoch = Some(frame.visual_epoch());
         self.frame = Some(frame);
     }
 
-    /// The frame the retained scene was painted from, if a paint ever
-    /// completed.
     pub(crate) const fn frame(&self) -> Option<&PaintOrder> {
         self.frame.as_ref()
     }

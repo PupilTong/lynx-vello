@@ -8,11 +8,6 @@ use stylo::values::computed::border::BorderCornerRadius;
 
 use super::CornerRadii;
 
-/// Resolves the four `border-*-radius` values against the border-box size
-/// (horizontal radii against the width, vertical against the height) and
-/// applies the css-backgrounds §5.5 overlap normalization: one scale factor,
-/// the minimum of `edge / (r₁ + r₂)` over the four edges, applied to every
-/// radius when below 1.
 pub(crate) fn resolve_corner_radii(style: &ComputedValues, size: Size2D<f32>) -> CornerRadii {
     let border = style.get_border();
     let resolve = |radius: &BorderCornerRadius| {
@@ -43,10 +38,6 @@ pub(crate) fn resolve_corner_radii(style: &ComputedValues, size: Size2D<f32>) ->
     radii
 }
 
-/// The css-backgrounds §5.5 overlap normalization, shared with the
-/// `inset()` motion-path contour: one scale factor, the minimum of
-/// `edge / (r₁ + r₂)` over the four edges, applied to every radius when
-/// below 1.
 pub(crate) fn normalize_corner_radii(radii: &mut CornerRadii, size: Size2D<f32>) {
     if radii.is_zero() {
         return;
@@ -83,8 +74,6 @@ pub(crate) fn normalize_corner_radii(radii: &mut CornerRadii, size: Size2D<f32>)
     }
 }
 
-/// Insets outer radii by the border widths to the padding-edge radii used
-/// for overflow clipping, clamping each component at zero.
 pub(crate) fn inner_radii(outer: CornerRadii, border: &Edges<f32>) -> CornerRadii {
     let inset = |corner: Size2D<f32>, horizontal: f32, vertical: f32| {
         Size2D::new(
@@ -100,8 +89,6 @@ pub(crate) fn inner_radii(outer: CornerRadii, border: &Edges<f32>) -> CornerRadi
     }
 }
 
-/// Point-in-rounded-rect: inside the rect (edges inclusive) and, within a
-/// corner's quadrant, inside that corner's ellipse.
 pub(crate) fn rounded_rect_contains(
     rect: Rect<f32>,
     radii: &CornerRadii,
@@ -190,12 +177,8 @@ mod tests {
 
     #[test]
     fn overlapping_radii_scale_down_uniformly() {
-        // Radii of 80 on a 100-wide edge overlap: factor = 100 / 160.
         let mut oversized = radii(80.0);
         let rect = Rect::from_size(Size2D::new(100.0, 100.0));
-        // Normalization itself lives in resolve_corner_radii; replicate the
-        // factor here against the containment test: an 80px corner on a
-        // 100px box would swallow the midpoint of each edge.
         let factor = 100.0 / 160.0;
         for corner in [
             &mut oversized.top_left,
@@ -206,7 +189,6 @@ mod tests {
             corner.width *= factor;
             corner.height *= factor;
         }
-        // Edge midpoints lie exactly on the rounded outline once normalized.
         assert!(rounded_rect_contains(
             rect,
             &oversized,
@@ -228,20 +210,16 @@ mod tests {
             &rounded,
             Point2D::new(50.0, 50.0)
         ));
-        // (10, 10) is inside the corner square but outside the circle of
-        // radius 50 centered at (50, 50).
         assert!(!rounded_rect_contains(
             rect,
             &rounded,
             Point2D::new(10.0, 10.0)
         ));
-        // On-axis edge points stay inside.
         assert!(rounded_rect_contains(
             rect,
             &rounded,
             Point2D::new(50.0, 0.0)
         ));
-        // Outside the rect entirely.
         assert!(!rounded_rect_contains(
             rect,
             &rounded,

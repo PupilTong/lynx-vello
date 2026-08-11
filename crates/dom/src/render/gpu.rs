@@ -55,13 +55,9 @@ impl fmt::Debug for Headless {
     }
 }
 
-/// Why a [`Headless`] renderer could not be created or render.
 #[derive(Debug)]
 pub enum GpuError {
-    /// No usable GPU adapter on this machine (for example, forbidden GPU
-    /// access). Product callers may report this; GPU-backed tests must fail.
     NoAdapter,
-    /// Device/queue creation or rendering failed.
     Render(String),
 }
 
@@ -119,12 +115,7 @@ impl Headless {
         })
     }
 
-    /// Renders `scene` at `width` × `height` device px over `base_color`.
-    ///
-    /// The render target is retained and reused while its dimensions stay the
-    /// same. This is the continuous-frame path for windowless embedders:
-    /// unlike [`Self::render`], it does not synchronize the CPU with the GPU
-    /// for pixel readback.
+    /// Renders a scene into the retained headless texture.
     pub fn render_frame(
         &mut self,
         scene: &vello::Scene,
@@ -158,22 +149,13 @@ impl Headless {
             view,
             &render_params(base_color, width, height),
         ) {
-            // The target's contents are indeterminate after a failed render
-            // (and a resize already replaced the previous frame), so drop it:
-            // `read_pixels` must report that no frame has been rendered rather
-            // than return pixels that never were.
             *target = None;
             return Err(GpuError::Render(error.to_string()));
         }
         Ok(())
     }
 
-    /// Blocks until all GPU work submitted so far has completed.
-    ///
-    /// [`Self::render_frame`] deliberately never synchronizes, so a
-    /// continuous frame loop that outpaces the GPU would otherwise accumulate
-    /// in-flight submissions without bound. Paced callers invoke this after
-    /// submitting a frame to keep at most one frame in flight.
+    /// Waits for all submitted GPU work.
     pub fn wait_idle(&self) -> Result<(), GpuError> {
         let handle = &self.context.devices[self.device_index];
         handle
@@ -183,10 +165,7 @@ impl Headless {
         Ok(())
     }
 
-    /// Reads the most recently rendered frame as tightly-packed, row-major
-    /// RGBA8 pixels.
-    ///
-    /// The staging buffer is retained across captures of the same size.
+    /// Reads the last frame as tightly packed row-major RGBA8 pixels.
     pub fn read_pixels(&mut self) -> Result<Vec<u8>, GpuError> {
         let (width, height) = self
             .target
@@ -212,8 +191,6 @@ impl Headless {
             .as_ref()
             .expect("ensure_readback installs a staging buffer");
 
-        // wgpu requires texture→buffer copy rows padded to 256 bytes; copy
-        // padded, then strip the padding while assembling the result.
         let tight_bytes_per_row = width * 4;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("pulsar headless readback copy"),
@@ -242,8 +219,6 @@ impl Headless {
             slice.map_async(wgpu::MapMode::Read, move |result| {
                 let _ = sender.send(result);
             });
-            // Waiting for the queue to drain resolves the map and fires the
-            // callback, so the recv below never blocks.
             let waited = device
                 .poll(wgpu::PollType::wait_indefinitely())
                 .map_err(|error| GpuError::Render(error.to_string()))
@@ -270,10 +245,6 @@ impl Headless {
                 Err(error) => error,
             }
         };
-        // A failed wait can leave the map request pending on the buffer, and
-        // wgpu treats copying into (or re-mapping) a pending buffer as a
-        // fatal validation error. Retaining it would poison every later
-        // capture, so drop it and let `ensure_readback` rebuild.
         self.readback = None;
         Err(error)
     }
@@ -346,14 +317,7 @@ impl Headless {
     }
 }
 
-/// Reads `texture` — an `Rgba8Unorm`, `COPY_SRC` texture of `width` ×
-/// `height` device px on `device` — back as tightly-packed, row-major RGBA8
-/// pixels through a one-shot staging buffer, blocking until the copy
-/// completes.
-///
-/// This is the readback half of [`Headless`] for embedders that render on
-/// their own device (a window surface) and must capture from that same
-/// device rather than re-render elsewhere.
+/// Reads an RGBA8 texture into tightly packed row-major pixels.
 pub fn read_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -367,8 +331,6 @@ pub fn read_texture(
         )));
     }
 
-    // wgpu requires texture→buffer copy rows padded to 256 bytes; copy
-    // padded, then strip the padding while assembling the result.
     let tight_bytes_per_row = width * 4;
     let padded_bytes_per_row =
         tight_bytes_per_row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);

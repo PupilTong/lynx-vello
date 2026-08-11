@@ -9,27 +9,12 @@ use crate::device::Viewport;
 use crate::ua::{PageConfig, ua_stylesheet};
 use crate::{ElementId, PAGE_TAG, VIEW_TAG};
 
-/// Why an Element PAPI call was rejected.
-///
-/// The main-thread script is untrusted input: `docs/style-architecture.md`
-/// requires this layer to validate handles before calling the crash-on-misuse
-/// DOM core, so every fallible PAPI entry point returns this instead of
-/// panicking.
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PapiError {
-    /// A handle that never named a live element.
     UnknownElement(ElementId),
-    /// Appending `child` under `parent` would put a node inside its own
-    /// subtree.
     WouldCycle { parent: ElementId, child: ElementId },
-    /// The page element cannot be given a parent — it is the permanent
-    /// document element, pre-created with the document.
     CannotReparentPage,
-    /// The page element cannot be dropped — the document element exists for
-    /// the document's whole life (recorded limit: web-core would let a page
-    /// be dropped and re-created, but no bundle does).
     CannotRemovePage,
 }
 
@@ -53,42 +38,21 @@ impl fmt::Display for PapiError {
 
 impl std::error::Error for PapiError {}
 
-/// One Lynx element tree: a `dom` document, an independent runtime-element
-/// arena, and the page policy the Element PAPI speaks in.
+/// A DOM document paired with Lynx runtime handles and page policy.
 #[derive(Debug)]
 pub struct ElementTree {
-    /// The DOM payload is only the key back into `elements`; all Lynx runtime
-    /// state stays in the context-owned arena.
     document: Document<ElementId>,
     elements: ElementArena,
-    /// Whether `__CreatePage` has run. The page element itself is permanent —
-    /// pre-created with the document — so this only gates the one-time
-    /// binding of the page's component fields.
     page_created: bool,
-    /// Whether a mutating PAPI call has run since the last
-    /// [`Self::flush_element_tree`]. `__FlushElementTree` is the script's
-    /// commit boundary; a frame producer sharing this tree across threads
-    /// must not build from a half-applied batch (appended elements may not
-    /// be styled yet), so it checks this before producing and falls back to
-    /// its retained frame while a batch is open.
     uncommitted: bool,
-    /// `__CreatePage`'s `componentID` — a string name web-core keeps in a side
-    /// table rather than on the element, so it never reaches selectors.
     page_component_id: String,
     config: PageConfig,
 }
 
-/// The page's permanent unique id: the document element is pre-created with
-/// the document, so the first live arena slot is always the page. Ids are
-/// opaque handles to the main-thread script, which receives this one from
-/// `__CreatePage` like any other.
 pub(crate) const PAGE_UNIQUE_ID: ElementId = 1;
 
 impl ElementTree {
-    /// Creates a tree for `viewport` with `config`'s UA cascade installed.
-    /// The page element already exists as the document element;
-    /// `__CreatePage` binds its component fields and returns its permanent
-    /// id.
+    /// Creates an element tree with its permanent page element and UA cascade.
     #[must_use]
     pub fn new(viewport: Viewport, config: PageConfig) -> Self {
         let mut document = Document::new(viewport.device(), PAGE_TAG, PAGE_UNIQUE_ID);
@@ -112,85 +76,46 @@ impl ElementTree {
         tree
     }
 
-    /// The underlying document, for this crate's own unit tests only.
-    ///
-    /// DOM shape (append order, tags, committed styles) is this layer's
-    /// semantics, so this layer's tests assert it; layers above observe
-    /// through `ElementId`-vocabulary reads (`page`, `element`, `config`)
-    /// and never see the document or `NodeId`. Production code has no
-    /// consumer: mutation goes through the PAPI, and the engine drives
-    /// rendering through the narrow methods this type forwards itself.
     #[cfg(test)]
     #[must_use]
     pub(crate) const fn document(&self) -> &Document<ElementId> {
         &self.document
     }
 
-    /// Renders the document's retained scene if it is stale, returning
-    /// whether a new scene was built.
-    ///
-    /// On the narrow mutable surface by the [`Self::handle_input`] admission
-    /// rule: rendering flushes styles, layout, and paint state but creates,
-    /// moves, and retires no element, so the handle table cannot
-    /// desynchronise.
+    /// Rebuilds the retained scene when stale and reports whether it changed.
     pub fn render(&mut self) -> bool {
         self.document.render()
     }
 
-    /// Whether a visual mutation has made the retained scene stale.
+    /// Returns whether the retained scene is stale.
     #[must_use]
     pub fn needs_render(&self) -> bool {
         self.document.needs_render()
     }
 
-    /// The scene retained by the last [`Self::render`].
+    /// Borrows the scene retained by the last render.
     #[must_use]
     pub fn scene(&self) -> std::cell::Ref<'_, dom::vello::Scene> {
         self.document.scene()
     }
 
-    /// Registers or updates decoded images for replaced content and CSS
-    /// image values. Resource state only — no element is touched.
+    /// Mutably borrows decoded image resources.
     pub fn images_mut(&mut self) -> &mut dom::ImageStore {
         self.document.images_mut()
     }
 
-    /// Feeds one host input event in, building the private visual frame needed
-    /// for hit testing and performing the resolved UA default action — today,
-    /// scrolling an `overflow: scroll` box.
-    ///
-    /// This belongs on the narrow mutable surface for the same reason
-    /// [`Self::set_viewport`] does: input cannot desynchronise the handle
-    /// table. All it can reach is scroll offsets and per-pointer gesture
-    /// state — no element is created, moved, or retired — so lending it out
-    /// costs none of the tree invariants this layer protects.
-    ///
-    /// Deliberately returns nothing: the DOM-level response speaks `NodeId`,
-    /// which stays out of this layer's public signatures. Dispatching through
-    /// Lynx's own event model (`bindEvent`/`catchEvent` phases, the gesture
-    /// arena, `hit-slop`) is the runtime layer's job, and when that layer
-    /// arrives it gets `ElementId`-vocabulary queries designed for it — an
-    /// unconsumed passthrough of the raw response is not that design.
+    /// Routes a host input event and applies its resolved default action.
     pub fn handle_input(&mut self, event: dom::input::InputEvent) {
         self.document.handle_input(event);
     }
 
-    /// Resizes the viewport, restyling and relaying out on the next flush.
+    /// Changes the CSS viewport size for the next flush.
     pub fn set_viewport(&mut self, width: f32, height: f32) {
         self.document.set_viewport(width, height);
     }
 
     /// Changes the number of device pixels per CSS pixel.
-    ///
-    /// Window embedders call this when a view moves between displays with
-    /// different scale factors. Keeping it on this narrow surface avoids
-    /// exposing the mutable [`Document`] and its tree-mutation methods.
-    ///
-    /// # Panics
-    ///
-    /// Panics on a non-finite or non-positive ratio: nothing downstream
-    /// validates it, and a stored `0.0` or `NaN` scale silently corrupts
-    /// every later cascade, layout, and paint.
+    /// Panics if the ratio is not finite and positive.
     pub fn set_device_pixel_ratio(&mut self, device_pixel_ratio: f32) {
         assert!(
             device_pixel_ratio.is_finite() && device_pixel_ratio > 0.0,
@@ -199,65 +124,50 @@ impl ElementTree {
         self.document.set_device_pixel_ratio(device_pixel_ratio);
     }
 
-    /// Registers font data for text measurement, returning how many faces were
-    /// added.
+    /// Registers font data and returns the number of added faces.
     pub fn register_fonts(&mut self, bytes: &[u8]) -> usize {
         self.document.register_fonts(bytes)
     }
 
     #[must_use]
+    /// Returns the page configuration.
     pub const fn config(&self) -> PageConfig {
         self.config
     }
 
-    /// The page element, once `__CreatePage` has run. The element itself is
-    /// permanent; `None` only means the script has not named it yet.
+    /// Returns the page id after `create_page` has run.
     #[must_use]
     pub fn page(&self) -> Option<ElementId> {
         self.page_created.then_some(PAGE_UNIQUE_ID)
     }
 
-    /// The `componentID` the page was created with; empty before
-    /// `__CreatePage`.
+    /// Returns the page component id recorded by `create_page`.
     #[cfg(test)]
     #[must_use]
     pub fn page_component_id(&self) -> &str {
         &self.page_component_id
     }
 
-    /// The DOM node a handle names, or `None` if the handle is not live.
-    /// Crate-internal: `NodeId` stays out of this layer's public signatures;
-    /// external liveness observation is [`Self::element`]`(id).is_some()`.
     #[must_use]
     pub(crate) fn node_id(&self, id: ElementId) -> Option<NodeId> {
         self.element(id).map(LynxElement::node_id)
     }
 
-    /// The live runtime element stored at `id`.
+    /// Returns the live runtime element for an id.
     #[must_use]
     pub fn element(&self, id: ElementId) -> Option<&LynxElement> {
         self.elements.get(id)
     }
 
-    /// Mounts author CSS — the seam a decoded `.web.bundle` `StyleInfo`
-    /// section will lower into once that lowering exists.
+    /// Adds an author stylesheet.
     pub fn add_author_stylesheet(&mut self, css: &str) {
         self.document.add_stylesheet(css, StylesheetOrigin::Author);
     }
 
-    /// `__CreatePage(componentID, componentCSSID)`.
-    ///
-    /// Idempotent, like web-core's: a second call returns the page that
-    /// already exists and ignores its arguments. The page is created detached;
-    /// [`Self::flush_element_tree`] is what puts it in the document.
+    /// Binds and returns the permanent page id, ignoring repeated calls.
     pub fn create_page(&mut self, component_id: &str, component_css_id: i32) -> ElementId {
         self.uncommitted = true;
         if !self.page_created {
-            // `componentID` is a *string* name, not the numeric unique id, and
-            // web-core keeps it out of the DOM — `create_element_common` files
-            // it in a side table. Recording it here rather than as an
-            // attribute keeps it invisible to selector matching; the DOM
-            // payload remains only the context-owned unique id.
             component_id.clone_into(&mut self.page_component_id);
             self.elements
                 .get_mut(PAGE_UNIQUE_ID)
@@ -268,10 +178,7 @@ impl ElementTree {
         PAGE_UNIQUE_ID
     }
 
-    /// `__CreateView(parentComponentUniqueID)`.
-    ///
-    /// Creates a detached `view` element. `parent_component_unique_id` is `0`
-    /// for "no parent component"; any other value must name a live element.
+    /// Creates a detached `view` for a live parent component or sentinel zero.
     pub fn create_view(
         &mut self,
         parent_component_unique_id: ElementId,
@@ -283,13 +190,7 @@ impl ElementTree {
         Ok(self.insert(VIEW_TAG, parent_component_unique_id, 0))
     }
 
-    /// `__AppendElement(parent, child)`.
-    ///
-    /// Appends `child` as `parent`'s last child, detaching it from any current
-    /// parent first, and returns it. web-core's TypeScript declares the return
-    /// `void`, but both real implementations — the CSR `parent.appendChild`
-    /// and the native `FiberAppendElement` — return the child, so that is the
-    /// behavior mirrored here.
+    /// Reparents `child` as the last child of `parent` and returns it.
     pub fn append_element(
         &mut self,
         parent: ElementId,
@@ -313,11 +214,7 @@ impl ElementTree {
         Ok(child)
     }
 
-    /// `__DropElement(id)`.
-    ///
-    /// The DOM subtree and every corresponding `LynxElement` are dropped
-    /// together. Their `Vec` entries remain as permanent `None` tombstones, so
-    /// no later creation can reuse any of their unique ids.
+    /// Drops an element subtree and permanently retires its ids.
     pub fn drop_element(&mut self, id: ElementId) -> Result<(), PapiError> {
         if id == PAGE_UNIQUE_ID {
             return Err(PapiError::CannotRemovePage);
@@ -335,19 +232,13 @@ impl ElementTree {
         Ok(())
     }
 
-    /// `__FlushElementTree()` — the single commit boundary.
-    ///
-    /// The page is permanently attached (it is the document element by
-    /// construction), so a commit is exactly the style + layout pass that
-    /// makes every pending mutation paint-eligible.
+    /// Commits pending mutations through style and layout.
     pub fn flush_element_tree(&mut self) {
         self.document.layout();
         self.uncommitted = false;
     }
 
-    /// Whether a mutating PAPI call has run since the last
-    /// [`Self::flush_element_tree`] — the commit-boundary gate a shared
-    /// frame producer checks before building.
+    /// Returns whether a PAPI mutation is awaiting a flush.
     #[must_use]
     pub const fn has_uncommitted_mutations(&self) -> bool {
         self.uncommitted
@@ -390,8 +281,6 @@ mod tests {
             .document()
             .rounded_layout(page_node)
             .expect("the page is laid out after the flush");
-        // The UA sheet sizes `page` to the viewport, so the flush produced
-        // real geometry rather than a zero box.
         assert!((layout.size.width - 393.0).abs() < f32::EPSILON);
         assert!((layout.size.height - 727.0).abs() < f32::EPSILON);
     }
@@ -465,7 +354,6 @@ mod tests {
         let second = tree.create_page("other", 7);
         assert_eq!(first, second);
         assert_eq!(tree.page(), Some(first));
-        // The second call's arguments are ignored, like web-core's.
         assert_eq!(tree.page_component_id(), "page");
         assert_eq!(
             tree.element(first).map(LynxElement::component_css_id),
@@ -479,9 +367,6 @@ mod tests {
         let page = tree.create_page("card", 0);
         assert_eq!(tree.page_component_id(), "card");
 
-        // It must not be selector-visible: the DOM core derives matching only
-        // from real DOM state, and an invented attribute would let author CSS
-        // from a bundle see something web-core never exposes.
         let node = tree.node_id(page).unwrap();
         assert_eq!(tree.document().get(node).unwrap().attributes().len(), 0);
     }
@@ -604,7 +489,6 @@ mod tests {
         let page = tree.create_page("page", 0);
         assert_eq!(tree.node_id(page), Some(document_element));
 
-        // Flushes are plain re-commits; the attachment never changes.
         tree.flush_element_tree();
         assert_eq!(tree.document().document_element().id(), document_element);
         tree.flush_element_tree();
@@ -616,8 +500,6 @@ mod tests {
         let mut tree = tree();
         assert!(tree.page().is_none());
         tree.flush_element_tree();
-        // The page is not yet script-visible, but it is real: the commit
-        // styled it.
         assert!(tree.page().is_none());
         assert!(
             tree.document()
@@ -673,13 +555,10 @@ mod tests {
             .unwrap()
             .computed_style()
             .unwrap();
-        // The switch is off, so nothing overrides the CSS initial value and
-        // the element is no longer a Lynx linear box.
         assert_ne!(
             style.clone_display(),
             dom::stylo::values::computed::Display::Linear
         );
-        // `box-sizing` is not gated by this switch and still applies.
         assert_eq!(
             style.clone_box_sizing(),
             dom::stylo::computed_values::box_sizing::T::BorderBox
@@ -716,7 +595,6 @@ mod tests {
         }
     }
 
-    /// A wide tree can be built and flushed without special-case bookkeeping.
     #[test]
     fn a_wide_tree_flushes() {
         let mut tree = tree();

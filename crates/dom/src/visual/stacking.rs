@@ -19,20 +19,12 @@ use stylo::values::specified::box_::WillChangeBits;
 
 use crate::layout::skips_contents;
 
-/// Whether `z-index` applies: positioned boxes plus flex/grid items
-/// (css-flexbox-1 §4.3, css-grid-1 §10.1). `is_item` is precomputed from the
-/// DOM parent's display mode by the builder.
 pub(crate) fn z_index_applies(position: PositionProperty, is_item: bool) -> bool {
     position != PositionProperty::Static || is_item
 }
 
-/// The full stacking-context predicate for a non-root element. The root
-/// element always establishes the initial stacking context and never
-/// consults this.
 pub(crate) fn establishes_stacking_context(style: &ComputedValues, z_applies: bool) -> bool {
     let position = style.clone_position();
-    // Fixed and sticky boxes always establish stacking contexts
-    // (css-position-3), positioned boxes only with a non-auto z-index.
     if matches!(position, PositionProperty::Fixed | PositionProperty::Sticky) {
         return true;
     }
@@ -40,12 +32,9 @@ pub(crate) fn establishes_stacking_context(style: &ComputedValues, z_applies: bo
         return true;
     }
     let box_style = style.get_box();
-    // transform list, individual rotate/translate/scale, perspective, and
-    // transform-style: preserve-3d (the fork's own damage helper).
     if box_style.has_transform_or_perspective() {
         return true;
     }
-    // opacity < 1, mix-blend-mode, clip-path, isolation: isolate.
     if style.guarantees_stacking_context() {
         return true;
     }
@@ -55,9 +44,6 @@ pub(crate) fn establishes_stacking_context(style: &ComputedValues, z_applies: bo
     if !matches!(box_style.offset_path, OffsetPath::None) {
         return true;
     }
-    // A mask "creates a stacking context the same way that CSS opacity does"
-    // (css-masking-1). Authorable in the fork grammar, though parse-gated
-    // behind servo's layout.unimplemented pref today.
     if style
         .get_svg()
         .mask_image
@@ -67,8 +53,6 @@ pub(crate) fn establishes_stacking_context(style: &ComputedValues, z_applies: bo
     {
         return true;
     }
-    // will-change induces whatever a non-initial value of the named property
-    // would induce; Z_INDEX only where z-index applies at all.
     let will_change = box_style.will_change.bits;
     if will_change.intersects(
         WillChangeBits::STACKING_CONTEXT_UNCONDITIONAL
@@ -91,13 +75,6 @@ pub(crate) fn establishes_stacking_context(style: &ComputedValues, z_applies: bo
     .intersects(Contain::LAYOUT | Contain::PAINT)
 }
 
-/// Whether an element that establishes a stacking context also needs its
-/// subtree composited as a render-layer group: `opacity` below one
-/// (css-color-3 §3.2 group rendering), `filter` (filter-effects-1),
-/// `clip-path`/`mask` (css-masking-1), and the storage-only
-/// `mix-blend-mode`/`isolation` triggers (compositing-1), read now so they
-/// go live on a grammar rebase. Every trigger here is also a
-/// stacking-context trigger, so groups are always whole contexts.
 pub(crate) fn needs_group_rendering(style: &ComputedValues) -> bool {
     use stylo::computed_values::isolation::T as Isolation;
     use stylo::computed_values::mix_blend_mode::T as MixBlendMode;
@@ -117,10 +94,6 @@ pub(crate) fn needs_group_rendering(style: &ComputedValues) -> bool {
             .any(|image| !matches!(image, Image::None))
 }
 
-/// The stack level a member sorts by within its parent stacking context:
-/// the z-index integer where z-index applies, otherwise 0 (`auto` counts
-/// as 0 for ordering; whether it also forms a context is the predicate's
-/// business, not this function's).
 pub(crate) fn stack_level(style: &ComputedValues, z_applies: bool) -> i32 {
     if z_applies {
         style.clone_z_index().integer_or(0)

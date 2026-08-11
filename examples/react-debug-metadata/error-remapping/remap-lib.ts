@@ -1,13 +1,4 @@
-/**
- * A TS reimplementation of biz_sourcemap's reversal, for tests. It reads the
- * build's own `debug-metadata.json` artifacts (no network) and reverses frames
- * with the `source-map` package, mirroring the backend's column convention:
- *
- *   engine column is 1-based  ->  subtract 1 for the source map's 0-based lookup
- *   resolved column is 0-based ->  add 1 back on output (report 1-based)
- *
- * No per-engine compensation — a faithful lookup, same as the backend.
- */
+/** Reimplements biz_sourcemap reversal for artifact-backed snapshot tests. */
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 
@@ -21,9 +12,9 @@ import type {
 
 export interface MapEntry {
   kind: string;
-  /** Bundle path with content hash, e.g. `.rspeedy/LazyComponent/background.<hash>.js`. */
+  /** Bundle path containing the content hash. */
   path: string;
-  /** Absolute path to the emitted bundle .js, for locating tokens in generated code. */
+  /** Absolute emitted bundle path. */
   jsFile: string;
   map: RawSourceMap;
 }
@@ -34,7 +25,7 @@ export interface Step {
   filename: string;
   lineno: number;
   colno: number;
-  /** present only when the mapping carries an original name (backend omitempty). */
+  /** Original function name when present in the mapping. */
   function_name?: string;
   context_line?: string;
   pre_context: string[];
@@ -42,11 +33,6 @@ export interface Step {
 }
 
 const CONTEXT_LINES = 5;
-/**
- * Minified bundles are one giant line, so a bytecode step's context would be
- * tens of KB. The backend returns it whole; for a readable snapshot we clip each
- * context line (the head is enough to spot a regression). Test-only.
- */
 const MAX_CONTEXT_LEN = 200;
 
 function clip(line: string): string {
@@ -57,14 +43,12 @@ function clip(line: string): string {
     : line;
 }
 
-/** Normalize a source-map `source` to a portable, backend-like path. */
 function normalizeSource(source: string): string {
-  const i = source.indexOf('/src/');
-  if (i >= 0) return source.slice(i + 1); // -> "src/..."
+  const sourceRootIndex = source.indexOf('/src/');
+  if (sourceRootIndex >= 0) return source.slice(sourceRootIndex + 1);
   return source.replace('webpack:///./', 'webpack:///');
 }
 
-/** Slice context lines (matching the backend's ±5), clipping over-long lines. */
 function sliceContext(
   lines: string[],
   line1: number,
@@ -78,52 +62,33 @@ function sliceContext(
   };
 }
 
-/**
- * Greatest-lower-bound lookup that mirrors the Go backend (biz_sourcemap's
- * sourcemap_parser uses `sort.Search`): the mapping with the greatest generated
- * position `<= (genLine, genCol0)`, and on a generated-column tie the FIRST one.
- *
- * `source-map`'s `originalPositionFor` resolves a same-column tie by where its
- * recursive binary search happens to land, so it can return a different
- * duplicate than the backend and flip across builds when the mapping array
- * shifts. A minified `new Error(...)` -> `Error(...)` is exactly this case: the
- * dropped `new` collapses the statement start (no name) and the `Error`
- * identifier (name "Error") onto one generated column, so the two co-located
- * mappings are equally valid and only the tie-break decides. This picks the
- * backend's choice deterministically.
- */
 function greatestLowerBound(
   consumer: BasicSourceMapConsumer | IndexedSourceMapConsumer,
   genLine: number,
   genCol0: number,
 ): MappingItem | null {
-  let best: MappingItem | null = null;
+  let closestMapping: MappingItem | null = null;
   consumer.eachMapping(
     (m) => {
       const atOrBefore = m.generatedLine < genLine
         || (m.generatedLine === genLine && m.generatedColumn <= genCol0);
       if (!atOrBefore) return;
       if (
-        best === null
-        || m.generatedLine > best.generatedLine
-        || (m.generatedLine === best.generatedLine
-          && m.generatedColumn > best.generatedColumn)
+        closestMapping === null
+        || m.generatedLine > closestMapping.generatedLine
+        || (m.generatedLine === closestMapping.generatedLine
+          && m.generatedColumn > closestMapping.generatedColumn)
       ) {
-        best = m;
+        closestMapping = m;
       }
     },
     null,
     SourceMapConsumer.GENERATED_ORDER,
   );
-  return best;
+  return closestMapping;
 }
 
-/**
- * Reverse a generated position through a source map into a full step (with
- * context lines), the same shape biz_sourcemap returns. `genCol0` is 0-based.
- * Uses {@link greatestLowerBound} rather than `originalPositionFor` so the
- * duplicate-column tie-break matches the Go backend.
- */
+/** Resolves a generated position with backend-compatible lower-bound ties. */
 export async function resolveStep(
   map: RawSourceMap,
   genLine: number,
@@ -146,11 +111,7 @@ export async function resolveStep(
   });
 }
 
-/**
- * Build a step from already-split source lines (for the mainThread bytecode step and
- * its source-map step). `functionName`, when set, mirrors the backend's
- * `function_name` (only the source-map step carries one).
- */
+/** Builds a remapping step from source lines and a one-based position. */
 export function stepFromLines(
   kind: string,
   filename: string,
@@ -178,11 +139,7 @@ function walk(dir: string, cb: (file: string) => void): void {
   }
 }
 
-/**
- * Index every artifact's source map by its release key (= the per-bundle
- * content hash a frame's `release` carries, minus the `debugmetadata:` prefix),
- * scanning all `debug-metadata.json` under the given dist dirs.
- */
+/** Indexes artifact source maps by release key. */
 export function buildMapIndex(distDirs: string[]): Map<string, MapEntry> {
   const index = new Map<string, MapEntry>();
   for (const dir of distDirs) {

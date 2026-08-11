@@ -86,6 +86,7 @@
 //!
 //! There is no raw pointer arithmetic, no manual retain/release (`CFRetained`
 //! owns every handle) and no transmute.
+
 #![allow(unsafe_code)]
 
 use std::ffi::c_void;
@@ -111,7 +112,7 @@ use objc2_image_io::{
 use crate::image_decoders::orientation::{self, Orientation};
 use crate::image_decoders::resample;
 
-/// PNG, JPEG, WebP, GIF, HEIC and AVIF through `ImageIO`.
+/// Decoder backed by Apple `ImageIO`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AppleDecoder;
 
@@ -122,8 +123,6 @@ impl AppleDecoder {
     }
 }
 
-/// Every identified format, claimed unconditionally — see the module docs for
-/// why there is no probe.
 const CAPABILITIES: Capabilities = Capabilities::none()
     .with(ImageFormat::Png, Acceleration::PlatformSoftware)
     .with(ImageFormat::Jpeg, Acceleration::PlatformSoftware)
@@ -156,17 +155,12 @@ impl Decoder for AppleDecoder {
         let header = read_header(&source, format, bytes)?;
         request.check(&header)?;
 
-        // `natural_size` and therefore `target` are in *oriented* space, but
-        // `ImageIO`'s thumbnail cap is applied to stored pixels — so the swap has
-        // to be undone before asking for a size and re-applied after.
         let target = request.effective_size(header.natural_size);
         let orientation = orientation_of(&source, format, bytes);
         let stored_natural = unswap(orientation, header.natural_size);
         let stored_target = unswap(orientation, target);
 
         let image = if stored_target == stored_natural {
-            // SAFETY: no options dictionary is passed, so there are no
-            // dictionary generics to get wrong.
             unsafe { source.image_at_index(0, None) }.ok_or_else(|| {
                 ImageError::decode(format, "ImageIO produced no image for frame 0")
             })?
@@ -175,14 +169,8 @@ impl Decoder for AppleDecoder {
         };
 
         let (pixels, width, height) = draw_rgba8(&image, format)?;
-        // Orientation first, so the target size is interpreted in the same
-        // space the natural size was reported in.
         let (pixels, width, height) = orientation.apply(pixels, width, height);
 
-        // `ImageIO` preserves the source aspect ratio, so a target that does not
-        // still needs the shared resampler. `scaled_image` deliberately asks for
-        // a thumbnail no *smaller* than the target on either axis, so this pass
-        // only ever downsamples.
         let (pixels, width, height) = if (width, height) == (target.width, target.height) {
             (pixels, width, height)
         } else {
@@ -200,9 +188,6 @@ impl Decoder for AppleDecoder {
             image: DecodedImage::from_rgba8(
                 width,
                 height,
-                // The bitmap context below is created with
-                // `kCGImageAlphaPremultipliedLast`, so these bytes are already
-                // scaled by alpha. Carried, not converted.
                 AlphaType::Premultiplied,
                 pixels,
                 format,
@@ -214,38 +199,21 @@ impl Decoder for AppleDecoder {
     }
 }
 
-// ------------------------------------------------------------- header
-
-/// Wraps the encoded bytes in a `CGImageSource`.
-///
-/// `CFData::from_bytes` copies. The no-copy constructor needs a `'static`
-/// buffer, and the encoded bytes here are borrowed for the length of one call —
-/// paying one copy of the *compressed* data is far cheaper than the peak
-/// full-size bitmap the scaled decode below avoids.
 fn image_source(
     format: ImageFormat,
     bytes: &[u8],
 ) -> Result<CFRetained<CGImageSource>, ImageError> {
     let data = CFData::from_bytes(bytes);
-    // SAFETY: no options dictionary is passed, so there are no dictionary
-    // generics to get wrong.
     unsafe { CGImageSource::with_data(&data, None) }
         .ok_or_else(|| ImageError::decode(format, "ImageIO could not open the byte stream"))
 }
 
-/// Frame 0's property dictionary. Header-only:
-/// `CGImageSourceCopyPropertiesAtIndex` parses container metadata and never
-/// touches pixel data, so no `CGImage` is created here.
 fn frame_properties(
     source: &CGImageSource,
     format: ImageFormat,
 ) -> Result<CFRetained<CFDictionary<CFString, CFType>>, ImageError> {
-    // SAFETY: no options dictionary is passed, so there are no dictionary
-    // generics to get wrong.
     let properties = unsafe { source.properties_at_index(0, None) }
         .ok_or_else(|| ImageError::decode(format, "ImageIO returned no image properties"))?;
-    // SAFETY: `CGImageSourceCopyPropertiesAtIndex` is documented to return a
-    // dictionary keyed by `CFString` whose values are Core Foundation objects.
     Ok(unsafe { CFRetained::cast_unchecked::<CFDictionary<CFString, CFType>>(properties) })
 }
 
@@ -256,7 +224,6 @@ fn read_header(
 ) -> Result<ImageHeader, ImageError> {
     let properties = frame_properties(source, format)?;
 
-    // SAFETY: reading immutable `CFString` constants exported by `ImageIO`.
     let (width_key, height_key, alpha_key) = unsafe {
         (
             kCGImagePropertyPixelWidth,
@@ -276,17 +243,12 @@ fn read_header(
     }
 
     let (width, height) = orientation_of(source, format, bytes).apply_to_size(width, height);
-    // SAFETY: takes no options; reads the already-parsed container index.
     let frames = unsafe { source.count() };
 
     Ok(ImageHeader {
         format,
         natural_size: PixelSize { width, height },
         has_alpha: property_bool(&properties, alpha_key).unwrap_or(false),
-        // An animated container presents more than one frame at the source
-        // level; v1 decodes frame 0 and reports the rest exists. The container
-        // check catches what the count misses: an APNG whose animation has a
-        // single frame still carries its `acTL`, but `ImageIO` counts 1.
         animated: frames > 1
             || crate::image_decoders::animation::container_declares_animation(format, bytes),
     })
@@ -301,8 +263,6 @@ fn property_bool(properties: &CFDictionary<CFString, CFType>, key: &CFString) ->
     Some(properties.get(key)?.downcast::<CFBoolean>().ok()?.as_bool())
 }
 
-/// The EXIF orientation to apply. See the module docs for why JPEG reads the
-/// bytes and HEIC/AVIF read `ImageIO`'s property.
 fn orientation_of(source: &CGImageSource, format: ImageFormat, bytes: &[u8]) -> Orientation {
     match format {
         ImageFormat::Jpeg => orientation::jpeg_orientation(bytes),
@@ -311,16 +271,10 @@ fn orientation_of(source: &CGImageSource, format: ImageFormat, bytes: &[u8]) -> 
     }
 }
 
-/// `kCGImagePropertyOrientation` for frame 0, as the transform it asks for.
-///
-/// The property carries the same 1..=8 vocabulary as EXIF tag `0x0112`, and a
-/// missing or unreadable value reads as identity — the same policy every
-/// mainstream decoder applies to a corrupt tag.
 fn property_orientation(source: &CGImageSource, format: ImageFormat) -> Orientation {
     let Ok(properties) = frame_properties(source, format) else {
         return Orientation::Identity;
     };
-    // SAFETY: reading an immutable `CFString` constant exported by `ImageIO`.
     let key = unsafe { kCGImagePropertyOrientation };
     let Some(value) = properties
         .get(key)
@@ -332,8 +286,6 @@ fn property_orientation(source: &CGImageSource, format: ImageFormat) -> Orientat
     u16::try_from(value).map_or(Orientation::Identity, Orientation::from_exif)
 }
 
-/// Converts a size from oriented space back into the stored space `ImageIO`
-/// speaks.
 const fn unswap(orientation: Orientation, size: PixelSize) -> PixelSize {
     if orientation.swaps_axes() {
         PixelSize {
@@ -345,15 +297,6 @@ const fn unswap(orientation: Orientation, size: PixelSize) -> PixelSize {
     }
 }
 
-// ------------------------------------------------------------- decode
-
-/// The decode-time downsample: `CGImageSourceCreateThumbnailAtIndex` with a
-/// max-pixel cap.
-///
-/// `kCGImageSourceCreateThumbnailFromImageAlways` forces the thumbnail to be
-/// built from the full image rather than from whatever low-resolution preview a
-/// camera happened to embed — an embedded thumbnail is a different picture, not
-/// a smaller one.
 fn scaled_image(
     source: &CGImageSource,
     format: ImageFormat,
@@ -361,7 +304,6 @@ fn scaled_image(
     target: PixelSize,
 ) -> Result<CFRetained<CGImage>, ImageError> {
     let max_pixel_size = CFNumber::new_i64(i64::from(thumbnail_cap(natural, target)));
-    // SAFETY: reading immutable `CFString` constants exported by `ImageIO`.
     let (always_key, size_key) = unsafe {
         (
             kCGImageSourceCreateThumbnailFromImageAlways,
@@ -373,20 +315,10 @@ fn scaled_image(
         &[CFBoolean::new(true).as_ref(), max_pixel_size.as_ref()],
     );
 
-    // SAFETY: the options dictionary is keyed by `CFString` and holds Core
-    // Foundation values, which is what `CGImageSourceCreateThumbnailAtIndex`
-    // requires; both keys take the value types passed above.
     unsafe { source.thumbnail_at_index(0, Some(AsRef::as_ref(&*options))) }
         .ok_or_else(|| ImageError::decode(format, "ImageIO produced no scaled image"))
 }
 
-/// The `kCGImageSourceThumbnailMaxPixelSize` value to ask for.
-///
-/// `ImageIO` caps the *longest* side and preserves the aspect ratio, so a target
-/// that does not preserve it cannot be hit exactly. The cap is therefore chosen
-/// so the thumbnail is at least as large as the target on **both** axes, leaving
-/// the final fit to [`resample`] — which downsamples. Picking the smaller cap
-/// instead would make that final pass an upscale, which is visibly worse.
 fn thumbnail_cap(natural: PixelSize, target: PixelSize) -> u32 {
     debug_assert!(
         natural.width > 0 && natural.height > 0,
@@ -399,12 +331,6 @@ fn thumbnail_cap(natural: PixelSize, target: PixelSize) -> u32 {
     u32::try_from(cap).unwrap_or(u32::MAX)
 }
 
-/// Redraws a `CGImage` into a tightly packed premultiplied RGBA8 buffer.
-///
-/// This pass is not overhead to be optimised away: it is what normalises
-/// grayscale, palette, CMYK, 16-bit, float and 10-bit HEIC/AVIF sources — all
-/// of which `ImageIO` hands back verbatim — into the single layout the rest of
-/// the pipeline and vello's atlas accept.
 fn draw_rgba8(image: &CGImage, format: ImageFormat) -> Result<(Vec<u8>, u32, u32), ImageError> {
     let stored_width = CGImage::width(Some(image));
     let stored_height = CGImage::height(Some(image));
@@ -427,20 +353,12 @@ fn draw_rgba8(image: &CGImage, format: ImageFormat) -> Result<(Vec<u8>, u32, u32
     })?;
     let mut pixels = vec![0u8; length];
 
-    // SAFETY: reading an immutable `CFString` constant exported by Core Graphics.
     let srgb = unsafe { kCGColorSpaceSRGB };
     let color_space = CGColorSpace::with_name(Some(srgb))
         .ok_or_else(|| ImageError::decode(format, "sRGB colour space unavailable"))?;
-    // Premultiplied, 32-bit-big-endian RGBA: R, G, B, A in memory order, which
-    // is exactly `DecodedImage`'s contract.
     let bitmap_info = CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0;
 
     {
-        // SAFETY: `pixels` is a live, uniquely borrowed allocation of exactly
-        // `height * stride` bytes, which is what the width/height/stride
-        // arguments describe. The context borrows it and is dropped at the end
-        // of this block, before `pixels` is read or moved, so the pointer never
-        // outlives the buffer and nothing else aliases it meanwhile.
         let context = unsafe {
             CGBitmapContextCreate(
                 pixels.as_mut_ptr().cast::<c_void>(),
@@ -454,8 +372,6 @@ fn draw_rgba8(image: &CGImage, format: ImageFormat) -> Result<(Vec<u8>, u32, u32
         }
         .ok_or_else(|| ImageError::decode(format, "could not create an RGBA8 bitmap context"))?;
 
-        // Drawn at exactly the image's own size, so no filtering happens here —
-        // scaling is either `ImageIO`'s job above or the resampler's below.
         let rect = CGRect::new(
             CGPoint::new(0.0, 0.0),
             CGSize::new(f64::from(width), f64::from(height)),
@@ -466,14 +382,6 @@ fn draw_rgba8(image: &CGImage, format: ImageFormat) -> Result<(Vec<u8>, u32, u32
     Ok((pixels, width, height))
 }
 
-// ------------------------------------------------------- test support
-
-/// Encodes RGBA8 pixels through `CGImageDestination`, so GIF/HEIC/AVIF
-/// fixtures never need committing.
-///
-/// `None` when the running OS has no encoder for `uti` — the *decode*
-/// assumption this crate makes does not extend to encoders, and a test that
-/// needs one probes through this return value.
 #[cfg(test)]
 fn encode_rgba(width: u32, height: u32, rgba: &[u8], uti: &str) -> Option<Vec<u8>> {
     use objc2_core_foundation::CFMutableData;
@@ -486,17 +394,11 @@ fn encode_rgba(width: u32, height: u32, rgba: &[u8], uti: &str) -> Option<Vec<u8
         "encode_rgba takes tightly packed RGBA8"
     );
 
-    // Draw the caller's pixels into a bitmap context and lift a `CGImage` out —
-    // the decoder's normalisation path, run in reverse.
     let mut pixels = rgba.to_vec();
-    // SAFETY: reading an immutable `CFString` constant exported by Core Graphics.
     let srgb = unsafe { kCGColorSpaceSRGB };
     let color_space = CGColorSpace::with_name(Some(srgb))?;
     let bitmap_info = CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0;
     let image = {
-        // SAFETY: `pixels` is a live, uniquely borrowed allocation of exactly
-        // `height * (width * 4)` bytes, and the context is dropped inside this
-        // block — `CGBitmapContextCreateImage` copies the bitmap.
         let context = unsafe {
             CGBitmapContextCreate(
                 pixels.as_mut_ptr().cast::<c_void>(),
@@ -513,13 +415,7 @@ fn encode_rgba(width: u32, height: u32, rgba: &[u8], uti: &str) -> Option<Vec<u8
 
     let data = CFMutableData::new(None, 0)?;
     let uti = CFString::from_str(uti);
-    // SAFETY: the destination appends encoded bytes to `data`, whose retained
-    // handle outlives it; no options dictionary is passed here or in
-    // `add_image`, so there are no dictionary generics to get wrong.
     let destination = unsafe { CGImageDestination::with_data(&data, &uti, 1, None) }?;
-    // SAFETY: `add_image` takes no options dictionary here, and `finalize`
-    // writes the pending image into `data` — both operate on the live retained
-    // destination and objects it retains itself.
     unsafe {
         CGImageDestination::add_image(&destination, &image, None);
         if !CGImageDestination::finalize(&destination) {
@@ -538,7 +434,6 @@ mod tests {
 
     use super::{AppleDecoder, encode_rgba};
 
-    /// An opaque RGBA8 test pattern: a deterministic per-pixel ramp.
     fn ramp_rgba(width: u32, height: u32) -> Vec<u8> {
         (0..width * height)
             .flat_map(|index| {
@@ -548,8 +443,6 @@ mod tests {
             .collect()
     }
 
-    /// An opaque PNG, encoded in-process with the `png` crate so PNG tests do
-    /// not depend on the encoder under test.
     fn png_bytes(width: u32, height: u32) -> Vec<u8> {
         let mut out = Vec::new();
         {
@@ -579,8 +472,6 @@ mod tests {
 
     #[test]
     fn a_png_round_trips_byte_for_byte() {
-        // The fixture is fully opaque, so premultiplication is a no-op and the
-        // decode must reproduce the source bytes exactly — PNG is lossless.
         let source = ramp_rgba(16, 9);
         let response = AppleDecoder::new()
             .decode(
@@ -623,11 +514,8 @@ mod tests {
             .decode(ImageFormat::Png, &png_bytes(32, 16), &request)
             .expect("ImageIO decodes a well-formed PNG");
 
-        // Not aspect-preserving, so `ImageIO` gets it close and the shared
-        // resampler finishes the job.
         assert_eq!(response.image.width(), 8);
         assert_eq!(response.image.height(), 5);
-        // The header still reports the *source* size, not the decoded size.
         assert_eq!(
             response.header.natural_size,
             PixelSize {
@@ -666,14 +554,9 @@ mod tests {
         assert!(format!("{error}").contains("PNG"));
     }
 
-    /// The formats the reference decoder never sees: encode through `ImageIO`,
-    /// sniff the result to prove the contract identifies it, then decode it
-    /// back and check dimensions and content survive.
     #[test]
     fn gif_heic_and_avif_round_trip_through_imageio() {
         let decoder = AppleDecoder::new();
-        // A flat colour rather than the ramp: GIF quantises to 256 colours and
-        // HEIC/AVIF default to lossy, so content is asserted with a tolerance.
         let source: Vec<u8> = std::iter::repeat_n([200u8, 60, 30, 255], 12 * 8)
             .flatten()
             .collect();

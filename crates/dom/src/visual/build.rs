@@ -90,12 +90,6 @@ pub(crate) fn build<T>(document: &Document<T>) -> PaintOrder {
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct FlowContext {
     clip: Option<usize>,
-    /// Sum of `-scroll_offset` over the scroll containers crossed so far,
-    /// already folded into the walk's running offset. Only *differences*
-    /// between two of these are ever used, and every property that could put a
-    /// non-translation between a capture and its use (transform, perspective,
-    /// filter, containment) also establishes a containing block, so the
-    /// difference is always a pure CSS-px translation.
     scroll: Vector2D<f32>,
 }
 
@@ -128,31 +122,23 @@ struct Member {
 }
 
 enum MemberPayload {
-    /// A real stacking context: recursed atomically at emission.
     Context {
         node: NodeId,
         offset: Point2D<f32>,
         clips: ClipContexts,
     },
-    /// A pseudo-stacking context: its own item plus its in-flow content,
-    /// already collected (pseudo boxes always sit at stack level 0; their
-    /// own record leads the stream).
-    Pseudo { stream: Vec<ItemRecord> },
+    Pseudo {
+        stream: Vec<ItemRecord>,
+    },
 }
 
 struct Builder<'doc, T> {
     tree: &'doc TreeArenas<T>,
     state: &'doc DocumentLayoutState,
-    /// Device pixel ratio, used only to snap scroll translations. Layout
-    /// rounds every location to whole device pixels, and scrolled content has
-    /// to keep that promise or a scrolled box would rasterize off the pixel
-    /// grid its unscrolled twin sits on.
     scale: f32,
     items: Vec<PaintItem>,
     clips: Vec<ClipNode>,
     layers: Vec<RenderLayer>,
-    /// Innermost open render layer during the walk (contexts recurse, so a
-    /// plain save/restore around each context body maintains it).
     current_layer: Option<usize>,
 }
 
@@ -165,9 +151,6 @@ impl<'doc, T> Builder<'doc, T> {
         &slab_get_for_live_node(&self.state.nodes, id).slot.rounded
     }
 
-    /// The translation this element applies to its own contents, snapped to
-    /// the device pixel grid. Zero for everything that is not a scrolled
-    /// scroll container.
     fn scroll_translation(&self, id: NodeId, style: &ComputedValues) -> Vector2D<f32> {
         let state = slab_get_for_live_node(&self.state.nodes, id);
         let Some(scroll_box) = scroll::resolve(style, &state.slot.rounded, state.scroll_offset)
@@ -223,8 +206,6 @@ impl<'doc, T> Builder<'doc, T> {
         let mut seq = 0_u32;
         self.collect(
             root,
-            // The context's own box did not move; its contents start one
-            // scroll translation into its local space.
             (ctx.current.scroll - seed.current.scroll).to_point(),
             matches!(mode, DisplayMode::Flex | DisplayMode::Grid),
             ctx,
@@ -249,9 +230,6 @@ impl<'doc, T> Builder<'doc, T> {
         self.close_layer(layer);
     }
 
-    /// Opens a render layer for a stacking-context root that needs group
-    /// compositing; call before its own item is pushed so the range covers
-    /// it. Returns the opened index for the matching [`Self::close_layer`].
     fn open_layer(
         &mut self,
         node: NodeId,
@@ -276,9 +254,6 @@ impl<'doc, T> Builder<'doc, T> {
         Some(index)
     }
 
-    /// Seals an opened layer's item range at context exit, dropping empty
-    /// groups (an empty group cannot contain surviving inner layers — their
-    /// item ranges would be inside its own — so popping is safe).
     fn close_layer(&mut self, opened: Option<usize>) {
         let Some(index) = opened else { return };
         self.current_layer = self.layers[index].parent;
@@ -291,12 +266,6 @@ impl<'doc, T> Builder<'doc, T> {
         }
     }
 
-    /// One pre-order pass under `node` over its **flattened** box-tree
-    /// children (dissolved `display: contents`, ordered by
-    /// `(Layout::order, flattened index)`): buffers in-flow content into
-    /// `stream`, surfaces positioned boxes and stacking contexts into
-    /// `members`, and threads the clip contexts down with member-site escape
-    /// resolution.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn collect(
         &mut self,
@@ -329,8 +298,6 @@ impl<'doc, T> Builder<'doc, T> {
                 continue;
             }
             let Some(view) = StyleView::try_of(child_node) else {
-                // Descendant of a display:none root: Stylo cleared its data
-                // and layout zeroed it.
                 continue;
             };
             let mode = display_mode(view.display());
@@ -354,11 +321,6 @@ impl<'doc, T> Builder<'doc, T> {
                 )
             };
             let position = style.clone_position();
-            // `node_offset` carries every scroll translation on the DOM path
-            // down to here. A positioned box anchored above one of those
-            // scrollers never moved with it, so rebasing onto the flow context
-            // its containing block sees also undoes the translations in
-            // between. Static boxes take the same code path with a zero delta.
             let captured = member_clip_contexts(position, ctx);
             child_offset += captured.current.scroll - ctx.current.scroll;
             let z_applies = stacking::z_index_applies(position, node_is_item_container);
@@ -381,8 +343,6 @@ impl<'doc, T> Builder<'doc, T> {
             let is_item_container = matches!(mode, DisplayMode::Flex | DisplayMode::Grid);
 
             if position != PositionProperty::Static {
-                // Pseudo-stacking context (computed `relative` or `absolute`
-                // here — `fixed` and `sticky` always form real contexts).
                 let member_seq = next(seq);
                 let mut pseudo_stream = Vec::new();
                 if visible {
@@ -423,7 +383,6 @@ impl<'doc, T> Builder<'doc, T> {
                 continue;
             }
 
-            // In-flow content.
             if visible {
                 stream.push(element_record(
                     child,
@@ -466,10 +425,6 @@ impl<'doc, T> Builder<'doc, T> {
                 let node = self.node(member_node);
                 let style = StyleView::try_of(node)
                     .expect("stacking members keep their style for the whole build");
-                // The perspective property applies to direct box-tree
-                // children only (`display: contents` levels dissolve); any
-                // deeper element carrying perspective is itself the nearer
-                // stacking context.
                 let perspective = (box_parent(node).map(Node::id) == Some(context_root))
                     .then_some(context_perspective)
                     .flatten();
@@ -483,13 +438,6 @@ impl<'doc, T> Builder<'doc, T> {
         }
     }
 
-    /// Applies an element's own clip, scroll translation, and containing-block
-    /// captures to the contexts its children see.
-    ///
-    /// `transform` anchors the element's border box *unscrolled*: a scroll
-    /// container's own box, and therefore its own clip, stay put while its
-    /// contents move. The captures come last, so a scroll container that is
-    /// also a containing block does scroll the positioned descendants it owns.
     fn enter_element(
         &mut self,
         node: NodeId,
@@ -510,8 +458,6 @@ impl<'doc, T> Builder<'doc, T> {
                     ),
                 );
                 let rect = unclipped_axes_unbounded(padding_box, clipped);
-                // Only a box clipped on both axes has clipped *corners*; a
-                // one-axis clip is an infinite strip, which has none.
                 let radii = if clipped.x && clipped.y {
                     let outer = resolve_corner_radii(
                         style,
@@ -544,12 +490,6 @@ impl<'doc, T> Builder<'doc, T> {
         inner
     }
 
-    /// A text leaf's run record; `None` when the run is invisible. Flags and
-    /// the hit-target element come from the text's own DOM parent — for a
-    /// text child of a `display: contents` element that parent is the
-    /// box-less element itself, which is the deliberate singular text-hit
-    /// rule (matching Chrome's `elementFromPoint`) and the inheritance relay
-    /// for visibility/pointer-events.
     fn text_record(
         &self,
         child: &Node<T>,
@@ -610,10 +550,6 @@ fn element_record(
     }
 }
 
-/// The flow context a member adopts, keyed by **computed** position: an
-/// absolute box is clipped and scrolled as seen from its absolute containing
-/// block, a fixed box from its fixed one; relative and sticky boxes stay in
-/// the normal flow.
 fn member_clip_contexts(position: PositionProperty, ctx: ClipContexts) -> ClipContexts {
     match position {
         PositionProperty::Absolute => ClipContexts {
@@ -628,10 +564,6 @@ fn member_clip_contexts(position: PositionProperty, ctx: ClipContexts) -> ClipCo
     }
 }
 
-/// Which axes an element clips its content on. `contain: paint` clips both;
-/// otherwise it is per axis, because `overflow: clip` on one axis with
-/// `visible` on the other is a legal pair the style adjuster does not fold
-/// (both are non-scrollable, so it sees nothing to reconcile).
 fn clipped_axes(style: &ComputedValues) -> ScrollAxes {
     if effective_containment(
         style.clone_contain(),
@@ -648,12 +580,6 @@ fn clipped_axes(style: &ComputedValues) -> ScrollAxes {
     }
 }
 
-/// Widens `rect` to unbounded along every axis that is not clipped, so a
-/// one-axis clip is the infinite strip it should be rather than a box.
-///
-/// The bound is finite because the clip is a real rect that gets transformed,
-/// hit-tested, and rasterized; it is far enough out that no layout this engine
-/// can produce reaches it, and small enough to stay exact in `f32`.
 fn unclipped_axes_unbounded(rect: Rect<f32>, clipped: ScrollAxes) -> Rect<f32> {
     const UNBOUNDED: f32 = 1.0e7;
     let mut rect = rect;
@@ -670,8 +596,6 @@ fn unclipped_axes_unbounded(rect: Rect<f32>, clipped: ScrollAxes) -> Rect<f32> {
 
 fn item_flags(style: &ComputedValues) -> (bool, bool) {
     let visible = matches!(style.clone_visibility(), visibility::T::Visible);
-    // Every value other than `none` behaves as `auto` on non-SVG content
-    // (SVG2 pointer-events); the fork's enum is `Auto | None` today.
     let hit_testable = visible && !matches!(style.clone_pointer_events(), PointerEvents::None);
     (visible, hit_testable)
 }

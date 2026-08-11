@@ -75,11 +75,7 @@ fn flex_axes(
     }
 }
 
-/// Transient per-item state accumulated across the Flexbox §9 sizing,
-/// flexing, cross-size, and alignment passes. It stores only resolved values
-/// and compact hot style fields; the raw sizing properties the base-size
-/// pass classifies are re-borrowed from the style view (borrowed accessors
-/// make a re-fetch a pointer projection, never a clone).
+/// Transient per-item state accumulated across Flexbox sizing and alignment.
 #[derive(Debug)]
 struct FlexItem<N> {
     geometry: ItemGeometry,
@@ -119,7 +115,6 @@ struct FlexLine {
     cross_position: f32,
 }
 
-/// The common single-line case stays inline; wrapping spills as needed.
 type FlexLines = SmallVec<[FlexLine; 1]>;
 
 fn alignment_distribution(
@@ -272,10 +267,6 @@ where
 }
 
 /// Lazily memoized main-axis measurements for one flex base-size pass.
-///
-/// Intrinsic text measurement is intentionally still performed whenever its
-/// result participates in sizing; this only avoids probes whose result has no
-/// consumer in the current branch of the flex algorithm.
 struct MainAxisProbes<'tree, 'state, T>
 where
     T: LayoutTree,
@@ -748,8 +739,6 @@ fn resolve_flexible_lengths<N>(
             item.target_main = item.hypothetical_main;
             item.frozen = true;
         }
-        // Frozen items contribute their just-set hypothetical size and
-        // unfrozen ones their flex basis, so `target_main` covers both.
         initial_used_items += item.target_main + axes.main.sum(item.margin);
     }
     let initial_free_space = inner_main_size - (total_gap + initial_used_items);

@@ -14,13 +14,10 @@ use dom::vello::peniko::Color;
 
 use crate::image::{Image, ImageError};
 
-/// Why a capture failed.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum CaptureError {
-    /// The GPU could not render the scene.
     Gpu(GpuError),
-    /// The readback did not describe a valid image.
     Image(ImageError),
 }
 
@@ -35,31 +32,14 @@ impl fmt::Display for CaptureError {
 
 impl std::error::Error for CaptureError {}
 
-/// Creates the mandatory headless renderer for a GPU-backed test.
-///
-/// A missing adapter is a test-environment failure, including in CI. Capture
-/// tests must never report success without rendering and comparing pixels.
+/// Creates the required headless renderer for a GPU-backed test.
 #[must_use]
 #[track_caller]
 pub fn headless(test: &str) -> Headless {
     Headless::new().unwrap_or_else(|error| panic!("{test}: GPU initialization failed: {error}"))
 }
 
-/// The device-pixel extent of a document's frame — the size a full-frame
-/// capture must be.
-///
-/// `Device::viewport_size` is already in CSS pixels, and DOM's private painter
-/// scales the whole scene up by the device pixel ratio (one CSS px becomes `ratio` device
-/// px), so the painted frame spans `viewport * ratio` device pixels. Capturing
-/// at anything smaller returns a top-left crop.
-///
-/// Playwright captures at `scale: 'css'` — one image pixel per CSS pixel —
-/// which it can do because it downsamples. We have no resampler, so goldens
-/// are device-pixel sized. They coincide with Playwright's only at a device
-/// pixel ratio of 1, which is exactly what lynx-stack pins for determinism:
-/// its Chromium project passes `--force-device-scale-factor=1`, and its
-/// Firefox project overrides `deviceScaleFactor: 1`. Every viewport in this
-/// repo uses 1.0 for the same reason.
+/// Returns the document frame's device-pixel dimensions.
 #[must_use]
 pub fn frame_size<T>(document: &Document<T>) -> (u32, u32) {
     let viewport = document.viewport_size();
@@ -77,12 +57,7 @@ pub fn frame_size<T>(document: &Document<T>) -> (u32, u32) {
     }
 }
 
-/// Lays out, paints, and reads back `document`'s whole frame.
-///
-/// Replaced-content resources must be registered through
-/// [`Document::images_mut`] before this call. The private painter necessarily
-/// consumes that same document-owned store, so capture cannot accidentally
-/// paint with a second empty registry.
+/// Lays out, paints, and reads back the document's whole frame.
 pub fn capture_document<T: Sync>(
     gpu: &mut Headless,
     document: &mut Document<T>,
@@ -104,11 +79,7 @@ pub fn capture_document_sized<T: Sync>(
     capture_scene_sized(gpu, &document.scene(), background, width, height)
 }
 
-/// Captures a scene retained by a document's private painter.
-///
-/// The painter has already consumed its document-owned image registry while
-/// building the scene, so this entry point deliberately accepts only the
-/// finished scene. Runtime adapters use this after their own render boundary.
+/// Captures a scene retained by a document's painter.
 pub fn capture_scene<T>(
     gpu: &mut Headless,
     document: &Document<T>,

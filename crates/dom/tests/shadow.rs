@@ -24,7 +24,6 @@ impl Harness {
         Self { doc, host, shadow }
     }
 
-    /// An element inside the shadow tree.
     fn shadow_el(&mut self, parent: NodeId, spec: &str) -> NodeId {
         self.doc.el(parent, spec)
     }
@@ -144,8 +143,6 @@ fn host_matches_the_host_from_inside_the_shadow_tree_only() {
          :host(.themed) target { width: 13px; }
          :host(.other) target { height: 99px; }",
     );
-    // The document cannot reach the host with `:host` — that selector is only
-    // meaningful from inside a shadow tree.
     harness.doc.add_css(":host { height: 77px; }");
     harness.doc.flush();
 
@@ -299,16 +296,12 @@ fn a_slot_added_later_claims_the_children_already_there() {
     harness.doc.flush();
     assert_eq!(harness.doc.dom.assigned_slot(slottable), None);
 
-    // Straight onto the shadow root, which is its own tree rather than a node
-    // with a shadow root above it.
     let slot = harness.shadow_el(harness.shadow, "slot");
     harness.doc.flush();
 
     assert_eq!(harness.doc.dom.assigned_slot(slottable), Some(slot));
     assert_eq!(harness.doc.dom.assigned_nodes(slot), &[slottable]);
 
-    // And nested one level down, where the mutated parent is an ordinary
-    // element inside the tree.
     let wrapper = harness.shadow_el(harness.shadow, "wrapper");
     let nested_slot = harness.shadow_el(wrapper, "slot[name=extra]");
     let extra = harness.doc.el(harness.host, "b[slot=extra]");
@@ -633,21 +626,8 @@ fn detaching_a_slottable_clears_its_assignment() {
     assert_eq!(harness.doc.dom.assigned_slot(slottable), Some(slot));
 }
 
-// --- Scale -----------------------------------------------------------------
-//
-// These assert the properties that only break once a tree is big: that the
-// incremental append path agrees with a full reassignment, that per-root
-// scoping holds when there are hundreds of roots, and that a deep stack of
-// host/slot boundaries still styles, inherits, and lays out.
-
-/// The component's own stylesheet. A shadow tree's elements are unreachable
-/// from the document sheet, so a component that needs its template laid out
-/// has to ship the rules for it — which is the encapsulation working, not a
-/// harness detail.
 const COMPONENT_CSS: &str = "frame { display: linear; } slot { display: linear; }";
 
-/// One component host: `<host><shadow: <frame><slot></frame>></host>` plus
-/// `rows` light children slotted into it.
 fn component(doc: &mut Doc, parent: NodeId, rows: usize) -> (NodeId, NodeId, Vec<NodeId>) {
     let host = doc.el(parent, "host");
     let shadow = doc.dom.attach_shadow(host, ShadowRootMode::Open);
@@ -682,8 +662,6 @@ fn a_page_of_many_hosts_slots_and_styles_every_one() {
         );
         assert!(doc.dom.shadow_root(*host).is_some());
     }
-    // Sampled rather than exhaustive: what scale can break is the assignment
-    // bookkeeping above, not the per-element cascade.
     for (_, _, rows) in components.iter().step_by(37) {
         assert_eq!(doc.value(rows[ROWS - 1], "width"), "10px");
     }
@@ -695,9 +673,6 @@ fn a_page_of_many_hosts_slots_and_styles_every_one() {
     assert_eq!((bottom.size.width, bottom.size.height), (10.0, 4.0));
 }
 
-/// The incremental append path must land on exactly the assignment a full
-/// reassignment would produce. A `name` round-trip on the slot forces the
-/// full path, so the two can be compared directly.
 #[test]
 fn appending_a_long_child_list_agrees_with_a_full_reassignment() {
     let mut doc = Doc::new();
@@ -719,8 +694,6 @@ fn appending_a_long_child_list_agrees_with_a_full_reassignment() {
     );
 }
 
-/// The same equivalence for the paths that are not a plain append: inserting
-/// into the middle of a long child list, and removing from the middle of one.
 #[test]
 fn mid_list_insertion_and_removal_keep_slot_order() {
     let mut doc = Doc::new();
@@ -741,9 +714,6 @@ fn mid_list_insertion_and_removal_keep_slot_order() {
     assert_eq!(doc.dom.assigned_slot(rows[32]), Some(slot));
 }
 
-/// A slot appended to a shadow tree that already has light children must
-/// claim them, even when there are many — that path is a full reassignment
-/// and has to see the whole child list.
 #[test]
 fn a_late_slot_claims_a_long_existing_child_list() {
     let mut doc = Doc::new();
@@ -840,8 +810,6 @@ fn removing_a_host_with_a_large_shadow_tree_frees_every_node() {
     let rows: Vec<_> = (0..128).map(|_| doc.el(host, "row")).collect();
     doc.flush();
 
-    // host + slot + 128 shadow-only elements + 128 rows carry payloads; the
-    // shadow root itself does not.
     assert_eq!(doc.dom.remove_subtree(host).len(), 2 + 128 + 128);
     for id in shadow_only
         .into_iter()

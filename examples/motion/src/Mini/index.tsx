@@ -16,7 +16,6 @@ export default function MiniExample() {
   const x = useMotionValueRef(0);
   const scale = useMotionValueRef(1);
 
-  // Consolidate transform updates to avoid redundant DOM operations
   const updateTransform = (xVal?: number, scaleVal?: number) => {
     'main thread';
     const xValue = xVal ?? x.current.get();

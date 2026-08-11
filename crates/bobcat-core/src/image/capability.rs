@@ -8,28 +8,12 @@
 
 use crate::image::format::ImageFormat;
 
-/// Codec **provenance**, not a promise about silicon.
-///
-/// No still-image API on any supported platform exposes an acceleration query,
-/// and none of them reaches a dedicated decode ASIC: `ImageIO`'s JPEG path
-/// imports `vImage` and no `IOKit` symbols, WIC's only GPU-adjacent surface hands
-/// YCbCr planes to Direct2D, and `AImageDecoder` is a shim over the platform
-/// Skia codecs writing into caller CPU memory. [`Self::DedicatedHardware`]
-/// therefore exists as a reserved tier that no current decoder ever reports — it
-/// is the honest answer to "is this hardware accelerated?", which is *no, and
-/// here is the ladder we can actually observe*.
-///
-/// Ordered worst to best, so `max` picks the preferred provenance.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum Acceleration {
-    /// A bundled pure-Rust codec (the Linux reference decoder).
     #[default]
     Software,
-    /// The operating system's own vendor-tuned CPU codec.
     PlatformSoftware,
-    /// Reserved for a codec running on dedicated decode silicon. No decoder
-    /// reports this today; it exists so adding one is not a breaking change.
     DedicatedHardware,
 }
 
@@ -45,11 +29,6 @@ impl Acceleration {
 }
 
 /// Per-format tiers for one decoder, `None` where it cannot decode that format.
-///
-/// Consulted before every probe and decode: a sniffed container the injected
-/// decoder does not claim is refused as
-/// [`Unsupported`](crate::image::ImageError::Unsupported) rather than handed to a
-/// decoder that would fail it less legibly.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Capabilities {
     tiers: [Option<Acceleration>; ImageFormat::ALL.len()],

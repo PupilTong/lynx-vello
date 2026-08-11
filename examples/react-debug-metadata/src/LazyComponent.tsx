@@ -1,14 +1,7 @@
 import './LazyComponent.css';
 
-// ---------------------------------------------------------------------------
-// These throws live INSIDE the dynamically-loaded component, so they compile
-// into LazyComponent.lynx.bundle (its OWN release / debug-metadata), separate
-// from the host (consumer main.lynx.bundle where CrashDemo lives). Use them to
-// verify remap resolves a dynamic-component stack against the right bundle.
-// ---------------------------------------------------------------------------
-
 function lazyDeepInner(): never {
-  throw new Error('boom from deep nested call (LazyComponent, background)'); // LazyComponent.tsx lazyDeepInner
+  throw new Error('boom from deep nested call (LazyComponent, background)');
 }
 function lazyDeepMid() {
   lazyDeepInner();
@@ -20,19 +13,17 @@ function lazyCrashBackground() {
 
 function lazyCrashType() {
   const obj = {} as { gone?: () => void };
-  // TypeError inside the dynamic component
   return (obj.gone as () => void)();
 }
 
 function lazyCrashUndefinedProp() {
   const obj = {} as { missing?: { x: number } };
-  // TypeError: Cannot read properties of undefined (reading 'x')
-  return obj.missing!.x; // LazyComponent.tsx lazyCrashUndefinedProp
+  return obj.missing!.x;
 }
 
 function lazyCrashMainThread() {
   'main thread';
-  throw new Error('boom from LazyComponent main-thread'); // LazyComponent.tsx lazyCrashMainThread
+  throw new Error('boom from LazyComponent main-thread');
 }
 
 export default function LazyComponent() {

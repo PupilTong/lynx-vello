@@ -9,8 +9,6 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-# The one dependency: this layer reaches stylo/euclid/vello exclusively
-# through `dom`'s vocabulary re-exports (strict linear layering).
 dom = { workspace = true }
 
 [lints]

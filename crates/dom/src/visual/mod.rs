@@ -90,60 +90,41 @@ use euclid::default::{Point2D, Rect, Size2D, Transform3D};
 use crate::tree::document::Document;
 use crate::{ImageStore, NodeId};
 
-/// The document's current frame in paint order: `items[0]` paints first
-/// (bottom), `items[len - 1]` paints last (top).
-///
-/// A frame is a snapshot. Its geometry is self-contained, so it stays
-/// queryable while the document's node set is unchanged; once nodes are
-/// removed (`Document::remove_subtree`), freed ids can be recycled and the
-/// frame no longer [`names_live_nodes`](Self::names_live_nodes) — painting
-/// fails fast on that, and the document-level hit queries fail closed until
-/// the next render retains a rebuilt frame.
+/// A frame's back-to-front paint order.
 #[derive(Debug)]
 pub(crate) struct PaintOrder {
     items: Vec<PaintItem>,
     clips: Vec<ClipNode>,
     layers: Vec<RenderLayer>,
-    /// [`Document::node_removal_epoch`] at build time.
     epoch: u64,
-    /// The document's private visual-mutation epoch at build time.
     visual_epoch: u64,
 }
 
 impl PaintOrder {
-    /// Back-to-front paint items.
     #[must_use]
     pub(crate) fn items(&self) -> &[PaintItem] {
         &self.items
     }
 
-    /// Clip arena referenced by [`PaintItem::clip`] and [`ClipNode::parent`].
     #[must_use]
     pub(crate) fn clips(&self) -> &[ClipNode] {
         &self.clips
     }
 
-    /// Render layers, in preorder (a layer precedes every layer nested in
-    /// it, and its [`RenderLayer::items`] range contains theirs).
     #[must_use]
     pub(crate) fn layers(&self) -> &[RenderLayer] {
         &self.layers
     }
 
-    /// The document visual epoch represented by this frame.
     #[must_use]
     pub(crate) const fn visual_epoch(&self) -> u64 {
         self.visual_epoch
     }
 }
 
-/// What one paint item draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PaintItemKind {
-    /// An element's own box: background, borders, decorations.
     ElementBox,
-    /// A text leaf's glyph runs; `element` is the styled parent element hit
-    /// testing resolves to.
     TextRun { element: NodeId },
 }
 
@@ -152,56 +133,21 @@ pub(crate) enum PaintItemKind {
 pub(crate) struct PaintItem {
     pub(crate) node: NodeId,
     pub(crate) kind: PaintItemKind,
-    /// Item-local border-box coordinates → viewport CSS px. Flattened
-    /// 2D-projective (z decoupled); a singular matrix means the element is
-    /// not rendered (css-transforms-1) and hit testing skips it.
     pub(crate) transform: Transform3D<f32>,
-    /// Innermost applicable clip, an index into [`PaintOrder::clips`].
     pub(crate) clip: Option<usize>,
-    /// Rounded border-box size.
     pub(crate) size: Size2D<f32>,
-    /// Resolved, overlap-normalized border radii (zero for text runs).
     pub(crate) radii: CornerRadii,
-    /// `visibility: visible` and `pointer-events` other than `none`.
     pub(crate) hit_testable: bool,
 }
 
-/// A stacking context whose subtree composites as a group — `opacity` below
-/// one, `filter`, `clip-path`, `mask`, and the storage-only blend/isolation
-/// triggers once a grammar rebase makes them authorable. The private painter must
-/// paint the enclosed items into an offscreen group and apply the effects on
-/// composite; contexts without group effects (plain `z-index`, transforms)
-/// deliberately get no layer.
-///
-/// Effect *parameters* are not duplicated here: the establishing element's
-/// computed style (via [`Document::paint_style`]) is the single source the
-/// painter resolves `opacity`/`filter`/`clip-path`/`mask` values from, with
-/// `clip-path` and `mask` geometry resolved against [`Self::size`].
-///
-/// Group effects still do not affect the hit queries (a `clip-path` that
-/// clips painting away does not yet clip the hit region — recorded v1
-/// limit).
+/// A stacking context rendered as a composited group.
 #[derive(Debug, Clone)]
 pub(crate) struct RenderLayer {
-    /// Next-outer render layer, an index into [`PaintOrder::layers`].
     pub(crate) parent: Option<usize>,
-    /// The establishing element.
     pub(crate) node: NodeId,
-    /// Layer-local (border-box) coordinates → viewport CSS px. Present even
-    /// when the establishing box itself paints no item (`visibility:
-    /// hidden` root with visible descendants).
     pub(crate) transform: Transform3D<f32>,
-    /// Rounded border-box size of the establishing element.
     pub(crate) size: Size2D<f32>,
-    /// The establishing element's resolved, overlap-normalized border
-    /// radii — carried here (not scavenged from the root's item) so
-    /// `clip-path`/`mask` geometry keeps its rounding even when the root
-    /// box paints no item (`visibility: hidden`).
     pub(crate) radii: CornerRadii,
-    /// Half-open range of [`PaintOrder::items`] the group encloses.
-    /// Stacking contexts paint atomically, so the range is contiguous and
-    /// nested layers' ranges nest; empty groups are dropped at build time,
-    /// so the range is never empty.
     pub(crate) items: std::ops::Range<usize>,
 }
 
@@ -209,17 +155,11 @@ pub(crate) struct RenderLayer {
 /// establishing element's local space.
 #[derive(Debug, Clone)]
 pub(crate) struct ClipNode {
-    /// Next-outer clip in this node's containing-block chain.
     pub(crate) parent: Option<usize>,
-    /// The establishing element, retained only for invariant tests; painting
-    /// and hit testing consume the clip's resolved geometry directly.
     #[cfg(test)]
     pub(crate) node: NodeId,
-    /// Clip-local coordinates → viewport CSS px.
     pub(crate) transform: Transform3D<f32>,
-    /// Padding box in clip-local coordinates.
     pub(crate) rect: Rect<f32>,
-    /// Inner border radii (outer radii inset by border widths, clamped ≥ 0).
     pub(crate) radii: CornerRadii,
 }
 
@@ -248,10 +188,6 @@ impl CornerRadii {
 }
 
 impl<T: Sync> Document<T> {
-    /// Flushes styles and layout, then builds the private frame description
-    /// painting consumes. [`Self::render`] is the sole production caller; the
-    /// copy the painter retains beside the scene is what the read-only hit
-    /// queries and input routing answer from.
     pub(crate) fn build_paint_order(&mut self) -> PaintOrder {
         self.layout();
         build::build(self)
@@ -270,18 +206,7 @@ impl<T: Sync> Document<T> {
 }
 
 impl<T> Document<T> {
-    /// CSSOM-View `elementsFromPoint` over the **rendered** frame: every
-    /// element whose rounded border box contains `point` (viewport CSS px),
-    /// topmost first in paint order, each element once, honoring transforms,
-    /// clip chains, `visibility`, and `pointer-events`. Text-run hits resolve
-    /// to the styled parent element.
-    ///
-    /// This is a pure read of the frame retained by the last [`Self::render`]:
-    /// it never flushes styles or layout and never rebuilds the frame, so it
-    /// answers for what is on screen, not for unrendered mutations. Before
-    /// the first render nothing is on screen and the answer is empty; after
-    /// nodes are removed the retained frame could name recycled ids, so it
-    /// fails closed — empty again — until the next render.
+    /// Returns rendered elements under a point from front to back.
     #[must_use]
     pub fn elements_from_point(&self, point: Point2D<f32>) -> Vec<NodeId> {
         self.with_rendered_frame(|frame| frame.elements_at(point))
@@ -302,17 +227,11 @@ impl<T> Document<T> {
         .unwrap_or_else(|| vec![Vec::new(); points.len()])
     }
 
-    /// The topmost element at `point` in the rendered frame — input
-    /// targeting's single answer, under the same pure-read contract as
-    /// [`Self::elements_from_point`].
     pub(crate) fn rendered_element_at(&self, point: Point2D<f32>) -> Option<NodeId> {
         self.with_rendered_frame(|frame| frame.first_element_at(point))
             .flatten()
     }
 
-    /// Lends the retained frame when one exists and it still names live
-    /// nodes. Node removals recycle ids, so a frame from before a removal
-    /// answers no one rather than possibly naming a stranger.
     fn with_rendered_frame<R>(&self, read: impl FnOnce(&PaintOrder) -> R) -> Option<R> {
         let painter = self.painter.borrow();
         let frame = painter.frame()?;
@@ -335,10 +254,7 @@ impl<T> Document<T> {
         Ref::map(self.painter.borrow(), crate::paint::painter::Painter::scene)
     }
 
-    /// Registers or updates decoded images without exposing the painter.
-    ///
-    /// Access conservatively advances the visual epoch so a retained scene is
-    /// never reused after its resource set may have changed.
+    /// Mutably accesses decoded images and invalidates the retained scene.
     pub fn images_mut(&mut self) -> &mut ImageStore {
         self.note_visual_mutation();
         self.painter.get_mut().images_mut()

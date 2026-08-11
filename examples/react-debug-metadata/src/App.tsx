@@ -13,11 +13,8 @@ const LazyComponent = lazy(() =>
   })
 );
 
-// ---- host (App.tsx, consumer main.lynx.bundle) inline crash sites ----
-// These compile straight into the host main bundle (NOT a dynamic component),
-// so a remapped stack should resolve here against the host's release.
 function appDeepInner(): never {
-  throw new Error('boom from App.tsx deep nested call (host, background)'); // App.tsx appDeepInner
+  throw new Error('boom from App.tsx deep nested call (host, background)');
 }
 function appDeepMid() {
   appDeepInner();
@@ -28,17 +25,16 @@ function appCrashNested() {
 
 function appCrashType() {
   const obj = {} as { missing?: () => void };
-  // TypeError: obj.missing is not a function (host)
   return (obj.missing as () => void)();
 }
 
 function appCrashThrow() {
-  throw new Error('explicit throw new Error (App.tsx host, background)'); // App.tsx appCrashThrow
+  throw new Error('explicit throw new Error (App.tsx host, background)');
 }
 
 function appCrashMainThread() {
   'main thread';
-  throw new Error('boom from App.tsx main-thread (host)'); // App.tsx appCrashMainThread
+  throw new Error('boom from App.tsx main-thread (host)');
 }
 
 export function App() {

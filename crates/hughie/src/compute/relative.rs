@@ -183,9 +183,7 @@ where
     }
 }
 
-/// Compact, sorted id lookup. Sorting by `(id, ordered_index)` and retaining
-/// the final pair implements duplicate-id last-wins semantics without a
-/// randomized hash table in the hot path.
+/// Compact sorted lookup with duplicate-id last-wins semantics.
 #[derive(Debug)]
 struct IdLookup {
     entries: Vec<(i32, usize)>,
@@ -899,8 +897,6 @@ fn position_axis<N>(
     bounds
 }
 
-/// Runs the shared prepare→constrain→measure sequence for one item and
-/// returns the constraints it was measured under.
 #[inline]
 fn measure_one<T>(
     tree: &T,

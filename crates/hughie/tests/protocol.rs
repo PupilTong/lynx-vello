@@ -783,8 +783,7 @@ fn flattened_children_splices_display_contents_subtrees_in_source_order() {
             .collect()
     };
 
-    // Each yielded child arrives with the style and `display` the walk read
-    // to classify it, so no caller looks either up a second time.
+    // Each yielded child carries the style and display already read.
     let (yielded, style, display) = tree
         .flattened_children(tree.node(root))
         .next()
@@ -793,15 +792,12 @@ fn flattened_children_splices_display_contents_subtrees_in_source_order() {
     assert!(std::ptr::eq(style, tree.style(tree.node(first))));
     assert_eq!(display, tree.style(tree.node(first)).display());
 
-    // The box-less wrapper and the box-less element nested inside it are both
-    // replaced by their own children, in place; a `display: none` child still
-    // appears, because its parent algorithm owns hiding its stale geometry.
+    // Box-less wrappers flatten in place while `display: none` remains visible to cleanup.
     assert_eq!(ids(root), vec![first, inner, hidden, last]);
     assert_eq!(ids(wrapper), vec![inner, hidden]);
     assert_eq!(ids(first), Vec::<usize>::new());
 
-    // Source children stay untouched: cleanup and the rounding walk need to
-    // reach every descendant, box-generating or not.
+    // Source children retain every descendant for cleanup and rounding.
     let source: Vec<usize> = tree
         .children(tree.node(root))
         .map(|child| child.index)
@@ -818,12 +814,10 @@ fn flattened_children_size_hint_never_bounds_a_walk_it_cannot_predict() {
     let empty = tree.push(contents_style(), vec![]);
     let direct = tree.push(MockStyle::default(), vec![plain, plain]);
     let grows = tree.push(MockStyle::default(), vec![expanding, plain]);
-    // The case that makes any source-derived lower bound wrong: one child,
-    // box-less and childless, so the walk yields nothing at all.
+    // A childless box-less child makes a source-derived lower bound invalid.
     let shrinks = tree.push(MockStyle::default(), vec![empty]);
 
-    // A `display: contents` child can add items or remove them, so the walk
-    // is bounded from neither side and `size_hint` promises nothing.
+    // `display: contents` can add or remove yielded items.
     for node in [direct, grows, shrinks] {
         assert_eq!(
             tree.flattened_children(tree.node(node)).size_hint(),
@@ -834,8 +828,7 @@ fn flattened_children_size_hint_never_bounds_a_walk_it_cannot_predict() {
     assert_eq!(tree.flattened_children(tree.node(grows)).count(), 3);
     assert_eq!(tree.flattened_children(tree.node(shrinks)).count(), 0);
 
-    // Pre-allocation uses the separate estimate instead, which is exact for
-    // the common node and only an estimate once a box-less child appears.
+    // The separate preallocation estimate tolerates box-less children.
     assert_eq!(
         tree.flattened_children(tree.node(direct)).capacity_hint(),
         2

@@ -7,17 +7,8 @@ import { defineConfig } from '@lynx-js/rspeedy';
 
 import { pluginLynxBundleAnalysisStats } from '../bundle-analysis-stats.plugin.js';
 
-// REACTLYNX_ASYNC=true loads the ReactLynx external bundle asynchronously
-// (mounted as a Promise) instead of as a synchronous global. Async outputs are
-// isolated in `dist-react-async` / `dist-external-bundle-react-async` so the
-// default (sync) build is untouched.
 const isAsync = process.env['REACTLYNX_ASYNC'] === 'true';
 
-// The `react.lynx.bundle` / `comp-lib.lynx.bundle` externals are loaded at
-// runtime via `lynx.loadScript`, which needs an absolute URL — a root-relative
-// `/react.lynx.bundle` fails on device/`preview` ("File not found"). Point
-// `assetPrefix` at the LAN host and a fixed port so the baked URLs are
-// reachable; `strictPort` keeps that port stable across dev/preview.
 function detectLanHost() {
   if (process.env['LYNX_HOST']) return process.env['LYNX_HOST'];
   for (const ifaces of Object.values(os.networkInterfaces())) {
@@ -35,7 +26,6 @@ export default defineConfig({
     pluginReactLynx(),
     pluginQRCode({
       schema(url) {
-        // We use `?fullscreen=true` to open the page in LynxExplorer in full screen mode
         return `${url}?fullscreen=true`;
       },
     }),

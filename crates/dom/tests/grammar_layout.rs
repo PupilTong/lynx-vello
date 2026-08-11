@@ -19,12 +19,6 @@ fn computed(declaration: &str, property: &str) -> String {
 
 #[test]
 fn display_grammar_is_the_lynx_value_set_and_includes_contents() {
-    // The fork's lynx grammar is `none | contents | flex | grid | linear |
-    // relative`: an internal layout mode only, with no flow layout and no
-    // `<display-outside> <display-inside>` compounds
-    // (`vendor/stylo/style/values/specified/box.rs`). `contents` is the one
-    // W3C box-generation value it keeps from upstream, and `web-core`'s
-    // built-in elements depend on it (`lynx-wrapper`, `x-input`, `x-image`, …).
     for value in ["none", "contents", "flex", "grid", "linear", "relative"] {
         assert!(parses("display", value), "`display: {value}` must parse");
         assert_eq!(

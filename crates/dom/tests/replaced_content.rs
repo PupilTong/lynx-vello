@@ -18,8 +18,6 @@ const PAGE: &str = "page { display: flex; position: relative; width: 800px; heig
     img { display: flex; position: absolute; left: 0; top: 0; }
     .box { width: 200px; height: 100px; }";
 
-/// A 4x4 PNG with four distinguishable quadrants, encoded in-process so no
-/// binary fixture is needed for the common case.
 fn checker_png(side: u32) -> Vec<u8> {
     let half = side / 2;
     let mut rgba = Vec::with_capacity((side * side * 4) as usize);
@@ -56,8 +54,6 @@ impl Harness {
         }
     }
 
-    /// The whole pipeline for one `<img>`: decode, publish the natural size to
-    /// layout, publish the pixels to paint.
     fn img(&mut self, class: &str, bytes: &[u8]) -> dom::NodeId {
         let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
         let mut reader = decoder.read_info().expect("png header");
@@ -102,9 +98,6 @@ fn a_decoded_image_paints_and_leaves_every_layer_closed() {
 
 #[test]
 fn the_natural_size_reaches_layout_when_no_size_is_specified() {
-    // The auto/auto case: with no CSS width or height, the used size IS the
-    // decoded intrinsic size. This is the whole reason the decode has to reach
-    // the document at all.
     let mut h = Harness::new("");
     let node = h.img("", &checker_png(8));
     h.doc.dom.layout();
@@ -140,9 +133,6 @@ fn natural_size_updates_change_auto_sized_layout() {
 
 #[test]
 fn a_node_with_no_registered_pixels_paints_nothing_but_still_lays_out() {
-    // The not-yet-loaded state: layout has the natural size (from a header
-    // probe) while the pixels are still in flight. That frame must not panic
-    // and must not draw a placeholder.
     let mut h = Harness::new("");
     let root = h.doc.root;
     let node = h.doc.el_tag(root, "img", "");
@@ -158,9 +148,6 @@ fn a_node_with_no_registered_pixels_paints_nothing_but_still_lays_out() {
 
 #[test]
 fn every_object_fit_value_paints_without_unbalancing_layers() {
-    // `contain`/`scale-down` underflow the content box, `cover` and an
-    // oversized `none` overflow it — the overflowing cases take the clip path,
-    // and a clip that is pushed and not popped corrupts every later item.
     for fit in ["fill", "contain", "cover", "none", "scale-down"] {
         let mut h = Harness::new(&format!(".box {{ object-fit: {fit}; }}"));
         h.img("box", &checker_png(4));

@@ -77,12 +77,9 @@ const NO_OP_BATCH: usize = 4_096;
 const PAGE_CSS: &str = "page { display: linear; }
      x-row { display: linear; width: 40px; height: 12px; }";
 
-/// The tag under test. Hyphenated because that is the shape a component
-/// library uses, though with no upgrade the name grammar no longer matters.
 const TAG: &str = "x-row";
 
-/// A definition that does the least a definition can do, so the measurement is
-/// the machinery rather than the handler.
+/// Minimal lifecycle handler used to isolate framework overhead.
 struct Inert;
 
 impl CustomElement<()> for Inert {
@@ -93,11 +90,8 @@ impl CustomElement<()> for Inert {
 
 #[derive(Clone, Copy)]
 enum Registry {
-    /// No definitions: every hook takes its empty-registry branch.
     Empty,
-    /// A definition for a tag nothing in the document uses.
     OtherTag,
-    /// A definition for the tag under test.
     UnderTest,
 }
 
@@ -112,8 +106,6 @@ fn page(registry: Registry) -> Document<()> {
     doc
 }
 
-/// Creation only, never inserted — the hottest path a runtime takes, and the
-/// one that pays for the definition lookup and, when it hits, the constructor.
 fn create_elements(registry: Registry) -> Document<()> {
     let mut doc = page(registry);
     for _ in 0..ELEMENTS {
@@ -122,8 +114,6 @@ fn create_elements(registry: Registry) -> Document<()> {
     doc
 }
 
-/// Creation plus connection, which is what actually raises reactions: each
-/// append walks the inserted subtree shadow-including.
 fn build_page(registry: Registry) -> (Document<()>, NodeId) {
     let mut doc = page(registry);
     let root = doc.document_element().id();
@@ -135,8 +125,6 @@ fn build_page(registry: Registry) -> (Document<()>, NodeId) {
     }
     (doc, probe)
 }
-
-// --- Creation -------------------------------------------------------------
 
 #[divan::bench]
 fn create_elements_plain(bencher: divan::Bencher) {
@@ -159,8 +147,6 @@ fn create_elements_defined(bencher: divan::Bencher) {
         .bench_local(|| black_box(create_elements(Registry::UnderTest)));
 }
 
-// --- Insertion ------------------------------------------------------------
-
 #[divan::bench]
 fn build_page_plain(bencher: divan::Bencher) {
     bencher
@@ -182,8 +168,6 @@ fn build_page_defined(bencher: divan::Bencher) {
         .bench_local(|| black_box(build_page(Registry::UnderTest)));
 }
 
-// --- Attribute mutation ---------------------------------------------------
-
 fn attribute_mutation(bencher: divan::Bencher, registry: Registry) {
     let (mut doc, probe) = build_page(registry);
     doc.layout();
@@ -195,8 +179,6 @@ fn attribute_mutation(bencher: divan::Bencher, registry: Registry) {
                 state
                     .borrow_mut()
                     .set_attribute(probe, "value", black_box("v"));
-                // A second, unobserved name: the gate must reject it before it
-                // reads an old value or allocates.
                 state
                     .borrow_mut()
                     .set_attribute(probe, "unwatched", black_box("v"));
@@ -213,8 +195,6 @@ fn attribute_mutation_plain(bencher: divan::Bencher) {
 fn attribute_mutation_defined(bencher: divan::Bencher) {
     attribute_mutation(bencher, Registry::UnderTest);
 }
-
-// --- Commit ---------------------------------------------------------------
 
 fn noop_commit(bencher: divan::Bencher, registry: Registry) {
     let (mut doc, _) = build_page(registry);
@@ -238,8 +218,6 @@ fn noop_commit_plain(bencher: divan::Bencher) {
 fn noop_commit_defined(bencher: divan::Bencher) {
     noop_commit(bencher, Registry::UnderTest);
 }
-
-// --- Removal --------------------------------------------------------------
 
 fn remove_page(bencher: divan::Bencher, registry: Registry) {
     bencher

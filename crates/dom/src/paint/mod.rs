@@ -25,10 +25,7 @@ use crate::paint::shape::ReferenceBoxes;
 use crate::vello::kurbo::{Affine, BezPath, Rect, Vec2};
 use crate::visual::CornerRadii;
 
-/// Glyph-silhouette source for `background-clip: text`: the element's
-/// descendant text layouts with their offsets from the element's border-box
-/// origin, collected by the walker (which owns the document borrow).
-/// Empty means the clip region is empty — the background paints nothing.
+/// Descendant glyph silhouettes used by `background-clip: text`.
 #[derive(Debug, Default)]
 pub(crate) struct TextClip<'doc> {
     pub runs: Vec<(Vec2, &'doc TextLayout)>,
@@ -40,11 +37,7 @@ impl TextClip<'_> {
     }
 }
 
-/// Reusable path buffers for the border/shadow painters, owned by the
-/// walker's per-frame scratch. Every path built into a buffer is fully
-/// encoded into the scene by the fill/clip call that immediately follows
-/// its construction, so one buffer per role serves every item in the frame
-/// without per-item allocation.
+/// Reusable paths for border and shadow painting.
 #[derive(Debug, Default)]
 pub(crate) struct PathScratch {
     /// Ring (outer minus inner) fill/clip paths.

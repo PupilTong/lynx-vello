@@ -1,3 +1,5 @@
+/* QuickJS C ABI shim used by the Rust bridge. */
+
 #include "quickjs.h"
 
 #include <assert.h>
@@ -28,9 +30,7 @@ typedef struct QjsUnhandledRejection {
 
 typedef int QjsInterruptCallback(void *opaque);
 
-/* How a host-call argument or result is tagged. Deliberately narrow: the
- * boundary carries primitives, and anything else is refused rather than
- * coerced. Mirrored by `HostArgKind` in ffi.rs. */
+
 enum QjsHostArgKind {
     QJS_ARG_UNDEFINED = 0,
     QJS_ARG_NULL = 1,
@@ -40,23 +40,15 @@ enum QjsHostArgKind {
     QJS_ARG_UNSUPPORTED = 5,
 };
 
-/* One argument, flattened.
- *
- * Arguments are only ever read, and only during the synchronous call, so they
- * are described in place rather than duplicated into per-argument heap boxes:
- * `argv` stays valid for the whole call and the values it holds are already
- * rooted by the caller. `text` is CESU-8 owned by QuickJS and freed by the
- * trampoline once the callee returns. */
+
 typedef struct QjsHostArg {
     int32_t kind;
-    double number;          /* Boolean: 0 or 1. Number: the value. */
-    const uint8_t *text;    /* String only. */
+    double number;
+    const uint8_t *text;
     size_t text_len;
 } QjsHostArg;
 
-/* The return value, described the same way so the callee never allocates a
- * boxed JSValue. `text` is UTF-16 owned by the callee and must stay valid
- * until the dispatch returns, which is when the trampoline reads it. */
+
 typedef struct QjsHostResult {
     int32_t kind;
     double number;
@@ -64,16 +56,11 @@ typedef struct QjsHostResult {
     size_t text_len;
 } QjsHostResult;
 
-/* Invoked while JavaScript is on the stack, once per call of a host function
- * created by `qjs_new_host_function`. A non-zero return means the callee
- * already threw on `runtime->context`. */
+
 typedef int QjsHostDispatch(void *opaque, void *handler, size_t argument_count,
                             const QjsHostArg *arguments, QjsHostResult *result);
 
-/* Invoked from the garbage collector when a host function becomes unreachable,
- * handing back the same `handler` address the function was created with. It
- * runs during collection, so the callee must only *record* the address — not
- * drop anything that could re-enter JavaScript. */
+
 typedef void QjsHostRelease(void *opaque, void *handler);
 
 typedef struct QjsRuntime {
@@ -89,21 +76,13 @@ typedef struct QjsRuntime {
     void *host_opaque;
 } QjsRuntime;
 
-/* One per host function, owned by a JS object whose only job is to be
- * collected at the same moment the function is: that is what gives the Rust
- * closure a lifetime instead of pinning it to the realm.
- *
- * `handler` is the closure's own stable address, not an index into a table —
- * so there is nothing to reallocate, no free list, and no way for a stale
- * reference to alias a different closure. NULL means the host still owns it,
- * which is how a failed construction tells the finalizer to stand down. */
+
 typedef struct QjsHostOwner {
     QjsRuntime *runtime;
     void *handler;
 } QjsHostOwner;
 
-/* Allocated once per process; JS_NewClassID is mutex-guarded, so sharing the
- * static across realms on different threads is safe. */
+
 static JSClassID qjs_host_owner_class_id;
 
 static void qjs_host_owner_finalizer(JSRuntime *raw, JSValue value) {
@@ -263,8 +242,7 @@ JSContext *qjs_context_new(QjsRuntime *runtime) {
     assert(runtime->context == NULL);
     runtime->context = JS_NewContext(runtime->raw);
     if (runtime->context != NULL) {
-        /* The host-function trampoline only receives a JSContext, so the
-         * owning QjsRuntime has to be reachable from it. */
+
         JS_SetContextOpaque(runtime->context, runtime);
     }
     return runtime->context;
@@ -320,8 +298,7 @@ QjsValue *qjs_new_big_uint64(JSContext *context, uint64_t value) {
     return qjs_box(context, JS_NewBigUint64(context, value));
 }
 
-/* Builds a JS string from UTF-16, exactly — including lone surrogates, which
- * is why it round-trips through a JSON escape rather than through UTF-8. */
+
 static JSValue qjs_string_from_utf16(JSContext *context, const uint16_t *units,
                                      size_t length) {
     static const char hex[] = "0123456789abcdef";
@@ -511,8 +488,7 @@ QjsValue *qjs_get_property(JSContext *context, const QjsValue *value,
 
 int qjs_set_property(JSContext *context, const QjsValue *target,
                      const char *name, const QjsValue *value) {
-    /* JS_SetPropertyStr consumes the value, so hand it a duplicate and leave
-     * the caller's box owning what it came in with. */
+
     return JS_SetPropertyStr(context, target->value, name,
                              JS_DupValue(context, value->value));
 }
@@ -533,9 +509,7 @@ void qjs_runtime_set_host_dispatch(QjsRuntime *runtime,
     runtime->host_opaque = opaque;
 }
 
-/* Arguments up to this many are described on the stack; a call with more
- * falls back to one allocation for the whole array. Every Element PAPI member
- * takes at most three. */
+
 #define QJS_HOST_INLINE_ARGS 8
 
 static void qjs_host_describe(JSContext *context, JSValueConst value,
@@ -646,16 +620,14 @@ static JSValue qjs_host_trampoline(JSContext *context, JSValueConst this_value,
     }
 
     if (status != 0) {
-        /* The dispatch threw through qjs_throw_error before returning. */
+
         return JS_EXCEPTION;
     }
     returned = qjs_host_build(context, &result);
     return returned;
 }
 
-/* Ownership contract: `handler` transfers to JavaScript only when this returns
- * non-NULL. On every failure path the owner's handler pointer is cleared first,
- * so the finalizer stands down and the caller still owns the closure. */
+
 QjsValue *qjs_new_host_function(JSContext *context, const char *name,
                                 int length, void *handler) {
     QjsRuntime *runtime = JS_GetContextOpaque(context);
@@ -669,9 +641,7 @@ QjsValue *qjs_new_host_function(JSContext *context, const char *name,
         return NULL;
     }
 
-    /* The owner object carries the closure's address and, when collected,
-     * tells the host it may be dropped. Handing it to JS_NewCFunctionData as
-     * the function's data makes the two die together. */
+
     owner = malloc(sizeof(*owner));
     if (owner == NULL) {
         JS_ThrowOutOfMemory(context);
@@ -696,13 +666,7 @@ QjsValue *qjs_new_host_function(JSContext *context, const char *name,
     }
     JS_FreeValue(context, data);
 
-    /* `name` is non-writable on function objects, so define rather than set.
-     * JS_NewCFunctionData already installed a valid empty name, so this is a
-     * redefine — and JS_DefinePropertyValue does NOT check its value for the
-     * exception sentinel before storing it. Handing it a failed allocation
-     * would overwrite a good name with the sentinel, leaving an object whose
-     * `.name` has no type and a pending exception that surfaces later at an
-     * unrelated call. Fail the whole construction instead. */
+
     function_name = JS_NewString(context, name);
     if (JS_IsException(function_name)) {
         owner->handler = NULL;

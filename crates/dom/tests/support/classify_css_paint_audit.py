@@ -1,24 +1,5 @@
 #!/usr/bin/env python3
-"""Turn a complete CSS-paint audit TSV into a checked difference registry.
-
-The audit uses a temporary all-case Chromium reference directory:
-
-    python3 crates/dom/tests/support/generate_css_paint_cases.py \
-      --split-atlases output/playwright/css-paint/atlases \
-      --reference-output /tmp/css-paint-references \
-      --include-differences
-    CSS_PAINT_REFERENCE_DIR=/tmp/css-paint-references \
-      CSS_PAINT_AUDIT=/tmp/css-paint.tsv \
-      cargo test -p dom --test css_atlas -- --include-ignored
-
-This classifier is deliberately strict. Every one of the 1,000 cases must be
-present exactly once, every mismatch must have one issue, and no matching case
-may still be assigned to an issue. Normal regressions compare permitted UA
-choices and W3C-correct raster/sampling differences with native snapshots, and
-skip the other differences. Audit mode executes all 1,000 cases against
-Chromium, so reclassification is the explicit path for removing a fixed case
-from the difference registry.
-"""
+"""Validates CSS paint audits and emits their difference registry."""
 
 from __future__ import annotations
 

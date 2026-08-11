@@ -1,8 +1,4 @@
-/**
- * Compute one backend-shaped frame ({code, release, raw, steps}) for a case +
- * engine from the CURRENT build — the single source of truth the snapshot tests
- * (runEngine.ts) assert against.
- */
+/** Computes backend-shaped frames from current build artifacts for snapshots. */
 import type { Case } from './cases.js';
 import { inferBgFrame } from './infer.js';
 import type { Engine } from './infer.js';
@@ -14,7 +10,7 @@ import type { MapEntry, Step } from './remap-lib.js';
 export interface ComputedFrame {
   code: number;
   release: string;
-  /** generated frame: `@<path>:<l>:<c>` (bg) or `at <anonymous> (<path>:<fid>:<pc>)`. */
+  /** Generated background or main-thread frame. */
   raw: string;
   steps: Step[];
 }

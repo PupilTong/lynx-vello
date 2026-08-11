@@ -557,9 +557,7 @@ fn display_contents_children_flex_as_items_of_the_box_ancestor() {
 
     definite_layout(&tree, root, 300.0, 20.0);
 
-    // All three leaves are items of `root` in source order, so they share its
-    // 150px of free space three ways — the wrappers are not items and impose
-    // no formatting context of their own.
+    // The three flattened leaves share the root's free space.
     for (item, x) in [(first, 0.0), (lifted, 100.0), (nested, 200.0)] {
         assert_close(tree.layout(item).size.width, 100.0);
         assert_close(tree.layout(item).location.x, x);
@@ -594,10 +592,7 @@ fn display_contents_items_keep_their_own_order_and_hidden_handling() {
 
     definite_layout(&tree, root, 100.0, 10.0);
 
-    // `order` is the lifted item's own, ranked against the flattened item
-    // list, and a `display: none` child of a box-less element is still hidden
-    // by the container that collected it — keeping the paint slot its index in
-    // that same flattened list.
+    // Lifted items keep their own order and flattened paint slot.
     assert_close(tree.layout(first).location.x, 0.0);
     assert_close(tree.layout(last).location.x, 20.0);
     assert_eq!(tree.layout(hidden), Layout::with_order(1));

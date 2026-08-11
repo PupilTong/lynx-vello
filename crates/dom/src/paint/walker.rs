@@ -51,30 +51,20 @@ use crate::{Document, ImageStore};
 /// Reused per-frame buffers.
 #[derive(Debug, Default)]
 pub(crate) struct Scratch {
-    /// Clip indices currently pushed as vello clip layers, outermost first.
     clip_stack: Vec<usize>,
-    /// Per-item chain buffer, outermost first.
     chain: Vec<usize>,
-    /// Open group scopes, outermost first.
     scopes: Vec<Scope>,
-    /// Per-layer content bounds in viewport CSS px (prepass).
     layer_bounds: Vec<Rect>,
-    /// Prepass open-layer stack.
     open_layers: Vec<usize>,
-    /// Prepass per-layer bounds accumulator (`None` = nothing yet).
     bounds_acc: Vec<Option<Rect>>,
-    /// Reused path buffers for the border/shadow painters.
     paths: PathScratch,
 }
 
 #[derive(Debug)]
 struct Scope {
     layer: usize,
-    /// `clip_stack` length at open; in-scope item clips pop back to it.
     base: usize,
-    /// vello layers pushed for this scope.
     pushed: u32,
-    /// Draw filter adjustments at close.
     filtered: bool,
 }
 
@@ -85,19 +75,12 @@ pub(crate) fn walk<T>(
     frame: &PaintOrder,
     images: &ImageStore,
 ) {
-    // Fail closed on any visual staleness: painting resolves the frame's
-    // geometry snapshot against live styles/layouts/text, so both recycled
-    // NodeIds (like hit testing) and post-build mutations of any kind
-    // (which hit testing tolerates — its snapshot is self-contained) make
-    // the mix incoherent.
     frame.assert_visually_fresh(document);
     scratch.clip_stack.clear();
     scratch.chain.clear();
     scratch.scopes.clear();
     compute_layer_bounds(scratch, document, frame);
 
-    // Single-sourced from the document's device: the same scale that
-    // rounded the layouts becomes the one CSS px -> device px transform.
     let scale = Affine::scale(f64::from(document.device().device_pixel_ratio().get()));
     let items = frame.items();
     let layers = frame.layers();
@@ -123,9 +106,6 @@ pub(crate) fn walk<T>(
     pop_clips_to(scene, scratch, 0);
 }
 
-/// Opens one group scope: effect layer, optional clip-path layer, optional
-/// mask sandwich. In-scope item clips pop first so no blend layer ever
-/// nests inside a clip layer.
 fn open_scope<T>(
     scene: &mut Scene,
     scratch: &mut Scratch,
@@ -169,8 +149,6 @@ fn open_scope<T>(
         && let Some((clip_shape, fill)) =
             crate::paint::shape::clip_path_shape(style, &fragment.reference_boxes())
     {
-        // A full layer, not a clip layer: the mask sandwich below may push
-        // blend layers inside (#1198).
         match local {
             Some(local) => with_shape!(&clip_shape, |s| scene.push_layer(
                 fill,
@@ -179,7 +157,6 @@ fn open_scope<T>(
                 scale * local,
                 s,
             )),
-            // Singular group transform: suppress the whole group.
             None => scene.push_layer(
                 Fill::NonZero,
                 BlendMode::new(Mix::Normal, Compose::SrcOver),
@@ -260,16 +237,10 @@ fn paint_item<T>(
                 return;
             };
             let fragment = BoxFragment::new(item.node, transform, item.size, item.radii, layout);
-            // `background-clip: text` clips its layers to the element's
-            // descendant glyph silhouettes; collect them only when the
-            // style asks (rare property, per-item Vec accepted).
             let text_clip =
                 background::needs_text_clip(style).then(|| collect_text_clip(document, item.node));
             shadow::paint_outset(scene, &mut scratch.paths, style, &fragment);
             background::paint(scene, style, &fragment, images, text_clip.as_ref());
-            // Inner shadows sit immediately above the background, below the
-            // element's content (css-backgrounds-3 §7.4.1) — replaced pixels
-            // cover them, the browser-observable order.
             shadow::paint_inset(scene, &mut scratch.paths, style, &fragment);
             background::paint_replaced_content(
                 scene,
@@ -288,12 +259,7 @@ fn paint_item<T>(
             let Some(layout) = document.text_layout(item.node) else {
                 return;
             };
-            // Decorations propagate from ancestor decorating boxes
-            // (css-text-decor-3 §2), not through inheritance — collect the
-            // chain, each entry in its originating box's style/color.
             let decorations = text::propagated_decorations(document, element);
-            // Only a gradient-valued `color` needs a positioning area; solid
-            // text — nearly all of it — must not pay for the lookups.
             let gradient_box = text::needs_gradient_box(style)
                 .then(|| color_gradient_box(document, item, element));
             text::paint(scene, style, layout, transform, &decorations, gradient_box);
@@ -301,20 +267,6 @@ fn paint_item<T>(
     }
 }
 
-/// The positioning area for a gradient-valued `color` (Lynx's text-gradient
-/// sugar), in the text run's local space.
-///
-/// The gradient has to be anchored to the styled *element*, not to the run:
-/// the same gradient authored as `background-image` would resolve against the
-/// element's padding box (`background-origin: padding-box` is the initial
-/// value), and anchoring per run would restart the ramp on every line of a
-/// wrapped paragraph.
-///
-/// `PaintItemKind::TextRun`'s `element` is the text's DOM parent, and the
-/// run's `Layout.location` is relative to that same box, so the padding-box
-/// origin in run-local space is `border_origin - location`. When the parent
-/// is box-less (`display: contents`, whose layout slot the host zeroes) the
-/// element carries no box to anchor to, and the run's own box stands in.
 fn color_gradient_box<T>(document: &Document<T>, item: &PaintItem, element: crate::NodeId) -> Rect {
     let own_box = Rect::new(
         0.0,
@@ -346,15 +298,6 @@ fn color_gradient_box<T>(document: &Document<T>, item: &PaintItem, element: crat
         )
 }
 
-/// Collects the committed text layouts under `element` for its
-/// `background-clip: text` silhouette, with offsets accumulated from the
-/// element's border-box origin. `Layout.location` is box-parent-relative
-/// and the layout host zeroes boxless (`display: contents`) elements'
-/// slots, so unconditional accumulation composes correctly; `display:
-/// none` subtrees contribute nothing because their text never commits a
-/// layout. Recorded v1 limits: descendant `transform`s are ignored (the
-/// silhouette uses layout positions only) and `visibility: hidden` text is
-/// skipped via its parent's style.
 fn collect_text_clip<T>(
     document: &Document<T>,
     element: crate::NodeId,
@@ -410,8 +353,6 @@ fn collect_text_clip_under<'doc, T>(
     }
 }
 
-/// Diffs the item's clip chain against the pushed stack within the current
-/// scope: pop to the longest common prefix, push the rest.
 fn sync_clips(
     scene: &mut Scene,
     scratch: &mut Scratch,
@@ -444,7 +385,6 @@ fn sync_clips(
 fn push_clip(scene: &mut Scene, clip: &ClipNode, scale: Affine) {
     let size = crate::Size2D::new(clip.rect.size.width, clip.rect.size.height);
     let Some(local) = convert::item_affine(&clip.transform, size) else {
-        // Singular clip space: nothing inside it can render.
         scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &Rect::ZERO);
         return;
     };
@@ -469,19 +409,6 @@ fn pop_clips_to(scene: &mut Scene, scratch: &mut Scratch, len: usize) {
     }
 }
 
-/// Per-layer conservative content bounds in viewport CSS px, in one sweep
-/// over the items (mirroring
-/// [`walk`]'s open/close logic, so each item is measured exactly once no
-/// matter how deeply layers nest; a closing layer's bounds fold into its
-/// parent's).
-///
-/// Bounds are the union of the enclosed items' border boxes inflated by
-/// their paint extents (shadows, outline, a font-size-proportional
-/// glyph-overshoot pad for text), seeded with the establishing element's
-/// own box (mask/clip-path geometry paints there even when the root box has
-/// no item), and clamped to the viewport at close. Corners map through the
-/// same affine fit [`paint_item`] draws with, so what is painted is what is
-/// bounded — over-approximation costs tiles, never pixels.
 fn compute_layer_bounds<T>(scratch: &mut Scratch, document: &Document<T>, frame: &PaintOrder) {
     let layers = frame.layers();
     let items = frame.items();
@@ -538,9 +465,6 @@ fn compute_layer_bounds<T>(scratch: &mut Scratch, document: &Document<T>, frame:
                 shadow::extent(style).max(border::outline_extent(style))
             }),
             PaintItemKind::TextRun { element } => {
-                // Glyph ink overhang (italic slant, negative side bearings,
-                // swashes) scales with font size and is not covered by the
-                // layout box; half an em is a generous conservative pad.
                 document.paint_style(element).map_or(4.0, |style| {
                     0.5 * f64::from(style.get_font().clone_font_size().computed_size().px())
                         + text::extent(style)
@@ -557,8 +481,6 @@ fn compute_layer_bounds<T>(scratch: &mut Scratch, document: &Document<T>, frame:
     }
 }
 
-/// The viewport-space AABB of a layer root's border box, mapped through the
-/// same affine fit the group's mask/clip-path geometry is painted with.
 fn layer_root_rect(layer: &RenderLayer) -> Option<Rect> {
     let affine = convert::item_affine(&layer.transform, layer.size)?;
     Some(affine_rect(
@@ -567,11 +489,6 @@ fn layer_root_rect(layer: &RenderLayer) -> Option<Rect> {
     ))
 }
 
-/// The viewport-space AABB of an item's border box inflated by `extent`
-/// CSS px on every side, or `None` for non-rendering transforms — mapped
-/// through the affine fit [`paint_item`] draws with (for projective
-/// matrices the fit's fourth corner can lie outside the true projection's
-/// AABB, so bounding the fit is what keeps painted content unclipped).
 fn item_viewport_rect(item: &PaintItem, extent: f64) -> Option<Rect> {
     let affine = convert::item_affine(&item.transform, item.size)?;
     Some(affine_rect(
@@ -585,7 +502,6 @@ fn item_viewport_rect(item: &PaintItem, extent: f64) -> Option<Rect> {
     ))
 }
 
-/// The AABB of `rect`'s four corners under `affine`.
 fn affine_rect(affine: Affine, rect: Rect) -> Rect {
     let corners = [
         affine * Point::new(rect.x0, rect.y0),
@@ -600,9 +516,6 @@ fn affine_rect(affine: Affine, rect: Rect) -> Rect {
     mapped
 }
 
-/// stylo `mix-blend-mode` → peniko blend (storage-only in the fork today;
-/// mapped so it goes live on a grammar rebase). `plus-lighter` is a compose
-/// op, not a mix (compositing-2).
 fn blend_mode(style: &stylo::properties::ComputedValues) -> BlendMode {
     use stylo::computed_values::mix_blend_mode::T as MixBlendMode;
     let mix = match style.get_effects().mix_blend_mode {

@@ -1,18 +1,7 @@
 import { useState } from '@lynx-js/react';
 
-// ---------------------------------------------------------------------------
-// Crash demo — every button below throws on a DIFFERENT thread / in a
-// DIFFERENT shape, so you can paste the resulting red-screen / Slardar stack
-// into the 反解 (remap) tool and check the remapped location matches the line
-// commented next to each throw.
-//
-// - bindtap handlers run on the BACKGROUND (JS) thread  -> source-map 单步反解
-// - main-thread:bindtap handlers run on the MAIN thread -> bytecode 两步反解
-// ---------------------------------------------------------------------------
-
-// nested call chain -> multi-frame background stack (innerThrow -> mid -> outer)
 function innerThrow(): never {
-  throw new Error('boom from deep nested call (background)'); // CrashDemo.tsx innerThrow
+  throw new Error('boom from deep nested call (background)');
 }
 function mid() {
   innerThrow();
@@ -23,29 +12,26 @@ function outer() {
 
 function crashTypeError() {
   const obj = {} as { notAFunction?: () => void };
-  // TypeError: obj.notAFunction is not a function
   return (obj.notAFunction as () => void)();
 }
 
 function crashReferenceError(): number {
-  // ReferenceError: notDefinedVariable is not defined
   // @ts-expect-error intentional undefined reference for the crash demo
   // eslint-disable-next-line @typescript-eslint/no-unsafe-return
   return notDefinedVariable + 1;
 }
 
 function crashExplicit() {
-  throw new Error('explicit throw new Error (background)'); // CrashDemo.tsx crashExplicit
+  throw new Error('explicit throw new Error (background)');
 }
 
 function crashNested() {
   outer();
 }
 
-// runs on the MAIN thread -> produces an `at fn:function_id:pc` stack
 function crashMainThread() {
   'main thread';
-  throw new Error('boom from main-thread'); // CrashDemo.tsx crashMainThread
+  throw new Error('boom from main-thread');
 }
 
 export function CrashDemo() {
@@ -70,7 +56,6 @@ export function CrashDemo() {
         <text>7. main-thread error</text>
       </view>
 
-      {/* harmless tap to prove the component is mounted/interactive */}
       <view className='crash-row' bindtap={() => setTick((n) => n + 1)}>
         <text>(tap me: no-op)</text>
       </view>

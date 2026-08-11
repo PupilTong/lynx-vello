@@ -1,34 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the 1,000-case pure-div CSS paint screenshot matrix.
-
-The generated Rust is consumed by ``tests/css_atlas.rs``. Chromium matches own
-browser PNGs, W3C-correct raster/sampling differences and permitted UA choices
-own native Pulsar/Parley snapshots, and the remaining audited differences are
-``#[ignore]``. Every difference retains a standalone HTML reproduction.
-
-The optional HTML output contains forty 5x5 browser atlases; every cell is an
-isolated 128x128 iframe.
-
-Reference images are intentionally browser-owned.  Generate the atlas PNGs
-with Playwright CLI, inspect them, then split them into per-case goldens:
-
-    python3 crates/dom/tests/support/generate_css_paint_cases.py \
-      --html-output output/playwright/css-paint
-    python3 -m http.server 8765 --bind 127.0.0.1
-    node crates/dom/tests/support/capture_css_paint_references.mjs \
-      http://127.0.0.1:8765 output/playwright/css-paint/atlases
-    python3 crates/dom/tests/support/generate_css_paint_cases.py \
-      --split-atlases output/playwright/css-paint/atlases
-
-For a full audit, split all references into a disposable directory:
-
-    python3 crates/dom/tests/support/generate_css_paint_cases.py \
-      --split-atlases output/playwright/css-paint/atlases \
-      --reference-output /tmp/css-paint-references --include-differences
-
-The split step uses Pillow only as a maintainer tool.  The Rust test suite
-decodes committed PNGs through ``flashbulb`` and has no Python dependency.
-"""
+"""Generates CSS paint cases, browser atlases, fixtures, and Rust tests."""
 
 from __future__ import annotations
 
@@ -123,9 +94,6 @@ def stage(content: str, extra: str = "") -> str:
 
 
 def box(style: str, content: str = "") -> str:
-    # hughie does not implement flow/block layout yet: `display: flow`
-    # intentionally lowers to a leaf and hides descendants.  Flex gives every
-    # structural test div a real child-formatting context in both engines.
     return f'<div style="display:flex;{style}">{content}</div>'
 
 
@@ -1382,9 +1350,6 @@ def write_rust(cases: list[Case], differences: dict[str, Difference]) -> None:
 
 
 def iframe_document(case: Case) -> str:
-    # Native imports the stage as the document element, so it is the initial
-    # stacking-context root. Isolate the browser stage to test the same
-    # descendant paint-order semantics without changing the shared fragment.
     return (
         "<!doctype html><meta charset=utf-8><style>"
         "@font-face{font-family:Ahem;src:url('/crates/hughie/tests/fixtures/Ahem.ttf')"

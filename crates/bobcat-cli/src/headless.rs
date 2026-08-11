@@ -83,8 +83,6 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
                 println!("Rendered one frame.");
             }
             Command::Screenshot(path) => {
-                // A screenshot failure must not tear down the session: report
-                // it at the prompt like any other bad command and keep going.
                 let result = engine
                     .capture()
                     .map_err(CliError::Engine)
@@ -148,8 +146,6 @@ impl FrameClock {
         self.next_tick += self.interval;
         let now = Instant::now();
         if self.next_tick <= now {
-            // Do not render a burst of stale frames after a slow frame. Vsync
-            // clocks expose the next opportunity, not a backlog of obligations.
             self.next_tick = now + self.interval;
         }
     }

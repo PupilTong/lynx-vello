@@ -12,7 +12,6 @@ use markup5ever_rcdom::{Handle, NodeData, RcDom};
 
 use crate::paint_common::{Doc, device};
 
-/// Parses one root element and its nested inline-styled children.
 #[must_use]
 pub(super) fn parse(fragment: &str, width: f32, height: f32) -> Doc {
     let context = QualName::new(None, ns!(html), local_name!("div"));
@@ -64,7 +63,6 @@ fn import_element(dom: &mut Document<()>, source: &Handle) -> NodeId {
     id
 }
 
-/// Applies `source`'s style attribute and imports its children under `id`.
 fn import_onto(dom: &mut Document<()>, id: NodeId, source: &Handle) {
     let NodeData::Element { attrs, .. } = &source.data else {
         panic!("fragment importer expected an element");
@@ -84,10 +82,6 @@ fn import_onto(dom: &mut Document<()>, id: NodeId, source: &Handle) {
             }
             NodeData::Text { contents } => {
                 let text = contents.borrow();
-                // Inter-element indentation is a whitespace-only text run, and
-                // css-flexbox-1 §4 does not render one as a flex item. Keeping
-                // them would turn every newline in a fixture into a stray text
-                // leaf, so the fixtures could not be indented at all.
                 if text.trim().is_empty() {
                     continue;
                 }

@@ -8,8 +8,6 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-# Keeps synthetic content metrics available to hughie's production-host
-# tests and benchmarks; the callback seam is absent from normal builds.
 layout-test-utils = ["hughie/layout-test-utils"]
 
 [dependencies]
@@ -18,24 +16,10 @@ slab = { workspace = true }
 smallvec = { workspace = true }
 parley = { workspace = true }
 pollster = { workspace = true }
-# The workspace entry turns vello's defaults off so the decode pipeline can reach
-# `peniko` without wgpu; this crate owns GPU submission, so it opts the GPU
-# back in.
 vello = { workspace = true, features = ["wgpu", "wgpu_default"] }
 
-# Layout integration: the `layout` module implements hughie's statically
-# split `LayoutTree` protocol over immutable tree/style arenas and a separate
-# mutable layout/text arena. Replaced leaves consume node-owned
-# `NaturalSize`; text nodes always use hughie's concrete Parley path;
-# there is no embedder measurement hook.
 hughie = { workspace = true }
 
-# stylo integration: element `Node`s own stylo's interior-mutable per-element state
-# (ElementData/selector flags) and the `traits` module implements stylo's
-# element traits (`TNode`/`TElement`/`TDocument`/`selectors::Element`) on the
-# plain one-word `&Node` handle. The vendored servo package `stylo_dom` keeps
-# its own name (upstream `vendor/stylo/style` aliases it to `dom`, which this
-# crate itself is now called); this crate re-exports its `ElementState`.
 stylo = { workspace = true }
 stylo_atoms = { workspace = true }
 stylo_dom = { workspace = true }
@@ -61,16 +45,10 @@ harness = false
 name = "paint"
 harness = false
 
-# Three-way plain/unmatched/defined measurements of the custom-element
-# lifecycle: what a document that never defines anything pays, what the
-# shadow-including walk costs, and what constructing and dispatching cost.
 [[bench]]
 name = "custom_elements"
 harness = false
 
-# Paired plain-vs-shadow measurements of the flat tree: construction, commit,
-# incremental restyle, slot reassignment, and frame production, plus the
-# many-roots and deep-nesting scale shapes.
 [[bench]]
 name = "shadow"
 harness = false

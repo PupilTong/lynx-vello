@@ -457,11 +457,7 @@ impl LogicalArea {
     }
 }
 
-/// Flow-normalized, row-major occupancy matrix. Each primary stripe stores
-/// its cross-axis cells contiguously, so the hot auto-placement search uses
-/// word masks instead of walking previously placed items. Very large sparse
-/// grids switch to sorted row intervals, avoiding a 50 MB eager bit matrix at
-/// the §5.4 line limits.
+/// A flow-normalized occupancy matrix with dense and sparse storage.
 #[derive(Debug)]
 struct Occupancy {
     storage: OccupancyStorage,

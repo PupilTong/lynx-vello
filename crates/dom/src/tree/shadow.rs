@@ -37,56 +37,26 @@ use stylo::stylesheets::DocumentStyleSheet;
 use crate::tree::document::{Document, NodeId, PayloadSlot};
 use crate::tree::node::Node;
 
-/// The `<slot>` element, and the `slot` attribute a slottable names its slot
-/// with — one atom serves both, since a local name is a local name.
-///
-/// W3C vocabulary, not Lynx vocabulary: `<slot>` is defined by the HTML
-/// standard as shadow DOM's own distribution point, so the generic DOM core
-/// owns it exactly the way it already owns `id`, `class`, and `style`.
 static SLOT: LazyLock<LocalName> = LazyLock::new(|| LocalName::from("slot"));
-/// The `name` a slot offers.
 static NAME: LazyLock<LocalName> = LazyLock::new(|| LocalName::from("name"));
-/// CSS Shadow Parts' two attributes: what a shadow tree exposes outward, and
-/// what a host forwards further outward on its behalf.
 static PART: LazyLock<LocalName> = LazyLock::new(|| LocalName::from("part"));
 static EXPORT_PARTS: LazyLock<LocalName> = LazyLock::new(|| LocalName::from("exportparts"));
 
-/// Whether an attribute name can change a slot assignment: `slot` names the
-/// slot a slottable wants, `name` names the slot itself.
 pub(crate) fn is_slot_assignment_attribute(name: &str) -> bool {
     matches!(name, "slot" | "name")
 }
 
-/// Whether a shadow root is reachable from script (`ShadowRootMode`).
-///
-/// The DOM core has no script binding of its own, so this is recorded rather
-/// than enforced: [`Document::shadow_root`] is the engine's own view and
-/// answers for either mode. A binding layer above gates on
-/// [`Document::shadow_root_mode`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShadowRootMode {
     Open,
     Closed,
 }
 
-/// A shadow-root node's own state.
-///
-/// Boxed inside `NodeData` so the variant costs an element or text node
-/// nothing: the scoped stylesheet set alone is far wider than the primary
-/// arena's stride.
+/// State owned by a shadow-root node.
 pub(crate) struct ShadowRootData {
     pub(crate) host: NodeId,
     pub(crate) mode: ShadowRootMode,
-    /// This shadow root's scoped author stylesheets and the `CascadeData`
-    /// Stylo matches them from. Rules here apply to this shadow tree only,
-    /// which is the encapsulation half of shadow DOM.
     pub(crate) styles: AuthorStyles<DocumentStyleSheet>,
-    /// This tree's `<slot>` elements in node-tree order, rebuilt only when a
-    /// mutation changes the slot set — which lets an ordinary append cost one
-    /// name comparison per slot instead of a walk of the whole tree.
-    ///
-    /// A cache, not observable state: every assignment materializes it before
-    /// use, and a debug assertion re-derives it on each hit.
     slots: Option<Vec<NodeId>>,
 }
 
@@ -101,38 +71,25 @@ impl ShadowRootData {
     }
 }
 
-/// The shadow-DOM links of one node, allocated only for the nodes that have
-/// any — a host, a slot, or a slotted node. Every other node keeps a single
-/// `None` word, so a document with no shadow root pays one predictable branch
-/// and no extra cache line.
+/// Optional host, slot, and assignment links.
 #[derive(Default)]
 pub(crate) struct ShadowLinks {
-    /// The shadow root this element hosts.
     pub(crate) shadow_root: Option<NodeId>,
-    /// The slot this node is assigned to, when it is a host's light child that
-    /// slot assignment matched.
     pub(crate) assigned_slot: Option<NodeId>,
-    /// A slot's assigned nodes, in the host's child order.
     pub(crate) assigned_nodes: Vec<NodeId>,
 }
 
 impl<T> Node<T> {
-    /// Whether this element is a `<slot>`. Only meaningful inside a shadow
-    /// tree, which is the only place slot assignment ever runs.
     #[must_use]
     pub(crate) fn is_slot(&self) -> bool {
         self.local_name.as_ref().is_some_and(|name| *name == *SLOT)
     }
 
-    /// This node's flat-tree children, always a slice of the arena so every
-    /// consumer keeps iterating a plain `&[NodeId]`.
     pub(crate) fn flat_children(&self) -> &[NodeId] {
         let Some(links) = self.shadow.as_deref() else {
             return &self.children;
         };
         if let Some(root) = links.shadow_root {
-            // A host renders its shadow tree; its light children reach the
-            // flat tree only through the slots that claimed them.
             return &self
                 .tree()
                 .get(root)
@@ -140,21 +97,12 @@ impl<T> Node<T> {
                 .children;
         }
         if links.assigned_nodes.is_empty() {
-            // Either not a slot at all, or a slot with nothing assigned — in
-            // which case its own children are its fallback content.
             &self.children
         } else {
             &links.assigned_nodes
         }
     }
 
-    /// This node's flat-tree parent.
-    ///
-    /// `None` for a light child of a host that no slot claimed: an unassigned
-    /// slottable is not in the flat tree at all, so it is not styled, laid
-    /// out, or painted. A shadow root reports its host, which keeps the
-    /// dirty-descendant and layout-invalidation spines connected even though
-    /// the shadow root itself generates no box.
     pub(crate) fn flat_parent_id(&self) -> Option<NodeId> {
         if let Some(links) = self.shadow.as_deref()
             && let Some(slot) = links.assigned_slot
@@ -187,19 +135,16 @@ impl<T> Node<T> {
         })
     }
 
-    /// The shadow root this element hosts.
     #[must_use]
     pub(crate) fn shadow_root_id(&self) -> Option<NodeId> {
         self.shadow.as_deref()?.shadow_root
     }
 
-    /// The slot this node is assigned to.
     #[must_use]
     pub(crate) fn assigned_slot_id(&self) -> Option<NodeId> {
         self.shadow.as_deref()?.assigned_slot
     }
 
-    /// The nodes assigned to this slot, in the host's child order.
     #[must_use]
     pub(crate) fn assigned_node_ids(&self) -> &[NodeId] {
         self.shadow
@@ -207,13 +152,6 @@ impl<T> Node<T> {
             .map_or(&[][..], |links| &links.assigned_nodes)
     }
 
-    /// The shadow root whose tree this node is in.
-    ///
-    /// Node-tree ancestry only, so it stops at the shadow root rather than
-    /// continuing into the host's light tree — that boundary is exactly what
-    /// scopes a selector to one shadow tree. A shadow root itself reports the
-    /// *outer* tree its host sits in, which is how `::part()` walks out
-    /// through nested trees.
     #[must_use]
     pub(crate) fn containing_shadow_root(&self) -> Option<&Node<T>> {
         let tree = self.tree();
@@ -228,8 +166,6 @@ impl<T> Node<T> {
         None
     }
 
-    /// Whether this element exposes any shadow part to its outer tree
-    /// (`part="…"`, CSS Shadow Parts).
     #[must_use]
     pub(crate) fn has_part_attr(&self) -> bool {
         self.attr_local_name(&PART).is_some()
@@ -240,15 +176,12 @@ impl<T> Node<T> {
         self.part_names().any(|part| part == name)
     }
 
-    /// The part names this element exposes, in `part` order.
     pub(crate) fn part_names(&self) -> impl Iterator<Item = &str> {
         self.attr_local_name(&PART)
             .unwrap_or_default()
             .split_whitespace()
     }
 
-    /// This host's `exportparts` entries as `(inner, exported)` pairs. An
-    /// entry is either `inner` (forwarded unrenamed) or `inner: exported`.
     fn exported_parts(&self) -> impl Iterator<Item = (&str, &str)> {
         self.attr_local_name(&EXPORT_PARTS)
             .unwrap_or_default()
@@ -265,8 +198,6 @@ impl<T> Node<T> {
             })
     }
 
-    /// The names this host re-exports `inner` under — a callback rather than
-    /// an `Option`, because one inner part may be exported several times.
     pub(crate) fn each_exported_part(&self, inner: &str, mut callback: impl FnMut(&str)) {
         for (name, exported) in self.exported_parts() {
             if name == inner {
@@ -275,15 +206,11 @@ impl<T> Node<T> {
         }
     }
 
-    /// Whether this host forwards any of its shadow tree's parts outward
-    /// (`exportparts="…"`).
     #[must_use]
     pub(crate) fn exports_any_part(&self) -> bool {
         self.attr_local_name(&EXPORT_PARTS).is_some()
     }
 
-    /// Translates a part name written in this host's *outer* tree into the
-    /// name it has inside this host's shadow tree.
     #[must_use]
     pub(crate) fn imported_part(&self, outer: &str) -> Option<&str> {
         self.exported_parts()
@@ -294,9 +221,6 @@ impl<T> Node<T> {
         self.shadow.get_or_insert_default()
     }
 
-    /// Drops a stale slot assignment when a node leaves its host's child list.
-    /// Reassignment only visits the host's *current* children, so the node
-    /// leaving is exactly the one it cannot reach.
     pub(crate) fn clear_assigned_slot(&mut self) {
         if let Some(links) = self.shadow.as_deref_mut() {
             links.assigned_slot = None;
@@ -305,12 +229,7 @@ impl<T> Node<T> {
 }
 
 impl<T> Document<T> {
-    /// Attaches a shadow root to `host` and returns it. Append children to it
-    /// with the ordinary [`Document::append_child`]; from that moment the host
-    /// renders its shadow tree instead of its own children.
-    ///
-    /// Panics if `host` already hosts one — `attachShadow()` is once per
-    /// element, and the DOM core is crash-on-misuse.
+    /// Attaches and returns a shadow root.
     pub fn attach_shadow(&mut self, host: NodeId, mode: ShadowRootMode) -> NodeId {
         assert!(
             self.get(host).is_some_and(Node::is_element),
@@ -326,8 +245,6 @@ impl<T> Document<T> {
         self.live_node_mut(root).parent = Some(host);
         self.live_node_mut(host).links_mut().shadow_root = Some(root);
         self.note_shadow_root_added();
-        // The host's light children just left the flat tree — nothing is
-        // assigned yet, because the shadow tree has no slots yet.
         self.assign_slots(root);
         self.mark_subtree_dirty(host);
         self.invalidate_layout(host);
@@ -364,8 +281,6 @@ impl<T> Document<T> {
         self.get(slot).map_or(&[][..], Node::assigned_node_ids)
     }
 
-    /// The shadow tree `node` belongs to: itself when `node` is the shadow
-    /// root, otherwise the nearest shadow root above it.
     #[must_use]
     fn shadow_root_of(&self, node: NodeId) -> Option<NodeId> {
         if self.get(node)?.is_shadow_root() {
@@ -374,8 +289,6 @@ impl<T> Document<T> {
         self.containing_shadow_root(node)
     }
 
-    /// The shadow root whose tree `node` is in, walking out through nested
-    /// shadow trees but never into a host's light tree.
     #[must_use]
     pub(crate) fn containing_shadow_root(&self, node: NodeId) -> Option<NodeId> {
         let mut current = self.get(node)?.parent_id();
@@ -389,16 +302,6 @@ impl<T> Document<T> {
         None
     }
 
-    /// Reassigns after `child` was linked into `parent`, `appended` when it
-    /// went on the end of the child list.
-    ///
-    /// Appending to a host is the hot path — it is what building a list does,
-    /// once per row — so it takes the incremental route: the new child is last
-    /// in host order, therefore last in whatever slot claims it, and no other
-    /// node's assignment can have changed. Reassigning the whole tree per
-    /// append instead made construction quadratic in the host's child count
-    /// (measured: 1024 rows went 51× slower than the same rows with no shadow
-    /// root; `benches/shadow.rs::build_wide_host_{plain,shadow}`).
     pub(crate) fn note_slot_assignment_inserted(
         &mut self,
         parent: NodeId,
@@ -418,8 +321,6 @@ impl<T> Document<T> {
         self.note_slot_set_change(parent, child);
     }
 
-    /// Reassigns after `child` was unlinked from `parent`. Removing a light
-    /// child can only take it out of its own slot, so that is all this does.
     pub(crate) fn note_slot_assignment_removed(&mut self, parent: NodeId, child: NodeId) {
         if !self.has_shadow_roots() {
             return;
@@ -430,15 +331,7 @@ impl<T> Document<T> {
         self.note_slot_set_change(parent, child);
     }
 
-    /// Handles the other half of a child-list change: a subtree that carries a
-    /// `<slot>` moving into or out of a shadow tree changes which slots exist,
-    /// which is the one case that needs the whole tree reassigned. A subtree
-    /// with no slot in it — every ordinary shadow-tree mutation — costs one
-    /// walk of the subtree that was just created anyway.
     fn note_slot_set_change(&mut self, parent: NodeId, child: NodeId) {
-        // `shadow_root_of`, not `containing_shadow_root`: a slot appended
-        // straight to the shadow root changes *that* tree's slot set, and the
-        // shadow root has no shadow root above it to find.
         let Some(root) = self.shadow_root_of(parent) else {
             return;
         };
@@ -458,15 +351,11 @@ impl<T> Document<T> {
             if node.is_slot() {
                 return true;
             }
-            // A nested host's shadow tree has its own slots, which belong to
-            // its own assignment, so the walk stays in the node tree.
             stack.extend_from_slice(node.child_ids());
         }
         false
     }
 
-    /// Assigns one freshly appended light child, leaving every other node's
-    /// assignment alone.
     fn assign_appended_slottable(&mut self, shadow_root: NodeId, child: NodeId) {
         let is_slottable = self
             .get(child)
@@ -476,8 +365,6 @@ impl<T> Document<T> {
         }
         self.ensure_slot_cache(shadow_root);
         let Some(slot) = self.matching_slot(shadow_root, child) else {
-            // No slot claims it, so it is simply not in the flat tree — the
-            // same state it was already in.
             return;
         };
         self.live_node_mut(slot)
@@ -485,18 +372,13 @@ impl<T> Document<T> {
             .assigned_nodes
             .push(child);
         self.live_node_mut(child).links_mut().assigned_slot = Some(slot);
-        // The dirty spine the traversal will descend runs through the slot,
-        // not through the host's child list, so it starts at the child.
         self.mark_ancestors_dirty_descendants(child);
     }
 
-    /// Drops one node from the slot holding it.
     fn unassign_slottable(&mut self, child: NodeId) {
         let Some(slot) = self.get(child).and_then(Node::assigned_slot_id) else {
             return;
         };
-        // While the link still points at the slot, so the walk goes out
-        // through the flat tree the node is leaving.
         self.mark_ancestors_dirty_descendants(child);
         if let Some(links) = self.live_node_mut(slot).shadow.as_deref_mut()
             && let Some(index) = links
@@ -509,7 +391,6 @@ impl<T> Document<T> {
         self.live_node_mut(child).clear_assigned_slot();
     }
 
-    /// The first slot in the tree whose `name` matches what `child` asks for.
     fn matching_slot(&self, shadow_root: NodeId, child: NodeId) -> Option<NodeId> {
         let wanted = self.get(child)?.attr_local_name(&SLOT).unwrap_or_default();
         let slots = self.get(shadow_root)?.shadow_data()?.slots.as_ref()?;
@@ -519,7 +400,6 @@ impl<T> Document<T> {
         })
     }
 
-    /// The tree's `<slot>` elements in node-tree order.
     fn collect_slots(&self, shadow_root: NodeId) -> Vec<NodeId> {
         let mut slots = Vec::new();
         let mut stack: Vec<NodeId> = self
@@ -534,8 +414,6 @@ impl<T> Document<T> {
             if node.is_slot() {
                 slots.push(id);
             }
-            // The node tree only: a nested host's own shadow tree is a tree of
-            // its own, and its slots claim *its* light children, not ours.
             stack.extend(node.child_ids().iter().rev().copied());
         }
         slots
@@ -571,9 +449,6 @@ impl<T> Document<T> {
         }
     }
 
-    /// Recomputes slot assignment after a `slot` or `name` attribute changed
-    /// on `node`: `slot` renames what a slottable asks for, `name` renames
-    /// what a slot offers.
     pub(crate) fn note_slot_assignment_attribute(&mut self, node: NodeId) {
         if !self.has_shadow_roots() {
             return;
@@ -591,17 +466,12 @@ impl<T> Document<T> {
         }
     }
 
-    /// DOM "assign slottables for a tree": walk the shadow tree's slots in
-    /// node-tree order, then hand each of the host's light children to the
-    /// first slot whose `name` matches its `slot`.
     pub(crate) fn assign_slots(&mut self, shadow_root: NodeId) {
         let Some(host) = self.get(shadow_root).and_then(Node::shadow_host_id) else {
             return;
         };
 
         self.ensure_slot_cache(shadow_root);
-        // A missing `name`/`slot` and an empty one are the same name — the
-        // default slot — so both sides normalize to a plain string.
         let mut slots: Vec<(NodeId, String, Vec<NodeId>)> = self
             .get(shadow_root)
             .and_then(Node::shadow_data)
@@ -625,8 +495,6 @@ impl<T> Document<T> {
             if !(node.is_element() || node.is_text_node()) {
                 continue;
             }
-            // A text node carries no attributes, so it always asks for the
-            // default slot.
             let wanted = node.attr_local_name(&SLOT).unwrap_or_default();
             let matched = slots.iter_mut().find(|(_, name, _)| name == wanted);
             match matched {
@@ -656,8 +524,6 @@ impl<T> Document<T> {
         }
 
         if changed {
-            // The flat tree under the host moved: what each slot renders, and
-            // which light children render at all, both changed.
             self.mark_subtree_dirty(host);
             self.invalidate_layout(host);
         }

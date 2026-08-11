@@ -20,9 +20,6 @@ pub enum ScriptValue<C, S> {
 }
 
 /// An isolated JavaScript engine supplied to Bobcat.
-///
-/// The import future is a GAT so each engine selects a concrete future type;
-/// callers do not need a boxed future or `dyn ScriptEngine`.
 pub trait ScriptEngine {
     type Callable: fmt::Debug;
 

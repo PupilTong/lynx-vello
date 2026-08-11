@@ -15,16 +15,7 @@ use stylo::values::computed::{CSSPixelLength, Length};
 use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_traits::{CSSPixel, DevicePixel};
 
-/// The rendering environment a [`Document`](crate::Document) is created for.
-///
-/// The constructor exposes exactly the inputs that vary between views —
-/// viewport CSS size and device-pixel ratio — and locks everything else to
-/// the one profile every current embedder wants: `screen` media type,
-/// standards (no-quirks) mode, light color scheme, a coarse primary pointer
-/// with no hover (the `@media (hover)` / `(pointer)` answers a touch-device
-/// app should see), and CSS-values-4 fallback font metrics. Widen this type
-/// with new constructors when a second profile genuinely appears; the quirks
-/// lock stays regardless.
+/// A document's viewport and device-pixel rendering environment.
 #[derive(Debug)]
 pub struct Device {
     stylo: stylo::device::Device,
@@ -55,12 +46,6 @@ impl Device {
     }
 }
 
-/// Test-harness seam: full-parameter construction for suites that probe
-/// media features or supply their own font metrics. Quirks mode is locked to
-/// no-quirks — selector matching (`TDocument::quirks_mode`) and the `Stylist`
-/// are already hard-wired to it inside this crate, so a quirks-mode device
-/// would silently diverge the cascade from matching; the knob does not exist
-/// above this function.
 #[doc(hidden)]
 #[must_use]
 #[expect(
@@ -94,20 +79,10 @@ pub fn standards_device(
     }
 }
 
-/// Font metrics for the CSS font-relative units the cascade resolves before
-/// any text is shaped (`ex`, `ch`, `cap`, `ic`).
-///
-/// Stylo asks for these during cascade, long before parley has picked a face,
-/// so this provider answers with the conventional ratios browsers fall back
-/// to when a face reports no metrics of its own rather than loading a font.
-/// Text itself is measured by parley through `hughie`, not by these numbers —
-/// only font-relative *length units* read them.
+/// CSS fallback font metrics used before text shaping.
 #[derive(Debug)]
 struct FallbackFontMetrics;
 
-/// Fallback ratios, relative to the font size, for faces that report no
-/// metrics. These match the CSS-values-4 defaults for `ex` (0.5em) and `ch`
-/// (0.5em), plus the usual 0.8em ascent / 0.2em descent split.
 const X_HEIGHT_RATIO: f32 = 0.5;
 const ZERO_ADVANCE_RATIO: f32 = 0.5;
 const CAP_HEIGHT_RATIO: f32 = 0.7;

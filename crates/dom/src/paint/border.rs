@@ -31,7 +31,6 @@ use crate::vello::kurbo::{BezPath, Cap, Rect, Stroke};
 use crate::vello::peniko::{Color, Fill};
 use crate::visual::CornerRadii;
 
-/// A border side.
 #[derive(Debug, Clone, Copy)]
 enum Side {
     Top,
@@ -50,7 +49,6 @@ struct SidePaint {
     color: Color,
 }
 
-/// Paints the four border sides.
 pub(crate) fn paint(
     scene: &mut Scene,
     paths: &mut PathScratch,
@@ -69,14 +67,6 @@ pub(crate) fn paint(
         fragment.padding_box,
         &inner_radii(&fragment.radii, &fragment.border_widths),
     );
-    // Fast path: every painting side is `solid` in one color (the
-    // ubiquitous case) — one even-odd ring fill, no clip layers.
-    // Zero-width sides contribute no ring area, so leaving them out of the
-    // uniformity check is sound — but the whole ring is filled, so every
-    // positive-width side must actually be in the painting set: a
-    // positive-width side that dropped out (fully transparent color) owns
-    // ring area that must stay unpainted, which only the per-side path
-    // honors.
     let positive_width_sides = [
         fragment.border_widths.top,
         fragment.border_widths.right,
@@ -98,9 +88,6 @@ pub(crate) fn paint(
     }
 }
 
-/// The sides that paint, in top/right/bottom/left order. Geometry (used
-/// widths) comes from layout — a `none`/`hidden` side already has zero
-/// width there — style/color come from the computed style.
 fn paintable_sides(style: &ComputedValues, widths: &Edges<f32>) -> SmallVec<[SidePaint; 4]> {
     let border = style.get_border();
     let sides = [
@@ -144,7 +131,6 @@ fn paintable_sides(style: &ComputedValues, widths: &Edges<f32>) -> SmallVec<[Sid
         .collect()
 }
 
-/// `Some(color)` when every painting side is `solid` in that one color.
 fn uniform_solid_color(sides: &[SidePaint]) -> Option<Color> {
     let first = sides.first()?;
     sides
@@ -153,7 +139,6 @@ fn uniform_solid_color(sides: &[SidePaint]) -> Option<Color> {
         .then_some(first.color)
 }
 
-/// Paints one side clipped to its miter quad.
 fn paint_side(
     scene: &mut Scene,
     paths: &mut PathScratch,
@@ -177,10 +162,6 @@ fn paint_side(
             scene.fill(Fill::EvenOdd, transform, color, None, &paths.ring);
         }
         BorderStyle::Double => {
-            // css-backgrounds-3 §3.2: two lines, each a third of the border
-            // width, with the middle third open. Insetting by ⅓ and ⅔ of
-            // every side's width keeps the sub-ring boundary radii
-            // interpolating consistently across adjacent `double` sides.
             let boundary_a = inset_shape(fragment, 1.0 / 3.0);
             let boundary_b = inset_shape(fragment, 2.0 / 3.0);
             let color = side.color;
@@ -198,23 +179,16 @@ fn paint_side(
             scene.fill(Fill::EvenOdd, transform, inner_shade, None, &paths.ring);
         }
         BorderStyle::Dashed | BorderStyle::Dotted => {
-            // Stroke the border centerline (halfway ring, radii averaged)
-            // at the side's width; the quad clip keeps this side only.
             let centerline = inset_shape(fragment, 0.5);
             let stroke = dash_stroke(side.line, side.width);
             with_shape!(&centerline, |shape| scene
                 .stroke(&stroke, transform, side.color, None, shape));
         }
-        // Filtered out in `paintable_sides`.
         BorderStyle::None | BorderStyle::Hidden => {}
     }
     scene.pop_layer();
 }
 
-/// The CSS2 §8.5.4 miter quad for one side, rebuilt into the caller's
-/// reusable buffer: outer box corners joined to the matching inner
-/// (padding-box) corners. With rounded corners the diagonal splits the
-/// corner region between adjacent sides — behaviorally fine.
 fn side_quad_into(path: &mut BezPath, side: Side, outer: Rect, inner: Rect) {
     let (a, b, c, d) = match side {
         Side::Top => (
@@ -250,19 +224,10 @@ fn side_quad_into(path: &mut BezPath, side: Side, outer: Rect, inner: Rect) {
     path.close_path();
 }
 
-/// Corner radii of the concentric ring boundary `fraction` of the way from
-/// the border-box edge (0) to the padding-box edge (1): the outer radii
-/// shrunk by the fraction-scaled side widths, clamped at zero. Linear in
-/// `fraction` until a radius clamps — `double`'s sub-ring boundaries and
-/// the dashed/dotted centerline (fraction ½, the outer/inner average) rely
-/// on this interpolation.
 fn ring_boundary_radii(radii: &CornerRadii, widths: &Edges<f32>, fraction: f32) -> CornerRadii {
     inner_radii(radii, &widths.map(|width| width * fraction))
 }
 
-/// The ring boundary `fraction` of the way through the border as a shape:
-/// the border box inset by the fraction-scaled side widths, with
-/// [`ring_boundary_radii`], degenerate-clamped like the padding box.
 fn inset_shape(fragment: &BoxFragment, fraction: f32) -> BoxShape {
     let border_box = fragment.border_box;
     let scaled = fragment.border_widths.map(|width| width * fraction);
@@ -280,19 +245,6 @@ fn inset_shape(fragment: &BoxFragment, fraction: f32) -> BoxShape {
     )
 }
 
-/// The dash geometry for `dashed`/`dotted`, scaled by the line width `w`
-/// (css-backgrounds-3 §3.2 leaves exact patterns to the UA):
-/// - `dashed`: 2w dashes with 1w gaps — a 3w period, inside the browsers' typical 2w–3w dash /
-///   1w–3w gap envelope.
-/// - `dotted`: near-zero-length dashes with round caps on a 2w period — circular dots of diameter
-///   w, 2w apart center to center, as browsers draw them. The dash length must not be exactly zero:
-///   vello 0.9 GPU-strokes every path (`scene.rs` `GPU_STROKES = true`), and a zero-length dash
-///   reaches `vello_encoding`'s `PathEncoder` as a coincident `MoveTo`/`LineTo` pair whose segment
-///   `line_to` rejects (no start tangent between coincident points) and whose dangling `MoveTo`
-///   `finish` truncates — so the whole dotted border encodes zero segments and paints nothing. A
-///   width-proportional stub (5% of w) keeps the dot visible as a round-cap circle and cannot
-///   collapse under f32 rounding at large scene coordinates the way an absolute epsilon could; the
-///   gap shrinks by the stub so the period stays exactly 2w.
 fn dash_stroke(line: BorderStyle, width: f64) -> Stroke {
     match line {
         BorderStyle::Dotted => {
@@ -307,9 +259,6 @@ fn dash_stroke(line: BorderStyle, width: f64) -> Stroke {
     }
 }
 
-/// The single shade `inset`/`outset` give a side (CSS2 §8.5.3: `inset`
-/// sinks the box — top/left dark, bottom/right light; `outset` raises it —
-/// the reverse). Other styles keep the side's own color.
 fn flat_shade(line: BorderStyle, side: Side, color: Color) -> Color {
     let top_left = matches!(side, Side::Top | Side::Left);
     match line {
@@ -331,9 +280,6 @@ fn flat_shade(line: BorderStyle, side: Side, color: Color) -> Color {
     }
 }
 
-/// The (outer-half, inner-half) shades for `groove`/`ridge` (CSS2 §8.5.3:
-/// `groove` looks carved in — outer half of top/left dark, inner half
-/// light, mirrored on bottom/right; `ridge` is the inverse).
 fn split_shades(line: BorderStyle, side: Side, color: Color) -> (Color, Color) {
     let dark_outer = matches!(side, Side::Top | Side::Left) == (line == BorderStyle::Groove);
     if dark_outer {
@@ -343,14 +289,10 @@ fn split_shades(line: BorderStyle, side: Side, color: Color) -> (Color, Color) {
     }
 }
 
-/// CSS2 §8.5.3 leaves the 3D "darker" shade to the UA; browsers scale RGB
-/// toward black by about a third — dark = ⅔·c, alpha preserved.
 fn darken(color: Color) -> Color {
     shade(color, |channel| channel * (2.0 / 3.0))
 }
 
-/// The matching light shade: blend a third of the way toward white —
-/// light = c + (1 − c)/3, alpha preserved.
 fn lighten(color: Color) -> Color {
     shade(color, |channel| channel + (1.0 - channel) / 3.0)
 }
@@ -360,13 +302,10 @@ fn shade(color: Color, tone: impl Fn(f32) -> f32) -> Color {
     Color::new([tone(r), tone(g), tone(b), a])
 }
 
-/// Bit-exact color equality (identical resolution paths produce identical
-/// bits; avoids float comparison).
 fn same_color(a: Color, b: Color) -> bool {
     a.components.map(f32::to_bits) == b.components.map(f32::to_bits)
 }
 
-/// Paints the outline ring outside the border box.
 pub(crate) fn paint_outline(
     scene: &mut Scene,
     paths: &mut PathScratch,
@@ -381,8 +320,6 @@ pub(crate) fn paint_outline(
     }
     let transform = fragment.transform;
     if let OutlineStyle::BorderStyle(line @ (BorderStyle::Dashed | BorderStyle::Dotted)) = line {
-        // Centerline stroke, mirroring the border sides — one whole-ring
-        // stroke (outlines have no per-side styles to miter between).
         let half = width / 2.0;
         let centerline = BoxShape::new(
             fragment.border_box.inflate(half, half),
@@ -392,10 +329,6 @@ pub(crate) fn paint_outline(
         with_shape!(&centerline, |shape| scene
             .stroke(&stroke, transform, color, None, shape));
     } else {
-        // `auto` and every other paintable style draw as a solid ring —
-        // the double/3D sub-ring split is not worth machinery no bundle
-        // can author yet (recorded approximation). `none`/`hidden` never
-        // reach here (`resolved_outline` gates on a painting style).
         let outer = BoxShape::new(
             fragment.border_box.inflate(width, width),
             &grow_radii(&fragment.radii, width as f32),
@@ -406,18 +339,10 @@ pub(crate) fn paint_outline(
     }
 }
 
-/// How far outside the border box the outline extends (its used width), for
-/// layer-bounds accounting. Zero when no outline paints.
 pub(crate) fn outline_extent(style: &ComputedValues) -> f64 {
     resolved_outline(style).map_or(0.0, |(width, _, _)| width)
 }
 
-/// The used outline `(width, style, color)` when one would paint: style not
-/// `none`/`hidden` (`auto` paints as solid), nonzero used width,
-/// non-transparent color. The fork's lynx grammar seeds
-/// `outline`/`outline-color`/`outline-style`/`outline-width` and
-/// deliberately omits `outline-offset` (Lynx outlines are flush rings), so
-/// the geometry above never needs an offset.
 fn resolved_outline(style: &ComputedValues) -> Option<(f64, OutlineStyle, Color)> {
     let outline = style.get_outline();
     let line = outline.outline_style;
@@ -438,11 +363,6 @@ fn resolved_outline(style: &ComputedValues) -> Option<(f64, OutlineStyle, Color)
     Some((width, line, color))
 }
 
-/// Outline ring radii: the border-box radii grown by `by` so the ring stays
-/// concentric with the box. Sharp corners stay sharp — a corner with either
-/// radius component at zero is square (css-backgrounds-3 §5) and keeps a
-/// square outline corner, the same corner treatment §7.4.1 gives
-/// spread-inflated shadows.
 fn grow_radii(radii: &CornerRadii, by: f32) -> CornerRadii {
     let corner = |corner: Size2D<f32>| {
         if corner.width > 0.0 && corner.height > 0.0 {
@@ -493,20 +413,15 @@ mod tests {
             top: 6.0,
             bottom: 3.0,
         };
-        // Outer third boundary of a `double` border: outer radius minus a
-        // third of the adjacent side widths.
         let third = ring_boundary_radii(&radii, &widths, 1.0 / 3.0);
         assert_close(third.top_left.width, 12.0 - 3.0);
         assert_close(third.top_left.height, 9.0 - 2.0);
-        // Inner third boundary: two thirds in.
         let two_thirds = ring_boundary_radii(&radii, &widths, 2.0 / 3.0);
         assert_close(two_thirds.top_left.width, 12.0 - 6.0);
         assert_close(two_thirds.top_left.height, 9.0 - 4.0);
-        // Fraction 1 is the padding-box radius.
         let inner = ring_boundary_radii(&radii, &widths, 1.0);
         assert_close(inner.top_left.width, 3.0);
         assert_close(inner.top_left.height, 3.0);
-        // Small radii clamp at zero instead of going negative.
         assert_close(two_thirds.bottom_left.width, 0.0);
         assert_close(two_thirds.bottom_left.height, 0.0);
     }
@@ -525,8 +440,6 @@ mod tests {
     fn dotted_pattern_is_round_dots_every_two_widths() {
         let stroke = dash_stroke(BorderStyle::Dotted, 3.0);
         assert_eq!(stroke.dash_pattern.len(), 2);
-        // Stub dash (5% of w, nonzero so vello's encoder keeps it) plus its
-        // gap keep the exact 2w period.
         assert!((stroke.dash_pattern[0] - 0.15).abs() < 1e-12);
         assert!(stroke.dash_pattern[0] > 0.0);
         assert!((stroke.dash_pattern[1] - 5.85).abs() < 1e-12);
@@ -537,11 +450,6 @@ mod tests {
 
     #[test]
     fn dash_strokes_encode_nonempty_gpu_stroke_segments() {
-        // Regression guard for the vello 0.9 GPU-stroke encoder dropping
-        // zero-length dashes (coincident MoveTo/LineTo pairs have no start
-        // tangent, so `PathEncoder::line_to` rejects them and `finish`
-        // truncates the dangling MoveTo): a dotted stroke around a rect must
-        // encode actual path segments, not silently vanish.
         let rect = Rect::new(0.0, 0.0, 100.0, 40.0);
         for line in [BorderStyle::Dotted, BorderStyle::Dashed] {
             let stroke = dash_stroke(line, 3.0);
@@ -619,7 +527,6 @@ mod tests {
 
     #[test]
     fn side_quads_split_corners_along_the_miter_diagonal() {
-        // left 4, top 6, right 4, bottom 8.
         let outer = Rect::new(0.0, 0.0, 40.0, 30.0);
         let inner = Rect::new(4.0, 6.0, 36.0, 22.0);
         let side_quad = |side| {
@@ -629,16 +536,12 @@ mod tests {
         };
         let top = side_quad(Side::Top);
         let left = side_quad(Side::Left);
-        // Middle of the top band belongs to the top quad only.
         assert_ne!(top.winding(Point::new(20.0, 3.0)), 0);
         assert_eq!(left.winding(Point::new(20.0, 3.0)), 0);
-        // The top-left corner diagonal runs (0,0) → (4,6), i.e. y = 1.5x:
-        // (1, 5) sits below it (left side), (3, 2) above it (top side).
         assert_eq!(top.winding(Point::new(1.0, 5.0)), 0);
         assert_ne!(left.winding(Point::new(1.0, 5.0)), 0);
         assert_ne!(top.winding(Point::new(3.0, 2.0)), 0);
         assert_eq!(left.winding(Point::new(3.0, 2.0)), 0);
-        // Nothing from the bottom band leaks into the top quad.
         assert_eq!(top.winding(Point::new(20.0, 26.0)), 0);
     }
 
@@ -685,9 +588,6 @@ mod tests {
 
     #[test]
     fn inset_shapes_land_between_border_and_padding_boxes() {
-        // Border box 60×40, widths (l 9, r 6, t 6, b 3): the halfway
-        // centerline sits at the average of the two boxes and fraction 1
-        // reproduces the padding box.
         let widths = Edges {
             left: 9.0_f32,
             right: 6.0,

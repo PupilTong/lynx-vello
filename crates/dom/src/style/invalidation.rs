@@ -27,8 +27,6 @@ const STRUCTURE_SENSITIVE: ElementSelectorFlags = ElementSelectorFlags::HAS_SLOW
     .union(ElementSelectorFlags::HAS_EMPTY_SELECTOR)
     .union(ElementSelectorFlags::MAY_HAVE_TREE_COUNTING_FUNCTION);
 
-/// Interned once — these three names are re-checked on every attribute
-/// mutation, and `LocalName::from` re-hashes into the atom table per call.
 static CLASS: LazyLock<LocalName> = LazyLock::new(|| LocalName::from("class"));
 static ID: LazyLock<LocalName> = LazyLock::new(|| LocalName::from("id"));
 static STYLE: LazyLock<LocalName> = LazyLock::new(|| LocalName::from("style"));
@@ -61,10 +59,6 @@ impl<T> Document<T> {
         insert_restyle_hint(self.live_node_mut(id), hint);
     }
 
-    /// Sets the dirty-descendants bit along the spine Stylo's traversal will
-    /// descend — the **flat** ancestor chain, since that is what
-    /// `TElement::traversal_children` yields. A shadow tree's spine therefore
-    /// runs out through its host, and a slotted node's out through its slot.
     pub(crate) fn mark_ancestors_dirty_descendants(&mut self, id: NodeId) {
         let tree = self.tree();
         let mut next = tree.get(id).and_then(Node::flat_parent_id);
@@ -90,8 +84,6 @@ impl<T> Document<T> {
         let parent_node = self.live(parent);
         let flags = parent_node.selector_flags();
         if flags.intersects(STRUCTURE_SENSITIVE) {
-            // Cloned so the child walk can outlive the shared borrow while
-            // hints (which need `&mut self`) are inserted.
             let children = parent_node.child_ids().to_vec();
             if flags.intersects(ElementSelectorFlags::HAS_EMPTY_SELECTOR) {
                 self.note_emptiness_change(parent);
@@ -179,8 +171,6 @@ impl<T> Document<T> {
             return;
         }
         let base = self.begin_reactions();
-        // `class` is re-serialized from the whole list, so the new value is
-        // only knowable after the write; the old one is captured here.
         let old = self.observed_class_value(id);
         self.note_class_attribute_change(id);
         let node = self.live_node_mut(id);
@@ -207,9 +197,6 @@ impl<T> Document<T> {
         self.drain_reactions(base);
     }
 
-    /// The serialized `class` attribute, but only when a handler is watching
-    /// it — `add_class`/`remove_class` read it twice per call, so the gate
-    /// keeps the unobserved path allocation-free.
     fn observed_class_value(&self, id: NodeId) -> Option<String> {
         if !self.observes_attribute(id, &CLASS) {
             return None;
@@ -219,11 +206,6 @@ impl<T> Document<T> {
 
     pub fn set_id_attribute(&mut self, id: NodeId, value: Option<&str>) {
         let base = self.begin_reactions();
-        // The standard's "remove an attribute" runs its change steps only when
-        // the attribute is actually there — clearing an `id` that was never
-        // set changes nothing and must report nothing. Setting an *equal*
-        // value does still report, which is why this tests presence rather
-        // than equality.
         if value.is_some() || self.live(id).attr_local_name(&ID).is_some() {
             self.enqueue_attribute_changed(id, &ID, value);
         }
@@ -303,10 +285,6 @@ impl<T> Document<T> {
     }
 
     fn update_element_state(&mut self, id: NodeId, flags: stylo_dom::ElementState, enabled: bool) {
-        // `DEFINED` belongs to the custom element state machine, which seeds it
-        // at element creation and never moves it. Letting it through here would
-        // let a caller make `:not(:defined)` match — an invariant this crate
-        // documents and that nothing else can break.
         assert!(
             !flags.contains(stylo_dom::ElementState::DEFINED),
             "Document::{{add,remove}}_element_state: `:defined` is owned by the custom element \
@@ -378,9 +356,6 @@ impl<T> Document<T> {
         self.drain_reactions(base);
     }
 
-    /// Shared tail of every style-attribute mutation: record the attribute
-    /// change, swap the parsed block and the serialized attribute together,
-    /// and request the style-attribute restyle.
     fn apply_inline_style_block(
         &mut self,
         id: NodeId,

@@ -51,29 +51,7 @@ impl<T: Sync> Document<T> {
 }
 
 impl<T> Document<T> {
-    /// Installs decoded intrinsic dimensions for a replaced element, and
-    /// invalidates the node-to-root box-cache path when the value changes.
-    ///
-    /// This is the W3C replaced-content seam, and it also marks the node
-    /// replaced if it is not already. The DOM core learns nothing about
-    /// `<img>`; tag policy stays in the embedder's UA stylesheet. It is public
-    /// because the decode pipeline that produces these dimensions lives above,
-    /// in the engine crate, which must not be handed the whole document core
-    /// to reach one setter.
-    ///
-    /// Setting an equal value is a structural no-op: nothing is invalidated, so
-    /// a loader that re-publishes an unchanged size after a re-fetch costs
-    /// nothing. That exactness is why there is no aspect-ratio epsilon here,
-    /// unlike native Lynx — it compared a measured box against a bitmap ratio,
-    /// where this compares the value against itself.
-    ///
-    /// Natural size shares the node's single nullable content slot with literal
-    /// text; changing between those internal content kinds replaces the prior
-    /// value.
-    ///
-    /// # Panics
-    ///
-    /// Panics on a vacant or non-element `NodeId`.
+    /// Updates intrinsic dimensions and invalidates affected layout.
     pub fn set_natural_size(&mut self, id: crate::NodeId, natural_size: NaturalSize) {
         let changed = {
             let node = self
@@ -91,14 +69,6 @@ impl<T> Document<T> {
         }
     }
 
-    /// The intrinsic dimensions and ratio a replaced element currently lays out
-    /// with, in CSS px. [`NaturalSize::NONE`] for non-elements, vacant ids, and
-    /// elements that are not replaced.
-    ///
-    /// Paint needs this separately from the decoded pixels: with decode-time
-    /// downsampling, a decoded image's width and height are device-scaled decode
-    /// dimensions, while `object-fit: none` / `scale-down` and the concrete
-    /// object size are defined against the **natural** size.
     #[must_use]
     pub(crate) fn natural_size(&self, id: crate::NodeId) -> NaturalSize {
         self.get(id)
@@ -147,10 +117,6 @@ impl<T> Document<T> {
             .map(|state| &state.slot.rounded)
     }
 
-    /// The committed (post-layout) retained Parley layout for a text node —
-    /// the shaped, line-broken, aligned paragraph the renderer paints glyph
-    /// runs from. `None` for non-text nodes and for text the layout pass has
-    /// not committed (e.g. inside `display: none` or skipped subtrees).
     #[must_use]
     pub(crate) fn text_layout(&self, id: crate::NodeId) -> Option<&TextLayout> {
         self.layout_state()
@@ -161,12 +127,6 @@ impl<T> Document<T> {
             .committed()
     }
 
-    /// Post-flush computed-style borrow for paint-time consumers, mirroring
-    /// the layout host's own access path: no Stylo runtime borrow check, no
-    /// `Arc` bump. `None` for non-elements and for elements the completed
-    /// traversal left unstyled (`display: none` descendants). The returned
-    /// value is the harvested snapshot of the last completed flush; its `Arc`
-    /// keeps it alive, so the borrow is always memory-safe.
     #[must_use]
     pub(crate) fn paint_style(&self, id: crate::NodeId) -> Option<&ComputedValues> {
         self.get(id)?.layout_computed_style()
@@ -235,9 +195,6 @@ impl<T> Document<T> {
     }
 
     pub(crate) fn invalidate_layout_all(&mut self) {
-        // `scroll_offset` is deliberately untouched: scroll position survives
-        // relayout (it re-clamps itself against the new geometry on read), so
-        // an invalidation must not reset every scroller to the top.
         for (
             _,
             NodeLayoutState {
@@ -279,9 +236,6 @@ mod tests {
 
     #[test]
     fn layout_state_size_probe() {
-        // 64-bit baseline before the static tree/state split. Keep these
-        // documented constants independent of the removed AtomicRefCell
-        // implementation and dependency.
         const PRE_SPLIT_NODE_SIZE: usize = 368;
         const PRE_SPLIT_ATOMIC_LAYOUT_DATA_SIZE: usize = 456;
         const PRE_SPLIT_ATOMIC_LAYOUT_RESULTS_SIZE: usize = 160;
@@ -303,20 +257,6 @@ mod tests {
             PRE_SPLIT_ATOMIC_LAYOUT_DATA_SIZE,
             PRE_SPLIT_ATOMIC_LAYOUT_RESULTS_SIZE,
         );
-        // Sizes assume the workspace-wide `smallvec/union` layout (see the
-        // root Cargo.toml note) — vello's graph enables it regardless, and
-        // pinning it keeps every cargo invocation agreeing on these numbers.
-        // `NodeLayoutState` went 648 → 656 when the CSSOM-View scroll offset
-        // joined it: eight dense bytes per node rather than a sparse side table,
-        // paid on a 640-byte neighbour, in exchange for lockstep allocation with
-        // the layout the offset is clamped against. `Node` went 192/200 →
-        // 216/224 when the Stylo traversal flags (`StylingData`, 24 bytes)
-        // moved inline from their side slab, trading stride for one fewer
-        // arena lookup on every traversal flag access. It went 216/224 →
-        // 224/232 for shadow DOM's one `Option<Box<ShadowLinks>>` word: a host,
-        // a slot, and a slotted node are the only nodes that allocate the
-        // links themselves, so a document with no shadow root pays a word and
-        // a predictable branch rather than three fields it never reads.
         #[cfg(target_pointer_width = "64")]
         assert_eq!(
             current,

@@ -14,15 +14,6 @@ use rustc_hash::FxHashMap;
 use crate::image::decode::{DecodeResponse, ImageHeader, PixelSize};
 
 /// What one decode-cache entry is keyed on.
-///
-/// The source string is the host's `ResolvedLocator::cache_key` when the fetcher
-/// supplied one and the resolved URL otherwise — never the pre-resolution
-/// specifier, since two specifiers can resolve to one resource and a host's
-/// rewrite hook is entitled to make them.
-///
-/// The decode target is part of the key because a 100 px and a 400 px decode of
-/// one URL are different images, and handing a caller the wrong one would show
-/// up as a silently blurry or silently oversized frame.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CacheKey {
     source: Arc<str>,
@@ -44,14 +35,7 @@ impl CacheKey {
     }
 }
 
-/// What one resolved specifier maps to, keyed by the target it was resolved
-/// *for*.
-///
-/// The target belongs in the key because resolution is target-sensitive by
-/// contract: the host receives `ImageHints::target_size_px` and is entitled to
-/// answer with a different URL or cache key per size. Keying on the specifier
-/// alone would let a 4x4 variant's mapping be overwritten by an 8x8 one, after
-/// which the sync probe for the 4x4 entry silently misses.
+/// What one resolved specifier maps to, keyed by the target it was resolved *for*.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ResolvedKey {
     specifier: Arc<str>,
@@ -69,11 +53,6 @@ impl ResolvedKey {
 }
 
 /// Bounded specifier→source memory for the sync probes.
-///
-/// Bounded because a view driving dynamic URLs (cache-busting query strings,
-/// signed links) would otherwise grow this map for the life of the process —
-/// every other piece of loader state has a ceiling, and this one was the
-/// exception.
 #[derive(Debug)]
 pub(crate) struct ResolvedMap {
     entries: FxHashMap<ResolvedKey, (Arc<str>, u64)>,
@@ -128,21 +107,9 @@ impl ResolvedMap {
 }
 
 /// An exact LRU bounded by **total decoded bytes**, not entry count.
-///
-/// Entry count is the wrong bound here: a 16x16 icon and a 4000x3000 photo are
-/// one entry each and differ by five orders of magnitude in cost, so a
-/// count-bounded cache either wastes memory or thrashes depending entirely on
-/// what the page happens to contain.
-///
-/// Hand-rolled rather than the `lru` crate for the same reason — a byte budget
-/// does not fit `LruCache::new(NonZeroUsize)`, and building on `unbounded()`
-/// plus manual eviction leaves the crate supplying only an intrusive list.
 #[derive(Debug)]
 pub struct DecodeCache {
     entries: FxHashMap<CacheKey, Entry>,
-    /// Recency index, oldest first. A `BTreeMap` keyed on a monotonic tick
-    /// gives O(log n) eviction of the true least-recently-used entry without
-    /// the unsafe intrusive list a hand-written O(1) LRU would need.
     recency: BTreeMap<u64, CacheKey>,
     clock: u64,
     bytes: u64,
@@ -167,14 +134,7 @@ impl DecodeCache {
         }
     }
 
-    /// Fetches and marks recently used. The returned response shares its pixel
-    /// buffer with the cached one, so this is a handle clone rather than a copy.
-    ///
-    /// A cached entry carries its own [`ImageHeader`], so serving a hit needs
-    /// exactly one lookup in one cache. Deriving the header from a second,
-    /// separately-bounded cache made a hit depend on both surviving eviction:
-    /// past the header cache's capacity, images whose pixels were still resident
-    /// were silently re-fetched and re-decoded.
+    /// Fetches and marks recently used.
     pub fn get(&mut self, key: &CacheKey) -> Option<DecodeResponse> {
         let tick = self.next_tick();
         let entry = self.entries.get_mut(key)?;
@@ -187,10 +147,6 @@ impl DecodeCache {
     }
 
     /// Inserts, evicting least-recently-used entries until the budget holds.
-    ///
-    /// An image larger than the entire budget is **not** inserted, and evicts
-    /// nothing: admitting it would flush every useful entry to store something
-    /// that cannot be kept anyway.
     pub fn insert(&mut self, key: CacheKey, response: DecodeResponse) {
         let size = response.image.byte_len() as u64;
         if size > self.budget {
@@ -261,12 +217,6 @@ impl DecodeCache {
 }
 
 /// Natural sizes, bounded by entry count.
-///
-/// Sized far larger than [`DecodeCache`] on purpose: an entry is tens of bytes
-/// against megabytes for a bitmap, and it buys something the pixels cannot. A
-/// second mount of a known URL can publish its natural size in the same commit
-/// that creates the node, so the very first frame lays out final — no 0x0 frame
-/// and no relayout when the decode lands.
 #[derive(Debug)]
 pub struct HeaderCache {
     entries: FxHashMap<Arc<str>, (ImageHeader, u64)>,
@@ -343,7 +293,6 @@ mod tests {
     use crate::image::format::ImageFormat;
     use crate::image::pixels::{AlphaType, DecodedImage};
 
-    /// A response whose pixels are `side * side * 4` bytes.
     fn image(side: u32) -> DecodeResponse {
         let image = DecodedImage::from_rgba8(
             side,
@@ -399,11 +348,9 @@ mod tests {
 
     #[test]
     fn evicts_the_least_recently_used_entry_first() {
-        // Budget fits exactly two 64-byte images.
         let mut cache = DecodeCache::with_budget(128);
         cache.insert(key("a"), image(4));
         cache.insert(key("b"), image(4));
-        // Touch "a" so "b" becomes the oldest.
         assert!(cache.get(&key("a")).is_some());
         cache.insert(key("c"), image(4));
 
@@ -466,8 +413,6 @@ mod tests {
 
     #[test]
     fn a_cached_entry_carries_its_own_header() {
-        // The whole point of storing the response: a hit must not depend on a
-        // second, separately-bounded cache still holding the header.
         let mut cache = DecodeCache::with_budget(1 << 20);
         cache.insert(key("a"), image(4));
         let hit = cache.get(&key("a")).expect("hit");
@@ -500,12 +445,9 @@ mod tests {
         map.insert(small.clone(), Arc::from("cdn/4x"));
         map.insert(large.clone(), Arc::from("cdn/8x"));
 
-        // Resolution is target-sensitive by contract, so one specifier can hold
-        // two distinct mappings and neither may clobber the other.
         assert_eq!(map.get(&small).as_deref(), Some("cdn/4x"));
         assert_eq!(map.get(&large).as_deref(), Some("cdn/8x"));
 
-        // And it evicts rather than growing forever on dynamic URLs.
         let mut bounded = ResolvedMap::with_capacity(2);
         for index in 0..5 {
             bounded.insert(ResolvedKey::new(format!("u{index}"), None), Arc::from("s"));

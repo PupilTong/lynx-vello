@@ -39,11 +39,8 @@ use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Rect};
 use crate::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
 
-/// A computed filter function (fork grammar: `blur() grayscale()
-/// brightness() contrast() saturate()` chains).
 type Filter = stylo::values::computed::effects::Filter;
 
-/// Draws the style's filter adjustments over the group content.
 pub(crate) fn apply(scene: &mut Scene, style: &ComputedValues, bounds: Rect, transform: Affine) {
     for filter in style.get_effects().filter.0.iter() {
         let Some(pass) = adjustment_pass(filter) else {
@@ -67,18 +64,13 @@ pub(crate) fn apply(scene: &mut Scene, style: &ComputedValues, bounds: Rect, tra
 struct Pass {
     mix: Mix,
     alpha: f32,
-    /// Achromatic fill level, 0 (black) to 1 (white).
     level: f32,
 }
 
-/// Maps a filter function to its blend pass (module-doc mapping), or `None`
-/// when the function is a no-op, out of the expressible range, or `blur()`.
 fn adjustment_pass(filter: &Filter) -> Option<Pass> {
     match filter {
         Filter::Grayscale(amount) => {
             let f = amount.0.clamp(0.0, 1.0);
-            // Any achromatic level works for Mix::Saturation; 0.5 keeps the
-            // fill mid-gray for debuggability.
             (f > 0.0).then_some(Pass {
                 mix: Mix::Saturation,
                 alpha: f,
@@ -86,8 +78,6 @@ fn adjustment_pass(filter: &Filter) -> Option<Pass> {
             })
         }
         Filter::Saturate(amount) => {
-            // saturate(f < 1) ≡ grayscale(1 − f); f ≥ 1 cannot oversaturate
-            // with Mix::Saturation — skipped (module doc).
             let f = amount.0.max(0.0);
             (f < 1.0).then_some(Pass {
                 mix: Mix::Saturation,
@@ -98,16 +88,12 @@ fn adjustment_pass(filter: &Filter) -> Option<Pass> {
         Filter::Brightness(amount) => {
             let f = amount.0.max(0.0);
             if f < 1.0 {
-                // Exact: multiply by gray(f) is c·f.
                 Some(Pass {
                     mix: Mix::Multiply,
                     alpha: 1.0,
                     level: f,
                 })
             } else if f > 1.0 {
-                // Approximate: screen against gray(1 − 1/f) brightens with
-                // the right endpoints (0 stays offset-free only at f→1;
-                // 1 maps to 1) — module doc.
                 Some(Pass {
                     mix: Mix::Screen,
                     alpha: 1.0,
@@ -118,10 +104,6 @@ fn adjustment_pass(filter: &Filter) -> Option<Pass> {
             }
         }
         Filter::Contrast(amount) => {
-            // Linear pivot identity c′ = c·f + 0.5·(1−f): a normal mix of
-            // gray(0.5) at alpha 1 − f — exact for f ≤ 1. f > 1 clamps out
-            // of the flat-blend range and degenerates to a no-op — skipped
-            // (recorded clamp error; module doc).
             let f = amount.0.max(0.0);
             (f < 1.0).then_some(Pass {
                 mix: Mix::Normal,
@@ -129,18 +111,12 @@ fn adjustment_pass(filter: &Filter) -> Option<Pass> {
                 level: 0.5,
             })
         }
-        // `blur()` needs an offscreen texture pass vello scenes do not
-        // express (recorded v1 limit — lib.rs docblock); the rest never
-        // parse through the fork's filter grammar (css-visual.md: only
-        // blur/grayscale/brightness/contrast/saturate) — a grammar rebase
-        // that adds them lands here.
         Filter::Blur(_)
         | Filter::HueRotate(_)
         | Filter::Invert(_)
         | Filter::Opacity(_)
         | Filter::Sepia(_)
         | Filter::DropShadow(_) => None,
-        // `Url` is uninhabited in the servo/lynx build.
         Filter::Url(url) => match *url {},
     }
 }
@@ -197,7 +173,6 @@ mod tests {
         assert_eq!(pass.mix, Mix::Normal);
         assert!((pass.alpha - 0.75).abs() < 1e-6);
         assert!((pass.level - 0.5).abs() < 1e-6);
-        // The pass computes c·f + 0.5·(1−f): check the affine mix at c = 1.
         let mixed = pass.level * pass.alpha + 1.0 * (1.0 - pass.alpha);
         assert!((mixed - (1.0 * 0.25 + 0.5 * 0.75)).abs() < 1e-6);
     }
@@ -205,7 +180,6 @@ mod tests {
     #[test]
     fn contrast_at_or_above_one_is_skipped() {
         assert!(adjustment_pass(&Filter::Contrast(NonNegative(1.0))).is_none());
-        // f > 1 clamps to a no-op (recorded clamp error).
         assert!(adjustment_pass(&Filter::Contrast(NonNegative(1.5))).is_none());
     }
 

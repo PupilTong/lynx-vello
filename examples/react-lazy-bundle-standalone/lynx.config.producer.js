@@ -25,8 +25,6 @@ export default defineConfig({
   output: {
     assetPrefix: producerPublicPath,
     distPath: {
-      // Separate output per loader variant so `pnpm build` (querycomponent +
-      // fetchbundle) doesn't clobber the first pass.
       root: path.join(
         projectRoot,
         enableFetchBundle ? 'dist-producer-fetchbundle' : 'dist-producer',

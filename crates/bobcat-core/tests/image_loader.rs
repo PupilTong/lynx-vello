@@ -31,8 +31,6 @@ async fn loads_and_decodes_through_the_buffered_transport() {
 
 #[tokio::test]
 async fn every_advertised_transport_yields_the_same_bytes() {
-    // The capability ladder is the only reason a host that cannot buffer still
-    // works, so each rung has to actually carry an image.
     for capability in [
         ResourceCapability::BufferedResource,
         ResourceCapability::ResourceStream,
@@ -54,9 +52,6 @@ async fn every_advertised_transport_yields_the_same_bytes() {
 
 #[tokio::test]
 async fn a_fetcher_with_no_usable_transport_is_refused_at_construction() {
-    // Only `resolve_locator` and `cancel_request` are mandatory in the
-    // protocol, so this is a real configuration a host can present — and
-    // failing once at construction beats failing per image.
     let double = Arc::new(
         FetcherDouble::new(Vec::new())
             .with_capabilities(vec![ResourceCapability::Http, ResourceCapability::Prefetch]),
@@ -69,8 +64,6 @@ async fn a_fetcher_with_no_usable_transport_is_refused_at_construction() {
 #[tokio::test]
 async fn a_data_url_resolves_but_never_reaches_the_transport() {
     let png = checker_png(4);
-    // A host rewrite that turns a specifier into a `data:` URL is exactly why
-    // resolution still runs first.
     let encoded = base64(&png);
     let double = Arc::new(
         FetcherDouble::new(Vec::new()).resolving_to(&format!("data:image/png;base64,{encoded}")),
@@ -98,13 +91,10 @@ async fn a_cache_hit_avoids_a_second_fetch() {
         .expect("cold load");
     let fetches_after_cold = double.fetch_count();
 
-    // The sync probe is what a caller inside a frame commit uses.
     let cached = loader.cached("icon.png", None).expect("decode cache hit");
     assert_eq!((cached.width(), cached.height()), (4, 4));
     assert_eq!(double.fetch_count(), fetches_after_cold, "no refetch");
 
-    // And a second `load` must consult the cache before the transport, not
-    // merely populate it afterwards.
     let warm = loader
         .load("icon.png", None, CancellationToken::new())
         .await
@@ -116,8 +106,6 @@ async fn a_cache_hit_avoids_a_second_fetch() {
         "a warm load must not reach the transport"
     );
 
-    // And the natural size survives independently, which is what lets a second
-    // mount lay out final on its first frame.
     let header = loader.cached_header("icon.png").expect("header cache hit");
     assert_eq!(
         header.natural_size,
@@ -133,16 +121,12 @@ async fn the_sync_probe_misses_until_the_specifier_has_been_resolved_once() {
     let double = Arc::new(FetcherDouble::new(checker_png(4)));
     let loader = loader(double);
 
-    // Documented behaviour: the cache is keyed on the RESOLVED source, and
-    // resolving is async, so a probe before the first load cannot hit.
     assert!(loader.cached("icon.png", None).is_none());
     assert!(loader.cached_header("icon.png").is_none());
 }
 
 #[tokio::test]
 async fn a_host_supplied_cache_key_is_what_entries_are_keyed_on() {
-    // Two specifiers the host resolves to one resource must share one entry —
-    // that is the whole point of `ResolvedLocator::cache_key`.
     let double = Arc::new(FetcherDouble::new(checker_png(4)).with_cache_key("asset:42"));
     let loader = loader(Arc::clone(&double));
 
@@ -207,7 +191,6 @@ async fn a_cancelled_load_reports_cancellation_rather_than_publishing_pixels() {
         .expect_err("a cancelled load must not succeed");
     assert!(matches!(error, ImageError::Cancelled), "got {error:?}");
 
-    // Nothing was published for a torn-down node.
     assert!(loader.cached("icon.png", None).is_none());
 }
 
@@ -229,7 +212,6 @@ async fn a_header_load_probes_without_decoding_and_populates_the_header_cache() 
         }
     );
     assert!(loader.cached_header("icon.png").is_some());
-    // The pixels were never decoded, so the decode cache stays empty.
     assert!(loader.cached("icon.png", None).is_none());
 }
 
@@ -292,7 +274,6 @@ async fn undecodable_bytes_surface_as_a_typed_error() {
     assert!(matches!(error, ImageError::UnknownFormat), "got {error:?}");
 }
 
-/// Minimal base64, so the test does not need an encoder dependency.
 fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
@@ -321,9 +302,6 @@ fn base64(bytes: &[u8]) -> String {
 
 #[tokio::test]
 async fn an_oversized_body_is_refused_rather_than_truncated() {
-    // A host that ignores `max_bytes` — or a stream with no length at all —
-    // must not slip through by having a decodable prefix. Truncating at the
-    // limit would load this image successfully.
     let mut oversized = checker_png(4);
     let real_len = oversized.len();
     oversized.extend_from_slice(&vec![0u8; 4096]);
@@ -356,10 +334,6 @@ async fn an_oversized_body_is_refused_rather_than_truncated() {
 
 #[tokio::test]
 async fn a_decode_cache_hit_does_not_need_the_header_cache() {
-    // With a one-entry header cache, loading A then B evicts A's header. A's
-    // pixels are still resident, so re-loading A must hit the decode cache
-    // rather than re-fetching: a hit that needed both caches made the smaller
-    // one silently govern the larger.
     let double = Arc::new(FetcherDouble::new(checker_png(4)));
     let loader = ImageLoader::new(
         Arc::clone(&double) as Arc<dyn bobcat_core::resource::ResourceFetcher>,
@@ -383,8 +357,6 @@ async fn a_decode_cache_hit_does_not_need_the_header_cache() {
 
 #[tokio::test]
 async fn a_cancelled_token_unsticks_a_hung_resolve() {
-    // `resolve_locator` is arbitrary embedder code. Awaiting it bare left the
-    // whole load uncancellable up to that point.
     let double = Arc::new(FetcherDouble::new(checker_png(4)).with_hung_resolve());
     let loader = loader(double);
 

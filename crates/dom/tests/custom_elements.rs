@@ -15,8 +15,6 @@ use std::sync::{Arc, Mutex};
 use common::Doc;
 use dom::{CustomElement, Document, NodeId, ShadowRootMode};
 
-/// What every callback appends to, so a test asserts an exact ordered
-/// transcript rather than a set of flags.
 type Log = Arc<Mutex<Vec<String>>>;
 
 fn log() -> Log {
@@ -29,8 +27,7 @@ fn take(log: &Log) -> Vec<String> {
 
 type Action = Box<dyn Fn(&mut Document<()>, NodeId) + Send + Sync>;
 
-/// A definition that records every reaction it receives and can run an
-/// arbitrary mutation from inside any of them.
+/// Records lifecycle reactions and optional callback mutations.
 struct Probe {
     tag: &'static str,
     log: Log,
@@ -137,8 +134,6 @@ fn define(doc: &mut Doc, probe: Probe) {
     doc.dom.define(tag, Box::new(probe));
 }
 
-// --- Definition and construction --------------------------------------------
-
 #[test]
 fn create_element_after_define_constructs_before_returning_the_id() {
     let log = log();
@@ -174,9 +169,6 @@ fn defining_an_empty_local_name_panics() {
     doc.dom.define("", Box::new(Probe::new("x-item", &log())));
 }
 
-/// The definition-before-creation contract. An element created first would
-/// never be constructed — nothing later moves it into a definition — so this
-/// is refused rather than silently accepted.
 #[test]
 #[should_panic(expected = "already has elements")]
 fn defining_a_tag_that_already_has_elements_panics() {
@@ -187,8 +179,6 @@ fn defining_a_tag_that_already_has_elements_panics() {
     define(&mut doc, Probe::new("x-item", &log));
 }
 
-/// The scan covers the arena, not just the document, so an element that is
-/// merely built and not yet inserted counts too.
 #[test]
 #[should_panic(expected = "already has elements")]
 fn defining_a_tag_that_a_detached_element_already_uses_panics() {
@@ -198,9 +188,6 @@ fn defining_a_tag_that_a_detached_element_already_uses_panics() {
     define(&mut doc, Probe::new("x-item", &log));
 }
 
-/// The document element is the one node that cannot obey the contract — it
-/// exists before any definition can — so defining its tag constructs it
-/// instead of refusing.
 #[test]
 fn defining_the_document_element_tag_constructs_and_connects_it() {
     let log = log();
@@ -218,8 +205,6 @@ fn defining_the_document_element_tag_constructs_and_connects_it() {
     );
 }
 
-/// Re-inserting an already-constructed element connects it again and never
-/// constructs it twice.
 #[test]
 fn re_inserting_a_constructed_element_never_constructs_it_twice() {
     let log = log();
@@ -246,8 +231,6 @@ fn re_inserting_a_constructed_element_never_constructs_it_twice() {
     );
 }
 
-/// A definition installed from inside a callback governs the elements created
-/// after it, in the callback's own nested scope.
 #[test]
 fn a_definition_installed_from_a_callback_governs_what_it_then_creates() {
     let log = log();
@@ -272,22 +255,14 @@ fn a_definition_installed_from_a_callback_governs_what_it_then_creates() {
     assert_eq!(
         take(&log),
         vec![
-            // Both constructions happen while the subtree is still detached —
-            // the nested `create_element` drains its own scope — so neither
-            // connects there.
             format!("x-outer:constructed#{outer}"),
             format!("x-inner:constructed#{inner}"),
-            // The insertion that follows connects the whole subtree in tree
-            // order.
             format!("x-outer:connected#{outer}"),
             format!("x-inner:connected#{inner}"),
         ]
     );
 }
 
-/// With no `undefined` state there is nothing for `:defined` to distinguish,
-/// so every element matches it — including a hyphenated tag with no
-/// definition, which a browser would leave unmatched until its script arrived.
 #[test]
 fn every_element_matches_defined_including_undefined_hyphenated_tags() {
     let log = log();
@@ -305,10 +280,6 @@ fn every_element_matches_defined_including_undefined_hyphenated_tags() {
     }
 }
 
-/// Attributes set after creation report normally. What disappeared with the
-/// upgrade half is only the *replay* of attributes an element carried
-/// beforehand, which the definition-before-creation contract makes an empty
-/// set.
 #[test]
 fn attributes_set_after_creation_report_normally() {
     let log = log();
@@ -333,8 +304,6 @@ fn attributes_set_after_creation_report_normally() {
         ]
     );
 }
-
-// --- Attributes ------------------------------------------------------------
 
 #[test]
 fn unobserved_attribute_changes_never_reach_the_handler() {
@@ -431,8 +400,6 @@ fn an_attribute_written_inside_the_constructor_reports_nothing() {
     );
 }
 
-// --- Connect and disconnect ------------------------------------------------
-
 #[test]
 fn connected_fires_once_per_insertion_never_doubled_with_the_construction() {
     let log = log();
@@ -528,7 +495,6 @@ fn remove_subtree_delivers_disconnect_while_the_subtree_is_still_readable() {
     define(
         &mut doc,
         Probe::new("x-item", &log).on_disconnected(Box::new(move |document, element| {
-            // The window in which the node is unlinked but not yet freed.
             let tag = document
                 .get(element)
                 .and_then(|node| node.tag_name().map(str::to_owned));
@@ -551,8 +517,6 @@ fn remove_subtree_delivers_disconnect_while_the_subtree_is_still_readable() {
         "and freed immediately after"
     );
 }
-
-// --- Ordering --------------------------------------------------------------
 
 #[test]
 fn subtree_insertion_delivers_callbacks_in_tree_order() {
@@ -578,8 +542,6 @@ fn subtree_insertion_delivers_callbacks_in_tree_order() {
         ]
     );
 }
-
-// --- Shadow trees ----------------------------------------------------------
 
 #[test]
 fn a_constructor_that_attaches_a_shadow_root_and_a_stylesheet_renders() {
@@ -649,8 +611,6 @@ fn an_unassigned_light_child_is_still_constructed_and_still_connects() {
     let host = doc.el(root, "host");
     doc.dom.attach_shadow(host, ShadowRootMode::Open);
 
-    // No slot claims it, so it is invisible to layout and paint — but it is
-    // still in the node tree, still connected, and still a custom element.
     let orphan = doc.el(host, "x-item");
     doc.flush();
 
@@ -667,9 +627,6 @@ fn an_unassigned_light_child_is_still_constructed_and_still_connects() {
     );
 }
 
-/// `:defined` matching everything is an invariant, not a convention: the
-/// generic element-state API must not be able to clear the bit and make
-/// `:not(:defined)` start matching.
 #[test]
 #[should_panic(expected = "owned by the custom element state machine")]
 fn clearing_defined_through_the_element_state_api_panics() {
@@ -690,7 +647,6 @@ fn setting_defined_through_the_element_state_api_panics() {
         .add_element_state(element, dom::ElementState::DEFINED);
 }
 
-/// Every lifecycle test above appends; this is the other insertion path.
 #[test]
 fn insert_before_a_reference_node_delivers_the_same_reactions() {
     let log = log();
@@ -717,8 +673,6 @@ fn insert_before_a_reference_node_delivers_the_same_reactions() {
     );
 }
 
-/// A detached element is still `Custom`, so its observed attributes still
-/// report — connectedness gates `connected`/`disconnected`, not attributes.
 #[test]
 fn an_attribute_change_on_a_detached_element_still_reports() {
     let log = log();
@@ -735,10 +689,6 @@ fn an_attribute_change_on_a_detached_element_still_reports() {
     );
 }
 
-/// Writing the value an attribute already has still reports, with
-/// `old == new`. The standard's *set an existing attribute value* runs its
-/// change steps unconditionally; only *remove* is gated on the attribute
-/// being there.
 #[test]
 fn setting_an_attribute_to_its_current_value_still_reports() {
     let log = log();
@@ -757,9 +707,6 @@ fn setting_an_attribute_to_its_current_value_still_reports() {
     );
 }
 
-/// The counterpart divergence: `add_class` of a token that is already present
-/// early-returns, where `DOMTokenList`'s update steps would re-set the
-/// attribute and fire with `old == new`.
 #[test]
 fn a_no_op_class_mutation_reports_nothing_unlike_dom_token_list() {
     let log = log();
@@ -775,8 +722,6 @@ fn a_no_op_class_mutation_reports_nothing_unlike_dom_token_list() {
 
     assert!(take(&log).is_empty());
 }
-
-// --- Adversarial and re-entrancy -------------------------------------------
 
 #[test]
 fn a_callback_that_creates_another_element_of_its_own_tag_does_not_panic() {
@@ -794,8 +739,6 @@ fn a_callback_that_creates_another_element_of_its_own_tag_does_not_panic() {
             }
             *guard += 1;
             drop(guard);
-            // Re-enters this very handler while the outer call is on the
-            // stack: the ordinary list-component shape.
             document.create_element("x-row", ());
         })),
     );
@@ -811,12 +754,6 @@ fn a_callback_that_creates_another_element_of_its_own_tag_does_not_panic() {
     assert!(transcript.contains(&format!("x-row:connected#{outer}")));
 }
 
-/// A callback that removes a later sibling does **not** cancel that sibling's
-/// already-queued reaction: the nested removal opens its own reaction scope,
-/// and that scope drains the sibling's whole per-element queue — the connected
-/// reaction the outer insertion queued included, ahead of the disconnect it
-/// just added. Every browser does the same, because the per-element reaction
-/// queue is shared across scopes while only the element queue is stacked.
 #[test]
 fn removing_a_later_sibling_from_a_callback_drains_that_siblings_whole_queue() {
     let log = log();
@@ -827,9 +764,6 @@ fn removing_a_later_sibling_from_a_callback_drains_that_siblings_whole_queue() {
     define(
         &mut doc,
         Probe::new("x-item", &log).on_connected(Box::new(move |document, _| {
-            // Taken out before the mutation: a callback must not hold a lock
-            // across a document mutation, because that mutation can re-enter
-            // this very callback for another element.
             let doomed = target.lock().unwrap().take();
             if let Some(id) = doomed {
                 document.remove_subtree(id);
@@ -878,11 +812,6 @@ fn a_freed_id_recycled_by_a_later_creation_receives_no_stale_reaction() {
     );
 }
 
-/// A `NodeId` is a slab key the arena recycles on free, so it is an occupancy
-/// token and never an identity one. A constructor that destroys its own
-/// element must therefore be refused outright — detaching it is fine, freeing
-/// it is not, because the very next creation would take its id back and the
-/// caller would be handed a live id naming a different element.
 #[test]
 #[should_panic(expected = "freeing it is not")]
 fn a_constructor_that_frees_the_element_being_created_panics() {
@@ -897,13 +826,6 @@ fn a_constructor_that_frees_the_element_being_created_panics() {
     doc.dom.create_element("x-item", ());
 }
 
-/// The same rule, in the shape that used to slip through every liveness
-/// check: free the element *and* create a replacement, so the id is occupied
-/// again by the time the guard looks at it.
-/// The second pin preflight — the one after the drain — is not dead defensive
-/// code. A constructor holds a pin on the element being created; if it removes
-/// a subtree whose `disconnected_callback` then appends that pinned element
-/// into the subtree being removed, only the post-drain pass can see it.
 #[test]
 #[should_panic(expected = "freeing it is not")]
 fn a_node_a_callback_moves_into_the_doomed_subtree_is_still_caught() {
@@ -939,10 +861,6 @@ fn a_node_a_callback_moves_into_the_doomed_subtree_is_still_caught() {
     doc.dom.create_element("x-inner", ());
 }
 
-/// The pin protects the node its caller is holding, not the whole subtree from
-/// every other removal: a `disconnected_callback` may remove a descendant of
-/// the subtree being removed. The outer removal then returns only the payloads
-/// it actually freed — the callback took the rest.
 #[test]
 fn a_disconnected_callback_may_remove_a_descendant_of_the_doomed_subtree() {
     let log = log();
@@ -973,10 +891,6 @@ fn a_disconnected_callback_may_remove_a_descendant_of_the_doomed_subtree() {
     assert!(doc.dom.get(inner).is_none());
 }
 
-/// The pin guard must fire *before* the arena is touched, not after. A
-/// callback that catches the guard's panic must find the subtree exactly as it
-/// was — otherwise `create_element` hands back an id whose node is gone, which
-/// is the failure the guard exists to prevent.
 #[test]
 fn a_caught_pin_panic_leaves_the_subtree_intact() {
     let log = log();
@@ -1018,8 +932,6 @@ fn a_constructor_that_frees_and_recycles_its_own_id_panics() {
     doc.dom.create_element("x-item", ());
 }
 
-/// And on the removal side: a disconnected callback that frees the subtree its
-/// caller is still holding.
 #[test]
 #[should_panic(expected = "freeing it is not")]
 fn a_disconnected_callback_that_frees_the_subtree_being_removed_panics() {
@@ -1036,10 +948,6 @@ fn a_disconnected_callback_that_frees_the_subtree_being_removed_panics() {
     doc.dom.remove_subtree(element);
 }
 
-/// The depth guard must balance its own counter. Incrementing before the
-/// assert leaked it on the panicking path, and `is_draining()` then answered
-/// `true` forever — wedging every later style flush on a document a harness
-/// still held.
 #[test]
 fn a_depth_guard_panic_leaves_the_document_usable() {
     let log = log();
@@ -1057,8 +965,6 @@ fn a_depth_guard_panic_leaves_the_document_usable() {
     }));
     assert!(hit_the_guard.is_err(), "the nesting guard fires");
 
-    // The document is unspecified as to content, but it must not be wedged:
-    // an unrelated mutation and a commit still work.
     let survivor = doc.dom.create_element("view", ());
     doc.dom.append_child(root, survivor);
     doc.flush();
@@ -1116,7 +1022,6 @@ fn unbounded_reaction_recursion_panics_instead_of_hanging() {
     define(
         &mut doc,
         Probe::new("x-item", &log).on_constructed(Box::new(|document, _| {
-            // No depth guard of its own: every construction starts another.
             document.create_element("x-item", ());
         })),
     );
@@ -1133,9 +1038,6 @@ fn an_attribute_callback_that_mutates_the_tree_drains_in_its_own_scope() {
         Probe::new("x-item", &log)
             .observing(&["value"])
             .on_attribute(Box::new(|document, element| {
-                // Appending a child of the same tag re-enters this definition
-                // through a nested scope, which must drain before the outer
-                // attribute reaction returns.
                 let child = document.create_element("x-item", ());
                 document.append_child(element, child);
             })),

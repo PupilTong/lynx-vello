@@ -29,8 +29,6 @@ use crate::tree::{
     SizingMode,
 };
 
-/// Main/cross mapping. Scratch coordinates remain flow-relative and are
-/// converted to physical coordinates only when geometry is exported.
 fn linear_axes(
     linear_direction: linear_direction::T,
     inline_direction: direction::T,
@@ -127,9 +125,7 @@ impl LinearItemFlags {
     }
 }
 
-/// One allocation-friendly scratch record per in-flow item. Raw style stays
-/// behind the node handle — immutable for the layout epoch — and is
-/// re-fetched only for intrinsic probes or a cyclic percentage re-resolution.
+/// Scratch state for one in-flow linear-layout item.
 #[derive(Debug)]
 #[allow(clippy::struct_excessive_bools)]
 struct LinearItem<N> {
@@ -509,9 +505,6 @@ fn resolve_intrinsic_sizes<T>(
     item.preferred_size = apply_aspect_ratio(item.preferred_size, item.aspect_ratio);
 }
 
-/// Projects a known border- or content-box length through an aspect ratio:
-/// strip the source axis's inset when sizing is content-box, scale, then
-/// re-add the target axis's inset.
 #[inline]
 fn ratio_project(
     known: f32,

@@ -108,20 +108,7 @@ pub use format::{ImageFormat, is_complete, sniff};
 pub use loader::{ImageLoader, ImagePrefetchTarget, LoaderConfig};
 pub use pixels::{AlphaType, DecodedImage, expected_byte_len};
 
-/// Identifies, validates and decodes one in-memory image with the injected
-/// decoder.
-///
-/// The one-shot path for a caller that already has the bytes — the `data:`
-/// branch, a test, a fixture. Anything fetching over a transport wants
-/// [`ImageLoader`], which adds caching, byte budgets and cancellation.
-///
-/// # Errors
-///
-/// [`ImageError::UnknownFormat`] when the leading bytes match no identified
-/// container, [`ImageError::Unsupported`] when `decoder` does not claim the
-/// identified format, [`ImageError::Truncated`] when the container's own
-/// framing says bytes are missing, and [`ImageError::TooLarge`] or
-/// [`ImageError::Decode`] from the decoder.
+/// Identifies, validates and decodes one in-memory image with the injected decoder.
 pub fn decode_bytes(
     decoder: &dyn Decoder,
     bytes: &[u8],
@@ -132,20 +119,11 @@ pub fn decode_bytes(
 }
 
 /// Header-only probe: the natural size and friends, without decoding pixels.
-///
-/// This is what layout waits on, and it is orders of magnitude cheaper than
-/// [`decode_bytes`].
-///
-/// # Errors
-///
-/// As [`decode_bytes`], minus the decode-specific failures.
 pub fn probe_bytes(decoder: &dyn Decoder, bytes: &[u8]) -> Result<ImageHeader, ImageError> {
     let format = identify(decoder, bytes)?;
     decoder.probe(format, bytes)
 }
 
-/// Sniff, the capability gate, and the framing check, in the one order every
-/// entry point needs them.
 fn identify(decoder: &dyn Decoder, bytes: &[u8]) -> Result<ImageFormat, ImageError> {
     let format = sniff(bytes).ok_or(ImageError::UnknownFormat)?;
     if !decoder.capabilities().supports(format) {
