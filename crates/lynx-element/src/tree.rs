@@ -221,7 +221,7 @@ impl ElementTree {
         }
         let node = self.node_id(id).ok_or(PapiError::UnknownElement(id))?;
         self.uncommitted = true;
-        let retired_ids = self.document.remove_subtree(node);
+        let retired_ids = self.document.drop_subtree(node);
         for unique_id in retired_ids {
             let retired = self.elements.retire(unique_id);
             debug_assert!(

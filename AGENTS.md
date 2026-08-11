@@ -493,10 +493,15 @@ useful signal for currently-compatible versions of those libraries.
   standard's own fallback), no customized built-ins/`is`/`extends`, no scoped
   registries, no `whenDefined`/`get`/`upgrade(root)`, and no `failed` state or
   construction stack — all of which exists to police a JavaScript constructor
-  that can throw. A callback may detach any node but may not *free* one the
-  mutation that called it is still holding: `create_element`, `remove_subtree`,
-  and the constructor call pin that id and panic if it is freed, because a
-  `NodeId` is a slab key the arena recycles and a replacement would otherwise
+  that can throw. `disconnected_callback` takes a shared `&Document`, not a
+  mutable one: it is the only callback that runs with a free already committed,
+  so a mutable handle would let it re-attach the subtree being freed, link a
+  child to a node about to die, or free the node its caller still holds — three
+  hazards every removal would then have to detect and refuse. A callback that
+  *can* mutate may detach any node but may not *free* one the mutation that
+  called it is still holding: `create_element` and the constructor call pin
+  that id, `drop_element`/`drop_subtree` refuse to free a pinned node, because
+  a `NodeId` is a slab key the arena recycles and a replacement would otherwise
   inherit it while every liveness check passed.
   Every node points directly back only to `TreeArenas`, and the
   same plain one-word `&Node` implements Stylo's document/node/element/shadow-root traits

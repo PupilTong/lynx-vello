@@ -75,12 +75,21 @@
 //!   `attributeChangedCallback` with `old == new` for `classList.add` of a token that is already
 //!   there. Both methods early-return here before any reaction is raised, which is the divergence —
 //!   deliberate, and asserted by a test.
+//! - **`disconnected_callback` receives a shared [`Document`], not a mutable one.** It is the one
+//!   callback that runs with a free already committed: the removal that raised it drains while the
+//!   subtree is unlinked but still allocated, then frees those slots the moment the drain returns.
+//!   A mutation from inside it could re-attach the subtree being freed, link a child to a node
+//!   about to die, or free the node its caller is still holding — three hazards a mutable handle
+//!   would force every removal to detect and refuse at run time. `&Document` makes them
+//!   unrepresentable instead, and costs a teardown handler nothing it needs: its own element, its
+//!   subtree, its attributes, and its computed style are all still readable. The other three
+//!   callbacks keep `&mut Document`; none of them runs with a free pending.
 //! - **A callback may detach any node, but may not free one its caller is still holding.**
-//!   [`Document::create_element`], [`Document::remove_subtree`], and the constructor call all pin
-//!   the id they will still be naming once the drain returns, and freeing a pinned node panics. Not
-//!   a convenience limit: a [`NodeId`] is a slab key the arena recycles on free, so without the pin
-//!   a callback that frees the node and creates a replacement hands its caller a live id naming a
-//!   *different* node — and every liveness check passes while it happens.
+//!   [`Document::create_element`] and the constructor call pin the id they will still be naming
+//!   once the drain returns, and [`Document::drop_element`]/[`Document::drop_subtree`] refuse to
+//!   free a pinned node. Not a convenience limit: a [`NodeId`] is a slab key the arena recycles on
+//!   free, so without the pin a callback that frees the node and creates a replacement hands its
+//!   caller a live id naming a *different* node — and every liveness check passes while it happens.
 //! - **A panicking callback leaves the document unspecified but not wedged.** The depth token
 //!   balances its counter on the unwinding path and records that the frame was abandoned, so the
 //!   next mutation discards the leftovers silently rather than blaming itself, while a scope in
@@ -115,7 +124,7 @@ pub trait CustomElement<T>: Send + Sync {
         let _ = (document, element);
     }
 
-    fn disconnected_callback(&self, document: &mut Document<T>, element: NodeId) {
+    fn disconnected_callback(&self, document: &Document<T>, element: NodeId) {
         let _ = (document, element);
     }
 
@@ -231,7 +240,7 @@ impl<T> Document<T> {
         }
     }
 
-    fn assert_not_pinned(&self, element: NodeId) {
+    pub(crate) fn assert_not_pinned(&self, element: NodeId) {
         assert!(
             !self.custom_elements.pinned.contains(&element),
             "a custom element lifecycle callback destroyed a node the mutation that called it is \
@@ -410,9 +419,11 @@ impl<T> Document<T> {
                 handler.connected_callback(self, element);
             }
             Reaction::Disconnected => {
-                let Some(handler) = self.dispatch_target(element) else {
+                let Some(definition) = self.get(element).and_then(|node| node.custom_definition)
+                else {
                     return;
                 };
+                let handler = &self.custom_elements.definitions[definition.index()].handler;
                 handler.disconnected_callback(self, element);
             }
             Reaction::AttributeChanged { name, old, new } => {

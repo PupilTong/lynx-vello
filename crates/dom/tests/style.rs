@@ -161,7 +161,7 @@ fn text_data_changes_invalidate_the_parent_empty_selector() {
     doc.layout();
     assert_color!(doc, box_element, RED, "clearing text restores :empty");
 
-    doc.detach(text);
+    doc.remove_element(text);
     doc.layout();
     doc.set_text_node_data(text, "reattached");
     doc.append_child(box_element, text);
@@ -173,7 +173,7 @@ fn text_data_changes_invalidate_the_parent_empty_selector() {
         "inserting non-empty text clears :empty"
     );
 
-    doc.detach(text);
+    doc.remove_element(text);
     doc.layout();
     assert_color!(
         doc,
