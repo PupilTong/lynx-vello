@@ -47,11 +47,11 @@ still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
   stylesheets, rule objects, or locks accidentally.
 - **Mutation carries invalidation.** Matching-relevant setters such as
   `set_classes`, `set_attribute`, `add_element_state`,
-  `remove_element_state`, `set_inline_style`, `insert_before`, `detach`, and
-  `remove_subtree` record their own pre-mutation snapshots or scoped restyle
-  hints before changing the tree. Stylesheet and device operations schedule
-  the document root in the same call. Embedders cannot set, clear, or query
-  internal traversal dirty state.
+  `remove_element_state`, `set_inline_style`, `insert_before`,
+  `remove_element`, `drop_element`, and `drop_subtree` record their own
+  pre-mutation snapshots or scoped restyle hints before changing the tree.
+  Stylesheet and device operations schedule the document root in the same call.
+  Embedders cannot set, clear, or query internal traversal dirty state.
 - **Payloads are opaque.** The payload arena retains the `T` supplied for
   each element/text node, and `Node<T>::payload` exposes a shared reference.
   The DOM core neither mutates the payload nor derives selector-visible state

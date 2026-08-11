@@ -231,7 +231,7 @@ fn remove_page(bencher: divan::Bencher, registry: Registry) {
                 .child_ids()
                 .to_vec();
             for row in rows {
-                doc.remove_subtree(row);
+                doc.drop_subtree(row);
             }
             doc
         });

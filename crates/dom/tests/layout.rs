@@ -848,7 +848,7 @@ fn layout_state_dies_with_its_node() {
     h.layout();
     assert_eq!(h.rect(old).2, 100.0);
 
-    h.doc.dom.remove_subtree(old);
+    h.doc.dom.drop_subtree(old);
     assert!(h.doc.dom.get(old).is_none());
 
     let new = h.doc.el(root, "view");
@@ -926,7 +926,7 @@ fn removed_boundary_is_not_replayed_after_its_node_id_is_reused() {
         dom::layout::NaturalSize::from_size(dom::layout::Size::new(30.0, 20.0)),
     );
 
-    assert_eq!(h.doc.dom.remove_subtree(old_boundary).len(), 2);
+    assert_eq!(h.doc.dom.drop_subtree(old_boundary).len(), 2);
 
     let first_reused = h.doc.dom.create_element("view", ());
     let second_reused = h.doc.dom.create_element("view", ());
@@ -1035,7 +1035,7 @@ fn detaching_from_a_laid_out_parent_updates_remaining_positions() {
     h.layout();
     assert_eq!(h.rect(second).0, 40.0);
 
-    h.doc.dom.detach(first);
+    h.doc.dom.remove_element(first);
     h.layout();
     assert_eq!(h.rect(second).0, 0.0);
 }

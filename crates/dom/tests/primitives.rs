@@ -30,7 +30,7 @@ fn removed_node_ids_may_be_reused_without_confusing_the_root() {
     doc.append_child(root, a);
     assert_eq!(doc.get(a).unwrap().parent_id(), Some(root));
 
-    doc.remove_subtree(a);
+    doc.drop_subtree(a);
     assert!(doc.get(a).is_none());
 
     let b = node(&mut doc, "div");
@@ -160,7 +160,7 @@ fn insert_before_reorders_within_one_parent() {
 }
 
 #[test]
-fn remove_subtree_frees_detaches_and_returns_payloads() {
+fn drop_subtree_frees_detaches_and_returns_payloads() {
     /// A payload carrying an embedder-side id, to observe the harvest.
     #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
     struct Payload(i32);
@@ -172,7 +172,7 @@ fn remove_subtree_frees_detaches_and_returns_payloads() {
     let grandchild = doc.create_text_node("payload", Payload(12));
     doc.append_child(child, grandchild);
 
-    let mut removed = doc.remove_subtree(child);
+    let mut removed = doc.drop_subtree(child);
     removed.sort_unstable();
     assert_eq!(
         removed,
@@ -187,11 +187,83 @@ fn remove_subtree_frees_detaches_and_returns_payloads() {
 }
 
 #[test]
+fn drop_element_frees_one_node_and_leaves_its_children_allocated() {
+    /// A payload carrying an embedder-side id, to observe the harvest.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Payload(i32);
+    let mut doc: Document<Payload> =
+        Document::new(common::device(800.0, 600.0), "page", Payload(1));
+    let container = doc.create_element("div", Payload(10));
+    let child = doc.create_element("div", Payload(11));
+    doc.append_child(container, child);
+    let grandchild = doc.create_text_node("payload", Payload(12));
+    doc.append_child(child, grandchild);
+
+    assert_eq!(
+        doc.drop_element(child),
+        Payload(11),
+        "only the dropped element's own payload comes back"
+    );
+
+    assert!(doc.get(child).is_none());
+    assert!(
+        doc.get(container).unwrap().child_ids().is_empty(),
+        "the dropped element is gone from its parent's child list"
+    );
+    let orphan = doc.get(grandchild).expect("the child outlives its parent");
+    assert_eq!(orphan.payload(), &Payload(12));
+    assert_eq!(
+        orphan.parent_id(),
+        None,
+        "and is left parentless rather than naming a freed node"
+    );
+
+    doc.append_child(container, grandchild);
+    assert_eq!(doc.get(container).unwrap().child_ids(), &[grandchild]);
+}
+
+#[test]
+fn remove_element_unlinks_without_freeing() {
+    let mut doc = test_document();
+    let root = doc.document_element().id();
+    let container = node(&mut doc, "div");
+    doc.append_child(root, container);
+    let leaf = node(&mut doc, "div");
+    doc.append_child(container, leaf);
+
+    doc.remove_element(container);
+
+    assert!(
+        doc.get(container)
+            .is_some_and(|node| node.parent_id().is_none()),
+        "the removed node stays allocated, just parentless"
+    );
+    assert_eq!(
+        doc.get(container).unwrap().child_ids(),
+        &[leaf],
+        "and keeps its own subtree"
+    );
+    assert!(!doc.is_connected(leaf));
+    assert!(doc.get(root).unwrap().child_ids().is_empty());
+
+    doc.append_child(root, container);
+    assert!(doc.is_connected(leaf), "the same ids re-insert intact");
+}
+
+#[test]
 #[should_panic(expected = "cannot remove the permanent document element")]
 fn the_document_element_cannot_be_removed() {
     let mut doc = test_document();
     let root = doc.document_element().id();
-    doc.remove_subtree(root);
+    doc.drop_subtree(root);
+}
+
+#[test]
+#[should_panic(expected = "cannot drop the permanent document element")]
+fn the_document_element_cannot_be_dropped_on_its_own() {
+    let mut doc = test_document();
+    let root = doc.document_element().id();
+    doc.drop_element(root);
 }
 
 #[test]
@@ -321,7 +393,9 @@ fn attributes_come_only_from_the_real_map() {
 }
 
 #[test]
-#[should_panic(expected = "cannot detach the permanent document element")]
+#[should_panic(
+    expected = "the permanent document element cannot be removed from the document node"
+)]
 fn the_document_element_cannot_be_reparented() {
     let mut doc = test_document();
     let root = doc.document_element().id();
@@ -351,7 +425,7 @@ fn text_nodes_reject_element_attributes() {
 fn mutating_through_a_stale_handle_crashes() {
     let mut doc = test_document();
     let a = node(&mut doc, "div");
-    doc.remove_subtree(a);
+    doc.drop_subtree(a);
     assert!(doc.get(a).is_none());
     doc.set_attribute(a, "title", "boom");
 }

@@ -477,7 +477,7 @@ impl<T> Document<T> {
         );
 
         let base = self.begin_reactions();
-        self.detach_inner(child);
+        self.unlink_from_parent(child);
         let index = match before {
             None => self
                 .get(parent)
@@ -506,28 +506,28 @@ impl<T> Document<T> {
         self.insert_before(parent, child, None);
     }
 
-    pub fn detach(&mut self, child: NodeId) {
+    pub fn remove_element(&mut self, child: NodeId) {
         let base = self.begin_reactions();
-        self.detach_inner(child);
+        self.unlink_from_parent(child);
         self.drain_reactions(base);
     }
 
-    fn detach_inner(&mut self, child: NodeId) {
+    fn unlink_from_parent(&mut self, child: NodeId) {
         assert_ne!(
             child, DOCUMENT_NODE_ID,
-            "Document::detach cannot detach the document node"
+            "the document node cannot be removed: it has no parent"
         );
         assert_ne!(
             child, DOCUMENT_ELEMENT_NODE_ID,
-            "Document::detach cannot detach the permanent document element"
+            "the permanent document element cannot be removed from the document node"
         );
         assert!(
             !self.get(child).is_some_and(Node::is_shadow_root),
-            "Document::detach cannot detach a shadow root from its host"
+            "a shadow root cannot be removed from its host"
         );
         let old_parent = self
             .get(child)
-            .expect("stale NodeId passed to Document::detach")
+            .expect("stale NodeId passed to a Document removal method")
             .parent_id();
         let Some(parent) = old_parent else {
             return;
@@ -561,78 +561,108 @@ impl<T> Document<T> {
         self.note_custom_elements_removed(child, was_connected);
     }
 
-    pub fn remove_subtree(&mut self, id: NodeId) -> Vec<T> {
+    pub fn drop_element(&mut self, id: NodeId) -> T {
         assert_ne!(
             id, DOCUMENT_NODE_ID,
-            "Document::remove_subtree cannot remove the document node"
+            "Document::drop_element cannot drop the document node"
         );
         assert_ne!(
             id, DOCUMENT_ELEMENT_NODE_ID,
-            "Document::remove_subtree cannot remove the permanent document element"
+            "Document::drop_element cannot drop the permanent document element"
         );
         assert!(
             !self.get(id).is_some_and(Node::is_shadow_root),
-            "Document::remove_subtree cannot remove a shadow root on its own"
+            "Document::drop_element cannot drop a shadow root on its own"
+        );
+        assert!(
+            self.get(id)
+                .expect("stale NodeId passed to Document::drop_element")
+                .shadow_root_id()
+                .is_none(),
+            "Document::drop_element cannot drop a shadow host on its own: its shadow tree can \
+             neither be re-parented nor reached again — use Document::drop_subtree"
+        );
+        self.assert_not_pinned(id);
+        let base = self.begin_reactions();
+        self.unlink_from_parent(id);
+        self.drain_reactions(base);
+        for child in self.live(id).child_ids().to_vec() {
+            self.unlink_from_parent(child);
+        }
+        self.node_removal_epoch += 1;
+        self.note_visual_mutation();
+        let (_, payload) = self.free_node(id);
+        self.prune_relayout_roots();
+        match payload {
+            PayloadSlot::Node(payload) => payload,
+            PayloadSlot::ShadowRoot => unreachable!("a shadow root is refused above"),
+            PayloadSlot::Document => unreachable!("the document node is refused above"),
+        }
+    }
+
+    pub fn drop_subtree(&mut self, id: NodeId) -> Vec<T> {
+        assert_ne!(
+            id, DOCUMENT_NODE_ID,
+            "Document::drop_subtree cannot remove the document node"
+        );
+        assert_ne!(
+            id, DOCUMENT_ELEMENT_NODE_ID,
+            "Document::drop_subtree cannot remove the permanent document element"
+        );
+        assert!(
+            !self.get(id).is_some_and(Node::is_shadow_root),
+            "Document::drop_subtree cannot remove a shadow root on its own"
         );
         self.assert_subtree_not_pinned(id);
         let base = self.begin_reactions();
-        self.detach_inner(id);
-        self.pin_node(id);
+        self.unlink_from_parent(id);
         self.drain_reactions(base);
-        self.unpin_node(id);
-        assert!(
-            self.get(id).is_some_and(|node| node.parent_id().is_none()),
-            "Document::remove_subtree: a disconnected callback re-attached the subtree being \
-             removed"
-        );
-        self.assert_subtree_not_pinned(id);
         self.node_removal_epoch += 1;
         self.note_visual_mutation();
         let mut removed = Vec::new();
         let mut stack = vec![id];
         while let Some(current) = stack.pop() {
-            let node = self
-                .tree
-                .nodes
-                .get(current)
-                .expect("subtree links always resolve while removing");
-            let removed_snapshot = self
-                .pending_snapshots
-                .remove(&OpaqueNode(current))
-                .is_some();
-            debug_assert_eq!(
-                removed_snapshot,
-                node.snapshot_present(),
-                "the document snapshot queue and node lifecycle flag diverged during removal"
-            );
-            {
-                let node = self
-                    .tree
-                    .nodes
-                    .try_remove(current)
-                    .expect("subtree links always resolve while removing");
-                stack.extend_from_slice(&node.children);
-                if let Some(root) = node.shadow_root_id() {
-                    stack.push(root);
-                }
-                if node.is_shadow_root() {
-                    self.shadow_roots -= 1;
-                }
+            let (node, payload) = self.free_node(current);
+            stack.extend_from_slice(&node.children);
+            if let Some(root) = node.shadow_root_id() {
+                stack.push(root);
             }
-            self.layout.remove(current);
-            self.forget_reactions(current);
-            match self.tree.remove_side_state(current) {
+            match payload {
                 PayloadSlot::Node(payload) => removed.push(payload),
                 PayloadSlot::ShadowRoot => {}
                 PayloadSlot::Document => unreachable!("the document node cannot be removed"),
             }
         }
+        self.prune_relayout_roots();
+        removed
+    }
+
+    fn free_node(&mut self, id: NodeId) -> (Node<T>, PayloadSlot<T>) {
+        let removed_snapshot = self.pending_snapshots.remove(&OpaqueNode(id)).is_some();
+        let node = self
+            .tree
+            .nodes
+            .try_remove(id)
+            .expect("subtree links always resolve while removing");
+        debug_assert_eq!(
+            removed_snapshot,
+            node.snapshot_present(),
+            "the document snapshot queue and node lifecycle flag diverged during removal"
+        );
+        if node.is_shadow_root() {
+            self.shadow_roots -= 1;
+        }
+        self.layout.remove(id);
+        self.forget_reactions(id);
+        (node, self.tree.remove_side_state(id))
+    }
+
+    fn prune_relayout_roots(&mut self) {
         let nodes = &self.tree.nodes;
         self.relayout_roots
             .retain(|pending| nodes.contains(pending.node_id));
         self.relayout_root_ids
             .retain(|&parked_id| nodes.contains(parked_id));
-        removed
     }
 
     pub(crate) fn take_snapshot_map(&mut self) -> SnapshotMap {
@@ -853,7 +883,7 @@ pub(crate) mod tests {
         ));
         assert!(document.layout.nodes.get(id).is_some());
 
-        assert_eq!(document.remove_subtree(id), vec![7]);
+        assert_eq!(document.drop_subtree(id), vec![7]);
         assert!(!document.tree.nodes.contains(id));
         assert!(document.tree.payloads.get(id).is_none());
         assert!(document.layout.nodes.get(id).is_none());
@@ -886,7 +916,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn remove_subtree_prunes_the_parked_id_set_so_a_reused_slot_is_not_stale() {
+    fn drop_subtree_prunes_the_parked_id_set_so_a_reused_slot_is_not_stale() {
         let mut document: Document<()> = Document::new(device(), "page", ());
         let a = document.document_element().id();
         let b = document.create_element("view", ());
@@ -895,7 +925,7 @@ pub(crate) mod tests {
         document.record_relayout_root(b, LayoutInput::default());
         assert!(document.relayout_root_ids.contains(&b));
 
-        assert_eq!(document.remove_subtree(b).len(), 1);
+        assert_eq!(document.drop_subtree(b).len(), 1);
         assert!(
             !document.relayout_root_ids.contains(&b),
             "the removed id must not remain in the parked set",
@@ -920,7 +950,7 @@ pub(crate) mod tests {
         document.append_child(root, detached);
         document.flush_styles_with_damage_sink(&mut |_, _| {});
 
-        document.detach(detached);
+        document.remove_element(detached);
         document.flush_styles_with_damage_sink(&mut |_, _| {});
         document.set_classes(detached, "hot");
         document.set_classes(connected, "hot");
@@ -979,7 +1009,7 @@ pub(crate) mod tests {
 
         document.set_classes(descendant, "nested");
         assert_eq!(document.pending_snapshots.len(), 2);
-        assert_eq!(document.remove_subtree(removed).len(), 2);
+        assert_eq!(document.drop_subtree(removed).len(), 2);
         assert!(
             document.pending_snapshots.is_empty(),
             "removing a subtree must purge every queued snapshot"

@@ -1043,7 +1043,7 @@ fn a_removal_fails_hit_queries_closed_until_the_next_render() {
     let root = h.root();
     let removed = h.el(root, "view.box");
     h.doc.dom.render();
-    h.doc.dom.remove_subtree(removed);
+    h.doc.dom.drop_subtree(removed);
     let recycled = h.el(root, "view.box");
     assert_eq!(
         h.doc.dom.elements_from_point(Point2D::new(50.0, 50.0)),

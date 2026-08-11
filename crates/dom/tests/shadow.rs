@@ -442,7 +442,7 @@ fn removing_a_host_removes_its_shadow_tree_with_it() {
     let inside = harness.shadow_el(harness.shadow, "inside");
     harness.doc.flush();
 
-    let removed = harness.doc.dom.remove_subtree(harness.host);
+    let removed = harness.doc.dom.drop_subtree(harness.host);
     assert_eq!(
         removed.len(),
         2,
@@ -451,6 +451,13 @@ fn removing_a_host_removes_its_shadow_tree_with_it() {
     assert!(harness.doc.dom.get(harness.shadow).is_none());
     assert!(harness.doc.dom.get(inside).is_none());
     assert!(harness.doc.dom.get(harness.host).is_none());
+}
+
+#[test]
+#[should_panic(expected = "cannot drop a shadow host on its own")]
+fn a_host_cannot_be_dropped_without_its_shadow_tree() {
+    let mut harness = Harness::new();
+    harness.doc.dom.drop_element(harness.host);
 }
 
 #[test]
@@ -595,7 +602,7 @@ fn removing_a_slot_stops_rendering_what_it_held() {
             .contains(&slottable)
     );
 
-    harness.doc.dom.remove_subtree(slot);
+    harness.doc.dom.drop_subtree(slot);
     harness.doc.flush();
     assert!(harness.doc.dom.render());
 
@@ -618,7 +625,7 @@ fn detaching_a_slottable_clears_its_assignment() {
     harness.doc.flush();
     assert_eq!(harness.doc.dom.assigned_slot(slottable), Some(slot));
 
-    harness.doc.dom.detach(slottable);
+    harness.doc.dom.remove_element(slottable);
     assert_eq!(harness.doc.dom.assigned_slot(slottable), None);
     assert_eq!(harness.doc.dom.assigned_nodes(slot), &[] as &[NodeId]);
 
@@ -707,7 +714,7 @@ fn mid_list_insertion_and_removal_keep_slot_order() {
     assert_eq!(doc.dom.assigned_nodes(slot), rows.as_slice());
 
     let removed = rows.remove(16);
-    doc.dom.remove_subtree(removed);
+    doc.dom.drop_subtree(removed);
     assert_eq!(doc.dom.assigned_nodes(slot), rows.as_slice());
 
     doc.flush();
@@ -810,7 +817,7 @@ fn removing_a_host_with_a_large_shadow_tree_frees_every_node() {
     let rows: Vec<_> = (0..128).map(|_| doc.el(host, "row")).collect();
     doc.flush();
 
-    assert_eq!(doc.dom.remove_subtree(host).len(), 2 + 128 + 128);
+    assert_eq!(doc.dom.drop_subtree(host).len(), 2 + 128 + 128);
     for id in shadow_only
         .into_iter()
         .chain(rows)

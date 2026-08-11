@@ -841,7 +841,7 @@ mod tests {
         let dirty_sibling = document.create_element("view", ());
         document.append_child(root, dirty_sibling);
         document.flush_styles_with_damage_sink(&mut |_, _| {});
-        document.detach(stale);
+        document.remove_element(stale);
         document.flush_styles_with_damage_sink(&mut |_, _| {});
 
         {

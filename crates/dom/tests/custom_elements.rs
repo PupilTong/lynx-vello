@@ -26,6 +26,7 @@ fn take(log: &Log) -> Vec<String> {
 }
 
 type Action = Box<dyn Fn(&mut Document<()>, NodeId) + Send + Sync>;
+type ReadAction = Box<dyn Fn(&Document<()>, NodeId) + Send + Sync>;
 
 /// Records lifecycle reactions and optional callback mutations.
 struct Probe {
@@ -34,7 +35,7 @@ struct Probe {
     observed: Vec<String>,
     on_constructed: Option<Action>,
     on_connected: Option<Action>,
-    on_disconnected: Option<Action>,
+    on_disconnected: Option<ReadAction>,
     on_attribute: Option<Action>,
 }
 
@@ -66,7 +67,7 @@ impl Probe {
         self
     }
 
-    fn on_disconnected(mut self, action: Action) -> Self {
+    fn on_disconnected(mut self, action: ReadAction) -> Self {
         self.on_disconnected = Some(action);
         self
     }
@@ -103,7 +104,7 @@ impl CustomElement<()> for Probe {
         }
     }
 
-    fn disconnected_callback(&self, document: &mut Document<()>, element: NodeId) {
+    fn disconnected_callback(&self, document: &Document<()>, element: NodeId) {
         self.record(&format!("disconnected#{element}"));
         if let Some(action) = &self.on_disconnected {
             action(document, element);
@@ -450,13 +451,13 @@ fn disconnect_is_gated_on_the_old_parents_connectedness() {
     let connected = doc.el(root, "x-item");
     let _ = take(&log);
 
-    doc.dom.detach(inside);
+    doc.dom.remove_element(inside);
     assert!(
         take(&log).is_empty(),
         "its old parent was never connected, so nothing was ever connected"
     );
 
-    doc.dom.detach(connected);
+    doc.dom.remove_element(connected);
     assert_eq!(take(&log), vec![format!("x-item:disconnected#{connected}")]);
 }
 
@@ -486,7 +487,7 @@ fn moving_a_two_element_subtree_batches_disconnect_and_connect_per_element() {
 }
 
 #[test]
-fn remove_subtree_delivers_disconnect_while_the_subtree_is_still_readable() {
+fn drop_subtree_delivers_disconnect_while_the_subtree_is_still_readable() {
     let log = log();
     let seen = Arc::new(Mutex::new(Vec::new()));
     let mut doc = Doc::new();
@@ -504,7 +505,7 @@ fn remove_subtree_delivers_disconnect_while_the_subtree_is_still_readable() {
     let element = doc.el(root, "x-item");
     let _ = take(&log);
 
-    doc.dom.remove_subtree(element);
+    doc.dom.drop_subtree(element);
 
     assert_eq!(take(&log), vec![format!("x-item:disconnected#{element}")]);
     assert_eq!(
@@ -516,6 +517,67 @@ fn remove_subtree_delivers_disconnect_while_the_subtree_is_still_readable() {
         doc.dom.get(element).is_none(),
         "and freed immediately after"
     );
+}
+
+#[test]
+fn drop_element_disconnects_the_subtree_that_survives_it() {
+    let log = log();
+    let mut doc = Doc::new();
+    let root = doc.root;
+    define(&mut doc, Probe::new("x-item", &log));
+    let parent = doc.el(root, "x-item");
+    let child = doc.el(parent, "x-item");
+    let _ = take(&log);
+
+    doc.dom.drop_element(parent);
+
+    assert_eq!(
+        take(&log),
+        vec![
+            format!("x-item:disconnected#{parent}"),
+            format!("x-item:disconnected#{child}"),
+        ],
+        "the child left the document with its parent, so it disconnects too — even though only \
+         the parent is freed"
+    );
+    assert!(doc.dom.get(parent).is_none());
+    assert!(
+        doc.dom
+            .get(child)
+            .is_some_and(|node| node.parent_id().is_none()),
+        "the child stays allocated, unlinked from the node that was freed"
+    );
+}
+
+#[test]
+fn drop_element_delivers_disconnect_while_the_children_are_still_attached() {
+    let log = log();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut doc = Doc::new();
+    let root = doc.root;
+    let recorded = Arc::clone(&seen);
+    define(
+        &mut doc,
+        Probe::new("x-item", &log).on_disconnected(Box::new(move |document, element| {
+            let children = document
+                .get(element)
+                .map(|node| node.child_ids().to_vec())
+                .unwrap_or_default();
+            recorded.lock().unwrap().push((element, children));
+        })),
+    );
+    let parent = doc.el(root, "x-item");
+    let child = doc.el(parent, "x-item");
+    let _ = take(&log);
+
+    doc.dom.drop_element(parent);
+
+    assert_eq!(
+        &*seen.lock().unwrap(),
+        &[(parent, vec![child]), (child, Vec::new())],
+        "the subtree is intact while the callbacks read it; the children are unlinked afterwards"
+    );
+    assert_eq!(doc.dom.get(child).unwrap().parent_id(), None);
 }
 
 #[test]
@@ -766,7 +828,7 @@ fn removing_a_later_sibling_from_a_callback_drains_that_siblings_whole_queue() {
         Probe::new("x-item", &log).on_connected(Box::new(move |document, _| {
             let doomed = target.lock().unwrap().take();
             if let Some(id) = doomed {
-                document.remove_subtree(id);
+                document.drop_subtree(id);
             }
         })),
     );
@@ -799,7 +861,7 @@ fn a_freed_id_recycled_by_a_later_creation_receives_no_stale_reaction() {
     let root = doc.root;
     define(&mut doc, Probe::new("x-item", &log));
     let element = doc.el(root, "x-item");
-    doc.dom.remove_subtree(element);
+    doc.dom.drop_subtree(element);
     let _ = take(&log);
 
     let recycled = doc.dom.create_element("plain", ());
@@ -820,75 +882,10 @@ fn a_constructor_that_frees_the_element_being_created_panics() {
     define(
         &mut doc,
         Probe::new("x-item", &log).on_constructed(Box::new(|document, element| {
-            document.remove_subtree(element);
+            document.drop_subtree(element);
         })),
     );
     doc.dom.create_element("x-item", ());
-}
-
-#[test]
-#[should_panic(expected = "freeing it is not")]
-fn a_node_a_callback_moves_into_the_doomed_subtree_is_still_caught() {
-    let log = log();
-    let doomed: Arc<Mutex<Option<NodeId>>> = Arc::new(Mutex::new(None));
-    let guest: Arc<Mutex<Option<NodeId>>> = Arc::new(Mutex::new(None));
-    let mut doc = Doc::new();
-    let root = doc.root;
-
-    let smuggled = Arc::clone(&guest);
-    define(
-        &mut doc,
-        Probe::new("x-outer", &log).on_disconnected(Box::new(move |document, element| {
-            if let Some(pinned) = *smuggled.lock().unwrap() {
-                document.append_child(element, pinned);
-            }
-        })),
-    );
-    let target = Arc::clone(&doomed);
-    let me = Arc::clone(&guest);
-    define(
-        &mut doc,
-        Probe::new("x-inner", &log).on_constructed(Box::new(move |document, element| {
-            *me.lock().unwrap() = Some(element);
-            if let Some(victim) = *target.lock().unwrap() {
-                document.remove_subtree(victim);
-            }
-        })),
-    );
-
-    let outer = doc.el(root, "x-outer");
-    *doomed.lock().unwrap() = Some(outer);
-    doc.dom.create_element("x-inner", ());
-}
-
-#[test]
-fn a_disconnected_callback_may_remove_a_descendant_of_the_doomed_subtree() {
-    let log = log();
-    let victim: Arc<Mutex<Option<NodeId>>> = Arc::new(Mutex::new(None));
-    let target = Arc::clone(&victim);
-    let mut doc = Doc::new();
-    let root = doc.root;
-    define(
-        &mut doc,
-        Probe::new("x-item", &log).on_disconnected(Box::new(move |document, _| {
-            if let Some(id) = target.lock().unwrap().take() {
-                document.remove_subtree(id);
-            }
-        })),
-    );
-    let outer = doc.el(root, "x-item");
-    let inner = doc.el(outer, "x-item");
-    *victim.lock().unwrap() = Some(inner);
-
-    let payloads = doc.dom.remove_subtree(outer);
-
-    assert_eq!(
-        payloads.len(),
-        1,
-        "the callback took the descendant's payload"
-    );
-    assert!(doc.dom.get(outer).is_none());
-    assert!(doc.dom.get(inner).is_none());
 }
 
 #[test]
@@ -901,7 +898,7 @@ fn a_caught_pin_panic_leaves_the_subtree_intact() {
         &mut doc,
         Probe::new("x-item", &log).on_constructed(Box::new(move |document, element| {
             let hit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                document.remove_subtree(element);
+                document.drop_subtree(element);
             }));
             *recorded.lock().unwrap() = hit.is_err();
         })),
@@ -925,27 +922,11 @@ fn a_constructor_that_frees_and_recycles_its_own_id_panics() {
     define(
         &mut doc,
         Probe::new("x-item", &log).on_constructed(Box::new(|document, element| {
-            document.remove_subtree(element);
+            document.drop_subtree(element);
             document.create_element("view", ());
         })),
     );
     doc.dom.create_element("x-item", ());
-}
-
-#[test]
-#[should_panic(expected = "freeing it is not")]
-fn a_disconnected_callback_that_frees_the_subtree_being_removed_panics() {
-    let log = log();
-    let mut doc = Doc::new();
-    let root = doc.root;
-    define(
-        &mut doc,
-        Probe::new("x-item", &log).on_disconnected(Box::new(|document, element| {
-            document.remove_subtree(element);
-        })),
-    );
-    let element = doc.el(root, "x-item");
-    doc.dom.remove_subtree(element);
 }
 
 #[test]
@@ -1071,7 +1052,7 @@ fn a_document_with_no_definitions_behaves_exactly_as_before() {
     let root = doc.root;
     let element = doc.el(root, "view");
     let child = doc.el(element, "view");
-    doc.dom.detach(child);
+    doc.dom.remove_element(child);
     doc.dom.append_child(element, child);
     doc.flush();
 

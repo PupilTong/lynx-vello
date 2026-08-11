@@ -10,7 +10,7 @@
 //! the pipeline. Neither the frame nor the painter crosses the document API
 //! boundary.
 //! A frame is pinned to the document's node-removal epoch: after any
-//! `remove_subtree` a freed id can be recycled by a later creation, so the
+//! `drop_subtree` a freed id can be recycled by a later creation, so the
 //! hit queries fail closed on a stale frame — they answer nothing until the
 //! next render — rather than returning a recycled node for old geometry.
 //! Painting is pinned harder — to the document's private visual-mutation
