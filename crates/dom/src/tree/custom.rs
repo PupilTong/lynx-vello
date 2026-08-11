@@ -337,7 +337,9 @@ impl<T> Document<T> {
                 let root = self.live_node_mut(DOCUMENT_ELEMENT_NODE_ID);
                 root.custom_definition = Some(definition);
                 root.custom_state = CustomElementState::Constructing;
+                root.mark_custom_subtree_may_contain();
             }
+            self.note_custom_subtree_inserted(DOCUMENT_ELEMENT_NODE_ID);
             self.enqueue_reaction(DOCUMENT_ELEMENT_NODE_ID, Reaction::Constructed);
             self.enqueue_reaction(DOCUMENT_ELEMENT_NODE_ID, Reaction::Connected);
             self.drain_reactions(base);
@@ -478,8 +480,33 @@ impl<T> Document<T> {
             let node = self.live_node_mut(element);
             node.custom_definition = Some(definition);
             node.custom_state = CustomElementState::Constructing;
+            node.mark_custom_subtree_may_contain();
         }
         self.enqueue_reaction(element, Reaction::Constructed);
+    }
+
+    pub(crate) fn note_custom_subtree_inserted(&mut self, root: NodeId) -> bool {
+        if !self.live(root).custom_subtree_may_contain() {
+            return false;
+        }
+
+        let mut current = self.live(root).parent_id();
+        while let Some(node_id) = current {
+            let parent = self.live(node_id).parent_id();
+            if self
+                .live_node_mut(node_id)
+                .mark_custom_subtree_may_contain()
+            {
+                break;
+            }
+            current = parent;
+        }
+        true
+    }
+
+    #[must_use]
+    pub(crate) fn custom_subtree_may_contain(&self, root: NodeId) -> bool {
+        self.live(root).custom_subtree_may_contain()
     }
 
     pub(crate) fn note_custom_elements_inserted(&mut self, root: NodeId, connected: bool) {
@@ -487,11 +514,9 @@ impl<T> Document<T> {
             return;
         }
         let mut inserted = SmallVec::<[NodeId; 8]>::new();
-        self.collect_shadow_including_inclusive(root, &mut inserted);
+        self.collect_custom_elements_shadow_including_inclusive(root, &mut inserted);
         for element in inserted {
-            if self.live(element).custom_state == CustomElementState::Custom {
-                self.enqueue_reaction(element, Reaction::Connected);
-            }
+            self.enqueue_reaction(element, Reaction::Connected);
         }
     }
 
@@ -500,11 +525,9 @@ impl<T> Document<T> {
             return;
         }
         let mut removed = SmallVec::<[NodeId; 8]>::new();
-        self.collect_shadow_including_inclusive(root, &mut removed);
+        self.collect_custom_elements_shadow_including_inclusive(root, &mut removed);
         for element in removed {
-            if self.live(element).custom_state == CustomElementState::Custom {
-                self.enqueue_reaction(element, Reaction::Disconnected);
-            }
+            self.enqueue_reaction(element, Reaction::Disconnected);
         }
     }
 
@@ -577,19 +600,24 @@ impl<T> Document<T> {
         self.custom_elements.is_draining()
     }
 
-    #[must_use]
-    pub(crate) fn has_custom_element_definitions(&self) -> bool {
-        !self.custom_elements.is_empty()
-    }
-
-    fn collect_shadow_including_inclusive(&self, root: NodeId, out: &mut SmallVec<[NodeId; 8]>) {
+    fn collect_custom_elements_shadow_including_inclusive(
+        &self,
+        root: NodeId,
+        out: &mut SmallVec<[NodeId; 8]>,
+    ) {
+        if !self.live(root).custom_subtree_may_contain() {
+            return;
+        }
         let mut stack: SmallVec<[NodeId; 8]> = SmallVec::new();
         stack.push(root);
         while let Some(current) = stack.pop() {
             let Some(node) = self.get(current) else {
                 continue;
             };
-            if node.is_element() {
+            if !node.custom_subtree_may_contain() {
+                continue;
+            }
+            if node.custom_state == CustomElementState::Custom {
                 out.push(current);
             }
             stack.extend(node.child_ids().iter().rev().copied());

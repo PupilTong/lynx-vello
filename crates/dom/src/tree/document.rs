@@ -492,12 +492,13 @@ impl<T> Document<T> {
         self.live_node_mut(parent).children.insert(index, child);
         self.live_node_mut(child).parent = Some(parent);
         let appended = index + 1 == self.live_node_mut(parent).children.len();
+        let contains_custom_elements = self.note_custom_subtree_inserted(child);
 
         self.note_moved_subtree(child);
         self.note_slot_assignment_inserted(parent, child, appended);
         self.note_child_list_change(parent, index);
         self.invalidate_layout(child);
-        let connected = self.has_custom_element_definitions() && self.is_connected(child);
+        let connected = contains_custom_elements && self.is_connected(child);
         self.note_custom_elements_inserted(child, connected);
         self.drain_reactions(base);
     }
@@ -532,7 +533,7 @@ impl<T> Document<T> {
         let Some(parent) = old_parent else {
             return;
         };
-        let was_connected = self.has_custom_element_definitions() && self.is_connected(parent);
+        let was_connected = self.custom_subtree_may_contain(child) && self.is_connected(parent);
 
         self.invalidate_layout(child);
 

@@ -84,6 +84,7 @@ pub struct Node<T> {
 
     pub(crate) custom_definition: Option<DefinitionId>,
     pub(crate) custom_state: CustomElementState,
+    custom_subtree_may_contain: bool,
 
     pub(crate) parsed_inline_style: Option<Arc<Locked<PropertyDeclarationBlock>>>,
 
@@ -159,6 +160,7 @@ impl<T> Node<T> {
             element_state: ElementState::empty(),
             custom_definition: None,
             custom_state: CustomElementState::default(),
+            custom_subtree_may_contain: false,
             parsed_inline_style: None,
             shadow: None,
             style_data: ElementDataWrapper::default(),
@@ -182,6 +184,17 @@ impl<T> Node<T> {
     #[inline]
     pub(crate) fn styling_data(&self) -> &StylingData {
         &self.styling
+    }
+
+    #[must_use]
+    pub(crate) fn custom_subtree_may_contain(&self) -> bool {
+        self.custom_subtree_may_contain
+    }
+
+    /// Marks this node's shadow-including subtree as possibly containing a
+    /// custom element, returning whether it was already marked.
+    pub(crate) fn mark_custom_subtree_may_contain(&mut self) -> bool {
+        std::mem::replace(&mut self.custom_subtree_may_contain, true)
     }
 
     pub(crate) fn owner_document(&self) -> &Node<T> {
