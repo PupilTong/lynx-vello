@@ -49,14 +49,12 @@ function Switch(
       )}
       bindtap={handleToggle}
     >
-      {/* Track */}
       <view
         className={cn(
           'lynx-size-full lynx-transition-all lynx-bg-neutral-faint ui-checked:lynx-bg-primary',
           checked && 'ui-checked',
         )}
       />
-      {/* Thumb */}
       <view
         className={cn(
           'lynx-absolute lynx-rounded-full lynx-size-full lynx-bg-primary-content lynx-transform-[translateX(3px)] lynx-transition-all lynx-shadow',

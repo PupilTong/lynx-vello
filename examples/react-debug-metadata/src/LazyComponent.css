@@ -3,7 +3,6 @@
   color: yellow;
 }
 
-/* crash rows inside the dynamic component (own bundle, own css) */
 .crash-section {
   margin-top: 14px;
   width: 88vw;

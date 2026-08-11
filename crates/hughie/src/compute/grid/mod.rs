@@ -47,9 +47,7 @@ struct ItemDefaults {
     rtl: bool,
 }
 
-/// Compact order/classification record retained before an item is resolved.
-/// Raw item style remains host-owned and is re-fetched through the node
-/// handle by each sizing or positioned-layout pass.
+/// Compact order and classification record for an unresolved item.
 #[derive(Debug, Clone, Copy)]
 struct PendingItem<N> {
     ordered: OrderedItem<N>,
@@ -220,8 +218,6 @@ where
     (columns, rows)
 }
 
-/// Runs one §12.3 track-sizing pass for one axis, then §12.4-aligns the
-/// tracks when that axis's inner size is definite.
 #[allow(clippy::too_many_arguments)]
 fn size_and_align_axis<T>(
     tree: &T,

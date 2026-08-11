@@ -38,9 +38,6 @@ const shutdown = (code) => {
 };
 
 consumer.on('exit', (code) => shutdown(code ?? 0));
-// Tear the consumer down on ANY producer exit (including a clean one):
-// the consumer's /producer lazy-bundle traffic depends on the producer, so
-// leaving it up would only serve guaranteed-to-fail requests.
 producer.on('exit', (code) => shutdown(code ?? 0));
 process.on('SIGINT', () => shutdown(0));
 process.on('SIGTERM', () => shutdown(0));

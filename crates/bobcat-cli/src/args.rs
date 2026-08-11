@@ -1,3 +1,5 @@
+//! Command-line argument parsing and validation.
+
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::num::NonZeroU32;
@@ -20,7 +22,6 @@ pub(crate) struct Options {
     pub(crate) vsync_hz: NonZeroU32,
     pub(crate) viewport_width: f32,
     pub(crate) viewport_height: f32,
-    /// Headless only: the headed host always derives this from the window.
     pub(crate) device_pixel_ratio: f32,
 }
 
@@ -178,9 +179,6 @@ fn next_utf8(arguments: &mut VecDeque<OsString>, option: &str) -> Result<String,
 fn parse_input_url(value: &str) -> Result<Url, CliError> {
     let url = Url::parse(value)
         .map_err(|error| CliError::arguments(format!("invalid input URL `{value}`: {error}")))?;
-    // Judged on the parsed URL, not the raw spelling: `FILE:///…`,
-    // `file:/…`, and `file://localhost/…` all normalize to a hostless local
-    // `file:///` URL and are just as local as the canonical form.
     if url.scheme() != "file"
         || url.host().is_some()
         || url.query().is_some()

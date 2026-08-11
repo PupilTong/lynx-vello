@@ -1,47 +1,17 @@
 //! The decoded byte format every decoder produces and the paint engine
 //! consumes.
 
-// The one sanctioned road to peniko: vello re-exports its version-matched copy,
-// dom re-exports vello, lynx-element re-exports dom. A direct peniko dependency
-// is forbidden (see AGENTS.md), and reaching through the chain is what
-// guarantees this Blob is the same type the paint engine's atlas keys on.
 use lynx_element::dom::vello::peniko;
 
 use crate::image::error::ImageError;
 
-/// How a decoded buffer encodes alpha.
-///
-/// Carried rather than normalised. The reference and WIC paths emit straight
-/// alpha, `ImageIO` and `AImageDecoder` premultiplied; converting on the CPU would
-/// be pure loss, because vello's fine shader premultiplies per texel before
-/// filtering either way. Byte-identical output across decoders is therefore not
-/// a goal — identical *composited* output is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AlphaType {
-    /// Separate (straight, unpremultiplied) alpha channel.
     Straight,
-    /// Colour channels already scaled by alpha.
     Premultiplied,
 }
 
 /// Decoded RGBA8 pixels plus the metadata needed to interpret them.
-///
-/// Row-major and tightly packed: stride is exactly `4 * width` with no row
-/// padding, length exactly `4 * width * height`, channel order R, G, B, A in
-/// memory.
-///
-/// The buffer *is* a `peniko::Blob`, so the identity `peniko` mints at
-/// construction is the identity every [`DecodedImage::to_image_data`] call
-/// hands back. That is what keeps vello's atlas holding one residency entry for
-/// the image instead of re-uploading it every frame, and making it structural
-/// beats leaving it to a convention a later caller can quietly break.
-///
-/// Colour values are the file's own sRGB-encoded bytes. No ICC or CICP
-/// conversion and no gamma conversion is performed, because vello's atlas is
-/// `Rgba8Unorm` rather than `Rgba8UnormSrgb` — a wide-gamut or tagged image
-/// renders as if it were sRGB.
-///
-/// Cloning is cheap: the buffer is shared, not copied.
 #[derive(Clone, Debug)]
 pub struct DecodedImage {
     data: peniko::Blob<u8>,
@@ -52,12 +22,6 @@ pub struct DecodedImage {
 
 impl DecodedImage {
     /// Wraps a decoded buffer.
-    ///
-    /// # Errors
-    ///
-    /// [`ImageError::Decode`] when either axis is zero or `pixels.len()` is not
-    /// exactly `4 * width * height` — a decoder that miscounts its own stride
-    /// must not reach the atlas.
     pub fn from_rgba8(
         width: u32,
         height: u32,
@@ -117,17 +81,13 @@ impl DecodedImage {
         self.pixels().len()
     }
 
-    /// The shared-buffer identity. Stable across [`Clone`] and across repeated
-    /// [`Self::to_image_data`] calls, which is the property that stops vello
-    /// re-uploading the same image every frame.
+    /// The shared-buffer identity.
     #[must_use]
     pub fn id(&self) -> u64 {
         self.data.id()
     }
 
     /// The `peniko` view of this image, for `dom`'s `ImageStore`.
-    ///
-    /// Cheap — it clones the shared buffer handle, never the pixels.
     #[must_use]
     pub fn to_image_data(&self) -> peniko::ImageData {
         use peniko::{ImageAlphaType, ImageData, ImageFormat};
@@ -146,9 +106,6 @@ impl DecodedImage {
 }
 
 /// `4 * width * height`, or `None` on overflow.
-///
-/// Public because decoder implementations outside this crate size their output
-/// buffers with it before [`DecodedImage::from_rgba8`] re-validates the result.
 #[must_use]
 pub fn expected_byte_len(width: u32, height: u32) -> Option<usize> {
     (width as usize)
@@ -206,14 +163,11 @@ mod tests {
 
     #[test]
     fn buffer_identity_survives_cloning_and_repeated_conversion() {
-        // The anti-re-upload invariant: vello's atlas keys residency on the
-        // blob id, so every view of one decoded image must share one id.
         let decoded = image(4, 4);
         let id = decoded.id();
         assert_eq!(decoded.clone().id(), id);
         assert_eq!(decoded.to_image_data().data.id(), id);
         assert_eq!(decoded.to_image_data().data.id(), id);
-        // A separately decoded image is a different entry.
         assert_ne!(image(4, 4).id(), id);
     }
 

@@ -14,8 +14,6 @@ mod paint_common;
 #[path = "support/screenshot.rs"]
 mod screenshot;
 
-// lynx-stack's Playwright Chromium project uses the Pixel 5 viewport, and its
-// tracked viewport screenshots are 393 × 727 CSS pixels.
 const SCREEN_WIDTH: f32 = 393.0;
 const SCREEN_HEIGHT: f32 = 727.0;
 const FRAGMENT: &str = r#"
@@ -48,7 +46,6 @@ fn inline_style_fragment_matches_reference() {
     screenshot::assert_golden(&["inline-style"], &actual);
 }
 
-/// One synthesised source image: dimensions plus its RGBA8 pixels.
 type Checker = (u32, u32, Vec<u8>);
 
 const OBJECT_FIT_CSS: &str = "
@@ -70,20 +67,9 @@ const OBJECT_FIT_CSS: &str = "
     .bordered { border: 6px solid #1f2937; }
 ";
 
-/// Every `object-fit` value, against a source both smaller and larger than its
-/// box.
-///
-/// Two natural sizes is the point: with only a small source, `none` and
-/// `scale-down` render identically and `scale-down`'s interesting branch — where
-/// it equals `contain` — is never exercised at all.
-///
-/// `image-rendering: pixelated` throughout, so sampling is nearest and the
-/// golden carries no bilinear filtering noise to absorb with tolerance.
 #[test]
 fn object_fit_matrix_matches_reference() {
     let mut doc = paint_common::Doc::with_css_sized(OBJECT_FIT_CSS, SCREEN_WIDTH, SCREEN_HEIGHT);
-    // Smaller than the 110x80 box (so `none` and `scale-down` agree), and
-    // larger than it (so `scale-down` collapses onto `contain`).
     let small = decode_checker(8, 8);
     let large = decode_checker(160, 120);
 
@@ -100,8 +86,6 @@ fn object_fit_matrix_matches_reference() {
         ("r3 c0 none", &large),
         ("r3 c1 down", &large),
         ("r3 c2 cover bottom-centre", &large),
-        // Geometry interactions: the content-box radii clip and the
-        // border/padding inset that shrinks the content box under the image.
         ("r4 c0 cover rounded", &large),
         ("r4 c1 contain bordered", &large),
         ("r4 c2 fill rounded bordered", &small),
@@ -128,15 +112,12 @@ fn object_fit_matrix_matches_reference() {
     screenshot::assert_golden(&["replaced-object-fit"], &actual);
 }
 
-/// A four-quadrant checker with a diagonal marker, so a flip, a rotation or an
-/// axis swap is visible rather than merely plausible.
 fn decode_checker(width: u32, height: u32) -> Checker {
     let mut rgba = Vec::with_capacity((width * height * 4) as usize);
     for y in 0..height {
         for x in 0..width {
             let left = x < width / 2;
             let top = y < height / 2;
-            // The marker stripe runs top-left to bottom-right.
             let on_diagonal = (x * height).abs_diff(y * width) < width.max(height);
             let pixel = if on_diagonal {
                 [0, 0, 0, 255]

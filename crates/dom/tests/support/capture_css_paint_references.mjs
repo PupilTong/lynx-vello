@@ -1,12 +1,5 @@
 #!/usr/bin/env node
-/**
- * Capture the browser-owned CSS paint atlases with a reproducible Playwright
- * context. Requires the `playwright` npm package and a local Chrome install.
- *
- * Usage:
- *   node capture_css_paint_references.mjs \
- *     http://127.0.0.1:8765 output/playwright/css-paint/atlases [shard ...]
- */
+/** Captures browser-owned CSS paint atlases through Playwright. */
 
 import fs from "node:fs/promises";
 import path from "node:path";

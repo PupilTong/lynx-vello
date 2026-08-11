@@ -25,19 +25,14 @@ use bobcat_core::image::{
 use crate::image_decoders::orientation::{self, Orientation};
 use crate::image_decoders::resample;
 
-/// What each per-format decoder hands back: the RGBA8 buffer, its **stored**
-/// dimensions (pre-orientation), and how it encodes alpha.
 type RawDecode = (Vec<u8>, (u32, u32), AlphaType);
 
-/// The three claimed formats. GIF, HEIC and AVIF are identified by the contract
-/// but deliberately unclaimed here: each would cost another bundled codec, and
-/// the platforms where those formats matter decode them through the system.
 const CAPABILITIES: Capabilities = Capabilities::none()
     .with(ImageFormat::Png, Acceleration::Software)
     .with(ImageFormat::Jpeg, Acceleration::Software)
     .with(ImageFormat::WebP, Acceleration::Software);
 
-/// PNG, JPEG and WebP via `png`, `zune-jpeg` and `image-webp`.
+/// Pure-Rust PNG, JPEG, and WebP decoder used on Linux.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SoftwareDecoder;
 
@@ -62,8 +57,6 @@ impl Decoder for SoftwareDecoder {
             ImageFormat::Png => probe_png(bytes),
             ImageFormat::Jpeg => probe_jpeg(bytes),
             ImageFormat::WebP => probe_webp(bytes),
-            // Unreachable through `decode_bytes`/the loader, which gate on
-            // `capabilities` first; a direct caller gets the same refusal.
             _ => Err(ImageError::Unsupported { format }),
         }
     }
@@ -84,8 +77,6 @@ impl Decoder for SoftwareDecoder {
             _ => return Err(ImageError::Unsupported { format }),
         };
 
-        // Orientation is applied before resampling so the target size is
-        // interpreted in the same space the natural size is reported in.
         let orientation = if format == ImageFormat::Jpeg {
             orientation::jpeg_orientation(bytes)
         } else {
@@ -116,15 +107,8 @@ impl Decoder for SoftwareDecoder {
     }
 }
 
-// ---------------------------------------------------------------- PNG
-
-/// `read_info` stops after the header chunks, before any `IDAT` is inflated, so
-/// this is genuinely header-only.
 fn png_reader(bytes: &[u8]) -> Result<png::Reader<Cursor<&[u8]>>, ImageError> {
     let mut decoder = png::Decoder::new(Cursor::new(bytes));
-    // EXPAND + STRIP_16: palette and sub-byte grayscale become 8-bit channels,
-    // `tRNS` becomes a real alpha channel, and 16-bit samples are truncated to
-    // 8. What survives is one of four 8-bit layouts, normalised below.
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     decoder
         .read_info()
@@ -152,18 +136,10 @@ fn decode_png(bytes: &[u8]) -> Result<RawDecode, ImageError> {
         (info.width, info.height)
     };
 
-    // APNG's default image is only animation frame 0 when an `fcTL` precedes
-    // `IDAT`. When `acTL` comes after it, the default image is a *fallback* for
-    // non-APNG decoders and is not part of the animation at all — returning it
-    // would quietly break this crate's documented "decode frame 0" policy and,
-    // for the common "transparent fallback" authoring pattern, hand back an
-    // empty image. `Info::frame_control` is `Some` after `read_info` exactly
-    // when the default image is frame 0, which is precisely the test needed.
     let default_image_is_frame_zero = reader.info().frame_control.is_some();
     let separate_fallback =
         reader.info().animation_control.is_some() && !default_image_is_frame_zero;
     if separate_fallback {
-        // Skip the fallback and advance to the real first animation frame.
         reader
             .next_frame_info()
             .map_err(|error| ImageError::decode(ImageFormat::Png, error.to_string()))?;
@@ -181,12 +157,6 @@ fn decode_png(bytes: &[u8]) -> Result<RawDecode, ImageError> {
     let (color_type, _) = reader.output_color_type();
     let rgba = expand_to_rgba(buffer, color_type, info.width, info.height)?;
 
-    // An animation frame may be a sub-rectangle of the canvas, so it has to be
-    // composited at its offset rather than returned as if it were the whole
-    // image. Frame 0 alone needs no blend-mode handling: the canvas starts
-    // fully transparent, and `Over` onto transparent black is `Source`, so both
-    // APNG blend ops agree here. Later frames would need real dispose/blend
-    // state, which static-only v1 does not keep.
     if separate_fallback {
         let frame = reader.info().frame_control.ok_or_else(|| {
             ImageError::decode(ImageFormat::Png, "animation frame carries no fcTL")
@@ -200,11 +170,9 @@ fn decode_png(bytes: &[u8]) -> Result<RawDecode, ImageError> {
         return Ok((composited, canvas, AlphaType::Straight));
     }
 
-    // PNG alpha is stored straight, and `png` never premultiplies.
     Ok((rgba, (info.width, info.height), AlphaType::Straight))
 }
 
-/// Places an RGBA8 sub-rectangle onto a transparent canvas at `offset`.
 fn composite_onto_canvas(
     frame: &[u8],
     frame_size: (u32, u32),
@@ -234,11 +202,6 @@ fn composite_onto_canvas(
     Ok(out)
 }
 
-/// Normalises `png`'s four possible 8-bit output layouts to RGBA8.
-///
-/// Takes the buffer by value so the already-RGBA case — by far the most common
-/// — is a truncation rather than a full copy of the image. At the 8192x8192
-/// ceiling that copy was a quarter of a gigabyte of pure waste.
 fn expand_to_rgba(
     mut buffer: Vec<u8>,
     color_type: png::ColorType,
@@ -278,7 +241,6 @@ fn expand_to_rgba(
                 rgba.extend_from_slice(&[source[0], source[1], source[2], 255]);
             }
             png::ColorType::Rgba => unreachable!("handled above"),
-            // `EXPAND` converts palette to RGB/RGBA, so this cannot survive.
             png::ColorType::Indexed => {
                 return Err(ImageError::decode(
                     ImageFormat::Png,
@@ -290,8 +252,6 @@ fn expand_to_rgba(
     Ok(rgba)
 }
 
-// --------------------------------------------------------------- JPEG
-
 fn probe_jpeg(bytes: &[u8]) -> Result<ImageHeader, ImageError> {
     let mut decoder = zune_jpeg::JpegDecoder::new(Cursor::new(bytes));
     decoder
@@ -302,7 +262,6 @@ fn probe_jpeg(bytes: &[u8]) -> Result<ImageHeader, ImageError> {
     Ok(ImageHeader {
         format: ImageFormat::Jpeg,
         natural_size: PixelSize { width, height },
-        // Baseline and progressive JPEG have no alpha channel.
         has_alpha: false,
         animated: false,
     })
@@ -320,12 +279,9 @@ fn decode_jpeg(bytes: &[u8]) -> Result<RawDecode, ImageError> {
         .decode()
         .map_err(|error| ImageError::decode(ImageFormat::Jpeg, error.to_string()))?;
     let (width, height) = jpeg_dimensions(&decoder)?;
-    // The synthesised alpha channel is fully opaque, so straight and
-    // premultiplied are the same bytes; report straight.
     Ok((pixels, (width, height), AlphaType::Straight))
 }
 
-/// `zune-jpeg` reports `usize` dimensions; everything above speaks `u32`.
 fn jpeg_dimensions<R>(decoder: &zune_jpeg::JpegDecoder<R>) -> Result<(u32, u32), ImageError>
 where
     R: zune_jpeg::zune_core::bytestream::ZByteReaderTrait,
@@ -339,8 +295,6 @@ where
         .map_err(|_| ImageError::decode(ImageFormat::Jpeg, "height does not fit u32"))?;
     Ok((width, height))
 }
-
-// --------------------------------------------------------------- WebP
 
 fn webp_decoder(bytes: &[u8]) -> Result<image_webp::WebPDecoder<Cursor<&[u8]>>, ImageError> {
     image_webp::WebPDecoder::new(Cursor::new(bytes))
@@ -360,8 +314,6 @@ fn probe_webp(bytes: &[u8]) -> Result<ImageHeader, ImageError> {
 
 fn decode_webp(bytes: &[u8], request: &DecodeRequest) -> Result<RawDecode, ImageError> {
     let mut decoder = webp_decoder(bytes)?;
-    // Unlike the other two, `image-webp` takes a real memory ceiling; give it
-    // the same budget the caller's pixel cap implies.
     decoder.set_memory_limit(
         usize::try_from(request.max_pixels.saturating_mul(4)).unwrap_or(usize::MAX),
     );
@@ -371,12 +323,10 @@ fn decode_webp(bytes: &[u8], request: &DecodeRequest) -> Result<RawDecode, Image
         .output_buffer_size()
         .ok_or_else(|| ImageError::decode(ImageFormat::WebP, "output buffer size overflows"))?;
     let mut buffer = vec![0u8; size];
-    // An animated WebP reads its first frame here; the rest is discarded.
     decoder
         .read_image(&mut buffer)
         .map_err(|error| ImageError::decode(ImageFormat::WebP, error.to_string()))?;
 
-    // `image-webp` writes RGB8 for an opaque image and RGBA8 otherwise.
     let rgba = if has_alpha {
         buffer
     } else {

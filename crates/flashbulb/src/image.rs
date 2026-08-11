@@ -4,9 +4,6 @@ use std::fmt;
 use std::path::Path;
 
 /// A tightly packed, row-major RGBA8 image.
-///
-/// Deliberately not `Clone`: copying a full-frame pixel buffer is never
-/// incidental, and nothing here needs it.
 #[derive(PartialEq, Eq)]
 pub struct Image {
     width: u32,
@@ -24,19 +21,13 @@ impl fmt::Debug for Image {
     }
 }
 
-/// Why an image could not be read or written.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ImageError {
-    /// The pixel buffer is not `width * height * 4` bytes.
     Size { width: u32, height: u32, len: usize },
-    /// `width * height * 4` does not fit in a `usize` on this target.
     Dimensions { width: u32, height: u32 },
-    /// The PNG is not the 8-bit RGBA form this crate writes.
     Format(String),
-    /// The PNG codec failed.
     Codec(String),
-    /// The file could not be read or written.
     Io(std::io::Error),
 }
 
@@ -202,9 +193,6 @@ impl Image {
         Ok(())
     }
 
-    /// Checked, because `width` and `height` are untrusted: on a 32-bit target
-    /// the product wraps, and a wrapped zero would accept an empty buffer as a
-    /// gigantic image.
     const fn byte_len(width: u32, height: u32) -> Option<usize> {
         match (width as usize).checked_mul(height as usize) {
             Some(pixels) => pixels.checked_mul(4),

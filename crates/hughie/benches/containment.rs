@@ -33,8 +33,7 @@ fn dirty_leaf_style(width: f32) -> TestStyle {
     }
 }
 
-/// A deep, bushy flex tree whose dirty leaf lives inside one subtree that is
-/// (optionally) a `contain: strict` relayout boundary.
+/// A deep flex tree with an optional strict-containment boundary.
 struct Fixture {
     tree: TestTree,
     root: TestId,

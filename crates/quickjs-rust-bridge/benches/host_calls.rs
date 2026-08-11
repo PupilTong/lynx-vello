@@ -17,12 +17,8 @@ fn main() {
     divan::main();
 }
 
-/// Calls per timed iteration. Large enough that per-iteration overhead is
-/// noise, small enough to stay well inside the default execution timeout.
 const CALLS: usize = 20_000;
 
-/// Builds a realm with `install`ed host functions and a `run` driver that makes
-/// `CALLS` calls of `call_expression`.
 fn driver(install: impl FnOnce(&mut Realm), call_expression: &str) -> (Realm, Value, Value) {
     let mut realm = Realm::new().expect("realm");
     install(&mut realm);
@@ -46,9 +42,6 @@ fn driver(install: impl FnOnce(&mut Realm), call_expression: &str) -> (Realm, Va
     (realm, run, undefined)
 }
 
-/// The shape every `__Create*` / `__AppendElement` handler has: return a
-/// handle and do nothing else, so the benchmark measures the boundary rather
-/// than the work behind it.
 #[allow(
     clippy::unnecessary_wraps,
     reason = "the signature is dictated by the host-function boundary"
@@ -57,7 +50,6 @@ fn number_handler(_: &[HostValue]) -> Result<HostValue, HostFunctionError> {
     Ok(HostValue::Number(1.0))
 }
 
-/// `__FlushElementTree()` — no arguments, no return value.
 #[divan::bench]
 fn no_arguments(bencher: divan::Bencher) {
     let (mut realm, run, undefined) = driver(
@@ -71,7 +63,6 @@ fn no_arguments(bencher: divan::Bencher) {
     bencher.bench_local(|| realm.call(&run, Some(&undefined), &[]).expect("run"));
 }
 
-/// `__CreateView(parentComponentUniqueID)` — one number in, one number out.
 #[divan::bench]
 fn one_number_argument(bencher: divan::Bencher) {
     let (mut realm, run, undefined) = driver(
@@ -85,7 +76,6 @@ fn one_number_argument(bencher: divan::Bencher) {
     bencher.bench_local(|| realm.call(&run, Some(&undefined), &[]).expect("run"));
 }
 
-/// `__AppendElement(parent, child)` — the most frequent call of all.
 #[divan::bench]
 fn two_number_arguments(bencher: divan::Bencher) {
     let (mut realm, run, undefined) = driver(
@@ -99,8 +89,6 @@ fn two_number_arguments(bencher: divan::Bencher) {
     bencher.bench_local(|| realm.call(&run, Some(&undefined), &[]).expect("run"));
 }
 
-/// `__CreatePage(componentID, componentCSSID)` — the string-argument path,
-/// which has to decode as well as cross.
 #[divan::bench]
 fn string_and_number_arguments(bencher: divan::Bencher) {
     let (mut realm, run, undefined) = driver(
@@ -114,7 +102,6 @@ fn string_and_number_arguments(bencher: divan::Bencher) {
     bencher.bench_local(|| realm.call(&run, Some(&undefined), &[]).expect("run"));
 }
 
-/// A handler returning a string, so the return path is measured too.
 #[divan::bench]
 fn string_return(bencher: divan::Bencher) {
     let (mut realm, run, undefined) = driver(

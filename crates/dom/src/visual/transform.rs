@@ -15,10 +15,7 @@ use stylo::values::generics::transform::{
     create_perspective_matrix, get_normalized_vector_and_angle,
 };
 
-/// The perspective a parent stacking context applies to its **direct
-/// box-tree children**'s matrices (display:contents levels dissolve): `T(−center) ·
-/// perspective(depth) · T(center)` in the parent's border-box space. `perspective-origin` is not
-/// compiled in this build, so the center is the initial `50% 50%`.
+/// Perspective applied to direct child stacking contexts.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ParentPerspective {
     pub depth: f32,
@@ -26,7 +23,6 @@ pub(crate) struct ParentPerspective {
 }
 
 impl ParentPerspective {
-    /// Reads the perspective a style applies to its children, if any.
     pub(crate) fn of(style: &ComputedValues, border_box: Size2D<f32>) -> Option<Self> {
         match style.get_box().perspective {
             stylo::values::generics::box_::Perspective::None => None,
@@ -44,9 +40,6 @@ impl ParentPerspective {
     }
 }
 
-/// Projects a matrix onto the z = 0 plane: keeps the x/y/w behavior for
-/// z = 0 inputs and decouples z entirely. Correct here because every element
-/// flattens (`transform-style` is always `Flat`).
 pub(crate) fn flatten(mut matrix: Transform3D<f32>) -> Transform3D<f32> {
     matrix.m13 = 0.0;
     matrix.m23 = 0.0;
@@ -58,21 +51,6 @@ pub(crate) fn flatten(mut matrix: Transform3D<f32>) -> Transform3D<f32> {
     matrix
 }
 
-/// A stacking-context root's flattened matrix mapping its border-box-local
-/// coordinates into its parent stacking context's space.
-///
-/// Composition per css-transforms-1 §"Transform Rendering",
-/// css-transforms-2 §6, and motion-1 §1.1 (the offset transform layers
-/// after the individual transform properties and before `transform`),
-/// spelled in `.then` order (first applied first):
-/// `T(−origin) → transform list → offset (rotate, then translate) → scale
-///  → rotate → translate → T(origin) → T(offset in parent) → parent
-///  perspective`.
-/// Percentages (translate functions, transform-origin) resolve against the
-/// border box. The motion-path anchor is always `transform-origin`
-/// (`offset-anchor` is not compiled), so inside this conjugation the offset
-/// translation is `position − origin` and the rotation pivots about the
-/// anchor.
 pub(crate) fn stacking_context_matrix(
     style: &ComputedValues,
     border_box: Size2D<f32>,
@@ -134,10 +112,6 @@ pub(crate) fn stacking_context_matrix(
     }
     flatten(matrix)
 }
-
-// The individual transform properties are storage-only in the fork (always
-// `None` until a grammar rebase exposes them); the arms mirror stylo's own
-// `ToMatrix` conventions so they are correct the day that happens.
 
 fn individual_translate(translate: &Translate, border_box: Size2D<f32>) -> Transform3D<f32> {
     match translate {

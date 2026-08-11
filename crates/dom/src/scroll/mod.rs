@@ -56,12 +56,7 @@ use crate::layout::{
 use crate::tree::document::Document;
 use crate::tree::node::Node;
 
-/// A per-axis pair of flags — which axes the user may scroll, which axes clip.
-///
-/// The style adjuster only reconciles axes that disagree about being
-/// *scrollable* (css-overflow-3 §3), so plenty of mixed pairs survive it:
-/// `overflow-x: hidden; overflow-y: scroll` is user-scrollable vertically
-/// only, and `overflow-x: clip; overflow-y: visible` clips horizontally only.
+/// Per-axis scrolling capability flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ScrollAxes {
     pub x: bool,
@@ -75,7 +70,6 @@ impl ScrollAxes {
     pub const NONE: Self = Self { x: false, y: false };
     pub const BOTH: Self = Self { x: true, y: true };
 
-    /// The part of `delta` these axes admit.
     #[must_use]
     fn mask(self, delta: Vector2D<f32>) -> Vector2D<f32> {
         Vector2D::new(
@@ -111,16 +105,11 @@ impl ScrollBox {
     }
 }
 
-/// Whether this computed style makes a box a scroll container at all —
-/// including `overflow: hidden`, which scrolls only programmatically.
 #[must_use]
 fn is_scroll_container(style: &ComputedValues) -> bool {
     style.clone_overflow_x().is_scrollable() || style.clone_overflow_y().is_scrollable()
 }
 
-/// The axes this computed style lets the user scroll: `scroll` only — never
-/// `hidden`, which scrolls programmatically, and never `clip`, which does not
-/// scroll at all (css-overflow-3 §3).
 #[must_use]
 fn user_scrollable_axes(style: &ComputedValues) -> ScrollAxes {
     ScrollAxes {
@@ -129,14 +118,6 @@ fn user_scrollable_axes(style: &ComputedValues) -> ScrollAxes {
     }
 }
 
-/// Clamps one axis into `0..=max`, mapping a non-finite request to `0.0`
-/// rather than storing it.
-///
-/// `f32::clamp` *propagates* NaN, and this crate re-clamps a stored offset on
-/// every read — so one NaN reaching the store would survive every later clamp
-/// and poison the box permanently. Since the offset arrives from an untrusted
-/// host through [`crate::input`], the arithmetic has to be closed under
-/// garbage, not merely well-behaved on good input.
 fn clamp_axis(value: f32, max: f32) -> f32 {
     if value.is_finite() {
         value.clamp(0.0, max)
@@ -149,12 +130,6 @@ fn clamp_to(offset: Vector2D<f32>, max: Vector2D<f32>) -> Vector2D<f32> {
     Vector2D::new(clamp_axis(offset.x, max.x), clamp_axis(offset.y, max.y))
 }
 
-/// The whole scroll model of one box, from its computed style, its committed
-/// layout, and its stored offset. `None` when the box is not a scroll
-/// container.
-///
-/// Single-sourced here so the public query and the paint-order build cannot
-/// disagree about how far a box has scrolled.
 pub(crate) fn resolve(
     style: &ComputedValues,
     layout: &hughie::tree::Layout,
@@ -163,8 +138,6 @@ pub(crate) fn resolve(
     if !is_scroll_container(style) {
         return None;
     }
-    // `content_size` is the scrollable overflow extent in the box's own
-    // border-box coordinates; the scrollport starts one border in.
     let scrollport = Size2D::new(
         (layout.size.width - layout.border.left - layout.border.right).max(0.0),
         (layout.size.height - layout.border.top - layout.border.bottom).max(0.0),
@@ -184,29 +157,13 @@ pub(crate) fn resolve(
 }
 
 impl<T> Document<T> {
-    /// Whether this node is a scroll container — a box whose computed
-    /// `overflow` is scrollable on either axis. `overflow: hidden` qualifies;
-    /// it just is not user-scrollable.
-    ///
-    /// # Panics
-    ///
-    /// Panics when computed styles are not ready; call [`Document::layout`]
-    /// after mutating the document first.
+    /// Whether this node has scrollable overflow.
     #[must_use]
     pub fn is_scroll_container(&self, id: NodeId) -> bool {
         self.paint_style(id).is_some_and(is_scroll_container)
     }
 
-    /// This node's scroll geometry, or `None` when it is not a scroll
-    /// container.
-    ///
-    /// Resolved against the last committed layout — call [`Document::layout`]
-    /// first if the tree has been mutated since.
-    ///
-    /// # Panics
-    ///
-    /// Panics when computed styles are not ready; call [`Document::layout`]
-    /// after mutating the document first.
+    /// Returns this node's scroll geometry when it is a scroll container.
     #[must_use]
     pub fn scroll_box(&self, id: NodeId) -> Option<ScrollBox> {
         resolve(
@@ -216,13 +173,7 @@ impl<T> Document<T> {
         )
     }
 
-    /// This node's scroll position, clamped to what its current geometry
-    /// admits. Zero for every node that is not a scroll container.
-    ///
-    /// # Panics
-    ///
-    /// Panics when computed styles are not ready; call [`Document::layout`]
-    /// after mutating the document first.
+    /// Returns the scroll offset clamped to current geometry.
     #[must_use]
     pub fn scroll_offset(&self, id: NodeId) -> Vector2D<f32> {
         self.scroll_box(id)
@@ -236,23 +187,7 @@ impl<T> Document<T> {
             .map_or_else(Vector2D::zero, |state| state.scroll_offset)
     }
 
-    /// Scrolls `id` to `offset`, clamping it into range. Returns the offset
-    /// actually applied.
-    ///
-    /// Scrolling moves painted content but neither restyles nor relayouts, so
-    /// this invalidates the private visual frame only: the next paint or hit
-    /// test rebuilds it, but performs no style or layout work.
-    ///
-    /// A non-finite component is clamped to `0.0` rather than stored: this
-    /// crate re-clamps on read, so a stored NaN would never wash out. The
-    /// `debug_assert` makes a host adapter that produces one loud in
-    /// development instead of quietly parking the box at the top.
-    ///
-    /// # Panics
-    ///
-    /// Panics when computed styles are not ready; call [`Document::layout`]
-    /// after mutating the document first. In debug builds, also on a non-finite
-    /// `offset`.
+    /// Scrolls to a clamped offset and returns the applied offset.
     pub fn scroll_to(&mut self, id: NodeId, offset: Vector2D<f32>) -> Vector2D<f32> {
         debug_assert!(
             offset.x.is_finite() && offset.y.is_finite(),
@@ -273,17 +208,7 @@ impl<T> Document<T> {
         clamped
     }
 
-    /// Scrolls `id` by `delta`, returning the part of `delta` it could **not**
-    /// consume — zero when the box absorbed the whole delta, the untouched
-    /// delta when it is not a scroll container or is already at that boundary.
-    ///
-    /// The remainder is the primitive scroll chaining is built from, here and
-    /// in whatever nested-scroll policy a runtime layer grows later.
-    ///
-    /// # Panics
-    ///
-    /// Panics when computed styles are not ready; call [`Document::layout`]
-    /// after mutating the document first.
+    /// Scrolls by a delta and returns the unconsumed remainder.
     pub fn scroll_by(&mut self, id: NodeId, delta: Vector2D<f32>) -> Vector2D<f32> {
         let Some(scroll_box) = self.scroll_box(id) else {
             return delta;
@@ -292,42 +217,21 @@ impl<T> Document<T> {
         scroll_box.offset + delta - applied
     }
 
-    /// The next box up whose scrolling this one moves with: its **containing
-    /// block**, not its DOM parent.
-    ///
-    /// This is the rule the paint build applies (CSS2 §11.1.1, and
-    /// the private visual collector's containing-block escape), keyed on
-    /// computed position exactly as that is: a box is only clipped by, and
-    /// only scrolls with, ancestors in its containing-block chain. Walking DOM
-    /// ancestry here instead would let a wheel over an absolute box anchored
-    /// *above* a scroller scroll that scroller — moving content behind a box
-    /// that visibly does not move, which is precisely the mismatch the paint
-    /// side avoids.
-    ///
-    /// A `fixed` box, or an `absolute` box with no positioned ancestor, is
-    /// anchored to the viewport, which is not a scrollable box here — so the
-    /// chain ends rather than falling back to the DOM parent.
     fn scroll_parent(&self, id: NodeId) -> Option<NodeId> {
         let node = self.get(id)?;
         if !node.is_element() {
-            // A text leaf sits in its styled parent's flow, box or not.
             return node.flat_parent_id();
         }
         let style = node.layout_computed_style()?;
         match style.clone_position() {
             PositionProperty::Absolute => Self::containing_block(node, false),
             PositionProperty::Fixed => Self::containing_block(node, true),
-            // Static, relative and sticky boxes stay in their box parent's
-            // flow, so they scroll with it.
             PositionProperty::Static | PositionProperty::Relative | PositionProperty::Sticky => {
                 box_parent(node).map(Node::id)
             }
         }
     }
 
-    /// The nearest ancestor establishing this box's absolute (or fixed)
-    /// containing block — the same predicates `visual` captures its escape
-    /// contexts with.
     fn containing_block(node: &Node<T>, fixed: bool) -> Option<NodeId> {
         let mut current = box_parent(node);
         while let Some(ancestor) = current {
@@ -345,20 +249,7 @@ impl<T> Document<T> {
         None
     }
 
-    /// The nearest box at or above `id` that the user may scroll along at
-    /// least one of `axes`, walking the containing-block chain
-    /// (`scroll_parent`) so the answer agrees with what actually moves
-    /// on screen.
-    ///
-    /// A box that is user-scrollable but already pinned at both boundaries
-    /// still qualifies: whether it *can absorb a particular delta* is
-    /// [`Self::scroll_by`]'s answer, not this one's, so a gesture stays
-    /// latched to the scroller it started on.
-    ///
-    /// # Panics
-    ///
-    /// Panics when computed styles are not ready; call [`Document::layout`]
-    /// after mutating the document first.
+    /// Finds the nearest ancestor scrollable on every requested axis.
     #[must_use]
     pub fn nearest_user_scrollable(&self, id: NodeId, axes: ScrollAxes) -> Option<NodeId> {
         let mut current = Some(id);
@@ -377,20 +268,7 @@ impl<T> Document<T> {
         None
     }
 
-    /// Applies `delta` at `from`, chaining whatever the innermost scroller
-    /// cannot absorb outward along the same containing-block chain, and
-    /// returns the innermost box that consumed anything together with the
-    /// total consumed.
-    ///
-    /// This is the CSS default (`overscroll-behavior: auto`): a scroller at its
-    /// boundary hands the rest to its parent. The node reported is the
-    /// innermost consumer, which is what an event target wants to name even
-    /// when an ancestor absorbed the rest.
-    ///
-    /// # Panics
-    ///
-    /// Panics when computed styles are not ready; call [`Document::layout`]
-    /// after mutating the document first.
+    /// Applies a delta through the ancestor scroll chain.
     pub fn scroll_chain(
         &mut self,
         from: NodeId,
@@ -437,8 +315,6 @@ mod tests {
     use crate::StylesheetOrigin;
     use crate::tree::document::tests::device;
 
-    /// A 100×100 `overflow: scroll` box holding a 300×400 child, nested inside
-    /// an outer 200×200 scroller so chaining has somewhere to go.
     fn nested_scrollers() -> (Document<()>, NodeId, NodeId) {
         let mut document: Document<()> = Document::new(device(), "page", ());
         document.add_stylesheet(
@@ -504,8 +380,6 @@ mod tests {
         assert_eq!(scroll_box.user_scrollable, ScrollAxes::NONE);
         assert_eq!(scroll_box.max_offset(), Vector2D::new(200.0, 300.0));
 
-        // Programmatic scrolling reaches it; a gesture never would, because
-        // `nearest_user_scrollable` refuses to name it.
         assert_eq!(
             document.scroll_to(clip, Vector2D::new(50.0, 60.0)),
             Vector2D::new(50.0, 60.0)
@@ -526,7 +400,6 @@ mod tests {
         );
         assert_eq!(document.scroll_offset(inner), Vector2D::new(0.0, 300.0));
 
-        // Already pinned at the bottom: the whole downward delta comes back.
         assert_eq!(
             document.scroll_by(inner, Vector2D::new(50.0, 25.0)),
             Vector2D::new(0.0, 25.0),
@@ -562,7 +435,6 @@ mod tests {
     fn chaining_hands_the_remainder_to_the_next_scroller_out() {
         let (mut document, outer, inner) = nested_scrollers();
 
-        // 400 down at the innermost box: 300 fits, 100 chains to the outer one.
         let (named, total) = document
             .scroll_chain(inner, Vector2D::new(0.0, 400.0))
             .expect("something scrolled");
@@ -571,7 +443,6 @@ mod tests {
         assert_eq!(document.scroll_offset(inner), Vector2D::new(0.0, 300.0));
         assert_eq!(document.scroll_offset(outer), Vector2D::new(0.0, 100.0));
 
-        // Both pinned downward now, so a further push moves nothing at all.
         document.scroll_to(outer, Vector2D::new(0.0, 1_000.0));
         let pinned_at = document.scroll_offset(outer);
         assert_eq!(document.scroll_chain(inner, Vector2D::new(0.0, 50.0)), None);
@@ -580,10 +451,6 @@ mod tests {
 
     #[test]
     fn the_chain_follows_containing_blocks_not_dom_ancestry() {
-        // `pinned` is a DOM child of the scroller but anchored on the page, so
-        // the paint build already refuses to scroll it. The input walk has to
-        // agree: a wheel over it must not scroll the box it sits inside, or
-        // content would slide behind a box that visibly does not move.
         let mut document: Document<()> = Document::new(device(), "page", ());
         document.add_stylesheet(
             "page { display: flex; position: relative; width: 800px; height: 600px; }
@@ -619,8 +486,6 @@ mod tests {
         );
         assert_eq!(document.scroll_offset(scroller), Vector2D::zero());
 
-        // A static child of the same scroller still scrolls it, so this is the
-        // containing-block rule and not a blanket refusal.
         let row = *document
             .get(scroller)
             .and_then(|node| node.child_ids().first())
@@ -630,8 +495,6 @@ mod tests {
             Some(scroller),
         );
 
-        // Making the scroller itself the containing block reconnects the
-        // absolute box to it, matching what the paint build then does.
         document.add_stylesheet(
             ".scroller { position: relative; }",
             StylesheetOrigin::Author,
@@ -648,9 +511,6 @@ mod tests {
         let (mut document, _outer, inner) = nested_scrollers();
         document.scroll_to(inner, Vector2D::new(0.0, 100.0));
 
-        // `f32::clamp` propagates NaN and this crate re-clamps on read, so a
-        // stored NaN would never wash out. Release builds absorb it; debug
-        // builds assert, so this only exercises the arithmetic.
         assert_eq!(
             clamp_to(
                 Vector2D::new(f32::NAN, f32::INFINITY),

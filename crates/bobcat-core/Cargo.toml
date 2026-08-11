@@ -14,7 +14,6 @@ quickjs = ["dep:quickjs-rust-bridge"]
 
 [dependencies]
 bytes = { workspace = true }
-# WHATWG `data:` URL parsing for the image loader's `data:` short-circuit.
 data-url = { workspace = true }
 http = { workspace = true }
 lynx-element = { workspace = true }
@@ -29,10 +28,6 @@ url = { workspace = true }
 [dev-dependencies]
 flashbulb = { workspace = true, features = ["render"] }
 lynx-template-decoder = { workspace = true }
-# The contract tests' decoder double is implemented over `png` — the engine
-# designs the `Decoder` contract and ships no codec, so its own tests inject a
-# minimal implementation the same way an embedder does. Fixture PNGs are
-# generated in-process with the same crate.
 png = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 

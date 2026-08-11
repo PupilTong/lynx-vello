@@ -9,15 +9,12 @@ use lynx_element::{ElementTree, PageConfig, Viewport};
 
 const VIEWPORT: Viewport = Viewport::new(393.0, 727.0);
 
-/// The single-threaded composition: the realm takes the tree from this
-/// slot per batch and every `__FlushElementTree` puts it back committed.
 fn runtime() -> (MainThreadRuntime, SharedTree) {
     let elements = SharedTree::new(ElementTree::new(VIEWPORT, PageConfig::default()));
     let runtime = MainThreadRuntime::new(elements.clone(), || {}).expect("QuickJS realm");
     (runtime, elements)
 }
 
-/// A realm whose committed batches land in a tree no assertion reads.
 fn bare_runtime() -> MainThreadRuntime {
     runtime().0
 }
@@ -40,10 +37,6 @@ fn a_card_root_builds_its_tree_through_the_papi() {
         )
         .expect("main-thread script");
 
-    // Ids allocate monotonically from 2 (the page is 1): the two rows and
-    // the nested view. Their liveness proves the committed batch applied;
-    // DOM shape (append order, tags, committed styles) is asserted where it
-    // is owned - lynx-element's own unit tests.
     let elements = elements.tree();
     assert!(elements.page().is_some());
     assert!(elements.element(2).is_some());
@@ -186,7 +179,6 @@ fn the_page_is_not_in_the_document_until_the_tree_is_flushed() {
             ",
         )
         .expect("evaluate");
-    // Evaluation alone only defines the entry point.
     assert!(elements.tree().page().is_none());
 
     runtime.render_page().expect("render");
@@ -331,17 +323,11 @@ fn a_second_boot_re_renders_into_the_same_tree() {
         )
         .expect("first boot");
     runtime.render_page().expect("second boot");
-    // renderPage appended one more child into the same tree: the first
-    // boot's view (id 2) and the second's (id 3) are both live.
     let elements = elements.tree();
     assert!(elements.element(2).is_some());
     assert!(elements.element(3).is_some());
 }
 
-/// web-core's MTS realm is a browser realm: promise jobs queued while the
-/// script runs execute before control returns to the host. Without an explicit
-/// drain, a bundle's `Promise.resolve().then(…)` — or any `await` — would
-/// never run at all.
 #[test]
 fn microtasks_queued_during_render_run_before_the_call_returns() {
     let (mut runtime, elements) = runtime();
@@ -369,8 +355,6 @@ fn microtasks_queued_during_render_run_before_the_call_returns() {
     }
 }
 
-/// An unhandled rejection raised by the script is reported rather than
-/// swallowed, so a bundle failing asynchronously is not mistaken for success.
 #[test]
 fn an_unhandled_rejection_during_render_is_reported() {
     let mut runtime = bare_runtime();
@@ -387,16 +371,9 @@ fn an_unhandled_rejection_during_render_is_reported() {
     assert!(error.to_string().contains("async boom"), "{error}");
 }
 
-/// Job ordering must match the crate's `ScriptEngine` impl.
-///
-/// Driving the realm directly and checkpointing beside it skips
-/// `resume_incomplete_checkpoint`, so a run that hit the per-checkpoint job
-/// limit would let the next source run ahead of the jobs still queued from the
-/// previous one. Both paths now share one internal entry point.
 #[test]
 fn a_run_that_exceeds_the_job_limit_finishes_before_the_next_one_starts() {
     let (mut runtime, elements) = runtime();
-    // Far more promise jobs than one checkpoint's budget.
     let over_budget = runtime.evaluate_main_thread_script(
         r"
         globalThis.ticks = 0;
@@ -408,9 +385,6 @@ fn a_run_that_exceeds_the_job_limit_finishes_before_the_next_one_starts() {
         ",
     );
 
-    // Whether the first run reports hitting the limit is an implementation
-    // detail; what matters is that the leftover jobs are not silently skipped
-    // past by the next evaluation.
     let _ = over_budget;
     runtime.render_page().ok();
 

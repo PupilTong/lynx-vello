@@ -9,8 +9,6 @@ rust-version.workspace = true
 keywords = ["layout", "flexbox", "grid", "css", "ui"]
 categories = ["gui"]
 
-# Parley is an unconditional part of the closed leaf model. The only feature
-# is a non-production seam used by the engine's integration-test hosts.
 [features]
 layout-test-utils = []
 
@@ -23,8 +21,6 @@ stylo = { workspace = true }
 divan = { workspace = true }
 euclid = { workspace = true }
 style_traits = { workspace = true }
-# Dev-only reverse edge: benchmarks exercise this crate through the concrete
-# production document host instead of a benchmark-owned LayoutNode.
 dom = { workspace = true, features = ["layout-test-utils"] }
 
 [[bench]]

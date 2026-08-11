@@ -25,8 +25,6 @@ fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(&path).unwrap_or_else(|error| panic!("reading {}: {error}", path.display()))
 }
 
-/// A 4x4-quadrant RGBA8 PNG (red / green / blue / transparent), encoded
-/// in-process so the common case needs no committed fixture.
 fn checker_png(side: u32) -> Vec<u8> {
     let half = side / 2;
     let mut rgba = Vec::with_capacity((side * side * 4) as usize);
@@ -65,8 +63,6 @@ fn decodes_the_jpeg_fixture_with_recognisable_quadrants() {
     assert_eq!((response.image.width(), response.image.height()), (16, 16));
     assert!(!response.header.has_alpha, "baseline JPEG carries no alpha");
 
-    // JPEG is lossy; assert the dominant channel per quadrant rather than exact
-    // bytes. Sampling the quadrant centre avoids the ringing at the edges.
     let pixel = |x: u32, y: u32| {
         let at = ((y * 16 + x) * 4) as usize;
         let p = &response.image.pixels()[at..at + 4];
@@ -112,9 +108,6 @@ fn decodes_the_lossless_webp_fixture_including_its_transparent_quadrant() {
 
 #[test]
 fn exif_orientation_is_applied_to_both_the_header_and_the_pixels() {
-    // Stored 16x8 tagged orientation 6 (rotate 90 CW) must present as 8x16.
-    // css-images-3 makes `image-orientation: from-image` the initial value and
-    // the fork has no such property, so un-oriented output is not authorable.
     let decoder = decoder();
     let bytes = fixture("exif-rot90.jpg");
     let header = probe_bytes(decoder.as_ref(), &bytes).expect("probe");
@@ -137,8 +130,6 @@ fn exif_orientation_is_applied_to_both_the_header_and_the_pixels() {
 
 #[test]
 fn a_png_with_a_fully_transparent_quadrant_round_trips() {
-    // The fully transparent quadrant is [0,0,0,0] under both straight and
-    // premultiplied encodings, so the assertion is exact on every platform.
     let decoder = decoder();
     let response = decode_bytes(decoder.as_ref(), &checker_png(4), &DecodeRequest::default())
         .expect("decode generated PNG");
@@ -150,10 +141,6 @@ fn a_png_with_a_fully_transparent_quadrant_round_trips() {
 
 #[test]
 fn grayscale_and_rgb_pngs_normalise_to_rgba8() {
-    // Whatever layout the container stored, tightly packed RGBA8 must come out
-    // or the atlas upload is garbage. Grayscale is asserted with a small
-    // tolerance: a colour-managed decoder (ImageIO) may map device gray
-    // through a gray→sRGB conversion the pure-Rust decoder does not perform.
     let decoder = decoder();
     let mut bytes = Vec::new();
     {
@@ -231,9 +218,6 @@ fn a_decode_target_downsamples_but_never_upsamples() {
 
 #[test]
 fn the_platform_decoder_handles_every_committed_fixture() {
-    // Probe and decode must agree with each other on every fixture — the
-    // probe is what layout consumed, so a decode that disagrees with it shows
-    // up as a mis-sized box.
     let decoder = decoder();
     for name in ["checker-16.jpg", "checker-16.webp", "exif-rot90.jpg"] {
         let bytes = fixture(name);
@@ -252,9 +236,6 @@ fn the_platform_decoder_handles_every_committed_fixture() {
 
 #[test]
 fn an_apng_reports_animated_and_decodes_a_full_canvas_frame() {
-    // This file's default image carries no preceding `fcTL`, so per the APNG
-    // spec it is a fallback for non-APNG decoders and is NOT part of the
-    // animation; frame 0 of the animation is opaque red.
     let decoder = decoder();
     let response = decode_bytes(
         decoder.as_ref(),
@@ -271,10 +252,6 @@ fn an_apng_reports_animated_and_decodes_a_full_canvas_frame() {
     );
 }
 
-/// The strict frame-0-not-fallback pixel assertion is pinned to the pure-Rust
-/// reference: it is the implementation whose `next_frame` would otherwise hand
-/// the transparent fallback back, and the recorded frame-0 policy was written
-/// against it. Platform decoders own their own frame-0 selection.
 #[cfg(target_os = "linux")]
 #[test]
 fn the_reference_decoder_returns_animation_frame_zero_not_the_fallback() {

@@ -29,47 +29,22 @@ use crate::resource::{
 };
 
 /// Everything a loader is configured with.
-///
-/// The base URL lives here rather than behind a setter, because a loader is
-/// shared through an `Arc` — `&mut self` is not reachable once anything has
-/// spawned against it.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct LoaderConfig {
-    /// The owning template's bundle URL, handed to the fetcher as
-    /// [`ResourceLocator::base_url`].
-    ///
-    /// **The fetcher performs the join**, not this module: that is what
-    /// `resolve_locator` is for, and a host rewrite like Lynx's
-    /// `res:///name → res:///id` is not a URL join at all, so the pre-join
-    /// specifier has to reach the host intact.
+    /// The owning template's bundle URL, handed to the fetcher as [`ResourceLocator::base_url`].
     pub base_url: Option<Url>,
     /// The [`RequestId`] namespace this loader owns.
-    ///
-    /// The protocol requires a `RequestId` to be unique within one fetcher and
-    /// delegates namespace allocation to the parties sharing it, so this has no
-    /// safe default: two loaders over one fetcher that both defaulted to `0`
-    /// would each issue `{namespace: 0, sequence: 0}` as their first request and
-    /// break that uniqueness. [`LoaderConfig::new`] therefore takes it, and the
-    /// view or engine that owns the fetcher is what assigns it.
     pub request_namespace: u64,
-    /// Applies to every transport, not just the buffered one — a hostile or
-    /// broken host must not be able to OOM the process through the stream or
-    /// path branch that the buffered branch was hardened against.
+    /// Applies to every transport, not just the buffered one — a hostile or broken host must not
+    /// be able to OOM the process through the stream or path branch that the buffered branch
+    /// was hardened against.
     pub max_encoded_bytes: u64,
     pub decode_cache_bytes: u64,
     pub header_cache_entries: usize,
-    /// In-flight decode cap. Bounded because a `spawn_blocking` decode cannot be
-    /// aborted, so unbounded fan-out would let cancelled work starve the pool.
+    /// In-flight decode cap.
     pub max_concurrent_decodes: usize,
-    /// In-flight *load* cap, acquired before the fetch and held until the decode
-    /// ends.
-    ///
-    /// The decode permit alone does not bound memory: it is taken *after* the
-    /// bytes are already in hand, so a hundred concurrent loads could each hold
-    /// up to `max_encoded_bytes` while queueing for one of four decode slots.
-    /// This is the bound that makes worst-case encoded residency
-    /// `max_concurrent_loads * max_encoded_bytes` instead of unbounded.
+    /// In-flight *load* cap, acquired before the fetch and held until the decode ends.
     pub max_concurrent_loads: usize,
     pub decode: DecodeRequest,
     pub device_scale: Option<f32>,
@@ -78,9 +53,6 @@ pub struct LoaderConfig {
 
 impl LoaderConfig {
     /// A configuration for the loader owning `request_namespace`.
-    ///
-    /// There is no `Default`: the namespace is not defaultable (see the field's
-    /// own documentation), so it has to be supplied here.
     #[must_use]
     pub fn new(request_namespace: u64) -> Self {
         Self {
@@ -90,10 +62,6 @@ impl LoaderConfig {
     }
 
     /// Sets the encoded-byte ceiling every transport is held to.
-    ///
-    /// Builders rather than struct-update syntax: this type is
-    /// `#[non_exhaustive]`, so `..LoaderConfig::new(0)` is a hard error outside
-    /// this crate.
     #[must_use]
     pub const fn with_max_encoded_bytes(mut self, max_encoded_bytes: u64) -> Self {
         self.max_encoded_bytes = max_encoded_bytes;
@@ -136,10 +104,6 @@ impl LoaderConfig {
         self
     }
 
-    /// The single-loader configuration, namespace `0`.
-    ///
-    /// Correct only when exactly one loader shares the fetcher; anything else
-    /// must use [`Self::new`].
     #[must_use]
     fn with_namespace_zero() -> Self {
         Self {
@@ -157,52 +121,27 @@ impl LoaderConfig {
     }
 }
 
-/// Which cache a prefetch should warm.
-///
-/// `lynx.prefetchImage`'s two cache targets, split at the layer that owns each:
-/// encoded bytes are the fetcher's, decoded pixels are ours.
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub enum ImagePrefetchTarget {
-    /// Delegated to [`ResourceFetcher::prefetch`].
     Encoded(CacheTarget),
-    /// Decoded into the loader's own [`DecodeCache`].
     Decoded { target: Option<PixelSize> },
 }
 
 /// The loader's mutable state, behind **one** lock.
-///
-/// Three independent mutexes let a concurrent `load` and `clear_caches`
-/// interleave into states no single operation can produce: pixels committed
-/// with the header and mapping already cleared (an entry nothing can ever look
-/// up again), or two racing loads combining one's header with the other's
-/// pixels. Every commit and every clear touches all three, so they are one
-/// critical section. It is held only across in-memory map updates — never
-/// across a fetch, a decode, or any `.await`.
 #[derive(Debug)]
 struct LoaderState {
     decodes: DecodeCache,
     headers: HeaderCache,
-    /// (specifier, target) → cache source, populated on every successful
-    /// resolve. Without it, [`ImageLoader::cached`] — which must not await, so
-    /// cannot resolve — would key on the pre-resolution specifier while
-    /// [`ImageLoader::load`] keys on the resolved one, and every probe would
-    /// miss.
     resolved: ResolvedMap,
 }
 
 /// Fetches, decodes and caches images for one view.
 pub struct ImageLoader {
     fetcher: Arc<dyn ResourceFetcher>,
-    /// The embedder-injected decoder. Shared because every blocking decode task
-    /// carries its own handle to it.
     decoder: Arc<dyn Decoder>,
     state: Mutex<LoaderState>,
-    /// `Arc` so a permit can be owned by the blocking decode task itself; see
-    /// the acquisition site in `load`.
     decode_permits: Arc<Semaphore>,
-    /// Taken before the fetch and released with the decode, so encoded buffers
-    /// waiting for a decode slot are bounded too.
     load_permits: Arc<Semaphore>,
     sequence: AtomicU64,
     config: LoaderConfig,
@@ -211,9 +150,6 @@ pub struct ImageLoader {
 
 impl fmt::Debug for ImageLoader {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // `ResourceFetcher` has no `Debug` supertrait — it is a host-implemented
-        // protocol object — so it is rendered by name, the same way
-        // `bobcat-core` renders its own reader fields.
         formatter
             .debug_struct("ImageLoader")
             .field("fetcher", &"<dyn ResourceFetcher>")
@@ -226,21 +162,6 @@ impl fmt::Debug for ImageLoader {
 
 impl ImageLoader {
     /// Builds a loader over `fetcher`, decoding through the injected `decoder`.
-    ///
-    /// There is no default decoder: the embedder chooses one — the reference
-    /// embedder's `image_decoders::platform_decoder()`, or its own [`Decoder`]
-    /// implementation over an existing image pipeline — and the loader never
-    /// second-guesses it.
-    ///
-    /// # Errors
-    ///
-    /// [`ImageError::NoTransport`] when the fetcher advertises none of
-    /// [`ResourceCapability::BufferedResource`],
-    /// [`ResourceCapability::ResourceStream`] or
-    /// [`ResourceCapability::ResourcePath`]. Probed once here rather than per
-    /// image, because only `resolve_locator` and `cancel_request` are mandatory
-    /// in the protocol and a fetcher that can serve none of these can never
-    /// serve an image.
     pub fn new(
         fetcher: Arc<dyn ResourceFetcher>,
         config: LoaderConfig,
@@ -278,14 +199,6 @@ impl ImageLoader {
     }
 
     /// Header-only load: resolve, then cache-or-fetch, then probe.
-    ///
-    /// This is what layout waits on. Probing is orders of magnitude cheaper than
-    /// decoding, which is the whole reason the natural size and the pixels
-    /// arrive on separate schedules.
-    ///
-    /// # Errors
-    ///
-    /// [`ImageError::Cancelled`], or any resolve/transport/probe failure.
     pub async fn header(
         &self,
         specifier: &str,
@@ -309,12 +222,7 @@ impl ImageLoader {
         Ok(header)
     }
 
-    /// Full load. `target` is the used content box in device px, or `None` to
-    /// decode at natural size.
-    ///
-    /// # Errors
-    ///
-    /// [`ImageError::Cancelled`], or any resolve/transport/decode failure.
+    /// Full load.
     pub async fn load(
         &self,
         specifier: &str,
@@ -325,16 +233,10 @@ impl ImageLoader {
         let source = cache_source(&resolved);
         let key = CacheKey::new(Arc::clone(&source), target);
 
-        // Consult the cache before the transport, not after. Resolving first is
-        // still required — the key is the *resolved* source, so two specifiers a
-        // host rewrites onto one resource share one entry — but everything past
-        // this point is what the cache exists to avoid.
         if let Some(hit) = self.lock().decodes.get(&key) {
             return Ok(hit);
         }
 
-        // Taken *before* the fetch, so the encoded buffer this load is about to
-        // hold counts against a bound. Held until the decode ends.
         let Some(load_permit) = self.acquire(&self.load_permits, &cancel).await? else {
             return Err(ImageError::Cancelled);
         };
@@ -346,20 +248,10 @@ impl ImageLoader {
             target_size: target,
             ..self.config.decode
         };
-        // Waiting for a permit is itself cancellable: a queue of images whose
-        // nodes are being recycled faster than they decode should shrink, not
-        // sit blocked on a semaphore it no longer needs.
         let Some(permit) = self.acquire(&self.decode_permits, &cancel).await? else {
             return Err(ImageError::Cancelled);
         };
 
-        // The permit moves *into* the blocking closure, so it is released when
-        // the decode actually ends rather than when this future stops waiting
-        // for it. `spawn_blocking` work is uncancellable once started, so
-        // dropping the handle below leaves the decode running; releasing the
-        // permit there instead would let a stream of cancelled loads run
-        // unboundedly many concurrent decodes and starve tokio's blocking pool
-        // — precisely under the churn the bound exists for.
         let decode = tokio::task::spawn_blocking(move || {
             let outcome = decode_bytes(decoder.as_ref(), &bytes, &request);
             drop(permit);
@@ -367,24 +259,15 @@ impl ImageLoader {
             outcome
         });
 
-        // Returning promptly and discarding the result is the honest behaviour:
-        // the decode drains against the bounded pool rather than being left to
-        // publish pixels for a torn-down node.
         let Some(joined) = cancel.run_until_cancelled(decode).await else {
             return Err(ImageError::Cancelled);
         };
         let response = joined.map_err(|error| ImageError::decode_join(&error))??;
 
-        // Re-checked here, not only before the decode: cancellation can land
-        // while the blocking task is finishing, and publishing pixels for a node
-        // that has since been torn down is the exact outcome the token was asked
-        // to prevent.
         if cancel.is_cancelled() {
             return Err(ImageError::Cancelled);
         }
 
-        // One critical section for the whole commit, so no observer can see the
-        // pixels without the header that describes them.
         {
             let mut state = self.lock();
             state.headers.insert(Arc::clone(&source), response.header);
@@ -393,12 +276,8 @@ impl ImageLoader {
         Ok(response)
     }
 
-    /// Non-blocking decode-cache probe, for a caller already inside a frame
-    /// commit that must not await.
-    ///
-    /// Misses until `specifier` has been resolved once by [`Self::load`] or
-    /// [`Self::header`], because the cache is keyed on the *resolved* source and
-    /// resolving is asynchronous.
+    /// Non-blocking decode-cache probe, for a caller already inside a frame commit that must not
+    /// await.
     #[must_use]
     pub fn cached(&self, specifier: &str, target: Option<PixelSize>) -> Option<DecodedImage> {
         let mut state = self.lock();
@@ -409,11 +288,7 @@ impl ImageLoader {
             .map(|response| response.image)
     }
 
-    /// Non-blocking natural-size probe. Same resolution caveat as
-    /// [`Self::cached`].
-    ///
-    /// A second mount of a known URL can publish its natural size in the same
-    /// commit that creates the node, so the first frame lays out final.
+    /// Non-blocking natural-size probe.
     #[must_use]
     pub fn cached_header(&self, specifier: &str) -> Option<ImageHeader> {
         let mut state = self.lock();
@@ -422,11 +297,6 @@ impl ImageLoader {
     }
 
     /// Warms a cache ahead of render.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::load`], or [`ImageError::Resource`] from the fetcher's own
-    /// prefetch.
     pub async fn prefetch(
         &self,
         specifier: &str,
@@ -440,7 +310,6 @@ impl ImageLoader {
             ImagePrefetchTarget::Encoded(cache_target) => {
                 let resolved = self.resolve(specifier, None, cancel.clone()).await?;
                 if data_url::is_data_url(&resolved.url) {
-                    // Nothing to warm: the bytes are the URL.
                     return Ok(());
                 }
                 self.fetcher
@@ -463,15 +332,10 @@ impl ImageLoader {
         state.resolved.clear();
     }
 
-    // ------------------------------------------------------------- internals
-
     fn lock(&self) -> std::sync::MutexGuard<'_, LoaderState> {
         self.state.lock().expect("loader state")
     }
 
-    /// Acquires a permit, giving up promptly if the caller cancels first.
-    ///
-    /// `Ok(None)` means cancelled; `Err` means the semaphore closed.
     async fn acquire(
         &self,
         semaphore: &Arc<Semaphore>,
@@ -498,8 +362,6 @@ impl ImageLoader {
         }
     }
 
-    /// Always runs, even for `data:` — a host's rewrite hook is entitled to turn
-    /// one specifier into another, and only the fetcher knows that.
     async fn resolve(
         &self,
         specifier: &str,
@@ -517,16 +379,11 @@ impl ImageLoader {
                 hints: ResourceHints::Image(ImageHints {
                     target_size_px: target,
                     device_scale: self.config.device_scale,
-                    // v1 is static-only; a variant-serving CDN should see that.
                     allow_animation: false,
                 }),
             },
             percent_decode: true,
         };
-        // The host's resolver is arbitrary embedder code that may block on a
-        // network round trip or a lock. Awaiting it bare made the whole load
-        // uncancellable up to that point: a cancelled token could not unstick a
-        // hung `resolve_locator`, so `load` would sit past any caller timeout.
         let Some(resolved) = cancel
             .run_until_cancelled(self.fetcher.resolve_locator(request))
             .await
@@ -553,7 +410,6 @@ impl ImageLoader {
         }
     }
 
-    /// The transport ladder, plus the `data:` short-circuit.
     async fn read_bytes(
         &self,
         resolved: &ResolvedLocator,
@@ -564,8 +420,6 @@ impl ImageLoader {
         }
         let limit = self.config.max_encoded_bytes;
         if data_url::is_data_url(&resolved.url) {
-            // Held to the same ceiling as every transport branch — the payload
-            // is attacker-supplied on this path just as much as on the others.
             return data_url::decode(&resolved.url, limit).map(Bytes::from);
         }
 
@@ -580,11 +434,6 @@ impl ImageLoader {
                             max_bytes: limit,
                         })
                         .await?;
-                    // `max_bytes` is a request to the host, not a guarantee from
-                    // it: a buggy or hostile fetcher can return more, and
-                    // trusting it made the budget advisory on this branch.
-                    // `Bytes` is handed straight through — the previous
-                    // `to_vec` copied up to the whole budget for nothing.
                     if response.bytes.len() as u64 > limit {
                         return Err(ImageError::EncodedTooLarge { limit });
                     }
@@ -593,12 +442,6 @@ impl ImageLoader {
                 ResourceCapability::ResourceStream => {
                     let stream = self.fetcher.open_resource(request).await?;
                     let mut bytes = Vec::new();
-                    // Read one byte PAST the ceiling so an overrun is *detected*
-                    // rather than silently truncated. `take(limit)` cuts the
-                    // stream at the limit, which for an oversized body whose
-                    // prefix happens to be a complete image decodes and loads
-                    // successfully — the budget would be enforced only by
-                    // accident of framing.
                     let overrun = limit.saturating_add(1);
                     stream
                         .reader
@@ -615,8 +458,6 @@ impl ImageLoader {
                 }
                 ResourceCapability::ResourcePath => {
                     let resource = self.fetcher.fetch_resource_path(request).await?;
-                    // tokio is built here without the `fs` feature, and a file
-                    // read is blocking work regardless.
                     tokio::task::spawn_blocking(move || read_capped(&resource.path, limit))
                         .await
                         .map_err(|error| ImageError::decode_join(&error))?
@@ -633,10 +474,6 @@ impl ImageLoader {
     }
 }
 
-/// The host's own cache key when it supplied one, else the resolved URL.
-///
-/// Never the pre-resolution specifier: two specifiers can resolve to one
-/// resource, and a host's rewrite hook exists precisely to make them.
 fn cache_source(resolved: &ResolvedLocator) -> Arc<str> {
     resolved
         .cache_key
@@ -652,7 +489,6 @@ fn read_capped(path: &std::path::Path, limit: u64) -> Result<Vec<u8>, ImageError
     }
     let bytes =
         std::fs::read(path).map_err(|error| ImageError::transport("read resource path", &error))?;
-    // The file can grow between the stat and the read.
     if bytes.len() as u64 > limit {
         return Err(ImageError::EncodedTooLarge { limit });
     }

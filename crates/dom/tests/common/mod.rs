@@ -78,9 +78,7 @@ impl FontMetricsProvider for TestFontMetricsProvider {
     }
 }
 
-/// A document + root, with node construction and mutation helpers.
-/// Every mutation goes through `Document` methods, which carry their own
-/// snapshot/invalidation bookkeeping.
+/// A document, root, and mutation helpers for CSS tests.
 #[derive(Debug)]
 pub(crate) struct Doc {
     pub(crate) dom: Document<()>,

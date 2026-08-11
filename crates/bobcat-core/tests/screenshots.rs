@@ -17,23 +17,13 @@ use flashbulb::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
 use flashbulb::{Image, Screenshots};
 use lynx_element::PageConfig;
 
-/// The embedder composition, offscreen: the engine owns the tree and the
-/// script run; the test provides device metrics and receives pixels.
 fn engine(config: PageConfig) -> OffscreenEngine {
     OffscreenEngine::new(config, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, 1.0).expect("engine")
 }
 
-/// lynx-stack's Playwright Chromium project emulates a Pixel 5, whose CSS
-/// viewport is 393 × 727; `toHaveScreenshot` captures in CSS pixels, so their
-/// tracked goldens are exactly that size.
 const VIEWPORT_WIDTH: f32 = 393.0;
 const VIEWPORT_HEIGHT: f32 = 727.0;
 
-/// Styling reaches the tree through an author stylesheet rather than through
-/// the PAPI: `__SetClasses`, `__AddInlineStyle`, and `__SetCSSId` are not
-/// implemented, so every rule below selects on tag and position — which is
-/// also how a decoded `.web.bundle` `StyleInfo` section will address elements
-/// once its lowering exists.
 const STYLE: &str = r"
 page {
   background-color: #e5e7eb;
@@ -58,8 +48,6 @@ page > view:nth-child(2) > view:nth-child(2) { background-color: #8b5cf6; }
 page > view:nth-child(3) > view:nth-child(1) { background-color: #0f766e; }
 ";
 
-/// A card root in the shape a real `lepusCode.root` has: it assigns
-/// `renderPage` onto `globalThis` and builds the tree from inside it.
 const MAIN_THREAD_SCRIPT: &str = r"
 globalThis.renderPage = function renderPage() {
   const page = __CreatePage('card', 0);
@@ -78,8 +66,6 @@ fn screenshots() -> Screenshots {
     flashbulb::screenshots_in(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// A missing adapter is a test-environment failure, including in CI: capture
-/// tests must never report success without rendering and comparing pixels.
 #[track_caller]
 fn capture_engine(engine: &mut OffscreenEngine, test: &str) -> Image {
     engine
@@ -104,8 +90,6 @@ fn a_main_thread_script_renders_its_element_tree() {
     screenshots().assert_matches(&["create-view-append-element"], &image);
 }
 
-/// A child larger than its parent, rendered under both settings of the
-/// `defaultOverflowVisible` page config.
 const OVERFLOW_STYLE: &str = r"
 page {
   background-color: #e5e7eb;
@@ -147,8 +131,6 @@ fn render_overflow(config: PageConfig, test: &str, golden: &str) {
     screenshots().assert_matches(&[golden], &image);
 }
 
-/// `defaultOverflowVisible: true` — the bundled default. The oversized child
-/// spills past its parent's border box.
 #[test]
 fn overflow_visible_lets_a_child_spill_out_of_its_parent() {
     render_overflow(
@@ -158,10 +140,6 @@ fn overflow_visible_lets_a_child_spill_out_of_its_parent() {
     );
 }
 
-/// `defaultOverflowVisible: false` — the UA sheet emits `overflow: hidden`,
-/// and the same child is clipped to its parent's padding box. Rendering both
-/// keeps the page-config switch honest end to end: if it stopped reaching the
-/// cascade, these two goldens would converge.
 #[test]
 fn overflow_hidden_clips_a_child_to_its_parent() {
     render_overflow(
@@ -222,9 +200,6 @@ fn checker_image() -> ImageData {
     }
 }
 
-/// The document owns the image registry beside its private painter. This
-/// golden fails visibly if the document's image store and painter diverge:
-/// the checker disappears and only the white fallback background remains.
 #[test]
 fn document_image_store_reaches_the_private_painter() {
     let mut engine = engine(PageConfig::default());

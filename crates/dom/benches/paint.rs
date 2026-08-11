@@ -56,9 +56,6 @@ fn device() -> dom::Device {
     )
 }
 
-/// A page of decorated cards: backgrounds, borders, radii, shadows, and a
-/// sprinkling of opacity groups and overflow clips — the shape of a typical
-/// Lynx card list.
 fn card_page(cards: usize) -> Document<()> {
     let mut dom = Document::new(device(), "page", ());
     dom.add_stylesheet(

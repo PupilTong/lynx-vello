@@ -174,14 +174,6 @@ impl QuickJsScriptEngine {
         self.config
     }
 
-    /// The single evaluation path: resume any incomplete checkpoint, evaluate,
-    /// checkpoint again, and surface a deferred checkpoint error.
-    ///
-    /// Every caller goes through here. Calling `realm.evaluate` directly and
-    /// checkpointing beside it looks equivalent but is not: it skips
-    /// `resume_incomplete_checkpoint`, so a run that hit the per-checkpoint job
-    /// limit would let the *next* source run ahead of the jobs still queued
-    /// from the last one.
     fn evaluate_raw(
         &mut self,
         source: quickjs::EvalSource<'_>,

@@ -53,18 +53,11 @@ use crate::vello::peniko::{
     self, BrushRef, Color, Extend, Fill, ImageBrush, ImageData, ImageQuality, ImageSampler,
 };
 
-/// Geometry epsilon (item-local CSS px).
 const EPS: f64 = 1e-6;
 
-/// Defensive caps for the explicit gradient tile loop: sub-pixel tiles
-/// over a large clip must not explode the fill count (the compat bar is
-/// behavioral, not adversarial).
 const MAX_TILES_PER_AXIS: f64 = 4096.0;
 const MAX_TILE_FILLS: f64 = 16384.0;
 
-/// Whether any `background-clip` value on this style is `text`, so the
-/// walker knows to collect the element's glyph silhouettes before painting.
-/// Over-eager when nothing would paint — collection is cheap and rare.
 pub(crate) fn needs_text_clip(style: &ComputedValues) -> bool {
     style
         .get_background()
@@ -74,9 +67,6 @@ pub(crate) fn needs_text_clip(style: &ComputedValues) -> bool {
         .any(|clip| matches!(clip, BackgroundClip::Text))
 }
 
-/// Paints the element's background stack (color, then image layers).
-/// `text_clip` is the walker-collected glyph source for
-/// `background-clip: text` layers; `None` when the style has none.
 pub(crate) fn paint(
     scene: &mut Scene,
     style: &ComputedValues,
@@ -87,8 +77,6 @@ pub(crate) fn paint(
     let background = style.get_background();
     let layers = background.background_image.0.as_slice();
 
-    // `background-color` first, clipped by the bottom-most (last) layer's
-    // `background-clip` (css-backgrounds-3 §3.10).
     let color = resolve_color(style, &background.background_color);
     if color.components[3] > 0.0 {
         let clip = *cycled(
@@ -124,8 +112,6 @@ pub(crate) fn paint(
         }
     }
 
-    // Image layers paint bottom-up: CSS lists the first-specified layer
-    // topmost, so iterate the list in reverse (css-backgrounds-3 §2.2).
     for index in (0..layers.len()).rev() {
         let image = &layers[index];
         if matches!(image, Image::None) {
@@ -152,9 +138,6 @@ pub(crate) fn paint(
                 paint_pattern_layer(scene, style, fragment, images, &layer);
             }
             UsedClip::Text => {
-                // Inside the sandwich the pattern is still bounded by the
-                // border box (backgrounds-4: the painting area is the
-                // intersection of the border box and the text).
                 let layer = make_layer(level_shape(fragment, BoxLevel::Border));
                 text_clip_sandwich(scene, fragment, text_clip, |scene| {
                     paint_pattern_layer(scene, style, fragment, images, &layer);
@@ -164,13 +147,6 @@ pub(crate) fn paint(
     }
 }
 
-/// The alpha-mask sandwich for `background-clip: text` (same construction
-/// as the walker's `mask-image` sandwich): isolate over the border-box
-/// shape, draw the glyph silhouettes, then a `Compose::SrcIn` layer whose
-/// content — drawn by `f` — keeps only the silhouettes' coverage on pop.
-/// The `SrcIn` blend layer's immediate parent is the isolating `SrcOver`
-/// layer (vello #1198 discipline). An absent or empty `text_clip` means an
-/// empty clip region: nothing paints.
 fn text_clip_sandwich(
     scene: &mut Scene,
     fragment: &BoxFragment,
@@ -207,19 +183,6 @@ fn text_clip_sandwich(
     scene.pop_layer();
 }
 
-/// Paints a replaced element's content image (registered by node id) at the
-/// concrete object size `object-fit` resolves (css-images-3 §5.5), placed by
-/// `object-position` (§5.6) inside the content box and always clipped to it.
-///
-/// The concrete object size comes from the element's **natural** size in CSS px,
-/// never from the decoded pixel dimensions. Decode-time downsampling makes those
-/// device-scaled: `fill` is immune, but `contain`/`cover`/`none`/`scale-down`
-/// would all resolve against the wrong number. The decoded dimensions drive only
-/// the brush transform, which maps decode-pixel space onto the destination rect.
-///
-/// The source is never cropped — `object-fit` only ever changes the destination
-/// geometry — so the sampler keeps `Extend::Pad` on both axes, which is also
-/// what clamps bilinear half-texel overshoot at the destination edge.
 pub(crate) fn paint_replaced_content(
     scene: &mut Scene,
     style: &ComputedValues,
@@ -263,9 +226,6 @@ pub(crate) fn paint_replaced_content(
         (draw_width, draw_height),
     );
 
-    // The clip is the content box with the content-box radii, so the pixels are
-    // clipped both by border radii intruding into it and by any `object-fit`
-    // that overflows (`cover`, and `none` on an oversized image).
     let shape = level_shape(fragment, BoxLevel::Content);
     let brush_transform = Affine::translate((destination.x0, destination.y0))
         * Affine::scale_non_uniform(
@@ -286,15 +246,6 @@ pub(crate) fn paint_replaced_content(
     );
 }
 
-/// The object's size before `object-fit` scaling (css-images-3 §5.3.1, reduced
-/// to the replaced-content case): natural dimensions where known, otherwise
-/// derived from the natural ratio against the content box, otherwise the content
-/// box itself (the spec's "default object size").
-///
-/// A zero or absent axis falls through to the content box rather than
-/// propagating: `NaturalSize` sanitises to *non-negative* finite values, so zero
-/// is a legal natural dimension, and dividing by it in [`fitted_size`] would
-/// produce a NaN that no `<= 0.0` guard downstream can catch.
 fn concrete_object_size(natural: NaturalSize, content: Rect) -> (f64, f64) {
     let dimensions = natural.dimensions();
     let width = dimensions.width.map(f64::from).filter(|value| *value > 0.0);
@@ -309,11 +260,8 @@ fn concrete_object_size(natural: NaturalSize, content: Rect) -> (f64, f64) {
 
     match (width, height, ratio) {
         (Some(width), Some(height), _) => (width, height),
-        // One axis plus a ratio determines the other.
         (Some(width), None, Some(ratio)) => (width, width / ratio),
         (None, Some(height), Some(ratio)) => (height * ratio, height),
-        // Ratio only: the largest box with that ratio that fits the content box,
-        // which is what "contain against the default object size" resolves to.
         (None, None, Some(ratio)) => {
             let by_width = (content.width(), content.width() / ratio);
             if by_width.1 <= content.height() {
@@ -322,21 +270,12 @@ fn concrete_object_size(natural: NaturalSize, content: Rect) -> (f64, f64) {
                 (content.height() * ratio, content.height())
             }
         }
-        // Nothing usable: the default object size is the content box.
         (Some(width), None, None) => (width, content.height()),
         (None, Some(height), None) => (content.width(), height),
         (None, None, None) => (content.width(), content.height()),
     }
 }
 
-/// Applies `object-fit` to the concrete object size against the content box.
-///
-/// Total by construction rather than by precondition: `paint_replaced_content`
-/// does reject an empty content box before calling, but [`concrete_object_size`]
-/// falls back *to* that box, so an empty box is the one input that can still
-/// hand this function a zero axis. Returning early beats an assertion the
-/// function cannot itself guarantee — and beats dividing by zero into a NaN that
-/// would reach `Affine::scale_non_uniform`.
 fn fitted_size(fit: ObjectFit, width: f64, height: f64, content: Rect) -> (f64, f64) {
     let (available_width, available_height) = (content.width(), content.height());
     if width <= 0.0 || height <= 0.0 {
@@ -348,9 +287,6 @@ fn fitted_size(fit: ObjectFit, width: f64, height: f64, content: Rect) -> (f64, 
         ObjectFit::Contain => uniform((available_width / width).min(available_height / height)),
         ObjectFit::Cover => uniform((available_width / width).max(available_height / height)),
         ObjectFit::None => (width, height),
-        // "as if `none` or `contain` were specified, whichever would result in a
-        // smaller concrete object size" — both preserve the same ratio, so
-        // comparing scale factors is equivalent to comparing sizes.
         ObjectFit::ScaleDown => uniform(
             (available_width / width)
                 .min(available_height / height)
@@ -371,7 +307,6 @@ pub(super) struct PatternLayer<'a> {
     pub clip: BoxShape,
 }
 
-/// The three CSS box levels a layer can resolve geometry against.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum BoxLevel {
     Border,
@@ -379,9 +314,6 @@ pub(super) enum BoxLevel {
     Content,
 }
 
-/// Vector longhands cycle: the layer count comes from the image list and
-/// shorter lists repeat (css-backgrounds-3 §2.3). Stylo guarantees
-/// non-empty computed lists.
 pub(super) fn cycled<T>(list: &[T], index: usize) -> &T {
     &list[index % list.len()]
 }
@@ -394,8 +326,6 @@ pub(super) fn level_rect(fragment: &BoxFragment, level: BoxLevel) -> Rect {
     }
 }
 
-/// The box level's rounded shape, with radii inset per css-backgrounds-3
-/// §5.2 at each level.
 pub(super) fn level_shape(fragment: &BoxFragment, level: BoxLevel) -> BoxShape {
     match level {
         BoxLevel::Border => BoxShape::new(fragment.border_box, &fragment.radii),
@@ -413,8 +343,6 @@ pub(super) fn level_shape(fragment: &BoxFragment, level: BoxLevel) -> BoxShape {
     }
 }
 
-/// Resolves and paints one image layer: source lookup, `background-size`,
-/// `background-position`, per-axis repeat, clipped to `layer.clip`.
 pub(super) fn paint_pattern_layer(
     scene: &mut Scene,
     style: &ComputedValues,
@@ -435,11 +363,6 @@ pub(super) fn paint_pattern_layer(
     };
     let area = layer.origin;
     let (mut tile_w, mut tile_h) = tile_size(layer.size, (area.width(), area.height()), intrinsic);
-    // `round` rescales the tile so a whole number fits the area
-    // (css-backgrounds-3 §3.6; recorded v1 limit: an `auto` other axis is
-    // not proportionally rescaled). `space` is approximated as `repeat`
-    // (recorded v1 limit — unreachable through Lynx's own parser, which
-    // only emits repeat/no-repeat, but stylo's shared grammar accepts it).
     if matches!(layer.repeat.0, BackgroundRepeatKeyword::Round) {
         tile_w = round_tile(area.width(), tile_w);
     }
@@ -447,7 +370,6 @@ pub(super) fn paint_pattern_layer(
         tile_h = round_tile(area.height(), tile_h);
     }
     if tile_w <= EPS || tile_h <= EPS {
-        // Zero-sized tiles paint nothing (css-backgrounds-3 §3.9).
         return;
     }
     let grid = TileGrid {
@@ -468,9 +390,6 @@ pub(super) fn paint_pattern_layer(
                 quality: image_quality(style),
                 alpha: 1.0,
             };
-            // Brush space is image pixels; map one tile onto the grid
-            // origin. `Extend::Repeat` then reproduces the abutting tile
-            // grid with period `tile` in each repeating axis.
             let brush_transform = Affine::translate(grid.origin.to_vec2())
                 * Affine::scale_non_uniform(
                     tile_w / f64::from(data.width),
@@ -489,8 +408,6 @@ pub(super) fn paint_pattern_layer(
                 Some(brush_transform),
             );
         }
-        // A solid tile: abutting same-color tiles merge, so the extendable
-        // draw-rect path is exact.
         Source::Solid(color) => fill_area(
             scene,
             fragment.transform,
@@ -527,8 +444,6 @@ pub(super) fn paint_pattern_layer(
     }
 }
 
-/// A layer's used `background-clip`: a box shape, the text-silhouette
-/// sandwich, or (`None`) nothing paints.
 enum UsedClip {
     Shape(BoxShape),
     Text,
@@ -544,8 +459,6 @@ fn used_clip(fragment: &BoxFragment, clip: BackgroundClip) -> Option<UsedClip> {
             Some(UsedClip::Shape(level_shape(fragment, BoxLevel::Content)))
         }
         BackgroundClip::Text => Some(UsedClip::Text),
-        // recorded v1 limit: Lynx's `background-clip: border-area` (clip
-        // to the ring the borders cover) skips the layer entirely.
         BackgroundClip::BorderArea => None,
     }
 }
@@ -562,10 +475,6 @@ fn extend_for(repeat: bool) -> Extend {
     if repeat { Extend::Repeat } else { Extend::Pad }
 }
 
-/// The lookup key for a `url(…)` layer: the resolved URL when the document
-/// base resolved it, otherwise the author's original string. Embedders
-/// register decoded pixels under the same key via
-/// [`ImageStore::insert_url`].
 fn image_url(url: &ComputedUrl) -> &str {
     match url {
         ComputedUrl::Valid(url) => url.as_str(),
@@ -573,7 +482,6 @@ fn image_url(url: &ComputedUrl) -> &str {
     }
 }
 
-/// A layer's paintable source.
 enum Source<'a> {
     Raster(&'a ImageData),
     Gradient(&'a Gradient),
@@ -587,7 +495,6 @@ fn resolve_source<'a>(
 ) -> Option<Source<'a>> {
     match image {
         Image::Url(url) => {
-            // A registry miss is the not-yet-loaded state: skip the layer.
             let data = images.url(image_url(url))?;
             (data.width > 0 && data.height > 0).then_some(Source::Raster(data))
         }
@@ -596,15 +503,10 @@ fn resolve_source<'a>(
             let color = resolve_color(style, color);
             (color.components[3] > 0.0).then_some(Source::Solid(color))
         }
-        // `none`, and — recorded v1 limit — `cross-fade()` / `image-set()`
-        // / `paint()`: the latter parse through stylo's shared grammar but
-        // sit outside the Lynx surface; skipped.
         _ => None,
     }
 }
 
-/// `image-rendering` → sampler quality: `crisp-edges`/`pixelated` want
-/// nearest sampling (css-images-3 §5.4).
 fn image_quality(style: &ComputedValues) -> ImageQuality {
     use stylo::values::computed::ImageRendering;
     match style.get_inherited_box().image_rendering {
@@ -623,8 +525,6 @@ struct TileGrid {
 }
 
 impl TileGrid {
-    /// The rect an extendable brush must fill: the clip bounds in
-    /// repeating axes, the single tile span otherwise.
     fn draw_rect(&self, clip_bounds: Rect) -> Rect {
         let (x0, x1) = if self.repeat_x {
             (clip_bounds.x0, clip_bounds.x1)
@@ -650,10 +550,6 @@ impl TileGrid {
     }
 }
 
-/// Fills `draw` with `brush`, clipped to `clip`: directly when `draw`
-/// covers the clip bounds, by rect intersection for rectangular clips, and
-/// via a clip layer otherwise. Plain fills inside a clip layer are safe
-/// (vello #1198 forbids only blend layers there).
 fn fill_area(
     scene: &mut Scene,
     transform: Affine,
@@ -690,9 +586,6 @@ fn fill_area(
     }
 }
 
-/// Draws a gradient tile grid. Unlike raster layers, a gradient restarts
-/// in every tile, so repetition cannot ride on brush extend modes when
-/// more than one tile is visible — each tile gets its own translated fill.
 fn fill_gradient_tiles(
     scene: &mut Scene,
     transform: Affine,
@@ -732,7 +625,6 @@ fn fill_gradient_tiles(
         );
         return;
     }
-    // Defensive product cap (see MAX_TILE_FILLS).
     if x_count * y_count > MAX_TILE_FILLS {
         y_count = (MAX_TILE_FILLS / x_count).floor().max(1.0);
     }
@@ -768,8 +660,6 @@ fn fill_gradient_tiles(
     }
 }
 
-/// The (integral, as f64) first tile index and tile count whose tiles
-/// intersect `[lo, hi]`, capped per axis (see [`MAX_TILES_PER_AXIS`]).
 fn tile_span(origin: f64, step: f64, lo: f64, hi: f64, repeat: bool) -> (f64, f64) {
     if !repeat {
         return (0.0, 1.0);
@@ -779,13 +669,6 @@ fn tile_span(origin: f64, step: f64, lo: f64, hi: f64, repeat: bool) -> (f64, f6
     (first, count.min(MAX_TILES_PER_AXIS))
 }
 
-// ---- CSS gradient → peniko resolution (shared with mask.rs through
-// `paint_pattern_layer`, and with text.rs for Lynx's gradient-valued
-// `color`). ----
-
-/// A resolved gradient: a peniko brush in tile-local space plus a
-/// brush-space adjustment (elliptical radial squash) composed after the
-/// per-tile translation, or a solid color for degenerate cases.
 pub(crate) enum GradientBrush {
     Gradient {
         gradient: peniko::Gradient,
@@ -794,12 +677,6 @@ pub(crate) enum GradientBrush {
     Solid(Color),
 }
 
-/// Converts a stylo computed gradient into a peniko brush for one tile of
-/// `tile` size. `None` means the layer paints nothing (no color stops).
-///
-/// `color_interpolation_method` is ignored: peniko interpolates
-/// premultiplied sRGB, the CSS default for legacy color syntax — other
-/// interpolation spaces are a recorded v1 limit.
 pub(crate) fn gradient_brush(
     style: &ComputedValues,
     gradient: &Gradient,
@@ -880,10 +757,6 @@ fn linear_gradient(
     if repeating || first < 0.0 || last > 1.0 {
         let span = last - first;
         if span <= EPS {
-            // All stops collapse onto one out-of-range position: the
-            // whole line pads to one side (repeating degenerate
-            // approximated by the last stop — recorded v1 limit vs the
-            // spec's average color).
             let color = if !repeating && first > 1.0 {
                 first_color
             } else {
@@ -937,9 +810,6 @@ fn radial_gradient(
         ),
     );
     let (rx, ry) = radial_radii(shape, center, tile);
-    // Stop lengths and percentages resolve against the horizontal radius;
-    // the elliptical squash below then carries them along every ray (the
-    // same scheme browsers use for elliptical stop resolution).
     let stop_basis = rx.max(EPS);
     let stops = fixup_stops(&gradient_stops(
         style,
@@ -954,15 +824,9 @@ fn radial_gradient(
         return Some(GradientBrush::Solid(last_color));
     }
     if rx <= EPS || ry <= EPS {
-        // Degenerate ending shape: rendered as if it were arbitrarily
-        // small (css-images-3 §3.2.3), so the plane takes the last stop's
-        // color (repeating degenerate approximated the same way —
-        // recorded v1 limit vs the spec's average color).
         return Some(GradientBrush::Solid(last_color));
     }
     let local = if (rx - ry).abs() > EPS {
-        // Build a circular gradient of radius `rx` and squash brush space
-        // vertically about the center to make it elliptical.
         Affine::translate(center.to_vec2())
             * Affine::scale_non_uniform(1.0, ry / rx)
             * Affine::translate(-center.to_vec2())
@@ -974,8 +838,6 @@ fn radial_gradient(
         if span <= EPS {
             return Some(GradientBrush::Solid(last_color));
         }
-        // Shift the window by whole periods until the start radius is
-        // non-negative — an identity under `Extend::Repeat`.
         let shift = (-first / span).ceil().max(0.0) * span;
         let (first, last) = (first + shift, last + shift);
         let remapped: Vec<(f32, Color)> = stops
@@ -992,20 +854,10 @@ fn radial_gradient(
         .with_extend(Extend::Repeat);
         return Some(GradientBrush::Gradient { gradient, local });
     }
-    // A non-repeating radial has no radii below zero: fold every sub-zero
-    // stop into one synthesized stop at radius 0 carrying the ramp's
-    // zero-crossing color (see [`synthesize_zero_radius_stop`]). Clamping
-    // positions instead would move the interpolation anchor and re-base
-    // the whole first ramp.
     let stops = synthesize_zero_radius_stop(stops);
     if stops.len() == 1 {
-        // Every stop was negative: the whole ramp collapses into the
-        // center point, so the plane takes the last stop's color.
         return Some(GradientBrush::Solid(stops[0].1));
     }
-    // Grow the geometry when stops overshoot the ending shape; positions
-    // are now within `[0, last]`, so dividing by `extent` normalizes them
-    // into `[0, 1]`.
     let extent = last.max(1.0);
     let scaled: Vec<(f32, Color)> = stops
         .iter()
@@ -1016,18 +868,8 @@ fn radial_gradient(
     Some(GradientBrush::Gradient { gradient, local })
 }
 
-/// Non-repeating radial pre-pass: the gradient line has no radii below
-/// zero, so every sub-zero stop is replaced with one synthesized stop at
-/// position 0 whose color is the ramp's value where it crosses zero — a
-/// component-wise linear sRGB interpolation between the two stops
-/// straddling zero (consistent with the linear-ramp approximation used
-/// throughout this module). An all-negative list collapses to a single
-/// stop at 0 with the last stop's color. Lists that never go below zero
-/// pass through untouched.
 fn synthesize_zero_radius_stop(stops: Vec<(f64, Color)>) -> Vec<(f64, Color)> {
     let Some(cross) = stops.iter().position(|&(position, _)| position >= 0.0) else {
-        // All-negative: only the ramp at and beyond the last stop is ever
-        // visible, and it pads with the last stop's color.
         let &(_, last_color) = stops.last().expect("caller checked non-empty");
         return vec![(0.0, last_color)];
     };
@@ -1036,8 +878,6 @@ fn synthesize_zero_radius_stop(stops: Vec<(f64, Color)>) -> Vec<(f64, Color)> {
     }
     let (before, before_color) = stops[cross - 1];
     let (after, after_color) = stops[cross];
-    // Fix-up made positions monotonic, so `before < 0 <= after` and the
-    // denominator is strictly positive.
     let t = -before / (after - before);
     let mut out = Vec::with_capacity(stops.len() - cross + 1);
     out.push((0.0, lerp_srgb(before_color, after_color, t)));
@@ -1045,8 +885,6 @@ fn synthesize_zero_radius_stop(stops: Vec<(f64, Color)>) -> Vec<(f64, Color)> {
     out
 }
 
-/// Component-wise linear interpolation between two colors in sRGB — the
-/// same straight-ramp model this module approximates gradients with.
 fn lerp_srgb(a: Color, b: Color, t: f64) -> Color {
     let t = t as f32;
     let mut components = a.components;
@@ -1078,9 +916,6 @@ fn conic_gradient(
                 .px(),
         ),
     );
-    // CSS conic 0deg points up and sweeps clockwise; peniko sweep angles
-    // measure from the +X axis, clockwise in y-down space (see
-    // `peniko::SweepGradientPosition`) — so subtract 90°.
     let base = angle.radians64() - FRAC_PI_2;
     let stops = fixup_stops(&gradient_stops(
         style,
@@ -1103,10 +938,6 @@ fn conic_gradient(
         stops
     };
     let window = conic_window_stops(&stops);
-    // Full-turn window + `Extend::Repeat` wraps vello's sweep parameter
-    // exactly once, putting the seam at the CSS `from` angle (vello's fine
-    // stage applies extend to `(φ − t0)/(t1 − t0)` without wrapping φ
-    // itself, so a Pad window crossing the +X axis would clamp wrongly).
     let gradient = peniko::Gradient::new_sweep(center, base as f32, (base + TAU) as f32)
         .with_stops(window.as_slice())
         .with_extend(Extend::Repeat);
@@ -1116,7 +947,6 @@ fn conic_gradient(
     })
 }
 
-/// Resolves gradient items to `(position, color)` pairs.
 fn gradient_stops<T>(
     style: &ComputedValues,
     items: &[GenericGradientItem<StyloColor, T>],
@@ -1131,9 +961,6 @@ fn gradient_stops<T>(
             GenericGradientItem::ComplexColorStop { color, position } => {
                 stops.push((Some(resolve(position)), resolve_color(style, color)));
             }
-            // An interpolation hint reshapes the easing between its two
-            // neighbor stops; ignoring it keeps the stop colors exact and
-            // approximates the ramp linearly (recorded v1 limit).
             GenericGradientItem::InterpolationHint(_) => {}
         }
     }
@@ -1149,8 +976,6 @@ fn fixup_stops(raw: &[(Option<f64>, Color)]) -> Vec<(f64, Color)> {
         .collect()
 }
 
-/// css-images-3 §3.4.3 color-stop fix-up: endpoint defaults (0 and 1),
-/// monotonic clamping, and even distribution of unpositioned stops.
 fn resolve_stop_offsets(positions: &[Option<f64>]) -> Vec<f64> {
     let mut resolved: Vec<Option<f64>> = positions.to_vec();
     let Some(first) = resolved.first_mut() else {
@@ -1190,10 +1015,6 @@ fn resolve_stop_offsets(positions: &[Option<f64>]) -> Vec<f64> {
     out
 }
 
-/// Unrolls a repeating-conic period across the visible turn `[0, 1]`.
-/// `None` when the period is degenerate or the unroll would explode
-/// (defensive cap; recorded v1 limit: such gradients collapse to the last
-/// stop's color instead of the spec's average color).
 fn unroll_conic_period(stops: &[(f64, Color)]) -> Option<Vec<(f64, Color)>> {
     let first = stops.first()?.0;
     let last = stops[stops.len() - 1].0;
@@ -1218,10 +1039,6 @@ fn unroll_conic_period(stops: &[(f64, Color)]) -> Option<Vec<(f64, Color)>> {
     Some(out)
 }
 
-/// Pads/clamps conic stops into the visible turn `[0, 1]`. Out-of-range
-/// positions collapse onto the seam (a hard edge at the `from` angle) —
-/// their sub-zero/super-one ramp segments are approximated away (recorded
-/// v1 limit).
 fn conic_window_stops(stops: &[(f64, Color)]) -> Vec<(f32, Color)> {
     let mut out = Vec::with_capacity(stops.len() + 2);
     if let (Some(&(first, first_color)), Some(&(last, last_color))) = (stops.first(), stops.last())
@@ -1239,12 +1056,6 @@ fn conic_window_stops(stops: &[(f64, Color)]) -> Vec<(f32, Color)> {
     out
 }
 
-/// The gradient-line angle in radians, CSS convention: 0 points up ("to
-/// top") and positive angles rotate clockwise (css-images-3 §3.1.1). In
-/// the legacy prefixed syntaxes the keywords name the *starting* side, so
-/// they flip by half a turn (recorded v1 limit: legacy prefixed *angle*
-/// conventions are not translated — Lynx's own parser only emits the
-/// modern syntax).
 fn direction_angle(
     direction: LineDirection,
     compat_mode: GradientCompatMode,
@@ -1263,26 +1074,22 @@ fn direction_angle(
         LineDirection::Vertical(VerticalPositionKeyword::Top) => flip,
         LineDirection::Vertical(VerticalPositionKeyword::Bottom) => PI + flip,
         LineDirection::Corner(x, y) => {
-            // "Magic corner": the gradient line is angled so the
-            // perpendicular through each endpoint passes through the two
-            // corners adjacent to the target corner (css-images-3 §3.1.2).
-            let corner = width.atan2(height); // "to top right"
+            let top_right_angle = width.atan2(height);
             let modern = match (x, y) {
-                (HorizontalPositionKeyword::Right, VerticalPositionKeyword::Top) => corner,
-                (HorizontalPositionKeyword::Right, VerticalPositionKeyword::Bottom) => PI - corner,
-                (HorizontalPositionKeyword::Left, VerticalPositionKeyword::Bottom) => PI + corner,
-                (HorizontalPositionKeyword::Left, VerticalPositionKeyword::Top) => -corner,
+                (HorizontalPositionKeyword::Right, VerticalPositionKeyword::Top) => top_right_angle,
+                (HorizontalPositionKeyword::Right, VerticalPositionKeyword::Bottom) => {
+                    PI - top_right_angle
+                }
+                (HorizontalPositionKeyword::Left, VerticalPositionKeyword::Bottom) => {
+                    PI + top_right_angle
+                }
+                (HorizontalPositionKeyword::Left, VerticalPositionKeyword::Top) => -top_right_angle,
             };
             modern + flip
         }
     }
 }
 
-/// Endpoints of the CSS gradient line for `angle` in a `width` × `height`
-/// box (y-down local space): the line passes through the center, and the
-/// line length is the box diagonal's projection onto the gradient
-/// direction, which makes the perpendiculars through the endpoints pass
-/// through the box corners (css-images-3 §3.1.3).
 fn linear_endpoints(angle: f64, width: f64, height: f64) -> (Point, Point) {
     let (sin, cos) = angle.sin_cos();
     let length = (width * sin).abs() + (height * cos).abs();
@@ -1291,8 +1098,6 @@ fn linear_endpoints(angle: f64, width: f64, height: f64) -> (Point, Point) {
     (center - half, center + half)
 }
 
-/// The radial ending shape's radii (css-images-3 §3.2.3), in tile-local
-/// px.
 fn radial_radii(shape: &EndingShape, center: Point, tile: Size) -> (f64, f64) {
     let near_x = center.x.abs().min((tile.width - center.x).abs());
     let far_x = center.x.abs().max((tile.width - center.x).abs());
@@ -1319,21 +1124,12 @@ fn radial_radii(shape: &EndingShape, center: Point, tile: Size) -> (f64, f64) {
         &EndingShape::Ellipse(Ellipse::Extent(extent)) => match extent {
             ShapeExtent::ClosestSide | ShapeExtent::Contain => (near_x, near_y),
             ShapeExtent::FarthestSide => (far_x, far_y),
-            // The corner ellipse keeps the side ellipse's aspect ratio and
-            // passes through the like-named corner; that corner's offsets
-            // from the center *are* the side distances, so the scale
-            // factor is exactly √2.
             ShapeExtent::ClosestCorner => (near_x * SQRT_2, near_y * SQRT_2),
             ShapeExtent::FarthestCorner | ShapeExtent::Cover => (far_x * SQRT_2, far_y * SQRT_2),
         },
     }
 }
 
-/// The used tile size for `background-size` (css-backgrounds-3 §3.9 used
-/// values). `intrinsic` is the raster pixel size (1 image px = 1 CSS px;
-/// device-pixel-ratio-aware natural sizing is future runtime policy);
-/// gradients pass `None` and default-size to the positioning area
-/// (css-images-3 §4.4).
 fn tile_size(size: &BackgroundSize, area: (f64, f64), intrinsic: Option<(f64, f64)>) -> (f64, f64) {
     let (area_w, area_h) = area;
     let ratio_fit = |cover: bool| -> (f64, f64) {
@@ -1381,15 +1177,10 @@ fn explicit_axis(
     }
 }
 
-/// `background-position` offset inside the positioning area: percentages
-/// resolve against (area − tile), so 50% centers the tile and 100% flushes
-/// it with the far edge (css-backgrounds-3 §3.6).
 fn position_offset(position: &LengthPercentage, area: f64, tile: f64) -> f64 {
     f64::from(position.resolve(Length::new((area - tile) as f32)).px())
 }
 
-/// `background-repeat: round`: rescale so a whole number of tiles (at
-/// least one) fits the area exactly (css-backgrounds-3 §3.6).
 fn round_tile(area: f64, tile: f64) -> f64 {
     if area <= 0.0 || tile <= 0.0 {
         return tile;
@@ -1398,7 +1189,6 @@ fn round_tile(area: f64, tile: f64) -> f64 {
     area / count
 }
 
-/// Exact for the tiny counts this module produces (stop-list lengths).
 #[allow(clippy::cast_precision_loss)]
 fn small_f64(value: usize) -> f64 {
     value as f64
@@ -1429,8 +1219,6 @@ mod tests {
             "expected {expected}, got {actual}"
         );
     }
-
-    // -- color-stop fix-up --
 
     #[test]
     fn unpositioned_stops_distribute_evenly() {
@@ -1471,8 +1259,6 @@ mod tests {
         assert_close(offsets[2], 1.5);
     }
 
-    // -- linear gradient geometry --
-
     #[test]
     fn to_top_runs_bottom_center_to_top_center() {
         let angle = direction_angle(
@@ -1505,9 +1291,6 @@ mod tests {
 
     #[test]
     fn corner_endpoint_perpendicular_passes_through_the_corner() {
-        // `to top right` on a 100×50 box: the perpendicular through the
-        // end point must pass through the top-right corner (the
-        // magic-corner construction).
         let angle = direction_angle(
             LineDirection::Corner(
                 HorizontalPositionKeyword::Right,
@@ -1522,13 +1305,11 @@ mod tests {
         let corner = Point::new(100.0, 0.0);
         let dot = (corner - end).dot(direction);
         assert!(dot.abs() < 1e-9, "perpendicular test failed: {dot}");
-        // And the line actually points into the top-right quadrant.
         assert!(end.x > 50.0 && end.y < 25.0);
     }
 
     #[test]
     fn explicit_angles_match_the_css_convention() {
-        // 180deg = to bottom.
         let (start, end) = linear_endpoints(PI, 100.0, 50.0);
         assert_close(start.y, 0.0);
         assert_close(end.y, 50.0);
@@ -1538,7 +1319,6 @@ mod tests {
 
     #[test]
     fn legacy_prefixed_keywords_name_the_starting_side() {
-        // `-webkit-linear-gradient(top, …)` runs top → bottom.
         let angle = direction_angle(
             LineDirection::Vertical(VerticalPositionKeyword::Top),
             GradientCompatMode::WebKit,
@@ -1547,8 +1327,6 @@ mod tests {
         );
         assert_close(angle, PI);
     }
-
-    // -- background-size resolution --
 
     #[test]
     fn auto_uses_the_intrinsic_size() {
@@ -1604,8 +1382,6 @@ mod tests {
         assert_close(h, 25.0);
     }
 
-    // -- background-position resolution --
-
     #[test]
     fn percentage_position_centers_the_remaining_space() {
         assert_close(position_offset(&percent(0.5), 200.0, 50.0), 75.0);
@@ -1617,16 +1393,11 @@ mod tests {
         assert_close(position_offset(&px(12.0), 200.0, 50.0), 12.0);
     }
 
-    // -- background-repeat: round --
-
     #[test]
     fn round_repeat_snaps_to_whole_tiles() {
         assert_close(round_tile(100.0, 30.0), 100.0 / 3.0);
-        // A tile larger than the area rounds down to exactly one tile.
         assert_close(round_tile(100.0, 260.0), 100.0);
     }
-
-    // -- conic stop windows --
 
     #[test]
     fn conic_stops_pad_the_full_turn() {
@@ -1655,20 +1426,15 @@ mod tests {
         let red = Color::new([1.0, 0.0, 0.0, 1.0]);
         let blue = Color::new([0.0, 0.0, 1.0, 1.0]);
         let unrolled = unroll_conic_period(&[(0.25, red), (0.5, blue)]).expect("finite unroll");
-        // Period 0.25 → copies at k = −2 … 3 (boundary-touching periods
-        // included; their overshoot clamps at the seam later).
         assert_eq!(unrolled.len(), 12);
         assert_close(unrolled[0].0, -0.25);
         assert_close(unrolled[11].0, 1.25);
-        // The visible turn is fully covered and positions stay monotonic.
         assert!(unrolled.first().unwrap().0 <= 0.0);
         assert!(unrolled.last().unwrap().0 >= 1.0);
         for pair in unrolled.windows(2) {
             assert!(pair[0].0 <= pair[1].0 + 1e-12);
         }
     }
-
-    // -- radial extents --
 
     #[test]
     fn corner_ellipses_scale_side_radii_by_sqrt_two() {
@@ -1686,12 +1452,8 @@ mod tests {
         assert_close(ry, 20.0);
     }
 
-    // -- non-repeating radial sub-zero stop synthesis --
-
     #[test]
     fn sub_zero_radial_stops_synthesize_the_zero_crossing_color() {
-        // `radial-gradient(circle 100px, red -100%, blue 100%)`: radius 0
-        // shows the 50/50 mix, not pure red.
         let red = Color::new([1.0, 0.0, 0.0, 1.0]);
         let blue = Color::new([0.0, 0.0, 1.0, 1.0]);
         let stops = synthesize_zero_radius_stop(vec![(-1.0, red), (1.0, blue)]);
@@ -1736,8 +1498,6 @@ mod object_fit_tests {
     use crate::layout::{NaturalSize, Size as LayoutSize};
     use crate::vello::kurbo::Rect;
 
-    /// A 200x100 content box — deliberately not square, so a transform that
-    /// silently swaps the axes cannot pass.
     fn content() -> Rect {
         Rect::new(0.0, 0.0, 200.0, 100.0)
     }
@@ -1764,15 +1524,12 @@ mod object_fit_tests {
 
     #[test]
     fn contain_fits_inside_and_cover_fills_past_the_box() {
-        // 40x20 (ratio 2) into 200x100 (ratio 2): both scale by 5 and agree.
         let (width, height) = concrete_object_size(natural(40.0, 20.0), content());
         assert_close(
             fitted_size(ObjectFit::Contain, width, height, content()),
             (200.0, 100.0),
         );
 
-        // 40x40 (ratio 1) into 200x100: contain is bounded by height (x2.5),
-        // cover by width (x5) and overflows vertically.
         let (width, height) = concrete_object_size(natural(40.0, 40.0), content());
         assert_close(
             fitted_size(ObjectFit::Contain, width, height, content()),
@@ -1801,14 +1558,12 @@ mod object_fit_tests {
 
     #[test]
     fn scale_down_is_none_when_small_and_contain_when_large() {
-        // Smaller than the box: identical to `none`, never upscaled.
         let (width, height) = concrete_object_size(natural(40.0, 20.0), content());
         assert_close(
             fitted_size(ObjectFit::ScaleDown, width, height, content()),
             fitted_size(ObjectFit::None, width, height, content()),
         );
 
-        // Larger than the box: identical to `contain`.
         let (width, height) = concrete_object_size(natural(400.0, 800.0), content());
         assert_close(
             fitted_size(ObjectFit::ScaleDown, width, height, content()),
@@ -1822,11 +1577,9 @@ mod object_fit_tests {
 
     #[test]
     fn a_ratio_without_dimensions_resolves_against_the_content_box() {
-        // Ratio 4 (wider than the box's 2): bounded by width.
         let ratio_only = NaturalSize::new(LayoutSize::new(None, None), Some(4.0));
         assert_close(concrete_object_size(ratio_only, content()), (200.0, 50.0));
 
-        // Ratio 1 (narrower than the box's 2): bounded by height.
         let square = NaturalSize::new(LayoutSize::new(None, None), Some(1.0));
         assert_close(concrete_object_size(square, content()), (100.0, 100.0));
     }
@@ -1848,9 +1601,6 @@ mod object_fit_tests {
 
     #[test]
     fn a_zero_or_absent_natural_axis_falls_back_to_the_content_box() {
-        // `NaturalSize` sanitises to non-negative, so zero is a legal value and
-        // would divide to infinity in `fitted_size` — the NaN this guards
-        // against reaches `Affine::scale_non_uniform` and poisons the scene.
         for degenerate in [
             NaturalSize::NONE,
             natural(0.0, 0.0),

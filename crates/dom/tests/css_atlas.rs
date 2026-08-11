@@ -41,13 +41,9 @@ const UPDATE_NATIVE_ENV: &str = "CSS_PAINT_UPDATE_NATIVE";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DifferenceKind {
-    /// W3C-correct output with a rasterization or boundary-sampling difference.
     RasterOrSampling,
-    /// W3C-correct output for behavior the specification leaves to the UA.
     UaChoice,
-    /// A real standards parser, layout, or paint gap.
     W3cGap,
-    /// Compatibility work for a property outside the W3C CSS surface.
     NonW3cCompatibility,
 }
 
@@ -186,9 +182,6 @@ fn run_skipped_case(index: usize) {
         case.name
     );
 
-    // `--include-ignored` is also the deliberate full-audit path.  A normal
-    // ignored-test run only validates fixture metadata and never exercises a
-    // known-bad paint path.
     if std::env::var_os(AUDIT_ENV).is_some() {
         assert!(
             std::env::var_os(REFERENCE_DIR_ENV).is_some(),
@@ -381,8 +374,6 @@ fn build_and_render(shard: usize, gpu: &mut Headless) -> Result<Image, String> {
     for slot in 0..CASES_PER_SHARD {
         let case = &generated::CASES[first + slot];
         if matches!(case.expectation, Expectation::Skip { .. }) && !include_skipped {
-            // A skipped fixture must not be exercised indirectly merely
-            // because an active neighbor shares its GPU atlas.
             continue;
         }
         let mut document = html::parse(case.fragment, CELL_SIZE_F32, CELL_SIZE_F32);

@@ -7,10 +7,7 @@ interface DemoCellProps {
   children?: ReactNode;
 }
 
-/**
- * A labeled visual sample for checking whether one or more Tailwind classes
- * are applied as expected.
- */
+/** A labeled visual sample for Tailwind classes. */
 export function DemoCell(
   { label, className = '', children }: DemoCellProps,
 ) {

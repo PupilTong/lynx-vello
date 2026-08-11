@@ -31,8 +31,8 @@ pub fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
     bytes
 }
 
-/// A 4x4 image whose four quadrants are red, green, blue and transparent —
-/// enough that a flipped, rotated or channel-swapped decode is visible.
+/// A 4x4 image whose four quadrants are red, green, blue and transparent — enough that a flipped,
+/// rotated or channel-swapped decode is visible.
 #[must_use]
 pub fn checker_rgba(side: u32) -> Vec<u8> {
     let half = side / 2;
@@ -56,16 +56,8 @@ pub fn checker_png(side: u32) -> Vec<u8> {
     encode_png(side, side, &checker_rgba(side))
 }
 
-/// A minimal PNG-only [`Decoder`], injected into the contract tests exactly
-/// the way an embedder injects a real one.
-///
-/// The engine designs the contract and ships no codec, so its own tests
-/// exercise the seam with this double rather than reaching up into an
-/// embedder's implementations (which would invert the layering in the build
-/// graph). It decodes the RGBA8 fixtures the tests generate, honours the
-/// request caps, and honours a downsample target with a nearest-neighbour
-/// resample — enough to satisfy every obligation the contract states, with
-/// none of the codec surface the real implementations carry.
+/// A minimal PNG-only [`Decoder`], injected into the contract tests exactly the way an embedder
+/// injects a real one.
 #[derive(Debug)]
 pub struct PngDouble;
 
@@ -127,7 +119,6 @@ impl Decoder for PngDouble {
             .next_frame(&mut pixels)
             .map_err(|error| ImageError::decode(format, error.to_string()))?;
         pixels.truncate(frame.buffer_size());
-        // The double only ever meets the RGBA8 fixtures this suite generates.
         if reader.output_color_type().0 != png::ColorType::Rgba {
             return Err(ImageError::decode(format, "the double decodes RGBA8 only"));
         }
@@ -158,8 +149,6 @@ impl Decoder for PngDouble {
     }
 }
 
-/// Nearest-neighbour, which is all a contract double owes: the tests assert
-/// dimensions and caching identity, never resample quality.
 fn resample_nearest(pixels: &[u8], from: (u32, u32), to: (u32, u32)) -> Vec<u8> {
     let mut out = Vec::with_capacity((to.0 * to.1 * 4) as usize);
     for y in 0..to.1 {
@@ -184,12 +173,12 @@ pub fn decoder() -> Arc<dyn Decoder> {
 pub struct FetcherDouble {
     pub bytes: Vec<u8>,
     pub capabilities: Vec<ResourceCapability>,
-    /// Overrides the resolved URL, so a test can drive the `data:` branch or a
-    /// host rewrite without a real network.
+    /// Overrides the resolved URL, so a test can drive the `data:` branch or a host rewrite
+    /// without a real network.
     pub resolve_to: Mutex<Option<String>>,
     pub cache_key: Option<String>,
-    /// Makes `resolve_locator` never complete, standing in for embedder code
-    /// blocked on a network round trip or a lock.
+    /// Makes `resolve_locator` never complete, standing in for embedder code blocked on a network
+    /// round trip or a lock.
     pub hang_resolve: bool,
     pub resolves: AtomicUsize,
     pub fetches: AtomicUsize,
@@ -353,9 +342,6 @@ impl ResourceFetcher for FetcherDouble {
         let id = request.context.id;
         let resource = request.resource;
         Box::pin(async move {
-            // Every test loader starts its protocol sequence at zero. Include
-            // the fetcher identity so parallel tests cannot overwrite one
-            // another's fixture between the metadata and size checks.
             let path = std::env::temp_dir().join(format!(
                 "lynx-vello-image-fixture-{self:p}-{}-{}.bin",
                 id.namespace, id.sequence

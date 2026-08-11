@@ -16,8 +16,6 @@ use crate::tree::node::Node;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DisplayMode {
     None,
-    /// Generates no box; the children generate theirs in the nearest box
-    /// ancestor's formatting context instead.
     Contents,
     Flex,
     Grid,
@@ -47,10 +45,6 @@ fn is_root_element<T>(node: &Node<T>) -> bool {
     node.flat_parent().is_none_or(Node::is_document)
 }
 
-/// Whether the element generates no principal box, so nothing about it can be
-/// laid out, contained, positioned, or made a containing block. The document
-/// element is exempt: Stylo blockifies `display: contents` there
-/// (`Display::equivalent_block_display`).
 pub(crate) fn generates_no_box(style: &ComputedValues) -> bool {
     style.clone_display().is_contents()
 }
@@ -106,8 +100,6 @@ pub(crate) fn establishes_absolute_containing_block<T>(
         || establishes_fixed_containing_block(node, style)
 }
 
-/// The ancestor whose formatting context lays this node out: its DOM parent,
-/// or the nearest ancestor generating a box when box-less elements intervene.
 pub(crate) fn box_parent<T>(node: &Node<T>) -> Option<&Node<T>> {
     let mut current = node.flat_parent()?;
     loop {

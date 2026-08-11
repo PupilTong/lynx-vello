@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use crate::compare::{CompareOptions, Comparison, compare};
 use crate::image::{Image, ImageError};
 
-/// Set this to `1` to overwrite goldens with the current rendering.
 pub const UPDATE_ENV: &str = "FLASHBULB_UPDATE_SNAPSHOTS";
 
 /// A directory of golden PNGs plus the tolerances they are compared with.
@@ -24,12 +23,7 @@ pub struct Screenshots {
 }
 
 impl Screenshots {
-    /// Opens the golden directory at `goldens`, writing failure artifacts into
-    /// a sibling `artifacts` directory (git-ignored, and easy to upload from
-    /// CI — the equivalent of Playwright's `test-results/`).
-    ///
-    /// Tests normally build the path from their own crate:
-    /// `Screenshots::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/screenshots"))`.
+    /// Opens a golden directory with a sibling failure-artifact directory.
     #[must_use]
     pub fn new(goldens: impl Into<PathBuf>) -> Self {
         let goldens = goldens.into();
@@ -70,21 +64,8 @@ impl Screenshots {
         self.update
     }
 
-    /// The path a name resolves to.
-    ///
-    /// `name` is a path-segment list, like Playwright's snapshot-name array:
-    /// `["basic-flex", "index"]` becomes `<goldens>/basic-flex/index.png`.
-    ///
-    /// The extension is *appended*, never substituted, so a segment containing
-    /// a dot keeps it — `["1.5x-scale"]` is `1.5x-scale.png`, not `1.png`.
-    /// `set_extension` would silently collapse those onto one file.
-    ///
-    /// # Panics
-    ///
-    /// Panics on an empty name, or on a segment that is empty, absolute, or
-    /// contains a path separator or `..` — a golden must name one file inside
-    /// the store, and a caller that computed a segment from data should not be
-    /// able to escape it.
+    /// Resolves path segments to a PNG inside the golden directory.
+    /// Panics when the name is empty or a segment can escape the store.
     #[must_use]
     pub fn path(&self, name: &[&str]) -> PathBuf {
         assert!(
@@ -109,11 +90,7 @@ impl Screenshots {
         path
     }
 
-    /// Compares `actual` against the golden `name`, or accepts it when the
-    /// update switch is set.
-    ///
-    /// A missing golden is written and reported as [`GoldenOutcome::Written`]
-    /// rather than failing, matching Playwright's first-run behavior.
+    /// Compares an image with its golden or accepts it in update mode.
     pub fn check(&self, name: &[&str], actual: &Image) -> Result<GoldenOutcome, GoldenError> {
         let path = self.path(name);
         if self.update {
@@ -150,17 +127,8 @@ impl Screenshots {
         })
     }
 
-    /// [`Self::check`], but panics with a report on anything but a match.
-    ///
-    /// This is the entry point a `#[test]` normally calls.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the golden differs, is a different size, was created by
-    /// this run, or could not be read. A golden that had to be *created* fails
-    /// deliberately, so an unreviewed baseline cannot pass CI silently; a
-    /// golden deliberately *accepted* through [`UPDATE_ENV`] passes, since
-    /// setting that variable is the review.
+    /// Checks a golden and panics with a failure report.
+    /// Panics unless the golden matches or update mode accepts the image.
     pub fn assert_matches(&self, name: &[&str], actual: &Image) {
         match self.check(name, actual) {
             Ok(GoldenOutcome::Matched { .. }) => {}
@@ -218,23 +186,23 @@ impl fmt::Display for Artifacts {
     }
 }
 
-/// What checking a golden produced.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum GoldenOutcome {
-    /// The rendering matched within tolerance.
-    Matched { anti_aliased_pixels: usize },
-    /// No golden existed, so one was written from this run.
-    Written { path: PathBuf },
-    /// The golden was deliberately replaced because [`UPDATE_ENV`] was set.
-    Updated { path: PathBuf },
-    /// The rendering differed beyond the budget.
+    Matched {
+        anti_aliased_pixels: usize,
+    },
+    Written {
+        path: PathBuf,
+    },
+    Updated {
+        path: PathBuf,
+    },
     Differed {
         path: PathBuf,
         comparison: Comparison,
         artifacts: Artifacts,
     },
-    /// The rendering is a different size than the golden.
     SizeMismatch {
         path: PathBuf,
         expected: (u32, u32),
@@ -302,7 +270,6 @@ impl fmt::Display for GoldenOutcome {
     }
 }
 
-/// A golden could not be read or written.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum GoldenError {
@@ -350,17 +317,14 @@ mod tests {
         Image::from_rgba8(width, height, pixels).unwrap()
     }
 
-    /// A scratch golden directory unique to this call, so tests in one binary
-    /// — and two concurrent `cargo test` processes sharing a `TMPDIR` — cannot
-    /// delete each other's goldens mid-comparison.
+    /// Gives each test call an isolated golden directory.
     fn store(label: &str) -> Screenshots {
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let unique = NEXT.fetch_add(1, Ordering::Relaxed);
         let root =
             std::env::temp_dir().join(format!("flashbulb-{label}-{}-{unique}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        // The default artifacts dir is a sibling of the goldens dir; keeping it
-        // inside this unique root isolates it too.
+        // The unique root isolates both goldens and their sibling artifacts.
         Screenshots::new(root.join("screenshots"))
     }
 
@@ -379,8 +343,7 @@ mod tests {
             "{}",
             store.path(&["1.5x-scale"]).display()
         );
-        // Two names that `set_extension` would collapse onto one file stay
-        // distinct.
+        // Dotted names that `set_extension` would collapse remain distinct.
         assert_ne!(store.path(&["a.b"]), store.path(&["a.c"]));
     }
 

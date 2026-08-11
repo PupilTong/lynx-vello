@@ -1,20 +1,4 @@
-/**
- * Every demo crash button, grouped by page section, top-to-bottom order.
- * `name` matches the on-page button text verbatim.
- *
- * - kind 'bg'    : background (JS) frame. `find` is a substring unique in the
- *   generated bundle; `token` is the failing identifier within it; `err` is the
- *   crash class — 'call' (throw Error(...) / obj.method()), 'read' (property
- *   access like (void 0).x), or 'global' (undefined global variable). The
- *   per-engine column derives from token + err (see infer.ts).
- * - kind 'main-thread' : main-thread frame. `marker` is the throw's unique message;
- *   the (function_id, pc) is inverted out of the bytecode-debug-info. PrimJS
- *   bytecode is engine-independent, so a mainThread case reverses the same for every
- *   engine (kept in all three files for page-order parity).
- *
- * MainThread pcs are inferred without a device sample yet — verify those against
- * a device. (The PrimJS column anchors are device-calibrated; see infer.ts.)
- */
+/** Declares crash cases in display order for remapping regression tests. */
 import type { ErrorKind } from './infer.js';
 
 export type Case =
@@ -99,9 +83,6 @@ export const sections: Section[] = [
         find: '.notAFunction(',
         token: 'notAFunction',
       },
-      // 'global', not 'read': PrimJS reports an undefined-GLOBAL ReferenceError
-      // at the module top (the outermost IIFE call, no source-map mapping ->
-      // reverses to null), not the variable site. v8/jsc report the variable.
       {
         name: '2. ReferenceError (background)',
         kind: 'bg',
@@ -123,9 +104,6 @@ export const sections: Section[] = [
         find: 'Error("boom from deep nested call (background)',
         token: 'Error',
       },
-      // page buttons 5 (async throw after await) and 6 (throw inside lazy chunk)
-      // are omitted: they don't red-screen on a real device, so there's no frame
-      // to reverse.
       {
         name: '7. main-thread error',
         kind: 'main-thread',

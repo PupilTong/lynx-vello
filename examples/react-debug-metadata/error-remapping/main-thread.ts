@@ -1,19 +1,4 @@
-/**
- * Main-thread (mainThread / lepusNG) reversal + inference, mirroring biz_sourcemap's
- * 2-step path. The main-thread engine is always PrimJS-family, so there is one
- * result per case (no v8/jsc/primjs split).
- *
- * A mainThread frame is `fn:function_id:pc`. Reversal:
- *   function_info[function_id].line_col[pc - 1] -> {line,col} in main-thread.js
- *   -> main-thread source-map -> business source.
- *
- * Inference (no device): find the throw's source line (by a message marker in
- * the main-thread source-map's sourcesContent), then invert — scan every
- * function's `line_col`, source-map each entry, and collect the (fid, pc) that
- * land on that line. The engine reports one specific pc among them; we surface
- * the function id, the pc range, and the (identical) resolved position. Verify
- * the exact fid/pc against a device.
- */
+/** Infers and reverses PrimJS main-thread frames for remapping tests. */
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 
@@ -60,7 +45,7 @@ function walk(dir: string, cb: (file: string) => void): void {
   }
 }
 
-/** Index every main-thread artifact's (release -> bytecode functions + map). */
+/** Indexes main-thread bytecode functions and source maps by release. */
 export function buildMainThreadIndex(
   distDirs: string[],
 ): Map<string, MainThreadEntry> {
@@ -115,7 +100,7 @@ export function buildMainThreadIndex(
   return index;
 }
 
-/** Infer the mainThread frame for a throw identified by a source-message marker. */
+/** Infers a main-thread frame from a unique source-message marker. */
 export async function inferMainThread(
   marker: string,
   index: Map<string, MainThreadEntry>,
@@ -131,52 +116,52 @@ export async function inferMainThread(
       content.slice(0, content.indexOf(marker)).split('\n').length;
     const genLines = entry.functionSource.split('\n');
     return SourceMapConsumer.with(entry.map, null, (consumer) => {
-      let fid = -1, pc = -1, lc: LineCol | null = null;
-      for (const fn of entry.functions) {
-        for (let i = 0; i < fn.line_col.length; i++) {
-          const cand = fn.line_col[i];
+      let selectedFunctionId = -1;
+      let selectedPc = -1;
+      let selectedPosition: LineCol | null = null;
+      for (const functionInfo of entry.functions) {
+        for (
+          let entryIndex = 0;
+          entryIndex < functionInfo.line_col.length;
+          entryIndex++
+        ) {
+          const candidate = functionInfo.line_col[entryIndex];
           const pos = consumer.originalPositionFor({
-            line: cand.line,
-            column: cand.column,
+            line: candidate.line,
+            column: candidate.column,
           });
-          // The engine reports the LAST bytecode on the throw line (device:
-          // function_id 21, pc 38). Scan every function_info entry and keep the
-          // globally highest pc, so the pick is deterministic rather than
-          // JSON-order-dependent when several functions map to the same line.
           if (
             pos.source && path.basename(pos.source) === file
             && pos.line === throwLine
-            && i + 1 > pc
+            && entryIndex + 1 > selectedPc
           ) {
-            fid = fn.function_id;
-            pc = i + 1;
-            lc = cand;
+            selectedFunctionId = functionInfo.function_id;
+            selectedPc = entryIndex + 1;
+            selectedPosition = candidate;
           }
         }
       }
-      if (fid < 0 || !lc) {
+      if (selectedFunctionId < 0 || !selectedPosition) {
         throw new Error(
           `no mainThread pc maps to ${file}:${throwLine} for ${marker}`,
         );
       }
-      // step 1: bytecode-debug-info -> position in generated main-thread.js
-      const step1 = stepFromLines(
+      const bytecodeStep = stepFromLines(
         'bytecode-debug-info',
         'main-thread.js',
-        lc.line,
-        lc.column + 1,
+        selectedPosition.line,
+        selectedPosition.column + 1,
         genLines,
       );
-      // step 2: that generated position -> business source
       const pos = consumer.originalPositionFor({
-        line: lc.line,
-        column: lc.column,
+        line: selectedPosition.line,
+        column: selectedPosition.column,
       });
       const srcContent = pos.source
         ? consumer.sourceContentFor(pos.source, true)
         : null;
       const srcLines = srcContent ? srcContent.split('\n') : [];
-      const step2 = stepFromLines(
+      const sourceMapStep = stepFromLines(
         'source-map',
         pos.source
           ? (pos.source.includes('/src/')
@@ -191,9 +176,9 @@ export async function inferMainThread(
       return {
         release,
         path: entry.path,
-        functionId: fid,
-        pc,
-        steps: [step1, step2],
+        functionId: selectedFunctionId,
+        pc: selectedPc,
+        steps: [bytecodeStep, sourceMapStep],
       };
     });
   }

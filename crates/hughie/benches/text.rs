@@ -127,9 +127,7 @@ impl TextCase {
     }
 }
 
-/// Independent per-node artifacts sharing the session-level text context used
-/// by the production protocol. Keeping the batch in one input avoids creating
-/// thousands of duplicate font collections for the sub-microsecond cases.
+/// Per-node artifacts sharing one session-level text context.
 #[derive(Debug)]
 struct TextBatch {
     context: TextContext,

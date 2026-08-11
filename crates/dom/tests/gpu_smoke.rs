@@ -7,8 +7,6 @@ use dom::vello;
 use dom::vello::kurbo::{Affine, Rect};
 use dom::vello::peniko::{Color, Fill};
 
-/// Reads the RGBA pixel at (`x`, `y`) from a tightly-packed row-major
-/// readback of the given width.
 fn pixel(pixels: &[u8], width: usize, x: usize, y: usize) -> [u8; 4] {
     let offset = (y * width + x) * 4;
     pixels[offset..offset + 4].try_into().unwrap()
@@ -23,7 +21,6 @@ fn headless(test: &str) -> Headless {
 fn red_square_over_white_base() {
     let mut headless = headless("red_square_over_white_base");
 
-    // A 40×40 red square at (12, 12) on a 64×64 white canvas.
     let mut scene = vello::Scene::new();
     scene.fill(
         Fill::NonZero,
@@ -56,8 +53,6 @@ fn red_square_over_white_base() {
 fn empty_scene_paints_exact_base_color_with_row_padding() {
     let mut headless = headless("empty_scene_paints_exact_base_color_with_row_padding");
 
-    // 33×17 makes each tight row 132 bytes, forcing 256-byte copy padding:
-    // exact pixels prove the readback strips row padding correctly.
     let scene = vello::Scene::new();
     let blue = Color::from_rgb8(0, 0, 255);
     let pixels = headless

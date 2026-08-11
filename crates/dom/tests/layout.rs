@@ -362,21 +362,16 @@ fn display_contents_lifts_children_into_the_containers_formatting_context() {
     let nested = h.doc.el(nested_wrapper, "view");
     h.layout();
 
-    // Three flex items in source order, sharing the container's width — the
-    // wrappers add no box and no formatting context of their own.
     assert_eq!(h.rect(first), (0.0, 0.0, 100.0, 40.0));
     assert_eq!(h.rect(lifted), (100.0, 0.0, 100.0, 40.0));
     assert_eq!(h.rect(nested), (200.0, 0.0, 100.0, 40.0));
 
-    // A box-less element has no box to report.
     assert_eq!(h.rect(wrapper), (0.0, 0.0, 0.0, 0.0));
     assert_eq!(h.rect(nested_wrapper), (0.0, 0.0, 0.0, 0.0));
 }
 
 #[test]
 fn display_contents_works_across_every_container_algorithm() {
-    // Grid placement, linear weights, and relative id anchoring all resolve
-    // over the flattened item list, not the source child list.
     let mut h = Harness::new(
         "page { display: flex; width: 300px; height: 300px; }
          .wrapper { display: contents; }
@@ -438,8 +433,6 @@ fn display_contents_inherits_to_its_children_without_boxing_them() {
     dom.append_child(wrapper, text);
     dom.layout();
 
-    // The text is an item of `page`, but inherits through its box-less DOM
-    // parent: five Ahem glyphs at the wrapper's 8px, not the container's 16px.
     assert_eq!(dom_rect(&dom, text), (0.0, 0.0, 40.0, 8.0));
     assert_eq!(dom_rect(&dom, wrapper), (0.0, 0.0, 0.0, 0.0));
 }
@@ -460,16 +453,8 @@ fn display_contents_cannot_contain_position_or_paint_its_descendants() {
     let absolute = h.doc.el(wrapper, ".abs");
     h.layout();
 
-    // None of `position`, `transform`, `contain`, or `content-visibility`
-    // applies to an element that generates no box, so the wrapper is neither
-    // hoisted nor a containing block, and its subtree is neither skipped nor
-    // contained: the absolute child resolves against `page`, which is static
-    // and therefore hands it to the viewport.
     assert_eq!(h.rect(wrapper), (0.0, 0.0, 0.0, 0.0));
     assert_eq!(h.rect(absolute), (10.0, 20.0, 30.0, 40.0));
-    // Its paint rank comes from the flattened item list it was collected in —
-    // behind `.plain`, which precedes it there — not from the one-child source
-    // list of the box-less element it happens to sit under.
     assert_eq!(h.layout_of(plain).order, 0);
     assert_eq!(h.layout_of(absolute).order, 1);
 }
@@ -492,8 +477,6 @@ fn display_contents_flip_relayouts_the_container_and_clears_the_stale_box() {
     h.doc.set_inline(wrapper, "display: contents");
     h.layout();
 
-    // Its child is now the container's own item, and the box it used to
-    // generate is gone rather than left behind at its last geometry.
     assert_eq!(h.rect(wrapper), (0.0, 0.0, 0.0, 0.0));
     assert_eq!(h.rect(lifted), (0.0, 0.0, 150.0, 40.0));
     assert_eq!(h.rect(sibling), (150.0, 0.0, 150.0, 40.0));
@@ -506,9 +489,6 @@ fn display_contents_flip_relayouts_the_container_and_clears_the_stale_box() {
 
 #[test]
 fn display_contents_on_the_document_element_blockifies() {
-    // CSS Display 3 §2.8 (the root element's principal box): `display:
-    // contents` blockifies there, which this engine lays out through the leaf
-    // fallback.
     let mut h = Harness::new(
         "page { display: contents; width: 120px; height: 30px; }
          view { width: 20px; height: 10px; }",
@@ -1636,12 +1616,8 @@ fn incremental_relayout_reanchors_a_hoisted_node_inside_a_boundary() {
     );
 }
 
-// --- display:contents dissolution (css-display-3 §2.5) ---
-
 #[test]
 fn contents_children_compete_in_the_container_order_sort() {
-    // Live-Chrome-verified interleave: order applies in the box parent's
-    // single item list, straddling the dissolved boundary.
     let mut h = Harness::new(
         "page { display: flex; width: 800px; height: 100px; }
          .wrap { display: contents; }
@@ -1676,7 +1652,6 @@ fn text_children_of_contents_measure_as_container_items() {
     h.doc.dom.append_child(wrap, text);
     let after = h.doc.el(root, "view.cell");
     h.layout();
-    // "hi" in 20px Ahem = 40px wide; the sibling box starts after it.
     let text_rect = dom_rect(&h.doc.dom, text);
     assert_eq!((text_rect.0, text_rect.2), (0.0, 40.0));
     assert_eq!(h.rect(after).0, 40.0);
@@ -1694,20 +1669,12 @@ fn absolute_child_of_contents_anchors_to_the_box_ancestor() {
     let wrap = h.doc.el(root, "view.wrap");
     let abs = h.doc.el(wrap, "view.abs");
     h.layout();
-    // The contents wrapper is boxless even with position: relative — it is
-    // never a containing block; the abs child anchors to the page. Its
-    // stored location is page-relative because the wrapper's layout is
-    // zeroed. (Recorded limitation: this host-hoisted path does not fold
-    // the abs box into the page's scrollable content_size.)
     assert_eq!(h.rect(abs), (10.0, 20.0, 50.0, 50.0));
     assert_eq!(h.rect(wrap), (0.0, 0.0, 0.0, 0.0));
 }
 
 #[test]
 fn a_parked_boundary_that_flips_to_contents_is_dropped_gracefully() {
-    // Regression for the stale-parked-root trace: park a containment
-    // boundary, flip it to display:contents, and relayout — must not panic
-    // and must dissolve correctly.
     let mut h = Harness::new(
         "page { display: flex; width: 800px; height: 100px; }
          .boundary { display: flex; contain: strict; width: 100px; height: 100px; }
@@ -1724,7 +1691,6 @@ fn a_parked_boundary_that_flips_to_contents_is_dropped_gracefully() {
     h.layout();
     assert_eq!(h.rect(after).0, 100.0);
 
-    // Park the boundary via a content mutation, then flip it to contents.
     h.doc.dom.set_text_node_data(text, "bb");
     h.doc
         .set_inline(boundary, "contain: strict; display: contents");
@@ -1747,17 +1713,12 @@ fn hoisted_boxes_rank_in_the_dissolved_sibling_space() {
     let sibling = h.doc.el(wrap, "view.cell");
     let fixed = h.doc.el(wrap, "view.fixed");
     h.layout();
-    // The fixed box's paint rank counts its dissolved in-flow sibling in the
-    // box parent's merged space (a rank-0 regression would mean the
-    // dissolved target was not found).
     assert_eq!(h.layout_of(sibling).order, 0);
     assert_eq!(h.layout_of(fixed).order, 1);
 }
 
 #[test]
 fn hoisted_rank_counts_negative_order_siblings_after_the_target() {
-    // The after-target arm of the merged rank: an order:-1 in-flow sibling
-    // following the hoisted box still sorts below its (0, index) key.
     let mut h = Harness::new(
         "page { display: flex; position: relative; width: 800px; height: 100px; }
          .wrap { display: contents; }
@@ -1792,8 +1753,6 @@ fn hoisted_rank_resolves_through_nested_contents_levels() {
     let inner = h.doc.el(outer, "view.wrap");
     let fixed = h.doc.el(inner, "view.fixed");
     h.layout();
-    // box_tree_parent walks two contents levels up to the page; the rank
-    // counts the page's dissolved list.
     assert_eq!(h.layout_of(sibling).order, 0);
     assert_eq!(h.layout_of(fixed).order, 1);
 }

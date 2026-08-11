@@ -36,24 +36,12 @@ struct DocumentNodeData {
 
 enum NodeData {
     Document(Box<DocumentNodeData>),
-    /// Layout/paint snapshot of the element's primary
-    /// `Arc<ComputedValues>`, refreshed by the exclusive post-flush damage
-    /// harvest. The `Arc` keeps the pointee alive, so reads are always
-    /// memory-safe; a debug assertion in [`Node::layout_computed_style`]
-    /// verifies the snapshot still matches Stylo's live primary style.
     Element(Option<Arc<ComputedValues>>),
     Text,
-    /// The root of one shadow tree, reached from its host through
-    /// [`Node::shadow_root_id`] rather than the host's child list. Boxed so a
-    /// shadow root's scoped stylesheet set costs elements and text nodes
-    /// nothing.
     ShadowRoot(Box<ShadowRootData>),
 }
 
-/// Stylo's per-node traversal and invalidation bookkeeping, stored inline on
-/// the [`Node`] so traversal flag access shares the node's cache lines.
-/// Snapshot payloads are sparse, document-owned state; only their atomic
-/// traversal lifecycle flags remain here.
+/// Inline Stylo traversal and invalidation state.
 pub(crate) struct StylingData {
     pub(crate) selector_flags: AtomicUsize,
     pub(crate) dirty_descendants: AtomicBool,
@@ -94,27 +82,13 @@ pub struct Node<T> {
     pub(crate) attrs: Vec<(LocalName, String)>,
     pub(crate) element_state: ElementState,
 
-    /// The definition bound to this element at creation, when its tag had one.
-    /// `NonZeroU32`-backed so the `Option` is four bytes and lands in the
-    /// primary node's existing tail padding.
     pub(crate) custom_definition: Option<DefinitionId>,
-    /// This element's position in the custom element state machine. Non-element
-    /// nodes keep the default and are never consulted.
     pub(crate) custom_state: CustomElementState,
 
     pub(crate) parsed_inline_style: Option<Arc<Locked<PropertyDeclarationBlock>>>,
 
-    /// Shadow-DOM links, allocated only for the nodes that take part in one:
-    /// a host, a slot, or a slotted node. Every other node keeps one `None`
-    /// word, so the flat-tree walks cost a predictable branch instead of a
-    /// wider primary arena stride.
     pub(crate) shadow: Option<Box<ShadowLinks>>,
 
-    /// Stylo's per-element style data, unconditionally present so no outer
-    /// cell is needed: interior mutability lives entirely inside the upstream
-    /// [`ElementDataWrapper`] (release-free, debug-checked borrows).
-    /// [`Self::stylo_data_present`] tracks Stylo's has-data protocol, which
-    /// the upstream wrapper does not model.
     style_data: ElementDataWrapper,
     stylo_data_present: AtomicBool,
 
@@ -148,12 +122,6 @@ impl<T> Node<T> {
         local_name: LocalName,
     ) -> Self {
         let mut node = Self::new(owner, id, NodeData::Element(None), Some(local_name), None);
-        // Every element matches `:defined` and nothing ever clears the bit:
-        // the standard's `undefined` state exists only for an element whose
-        // definition has not arrived yet, and this crate requires definitions
-        // to precede their elements (see `tree::custom`'s scope note). Seeding
-        // it here rather than answering the selector from a state field keeps
-        // the matcher a single bitset test.
         node.element_state = ElementState::DEFINED;
         node
     }
@@ -270,16 +238,12 @@ impl<T> Node<T> {
         matches!(&self.data, NodeData::Text)
     }
 
-    /// Whether this node is the root of a shadow tree. A shadow root is
-    /// neither an element nor a text node: it matches no selector, generates
-    /// no box, and is transparent in the flat tree, where its children hang
-    /// directly off its host.
+    /// Whether this node is a shadow root.
     #[must_use]
     pub fn is_shadow_root(&self) -> bool {
         matches!(&self.data, NodeData::ShadowRoot(_))
     }
 
-    /// The element this shadow root is attached to.
     #[must_use]
     pub(crate) fn shadow_host_id(&self) -> Option<NodeId> {
         match &self.data {
@@ -453,11 +417,6 @@ impl<T> Node<T> {
         self.has_style_data().then_some(&self.style_data)
     }
 
-    /// Store the harvested layout-style snapshot, reporting whether the
-    /// snapshot's `Arc` identity changed. The damage harvest keys its descent
-    /// on that change: a freshly (re)styled element is exactly one whose
-    /// snapshot moved, and its children may hold initial styles Stylo's
-    /// dirty-descendants bookkeeping does not cover.
     pub(crate) fn refresh_layout_style(&mut self, style: Option<Arc<ComputedValues>>) -> bool {
         let NodeData::Element(snapshot) = &mut self.data else {
             debug_assert!(style.is_none(), "only elements own computed styles");
@@ -474,14 +433,6 @@ impl<T> Node<T> {
         changed
     }
 
-    /// Borrow the harvested computed style without re-entering Stylo's
-    /// runtime borrow checker or incrementing the style `Arc`.
-    ///
-    /// The snapshot is refreshed by the exclusive post-flush damage harvest
-    /// and its `Arc` keeps the value alive, so this is always memory-safe.
-    /// After a traversal that panicked mid-flush the snapshot can lag the
-    /// live style (the document is unspecified per the let-it-crash policy);
-    /// the debug assertion below reports any divergence.
     pub(crate) fn layout_computed_style(&self) -> Option<&ComputedValues> {
         let NodeData::Element(snapshot) = &self.data else {
             return None;
@@ -512,21 +463,10 @@ impl<T> Node<T> {
         }
     }
 
-    /// Whether this node generates a replaced box.
-    ///
-    /// Independent of whether a natural size has arrived: an `<img>` is a
-    /// replaced element from the moment it exists, and its intrinsic dimensions
-    /// show up one network round trip later. Conflating the two made an image
-    /// stop being replaced whenever its size was unknown — which is exactly the
-    /// pre-decode state — so layout would route it back into its parent's
-    /// formatting context for the first frame and then move it out again.
     pub(crate) fn is_replaced(&self) -> bool {
         matches!(self.content.as_deref(), Some(NodeContent::Replaced(_)))
     }
 
-    /// Installs intrinsic dimensions, and makes the node replaced if it is not
-    /// already. [`NaturalSize::NONE`] clears the dimensions but keeps replaced
-    /// status — use `set_element_text_content` to make a node non-replaced.
     pub(crate) fn set_natural_size(&mut self, natural_size: NaturalSize) -> bool {
         if self.natural_size() == natural_size && self.is_replaced() {
             return false;
@@ -608,14 +548,11 @@ impl<T> Node<T> {
         }
     }
 
-    /// Marks the element's Stylo data present and lends the wrapper for the
-    /// traversal's exclusive per-element write.
     pub(crate) fn ensure_style_data(&self) -> &ElementDataWrapper {
         self.stylo_data_present.store(true, Ordering::Release);
         &self.style_data
     }
 
-    /// Resets the element's Stylo data to its unstyled state.
     pub(crate) fn clear_style_data(&self) {
         *self.style_data.borrow_mut() = ElementData::default();
         self.stylo_data_present.store(false, Ordering::Release);
@@ -675,9 +612,6 @@ impl<T> Node<T> {
 
     fn sibling_at(&self, offset: isize) -> Option<&Node<T>> {
         if self.is_shadow_root() {
-            // A shadow root points at its host as its parent so the ancestor
-            // spines stay connected, but it is not one of the host's children
-            // and therefore has no siblings.
             return None;
         }
         let tree = self.tree();
@@ -709,9 +643,6 @@ impl<T> Node<T> {
         }
     }
 
-    /// The flat-tree children — what Stylo traverses, layout lays out, and
-    /// paint walks. Identical to [`Self::children_iter`] until a shadow root
-    /// exists.
     pub(crate) fn flat_children_iter(&self) -> ChildrenIter<'_, T> {
         ChildrenIter {
             tree: self.tree(),
@@ -820,12 +751,7 @@ mod tests {
         const PRE_BOXING_NODE_STRIDE: usize = 408;
         const PRE_STATIC_SPLIT_NODE_STRIDE: usize = 368;
 
-        // The boxed shadow-root variant is why this is still 16: a shadow
-        // root's host, mode, and scoped stylesheet set live behind one
-        // pointer rather than widening every element and text node.
         assert_eq!(std::mem::size_of::<NodeData>(), 16);
-        // Assumes the workspace-wide `smallvec/union` layout (root
-        // Cargo.toml note).
         assert_eq!(
             std::mem::size_of::<Node<()>>(),
             if cfg!(debug_assertions) { 232 } else { 224 }
@@ -891,9 +817,6 @@ mod tests {
 
         let node = document.get(root).expect("root remains live");
         let before = std::ptr::from_ref(node.layout_computed_style().expect("root is styled"));
-        // Hint-level out-of-band access — what invalidation writes between
-        // flushes — does not move the primary style, so the harvested
-        // snapshot stays identical and readable.
         drop(
             <&Node<()> as TElement>::mutate_data(&node).expect("a flushed element owns Stylo data"),
         );
@@ -907,10 +830,7 @@ mod tests {
         );
     }
 
-    /// An unvisited detached element whose primary style is cleared out of
-    /// band diverges from its harvested snapshot. Release builds keep reading
-    /// the snapshot (stale but `Arc`-owned, so memory-safe); debug builds
-    /// report the divergence at the read site.
+    /// A detached element reports a diverged harvested style in debug builds.
     #[cfg(debug_assertions)]
     #[test]
     fn diverged_snapshot_on_unvisited_element_is_reported_in_debug() {

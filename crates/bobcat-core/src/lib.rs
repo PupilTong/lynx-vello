@@ -14,13 +14,8 @@
 //! main-thread runtime. Disable default features to use only the external
 //! engine contracts without compiling `QuickJS`.
 
-// The coverage run compiles with `--cfg coverage_nightly` and the test modules
-// opt out via `#[coverage(off)]`, which needs this experimental feature (same
-// pattern as every other workspace crate).
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
-/// The layer below, re-exported whole: the product reaches `ElementTree`,
-/// `dom`, and the render stack exclusively through this door.
 pub use lynx_element;
 
 pub mod engine;

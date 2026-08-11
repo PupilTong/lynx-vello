@@ -40,7 +40,6 @@ use crate::vello::kurbo::Rect;
 use crate::vello::peniko::{BlendMode, Color, Compose, Fill, Mix};
 use crate::visual::CornerRadii;
 
-/// Paints the outset (drop) shadows; call before the background.
 pub(crate) fn paint_outset(
     scene: &mut Scene,
     paths: &mut PathScratch,
@@ -52,7 +51,6 @@ pub(crate) fn paint_outset(
         return;
     }
     let border_shape = BoxShape::new(fragment.border_box, &fragment.radii);
-    // Reversed: last-specified paints first (first-specified on top).
     for shadow in shadows.iter().rev().filter(|shadow| !shadow.inset) {
         paint_one_outset(scene, paths, style, fragment, &border_shape, shadow);
     }
@@ -72,16 +70,10 @@ fn paint_one_outset(
     }
     let geometry = ShadowGeometry::new(shadow);
     let Some(rect) = offset_rect(fragment.border_box, &geometry, geometry.spread) else {
-        // A negative spread collapsed the shadow shape to nothing.
         return;
     };
     let radii = adjust_radii(&fragment.radii, geometry.spread as f32);
 
-    // css-backgrounds-3 §7.4.1: the shadow paints only outside the
-    // border-box shape. An even-odd ring between a conservative outer bound
-    // of the blurred draw (2.5σ Gaussian cutoff, plus |offset| slack so the
-    // bound also covers the un-offset box) and the border box carves the
-    // area under the box out of the clip.
     let margin = 2.5 * geometry.sigma + geometry.dx.abs() + geometry.dy.abs();
     let bounds = BoxShape::Rect(rect.inflate(margin, margin));
     ring_path_into(&mut paths.ring, &bounds, border_shape);
@@ -95,9 +87,6 @@ fn paint_one_outset(
             geometry.sigma,
         );
     } else {
-        // Zero blur: exact fill of the offset shape with per-corner radii.
-        // Clamped radius adjustment can leave adjacent radii overlapping an
-        // edge, so re-normalize (css-backgrounds-3 §5.5).
         let radii = normalize_radii(radii, rect.width() as f32, rect.height() as f32);
         let shape = BoxShape::new(rect, &radii);
         with_shape!(&shape, |s| scene.fill(
@@ -111,7 +100,6 @@ fn paint_one_outset(
     scene.pop_layer();
 }
 
-/// Paints the inset shadows; call after the background, before borders.
 pub(crate) fn paint_inset(
     scene: &mut Scene,
     paths: &mut PathScratch,
@@ -122,11 +110,8 @@ pub(crate) fn paint_inset(
     if !shadows.iter().any(|shadow| shadow.inset) {
         return;
     }
-    // The inset shadow field lives inside the padding box, with its radii
-    // (css-backgrounds-3 §7.4.1).
     let padding_radii = inner_radii(&fragment.radii, &fragment.border_widths);
     let padding_shape = BoxShape::new(fragment.padding_box, &padding_radii);
-    // Reversed: last-specified paints first (first-specified on top).
     for shadow in shadows.iter().rev().filter(|shadow| shadow.inset) {
         paint_one_inset(
             scene,
@@ -154,15 +139,10 @@ fn paint_one_inset(
         return;
     }
     let geometry = ShadowGeometry::new(shadow);
-    // The hole is the unshadowed inner area: the padding box shifted by the
-    // offset and deflated by the spread. `None` means the spread swallowed
-    // it — the whole padding box is shadowed.
     let hole_rect = offset_rect(fragment.padding_box, &geometry, -geometry.spread);
     let hole_radii = adjust_radii(padding_radii, -geometry.spread as f32);
 
     if geometry.sigma > 0.0 {
-        // A full SrcOver layer, not a clip layer: the DestOut blend layer
-        // below nests inside (vello #1198).
         with_shape!(padding_shape, |s| scene.push_layer(
             Fill::NonZero,
             BlendMode::new(Mix::Normal, Compose::SrcOver),
@@ -178,8 +158,6 @@ fn paint_one_inset(
             s
         ));
         if let Some(hole) = hole_rect {
-            // DestOut leaves color × (1 − blurred hole alpha): full color at
-            // the padding edge fading out across the blur — the shadow band.
             with_shape!(padding_shape, |s| scene.push_layer(
                 Fill::NonZero,
                 BlendMode::new(Mix::Normal, Compose::DestOut),
@@ -198,10 +176,6 @@ fn paint_one_inset(
         }
         scene.pop_layer();
     } else {
-        // Zero blur: fill (padding − hole) even-odd. The clip layer matters
-        // when the offset hole sticks outside the padding shape (the ring's
-        // even-odd winding alone would fill that overhang). Plain fills
-        // inside a clip layer are fine (#1198 concerns blend layers only).
         with_shape!(padding_shape, |s| scene.push_clip_layer(
             Fill::NonZero,
             fragment.transform,
@@ -209,16 +183,11 @@ fn paint_one_inset(
         ));
         match hole_rect {
             Some(hole) => {
-                // Re-normalize for the same clamped-adjustment overlap case
-                // as the outset zero-blur path.
                 let radii = normalize_radii(hole_radii, hole.width() as f32, hole.height() as f32);
                 let hole_shape = BoxShape::new(hole, &radii);
-                // Built while the padding clip layer is open — sequential
-                // with every other use of the buffer, so still sound.
                 ring_path_into(&mut paths.ring, padding_shape, &hole_shape);
                 scene.fill(Fill::EvenOdd, fragment.transform, color, None, &paths.ring);
             }
-            // No hole: the whole padding box is shadowed.
             None => with_shape!(padding_shape, |s| scene.fill(
                 Fill::NonZero,
                 fragment.transform,
@@ -231,15 +200,10 @@ fn paint_one_inset(
     }
 }
 
-/// How far outside the border box the outset shadows can paint
-/// (max over shadows of `|offset| + max(spread, 0) + 2.5 × blur-σ`, where σ
-/// is the blur radius halved per css-backgrounds-3 §7). Zero without
-/// shadows.
 pub(crate) fn extent(style: &ComputedValues) -> f64 {
     outset_extent(&style.get_effects().box_shadow.0)
 }
 
-/// [`extent`] over a plain shadow slice (factored for testability).
 fn outset_extent(shadows: &[BoxShadow]) -> f64 {
     shadows
         .iter()
@@ -258,7 +222,6 @@ struct ShadowGeometry {
     dx: f64,
     dy: f64,
     spread: f64,
-    /// Gaussian σ: half the CSS blur radius (css-backgrounds-3 §7.4.1).
     sigma: f64,
 }
 
@@ -273,8 +236,6 @@ impl ShadowGeometry {
     }
 }
 
-/// `rect` shifted by the shadow offset and grown by `outset` on every side
-/// (negative shrinks); `None` when the result has no area.
 fn offset_rect(rect: Rect, geometry: &ShadowGeometry, outset: f64) -> Option<Rect> {
     let rect = Rect::new(
         rect.x0 + geometry.dx - outset,
@@ -285,10 +246,6 @@ fn offset_rect(rect: Rect, geometry: &ShadowGeometry, outset: f64) -> Option<Rec
     (rect.width() > 0.0 && rect.height() > 0.0).then_some(rect)
 }
 
-/// Corner radii grown (positive `delta`) or shrunk by the spread distance,
-/// clamped at zero. A zero component stays zero — sharp corners stay sharp
-/// (the endpoint of css-backgrounds-3 §7.4.1's spread easing; the easing
-/// itself is skipped — module doc).
 fn adjust_radii(radii: &CornerRadii, delta: f32) -> CornerRadii {
     let component = |value: f32| {
         if value > 0.0 {
@@ -307,11 +264,6 @@ fn adjust_radii(radii: &CornerRadii, delta: f32) -> CornerRadii {
     }
 }
 
-/// The single uniform corner radius vello's blur primitive accepts: the
-/// average of the eight per-corner components (recorded approximation —
-/// module doc), clamped to the rect's half-min-dimension so the implied
-/// shape stays well-formed. Zero radii average to zero, so sharp shadows
-/// stay sharp.
 fn uniform_radius(radii: &CornerRadii, rect: Rect) -> f64 {
     let sum = radii.top_left.width
         + radii.top_left.height
@@ -353,7 +305,6 @@ mod tests {
 
     #[test]
     fn extent_takes_the_max_outset_reach() {
-        // |−6| + spread 3 + 2.5 × (8 / 2) = 19; the huge inset is ignored.
         let shadows = [
             shadow(4.0, -6.0, 8.0, 3.0, false),
             shadow(100.0, 100.0, 100.0, 100.0, true),
@@ -364,8 +315,6 @@ mod tests {
 
     #[test]
     fn extent_ignores_negative_spread() {
-        // Negative spread shrinks the shadow shape but never pulls the
-        // reach negative: 0 + max(−10, 0) + 2.5 × 2 = 5.
         assert!((outset_extent(&[shadow(0.0, 0.0, 4.0, -10.0, false)]) - 5.0).abs() < 1e-9);
     }
 
@@ -398,7 +347,6 @@ mod tests {
         let inflated = adjust_radii(&radii, 2.0);
         assert!((inflated.top_left.width - 6.0).abs() < 1e-6);
         assert!((inflated.top_left.height - 8.0).abs() < 1e-6);
-        // Zero components stay zero even under positive spread.
         assert!((inflated.top_right.width - 0.0).abs() < 1e-6);
         assert!((inflated.top_right.height - 5.0).abs() < 1e-6);
         assert!(inflated.bottom_left.width.abs() < 1e-6);

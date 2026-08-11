@@ -3,8 +3,6 @@
   --color-text: #fff;
 }
 
-/* dedicated demo page: plain dark, fully scrollable (no fixed backdrop that
-   would swallow scroll gestures) */
 .App {
   height: 100vh;
   background-color: #0d0d12;
@@ -40,7 +38,6 @@ text {
   margin-top: 16px;
 }
 
-/* crash-demo rows: clearly separated, padded, tappable, readable over the bg */
 .crash-section {
   margin-top: 18px;
   width: 88vw;

@@ -367,11 +367,6 @@ pub(super) fn resolve_item_intrinsic_dimensions<T>(
             cross_tracks,
         )
     });
-    // Grid deliberately re-borrows the style after recursive intrinsic
-    // probes instead of cloning it into every item. LayoutTree's immutable
-    // topology/style contract makes the intrinsic tags captured earlier in
-    // this pass stable; a host that changes the style mid-pass violates that
-    // contract, and the variant checks below intentionally fail fast.
     let style = tree.style(item.key.node);
     let size = axis.size(style.size());
     let min_size = axis.size(style.min_size());
@@ -734,9 +729,6 @@ struct DistributionScratch {
 }
 
 /// Reusable buffers for one recursive Grid layout frame.
-///
-/// Logical contents reset between axes and reruns; capacities stay local, so
-/// recursive child layout cannot alias its parent's sizing state.
 #[derive(Default)]
 pub(super) struct IntrinsicSizingScratch {
     single_growth_limits: Vec<Option<f32>>,
@@ -1398,7 +1390,6 @@ fn resolve_intrinsic_sizes<T>(
     finalize_growth_limits(&mut tracks.tracks);
 }
 
-/// Clamps still-infinite growth limits down to each track's base size.
 fn finalize_growth_limits(tracks: &mut [Track]) {
     for track in tracks {
         if !track.growth_limit.is_finite() {

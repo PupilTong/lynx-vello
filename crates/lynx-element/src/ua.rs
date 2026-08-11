@@ -5,30 +5,18 @@
 //! on every element, …) stay embedder cascade policy (UA sheet)." This module
 //! is that policy.
 
-/// The page-config switches that change the UA cascade.
-///
-/// These are read from the decoded `.web.bundle` `Configurations` section —
-/// web-core bakes the same three booleans into its element-API closures in
-/// `onPageConfigReady`, before any main-thread script runs.
+/// Page configuration that controls the Lynx UA cascade.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PageConfig {
-    /// `defaultDisplayLinear` — every element defaults to `display: linear`
-    /// (vertical), Lynx's default box model, rather than a W3C block/flow one.
+    /// Whether elements default to `display: linear`.
     pub default_display_linear: bool,
-    /// `defaultOverflowVisible` — elements default to `overflow: visible`
-    /// instead of Lynx's `overflow: hidden`.
+    /// Whether elements default to visible overflow.
     pub default_overflow_visible: bool,
-    /// `enableCSSSelector` — whether author CSS is matched as real selectors.
-    ///
-    /// Recorded as configuration, but nothing reads it yet: this crate has no
-    /// `__SetCSSId`, so there is no per-component CSS-scope path to switch.
+    /// Whether author CSS selector matching is enabled.
     pub enable_css_selector: bool,
 }
 
 impl Default for PageConfig {
-    /// The defaults a `.web.bundle` built by today's toolchain carries:
-    /// `defaultDisplayLinear` and `defaultOverflowVisible` both `"true"`, CSS
-    /// selectors enabled.
     fn default() -> Self {
         Self {
             default_display_linear: true,
@@ -38,11 +26,6 @@ impl Default for PageConfig {
     }
 }
 
-/// The UA stylesheet for `config`.
-///
-/// `linear-direction` already computes to `column` initially in the fork's
-/// grammar, which is Lynx's vertical default, so `display: linear` alone
-/// reproduces "linear/vertical on every element".
 #[must_use]
 pub(crate) fn ua_stylesheet(config: PageConfig) -> String {
     let display = if config.default_display_linear {
@@ -55,9 +38,6 @@ pub(crate) fn ua_stylesheet(config: PageConfig) -> String {
     } else {
         "overflow: hidden;"
     };
-    // `page` is sized to the viewport: it is the containing block every other
-    // element resolves percentages against, and the element `position: fixed`
-    // anchors to.
     format!(
         "page, view {{ box-sizing: border-box; {display} {overflow} }}\n\
          page {{ width: 100%; height: 100%; }}\n"

@@ -1,10 +1,4 @@
-/**
- * Framework-agnostic flappy-bird physics engine.
- *
- * Manages gravity, jump impulse, and a 60fps game loop.
- * Wire it up to any UI framework by calling `jump()` on tap
- * and reading `getY()` in the loop callback.
- */
+/** Framework-agnostic Flappy Bird physics. */
 
 export interface FlappyOptions {
   /** Downward acceleration per frame (default 0.6) */
@@ -58,8 +52,8 @@ export function createFlappy(
   }
 
   function jump() {
-    // Stack impulse on rapid taps, clamped to one full jumpForce
-    velocity = Math.max(velocity + jumpForce * stackFactor, jumpForce);
+    const stackedVelocity = velocity + jumpForce * stackFactor;
+    velocity = Math.max(stackedVelocity, jumpForce);
     if (!timer) {
       loop();
     }

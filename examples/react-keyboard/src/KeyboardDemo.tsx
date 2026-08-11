@@ -133,7 +133,6 @@ export function KeyboardDemo() {
         'global-bindkeyup': handleKeyUp,
       }}
     >
-      {/* Header */}
       <view className='kb-header'>
         <text style={{ color: '#fff', fontSize: '22px', fontWeight: 'bold' }}>
           KEYBOARD EVENTS
@@ -143,7 +142,6 @@ export function KeyboardDemo() {
         </text>
       </view>
 
-      {/* Last key */}
       <view className='kb-last-key-row'>
         <text style={{ color: '#555', fontSize: '13px', flex: 1 }}>
           Last key
@@ -159,7 +157,6 @@ export function KeyboardDemo() {
         </text>
       </view>
 
-      {/* Keyboard */}
       <view className='kb-board'>
         {ROWS.map((row, rowIdx) => (
           <view key={rowIdx} className='kb-row'>
@@ -197,7 +194,6 @@ export function KeyboardDemo() {
         ))}
       </view>
 
-      {/* Legend */}
       <view className='kb-legend'>
         <view className='kb-legend-item'>
           <view

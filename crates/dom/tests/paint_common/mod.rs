@@ -67,9 +67,6 @@ impl Doc {
         Self::with_css_sized(css, 800.0, 600.0)
     }
 
-    /// [`Self::with_css`] at an explicit viewport. `capture_document` sizes the
-    /// frame from the document's own device, so a screenshot case that wants a
-    /// specific canvas has to say so here.
     #[must_use]
     pub(super) fn with_css_sized(css: &str, width: f32, height: f32) -> Self {
         let mut dom = Document::new(device(width, height), "page", ());
@@ -82,8 +79,6 @@ impl Doc {
         self.el_tag(parent, "view", class)
     }
 
-    /// [`Self::el`] with an explicit tag, for cases where the tag is the point
-    /// — a replaced `img`, say, whose UA rules the case's own CSS supplies.
     pub(super) fn el_tag(&mut self, parent: NodeId, tag: &str, class: &str) -> NodeId {
         let id = self.dom.create_element(tag, ());
         for name in class.split_whitespace() {

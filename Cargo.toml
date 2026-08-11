@@ -1,10 +1,6 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-# The vendored forks are Cargo workspaces in their own right. Our crates consume
-# their members via path dependencies, but each must stay its *own* workspace so
-# its members' `workspace = true` dependencies inherit from that fork's root
-# manifest rather than from this one.
 exclude = ["vendor/stylo", "vendor/vello", "vendor/wgpu"]
 
 [workspace.package]
@@ -15,32 +11,14 @@ repository = "https://github.com/akiwah/lynx-vello"
 rust-version = "1.95"
 
 [workspace.dependencies]
-# Intra-workspace crates
 bobcat-core = { path = "crates/bobcat-core", default-features = false }
 lynx-template-decoder = { path = "crates/lynx-template-decoder" }
-# Parley is part of hughie's closed leaf model in every build: hosts
-# choose between decoded `NaturalSize` and the concrete text engine, never an
-# optional arbitrary-content measurement seam.
 hughie = { path = "crates/hughie" }
 flashbulb = { path = "crates/flashbulb" }
 lynx-element = { path = "crates/lynx-element" }
 quickjs-rust-bridge = { path = "crates/quickjs-rust-bridge" }
 dom = { path = "crates/dom" }
 
-# The Lynx-patched stylo fork (git submodule; see AGENTS.md dependency
-# policy). The `lynx` branch carries the Lynx patch series (viewport-relative
-# rpx, display:linear|relative, linear-*/relative-*/-x-* longhands) and
-# is rebased onto upstream stylo releases.
-#
-# We enable the fork's `lynx` cargo feature workspace-wide: it turns stylo into
-# Lynx's CSS engine — enabling those Lynx-only additions AND disabling the CSS
-# properties and keyword values Lynx does not support (so, e.g., `float`,
-# `writing-mode` or `overflow: clip` stop parsing). `lynx` implies `servo`.
-#
-# The vendored servo package `stylo_dom` keeps its own name here. Upstream
-# `vendor/stylo/style`'s Cargo.toml aliases it to `dom`, but that name is
-# taken in this workspace by `crates/dom`, so we do not mirror the rename.
-# Only `crates/dom` (which re-exports its `ElementState`) depends on it.
 stylo = { path = "vendor/stylo/style", package = "stylo", features = ["lynx"] }
 stylo_atoms = { path = "vendor/stylo/stylo_atoms" }
 stylo_dom = { path = "vendor/stylo/stylo_dom" }
@@ -49,18 +27,6 @@ style_traits = { path = "vendor/stylo/style_traits", package = "stylo_traits" }
 selectors = { path = "vendor/stylo/selectors" }
 servo_arc = { path = "vendor/stylo/servo_arc" }
 
-# The embedded JavaScript engine is pinned as a git submodule rather than a
-# Cargo package. `quickjs-rust-bridge` compiles the C core directly and keeps
-# all ABI-sensitive `JSValue` handling behind a C shim. `bobcat-core`'s
-# default `quickjs` feature owns the higher-level adapter and runtime
-# composition policy; disabling it leaves the static engine traits.
-
-# Third-party
-#
-# `app_units`, `euclid`, and `url` are pinned to the same
-# major/minor the vendored stylo fork depends on (`vendor/stylo/style/Cargo.toml`)
-# so Cargo unifies them to a single version and the stylo trait signatures line
-# up type-for-type (no duplicate `euclid`/`app_units` in the graph).
 app_units = "0.7"
 bytecheck = "0.6"
 bytes = "1"
@@ -70,23 +36,9 @@ divan = { package = "codspeed-divan-compat", version = "5" }
 euclid = "0.22"
 html5ever = "0.39"
 http = "1"
-# Software decode, one crate per format rather than the `image` facade.
-#
-# These are exactly the three decoders the crates.io `image` facade delegates
-# to, taken directly for `bobcat-cli`'s Linux-only reference decoder. The
-# facade was rejected: it pulls `moxcms`/`pxfm` in non-optionally for colour
-# management we do not perform, its own PNG/WebP memory limits are documented
-# as not wired through, and going direct lets each codec emit RGBA8 without
-# the facade's intermediate conversion.
-#
-# `png` is already pinned above for `flashbulb`, so PNG costs no extra crate.
 zune-jpeg = "0.5.15"
 image-webp = "0.2.4"
-# Post-decode resampling: no software decoder here scales during decode, and
-# naive resampling halos transparent edges — `ResizeOptions::use_alpha` does the
-# alpha-correct thing.
 fast_image_resize = "6.1"
-# WHATWG `data:` URL parsing (servo/rust-url, same family as the pinned `url`).
 data-url = "0.3"
 markup5ever_rcdom = "0.39"
 parley = { version = "0.11", default-features = false, features = [
@@ -101,36 +53,13 @@ rustc-hash = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 slab = "0.4"
-# `union` is enabled explicitly so every cargo invocation agrees: vello's
-# dependency graph turns it on anyway, and per-invocation feature
-# unification would otherwise make `SmallVec` (and thus `Node`/`LayoutSlot`)
-# sizes differ between `-p dom` and workspace builds — the size probes
-# pin the unified layout.
 smallvec = { version = "1", features = ["const_new", "union"] }
 thiserror = "2"
-# `bobcat_core::image`'s loader needs `rt` (`spawn_blocking` lives behind
-# `cfg_rt!`), `sync` (the decode-concurrency semaphore) and `io-util` (the
-# `open_resource` fallback's `read_to_end`). Declared here rather than per-crate so
-# `cargo check -p bobcat-core` and `cargo check --workspace` compile the same
-# tokio — the same per-invocation feature-unification hazard the `smallvec`
-# entry below records.
 tokio = { version = "1", features = ["io-util", "rt", "sync"] }
 tokio-util = "0.7"
 url = "2"
-# macOS-only window host for `bobcat-cli`. Platform backends are selected by
-# cfg inside winit; the raw-window-handle 0.6 implementation is what WGPU 30
-# consumes through vello.
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 
-# Platform image-decode backends for `bobcat-cli`'s reference decoders. Each is consumed only from
-# a `[target.'cfg(…)'.dependencies]` block, so a build for one OS never resolves
-# the other two.
-#
-# Apple ImageIO (macOS/iOS). The objc2 family is already in the graph via
-# parley/fontique and wgpu-hal's raw-window-metal, so this unifies exactly;
-# `default-features = false` keeps the Objective-C runtime, `block2` and
-# `dispatch2` out. Each crate carries its own `#[link(kind = "framework")]`, so
-# there is no build script and no linker flag.
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
     "CFArray",
     "CFCGTypes",
@@ -148,52 +77,20 @@ objc2-core-graphics = { version = "0.3.2", default-features = false, features = 
     "std",
 ] }
 objc2-image-io = { version = "0.3.2", default-features = false, features = [
-    # CGImageDestination powers no product path — it is the in-process fixture
-    # encoder for the reference decoders' GIF/HEIC/AVIF round-trip tests
-    # (`cfg(test)`-gated), kept on this shared entry because features unify
-    # workspace-wide anyway.
     "CGImageDestination",
     "CGImageProperties",
     "CGImageSource",
     "objc2-core-graphics",
     "std",
 ] }
-# Windows Imaging Component. `windows-sys` is not a candidate: it ships no COM
-# interfaces and has no `Win32_Graphics_Imaging` feature at all. `Win32_System_Com`
-# is mandatory — `IWICStream`, `CreateDecoderFromStream` and
-# `CreateComponentEnumerator` are all gated on it.
 windows = { version = "0.62.2", features = [
     "Win32_Graphics_Imaging",
     "Win32_System_Com",
 ] }
-# Android `AImageDecoder`. Raw `ndk-sys`, not the safe `ndk` crate: `ndk` 0.9 has
-# no ImageDecoder wrapper of any kind. It supplies types and the
-# `ANDROID_IMAGE_DECODER_*` constants only — every function is reached through
-# `dlsym`, which is also the API-30 capability probe.
 ndk-sys = { version = "0.6.0", features = ["bitmap"] }
-# `dlopen`/`dlsym`/`RTLD_NOW` for that probe. Android-only consumer.
 libc = "0.2"
-# GPU vector renderer. The PupilTong fork's long-lived `lynx` branch is pinned
-# as a git submodule, and `vello` re-exports its version-matched `wgpu`,
-# `peniko`, and `kurbo`; `crates/dom` consumes all three through those
-# re-exports, so the graph can never hold two skewed copies. Parley 0.11 and
-# Vello 0.9 share one
-# `linebender_resource_handle`, so Parley's `FontData` feeds
-# `Scene::draw_glyphs` directly.
-#
-# `default-features = false` drops vello's `wgpu`/`wgpu_default` defaults here so
-# the decode pipeline (`bobcat_core::image`) — which needs only the
-# unconditional `pub use peniko`, not a GPU — stays buildable without wgpu; the
-# GPU is opted back in where rendering actually happens. The default must be off at the *workspace* entry: a
-# member's own `default-features = false` against an unqualified workspace entry
-# is ignored with a warning.
 vello = { path = "vendor/vello/vello", default-features = false }
 
-# The PupilTong Vello fork's `lynx` integration line targets WGPU 30. These two
-# patches redirect its crates.io entry edges into the complete vendored WGPU
-# workspace; WGPU's remaining internal crates are connected by path
-# dependencies in that workspace's own manifest, so every WGPU/Naga package in
-# the resolved graph comes from `vendor/wgpu`.
 [patch.crates-io]
 naga = { path = "vendor/wgpu/naga" }
 wgpu = { path = "vendor/wgpu/wgpu" }

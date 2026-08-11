@@ -14,10 +14,6 @@ use lynx_element::dom::vello::util::{RenderContext, RenderSurface};
 
 use super::{EngineError, FrameSize, Window};
 
-/// The draw target an embedder lends with its window: anything wgpu can
-/// build a surface on (a borrow of the window, a window handle behind
-/// `Arc`, a raw handle pair, …), valid for as long as the engine borrows
-/// the window it came from.
 pub type WindowTarget<'window> = vello::wgpu::SurfaceTarget<'window>;
 
 pub(super) struct WindowGraphics<'window> {
@@ -25,15 +21,11 @@ pub(super) struct WindowGraphics<'window> {
     surface: RenderSurface<'window>,
     renderer: vello::Renderer,
     capture: Option<CaptureTarget>,
-    /// The frame size the retained target texture currently holds, or
-    /// `None` before the first render (and after a surface resize, which
-    /// replaces the target texture).
     rendered: Option<FrameSize>,
 }
 
-/// A `COPY_SRC` twin of the surface's render target, on the same device, so
-/// screenshots read back exactly what the window pipeline rendered instead
-/// of re-rendering on a second GPU stack.
+/// A `COPY_SRC` twin of the surface's render target, on the same device, so screenshots read back
+/// exactly what the window pipeline rendered instead of re-rendering on a second GPU stack.
 struct CaptureTarget {
     width: u32,
     height: u32,
@@ -76,14 +68,10 @@ impl<'window> WindowGraphics<'window> {
         })
     }
 
-    /// Whether the retained target already holds a frame at `size`, so a
-    /// re-present can skip scene rendering entirely.
     pub(super) fn rendered_at(&self, size: FrameSize) -> bool {
         self.rendered == Some(size)
     }
 
-    /// Renders `scene` into the retained target texture, reconfiguring the
-    /// surface first if `size` changed.
     pub(super) fn render_to_target(
         &mut self,
         scene: &vello::Scene,
@@ -112,9 +100,6 @@ impl<'window> WindowGraphics<'window> {
         Ok(())
     }
 
-    /// Presents the retained target: acquires the surface texture, blits,
-    /// notifies the window just before presenting, and presents. Called
-    /// outside the tree lock — the vsync wait must not block anyone.
     pub(super) fn present<W: Window>(&mut self, window: &W) -> Result<(), EngineError> {
         let Self {
             context, surface, ..
@@ -164,8 +149,6 @@ impl<'window> WindowGraphics<'window> {
         Ok(())
     }
 
-    /// Reads back the frame most recently rendered into the surface's target
-    /// texture, on the window's own device, as tightly-packed RGBA8 pixels.
     pub(super) fn capture_frame(&mut self, size: FrameSize) -> Result<Vec<u8>, EngineError> {
         let handle = &self.context.devices[self.surface.dev_id];
         if !self

@@ -24,9 +24,6 @@ const assetPrefix = `http://${detectLanHost()}:${port}/`;
 export default defineConfig({
   output: {
     assetPrefix,
-    // Give the FetchBundle variant its own output dir so `pnpm build`'s two
-    // sequential builds don't clobber each other (Rspeedy cleans `dist/`
-    // before each build).
     ...(enableFetchBundle ? { distPath: { root: 'dist-fetchbundle' } } : {}),
   },
   server: {
@@ -39,7 +36,6 @@ export default defineConfig({
     }),
     pluginQRCode({
       schema(url) {
-        // We use `?fullscreen=true` to open the page in LynxExplorer in full screen mode
         return `${url}?fullscreen=true`;
       },
     }),

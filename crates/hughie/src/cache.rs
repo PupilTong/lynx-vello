@@ -40,12 +40,7 @@ const INPUT_FLAGS: u16 = EXACT_INPUT_FLAGS
     | (AVAILABLE_TAG_MASK << AVAILABLE_HEIGHT_SHIFT)
     | (GOAL_MASK << GOAL_SHIFT);
 
-/// A lossless, compact [`LayoutInput`].
-///
-/// Four option-presence bits are shared by the two `Size<Option<f32>>`
-/// fields. Intrinsic available-space variants use two-bit tags and keep a
-/// float payload only for `Definite`. No float value is reserved as a
-/// sentinel, so every `f32` bit pattern remains representable.
+/// A lossless compact representation of [`LayoutInput`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PackedLayoutInput {
     values: [f32; 6],
@@ -201,8 +196,7 @@ fn unpack_available_space(value: f32, flags: u16, shift: u32) -> AvailableSpace 
     }
 }
 
-/// All six output floats are dense. Baseline presence occupies two otherwise
-/// unused high bits in the paired packed input, without a NaN sentinel.
+/// A dense representation of all six layout output values.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PackedLayoutOutput {
     values: [f32; 6],
@@ -258,11 +252,7 @@ impl MeasurementSlot {
     }
 }
 
-/// A bounded, allocation-free per-node layout cache.
-///
-/// All eight measurement shapes are stored inline. The fixed cap avoids a
-/// per-node heap allocation when an algorithm probes more than four distinct
-/// constraint shapes.
+/// A bounded per-node layout cache with eight inline measurement slots.
 #[derive(Debug, PartialEq, Default)]
 pub struct Cache {
     committed: Option<MeasurementSlot>,

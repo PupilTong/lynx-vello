@@ -1,3 +1,5 @@
+//! Screenshot encoding and persistence.
+
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
@@ -22,9 +24,6 @@ pub enum ScreenshotError {
     Codec(#[from] png::EncodingError),
 }
 
-/// Writes one screenshot and reports it, wrapping failures as
-/// [`CliError::Screenshot`] — the single write-and-report tail both the
-/// headless and macOS hosts share.
 pub(crate) fn save_screenshot(path: &Path, size: FrameSize, pixels: &[u8]) -> Result<(), CliError> {
     write_png(path, size.width, size.height, pixels).map_err(|source| CliError::Screenshot {
         path: path.to_owned(),
@@ -34,10 +33,6 @@ pub(crate) fn save_screenshot(path: &Path, size: FrameSize, pixels: &[u8]) -> Re
     Ok(())
 }
 
-// Deliberately independent of `flashbulb::Image::write_png`: flashbulb is
-// test infrastructure, and the shipped binary must not depend on it. Keep the
-// two encoders' settings in sync (RGBA8, eight-bit depth, parent-directory
-// creation).
 pub(crate) fn write_png(
     path: &Path,
     width: u32,

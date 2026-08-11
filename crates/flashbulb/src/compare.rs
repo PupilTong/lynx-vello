@@ -20,7 +20,6 @@ use crate::image::Image;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CompareOptions {
     /// Per-pixel YIQ sensitivity in `0.0..=1.0`; smaller is stricter.
-    /// Playwright's default is `0.2`.
     pub threshold: f64,
     /// Count anti-aliased pixels as differences instead of ignoring them.
     pub include_anti_aliasing: bool,
@@ -28,15 +27,11 @@ pub struct CompareOptions {
     pub max_diff_pixels: Option<usize>,
     /// Budget as a fraction of the image, in `0.0..=1.0`.
     pub max_diff_pixel_ratio: Option<f64>,
-    /// How strongly the unchanged parts of the source show through the diff
-    /// image, in `0.0..=1.0`.
+    /// Visibility of unchanged source pixels in the diff, in `0.0..=1.0`.
     pub diff_background_alpha: f64,
 }
 
 impl Default for CompareOptions {
-    /// Playwright's per-pixel default (`threshold: 0.2`) with a zero-pixel
-    /// budget — the same effective setting lynx-stack's own helpers use when
-    /// they pass `maxDiffPixelRatio: 0`.
     fn default() -> Self {
         Self {
             threshold: 0.2,
@@ -77,13 +72,10 @@ impl CompareOptions {
             clippy::cast_sign_loss,
             reason = "a pixel budget is inherently approximate and non-negative"
         )]
-        // Playwright multiplies the ratio unclamped, so a negative one makes
-        // even an identical pair "fail". Clamping is a deliberate divergence:
-        // a typo'd ratio should mean "no tolerance", not "always fail".
-        let from_ratio = self
+        let clamped_ratio_budget = self
             .max_diff_pixel_ratio
             .map(|ratio| (pixel_count as f64 * ratio.clamp(0.0, 1.0)) as usize);
-        match (self.max_diff_pixels, from_ratio) {
+        match (self.max_diff_pixels, clamped_ratio_budget) {
             (Some(absolute), Some(ratio)) => absolute.min(ratio),
             (Some(only), None) | (None, Some(only)) => only,
             (None, None) => 0,
@@ -130,20 +122,13 @@ impl Comparison {
     }
 }
 
-/// The largest possible squared YIQ difference between two colors — the
-/// normalization constant `threshold` is expressed against.
 const MAX_YIQ_DELTA: f64 = 35215.0;
 
 const DIFF_COLOR: [u8; 3] = [255, 0, 0];
 const ANTI_ALIAS_COLOR: [u8; 3] = [255, 255, 0];
 
 /// Compares two same-sized images.
-///
-/// # Panics
-///
-/// Panics if the images differ in size; call [`Image::has_same_size`] first —
-/// a size mismatch is a different kind of failure than a pixel mismatch and
-/// callers report it differently.
+/// Panics if the image sizes differ.
 #[must_use]
 pub fn compare(expected: &Image, actual: &Image, options: CompareOptions) -> Comparison {
     assert!(
@@ -153,7 +138,6 @@ pub fn compare(expected: &Image, actual: &Image, options: CompareOptions) -> Com
 
     let width = expected.width();
     let height = expected.height();
-    // The dimensions came from an existing image, so they are known to fit.
     let mut diff =
         Image::transparent(width, height).expect("the diff matches an already-allocated image");
     let mut diff_pixels = 0;
@@ -170,9 +154,6 @@ pub fn compare(expected: &Image, actual: &Image, options: CompareOptions) -> Com
                 position,
                 false,
             );
-            // Written as pixelmatch writes it (`> maxDelta` selects the diff
-            // branch) rather than as the negation, so a non-ordered threshold
-            // such as NaN takes the same branch there as here.
             if delta.abs() > max_delta {
                 let is_anti_aliasing = !options.include_anti_aliasing
                     && (is_anti_aliased(expected, actual, x, y)
@@ -214,12 +195,6 @@ fn draw(target: &mut [u8], position: usize, color: [u8; 3]) {
     target[position + 3] = 255;
 }
 
-/// Writes the source pixel as dimmed gray, so real differences stand out
-/// against a ghost of the original.
-///
-/// Unlike the comparison path, the source channels are *not* composited over
-/// white first — pixelmatch's `drawGrayPixel` takes their luminance raw and
-/// folds alpha into the dimming factor instead.
 fn draw_gray(source: &[u8], position: usize, alpha: f64, target: &mut [u8]) {
     let luminance = rgb_to_y_components(
         f64::from(source[position]),
@@ -236,10 +211,6 @@ fn draw_gray(source: &[u8], position: usize, alpha: f64, target: &mut [u8]) {
     draw(target, position, [value, value, value]);
 }
 
-/// The signed squared YIQ distance between two pixels.
-///
-/// The sign records which pixel is brighter — the anti-aliasing detector below
-/// needs the direction, the diff count needs only the magnitude.
 fn color_delta(first: &[u8], second: &[u8], at: usize, other: usize, luminance_only: bool) -> f64 {
     if first[at..at + 4] == second[other..other + 4] {
         return 0.0;
@@ -258,8 +229,6 @@ fn color_delta(first: &[u8], second: &[u8], at: usize, other: usize, luminance_o
     if y > 0.0 { -delta } else { delta }
 }
 
-/// Composites a pixel over white, the background pixelmatch assumes, so that
-/// two differently transparent pixels are compared as they would look.
 fn unpremultiply(pixels: &[u8], at: usize) -> (f64, f64, f64) {
     let alpha = f64::from(pixels[at + 3]);
     let (r, g, b) = (
@@ -290,10 +259,6 @@ fn rgb_to_q(r: f64, g: f64, b: f64) -> f64 {
     r * 0.211_470_17 - g * 0.522_617_11 + b * 0.311_146_94
 }
 
-/// Whether the pixel at (`x`, `y`) in `image` looks like an anti-aliasing
-/// artifact, using Vysniauskas's intensity-slope test: an anti-aliased pixel
-/// is a local brightness extreme with few equal neighbours, and its extreme
-/// neighbour is a solid-colored pixel in *both* images.
 fn is_anti_aliased(image: &Image, other: &Image, x: u32, y: u32) -> bool {
     let width = image.width();
     let height = image.height();
@@ -302,19 +267,13 @@ fn is_anti_aliased(image: &Image, other: &Image, x: u32, y: u32) -> bool {
     let x2 = (x + 1).min(width - 1);
     let y2 = (y + 1).min(height - 1);
     let position = offset(width, x, y);
-    // Pixels on the image border have fewer neighbours; count the missing ones
-    // as equal so an edge pixel is not mistaken for an extreme.
-    let mut equal_neighbours = u32::from(x == x0 || x == x2 || y == y0 || y == y2);
+    let mut equal_or_missing_neighbours = u32::from(x == x0 || x == x2 || y == y0 || y == y2);
 
     let mut min = 0.0;
     let mut max = 0.0;
     let mut min_at = (0, 0);
     let mut max_at = (0, 0);
 
-    // x-outer / y-inner, matching pixelmatch. The order is load-bearing: `min`
-    // and `max` are tracked with strict comparisons, so the first neighbour
-    // visited wins a tie, and a transposed walk can pick a different extreme
-    // pixel and reach the opposite anti-aliasing verdict.
     for neighbour_x in x0..=x2 {
         for neighbour_y in y0..=y2 {
             if neighbour_x == x && neighbour_y == y {
@@ -328,8 +287,8 @@ fn is_anti_aliased(image: &Image, other: &Image, x: u32, y: u32) -> bool {
                 true,
             );
             if delta == 0.0 {
-                equal_neighbours += 1;
-                if equal_neighbours > 2 {
+                equal_or_missing_neighbours += 1;
+                if equal_or_missing_neighbours > 2 {
                     return false;
                 }
             } else if delta < min {
@@ -351,8 +310,6 @@ fn is_anti_aliased(image: &Image, other: &Image, x: u32, y: u32) -> bool {
             && has_many_siblings(other, max_at.0, max_at.1))
 }
 
-/// Whether a pixel has three or more identically colored neighbours, i.e. sits
-/// in a solid region rather than on an edge.
 fn has_many_siblings(image: &Image, x: u32, y: u32) -> bool {
     let width = image.width();
     let height = image.height();
@@ -488,9 +445,7 @@ mod tests {
 
     #[test]
     fn anti_aliasing_on_an_edge_is_excluded_from_the_count() {
-        // A hard black/white vertical edge, with one column of the boundary
-        // shaded differently in each image — the shape an anti-aliased edge
-        // takes when two rasterizers disagree about coverage.
+        // Models two rasterizers disagreeing on one anti-aliased edge column.
         const WIDTH: u32 = 5;
         const HEIGHT: u32 = 5;
         let build = |edge: u8| {
@@ -523,14 +478,7 @@ mod tests {
         assert_eq!(result.anti_aliased_pixels, 0);
     }
 
-    /// The 3x3 case where the neighbour-iteration order decides the verdict.
-    ///
-    /// Two neighbours of the changed pixel tie on luminance delta, and `min`
-    /// and `max` update on strict comparisons, so whichever is visited first
-    /// wins — and only one of them has enough equal siblings to make the pixel
-    /// read as anti-aliasing. Walking y-outer instead of x-outer flips this
-    /// from "0 differences" (what Playwright reports) to "1 difference", which
-    /// with the default zero-pixel budget is a spurious failure.
+    /// Verifies the neighbour-order tie break against Playwright.
     #[test]
     fn tie_breaking_matches_playwright_neighbour_order() {
         let build = |top_left: u8| {

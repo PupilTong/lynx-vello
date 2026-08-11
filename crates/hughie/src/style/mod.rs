@@ -8,12 +8,6 @@ use stylo::servo_arc::Arc;
 
 use crate::geometry::{Edges, Point, Size};
 
-/// Declares a source-backed style protocol and its zero-cost reference view.
-///
-/// The full forwarding implementation matters: cascade-less hosts commonly
-/// return `&Style` from [`LayoutTree::style`](crate::tree::LayoutTree::style),
-/// and forwarding only the computed-value source would discard any accessor
-/// overrides on the underlying style.
 macro_rules! style_protocol {
     (
         pub trait $trait:ident: $super:path {
@@ -85,9 +79,6 @@ fn lower_relative_logical(physical: RelativeReference, logical: RelativeReferenc
     }
 }
 
-// One borrowed view of all box-layout computed values. A Stylo-backed host
-// only supplies `computed_values` and genuinely host-dependent lowering such
-// as `position`; cascade-less hosts can still override individual accessors.
 style_protocol! {
     pub trait CoreStyle: Sized {
         defaults(style) {
@@ -157,18 +148,9 @@ style_protocol! {
             direction -> direction::T = style.inherited_values().clone_direction(),
             containment -> Contain = {
                 let box_style = style.computed_values().get_box();
-                if box_style.contain.is_empty()
-                    && box_style.content_visibility == ContentVisibility::Visible
-                {
-                    // Nothing authored and nothing to fold: the overwhelmingly
-                    // common node, answered without asking how it is displayed.
-                    Contain::empty()
-                } else if style.display().is_contents() {
-                    // Containment and content-visibility have no effect on an
-                    // element that generates no box at all: there is no
-                    // principal box to contain, and its children keep
-                    // generating their own boxes regardless (CSS Contain 2
-                    // §1.1, CSS Display 3 §2.5).
+                let uses_containment_defaults = box_style.contain.is_empty()
+                    && box_style.content_visibility == ContentVisibility::Visible;
+                if uses_containment_defaults || style.display().is_contents() {
                     Contain::empty()
                 } else {
                     effective_containment(
@@ -182,8 +164,6 @@ style_protocol! {
                 style.computed_values().clone_contain_intrinsic_width(),
             contain_intrinsic_height -> ContainIntrinsicSize =
                 style.computed_values().clone_contain_intrinsic_height(),
-            // An element generating no box has no contents to skip — asked
-            // second, so the common node never pays for the question.
             skips_contents -> bool =
                 style.computed_values().clone_content_visibility() == ContentVisibility::Hidden
                     && !style.display().is_contents(),
@@ -433,8 +413,6 @@ mod tests {
         }
 
         fn computed_values(&self) -> &ComputedValues {
-            // `contain: strict` plus `content-visibility: hidden`, i.e. every
-            // containment bit a box could possibly claim.
             static CONTAINED: LazyLock<Arc<ComputedValues>> = LazyLock::new(|| {
                 let mut values = ComputedValues::clone(initial_values());
                 let box_style = values.mutate_box();
@@ -458,9 +436,6 @@ mod tests {
         );
         assert!(contained.skips_contents());
 
-        // `display: contents` generates no principal box, so there is nothing
-        // to contain and nothing whose contents could be skipped — which keeps
-        // it out of `is_relayout_boundary` and every host ancestor walk.
         let box_less = BoxLess {
             display: Display::Contents,
         };

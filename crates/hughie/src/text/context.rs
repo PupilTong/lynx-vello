@@ -26,8 +26,6 @@ impl TextContext {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            // The discovered system-font backend is immutable and shared;
-            // mutable source and layout caches remain local to this context.
             font: system_font_template().clone(),
             layout: LayoutContext::new(),
             #[cfg(test)]

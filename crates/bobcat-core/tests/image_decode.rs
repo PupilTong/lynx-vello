@@ -19,8 +19,6 @@ use support::{checker_png, checker_rgba, decoder};
 
 #[test]
 fn decodes_a_png_round_trip_byte_for_byte() {
-    // PNG is lossless and the double neither converts nor premultiplies, so
-    // this is an exact assertion.
     let side = 4;
     let source = checker_rgba(side);
     let decoder: Arc<dyn Decoder> = decoder();
@@ -37,7 +35,6 @@ fn decodes_a_png_round_trip_byte_for_byte() {
     assert_eq!(response.header.format, ImageFormat::Png);
     assert!(response.header.has_alpha);
     assert!(!response.header.animated);
-    // Provenance must be reported truthfully for whichever decoder ran.
     assert_eq!(response.backend, decoder.name());
     assert_eq!(
         Some(response.acceleration),
@@ -65,10 +62,6 @@ fn probing_costs_no_pixels_but_reports_the_same_size() {
 
 #[test]
 fn a_truncated_container_is_rejected_before_any_decoder_runs() {
-    // Platform decoders disagree about truncation (ImageIO decodes a cut PNG
-    // to a transparent full-size image and calls the source complete), so the
-    // framing gate fires in the contract layer, before whichever decoder is
-    // injected — which is why it must fire for the double too.
     let decoder = decoder();
     let complete = checker_png(4);
     let bytes = &complete[..complete.len() - 8];
@@ -86,7 +79,6 @@ fn a_truncated_container_is_rejected_before_any_decoder_runs() {
         ),
         "expected Truncated, got {error:?}"
     );
-    // The header probe takes the same gate.
     assert!(matches!(
         probe_bytes(decoder.as_ref(), bytes),
         Err(ImageError::Truncated { .. })
@@ -110,9 +102,6 @@ fn unidentified_containers_are_refused_as_unknown() {
 
 #[test]
 fn an_identified_but_unclaimed_format_is_refused_as_unsupported() {
-    // The double claims PNG alone, so every other identified container is the
-    // `Unsupported` case — distinct from `UnknownFormat`, and reported before
-    // the decoder is asked anything.
     let decoder = decoder();
     for (bytes, format) in [
         (b"GIF89a\x10\x00\x10\x00".to_vec(), ImageFormat::Gif),
@@ -158,8 +147,6 @@ fn a_decode_target_downsamples_but_never_upsamples() {
     }));
     let small = decode_bytes(decoder.as_ref(), &bytes, &request).expect("downsample");
     assert_eq!((small.image.width(), small.image.height()), (8, 8));
-    // The header keeps reporting the SOURCE size: layout resolves `object-fit`
-    // against the natural size, not the decode size.
     assert_eq!(
         small.header.natural_size,
         PixelSize {
