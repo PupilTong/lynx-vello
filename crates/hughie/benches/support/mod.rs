@@ -155,7 +155,11 @@ impl LayoutFixture {
 
     pub(super) fn text(&mut self, parent: NodeId, text: &str) -> NodeId {
         if !self.text_fonts_registered {
-            assert_eq!(self.document.register_fonts(AHEM), 1);
+            assert_eq!(
+                self.document
+                    .register_fonts(dom::FontBlob::from_static(AHEM)),
+                1
+            );
             self.text_fonts_registered = true;
         }
         let node = self.document.create_text_node(text, ());

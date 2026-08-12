@@ -14,8 +14,8 @@ use hughie::geometry::Point;
 pub use hughie::geometry::Size;
 use hughie::invalidate::is_relayout_boundary;
 use hughie::style::CoreStyle;
-use hughie::text::TextContext;
 pub(crate) use hughie::text::TextLayout;
+use hughie::text::{FontBlob, TextContext};
 pub use hughie::tree::Layout;
 use stylo::properties::ComputedValues;
 use stylo::servo_arc::Arc;
@@ -97,12 +97,13 @@ impl<T> Document<T> {
         self.invalidate_layout(id);
     }
 
-    pub fn register_fonts(&mut self, bytes: &[u8]) -> usize {
+    /// Registers an owned font resource without copying its byte payload.
+    pub fn register_fonts(&mut self, data: FontBlob) -> usize {
         let context = self
             .layout_state_mut()
             .text_context
             .get_or_insert_with(|| Box::new(TextContext::new()));
-        let registered = context.register_fonts(bytes);
+        let registered = context.register_fonts(data);
         if registered != 0 {
             self.invalidate_layout_all();
         }

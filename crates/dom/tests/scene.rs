@@ -99,7 +99,7 @@ fn text_runs_encode_glyphs() {
         ".text { display: flex; width: 200px; height: 50px;
                  font-family: Ahem; font-size: 20px; color: black; }",
     );
-    h.doc.dom.register_fonts(AHEM);
+    h.doc.dom.register_fonts(dom::FontBlob::from_static(AHEM));
     let root = h.doc.root;
     let holder = h.doc.el(root, "box text");
     h.doc.text(holder, "Hello");
@@ -141,7 +141,10 @@ fn background_clip_text_sandwiches_the_layer() {
                         font-family: Ahem; font-size: 20px; color: black;
                         background-color: rebeccapurple; background-clip: text; }";
     let mut with_text = Harness::new(css);
-    with_text.doc.dom.register_fonts(AHEM);
+    with_text
+        .doc
+        .dom
+        .register_fonts(dom::FontBlob::from_static(AHEM));
     let root = with_text.doc.root;
     let holder = with_text.doc.el(root, "box text");
     with_text.doc.text(holder, "Hello");
@@ -154,7 +157,10 @@ fn background_clip_text_sandwiches_the_layer() {
     );
 
     let mut empty = Harness::new(css);
-    empty.doc.dom.register_fonts(AHEM);
+    empty
+        .doc
+        .dom
+        .register_fonts(dom::FontBlob::from_static(AHEM));
     let root2 = empty.doc.root;
     empty.doc.el(root2, "box text");
     let (_, clips_empty, open2) = empty.stats();
@@ -224,7 +230,10 @@ fn text_decorations_propagate_through_nested_boxes() {
         .text { display: flex; width: 200px; height: 50px;
                 font-family: Ahem; font-size: 20px; color: black; }";
     let mut plain = Harness::new(css);
-    plain.doc.dom.register_fonts(AHEM);
+    plain
+        .doc
+        .dom
+        .register_fonts(dom::FontBlob::from_static(AHEM));
     let root = plain.doc.root;
     let outer = plain.doc.el(root, "box text");
     let inner = plain.doc.el(outer, "inner");
@@ -232,7 +241,10 @@ fn text_decorations_propagate_through_nested_boxes() {
     let (draws_plain, _, _) = plain.stats();
 
     let mut decorated = Harness::new(css);
-    decorated.doc.dom.register_fonts(AHEM);
+    decorated
+        .doc
+        .dom
+        .register_fonts(dom::FontBlob::from_static(AHEM));
     let root2 = decorated.doc.root;
     let outer2 = decorated.doc.el(root2, "box text u");
     let inner2 = decorated.doc.el(outer2, "inner");
@@ -251,7 +263,10 @@ fn text_decorations_propagate_through_nested_boxes() {
         .text { display: flex; width: 200px; height: 50px;
                 font-family: Ahem; font-size: 20px; color: black; }";
     let mut escaped = Harness::new(abs_css);
-    escaped.doc.dom.register_fonts(AHEM);
+    escaped
+        .doc
+        .dom
+        .register_fonts(dom::FontBlob::from_static(AHEM));
     let root3 = escaped.doc.root;
     let outer3 = escaped.doc.el(root3, "box text u");
     let inner3 = escaped.doc.el(outer3, "inner");

@@ -7,7 +7,7 @@ use divan::counter::ItemsCount;
 use hughie::compute::LeafMeasureInput;
 use hughie::geometry::Size;
 use hughie::style::{CoreStyle, TextContainerStyle, TextRun, TextRunStyle};
-use hughie::text::{TextContext, TextLayoutStore, TextMeasurer};
+use hughie::text::{FontBlob, TextContext, TextLayoutStore, TextMeasurer};
 use hughie::tree::{AvailableSpace, LayoutGoal};
 use stylo::values::computed::Display;
 use stylo::values::computed::font::{
@@ -137,7 +137,7 @@ struct TextBatch {
 impl TextBatch {
     fn new(spec: &'static [(&'static str, f32)], batch_size: usize) -> Self {
         let mut context = TextContext::without_system_fonts();
-        assert_eq!(context.register_fonts(AHEM), 1);
+        assert_eq!(context.register_fonts(FontBlob::from_static(AHEM)), 1);
         Self {
             context,
             cases: (0..batch_size).map(|_| TextCase::new(spec)).collect(),

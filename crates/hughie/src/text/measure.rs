@@ -338,6 +338,7 @@ mod tests {
     use super::*;
     use crate::geometry::Size;
     use crate::style::CoreStyle;
+    use crate::text::FontBlob;
     use crate::tree::RequestedAxis;
 
     const AHEM: &[u8] = include_bytes!("../../tests/fixtures/Ahem.ttf");
@@ -430,7 +431,7 @@ mod tests {
     #[test]
     fn one_shaped_layout_is_rebroken_for_probe_and_commit_constraints() {
         let mut context = TextContext::without_system_fonts();
-        assert_eq!(context.register_fonts(AHEM), 1);
+        assert_eq!(context.register_fonts(FontBlob::from_static(AHEM)), 1);
         let style = RunStyle {
             family: named_family("Ahem"),
         };
@@ -628,7 +629,7 @@ mod tests {
     #[test]
     fn measurer_debug_is_non_exhaustive_and_stable() {
         let mut context = TextContext::without_system_fonts();
-        assert_eq!(context.register_fonts(AHEM), 1);
+        assert_eq!(context.register_fonts(FontBlob::from_static(AHEM)), 1);
         let style = RunStyle {
             family: named_family("Ahem"),
         };

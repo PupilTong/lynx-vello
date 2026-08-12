@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use dom::{self, Document, NodeId, StylesheetOrigin};
+use dom::{self, Document, FontBlob, NodeId, StylesheetOrigin};
 
 use crate::arena::{ElementArena, LynxElement};
 use crate::device::Viewport;
@@ -124,9 +124,9 @@ impl ElementTree {
         self.document.set_device_pixel_ratio(device_pixel_ratio);
     }
 
-    /// Registers font data and returns the number of added faces.
-    pub fn register_fonts(&mut self, bytes: &[u8]) -> usize {
-        self.document.register_fonts(bytes)
+    /// Registers shared font data and returns the number of added faces.
+    pub fn register_fonts(&mut self, data: FontBlob) -> usize {
+        self.document.register_fonts(data)
     }
 
     #[must_use]

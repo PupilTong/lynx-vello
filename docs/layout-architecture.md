@@ -339,6 +339,10 @@ Text is the other fixed path. `TextMeasurer::compute_layout` enters the same
 crate-private leaf box routine using Parley; external code cannot substitute a
 different callback. `TextLayout` retains an owned `parley::Layout`, and its
 borrowed view exposes size and first baseline without cloning or reshaping.
+Font registration takes a `FontBlob`: the caller moves an owned byte container
+into Parley's shared resource handle, so resource-loader buffers are retained
+without copying their payload. `FontBlob::copy_from_slice` names the unavoidable
+copying fallback for a caller that owns only a temporary borrow.
 The `dom` host constructs a node-scoped `TextMeasurer` by borrowing
 immutable text/style content and the separately mutable layout state. That
 state lazily boxes one document `TextContext` and one `TextLayoutStore` for

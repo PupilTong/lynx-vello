@@ -378,7 +378,9 @@ fn build_and_render(shard: usize, gpu: &mut Headless) -> Result<Image, String> {
         }
         let mut document = html::parse(case.fragment, CELL_SIZE_F32, CELL_SIZE_F32);
         if case.category == "text" {
-            let registered = document.dom.register_fonts(AHEM);
+            let registered = document
+                .dom
+                .register_fonts(dom::FontBlob::from_static(AHEM));
             if registered != 1 {
                 return Err(format!(
                     "{}: expected to register one Ahem face, got {registered}",

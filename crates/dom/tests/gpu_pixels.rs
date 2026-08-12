@@ -30,7 +30,7 @@ fn background_clip_text_clips_to_glyph_ink() {
                 font-family: Ahem; font-size: 20px; color: transparent;
                 background-color: rebeccapurple; background-clip: text; }";
     let mut doc = Doc::with_css(css);
-    doc.dom.register_fonts(AHEM);
+    doc.dom.register_fonts(dom::FontBlob::from_static(AHEM));
     let root = doc.root;
     let holder = doc.el(root, "text");
     doc.text(holder, "HH HH");
@@ -65,7 +65,7 @@ fn plain_background_covers_the_box() {
                 font-family: Ahem; font-size: 20px; color: black;
                 background-color: rebeccapurple; }";
     let mut doc = Doc::with_css(css);
-    doc.dom.register_fonts(AHEM);
+    doc.dom.register_fonts(dom::FontBlob::from_static(AHEM));
     let root = doc.root;
     let holder = doc.el(root, "text");
     doc.text(holder, "HH HH");
@@ -93,7 +93,7 @@ fn gradient_color_fills_glyph_ink_from_the_padding_box() {
                 font-family: Ahem; font-size: 20px;
                 color: linear-gradient(90deg, #ff0000, #0000ff); }";
     let mut doc = Doc::with_css(css);
-    doc.dom.register_fonts(AHEM);
+    doc.dom.register_fonts(dom::FontBlob::from_static(AHEM));
     let root = doc.root;
     let holder = doc.el(root, "text");
     doc.text(holder, "HH");
