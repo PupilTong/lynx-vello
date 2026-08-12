@@ -754,10 +754,15 @@ the painting — layout's job is to never be the frame's bottleneck.
   track freezing, and nesting; Linear weighted freezing, positioned/hidden
   children, percentage intrinsic sizing, and cross gravity; and Relative
   wrap-width refinement, dependency chains/cycles, duplicate ids, and nesting.
-  Equivalent-tree
-  Taffy/Yoga and other cross-engine differential baselines remain future
-  additions — not to copy those engines' designs, but to keep
-  "high-performance" falsifiable.
+  Five focused Flex shapes now also have their own Hughie-only benchmark target
+  (`hughie_flex`): active growth, wrapping with gaps, grow and shrink freezing,
+  and a balanced deep tree. The local Taffy/Yoga/Starlight comparison that
+  selected those shapes is summarized in
+  [`layout-engine-benchmark-study.md`](layout-engine-benchmark-study.md), but
+  its external-engine harnesses and raw samples are deliberately not part of
+  this repository. Equivalent cross-engine studies for capabilities outside
+  the common Flex subset remain future work — not to copy those engines'
+  designs, but to keep "high-performance" falsifiable.
 
 ## Algorithms (Flex, Grid, Relative, and Linear implemented)
 

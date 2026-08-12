@@ -44,3 +44,28 @@ the batch, preserving throughput reporting. Cold workloads use independent
 fixtures within a batch; warm-cache workloads restore their intended cache
 state between logical operations instead of accidentally becoming a different
 cache-hit benchmark.
+
+## Standalone Hughie Flex cases
+
+`hughie_flex.rs` is a separate Cargo benchmark target containing five focused
+Hughie workloads: `wide_active_grow`, `wide_wrap_gap`, `wide_grow_freeze`,
+`wide_shrink_freeze`, and `balanced_deep`. It is intentionally not folded into
+the broader `flexbox` target, so the five-case signal can be selected and
+tracked independently:
+
+```sh
+cargo bench -p hughie --bench hughie_flex
+```
+
+Each case contains exactly 4,095 nodes including the root and uses only the
+existing production-host `LayoutFixture`. CSS resolution, tree construction,
+the preparation layout, and explicit cache invalidation happen while Divan is
+creating the input. The measured closure calls `Document::layout` once on the
+fully invalidated Hughie tree and includes the production host, layout caches,
+positioned pass, and pixel rounding.
+
+These cases are Hughie regression benchmarks, not a cross-engine runner. They
+contain no dependency, adapter, geometry oracle, CSV format, or execution path
+for Taffy, Yoga, Starlight, or any other layout engine. The conclusions from
+the one-off local comparison that motivated their shapes are retained in
+[`docs/layout-engine-benchmark-study.md`](../../../docs/layout-engine-benchmark-study.md).
