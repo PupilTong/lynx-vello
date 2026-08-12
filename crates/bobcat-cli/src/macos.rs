@@ -56,10 +56,6 @@ impl EmbedderWindow for MacWindow {
             os: Arc::clone(&self.os),
         }
     }
-
-    fn pre_present(&self) {
-        self.os.pre_present_notify();
-    }
 }
 
 struct FrameRequests {
@@ -69,6 +65,10 @@ struct FrameRequests {
 impl FrameRequester for FrameRequests {
     fn request_frame(&self) {
         self.os.request_redraw();
+    }
+
+    fn pre_present(&self) {
+        self.os.pre_present_notify();
     }
 }
 

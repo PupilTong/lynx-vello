@@ -1,0 +1,23 @@
+[package]
+name = "bobcat-wasm"
+description = "Browser WebAssembly embedder for Bobcat Canvas rendering"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "wasi"))'.dependencies]
+bobcat-core = { workspace = true }
+napi = { workspace = true }
+napi-derive = { workspace = true }
+
+[build-dependencies]
+napi-build = { workspace = true }
+
+[lints]
+workspace = true

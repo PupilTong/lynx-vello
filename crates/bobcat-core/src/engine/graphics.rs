@@ -7,12 +7,14 @@
 //! invalidation and re-exposure re-present the retained target with a blit
 //! alone.
 
-use lynx_element::dom::render::gpu::{read_texture, render_params, renderer_options};
+#[cfg(not(target_arch = "wasm32"))]
+use lynx_element::dom::render::gpu::read_texture;
+use lynx_element::dom::render::gpu::{render_params, renderer_options};
 use lynx_element::dom::vello;
 use lynx_element::dom::vello::peniko::Color;
 use lynx_element::dom::vello::util::{RenderContext, RenderSurface};
 
-use super::{EngineError, FrameSize, Window};
+use super::{EngineError, FrameRequester, FrameSize};
 
 pub type WindowTarget<'window> = vello::wgpu::SurfaceTarget<'window>;
 
@@ -20,12 +22,15 @@ pub(super) struct WindowGraphics<'window> {
     context: RenderContext,
     surface: RenderSurface<'window>,
     renderer: vello::Renderer,
+    #[cfg(not(target_arch = "wasm32"))]
     capture: Option<CaptureTarget>,
     rendered: Option<FrameSize>,
 }
 
-/// A `COPY_SRC` twin of the surface's render target, on the same device, so screenshots read back
-/// exactly what the window pipeline rendered instead of re-rendering on a second GPU stack.
+/// A `COPY_SRC` twin of the surface's render target, on the same device, so
+/// screenshots read back exactly what the window pipeline rendered instead
+/// of re-rendering on a second GPU stack.
+#[cfg(not(target_arch = "wasm32"))]
 struct CaptureTarget {
     width: u32,
     height: u32,
@@ -44,18 +49,20 @@ impl std::fmt::Debug for WindowGraphics<'_> {
 }
 
 impl<'window> WindowGraphics<'window> {
-    pub(super) fn new(
+    pub(super) async fn new(
         target: impl Into<WindowTarget<'window>>,
         size: FrameSize,
     ) -> Result<Self, EngineError> {
         let mut context = RenderContext::new();
-        let surface = pollster::block_on(context.create_surface(
-            target,
-            size.width.max(1),
-            size.height.max(1),
-            vello::wgpu::PresentMode::AutoVsync,
-        ))
-        .map_err(|error| EngineError::Render(error.to_string()))?;
+        let surface = context
+            .create_surface(
+                target,
+                size.width.max(1),
+                size.height.max(1),
+                vello::wgpu::PresentMode::AutoVsync,
+            )
+            .await
+            .map_err(|error| EngineError::Render(error.to_string()))?;
         let handle = &context.devices[surface.dev_id];
         let renderer = vello::Renderer::new(&handle.device, renderer_options())
             .map_err(|error| EngineError::Render(error.to_string()))?;
@@ -63,6 +70,7 @@ impl<'window> WindowGraphics<'window> {
             context,
             surface,
             renderer,
+            #[cfg(not(target_arch = "wasm32"))]
             capture: None,
             rendered: None,
         })
@@ -100,7 +108,10 @@ impl<'window> WindowGraphics<'window> {
         Ok(())
     }
 
-    pub(super) fn present<W: Window>(&mut self, window: &W) -> Result<(), EngineError> {
+    /// Presents the retained target: acquires the surface texture, blits,
+    /// notifies the window just before presenting, and presents. Called
+    /// outside the tree lock — the vsync wait must not block anyone.
+    pub(super) fn present(&mut self, frames: &impl FrameRequester) -> Result<(), EngineError> {
         let Self {
             context, surface, ..
         } = self;
@@ -108,9 +119,13 @@ impl<'window> WindowGraphics<'window> {
             vello::wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
             vello::wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
             vello::wgpu::CurrentSurfaceTexture::Timeout
-            | vello::wgpu::CurrentSurfaceTexture::Occluded => return Ok(()),
+            | vello::wgpu::CurrentSurfaceTexture::Occluded => {
+                frames.request_frame();
+                return Ok(());
+            }
             vello::wgpu::CurrentSurfaceTexture::Outdated => {
                 context.configure_surface(surface);
+                frames.request_frame();
                 return Ok(());
             }
             vello::wgpu::CurrentSurfaceTexture::Lost => {
@@ -141,7 +156,7 @@ impl<'window> WindowGraphics<'window> {
             &output_view,
         );
         handle.queue.submit([encoder.finish()]);
-        window.pre_present();
+        frames.pre_present();
         handle.queue.present(surface_texture);
         if reconfigure_after {
             context.configure_surface(surface);
@@ -149,6 +164,9 @@ impl<'window> WindowGraphics<'window> {
         Ok(())
     }
 
+    /// Reads back the frame most recently rendered into the surface's target
+    /// texture, on the window's own device, as tightly-packed RGBA8 pixels.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn capture_frame(&mut self, size: FrameSize) -> Result<Vec<u8>, EngineError> {
         let handle = &self.context.devices[self.surface.dev_id];
         if !self

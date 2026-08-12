@@ -6,7 +6,7 @@
 //! internal pipeline. Its event handlers are relays — they hand the engine
 //! an OS fact (`dispatch_input`, `resize`, `notify_redraw`, `pump`) and the
 //! engine decides what the pipeline does with it, requesting frames itself
-//! through the [`Window`] it borrowed at attach time.
+//! through the [`Window`] capabilities supplied at attach time.
 //!
 //! # Two threads, one hand-off slot
 //!
@@ -44,7 +44,9 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, MutexGuard, TryLockError, mpsc};
+#[cfg(feature = "quickjs")]
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 use lynx_element::dom::input::InputEvent;
 use lynx_element::dom::render::gpu::{GpuError, Headless};
@@ -89,8 +91,10 @@ pub enum ScriptRunError {
     Script(crate::quickjs::MainThreadError),
 }
 
+/// A message crossing from an engine-owned thread.
+#[cfg(feature = "quickjs")]
 enum EngineMessage {
-    #[cfg(feature = "quickjs")]
+    /// The main-thread script ran to completion (or failed) on its thread.
     ScriptDone(Result<(), ScriptRunError>),
 }
 
@@ -117,8 +121,15 @@ impl fmt::Debug for Screenshot {
     }
 }
 
-/// The embedder's window: the draw target it lends, and the OS mechanisms the engine schedules
-/// through.
+/// The embedder's window: the draw target it lends and the detachable frame
+/// capability the engine schedules through. The embedder provides the
+/// mechanisms; the engine decides when to invoke them.
+///
+/// The engine is generic over this trait, so every call here is a direct one
+/// — a window is a type, not a set of boxed closures. The draw target is a
+/// GAT, which lets native surfaces borrow an embedder-owned window. Browser
+/// embedders can instead attach an owned canvas target through
+/// [`Engine::attach_target`].
 pub trait Window {
     type Target<'window>: Into<WindowTarget<'window>>
     where
@@ -129,14 +140,19 @@ pub trait Window {
     fn target(&self) -> Self::Target<'_>;
 
     fn frames(&self) -> Self::Frames;
-
-    fn pre_present(&self);
 }
 
-/// A window's frame-request capability, held apart from the window itself because it travels to
-/// engine-owned threads.
+/// A window's scheduling capability, held apart from the draw target because
+/// frame requests travel to engine-owned threads while pre-present callbacks
+/// stay on the presenting side.
 pub trait FrameRequester: Send + Sync + 'static {
     fn request_frame(&self);
+
+    /// Called on the presenting side immediately before presenting. Native
+    /// window handles use this for mechanisms such as winit's
+    /// `Window::pre_present_notify`; browser frame signals can keep the
+    /// default no-op.
+    fn pre_present(&self) {}
 }
 
 #[derive(Debug)]
@@ -151,10 +167,6 @@ impl Window for NoWindow {
     }
 
     fn frames(&self) -> Self::Frames {
-        match *self {}
-    }
-
-    fn pre_present(&self) {
         match *self {}
     }
 }
@@ -208,12 +220,25 @@ impl SharedTree {
         }
     }
 
+    /// Takes the tree out to open a batch. Blocks only for the presenting
+    /// side's brief borrows — the script may wait on the engine.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a batch is already open: there is one main thread.
+    #[cfg(feature = "quickjs")]
     pub(crate) fn take(&self) -> ElementTree {
         self.lock()
             .take()
             .expect("the tree was already taken: only one batch can be open")
     }
 
+    /// Puts the tree back at a batch boundary.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the slot is occupied: the tree cannot be returned twice.
+    #[cfg(feature = "quickjs")]
     pub(crate) fn put(&self, tree: ElementTree) {
         let mut guard = self.lock();
         assert!(
@@ -251,28 +276,36 @@ impl DerefMut for TreeGuard<'_> {
     }
 }
 
-enum Output<'window, W> {
+/// The attached output, if any.
+enum Output<'window> {
     None,
     Offscreen(Box<Headless>),
-    Window {
-        graphics: Box<WindowGraphics<'window>>,
-        window: &'window W,
-    },
+    /// A window: the presentation stack lives here, on the thread the
+    /// embedder calls the engine from, and its surface borrows the
+    /// embedder's window for exactly as long as it does.
+    Window(Box<WindowGraphics<'window>>),
 }
 
-/// The engine half of a Lynx view: the shared element tree, input routing, frame production,
-/// presentation, and the engine-owned script thread.
+/// The engine half of a Lynx view: the shared element tree, input routing,
+/// frame production, presentation, and the engine-owned script thread.
+///
+/// Generic over the embedder's [`Window`] capability types. A native surface
+/// may borrow its window for the life of the engine; an owned browser canvas
+/// target does not. [`OffscreenEngine`] is the composition with no window at
+/// all.
+///
+/// Deliberately `!Send`: it lives on the thread the embedder calls it from.
 pub struct Engine<'window, W: Window> {
     elements: SharedTree,
     viewport: Viewport,
     frame_size: FrameSize,
+    #[cfg(feature = "quickjs")]
     messages: mpsc::Receiver<EngineMessage>,
-    #[cfg_attr(
-        not(feature = "quickjs"),
-        allow(dead_code, reason = "only engine-owned script threads send messages")
-    )]
+    #[cfg(feature = "quickjs")]
     message_sender: mpsc::Sender<EngineMessage>,
-    output: Output<'window, W>,
+    output: Output<'window>,
+    /// The window's frame-request handle, behind `Arc` so the Lynx main
+    /// thread keeps one of its own.
     frames: Option<Arc<W::Frames>>,
     pending_input: VecDeque<InputEvent>,
     pending_resize: Option<(f32, f32, f32)>,
@@ -300,12 +333,15 @@ impl<'window, W: Window> Engine<'window, W> {
     ) -> Result<Self, EngineError> {
         let frame_size = frame_size(width, height, device_pixel_ratio)?;
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
+        #[cfg(feature = "quickjs")]
         let (message_sender, messages) = mpsc::channel();
         Ok(Self {
             elements: SharedTree::new(ElementTree::new(viewport, config)),
             viewport,
             frame_size,
+            #[cfg(feature = "quickjs")]
             messages,
+            #[cfg(feature = "quickjs")]
             message_sender,
             output: Output::None,
             frames: None,
@@ -321,14 +357,25 @@ impl<'window, W: Window> Engine<'window, W> {
         self.elements.tree()
     }
 
+    /// The current physical render-target size in device pixels.
+    #[must_use]
+    pub const fn frame_size(&self) -> FrameSize {
+        self.frame_size
+    }
+
     /// Mounts author CSS.
     pub fn add_author_stylesheet(&mut self, css: &str) {
         self.elements.tree().add_author_stylesheet(css);
+        self.refresh();
     }
 
     /// Registers shared font data for text measurement without copying it.
     pub fn register_fonts(&mut self, data: FontBlob) -> usize {
-        self.elements.tree().register_fonts(data)
+        let registered = self.elements.tree().register_fonts(data);
+        if registered > 0 {
+            self.refresh();
+        }
+        registered
     }
 
     /// Registers or updates decoded images, then keeps the next frame fresh.
@@ -408,20 +455,23 @@ impl<'window, W: Window> Engine<'window, W> {
 
     /// Drains lifecycle messages from engine-owned threads.
     pub fn pump(&mut self) -> Vec<EngineEvent> {
-        #[cfg_attr(
-            not(feature = "quickjs"),
-            allow(unused_mut, reason = "no message variant exists to push")
-        )]
-        let mut events = Vec::new();
-        while let Ok(message) = self.messages.try_recv() {
-            match message {
-                #[cfg(feature = "quickjs")]
-                EngineMessage::ScriptDone(result) => {
-                    events.push(EngineEvent::ScriptFinished(result));
+        #[cfg(feature = "quickjs")]
+        {
+            let mut events = Vec::new();
+            while let Ok(message) = self.messages.try_recv() {
+                match message {
+                    EngineMessage::ScriptDone(result) => {
+                        events.push(EngineEvent::ScriptFinished(result));
+                    }
                 }
             }
+            events
         }
-        events
+
+        #[cfg(not(feature = "quickjs"))]
+        {
+            Vec::new()
+        }
     }
 
     /// Attaches an offscreen GPU target.
@@ -431,27 +481,56 @@ impl<'window, W: Window> Engine<'window, W> {
         Ok(())
     }
 
-    /// Attaches the embedder's window as the draw target: the whole presentation stack is created
-    /// here, on the calling thread, and stays here — presentation and vsync interact with the OS
-    /// only on this thread.
+    /// Attaches the embedder's window as the draw target: the whole
+    /// presentation stack is created here, on the calling thread, and stays
+    /// here — presentation and vsync interact with the OS only on this
+    /// thread. The surface borrows the window, which therefore outlives the
+    /// engine.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn attach_window(
         &mut self,
         window: &'window W,
         size: FrameSize,
     ) -> Result<(), EngineError> {
-        let graphics = WindowGraphics::new(window.target(), size)?;
-        self.output = Output::Window {
-            graphics: Box::new(graphics),
-            window,
-        };
-        self.frames = Some(Arc::new(window.frames()));
+        pollster::block_on(self.attach_window_async(window, size))
+    }
+
+    /// Asynchronously attaches the embedder's window as the draw target.
+    ///
+    /// Browser WebGPU obtains its adapter and device through JavaScript
+    /// promises, so embedders targeting Wasm must use this entry rather than
+    /// blocking the browser thread. Native embedders may use this directly or
+    /// the synchronous [`Self::attach_window`] convenience wrapper.
+    pub async fn attach_window_async(
+        &mut self,
+        window: &'window W,
+        size: FrameSize,
+    ) -> Result<(), EngineError> {
+        self.attach_target(window.target(), window.frames(), size)
+            .await
+    }
+
+    /// Attaches an already-owned surface target and its frame capability.
+    ///
+    /// This is the browser-friendly form: `SurfaceTarget::Canvas` owns a
+    /// JavaScript canvas reference, so the Wasm wrapper does not need a
+    /// self-referential Rust struct merely to keep a `Window` borrow alive.
+    pub async fn attach_target(
+        &mut self,
+        target: impl Into<WindowTarget<'window>>,
+        frames: W::Frames,
+        size: FrameSize,
+    ) -> Result<(), EngineError> {
+        let graphics = WindowGraphics::new(target, size).await?;
+        self.output = Output::Window(Box::new(graphics));
+        self.frames = Some(Arc::new(frames));
         self.refresh();
         Ok(())
     }
 
     /// Relays the OS's "the window wants a frame" fact.
     pub fn notify_redraw(&mut self) -> Result<(), EngineError> {
-        let Output::Window { graphics, window } = &mut self.output else {
+        let Output::Window(graphics) = &mut self.output else {
             return Ok(());
         };
         let size = self.frame_size;
@@ -465,7 +544,11 @@ impl<'window, W: Window> Engine<'window, W> {
             }
         }
         if graphics.rendered_at(size) {
-            graphics.present(*window)?;
+            let frames = self
+                .frames
+                .as_deref()
+                .expect("a window output always installs its frame capability");
+            graphics.present(frames)?;
         }
         Ok(())
     }
@@ -498,7 +581,11 @@ impl<'window, W: Window> Engine<'window, W> {
         Ok(true)
     }
 
-    /// Captures the current frame as pixels — synchronously, from whichever target is attached.
+    /// Captures the current frame as pixels — synchronously, from whichever
+    /// target is attached. Renders first if the document changed and the
+    /// tree is available; a tree busy mid-commit (window mode) captures the
+    /// retained frame, which is what the window is showing.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn capture(&mut self) -> Result<Screenshot, EngineError> {
         let size = self.frame_size;
         match &mut self.output {
@@ -514,7 +601,7 @@ impl<'window, W: Window> Engine<'window, W> {
                 let pixels = gpu.read_pixels().map_err(EngineError::Gpu)?;
                 Ok(Screenshot { size, pixels })
             }
-            Output::Window { graphics, .. } => {
+            Output::Window(graphics) => {
                 if let Some(mut tree) = self.elements.try_tree()
                     && !tree.has_uncommitted_mutations()
                 {

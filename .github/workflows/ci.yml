@@ -27,6 +27,7 @@ jobs:
           cargo fmt --check
           -p bobcat-core
           -p bobcat-cli
+          -p bobcat-wasm
           -p flashbulb
           -p lynx-element
           -p lynx-template-decoder
@@ -74,6 +75,57 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
           fail_ci_if_error: true
+
+  browser:
+    name: threaded Wasm + Pages build (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: browser-wasm
+
+      - name: Install wasm-tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-tools
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24.15.0
+          cache: pnpm
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build threaded Rust Wasm bindings
+        run: pnpm --filter bobcat-wasm build
+
+      - name: Verify shared memory and atomic blocking instructions
+        run: |
+          wasm-tools print crates/bobcat-wasm/bobcat_wasm_threads.wasm32-wasi.wasm > "$RUNNER_TEMP/bobcat-wasi.wat"
+          rg --quiet '\(memory.*shared\)' "$RUNNER_TEMP/bobcat-wasi.wat"
+          rg --quiet '\(import "wasi" "thread-spawn"' "$RUNNER_TEMP/bobcat-wasi.wat"
+          rg --quiet 'memory\.atomic\.wait32' "$RUNNER_TEMP/bobcat-wasi.wat"
+          rg --quiet 'memory\.atomic\.notify' "$RUNNER_TEMP/bobcat-wasi.wat"
+
+      - name: Type-check GitHub Pages
+        run: pnpm --filter github-pages test:type
+
+      - name: Build GitHub Pages
+        run: pnpm --filter github-pages build
+        env:
+          PAGES_BASE_PATH: /ci-preview
 
   walltime-benchmarks:
     name: bench (CodSpeed walltime, macOS)

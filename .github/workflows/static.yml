@@ -1,9 +1,8 @@
-name: Deploy static content to Pages
+name: Build and deploy GitHub Pages
 
 on:
   push:
-    branches: ["main"]
-
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -12,24 +11,78 @@ permissions:
   id-token: write
 
 concurrency:
-  group: "pages"
+  group: pages
   cancel-in-progress: false
 
 jobs:
+  build:
+    name: Build threaded Wasm site
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: browser-wasm
+
+      - name: Install wasm-tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-tools
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24.15.0
+          cache: pnpm
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@v5
+
+      - name: Build threaded Rust Wasm bindings
+        run: pnpm --filter bobcat-wasm build
+
+      - name: Verify shared memory and atomic blocking instructions
+        run: |
+          wasm-tools print crates/bobcat-wasm/bobcat_wasm_threads.wasm32-wasi.wasm > "$RUNNER_TEMP/bobcat-wasi.wat"
+          rg --quiet '\(memory.*shared\)' "$RUNNER_TEMP/bobcat-wasi.wat"
+          rg --quiet '\(import "wasi" "thread-spawn"' "$RUNNER_TEMP/bobcat-wasi.wat"
+          rg --quiet 'memory\.atomic\.wait32' "$RUNNER_TEMP/bobcat-wasi.wat"
+          rg --quiet 'memory\.atomic\.notify' "$RUNNER_TEMP/bobcat-wasi.wat"
+
+      - name: Type-check GitHub Pages
+        run: pnpm --filter github-pages test:type
+
+      - name: Build GitHub Pages
+        run: pnpm --filter github-pages build
+        env:
+          PAGES_BASE_PATH: ${{ steps.pages.outputs.base_path }}
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: packages/github-pages/dist
   deploy:
+    name: Deploy GitHub Pages
+    needs: build
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: '.'
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5

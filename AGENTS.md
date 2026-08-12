@@ -154,11 +154,13 @@ useful signal for currently-compatible versions of those libraries.
   metrics, OS initialization, a draw target, and IO primitives, and relay
   OS facts in (`dispatch_input`/`resize`/`notify_redraw`/`pump`/ticks);
   they never start or steer the pipeline — the engine schedules through the
-  `engine::Window` it borrows at attach time (`target`, `frames`,
-  `pre_present`). `Engine` is generic over that trait, so no capability is a
-  boxed closure or a `dyn` call; the draw target is a GAT, which is what
-  lets the engine's surface borrow the embedder's window instead of
-  requiring a `'static` refcounted handle. `engine::OffscreenEngine` is the
+  `engine::Window` it borrows at attach time (`target`, `frames`). `Engine`
+  is generic over that trait, so no capability is a boxed closure or a `dyn`
+  call; the draw target is a GAT, which is what lets a native surface borrow
+  the embedder's window instead of requiring a `'static` refcounted handle.
+  Browser embedders may instead pass an owned canvas target through the async
+  `attach_target`; `FrameRequester` owns both redraw requests and the optional
+  presenting-side `pre_present` hook. `engine::OffscreenEngine` is the
   windowless composition, over the uninhabited `NoWindow`.
   The `image` module is the replaced-content decode **contract** and pipeline:
   container identification from magic bytes (PNG, JPEG, WebP, GIF, HEIC,
@@ -284,6 +286,24 @@ useful signal for currently-compatible versions of those libraries.
   remains a precise `bobcat-core` QuickJS error, and non-empty decoded `StyleInfo`
   currently produces an explicit author-styles-omitted warning rather than silent
   claimed compatibility.
+- `crates/bobcat-wasm` — the pure-Rust browser embedder and npm facade. NAPI-RS
+  builds one `wasm32-wasip1-threads` module: real `std::thread`, atomic
+  wait/notify, and blocking synchronization run in emnapi's shared-memory
+  Workers, while the vendored wgpu WASI Node-API bridge gives Vello an HTML
+  Canvas WebGPU surface from the same artifact. The current NAPI
+  `parallelChecksum` is an end-to-end thread/atomic/join probe. The module
+  depends on `bobcat-core` with QuickJS disabled and owns an `Engine` on the
+  browser UI thread; it attaches the Canvas target asynchronously, relays CSS
+  viewport size and DPR, and presents the retained scene directly through
+  WebGPU. Its facade exposes the five implemented Element-PAPI mutations plus
+  stylesheet, font, resize, and frame methods. WebGPU objects are thread-affine
+  and remain on the browser UI thread — CPU workers must never own or use the
+  Device, Queue, Surface, Renderer, or Canvas handles. A future browser QuickJS
+  realm must likewise live permanently on one dedicated WASI thread because of
+  realm affinity, but its integration with the UI-thread engine is not yet
+  implemented. Until then this boundary does not claim `.web.bundle`
+  execution. Synchronous GPU capture is likewise absent because browser WebGPU
+  completion is Promise-driven.
 - `crates/lynx-element` — the Lynx runtime element layer, i.e. the crate the
   layering diagrams drew as the dashed "future Lynx runtime adapter" box. It
   owns exactly what `dom` is forbidden to know: Lynx tag names, Element-PAPI

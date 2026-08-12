@@ -8,6 +8,7 @@ Rust and pnpm monorepo exploring a native [Lynx](https://lynxjs.org) rendering s
 | --- | --- |
 | [`crates/bobcat-core`](crates/bobcat-core) | Native runtime core combining engine-neutral resource/script/view protocols with the optional QuickJS adapter and main-thread host globals. It does not expose a renderer façade or re-export DOM/GPU internals. |
 | [`crates/bobcat-cli`](crates/bobcat-cli) | The independent `bobcat` product: loads local `file:///` web bundles, privately composes the runtime with a macOS window or paced headless GPU target, and exposes debugger-style frame/screenshot commands. |
+| [`crates/bobcat-wasm`](crates/bobcat-wasm) | Pure-Rust browser embedder built as one NAPI-RS `wasm32-wasip1-threads` module. Its shared-memory Wasm supplies real Rust threads/blocking synchronization while the vendored wgpu WASI bridge lets Vello present the current Element-PAPI scene to an HTML canvas. |
 | [`crates/lynx-template-decoder`](crates/lynx-template-decoder) | Native Rust decoder for the Lynx **web** binary template (`.web.bundle`), a port of `@lynx-js/web-core`'s `decodeTemplate` incl. the rkyv `StyleInfo` model. |
 | [`crates/dom`](crates/dom) | Generic W3C-DOM-subset `Document<T>`/`Node<T>` tree, standards-oriented Stylo cascade/layout core, and document-owned private paint pipeline. |
 | [`crates/lynx-element`](crates/lynx-element) | The Lynx runtime element layer: `ElementId = u32`, validated Element PAPI operations and handle space, `ElementTree`, `<page>` root policy, view/device construction, and Lynx UA defaults. |
@@ -66,6 +67,23 @@ Element PAPI member exits with that precise runtime error. Decoded `StyleInfo`
 author rules are not ingested yet; if a runnable bundle contains them, the CLI
 prints an explicit warning that author styles are omitted.
 
+## Running the browser embedder
+
+The `github-pages` pnpm package builds the threaded `bobcat-wasm` module,
+installs a COOP/COEP service worker, runs an NAPI-RS WASI thread probe, and
+renders a small Element-PAPI scene into an HTML canvas from that same module:
+
+```sh
+pnpm install --frozen-lockfile
+pnpm --filter bobcat-wasm build
+pnpm --filter github-pages dev
+```
+
+The first visit reloads once after the service worker takes control; this is
+required before `SharedArrayBuffer` and threaded Wasm are available. See
+[`docs/browser-wasm.md`](docs/browser-wasm.md) for the thread/Canvas design and
+the current browser-runtime boundary.
+
 ## Toolchain
 
 The workspace pins the **2026-07-01 nightly** toolchain via [`rust-toolchain.toml`](rust-toolchain.toml)
@@ -91,12 +109,12 @@ corepack pnpm install --frozen-lockfile
 
 ## CI
 
-A single `macos-latest` (aarch64) job runs rustfmt, clippy (`-D warnings`),
-tests with coverage ([Codecov](https://codecov.io)), and benchmarks tracked by
-[CodSpeed](https://codspeed.io) in **walltime** mode — CodSpeed's
-valgrind-based simulation instrument is Linux-only, but walltime is fully
-supported on macOS aarch64 (runner ships darwin-arm64 binaries and uses the
-samply profiler there).
+CI separates native checks, browser/WASI checks, wall-time benchmarks, and
+memory benchmarks. Native rustfmt, clippy (`-D warnings`), tests, and coverage
+([Codecov](https://codecov.io)) run on `macos-latest` aarch64; the browser job
+builds the shared-memory WASIP1-threads artifact and GitHub Pages demo on
+Ubuntu. [CodSpeed](https://codspeed.io) tracks wall time on macOS and memory on
+Ubuntu.
 
 ## Reference knowledge
 
