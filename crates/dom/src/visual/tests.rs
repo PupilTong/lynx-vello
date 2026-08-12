@@ -5,7 +5,7 @@
 
 use crate::test_common::{self as common, Doc};
 use crate::visual::{PaintItemKind, PaintOrder};
-use crate::{NodeId, Point2D};
+use crate::{FontBlob, NodeId, Point2D};
 
 const AHEM: &[u8] = include_bytes!("../../../hughie/tests/fixtures/Ahem.ttf");
 
@@ -474,7 +474,7 @@ fn text_runs_paint_with_their_element_and_hit_as_the_element() {
          .label { display: flex; width: 200px; height: 50px;
                   font-family: Ahem; font-size: 20px; }",
     );
-    h.doc.dom.register_fonts(AHEM);
+    h.doc.dom.register_fonts(FontBlob::from_static(AHEM));
     let root = h.root();
     let label = h.el(root, "view.label");
     let text = h.doc.dom.create_text_node("hello", ());
@@ -740,7 +740,7 @@ fn text_runs_are_clipped_by_their_element() {
          .clipper { display: flex; overflow: hidden; width: 60px; height: 20px;
                     font-family: Ahem; font-size: 20px; }",
     );
-    h.doc.dom.register_fonts(AHEM);
+    h.doc.dom.register_fonts(FontBlob::from_static(AHEM));
     let root = h.root();
     let clipper = h.el(root, "view.clipper");
     let text = h.doc.dom.create_text_node("hellohello", ());
@@ -913,7 +913,7 @@ fn text_in_contents_hits_the_contents_element() {
                 font-family: Ahem; font-size: 20px; }
          .wrap { display: contents; }",
     );
-    h.doc.dom.register_fonts(AHEM);
+    h.doc.dom.register_fonts(FontBlob::from_static(AHEM));
     let root = h.root();
     let wrap = h.el(root, "view.wrap");
     let text = h.doc.dom.create_text_node("hello", ());

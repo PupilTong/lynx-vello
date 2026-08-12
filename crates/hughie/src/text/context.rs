@@ -3,9 +3,10 @@
 use core::fmt;
 use std::sync::OnceLock;
 
-use parley::fontique::{Blob, Collection, CollectionOptions, SourceCache};
+use parley::fontique::{Collection, CollectionOptions, SourceCache};
 use parley::{FontContext, LayoutContext};
 
+use super::FontBlob;
 use crate::style::TextBrush;
 
 fn system_font_template() -> &'static FontContext {
@@ -49,10 +50,11 @@ impl TextContext {
         }
     }
 
-    pub fn register_fonts(&mut self, bytes: &[u8]) -> usize {
+    /// Registers an owned font resource without copying its byte payload.
+    pub fn register_fonts(&mut self, data: FontBlob) -> usize {
         self.font
             .collection
-            .register_fonts(Blob::from(bytes.to_vec()), None)
+            .register_fonts(data.into_inner(), None)
             .into_iter()
             .map(|(_, fonts)| fonts.len())
             .sum()
@@ -100,9 +102,32 @@ mod tests {
     fn deterministic_context_registers_embedded_fonts() {
         let mut context = TextContext::without_system_fonts();
         assert_eq!(context.font.collection.family_names().count(), 0);
-        assert_eq!(context.register_fonts(b"not a font"), 0);
-        assert_eq!(context.register_fonts(AHEM), 1);
+        assert_eq!(
+            context.register_fonts(FontBlob::from_static(b"not a font")),
+            0
+        );
+        assert_eq!(context.register_fonts(FontBlob::from_static(AHEM)), 1);
         assert!(context.font.collection.family_id("Ahem").is_some());
+    }
+
+    #[test]
+    fn registration_retains_the_original_shared_blob() {
+        let mut context = TextContext::without_system_fonts();
+        let data = FontBlob::from_static(AHEM);
+        let original_id = data.id();
+
+        assert_eq!(context.register_fonts(data), 1);
+
+        let family = context
+            .font
+            .collection
+            .family_by_name("Ahem")
+            .expect("the registered family is available");
+        let font = family.default_font().expect("Ahem contains one face");
+        let parley::fontique::SourceKind::Memory(retained) = font.source().kind() else {
+            panic!("an in-memory font must retain an in-memory source");
+        };
+        assert_eq!(retained.id(), original_id);
     }
 
     #[test]
@@ -118,7 +143,7 @@ mod tests {
         let mut sibling = TextContext::new();
         let sibling_before = sibling.font.collection.family_id("Ahem");
 
-        assert_eq!(context.register_fonts(AHEM), 1);
+        assert_eq!(context.register_fonts(FontBlob::from_static(AHEM)), 1);
         assert!(context.font.collection.family_id("Ahem").is_some());
         assert_eq!(sibling.font.collection.family_id("Ahem"), sibling_before);
     }

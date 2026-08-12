@@ -5,7 +5,7 @@ use hughie::compute::{
 };
 use hughie::geometry::{Edges, Size};
 use hughie::style::{CoreStyle, TextContainerStyle, TextRun, TextRunStyle};
-use hughie::text::{TextContext, TextLayoutStore, TextMeasurer};
+use hughie::text::{FontBlob, TextContext, TextLayoutStore, TextMeasurer};
 use hughie::tree::{
     AvailableSpace, LayoutGoal, LayoutInput, LayoutOutput, LayoutSlot, LayoutTree, RequestedAxis,
 };
@@ -42,7 +42,7 @@ fn assert_size(actual: Size<f32>, expected: Size<f32>) {
 
 fn text_context() -> TextContext {
     let mut context = TextContext::without_system_fonts();
-    assert_eq!(context.register_fonts(AHEM), 1);
+    assert_eq!(context.register_fonts(FontBlob::from_static(AHEM)), 1);
     context
 }
 

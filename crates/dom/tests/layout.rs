@@ -6,8 +6,8 @@
 mod common;
 
 use common::{Doc, device_with};
-use dom::NodeId;
 use dom::layout::Layout;
+use dom::{FontBlob, NodeId};
 use stylo::queries::values::PrefersColorScheme;
 
 const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
@@ -424,7 +424,7 @@ fn display_contents_inherits_to_its_children_without_boxing_them() {
          .wrapper { display: contents; font-size: 8px; }",
         dom::StylesheetOrigin::Author,
     );
-    assert_eq!(dom.register_fonts(AHEM), 1);
+    assert_eq!(dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = dom.document_element().id();
     let wrapper = dom.create_element("view", ());
     dom.add_class(wrapper, "wrapper");
@@ -755,7 +755,7 @@ fn text_nodes_use_parley_with_their_parents_inherited_style() {
          .sibling { width: 50px; height: 10px; }",
         dom::StylesheetOrigin::Author,
     );
-    assert_eq!(dom.register_fonts(AHEM), 1);
+    assert_eq!(dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = dom.document_element().id();
     let sibling = dom.create_element("view", ());
     dom.add_class(sibling, "sibling");
@@ -780,7 +780,7 @@ fn inherited_text_style_change_remeasures_text_child() {
                 font-family: Ahem; font-size: 16px; }",
         dom::StylesheetOrigin::Author,
     );
-    assert_eq!(dom.register_fonts(AHEM), 1);
+    assert_eq!(dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = dom.document_element().id();
     let text = dom.create_text_node("hello", ());
     dom.append_child(root, text);
@@ -803,7 +803,7 @@ fn inherited_text_style_change_remeasures_nested_text_child() {
          page { font-family: Ahem; font-size: 16px; }",
         dom::StylesheetOrigin::Author,
     );
-    assert_eq!(dom.register_fonts(AHEM), 1);
+    assert_eq!(dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = dom.document_element().id();
     let parent = dom.create_element("view", ());
     dom.append_child(root, parent);
@@ -961,7 +961,7 @@ fn color_only_change_preserves_text_geometry() {
                 font-family: Ahem; font-size: 16px; }",
         dom::StylesheetOrigin::Author,
     );
-    assert_eq!(dom.register_fonts(AHEM), 1);
+    assert_eq!(dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = dom.document_element().id();
     let text = dom.create_text_node("hello", ());
     dom.append_child(root, text);
@@ -1269,7 +1269,7 @@ fn content_visibility_hidden_skips_descendant_layout_and_measurement() {
          .fixed { position: fixed; left: 10px; top: 20px; width: 30px; height: 40px; }",
         dom::StylesheetOrigin::Author,
     );
-    assert_eq!(dom.register_fonts(AHEM), 1);
+    assert_eq!(dom.register_fonts(FontBlob::from_static(AHEM)), 1);
     let root = dom.document_element().id();
     let container = dom.create_element("view", ());
     dom.add_class(container, "container");
@@ -1645,7 +1645,7 @@ fn text_children_of_contents_measure_as_container_items() {
          .wrap { display: contents; }
          .cell { display: flex; width: 100px; height: 100px; }",
     );
-    h.doc.dom.register_fonts(AHEM);
+    h.doc.dom.register_fonts(FontBlob::from_static(AHEM));
     let root = h.doc.root;
     let wrap = h.doc.el(root, "view.wrap");
     let text = h.doc.dom.create_text_node("hi", ());

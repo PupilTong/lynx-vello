@@ -20,7 +20,7 @@ pub(super) fn capture(test: &str, fragment: &str, width: f32, height: f32) -> Im
     let mut gpu = headless(test);
     let mut doc = html::parse(fragment, width, height);
     assert_eq!(
-        doc.dom.register_fonts(ROBOTO),
+        doc.dom.register_fonts(dom::FontBlob::from_static(ROBOTO)),
         1,
         "the vendored Roboto fixture must register exactly one face"
     );

@@ -742,7 +742,7 @@ mod tests {
     use stylo::dom::TElement;
 
     use super::*;
-    use crate::Document;
+    use crate::{Document, FontBlob};
 
     #[cfg(target_pointer_width = "64")]
     #[test]
@@ -790,7 +790,10 @@ mod tests {
         let mut document = Document::<()>::new(crate::tree::document::tests::device(), "page", ());
         assert!(document.layout_state().text_context.is_none());
 
-        assert_eq!(document.register_fonts(b"not a font"), 0);
+        assert_eq!(
+            document.register_fonts(FontBlob::from_static(b"not a font")),
+            0
+        );
         let first = std::ptr::from_ref(
             document
                 .layout_state()
@@ -798,7 +801,10 @@ mod tests {
                 .as_deref()
                 .expect("font registration lazily creates the text context"),
         );
-        assert_eq!(document.register_fonts(b"still not a font"), 0);
+        assert_eq!(
+            document.register_fonts(FontBlob::from_static(b"still not a font")),
+            0
+        );
         let second = std::ptr::from_ref(
             document
                 .layout_state()

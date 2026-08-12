@@ -46,10 +46,10 @@ use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError, mpsc};
 
-use lynx_element::dom::ImageStore;
 use lynx_element::dom::input::InputEvent;
 use lynx_element::dom::render::gpu::{GpuError, Headless};
 use lynx_element::dom::vello::peniko::Color;
+use lynx_element::dom::{FontBlob, ImageStore};
 use lynx_element::{ElementTree, PageConfig, Viewport};
 
 use self::graphics::WindowGraphics;
@@ -326,9 +326,9 @@ impl<'window, W: Window> Engine<'window, W> {
         self.elements.tree().add_author_stylesheet(css);
     }
 
-    /// Registers font data for text measurement.
-    pub fn register_fonts(&mut self, bytes: &[u8]) -> usize {
-        self.elements.tree().register_fonts(bytes)
+    /// Registers shared font data for text measurement without copying it.
+    pub fn register_fonts(&mut self, data: FontBlob) -> usize {
+        self.elements.tree().register_fonts(data)
     }
 
     /// Registers or updates decoded images, then keeps the next frame fresh.
@@ -633,6 +633,24 @@ mod tests {
     fn frame_size_rejects_unbounded_targets() {
         let error = frame_size(20_000.0, 100.0, 1.0).unwrap_err();
         assert!(error.to_string().contains("16384"));
+    }
+
+    #[test]
+    fn resource_bytes_reach_font_registration_without_copying() {
+        use bytes::Bytes;
+        use lynx_element::PageConfig;
+        use lynx_element::dom::FontBlob;
+
+        use super::OffscreenEngine;
+
+        let bytes = Bytes::from_static(b"not a font");
+        let original = bytes.as_ptr();
+        let blob = FontBlob::new(bytes);
+        assert_eq!(blob.as_ref().as_ptr(), original);
+
+        let mut engine =
+            OffscreenEngine::new(PageConfig::default(), 393.0, 727.0, 1.0).expect("engine");
+        assert_eq!(engine.register_fonts(blob), 0);
     }
 
     #[cfg(feature = "quickjs")]

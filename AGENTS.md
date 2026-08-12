@@ -644,6 +644,10 @@ useful signal for currently-compatible versions of those libraries.
   `DocumentLayoutState` lazily boxes the shared Parley `TextContext`; each
   text node's layout-state entry lazily boxes its probe/commit
   `TextLayoutStore` and reads inherited font/text values from its parent.
+  Font registration takes the shared `FontBlob` resource through
+  `Engine` → `ElementTree` → `Document` → `TextContext`; an owned loader
+  buffer is moved into Parley without copying its payload, while
+  `FontBlob::copy_from_slice` is the explicit copying fallback.
   Relayout damage on an element evicts its direct text children's
   measurement caches and retained artifacts because text nodes have no Stylo
   damage record of their own. Parley is unconditional and there is no
