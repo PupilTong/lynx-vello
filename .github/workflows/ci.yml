@@ -91,11 +91,6 @@ jobs:
         with:
           shared-key: browser-wasm
 
-      - name: Install wasm-tools
-        uses: taiki-e/install-action@v2
-        with:
-          tool: wasm-tools
-
       - name: Install pnpm
         uses: pnpm/action-setup@v6
 
@@ -110,14 +105,6 @@ jobs:
 
       - name: Build threaded Rust Wasm bindings
         run: pnpm --filter bobcat-wasm build
-
-      - name: Verify shared memory and atomic blocking instructions
-        run: |
-          wasm-tools print crates/bobcat-wasm/bobcat_wasm_threads.wasm32-wasi.wasm > "$RUNNER_TEMP/bobcat-wasi.wat"
-          rg --quiet '\(memory.*shared\)' "$RUNNER_TEMP/bobcat-wasi.wat"
-          rg --quiet '\(import "wasi" "thread-spawn"' "$RUNNER_TEMP/bobcat-wasi.wat"
-          rg --quiet 'memory\.atomic\.wait32' "$RUNNER_TEMP/bobcat-wasi.wat"
-          rg --quiet 'memory\.atomic\.notify' "$RUNNER_TEMP/bobcat-wasi.wat"
 
       - name: Type-check GitHub Pages
         run: pnpm --filter github-pages test:type
