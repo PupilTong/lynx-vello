@@ -28,7 +28,7 @@ fn a_card_root_builds_its_tree_through_the_papi() {
     runtime
         .run_main_thread_script(
             r"
-            globalThis.owned = [];
+            const owned = [];
             globalThis.renderPage = function () {
               const page = __CreatePage('card', 0);
               const first = __CreateView(0);
@@ -56,6 +56,7 @@ fn create_view_returns_a_handle_append_element_accepts() {
     runtime
         .run_main_thread_script(
             r"
+            const owned = [];
             globalThis.renderPage = function () {
               const page = __CreatePage('card', 0);
               const view = __CreateView(0);
@@ -69,7 +70,7 @@ fn create_view_returns_a_handle_append_element_accepts() {
               if (appended !== view) {
                 throw new Error('__AppendElement must return the child');
               }
-              globalThis.ownedView = view;
+              owned.push(view);
             };
             ",
         )
@@ -114,12 +115,13 @@ fn remove_element_detaches_and_returns_the_exact_live_child_wrapper() {
     runtime
         .run_main_thread_script(
             r"
+            const owned = [];
             globalThis.renderPage = function () {
               const page = __CreatePage('card', 0);
               const parent = __CreateView(0);
               const child = __CreateView(0);
               const grandchild = __CreateView(0);
-              globalThis.owned = [parent, child, grandchild];
+              owned.push(parent, child, grandchild);
               __AppendElement(page, parent);
               __AppendElement(parent, child);
               __AppendElement(child, grandchild);
@@ -149,12 +151,13 @@ fn remove_element_rejects_a_parent_that_does_not_own_the_child() {
     runtime
         .run_main_thread_script(
             r"
+            const owned = [];
             globalThis.renderPage = function () {
               const page = __CreatePage('card', 0);
               const actualParent = __CreateView(0);
               const wrongParent = __CreateView(0);
               const child = __CreateView(0);
-              globalThis.owned = [actualParent, wrongParent, child];
+              owned.push(actualParent, wrongParent, child);
               __AppendElement(page, actualParent);
               __AppendElement(page, wrongParent);
               __AppendElement(actualParent, child);
@@ -189,12 +192,13 @@ fn explicit_drop_is_idempotent_and_its_later_finalizer_is_harmless() {
     runtime
         .run_main_thread_script(
             r"
+            const owned = [];
             globalThis.renderPage = function () {
               __CreatePage('card', 0);
               const dropped = __CreateView(0);
               __DropElement(dropped);
               __DropElement(dropped);
-              globalThis.kept = __CreateView(0);
+              owned.push(__CreateView(0));
             };
             ",
         )
@@ -211,11 +215,12 @@ fn drop_element_retires_only_the_attached_target_and_preserves_its_child() {
     runtime
         .run_main_thread_script(
             r"
+            const owned = [];
             globalThis.renderPage = function () {
               const page = __CreatePage('card', 0);
               const parent = __CreateView(0);
               const child = __CreateView(0);
-              globalThis.child = child;
+              owned.push(child);
               __AppendElement(page, parent);
               __AppendElement(parent, child);
               __DropElement(parent);
@@ -487,7 +492,7 @@ fn process_data_runs_before_render_page_and_feeds_it() {
     runtime
         .run_main_thread_script(
             r"
-            globalThis.owned = [];
+            const owned = [];
             globalThis.processData = function () { return 3; };
             globalThis.renderPage = function (count) {
               const page = __CreatePage('card', 0);
@@ -665,7 +670,7 @@ fn a_second_boot_re_renders_into_the_same_tree() {
     runtime
         .run_main_thread_script(
             r"
-            globalThis.owned = [];
+            const owned = [];
             globalThis.renderPage = function () {
               const child = __CreateView(0);
               owned.push(child);
@@ -686,7 +691,7 @@ fn microtasks_queued_during_render_run_before_the_call_returns() {
     runtime
         .run_main_thread_script(
             r"
-            globalThis.owned = [];
+            const owned = [];
             globalThis.renderPage = function () {
               const page = __CreatePage('card', 0);
               Promise.resolve().then(function () {

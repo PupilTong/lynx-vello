@@ -745,7 +745,7 @@ mod tests {
         engine
             .spawn_script(
                 r"
-                globalThis.owned = [];
+                const owned = [];
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
                   const first = __CreateView(0);

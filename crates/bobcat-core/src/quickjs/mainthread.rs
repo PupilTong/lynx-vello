@@ -351,8 +351,7 @@ impl MainThreadRuntime {
     pub fn collect_garbage(&mut self) -> Result<(), MainThreadError> {
         let result = self
             .engine
-            .collect_garbage()
-            .map(|_| ())
+            .collect_garbage_and_run_cleanup_jobs()
             .map_err(|error| MainThreadError::from_engine("collecting garbage", &error));
         self.tree.borrow_mut().release();
         result

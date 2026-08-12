@@ -194,19 +194,22 @@ impl QuickJsScriptEngine {
         quickjs_to_script_value(value, ScriptErrorPhase::Evaluate)
     }
 
-    fn collect_garbage(&mut self) -> Result<usize, ScriptError> {
+    /// Completes an explicit collection boundary, including JavaScript
+    /// `FinalizationRegistry` cleanup callbacks and the jobs they enqueue.
+    fn collect_garbage_and_run_cleanup_jobs(&mut self) -> Result<(), ScriptError> {
         self.resume_incomplete_checkpoint(ScriptErrorPhase::Evaluate)?;
-        let mut executed = 0usize;
-        // QuickJS removes weak targets before its cycle pass. A target first
-        // proven unreachable by that cycle pass therefore reaches its
-        // FinalizationRegistry on the following collection.
+
+        // JS_RunGC runs gc_remove_weak_objects before gc_free_cycles. A target
+        // first proven unreachable by the cycle pass therefore reaches its
+        // FinalizationRegistry only during the following collection.
         for _ in 0..2 {
             self.realm.run_gc();
-            // FinalizationRegistry cleanup callbacks are jobs; JS_RunGC does
-            // not execute them itself.
-            executed = executed.saturating_add(self.checkpoint(ScriptErrorPhase::Evaluate)?);
+            // JS_RunGC only queues FinalizationRegistry callbacks. The
+            // checkpoint executes those callbacks and their Promise job that
+            // coalesces element drops before this boundary returns.
+            self.checkpoint(ScriptErrorPhase::Evaluate)?;
         }
-        Ok(executed)
+        Ok(())
     }
 }
 

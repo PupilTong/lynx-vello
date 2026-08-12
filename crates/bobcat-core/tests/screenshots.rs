@@ -49,7 +49,7 @@ page > view:nth-child(3) > view:nth-child(1) { background-color: #0f766e; }
 ";
 
 const MAIN_THREAD_SCRIPT: &str = r"
-globalThis.elements = [];
+const elements = [];
 globalThis.renderPage = function renderPage() {
   const page = __CreatePage('card', 0);
   const rows = [3, 2, 1];
@@ -114,7 +114,7 @@ page > view > view {
 ";
 
 const OVERFLOW_SCRIPT: &str = r"
-globalThis.elements = [];
+const elements = [];
 globalThis.renderPage = function renderPage() {
   const page = __CreatePage('card', 0);
   for (let row = 0; row < 2; row += 1) {
@@ -179,9 +179,11 @@ page > view {
 "#;
 
 const IMAGE_SCRIPT: &str = r"
+const elements = [];
 globalThis.renderPage = function renderPage() {
   const page = __CreatePage('card', 0);
-  globalThis.imageView = __CreateView(0);
+  const imageView = __CreateView(0);
+  elements.push(imageView);
   __AppendElement(page, imageView);
 };
 ";

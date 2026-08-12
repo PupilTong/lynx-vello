@@ -90,7 +90,7 @@ fn the_boot_sequence_works_on_a_bundle_shaped_script() {
     runtime
         .run_main_thread_script(
             r"
-            globalThis.owned = [];
+            const owned = [];
             Object.assign(globalThis, {
               processData: function (data) { return data; },
               renderPage: function () {
