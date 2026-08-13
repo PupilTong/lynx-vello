@@ -82,7 +82,6 @@ pub use crate::ua::PageConfig;
 
 pub(crate) const PAGE_TAG: &str = "page";
 
-pub(crate) const FRAME_TAG: &str = "frame";
 pub(crate) const IMAGE_TAG: &str = "image";
 pub(crate) const LIST_TAG: &str = "list";
 pub(crate) const RAW_TEXT_TAG: &str = "raw-text";

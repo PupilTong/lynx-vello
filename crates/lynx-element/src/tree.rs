@@ -8,8 +8,8 @@ use crate::arena::{ElementArena, LynxElement};
 use crate::device::Viewport;
 use crate::ua::{PageConfig, ua_stylesheet};
 use crate::{
-    ElementId, FRAME_TAG, IMAGE_TAG, LIST_TAG, PAGE_TAG, RAW_TEXT_TAG, SCROLL_VIEW_TAG, TEXT_TAG,
-    VIEW_TAG, WRAPPER_TAG,
+    ElementId, IMAGE_TAG, LIST_TAG, PAGE_TAG, RAW_TEXT_TAG, SCROLL_VIEW_TAG, TEXT_TAG, VIEW_TAG,
+    WRAPPER_TAG,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,7 +17,6 @@ use crate::{
 pub enum PapiError {
     UnknownElement(ElementId),
     WouldCycle { parent: ElementId, child: ElementId },
-    CannotCreateFrame,
     CannotReparentPage,
     CannotRemovePage,
 }
@@ -32,9 +31,6 @@ impl fmt::Display for PapiError {
                 formatter,
                 "appending #{child} under #{parent} would form a cycle"
             ),
-            Self::CannotCreateFrame => {
-                formatter.write_str("frame elements require the unimplemented __CreateFrame PAPI")
-            }
             Self::CannotReparentPage => {
                 formatter.write_str("the page element cannot be given a parent")
             }
@@ -191,9 +187,6 @@ impl ElementTree {
         tag: &str,
         parent_component_unique_id: ElementId,
     ) -> Result<ElementId, PapiError> {
-        if tag == FRAME_TAG {
-            return Err(PapiError::CannotCreateFrame);
-        }
         self.validate_parent_component(parent_component_unique_id)?;
         self.uncommitted = true;
         Ok(self.insert(tag, parent_component_unique_id, 0))
@@ -547,15 +540,6 @@ mod tests {
         ] {
             assert_eq!(result.unwrap_err(), PapiError::UnknownElement(9));
         }
-    }
-
-    #[test]
-    fn generic_element_creation_cannot_bypass_the_missing_frame_constructor() {
-        let mut tree = tree();
-        assert_eq!(
-            tree.create_element("frame", 0).unwrap_err(),
-            PapiError::CannotCreateFrame
-        );
     }
 
     #[test]
