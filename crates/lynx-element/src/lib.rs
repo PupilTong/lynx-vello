@@ -14,23 +14,33 @@
 //!
 //! # Element PAPI scope
 //!
-//! web-core's main-thread global object carries 61 `__`-prefixed Element PAPI
-//! members. This crate implements the five that make a tree exist, mutate, retire, and
-//! become visible:
+//! This crate implements every element constructor used by `ReactLynx`'s Snapshot backend except
+//! `__CreateFrame`, plus the operations that currently make the resulting tree mutate, retire,
+//! and become visible:
 //!
 //! | PAPI | Method |
 //! | --- | --- |
 //! | `__CreatePage(componentID, componentCSSID)` | [`ElementTree::create_page`] |
+//! | `__CreateElement(tag, parentComponentUniqueID)` | [`ElementTree::create_element`] |
+//! | `__CreateWrapperElement(parentComponentUniqueID)` | [`ElementTree::create_wrapper_element`] |
+//! | `__CreateText(parentComponentUniqueID)` | [`ElementTree::create_text`] |
+//! | `__CreateImage(parentComponentUniqueID)` | [`ElementTree::create_image`] |
 //! | `__CreateView(parentComponentUniqueID)` | [`ElementTree::create_view`] |
+//! | `__CreateScrollView(parentComponentUniqueID)` | [`ElementTree::create_scroll_view`] |
+//! | `__CreateRawText(text)` | [`ElementTree::create_raw_text`] |
+//! | `__CreateList(parentComponentUniqueID, ...)` | [`ElementTree::create_list`] |
 //! | `__AppendElement(parent, child)` | [`ElementTree::append_element`] |
+//! | `__InsertElementBefore(parent, child, reference?)` | [`ElementTree::insert_element_before`] |
+//! | `__RemoveElement(parent, child)` | [`ElementTree::remove_element`] |
+//! | `__ReplaceElement(newElement, oldElement)` | [`ElementTree::replace_element`] |
 //! | `__DropElement(element)` | [`ElementTree::drop_element`] |
 //! | `__FlushElementTree()` | [`ElementTree::flush_element_tree`] |
 //!
-//! Everything else — attributes, classes, inline styles, `__SetCSSId`, events,
-//! the other `__Create*` constructors, querying, list callbacks — is not
-//! implemented yet. Calling into this crate is the whole Element PAPI surface
-//! that exists today; a script that needs more will fail at the missing global,
-//! not silently render wrong.
+//! Everything else — attributes, classes, inline styles, `__SetCSSId`, events, `__CreateFrame`,
+//! tree querying, and list callback execution — is not implemented yet. Creating a list records its
+//! element identity and tag only; the current runtime binding does not retain its JavaScript
+//! callbacks. Calling into this crate is the whole Element PAPI surface that exists today; a script
+//! that needs more will fail at the missing global, not silently render wrong.
 //!
 //! # Recorded limits
 //!
@@ -75,4 +85,10 @@ pub use crate::ua::PageConfig;
 
 pub(crate) const PAGE_TAG: &str = "page";
 
+pub(crate) const IMAGE_TAG: &str = "image";
+pub(crate) const LIST_TAG: &str = "list";
+pub(crate) const RAW_TEXT_TAG: &str = "raw-text";
+pub(crate) const SCROLL_VIEW_TAG: &str = "scroll-view";
+pub(crate) const TEXT_TAG: &str = "text";
 pub(crate) const VIEW_TAG: &str = "view";
+pub(crate) const WRAPPER_TAG: &str = "wrapper";

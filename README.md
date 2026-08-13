@@ -24,9 +24,10 @@ dirty/cache wiring, the positioned pass, text measurement, visual ordering,
 and private scene construction. `lynx-element` is the runtime adapter directly
 over `dom`; `bobcat-core` composes it with runtime protocols, and the core's
 optional QuickJS feature runs main-thread scripts
-against it — five of web-core's 61 Element PAPI members are wired up so far
-(`__CreatePage`, `__CreateView`,
-`__AppendElement`, `__DropElement`, `__FlushElementTree`);
+against it — 15 of web-core's 61 Element PAPI members are wired up so far:
+every ReactLynx Snapshot constructor except `__CreateFrame`, all four tree
+mutations (`__AppendElement`, `__InsertElementBefore`, `__RemoveElement`,
+`__ReplaceElement`), `__DropElement`, and `__FlushElementTree`;
 `StyleInfo` ingestion, attributes, classes, and events are not.
 
 See [`docs/runtime-architecture.md`](docs/runtime-architecture.md) for the

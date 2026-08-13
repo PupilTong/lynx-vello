@@ -46,10 +46,15 @@
 //!
 //! # Recorded limits
 //!
-//! - **Five Element PAPI members are installed** — `__CreatePage`, `__CreateView`,
-//!   `__AppendElement`, `__DropElement`, `__FlushElementTree` (see `lynx-element`'s crate docs). A
-//!   bundle that reaches for anything else gets a `ReferenceError` naming the missing global, which
-//!   is the intended failure: a silently wrong render would be worse.
+//! - **Every `ReactLynx` Snapshot constructor except `__CreateFrame` is installed** —
+//!   `__CreatePage`, `__CreateElement`, `__CreateWrapperElement`, `__CreateText`, `__CreateImage`,
+//!   `__CreateView`, `__CreateScrollView`, `__CreateRawText`, and `__CreateList` — alongside all
+//!   four tree mutation calls (`__AppendElement`, `__InsertElementBefore`, `__RemoveElement`,
+//!   `__ReplaceElement`), `__DropElement`, and `__FlushElementTree` (see `lynx-element`'s crate
+//!   docs). List construction consumes only its numeric parent-component argument; callback storage
+//!   and execution remain unimplemented. A bundle that reaches for another member gets a
+//!   `ReferenceError` naming the missing global, which is the intended failure: a silently wrong
+//!   render would be worse.
 //! - **Element handles cross as opaque JavaScript weak-ref objects.** Each object carries the
 //!   element arena id. When `QuickJS` collects it, the realm calls [`ElementTree::drop_element`],
 //!   which retires only that Lynx element and its corresponding DOM node. Its surviving descendants
@@ -74,6 +79,7 @@ use crate::script::ScriptError;
 
 const MAIN_THREAD_SOURCE_NAME: &str = "main-thread.js";
 const BOOT_SOURCE_NAME: &str = "<lynx boot>";
+const CREATE_LIST_BINDING_SOURCE_NAME: &str = "<lynx __CreateList binding>";
 
 const WRAPPER_PREFIX: &str = "//# allFunctionsCalledOnLoad\n(function(){ \"use strict\"; \
                               const navigator=void 0,postMessage=void 0,window=void 0; ";
@@ -90,6 +96,19 @@ const BOOT_SEQUENCE: &str = r#"(function () {
   }
   renderPage(data);
   __FlushElementTree();
+})()"#;
+
+const CREATE_LIST_BINDING: &str = r#"(function () {
+  "use strict";
+  const createListElement = globalThis.__CreateListElementHost;
+  delete globalThis.__CreateListElementHost;
+  globalThis.__CreateList = function __CreateList(
+    parentComponentUniqueId,
+    componentAtIndex,
+    enqueueComponent
+  ) {
+    return createListElement(parentComponentUniqueId);
+  };
 })()"#;
 
 /// Why running a main-thread script failed.
@@ -266,27 +285,64 @@ fn install_element_papi(
     })?;
 
     let tree = Rc::clone(&handle);
-    realm.define_global_function("__CreateView", 1, move |arguments| {
-        let parent_component = u32_argument("__CreateView", arguments, 0)?;
+    realm.define_global_function("__CreateElement", 2, move |arguments| {
+        let tag = string_argument("__CreateElement", arguments, 0)?;
+        let parent_component = u32_argument("__CreateElement", arguments, 1)?;
         let id = tree
             .borrow_mut()
             .tree()
-            .create_view(parent_component)
+            .create_element(tag, parent_component)
             .map_err(papi_error)?;
         Ok(js_weak_ref_value(id))
     })?;
 
+    define_parent_element_constructor(
+        realm,
+        &handle,
+        "__CreateWrapperElement",
+        ElementTree::create_wrapper_element,
+    )?;
+    define_parent_element_constructor(realm, &handle, "__CreateText", ElementTree::create_text)?;
+    define_parent_element_constructor(realm, &handle, "__CreateImage", ElementTree::create_image)?;
+    define_parent_element_constructor(realm, &handle, "__CreateView", ElementTree::create_view)?;
+    define_parent_element_constructor(
+        realm,
+        &handle,
+        "__CreateScrollView",
+        ElementTree::create_scroll_view,
+    )?;
+
     let tree = Rc::clone(&handle);
-    realm.define_global_function("__AppendElement", 2, move |arguments| {
-        let parent = element_argument("__AppendElement", arguments, 0)?;
-        let child = element_argument("__AppendElement", arguments, 1)?;
-        let appended = tree
+    realm.define_global_function("__CreateRawText", 1, move |arguments| {
+        let text = string_argument("__CreateRawText", arguments, 0)?;
+        let id = tree.borrow_mut().tree().create_raw_text(text);
+        Ok(js_weak_ref_value(id))
+    })?;
+
+    // ReactLynx passes callback functions and an info object after the parent component id. Those
+    // values stay in JavaScript until list callback execution exists; the leaf host binding sees
+    // only the primitive argument it owns.
+    let tree = Rc::clone(&handle);
+    realm.define_global_function("__CreateListElementHost", 1, move |arguments| {
+        let parent_component = u32_argument("__CreateList", arguments, 0)?;
+        let id = tree
             .borrow_mut()
             .tree()
-            .append_element(parent, child)
+            .create_list(parent_component)
             .map_err(papi_error)?;
-        Ok(js_weak_ref_value(appended))
+        Ok(js_weak_ref_value(id))
     })?;
+    realm
+        .evaluate(
+            quickjs::EvalSource {
+                name: Some(CREATE_LIST_BINDING_SOURCE_NAME),
+                ..quickjs::EvalSource::new(CREATE_LIST_BINDING)
+            },
+            quickjs::EvalOptions::default(),
+        )
+        .map(|_| ())?;
+
+    define_tree_mutation_papis(realm, &handle)?;
 
     let tree = Rc::clone(&handle);
     realm.define_global_function("__DropElement", 1, move |arguments| {
@@ -306,6 +362,77 @@ fn install_element_papi(
     })?;
 
     Ok(handle)
+}
+
+type ParentElementConstructor = fn(&mut ElementTree, ElementId) -> Result<ElementId, PapiError>;
+
+fn define_tree_mutation_papis(
+    realm: &mut quickjs::Realm,
+    handle: &Rc<RefCell<TreeHandle>>,
+) -> Result<(), quickjs::Error> {
+    let tree = Rc::clone(handle);
+    realm.define_global_function("__AppendElement", 2, move |arguments| {
+        let parent = element_argument("__AppendElement", arguments, 0)?;
+        let child = element_argument("__AppendElement", arguments, 1)?;
+        let appended = tree
+            .borrow_mut()
+            .tree()
+            .append_element(parent, child)
+            .map_err(papi_error)?;
+        Ok(js_weak_ref_value(appended))
+    })?;
+
+    let tree = Rc::clone(handle);
+    realm.define_global_function("__InsertElementBefore", 3, move |arguments| {
+        let parent = element_argument("__InsertElementBefore", arguments, 0)?;
+        let child = element_argument("__InsertElementBefore", arguments, 1)?;
+        let reference = optional_element_argument("__InsertElementBefore", arguments, 2)?;
+        let inserted = tree
+            .borrow_mut()
+            .tree()
+            .insert_element_before(parent, child, reference)
+            .map_err(papi_error)?;
+        Ok(js_weak_ref_value(inserted))
+    })?;
+
+    let tree = Rc::clone(handle);
+    realm.define_global_function("__RemoveElement", 2, move |arguments| {
+        let parent = element_argument("__RemoveElement", arguments, 0)?;
+        let child = element_argument("__RemoveElement", arguments, 1)?;
+        let removed = tree
+            .borrow_mut()
+            .tree()
+            .remove_element(parent, child)
+            .map_err(papi_error)?;
+        Ok(js_weak_ref_value(removed))
+    })?;
+
+    let tree = Rc::clone(handle);
+    realm.define_global_function("__ReplaceElement", 2, move |arguments| {
+        let new_element = element_argument("__ReplaceElement", arguments, 0)?;
+        let old_element = element_argument("__ReplaceElement", arguments, 1)?;
+        tree.borrow_mut()
+            .tree()
+            .replace_element(new_element, old_element)
+            .map_err(papi_error)?;
+        Ok(HostValue::Undefined)
+    })?;
+
+    Ok(())
+}
+
+fn define_parent_element_constructor(
+    realm: &mut quickjs::Realm,
+    handle: &Rc<RefCell<TreeHandle>>,
+    name: &'static str,
+    constructor: ParentElementConstructor,
+) -> Result<(), quickjs::Error> {
+    let tree = Rc::clone(handle);
+    realm.define_global_function(name, 1, move |arguments| {
+        let parent_component = u32_argument(name, arguments, 0)?;
+        let id = constructor(tree.borrow_mut().tree(), parent_component).map_err(papi_error)?;
+        Ok(js_weak_ref_value(id))
+    })
 }
 
 fn js_weak_ref_value(id: ElementId) -> HostValue {
@@ -400,4 +527,19 @@ fn element_argument(
         )));
     };
     Ok(id)
+}
+
+fn optional_element_argument(
+    function: &str,
+    arguments: &[HostValue],
+    index: usize,
+) -> Result<Option<ElementId>, HostFunctionError> {
+    match *argument(arguments, index) {
+        HostValue::Undefined | HostValue::Null => Ok(None),
+        HostValue::JsWeakRef(id) => Ok(Some(id)),
+        _ => Err(HostFunctionError::new(format!(
+            "{function} expects a JavaScript element weak reference, null, or undefined for \
+             argument {index}"
+        ))),
+    }
 }
