@@ -5,7 +5,7 @@
 //! The fixtures are the same `ReactLynx` build artifacts
 //! `lynx-template-decoder` decodes, vendored from lynx-stack's `web-core-e2e`
 //! suite. Running their `lepusCode.root` end to end needs far more than the
-//! five Element PAPI members that exist; this test pins *exactly* where the
+//! Element PAPI constructors that exist; this test pins *exactly* where the
 //! wall is, so the gap is a failing assertion to update rather than a
 //! paragraph of prose that rots.
 

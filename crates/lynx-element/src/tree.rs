@@ -7,13 +7,17 @@ use dom::{self, Document, FontBlob, NodeId, StylesheetOrigin};
 use crate::arena::{ElementArena, LynxElement};
 use crate::device::Viewport;
 use crate::ua::{PageConfig, ua_stylesheet};
-use crate::{ElementId, PAGE_TAG, VIEW_TAG};
+use crate::{
+    ElementId, FRAME_TAG, IMAGE_TAG, LIST_TAG, PAGE_TAG, RAW_TEXT_TAG, SCROLL_VIEW_TAG, TEXT_TAG,
+    VIEW_TAG, WRAPPER_TAG,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PapiError {
     UnknownElement(ElementId),
     WouldCycle { parent: ElementId, child: ElementId },
+    CannotCreateFrame,
     CannotReparentPage,
     CannotRemovePage,
 }
@@ -28,6 +32,9 @@ impl fmt::Display for PapiError {
                 formatter,
                 "appending #{child} under #{parent} would form a cycle"
             ),
+            Self::CannotCreateFrame => {
+                formatter.write_str("frame elements require the unimplemented __CreateFrame PAPI")
+            }
             Self::CannotReparentPage => {
                 formatter.write_str("the page element cannot be given a parent")
             }
@@ -178,16 +185,80 @@ impl ElementTree {
         PAGE_UNIQUE_ID
     }
 
+    /// Creates a detached element with a Lynx tag for a live parent component or sentinel zero.
+    pub fn create_element(
+        &mut self,
+        tag: &str,
+        parent_component_unique_id: ElementId,
+    ) -> Result<ElementId, PapiError> {
+        if tag == FRAME_TAG {
+            return Err(PapiError::CannotCreateFrame);
+        }
+        self.validate_parent_component(parent_component_unique_id)?;
+        self.uncommitted = true;
+        Ok(self.insert(tag, parent_component_unique_id, 0))
+    }
+
+    /// Creates a detached `wrapper` for a live parent component or sentinel zero.
+    pub fn create_wrapper_element(
+        &mut self,
+        parent_component_unique_id: ElementId,
+    ) -> Result<ElementId, PapiError> {
+        self.create_element(WRAPPER_TAG, parent_component_unique_id)
+    }
+
+    /// Creates a detached `text` for a live parent component or sentinel zero.
+    pub fn create_text(
+        &mut self,
+        parent_component_unique_id: ElementId,
+    ) -> Result<ElementId, PapiError> {
+        self.create_element(TEXT_TAG, parent_component_unique_id)
+    }
+
+    /// Creates a detached `image` for a live parent component or sentinel zero.
+    pub fn create_image(
+        &mut self,
+        parent_component_unique_id: ElementId,
+    ) -> Result<ElementId, PapiError> {
+        self.create_element(IMAGE_TAG, parent_component_unique_id)
+    }
+
     /// Creates a detached `view` for a live parent component or sentinel zero.
     pub fn create_view(
         &mut self,
         parent_component_unique_id: ElementId,
     ) -> Result<ElementId, PapiError> {
-        if parent_component_unique_id != 0 && self.node_id(parent_component_unique_id).is_none() {
-            return Err(PapiError::UnknownElement(parent_component_unique_id));
-        }
+        self.create_element(VIEW_TAG, parent_component_unique_id)
+    }
+
+    /// Creates a detached `scroll-view` for a live parent component or sentinel zero.
+    pub fn create_scroll_view(
+        &mut self,
+        parent_component_unique_id: ElementId,
+    ) -> Result<ElementId, PapiError> {
+        self.create_element(SCROLL_VIEW_TAG, parent_component_unique_id)
+    }
+
+    /// Creates a detached `raw-text` leaf whose `text` attribute carries its literal contents.
+    pub fn create_raw_text(&mut self, text: &str) -> ElementId {
         self.uncommitted = true;
-        Ok(self.insert(VIEW_TAG, parent_component_unique_id, 0))
+        let unique_id = self.insert(RAW_TEXT_TAG, 0, 0);
+        let node = self
+            .node_id(unique_id)
+            .expect("a just-inserted raw-text element is live");
+        self.document.set_attribute(node, "text", text);
+        unique_id
+    }
+
+    /// Creates a detached `list` for a live parent component or sentinel zero.
+    ///
+    /// List callback storage and execution belong to the future list PAPI implementation; this
+    /// operation establishes only the element identity and tag.
+    pub fn create_list(
+        &mut self,
+        parent_component_unique_id: ElementId,
+    ) -> Result<ElementId, PapiError> {
+        self.create_element(LIST_TAG, parent_component_unique_id)
     }
 
     /// Reparents `child` as the last child of `parent` and returns it.
@@ -244,6 +315,16 @@ impl ElementTree {
     #[must_use]
     pub const fn has_uncommitted_mutations(&self) -> bool {
         self.uncommitted
+    }
+
+    fn validate_parent_component(
+        &self,
+        parent_component_unique_id: ElementId,
+    ) -> Result<(), PapiError> {
+        if parent_component_unique_id != 0 && self.node_id(parent_component_unique_id).is_none() {
+            return Err(PapiError::UnknownElement(parent_component_unique_id));
+        }
+        Ok(())
     }
 
     fn insert(
@@ -409,6 +490,71 @@ mod tests {
         assert_eq!(
             tree.create_view(9).unwrap_err(),
             PapiError::UnknownElement(9)
+        );
+    }
+
+    #[test]
+    fn reactlynx_create_functions_use_lynx_tags_and_record_the_parent_component() {
+        let mut tree = tree();
+        let page = tree.create_page("card", 0);
+        let elements = [
+            (
+                tree.create_element("custom-widget", page).unwrap(),
+                "custom-widget",
+            ),
+            (tree.create_wrapper_element(page).unwrap(), "wrapper"),
+            (tree.create_text(page).unwrap(), "text"),
+            (tree.create_image(page).unwrap(), "image"),
+            (tree.create_view(page).unwrap(), "view"),
+            (tree.create_scroll_view(page).unwrap(), "scroll-view"),
+            (tree.create_list(page).unwrap(), "list"),
+        ];
+
+        for (id, expected_tag) in elements {
+            let element = tree.element(id).expect("the created element is live");
+            assert_eq!(element.parent_component_unique_id(), page);
+            let node = tree.document().get(element.node_id()).unwrap();
+            assert_eq!(node.tag_name(), Some(expected_tag));
+        }
+    }
+
+    #[test]
+    fn raw_text_stores_its_literal_text_and_uses_the_null_component_sentinel() {
+        let mut tree = tree();
+        let raw_text = tree.create_raw_text("Hello, Lynx");
+        let element = tree.element(raw_text).expect("the raw text is live");
+        assert_eq!(element.parent_component_unique_id(), 0);
+
+        let node = tree.document().get(element.node_id()).unwrap();
+        assert_eq!(node.tag_name(), Some("raw-text"));
+        assert_eq!(
+            node.attributes().find(|(name, _)| *name == "text"),
+            Some(("text", "Hello, Lynx"))
+        );
+    }
+
+    #[test]
+    fn every_parent_component_create_function_rejects_an_unknown_component() {
+        let mut tree = tree();
+        for result in [
+            tree.create_element("custom-widget", 9),
+            tree.create_wrapper_element(9),
+            tree.create_text(9),
+            tree.create_image(9),
+            tree.create_view(9),
+            tree.create_scroll_view(9),
+            tree.create_list(9),
+        ] {
+            assert_eq!(result.unwrap_err(), PapiError::UnknownElement(9));
+        }
+    }
+
+    #[test]
+    fn generic_element_creation_cannot_bypass_the_missing_frame_constructor() {
+        let mut tree = tree();
+        assert_eq!(
+            tree.create_element("frame", 0).unwrap_err(),
+            PapiError::CannotCreateFrame
         );
     }
 

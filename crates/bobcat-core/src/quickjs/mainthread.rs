@@ -46,10 +46,13 @@
 //!
 //! # Recorded limits
 //!
-//! - **Five Element PAPI members are installed** — `__CreatePage`, `__CreateView`,
-//!   `__AppendElement`, `__DropElement`, `__FlushElementTree` (see `lynx-element`'s crate docs). A
-//!   bundle that reaches for anything else gets a `ReferenceError` naming the missing global, which
-//!   is the intended failure: a silently wrong render would be worse.
+//! - **Every `ReactLynx` Snapshot constructor except `__CreateFrame` is installed** — `__CreatePage`,
+//!   `__CreateElement`, `__CreateWrapperElement`, `__CreateText`, `__CreateImage`, `__CreateView`,
+//!   `__CreateScrollView`, `__CreateRawText`, and `__CreateList` — alongside `__AppendElement`,
+//!   `__DropElement`, and `__FlushElementTree` (see `lynx-element`'s crate docs). List construction
+//!   consumes only its numeric parent-component argument; callback storage and execution remain
+//!   unimplemented. A bundle that reaches for another member gets a `ReferenceError` naming the
+//!   missing global, which is the intended failure: a silently wrong render would be worse.
 //! - **Element handles cross as opaque JavaScript weak-ref objects.** Each object carries the
 //!   element arena id. When `QuickJS` collects it, the realm calls [`ElementTree::drop_element`],
 //!   which retires only that Lynx element and its corresponding DOM node. Its surviving descendants
@@ -74,6 +77,7 @@ use crate::script::ScriptError;
 
 const MAIN_THREAD_SOURCE_NAME: &str = "main-thread.js";
 const BOOT_SOURCE_NAME: &str = "<lynx boot>";
+const CREATE_LIST_BINDING_SOURCE_NAME: &str = "<lynx __CreateList binding>";
 
 const WRAPPER_PREFIX: &str = "//# allFunctionsCalledOnLoad\n(function(){ \"use strict\"; \
                               const navigator=void 0,postMessage=void 0,window=void 0; ";
@@ -90,6 +94,19 @@ const BOOT_SEQUENCE: &str = r#"(function () {
   }
   renderPage(data);
   __FlushElementTree();
+})()"#;
+
+const CREATE_LIST_BINDING: &str = r#"(function () {
+  "use strict";
+  const createListElement = globalThis.__CreateListElementHost;
+  delete globalThis.__CreateListElementHost;
+  globalThis.__CreateList = function __CreateList(
+    parentComponentUniqueId,
+    componentAtIndex,
+    enqueueComponent
+  ) {
+    return createListElement(parentComponentUniqueId);
+  };
 })()"#;
 
 /// Why running a main-thread script failed.
@@ -266,15 +283,62 @@ fn install_element_papi(
     })?;
 
     let tree = Rc::clone(&handle);
-    realm.define_global_function("__CreateView", 1, move |arguments| {
-        let parent_component = u32_argument("__CreateView", arguments, 0)?;
+    realm.define_global_function("__CreateElement", 2, move |arguments| {
+        let tag = string_argument("__CreateElement", arguments, 0)?;
+        let parent_component = u32_argument("__CreateElement", arguments, 1)?;
         let id = tree
             .borrow_mut()
             .tree()
-            .create_view(parent_component)
+            .create_element(tag, parent_component)
             .map_err(papi_error)?;
         Ok(js_weak_ref_value(id))
     })?;
+
+    define_parent_element_constructor(
+        realm,
+        &handle,
+        "__CreateWrapperElement",
+        ElementTree::create_wrapper_element,
+    )?;
+    define_parent_element_constructor(realm, &handle, "__CreateText", ElementTree::create_text)?;
+    define_parent_element_constructor(realm, &handle, "__CreateImage", ElementTree::create_image)?;
+    define_parent_element_constructor(realm, &handle, "__CreateView", ElementTree::create_view)?;
+    define_parent_element_constructor(
+        realm,
+        &handle,
+        "__CreateScrollView",
+        ElementTree::create_scroll_view,
+    )?;
+
+    let tree = Rc::clone(&handle);
+    realm.define_global_function("__CreateRawText", 1, move |arguments| {
+        let text = string_argument("__CreateRawText", arguments, 0)?;
+        let id = tree.borrow_mut().tree().create_raw_text(text);
+        Ok(js_weak_ref_value(id))
+    })?;
+
+    // ReactLynx passes callback functions and an info object after the parent component id. Those
+    // values stay in JavaScript until list callback execution exists; the leaf host binding sees
+    // only the primitive argument it owns.
+    let tree = Rc::clone(&handle);
+    realm.define_global_function("__CreateListElementHost", 1, move |arguments| {
+        let parent_component = u32_argument("__CreateList", arguments, 0)?;
+        let id = tree
+            .borrow_mut()
+            .tree()
+            .create_list(parent_component)
+            .map_err(papi_error)?;
+        Ok(js_weak_ref_value(id))
+    })?;
+    realm
+        .evaluate(
+            quickjs::EvalSource {
+                name: Some(CREATE_LIST_BINDING_SOURCE_NAME),
+                ..quickjs::EvalSource::new(CREATE_LIST_BINDING)
+            },
+            quickjs::EvalOptions::default(),
+        )
+        .map(|_| ())?;
 
     let tree = Rc::clone(&handle);
     realm.define_global_function("__AppendElement", 2, move |arguments| {
@@ -306,6 +370,22 @@ fn install_element_papi(
     })?;
 
     Ok(handle)
+}
+
+type ParentElementConstructor = fn(&mut ElementTree, ElementId) -> Result<ElementId, PapiError>;
+
+fn define_parent_element_constructor(
+    realm: &mut quickjs::Realm,
+    handle: &Rc<RefCell<TreeHandle>>,
+    name: &'static str,
+    constructor: ParentElementConstructor,
+) -> Result<(), quickjs::Error> {
+    let tree = Rc::clone(handle);
+    realm.define_global_function(name, 1, move |arguments| {
+        let parent_component = u32_argument(name, arguments, 0)?;
+        let id = constructor(tree.borrow_mut().tree(), parent_component).map_err(papi_error)?;
+        Ok(js_weak_ref_value(id))
+    })
 }
 
 fn js_weak_ref_value(id: ElementId) -> HostValue {
